@@ -12,6 +12,12 @@ pass --memory-ring for the old 512 x 1 MiB memory ring instead.
 single letter/digit); --start-after-seconds bounds or replaces the arm wait.
 --status-json samples Status.json at 4 Hz while recording (on by default when
 the Frontier Saved Games copy exists) into <output>\\status_samples.jsonl.
+
+Once recording starts, each installed EDVR DLL's embedded CodeView record is
+matched, by PDB name and GUID+age, against build\\ and the install receipt's
+own source directory; a match is copied into <output>\\symbols\\ so a later
+rebuild of build\\ can never orphan an already-captured trace. Unmatched is
+logged, not an error -- the game may be running an older build.
 """
 import sys
 sys.dont_write_bytecode = True
@@ -23,8 +29,9 @@ from datetime import datetime, timezone
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
@@ -482,6 +489,204 @@ def installed_receipt(target):
     raise ValueError("No receipt verifies the active native install: " + (errors[0] if errors else str(target)))
 
 
+IMAGE_DEBUG_TYPE_CODEVIEW = 2
+MSF_MAGIC = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\x00\x00\x00"
+SYMBOL_KEYS = ("graphics", "runtime")
+
+
+def _format_guid(raw16):
+    """16 raw GUID bytes -> "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX".
+
+    The first three fields are little-endian; the last two are a plain hex
+    dump of the remaining bytes, unchanged. The same mixed-endian text form
+    a PE CodeView record and a PDB's own Info Stream both use, so the two
+    only need formatting once.
+    """
+    d1, d2, d3 = struct.unpack_from("<IHH", raw16, 0)
+    d4 = raw16[8:16]
+    return "%08X-%04X-%04X-%s-%s" % (d1, d2, d3, d4[:2].hex().upper(), d4[2:].hex().upper())
+
+
+def _rva_to_file_offset(sections, rva):
+    """Translate an image RVA to a file offset via the section table, or None."""
+    for virtual_address, virtual_size, size_of_raw_data, pointer_to_raw_data in sections:
+        span = max(virtual_size, size_of_raw_data)
+        if virtual_address <= rva < virtual_address + span:
+            return pointer_to_raw_data + (rva - virtual_address)
+    return None
+
+
+def codeview_record(dll_path):
+    """The RSDS CodeView record embedded in a PE's debug directory, or None.
+
+    Parsed by hand: the DOS header's e_lfanew locates the PE signature; the
+    COFF header gives the section count and the optional header's size; the
+    optional header's DataDirectory[6] (IMAGE_DIRECTORY_ENTRY_DEBUG) gives an
+    RVA and size for the array of 28-byte IMAGE_DEBUG_DIRECTORY entries, so
+    the section table is walked once to translate that RVA to a file offset.
+    A Type 2 (CODEVIEW) entry's PointerToRawData/SizeOfData is itself a file
+    offset: the RSDS record there is a 4-byte signature, a 16-byte GUID, a
+    uint32 age, then a NUL-terminated UTF-8 PDB path.
+
+    Returns None for anything that is not a well-formed PE with an RSDS
+    CodeView entry -- including the older NB10 debug format, which this
+    project's MSVC toolchain never emits. Raises only if dll_path can't be
+    read; every format inconsistency past that point is reported as None
+    rather than an exception, since a DLL built without /DEBUG is routine,
+    not an error.
+    """
+    data = Path(dll_path).read_bytes()
+    try:
+        if len(data) < 0x40 or data[:2] != b"MZ":
+            return None
+        e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[e_lfanew:e_lfanew + 4] != b"PE\x00\x00":
+            return None
+        coff_off = e_lfanew + 4
+        (_machine, section_count, _timestamp, _symtab_ptr, _symtab_count,
+         opt_header_size, _characteristics) = struct.unpack_from("<HHIIIHH", data, coff_off)
+        opt_header_off = coff_off + 20
+        magic = struct.unpack_from("<H", data, opt_header_off)[0]
+        if magic == 0x10B:      # PE32: DataDirectory starts at +96 in the optional header.
+            data_directory_off = opt_header_off + 96
+        elif magic == 0x20B:    # PE32+: ImageBase is 8 bytes wider, so +112 instead.
+            data_directory_off = opt_header_off + 112
+        else:
+            return None
+        debug_rva, debug_size = struct.unpack_from("<II", data, data_directory_off + 6 * 8)
+        if not debug_rva or not debug_size:
+            return None
+        section_off = coff_off + 20 + opt_header_size
+        sections = []
+        for i in range(section_count):
+            _name, virtual_size, virtual_address, size_of_raw_data, pointer_to_raw_data = \
+                struct.unpack_from("<8sIIII", data, section_off + i * 40)
+            sections.append((virtual_address, virtual_size, size_of_raw_data, pointer_to_raw_data))
+        debug_dir_off = _rva_to_file_offset(sections, debug_rva)
+        if debug_dir_off is None:
+            return None
+        for i in range(debug_size // 28):
+            (_characteristics2, _timestamp2, _major, _minor, entry_type,
+             size_of_data, _address_of_raw_data, pointer_to_raw_data) = \
+                struct.unpack_from("<IIHHIIII", data, debug_dir_off + i * 28)
+            if entry_type != IMAGE_DEBUG_TYPE_CODEVIEW:
+                continue
+            cv = data[pointer_to_raw_data:pointer_to_raw_data + size_of_data]
+            if cv[:4] != b"RSDS":
+                continue
+            guid = _format_guid(cv[4:20])
+            age = struct.unpack_from("<I", cv, 20)[0]
+            raw_name = cv[24:]
+            nul = raw_name.find(b"\x00")
+            if nul != -1:
+                raw_name = raw_name[:nul]
+            pdb_name = PureWindowsPath(raw_name.decode("utf-8", errors="replace")).name
+            return dict(pdb_name=pdb_name, guid=guid, age=age)
+        return None
+    except (struct.error, IndexError):
+        return None
+
+
+def pdb_signature(pdb_path):
+    """The {guid, age} a PDB's Info Stream (MSF stream 1) declares, or None.
+
+    Parsed by hand: the 32-byte MSF magic is followed by the superblock
+    (BlockSize, FreeBlockMapBlock, NumBlocks, NumDirectoryBytes, Unknown,
+    BlockMapAddr, each a little-endian uint32). BlockMapAddr is the block
+    holding the Stream Directory's own block-number array; like every other
+    minimal MSF reader, this assumes that array fits in a single block --
+    true of every PDB this project has produced, though not guaranteed by
+    the format for an enormous one. The Stream Directory itself is
+    {NumStreams u32, StreamSizes[NumStreams] u32, then each stream's block
+    numbers in turn}; stream 1 is the PDB Info Stream: {Version u32,
+    Signature u32, Age u32, Guid 16 bytes}.
+
+    Returns None for anything that is not a well-formed MSF7 container with
+    a readable stream 1. Raises only if pdb_path can't be read.
+    """
+    data = Path(pdb_path).read_bytes()
+    try:
+        if data[:32] != MSF_MAGIC:
+            return None
+        block_size, _free_block_map, _num_blocks, num_directory_bytes, _reserved, block_map_addr = \
+            struct.unpack_from("<IIIIII", data, 32)
+        directory_block_count = -(-num_directory_bytes // block_size)  # ceil division
+        directory_blocks = struct.unpack_from("<%dI" % directory_block_count, data,
+                                              block_map_addr * block_size)
+        directory_bytes = b"".join(data[block * block_size:(block + 1) * block_size]
+                                   for block in directory_blocks)[:num_directory_bytes]
+        stream_count = struct.unpack_from("<I", directory_bytes, 0)[0]
+        if stream_count < 2:
+            return None
+        stream_sizes = struct.unpack_from("<%dI" % stream_count, directory_bytes, 4)
+        offset = 4 + 4 * stream_count
+        stream_blocks = []
+        for size in stream_sizes:
+            count = 0 if size in (0, 0xFFFFFFFF) else -(-size // block_size)
+            stream_blocks.append(struct.unpack_from("<%dI" % count, directory_bytes, offset) if count else ())
+            offset += 4 * count
+        info_bytes = b"".join(data[block * block_size:(block + 1) * block_size]
+                              for block in stream_blocks[1])[:stream_sizes[1]]
+        age = struct.unpack_from("<I", info_bytes, 8)[0]
+        guid = _format_guid(info_bytes[12:28])
+        return dict(guid=guid, age=age)
+    except (struct.error, IndexError, ZeroDivisionError):
+        return None
+
+
+def match_symbols(installed_files, candidate_dirs):
+    """Match each installed EDVR DLL's CodeView record to a PDB.
+
+    For every installed_files entry whose key is in SYMBOL_KEYS: reads the
+    *installed* DLL's CodeView record -- the build actually running, which
+    may be older than whatever build\\ holds right now -- then looks, in
+    order, across candidate_dirs plus that entry's own source directory, for
+    a PDB named pdb_name whose guid+age match. The first candidate directory
+    with a same-named, same-signature PDB wins. A same-named PDB with a
+    different signature does not count: matched stays False and pdb stays
+    None, because symbolicating against the wrong PDB would be silently
+    wrong rather than simply absent.
+
+    Returns a list of {"key", "dll", "pdb_name", "guid", "age", "matched",
+    "pdb"}, one entry per matching installed_files key. pdb_name/guid/age are
+    None when the installed DLL carries no CodeView record at all (including
+    when it can't be read); pdb is None unless matched is True.
+    """
+    results = []
+    for entry in installed_files:
+        if entry.get("key") not in SYMBOL_KEYS:
+            continue
+        dll = entry["target"]
+        try:
+            cv = codeview_record(dll)
+        except OSError:
+            cv = None
+        result = dict(key=entry["key"], dll=dll,
+                      pdb_name=cv["pdb_name"] if cv else None,
+                      guid=cv["guid"] if cv else None,
+                      age=cv["age"] if cv else None,
+                      matched=False, pdb=None)
+        if cv:
+            seen = []
+            for directory in [*candidate_dirs, Path(entry["source"]).parent]:
+                directory = Path(directory)
+                if directory in seen:
+                    continue
+                seen.append(directory)
+                candidate = directory / cv["pdb_name"]
+                if not candidate.is_file():
+                    continue
+                try:
+                    signature = pdb_signature(candidate)
+                except OSError:
+                    signature = None
+                if signature and signature["guid"] == cv["guid"] and signature["age"] == cv["age"]:
+                    result.update(matched=True, pdb=str(candidate))
+                    break
+        results.append(result)
+    return results
+
+
 def plan(args):
     import install_edvr
     import edvr_log
@@ -509,6 +714,9 @@ def plan(args):
     status_json = Path(args.status_json).resolve() if args.status_json else default_status_json()
     logging_mode = "memory" if args.memory_ring else "file"
     commands = wpr_commands(wpr, PROFILE, output / "flight.etl", instance, logging_mode == "file", output)
+    symbols = dict(candidate_dirs=[str(ROOT / "build")],
+                  dlls=[{"key": e["key"], "target": e["target"], "source": e["source"]}
+                        for e in receipt["files"] if e.get("key") in SYMBOL_KEYS])
     return dict(target=str(target), executable=str(executable), expected_build=expected, receipt=receipt_path,
                 installed_files=receipt["files"], output=str(output), wpr=str(wpr),
                 profile=str(PROFILE), analyzer=str(ANALYZER), dotnet=dotnet,
@@ -517,7 +725,7 @@ def plan(args):
                 logging_mode=logging_mode, start_command=commands["start"],
                 stop_command=commands["stop"], cancel_command=commands["cancel"],
                 start_vk=start_vk, stop_vk=stop_vk, start_after_seconds=args.start_after_seconds,
-                status_json=str(status_json) if status_json else None)
+                status_json=str(status_json) if status_json else None, symbols=symbols)
 
 
 def smoke_test_capture(p, directory):
@@ -545,6 +753,40 @@ def smoke_test_capture(p, directory):
     print(analyze(p["dotnet"], p["analyzer"], trace, smoke_result["pid"], report), flush=True)
     validated = validate_smoke_report(json.loads(report.read_text(encoding="utf-8")))
     return dict(pid=smoke_result["pid"], report=str(report), **validated)
+
+
+def capture_symbols(p, directory):
+    """Copy the PDB matching each installed EDVR DLL beside this capture.
+
+    Runs once WPR is recording (on_started), so a later rebuild of build\\
+    can never orphan an already-captured trace: whatever matches what is
+    actually running is pulled in now. The symbols\\ subdirectory is created
+    only once there is a matched PDB to put in it. Best-effort like the
+    Status.json sampler -- a match or copy failure is logged to status.json
+    and the console, never allowed to cost the flight already underway.
+    """
+    try:
+        matches = match_symbols(p["installed_files"], [ROOT / "build"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print("[edvr] cpu profile: symbols: match failed: %s" % exc, flush=True)
+        write_status(directory, "recording", symbols=dict(error=str(exc)))
+        return []
+    symbols_dir = directory / "symbols"
+    copied = []
+    for entry in matches:
+        label = "matched" if entry["matched"] else "unmatched (game may be running an older build)"
+        print("[edvr] cpu profile: symbols %s: %s guid=%s age=%s" %
+             (label, entry["key"], entry["guid"], entry["age"]), flush=True)
+        if entry["matched"]:
+            try:
+                symbols_dir.mkdir(parents=True, exist_ok=True)
+                destination = symbols_dir / Path(entry["pdb"]).name
+                shutil.copy2(entry["pdb"], destination)
+                copied.append(str(destination))
+            except OSError as exc:
+                print("[edvr] cpu profile: symbols: copy failed for %s: %s" % (entry["key"], exc), flush=True)
+    write_status(directory, "recording", symbols=dict(matches=matches, copied=copied))
+    return copied
 
 
 def capture(args, key_reader=key_is_down):
@@ -589,6 +831,7 @@ def capture(args, key_reader=key_is_down):
                     args=(p["status_json"], directory / "status_samples.jsonl", sampler_stop),
                     daemon=True)
                 sampler_thread.start()
+            capture_symbols(p, directory)
 
         def on_stopped():
             now = utc_now_iso_ms()
@@ -956,6 +1199,7 @@ def self_test():
                                                     "-instancename", p["instance"]])
                         check(p["start_vk"] is None and p["stop_vk"] is None and p["start_after_seconds"] is None)
                         check(p["status_json"] is None)
+                        check(p["symbols"] == dict(candidate_dirs=[str(ROOT / "build")], dlls=[]))
 
                         ring_args = argparse.Namespace(**{**vars(args), "memory_ring": True})
                         ring = plan(ring_args)
@@ -1001,6 +1245,141 @@ def self_test():
                 mock.patch(__name__ + ".invoke", side_effect=AssertionError("dry-run invoked compiler")):
             check(build_analyzer(argparse.Namespace(trace_event_directory=str(dependency), dry_run=True)) == 0)
         check(before == snapshot())
+
+    # codeview_record / pdb_signature / match_symbols / capture_symbols: hand-built
+    # PE and MSF fixtures, so the byte-level parse is tested without a real PDB.
+    with tempfile.TemporaryDirectory() as tmp3:
+        fixture = Path(tmp3)
+        e_lfanew, opt_header_size = 0x80, 112 + 16 * 8  # PE32+ optional header + 16 data directories
+        coff_off, opt_off = e_lfanew + 4, e_lfanew + 4 + 20
+        section_off, section_file_offset, section_rva = opt_off + opt_header_size, 0x400, 0x2000
+        guid_bytes = struct.pack("<IHH", 0x12345678, 0x9ABC, 0xDEF0) + bytes(
+            [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF])
+        expected_guid = "12345678-9ABC-DEF0-0123-456789ABCDEF"
+        check(_format_guid(guid_bytes) == expected_guid)
+
+        def build_pe(debug_rva=section_rva, debug_size=28):
+            name = b"C:\\fixture\\build\\d3d11.pdb\x00"
+            rsds = b"RSDS" + guid_bytes + struct.pack("<I", 7) + name
+            debug_entry = struct.pack("<IIHHIIII", 0, 0, 0, 0, IMAGE_DEBUG_TYPE_CODEVIEW, len(rsds),
+                                      section_rva + 28, section_file_offset + 28)
+            buf = bytearray(max(section_file_offset + 28 + len(rsds), section_off + 40))
+            buf[0:2] = b"MZ"
+            struct.pack_into("<I", buf, 0x3C, e_lfanew)
+            buf[e_lfanew:e_lfanew + 4] = b"PE\x00\x00"
+            struct.pack_into("<HHIIIHH", buf, coff_off, 0x8664, 1, 0, 0, 0, opt_header_size, 0)
+            struct.pack_into("<H", buf, opt_off, 0x20B)
+            struct.pack_into("<II", buf, opt_off + 112 + 6 * 8, debug_rva, debug_size)
+            struct.pack_into("<8sIIII", buf, section_off, b".fixture", 0x1000, section_rva, 0x1000,
+                             section_file_offset)
+            buf[section_file_offset:section_file_offset + 28] = debug_entry
+            buf[section_file_offset + 28:section_file_offset + 28 + len(rsds)] = rsds
+            return bytes(buf)
+
+        pe_bytes = build_pe()
+        pe_path = fixture / "fixture.dll"
+        pe_path.write_bytes(pe_bytes)
+        check(codeview_record(pe_path) == dict(pdb_name="d3d11.pdb", guid=expected_guid, age=7))
+
+        not_pe = fixture / "not_pe.dll"
+        not_pe.write_bytes(b"not a pe file at all, just filler bytes so it is long enough")
+        check(codeview_record(not_pe) is None)
+
+        no_debug = fixture / "no_debug.dll"
+        no_debug.write_bytes(build_pe(debug_rva=0, debug_size=0))
+        check(codeview_record(no_debug) is None)
+
+        try:
+            codeview_record(fixture / "missing.dll")
+            check(False)
+        except OSError:
+            check(True)
+
+        def build_msf(age, guid16):
+            block_size = 512
+            buf = bytearray(6 * block_size)
+            buf[0:32] = MSF_MAGIC
+            struct.pack_into("<IIIIII", buf, 32, block_size, 1, 6, 16, 0, 3)
+            struct.pack_into("<I", buf, 3 * block_size, 4)              # block map -> stream dir in block 4
+            struct.pack_into("<III", buf, 4 * block_size, 2, 0, 28)     # numstreams=2, sizes=[0, 28]
+            struct.pack_into("<I", buf, 4 * block_size + 12, 5)         # stream 1's blocks = [5]
+            struct.pack_into("<III", buf, 5 * block_size, 20000404, 0, age)  # Version, Signature, Age
+            buf[5 * block_size + 12:5 * block_size + 28] = guid16
+            return bytes(buf)
+
+        good_pdb = fixture / "d3d11.pdb"
+        good_pdb.write_bytes(build_msf(7, guid_bytes))
+        check(pdb_signature(good_pdb) == dict(guid=expected_guid, age=7))
+
+        wrong_guid_bytes = struct.pack("<IHH", 0x99999999, 0x1111, 0x2222) + bytes(8)
+        wrong_pdb = fixture / "wrong.pdb"
+        wrong_pdb.write_bytes(build_msf(99, wrong_guid_bytes))
+        check(pdb_signature(wrong_pdb) != pdb_signature(good_pdb))
+
+        not_msf = fixture / "not_msf.pdb"
+        not_msf.write_bytes(b"not an MSF container" + b"\x00" * 64)
+        check(pdb_signature(not_msf) is None)
+
+        try:
+            pdb_signature(fixture / "missing.pdb")
+            check(False)
+        except OSError:
+            check(True)
+
+        build_dir = fixture / "build"
+        build_dir.mkdir()
+        (build_dir / "d3d11.pdb").write_bytes(build_msf(7, guid_bytes))
+        target_dir = fixture / "installed"
+        target_dir.mkdir()
+        installed_graphics = target_dir / "d3d11.dll"
+        installed_graphics.write_bytes(pe_bytes)
+        other_source = fixture / "other_source"
+        other_source.mkdir()
+
+        installed_files = [
+            {"key": "graphics", "target": str(installed_graphics),
+             "source": str(build_dir / "edvr_openxr_graphics.dll")},
+            {"key": "runtime", "target": str(fixture / "missing_runtime.dll"),
+             "source": str(other_source / "edvr_openxr_runtime.dll")},
+            {"key": "loader", "target": str(target_dir / "openxr_loader.dll"),
+             "source": str(build_dir / "openxr_loader.dll")},
+        ]
+        matches = match_symbols(installed_files, [build_dir])
+        check(len(matches) == 2)  # the loader key is not a SYMBOL_KEYS entry
+        graphics = next(m for m in matches if m["key"] == "graphics")
+        check(graphics["matched"] is True and graphics["pdb"] == str(build_dir / "d3d11.pdb"))
+        check(graphics["guid"] == expected_guid and graphics["age"] == 7)
+        runtime = next(m for m in matches if m["key"] == "runtime")
+        check(runtime["matched"] is False and runtime["pdb"] is None and runtime["guid"] is None)
+
+        # A same-named PDB with the wrong signature must not count as matched.
+        wrong_source_dir = fixture / "wrong_source"
+        wrong_source_dir.mkdir()
+        (wrong_source_dir / "d3d11.pdb").write_bytes(build_msf(99, wrong_guid_bytes))
+        wrong_matches = match_symbols(
+            [{"key": "graphics", "target": str(installed_graphics),
+              "source": str(wrong_source_dir / "edvr_openxr_graphics.dll")}],
+            [fixture / "empty_candidate_dir"])
+        check(wrong_matches[0]["matched"] is False and wrong_matches[0]["pdb"] is None)
+        check(wrong_matches[0]["pdb_name"] == "d3d11.pdb" and wrong_matches[0]["guid"] == expected_guid)
+
+        # capture_symbols: the copy lands under symbols\, status.json records it, and
+        # a capture with nothing matched never creates the symbols\ directory at all.
+        capture_dir = fixture / "capture"
+        capture_dir.mkdir()
+        with mock.patch(__name__ + ".ROOT", build_dir.parent):
+            copied = capture_symbols(dict(installed_files=installed_files), capture_dir)
+        check(len(copied) == 1 and Path(copied[0]).name == "d3d11.pdb")
+        check((capture_dir / "symbols" / "d3d11.pdb").is_file())
+        check(Path(copied[0]).read_bytes() == (build_dir / "d3d11.pdb").read_bytes())
+        status = json.loads((capture_dir / "status.json").read_text(encoding="utf-8"))
+        check(status["symbols"]["copied"] == copied and len(status["symbols"]["matches"]) == 2)
+
+        capture_dir2 = fixture / "capture2"
+        capture_dir2.mkdir()
+        with mock.patch(__name__ + ".ROOT", fixture / "nonexistent_root"):
+            copied2 = capture_symbols(dict(installed_files=[]), capture_dir2)
+        check(copied2 == [] and not (capture_dir2 / "symbols").exists())
 
     with tempfile.TemporaryDirectory() as tmp2:
         saved_games = Path(tmp2)
