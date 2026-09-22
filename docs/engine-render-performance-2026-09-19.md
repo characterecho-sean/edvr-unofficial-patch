@@ -46,18 +46,20 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
-* **Open (identification arc closed; change-gate ABORTED in flight; the
-  occlusion lever designed and reviewed — see
-  docs/design-occlusion-culling-2026-09-22.md, revised in place after an
-  in-repo review whose ledger is in the gitignored reviews/ dir):** (1)
-  Phase A of the reviewed design — ONE instrumented flight: the
-  cpu_profile WPR trace (does the main thread wait on the job pipeline;
-  walk-vs-emit by address) plus armed eye runs at >= 5 poses for the
-  depth/truth corpus; kill gate: pipeline not on the critical path, or
-  recall x critical-path-share x 5.3 ms < ~1.5 ms; (2) fix the depth
-  capture's constants keying (structure-family draw, not first pool
-  draw); (3) per-record identity/change signal (motion arc); (4)
-  scheduler payload-vtable closure; (5) ring-buffer command consumers.
+* **Open (perf arc CLOSED at Phase A, 2026-09-22 — the occlusion lever
+  killed by its own gate; see the Phase A verdict entry):** the consuming
+  thread does not wait on the job pipeline (~0 LOD-attributable stall,
+  ~7 ms pacing slack) — there is no settlement CPU wall on this rig under
+  EDVR to harvest. Remaining items are instrument/tool gaps and other arcs:
+  (1) edvr_cpu.wprp's 512x1 MiB buffers are a ~13.7 s ring at ~38 MB/s —
+  size them for the session or the clean leg is lost (affects any future
+  cpu_profile use); (2) eye depth capture is native-VR-only by design (the
+  flat panel forms no scene pair) — document or extend; (3) the object
+  classification ownership join failed in all four Phase A runs
+  (unwind_failed ~90%) — the record-to-object join the flicker/object arcs
+  need; (4) depth-capture constants keying (structure-family draw); (5)
+  per-record identity/change signal (motion arc); (6) ring-buffer command
+  consumers.
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -68,6 +70,10 @@
   Merge-key control of any kind — the key is an incidental audio counter
   sampled at rekey. The 82% bucket attribution and 40-frame cadence — no
   evidence route exists from the bucket lists to eye-pass draws.
+  Occlusion culling of the job pipeline — KILLED at Phase A 2026-09-22:
+  the consuming thread does not wait on the pipeline (~0 attributable
+  stall, ~7 ms pacing slack); the retake escape hatch caps at ~0.75 ms,
+  under the design's ~1.5 ms bar.
 
 ## Frame budget philosophy
 
@@ -1377,3 +1383,60 @@ per-frame provably-unseen set, every frame, with movers running). The
 design is written for review at docs/design-occlusion-culling-2026-09-22.md
 (evidence chain, soundness sketch, staged plan with kill gates, review
 questions).
+
+
+### 2026-09-22 -- Phase A verdict: KILL. The settlement CPU wall is not the job pipeline; the consuming thread has ~7 ms of pacing slack
+
+Phase A flown per the reviewed design: one WPR capture (build/phaseA-cpu-parked,
+543 MB ETL, build 1262c8c pinned) + four posed eye runs (parked cockpit, on
+foot, inside-looking-out, doorway; the SRV pose was unavailable - no SRV at
+this settlement - and the vehicle view is covered by the cockpit pose).
+
+**Critical-path verdict (the kill gate):** the consuming thread (the game's
+D3D context thread, tid 34408 - every frame marker and sampled stack is its)
+accounts for ~1.9 ms running + <= 0.75 ms waiting + ~7 ms pacing wait per
+11.1 ms frame. Its wait wakers: 3,195 generic scheduler signal (0x5d6xxx),
+1,784 EDVR frame signal, ~2,000 assorted game code - ZERO in any job-pipeline
+range (0x4321940/0x4320340/0x430EFE0/0x433DB20) out of ~14k observations.
+CPU contention nil (0.05 ms ready). **There is no ~4-5 ms wall on the
+consuming thread to harvest: LOD-attributable stall is ~0; even the
+generous <= 0.75 ms x recall bound sits under the design's ~1.5 ms bar.**
+With EDVR installed, this rig at this settlement is pacer-limited (88-89
+fps), not pipeline-bound. This closes the occlusion-culling arc at Phase A
+by its own gate - the cheapest possible kill, which is the design working.
+
+**Capture defect (recorded as a tool gap):** edvr_cpu.wprp's 512x1 MiB
+buffer set is a ~13.7 s ring at the measured 37.8 MB/s - the designed clean
+parked leg was overwritten before the 300 s stop; the decoded window is
+post-pose-4 (stable 401-frame sub-window analyzed, 88 fps). The walk-vs-emit
+gate was therefore NOT exercised: the report's samples are window-scoped to
+the consuming thread (265 observations, none in pipeline code; the pipeline
+runs on workers outside the decoded windows). **Escape hatch (user's call,
+recommended against on expected value):** a retaken trace with a larger WPR
+buffer plus analyzer coverage of WaitGetPoses-return -> PresentBegin and
+worker-thread attribution could only resurrect <= ~0.75 ms of join stall -
+under the bar even if found.
+
+**Corpus findings:** depth dumps exist only for the cockpit pose. The three
+on-foot poses expose a single flat-panel target, so the depth probe's
+two-target scene pair never forms (decline counters all-zero - never
+engaged, not refused): eye depth capture is native-VR-only BY DESIGN, now
+recorded. The classification runs produced a producer/identity corpus but
+ZERO ownership links (unwind_failed ~90%, ancestor_missing ~10%,
+no_selected_frame in all four runs) - Phase B's record-to-object join did
+not survive; recorded as an instrument gap for the object/flicker arcs.
+
+**What stands for the whole perf question:** on this rig under EDVR, the
+settlement is not CPU-bound - the earlier stock fpsVR ~9.5-10 ms CPU figure
+is whole-process; the thread that paces the frame works 2.5-4 ms and waits
+the rest. The ~5.3 ms view-dependent content cost measured by subtraction
+is real CPU time, but it runs on worker threads that the critical path does
+not wait on. Remaining perf surface: the ~2 ms universal + ~2.2 ms
+planet-surface floors (engine base + terrain system - not reachable from a
+proxy) and the ~7 ms pacing slack (headroom, e.g. for the motion work).
+
+ruled out: occlusion culling of the job pipeline (killed at Phase A);
+the escape-hatch retake is available but its ceiling is under the bar.
+Also closed: any prize arithmetic that multiplies the unseen fraction by
+the thread-summed job time - the wall-share was the gate and the gate
+failed.
