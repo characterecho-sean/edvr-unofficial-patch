@@ -40,8 +40,18 @@ otherwise.
   legs. The cull design is RE-SCOPED to draw submission as the prize
   (design doc §8; the pipeline prize stays KILLED): same frustum-reject
   site, gate B' = the record -> draw join and the unseen share of the
-  caller's draw time. Read the GPU side next to any CPU saving (addendum
-  2: 8-15 ms app GPU at 0.7559 scale). The approach onset is a RAMP with distance (stage 1
+  caller's draw time. B' DONE offline (design doc §9): the join is exact
+  via each draw's instance range into the pool, 71-72% of settlement eye
+  draws are all-unseen at the parked pose (6.0-6.1 ms), a coverage
+  buffer with ideal occluders removes 36-53% (3.1-4.5 ms vs the 1.5 ms
+  bar) - PASS on the ceiling, conditional on qualifying the real
+  occluders (front building exteriors 30-100 m out) and on proving
+  which per-view test admits the pool draws: the stage 1 gate's camera
+  is a per-eye view record at ctx+0x40 (frustum planes +0x30, position
+  +0x540, occludee spheres +0x240/+0x280) but its verdict feeds the
+  type-2 item path, while the draw-item builder reads rec+0x208 written
+  by FUN_144308B30 (undecompiled). Read the GPU side next to any CPU
+  saving (addendum 2: 8-15 ms app GPU at 0.7559 scale). The approach onset is a RAMP with distance (stage 1
   per-record LOD admission fits; R1 4.0 -> 12.7 ms from 5.3 km to
   landing, r = 0.97 with job-0 samples); the settlement's collection
   admission (reset-repopulate) is untested because that leg began after

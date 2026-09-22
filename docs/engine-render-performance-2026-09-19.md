@@ -81,7 +81,22 @@
   hooks 0.7, wrappers 0.26, live per-draw features ~0.5, the DrawClock's
   2 ms every-16th-frame hitch. Even at zero EDVR cost the caller sits at
   ~11.9 ms: necessary, not sufficient — the draw count (1b) is what
-  reaches 90 Hz; a second cut round runs in parallel with it;
+  reaches 90 Hz; a second cut round runs in parallel with it; Phase B'
+  of the re-scoped cull is DONE offline (design doc §9, 2026-09-22):
+  the record -> draw join is exact (each eye draw names its pool
+  records through its instance range), 71-72% of the settlement's eye
+  draws come only from unseen records at three identical parked runs
+  (6.0-6.1 ms of the 8.5 ms), the §3.2 coverage buffer with ideal
+  occluders removes 36-53% (3.1-4.5 ms) against the 1.5 ms bar, so B'
+  PASSES on its ceiling but CONDITIONALLY: the occluders are the front
+  buildings' exteriors 30-100 m out (not the cockpit, <= 2%) and a
+  qualified inventory of their solid parts must reproduce >= ~45% of
+  the ideal; and the gate's camera is its own argument (a view record
+  per eye at ctx+0x40) BUT its verdict feeds only the type-2 item path
+  - which test admits the pool draws (FUN_144308B30) is unproven. Next:
+  that decompile, the depth capture's cb1 byte-range fix, and one armed
+  capture at the parked pose (per-view gate results per record, the view
+  array, occluder mesh geometry) before any Phase C code;
   cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
   the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
   must be read next to it; (1b) the RE-SCOPED cull (design doc §8):
