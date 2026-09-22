@@ -68,17 +68,20 @@
   draw 0.09, binding hash 0.11, and a tail of per-draw predicates) and
   CUT and BUILT (2026-09-22 per-draw-cut entry: the tail was cross-TU
   call overhead under /O2 without /GL; inline readers and live guards,
-  noinline for the two GS-buffer bodies); leg 1 re-flown once on it,
-  INCONCLUSIVE (2026-09-22 re-fly entry: SteamVR at 0.7559 instead of
-  Pimax OpenXR at 0.566, a different pad and heading, rate unsettled;
-  EDVR leaf 3.81 vs 3.94 ms and the gfx log's own draw-hook line
-  3.70-4.06 vs 3.84-3.98 ms, while the game-side load rose 30-55%);
-  the panel-distance fix makes the forty-term hoist inert, so the next
-  targets are beginPanelOverride's body 0.56 ms, forwardWithVerdict's
-  own body 0.61, hookedMap 0.37, the CreateBuffer hook 0.28, guarded<>
-  0.22 and the DrawClock's 2 ms every-16th-frame hitch; a measurement
-  needs the 16:50 leg's environment (Pimax OpenXR, same scale, the
-  original pad at heading 42) — the bar is the 3.94 ms;
+  noinline for the two GS-buffer bodies) and MEASURED like for like
+  (2026-09-22 parked-4 entry, Pimax OpenXR 0.566, ~30 m from the pad):
+  EDVR's per-draw cost -0.7-0.8 ms per frame by both instruments (R1
+  EDVR leaf 3.94 -> 3.25 ms; the gfx log's own draw-hook line 3.84-3.98
+  -> 2.98-3.17), the targeted functions gone, the inlined loads moved
+  into forwardWithVerdict's body and the forty-term hoist inert with
+  panel distance on; the caller thread unchanged at 15.1 ms (the view's
+  draw set +0.7 ms of game-side submission, same pipeline), still 45
+  fps. EDVR's remaining 3.2 ms: dispatch bodies 1.6 (forwardWithVerdict
+  0.60, verdict lambda 0.36, beginPanelOverride body 0.51), resource
+  hooks 0.7, wrappers 0.26, live per-draw features ~0.5, the DrawClock's
+  2 ms every-16th-frame hitch. Even at zero EDVR cost the caller sits at
+  ~11.9 ms: necessary, not sufficient — the draw count (1b) is what
+  reaches 90 Hz; a second cut round runs in parallel with it;
   cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
   the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
   must be read next to it; (1b) the RE-SCOPED cull (design doc §8):
@@ -2123,3 +2126,73 @@ the realized per-frame change is within noise under a heavier scene.
 The measurement it needs is the same environment as the 16:50 leg:
 Pimax OpenXR at the same render scale, parked on the original pad at
 heading 42, the same ini. ruled out: nothing.
+
+### 2026-09-22 -- Leg 1 re-flown on the cut, like for like (build\phaseA-parked-4): EDVR's per-draw cost -0.7 ms per frame (-18%), the caller thread still 15.1 ms, still half rate
+
+build\phaseA-parked-4: 75 s, 2.26 GB, pid 14044, build b9c41c0 (check
+exit 0), Pimax OpenXR at requested 0.566 (the baseline's runtime and
+scale), parked ~30 m from the original pad at heading 52 (baseline 42),
+rate settled at 45.0-46.2 fps for the three windows covering the
+recording, both PDBs matched and every EDVR frame named from them.
+2855 frames all covered; window 8 (1351 frames) reconciles to 0.0008
+ms. Compared with the baseline's window 15 (1349 frames, 16:50 leg):
+
+| caller thread, per frame | baseline | cut |
+|---|---|---|
+| fps / cycle | 45.0 / 22.25 ms | 45.0 / 22.22 ms |
+| R1 length / running | 11.14 / 10.97 ms | 11.17 / 11.03 ms |
+| post-present R5c length / running | 4.56 / 3.36 | 4.65 / 3.44 |
+| next-wait R6 | 4.92 | 5.00 |
+| caller running, whole cycle | 15.13 ms | 15.19 ms |
+| thread-summed pipeline | 5.24 ms | 5.25 ms |
+| R1 leaf: EDVR d3d11.dll | 3.94 ms | 3.25 ms |
+| R1 leaf: game exe | 4.45 | 4.98 |
+| R1 leaf: System32 d3d11 / kernel / ntdll / NVIDIA UMD | 0.74 / 0.53 / 0.59 / 0.50 | 0.80 / 0.63 / 0.63 / 0.55 |
+| gfx log "draw hook CPU" (EDVR's own hook time per sampled frame) | 3.84-3.98 ms | 2.98-3.17 ms |
+
+**EDVR's own cost fell by 0.7-0.8 ms per frame by both instruments**
+(leaf time -0.69, the self-measured hook line -0.8, the
+innermost-EDVR-frame population 6826 -> 6008 samples = -0.61). Per
+function (innermost EDVR frame, ms/frame, baseline -> cut): gone
+entirely - meshMotionDraw 0.12, screenMotionUiDraw 0.08 +
+screenMotionDraw 0.04, bindingShaderHash 0.07 + bindingGet 0.07 +
+bindingGeneration 0.04, uiSeparationToneBegin 0.05, uiDepthDeferredEye
+0.04 + uiDepthPlanetBegin 0.03, introProbeWants 0.04, quadProbeWants
+0.03; celestial begin 0.19 -> 0.06; __security_check_cookie 0.16 ->
+0.09; uiDeferredTraceDrawEnter 0.08 -> 0.05. Moved rather than removed:
+forwardWithVerdict's own body 0.42 -> 0.60 (the inlined binding reads
+and live guards are now loads inside it - inlining relocates a load, it
+does not delete it); guarded<> 0.14 -> 0.17; beginPanelOverride 0.49 ->
+0.51 (the hoist is inert with panel distance on, as the previous entry
+found). Unchanged: hookedMap 0.32 -> 0.31 (+ mapWaitNote 0.09), the
+CreateBuffer hook 0.17 -> 0.19, the verdict lambda 0.43 -> 0.36, qpcNow
+0.10 -> 0.11, beforeTone 0.11 -> 0.10, srv0IsPanelSized 0.09 -> 0.10,
+gpuFrameCommand 0.09 -> 0.08, hashOf 0.06 -> 0.05.
+
+**Why the caller thread did not move.** Its R1 running is 11.03 vs
+10.97 ms: the game-side draw submission was ~0.7 ms heavier in this
+leg (game code +0.53, D3D runtime/driver/kernel +0.2) with the same
+pipeline load - the view differs by 10 degrees and 30 m, which changes
+the frustum's draw set while the admitted records stay the same. EDVR's
+own cost is the like-for-like quantity; the caller's total is not, at
+this precision. The frame is still 22.2 ms at half rate with ~5 ms of
+slot wait, and the caller still runs ~15 ms of it.
+
+**Where EDVR's remaining 3.2 ms sits (R1, ms/frame):** the draw hook's
+own dispatch - forwardWithVerdict body 0.60 + the verdict lambda 0.36 +
+beginPanelOverride body 0.51 + hookedDrawIndexedInstanced 0.13 = 1.6;
+the resource hooks - hookedMap 0.31 + mapWaitNote 0.09 + hookedUnmap
+0.08 + CreateBuffer 0.19 + CreateTexture2D ~0.05 = 0.7; the wrappers -
+guarded<> 0.17 + cookies 0.09 = 0.26; per-draw feature calls that are
+live - beforeTone and the uiDeferred family ~0.3, srv0IsPanelSized 0.10,
+gpuFrameCommand 0.08, hashOf 0.05, qpcNow 0.11 (the DrawClock's 2 ms on
+every sixteenth frame).
+
+**Reading.** The cut is real and modest: about a fifth of EDVR's
+per-draw cost, a twentieth of the caller thread's frame. A second
+round on the dispatch bodies and the Map/CreateBuffer hooks could
+plausibly halve what is left, but even removing all 3.2 ms leaves the
+caller at ~11.9 ms per frame, over the 11.1 ms of a 90 Hz frame at this
+view. EDVR's per-draw cost is necessary to cut and not sufficient: the
+draw count itself (the re-scoped cull, design doc §8, or the LOD lever)
+is what reaches 90 Hz here. ruled out: nothing new.
