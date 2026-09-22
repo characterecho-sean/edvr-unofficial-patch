@@ -22,6 +22,16 @@ public:
     NativePerfAverage transfer(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage compose(uint64_t nowMs, uint64_t windowMs) const noexcept;
     double predictedPeriod(uint64_t nowMs) const noexcept;
+    // The base display period in milliseconds that predictedPeriod is compared
+    // against: the runtime's published display frequency while fresh (the ABI's
+    // baseDisplayHz), else the session's first predicted period. 0 when neither
+    // is known. Survives ring staleness only through the first-period fallback.
+    double basePeriodMs(uint64_t nowMs) const noexcept;
+    // The display-rate throttle test: the runtime predicting more than 1.5x the
+    // base period means the headset is running at a throttled display rate
+    // (e.g. SteamVR halving 90 Hz to 45 Hz under load), whatever the producer
+    // cadence reads.
+    static bool displayThrottled(double predictedPeriodMs, double basePeriodMs) noexcept;
     int graph(bool producer, float* out, int max, uint64_t nowMs) const noexcept;
 private:
     static constexpr unsigned kCapacity=900;
@@ -40,6 +50,9 @@ private:
     uint64_t generation_=0, firstSequence_=0;
     double period_=0;
     uint64_t periodAt_=0;
+    double baseHz_=0;
+    uint64_t baseHzAt_=0;
+    double firstPeriodMs_=0;
     static bool age(uint64_t now,uint64_t at,uint64_t window) noexcept;
     static bool duration(double value) noexcept;
 };
