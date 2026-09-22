@@ -2995,9 +2995,10 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     "instrument switches the probe on itself), declines %u format / %u bytes / %u "
                     "frame-cap, %u readback/write failures, %u SEH faults; %s. Each file is one eye "
                     "pass's completed depth as plain R32_FLOAT texels (the R32G8X24 family converted "
-                    "through the depth probe's read table) plus that pass's VS b1 floats [256,592) from "
-                    "its first pool-carrying draw (view-projection rows at 270..273, camera-relative "
-                    "origin at 275); eye A/B is the scene pair's first-bind order. Only with "
+                    "through the depth probe's read table) plus that pass's VS b1 float4 registers "
+                    "[256,336) from its first pool-carrying draw (file version 2: the view-projection's "
+                    "columns at registers 270..273, the eye origin at 275; version 1 files hold registers "
+                    "64..147 and no camera); eye A/B is the scene pair's first-bind order. Only with "
                     "advanced.eye_depth_capture on; the first %u frames of the run; no rendering changes.",
                     dir.c_str(),depthFiles,g_ledgerStamp,
                     static_cast<unsigned long long>(g_eyeDepthCapture.bytes()),g_eyeDepthCapture.nonEyeSkips,

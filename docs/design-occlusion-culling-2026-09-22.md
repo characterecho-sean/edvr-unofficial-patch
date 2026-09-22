@@ -640,7 +640,12 @@ src/d3d11/eye_depth_capture.h:191-192 and 258-271 copy cb1 BYTES
 1024-2367 (float4 registers 64-147) while the view-projection is
 registers 270-273 (bytes 4320-4383) and the eye origin register 275:
 no key draw can supply them in that window. The fix is the offset, not
-the key; not made here (the snapshot's cb1 served instead).
+the key; not made here (the snapshot's cb1 served instead). FIXED in
+close-out 2: file version 2 copies registers [256, 336) (bytes 4096-
+5375, clamped to the buffer, none if it stops short of register 275)
+and names the block's first cb1 float in the header;
+tools/eye_depth_dump.py reads both versions and yields a camera only
+from version 2.
 
 **Next (offline first, then one armed capture at the parked pose, no
 reject).** (1) Decompile FUN_144308B30 and settle which per-view test
