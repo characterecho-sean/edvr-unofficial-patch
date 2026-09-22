@@ -20,13 +20,14 @@ context; every load-bearing claim cites its evidence.
   2026-09-22 entry). The ms figure (~4.8–5.1 of the ~5.3 ms view-dependent
   cost) is an ESTIMATE by proportionality: the job time it rests on is
   summed across worker threads and its wall-clock share is unproven (§2.2).
-- **Open:** reviewer verdict; a VALID Phase A (§4) — the 2026-09-22 flight
-  was invalid for the gate and its KILL verdict withdrawn the same day
-  (engine arc, withdrawal entry: the WPR ring dropped the cockpit leg; the
-  analyzer measures only the post-present slice); whether the job pipeline
-  sits on the caller thread's critical path; the camera the engine's
-  frustum gate reads and the readers of its active mask (§3.3); which
-  surfaces occlude the measured unseen set; the record → mesh join.
+- **Open (re-scoped, §8):** the prize is now draw submission on the
+  caller thread (the settlement's ~8.5 ms per frame at the parked view,
+  91-96% of its records unseen), not the job pipeline (KILLED, below).
+  Phase B' offline: the record -> draw join, the unseen share of the
+  caller's draw time at cockpit poses, the camera the engine's frustum
+  gate reads and the readers of its active mask (§3.3), which surfaces
+  occlude the measured unseen set. Preceded by the EDVR per-draw path
+  cut (engine arc, 2026-09-22 per-draw entry) and a GPU-side reading.
 - **Scope (Sean, 2026-09-22):** cockpit only — true stereoscopic settlement
   rendering from the ship. On foot is out of scope for now; the corpus and
   the profile legs are cockpit poses. Also to instrument: CPU frame time
@@ -366,3 +367,49 @@ and if the pipeline is off the critical path no offline work is worth doing.
   (`tools/pool_pair.py`), scheduler stack probe, L1 job brackets,
   `tools/cpu_profile.py` (WPR sampled + CSwitch), `tools/build_diff.py`,
   `targetValid()` in `src/d3d11/kinematic_eval_hook.cpp`.
+
+## 8. Re-scope after the valid Phase A (2026-09-22 evening, Sean's call)
+
+The Phase A KILL stands for the prize this document priced: the job
+pipeline's CPU (§2.2) is 5.24 ms thread-summed on seven workers and
+0.81 ms on the caller thread's critical path (engine arc, "Phase A,
+valid: KILL"). The same flight measured a different prize on the same
+records, and the re-scope targets that one.
+
+**Prize: draw submission on the caller thread.** The parked cockpit's
+caller thread runs 15.1 ms per frame; the settlement's share of it,
+read as the difference between 5.3 km out and parked on the approach
+leg, is ~7 ms before first submit plus ~1.5 ms after Present, and it
+scales with what the settlement submits (R1 ramps with the job-0 sample
+count, r = 0.97). Every admitted record becomes draws; the depth join
+of §2 measured 90.7-96.2% of the settlement's submitted records as
+unseen in both eyes from that view. A cull at admission therefore
+removes draw submission on the critical path (and the GPU vertex work
+early-z never saves), not just worker time. Even at half the measured
+recall the recoverable time is several milliseconds against the same
+1.5 ms bar.
+
+**Site: unchanged from §3.3** - the frustum-reject decision of the
+distance/LOD gate (FUN_14430EFE0). A record rejected there is
+indistinguishable from one outside the frustum, a state the engine
+already handles every frame as the view moves; the engine-state risk is
+the one the engine takes for itself. The oracle risk (a wrong reject is
+a missing object, the settlement-flicker failure class) is unchanged
+and so is §3.4: shadow mode with counters before any reject, inflated
+bounds and hysteresis, the per-frame test under 0.3 ms for 12k records,
+the flicker instrument and census equality as validation gates. The
+engine's cull body is not replaced; the reject is added in front of it.
+
+**Gates, replacing §4 from Phase B on:**
+
+| Phase | Work | Flight? | Kill gate |
+|---|---|---|---|
+| B' | Offline: the record -> draw join (depth corpus run 055252 + census), so unseen records are priced in draws; the unseen share of the caller thread's draw time at cockpit poses; the oracle's camera source (§3.3) | No | unseen share x recall x settlement draw time < 1.5 ms, or no join |
+| C | Build: shadow mode, counters, config-gated, hook validation | No | census inequality in test |
+| D | Validation flights, the same two legs as Phase A (parked, then the approach), compared with the analyzer's R1 module split | Yes | flicker-instrument hits; mover/doorway failures; hysteresis pops |
+
+Two things precede B' and are independent of it: EDVR's own per-draw
+path (3.94 ms per frame of EDVR leaf time on the caller thread at the
+same view, named in the engine arc's 2026-09-22 per-draw entry) is pure
+overhead and is being cut first; and the GPU side at Pimax resolution is
+unmeasured in the CPU trace and must be read next to any CPU saving.

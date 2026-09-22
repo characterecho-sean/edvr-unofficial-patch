@@ -61,14 +61,21 @@
   landing, r = 0.97 with job-0 samples), no step. Nothing of the design
   is built or will be. Entry: 2026-09-22 "Phase A, valid: KILL".
 
-* **Open (arc OPEN on the NEW lever; scope cockpit-only stereo):** (1)
-  name the EDVR functions behind the 3.94 ms per frame of innermost
-  EDVR d3d11.dll time in R1 on the caller thread (innermost EDVR RVAs
-  from the parked trace build\phaseA-parked-2 + a PDB rebuilt at 2d8fbda
-  whose .text matches the installed DLL), then cut the per-draw path and
-  remeasure with the same two legs — cutting all of it lands the caller
-  at ~11.2 ms, the edge of 90 Hz, so the GPU side (unmeasured here;
-  addendum 2: 8-15 ms app GPU at 0.7559) must be read next to it; (2)
+* **Open (arc OPEN on two levers; scope cockpit-only stereo):** (1)
+  EDVR's per-draw path, NAMED (2026-09-22 per-draw entry: hookedMap +
+  mapWaitNote 0.40 ms, the draw-hook verdict lambda 0.20, the
+  CreateBuffer hook 0.17, /GS cookies 0.16, guarded<> 0.11, qpcNow per
+  draw 0.09, binding hash 0.11, and a tail of per-draw predicates) and
+  being CUT (hoisted predicates, unarmed instruments free, safebuffers,
+  early exits, O(1) binding hash); remeasure with the same two legs
+  against the analyzer's R1 module split — the bar is the 3.94 ms;
+  cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
+  the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
+  must be read next to it; (1b) the RE-SCOPED cull (design doc §8):
+  draw submission is the prize (settlement share ~8.5 ms per frame,
+  91-96% of records unseen), same site and safety architecture, new
+  gate B' = the record -> draw join and the unseen share of the
+  caller's draw time; (2)
   the settlement admission (C2, reset-repopulate) stays untested: the
   approach leg began after a reload at the settlement — a leg that
   starts from a real 10 km arrival would test it; (3) DONE 2026-09-22:
@@ -1892,3 +1899,62 @@ because R1 is 98.6% running. ruled out: a step-shaped settlement onset
 between 5.3 km and landing, because R1 ramps with no jump over 0.6 ms.
 ruled out: the armed instruments as the cause of the 2026-09-22 morning
 cockpit numbers, because the clean leg reproduces them (11.1 vs 12 ms).
+
+### 2026-09-22 -- EDVR's per-draw path named; the design re-scoped to draw submission (Sean); the cut begins
+
+**Naming the 3.94 ms.** The parked trace's innermost EDVR RVAs were
+symbolized against a PDB from a rebuild of 2d8fbda in a scratch
+worktree (analysis in the session's scratch record). Caveat first: the
+rebuilt .text differs from the installed DLL in 1.06% of bytes (25,839
+of 2,446,336; section sizes and the .pdata function table identical),
+so function-level attribution holds but line-level does not for RVAs on
+a differing byte (one top-30 entry, the vscreen.cpp:4041 lambda). The
+capture tool now keeps the matching PDB beside each trace (commit on
+main, this evening) so this never recurs. Population: 5320 of 14757
+caller R1 samples have an EDVR leaf frame (3.94 ms/frame; 6826 have an
+EDVR frame anywhere); the analyzer's RVA list was capped at 40 rows and
+names 2397 of them - the head of a long tail of small functions.
+
+Leaf samples per function (window 15, 1349 frames; ms/frame =
+count/1349): hookedMap (vscreen.cpp:2901-2903) 425 + mapWaitNote 114 =
+0.40 ms, entered from one game call site on every Map; the per-draw
+verdict lambda in forwardWithVerdict under hookedDrawIndexedInstanced
+(vscreen.cpp:4041) 271 = 0.20; hookedDevCreate<3,0> = the CreateBuffer
+slot (device_hook.cpp:864) 232 = 0.17; __security_check_cookie 221 =
+0.16 (/GS cookies on the hot hooks); the guarded<> wrapper (guard.h:60)
+153 = 0.11; qpcNow (log.cpp:85) 125 = 0.09, called per draw from the
+draw hook; bindingGet + bindingShaderHash (binding_shadow.cpp) 145 =
+0.11; hookedPresent 138 = 0.10; edvr::begin (celestial_motion.cpp:423)
+88; beginPanelOverride (vscreen.cpp:1666) 85; beforeTone /
+uiDeferredBeforeTone (ui_deferred.cpp:582) 80; hookedUnmap 68;
+journalGameplay (journal_watch.cpp:554, per draw via
+backdropOnComposite) 59; hookedCreateTexture2D 50; readPool 50;
+endQuery 46; hashOf (exposure_fix.cpp:363) 44; introProbeWants (per
+draw) 39; meshMotionDraw 37; renderBoundaryPresent 32. Two game entry
+points carry it: 0x51bcab (the draw hook, several chains converging on
+hookedDrawIndexedInstanced, 27% of R1) and 0x50f0e5 (hookedMap). The
+shape is the finding: no hot function, a dozen small per-draw
+predicates and instruments each run ~18k times per frame, plus the
+Map/Unmap hooks on every constant-buffer update. Session state:
+temporal_aa off (no NGX module in the trace at all; the "NVIDIA" time
+is the D3D11 driver executing the game's own draws), ui_depth on,
+engine_motion on.
+
+**Re-scope (Sean, 2026-09-22 evening):** the KILL stands for the job
+pipeline as the prize; the same records' draw submission on the caller
+thread is the new prize (settlement share ~8.5 ms per frame, from the
+approach leg's far-to-parked difference, 91-96% of records unseen), at
+the same site (the frustum-reject decision, §3.3) with the same safety
+architecture (§3.4) and new gates (design doc §8: B' = the record ->
+draw join and the unseen share of the caller's draw time, then C, then
+D with the same two legs). Patching the reject decision in memory is
+the project's normal practice, not the risk; the oracle is.
+
+**The cut, in flight:** hoist the per-frame-constant predicates
+(journalGameplay, introProbeWants, panel-override state) out of the
+draw path, instruments free when unarmed (qpcNow, mapWaitNote), thin
+guarded<> and mark hot hooks safebuffers, early exits in hookedMap /
+hookedUnmap / CreateBuffer / CreateTexture2D before any bookkeeping,
+O(1) binding hash per draw, verdict-lambda test order. Measured
+afterwards with the same two legs against the analyzer's R1 module
+split; the bar is the 3.94 ms itself.

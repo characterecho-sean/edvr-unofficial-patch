@@ -29,11 +29,17 @@ otherwise.
   innermost in EDVR's own d3d11.dll (46% of samples pass through it),
   4.45 ms game code, ~2.4 ms D3D runtime + NVIDIA driver + kernel - and
   the stage 2-3 job pipeline is 5.24 ms thread-summed on seven workers
-  but 0.81 ms on the critical path. Next: name the EDVR functions behind
-  the 3.94 ms (innermost EDVR RVAs from build\phaseA-parked-2 + a PDB
-  rebuilt at 2d8fbda), cut the per-draw path, remeasure with the same
-  two legs; read the GPU side next to it (addendum 2: 8-15 ms app GPU
-  at 0.7559 scale). The approach onset is a RAMP with distance (stage 1
+  but 0.81 ms on the critical path. The 3.94 ms is NAMED (engine arc,
+  2026-09-22 per-draw entry): a dozen small per-draw predicates and
+  instruments (hookedMap/mapWaitNote 0.40 ms, the draw-hook verdict
+  lambda 0.20, the CreateBuffer hook 0.17, /GS cookies 0.16, guarded<>
+  0.11, qpcNow 0.09, binding hash 0.11, ...) each run ~18k times per
+  frame; the cut is in progress and is remeasured with the same two
+  legs. The cull design is RE-SCOPED to draw submission as the prize
+  (design doc §8; the pipeline prize stays KILLED): same frustum-reject
+  site, gate B' = the record -> draw join and the unseen share of the
+  caller's draw time. Read the GPU side next to any CPU saving (addendum
+  2: 8-15 ms app GPU at 0.7559 scale). The approach onset is a RAMP with distance (stage 1
   per-record LOD admission fits; R1 4.0 -> 12.7 ms from 5.3 km to
   landing, r = 0.97 with job-0 samples); the settlement's collection
   admission (reset-repopulate) is untested because that leg began after
