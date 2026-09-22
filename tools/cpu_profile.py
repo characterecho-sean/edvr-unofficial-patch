@@ -41,7 +41,11 @@ GAME = "EliteDangerous64.exe"
 
 
 def source_hashes():
-    names = ("tools/cpu_profile/Program.cs", "tools/cpu_profile/EdvrCpuProfile.csproj",
+    # Every analyzer source: the analyzer is split across several .cs files, and
+    # a new one must invalidate the validated-build stamp like Program.cs does.
+    sources = sorted("tools/cpu_profile/" + path.name
+                     for path in (ROOT / "tools" / "cpu_profile").glob("*.cs"))
+    names = (*sources, "tools/cpu_profile/EdvrCpuProfile.csproj",
              "tools/cpu_profile/Directory.Build.props",
              "tools/cpu_profile/edvr_cpu.wprp", "src/common/native_cpu_trace_events.h")
     # Normalize source line endings so git's Windows checkout conversion is inert.
