@@ -19,7 +19,17 @@
 #include <memory>
 #include <vector>
 
-namespace edvr { namespace {
+namespace edvr {
+
+// uiDeferredResourceWriteLive()'s backing state (ui_deferred.h). Out here
+// rather than in the anonymous namespace below purely so the header can see
+// it; written only from this file, on the render thread, by
+// refreshMightObserveWrite() below.
+namespace detail {
+bool g_uiDeferredMightObserveWrite = false;
+}  // namespace detail
+
+namespace {
 template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
 thread_local bool inside=false;
 thread_local bool routeHandledThisDraw=false;
@@ -144,6 +154,12 @@ unsigned routeCaptureReports=0;
 struct CaptureFailure { uint64_t vs=0,ps=0;std::string reason;char stage=0;int slot=-1; };
 std::vector<CaptureFailure> captureFailures;
 static bool diagnosticWindow(){return diagnosticUntilGeneration && generation<=diagnosticUntilGeneration;}
+// uiDeferredResourceWriteLive()'s refresh (ui_deferred.h): re-derived from
+// enabled/diagnosticWindow() rather than toggled by hand, so a caller that
+// resumes an already-armed diagnostic window (generation/diagnosticUntilGeneration
+// carried over from before) is not missed. Called at every site that changes
+// enabled, generation or diagnosticUntilGeneration.
+static void refreshMightObserveWrite(){edvr::detail::g_uiDeferredMightObserveWrite=enabled||diagnosticWindow();}
 
 // The sampled blit immediately after tone mapping is a draw, not a resource
 // copy, so the alias tracker cannot say what produced its t0. Keep the last
@@ -250,6 +266,7 @@ void decline(Eye& e,const char* why) {
     ++declined;e.complete=false;e.aborted=true;
     if(!failed){failed=true;enabled=false;resetPending[0]=resetPending[1]=true;
         diagnosticUntilGeneration=generation+1;
+        refreshMightObserveWrite();
         Log::get().note("Deferred UI: disabled until AA is switched Off and back on, or the game restarts. Existing UI handling resumes on following frames; temporal history restarts once per eye.");}
     static unsigned reports=0;
     if(reports++<12)Log::get().note("Deferred UI: original frame retained: %s (draws=%u, VS=%016llX PS=%016llX).",why,e.count,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps));
@@ -361,6 +378,7 @@ void uiDeferredConfigure(Config& cfg) {
     // route too -- its own compose writes the texture this route reads and
     // replays into, so there is nothing here to stand down for a fovea.
     enabled=requested && !failed;
+    refreshMightObserveWrite();
     writerShaderDir=cfg.logDir()+L"\\shaders";
 }
 void uiDeferredTraceDrawEnter(ID3D11DeviceContext* ctx,bool eyeSizedTarget,char kind,uint32_t count,uint32_t instances,
@@ -910,8 +928,9 @@ void uiDeferredFrameBoundary(ID3D11DeviceContext* ctx) {
     for(auto& e:eyes){if(e.count && !e.restored)restore(ctx,e);for(UINT i=0;i<e.count;++i){e.draws[i]->packet=UiDeferredDraw{};}e.tone=UiDeferredDraw{};e.postTone=UiDeferredDraw{};e.tails.clear();e.count=e.changedStencil=0;e.bytes=0;e.complete=e.restored=e.aborted=false;e.aliases.clear();e.output.Reset();}
     snapshots.frameBoundary();
     ++generation;
+    refreshMightObserveWrite();
     writerTraceOrdinal=0;writerTracePending=-1;
     if(!enabled && !diagnosticWindow())clearWriterTrace();
 }
-void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();captureFailures.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();replayTarget.Reset();worldDrawMode=WorldDrawMode::None;enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=routeHandledThisDraw=false;captured=applied=declined=glassReplays=0;glassReplayReports=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=routeCaptureReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
+void uiDeferredShutdown(){for(auto& e:eyes)e=Eye{};renderer=Renderer{};materials.clear();masks.clear();captureFailures.clear();snapshots=UiDeferredSnapshots{};recorder.Reset();savedBlend.Reset();savedPs.Reset();savedTarget.Reset();savedDepth.Reset();replayTarget.Reset();worldDrawMode=WorldDrawMode::None;enabled=failed=resetPending[0]=resetPending[1]=colourMuted=noted=routeNoted=routeHandledThisDraw=false;captured=applied=declined=glassReplays=0;glassReplayReports=0;diagnostic={};generation=1;diagnosticUntilGeneration=0;refreshMightObserveWrite();toneReports=aliasReports=prepareReports=postToneReports=lateCompositeReports=boundaryReports=routeCaptureReports=0;clearWriterTrace();writerTraceSerial=producerMatches=producerMisses=writerTargetQueries=writerShaderQueries=0;writerShaderKeys={};writerShaderCount=writerShaderReports=0;writerShaderDir.clear();}
 }

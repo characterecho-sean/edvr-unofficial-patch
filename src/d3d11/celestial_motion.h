@@ -29,6 +29,24 @@ inline bool celestialMotionLive() {
     return detail::g_celestialMotionEnabled && !detail::g_celestialMotionFailed;
 }
 
+// Any of the three watched terrain constant-buffer slots currently holding a
+// live buffer pointer: celestialMotionConstantsMapped/Unmapped/UnknownWrite's
+// own necessary first test (celestial_motion.cpp). Each loops the three
+// watched slots comparing the resource it was handed against each slot's
+// buffer pointer, so none of the three can possibly match anything when all
+// three are null -- the exact case this answers.
+//
+// Deliberately NOT celestialMotionLive(): a slot can hold a stale non-null
+// pointer while g_celestialMotionFailed is true (a fault does not itself
+// clear the watch), so the two conditions are not interchangeable. Kept in
+// sync at every site that changes a watched slot's buffer.
+namespace detail {
+extern bool g_celestialMotionAnyWatched;
+}  // namespace detail
+inline bool celestialMotionAnyWatched() {
+    return detail::g_celestialMotionAnyWatched;
+}
+
 bool celestialMotionBegin(ID3D11DeviceContext* ctx, uint64_t vs);
 // Null-PS terrain prepasses can record coverage in their original draw.
 // True requires End immediately after that draw; false leaves it untouched.

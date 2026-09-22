@@ -24,9 +24,19 @@ void meshMotionConfigure(bool on);
 //
 // The regression rig drives meshMotionDraw directly and flips `enabled`
 // itself, so it is unaffected by a guard at vscreen's call site.
-namespace mesh_motion_detail { extern bool enabled, failed; }
+namespace mesh_motion_detail { extern bool enabled, failed; extern unsigned pendingCount; }
 inline bool meshMotionLive() {
     return mesh_motion_detail::enabled && !mesh_motion_detail::failed;
+}
+
+// meshMotionBeforeMap's own first test (mesh_motion.cpp): nothing captured is
+// waiting to flush. Necessary, not sufficient -- the callee still compares
+// the resource it was handed against the queued scene/ids/pool buffers, or
+// against nothing at all for an unknown write (resource == nullptr).
+// pendingCount mirrors pending.count, kept in sync at every site that
+// changes it.
+inline bool meshMotionAnyPending() {
+    return mesh_motion_detail::pendingCount != 0;
 }
 
 void meshMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,unsigned start,int base,unsigned startInstance,uint64_t vs);

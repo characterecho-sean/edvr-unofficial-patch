@@ -19,6 +19,11 @@ namespace edvr {
 namespace detail {
 bool g_celestialMotionEnabled = false;
 bool g_celestialMotionFailed = false;
+// celestialMotionAnyWatched() (celestial_motion.h). Kept in sync at every
+// site below that changes g_watched[*].buffer, rather than recomputed from
+// celestialMotionLive() -- see the header for why those two are not the
+// same condition.
+bool g_celestialMotionAnyWatched = false;
 }  // namespace detail
 
 namespace {
@@ -371,6 +376,7 @@ static bool begin(ID3D11DeviceContext* ctx, uint64_t vs, bool original) {
             ++g_rewatches;
         }
     }
+    detail::g_celestialMotionAnyWatched = g_watched[0].buffer || g_watched[1].buffer || g_watched[2].buffer;
     if((++g_costDraws&63u)==0)g_saved.timed=g_gpu.begin(ctx);
     if(original)++g_originalDraws;
     ID3D11ShaderResourceView* sources[4]{}; ctx->VSGetShaderResources(0,4,sources);
@@ -531,6 +537,7 @@ void celestialMotionShutdown() {
     g_buildGpu.reset();g_buildBatches=0;
     detail::g_celestialMotionFailed=g_noted=g_capNoted=false;
     for (auto& w:g_watched) { w.buffer=nullptr; w.valid=false; w.mapped=nullptr; }
+    detail::g_celestialMotionAnyWatched = false;
 }
 // Hot: the game Maps roughly 1100 buffers a frame over terrain. Every tee
 // starts with the pointer compares below and returns immediately once

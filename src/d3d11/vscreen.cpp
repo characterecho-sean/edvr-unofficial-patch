@@ -358,10 +358,17 @@ struct State {
     PFN_PSSetShader          realPSSetShader = nullptr;
     // The shader hash memo the shader hooks fill (shaderHashMemo): the
     // registry's lock once per new pointer, not once per set.
+    // 64, not 32: a busy scene binds more than 32 distinct VS/PS across
+    // cockpit, ship, terrain/station and UI in one frame, and this table is
+    // direct-mapped (shaderHashMemo), so more live shaders than slots means
+    // every extra one evicts and re-fetches another. mapMemo below took the
+    // same 64 for the same reason. registerShaderHash only runs at shader
+    // CREATION (device_hook.cpp), not per frame, so this is sized against
+    // distinct shaders in play, not against a churn rate.
     struct ShaderMemo {
-        void*    ptr[32] = {};
-        uint64_t hash[32] = {};
-        uint32_t gen[32] = {};   // the registry's generation at the lookup
+        void*    ptr[64] = {};
+        uint64_t hash[64] = {};
+        uint32_t gen[64] = {};   // the registry's generation at the lookup
     };
     ShaderMemo vsMemo, psMemo;
     // The shadow's audit (bindingAudit): every 1024th draw of the owner's
@@ -2833,7 +2840,7 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
 // answer a consumer cannot tell from "no shader".
 uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
     if (!shader) return 0;
-    const size_t i = (reinterpret_cast<uintptr_t>(shader) >> 4) & 31;
+    const size_t i = (reinterpret_cast<uintptr_t>(shader) >> 4) & 63;
     const uint32_t gen = shaderRegistryGeneration();
     if (m.ptr[i] != shader || m.gen[i] != gen || m.hash[i] == 0) {
         m.ptr[i] = shader;
@@ -2930,15 +2937,20 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
 HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
-    gpuFrameCommand(self);
+    // Necessary, not sufficient, for gpuFrameCommand to do anything but
+    // return (gpu_frame_timing.h): the ctx-matches-the-owner's-context test
+    // still runs for real inside it, foreign-thread poisoning included.
+    if (gpuFrameCommandMightAct()) gpuFrameCommand(self);
     State* s = g_state;
     ++s->thunkHits[kHitMap];
     if (foreignContext(self)) {
         if(type!=D3D11_MAP_READ && objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         return s->realMap(self, res, sub, type, flags, mapped);
     }
-    meshMotionBeforeMap(res);
-    if(type!=D3D11_MAP_READ)uiDeferredResourceWrite(self,res);
+    // Nothing captured is waiting to flush (mesh_motion.h): the call would
+    // only re-test pending.count and return.
+    if (meshMotionAnyPending()) meshMotionBeforeMap(res);
+    if(type!=D3D11_MAP_READ && uiDeferredResourceWriteLive())uiDeferredResourceWrite(self,res);
     // Timed, not touched: the wait inside the runtime's Map is the game's
     // stall on the GPU, and the native timing line reports it (map_wait.h).
     //
@@ -2980,7 +2992,9 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     }
     // Terrain-constants CPU shadow: capture the mapped pointer so the Unmap
     // tee can memcpy the game's write without a GPU copy at draw time.
-    if (mapData0 && type != D3D11_MAP_READ) {
+    // Guarded by celestialMotionAnyWatched() (celestial_motion.h): with no
+    // slot watched, the callee's own loop cannot match this resource either.
+    if (mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {
         celestialMotionConstantsMapped(res, mapped->pData);
     }
     // Only the one buffer we care about, so this is a pointer compare on a very
@@ -3045,7 +3059,10 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->camBytes = mm.byteWidth;
         }
     }
-    if(mapData0 && res){
+    // glitchFrameObserving() (glitch_frame.h): glitchFrameWantsPool's own
+    // necessary first test is installed-and-observing; with either false it
+    // always returns 0.
+    if(mapData0 && res && glitchFrameObserving()){
         const uint32_t bytes=glitchFrameWantsPool(res);
         if(bytes){
             // A resource address may be recycled. Verify the current mapping's
@@ -3135,7 +3152,9 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
 
 void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub) {
-    gpuFrameCommand(self);
+    // See hookedMap: necessary, not sufficient, for gpuFrameCommand to do
+    // anything but return.
+    if (gpuFrameCommandMightAct()) gpuFrameCommand(self);
     State* s = g_state;
     ++s->thunkHits[kHitUnmap];
     if (foreignContext(self)) {
@@ -3144,8 +3163,14 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         return;
     }
     motionResourceWritten(res);
-    celestialMotionConstantsUnmapped(res);
-    glitchFrameInvalidatePool(res);
+    // Guarded the same way as hookedMap's Map-time tee: with no slot
+    // watched, the callee's own loop cannot match this resource either.
+    if (celestialMotionAnyWatched()) celestialMotionConstantsUnmapped(res);
+    // glitchFrameInvalidatePool's own and only test is "installed at all"
+    // (glitch_frame.h) -- unlike glitchFrameWantsPool, it does not also ask
+    // State::observing, so glitchFrameObserving() would be the wrong,
+    // narrower guard here.
+    if (glitchFrameInstalled()) glitchFrameInvalidatePool(res);
     if(res==s->scenePoolResource && s->scenePoolData){
         guardedBudget(g_cameraBudget,[&]{glitchFrameObservePool(res,s->scenePoolData,s->scenePoolBytes);});
         s->scenePoolResource=nullptr;s->scenePoolData=nullptr;s->scenePoolBytes=0;

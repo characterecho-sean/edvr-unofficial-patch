@@ -2604,7 +2604,7 @@ bool uiDepthSeparatedCoverage(uint32_t w, uint32_t h, int eye,
     if (!dv) return false;
     *mask=m.tex; *holo=hv; *edits=e.srv; *depth=dv; return true;
 }
-void uiDepthMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t end) {
+void uiDepthMotionResourceWrittenImpl(ID3D11Resource* resource,uint64_t first,uint64_t end) {
     if(!resource && !detail::g_uiDepthOn) return;
     for(auto& motion:g_holoMotion) motion.resourceWritten(resource,first,end);
 }

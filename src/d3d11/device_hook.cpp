@@ -882,7 +882,9 @@ HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
             }
             // A destroyed buffer's address can be reused by a fresh one; a
             // watched slot would otherwise inherit that buffer's stale shadow.
-            if (out && *out) celestialMotionConstantsUnknownWrite(static_cast<ID3D11Buffer*>(*out));
+            // Guarded the same way as the Map/Unmap tees (celestial_motion.h):
+            // with no slot watched, no new buffer's address can match one.
+            if (out && *out && celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(static_cast<ID3D11Buffer*>(*out));
         }
     }
     return hr;

@@ -29,6 +29,16 @@ void glitchFrameSetFssMonoProviders(int (*frames)(), bool (*chrome)()) {
 #include "../common/log.h"
 
 namespace edvr {
+
+// glitchFrameInstalled()/glitchFrameObserving()'s backing state
+// (glitch_frame.h). Out here rather than in the anonymous namespace below
+// purely so the header can see them; written only from this file, on the
+// render thread, by syncGlitchFrameDetail() near installGlitchFrameFix.
+namespace detail {
+bool g_glitchFrameInstalled = false;
+bool g_glitchFrameObserving = false;
+}  // namespace detail
+
 namespace {
 
 // Frames of camera history held in memory and written out only when asked.
@@ -1382,9 +1392,20 @@ void validate() {
 
 }  // namespace
 
+// glitchFrameInstalled()/glitchFrameObserving()'s refresh (glitch_frame.h):
+// re-derived from g_state/State::observing rather than toggled by hand, so a
+// re-install that finds State::observing already true from a previous
+// install/shutdown cycle on the same static State is not missed. Called at
+// every site that changes g_state or State::observing.
+static void syncGlitchFrameDetail() {
+    detail::g_glitchFrameInstalled = g_state != nullptr;
+    detail::g_glitchFrameObserving = g_state && g_state->observing;
+}
+
 void installGlitchFrameFix() {
     static State s;
     g_state = &s;
+    syncGlitchFrameDetail();
 
     Config& cfg = Config::get();
     // The switch is a choice and lives in [fix]; the three numbers below it are
@@ -1558,6 +1579,7 @@ void installGlitchFrameFix() {
         if (static_cast<uint64_t>(s.posOffset) * 4u + 12u <= s.bufferBytes &&
             s.bufferBytes != 0) {
             s.observing = true;
+            syncGlitchFrameDetail();
             Log::get().note(
                 "transition flash fix off (fix.transition_flash = 0). No frame will "
                 "be withheld. The viewpoint history is still being recorded, so the "
@@ -1593,6 +1615,7 @@ void installGlitchFrameFix() {
     // through this function -- the fix being on or off decides whether anything
     // is withheld, never whether anything is recorded.
     s.observing = true;
+    syncGlitchFrameDetail();
 
     // Said at install, not only when validation finishes, so a log from a
     // session that never reached a rendered scene still shows whether this was
@@ -2899,6 +2922,7 @@ void shutdownGlitchFrameFix() {
             s->framesWithheld, s->suppressed);
     }
     g_state = nullptr;
+    syncGlitchFrameDetail();
 }
 
 }  // namespace edvr
