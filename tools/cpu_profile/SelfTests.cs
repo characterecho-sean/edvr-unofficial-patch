@@ -462,6 +462,21 @@ internal static class SelfTests
             Addresses = [0x7FF300000100, 0x7FF300000200, 0x7FF300000300, GameBase + 0x10],
             Depth = 4,
         }) == "ntdll.dll*3 < 0x10", "a run in one module collapses");
+        // Non-contiguous EDVR frames keep their order, the cap holds, and the
+        // game call site is the first game frame below the LAST of them.
+        var nested = new StackInfo
+        {
+            ModuleIds = [edvrD3d11, systemD3d11, edvrD3d11, exe, exe],
+            Addresses = [0x7FF000001000, 0x7FF100000000, 0x7FF000002000, GameBase + 0x600,
+                         GameBase + 0x700],
+            Depth = 5,
+        };
+        var chain = stacks.EdvrFrames(nested, 6, out var site);
+        Check(chain.Count == 2 && chain[0] == "0x1000" && chain[1] == "0x2000" && site == "0x600",
+              "an EDVR chain is innermost outward with the entering game call site");
+        Check(stacks.EdvrFrames(nested, 1, out _).Count == 1, "the chain cap holds");
+        Check(stacks.EdvrFrames(stacks[other], 6, out var noSite).Count == 0 && noSite == "none",
+              "a stack with no EDVR frame yields no chain");
         data.Stacks = stacks;
 
         Collected.Append(data.SamplesByThread, Caller, new StackObs(2000, pipeline));
@@ -669,6 +684,13 @@ internal static class SelfTests
               "overlapping any-frame counts are independent");
         Check(Convert.ToInt64(any["anyFrameUnresolved"]) == 1 && Convert.ToInt64(any["topFrameUnresolved"]) == 0,
               "an unresolved frame inside a stack is counted without hiding the top");
+        var innermost = (Dictionary<string, object?>[])submit["edvrInnermostRvas"]!;
+        Check(innermost.Length == 1 && (string)innermost[0]["rva"]! == "0x3000",
+              "the innermost EDVR frame is reported as an RVA of our own DLL");
+        var chains = (Dictionary<string, object?>[])submit["edvrChains"]!;
+        Check(chains.Length == 1 && ((string[])chains[0]["chain"]!)[0] == "0x3000" &&
+              (string)chains[0]["gameCallSite"]! == "0x42b4500",
+              "the EDVR chain carries the game call site that entered it");
         var stacksInRegion = (Dictionary<string, object?>[])submit["topStacks"]!;
         Check(stacksInRegion.Length == 2 && Convert.ToInt64(stacksInRegion[0]["count"]) == 1,
               "the region's stacks are grouped by signature");

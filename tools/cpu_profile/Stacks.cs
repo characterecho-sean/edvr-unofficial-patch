@@ -374,6 +374,35 @@ internal sealed class StackStore
     public ModuleClass ClassOf(int moduleId) =>
         moduleId >= 0 && moduleId < _modules.Count ? _modules[moduleId].Class : ModuleClass.Unknown;
 
+    /// The stack's frames inside EDVR's own d3d11.dll, innermost outward, as
+    /// RVAs of that module, plus the first game-exe RVA below the last of them:
+    /// the call site where the game entered our hook. Both are RVAs so another
+    /// pass can symbolize them against the built DLL and the game image.
+    public List<string> EdvrFrames(StackInfo info, int max, out string gameCallSite)
+    {
+        var chain = new List<string>();
+        gameCallSite = "none";
+        var lastEdvr = -1;
+        for (var i = 0; i < info.ModuleIds.Length; i++)
+        {
+            var moduleId = info.ModuleIds[i];
+            if (moduleId < 0 || _modules[moduleId].Class != ModuleClass.EdvrD3d11) continue;
+            lastEdvr = i;
+            if (chain.Count < max && info.Addresses[i] >= _modules[moduleId].ImageBase)
+                chain.Add($"0x{info.Addresses[i] - _modules[moduleId].ImageBase:x}");
+        }
+        if (lastEdvr < 0) return chain;
+        for (var i = lastEdvr + 1; i < info.ModuleIds.Length; i++)
+        {
+            var moduleId = info.ModuleIds[i];
+            if (moduleId < 0 || _modules[moduleId].Class != ModuleClass.GameExe) continue;
+            if (info.Addresses[i] >= _modules[moduleId].ImageBase)
+                gameCallSite = $"0x{info.Addresses[i] - _modules[moduleId].ImageBase:x}";
+            break;
+        }
+        return chain;
+    }
+
     /// One stack as a single string: a game frame is its RVA, anything else is
     /// its module name, and a run of frames in the same module collapses to
     /// name*count so the line stays readable.
