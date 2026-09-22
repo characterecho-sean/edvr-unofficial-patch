@@ -2516,3 +2516,30 @@ are visible; the §10 nearest-origin association as occluder identity
 (13.7% of points); the reader's 120 m range as occluder selection
 (0.0-0.2%); the part test as what admits the 197 unclaimed one-eye
 slots.
+
+### 2026-09-22 -- The GPU side of the same parked leg, read from the perf monitor: 9.2-10.2 ms per frame at 0.566; the direction after the cull's death
+
+The parked-5 session's gfx log (edvr_gfx_20260922_152002.log) carries
+the perf monitor's per-frame application-render GPU lines during the
+leg (21:22:57-21:23:17 UTC): render 9.19 / 10.18 / 10.23 / 9.70 / 9.84
+ms (valid pairs, age 15 ms), and the native metrics history's producer
+9.77-9.89 ms with the runtime's predicted period at 11.111 ms. Pimax
+Crystal Super at requested 0.566 (about 3070x3032 per eye, ~18.6 MP
+both eyes). So at this scale the GPU sits within ~1 ms of the 90 Hz
+budget while the caller thread sits 2 ms over it; at the 0.7559 scale
+of addendum 2 it was over on its own (8-15 ms). Any 90 Hz target here
+needs both: the caller thread from 13.2 to ~10 ms and the GPU held at
+or under ~10.
+
+**Direction (2026-09-22, after the cull closed):** (1) the LOD lever at
+the proven per-part site - measure its elasticity offline on run
+165433 first (the part rows carry sphere, LOD result and view
+distance; a bias on the screen-size threshold is the engine's own
+mechanism continued below the slider's floor; visual cost stated per
+factor); (2) a third per-draw round on the resource hooks,
+beginPanelOverride's body and the guard wrapper (ceiling ~1 ms); (3)
+the GPU read beside any CPU saving, as above; (4) 45 Hz with
+reprojection as the honest fallback where the budget is not met, which
+is what EDVR's per-object motion vectors serve. Both (1) and (2) are
+running as offline work; nothing needs a flight until one of them has
+a number.
