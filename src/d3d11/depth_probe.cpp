@@ -403,9 +403,13 @@ void depthProbeConfigure(Config& cfg) {
     // keeps for the temporal pass (depthProbeClearValueFor): the near value
     // it writes must come from a recorded clear, never a guess, so the probe
     // must be watching even on a rig with the temporal pass off.
+    // advanced.eye_depth_capture needs the scene pair too, and the flight
+    // rig runs fix.temporal_aa AND fix.eye_mask both off -- the capture
+    // lights the probe itself rather than inherit either feature's switch.
     invalidateScenePickCache();
     g_wanted = (_stricmp(mode.c_str(), "off") != 0 && !mode.empty()) ||
-               (_stricmp(eyeMask.c_str(), "off") != 0 && !eyeMask.empty());
+               (_stricmp(eyeMask.c_str(), "off") != 0 && !eyeMask.empty()) ||
+               cfg.getBool("advanced.eye_depth_capture", false);
 }
 
 namespace {

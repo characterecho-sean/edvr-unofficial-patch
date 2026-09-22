@@ -17,6 +17,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 unsigned checks = 0;
 std::string temporalMode = "dlss";
+bool eyeDepthCaptureOn = false;
 
 void check(bool value, const char* message) {
     ++checks;
@@ -73,6 +74,10 @@ Config& Config::get() { static Config config; return config; }
 std::string Config::getString(const char* key, const char* def) const {
     if (!std::strcmp(key, "fix.temporal_aa")) return temporalMode;
     if (!std::strcmp(key, "fix.eye_mask")) return "off";
+    return def;
+}
+bool Config::getBool(const char* key, bool def) const {
+    if (!std::strcmp(key, "advanced.eye_depth_capture")) return eyeDepthCaptureOn;
     return def;
 }
 
@@ -619,6 +624,22 @@ int main(int argc, char** argv) {
         check(scene(100, 100, 0, true) == reusedRight.texture.Get() &&
               scene(100, 100, 1, true) == reusedLeft.texture.Get(),
               "reused slots form a fresh ordered pair after rollover");
+
+        // advanced.eye_depth_capture lights the probe on its own: the flight
+        // rig runs fix.temporal_aa AND fix.eye_mask both off, and the eye-run
+        // depth capture's scene-pair verdict needs the probe watching anyway.
+        temporalMode = "off";
+        edvr::depthProbeConfigure(edvr::Config::get());
+        check(!edvr::g_wanted, "temporal and eye mask both off leaves the probe unwatched");
+        eyeDepthCaptureOn = true;
+        edvr::depthProbeConfigure(edvr::Config::get());
+        check(edvr::g_wanted, "the eye depth capture enables the depth probe on its own");
+        eyeDepthCaptureOn = false;
+        edvr::depthProbeConfigure(edvr::Config::get());
+        check(!edvr::g_wanted, "the capture off restores the unwatched state");
+        temporalMode = "dlss";
+        edvr::depthProbeConfigure(edvr::Config::get());
+        check(edvr::g_wanted, "temporal AA still enables the probe on its own");
 
         const uint32_t configScan = edvr::g_scenePickScans;
         temporalMode = "off";
