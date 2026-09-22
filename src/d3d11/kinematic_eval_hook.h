@@ -76,4 +76,24 @@ const char* kinematicEvalStaticGateAttach() noexcept;
 // consumer holds it.
 void kinematicEvalStaticGateDetach() noexcept;
 
+// --- The cull gate probe's feed (advanced.cull_gate_capture) ----------------
+// FUN_14430EFE0, this file's evaluator target, IS the traversal's per-(record,
+// view) gate, and FUN_1442B4420, the bucket bracket's target, is the
+// draw-item builder with its own per-view frustum (design doc §9). The probe
+// observes both through the relays already here: the gate's verdict AFTER the
+// forward (gateCtx, out, view), the builder's inputs BEFORE it (pose, ctx,
+// mask, nibbles = rec+0x210). Raw callbacks, no link dependency; null means
+// off (one atomic load per call).
+using GateProbeGateFn = void (*)(uintptr_t gateCtx, uintptr_t out, uintptr_t view) noexcept;
+using GateProbeBuilderFn = void (*)(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
+void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate, GateProbeBuilderFn builder) noexcept;
+// Installs the shared kinematic hook set (validating the executable) and
+// holds the eval gate open for the probe's window. Same return vocabulary as
+// attachKinematicEvalHooks.
+const char* kinematicEvalGateProbeAttach() noexcept;
+void kinematicEvalGateProbeDetach() noexcept;
+// True while the builder bracket (FUN_1442B4420) is installed: the probe's
+// builder verdicts depend on it separately from the evaluator.
+bool kinematicEvalBuilderHooked() noexcept;
+
 } // namespace edvr

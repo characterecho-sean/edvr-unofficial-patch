@@ -68,7 +68,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -303,13 +303,124 @@ def read(path):
                 scissors=scissors, viewports=viewports, sampler=sampler, blend=blend,
                 depth_desc=depth, raster=raster, layout=layout,
                 before=before_data, after=after_data, depth=depth_data, ps_b1_data=ps_b1_data))
+    geometry = read_geometry(unpack, take) if version >= 9 else empty_geometry()
     failures, = unpack('<I')
     if stream.read(1):
         raise ValueError('Trailing snapshot data')
     return dict(version=version, dropped=dropped, failures=failures, draws=draws, surfaces=surfaces,
                 mesh_buffers=mesh_buffers, mesh_declined=mesh_declined,
                 effect_images=effect_images, effect_image_declined=effect_image_declined, night_sampling=night_sampling,
-                sprite_diagnostics=sprite_diagnostics, sprite_declined=sprite_declined)
+                sprite_diagnostics=sprite_diagnostics, sprite_declined=sprite_declined, geometry=geometry)
+
+
+def empty_geometry():
+    return dict(frame=0, meshes=[], declined=0, draws_dropped=0, states=[], draws=[])
+
+
+GEO_MAX_MESHES = 20000
+GEO_MAX_DRAWS = 40000
+GEO_BUDGET = 96 * 1024 * 1024
+
+
+def read_geometry(unpack, take):
+    """Version 9's trailing section: the cull gate probe's armed-frame geometry
+    (eye_draw_snapshot.h, captureGeometry). Meshes carry the vertex window
+    (from the base vertex) and the index window (from the start index) as the
+    GPU held them, with the input layout that decodes the vertices; states the
+    native D3D11 blend / depth-stencil / rasterizer descriptors; draws map
+    each ledger ordinal of the armed frame to a mesh and a state
+    (0xFFFFFFFF = declined)."""
+    frame, nm, declined, dropped = unpack('<4I')
+    if nm > GEO_MAX_MESHES:
+        raise ValueError('Invalid geometry mesh count')
+    meshes, total = [], 0
+    for _ in range(nm):
+        m = dict(zip(('vb', 'vb_slot', 'vb_offset', 'vb_stride', 'vb_whole'), unpack('<Q4I')))
+        m.update(zip(('ib', 'ib_offset', 'ib_format', 'ib_whole'), unpack('<Q3I')))
+        m.update(zip(('start', 'base', 'count', 'kind', 'topology'), unpack('<Ii3I')))
+        m['v_capture'], = unpack('<I')
+        vbytes, = unpack('<I')
+        m['vertices'] = take(vbytes)
+        m['i_capture'], = unpack('<I')
+        ibytes, = unpack('<I')
+        m['indices'] = take(ibytes)
+        total += vbytes + ibytes
+        if total > GEO_BUDGET or m['vb_slot'] > 1:
+            raise ValueError('Invalid geometry mesh')
+        elements, = unpack('<I')
+        if elements > 32:
+            raise ValueError('Invalid geometry layout size')
+        m['layout'] = []
+        for _ in range(elements):
+            semantic = take(64)
+            if b'\0' not in semantic:
+                raise ValueError('Unterminated geometry input semantic')
+            e = dict(zip(('index', 'format', 'slot', 'offset', 'classification', 'step'), unpack('<6I')))
+            e['semantic'] = semantic.split(b'\0', 1)[0].decode('ascii')
+            m['layout'].append(e)
+        meshes.append(m)
+    ns, = unpack('<I')
+    if ns > 4096:
+        raise ValueError('Invalid geometry state count')
+    states = []
+
+    def blob(exact):
+        n, = unpack('<I')
+        if n != exact:
+            raise ValueError('Invalid geometry state descriptor')
+        return take(n)
+    for _ in range(ns):
+        flags, = unpack('<I')
+        blend = blob(264)
+        factor = list(unpack('<4f'))
+        sample_mask, = unpack('<I')
+        depth = blob(52)
+        stencil_ref, = unpack('<I')
+        raster = blob(40)
+        states.append(dict(flags=flags, blend=blend, factor=factor, sample_mask=sample_mask,
+                           depth=depth, stencil_ref=stencil_ref, raster=raster))
+    nd, = unpack('<I')
+    if nd > GEO_MAX_DRAWS:
+        raise ValueError('Invalid geometry draw count')
+    draws = []
+    for _ in range(nd):
+        g = dict(zip(('frame', 'ordinal', 'mesh', 'state'), unpack('<4I')))
+        g['vs'], g['ps'] = unpack('<2Q')
+        g['instances'], g['start_instance'] = unpack('<2I')
+        if (g['mesh'] != 0xffffffff and g['mesh'] >= nm) or (g['state'] != 0xffffffff and g['state'] >= ns):
+            raise ValueError('Invalid geometry draw reference')
+        draws.append(g)
+    return dict(frame=frame, meshes=meshes, declined=declined, draws_dropped=dropped, states=states, draws=draws)
+
+
+def blend_opaque(state):
+    """True when render target 0 does not blend (D3D11_BLEND_DESC: AlphaToCoverage,
+    IndependentBlend, then RenderTarget[0].BlendEnable first) or no blend state
+    is bound (the default is opaque)."""
+    if not state['flags'] & 1:
+        return True
+    alpha_to_coverage, independent, rt0_enable = struct.unpack_from('<3i', state['blend'], 0)
+    return not rt0_enable and not alpha_to_coverage
+
+
+def depth_writes(state):
+    """True when depth testing is on and the write mask is ALL (D3D11_DEPTH_STENCIL_DESC:
+    DepthEnable, DepthWriteMask first); an unbound state is the default (on, ALL)."""
+    if not state['flags'] & 2:
+        return True
+    enable, write_mask = struct.unpack_from('<2i', state['depth'], 0)
+    return bool(enable) and write_mask == 1
+
+
+def triangles(mesh):
+    """Triangles the draw rasterises: list = count/3, strip = count-2 (restart
+    indices and degenerates are not subtracted), anything else 0."""
+    t = mesh['topology']
+    if t == 4:      # D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+        return mesh['count'] // 3
+    if t == 5:      # TRIANGLESTRIP
+        return max(0, mesh['count'] - 2)
+    return 0
 
 
 def packed_float_channel(value, mantissa_bits):
@@ -397,7 +508,7 @@ def verify_fixture(capture):
 
 
 def verify_sprite_fixture(capture):
-    assert capture['version'] == 8 and capture['failures'] == 0
+    assert capture['version'] == 9 and capture['failures'] == 0
     assert len(capture['sprite_diagnostics']) == 1 and capture['sprite_declined'] >= 2
     d = capture['sprite_diagnostics'][0]
     assert d['draw'] == 2 and (d['width'], d['height']) == (1400, 1400)
@@ -493,6 +604,35 @@ def self_test():
             pass
         else:
             raise AssertionError('Invalid sprite diagnostic count accepted')
+        # Version 9: the geometry section, empty and with one mesh/state/draw.
+        h9 = b'EDVRDRW1' + struct.pack('<4I',9,0,0,0)
+        v8_tail = struct.pack('<2I',0,0) + struct.pack('<2I',0,0) + struct.pack('<I',0) + struct.pack('<2I',0,0)
+        p.write_bytes(h9 + v8_tail + struct.pack('<4I',0,0,0,0) + struct.pack('<I',0) + struct.pack('<I',0) + struct.pack('<I',0))
+        g = read(p)['geometry']
+        assert g['frame'] == 0 and g['meshes'] == [] and g['draws'] == [], 'empty v9 geometry section'
+        verts, idx = bytes(range(80)), struct.pack('<6H',0,1,2,0,2,1)
+        mesh = struct.pack('<Q4I',0x1234,1,16,40,4096) + struct.pack('<Q3I',0x5678,4,57,1024)
+        mesh += struct.pack('<Ii3I',3,8000,6,ord('X'),4) + struct.pack('<2I',16+8000*40,len(verts)) + verts
+        mesh += struct.pack('<2I',4+3*2,len(idx)) + idx + struct.pack('<I',1) + b'PACKEDVERTEXDATAA'.ljust(64,b'\0') + struct.pack('<6I',0,3,1,0,0,0)
+        state = struct.pack('<I',7) + struct.pack('<I',264) + bytes(264) + struct.pack('<4f',1,1,1,1) + struct.pack('<I',0xffffffff)
+        state += struct.pack('<I',52) + struct.pack('<2i',1,1) + bytes(44) + struct.pack('<I',0) + struct.pack('<I',40) + bytes(40)
+        draw = struct.pack('<4I',2,123,0,0) + struct.pack('<2Q',0xEB5234DB6ADB491D,0x1) + struct.pack('<2I',5,29178)
+        body = struct.pack('<4I',2,1,0,0) + mesh + struct.pack('<I',1) + state + struct.pack('<I',1) + draw
+        p.write_bytes(h9 + v8_tail + body + struct.pack('<I',0))
+        g = read(p)['geometry']
+        m = g['meshes'][0]
+        assert g['frame'] == 2 and m['count'] == 6 and m['indices'] == idx and m['vertices'] == verts, 'v9 mesh payloads'
+        assert m['layout'][0]['semantic'] == 'PACKEDVERTEXDATAA' and triangles(m) == 2, 'v9 layout and triangle count'
+        assert g['draws'][0]['ordinal'] == 123 and g['draws'][0]['mesh'] == 0, 'v9 draw map'
+        assert blend_opaque(g['states'][0]) and depth_writes(g['states'][0]), 'v9 state decode'
+        bad = body[:-40] + struct.pack('<4I',2,123,1,0) + body[-24:]   # mesh 1 of 1
+        p.write_bytes(h9 + v8_tail + bad + struct.pack('<I',0))
+        try:
+            read(p)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Dangling geometry mesh reference accepted')
         def night_file(phase=6, size=128, mask=0, reference=0, vs=0xFCF7BD2896751D96):
             d = struct.pack('<3Q9I',vs,0xF786D34B5E118D5E,3,7,17,ord('X'),6,1,0,16,16,0xffffffff)
             d += struct.pack('<QII',0,0,0)*4 + struct.pack('<Ii',0,0) + struct.pack('<5I',0,0,0,0,0)*3
@@ -551,7 +691,7 @@ def main():
         assert sprite_path.exists(), 'sprite diagnostic fixture is required'
         verify_sprite_fixture(read(sprite_path))
         effects = read(str(a.path)+'.effects')
-        assert effects['version'] == 8 and len(effects['draws']) == 5 and effects['failures'] == 0
+        assert effects['version'] == 9 and len(effects['draws']) == 5 and effects['failures'] == 0
         for i,d in enumerate(effects['draws']):
             assert d['ordinal'] == 0xfffffffd and d['mesh'] == [0xffffffff]*3
             assert d['layout'][1] == dict(semantic='TEXCOORD',index=0,format=2,slot=1,offset=16,classification=1,step=1)
@@ -582,6 +722,16 @@ def main():
                 assert b['first_draw'] == group*2 and b['frame'] == d['frame']
                 assert b['data'] == bytes([51+group+role*10])*b['whole'], 'Eye pool copy came from the other eye/frame'
         assert len({d['target'] for d in eye_mesh['draws']}) == 2
+        # Version 9 geometry (the rig's armed frame 710): two meshes, two states, three map rows.
+        geo = eye_mesh['geometry']
+        assert geo['frame'] == 710 and len(geo['meshes']) == 2 and len(geo['states']) == 2 and geo['declined'] == 0
+        assert [(g['ordinal'], g['mesh'], g['state']) for g in geo['draws']] == [(7, 0, 0), (8, 0, 0), (9, 1, 1)]
+        m0, m1 = geo['meshes']
+        assert (m0['i_capture'], m0['indices']) == (6, bytes((b+37) & 255 for b in range(6, 18))), 'index window from the start index'
+        assert (m0['v_capture'], m0['vertices']) == (16, bytes([76])*16), 'vertex window from the base vertex, clamped'
+        assert m1['indices'] == bytes((b+37) & 255 for b in range(4, 10)) and m1['vertices'] == bytes([76])*24
+        assert blend_opaque(geo['states'][0]) and not blend_opaque(geo['states'][1]), 'blend state per draw'
+        assert m0['layout'][0]['semantic'] == 'POSITION' and triangles(m0) == 2 and triangles(m1) == 1
         v = read(str(a.path)+'.vscreen')
         assert len(v['draws']) == 3 and len(v['surfaces']) == 2 and v['failures'] == 0
         assert v['draws'][0]['ordinal'] == 0xffffffff and v['draws'][0]['texture'] == 0xffffffff
@@ -589,7 +739,7 @@ def main():
         assert all(z == .75 for z in struct.unpack('<64f', v['surfaces'][1]['data'])), 'Source depth was copied before scene completion or after reuse'
         assert export_surfaces(v, Path('unused'), True) == [Path('unused/surface_00.png')], 'Depth was treated as colour'
         crops = read(str(a.path)+'.crops')
-        assert crops['version'] == 8 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
+        assert crops['version'] == 9 and crops['failures'] == 0 and crops['effect_image_declined'] == 1
         assert len(crops['effect_images']) == 2
         for i,e in enumerate(crops['effect_images']):
             assert (e['draw'], e['after'], e['x'], e['y'], e['width'], e['height'], e['format']) == (0,i,2,3,1024,1024,26)
@@ -608,7 +758,7 @@ def main():
                     path = Path(a.path).parent / f'{stage}_{shader:016X}.dxbc'
                     assert path.read_bytes() == b'solar-bytecode\0', 'Solar shader stage was omitted or substituted'
         night = read(str(a.path)+'.night')
-        assert night['version'] == 8 and night['failures'] == 0 and len(night['draws']) == 3
+        assert night['version'] == 9 and night['failures'] == 0 and len(night['draws']) == 3
         assert len(night['effect_images']) == 14 and night['effect_image_declined'] == 0
         d = night['draws'][0]
         assert d['vs'] == 0xFCF7BD2896751D96 and d['ps'] == 0xF786D34B5E118D5E

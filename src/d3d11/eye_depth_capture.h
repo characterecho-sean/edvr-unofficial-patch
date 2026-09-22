@@ -19,11 +19,22 @@
 // draws allocate state; every other draw is counted in nonEyeSkips, reported
 // separately from declines so the two can never blur together again.
 //
-// The constants block is VS b1 floats [256, 592) from the pass's FIRST
-// pool-carrying draw (the ledger's own t33==g_pool test): view-projection
-// rows live at cb1[270..273], the camera-relative origin at cb1[275]; the
-// 336-float window survives small layout shifts. A pass with no pool draw
-// keeps an explicit zero-float constants block.
+// The constants block is VS b1 float4 REGISTERS [256, 336) -- bytes
+// [4096, 5376), the end clamped to the buffer -- from the pass's FIRST
+// pool-carrying draw (the ledger's own t33==g_pool test). The game's pool
+// VS reads the view-projection from registers cb1[270..273] (the clip
+// matrix's columns: clip = x*c270 + y*c271 + z*c272 + c273 for the record
+// position minus register 275, the eye origin in the record frame;
+// vs_EB5234DB6ADB491D); the 80-register window keeps them with room for a
+// small layout shift. A buffer that stops short of register 275, or a pass
+// with no pool draw, keeps an explicit zero-float constants block.
+//
+// File version 2 (2026-09-22). Version 1 counted the window in FLOATS,
+// not registers, and copied cb1 bytes [1024, 2368) -- registers 64..147 --
+// which never hold the view-projection or the origin, whichever draw keyed
+// the copy (design-occlusion-culling-2026-09-22.md §9). Version 2 adds the
+// block's first cb1 float index to the header (1024 = register 256), so a
+// reader tells the two apart; tools/eye_depth_dump.py reads both.
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <cstdint>
@@ -188,9 +199,20 @@ class EyeDepthCapture {
         records_.push_back(std::move(r));
     }
 public:
-    static constexpr uint32_t kConstFirstFloat = 256;  // VS b1 floats from here...
-    static constexpr uint32_t kConstFloats = 336;      // ...for this many
-    static constexpr uint32_t kConstBytes = kConstFloats * 4;
+    static constexpr uint32_t kFileVersion = 2;        // 2: register window + const_first_float
+    static constexpr uint32_t kConstFirstRegister = 256;   // VS b1 float4 registers from here...
+    static constexpr uint32_t kConstEndRegister = 336;     // ...to here, clamped to the buffer...
+    static constexpr uint32_t kConstNeedRegister = 276;    // ...which must reach register 275
+    static constexpr uint32_t kConstFirstByte = kConstFirstRegister * 16;
+    static constexpr uint32_t kConstFirstFloat = kConstFirstByte / 4;   // the header's const_first_float
+    static constexpr uint32_t kConstMaxBytes = (kConstEndRegister - kConstFirstRegister) * 16;
+    // The window [first, end) of a VS b1 buffer ByteWidth bytes long, in
+    // bytes; 0 when the buffer stops short of register 275.
+    static uint32_t constWindowEnd(uint32_t byteWidth) {
+        uint32_t end = byteWidth & ~15u;
+        if (end > kConstEndRegister * 16) end = kConstEndRegister * 16;
+        return end >= kConstNeedRegister * 16 ? end : 0;
+    }
     // Two frames, not four: a converted R32G8X24 slice is w*h*4 (~28 MB at
     // the flight rig's 2665x2632), 2 frames x 2 eyes ~112 MB under the 192 MB
     // total -- and the parked-settlement analysis this serves needs one, at
@@ -247,31 +269,34 @@ public:
         }
         lastFrame_ = frame;
         if (!poolDraw || pending_[eye].live) return;
-        // First pool-carrying draw of this pass: keep VS b1's frame block.
-        // cb1[256..592) holds the view-projection rows (270..273) and the
-        // camera-relative origin (275) with room for a small layout shift.
+        // First pool-carrying draw of this pass: keep VS b1's frame block,
+        // float4 registers [256, 336) clamped to the buffer -- the
+        // view-projection (270..273) and the eye origin (275) with room for
+        // a small layout shift. Offsets are REGISTERS x 16 bytes: version 1
+        // counted floats and copied registers 64..147 instead.
         ID3D11Buffer* b1 = nullptr;
         ctx->VSGetConstantBuffers(1, 1, &b1);
         if (!b1) return;
         D3D11_BUFFER_DESC bd{};
         b1->GetDesc(&bd);
-        const uint32_t off = kConstFirstFloat * 4;
-        if (bd.ByteWidth >= off + kConstBytes) {
+        const uint32_t off = kConstFirstByte;
+        const uint32_t end = constWindowEnd(bd.ByteWidth);
+        if (end > off) {
             Microsoft::WRL::ComPtr<ID3D11Device> dev;
             ctx->GetDevice(&dev);
             if (dev) {
                 Buffer stage;
                 D3D11_BUFFER_DESC sd = bd;
-                sd.ByteWidth = kConstBytes;
+                sd.ByteWidth = end - off;
                 sd.Usage = D3D11_USAGE_STAGING;
                 sd.BindFlags = sd.MiscFlags = sd.StructureByteStride = 0;
                 sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                 if (SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &stage))) {
-                    D3D11_BOX box{off, 0, 0, off + kConstBytes, 1, 1};
+                    D3D11_BOX box{off, 0, 0, end, 1, 1};
                     ctx->CopySubresourceRegion(stage.Get(), 0, 0, 0, 0, b1, 0, &box);
                     pending_[eye].stage = stage;
                     pending_[eye].frame = frame;
-                    pending_[eye].bytes = kConstBytes;
+                    pending_[eye].bytes = end - off;
                     pending_[eye].whole = bd.ByteWidth;
                     pending_[eye].live = true;
                 } else ++failures;
@@ -293,12 +318,13 @@ public:
             if (_wfopen_s(&f, path, L"wb") || !f) { ++failures; continue; }
             bool ok = fwrite("EDVRDEPT", 1, 8, f) == 8;
             auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
-            u32(1);                       // version
+            u32(kFileVersion);            // version 2
             u32(r.frame);
             u32(r.eye);
             u32(r.width);
             u32(r.height);
             u32(r.format);
+            u32(kConstFirstFloat);        // const_first_float: 1024 = register 256 (v2)
             const uint32_t fileFaults = faults;
             D3D11_MAPPED_SUBRESOURCE mc{};
             const bool constOk = r.constBytes && r.constStage &&

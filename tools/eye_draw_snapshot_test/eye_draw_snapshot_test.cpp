@@ -473,6 +473,34 @@ int wmain(int argc, wchar_t** argv) {
     const auto eyeBytes=eyeMesh.meshBytes;
     for(unsigned frame:{699u,703u,720u})eyeMesh.captureEyeMesh(ctx.Get(),frame,1,meshVs,0,'X',6,1,0,0,0);
     check(eyeMesh.draws.size()==12 && eyeMesh.meshBytes==eyeBytes,"eye mesh capture stops after three consecutive frames");
+    // Version 9: the cull gate probe's armed-frame geometry. Every pool draw
+    // of the armed frame gets a map row; a mesh drawn twice is copied once;
+    // a second blend state is a second state row; other frames are ignored.
+    // The layout names slot 0 per-vertex (meshIds, stride 8, 32 bytes: the
+    // window clamps to the buffer); the index buffer is `indices` at +4.
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    eyeMesh.armGeometry(710);
+    eyeMesh.captureGeometry(ctx.Get(),709,5,meshVs,0,'X',6,1,0,1,0);
+    check(eyeMesh.geoDraws.empty(),"geometry ignores frames other than the armed one");
+    eyeMesh.captureGeometry(ctx.Get(),710,7,meshVs,0x77,'X',6,2,16,1,2);
+    eyeMesh.captureGeometry(ctx.Get(),710,8,meshVs,0x78,'X',6,3,24,1,2);
+    {
+        D3D11_BLEND_DESC blendDesc{};blendDesc.RenderTarget[0].BlendEnable=TRUE;
+        blendDesc.RenderTarget[0].SrcBlend=D3D11_BLEND_SRC_ALPHA;blendDesc.RenderTarget[0].DestBlend=D3D11_BLEND_INV_SRC_ALPHA;
+        blendDesc.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;blendDesc.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;
+        blendDesc.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;blendDesc.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        blendDesc.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        ComPtr<ID3D11BlendState> blend;hr(dev->CreateBlendState(&blendDesc,&blend));
+        ctx->OMSetBlendState(blend.Get(),nullptr,0xffffffff);
+        eyeMesh.captureGeometry(ctx.Get(),710,9,meshVs,0x79,'X',3,1,32,0,0);
+        ctx->OMSetBlendState(nullptr,nullptr,0xffffffff);
+    }
+    check(eyeMesh.geoDraws.size()==3 && eyeMesh.geoMeshes.size()==2 && eyeMesh.geoStates.size()==2 &&
+          !eyeMesh.geoDeclined && !eyeMesh.geoDrawsDropped,
+          "geometry keeps one copy per distinct mesh and state within the armed frame");
+    check(eyeMesh.geoDraws[0].mesh==0 && eyeMesh.geoDraws[1].mesh==0 && eyeMesh.geoDraws[2].mesh==1 &&
+          eyeMesh.geoDraws[2].state==1 && eyeMesh.geoMeshes[0].vBytes==16 && eyeMesh.geoMeshes[0].iBytes==12,
+          "geometry map rows, the clamped vertex window and the index window");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     // The eye-run depth capture (advanced.eye_depth_capture): each pass's
@@ -499,7 +527,16 @@ int wmain(int argc, wchar_t** argv) {
             ComPtr<ID3D11Texture2D> c;hr(dev->CreateTexture2D(&eyeColDesc,nullptr,&c));
             hr(dev->CreateRenderTargetView(c.Get(),nullptr,&eyeRtv[e]));
         }
-        D3D11_BUFFER_DESC cb1Desc{};cb1Desc.ByteWidth=4096;cb1Desc.Usage=D3D11_USAGE_DEFAULT;
+        // The game's pool-VS b1 is 336 float4 registers (5376 bytes, the
+        // eyemesh snapshot's copy); the camera sits at registers 270..275.
+        // Every fixture float holds its own cb1 float index (+ a per-eye and
+        // per-frame offset), exact in f32, so a window counted in the wrong
+        // units shows up as the wrong index -- version 1 counted floats.
+        constexpr unsigned kCb1Floats=336*4;
+        auto cb1Value=[](unsigned k,unsigned eye,unsigned frameIndex){
+            return float(k)+0.5f*float(eye)+2000.0f*float(frameIndex);
+        };
+        D3D11_BUFFER_DESC cb1Desc{};cb1Desc.ByteWidth=kCb1Floats*4;cb1Desc.Usage=D3D11_USAGE_DEFAULT;
         cb1Desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         ComPtr<ID3D11Buffer> cb1;hr(dev->CreateBuffer(&cb1Desc,nullptr,&cb1));
         ctx->VSSetConstantBuffers(1,1,cb1.GetAddressOf());
@@ -531,9 +568,8 @@ int wmain(int argc, wchar_t** argv) {
                 for(int y=0;y<8;++y)for(int x=0;x<8;++x)
                     pattern[y*8+x]=0.001f*float(x+y*8)+0.5f*float(eye)+float(frame-firstFrame)*0.01f;
                 ctx->UpdateSubresource(depthTex[eye].Get(),0,nullptr,pattern,8*4,0);
-                std::vector<float> cb1Data(1024);
-                for(size_t k=0;k<cb1Data.size();++k)
-                    cb1Data[k]=float(frame)+0.5f*float(eye)+0.0001f*float(k);
+                std::vector<float> cb1Data(kCb1Floats);
+                for(unsigned k=0;k<kCb1Floats;++k)cb1Data[k]=cb1Value(k,eye,frame-firstFrame);
                 ctx->UpdateSubresource(cb1.Get(),0,nullptr,cb1Data.data(),0,0);
                 depth.noteEyeDraw(ctx.Get(),frame,depthDsv[eye].Get(),true,int(eye));
                 // A second pool draw of the same pass must not replace the
@@ -554,20 +590,20 @@ int wmain(int argc, wchar_t** argv) {
         float pollution[64];for(float& v:pollution)v=0.99f;
         ctx->UpdateSubresource(depthTex[0].Get(),0,nullptr,pollution,8*4,0);
         ctx->UpdateSubresource(depthTex[1].Get(),0,nullptr,pollution,8*4,0);
-        std::vector<float> dead(1024,7.7f);ctx->UpdateSubresource(cb1.Get(),0,nullptr,dead.data(),0,0);
+        std::vector<float> dead(kCb1Floats,7.7f);ctx->UpdateSubresource(cb1.Get(),0,nullptr,dead.data(),0,0);
         wait_gpu(ctx.Get(),dev.Get());
         std::wstring depthDir=argv[1];depthDir.resize(depthDir.find_last_of(L"\\/"));
         check(depth.write(ctx.Get(),depthDir.c_str(),L"TEST")==4,"four depth files written");
         check(depth.failures==0 && depth.faults==0,"depth readbacks complete without faults");
-        struct DepthHeader{char magic[8];uint32_t version,frame,eye,width,height,format,constFloats;};
-        static_assert(sizeof(DepthHeader)==36,"tools/eye_depth_dump.py reads a 36-byte header");
+        struct DepthHeader{char magic[8];uint32_t version,frame,eye,width,height,format,constFirstFloat,constFloats;};
+        static_assert(sizeof(DepthHeader)==40,"tools/eye_depth_dump.py reads a 40-byte version-2 header");
         auto readDepthFile=[&](const wchar_t* name,DepthHeader& hd,std::vector<float>& constants,std::vector<float>& grid)->bool{
             FILE* f=nullptr;if(_wfopen_s(&f,(depthDir+L"\\"+name).c_str(),L"rb")||!f)return false;
             bool ok=fread(&hd,1,sizeof(hd),f)==sizeof(hd) && std::memcmp(hd.magic,"EDVRDEPT",8)==0;
             uint32_t depthBytes=0;uint32_t fileFaults=0;
             if(ok) {
                 constants.resize(hd.constFloats);
-                ok=hd.constFloats<=336 && (constants.empty() ||
+                ok=hd.constFloats<=(336-256)*4 && (constants.empty() ||
                    fread(constants.data(),4,constants.size(),f)==constants.size());
             }
             if(ok) ok=fread(&depthBytes,4,1,f)==1 && depthBytes==hd.width*hd.height*4;
@@ -581,16 +617,20 @@ int wmain(int argc, wchar_t** argv) {
             _snwprintf_s(name,64,_TRUNCATE,L"depth_TEST_f%u_%c.bin",firstFrame,eye?'B':'A');
             DepthHeader hd{};std::vector<float> constants,grid;
             check(readDepthFile(name,hd,constants,grid),"depth fixture file parses");
-            check(hd.version==1 && hd.frame==firstFrame && hd.eye==eye && hd.width==8 && hd.height==8 &&
+            check(hd.version==2 && hd.frame==firstFrame && hd.eye==eye && hd.width==8 && hd.height==8 &&
                   hd.format==int(DXGI_FORMAT_R32_FLOAT),
-                  "depth fixture header round-trips with an R32_FLOAT payload format");
-            check(constants.size()==336,"336 VS b1 floats from the first pool draw");
-            // ~9000 in f32 quantizes to ~5e-4: expect the same float formula,
-            // with tolerance wider than one ulp at this magnitude.
-            const float wantConst=float(firstFrame)+0.5f*float(eye)+0.0001f*256.0f;
-            check(std::fabs(constants[0]-wantConst)<1e-3f,"constants start at cb1[256]");
-            const float wantRow=float(firstFrame)+0.5f*float(eye)+0.0001f*270.0f;
-            check(std::fabs(constants[14]-wantRow)<1e-3f,"view-proj row slot present");
+                  "depth fixture header round-trips (version 2) with an R32_FLOAT payload format");
+            check(hd.constFirstFloat==1024,"the header names the block's first cb1 float: register 256");
+            check(constants.size()==320,"VS b1 registers 256..335 from the first pool draw");
+            bool exact=constants.size()==320;
+            for(unsigned j=0;exact && j<constants.size();++j)exact=constants[j]==cb1Value(1024+j,eye,0);
+            check(exact,"every block float is its own cb1 float index: registers 256..335, not floats 256..591");
+            // The camera the join needs: the clip matrix's columns at
+            // registers 270..273 and the eye origin at 275.
+            check(constants[(270-256)*4]==cb1Value(1080,eye,0) && constants[(273-256)*4+3]==cb1Value(1095,eye,0),
+                  "view-projection columns cb1[270..273] inside the block");
+            check(constants[(275-256)*4]==cb1Value(1100,eye,0) && constants[(275-256)*4+2]==cb1Value(1102,eye,0),
+                  "eye origin cb1[275] inside the block");
             check(grid.size()==64,"64 depth texels");
             for(int y=0;y<8;++y)for(int x=0;x<8;++x) {
                 const float want=0.001f*float(x+y*8)+0.5f*float(eye);
@@ -625,9 +665,8 @@ int wmain(int argc, wchar_t** argv) {
                     texels[i][4]=static_cast<uint8_t>(i+eye);
                 }
                 ctx->UpdateSubresource(s8Tex[eye].Get(),0,nullptr,texels,8*8,0);
-                std::vector<float> cb1Data(1024);
-                for(size_t k=0;k<cb1Data.size();++k)
-                    cb1Data[k]=float(frame)+0.5f*float(eye)+0.0001f*float(k);
+                std::vector<float> cb1Data(kCb1Floats);
+                for(unsigned k=0;k<kCb1Floats;++k)cb1Data[k]=cb1Value(k,eye,frame-s8Frame);
                 ctx->UpdateSubresource(cb1.Get(),0,nullptr,cb1Data.data(),0,0);
                 deep.noteEyeDraw(ctx.Get(),frame,s8Dsv[eye].Get(),true,int(eye));
             }
@@ -646,7 +685,8 @@ int wmain(int argc, wchar_t** argv) {
             check(readDepthFile(name,hd,constants,grid),"converted depth fixture parses");
             check(hd.format==int(DXGI_FORMAT_R32_FLOAT),"converted payload saved as plain R32_FLOAT");
             check(hd.width==8 && hd.height==8 && grid.size()==64,"converted grid shape");
-            check(constants.size()==336,"constants intact alongside the conversion");
+            check(constants.size()==320 && constants[(270-256)*4]==cb1Value(1080,eye,0),
+                  "constants intact alongside the conversion");
             for(int i=0;i<64;++i) {
                 const float want=0.25f+0.001f*float(i)+0.5f*float(eye);
                 check(std::fabs(grid[i]-want)<1e-5f,"converted texel keeps the depth float");
@@ -658,8 +698,8 @@ int wmain(int argc, wchar_t** argv) {
         check(off.count()==0 && !off.enabled(),"depth capture stays silent while off");
         // A non-eye draw between the two eye passes is skipped (not
         // declined), must not end the open pass, and a constants buffer
-        // shorter than cb1[256..592) keeps an explicit zero-float block on
-        // disk.
+        // that stops short of register 275 keeps an explicit zero-float
+        // block on disk.
         edvr::EyeDepthCapture odd;
         odd.configure(true);
         ComPtr<ID3D11Texture2D> thirdTex;ComPtr<ID3D11DepthStencilView> thirdDsv;
@@ -684,7 +724,36 @@ int wmain(int argc, wchar_t** argv) {
         _snwprintf_s(oddName,64,_TRUNCATE,L"depth_ODD_f%u_A.bin",oddFrame);
         DepthHeader oh{};std::vector<float> oc,og;
         check(readDepthFile(oddName,oh,oc,og),"short-constants depth file parses");
-        check(oh.constFloats==0 && oc.empty(),"constants block explicit when b1 is too short");
+        check(oh.constFloats==0 && oc.empty() && oh.constFirstFloat==1024,
+              "constants block explicit when b1 is too short");
+        // A buffer that ends exactly after the camera (CB1[276], 4416 bytes):
+        // the window clamps to registers 256..275 and keeps all of it.
+        check(edvr::EyeDepthCapture::constWindowEnd(4416)==4416 &&
+              edvr::EyeDepthCapture::constWindowEnd(4400)==0 &&
+              edvr::EyeDepthCapture::constWindowEnd(8192)==336*16,
+              "the constants window clamps to the buffer and needs register 275");
+        {
+            edvr::EyeDepthCapture tight;
+            tight.configure(true);
+            D3D11_BUFFER_DESC tightDesc{};tightDesc.ByteWidth=276*16;tightDesc.Usage=D3D11_USAGE_DEFAULT;
+            tightDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            ComPtr<ID3D11Buffer> tightCb1;hr(dev->CreateBuffer(&tightDesc,nullptr,&tightCb1));
+            std::vector<float> tightData(276*4);
+            for(unsigned k=0;k<276*4;++k)tightData[k]=cb1Value(k,0,0);
+            ctx->UpdateSubresource(tightCb1.Get(),0,nullptr,tightData.data(),0,0);
+            ctx->VSSetConstantBuffers(1,1,tightCb1.GetAddressOf());
+            const unsigned tightFrame=9300;
+            tight.noteEyeDraw(ctx.Get(),tightFrame,depthDsv[0].Get(),true,0);
+            tight.noteEyeDraw(ctx.Get(),tightFrame,depthDsv[1].Get(),true,1);
+            wait_gpu(ctx.Get(),dev.Get());
+            check(tight.write(ctx.Get(),depthDir.c_str(),L"TIGHT")==1,"tight-constants depth file written");
+            wchar_t tightName[64];
+            _snwprintf_s(tightName,64,_TRUNCATE,L"depth_TIGHT_f%u_A.bin",tightFrame);
+            DepthHeader th{};std::vector<float> tc,tg;
+            check(readDepthFile(tightName,th,tc,tg),"tight-constants depth file parses");
+            check(th.constFirstFloat==1024 && tc.size()==80 && tc[(275-256)*4+2]==cb1Value(1102,0,0),
+                  "a CB1[276] buffer yields registers 256..275, the eye origin included");
+        }
         // A multisampled depth target is declined, never half-copied.
         edvr::EyeDepthCapture msaa;
         msaa.configure(true);
