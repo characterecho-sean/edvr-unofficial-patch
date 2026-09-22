@@ -81,12 +81,17 @@
   hooks 0.7, wrappers 0.26, live per-draw features ~0.5, the DrawClock's
   2 ms every-16th-frame hitch. Even at zero EDVR cost the caller sits at
   ~11.9 ms: necessary, not sufficient — the draw count (1b) is what
-  reaches 90 Hz; round two of the cut is BUILT and gated (a606157,
-  2026-09-22 round-two entry: verdict ladder, deferred-UI guard, the
-  draw clock's spike, cookies, 38 more inline predicates, the SRV
-  private-data tag, the Map/Create guards), NOT FLOWN — measured on the
-  same parked leg against parked-4 (EDVR leaf 3.25 ms by top module,
-  draw-hook line 3.0-3.2); Phase B'
+  reaches 90 Hz; round two of the cut (a606157: verdict ladder,
+  deferred-UI guard, the draw clock's spike, cookies, 38 more inline
+  predicates, the SRV private-data tag, the Map/Create guards) is
+  MEASURED like for like (parked-5 entry): EDVR's pre-submit leaf time
+  3.94 -> 3.25 -> 1.69 ms across baseline / round 1 / round 2, the
+  caller thread 15.1 -> 13.2 ms per frame, still 45 fps (13.2 does not
+  fit 11.1; the caller idles 6.7 ms per cycle). What remains, 1.69 ms:
+  the resource hooks ~0.7 (hookedMap 0.37, CreateBuffer 0.19),
+  beginPanelOverride's body 0.32, guarded<> 0.19, forwardWithVerdict
+  0.21. The lever is EXHAUSTED as a route to 90 Hz at this view; it
+  bought 2 ms of headroom that the draw-count lever needs; Phase B'
   of the re-scoped cull is DONE offline (design doc §9, 2026-09-22):
   the record -> draw join is exact (each eye draw names its pool
   records through its instance range), 71-72% of the settlement's eye
@@ -2284,3 +2289,61 @@ leaf time by top module and the draw-hook line. Paper ceiling of round
 two: ~1.5-2 ms of the remaining 3.25; the honest expectation is less,
 because inlining relocates loads and the forwarded draws' time is the
 game's.
+
+### 2026-09-22 -- Round two measured (build\phaseA-parked-5): EDVR's pre-submit leaf time 3.25 -> 1.69 ms, the caller thread 15.2 -> 13.2 ms per frame; still 45 fps
+
+build\phaseA-parked-5: 75 s, 2.27 GB, pid 22820, build a606157 (check
+exit 0), Pimax OpenXR at 0.566, the same pad and heading as parked-4
+(lat 68.067238 lon 121.02597 heading 52), windows 5-6 at 45.5 / 45.2
+fps, both PDBs matched, 2945 frames all covered, window 6 reconciles to
+0.0008 ms. Like for like against parked-4 window 8 (round one) and the
+16:50 baseline window 15:
+
+| caller thread, per frame | baseline | round 1 (parked-4) | round 2 (parked-5) |
+|---|---|---|---|
+| fps / cycle | 45.0 / 22.25 ms | 45.0 / 22.22 | 45.2 / 22.14 |
+| R1 length / running | 11.14 / 10.97 | 11.17 / 11.03 | 9.08 / 8.90 |
+| R5c length / running | 4.56 / 3.36 | 4.65 / 3.44 | 5.03 / 3.83 |
+| R6 next wait | 4.92 | 5.00 | 6.66 |
+| caller running, whole cycle | 15.13 | 15.19 | 13.18 |
+| thread-summed pipeline | 5.24 | 5.25 | 5.10 |
+| R1 leaf: EDVR d3d11.dll | 3.94 | 3.25 | 1.69 |
+| R1 leaf: game exe | 4.45 | 4.98 | 4.71 |
+| R1 leaf: System32 d3d11 / kernel / ntdll / NVIDIA UMD | 0.74 / 0.53 / 0.59 / 0.50 | 0.80 / 0.63 / 0.63 / 0.55 | 0.73 / 0.53 / 0.61 / 0.51 |
+| innermost-EDVR-frame population (ms/frame) | 5.06 | 4.45 | 2.74 |
+| gfx log "draw hook CPU" | 3.84-3.98 | 2.98-3.17 | 2.11-2.13 (now an estimate) |
+
+**EDVR's own pre-submit cost is down 57% from the baseline** (3.94 ->
+1.69 ms by top-of-stack module) and the caller thread's frame work is
+down 2.0 ms (15.2 -> 13.2), with the same pipeline load and the same
+game-side leaf time as round one. The runtime still delivers at 45 Hz:
+13.2 ms of caller work does not fit 11.1 ms, so the caller idles
+6.7 ms per cycle instead of 5.0. Per function (innermost-EDVR-frame
+population, ms/frame, round 1 -> round 2): forwardWithVerdict 0.60 ->
+0.21; beginPanelOverride 0.51 -> 0.32; the draw lambda 0.36 -> 0.33
+(mostly the forwarded game draw, see the correction above); qpcNow
+0.11 -> 0.003; beforeTone 0.10, uiDeferredBegin 0.07,
+uiDeferredTraceDrawEnter 0.05, uiDeferredBeforeDraw 0.05,
+uiDeferredEnd 0.03 -> all 0; mapWaitNote 0.09 -> 0 (inlined, its cost
+now inside hookedMap 0.31 -> 0.37); staticSurfaceBegin 0.06 -> 0; the
+ui_deferred static begin 0.06 -> 0; __security_check_cookie 0.09 ->
+0.01; depthProbeNoteDraw, backdropWantsDraws, headOffsetGateWantsPanel,
+drawCensusArmed and the other inlined predicates gone;
+srv0IsPanelSized 0.10 -> 0.07 (one guarded private-data read remains).
+Unchanged: the CreateBuffer hook 0.19, guarded<> 0.17 -> 0.19,
+gpuFrameCommand 0.08 -> 0.09, hookedUnmap 0.08, hashOf 0.05 -> 0.045,
+the shader-hash map find 0.075 -> 0.063.
+
+**What remains of EDVR on the caller thread's pre-submit phase, 1.69
+ms by top module:** the resource hooks (hookedMap + inlined map-wait
+0.37, CreateBuffer 0.19, CreateTexture2D 0.04, hookedUnmap 0.08 = ~0.7)
+now lead; then beginPanelOverride's body 0.32, the guard wrapper 0.19,
+forwardWithVerdict 0.21, the draw hook 0.09, gpuFrameCommand 0.09,
+srv0IsPanelSized 0.07, hashOf + its map 0.11. A third round would chase
+the resource hooks and the two bodies; the ceiling is the whole 1.69
+ms, which would land the caller at ~11.5 ms - still over 11.1. The
+lever is exhausted as a route to 90 Hz at this view; what it bought is
+2 ms of caller-thread headroom that the draw-count lever (design doc
+§8/§9, gate probe next) will need.
+
+ruled out: nothing new. The round-one accounting corrections stand.
