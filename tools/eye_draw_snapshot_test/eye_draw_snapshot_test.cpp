@@ -520,7 +520,7 @@ int wmain(int argc, wchar_t** argv) {
             hr(dev->CreateDepthStencilView(t.Get(),&eyeDsvDesc,&offDsv[o]));
         }
         const unsigned firstFrame=9000;
-        for(unsigned frame=firstFrame;frame<=firstFrame+4;++frame) {
+        for(unsigned frame=firstFrame;frame<=firstFrame+2;++frame) {
             depth.noteEyeDraw(ctx.Get(),frame,offDsv[0].Get(),false,-1);
             depth.noteEyeDraw(ctx.Get(),frame,offDsv[1].Get(),false,-1);
             for(unsigned eye=0;eye<2;++eye) {
@@ -543,11 +543,13 @@ int wmain(int argc, wchar_t** argv) {
                 if(!eye)depth.noteEyeDraw(ctx.Get(),frame,offDsv[0].Get(),false,-1);
             }
         }
-        // Frames firstFrame..firstFrame+3 kept (kMaxFrames=4); the last
-        // frame's eye B is never followed by a switch, so it is not captured.
-        check(depth.count()==8,"four frames of two completed eye passes staged");
-        check(depth.declined>=1,"frames past the cap declined explicitly");
-        check(depth.nonEyeSkips==15,"the frame's three non-eye phases skipped per frame, never staged");
+        // Frames firstFrame..firstFrame+1 kept (kMaxFrames=2); the third
+        // frame's eye A declines as frame-cap, and the last open pass is
+        // never followed by a switch, so it is not captured.
+        check(depth.count()==4,"two frames of two completed eye passes staged");
+        check(depth.declinedFrameCap>=1 && depth.declinedFormat==0 && depth.declinedBytes==0,
+              "the frame-cap decline is reason-coded apart from format and bytes");
+        check(depth.nonEyeSkips==9,"the frame's three non-eye phases skipped per frame, never staged");
         // Late overwrites of both source textures must not change the copies.
         float pollution[64];for(float& v:pollution)v=0.99f;
         ctx->UpdateSubresource(depthTex[0].Get(),0,nullptr,pollution,8*4,0);
@@ -555,7 +557,7 @@ int wmain(int argc, wchar_t** argv) {
         std::vector<float> dead(1024,7.7f);ctx->UpdateSubresource(cb1.Get(),0,nullptr,dead.data(),0,0);
         wait_gpu(ctx.Get(),dev.Get());
         std::wstring depthDir=argv[1];depthDir.resize(depthDir.find_last_of(L"\\/"));
-        check(depth.write(ctx.Get(),depthDir.c_str(),L"TEST")==8,"eight depth files written");
+        check(depth.write(ctx.Get(),depthDir.c_str(),L"TEST")==4,"four depth files written");
         check(depth.failures==0 && depth.faults==0,"depth readbacks complete without faults");
         struct DepthHeader{char magic[8];uint32_t version,frame,eye,width,height,format,constFloats;};
         static_assert(sizeof(DepthHeader)==36,"tools/eye_depth_dump.py reads a 36-byte header");
@@ -580,8 +582,8 @@ int wmain(int argc, wchar_t** argv) {
             DepthHeader hd{};std::vector<float> constants,grid;
             check(readDepthFile(name,hd,constants,grid),"depth fixture file parses");
             check(hd.version==1 && hd.frame==firstFrame && hd.eye==eye && hd.width==8 && hd.height==8 &&
-                  (hd.format==int(DXGI_FORMAT_R32_TYPELESS) || hd.format==int(DXGI_FORMAT_D32_FLOAT)),
-                  "depth fixture header round-trips");
+                  hd.format==int(DXGI_FORMAT_R32_FLOAT),
+                  "depth fixture header round-trips with an R32_FLOAT payload format");
             check(constants.size()==336,"336 VS b1 floats from the first pool draw");
             // ~9000 in f32 quantizes to ~5e-4: expect the same float formula,
             // with tolerance wider than one ulp at this magnitude.
@@ -593,6 +595,61 @@ int wmain(int argc, wchar_t** argv) {
             for(int y=0;y<8;++y)for(int x=0;x<8;++x) {
                 const float want=0.001f*float(x+y*8)+0.5f*float(eye);
                 check(std::fabs(grid[y*8+x]-want)<1e-5f,"staged depth holds the pass-end pattern");
+            }
+        }
+        // The flight rig's actual eye family: R32G8X24_TYPELESS with a
+        // D32_FLOAT_S8X24_UINT view (the census line names the VIEW "D32").
+        // It stages in its own typeless family and saves plain R32_FLOAT
+        // texels, constants intact.
+        edvr::EyeDepthCapture deep;
+        deep.configure(true);
+        D3D11_TEXTURE2D_DESC s8Desc{};s8Desc.Width=s8Desc.Height=8;
+        s8Desc.MipLevels=s8Desc.ArraySize=s8Desc.SampleDesc.Count=1;
+        s8Desc.Format=DXGI_FORMAT_R32G8X24_TYPELESS;s8Desc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        D3D11_DEPTH_STENCIL_VIEW_DESC s8View{};s8View.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        s8View.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
+        ComPtr<ID3D11Texture2D> s8Tex[2];ComPtr<ID3D11DepthStencilView> s8Dsv[2];
+        for(int e=0;e<2;++e) {
+            ComPtr<ID3D11Texture2D> t;hr(dev->CreateTexture2D(&s8Desc,nullptr,&t));s8Tex[e]=t;
+            hr(dev->CreateDepthStencilView(t.Get(),&s8View,&s8Dsv[e]));
+        }
+        ctx->VSSetConstantBuffers(1,1,cb1.GetAddressOf());
+        const unsigned s8Frame=9200;
+        for(unsigned frame=s8Frame;frame<=s8Frame+1;++frame) {
+            for(unsigned eye=0;eye<2;++eye) {
+                // 8-byte texels: depth float, stencil byte, three pad bytes.
+                uint8_t texels[64][8]{};
+                for(int i=0;i<64;++i) {
+                    const float d=0.25f+0.001f*float(i)+0.5f*float(eye)+float(frame-s8Frame)*0.01f;
+                    std::memcpy(texels[i],&d,4);
+                    texels[i][4]=static_cast<uint8_t>(i+eye);
+                }
+                ctx->UpdateSubresource(s8Tex[eye].Get(),0,nullptr,texels,8*8,0);
+                std::vector<float> cb1Data(1024);
+                for(size_t k=0;k<cb1Data.size();++k)
+                    cb1Data[k]=float(frame)+0.5f*float(eye)+0.0001f*float(k);
+                ctx->UpdateSubresource(cb1.Get(),0,nullptr,cb1Data.data(),0,0);
+                deep.noteEyeDraw(ctx.Get(),frame,s8Dsv[eye].Get(),true,int(eye));
+            }
+        }
+        // The last open pass (eye B of the second frame) has no following
+        // switch, so three records: both eyes of the first frame, eye A of
+        // the second.
+        check(deep.count()==3 && deep.declined()==0 && deep.failures==0 && deep.faults==0,
+              "R32G8X24 eye passes stage and decline nothing");
+        wait_gpu(ctx.Get(),dev.Get());
+        check(deep.write(ctx.Get(),depthDir.c_str(),L"S8")==3,"converted depth files written");
+        for(unsigned eye=0;eye<2;++eye) {
+            wchar_t name[64];
+            _snwprintf_s(name,64,_TRUNCATE,L"depth_S8_f%u_%c.bin",s8Frame,eye?'B':'A');
+            DepthHeader hd{};std::vector<float> constants,grid;
+            check(readDepthFile(name,hd,constants,grid),"converted depth fixture parses");
+            check(hd.format==int(DXGI_FORMAT_R32_FLOAT),"converted payload saved as plain R32_FLOAT");
+            check(hd.width==8 && hd.height==8 && grid.size()==64,"converted grid shape");
+            check(constants.size()==336,"constants intact alongside the conversion");
+            for(int i=0;i<64;++i) {
+                const float want=0.25f+0.001f*float(i)+0.5f*float(eye);
+                check(std::fabs(grid[i]-want)<1e-5f,"converted texel keeps the depth float");
             }
         }
         // Off is a no-op: one bool, no copies, no files.
@@ -615,7 +672,7 @@ int wmain(int argc, wchar_t** argv) {
         const unsigned oddFrame=9100;
         odd.noteEyeDraw(ctx.Get(),oddFrame,depthDsv[0].Get(),true,0);
         odd.noteEyeDraw(ctx.Get(),oddFrame,thirdDsv.Get(),true,-1);
-        check(odd.nonEyeSkips==1 && odd.declined==0 && odd.count()==0,
+        check(odd.nonEyeSkips==1 && odd.declined()==0 && odd.count()==0,
               "a non-eye draw mid-pass is skipped and does not end the open pass");
         odd.noteEyeDraw(ctx.Get(),oddFrame,depthDsv[1].Get(),true,1);
         check(odd.count()==1,"the eye pass ends at the next eye pass's first draw");
@@ -639,9 +696,11 @@ int wmain(int argc, wchar_t** argv) {
         hr(dev->CreateDepthStencilView(msaaTex.Get(),&msaaView,&msaaDsv));
         msaa.noteEyeDraw(ctx.Get(),9200,msaaDsv.Get(),true,0);
         msaa.noteEyeDraw(ctx.Get(),9200,depthDsv[0].Get(),true,0);
-        check(msaa.declined==1 && msaa.count()==0,"multisampled depth declined explicitly");
+        check(msaa.declinedFormat==1 && msaa.declinedBytes==0 && msaa.declinedFrameCap==0 &&
+                  msaa.count()==0,
+              "multisampled depth declined as format, reason-coded apart from the frame cap");
         odd.reset();
-        check(odd.count()==0 && !odd.declined && !odd.failures && !odd.nonEyeSkips,
+        check(odd.count()==0 && !odd.declined() && !odd.failures && !odd.nonEyeSkips,
               "depth capture reset clears the run");
         ctx->VSSetConstantBuffers(1,1,&b);
     }

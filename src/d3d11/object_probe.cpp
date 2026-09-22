@@ -2992,17 +2992,19 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     Log::get().note("object probe: eye depth capture %ls: %u files (depth_%ls_f<frame>_<A|B>.bin), "
                     "%llu payload bytes staged, %u non-eye draws skipped (offscreen phases the depth "
                     "probe's scene pair does not name; eye identity comes from that pair, and this "
-                    "instrument switches the probe on itself), %u range/budget declines, %u readback/write "
-                    "failures, %u SEH faults; %s. Each file is one eye pass's completed D32 depth plus "
-                    "that pass's VS b1 floats [256,592) from its first pool-carrying draw "
-                    "(view-projection rows at 270..273, camera-relative origin at 275); eye A/B is the "
-                    "scene pair's first-bind order. Only with advanced.eye_depth_capture on; the first "
-                    "%u frames of the run; no rendering changes.",
+                    "instrument switches the probe on itself), declines %u format / %u bytes / %u "
+                    "frame-cap, %u readback/write failures, %u SEH faults; %s. Each file is one eye "
+                    "pass's completed depth as plain R32_FLOAT texels (the R32G8X24 family converted "
+                    "through the depth probe's read table) plus that pass's VS b1 floats [256,592) from "
+                    "its first pool-carrying draw (view-projection rows at 270..273, camera-relative "
+                    "origin at 275); eye A/B is the scene pair's first-bind order. Only with "
+                    "advanced.eye_depth_capture on; the first %u frames of the run; no rendering changes.",
                     dir.c_str(),depthFiles,g_ledgerStamp,
                     static_cast<unsigned long long>(g_eyeDepthCapture.bytes()),g_eyeDepthCapture.nonEyeSkips,
-                    g_eyeDepthCapture.declined,
+                    g_eyeDepthCapture.declinedFormat,g_eyeDepthCapture.declinedBytes,
+                    g_eyeDepthCapture.declinedFrameCap,
                     g_eyeDepthCapture.failures,g_eyeDepthCapture.faults,
-                    depthFiles||g_eyeDepthCapture.declined?"written":"nothing captured (instrument off, "
+                    depthFiles||g_eyeDepthCapture.declined()?"written":"nothing captured (instrument off, "
                     "or no scene-pair frames in the run)",
                     static_cast<unsigned>(edvr::EyeDepthCapture::kMaxFrames));
     Log::get().note("object probe: tone-map snapshots %ls: %u draws, actual first matching frame %u, %u reserved bytes, %u declines, %u failed copies/shaders; %s. At most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.firstFrame(),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");

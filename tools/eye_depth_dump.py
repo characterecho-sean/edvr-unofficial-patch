@@ -11,8 +11,10 @@ armed eye run's other captures in edvr_logs\\pool\\:
     u32     eye              -- 0 = A, 1 = B (scene order: the frame's two
                                 depth targets in first-seen order)
     u32     width, height    -- of the depth-stencil texture
-    u32     format           -- DXGI_FORMAT of the resource (39 R32_TYPELESS,
-                                40 D32_FLOAT)
+    u32     format           -- DXGI_FORMAT of the PAYLOAD: 41 R32_FLOAT
+                                (the R32G8X24 family is converted at capture;
+                                files from the first builds may carry 39
+                                R32_TYPELESS / 40 D32_FLOAT, same payload)
     u32     const_floats     -- 336, or 0 if the constants readback failed
     f32[const_floats]        -- VS b1 floats [256, 592) from the pass's first
                                 pool-carrying draw. Index k corresponds to
@@ -100,8 +102,8 @@ def read(path):
         raise ValueError('Invalid eye index %d' % eye)
     if not width or not height or width > 16384 or height > 16384:
         raise ValueError('Invalid dimensions %dx%d' % (width, height))
-    if fmt not in (39, 40):   # R32_TYPELESS, D32_FLOAT
-        raise ValueError('Unexpected depth format %d' % fmt)
+    if fmt not in (39, 40, 41):   # R32_TYPELESS / D32_FLOAT (legacy) / R32_FLOAT
+        raise ValueError('Unexpected depth payload format %d' % fmt)
     if const_floats > CONST_FLOATS:
         raise ValueError('Invalid constants count %d' % const_floats)
     constants = list(struct.unpack('<%df' % const_floats,

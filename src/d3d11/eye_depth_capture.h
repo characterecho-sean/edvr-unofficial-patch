@@ -28,8 +28,11 @@
 #include <wrl/client.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
+
+#include "depth_probe.h"   // depthReadFormat: the probe's own depth-channel table
 
 namespace edvr {
 class EyeDepthCapture {
@@ -45,6 +48,7 @@ class EyeDepthCapture {
         Buffer constStage;
         uint32_t frame = 0, eye = 0, width = 0, height = 0, format = 0;
         uint32_t bytes = 0, constBytes = 0, constWhole = 0;
+        uint32_t storedTexel = 4;   // staged bytes per texel: 4 plain, 8 for R32G8X24
     };
     std::vector<Record> records_;
     PendingConst pending_[2];   // per verdict eye, this frame
@@ -75,14 +79,31 @@ class EyeDepthCapture {
     // The mapped-row copy runs under SEH: a faulting staging pointer must
     // count, not crash the late write. POD locals only -- /EHs units cannot
     // unwind C++ objects through __try (kinematic_eval_hook.cpp's rule).
-    static bool guardedRows(FILE* f, const uint8_t* p, int64_t pitch, uint32_t row,
-                            uint32_t rows, uint32_t* faults) {
+    // srcTexel 8 (R32G8X24 staged in its own family) converts each texel to
+    // its first four bytes, the depth float; the payload is always 4-byte.
+    static bool guardedRows(FILE* f, const uint8_t* p, int64_t pitch, uint32_t rowBytes,
+                            uint32_t rows, uint32_t srcTexel, uint32_t* faults) {
         bool ok = true;
+        uint8_t* conv = nullptr;
+        if (srcTexel != 4) {
+            conv = static_cast<uint8_t*>(std::malloc(rowBytes));
+            if (!conv) { ++*faults; return false; }
+        }
         __try {
-            for (uint32_t y = 0; y < rows; ++y)
-                ok = fwrite(p + static_cast<size_t>(y) * pitch, 1, row, f) == row && ok;
+            for (uint32_t y = 0; y < rows; ++y) {
+                const uint8_t* src = p + static_cast<size_t>(y) * pitch;
+                if (srcTexel == 4) {
+                    ok = fwrite(src, 1, rowBytes, f) == rowBytes && ok;
+                } else {
+                    const uint32_t n = rowBytes / 4;
+                    for (uint32_t x = 0; x < n; ++x)
+                        std::memcpy(conv + size_t(x) * 4, src + size_t(x) * srcTexel, 4);
+                    ok = fwrite(conv, 1, rowBytes, f) == rowBytes && ok;
+                }
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { ++*faults; ok = false; }
+        std::free(conv);
         return ok;
     }
     static bool guardedBytes(FILE* f, const void* p, uint32_t bytes, uint32_t* faults) {
@@ -102,21 +123,42 @@ class EyeDepthCapture {
             for (size_t k = 0; k < i; ++k) counted = counted || records_[k].frame == r.frame;
             if (!counted) ++keptFrames;
         }
-        if (!keptFrame && keptFrames >= kMaxFrames) { ++declined; return; }
+        // Declines carry a reason, never a bare count: the 2026-09-21 flight
+        // logged 151 unexplained declines that were all one format gate.
+        if (!keptFrame && keptFrames >= kMaxFrames) { ++declinedFrameCap; return; }
         Microsoft::WRL::ComPtr<ID3D11Resource> res;
         dsv->GetResource(&res);
         Texture tex;
         if (!res || FAILED(res.As(&tex))) { ++failures; return; }
         D3D11_TEXTURE2D_DESC td{};
         tex->GetDesc(&td);
-        // The census reports the eye pair as D32_FLOAT. The depth-reading
-        // copy wants the plain 4-byte family; anything else (MSAA, the
-        // 8-byte S8 layouts) is declined explicitly, never half-copied.
+        // The payload is always plain R32_FLOAT depth (file format field
+        // DXGI_FORMAT_R32_FLOAT). Two read paths, both borrowed from the
+        // depth probe (depthReadFormat, depth_probe.h): the 4-byte family
+        // stages as-is; the R32G8X24 family (the flight rig's eye texture:
+        // resource R32G8X24_TYPELESS -- the census line's "D32" is the DSV's
+        // VIEW format, D32_FLOAT_S8X24_UINT) stages in its own typeless
+        // family and the depth float is picked out of each 8-byte texel at
+        // the write. Anything the probe's table does not read, MSAA, or a
+        // non-single-slice texture declines as format, never half-copies.
+        const bool plain = td.Format == DXGI_FORMAT_R32_TYPELESS || td.Format == DXGI_FORMAT_D32_FLOAT;
+        DXGI_FORMAT readFmt = DXGI_FORMAT_UNKNOWN, copyFmt = DXGI_FORMAT_UNKNOWN;
+        uint32_t storedTexel = 4;
+        if (!plain) {
+            readFmt = depthReadFormat(td.Format, &copyFmt);
+            if (readFmt == DXGI_FORMAT_UNKNOWN || copyFmt != DXGI_FORMAT_R32G8X24_TYPELESS) {
+                ++declinedFormat;
+                return;
+            }
+            storedTexel = 8;
+        }
+        if (td.SampleDesc.Count != 1 || td.ArraySize != 1 || !td.Width || !td.Height) {
+            ++declinedFormat;
+            return;
+        }
         const uint64_t bytes = static_cast<uint64_t>(td.Width) * td.Height * 4;
-        if ((td.Format != DXGI_FORMAT_R32_TYPELESS && td.Format != DXGI_FORMAT_D32_FLOAT) ||
-            td.SampleDesc.Count != 1 || td.ArraySize != 1 || !bytes ||
-            bytes > kMaxTextureBytes || bytes > kMaxTotalBytes - bytes_) {
-            ++declined;
+        if (!bytes || bytes > kMaxTextureBytes || bytes > kMaxTotalBytes - bytes_) {
+            ++declinedBytes;
             return;
         }
         Microsoft::WRL::ComPtr<ID3D11Device> dev;
@@ -127,12 +169,14 @@ class EyeDepthCapture {
         r.eye = static_cast<uint32_t>(eye);
         r.width = td.Width;
         r.height = td.Height;
-        r.format = static_cast<uint32_t>(td.Format);
+        r.format = static_cast<uint32_t>(DXGI_FORMAT_R32_FLOAT);   // the payload, not the source
+        r.storedTexel = storedTexel;
         r.bytes = static_cast<uint32_t>(bytes);
         td.MipLevels = 1;
         td.Usage = D3D11_USAGE_STAGING;
         td.BindFlags = td.MiscFlags = 0;
         td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (!plain) td.Format = copyFmt;   // same typeless family: a bit-exact stage
         if (FAILED(dev->CreateTexture2D(&td, nullptr, &r.stage))) { ++failures; return; }
         ctx->CopySubresourceRegion(r.stage.Get(), 0, 0, 0, 0, tex.Get(), 0, nullptr);
         bytes_ += bytes;
@@ -147,10 +191,16 @@ public:
     static constexpr uint32_t kConstFirstFloat = 256;  // VS b1 floats from here...
     static constexpr uint32_t kConstFloats = 336;      // ...for this many
     static constexpr uint32_t kConstBytes = kConstFloats * 4;
-    static constexpr uint32_t kMaxFrames = 4;          // armed frames kept, from the run's first
+    // Two frames, not four: a converted R32G8X24 slice is w*h*4 (~28 MB at
+    // the flight rig's 2665x2632), 2 frames x 2 eyes ~112 MB under the 192 MB
+    // total -- and the parked-settlement analysis this serves needs one, at
+    // most two frames, never four.
+    static constexpr uint32_t kMaxFrames = 2;
     static constexpr uint64_t kMaxTotalBytes = 192ull * 1024 * 1024;
     static constexpr uint64_t kMaxTextureBytes = 64ull * 1024 * 1024;
-    uint32_t declined = 0, failures = 0, faults = 0, nonEyeSkips = 0;
+    uint32_t declinedFormat = 0, declinedBytes = 0, declinedFrameCap = 0;
+    uint32_t failures = 0, faults = 0, nonEyeSkips = 0;
+    uint32_t declined() const { return declinedFormat + declinedBytes + declinedFrameCap; }
     bool enabled() const { return on_; }
     void configure(bool on) {
         on_ = on;
@@ -161,7 +211,9 @@ public:
         pending_[0] = PendingConst{};
         pending_[1] = PendingConst{};
         resetSlots();
-        declined = 0;
+        declinedFormat = 0;
+        declinedBytes = 0;
+        declinedFrameCap = 0;
         failures = 0;
         faults = 0;
         nonEyeSkips = 0;
@@ -261,11 +313,11 @@ public:
             const bool mapped = r.stage &&
                                 SUCCEEDED(ctx->Map(r.stage.Get(), 0, D3D11_MAP_READ,
                                                    D3D11_MAP_FLAG_DO_NOT_WAIT, &m)) &&
-                                m.pData && m.RowPitch >= static_cast<int>(r.width * 4);
+                                m.pData && m.RowPitch >= static_cast<int>(r.width * r.storedTexel);
             u32(mapped ? r.bytes : 0);
             if (mapped) {
                 ok = guardedRows(f, static_cast<const uint8_t*>(m.pData), m.RowPitch, r.width * 4,
-                                 r.height, &faults) && ok;
+                                 r.height, r.storedTexel, &faults) && ok;
                 ctx->Unmap(r.stage.Get(), 0);
             } else ++failures;
             u32(faults - fileFaults);
