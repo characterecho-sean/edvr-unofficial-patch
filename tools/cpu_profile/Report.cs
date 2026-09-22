@@ -43,7 +43,7 @@ internal static class Report
     public const int FixedWindowUs = 5_000_000;
 
     public static Dictionary<string, object?> Build(string input, int pid, Collected data, string framesPath,
-                                                    RuntimeLogResult? runtimeLog, Action<string>? progress = null)
+                                                    RuntimeLogResult? runtimeLog, SymbolTable? symbols = null, Action<string>? progress = null)
     {
         if (data.Clocks.Count == 0) throw new InvalidDataException("trace has no valid EDVR Clock marker");
         if (data.KernelFirstQpc == long.MaxValue || data.KernelLastQpc == long.MinValue)
@@ -254,11 +254,12 @@ internal static class Report
             ["spanOffsets"] = SpanOffsets(cycles),
             ["cycleCoveredWithoutDerivation"] = analyzer.CoveredWithoutDerivation,
             ["threads"] = Threads(covered, data),
-            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data),
+            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data, 30, symbols),
+            ["symbols"] = (symbols ?? SymbolTable.Off()).ToJson(),
             ["rvaClasses"] = RvaClasses(covered, data, analyzer),
             ["attributionSummary"] = Attribution(covered, data),
             ["gate"] = Gate(covered),
-            ["windows"] = groups.Select(group => Window(group, data)).ToArray(),
+            ["windows"] = groups.Select(group => Window(group, data, symbols)).ToArray(),
             ["runtimeLog"] = runtimeLog is null ? null : new Dictionary<string, object?>
             {
                 ["path"] = runtimeLog.Path,
@@ -314,7 +315,7 @@ internal static class Report
         return groups;
     }
 
-    private static Dictionary<string, object?> Window(WindowGroup group, Collected data)
+    private static Dictionary<string, object?> Window(WindowGroup group, Collected data, SymbolTable? symbols)
     {
         var frames = group.Frames;
         var derived = frames.Where(frame => frame.Derived).ToList();
@@ -360,7 +361,7 @@ internal static class Report
             ["spanOffsets"] = SpanOffsets(frames),
             ["regions"] = Regions(covered),
             ["threads"] = Threads(covered, data),
-            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data),
+            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data, 30, symbols),
             ["attribution"] = Attribution(covered, data),
             ["gate"] = Gate(covered),
         };
@@ -585,10 +586,12 @@ internal static class Report
     /// innermost frame's module, the modules and classes anywhere in the stack,
     /// and the stacks themselves. One sample is one sampling interval, so a
     /// count is also a time.
-    public static object CallerStacksByRegion(List<FrameCycle> frames, Collected data, int topGroups = 30)
+    public static object CallerStacksByRegion(List<FrameCycle> frames, Collected data, int topGroups = 30,
+                                              SymbolTable? symbols = null)
     {
         var rows = new List<Dictionary<string, object?>>();
         var interval = data.SampleIntervalUs;
+        var edvrModule = data.Stacks.EdvrD3d11ModuleId;
         for (byte group = 0; group < CycleAnalyzer.SampleRegionNames.Length; group++)
         {
             var byModule = new Dictionary<string, long>();
@@ -604,7 +607,7 @@ internal static class Report
                     var stack = data.Stacks[stackId];
                     total++;
                     Numeric.Increment(byModule, data.Stacks.DisplayName(stack.TopModuleId));
-                    Numeric.Increment(bySignature, data.Stacks.Signature(stack));
+                    Numeric.Increment(bySignature, data.Stacks.Signature(stack, 20, symbols));
                     if (stack.AnyEdvrD3d11) edvr++;
                     if (stack.AnySystemD3d11) system++;
                     if (stack.AnyNvidiaUserMode) nvidia++;
@@ -656,17 +659,34 @@ internal static class Report
                 // built DLL: the innermost frame of each sample, and the chain
                 // through our hook with the game call site that entered it.
                 ["edvrInnermostRvas"] = edvrInnermost.OrderByDescending(pair => pair.Value).Take(40)
-                    .Select(pair => new Dictionary<string, object?>
+                    .Select(pair =>
                     {
-                        ["rva"] = pair.Key,
-                        ["count"] = pair.Value,
+                        var row = new Dictionary<string, object?>
+                        {
+                            ["rva"] = pair.Key,
+                            ["count"] = pair.Value,
+                        };
+                        symbols?.Annotate(row, edvrModule, pair.Key);
+                        return row;
                     }).ToArray(),
                 ["edvrChains"] = edvrChains.OrderByDescending(pair => pair.Value).Take(25)
-                    .Select(pair => new Dictionary<string, object?>
+                    .Select(pair =>
                     {
-                        ["chain"] = pair.Key.Chain.Split(" < "),
-                        ["gameCallSite"] = pair.Key.Site,
-                        ["count"] = pair.Value,
+                        var chain = pair.Key.Chain.Split(" < ");
+                        var row = new Dictionary<string, object?>
+                        {
+                            ["chain"] = chain,
+                            ["gameCallSite"] = pair.Key.Site,
+                            ["count"] = pair.Value,
+                        };
+                        if (symbols is { Enabled: true })
+                            row["chainSymbols"] = chain.Select(rva =>
+                            {
+                                var frame = new Dictionary<string, object?> { ["rva"] = rva };
+                                symbols.Annotate(frame, edvrModule, rva);
+                                return frame;
+                            }).ToArray();
+                        return row;
                     }).ToArray(),
             });
         }
