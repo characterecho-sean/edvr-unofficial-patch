@@ -255,6 +255,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t poseFailures=0;
   DWORD ownerThread=GetCurrentThreadId();
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
+  // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md).
+  uint64_t headLocateFailures=0,headLocateConsecutiveFailures=0;
   XrViewConfigurationView sizes[2]{};
   float requestedRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
   float effectiveRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
@@ -1440,8 +1442,24 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!operation||generation!=geometryGeneration||!read().connected||
        !state.running()||state.terminal()||!seated.space()||origin!=vr::TrackingUniverseSeated)return false;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-    lastHeadResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),prediction,head,&lastHeadTime,counterNow);
-    if(lastHeadResult!=XR_SUCCESS)return false;
+    HeadLocatorStage headLocateStage=HeadLocatorStage::None;
+    lastHeadResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),prediction,head,&lastHeadTime,counterNow,&headLocateStage);
+    if(lastHeadResult!=XR_SUCCESS) {
+      // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md):
+      // this per-frame path was silent before this build. Rate-limited so a
+      // persistently failing runtime call cannot flood a whole session's log.
+      ++headLocateFailures;++headLocateConsecutiveFailures;
+      if(headLocateConsecutiveFailures<=3||headLocateConsecutiveFailures%300==0)
+        nativeTracePrintf("head_locate_failed,stage=%s,result=%d,consecutive=%llu,total=%llu\n",
+            headLocatorStageName(headLocateStage),int(lastHeadResult),
+            (unsigned long long)headLocateConsecutiveFailures,(unsigned long long)headLocateFailures);
+      return false;
+    }
+    if(headLocateConsecutiveFailures) {
+      nativeTracePrintf("head_locate_recovered,after_consecutive=%llu,total_failures=%llu\n",
+          (unsigned long long)headLocateConsecutiveFailures,(unsigned long long)headLocateFailures);
+      headLocateConsecutiveFailures=0;
+    }
     vr::TrackedDevicePose_t pose{};pose.bDeviceIsConnected=true;
     pose.mDeviceToAbsoluteTracking.m[0][0]=pose.mDeviceToAbsoluteTracking.m[1][1]=pose.mDeviceToAbsoluteTracking.m[2][2]=1;
     constexpr auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
@@ -1516,17 +1534,28 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!launchCentreSamples)launchCentreBegan=now;
     ++launchCentreSamples;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow);
+    HeadLocatorStage headLocateStage=HeadLocatorStage::None;
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,&headLocateStage);
     // A temporarily unavailable current-time pose must not trigger a reset
     // using a cached/predicted pose or extend startup indefinitely.
-    if(lastResetResult!=XR_SUCCESS&&lastResetResult!=XR_ERROR_TIME_INVALID&&lastResetResult!=XR_ERROR_POSE_INVALID)
+    // XR_ERROR_INITIALIZATION_FAILED joined the tolerated set 2026-09-22:
+    // some Linux/Proton OpenXR stacks (WiVRn observed) return it from the
+    // very first locate of a session instead of TIME_INVALID/POSE_INVALID
+    // for what reads as the same "no tracking data yet" condition
+    // (docs/linux-native-openxr-launch-centre-2026-09-22.md). Diagnostic
+    // build: still traces which call and code it saw, tolerated or not.
+    if(lastResetResult!=XR_SUCCESS&&lastResetResult!=XR_ERROR_TIME_INVALID&&
+       lastResetResult!=XR_ERROR_POSE_INVALID&&lastResetResult!=XR_ERROR_INITIALIZATION_FAILED) {
+      nativeTracePrintf("launch_centre_locate_stage,stage=%s,result=%d\n",
+          headLocatorStageName(headLocateStage),int(lastResetResult));
       return result("launch_centre_locate",lastResetResult);
+    }
     if(lastResetResult!=XR_SUCCESS)head.locationFlags=0;
     auto decision=launchCentre.consider(head.pose,head.locationFlags);
     if(decision==LaunchCentreDecision::Wait&&now-launchCentreBegan>=2000)decision=launchCentre.expire();
     if(decision==LaunchCentreDecision::Wait) {
-      if(launchCentreSamples==1)nativeTracePrintf("native_launch_centre,waiting_for_tracking=1,flags=%llu,result=%d\n",
-          (unsigned long long)head.locationFlags,int(lastResetResult));
+      if(launchCentreSamples==1)nativeTracePrintf("native_launch_centre,waiting_for_tracking=1,stage=%s,flags=%llu,result=%d\n",
+          headLocatorStageName(headLocateStage),(unsigned long long)head.locationFlags,int(lastResetResult));
       refresh=true;return true;
     }
     if(decision==LaunchCentreDecision::Centre) {
