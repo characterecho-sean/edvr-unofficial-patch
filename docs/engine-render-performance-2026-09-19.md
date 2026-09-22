@@ -1349,4 +1349,7 @@ ruled out: draw-dedup culling (~213 fully-identical submissions/frame,
 dependent; would reproduce the flicker class). What the number funds:
 a DYNAMIC eval-level culling design — per-frame, conservative, the
 depth-join as its regression oracle (culled set must be a subset of the
-per-frame provably-unseen set, every frame, with movers running).
+per-frame provably-unseen set, every frame, with movers running). The
+design is written for review at docs/design-occlusion-culling-2026-09-22.md
+(evidence chain, soundness sketch, staged plan with kill gates, review
+questions).
