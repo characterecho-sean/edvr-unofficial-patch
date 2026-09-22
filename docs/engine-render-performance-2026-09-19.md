@@ -66,8 +66,10 @@
   mapWaitNote 0.40 ms, the draw-hook verdict lambda 0.20, the
   CreateBuffer hook 0.17, /GS cookies 0.16, guarded<> 0.11, qpcNow per
   draw 0.09, binding hash 0.11, and a tail of per-draw predicates) and
-  being CUT (hoisted predicates, unarmed instruments free, safebuffers,
-  early exits, O(1) binding hash); remeasure with the same two legs
+  CUT, BUILT, NOT FLOWN (2026-09-22 per-draw-cut entry: the tail was
+  cross-TU call overhead under /O2 without /GL; once-per-frame gate,
+  inline readers and live guards, noinline for the two GS-buffer
+  bodies; paper saving ~1.5-2.0 ms); remeasure with the same two legs
   against the analyzer's R1 module split — the bar is the 3.94 ms;
   cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
   the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
@@ -1984,3 +1986,72 @@ the temporal pass and had no consumer in this session): ui_depth's
 deferred path (~600 samples, 0.44 ms) and engine motion's draw hooks
 (~575, 0.43 ms). The first top-30 table above was the head of this
 list; 48% of the samples lay outside it.
+
+### 2026-09-22 -- The per-draw cut, built and gated (commits a49dca4 + a5a668d): the tail was call overhead, not work; NOT FLOWN
+
+**The structural finding.** build.bat compiles with /O2 and no /GL, so
+nothing inlines across translation units: every one-line getter that
+lives in a .cpp is a real call with a prologue, a frame and a return,
+and the draw path asked about forty of them per draw. That, not any
+single function, is the profile's long tail. Two corrections to the
+entry above follow from reading the code rather than the profile: (1)
+fix.ui_depth is not read anywhere in src (config_test asserts it stays
+unset: "UI depth is bundled with temporal AA"), and ui_depth's on-state
+is derived from temporalModeEnabled(fix.temporal_aa); celestial, mesh
+and kinematic motion are configured under g_wanted from
+temporal_pass.cpp:7235-7250 - so Sean's rule was already the code's
+rule, and the ~1200 samples on those families were the epilogues of
+disabled features being CALLED 18-36k times a frame; (2) the
+unordered_map::find on the draw path is the shader-hash registry
+(hashOf, exposure_fix.cpp:360, under a CRITICAL_SECTION), not the
+kinematic tracker, which only runs on the evaluator thread.
+
+**What changed** (all behaviour-preserving; the one timing change is
+noted): the forty-term subscriber condition at the top of
+beginPanelOverride (658 samples, 0.49 ms) is sampled once per frame
+into a published atomic (draw_gate.h) that every arming site also
+raises (census hotkey, census_auto, the census_at_ms schedule, the quad
+probe, and a settings refresh re-samples), so a feature arming
+mid-frame is seen at latest one frame later and a hotkey census never
+loses its first frame; bindingGet/bindingGeneration/bindingShaderHash
+became inline loads over a published shadow (0.18 ms), with an opt-out
+for the eight test rigs that fake the shadow; the quad-skip re-issue
+(a D3D11_RECT[16] that put a /GS cookie and a 300-byte frame on all
+four forwardWithVerdict instantiations) and noteDeviceCreateFailure's
+two char[320] (the same, on every CreateBuffer) moved behind noinline,
+which keeps the cookie where the arrays are (no safebuffers anywhere:
+on MSVC a function without a GS buffer carries no cookie, so the 221
+cookie samples were real buffers); inline live guards in front of
+celestial motion (0.18 ms), ui_separation, ui_depth (its mode enum
+moved to the header rather than mirrored), mesh motion (its admission
+census is read only inside a report that opens with if(!enabled)
+return) and screen motion (enabled/failed hoisted with the three
+wholesale resets made explicit, screen_motion_test asserts the
+coupling); the per-draw DrawClock asks perfMonitorSampleDraws inline
+(it samples one frame in 16); the verdict block in
+hookedDrawIndexedInstanced tests the draw's shape before the hash and
+the temporal predicates; backdropOnComposite tests the shape before
+journalGameplay; hookedMap names its eight repeated conditions once;
+introProbeWants and quadProbeWants read published flags. The map-wait
+instrument's two QueryPerformanceCounter reads per Map now live only
+while a native timing context is current - which in a VR flight is the
+whole session, so that one saves nothing in the measured scenario and
+was kept for its consumer (the native timing line's wait component).
+
+**Left for the flight, with evidence:** srv0IsPanelSized +
+bindingResolve (273 samples, 0.20 ms) is a three-COM-call view resolve
+per draw because PsSrv0's generation moves every draw - a cache-policy
+change that needs a flight; the shader-hash registry lock (hashOf, ~25
+per-draw sites) can be cached against the VS binding generation as
+ui_depth.cpp:932 and vscreen.cpp:2834 already do, but target_sharp and
+panel_upscale read the VS off the context deliberately, so it is not a
+blind substitution; gpuFrameCommand + Controller::owns (158) is the
+default-on app GPU timing's foreign-thread check (GetCurrentThreadId
+per hooked command), a correctness check left alone.
+
+**Expected saving on paper:** roughly 1.5-2.0 ms of the 3.94 ms of EDVR
+leaf time (beginPanelOverride 0.49, the motion and ui families ~0.87,
+bindings 0.18, cookies and frames on the two extracted bodies, the
+probe and journal calls) - a paper number until the same two legs are
+flown against the analyzer's R1 byTopModule EDVR count. Gate: build.bat
+with EDVR_PROFILE_SYMBOLS=1 green on the merged tree.

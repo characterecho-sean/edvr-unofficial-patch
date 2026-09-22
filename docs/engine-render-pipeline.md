@@ -34,7 +34,9 @@ otherwise.
   instruments (hookedMap/mapWaitNote 0.40 ms, the draw-hook verdict
   lambda 0.20, the CreateBuffer hook 0.17, /GS cookies 0.16, guarded<>
   0.11, qpcNow 0.09, binding hash 0.11, ...) each run ~18k times per
-  frame; the cut is in progress and is remeasured with the same two
+  frame; the cut is BUILT and gated, NOT FLOWN (engine arc, 2026-09-22
+  per-draw-cut entry: the tail was cross-TU call overhead, /O2 without
+  /GL; paper saving ~1.5-2.0 ms) and is remeasured with the same two
   legs. The cull design is RE-SCOPED to draw submission as the prize
   (design doc §8; the pipeline prize stays KILLED): same frustum-reject
   site, gate B' = the record -> draw join and the unseen share of the
