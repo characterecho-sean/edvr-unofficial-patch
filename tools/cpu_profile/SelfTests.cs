@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Buffers.Binary;
 
 // Every computation in this analyzer is exercised here against synthetic data
@@ -775,6 +776,11 @@ internal static class SelfTests
             }
             catch (DirectoryNotFoundException) { Check(true, "a missing symbol directory is refused"); }
             Check(Program.DefaultSymbolDirectory(etl) == Path.Combine(root, "symbols"), "default lookup");
+            var exported = Program.ParseOptions(["--input", etl, "--pid", "7", "--output",
+                                                 Path.Combine(root, "r.json"), "--edvr-export",
+                                                 Path.Combine(root, "e.json"), "--edvr-export-window", "15"]);
+            Check(exported.EdvrExport == Path.Combine(root, "e.json") && exported.EdvrExportWindow == 15 &&
+                  exported.EdvrExportRegion == "R1", "the uncapped export defaults to R1 of the named window");
         }
         finally { Directory.Delete(root, true); }
     }
@@ -929,6 +935,24 @@ internal static class SelfTests
             Check(symbolizedStacks.Any(stack =>
                       ((string)stack["stack"]!).Contains("d3d11.dll [edvr]!EdvrPresentHook")),
                   "a resolved EDVR frame is rendered as module!function in the collapsed stack");
+            // The uncapped export must equal its own totals, which is what makes
+            // it safe to sum where report.json's capped copy is not.
+            var exportPath = Path.Combine(output, "edvr.json");
+            Report.Build(input, Pid, data, Path.Combine(output, "frames4.jsonl"), null, fake, null,
+                         exportPath, 1, "R2-R4");
+            var export = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+                File.ReadAllText(exportPath))!;
+            Check(export["region"].GetString() == "R2-R4" && export["capped"].GetBoolean() == false,
+                  "the export names its region and says it is uncapped");
+            var rows = export["innermost"].EnumerateArray().ToArray();
+            Check(rows.Length == export["distinctRvaCount"].GetInt32() &&
+                  rows.Sum(row => row.GetProperty("count").GetInt64()) ==
+                  export["edvrInnermostTotal"].GetInt64(),
+                  "the exported list is complete: its rows sum to the uncapped total");
+            Check(export["callerSamplesTopFrameInEdvr"].GetInt64() == 0 &&
+                  export["callerSamplesAnyEdvrFrame"].GetInt64() == 1,
+                  "the export carries both populations so neither is mistaken for the other");
+
             var symbolsOn = (Dictionary<string, object?>)symbolized["symbols"]!;
             Check(symbolsOn["enabled"] is true && Convert.ToInt64(symbolsOn["resolvedEdvrFrameLookups"]) > 0,
                   "the symbols object reports the lookups it made");

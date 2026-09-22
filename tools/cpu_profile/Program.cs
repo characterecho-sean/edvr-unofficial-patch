@@ -55,14 +55,20 @@ internal static class Program
     }
 
     internal sealed record Options(string Input, int Pid, string Output, string? RuntimeLog, string Frames,
-                                   string? Symbols);
+                                   string? Symbols, string? EdvrExport, int EdvrExportWindow,
+                                   string EdvrExportRegion);
 
     private const string Usage = "usage: EdvrCpuProfile --input <etl> --pid <pid> --output <report.json> " +
-                                 "[--runtime-log <log>] [--frames <frames.jsonl>] [--symbols <dir>] | --self-test";
+                                 "[--runtime-log <log>] [--frames <frames.jsonl>] [--symbols <dir>] " +
+                                 "[--edvr-export <path> --edvr-export-window <n> [--edvr-export-region R1]] " +
+                                 "| --self-test";
 
     internal static Options ParseOptions(string[] args)
     {
         string? input = null, output = null, runtimeLog = null, frames = null, symbols = null;
+        string? edvrExport = null;
+        var edvrExportRegion = "R1";
+        var edvrExportWindow = 0;
         int? pid = null;
         for (var i = 0; i < args.Length; i++)
         {
@@ -72,6 +78,10 @@ internal static class Program
             else if (args[i] == "--runtime-log" && ++i < args.Length) runtimeLog = args[i];
             else if (args[i] == "--frames" && ++i < args.Length) frames = args[i];
             else if (args[i] == "--symbols" && ++i < args.Length) symbols = args[i];
+            else if (args[i] == "--edvr-export" && ++i < args.Length) edvrExport = args[i];
+            else if (args[i] == "--edvr-export-window" && ++i < args.Length &&
+                     int.TryParse(args[i], out var exportWindow)) edvrExportWindow = exportWindow;
+            else if (args[i] == "--edvr-export-region" && ++i < args.Length) edvrExportRegion = args[i];
             else throw new ArgumentException(Usage);
         }
         if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output) || pid is null || pid <= 0)
@@ -88,7 +98,9 @@ internal static class Program
             : Path.GetFullPath(frames);
         return new Options(Path.GetFullPath(input), pid.Value, outputPath,
                            runtimeLog is null ? null : Path.GetFullPath(runtimeLog), framesPath,
-                           symbols is null ? DefaultSymbolDirectory(input) : Path.GetFullPath(symbols));
+                           symbols is null ? DefaultSymbolDirectory(input) : Path.GetFullPath(symbols),
+                           edvrExport is null ? null : Path.GetFullPath(edvrExport), edvrExportWindow,
+                           edvrExportRegion);
     }
 
     /// The capture tool drops the PDBs that match the installed DLLs beside the
@@ -122,7 +134,8 @@ internal static class Program
                 progress?.Invoke($"symbols: {options.Symbols} enabled={symbols.Enabled} " +
                                  $"matched={symbols.Modules.Count(module => module.Matched)}" +
                                  $"/{symbols.Modules.Count}");
-            return Report.Build(options.Input, options.Pid, data, options.Frames, runtimeLog, symbols, progress);
+            return Report.Build(options.Input, options.Pid, data, options.Frames, runtimeLog, symbols, progress,
+                                options.EdvrExport, options.EdvrExportWindow, options.EdvrExportRegion);
         }
         finally
         {
