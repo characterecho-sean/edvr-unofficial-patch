@@ -1296,3 +1296,57 @@ design's own fallback.
 Next flight: brackets with the gate off vs on at the settlement
 (Phase-0 kill-gate: job-0+batch wall share), then census draw-count
 equality, movers re-running, and a jump/dock invalidation pass (Phase 2).
+
+
+### 2026-09-22 -- The visibility prize, measured: ~91-97% of submitted settlement records are provably unseen from a parked view (~4.8-5.1 ms of the 5.3 ms content bound)
+
+The depth-capture join (run 055252, frame 2, both eyes): 12,287 submitted
+records (ledger union via the instance stream) projected through per-eye
+view-projections recovered from the eyemesh drawstate (the depth files'
+own constants block was unusable — keying artifact, below) and tested
+against the stored D32 depth. Visible-in-either-eye vs unseen-in-both,
+by conservative footprint radius: r=0.3 m -> 96.2% unseen; r=1 m ->
+90.7% unseen (content-only variants 96.5-98.8%). Structure of the unseen:
+near-field settlement clutter — 7,273 records nearer than 300 m, zero
+beyond 4 km, only 29 out-of-frustum in both eyes (frustum already does
+its job). Spot checks validated the convention both ways (an own-write
+record matching stored depth exactly; a genuinely occluded record).
+
+**Prize: ~4.8-5.1 ms of the 5.3 ms view-dependent content upper bound**
+(r=0.3-1 m, the trustworthy band; assumes cost ~linear in submitted
+records). This is the measured answer to 'cull what is not visible':
+from a parked cockpit view, essentially ALL of the view-dependent CPU is
+spent on content nobody sees — occluded by other structures, not
+distance-culled, not frustum-culled.
+
+**Caveats that shape the design (not disclaimers — engineering
+requirements):** (1) The unseen fraction is a CEILING on the cullable
+set: the footprint test under-claims visible (origins inside their own
+silhouette read as unseen — the r=3 column's ~5% inflation); the true
+cullable set sits between the content-only and all-tap numbers. (2)
+Head ROTATION un-occludes: the parked view occludes ~91-97%, but the
+set is view-dependent per frame — this sizes the prize for a DYNAMIC
+per-frame culler; it is not a cull list. A static cull of this set
+would be the flicker arc's bug exactly. (3) One settlement, one parked
+pose; moving views will show more visible content — the dynamic average
+prize needs a view sweep (now cheap: every armed eye run yields depth).
+(4) The depth capture's constants keying is FRAGILE: this frame's first
+pool-carrying draw was a 3-vertex eval-like pass whose cb1 is not the
+eye view-proj (the join recovered projections from the eyemesh
+drawstate instead). Fix the keying (structure-family draw, or N-vertex
+threshold) before relying on the constants block in future runs.
+
+**Instrument note**: the depth capture needed three fix rounds (eye-slot
+selection by first-seen DSV -> fixed to the depth probe's scene-eye
+pick; the probe's watch gated on temporal/eye-mask -> the capture lights
+it itself; the eye depth is R32G8X24_TYPELESS 2665x2632 -> converted via
+the probe's read path). Declines are now reason-coded (format/bytes/
+frame-cap) so a refusal is never blind again. Flown green: 4 files,
+0 declines, 190 MB staged.
+
+ruled out: draw-dedup culling (~213 fully-identical submissions/frame,
+0.3%); static occlusion culling of the measured unseen set (view-
+dependent; would reproduce the flicker class). What the number funds:
+a DYNAMIC eval-level culling design — per-frame, conservative, the
+depth-join as its regression oracle (culled set must be a subset of the
+per-frame provably-unseen set, every frame, with movers running).
