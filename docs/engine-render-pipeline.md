@@ -70,10 +70,14 @@ otherwise.
   record unit fails the bar with ideal occluders (0.5-0.9 ms); the
   per-part split is FUN_1442B3FC0 (frustum + LOD per sub-item per view,
   decompiled), where ideal occluders give 2.5-3.3 ms - open, real
-  occluders unmeasured because the geometry capture came back empty
-  (probe bug, FIXED b706df9: the arm re-arms after the pool-release
-  reset; and the probe now observes FUN_1442B3FC0 per sub-item and
-  view, EDVRGATE v2, NOT FLOWN). The eye depth capture's constants
+  occluders MEASURED on run 165433 (design doc §12): the part site is
+  PROVEN (FUN_1442B3FC0's per-(part, eye) verdicts admit exactly the
+  pool draws, 0 / 0 / 20,728), but the occluding surface is 89.6% open
+  panels and shells; qualified closed solids and eroded boxes remove
+  ZERO draws, and even ideal occluders at the part unit reach only
+  1.2-1.6 ms post-cut. The re-scoped cull FAILS B'; the arc is closed
+  unless a quads-on-panel-faces + terrain representation within a
+  30-60k triangle budget is measured offline. The eye depth capture's constants
   block is fixed (file version 2: registers 256-335, the camera at
   270-275; version 1 never held it). Read the GPU side next to any CPU
   saving (addendum 2: 8-15 ms app GPU at 0.7559 scale). The approach onset is a RAMP with distance (stage 1

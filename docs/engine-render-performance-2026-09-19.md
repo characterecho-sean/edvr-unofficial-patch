@@ -121,15 +121,17 @@
   site, conditional on real occluders reproducing ~62-80% of the ideal
   at the post-cut share; the geometry capture came back empty (a probe
   bug in the pool-first-seen path), so the real-occluder recall is
-  still unmeasured. Both fixes are BUILT (b706df9, design doc §11): the
-  geometry arm survives a pool re-seen after arming (re-armed, or the
-  loss is logged as such), and the probe observes FUN_1442B3FC0 after
-  the forward (prologue + builder frame + call site validated, stands
-  down alone; EDVRGATE v2 part rows with verdict, view, world centre
-  and radius; reader reads v1 and v2 and tallies per part); NOT FLOWN
-  - one more parked capture with both keys and one Insert press
-  measures the real-occluder recall at the part site; realistic prize
-  ~1-2 ms; Phase C only on a PASS;
+  then MEASURED with probe v2 (run 165433, design doc §12, 2026-09-22
+  probe-v2 entry): the part site is PROVEN (FUN_1442B3FC0's verdicts
+  admit exactly the pool draws, 0 / 0 / 20,728), but the hiding
+  surface is 89.6% open panels and shells, closed-solid and eroded-box
+  occluders remove ZERO draws at both buffer sizes, and even ideal
+  occluders at the part unit reach only 1.2-1.6 ms post-cut, so the
+  re-scoped cull FAILS Phase B' on evidence; 0 false rejects against
+  the exact re-draw truth. The arc is CLOSED on that evidence; the one
+  offline question left (open-panel quads + terrain within a 30-60k
+  triangle budget, measured on 165433, ceiling the ideal row) is
+  Sean's call and reopens nothing by itself; no cull code was built;
   cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
   the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
   must be read next to it; (1b) the RE-SCOPED cull (design doc §8):
@@ -2441,3 +2443,76 @@ builder records (rejects 20,232 drawn pairs); the first run's 18
 "disagreements" (shadow twins); declined draws as the reason the
 geometry is empty (a probe bug); full meshes as occluders within
 0.3 ms.
+
+### 2026-09-22 -- Probe v2 flown (run 165433): the part site is PROVEN, the occluders are REFUTED - qualified solid occluders remove zero draws; the re-scoped cull FAILS Phase B'
+
+One Insert press parked on the pad, build b706df9, Pimax OpenXR. The
+capture held everything the close-out asked for: 109,291 FUN_1442B3FC0
+rows (0 unverified, 0 foreign, 0 dropped), the geometry arm survived
+the pool re-sighting (19,482 draws, 4,865 distinct meshes decoded and
+checked by re-drawing every instance against the stored depth, which
+also gives an exact per-instance visibility truth), the frame-2 depth
+pair with cameras, the v2 gate dump. Analysis and tables are the design
+doc's §12 (on main, d0e6720).
+
+**The site, at the part unit, is proven.** FUN_1442B3FC0's per-(part,
+eye) verdicts admit exactly the builder parts' pool draws: 0 rejected-
+and-drawn, 0 admitted-and-undrawn, 20,728 admitted-and-drawn, 0
+untested; it reaches 85.2% of the pool draws. Of the 219 one-eye
+slots, 20 are the part test rejecting the other eye, 2 are slot
+copies, and 197 belong to no record the probe captures at all (drawn by
+VS 4435F2E50020E7F3, nearest engine record 343-781 m away): whatever
+admits those per eye sits outside the builder and the gate.
+
+**The occluders are refuted.** The surface that hides the unseen parts
+is 89.6% open opaque panels and shells, 3.5% closed meshes, 6.9%
+terrain and the hull. Only 187 of 4,864 meshes are closed, and the top
+occluding meshes stay open even after a 5 cm weld; many are one-sided.
+§3.2 built from qualified closed solids - raw triangles (a) or eroded
+inner boxes (b) - removes ZERO pool draws at both buffer sizes:
+
+| occluders, part unit, both-eyes rule | 256x128 | 256x256 |
+|---|---|---|
+| truth, exact re-draw | 63.0% = 5.35 / 3.97 ms | same |
+| ideal (the stored depth itself) | 19.5% = 1.66 / 1.23 ms | 25.9% = 2.20 / 1.63 ms |
+| (a) raw closed-solid triangles | 0 draws | 0 draws |
+| (b) eroded inner boxes, 4,022 tris/eye | 0 | 0 |
+| bound: every open opaque instance | 14.6% = 1.24 / 0.92 | 20.7% = 1.76 / 1.30 |
+| bound: open opaque + terrain | 19.5% | 25.9% = 2.20 / 1.63 |
+
+(ms at the pre-cut 8.5 ms share / the post-cut 6.3 ms share.) The
+ratio real/ideal is 0 against the ~45% bar; 0 ms against 1.5 ms. The
+bar is steeper at this unit than §9 assumed: even IDEAL occluders at
+256x128 reach only 1.23 ms post-cut, and a real set would need 90%
+(pre-cut) or 92% at 256x256 (post-cut) of the ideal. The only
+representation that reaches the bar is raw open-panel triangles plus
+terrain: 0.5-2.3 M triangles per eye, 2-3 ms to rasterize against a
+0.3 ms budget that fits 30-60k, and it rests on honouring each draw's
+cull mode, which §3.2's soundness argument never covered (a one-sided
+panel is not an occluder from behind). False rejects: 0 at slot and
+draw level against the exact truth in every row. Occludee tests at the
+site: 20,728 per frame, ~0.1 ms. Two smaller findings: the R = 1 m
+footprint truth used since §2 is slightly optimistic (400 slots it
+calls unseen are visible in the exact re-draw, and 176-644 draws it
+would remove under ideal occluders hold a visible slot), and the §10
+nearest-origin association names the owning slot for only 13.7% of the
+occluding points.
+
+**Verdict: the re-scoped cull FAILS Phase B' on evidence.** With the
+occluder representation the design allows (closed solids, eroded
+boxes) the prize is nil; with the one that would work (open panels +
+terrain) the cost is ten times the budget and the soundness is
+unproven. The one remaining offline question - a quads-on-panel-faces
+representation plus terrain, measured on 165433 within a 30-60k
+triangle budget - needs no flight and is the last thing that could
+reopen the arc; its ceiling even if perfect is the ideal row, ~1.2-1.6
+ms post-cut, for a per-frame software rasterizer on the workers with a
+correctness argument still to be made. Recommendation: close the arc.
+
+ruled out: closed-solid occluders, because their raw triangles remove
+0 draws; eroded inner boxes, because they remove 0 draws; the R = 1 m
+footprint as a zero-violation truth, because 400 slots it calls unseen
+are visible; the §10 nearest-origin association as occluder identity
+(13.7% of points); the reader's 120 m range as occluder selection
+(0.0-0.2%); the part test as what admits the 197 unclaimed one-eye
+slots.
