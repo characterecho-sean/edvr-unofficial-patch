@@ -1,5 +1,8 @@
 // End-to-end controller state test. Graphics calls use system D3D11; only
 // game classification/binding-shadow and coverage discovery are supplied.
+// This rig supplies its own binding shadow readers (below), so it asks the
+// header for declarations rather than the inline production ones.
+#define EDVR_BINDING_SHADOW_EXTERNAL 1
 #include "../../src/d3d11/ui_separation.cpp"
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
 #include <d3dcompiler.h>

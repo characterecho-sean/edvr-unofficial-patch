@@ -9,6 +9,26 @@ namespace edvr {
 // index into a private layer. The temporal pass accepts it only where its
 // depth agrees with the final scene, never over foreground UI or ships.
 void celestialMotionConfigure(bool enabled);
+
+// Could a Begin below possibly say yes? A NECESSARY condition only -- Begin
+// re-tests this and everything else, so a false here is exactly a Begin that
+// would have returned false.
+//
+// It exists so the draw path can decline without a call. Both Begins are
+// invoked once per eye-pass draw, and with fix.temporal_aa off (which is what
+// switches this whole feature off, temporal_pass.cpp) they do nothing but
+// return -- yet the build is /O2 with no /GL, so "nothing but return" is a
+// call, a prologue and an epilogue about 36k times a frame. 249 innermost
+// samples of the 1349-frame window of 2026-09-22 landed on this function's
+// epilogue, 0.18 ms a frame, spent entirely on declining.
+namespace detail {
+extern bool g_celestialMotionEnabled;
+extern bool g_celestialMotionFailed;
+}  // namespace detail
+inline bool celestialMotionLive() {
+    return detail::g_celestialMotionEnabled && !detail::g_celestialMotionFailed;
+}
+
 bool celestialMotionBegin(ID3D11DeviceContext* ctx, uint64_t vs);
 // Null-PS terrain prepasses can record coverage in their original draw.
 // True requires End immediately after that draw; false leaves it untouched.

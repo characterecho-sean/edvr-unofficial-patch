@@ -1,5 +1,8 @@
 // Exercise the production coverage pass on D3D11 WARP. Only the game's
 // depth-probe selection, logging and raw-hook entry are supplied here.
+// This rig supplies its own binding shadow readers (below), so it asks the
+// header for declarations rather than the inline production ones.
+#define EDVR_BINDING_SHADOW_EXTERNAL 1
 #include "../../src/d3d11/ui_depth.cpp"
 #include "../../src/d3d11/ui_resolve.h"
 #include <d3dcompiler.h>

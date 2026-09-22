@@ -7,6 +7,15 @@
 #include "../common/timing.h"
 
 namespace edvr {
+
+// The two flags introProbeWants reads, out here rather than in the anonymous
+// namespace below so the header can answer without a call (intro_probe.h).
+// Written only from this file.
+namespace detail {
+bool g_introProbeOn = false;
+bool g_introProbeClosed = false;
+}  // namespace detail
+
 namespace {
 
 // Distinct target sizes recorded in one frame. The startup frames this was
@@ -33,9 +42,7 @@ constexpr uint32_t kMaxStallLines = 16;
 // startup; sixteen leaves room for the menu behind it.
 constexpr uint32_t kMaxClears = 16;
 
-bool     g_on = false;
 bool     g_configured = false;
-bool     g_closed = false;
 
 uint64_t g_startMs = 0;        // the first frame boundary
 uint64_t g_prevMs = 0;
@@ -160,7 +167,7 @@ void sortBuckets() {
 }
 
 void closeProbe(uint32_t frameNo, const char* why) {
-    g_closed = true;
+    detail::g_introProbeClosed = true;
     closeFillAccount("the probe closing");
     char tail[224];
     if (g_firstEyeFrame) {
@@ -191,13 +198,13 @@ void introProbeConfigure(Config& cfg) {
     const bool on = cfg.getBool("advanced.intro_probe", false);
     const bool first = !g_configured;
     g_configured = true;
-    if (on == g_on && !first) return;
-    g_on = on;
+    if (on == detail::g_introProbeOn && !first) return;
+    detail::g_introProbeOn = on;
     if (!on) {
         if (!first) Log::get().note("intro probe: off.");
         return;
     }
-    if (g_closed) {
+    if (detail::g_introProbeClosed) {
         Log::get().note(
             "intro probe: on, but its window has already closed this session. "
             "Restart the game to record another startup.");
@@ -213,7 +220,6 @@ void introProbeConfigure(Config& cfg) {
         static_cast<unsigned long long>(kStallMs));
 }
 
-bool introProbeWants() { return g_on && !g_closed; }
 
 void introProbeNoteDevice() {
     if (!g_deviceMs) g_deviceMs = stampMs();
@@ -229,7 +235,7 @@ bool introProbeSinceDevice(double* seconds) {
 }
 
 void introProbeNoteMovieFill() {
-    if (!g_on || g_closed || g_fillClosed) return;
+    if (!detail::g_introProbeOn || detail::g_introProbeClosed || g_fillClosed) return;
     const uint64_t now = stampMs();
     g_fillLastMs = now;
     if (g_fillFrames++ == 0) {
@@ -245,7 +251,7 @@ void introProbeNoteMovieFill() {
 }
 
 void introProbeOnDraw(uint32_t targetW, uint32_t targetH, bool eyeSized) {
-    if (!g_on || g_closed) return;
+    if (!detail::g_introProbeOn || detail::g_introProbeClosed) return;
     ++g_drawsThisFrame;
     for (uint32_t i = 0; i < g_bucketCount; ++i) {
         if (g_buckets[i].w == targetW && g_buckets[i].h == targetH) {
@@ -266,7 +272,7 @@ void introProbeOnDraw(uint32_t targetW, uint32_t targetH, bool eyeSized) {
 }
 
 void introProbeOnClear(uint32_t targetW, uint32_t targetH, const float rgba[4]) {
-    if (!g_on || g_closed || !rgba) return;
+    if (!detail::g_introProbeOn || detail::g_introProbeClosed || !rgba) return;
     for (uint32_t i = 0; i < g_clearCount; ++i) {
         const ClearSeen& s = g_clears[i];
         if (s.w != targetW || s.h != targetH) continue;
@@ -295,7 +301,7 @@ void introProbeOnClear(uint32_t targetW, uint32_t targetH, const float rgba[4]) 
 }
 
 void introProbeFrameBoundary(uint32_t frameNo, bool sceneFrame) {
-    if (!g_on || g_closed) return;
+    if (!detail::g_introProbeOn || detail::g_introProbeClosed) return;
     const uint64_t now = nowMs();
     if (g_startMs == 0) {
         g_startMs = stampMs();

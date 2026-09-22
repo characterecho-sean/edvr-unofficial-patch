@@ -7,15 +7,17 @@
 #include "../common/guard.h"
 
 namespace edvr {
+
+// The shadow. Declared in the header so the three per-draw readers are loads
+// rather than calls (binding_shadow.h says why); defined here, once, and still
+// written only through the setters below.
+namespace detail {
+BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
+}  // namespace detail
+
 namespace {
 
-struct Slot {
-    void*    ptr = nullptr;
-    uint32_t gen = 1;   // starts at 1 so a caller's zero-initialised cache is stale
-    uint64_t hash = 0;  // a shader slot's content hash (bindingSetShader)
-};
-
-Slot g_slots[static_cast<size_t>(BindSlot::Count)];
+using Slot = detail::BindingSlot;
 
 // This module's own budget, not shared with any fix.
 //
@@ -38,7 +40,7 @@ FaultBudget g_probeBudget("bindingShadow.resolve", 5);
 // budgets, because they are two failures.
 FaultBudget g_resourceBudget("bindingShadow.resolveResource", 5);
 
-Slot& slotOf(BindSlot s) { return g_slots[static_cast<size_t>(s)]; }
+Slot& slotOf(BindSlot s) { return detail::g_bindingSlots[static_cast<size_t>(s)]; }
 
 // The GetType-then-GetDesc half, shared by both resolvers so there is one copy
 // of it and not two. Called from inside a guard; holds nothing that unwinds.
@@ -76,10 +78,6 @@ bool describeResource(ID3D11Resource* res, ResourceInfo* out) {
 
 }  // namespace
 
-void* bindingGet(BindSlot slot) { return slotOf(slot).ptr; }
-
-uint32_t bindingGeneration(BindSlot slot) { return slotOf(slot).gen; }
-
 void bindingSet(BindSlot slot, void* ptr) {
     Slot& s = slotOf(slot);
     s.ptr = ptr;
@@ -93,10 +91,8 @@ void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash) {
     ++s.gen;
 }
 
-uint64_t bindingShaderHash(BindSlot slot) { return slotOf(slot).hash; }
-
 void bindingForgetAll() {
-    for (Slot& s : g_slots) {
+    for (Slot& s : detail::g_bindingSlots) {
         s.ptr = nullptr;
         s.hash = 0;
         ++s.gen;
@@ -108,7 +104,7 @@ void bindingFrameBoundary() {
     // then draws for many frames is ordinary -- nulling them here cost the panel
     // fix everything after the first Present, measured at 1800 overrides before
     // the change and 1 after.
-    for (Slot& s : g_slots) ++s.gen;
+    for (Slot& s : detail::g_bindingSlots) ++s.gen;
 }
 
 bool bindingResolve(void* view, ResourceInfo* out) {

@@ -79,7 +79,18 @@ void quadProbeConfigure(Config& cfg);
 
 // Is a capture still wanted? False once one has been taken, which keeps this
 // out of the draw path's condition for the rest of the session.
-bool quadProbeWants();
+//
+// Inline, with the two flags: the draw path asks four times a draw and "out
+// of the draw path" was still a cross-TU call for two bool loads, since the
+// build is /O2 with no /GL. 37 innermost samples of the 1349-frame window of
+// 2026-09-22, for a probe that is unarmed in an ordinary session.
+namespace detail {
+extern bool g_quadProbeArmed;
+extern bool g_quadProbeTaken;
+}  // namespace detail
+inline bool quadProbeWants() {
+    return detail::g_quadProbeArmed && !detail::g_quadProbeTaken;
+}
 
 // Ask for a capture now, replacing any already taken. Bound to the draw
 // census key so a transient widget -- a marker that only shows during a

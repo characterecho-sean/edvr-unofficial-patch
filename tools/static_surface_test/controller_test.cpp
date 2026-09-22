@@ -1,6 +1,9 @@
 // End-to-end WARP test for the production static-surface controller. Only
 // Elite's settled depth/eye classification, binding shadow and raw hook bypass
 // calls are supplied by this standalone harness.
+// This rig supplies its own binding shadow readers (below), so it asks the
+// header for declarations rather than the inline production ones.
+#define EDVR_BINDING_SHADOW_EXTERNAL 1
 #include "../../src/d3d11/static_surface.cpp"
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
 

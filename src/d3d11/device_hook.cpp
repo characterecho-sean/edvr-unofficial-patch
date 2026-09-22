@@ -640,7 +640,16 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
 // textures back. One bool per create when both matchers are off.
 // Defined with the other six creates below; this one is hooked already, for a
 // different reason, and only borrows the reporting.
-void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
+//
+// NOINLINE, and that is a performance decision rather than a style one. This
+// body holds two 320-byte char buffers, which is a /GS stack cookie and a
+// large frame -- and its only callers are the create hooks, one call site
+// each, which is exactly what the inliner takes. Inlined, every CreateBuffer
+// the game makes pays the cookie and the frame for a branch that is taken at
+// most kCreateFailNotes times in a session. The game creates buffers every
+// frame: hookedDevCreate<3,0> was 228 innermost samples of the 1349-frame
+// window of 2026-09-22, beside 221 in __security_check_cookie.
+__declspec(noinline) void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
                              const void* second, bool firstIsResource);
 
 HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
@@ -769,7 +778,8 @@ const char* devCreateName(size_t slot) {
 
 // D3D11 refused something the GAME asked for. See kDevCreateBuffer above for
 // why this is worth a line: the crash that follows names nothing.
-void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
+// NOINLINE: the declaration above says why.
+__declspec(noinline) void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
                              const void* second, bool firstIsResource) {
     if (g_state->createFailNotes >= kCreateFailNotes) return;
     ++g_state->createFailNotes;
