@@ -2,45 +2,53 @@
 
 ## Status
 
-Opened 2026-09-21, from a supporter's log bundle. Updated same day twice
-more: a second bundle ruled out SteamVR-the-runtime (identical crash on
-VirtualDesktopXR); then the user turned the Steam client's desktop overlay
-off for Elite Dangerous (Steam library > Properties > General > "Enable
-Steam Overlay") with EDHM left in place, and **the crash stopped** --
-reported directly by the user, no log bundle taken for this run. The Steam
-overlay is CONFIRMED NECESSARY. EDHM's necessity is still untested in
-isolation (no flight yet with the overlay on and EDHM out of the chain) --
-so "EDHM + overlay" cannot yet be narrowed to "overlay alone," only to
-"overlay is required." No code has been changed; this is a workaround, not
-a fix.
+Opened 2026-09-21, from a supporter's log bundle. Updated same day three
+times more: a second bundle ruled out SteamVR-the-runtime (identical crash
+on VirtualDesktopXR); the user then turned the Steam client's desktop
+overlay off for Elite Dangerous with EDHM left in place, and **the crash
+stopped** (reported directly, no log bundle for that run); then, starting
+the fix design, a **code-citation correction**: the freeing call is
+`NativeDevice::reset()` (`src\openxr\native_device.h:96-97`), not
+`NativeGraphicsClient::reset()` as first written below -- the two classes
+are easy to conflate by name and both have a `reset()` that frees a module,
+but `native_runtime_host.h:1798`'s `graphics` field is declared
+`NativeDevice graphics` (line 172), not a `NativeGraphicsClient`.
+`NativeGraphicsClient` is unrelated to this arc; do not cite it again. See
+`## Design` for the corrected mechanism, a real, not-yet-confirmed puzzle
+in it (`systemD3D11CreateDevice()` appears to already leak a permanent
+reference to the same module this code frees), and the proposed fix. No
+code has been changed yet.
 
-Hypothesis: `host_graphics_reset` (`src\openxr\native_runtime_host.h:1797`)
-calls `NativeGraphicsClient::reset()` (`src\openxr\native_graphics_client.h:75`),
-which does `FreeLibrary(module_)` on the D3D11 graphics proxy (`d3d11.dll`)
-from the OpenXR shutdown thread, 78 ms after that stage began and 31 ms
-after the whole shutdown sequence reported clean. At that same moment the
-D3D11 render thread was still active *inside that module*, chained down
-through EDHM and the Steam overlay
+Hypothesis, as corrected in `## Design`: `host_graphics_reset`
+(`src\openxr\native_runtime_host.h:1797-1798`) calls `NativeDevice::reset()`
+(`src\openxr\native_device.h:96-97`), which does `FreeLibrary(systemModule_)`
+on System32's `d3d11.dll` -- the genuine Windows module, obtained earlier by
+`openSystemD3D11()` (`src\common\system_d3d11.h`), not EDVR's own proxy DLL
+beside the game -- from the OpenXR shutdown thread, 31 ms after the whole
+shutdown sequence reported clean, in both logged flights, to the
+millisecond. At that same moment a thread was still active on the game's
+real D3D11 immediate context (the crash's `rcx` register matches that
+context's address, logged all session), reached by chaining through EDVR's
+own proxy, EDHM and the Steam overlay
 (`d3d11.dll -> d3d11_edhm.dll -> gameoverlayrenderer64.dll -> d3d11.dll ->
 crash`), and the crash's own breadcrumb says the faulting address has "no
-module" -- consistent with `d3d11.dll` having just been unmapped out from
-under a thread still executing in it.
+module" -- consistent with the called-through module having just been
+unmapped out from under a thread still executing through it. The crash
+handler's module-name printer strips every path down to its bare filename
+(`crash_context.h:86-91`), so seeing "module=d3d11.dll" twice in one stack
+does not prove it is the *same* d3d11.dll both times -- EDVR's own proxy
+and System32's genuine module can both be loaded, both under that same
+filename, at different base addresses. See `## Design` for how the two
+frames were told apart.
 
-`src\d3d11\device_hook.cpp:2729-2731` documents the opposite assumption for
-the D3D11 side's own teardown ("Normal process exit skips this entire
-path"): `shutdownDeviceHooks` was written on the belief that `FreeLibrary`
-on this module during a normal game close does not happen. The OpenXR side
-now calls it there, on every close.
-
-Not confirmed: whether this OpenXR-side `FreeLibrary` is the call that
-actually drops `d3d11.dll`'s refcount to zero (the game, EDHM or Steam may
-hold their own references, in which case the module would survive this call
-and some other explanation is needed); whether `stereo.drain()`, the stage
-immediately before this one, was meant to rule out exactly this and has a
-gap, or never covered a Present arriving from the game's or the overlay's
-own shutdown-time redraw; and whether this needs EDHM and the Steam overlay
-both, or reproduces with either alone -- three flights now, all with both
-present, all with the identical stack.
+`src\d3d11\device_hook.cpp:2729-2731` documents a related but distinct
+assumption for the D3D11 side's own teardown ("Normal process exit skips
+this entire path"): `shutdownDeviceHooks`, which would remove EDVR's own
+hooks, was written on the belief that an explicit `FreeLibrary` of EDVR's
+*own* proxy DLL during a normal close does not happen -- and, per the
+correction, it still doesn't seem to: EDVR's own proxy is never observed
+freed in these flights, only chained through, which is why its hooks (the
+outermost stack frame, every flight) are still live at crash time.
 
 Also worth a look if this reaches a fix: the gap from `host_gate_finish`
 (shutdown reporting clean) to the crash was 31 ms in *both* flights,
@@ -127,34 +135,58 @@ The `tick=` values are `GetTickCount64()` milliseconds (same clock as
 whole sequence reported clean.
 
 `host_graphics_reset` (`native_runtime_host.h:1797-1798`) is
-`graphics.reset(); externalDevice = nullptr;`. `NativeGraphicsClient::reset()`
-(`native_graphics_client.h:75-80`):
+`graphics.reset(); externalDevice = nullptr;`, where `graphics` is a
+`NativeDevice` (`native_runtime_host.h:172`). `NativeDevice::reset()`
+(`native_device.h:96-97`):
 
-    void reset() {
-      context_.Reset();
-      device_.Reset();
-      if (module_) FreeLibrary(module_);
-      module_ = nullptr;
-    }
+    void reset(){context_.Reset();device_.Reset();feature_=D3D_FEATURE_LEVEL_1_0_CORE;
+      if(systemModule_){FreeLibrary(systemModule_);systemModule_=nullptr;}}
 
-`module_` is a `GetModuleHandleExW`-retained handle to the D3D11 graphics
-proxy itself, taken in `acquire()` (`native_graphics_client.h:21-72`) by its
-trusted absolute path -- `d3d11.dll` beside the game, EDVR's own module.
-This `FreeLibrary` is an explicit unload of the very module the render
-thread was, per the breadcrumb above, still executing inside.
+`systemModule_` is set only by `initializeSeparate()` (`native_device.h:77-91`),
+which both flights' openxr logs confirm ran: `device_module,route=mapped,
+path=C:\Windows\system32\d3d11.dll` and `graphics_ownership,mode=separate,
+distinct_devices=1`, both flights. "Separate" mode is not an edge case --
+`native_module.cpp:260-276`'s `packagedDefaultPaths()`, the path taken by
+every normal install with no explicit bootstrap or local-config override,
+sets `separateDevice=true` unconditionally. This is the default for
+essentially every installed copy of EDVR, not something particular to this
+reporter.
 
-The D3D11 side's own teardown comment
-(`src\d3d11\device_hook.cpp:2729-2731`) assumes the opposite:
+`initializeSeparate()` takes its module reference from `openSystemD3D11()`
+(`src\common\system_d3d11.h:47-74`), which is explicit about ownership:
+"One reference, the caller's to FreeLibrary" (line 34), obtained with
+`GetModuleHandleExW(0, ...)` -- flag 0, a real reference, not
+`UNCHANGED_REFCOUNT`. `NativeDevice::reset()`'s `FreeLibrary(systemModule_)`
+is exactly that reference being correctly, deliberately released. The D3D11
+side's own teardown comment (`src\d3d11\device_hook.cpp:2729-2731`,
+"Normal process exit skips this entire path") is about a *different*
+module -- EDVR's own proxy DLL, freed only via `shutdownDeviceHooks`, which
+these flights never show running -- so it does not directly contradict this
+release; it is cited here because the same file (~line 2764) already treats
+"a thread can still be inside a stub" as a known hazard for a *different*
+piece of freed memory (`VTableHook`'s trampoline pages, which it leaks on
+purpose for exactly that reason) -- the same reasoning applies to
+`systemModule_`, argued fully in `## Design`.
 
-    // FreeLibrary teardown can run under the loader lock on another thread.
-    // Invalidate timing first, ...
-    // Normal process exit skips this entire path.
-
-and the same file already treats "a thread can still be inside a stub" as a
-known hazard for the vtable hook's trampoline pages (~line 2764: the
-live-mode stub page is leaked on purpose rather than freed, because a
-thread can still be inside it) -- but that guard covers only the small stub
-pages, not the whole-module `FreeLibrary` the OpenXR side now performs.
+**A real complication, not yet resolved:** `system_d3d11.h:76-86`'s
+`systemD3D11CreateDevice()` *also* calls `openSystemD3D11()`, inside a
+function-local `static const` initializer -- a magic static, guaranteed to
+run exactly once per process (per DLL; the OpenXR runtime module has its
+own copy of this inline function, distinct from EDVR's D3D11 proxy's) --
+and its comment says the module "stays mapped for the life of the process."
+That local's `SystemD3D11` object goes out of scope without ever calling
+`FreeLibrary` on the handle it holds -- a second, *permanent*, intentional
+leak of the same System32 module. `native_runtime_host.h:1936` calls
+`systemD3D11CreateDevice()` unconditionally, before the branch that chooses
+`initializeSeparate()`, on every session. If that static genuinely runs
+first and genuinely keeps the module's refcount above zero for the rest of
+the process's life, `NativeDevice::reset()`'s later `FreeLibrary` should
+never be able to bring System32's `d3d11.dll` down to zero references and
+actually unmap it -- which would mean this specific call is *not* the
+crash's cause after all, and the true freed resource is still unidentified.
+This was not resolved by reading the code; `## Design` proposes removing
+the release regardless, since it is safe either way, plus a cheap
+diagnostic to settle which explanation is right.
 
 ## Second flight -- 2026-09-21, SteamVR removed
 
@@ -226,10 +258,12 @@ late call left to land in the unmapped module.
 
 ## Not ruled out
 
-- Whether the OpenXR-side `FreeLibrary` is the release that actually brings
-  `d3d11.dll`'s refcount to zero, or whether some other reference was
-  already the last one before it. If the module survives this call, the
-  mechanism above needs revising.
+- Whether `NativeDevice::reset()`'s `FreeLibrary(systemModule_)` is the
+  release that actually brings System32's `d3d11.dll` to zero references,
+  given `systemD3D11CreateDevice()` appears to independently hold a
+  permanent reference to the same module (see the complication above). Not
+  resolved by reading the code; `## Design` proposes a fix that does not
+  depend on the answer, plus a diagnostic that would settle it.
 - Whether `stereo.drain()` (`host_owned_graphics_drain`, the stage
   immediately before `host_graphics_reset`) was meant to rule out exactly
   this and has a gap, or only ever covered EDVR's own in-flight XR frame,
@@ -239,7 +273,19 @@ late call left to land in the unmapped module.
   (EDHM out of the chain) would also crash. Not yet flown; lower priority
   now that a workaround is confirmed, but relevant to how a real fix should
   be scoped -- a fix aimed only at the EDHM link would miss an
-  overlay-alone case.
+  overlay-alone case. Given the corrected mechanism doesn't name EDHM at
+  all (System32 `d3d11.dll` is shared process-wide, not EDHM-specific),
+  overlay-alone reproducing it is now the more likely outcome, not the
+  less likely one.
+- Exactly which frames in the crash stack are System32's `d3d11.dll` versus
+  EDVR's own proxy, both printed as bare filename "d3d11.dll". Frame 7
+  (`+0x20D8E`, calls into EDHM) is architecturally EDVR's own proxy --
+  nothing else in the process has a reason to call `d3d11_edhm.dll`. Frames
+  1 and 0 (`+0x177009`, then unmapped) were not independently confirmed;
+  the design below treats them as System32's on the strength of `rcx`
+  matching the game's real immediate context (a COM vtable dispatch through
+  a shared, process-wide object, not a call private to any one proxy), not
+  on a direct address match.
 
 ## Ruled out
 
@@ -255,3 +301,96 @@ late call left to land in the unmapped module.
   Meta Quest 3, no SteamVR anywhere in the picture, and reproduced the
   identical crash. The runtime backend is not a factor; the D3D11-side
   chain (EDHM + Steam's desktop overlay) is.
+
+## Design
+
+Started 2026-09-22, prompted by the user asking to design a real fix. This
+section is design only -- nothing below has been built, and no C++ has
+changed.
+
+### What changed from the original write-up
+
+Re-reading the actual call graph (not just grepping for a `reset()` that
+frees a module) found the citation above was wrong: `host_graphics_reset`
+calls `NativeDevice::reset()` (`native_device.h`), not
+`NativeGraphicsClient::reset()` (`native_graphics_client.h`) -- a different
+class this arc never needed. `NativeDevice::reset()` frees `systemModule_`,
+which both flights' logs confirm is System32's genuine `d3d11.dll`
+(`device_module,route=mapped,path=C:\Windows\system32\d3d11.dll`), taken by
+`initializeSeparate()` because EDVR runs in "separate device" mode -- the
+default for every normal install, not an edge case. This does not change
+what happened (the crash and its timing are unaffected by which citation
+was wrong), but it changes where a fix belongs and who else it can affect:
+this is process-wide shared-module lifetime, not EDVR's own proxy DLL, so
+it's a `d3d11.dll`/`GetModuleHandleExW` refcounting question that has
+nothing to do with EDHM's identity specifically.
+
+### The fix
+
+Stop calling `FreeLibrary(systemModule_)` in `NativeDevice::reset()`. Set
+`systemModule_ = nullptr` without releasing the reference -- i.e. leak it,
+the same way `systemD3D11CreateDevice()` (`system_d3d11.h:76-86`) already
+and deliberately leaks its own reference to the identical module, with the
+identical justification in that function's own comment: "which stays
+mapped for the life of the process." `NativeDevice` gets torn down and
+potentially reconstructed more than once in a process's life (its own
+`reset()` runs at the top of both `initialize()` and `initializeExisting()`,
+clearing state before a fresh acquire); leaking on the *shutdown* path
+only, not on every `reset()`, would need either a separate
+`releaseSystemModule()`-vs-`reset()` split or accepting that every
+`initializeSeparate()` call after the first adds one more permanent
+reference to a module that was always going to stay mapped anyway. Given
+`systemD3D11CreateDevice()` already treats unbounded leakage of this exact
+module as fine, the simplest version -- never call `FreeLibrary` on
+`systemModule_` at all, anywhere, ever -- is in line with the codebase's
+own stated model for this specific resource and needs no new bookkeeping.
+
+This is safe regardless of which half of the "not resolved" complication
+above turns out to be true:
+
+- If `systemD3D11CreateDevice()`'s permanent reference is *not* already
+  covering `systemModule_`'s slot (they're independent references, and this
+  one really was the last), this removes the exact operation the evidence
+  points at, and should end the crash outright.
+- If `systemD3D11CreateDevice()`'s reference already keeps the module alive
+  regardless, this change is a no-op for correctness -- the module was
+  never actually at risk from this specific call -- and the crash's true
+  cause is still open. In that case the change should still land (it is
+  strictly more correct than freeing a shared system module from
+  per-instance teardown code, matches the file's own precedent, and costs
+  nothing), but the arc stays open rather than closing on an unconfirmed
+  fix.
+
+Either way this does not touch `context_.Reset()`/`device_.Reset()`
+(releasing EDVR's own separate device/context, which nothing else in the
+process shares -- `distinct_devices=1`, both flights) or any of the other
+shutdown stages. Scope stays to the one line implicated by the evidence.
+
+### The diagnostic, to fly alongside the fix
+
+Add one breadcrumb line to `NativeDevice::reset()`, gated on
+`systemModule_` being non-null, before clearing it: re-probe the module
+with a fresh `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+...)` on the same absolute path immediately after the (now-removed)
+`FreeLibrary` would have run, and log whether it still resolves. If it
+does, `systemD3D11CreateDevice()`'s permanent reference (or another one) is
+confirmed as what was really keeping the module alive, settling the open
+question without costing a flight beyond the one already needed to confirm
+the fix itself. If it does not resolve, that's surprising given the
+analysis above and worth its own look before trusting the fix.
+
+### Before this ships
+
+- Build clean (`build.bat`, absolute path, read the tail) -- this is a
+  one-line removal plus one diagnostic line, but it's shutdown-path code
+  in a header included from the OpenXR runtime module, and a typo here
+  costs a flight to notice.
+- A repro flight from this reporter (or anyone reproducing today) with the
+  fix installed, confirming the crash is gone AND the new diagnostic line
+  fired, read with `edvr_log.py --expect-build` against the exact commit
+  first.
+- Consider, separately and not blocking this fix, the still-open EDHM-alone
+  question -- if the mechanism is confirmed process-wide rather than
+  EDHM-specific, it may be worth a second discriminating flight (Steam
+  overlay on, EDHM out of the chain) purely to complete the arc, not
+  because the fix's scope depends on the answer.
