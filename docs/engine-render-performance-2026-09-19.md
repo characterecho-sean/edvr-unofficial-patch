@@ -93,10 +93,18 @@
   qualified inventory of their solid parts must reproduce >= ~45% of
   the ideal; and the gate's camera is its own argument (a view record
   per eye at ctx+0x40) BUT its verdict feeds only the type-2 item path
-  - which test admits the pool draws (FUN_144308B30) is unproven. Next:
-  that decompile, the depth capture's cb1 byte-range fix, and one armed
-  capture at the parked pose (per-view gate results per record, the view
-  array, occluder mesh geometry) before any Phase C code;
+  - which test admits the pool draws (FUN_144308B30) was unproven; B'
+  CLOSE-OUT (design doc §9, on main): FUN_144308B30 decompiled - it is
+  a per-view screen-size test that trims the collection's active mask
+  into rec+0x208, the frustum verdict of FUN_14430EFE0 never reaches the
+  pool draws (type-2 singletons only), and the draw-item builder runs
+  its own per-view test (view+0x570, FUN_1404F4E10), so the candidate
+  reject site MOVES to the builder's view loop; the eye depth capture's
+  constants block is fixed (file version 2, the camera registers
+  270-275); the gate probe is BUILT, NOT FLOWN (advanced.cull_gate_
+  capture=1 with eye_depth_capture=1, press the eye-run key at the
+  parked pose; reader tools\cull_gate_probe.py). One armed capture then
+  settles the site and the occluders' geometry before any Phase C code;
   cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
   the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
   must be read next to it; (1b) the RE-SCOPED cull (design doc §8):

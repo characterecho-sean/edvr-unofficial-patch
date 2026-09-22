@@ -49,8 +49,21 @@ otherwise.
   which per-view test admits the pool draws: the stage 1 gate's camera
   is a per-eye view record at ctx+0x40 (frustum planes +0x30, position
   +0x540, occludee spheres +0x240/+0x280) but its verdict feeds the
-  type-2 item path, while the draw-item builder reads rec+0x208 written
-  by FUN_144308B30 (undecompiled). Read the GPU side next to any CPU
+  type-2 item path only. DECOMPILED (B' close-out, analysis\decomp\
+  decomp_4308B30.txt): rec+0x208 is the collection's active mask
+  (FUN_144331300, distance/LOD per view, no planes) trimmed by the LOD
+  nibble filter and by FUN_144308B30 (a 17-line per-view screen-size
+  test against view+0x540, no callees); FUN_14430EFE0's frustum verdict
+  never touches it, and the draw-item builder FUN_1442B4420 receives the
+  collection mask and runs its OWN per-view test (view+0x570,
+  FUN_1404F4E10, callback FUN_14288AC40). A reject at FUN_14430EFE0
+  removes at most the type-2 singletons; the candidate reject site for
+  the pool draws moves to the builder's view loop, to be confirmed by
+  the gate probe (advanced.cull_gate_capture, rides the eye-run hotkey
+  with eye_depth_capture; dump gate_<stamp>.bin + EDVRDRW1 v9 geometry;
+  reader tools\cull_gate_probe.py). The eye depth capture's constants
+  block is fixed (file version 2: registers 256-335, the camera at
+  270-275; version 1 never held it). Read the GPU side next to any CPU
   saving (addendum 2: 8-15 ms app GPU at 0.7559 scale). The approach onset is a RAMP with distance (stage 1
   per-record LOD admission fits; R1 4.0 -> 12.7 ms from 5.3 km to
   landing, r = 0.97 with job-0 samples); the settlement's collection
