@@ -141,6 +141,14 @@ int main(int argc, char** argv) {
                 "the flash threshold reads from [advanced]");
     expectFloat("advanced.transition_flash_speed_factor", 8.0f,
                 "...and its speed factor");
+    // The eye-run depth instrument ships as a commented template like the
+    // other developer instruments: the compiled default is what a user gets.
+    if (Config::get().getBool("advanced.eye_depth_capture", false) == false &&
+        Config::get().getBool("advanced.eye_depth_capture", true) == true)
+        ok("eye depth capture is documented but not live under [advanced]");
+    else
+        fail("eye depth capture is documented but not live under [advanced]",
+             "the shipped file defines it live");
 
     // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
     // This is the claim that a repeated section header is not a parse error
