@@ -27,15 +27,18 @@ context; every load-bearing claim cites its evidence.
   carries <= 2% of draws at buffer resolution), and a qualified
   inventory of their solid parts must reproduce >= ~45% of the ideal
   (68-79% if EDVR's own per-draw cost were cut to zero: the two levers
-  price the same draws). The gate's camera is its own argument (a view
-  record, one per eye) and its occludee spheres are there too, BUT its
-  verdict feeds only the type-2 item path: which per-view test admits
-  the pool draws (FUN_144308B30, the gate, Level 4) is unproven (§9).
-- **Next (§9):** decompile FUN_144308B30; then one armed capture at the
-  parked pose, no reject: per-view results beside each engine record's
-  t33 slots, the gate's view array (eye identity, same-frame proof) and
-  mesh geometry for the ~300 occluder records; then the inventory's
-  recall offline against the three depth captures.
+  price the same draws). SITE (§9 close-out 1): FUN_144308B30 is a
+  per-view distance/LOD test with no planes; FUN_14430EFE0's frustum
+  verdict reaches only the type-2 items. The pool draws' only per-view
+  frustum is the draw-item builder's view loop (FUN_1442B4420, one view
+  array for all three tests), which becomes the candidate site,
+  conditional on its items being the instanced pool draws.
+- **Next (§9):** the armed gate probe at the parked pose, no reject:
+  the builder's and the gate's per-view verdicts beside each engine
+  record's t33 slots (proves or refutes items -> pool draws), the view
+  array (eye identity, same-frame proof) and mesh geometry for the
+  occluder records; then the inventory's recall offline against the
+  three depth captures.
 - **Scope (Sean, 2026-09-22):** cockpit only — true stereoscopic settlement
   rendering from the ship. On foot is out of scope for now; the corpus and
   the profile legs are cockpit poses. Also to instrument: CPU frame time
@@ -48,11 +51,8 @@ context; every load-bearing claim cites its evidence.
   occluders; single-occluder rect coverage as the test. Phase B' (§9):
   the cockpit as the parked prize's occluder; nesting as what hides the
   parked view; the 2026-09-21 "<0.15 ms for 3.5k draws" baseline (§1:
-  its windows held no settlement frames).
-- **Tooling (2026-09-22, on main):** file-mode capture with hotkey legs;
-  the analyzer (regions R1-R6, per-thread busy, waker attribution,
-  `--runtime-log` reconciliation) reproduces the runtime's cycle phases
-  to 0.001 ms.
+  its windows held no settlement frames); a reject at FUN_14430EFE0 as
+  the pool-draw cull (type-2 items only).
 - **VERDICT (2026-09-22 evening, valid Phase A): KILL.** Two clean
   file-mode legs on build 2d8fbda (engine arc, "Phase A, valid: KILL"
   entry). Parked cockpit: the job pipeline is 5.24 ms thread-summed on
@@ -659,3 +659,62 @@ Gate before Phase C: the site proven, and the inventory reproducing
 >= ~45% of the ideal removal at R = 1 m (>= 1.5 ms), re-priced after the
 per-draw cut; a second cockpit pose (the approach, ~1 km) before the
 flight gates.
+
+**Close-out 1 (2026-09-22): which per-view test admits the pool draws,
+from decomp_4308B30.txt** (analysis\decomp, headless Ghidra, read-only
+project; the callees FUN_142817260, FUN_142842E90, FUN_14288AC40 and
+FUN_14288A1E0 decompiled beside it). rec+0x208 is written once per
+record per frame by the traversal from local_290
+(decomp_4312040.txt:325/338 -> 346), and local_290 never sees a
+frustum. It starts as the collection's ACTIVE MASK: FUN_144320340
+passes FUN_144331300's output+0x20 as the traversal's param_2
+(decomp_4320340.txt:44, 55; 4312040:136), and that mask is itself a
+per-view distance/LOD result with no planes (decomp_4331300.txt:129-190,
+view+0x540 camera, +0x550/+0x560 scale and bias, +0x570 view bits). The
+traversal drops views whose parent LOD nibble exceeds the node's LOD
+count (4312040:137-149), then views failing FUN_144308B30 (4312040:165).
+FUN_144308B30 is a per-view DISTANCE/SCREEN-SIZE test, 17 lines, no
+callees, no planes: per view bit it finds the view through the bit
+table ctx+0x1A840, measures the record's centre (rec+0x240) against the
+view's camera (view+0x540, read as ctx+0x580+i*0x6A0), scales by view
++0x550/+0x560 and the context's ctx+0x30, and either writes the view's
+LOD index into the nibble table (decomp_4308B30.txt:94-98; param_1[3] =
+local_230 -> rec+0x210) or clears the bit through param_1[4] =
+&local_290 (4308B30:101). FUN_14430EFE0's frustum verdict edits only
+local_288 (4312040:206-321), which feeds the type-2 path FUN_142817260
+-> FUN_144312E00 (4312040:326-337); rec+0x208, the nibble table and the
+children's incoming mask (4312040:353) never see it. Level 3 dispatches
+a record whose rec+0x208 holds any view within the node's LOD count
+(4320340:64-86) to FUN_1442B4420, handing it the collection's active
+mask rather than rec+0x208 (4320340:95), and the builder runs its OWN
+per-view admission: view+0x570 against that mask, FUN_1404F4E10 on the
+pose's transformed bounds, then (under DAT_145ea3399 and view+0x68D
+bit 0) the visibility callback FUN_14288AC40 (decomp_42B4420.txt:250-
+275), ORing each surviving view into local_4b8, the mask its items are
+built from. **So a reject at FUN_14430EFE0 removes at most the type-2
+singleton items** (FUN_144312E00, <= 3 items a call, 92 calls a frame
+in flight 073348) **and not** rec+0x208, the Level-3 dispatch, the
+builder's items (its own frustum loop re-admits the view), the
+children's traversal, or job-0's pose writes (FUN_14433DB20 runs at
+4312040:153, before the gate loop). The per-eye record sets of the pool
+draws (3a: 358 and 152 single-eye records, each outside the other eye's
+viewport) need a per-view frustum; of the three per-view tests only the
+builder's applies one to non-type-2 records. The site for removing pool
+draws is FUN_1442B4420's view loop (42B4420:250-275: clearing a view
+there before local_4b8 is ORed), conditional on the one link no
+decompile has shown, that the builder's items become the instanced pool
+draws: the 2026-09-21 trace found no route from either item list to the
+D3D draws, and Phase A's caller-thread "draw-item chain" (0x4C81CA0 <
+0x4C8227C) sitting beside the bucket drain's command enqueue
+FUN_144C7EF70 is suggestive, not proof. The gate probe (close-out 3)
+records the builder's per-view verdicts beside the t33 slots so one
+armed frame proves or refutes it. The camera answer of 3a stands: all
+three per-view tests read the same view array (FUN_144308B30 and
+FUN_144331300 its +0x540/+0x550/+0x560, the builder and FUN_14430EFE0
+its +0x30 planes).
+
+ruled out: a reject at FUN_14430EFE0 as the pool-draw cull, because its
+verdict (local_288) reaches only the type-2 item path, while rec+0x208
+and the draw-item builder's input come from the distance/LOD tests
+(4312040:137-165, 346; 4320340:95) and the builder re-tests the frustum
+itself (42B4420:250-275).
