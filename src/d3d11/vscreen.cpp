@@ -1273,11 +1273,68 @@ bool srv0IsPanelSized(State* s, char kind, uint32_t count) {
     const uint32_t w = s->panelW ? s->panelW : 1920;
     const uint32_t h = s->panelH ? s->panelH : 1080;
 
-    ResourceInfo info;
-    const bool resolved = bindingResolve(srv, &info) && info.isTexture2D;
-    const uint32_t lastW = resolved ? info.a : 0;
-    const uint32_t lastH = resolved ? info.b : 0;
-    const bool out = resolved && lastW == w && lastH == h;
+    // The generation above resets on every rebind -- even a rebind of the
+    // SAME view -- and once a frame regardless, so in a real frame it almost
+    // never carries an answer from one draw to the next: this would otherwise
+    // resolve on every eye-sized draw, which is the 0.15 ms/frame of guarded
+    // GetResource+GetType+GetDesc+Release this cache exists to remove.
+    //
+    // What a rebind cannot change is the VIEW's own identity, and D3D11 gives
+    // every ID3D11DeviceChild a private data store that lives and dies with
+    // the object -- unlike a map of our own keyed by the view pointer. This
+    // file shipped that exact bug twice already (see the comment above
+    // panelW below: panelSrcCache and eyeSizedCache, both in 0.5.2, both
+    // survived a view's destruction because D3D reuses freed addresses and
+    // answered for whatever the runtime put at that address next). A tag
+    // stored ON the object cannot make that mistake: a recycled address is a
+    // NEW object with an empty private-data store, so it reads back as
+    // untagged, never as someone else's stale answer -- there is no side
+    // table for it to have outlived.
+    //
+    // What is tagged is the view's resolved WIDTH/HEIGHT/isTexture2D, not the
+    // panel verdict: a resource's own dimensions cannot change for its life,
+    // but the panel side of the comparison (w/h above) can, under the
+    // resolution fix, so that comparison is still made fresh every call.
+    struct Srv0PanelTag { uint32_t isTexture2D; uint32_t width; uint32_t height; };
+    static FaultBudget srv0TagBudget("vScreen.srv0PanelTag", 5);
+    static const GUID kSrv0PanelTagGuid = {
+        0x7e2c9a15, 0x5d3b, 0x4f8e,
+        {0xa1, 0x6c, 0x9d, 0x4b, 0x2e, 0x71, 0x8f, 0x03}};
+
+    ID3D11View* const view = static_cast<ID3D11View*>(srv);
+    Srv0PanelTag tag{};
+    bool haveTag = false;
+    guardedBudget(srv0TagBudget, [&] {
+        UINT bytes = sizeof(tag);
+        haveTag = SUCCEEDED(view->GetPrivateData(kSrv0PanelTagGuid, &bytes, &tag)) &&
+                  bytes == sizeof(tag);
+    });
+
+    uint32_t lastW, lastH;
+    bool out;
+    if (haveTag) {
+        lastW = tag.width;
+        lastH = tag.height;
+        out = tag.isTexture2D != 0 && lastW == w && lastH == h;
+    } else {
+        ResourceInfo info;
+        const bool ok = bindingResolve(srv, &info);
+        const bool resolved = ok && info.isTexture2D;
+        lastW = resolved ? info.a : 0;
+        lastH = resolved ? info.b : 0;
+        out = resolved && lastW == w && lastH == h;
+        // Tag it only off a resolve that PROVED the pointer a live view a
+        // moment ago (bindingResolve's own guard just succeeded on it): an
+        // unknowable resolve is left untagged, exactly as today, rather than
+        // risk a SetPrivateData on a pointer that may not be a real COM
+        // object at all.
+        if (ok) {
+            const Srv0PanelTag fresh{resolved ? 1u : 0u, lastW, lastH};
+            guardedBudget(srv0TagBudget, [&] {
+                view->SetPrivateData(kSrv0PanelTagGuid, sizeof(fresh), &fresh);
+            });
+        }
+    }
     // What an eye-sized draw sampled when it was NOT the panel.
     //
     // In HMD Cinema Mode the override applies once a frame rather than twice, so
