@@ -66,11 +66,19 @@
   mapWaitNote 0.40 ms, the draw-hook verdict lambda 0.20, the
   CreateBuffer hook 0.17, /GS cookies 0.16, guarded<> 0.11, qpcNow per
   draw 0.09, binding hash 0.11, and a tail of per-draw predicates) and
-  CUT, BUILT, NOT FLOWN (2026-09-22 per-draw-cut entry: the tail was
-  cross-TU call overhead under /O2 without /GL; once-per-frame gate,
-  inline readers and live guards, noinline for the two GS-buffer
-  bodies; paper saving ~1.5-2.0 ms); remeasure with the same two legs
-  against the analyzer's R1 module split — the bar is the 3.94 ms;
+  CUT and BUILT (2026-09-22 per-draw-cut entry: the tail was cross-TU
+  call overhead under /O2 without /GL; inline readers and live guards,
+  noinline for the two GS-buffer bodies); leg 1 re-flown once on it,
+  INCONCLUSIVE (2026-09-22 re-fly entry: SteamVR at 0.7559 instead of
+  Pimax OpenXR at 0.566, a different pad and heading, rate unsettled;
+  EDVR leaf 3.81 vs 3.94 ms and the gfx log's own draw-hook line
+  3.70-4.06 vs 3.84-3.98 ms, while the game-side load rose 30-55%);
+  the panel-distance fix makes the forty-term hoist inert, so the next
+  targets are beginPanelOverride's body 0.56 ms, forwardWithVerdict's
+  own body 0.61, hookedMap 0.37, the CreateBuffer hook 0.28, guarded<>
+  0.22 and the DrawClock's 2 ms every-16th-frame hitch; a measurement
+  needs the 16:50 leg's environment (Pimax OpenXR, same scale, the
+  original pad at heading 42) — the bar is the 3.94 ms;
   cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
   the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
   must be read next to it; (1b) the RE-SCOPED cull (design doc §8):
@@ -2055,3 +2063,63 @@ bindings 0.18, cookies and frames on the two extracted bodies, the
 probe and journal calls) - a paper number until the same two legs are
 flown against the analyzer's R1 byTopModule EDVR count. Gate: build.bat
 with EDVR_PROFILE_SYMBOLS=1 green on the merged tree.
+
+### 2026-09-22 -- Leg 1 re-flown on the cut (build b9c41c0): INCONCLUSIVE, the environment changed three ways; EDVR's per-frame hook cost unchanged by both instruments; beginPanelOverride re-read
+
+build\phaseA-parked-3: 80 s, 3.1 GB, pid 7132, log build v0.17.0-316-
+gb9c41c0 (check exit 0), 3006 frames all covered, both PDBs matched by
+GUID+age and copied by the capture tool, analyzer symbols enabled
+(every EDVR frame named from the matching PDB - the first run of that
+path). Reconciliation holds (window 6: 0.001 ms).
+
+**Not a before/after.** The runtime log names a different runtime and
+resolution: headset_key steamvr-openxr/steamvr-openxr-aapvr, runtime
+SteamVR/OpenXR, requested 0.7559 - every earlier leg ran Pimax OpenXR
+at 0.566 (1.78x fewer pixels). The ship was parked at the approach
+leg's touchdown point, lat 68.094749 lon 121.076538 heading 195, not
+the original pad at lat 68.067474 lon 121.028328 heading 42. The rate
+never settled: windows 4-8 read 68 / 52 / 43 / 49 / 56 fps against the
+old leg's flat 45.0 for four windows, the next-wait phase collapsed to
+0.15 ms (SteamVR does not hold the caller at a half-rate slot the way
+Pimax OpenXR did) and the cycle ran flat out at 23.2 ms of caller work.
+
+**What the caller thread did (window 6, 1291 frames, new vs old leg
+window 15):** R1 14.33 ms (11.14), running 13.59 (10.97); R5c 6.31
+(4.56); caller running per frame 17.9 ms (15.1). By innermost module in
+R1, ms/frame new vs old: game exe 5.84 vs 4.45; EDVR d3d11 3.81 vs
+3.94; System32 d3d11 1.05 vs 0.74; kernel 1.17 vs 0.53; ntdll 0.72 vs
+0.59; nvwgf2umx 0.70 vs 0.50. Thread-summed pipeline 6.06 vs 5.24 ms.
+The CreateBuffer hook 359 vs 232 samples, hookedMap 475 vs 425. So the
+game-side load rose 30-55% (a different view, more dynamic-resource
+churn, the kernel's share doubled under it) while EDVR's own leaf time
+stayed within 3%. EDVR's second instrument agrees: the gfx log's
+"draw hook CPU" line (EDVR's own time inside its hooks per sampled
+frame, one frame in 16) read 3.84-3.98 ms across the old parked leg and
+3.70-4.06 ms across this one. Relative to the D3D runtime's own time
+under the same draws, EDVR's share fell from 5.3x to 3.6x, which is the
+only normalization the data allows and is stated as such.
+
+**A correction to the cut entry, from the named stacks.** The gfx log
+prints "vScreen fixes installed: ... panel distance on": s->
+distanceEnabled is the FIRST term of beginPanelOverride's forty-term
+chain, so the old chain short-circuited after one load and the hoist
+saved nothing there. The 658 (now 721) innermost samples are the
+function's BODY, which runs for every draw whenever any subscriber is
+on - it, and forwardWithVerdict's own inline body (786 innermost
+samples, 0.61 ms, the largest single EDVR entry in this leg), are the
+next targets. What did vanish from the table: bindingGet/ShaderHash,
+introProbeWants, quadProbeWants, journalGameplay, celestial begin,
+meshMotionDraw, screenMotion*, and the cookie samples fell from 221 to
+~55. What remains, with what grew with the call volume: forwardWith-
+Verdict body 0.61, beginPanelOverride body 0.56, hookedMap 0.37,
+CreateBuffer hook 0.28, guarded<> 0.22, qpcNow 0.13 (the DrawClock
+samples one frame in 16 and spends ~2 ms on THAT frame: a periodic
+hitch, to be sampled far less often or removed), beforeTone 0.12
+(ui_deferred, a live feature, not temporal-gated - my earlier reading
+was wrong), gpuFrameCommand 0.11, hookedCreateTexture2D 0.07.
+
+**Verdict:** the cut's paper saving is not measurable from this leg;
+the realized per-frame change is within noise under a heavier scene.
+The measurement it needs is the same environment as the 16:50 leg:
+Pimax OpenXR at the same render scale, parked on the original pad at
+heading 42, the same ini. ruled out: nothing.
