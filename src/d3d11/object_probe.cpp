@@ -2991,8 +2991,8 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     const uint32_t depthFiles=g_eyeDepthCapture.write(ctx,dir.c_str(),g_ledgerStamp);
     Log::get().note("object probe: eye depth capture %ls: %u files (depth_%ls_f<frame>_<A|B>.bin), "
                     "%llu payload bytes staged, %u non-eye draws skipped (offscreen phases the depth "
-                    "probe's scene pair does not name; eye identity comes from that pair, wanted with "
-                    "fix.temporal_aa or fix.eye_mask), %u range/budget declines, %u readback/write "
+                    "probe's scene pair does not name; eye identity comes from that pair, and this "
+                    "instrument switches the probe on itself), %u range/budget declines, %u readback/write "
                     "failures, %u SEH faults; %s. Each file is one eye pass's completed D32 depth plus "
                     "that pass's VS b1 floats [256,592) from its first pool-carrying draw "
                     "(view-projection rows at 270..273, camera-relative origin at 275); eye A/B is the "
