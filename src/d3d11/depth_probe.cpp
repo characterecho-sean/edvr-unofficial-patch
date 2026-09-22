@@ -16,6 +16,12 @@
 #include "temporal_pass.h"
 
 namespace edvr {
+
+// The probe's arming, out here only so depth_probe.h can read it inline.
+namespace detail {
+bool g_depthProbeWanted = false;
+}  // namespace detail
+
 namespace {
 
 // The sampler: 256 depth values on a 16x16 grid across the target, read
@@ -84,7 +90,9 @@ int      g_targetCount = 0;
 void*    g_lastDsv = nullptr;
 void*    g_lastDrawDsv = nullptr;   // the per-draw fast path's cache
 int      g_lastDrawIdx = -1;
-bool     g_wanted = false;
+// Bound to the published flag depthProbeWanted() reads (depth_probe.h), so
+// the name this file and its rig have always used reads and writes it.
+bool&    g_wanted = detail::g_depthProbeWanted;
 uint32_t g_distinctThisFrame = 0;
 uint32_t g_maxDistinct = 0;
 uint32_t g_eyeFrames = 0;   // frames that had at least one eye draw

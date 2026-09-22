@@ -1861,9 +1861,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
     }
     // Every draw's depth target, for the depth probe's census of where the
-    // game's depth actually goes (depth_probe.h): one pointer compare.
-    depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
-                       bindingGet(BindSlot::Rtv0) == nullptr);
+    // game's depth actually goes (depth_probe.h): one pointer compare --
+    // and, while nothing arms the probe, not even the call (depthProbeWanted
+    // is the note's own first test, inline).
+    if (depthProbeWanted()) {
+        depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
+                           bindingGet(BindSlot::Rtv0) == nullptr);
+    }
     if (!s->rtv0Eye) {
         if (screenMotionLive()) screenMotionSource(self,s->panelW?s->panelW:1920,s->panelH?s->panelH:1080);
         // NOT an eye texture -- but it is still a DRAW, and where the draws

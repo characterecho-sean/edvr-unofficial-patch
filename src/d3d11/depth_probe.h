@@ -58,6 +58,15 @@ void depthProbeConfigure(Config& cfg);
 void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
                         bool rtvNull);
 
+// Is the probe watching? depthProbeNoteDraw's own first test, published so
+// the draw path can skip the call: the probe is armed only by fix.temporal_aa,
+// fix.eye_mask or advanced.eye_depth_capture, and with all three off the note
+// was a cross-TU call per draw (this build has no /GL) that returned at once --
+// 49 innermost samples of the flown 2026-09-22 window, all on its prologue and
+// epilogue.
+namespace detail { extern bool g_depthProbeWanted; }
+inline bool depthProbeWanted() { return detail::g_depthProbeWanted; }
+
 // The indirect draws (DrawIndexedInstancedIndirect and its twin), which
 // never reach the classifier: counted and their depth target noted, so a
 // scene drawn GPU-side is not invisible to the census.
