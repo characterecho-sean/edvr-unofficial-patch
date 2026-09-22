@@ -204,7 +204,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   std::atomic<bool> timingApplicationOpen{false};
   std::atomic<uint64_t> timingApplicationSequence{0};
   unsigned timingFrameMask=0;
-  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_3};
+  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_4};
   bool timingGpuBegun[2]{};
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
@@ -675,7 +675,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     for(unsigned i=0;i<count;++i)timing.publishDeviceGpu(samples[i]);
   }
   void timingResetFrame(uint64_t sequence) {
-    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_3};
+    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_4};
     timingFrame.sequence=sequence;
     const double missing=std::numeric_limits<double>::quiet_NaN();
     for(double& value:timingFrame.submitMs)value=missing;
@@ -683,6 +683,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     for(double& value:timingFrame.menuMs)value=missing;
     for(double& value:timingFrame.transferMs)value=missing;
     timingFrame.composeMs=missing;
+    // The base the consumer flags throttling against: the display_frequency
+    // publication (runtime refresh rate, or the compatibility 90 Hz default).
+    const auto system=read();
+    timingFrame.baseDisplayHz=system.displayFrequencyAvailable&&std::isfinite(system.displayFrequency)&&system.displayFrequency>0?system.displayFrequency:0;
   }
   bool invalidateOrigin(const char* reason="reference_change") {
     menu.invalidate(); // CPU only, including callers without a producer boundary.

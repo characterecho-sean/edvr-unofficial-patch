@@ -1,9 +1,16 @@
 #pragma once
 #include <windows.h>
 #include <d3d11.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define EDVR_NATIVE_TIMING_VERSION_3 3u
+// Version 4 appends baseDisplayHz to the END of EdvrNativeTimingFrame and
+// nothing else. The two DLLs are copied apart by hand all the time (the same
+// rule native_frame.h states), so publishCpu still accepts a version 3 frame
+// of the smaller size; it simply carries no base display rate, and the
+// consumer falls back to the session's first predicted period.
+#define EDVR_NATIVE_TIMING_VERSION_4 4u
 // Private paired-module measurement capability. Acquire binds the producer;
 // gpuEye runs only on that thread. All other callbacks are CPU-only and may
 // run on the XR owner. The host retains the module/device through close.
@@ -27,7 +34,16 @@ struct EdvrNativeTimingFrame {
     float gameFov[2][4];
     uint32_t treatments[2];
     uint64_t featureEpoch;
+    // Version 4 and later. The panel's base refresh rate in hertz, from the
+    // same publication the display_frequency log line names (0 when the
+    // runtime has published none). The consumer compares the predicted period
+    // against this base to flag a throttled display rate.
+    float baseDisplayHz;
 };
+// The size the fields through featureEpoch occupy, which is what a version 3
+// caller's struct is. baseDisplayHz follows with no tail padding in play.
+#define EDVR_NATIVE_TIMING_FRAME_SIZE_3 \
+    ((uint32_t)offsetof(EdvrNativeTimingFrame, baseDisplayHz))
 enum EdvrNativeGpuStatus : uint32_t {
     EdvrNativeGpuPending, EdvrNativeGpuValid, EdvrNativeGpuDisabled,
     EdvrNativeGpuIncomplete, EdvrNativeGpuQueryFailure, EdvrNativeGpuStale,

@@ -312,8 +312,12 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
 HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
     std::lock_guard<std::mutex> lock(lifetime);
     Context* c = identify(p);
+    // A version 3 caller's struct ends at featureEpoch; accept it and let the
+    // missing baseDisplayHz read as 0 (the consumer's fallback covers it).
+    const bool frameV4 = frame && frame->version == EDVR_NATIVE_TIMING_VERSION_4;
     if (!c || !c->active || c != current || !frame ||
-        frame->size != sizeof(*frame) || frame->version != EDVR_NATIVE_TIMING_VERSION_3 ||
+        (frame->version != EDVR_NATIVE_TIMING_VERSION_3 && !frameV4) ||
+        frame->size != (frameV4 ? uint32_t(sizeof(*frame)) : EDVR_NATIVE_TIMING_FRAME_SIZE_3) ||
         !c->waitValid || c->published || frame->sequence != c->waitSequence) return E_INVALIDARG;
     bool fieldsValid = finiteNonnegative(frame->composeMs);
     for (unsigned eye = 0; eye < 2; ++eye) fieldsValid = fieldsValid &&
@@ -324,7 +328,8 @@ HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
         poison(frame->sequence); c->waitValid = false;
         clearCpu(); snapshot.invalid = true; return E_INVALIDARG;
     }
-    snapshot.cpu = *frame;
+    snapshot.cpu = {};
+    std::memcpy(&snapshot.cpu, frame, frame->size);
     snapshot.haveCpu = true;
     snapshot.invalid = false;
     snapshot.active = true;

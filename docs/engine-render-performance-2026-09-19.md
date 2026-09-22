@@ -1620,3 +1620,10 @@ at 26 MP - the user's original 'settlements are CPU-bound' is rig-true.
 FIX (small, spec'd): a DISPLAY tile on the native path - surface the
 runtime's predictedPeriod (throttle detection) plus a display-cadence
 estimate, so the page can never read 56 while the headset shows 45.
+
+Landed 2026-09-22 (branch perf-monitor-display-tile-2026-09-22): DISPLAY
+tile shows predictedPeriod as Hz with the base rate and a THROTTLED flag at
+>1.5x base; base crosses as EdvrNativeTimingFrame v4 baseDisplayHz (the
+display_frequency publication), falling back to the session's first
+predicted period for a v3 host. No display-cadence estimate shipped: no
+accepted/completed-frame counter with display timestamps crosses the ABI.

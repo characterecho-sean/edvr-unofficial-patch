@@ -7,6 +7,11 @@
 //                                    here every frame (one clock read and a
 //                                    store; the ring is the only per-frame
 //                                    work when the page is not showing)
+//   DISPLAY (native path only)       the runtime's predicted display period
+//                                    as Hz, its base rate, and a THROTTLED
+//                                    flag when the prediction passes 1.5x
+//                                    base -- the display side the producer
+//                                    cadence cannot show
 //   app GPU, compositor GPU,         the compositor's own frame timing, read
 //   dropped, reprojected             by the openvr half once a frame and
 //                                    published on the channel (frame_timing.h)

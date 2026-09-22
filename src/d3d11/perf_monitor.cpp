@@ -1317,6 +1317,31 @@ int perfMonitorTiles(PerfTile* out, int max) {
         }
         tile("EDVR PASSES", v, sub);
     }
+    // The display side, which no producer tile can show: the runtime's
+    // predicted period is the display cadence it advertises -- the same ring
+    // value the periodic native-metrics log line prints -- and against the
+    // base rate, a prediction past 1.5x base means the headset is delivering
+    // a throttled display rate (e.g. SteamVR halving 90 Hz to 45 under the
+    // wall) no matter what FRAME RATE's producer cadence reads. No runtime
+    // accepted/completed-frame counter with display timestamps crosses the
+    // ABI, so there is deliberately no measured display-cadence figure here.
+    if (native) {
+        const double predicted = s.nativeHistory.predictedPeriod(historyNow);
+        const double baseMs = s.nativeHistory.basePeriodMs(historyNow);
+        if (predicted > 0.0) {
+            snprintf(v, sizeof(v), "%.1f", 1000.0 / predicted);
+            if (baseMs > 0.0) {
+                snprintf(sub, sizeof(sub), "Hz display (base %.1f)%s", 1000.0 / baseMs,
+                         NativePerfHistory::displayThrottled(predicted, baseMs) ? "; THROTTLED" : "");
+            } else {
+                snprintf(sub, sizeof(sub), "Hz display; base unknown");
+            }
+        } else {
+            snprintf(v, sizeof(v), "--");
+            snprintf(sub, sizeof(sub), "runtime prediction unavailable");
+        }
+        tile("DISPLAY", v, sub);
+    }
     return n;
 }
 void perfMonitorLastDropLine(char* buf, size_t bufLen) {
