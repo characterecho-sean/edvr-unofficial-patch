@@ -108,13 +108,19 @@ internal static class RvaTable
     };
 }
 
-internal sealed class ModuleInfo(int id, string path, string name, ulong imageBase, ModuleClass moduleClass)
+internal sealed class ModuleInfo(int id, string path, string name, ulong imageBase, ModuleClass moduleClass,
+                                 string pdbName = "", Guid pdbSignature = default, int pdbAge = 0)
 {
     public int Id { get; } = id;
     public string Path { get; } = path;
     public string Name { get; } = name;
     public ulong ImageBase { get; } = imageBase;
     public ModuleClass Class { get; } = moduleClass;
+    // The CodeView record of the binary that actually ran. A PDB is only usable
+    // when it carries this signature and age.
+    public string PdbName { get; } = pdbName;
+    public Guid PdbSignature { get; } = pdbSignature;
+    public int PdbAge { get; } = pdbAge;
     public long Frames;
 
     /// The two d3d11.dll are the same file name in different directories, and
@@ -336,7 +342,8 @@ internal sealed class StackStore
         var id = _modules.Count;
         var path = module.FilePath ?? "";
         var name = string.IsNullOrEmpty(path) ? module.Name ?? "" : System.IO.Path.GetFileName(path);
-        _modules.Add(new ModuleInfo(id, path, name, module.ImageBase, Classify(path, name)));
+        _modules.Add(new ModuleInfo(id, path, name, module.ImageBase, Classify(path, name),
+                                    module.PdbName ?? "", module.PdbSignature, module.PdbAge));
         _moduleIds[index] = id;
         return id;
     }
@@ -367,6 +374,10 @@ internal sealed class StackStore
         if (lowerPath.Contains(@"\windows\")) return ModuleClass.SystemModule;
         return ModuleClass.Other;
     }
+
+    /// The one EDVR d3d11.dll whose RVAs the chain tables are expressed in.
+    public int EdvrD3d11ModuleId =>
+        _modules.FirstOrDefault(module => module.Class == ModuleClass.EdvrD3d11)?.Id ?? -1;
 
     public string DisplayName(int moduleId) =>
         moduleId >= 0 && moduleId < _modules.Count ? _modules[moduleId].Display : "unresolved";
@@ -406,7 +417,7 @@ internal sealed class StackStore
     /// One stack as a single string: a game frame is its RVA, anything else is
     /// its module name, and a run of frames in the same module collapses to
     /// name*count so the line stays readable.
-    public string Signature(StackInfo info, int maxTokens = 20)
+    public string Signature(StackInfo info, int maxTokens = 20, SymbolTable? symbols = null)
     {
         var tokens = new List<string>();
         var run = "";
@@ -418,6 +429,15 @@ internal sealed class StackStore
                         info.Addresses[i] >= _modules[moduleId].ImageBase
                 ? $"0x{info.Addresses[i] - _modules[moduleId].ImageBase:x}"
                 : DisplayName(moduleId);
+            // An EDVR frame becomes "d3d11.dll [edvr]!Function" once its own
+            // PDB has been matched; everything else keeps the module name.
+            if (symbols is { Enabled: true } && moduleId >= 0 &&
+                _modules[moduleId].Class is ModuleClass.EdvrD3d11 or ModuleClass.EdvrOpenvrApi &&
+                info.Addresses[i] >= _modules[moduleId].ImageBase)
+            {
+                var hit = symbols.Resolve(moduleId, (uint)(info.Addresses[i] - _modules[moduleId].ImageBase));
+                if (hit is not null) token = $"{DisplayName(moduleId)}!{hit.Name}";
+            }
             if (token == run) { runCount++; continue; }
             if (runCount > 0) tokens.Add(runCount > 1 ? $"{run}*{runCount}" : run);
             run = token;

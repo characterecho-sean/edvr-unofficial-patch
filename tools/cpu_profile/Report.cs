@@ -43,7 +43,9 @@ internal static class Report
     public const int FixedWindowUs = 5_000_000;
 
     public static Dictionary<string, object?> Build(string input, int pid, Collected data, string framesPath,
-                                                    RuntimeLogResult? runtimeLog, Action<string>? progress = null)
+                                                    RuntimeLogResult? runtimeLog, SymbolTable? symbols = null,
+                                                    Action<string>? progress = null, string? edvrExportPath = null,
+                                                    int edvrExportWindow = 0, string edvrExportRegion = "R1")
     {
         if (data.Clocks.Count == 0) throw new InvalidDataException("trace has no valid EDVR Clock marker");
         if (data.KernelFirstQpc == long.MaxValue || data.KernelLastQpc == long.MinValue)
@@ -106,6 +108,8 @@ internal static class Report
                          $"covered={cycles.Count(c => c.Covered)}");
 
         var groups = Group(cycles, runtimeLog);
+        if (edvrExportPath is not null) WriteEdvrExport(edvrExportPath, edvrExportWindow, edvrExportRegion,
+                                                       input, pid, groups, data, symbols);
         var stackGroups = new Dictionary<(string Kind, int StackId), long>();
         var frameReports = new List<Dictionary<string, object?>>();
         var discardedPrefix = 0;
@@ -254,11 +258,12 @@ internal static class Report
             ["spanOffsets"] = SpanOffsets(cycles),
             ["cycleCoveredWithoutDerivation"] = analyzer.CoveredWithoutDerivation,
             ["threads"] = Threads(covered, data),
-            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data),
+            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data, 30, symbols),
+            ["symbols"] = (symbols ?? SymbolTable.Off()).ToJson(),
             ["rvaClasses"] = RvaClasses(covered, data, analyzer),
             ["attributionSummary"] = Attribution(covered, data),
             ["gate"] = Gate(covered),
-            ["windows"] = groups.Select(group => Window(group, data)).ToArray(),
+            ["windows"] = groups.Select(group => Window(group, data, symbols)).ToArray(),
             ["runtimeLog"] = runtimeLog is null ? null : new Dictionary<string, object?>
             {
                 ["path"] = runtimeLog.Path,
@@ -314,7 +319,7 @@ internal static class Report
         return groups;
     }
 
-    private static Dictionary<string, object?> Window(WindowGroup group, Collected data)
+    private static Dictionary<string, object?> Window(WindowGroup group, Collected data, SymbolTable? symbols)
     {
         var frames = group.Frames;
         var derived = frames.Where(frame => frame.Derived).ToList();
@@ -360,7 +365,7 @@ internal static class Report
             ["spanOffsets"] = SpanOffsets(frames),
             ["regions"] = Regions(covered),
             ["threads"] = Threads(covered, data),
-            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data),
+            ["callerStacksByRegion"] = CallerStacksByRegion(covered, data, 30, symbols),
             ["attribution"] = Attribution(covered, data),
             ["gate"] = Gate(covered),
         };
@@ -585,10 +590,12 @@ internal static class Report
     /// innermost frame's module, the modules and classes anywhere in the stack,
     /// and the stacks themselves. One sample is one sampling interval, so a
     /// count is also a time.
-    public static object CallerStacksByRegion(List<FrameCycle> frames, Collected data, int topGroups = 30)
+    public static object CallerStacksByRegion(List<FrameCycle> frames, Collected data, int topGroups = 30,
+                                              SymbolTable? symbols = null, int rvaCap = 200, int chainCap = 60)
     {
         var rows = new List<Dictionary<string, object?>>();
         var interval = data.SampleIntervalUs;
+        var edvrModule = data.Stacks.EdvrD3d11ModuleId;
         for (byte group = 0; group < CycleAnalyzer.SampleRegionNames.Length; group++)
         {
             var byModule = new Dictionary<string, long>();
@@ -604,7 +611,7 @@ internal static class Report
                     var stack = data.Stacks[stackId];
                     total++;
                     Numeric.Increment(byModule, data.Stacks.DisplayName(stack.TopModuleId));
-                    Numeric.Increment(bySignature, data.Stacks.Signature(stack));
+                    Numeric.Increment(bySignature, data.Stacks.Signature(stack, 20, symbols));
                     if (stack.AnyEdvrD3d11) edvr++;
                     if (stack.AnySystemD3d11) system++;
                     if (stack.AnyNvidiaUserMode) nvidia++;
@@ -655,22 +662,88 @@ internal static class Report
                 // RVAs inside EDVR's own d3d11.dll, for symbolizing against the
                 // built DLL: the innermost frame of each sample, and the chain
                 // through our hook with the game call site that entered it.
-                ["edvrInnermostRvas"] = edvrInnermost.OrderByDescending(pair => pair.Value).Take(40)
-                    .Select(pair => new Dictionary<string, object?>
+                // The lists below are capped, so they carry their own uncapped
+                // totals: summing a truncated breakdown is not a total, and
+                // reading one as if it were has already cost a reconciliation.
+                ["edvrInnermostTotal"] = edvrInnermost.Values.Sum(),
+                ["distinctRvaCount"] = edvrInnermost.Count,
+                ["edvrChainTotal"] = edvrChains.Values.Sum(),
+                ["distinctChainCount"] = edvrChains.Count,
+                ["edvrInnermostRvas"] = edvrInnermost.OrderByDescending(pair => pair.Value).Take(rvaCap)
+                    .Select(pair =>
                     {
-                        ["rva"] = pair.Key,
-                        ["count"] = pair.Value,
+                        var row = new Dictionary<string, object?>
+                        {
+                            ["rva"] = pair.Key,
+                            ["count"] = pair.Value,
+                        };
+                        symbols?.Annotate(row, edvrModule, pair.Key);
+                        return row;
                     }).ToArray(),
-                ["edvrChains"] = edvrChains.OrderByDescending(pair => pair.Value).Take(25)
-                    .Select(pair => new Dictionary<string, object?>
+                ["edvrChains"] = edvrChains.OrderByDescending(pair => pair.Value).Take(chainCap)
+                    .Select(pair =>
                     {
-                        ["chain"] = pair.Key.Chain.Split(" < "),
-                        ["gameCallSite"] = pair.Key.Site,
-                        ["count"] = pair.Value,
+                        var chain = pair.Key.Chain.Split(" < ");
+                        var row = new Dictionary<string, object?>
+                        {
+                            ["chain"] = chain,
+                            ["gameCallSite"] = pair.Key.Site,
+                            ["count"] = pair.Value,
+                        };
+                        if (symbols is { Enabled: true })
+                            row["chainSymbols"] = chain.Select(rva =>
+                            {
+                                var frame = new Dictionary<string, object?> { ["rva"] = rva };
+                                symbols.Annotate(frame, edvrModule, rva);
+                                return frame;
+                            }).ToArray();
+                        return row;
                     }).ToArray(),
             });
         }
         return rows;
+    }
+
+    /// The uncapped EDVR RVA lists for one window and one region, as their own
+    /// file. report.json's copies are capped to keep it small, and this window's
+    /// R1 alone has over a thousand distinct RVAs, so a complete list has to be
+    /// asked for rather than reconstructed from a truncated one.
+    private static void WriteEdvrExport(string path, int window, string region, string input, int pid,
+                                        List<WindowGroup> groups, Collected data, SymbolTable? symbols)
+    {
+        var group = groups.FirstOrDefault(item => item.Number == window);
+        var covered = group?.Frames.Where(frame => frame.Covered).ToList() ?? [];
+        var regions = (List<Dictionary<string, object?>>)CallerStacksByRegion(
+            covered, data, 30, symbols, int.MaxValue, int.MaxValue);
+        var row = regions.FirstOrDefault(item => (string)item["region"]! == region);
+        var innermost = row is null ? [] : (Dictionary<string, object?>[])row["edvrInnermostRvas"]!;
+        var chains = row is null ? [] : (Dictionary<string, object?>[])row["edvrChains"]!;
+        var topModule = row is null ? 0L : ((Dictionary<string, object?>[])row["byTopModule"]!)
+            .Where(module => (string)module["module"]! == "d3d11.dll [edvr]")
+            .Select(module => Convert.ToInt64(module["samples"])).FirstOrDefault();
+        var export = new Dictionary<string, object?>
+        {
+            ["source"] = input,
+            ["pid"] = pid,
+            ["window"] = window,
+            ["region"] = region,
+            ["frames"] = covered.Count,
+            ["module"] = "d3d11.dll in the game directory (EDVR)",
+            ["note"] = "RVAs are address minus that module's image base; chains run innermost outward",
+            ["callerSamplesTopFrameInEdvr"] = topModule,
+            ["callerSamplesAnyEdvrFrame"] = row?["anyFrameIn"] is Dictionary<string, object?> any
+                ? any["edvrD3d11"] : 0L,
+            ["edvrInnermostTotal"] = row?["edvrInnermostTotal"],
+            ["distinctRvaCount"] = row?["distinctRvaCount"],
+            ["edvrChainTotal"] = row?["edvrChainTotal"],
+            ["distinctChainCount"] = row?["distinctChainCount"],
+            ["capped"] = false,
+            ["innermost"] = innermost,
+            ["chains"] = chains,
+        };
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        File.WriteAllText(path, JsonSerializer.Serialize(export,
+            new JsonSerializerOptions { WriteIndented = true }));
     }
 
     /// Wait time by region of the cycle crossed with the waker class, so R1's

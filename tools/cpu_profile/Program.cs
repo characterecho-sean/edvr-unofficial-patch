@@ -54,14 +54,21 @@ internal static class Program
         }
     }
 
-    internal sealed record Options(string Input, int Pid, string Output, string? RuntimeLog, string Frames);
+    internal sealed record Options(string Input, int Pid, string Output, string? RuntimeLog, string Frames,
+                                   string? Symbols, string? EdvrExport, int EdvrExportWindow,
+                                   string EdvrExportRegion);
 
     private const string Usage = "usage: EdvrCpuProfile --input <etl> --pid <pid> --output <report.json> " +
-                                 "[--runtime-log <log>] [--frames <frames.jsonl>] | --self-test";
+                                 "[--runtime-log <log>] [--frames <frames.jsonl>] [--symbols <dir>] " +
+                                 "[--edvr-export <path> --edvr-export-window <n> [--edvr-export-region R1]] " +
+                                 "| --self-test";
 
     internal static Options ParseOptions(string[] args)
     {
-        string? input = null, output = null, runtimeLog = null, frames = null;
+        string? input = null, output = null, runtimeLog = null, frames = null, symbols = null;
+        string? edvrExport = null;
+        var edvrExportRegion = "R1";
+        var edvrExportWindow = 0;
         int? pid = null;
         for (var i = 0; i < args.Length; i++)
         {
@@ -70,6 +77,11 @@ internal static class Program
             else if (args[i] == "--output" && ++i < args.Length) output = args[i];
             else if (args[i] == "--runtime-log" && ++i < args.Length) runtimeLog = args[i];
             else if (args[i] == "--frames" && ++i < args.Length) frames = args[i];
+            else if (args[i] == "--symbols" && ++i < args.Length) symbols = args[i];
+            else if (args[i] == "--edvr-export" && ++i < args.Length) edvrExport = args[i];
+            else if (args[i] == "--edvr-export-window" && ++i < args.Length &&
+                     int.TryParse(args[i], out var exportWindow)) edvrExportWindow = exportWindow;
+            else if (args[i] == "--edvr-export-region" && ++i < args.Length) edvrExportRegion = args[i];
             else throw new ArgumentException(Usage);
         }
         if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output) || pid is null || pid <= 0)
@@ -77,13 +89,28 @@ internal static class Program
         if (!File.Exists(input)) throw new FileNotFoundException("ETL input does not exist", input);
         if (runtimeLog is not null && !File.Exists(runtimeLog))
             throw new FileNotFoundException("runtime log does not exist", runtimeLog);
+        if (symbols is not null && !Directory.Exists(symbols))
+            throw new DirectoryNotFoundException($"symbol directory does not exist: {symbols}");
         var outputPath = Path.GetFullPath(output);
         var framesPath = string.IsNullOrWhiteSpace(frames)
             ? Path.Combine(Path.GetDirectoryName(outputPath)!,
                            Path.GetFileNameWithoutExtension(outputPath) + ".frames.jsonl")
             : Path.GetFullPath(frames);
         return new Options(Path.GetFullPath(input), pid.Value, outputPath,
-                           runtimeLog is null ? null : Path.GetFullPath(runtimeLog), framesPath);
+                           runtimeLog is null ? null : Path.GetFullPath(runtimeLog), framesPath,
+                           symbols is null ? DefaultSymbolDirectory(input) : Path.GetFullPath(symbols),
+                           edvrExport is null ? null : Path.GetFullPath(edvrExport), edvrExportWindow,
+                           edvrExportRegion);
+    }
+
+    /// The capture tool drops the PDBs that match the installed DLLs beside the
+    /// trace, so a capture directory symbolizes itself with no extra argument.
+    internal static string? DefaultSymbolDirectory(string input)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(input));
+        if (string.IsNullOrEmpty(directory)) return null;
+        var symbols = Path.Combine(directory, "symbols");
+        return Directory.Exists(symbols) ? symbols : null;
     }
 
     private static Dictionary<string, object?> Analyze(Options options, Action<string>? progress)
@@ -100,7 +127,15 @@ internal static class Program
             progress?.Invoke($"etlx: {new FileInfo(converted).Length / 1048576} MB");
             using var log = new TraceLog(converted);
             var data = Collector.Collect(log, options.Pid, progress);
-            return Report.Build(options.Input, options.Pid, data, options.Frames, runtimeLog, progress);
+            var symbols = options.Symbols is null
+                ? SymbolTable.Off()
+                : PdbSymbols.Load(options.Symbols, data.Stacks.Modules);
+            if (options.Symbols is not null)
+                progress?.Invoke($"symbols: {options.Symbols} enabled={symbols.Enabled} " +
+                                 $"matched={symbols.Modules.Count(module => module.Matched)}" +
+                                 $"/{symbols.Modules.Count}");
+            return Report.Build(options.Input, options.Pid, data, options.Frames, runtimeLog, symbols, progress,
+                                options.EdvrExport, options.EdvrExportWindow, options.EdvrExportRegion);
         }
         finally
         {

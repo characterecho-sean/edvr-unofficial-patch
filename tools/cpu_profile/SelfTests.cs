@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Buffers.Binary;
 
 // Every computation in this analyzer is exercised here against synthetic data
@@ -28,6 +29,8 @@ internal static class SelfTests
         WaitAttribution();
         ThreadBusyAndGate();
         WindowGrouping();
+        SymbolOptions();
+        SymbolAnnotation();
         ReportShape();
         Console.WriteLine($"EdvrCpuProfile self-test: {_checks} checks");
     }
@@ -744,6 +747,90 @@ internal static class SelfTests
         }
     }
 
+    private static void SymbolOptions()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"edvr-cpu-selftest-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var etl = Path.Combine(root, "flight.etl");
+        File.WriteAllText(etl, "fixture");
+        try
+        {
+            var bare = Program.ParseOptions(["--input", etl, "--pid", "7", "--output",
+                                             Path.Combine(root, "r.json")]);
+            Check(bare.Symbols is null, "no symbols directory beside the trace means symbols stay off");
+            Directory.CreateDirectory(Path.Combine(root, "symbols"));
+            var defaulted = Program.ParseOptions(["--input", etl, "--pid", "7", "--output",
+                                                  Path.Combine(root, "r.json")]);
+            Check(defaulted.Symbols == Path.Combine(root, "symbols"),
+                  "a symbols directory beside the trace is used without an argument");
+            var explicitDir = Path.Combine(root, "elsewhere");
+            Directory.CreateDirectory(explicitDir);
+            var chosen = Program.ParseOptions(["--input", etl, "--pid", "7", "--output",
+                                               Path.Combine(root, "r.json"), "--symbols", explicitDir]);
+            Check(chosen.Symbols == explicitDir, "an explicit symbol directory wins");
+            try
+            {
+                Program.ParseOptions(["--input", etl, "--pid", "7", "--output", Path.Combine(root, "r.json"),
+                                      "--symbols", Path.Combine(root, "missing")]);
+                Check(false, "a missing symbol directory is refused");
+            }
+            catch (DirectoryNotFoundException) { Check(true, "a missing symbol directory is refused"); }
+            Check(Program.DefaultSymbolDirectory(etl) == Path.Combine(root, "symbols"), "default lookup");
+            var exported = Program.ParseOptions(["--input", etl, "--pid", "7", "--output",
+                                                 Path.Combine(root, "r.json"), "--edvr-export",
+                                                 Path.Combine(root, "e.json"), "--edvr-export-window", "15"]);
+            Check(exported.EdvrExport == Path.Combine(root, "e.json") && exported.EdvrExportWindow == 15 &&
+                  exported.EdvrExportRegion == "R1", "the uncapped export defaults to R1 of the named window");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static void SymbolAnnotation()
+    {
+        Check(!SymbolTable.Off().Enabled, "symbols are off by default");
+        Check(SymbolTable.Disabled(@"c:\symbols").Directory == @"c:\symbols",
+              "a disabled table still says where it looked");
+        Check(SymbolTable.TryParseRva("0x1b8763", out var parsed) && parsed == 0x1B8763, "rva parsing");
+        Check(!SymbolTable.TryParseRva("none", out _), "a non-rva is not parsed");
+
+        var table = SymbolTable.ForTest((module, rva) =>
+            module == 1 && rva == 0x3000 ? new SymbolHit("EdvrPresentHook", @"src\d3d11\present.cpp", 42) : null);
+        var row = new Dictionary<string, object?> { ["rva"] = "0x3000", ["count"] = 5L };
+        table.Annotate(row, 1, "0x3000");
+        Check((string)row["rva"]! == "0x3000" && Convert.ToInt64(row["count"]) == 5,
+              "annotation leaves the RVA and count untouched");
+        Check((string)row["name"]! == "EdvrPresentHook" && (string)row["file"]! == @"src\d3d11\present.cpp" &&
+              Convert.ToInt32(row["line"]) == 42, "annotation adds name, file and line");
+        var missing = new Dictionary<string, object?> { ["rva"] = "0x4000" };
+        table.Annotate(missing, 1, "0x4000");
+        Check(!missing.ContainsKey("name"), "an unresolved RVA gains no fields");
+        Check(table.ResolvedLookups == 1 && table.UnresolvedLookups == 1, "lookup counters");
+        table.Annotate(row, 1, "0x3000");
+        Check(table.ResolvedLookups == 2 && table.ToJson()["distinctRvasLookedUp"] is 2,
+              "repeat lookups are counted but resolved once");
+
+        // An unmatched PDB must leave the table off: naming one build's RVAs with
+        // another build's symbols is worse than leaving them as numbers.
+        var unmatched = SymbolTable.Disabled(@"c:\symbols");
+        unmatched.Modules.Add(new ModuleSymbolStatus
+        {
+            Module = "d3d11.dll [edvr]",
+            PdbName = @"C:\build\d3d11.pdb",
+            PdbSignature = Guid.Empty.ToString(),
+            Matched = false,
+            Note = "signature mismatch: this PDB is from a different build of the same source",
+        });
+        var json = unmatched.ToJson();
+        Check(json["enabled"] is false, "an unmatched PDB leaves symbolization off");
+        var modules = (Dictionary<string, object?>[])json["modules"]!;
+        Check(modules.Length == 1 && modules[0]["matched"] is false &&
+              ((string)modules[0]["note"]!).StartsWith("signature mismatch"),
+              "the unmatched PDB is reported with its reason");
+        var offRow = new Dictionary<string, object?> { ["rva"] = "0x3000" };
+        unmatched.Annotate(offRow, 1, "0x3000");
+        Check(!offRow.ContainsKey("name"), "a disabled table annotates nothing");
+    }
+
     private static void ReportShape()
     {
         var data = Fixture();
@@ -825,6 +912,50 @@ internal static class SelfTests
             Near(Convert.ToDouble(report["maxRegionResidualUs"]), 0, "regions leave no residual");
             var ownership = (Dictionary<string, object?>)report["stackOwnership"]!;
             Check(ownership.ContainsKey("readyStackOwnedByEmitter"), "ready-stack ownership is reported");
+            var symbolsOff = (Dictionary<string, object?>)report["symbols"]!;
+            Check(symbolsOff["enabled"] is false, "the report says when symbols are off");
+
+            // The same report with a resolver behind it: additive everywhere, and
+            // the RVA strings are untouched.
+            var fake = SymbolTable.ForTest((module, rva) =>
+                module == 1 && rva == 0x3000 ? new SymbolHit("EdvrPresentHook", "present.cpp", 42) : null);
+            var symbolized = Report.Build(input, Pid, data, Path.Combine(output, "frames3.jsonl"), null, fake);
+            var regions = (List<Dictionary<string, object?>>)symbolized["callerStacksByRegion"]!;
+            var submitRegion = regions[1];
+            var innermostRows = (Dictionary<string, object?>[])submitRegion["edvrInnermostRvas"]!;
+            Check((string)innermostRows[0]["rva"]! == "0x3000", "the RVA string is unchanged");
+            Check((string)innermostRows[0]["name"]! == "EdvrPresentHook" &&
+                  (string)innermostRows[0]["file"]! == "present.cpp" &&
+                  Convert.ToInt32(innermostRows[0]["line"]) == 42, "the innermost RVA is symbolized");
+            var chainRows = (Dictionary<string, object?>[])submitRegion["edvrChains"]!;
+            var chainSymbols = (Dictionary<string, object?>[])chainRows[0]["chainSymbols"]!;
+            Check(((string[])chainRows[0]["chain"]!)[0] == "0x3000", "the chain's RVAs are unchanged");
+            Check((string)chainSymbols[0]["name"]! == "EdvrPresentHook", "the chain is symbolized beside it");
+            var symbolizedStacks = (Dictionary<string, object?>[])submitRegion["topStacks"]!;
+            Check(symbolizedStacks.Any(stack =>
+                      ((string)stack["stack"]!).Contains("d3d11.dll [edvr]!EdvrPresentHook")),
+                  "a resolved EDVR frame is rendered as module!function in the collapsed stack");
+            // The uncapped export must equal its own totals, which is what makes
+            // it safe to sum where report.json's capped copy is not.
+            var exportPath = Path.Combine(output, "edvr.json");
+            Report.Build(input, Pid, data, Path.Combine(output, "frames4.jsonl"), null, fake, null,
+                         exportPath, 1, "R2-R4");
+            var export = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+                File.ReadAllText(exportPath))!;
+            Check(export["region"].GetString() == "R2-R4" && export["capped"].GetBoolean() == false,
+                  "the export names its region and says it is uncapped");
+            var rows = export["innermost"].EnumerateArray().ToArray();
+            Check(rows.Length == export["distinctRvaCount"].GetInt32() &&
+                  rows.Sum(row => row.GetProperty("count").GetInt64()) ==
+                  export["edvrInnermostTotal"].GetInt64(),
+                  "the exported list is complete: its rows sum to the uncapped total");
+            Check(export["callerSamplesTopFrameInEdvr"].GetInt64() == 0 &&
+                  export["callerSamplesAnyEdvrFrame"].GetInt64() == 1,
+                  "the export carries both populations so neither is mistaken for the other");
+
+            var symbolsOn = (Dictionary<string, object?>)symbolized["symbols"]!;
+            Check(symbolsOn["enabled"] is true && Convert.ToInt64(symbolsOn["resolvedEdvrFrameLookups"]) > 0,
+                  "the symbols object reports the lookups it made");
         }
         finally
         {
