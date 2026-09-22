@@ -139,7 +139,13 @@ uint32_t fssResScaleOf(void* resource);
 
 // Anything tracked at all? The viewport paths gate on this so a session
 // that never opens the FSS never pays a resolve.
-bool fssResActive();
+//
+// Inline: asked on the viewport paths, and the build has no /GL to fold a
+// cross-TU getter for one scalar load.
+namespace detail {
+extern uint32_t g_fssResCount;
+}  // namespace detail
+inline bool fssResActive() { return detail::g_fssResCount != 0; }
 
 // The viewport paths' receipts: scaled at RSSetViewports, or caught late by
 // the draw-time backstop. Capped log lines; the counts land in the note.

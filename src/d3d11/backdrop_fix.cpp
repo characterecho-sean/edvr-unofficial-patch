@@ -13,6 +13,13 @@
 #include "shader_swap.h"
 
 namespace edvr {
+
+// backdropWantsDraws reads this from the header with no call: asked per
+// draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_backdropOn = false;
+}  // namespace detail
+
 namespace {
 
 // One deband pass. The kernel is run several times at growing radius, each
@@ -135,7 +142,6 @@ constexpr int kMaxSlots = 4;
 
 FaultBudget g_budget("backdrop", 8);
 
-bool g_on = false;
 // "splash": serve the BEST still we hold for every matched draw, rather than
 // each draw's own.
 //
@@ -522,16 +528,14 @@ void backdropConfigure(Config& cfg) {
     }
     g_threshold = t;
     g_dither = d;
-    g_on = on;
+    detail::g_backdropOn = on;
     if (g_splash != splash) g_notedSplash = false;
     g_splash = splash;
 }
 
-bool backdropWantsDraws() { return g_on; }
-
 bool backdropOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     uint32_t instances) {
-    if (!g_on || g_failed || !ctx) return false;
+    if (!detail::g_backdropOn || g_failed || !ctx) return false;
     // This is the MENU's backdrop. The first field run had no such gate, kept
     // matching after LoadGame, and spent its rebuild budget on in-game
     // textures -- eye-draw count 22 (menu) to 724 (flying) in the same
@@ -628,7 +632,7 @@ bool backdropOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 // nothing else can answer yes.
 bool backdropOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                          uint32_t instances) {
-    if (!g_on || g_failed || !ctx || g_slotsUsed == 0) return false;
+    if (!detail::g_backdropOn || g_failed || !ctx || g_slotsUsed == 0) return false;
     // The draw's SHAPE before the journal, which is a cross-TU call for one
     // bool that this build cannot inline (/O2, no /GL). Both are pure reads
     // and the answer is unchanged; the difference is that the call is now
@@ -666,7 +670,7 @@ bool backdropOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 void backdropBegin(ID3D11DeviceContext* ctx) {
     g_bound = false;
     g_saved = nullptr;
-    if (!g_on || !ctx) return;
+    if (!detail::g_backdropOn || !ctx) return;
     if (g_hit < 0 || g_hit >= g_slotsUsed) return;
     const int use = chooseSlot(g_hit);
     ID3D11ShaderResourceView* mine = g_slots[use].gameSrv;

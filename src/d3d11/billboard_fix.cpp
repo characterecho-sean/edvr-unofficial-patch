@@ -14,7 +14,17 @@
 #include "binding_shadow.h"
 
 namespace edvr {
+
+// billboardWantsDraws reads this from the header with no call: asked per
+// draw, and the build has no /GL to fold a cross-TU getter. BillboardMode
+// itself is declared in the header, so the inline function there can
+// name its kStock value.
+namespace detail {
+BillboardMode g_billboardMode = BillboardMode::kStock;
+}  // namespace detail
+
 namespace {
+using Mode = detail::BillboardMode;
 
 // The family, matcher v2 (see cb_peek.cpp for the sweep that corrected v1):
 // DrawIndexedInstanced, the eye-sized depth resolve in PS slot 0, a texture
@@ -41,9 +51,6 @@ constexpr uint32_t kShadowBytes = 512;
 // wrongness is which draw is matched); a sprite that ignores even this
 // proves it does not (and the basis lives in a second constant slot or the
 // shader's own math).
-enum class Mode : uint32_t { kStock, kSteady, kProbe };
-Mode g_mode = Mode::kStock;
-
 // The buffer being watched and its last write. The game multiplexes several
 // sprites through one buffer, write-draw, write-draw -- so the shadow is
 // per-write and consumed by the next matched draw.
@@ -109,10 +116,8 @@ void billboardConfigure(Config& /*cfg*/) {
     // remains in service is the shadow-and-substitute machinery below,
     // loaned to the glare fix as its constants tee (billboardGlareWatch).
     // No keys are read.
-    g_mode = Mode::kStock;
+    detail::g_billboardMode = Mode::kStock;
 }
-
-bool billboardWantsDraws() { return g_mode != Mode::kStock; }
 
 // The glare-steady loan: sun_glare_steady borrows this module's whole
 // shadow-and-substitute machinery -- the glare train writes the SAME
@@ -123,7 +128,7 @@ bool billboardWantsDraws() { return g_mode != Mode::kStock; }
 void billboardGlareWatch(bool on) {
     if (g_glareWatch != on) {
         g_glareWatch = on;
-        if (!on && g_mode == Mode::kStock) {
+        if (!on && detail::g_billboardMode == Mode::kStock) {
             g_target = nullptr;
             g_shadowValid = false;
         }
@@ -155,7 +160,7 @@ bool billboardOnGlareDraw(uint32_t count, uint32_t /*instances*/) {
 }
 
 bool billboardOnEyeDraw(char kind, uint32_t count, uint32_t /*instances*/) {
-    if (g_mode == Mode::kStock || kind != kKind || count < kMinIndices) {
+    if (detail::g_billboardMode == Mode::kStock || kind != kKind || count < kMinIndices) {
         return false;
     }
 
@@ -207,11 +212,11 @@ const float* billboardShadowFloats(uint32_t* count) {
 }
 
 void* billboardTarget() {
-    return g_mode != Mode::kStock || g_glareWatch ? g_target : nullptr;
+    return detail::g_billboardMode != Mode::kStock || g_glareWatch ? g_target : nullptr;
 }
 
 void billboardCapture(const void* data, uint32_t bytes) {
-    if ((g_mode == Mode::kStock && !g_glareWatch) || !data ||
+    if ((detail::g_billboardMode == Mode::kStock && !g_glareWatch) || !data ||
         bytes < (kMinFloats + 1) * 4) {
         g_shadowValid = false;
         return;
@@ -262,7 +267,7 @@ void billboardBegin(ID3D11DeviceContext* ctx) {
     memcpy(m.pData, g_shadow, bytes);
     float* f = static_cast<float*>(m.pData);
     const float s = len3(f + kDrawnRight);
-    if (g_mode == Mode::kProbe) {
+    if (detail::g_billboardMode == Mode::kProbe) {
         // The discriminating experiment: shrink instead of reorient. A
         // sprite that visibly shrinks is consuming these floats; one that
         // does not has its basis somewhere this buffer is not.
@@ -327,7 +332,7 @@ void billboardBegin(ID3D11DeviceContext* ctx) {
         Log::get().note("billboard: %s -- %llu substitution(s) since last "
                         "note (scale %.3f), %llu shape-refusals, %llu "
                         "target changes total.",
-                        g_mode == Mode::kProbe ? "PROBE shrinking" : "steady",
+                        detail::g_billboardMode == Mode::kProbe ? "PROBE shrinking" : "steady",
                         static_cast<unsigned long long>(g_applied -
                                                         g_appliedAtNote),
                         s, static_cast<unsigned long long>(g_rejected),

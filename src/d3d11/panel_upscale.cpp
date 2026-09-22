@@ -26,6 +26,14 @@
 #include "fsr_hlsl_gen.h"   // the same two files, as HLSL string chunks
 
 namespace edvr {
+
+// panelUpscaleWantsDraws reads these from the header with no call: asked
+// per eye draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_panelUpscaleSharp = false;
+bool g_panelUpscaleFailed = false;
+}  // namespace detail
+
 namespace {
 
 // vs 81216C77F90DEDD6 on game build 332753 -- the shared holo-panel family.
@@ -116,8 +124,6 @@ struct Tex {
 
 FaultBudget g_budget("panelUpscale", 4);
 
-bool     g_sharp = false;
-bool     g_failed = false;
 uint64_t g_vsHash = kVsHash;
 uint32_t g_scale = 2;
 float    g_sharpen = 0.25f;      // RCAS stops; negative = off
@@ -139,8 +145,8 @@ uint64_t g_applied = 0;
 uint64_t g_frames = 0;
 
 void standDown(const char* why) {
-    if (g_failed) return;
-    g_failed = true;
+    if (detail::g_panelUpscaleFailed) return;
+    detail::g_panelUpscaleFailed = true;
     Log::get().note("holo panels: %s. The panel is sampled the way the game "
                     "samples it for the rest of this session.", why);
 }
@@ -349,17 +355,17 @@ bool resample(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src,
 }  // namespace
 
 void panelUpscaleConfigure(Config& cfg) {
-    const bool was = g_sharp;
+    const bool was = detail::g_panelUpscaleSharp;
     const uint32_t wasScale = g_scale;
     const float wasSharpen = g_sharpen;
 
     const std::string m = cfg.getString("experimental.holo_panels", "stock");
     if (m == "stock") {
-        g_sharp = false;
+        detail::g_panelUpscaleSharp = false;
     } else if (m == "sharp") {
-        g_sharp = true;
+        detail::g_panelUpscaleSharp = true;
     } else {
-        g_sharp = false;
+        detail::g_panelUpscaleSharp = false;
         Log::get().note("holo_panels \"%s\" is not stock or sharp; running "
                         "stock.", m.c_str());
     }
@@ -414,7 +420,7 @@ void panelUpscaleConfigure(Config& cfg) {
                         g_scale, g_sharpen >= 0.0f ? "on" : "off");
     }
 
-    if (was != g_sharp) {
+    if (was != detail::g_panelUpscaleSharp) {
         Log::get().note(
             "holo panels: %s. Every cockpit holo panel is painted by one "
             "shared shader reading a different interface surface; sharp "
@@ -422,14 +428,12 @@ void panelUpscaleConfigure(Config& cfg) {
             "EASU (%ux, sharpening %s) once a frame and hands the game's own "
             "draw the result. It cannot add detail. Watching for vs %016llX "
             "with a %s surface in slot %u.",
-            g_sharp ? "sharp" : "stock", g_scale,
+            detail::g_panelUpscaleSharp ? "sharp" : "stock", g_scale,
             g_sharpen >= 0.0f ? "on" : "off",
             static_cast<unsigned long long>(g_vsHash),
             g_wantW ? "named" : "measured-aspect", kSlot);
     }
 }
-
-bool panelUpscaleWantsDraws() { return g_sharp && !g_failed; }
 
 bool panelUpscaleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                            uint32_t instances) {
@@ -453,7 +457,7 @@ bool panelUpscaleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 void panelUpscaleBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    if (g_failed) return;
+    if (detail::g_panelUpscaleFailed) return;
 
     ID3D11ShaderResourceView* src = static_cast<ID3D11ShaderResourceView*>(
         bindingGet(BindSlot::PsSrv2));

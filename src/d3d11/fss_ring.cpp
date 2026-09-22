@@ -13,6 +13,14 @@
 #include "shader_swap.h"    // shaderSwapCompilePs: the paved compile path
 
 namespace edvr {
+
+// fssRingWantsDraws reads this from the header with no call: asked per
+// eye draw behind the body-frame gate, and the build has no /GL to fold a
+// cross-TU getter.
+namespace detail {
+uint8_t g_fssRingMode = 0;
+}  // namespace detail
+
 namespace {
 
 // The three ring-draw families, by vertex-shader content hash, with how many
@@ -50,7 +58,6 @@ constexpr uint32_t kCbSlots = 4;
 // byte means "revealed" depends on the shader's compare direction --
 // fss_scan_level's lesson -- so both polarities ship and one look names
 // the right one.
-uint8_t g_mode = 0;
 
 // Mode 6 = "clean": the surgical fix. The ring quad's own pixel shader,
 // transcribed from docs/shaders/fss-ring-ps.asm with the flag byte's bit 4 -- the
@@ -437,12 +444,12 @@ void fssRingConfigure(Config& cfg) {
                         "depth, mask255, mask0 or clean; running stock.",
                         m.c_str());
     }
-    if (mode == g_mode) return;
-    g_mode = mode;
+    if (mode == detail::g_fssRingMode) return;
+    detail::g_fssRingMode = mode;
     g_engagedNoted = false;
     g_learnNoted = false;
     releaseLearned();
-    if (g_mode == 6) {
+    if (detail::g_fssRingMode == 6) {
         Log::get().note(
             "fss ring ARMED: the ring quad draws through EDVR's transcribed "
             "pixel shader with the dissolve's hard-black state removed -- "
@@ -450,7 +457,7 @@ void fssRingConfigure(Config& cfg) {
             "fade and the lighting are the game's own. Compiles at the "
             "first zoom; a compile failure is logged and the game draws "
             "stock. Clear to restore.");
-    } else if (g_mode >= 4) {
+    } else if (detail::g_fssRingMode >= 4) {
         Log::get().note(
             "fss ring ARMED: the ring quad's reveal mask (PS slot 3) is "
             "replaced with flat %u for exactly those draws, both eyes -- "
@@ -458,14 +465,14 @@ void fssRingConfigure(Config& cfg) {
             "WHOLE (no black squares) this polarity is the fix; if it "
             "VANISHES or never resolves, flip to the other. Clear to "
             "restore.",
-            g_mode == 4 ? 255u : 0u);
-    } else if (g_mode == 3) {
+            detail::g_fssRingMode == 4 ? 255u : 0u);
+    } else if (detail::g_fssRingMode == 3) {
         Log::get().note(
             "fss ring ARMED: every ring-family draw runs with depth and "
             "stencil tests OFF, both eyes. Squares dying here means the "
             "left eye's squares are ring pixels CULLED by per-eye "
             "depth/stencil content. Clear to restore.");
-    } else if (g_mode) {
+    } else if (detail::g_fssRingMode) {
         Log::get().note(
             "fss ring ARMED: the %s eye's ring draws run with the %s eye's "
             "sampled inputs AND pixel-stage constants, restored after every "
@@ -473,7 +480,7 @@ void fssRingConfigure(Config& cfg) {
             "imagery is correct for both -- if the black squares die, the "
             "lagging per-eye state is measured and this is the fix's shape. "
             "Clear to restore.",
-            g_mode == 1 ? "FIRST" : "SECOND", g_mode == 1 ? "SECOND" : "FIRST");
+            detail::g_fssRingMode == 1 ? "FIRST" : "SECOND", detail::g_fssRingMode == 1 ? "SECOND" : "FIRST");
     } else {
         Log::get().note("fss ring: stock; each eye's ring draws read their "
                         "own inputs (%llu draws were fed while armed).",
@@ -481,11 +488,9 @@ void fssRingConfigure(Config& cfg) {
     }
 }
 
-bool fssRingWantsDraws() { return g_mode != 0; }
-
 bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                       uint32_t instances) {
-    if (!g_mode || !ctx) return false;
+    if (!detail::g_fssRingMode || !ctx) return false;
     // The cheap gate first: every family is a tiny fixed-geometry draw.
     if (!((kind == 'N' && instances == 1 && (count == 3 || count == 4)) ||
           (kind == 'X' && count == 14))) {
@@ -505,25 +510,25 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (occ > 2 * k) return false;   // unexpected extra: leave alone
         const uint8_t eye = static_cast<uint8_t>((occ - 1) / k);
         const uint8_t j = static_cast<uint8_t>((occ - 1) % k);
-        if (g_mode == 3) {
+        if (detail::g_fssRingMode == 3) {
             // Depth mode: no learning, no feeding; every matched draw in
             // both eyes gets the no-test state in Begin/End.
             g_pendingFam = f;
             g_pendingJ = j;
             return true;
         }
-        if (g_mode >= 4) {
+        if (detail::g_fssRingMode >= 4) {
             // Mask modes touch only the quad. Clean covers the quad (bit-4
             // shader plus fade patch) and the mesh (fade patch alone --
             // docs/shaders/fss-ring-mesh-ps.asm has no bit-4 path); the f60 mask
             // writer passes through untouched.
-            if (g_mode == 6 ? f > 1 : f != 0) return false;
+            if (detail::g_fssRingMode == 6 ? f > 1 : f != 0) return false;
             g_pendingFam = f;
             g_pendingJ = j;
             g_pendingEyeIdx = eye;
             return true;
         }
-        const uint8_t lender = (g_mode == 1) ? 1 : 0;
+        const uint8_t lender = (detail::g_fssRingMode == 1) ? 1 : 0;
         if (eye == lender) {
             // Learn, inline: a read costs nothing the draw can notice.
             guardedBudget(g_budget, [&] {
@@ -590,8 +595,8 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     g_depthEngaged = false;
     g_psEngaged = false;
-    if (!ctx || !g_mode) return;
-    if (g_mode == 6) {
+    if (!ctx || !detail::g_fssRingMode) return;
+    if (detail::g_fssRingMode == 6) {
         guardedBudget(g_budget, [&] {
             // The fade patch, for quad and mesh alike.
             ID3D11Buffer* gameCb = nullptr;
@@ -709,7 +714,7 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
         });
         return;
     }
-    if (g_mode >= 4) {
+    if (detail::g_fssRingMode >= 4) {
         guardedBudget(g_budget, [&] {
             // Size the flat mask to whatever the game bound at slot 3.
             ID3D11ShaderResourceView* cur = nullptr;
@@ -732,7 +737,7 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
                     res->Release();
                 }
             }
-            const uint8_t want = g_mode == 4 ? 0xFF : 0x00;
+            const uint8_t want = detail::g_fssRingMode == 4 ? 0xFF : 0x00;
             if (!w || !h) {
                 if (cur) cur->Release();
                 return;
@@ -809,7 +814,7 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
         });
         return;
     }
-    if (g_mode == 3) {
+    if (detail::g_fssRingMode == 3) {
         guardedBudget(g_budget, [&] {
             if (!g_noDepth) {
                 ID3D11Device* dev = nullptr;
@@ -861,7 +866,7 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
 
 void fssRingEnd(ID3D11DeviceContext* ctx) {
     if ((g_psEngaged || g_cbEngaged || g_holdSlot >= 0) && ctx &&
-        g_mode == 6) {
+        detail::g_fssRingMode == 6) {
         if (g_holdSlot >= 0) {
             ctx->PSSetShaderResources(g_holdSlot, 1, &g_displacedHold);
             if (g_displacedHold) {
@@ -897,7 +902,7 @@ void fssRingEnd(ID3D11DeviceContext* ctx) {
         }
         return;
     }
-    if (g_engaged && ctx && g_mode >= 4) {
+    if (g_engaged && ctx && detail::g_fssRingMode >= 4) {
         g_engaged = false;
         ctx->PSSetShaderResources(3, 1, &g_displaced[3]);
         if (g_displaced[3]) {

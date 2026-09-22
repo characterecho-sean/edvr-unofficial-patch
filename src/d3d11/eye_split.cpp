@@ -12,6 +12,14 @@
 #include "../common/log.h"
 
 namespace edvr {
+
+// eyeSplitWantsDraws reads these from the header with no call: asked per
+// eye-texture draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+uint32_t g_eyeSplitWant = 0;
+bool     g_eyeSplitDone = false;
+}  // namespace detail
+
 namespace {
 
 // A measured frame from the field carries SIXTEEN eye-sized targets, not the
@@ -50,9 +58,7 @@ Target   g_tg[kMaxTargets];
 uint32_t g_count = 0;
 uint32_t g_overflow = 0;
 
-uint32_t g_want = 0;        // N from config; 0 = off
 uint32_t g_frames = 0;      // scene frames since arming
-bool     g_done = false;    // one dump per arming
 bool     g_notedFirst = false;
 
 FaultBudget g_budget("eyeSplit", 8);
@@ -215,13 +221,13 @@ void writeOut(ID3D11DeviceContext* ctx) {
 void eyeSplitConfigure(Config& cfg) {
     const int n = cfg.getInt("advanced.eye_split", 0);
     const uint32_t want = n > 0 ? static_cast<uint32_t>(n) : 0;
-    if (want == g_want) return;
-    g_want = want;
+    if (want == detail::g_eyeSplitWant) return;
+    detail::g_eyeSplitWant = want;
     g_frames = 0;
-    g_done = false;
+    detail::g_eyeSplitDone = false;
     g_notedFirst = false;
     releaseAll();
-    if (g_want) {
+    if (detail::g_eyeSplitWant) {
         Log::get().note(
             "eye split ARMED: on scene frame %u from now, every render "
             "target the scene draws into is copied and written to "
@@ -230,13 +236,11 @@ void eyeSplitConfigure(Config& cfg) {
             "targets and about 20 MB of files, with one visible hitch. Put "
             "the body that renders wrong in view and let it sit. One dump "
             "per arming.",
-            g_want, kStep, kStep);
+            detail::g_eyeSplitWant, kStep, kStep);
     } else {
         Log::get().note("eye split: off.");
     }
 }
-
-bool eyeSplitWantsDraws() { return g_want != 0 && !g_done; }
 
 void eyeSplitOnEyeDraw(ID3D11DeviceContext* ctx) {
     if (!eyeSplitWantsDraws() || !ctx) return;
@@ -325,10 +329,10 @@ void eyeSplitFrameBoundary(ID3D11DeviceContext* ctx) {
         Log::get().note(
             "eye split: counting scene frames -- %u distinct target(s) this "
             "frame. The dump lands on frame %u.",
-            g_count, g_want);
+            g_count, detail::g_eyeSplitWant);
     }
 
-    if (g_frames < g_want) {
+    if (g_frames < detail::g_eyeSplitWant) {
         clearFrame();
         return;
     }
@@ -342,7 +346,7 @@ void eyeSplitFrameBoundary(ID3D11DeviceContext* ctx) {
         }
         writeOut(ctx);
     });
-    g_done = true;
+    detail::g_eyeSplitDone = true;
     clearFrame();
 }
 

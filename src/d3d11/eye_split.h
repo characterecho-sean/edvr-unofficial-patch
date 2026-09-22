@@ -70,7 +70,16 @@ class Config;
 void eyeSplitConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set.
-bool eyeSplitWantsDraws();
+//
+// Inline: asked per eye-texture draw, and the build has no /GL to fold a
+// cross-TU getter for two scalar loads.
+namespace detail {
+extern uint32_t g_eyeSplitWant;
+extern bool     g_eyeSplitDone;
+}  // namespace detail
+inline bool eyeSplitWantsDraws() {
+    return detail::g_eyeSplitWant != 0 && !detail::g_eyeSplitDone;
+}
 
 // Called for every eye-texture draw while armed: notes which target is
 // bound, so the boundary knows what to copy. Changes nothing about the draw.

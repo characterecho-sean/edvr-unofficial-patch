@@ -15,6 +15,15 @@
 #include "exposure_fix.h"   // lookupShaderHash
 
 namespace edvr {
+
+// fssRevealWantsDraws reads these from the header with no call: asked per
+// eye draw and from the Map/Unmap tees, and the build has no /GL to fold a
+// cross-TU getter.
+namespace detail {
+bool g_fssRevealSteady = false;
+bool g_fssRevealLockstep = false;
+}  // namespace detail
+
 namespace {
 
 constexpr uint64_t kCompositeHash = 0x953C8123AD8DC13Bull;
@@ -28,9 +37,6 @@ constexpr uint64_t kCompositeHash = 0x953C8123AD8DC13Bull;
 // size, and SAY every refusal.
 constexpr uint32_t kSceneBlockMin = 333 * 16;
 constexpr uint32_t kSceneBlockMax = 8192;
-
-bool g_steady = false;
-bool g_lockstep = false;
 
 // ---- The lockstep copies: occurrence 1's four content textures, frozen
 // at its draw so occurrence 2 reads the same bytes. Recreated whenever a
@@ -92,7 +98,7 @@ FaultBudget g_budget("fssReveal", 8);
 }  // namespace
 
 void fssRevealConfigure(Config& cfg) {
-    const bool wasSteady = g_steady;
+    const bool wasSteady = detail::g_fssRevealSteady;
     // ONE key for the whole black-squares fix (src/common/eye_sync.h);
     // this module serves its composite half.
     const EyeSync es = eyeSyncFromConfig(cfg);
@@ -106,21 +112,21 @@ void fssRevealConfigure(Config& cfg) {
                 cfg.getString("fix.fss_eye_sync", "on").c_str());
         }
     }
-    g_steady = es.steady;
-    g_lockstep = es.lockstep;
+    detail::g_fssRevealSteady = es.steady;
+    detail::g_fssRevealLockstep = es.lockstep;
     static bool s_wasLockstep = false;
-    const bool lockFlip = s_wasLockstep != g_lockstep;
-    s_wasLockstep = g_lockstep;
-    if (wasSteady != g_steady || lockFlip) {
+    const bool lockFlip = s_wasLockstep != detail::g_fssRevealLockstep;
+    s_wasLockstep = detail::g_fssRevealLockstep;
+    if (wasSteady != detail::g_fssRevealSteady || lockFlip) {
         Log::get().note(
-            g_lockstep
+            detail::g_fssRevealLockstep
                 ? "fss reveal: ON (the lockstep mechanism). The second "
                   "eye's composite reads "
                   "byte-identical copies of the first eye's textures and "
                   "scene constants -- the two panels cannot differ, and "
                   "both show the resolve animation the flat screen shows, "
                   "binocularly fused."
-            : g_steady
+            : detail::g_fssRevealSteady
                 ? "fss reveal: steady. Both eyes' composites are drawn with "
                   "ONE snapshot of the scene constants, so the dissolve is "
                   "evaluated at the same moment for both -- the per-eye "
@@ -136,15 +142,13 @@ void fssRevealConfigure(Config& cfg) {
     }
 }
 
-bool fssRevealWantsDraws() { return g_steady || g_lockstep; }
-
 void fssRevealNoteMap(void* resource, void* data) {
-    if ((!g_steady && !g_lockstep) || resource != g_sceneCb) return;
+    if ((!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep) || resource != g_sceneCb) return;
     g_mapped = data;
 }
 
 void fssRevealNoteUnmap(void* resource) {
-    if ((!g_steady && !g_lockstep) || resource != g_sceneCb || !g_mapped) {
+    if ((!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep) || resource != g_sceneCb || !g_mapped) {
         return;
     }
     void* src = g_mapped;
@@ -157,7 +161,7 @@ void fssRevealNoteUnmap(void* resource) {
 }
 
 void fssRevealNoteUpdate(void* resource, const void* data) {
-    if ((!g_steady && !g_lockstep) || resource != g_sceneCb || !data ||
+    if ((!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep) || resource != g_sceneCb || !data ||
         !g_sceneCbBytes) {
         return;
     }
@@ -169,7 +173,7 @@ void fssRevealNoteUpdate(void* resource, const void* data) {
 
 bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         uint32_t instances) {
-    if ((!g_steady && !g_lockstep) || kind != 'N' ||
+    if ((!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep) || kind != 'N' ||
         count != 6 || instances != 1 || !ctx) {
         return false;
     }
@@ -186,7 +190,7 @@ bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 void fssRevealBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     g_lsBound = false;
-    if (!ctx || (!g_steady && !g_lockstep)) return;
+    if (!ctx || (!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep)) return;
     guardedBudget(g_budget, [&] {
         ++g_occurrence;
 
@@ -242,7 +246,7 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                         "sync cannot engage. Said once.");
                 }
             }
-            if (g_lockstep) {
+            if (detail::g_fssRevealLockstep) {
                 // Freeze THIS draw's four content textures. All four or
                 // none: a partial freeze is a new per-eye split.
                 ID3D11ShaderResourceView* srv[4] = {};
@@ -325,7 +329,7 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
 
         if (g_occurrence != 2) return;
 
-        if (g_lockstep) {
+        if (detail::g_fssRevealLockstep) {
             // The frozen inputs, if occurrence 1 produced a full set. The
             // b1 substitution below completes the byte-identical read.
             bool any = false;

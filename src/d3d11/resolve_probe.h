@@ -59,7 +59,22 @@ class Config;
 void resolveProbeConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set.
-bool resolveProbeWantsDraws();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for three scalar loads. The enum lives here too, so this can
+// name its kOff value.
+namespace detail {
+enum class ResolveProbeMode : uint32_t { kOff, kWhite, kInputs, kNoStencil, kNoDepth,
+                                          kNoBoth };
+extern ResolveProbeMode g_resolveProbeShaderMode;
+extern ResolveProbeMode g_resolveProbeStateMode;
+extern bool             g_resolveProbeWantNoBlend;
+}  // namespace detail
+inline bool resolveProbeWantsDraws() {
+    return detail::g_resolveProbeShaderMode != detail::ResolveProbeMode::kOff ||
+           detail::g_resolveProbeStateMode != detail::ResolveProbeMode::kOff ||
+           detail::g_resolveProbeWantNoBlend;
+}
 
 // Called for every eye draw while armed: true when this draw is the resolve,
 // which is recognised by its PIXEL shader's content hash rather than by its

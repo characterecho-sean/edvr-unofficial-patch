@@ -38,7 +38,13 @@ class Config;
 void holoConfigure(Config& cfg);
 
 // False in stock mode, which keeps the per-draw path free when off.
-bool holoWantsDraws();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_holoSteady;
+}  // namespace detail
+inline bool holoWantsDraws() { return detail::g_holoSteady; }
 
 // Is this eye draw the hologram composite? Matched by shape: a 6-index
 // instanced quad, no depth via... the quad BINDS depth for masking, so the

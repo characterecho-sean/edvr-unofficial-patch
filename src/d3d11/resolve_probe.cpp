@@ -15,7 +15,19 @@
 #include "shader_swap.h"
 
 namespace edvr {
+
+// resolveProbeWantsDraws reads these from the header with no call: asked
+// per eye draw, and the build has no /GL to fold a cross-TU getter.
+// ResolveProbeMode itself is declared in the header, so the inline
+// function there can name its kOff value.
+namespace detail {
+ResolveProbeMode g_resolveProbeShaderMode = ResolveProbeMode::kOff;
+ResolveProbeMode g_resolveProbeStateMode = ResolveProbeMode::kOff;
+bool             g_resolveProbeWantNoBlend = false;
+}  // namespace detail
+
 namespace {
+using Mode = detail::ResolveProbeMode;
 
 // The deferred resolve's PIXEL shader, measured 2026-08-30 from a field
 // shader dump (advanced.glare_shader_dump) and confirmed by disassembly.
@@ -94,9 +106,6 @@ PSOut main(VSOut i) {
 // the stencil test, and depth is already known to be written in that eye --
 // the disc occludes the star field behind it. Stencil is the one nothing
 // here has ever recorded.
-enum class Mode : uint32_t { kOff, kWhite, kInputs, kNoStencil, kNoDepth,
-                             kNoBoth };
-
 bool isShaderMode(Mode m) { return m == Mode::kWhite || m == Mode::kInputs; }
 bool isStateMode(Mode m) {
     return m == Mode::kNoStencil || m == Mode::kNoDepth || m == Mode::kNoBoth;
@@ -115,8 +124,6 @@ bool isStateMode(Mode m) {
 // and something later paints over it".
 //
 // Spelled `white+noboth` in the ini; either half alone still works.
-Mode                g_shaderMode = Mode::kOff;
-Mode                g_stateMode = Mode::kOff;
 ID3D11PixelShader*  g_probePs = nullptr;
 bool                g_tried = false;
 ID3D11PixelShader*  g_savedPs = nullptr;
@@ -141,7 +148,6 @@ bool                     g_dsEngaged = false;
 // NULL blend state (the API default: no blending, all channels land) with a
 // full sample mask, so output that appears can only have been eaten by what
 // was unbound.
-bool               g_wantNoBlend = false;
 ID3D11BlendState*  g_savedBs = nullptr;
 FLOAT              g_savedBf[4] = {};
 UINT               g_savedSm = 0xFFFFFFFFu;
@@ -219,20 +225,20 @@ void resolveProbeConfigure(Config& cfg) {
         wantState = Mode::kOff;
         wantNoBlend = false;
     }
-    if (wantShader == g_shaderMode && wantState == g_stateMode &&
-        wantNoBlend == g_wantNoBlend) {
+    if (wantShader == detail::g_resolveProbeShaderMode && wantState == detail::g_resolveProbeStateMode &&
+        wantNoBlend == detail::g_resolveProbeWantNoBlend) {
         return;
     }
-    g_shaderMode = wantShader;
-    g_stateMode = wantState;
-    g_wantNoBlend = wantNoBlend;
+    detail::g_resolveProbeShaderMode = wantShader;
+    detail::g_resolveProbeStateMode = wantState;
+    detail::g_resolveProbeWantNoBlend = wantNoBlend;
     // The compiled shader is per-mode (the variants differ by #define), so
     // a mode change drops it and the next matched draw builds the new one.
     // The derived state goes with it for the same reason.
     releaseShader();
     releaseState();
     g_engagedNoted = false;
-    switch (g_shaderMode) {
+    switch (detail::g_resolveProbeShaderMode) {
         case Mode::kWhite:
             Log::get().note(
                 "resolve probe ARMED (white): the deferred lighting resolve "
@@ -256,7 +262,7 @@ void resolveProbeConfigure(Config& cfg) {
         default:
             break;
     }
-    switch (g_stateMode) {
+    switch (detail::g_resolveProbeStateMode) {
         case Mode::kNoStencil:
         case Mode::kNoDepth:
         case Mode::kNoBoth:
@@ -266,16 +272,16 @@ void resolveProbeConfigure(Config& cfg) {
                 "-- every other comparison, mask and pass-op left exactly as "
                 "the game set it, so a body that appears can only be the test "
                 "that was turned off. Restored after each draw.",
-                g_stateMode == Mode::kNoStencil ? "nostencil"
-                    : g_stateMode == Mode::kNoDepth ? "nodepth" : "noboth",
-                g_stateMode == Mode::kNoStencil ? "the STENCIL test"
-                    : g_stateMode == Mode::kNoDepth ? "the DEPTH test"
+                detail::g_resolveProbeStateMode == Mode::kNoStencil ? "nostencil"
+                    : detail::g_resolveProbeStateMode == Mode::kNoDepth ? "nodepth" : "noboth",
+                detail::g_resolveProbeStateMode == Mode::kNoStencil ? "the STENCIL test"
+                    : detail::g_resolveProbeStateMode == Mode::kNoDepth ? "the DEPTH test"
                                                     : "both tests");
             break;
         default:
             break;
     }
-    if (g_wantNoBlend) {
+    if (detail::g_resolveProbeWantNoBlend) {
         Log::get().note(
             "resolve probe ARMED (noblend): the resolve draws with NO blend "
             "state -- the API default, blending off, every channel written, "
@@ -286,10 +292,10 @@ void resolveProbeConfigure(Config& cfg) {
             "it, and the census's bl= column then shows what the game had "
             "bound.");
     }
-    if (g_shaderMode == Mode::kOff && g_stateMode == Mode::kOff &&
-        !g_wantNoBlend) {
+    if (detail::g_resolveProbeShaderMode == Mode::kOff && detail::g_resolveProbeStateMode == Mode::kOff &&
+        !detail::g_resolveProbeWantNoBlend) {
         Log::get().note("resolve probe: off, the game's own resolve.");
-    } else if (g_shaderMode != Mode::kOff && g_stateMode != Mode::kOff) {
+    } else if (detail::g_resolveProbeShaderMode != Mode::kOff && detail::g_resolveProbeStateMode != Mode::kOff) {
         Log::get().note(
             "resolve probe: BOTH halves are armed. The replacement shader "
             "cannot output black and the per-pixel tests cannot reject it, "
@@ -298,11 +304,6 @@ void resolveProbeConfigure(Config& cfg) {
             "from the one this has been chasing, and points at the draws "
             "after the resolve rather than at the resolve itself.");
     }
-}
-
-bool resolveProbeWantsDraws() {
-    return g_shaderMode != Mode::kOff || g_stateMode != Mode::kOff ||
-           g_wantNoBlend;
 }
 
 bool resolveProbeOnEyeDraw(ID3D11DeviceContext* ctx) {
@@ -322,7 +323,7 @@ bool resolveProbeOnEyeDraw(ID3D11DeviceContext* ctx) {
 void resolveProbeBegin(ID3D11DeviceContext* ctx) {
     if (!resolveProbeWantsDraws() || !ctx) return;
     guardedBudget(g_budget, [&] {
-        if (isShaderMode(g_shaderMode)) {
+        if (isShaderMode(detail::g_resolveProbeShaderMode)) {
             if (!g_probePs && !g_tried) {
                 g_tried = true;
                 const SwapMacro white[] = {{"PROBE_WHITE", "1"},
@@ -330,7 +331,7 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
                 g_probePs = shaderSwapCompilePs(
                     ctx, kProbePsHlsl, sizeof(kProbePsHlsl) - 1, "main",
                     "resolve_probe_ps",
-                    g_shaderMode == Mode::kWhite ? white : nullptr,
+                    detail::g_resolveProbeShaderMode == Mode::kWhite ? white : nullptr,
                     "resolve probe");
             }
             if (!g_probePs) return;   // shader_swap said why; draw stock
@@ -338,7 +339,7 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
             ctx->PSSetShader(g_probePs, nullptr, 0);
             g_psEngaged = true;
         }
-        if (isStateMode(g_stateMode)) {
+        if (isStateMode(detail::g_resolveProbeStateMode)) {
             // The game's own state is read first and DERIVED from, every
             // time this is armed fresh, because authoring one from nothing
             // would change comparisons and masks nobody asked about and
@@ -371,12 +372,12 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
                 const unsigned wasFunc = static_cast<unsigned>(d.DepthFunc);
                 const bool wasWriteAll =
                     d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;
-                if (g_stateMode == Mode::kNoStencil ||
-                    g_stateMode == Mode::kNoBoth) {
+                if (detail::g_resolveProbeStateMode == Mode::kNoStencil ||
+                    detail::g_resolveProbeStateMode == Mode::kNoBoth) {
                     d.StencilEnable = FALSE;
                 }
-                if (g_stateMode == Mode::kNoDepth ||
-                    g_stateMode == Mode::kNoBoth) {
+                if (detail::g_resolveProbeStateMode == Mode::kNoDepth ||
+                    detail::g_resolveProbeStateMode == Mode::kNoBoth) {
                     d.DepthEnable = FALSE;
                 }
                 ID3D11Device* dev = nullptr;
@@ -405,7 +406,7 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
             ctx->OMSetDepthStencilState(g_derived, g_savedRef);
             g_dsEngaged = true;
         }
-        if (g_wantNoBlend) {
+        if (detail::g_resolveProbeWantNoBlend) {
             ctx->OMGetBlendState(&g_savedBs, g_savedBf, &g_savedSm);
             const FLOAT one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
             ctx->OMSetBlendState(nullptr, one, 0xFFFFFFFFu);

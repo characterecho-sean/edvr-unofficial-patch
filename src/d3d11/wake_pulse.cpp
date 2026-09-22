@@ -14,6 +14,13 @@
 #include "../common/log.h"
 
 namespace edvr {
+
+// wakePulseWantsDraws reads this from the header with no call: it is asked
+// per offscreen draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_wakePulseOff = false;
+}  // namespace detail
+
 namespace {
 
 // The panel surface, by its ASPECT.
@@ -130,7 +137,6 @@ bool          g_capI16 = true;
 // and this is not reason enough to change that.
 ID3D11DeviceContext* g_capCtx = nullptr;
 
-bool     g_off = false;
 uint32_t g_indices[kMaxIndices] = {kIndices, kIndicesAlt};
 uint32_t g_indexCount = 2;
 uint64_t g_dropped = 0;
@@ -303,14 +309,14 @@ bool ringDecide(ID3D11DeviceContext* ctx, float* loOut, float* hiOut) {
 }  // namespace
 
 void wakePulseConfigure(Config& cfg) {
-    const bool was = g_off;
+    const bool was = detail::g_wakePulseOff;
     const std::string m = cfg.getString("fix.wake_pulse", "off");
     if (m == "stock") {
-        g_off = false;
+        detail::g_wakePulseOff = false;
     } else if (m == "off") {
-        g_off = true;
+        detail::g_wakePulseOff = true;
     } else {
-        g_off = false;
+        detail::g_wakePulseOff = false;
         Log::get().note("wake_pulse \"%s\" is not stock or off; running "
                         "stock.", m.c_str());
     }
@@ -342,7 +348,7 @@ void wakePulseConfigure(Config& cfg) {
         g_indexCount = 2;
     }
 
-    if (was != g_off) {
+    if (was != detail::g_wakePulseOff) {
         Log::get().note(
             "wake pulse: %s. With a high wake selected, a marker under the "
             "speed readout flashes in time with the target indicator -- both "
@@ -354,16 +360,14 @@ void wakePulseConfigure(Config& cfg) {
             "pixel size, so if the count below stays at zero this build "
             "will name the candidates it saw and one of them wants "
             "setting in advanced.wake_pulse_indices.",
-            g_off ? "off" : "stock", g_indexCount);
+            detail::g_wakePulseOff ? "off" : "stock", g_indexCount);
     }
 }
-
-bool wakePulseWantsDraws() { return g_off; }
 
 bool wakePulseSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     uint32_t targetW, uint32_t targetH, uint32_t startIndex,
                     int baseVertex) {
-    if (!g_off) return false;
+    if (!detail::g_wakePulseOff) return false;
     if (targetW < kMinWidth || targetH == 0) return false;
     const float aspect = static_cast<float>(targetW) / static_cast<float>(targetH);
     if (aspect < kAspect - kAspectTol || aspect > kAspect + kAspectTol) {
@@ -438,7 +442,7 @@ bool wakePulseSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 }
 
 void wakePulseReport() {
-    if (!g_off) return;
+    if (!detail::g_wakePulseOff) return;
     ++g_frame;
 
     // The ring test's readback, once the copies have had time to execute.

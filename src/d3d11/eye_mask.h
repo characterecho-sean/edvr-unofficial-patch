@@ -127,7 +127,15 @@ class Config;
 void eyeMaskConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set -- mirrors foveationWantsDraws.
-bool eyeMaskWantsDraws();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one scalar load. The enum lives here too, so this can name
+// its Off value.
+namespace detail {
+enum class EyeMaskMode { Off, Auto, Lens };
+extern EyeMaskMode g_eyeMaskMode;
+}  // namespace detail
+inline bool eyeMaskWantsDraws() { return detail::g_eyeMaskMode != detail::EyeMaskMode::Off; }
 
 // From vscreen.cpp's beginPanelOverride, at an eye draw's first reach this
 // frame: dsvIdentity is the binding shadow's Dsv0, an IDENTITY only (never

@@ -51,6 +51,14 @@
 
 namespace edvr {
 static void beginEyeRun();
+
+// temporalPassWantsFssChrome reads this from the header with no call:
+// asked by vscreen.cpp's beginPanelOverride, and the build has no /GL to
+// fold a cross-TU getter.
+namespace detail {
+bool g_temporalPassWantedFssChrome = false;
+}  // namespace detail
+
 namespace {
 
 // The fovea composite (docs/performance.md feature 6), its own tiny shader
@@ -1474,7 +1482,6 @@ uint32_t g_fssInterfaceFrames = 0;   // frames the scanner's interface took the 
 // (fssInterfaceLive, the per-frame question, sits below g_rowsFrame.)
 
 // The configure and warm state.
-bool     g_wanted = false;
 bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
 float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
 float    g_shipMetres = kTemporalShipMetres;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
@@ -1950,8 +1957,9 @@ bool stageEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D
 }
 
 uint32_t g_rowsFrame = 0; // scene boundary counter, shared by captures and row selection
-// Is the scanner's screen up this frame (the state above g_wanted says why
-// it is asked)? Answered per eye and idempotent within a frame.
+// Is the scanner's screen up this frame (the state above -- what feeds
+// temporalPassWantsFssChrome -- says why it is asked)? Answered per eye
+// and idempotent within a frame.
 bool fssInterfaceLive() {
     const LONG stamp = fssChromeStampValue();
     if (stamp == 0) return false;
@@ -7196,9 +7204,9 @@ void temporalPassConfigure(Config& cfg) {
     // window regardless of whether the values read back the same.
     ++g_configGeneration;
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
-    const bool wasWanted = g_wanted;
-    g_wanted = temporalModeEnabled(mode);
-    if (g_wanted != wasWanted) {
+    const bool wasWanted = detail::g_temporalPassWantedFssChrome;
+    detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode);
+    if (detail::g_temporalPassWantedFssChrome != wasWanted) {
         memset(g_rowsObserved, 0, sizeof(g_rowsObserved));
         g_rowsObservedWrites = 0;
         g_rowsObservedEvictions = 0;
@@ -7232,8 +7240,8 @@ void temporalPassConfigure(Config& cfg) {
     // against the frame (the terrain frame-time arc, 2026-09-17). Off leaves
     // the camera's motion on their pixels, which ghosts on a moving body,
     // which is the point: a lever, not a setting to fly with.
-    celestialMotionConfigure(g_wanted && cfg.getBool("advanced.terrain_motion", true));
-    meshMotionConfigure(g_wanted && cfg.getBool("advanced.mesh_motion", true));
+    celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.terrain_motion", true));
+    meshMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.mesh_motion", true));
     // The kinematic tracker (docs/kinematic-motion-injection-2026-09-19.md):
     // engine-truth stasis for settlement records, feeding the temporal pass's
     // ownership coverage. The mask is diagnostic-only (the movers view paints
@@ -7247,7 +7255,7 @@ void temporalPassConfigure(Config& cfg) {
             Log::get().note("engine motion: fix.engine_motion=auto is reserved until the "
                             "scene gate lands -- behaving as off.");
         }
-        kinematicMotionConfigure(g_wanted && _stricmp(engineMotion.c_str(), "on") == 0);
+        kinematicMotionConfigure(detail::g_temporalPassWantedFssChrome && _stricmp(engineMotion.c_str(), "on") == 0);
     }
     // The scheduler stack-capture probe (docs/engine-render-pipeline.md
     // stage 0): read-only return-address signatures at the four
@@ -7273,7 +7281,7 @@ void temporalPassConfigure(Config& cfg) {
         }
     }
     const std::string staticFovea = cfg.getString("advanced.temporal_aa_fovea", "0");
-    g_staticSurfacesOn = g_wanted && g_trainedWanted &&
+    g_staticSurfacesOn = detail::g_temporalPassWantedFssChrome && g_trainedWanted &&
                          g_temporalEngine == edvr::TemporalEngine::Nvidia &&
                          (staticFovea.empty() || _stricmp(staticFovea.c_str(), "0") == 0) &&
                          cfg.getBool("advanced.temporal_aa_static_surfaces", false);
@@ -7310,7 +7318,7 @@ void temporalPassConfigure(Config& cfg) {
     g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
                 : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : 0;
-    g_objectsOn = g_wanted;
+    g_objectsOn = detail::g_temporalPassWantedFssChrome;
     float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 1500.0f);
     if (!std::isfinite(reach)) reach = 1500.0f;
     if (reach < 1.0f) reach = 1.0f;
@@ -7718,7 +7726,7 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
-    if (!ctx || (!g_wanted && !g_eyeRunReady)) return;
+    if (!ctx || (!detail::g_temporalPassWantedFssChrome && !g_eyeRunReady)) return;
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     const bool accepted = acceptPassDevice(dev);
@@ -7728,7 +7736,7 @@ void temporalPassTick(ID3D11DeviceContext* ctx) {
         writeEyeRun(ctx, g_eyeRunWidth, g_eyeRunHeight);
         g_eyeRunReady = false;
     }
-    if (!g_wanted || !ctx) return;
+    if (!detail::g_temporalPassWantedFssChrome || !ctx) return;
     // Create both precompiled variants during warm-up so arming an eye dump
     // does not introduce shader creation work in the captured head movement.
     motionShader(ctx, false);
@@ -7755,7 +7763,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     // that size goes into the ring, stamped with the frame and the order;
     // chooseCameraRows picks the frame's at its first treat. Kept only
     // when the rows are a rotation.
-    if (!g_wanted || !data || bytes < 944 * 4) return;
+    if (!detail::g_temporalPassWantedFssChrome || !data || bytes < 944 * 4) return;
     const float* f = static_cast<const float*>(data) + 932;
     const float* pz = static_cast<const float*>(data) + 792;
     const bool rowsValid = temporalRowsAreRotation(f);
@@ -7800,7 +7808,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
 }
 
 void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx) {
-    if (!g_wanted || g_curLatched) return;
+    if (!detail::g_temporalPassWantedFssChrome || g_curLatched) return;
     g_curLatched = true;
     g_boundSeen = false;
     g_boundBuf = nullptr;
@@ -7845,7 +7853,7 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx) {
 }
 
 bool temporalPassWantsRigidDraw(int eye) {
-    if (!g_wanted || eye < 0 || eye > 1) return false;
+    if (!detail::g_temporalPassWantedFssChrome || eye < 0 || eye > 1) return false;
     return !g_rigidDraw[eye].seen || g_rigidDraw[eye].frame != g_rowsFrame;
 }
 
@@ -7885,7 +7893,7 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
 }
 
 void temporalPassFrameBoundary() {
-    if (!g_wanted) return;
+    if (!detail::g_temporalPassWantedFssChrome) return;
     for (int eye = 0; eye < 2; ++eye) {
         if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
             g_prevRigidDraw[eye] = g_rigidDraw[eye];
@@ -7921,7 +7929,6 @@ void temporalPassFrameBoundary() {
     g_curValid = false;
 }
 
-bool temporalPassWantsFssChrome() { return g_wanted; }
 
 bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
                         double* rejectPct, double* clipPct) {

@@ -46,7 +46,13 @@ class Config;
 void fssPanelConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set.
-bool fssPanelWantsDraws();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_fssPanelEnabled;
+}  // namespace detail
+inline bool fssPanelWantsDraws() { return detail::g_fssPanelEnabled; }
 
 // Called for eye draws. Matches X n=6 i=1, then the bound vertex shader's
 // content hash against the pair. Remembers which shader matched for

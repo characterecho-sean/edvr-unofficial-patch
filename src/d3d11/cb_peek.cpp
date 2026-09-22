@@ -16,6 +16,13 @@
 #include "sunglare_fix.h"
 
 namespace edvr {
+
+// cbPeekEnabled reads this from the header with no call: asked per eye
+// draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_cbPeekOn = false;
+}  // namespace detail
+
 namespace {
 
 // The family, matcher v2 (cb_peek's first sweep corrected v1; see the
@@ -42,7 +49,6 @@ constexpr float    kChangeEps = 1e-4f;
 constexpr uint32_t kFirstDumpFloats = 64;
 constexpr uint32_t kDeltaPerLine = 16;
 
-bool     g_enabled = false;
 bool     g_glare = false;          // cb_peek_glare: match the sun-glare
                                    // element train instead of the sprite
                                    // family, and learn its VS constants --
@@ -152,13 +158,13 @@ void poolSample(ID3D11DeviceContext* ctx, ID3D11Buffer* pool,
 }  // namespace
 
 void cbPeekConfigure(Config& cfg) {
-    const bool was = g_enabled;
-    g_enabled = false;   // retired instrument: the decode arcs it served are closed
+    const bool was = detail::g_cbPeekOn;
+    detail::g_cbPeekOn = false;   // retired instrument: the decode arcs it served are closed
     g_glare = false;
     const int wantN = 0;
     g_wantN = static_cast<uint32_t>(wantN);
     g_wantMinBytes = 0;
-    if (g_enabled && g_glare && !was) {
+    if (detail::g_cbPeekOn && g_glare && !was) {
         g_target = nullptr;
         g_dumpedFull = false;
         g_lines = 0;
@@ -168,7 +174,7 @@ void cbPeekConfigure(Config& cfg) {
                         "off-centre, straight, pitch, straight.");
         return;
     }
-    if (g_enabled && !was) {
+    if (detail::g_cbPeekOn && !was) {
         g_target = nullptr;
         g_dumpedFull = false;
         g_lines = 0;
@@ -191,7 +197,7 @@ void cbPeekConfigure(Config& cfg) {
                             "toggle off and on, then run the sweep.");
         }
     }
-    if (!g_enabled && was) {
+    if (!detail::g_cbPeekOn && was) {
         g_target = nullptr;
         g_pendingCopy = false;
         g_poolAnnounced = false;
@@ -202,13 +208,11 @@ void cbPeekConfigure(Config& cfg) {
     }
 }
 
-bool cbPeekEnabled() { return g_enabled; }
-
 void* cbPeekTarget() { return g_target; }
 
 void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                      uint32_t instances) {
-    if (!g_enabled || g_target || !ctx) return;
+    if (!detail::g_cbPeekOn || g_target || !ctx) return;
 
     // Glare mode: one matcher for the train, shared with the fix itself,
     // and the learn is always the vertex-stage constants -- the 208-byte
@@ -410,7 +414,7 @@ void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 }
 
 void cbPeekCapture(const void* data, uint32_t bytes) {
-    if (!g_enabled || !data || g_lines >= kMaxLines) return;
+    if (!detail::g_cbPeekOn || !data || g_lines >= kMaxLines) return;
     if (bytes > kMaxBytes) bytes = kMaxBytes;
     const uint32_t n = bytes / 4;
     if (n == 0) return;

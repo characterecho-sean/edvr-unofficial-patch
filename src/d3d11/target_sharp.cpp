@@ -18,6 +18,14 @@
 #include "vscreen.h"        // vScreenIsEyeSized
 
 namespace edvr {
+
+// targetSharpWantsDraws reads these from the header with no call: asked
+// per eye draw, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+bool g_targetSharpSharp = false;
+bool g_targetSharpFailed = false;
+}  // namespace detail
+
 namespace {
 
 // The composite's shape, from the census A/B that named it.
@@ -244,8 +252,6 @@ std::string joinChunks(const char* const* chunks) {
 
 enum class Mode { kOff, kCubic, kEasu };
 
-bool     g_sharp = false;
-bool     g_failed = false;
 uint64_t g_vsHash = kVsHash;
 float    g_sharpen = 0.25f;   // RCAS stops; negative = RCAS off
 bool     g_scaleProbe = false;   // paint the local scale instead of the art
@@ -266,7 +272,7 @@ ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
         g_psHadProbe == g_scaleProbe) {
         return g_ps;
     }
-    if (g_failed) return nullptr;
+    if (detail::g_targetSharpFailed) return nullptr;
     if (g_ps) {
         g_ps->Release();
         g_ps = nullptr;
@@ -309,7 +315,7 @@ ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
         // shaderSwapCompilePs has already said why. One stand-down for the
         // session: a compile that failed once fails every draw, and a line
         // per draw would be the log.
-        g_failed = true;
+        detail::g_targetSharpFailed = true;
         Log::get().note("target indicator: no resampler would compile, so the "
                         "indicator is drawn exactly as the game draws it for "
                         "the rest of this session.");
@@ -339,15 +345,15 @@ ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void targetSharpConfigure(Config& cfg) {
-    const bool was = g_sharp;
+    const bool was = detail::g_targetSharpSharp;
     const std::string m = cfg.getString("experimental.target_indicator",
                                         "stock");
     if (m == "stock") {
-        g_sharp = false;
+        detail::g_targetSharpSharp = false;
     } else if (m == "sharp") {
-        g_sharp = true;
+        detail::g_targetSharpSharp = true;
     } else {
-        g_sharp = false;
+        detail::g_targetSharpSharp = false;
         Log::get().note("target_indicator \"%s\" is not stock or sharp; "
                         "running stock.", m.c_str());
     }
@@ -386,20 +392,18 @@ void targetSharpConfigure(Config& cfg) {
         }
     }
 
-    if (was != g_sharp) {
+    if (was != detail::g_targetSharpSharp) {
         Log::get().note(
             "target indicator: %s. The selected target's direction indicator "
             "is composited into the eye by one quad through a single bilinear "
             "sample; sharp replaces that pixel shader with the same colour "
             "maths over an edge-adaptive reconstruction (AMD's EASU), "
             "sharpening %s. It cannot add detail. Watching for vs %016llX.",
-            g_sharp ? "sharp" : "stock",
+            detail::g_targetSharpSharp ? "sharp" : "stock",
             g_sharpen >= 0.0f ? "on" : "off",
             static_cast<unsigned long long>(g_vsHash));
     }
 }
-
-bool targetSharpWantsDraws() { return g_sharp && !g_failed; }
 
 bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                           uint32_t instances) {

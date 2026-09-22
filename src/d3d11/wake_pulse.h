@@ -67,7 +67,13 @@ class Config;
 void wakePulseConfigure(Config& cfg);
 
 // False in stock mode, which keeps the offscreen draw path free.
-bool wakePulseWantsDraws();
+//
+// Inline: asked per offscreen draw, and the build has no /GL to fold a
+// cross-TU getter for one bool load.
+namespace detail {
+extern bool g_wakePulseOff;
+}  // namespace detail
+inline bool wakePulseWantsDraws() { return detail::g_wakePulseOff; }
 
 // Is this offscreen draw the pulse? Called with the draw's shape and the
 // size of the target it is landing in, from the offscreen branch that

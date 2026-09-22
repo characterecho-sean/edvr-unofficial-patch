@@ -39,7 +39,13 @@ class Config;
 void fssRingConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set and the body-frame gate.
-bool fssRingWantsDraws();
+//
+// Inline: asked per eye draw behind the body-frame gate, and the build has
+// no /GL to fold a cross-TU getter for one scalar load.
+namespace detail {
+extern uint8_t g_fssRingMode;
+}  // namespace detail
+inline bool fssRingWantsDraws() { return detail::g_fssRingMode != 0; }
 
 // Called for eye draws behind the body-frame gate. Learning (at the lending
 // eye's draws) happens inside this call; true means the draw is the

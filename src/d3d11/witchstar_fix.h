@@ -37,7 +37,13 @@ class Config;
 void witchstarConfigure(Config& cfg);
 
 // False in stock mode; the per-draw path costs nothing then.
-bool witchstarWantsDraws();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for one bool load.
+namespace detail {
+extern bool g_witchstarPinned;
+}  // namespace detail
+inline bool witchstarWantsDraws() { return detail::g_witchstarPinned; }
 
 // Every eye draw while enabled, match or not: the cluster is recognised as
 // a RUN -- armed by a family member with a large index count, extended

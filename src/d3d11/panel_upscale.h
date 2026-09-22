@@ -69,7 +69,16 @@ class Config;
 void panelUpscaleConfigure(Config& cfg);
 
 // False in stock mode and once stood down, which keeps the draw path free.
-bool panelUpscaleWantsDraws();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for two bool loads.
+namespace detail {
+extern bool g_panelUpscaleSharp;
+extern bool g_panelUpscaleFailed;
+}  // namespace detail
+inline bool panelUpscaleWantsDraws() {
+    return detail::g_panelUpscaleSharp && !detail::g_panelUpscaleFailed;
+}
 
 // Is this eye draw a holo panel reading the surface we are aimed at? The
 // vertex shader's hash, then slot 2 being a Texture2D of the configured

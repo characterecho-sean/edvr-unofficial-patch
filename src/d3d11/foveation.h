@@ -56,6 +56,7 @@
 #include "binding_shadow.h"
 
 struct ID3D11DeviceContext;
+struct IUnknown;
 
 namespace edvr {
 
@@ -64,7 +65,21 @@ class Config;
 void foveationConfigure(Config& cfg);
 
 // One bool for the draw path's early-out set.
-bool foveationWantsDraws();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for three scalar loads. The enum lives here too, so this can
+// name its Wanted/Armed values.
+namespace detail {
+enum class FoveationPhase { Off, Wanted, Armed, Down };
+extern FoveationPhase g_foveationPhase;
+extern IUnknown*      g_foveationBound;
+extern bool           g_foveationBoundUnknown;
+}  // namespace detail
+inline bool foveationWantsDraws() {
+    return detail::g_foveationPhase == detail::FoveationPhase::Wanted ||
+           detail::g_foveationPhase == detail::FoveationPhase::Armed ||
+           detail::g_foveationBound != nullptr || detail::g_foveationBoundUnknown;
+}
 
 // Every draw on the owner context: whether slot 0's target is eye-sized
 // (the census's own verdict), the view and its binding generation, and the

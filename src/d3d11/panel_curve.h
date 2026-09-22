@@ -70,7 +70,28 @@ void panelCurveConfigure(Config& cfg);
 // Is a substitution wanted at all? False when curvature is 0 and the segment
 // count is the default, and false for the rest of the session once the fault
 // budget has stood the feature down.
-bool panelCurveWants();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for four scalar loads. kDefaultSegments lives here too, so this
+// can compare against it; the .cpp's segment default and clamp keep using
+// it unqualified through a using-declaration.
+namespace detail {
+constexpr int kDefaultSegments = 64;
+extern bool  g_panelCurveStoodDown;
+extern float g_panelCurveCurvature;
+extern int   g_panelCurveSegments;
+extern float g_panelCurveZTest;
+}  // namespace detail
+inline bool panelCurveWants() {
+    if (detail::g_panelCurveStoodDown) return false;
+    // Curvature 0 at the default segment count is the shipped state and does
+    // nothing at all. A non-default segment count at curvature 0 is the
+    // deliberate identity test, which has to substitute in order to prove
+    // anything -- so it counts as wanting.
+    return detail::g_panelCurveCurvature > 0.0f ||
+           detail::g_panelCurveSegments != detail::kDefaultSegments ||
+           detail::g_panelCurveZTest != 0.0f;
+}
 
 // Replace one recognised composite draw with the bent strip: save the input
 // assembler state actually touched, bind ours, issue the equivalent draw,

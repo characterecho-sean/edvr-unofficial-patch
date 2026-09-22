@@ -56,7 +56,15 @@ void remlokConfigure(Config& cfg);
 
 // Does the fix need the per-draw path at all? False in stock mode, which is
 // what keeps this module free when it is off.
-bool remlokWantsDraws();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for one scalar load. The enum lives here too, so this can name
+// its kStock value.
+namespace detail {
+enum class RemlokMode : uint32_t { kStock, kOuter, kHide };
+extern RemlokMode g_remlokMode;
+}  // namespace detail
+inline bool remlokWantsDraws() { return detail::g_remlokMode != detail::RemlokMode::kStock; }
 
 // One draw that reached an eye texture, with its bindings still current.
 // Matches the overlay by shape (kind, count, instances, no depth bound,

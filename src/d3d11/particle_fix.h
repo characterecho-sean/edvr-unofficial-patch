@@ -31,7 +31,15 @@ class Config;
 void particleConfigure(Config& cfg);
 
 // Whether the substitution is on -- the draw chain asks before matching.
-bool particleSteady();
+//
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one scalar load. The enum lives here too, so this can name
+// its kSteady value.
+namespace detail {
+enum class ParticleMode { kStock, kSteady };
+extern ParticleMode g_particleMode;
+}  // namespace detail
+inline bool particleSteady() { return detail::g_particleMode == detail::ParticleMode::kSteady; }
 
 // Is this draw the witchspace starfield, with fix.witchspace_stars = off?
 // True means do not forward it. Nothing is substituted: the draw is simply

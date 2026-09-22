@@ -165,7 +165,15 @@ void headOffsetGateSetView(int view);
 //
 // Asked by the render hooks, because counting panel draws costs a GetDesc per
 // eye-sized draw and is not worth paying for when nothing wants the answer.
-bool headOffsetGateWantsPanel();
+//
+// Inline: the build has no /GL to fold a cross-TU getter for one bool
+// load. Lives in detail rather than the Gate struct because Gate is reset
+// wholesale (g = Gate()); head_offset_gate.cpp resets this explicitly at
+// that one site.
+namespace detail {
+extern bool g_headOffsetGateWantsPanel;
+}  // namespace detail
+inline bool headOffsetGateWantsPanel() { return detail::g_headOffsetGateWantsPanel; }
 
 // Called once per frame from the Present path, with the two counters this
 // decision is made from:

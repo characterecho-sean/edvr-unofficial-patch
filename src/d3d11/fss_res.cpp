@@ -13,6 +13,13 @@
 #include "../common/log.h"
 
 namespace edvr {
+
+// fssResActive reads this from the header with no call: asked on the
+// viewport paths, and the build has no /GL to fold a cross-TU getter.
+namespace detail {
+uint32_t g_fssResCount = 0;
+}  // namespace detail
+
 namespace {
 
 // Entries are never removed -- the game gives no release signal we hook --
@@ -73,7 +80,6 @@ struct State {
     char     specStr[128] = {};  // the raw setting, to log only on a change
     Tracked  tracked[kTracked];
     uint32_t next = 0;
-    uint32_t count = 0;        // total ever tracked; >0 makes fssResActive true
     uint32_t inflateNotes = 0;
     uint32_t scaled = 0;       // viewports scaled at RSSetViewports
     uint32_t scaledLate = 0;   // caught by the draw-time backstop instead
@@ -232,7 +238,7 @@ void fssResNoteCreated(void* texture, uint32_t origW, uint32_t origH,
     t.w = origW;
     t.h = origH;
     t.scale = scale;
-    ++g_s.count;
+    ++detail::g_fssResCount;
     if (g_s.inflateNotes < 8) {
         ++g_s.inflateNotes;
         Log::get().note(
@@ -244,7 +250,7 @@ void fssResNoteCreated(void* texture, uint32_t origW, uint32_t origH,
 }
 
 bool fssResIsInflated(void* resource) {
-    if (!resource || g_s.count == 0) return false;
+    if (!resource || detail::g_fssResCount == 0) return false;
     for (const Tracked& t : g_s.tracked) {
         if (t.tex == resource) return true;
     }
@@ -252,7 +258,7 @@ bool fssResIsInflated(void* resource) {
 }
 
 bool fssResOrigSize(void* resource, uint32_t* w, uint32_t* h) {
-    if (!resource || g_s.count == 0) return false;
+    if (!resource || detail::g_fssResCount == 0) return false;
     for (const Tracked& t : g_s.tracked) {
         if (t.tex == resource) {
             *w = t.w;
@@ -264,7 +270,7 @@ bool fssResOrigSize(void* resource, uint32_t* w, uint32_t* h) {
 }
 
 uint32_t fssResScaleOf(void* resource) {
-    if (!resource || g_s.count == 0) return 1;
+    if (!resource || detail::g_fssResCount == 0) return 1;
     for (const Tracked& t : g_s.tracked) {
         if (t.tex == resource) return t.scale;
     }
@@ -274,8 +280,6 @@ uint32_t fssResScaleOf(void* resource) {
 // Turning a matcher off does NOT untrack what it already inflated: those
 // textures are still the wrong size for their viewports, and the game holds
 // them until it releases them. So this stays true while anything is tracked.
-bool fssResActive() { return g_s.count != 0; }
-
 void fssResNoteViewportScaled(bool late) {
     if (late) {
         ++g_s.scaledLate;

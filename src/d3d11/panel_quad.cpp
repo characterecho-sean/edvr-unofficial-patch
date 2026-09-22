@@ -16,6 +16,15 @@
 #include "shader_sig.h"
 
 namespace edvr {
+
+// panelQuadWants reads these from the header with no call: asked at the
+// panel composite draw, and the build has no /GL to fold a cross-TU
+// getter.
+namespace detail {
+bool g_panelQuadWanted = false;
+bool g_panelQuadPending = false;
+}  // namespace detail
+
 namespace {
 
 // The census measured 80 bytes. The cap is generous against that and still
@@ -35,8 +44,6 @@ constexpr uint64_t kReadbackLagMs = 50;
 // anything tighter would fail on a legitimate -1.0f against -0.99999994f.
 constexpr float kEps = 1e-4f;
 
-bool          g_wanted = false;      // config says take a capture
-bool          g_pending = false;     // copy queued, readback owed
 uint64_t      g_copyMs = 0;
 ID3D11Buffer* g_staging = nullptr;   // owned
 uint32_t      g_stagingBytes = 0;    // what it was CREATED at, which is not
@@ -265,8 +272,8 @@ void readBack(ID3D11DeviceContext* ctx) {
     });
     // One capture per arming, whether it parsed or not. A diagnostic that
     // keeps firing is one somebody turns off before reading it.
-    g_wanted = false;
-    g_pending = false;
+    detail::g_panelQuadWanted = false;
+    detail::g_panelQuadPending = false;
 }
 
 void queueCopy(ID3D11DeviceContext* ctx) {
@@ -280,7 +287,7 @@ void queueCopy(ID3D11DeviceContext* ctx) {
                 "its corners are synthesised in the shader and there is no quad to "
                 "read. That is what the design calls Path B, and it changes the plan "
                 "rather than this capture. Standing down.");
-            g_wanted = false;
+            detail::g_panelQuadWanted = false;
             return;
         }
 
@@ -297,7 +304,7 @@ void queueCopy(ID3D11DeviceContext* ctx) {
                 "Standing down without copying.",
                 bytes, stride, kMaxBytes);
             vb->Release();
-            g_wanted = false;
+            detail::g_panelQuadWanted = false;
             return;
         }
 
@@ -324,7 +331,7 @@ void queueCopy(ID3D11DeviceContext* ctx) {
                                 "created; standing down.",
                                 bytes);
                 vb->Release();
-                g_wanted = false;
+                detail::g_panelQuadWanted = false;
                 return;
             }
             g_stagingBytes = bytes;
@@ -406,7 +413,7 @@ void queueCopy(ID3D11DeviceContext* ctx) {
         }
 
         g_copyMs = nowMs();
-        g_pending = true;
+        detail::g_panelQuadPending = true;
     });
 }
 
@@ -423,29 +430,27 @@ void panelQuadConfigure(Config& cfg) {
         // Any state from a previous capture is dropped here, so a second one
         // cannot report the first one's sizes.
         g_bytes = g_stride = g_offset = 0;
-        g_wanted = true;
-        g_pending = false;
+        detail::g_panelQuadWanted = true;
+        detail::g_panelQuadPending = false;
         Log::get().note(
             "panel quad: armed. The next panel composite's vertex buffer will be "
             "copied and read back a few frames later, once, and its vertices "
             "logged. Get on foot or into HMD Cinema Mode with the screen up.");
     }
     if (!on) {
-        g_wanted = false;
-        g_pending = false;
+        detail::g_panelQuadWanted = false;
+        detail::g_panelQuadPending = false;
     }
     g_lastOn = on;
 }
 
-bool panelQuadWants() { return g_wanted || g_pending; }
-
 void panelQuadOnComposite(ID3D11DeviceContext* ctx) {
     if (!ctx) return;
-    if (g_pending) {
+    if (detail::g_panelQuadPending) {
         if (g_staging && nowMs() - g_copyMs >= kReadbackLagMs) readBack(ctx);
         return;
     }
-    if (g_wanted) queueCopy(ctx);
+    if (detail::g_panelQuadWanted) queueCopy(ctx);
 }
 
 void panelQuadShutdown() {
@@ -459,8 +464,8 @@ void panelQuadShutdown() {
     }
     g_stagingBytes = 0;
     g_ibStagingBytes = 0;
-    g_wanted = false;
-    g_pending = false;
+    detail::g_panelQuadWanted = false;
+    detail::g_panelQuadPending = false;
     g_lastOn = false;
 }
 

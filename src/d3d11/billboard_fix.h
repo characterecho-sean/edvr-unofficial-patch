@@ -40,7 +40,15 @@ class Config;
 // for its shadow machinery, loaned to the sun-glare fix as its
 // constants tee.
 void billboardConfigure(Config& cfg);
-bool billboardWantsDraws();
+
+// Inline: asked per draw, and the build has no /GL to fold a cross-TU
+// getter for one scalar load. The enum lives here too, so this can name
+// its kStock value.
+namespace detail {
+enum class BillboardMode : uint32_t { kStock, kSteady, kProbe };
+extern BillboardMode g_billboardMode;
+}  // namespace detail
+inline bool billboardWantsDraws() { return detail::g_billboardMode != detail::BillboardMode::kStock; }
 
 // Every eye draw while enabled: matches the sprite family (X, eye-sized
 // depth in PS slot 0, a texture in slot 1, 64+ indices) and tracks which

@@ -48,7 +48,16 @@ class Config;
 void objectProbeConfigure(Config& cfg);
 
 // For the draw chain's early-return list: true while the probe is on.
-bool objectProbeWantsDraws();
+//
+// Inline: asked per eye draw, and the build has no /GL to fold a cross-TU
+// getter for two bool loads.
+namespace detail {
+extern bool g_objectProbeOn;
+extern bool g_objectProbeLedgerOn;
+}  // namespace detail
+inline bool objectProbeWantsDraws() {
+    return detail::g_objectProbeOn || detail::g_objectProbeLedgerOn;
+}
 
 // One eye draw, after the eye gate: an instanced draw may be asked for its
 // t33 binding, a few times a frame until the pool is known and then once a
@@ -61,7 +70,7 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 // Visible draws routed before the normal eye-draw hook (particle billboards).
 // The caller establishes that the target is an eye. Record the original
 // shader in an active ledger, without probing its unrelated instance pool.
-bool objectProbeLedgerActive();
+inline bool objectProbeLedgerActive() { return detail::g_objectProbeLedgerOn; }
 void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx);
 // Around only the native draw, after Begin substitutions and before private
 // depth/motion reissues. Inactive outside an explicitly armed eye capture.
