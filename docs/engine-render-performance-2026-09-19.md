@@ -1603,12 +1603,18 @@ ms. Audit (code + the 09:37 session log):
   almost no GPU to the app; its own 26 MP distortion is invisible).
 - THE PIMAX WALL IS REAL (rig-resolved): EDVR's own numbers at the
   settlement: producer 11.9-13.4 ms vs 0.5-3.3 away, app GPU 8.2-14.9
-  ms - at XR 4100x3212 per eye (13.17 MP, 26.3 MP both eyes), canted
-  parallel projection (m02 = -+0.1389 per eye, the known ~1/3 tax), plus
-  the ~5.3 ms job pipeline. Draw counts match the Quest rig (~19.4k) -
-  the cost scales with PER-EYE PIXELS and the projection path, not
-  submission. SteamVR halves the display rate under that wall (22.222 ms
-  predicted period) - fpsVR's 42-44 is the delivered truth.
+  ms - at XR 4100x3212 per eye (13.17 MP, 26.3 MP both eyes - ~3.1x the
+  Quest rig's per-eye pixels), plus the ~5.3 ms job pipeline. The
+  m02 = -+0.1389 asymmetric frusta are the ORDINARY off-axis stereo
+  projection (principal-point offset - the same signature the Quest
+  analysis proved non-canted, 2026-09-21), NOT canted projection: the
+  user's headset is a Pimax Crystal Super micro-OLED with 0 deg cant,
+  and an earlier attribution of a 'canted ~1/3 tax' here is retracted.
+  Draw counts match the Quest rig (~19.4k) - the cost scales with
+  PER-EYE PIXELS (GPU-side, plus GPU-bound backpressure inflating the
+  CPU-side intervals and tile-count-scaled compute dispatches), not
+  submission. SteamVR halves the display rate under that wall (22.222
+  ms predicted period) - fpsVR's 42-44 is the delivered truth.
 So: Quest rig = pacer-limited (VDXR), Pimax rig = a genuine CPU+GPU wall
 at 26 MP - the user's original 'settlements are CPU-bound' is rig-true.
 FIX (small, spec'd): a DISPLAY tile on the native path - surface the
