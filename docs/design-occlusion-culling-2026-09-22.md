@@ -45,10 +45,17 @@ context; every load-bearing claim cites its evidence.
   reconciliation) and reproduces the runtime log's cycle phases for the
   old trace's windows 30-31 to within 0.001 ms — the analyzer is proven;
   the old trace itself remains a tool input, not gate evidence.
-- **Next:** Phase A — the two-leg cockpit flight designed in the engine
-  arc's 2026-09-22 onset entry (leg 1 parked, capture instruments off;
-  leg 2 the approach from beyond 5 km), then the gate verdict, then Phase B
-  offline only if it passes.
+- **VERDICT (2026-09-22 evening, valid Phase A): KILL.** Two clean
+  file-mode legs on build 2d8fbda (engine arc, "Phase A, valid: KILL"
+  entry). Parked cockpit: the job pipeline is 5.24 ms thread-summed on
+  seven workers (the ~5.3 ms reproduced) but only 0.81 ms on the caller
+  thread's critical path (0.67 ms running, all post-present, + 0.14 ms
+  of pipeline-attributed waits; share 0.155): recall x critical path =
+  0.78 ms against the ~1.5 ms bar. The caller thread's wall is draw
+  submission (11 ms before first submit, 98.6% running, 3.94 ms of it
+  innermost in EDVR's own d3d11.dll), which no eval-level cull touches.
+  Nothing of §3 is built; §4 stops at Phase A. The arc's successor is
+  the EDVR per-draw cost on the caller thread (engine arc Status).
 
 ## 1. Context and goal
 

@@ -20,28 +20,24 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) a VALID Phase A of the reviewed
-  occlusion design (docs/design-occlusion-culling-2026-09-22.md). The
-  2026-09-22 flight was invalid for the gate and its KILL verdict was
-  withdrawn the same day (engine arc, withdrawal entry): the WPR ring
-  dropped the parked-cockpit leg, the window analysed was the on-foot
-  doorway pose and the exit, and the analyzer measures only the
-  post-present slice [PresentEnd, NextWaitEntry). Retake tooling DONE
-  2026-09-22 (on main): cpu_profile.py captures in file mode with
-  hotkey-armed legs and samples Status.json; the analyzer covers the
-  whole cycle (eight regions, per-thread busy table, waits attributed by
-  the waker's last sample per region and per blocking site, mechanical
-  RVA classes on decompile sizes) and reproduces the runtime log's cycle
-  phases for windows 30-31 of the old trace to within 0.001 ms (engine
-  arc, 2026-09-22 tooling entry). The flight is designed (engine arc,
-  2026-09-22 onset entry): leg 1 parked cockpit with scheduler_probe and
-  eye_depth_capture OFF, leg 2 the approach from beyond 5 km. Scope is
-  cockpit-only stereo (on foot out of scope). The ~1 km onset has five
-  candidates with trace signatures in that entry (per-record LOD gate,
-  reset-repopulate admission, physics scope, waiting/EDVR hook cost,
-  streaming). Kill gate unchanged: pipeline off the critical path or recall x share x 5.3 ms
-  < ~1.5 ms; the static unseen set is a CEILING, not a cull list; Phase B
-  offline follows only if Phase A passes; (2) depth-capture constants
+* **Open, highest value first:** (1) the caller thread's draw-submission
+  cost. The VALID Phase A of 2026-09-22 (engine arc, "Phase A, valid:
+  KILL" entry; two clean file-mode legs on build 2d8fbda, analyzer
+  reconciled to the runtime log within 0.001 ms) measured the parked
+  cockpit at 45 fps with the caller thread running 15.1 ms per 22.2 ms
+  cycle: 11 ms before first submit is draw submission - 3.94 ms
+  innermost in EDVR's own d3d11.dll (46% of samples pass through it),
+  4.45 ms game code, ~2.4 ms D3D runtime + NVIDIA driver + kernel - and
+  the stage 2-3 job pipeline is 5.24 ms thread-summed on seven workers
+  but 0.81 ms on the critical path. Next: name the EDVR functions behind
+  the 3.94 ms (innermost EDVR RVAs from build\phaseA-parked-2 + a PDB
+  rebuilt at 2d8fbda), cut the per-draw path, remeasure with the same
+  two legs; read the GPU side next to it (addendum 2: 8-15 ms app GPU
+  at 0.7559 scale). The approach onset is a RAMP with distance (stage 1
+  per-record LOD admission fits; R1 4.0 -> 12.7 ms from 5.3 km to
+  landing, r = 0.97 with job-0 samples); the settlement's collection
+  admission (reset-repopulate) is untested because that leg began after
+  a reload at the settlement; (2) depth-capture constants
   keying fix; (3) per-record identity/change signal (stage 2 — motion
   arc); (4) scheduler payload-vtable closure (stage 0); (5) ring-buffer
   command consumers.

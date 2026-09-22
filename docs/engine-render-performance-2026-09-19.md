@@ -46,30 +46,34 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
-* **State (2026-09-22, retake tooling proven, flight designed):** the
-  capture tool records in file mode with hotkey-armed legs and samples
-  Status.json; the analyzer covers the whole cycle (regions R1-R6,
-  per-thread busy table, waits attributed by the waker's last sample per
-  region and blocking site, RVA classes on decompile sizes) and
-  reproduces the runtime log's cycle phases for the old trace's windows
-  30-31 to within 0.001 ms (2026-09-22 tooling entry). Nothing of the
-  design is built. The old trace stays a tool input, not gate evidence.
+* **State (2026-09-22 evening, VALID Phase A flown: the occlusion
+  arc is KILLED, the wall is named):** two clean file-mode legs on build
+  2d8fbda, reconciled to the runtime log within 0.001 ms. Parked cockpit
+  at 45 fps: the caller thread RUNS 15.1 ms per 22.2 ms cycle (10.97 of
+  the 11.14 ms before first submit, 98.6% running), so it alone cannot
+  fit a 90 Hz frame. The job pipeline is 5.24 ms thread-summed on seven
+  workers but only 0.81 ms on the caller's critical path (0.67 running,
+  all post-present, + 0.14 waits): recall x critical path = 0.78 ms
+  against the 1.5 ms bar. The pre-submit 11 ms is draw submission:
+  3.94 ms innermost in EDVR's OWN d3d11.dll (46% of samples pass through
+  it), 4.45 ms game code, ~2.4 ms D3D runtime + NVIDIA driver + kernel.
+  The approach onset is a RAMP (R1 4.0 -> 12.7 ms from 5.3 km to
+  landing, r = 0.97 with job-0 samples), no step. Nothing of the design
+  is built or will be. Entry: 2026-09-22 "Phase A, valid: KILL".
 
-* **Open (arc OPEN; Phase A flown 2026-09-22 but INVALID for its gate —
-  the KILL verdict was withdrawn the same day, see the withdrawal entry;
-  scope is now cockpit-only stereo, on foot out of scope):** (1) the
-  VALID Phase A flight: two legs in one session per the 2026-09-22 onset
-  entry — leg 1 parked cockpit, 60-75 s, scheduler_probe and
-  eye_depth_capture OFF, Pimax smart smoothing off; leg 2 the approach
-  from beyond 5 km; both through the analyzer with --runtime-log; the
-  gate reads from leg 1 (caller pipeline running + pipeline-attributed
-  waits in R1, critical-path share, recall x share x 5.3 ms vs ~1.5 ms);
-  (2) the ~1 km onset from leg 2: five candidates with trace signatures
-  in the onset entry (per-record LOD gate = ramp; reset-repopulate
-  admission = step with 0x36A0F50 sampled; physics scope; waiting or
-  EDVR hook share = not the pipeline; streaming = I/O sites); (3) DONE
-  2026-09-22: the 13.7 s memory ring — file mode is the default now,
-  --memory-ring restores the ring; (4) eye depth capture
+* **Open (arc OPEN on the NEW lever; scope cockpit-only stereo):** (1)
+  name the EDVR functions behind the 3.94 ms per frame of innermost
+  EDVR d3d11.dll time in R1 on the caller thread (innermost EDVR RVAs
+  from the parked trace build\phaseA-parked-2 + a PDB rebuilt at 2d8fbda
+  whose .text matches the installed DLL), then cut the per-draw path and
+  remeasure with the same two legs — cutting all of it lands the caller
+  at ~11.2 ms, the edge of 90 Hz, so the GPU side (unmeasured here;
+  addendum 2: 8-15 ms app GPU at 0.7559) must be read next to it; (2)
+  the settlement admission (C2, reset-repopulate) stays untested: the
+  approach leg began after a reload at the settlement — a leg that
+  starts from a real 10 km arrival would test it; (3) DONE 2026-09-22:
+  the 13.7 s memory ring — file mode is the default now, --memory-ring
+  restores the ring; (4) eye depth capture
   is native-VR-only by design (the flat panel forms no scene pair) —
   document or extend; (5) the object classification ownership join failed
   in all four Phase A runs (unwind_failed ~90%) — the record-to-object
@@ -1796,3 +1800,95 @@ samples), which is why the sizes went in before any flight.
 
 ruled out: nothing. The gate is still unmeasured; the instrument is now
 proven against the runtime's own accounting.
+
+### 2026-09-22 -- Phase A, valid: KILL. The pipeline is 0.8 ms of the caller thread's 15.1 ms; the wall is draw submission, 3.9 ms of it inside EDVR's own d3d11.dll; the onset is a ramp
+
+Two file-mode legs, one session, build v0.17.0-300-g2d8fbda (log check
+exit 0), pid 22184, Pimax Crystal Super on Pimax OpenXR, requested
+resolution 0.566 (openxr_resolution line), pacing=0, scheduler_probe
+and eye_depth_capture OFF (the gfx log prints no probe or census line),
+no capture hotkey pressed. Both traces analysed with --runtime-log:
+leg 1 (build\phaseA-parked-2, 2.49 GB, 75 s, 2831 frames, 2830 covered,
+eventsLost 0) reproduces windows 15 and 16 of the runtime log to
+0.0009 ms; leg 2 (build\onset-approach, 3.52 GB, 103 s, 4424 frames all
+covered) reproduces windows 31-33. Region residual 0 in both.
+
+**Leg 1, parked cockpit (~200 m from the settlement point), windows
+15/16, 1349/1344 frames, 45.0 fps, cycle 22.25 ms.** Caller thread per
+cycle, µs (length / running / waiting): R1 [waitReturn, firstSubmit)
+11142 / 10966 / 152; R2-R4 submits 1156 / 357 / 755; R5a-b 472 / 369 /
+86; R5c [presentEnd, nextWaitEntry) 4557 / 3361 / 1145; R6 next wait
+4920 / 39 / 4878. Caller running 15.1 ms per frame in total: the
+thread alone cannot fit the 11.1 ms of a 90 Hz frame, the runtime
+delivers at 45 Hz and the caller idles 4.9 ms per cycle in R6. The
+pre-submit phase is 98.6% running - not blocking, not back-pressure,
+not EDVR parking (C4-waiting is out for the cockpit).
+
+**The gate, measured.** Thread-summed pipeline running (all threads,
+samples in the job bodies / thunks / call site / eval / record drain):
+5.24 ms per frame - the design's ~5.3 ms reproduced by a second
+instrument. Of it on the caller thread: 0.67 ms running (1882 of 42738
+caller samples, ALL in R5: record_drain 0.61, batch 0.11, job-0 0.07,
+call site 0.06; ZERO pipeline samples in R1) plus 0.14 ms of waits
+whose waker's last sample was in the pipeline. Critical-path share
+0.155. Recall ceiling x critical-path pipeline: 0.96 x 0.81 = 0.78 ms;
+by the design's formula 0.96 x 0.155 x 5.3 = 0.79 ms. The bar is
+~1.5 ms. **KILL at Phase A, by the design's own gate, on a valid
+measurement this time.** The premise was wrong: the pipeline runs on
+seven worker threads at ~0.75 ms each per frame, overlapped, and the
+caller thread waits 0.14 ms for it.
+
+**What the caller thread's 11 ms of R1 is** (top-of-stack module of its
+14757 R1 samples in window 15, ms per frame): game exe 4.45 (40.7%),
+EDVR's own d3d11.dll 3.94 (36.1%), System32 d3d11 0.74, ntdll 0.59,
+kernel 0.53, nvwgf2umx 0.50, other 0.2. 46% of R1 samples have an EDVR
+d3d11 frame anywhere on the stack; 27% sit on one path, EDVR frames
+over game RVAs 0x51bcab < 0x4c82f18 < 0x594ed5 < 0x58f2f4 (a per-draw
+or per-state call the game makes through the proxy). R1 is draw
+submission. R5c's 3.4 ms running is 77% game code (the record drain,
+the call site, the draw-item chain 0x4c81ca0 < 0x4c8227c) with EDVR at
+0.09 ms. Window 16 repeats every number within 0.1 ms. Frame
+resolution: 1.62 M frames resolved, 73 unresolved, so the module split
+is complete.
+
+**Leg 2, the approach (5.35 km 3-D distance at 5.2 km altitude down to
+touchdown at 234 m, Status.json joined by UTC, per-second series in the
+scratch record).** R1 running is a RAMP: 4.0 ms at 5.35 km, 5.8 at
+4.5 km, 6.3 at 3.7 km, 6.9 at 2.0 km, 7.4 at 1.2 km, 8.6 at 1.0 km,
+9.0 at 800 m, 9.6 at 430 m, 11.3 at 313 m, 12.7 landed; no
+adjacent-second jump above 0.6 ms in 86 s; it tracks the thread-summed
+UpdateRenderDataJob samples (1.4 -> 3.9 per frame, r = 0.97) and the
+thread-summed pipeline (2.0 -> 5.4 ms). reset_repopulate 0x36A0F50 was
+never sampled on any thread in either leg, but this leg cannot test C2:
+the game had been reloaded at the settlement at 16:57:09 (journal
+LoadGame; ApproachSettlement fired at load-in, not during the descent),
+so the collection was admitted before the capture began. The half-rate
+throttle engaged at 4.5 km (first 42 of 48 frames over 16 ms) and held
+100% from 2.1 km; the "~1 km" the user perceives is where R1 passes
+~9 ms (800 m), not where the rate halves.
+
+**Reading against the candidates:** C1 (per-record LOD admission) fits
+the ramp and the job-0 correlation; C2 untestable here; C3 out (job 2
+never sampled); C4-waiting out (R1 running 98.6%); C4-EDVR-hook is
+CONFIRMED as the largest single block (3.9 ms innermost, up to 5.2 ms
+with the D3D runtime and driver underneath it); C5 out (no I/O sites).
+The admission ramp sets HOW MANY draws the settlement submits; EDVR's
+per-draw path sets what each one costs the caller thread.
+
+**Consequence.** The occlusion-culling arc CLOSES at Phase A. The lever
+the flight found is EDVR's own per-draw cost on the caller thread: it
+is the one block that is ours to cut, and cutting all of it lands the
+caller at ~11.2 ms, the edge of 90 Hz (the GPU side is unmeasured in
+this trace; addendum 2 above measured 8-15 ms app GPU at 0.7559 scale).
+Next, no flight needed: name the EDVR functions behind the 3.9 ms from
+this trace (innermost EDVR RVAs from the analyzer + a PDB rebuilt at
+2d8fbda whose .text matches the installed DLL), then cut the per-draw
+path and remeasure with the same two legs.
+
+ruled out: occlusion culling of the job pipeline, because the pipeline's
+critical-path time is 0.81 ms per frame against a 1.5 ms bar (valid
+Phase A). ruled out: back-pressure or EDVR parking as the cockpit wall,
+because R1 is 98.6% running. ruled out: a step-shaped settlement onset
+between 5.3 km and landing, because R1 ramps with no jump over 0.6 ms.
+ruled out: the armed instruments as the cause of the 2026-09-22 morning
+cockpit numbers, because the clean leg reproduces them (11.1 vs 12 ms).
