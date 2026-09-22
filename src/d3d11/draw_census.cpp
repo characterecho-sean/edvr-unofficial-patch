@@ -702,6 +702,12 @@ void finish() {
 
 }  // namespace
 
+// The numeric form of bindingToken's "@N", for the eye-run ledger's binary
+// rows: the same table entry a census line would name this view by, so a
+// ledger row joins a census line's r= token exactly. -1 for null (no RTV
+// bound), -2 when the table is full.
+int drawCensusIntern(void* view) { return internOf(view, Kind::kView); }
+
 bool drawCensusArmed() { return g_pending || g_framesLeft > 0; }
 
 void drawCensusRequest() {

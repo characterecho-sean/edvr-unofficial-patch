@@ -24,11 +24,13 @@
 #include "../common/timing.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
+#include "depth_probe.h"
 #include "eye_draw_snapshot.h"
 #include "object_classification_probe.h"
 #include "mesh_motion.h"
 #include "eye_tonemap_snapshot.h"
 #include "eye_panel_snapshot.h"
+#include "eye_depth_capture.h"
 #include "gui_draw_snapshot.h"
 
 namespace edvr {
@@ -512,18 +514,26 @@ constexpr int      kLedgerFrames = 20;          // the run's sixteen crops and s
 constexpr uint32_t kLedgerBonesMax = 1u << 20;  // the palette's first megabyte: rows to 21845; the station's bases reached 16413 (2026-09-10)
 constexpr int      kLedgerRing = 4;
 constexpr int      kLedgerCrops = 32;
+// Row layout is versioned by the draws file's header (version 1 = 24-byte
+// rows, version 2 = 40-byte rows with ps/rt): tools/eye_run_ledger.py parses
+// both, so the two must stay in step.
 struct LedgerDraw {
     uint64_t vs;             // the bound vertex shader's hash (the binding shadow's; 0 = one the registry had not met)
     uint32_t count;          // the vertex or index count
     uint32_t instances;
     uint32_t startInstance;  // StartInstanceLocation: where its records' indices sit in the instance stream
+    uint32_t pad0;           // version 2: keeps ps 8-aligned; zero
+    uint64_t ps;             // version 2: the bound pixel shader's hash, same source as vs (0 = unknown)
+    int32_t  rt;             // version 2: the census's intern id of the bound RTV (drawCensusIntern):
+                             // >= 0 the same @N a census line's r= token carries, -1 no RTV bound
+                             // (a depth-only or shadow pass), -2 the census's table was full
     uint8_t  kind;           // 'D' 'I' 'N' 'X'
     uint8_t  pool;           // 1 = t33 HELD the pool at this draw (asked of the context; armed only) -- which
                              // it does on every draw after a pool draw, the game never unbinding it;
                              // whether the shader READS it is the desk's question (tools/eye_run_ledger.py --pool-vs)
     uint16_t pad;
 };
-static_assert(sizeof(LedgerDraw) == 24, "tools/eye_run_ledger.py reads 24-byte rows");
+static_assert(sizeof(LedgerDraw) == 40, "tools/eye_run_ledger.py reads 40-byte rows (version 2)");
 struct LedgerCopy {
     ID3D11Buffer* staging = nullptr;
     uint32_t bytes = 0;
@@ -577,6 +587,7 @@ int     g_auxCount = 0;
 EyeDrawSnapshot g_drawSnapshot;
 EyeTonemapSnapshot g_tonemapSnapshot;
 EyePanelSnapshot g_panelSnapshot;
+EyeDepthCapture g_eyeDepthCapture;
 // The ledger records the submitted draw. Delay the panel's copies until
 // the native draw runs, after texture/constant substitutions have begun.
 struct PanelCaptureArgs {
@@ -606,6 +617,7 @@ void ledgerRelease() {
     g_drawSnapshot.reset();
     g_tonemapSnapshot.reset();
     g_panelSnapshot.reset();
+    g_eyeDepthCapture.reset();
     g_panelCaptureArgs = {};
     g_panelSkipped = 0;
     g_eyeMeshSnapshot.reset();
@@ -2649,10 +2661,21 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     if (frame < g_ledgerFrame0 || frame > g_ledgerLastFrame) return;
     LedgerDraw d{};
     d.vs = bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0;
+    d.ps = bindingGet(BindSlot::Ps) ? bindingShaderHash(BindSlot::Ps) : 0;
     d.count = count;
     d.instances = instances;
     d.startInstance = startInstance;
     d.kind = static_cast<uint8_t>(kind);
+    // The target the draw lands in, as the census would name it: one
+    // OMGetRenderTargets and one intern per draw, armed intervals only. The
+    // desk's duplication study needs per-row pass identity -- same-pass
+    // repeats cull, per-eye/per-pass repeats do not -- and the RTV's census
+    // intern id is both stable across the run and joinable to census lines.
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, g_eyeDepthCapture.enabled() ? &dsv : nullptr);
+    d.rt = drawCensusIntern(rtv);
+    if (rtv) rtv->Release();
     if (g_panelCaptureArgs.ctx) {
         ++g_panelSkipped;
         g_panelCaptureArgs = {};
@@ -2699,6 +2722,19 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
                 paletteCapture(ctx);
             }
         });
+    }
+    // The eye run's depth capture (advanced.eye_depth_capture) keys the pass
+    // off the same single OMGetRenderTargets above; its poolDraw verdict is
+    // the ledger's own t33 test from the block just run. Eye identity is the
+    // depth probe's scene pair -- depthProbeSceneEyeOf(dsv) -- NOT the
+    // frame's first-seen DSVs: the offscreen stages run before the eye
+    // passes and reach this ledger with their own depth targets, and the
+    // first flight interned those into both slots (190 declines, no files).
+    if (dsv) {
+        int eye = -1;
+        depthProbeSceneEyeOf(dsv, &eye, nullptr);
+        g_eyeDepthCapture.noteEyeDraw(ctx, frame, dsv, d.pool != 0, eye);
+        dsv->Release();
     }
     g_ledgerDraws[frame - g_ledgerFrame0].push_back(d);
 }
@@ -2874,8 +2910,8 @@ void writeLedger(ID3D11DeviceContext* ctx) {
         int32_t  crop[kLedgerCrops];   // crop k's frame, -1 = not taken
     };
     static_assert(sizeof(Header) == 160, "tools/eye_run_ledger.py reads a 160-byte header");
-    Header hd = {{'E', 'D', 'V', 'R', 'L', 'D', 'G', 'R'}, 1u, static_cast<uint32_t>(kLedgerFrames), g_ledgerFrame0,
-                 g_instStride, 48u, g_poolBytes, {}};   // the palettes are 48-byte rows
+    Header hd = {{'E', 'D', 'V', 'R', 'L', 'D', 'G', 'R'}, 2u, static_cast<uint32_t>(kLedgerFrames), g_ledgerFrame0,
+                 g_instStride, 48u, g_poolBytes, {}};   // the palettes are 48-byte rows; version 2 rows carry ps and rt
     memcpy(hd.crop, g_ledgerCropFrame, sizeof(hd.crop));
     _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\draws_%s.bin", dir.c_str(), g_ledgerStamp);
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -2949,6 +2985,26 @@ void writeLedger(ID3D11DeviceContext* ctx) {
         static_cast<unsigned long long>(g_panelSnapshot.bytes),g_panelSnapshot.declined,
         g_panelSnapshot.failures,g_panelSnapshot.ignoredOtherEye,g_panelSkipped,
         panelOk?"written":"WRITE FAILED");
+    // The depth capture's readback rides the ledger's own grace period: the
+    // copies were staged the moment each pass ended, so only the Map waits
+    // on the GPU, with the snapshot's no-wait rule.
+    const uint32_t depthFiles=g_eyeDepthCapture.write(ctx,dir.c_str(),g_ledgerStamp);
+    Log::get().note("object probe: eye depth capture %ls: %u files (depth_%ls_f<frame>_<A|B>.bin), "
+                    "%llu payload bytes staged, %u non-eye draws skipped (offscreen phases the depth "
+                    "probe's scene pair does not name; eye identity comes from that pair, and this "
+                    "instrument switches the probe on itself), %u range/budget declines, %u readback/write "
+                    "failures, %u SEH faults; %s. Each file is one eye pass's completed D32 depth plus "
+                    "that pass's VS b1 floats [256,592) from its first pool-carrying draw "
+                    "(view-projection rows at 270..273, camera-relative origin at 275); eye A/B is the "
+                    "scene pair's first-bind order. Only with advanced.eye_depth_capture on; the first "
+                    "%u frames of the run; no rendering changes.",
+                    dir.c_str(),depthFiles,g_ledgerStamp,
+                    static_cast<unsigned long long>(g_eyeDepthCapture.bytes()),g_eyeDepthCapture.nonEyeSkips,
+                    g_eyeDepthCapture.declined,
+                    g_eyeDepthCapture.failures,g_eyeDepthCapture.faults,
+                    depthFiles||g_eyeDepthCapture.declined?"written":"nothing captured (instrument off, "
+                    "or no scene-pair frames in the run)",
+                    static_cast<unsigned>(edvr::EyeDepthCapture::kMaxFrames));
     Log::get().note("object probe: tone-map snapshots %ls: %u draws, actual first matching frame %u, %u reserved bytes, %u declines, %u failed copies/shaders; %s. At most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.firstFrame(),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");
     const uint32_t missingShaders = g_drawSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye draw snapshots %ls: %u draws, %u holo surfaces, %u capped draws, "
@@ -3188,6 +3244,7 @@ void objectProbeConfigure(Config& cfg) {
     // needs them without the log.
     g_verbose = cfg.getBool("advanced.object_probe", false);
     g_details = cfg.getBool("advanced.temporal_aa_diagnostics", false);
+    g_eyeDepthCapture.configure(cfg.getBool("advanced.eye_depth_capture", false));
     g_on = g_verbose || temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
 }
 

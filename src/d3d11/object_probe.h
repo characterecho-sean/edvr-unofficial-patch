@@ -84,8 +84,11 @@ void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t coun
 // pool copy is kept; the scene's instance stream (the per-instance record
 // indices every pool draw reads, 8 bytes each) and the first megabyte of
 // every bone palette the pool draws bind at VS t38 (up to four) are copied
-// and kept; every eye draw is noted with its shader, its counts, its start
-// instance and whether t33 was the pool; and the big instanced draws that
+// and kept; every eye draw is noted with its vertex and pixel shader hashes,
+// its counts, its start instance, whether t33 was the pool, and the render
+// target it landed in (the census's intern id: the two eye targets, any
+// offscreen target, or none for a depth-only pass); and the big instanced
+// draws that
 // read no pool (the first run's ledger, 05:19: the whole station's records
 // were drawn and turned as one, so the slow ring is drawn by something
 // else -- a ring of segments placed by a world matrix, say) have their

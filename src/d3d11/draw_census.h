@@ -318,4 +318,12 @@ void drawCensusTick(ID3D11DeviceContext* ctx);
 // logged so a census can be lined up against the rest of the log.
 void drawCensusFrameBoundary(uint32_t frameNo);
 
+// The intern id the census would give this view pointer (its r=/d= table):
+// >= 0 the @N a census line carries, -1 for null, -2 when the table is full.
+// For the eye-run ledger's draws_<stamp>.bin rows (object_probe.cpp): per-row
+// render-target identity joinable to the census's own tokens, so a ledger row
+// and a census line can be tied to the SAME view. The pointer must be a live
+// view, as at a draw; the ledger interns the RTV it just read off the context.
+int drawCensusIntern(void* view);
+
 }  // namespace edvr

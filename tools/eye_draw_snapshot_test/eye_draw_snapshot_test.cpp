@@ -1,6 +1,8 @@
 #include "../../src/d3d11/eye_draw_snapshot.h"
 #include "../../src/d3d11/gui_draw_snapshot.h"
+#include "../../src/d3d11/eye_depth_capture.h"
 #include <d3dcompiler.h>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -304,6 +306,31 @@ int wmain(int argc, wchar_t** argv) {
         solar.draws.back().ps=123;
         check(solar.writeShaders(dir.c_str())==1,"unexpected solar PS reported missing, never silently substituted");
     }
+    {
+        // Census unknown-A/B settlement prop batches, 2026-09-21. The VS
+        // alone enters sourceMesh(), but the paired PS dxbc needs BOTH the
+        // creation-time retention gate (device_hook hookedCreatePS) and the
+        // writeShaders pixel branch -- prove the write half per family here.
+        edvr::EyeDrawSnapshot unknowns;
+        const char bytes[]="unknown-bytecode";
+        const uint64_t vs[]={edvr::EyeDrawSnapshot::kUnknownA,edvr::EyeDrawSnapshot::kUnknownB};
+        const uint64_t ps[]={edvr::EyeDrawSnapshot::kUnknownAPs,edvr::EyeDrawSnapshot::kUnknownBPs};
+        for(unsigned family=0;family<2;++family) {
+            edvr::EyeDrawSnapshot::rememberShader(vs[family],bytes,sizeof(bytes));
+            edvr::EyeDrawSnapshot::rememberShader(ps[family],bytes,sizeof(bytes));
+            edvr::EyeDrawSnapshot::rememberLayout(nightLayout.Get(),&nightElement,1,vs[family]);
+            unknowns.capture(ctx.Get(),1100,family,vs[family],ps[family],'X',6,1,0,0,0,true);
+        }
+        check(unknowns.draws.size()==2,"unknown-A/B draws retained via sourceMesh");
+        std::wstring udir=argv[1];udir.resize(udir.find_last_of(L"\\/"));
+        check(unknowns.writeShaders(udir.c_str())==0,"unknown-A/B vertex and pixel shader writes");
+        for(const wchar_t* name:{L"vs_8056C9D5F22007F9.dxbc",L"ps_669CC896CA4AA988.dxbc",
+                                L"vs_2684F02B9B0BB0DE.dxbc",L"ps_2376A8D9AA874372.dxbc"}) {
+            FILE* f=nullptr;
+            check(_wfopen_s(&f,(udir+L"\\"+name).c_str(),L"rb")==0 && f,"unknown shader file written");
+            if(f)fclose(f);
+        }
+    }
     ComPtr<ID3D11Texture2D> nightTexture[5];ComPtr<ID3D11ShaderResourceView> nightView[5];
     UINT nightRow[5]{},nightRows[5]{};
     for(UINT slot=0;slot<5;++slot) {
@@ -448,6 +475,176 @@ int wmain(int argc, wchar_t** argv) {
     check(eyeMesh.draws.size()==12 && eyeMesh.meshBytes==eyeBytes,"eye mesh capture stops after three consecutive frames");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
+    // The eye-run depth capture (advanced.eye_depth_capture): each pass's
+    // completed depth is staged the moment the NEXT pass's first draw is
+    // noted; values written after the pass must not leak in, and later
+    // overwrites of the source textures must not change the staged copies.
+    {
+        edvr::EyeDepthCapture depth;
+        depth.configure(true);
+        check(depth.enabled() && depth.count()==0,"depth capture configures on");
+        D3D11_TEXTURE2D_DESC eyeDepthDesc{};eyeDepthDesc.Width=eyeDepthDesc.Height=8;
+        eyeDepthDesc.MipLevels=eyeDepthDesc.ArraySize=eyeDepthDesc.SampleDesc.Count=1;
+        eyeDepthDesc.Format=DXGI_FORMAT_R32_TYPELESS;eyeDepthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        D3D11_TEXTURE2D_DESC eyeColDesc{};eyeColDesc.Width=eyeColDesc.Height=8;
+        eyeColDesc.MipLevels=eyeColDesc.ArraySize=eyeColDesc.SampleDesc.Count=1;
+        eyeColDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;eyeColDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+        D3D11_DEPTH_STENCIL_VIEW_DESC eyeDsvDesc{};eyeDsvDesc.Format=DXGI_FORMAT_D32_FLOAT;
+        eyeDsvDesc.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
+        ComPtr<ID3D11Texture2D> depthTex[2];ComPtr<ID3D11DepthStencilView> depthDsv[2];
+        ComPtr<ID3D11RenderTargetView> eyeRtv[2];
+        for(int e=0;e<2;++e) {
+            ComPtr<ID3D11Texture2D> t;hr(dev->CreateTexture2D(&eyeDepthDesc,nullptr,&t));depthTex[e]=t;
+            hr(dev->CreateDepthStencilView(t.Get(),&eyeDsvDesc,&depthDsv[e]));
+            ComPtr<ID3D11Texture2D> c;hr(dev->CreateTexture2D(&eyeColDesc,nullptr,&c));
+            hr(dev->CreateRenderTargetView(c.Get(),nullptr,&eyeRtv[e]));
+        }
+        D3D11_BUFFER_DESC cb1Desc{};cb1Desc.ByteWidth=4096;cb1Desc.Usage=D3D11_USAGE_DEFAULT;
+        cb1Desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> cb1;hr(dev->CreateBuffer(&cb1Desc,nullptr,&cb1));
+        ctx->VSSetConstantBuffers(1,1,cb1.GetAddressOf());
+        // THE 2026-09-21 FLIGHT REGRESSION: the engine runs offscreen stages
+        // BEFORE the eye passes, and those draws reach the armed ledger with
+        // their own depth targets. The caller's eye verdict (depthProbeScene
+        // EyeOf: 0/1 for the scene pair, -1 otherwise) must send them to
+        // nonEyeSkips without touching the two eye slots -- the first build
+        // interned them instead and wrote zero files. Two offscreen targets
+        // of different sizes, drawn before AND between the eye passes.
+        D3D11_TEXTURE2D_DESC offDepthDesc{};offDepthDesc.Width=4;offDepthDesc.Height=4;
+        offDepthDesc.MipLevels=offDepthDesc.ArraySize=offDepthDesc.SampleDesc.Count=1;
+        offDepthDesc.Format=DXGI_FORMAT_R32_TYPELESS;offDepthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        ComPtr<ID3D11Texture2D> offTex[2];ComPtr<ID3D11DepthStencilView> offDsv[2];
+        for(int o=0;o<2;++o) {
+            if(o)offDepthDesc.Width=offDepthDesc.Height=16;
+            ComPtr<ID3D11Texture2D> t;hr(dev->CreateTexture2D(&offDepthDesc,nullptr,&t));offTex[o]=t;
+            hr(dev->CreateDepthStencilView(t.Get(),&eyeDsvDesc,&offDsv[o]));
+        }
+        const unsigned firstFrame=9000;
+        for(unsigned frame=firstFrame;frame<=firstFrame+4;++frame) {
+            depth.noteEyeDraw(ctx.Get(),frame,offDsv[0].Get(),false,-1);
+            depth.noteEyeDraw(ctx.Get(),frame,offDsv[1].Get(),false,-1);
+            for(unsigned eye=0;eye<2;++eye) {
+                ID3D11RenderTargetView* eyeRt=eyeRtv[eye].Get();
+                ctx->OMSetRenderTargets(1,&eyeRt,depthDsv[eye].Get());
+                // A known value pattern per pass; the staged copy must keep it.
+                float pattern[64];
+                for(int y=0;y<8;++y)for(int x=0;x<8;++x)
+                    pattern[y*8+x]=0.001f*float(x+y*8)+0.5f*float(eye)+float(frame-firstFrame)*0.01f;
+                ctx->UpdateSubresource(depthTex[eye].Get(),0,nullptr,pattern,8*4,0);
+                std::vector<float> cb1Data(1024);
+                for(size_t k=0;k<cb1Data.size();++k)
+                    cb1Data[k]=float(frame)+0.5f*float(eye)+0.0001f*float(k);
+                ctx->UpdateSubresource(cb1.Get(),0,nullptr,cb1Data.data(),0,0);
+                depth.noteEyeDraw(ctx.Get(),frame,depthDsv[eye].Get(),true,int(eye));
+                // A second pool draw of the same pass must not replace the
+                // first draw's constants block. A non-eye draw between the
+                // passes must not end the open one either.
+                depth.noteEyeDraw(ctx.Get(),frame,depthDsv[eye].Get(),true,int(eye));
+                if(!eye)depth.noteEyeDraw(ctx.Get(),frame,offDsv[0].Get(),false,-1);
+            }
+        }
+        // Frames firstFrame..firstFrame+3 kept (kMaxFrames=4); the last
+        // frame's eye B is never followed by a switch, so it is not captured.
+        check(depth.count()==8,"four frames of two completed eye passes staged");
+        check(depth.declined>=1,"frames past the cap declined explicitly");
+        check(depth.nonEyeSkips==15,"the frame's three non-eye phases skipped per frame, never staged");
+        // Late overwrites of both source textures must not change the copies.
+        float pollution[64];for(float& v:pollution)v=0.99f;
+        ctx->UpdateSubresource(depthTex[0].Get(),0,nullptr,pollution,8*4,0);
+        ctx->UpdateSubresource(depthTex[1].Get(),0,nullptr,pollution,8*4,0);
+        std::vector<float> dead(1024,7.7f);ctx->UpdateSubresource(cb1.Get(),0,nullptr,dead.data(),0,0);
+        wait_gpu(ctx.Get(),dev.Get());
+        std::wstring depthDir=argv[1];depthDir.resize(depthDir.find_last_of(L"\\/"));
+        check(depth.write(ctx.Get(),depthDir.c_str(),L"TEST")==8,"eight depth files written");
+        check(depth.failures==0 && depth.faults==0,"depth readbacks complete without faults");
+        struct DepthHeader{char magic[8];uint32_t version,frame,eye,width,height,format,constFloats;};
+        static_assert(sizeof(DepthHeader)==36,"tools/eye_depth_dump.py reads a 36-byte header");
+        auto readDepthFile=[&](const wchar_t* name,DepthHeader& hd,std::vector<float>& constants,std::vector<float>& grid)->bool{
+            FILE* f=nullptr;if(_wfopen_s(&f,(depthDir+L"\\"+name).c_str(),L"rb")||!f)return false;
+            bool ok=fread(&hd,1,sizeof(hd),f)==sizeof(hd) && std::memcmp(hd.magic,"EDVRDEPT",8)==0;
+            uint32_t depthBytes=0;uint32_t fileFaults=0;
+            if(ok) {
+                constants.resize(hd.constFloats);
+                ok=hd.constFloats<=336 && (constants.empty() ||
+                   fread(constants.data(),4,constants.size(),f)==constants.size());
+            }
+            if(ok) ok=fread(&depthBytes,4,1,f)==1 && depthBytes==hd.width*hd.height*4;
+            if(ok) {grid.resize(depthBytes/4);ok=fread(grid.data(),4,grid.size(),f)==grid.size();}
+            if(ok) ok=fread(&fileFaults,4,1,f)==1 && fileFaults==0;
+            if(fclose(f)!=0)ok=false;
+            return ok;
+        };
+        for(unsigned eye=0;eye<2;++eye) {
+            wchar_t name[64];
+            _snwprintf_s(name,64,_TRUNCATE,L"depth_TEST_f%u_%c.bin",firstFrame,eye?'B':'A');
+            DepthHeader hd{};std::vector<float> constants,grid;
+            check(readDepthFile(name,hd,constants,grid),"depth fixture file parses");
+            check(hd.version==1 && hd.frame==firstFrame && hd.eye==eye && hd.width==8 && hd.height==8 &&
+                  (hd.format==int(DXGI_FORMAT_R32_TYPELESS) || hd.format==int(DXGI_FORMAT_D32_FLOAT)),
+                  "depth fixture header round-trips");
+            check(constants.size()==336,"336 VS b1 floats from the first pool draw");
+            // ~9000 in f32 quantizes to ~5e-4: expect the same float formula,
+            // with tolerance wider than one ulp at this magnitude.
+            const float wantConst=float(firstFrame)+0.5f*float(eye)+0.0001f*256.0f;
+            check(std::fabs(constants[0]-wantConst)<1e-3f,"constants start at cb1[256]");
+            const float wantRow=float(firstFrame)+0.5f*float(eye)+0.0001f*270.0f;
+            check(std::fabs(constants[14]-wantRow)<1e-3f,"view-proj row slot present");
+            check(grid.size()==64,"64 depth texels");
+            for(int y=0;y<8;++y)for(int x=0;x<8;++x) {
+                const float want=0.001f*float(x+y*8)+0.5f*float(eye);
+                check(std::fabs(grid[y*8+x]-want)<1e-5f,"staged depth holds the pass-end pattern");
+            }
+        }
+        // Off is a no-op: one bool, no copies, no files.
+        edvr::EyeDepthCapture off;
+        off.noteEyeDraw(ctx.Get(),firstFrame,depthDsv[0].Get(),true,0);
+        check(off.count()==0 && !off.enabled(),"depth capture stays silent while off");
+        // A non-eye draw between the two eye passes is skipped (not
+        // declined), must not end the open pass, and a constants buffer
+        // shorter than cb1[256..592) keeps an explicit zero-float block on
+        // disk.
+        edvr::EyeDepthCapture odd;
+        odd.configure(true);
+        ComPtr<ID3D11Texture2D> thirdTex;ComPtr<ID3D11DepthStencilView> thirdDsv;
+        hr(dev->CreateTexture2D(&eyeDepthDesc,nullptr,&thirdTex));
+        hr(dev->CreateDepthStencilView(thirdTex.Get(),&eyeDsvDesc,&thirdDsv));
+        D3D11_BUFFER_DESC smallDesc{};smallDesc.ByteWidth=1024;smallDesc.Usage=D3D11_USAGE_DEFAULT;
+        smallDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> smallCb1;hr(dev->CreateBuffer(&smallDesc,nullptr,&smallCb1));
+        ctx->VSSetConstantBuffers(1,1,smallCb1.GetAddressOf());
+        const unsigned oddFrame=9100;
+        odd.noteEyeDraw(ctx.Get(),oddFrame,depthDsv[0].Get(),true,0);
+        odd.noteEyeDraw(ctx.Get(),oddFrame,thirdDsv.Get(),true,-1);
+        check(odd.nonEyeSkips==1 && odd.declined==0 && odd.count()==0,
+              "a non-eye draw mid-pass is skipped and does not end the open pass");
+        odd.noteEyeDraw(ctx.Get(),oddFrame,depthDsv[1].Get(),true,1);
+        check(odd.count()==1,"the eye pass ends at the next eye pass's first draw");
+        odd.noteEyeDraw(ctx.Get(),oddFrame+1,depthDsv[0].Get(),true,0);
+        check(odd.count()==2,"an already-staged pass is never enqueued twice");
+        wait_gpu(ctx.Get(),dev.Get());
+        check(odd.write(ctx.Get(),depthDir.c_str(),L"ODD")==2,"odd-run depth files written");
+        wchar_t oddName[64];
+        _snwprintf_s(oddName,64,_TRUNCATE,L"depth_ODD_f%u_A.bin",oddFrame);
+        DepthHeader oh{};std::vector<float> oc,og;
+        check(readDepthFile(oddName,oh,oc,og),"short-constants depth file parses");
+        check(oh.constFloats==0 && oc.empty(),"constants block explicit when b1 is too short");
+        // A multisampled depth target is declined, never half-copied.
+        edvr::EyeDepthCapture msaa;
+        msaa.configure(true);
+        D3D11_TEXTURE2D_DESC msaaDesc=eyeDepthDesc;msaaDesc.SampleDesc.Count=4;
+        ComPtr<ID3D11Texture2D> msaaTex;ComPtr<ID3D11DepthStencilView> msaaDsv;
+        hr(dev->CreateTexture2D(&msaaDesc,nullptr,&msaaTex));
+        D3D11_DEPTH_STENCIL_VIEW_DESC msaaView=eyeDsvDesc;
+        msaaView.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2DMS;
+        hr(dev->CreateDepthStencilView(msaaTex.Get(),&msaaView,&msaaDsv));
+        msaa.noteEyeDraw(ctx.Get(),9200,msaaDsv.Get(),true,0);
+        msaa.noteEyeDraw(ctx.Get(),9200,depthDsv[0].Get(),true,0);
+        check(msaa.declined==1 && msaa.count()==0,"multisampled depth declined explicitly");
+        odd.reset();
+        check(odd.count()==0 && !odd.declined && !odd.failures && !odd.nonEyeSkips,
+              "depth capture reset clears the run");
+        ctx->VSSetConstantBuffers(1,1,&b);
+    }
     wait_gpu(ctx.Get(),dev.Get());
     check(snap.write(ctx.Get(), argv[1]), "snapshot write");
     check(meshSnap.write(ctx.Get(),(std::wstring(argv[1])+L".mesh").c_str()),"source mesh snapshot write");

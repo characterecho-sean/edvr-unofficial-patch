@@ -7074,3 +7074,28 @@ JSON alongside everything this doc's flights already read -- no
 separate flight needed. Engine layout, dead-instrument
 discriminators, and the flight protocol are in
 engine-render-performance-2026-09-19.md (06:37 entry).
+
+### 2026-09-21 07:29 -- shared flight note: three-producer build installed
+
+Flight 064511's classification JSON carried the first bucket-items
+read (instrument live, zero faults in 462k calls); the producer map
+is resolved offline and the instrument now covers all three bucket
+producers (frontier d3d11 sha256:16 99885e3a092df662). The next
+settlement eye burst carries kinematicEval.bucket_items_direct
+alongside the rest -- the per-pass depth-probe census this doc
+already reads is the join target. Details in
+engine-render-performance-2026-09-19.md (06:55 and 07:29 entries).
+
+### 2026-09-21 07:45 -- shared flight note: flight 073348 read; L2 decision GO
+
+Flight 073348 (three-producer build, hash-verified) ran all menu and
+space -- a producer-proving flight, not a settlement join: all three
+hooks confirmed installed and two fired (FUN_144312E00 is a
+singleton-item trickle; FUN_14369C9C0 never fired in 11.7k frames).
+The offline decode of the batch clear (FUN_14434DB60) closed the
+census join anyway: bucket lists are rebuilt wholesale on LOD-mask
+changes and retained between rebuilds, so the eye pass (82% of
+draws) is bucket-list draws, and L2 suppression is clear-bits +
+force-rebuild via the engine's own batch clear. Decision GO; build
+mechanics are offline next. Details in
+engine-render-performance-2026-09-19.md (07:45 entry).

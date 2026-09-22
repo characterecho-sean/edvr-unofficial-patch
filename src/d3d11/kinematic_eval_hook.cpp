@@ -2,6 +2,7 @@
 #include "kinematic_eval_probe.h"
 #include "../common/code_hook.h"
 #include <windows.h>
+#include <intrin.h>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -22,6 +23,10 @@ using RigEvalFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t);
 // param_5/param_6 and corrupt the items.
 using BucketFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
                                          uintptr_t,uintptr_t);
+// The direct bucket producers take the bucket as param_2: FUN_144312E00
+// has four register params, FUN_14369C9C0 three. One four-param forward
+// covers both -- the three-param callee never reads r9, which is volatile.
+using DirectBuildFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 
 // The evaluator and the job bodies live in the GAME'S module; this DLL loads
 // more than two gigabytes away, which a five-byte E9 patch cannot reach
@@ -34,15 +39,26 @@ alignas(8) std::atomic<KinematicEvalProbe*> observer{nullptr};
 static_assert(decltype(observer)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 
-// The relay gate, distinct from observer: non-zero while EITHER consumer
-// wants eval callbacks -- the probe while attached (eye-dump captures) or
-// the kinematic tracker while fix.engine_motion is on (no dump involved).
+// The relay gate, distinct from observer: non-zero while ANY consumer wants
+// eval callbacks -- the probe while attached (eye-dump captures), the
+// kinematic tracker while fix.engine_motion is on (no dump involved), the
+// scheduler stack probe while armed, or the static prop gate while
+// fix.static_prop_updates is on.
 // observer stays the probe's own cell; the relays gate on evalGate.
 alignas(8) std::atomic<uintptr_t> evalGate{0};
 static_assert(decltype(evalGate)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 std::atomic<bool> trackerWanted{false};
 alignas(8) std::atomic<KinematicTrackerObserverFn> trackerObserver{nullptr};
+// The scheduler stack probe's want: its targets 0/1 are the job bodies
+// themselves, already patched by this file, so it observes through the
+// job-0/1 relays and holds this gate open while armed.
+std::atomic<bool> schedulerWanted{false};
+// The static prop gate's want (fix.static_prop_updates): job 0's relay is
+// its hook site, so it observes through the bracket and holds this gate
+// open while enabled.
+std::atomic<bool> staticGateWanted{false};
+alignas(8) std::atomic<StaticGateDecideFn> staticGateObserver{nullptr};
 
 // The probe is a process-lifetime global (kinematicEvalProbe), so a bracket
 // that loaded the pointer before a detach remains safe while it finishes;
@@ -198,6 +214,10 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t,uintptr_t,uintp
 __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t,uintptr_t,uintptr_t,
                                                               uintptr_t,uintptr_t,uintptr_t) noexcept;
+#define EDVR_DIRECT_PROTO(i) \
+    __declspec(noinline) uintptr_t __fastcall directBuild##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
+EDVR_DIRECT_PROTO(0) EDVR_DIRECT_PROTO(1)
+#undef EDVR_DIRECT_PROTO
 #define EDVR_JOB_PROTO(i) \
     __declspec(noinline) uintptr_t __fastcall job##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 EDVR_JOB_PROTO(0) EDVR_JOB_PROTO(1) EDVR_JOB_PROTO(2)
@@ -218,6 +238,12 @@ HookEntry g_jobEntries[KinematicEvalProbe::kJobCount]={
 };
 HookEntry g_bucketEntry{"kinematic-bucket-build",KinematicEvalProbe::kBucketBuildRva,
                         reinterpret_cast<void*>(&bucketBuildObserved)};
+HookEntry g_directEntries[KinematicEvalProbe::kDirectProducerCount]={
+    {"kinematic-build-144312e00",KinematicEvalProbe::kDirectBuildRvas[0],
+     reinterpret_cast<void*>(&directBuild0)},
+    {"kinematic-build-14369c9c0",KinematicEvalProbe::kDirectBuildRvas[1],
+     reinterpret_cast<void*>(&directBuild1)},
+};
 
 // Per-thread mask of the job brackets currently on the stack (1u<<jobId),
 // maintained by bracket() and read by evalObserved: attributes every eval
@@ -247,6 +273,25 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
                              uintptr_t c,uintptr_t d) noexcept {
     const auto forward=reinterpret_cast<JobFn>(g_jobEntries[job].forward.load(std::memory_order_acquire));
     if(!forward)return 0; // this job stood down at install; the relay is unreachable then
+    // The scheduler stack probe's targets 0/1 ARE these job bodies (their
+    // RVAs already carry this hook's patch), so their capture rides here,
+    // before the timed region and before the forward -- the pre-forward
+    // point a dedicated hook would sit. The address handed over is this
+    // frame's return-address slot: one frame deeper than the target's
+    // entry RSP, so this wrapper's own return address (EDVR code, outside
+    // the probe's image range) scans as a filtered miss and the engine's
+    // return address lands at index 0 of the collected stack.
+    if(job<2)schedulerStackNoteJobEntry(job,
+        reinterpret_cast<uintptr_t>(_AddressOfReturnAddress()));
+    // The static prop gate's change test (fix.static_prop_updates): job 0
+    // only, before the timed region. A skip verdict forwards past the call
+    // entirely -- no forward, no bracket timing, no probe observations: a
+    // skipped call is one the engine never runs, so nothing downstream of
+    // this point may record it as executed.
+    if(job==0) {
+        const auto gate=staticGateObserver.load(std::memory_order_acquire);
+        if(gate && gate(a))return 0;
+    }
     // Job attribution: every eval observation made while this job runs on
     // this thread carries its bit. Save/restore so nested jobs keep both
     // bits and early returns always unwind the mask.
@@ -397,6 +442,44 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
     return result;
 }
 
+// --- Direct-producer brackets (bucket = param_2) -----------------------------
+// Same counter-delta discipline as the 42B4420 bracket without the entry
+// walk: param_2 IS the bucket (decomp_4312E00 line 250, decomp_369C9C0 line
+// 318 -- both INC param_2+0x2A4 per appended item). A fault on either read
+// drops the call's items, never the flight.
+uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
+                                   uintptr_t c,uintptr_t d) noexcept {
+    const auto forward=reinterpret_cast<DirectBuildFn>(
+        g_directEntries[producer].forward.load(std::memory_order_acquire));
+    if(!forward)return 0; // stood down at install; the relay is unreachable then
+    int32_t start=0;
+    bool fault=false;
+    __try {
+        std::memcpy(&start,reinterpret_cast<const void*>(b+0x2A4),4);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {fault=true;}
+    const uintptr_t result=forward(a,b,c,d);
+    uint64_t items=0;
+    uint32_t neg=0;
+    if(!fault) {
+        __try {
+            int32_t end=0;
+            std::memcpy(&end,reinterpret_cast<const void*>(b+0x2A4),4);
+            const int64_t delta=static_cast<int64_t>(end)-static_cast<int64_t>(start);
+            if(delta>0)items=static_cast<uint64_t>(delta);
+            else if(delta<0)neg=1; // drained mid-call: residue unknowable
+        } __except(EXCEPTION_EXECUTE_HANDLER) {items=0;neg=0;fault=true;}
+    }
+    kinematicEvalProbe.noteDirectBuild(producer,items,neg,fault);
+    return result;
+}
+
+#define EDVR_DIRECT_WRAPPER(i) \
+    __declspec(noinline) uintptr_t __fastcall directBuild##i(uintptr_t a,uintptr_t b,uintptr_t c,uintptr_t d) noexcept { \
+        return directBracket(i,a,b,c,d); \
+    }
+EDVR_DIRECT_WRAPPER(0) EDVR_DIRECT_WRAPPER(1)
+#undef EDVR_DIRECT_WRAPPER
+
 std::mutex g_installMutex;
 
 bool installOne(HookEntry& entry,uintptr_t base) noexcept;
@@ -427,6 +510,14 @@ bool ensureInstalled(uintptr_t base) noexcept {
         // bucket_items.calls == 0 with installed status is the stand-down
         // signature, and CodeHook has logged the reason under
         // kinematic-bucket-build. (Job 3's thunk refused this way before.)
+    }
+    for(uint32_t i=0;i<KinematicEvalProbe::kDirectProducerCount;++i) {
+        if(!installOne(g_directEntries[i],base)) {
+            // Same stand-down-alone rule; bucket_items_direct[i].calls == 0
+            // with installed status is the signature, and CodeHook logs
+            // under the site's own name (kinematic-build-144312e00 /
+            // kinematic-build-14369c9c0).
+        }
     }
     return true;
 }
@@ -522,7 +613,9 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
 // deaf (2026-09-20 review finding 4).
 void recomputeGateLocked() noexcept {
     const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
-                    trackerWanted.load(std::memory_order_acquire);
+                    trackerWanted.load(std::memory_order_acquire) ||
+                    schedulerWanted.load(std::memory_order_acquire) ||
+                    staticGateWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
 }
 
@@ -557,6 +650,56 @@ void kinematicEvalTrackerDetach() noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
         trackerWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
+}
+
+const char* kinematicEvalSchedulerAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        schedulerWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalSchedulerDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        schedulerWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
+}
+
+void kinematicEvalSetStaticGateObserver(StaticGateDecideFn fn) noexcept {
+    staticGateObserver.store(fn,std::memory_order_release);
+}
+
+const char* kinematicEvalStaticGateAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        staticGateWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalStaticGateDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        staticGateWanted.store(false,std::memory_order_release);
         recomputeGateLocked();
     } catch(...) {}
 }

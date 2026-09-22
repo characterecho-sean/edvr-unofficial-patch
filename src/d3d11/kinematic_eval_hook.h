@@ -39,4 +39,41 @@ const char* kinematicEvalTrackerAttach() noexcept;
 // Closes the tracker's want; the gate stays open while the probe holds it.
 void kinematicEvalTrackerDetach() noexcept;
 
+// --- The scheduler stack probe's feed (advanced.scheduler_probe) ------------
+// Targets 0/1 of SchedulerStackProbe are the job bodies' own RVAs, which
+// already carry this hook's patch -- CodeHook refuses a second patch and
+// there is nothing to gain by double-hooking. Instead the job-0/1 relay
+// wrappers call schedulerStackNoteJobEntry() (scheduler_stack_hook.h) before
+// their timed bracket, at exactly the pre-forward point a dedicated hook
+// would sit. For that to happen the eval relays must be live even when the
+// eval probe and the tracker are both dark, so the scheduler probe is a
+// third gate consumer:
+void schedulerStackNoteJobEntry(uint32_t target, uintptr_t entryRsp) noexcept;
+// Installs the shared kinematic hook set (validating the executable) and
+// holds the eval gate open for the scheduler probe. Same return vocabulary
+// as attachKinematicEvalHooks; idempotent across re-arms.
+const char* kinematicEvalSchedulerAttach() noexcept;
+// Closes the scheduler probe's want; the gate stays open while any other
+// consumer holds it.
+void kinematicEvalSchedulerDetach() noexcept;
+
+// --- The static prop gate's feed (fix.static_prop_updates) ------------------
+// Job 0's relay (FUN_144321940) is the gate's hook site -- CodeHook refuses
+// a second patch, and there is nothing to gain by double-hooking. The
+// bracket consults the registered observer BEFORE its timed region and, on
+// a skip verdict, forwards past the call entirely: skipped calls never
+// enter the timed bracket, so the gate's wall share reads off the jobs[0]
+// counter's drop against a no-gate baseline. The gate module (which owns
+// the cache) registers decide here, exactly the way the tracker registers
+// its observer above; this file carries no link dependency on it.
+using StaticGateDecideFn = uint32_t (*)(uintptr_t job0Param) noexcept;
+void kinematicEvalSetStaticGateObserver(StaticGateDecideFn fn) noexcept;
+// Installs the shared kinematic hook set (validating the executable) and
+// holds the eval gate open for the static prop gate. Same return vocabulary
+// as attachKinematicEvalHooks; idempotent across re-arms.
+const char* kinematicEvalStaticGateAttach() noexcept;
+// Closes the static gate's want; the gate stays open while any other
+// consumer holds it.
+void kinematicEvalStaticGateDetach() noexcept;
+
 } // namespace edvr

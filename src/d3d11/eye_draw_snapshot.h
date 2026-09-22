@@ -45,6 +45,12 @@ public:
     static constexpr uint64_t kVscreen=0x5C36AF051B98B9F1ull,kVscreenPs=0xCFE84157BC76E921ull;
     static constexpr uint64_t kScene=0x4435F2E50020E7F3ull;
     static constexpr uint64_t kNight=0xFCF7BD2896751D96ull,kNightPs=0xF786D34B5E118D5Eull;
+    // Census unknown-A/B settlement prop batches, 2026-09-21. PS hashes are
+    // listed explicitly: PS bytecode is only retained when a creation-time
+    // gate names the hash (device_hook hookedCreatePS), unlike VS which
+    // always reaches rememberShader.
+    static constexpr uint64_t kUnknownA=0x8056C9D5F22007F9ull,kUnknownAPs=0x669CC896CA4AA988ull;
+    static constexpr uint64_t kUnknownB=0x2684F02B9B0BB0DEull,kUnknownBPs=0x2376A8D9AA874372ull;
     // 05:10:17 supercruise Earth-like world: opaque surface and cloud layer.
     // Their affine VS placement is outside the rigid t33 pool. Capture the
     // actual draw's constants/vertices, never substitute atmosphere matrices.
@@ -121,6 +127,8 @@ public:
         // The laser rifle's glow strips and the root triangle (2026-09-17).
         case 0xBB31244E30265F2Dull:case 0xCFCA8FFC6B058630ull:
         case 0x88DCF1164C640EC3ull:return true;
+        // Census unknown-A/B settlement prop batches, 2026-09-21.
+        case kUnknownA:case kUnknownB:return true;
         default:return false;
         }
     }
@@ -243,7 +251,7 @@ public:
     // bounded VS set, then write only shaders seen in the requested run.
     // No broad shader-dump setting or startup disk writes are necessary.
     static void rememberShader(uint64_t hash, const void* bytes, size_t size) {
-        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && !solarPixel(hash) && hash!=kVscreenPs && hash!=kNightPs && hash!=kSpritePs) || !bytes || !size || size > 256*1024) return;
+        if ((!watches(hash) && !sourceMesh(hash) && !sourceEffect(hash) && !solarPixel(hash) && hash!=kVscreenPs && hash!=kNightPs && hash!=kSpritePs && hash!=kUnknownAPs && hash!=kUnknownBPs) || !bytes || !size || size > 256*1024) return;
         std::lock_guard<std::mutex> lock(shaderMutex());
         auto& shaders = shaderBytes();
         if (shaders.count(hash)) return;
@@ -256,7 +264,7 @@ public:
         uint32_t missing = 0;
         std::map<uint64_t, bool> seen;
         for (const Draw& d : draws) {
-            const uint64_t pixel=d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:((d.vs==kSprite && d.ps==kSpritePs)?kSpritePs:(solarDraw(d.vs)?d.ps:0)));
+            const uint64_t pixel=d.vs==kVscreen?kVscreenPs:(d.vs==kNight && d.ps==kNightPs?kNightPs:((d.vs==kSprite && d.ps==kSpritePs)?kSpritePs:((d.vs==kUnknownA || d.vs==kUnknownB)?d.ps:(solarDraw(d.vs)?d.ps:0))));
             if(pixel && seen.emplace(pixel,true).second) {
                 const auto ps=shaders.find(pixel);
                 if(ps==shaders.end())++missing;
