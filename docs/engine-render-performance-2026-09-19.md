@@ -46,16 +46,18 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
-* **Open (identification arc closed; change-gate design ABORTED in flight —
-  see the design entry's OUTCOME):** unknown-A/B are the settlement pool's
-  material layers; A is an ungated detail pass (~550 draws/frame,
-  invisible at range — a design input, not a build order). Remaining:
-  (1) decide the surviving variant from the abort evidence: (a) cheaper
-  job-0 (cpu_profile inside FUN_144321940) or (b) inside-job change
-  detection that re-emits output every frame — downstream gating is dead
-  (output is consumed per frame); (2) per-record identity/change signal
-  (motion arc); (3) optionally close the scheduler's runtime-built
-  payload vtables; (4) ring-buffer command consumers.
+* **Open (identification arc closed; change-gate ABORTED in flight; the
+  occlusion lever designed and reviewed — see
+  docs/design-occlusion-culling-2026-09-22.md, revised in place after an
+  in-repo review whose ledger is in the gitignored reviews/ dir):** (1)
+  Phase A of the reviewed design — ONE instrumented flight: the
+  cpu_profile WPR trace (does the main thread wait on the job pipeline;
+  walk-vs-emit by address) plus armed eye runs at >= 5 poses for the
+  depth/truth corpus; kill gate: pipeline not on the critical path, or
+  recall x critical-path-share x 5.3 ms < ~1.5 ms; (2) fix the depth
+  capture's constants keying (structure-family draw, not first pool
+  draw); (3) per-record identity/change signal (motion arc); (4)
+  scheduler payload-vtable closure; (5) ring-buffer command consumers.
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -1343,6 +1345,28 @@ it itself; the eye depth is R32G8X24_TYPELESS 2665x2632 -> converted via
 the probe's read path). Declines are now reason-coded (format/bytes/
 frame-cap) so a refusal is never blind again. Flown green: 4 files,
 0 declines, 190 MB staged.
+
+**Design + review (2026-09-22):** the culling design was written up at
+docs/design-occlusion-culling-2026-09-22.md and reviewed in-repo (review
+ledger in the gitignored reviews/ dir; the doc was revised in place).
+The review kept the evidence chain and rebuilt the mechanism: integration
+moved to the engine's own frustum-reject path (clearing a record's bit in
+the evaluator's active mask — indistinguishable from the engine's own
+reject, removes the walk AND the emission, and the gate has the frame's
+own camera); occluders are individually solid opaque parts qualified
+offline (opaque PS + closed mesh), never whole structures (buildings are
+hollow shells the player walks through); the test is a conservative CPU
+coverage buffer with occluder fusion (pairwise shadow-volume as fallback);
+the oracle is an EXACT truth (MeshCoverage per-pixel record ownership or
+generalised per-draw occlusion queries) over a >= 5-pose corpus, because
+the footprint join over-claims unseen. Two findings the session should
+have caught itself: the job-0 hook has no view (the map's own stage 5
+says per-eye projections exist only at draw time), and the prize's ms
+figure rests on thread-summed job time whose critical-path share is
+unproven — the journal recorded both. Phase order was corrected: Phase A
+(one cpu_profile WPR flight: does the main thread wait on the job
+pipeline, walk-vs-emit by address, plus depth/truth at >= 5 poses) goes
+FIRST because it is the cheapest kill.
 
 ruled out: draw-dedup culling (~213 fully-identical submissions/frame,
 0.3%); static occlusion culling of the measured unseen set (view-
