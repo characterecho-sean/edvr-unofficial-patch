@@ -473,6 +473,34 @@ int wmain(int argc, wchar_t** argv) {
     const auto eyeBytes=eyeMesh.meshBytes;
     for(unsigned frame:{699u,703u,720u})eyeMesh.captureEyeMesh(ctx.Get(),frame,1,meshVs,0,'X',6,1,0,0,0);
     check(eyeMesh.draws.size()==12 && eyeMesh.meshBytes==eyeBytes,"eye mesh capture stops after three consecutive frames");
+    // Version 9: the cull gate probe's armed-frame geometry. Every pool draw
+    // of the armed frame gets a map row; a mesh drawn twice is copied once;
+    // a second blend state is a second state row; other frames are ignored.
+    // The layout names slot 0 per-vertex (meshIds, stride 8, 32 bytes: the
+    // window clamps to the buffer); the index buffer is `indices` at +4.
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    eyeMesh.armGeometry(710);
+    eyeMesh.captureGeometry(ctx.Get(),709,5,meshVs,0,'X',6,1,0,1,0);
+    check(eyeMesh.geoDraws.empty(),"geometry ignores frames other than the armed one");
+    eyeMesh.captureGeometry(ctx.Get(),710,7,meshVs,0x77,'X',6,2,16,1,2);
+    eyeMesh.captureGeometry(ctx.Get(),710,8,meshVs,0x78,'X',6,3,24,1,2);
+    {
+        D3D11_BLEND_DESC blendDesc{};blendDesc.RenderTarget[0].BlendEnable=TRUE;
+        blendDesc.RenderTarget[0].SrcBlend=D3D11_BLEND_SRC_ALPHA;blendDesc.RenderTarget[0].DestBlend=D3D11_BLEND_INV_SRC_ALPHA;
+        blendDesc.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;blendDesc.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;
+        blendDesc.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;blendDesc.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        blendDesc.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        ComPtr<ID3D11BlendState> blend;hr(dev->CreateBlendState(&blendDesc,&blend));
+        ctx->OMSetBlendState(blend.Get(),nullptr,0xffffffff);
+        eyeMesh.captureGeometry(ctx.Get(),710,9,meshVs,0x79,'X',3,1,32,0,0);
+        ctx->OMSetBlendState(nullptr,nullptr,0xffffffff);
+    }
+    check(eyeMesh.geoDraws.size()==3 && eyeMesh.geoMeshes.size()==2 && eyeMesh.geoStates.size()==2 &&
+          !eyeMesh.geoDeclined && !eyeMesh.geoDrawsDropped,
+          "geometry keeps one copy per distinct mesh and state within the armed frame");
+    check(eyeMesh.geoDraws[0].mesh==0 && eyeMesh.geoDraws[1].mesh==0 && eyeMesh.geoDraws[2].mesh==1 &&
+          eyeMesh.geoDraws[2].state==1 && eyeMesh.geoMeshes[0].vBytes==16 && eyeMesh.geoMeshes[0].iBytes==12,
+          "geometry map rows, the clamped vertex window and the index window");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     // The eye-run depth capture (advanced.eye_depth_capture): each pass's

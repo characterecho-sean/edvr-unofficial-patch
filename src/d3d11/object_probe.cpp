@@ -32,6 +32,8 @@
 #include "eye_panel_snapshot.h"
 #include "eye_depth_capture.h"
 #include "gui_draw_snapshot.h"
+#include "cull_gate_probe.h"
+#include "kinematic_eval_hook.h"
 
 namespace edvr {
 namespace {
@@ -600,6 +602,74 @@ struct PanelCaptureArgs {
 uint32_t g_panelSkipped = 0;
 EyeDrawSnapshot g_eyeMeshSnapshot;
 GuiDrawSnapshot g_guiSnapshot;
+
+// The cull gate probe (advanced.cull_gate_capture) rides the eye run like
+// the depth capture: armed with the ledger, it observes the engine's
+// per-view gate and the draw-item builder for the run's first three
+// complete frames (cull_gate_probe.h), and the eye-mesh snapshot keeps the
+// geometry of the first one's pool draws (EDVRDRW1 version 9). State for
+// this run's log lines; the probe itself is a process-lifetime global.
+bool        g_gateRun = false;          // armed with this eye run (key on)
+bool        g_gateHooked = false;       // the relays accepted the probe
+const char* g_gateHookStatus = "off";
+bool        g_gateBuilderHooked = false;
+bool        g_gateFrustumOk = false;
+uint8_t     g_gateVisGlobal = 0;
+
+// FUN_1404F4E10's first sixteen bytes in the hash-verified executable
+// (analysis EliteDangerous64.exe at RVA 0x4F4E10): movups xmm3,[r8];
+// xor r9d,r9d; movups xmm2,[rdx]; movaps xmm0,xmm3; movzx r8d,word[rcx+44].
+constexpr uint8_t kFrustumPrologue[16] = {0x41,0x0F,0x10,0x18,0x45,0x33,0xC9,0x0F,
+                                          0x10,0x12,0x0F,0x28,0xC3,0x44,0x0F,0xB7};
+
+bool gateReadImage(void* dst, uintptr_t src, size_t n) {
+    __try { std::memcpy(dst, reinterpret_cast<const void*>(src), n); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void closeGateProbe() {
+    kinematicEvalSetGateProbeObservers(nullptr, nullptr);
+    if (g_gateHooked) kinematicEvalGateProbeDetach();
+    cullGateProbe.disarm();
+}
+
+void armGateProbe() {
+    g_gateRun = true;
+    g_gateHooked = false;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    uint8_t prologue[sizeof(kFrustumPrologue)] = {};
+    g_gateFrustumOk = base && gateReadImage(prologue, base + CullGateProbe::kFrustumRva, sizeof(prologue)) &&
+                      std::memcmp(prologue, kFrustumPrologue, sizeof(prologue)) == 0;
+    g_gateVisGlobal = 0;
+    if (base) gateReadImage(&g_gateVisGlobal, base + CullGateProbe::kVisGlobalRva, 1);
+    const uint32_t first = g_ledgerFrame0 + 1;   // the run's first complete frame (its first is partial)
+    const auto frustum = g_gateFrustumOk
+        ? reinterpret_cast<CullGateProbe::FrustumFn>(base + CullGateProbe::kFrustumRva) : nullptr;
+    if (!cullGateProbe.arm(first, frustum, g_gateVisGlobal)) {
+        g_gateHookStatus = "no_memory";
+        Log::get().note("cull gate probe: could not allocate its window buffers for eye run %ls; "
+                        "nothing will be captured (advanced.cull_gate_capture).", g_ledgerStamp);
+        return;
+    }
+    kinematicEvalSetGateProbeObservers(&cullGateProbeGateObserver, &cullGateProbeBuilderObserver);
+    g_gateHookStatus = kinematicEvalGateProbeAttach();
+    g_gateHooked = std::strcmp(g_gateHookStatus, "installed") == 0;
+    g_gateBuilderHooked = g_gateHooked && kinematicEvalBuilderHooked();
+    if (!g_gateHooked) {
+        kinematicEvalSetGateProbeObservers(nullptr, nullptr);
+        cullGateProbe.disarm();
+    }
+    g_eyeMeshSnapshot.armGeometry(first);
+    Log::get().note("cull gate probe: armed with eye run %ls for ledger frames %u..%u: engine hooks %s "
+                    "(the traversal's per-view gate FUN_14430EFE0 through the evaluator relay; the "
+                    "draw-item builder FUN_1442B4420 %s), the builder's plane test FUN_1404F4E10 %s, "
+                    "visibility global DAT_145ea3399 = %u; pool-draw geometry for frame %u in the eye "
+                    "mesh snapshot. No reject, nothing on screen (advanced.cull_gate_capture).",
+                    g_ledgerStamp, first, cullGateProbe.lastFrame(), g_gateHookStatus,
+                    g_gateBuilderHooked ? "hooked" : "NOT hooked (no builder verdicts)",
+                    g_gateFrustumOk ? "matched" : "MISMATCHED (builder frustum verdicts absent)",
+                    static_cast<unsigned>(g_gateVisGlobal), first);
+}
 struct AuxFrame {   // one watched shader's buffers in one frame
     uint64_t vs;
     uint32_t instances, count;
@@ -2736,6 +2806,12 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
         g_eyeDepthCapture.noteEyeDraw(ctx, frame, dsv, d.pool != 0, eye);
         dsv->Release();
     }
+    // The cull gate probe's occluder inventory (EDVRDRW1 version 9): every
+    // pool draw of its armed frame, both eyes, keyed by this row's ordinal;
+    // one copy per distinct mesh. Returns at once unless the probe armed it.
+    if (d.pool && instances)
+        g_eyeMeshSnapshot.captureGeometry(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
+                                          d.vs, d.ps, kind, count, instances, startInstance, start, base);
     g_ledgerDraws[frame - g_ledgerFrame0].push_back(d);
 }
 
@@ -3008,6 +3084,43 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     depthFiles||g_eyeDepthCapture.declined()?"written":"nothing captured (instrument off, "
                     "or no scene-pair frames in the run)",
                     static_cast<unsigned>(edvr::EyeDepthCapture::kMaxFrames));
+    // The cull gate probe's file, written only for a run it armed with. Its
+    // window closed ~30 frames ago, so no worker is still appending.
+    if (g_gateRun) {
+        if (cullGateProbe.armed()) closeGateProbe();
+        wchar_t gatePath[MAX_PATH];
+        _snwprintf_s(gatePath, MAX_PATH, _TRUNCATE, L"%s\\gate_%s.bin", dir.c_str(), g_ledgerStamp);
+        const bool gateOk = g_gateHooked && cullGateProbe.write(gatePath);
+        const CullGateProbe::Counts gc = cullGateProbe.counts();
+        const auto& geo = g_eyeMeshSnapshot;
+        if (!g_gateHooked || (!gc.gateCalls && !gc.builderCalls)) {
+            Log::get().note("cull gate probe: NOTHING captured for eye run %ls -- %s (advanced.cull_gate_capture). "
+                            "Pool-draw geometry: %u draws, %u meshes.",
+                            g_ledgerStamp,
+                            !g_gateHooked ? "the engine hooks refused the probe (status above); no gate file"
+                                          : "no gate or builder call landed in its ledger frames (the traversal "
+                                            "never ran in the window, or the frame stamp never reached it); the "
+                                            "gate file holds zero rows",
+                            static_cast<unsigned>(geo.geoDraws.size()), static_cast<unsigned>(geo.geoMeshes.size()));
+        } else {
+            Log::get().note("cull gate probe: %ls: %u gate calls (%u kept, %u dropped over the cap), %u builder "
+                            "calls on %u engine records (%u kept, %u dropped), %u view-array dumps (%u dropped), "
+                            "%u entries / %u sub-items dropped, %u faults, %u record/pose mismatches; ledger frames "
+                            "%u..%u; builder plane test %s; %s. Pool-draw geometry for frame %u: %u draws mapped, "
+                            "%u distinct meshes, %u states, %u declined, %u draws over the cap (drawstate_%ls.eyemesh.bin, "
+                            "version 9). tools/cull_gate_probe.py reads them with the run's depth, pool and ledger.",
+                            gatePath, gc.gateCalls, gc.gateKept, gc.gateDropped, gc.builderCalls,
+                            cullGateProbe.distinctRecords(), gc.builderKept, gc.builderDropped, gc.dumps,
+                            gc.dumpsDropped, gc.entriesDropped, gc.subItemsDropped, gc.faults, gc.recordMismatch,
+                            cullGateProbe.firstFrame(), cullGateProbe.lastFrame(),
+                            g_gateFrustumOk ? "matched" : "MISMATCHED (no builder frustum verdicts)",
+                            gateOk ? "written" : "WRITE FAILED",
+                            cullGateProbe.firstFrame(), static_cast<unsigned>(geo.geoDraws.size()),
+                            static_cast<unsigned>(geo.geoMeshes.size()), static_cast<unsigned>(geo.geoStates.size()),
+                            geo.geoDeclined, geo.geoDrawsDropped, g_ledgerStamp);
+        }
+        g_gateRun = false;
+    }
     Log::get().note("object probe: tone-map snapshots %ls: %u draws, actual first matching frame %u, %u reserved bytes, %u declines, %u failed copies/shaders; %s. At most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.firstFrame(),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");
     const uint32_t missingShaders = g_drawSnapshot.writeShaders(dir.c_str());
     Log::get().note("object probe: eye draw snapshots %ls: %u draws, %u holo surfaces, %u capped draws, "
@@ -3248,6 +3361,7 @@ void objectProbeConfigure(Config& cfg) {
     g_verbose = cfg.getBool("advanced.object_probe", false);
     g_details = cfg.getBool("advanced.temporal_aa_diagnostics", false);
     g_eyeDepthCapture.configure(cfg.getBool("advanced.eye_depth_capture", false));
+    cullGateProbe.configure(cfg.getBool("advanced.cull_gate_capture", false));
     g_on = g_verbose || temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
 }
 
@@ -3431,6 +3545,7 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 
 void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_on && !g_ledgerOn) {
+        if (cullGateProbe.armed()) closeGateProbe();   // switched off mid-window: release the relays
         if (g_wasOn) {
             // Switched off live: the copies and the reference go, the
             // figures print once more.
@@ -3451,6 +3566,11 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     }
     g_wasOn = true;
     ++g_frame;
+    // The cull gate probe stamps the jobs it observes with the ledger frame
+    // the draws submitted from now on belong to (ledgerNoteDraw's g_frame+1),
+    // and lets go of the relays one frame after its window.
+    cullGateProbe.setFrame(g_frame + 1);
+    if (cullGateProbe.armed() && g_frame + 1 > cullGateProbe.lastFrame() + 1) closeGateProbe();
     // The body's motion and the ships age a frame, under the publish lock
     // the worker publishes into; past the hold they are nobody's.
     {
@@ -3523,6 +3643,9 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     g_ledgerSkipped = 0;
     ledgerRelease();
     g_ledgerOn = true;
+    g_gateRun = false;
+    g_eyeMeshSnapshot.armGeometry(0);
+    if (cullGateProbe.enabled()) armGateProbe();   // advanced.cull_gate_capture rides the eye run
     meshMotionArmClassification();
     Log::get().note("object classification: armed with eye run %ls; discover accepted mesh sources, then capture one complete later eye and its upload provenance. No rendering changes.",g_ledgerStamp);
     // The eye run is an explicit diagnostic capture. Pair its ledger with
@@ -3541,6 +3664,7 @@ void objectProbeLedgerMark(int k) {
 }
 
 void objectProbeShutdown() {
+    if (cullGateProbe.armed()) closeGateProbe();
     objectClassificationProbe.reset();
     stopWorker();
     releaseRing();

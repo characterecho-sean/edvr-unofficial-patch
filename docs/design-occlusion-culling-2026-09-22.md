@@ -33,12 +33,12 @@ context; every load-bearing claim cites its evidence.
   frustum is the draw-item builder's view loop (FUN_1442B4420, one view
   array for all three tests), which becomes the candidate site,
   conditional on its items being the instanced pool draws.
-- **Next (§9):** the armed gate probe at the parked pose, no reject:
-  the builder's and the gate's per-view verdicts beside each engine
-  record's t33 slots (proves or refutes items -> pool draws), the view
-  array (eye identity, same-frame proof) and mesh geometry for the
-  occluder records; then the inventory's recall offline against the
-  three depth captures.
+- **Next (§9):** fly the gate probe (BUILT, gated, not flown:
+  advanced.cull_gate_capture with eye_depth_capture, the eye-run
+  hotkey, parked pose): the builder's and the gate's per-view verdicts
+  beside each engine record's t33 records, the view array and the
+  occluders' geometry; tools\cull_gate_probe.py names the admitting
+  test, then the inventory's recall is measured offline.
 - **Scope (Sean, 2026-09-22):** cockpit only — true stereoscopic settlement
   rendering from the ship. On foot is out of scope for now; the corpus and
   the profile legs are cockpit poses. Also to instrument: CPU frame time
@@ -723,3 +723,44 @@ verdict (local_288) reaches only the type-2 item path, while rec+0x208
 and the draw-item builder's input come from the distance/LOD tests
 (4312040:137-165, 346; 4320340:95) and the builder re-tests the frustum
 itself (42B4420:250-275).
+
+**Close-out 3 (2026-09-22): the gate probe, built and gated, NOT FLOWN.**
+`advanced.cull_gate_capture = 1` (default 0) rides the eye-run hotkey
+like eye_depth_capture; pair the two. For the run's first three complete
+ledger frames it observes, through relays already installed (no new
+patch): FUN_14430EFE0 -- which IS the kinematic "evaluator" target
+(kEvalRva) -- after each forward, as (engine record, view index, passed,
+LOD); and the draw-item builder's bracket before each forward: the
+record (param_4 - 0x210), its +0x170/+0x17C pose, +0x240/+0x270/+0x280
+sphere, +0x208 view mask and +0x210 nibbles, and the builder's own
+per-view admission recomputed with the engine's FUN_1404F4E10 on the
+builder's inputs (prologue-checked; views where the FUN_14288AC40
+callback would also apply are flagged, never called), plus the pose
+context's entries and their 32-byte sub-items (the parts' local
+transforms, which join to the t33 records). Once per (context, frame):
+the view array, raw 0x6A0 bytes and plane array per view. Files:
+edvr_logs\pool\gate_<stamp>.bin ('EDVRGATE' v1) and
+drawstate_<stamp>.eyemesh.bin version 9 (EDVRDRW1 extended: every pool
+draw of the first frame mapped by ledger ordinal to one copy per
+distinct mesh -- vertex and index windows, input layout, topology -- and
+per distinct blend/depth-stencil/raster state). Log lines: "cull gate
+probe: armed ..." (hook status, builder hook, plane-test prologue), then
+at the ledger write either the counts line or "NOTHING captured" with
+the reason. tools/cull_gate_probe.py reads a run: seen/unseen per t33
+record, the eye views by plane normals and the engine-to-pool offset,
+the engine record behind each t33 record, per-eye verdicts of the mask,
+the gate and the builder against the ledger's per-eye draws (the tally
+that names the admitting test), and the occluder set's triangles and
+state. Proven offline: on 055252 it reproduces 88.9% unseen; with a
+synthetic gate file over 055252's real files it names both eyes (|cos|
+1.00000), recovers a planted offset to 0.000 m, joins 4,360 t33
+records and tallies the planted builder verdicts 943/0. Build gates:
+the cull_gate_probe_test rig (12 checks on synthetic engine memory,
+including a wild pointer and a pose mismatch), the reader's self-test
+and its fixture check, the snapshot rig's version-9 geometry.
+
+**Next: one parked capture, both keys on, no reject.** Read with
+`python tools\cull_gate_probe.py <pool> <stamp>`: the builder tally
+must agree with the ledger's per-eye draws where the gate does not; if
+the builder also disagrees, the per-eye split is decided after the
+items and the site moves again.

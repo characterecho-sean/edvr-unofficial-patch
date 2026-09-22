@@ -95,8 +95,18 @@ public:
     static const GUID& effectLayoutKey() {
         static const GUID key={0x10e33b44,0x1cf4,0x4fa2,{0x82,0x1f,0x63,0x51,0xda,0xeb,0x43,0x99}};return key;
     }
+    // Any layout that reads the instance pool's per-instance record index is
+    // a pool family (EB52 and its material layers, the unknown-A/B pairs,
+    // 5B4D/BBE5 among them): the cull gate probe's geometry capture needs
+    // their vertex layouts to decode the occluders' positions.
+    static bool poolLayout(const D3D11_INPUT_ELEMENT_DESC* e,UINT n) {
+        for(UINT i=0;e && i<n;++i)
+            if(e[i].SemanticName && std::strcmp(e[i].SemanticName,"INSTANCEANDMODELDATAINDEX")==0)return true;
+        return false;
+    }
     static void rememberLayout(ID3D11InputLayout* layout,const D3D11_INPUT_ELEMENT_DESC* e,UINT n,uint64_t vs) {
-        if((!sourceEffect(vs) && !sourceMesh(vs) && !planetSurface(vs) && !solarDraw(vs) && vs!=kNight && vs!=kSprite) || !layout || !e || !n || n>32)return;
+        if((!sourceEffect(vs) && !sourceMesh(vs) && !planetSurface(vs) && !solarDraw(vs) && vs!=kNight && vs!=kSprite &&
+            !poolLayout(e,n)) || !layout || !e || !n || n>32)return;
         std::vector<Layout> items(n);
         for(UINT i=0;i<n;++i) {
             if(!e[i].SemanticName || strlen(e[i].SemanticName)>=64)return;
@@ -299,6 +309,7 @@ public:
         nightSampling.clear();
         meshBuffers.clear();meshBytes=meshDeclined=meshDraws=0;
         sourceDepth.Reset();sourceDepthFormat=DXGI_FORMAT_UNKNOWN;sourceFrame=0;
+        armGeometry(0);
     }
 
     uint32_t captureMeshBuffer(ID3D11DeviceContext* ctx,ID3D11Device* dev,
@@ -338,6 +349,147 @@ public:
                         char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
         if(!sourceMesh(vs) || (firstFrame && (frame<firstFrame || frame-firstFrame>=3)))return;
         capture(ctx,frame,ordinal,vs,ps,kind,count,instances,startInstance,start,base,true,true);
+    }
+
+    // --- Version 9: one armed frame's pool-draw geometry -------------------
+    // The cull gate probe's occluder inventory (advanced.cull_gate_capture,
+    // design-occlusion-culling-2026-09-22.md §9): EVERY instanced eye draw
+    // of the armed frame whose t33 held the pool gets a map row (frame, the
+    // ledger's own ordinal, mesh, state, VS/PS, instance range), so the
+    // reader joins any ledger row to its geometry and chooses the occluders
+    // offline from the pool positions and the depth. Each distinct mesh --
+    // (vertex buffer, slot, offset, stride, index buffer, offset, format,
+    // start, base, count, kind, topology) -- is copied once: the index
+    // window [start, start+count) and a vertex window from the base vertex
+    // for `count` vertices (a mesh whose indices reach past it is flagged by
+    // the reader, not guessed), with the input layout that decodes it. Each
+    // distinct blend/depth-stencil/raster state is kept once. Separate
+    // budget, explicit declines; off (geoFrame 0) unless the probe armed it.
+    struct GeoMesh {
+        uint64_t vb=0,ib=0;
+        uint32_t vbSlot=0,vbOffset=0,vbStride=0,vbWhole=0,ibOffset=0,ibFormat=0,ibWhole=0;
+        uint32_t start=0;int32_t base=0;uint32_t count=0,kind=0,topology=0;
+        uint32_t vCapture=0,vBytes=0,iCapture=0,iBytes=0;
+        Buffer vStage,iStage;
+        std::vector<Layout> layout;
+    };
+    struct GeoState {
+        uint32_t flags=0;   // 1 blend state bound, 2 depth-stencil state bound, 4 rasterizer state bound
+        D3D11_BLEND_DESC blend{};float factor[4]{};uint32_t sampleMask=0;
+        D3D11_DEPTH_STENCIL_DESC depth{};uint32_t stencilRef=0;
+        D3D11_RASTERIZER_DESC raster{};
+    };
+    struct GeoDraw {
+        uint32_t frame=0,ordinal=0,mesh=UINT32_MAX,state=UINT32_MAX;
+        uint64_t vs=0,ps=0;uint32_t instances=0,startInstance=0;
+    };
+    std::vector<GeoMesh> geoMeshes;
+    std::vector<GeoState> geoStates;
+    std::vector<GeoDraw> geoDraws;
+    std::map<std::vector<uint64_t>,uint32_t> geoMeshIndex,geoStateIndex;
+    uint32_t geoFrame=0,geoBytes=0,geoDeclined=0,geoDrawsDropped=0;
+    static constexpr uint32_t kGeoBudget=96*1024*1024,kGeoMaxDraws=40000,kGeoMaxMeshes=20000;
+
+    void armGeometry(uint32_t frame) {
+        geoMeshes.clear();geoStates.clear();geoDraws.clear();geoMeshIndex.clear();geoStateIndex.clear();
+        geoFrame=frame;geoBytes=geoDeclined=geoDrawsDropped=0;
+    }
+    // One ledger row of the armed frame; the caller has already decided
+    // the draw is instanced and that t33 held the pool.
+    void captureGeometry(ID3D11DeviceContext* ctx,uint32_t frame,uint32_t ordinal,uint64_t vs,uint64_t ps,
+                         char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
+        if(!ctx || !geoFrame || frame!=geoFrame)return;
+        if(geoDraws.size()>=kGeoMaxDraws){++geoDrawsDropped;return;}
+        GeoDraw g;g.frame=frame;g.ordinal=ordinal;g.vs=vs;g.ps=ps;g.instances=instances;g.startInstance=startInstance;
+        g.state=geoCaptureState(ctx);
+        g.mesh=geoCaptureMesh(ctx,kind,count,start,base);
+        geoDraws.push_back(g);
+    }
+
+    uint32_t geoCaptureState(ID3D11DeviceContext* ctx) {
+        ID3D11BlendState* bs=nullptr;FLOAT factor[4]{};UINT mask=0;ctx->OMGetBlendState(&bs,factor,&mask);
+        ID3D11DepthStencilState* ds=nullptr;UINT ref=0;ctx->OMGetDepthStencilState(&ds,&ref);
+        ID3D11RasterizerState* rs=nullptr;ctx->RSGetState(&rs);
+        uint32_t f[4];std::memcpy(f,factor,sizeof(f));
+        const std::vector<uint64_t> key={reinterpret_cast<uint64_t>(bs),reinterpret_cast<uint64_t>(ds),reinterpret_cast<uint64_t>(rs),
+                                         (uint64_t(f[0])<<32)|f[1],(uint64_t(f[2])<<32)|f[3],(uint64_t(mask)<<32)|ref};
+        uint32_t index=UINT32_MAX;
+        const auto it=geoStateIndex.find(key);
+        if(it!=geoStateIndex.end())index=it->second;
+        else {
+            GeoState s;
+            if(bs){bs->GetDesc(&s.blend);s.flags|=1u;}
+            if(ds){ds->GetDesc(&s.depth);s.flags|=2u;}
+            if(rs){rs->GetDesc(&s.raster);s.flags|=4u;}
+            std::memcpy(s.factor,factor,sizeof(s.factor));s.sampleMask=mask;s.stencilRef=ref;
+            index=uint32_t(geoStates.size());geoStates.push_back(s);geoStateIndex.emplace(key,index);
+        }
+        if(bs)bs->Release();if(ds)ds->Release();if(rs)rs->Release();
+        return index;
+    }
+
+    uint32_t geoCaptureMesh(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t start,int32_t base) {
+        // The vertex slot: the one the layout reads per vertex; without a
+        // remembered layout, slot 1 when slot 0 is the 8-byte instance stream.
+        std::vector<Layout> layout;
+        {
+            Microsoft::WRL::ComPtr<ID3D11InputLayout> il;ctx->IAGetInputLayout(&il);
+            Layout elements[32];UINT bytes=sizeof(elements);
+            if(il && SUCCEEDED(il->GetPrivateData(effectLayoutKey(),&bytes,elements)) && bytes &&
+               bytes<=sizeof(elements) && bytes%sizeof(Layout)==0)layout.assign(elements,elements+bytes/sizeof(Layout));
+        }
+        ID3D11Buffer* raw[2]{};UINT strides[2]{},offsets[2]{};ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);
+        Buffer vbs[2];vbs[0].Attach(raw[0]);vbs[1].Attach(raw[1]);
+        uint32_t slot=UINT32_MAX;
+        for(const auto& e:layout)if(e.classification==D3D11_INPUT_PER_VERTEX_DATA && e.slot<2){slot=e.slot;break;}
+        if(slot==UINT32_MAX)slot=(strides[0]==8 && vbs[1])?1u:0u;
+        ID3D11Buffer* ibRaw=nullptr;DXGI_FORMAT fmt=DXGI_FORMAT_UNKNOWN;UINT ibOffset=0;ctx->IAGetIndexBuffer(&ibRaw,&fmt,&ibOffset);
+        Buffer ib;ib.Attach(ibRaw);
+        D3D11_PRIMITIVE_TOPOLOGY topology=D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;ctx->IAGetPrimitiveTopology(&topology);
+        const bool indexed=kind=='X'||kind=='I';
+        const std::vector<uint64_t> key={reinterpret_cast<uint64_t>(vbs[slot].Get()),(uint64_t(slot)<<32)|offsets[slot],
+                                         strides[slot],indexed?reinterpret_cast<uint64_t>(ib.Get()):0,
+                                         indexed?((uint64_t(ibOffset)<<32)|uint32_t(fmt)):0,
+                                         (uint64_t(start)<<32)|uint32_t(base),(uint64_t(count)<<32)|uint32_t(kind),uint64_t(topology)};
+        const auto it=geoMeshIndex.find(key);
+        if(it!=geoMeshIndex.end())return it->second;
+        if(geoMeshes.size()>=kGeoMaxMeshes || !vbs[slot] || !strides[slot]){++geoDeclined;return UINT32_MAX;}
+        GeoMesh m;m.vb=reinterpret_cast<uint64_t>(vbs[slot].Get());m.vbSlot=slot;m.vbOffset=offsets[slot];m.vbStride=strides[slot];
+        m.start=start;m.base=base;m.count=count;m.kind=uint32_t(uint8_t(kind));m.topology=uint32_t(topology);m.layout=std::move(layout);
+        D3D11_BUFFER_DESC vd{};vbs[slot]->GetDesc(&vd);m.vbWhole=vd.ByteWidth;
+        // Vertex window: indexed draws from the base vertex for `count`
+        // vertices (a mesh's distinct vertices never outnumber its indices
+        // unless its indices skip ahead -- the reader checks), non-indexed
+        // draws exactly [start, start+count).
+        const uint64_t firstVertex=indexed?uint64_t(base>0?base:0):uint64_t(start);
+        const uint64_t vBegin=uint64_t(m.vbOffset)+firstVertex*m.vbStride;
+        uint64_t vBytes=uint64_t(count<65536u?count:65536u)*m.vbStride;
+        if(vBegin<m.vbWhole && vBegin+vBytes>m.vbWhole)vBytes=m.vbWhole-vBegin;
+        if(vBegin>=m.vbWhole)vBytes=0;
+        uint64_t iBegin=0,iBytes=0;
+        if(indexed && ib) {
+            const uint32_t is=fmt==DXGI_FORMAT_R16_UINT?2u:fmt==DXGI_FORMAT_R32_UINT?4u:0u;
+            D3D11_BUFFER_DESC id{};ib->GetDesc(&id);
+            m.ib=reinterpret_cast<uint64_t>(ib.Get());m.ibOffset=ibOffset;m.ibFormat=uint32_t(fmt);m.ibWhole=id.ByteWidth;
+            iBegin=uint64_t(ibOffset)+uint64_t(start)*is;iBytes=uint64_t(count)*is;
+            if(!is || iBegin>=m.ibWhole)iBytes=0;
+            else if(iBegin+iBytes>m.ibWhole)iBytes=m.ibWhole-iBegin;
+        }
+        if((!vBytes && !iBytes) || uint64_t(geoBytes)+vBytes+iBytes>kGeoBudget){++geoDeclined;return UINT32_MAX;}
+        Microsoft::WRL::ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        auto stage=[&](ID3D11Buffer* src,uint64_t begin,uint64_t bytes,Buffer& out,uint32_t& capture,uint32_t& copied)->bool{
+            if(!bytes)return true;
+            D3D11_BUFFER_DESC sd{};sd.ByteWidth=uint32_t(bytes);sd.Usage=D3D11_USAGE_STAGING;sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            if(!dev || FAILED(dev->CreateBuffer(&sd,nullptr,&out))){++failures;return false;}
+            D3D11_BOX box{uint32_t(begin),0,0,uint32_t(begin+bytes),1,1};
+            ctx->CopySubresourceRegion(out.Get(),0,0,0,0,src,0,&box);
+            capture=uint32_t(begin);copied=uint32_t(bytes);geoBytes+=uint32_t(bytes);return true;
+        };
+        stage(vbs[slot].Get(),vBegin,vBytes,m.vStage,m.vCapture,m.vBytes);
+        if(ib)stage(ib.Get(),iBegin,iBytes,m.iStage,m.iCapture,m.iBytes);
+        const uint32_t index=uint32_t(geoMeshes.size());
+        geoMeshes.push_back(std::move(m));geoMeshIndex.emplace(key,index);
+        return index;
     }
 
     // First world/terrain draw per source frame, not every offscreen draw.
@@ -650,7 +802,7 @@ public:
         bool ok = fwrite("EDVRDRW1", 1, 8, f) == 8;
         auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
         auto u64 = [&](uint64_t v) { ok = fwrite(&v, 8, 1, f) == 1 && ok; };
-        u32(8); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
+        u32(9); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
         auto payload = [&](ID3D11Resource* resource, uint32_t bytes, uint32_t row, uint32_t height) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const bool mapped = resource && SUCCEEDED(ctx->Map(resource, 0, D3D11_MAP_READ,
@@ -729,6 +881,28 @@ public:
             u32(s.afterBytes);if(s.postPending){u32(0);++failures;}else payload(s.after.Get(),s.afterBytes,s.height?s.afterBytes/s.height:0,s.height);
             u32(s.depthBytes);payload(s.depthImage.Get(),s.depthBytes,s.height?s.depthBytes/s.height:0,s.height);
             payload(s.psB1.Get(),s.psB1Bytes,0,0);
+        }
+        // Version 9: the armed frame's pool-draw geometry (geoFrame 0 and
+        // three empty tables when the cull gate probe did not arm it).
+        u32(geoFrame);u32(uint32_t(geoMeshes.size()));u32(geoDeclined);u32(geoDrawsDropped);
+        for(auto& m:geoMeshes) {
+            u64(m.vb);u32(m.vbSlot);u32(m.vbOffset);u32(m.vbStride);u32(m.vbWhole);
+            u64(m.ib);u32(m.ibOffset);u32(m.ibFormat);u32(m.ibWhole);
+            u32(m.start);u32(static_cast<uint32_t>(m.base));u32(m.count);u32(m.kind);u32(m.topology);
+            u32(m.vCapture);payload(m.vStage.Get(),m.vBytes,0,0);
+            u32(m.iCapture);payload(m.iStage.Get(),m.iBytes,0,0);
+            u32(uint32_t(m.layout.size()));
+            for(const auto& e:m.layout){ok=fwrite(e.semantic,1,64,f)==64 && ok;u32(e.index);u32(e.format);u32(e.slot);u32(e.offset);u32(e.classification);u32(e.step);}
+        }
+        u32(uint32_t(geoStates.size()));
+        for(const auto& s:geoStates) {
+            u32(s.flags);blob(&s.blend,sizeof(s.blend));
+            uint32_t factor[4];std::memcpy(factor,s.factor,sizeof(factor));for(auto v:factor)u32(v);
+            u32(s.sampleMask);blob(&s.depth,sizeof(s.depth));u32(s.stencilRef);blob(&s.raster,sizeof(s.raster));
+        }
+        u32(uint32_t(geoDraws.size()));
+        for(const auto& g:geoDraws) {
+            u32(g.frame);u32(g.ordinal);u32(g.mesh);u32(g.state);u64(g.vs);u64(g.ps);u32(g.instances);u32(g.startInstance);
         }
         u32(failures);
         ok = !ferror(f) && ok;

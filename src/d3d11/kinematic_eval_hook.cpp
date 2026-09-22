@@ -59,6 +59,13 @@ std::atomic<bool> schedulerWanted{false};
 // open while enabled.
 std::atomic<bool> staticGateWanted{false};
 alignas(8) std::atomic<StaticGateDecideFn> staticGateObserver{nullptr};
+// The cull gate probe's want (advanced.cull_gate_capture): observes the
+// evaluator (the traversal's per-view gate) after its forward and the
+// bucket bracket (the draw-item builder) before its forward, for the few
+// frames of an armed eye run.
+std::atomic<bool> gateProbeWanted{false};
+alignas(8) std::atomic<GateProbeGateFn> gateProbeGate{nullptr};
+alignas(8) std::atomic<GateProbeBuilderFn> gateProbeBuilder{nullptr};
 
 // The probe is a process-lifetime global (kinematicEvalProbe), so a bracket
 // that loaded the pointer before a detach remains safe while it finishes;
@@ -259,7 +266,12 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
     const auto tracker=trackerObserver.load(std::memory_order_acquire);
     if(tracker)tracker(descriptor,jobMask); // kinematicMotionObserve gates on its own flag
     const auto forward=reinterpret_cast<EvalFn>(g_evalEntry.forward.load(std::memory_order_acquire));
-    return forward(descriptor,param2,renderRecord);
+    const uintptr_t result=forward(descriptor,param2,renderRecord);
+    // The cull gate probe reads the verdict the call just wrote (param2:
+    // u32 LOD index, u8 passed); renderRecord is the VIEW (design doc §9).
+    const auto gateProbe=gateProbeGate.load(std::memory_order_acquire);
+    if(gateProbe)gateProbe(descriptor,param2,renderRecord);
+    return result;
 }
 
 __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t rig,uintptr_t poseCtx) noexcept {
@@ -416,6 +428,11 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
                                                               uintptr_t e,uintptr_t f) noexcept {
     const auto forward=reinterpret_cast<BucketFn>(g_bucketEntry.forward.load(std::memory_order_acquire));
     if(!forward)return 0; // stood down at install; the relay is unreachable then
+    // The cull gate probe sees the builder's inputs as the builder will:
+    // before the forward (a = pose context, b = render context, c = the
+    // collection's active view mask, d = rec+0x210).
+    const auto builderProbe=gateProbeBuilder.load(std::memory_order_acquire);
+    if(builderProbe)builderProbe(a,b,c,d);
     BucketSnap snaps[kBucketWalkCap];
     uint32_t flags=0;
     const uint32_t n=collectBuckets(a,snaps,kBucketWalkCap,&flags);
@@ -615,7 +632,8 @@ void recomputeGateLocked() noexcept {
     const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
                     trackerWanted.load(std::memory_order_acquire) ||
                     schedulerWanted.load(std::memory_order_acquire) ||
-                    staticGateWanted.load(std::memory_order_acquire);
+                    staticGateWanted.load(std::memory_order_acquire) ||
+                    gateProbeWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
 }
 
@@ -702,6 +720,39 @@ void kinematicEvalStaticGateDetach() noexcept {
         staticGateWanted.store(false,std::memory_order_release);
         recomputeGateLocked();
     } catch(...) {}
+}
+
+void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate,GateProbeBuilderFn builder) noexcept {
+    gateProbeGate.store(gate,std::memory_order_release);
+    gateProbeBuilder.store(builder,std::memory_order_release);
+}
+
+const char* kinematicEvalGateProbeAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        gateProbeWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalGateProbeDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        gateProbeWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
+}
+
+bool kinematicEvalBuilderHooked() noexcept {
+    return g_bucketEntry.ready.load(std::memory_order_acquire) &&
+           g_bucketEntry.forward.load(std::memory_order_acquire)!=0;
 }
 
 } // namespace edvr

@@ -446,7 +446,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
-    "src\d3d11\static_prop_gate.cpp" ^
+    "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
@@ -2120,4 +2120,27 @@ if errorlevel 1 ( echo [edvr] ERROR: static prop gate JSON writer test build fai
 "%BUILD%\static_prop_gate_json_test.exe" --dry-run || exit /b 1
 "%BUILD%\static_prop_gate_json_test.exe" --self-test || exit /b 1
 python "tools\static_prop_gate_json_selftest.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_cull_gate_probe_test
+echo [edvr] === cull_gate_probe_test.exe ===
+REM Build gate for the cull gate probe (advanced.cull_gate_capture): the
+REM production observers driven with synthetic engine memory laid out as the
+REM decompiles read it (render context and views, record, pose context with
+REM entries and sub-items, the traversal's gate context), a wild pointer and
+REM a pose mismatch; the real writer's file is then parsed by the reader,
+REM which asserts every field. A probe that records nothing or a writer one
+REM field off fails here, not ten minutes into a settlement capture.
+if not exist "%OBJ%\cullgate" mkdir "%OBJ%\cullgate"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\cullgate\\" /Fe"%BUILD%\cull_gate_probe_test.exe" ^
+    "tools\cull_gate_probe_test\cull_gate_probe_test.cpp" ^
+    "src\d3d11\cull_gate_probe.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: cull gate probe test build failed & exit /b 1 )
+"%BUILD%\cull_gate_probe_test.exe" --dry-run || exit /b 1
+"%BUILD%\cull_gate_probe_test.exe" "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
+python "tools\cull_gate_probe.py" --self-test || exit /b 1
+python "tools\cull_gate_probe.py" --verify-fixture "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
 exit /b 0
