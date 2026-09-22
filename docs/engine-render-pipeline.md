@@ -71,7 +71,9 @@ otherwise.
   per-part split is FUN_1442B3FC0 (frustum + LOD per sub-item per view,
   decompiled), where ideal occluders give 2.5-3.3 ms - open, real
   occluders unmeasured because the geometry capture came back empty
-  (probe bug). The eye depth capture's constants
+  (probe bug, FIXED b706df9: the arm re-arms after the pool-release
+  reset; and the probe now observes FUN_1442B3FC0 per sub-item and
+  view, EDVRGATE v2, NOT FLOWN). The eye depth capture's constants
   block is fixed (file version 2: registers 256-335, the camera at
   270-275; version 1 never held it). Read the GPU side next to any CPU
   saving (addendum 2: 8-15 ms app GPU at 0.7559 scale). The approach onset is a RAMP with distance (stage 1

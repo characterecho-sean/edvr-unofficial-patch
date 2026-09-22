@@ -121,9 +121,15 @@
   site, conditional on real occluders reproducing ~62-80% of the ideal
   at the post-cut share; the geometry capture came back empty (a probe
   bug in the pool-first-seen path), so the real-occluder recall is
-  still unmeasured. To close: fix the geometry arm, record
-  FUN_1442B3FC0's per-sub-item verdicts + model spheres, one more
-  parked capture; realistic prize ~1-2 ms; Phase C only on a PASS;
+  still unmeasured. Both fixes are BUILT (b706df9, design doc §11): the
+  geometry arm survives a pool re-seen after arming (re-armed, or the
+  loss is logged as such), and the probe observes FUN_1442B3FC0 after
+  the forward (prologue + builder frame + call site validated, stands
+  down alone; EDVRGATE v2 part rows with verdict, view, world centre
+  and radius; reader reads v1 and v2 and tallies per part); NOT FLOWN
+  - one more parked capture with both keys and one Insert press
+  measures the real-occluder recall at the part site; realistic prize
+  ~1-2 ms; Phase C only on a PASS;
   cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
   the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
   must be read next to it; (1b) the RE-SCOPED cull (design doc §8):
