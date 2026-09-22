@@ -14,7 +14,7 @@ NativeTimingSnapshot cpu(uint64_t seq,uint64_t at) {
     NativeTimingSnapshot s{};s.active=true;s.generation=7;s.firstSequence=1;s.sequence=seq;
     s.capturedAtMs=at;s.waitMs=4;s.predictedPeriodMs=11;s.haveCpu=true;
     s.applicationMs=3;s.applicationValid=true;
-    s.cpu={sizeof(s.cpu),EDVR_NATIVE_TIMING_VERSION_3,seq};s.cpu.submitMs[0]=1;s.cpu.submitMs[1]=2;
+    s.cpu={sizeof(s.cpu),EDVR_NATIVE_TIMING_VERSION_4,seq};s.cpu.submitMs[0]=1;s.cpu.submitMs[1]=2;s.cpu.baseDisplayHz=90;
     return s;
 }
 GpuFrameSnapshot gpu(uint64_t seq,uint64_t at,uint64_t age=0,double ms=5) {
@@ -93,6 +93,38 @@ void agesAndValues() {
     t=cpu(2,10010);t.predictedPeriodMs=NAN;h.observe(true,t,gpu(2,10010),10010);
     check(h.submit(10010,200).count==2&&!h.predictedPeriod(10010),"invalid new prediction replaces old prediction without losing CPU samples");
     t=cpu(3,10020);t.predictedPeriodMs=0;h.observe(true,t,gpu(3,10020),10020);check(!h.predictedPeriod(10020),"zero period is unavailable");
+}
+void displayBase() {
+    NativePerfHistory h;
+    // The spec cases: 22.222 ms predicted against a 90 Hz base is a 45 Hz
+    // display rate and THROTTLED; 11.111 ms is 90 Hz, no flag.
+    auto t=cpu(1,10000);t.predictedPeriodMs=22.222;auto g=gpu(1,10000);
+    h.observe(true,t,g,10000);
+    const double predicted=h.predictedPeriod(10000);
+    const double base=h.basePeriodMs(10000);
+    check(predicted>22.0&&predicted<22.3&&base>11.0&&base<11.2&&
+          NativePerfHistory::displayThrottled(predicted,base),
+          "predicted 22.222 ms with base 90 Hz reads a 45 Hz display and THROTTLED");
+    t=cpu(2,10010);t.predictedPeriodMs=11.111;h.observe(true,t,gpu(2,10010),10010);
+    check(!NativePerfHistory::displayThrottled(h.predictedPeriod(10010),h.basePeriodMs(10010)),
+          "predicted 11.111 ms with base 90 Hz shows no flag");
+    // A version 3 host never sends baseDisplayHz: the session's first
+    // predicted period stands in as the base.
+    h.clear();t=cpu(3,10020);t.cpu.version=EDVR_NATIVE_TIMING_VERSION_3;t.cpu.baseDisplayHz=0;t.predictedPeriodMs=11.111;
+    h.observe(true,t,gpu(3,10020),10020);
+    t=cpu(4,10030);t.cpu.version=EDVR_NATIVE_TIMING_VERSION_3;t.cpu.baseDisplayHz=0;t.predictedPeriodMs=22.222;
+    h.observe(true,t,gpu(4,10030),10030);
+    check(NativePerfHistory::displayThrottled(h.predictedPeriod(10030),h.basePeriodMs(10030)),
+          "version 3 host falls back to the session's first predicted period");
+    // The published base is ring-fresh like the prediction: past 2 s the
+    // first-period fallback answers, and a new session resets both.
+    h.clear();t=cpu(5,10040);t.predictedPeriodMs=12;h.observe(true,t,gpu(5,10040),10040);
+    check(h.basePeriodMs(10040)>11.0&&h.basePeriodMs(10040)<11.2&&approx(h.basePeriodMs(12041),12),
+          "stale published base falls back to the first predicted period");
+    t=cpu(6,10050);t.generation=9;t.firstSequence=6;t.predictedPeriodMs=17;
+    h.observe(true,t,gpu(6,10050),10050);
+    check(NativePerfHistory::displayThrottled(h.predictedPeriod(10050),h.basePeriodMs(10050)),
+          "new session resets the base to the new session's prediction");
 }
 void graphs() {
     NativePerfHistory h;for(uint64_t i=1;i<=950;++i){auto t=cpu(i,10000+i);t.cpu.submitMs[0]=double(i);t.cpu.submitMs[1]=0;t.applicationMs=double(i);h.observe(true,t,gpu(i,10000+i,0,double(i)+100),10000+i);}
@@ -273,6 +305,6 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=2)return 2;
     if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_perf_history_test: dry-run (no runtime, device or files)");return 0;}
     if(std::wcscmp(argv[1],L"--self-test"))return 2;
-    averages();invalidation();agesAndValues();graphs();benchmarkWindows();benchmarkAdmission();
+    averages();invalidation();agesAndValues();displayBase();graphs();benchmarkWindows();benchmarkAdmission();
     std::printf("native_perf_history_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

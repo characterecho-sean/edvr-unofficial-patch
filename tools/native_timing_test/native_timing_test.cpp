@@ -29,9 +29,10 @@ extern "C" uint64_t WINAPI edvrGpuFrameEvent(unsigned protocol, unsigned event,
 }
 struct Checks { unsigned count=0, failures=0; void check(bool ok,const char* s){++count;if(!ok){++failures;std::printf("FAIL: %s\n",s);}} };
 static EdvrNativeTimingFrame frame(uint64_t seq) {
-    EdvrNativeTimingFrame f{sizeof(f),EDVR_NATIVE_TIMING_VERSION_3,seq};
+    EdvrNativeTimingFrame f{sizeof(f),EDVR_NATIVE_TIMING_VERSION_4,seq};
     f.submitMs[0]=.2;f.submitMs[1]=.3;f.temporalMs[0]=.1;f.temporalMs[1]=.1;
-    f.menuMs[0]=.05;f.menuMs[1]=.06;f.transferMs[0]=.4;f.transferMs[1]=.5;f.composeMs=.7;return f;
+    f.menuMs[0]=.05;f.menuMs[1]=.06;f.transferMs[0]=.4;f.transferMs[1]=.5;f.composeMs=.7;
+    f.baseDisplayHz=90;return f;
 }
 static uint64_t waitValid(EdvrNativeTimingTable& t,Checks& c,int64_t period=11111111) {
     uint64_t seq=0;HRESULT result=E_FAIL;std::thread cpu([&]{seq=t.waitBegin(t.context);result=t.waitEnd(t.context,seq,1,period);});cpu.join();
@@ -71,6 +72,9 @@ int wmain(int argc,wchar_t** argv){
     auto badWait=t.waitBegin(t.context);c.check(t.waitEnd(t.context,badWait,0,11111111)==E_INVALIDARG,"invalid wait flag");
     auto badValidity=t.waitBegin(t.context);c.check(t.waitEnd(t.context,badValidity,2,11111111)==E_INVALIDARG,"invalid validity value");
     auto s4=waitValid(t,c);auto badFrame=frame(s4);badFrame.size--;c.check(t.publishCpu(t.context,&badFrame)==E_INVALIDARG,"wrong frame size");badFrame=frame(s4);badFrame.version++;c.check(t.publishCpu(t.context,&badFrame)==E_INVALIDARG,"wrong frame version");
+    auto sV3=waitValid(t,c);auto oldFrame=frame(sV3);oldFrame.version=EDVR_NATIVE_TIMING_VERSION_3;oldFrame.size=EDVR_NATIVE_TIMING_FRAME_SIZE_3;
+    c.check(t.publishCpu(t.context,&oldFrame)==S_OK&&!edvr::nativeTimingSnapshot().cpu.baseDisplayHz,"version three frame still accepted without a base rate");
+    auto sB=waitValid(t,c);auto baseFrame=frame(sB);c.check(t.publishCpu(t.context,&baseFrame)==S_OK&&edvr::nativeTimingSnapshot().cpu.baseDisplayHz==90,"version four base display rate travels with the frame");
     auto badPeriod=t.waitBegin(t.context);c.check(t.waitEnd(t.context,badPeriod,1,-1)==E_INVALIDARG,"invalid period");
     D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=4;desc.MipLevels=desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;ComPtr<ID3D11Texture2D>tex;c.check(SUCCEEDED(d->CreateTexture2D(&desc,nullptr,&tex)),"texture");
     auto s5=waitValid(t,c);c.check(t.gpuEye(t.context,s5,0,1,0,tex.Get())==1,"GPU begin");c.check(!t.gpuEye(t.context,s5,0,1,0,tex.Get()),"duplicate eye begin rejected");c.check(!t.gpuEye(t.context,s5,1,0,1,tex.Get()),"overlap eye end rejected");c.check(t.gpuEye(t.context,s5,0,0,0,tex.Get())==0,"abandoned pair rejected");c.check(!edvr::nativeTimingSnapshot().haveCpu,"abandoned pair clears CPU after wait end");

@@ -1589,6 +1589,52 @@ openxr_resolution headset=5424x5356 requested=0.7559), so the half-rate
 stretches above are Pimax OpenXR's, and the user-side toggle to try is
 Pimax's smart smoothing, not Virtual Desktop's SSW.
 
+### 2026-09-22 (addendum 2) -- Monitor audit: clocks correct, presentation defective; the Pimax wall is real, rig-resolved
+
+Pimax 8KX + SteamVR session (smart smoothing OFF, EDVR native OpenXR
+runtime on SteamVR/OpenXR): fpsVR read 42-44 fps / CPU 18-19 ms / GPU
+<1.0 ms at the settlement; EDVR's monitor read ~56 fps / CPU-GPU 12-13
+ms. Audit (code + the 09:37 session log):
+- No clock bug: overlay fps = producer cadence (game Present->Present
+  QPC delta, 900-frame ring, perf_monitor.cpp:713-718,1068); CPU = app
+  work only (waits excluded); GPU = app render only (compose excluded).
+  fpsVR's CPU 18-19 = EDVR's app 12-13 + ~5-6 ms of waits - consistent.
+- The defects are presentational: 'FRAME RATE' reads as headset fps but
+  is production cadence; on the native path the monitor surfaces NO
+  display-side signal (drop/reprojection tiles are 'native OpenXR
+  timing unavailable'), and hides the runtime's own predictedPeriod
+  (which read 22.222 ms = 45 Hz DURING the settlement stretch - SteamVR
+  halving the display rate under the wall). Production 50-57, display
+  42-45: both instruments faithful, the page shows the wrong side.
+  fpsVR's GPU <1.0 is a layered-submission artifact (SteamVR attributes
+  almost no GPU to the app; its own 26 MP distortion is invisible).
+- THE PIMAX WALL IS REAL (rig-resolved): EDVR's own numbers at the
+  settlement: producer 11.9-13.4 ms vs 0.5-3.3 away, app GPU 8.2-14.9
+  ms - at XR 4100x3212 per eye (13.17 MP, 26.3 MP both eyes - ~3.1x the
+  Quest rig's per-eye pixels), plus the ~5.3 ms job pipeline. The
+  m02 = -+0.1389 asymmetric frusta are the ORDINARY off-axis stereo
+  projection (principal-point offset - the same signature the Quest
+  analysis proved non-canted, 2026-09-21), NOT canted projection: the
+  user's headset is a Pimax Crystal Super micro-OLED with 0 deg cant,
+  and an earlier attribution of a 'canted ~1/3 tax' here is retracted.
+  Draw counts match the Quest rig (~19.4k) - the cost scales with
+  PER-EYE PIXELS (GPU-side, plus GPU-bound backpressure inflating the
+  CPU-side intervals and tile-count-scaled compute dispatches), not
+  submission. SteamVR halves the display rate under that wall (22.222
+  ms predicted period) - fpsVR's 42-44 is the delivered truth.
+So: Quest rig = pacer-limited (VDXR), Pimax rig = a genuine CPU+GPU wall
+at 26 MP - the user's original 'settlements are CPU-bound' is rig-true.
+FIX (small, spec'd): a DISPLAY tile on the native path - surface the
+runtime's predictedPeriod (throttle detection) plus a display-cadence
+estimate, so the page can never read 56 while the headset shows 45.
+
+Landed 2026-09-22 (branch perf-monitor-display-tile-2026-09-22): DISPLAY
+tile shows predictedPeriod as Hz with the base rate and a THROTTLED flag at
+>1.5x base; base crosses as EdvrNativeTimingFrame v4 baseDisplayHz (the
+display_frequency publication), falling back to the session's first
+predicted period for a v3 host. No display-cadence estimate shipped: no
+accepted/completed-frame counter with display timestamps crosses the ABI.
+
 ### 2026-09-22 -- The ~1 km onset: candidates, their log signatures, and the one approach flight that separates them (desk work, no flight)
 
 Scope is cockpit only (Sean, 2026-09-22). The observation to locate: CPU
@@ -1617,11 +1663,12 @@ instrument: at 100 m/s a 30 s window is 3 km.
   0x432B2A0): the passed set's physics grows while job-0 does not.
 * **C4 Not the pipeline**: the caller thread's game_before_first_submit
   grows as WAITING at D3D/driver/kernel blocking sites (GPU
-  back-pressure or the half-rate throttle), or as EDVR's own per-draw
-  hook time (samples in EDVR's d3d11.dll on the caller thread scaling
-  with the draw count). The 2026-09-22 cockpit windows (12 ms before
-  first submit, 5.1 ms after Present, 22.3 ms cycle) do not say which;
-  the analyzer's running/waiting split per region does.
+  back-pressure, which addendum 2 above names for the Pimax rig, or the
+  half-rate throttle), or as EDVR's own per-draw hook time (samples in
+  EDVR's d3d11.dll on the caller thread scaling with the draw count).
+  The 2026-09-22 cockpit windows (12 ms before first submit, 5.1 ms
+  after Present, 22.3 ms cycle) do not say which; the analyzer's
+  running/waiting split per region does.
 * **C5 Streaming**: no settlement asset-streaming mechanism is
   evidenced (the "streaming burst" of the 2026-09-21 design entry is
   job-0's internal cache refresh); it would show as I/O blocking sites
@@ -1630,7 +1677,7 @@ instrument: at 100 m/s a 30 s window is 3 km.
 **Signatures, all from one trace plus two files:** (S1) per-second
 series from the analyzer's frames.jsonl: before_first mean, its
 running/ready/waiting split, thread-summed samples per RVA class
-(job0/job1/job2/eval/LOD/record_drain/reset_repopulate/scheduler/EDVR
+(job0/job1/job2/eval/record_drain/reset_repopulate/scheduler/EDVR
 d3d11/other) and the first frame that samples 0x36A0F50; (S2)
 distance: haversine between Status.json (Latitude, Longitude, Altitude,
 PlanetRadius, ~1 Hz, sampled by cpu_profile.py into
@@ -1651,27 +1698,29 @@ Location 14:12:02, no Liftoff/Touchdown), so the coincidence says
 nothing about a radius.
 
 **The flight (one session, one ini, two legs, two captures):**
-environment to state in the entry: build HEAD (`python tools\edvr_log.py
---target frontier --expect-build HEAD --version`), Pimax Crystal Super on
-Pimax OpenXR with the log's openxr_resolution line, DLSS state, Pimax
-smart smoothing OFF (a half-rate throttle fills the regions with
-waiting; the analyzer separates it, a clean leg is cheaper). Instruments
-OFF: `advanced.scheduler_probe = 0` (the live Frontier ini has 1: a
-return-address signature walk at every job entry, ~432/frame, and it was
-ON during the 2026-09-22 cockpit leg), `advanced.eye_depth_capture = 0`
-(live ini has 1), `advanced.object_probe` absent or 0, no NUMLOCK census
-and no classification capture during leg 1. Leg 1, the Phase A gate:
-loaded parked at the settlement, cockpit, head still; from an elevated
-console `python tools\cpu_profile.py --capture --target frontier
---start-key F9 --stop-key F11 --max-seconds 90 --output
-build\phaseA-parked-2`; F9 in the cockpit, 60-75 s, F11 (pick two keys
-that are not in the .binds; F10 is Elite's screenshot). Leg 2, the
-onset: lift off, fly out past 5 km (nav-target distance on the HUD),
-turn, F9 at or beyond 5 km, approach at 100 m/s or slower and 50 m/s
-inside 2 km, land or park, F11; second run of the tool with
-`--max-seconds 420 --output build\onset-approach`. Analysis: both traces
-through the analyzer with `--runtime-log` (the per-window reconciliation
-must hold before any number is read); leg 1 gives the gate (caller
-pipeline running + pipeline-attributed waits, the critical-path share,
-recall x share x 5.3 ms against ~1.5 ms); leg 2 gives the onset per the
-signatures above, joined to distance by UTC.
+environment to state in the entry: build HEAD built with
+EDVR_PROFILE_SYMBOLS=1 (so EDVR's own frames resolve; `python
+tools\edvr_log.py --target frontier --expect-build HEAD --version`),
+Pimax Crystal Super on Pimax OpenXR with the log's openxr_resolution
+line, DLSS state, Pimax smart smoothing OFF (a half-rate throttle fills
+the regions with waiting; the analyzer separates it, a clean leg is
+cheaper). Instruments OFF: `advanced.scheduler_probe = 0` (the live
+Frontier ini has 1: a return-address signature walk at every job entry,
+~432/frame, and it was ON during the 2026-09-22 cockpit leg),
+`advanced.eye_depth_capture = 0` (live ini has 1),
+`advanced.object_probe` absent or 0, no NUMLOCK census and no
+classification capture during leg 1. Leg 1, the Phase A gate: loaded
+parked at the settlement, cockpit, head still; from an elevated console
+`python tools\cpu_profile.py --capture --target frontier --start-key F9
+--stop-key F11 --max-seconds 90 --output build\phaseA-parked-2`; F9 in
+the cockpit, 60-75 s, F11 (pick two keys that are not in the .binds;
+F10 is Elite's screenshot). Leg 2, the onset: lift off, fly out past
+5 km (nav-target distance on the HUD), turn, F9 at or beyond 5 km,
+approach at 100 m/s or slower and 50 m/s inside 2 km, land or park,
+F11; second run of the tool with `--max-seconds 420 --output
+build\onset-approach`. Analysis: both traces through the analyzer with
+`--runtime-log` (the per-window reconciliation must hold before any
+number is read); leg 1 gives the gate (caller pipeline running +
+pipeline-attributed waits, the critical-path share, recall x share x
+5.3 ms against ~1.5 ms); leg 2 gives the onset per the signatures
+above, joined to distance by UTC.
