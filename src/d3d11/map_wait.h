@@ -30,6 +30,7 @@
 #include <atomic>
 #include <cstdint>
 #include <d3d11.h>
+#include <windows.h>
 
 namespace edvr {
 
@@ -44,6 +45,14 @@ namespace detail {
 // Atomic because the arming side is the runtime's acquire/close, which is not
 // necessarily the thread that Maps. A relaxed load is a plain mov on x86-64.
 extern std::atomic<bool> g_mapWaitArmed;
+// mapWaitNote's totals (map_wait.cpp), moved out here so its whole body can
+// move inline below: three relaxed fetch_adds, the slow-call test and the
+// CAS loop, with no cross-TU call left on the per-Map path. Relaxed for the
+// same reason as map_wait.cpp always gave: the line that reads them is a
+// five-second summary, and a count that lands a Map late is not worth a
+// fence on every one.
+extern std::atomic<uint64_t> g_readCalls, g_readTicks, g_writeCalls, g_writeTicks,
+                              g_longestTicks, g_slowCalls;
 }  // namespace detail
 
 // Is the consumer of these totals present? Read once per Map, before the
@@ -57,7 +66,35 @@ inline bool mapWaitArmed() {
 // ticks nobody will report.
 void mapWaitArm(bool on);
 
-void mapWaitNote(D3D11_MAP type, uint64_t ticks);
+namespace detail {
+// The QueryPerformanceFrequency cache mapWaitNote's slow-call test and
+// mapWaitMs both need. Moved here, inline, for the same reason as the totals
+// above -- a function-local static in an inline function has one instance
+// program-wide, so the lazy init still runs exactly once.
+inline uint64_t mapWaitFrequency() {
+    static const uint64_t f = [] {
+        LARGE_INTEGER q{};
+        QueryPerformanceFrequency(&q);
+        return q.QuadPart > 0 ? static_cast<uint64_t>(q.QuadPart) : 1u;
+    }();
+    return f;
+}
+}  // namespace detail
+
+// mapWaitNote's whole body (map_wait.cpp originally): three relaxed
+// fetch_adds, the slow-call test and the CAS loop for the longest tick.
+// Called once per Map, behind mapWaitArmed(), so this is the cost past the
+// QPC pair -- inline atomics and one inline frequency read, no cross-TU call.
+inline void mapWaitNote(D3D11_MAP type, uint64_t ticks) {
+    const bool read = type == D3D11_MAP_READ || type == D3D11_MAP_READ_WRITE;
+    (read ? detail::g_readCalls : detail::g_writeCalls).fetch_add(1, std::memory_order_relaxed);
+    (read ? detail::g_readTicks : detail::g_writeTicks).fetch_add(ticks, std::memory_order_relaxed);
+    if (ticks * 10000u > detail::mapWaitFrequency()) detail::g_slowCalls.fetch_add(1, std::memory_order_relaxed);   // past 100 us
+    uint64_t longest = detail::g_longestTicks.load(std::memory_order_relaxed);
+    while (ticks > longest &&
+           !detail::g_longestTicks.compare_exchange_weak(longest, ticks, std::memory_order_relaxed)) {}
+}
+
 MapWaitTotals mapWaitTake();     // the totals since the last take, then zero
 double mapWaitMs(uint64_t ticks);
 

@@ -291,6 +291,12 @@ unsigned geometryEpoch=0,geometryWrites=0,unknownWrites=0,rangeWrites=0,disjoint
 Ptr<ID3D11Buffer> dump,dumpPrevious;
 unsigned dumpCount=0,dumpPreviousCount=0,dumpSceneFrame=~0u,dumpMeshFrame=0,dumpEye=0,dumpWidth=0,dumpHeight=0,dumpWriteSlot=0;
 struct Settings { UINT info[4],key[16];float dimensions[4]; };
+// Mirror of pending.count: meshMotionAnyPending()'s backing state
+// (mesh_motion.h), so hookedMap's per-Map call can be skipped outright when
+// nothing is queued to flush. Kept in sync at every site that changes
+// pending.count, declared ahead of the struct so clear() (defined inline,
+// below) can reach it.
+unsigned pendingCount=0;
 struct PendingCapture {
     Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11Buffer> scene;
@@ -300,7 +306,7 @@ struct PendingCapture {
     Ptr<ID3D11UnorderedAccessView> output;
     Settings inputs[maxRecords];
     unsigned count=0;
-    void clear(){count=0;context.Reset();scene.Reset();ids.Reset();pool.Reset();poolResource.Reset();output.Reset();}
+    void clear(){count=0;pendingCount=0;context.Reset();scene.Reset();ids.Reset();pool.Reset();poolResource.Reset();output.Reset();}
 } pending;
 // Retaining both COM objects makes pointer reuse impossible during the frame.
 // Only immutable texture metadata is cached; scene-pick and eye selection below
@@ -611,6 +617,7 @@ void meshMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn issue,unsigned cou
     auto& slice=indexStamp.indices.try_emplace((indexFirst<<32)|indexEnd,IndexStamp{indexStamp.epoch,frames}).first->second;
     slice.seen=frames;data.key[15]=std::max(vertexEpoch,slice.epoch);
     for(unsigned i=0;i<n;++i){auto& input=pending.inputs[pending.count++];input=data;input.info[0]=now.count+i;input.info[3]+=i*8;}
+    pendingCount=pending.count;
     const bool coverageSample=(++draws&63u)==0;bool timed=false,timedComparison=false;
     if(coverageSample){if(comparison.measurement){timed=comparisonCoverageGpu.begin(ctx);timedComparison=timed;if(timed)++comparison.metrics.coverageGpuSubmitted;}else timed=drawGpu.begin(ctx);}
     if(!uploadSettings(ctx,data)){if(timed){if(timedComparison)comparisonCoverageGpu.end(ctx);else drawGpu.end(ctx);}return;}
@@ -700,7 +707,9 @@ void meshMotionResourceWritten(ID3D11Resource* resource,uint64_t first,uint64_t 
     using namespace mesh_motion_detail;
     // Copy/Update hooks call before the write; Map must flush before the
     // actual Map call, since a mapped resource cannot be used by the GPU.
-    meshMotionBeforeMap(resource);
+    // Guarded the same way as hookedMap's own call (mesh_motion.h): nothing
+    // is queued, so the call would only re-test pending.count and return.
+    if (pendingCount) meshMotionBeforeMap(resource);
     if(!resource)depthMetadata.clear();
     if(!enabled || (resource && watched.find(resource)==watched.end()))return;
     if(resource){

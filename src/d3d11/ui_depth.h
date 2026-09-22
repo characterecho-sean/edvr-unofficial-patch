@@ -175,7 +175,16 @@ void uiDepthHoloStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene);
 void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx, const wchar_t* directory, const wchar_t* stamp);
 // Geometry writes invalidate only accepted corona generations; nullptr is an
 // unknown write and invalidates all such generations.
-void uiDepthMotionResourceWritten(ID3D11Resource*,uint64_t first=0,uint64_t end=~uint64_t(0));
+//
+// uiDepthMotionResourceWrittenImpl is the real body (ui_depth.cpp), whose own
+// first line is `if(!resource && !detail::g_uiDepthOn) return;`. That test
+// moves here, inline, as the wrapper every caller actually links against --
+// including the one inside motionResourceWritten (vscreen.cpp), which cannot
+// itself change to add a guard (see AGENTS.md's scope note on that file).
+void uiDepthMotionResourceWrittenImpl(ID3D11Resource*,uint64_t first,uint64_t end);
+inline void uiDepthMotionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)) {
+    if (resource || detail::g_uiDepthOn) uiDepthMotionResourceWrittenImpl(resource, first, end);
+}
 
 // The strength the interface proper is marked at (advanced.ui_depth_reactive;
 // 0 = no fixed NVIDIA bias; motion classification and adaptive history remain).

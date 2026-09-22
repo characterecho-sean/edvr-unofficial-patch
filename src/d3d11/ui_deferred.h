@@ -99,6 +99,21 @@ bool uiDeferredFallbackReset(int eye);
 // anything; safe to call every frame regardless of capture state.
 struct UiDeferredEyeState { bool enabled; bool sampled; unsigned aliases; unsigned draws; bool complete; };
 UiDeferredEyeState uiDeferredEyeState(int eye);
+
+// uiDeferredResourceWrite's own necessary first test (ui_deferred.cpp): with
+// this false, `inside || !r` aside, the function is guaranteed to reach
+// `if(!enabled)return;` before doing anything else -- the trace-clear loop
+// just above that line runs on `enabled || diagnosticWindow()`, the same OR,
+// so dropping the call here is exactly the callee declining, never a
+// difference in which entries end up cleared. Mirrors enabled, generation
+// and diagnosticUntilGeneration, kept in sync at every site that changes any
+// of the three (all in ui_deferred.cpp).
+namespace detail {
+extern bool g_uiDeferredMightObserveWrite;
+}  // namespace detail
+inline bool uiDeferredResourceWriteLive() {
+    return detail::g_uiDeferredMightObserveWrite;
+}
 void uiDeferredResourceWrite(ID3D11DeviceContext*, ID3D11Resource*);
 void uiDeferredViewWrite(ID3D11DeviceContext*, ID3D11View*);
 void uiDeferredCopy(ID3D11Resource* destination, ID3D11Resource* source, bool complete);

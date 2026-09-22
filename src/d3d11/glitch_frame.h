@@ -32,6 +32,20 @@ namespace edvr {
 
 void installGlitchFrameFix();
 
+// glitchFrameInvalidatePool's own and only test (glitch_frame.cpp): the fix
+// is installed at all. Necessary and sufficient -- unlike the functions
+// below, it does not also ask State::observing.
+//
+// glitchFrameWantsPool's own necessary first test: installed AND
+// State::observing. Both mirror g_state/State::observing, kept in sync by
+// syncGlitchFrameDetail() at every site that changes either (glitch_frame.cpp).
+namespace detail {
+extern bool g_glitchFrameInstalled;
+extern bool g_glitchFrameObserving;
+}  // namespace detail
+inline bool glitchFrameInstalled() { return detail::g_glitchFrameInstalled; }
+inline bool glitchFrameObserving() { return detail::g_glitchFrameObserving; }
+
 // Called from the Map/Unmap hooks. The detector picks out the buffers it cares
 // about by size, so passing it everything is intended.
 bool glitchFrameWantsBuffer(uint32_t bytes);
