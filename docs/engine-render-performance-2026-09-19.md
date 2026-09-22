@@ -46,20 +46,24 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
-* **Open (perf arc CLOSED at Phase A, 2026-09-22 — the occlusion lever
-  killed by its own gate; see the Phase A verdict entry):** the consuming
-  thread does not wait on the job pipeline (~0 LOD-attributable stall,
-  ~7 ms pacing slack) — there is no settlement CPU wall on this rig under
-  EDVR to harvest. Remaining items are instrument/tool gaps and other arcs:
-  (1) edvr_cpu.wprp's 512x1 MiB buffers are a ~13.7 s ring at ~38 MB/s —
-  size them for the session or the clean leg is lost (affects any future
-  cpu_profile use); (2) eye depth capture is native-VR-only by design (the
-  flat panel forms no scene pair) — document or extend; (3) the object
-  classification ownership join failed in all four Phase A runs
-  (unwind_failed ~90%) — the record-to-object join the flicker/object arcs
-  need; (4) depth-capture constants keying (structure-family draw); (5)
-  per-record identity/change signal (motion arc); (6) ring-buffer command
-  consumers.
+* **Open (arc OPEN; Phase A flown 2026-09-22 but INVALID for its gate —
+  the KILL verdict was withdrawn the same day, see the withdrawal entry;
+  scope is now cockpit-only stereo, on foot out of scope):** (1) a VALID
+  Phase A: file-mode WPR of the parked-cockpit leg with no capture
+  instruments armed, the analyzer covering the whole cycle, per-thread
+  load and attributed scheduler waits, reconciled against the runtime
+  log's cycle phases (the old ETL + log windows 30-31 prove the analyzer
+  offline first); (2) the ~1 km onset: CPU frame time rises once the ship
+  is within ~1 km of the settlement — locate the gate with one approach
+  flight (cycle windows + distance + per-frame record/draw counts); (3)
+  edvr_cpu.wprp's 512x1 MiB buffers are a ~13.7 s ring at ~38 MB/s — file
+  mode or sized buffers, or the leg is lost again; (4) eye depth capture
+  is native-VR-only by design (the flat panel forms no scene pair) —
+  document or extend; (5) the object classification ownership join failed
+  in all four Phase A runs (unwind_failed ~90%) — the record-to-object
+  join the flicker/object arcs need; (6) depth-capture constants keying
+  (structure-family draw); (7) per-record identity/change signal (motion
+  arc); (8) ring-buffer command consumers.
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -70,10 +74,12 @@
   Merge-key control of any kind — the key is an incidental audio counter
   sampled at rekey. The 82% bucket attribution and 40-frame cadence — no
   evidence route exists from the bucket lists to eye-pass draws.
-  Occlusion culling of the job pipeline — KILLED at Phase A 2026-09-22:
-  the consuming thread does not wait on the pipeline (~0 attributable
-  stall, ~7 ms pacing slack); the retake escape hatch caps at ~0.75 ms,
-  under the design's ~1.5 ms bar.
+  Occlusion culling of the job pipeline is NOT ruled out: the 2026-09-22
+  KILL was withdrawn the same day — its trace never covered the cockpit
+  leg and the analyzer measures only the post-present slice (withdrawal
+  entry). Its Phase A gate is unmeasured. What IS closed: any prize
+  arithmetic that multiplies the unseen fraction by thread-summed job
+  time without a measured critical-path share.
 
 ## Frame budget philosophy
 
@@ -1440,3 +1446,97 @@ the escape-hatch retake is available but its ceiling is under the bar.
 Also closed: any prize arithmetic that multiplies the unseen fraction by
 the thread-summed job time - the wall-share was the gate and the gate
 failed.
+
+### 2026-09-22 -- Phase A verdict WITHDRAWN: the trace never covered the cockpit leg, and the analyzer's window is the post-present slice
+
+Reviewed the same day against the tool's own output
+(build/phaseA-cpu-parked/report.json, 847 frames), the analyzer source
+(tools/cpu_profile/Program.cs) and the runtime log's own frame-cycle
+instrument (edvr_openxr_20260922_081020_495_38876.log,
+native_frame_cycle_window / _phase every 30 s). Review record out of tree:
+reviews/phaseA-verdict-review-2026-09-22.md (gitignored, main checkout).
+
+**What the window was.** The 13.47 s ring covers 14:23:58-14:24:11.6 UTC:
+the on-foot doorway pose in deferred pacing, then the menu and the exit.
+The runtime's pacing-mode change to `runtime` at sequence 40252
+(14:24:04.096) is the analyzer's featureEpoch 4->5 at frame 492 of 847;
+`module_shutdown_entry` is logged at 14:24:11.903, a quarter second after
+the trace ends. The parked-cockpit leg is what the ring overwrote; the
+verdict entry never named the state it analysed.
+
+**What the analyzer measures.** Its per-frame window is
+[PresentEndUs, NextWaitEntryUs) (Program.cs:408-409): Present returned to
+the next WaitGetPoses entered, i.e. EDVR's post_second_submit_to_next_wait
+phase (3.5 ms mean in window 31; the report's durationUs p50 is 2.9 ms).
+game_before_first_submit - the render phase, 3.3-4.6 ms on foot and
+11.4-13 ms in the cockpit - lies entirely outside it, and so does the
+pacer block inside the second Submit (3.0-4.6 ms). "~1.9 ms running +
+<= 0.75 ms waiting + ~7 ms pacing" is the post-present slice plus
+everything else lumped as pacing. Window 31's honest split from the cycle
+instrument: ~7.4 ms game work, ~4.6 ms pacer block, 12.0 ms cycle (83.1
+fps, p95 15.2 ms - not "88-89 fps pacer-limited").
+
+**The session, caller thread 34408, from the cycle windows:** windows
+7-15 (14:12:42-14:16:42, parked cockpit, stereo, pacing=0): 44.5-45.0 fps,
+cycle 22.3 ms, game_before_first_submit 11.4-13.0 ms (p95 13-15),
+post_submit 5.1-6.2 ms, next_wait 2.1-4.9 ms - half rate, no pacer block,
+~18 ms of caller-thread wall per cycle. Windows 25-31 (on foot, deferred
+pacing from 14:20:50): 59 -> 88 fps, before_first 9.3 -> 3.3 ms, pacer
+0.9 -> 4.6 ms. Caveat: the object probe, eye depth capture and
+classification capture were armed all session and may inflate the cockpit
+numbers (stock fpsVR: 9.5-10 ms at 90 fps); the cockpit leg needs a clean
+re-measure before it is called the wall.
+
+**The waker argument does not hold.** In the analysed slice the caller
+thread's largest blocking site is inside the job scheduler: 2,949
+switch-outs at +0x5d6d7f under +0x5d4141 / +0x5d67a6 (the job-table and
+per-worker pump, ~3.5 per frame); the wakers are the scheduler's signal
+path from other threads (+0x5d6dcd: 2,277+204+131+81; +0x5d6abd: 304+95).
+A job body cannot appear on a signaller's stack - the worker signals after
+the job returns - so searching wakers for 0x4321940 etc. cannot see a join;
+the analyzer has no RVA list at all, and the matching was manual over the
+top-50 whole-stack groups. "265 observations, none in pipeline code" is
+also wrong: ~70 of the 265 caller-thread samples sit in the pipeline's own
+chain - the UpdateRenderDataJob call site 0x431B21F
+(object_record_writer_probe.cpp:14-15) and job thunks under EDVR's
+bracket frame (d3d11.dll+0x13fd17 <- +0x42df9a0 <- +0x434d847).
+
+**"The fpsVR figure is whole-process"** is contradicted: the stock on-foot
+fpsVR figure was 7.8 ms; window 30's caller-thread phases sum to 8.3 ms and
+window 31's to 7.4 ms. The overlay reports the pacing thread's game work.
+
+**Withdrawn:** the KILL; "the settlement is not CPU-bound"; "pacer-limited
+at 88-89 fps"; the <= 0.75 ms retake ceiling (it is the post-present wait
+in the lightest state of the session and bounds nothing). **Stands:** the
+ring-buffer tool gap (real; it decided the flight); eye depth capture is
+native-VR-only; the classification ownership join failed. The design's
+gate logic was applied honestly, to data that does not measure the gate.
+
+**Scope from here (Sean, 2026-09-22):** cockpit only - true stereoscopic
+settlement rendering from the ship. On foot is out of scope for now. New
+observation to instrument: CPU frame time rises noticeably once the ship
+comes within ~1 km of the settlement - a distance-gated onset (the eval
+chain's distance/LOD gates admitting the settlement's records, or
+streaming) that one approach flight can locate with the cycle windows
+already in the log plus a distance reading and the per-frame record/draw
+counts.
+
+**A valid Phase A needs:** (1) file-mode WPR (the EDVRCPU file profile
+exists in edvr_cpu.wprp; cpu_profile.py asserts memory mode - a tool
+change), the cockpit leg FIRST and the capture stopped before any eye run;
+(2) no capture instruments armed during the leg (a second leg with them on
+measures their cost); (3) the analyzer emitting WaitReturnUs /
+SecondSubmitReturnUs / PresentBeginUs with running / ready / waiting per
+region - [WaitReturn, FirstSubmit), [FirstSubmit, PresentEnd),
+[PresentEnd, NextWaitEntry) - reconciled per window against the runtime
+log's cycle phases (they must agree, or the analyzer is wrong); (4) a
+per-thread busy table so worker load per frame is visible; (5) scheduler
+waits attributed by what was signalled (the waker's last sample or its L1
+bracket state), not by the signaller's stack; (6) mechanical RVA matching
+over all stacks against the job bodies, the thunk table, 0x431B21F and the
+scheduler signal sites. The old ETL (build/phaseA-cpu-parked/flight.etl)
+plus log windows 30-31 is the offline test input for (3)-(6): the numbers
+are known, so the analyzer can be proven before a flight is spent.
+
+ruled out: nothing new. Un-ruled: occlusion culling of the job pipeline -
+its Phase A gate is UNMEASURED, not failed.

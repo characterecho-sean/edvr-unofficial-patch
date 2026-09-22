@@ -20,13 +20,21 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) Phase A of the reviewed occlusion
-  design (docs/design-occlusion-culling-2026-09-22.md, revised in-repo
-  2026-09-22): ONE instrumented flight — cpu_profile WPR trace at the
-  parked settlement (critical-path verdict; walk-vs-emit by address) plus
-  armed eye runs at >= 5 poses for the depth/truth corpus; kill gate:
-  pipeline off the critical path or the recall x share x 5.3 ms ceiling
-  < ~1.5 ms. The static unseen set is a CEILING, not a cull list; Phase B
+* **Open, highest value first:** (1) a VALID Phase A of the reviewed
+  occlusion design (docs/design-occlusion-culling-2026-09-22.md). The
+  2026-09-22 flight was invalid for the gate and its KILL verdict was
+  withdrawn the same day (engine arc, withdrawal entry): the WPR ring
+  dropped the parked-cockpit leg, the window analysed was the on-foot
+  doorway pose and the exit, and the analyzer measures only the
+  post-present slice [PresentEnd, NextWaitEntry). Retake: file-mode WPR,
+  cockpit leg first with no capture instruments armed, analyzer covering
+  the whole cycle + per-thread load + attributed scheduler waits, proven
+  offline against the old ETL and the runtime log's cycle phases before
+  the flight. Scope is cockpit-only stereo (on foot out of scope). Also
+  instrument the ~1 km onset: CPU frame time rises once the ship is within
+  ~1 km of the settlement (a distance gate in stage 1, or streaming). Kill
+  gate unchanged: pipeline off the critical path or recall x share x 5.3 ms
+  < ~1.5 ms; the static unseen set is a CEILING, not a cull list; Phase B
   offline follows only if Phase A passes; (2) depth-capture constants
   keying fix; (3) per-record identity/change signal (stage 2 — motion
   arc); (4) scheduler payload-vtable closure (stage 0); (5) ring-buffer

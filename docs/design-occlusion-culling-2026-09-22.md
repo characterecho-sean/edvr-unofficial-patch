@@ -20,17 +20,25 @@ context; every load-bearing claim cites its evidence.
   2026-09-22 entry). The ms figure (~4.8–5.1 of the ~5.3 ms view-dependent
   cost) is an ESTIMATE by proportionality: the job time it rests on is
   summed across worker threads and its wall-clock share is unproven (§2.2).
-- **Open:** reviewer verdict; Phase A (one flight, §4) not flown; whether
-  the job pipeline sits on the main thread's critical path; the camera the
-  engine's frustum gate reads and the readers of its active mask (§3.3);
-  which surfaces occlude the measured unseen set; the record → mesh join.
+- **Open:** reviewer verdict; a VALID Phase A (§4) — the 2026-09-22 flight
+  was invalid for the gate and its KILL verdict withdrawn the same day
+  (engine arc, withdrawal entry: the WPR ring dropped the cockpit leg; the
+  analyzer measures only the post-present slice); whether the job pipeline
+  sits on the caller thread's critical path; the camera the engine's
+  frustum gate reads and the readers of its active mask (§3.3); which
+  surfaces occlude the measured unseen set; the record → mesh join.
+- **Scope (Sean, 2026-09-22):** cockpit only — true stereoscopic settlement
+  rendering from the ship. On foot is out of scope for now; the corpus and
+  the profile legs are cockpit poses. Also to instrument: CPU frame time
+  rises noticeably once the ship is within ~1 km of the settlement.
 - **Ruled out (do not re-propose; evidence in §5):** draw-dedup culling;
   static/PVS culling; skip-based work gating (the change-gate abort); GPU
   occlusion queries as the runtime mechanism (they remain the offline
   oracle, §3.4); same-frame depth readback; boundary-side draw-call motion
   estimation (pipeline doc, 2026-09-19 decision); whole-structure boxes as
   occluders; single-occluder rect coverage as the test.
-- **Next:** Phase A — one instrumented flight (§4), then Phase B offline.
+- **Next:** the analyzer and capture fixes (offline, provable against the
+  old ETL), then Phase A — one cockpit flight (§4), then Phase B offline.
 
 ## 1. Context and goal
 
