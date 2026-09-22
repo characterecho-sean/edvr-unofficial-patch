@@ -20,18 +20,17 @@ otherwise.
   depth; stages 2, 3 and 4 are the deep ones. Stage 5 (VR frame) moved off
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
-* **Open, highest value first:** (1) the dynamic eval-level culling
-  design — measured prize ~4.8-5.1 ms of the 5.3 ms view-dependent
-  content bound at a parked settlement view (91-97% of submitted records
-  provably unseen, engine arc 2026-09-22 entry): per-frame, conservative,
-  depth-join as the regression oracle; the static unseen set is a
-  CEILING, not a cull list (head rotation un-occludes); (2) fix the
-  depth capture's constants keying (this frame's first pool-carrying
-  draw was a 3-vertex eval pass — key on a structure-family draw); (3) a
-  view sweep to size the DYNAMIC average prize (every armed eye run now
-  yields depth); (4) per-record identity and change signal (stage 2 —
-  motion arc); (5) scheduler payload-vtable closure (stage 0); (6)
-  ring-buffer command consumers.
+* **Open, highest value first:** (1) Phase A of the reviewed occlusion
+  design (docs/design-occlusion-culling-2026-09-22.md, revised in-repo
+  2026-09-22): ONE instrumented flight — cpu_profile WPR trace at the
+  parked settlement (critical-path verdict; walk-vs-emit by address) plus
+  armed eye runs at >= 5 poses for the depth/truth corpus; kill gate:
+  pipeline off the critical path or the recall x share x 5.3 ms ceiling
+  < ~1.5 ms. The static unseen set is a CEILING, not a cull list; Phase B
+  offline follows only if Phase A passes; (2) depth-capture constants
+  keying fix; (3) per-record identity/change signal (stage 2 — motion
+  arc); (4) scheduler payload-vtable closure (stage 0); (5) ring-buffer
+  command consumers.
 * **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
   as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
   decision). Bucket suppression — five independent grounds,
