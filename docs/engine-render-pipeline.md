@@ -26,14 +26,20 @@ otherwise.
   withdrawn the same day (engine arc, withdrawal entry): the WPR ring
   dropped the parked-cockpit leg, the window analysed was the on-foot
   doorway pose and the exit, and the analyzer measures only the
-  post-present slice [PresentEnd, NextWaitEntry). Retake: file-mode WPR,
-  cockpit leg first with no capture instruments armed, analyzer covering
-  the whole cycle + per-thread load + attributed scheduler waits, proven
-  offline against the old ETL and the runtime log's cycle phases before
-  the flight. Scope is cockpit-only stereo (on foot out of scope). Also
-  instrument the ~1 km onset: CPU frame time rises once the ship is within
-  ~1 km of the settlement (a distance gate in stage 1, or streaming). Kill
-  gate unchanged: pipeline off the critical path or recall x share x 5.3 ms
+  post-present slice [PresentEnd, NextWaitEntry). Retake tooling DONE
+  2026-09-22 (on main): cpu_profile.py captures in file mode with
+  hotkey-armed legs and samples Status.json; the analyzer covers the
+  whole cycle (eight regions, per-thread busy table, waits attributed by
+  the waker's last sample per region and per blocking site, mechanical
+  RVA classes on decompile sizes) and reproduces the runtime log's cycle
+  phases for windows 30-31 of the old trace to within 0.001 ms (engine
+  arc, 2026-09-22 tooling entry). The flight is designed (engine arc,
+  2026-09-22 onset entry): leg 1 parked cockpit with scheduler_probe and
+  eye_depth_capture OFF, leg 2 the approach from beyond 5 km. Scope is
+  cockpit-only stereo (on foot out of scope). The ~1 km onset has five
+  candidates with trace signatures in that entry (per-record LOD gate,
+  reset-repopulate admission, physics scope, waiting/EDVR hook cost,
+  streaming). Kill gate unchanged: pipeline off the critical path or recall x share x 5.3 ms
   < ~1.5 ms; the static unseen set is a CEILING, not a cull list; Phase B
   offline follows only if Phase A passes; (2) depth-capture constants
   keying fix; (3) per-record identity/change signal (stage 2 — motion

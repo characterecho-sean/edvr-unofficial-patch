@@ -37,8 +37,18 @@ context; every load-bearing claim cites its evidence.
   oracle, §3.4); same-frame depth readback; boundary-side draw-call motion
   estimation (pipeline doc, 2026-09-19 decision); whole-structure boxes as
   occluders; single-occluder rect coverage as the test.
-- **Next:** the analyzer and capture fixes (offline, provable against the
-  old ETL), then Phase A — one cockpit flight (§4), then Phase B offline.
+- **Tooling (2026-09-22, on main):** the capture tool records in file
+  mode with hotkey-armed legs (`--start-key`/`--stop-key`) and samples
+  Status.json; the analyzer covers the whole cycle (regions R1-R6,
+  per-thread busy table, waits attributed by the waker's last sample per
+  region and blocking site, RVA classes on decompile sizes, `--runtime-log`
+  reconciliation) and reproduces the runtime log's cycle phases for the
+  old trace's windows 30-31 to within 0.001 ms — the analyzer is proven;
+  the old trace itself remains a tool input, not gate evidence.
+- **Next:** Phase A — the two-leg cockpit flight designed in the engine
+  arc's 2026-09-22 onset entry (leg 1 parked, capture instruments off;
+  leg 2 the approach from beyond 5 km), then the gate verdict, then Phase B
+  offline only if it passes.
 
 ## 1. Context and goal
 

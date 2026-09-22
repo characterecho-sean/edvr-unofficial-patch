@@ -46,18 +46,30 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
+* **State (2026-09-22, retake tooling proven, flight designed):** the
+  capture tool records in file mode with hotkey-armed legs and samples
+  Status.json; the analyzer covers the whole cycle (regions R1-R6,
+  per-thread busy table, waits attributed by the waker's last sample per
+  region and blocking site, RVA classes on decompile sizes) and
+  reproduces the runtime log's cycle phases for the old trace's windows
+  30-31 to within 0.001 ms (2026-09-22 tooling entry). Nothing of the
+  design is built. The old trace stays a tool input, not gate evidence.
+
 * **Open (arc OPEN; Phase A flown 2026-09-22 but INVALID for its gate —
   the KILL verdict was withdrawn the same day, see the withdrawal entry;
-  scope is now cockpit-only stereo, on foot out of scope):** (1) a VALID
-  Phase A: file-mode WPR of the parked-cockpit leg with no capture
-  instruments armed, the analyzer covering the whole cycle, per-thread
-  load and attributed scheduler waits, reconciled against the runtime
-  log's cycle phases (the old ETL + log windows 30-31 prove the analyzer
-  offline first); (2) the ~1 km onset: CPU frame time rises once the ship
-  is within ~1 km of the settlement — locate the gate with one approach
-  flight (cycle windows + distance + per-frame record/draw counts); (3)
-  edvr_cpu.wprp's 512x1 MiB buffers are a ~13.7 s ring at ~38 MB/s — file
-  mode or sized buffers, or the leg is lost again; (4) eye depth capture
+  scope is now cockpit-only stereo, on foot out of scope):** (1) the
+  VALID Phase A flight: two legs in one session per the 2026-09-22 onset
+  entry — leg 1 parked cockpit, 60-75 s, scheduler_probe and
+  eye_depth_capture OFF, Pimax smart smoothing off; leg 2 the approach
+  from beyond 5 km; both through the analyzer with --runtime-log; the
+  gate reads from leg 1 (caller pipeline running + pipeline-attributed
+  waits in R1, critical-path share, recall x share x 5.3 ms vs ~1.5 ms);
+  (2) the ~1 km onset from leg 2: five candidates with trace signatures
+  in the onset entry (per-record LOD gate = ramp; reset-repopulate
+  admission = step with 0x36A0F50 sampled; physics scope; waiting or
+  EDVR hook share = not the pipeline; streaming = I/O sites); (3) DONE
+  2026-09-22: the 13.7 s memory ring — file mode is the default now,
+  --memory-ring restores the ring; (4) eye depth capture
   is native-VR-only by design (the flat panel forms no scene pair) —
   document or extend; (5) the object classification ownership join failed
   in all four Phase A runs (unwind_failed ~90%) — the record-to-object
@@ -1724,3 +1736,63 @@ number is read); leg 1 gives the gate (caller pipeline running +
 pipeline-attributed waits, the critical-path share, recall x share x
 5.3 ms against ~1.5 ms); leg 2 gives the onset per the signatures
 above, joined to distance by UTC.
+
+### 2026-09-22 -- Retake tooling proven offline: file-mode capture, hotkey legs, and an analyzer that reproduces the runtime's cycle phases to 0.001 ms
+
+Deliverable A of the retake (commits bd8df5c capture tool, 095eb09 +
+8c2d768 analyzer, 90454b3 validated-build hashes; gate = build.bat with
+EDVR_PROFILE_SYMBOLS=1, which is the only way the analyzer gate runs
+and also the build to fly, since it links EDVR's DLLs with symbols).
+
+**Capture (tools\cpu_profile.py):** `--capture` starts the EDVRCPU
+file-mode profile (`-filemode -recordtempto <capture dir>`; the file
+collector has 256 x 1 MiB of burst slack) unless `--memory-ring` asks
+for the old 13.7 s ring. `--start-key`/`--stop-key` (GetAsyncKeyState,
+works with the game focused) or `--start-after-seconds` arm a leg from
+inside the headset; status.json records recording_started_utc /
+recording_stopped_utc and the stop reason. Status.json is sampled at
+4 Hz into status_samples.jsonl (one line per change: Flags, Latitude,
+Longitude, Altitude, Heading, PlanetRadius, BodyName) and the newest
+journal path is noted. --dry-run still writes nothing (self-test, 108
+checks). The validated-build stamp now hashes every analyzer .cs file.
+
+**Analyzer (tools\cpu_profile\*.cs, nine files, self-test 296 checks):**
+derives first-Submit entry/return and second-Submit entry from the
+op-2 spans; emits every timestamp and eight regions R1 [waitReturn,
+firstSubmitEntry) .. R6 [nextWaitEntry, nextWaitReturn) with the
+caller thread's running/ready/waiting/unknown; a per-thread busy table
+with sample counts per RVA class; every caller wait segment with its
+blocking site, waker thread, waker ready-stack top and the waker's
+class by its LAST SAMPLE before the ready (stale beyond 2 ms), split
+per region and cross-tabbed against the top blocking sites; RVA classes
+bounded by the decompile sizes (job bodies 503/565/62 bytes, eval 1006,
+reset-repopulate 687, record drain 134; the LOD evaluator 0x4331300 is
+a 9-byte jmp thunk and will not match; the scheduler range is left
+explicit); gate quantities per frame and per window; `--runtime-log`
+groups frames by the log's first/last sequence. Per-frame detail goes
+to frames.jsonl, report.json stays additive (schemaVersion 1).
+
+**Proof on the old trace** (build\phaseA-cpu-parked\flight.etl, 543 MB,
+run with the 081020 log): windows 30 and 31 reproduce all seven phases
+to within 0.0009 ms with frame counts equal to the log's valid= (2644,
+1116); region sums close to 0.001 µs with unknown 0.000 over 846 x 11
+regions; caller running from CSwitch vs samples x 1000 µs interval
+(SampledProfileInterval event) agree to 0.017%; ReadyThread stacks
+belong to the waker in 26,721 of 26,721 cases; 29 switch-outs with an
+unresolved process id were rescued from the thread table (they had left
+four threads reading 100% busy). The hand counts of the withdrawal
+entry reproduce (265 caller samples, 2693 wakes at 0x5d6dcd, 2973
+switch-outs at 0x5d6d7f). Cost 6 s and 400 MB; ETLX 0.62x the ETL, so
+a 10 GB approach trace budgets at ~2 min and ~6 GB of ETLX.
+
+**What the old slice shows about the METHOD only** (on foot, doorway,
+not gate evidence): pipeline wakers carry time only in R5c (43 µs/frame)
+and at the 0x5d7044 scheduler branch; R4 is the pacer (2.4 ms/frame,
+wakers stale or in EDVR's openvr_api); R6 is one wait per frame; the
+dominant scheduler site 0x5d6d7f splits into 66 DPC-ended ~10 ms waits
+and 3117 stale-waker waits. The entry+0x2000 bound of the first pass
+had over-claimed (physics 112 -> 0, LOD 206 -> 0, thunks 131 -> 1
+samples), which is why the sizes went in before any flight.
+
+ruled out: nothing. The gate is still unmeasured; the instrument is now
+proven against the runtime's own accounting.
