@@ -453,7 +453,7 @@ HRESULT WINAPI close(void* p) {
     poison(c->waitSequence);
     c->active = false; c->device = nullptr; c->waitOutstanding = c->waitValid = false;
     c->published = false;
-    if (current == c) { current = nullptr; resetPresentHistory(); }
+    if (current == c) { current = nullptr; resetPresentHistory(); edvr::mapWaitArm(false); }
     snapshot = {};
     return S_OK;
 }
@@ -574,6 +574,11 @@ extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest*
     Context& c = pool[used++];
     c = {}; c.active = true; c.device = request->device; c.producer = GetCurrentThreadId();
     c.generation = request->generation; current = &c;
+    // The Map-wait totals have one consumer, the publish line below, and it
+    // lives exactly as long as this context. Arm its collection with it, so
+    // the two clock reads per Map are paid only while something reports them
+    // (map_wait.h).
+    edvr::mapWaitArm(true);
     resetPresentHistory();
     snapshot = {}; snapshot.active = true; snapshot.generation = c.generation;
     table->context = &c; table->waitBegin = waitBegin; table->waitEnd = waitEnd;

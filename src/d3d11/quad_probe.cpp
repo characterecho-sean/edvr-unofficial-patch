@@ -13,6 +13,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/timing.h"  // the wall-clock gate
+#include "draw_gate.h"         // drawGateArm: the key lands mid-frame
 
 namespace edvr {
 
@@ -301,6 +302,9 @@ void quadProbeRequest() {
     const bool again = detail::g_quadProbeTaken;
     dropCapture();
     detail::g_quadProbeTaken = false;
+    // quadProbeWants() has just gone from false to true, inside a frame whose
+    // gate was sampled before the key was pressed (draw_gate.h).
+    drawGateArm();
     g_skipLeft = g_wantSkip;
     g_lastSkipFrame = 0;
     Log::get().note("quad probe: capture requested by key -- the next frame "

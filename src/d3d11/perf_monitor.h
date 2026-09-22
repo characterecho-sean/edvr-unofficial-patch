@@ -138,7 +138,19 @@ void perfMonitorNotePresentWait(double ms);
 // cost in the hooks, credited to that frame and shown as the running
 // figure. The thunks pay two clock reads per draw on a sample frame and
 // one branch otherwise.
-bool perfMonitorSampleDraws();
+// Is this a draw-sample frame (one in sixteen)? Inline, because every draw
+// thunk's DrawClock asks, so it was a cross-TU call about 18k times a frame
+// in a build with no /GL -- and on fifteen frames in sixteen the answer is no
+// and the call was all of the cost.
+//
+// There is NO config key behind this: the draw-hook CPU attribution runs for
+// one frame in sixteen in every session (perf_monitor.cpp's only two Config
+// reads are fix.temporal_aa and fix.temporal_aa_model, neither related), and
+// its consumers -- the 1800-frame "draw hook CPU" window line and cpuDrawsMs
+// on the drop line -- are always present. So this cannot be armed away; it
+// can only be made cheap to ask.
+namespace detail { extern bool g_perfMonitorSampleDraws; }
+inline bool perfMonitorSampleDraws() { return detail::g_perfMonitorSampleDraws; }
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks);
 
 void perfMonitorShutdown();

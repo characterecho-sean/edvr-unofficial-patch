@@ -40,7 +40,7 @@ int main(){
  ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>c;D3D_FEATURE_LEVEL level{};
  hr(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,&level,&c));
  auto hdr=surface(d.Get(),DXGI_FORMAT_R11G11B10_FLOAT),ldr=surface(d.Get(),DXGI_FORMAT_R8G8B8A8_UNORM);
- maskTexture=hdr.tex.Get();coverageView=hdr.srv.Get();edvr::enabled=true;
+ maskTexture=hdr.tex.Get();coverageView=hdr.srv.Get();edvr::detail::g_uiSeparationEnabled=true;
  auto vsCode=compile("float4 main(uint i:SV_VertexID):SV_Position{return float4(i==2?3:-1,i==1?3:-1,.5,1);}","vs_5_0");
  ComPtr<ID3D11VertexShader>vs;hr(d->CreateVertexShader(vsCode->GetBufferPointer(),vsCode->GetBufferSize(),nullptr,&vs));c->VSSetShader(vs.Get(),nullptr,0);c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
  auto psCode=compile("float4 main():SV_Target{return float4(.3,.2,.1,.5);}","ps_5_0");ComPtr<ID3D11PixelShader>ps;hr(d->CreatePixelShader(psCode->GetBufferPointer(),psCode->GetBufferSize(),nullptr,&ps));
@@ -75,11 +75,11 @@ int main(){
  check(read(d.Get(),c.Get(),result.colour)!=full,"clean tone output actually excludes target");
  coverageReady=false;check(!edvr::uiSeparationInputs(ldr.tex.Get(),hdr.tex.Get(),0,8,8,result),"incomplete metadata declines");
  check(edvr::uiSeparationFailed()&&!result.colour,"decline publishes no partial input");check(full==read(d.Get(),c.Get(),ldr.tex.Get()),"fallback retains original LDR");
- edvr::uiSeparationShutdown();edvr::enabled=true;edvr::uiSeparationUnknownWrite();check(!edvr::uiSeparationFailed(),"untracked draw before seed is harmless");
+ edvr::uiSeparationShutdown();edvr::detail::g_uiSeparationEnabled=true;edvr::uiSeparationUnknownWrite();check(!edvr::uiSeparationFailed(),"untracked draw before seed is harmless");
  vsHash=psHash=0;targetEye=0;bind(hdr);c->PSSetShader(ps.Get(),nullptr,0);c->OMSetBlendState(over.Get(),nullptr,~0u);
  check(edvr::uiSeparationBegin(c.Get()),"new session seeds");c->Draw(3,0);edvr::uiSeparationEnd(c.Get());
  edvr::uiSeparationResourceWrite(hdr.tex.Get());check(edvr::uiSeparationFailed(),"non-draw HDR write declines");check(!edvr::uiSeparationBegin(c.Get()),"failure sticky across later draws");
- edvr::uiSeparationShutdown();edvr::enabled=true;
+ edvr::uiSeparationShutdown();edvr::detail::g_uiSeparationEnabled=true;
  check(edvr::uiSeparationBegin(c.Get()),"view-write session seeds");c->Draw(3,0);edvr::uiSeparationEnd(c.Get());
  edvr::uiSeparationViewWrite(nullptr);edvr::uiSeparationViewWrite(ldr.rtv.Get());
  check(!edvr::uiSeparationFailed(),"null and unrelated view writes are harmless");

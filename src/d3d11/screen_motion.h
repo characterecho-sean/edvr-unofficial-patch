@@ -5,6 +5,25 @@ struct ID3D11ShaderResourceView;
 namespace edvr {
 class Config;
 void screenMotionConfigure(Config&);
+
+// Is this fix live? The first term of screenMotionSource, screenMotionUiDraw
+// and screenMotionRecognize, published so the draw path can decline without a
+// call -- each is invoked once per draw and, with fix.temporal_aa off (which
+// is what arms this whole feature), each only ever returned immediately. 161
+// innermost samples of the 1349-frame window of 2026-09-22 between the two
+// draw entries. None of them touches anything before that first test.
+//
+// The flags live outside the module's State because State is reset wholesale
+// in three places; screen_motion.cpp says what each reset does to them, and
+// screen_motion_test asserts it.
+namespace detail {
+extern bool g_screenMotionEnabled;
+extern bool g_screenMotionFailed;
+}  // namespace detail
+inline bool screenMotionLive() {
+    return detail::g_screenMotionEnabled && !detail::g_screenMotionFailed;
+}
+
 void screenMotionSource(ID3D11DeviceContext*,unsigned width,unsigned height);
 void screenMotionUiDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance);

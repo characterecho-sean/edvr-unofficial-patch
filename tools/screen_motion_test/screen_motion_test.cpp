@@ -84,7 +84,7 @@ int main(int argc,char** argv){
     auto psCode=compile("float4 main():SV_Target{return 1;}","ps_5_0");ComPtr<ID3D11PixelShader> ps;hr(dev->CreatePixelShader(psCode->GetBufferPointer(),psCode->GetBufferSize(),nullptr,&ps));
     ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     D3D11_VIEWPORT vp{0,0,float(W),float(H),0,1};ctx->RSSetViewports(1,&vp);UINT stride=8,offset=0;ctx->IASetVertexBuffers(1,1,vb.GetAddressOf(),&stride,&offset);
-    g.enabled=true;
+    detail::g_screenMotionEnabled=true;
     auto sourceDraw=[&](){
         ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(0,1,&none);
         ctx->OMSetRenderTargets(1,rt.GetAddressOf(),ds.Get());ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_DEPTH,.0025f,0);
@@ -236,7 +236,29 @@ int main(int argc,char** argv){
     const bool secondAdmission=g_gpu.uiClear.begin(ctx.Get(),1,g_gpu.scope,g.frame);
     check(firstAdmission&&!secondAdmission&&g_gpu.uiClear.selected==2&&g_gpu.uiClear.submitted==1&&g_gpu.uiClear.budgetSkipped==1,"screen GPU diagnostics enforce one category admission per frame");
     g_gpu.reset(ctx.Get());
-    ctx->ClearState();screenMotionShutdown();
+    ctx->ClearState();
+    // The arming pair lives OUTSIDE State (screen_motion.h) so the draw path
+    // can read it inline, which means the three places that reset State
+    // wholesale must each say what happens to it. That is the coupling these
+    // checks exist to hold: screenMotionLive() is what the draw path believes,
+    // and it has to keep agreeing with the flags after every reset.
+    {
+        detail::g_screenMotionEnabled=true;detail::g_screenMotionFailed=false;
+        check(screenMotionLive(),"live with the feature armed and no failure");
+        detail::g_screenMotionFailed=true;
+        check(!screenMotionLive(),"a setup failure stands the draw path down");
+        // The idle reset (120 frames without a screen) clears the failure and
+        // KEEPS the arming -- it exists to let a transient failure retry.
+        g.seen=true;g.lastScreen=0;g.frame=121;
+        screenMotionFrameBoundary(nullptr);
+        check(detail::g_screenMotionEnabled&&!detail::g_screenMotionFailed&&screenMotionLive(),
+              "the idle State reset keeps the arming and clears the failure");
+        // Shutdown clears both, so a torn-down module can never read live.
+        screenMotionShutdown();
+        check(!detail::g_screenMotionEnabled&&!detail::g_screenMotionFailed&&!screenMotionLive(),
+              "shutdown clears the arming pair with State");
+    }
+    screenMotionShutdown();
     {auto d=screenMotionGpuDiagnostics();check(!d.collecting&&!d.draining&&!d.sourceFrames&&!d.uiClearCalls&&!d.uiDrawCalls&&!d.eyeClearCalls&&!d.projectionCalls,"screen GPU diagnostics reset on shutdown");}
     testScreenConsumers(dev.Get(),ctx.Get());
     if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessages();++i){SIZE_T messageBytes=0;queue->GetMessage(i,nullptr,&messageBytes);std::vector<unsigned char> b(messageBytes);auto* m=reinterpret_cast<D3D11_MESSAGE*>(b.data());queue->GetMessage(i,m,&messageBytes);if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"D3D debug layer clean");}}

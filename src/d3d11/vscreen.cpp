@@ -36,6 +36,7 @@
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
+#include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "fss_panel.h"
 #include "fss_probe.h"
@@ -93,6 +94,14 @@
 #include <intrin.h>
 
 namespace edvr {
+
+// The subscriber gate the draw path reads (draw_gate.h). TRUE at startup, so
+// the frames before the first boundary sample are never gated out; this file
+// owns the sampling, so it owns the storage.
+namespace detail {
+std::atomic<bool> g_drawGateWanted{true};
+}  // namespace detail
+
 namespace {
 
 // nullptr invalidates every cached input (command-list execution); otherwise
@@ -449,11 +458,6 @@ struct State {
     uint32_t relearns = 0;
 
     bool  blackVoid = true;
-    // Does ANY feature still want to see draws? The answer to the forty-term
-    // condition at the top of beginPanelOverride, sampled once per frame in
-    // vScreenFrameBoundary (drawGateSubscribed). Starts TRUE so the frames
-    // before the first boundary are never gated out.
-    bool  drawGateWanted = true;
     bool  distanceEnabled = false;
     float distanceScale = 1.0f;
     uint32_t distanceIndex = 47;
@@ -1703,7 +1707,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // nobody consumes, because every feature below still tests its own
     // predicate. Stale-false is the only direction that can starve a feature,
     // and it is bounded to the single frame in which that feature armed.
-    if (!s->drawGateWanted) {
+    if (!drawGateWanted()) {
         return DrawVerdict::kNone;
     }
 
@@ -1811,7 +1815,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
                        bindingGet(BindSlot::Rtv0) == nullptr);
     if (!s->rtv0Eye) {
-        screenMotionSource(self,s->panelW?s->panelW:1920,s->panelH?s->panelH:1080);
+        if (screenMotionLive()) screenMotionSource(self,s->panelW?s->panelW:1920,s->panelH?s->panelH:1080);
         // NOT an eye texture -- but it is still a DRAW, and where the draws
         // are going is the entire question when the eye textures are getting
         // almost none. Counted here rather than inside the recogniser,
@@ -2937,10 +2941,21 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if(type!=D3D11_MAP_READ)uiDeferredResourceWrite(self,res);
     // Timed, not touched: the wait inside the runtime's Map is the game's
     // stall on the GPU, and the native timing line reports it (map_wait.h).
-    LARGE_INTEGER mapT0{}; QueryPerformanceCounter(&mapT0);
-    const HRESULT hr = s->realMap(self, res, sub, type, flags, mapped);
-    LARGE_INTEGER mapT1{}; QueryPerformanceCounter(&mapT1);
-    edvr::mapWaitNote(type, mapT1.QuadPart > mapT0.QuadPart ? static_cast<uint64_t>(mapT1.QuadPart - mapT0.QuadPart) : 0u);
+    //
+    // And timed only while that line exists. mapWaitArmed() follows the
+    // native timing context's own lifetime, so a session with no consumer
+    // forwards the Map with one relaxed load instead of two clock reads and
+    // three atomics -- about 1100 times a frame over terrain. Both branches
+    // call the same real Map with the same arguments.
+    HRESULT hr;
+    if (mapWaitArmed()) {
+        LARGE_INTEGER mapT0{}; QueryPerformanceCounter(&mapT0);
+        hr = s->realMap(self, res, sub, type, flags, mapped);
+        LARGE_INTEGER mapT1{}; QueryPerformanceCounter(&mapT1);
+        edvr::mapWaitNote(type, mapT1.QuadPart > mapT0.QuadPart ? static_cast<uint64_t>(mapT1.QuadPart - mapT0.QuadPart) : 0u);
+    } else {
+        hr = s->realMap(self, res, sub, type, flags, mapped);
+    }
     if(objectClassificationProbe.active())objectClassificationProbe.noteMap(self,res,sub,type,hr,mapped && mapped->pData);
     // THE MAP SUCCEEDED AND GAVE US SUBRESOURCE 0, asked once.
     //
@@ -3544,7 +3559,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     const bool glassQueryActive=self==g_state->ownerCtx &&
         bindingShaderHash(BindSlot::Vs)==kUiDeferredGlassVs && bindingShaderHash(BindSlot::Ps)==kUiDeferredGlassPs &&
         g_state->gameQueries.countingActive();
-    const bool deferred=self==g_state->ownerCtx && uiDeferredBegin(self,uiDepthDeferredEye(),kind,count,instances,args.start,args.base,args.startInstance,
+    // uiDepthDeferredEye() returns -1 unless the mode is kReissueScene, which
+    // uiDepthReissuingScene() answers inline (ui_depth.h): same value, no call
+    // on the draws that are not a scene re-issue.
+    const bool deferred=self==g_state->ownerCtx && uiDeferredBegin(self,uiDepthReissuingScene()?uiDepthDeferredEye():-1,kind,count,instances,args.start,args.base,args.startInstance,
         static_cast<uint32_t>(v),glassQueryActive);
     originalMetadata.modified = terrainOriginal || deferred;
     bool originalIssued=false;
@@ -3553,7 +3571,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if(originalIssued && self==g_state->ownerCtx)uiDeferredTraceOriginalIssued();
     if(originalIssued && self==g_state->ownerCtx && uiDeferredWorldReplayBegin(self))pureDraw();
     if(self==g_state->ownerCtx)uiDeferredEnd(self);
-    if(self==g_state->ownerCtx && uiSeparationToneBegin(self,kind,count,instances)) {
+    // uiSeparationLive() first: bundled with fix.temporal_aa's external
+    // engines, so with temporal off this was a call per draw that only ever
+    // returned false (ui_separation.h). Same first test, inline.
+    if(self==g_state->ownerCtx && uiSeparationLive() &&
+       uiSeparationToneBegin(self,kind,count,instances)) {
         pureDraw();uiSeparationToneEnd(self);
     }
     if (effectCaptureScope.ctx) objectProbePanelDrawEnd(self);
@@ -3583,7 +3605,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         }
         uiDepthReissueEnd(self);
     }
-    if(self==g_state->ownerCtx && uiDepthPlanetBegin(self)) {
+    // uiDepthPlanetPending() is the function's own first test, inline: it
+    // clears both flags and then declines unless one was set, so skipping it
+    // when neither is set skips only the clearing of two false bools
+    // (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
+    if(self==g_state->ownerCtx && uiDepthPlanetPending() && uiDepthPlanetBegin(self)) {
         pureDraw();uiDepthPlanetEnd(self);
         uiDepthSeparatedInvalidate();
     }
@@ -3973,7 +3999,8 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     args.base = static_cast<int32_t>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     forwardWithVerdict(self, v, 'D', count, 1, args, [&] {
-        const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
+        const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
+                            uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
         const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
         g_state->realDraw(self, count, start);
@@ -4010,7 +4037,8 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.base = baseVertex;
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     forwardWithVerdict(self, v, 'I', count, 1, args, [&] {
-        const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
+        const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
+                            uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
         const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
@@ -4048,7 +4076,8 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                            ? g_state->glareClamp
                            : instances;
     forwardWithVerdict(self, v, 'N', perInstance, drawn, args, [&] {
-        const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
+        const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
+                            uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
         const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
         g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
@@ -4090,7 +4119,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
-        const bool separate=t_colourOriginal && self==g_state->ownerCtx && uiSeparationBegin(self);
+        const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
+                            uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
         const bool staticOwner=t_colourOriginal && !separate && self==g_state->ownerCtx &&
             staticSurfaceBegin(self,perInstance,instances,startIndex,baseVertex,
@@ -4161,9 +4191,18 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 }
                 if(scene)scene->Release();
             }
-            screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
-            screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
-            meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
+            // screenMotionLive() is the first term of both (screen_motion.h);
+            // with fix.temporal_aa off these were two calls per draw that only
+            // ever returned.
+            if (screenMotionLive()) {
+                screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+                screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+            }
+            // meshMotionLive() is meshMotionDraw's own first reject, inline
+            // (mesh_motion.h names the census reader and why skipping the
+            // call while the feature is off silences nothing).
+            if (meshMotionLive())
+                meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
         }
         return true;  // the original draw was issued
     });
@@ -4777,6 +4816,14 @@ void vScreenRefreshConfig() {
                         "(index %u)",
                         s->blackVoid ? "on" : "off", s->distanceScale, s->distanceIndex);
     }
+
+    // A live settings change can switch a subscriber on, and the sweep above
+    // is where every one of them learns its new value. Re-sample the real
+    // condition here rather than merely raising the gate: the answer is
+    // knowable now, and waiting for the next frame boundary would cost the
+    // newly enabled fix its first frame of draws. This runs only on a change
+    // -- the reloadIfChanged early return above sees to that.
+    drawGateSet(drawGateSubscribed(s));
 }
 
 bool vScreenReclaimHooks() {
@@ -5786,9 +5833,10 @@ void vScreenFrameBoundary() {
     ++s->frameNo;
 
     // The draw path's subscriber gate for the frame about to start. Forty
-    // getters once a frame instead of forty per draw; beginPanelOverride's
-    // use site holds the reasoning and the bound on being one frame late.
-    s->drawGateWanted = drawGateSubscribed(s);
+    // getters once a frame instead of forty per draw; draw_gate.h holds the
+    // reasoning, and the arming paths that can fire between two of these
+    // raise the gate themselves rather than waiting for the next one.
+    drawGateSet(drawGateSubscribed(s));
 
     // The steady-state breadcrumb. Rate-limits itself to one line every
     // log.breadcrumb_heartbeat_seconds (30 by default, 0 disables it); this

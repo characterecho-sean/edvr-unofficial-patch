@@ -10,7 +10,17 @@
 #include "../common/temporal_mode.h"
 #include "../common/log.h"
 
-namespace edvr { namespace {
+namespace edvr {
+
+// The two flags screenMotionLive reads without a call (screen_motion.h).
+// OUT of State deliberately: State is reset wholesale in three places, and
+// each of them must now say what the arming becomes. That is the point --
+// a reset that silently cleared ailed used to be invisible.
+namespace detail {
+bool g_screenMotionEnabled = false;
+bool g_screenMotionFailed = false;
+}  // namespace detail
+ namespace {
 template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
 struct Screen {
     Ptr<ID3D11Resource> target;
@@ -23,7 +33,7 @@ struct Screen {
     bool written=false;
 };
 struct State {
-    bool enabled=false,failed=false,noted=false;
+    bool noted=false;
     bool seen=false;
     bool weapon=true,weaponNoted=false;
     unsigned lastScreen=0;
@@ -166,20 +176,20 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,uns
 }
 void screenMotionConfigure(Config& cfg) {
     bool on=temporalModeEnabled(cfg.getString("fix.temporal_aa","off"));
-    if(on!=g.enabled){g_gpu.close();g=State{};g.enabled=on;}
+    if(on!=detail::g_screenMotionEnabled){g_gpu.close();g=State{};detail::g_screenMotionEnabled=on;detail::g_screenMotionFailed=false;}
     if(on&&!g_gpu.policyNoted){g_gpu.policyNoted=true;Log::get().note("on-foot motion GPU diagnostics: enabled for screen UI clears/reissues, per-eye screen projection, and weapon identify/capture/raster; exact sparse query intervals only, one admission per category per frame, 1800 source-frame windows and a 120-frame no-wait drain.");}
     const bool weapon=cfg.getBool("fix.weapon_stability",true);
     if(weapon!=g.weapon)g_gpu.close();
     g.weapon=weapon;
-    weaponMotionConfigure(g.enabled && g.weapon);
+    weaponMotionConfigure(detail::g_screenMotionEnabled && g.weapon);
 }
 bool screenMotionRecognize() {
-    bool matched=g.enabled && !g.failed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
+    bool matched=detail::g_screenMotionEnabled && !detail::g_screenMotionFailed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
         bindingShaderHash(BindSlot::Ps)==0xCFE84157BC76E921ull;
     if(matched){g.seen=true;g.lastScreen=g.frame;}return matched;
 }
 void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
-    if(!g.enabled || g.failed || !g.seen || g.frame-g.lastScreen>2 || g.sourceFrame==g.frame || !ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
+    if(!detail::g_screenMotionEnabled || detail::g_screenMotionFailed || !g.seen || g.frame-g.lastScreen>2 || g.sourceFrame==g.frame || !ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     uint64_t vs=bindingShaderHash(BindSlot::Vs);
     if(vs!=0xACE405F428C17EF6ull && vs!=0x4435F2E50020E7F3ull)return;
     ResourceInfo colour;
@@ -212,7 +222,7 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
 }
 void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance) {
-    if(!g.enabled || g.failed || g.sourceFrame!=g.frame || !draw || !ctx ||
+    if(!detail::g_screenMotionEnabled || detail::g_screenMotionFailed || g.sourceFrame!=g.frame || !draw || !ctx ||
        ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
     // Flight 14:40:54, final LDR draws 932..938. These are GUI composites,
@@ -284,7 +294,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     if(g.eyes[0].frame==g.frame){if(g.eyes[0].target.Get()==res.Get())return;eye=1;}
     Screen& e=g.eyes[eye];if(e.frame==g.frame)return;
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
-    if(!prepare(ctx,dev.Get(),e,td.Width,td.Height)){g.failed=true;Log::get().note("screen motion: resource creation failed; original temporal inputs retained.");return;}
+    if(!prepare(ctx,dev.Get(),e,td.Width,td.Height)){detail::g_screenMotionFailed=true;Log::get().note("screen motion: resource creation failed; original temporal inputs retained.");return;}
     unsigned next=1-e.write;
     if(!copyCb(ctx,dev.Get(),0,e.model[next],12*16) || !copyCb(ctx,dev.Get(),1,e.camera[next],274*16))return;
     Ptr<ID3D11Buffer> vb;UINT stride=0,offset=0;ctx->IAGetVertexBuffers(1,1,&vb,&stride,&offset);if(!vb || stride<8)return;
@@ -324,14 +334,14 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     e.frame=g.frame;e.write=next;e.target=res;
 }
 ID3D11ShaderResourceView* screenMotionView(int eye,unsigned w,unsigned h) {
-    if(!g.enabled || eye<0 || eye>1)return nullptr;Screen& e=g.eyes[eye];
+    if(!detail::g_screenMotionEnabled || eye<0 || eye>1)return nullptr;Screen& e=g.eyes[eye];
     return e.written && e.frame==g.frame && e.width==w && e.height==h?e.srv.Get():nullptr;
 }
 void screenMotionFrameBoundary(ID3D11DeviceContext* ctx){
     weaponMotionFrameBoundary(ctx);
     g_gpu.tick(ctx,g.frame);
     ++g.frame;
-    if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool on=g.enabled,weapon=g.weapon;g=State{};g.enabled=on;g.weapon=weapon;}
+    if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool weapon=g.weapon;g=State{};g.weapon=weapon;detail::g_screenMotionFailed=false;}
 }
 ScreenMotionGpuDiagnostics screenMotionGpuDiagnostics(){
     ScreenMotionGpuDiagnostics s{};s.scope=g_gpu.scope;s.sourceFrames=g_gpu.sourceFrames;
@@ -343,5 +353,5 @@ ScreenMotionGpuDiagnostics screenMotionGpuDiagnostics(){
     s.uiClearInvalid=g_gpu.uiClear.timer.totals.invalid;s.uiDrawInvalid=g_gpu.uiDraw.timer.totals.invalid;s.eyeClearInvalid=g_gpu.eyeClear.timer.totals.invalid;s.projectionInvalid=g_gpu.projection.timer.totals.invalid;
     s.collecting=g_gpu.phase==GpuDiagnostics::Phase::Collecting;s.draining=g_gpu.phase==GpuDiagnostics::Phase::Draining;return s;
 }
-void screenMotionShutdown(){g_gpu.reset(nullptr);g=State{};weaponMotionShutdown();}
+void screenMotionShutdown(){g_gpu.reset(nullptr);g=State{};detail::g_screenMotionEnabled=false;detail::g_screenMotionFailed=false;weaponMotionShutdown();}
 }

@@ -10,6 +10,24 @@ struct ID3D11ShaderResourceView;
 namespace edvr {
 class Config;
 void uiSeparationConfigure(Config&);
+
+// Is this fix live at all? The first term of every Begin below, published so
+// the draw path can decline without a call.
+//
+// It is bundled with fix.temporal_aa's external engines (uiSeparationConfigure
+// reads temporalExternalEngine), so in a session with temporal AA off both
+// Begins were cross-TU calls that only ever returned false -- once per draw
+// each. uiSeparationToneBegin alone was 72 innermost samples of the
+// 1349-frame window of 2026-09-22. Neither Begin touches anything before its
+// first test, so declining here and declining inside are the same decline.
+namespace detail {
+extern bool g_uiSeparationEnabled;
+extern bool g_uiSeparationFailed;
+}  // namespace detail
+inline bool uiSeparationLive() {
+    return detail::g_uiSeparationEnabled && !detail::g_uiSeparationFailed;
+}
+
 void uiSeparationRemember(ID3D11PixelShader*,const void*,size_t,bool linked);
 bool uiSeparationBegin(ID3D11DeviceContext*);
 void uiSeparationEnd(ID3D11DeviceContext*);
