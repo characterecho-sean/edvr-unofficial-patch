@@ -1581,3 +1581,36 @@ straddle, EDVR's submit path is the fix. (3) The engine's periodic
 stalls (true rate far above the throttled log; shader compiles 40-90 ms
 every 30-60 s) remain the engine-side trigger worth a PresentMon stock
 capture + the de-throttled counter.
+
+### 2026-09-22 (addendum 2) -- Monitor audit: clocks correct, presentation defective; the Pimax wall is real, rig-resolved
+
+Pimax 8KX + SteamVR session (smart smoothing OFF, EDVR native OpenXR
+runtime on SteamVR/OpenXR): fpsVR read 42-44 fps / CPU 18-19 ms / GPU
+<1.0 ms at the settlement; EDVR's monitor read ~56 fps / CPU-GPU 12-13
+ms. Audit (code + the 09:37 session log):
+- No clock bug: overlay fps = producer cadence (game Present->Present
+  QPC delta, 900-frame ring, perf_monitor.cpp:713-718,1068); CPU = app
+  work only (waits excluded); GPU = app render only (compose excluded).
+  fpsVR's CPU 18-19 = EDVR's app 12-13 + ~5-6 ms of waits - consistent.
+- The defects are presentational: 'FRAME RATE' reads as headset fps but
+  is production cadence; on the native path the monitor surfaces NO
+  display-side signal (drop/reprojection tiles are 'native OpenXR
+  timing unavailable'), and hides the runtime's own predictedPeriod
+  (which read 22.222 ms = 45 Hz DURING the settlement stretch - SteamVR
+  halving the display rate under the wall). Production 50-57, display
+  42-45: both instruments faithful, the page shows the wrong side.
+  fpsVR's GPU <1.0 is a layered-submission artifact (SteamVR attributes
+  almost no GPU to the app; its own 26 MP distortion is invisible).
+- THE PIMAX WALL IS REAL (rig-resolved): EDVR's own numbers at the
+  settlement: producer 11.9-13.4 ms vs 0.5-3.3 away, app GPU 8.2-14.9
+  ms - at XR 4100x3212 per eye (13.17 MP, 26.3 MP both eyes), canted
+  parallel projection (m02 = -+0.1389 per eye, the known ~1/3 tax), plus
+  the ~5.3 ms job pipeline. Draw counts match the Quest rig (~19.4k) -
+  the cost scales with PER-EYE PIXELS and the projection path, not
+  submission. SteamVR halves the display rate under that wall (22.222 ms
+  predicted period) - fpsVR's 42-44 is the delivered truth.
+So: Quest rig = pacer-limited (VDXR), Pimax rig = a genuine CPU+GPU wall
+at 26 MP - the user's original 'settlements are CPU-bound' is rig-true.
+FIX (small, spec'd): a DISPLAY tile on the native path - surface the
+runtime's predictedPeriod (throttle detection) plus a display-cadence
+estimate, so the page can never read 56 while the headset shows 45.
