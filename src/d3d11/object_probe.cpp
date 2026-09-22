@@ -512,18 +512,26 @@ constexpr int      kLedgerFrames = 20;          // the run's sixteen crops and s
 constexpr uint32_t kLedgerBonesMax = 1u << 20;  // the palette's first megabyte: rows to 21845; the station's bases reached 16413 (2026-09-10)
 constexpr int      kLedgerRing = 4;
 constexpr int      kLedgerCrops = 32;
+// Row layout is versioned by the draws file's header (version 1 = 24-byte
+// rows, version 2 = 40-byte rows with ps/rt): tools/eye_run_ledger.py parses
+// both, so the two must stay in step.
 struct LedgerDraw {
     uint64_t vs;             // the bound vertex shader's hash (the binding shadow's; 0 = one the registry had not met)
     uint32_t count;          // the vertex or index count
     uint32_t instances;
     uint32_t startInstance;  // StartInstanceLocation: where its records' indices sit in the instance stream
+    uint32_t pad0;           // version 2: keeps ps 8-aligned; zero
+    uint64_t ps;             // version 2: the bound pixel shader's hash, same source as vs (0 = unknown)
+    int32_t  rt;             // version 2: the census's intern id of the bound RTV (drawCensusIntern):
+                             // >= 0 the same @N a census line's r= token carries, -1 no RTV bound
+                             // (a depth-only or shadow pass), -2 the census's table was full
     uint8_t  kind;           // 'D' 'I' 'N' 'X'
     uint8_t  pool;           // 1 = t33 HELD the pool at this draw (asked of the context; armed only) -- which
                              // it does on every draw after a pool draw, the game never unbinding it;
                              // whether the shader READS it is the desk's question (tools/eye_run_ledger.py --pool-vs)
     uint16_t pad;
 };
-static_assert(sizeof(LedgerDraw) == 24, "tools/eye_run_ledger.py reads 24-byte rows");
+static_assert(sizeof(LedgerDraw) == 40, "tools/eye_run_ledger.py reads 40-byte rows (version 2)");
 struct LedgerCopy {
     ID3D11Buffer* staging = nullptr;
     uint32_t bytes = 0;
@@ -2649,10 +2657,20 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     if (frame < g_ledgerFrame0 || frame > g_ledgerLastFrame) return;
     LedgerDraw d{};
     d.vs = bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0;
+    d.ps = bindingGet(BindSlot::Ps) ? bindingShaderHash(BindSlot::Ps) : 0;
     d.count = count;
     d.instances = instances;
     d.startInstance = startInstance;
     d.kind = static_cast<uint8_t>(kind);
+    // The target the draw lands in, as the census would name it: one
+    // OMGetRenderTargets and one intern per draw, armed intervals only. The
+    // desk's duplication study needs per-row pass identity -- same-pass
+    // repeats cull, per-eye/per-pass repeats do not -- and the RTV's census
+    // intern id is both stable across the run and joinable to census lines.
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    d.rt = drawCensusIntern(rtv);
+    if (rtv) rtv->Release();
     if (g_panelCaptureArgs.ctx) {
         ++g_panelSkipped;
         g_panelCaptureArgs = {};
@@ -2874,8 +2892,8 @@ void writeLedger(ID3D11DeviceContext* ctx) {
         int32_t  crop[kLedgerCrops];   // crop k's frame, -1 = not taken
     };
     static_assert(sizeof(Header) == 160, "tools/eye_run_ledger.py reads a 160-byte header");
-    Header hd = {{'E', 'D', 'V', 'R', 'L', 'D', 'G', 'R'}, 1u, static_cast<uint32_t>(kLedgerFrames), g_ledgerFrame0,
-                 g_instStride, 48u, g_poolBytes, {}};   // the palettes are 48-byte rows
+    Header hd = {{'E', 'D', 'V', 'R', 'L', 'D', 'G', 'R'}, 2u, static_cast<uint32_t>(kLedgerFrames), g_ledgerFrame0,
+                 g_instStride, 48u, g_poolBytes, {}};   // the palettes are 48-byte rows; version 2 rows carry ps and rt
     memcpy(hd.crop, g_ledgerCropFrame, sizeof(hd.crop));
     _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\draws_%s.bin", dir.c_str(), g_ledgerStamp);
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
