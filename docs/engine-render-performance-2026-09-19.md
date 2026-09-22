@@ -46,13 +46,16 @@
   high settlement draw count is one dominant small-batch scenery family — not
   the bucket subsystem, whose items never reach the boundary as draws.
 
-* **Open (identification arc closed, see the entry below):** unknown-A/B
-  are the settlement pool's material layers; A is an ungated detail pass
-  (~550 draws/frame, invisible at range — a design input, not a build
-  order). Remaining: (1) per-record identity/change signal (motion arc);
-  (2) where LOD gates B's layer selection (offline, stage 2 chain);
-  (3) optionally close the scheduler's runtime-built payload vtables;
-  (4) ring-buffer command consumers.
+* **Open (identification arc closed; change-gate design ABORTED in flight —
+  see the design entry's OUTCOME):** unknown-A/B are the settlement pool's
+  material layers; A is an ungated detail pass (~550 draws/frame,
+  invisible at range — a design input, not a build order). Remaining:
+  (1) decide the surviving variant from the abort evidence: (a) cheaper
+  job-0 (cpu_profile inside FUN_144321940) or (b) inside-job change
+  detection that re-emits output every frame — downstream gating is dead
+  (output is consumed per frame); (2) per-record identity/change signal
+  (motion arc); (3) optionally close the scheduler's runtime-built
+  payload vtables; (4) ring-buffer command consumers.
 
 * **Ruled out (pointers, do not re-propose):** draw-call identity/motion
   estimation as a class — kinematic-motion-injection-2026-09-19.md.
@@ -1223,6 +1226,31 @@ surface:** stale props after missed changes (bounded by the forced
 refresh + movers-always-run), invalidation bugs across transitions (the
 journal/reset triggers), and identity collisions (bounded by N-frame
 refresh; the probe capture quantifies if needed).
+
+**OUTCOME (flown 2026-09-21, leg 1 gate-off / leg 2 gate-on at 'Chanfield
+Nutrition', 38 Lyncis): ABORTED — the persistence invariant is refuted.**
+The gate worked exactly as designed: 91.2% skip rate at steady state,
+zero verify_faults, zero evictions, healthy change oracle. The flicker
+is STRUCTURAL, not a bad skip: job-0's (FUN_144321940) output is
+CONSUMED per frame, not persisted — a collection's structures render
+only on frames where its job ran. Steady-state leg 2: 93% of EB52
+instances absent every frame (2,850 vs 15,915 draw rows/frame); the
+settlement flashed back at frames 18-19 as the 30-frame forced-refresh
+wave (collections cached in one streaming burst, refreshes in phase) —
+~2 visible frames per ~30; without the failsafe it would have been
+'structures absent', not flicker. Census inequality 5.6x. The design's
+core assumption ('items persist, draws re-execute from them') was wrong
+for the mesh/settlement path (it held only for the bucket/light
+subsystem). Downstream skipping of job-0 is dead in any form: production
+must run every frame for content to exist. ruled out: every skip-based
+variant of this design. What survives: (a) make the job cheaper
+(cpu_profile inside job-0 — the 91% skip rate proves the wall-time win
+exists but cannot be harvested by omission), or (b) change detection
+INSIDE the job that re-emits identical output every frame at lower cost
+— the output side can never be gated. Phase 1 code stays default-off
+(dark; one atomic load when off); removal is a pending question. Leg 1's
+baseline (jobs[] at this settlement, temporal off) is retained as the
+cost reference.
 
 
 ### 2026-09-21 -- Phase 1 implemented (build-gated, unflown)
