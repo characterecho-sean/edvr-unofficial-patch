@@ -111,10 +111,19 @@
   its own per-view test (view+0x570, FUN_1404F4E10), so the candidate
   reject site MOVES to the builder's view loop; the eye depth capture's
   constants block is fixed (file version 2, the camera registers
-  270-275); the gate probe is BUILT, NOT FLOWN (advanced.cull_gate_
-  capture=1 with eye_depth_capture=1, press the eye-run key at the
-  parked pose; reader tools\cull_gate_probe.py). One armed capture then
-  settles the site and the occluders' geometry before any Phase C code;
+  270-275); the gate probe FLOWN (run 152632, design doc §10,
+  2026-09-22 gate-probe entry): the builder's view loop predicts the
+  pool draws exactly at the ENGINE-RECORD level, but that unit FAILS
+  the bar even with ideal occluders (5.9-10.7% of draws, 0.5-0.9 ms:
+  one visible part keeps a 1,287-part record); the per-PART split
+  lives in FUN_1442B3FC0, where ideal occluders remove 29.8-38.5%
+  (2.5-3.3 ms at the pre-cut share) with zero false rejects - the open
+  site, conditional on real occluders reproducing ~62-80% of the ideal
+  at the post-cut share; the geometry capture came back empty (a probe
+  bug in the pool-first-seen path), so the real-occluder recall is
+  still unmeasured. To close: fix the geometry arm, record
+  FUN_1442B3FC0's per-sub-item verdicts + model spheres, one more
+  parked capture; realistic prize ~1-2 ms; Phase C only on a PASS;
   cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
   the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
   must be read next to it; (1b) the RE-SCOPED cull (design doc §8):
@@ -2347,3 +2356,82 @@ lever is exhausted as a route to 90 Hz at this view; what it bought is
 §8/§9, gate probe next) will need.
 
 ruled out: nothing new. The round-one accounting corrections stand.
+
+### 2026-09-22 -- Gate probe flown (run 152632): the draw-item builder is the site; at its record unit even ideal occluders reach 0.5-0.9 ms (FAIL); the part unit is the open site (2.5-3.3 ms ideal), unmeasured because the geometry capture came back empty
+
+Session B: one Insert press parked on the pad, build a606157, Pimax
+OpenXR; the probe wrote gate_152632.bin (86,760 gate calls, 2,037
+builder calls on 679 engine records, nothing dropped), the frame-2
+depth pair (file version 2, the camera registers present for the
+first time), the pool and instance streams for frames 2-20 and the
+draw snapshot. Analysis and the record are the design doc's §10 (on
+main, 70e76a3); the reader tools\cull_gate_probe.py had two bugs fixed
+on the way (the mask's bits are per view - eye A is view 0 = bit 1,
+eye B is view 5 = bit 22 - and shadow-only twin records at the same
+positions were being counted against the builder).
+
+**The site, settled by prediction.** Per (record, eye) the builder's
+view loop (FUN_1442B4420:250-275) admits exactly the engine records
+whose parts are drawn in that eye: 0 drawn slots it rejects, 0
+admitted-and-undrawn, 1,062 admitted-and-drawn; the collection mask
+rec+0x208 over-admits 8 records per eye (written pool slots, nothing
+drawn - the builder's frustum test rejects exactly those); the
+frustum gate FUN_14430EFE0 rejects 20,232 drawn (slot, eye) pairs and
+so cannot be the admitting test. No test ever gives the two eyes
+different verdicts at the record level: the per-eye split happens per
+PART in FUN_1442B3FC0 (decompiled, analysis\decomp\decomp_42B3FC0.txt:
+a frustum + LOD test on each sub-item's sphere per view, setting the
+item's view mask); 217 parts are drawn in one eye only and every one
+projects outside the other eye's viewport. Records the builder never
+sees (2,213) go through the gate and carry 14.5% of pool draws. Eyes:
+view 0 is A, view 5 is B in all three dumps; the frame-2 dump matches
+the depth cameras to 0.087 mm and 0.0006 degrees (same frame proven);
+the pose entries cannot separate frames 2-4 because nothing moved.
+
+**The prize depends on the unit** (R = 1 m, a draw goes only when every
+record in it is rejected in both eyes; ms = share x 8.5, the share as
+measured before the per-draw cut):
+
+| unit | depth truth | ideal occluders 256x128 | ideal 256x256 |
+|---|---|---|---|
+| t33 part, all records | 70.3% / 5.98 ms | 35.0% / 2.97 | 45.9% / 3.90 |
+| part, builder parts only (FUN_1442B3FC0) | 59.5% / 5.05 | 29.8% / 2.54 | 38.5% / 3.27 |
+| engine record, all parts occluded (the view loop) | 13.2% / 1.12 | 5.9% / 0.50 | 10.7% / 0.91 |
+| engine record, its own frustum sphere | - | 2.0% / 0.17 | 3.5% / 0.29 |
+
+False rejects against the depth truth: 0 in every ideal row at every
+R and buffer size. So: a record-level reject in the builder's view
+loop FAILS the 1.5 ms bar even with perfect occluders (the largest
+record has 1,287 parts and one visible part keeps all of them); the
+per-part site inside FUN_1442B3FC0 clears it on the ideal ceiling and
+is CONDITIONAL on real occluders reproducing >= 59% (256x128) or 46%
+(256x256) of the ideal at the 8.5 ms share - and with the per-draw
+cut already realized the settlement share is nearer 6.3 ms, which
+raises that to roughly 80% / 62%.
+
+**The number is still missing.** The geometry section of the snapshot
+came back empty (0 draws mapped): the pool was first seen 60 ms after
+the arm, and that path runs releasePool -> ledgerRelease ->
+g_eyeMeshSnapshot.reset() -> armGeometry(0) (object_probe.cpp:3535-
+3537, 1906, 700), a probe bug, not a declined capture. Without
+geometry the solid occluder inventory cannot be built: full meshes
+would be 155k triangles per eye (0.4-0.8 ms per eye to rasterize, 3-5x
+the 0.3 ms budget); eroded boxes (~2k triangles, under 0.02 ms) need
+the inventory. The occludee tests themselves are ~27k per frame at the
+part site, ~0.12 ms summed across the workers.
+
+**Verdict:** B' FAILS at the site this capture proves (the record
+unit) and stays conditional and unmeasured at the part unit. To close
+it: fix the geometry arm in C++; extend the probe to record
+FUN_1442B3FC0's per-sub-item, per-view verdicts plus each model's
+centre (+0x00) and radius (+0x10); one more parked capture (both keys,
+one Insert press). Then the real-occluder recall at the part site
+decides Phase C, with the bar restated against the post-cut share.
+
+ruled out: a record-level reject in the builder's view loop (at most
+0.91 ms with ideal occluders); the collection mask as the admitting
+test (over-admits 8 per eye); FUN_14430EFE0 as the admitting test for
+builder records (rejects 20,232 drawn pairs); the first run's 18
+"disagreements" (shadow twins); declined draws as the reason the
+geometry is empty (a probe bug); full meshes as occluders within
+0.3 ms.

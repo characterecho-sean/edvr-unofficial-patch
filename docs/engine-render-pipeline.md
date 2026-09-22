@@ -64,7 +64,14 @@ otherwise.
   the pool draws moves to the builder's view loop, to be confirmed by
   the gate probe (advanced.cull_gate_capture, rides the eye-run hotkey
   with eye_depth_capture; dump gate_<stamp>.bin + EDVRDRW1 v9 geometry;
-  reader tools\cull_gate_probe.py). The eye depth capture's constants
+  reader tools\cull_gate_probe.py). FLOWN (run 152632, design doc §10):
+  the builder's view loop predicts the pool draws exactly per engine
+  record (0 mispredictions; eye A = view 0, eye B = view 5), but the
+  record unit fails the bar with ideal occluders (0.5-0.9 ms); the
+  per-part split is FUN_1442B3FC0 (frustum + LOD per sub-item per view,
+  decompiled), where ideal occluders give 2.5-3.3 ms - open, real
+  occluders unmeasured because the geometry capture came back empty
+  (probe bug). The eye depth capture's constants
   block is fixed (file version 2: registers 256-335, the camera at
   270-275; version 1 never held it). Read the GPU side next to any CPU
   saving (addendum 2: 8-15 ms app GPU at 0.7559 scale). The approach onset is a RAMP with distance (stage 1
