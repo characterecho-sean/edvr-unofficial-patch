@@ -26,3 +26,7 @@ third_party/ffx-dx11/
 
 # Pinned Khronos loader binary, fetched by tools/fetch_openxr_loader.py.
 third_party/openxr/loader/
+
+# Review write-ups (design and code reviews) stay local: the doc they review
+# carries what the repo needs, the review's own ledger does not ship.
+reviews/
