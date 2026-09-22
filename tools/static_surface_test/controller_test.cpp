@@ -448,6 +448,19 @@ void controllerTests() {
     f.context->OMSetBlendState(f.blend.Get(), nullptr, ~0u);
     f.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     check(!f.begin(), "unsupported topology declines");
+
+    // The module-state predicate (static_surface.h): a cheap call-site guard
+    // for skipping staticSurfaceBegin entirely rather than calling in and
+    // letting it decline on these same two reads. Last, because both halves
+    // leave the module off/failed and nothing here depends on it staying on
+    // afterwards.
+    check(edvr::staticSurfaceLive(), "live predicate matches configured-on state");
+    edvr::static_surface_detail::failed = true;
+    check(!edvr::staticSurfaceLive(), "live predicate follows a failed setup even while still enabled");
+    edvr::static_surface_detail::failed = false;
+    check(edvr::staticSurfaceLive(), "live predicate recovers once failed clears");
+    edvr::staticSurfaceConfigure(false);
+    check(!edvr::staticSurfaceLive(), "live predicate follows configured-off state");
 }
 
 } // namespace

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -24,6 +25,21 @@ void staticSurfaceRememberPs(ID3D11PixelShader*, const void* bytecode,
 void staticSurfaceRememberLayout(ID3D11InputLayout*,
                                  const D3D11_INPUT_ELEMENT_DESC*, unsigned count,
                                  uint64_t vertexShaderHash);
+
+// Is the module live at all -- feature on, and its one-time setup not
+// already failed? Published so a caller can skip staticSurfaceBegin
+// entirely on a module-state decline, rather than pay the call (seven
+// arguments, across the DLL) and its own /GS cookie only to have it decline
+// on these same two reads a moment later. Mirrors screenMotionLive()
+// (screen_motion.h) for the same reason: g_screenMotionEnabled/
+// g_screenMotionFailed there, enabled/failed here.
+namespace static_surface_detail {
+extern std::atomic<bool> enabled;
+extern bool failed;
+}  // namespace static_surface_detail
+inline bool staticSurfaceLive() {
+    return static_surface_detail::enabled.load() && !static_surface_detail::failed;
+}
 
 // Begin replaces only the pixel shader and the state needed for MRT slot 7.
 // End is safe after a false Begin and restores every state changed by Begin.

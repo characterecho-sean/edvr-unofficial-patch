@@ -231,6 +231,112 @@ void writeTexture(ID3D11DeviceContext* ctx,ID3D11Texture2D* tex,const wchar_t* p
     FILE* f=nullptr;_wfopen_s(&f,path,L"wb");if(f){const uint32_t header[9]={1,d.Width,d.Height,uint32_t(d.Format),d.Width*16,dumpSceneFrame,0,0,0};ok=fwrite("EDVRTEX1",1,8,f)==8&&fwrite(header,sizeof(header),1,f)==1;for(uint32_t y=0;y<d.Height&&ok;++y)ok=fwrite(static_cast<const char*>(map.pData)+y*map.RowPitch,1,d.Width*16,f)==d.Width*16;if(fclose(f)!=0)ok=false;}ctx->Unmap(tex,0);
 }
 
+// The occupied-slots gate: stream-output targets, UAVs, and render targets
+// 6/7 plus the actual depth target against the eye's own dsv. Lifted out of
+// staticSurfaceBegin and NOINLINE, for the same reason as
+// vertexBufferFingerprint below: it owns so[4]/uav[8]/rawRtv[8], three more
+// raw arrays a D3D call (SOGetTargets, OMGetRenderTargetsAndUnorderedAccess-
+// Views, OMGetRenderTargets) writes into for a runtime-bounded count -- and
+// dumpbin confirmed the reason to look here: moving vertexBufferFingerprint's
+// array out on its own left staticSurfaceBegin with a /GS cookie still
+// (exactly one call to __security_check_cookie in its disassembly, unchanged
+// from before that first move), so at least one more qualifying array was
+// still declared directly in it. This is the earliest-gated of the
+// remaining candidates and, unlike the vertex-buffer one, sits on what is
+// very likely the COMMON path for a rigid-family draw (SO/UAV binding and a
+// 7th/8th render target are the rare CONDITION, not the check) -- so this
+// move does not reduce how often the cookie is paid, only how much of
+// staticSurfaceBegin's own frame is spent on the buffers that cause it.
+// originalRt/actualDepth still cross back out: saveAndBind needs both on
+// the accept path, and neither is itself a raw array handed to an external
+// write (originalRt is a std::array<ComPtr<...>,8> filled by a
+// compile-time-bounded loop of .Attach() calls, actualDepth a single
+// ComPtr), so returning them does not reintroduce a /GS buffer here.
+//
+// RE-CHECKED WITH DUMPBIN AFTER THIS MOVE TOO: staticSurfaceBegin still
+// shows one call to __security_check_cookie. The remaining suspect is
+// FLOAT factors[4] a few lines above this gate, in the Blend check --
+// address-taken and handed to OMGetBlendState the same way so/uav/rawRtv
+// were handed to their own D3D calls. Not moved: factors sits on the same
+// common path as this gate (so extracting it would not reduce how often the
+// cookie is paid either), and factors survives to saveAndBind at the very
+// end, so a clean move needs somewhere non-array-shaped to carry four
+// floats out of a helper -- a struct of four named scalars rather than a
+// nested array, which nothing here has needed before and which is untested
+// against this file's actual /GS behaviour. Flagged rather than forced.
+//
+// NOINLINE rather than __declspec(safebuffers): the cookie is protecting a
+// real array that a D3D call writes into, and it still does, here, where the
+// array is. Only the hot path is relieved of it.
+//
+// Returns false with *declineOut set to the first failure the inline checks
+// would have hit, in the same order (StreamOutput, then Uav, then Targets).
+__declspec(noinline) bool occupiedSlotsCheck(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv,
+                                              std::array<Ptr<ID3D11RenderTargetView>,8>& originalRt,
+                                              Ptr<ID3D11DepthStencilView>& actualDepth,
+                                              Decline* declineOut) {
+    ID3D11Buffer* so[4]{};
+    ctx->SOGetTargets(4,so);
+    bool occupied=false;
+    for(auto* p:so)if(p){occupied=true;p->Release();}
+    if(occupied){*declineOut=Decline::StreamOutput;return false;}
+
+    ID3D11UnorderedAccessView* uav[8]{};
+    ctx->OMGetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,8,uav);
+    for(auto* p:uav)if(p){occupied=true;p->Release();}
+    if(occupied){*declineOut=Decline::Uav;return false;}
+
+    ID3D11RenderTargetView* rawRtv[8]{};
+    ctx->OMGetRenderTargets(8,rawRtv,&actualDepth);
+    for(unsigned i=0;i<8;++i){originalRt[i].Attach(rawRtv[i]);if(i>=6&&rawRtv[i])occupied=true;}
+    if(occupied||actualDepth.Get()!=dsv){*declineOut=Decline::Targets;return false;}
+    return true;
+}
+
+// The rigid draw's per-vertex-buffer fingerprint: which slots are bound, and
+// each one's resource identity, stride, offset and write-epoch, mixed into
+// the geometry key. Lifted out of staticSurfaceBegin and NOINLINE.
+//
+// It owns rawVb/strides/offsets, three D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_
+// COUNT-element arrays IAGetVertexBuffers fills through a raw pointer for a
+// runtime-bounded count -- a /GS buffer, and the most deeply gated one in
+// staticSurfaceBegin: reaching it already requires shape, context, eye,
+// depth, viewport, depth-state, blend, stages, predicate, stream-output,
+// uav, targets, shaders and layout to have all passed. The cookie is paid at
+// every entry and exit of the function that OWNS the buffer, regardless of
+// which decline point a given call actually reaches -- so while this lived
+// inline, every rigid-family draw paid it for a buffer only the
+// narrowest-gated fraction of them ever touch. Measured 2026-09-22, caller
+// thread: staticSurfaceBegin's own __security_check_cookie, 18 samples, 0.06
+// ms/frame of its own.
+//
+// NOINLINE rather than __declspec(safebuffers): the cookie is protecting a
+// real array that a D3D call writes into, and it still does, here, where the
+// array is. Only the hot path is relieved of it.
+//
+// Returns false with *declineOut set to the first failure the inline loop
+// would have hit, in the same order; on true, key has been mixed exactly as
+// the inline loop mixed it.
+__declspec(noinline) bool vertexBufferFingerprint(ID3D11DeviceContext* ctx,
+                                                   const LayoutInfo& layoutInfo,
+                                                   Key96& key, Decline* declineOut) {
+    ID3D11Buffer* rawVb[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT]{};
+    UINT strides[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT]{},offsets[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT]{};
+    ctx->IAGetVertexBuffers(0,layoutInfo.slots,rawVb,strides,offsets);
+    std::array<Ptr<ID3D11Buffer>,D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vb;
+    for(unsigned i=0;i<layoutInfo.slots;++i)vb[i].Attach(rawVb[i]);
+    bool haveVertex=false;
+    for(unsigned i=0;i<layoutInfo.slots;++i)if(layoutInfo.vertexMask&(1u<<i)){
+        if(!vb[i]){*declineOut=Decline::Geometry;return false;}
+        haveVertex=true;bool gpu=false;auto* stamp=resourceStamp(vb[i].Get(),gpu);
+        if(!stamp){*declineOut=Decline::Cache;return false;}
+        if(gpu){*declineOut=Decline::GpuWritable;return false;}
+        mix(key,i);mix(key,reinterpret_cast<uintptr_t>(vb[i].Get()));mix(key,strides[i]);mix(key,offsets[i]);mix(key,stamp->epoch);
+    }
+    if(!haveVertex){*declineOut=Decline::Geometry;return false;}
+    return true;
+}
+
 } // namespace static_surface_detail
 
 void staticSurfaceConfigure(bool on){using namespace static_surface_detail;std::lock_guard<std::recursive_mutex> lock(stateMutex);if(on==enabled.load())return;staticSurfaceShutdown();enabled.store(on);if(on)Log::get().note("static surface ownership: enabled; eligible original rigid draws append a 96-bit geometry/pose owner and raw device depth in MRT7. Shader and input-layout metadata is captured at creation, so enabling this live requires a restart before draws can be owned.");}
@@ -275,20 +381,23 @@ bool staticSurfaceBegin(ID3D11DeviceContext* ctx,unsigned count,unsigned instanc
     Ptr<ID3D11BlendState> blend;FLOAT factors[4]{};UINT mask=0;ctx->OMGetBlendState(&blend,factors,&mask);D3D11_BLEND_DESC bd{};if(!blendDescription(blend.Get(),bd))return finish(Decline::Cache);if(bd.AlphaToCoverageEnable||bd.RenderTarget[0].BlendEnable)return finish(Decline::Blend);
     D3D11_PRIMITIVE_TOPOLOGY topology{};ctx->IAGetPrimitiveTopology(&topology);Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> dom;ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&dom,nullptr,nullptr);if(topology!=D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST||gs||hs||dom)return finish(Decline::Stages);
     Ptr<ID3D11Predicate> predicate;BOOL pred=FALSE;ctx->GetPredication(&predicate,&pred);if(predicate)return finish(Decline::Predicate);
-    ID3D11Buffer* so[4]{};ctx->SOGetTargets(4,so);bool occupied=false;for(auto* p:so)if(p){occupied=true;p->Release();}if(occupied)return finish(Decline::StreamOutput);
-    ID3D11UnorderedAccessView* uav[8]{};ctx->OMGetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,8,uav);for(auto* p:uav)if(p){occupied=true;p->Release();}if(occupied)return finish(Decline::Uav);
-    ID3D11RenderTargetView* rawRtv[8]{};Ptr<ID3D11DepthStencilView> actualDepth;ctx->OMGetRenderTargets(8,rawRtv,&actualDepth);std::array<Ptr<ID3D11RenderTargetView>,8> originalRt;for(unsigned i=0;i<8;++i){originalRt[i].Attach(rawRtv[i]);if(i>=6&&rawRtv[i])occupied=true;}if(occupied||actualDepth.Get()!=dsv)return finish(Decline::Targets);
+    // The occupied-slots gate: lifted into occupiedSlotsCheck (above) and
+    // NOINLINE -- see that function's comment for why, and for what dumpbin
+    // said after the vertex-buffer move alone.
+    std::array<Ptr<ID3D11RenderTargetView>,8> originalRt;Ptr<ID3D11DepthStencilView> actualDepth;
+    Decline slotsDecline=Decline::StreamOutput;if(!occupiedSlotsCheck(ctx,dsv,originalRt,actualDepth,&slotsDecline))return finish(slotsDecline);
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;UINT vsClasses=0,psClasses=0;ctx->VSGetShader(&vs,nullptr,&vsClasses);ctx->PSGetShader(&ps,nullptr,&psClasses);if(!vs||!ps)return finish(Decline::Shaders);
     auto vi=vertexShaders.find(vs.Get());auto pi=pixelShaders.find(ps.Get());if(vi==vertexShaders.end()||pi==pixelShaders.end()){++counters.shaderMiss;return finish(Decline::Shaders);}if(vsClasses||psClasses||vi->second.linked||pi->second.linked)return finish(Decline::Linked);if(!vi->second.valid)return finish(Decline::ShaderInputs);
     Ptr<ID3D11Buffer> originalCb;Ptr<ID3D11ShaderResourceView> originalSrv;ctx->PSGetConstantBuffers(13,1,&originalCb);ctx->PSGetShaderResources(127,1,&originalSrv);if(originalCb||originalSrv)return finish(Decline::Bindings);
     Ptr<ID3D11ShaderResourceView> pool;ctx->VSGetShaderResources(33,1,&pool);if(!pool)return finish(Decline::Pool);D3D11_SHADER_RESOURCE_VIEW_DESC pd{};pool->GetDesc(&pd);Ptr<ID3D11Resource> poolResource;pool->GetResource(&poolResource);Ptr<ID3D11Buffer> poolBuffer;if(pd.ViewDimension!=D3D11_SRV_DIMENSION_BUFFER||pd.Buffer.FirstElement||FAILED(poolResource.As(&poolBuffer)))return finish(Decline::Pool);D3D11_BUFFER_DESC pbd{};poolBuffer->GetDesc(&pbd);if(pbd.StructureByteStride!=336||pd.Buffer.NumElements!=pbd.ByteWidth/336)return finish(Decline::Pool);
     Ptr<ID3D11InputLayout> layout;ctx->IAGetInputLayout(&layout);if(!layout)return finish(Decline::Geometry);auto layoutIt=layouts.find(layout.Get());if(layoutIt==layouts.end()||!layoutIt->second.valid)return finish(Decline::Geometry);const LayoutInfo& layoutInfo=layoutIt->second;
-    ID3D11Buffer* rawVb[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT]{};UINT strides[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT]{},offsets[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT]{};ctx->IAGetVertexBuffers(0,layoutInfo.slots,rawVb,strides,offsets);std::array<Ptr<ID3D11Buffer>,D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vb;for(unsigned i=0;i<layoutInfo.slots;++i)vb[i].Attach(rawVb[i]);
     Ptr<ID3D11Buffer> ib;DXGI_FORMAT indexFormat{};UINT indexOffset=0;ctx->IAGetIndexBuffer(&ib,&indexFormat,&indexOffset);const UINT indexBytes=indexFormat==DXGI_FORMAT_R16_UINT?2:indexFormat==DXGI_FORMAT_R32_UINT?4:0;if(!ib||!indexBytes)return finish(Decline::Geometry);
     Key96 key=startKey();mix(key,vsHash);mix(key,reinterpret_cast<uintptr_t>(vs.Get()));mix(key,reinterpret_cast<uintptr_t>(ps.Get()));mix(key,reinterpret_cast<uintptr_t>(layout.Get()));mix(key,uint64_t(uint32_t(base)));mix(key,start);mix(key,count);mix(key,indexFormat);mix(key,indexOffset);
-    bool haveVertex=false;
-    for(unsigned i=0;i<layoutInfo.slots;++i)if(layoutInfo.vertexMask&(1u<<i)){if(!vb[i])return finish(Decline::Geometry);haveVertex=true;bool gpu=false;auto* stamp=resourceStamp(vb[i].Get(),gpu);if(!stamp)return finish(Decline::Cache);if(gpu)return finish(Decline::GpuWritable);mix(key,i);mix(key,reinterpret_cast<uintptr_t>(vb[i].Get()));mix(key,strides[i]);mix(key,offsets[i]);mix(key,stamp->epoch);}
-    if(!haveVertex)return finish(Decline::Geometry);
+    // The vertex-buffer fetch and per-slot fingerprint: lifted into
+    // vertexBufferFingerprint (above) and NOINLINE, so the /GS-flagged
+    // rawVb/strides/offsets arrays it owns no longer give THIS function a
+    // stack cookie -- see that function's comment for the measurement.
+    Decline vertexDecline=Decline::Geometry;if(!vertexBufferFingerprint(ctx,layoutInfo,key,&vertexDecline))return finish(vertexDecline);
     bool gpu=false;auto* indexStamp=resourceStamp(ib.Get(),gpu);if(!indexStamp)return finish(Decline::Cache);if(gpu)return finish(Decline::GpuWritable);const uint64_t first=uint64_t(indexOffset)+uint64_t(start)*indexBytes,end=first+uint64_t(count)*indexBytes;if(end>indexStamp->desc.ByteWidth)return finish(Decline::Geometry);const uint64_t ie=indexEpoch(*indexStamp,first,end);if(!ie)return finish(Decline::Cache);mix(key,reinterpret_cast<uintptr_t>(ib.Get()));mix(key,ie);
     auto* replacement=patchedShader(ctx,ps.Get(),vi->second.inputs);if(!replacement)return finish(Decline::ShaderInputs);auto* cb=keyBuffer(ctx,key);if(!cb)return finish(Decline::Cache);auto* twin=blendTwin(ctx,blend.Get());if(!twin)return finish(Decline::Cache);
     Eye& eye=eyes[eyeIndex];if(eye.scene.Get()!=scene.Get()&&!createEye(ctx,scene.Get(),eye)){failed=true;return finish(Decline::Cache);}if(eye.consumed)return finish(Decline::HistoryConsumed);
