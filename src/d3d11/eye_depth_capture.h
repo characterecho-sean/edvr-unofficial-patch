@@ -10,8 +10,14 @@
 // sync point (writeLedger), with the same no-wait Map and explicit failure
 // counts the draw snapshot uses.
 //
-// Eye A/B is the frame's depth targets in first-seen (scene) order -- the
-// same ordering depth_probe's scene pick calls first/second.
+// Eye A/B is the CALLER's verdict (object_probe passes depthProbeSceneEyeOf's
+// answer): the depth probe's scene pair, ordered by first bind in the frame.
+// The first flight of this instrument (2026-09-21) interned the frame's two
+// first-SEEN DSVs instead, and the engine's offscreen stages -- which run
+// before the eye passes and reach the armed ledger with their own depth
+// targets -- took both slots: 190 declines, zero files. Only verdict-eye
+// draws allocate state; every other draw is counted in nonEyeSkips, reported
+// separately from declines so the two can never blur together again.
 //
 // The constants block is VS b1 floats [256, 592) from the pass's FIRST
 // pool-carrying draw (the ledger's own t33==g_pool test): view-projection
@@ -41,22 +47,16 @@ class EyeDepthCapture {
         uint32_t bytes = 0, constBytes = 0, constWhole = 0;
     };
     std::vector<Record> records_;
-    PendingConst pending_[2];   // per eye slot, this frame
+    PendingConst pending_[2];   // per verdict eye, this frame
     bool on_ = false;
-    // Per-frame DSV interning, by pointer, in first-seen (scene) order --
-    // the same interning model the census uses for views, without its table.
-    ID3D11DepthStencilView* slotDsv_[2] = {};
-    int slotCount_ = 0;
     uint32_t frame_ = 0;
     ID3D11DepthStencilView* lastDsv_ = nullptr;   // the open pass
     uint32_t lastFrame_ = 0;
-    int lastSlot_ = -1;
+    int lastEye_ = -1;            // the open pass's verdict eye
     bool openEnqueued_ = false;   // the open pass's record is staged
 
     void newFrame(uint32_t frame) {
         frame_ = frame;
-        slotCount_ = 0;
-        slotDsv_[0] = slotDsv_[1] = nullptr;
         // A pending constants block belongs to one frame; its pass either
         // joined a record at enqueue or never ended, so a new frame starts
         // clean rather than letting a stale block block this one. The join
@@ -69,7 +69,7 @@ class EyeDepthCapture {
         newFrame(0);
         lastDsv_ = nullptr;
         lastFrame_ = 0;
-        lastSlot_ = -1;
+        lastEye_ = -1;
         openEnqueued_ = false;
     }
     // The mapped-row copy runs under SEH: a faulting staging pointer must
@@ -150,7 +150,7 @@ public:
     static constexpr uint32_t kMaxFrames = 4;          // armed frames kept, from the run's first
     static constexpr uint64_t kMaxTotalBytes = 192ull * 1024 * 1024;
     static constexpr uint64_t kMaxTextureBytes = 64ull * 1024 * 1024;
-    uint32_t declined = 0, failures = 0, faults = 0;
+    uint32_t declined = 0, failures = 0, faults = 0, nonEyeSkips = 0;
     bool enabled() const { return on_; }
     void configure(bool on) {
         on_ = on;
@@ -164,41 +164,37 @@ public:
         declined = 0;
         failures = 0;
         faults = 0;
+        nonEyeSkips = 0;
         bytes_ = 0;
     }
     uint32_t count() const { return static_cast<uint32_t>(records_.size()); }
     uint64_t bytes() const { return bytes_; }
-    // One eye draw of an armed frame. `dsv` is the draw's depth-stencil view
-    // (the caller's single OMGetRenderTargets, which the ledger already runs
-    // for the RTV); `poolDraw` is the ledger's own t33==g_pool verdict for
-    // the draw. One bool while off; a pointer compare per draw while on.
-    void noteEyeDraw(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11DepthStencilView* dsv, bool poolDraw) {
+    // One armed-frame draw. `dsv` is the draw's depth-stencil view (the
+    // caller's single OMGetRenderTargets, which the ledger already runs for
+    // the RTV); `poolDraw` is the ledger's own t33==g_pool verdict; `eye` is
+    // the caller's eye verdict, 0/1 for a draw into the depth probe's scene
+    // pair (depthProbeSceneEyeOf), -1 for anything else. Non-eye draws return
+    // before any state is touched and are counted in nonEyeSkips -- the
+    // offscreen stages run BEFORE the eye passes in a frame and must not
+    // spend the two slots (the 2026-09-21 flight: they did, 190 declines, no
+    // files). One bool while off; a pointer compare per draw while on.
+    void noteEyeDraw(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11DepthStencilView* dsv, bool poolDraw, int eye) {
         if (!on_ || !ctx || !dsv) return;
+        if (eye < 0 || eye > 1) { ++nonEyeSkips; return; }
         // The open pass ended: its DSV just changed and nothing new for its
         // texture is enqueued before this point in the stream. This runs
         // BEFORE the frame rolls below, while the ended pass's pending
         // constants still belong to the closing frame.
-        if (dsv != lastDsv_ && lastDsv_ && !openEnqueued_ && lastSlot_ >= 0)
-            enqueue(ctx, lastDsv_, lastFrame_, lastSlot_);
+        if (dsv != lastDsv_ && lastDsv_ && !openEnqueued_ && lastEye_ >= 0)
+            enqueue(ctx, lastDsv_, lastFrame_, lastEye_);
         if (frame != frame_) newFrame(frame);
-        int slot = -1;
-        for (int i = 0; i < slotCount_; ++i)
-            if (slotDsv_[i] == dsv) { slot = i; break; }
-        if (slot < 0) {
-            // A third distinct depth target in one frame is not the two-eye
-            // scene (a HUD phase with its own depth, say): decline it rather
-            // than guess which pass it belongs to.
-            if (slotCount_ >= 2) { ++declined; return; }
-            slot = slotCount_++;
-            slotDsv_[slot] = dsv;
-        }
         if (dsv != lastDsv_) {
             lastDsv_ = dsv;
-            lastSlot_ = slot;
+            lastEye_ = eye;
             openEnqueued_ = false;
         }
         lastFrame_ = frame;
-        if (!poolDraw || pending_[slot].live) return;
+        if (!poolDraw || pending_[eye].live) return;
         // First pool-carrying draw of this pass: keep VS b1's frame block.
         // cb1[256..592) holds the view-projection rows (270..273) and the
         // camera-relative origin (275) with room for a small layout shift.
@@ -221,11 +217,11 @@ public:
                 if (SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &stage))) {
                     D3D11_BOX box{off, 0, 0, off + kConstBytes, 1, 1};
                     ctx->CopySubresourceRegion(stage.Get(), 0, 0, 0, 0, b1, 0, &box);
-                    pending_[slot].stage = stage;
-                    pending_[slot].frame = frame;
-                    pending_[slot].bytes = kConstBytes;
-                    pending_[slot].whole = bd.ByteWidth;
-                    pending_[slot].live = true;
+                    pending_[eye].stage = stage;
+                    pending_[eye].frame = frame;
+                    pending_[eye].bytes = kConstBytes;
+                    pending_[eye].whole = bd.ByteWidth;
+                    pending_[eye].live = true;
                 } else ++failures;
             }
         }

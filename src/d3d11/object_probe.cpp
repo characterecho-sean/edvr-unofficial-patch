@@ -24,6 +24,7 @@
 #include "../common/timing.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
+#include "depth_probe.h"
 #include "eye_draw_snapshot.h"
 #include "object_classification_probe.h"
 #include "mesh_motion.h"
@@ -2724,9 +2725,15 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     }
     // The eye run's depth capture (advanced.eye_depth_capture) keys the pass
     // off the same single OMGetRenderTargets above; its poolDraw verdict is
-    // the ledger's own t33 test from the block just run.
+    // the ledger's own t33 test from the block just run. Eye identity is the
+    // depth probe's scene pair -- depthProbeSceneEyeOf(dsv) -- NOT the
+    // frame's first-seen DSVs: the offscreen stages run before the eye
+    // passes and reach this ledger with their own depth targets, and the
+    // first flight interned those into both slots (190 declines, no files).
     if (dsv) {
-        g_eyeDepthCapture.noteEyeDraw(ctx, frame, dsv, d.pool != 0);
+        int eye = -1;
+        depthProbeSceneEyeOf(dsv, &eye, nullptr);
+        g_eyeDepthCapture.noteEyeDraw(ctx, frame, dsv, d.pool != 0, eye);
         dsv->Release();
     }
     g_ledgerDraws[frame - g_ledgerFrame0].push_back(d);
@@ -2983,16 +2990,20 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     // on the GPU, with the snapshot's no-wait rule.
     const uint32_t depthFiles=g_eyeDepthCapture.write(ctx,dir.c_str(),g_ledgerStamp);
     Log::get().note("object probe: eye depth capture %ls: %u files (depth_%ls_f<frame>_<A|B>.bin), "
-                    "%llu payload bytes staged, %u range/budget declines, %u readback/write failures, "
-                    "%u SEH faults; %s. Each file is one eye pass's completed D32 depth plus that pass's "
-                    "VS b1 floats [256,592) from its first pool-carrying draw (view-projection rows at "
-                    "270..273, camera-relative origin at 275); eye A/B is scene order. Only with "
-                    "advanced.eye_depth_capture on; the first %u frames of the run; no rendering changes.",
+                    "%llu payload bytes staged, %u non-eye draws skipped (offscreen phases the depth "
+                    "probe's scene pair does not name; eye identity comes from that pair, wanted with "
+                    "fix.temporal_aa or fix.eye_mask), %u range/budget declines, %u readback/write "
+                    "failures, %u SEH faults; %s. Each file is one eye pass's completed D32 depth plus "
+                    "that pass's VS b1 floats [256,592) from its first pool-carrying draw "
+                    "(view-projection rows at 270..273, camera-relative origin at 275); eye A/B is the "
+                    "scene pair's first-bind order. Only with advanced.eye_depth_capture on; the first "
+                    "%u frames of the run; no rendering changes.",
                     dir.c_str(),depthFiles,g_ledgerStamp,
-                    static_cast<unsigned long long>(g_eyeDepthCapture.bytes()),g_eyeDepthCapture.declined,
+                    static_cast<unsigned long long>(g_eyeDepthCapture.bytes()),g_eyeDepthCapture.nonEyeSkips,
+                    g_eyeDepthCapture.declined,
                     g_eyeDepthCapture.failures,g_eyeDepthCapture.faults,
                     depthFiles||g_eyeDepthCapture.declined?"written":"nothing captured (instrument off, "
-                    "or no two-eye frames in the run)",
+                    "or no scene-pair frames in the run)",
                     static_cast<unsigned>(edvr::EyeDepthCapture::kMaxFrames));
     Log::get().note("object probe: tone-map snapshots %ls: %u draws, actual first matching frame %u, %u reserved bytes, %u declines, %u failed copies/shaders; %s. At most two eye draws; exposure, colour LUT, HDR input and converted output retained for target colour replay. No rendering changes.",tonePath,unsigned(g_tonemapSnapshot.count()),g_tonemapSnapshot.firstFrame(),g_tonemapSnapshot.bytes,g_tonemapSnapshot.declined,g_tonemapSnapshot.failures,toneOk?"written":"WRITE FAILED");
     const uint32_t missingShaders = g_drawSnapshot.writeShaders(dir.c_str());
