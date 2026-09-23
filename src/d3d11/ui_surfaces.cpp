@@ -1,7 +1,8 @@
 // fix.ui_quality -- the surfaces half. ui_surfaces.h says what and why;
-// ui_quality_math.h holds the arithmetic and the census, shared with
-// tools/ui_quality_test; fss_res.cpp owns the inflation mechanism this
-// drives (the tracked ring, the viewport and scissor backstops).
+// ui_quality_math.h holds the arithmetic, the census, the learning and the
+// pair memo, shared with tools/ui_quality_test; fss_res.cpp owns the
+// inflation mechanism this drives (the tracked ring, the viewport and
+// scissor backstops).
 #include "ui_surfaces.h"
 
 #include "ui_quality_math.h"
@@ -22,6 +23,7 @@
 #include <d3d11.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -31,12 +33,12 @@ namespace edvr {
 
 namespace {
 
-constexpr uint32_t kMaxRatios = 32;
 constexpr uint32_t kMaxDim = 16384;  // D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION
 constexpr uint32_t kSizeNotes = 8;   // distinct sizes named (with their RVAs) a session
 constexpr uint32_t kCandidates = 32; // unmatched candidate creates remembered for learning
 constexpr uint32_t kSnapshot = 32;   // learned surfaces kept for the family label
 constexpr uint32_t kFirsts = 4;      // resizes quoted on the totals line
+constexpr uint32_t kLearnNotes = 16; // learning lines a session
 constexpr wchar_t kRatioFile[] = L"ui_quality_ratios.txt";
 
 // The internal render resolution, as read at one moment.
@@ -66,15 +68,48 @@ struct Lock {
 
 std::atomic<bool> g_on{false};
 
+// HMD Quality, cached (review P3-2): read from the game's newest .fxcfg --
+// a folder scan and a file read -- on configure, and while the key is on
+// every five seconds on a thread-pool thread; never on the render thread's
+// frame path, never inside a create. The bits of a float, 0 while unknown.
+std::atomic<uint32_t> g_hmdBits{0};
+std::atomic<bool> g_hmdBusy{false};
+
+float hmdCached() {
+    const uint32_t bits = g_hmdBits.load(std::memory_order_acquire);
+    float v = 0.0f;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+void hmdReadNow() {
+    float q = 0.0f;
+    if (!deviceHookHmdQuality(&q) || !(q > 0.0f) || !std::isfinite(q)) q = 0.0f;
+    uint32_t bits = 0;
+    std::memcpy(&bits, &q, sizeof(bits));
+    g_hmdBits.store(bits, std::memory_order_release);
+}
+
+VOID CALLBACK hmdRefresh(PTP_CALLBACK_INSTANCE, PVOID) {
+    hmdReadNow();
+    g_hmdBusy.store(false, std::memory_order_release);
+}
+
+void hmdRefreshOffThread() {
+    bool idle = false;
+    if (!g_hmdBusy.compare_exchange_strong(idle, true)) return;  // one in flight
+    if (!TrySubmitThreadpoolCallback(hmdRefresh, nullptr, nullptr))
+        g_hmdBusy.store(false, std::memory_order_release);
+}
+
 // Everything below g_lock.
 struct State {
     float target = 0.0f;
     std::string text = "off";
     bool loaded = false;
-    UiQualityRatio table[kMaxRatios];
-    uint32_t count = 0;
-    uint32_t learnedOnFile = 0;
-    // The classifier's surfaces, snapshot each second for the label.
+    UiQualityLearning learn;  // the census, learned ratios, pending sightings, fixed sizes
+    UiQualityMemo memo;       // the last decisions, by the size the game asked for
+    // The classifier's surfaces, snapshot every five seconds for the label.
     uint32_t snapW[kSnapshot] = {}, snapH[kSnapshot] = {};
     char snapF[kSnapshot] = {};
     uint32_t snapCount = 0;
@@ -84,10 +119,9 @@ struct State {
     // Session counts.
     uint32_t examined = 0;  // render or depth creates offered (0: the match never ran)
     uint32_t resized = 0, resizedCensus = 0, resizedLearned = 0, onSubmitted = 0;
-    uint32_t unmatched = 0;
+    uint32_t unmatched = 0, memoHits = 0;
     Resized firsts[kFirsts];
     uint32_t firstCount = 0;
-    float lastFactor = 0.0f;
     Basis basis;  // as last read, for the summary
     bool basisRead = false;
     // Once-lines.
@@ -97,14 +131,17 @@ struct State {
     uint32_t crossNotes = 0;
     uint32_t crossDW = 0, crossDH = 0, crossMW = 0, crossMH = 0;
     uint32_t learnNotes = 0;
-    uint64_t lastSecondMs = 0;
+    uint64_t lastTickMs = 0;
 };
 State g_s;
 
 std::atomic<uint32_t> g_viewports{0}, g_scissors{0}, g_copies{0};
 
-// Reads the inputs: every one is safe from any thread, and none of them is
-// read under g_lock (native_temporal takes its own).
+// Reads the inputs, each safe from any thread and none of them a lock that
+// anything holds around a create: native temporal's recommendation is a
+// lock-free snapshot (review P1-1), the runtime's sizing is an 80-byte copy
+// under a mutex nothing holds while creating, HMD Quality is the cache
+// above, the submitted size is a shared-memory word.
 Basis readBasis() {
     Basis b;
     uint32_t w = 0, h = 0;
@@ -124,8 +161,7 @@ Basis readBasis() {
             }
         }
     }
-    float hmd = 0.0f;
-    if (deviceHookHmdQuality(&hmd) && hmd > 0.0f) b.hmd = hmd;
+    b.hmd = hmdCached();
     b.derivedW = uiQualityInternalDim(b.recW, b.hmd);
     b.derivedH = uiQualityInternalDim(b.recH, b.hmd);
     if (!b.derivedW || !b.derivedH) b.derivedW = b.derivedH = 0;
@@ -145,26 +181,26 @@ std::wstring ratioPath() {
     return dir.empty() ? std::wstring() : dir + L"\\" + kRatioFile;
 }
 
-// Under g_lock. The census first, then whatever this rig learned.
+// Under g_lock. The census first, then what this rig learned, is waiting
+// on, and knows not to scale.
 void loadTable() {
     g_s.loaded = true;
-    g_s.count = uiQualitySeedTable(g_s.table, kMaxRatios);
-    g_s.learnedOnFile = 0;
+    g_s.learn.reset();
     const std::wstring path = ratioPath();
     if (path.empty()) return;
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return;
-    char buf[4096] = {};
+    char buf[8192] = {};
     DWORD got = 0;
     const BOOL ok = ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr);
     CloseHandle(f);
     if (!ok || !got) return;
     buf[got] = '\0';
-    g_s.learnedOnFile = uiQualityParseRatios(buf, g_s.table, &g_s.count, kMaxRatios);
+    uiQualityParseLearning(buf, g_s.learn);
 }
 
-// Under g_lock: the learned entries only (the census is compiled in).
+// Under g_lock.
 void saveTable() {
     const std::wstring path = ratioPath();
     if (path.empty()) return;
@@ -172,24 +208,10 @@ void saveTable() {
     HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return;
-    std::string text =
-        "# fix.ui_quality: interface-surface ratios learned on this rig, in ten-thousandths of the\n"
-        "# internal render width and height. The census's are compiled in. Delete to forget.\n";
-    char line[48];
-    for (uint32_t i = 0; i < g_s.count; ++i) {
-        if (g_s.table[i].origin != UiQualityOrigin::kLearned) continue;
-        _snprintf_s(line, _TRUNCATE, "%u %u\n", g_s.table[i].w, g_s.table[i].h);
-        text += line;
-    }
+    const std::string text = uiQualityFormatLearning(g_s.learn);
     DWORD written = 0;
     WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
     CloseHandle(f);
-}
-
-uint32_t learnedCount() {
-    uint32_t n = 0;
-    for (uint32_t i = 0; i < g_s.count; ++i) n += g_s.table[i].origin == UiQualityOrigin::kLearned;
-    return n;
 }
 
 const char* familyName(char f) {
@@ -226,11 +248,50 @@ std::string basisText(const Basis& b) {
     return s;
 }
 
+// Under g_lock: what one sighting taught, said at most kLearnNotes times.
+void noteLearning(UiQualityLearn v, char family, uint32_t w, uint32_t h, uint32_t bw, uint32_t bh,
+                  uint32_t lw, uint32_t lh) {
+    if (g_s.learnNotes >= kLearnNotes) return;
+    if (v == UiQualityLearn::kPending) {
+        ++g_s.learnNotes;
+        Log::get().note(
+            "ui quality: surfaces: pending -- the GUI renderer draws %s into a %ux%u surface made "
+            "against an internal %ux%u (ratio %.4f x %.4f) that is on no ratio; it is resized once "
+            "the same ratio is seen at an internal size more than 1%% different (it scales), "
+            "never if the same size is (it does not).",
+            familyName(family), w, h, bw, bh, uiQualityRatioX10000(w, bw) / 10000.0,
+            uiQualityRatioX10000(h, bh) / 10000.0);
+    } else if (v == UiQualityLearn::kPromoted) {
+        ++g_s.learnNotes;
+        Log::get().note(
+            "ui quality: surfaces: learned -- a %s surface's ratio %.4f x %.4f held at a second "
+            "internal size (now %ux%u against %ux%u): it scales, so it is resized from its next "
+            "creation (a trip through the main menu) and in later sessions (ui_quality_ratios.txt "
+            "beside the logs).",
+            familyName(family), lw / 10000.0, lh / 10000.0, w, h, bw, bh);
+    } else if (v == UiQualityLearn::kNotScaling) {
+        ++g_s.learnNotes;
+        Log::get().note(
+            "ui quality: surfaces: a %ux%u %s surface kept its pixel size at a second internal "
+            "size (%ux%u): it does not scale, and is never resized (kept in "
+            "ui_quality_ratios.txt).",
+            w, h, familyName(family), bw, bh);
+    } else if (v == UiQualityLearn::kFull) {
+        ++g_s.learnNotes;
+        Log::get().note("ui quality: surfaces: the learning table is full; a %ux%u surface is "
+                        "not recorded.",
+                        w, h);
+    }
+}
+
 }  // namespace
 
 // --------------------------------------------------------------- the API
 
 void uiSurfacesSetTarget(float target, const char* text) {
+    // Configure is the one place HMD Quality is read on this thread: it runs
+    // when the ini changes, not every frame.
+    if (target > 0.0f) hmdReadNow();
     Lock lock;
     const std::string t = text ? text : "off";
     if (target == g_s.target && t == g_s.text) return;
@@ -238,6 +299,7 @@ void uiSurfacesSetTarget(float target, const char* text) {
     g_s.text = t;
     // A real change starts the story over; the table and the size notes stay.
     g_s.noHmdNoted = g_s.noBasisNoted = g_s.atTargetNoted = false;
+    g_s.memo.clear();
     g_on.store(target > 0.0f, std::memory_order_release);
 }
 
@@ -246,10 +308,28 @@ bool uiSurfacesWantCreates() { return g_on.load(std::memory_order_acquire); }
 bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut) {
     if (!d || !g_on.load(std::memory_order_acquire)) return false;
     const Basis b = readBasis();
+    const uint64_t now = GetTickCount64();
     Lock lock;
     ++g_s.examined;
     g_s.basis = b;
     g_s.basisRead = true;
+    // The pair: a create of a size decided within the last two seconds gets
+    // that decision, whatever the basis says now (a colour target and its
+    // depth partner must stay the same size).
+    if (const UiQualityDecision* m = g_s.memo.find(d->Width, d->Height, now)) {
+        if (m->nw == m->ow && m->nh == m->oh) return false;
+        ++g_s.memoHits;
+        d->Width = m->nw;
+        d->Height = m->nh;
+        if (factorOut) *factorOut = m->factor;
+        if (familyOut) *familyOut = m->family;
+        if (m->origin == UiQualityOrigin::kLearned) {
+            ++g_s.resizedLearned;
+        } else {
+            ++g_s.resizedCensus;
+        }
+        return true;
+    }
     float factor = 0.0f;
     if (!b.hmd) {
         if (!g_s.noHmdNoted) {
@@ -270,7 +350,6 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
         }
         return false;
     }
-    g_s.lastFactor = factor;
     // The bases a ratio is taken against: the derived size, and the size
     // the game submits where it differs (a FOV-trim or cull-guard change in
     // flight, or an HMD Quality the .fxcfg does not hold); vScreen's own
@@ -303,33 +382,39 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
         return false;
     }
     if (!g_s.loaded) loadTable();
+    const UiQualityLearning& L = g_s.learn;
     int found = -1;
     uint32_t used = 0;
     bool candidate = false;
     for (uint32_t i = 0; i < nb && found < 0; ++i) {
         if (!uiQualityCandidateShape(d->Width, d->Height, bw[i], bh[i])) continue;
         candidate = true;
-        found = uiQualityRatioFind(g_s.table, g_s.count, uiQualityRatioX10000(d->Width, bw[i]),
+        found = uiQualityRatioFind(L.table, L.n, uiQualityRatioX10000(d->Width, bw[i]),
                                    uiQualityRatioX10000(d->Height, bh[i]));
         used = i;
     }
+    const uint32_t ow = d->Width, oh = d->Height;
     if (found < 0) {
         if (candidate) {
             // Remembered with the basis it was made against: if the GUI
             // renderer's draws are later seen landing in a surface of this
-            // size, its ratio is learned from THIS basis, not a later one.
+            // size, its ratio is taken against THIS basis, not a later one.
             ++g_s.unmatched;
             Candidate& c = g_s.cand[g_s.candNext];
             g_s.candNext = (g_s.candNext + 1) % kCandidates;
             if (g_s.candCount < kCandidates) ++g_s.candCount;
-            c.w = d->Width;
-            c.h = d->Height;
+            c.w = ow;
+            c.h = oh;
             c.basisW = bw[0];
             c.basisH = bh[0];
+            UiQualityDecision keep;
+            keep.ow = keep.nw = ow;
+            keep.oh = keep.nh = oh;
+            keep.ms = now;
+            g_s.memo.put(keep);
         }
         return false;
     }
-    const uint32_t ow = d->Width, oh = d->Height;
     const uint32_t nw = uiQualityRoundDim(ow, factor), nh = uiQualityRoundDim(oh, factor);
     if (nw > kMaxDim || nh > kMaxDim || (nw == ow && nh == oh)) return false;
     char family = 0;
@@ -339,7 +424,7 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
             break;
         }
     }
-    const UiQualityRatio& r = g_s.table[found];
+    const UiQualityRatio& r = L.table[found];
     if (which[used] == 1) ++g_s.onSubmitted;
     // Once per distinct size a session: what matched, against what, and the
     // game's allocating call -- the route to sizing it in the engine instead,
@@ -382,6 +467,16 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
     } else {
         ++g_s.resizedCensus;
     }
+    UiQualityDecision made;
+    made.ow = ow;
+    made.oh = oh;
+    made.nw = nw;
+    made.nh = nh;
+    made.factor = factor;
+    made.family = family;
+    made.origin = r.origin;
+    made.ms = now;
+    g_s.memo.put(made);
     return true;
 }
 
@@ -404,13 +499,13 @@ void uiSurfacesFrameBoundary() {
     if (!g_on.load(std::memory_order_acquire)) return;
     const uint64_t now = GetTickCount64();
     {
-        // Every five seconds: reading HMD Quality scans the game's Graphics
-        // options folder, which is not a thing to do on the render thread
-        // every frame (deviceHookHmdQuality caches it a second per thread).
         Lock lock;
-        if (now - g_s.lastSecondMs < 5000) return;
-        g_s.lastSecondMs = now;
+        if (now - g_s.lastTickMs < 5000) return;
+        g_s.lastTickMs = now;
     }
+    // HMD Quality for the next five seconds, read on a pool thread; this
+    // tick uses the cache (review P3-2: no folder scan on the render thread).
+    hmdRefreshOffThread();
     const Basis b = readBasis();
     UiDepthLearnedSurface learned[kSnapshot];
     const uint32_t nLearned = uiDepthLearnedSurfaces(learned, kSnapshot);
@@ -446,11 +541,12 @@ void uiSurfacesFrameBoundary() {
         }
     }
     // The label snapshot, and the learning: a surface the GUI renderer's own
-    // draws landed in (the classifier's evidence that it IS interface), whose
-    // create this module saw unmatched, has its ratio taken against the basis
-    // of that create and kept for later creates and sessions.
+    // draws landed in (the classifier: it IS interface), whose create this
+    // module saw unmatched, is observed at the basis of each such create --
+    // pending at the first, learned when the same ratio holds at a second
+    // resolution, refused for good when the same pixel size does.
     g_s.snapCount = 0;
-    bool learnedAny = false;
+    bool changed = false;
     for (uint32_t i = 0; i < nLearned; ++i) {
         uint32_t w = learned[i].w, h = learned[i].h;
         uint32_t ow = 0, oh = 0;
@@ -464,32 +560,33 @@ void uiSurfacesFrameBoundary() {
             g_s.snapF[g_s.snapCount] = learned[i].family;
             ++g_s.snapCount;
         }
-        // The creates of this size: one basis between them, or none learned.
-        uint32_t basisW = 0, basisH = 0;
-        bool ambiguous = false;
+        // The distinct bases this size was created against.
+        uint32_t basesW[4] = {}, basesH[4] = {}, nBases = 0;
         for (uint32_t k = 0; k < g_s.candCount; ++k) {
             const Candidate& c = g_s.cand[k];
             if (c.w != w || c.h != h) continue;
-            if (basisW && (c.basisW != basisW || c.basisH != basisH)) ambiguous = true;
-            basisW = c.basisW;
-            basisH = c.basisH;
+            bool seen = false;
+            for (uint32_t j = 0; j < nBases; ++j)
+                seen = seen || (basesW[j] == c.basisW && basesH[j] == c.basisH);
+            if (!seen && nBases < 4) {
+                basesW[nBases] = c.basisW;
+                basesH[nBases] = c.basisH;
+                ++nBases;
+            }
         }
-        if (!basisW || ambiguous || !uiQualityCandidateShape(w, h, basisW, basisH)) continue;
+        if (!nBases) continue;
         if (!g_s.loaded) loadTable();
-        const uint32_t rw = uiQualityRatioX10000(w, basisW), rh = uiQualityRatioX10000(h, basisH);
-        if (!uiQualityLearn(g_s.table, &g_s.count, kMaxRatios, rw, rh)) continue;
-        learnedAny = true;
-        if (g_s.learnNotes < 8) {
-            ++g_s.learnNotes;
-            Log::get().note(
-                "ui quality: surfaces: learned -- the GUI renderer draws %s into a %ux%u surface "
-                "made against an internal %ux%u: ratio %.4f x %.4f, resized from its next "
-                "creation (a trip through the main menu) and in later sessions "
-                "(ui_quality_ratios.txt beside the logs).",
-                familyName(learned[i].family), w, h, basisW, basisH, rw / 10000.0, rh / 10000.0);
+        for (uint32_t j = 0; j < nBases; ++j) {
+            uint32_t lw = 0, lh = 0;
+            const UiQualityLearn v = g_s.learn.observe(w, h, basesW[j], basesH[j], &lw, &lh);
+            if (v == UiQualityLearn::kPending || v == UiQualityLearn::kPromoted ||
+                v == UiQualityLearn::kNotScaling) {
+                changed = true;
+            }
+            noteLearning(v, learned[i].family, w, h, basesW[j], basesH[j], lw, lh);
         }
     }
-    if (learnedAny) saveTable();
+    if (changed) saveTable();
 }
 
 void uiSurfacesSummary(char* out, size_t n) {
@@ -517,12 +614,15 @@ void uiSurfacesSummary(char* out, size_t n) {
         if (!g_s.loaded) {
             appendf(s, ", %u census ratios", kUiQualitySeedCount);
         } else {
-            appendf(s, ", ratios %u census + %u learned", kUiQualitySeedCount, learnedCount());
+            appendf(s, ", ratios %u census + %u learned (%u pending a second resolution, %u sizes "
+                       "that do not scale)",
+                    kUiQualitySeedCount, g_s.learn.learnedCount(), g_s.learn.np, g_s.learn.nf);
         }
         if (g_s.resized) {
-            appendf(s, ", %u made bigger this session (%u by census ratio, %u learned%s:",
+            appendf(s, ", %u made bigger this session (%u by census ratio, %u learned%s, %u as a "
+                       "pair's partner:",
                     g_s.resized, g_s.resizedCensus, g_s.resizedLearned,
-                    g_s.onSubmitted ? ", some against the submitted size" : "");
+                    g_s.onSubmitted ? ", some against the submitted size" : "", g_s.memoHits);
             for (uint32_t i = 0; i < g_s.firstCount; ++i) {
                 const Resized& r = g_s.firsts[i];
                 appendf(s, "%s %ux%u -> %ux%u %s", i ? "," : "", r.ow, r.oh, r.nw, r.nh,

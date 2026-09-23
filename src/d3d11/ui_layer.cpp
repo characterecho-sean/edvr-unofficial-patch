@@ -501,7 +501,20 @@ UiDsState dsStateOf(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, UINT*
     }
     if (refOut) *refOut = ref;
     if (viewFmtOut) *viewFmtOut = viewFmt;
-    return uiLayerDsStateFrom(dss ? &d : nullptr, flags);
+    UiDsState s = uiLayerDsStateFrom(dss ? &d : nullptr, flags);
+    // Decided here, once per draw: a stencil test against a view with no
+    // stencil plane is no test at all (review P3-6), said once.
+    s.stencilPlane = viewFmt == DXGI_FORMAT_D32_FLOAT_S8X24_UINT ||
+                     viewFmt == DXGI_FORMAT_D24_UNORM_S8_UINT;
+    static bool stencillessNoted = false;
+    if (dsv && s.stencilEnable && !s.stencilPlane && !stencillessNoted) {
+        stencillessNoted = true;
+        Log::get().note("ui quality: layer: a draw enables the stencil test against a %s depth "
+                        "target, which has no stencil: D3D11 passes it, and so does the layer's "
+                        "copy in the same format -- nothing is seeded for it.",
+                        viewName(viewFmt));
+    }
+    return s;
 }
 
 // Typeless family and the two shader views of a depth-stencil view format;
@@ -817,7 +830,11 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // so later tests in the layer see its write.
     ID3D11DepthStencilView* layerDsv = nullptr;
     const void* gameDs = dsvResource(g_draw.dsv);
-    const bool seededNow = e.dsv && e.dsSeq == g_draw.seq && e.dsSource && e.dsSource == gameDs;
+    // Seeded this frame, from this buffer, AND at the layer's size: a layer
+    // re-made mid-frame leaves a depth target of the old size, which D3D11
+    // would refuse to bind beside it (review P3-5).
+    const bool seededNow = e.dsv && e.dsW == e.w && e.dsH == e.h && e.dsSeq == g_draw.seq &&
+                           e.dsSource && e.dsSource == gameDs;
     const bool needsDs = g_draw.ds.tests() || (g_draw.ds.writes() && seededNow);
     if (needsDs) {
         const bool stale = !seededNow;
@@ -1933,7 +1950,17 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     onFootGateTick();
     // The warm compile, the sharpen's reason: not a first-use D3DCompile at
     // the door.
-    if (ctx && detail::g_uiLayerLive) compileOnce(ctx);
+    if (ctx && detail::g_uiLayerLive) {
+        compileOnce(ctx);
+        // The depth-stencil seed's three shaders and its deferred context,
+        // warmed here too rather than mid-frame at the first tested UI draw
+        // (review P3-3).
+        if (!g_seeder && !g_seederTried) {
+            Ptr<ID3D11Device> dev;
+            ctx->GetDevice(&dev);
+            ensureSeeder(dev.Get());
+        }
+    }
     // Not live -- off, no pass, the jitter switches set, stood down: this
     // frame's doors have run, so nothing still needs the layers. Let the
     // memory go; the next live frame makes them again.

@@ -17,6 +17,10 @@
 
 #include <d3d11_4.h>   // ID3D11Multithread, for the protection probe
 #include <dxgi1_2.h>
+#include <intrin.h>    // _ReturnAddress: EDVR's own creates, told from the game's
+
+// This module's own image (the linker's symbol), for addressInEdvr.
+extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 #include "graphics_runtime.h"
 #include "render_boundary.h"
@@ -655,10 +659,26 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
 __declspec(noinline) void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
                              const void* second, bool firstIsResource);
 
+// Is this return address inside EDVR's own image? The CreateTexture2D hook
+// is a vtable slot, so its return address is its caller's: EDVR's own
+// creates (the temporal pass's targets, the deferred UI replay's, the UI
+// layer's) come from this module, the game's from its own. Two compares
+// against the image's extent, read once from its own headers.
+bool addressInEdvr(const void* address) {
+    static const uintptr_t base = reinterpret_cast<uintptr_t>(&__ImageBase);
+    static const uintptr_t extent = [] {
+        const auto* dos = &__ImageBase;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+            reinterpret_cast<const BYTE*>(dos) + dos->e_lfanew);
+        return static_cast<uintptr_t>(nt->OptionalHeader.SizeOfImage);
+    }();
+    return reinterpret_cast<uintptr_t>(address) - base < extent;
+}
+
 HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
                                                    const D3D11_TEXTURE2D_DESC* desc,
                                                    const D3D11_SUBRESOURCE_DATA* init,
-                                                   ID3D11Texture2D** out) {
+                                                   ID3D11Texture2D** out, bool fromEdvr) {
     if (self != g_state->device || !desc || !fssResWantsCreates()) {
         return g_state->realCreateTexture2D(self, desc, init, out);
     }
@@ -668,7 +688,7 @@ HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
     InflateSource source = InflateSource::kNone;
     char family = 0;
     guardedBudget(g_createBudget, [&] {
-        inflated = fssResMaybeInflate(&d, init != nullptr, &scale, &source, &family);
+        inflated = fssResMaybeInflate(&d, init != nullptr, &scale, &source, &family, fromEdvr);
     });
     if (!inflated) {
         return g_state->realCreateTexture2D(self, desc, init, out);
@@ -703,7 +723,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_TEXTURE2D_DESC* desc,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out) {
-    const HRESULT hr = createTexture2DForwarded(self, desc, init, out);
+    const HRESULT hr = createTexture2DForwarded(self, desc, init, out,
+                                                addressInEdvr(_ReturnAddress()));
     if (self == g_state->device) {
         if (FAILED(hr)) {
             noteDeviceCreateFailure(kDevCreateTexture2D, hr, desc, init, false);

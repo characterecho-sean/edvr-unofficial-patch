@@ -13,6 +13,7 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/d3d11/temporal_pass.h"
 #include "../../src/d3d11/ui_layer.h"
+#include "../../src/d3d11/ui_surfaces.h"
 #include "../../src/openxr/native_temporal_client.h"
 #include "../../src/common/system_d3d11.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
@@ -27,6 +28,19 @@ struct Call {
   bool motion=false,head=false;float previousHead[12]{},currentHead[12]{},offset[3]{};
 };
 Call note;std::vector<Call> calls;bool passSucceeds=true;
+// P1-1 (review 2026-09-23): the pass runs INSIDE treat(), which holds the
+// channel's mutex, and makes its targets through the device's
+// CreateTexture2D -- where fix.ui_quality's surfaces ask for the
+// recommendation. The stub asks from there, exactly as the create hook
+// would; MSVC's std::mutex throws on a re-lock from its own thread.
+unsigned reentries=0,reentryThrows=0;uint32_t reentryRecW=0,reentryRecH=0;bool reentryJitter=true,reentryWarm=true;
+void askFromInsideTreat(){
+  ++reentries;
+  try{uint32_t w=0,h=0;if(edvr::nativeTemporalRecommended(&w,&h)){reentryRecW=w;reentryRecH=h;}
+      uint64_t sq=0;float x=0,y=0;uint32_t a=0,b=0;reentryJitter=edvr::nativeTemporalDrawJitter(0,&sq,&x,&y,&a,&b);
+      ID3D11Device* dv=nullptr;unsigned long th=0;reentryWarm=edvr::nativeTemporalWarmTarget(&dv,&th);}
+  catch(...){++reentryThrows;}
+}
 extern "C" void edvrTemporalAaNoteHead(int eye,const float* previous,const float* current,const float* offset) {
   note={};note.eye=unsigned(eye);note.head=previous&&current&&offset;
   if(note.head){std::memcpy(note.previousHead,previous,48);std::memcpy(note.currentHead,current,48);std::memcpy(note.offset,offset,12);}
@@ -34,6 +48,7 @@ extern "C" void edvrTemporalAaNoteHead(int eye,const float* previous,const float
 extern "C" void* edvrTemporalAa(void* source,int eye,const float*,const float* now,const float* previous,
     float jx,float jy,const float* delta,const float* translation,const float* swapped,float nearZ,float farZ,
     float headDeg,int,float,float,unsigned outW,unsigned outH,unsigned flags) {
+  askFromInsideTreat();
   Call c=note;c.eye=unsigned(eye);c.jx=jx;c.jy=jy;c.nearZ=nearZ;c.farZ=farZ;c.headDeg=headDeg;
   c.outW=outW;c.outH=outH;c.flags=flags;c.motion=delta&&translation;
   if(delta)std::memcpy(c.delta,delta,36);if(translation)std::memcpy(c.translation,translation,12);
@@ -89,6 +104,10 @@ void run(){
       "warm target names the acquiring thread and device");
   check(p.tangentShift[0][0]==0&&p.tangentShift[1][1]==0,"unknown input size means no jitter");
   check(treat(t,1,1,source.Get())==S_OK&&treat(t,1,0,source.Get())==S_OK,"reversed first pair");
+  check(reentries>=2&&reentryThrows==0,"asked from inside treat (as the create hook asks), nothing re-locks the channel's mutex");
+  check(reentryRecW==480&&reentryRecH==360,"...and the recommendation is the frame's, read without the lock");
+  check(!reentryJitter&&!reentryWarm,"...and the readers that take the lock answer no there instead of throwing");
+  {uint32_t rw=0,rh=0;check(edvr::nativeTemporalRecommended(&rw,&rh)&&rw==480&&rh==360,"the recommendation outside treat");}
   check(calls.back().flags&1,"first history reset");check(!calls.back().head,"first frame has no invented head pair");
   f=frame(11,2);f.head[3]=.1f;p=begin(t,f);t.noteProjection(t.context,2,0,.1f,1000);
   check(treat(t,2,0,source.Get())==S_OK,"second left");auto c=calls.back();
@@ -111,6 +130,7 @@ void run(){
   f=frame(11,4);begin(t,f);check(treat(t,4,0,source.Get())==S_OK&&(calls.back().flags&1),"sequence gap reset");
   f=frame(11,5);f.referenceGeneration=2;begin(t,f);check(treat(t,5,0,source.Get())==S_OK&&(calls.back().flags&1),"reference change reset");
   check(t.invalidate(t.context)==S_OK,"CPU invalidation");check(treat(t,5,0,source.Get())==E_INVALIDARG,"invalidated frame cannot treat");check(t.beginFrame(t.context,&f,&p)==E_INVALIDARG,"invalidated sequence cannot reopen");
+  {uint32_t rw=0,rh=0;check(!edvr::nativeTemporalRecommended(&rw,&rh),"no recommendation once the channel is invalidated");}
   f=frame(11,6);p=begin(t,f);auto larger=d.texture(640,480);check(treat(t,6,0,larger.Get())==S_OK,"resize treatment");c=calls.back();
   check(c.flags&1,"resize reset");check(closeFloat(c.jx,-p.tangentShift[0][0]*640/1.9f),"resize converts jitter to actual pixels");
   Device other;auto foreign=other.texture();check(treat(t,6,1,foreign.Get())==E_INVALIDARG,"wrong device rejected");
@@ -124,6 +144,7 @@ void run(){
   check(t.close(t.context)==S_OK&&t.close(t.context)==S_FALSE,"idempotent CPU close");
   warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
+  {uint32_t rw=0,rh=0;check(!edvr::nativeTemporalRecommended(&rw,&rh),"no recommendation once the channel closes");}
   auto fresh=acquire(d,12);f=frame(12,1);begin(fresh,f);check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
   // Previous eye yaw 90 degrees, current yaw zero, head translates +X:
   // the translation is +Z in the previous eye and head rotation is zero.

@@ -528,6 +528,22 @@ void testDepthStencil() {
     a.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
     e = uiLayerDsEffect(uiLayerDsStateFrom(&a, 0), true);
     check(!e.tests() && !e.writes(), "depth ALWAYS without a write is neither");
+    // A stencil test against a view with no stencil plane (D32_FLOAT): D3D11
+    // passes it and drops the write; there is nothing to seed, so nothing is
+    // (review P3-6: it re-seeded on every draw).
+    D3D11_DEPTH_STENCIL_DESC t{};
+    t.DepthEnable = FALSE;
+    t.StencilEnable = TRUE;
+    t.StencilReadMask = t.StencilWriteMask = 0x04;
+    t.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_REPLACE,
+                   D3D11_COMPARISON_EQUAL};
+    t.BackFace = t.FrontFace;
+    UiDsState st = uiLayerDsStateFrom(&t, 0);
+    check(uiLayerDsEffect(st, true).stencilTest && uiLayerDsEffect(st, true).stencilWrite,
+          "with a stencil plane, the test and the write count");
+    st.stencilPlane = false;
+    check(!uiLayerDsEffect(st, true).tests() && !uiLayerDsEffect(st, true).writes(),
+          "without one, neither does: no seed, every draw");
 }
 
 // ---------------------------------------------------------- the surfaces
@@ -596,15 +612,82 @@ void testSurfaces() {
               uiQualityCandidateShape(417, 625, 1995, 1970),
           "the candidate shape: smaller than the eye, no power of two, no sliver");
 
-    // The learned-ratio file.
-    const char* file = "# fix.ui_quality\n2092 3175\n9999 1\nfoo\n4000 2000 7\n12 34\r\n12 40\n";
-    const uint32_t taken = uiQualityParseRatios(file, t, &n, 32);
-    check(taken == 2 && n == 7 && t[5].w == 9999 && t[5].h == 1 && t[6].w == 12 && t[6].h == 34 &&
-              t[6].origin == UiQualityOrigin::kLearned,
-          "the file: comments, a census repeat, junk, a third number and a near-repeat add nothing");
-    check(!uiQualityLearn(t, &n, 32, 2095, 3170) && uiQualityLearn(t, &n, 32, 5000, 5000) && n == 8 &&
+    check(!uiQualityLearn(t, &n, 32, 2095, 3170) && uiQualityLearn(t, &n, 32, 5000, 5000) && n == 6 &&
               !uiQualityLearn(t, &n, 32, 10000, 5),
-          "learning: a ratio within the tolerance of one on file is not added");
+          "a ratio within the tolerance of one on the table is not added twice");
+
+    // Learning (review P2-1): the caller offers only GUI-drawn surfaces (is
+    // it UI); the table takes one only once the same ratio holds at a second
+    // resolution (does it scale). Both questions, not either.
+    {
+        UiQualityLearning L;
+        L.reset();
+        check(L.n == 5 && L.learnedCount() == 0 && L.np == 0 && L.nf == 0, "learning starts from the census alone");
+        check(L.observe(417, 625, 1995, 1970) == UiQualityLearn::kIgnored, "a census panel is not learned again");
+        check(L.observe(700, 500, 1995, 1970) == UiQualityLearn::kPending, "a GUI surface on no ratio is pending first");
+        check(L.observe(700, 500, 1995, 1970) == UiQualityLearn::kSameBasis &&
+                  uiQualityRatioFind(L.table, L.n, uiQualityRatioX10000(700, 1995), uiQualityRatioX10000(500, 1970)) < 0,
+              "...seen again at the same resolution it is still pending, and matches nothing");
+        uint32_t lw = 0, lh = 0;
+        check(L.observe(1077, 769, 3070, 3032, &lw, &lh) == UiQualityLearn::kPromoted && L.learnedCount() == 1 &&
+                  L.np == 0 && uiQualityRatioFind(L.table, L.n, uiQualityRatioX10000(700, 1995),
+                                                  uiQualityRatioX10000(500, 1970)) >= 0,
+              "the same ratio at a second resolution: it scales, and is learned");
+        check(L.observe(666, 998, 2481, 2121) == UiQualityLearn::kPending, "the census's 666x998 is pending first too");
+        check(L.observe(666, 998, 2307, 1652) == UiQualityLearn::kNotScaling && L.isFixed(666, 998) && L.np == 0,
+              "...the same pixel size at another resolution: it does not scale, refused for good");
+        check(L.observe(666, 998, 3070, 3032) == UiQualityLearn::kFixed && L.learnedCount() == 1,
+              "...and never learned after");
+        check(L.observe(800, 600, 1995, 1970) == UiQualityLearn::kPending, "another pending sighting");
+        // The file keeps all three kinds of fact across sessions.
+        const std::string text = uiQualityFormatLearning(L);
+        UiQualityLearning R;
+        R.reset();
+        check(uiQualityParseLearning(text.c_str(), R) == 3 && R.learnedCount() == 1 && R.np == 1 && R.nf == 1 &&
+                  R.isFixed(666, 998) && R.pending[0].w == 800 && R.pending[0].bw == 1995,
+              "the file keeps the learned ratio, the pending sighting and the fixed size");
+        UiQualityLearning O;
+        O.reset();
+        check(uiQualityParseLearning("# the first build's file\n2092 3175\n4000 2000\nlearned 4000\n"
+                                     "learned 4000 2000 7\npending 1 2 3\nfixed 0 5\nfoo 1 2\nlearned 2095 3170\n",
+                                     O) == 0 &&
+                  O.n == 5,
+              "bare ratios (learned without the scaling test), short, long, zero, unknown and census lines refused");
+        UiQualityLearning P;
+        P.reset();
+        check(uiQualityParseLearning("pending 3509 2538 700 500 1995 1970\n", P) == 1 &&
+                  P.observe(1077, 769, 3070, 3032) == UiQualityLearn::kPromoted,
+              "a sighting pending from an earlier session is promoted by this one's");
+    }
+
+    // The pair (review P3-9): a colour target and its depth partner stay one
+    // size though the basis moves between the two creates.
+    {
+        UiQualityMemo memo;
+        UiQualityDecision made;
+        made.ow = 417;
+        made.oh = 625;
+        made.nw = 642;
+        made.nh = 962;
+        made.factor = 1.5385f;
+        made.origin = UiQualityOrigin::kCensus;
+        made.ms = 1000;
+        memo.put(made);
+        const UiQualityDecision* m = memo.find(417, 625, 1400);
+        check(m && m->nw == 642 && m->nh == 962 && m->origin == UiQualityOrigin::kCensus,
+              "the partner of a resized surface gets the same size");
+        check(!memo.find(417, 625, 1000 + kUiQualityMemoMs + 1) && !memo.find(418, 625, 1400),
+              "...within the window, for the same asked size only");
+        UiQualityDecision left;
+        left.ow = left.nw = 500;
+        left.oh = left.nh = 300;
+        left.ms = 2000;
+        memo.put(left);
+        const UiQualityDecision* k = memo.find(500, 300, 2100);
+        check(k && k->nw == 500 && k->nh == 300, "the partner of a surface left alone is left alone");
+        memo.clear();
+        check(!memo.find(417, 625, 1400) && !memo.find(500, 300, 2100), "cleared when the key changes");
+    }
 }
 
 // ------------------------------------------------------------ the GPU

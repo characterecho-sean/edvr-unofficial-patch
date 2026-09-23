@@ -385,19 +385,20 @@ void uiDeferredConfigure(Config& cfg) {
     const auto m=cfg.getString("fix.temporal_aa","off");
     const bool requested=temporalExternalEngine(m);
     if(!requested){failed=false;routeNoted=false;}
-    // advanced.ui_replay: Sean's A/B for the cockpit HUD (2026-09-23). 1, the
-    // default, is this file as it has always run. 0 turns the replay off
+    // advanced.ui_replay: Sean's A/B for the cockpit HUD (2026-09-23). on, the
+    // default, is this file as it has always run. off turns the replay off
     // outright: the holo panels, flight HUD and target sprite (and the
     // orbital lines and planetary HUD it also captures) stay in the game's
     // frame, where the interface depth's re-issue and reactive mask treat
     // them exactly as they do whenever this replay declines, and the
     // upscaler reconstructs them. Read at the config poll, between frames.
+    // on | off, the ini's convention for a switch (review P3-10).
     static int lastReplay=-1;static bool lastRequested=false;
-    const bool replay=cfg.getInt("advanced.ui_replay",1)!=0;
+    const bool replay=cfg.getBool("advanced.ui_replay",true);
     if(requested && (int(replay)!=lastReplay || !lastRequested))
         Log::get().note(replay
-            ? "Deferred UI: advanced.ui_replay = 1 (the default) -- the cockpit's holo panels, flight HUD and target sprite are redrawn after the upscale at the output size."
-            : "Deferred UI: advanced.ui_replay = 0 -- the replay is OFF: the cockpit's holo panels, flight HUD and target sprite stay in the game's frame with their interface depth and reactive mask, and the upscaler reconstructs them.");
+            ? "Deferred UI: advanced.ui_replay = on (the default) -- the cockpit's holo panels, flight HUD and target sprite are redrawn after the upscale at the output size."
+            : "Deferred UI: advanced.ui_replay = off -- the replay is OFF: the cockpit's holo panels, flight HUD and target sprite stay in the game's frame with their interface depth and reactive mask, and the upscaler reconstructs them.");
     lastReplay=int(replay);lastRequested=requested;
     // The fovea path (temporal_pass.cpp) now runs this same capture/replay
     // route too -- its own compose writes the texture this route reads and

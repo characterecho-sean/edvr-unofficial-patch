@@ -10,6 +10,7 @@
 #include "../common/supersample_math.h"
 #include "../common/log.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -67,6 +68,21 @@ struct State {
 };
 
 State pool[16]; unsigned used = 0; State* current = nullptr; std::mutex mutex;
+
+// fix.ui_quality's surfaces read the recommendation from INSIDE
+// CreateTexture2D, and the temporal pass makes its targets (the deferred UI
+// replay's, NGX's) inside treat(), which holds `mutex` across the pass:
+// re-locking it on that thread throws -- MSVC's std::mutex is not recursive
+// -- and each throw would charge the create hook's shared fault budget
+// until shader registration stopped for the session (review 2026-09-23,
+// P1-1). So begin() publishes it here, under the lock, packed w << 32 | h,
+// and nativeTemporalRecommended reads it without the lock. 0 while no frame
+// has begun, and once the channel is invalidated or closed.
+std::atomic<uint64_t> g_recommended{0};
+// The render thread inside treat(), holding `mutex` across the temporal
+// pass: the readers below that must take the lock answer "no" there rather
+// than re-lock it.
+thread_local bool t_insideTreat = false;
 
 State* identify(void* p) {
   for (unsigned i = 0; i < used; ++i) if (p == &pool[i]) return &pool[i];
@@ -156,6 +172,7 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   s->currentSettings=next;
   s->begun=true;s->sequence=f->sequence;s->reference=f->referenceGeneration;
   s->recW=f->recommendedWidth;s->recH=f->recommendedHeight;
+  g_recommended.store((uint64_t(s->recW)<<32)|s->recH,std::memory_order_release);
   std::memcpy(s->head,f->head,sizeof(s->head));std::memcpy(s->eyes,f->eyeToHead,sizeof(s->eyes));std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));
   s->treated[0]=s->treated[1]=false;
   s->projectionKnown[0]=s->projectionKnown[1]=false;
@@ -181,6 +198,7 @@ HRESULT WINAPI noteProjection(void* p,uint64_t seq,uint32_t eye,float nearZ,floa
 
 HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,const float* box,ID3D11Texture2D** output,float* outBox) {
   if(output)*output=nullptr;if(outBox)std::memset(outBox,0,16);std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
+  struct InsideTreat{InsideTreat(){t_insideTreat=true;}~InsideTreat(){t_insideTreat=false;}} insideTreat;
   if(!s||!s->active||s!=current||GetCurrentThreadId()!=s->thread||!source||!output||!outBox||eye>1||seq!=s->sequence||s->treated[eye]||!s->begun||!sameDevice(s->device,source))return E_INVALIDARG;
   if(box&&(!finite(box,4)||box[0]==box[2]||box[1]==box[3]))return E_INVALIDARG;
   if(box) for(int i=0;i<4;++i) if(box[i]<0.0f||box[i]>1.0f)return E_INVALIDARG;
@@ -273,7 +291,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   std::memcpy(hst.otherEye,s->eyes[1-eye],sizeof(hst.otherEye));std::memcpy(hst.frustum,s->frusta[eye],sizeof(hst.frustum));
   hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;return S_OK;
 }
-HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
+HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
@@ -291,7 +309,8 @@ HRESULT WINAPI close(void* p){
       (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown));
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
       (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
-  reset(*s);s->active=false;s->begun=false;s->device=nullptr;if(current==s)current=nullptr;return S_OK;
+  reset(*s);s->active=false;s->begun=false;s->device=nullptr;
+  if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);}return S_OK;
 }
 }
 
@@ -305,6 +324,7 @@ namespace edvr {
 // False until a channel is acquired (a flat session, the OpenVR path, or
 // VR still starting).
 bool nativeTemporalWarmTarget(ID3D11Device** dev, unsigned long* thread) {
+  if (t_insideTreat) return false;  // this thread holds the lock (see g_recommended)
   std::lock_guard<std::mutex> lock(mutex);
   if (!current || !current->active || !current->device) return false;
   if (dev) *dev = current->device;
@@ -319,9 +339,11 @@ bool nativeTemporalWarmTarget(ID3D11Device** dev, unsigned long* thread) {
 // inverse treat() takes above, before its sign and lag switches, which are
 // the pass's reading of the jitter, not where the game put the pixels.
 // (0, 0) when the pass is not jittering. False before the first beginFrame
-// or once the channel closes.
+// or once the channel closes -- and on a thread inside treat(), which holds
+// the lock (a UI draw issued inside the door is late for the layer anyway).
 bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float* jy,
                               uint32_t* w, uint32_t* h) {
+  if (t_insideTreat) return false;
   std::lock_guard<std::mutex> lock(mutex);
   if (!current || !current->active || !current->begun || eye > 1) return false;
   const State& s = *current;
@@ -333,15 +355,19 @@ bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float
   if (h) *h = s.height[eye];
   return true;
 }
-// fix.ui_quality's surfaces (ui_surfaces.h): the recommendation the runtime
-// gave the game for the frame being drawn, max over eyes -- what
-// GetRecommendedRenderTargetSize answers, the FOV trim and the cull guard
-// included. Read from CreateTexture2D's threads, so under the lock.
+// fix.ui_quality's surfaces (ui_surfaces.h): the size, max over eyes, the
+// runtime's beginFrame says the frame being drawn was rendered for (the
+// host's treatedGeometry: the FOV trim and the cull guard included). Outside
+// an adoption that is what GetRecommendedRenderTargetSize answers; DURING a
+// cull-guard or FOV-trim adoption it is the previous ask, one rebuild behind
+// the game (review P3-1, open). Read from inside CreateTexture2D -- EDVR's
+// own creates in treat() included -- so from g_recommended, never the lock.
 bool nativeTemporalRecommended(uint32_t* w, uint32_t* h) {
-  std::lock_guard<std::mutex> lock(mutex);
-  if (!current || !current->active || !current->begun || !current->recW || !current->recH) return false;
-  if (w) *w = current->recW;
-  if (h) *h = current->recH;
+  const uint64_t v = g_recommended.load(std::memory_order_acquire);
+  const uint32_t rw = static_cast<uint32_t>(v >> 32), rh = static_cast<uint32_t>(v);
+  if (!rw || !rh) return false;
+  if (w) *w = rw;
+  if (h) *h = rh;
   return true;
 }
 }

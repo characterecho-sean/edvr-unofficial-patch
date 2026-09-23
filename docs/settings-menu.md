@@ -86,7 +86,7 @@ current timing and overlay qualification is linked separately.*
 - **2026-09-23 (later):** the `HUD quality` row is gone -- one key,
   `fix.ui_quality`, now drives both the cockpit panels' size and the layer
   (docs/ui-layer-2026-09-23.md); `fix.hud_quality` is no longer read.
-  `advanced.ui_replay` (1 | 0, developer tier) is the A/B for the deferred
+  `advanced.ui_replay` (on | off, developer tier) is the A/B for the deferred
   UI replay of the cockpit HUD.
 
 *A design document, written before the code. It supersedes and extends
