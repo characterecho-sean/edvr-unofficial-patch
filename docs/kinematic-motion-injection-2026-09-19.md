@@ -3,30 +3,29 @@
 ## Status
 
 - **State:** DECIDED DIRECTION, 2026-09-19 (Sean): engine-level injection from
-  KinematicRig truth is the design, not draw-call interpretation in the render
-  pipeline (ruled out as a class). Phase 0/A/B built and flown clean by 2026-09-20
-  17:05 (tracker, sphere-backed quarter-res ownership mask fix.engine_motion_veto
-  default off, straddle -> paint-none; whole-eye cyan gone, per-pixel ownership
-  still coarse). Four engine-truth routes to a mover/static flag were then tried and
-  closed 0-for-4 by 21:25 that day -- see that entry. RESUMED OFFLINE 2026-09-23
-  (Sean: motion vectors should derive from the engine, not render-time estimates);
-  offline research done, no code. An opus read-only pass reframed the question from
-  "is this record a mover" to "where can a previous-frame pose be read at all," and
-  found: no engine velocity buffer anywhere in the VR path (413 shaders, none
-  two-channel; BlurEnabled false); record+0x1C0..0x1F8 is NOT a previous-frame
-  transform at draw time, only a change detector FUN_14433DB20 sets equal to +0xF0
-  at its own tail; and movers ARE rig records -- a moving t33 pool record matches a
-  tracked record's +0x170 to under 1 mm in the same frame, across four captures.
-  Full evidence and the three designs it permits (A pool-diff, B engine-record, C
-  fifth G-buffer target) are in the 2026-09-23 entry.
-- **Open:** superseded by Sean's requirement and the overseer's answer in the
-  2026-09-23, later entry -- generalized: camera-only through depth for statics, exact
-  engine-record delta via substituted pool shaders for movers (design C fed by design
-  B), and the existing DLSS/FSR reactive mask as the only fallback; design A (pool
-  content-diffing) dropped as guesswork. Still to verify before code: stations and
-  ships in space as rig records; the previous bone palette's residency; the particle
-  families' inputs; the substitution cost for the three pool families and the skinned
-  ones.
+  KinematicRig truth, not draw-call interpretation (ruled out as a class). Phase 0/A/B
+  built and flown clean by 2026-09-20 17:05 (tracker, sphere-backed quarter-res
+  ownership veto, straddle -> paint-none; whole-eye cyan gone). Four engine-truth
+  routes to a mover/static flag closed 0-for-4 by 21:25 that day. RESUMED OFFLINE
+  2026-09-23 (Sean: motion vectors should derive from the engine, not render-time
+  estimates); the offline pass then found no engine velocity buffer anywhere in the VR
+  path, the record's +0x1C0..0x1F8 block a same-frame change detector not history, and
+  movers proven to be rig records matching tracked poses to under 1 mm (2026-09-23
+  entry). Sean then set the requirement -- GENERALIZED, no estimation anywhere, not
+  even as a fallback -- and the overseer answered with three sources: camera-only for
+  statics, engine-record delta via substituted pool shaders for movers (design C fed
+  by design B), and the existing DLSS/FSR reactive mask as the only fallback; design A
+  (pool content-pairing) was the open alternative (2026-09-23, later entry). The first
+  half of the resulting flight is now IN: blur ON renders no velocity anywhere (same
+  pool shaders, no two-channel target, no blur pass before the tone-map), and on the
+  landing ship the engine-record join matched all 64 drawn movers exactly (56/56 of
+  the fast ones) while design A's content-pairing mis-paired 11-23 of those 56 --
+  DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry).
+- **Open:** B's coverage of stations and ships in space (untested, no tracker capture
+  exists off-settlement); the previous bone palette's residency; the particle
+  families' inputs; the substitution cost for the seven families (the three pool
+  families plus the landing ship's four); and whether the engine reads t33 bytes
+  288-319 on the CPU side.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -35,13 +34,11 @@
   dirty-node-queue family mismatch); an engine velocity buffer in the VR path, and
   record+0x1C0..0x1F8 as a previous-frame transform at draw time (both 2026-09-23
   entry). Do not re-propose any of the above.
-- **Next:** the combined flight in the 2026-09-23, later entry, awaiting Sean's go --
-  motion blur ON, `advanced.glare_shader_dump = 1` (restart), the tracker on; one
-  eye-run capture at a station approach with ship traffic, then a settlement with a
-  landing ship. Read the blur-on shaders via analysis\motion\dxbc_sig.py (two-channel
-  targets, previous-pose SRVs) and the station's movers via mover_exact.py /
-  mover_vs_tracker.py against tracked records; if blur is per-object the engine may
-  already carry the buffer design C wants.
+- **Next:** the station-approach capture with the tracker on (blur back OFF,
+  glare_shader_dump back to 0) for coverage; then, Sean's call, phase 1 of B+C -- the
+  per-record delta from the tracker, the pool families' VS/PS substituted to write a
+  velocity target in the game's own pass, the reactive mask as the only fallback,
+  measured before/after on a landing ship.
 
 ## Premise
 
@@ -1772,3 +1769,72 @@ settlement with a landing ship. Read: the blur-on shaders through
 analysis\motion\dxbc_sig.py for two-channel targets and previous-pose SRVs; the
 station's movers through mover_exact.py / mover_vs_tracker.py against tracked records.
 Awaiting Sean's go.
+
+### 2026-09-23, evening -- Blur ON changes nothing; the landing ship's movers join the tracker 64/64; design A measured wrong
+
+Sean flew the first half of the combined flight named in the entry above: build fd25af9, a
+ship landing at a settlement, motion blur ON in the game's graphics options,
+`advanced.glare_shader_dump = 1`, the tracker on (2026-09-23 04:34 local). An opus
+read-only pass analysed the capture -- gfx log edvr_gfx_20260923_043410.log, eye run
+043720, 19 pool frames, depth, eye images, ledger and drawstate -- with artefacts under
+the main checkout's gitignored analysis\motion\blur_on\ and the scripts in
+analysis\motion\ (mover_draws.py is now a shared import for the mover_*.py scripts).
+
+**Blur ON renders no per-object velocity (confidence high).** The 250 new shader files are
+160 compute (compute dumping only began 2026-09-07, so all count as "new"), 52 pixel, 38
+vertex; of the 45 new VS/PS hashes bound in this eye run, 39 are also bound in blur-off
+runs from 09-20 to 09-23. Every one of the 99 targets the 52 new PS write is xyzw, none
+two-channel: the four-target ones write emissive or a constant to o3 (`mul o3.xyz,
+r0.xyzx, cb1[90].yyyy` in F1670378; `mov o3.xyzw, l(0,0,0,0)` in 669CC896), the two-target
+glass ones (29D8624F, D0B9213C, B9F7DA33) a transmittance tint. All 38 new VS have one
+SV_POSITION; the only clip-like extra output, CURRENTCLIPPOSITION in vs_65503A08168D246C,
+is the same value (`mov [precise] o1.xyzw, r0.xyzw`) feeding a depth fade
+(ps_D016068F24E2A565). The extra SRV slots are bounds (t36) and a mask texture (t0), not
+poses. Across all 89 pool-type VS in the dump, t33 is read only at 0, 4, 12, 16, 320, 324,
+332 and the material blocks at 32+32k; nothing reads bytes 288-319; no VS reads
+cb1[270..273] twice or cb1[192..195] at all.
+
+ruled out: an engine velocity buffer with motion blur ON, because blur-on run 043720 binds
+the same pool shaders, writes no two-channel target, keeps the second pose block a
+same-frame copy, and adds no pass before the tone-map (2026-09-23).
+
+**The pool families are unchanged.** Frame 2 binds EB5234DB6ADB491D 4,499 draws, 5B4D/4375
+2,521, BBE5/DB3E 922 (7,942 of 10,083 pool rows), the same hashes as blur off; t33 stride
+336 (7,168 records), t38 stride 48; the record's second pose block (bytes 292-303 and
+312-319) equals the first byte for byte on 100% of 7,168 records in frames 3-20, including
+every record that moved since the previous frame (147-195 per frame), same as blur-off run
+165433; cb1[192..195] is zero in the scene pass in both eyes (and in blur-off run 012514);
+the pool buffer is renamed each frame, so no previous t33 is resident.
+
+**No blur pass.** The eye-sized full-screen sequence is identical to blur-off runs 165433
+and 012514 (15 draws, ending per eye with the tone-map 2D78DC3F/99C21CEB then a
+2-instruction copy); the tone-map's colour input is the lighting composite's target
+(resource @753, 1995x1970, fmt 26); the 13 pairs unique to this ledger are cockpit
+forward, glass and holo materials. Caveats: the census truncated inside frame 0
+(16,384-line ring), so late offscreen or compute passes are unseen; the capture was at
+landing speed, and a speed-gated camera blur compiled on first use would not appear.
+
+**The landing ship.** 9,488-9,491 pool eye draws per frame, 138-198 moving records,
+402-536 mover draws (4.2-5.6%); the ship is a rigid group of 33-48 records about 0.54 km
+out moving about (0.4, -1.8, -0.6) m per frame; its 184-196 draws per frame bind no
+blur-on variant (DE545DC8/E46E3E48, AACFDCF2/CF534B32, 66DE2CAD/864F1F94, EB52/CB9F,
+61AE8EB0/FC43E427, 5B4D/4375: all from the 09-06 dump, all reading t33 and t38 only with
+cb1[270..273] and cb1[275]). mover_exact: ledger frame f maps to tracker frame 16867 + f;
+at f = 5, 10 and 16, 64 drawn movers match a tracked record's +0x170 and quaternion
+EXACTLY, including all 56 fast (ship) movers; any other frame offset matches at most 1;
+the tracker's own delta equals the true pool motion for all 56 ship movers, while the
+pool-side content pairing (design A) picked a look-alike sibling part for 11-23 of the 56
+per frame -- design A's failure, measured.
+
+ruled out: design A, pool content-pairing as the previous-pose source, because on the
+landing ship it mis-paired 11-23 of 56 fast movers per frame while the engine-record join
+matched 64/64 exactly (2026-09-23).
+
+**What EDVR still needs.** The current pose from t33 at draw time, the previous pose from
+the tracker keyed by the engine record, and its own previous view-projection for the
+camera term. An implementation lead: bytes 288-319 of each t33 record (a float, then
+position, base, scale and quaternion) are a same-frame copy no dumped shader reads, so
+EDVR could write the previous pose there at the pool's Unmap and a substituted VS would
+read t33 +292/+312 with no extra SRV; whether the engine reads that block on the CPU side
+is unknown. The ship adds four families with the pool layout to C's substitution set
+(DE54, AACF, 66DE, 61AE) beside the three pool families, blur setting irrelevant.
