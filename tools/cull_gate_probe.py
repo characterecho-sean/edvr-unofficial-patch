@@ -6,7 +6,8 @@ print the inputs the occlusion-culling recall measurement needs
 
     python tools/cull_gate_probe.py <edvr_logs\\pool> <stamp> [<stamp> ...]
            [--frame F] [--radius 1.0] [--occluder-range 120] [--records 40]
-           [--parts 40] [--parts-csv FILE]
+           [--parts 40] [--parts-csv FILE] [--lod-bias K[,K...]]
+           [--settlement-ms 6.3,8.5]
     python tools/cull_gate_probe.py --self-test
     python tools/cull_gate_probe.py --verify-fixture <gate file>   (build.bat)
 
@@ -33,7 +34,14 @@ only, and --parts parts listed (one-eye parts first; --parts-csv writes
 all). With version 9
 geometry in drawstate_<stamp>.eyemesh.bin: the occluder set (seen records
 within --occluder-range metres), its meshes' triangle counts and whether
-their states are opaque and depth-writing.
+their states are opaque and depth-writing. With --lod-bias (version 2):
+FUN_1442B3FC0 re-run on every part row -- its screen-size and frustum terms
+exactly; its t0 term needs the part's LOD table, which the probe does not
+record, so each model's t0 is bracketed by its rows -- and per factor k the
+pool eye draws a bias there removes by the exact instance-range join: the
+screen-size threshold x k (exact), the view's LOD scale x k and the LOD
+distance x k (lower..upper), per eye and in all, as a share of the pool eye
+draws and in ms at --settlement-ms (docs/design-settlement-lod-bias-2026-09-22.md).
 
 gate_<stamp>.bin ('EDVRGATE' version 2; version 1 lacks every [v2] field),
 little-endian, written field by field (cull_gate_probe.cpp, write()):
@@ -571,13 +579,15 @@ def run(pool_dir, stamp, args):
     nrec = len(pool['pos'])
     drawn = {'A': set(), 'B': set()}
     rows_of = {}
+    eye_draws = []   # (eye, the instance range's slots) per pool eye draw, for --lod-bias
     for i, r in enumerate(rows):
         e = eye_of_rt.get(int(r['rt']))
         if not e or int(r['inst']) == 0 or (int(r['start']) == 0 and int(r['inst']) == 1):
             continue
         s, n = int(r['start']), int(r['inst'])
-        for x in inst[s * stride:(s + n) * stride:stride]:
-            x = int(x)
+        slots = [int(x) for x in inst[s * stride:(s + n) * stride:stride]]
+        eye_draws.append((e, slots))
+        for x in slots:
             if x < nrec:
                 drawn[e].add(x)
                 rows_of.setdefault(x, []).append(i)
@@ -693,6 +703,8 @@ def run(pool_dir, stamp, args):
         print('    %#x  %3d/%-3d  mask %s  gate %s  builder %s  ledger %s' % (
             rid, nseen, parts, fmt(v['mask']), fmt(v['gate']), fmt(v['builder']), fmt(led)))
     report_parts(gate, obs_frame, eye_views, pclaims, drawn, seen_of, verdicts, off, pool, args)
+    if args.lod_bias:
+        report_lod_bias(gate, obs_frame, eye_views, pclaims, verdicts, eye_draws, args.lod_bias, args.settlement_ms)
     occluders(pool_dir, stamp, frame, recs, seen, cams, rows_of, args)
     return 0
 
@@ -824,6 +836,232 @@ def report_parts(gate, obs_frame, eye_views, pclaims, drawn, seen_of, verdicts, 
         print('  %d parts written to %s' % (len(order), args.parts_csv))
 
 
+# --------------------------------------------------------------------------- the LOD bias (--lod-bias)
+
+SIZE_FACTOR = 0.5   # DAT_144E2F870 (0.5) x DAT_144E2F880 (1.0), .rdata of build 332841 (decomp_42B3FC0.txt:68-71)
+
+
+def factors(text):
+    """'1,1.25,2' -> [1.0, 1.25, 2.0] (an argparse type): positive, finite."""
+    try:
+        out = [float(x) for x in text.split(',') if x.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError('expected numbers separated by commas: %r' % text)
+    if not out or any(not (0 < x < float('inf')) for x in out):
+        raise argparse.ArgumentTypeError('expected positive finite numbers: %r' % text)
+    return out
+
+
+def part_row_terms(gate):
+    """FUN_1442B3FC0 (decomp_42B3FC0.txt) re-run on every version 2 part row
+    whose frame has a view dump. Per row: d, the distance from the view's
+    camera (+0x540, xyz); size_ok, the screen-size term 0.5*(A*d + B) <= r
+    (A = view +0x550, B = +0x560: the size of one pixel per metre of
+    distance and its orthographic constant, FUN_14280F800); inside, the
+    frustum term (FUN_1404F4E10 on the view's dumped planes: out when
+    n.c - w > r); f = A*(d - r)*s + B, the LOD distance (s = the context's
+    +0x30). The third term, f <= t0 (the first float of the part's LOD
+    table, param_1[4] -> *(entry+8), 0x80 bytes), and the LOD pick need that
+    table, which the probe does not record. The engine's distance is
+    rsqrt(rcp(d^2)) (~2^-11 relative); this one is exact."""
+    import numpy as np
+    dumps = {d['frame']: d for d in gate['dumps']}
+    parts = gate.get('parts', ())
+    n = len(parts)
+    f32 = np.float32
+    C = np.array([p['centre'] for p in parts], f32).reshape(n, 3)
+    R = np.array([p['radius'] for p in parts], f32)
+    cam = np.zeros((n, 3), f32)
+    A = np.zeros(n, f32)
+    B = np.zeros(n, f32)
+    S = np.zeros(n, f32)
+    ok = np.zeros(n, bool)
+    inside = np.ones(n, bool)
+    groups = {}
+    for i, p in enumerate(parts):
+        groups.setdefault((p['frame'], p['view']), []).append(i)
+    for (frame, view), idx in groups.items():
+        d = dumps.get(frame)
+        if d is None or view >= len(d['views']):
+            continue
+        idx = np.array(idx)
+        v = d['views'][view]
+        cam[idx] = f32(v['camera'][:3])
+        A[idx], B[idx], S[idx] = f32(v['lod_scale']), f32(v['lod_bias']), f32(d['lod_scale'])
+        ok[idx] = True
+        for pl in v['planes']:
+            pl = np.array(pl, f32)
+            dot = (C[idx, 0] * pl[0] + C[idx, 1] * pl[1]) + (C[idx, 2] * pl[2] - pl[3])
+            inside[idx] &= ~(R[idx] < dot)
+    diff = C - cam
+    d = np.sqrt((diff * diff).sum(axis=1)).astype(f32)
+    size_ok = f32(SIZE_FACTOR) * (A * d + B) <= R
+    f = (A * (d - R) * S + B).astype(f32)
+    passed = np.array([bool(p['passed']) for p in parts], bool)
+    lod = np.array([p['lod'] for p in parts], np.int64)
+    model = np.zeros(n, np.uint64)
+    for i, p in enumerate(parts):
+        if p['builder'] != NO_ROW and p['entry'] != NO_ROW:
+            b = gate['builders'][p['builder']]
+            if p['entry'] < b['entries_copied']:
+                model[i] = gate['entries'][b['entry_first'] + p['entry']]['model']
+    return dict(ok=ok, d=d, R=R, A=A, B=B, S=S, size_ok=size_ok, inside=inside, f=f, passed=passed, lod=lod,
+                model=model)
+
+
+def t0_brackets(terms):
+    """Per model, what the rows prove of its LOD table's first entry t0
+    (the part passes only while f <= t0): t0 >= lo, the largest f among its
+    passing rows, and t0 < hi, the smallest f among the rows the screen-size
+    and frustum terms pass but the engine rejected. Also the rows' own
+    consistency: a model whose lo >= hi, or whose LOD nibble falls as f
+    rises, contradicts a single monotone table."""
+    import numpy as np
+    lo, hi, nib = {}, {}, {}
+    ok = terms['ok'] & (terms['model'] != 0)
+    for i in np.nonzero(ok & terms['passed'])[0]:
+        m = int(terms['model'][i])
+        lo[m] = max(lo.get(m, -np.inf), float(terms['f'][i]))
+        nib.setdefault(m, []).append((float(terms['f'][i]), int(terms['lod'][i])))
+    for i in np.nonzero(ok & terms['size_ok'] & terms['inside'] & ~terms['passed'])[0]:
+        m = int(terms['model'][i])
+        hi[m] = min(hi.get(m, np.inf), float(terms['f'][i]))
+    conflicts = sum(1 for m in hi if lo.get(m, -np.inf) >= hi[m])
+    inversions = 0
+    for m, fl in nib.items():
+        top = {}
+        for fv, L in fl:
+            lo_hi = top.setdefault(L, [fv, fv])
+            lo_hi[0], lo_hi[1] = min(lo_hi[0], fv), max(lo_hi[1], fv)
+        levels = sorted(top)
+        inversions += any(top[a][1] > top[b][0] for i, a in enumerate(levels) for b in levels[i + 1:])
+    return dict(lo=lo, hi=hi, conflicts=conflicts, inversions=inversions, models=len(set(lo) | set(hi)))
+
+
+def lod_bias_verdicts(k, form, rows_of, keys, admitted, terms, brackets):
+    """Per part, per eye: does it still pass with the bias k? form 'size':
+    the screen-size threshold alone, 0.5*(k*A*d + B) <= r -- exact. form
+    'scale': the view's LOD scale A -> k*A, which moves the screen-size
+    term and f (t0 half at k*f). form 'distance': the LOD distance f -> k*f
+    (s -> k*s: how LODDistanceScale acts, ctx+0x30 = 2 - LODDistanceScale).
+    The t0 half is known only within the model's bracket, so 'scale' and
+    'distance' return (kept for certain, kept possibly): the draws they
+    remove lie between the two."""
+    import numpy as np
+    f32 = np.float32
+    out = {}
+    for e in 'AB':
+        sure = np.zeros(len(keys), bool)
+        maybe = np.zeros(len(keys), bool)
+        for j, key in enumerate(keys):
+            if not admitted[e][j]:
+                continue
+            for r in rows_of.get((key, e), ()):
+                if not terms['passed'][r]:
+                    continue
+                size = True
+                if form in ('size', 'scale'):
+                    size = bool(f32(SIZE_FACTOR) * (f32(k) * terms['A'][r] * terms['d'][r] + terms['B'][r]) <=
+                                terms['R'][r])
+                if form == 'size':
+                    sure[j] = maybe[j] = sure[j] or size
+                    continue
+                m = int(terms['model'][r])
+                fk = float(f32(k) * terms['f'][r])
+                sure[j] = sure[j] or (size and fk <= brackets['lo'].get(m, -np.inf))
+                maybe[j] = maybe[j] or (size and fk < brackets['hi'].get(m, np.inf))
+        out[e] = (sure, maybe)
+    return out
+
+
+def draws_removed(kept, claims_of_slot, eye_draws):
+    """The exact instance-range join: a drawn slot goes in an eye when no
+    part claiming it is kept there; a draw goes when every slot of its
+    instance range goes (a slot no builder part claims never goes).
+    kept: eye -> per-part bool; claims_of_slot: slot -> part indices;
+    eye_draws: [(eye, slots)]. Returns per-draw flags."""
+    gone_slot = {e: {k for k, idx in claims_of_slot.items() if not any(kept[e][i] for i in idx)} for e in 'AB'}
+    return [bool(len(slots)) and all(int(s) in gone_slot[e] for s in slots) for e, slots in eye_draws]
+
+
+def report_lod_bias(gate, obs_frame, eye_views, pclaims, verdicts, eye_draws, ks, ms):
+    """--lod-bias: the pool eye draws a bias k at FUN_1442B3FC0 removes, by
+    the exact instance-range join, per eye and in all; share of the pool eye
+    draws and ms at the given settlement shares (post-cut, pre-cut)."""
+    import numpy as np
+    if gate.get('version', 1) < 2:
+        print('  --lod-bias: gate file version 1 has no part rows')
+        return
+    terms = part_row_terms(gate)
+    br = t0_brackets(terms)
+    t = terms
+    frames = np.array([p['frame'] for p in gate['parts']])
+    pviews = np.array([p['view'] for p in gate['parts']])
+    eye_rows = t['ok'] & (frames == obs_frame) & ((pviews == eye_views['A']) | (pviews == eye_views['B']))
+    spec = t['size_ok'] & t['inside']
+    d0 = next((d for d in gate['dumps'] if d['frame'] == obs_frame), None)
+    if d0 is not None and max(eye_views.values()) < len(d0['views']):
+        va, vb = d0['views'][eye_views['A']], d0['views'][eye_views['B']]
+        print('  LOD bias at FUN_1442B3FC0, frame %d: eye views %d / %d, A (+0x550) %.9g / %.9g, B (+0x560) %g / %g, '
+              's (ctx+0x30) %g' % (obs_frame, eye_views['A'], eye_views['B'], va['lod_scale'], vb['lod_scale'],
+                                   va['lod_bias'], vb['lod_bias'], d0['lod_scale']))
+    print('  reproduction, every row with a view dump (%d of %d): engine passes the model rejects %d; engine rejects '
+          'the screen-size and frustum terms pass %d (the LOD table\'s t0, not recorded); in the frame\'s eye rows: '
+          '%d rows, %d pass, %d screen-size rejects, %d frustum rejects, %d t0 rejects' % (
+              int(t['ok'].sum()), len(t['ok']), int((t['ok'] & t['passed'] & ~spec).sum()),
+              int((t['ok'] & ~t['passed'] & spec).sum()), int(eye_rows.sum()), int((eye_rows & t['passed']).sum()),
+              int((eye_rows & ~t['size_ok']).sum()), int((eye_rows & t['size_ok'] & ~t['inside']).sum()),
+              int((eye_rows & spec & ~t['passed']).sum())))
+    print('  the rows against one monotone LOD table per model: %d models, %d t0 conflicts, %d nibble inversions' % (
+        br['models'], br['conflicts'], br['inversions']))
+    views, _ = part_views(gate, obs_frame)
+    record_builder = {rid: v['builder'] for rid, v in verdicts.items()}
+    keys = sorted({key for ks_ in pclaims.values() for key in ks_})
+    kidx = {key: j for j, key in enumerate(keys)}
+    pverdict = part_eye_verdicts(keys, views, eye_views, record_builder)
+    admitted = {e: np.array([pverdict[key][e] is True for key in keys]) for e in 'AB'}
+    rows_of = {}
+    eye_of_view = {eye_views['A']: 'A', eye_views['B']: 'B'}
+    for i, p in enumerate(gate['parts']):
+        if (p['frame'] == obs_frame and p['view'] in eye_of_view and p['builder'] != NO_ROW and t['ok'][i] and
+                not p['flags'] & (PART_UNVERIFIED | PART_FOREIGN_CALLER | PART_OWNER_MISMATCH | PART_SPHERE_FAULT)):
+            key = (gate['builders'][p['builder']]['record'], p['entry'], p['sub'])
+            if key in kidx:
+                rows_of.setdefault((key, eye_of_view[p['view']]), []).append(i)
+    claims_of_slot = {k: [kidx[key] for key in ks_] for k, ks_ in pclaims.items()}
+    n = len(eye_draws)
+    eye_of = np.array([e for e, _ in eye_draws])
+    base = draws_removed({e: admitted[e] for e in 'AB'}, claims_of_slot, eye_draws)
+    post, pre = ms
+    print('  pool eye draws %d (A %d, B %d); with the engine\'s own verdicts the join removes %d (must be 0)' % (
+        n, int((eye_of == 'A').sum()), int((eye_of == 'B').sum()), sum(base)))
+
+    def cells(gone):
+        g = np.array(gone, bool)
+        a, b = int((g & (eye_of == 'A')).sum()), int((g & (eye_of == 'B')).sum())
+        return a, b, a + b
+
+    print('  screen-size threshold x k (exact; the part must span k pixels):')
+    print('      k   parts A  parts B  draws A  draws B      A+B   share  %.1f ms  %.1f ms' % (post, pre))
+    for k in ks:
+        v = lod_bias_verdicts(k, 'size', rows_of, keys, admitted, terms, br)
+        a, b, tot = cells(draws_removed({e: v[e][0] for e in 'AB'}, claims_of_slot, eye_draws))
+        print('  %5g  %8d %8d %8d %8d %8d  %5.2f%%  %6.2f  %6.2f' % (
+            k, int((admitted['A'] & ~v['A'][0]).sum()), int((admitted['B'] & ~v['B'][0]).sum()), a, b, tot,
+            100.0 * tot / max(1, n), post * tot / max(1, n), pre * tot / max(1, n)))
+    for form, what in (('scale', 'the view\'s LOD scale x k (screen size and t0)'),
+                       ('distance', 'the LOD distance x k (t0 only: LODDistanceScale\'s mechanism, s = 2 - it)')):
+        print('  %s: t0 bracketed by the rows, removed draws lower..upper:' % what)
+        print('      k        A+B lower..upper        share       %.1f ms       %.1f ms' % (post, pre))
+        for k in ks:
+            v = lod_bias_verdicts(k, form, rows_of, keys, admitted, terms, br)
+            lo_n = cells(draws_removed({e: v[e][1] for e in 'AB'}, claims_of_slot, eye_draws))[2]
+            hi_n = cells(draws_removed({e: v[e][0] for e in 'AB'}, claims_of_slot, eye_draws))[2]
+            print('  %5g  %8d .. %-8d  %5.2f..%5.2f%%  %5.2f..%5.2f  %5.2f..%5.2f' % (
+                k, lo_n, hi_n, 100.0 * lo_n / max(1, n), 100.0 * hi_n / max(1, n), post * lo_n / max(1, n),
+                post * hi_n / max(1, n), pre * lo_n / max(1, n), pre * hi_n / max(1, n)))
+
+
 def occluders(pool_dir, stamp, frame, recs, seen, cams, rows_of, args):
     """Seen t33 records within --occluder-range of eye A: their draws' meshes
     from the version 9 geometry, triangle counts, and whether the state is
@@ -919,6 +1157,9 @@ def fixture_expectations(g):
     assert parts[0]['view_bits'] == 1 and parts[1]['view_bits'] == 2, 'the view bits a pass sets'
     assert parts[0]['sub_item'] and parts[1]['sub_item'] - parts[0]['sub_item'] == 32, 'the sub-item addresses'
     assert all(p['sub_item'] == 0 for p in parts if p['flags'] & PART_UNVERIFIED), 'no address without identity'
+    # --lod-bias reads the probe's own file: every row has its frame's dump; P1's distance is from view 0's camera.
+    t = part_row_terms(g)
+    assert t['ok'].all() and abs(float(t['d'][0]) - math.sqrt(134.0)) < 1e-4, 'LOD-bias terms on the rig\'s file'
 
 
 def self_test():
@@ -1044,7 +1285,84 @@ def self_test():
     assert t['rejected, drawn'] == 1 and t['admitted, undrawn'] == 0, t
     t = part_tally(pc, {'A': {1, 3}, 'B': {1}}, ev)
     assert t['rejected, drawn'] == 0 and t['admitted, undrawn'] == 1, t
+    lod_bias_self_test()
     print('cull_gate_probe self-test passed')
+
+
+def lod_bias_self_test():
+    """--lod-bias on a fixture with known answers. Eyes A = view 0 and B =
+    view 1 at the origin, A = 0.001 (a pixel spans 1 mm per metre), B = 0,
+    s = 1, one plane x - 50 (out when x - 50 > r). Record 10's parts:
+    P1 (model 0x100, e0/s0) at z 100, r 1: passes, f = 0.099;
+    P2 (0x100, e0/s1) at z 300, r 0.1: screen size 0.15 > 0.1, rejected;
+    P3 (0x200, e1/s0) at z 200, r 0.5: passes, f = 0.1995;
+    P4 (0x200, e1/s1) at z 400, r 2: both terms pass, rejected -- t0;
+    P5 (0x100, e0/s2) at x 60, z 100, r 1: outside the plane, rejected.
+    Draws per eye: [slot 1 = P1], [2 = P3], [1, 2], [7, claimed by none]."""
+    import contextlib
+    import numpy as np
+
+    def view(bits):
+        raw = bytearray(VIEW_BYTES)
+        struct.pack_into('<4f', raw, 0x540, 0, 0, 0, 0)
+        struct.pack_into('<ff', raw, 0x550, 0.001, 0)
+        struct.pack_into('<f', raw, 0x560, 0.0)
+        struct.pack_into('<Q', raw, 0x570, bits)
+        v = decode_view(bytes(raw))
+        v.update(planes=[[1.0, 0.0, 0.0, 50.0]], raw=bytes(raw))
+        return v
+    spec = [((0, 0), (0.0, 0.0, 100.0), 1.0, 1, 0), ((0, 1), (0.0, 0.0, 300.0), 0.1, 0, 0),
+            ((1, 0), (0.0, 0.0, 200.0), 0.5, 1, 1), ((1, 1), (0.0, 0.0, 400.0), 2.0, 0, 0),
+            ((0, 2), (60.0, 0.0, 100.0), 1.0, 0, 0)]
+    parts = [dict(pose=0, sub_item=0, view_bits=1 << v, centre=list(c), radius=r, frame=5, builder=0, entry=es[0],
+                  sub=es[1], lod=lod, view=v, passed=ok, flags=0) for v in (0, 1) for es, c, r, ok, lod in spec]
+    g = dict(version=2, dumps=[dict(frame=5, lod_scale=1.0, views=[view(1), view(2)])],
+             builders=[dict(record=10, entry_first=0, entries_copied=2)],
+             entries=[dict(model=0x100), dict(model=0x200)], parts=parts)
+    t = part_row_terms(g)
+    assert t['ok'].all() and list(t['size_ok'][:5]) == [True, False, True, True, True], t['size_ok']
+    assert list(t['inside'][:5]) == [True, True, True, True, False], t['inside']
+    assert abs(float(t['f'][0]) - 0.099) < 1e-6 and abs(float(t['f'][2]) - 0.1995) < 1e-6, t['f']
+    br = t0_brackets(t)
+    assert br['lo'] == {0x100: float(t['f'][0]), 0x200: float(t['f'][2])} and br['hi'] == {0x200: float(t['f'][3])}, br
+    assert (br['conflicts'], br['inversions'], br['models']) == (0, 0, 2), br
+    # A model whose rows contradict one monotone table: a pass beyond its own t0 reject, a nibble that falls.
+    bad = dict(g, parts=parts + [dict(parts[2], centre=[0.0, 0.0, 500.0], lod=0)])
+    br_bad = t0_brackets(part_row_terms(bad))
+    assert (br_bad['conflicts'], br_bad['inversions']) == (1, 1), br_bad
+    keys = [(10, 0, 0), (10, 1, 0)]
+    admitted = {e: np.array([True, True]) for e in 'AB'}
+    rows_of = {((10, 0, 0), 'A'): [0], ((10, 1, 0), 'A'): [2], ((10, 0, 0), 'B'): [5], ((10, 1, 0), 'B'): [7]}
+    claims = {1: [0], 2: [1]}
+    draws = [(e, s) for e in 'AB' for s in ([1], [2], [1, 2], [7])]
+
+    def removed(k, form, which):
+        v = lod_bias_verdicts(k, form, rows_of, keys, admitted, t, br)
+        return sum(draws_removed({e: v[e][which] for e in 'AB'}, claims, draws))
+    # The screen-size threshold alone: P3 (r 0.5 at 200 m) needs k * 0.1 > 0.5, P1 k * 0.05 > 1.
+    got = [removed(k, 'size', 0) for k in (1, 4, 6, 21)]
+    assert got == [0, 0, 2, 6], got
+    # The view's LOD scale x 2: P3's 2f passes its model's t0 reject (certain); P1's 2f is past every f its model
+    # was seen passing at (possible) -- lower bound 2 draws (the [2]s), upper 6 (all but the unclaimed [7]s).
+    assert (removed(2, 'scale', 1), removed(2, 'scale', 0)) == (2, 6)
+    assert (removed(1.5, 'distance', 1), removed(1.5, 'distance', 0)) == (0, 6)
+    assert (removed(1, 'scale', 1), removed(1, 'scale', 0)) == (0, 0), 'no bias, nothing removed'
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report_lod_bias(g, 5, {'A': 0, 'B': 1}, {1: {(10, 0, 0)}, 2: {(10, 1, 0)}},
+                        {10: {'builder': {'A': True, 'B': True}}}, draws, [1.0, 6.0], [6.3, 8.5])
+    text = buf.getvalue()
+    assert 'engine passes the model rejects 0' in text, text
+    assert 'engine rejects the screen-size and frustum terms pass 2' in text, text
+    assert '10 rows, 4 pass, 2 screen-size rejects, 2 frustum rejects, 2 t0 rejects' in text, text
+    assert 'the join removes 0 (must be 0)' in text, text
+    six = [ln.split() for ln in text.splitlines() if ln.split()[:1] == ['6']]
+    assert six and six[0][:6] == ['6', '1', '1', '1', '1', '2'], six
+    for ok, arg in ((True, '1,1.25,2'), (False, '0'), (False, 'x'), (False, 'inf')):
+        try:
+            assert factors(arg) == [1.0, 1.25, 2.0] and ok, arg
+        except argparse.ArgumentTypeError:
+            assert not ok, arg
 
 
 def main():
@@ -1057,6 +1375,10 @@ def main():
     ap.add_argument('--records', type=int, default=40, help='engine records to list')
     ap.add_argument('--parts', type=int, default=40, help='parts to list (version 2; one-eye parts first)')
     ap.add_argument('--parts-csv', metavar='FILE', help='write every joined part (version 2) to this CSV')
+    ap.add_argument('--lod-bias', metavar='K[,K...]', type=factors, default=None,
+                    help='version 2: the pool eye draws a bias k at FUN_1442B3FC0 removes (exact join), per k')
+    ap.add_argument('--settlement-ms', metavar='POST,PRE', type=factors, default=[6.3, 8.5],
+                    help='the settlement\'s draw-submission share in ms, post-cut and pre-cut (default 6.3,8.5)')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--verify-fixture', metavar='GATE_FILE', help=argparse.SUPPRESS)
     a = ap.parse_args()
@@ -1077,6 +1399,8 @@ def main():
         return 0
     if not a.pool_dir or not a.stamps:
         ap.error('a pool directory and at least one run stamp are required (or --self-test)')
+    if len(a.settlement_ms) != 2:
+        ap.error('--settlement-ms takes two values: POST,PRE')
     status = 0
     for stamp in a.stamps:
         try:
