@@ -301,6 +301,65 @@ int main(int argc, char** argv) {
         else fail("...and the full table is left unchanged", "count moved");
     }
 
+    // --- seeding the documented census ratio ------------------------------
+    {
+        // A fresh table, exactly a fresh install with no persisted file.
+        edvr::HudQualityRatioSlot slots[8];
+        uint32_t count = 0;
+        const bool added = edvr::hudQualitySeedCensusRatio(slots, &count, 8, 10);
+        if (added && count == 1) ok("seeding a fresh table adds exactly one entry");
+        else fail("seeding a fresh table adds exactly one entry",
+                 added ? "count was not 1" : "hudQualitySeedCensusRatio returned false");
+        if (slots[0].seeded && slots[0].confirmed) {
+            ok("...marked both seeded and confirmed (usable without a session's own evidence)");
+        } else {
+            fail("...marked both seeded and confirmed (usable without a session's own evidence)",
+                 "one of the two flags was not set");
+        }
+
+        // The whole point: one cockpit session, any HMD Quality, matches on
+        // the very first CreateTexture2D -- no second, different-resolution
+        // session required the way an ordinary (unseeded) ratio needs.
+        uint32_t matchedIdx = 12345;
+        expectVerdict(slots, &count, 8, edvr::kHudQualityCensusRatioW,
+                     edvr::kHudQualityCensusRatioH, 5000, 10,
+                     edvr::HudQualityRatioVerdict::kConfirmed,
+                     "the seeded vector ratio matches at a NEW internal resolution on the first call");
+        // hudQualityRatioObserve's own out-param, so the caller can label
+        // the log line -- fss_res.cpp's actual use of this.
+        edvr::hudQualityRatioObserve(slots, &count, 8, edvr::kHudQualityCensusRatioW,
+                                     edvr::kHudQualityCensusRatioH, 7000, 10, &matchedIdx);
+        if (matchedIdx == 0 && slots[matchedIdx].seeded) {
+            ok("...and the match reports back which slot, so the caller can tell it was seeded");
+        } else {
+            fail("...and the match reports back which slot, so the caller can tell it was seeded",
+                 "wrong index or not marked seeded");
+        }
+
+        // Calling it again (the next session's load, or a reload this
+        // session) must not add a duplicate.
+        const bool addedAgain = edvr::hudQualitySeedCensusRatio(slots, &count, 8, 10);
+        if (!addedAgain && count == 1) {
+            ok("seeding twice is idempotent -- no duplicate entry");
+        } else {
+            fail("seeding twice is idempotent -- no duplicate entry",
+                addedAgain ? "returned true the second time" : "count changed");
+        }
+
+        // An UNSEEDED ratio in the SAME (already-seeded) table still needs
+        // two different-resolution sessions -- seeding one shape does not
+        // give every shape a free pass.
+        expectVerdict(slots, &count, 8, 1500, 2800, 4340, 10,
+                     edvr::HudQualityRatioVerdict::kNewCandidate,
+                     "an unseeded ratio in a seeded table still starts as a new candidate");
+        expectVerdict(slots, &count, 8, 1500, 2800, 4340, 10,
+                     edvr::HudQualityRatioVerdict::kSameSession,
+                     "...and still waits at the same internal width");
+        expectVerdict(slots, &count, 8, 1500, 2800, 6510, 10,
+                     edvr::HudQualityRatioVerdict::kConfirmed,
+                     "...confirming only once a second, different width agrees");
+    }
+
     if (g_fails) {
         std::printf("HUD QUALITY TEST FAILED (%d)\n", g_fails);
         return 1;

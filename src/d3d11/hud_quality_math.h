@@ -82,12 +82,15 @@ bool hudQualityRatioNear(uint32_t candidateX10000, uint32_t knownX10000,
 // One entry in the cross-session ratio table: a candidate surface shape,
 // as (width, height) ratios to the internal render resolution, the internal
 // WIDTH it was last observed at (the "was this a different session's
-// resolution" test), and whether two different resolutions have now agreed.
+// resolution" test), whether two different resolutions have now agreed,
+// and whether it was SEEDED (fss_res.h's own documented census) rather
+// than measured on this rig.
 struct HudQualityRatioSlot {
     uint32_t ratioWx10000 = 0;
     uint32_t ratioHx10000 = 0;
     uint32_t lastInternalW = 0;
     bool     confirmed = false;
+    bool     seeded = false;
 };
 
 enum class HudQualityRatioVerdict : uint8_t {
@@ -105,9 +108,30 @@ enum class HudQualityRatioVerdict : uint8_t {
 // time a second, different internalW agrees with it. Pure -- no file I/O,
 // no global state -- so the caller owns persistence; fss_res.cpp loads the
 // table at configure time and saves it after any call that changes it
-// (kNewCandidate or the kSameSession->kConfirmed transition).
+// (kNewCandidate or the kSameSession->kConfirmed transition). *matchedIndex,
+// when given, is set to the slot involved for every verdict except kNoSlot
+// -- the caller's way to ask whether that entry was `seeded`.
 HudQualityRatioVerdict hudQualityRatioObserve(HudQualityRatioSlot* slots, uint32_t* count,
                                               uint32_t capacity, uint32_t rw, uint32_t rh,
-                                              uint32_t internalW, uint32_t toleranceX10000);
+                                              uint32_t internalW, uint32_t toleranceX10000,
+                                              uint32_t* matchedIndex = nullptr);
+
+// fss_res.h's own two-session census, the founding evidence for the whole
+// ratio match: 908x1361 at scene 4340x4284, and 1363x2042 at scene
+// 6510x6426 -- "the same fraction to four significant figures, three
+// surfaces agreeing" (vector, text and icon, per that census). Averaged to
+// one canonical ratio; the existing tolerance absorbs both original
+// readings (each two ten-thousandths from it) and whatever a real rig
+// rounds to.
+constexpr uint32_t kHudQualityCensusRatioW = 2093;
+constexpr uint32_t kHudQualityCensusRatioH = 3178;
+
+// Ensures the census ratio above is present in slots[0..*count), adding it
+// (confirmed and seeded, needing no session's evidence) if it is not
+// already there -- seeded or independently measured and confirmed makes no
+// difference, both mean "already usable". Idempotent: safe to call every
+// load. Returns true only when a new seeded entry was actually added.
+bool hudQualitySeedCensusRatio(HudQualityRatioSlot* slots, uint32_t* count, uint32_t capacity,
+                               uint32_t toleranceX10000);
 
 }  // namespace edvr

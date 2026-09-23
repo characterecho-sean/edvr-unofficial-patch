@@ -10,11 +10,18 @@ session against this build yet.
 State: `fix.hud_quality = off | 1.0 | 1.25`, on the Performance page,
 generalises `advanced.surface_inflate` (fss_res.cpp) from a named `WxH` and
 an integer 2..4 to a size matched by its RATIO to the game's internal
-render resolution (confirmed across two sessions at different resolutions)
-and a float factor derived from the game's live HMD Quality. The classifier
+render resolution (seeded from a documented census for the interface
+surfaces, so one cockpit session at any HMD Quality is enough; any other
+ratio still needs two sessions at different resolutions to confirm) and a
+float factor derived from the game's live HMD Quality. The classifier
 (`ui_depth.cpp`) is no longer the matcher -- see "Why the rewrite" -- and is
 kept only as a same-session cross-check that labels a match vector/text/icon
-for the log.
+for the log. The internal render resolution itself falls back to the last
+session's reading for the same eye shape when this session has not
+measured one yet (`vScreenInternalResolution()`, `vscreen.cpp`), so the
+cockpit's own panels -- created before the strong measurement's 100+
+eye-shaped-draws-in-one-frame bar is usually cleared -- still get a real
+number to match against.
 
 Open: **gate G9** (`docs/crisp-ui-handoff.md:1017`) -- does inflating a
 surface sharpen its TEXT, or only its vector lines. Never flown for any
@@ -32,7 +39,11 @@ Kept only as a cross-check counter now.
 
 Next flight: HMD Quality 0.7 or lower, in the **cockpit** (not the main
 menu -- see Flight 1), `fix.hud_quality = 1.0`. See "What the first flight
-must show".
+must show". Seeding and the internal-resolution fallback (both 2026-09-23,
+same day, third commit) mean Sean's tenth session, at his usual HMD
+Quality 0.65, should now resize the interface surfaces on its own -- the
+first build of the day needed a second, different-resolution session that
+never came.
 
 ## Flight 1 (2026-09-23, build 7a47fd3c, gfx log edvr_gfx_20260923_073156.log
 and edvr_gfx_20260923_073409.log)
@@ -86,6 +97,41 @@ different resolutions. That fraction is exactly what `CreateTexture2D`
 already carries in its own desc, the moment the game asks -- no draw, no
 classifier, no prior session even required for the FIRST sighting (only
 for using it).
+
+## Seeding, and why a second flight still needed it (2026-09-23, third commit)
+
+Even with the ratio match built, Sean's next flight would still have
+matched nothing: the table starts EMPTY, and his sessions all run HMD
+Quality 0.65 -- with no second, DIFFERENT resolution ever seen, nothing on
+file could reach `kConfirmed`. The two-session proof already exists,
+though -- it is fss_res.h's own census above, already measured, already
+agreeing to four figures. `hudQualityLoadRatios` now seeds the table with
+it (`hudQualitySeedCensusRatio`, averaged to one canonical ratio,
+`kHudQualityCensusRatioW`/`H` = 2093/3178 ten-thousandths) whenever it is
+not already present, marked BOTH `confirmed` and `seeded` -- usable from
+the very first `CreateTexture2D` of the very first session, at any HMD
+Quality, with no local evidence required. The first match against a
+seeded entry logs which one it was ("matched a ratio seeded from the
+2026-09 census... not yet independently confirmed on this rig"), so the
+distinction between "the census's number" and "this rig's own measurement"
+stays visible in the log. Any OTHER ratio -- a holo panel, a menu screen,
+anything not in the census -- gets no such head start and still needs two
+different-resolution sessions, exactly as before.
+
+The internal resolution itself has the matching problem one level up: the
+strong measurement needs over 100 eye-shaped draws in one frame
+(`kSceneEyeDraws`), and the cockpit's own interface panels can be created
+in the first few frames, before that bar is cleared. `vScreenInternalResolution()`
+now falls back to the last SESSION's measurement for the same eye shape
+(a new small state file, `vscreen_internal_res.txt` next to the logs, the
+same raw-WinAPI discipline as `vscreen_auto_state.cpp`'s own file) when
+this session has not measured one yet, logged once
+("...using WxH, the last session's measurement for this eye shape...").
+The eye-shape check is the fallback's "same headset" test: a resolution
+measured on a different headset must not be handed to this session's ratio
+match. Superseded automatically the moment the real measurement lands
+later in the same session (and that value is then saved for the NEXT
+session's own fallback).
 
 ## The mechanism
 
@@ -186,6 +232,23 @@ A candidate seen but not yet confirmable, capped at 8 lines:
     internal render resolution is on file but not yet confirmed at a
     second, different resolution. Said at most 8 times.
 
+The first match against a seeded (not locally measured) ratio, once per
+slot per session:
+
+    hud quality: 908x1361 matched a ratio seeded from the 2026-09 census
+    (fss_res.h's own two-session measurement: 908x1361 at scene 4340x4284,
+    1363x2042 at 6510x6426) -- not yet independently confirmed on this
+    rig, inflating from this session's first sighting rather than waiting
+    for a second.
+
+The internal-resolution fallback, once per session:
+
+    vScreen: the internal render resolution has not been measured this
+    session yet (needs over 100 eye-shaped draws in one frame); using
+    1995x1970, the last session's measurement for this eye shape
+    (1995x1970), until the real one lands. fix.hud_quality's ratio match
+    is what asked. Said once.
+
 The RVA instrument, once per distinct size per session:
 
     hud quality: interface surface 1346x757 (vector) created from game
@@ -207,11 +270,12 @@ HMD Quality 0.7 or lower (Elite's own graphics options), `fix.hud_quality
 not only from the main menu (Flight 1's session never measured an internal
 resolution at all):
 
-1. The resize line, naming at least one surface. "seen not resized" > 0
-   with nothing resized on a FRESH install's first session is expected --
-   fss_res.h's own two-resolution proof needs a second session at a
-   different HMD Quality to confirm anything; that second session should
-   show a resize instead.
+1. The resize line, naming at least one surface -- expected on the FIRST
+   session now, since the interface surfaces' own ratio is seeded (see
+   "Seeding" above); no second session should be needed for those three.
+   "seen not resized" > 0 alongside it is fine -- some OTHER surface's
+   ratio, not yet in the census, still needs its own second session to
+   confirm.
 2. The HUD text judged in the headset, at `off`, `1.0` and `1.25` in turn
    (a menu trip between each, since surfaces only resize at their next
    creation) -- sharper or not. This is gate G9 itself: inflation has been
@@ -245,9 +309,12 @@ line (Performance page, matching `fix.settlement_detail`'s precedent);
 read in `fss_res.cpp`; asserted in `tools/config_test/config_test.cpp`.
 Contract count +1 over pre-hud_quality (one key, read and documented; 261
 read / 261 documented with this build). `hud_quality_test.exe --self-test`
-covers the parsing, the factor arithmetic, the rounding, and the ratio
-state machine (new-candidate / same-session / confirmed / table-full, and
-the founding two-session census numbers themselves); auto-discovered by
+covers the parsing, the factor arithmetic, the rounding, the ratio state
+machine (new-candidate / same-session / confirmed / table-full, and the
+founding two-session census numbers themselves), and the seeding rig
+(a fresh table matches the seeded ratio at a new internal resolution on
+the first call; seeding twice is idempotent; an unseeded ratio in the same
+table still needs two different-resolution sessions); auto-discovered by
 `tools/run_jobs.py`'s `:rig_<label>` scan in `build.bat`'s gate.
 
 ## Doubt, stated plainly
@@ -260,10 +327,20 @@ the founding two-session census numbers themselves); auto-discovered by
   (`renderW`/`renderH`, eye-shape-corroborated) rather than the weaker
   "busiest render target" one (`sceneW`/`sceneH` alone) that fires more
   often but is not guaranteed to be one undistorted eye's worth of scene
-  -- chosen for correctness over availability; the cost is that a session
-  which never triggers the strong promotion (Flight 1) matches nothing,
-  which the log now says plainly rather than guessing with a shakier
-  number.
+  -- chosen for correctness over availability; the cross-session fallback
+  (this commit) covers most of the gap this left, and the log says
+  plainly when the fallback itself has nothing to offer either.
+- The seeded ratio is ONE canonical value (the two census readings
+  averaged), not three separate per-family entries -- the census itself
+  measured "three surfaces agreeing" on one fraction, so one seed serves
+  vector, text and icon alike; a family whose real ratio turns out to
+  differ from the seed would still need its own two-session confirmation,
+  same as any other unseeded shape.
+- The internal-resolution fallback is keyed to eye SHAPE (width and height
+  within `near2`, 2 pixels), not to a headset name -- two different
+  headsets that happen to submit the same eye size would be treated as
+  "the same" by this check. Judged an acceptable, rare edge case rather
+  than plumbing a headset identity string through for it.
 - The inventory of every offscreen UI surface (shader family, ratio,
   what it shows) is in `docs/crisp-ui-handoff.md`'s "Offscreen UI surface
   inventory" section, written for the Design A build; only the vector/

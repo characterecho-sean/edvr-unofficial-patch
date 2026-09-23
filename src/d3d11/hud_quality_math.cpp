@@ -51,7 +51,8 @@ bool hudQualityRatioNear(uint32_t candidateX10000, uint32_t knownX10000,
 
 HudQualityRatioVerdict hudQualityRatioObserve(HudQualityRatioSlot* slots, uint32_t* count,
                                               uint32_t capacity, uint32_t rw, uint32_t rh,
-                                              uint32_t internalW, uint32_t toleranceX10000) {
+                                              uint32_t internalW, uint32_t toleranceX10000,
+                                              uint32_t* matchedIndex) {
     if (!slots || !count) return HudQualityRatioVerdict::kNoSlot;
     for (uint32_t i = 0; i < *count; ++i) {
         HudQualityRatioSlot& s = slots[i];
@@ -59,6 +60,7 @@ HudQualityRatioVerdict hudQualityRatioObserve(HudQualityRatioSlot* slots, uint32
             !hudQualityRatioNear(rh, s.ratioHx10000, toleranceX10000)) {
             continue;
         }
+        if (matchedIndex) *matchedIndex = i;
         if (s.confirmed) {
             s.lastInternalW = internalW;
             return HudQualityRatioVerdict::kConfirmed;
@@ -76,13 +78,35 @@ HudQualityRatioVerdict hudQualityRatioObserve(HudQualityRatioSlot* slots, uint32
         return HudQualityRatioVerdict::kConfirmed;
     }
     if (*count >= capacity) return HudQualityRatioVerdict::kNoSlot;
+    if (matchedIndex) *matchedIndex = *count;
     HudQualityRatioSlot& s = slots[*count];
     s.ratioWx10000 = rw;
     s.ratioHx10000 = rh;
     s.lastInternalW = internalW;
     s.confirmed = false;
+    s.seeded = false;
     ++*count;
     return HudQualityRatioVerdict::kNewCandidate;
+}
+
+bool hudQualitySeedCensusRatio(HudQualityRatioSlot* slots, uint32_t* count, uint32_t capacity,
+                               uint32_t toleranceX10000) {
+    if (!slots || !count) return false;
+    for (uint32_t i = 0; i < *count; ++i) {
+        if (hudQualityRatioNear(slots[i].ratioWx10000, kHudQualityCensusRatioW, toleranceX10000) &&
+            hudQualityRatioNear(slots[i].ratioHx10000, kHudQualityCensusRatioH, toleranceX10000)) {
+            return false;   // already on file, seeded earlier or independently measured
+        }
+    }
+    if (*count >= capacity) return false;
+    HudQualityRatioSlot& s = slots[*count];
+    s.ratioWx10000 = kHudQualityCensusRatioW;
+    s.ratioHx10000 = kHudQualityCensusRatioH;
+    s.lastInternalW = 0;    // no session has used it yet
+    s.confirmed = true;     // the census itself IS the two-session proof
+    s.seeded = true;
+    ++*count;
+    return true;
 }
 
 }  // namespace edvr

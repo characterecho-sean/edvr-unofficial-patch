@@ -164,6 +164,10 @@ struct HudQualityStats {
     uint32_t         rvaLoggedCount = 0;        // distinct sizes RVA-logged so far (kRvaLogMax cap)
     uint32_t         rvaLoggedW[kRvaLogMax] = {};
     uint32_t         rvaLoggedH[kRvaLogMax] = {};
+    // Session-only (never persisted): has slot i's seeded-ratio use already
+    // been announced this session? Indexed by g_ratioTable slot index,
+    // which is stable once assigned (the table only grows).
+    bool             seededAnnounced[kRatioSlots] = {};
 };
 HudQualityStats g_hq;
 
@@ -184,55 +188,79 @@ std::wstring ratioStatePath(const std::wstring& logDir) {
     return logDir + L"\\" + kRatioStateFile;
 }
 
+void hudQualitySaveRatios();   // forward: hudQualityLoadRatios persists a newly-added seed
+
 // Same discipline as vscreen_auto_state.cpp's lastKnownEyeWidth/
 // noteResolvedEyeWidthForVScreenAuto: raw WinAPI file I/O, no exceptions,
 // a corrupt or hand-edited file is ignored a line at a time rather than
 // trusted or treated as fatal. Format: a count line, then one line per
-// slot of "ratioW ratioH lastInternalW confirmed" (space-separated
-// integers; confirmed is 0 or 1).
+// slot of "ratioW ratioH lastInternalW confirmed seeded" (space-separated
+// integers; confirmed and seeded are 0 or 1). lastInternalW of 0 is valid
+// for a seeded entry that has not been used by any session yet.
+//
+// Ends by seeding fss_res.h's own documented census ratio
+// (hudQualitySeedCensusRatio) if it is not already present, so the table
+// is always ready to match the interface surfaces from the very first
+// CreateTexture2D of a session -- a fresh install (no file at all) still
+// gets the seed, not just an ordinary re-load of an existing one.
 void hudQualityLoadRatios() {
     g_ratioTable.count = 0;
     g_ratioTable.loaded = true;
     const std::wstring& logDir = Config::get().logDir();
-    if (logDir.empty()) return;
-    HANDLE f = CreateFileW(ratioStatePath(logDir).c_str(), GENERIC_READ, FILE_SHARE_READ,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return;
-    char buf[2048] = {};
-    DWORD got = 0;
-    const BOOL ok = ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr);
-    CloseHandle(f);
-    if (!ok || !got) return;
-    buf[got] = '\0';
-    char* p = buf;
-    // First line: a declared count, read but not trusted past kRatioSlots
-    // or past what the rest of the file actually holds.
-    strtoul(p, &p, 10);
-    while (*p && g_ratioTable.count < kRatioSlots) {
-        while (*p == '\r' || *p == '\n') ++p;
-        if (!*p) break;
-        char* end = nullptr;
-        const unsigned long rw = strtoul(p, &end, 10);
-        if (end == p) break;
-        p = end;
-        const unsigned long rh = strtoul(p, &end, 10);
-        if (end == p) break;
-        p = end;
-        const unsigned long lastW = strtoul(p, &end, 10);
-        if (end == p) break;
-        p = end;
-        const unsigned long conf = strtoul(p, &end, 10);
-        if (end == p) break;
-        p = end;
-        if (rw == 0 || rh == 0 || rw > 10000 || rh > 10000 || lastW < 100) {
-            while (*p && *p != '\n') ++p;   // skip the rest of a bad line
-            continue;
+    // A file to read is optional below (a fresh install has none); reaching
+    // the seed step either way is what matters, so parsing just skips
+    // itself rather than returning early.
+    HANDLE f = logDir.empty()
+                  ? INVALID_HANDLE_VALUE
+                  : CreateFileW(ratioStatePath(logDir).c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE) {
+        char buf[2048] = {};
+        DWORD got = 0;
+        const BOOL ok = ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr);
+        CloseHandle(f);
+        if (ok && got) {
+            buf[got] = '\0';
+            char* p = buf;
+            // First line: a declared count, read but not trusted past
+            // kRatioSlots or past what the rest of the file actually holds.
+            strtoul(p, &p, 10);
+            while (*p && g_ratioTable.count < kRatioSlots) {
+                while (*p == '\r' || *p == '\n') ++p;
+                if (!*p) break;
+                char* end = nullptr;
+                const unsigned long rw = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                const unsigned long rh = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                const unsigned long lastW = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                const unsigned long conf = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                const unsigned long seeded = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                if (rw == 0 || rh == 0 || rw > 10000 || rh > 10000 ||
+                    (lastW != 0 && lastW < 100)) {
+                    while (*p && *p != '\n') ++p;   // skip the rest of a bad line
+                    continue;
+                }
+                HudQualityRatioSlot& s = g_ratioTable.slots[g_ratioTable.count++];
+                s.ratioWx10000 = static_cast<uint32_t>(rw);
+                s.ratioHx10000 = static_cast<uint32_t>(rh);
+                s.lastInternalW = static_cast<uint32_t>(lastW);
+                s.confirmed = conf != 0;
+                s.seeded = seeded != 0;
+            }
         }
-        HudQualityRatioSlot& s = g_ratioTable.slots[g_ratioTable.count++];
-        s.ratioWx10000 = static_cast<uint32_t>(rw);
-        s.ratioHx10000 = static_cast<uint32_t>(rh);
-        s.lastInternalW = static_cast<uint32_t>(lastW);
-        s.confirmed = conf != 0;
+    }
+    if (hudQualitySeedCensusRatio(g_ratioTable.slots, &g_ratioTable.count, kRatioSlots,
+                                  kRatioToleranceX10000)) {
+        hudQualitySaveRatios();   // a newly-added seed is written back at once
     }
 }
 
@@ -249,8 +277,8 @@ void hudQualitySaveRatios() {
     if (n > 0) WriteFile(f, line, static_cast<DWORD>(n), &written, nullptr);
     for (uint32_t i = 0; i < g_ratioTable.count; ++i) {
         const HudQualityRatioSlot& s = g_ratioTable.slots[i];
-        n = snprintf(line, sizeof(line), "%u %u %u %u\n", s.ratioWx10000, s.ratioHx10000,
-                    s.lastInternalW, s.confirmed ? 1u : 0u);
+        n = snprintf(line, sizeof(line), "%u %u %u %u %u\n", s.ratioWx10000, s.ratioHx10000,
+                    s.lastInternalW, s.confirmed ? 1u : 0u, s.seeded ? 1u : 0u);
         if (n > 0) WriteFile(f, line, static_cast<DWORD>(n), &written, nullptr);
     }
     CloseHandle(f);
@@ -437,6 +465,21 @@ void hudQualityNoteRva(uint32_t w, uint32_t h, char family) {
         stack.gameFrames ? rvas : "none", stack.gameFrames, stack.captured);
 }
 
+// The first time a match uses a SEEDED ratio (fss_res.h's own documented
+// census, not yet independently confirmed on this rig), said once per
+// slot so the log is honest about where the number came from.
+void hudQualityNoteSeededUse(uint32_t slotIndex, uint32_t w, uint32_t h) {
+    if (slotIndex >= kRatioSlots || g_hq.seededAnnounced[slotIndex]) return;
+    g_hq.seededAnnounced[slotIndex] = true;
+    Log::get().note(
+        "hud quality: %ux%u matched a ratio seeded from the 2026-09 census "
+        "(fss_res.h's own two-session measurement: 908x1361 at scene "
+        "4340x4284, 1363x2042 at 6510x6426) -- not yet independently "
+        "confirmed on this rig, inflating from this session's first "
+        "sighting rather than waiting for a second.",
+        w, h);
+}
+
 }  // namespace
 
 void fssResConfigure(Config& cfg) {
@@ -592,9 +635,11 @@ bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
     // interface surfaces as a fixed fraction of the internal render
     // resolution, stable across sessions at different resolutions; that
     // fraction is knowable the moment the game asks to create the texture,
-    // once it has been confirmed by a second session at a different
-    // resolution (hudQualityRatioObserve). The classifier is kept only as
-    // a cross-check below, to LABEL a match's family for the log.
+    // once it has been confirmed -- either by a second session at a
+    // different resolution (hudQualityRatioObserve), or from the first
+    // CreateTexture2D of ANY session for the one ratio the census already
+    // documented (hudQualityLoadRatios seeds it). The classifier is kept
+    // only as a cross-check below, to LABEL a match's family for the log.
     if (g_s.hudQualityTarget > 0.0f) {
         float mult = 0.0f;
         if (!deviceHookHmdQuality(&mult) || !(mult > 0.0f)) {
@@ -618,9 +663,10 @@ bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
                     g_hq.lastFactor = factor;
                     const uint32_t rw = hudQualityRatioX10000(d->Width, internalW);
                     const uint32_t rh = hudQualityRatioX10000(d->Height, internalH);
+                    uint32_t matchedIdx = 0;
                     const HudQualityRatioVerdict verdict = hudQualityRatioObserve(
                         g_ratioTable.slots, &g_ratioTable.count, kRatioSlots, rw, rh,
-                        internalW, kRatioToleranceX10000);
+                        internalW, kRatioToleranceX10000, &matchedIdx);
                     if (verdict == HudQualityRatioVerdict::kNewCandidate) {
                         hudQualitySaveRatios();
                         hudQualityNoteSeenNotResized(d->Width, d->Height);
@@ -643,6 +689,10 @@ bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
                             d->Height = newH;
                             if (scaleOut) *scaleOut = factor;
                             if (sourceOut) *sourceOut = InflateSource::kMatch;
+                            if (matchedIdx < g_ratioTable.count &&
+                                g_ratioTable.slots[matchedIdx].seeded) {
+                                hudQualityNoteSeededUse(matchedIdx, origW, origH);
+                            }
                             // The classifier, as a cross-check only: does it
                             // already know this ORIGINAL (pre-inflate) size
                             // by name? If so, label the log with its family;
