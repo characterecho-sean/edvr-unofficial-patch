@@ -890,7 +890,7 @@ void engineVelocityConfigure(bool on) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (on == live.load(std::memory_order_acquire)) return;
     if (!on) { engineVelocityShutdown(); return; }
-    // The emit bracket rides the tracker's hook set (fix.engine_motion=on
+    // The emit bracket rides the tracker's hook set (fix.temporal_aa on
     // attaches it, just before this, by kinematicMotionConfigure); the
     // bracket itself needs the lookup verified.
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -909,7 +909,7 @@ void engineVelocityConfigure(bool on) {
     g_windowStartMs = nowMs();
     live.store(true, std::memory_order_release);
     if (!g_emitLive.load(std::memory_order_acquire)) { logStoodDown(); return; }
-    Log::get().note("engine motion: engine-record velocity live (fix.engine_motion=on): FUN_144312E00's records carry "
+    Log::get().note("engine motion: engine-record velocity live (with fix.temporal_aa): FUN_144312E00's records carry "
                     "their previous engine pose when it is continuous and proven; the pool families' own draws write the "
                     "pool slot and depth at MRT6 under an unblended state; the temporal pass takes exact record motion "
                     "there, masks rig records it cannot follow, and keeps the camera term elsewhere. Per-30 s lines "

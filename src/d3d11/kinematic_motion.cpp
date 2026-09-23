@@ -206,7 +206,7 @@ void summaryLocked(uint64_t now) {
         "gap drops %llu, node changes %llu, bounds changes %llu, same-frame "
         "invalidations %llu; sphere changes %llu; frames %llu, "
         "zero-record %llu, eligible-frames %llu; phys-touched eligible %u movers %u. "
-        "Absence of this line with fix.engine_motion on reads as a dead "
+        "Absence of this line with fix.temporal_aa on reads as a dead "
         "instrument, never as success.",
         (unsigned long long)records_.size(),
         (unsigned long long)stats_.seenLast, (unsigned long long)stats_.eligibleLast,
@@ -240,7 +240,7 @@ void kinematicMotionConfigure(bool on) {
         static std::string lastFail;
         if (lastFail != result) {
             lastFail = result;
-            Log::get().note("engine motion: fix.engine_motion is on but the kinematic eval hook "
+            Log::get().note("engine motion: fix.temporal_aa is on but the kinematic eval hook "
                             "refused (%s) -- the tracker stands down and the stock motion path "
                             "is untouched. Retried quietly on later config polls.", result);
         }
@@ -254,7 +254,7 @@ void kinematicMotionConfigure(bool on) {
         lastSummaryMs_ = configureTickMs_;
     }
     active_.store(true, std::memory_order_release);
-    Log::get().note("engine motion: tracker live (fix.engine_motion=on) -- proves per-record "
+    Log::get().note("engine motion: tracker live (with fix.temporal_aa) -- proves per-record "
                     "stasis from engine truth; the engine-record path's summary reads its "
                     "movers count as a cross-check. Stand-downs and zero-record frames are "
                     "logged, never read as pass.");

@@ -1,5 +1,5 @@
 // engine_velocity_test: the build gate for engine-record velocity
-// (fix.engine_motion=on, phase 1; docs/kinematic-motion-injection-2026-09-19.md,
+// (part of fix.temporal_aa, phase 1; docs/kinematic-motion-injection-2026-09-19.md,
 // 2026-09-23 "Phase 1 built").
 //
 //   --self-test   every check below, on WARP; writes nothing

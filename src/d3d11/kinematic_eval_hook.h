@@ -22,11 +22,11 @@ bool kinematicEvalHooksMatch(uintptr_t evalTarget) noexcept;
 // already loaded the pointer finishes safely.
 void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept;
 
-// --- The kinematic tracker's feed (fix.engine_motion) -----------------------
+// --- The kinematic tracker's feed (with fix.temporal_aa) --------------------
 // The tracker needs the eval stream WITHOUT an eye dump armed, so the relay
 // gate is a cell of its own, open while EITHER consumer wants callbacks:
 // the probe while attached (attach/detach above) or the tracker while
-// fix.engine_motion is on (below). The tracker registers a raw callback;
+// fix.temporal_aa is on (below). The tracker registers a raw callback;
 // the eval relay invokes it after the probe's observe, gated the same way.
 // jobMask carries the TLS bracket bits (1u<<jobId) active at observation --
 // the job-attribution discriminator (kinematic doc, 2026-09-20 17:10).
@@ -39,7 +39,7 @@ const char* kinematicEvalTrackerAttach() noexcept;
 // Closes the tracker's want; the gate stays open while the probe holds it.
 void kinematicEvalTrackerDetach() noexcept;
 
-// --- Engine-record velocity's emit feed (fix.engine_motion=on, phase 1) -----
+// --- Engine-record velocity's emit feed (with fix.temporal_aa, phase 1) -----
 // FUN_144312E00 (direct producer 0) appends each kinematic rig record's
 // 0x150-byte pool records to its owner's node lists. The direct bracket calls
 // this observer AFTER the forward with the rig record (param_1), the owner
@@ -47,7 +47,7 @@ void kinematicEvalTrackerDetach() noexcept;
 // call appended -- so engine_velocity.cpp can write the previous pose into
 // exactly those records before the engine's copier uploads them. Runs on the
 // producer's job thread, under the eval gate the tracker holds open (the
-// tracker is what fix.engine_motion=on attaches). Null = off: one atomic load.
+// tracker is what fix.temporal_aa on attaches). Null = off: one atomic load.
 using EngineEmitObserverFn = void (*)(uintptr_t record, uintptr_t owner, int32_t before, int32_t after) noexcept;
 void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept;
 // Whether the observer above can be called at all: the hook set installed,

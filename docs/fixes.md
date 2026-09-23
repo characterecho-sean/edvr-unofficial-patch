@@ -114,7 +114,9 @@ under Experimental too. Disabling that appearance keeps pulse stability.
 
 **Temporal anti-aliasing.** Select TAA or DLSS on Performance
 (`fix.temporal_aa = off` by default); both include UI and smoke depth, adaptive
-UI history and rotating-station motion automatically. On an RTX card, the
+UI history and moving ships', vehicles' and settlement parts' exact motion from
+Elite's own records automatically (stations and ships in space are not yet
+verified). On an RTX card, the
 automatic NVIDIA choice displays **DLAA** at HMD Quality 1.0 or higher and
 **DLSS** below it, with **DLSS preset** (or **DLAA preset**) on the same page,
 default **K** (`fix.temporal_aa_model = k`), and J, L, M or Automatic choices.

@@ -4688,7 +4688,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.base = baseVertex;
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
-    // Engine-record velocity (fix.engine_motion=on): four generation
+    // Engine-record velocity (with fix.temporal_aa): four generation
     // compares; the pool families' substituted shaders and MRT6 are bound
     // only when the game has rebound something since the last look. After the
     // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.

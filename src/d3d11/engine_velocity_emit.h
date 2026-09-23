@@ -1,5 +1,5 @@
 #pragma once
-// Engine-record velocity, the EMIT half (fix.engine_motion=on, phase 1): pure
+// Engine-record velocity, the EMIT half (with fix.temporal_aa, phase 1): pure
 // logic with no D3D in it, so tools/engine_velocity_test drives it with a
 // fake owner, dictionary and node lists laid out as the engine lays them.
 //

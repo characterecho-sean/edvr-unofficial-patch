@@ -603,12 +603,22 @@ keeps of the last frame it submitted, always the game's content, never EDVR's.
 **The temporal pass and the sharpening** (`temporal_aa`, `render_sharpness`,
 both off by default) are each one GPU pass over the game's finished frame, into
 a texture EDVR owns, and that copy is what the runtime receives — the game's
-texture is read, never written, no answer the game asks for changes, and
-nothing is read from memory. The temporal pass also shifts the projection the
-game is told by a fraction of a pixel each frame, the way the terrain fix
-shifts it by a margin.
+texture is read, never written, and no answer the game asks for changes. The
+temporal pass also shifts the projection the game is told by a fraction of a
+pixel each frame, the way the terrain fix shifts it by a margin.
 
-**Three fixes do more, and each is described in full:** the resolution fix
+**For moving objects the temporal pass goes further**, only while `temporal_aa`
+is on: it hooks Elite's own functions that update and pack moving ships,
+vehicles and settlement parts each frame — in memory only, and only in the
+executable it was verified against; anything else and it stands down and says
+so in the log — reads each object's position and orientation from the game's
+render records, and writes last frame's into an unused part of the same record,
+which the game then hands the GPU. It also swaps the shaders those objects are
+drawn with for copies that write one extra output, which record drew each pixel
+and at what depth, into a target EDVR owns; what they draw into the game's own
+targets is unchanged, bit for bit.
+
+**Other fixes do more too, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam
 ([above](#explorer-cam)) reads one number from the game's memory and changes
 the headset position the game is told about; the cull guard
@@ -617,8 +627,8 @@ told the headset shows — the game then draws the wider view itself, and EDVR
 submits only the true region, copied from the game's own frame. It edits
 answers, never memory: the runtime and anything else asking always receive the
 truth, and it validates the runtime's projection against the shape it expects
-before changing anything, standing down loudly on a mismatch. None of the three
-does anything until you configure it.
+before changing anything, standing down loudly on a mismatch. None of them does
+anything until you configure it.
 
 **The resolution fix, `auto` by default,** rewrites the twelve numbers that are
 the width and height the game forces for the on-foot screen, in the places it
@@ -653,8 +663,9 @@ credits, missions. Nothing interacts with anti-cheat, and nothing attempts to
 hide from anything.
 
 If you would rather no part of this went near the game's code or memory, set
-`vscreen_res_width` to `1920` (the stock size, meaning "do not patch") and
-leave Explorer Cam unconfigured — the DLL then behaves as earlier versions did.
+`vscreen_res_width` to `1920` (the stock size, meaning "do not patch"), leave
+Explorer Cam unconfigured and leave `temporal_aa` off — the DLL then behaves as
+earlier versions did.
 
 ## Build
 

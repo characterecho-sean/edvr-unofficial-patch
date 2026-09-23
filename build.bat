@@ -1999,7 +1999,7 @@ exit /b 0
 
 :rig_engine_velocity_test
 echo [edvr] === engine_velocity_test.exe ===
-REM Build gate for engine-record velocity (fix.engine_motion=on, phase 1;
+REM Build gate for engine-record velocity (part of fix.temporal_aa, phase 1;
 REM docs\kinematic-motion-injection-2026-09-19.md, 2026-09-23): the DXBC
 REM patcher end to end on WARP (patched pool-family shaders disassemble,
 REM reflect, create and DRAW the exact slot and depth at MRT6), the emit
