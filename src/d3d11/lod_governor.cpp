@@ -66,12 +66,106 @@ double Policy::meanGpuMs() const noexcept {
     return n ? sum / n : -1.0;
 }
 
-Outcome Policy::ceilingOutcome() const noexcept {
-    if (lastWin_.decided && !lastWin_.triggered) return Outcome::Reached;
+void Policy::Cohort::add(double r, double t, double p) noexcept {
+    if (!n) {
+        recordsLo = recordsHi = r;
+        testedLo = testedHi = t;
+    } else {
+        if (r < recordsLo) recordsLo = r;
+        if (r > recordsHi) recordsHi = r;
+        if (t < testedLo) testedLo = t;
+        if (t > testedHi) testedHi = t;
+    }
+    ++n;
+    records += r;
+    tested += t;
+    passed += p;
+}
+
+void Policy::Cohort::done() noexcept {
+    if (!n) return;
+    records /= n;
+    tested /= n;
+    passed /= n;
+}
+
+// Every frame within 5% (records) and 10% (parts tested) of the side's mean;
+// half a count of slack keeps a side of small, constant counts stable.
+bool Policy::Cohort::stable() const noexcept {
+    return n >= kEffectMin && recordsHi - records <= kStableRecordsShare * records + 0.5 &&
+           records - recordsLo <= kStableRecordsShare * records + 0.5 &&
+           testedHi - tested <= kStableTestedShare * tested + 0.5 && tested - testedLo <= kStableTestedShare * tested + 0.5;
+}
+
+Policy::Cohort Policy::ringCohort() const noexcept {
+    Cohort c;
+    for (uint32_t i = 0; i < partsCount_; ++i) {
+        const double* p = parts_[(partsNext_ + kEffectFrames - 1 - i) % kEffectFrames];
+        c.add(p[3], p[0], p[1]);
+    }
+    c.done();
+    return c;
+}
+
+double Policy::callerNow() const noexcept {
+    return count_ >= kEffectMin ? periodMs_ + meanExcessMs() : -1.0;
+}
+
+// Within 2 m of the eye camera now; with either camera unknown, not the same.
+bool Policy::sameCam(const float a[3], bool aValid) const noexcept {
+    if (!aValid || !camValid_) return false;
+    const double dx = double(a[0]) - cam_[0], dy = double(a[1]) - cam_[1], dz = double(a[2]) - cam_[2];
+    return dx * dx + dy * dy + dz * dz <= kSameViewM * kSameViewM;
+}
+
+namespace {
+// The whole effect between two ends: a benefit when the parts tested or
+// passed at EDVR's scale fell 1% or more (judged at 200 tested a frame or
+// more) or the caller work fell 0.2 ms or more; none when neither did with
+// both judged; else not judged.
+Effect classifyEffect(double testedBefore, double testedAfter, double passedBefore, double passedAfter,
+                      double callerBefore, double callerAfter) noexcept {
+    const bool partsJudged = testedBefore >= kJudgeMinTested && testedAfter >= 0.0 && passedAfter >= 0.0;
+    const bool callerJudged = callerBefore >= 0.0 && callerAfter >= 0.0;
+    const bool partsFell =
+        partsJudged && (testedBefore - testedAfter >= kBenefitShare * testedBefore ||
+                        (passedBefore > 0.0 && passedBefore - passedAfter >= kBenefitShare * passedBefore));
+    const bool callerFell = callerJudged && callerBefore - callerAfter >= kBenefitCallerMs;
+    if (partsFell || callerFell) return Effect::Benefit;
+    if (partsJudged && callerJudged) return Effect::NoBenefit;
+    return Effect::NotJudged;
+}
+}  // namespace
+
+// At k_max: the target reached when the last second did not trigger; else the
+// whole effect against the k = 1 baseline of this view -- the eye camera
+// within 2 m of it, a stable scene now, neither the records nor the parts
+// tested above the baseline's by more than 2% (the lever only removes) --
+// and without one, the last judged step's.
+Outcome Policy::ceilingOutcome(EffectFigures* figures) const noexcept {
+    EffectFigures f = lastFig_;
+    f.baseline = false;
+    Effect e = lastEffect_;
+    if (base_.valid && sameCam(base_.cam, base_.camValid)) {
+        const Cohort now = ringCohort();
+        if (now.stable() && now.records <= base_.records * (1.0 + kSceneGrowShare) + 0.5 &&
+            now.tested <= base_.tested * (1.0 + kSceneGrowShare) + 0.5) {
+            f.tested[0] = base_.tested;
+            f.tested[1] = now.tested;
+            f.passed[0] = base_.passed;
+            f.passed[1] = now.passed;
+            f.caller[0] = base_.caller;
+            f.caller[1] = callerNow();
+            f.baseline = true;
+            e = classifyEffect(f.tested[0], f.tested[1], f.passed[0], f.passed[1], f.caller[0], f.caller[1]);
+        }
+    }
+    if (figures) *figures = f;
     if (!lastWin_.decided) return Outcome::Unknown;
-    return lastEffect_ == Effect::Benefit     ? Outcome::Residual
-         : lastEffect_ == Effect::NoBenefit ? Outcome::NoBenefit
-                                            : Outcome::Unknown;
+    if (!lastWin_.triggered) return Outcome::Reached;
+    return e == Effect::Benefit     ? Outcome::Residual
+         : e == Effect::NoBenefit ? Outcome::NoBenefit
+                                  : Outcome::Unknown;
 }
 
 // One valid sample into the ring; once it is full the oldest leaves, and its
@@ -152,39 +246,55 @@ void Policy::closeWindow(uint64_t nowMs) noexcept {
     gather_ = Gather{};
 }
 
-// A step's benefit is measured from here: the latest 30 frames' passed parts
-// and 30 samples' caller work before it, the same after it.
+// A step's benefit is measured from here: the latest 30 frames with builder
+// work and 30 samples' caller work before it, the same after it, and where
+// the eye camera was.
 void Policy::openEffect(Opened kind, bool coarse) noexcept {
     effectOpen_ = true;
     effectKind_ = kind;
     effectCoarse_ = coarse;
     effectRetry_ = kind == Opened::Up && retry_;
-    effectBeforePassed_ = partsCount_ >= kEffectMin ? partsMean(1) : -1.0;
-    effectBeforeCaller_ = count_ >= kEffectMin ? periodMs_ + meanExcessMs() : -1.0;
-    effectPassedSum_ = effectCallerSum_ = 0.0;
-    effectPassedN_ = effectCallerN_ = 0;
+    effectBefore_ = ringCohort();
+    effectAfter_ = Cohort{};
+    effectBeforeCaller_ = callerNow();
+    effectCallerSum_ = 0.0;
+    effectCallerN_ = 0;
+    effectCamValid_ = camValid_;
+    std::memcpy(effectCam_, cam_, sizeof(effectCam_));
 }
 
-// The open step's benefit: the parts passed at EDVR's scale moved 1% or more
-// (judged at 200 a frame or more, 10 frames each side at least), or the
-// caller work fell 0.2 ms or more (10 samples each side). An up step without
-// one adds to the run (0.25 two units, 0.05 one); 4 units and the lever is
-// inert at this view. A retried step with one re-arms.
+// The open step's benefit, its whole effect (classifyEffect), judged only on
+// a stable scene: both sides stable, neither the records nor the parts tested
+// risen more than 2% across the step, the eye camera within 2 m of where it
+// was -- else not judged, never a reason to hold. An up step without a
+// benefit adds to the run (0.25 two units, 0.05 one); 4 units and the lever
+// is inert at this view. A retried step with one re-arms.
 void Policy::judgeEffect(uint64_t nowMs) noexcept {
     effectOpen_ = false;
-    const double passed = effectPassedN_ ? effectPassedSum_ / effectPassedN_ : -1.0;
-    const double caller = effectCallerN_ ? effectCallerSum_ / effectCallerN_ : -1.0;
-    const bool partsKnown = effectBeforePassed_ >= kInertMinPassed && effectPassedN_ >= kEffectMin;
-    const bool callerKnown = effectBeforeCaller_ >= 0.0 && effectCallerN_ >= kEffectMin;
-    const bool benefit =
-        (partsKnown && std::fabs(passed - effectBeforePassed_) >= kBenefitPassedShare * effectBeforePassed_) ||
-        (callerKnown && effectBeforeCaller_ - caller >= kBenefitCallerMs);
-    lastEffect_ = benefit ? Effect::Benefit : partsKnown && callerKnown ? Effect::NoBenefit : Effect::Unknown;
-    lastPassed_[0] = effectBeforePassed_;
-    lastPassed_[1] = passed;
-    lastCaller_[0] = effectBeforeCaller_;
-    lastCaller_[1] = caller;
+    Cohort after = effectAfter_;
+    after.done();
+    const Cohort& before = effectBefore_;
+    const double caller = effectCallerN_ >= kEffectMin ? effectCallerSum_ / effectCallerN_ : -1.0;
+    const bool stable = before.stable() && after.stable();
+    const bool grew = after.records > before.records * (1.0 + kSceneGrowShare) + 0.5 ||
+                      after.tested > before.tested * (1.0 + kSceneGrowShare) + 0.5;
+    const bool moved = effectCamValid_ && camValid_ && !sameCam(effectCam_, true);
+    lastFig_ = EffectFigures{};
+    if (before.n) {
+        lastFig_.tested[0] = before.tested;
+        lastFig_.passed[0] = before.passed;
+    }
+    if (after.n) {
+        lastFig_.tested[1] = after.tested;
+        lastFig_.passed[1] = after.passed;
+    }
+    lastFig_.caller[0] = effectBeforeCaller_;
+    lastFig_.caller[1] = caller;
+    lastEffect_ = stable && !grew && !moved
+        ? classifyEffect(before.tested, after.tested, before.passed, after.passed, effectBeforeCaller_, caller)
+        : Effect::NotJudged;
     if (effectKind_ != Opened::Up) return;   // a kick's or reduced's effect: the outcome only
+    ++judged_[lastEffect_ == Effect::Benefit ? 0 : lastEffect_ == Effect::NoBenefit ? 1 : 2];
     if (effectRetry_) {
         if (lastEffect_ == Effect::Benefit && inert_) {
             inert_ = retryArmed_ = false;
@@ -198,14 +308,14 @@ void Policy::judgeEffect(uint64_t nowMs) noexcept {
         inertUnits_ = 0;
         return;
     }
-    if (lastEffect_ != Effect::NoBenefit) return;   // unknown: no evidence either way
+    if (lastEffect_ != Effect::NoBenefit) return;   // not judged: no evidence either way
     if (!inertUnits_) {
-        runPassed_[0] = effectBeforePassed_;
-        runCaller_[0] = effectBeforeCaller_;
+        runFig_ = lastFig_;   // the run's first before
         runCoarse_ = runFine_ = 0;
     }
-    runPassed_[1] = passed;
-    runCaller_[1] = caller;
+    runFig_.tested[1] = lastFig_.tested[1];
+    runFig_.passed[1] = lastFig_.passed[1];
+    runFig_.caller[1] = lastFig_.caller[1];
     if (effectCoarse_) ++runCoarse_;
     else ++runFine_;
     inertUnits_ += effectCoarse_ ? 2u : 1u;
@@ -225,6 +335,8 @@ Step Policy::update(const FrameSignals& s) noexcept {
     }
     cycle_ = Cycle{};
     windowClosed_ = inertStarted_ = rearmed_ = false;
+    camValid_ = s.camValid;
+    if (s.camValid) std::memcpy(cam_, s.cam, sizeof(cam_));
     // On foot (the game's Status.json, the flag the on-foot frame pacing keys
     // on): the arc measured the cockpit only, so k is held at 1 exactly as
     // outside a settlement -- at once, the settlement, the samples, the clock,
@@ -323,23 +435,21 @@ Step Policy::update(const FrameSignals& s) noexcept {
             ++effectCallerN_;
         }
     }
-    // The lever's effect, frame by frame (frames with part tests only): the
-    // latest 30 frames' parts, and an open step's passed-parts cohort. The
+    // The lever's effect, frame by frame (frames with builder work only): the
+    // latest 30 frames' parts and records, and an open step's after side. The
     // step is judged once 30 fresh samples have followed it (and 30 frames of
-    // part tests, if it had parts before it).
-    if (s.tested > 0) {
+    // builder work, if it had any before it).
+    if (s.records > 0 || s.tested > 0) {
         double* p = parts_[partsNext_];
         p[0] = s.tested;
         p[1] = s.passed;
         p[2] = s.dropped;
+        p[3] = s.records;
         partsNext_ = (partsNext_ + 1) % kEffectFrames;
         if (partsCount_ < kEffectFrames) ++partsCount_;
-        if (effectOpen_) {
-            effectPassedSum_ += s.passed;
-            ++effectPassedN_;
-        }
+        if (effectOpen_) effectAfter_.add(s.records, s.tested, s.passed);
     }
-    if (effectOpen_ && effectCallerN_ >= kEffectFrames && (effectPassedN_ >= kEffectFrames || effectBeforePassed_ < 0.0))
+    if (effectOpen_ && effectCallerN_ >= kEffectFrames && (effectAfter_.n >= kEffectFrames || effectBefore_.n == 0))
         judgeEffect(s.nowMs);
     // Inert: one step may be retried 30 s after the hold or the last retry,
     // or at once when the view changes -- the parts tested a frame moved by
@@ -395,6 +505,21 @@ Step Policy::update(const FrameSignals& s) noexcept {
     // A step whose 30 samples are not all in (a frame rate under 30) is
     // judged now on what it has.
     if (effectOpen_) judgeEffect(s.nowMs);
+    // The k = 1 baseline of this view: each second at k 1 in the settlement
+    // on a stable scene, with the eye camera where it was taken.
+    if (steps_ == 0 && inSettlement_) {
+        const Cohort c = ringCohort();
+        const double caller = callerNow();
+        if (c.stable() && caller >= 0.0) {
+            base_.valid = true;
+            base_.records = c.records;
+            base_.tested = c.tested;
+            base_.passed = c.passed;
+            base_.caller = caller;
+            base_.camValid = camValid_;
+            std::memcpy(base_.cam, cam_, sizeof(base_.cam));
+        }
+    }
     // A step down that has held 60 s without a trigger: the next recovery
     // trial waits 5 clean seconds again. Counted from the step, not from the
     // last trigger: a wait of 60 clean seconds is itself 60 s without one.
@@ -916,6 +1041,7 @@ bool shadowRecord(uintptr_t ctx, uintptr_t nibbles, uint32_t eyes, float k, Reco
 struct ViewInfo {
     float A, B;
     uint32_t bit;
+    float cam[3];   // +0x540: the camera the part test measures distance from
 };
 bool readViews(uintptr_t ctx, ViewInfo* views, uint32_t* count) noexcept {
     __try {
@@ -927,6 +1053,7 @@ bool readViews(uintptr_t ctx, ViewInfo* views, uint32_t* count) noexcept {
             uint64_t bits = 0;
             std::memcpy(&views[i].A, reinterpret_cast<const void*>(view + 0x550), 4);
             std::memcpy(&views[i].B, reinterpret_cast<const void*>(view + 0x560), 4);
+            std::memcpy(views[i].cam, reinterpret_cast<const void*>(view + 0x540), 12);
             std::memcpy(&bits, reinterpret_cast<const void*>(view + 0x570), 8);
             unsigned long index = 0;
             views[i].bit = bits && !(bits & (bits - 1)) && _BitScanForward64(&index, bits) ? uint32_t(index) : 64u;
@@ -954,6 +1081,7 @@ struct Window {
     // the CPU's in frames with >= 200 records (what a rise needs).
     uint32_t cycles = 0, slotMisses = 0, slotGpuBound = 0, slotUnexplained = 0, denseOurMisses = 0;
     uint32_t kicks = 0, restores = 0, restoresKick = 0, inertHolds = 0, retries = 0, rearms = 0;
+    uint32_t judgedAt[3] = {};   // the policy's up-step judgements at the window's start (benefit, none, not judged)
     double ceilingMs = 0;         // wall time at k_max with the trigger holding
     bool ceilingLogged = false;   // the ceiling line, once a window
     double workSum = 0, periodSum = 0;
@@ -1005,6 +1133,8 @@ struct State {
     uint32_t eyes = 0xFFFFu;
     float eyePixel = 0;
     uint32_t viewCount = 0;
+    bool eyeCamValid = false;   // eye A's camera (+0x540), the view's identity for the lever's effect
+    float eyeCam[3] = {};
     bool standDownLogged = false;   // process lifetime, like the stand-down
     bool overflowLogged = false;
     // The cockpit gate: on foot as the last boundary saw it, since when, for
@@ -1065,9 +1195,20 @@ void identifyEyes(State& st) noexcept {
             pixel = minA;
         }
     }
+    // Eye A's camera: the view's identity for the lever's effect.
+    bool camValid = false;
+    float cam[3] = {};
+    for (uint32_t i = 0; i < n && eyes != 0xFFFFu; ++i)
+        if (views[i].bit == (eyes & 0xFFu)) {
+            camValid = std::isfinite(views[i].cam[0]) && std::isfinite(views[i].cam[1]) && std::isfinite(views[i].cam[2]);
+            std::memcpy(cam, views[i].cam, sizeof(cam));
+            break;
+        }
     st.eyes = eyes;
     st.eyePixel = pixel;
     st.viewCount = n;
+    st.eyeCamValid = camValid;
+    std::memcpy(st.eyeCam, cam, sizeof(cam));
     g_eyes.store(eyes, std::memory_order_release);
 }
 
@@ -1238,23 +1379,25 @@ const char* outcomeName(lodgov::Outcome o) noexcept {
     }
 }
 
-// A measured step's cohorts: "passed parts 4,879 -> 4,872 a frame, caller
-// work 12.40 -> 12.30 ms", a side that could not be judged said so.
-void effectText(double passedBefore, double passedAfter, double callerBefore, double callerAfter, char* out,
-                size_t n) noexcept {
-    char parts[96], caller[80];
-    if (passedBefore >= 0.0 && passedAfter >= 0.0) {
-        char a[32], b[32];
-        grouped(passedBefore, a, sizeof(a));
-        grouped(passedAfter, b, sizeof(b));
-        std::snprintf(parts, sizeof(parts), "passed parts %s -> %s a frame", a, b);
+// What a step, or the ceiling, moved: "tested 9,720 -> 9,618, passed 4,879 ->
+// 4,872 parts a frame, caller work 12.40 -> 12.30 ms" (both eyes; passed at
+// EDVR's scale), a side not measured said so.
+void effectText(const lodgov::EffectFigures& f, char* out, size_t n) noexcept {
+    char parts[128], caller[80];
+    if (f.tested[0] >= 0.0 && f.tested[1] >= 0.0) {
+        char t0[32], t1[32], p0[32], p1[32];
+        grouped(f.tested[0], t0, sizeof(t0));
+        grouped(f.tested[1], t1, sizeof(t1));
+        grouped(f.passed[0], p0, sizeof(p0));
+        grouped(f.passed[1], p1, sizeof(p1));
+        std::snprintf(parts, sizeof(parts), "tested %s -> %s, passed %s -> %s parts a frame", t0, t1, p0, p1);
     } else {
-        std::snprintf(parts, sizeof(parts), "passed parts not judged (under 10 frames of part tests)");
+        std::snprintf(parts, sizeof(parts), "parts not measured (under 10 frames of builder work)");
     }
-    if (callerBefore >= 0.0 && callerAfter >= 0.0)
-        std::snprintf(caller, sizeof(caller), "caller work %.2f -> %.2f ms", callerBefore, callerAfter);
+    if (f.caller[0] >= 0.0 && f.caller[1] >= 0.0)
+        std::snprintf(caller, sizeof(caller), "caller work %.2f -> %.2f ms", f.caller[0], f.caller[1]);
     else
-        std::snprintf(caller, sizeof(caller), "caller work not judged (under 10 fresh samples)");
+        std::snprintf(caller, sizeof(caller), "caller work not measured (under 10 fresh samples)");
     std::snprintf(out, n, "%s, %s", parts, caller);
 }
 
@@ -1402,13 +1545,15 @@ void logSummary(State& st, uint64_t nowMs) {
     const uint32_t cpuMisses = w.slotMisses - w.slotGpuBound - w.slotUnexplained;
     Log::get().note(
         "settlement detail (%s) decisions: slots missed %u of %u (the CPU's %u, GPU-bound %u, unexplained %u)%s; "
-        "kicks %u; restores %u (%u after a failed kick); the next recovery trial after %u clean seconds; inert holds "
-        "%u (retries %u, re-armed %u); at EDVR's scale passed %.1f, dropped %.1f parts a frame; at the ceiling with "
+        "kicks %u; restores %u (%u after a failed kick); the next recovery trial after %u clean seconds; up steps' "
+        "benefit %u yes, %u no, %u not judged (the scene changing, or too few samples); inert holds %u (retries %u, "
+        "re-armed %u); parts a frame: tested %.1f, passed at EDVR's scale %.1f, dropped %.1f; at the ceiling with "
         "misses %.1f s%s.",
         tag, w.slotMisses, w.cycles, cpuMisses, w.slotGpuBound, w.slotUnexplained,
         noCaller ? " (no caller work: holding)" : "", w.kicks, w.restores, w.restoresKick, st.policy.downWait(),
-        w.inertHolds, w.retries, w.rearms, st.policy.passedMean(), st.policy.droppedMean(), w.ceilingMs / 1000.0,
-        outcome);
+        st.policy.judgedBenefit() - w.judgedAt[0], st.policy.judgedNone() - w.judgedAt[1],
+        st.policy.notJudged() - w.judgedAt[2], w.inertHolds, w.retries, w.rearms, st.policy.testedMean(),
+        st.policy.passedMean(), st.policy.droppedMean(), w.ceilingMs / 1000.0, outcome);
     if (!w.recordsSum && !w.partsSum) return;   // nothing built: the header says so
     for (uint32_t e = 0; e < 2; ++e) {
         const uint64_t* p = &w.sum[cPartBase + e * kPartFields];
@@ -1471,6 +1616,9 @@ void startWindow(State& st, uint64_t nowMs) {
     st.w = Window{};
     st.w.startMs = nowMs;
     st.w.kLow = st.w.kHigh = st.policy.k();
+    st.w.judgedAt[0] = st.policy.judgedBenefit();
+    st.w.judgedAt[1] = st.policy.judgedNone();
+    st.w.judgedAt[2] = st.policy.notJudged();
     st.w.setterCalls = g_setterCalls.load(std::memory_order_relaxed);
     st.w.setterScaled = g_setterScaled.load(std::memory_order_relaxed);
     st.w.setterImplausible = g_setterImplausible.load(std::memory_order_relaxed);
@@ -1613,6 +1761,8 @@ void frameBoundaryAt(uint64_t nowMs, double clockMs) {
     sig.records = d[cRecords];
     sig.nowMs = nowMs;
     sig.clockMs = clockMs;   // the display slot: the interval to the previous boundary
+    sig.camValid = st.eyeCamValid;   // the view's identity for the lever's effect
+    std::memcpy(sig.cam, st.eyeCam, sizeof(sig.cam));
     // The lever's effect this frame, both eyes: the parts tested, and those
     // passed at EDVR's scale -- acting, the engine's own passes (its tests ran
     // at s_game x k); observing, those less the shadow's would-drop.
@@ -1685,10 +1835,9 @@ void frameBoundaryAt(uint64_t nowMs, double clockMs) {
     // 0.25 or four of 0.05 in a row. Said once a hold, with the run's figures.
     if (st.policy.inertStarted()) {
         ++w.inertHolds;
-        char effective[40], figures[200], steps[64];
+        char effective[40], figures[256], steps[64];
         effectiveText(k, effective, sizeof(effective));
-        effectText(st.policy.runPassedBefore(), st.policy.runPassedAfter(), st.policy.runCallerBefore(),
-                   st.policy.runCallerAfter(), figures, sizeof(figures));
+        effectText(st.policy.runFigures(), figures, sizeof(figures));
         stepsText(st.policy.runCoarse(), st.policy.runFine(), steps, sizeof(steps));
         Log::get().note("settlement detail: the LOD lever is inert at this view: no observed benefit: %s across %s; "
                         "holding k %.2f (s x k %s), no step and no kick; one step is retried every 30 s or when the "
@@ -1697,9 +1846,8 @@ void frameBoundaryAt(uint64_t nowMs, double clockMs) {
     // A retried step that showed a benefit: the hold is over.
     if (st.policy.rearmed()) {
         ++w.rearms;
-        char figures[200];
-        effectText(st.policy.effectPassedBefore(), st.policy.effectPassedAfter(), st.policy.effectCallerBefore(),
-                   st.policy.effectCallerAfter(), figures, sizeof(figures));
+        char figures[256];
+        effectText(st.policy.lastFigures(), figures, sizeof(figures));
         Log::get().note("settlement detail: the LOD lever responds again at this view: the retried step moved %s; "
                         "stepping resumes at k %.2f.", figures, double(k));
     }
@@ -1779,16 +1927,20 @@ void frameBoundaryAt(uint64_t nowMs, double clockMs) {
         else
             std::snprintf(gpu, sizeof(gpu), "GPU unknown (no application-render sample)");
         // The outcome: a ceiling miss alone does not say the remaining work
-        // is not LOD-elastic; the last judged step's benefit does.
-        const lodgov::Outcome o = st.policy.ceilingOutcome();
-        char outcome[300];
-        if (o == lodgov::Outcome::Residual || o == lodgov::Outcome::NoBenefit) {
-            char figures[200];
-            effectText(st.policy.effectPassedBefore(), st.policy.effectPassedAfter(), st.policy.effectCallerBefore(),
-                       st.policy.effectCallerAfter(), figures, sizeof(figures));
-            std::snprintf(outcome, sizeof(outcome), "%s (the last step moved %s)", outcomeName(o), figures);
+        // is not LOD-elastic; the whole effect -- against the k = 1 baseline
+        // of this view when there is one, else the last judged step -- does,
+        // and both ends are printed so a reader sees what the ceiling removed.
+        lodgov::EffectFigures fig;
+        const lodgov::Outcome o = st.policy.ceilingOutcome(&fig);
+        char outcome[400];
+        if (!fig.baseline && fig.tested[0] < 0.0 && fig.caller[0] < 0.0) {
+            std::snprintf(outcome, sizeof(outcome), "%s (no k 1 baseline of this view, no step measured)",
+                          outcomeName(o));
         } else {
-            std::snprintf(outcome, sizeof(outcome), "%s", outcomeName(o));
+            char figures[256];
+            effectText(fig, figures, sizeof(figures));
+            std::snprintf(outcome, sizeof(outcome), "%s (%s: %s)", outcomeName(o),
+                          fig.baseline ? "against k 1 at this view" : "the last judged step", figures);
         }
         const uint32_t missing = st.policy.misses() + st.policy.gpuBoundMisses() + st.policy.unexplainedMisses();
         Log::get().note("settlement detail: at the ceiling (k %.2f, s x k %s) and still missing %u of the last %u "
@@ -1859,11 +2011,11 @@ void configureLine(const State& st) {
             "pre-kick k comes back and no kick follows for 60 s; else back 0.25 per 5 clean seconds to the pre-kick "
             "k + 0.25. A step down is a trial: a trigger within 10 s restores the k before it and doubles the clean "
             "seconds the next one waits for (5, 10, 20, 40, 60; 5 again once a step down holds 60 s). Up steps "
-            "without a benefit (the passed parts "
-            "moving < 1%%, the caller work falling < 0.2 ms), two of 0.25 or four of 0.05 in a row: the lever is "
-            "inert here, no up and no kick, one step retried every 30 s or when the parts tested move 20%%. At k_max "
-            "with 5 triggering seconds in a row a line gives the outcome; without caller work (timing v3/v4) auto "
-            "holds.");
+            "without a benefit on a stable scene (the parts tested and passed at EDVR's scale falling < 1%%, the "
+            "caller work < 0.2 ms; a changing scene is not judged), two of 0.25 or four of 0.05 in a row: the lever "
+            "is inert here, no up and no kick, one step retried every 30 s or when the parts tested move 20%%. At "
+            "k_max with 5 triggering seconds in a row a line gives the outcome on the same measure, against the k 1 "
+            "baseline of the same view when there is one; without caller work (timing v3/v4) auto holds.");
     }
 }
 

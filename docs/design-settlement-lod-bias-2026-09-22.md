@@ -10,21 +10,20 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 
 - **State (2026-09-23):** `fix.settlement_detail` SHIPS as a fix, default
   `auto` (live in edvr.ini, F8 Performance page), k_max 6.0 (1..8), cockpit
-  only (k = 1 on foot). Since refinement 4b and the review's fixes (section
-  9 part (6), NOT FLOWN): a decision a second on that second's cycles with
-  FRESH timing (older than 2 s expires; k holds); a cycle > 1.5 periods took
-  two slots, classed GPU-bound / unexplained / the CPU's; up while a tenth
-  are the CPU's (0.25 at a quarter or > 1 ms over, else 0.05); a kick to
-  k_max after 10 s, a trial restored if its fifth second still misses; down
-  0.05 after 5 clean seconds, a trial restored within 10 s, the wait
-  doubling; inert after up steps with no benefit (passed parts < 1%, caller
-  work < 0.2 ms); at k_max an outcome line; back aboard, the k from before
-  on foot in one step. Flights: 03:30 (b55e06b, s 1.5) k 1 -> 2.70 in 80 s,
-  ~50 -> 71-75 fps; 04:23 a third of the frames took two slots at a mean at
-  the period, no step; 05:05 (reduced, k 6.00) two slots a cycle at 45-56
-  fps (the half-rate trap); 05:53 (close range) k 6 in ~83 s dropped ~4 of
-  4,800 parts, inert; 06:53 re-boarding re-ramped from 1 and flickered.
-  Review: reviews/lod-governor-review-2026-09-23.md (main, gitignored).
+  only (k = 1 on foot). Refinement 4b and the review's fixes (section 9 part
+  (6)) FLEW at 07:15 (6d34ffd5): a decision a second on cycles with FRESH
+  timing; misses classed GPU-bound / unexplained / the CPU's; up while a
+  tenth are the CPU's (0.25 at a quarter or > 1 ms over); a kick after 10 s,
+  a trial (07:15: failed, 3.15 restored); down trials undone within 10 s;
+  back aboard the k from before (07:15: 3.90). Since, NOT FLOWN: a step's
+  benefit judged only on a stable scene, on the parts tested and passed and
+  the caller work; the ceiling's outcome against the k = 1 baseline of the
+  same view, both ends printed. Flights: 03:30 (b55e06b, s 1.5) k 1 -> 2.70
+  in 80 s, ~50 -> 71-75 fps; 04:23 a third of the frames took two slots at a
+  mean at the period, no step; 05:05 (reduced) two slots a cycle at k 6 (the
+  half-rate trap); 05:53 (close range) ~4 of 4,800 parts dropped at k 6;
+  06:53 re-boarding re-ramped from 1 and flickered. Review:
+  reviews/lod-governor-review-2026-09-23.md (main checkout, gitignored).
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
   +0x550 = 1/fy (0.000834297 here), B = +0x560 = 0 for the eyes; (2) the
@@ -60,7 +59,8 @@ flown once, refined, shipped as the default). Capture: eye run 165433
   deg and a 4.2 m radius).
 - **LOD shift is draw-neutral here** (99.0% of admitted eye parts at nibble
   3 or 4); Leg C's LODDistanceScale 0.001 left 18.9k eye draws (section 6).
-- **Open:** the first flight of part (6) (section 9's last list).
+- **Open:** part (6)'s stable-scene judgement and baseline outcome, unflown
+  (section 9's last list).
 - **Ruled out:** section 6 (the mean as the miss signal and the step size,
   the sliding window, the dropped count as the inert test) and section 9.
 - **Next:** fly the shipped default parked at Cranfield with the in-game
@@ -195,7 +195,15 @@ steps (the review of 2026-09-23, finding 2).
 ruled out: the dropped-part count as the test of an inert lever, because
 whole records culled upstream never reach the part observer and a nibble
 change cuts work without dropping a part (the review); the benefit test
-reads the parts passed at EDVR's scale and the caller work.
+reads the parts tested and passed at EDVR's scale and the caller work.
+ruled out: judging a step's benefit on a changing scene, because at 07:15
+the inert line came during the approach (the records rising, the per-eye
+tested count 2,109 -> 4,205 -> 2,477 across windows); a step is judged
+only when both its sides are stable.
+ruled out: the last step's passed parts as the ceiling's outcome, because
+at 07:15 it said residual benefit beside an acting dropped count of 4 a
+frame; the outcome reads the whole effect against a k = 1 baseline of the
+same view and prints both ends.
 
 ## 7. Sources
 
@@ -844,27 +852,41 @@ dropping a part). As built (lodgov::Policy, the boundary, readWork):
    step: counted from the last trigger, every 60-second wait would reset
    itself and the cap would never hold. Triggering at or above the working
    point forgets it.
-6. Benefit, and the inert lever. Each up step is measured: the parts
-   passed at EDVR's scale a frame, both eyes (acting, the engine's own
-   passes; observing, those less the shadow's would-drop), and the caller
-   work, over the 30 frames and samples after it against the 30 before.
-   No benefit when the passed parts move less than 1% (judged at 200 a
-   frame or more) and the caller work falls less than 0.2 ms; unknown when
-   either side cannot be judged, never a reason to hold. Two such 0.25
-   steps in a row, or four 0.05 steps, and the lever is inert at this
-   view: no up step and no kick (a held second restarts the kick's run),
-   said once with the run's figures; one step is retried 30 s after the
-   hold or the last retry, or at once when the parts tested a frame move
-   more than 20%, and a retry with a benefit re-arms (`the LOD lever
-   responds again`). Down still applies.
-7. The outcome at k_max. Five triggering seconds in a row there: once a
-   summary window, `at the ceiling (k, s x k) and still missing N of the
-   last 30 display slots (C the CPU's, G GPU-bound, U unexplained): outcome
-   X; caller work M ms mean, GPU G ms` (`: the GPU is the wall` when it is
-   the larger), X one of `target reached`, `residual benefit`, `no observed
-   benefit` (these two with the last step's figures) or `unknown (no fresh
-   evidence)`. The summary gives the outcome while k is at k_max. Nothing
-   acts on it.
+6. Benefit, and the inert lever. Each up step is measured on its whole
+   effect, both eyes: the parts tested (a record that loses the eye at
+   EDVR's scale never reaches the builder, so its parts leave this count)
+   and the parts passed at EDVR's scale (acting, the engine's own passes;
+   observing, those less the shadow's would-drop), and the caller work,
+   over the 30 frames and samples after it against the 30 before -- and
+   only on a stable scene: every frame's builder records within 5% and
+   parts tested within 10% of its side's mean, 10 frames or more a side,
+   neither mean rising more than 2% across the step (the lever only
+   removes), the eye camera (view A's +0x540) within 2 m. Else not judged,
+   never a reason to hold. A benefit: the parts tested or passed falling
+   1% or more, or the caller work 0.2 ms or more; none: neither, with the
+   parts (200 tested a frame or more) and the caller work judged. Two
+   steps of 0.25 without one in a row, or four of 0.05, and the lever is
+   inert at this view: no up step and no kick (a held second restarts the
+   kick's run), said once with the run's figures; one step is retried 30 s
+   after the hold or the last retry, or at once when the parts tested a
+   frame move more than 20%, and a retry with a benefit re-arms (`the LOD
+   lever responds again`). Down still applies. The summary counts the up
+   steps judged with a benefit, without one, and not judged.
+7. The outcome at k_max, on the same whole effect. A k = 1 baseline of the
+   view is taken each second at k 1 in the settlement on a stable scene
+   (records, parts tested and passed, caller work, the eye camera); kept
+   across on foot, it answers only while the eye camera is within 2 m of
+   where it was taken, the scene is stable and neither the records nor the
+   parts tested have risen more than 2%; without one, the last judged step
+   answers. Five triggering seconds in a row at k_max: once a summary
+   window, `at the ceiling (k, s x k) and still missing N of the last 30
+   display slots (C the CPU's, G GPU-bound, U unexplained): outcome X
+   (against k 1 at this view: tested A -> B, passed C -> D parts a frame,
+   caller work E -> F ms); caller work M ms mean, GPU G ms` (`: the GPU is
+   the wall` when it is the larger; `the last judged step:` without a
+   baseline), X one of `target reached`, `residual benefit`, `no observed
+   benefit` or `unknown (no fresh evidence)`. The summary gives the outcome
+   while k is at k_max. Nothing acts on it.
 8. Kept: without caller work (timing v3/v4) auto holds, said once and in
    each summary; in at 200 records, out after 30 frames under 150 (k 1 at
    once). The summary now counts a settlement's frames at 150-199 records,
@@ -880,6 +902,20 @@ dropping a part). As built (lodgov::Policy, the boundary, readWork):
    (held on foot 1843 frames)`, no ramp; no such frame within 5 s and it
    starts from 1 as before. A hold that begins at 1 keeps the pending k;
    reduced's own jump to k_max does the same work there.
+10. The 07:15 flight (6d34ffd5, the pad, auto, the slider at its default;
+    edvr_gfx_20260923_071521.log; the overseer's reading): every rule
+    above fired -- 2030 frames without fresh timing and 4 expiries during
+    the load, the per-second decisions with their classes, a kick at
+    07:17:3x (3.15 -> 6.00 after ten triggering seconds) that failed its
+    trial and restored 3.15, the on-foot hold (161 + 1167 frames), `back
+    aboard: k restored to 3.90 (held on foot 1328 frames)`, then steps to
+    the ceiling with `at k_max now: residual benefit` for three windows.
+    Two readings were wrong, and 6 and 7 now carry the corrections: the
+    inert line came during the approach (`passed parts 9,720 -> 9,618 ...`
+    while the records rose and the per-eye tested count ran 2,109 -> 4,205
+    -> 2,477 across windows), and `residual benefit` stood beside an acting
+    dropped count of 4 a frame (the record-level removal is invisible to
+    that counter; section 9's lower bound).
 
 Lines: the policy is two lines after the configure line (`auto's policy,
 decided once a second ...`, `auto's trials: ...`); `up 0.25: 91 of 91
@@ -889,15 +925,17 @@ or more the CPU's: the coarse step)`; `down 0.05: 5 clean seconds in a row
 (...); a trial: k 2.00 comes back if a second triggers within 10 s`;
 `kick: 10 seconds in a row ...: from the pre-kick k 1.45 to k_max 2.00
 ...; a trial, judged on the fifth second at k_max`; the two restores; `the
-LOD lever is inert at this view: no observed benefit: passed parts 500 ->
-500 a frame, caller work 12.90 -> 12.90 ms across two 0.25 steps; holding
-k 1.50 (...)`; and a second summary line, `decisions: slots missed N of S
-(the CPU's C, GPU-bound G, unexplained U); kicks K; restores R (F after a
-failed kick); the next recovery trial after W clean seconds; inert holds H
-(retries, re-armed); at EDVR's scale passed P, dropped D parts a frame; at
-the ceiling with misses T s (at k_max now: X)`. Longest line 950 of 1166.
+LOD lever is inert at this view: no observed benefit: tested 500 -> 500,
+passed 500 -> 500 parts a frame, caller work 12.90 -> 12.90 ms across two
+0.25 steps; holding k 1.50 (...)`; and a second summary line, `decisions:
+slots missed N of S (the CPU's C, GPU-bound G, unexplained U); kicks K;
+restores R (F after a failed kick); the next recovery trial after W clean
+seconds; up steps' benefit B yes, N no, U not judged (...); inert holds H
+(retries, re-armed); parts a frame: tested T, passed at EDVR's scale P,
+dropped D; at the ceiling with misses T s (at k_max now: X)`. Longest line
+950 of 1166.
 
-Rig (229 checks): the trigger's line at 90 Hz, 8 of 82 hold and 9 of 81
+Rig (238 checks): the trigger's line at 90 Hz, 8 of 82 hold and 9 of 81
 step; at a mean at the period 17 of 73 step 0.05 and 21 of 69 (a quarter)
 0.25; 30% misses at the period whatever k: 0.25 a second to 3.25, the kick
 at the 10th second, restored at the 15th, k_max again at the 26th, spent at
@@ -924,7 +962,15 @@ inactive source, a sequence already 3 s old, an explicit invalid source)
 all hold k at 1.25 through 6.6 s, each expiring the evidence once; back
 aboard, 3.45 held and 2000 frames on foot, 680 records within 5 s: k 3.45
 in one step and no step after; records under 200 for 6 s: k 1, then the
-ordinary 0.25 ramp; a hold that begins at 1 keeps the pending k.
+ordinary 0.25 ramp; a hold that begins at 1 keeps the pending k; steps in
+a loading scene (records 400 -> 680 across each second) are not judged,
+six steps and no hold; a stable scene where a step takes 10% of the parts
+tested with the passed unchanged is a benefit; at k_max 1.50 against the
+k 1 baseline, tested 5,500 -> 4,400: residual benefit; nothing moved: no
+observed benefit; the eye camera 5 m away: the last judged step answers;
+at the boundary the ceiling line at k 2.00 reads `outcome residual benefit
+(against k 1 at this view: tested 500 -> 500, passed 500 -> 0 parts a
+frame, caller work 12.90 -> 12.90 ms)`.
 
 ### What the next flight must show (the shipped build)
 
@@ -941,9 +987,12 @@ in-game detail slider at its default (s 1.0); then close to the buildings:
    0.05` trials, and `restored k X after a failed recovery trial` if one
    fails; in `decisions:`, the CPU's share falling as k rises, and `no fresh
    timing on 0 frames` while the runtime feeds it.
-3. Close to the buildings: the inert line with its figures and no steps
-   after it, one retried step every 30 s; any `at the ceiling` line names
-   its outcome.
+3. During the approach, the decisions line's `not judged` rising and no
+   inert line; close to the buildings, once loaded, the inert line with
+   the parts tested and passed and the caller work at both ends, no steps
+   after it, one retried step every 30 s; any `at the ceiling` line gives
+   its outcome `against k 1 at this view` with both ends, or says it had
+   only the last judged step.
 4. Disembark and board once: one `on foot` and one `no longer on foot`
    line, beside the pacing's own `native frame: begin ... pacing=turbo` and
    `pacing=runtime` lines (the same flag: turbo with no `on foot` line means

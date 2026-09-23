@@ -54,10 +54,14 @@
 //     period - 0.3 ms (the GPU under that or unknown); else the CPU's. Only
 //     the CPU's trigger; the other two are counted and named, and none is
 //     called LOD-fixable or LOD-inelastic on its class alone;
-//   * the lever's effect -- per frame, both eyes, the parts tested and the
-//     parts passed at EDVR's scale (acting: the engine's own passes, run at
+//   * the lever's effect -- per frame, both eyes, the builder records, the
+//     parts tested (a record that loses the eye at EDVR's scale never
+//     reaches the builder, so its parts leave this count) and the parts
+//     passed at EDVR's scale (acting: the engine's own passes, run at
 //     s_game x k; observing: those less the shadow's would-drop), beside the
-//     caller work: a step's benefit is what both did across it;
+//     caller work; and the eye camera (view A's +0x540) as the view's
+//     identity: a step's benefit is what they did across it, on a stable
+//     scene only;
 //   * the game's LOD scale s_game, from the setter bracket (the value the
 //     engine stored on its last call for that context; 1.0 at the slider's
 //     maximum detail, 1.5 at its lowest), and the scale the tests ran with,
@@ -130,11 +134,14 @@
 // doubles the clean seconds the next trial waits for (5, 10, 20, 40, 60;
 // back to 5 once a step down has held 60 s without a trigger -- counted from
 // the step, as 60 clean seconds of waiting are 60 s without one too). Each
-// up step's BENEFIT is
-// measured -- the parts passed at EDVR's scale a frame and the caller work,
-// over the 30 frames and samples after it against the 30 before: none when
-// the passed parts move less than 1% (judged at 200 a frame or more) and the
-// caller work falls less than 0.2 ms, unknown when either cannot be judged.
+// up step's BENEFIT is measured on its whole effect -- the parts tested and
+// the parts passed at EDVR's scale a frame and the caller work, over the 30
+// frames and samples after it against the 30 before -- and only on a stable
+// scene (every frame's records within 5% and parts tested within 10% of its
+// side's mean, neither mean rising 2% across the step, the eye camera within
+// 2 m; 07:15 judged one during the approach): none when the parts tested and
+// passed fall less than 1% (judged at 200 tested a frame or more) and the
+// caller work less than 0.2 ms; otherwise not judged, never a reason to hold.
 // Two such 0.25 steps in a row, or four 0.05 ones, and the lever is INERT at
 // this view (05:53: about 4 of 4,800 parts dropped at k 6): no up step and no
 // kick, said once; one step is retried every 30 s or when the parts tested a
@@ -142,7 +149,10 @@
 // second starts the kick's run of ten over; down still applies. At k_max with
 // five triggering seconds in a row a line gives the outcome -- target
 // reached, residual benefit, no observed benefit, or unknown (no fresh
-// evidence) -- and nothing acts on it. Without caller work (a timing v3/v4
+// evidence) -- on the same whole effect, against the k = 1 baseline of the
+// same view when there is one (07:15 said residual benefit while the dropped
+// count read 4 a frame), with the parts tested and passed and the caller work
+// at both ends; nothing acts on it. Without caller work (a timing v3/v4
 // runtime) a miss cannot be attributed: nothing triggers, and auto holds.
 // Back to 1 when the records have stayed under 150 for 30 frames, and at once
 // on foot, held there while it lasts; back aboard, a frame with 200 records
@@ -198,10 +208,14 @@ constexpr uint32_t kKickTrialWindows = 5;          // ... judged on the 5th wind
 constexpr uint64_t kKickBlockMs = 60000;           // ... failed: the pre-kick k, and no kick for 60 s
 constexpr uint32_t kCeilingWindows = 5;            // the lever spent: 5 triggering windows in a row at k_max
 constexpr uint32_t kEffectFrames = 30;             // a step's benefit: 30 frames/samples after vs 30 before
-constexpr uint32_t kEffectMin = 10;                // ... each side judged on at least 10
-constexpr double kBenefitPassedShare = 0.01;       // a benefit: passed parts moved >= 1% ...
-constexpr double kBenefitCallerMs = 0.2;           // ... or the caller work fell >= 0.2 ms
-constexpr double kInertMinPassed = 200.0;          // the parts judged at >= 200 passed a frame
+constexpr uint32_t kEffectMin = 10;                // ... each side judged on at least 10 ...
+constexpr double kStableRecordsShare = 0.05;       // ... on a stable scene: every frame's records within 5% ...
+constexpr double kStableTestedShare = 0.10;        // ... and parts tested within 10% of its side's mean ...
+constexpr double kSceneGrowShare = 0.02;           // ... neither mean rising > 2% across it (the lever only removes) ...
+constexpr double kSameViewM = 2.0;                 // ... and the eye camera within 2 m
+constexpr double kBenefitShare = 0.01;             // a benefit: parts tested or passed falling >= 1% ...
+constexpr double kBenefitCallerMs = 0.2;           // ... or the caller work falling >= 0.2 ms
+constexpr double kJudgeMinTested = 200.0;          // the parts judged at >= 200 tested a frame
 constexpr uint32_t kInertUnits = 4;                // inert: steps without benefit, 0.25 = 2 units, 0.05 = 1
 constexpr double kRearmShare = 0.20;               // retry a step: the parts tested a frame moved > 20% ...
 constexpr uint64_t kRetryMs = 30000;               // ... or 30 s since the hold or the last retry
@@ -238,6 +252,11 @@ struct FrameSignals {
     // at EDVR's scale (acting: the engine's passes; observing: those less the
     // shadow's would-drop), parts dropped at EDVR's scale.
     uint32_t tested = 0, passed = 0, dropped = 0;
+    // The eye camera (view A's +0x540, the part test's own camera): the
+    // view's identity -- a step is judged, and a k = 1 baseline compared,
+    // only while it stays within 2 m.
+    bool camValid = false;
+    float cam[3] = {};
 };
 // Enter: reduced mode's k = k_max at once (the settlement started, or k_max
 // rose while in it). Foot: k back to 1 at once, on foot. Kick: k = k_max at
@@ -269,10 +288,25 @@ struct WindowResult {
     bool triggered = false;    // decided, >= a tenth of the cycles the CPU's misses, caller work to say so
     bool headroom = false;     // decided, no two-slot cycle at all, the mean more than 1.0 ms under
 };
-// A step's measured benefit: the parts passed at EDVR's scale moved 1% or
-// more, or the caller work fell 0.2 ms or more (Benefit); neither, with both
-// judged (NoBenefit); or it could not be judged (Unknown).
-enum class Effect : uint8_t { Unknown, Benefit, NoBenefit };
+// A step's measured benefit, the whole effect: a record that loses the eye at
+// EDVR's scale never reaches the builder, so its parts leave the TESTED
+// count, and a part that fails leaves the PASSED one. Judged only on a stable
+// scene -- every frame's records within 5% and parts tested within 10% of its
+// side's mean, 10 frames or more each side, neither mean rising more than 2%
+// across the step, the eye camera within 2 m (07:15: a judgement during the
+// approach, the tested count 2,109 -> 4,205 -> 2,477 across windows, was
+// meaningless). Benefit: the parts tested or passed falling 1% or more, or
+// the caller work 0.2 ms or more; NoBenefit: neither, with the parts (200
+// tested a frame or more) and the caller work judged; else NotJudged, never
+// a reason to hold.
+enum class Effect : uint8_t { NotJudged, Benefit, NoBenefit };
+// What a step, or the ceiling against a k = 1 baseline, moved: the parts
+// tested and passed at EDVR's scale a frame and the caller work ms, before
+// and after (-1: not measured); baseline: against the k = 1 baseline.
+struct EffectFigures {
+    double tested[2] = {-1, -1}, passed[2] = {-1, -1}, caller[2] = {-1, -1};
+    bool baseline = false;
+};
 // At k_max: what the lever did there.
 enum class Outcome : uint8_t { Reached, Residual, NoBenefit, Unknown };
 
@@ -323,9 +357,14 @@ public:
     // At k_max with five triggering windows in a row: the lever is spent.
     bool ceilingMissing() const noexcept { return steps_ == maxSteps_ && ceilRun_ >= kCeilingWindows; }
     // What the lever did at k_max: the target reached (the last window did
-    // not trigger), else the last judged step's benefit -- residual, none,
-    // or unknown (no fresh evidence).
-    Outcome ceilingOutcome() const noexcept;
+    // not trigger), else its whole effect -- residual benefit, none, or
+    // unknown (no fresh evidence) -- against the k = 1 baseline of this view
+    // when there is one (taken each second at k 1 in the settlement on a
+    // stable scene; the same view while the eye camera is within 2 m and
+    // neither the records nor the parts tested have risen more than 2%),
+    // else the last judged step's. The figures behind it, if asked.
+    Outcome ceilingOutcome(EffectFigures* figures = nullptr) const noexcept;
+    bool haveBaseline() const noexcept { return base_.valid; }
     // The latest valid sample carried no caller work (a timing v3/v4
     // runtime): a miss cannot be attributed to the CPU, nothing triggers.
     bool holding() const noexcept { return holding_; }
@@ -353,18 +392,15 @@ public:
     bool upNearGood() const noexcept { return upNear_; }
     int downQuanta() const noexcept { return downQuanta_; }
     bool relaxStep() const noexcept { return relaxStep_; }
-    // The lever's benefit: the last judged step's effect and its cohorts
-    // (passed parts a frame and caller work ms, before -> after; -1 unknown);
+    // The lever's benefit: the last judged step's effect and its figures;
     // INERT at this view after 4 units of steps without a benefit in a row
     // (0.25 = 2, 0.05 = 1): no up step and no kick, one step retried every
     // 30 s or when the parts tested a frame move by more than 20% (a retry
     // with a benefit re-arms). The run that made it inert: its first before,
-    // its last after, its steps. The latest 30 frames' part means.
+    // its last after, its steps. How the up steps were judged since reset.
+    // The latest 30 frames' means.
     Effect lastEffect() const noexcept { return lastEffect_; }
-    double effectPassedBefore() const noexcept { return lastPassed_[0]; }
-    double effectPassedAfter() const noexcept { return lastPassed_[1]; }
-    double effectCallerBefore() const noexcept { return lastCaller_[0]; }
-    double effectCallerAfter() const noexcept { return lastCaller_[1]; }
+    const EffectFigures& lastFigures() const noexcept { return lastFig_; }
     bool inert() const noexcept { return inert_; }
     bool inertStarted() const noexcept { return inertStarted_; }
     bool rearmed() const noexcept { return rearmed_; }
@@ -372,15 +408,16 @@ public:
     uint32_t inertHolds() const noexcept { return inertHolds_; }
     uint32_t retries() const noexcept { return retries_; }
     uint32_t rearms() const noexcept { return rearms_; }
-    double runPassedBefore() const noexcept { return runPassed_[0]; }
-    double runPassedAfter() const noexcept { return runPassed_[1]; }
-    double runCallerBefore() const noexcept { return runCaller_[0]; }
-    double runCallerAfter() const noexcept { return runCaller_[1]; }
+    const EffectFigures& runFigures() const noexcept { return runFig_; }
     uint32_t runCoarse() const noexcept { return runCoarse_; }
     uint32_t runFine() const noexcept { return runFine_; }
+    uint32_t judgedBenefit() const noexcept { return judged_[0]; }
+    uint32_t judgedNone() const noexcept { return judged_[1]; }
+    uint32_t notJudged() const noexcept { return judged_[2]; }
     double testedMean() const noexcept { return partsMean(0); }
     double passedMean() const noexcept { return partsMean(1); }
     double droppedMean() const noexcept { return partsMean(2); }
+    double recordsMean() const noexcept { return partsMean(3); }
     static float kOf(int steps) noexcept { return float(kQuantaPerUnit + steps) / float(kQuantaPerUnit); }
 
 private:
@@ -390,6 +427,24 @@ private:
         double excessSum = 0;
     };
     enum class Opened : uint8_t { Up, Kick, Enter };
+    // One side of a measurement: frames with builder work -- their records,
+    // parts tested and passed -- summed with their extremes; done() turns
+    // the sums into means, and stable() asks for 10 frames or more, every one
+    // within 5% (records) and 10% (parts tested) of its mean.
+    struct Cohort {
+        uint32_t n = 0;
+        double records = 0, tested = 0, passed = 0;
+        double recordsLo = 0, recordsHi = 0, testedLo = 0, testedHi = 0;
+        void add(double r, double t, double p) noexcept;
+        void done() noexcept;
+        bool stable() const noexcept;
+    };
+    // The k = 1 baseline of a stable view in the settlement.
+    struct Baseline {
+        bool valid = false, camValid = false;
+        double records = 0, tested = 0, passed = 0, caller = -1;
+        float cam[3] = {};
+    };
     void emptyRing() noexcept { count_ = missCount_ = gpuCount_ = unexCount_ = 0; }
     void push(double excessMs, bool miss, bool gpuBound, bool unexplained, double gpuMs) noexcept;   // gpuMs < 0: none
     // A window restarts on enabling, on foot and on leaving the settlement,
@@ -400,7 +455,10 @@ private:
     // progress, the runs, an open step's cohorts and a kick's trial go; k holds.
     void expire(uint64_t nowMs) noexcept;
     void closeWindow(uint64_t nowMs) noexcept;
-    double partsMean(int field) const noexcept;       // 0 tested, 1 passed at EDVR's scale, 2 dropped
+    double partsMean(int field) const noexcept;       // 0 tested, 1 passed at EDVR's scale, 2 dropped, 3 records
+    Cohort ringCohort() const noexcept;               // the latest 30 frames as one side, done
+    double callerNow() const noexcept;                // the ring's caller work mean, -1 under 10 samples
+    bool sameCam(const float a[3], bool aValid) const noexcept;   // within 2 m of the eye camera now
     void openEffect(Opened kind, bool coarse) noexcept;
     void judgeEffect(uint64_t nowMs) noexcept;
 
@@ -439,19 +497,25 @@ private:
     bool restoreKick_ = false;
     int upQuanta_ = 0, downQuanta_ = 0;
     bool upHeld_ = false, upNear_ = false, relaxStep_ = false;
-    // The lever's benefit: the latest 30 frames' parts, the open step's
-    // cohorts, the run without benefit, and the hold.
-    double parts_[kEffectFrames][3] = {};
+    // The lever's benefit: the latest 30 frames with builder work (tested,
+    // passed, dropped, records), the eye camera, the open step's sides, the
+    // last judgement, the run without benefit, the hold, and the k = 1
+    // baseline (kept across on foot: the camera tells the same view).
+    double parts_[kEffectFrames][4] = {};
     uint32_t partsNext_ = 0, partsCount_ = 0;
-    bool effectOpen_ = false, effectCoarse_ = false, effectRetry_ = false;
+    bool camValid_ = false;
+    float cam_[3] = {};
+    bool effectOpen_ = false, effectCoarse_ = false, effectRetry_ = false, effectCamValid_ = false;
     Opened effectKind_ = Opened::Up;
-    double effectBeforePassed_ = -1, effectBeforeCaller_ = -1;
-    double effectPassedSum_ = 0, effectCallerSum_ = 0;
-    uint32_t effectPassedN_ = 0, effectCallerN_ = 0;
-    Effect lastEffect_ = Effect::Unknown;
-    double lastPassed_[2] = {-1, -1}, lastCaller_[2] = {-1, -1};
+    Cohort effectBefore_, effectAfter_;
+    double effectBeforeCaller_ = -1, effectCallerSum_ = 0;
+    uint32_t effectCallerN_ = 0;
+    float effectCam_[3] = {};
+    Effect lastEffect_ = Effect::NotJudged;
+    EffectFigures lastFig_, runFig_;
+    uint32_t judged_[3] = {};   // up steps: with a benefit, without, not judged
     uint32_t inertUnits_ = 0, runCoarse_ = 0, runFine_ = 0;
-    double runPassed_[2] = {-1, -1}, runCaller_[2] = {-1, -1};
+    Baseline base_;
     bool inert_ = false, inertStarted_ = false, rearmed_ = false, retry_ = false, retryArmed_ = false;
     uint64_t inertSinceMs_ = 0;
     double testedAtHold_ = 0;
