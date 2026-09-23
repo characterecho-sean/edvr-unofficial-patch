@@ -2668,3 +2668,46 @@ buffers, not per draw; left for Sean.
 Measurement: the parked-5 leg, same pad and heading, compared on R1
 byTopModule EDVR and on this entry's two populations (own instructions
 vs forwarded calls).
+
+### 2026-09-23 -- Settings leg (build\phaseA-parked-6): INCONCLUSIVE - two knobs moved at once, no census; the caller thread got 0.7 ms SLOWER and the pipeline 8.6% heavier
+
+Flown on build b706df9 (the round-two DLL plus the unarmed probe),
+Pimax OpenXR 0.566, the same pad and heading as parked-5, windows
+10-11 at 44.3 / 44.6 fps. The game's Custom.4.4.fxcfg was rewritten at
+00:37:30 UTC, four minutes before the leg, to LODDistanceScale 0.55,
+MaterialQuality 0, SurfaceMaterialQuality 2 - not the slider floor of
+0.1 that pass C used on 2026-09-21 (which kept MaterialQuality 3 and
+SurfaceMaterialQuality 2 and measured the draws with the census: EB52
+-16.9%, all pool eye draws -18.7%). No census was pressed here, so the
+draw count of this leg is unknown.
+
+| caller thread, per frame | parked-5 (1.0 / 3 / 2) | parked-6 (0.55 / 0 / 2) |
+|---|---|---|
+| cycle / fps | 22.14 ms / 45.2 | 22.4-22.6 / 44.5 |
+| R1 length / running | 9.08 / 8.90 | 9.83-9.88 / 9.30-9.46 |
+| R5c length / running | 5.03 / 3.83 | 5.29-5.39 / 3.71-3.86 |
+| caller running, whole cycle | 13.18 | 13.87 |
+| thread-summed pipeline | 5.10 | 5.54 |
+| R1 leaf: game exe / EDVR / sys d3d11 / kernel / NVIDIA | 4.71 / 1.69 / 0.73 / 0.53 / 0.51 | 5.11 / 1.67 / 0.78 / 0.61 / 0.52 |
+| gfx "draw hook CPU" | 2.11-2.13 | 2.06-2.23 |
+| app GPU (perf monitor) | 9.2-10.2 | 9.8-11.6 (one 15.7 spike at the settings change) |
+
+Reading: with these settings the settlement's admitted set grew (the
+job pipeline +8.6%, the game's own pre-submit code +0.4 ms) and the
+caller thread ended 0.7 ms slower, while EDVR's own leaf time was
+unchanged (as it should be on the same build). Either MaterialQuality 0
+changes the pool's records or layers in a way that costs more than the
+LOD scale saves, or the settings had not fully settled (windows 5-7,
+right after the change, read 28-34 fps), or the LOD-distance mapping
+s = 2 - LODDistanceScale from the LOD note is the wrong sign - the
+capture cannot say which, because the one number that separates them
+(the eye-draw count) was not taken. What it does say: lowering these
+two knobs together did not buy caller-thread time at this view.
+
+**The controlled leg it needs (leg C):** LODDistanceScale 0.1 ALONE
+(MaterialQuality 3, SurfaceMaterialQuality 2, as pass C), settled for
+a minute, one NUMLOCK census press during the capture for the eye-draw
+count, on the round-three build; read against leg A (the same build at
+1.0 / 3 / 2) on the caller thread, the pipeline, the draw count and the
+GPU line. ruled out: nothing - this leg measures two knobs and no
+count.
