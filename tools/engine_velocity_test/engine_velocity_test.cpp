@@ -81,7 +81,22 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         {L"vs_BBE58E40FE88EC80", L"ps_DB3E8D20CF53FBC0", false}, {L"vs_DE545DC8EE4FBB87", L"ps_E46E3E4832B2FDB0", false},
         {L"vs_AACFDCF2FB9AD809", L"ps_CF534B32F491561A", false}, {L"vs_66DE2CADB1F4AE6B", L"ps_864F1F949851B8DE", false},
         {L"vs_61AE8EB05FDC18DD", L"ps_FC43E42710010343", false},
+        // The station (eye run 143416): the two stock station pairs keyed.
+        {L"vs_DE545DC8EE4FBB87", L"ps_CB429E043DBB2506", false}, {L"vs_61AE8EB05FDC18DD", L"ps_451A82D4DD1BA254", false},
     };
+    // The station's pool shaders that are no family yet: their inputs must
+    // derive from the real bytecode before any pixel shader of theirs can be
+    // keyed (vs_4361's, ps_16940F576006BE65, is in no dump yet).
+    for (const wchar_t* name : {L"vs_436193B352A2897E", L"vs_889A5279E68F0672"}) {
+        const auto vs = readFile(root + L"\\shaders\\" + name + L".dxbc");
+        if (vs.empty()) { std::printf("  corpus: %ls absent (derive not checked)\n", name); continue; }
+        edvr::EngineVelocityInputs in;
+        std::string why;
+        const bool derived = edvr::engineVelocityDeriveInputs(vs.data(), vs.size(), in, why);
+        std::printf("  corpus: %ls derives: %s -- slot v%u.%c, SV_Position v%u%s%s%s\n", name, derived ? "yes" : "NO",
+                    in.identityRegister, "xyzw"[in.identityComponent & 3], in.positionRegister,
+                    in.slotFromVsPatch ? ", VS exports EDVRPOOLSLOT" : "", derived ? "" : " -- ", derived ? "" : why.c_str());
+    }
     for (const auto& p : pairs) {
         const auto vs = readFile(root + L"\\shaders\\" + p.vs + L".dxbc");
         const auto ps = readFile(root + L"\\shaders\\" + p.ps + L".dxbc");

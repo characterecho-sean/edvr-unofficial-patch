@@ -43,7 +43,18 @@ std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 // Vertex-shader hash -> the pixel shaders measured with it (blur-on run 043720
 // and the 09-06 dump; docs/kinematic-motion-injection-2026-09-19.md). A hash
 // that is not here is not substituted: after a game update the family stands
-// down by name, the way every keyed fix in EDVR does.
+// down by name, the way every keyed fix in EDVR does -- and so does a shader
+// another mod (EDHM's 3Dmigoto) replaces: its hash is not here.
+//
+// The station (eye run 143416, docs/kinematic-motion-injection-2026-09-19.md
+// "The station"): ps_CB429E043DBB2506 (vs_DE54, 108 station instances a frame)
+// and ps_451A82D4DD1BA254 (vs_61AE) drew station parts stock, so their pixels
+// kept the camera term while the station turned; both keyed, each proven by
+// the corpus identity harness (o0..o3 and depth bit-identical). Not keyed:
+// ps_B7D50283329322C3 (vs_EB52 -- the commander's legs, records 2 m away;
+// decided), and vs_436193B352A2897E, the station's biggest pool shader, which
+// is no family yet: its only pixel shader, ps_16940F576006BE65, is not in any
+// dump, and nothing is keyed without the harness.
 struct Family {
     uint64_t vs;
     const char* name;
@@ -53,10 +64,10 @@ constexpr Family kFamilies[] = {
     {0xEB5234DB6ADB491Dull, "vs_EB5234DB6ADB491D", {0xCB9F297EFF264251ull, 0x9ABF60B4B51F2C1Full, 0x3434972DB5336AA4ull}},
     {0x5B4D8E894EEDA8B4ull, "vs_5B4D8E894EEDA8B4", {0x4375B72964F386CDull, 0, 0}},
     {0xBBE58E40FE88EC80ull, "vs_BBE58E40FE88EC80", {0xDB3E8D20CF53FBC0ull, 0, 0}},
-    {0xDE545DC8EE4FBB87ull, "vs_DE545DC8EE4FBB87", {0xE46E3E4832B2FDB0ull, 0, 0}},
+    {0xDE545DC8EE4FBB87ull, "vs_DE545DC8EE4FBB87", {0xE46E3E4832B2FDB0ull, 0xCB429E043DBB2506ull, 0}},
     {0xAACFDCF2FB9AD809ull, "vs_AACFDCF2FB9AD809", {0xCF534B32F491561Aull, 0, 0}},
     {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0, 0}},
-    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0, 0}},
+    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0}},
 };
 constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
 static_assert(kFamilyCount <= kMaxFamilies, "familyDraws holds every family");
