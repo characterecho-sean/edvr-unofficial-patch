@@ -382,10 +382,10 @@ bool compile(const char* src, size_t len, const char* entry, const char* profile
     return SUCCEEDED(hr);
 }
 
-bool setup(Gpu& g) {
+bool setup(Gpu& g, bool hardware) {
     D3D_FEATURE_LEVEL fl{};
-    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
-                                 &g.dev, &fl, &g.ctx))) {
+    if (FAILED(D3D11CreateDevice(nullptr, hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr,
+                                 0, nullptr, 0, D3D11_SDK_VERSION, &g.dev, &fl, &g.ctx))) {
         return false;
     }
     ComPtr<ID3DBlob> v, p, c;
@@ -733,8 +733,11 @@ int main(int argc, char** argv) {
         std::puts("ui_layer_test: dry-run (no device, no files)");
         return 0;
     }
-    if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) {
-        std::puts("usage: ui_layer_test --self-test | --dry-run");
+    // --hardware: the same checks on the default hardware adapter instead of
+    // WARP, by hand (the gate runs --self-test; a build machine may have no GPU).
+    const bool hardware = argc == 2 && std::strcmp(argv[1], "--hardware") == 0;
+    if (argc != 2 || (std::strcmp(argv[1], "--self-test") != 0 && !hardware)) {
+        std::puts("usage: ui_layer_test --self-test | --hardware | --dry-run");
         return 2;
     }
     testKey();
@@ -745,8 +748,8 @@ int main(int argc, char** argv) {
     testFootprint();
     testGate();
     Gpu g;
-    if (!setup(g)) {
-        check(false, "WARP device and the production composite shader");
+    if (!setup(g, hardware)) {
+        check(false, "a device and the production composite shader");
     } else {
         testRedirect(g, 1.0f);
         testRedirect(g, 1.25f);
