@@ -2709,6 +2709,10 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     for (UiDepthLayer& layer : g_uiDepth) layer.frameBoundary();
     for (UiDepthLayer& layer : g_separatedDepth) layer.frameBoundary();
     for(auto& motion:g_holoMotion) motion.frameBoundary();
+    // After the pruning above: the write guard in ui_depth.h may stand down
+    // again once neither eye's map holds a corona's buffers (holo_motion.h).
+    detail::g_holoGeometryTracked.store(g_holoMotion[0].tracksGeometry() || g_holoMotion[1].tracksGeometry(),
+                                        std::memory_order_relaxed);
     g_separatedFailed[0]=g_separatedFailed[1]=false;
     g_cleanReplayOn=false;
     g_frameTargetCount = 0;

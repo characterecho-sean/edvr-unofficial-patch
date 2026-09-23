@@ -44,6 +44,10 @@ constexpr uint32_t kUiMinW = 1024;
 constexpr char     kKind = 'X';
 constexpr uint32_t kMinIndices = 100;
 constexpr uint32_t kInstances = 1;
+// The shape test itself is scrimWashShape (scrim_fix.h), inline so the draw
+// path can ask it first; it must say what these three constants say.
+static_assert(kKind == 'X' && kMinIndices == 100 && kInstances == 1,
+              "scrimWashShape (scrim_fix.h) must match the wash mesh's shape");
 
 bool isBc1(uint32_t fmt) {
     return fmt == DXGI_FORMAT_BC1_TYPELESS || fmt == DXGI_FORMAT_BC1_UNORM ||
@@ -206,7 +210,7 @@ void scrimConfigure(Config& cfg) {
 
 bool scrimOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     if (!detail::g_scrimOn) return false;
-    if (kind != kKind || instances != kInstances || count < kMinIndices) {
+    if (!scrimWashShape(kind, count, instances)) {
         return false;
     }
     // Slot 0 first: a 16x16 BC1 is the rare binding, and every other mesh in

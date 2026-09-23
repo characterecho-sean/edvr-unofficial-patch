@@ -41,6 +41,10 @@ constexpr uint32_t kVerts = 6;
 constexpr uint32_t kSheetW = 2048;
 constexpr uint32_t kSheetH = 1024;
 constexpr uint32_t kSheetFmt = 98;
+// The shape half of the test is sunglareTrainShape (sunglare_fix.h), inline
+// so the draw path can ask it first; it must say what these two say.
+static_assert(kKind == 'N' && kVerts == 6,
+              "sunglareTrainShape (sunglare_fix.h) must match the train's measured shape");
 
 // The shipped surface: one key, three modes. realistic = the record-
 // selected anchored elements, world-drawn (corona and smudge class,
@@ -516,7 +520,7 @@ void dumpInstanceStreams(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 bool sunglareIsGlareTrain(char kind, uint32_t count, uint32_t instances) {
-    if (kind != kKind || count != kVerts || instances < 2) return false;
+    if (!sunglareTrainShape(kind, count, instances)) return false;
     ResourceInfo s0, s1;
     if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &s0) ||
         !s0.isTexture2D || s0.a != kSheetW || s0.b != kSheetH ||

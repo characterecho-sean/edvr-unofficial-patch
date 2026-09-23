@@ -76,6 +76,17 @@ void  sunglareSceneDump(const void* data, uint32_t bytes);
 // The train's identity test, exported for the constant-buffer peek: the
 // steer needs to read the 208-byte CB of exactly these draws, and two
 // matchers for one family is how the witchstar era learned wrong things.
+//
+// sunglareTrainShape is its first, shape-only half (DrawInstanced, six
+// vertices, more than one instance), inline: sunglareOnEyeDraw answers
+// kStock without touching anything when it fails, and sunglareWantsDraws is
+// a pure read, so the draw path asks the shape before both calls -- which it
+// made for every eye draw (35 innermost samples of the 1355-frame parked-5
+// window). sunglareIsGlareTrain asks this same function, so they cannot
+// drift.
+inline bool sunglareTrainShape(char kind, uint32_t count, uint32_t instances) {
+    return kind == 'N' && count == 6 && instances >= 2;
+}
 bool sunglareIsGlareTrain(char kind, uint32_t count, uint32_t instances);
 
 // When the train last drew, in nowMs() time; 0 = never this session.

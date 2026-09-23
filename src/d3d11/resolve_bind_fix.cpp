@@ -23,18 +23,14 @@ bool g_resolveBindOn = false;
 
 namespace {
 
-// The deferred resolve's PIXEL shader -- the same content hash
-// resolve_probe.cpp matches on, measured 2026-08-30 from a field shader
-// dump and confirmed by disassembly. Duplicated rather than shared because
-// the two modules stand alone: one is a probe somebody arms for an
-// evening, this is a fix that ships on.
-constexpr uint64_t kResolvePs = 0x7CECABDE34FFBE9EULL;
-
-enum class ShadowMatch : uint8_t { Unknown, No, Yes };
-
+// The deferred resolve's PIXEL shader and the shadow's three-way answer now
+// live in resolve_bind_fix.h (detail::kResolveBindPs, resolveBindShadowMatch)
+// so the draw path can ask the "No" inline before calling in; these are the
+// names this file has always used for them.
+constexpr uint64_t kResolvePs = detail::kResolveBindPs;
+using ShadowMatch = detail::ResolveBindShadow;
 constexpr ShadowMatch shadowMatch(bool hasShader, uint64_t hash) {
-    if (!hasShader || !hash) return ShadowMatch::Unknown;
-    return hash == kResolvePs ? ShadowMatch::Yes : ShadowMatch::No;
+    return detail::resolveBindShadowMatch(hasShader, hash);
 }
 
 FaultBudget g_budget("resolveBind", 8);

@@ -39,7 +39,10 @@ extern bool     g_fssDumpDone;
 extern uint32_t g_fssDumpSeriesWant;
 extern bool     g_fssDumpSeriesDone;
 }  // namespace detail
-inline bool fssDumpWantsDraws() {
+// __forceinline, not inline: beginPanelOverride is large enough that MSVC's
+// inliner declined this one and called an out-of-line copy per eye draw
+// (checked on the built DLL, 2026-09-22 round three).
+__forceinline bool fssDumpWantsDraws() {
     return (detail::g_fssDumpFrame != 0 && !detail::g_fssDumpDone) ||
            (detail::g_fssDumpSeriesWant != 0 && !detail::g_fssDumpSeriesDone);
 }

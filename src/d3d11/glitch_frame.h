@@ -58,7 +58,16 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource);
 // Read-only cross-check of the camera buffer bound to a recognised opaque
 // eye draw. A fresh same-frame write is required. Saved beside the legacy
 // furthest-camera history and paired with the bound pool below.
-bool glitchFrameIsSceneDraw(uint64_t vertexShaderHash);
+//
+// glitchFrameIsSceneDraw is a pure classifier of five rigid-scene vertex
+// shader hashes, defined here inline: the draw lambda asks it for every eye
+// geometry draw, and as a cross-TU call (/O2, no /GL) that was a call per
+// draw for five compares.
+inline bool glitchFrameIsSceneDraw(uint64_t vertexShaderHash) {
+    return vertexShaderHash==0xEB5234DB6ADB491Dull || vertexShaderHash==0xDE545DC8EE4FBB87ull ||
+        vertexShaderHash==0x61AE8EB05FDC18DDull || vertexShaderHash==0x66DE2CADB1F4AE6Bull ||
+        vertexShaderHash==0xAACFDCF2FB9AD809ull;
+}
 bool glitchFrameWantsSceneDraw(uint64_t vertexShaderHash);
 bool glitchFrameNoteSceneDraw(const void* resource, float* sampledPosition = nullptr);
 

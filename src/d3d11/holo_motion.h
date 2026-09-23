@@ -5,6 +5,7 @@
 // History keys name the surface/mesh, never the reordered pool slot.
 #include <d3d11.h>
 #include <wrl/client.h>
+#include <atomic>
 #include <cstdint>
 #include <unordered_map>
 #include <algorithm>
@@ -12,6 +13,29 @@
 #include "eye_draw_snapshot.h"
 
 namespace edvr {
+// "Some HoloMotion may hold geometry", for ui_depth.h's inline write guard.
+//
+// resourceWritten below is a no-op for a non-null resource unless that
+// resource is a key of `geometry`, and every Unmap, Copy and Update the game
+// makes reaches it twice (both eyes' g_holoMotion) through
+// uiDepthMotionResourceWritten -- an unordered_map find each, about 1100
+// times a frame over terrain: 98 innermost samples of the 1355-frame window
+// of 2026-09-22 (parked-5), the largest EDVR-owned item on the Unmap path.
+// The maps are empty unless a smoke corona was accepted in the last few
+// frames.
+//
+// Set TRUE at the one insertion site (prepare, corona path), before anything
+// that can re-enter the write hooks; recomputed from g_holoMotion's own maps
+// at uiDepthFrameBoundary, after their frameBoundary() pruning. Nothing else
+// inserts, and erasures (pruning, clear, reassignment) can only empty a map,
+// so FALSE always means g_holoMotion's maps are empty -- the only instances
+// the guarded call reaches. Relaxed: every writer and reader is on the
+// owner context's thread, the same thread that already touches the maps
+// unlocked.
+namespace detail {
+inline std::atomic<bool> g_holoGeometryTracked{false};
+}  // namespace detail
+
 struct HoloDraw {
     char kind=0;
     uint32_t count=0, instances=0, start=0;
@@ -320,7 +344,7 @@ public:
         bool enough=true; const UINT minimum[3]={mode==2?0u:128u,276*16,(mode==2 || mode==4)?0u:corona?32u:mode==3?32u:64u};
         for(int i=0;i<3;++i) { D3D11_BUFFER_DESC bd{}; if(cb[i]) cb[i]->GetDesc(&bd); enough=enough && bd.ByteWidth>=minimum[i]; }
         if(!enough) { for(auto* p:cb) if(p) p->Release(); return false; }
-        if(corona) { geometry[vb[0].Get()].seen=frame; geometry[ib.Get()].seen=frame; }
+        if(corona) { geometry[vb[0].Get()].seen=frame; geometry[ib.Get()].seen=frame; detail::g_holoGeometryTracked.store(true,std::memory_order_relaxed); }
         struct Data { UINT info[4],key[16]; float limits[4]; } data{};
         data.info[0]=now.count; data.info[1]=prev.count; data.info[2]=mode; data.info[3]=count;
         IUnknown* objects[3]={surface.Get(),vb[pooled?1:0].Get(),mode==2?nullptr:ib.Get()};
@@ -360,10 +384,15 @@ public:
             if(++geometryEpoch==0) { geometryEpoch=1; unknownEpoch=0; geometry.clear(); for(auto& hist:history){for(unsigned i=0;i<hist.count;++i)for(auto& p:hist.sources[i])p.Reset();hist.count=0;} cleared=false; }
             unknownEpoch=geometryEpoch; return true;
         }
+        // Empty is the common state (no corona accepted lately): a find on an
+        // empty map hashes the key and misses, so this answers the same.
+        if(geometry.empty()) return false;
         auto it=geometry.find(resource); if(it==geometry.end()) return false;
         if(++geometryEpoch==0) { geometryEpoch=1; unknownEpoch=0; geometry.clear(); for(auto& hist:history){for(unsigned i=0;i<hist.count;++i)for(auto& p:hist.sources[i])p.Reset();hist.count=0;} cleared=false; return true; }
         it->second.epoch=geometryEpoch; return true;
     }
+    // For detail::g_holoGeometryTracked's recompute (ui_depth.cpp).
+    bool tracksGeometry() const { return !geometry.empty(); }
     void noteFrame() {
         ++frame;
         for(auto it=geometry.begin();it!=geometry.end();) {

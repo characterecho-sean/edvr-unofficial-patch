@@ -18,6 +18,7 @@
 
 #include <d3d11.h>
 
+#include <atomic>
 #include <cstdint>
 
 #include "../common/vtable_hook.h"  // HookMode
@@ -61,7 +62,17 @@ uint64_t lookupShaderHash(void* shader);
 // How many registrations there have been: a memo of pointer -> hash asks
 // again when this moves, because a destroyed shader's address comes back as
 // another shader's (vscreen's shaderHashMemo, 2026-09-09).
-uint32_t shaderRegistryGeneration();
+//
+// Inline over the counter itself (bumped only in exposure_fix.cpp's
+// registerShaderHash): the memo asks it on every VS and PS set, and as a
+// cross-TU call (/O2, no /GL) that was a call per set for one load. Same
+// load, same acquire ordering.
+namespace detail {
+extern std::atomic<uint32_t> g_shaderRegistryGen;
+}  // namespace detail
+inline uint32_t shaderRegistryGeneration() {
+    return detail::g_shaderRegistryGen.load(std::memory_order_acquire);
+}
 
 // Called once per frame from Present. The pairing of first and second eye is
 // only meaningful within a frame.

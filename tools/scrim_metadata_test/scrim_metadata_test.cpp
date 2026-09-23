@@ -180,6 +180,16 @@ int main() {
         check(calls() == 4, "both real SRVs resolved");
         check(edvr::scrimOnEyeDraw('X', 5760, 1), "real scrim cached");
         check(calls() == 4, "recognition cache avoids both queries");
+        // The draw path asks scrimWashShape inline before the call; with the
+        // real wash bound, the two must agree shape by shape, and a shape the
+        // pre-check turns away must be one the match declines untouched.
+        check(edvr::scrimWashShape('X', 5760, 1) && edvr::scrimWashShape('X', 100, 1),
+              "inline shape pre-check accepts the wash mesh");
+        check(!edvr::scrimWashShape('X', 6, 1) && !edvr::scrimOnEyeDraw('X', 6, 1) &&
+                  !edvr::scrimWashShape('X', 5760, 2) && !edvr::scrimOnEyeDraw('X', 5760, 2) &&
+                  !edvr::scrimWashShape('N', 5760, 1) && !edvr::scrimOnEyeDraw('N', 5760, 1),
+              "inline shape pre-check rejects exactly what the match rejects on shape");
+        check(calls() == 4, "shape rejections make no query");
 
         bindSrv(context.Get(), 1, other.Get());
         check(!edvr::scrimOnEyeDraw('X', 5760, 1), "slot1-only miss");

@@ -43,6 +43,8 @@
 // fix.scanner_body = on | off, default on.
 #pragma once
 
+#include <cstdint>
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -57,6 +59,22 @@ void resolveBindConfigure(Config& cfg);
 // getter for one bool load.
 namespace detail {
 extern bool g_resolveBindOn;
+
+// The deferred resolve's PIXEL shader -- the same content hash
+// resolve_probe.cpp matches on, measured 2026-08-30 from a field shader
+// dump and confirmed by disassembly. Duplicated rather than shared because
+// the two modules stand alone: one is a probe somebody arms for an
+// evening, this is a fix that ships on.
+constexpr uint64_t kResolveBindPs = 0x7CECABDE34FFBE9EULL;
+
+// What the binding shadow's pixel shader slot says about this draw. Unknown
+// when the slot holds no pointer or a zero hash -- the callee then asks the
+// real context (resolve_bind_fix.cpp says why).
+enum class ResolveBindShadow : uint8_t { Unknown, No, Yes };
+constexpr ResolveBindShadow resolveBindShadowMatch(bool hasShader, uint64_t hash) {
+    if (!hasShader || !hash) return ResolveBindShadow::Unknown;
+    return hash == kResolveBindPs ? ResolveBindShadow::Yes : ResolveBindShadow::No;
+}
 }  // namespace detail
 inline bool resolveBindWants() { return detail::g_resolveBindOn; }
 
@@ -64,6 +82,15 @@ inline bool resolveBindWants() { return detail::g_resolveBindOn; }
 // content hash, the same key resolve_probe matches on). Uses the owner
 // context's binding shadow when its pointer and hash are both known; otherwise
 // reads the real context and repairs that shadow slot when possible.
+//
+// resolveBindShadowSaysNo is that shadow answer's "No", inline: the callee
+// returns false on it without touching anything, and with the fix on by
+// default the call per eye draw (19 innermost samples of the 1355-frame
+// parked-5 window) almost always ended there. Pass the shadow's own
+// (pointer held, hash) pair.
+inline bool resolveBindShadowSaysNo(bool hasShader, uint64_t hash) {
+    return detail::resolveBindShadowMatch(hasShader, hash) == detail::ResolveBindShadow::No;
+}
 bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx);
 
 // Around the matched draw: cache the vertex buffer if one is bound; lend

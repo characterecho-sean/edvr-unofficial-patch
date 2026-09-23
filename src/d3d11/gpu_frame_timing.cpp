@@ -48,8 +48,21 @@ GpuSpanOwner bindOwner(GpuTimingFrameDriver& driver, ID3D11Device* d,
 // all. Provably identical to GetCurrentThreadId() by construction (it IS
 // that call, cached), so no separate self-check is needed the way an
 // offset-based read of the TEB would want.
-inline DWORD currentThreadIdCached() noexcept {
-    static thread_local const DWORD id = GetCurrentThreadId();
+//
+// A ZERO-INITIALISED thread_local, filled on first use, rather than a
+// function-local `static thread_local const DWORD id = GetCurrentThreadId()`:
+// that form is a dynamic TLS initialisation, so every call tested and set a
+// per-thread init guard beside the read (the flown owns() did exactly that,
+// once per hooked command). Zero is a safe "not yet": no running thread has
+// id 0 (it names the idle process), so the cached value is GetCurrentThreadId()
+// on every call either way.
+thread_local DWORD t_currentThreadId = 0;
+__forceinline DWORD currentThreadIdCached() noexcept {
+    DWORD id = t_currentThreadId;
+    if (!id) {
+        id = GetCurrentThreadId();
+        t_currentThreadId = id;
+    }
     return id;
 }
 struct Controller {
@@ -69,7 +82,11 @@ struct Controller {
     ID3D11DeviceContext* context() const noexcept {
         return reinterpret_cast<ID3D11DeviceContext*>(owner.context);
     }
-    bool owns(ID3D11DeviceContext* c) const noexcept {
+    // Forced inline: gpuFrameCommand asks it once per hooked command, and
+    // as a call (the flown build did not inline it) it was a second prologue
+    // and a second walk to this module's TLS block, which gpuFrameCommand
+    // has just made for g_gpuFrameInternal. Same four tests, same order.
+    __forceinline bool owns(ID3D11DeviceContext* c) const noexcept {
         return owner.immediate && owner.thread == currentThreadIdCached() &&
                owner.context && c == context();
     }

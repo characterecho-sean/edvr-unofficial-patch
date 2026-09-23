@@ -106,11 +106,23 @@ namespace {
 
 // nullptr invalidates every cached input (command-list execution); otherwise
 // only writes to a source instance, bone or camera buffer invalidate them.
+//
+// Reached from every Unmap, Copy and Update on the owner context, so the two
+// callees below whose own first tests are published state are asked inline
+// first (/O2, no /GL: each was a cross-TU call per write). Both tests are the
+// callee's own, word for word, so the calls skipped are exactly the ones that
+// would return having done nothing:
+//   meshMotionResourceWritten (mesh_motion.cpp) flushes when pendingCount,
+//   clears its depth metadata on a null resource, and otherwise returns at
+//   `!enabled` before anything else;
+//   staticSurfaceResourceWritten (static_surface.cpp) returns at
+//   `!enabled.load()` before anything else.
 static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
     if(!resource && objectClassificationProbe.active())objectClassificationProbe.unknownWrites();
     weaponMotionResourceWritten(resource);
-    meshMotionResourceWritten(resource,first,end);
-    staticSurfaceResourceWritten(resource,first,end);
+    if(!resource || mesh_motion_detail::pendingCount || mesh_motion_detail::enabled)
+        meshMotionResourceWritten(resource,first,end);
+    if(static_surface_detail::enabled.load())staticSurfaceResourceWritten(resource,first,end);
     uiDepthMotionResourceWritten(resource,first,end);
 }
 
@@ -365,10 +377,27 @@ struct State {
     // same 64 for the same reason. registerShaderHash only runs at shader
     // CREATION (device_hook.cpp), not per frame, so this is sized against
     // distinct shaders in play, not against a churn rate.
+    //
+    // 1024, one entry per slot, indexed by a multiplicative hash of the
+    // pointer (2026-09-22, round three). At 64 the parked settlement still
+    // took the registry's critical section about a thousand times a frame
+    // (hashOf: 55 samples in Enter/LeaveCriticalSection of the 1355-frame
+    // parked-5 window, all from the two shader-set hooks), with no shader
+    // CREATION in the profile to invalidate it -- a frame there binds
+    // hundreds of distinct shaders, and (ptr >> 4) & 63 over heap addresses
+    // with fixed strides between them collides far more often than 64 slots
+    // suggest. Each entry is one 24-byte record, so a lookup touches one
+    // cache line rather than three parallel arrays. The validity test is
+    // unchanged (pointer, registry generation, non-zero hash), so a hit
+    // answers what the registry would.
     struct ShaderMemo {
-        void*    ptr[64] = {};
-        uint64_t hash[64] = {};
-        uint32_t gen[64] = {};   // the registry's generation at the lookup
+        static constexpr size_t kSlots = 1024;
+        struct Entry {
+            void*    ptr = nullptr;
+            uint64_t hash = 0;
+            uint32_t gen = 0;   // the registry's generation at the lookup
+        };
+        Entry e[kSlots] = {};
     };
     ShaderMemo vsMemo, psMemo;
     // The shadow's audit (bindingAudit): every 1024th draw of the owner's
@@ -667,6 +696,14 @@ struct State {
     uint32_t rtv0SizeGen = 0;
     bool     psSrv0Panel = false;
     uint32_t psSrv0PanelGen = 0;
+    // The bound target's whole resolve, the rtv0Eye pattern once more, for
+    // the wake pulse -- a shipped fix that needs the target's size on EVERY
+    // offscreen draw (it counts panel frames and learns candidate shapes, so
+    // the resolve cannot wait for a shape match). Only a SUCCESSFUL resolve
+    // is kept; a failed one is retried on the next draw, as it always was
+    // (rtv0Resolve says why that is the whole difference).
+    ResourceInfo rtv0Info;
+    uint32_t     rtv0InfoGen = 0;   // 0: never -- binding generations start at 1
 
     // The panel's transform, as the game last wrote it. Captured from the Unmap
     // the game wrote it through, so reading it costs nothing.
@@ -1259,13 +1296,27 @@ bool isFlatGrey(const FLOAT c[4]) {
 // The panel is whatever size the game forces for that view mode -- 1920x1080 by
 // default, or the raised size when the resolution fix is on. Nothing else an
 // eye-sized draw samples has exactly those dimensions.
-bool srv0IsPanelSized(State* s, char kind, uint32_t count) {
+//
+// SPLIT IN TWO (2026-09-22, round three). The three early answers below --
+// too many vertices, nothing bound, the generation unchanged -- are what
+// nearly every call gets, and they are now inline at the four call sites in
+// beginPanelOverride (up to three per eye draw with the panel distance fix
+// and the curved screen on). The rest is srv0IsPanelSizedSlow, NOINLINE,
+// because it owns a Srv0PanelTag -- a no-pointer struct over eight bytes
+// that GetPrivateData fills, i.e. a /GS buffer -- so while it was one
+// function every call, the early returns included, set up and checked a
+// stack cookie (srv0IsPanelSized was 98 innermost samples of the 1355-frame
+// parked-5 window, 45 of them on its epilogue). Same tests, same order, same
+// memo, same answers.
+__declspec(noinline) bool srv0IsPanelSizedSlow(State* s, char kind, uint32_t count,
+                                                void* srv, uint32_t gen);
+
+__forceinline bool srv0IsPanelSized(State* s, char kind, uint32_t count) {
     // The composite that reads the panel is a quad -- six indices, the
     // intro's and the menu backdrop's censuses agree -- so a draw of more
     // than a few dozen is not it, and asking costs a resolve per draw
     // (the slot's generation moves with every material: the review of
     // 2026-09-09 put it at 0.6 ms a frame).
-    (void)kind;
     if (count > 64) return false;
     void* srv = bindingGet(BindSlot::PsSrv0);
     if (!srv) return false;
@@ -1276,7 +1327,11 @@ bool srv0IsPanelSized(State* s, char kind, uint32_t count) {
     // only from the two hooks this file happens to own.
     const uint32_t gen = bindingGeneration(BindSlot::PsSrv0);
     if (s->psSrv0PanelGen == gen) return s->psSrv0Panel;
+    return srv0IsPanelSizedSlow(s, kind, count, srv, gen);
+}
 
+__declspec(noinline) bool srv0IsPanelSizedSlow(State* s, char kind, uint32_t count,
+                                                void* srv, uint32_t gen) {
     const uint32_t w = s->panelW ? s->panelW : 1920;
     const uint32_t h = s->panelH ? s->panelH : 1080;
 
@@ -1643,6 +1698,40 @@ bool drawGateSubscribed(State* s) {
         introProbeWants() || introPanelWants();
 }
 
+// The bound target's resolve, for the wake pulse, memoised on Rtv0's binding
+// generation -- the rtv0Eye pattern. The wake pulse needs the target's size
+// on every offscreen draw, and resolving it there was four guarded COM calls
+// (GetResource, GetType, GetDesc, Release) per draw: 43 of the resolver's
+// COM samples in the 1355-frame parked-5 window came from that one site.
+//
+// The generation is read HERE, at the use, not taken from the rtvGen
+// beginPanelOverride read at its top, so the answer always describes the
+// binding as it stands when asked.
+//
+// What differs from resolving per draw is only the bargain every
+// generation-keyed answer in this file already makes (rtv0Eye,
+// censusAutoMatch, fssScanBody -- all on this slot): within one generation
+// the pointer is the one the last hooked set recorded, and a bound view holds
+// its resource for its lifetime, so a second resolve can disagree with the
+// first only if the object at that address changed with no hooked set in
+// between -- an unbind through an unhooked path, a release and a reuse of the
+// address, all inside one frame, because the frame boundary bumps every
+// generation. And if the resolver's fault budget runs out mid-generation, a
+// kept answer is still served until the generation moves (at most the rest
+// of the frame) where bindingResolve would have answered false at once. A
+// FAILED resolve is never kept: it is retried on the next draw exactly as
+// before, and a fault is still charged on the draw that faults.
+__forceinline const ResourceInfo* rtv0Resolved(State* s) {
+    const uint32_t gen = bindingGeneration(BindSlot::Rtv0);
+    if (s->rtv0InfoGen != gen) {
+        ResourceInfo info;
+        if (!bindingResolve(bindingGet(BindSlot::Rtv0), &info)) return nullptr;
+        s->rtv0Info = info;
+        s->rtv0InfoGen = gen;
+    }
+    return &s->rtv0Info;
+}
+
 // kind, count and instances describe the draw for the census and the census
 // probe, and args is the rest of the call's own argument set (start index,
 // base vertex, start instance -- draw_census.h, DrawArgs), passed through
@@ -1835,7 +1924,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // take their basis from the game camera either way, which is why they
     // swim when the mouse turns as well as when the head does, and a fix
     // that only reached the stereo view would leave half the bug standing.
-    particleOnEyeDraw(self, kind, count, instances);
+    // particleProbeOn() is the callee's own first test, inline
+    // (particle_fix.h): with the probe off, its default, the call only
+    // returned.
+    if (particleProbeOn()) particleOnEyeDraw(self, kind, count, instances);
 
     // The particle billboards, before the eye gate for the same reason the
     // probe is: on foot they draw into the panel, and a fix that only ran
@@ -1844,7 +1936,15 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // Visible substituted draws need their own census/ledger entry here,
     // since the early return bypasses the normal recording below. Effects
     // withheld entirely are instead counted by drawCensusNoteUnseen.
-    if (particleSteady() && particleOnDraw(self, kind, count, instances)) {
+    //
+    // particleOnDrawMayMatch (particle_fix.h) is the callee's own rejections
+    // ahead of its first effect -- shape, then the held vertex shader hash
+    // against the two transcriptions -- inline, so the draws that are not a
+    // billboard (nearly all of them) no longer make the call.
+    if (particleSteady() &&
+        particleOnDrawMayMatch(kind, count, instances,
+                               bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0) &&
+        particleOnDraw(self, kind, count, instances)) {
         // This is still a visible draw. Capture the ORIGINAL shader and
         // resources before particleBegin substitutes its vertex stage;
         // otherwise the smoke that survives the drive switches is absent
@@ -1861,7 +1961,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // it. Here beside the billboards because it is the same family and the
     // same identification -- by shader hash, before the eye gate, since the
     // jump tunnel draws into the panel on foot as well.
-    if (witchspaceStarsSkip(self, kind, count, instances)) {
+    // witchspaceStarsHidden() is the callee's own first test, inline: with
+    // fix.witchspace_stars at its default (on), the call only returned false.
+    if (witchspaceStarsHidden() && witchspaceStarsSkip(self, kind, count, instances)) {
         if (drawCensusArmed()) drawCensusNoteUnseen('w');
         return DrawVerdict::kSkip;
     }
@@ -1978,7 +2080,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         //
         // The intro probe reads the same draw, so its fill timing does not
         // depend on any intro fix being on; introProbeWants is two bools.
-        if ((introPanelWants() || introProbeWants()) && kind == 'N' && count == 4 &&
+        // The draw's shape is asked FIRST: introPanelWants is a cross-TU call
+        // (intro_panel.cpp, /O2 without /GL) that was made for every draw here
+        // and at the composite below. All the terms are pure reads, so only
+        // the order changed.
+        if (kind == 'N' && count == 4 && (introPanelWants() || introProbeWants()) &&
             bindingGet(BindSlot::PsSrv1) && bindingGet(BindSlot::PsSrv2)) {
             ResourceInfo info;
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
@@ -2003,7 +2109,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // this census call already said why -- a census taken while probing
         // must record what the game SUBMITTED -- and the fix was written past
         // it.
-        if (backdropOnDraw(self, kind, count, instances)) {
+        // Shape first, inline (backdrop_fix.h): the call per offscreen draw
+        // answered false on it, having touched nothing.
+        if (backdropBlitShape(kind, count, instances) &&
+            backdropOnDraw(self, kind, count, instances)) {
             return DrawVerdict::kBackdrop;
         }
         // The resolution fix's draw-time backstop: if the game set the body
@@ -2050,11 +2159,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // matched the same way: a draw shape into a target named by its
         // proportion of the eye. A shipped fix rather than an instrument, so
         // it is checked first and costs one bool when off.
+        // The target's size comes from rtv0Resolved: one resolve per binding
+        // generation instead of one per offscreen draw (it says what that
+        // trades, which is nothing a verdict here can see).
         if (wakePulseWantsDraws()) {
-            ResourceInfo wp;
-            if (bindingResolve(bindingGet(BindSlot::Rtv0), &wp) &&
-                wp.isTexture2D &&
-                wakePulseSkips(self, kind, count, wp.a, wp.b,
+            const ResourceInfo* wp = rtv0Resolved(s);
+            if (wp && wp->isTexture2D &&
+                wakePulseSkips(self, kind, count, wp->a, wp->b,
                                s->qsStartIndex, s->qsBaseVertex)) {
                 return DrawVerdict::kSkip;
             }
@@ -2184,8 +2295,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // first draw into the scene pair's depth, which is the scene camera's
     // by construction -- depth_probe.cpp says why.)
     // The depth target this eye draw uses, for the depth probe -- one
-    // pointer compare unless it changed (depth_probe.h).
-    depthProbeNoteEyeDraw(self, bindingGet(BindSlot::Dsv0), s->eyeDrawsThisFrame);
+    // pointer compare unless it changed (depth_probe.h), and that compare is
+    // now made here, inline, before the call rather than inside it.
+    {
+        void* const eyeDsv = bindingGet(BindSlot::Dsv0);
+        if (depthProbeEyeDrawNeedsNote(eyeDsv))
+            depthProbeNoteEyeDraw(self, eyeDsv, s->eyeDrawsThisFrame);
+    }
     // fix.eye_mask's own draw, past every hook below (eye_mask.h): at most
     // once per eye per frame, so the cheap "already drawn" check runs before
     // anything else even when the feature is off.
@@ -2207,7 +2323,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // the movie was converted into THIS frame; the constants are then
     // checked for a screen-space placement before anything is bound, so
     // the splash and the menu refuse it by their own numbers.
-    if (introPanelWants() && kind == 'X' && count == 6) {
+    // Shape first, then the cross-TU introPanelWants (pure reads, see the
+    // fill test above): the call was made for every eye draw.
+    if (kind == 'X' && count == 6 && introPanelWants()) {
         ResourceInfo srv;
         if (bindingResolve(bindingGet(BindSlot::PsSrv0), &srv) &&
             srv.isTexture2D &&
@@ -2241,8 +2359,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
     }
     // The pool probe (object_probe.h): one bool while off; a few t33 reads a
-    // frame until the pool is known, then one a second.
-    objectProbeOnEyeDraw(self, kind, count, instances, args.startInstance,args.start,args.base);
+    // frame until the pool is known, then one a second. The bool is now read
+    // HERE: objectProbeWantsDraws() is the callee's own first test, inline,
+    // and with the probe off the call per eye draw only returned (63
+    // innermost samples of the 1355-frame parked-5 window, all prologue,
+    // test and epilogue).
+    if (objectProbeWantsDraws())
+        objectProbeOnEyeDraw(self, kind, count, instances, args.startInstance,args.start,args.base);
 
     // The suppression probe, after the census so a census taken while probing
     // still records what the game SUBMITTED. Everything before this point is
@@ -2316,18 +2439,24 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
     }
 
-    if(nightVisionMatches(kind,count,instances))return DrawVerdict::kNightVision;
+    // Shape first, inline (night_vision.h): the match is pure, and the call
+    // per eye draw failed on this very test.
+    if(nightVisionShape(kind,count,instances) && nightVisionMatches(kind,count,instances))
+        return DrawVerdict::kNightVision;
 
     // The RemLok overlay fix, after the probes so a census taken while it
-    // runs still records the draw the game submitted.
-    if (remlokWantsDraws()) {
+    // runs still records the draw the game submitted. The shape is asked
+    // first, inline (remlok_fix.h): any other shape comes back kNone.
+    if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
         const RemlokAction a = remlokOnEyeDraw(kind, count, instances);
         if (a == RemlokAction::kHide) return DrawVerdict::kSkip;
         if (a == RemlokAction::kScissor) return DrawVerdict::kRemlok;
     }
 
     // The loading hologram's pattern fix, same placement for the same reason.
-    if (holoWantsDraws() && holoOnEyeDraw(kind, count, instances)) {
+    // Shape first, inline (holo_fix.h), as for the RemLok overlay above.
+    if (holoWantsDraws() && holoPatternShape(kind, count, instances) &&
+        holoOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kHolo;
     }
 
@@ -2359,8 +2488,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kHudGrain;
     }
 
-    // The loader dialog's dimming wash, recognised by what it samples.
-    if (scrimWantsDraws() && scrimOnEyeDraw(kind, count, instances)) {
+    // The loader dialog's dimming wash, recognised by what it samples -- and
+    // first by its shape, inline (scrim_fix.h), which turns away the quads
+    // and small draws before the call.
+    if (scrimWantsDraws() && scrimWashShape(kind, count, instances) &&
+        scrimOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kScrim;
     }
 
@@ -2370,7 +2502,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // which is what actually bypasses the engine's downsample. Both wear the
     // same verdict because both do the same thing: bind our bake into PS
     // slot 0 for one draw and put the game's texture back after.
-    if (backdropWantsDraws() &&
+    // The composite's shape first, inline (backdrop_fix.h): the call per eye
+    // draw failed on it (30 innermost samples of the parked-5 window).
+    if (backdropWantsDraws() && backdropCompositeShape(kind, count, instances) &&
         backdropOnComposite(self, kind, count, instances)) {
         return DrawVerdict::kBackdrop;
     }
@@ -2405,10 +2539,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // the squares live in the ~10 frames before it. The mode latch keeps
     // the widened window inside the scanner (the loading screen draws
     // none of this), and the zoom-start jump bounds it.
+    // The jump window before the mode latch: deviceHookFssModeLatch is a
+    // cross-TU call (device_hook.cpp) and a pure read, and it was being made
+    // for every eye draw outside the scanner. Same three terms, same answer.
     if (fssRevealWantsDraws() &&
         ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
-         (deviceHookFssModeLatch() && s->fssJumpFrame != 0 &&
-          s->frameNo - s->fssJumpFrame <= 600)) &&
+         (s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
+          deviceHookFssModeLatch())) &&
         fssRevealOnEyeDraw(self, kind, count, instances)) {
         if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
         return DrawVerdict::kFssReveal;
@@ -2435,8 +2572,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // PIXEL shader hash, so it is asked LAST -- every fix above it that
     // swaps a shader has already had its say, and this one replaces the
     // whole pass rather than composing with anything.
+    // resolveBindShadowSaysNo (resolve_bind_fix.h) is the fix's own first
+    // answer from the shadow, inline: a held shader whose hash is not the
+    // resolve's is a false the call gives without touching anything.
     if ((resolveProbeWantsDraws() && resolveProbeOnEyeDraw(self)) ||
-        (resolveBindWants() && resolveBindOnEyeDraw(self))) {
+        (resolveBindWants() &&
+         !resolveBindShadowSaysNo(bindingGet(BindSlot::Ps) != nullptr,
+                                  bindingShaderHash(BindSlot::Ps)) &&
+         resolveBindOnEyeDraw(self))) {
         return DrawVerdict::kResolveProbe;
     }
 
@@ -2478,7 +2621,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // its buffer is never substituted for these draws. Clamp and steady
     // compose: the clamp count rides glareClamp to the DrawInstanced
     // thunk regardless of which verdict carries the draw there.
-    if (sunglareWantsDraws()) {
+    // The train's shape first, inline (sunglare_fix.h): for any other shape
+    // sunglareOnEyeDraw answers kStock and this block does nothing, and both
+    // calls -- sunglareWantsDraws is cross-TU too -- were made per eye draw.
+    if (sunglareTrainShape(kind, count, instances) && sunglareWantsDraws()) {
         const SunglareAction a = sunglareOnEyeDraw(kind, count, instances);
         if (a == SunglareAction::kSkip) return DrawVerdict::kSkip;
         if (a != SunglareAction::kStock) {
@@ -2935,14 +3081,20 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
 // answer a consumer cannot tell from "no shader".
 uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
     if (!shader) return 0;
-    const size_t i = (reinterpret_cast<uintptr_t>(shader) >> 4) & 63;
+    // Fibonacci hashing: the top 10 bits of the pointer times 2^64/phi, so
+    // every address bit reaches the slot index (State::ShaderMemo says why
+    // the low bits alone collided).
+    static_assert(State::ShaderMemo::kSlots == 1024, "the shift below takes 10 bits");
+    const size_t i = static_cast<size_t>(
+        (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(shader)) * 0x9E3779B97F4A7C15ull) >> 54);
     const uint32_t gen = shaderRegistryGeneration();
-    if (m.ptr[i] != shader || m.gen[i] != gen || m.hash[i] == 0) {
-        m.ptr[i] = shader;
-        m.gen[i] = gen;
-        m.hash[i] = lookupShaderHash(shader);
+    State::ShaderMemo::Entry& e = m.e[i];
+    if (e.ptr != shader || e.gen != gen || e.hash == 0) {
+        e.ptr = shader;
+        e.gen = gen;
+        e.hash = lookupShaderHash(shader);
     }
-    return m.hash[i];
+    return e.hash;
 }
 
 void STDMETHODCALLTYPE hookedVSSetShader(ID3D11DeviceContext* self, ID3D11VertexShader* vs,
@@ -3029,6 +3181,28 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (!restoreContextState) forgetBindings(s);
 }
 
+// The GetType-then-GetDesc pair hookedMap's tees ask of a mapped resource,
+// lifted out and NOINLINE -- the eight D3D11_BUFFER_DESC locals that used to
+// sit inline are /GS buffers (a no-pointer struct over eight bytes, filled by
+// a COM call), so hookedMap carried a stack cookie and its check on EVERY
+// Map, about 1100 a frame, for blocks that run a handful of times a frame.
+// The cookie stays here, where the struct is. GetType FIRST, the rule every
+// copy of this pair in the file keeps (see the composite branch below): a
+// texture's GetDesc in the buffer's vtable slot writes 44 bytes into 24.
+// False, with the outputs untouched, when the resource is not a buffer.
+__declspec(noinline) bool mapBufferDesc(ID3D11Resource* res, UINT* byteWidth,
+                                        UINT* stride = nullptr, UINT* miscFlags = nullptr) {
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_BUFFER) return false;
+    D3D11_BUFFER_DESC d{};
+    static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+    *byteWidth = d.ByteWidth;
+    if (stride) *stride = d.StructureByteStride;
+    if (miscFlags) *miscFlags = d.MiscFlags;
+    return true;
+}
+
 HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
@@ -3101,19 +3275,17 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         // pointer with no reference held, so after the game destroys that buffer
         // the address can come back as a TEXTURE -- at which point
         // ID3D11Buffer::GetDesc writes 44 bytes of texture description into the
-        // 20-byte local below. That is a /GS stack-smash fast-fail: not an
-        // exception, not catchable by SEH, and this hook has no guard anyway.
-        // The neighbouring branch carried the warning and the fix; this one
-        // carried neither.
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            if (d.ByteWidth <= sizeof(s->shadow)) {
+        // buffer description (now mapBufferDesc's local). That is a /GS
+        // stack-smash fast-fail: not an exception, not catchable by SEH, and
+        // this hook has no guard anyway. The neighbouring branch carried the
+        // warning and the fix; this one carried neither. mapBufferDesc asks
+        // GetType first for every caller.
+        UINT byteWidth = 0;
+        if (mapBufferDesc(res, &byteWidth)) {
+            if (byteWidth <= sizeof(s->shadow)) {
                 s->mappedResource = res;
                 s->mappedData = mapped->pData;
-                s->mappedBytes = d.ByteWidth;
+                s->mappedBytes = byteWidth;
             }
         } else {
             // The address is no longer our buffer. Forget it so the next
@@ -3129,8 +3301,9 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         // ID3D11Buffer::GetDesc and ID3D11Texture2D::GetDesc occupy the same
         // vtable slot on their respective interfaces -- so calling the buffer
         // one on a texture writes a 44-byte texture description into the
-        // 20-byte buffer description below. That is a stack smash, and it
-        // brought the whole process down on the first frame.
+        // buffer description (mapBufferDesc's, which asks GetType first). That
+        // is a stack smash, and it brought the whole process down on the
+        // first frame.
         // The kind and size, memoised by address: a Map a draw at three
         // thousand draws paid the two COM calls each for a detector that
         // wants one buffer (the review of 2026-09-09: up to 0.4 ms a frame).
@@ -3140,13 +3313,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         if (mm.res != res) {
             mm.res = res;
             mm.byteWidth = 0;
-            D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-            res->GetType(&dim);
-            if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-                D3D11_BUFFER_DESC d{};
-                static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-                mm.byteWidth = d.ByteWidth;
-            }
+            mapBufferDesc(res, &mm.byteWidth);   // stays 0 for a texture
         }
         if (mm.byteWidth && glitchFrameWantsBuffer(mm.byteWidth)) {
             s->camResource = res;
@@ -3162,11 +3329,10 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         if(bytes){
             // A resource address may be recycled. Verify the current mapping's
             // extent instead of trusting the old nominated byte count.
-            D3D11_RESOURCE_DIMENSION kind{};res->GetType(&kind);
-            if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){
-                D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-                if(d.StructureByteStride==336 && (d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)){
-                    s->scenePoolResource=res;s->scenePoolData=mapped->pData;s->scenePoolBytes=d.ByteWidth;
+            UINT poolBytes=0,poolStride=0,poolMisc=0;
+            if(mapBufferDesc(res,&poolBytes,&poolStride,&poolMisc)){
+                if(poolStride==336 && (poolMisc&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)){
+                    s->scenePoolResource=res;s->scenePoolData=mapped->pData;s->scenePoolBytes=poolBytes;
                 }
             }
         }
@@ -3179,26 +3345,14 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         s->peekResource = res;
         s->peekData = mapped->pData;
         s->peekBytes = 0;
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            s->peekBytes = d.ByteWidth;
-        }
+        mapBufferDesc(res, &s->peekBytes);   // stays 0 for a texture
     }
     // The billboard fix's target, the same way and for the same reasons.
     if (mapSub0 && res == billboardTarget()) {
         s->bbResource = res;
         s->bbData = mapped->pData;
         s->bbBytes = 0;
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            s->bbBytes = d.ByteWidth;
-        }
+        mapBufferDesc(res, &s->bbBytes);
     }
     // The particle billboards' constants, same discipline again: the
     // basis vectors cannot be read at the draw, so the write is watched.
@@ -3206,13 +3360,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         s->partResource = res;
         s->partData = mapped->pData;
         s->partBytes = 0;
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            s->partBytes = d.ByteWidth;
-        }
+        mapBufferDesc(res, &s->partBytes);
     }
     // The emitter's constants for the same fix, so the billboards can be
     // aimed at their own plume rather than along the view axis.
@@ -3220,13 +3368,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         s->part0Resource = res;
         s->part0Data = mapped->pData;
         s->part0Bytes = 0;
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            s->part0Bytes = d.ByteWidth;
-        }
+        mapBufferDesc(res, &s->part0Bytes);
     }
     // The world shader's true-camera feed: the scene CB vscreen
     // nominated at the last big eye draw, same discipline again.
@@ -3234,13 +3376,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         s->sceneCbResource = res;
         s->sceneCbData = mapped->pData;
         s->sceneCbBytes = 0;
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            s->sceneCbBytes = d.ByteWidth;
-        }
+        mapBufferDesc(res, &s->sceneCbBytes);
     }
     return hr;
 }
@@ -3641,6 +3777,25 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
     }
 }
 
+// forwardWithVerdict's re-issue of the game's own draw, straight to the
+// runtime, for the rare passes that draw it again (the deferred-UI world
+// replay, the tone separation, the interface depth re-issues). A NOINLINE
+// function taking VALUES, where it used to be a [&] lambda: the flown
+// forwardWithVerdict built that lambda's closure -- the addresses of self,
+// kind, count, instances and args -- on every draw, which also pinned those
+// parameters in memory for the whole body (self was reloaded from its stack
+// slot at every use), for a closure a normal draw never calls. Same four
+// calls with the same arguments.
+__declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count,
+                                          UINT instances, const DrawArgs& args) {
+    switch(kind) {
+    case 'D':g_state->realDraw(self,count,UINT(args.base));break;
+    case 'I':g_state->realDrawIndexed(self,count,args.start,args.base);break;
+    case 'N':g_state->realDrawInstanced(self,count,instances,UINT(args.base),args.startInstance);break;
+    case 'X':g_state->realDrawIndexedInstanced(self,count,instances,args.start,args.base,args.startInstance);break;
+    }
+}
+
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
@@ -3651,14 +3806,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     originalMetadata.startIndex = args.start;
     originalMetadata.baseVertex = args.base;
     originalMetadata.startInstance = args.startInstance;
-    const auto pureDraw=[&] {
-        switch(kind) {
-        case 'D':g_state->realDraw(self,count,UINT(args.base));break;
-        case 'I':g_state->realDrawIndexed(self,count,args.start,args.base);break;
-        case 'N':g_state->realDrawInstanced(self,count,instances,UINT(args.base),args.startInstance);break;
-        case 'X':g_state->realDrawIndexedInstanced(self,count,instances,args.start,args.base,args.startInstance);break;
-        }
-    };
     // Asked once. ownerCtx is written only at install (installVScreenFixes),
     // never by anything a draw can reach, so the answer cannot change between
     // the first use below and the last -- but g_state is a global the
@@ -3756,14 +3903,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     { OriginalDrawScope original(&originalMetadata);
       originalIssued=draw(); }
     if(originalIssued && uiDeferred)uiDeferredTraceOriginalIssued();
-    if(originalIssued && uiDeferred && uiDeferredWorldReplayBegin(self))pureDraw();
+    if(originalIssued && uiDeferred && uiDeferredWorldReplayBegin(self))
+        pureDrawReissue(self,kind,count,instances,args);
     if(uiDeferred)uiDeferredEnd(self);
     // uiSeparationLive() first: bundled with fix.temporal_aa's external
     // engines, so with temporal off this was a call per draw that only ever
     // returned false (ui_separation.h). Same first test, inline.
     if(owner && uiSeparationLive() &&
        uiSeparationToneBegin(self,kind,count,instances)) {
-        pureDraw();uiSeparationToneEnd(self);
+        pureDrawReissue(self,kind,count,instances,args);uiSeparationToneEnd(self);
     }
     if (effectCaptureScope.ctx) objectProbePanelDrawEnd(self);
     if(terrainOriginal)celestialMotionEnd(self);
@@ -3787,8 +3935,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // of 2026-09-07). splashDimBegin below has had this shape all along.
     if (!deferred && uiDepthScope.on && uiDepthWantsReissue()) {
         if (uiDepthReissueBegin(self)) {
-            pureDraw();
-            if(uiDepthSeparatedReissueBegin(self)) { pureDraw();uiDepthSeparatedReissueEnd(self); }
+            pureDrawReissue(self,kind,count,instances,args);
+            if(uiDepthSeparatedReissueBegin(self)) {
+                pureDrawReissue(self,kind,count,instances,args);uiDepthSeparatedReissueEnd(self);
+            }
         }
         uiDepthReissueEnd(self);
     }
@@ -3797,7 +3947,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // when neither is set skips only the clearing of two false bools
     // (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
     if(owner && uiDepthPlanetPending() && uiDepthPlanetBegin(self)) {
-        pureDraw();uiDepthPlanetEnd(self);
+        pureDrawReissue(self,kind,count,instances,args);uiDepthPlanetEnd(self);
         uiDepthSeparatedInvalidate();
     }
     if (!terrainOriginal && owner && celestialMotionLive() &&

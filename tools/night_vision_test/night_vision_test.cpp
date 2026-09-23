@@ -120,6 +120,9 @@ struct Rig {
 void test(bool realistic){
     testOn=realistic;testPulse=true;
     Rig r;check(nightVisionMatches('X',240,1),"exact night pair accepted");check(!nightVisionMatches('D',240,1)&&!nightVisionMatches('X',6,1)&&!nightVisionMatches('X',240,2),"unrelated draw shapes rejected");
+    // The draw path asks nightVisionShape inline before the call: it must
+    // accept the matched shape and nothing the match itself rejects on shape.
+    check(nightVisionShape('X',240,1)&&!nightVisionShape('D',240,1)&&!nightVisionShape('X',6,1)&&!nightVisionShape('X',240,2),"inline shape pre-check agrees with the match");
     testPs=0;check(!nightVisionMatches('X',240,1),"unrelated shader rejected");testPs=0xF786D34B5E118D5Eull;
     // The same world point under two camera rotations, placed at pixel
     // centre with asymmetric projection offsets. Its radial pulse must

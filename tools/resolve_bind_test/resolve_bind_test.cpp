@@ -123,6 +123,16 @@ int main() {
         check(!edvr::resolveBindOnEyeDraw(context.Get()), "known non-resolve declines");
         check(g_getPixelShaderCalls == 0, "known non-resolve avoids PSGetShader");
 
+        // The draw path's inline pre-check (resolve_bind_fix.h) may skip the
+        // call only where the shadow alone already says no: a held shader
+        // with a known hash that is not the resolve's. Unknown (no pointer,
+        // or a zero hash) and the resolve itself must still reach the call.
+        check(edvr::resolveBindShadowSaysNo(true, 1), "inline pre-check: known non-resolve");
+        check(!edvr::resolveBindShadowSaysNo(true, kResolveHash), "inline pre-check: known resolve reaches the call");
+        check(!edvr::resolveBindShadowSaysNo(true, 0) && !edvr::resolveBindShadowSaysNo(false, 1),
+              "inline pre-check: an unknown shadow reaches the call");
+        check(edvr::detail::kResolveBindPs == kResolveHash, "inline pre-check names the resolve's hash");
+
         // A shader can be bound before the registry learns its hash. The real
         // getter remains authoritative, and a successful lookup repairs the
         // shadow so the following draw takes the fast path.

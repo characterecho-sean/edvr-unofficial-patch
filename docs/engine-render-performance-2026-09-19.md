@@ -61,6 +61,18 @@
   landing, r = 0.97 with job-0 samples), no step. Nothing of the design
   is built or will be. Entry: 2026-09-22 "Phase A, valid: KILL".
 
+* **Per-draw cut, round three (2026-09-22, BUILT + GATED, NOT FLOWN):**
+  parked-5's per-function numbers re-read against the flown DLL's own
+  disassembly: 0.67 ms/frame of the 2.74 ms innermost-EDVR population is
+  the game's forwarded D3D calls (realMap, CreateBuffer, Unmap,
+  CreateTexture2D, the draw itself), guarded<> is the COM calls inside it
+  (the guard is free), and the unordered_map find was ui_depth's holo
+  geometry on every Unmap, not the shader registry. Cut: ~20 per-draw
+  cross-TU calls behind their own first tests inline, the Unmap path's
+  holo finds, srv0IsPanelSized's /GS cookie, the wake pulse's per-draw
+  resolve, owns() in gpuFrameCommand, the shader memo 64 -> 1024.
+  Paper ceiling ~0.5 ms/frame. Entry: "Per-draw cut, round three".
+
 * **Open (arc OPEN on two levers; scope cockpit-only stereo):** (1)
   EDVR's per-draw path, NAMED (2026-09-22 per-draw entry: hookedMap +
   mapWaitNote 0.40 ms, the draw-hook verdict lambda 0.20, the
@@ -2595,3 +2607,64 @@ at LODDistanceScale 0.1 (the floor) with the same analyzer and the
 GPU line, to measure the slider's own effect on the caller thread and
 the GPU at this view; then decide whether the beyond-the-floor bias is
 worth its visual cost.
+
+### 2026-09-22 -- Per-draw cut, round three: built and gated, NOT FLOWN; parked-5 re-read against the flown DLL
+
+**The accounting, corrected from the flown binary.** The per-function
+figures of the parked-5 entry are the innermost-EDVR-frame population
+(3708 samples, 2.74 ms/frame), and a sample whose innermost EDVR frame
+sits at the return of a call out of the module is time in the callee.
+Classifying every hot RVA of window 6 against the flown d3d11.dll
+(the pre-b706df9 backup, PDB GUID 50D9C55F confirmed) gives: 0.67
+ms/frame is the game's own forwarded D3D calls -- hookedMap 186 samples
+at the return of realMap, the CreateBuffer hook 261 of its 262 at the
+return of the real CreateBuffer, hookedUnmap 85, CreateTexture2D 49 (all
+of it), the draw lambda 249 at the forwarded draw; 0.13 ms is the
+map-wait instrument's QueryPerformanceCounter pair and 0.085 its two
+locked adds (the log's own count: 3,110 Maps a frame, not 1,100);
+guarded<> is the COM inside it (bindingResolve's GetResource/GetType/
+Release 131 samples, srv0IsPanelSized's GetPrivateData 103), the guard
+itself ~9; and the 85-sample unordered_map::find is ui_depth's holo
+geometry map, asked twice on every Unmap, not the shader registry,
+whose cost is its critical section (55 of hashOf's 61). hookedMap's own
+tee work was ~21 samples. So EDVR's true own-instruction remainder
+after round two is nearer 1.0 ms than 1.69.
+
+**What changed (all exact unless noted):** the Unmap path's holo finds
+behind a published "geometry tracked" flag (set at the one insertion,
+recomputed after the frame boundary's pruning) plus an empty() test;
+mesh-motion and static-surface write calls behind their own first
+tests; hookedMap's eight D3D11_BUFFER_DESC blocks into noinline
+mapBufferDesc (the cookie left hookedMap); srv0IsPanelSized split into
+an inline fast path and noinline srv0IsPanelSizedSlow (the cookie now
+only on a generation miss); per-draw calls behind their own first tests
+inline -- objectProbeOnEyeDraw, depthProbeNoteEyeDraw, particleOnEyeDraw,
+witchspaceStarsSkip, particleOnDraw (shape + held VS hash), and the
+shapes of night vision, the glare train, RemLok, holo, scrim and both
+backdrop halves; introPanelWants and deviceHookFssModeLatch asked after
+the cheap terms; resolveBind's shadow "No" inline; glitchFrameIsSceneDraw,
+panelCurveWants and fssDumpWantsDraws forced inline (MSVC had declined the
+last two inside beginPanelOverride); gpuFrameCommand's owns() forced
+inline with a guard-free cached thread id; the shader memo 64 -> 1024
+slots, Fibonacci-indexed, and shaderRegistryGeneration inline;
+forwardWithVerdict's pureDraw closure (which pinned self/kind/count in
+memory on every draw) replaced by a noinline function taking values.
+One non-exact change: the wake pulse's Rtv0 resolve is kept per binding
+generation (successes only; failures retried per draw as before), the
+bargain rtv0Eye already makes. Paper ceiling ~0.5 ms/frame of EDVR's
+1.69 ms leaf; honest expectation less.
+
+**Not done, with reasons:** the map-wait atomics (cross-thread totals,
+kept); a per-resource Map interest flag (the tees are 0.015 ms/frame);
+a lock-free registry (it is written at every shader creation for the
+whole session, so a snapshot needs reclamation; the memo absorbs the
+lookups); scrim/holo per-draw resolves (their generation moves every
+draw; the tag route is a measured follow-up). The memcpy (0.046) is
+particleCapture on each Unmap of the particle cb1 (5,376 bytes read back
+from a WRITE_DISCARD mapping), plus particleCaptureCb0 copying the cb0
+ring into g_shadow0, which nothing reads -- per Map/Unmap of those two
+buffers, not per draw; left for Sean.
+
+Measurement: the parked-5 leg, same pad and heading, compared on R1
+byTopModule EDVR and on this entry's two populations (own instructions
+vs forwarded calls).

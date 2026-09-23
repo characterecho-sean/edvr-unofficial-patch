@@ -181,9 +181,19 @@ void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx, const wchar_t* directory, co
 // moves here, inline, as the wrapper every caller actually links against --
 // including the one inside motionResourceWritten (vscreen.cpp), which cannot
 // itself change to add a guard (see AGENTS.md's scope note on that file).
+//
+// And for a NON-null resource the body's only effect is inside
+// HoloMotion::resourceWritten, which does nothing unless the resource is in
+// g_holoMotion's geometry maps -- empty unless a smoke corona was accepted in
+// the last few frames. detail::g_holoGeometryTracked (holo_motion.h) is false
+// only while those maps are empty, so the call is skipped exactly when it
+// could not act. This was an unordered_map find per eye on every Unmap, Copy
+// and Update: 98 innermost samples of the 1355-frame parked-5 window.
 void uiDepthMotionResourceWrittenImpl(ID3D11Resource*,uint64_t first,uint64_t end);
 inline void uiDepthMotionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)) {
-    if (resource || detail::g_uiDepthOn) uiDepthMotionResourceWrittenImpl(resource, first, end);
+    if (resource ? detail::g_holoGeometryTracked.load(std::memory_order_relaxed)
+                 : detail::g_uiDepthOn)
+        uiDepthMotionResourceWrittenImpl(resource, first, end);
 }
 
 // The strength the interface proper is marked at (advanced.ui_depth_reactive;

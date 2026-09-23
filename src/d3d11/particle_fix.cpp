@@ -29,6 +29,10 @@ namespace edvr {
 // name its kSteady value.
 namespace detail {
 ParticleMode g_particleMode = ParticleMode::kStock;
+// Published for the draw path's inline first tests (particle_fix.h); the
+// file-local names below are references to these.
+bool g_particleHideStars = false;
+bool g_particleProbe = false;
 }  // namespace detail
 
 namespace {
@@ -92,7 +96,8 @@ constexpr uint64_t kFlareVs = 0x6041FD2D3D0164E1ull;
 // general background starfield. That is evidence it is specific to the
 // jump tunnel, not proof it draws nowhere else.
 constexpr uint64_t kWitchspaceStarsVs = 0x9AEC596A2B036EA6ull;
-bool g_hideWitchspaceStars = false;
+// Bound to the published flag witchspaceStarsHidden() reads (particle_fix.h).
+bool& g_hideWitchspaceStars = detail::g_particleHideStars;
 struct BillboardVariant {
     uint64_t    hash;
     const char* hlsl;
@@ -107,6 +112,12 @@ const BillboardVariant kVariants[kVariantCount] = {
     {kFlareVs, kFlareWorldVS, sizeof(kFlareWorldVS) - 1,
      "flare_vs"},
 };
+// The draw path's inline prefilter (particleOnDrawMayMatch, particle_fix.h)
+// compares against its own copy of these hashes; a variant added here and
+// not there would be silently never offered, so the two lists must agree.
+static_assert(kVariantCount == 2 && detail::kParticleVariantVs[0] == kPlumeVs &&
+                  detail::kParticleVariantVs[1] == kFlareVs,
+              "particle_fix.h's kParticleVariantVs must list kVariants' hashes in order");
 
 const char* variantLabel(int v) {
     return (v == 1) ? "solar flare" : "smoke plume";
@@ -141,7 +152,7 @@ constexpr uint64_t kSampleMs = 1000;
 // basis -- position arrives separately through cb0[9..11] -- and cb1[277]
 // holds a camera right the shader never even reads. [278] is the whole of
 // the change.
-bool     g_probe = false;
+bool&    g_probe = detail::g_particleProbe;   // particleProbeOn() (particle_fix.h)
 bool     g_pending = false;
 uint64_t g_copyMs = 0;
 uint64_t g_lastMs = 0;

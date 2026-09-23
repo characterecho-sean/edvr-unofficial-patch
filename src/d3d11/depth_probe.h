@@ -77,6 +77,22 @@ void depthProbeNoteIndirectDraw(ID3D11DeviceContext* ctx, void* dsv);
 void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
                            uint32_t eyeDrawIndex);
 
+// Would depthProbeNoteEyeDraw do anything for this view? Its common case is
+// "watching, this frame already flagged, same view as the last eye draw":
+// it sets a flag that is already set and returns at one compare. That call
+// was made on every eye draw (/O2, no /GL) -- about 35 innermost samples of
+// the 1355-frame parked-5 window between the callee and its call site. The
+// two fields are the callee's own (depth_probe.cpp binds its names to them),
+// so false here is exactly the case in which the call changes nothing.
+namespace detail {
+extern void* g_depthProbeLastDsv;
+extern bool g_depthProbeEyeDrawThisFrame;
+}  // namespace detail
+inline bool depthProbeEyeDrawNeedsNote(void* dsv) {
+    return detail::g_depthProbeWanted &&
+           (!detail::g_depthProbeEyeDrawThisFrame || dsv != detail::g_depthProbeLastDsv);
+}
+
 // From the render-target hooks, BEFORE the game's rebind is forwarded:
 // is `current` (the view bound until now) a target the eye draws use,
 // about to be replaced by `next`, and due for a sample? When this says
