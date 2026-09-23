@@ -25,6 +25,11 @@ struct EdvrNativeTemporalFrame {
   // it arrives, while the recommendation above is still the previous ask.
   // 0 when the host does not say (the recommendation is then the answer).
   uint32_t askedWidth, askedHeight;
+  // Eye 0's TRUE (located, display) frustum's vertical tangents, magnitudes:
+  // what the headset shows, before a cull guard widens or a FOV trim narrows
+  // what the game is told. fix.ui_quality's engine-side panel sizing takes
+  // its untrimmed k from it. 0 when the host does not say.
+  float trueUp, trueDown;
 };
 struct EdvrNativeTemporalProjection {
   uint32_t size, version;

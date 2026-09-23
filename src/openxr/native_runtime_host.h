@@ -933,8 +933,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       // ...and what the game is told now, which leads that during an
       // adoption: fix.ui_quality's surfaces size a panel the game makes for
       // the new ask by it (the P3-1 lag, flight 2026-09-23 13:23).
+      // ...and the true display frustum (the located views, before a cull
+      // guard or trim), which the engine-side panel sizing takes k_out from.
       const auto begun=temporal.begin(treatedGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking,
-          (std::max)(gameGeometry.width[0],gameGeometry.width[1]),(std::max)(gameGeometry.height[0],gameGeometry.height[1]));
+          (std::max)(gameGeometry.width[0],gameGeometry.width[1]),(std::max)(gameGeometry.height[0],gameGeometry.height[1]),
+          std::fabs(temporalGeometry.raw[0].top),std::fabs(temporalGeometry.raw[0].bottom));
       if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
       ++temporalFrames;
     } else invalidateEyeTreatments();

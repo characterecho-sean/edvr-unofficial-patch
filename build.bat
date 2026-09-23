@@ -472,7 +472,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_separation.cpp" ^
     "src\d3d11\ui_deferred.cpp" ^
-    "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" ^
+    "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^

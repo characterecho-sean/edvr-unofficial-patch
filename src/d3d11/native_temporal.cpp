@@ -89,6 +89,10 @@ std::atomic<uint64_t> g_vertical{0};
 // re-creates its surfaces for it before a frame of it arrives (review P3-1,
 // flight 2026-09-23 13:23). 0 when the host does not say.
 std::atomic<uint64_t> g_asked{0};
+// ...and the true display frustum's vertical tangents (eye 0, magnitudes, as
+// float bits), for the engine-side panel sizing's untrimmed k. 0 when the
+// host does not say.
+std::atomic<uint64_t> g_trueVertical{0};
 // The render thread inside treat(), holding `mutex` across the temporal
 // pass: the readers below that must take the lock answer "no" there rather
 // than re-lock it.
@@ -188,6 +192,9 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
    std::memcpy(&a,&up,4);std::memcpy(&b,&down,4);g_vertical.store((uint64_t(a)<<32)|b,std::memory_order_release);}
   {const bool asked=f->askedWidth&&f->askedHeight&&f->askedWidth<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION&&f->askedHeight<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
    g_asked.store(asked?((uint64_t(f->askedWidth)<<32)|f->askedHeight):0,std::memory_order_release);}
+  {const float up=std::fabs(f->trueUp),down=std::fabs(f->trueDown);uint32_t a=0,b=0;
+   const bool known=up>0.0f&&down>0.0f&&std::isfinite(up)&&std::isfinite(down);
+   std::memcpy(&a,&up,4);std::memcpy(&b,&down,4);g_trueVertical.store(known?((uint64_t(a)<<32)|b):0,std::memory_order_release);}
   s->treated[0]=s->treated[1]=false;
   s->projectionKnown[0]=s->projectionKnown[1]=false;
   std::memset(out,0,sizeof(*out));out->size=sizeof(*out);out->version=EDVR_NATIVE_TEMPORAL_VERSION_1;
@@ -305,7 +312,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   std::memcpy(hst.otherEye,s->eyes[1-eye],sizeof(hst.otherEye));std::memcpy(hst.frustum,s->frusta[eye],sizeof(hst.frustum));
   hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;return S_OK;
 }
-HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
+HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
@@ -324,7 +331,7 @@ HRESULT WINAPI close(void* p){
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
       (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
   reset(*s);s->active=false;s->begun=false;s->device=nullptr;
-  if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);}return S_OK;
+  if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);}return S_OK;
 }
 }
 
@@ -405,6 +412,19 @@ bool nativeTemporalAsked(uint32_t* w, uint32_t* h) {
   if (!v) return false;
   if (w) *w = static_cast<uint32_t>(v >> 32);
   if (h) *h = static_cast<uint32_t>(v);
+  return true;
+}
+// The true display frustum's vertical tangents (eye 0), lock-free; false when
+// the host did not say, before the first beginFrame, or once invalidated.
+bool nativeTemporalTrueVerticalTangents(float* up, float* down) {
+  const uint64_t v = g_trueVertical.load(std::memory_order_acquire);
+  if (!v) return false;
+  const uint32_t ab = static_cast<uint32_t>(v >> 32), bb = static_cast<uint32_t>(v);
+  float fa = 0.0f, fb = 0.0f;
+  std::memcpy(&fa, &ab, 4);
+  std::memcpy(&fb, &bb, 4);
+  if (up) *up = fa;
+  if (down) *down = fb;
   return true;
 }
 }
