@@ -70,6 +70,8 @@
 #include "ui_depth.h"
 #include "ui_separation.h"
 #include "ui_deferred.h"
+#include "ui_layer.h"
+#include "ui_layer_math.h"
 #include "celestial_motion.h"
 #include "mesh_motion.h"
 #include "object_classification_probe.h"
@@ -3890,6 +3892,63 @@ __declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, 
     }
 }
 
+// fix.ui_quality (ui_layer.h): which piece of the interface an owner draw is.
+// Asked only while the layer is live. A draw into anything that is not an
+// eye target is none -- the GUI's own draws into its surfaces are the
+// surfaces' content, not the eye's UI. Into an eye target that is not 8-bit
+// UNORM (the lit HDR target -- thousands of scene draws a frame) only three
+// hash compares run, to name the cockpit families the layer leaves; the
+// full rules run for the post-tonemap target alone, where a frame has a few
+// dozen draws. The 2D screen's composite is recognised exactly as the panel
+// distance and the curved screen recognise it (srv0IsPanelSized); the rest
+// by what they sample (ui_depth's learned surfaces), named by vertex shader.
+__declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {
+    const int target = uiLayerTargetKind();
+    if (target == 0) return UiLayerFamily::kNone;
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    if (target == 1) {
+        return vs == 0x81216C77F90DEDD6ull   ? UiLayerFamily::kHolo
+               : vs == 0xB7790CBFC6554097ull ? UiLayerFamily::kFlightHud
+               : vs == 0xE508648660A352B2ull ? UiLayerFamily::kSprite
+                                             : UiLayerFamily::kNone;
+    }
+    if (srv0IsPanelSized(s, kind, count)) return UiLayerFamily::kScreen;
+    if (uiDepthSampledSurfaceSlot() >= 0) {
+        return vs == 0xA888D51024D9798Eull   ? UiLayerFamily::kPanel
+               : vs == 0x4EF6DDB075A927FAull ? UiLayerFamily::kLoader
+               : vs == 0x81216C77F90DEDD6ull ? UiLayerFamily::kHolo
+               : vs == 0xE508648660A352B2ull ? UiLayerFamily::kSprite
+                                             : UiLayerFamily::kSurface;
+    }
+    if (vs == 0x666EF0C4C616F67Eull || vs == 0x1012E00B3CB44469ull || vs == 0xA3E5D3FCBC1165F8ull)
+        return UiLayerFamily::kGuiDirect;
+    if (vs == 0xB7790CBFC6554097ull) return UiLayerFamily::kFlightHud;
+    return UiLayerFamily::kNone;
+}
+
+// The verdicts that forward the game's own draw -- as it is, or wrapped in
+// their own state changes, or (the loader panel, the curved screen) drawn
+// by a substitution the layer brackets too. Everything else swallows it,
+// re-issues it (the splash dim after the intro's and the backdrop's), or is
+// the scanner's or a probe's, and the layer leaves those alone.
+bool uiLayerVerdictForwards(DrawVerdict v) {
+    switch (v) {
+        case DrawVerdict::kNone:
+        case DrawVerdict::kPanel:
+        case DrawVerdict::kRemlok:
+        case DrawVerdict::kHolo:
+        case DrawVerdict::kScrim:
+        case DrawVerdict::kLoaderPanel:
+        case DrawVerdict::kTargetSharp:
+        case DrawVerdict::kHudSprite:
+        case DrawVerdict::kPanelUpscale:
+        case DrawVerdict::kHudGrain:
+            return true;
+        default:
+            return false;
+    }
+}
+
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
@@ -3943,18 +4002,35 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         g_state->curveThisDraw = false;
         return;
     }
+    // fix.ui_quality, the UI layer (ui_layer.h): decided once for this draw
+    // and applied around EVERY issue of it below -- the loader panel's and
+    // the curved screen's substitutions draw the composite themselves, so
+    // they are bracketed as well. After kSkip (a skipped draw has nothing to
+    // move); kQuadSkip swallows and redraws pieces, so it is left alone.
+    // Off, this is one load; on, eye draws pay a generation compare and, on
+    // the post-tonemap target only, the family rules.
+    bool uiLayer = false;
+    if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
+        const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
+        if (uiFamily != UiLayerFamily::kNone) {
+            uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily), uiLayerVerdictForwards(v));
+        }
+    }
+    // The one order the layer changes: a draw after the UI into (or reading)
+    // an eye target the UI was taken from now lands under it. Counted, named.
+    if (!uiLayer && owner && uiLayerWatching()) uiLayerNoteOther(self, count);
     // The sub-draw probe, which also SWALLOWS the game's draw -- it re-issues
     // the surviving index ranges itself. Before the curve substitution
     // because both swallow, and two swallows would draw the quads twice.
     // The resized panel, which swallows the draw only when it succeeds.
     if (v == DrawVerdict::kLoaderPanel) {
         if(owner){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
-        if (loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
-                                  g_state->qsInstances,
-                                  g_state->qsStartInstance)) {
-            return;
-        }
-        if(draw() && uiDeferred)uiDeferredTraceOriginalIssued();
+        const bool layered = uiLayer && uiLayerBegin(self);
+        const bool swallowed = loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
+                                                     g_state->qsInstances,
+                                                     g_state->qsStartInstance);
+        if (!swallowed && draw() && uiDeferred) uiDeferredTraceOriginalIssued();
+        if (layered) uiLayerEnd(self);
         return;
     }
     if (v == DrawVerdict::kQuadSkip) {
@@ -3967,9 +4043,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (g_state->curveThisDraw) {
         if(owner){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
         g_state->curveThisDraw = false;
-        if (panelCurveSubstitute(self, g_state->realDrawIndexedInstanced)) {
-            return;
-        }
+        const bool layered = uiLayer && uiLayerBegin(self);
+        const bool swallowed = panelCurveSubstitute(self, g_state->realDrawIndexedInstanced);
+        if (layered) uiLayerEnd(self);
+        if (swallowed) return;
     }
     // One compare for the ordinary draw; the switch for the one with a
     // verdict (forwardVerdictBegin says why this is the same ladder).
@@ -3993,9 +4070,14 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     const bool deferred=uiDeferred && uiDeferredBegin(self,uiDepthReissuingScene()?uiDepthDeferredEye():-1,kind,count,instances,args.start,args.base,args.startInstance,
         static_cast<uint32_t>(v),glassQueryActive);
     originalMetadata.modified = terrainOriginal || deferred;
+    // The layer's bracket goes innermost: after the verdict's own Begin (a
+    // RemLok scissor, a slot swap) so the layer maps the state the draw is
+    // actually issued with, and around nothing but the game's own draw.
+    const bool layered = uiLayer && uiLayerBegin(self);
     bool originalIssued=false;
     { OriginalDrawScope original(&originalMetadata);
       originalIssued=draw(); }
+    if (layered) uiLayerEnd(self);
     if(originalIssued && uiDeferred)uiDeferredTraceOriginalIssued();
     if(originalIssued && uiDeferred && uiDeferredWorldReplayBegin(self))
         pureDrawReissue(self,kind,count,instances,args);
@@ -4003,7 +4085,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // uiSeparationLive() first: bundled with fix.temporal_aa's external
     // engines, so with temporal off this was a call per draw that only ever
     // returned false (ui_separation.h). Same first test, inline.
-    if(owner && uiSeparationLive() &&
+    // A draw the UI layer took is not in the eye's colour at all, so neither
+    // the tone separation nor the interface depth below re-issues it: its
+    // depth and its reactive mask exist to tell the upscaler about pixels
+    // the upscaler no longer sees.
+    if(owner && !layered && uiSeparationLive() &&
        uiSeparationToneBegin(self,kind,count,instances)) {
         pureDrawReissue(self,kind,count,instances,args);uiSeparationToneEnd(self);
     }
@@ -4027,7 +4113,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // a second time, in full colour, over itself -- and the paths that
     // decline latch, so it would last the session (the pre-release review
     // of 2026-09-07). splashDimBegin below has had this shape all along.
-    if (!deferred && uiDepthScope.on && uiDepthWantsReissue()) {
+    if (!deferred && !layered && uiDepthScope.on && uiDepthWantsReissue()) {
         if (uiDepthReissueBegin(self)) {
             pureDrawReissue(self,kind,count,instances,args);
             if(uiDepthSeparatedReissueBegin(self)) {
@@ -4082,7 +4168,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
-    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
+    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -4240,6 +4326,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         uiDeferredCopyRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,box);
         glitchFrameInvalidatePool(dst);
         if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
+        if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
     }
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
@@ -4646,15 +4733,17 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             }
             // screenMotionLive() is the first term of both (screen_motion.h);
             // with fix.temporal_aa off these were two calls per draw that only
-            // ever returned.
-            if (screenMotionLive()) {
+            // ever returned. Neither runs for a draw the UI layer took
+            // (ui_layer.h): its pixels are not in the pass's input, and the
+            // bound target and viewport are the layer's.
+            if (screenMotionLive() && !uiLayerRedirecting()) {
                 screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
                 screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             }
             // meshMotionLive() is meshMotionDraw's own first reject, inline
             // (mesh_motion.h names the census reader and why skipping the
             // call while the feature is off silences nothing).
-            if (meshMotionLive())
+            if (meshMotionLive() && !uiLayerRedirecting())
                 meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
         }
         return true;  // the original draw was issued
@@ -5152,6 +5241,17 @@ void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstRe
                                    srcDepthPitch);
 }
 
+void vScreenRSSetViewportsRaw(ID3D11DeviceContext* ctx, uint32_t n, const D3D11_VIEWPORT* vps) {
+    if (!g_state || !g_state->realRSSetViewports || !ctx) return;
+    g_state->realRSSetViewports(ctx, n, vps);
+}
+
+void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv,
+                                     const float colour[4]) {
+    if (!g_state || !g_state->realClearRtv || !ctx || !rtv) return;
+    g_state->realClearRtv(ctx, rtv, colour);
+}
+
 bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     State* s = g_state;
     if (!s || !w || !h) return false;
@@ -5309,6 +5409,7 @@ void vScreenRefreshConfig() {
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
     uiDeferredConfigure(cfg);
+    uiLayerConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -5512,6 +5613,9 @@ void vScreenFrameBoundary() {
         uiSeparationFrameBoundary();
         uiDeferredFrameBoundary(g_state->ownerCtx);
         uiDepthFrameBoundary(g_state->ownerCtx);
+        // fix.ui_quality: its warm compile, its 30-second totals, and the end
+        // of this frame's watch for draws after the UI.
+        uiLayerFrameBoundary(g_state->ownerCtx);
         screenMotionFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
         meshMotionFrameBoundary(g_state->ownerCtx);
@@ -6483,6 +6587,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
     uiDeferredConfigure(cfg);
+    uiLayerConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -6855,6 +6960,7 @@ void shutdownVScreenFixes() {
     uiSeparationShutdown();
     uiDeferredShutdown();
     uiDepthShutdown();
+    uiLayerShutdown();
     screenMotionShutdown();
     nightVisionShutdown();
     celestialMotionShutdown();

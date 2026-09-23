@@ -33,6 +33,7 @@ struct ID3D11Buffer;
 struct ID3D11Resource;
 struct ID3D11BlendState;
 struct D3D11_BOX;
+struct D3D11_VIEWPORT;
 
 namespace edvr {
 void vScreenExecuteCommandListRaw(ID3D11DeviceContext*,ID3D11CommandList*,int restore);
@@ -148,6 +149,14 @@ void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state
 void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
                                  uint32_t dstSubresource, const D3D11_BOX* dstBox,
                                  const void* srcData, uint32_t srcRowPitch, uint32_t srcDepthPitch);
+// And the two fix.ui_quality's layer needs (ui_layer.cpp): its viewports
+// set around a redirected draw -- the RSSetViewports hook would scale them
+// again for a tracked surface and count them -- and its per-frame clear,
+// which the ClearRenderTargetView hook would otherwise report to the
+// deferred UI and the separation as a write to a target they track.
+void vScreenRSSetViewportsRaw(ID3D11DeviceContext* ctx, uint32_t n, const D3D11_VIEWPORT* vps);
+void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv,
+                                     const float colour[4]);
 
 // Installs the context hooks using the mechanism the caller decided for this
 // device -- shared with the exposure hooks so the two never split modes on

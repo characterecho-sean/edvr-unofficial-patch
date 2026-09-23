@@ -1,5 +1,25 @@
 # Handoff: crisp UI under DLSS
 
+## Status
+
+- **Design A (the UI layer): BUILT, phase 1, NOT FLOWN (2026-09-23)** as
+  `fix.ui_quality = off | 1.0 | 1.25` -- see
+  [ui-layer-2026-09-23.md](ui-layer-2026-09-23.md) for the design as built
+  against A1-A8, the gates, the log lines and what the first flight must
+  show. It takes the post-tonemap UI (the 2D screen's composite, the menu,
+  modal and loading-screen composites of learned surfaces) into a per-eye
+  layer at the door's output size x target and composites it after RCAS.
+  The cockpit's HDR families (holo panels, flight HUD, sprite) are LEFT: the
+  first censuses below (G1) put them before the tonemap, and the deferred UI
+  replay (`ui_deferred.cpp`) re-draws them after the upscale at 1.0.
+- **Design B0 (the interface depth, `ui_depth.cpp`; once `fix.ui_depth`, now
+  gated on `fix.temporal_aa` alone): SHIPPED**; its depth re-issue and
+  reactive mask still serve every UI draw the layer does not take, and skip
+  the ones it does.
+- The gates: G1, G2, G3, G6, G8, G10 answered from censuses (2026-09-06,
+  below); G9 is `fix.hud_quality`'s flight (docs/hud-quality-2026-09-23.md).
+- The italic status line below is the 2026-09-05 original, kept as written.
+
 *Status: DESIGN, nothing built. Written 2026-09-05 on branch
 `claude/ui-text-aliasing-dlss-dd8735` off main `2ff1267` (v0.14.0 plus docs).
 For the agent who builds it. Everything marked MEASURED comes from a flight

@@ -12,6 +12,7 @@
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/d3d11/temporal_pass.h"
+#include "../../src/d3d11/ui_layer.h"
 #include "../../src/openxr/native_temporal_client.h"
 #include "../../src/common/system_d3d11.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
@@ -40,6 +41,13 @@ extern "C" void* edvrTemporalAa(void* source,int eye,const float*,const float* n
   calls.push_back(c);return passSucceeds?source:nullptr; // borrowed; provider AddRefs
 }
 extern "C" void edvrEyeCaptureUntreated(void*,int,const float*){++dumps;}
+// fix.ui_quality's door hook (src/d3d11/ui_layer.cpp): the pass tells the
+// layer which eyes it handed on, so the layer arms only behind a treated
+// frame. Recorded here, asserted below.
+unsigned uiLayerNotes=0;uint64_t uiLayerNoteSeq=0;uint32_t uiLayerNoteEye=9;const void* uiLayerNoteOut=nullptr;
+unsigned uiLayerSubmits=0;const void* uiLayerSubmitted[2]{};
+namespace edvr{void uiLayerNoteTemporal(uint64_t seq,uint32_t eye,const void* out){++uiLayerNotes;uiLayerNoteSeq=seq;uiLayerNoteEye=eye;uiLayerNoteOut=out;}
+void uiLayerNoteSubmitted(uint64_t,uint32_t eye,const void* submitted){++uiLayerSubmits;if(eye<2)uiLayerSubmitted[eye]=submitted;}}
 struct Device {
   ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
   Device(){auto create=edvr::systemD3D11CreateDevice();require(create!=nullptr,"system D3D11");
@@ -85,6 +93,15 @@ void run(){
   f=frame(11,2);f.head[3]=.1f;p=begin(t,f);t.noteProjection(t.context,2,0,.1f,1000);
   check(treat(t,2,0,source.Get())==S_OK,"second left");auto c=calls.back();
   check(closeFloat(c.jx,-p.tangentShift[0][0]*320/1.9f)&&closeFloat(c.jy,p.tangentShift[0][1]*240/2.f),"consumer jitter uses pixels and correct signs");
+  // fix.ui_quality reads the same jitter at DRAW time (ui_layer.h): the
+  // frame's sequence, the pixel jitter the pass itself receives here (as_is,
+  // no lag), and the region it was computed over.
+  {uint64_t ds=0;float djx=9,djy=9;uint32_t dw=0,dh=0;
+   check(edvr::nativeTemporalDrawJitter(0,&ds,&djx,&djy,&dw,&dh)&&ds==2&&closeFloat(djx,c.jx)&&closeFloat(djy,c.jy)&&dw==320&&dh==240,
+         "draw-time jitter is the pixel jitter the pass receives, for the frame being drawn");
+   check(!edvr::nativeTemporalDrawJitter(2,&ds,&djx,&djy,&dw,&dh),"draw-time jitter refuses an eye that does not exist");}
+  check(uiLayerNotes>=3&&uiLayerNoteSeq==2&&uiLayerNoteEye==0&&uiLayerNoteOut==source.Get(),"each treated eye is noted to the UI layer with the pass's output");
+  check(uiLayerSubmits>=3&&uiLayerSubmitted[0]==source.Get()&&uiLayerSubmitted[1]==source.Get(),"the game's submitted texture is noted per eye for the UI layer's eye check");
   check(std::fabs(c.jx)>.01f||std::fabs(c.jy)>.01f,"known-size jitter engaged");
   check(c.head&&closeFloat(c.offset[0],-.032f)&&closeFloat(c.currentHead[3],.1f)&&closeFloat(c.previousHead[3],0),"world path receives exact head pair and eye offset");
   check(c.motion&&closeFloat(c.translation[0],.1f)&&closeFloat(c.swapped[0],.1f)&&closeFloat(c.delta[0],1),"pure translation expected reprojection");
@@ -118,7 +135,8 @@ void run(){
   edvr::Config::get().set("fix.temporal_aa","off");check(treat(fresh,3,1,source.Get())==S_OK,"current pair freezes AA setting");
   f=frame(12,4);p=begin(fresh,f);const auto before=dumps;check(treat(fresh,4,0,source.Get())==S_FALSE&&dumps==before+1,"next frame AA off captures untreated eyes");check(p.tangentShift[0][0]==0,"AA off zeros jitter");check(fresh.close(fresh.context)==S_OK,"fresh close");
   auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
-  f=frame(13,2);begin(dlss,f);passSucceeds=false;check(treat(dlss,2,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
+  f=frame(13,2);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,2,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
+  check(uiLayerNotes==notesBefore,"a refused eye is not noted to the UI layer (it must not arm behind raw pixels)");
   f=frame(13,3);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
   auto unknown=acquire(d,14,"invalid-mode");f=frame(14,1);begin(unknown,f);check(treat(unknown,1,0,source.Get())==S_FALSE,"unknown mode is off");check(unknown.close(unknown.context)==S_OK,"unknown close");
   edvr::Config::get().set("advanced.temporal_aa_jitter_sign","flip_both");

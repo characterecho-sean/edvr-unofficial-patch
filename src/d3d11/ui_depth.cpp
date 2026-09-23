@@ -1500,6 +1500,27 @@ uint32_t uiDepthLearnedSurfaceSizes(uint32_t* outW, uint32_t* outH,
     return n;
 }
 
+// fix.ui_quality's two questions (ui_depth.h says why they live here).
+// Neither writes this pass's per-draw state; eyeIndexFor does register a
+// new target in the frame's table, exactly as the pass's own classifier
+// would at the same draw.
+int uiDepthSampledSurfaceSlot() {
+    if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return -1;
+    static const BindSlot kSlots[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1,
+                                       BindSlot::PsSrv2, BindSlot::PsSrv3};
+    for (int i = 0; i < 4; ++i) {
+        if (viewIsSurface(bindingGet(kSlots[i]))) return i;
+    }
+    return -1;
+}
+
+int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt) {
+    if (!res) return -1;
+    int eye = eyeIndexFor(res, w, h, fmt);
+    if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
+    return eye;
+}
+
 void uiDepthConfigure(Config& cfg) {
     float cockpit = cfg.getFloat("advanced.temporal_aa_ship_metres", kTemporalShipMetres);
     if (!std::isfinite(cockpit) || cockpit < 0) cockpit = 0;

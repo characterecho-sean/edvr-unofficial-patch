@@ -74,6 +74,12 @@ current timing and overlay qualification is linked separately.*
   live HMD Quality, instead of a named
   `WxH` and an integer 2..4. BUILT, NOT FLOWN -- gate G9
   (`crisp-ui-handoff.md`) is still open for every inflation mechanism.
+- **2026-09-23:** `fix.ui_quality` added to the Performance page's row list
+  below (`UI quality | choices off, 1.0=HMD Quality 1.0, 1.25=HMD Quality
+  1.25 | live | menu performance`, docs/ui-layer-2026-09-23.md): the game's
+  post-tonemap UI drawn into a per-eye layer after the upscale (Design A of
+  `crisp-ui-handoff.md`, phase 1). `advanced.temporal_aa_debug` gains the
+  developer-tier value `ui_layer`. BUILT, NOT FLOWN.
 
 *A design document, written before the code. It supersedes and extends
 Feature 4 of [performance.md](performance.md) (2026-09-05), which stays as
@@ -677,7 +683,8 @@ they were there (flown 2026-09-07).
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
    `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
    `render_sharpness`, `foveation`, `foveation_centre`, `settlement_detail`,
-   `hud_quality` (labelled **HUD quality**, default off), and `render_scale`
+   `hud_quality` (labelled **HUD quality**, default off), `ui_quality`
+   (labelled **UI quality**, default off), and `render_scale`
    when its branch lands. Costs where they are measured:
    the temporal pass's own timing, NVIDIA's pass per eye, the sharpen's
    timestamp pair, the pixel fraction under scale. UI/smoke depth and

@@ -165,6 +165,11 @@ int main(int argc, char** argv) {
     // default off (the HUD follows HMD Quality as today).
     expectStr("fix.hud_quality", "off",
               "hud quality ships live in [fix] and defaults off");
+    // ui_quality is the UI layer (docs/ui-layer-2026-09-23.md): the game's
+    // post-tonemap UI drawn into a per-eye layer after the upscale; ships
+    // live in [fix], default off (the UI is drawn into the picture as today).
+    expectStr("fix.ui_quality", "off",
+              "ui quality ships live in [fix] and defaults off");
 
     // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
     // This is the claim that a repeated section header is not a parse error
