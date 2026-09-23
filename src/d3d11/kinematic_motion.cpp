@@ -76,6 +76,11 @@ bool standDownNoted_ = false, noMoverNoted_ = false, boundsWaitNoted_ = false;
 // motion separates both from the view products). Once per session.
 int boundsDumpStage_ = 0;
 std::vector<uint32_t> boundsDumpIds_;
+// The window's cost (kinematicMotionTakeCost): under mutex_, reset when taken,
+// not by clearLocked -- a configure cycle inside a window still costs.
+KinematicMotionCost cost_;
+thread_local uint32_t t_observeCalls = 0;   // per-thread sampling ticket, no shared RMW
+uint64_t qpc() noexcept { LARGE_INTEGER t{}; QueryPerformanceCounter(&t); return static_cast<uint64_t>(t.QuadPart); }
 
 bool guardedRead(uintptr_t address, void* output, size_t bytes) noexcept {
     __try { std::memcpy(output, reinterpret_cast<const void*>(address), bytes); return true; }
@@ -271,9 +276,19 @@ void kinematicMotionShutdown() {
     if (was) Log::get().note("engine motion: tracker stood down, state cleared.");
 }
 
+// The whole Present tick, timed into the window (cost_): its lock wait and the
+// population scan, on the caller thread.
+struct PresentTimer {
+    uint64_t t0 = qpc();
+    ~PresentTimer() { cost_.presentTicks += qpc() - t0; ++cost_.presentScans; }   // runs before the lock is released
+};
+
 void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept {
     if (!active_.load(std::memory_order_acquire)) return;
+    const uint64_t t0 = qpc();
     std::lock_guard<std::mutex> lock(mutex_);
+    PresentTimer timer;
+    timer.t0 = t0;
     if (!clockSeeded_) {
         // The first tick STARTS the first frame; there is no ended frame to
         // count (the arm-seed seam that fired 3,073 fake gaps on 094158).
@@ -334,7 +349,11 @@ void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept {
 void kinematicMotionObserve(uintptr_t descriptor, uint32_t jobMask) noexcept {
     if (!active_.load(std::memory_order_acquire)) return;
     if (!descriptor) return;
+    const bool sample = (++t_observeCalls % kLockSampleEvery) == 0;
+    const uint64_t t0 = sample ? qpc() : 0;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (sample) { cost_.lockWaitTicks += qpc() - t0; ++cost_.lockSamples; }
+    ++cost_.evaluations;
     ++stats_.observed;
     if (!clockSeeded_) return; // no table state until the present clock lives
     bool ok = true;
@@ -499,6 +518,16 @@ KinematicMotionStats kinematicMotionStats() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     KinematicMotionStats out = stats_;
     out.tracked = static_cast<uint32_t>(records_.size());
+    return out;
+}
+
+KinematicMotionCost kinematicMotionTakeCost() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    KinematicMotionCost out = cost_;
+    cost_ = KinematicMotionCost{};
+    LARGE_INTEGER f{};
+    QueryPerformanceFrequency(&f);
+    out.qpcFrequency = f.QuadPart > 0 ? static_cast<uint64_t>(f.QuadPart) : 1;
     return out;
 }
 

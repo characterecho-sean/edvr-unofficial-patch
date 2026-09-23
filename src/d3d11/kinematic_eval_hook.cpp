@@ -49,14 +49,20 @@ static_assert(decltype(observer)::is_always_lock_free,
 
 // The relay gate, distinct from observer: non-zero while ANY consumer wants
 // eval callbacks -- the probe while attached (eye-dump captures), the
-// kinematic tracker while fix.temporal_aa is on (no dump involved), the
-// scheduler stack probe while armed, or the static prop gate while
-// fix.static_prop_updates is on.
+// kinematic tracker while engine motion's diagnostics want it, the emit
+// bracket while fix.temporal_aa is on (no dump involved), the scheduler stack
+// probe while armed, or the static prop gate while fix.static_prop_updates is
+// on.
 // observer stays the probe's own cell; the relays gate on evalGate.
 alignas(8) std::atomic<uintptr_t> evalGate{0};
 static_assert(decltype(evalGate)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 std::atomic<bool> trackerWanted{false};
+// Engine-record velocity's own want on the hook set (the 2026-09-23
+// performance review, item 1): the emit bracket rides the direct-producer
+// relay, which gates on evalGate, so the emit holds the gate open itself and
+// the legacy tracker's observer can be diagnostic-only.
+std::atomic<bool> emitWanted{false};
 alignas(8) std::atomic<KinematicTrackerObserverFn> trackerObserver{nullptr};
 // Engine-record velocity's emit observer (direct producer 0's post-forward).
 alignas(8) std::atomic<EngineEmitObserverFn> emitObserver{nullptr};
@@ -970,6 +976,7 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
 void recomputeGateLocked() noexcept {
     const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
                     trackerWanted.load(std::memory_order_acquire) ||
+                    emitWanted.load(std::memory_order_acquire) ||
                     schedulerWanted.load(std::memory_order_acquire) ||
                     staticGateWanted.load(std::memory_order_acquire) ||
                     gateProbeWanted.load(std::memory_order_acquire);
@@ -1008,13 +1015,36 @@ void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept {
 bool kinematicEvalEmitHookLive(const char** why) noexcept {
     const char* reason=nullptr;
     if(!g_evalEntry.ready.load(std::memory_order_acquire))
-        reason="the kinematic hook set is not installed; the tracker's attach line names why";
+        reason="the kinematic hook set is not installed; the emit's attach line names why";
     else if(!g_directEntries[0].ready.load(std::memory_order_acquire))
         reason="CodeHook refused kinematic-build-144312e00; its own line names why";
     else if(evalGate.load(std::memory_order_acquire)==0)
-        reason="the hook set's gate is closed (the tracker is detached), so the relay never calls the bracket";
+        reason="the hook set's gate is closed (the emit is detached), so the relay never calls the bracket";
     if(why)*why=reason;
     return reason==nullptr;
+}
+
+const char* kinematicEvalEmitAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        emitWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalEmitDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        emitWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
 }
 
 const char* kinematicEvalTrackerAttach() noexcept {

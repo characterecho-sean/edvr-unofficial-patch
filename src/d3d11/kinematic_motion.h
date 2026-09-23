@@ -66,6 +66,21 @@ void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept;
 // jobMask carries the bracket TLS bits (1u<<jobId) at observation time.
 void kinematicMotionObserve(uintptr_t descriptor, uint32_t jobMask = 0) noexcept;
 KinematicMotionStats kinematicMotionStats() noexcept;
+// What the tracker costs, per window (the 2026-09-23 performance review, item
+// 1): every evaluation takes the module mutex on a job thread, and the owned
+// Present scans the tracked population on the caller thread. Taken (and
+// reset) once per engine-motion summary; the flight prices the tracker with
+// it. lockWaitTicks is the QPC time waiting for the mutex in 1 of every
+// kLockSampleEvery evaluations per thread; presentTicks is the whole Present
+// tick (its wait included), every frame.
+constexpr uint32_t kLockSampleEvery = 64;
+struct KinematicMotionCost {
+    uint64_t evaluations = 0;       // observer calls while active
+    uint64_t lockSamples = 0, lockWaitTicks = 0;
+    uint64_t presentScans = 0, presentTicks = 0;
+    uint64_t qpcFrequency = 1;
+};
+KinematicMotionCost kinematicMotionTakeCost() noexcept;
 // Test-rig introspection: eligibility of one record by its live pointer.
 bool kinematicMotionRecordEligible(uint64_t record) noexcept;
 // Test-rig introspection: the once-per-session bounds dump stage (0 = armed,

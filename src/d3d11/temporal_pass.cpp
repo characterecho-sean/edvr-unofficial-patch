@@ -6979,6 +6979,20 @@ void temporalPassDumpHistory(const char* trigger) {
     Log::get().note("--- end temporal submission history ---");
 }
 
+// Engine motion's diagnostics (the 2026-09-23 performance review, item 1): the
+// legacy kinematic tracker -- a mutex on every evaluation on the job threads,
+// a population scan at every Present on the caller thread -- and the emit's
+// census run only while something reads them: advanced.temporal_aa_diagnostics,
+// the movers view, or an eye run (from its arming to the first config poll
+// after it is written). Engine-record velocity holds its own hooks and needs
+// neither.
+static void applyEngineMotionDiagnostics() {
+    const bool on = detail::g_temporalPassWantedFssChrome &&
+                    (g_diagnostics || g_debugMode == 4 || g_eyeRunLeft > 0 || g_eyeRunReady);
+    kinematicMotionConfigure(on);
+    engineVelocityDiagnostics(on);
+}
+
 void temporalPassConfigure(Config& cfg) {
     // Stage 0 price report: every call (both its call sites) may change a
     // live temporal_aa_* setting, so every call closes the report's current
@@ -7034,7 +7048,9 @@ void temporalPassConfigure(Config& cfg) {
     // pairing pool records across frames: off by default (advanced.mesh_motion
     // = on keeps it for an A/B, and the engine's pixels override it either way).
     meshMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.mesh_motion", false));
-    kinematicMotionConfigure(engineMotionOn);
+    // The emit holds the shared eval hooks itself; the legacy tracker and the
+    // emit's census are diagnostic-only (applyEngineMotionDiagnostics, below
+    // the debug mode's read).
     engineVelocityConfigure(engineMotionOn);
     // The scheduler stack-capture probe (docs/engine-render-pipeline.md
     // stage 0): read-only return-address signatures at the four
@@ -7095,6 +7111,7 @@ void temporalPassConfigure(Config& cfg) {
     g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
                 : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : _stricmp(dbg.c_str(), "motion_source") == 0 ? 6 : 0;
+    applyEngineMotionDiagnostics();
     // Tier 2's estimated object motion (the body/ship paths and the body's
     // occupancy grid, object_probe.cpp's rigid fit): off by default -- it
     // estimates, and the requirement is no estimation.
@@ -8179,6 +8196,7 @@ static void beginEyeRun() {
                  static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
+    applyEngineMotionDiagnostics();   // the tracker and the census run for the run
     g_eyeMotionTraceCount = 0;
     g_eyeInputsFrame=0;
     g_meshFallbackSnapshot=MeshFallbackSnapshot{};

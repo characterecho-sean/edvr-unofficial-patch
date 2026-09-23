@@ -72,6 +72,10 @@ constexpr unsigned kEngineVelocityScenePrevCb = 2;
 void engineVelocityConfigure(bool on);
 void engineVelocityShutdown();
 bool engineVelocityActive() noexcept;
+// Engine motion's diagnostics wanted (temporal_pass: advanced.temporal_aa_
+// diagnostics, the movers view or an eye run): the emit's census runs only
+// then, as the legacy tracker does (the 2026-09-23 performance review).
+void engineVelocityDiagnostics(bool on);
 
 // Shader creation (device_hook): the keyed pool families' bytecode is kept
 // whether or not the feature is on (ten small shaders), so enabling it live

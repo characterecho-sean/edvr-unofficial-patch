@@ -2446,3 +2446,27 @@ differs). screen_motion_test 56541 (+2: each source frame names its depth to the
 If the new code never runs, the log reads as 114958: no slot-target line, the movers line's
 `eye-frames 0, with MRT6 bound 0`, and no `on foot:` line (or `source frames 0`). Bound but
 never asked: `screen views asked 0`. Asked but refused: the refusal names the reason.
+
+### 2026-09-23 -- Performance round (reviews\engine-motion-performance-review-2026-09-23.md)
+
+One commit per item, built and rigged, none flown.
+
+**1. The legacy tracker is diagnostic-only.** Its observer took one global mutex per
+evaluation on the job threads and its Present tick scanned the tracked population on the
+caller thread, whenever temporal AA was on; since stage B its only consumer was the movers
+line's "against the tracker's N moving records/frame". On foot in 114958 the emit saw 4.5-7M
+calls per 30 s with 390-470 moving records a frame, and the frame was caller-thread bound at
+~16 ms: the prime suspect. Now the emit holds the shared eval hooks itself
+(`kinematicEvalEmitAttach`: the direct-producer relay gates on the same eval gate, so the
+emit's want keeps it open), and the tracker and the emit's census of one record in eight
+run only while engine motion's diagnostics want them -- advanced.temporal_aa_diagnostics,
+the movers view, or an eye run from its arming to the first config poll after it is written
+(`applyEngineMotionDiagnostics`, temporal_pass.cpp). The emit's previous-pose certification
+is its own table and is untouched. Measured whenever the tracker runs, per 30 s: `engine
+motion: tracker (diagnostic-only) cost: N evaluations (X a frame), each taking its mutex:
+lock wait Y us sampled (1 in 64, S samples), ~Z ms/frame summed over the job threads;
+Present scan W ms/frame on the caller thread`. With diagnostics off: `engine motion: tracker
+off (diagnostic-only ...)`, the movers line reads `(the tracker, diagnostic-only, was off)`
+and the census line ends `(the census is off ...)`, emit joins unchanged. Never ran: the old
+movers wording with a tracker number and no cost or off line. Rigs: kinematic_motion_test
+case 20 (the cost window), engine_velocity_test P1.
