@@ -1,5 +1,5 @@
 #pragma once
-// Engine-record velocity, phase 1 (fix.engine_motion=on; docs/kinematic-motion-
+// Engine-record velocity, phase 1 (part of fix.temporal_aa; docs/kinematic-motion-
 // injection-2026-09-19.md, 2026-09-23 "Phase 1 built" and "Fix round" entries).
 //
 // Exact per-pixel motion for the game's rigid movers from the engine's own
@@ -67,8 +67,8 @@ constexpr unsigned kEngineVelocityScenePrevCb = 2;
 // The record, item and marker layout lives in engine_velocity_emit.h (the
 // emit half) and the compose's ENGINE_MOTION_HLSL block; nothing here repeats it.
 
-// fix.engine_motion=on with the temporal pass live. Idempotent across the
-// once-per-second config re-poll.
+// On with the temporal pass live (fix.temporal_aa, every mode). Idempotent
+// across the once-per-second config re-poll.
 void engineVelocityConfigure(bool on);
 void engineVelocityShutdown();
 bool engineVelocityActive() noexcept;

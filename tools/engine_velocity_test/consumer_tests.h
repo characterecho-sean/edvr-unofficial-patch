@@ -1,7 +1,7 @@
 #pragma once
 // consumer_tests: drives the PRODUCTION temporal compute shader (the full
 // kTemporalCsHlsl of src/d3d11/temporal_shader_source.h, entry "mv") on
-// WARP, with the engine-record motion path (fix.engine_motion=on, probe.w
+// WARP, with the engine-record motion path (fix.temporal_aa on, probe.w
 // bit 2048) armed through real ES/EP/scene-depth resources -- unlike
 // tools/engine_velocity_test/math_tests.h, which tests the ENGINE_MOTION_HLSL
 // block's arithmetic in isolation via a minimal wrapper shader, this drives

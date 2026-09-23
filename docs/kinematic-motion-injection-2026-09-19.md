@@ -4,8 +4,7 @@
 
 - **State:** DECIDED DIRECTION, 2026-09-19 (Sean): engine-level injection from
   KinematicRig truth, not draw-call interpretation (ruled out as a class). Phase 0/A/B
-  built and flown clean by 2026-09-20 17:05 (tracker, sphere-backed quarter-res
-  ownership veto, straddle -> paint-none; whole-eye cyan gone). Four engine-truth
+  built and flown clean by 2026-09-20 17:05 (B's veto since removed). Four engine-truth
   routes to a mover/static flag closed 0-for-4 by 21:25 that day. RESUMED OFFLINE
   2026-09-23 (Sean: motion vectors should derive from the engine, not render-time
   estimates); the offline pass then found no engine velocity buffer anywhere in the VR
@@ -27,6 +26,7 @@
   census; the motion_source legend corrected (green = certified rig record, still or
   moving). STAGE B REMOVED 2026-09-23 (its coverage pass was the ~3 ms prep),
   superseded by the engine path's exact per-pixel ownership; the veto never shipped on.
+  ITS KEY RETIRED 2026-09-23: engine motion is part of fix.temporal_aa, every mode.
 - **Open:** the follow-ups' flight (the expected price line is under Next); on foot
   the eyes show a flat 2D-screen panel (no eye scene), and with fix.ui_quality on the
   UI layer lifted it past DLSS entirely -- DECIDED (overseer, 2026-09-23): the layer
@@ -57,7 +57,7 @@
   pre-pass or a depth bias as the stale cockpit (all three: the re-fly entry); green on
   the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
   cause (the 09:38 entry). Do not re-propose any of the above.
-- **Next:** the same flight (fix.engine_motion=on, dlss, diagnostics 1; pad, walk,
+- **Next:** the same flight (fix.temporal_aa = dlss, diagnostics 1; pad, walk,
   re-board) read against the re-fly entry: in the cockpit `prep ~0.2-0.5 (copy ~0.05
   mv ~0.1-0.3)`; on foot `depth probe layout:` and the layer's on-foot line.
 

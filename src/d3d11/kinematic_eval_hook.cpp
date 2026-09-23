@@ -49,7 +49,7 @@ static_assert(decltype(observer)::is_always_lock_free,
 
 // The relay gate, distinct from observer: non-zero while ANY consumer wants
 // eval callbacks -- the probe while attached (eye-dump captures), the
-// kinematic tracker while fix.engine_motion is on (no dump involved), the
+// kinematic tracker while fix.temporal_aa is on (no dump involved), the
 // scheduler stack probe while armed, or the static prop gate while
 // fix.static_prop_updates is on.
 // observer stays the probe's own cell; the relays gate on evalGate.
@@ -455,7 +455,7 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
     // detailed observer's cost enters the measured region only while it is
     // actually capturing, which is exactly the with/without comparison L1
     // wants. The probe global is process-lifetime, so the tracker-only path
-    // (fix.engine_motion on, probe never attached) times too. jobs[] now
+    // (fix.temporal_aa on, probe never attached) times too. jobs[] now
     // accumulates per-session, not per capture window. Ownership capture
     // stays capture-gated: observe()/noteOwnership keep their active() gates.
     if(probe && probe->active())probe->noteOwnership(job,a);

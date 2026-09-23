@@ -46,7 +46,7 @@ Texture2D<uint4> ownerPrev : register(t18);
 )HLSL"
 R"HLSL(
 // ENGINE_MOTION_HLSL_BEGIN
-// Engine-record motion (fix.engine_motion=on, phase 1; docs/kinematic-motion-
+// Engine-record motion (with fix.temporal_aa, phase 1; docs/kinematic-motion-
 // injection-2026-09-19.md, 2026-09-23 "Phase 1 built"). This block is the one
 // text both the compose and tools/engine_velocity_test compile: the rig cuts
 // it out between the two marker lines, so keep it self-contained.
@@ -593,7 +593,7 @@ bool meshPixel(float2 p,float2 offset,out float2 pp,out float zp) {
 }
 )HLSL"
 R"HLSL(
-// Engine-record motion (fix.engine_motion=on, phase 1; docs/kinematic-motion-
+// Engine-record motion (with fix.temporal_aa, phase 1; docs/kinematic-motion-
 // injection-2026-09-19.md, 2026-09-23 "Phase 1 built"). The kinds:
 //   0 no engine data at this pixel (unbound, unwritten, UI, screen);
 //   1 JOINED: pp/zp hold the surface's exact previous position -- the point
@@ -831,7 +831,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         }
     }
     hy = 0.0;
-    // Engine-record motion FIRST (fix.engine_motion=on, probe.w 2048): the
+    // Engine-record motion FIRST (with fix.temporal_aa, probe.w 2048): the
     // record's exact motion, or no history at all for a masked rig record.
     if (allowWorld) {
         float2 engineP; float engineZ;
@@ -1246,7 +1246,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
 )HLSL"
 R"HLSL(
-        // Engine-record motion LAST (fix.engine_motion=on, probe.w 2048): a
+        // Engine-record motion LAST (with fix.temporal_aa, probe.w 2048): a
         // pixel the game's own substituted pool draw owns takes the record's
         // exact motion over every estimate above (the body/ship paths, mesh,
         // the rigid-owner promotion); a masked one keeps no history. Unbound,
@@ -1444,7 +1444,7 @@ R"HLSL(
             }
             paintDebug(id.xy, size, o3);
         } else if (split.y == 6.0) {
-            // The motion-source view (fix.engine_motion): green where a rig
+            // The motion-source view (with fix.temporal_aa): green where a rig
             // record's certified previous pose gave the pixel its exact motion
             // (kind 1) -- moving OR still, a still record yielding the camera
             // term through the record, so green is not a mover count; red

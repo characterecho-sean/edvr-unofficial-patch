@@ -131,6 +131,7 @@ int main(int argc, char** argv) {
     expectStr("fix.ui_depth", "<unset>", "UI depth is bundled with temporal AA");
     expectStr("fix.temporal_aa_objects", "<unset>", "station motion is bundled with temporal AA");
     expectStr("fix.temporal_aa_smoke", "<unset>", "smoke depth is bundled with temporal AA");
+    expectStr("fix.engine_motion", "<unset>", "engine motion is bundled with temporal AA: its own key is retired");
     expectBool("fix.share_exposure", true, "a key in the first [fix] reads");
     expectBool("fix.transition_flash", true, "...and another beside it");
     expectStr("hotkey.toggle_exposure", "SCROLLLOCK",

@@ -84,9 +84,9 @@
   flight-proven by 125207 (13:05 entry: tracker clean, bounds block
   decoded); supersedes v0.17.0-117-g0d042f5c-dirty (2AAA67BF). The
   064047 flight proved record+0x170 is the per-frame world position
-  (06:45 entry). INIs unchanged; fix.engine_motion defaults off and
-  must be set on in the live ini for the tracker (the 12:46 flight
-  had it under [advanced] -- dark, not evidence). Flight check:
+  (06:45 entry). INIs unchanged; the tracker runs whenever
+  fix.temporal_aa is on (its own key retired 2026-09-23; the 12:46
+  flight had that key under [advanced] -- dark, not evidence). Flight check:
   --expect-build v0.17.0-119-g6899d0ff-dirty. Stage B landed 14:45
   (same-date entry): commit 6b90d0b installed to frontier, d3d11
   sha256 81d5d27f434b2458, --verify-only green; unflown. The 13-finding

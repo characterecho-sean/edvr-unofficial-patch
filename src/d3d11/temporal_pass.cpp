@@ -596,7 +596,7 @@ const char* const kRegionNames[kRegionCount] = {
 };
 // Prep's own parts, on the full-frame path (the engine-motion re-fly of
 // 2026-09-23, log 093817: "prep" read ~3 ms a stereo pair in the cockpit
-// with fix.engine_motion on against ~0.2 in menus and on foot, and one
+// with engine-record motion on against ~0.2 in menus and on foot, and one
 // region cannot say which of its dispatches that is). The colour copies
 // and the motion-vector dispatch, timed the same way and printed INSIDE
 // prep's figure: they are parts of prep, so "other", the seven exported
@@ -5727,7 +5727,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     if (staticOwnerBound) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 256u);
-                    // Engine-record velocity (fix.engine_motion=on): bit 2048
+                    // Engine-record velocity (with fix.temporal_aa on): bit 2048
                     // and t21/t22/b1/b2 below; clear = byte-identical.
                     const bool engineBound = engineViewsGiven && depthSrv;
                     if (engineBound) p.probe[3] =
@@ -7021,31 +7021,21 @@ void temporalPassConfigure(Config& cfg) {
     // against the frame (the terrain frame-time arc, 2026-09-17). Off leaves
     // the camera's motion on their pixels, which ghosts on a moving body,
     // which is the point: a lever, not a setting to fly with.
-    // fix.engine_motion (docs/kinematic-motion-injection-2026-09-19.md): on is
-    // engine-record velocity -- the kinematic tracker's hook set, the emit
-    // bracket writing each rig record's previous pose into the pool, the pool
-    // families' own draws recording slot and depth, and the compose taking the
-    // record's exact motion there. auto is reserved until the scene gate
-    // lands and behaves as off, said once. Read first: the estimators below
-    // default off when it is on.
-    const std::string engineMotion = cfg.getString("fix.engine_motion", "off");
-    const bool engineMotionOn = detail::g_temporalPassWantedFssChrome && _stricmp(engineMotion.c_str(), "on") == 0;
+    // Engine-record velocity (docs/kinematic-motion-injection-2026-09-19.md)
+    // is part of fix.temporal_aa in every mode, with no key of its own (the
+    // separate key retired 2026-09-23): the kinematic tracker's hook set, the
+    // emit bracket writing each rig record's previous pose into the pool, the
+    // pool families' own draws recording slot and depth, and the compose
+    // taking the record's exact motion there. It arms and disarms with the
+    // mode, live; a hook that cannot install stands it down whole, logged.
+    const bool engineMotionOn = detail::g_temporalPassWantedFssChrome;
     celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.terrain_motion", true));
     // The per-record rigid match (mesh_motion) estimates a mover's motion by
-    // pairing pool records across frames; with engine-record velocity on it
-    // defaults off (advanced.mesh_motion = on keeps it for an A/B, and the
-    // engine's pixels override it either way).
-    meshMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.mesh_motion", !engineMotionOn));
-    {
-        static bool engineMotionAutoNoted = false;
-        if (_stricmp(engineMotion.c_str(), "auto") == 0 && !engineMotionAutoNoted) {
-            engineMotionAutoNoted = true;
-            Log::get().note("engine motion: fix.engine_motion=auto is reserved until the "
-                            "scene gate lands -- behaving as off.");
-        }
-        kinematicMotionConfigure(engineMotionOn);
-        engineVelocityConfigure(engineMotionOn);
-    }
+    // pairing pool records across frames: off by default (advanced.mesh_motion
+    // = on keeps it for an A/B, and the engine's pixels override it either way).
+    meshMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.mesh_motion", false));
+    kinematicMotionConfigure(engineMotionOn);
+    engineVelocityConfigure(engineMotionOn);
     // The scheduler stack-capture probe (docs/engine-render-pipeline.md
     // stage 0): read-only return-address signatures at the four
     // scheduler-fed worker entries, naming the frame scheduler the vtable
@@ -7067,9 +7057,10 @@ void temporalPassConfigure(Config& cfg) {
         static bool bothNoted = false;
         if (!bothNoted) {
             bothNoted = true;
-            Log::get().note("engine motion: advanced.temporal_aa_static_surfaces and fix.engine_motion=on both replace "
-                            "the pool families' pixel shaders; on a draw engine-record velocity has substituted, the "
-                            "static owner finds a shader it did not patch and declines (its 'shaders' decline count).");
+            Log::get().note("engine motion: advanced.temporal_aa_static_surfaces and engine-record velocity (part of "
+                            "fix.temporal_aa) both replace the pool families' pixel shaders; on a draw engine-record "
+                            "velocity has substituted, the static owner finds a shader it did not patch and declines "
+                            "(its 'shaders' decline count).");
         }
     }
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
@@ -7105,13 +7096,13 @@ void temporalPassConfigure(Config& cfg) {
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
                 : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : _stricmp(dbg.c_str(), "motion_source") == 0 ? 6 : 0;
     // Tier 2's estimated object motion (the body/ship paths and the body's
-    // occupancy grid, object_probe.cpp's rigid fit): on with the temporal pass,
-    // off by default while engine-record velocity is on -- it estimates, and
-    // the requirement is no estimation. advanced.temporal_aa_estimated_objects
-    // = on keeps it for an A/B; the engine's own pixels override it either way.
-    // (Not the retired fix.temporal_aa_objects, which config_test keeps unset.)
+    // occupancy grid, object_probe.cpp's rigid fit): off by default -- it
+    // estimates, and the requirement is no estimation.
+    // advanced.temporal_aa_estimated_objects = on keeps it for an A/B; the
+    // engine's own pixels override it either way. (Not the retired
+    // fix.temporal_aa_objects, which config_test keeps unset.)
     g_objectsOn = detail::g_temporalPassWantedFssChrome &&
-                  cfg.getBool("advanced.temporal_aa_estimated_objects", !engineMotionOn);
+                  cfg.getBool("advanced.temporal_aa_estimated_objects", false);
     float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 1500.0f);
     if (!std::isfinite(reach)) reach = 1500.0f;
     if (reach < 1.0f) reach = 1.0f;

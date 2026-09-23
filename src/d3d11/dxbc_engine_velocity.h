@@ -1,6 +1,6 @@
 #pragma once
 
-// Engine-record velocity, phase 1 (fix.engine_motion=on): restricted SM5
+// Engine-record velocity, phase 1 (with fix.temporal_aa): restricted SM5
 // patches that make the game's OWN pool draws record, per pixel, which pool
 // record drew the pixel and at what depth. The temporal pass then turns that
 // record's engine poses (current, and the previous one EDVR wrote into the
