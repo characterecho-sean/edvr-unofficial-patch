@@ -18,6 +18,9 @@ void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsig
 // The host's per-draw gate, cheap enough for every DrawIndexedInstanced:
 // on, the on-foot source depth seen this frame, and a weapon family VS.
 bool weaponMotionWants(uint64_t vsHash);
+// The weapon and tool shaders alone (no state): screen_motion's naming
+// without terrain skips them, since their camera is the first person's.
+bool weaponMotionFamilyVs(uint64_t vsHash);
 ID3D11ShaderResourceView* weaponMotionView();
 struct WeaponMotionGpuDiagnostics {
     uint64_t scope=0,sourceFrames=0,calls=0,selected=0,submitted=0;

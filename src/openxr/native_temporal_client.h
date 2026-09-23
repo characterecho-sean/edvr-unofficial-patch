@@ -35,7 +35,8 @@ class NativeTemporalClient final {
   // askedWidth/askedHeight: what the game is told now, max over eyes (the
   // geometry's own widths are what the frame was rendered for); 0 unknown.
   HRESULT begin(const GeometryInput& geometry, uint64_t referenceGeneration, float (&shift)[2][2],
-      const vr::HmdMatrix34_t* renderedHead = nullptr, uint32_t askedWidth = 0, uint32_t askedHeight = 0) {
+      const vr::HmdMatrix34_t* renderedHead = nullptr, uint32_t askedWidth = 0, uint32_t askedHeight = 0,
+      float trueUp = 0.0f, float trueDown = 0.0f) {
     std::memset(shift, 0, sizeof(shift));
     GeometrySnapshot snapshot{};
     if (!makeGeometrySnapshot(geometry, snapshot) || !referenceGeneration) { invalidate(); return E_INVALIDARG; }
@@ -55,6 +56,8 @@ class NativeTemporalClient final {
     frame.recommendedHeight = (std::max)(geometry.height[0], geometry.height[1]);
     frame.askedWidth = askedWidth;
     frame.askedHeight = askedHeight;
+    frame.trueUp = trueUp;
+    frame.trueDown = trueDown;
     EdvrNativeTemporalProjection output{sizeof(output), EDVR_NATIVE_TEMPORAL_VERSION_1};
     const auto result = table_.beginFrame(table_.context, &frame, &output);
     if (result != S_OK) return result;
