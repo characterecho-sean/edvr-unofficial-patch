@@ -53,22 +53,32 @@ std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 // kept the camera term while the station turned; both keyed, each proven by
 // the corpus identity harness (o0..o3 and depth bit-identical). Not keyed:
 // ps_B7D50283329322C3 (vs_EB52 -- the commander's legs, records 2 m away;
-// decided), and vs_436193B352A2897E, the station's biggest pool shader, which
-// is no family yet: its only pixel shader, ps_16940F576006BE65, is not in any
-// dump, and nothing is keyed without the harness.
+// decided).
+//
+// Flight 6 (153446: the shader dump armed at a station, the "Flight 6" entry):
+// vs_436193B352A2897E, the station's biggest pool shader (547 of its 1193
+// instances a frame, 143416) with its only pixel shader ps_16940F576006BE65;
+// vs_889A5279E68F0672 with ps_B46E52A1E0B2F39C (the station) and
+// ps_EBA95E15B0A66102 -- each pair through the corpus identity harness
+// (40,960 texels, 0 mismatches; MRT6 8192 checked, 0 bad). Not keyable:
+// vs_DE54's ps_91F8937EDA723663 and ps_A6070F9DD1CFB601, whose input register
+// the family's SV_Position sits at holds another semantic (the patcher's
+// refusal; engine_velocity_test's --corpus candidates print it).
 struct Family {
     uint64_t vs;
     const char* name;
-    uint64_t ps[3];
+    uint64_t ps[4];
 };
 constexpr Family kFamilies[] = {
-    {0xEB5234DB6ADB491Dull, "vs_EB5234DB6ADB491D", {0xCB9F297EFF264251ull, 0x9ABF60B4B51F2C1Full, 0x3434972DB5336AA4ull}},
-    {0x5B4D8E894EEDA8B4ull, "vs_5B4D8E894EEDA8B4", {0x4375B72964F386CDull, 0, 0}},
-    {0xBBE58E40FE88EC80ull, "vs_BBE58E40FE88EC80", {0xDB3E8D20CF53FBC0ull, 0, 0}},
-    {0xDE545DC8EE4FBB87ull, "vs_DE545DC8EE4FBB87", {0xE46E3E4832B2FDB0ull, 0xCB429E043DBB2506ull, 0}},
-    {0xAACFDCF2FB9AD809ull, "vs_AACFDCF2FB9AD809", {0xCF534B32F491561Aull, 0, 0}},
-    {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0, 0}},
-    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0}},
+    {0xEB5234DB6ADB491Dull, "vs_EB5234DB6ADB491D", {0xCB9F297EFF264251ull, 0x9ABF60B4B51F2C1Full, 0x3434972DB5336AA4ull, 0}},
+    {0x5B4D8E894EEDA8B4ull, "vs_5B4D8E894EEDA8B4", {0x4375B72964F386CDull, 0, 0, 0}},
+    {0xBBE58E40FE88EC80ull, "vs_BBE58E40FE88EC80", {0xDB3E8D20CF53FBC0ull, 0, 0, 0}},
+    {0xDE545DC8EE4FBB87ull, "vs_DE545DC8EE4FBB87", {0xE46E3E4832B2FDB0ull, 0xCB429E043DBB2506ull, 0, 0}},
+    {0xAACFDCF2FB9AD809ull, "vs_AACFDCF2FB9AD809", {0xCF534B32F491561Aull, 0, 0, 0}},
+    {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0, 0, 0}},
+    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0, 0}},
+    {0x436193B352A2897Eull, "vs_436193B352A2897E", {0x16940F576006BE65ull, 0, 0, 0}},
+    {0x889A5279E68F0672ull, "vs_889A5279E68F0672", {0xB46E52A1E0B2F39Cull, 0xEBA95E15B0A66102ull, 0, 0}},
 };
 constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
 static_assert(kFamilyCount <= kMaxFamilies, "familyDraws holds every family");

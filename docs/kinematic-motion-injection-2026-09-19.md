@@ -20,18 +20,19 @@
   pool draw held to the naming draw's camera, the others declined, the frame kept.
   STATION (eye run 143416, "The station" entry): the joined station pixels are EXACT
   (one rigid motion to 0.002 px at the records' own 0.106-0.110 deg a frame), but 55% of
-  its pixels kept the camera term, 0.31-0.35 px a frame short: vs_4361 (no family) and
-  stock pixel shaders. ps_CB429E04 (DE54) and ps_451A82D4 (61AE) KEYED, harness-proven,
-  MERGED, NOT FLOWN; vs_4361 waits on its pixel shader's bytecode.
+  its pixels kept the camera term, 0.31-0.35 px a frame short. KEYED, harness-proven,
+  NOT FLOWN: ps_CB42 (DE54) and ps_451A (61AE); then from flight 6's dump ("Flight 6"
+  entry) vs_4361 + ps_1694 (547 of the station's 1193 instances a frame) and vs_889A +
+  ps_B46E / ps_EBA9. vs_DE54's ps_91F8 and ps_A607: refused by the patcher.
 - **Open:** walkers (vs_F516BF0201303B87, not a pool family; w=2 on the panel) wait on
   phase 2's previous bone palette -- a walking NPC still blurs after the on-foot fix;
   which camera the walk's other draws use (the new line's rows and distance say); a
   temporal pass on the flat source for its own aliasing; the stale cockpit (the
   commander's legs under ps_B7D5 and vs_7B0DC42D, DECIDED not keyed; 35.4% undecided, low
   priority); the tracker's evaluated-but-not-drawn movers (the 09:38 entry); the boarding
-  flicker (the LOD governor, not this arc); the station's vs_436193B352A2897E (derives:
-  slot v0.y) and vs_889A5279E68F0672 (derives: v0.x) as families; ships in space;
-  builder-path movers and articulated parts (phase 2).
+  flicker (the LOD governor, not this arc); vs_DE54's ps_91F8 and ps_A607 (the family's
+  SV_Position register holds another semantic in them: a patcher extension); ships in
+  space; builder-path movers and articulated parts (phase 2).
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -55,9 +56,9 @@
 - **Next:** one flight (--expect-build HEAD first): walking near a drone or a landing
   ship -- `on foot: ... frames dropped: none; screen views asked A, given A` (less the
   first frame), `camera rule: ... declined D in F frames`, `panel pixels per sampled eye
-  draw: engine-joined J`, J > 0; then a station approach with advanced.glare_shader_dump
-  = 1 (restart to arm): stale falls by the keyed share and ps_16940F576006BE65 is dumped,
-  then vs_4361 is keyed through the harness. Then the diagnostics 1 vs 0 comparison.
+  draw: engine-joined J`, J > 0; then a station approach: the family lines name vs_4361
+  and vs_889A patched, and stale falls to the stock remainder. Then the diagnostics 1
+  vs 0 comparison.
 
 ## Premise
 
@@ -2697,3 +2698,39 @@ edvr_logs\shaders\ps_16940F576006BE65.dxbc appears, and vs_4361 becomes a family
 the harness. If the new code never ran, the family lines still name ps_CB42 and ps_451A
 "left stock". Rigs: engine_velocity_test 967 checks (the gate), 1254 with --corpus
 (eleven real pairs identical, two derive-only).
+
+### 2026-09-23 -- Flight 6 (153446): the station's biggest family keyed
+
+**The flight.** Build 1eae654d (the on-foot and station fixes merged), the shader dump
+armed; eye 4074x4076 output from 2037x2038 (DLSS performance, exactly 50%), the 2D screen
+5088x2862. Docked at a station (still blurry turning: vs_4361 unkeyed, as expected),
+disembarked into the HANGAR on foot 15:37:20-15:38:12. The dump wrote
+ps_16940F576006BE65.dxbc (9148 bytes, 15:36:12) beside vs_436193B352A2897E.dxbc (09-06).
+
+**The station's families, through the corpus identity harness** (engine_velocity_test
+--corpus edvr_logs: derive, patch, reflect, create, then stock and patched drawn over the
+same inputs, SV_Target0..3 and depth compared bit for bit, MRT6 checked against the slot):
+
+| pair | result |
+|---|---|
+| vs_436193B352A2897E + ps_16940F576006BE65 | 40,960 texels, 0 mismatches; MRT6 8192 checked, 0 bad (slot v0.y, SV_Position v5) -- KEYED |
+| vs_889A5279E68F0672 + ps_B46E52A1E0B2F39C (the station's) | 40,960, 0 mismatches; 8192, 0 bad (v0.x, v4) -- KEYED |
+| vs_889A5279E68F0672 + ps_EBA95E15B0A66102 | 40,960, 0 mismatches; 8192, 0 bad -- KEYED |
+| vs_DE545DC8EE4FBB87 + ps_91F8937EDA723663 | refused by the patcher: "position input register holds another semantic" |
+| vs_DE545DC8EE4FBB87 + ps_A6070F9DD1CFB601 | refused, the same |
+
+Two new families in src/d3d11/engine_velocity.cpp kFamilies (nine now; kMaxFamilies 10,
+four pixel shaders a family). The refused two stay stock: the family's SV_Position sits
+in v4 of its vertex outputs, and these two pixel shaders declare another semantic in
+that register -- a patcher that finds SV_Position by semantic in the pixel shader's own
+input signature would take them; not built. The rig now splits its corpus into keyed
+pairs (each must pass: 14) and candidates (tried and reported, never failing the run:
+the refused two), and takes each call's result before its check -- a reason written by
+the call was printed from a dangling pointer before (the first run's garbled FAIL).
+engine_velocity_test 1008 checks (the gate), 1373 with --corpus.
+
+**What a flight shows.** At a station: `engine motion: family vs_436193B352A2897E: live;
+substituted N binds ...; patched [ps_16940F576006BE65]` and the same for vs_889A; with
+diagnostics, stale per eye-frame down from 136,878 toward the stock remainder (ps_91F8 and
+ps_A607 are the cockpit's and the on-foot views', not the station's). If the new code
+never ran: no family line for either.

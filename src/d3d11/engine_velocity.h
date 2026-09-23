@@ -98,7 +98,7 @@ struct DrawCache {
     bool eye = false;
     int family = -1;   // the family whose substituted shaders are bound, -1 none
 };
-constexpr int kMaxFamilies = 8;
+constexpr int kMaxFamilies = 10;
 extern std::atomic<bool> live;
 extern DrawCache cache;                        // owner thread only
 extern uint64_t familyDraws[kMaxFamilies];     // owner thread only: draws that ran substituted

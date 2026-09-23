@@ -73,8 +73,58 @@ std::vector<BYTE> readFile(const std::wstring& path) {
 // patches, reflects and creates, and then (corpus_identity.h) draws stock and
 // patched over the same inputs: SV_Target0..3 and depth must match byte for
 // byte -- the substitution must not change the game's own G-buffer.
+struct Pair { const wchar_t* vs; const wchar_t* ps; bool vsPatch; };
+// A candidate's first failure, kept whole (its text can come from a local).
+std::string g_softWhy;
+void softCheck(bool value, const char* why) {
+    if (!value && g_softWhy.empty()) g_softWhy = why && *why ? why : "(no reason given)";
+}
+// One real pair through the whole harness, `ok` deciding what a failure does:
+// `check` for a keyed pair (the run fails), softCheck for a candidate (the
+// first failure is kept and printed). Each result is taken before its check,
+// so a reason written by the call is the one printed.
+bool onePair(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& root, const Pair& p,
+             void (*ok)(bool, const char*)) {
+    const auto vs = readFile(root + L"\\shaders\\" + p.vs + L".dxbc");
+    const auto ps = readFile(root + L"\\shaders\\" + p.ps + L".dxbc");
+    ok(!vs.empty() && !ps.empty(), "real corpus pair present");
+    if (vs.empty() || ps.empty()) return false;
+    edvr::EngineVelocityInputs in;
+    std::string why;
+    const bool derived = edvr::engineVelocityDeriveInputs(vs.data(), vs.size(), in, why);
+    ok(derived, why.c_str());
+    if (!derived) return false;
+    ok(in.slotFromVsPatch == p.vsPatch, "real family: VS patch needed exactly for the UV-only family");
+    std::vector<BYTE> pvs = vs, pps;
+    if (in.slotFromVsPatch) {
+        const bool vsPatched = edvr::engineVelocityPatchVs(vs.data(), vs.size(), in, pvs, why);
+        ok(vsPatched, why.c_str());
+        if (!vsPatched) return false;
+    }
+    const bool psPatched = edvr::engineVelocityPatchPs(ps.data(), ps.size(), in, pps, why);
+    ok(psPatched, why.c_str());
+    if (!psPatched) return false;
+    ComPtr<ID3D11VertexShader> v;
+    ComPtr<ID3D11PixelShader> f;
+    const bool vsMade = SUCCEEDED(device->CreateVertexShader(pvs.data(), pvs.size(), nullptr, &v));
+    const bool psMade = SUCCEEDED(device->CreatePixelShader(pps.data(), pps.size(), nullptr, &f));
+    ok(vsMade, "real patched VS created on WARP");
+    ok(psMade, "real patched PS created on WARP");
+    if (!vsMade || !psMade) return false;
+    ComPtr<ID3D11ShaderReflection> reflect;
+    const bool reflects = SUCCEEDED(D3DReflect(pps.data(), pps.size(), IID_PPV_ARGS(&reflect)));
+    ok(reflects, "real patched PS reflects");
+    if (!reflects) return false;
+    std::printf("  corpus: %ls + %ls: slot v%u.%c, SV_Position v%u%s -- patched, reflected, created\n", p.vs, p.ps,
+                in.identityRegister, "xyzw"[in.identityComponent & 3], in.positionRegister,
+                in.slotFromVsPatch ? ", VS exports EDVRPOOLSLOT" : "");
+    char name[80];
+    std::snprintf(name, sizeof(name), "%ls + %ls", p.vs, p.ps);
+    const corpus_identity::Result r = corpus_identity::compare(device, context, ps, pps, in, ok, name);
+    ok(r.driven, "real corpus pair driven for the o0..o3 identity check (not skipped)");
+    return r.driven;
+}
 void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& root) {
-    struct Pair { const wchar_t* vs; const wchar_t* ps; bool vsPatch; };
     const Pair pairs[] = {
         {L"vs_EB5234DB6ADB491D", L"ps_CB9F297EFF264251", false}, {L"vs_EB5234DB6ADB491D", L"ps_9ABF60B4B51F2C1F", false},
         {L"vs_EB5234DB6ADB491D", L"ps_3434972DB5336AA4", false}, {L"vs_5B4D8E894EEDA8B4", L"ps_4375B72964F386CD", true},
@@ -83,47 +133,29 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         {L"vs_61AE8EB05FDC18DD", L"ps_FC43E42710010343", false},
         // The station (eye run 143416): the two stock station pairs keyed.
         {L"vs_DE545DC8EE4FBB87", L"ps_CB429E043DBB2506", false}, {L"vs_61AE8EB05FDC18DD", L"ps_451A82D4DD1BA254", false},
+        // Flight 6 (153446, the shader dump armed at a station): the station's
+        // biggest pool shader and its only pixel shader; vs_889A with both of
+        // its pixel shaders (ps_B46E at the station, ps_EBA9 elsewhere).
+        {L"vs_436193B352A2897E", L"ps_16940F576006BE65", false},
+        {L"vs_889A5279E68F0672", L"ps_B46E52A1E0B2F39C", false}, {L"vs_889A5279E68F0672", L"ps_EBA95E15B0A66102", false},
     };
-    // The station's pool shaders that are no family yet: their inputs must
-    // derive from the real bytecode before any pixel shader of theirs can be
-    // keyed (vs_4361's, ps_16940F576006BE65, is in no dump yet).
-    for (const wchar_t* name : {L"vs_436193B352A2897E", L"vs_889A5279E68F0672"}) {
-        const auto vs = readFile(root + L"\\shaders\\" + name + L".dxbc");
-        if (vs.empty()) { std::printf("  corpus: %ls absent (derive not checked)\n", name); continue; }
-        edvr::EngineVelocityInputs in;
-        std::string why;
-        const bool derived = edvr::engineVelocityDeriveInputs(vs.data(), vs.size(), in, why);
-        std::printf("  corpus: %ls derives: %s -- slot v%u.%c, SV_Position v%u%s%s%s\n", name, derived ? "yes" : "NO",
-                    in.identityRegister, "xyzw"[in.identityComponent & 3], in.positionRegister,
-                    in.slotFromVsPatch ? ", VS exports EDVRPOOLSLOT" : "", derived ? "" : " -- ", derived ? "" : why.c_str());
+    for (const auto& p : pairs) onePair(device, context, root, p, &check);
+    // Candidates: pairs seen drawing stock that are not keyed. Each is tried
+    // and its first failure printed, never failing the run -- a pair joins the
+    // keyed list above (and kFamilies) only once it passes here whole.
+    // Flight 6 (153446): vs_DE54's last two stock pixel shaders, which the
+    // patcher refuses (the family's SV_Position input register holds another
+    // semantic in them).
+    const Pair candidates[] = {
+        {L"vs_DE545DC8EE4FBB87", L"ps_91F8937EDA723663", false}, {L"vs_DE545DC8EE4FBB87", L"ps_A6070F9DD1CFB601", false},
+    };
+    for (const auto& p : candidates) {
+        g_softWhy.clear();
+        const bool passed = onePair(device, context, root, p, &softCheck) && g_softWhy.empty();
+        std::printf("  candidate: %ls + %ls: %s%s\n", p.vs, p.ps, passed ? "PASSES the harness" : "not keyable -- ",
+                    passed ? "" : g_softWhy.c_str());
     }
-    for (const auto& p : pairs) {
-        const auto vs = readFile(root + L"\\shaders\\" + p.vs + L".dxbc");
-        const auto ps = readFile(root + L"\\shaders\\" + p.ps + L".dxbc");
-        check(!vs.empty() && !ps.empty(), "real corpus pair present");
-        edvr::EngineVelocityInputs in;
-        std::string why;
-        check(edvr::engineVelocityDeriveInputs(vs.data(), vs.size(), in, why), why.c_str());
-        check(in.slotFromVsPatch == p.vsPatch, "real family: VS patch needed exactly for the UV-only family");
-        std::vector<BYTE> pvs = vs, pps;
-        if (in.slotFromVsPatch) check(edvr::engineVelocityPatchVs(vs.data(), vs.size(), in, pvs, why), why.c_str());
-        check(edvr::engineVelocityPatchPs(ps.data(), ps.size(), in, pps, why), why.c_str());
-        ComPtr<ID3D11VertexShader> v;
-        ComPtr<ID3D11PixelShader> f;
-        check(SUCCEEDED(device->CreateVertexShader(pvs.data(), pvs.size(), nullptr, &v)), "real patched VS created on WARP");
-        check(SUCCEEDED(device->CreatePixelShader(pps.data(), pps.size(), nullptr, &f)), "real patched PS created on WARP");
-        ComPtr<ID3D11ShaderReflection> reflect;
-        check(SUCCEEDED(D3DReflect(pps.data(), pps.size(), IID_PPV_ARGS(&reflect))), "real patched PS reflects");
-        std::printf("  corpus: %ls + %ls: slot v%u.%c, SV_Position v%u%s -- patched, reflected, created\n", p.vs, p.ps,
-                    in.identityRegister, "xyzw"[in.identityComponent], in.positionRegister,
-                    in.slotFromVsPatch ? ", VS exports EDVRPOOLSLOT" : "");
-        char name[80];
-        std::snprintf(name, sizeof(name), "%ls + %ls", p.vs, p.ps);
-        const corpus_identity::Result r = corpus_identity::compare(device, context, ps, pps, in, &check, name);
-        check(r.driven, "real corpus pair driven for the o0..o3 identity check (not skipped)");
-    }
-}
-} // namespace
+}} // namespace
 
 int wmain(int argc, wchar_t** argv) {
     bool selfTest = false;
