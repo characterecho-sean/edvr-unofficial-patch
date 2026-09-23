@@ -3,60 +3,43 @@
 ## Status
 
 - **State:** DECIDED DIRECTION, 2026-09-19 (Sean): engine-level injection from
-  KinematicRig truth, not draw-call interpretation (ruled out as a class). Phase 0/A/B
-  built and flown clean by 2026-09-20 17:05 (tracker, sphere-backed quarter-res
-  ownership veto, straddle -> paint-none; whole-eye cyan gone). Four engine-truth
-  routes to a mover/static flag closed 0-for-4 by 21:25 that day. RESUMED OFFLINE
-  2026-09-23 (Sean: motion vectors should derive from the engine, not render-time
-  estimates); the offline pass then found no engine velocity buffer anywhere in the VR
-  path, the record's +0x1C0..0x1F8 block a same-frame change detector not history, and
-  movers proven to be rig records matching tracked poses to under 1 mm (2026-09-23
-  entry). Sean then set the requirement -- GENERALIZED, no estimation anywhere, not
-  even as a fallback -- and the overseer answered with three sources: camera-only for
-  statics, engine-record delta via substituted pool shaders for movers (design C fed
-  by design B), and the existing DLSS/FSR reactive mask as the only fallback; design A
-  (pool content-pairing) was the open alternative (2026-09-23, later entry). The first
-  half of the resulting flight is now IN: blur ON renders no velocity anywhere (same
-  pool shaders, no two-channel target, no blur pass before the tone-map), and on the
-  landing ship the engine-record join matched all 64 drawn movers exactly (56/56 of
-  the fast ones) while design A's content-pairing mis-paired 11-23 of those 56 --
-  DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 BUILT and
-  merged (2026-09-23 "Phase 1 built"): previous engine pose written into each rig
-  record's own pool record at FUN_144312E00's emit, slot + depth at MRT6 from the
-  substituted pool shaders, exact motion in the compose. FLOWN ONCE (065324): every
-  eye-frame refused (cb1 re-mapped), a shadowed flag bound the inputs on every DLSS
-  dispatch, gaps masked-as-zero, flicker on re-boarding. FIX ROUND BUILT, NOT FLOWN,
-  NOT MERGED (2026-09-23 "Fix round" entry): rows 270..275 compared at the next draw,
-  not the write; the review's five findings folded (missing history masked, invalidity
-  carried, source rebinds and blend hooked and checked, derived unblended MRT6 state
-  with odd slot codes, every compute slot restored) plus the stand-down line; MRT6
-  binding validated; a census of evaluated-but-not-drawn movers.
-- **Open:** the fix round's flight (its entry's checklist); whether the tracker's extra
-  movers are evaluated-but-not-drawn (the census); the boarding flicker (prime
-  candidate: the LOD governor's ramp from 06:57:14.269, not this arc's code); stations
-  and ships in space (untested); builder-path movers (0x42B4130) and articulated parts
-  (phase 2); skinned motion's previous palette (phase 2); the particle families'
-  inputs; the extra `mv` barrier that changed its instrumented output on WARP.
-- **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
-  misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
-  (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
-  doc's journal: four engine-truth routes to a mover/static flag (2026-09-20 21:25
-  entry -- return-address attribution, record-field clustering, TLS job-attribution,
-  dirty-node-queue family mismatch); an engine velocity buffer in the VR path, and
-  record+0x1C0..0x1F8 as a previous-frame transform at draw time (both 2026-09-23
-  entry); design A, pool content-pairing, and an engine velocity buffer with motion
-  blur ON (both 2026-09-23 evening entry); scaling a history delta over a gap
-  (estimation, the review); the tick straddling two frames as the gap cause (repeats and
-  in-frame pose changes 0 in all 8 windows of 065324); rows 270..275 changing inside
-  an eye pass (capture 043720: one block per pass); "blending on MRT6 only loses
-  coverage" (the review's WARP counterexample); the substituted shaders changing the
-  game's G-buffer (o0..o3 and depth bit-identical, all nine real pairs, WARP). Do not
-  re-propose any of the above.
-- **Next:** review and merge the fix round, then the same flight: a ship landing at a
-  settlement with fix.engine_motion=on, fix.temporal_aa=dlss,
-  advanced.temporal_aa_diagnostics=1 and the motion_source view, read against the Fix
-  round entry's checklist, and A/B against advanced.mesh_motion=on +
-  advanced.temporal_aa_estimated_objects=on. The station-approach coverage capture
+  KinematicRig truth (draw-call interpretation ruled out as a class); GENERALIZED, no
+  estimation even as a fallback (Sean's 2026-09-23 requirement); B+C is the design --
+  camera-only for statics, engine-record delta via substituted pool shaders for
+  movers, the reactive mask the only fallback -- with design A measured wrong and an
+  engine velocity buffer ruled out with blur both off and on (2026-09-19 through
+  2026-09-23 evening entries; ruled-out pointer below). PHASE 1 built and merged:
+  previous pose written into each rig record at FUN_144312E00's emit, MRT6 from the
+  substituted pool shaders. FLOWN ONCE (065324): every eye-frame refused (cb1
+  re-mapped), a shadowed flag, gaps masked-as-zero, boarding flicker. FIX ROUND fixed
+  the review's five findings, MERGED, INSTALLED (7fdc17a9). RE-FLOWN 2026-09-23 09:38
+  (this entry, the fix round's owed flight): cockpit numbers are CLEAN -- 0
+  disagreements, locate failures, faults and invalidated frames across the 30 s
+  window, the tracker's evaluated-but-not-drawn gap now measured directly
+  (~160/frame); the motion-source legend's "a moving record's own motion" was WRONG
+  (green = any certified rig record, still or moving) and is being reworded; on foot
+  the scene's depth vanished from 09:41:04 to boarding at 09:43:08 -- a
+  packed-target/probe-filter bug, not this arc's code, fix in flight with the motion
+  agent.
+- **Open:** on-foot depth (why the eye-sized filter never accepts the 3840x2160
+  on-foot target, so the scene pair drifts to 256x256); the temporal-pass prep cost
+  while the engine path is live in the cockpit (2.9-3.7 ms/pair vs 0.12-0.22 off --
+  suspect enginePixel fetching the 320-byte pool record twice per pixel before the
+  kind is known, unmeasured); why the cockpit's dashboard, consoles, throttle, stick
+  and canopy paint STALE rather than engine-joined (2026-09-23 09:38 entry).
+- **Ruled out (do not re-propose; each closed in its dated entry below):** draw-shape
+  memo identity, pool-slot identity, 3x3 SAD camera-vs-body match, hidden-bone-spin
+  estimation (pre-2026-09-20); the four engine-truth mover/static routes (2026-09-20
+  21:25); an engine velocity buffer with blur off or on, and record+0x1C0..0x1F8 as
+  previous-frame truth (2026-09-23 entries); design A pool content-pairing (2026-09-23
+  evening); the fix round's five closed hypotheses -- a scaled history delta over a
+  gap, a straddling tick, rows 270..275 changing inside a pass, MRT6 blending losing
+  coverage, and the substituted shaders altering the G-buffer (Fix round entry); green
+  cockpit panels as a mover bug, and the engine path's CPU cost as the cause of the
+  higher cockpit figure (2026-09-23 09:38 entry).
+- **Next:** after the motion agent's build (on-foot packed-target fix, prep
+  sub-timers): the same protocol -- pad, walk, re-board -- checking the prep sub-timer
+  split and whether "in hand" returns on foot. The station-approach coverage capture
   (blur OFF, glare_shader_dump 0) stays open for stations.
 
 ## Premise
@@ -2183,3 +2166,51 @@ not a defect. (4) pose disagreements, locate failures, write faults 0. (5) cost:
 half's ms/frame on the caller thread (the substitution now runs for the whole pass; target
 under 0.5). (6) flicker: if it recurs, which of `substitution starts`, `slot target
 re-created` or the governor's `k ... up` lines it lines up with.
+
+### 2026-09-23 09:38 re-fly (build 7fdc17a9, engine_motion on, DLSS, 1597x1835 -> 2458x2824, settlement pad; cockpit 09:38:45-09:41:04, on foot 09:41:05-09:43:08, back aboard after)
+
+The overseer read Sean's 09:38 re-fly capture and the 09:28 UI test from the same session;
+do not re-derive these facts, and this entry does not re-read the logs whole. This is the
+engine-motion half -- the fix round's owed flight (previous Next).
+
+**Cockpit.** Substitution from present frame 4160; pool records joined 737k per 30 s
+window, with motion 10930, masked 13757 (gap 12669, first seen 1012); disagreements,
+locate failures, faults all 0; movers joined 6.2 then 12.5 records/frame against the
+tracker's 164 and 426 moving records/frame (the difference is records evaluated but not
+drawn, ~160/frame by the one-in-eight census); eye-frames invalidated 0; derived blend
+states bound 52341, refused 0; views asked 3498, given 2390, refused other depth 1106;
+pixels per eye-frame: engine-joined 67640-76904, masked 0-2, camera term 59-90k, stale
+172-225k (the largest class), corrupt 0; bracket 0.18-0.2 us/call, 0.015-0.2 ms/frame on
+the job threads.
+
+**Eye run 094048 (cockpit, motion_source view).** The dashboard, consoles, throttle, stick
+and canopy frame paint STALE (yellow, the slot's depth is not the scene's bit for bit);
+the seat paints camera term (blue); the two side-panel surfaces and the settlement's rig
+parts (drone, turret, posts) paint green; the settlement's buildings blue. Green is any
+rig record with a certified previous pose, still or moving, not a mover: the legend in
+edvr.ini said "a moving record's own motion" and misled; the motion agent is rewording it.
+
+ruled out: green on the cockpit side panels is a mover bug, because green is kind 1 = any
+certified rig record, still or moving (engineRecordKind/enginePixel).
+
+**Cost.** The temporal pass's prep stage (colour copy + motion-vector dispatch) ran
+2.9-3.7 ms per stereo pair whenever the engine path was live in the cockpit, 0.14-0.22
+when it had nothing to do (menus, on foot), against 0.12-0.22 in the 07:31 and 09:28
+flights with engine_motion off; NGX full unchanged 1.4-1.9. The governor's cockpit
+windows: caller work 12.07 and 15.75 ms, 923 of 1749 and 1133 of 1580 two-slot cycles, 783
+and 1093 of them GPU-bound. So the CPU figure Sean saw is the caller waiting on a GPU over
+the period; the engine path's own CPU cost is ~0.02-0.2 ms/frame. Suspect (unmeasured):
+enginePixel fetching the 320-byte pool record per pixel, twice, before the kind is known;
+sub-timers and a cut are in flight with the motion agent.
+
+ruled out: the higher CPU figure with engine_motion on is CPU work in the engine path,
+because the bracket costs 0.02-0.2 ms/frame on job threads while the misses are GPU-bound
+and prep is 2.9-3.7 ms/pair.
+
+**On foot.** "The scene's depth went away" at 09:41:04.474, "in hand" only at boarding
+09:43:08.360; rotation-only reprojection, no engine motion (10578 frames without a
+substitution), no UI depth; the hills shimmered while walking. Cause: the on-foot world is
+drawn into a 3840x2160 depth target (#23, D32_FLOAT_S8X24, 5.5-15.6k draws a frame) that
+the probe's eye-size filter never accepts; the eye-sized list was empty or junk and the
+scene pair drifted to 256x256 targets. Fix in flight with the motion agent (packed-target
+region).
