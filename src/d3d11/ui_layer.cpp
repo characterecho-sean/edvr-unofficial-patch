@@ -21,6 +21,7 @@
 #include "foveation.h"     // whether a shading-rate image is bound for the eye
 #include "gpu_timing.h"
 #include "graphics_runtime.h"
+#include "journal_watch.h" // the on-foot gate's reading: Status.json's Flags2 bit 0
 #include "shader_swap.h"
 #include "ui_deferred.h"   // uiDeferredRouteCapturedThisDraw: the replay's own draws
 #include "ui_depth.h"      // uiDepthEyeOfTarget: the eye, by the pass's own table
@@ -236,10 +237,17 @@ struct Window {
     uint64_t lostLayers = 0, doors = 0, treated = 0, composites = 0, overGameImage = 0;
     uint64_t compositeRefused = 0, afterWrites = 0, afterReads = 0, debugComposites = 0;
     uint64_t eyeMatched = 0, eyeSwapped = 0, eyeUntold = 0, seedStale = 0;
+    uint64_t gateReads = 0, screenAsked = 0;  // the on-foot gate: frames read, 2D screen draws that asked
     uint32_t timed = 0;
     double timeSum = 0.0, timeMax = 0.0;
 };
 Window g_win;
+
+// The on-foot gate (ui_layer_math.h): read once a frame at the boundary,
+// so every draw of a frame sees one answer.
+UiOnFootGate g_onFoot;
+uint64_t g_onFootSinceMs = 0;
+bool g_journalOffNoted = false;
 uint64_t g_winStartMs = 0;
 uint64_t g_sessionRedirected = 0;
 
@@ -1289,6 +1297,50 @@ bool doorCanComposite(ID3D11Texture2D* source) {
     return true;
 }
 
+// ------------------------------------------------------- the on-foot gate
+
+// Once a frame while the layer is live, on the render thread -- the thread
+// that ticks the journal watcher, and the one the LOD governor reads it on.
+// Every flip is one line, either way, never rate-limited: the journal flips
+// it only at a disembark, an embark, or a trip through the menus.
+void onFootGateTick() {
+    if (!detail::g_uiLayerLive) return;
+    const bool active = journalWatchActive();
+    const bool known = journalOnFootKnown(), onFoot = journalOnFoot();
+    const uint64_t now = GetTickCount64();
+    const int8_t before = g_onFoot.state;
+    const bool held = uiLayerOnFootStep(g_onFoot, known, onFoot, now);
+    ++g_win.gateReads;
+    if (!active && !g_journalOffNoted) {
+        g_journalOffNoted = true;
+        Log::get().note("ui quality: layer: the journal watcher is not reading the game's Status.json "
+                        "(d3d11.journal_watch off, or the journal folder not found), so on foot cannot be "
+                        "told: the 2D screen is taken on foot too, where it is the world.");
+    }
+    if (g_onFoot.state == before) return;
+    if (held) {
+        g_onFootSinceMs = now;
+        Log::get().note(
+            "ui quality: layer: on foot%s (the game's Status.json, Flags2 bit 0, through the journal "
+            "watcher -- about a second behind the game) -- the 2D screen shows the world now: it stays "
+            "in the game's frame for the temporal pass, the helmet HUD with it; the rest of the UI goes "
+            "into the layer as before.",
+            before < 0 ? ", at the on-foot gate's first reading" : "");
+    } else if (before < 0) {
+        Log::get().note("ui quality: layer: not on foot at the on-foot gate's first reading (%s) -- the "
+                        "2D screen goes into the layer.",
+                        known    ? "the game's Status.json says aboard"
+                        : active ? "no Flags2 in Status.json: a menu, or no file yet"
+                                 : "the journal watcher is off");
+    } else {
+        Log::get().note("ui quality: layer: no longer on foot after %.1f s (%s) -- the 2D screen goes "
+                        "into the layer again.",
+                        static_cast<double>(now - g_onFootSinceMs) / 1000.0,
+                        known ? "the game's Status.json says aboard"
+                              : "Status.json has not said so for 3 s: a menu, or the watcher stopped");
+    }
+}
+
 // ------------------------------------------------------------ the totals
 
 void appendf(std::string& s, const char* fmt, ...) {
@@ -1360,7 +1412,8 @@ void logTotals(double seconds) {
         "refused at issue (a changed blend, or a seed that failed); after the UI the game drew "
         "%llu times into, and %llu times read, an eye target the UI was taken from (those now "
         "land under it, or miss it); eye check against the game's Submit: %llu matched, %llu "
-        "SWAPPED, %llu could not be told; %llu redirected this session%s.",
+        "SWAPPED, %llu could not be told; the on-foot gate %s, read %llu times, asked by %llu 2D "
+        "screen draws (%llu left in the picture on foot); %llu redirected this session%s.",
         static_cast<unsigned long long>(late), static_cast<unsigned long long>(g_win.lostLayers),
         static_cast<unsigned long long>(g_win.doors), static_cast<unsigned long long>(g_win.treated),
         static_cast<unsigned long long>(g_win.compositeRefused),
@@ -1370,6 +1423,12 @@ void logTotals(double seconds) {
         static_cast<unsigned long long>(g_win.eyeMatched),
         static_cast<unsigned long long>(g_win.eyeSwapped),
         static_cast<unsigned long long>(g_win.eyeUntold),
+        g_onFoot.state == 1 ? "holds (on foot)" : g_onFoot.state == 0 ? "is open" : "has never read the journal",
+        static_cast<unsigned long long>(g_win.gateReads),
+        static_cast<unsigned long long>(g_win.screenAsked),
+        static_cast<unsigned long long>(
+            g_win.decided[static_cast<size_t>(UiLayerFamily::kScreen)]
+                         [static_cast<size_t>(UiLayerDecision::kOnFootWorld)]),
         static_cast<unsigned long long>(g_sessionRedirected),
         g_stoodDown ? " -- the layer STOOD DOWN (the line above says why)" : "");
 }
@@ -1433,10 +1492,13 @@ void uiLayerConfigure(Config& cfg) {
               "the jitter by the shipped convention only."
             : "the game's post-tonemap UI (the 2D screen, the menus, the loading screen) is drawn "
               "by its own shaders into a per-eye layer at that size times the door's output, "
-              "unjittered, and composited after the upscale and RCAS, before EDVR's menu; the "
-              "cockpit's holo panels, flight HUD and target sprite are drawn before the tonemap "
-              "and stay in the picture (advanced.ui_replay says whether the deferred UI replay "
-              "redraws them). Draws the layer takes get no UI depth and no reactive mask.");
+              "unjittered, and composited after the upscale and RCAS, before EDVR's menu -- "
+              "except the 2D screen while on foot, where it shows the world and stays in the "
+              "picture for the temporal pass (the game's Status.json says when, a second or so "
+              "late); the cockpit's holo panels, flight HUD and target sprite are drawn before "
+              "the tonemap and stay in the picture (advanced.ui_replay says whether the deferred "
+              "UI replay redraws them). Draws the layer takes get no UI depth and no reactive "
+              "mask.");
     if (debugView && temporal) {
         Log::get().note("ui quality: advanced.temporal_aa_debug = ui_layer -- the layer is shown "
                         "over black.");
@@ -1481,6 +1543,9 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.family = family;
     f.verdictForwards = verdictForwards;
     f.substituted = substituted;
+    // The on-foot gate, as this frame's boundary read it.
+    f.onFoot = g_onFoot.state == 1;
+    if (family == UiLayerFamily::kScreen) ++g_win.screenAsked;
     const int kind = uiLayerTargetKind();
     f.eyeTarget = kind != 0;
     f.ldrView = kind == 2;
@@ -1864,6 +1929,8 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     detail::g_uiLayerWatching = false;
     g_watchBudget = kWatchPerFrame;
     ++g_win.frames;
+    // The next frame's answer to "is the 2D screen the world?".
+    onFootGateTick();
     // The warm compile, the sharpen's reason: not a first-use D3DCompile at
     // the door.
     if (ctx && detail::g_uiLayerLive) compileOnce(ctx);

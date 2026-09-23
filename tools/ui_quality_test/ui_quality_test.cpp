@@ -394,6 +394,50 @@ void testGate() {
           }) == UiLayerDecision::kBlendRefused,
           "a multiply through a substitution is left (its second draw cannot be repeated)");
     check(with([](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kRefused; }) == UiLayerDecision::kBlendRefused, "blend");
+
+    // The on-foot gate: on foot the 2D screen IS the world (flight 09:38:
+    // the layer took it and the temporal pass got a black eye). The journal's
+    // pair (known, on foot), read once a frame, drives the fact.
+    {
+        auto screenWith = [&](bool gateHolds, UiLayerFamily fam = UiLayerFamily::kScreen) {
+            UiLayerDrawFacts g = f;
+            g.family = fam;
+            g.onFoot = gateHolds;
+            return uiLayerDecide(g);
+        };
+        UiOnFootGate gate;
+        check(gate.state == -1, "the gate starts unread");
+        check(uiLayerOnFootStep(gate, true, true, 1000) &&
+                  screenWith(gate.state == 1) == UiLayerDecision::kOnFootWorld,
+              "on foot: the 2D screen is not redirected");
+        check(std::strcmp(uiLayerDecisionName(UiLayerDecision::kOnFootWorld),
+                          "on foot: the screen shows the world; the temporal pass keeps it") == 0,
+              "...and the left-in-the-frame line gives the reason");
+        check(screenWith(true, UiLayerFamily::kPanel) == UiLayerDecision::kRedirect &&
+                  screenWith(true, UiLayerFamily::kLoader) == UiLayerDecision::kRedirect,
+              "on foot, the menus and the loading screen are still taken");
+        check(with([](UiLayerDrawFacts& g) {
+                  g.onFoot = true;
+                  g.armed = false;
+                  g.late = true;
+              }) == UiLayerDecision::kOnFootWorld,
+              "on foot is the reason whatever else holds");
+        check(uiLayerOnFootStep(gate, false, false, 1500) && uiLayerOnFootStep(gate, false, false, 3900),
+              "a short unknown (a mid-write read of Status.json) holds the gate");
+        check(!uiLayerOnFootStep(gate, false, false, 4001) && gate.state == 0 &&
+                  screenWith(gate.state == 1) == UiLayerDecision::kRedirect,
+              "unknown for 3 s after the last on-foot reading releases it");
+        UiOnFootGate aboard;
+        check(!uiLayerOnFootStep(aboard, true, false, 1000) &&
+                  screenWith(aboard.state == 1) == UiLayerDecision::kRedirect,
+              "aboard: the 2D screen is redirected");
+        check(uiLayerOnFootStep(aboard, true, true, 2000) && !uiLayerOnFootStep(aboard, true, false, 2100),
+              "embarking releases the gate at once, without the hold");
+        UiOnFootGate unknown;
+        check(!uiLayerOnFootStep(unknown, false, false, 1000) && !uiLayerOnFootStep(unknown, false, true, 2000) &&
+                  unknown.state == 0 && screenWith(unknown.state == 1) == UiLayerDecision::kRedirect,
+              "unknown journal (a menu, the watcher off): the 2D screen is redirected, as before the gate");
+    }
     check(with([](UiLayerDrawFacts& g) { g.layerReady = false; }) == UiLayerDecision::kLayerFailed, "no layer");
     // The first failing test is the one reported: the cockpit's HDR draw
     // reads as HDR even while the layer is not armed yet.

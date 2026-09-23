@@ -545,6 +545,48 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
     }
 }
 
+// THE ON-FOOT GATE. On foot, Odyssey renders the world ONCE, flat, into the
+// 2D screen's 3840x2160 target and shows it as a panel in each eye through
+// the screen's composite (flight 2026-09-23 09:38: vs 5C36AF051B98B9F1 ps
+// CFE84157BC76E921, one draw an eye; 5.5k-15.6k draws a frame into the
+// screen's own depth target, none into an eye). There the composite IS the
+// game world: the layer taking it handed the temporal pass a black eye (the
+// luma probe read game=0.000 on every sample for two minutes) and put the
+// world on screen with no temporal pass at all -- the distant hills
+// shimmered. So while the commander is on foot the 2D screen stays in the
+// game's frame, the helmet HUD (drawn into the same texture) with it;
+// everything else the layer takes, it still takes.
+//
+// The reading is the journal watcher's, of the game's Status.json (Flags2
+// bit 0: journalOnFootKnown && journalOnFoot, the LOD governor's and the
+// on-foot frame pacing's source). It LAGS: the game rewrites the file about
+// once a second and the watcher reads it twice a second (the 09:38 flight:
+// the screen went on foot at 09:41:04.442, the journal said so at
+// 09:41:05.003) -- the transitions it lags are behind a loading screen.
+// Unknown (a menu, the watcher off) does not hold the gate: the screen is
+// taken, as before the gate. Held through a SHORT unknown, though: a read
+// that caught the file mid-write finds no Flags2 and reads as unknown, and
+// the direction that breaks the picture is taking the world, so on foot
+// holds until the journal says aboard, or has said nothing for kHoldMs.
+struct UiOnFootGate {
+    int8_t state = -1;          // -1 never read; 0 the screen is taken; 1 on foot: left
+    uint64_t lastOnFootMs = 0;  // the last reading that said on foot
+};
+constexpr uint64_t kUiOnFootHoldMs = 3000;
+
+// One reading of the journal's pair at nowMs; true while the gate holds.
+inline bool uiLayerOnFootStep(UiOnFootGate& g, bool known, bool onFoot, uint64_t nowMs) {
+    if (known && onFoot) {
+        g.lastOnFootMs = nowMs;
+        g.state = 1;
+    } else if (known) {
+        g.state = 0;  // aboard: released at once
+    } else if (!(g.state == 1 && nowMs - g.lastOnFootMs < kUiOnFootHoldMs)) {
+        g.state = 0;  // unknown, and not a blip inside an on-foot stretch
+    }
+    return g.state == 1;
+}
+
 // Why a UI draw was left in the game's frame (or kRedirect). The order is
 // the order of the tests in uiLayerDecide, so the reason reported is the
 // first that failed.
@@ -552,6 +594,10 @@ enum class UiLayerDecision : uint8_t {
     kRedirect = 0,
     kNotUi,          // no family
     kVerdict,        // another fix swallows or re-issues the draw
+    kOnFootWorld,    // the 2D screen while the commander is on foot: there the
+                     // screen IS the game world (Odyssey renders it once, flat,
+                     // into the screen's target), and taking it would hand the
+                     // temporal pass a black eye (the on-foot gate, below)
     kNotEyeTarget,   // the colour target is not an eye-sized 2D target
     kHdrTarget,      // drawn into the lit HDR target BEFORE exposure and the
                      // tonemap: the layer is composited after both, so taking
@@ -583,6 +629,8 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
         case UiLayerDecision::kRedirect: return "redirected into the layer";
         case UiLayerDecision::kNotUi: return "not UI";
         case UiLayerDecision::kVerdict: return "another fix swallows or re-issues it";
+        case UiLayerDecision::kOnFootWorld:
+            return "on foot: the screen shows the world; the temporal pass keeps it";
         case UiLayerDecision::kNotEyeTarget: return "not drawn into an eye target";
         case UiLayerDecision::kHdrTarget:
             return "drawn into the HDR target before the tonemap (left in the picture; under an "
@@ -611,6 +659,7 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
 struct UiLayerDrawFacts {
     UiLayerFamily family = UiLayerFamily::kNone;
     bool verdictForwards = true;  // the draw is forwarded as-is by its verdict
+    bool onFoot = false;          // the on-foot gate holds (uiLayerOnFootStep)
     bool eyeTarget = false;       // an eye-sized 2D colour target
     bool ldrView = false;         // ... viewed as 8-bit UNORM (post-tonemap)
     bool vrs = false;             // variable-rate shading bound
@@ -630,6 +679,9 @@ struct UiLayerDrawFacts {
 inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
     if (f.family == UiLayerFamily::kNone) return UiLayerDecision::kNotUi;
     if (!f.verdictForwards) return UiLayerDecision::kVerdict;
+    // Before every other test, so the reason is the same whatever else holds
+    // (armed or not, late or not): on foot the screen is the world.
+    if (f.onFoot && f.family == UiLayerFamily::kScreen) return UiLayerDecision::kOnFootWorld;
     if (!f.eyeTarget) return UiLayerDecision::kNotEyeTarget;
     if (!f.ldrView) return UiLayerDecision::kHdrTarget;
     if (f.vrs) return UiLayerDecision::kVrs;
