@@ -16,7 +16,7 @@
 
 #include "binding_shadow.h"
 #include "device_hook.h"   // deviceHookHmdQuality, for the configure line
-#include "foveation.h"     // foveationWantsDraws: variable-rate shading bound
+#include "foveation.h"     // whether a shading-rate image is bound for the eye
 #include "gpu_timing.h"
 #include "graphics_runtime.h"
 #include "shader_swap.h"
@@ -954,7 +954,9 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     const int kind = uiLayerTargetKind();
     f.eyeTarget = kind != 0;
     f.ldrView = kind == 2;
-    f.vrs = foveationWantsDraws();
+    // A shading-rate image bound for the eye (or possibly bound) would shade
+    // the layer -- a different size -- through the eye's tiles.
+    f.vrs = detail::g_foveationBound != nullptr || detail::g_foveationBoundUnknown;
     uint64_t seq = 0;
     float jx = 0.0f, jy = 0.0f;
     uint32_t sw = 0, sh = 0;

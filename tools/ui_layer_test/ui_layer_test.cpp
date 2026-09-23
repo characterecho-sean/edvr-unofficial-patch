@@ -529,10 +529,10 @@ void testRedirect(Gpu& g, float target) {
     // centre, so float error cannot move one across a centre, while any
     // uncancelled jitter of a quarter pixel or more does.
     // Inside the layer's outermost row and column: a sub-pixel viewport
-    // origin clips its own far edge to whole pixels (measured on WARP: a
-    // viewport ending at 29.83 draws no row 29), so a negative cancel can
-    // cost the layer its outermost row or column -- the eye's edge, under
-    // the lens mask. docs/ui-layer-2026-09-23.md records it.
+    // origin clips its own far edge to whole pixels (measured on WARP and on
+    // a hardware adapter alike: a viewport ending at 29.83 draws no row 29),
+    // so a negative cancel can cost the layer its last row or column -- the
+    // eye's edge, under the lens mask. docs/ui-layer-2026-09-23.md records it.
     const float left = 10.3f, right = 31.3f, top = 7.3f, bottom = 24.3f;  // layer pixels
     const float rect[4] = {-1.0f + 2.0f * left / ls.w, 1.0f - 2.0f * bottom / ls.h,
                            -1.0f + 2.0f * right / ls.w, 1.0f - 2.0f * top / ls.h};
