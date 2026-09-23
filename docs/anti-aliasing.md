@@ -22,6 +22,9 @@ Updated 2026-09-16 for Feature A's retirement.*
   2026-09-16: TAA's own resolve was shipping with the registration
   instrument compiled in; a lean variant is BUILT, NOT FLOWN (see the
   2026-09-16 entry at the end).
+  2026-09-23: the DLSS quality-mode ladder walk no longer breaks on a
+  failed query, and the shared refusal reason no longer goes stale after
+  a create succeeds (see the 2026-09-23 entry at the end).
 - **Open:**
   - Features C and D: still unbuilt design sketches.
   - DLSS/FSR 2 as default engines behind the door (Phasing step 6): not
@@ -2037,3 +2040,77 @@ line, then flip advanced.temporal_aa_diagnostics to 1 live and read the
 1.2-1.6. If so, the next candidates -- only after this measurement -- are
 the 27-load three-source depth dilation, the 9-tap Catmull-Rom history,
 and the UI history read/write.
+
+## DLSS mode selection hardened (2026-09-23)
+
+A supporter's flight (edvr_gfx_20260923_092848.log) line 658, 09:29:10.213:
+"dlaa was asked for, but a 1229x1412 frame sits outside every DLSS mode's
+render range for a 3070x3032 output. The pass's own history runs instead."
+-- a 40% input against an output whose ultra performance mode (one third)
+should have held it. 54 ms later (line 668) the output changed to
+2458x2824 and the SAME input created fine, at exactly 50%, performance
+mode, range 1229x1412..2458x2824 (min = the mode's own optimal size, max
+= the output). Sean separately reported HMD Quality 0.5 "disengaging
+DLSS," not reproduced that day: a 1535x1516 -> 3070x3032 feature created
+at exactly 50%, range 1535x1516..3070x3032 -- the input exactly at the
+range's minimum.
+
+Cause, on the evidence available (the old code printed only the chosen
+mode's own range, never the other three, so this could not be settled
+outright): `ensureFeature`'s ladder walk (dlaa.cpp, then ~296-347) queried
+NGX_DLSS_GET_OPTIMAL_SETTINGS for quality, balanced, performance and
+ultra performance in order and `break`s on the first query that fails.
+Quality's query answering but not holding a 40% input, followed by
+balanced's query failing, would break the walk before performance or
+ultra performance -- which the evidence says should have held it -- were
+ever tried. `evaluateCrop`'s separate ratio selection (~675-681) used a
+different threshold (no epsilon, 0.66 vs. 0.667) from ensureFeature's own
+ratio fallback, so the same ratio could pick different modes depending
+which call site saw it.
+
+Fix (dlaa.h/dlaa.cpp):
+- The query loop never breaks: all four modes are always queried, each
+  recorded ok/failed, and logged ONCE per output size --
+  `dlss: modes for WxH: quality W2xH2 (minW2xH2..maxW2xH2), balanced ...,
+  performance ..., ultra performance ...` (a failed query prints its NGX
+  code instead of a range) -- so a refusal is always explained without a
+  second flight for better logging. If this code never ran on a given
+  output size, no such line appears for it; the old single-range refusal
+  text is the only sign that would remain.
+- Selection (dlaa.h, `dlssChooseMode`): among modes whose [min,max] holds
+  the input (>=/<= both ends, so exactly-at-minimum stays put), the
+  nearest optimal wins, as before. If none holds it but a query failed,
+  the ladder is incomplete, not a real "no": the nearest mode by ratio is
+  picked and NGX's create call decides (its own failure path already
+  logs the NGX result). Only when all four queries succeeded and truly
+  none holds the input does this refuse -- and now the message carries
+  all four ranges, not just the one that was checked last.
+- One ratio helper (`dlssModeByRatio`) replaces the two that had drifted
+  apart; both ensureFeature's range-unknown fallback and evaluateCrop's
+  per-frame ratio call it, epsilon and all (the 2026-09-05 review, F1: an
+  exact half stays on performance, not ultra performance).
+- A create success (ensureFeature and evaluateCrop) now resets the shared
+  `g_reason` to "available". It had no reset on success at all: a
+  ladder-walk refusal at one output size could outlive its own cause and
+  still be the string a later `dlaaAvailable(dev, &reason)` call hands
+  back (temporal_pass.cpp:5529, 5977) even after a later size change
+  fixed it. The read side already re-reads g_reason fresh on every call
+  (confirmed by inspection); this was purely a stale-write bug.
+
+Rig: `tools\dlaa_mode_test` (registered in build.bat, no NGX SDK or device
+needed -- DlssModeRange/dlssModeByRatio/dlssChooseMode are SDK-free, in
+dlaa.h). Fixture ladders for both outputs above, built from the field's
+own rule (min = a mode's optimal, max = the output); asserts the
+exact-minimum and one-pixel-short cases on both outputs at all six sizes
+(1535x1516, 1534x1516, 1229x1412, 1228x1411, 1023x1010, 1022x1010), a
+mid-ladder query hole that must not hide a lower mode, the all-failed and
+partial-failure ratio fallbacks with no fabricated range, nearest-optimal
+selection when every mode holds the input, and that a genuine floor
+(1022x1010 against 3070x3032, one pixel below even ultra performance's
+minimum with every query answering) still refuses.
+
+Not flown: the fix addresses what the log evidence and the code both
+support (the break, the two ratio rules, the stale reason), but no flight
+yet carries the "modes for WxH" line. Next flight: read it at the
+09:29:10 output size and confirm which query, if any, was the one that
+failed that day.

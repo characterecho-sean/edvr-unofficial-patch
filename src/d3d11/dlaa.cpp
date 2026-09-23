@@ -274,6 +274,48 @@ void releaseFeatures() {
     }
 }
 
+// DlssMode/DlssModeRange/dlssModeByRatio/dlssChooseMode live in dlaa.h,
+// SDK-free, so tools/dlaa_mode_test can drive the selection with no NGX
+// and no device. kNgxLadder is the one place that maps a DlssMode index
+// to NVIDIA's own enum, in the ladder's long-standing order (largest
+// render fraction first).
+constexpr NVSDK_NGX_PerfQuality_Value kNgxLadder[kDlssModeCount] = {
+    NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced,
+    NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_PerfQuality_Value_UltraPerformance};
+
+// The output size this file last printed the mode table for; (0,0)
+// initially, so the first ladder walk always logs. Not per-eye -- the
+// query depends only on the output size, so both eyes share one line,
+// and a preset-only change (same output) does not repeat it.
+uint32_t g_modesLoggedW = 0, g_modesLoggedH = 0;
+
+// Point 1 of the 2026-09-23 hardening: whatever the selection below does
+// with these four answers, name them all, once per output size, so a
+// refusal is always explained after the fact rather than needing a second
+// flight with better logging. The 2026-09-23 flight refused a 1229x1412
+// input against a 3070x3032 output having printed only that one refusal's
+// own (empty) range; this line would have shown whether ultra
+// performance's query had failed or its range genuinely stopped short.
+void logDlssModesOnce(uint32_t outW, uint32_t outH, const DlssModeRange modes[kDlssModeCount],
+                      const unsigned errCodes[kDlssModeCount]) {
+    if (outW == g_modesLoggedW && outH == g_modesLoggedH) return;
+    g_modesLoggedW = outW;
+    g_modesLoggedH = outH;
+    char line[320];
+    size_t used = 0;
+    for (int k = 0; k < kDlssModeCount && used < sizeof(line); ++k) {
+        const DlssModeRange& m = modes[k];
+        const int n = m.ok
+            ? snprintf(line + used, sizeof(line) - used, "%s%s %ux%u (%ux%u..%ux%u)",
+                      k ? ", " : "", kDlssModeNames[k], m.optW, m.optH, m.minW, m.minH, m.maxW,
+                      m.maxH)
+            : snprintf(line + used, sizeof(line) - used, "%s%s query failed (0x%08X)",
+                      k ? ", " : "", kDlssModeNames[k], errCodes[k]);
+        if (n > 0) used += static_cast<size_t>(n);
+    }
+    Log::get().note("dlss: modes for %ux%u: %s", outW, outH, line);
+}
+
 // The full-frame feature for one eye: made when it is missing or its key
 // (the sizes, the preset generation) has moved, left alone otherwise. The
 // ONE block dlaaEvaluate and dlaaWarm share, so what the warm-up makes on
@@ -308,41 +350,62 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
                                                    &maxH, &minW, &minH, &sharpness);
             optKnown = !NVSDK_NGX_FAILED(optErr);
         } else {
-            const NVSDK_NGX_PerfQuality_Value ladder[4] = {
-                NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced,
-                NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_PerfQuality_Value_UltraPerformance};
-            int best = -1;
-            unsigned bestDiff = ~0u;
-            for (int k = 0; k < 4; ++k) {
+            DlssModeRange modes[kDlssModeCount];
+            unsigned errCodes[kDlssModeCount] = {};
+            for (int k = 0; k < kDlssModeCount; ++k) {
                 unsigned oW2 = 0, oH2 = 0, mxW = 0, mxH = 0, mnW = 0, mnH = 0;
                 float sh = 0.0f;
-                optErr = NGX_DLSS_GET_OPTIMAL_SETTINGS(g_caps, outW, outH, ladder[k], &oW2, &oH2,
-                                                       &mxW, &mxH, &mnW, &mnH, &sh);
-                if (NVSDK_NGX_FAILED(optErr)) break;
-                optKnown = true;
-                const bool inRange = w >= mnW && h >= mnH && w <= mxW && h <= mxH;
-                const unsigned diff = oW2 > w ? oW2 - w : w - oW2;
-                if (inRange && diff < bestDiff) {
-                    best = k;
-                    bestDiff = diff;
-                    optW = oW2; optH = oH2; minW = mnW; minH = mnH; maxW = mxW; maxH = mxH;
-                    sharpness = sh;
+                // Never breaks on a failed query (the 2026-09-23 hardening):
+                // one bad query used to end the walk here and hide every
+                // mode below it on the ladder -- see docs/anti-aliasing.md.
+                optErr = NGX_DLSS_GET_OPTIMAL_SETTINGS(g_caps, outW, outH, kNgxLadder[k], &oW2,
+                                                       &oH2, &mxW, &mxH, &mnW, &mnH, &sh);
+                errCodes[k] = static_cast<unsigned>(optErr);
+                modes[k].ok = !NVSDK_NGX_FAILED(optErr);
+                if (modes[k].ok) {
+                    optKnown = true;
+                    modes[k].optW = oW2; modes[k].optH = oH2;
+                    modes[k].minW = mnW; modes[k].minH = mnH;
+                    modes[k].maxW = mxW; modes[k].maxH = mxH;
+                    modes[k].sharpness = sh;
                 }
             }
-            if (best >= 0) {
-                quality = ladder[best];
-            } else if (optKnown) {
+            // Logged once per output size, whatever the pick below does
+            // with it, so a refusal is always explained after the fact.
+            logDlssModesOnce(outW, outH, modes, errCodes);
+
+            DlssMode picked = DlssMode::Quality;
+            bool fromRange = false;
+            DlssModeRange chosenRange;
+            if (dlssChooseMode(modes, w, h, outW, &picked, &fromRange, &chosenRange)) {
+                quality = kNgxLadder[static_cast<int>(picked)];
+                if (fromRange) {
+                    optW = chosenRange.optW; optH = chosenRange.optH;
+                    minW = chosenRange.minW; minH = chosenRange.minH;
+                    maxW = chosenRange.maxW; maxH = chosenRange.maxH;
+                    sharpness = chosenRange.sharpness;
+                }
+            } else {
+                // Reached only when all four queries answered and none
+                // holds the input (build point 2's third case) -- the four
+                // ranges go straight into the reason so the log explains
+                // the refusal without a second flight for better logging.
+                char ranges[224];
+                size_t used = 0;
+                for (int k = 0; k < kDlssModeCount && used < sizeof(ranges); ++k) {
+                    const DlssModeRange& m = modes[k];
+                    const int n = snprintf(ranges + used, sizeof(ranges) - used,
+                                           "%s%s %ux%u..%ux%u", k ? ", " : "", kDlssModeNames[k],
+                                           m.minW, m.minH, m.maxW, m.maxH);
+                    if (n > 0) used += static_cast<size_t>(n);
+                }
                 snprintf(g_reasonBuf, sizeof(g_reasonBuf),
                          "a %ux%u frame sits outside every DLSS mode's render range for a "
-                         "%ux%u output",
-                         w, h, outW, outH);
+                         "%ux%u output (%s)",
+                         w, h, outW, outH, ranges);
                 g_reason = g_reasonBuf;
                 if (reason) *reason = g_reason;
                 return false;
-            } else {
-                const float ratio = static_cast<float>(w) / static_cast<float>(outW);
-                quality = ratio >= 0.66f ? ladder[0] : ratio >= 0.58f ? ladder[1]
-                        : ratio >= 0.5f ? ladder[2] : ladder[3];
             }
         }
         if (!optKnown && !g_optimalFailNoted) {
@@ -390,6 +453,13 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         f.outW = outW;
         f.outH = outH;
         f.presetGen = g_presetGen;
+        // Build point 5, 2026-09-23: a create success resets the shared
+        // reason, so a caller that reads it later (dlaaAvailable's *reason,
+        // which just echoes g_reason once NGX has initialised) is not shown
+        // a stale refusal from a size this eye no longer has. Without this,
+        // a ladder-walk refusal at one output size could outlive its own
+        // cause and still be quoted after a later size change fixed it.
+        g_reason = "available";
         if (outW == w && outH == h) {
             Log::get().note(
                 "dlaa: the feature is created for eye %d at %ux%u, DLAA, preset %s (the "
@@ -670,15 +740,13 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
         // for both eyes and stable, so the eyes never land on different DLSS
         // networks across a 0.5/0.58/0.667 threshold the way the per-eye crop
         // ratio does when rounding straddles it (the review of 2026-09-05,
-        // F1). The +eps keeps exactly 0.5 on MaxPerf rather than
-        // UltraPerformance (a 1/2-scale input is not the 1/3-scale mode).
+        // F1). dlssModeByRatio (dlaa.h) is the one ratio rule in the file now
+        // (build point 4, 2026-09-23) -- ensureFeature's own range-unknown
+        // fallback calls the same helper, so a given ratio can no longer pick
+        // different modes depending which call site saw it.
         NVSDK_NGX_PerfQuality_Value q = NVSDK_NGX_PerfQuality_Value_DLAA;
         if (inW != outW || inH != outH) {
-            const float ratio = static_cast<float>(inW) / static_cast<float>(outW) + 0.002f;
-            q = ratio >= 0.667f ? NVSDK_NGX_PerfQuality_Value_MaxQuality
-              : ratio >= 0.58f  ? NVSDK_NGX_PerfQuality_Value_Balanced
-              : ratio >= 0.5f   ? NVSDK_NGX_PerfQuality_Value_MaxPerf
-              :                   NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+            q = kNgxLadder[static_cast<int>(dlssModeByRatio(inW, outW))];
         }
         NVSDK_NGX_DLSS_Create_Params cp{};
         cp.Feature.InWidth = icw;
@@ -707,6 +775,10 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
         f.outH = och;
         f.presetGen = g_presetGen;
         didCreate = true;
+        // Same reset as ensureFeature's (build point 5): this crop
+        // feature's own create succeeded, so the shared reason must not
+        // go on quoting an older refusal.
+        g_reason = "available";
         Log::get().note(
             "temporal aa %s: NVIDIA's feature is created for eye %d, crop %ux%u in -> "
             "%ux%u out (%s, preset %s, output sub-rectangles; input based at %u,%u in the "
