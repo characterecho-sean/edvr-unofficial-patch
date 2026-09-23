@@ -29,7 +29,17 @@ void weaponMotionShutdown(){}
 uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 std::string Config::getString(const char*,const char*)const{return "dlss";}
-bool Config::getBool(const char* key,bool def)const{check(!strcmp(key,"fix.weapon_stability")&&def,"weapon temporal motion uses existing live toggle");return true;}
+bool Config::getBool(const char* key,bool def)const{
+    if(!strcmp(key,"advanced.temporal_aa_diagnostics"))return false;   // the engine counts (engine_velocity_test drives them)
+    check(!strcmp(key,"fix.weapon_stability")&&def,"weapon temporal motion uses existing live toggle");return true;
+}
+// engine_velocity.cpp is not linked here: the on-foot engine path is driven
+// by tools/engine_velocity_test (panel_tests.h). No source views: the screen
+// shader keeps the camera term, byte-identical to before.
+unsigned testSourceNotes=0;
+void engineVelocityNoteSource(ID3D11Texture2D*){++testSourceNotes;}
+bool engineVelocitySourceViews(ID3D11Texture2D*,EngineVelocityViews* out){if(out)*out=EngineVelocityViews{};return false;}
+void engineVelocityNotePanelPixels(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t){}
 void* bindingGet(BindSlot s){return s==BindSlot::Rtv0?testRtv:nullptr;}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:s==BindSlot::Ps?testPs:0;}
 bool bindingResolve(void* view,ResourceInfo* info){
@@ -102,8 +112,10 @@ int main(int argc,char** argv){
         ComPtr<ID3D11RenderTargetView> after;ctx->OMGetRenderTargets(1,&after,nullptr);check(after.Get()==er[e].Get(),"game colour target restored");
         ComPtr<ID3D11PixelShader> afterPs;ctx->PSGetShader(&afterPs,nullptr,nullptr);check(afterPs.Get()==ps.Get(),"game pixel shader restored");
     };
-    sourceDraw();check(!g.depth,"source work waits for actual screen");screenDraw(0);screenDraw(1);screenMotionFrameBoundary(ctx.Get());
-    sourceDraw();screenDraw(0);screenDraw(1);check(!screenMotionView(0,W,H),"first source frame has no invented history");
+    sourceDraw();check(!g.depth,"source work waits for actual screen");check(!testSourceNotes,"no source named to the engine path before the screen");
+    screenDraw(0);screenDraw(1);screenMotionFrameBoundary(ctx.Get());
+    sourceDraw();check(testSourceNotes==1,"each source frame names its depth to the engine path (its MRT6 slot target follows it)");
+    screenDraw(0);screenDraw(1);check(!screenMotionView(0,W,H),"first source frame has no invented history");
     screenMotionFrameBoundary(ctx.Get());source[275][0]=.1f;sourceDraw();
     // The game clears depth later in the frame: read completed depth now,
     // not a premature copy at the first terrain draw.
@@ -222,10 +234,10 @@ int main(int argc,char** argv){
         ID3D11Buffer* cb[5]={sc.Get(),oldCb.Get(),mc.Get(),ec.Get(),e.settings.Get()};ctx->PSSetConstantBuffers(2,5,cb);
         ctx->PSSetShader(g.ps.Get(),nullptr,0);ctx->OMSetRenderTargets(1,preciseRtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(g.ds.Get(),0);
         ID3D11ShaderResourceView* srv[2]={g.depthSrv.Get(),e.sizeSrv[0].Get()};ctx->PSSetShaderResources(8,2,srv);
-        float old[276][4]{},settings[8]{},uv[4]{},expected[2]{};
+        float old[276][4]{},settings[12]{},uv[4]{},expected[2]{};   // the fixture carries shape and extent; engine stays 0
         for(UINT k=0;k<n;++k){
             f.read(reinterpret_cast<char*>(source),sizeof(source));f.read(reinterpret_cast<char*>(old),sizeof(old));f.read(reinterpret_cast<char*>(model),sizeof(model));f.read(reinterpret_cast<char*>(camera),sizeof(camera));
-            f.read(reinterpret_cast<char*>(settings),sizeof(settings));f.read(reinterpret_cast<char*>(size),sizeof(size));f.read(reinterpret_cast<char*>(uv),sizeof(uv));f.read(reinterpret_cast<char*>(expected),sizeof(expected));check(bool(f),"fixture complete");
+            f.read(reinterpret_cast<char*>(settings),8*sizeof(float));f.read(reinterpret_cast<char*>(size),sizeof(size));f.read(reinterpret_cast<char*>(uv),sizeof(uv));f.read(reinterpret_cast<char*>(expected),sizeof(expected));check(bool(f),"fixture complete");
             ctx->UpdateSubresource(sc.Get(),0,nullptr,source,0,0);ctx->UpdateSubresource(oldCb.Get(),0,nullptr,old,0,0);ctx->UpdateSubresource(mc.Get(),0,nullptr,model,0,0);ctx->UpdateSubresource(ec.Get(),0,nullptr,camera,0,0);ctx->UpdateSubresource(e.settings.Get(),0,nullptr,settings,0,0);ctx->UpdateSubresource(uvCb.Get(),0,nullptr,uv,0,0);
             float sized[4]={size[0],size[1],0,0};ctx->UpdateSubresource(e.sizes[0].Get(),0,nullptr,sized,0,0);ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_DEPTH,uv[2],0);ctx->Draw(3,0);
             auto a=read(dev.Get(),ctx.Get(),precise.Get());

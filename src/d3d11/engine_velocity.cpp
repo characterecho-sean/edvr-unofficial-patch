@@ -36,7 +36,7 @@ namespace emit = engine_velocity_emit;
 std::atomic<bool> live{false};
 DrawCache cache;
 uint64_t familyDraws[kMaxFamilies] = {};
-std::atomic<const ID3D11Resource*> watch[4] = {};
+std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 
 // --- The keyed pool families -------------------------------------------------
 // Vertex-shader hash -> the pixel shaders measured with it (blur-on run 043720
@@ -137,9 +137,9 @@ std::vector<BlendEntry> g_blends;
 constexpr size_t kBlendCap = 64;
 
 // --- The watched sources --------------------------------------------------------
-// Per watch slot (eye0 pool, eye0 scene, eye1 pool, eye1 scene): the writes
-// seen since the slot was assigned, and for the scene constants the
-// registers 270..275 the last Unmap left.
+// Per watch slot (eye0 pool, eye0 scene, eye1 pool, eye1 scene, source pool,
+// source scene): the writes seen since the slot was assigned, and for the
+// scene constants the registers 270..275 the last Unmap left.
 constexpr unsigned kRowsFirst = 270, kRowsBytes = 6 * 16;
 struct WatchInfo {
     const ID3D11Resource* resource = nullptr;
@@ -149,7 +149,7 @@ struct WatchInfo {
     bool rowsKnown = false;
     uint8_t rows[kRowsBytes] = {};
 };
-WatchInfo g_watchInfo[4];
+WatchInfo g_watchInfo[kWatchSlots];
 
 // --- Per eye -------------------------------------------------------------------
 enum Invalid : int {
@@ -186,7 +186,15 @@ struct Eye {
     uint8_t sceneRows[kRowsBytes] = {};
     bool bound = false, written = false, invalid = false, consumed = false;
 };
-Eye g_eyes[2];
+// Eyes 0 and 1, and the on-foot source (kEngineVelocitySourceEye): the same
+// eye-frame rules for a pass into the source's depth.
+Eye g_eyes[3];
+static_assert(kEngineVelocitySourceEye == 2 && kWatchSlots == 6, "one watch pair per eye, the source's last");
+// The on-foot source's depth as screen_motion last named it, and the present
+// frame it did (~0u: never). A pool draw into this depth is the source pass
+// while the naming is at most two frames old.
+Ptr<ID3D11Texture2D> g_sourceDepth;
+uint32_t g_sourceNoted = ~0u;
 
 std::atomic<uint32_t> g_frame{0};
 
@@ -220,6 +228,13 @@ struct DrawStats {
     uint64_t restores = 0;
     uint64_t frames = 0;
     uint64_t pixelsJoined = 0, pixelsMasked = 0, pixelsCamera = 0, pixelsStale = 0, pixelsCorrupt = 0, pixelReads = 0;
+    // The on-foot source: its eye-frames (also counted in eyeFrames above),
+    // the screen shader's view requests and refusals, and its panel pixels.
+    uint64_t sourceFrames = 0, sourceFramesBound = 0;
+    uint64_t sourceViewsAsked = 0, sourceViewsGiven = 0;
+    uint64_t sourceRefusedNoEmit = 0, sourceRefusedDepth = 0, sourceRefusedFrame = 0, sourceRefusedInvalid = 0,
+             sourceRefusedUnwritten = 0, sourceRefusedPrevious = 0;
+    uint64_t panelJoined = 0, panelMasked = 0, panelCamera = 0, panelStale = 0, panelCorrupt = 0, panelDraws = 0;
     uint64_t trackerMovers = 0, trackerFrames = 0;
     uint64_t burstFrames = 0, burstGaps = 0;
     void clear() { *this = DrawStats{}; }
@@ -459,7 +474,13 @@ bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* dep
     }
     // When the slot target was made, for the flight's timeline (the depth
     // pair is re-created on boarding, and this follows it).
-    if (wasDepth)
+    if (eye == kEngineVelocitySourceEye)
+        Log::get().note("engine motion: on-foot source slot target %s %ux%u R32G32 (%.1f MB) for the source depth %p at "
+                        "present frame %u -- the 2D screen's scene is drawn there, not in the eyes, so its pool draws "
+                        "record slot and depth here%s.", wasDepth ? "re-created" : "created", dd.Width, dd.Height,
+                        double(dd.Width) * dd.Height * 8.0 / 1e6, static_cast<const void*>(depth),
+                        frameNow(), wasDepth ? " (the source was re-made)" : "");
+    else if (wasDepth)
         Log::get().note("engine motion: eye %d slot target re-created %ux%u for depth texture %p (was %ux%u for %p) at "
                         "present frame %u.", eye, dd.Width, dd.Height, static_cast<const void*>(depth), wasW, wasH,
                         wasDepth, frameNow());
@@ -647,8 +668,17 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     int eye = -1, target = -1;
     const bool eyePass = rtv0Eye && dsv && depthProbeCurrentSceneEyeOf(dsv, &eye, &target) && (eye == 0 || eye == 1);
     const int f = familyOfVs(vsHash);
+    // On foot no pool draw targets an eye: the source pass is a pool family
+    // draw into the depth screen_motion named this frame or the last two.
+    bool sourcePass = false;
+    if (!eyePass && f >= 0 && dsv && g_sourceDepth && frameNow() - g_sourceNoted <= 2u) {
+        Ptr<ID3D11Resource> depthRes;
+        dsv->GetResource(&depthRes);
+        sourcePass = depthRes.Get() == static_cast<ID3D11Resource*>(g_sourceDepth.Get());
+        if (sourcePass) eye = kEngineVelocitySourceEye;
+    }
     auto vsInfo = vs ? g_vs.find(vs) : g_vs.end();
-    if (!g_emitLive.load(std::memory_order_acquire) || !eyePass || f < 0 || vsInfo == g_vs.end() ||
+    if (!g_emitLive.load(std::memory_order_acquire) || !(eyePass || sourcePass) || f < 0 || vsInfo == g_vs.end() ||
         vsInfo->second.family != f) { restore(ctx); return; }
     deriveFamily(f);
     FamilyState& fam = g_families[f];
@@ -666,6 +696,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         // The eye-frame: this depth's slot target, cleared, and the sources copied.
         if (!ensureSlots(ctx, e, eye, depthTex.Get())) { restore(ctx); return; }
         ++g_draw.eyeFrames;
+        if (sourcePass) ++g_draw.sourceFrames;
         e.frame = frame;
         e.bound = e.written = e.invalid = e.consumed = false;
         e.rtvGen = e.dsvGen = 0;
@@ -681,7 +712,10 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         e.rtvGen = cache.rtv;
         e.dsvGen = cache.dsv;
         e.bound = bindTarget(ctx, e, dsv);
-        if (e.bound && !e.written) ++g_draw.eyeFramesBound;
+        if (e.bound && !e.written) {
+            ++g_draw.eyeFramesBound;
+            if (sourcePass) ++g_draw.sourceFramesBound;
+        }
         e.written = e.written || e.bound;
     }
     if (!e.bound) { restore(ctx); return; }
@@ -742,7 +776,10 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         char quiet[48];
         if (g_lastSubstitution == ~0u) _snprintf_s(quiet, _TRUNCATE, "the first this session");
         else _snprintf_s(quiet, _TRUNCATE, "%u frames without one", frame - g_lastSubstitution);
-        Log::get().note("engine motion: substitution starts at present frame %u (eye %d, %s, ps_%016llX), %s.", frame, eye,
+        char where[24];
+        if (eye == kEngineVelocitySourceEye) _snprintf_s(where, _TRUNCATE, "on-foot source");
+        else _snprintf_s(where, _TRUNCATE, "eye %d", eye);
+        Log::get().note("engine motion: substitution starts at present frame %u (%s, %s, ps_%016llX), %s.", frame, where,
                         kFamilies[f].name, static_cast<unsigned long long>(psHash), quiet);
     }
     g_lastSubstitution = frame;
@@ -831,6 +868,29 @@ void summaryLocked(uint64_t now) {
         Log::get().note("engine motion: pixels: not counted this window -- the counts come from the instrumented DLSS/FSR "
                         "motion shader only (advanced.temporal_aa_diagnostics = 1, or a debug view) with the engine inputs "
                         "bound; this is not a zero count.");
+    // On foot: the source pass and the screen shader that carries its
+    // pixels through the panel (docs/kinematic-motion-injection-2026-09-19.md,
+    // 2026-09-23 "On foot"). Printed whenever the source was about.
+    const Eye& source = g_eyes[kEngineVelocitySourceEye];
+    if (g_draw.sourceFrames || g_draw.sourceViewsAsked || g_draw.panelDraws || source.slots) {
+        const double draws = double(std::max<uint64_t>(1, g_draw.panelDraws));
+        Log::get().note("engine motion: on foot: source frames %llu, with MRT6 bound %llu (slot target %ux%u); screen "
+                        "views asked %llu, given %llu, refused: stood down %llu, other depth %llu, other frame %llu, "
+                        "invalidated %llu, unwritten %llu, no previous scene constants %llu; panel pixels per eye draw: "
+                        "engine-joined %.0f (a rig record's certified exact motion, carried through the panel), masked "
+                        "%.0f (no history), pool surface not a rig record %.0f (camera term), stale slot %.0f, corrupt "
+                        "slot code %.0f (declined; must be 0) over %llu counted eye draws%s.",
+                        u(g_draw.sourceFrames), u(g_draw.sourceFramesBound), source.width, source.height,
+                        u(g_draw.sourceViewsAsked), u(g_draw.sourceViewsGiven), u(g_draw.sourceRefusedNoEmit),
+                        u(g_draw.sourceRefusedDepth), u(g_draw.sourceRefusedFrame), u(g_draw.sourceRefusedInvalid),
+                        u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious),
+                        double(g_draw.panelJoined) / draws, double(g_draw.panelMasked) / draws,
+                        double(g_draw.panelCamera) / draws, double(g_draw.panelStale) / draws,
+                        double(g_draw.panelCorrupt) / draws, u(g_draw.panelDraws),
+                        g_draw.panelDraws ? "" : " (not counted this window: the screen shader counts with "
+                                                 "advanced.temporal_aa_diagnostics = 1 or the motion_source view; "
+                                                 "not a zero count)");
+    }
     for (int f = 0; f < kFamilyCount; ++f) {
         FamilyState& s = g_families[f];
         std::string patched, failed;
@@ -860,6 +920,8 @@ void summaryLocked(uint64_t now) {
 
 void clearLocked() {
     for (auto& e : g_eyes) e = Eye{};
+    g_sourceDepth.Reset();
+    g_sourceNoted = ~0u;
     for (auto& w : watch) w.store(nullptr);
     for (auto& w : g_watchInfo) w = WatchInfo{};
     for (auto& s : g_families) {
@@ -991,7 +1053,7 @@ void noteResourceWrite(const ID3D11Resource* resource) noexcept {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     bool matched = false, rowsRead = false, rowsOk = false;
     uint8_t rows[kRowsBytes] = {};
-    for (unsigned i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < kWatchSlots; ++i) {
         WatchInfo& w = g_watchInfo[i];
         if (w.resource != resource) continue;
         matched = true;
@@ -1057,6 +1119,20 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!live.load(std::memory_order_acquire)) return;
     cache = DrawCache{};
     ++g_draw.frames;
+    // The on-foot source's slot target lives only while the source is drawn:
+    // kSourceIdleFrames present frames without screen_motion naming it and it
+    // goes, with its watches and the held depth.
+    Eye& source = g_eyes[kEngineVelocitySourceEye];
+    if ((source.slots || g_sourceDepth) && frameNow() - g_sourceNoted > kSourceIdleFrames) {
+        if (source.slots)
+            Log::get().note("engine motion: on-foot source slot target released (%ux%u, %.1f MB) at present frame %u: "
+                            "no on-foot source for %u frames.", source.width, source.height,
+                            double(source.width) * source.height * 8.0 / 1e6, frameNow(), kSourceIdleFrames);
+        source = Eye{};
+        for (unsigned i = 4; i < kWatchSlots; ++i) { watch[i].store(nullptr); g_watchInfo[i] = WatchInfo{}; }
+        g_sourceDepth.Reset();
+        g_sourceNoted = ~0u;
+    }
     refreshEmitStatus(false);
     const KinematicMotionStats k = kinematicMotionStats();
     if (k.framesCounted) { g_draw.trackerMovers += k.moversLast; ++g_draw.trackerFrames; }
@@ -1070,31 +1146,72 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     if (now - g_windowStartMs >= kSummaryMs) summaryLocked(now);
 }
 
-bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out) {
-    if (!out) return false;
-    *out = EngineVelocityViews{};
-    if (!live.load(std::memory_order_acquire) || eye < 0 || eye > 1 || !sceneDepth) return false;
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    ++g_draw.viewsAsked;
-    if (!g_emitLive.load(std::memory_order_acquire)) { ++g_draw.refusedNoEmit; return false; }
-    Eye& e = g_eyes[eye];
+namespace engine_velocity_detail {
+// The counters one kind of view request moves (the eyes' or the source's).
+struct ViewCounts {
+    uint64_t &asked, &given, &noEmit, &depth, &frame, &invalid, &unwritten, &previous;
+};
+bool giveViewsLocked(Eye& e, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out, ViewCounts c) {
+    ++c.asked;
+    if (!g_emitLive.load(std::memory_order_acquire)) { ++c.noEmit; return false; }
     const uint32_t frame = frameNow();
     const unsigned now = frame & 1u, before = (frame - 1u) & 1u;
-    if (e.depth.Get() != sceneDepth) { ++g_draw.refusedDepth; return false; }
-    if (e.frame != frame) { ++g_draw.refusedFrame; return false; }
-    if (e.invalid) { ++g_draw.refusedInvalid; return false; }
+    if (e.depth.Get() != sceneDepth) { ++c.depth; return false; }
+    if (e.frame != frame) { ++c.frame; return false; }
+    if (e.invalid) { ++c.invalid; return false; }
     if (!e.written || !e.slotsSrv || !e.poolSrv || e.sceneFrame[now] != frame || !e.scene[now]) {
-        ++g_draw.refusedUnwritten;
+        ++c.unwritten;
         return false;
     }
-    if (e.sceneFrame[before] != frame - 1u || !e.scene[before]) { ++g_draw.refusedPrevious; return false; }
+    if (e.sceneFrame[before] != frame - 1u || !e.scene[before]) { ++c.previous; return false; }
     e.consumed = true;
     out->slots = e.slotsSrv.Get(); out->slots->AddRef();
     out->pool = e.poolSrv.Get(); out->pool->AddRef();
     out->sceneNow = e.scene[now].Get(); out->sceneNow->AddRef();
     out->scenePrev = e.scene[before].Get(); out->scenePrev->AddRef();
-    ++g_draw.viewsGiven;
+    ++c.given;
     return true;
+}
+}  // namespace engine_velocity_detail
+
+bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out) {
+    if (!out) return false;
+    *out = EngineVelocityViews{};
+    if (!live.load(std::memory_order_acquire) || eye < 0 || eye > 1 || !sceneDepth) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    return giveViewsLocked(g_eyes[eye], sceneDepth, out,
+                           {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
+                            g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious});
+}
+
+void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth) {
+    if (!live.load(std::memory_order_acquire) || !sourceDepth) return;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if (g_sourceDepth.Get() != sourceDepth) g_sourceDepth = sourceDepth;
+    g_sourceNoted = frameNow();
+}
+
+bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews* out) {
+    if (!out) return false;
+    *out = EngineVelocityViews{};
+    if (!live.load(std::memory_order_acquire) || !sourceDepth) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    return giveViewsLocked(g_eyes[kEngineVelocitySourceEye], sourceDepth, out,
+                           {g_draw.sourceViewsAsked, g_draw.sourceViewsGiven, g_draw.sourceRefusedNoEmit,
+                            g_draw.sourceRefusedDepth, g_draw.sourceRefusedFrame, g_draw.sourceRefusedInvalid,
+                            g_draw.sourceRefusedUnwritten, g_draw.sourceRefusedPrevious});
+}
+
+void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
+                                   uint32_t eyeDraws) {
+    if (!live.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    g_draw.panelJoined += joined;
+    g_draw.panelMasked += masked;
+    g_draw.panelCamera += camera;
+    g_draw.panelStale += stale;
+    g_draw.panelCorrupt += corrupt;
+    g_draw.panelDraws += eyeDraws;
 }
 
 void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt) {

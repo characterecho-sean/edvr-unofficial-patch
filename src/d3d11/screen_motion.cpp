@@ -2,9 +2,13 @@
 #include "weapon_motion.h"
 #include <d3d11.h>
 #include <wrl/client.h>
+#include <cstring>
+#include <string>
 #include "binding_shadow.h"
+#include "engine_velocity.h"
 #include "gpu_interval.h"
 #include "shader_swap.h"
+#include "temporal_shader_bytecode.h"   // kEngineMotionCoreHlsl (tools/temporal_shader_build)
 #include "ui_layer.h"
 #include "vscreen.h"
 #include "../common/config.h"
@@ -54,7 +58,20 @@ struct State {
     unsigned uiFrame=~0u,uiDraws=0;
     bool uiNoted=false;
     Screen eyes[2];
+    // Engine-record motion on foot: the screen shader's per-kind eye-pixel
+    // counts (u1, cleared at the frame's first counted draw), copied out at
+    // the frame boundary and read a few frames later without waiting.
+    Ptr<ID3D11Buffer> counts,countsStaging[4];
+    Ptr<ID3D11UnorderedAccessView> countsUav;
+    unsigned countsDraws[4]{},countsWrite=0,countFrame=~0u,countDraws=0;
+    bool countsPending[4]{},engineNoted=false;
 } g;
+// What the screen shader does with the source's engine data beyond using it
+// (screenMotionConfigure): count its kinds (advanced.temporal_aa_diagnostics or
+// the motion_source view) and hand them to the view (motion_source). Outside
+// State: State resets must not forget a setting until the next config poll.
+bool g_countKinds=false,g_paintKinds=false;
+constexpr unsigned kPanelKinds=5;   // joined, masked, not a rig record, stale, corrupt
 
 constexpr uint64_t kGpuWindowFrames=1800;
 constexpr unsigned kGpuDrainFrames=120;
@@ -150,9 +167,21 @@ bool copyCb(ID3D11DeviceContext* ctx,ID3D11Device* dev,unsigned slot,Ptr<ID3D11B
     }
     ctx->CopyResource(out.Get(),in.Get());return true;
 }
+bool prepareCounts(ID3D11Device* dev) {
+    if(g.counts)return true;
+    D3D11_BUFFER_DESC bd{};bd.ByteWidth=kPanelKinds*4;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+    bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;bd.StructureByteStride=4;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};ud.Format=DXGI_FORMAT_UNKNOWN;ud.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;ud.Buffer.NumElements=kPanelKinds;
+    D3D11_BUFFER_DESC sd=bd;sd.Usage=D3D11_USAGE_STAGING;sd.BindFlags=0;sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    bool ok=SUCCEEDED(dev->CreateBuffer(&bd,nullptr,&g.counts)) && SUCCEEDED(dev->CreateUnorderedAccessView(g.counts.Get(),&ud,&g.countsUav));
+    for(auto& s:g.countsStaging)ok=ok && SUCCEEDED(dev->CreateBuffer(&sd,nullptr,&s));
+    if(!ok){g.counts.Reset();g.countsUav.Reset();for(auto& s:g.countsStaging)s.Reset();}
+    return ok;
+}
 bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,unsigned h) {
     if(!g.ps) {
-        g.ps.Attach(shaderSwapCompilePs(ctx,kScreenMotionPs,sizeof(kScreenMotionPs)-1,"main","screen motion",nullptr,"screen motion"));
+        const std::string source=screenMotionPsSource(kEngineMotionCoreHlsl);   // the compose's own arithmetic in front
+        g.ps.Attach(shaderSwapCompilePs(ctx,source.c_str(),source.size(),"main","screen motion",nullptr,"screen motion"));
         D3D11_BLEND_DESC b{};b.RenderTarget[0].RenderTargetWriteMask=15;
         D3D11_DEPTH_STENCIL_DESC d{};d.DepthFunc=D3D11_COMPARISON_ALWAYS;
         if(!g.ps || FAILED(dev->CreateBlendState(&b,&g.blend)) || FAILED(dev->CreateDepthStencilState(&d,&g.ds)))return false;
@@ -163,7 +192,7 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,uns
         td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
         if(FAILED(dev->CreateTexture2D(&td,nullptr,&e.map)) || FAILED(dev->CreateRenderTargetView(e.map.Get(),nullptr,&e.rtv)) ||
            FAILED(dev->CreateShaderResourceView(e.map.Get(),nullptr,&e.srv)))return false;
-        D3D11_BUFFER_DESC bd{};bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=48;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;   // shape, extent, engine
         if(FAILED(dev->CreateBuffer(&bd,nullptr,&e.settings)))return false;
         bd.ByteWidth=16;bd.BindFlags=D3D11_BIND_SHADER_RESOURCE;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;sd.Format=DXGI_FORMAT_R32_TYPELESS;
@@ -183,6 +212,9 @@ void screenMotionConfigure(Config& cfg) {
     if(weapon!=g.weapon)g_gpu.close();
     g.weapon=weapon;
     weaponMotionConfigure(detail::g_screenMotionEnabled && g.weapon);
+    const std::string debug=cfg.getString("advanced.temporal_aa_debug","off");
+    g_paintKinds=_stricmp(debug.c_str(),"motion_source")==0;
+    g_countKinds=g_paintKinds || cfg.getBool("advanced.temporal_aa_diagnostics",false);
 }
 bool screenMotionRecognize() {
     bool matched=detail::g_screenMotionEnabled && !detail::g_screenMotionFailed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
@@ -220,6 +252,8 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     g.sourcePrevious=g.sourceFrame;g.sourceFrame=g.frame;g.sourceWrite=next;
     g_gpu.noteSource(tex.Get(),td.Width,td.Height,g.frame);
     weaponMotionSource(tex.Get());
+    // The source pass's pool draws take MRT6 into this depth's slot target.
+    engineVelocityNoteSource(tex.Get());
 }
 void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance) {
@@ -316,24 +350,49 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     if(consecutive) {
         bool ui=g.uiFrame==g.frame && g.uiDraws && g.uiTarget.Get()==cr.Get();
         bool weapon=g.weapon && g.stencilSrv;
-        float data[8]={e.shape[0],e.shape[1],e.shape[2],e.shape[3],float(e.width),float(e.height),ui?1.0f:0.0f,weapon?1.0f:0.0f};ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
+        // The source pass's engine data (engine_velocity.h): its MRT6 slot
+        // target, pool snapshot and scene constants this frame and last, or
+        // nothing -- the shader then keeps today's camera term everywhere.
+        EngineVelocityViews ev{};
+        const bool engine=engineVelocitySourceViews(g.depth.Get(),&ev);
+        const bool counting=engine && g_countKinds && prepareCounts(dev.Get());
+        float data[12]={e.shape[0],e.shape[1],e.shape[2],e.shape[3],float(e.width),float(e.height),ui?1.0f:0.0f,weapon?1.0f:0.0f,
+                        engine?1.0f:0.0f,engine && g_paintKinds?1.0f:0.0f,counting?1.0f:0.0f,0.0f};
+        ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
         ID3D11RenderTargetView* savedRt[8]{};Ptr<ID3D11DepthStencilView> savedDepth;ctx->OMGetRenderTargets(8,savedRt,&savedDepth);
         Ptr<ID3D11BlendState> savedBlend;FLOAT factors[4];UINT mask;ctx->OMGetBlendState(&savedBlend,factors,&mask);
         Ptr<ID3D11DepthStencilState> savedDs;UINT stencil;ctx->OMGetDepthStencilState(&savedDs,&stencil);
         Ptr<ID3D11PixelShader> savedPs;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->PSGetShader(&savedPs,classes,&nc);
-        ID3D11Buffer* savedCb[5]{};ctx->PSGetConstantBuffers(2,5,savedCb);
-        ID3D11ShaderResourceView* savedSrv[5]{};ctx->PSGetShaderResources(8,5,savedSrv);
-        ID3D11Buffer* cb[5]={g.camera[g.sourceWrite].Get(),g.camera[1-g.sourceWrite].Get(),e.model[e.write].Get(),e.camera[e.write].Get(),e.settings.Get()};
-        ID3D11ShaderResourceView* srvs[5]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr,weapon?g.stencilSrv.Get():nullptr,weapon?weaponMotionView():nullptr};
+        ID3D11Buffer* savedCb[7]{};ctx->PSGetConstantBuffers(2,7,savedCb);
+        ID3D11ShaderResourceView* savedSrv[7]{};ctx->PSGetShaderResources(8,7,savedSrv);
+        ID3D11Buffer* cb[7]={g.camera[g.sourceWrite].Get(),g.camera[1-g.sourceWrite].Get(),e.model[e.write].Get(),e.camera[e.write].Get(),e.settings.Get(),
+                             engine?ev.sceneNow:nullptr,engine?ev.scenePrev:nullptr};
+        ID3D11ShaderResourceView* srvs[7]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr,weapon?g.stencilSrv.Get():nullptr,weapon?weaponMotionView():nullptr,
+                                           engine?ev.slots:nullptr,engine?ev.pool:nullptr};
         vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(g.ds.Get(),0);
-        ctx->PSSetConstantBuffers(2,5,cb);ctx->PSSetShaderResources(8,5,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
+        ctx->PSSetConstantBuffers(2,7,cb);ctx->PSSetShaderResources(8,7,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
+        // The counts' UAV at u1, beside the one render target. Bound and
+        // unbound with the render targets kept (0xFFFFFFFF): the binding
+        // hook leaves the shadow alone for exactly that call.
+        constexpr UINT kKeepTargets=0xFFFFFFFFu;
+        if(counting) {
+            if(g.countFrame!=g.frame){const UINT zeros[4]{};ctx->ClearUnorderedAccessViewUint(g.countsUav.Get(),zeros);g.countFrame=g.frame;g.countDraws=0;}
+            ctx->OMSetRenderTargetsAndUnorderedAccessViews(kKeepTargets,nullptr,nullptr,1,1,g.countsUav.GetAddressOf(),nullptr);
+        }
         const bool projectionTimed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.projection.begin(ctx,16,g_gpu.scope,g.frame);
         draw(ctx,count,instances,start,base,startInstance);
         if(projectionTimed)g_gpu.projection.timer.end(ctx);
-        ID3D11ShaderResourceView* nulls[5]{};ctx->PSSetShaderResources(8,5,nulls);
+        if(counting) {
+            ID3D11UnorderedAccessView* none=nullptr;
+            ctx->OMSetRenderTargetsAndUnorderedAccessViews(kKeepTargets,nullptr,nullptr,1,1,&none,nullptr);
+            ++g.countDraws;
+        }
+        ID3D11ShaderResourceView* nulls[7]{};ctx->PSSetShaderResources(8,7,nulls);
         vScreenSetRenderTargetsRaw(ctx,8,savedRt,savedDepth.Get());ctx->OMSetBlendState(savedBlend.Get(),factors,mask);ctx->OMSetDepthStencilState(savedDs.Get(),stencil);
-        ctx->PSSetConstantBuffers(2,5,savedCb);ctx->PSSetShaderResources(8,5,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
+        ctx->PSSetConstantBuffers(2,7,savedCb);ctx->PSSetShaderResources(8,7,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
         for(auto* p:savedRt)if(p)p->Release();for(auto* p:savedCb)if(p)p->Release();for(auto* p:savedSrv)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
+        if(ev.slots)ev.slots->Release();if(ev.pool)ev.pool->Release();if(ev.sceneNow)ev.sceneNow->Release();if(ev.scenePrev)ev.scenePrev->Release();
+        if(engine && !g.engineNoted){g.engineNoted=true;Log::get().note("screen motion: the source pass's engine data is bound: certified rig records carry their own engine motion to their previous source UV before the panel mapping; masked ones keep no history%s.",g_countKinds?", counted per eye pixel":"");}
         e.written=true;
         if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil selects original-vertex weapon motion; uncovered or invalid history rejected.");}
         if(!g.noted){g.noted=true;Log::get().note("screen motion: source camera/depth projected through the actual screen mesh at %ux%u per eye; GPU-only history, no source colour copies.",e.width,e.height);}
@@ -345,9 +404,33 @@ ID3D11ShaderResourceView* screenMotionView(int eye,unsigned w,unsigned h) {
     if(!detail::g_screenMotionEnabled || eye<0 || eye>1)return nullptr;Screen& e=g.eyes[eye];
     return e.written && e.frame==g.frame && e.width==w && e.height==h?e.srv.Get():nullptr;
 }
+// The frame's panel counts: copied out once the frame's eyes are drawn, read
+// back without waiting a few frames later, oldest first, handed to the engine
+// motion summary (per counted eye draw). A ring slot still waiting drops the
+// newest sample rather than stall.
+static void flushPanelCounts(ID3D11DeviceContext* ctx) {
+    if(!ctx || !g.counts)return;
+    if(g.countFrame==g.frame && g.countDraws) {
+        const unsigned w=g.countsWrite;
+        if(!g.countsPending[w]) {
+            ctx->CopyResource(g.countsStaging[w].Get(),g.counts.Get());
+            g.countsDraws[w]=g.countDraws;g.countsPending[w]=true;g.countsWrite=(w+1)%4;
+        }
+    }
+    for(unsigned k=0;k<4;++k) {
+        const unsigned i=(g.countsWrite+k)%4;
+        if(!g.countsPending[i])continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if(ctx->Map(g.countsStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m)!=S_OK)break;
+        uint32_t c[kPanelKinds]{};std::memcpy(c,m.pData,sizeof(c));ctx->Unmap(g.countsStaging[i].Get(),0);
+        engineVelocityNotePanelPixels(c[0],c[1],c[2],c[3],c[4],g.countsDraws[i]);
+        g.countsPending[i]=false;
+    }
+}
 void screenMotionFrameBoundary(ID3D11DeviceContext* ctx){
     weaponMotionFrameBoundary(ctx);
     g_gpu.tick(ctx,g.frame);
+    flushPanelCounts(ctx);
     ++g.frame;
     if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool weapon=g.weapon;g=State{};g.weapon=weapon;detail::g_screenMotionFailed=false;}
 }
