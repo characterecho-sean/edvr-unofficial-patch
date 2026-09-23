@@ -2850,3 +2850,66 @@ parts would drop per frame at the k it settles on and in which angular
 bins, the disagreement count (must be ~0), and the worker-side cost
 in the analyzer's per-thread table; with a census press, the draw
 count for the removal fraction.
+
+### 2026-09-23 -- Shadow flight 1 (build\gov-parked-1): the recompute reproduces the engine exactly, k never moved because its signal is the pre-submit phase only, the engine saturates at s = 1.5, and the LOD tables make the elasticity exact: k_max 2 = 19% of draws, k 3 = 34%
+
+Parked on the pad (heading 52), build e601452 (check exit 0), 74 s,
+2758 frames all covered, windows 5-7 at 42.6 / 45.5 / 46.3 fps. The
+settings at launch were still LODDistanceScale 0.001 and
+MaterialQuality 0 (not restored), which turned out to be useful: the
+probe's view dump shows the engine holding s = ctx+0x30 = 1.5, not the
+~2.0 the LOD note's "2 - slider" mapping predicts, while at 1.0 it held
+1.0 (run 165433). So the slider's effect saturates at 1.5 - Sean's
+clamp suspicion, in one number - and the pool eye draws at s = 1.5
+are 16,797 per frame against ~18.3k at s = 1.0 (-8%; the census's
+18.6k counts non-pool draws too).
+
+**The governor** logged its configure line and every 30 s summary, k
+sat at 1.00 for the whole leg, and the summary says why: "frame work
+8.37-8.67 ms mean vs period 11.11 ms". Its signal is the runtime's
+applicationMs, the pre-submit phase plus the eye treatments; the
+runtime's own cycle instrument for the same windows reads before-first
+8.24, post-submit 5.31, next-wait 7.57, cycle 21.99 - the caller's
+work per cycle is 14.4 ms and the frame misses the period, invisible
+to a signal that stops at the first submit. Being fixed: the runtime
+crosses callerWorkMs = cycle - next-wait, the governor reads it, the
+policy is unchanged. Everything else held: 0 disagreements over
+~1.4 M part recomputations and ~30k record recomputations (the shadow
+model IS the engine's test), builder records 679 and part tests
+~33k per frame at the pad, eye A = view bit 1, eye B = bit 22; EDVR's
+caller-thread leaf unchanged at 1.18 ms (window 6) and the worker-side
+cost invisible against the pipeline's 5.2 ms.
+
+**The exact elasticity, from the recorded tables** (EDVRGATE v3, 7
+tables covering all 97,008 part rows, 0 disagreements on the 79,151
+rows the other two terms pass; the dominant table t0 = 0.2737 with
+levels 0.0128 / 0.0257 / 0.0513 / 0.1026, the building shells' t0 =
+21.38 which never drops; frame 2, 16,797 pool eye draws, the
+both-eyes rule; k multiplies the engine's s of 1.5):
+
+| k (effective s) | draws removed | share | ms at 6.3 / 8.5 |
+|---|---|---|---|
+| 1.25 (1.875) | 318 | 1.9% | 0.12 / 0.16 |
+| 1.5 (2.25) | 1,123 | 6.7% | 0.42 / 0.57 |
+| 2 (3.0) | 3,222 | 19.2% | 1.21 / 1.63 |
+| 3 (4.5) | 5,634 | 33.5% | 2.11 / 2.85 |
+| 4 (6.0) | 5,662 | 33.7% | 2.12 / 2.87 |
+
+Removal saturates near 34%: the remaining parts belong to tables whose
+cutoff sits at kilometres. What goes at effective s = 3: parts of the
+dominant table beyond ~109 m (f = A(d - r)s > 0.2737) and the small
+props' table (t0 0.077) beyond ~31 m - the 100 m scale Sean named. The
+screen-size form stays negligible (32 draws at k = 4). Because the
+governor multiplies whatever s the game holds, k_max must be read
+against it: from s = 1.0 the same removal needs k = 3 (s = 3) and 4.5;
+from s = 1.5, k = 2 and 3. The default k_max of 2.0 is therefore too
+low at the game's maximum setting; 4 (the key's ceiling) reaches the
+saturation from either.
+
+**Reading:** the governor's acting mode has a real prize at this view -
+1.2 ms at effective s = 3, 2.1 ms at the saturation - which, on top of
+leg C's 11.9 ms, is the difference between 45 and 90 Hz here, at the
+cost of detail beyond ~100 m. ruled out: the "s = 2 - LODDistanceScale"
+mapping below the slider's floor, because 0.001 yields s = 1.5. ruled
+out: applicationMs as the governor's frame signal, because it omits
+the post-submit phase and reads 8.5 ms in a 22 ms cycle.
