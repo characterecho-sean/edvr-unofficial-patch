@@ -1,9 +1,11 @@
 // Build gate for the settlement LOD governor (src/d3d11/lod_governor.*,
 // fix.settlement_detail, shipped default auto): the policy's steps and
-// hysteresis on synthetic frame sequences, auto's ramp -- 0.25 a step while the
-// 30 samples behind it ran more than 1.0 ms over on average, 0.05 near the
-// target and always down, held to k_max (default 6, ceiling 8) -- and
-// reduced's k_max-at-once; the cockpit gate (on foot, per the journal
+// hysteresis on synthetic frame sequences, auto's steps on the latest 30
+// samples -- up while 3 or more missed their slot (0.25 while their mean ran
+// more than 1.0 ms over, else 0.05), down 0.05 when none did with a
+// millisecond to spare, hold between, held to k_max (default 6, ceiling 8);
+// a stream with a third of its frames missing (the 04:23 flight) steps once a
+// second -- and reduced's k_max-at-once; the cockpit gate (on foot, per the journal
 // watcher's Status.json, k is 1 at once and held; one line per transition,
 // the frames counted in the summary); the engine arithmetic
 // the shadow repeats (FUN_1442B3FC0 / FUN_144308B30's distance, LOD distance,
@@ -159,37 +161,50 @@ void casePolicy() {
     bool any = false;
     for (int i = 0; i < 300; ++i) any |= frame(150, Work::Valid, 14.0) != Step::None;
     check(!any && p.steps() == 0 && !p.inSettlement(), "policy: over budget with 150 records never rises");
-    for (int i = 0; i < 300; ++i) any |= frame(679, Work::Valid, 11.40) != Step::None;
-    check(!any && p.steps() == 0 && p.inSettlement(), "policy: 679 records within the 0.3 ms margin holds k at 1");
+    // The ring: a bad sample empties it, and it must hold 30 before any step.
+    frame(150, Work::Invalid, 0);
+    check(p.samples() == 0 && p.overCount() == 0, "policy: an invalid sample empties the ring");
     for (int i = 0; i < 29; ++i) any |= frame(679, Work::Valid, 12.0) != Step::None;
-    check(!any && p.overRun() == 29, "policy: 29 over-budget samples do not step");
+    check(!any && p.samples() == 29 && p.overCount() == 29 && p.steps() == 0,
+          "policy: 29 samples, every one over, do not step: the ring must hold 30");
     check(frame(679, Work::Valid, 12.0) == Step::Up && p.steps() == 1 && p.k() == 1.05f && p.upQuanta() == 1 &&
-              !p.upHeld(),
-          "policy: the 30th steps up by 0.05 (12.0 ms is 0.89 over: within 1.0, the fine step)");
+              !p.upHeld() && p.stepOver() == 30,
+          "policy: the 30th steps up by 0.05 (30 of 30 over; 12.0 ms is 0.89 over: the fine step)");
     int ups = 0;
     for (int i = 0; i < 90; ++i) ups += frame(679, Work::Valid, 12.0) == Step::Up;   // 990 ms
     check(ups == 0, "policy: no second step inside the one-second ramp interval");
     check(frame(679, Work::Valid, 12.0) == Step::Up && p.steps() == 2, "policy: the next step a second later");
-    // A frame with no new sample holds the run; a bad sample breaks it.
+    // A frame with no new sample holds the ring; a bad sample empties it.
     frame(679, Work::None, 0);
-    check(p.overRun() >= 30, "policy: a frame without a sample holds the over-budget run");
+    check(p.samples() == 30 && p.overCount() == 30, "policy: a frame without a sample holds the ring");
     frame(679, Work::Invalid, 0);
-    check(p.overRun() == 0, "policy: an invalid sample breaks the run");
-    for (int i = 0; i < 29; ++i) frame(679, Work::Valid, 12.0);
-    check(p.steps() == 2, "policy: the run is counted again from the bad sample");
+    check(p.samples() == 0 && p.overCount() == 0, "policy: an invalid sample empties it again");
+    // No sample over by 0.3 ms and no millisecond to spare: hold.
+    for (int i = 0; i < 300; ++i) any |= frame(679, Work::Valid, 11.40) != Step::None;
+    check(!any && p.steps() == 2 && p.inSettlement() && p.samples() == 30 && p.overCount() == 0,
+          "policy: 679 records within the 0.3 ms margin hold k (0 of 30 over, the mean 0.29 ms over)");
+    // Misses, not runs: 2 of the last 30 over hold, the 3rd steps up.
+    for (int i = 0; i < 2; ++i) any |= frame(679, Work::Valid, 12.0) != Step::None;
+    check(!any && p.overCount() == 2 && p.steps() == 2, "policy: 2 of the last 30 over hold (the dead band)");
+    check(frame(679, Work::Valid, 12.0) == Step::Up && p.steps() == 3 && p.stepOver() == 3 && p.upQuanta() == 1,
+          "policy: the 3rd of the last 30 over steps up, 0.05 (their mean 0.35 ms over)");
     // A frame under 200 records blocks a rise, without leaving the settlement.
     for (int i = 0; i < 200; ++i) frame(180, Work::Valid, 12.0);
-    check(p.steps() == 2 && p.inSettlement(), "policy: 150-199 records holds k and the settlement");
+    check(p.steps() == 3 && p.inSettlement(), "policy: 150-199 records holds k and the settlement");
     // Up to k_max and no further.
     for (int i = 0; i < 4000; ++i) frame(679, Work::Valid, 12.0);
     check(p.steps() == 20 && p.k() == 2.0f, "policy: k stops at k_max");
-    // The hysteresis zone holds; under by more than 1.0 ms steps down once a second.
+    // The dead band holds: none over, but the mean only 0.61 ms under.
     for (int i = 0; i < 300; ++i) any |= frame(679, Work::Valid, 10.5) != Step::None;
-    check(!any && p.steps() == 20, "policy: between period - 1.0 and period + 0.3 ms k holds");
+    check(!any && p.steps() == 20, "policy: none of 30 over without a millisecond to spare holds k");
+    // Down once none of the 30 is over and their mean is more than 1.0 ms
+    // under: the 8th sample at 9.0 ms takes the mean from -0.61 past -1.0.
+    int downAt = 0;
+    for (int i = 1; i <= 30 && !downAt; ++i)
+        if (frame(679, Work::Valid, 9.0) == Step::Down) downAt = i;
+    check(downAt == 8 && p.steps() == 19 && p.stepOver() == 0 && p.stepMeanExcessMs() < -1.0,
+          "policy: none over and the mean past 1.0 ms under steps down by 0.05");
     int downs = 0;
-    for (int i = 0; i < 29; ++i) downs += frame(679, Work::Valid, 9.0) == Step::Down;
-    check(downs == 0, "policy: 29 under-budget samples do not step down");
-    check(frame(679, Work::Valid, 9.0) == Step::Down && p.steps() == 19, "policy: the 30th steps down by 0.05");
     for (int i = 0; i < 90; ++i) downs += frame(679, Work::Valid, 9.0) == Step::Down;
     check(downs == 0, "policy: at most one step down a second");
     // A lowered k_max clamps at once.
@@ -211,27 +226,36 @@ void casePolicy() {
     check(p.maxSteps() == 5, "policy: k_max is quantised to the 0.05 step");
 }
 
-// auto's faster start (after the first acting flight, 2026-09-23: 80 s from k
-// 1 to 2.70 at 0.05 a step while the work sat 1.0-1.8 ms over): an up step is
-// 0.25 while the 30 samples that triggered it ran more than 1.0 ms over the
-// period on average, else 0.05; a down step is always 0.05; k stays quantised
-// to 0.05 and held to k_max. The trigger is unchanged: 30 consecutive samples
-// over by more than 0.3 ms, at most one step a second.
-void caseCoarsePolicy() {
+// auto's steps (after the two acting flights of 2026-09-23): decided on the
+// latest 30 valid samples, a ring that must be full -- up while 3 or more of
+// them ran more than 0.3 ms over the period (a missed slot), 0.25 if their
+// mean ran more than 1.0 ms over, else 0.05; down 0.05 when none did and their
+// mean was more than 1.0 ms under; hold between; at most one step a second; k
+// quantised to 0.05 and held to k_max.
+void caseStepPolicy() {
     using namespace lodgov;
     const double period = 1000.0 / 90.0;
     uint64_t t = 1000;
-    auto frame = [&](Policy& p, double ms, uint32_t records = 679) {
+    auto frame = [&](Policy& p, double ms, uint32_t records = 679, uint64_t dtMs = 11) {
         FrameSignals s;
         s.records = records;
         s.work = Work::Valid;
         s.workMs = ms;
         s.periodMs = period;
         s.nowMs = t;
+        t += dtMs;
+        return p.update(s);
+    };
+    auto invalid = [&](Policy& p) {
+        FrameSignals s;
+        s.records = 679;
+        s.work = Work::Invalid;
+        s.nowMs = t;
         t += 11;
         return p.update(s);
     };
-    // The first acting flight's start: caller work 12.9 ms against 11.11.
+    // The first acting flight's start: caller work 12.9 ms against 11.11,
+    // every sample over.
     Policy p;   // the default k_max, 6.0
     int ups = 0, coarse = 0;
     bool meanOk = true;
@@ -240,27 +264,26 @@ void caseCoarsePolicy() {
     for (int i = 0; i < 2000 && p.k() < 2.5f; ++i) {
         if (frame(p, 12.9) != Step::Up) continue;
         ++ups;
-        if (p.upQuanta() == kCoarseQuanta && !p.upHeld()) ++coarse;
-        meanOk &= std::fabs(p.upMeanExcessMs() - (12.9 - period)) < 1e-9;
+        if (p.upQuanta() == kCoarseQuanta && !p.upHeld() && p.stepOver() == 30) ++coarse;
+        meanOk &= std::fabs(p.stepMeanExcessMs() - (12.9 - period)) < 1e-9;
         reachedMs = t - 11 - t0;   // the step's own frame
     }
     check(ups == 6 && coarse == 6 && p.steps() == 30 && p.k() == 2.5f,
-          "coarse: from k 1 at 12.9 ms against 11.11 the ramp reaches 2.50 in 6 steps of 0.25");
-    check(meanOk, "coarse: each step's mean excess is its 30 samples' own (1.79 ms)");
+          "steps: from k 1 at 12.9 ms against 11.11 the ramp reaches 2.50 in 6 steps of 0.25");
+    check(meanOk, "steps: each step's mean excess is its 30 samples' own (1.79 ms)");
     check(reachedMs > 5000 && reachedMs < 5600,
-          "coarse: ... in about 5.3 s -- the first step at the 30th sample, then one a second");
+          "steps: ... in about 5.3 s -- the first step at the 30th sample, then one a second");
     std::printf("lod_governor_test: ramp at 12.9 ms against 11.11 (90 Hz samples): k 1.00 -> %.2f in %d steps of "
                 "0.25, %.2f s\n", double(p.k()), ups, double(reachedMs) / 1000.0);
     // Near the target, fine steps: 11.6 ms is 0.49 over.
     int fine = 0, other = 0;
     for (int i = 0; i < 300; ++i)
         if (frame(p, 11.6) == Step::Up) (p.upQuanta() == 1 ? fine : other)++;
-    check(fine >= 2 && other == 0 && p.steps() == 30 + fine && p.upMeanExcessMs() < 1.0,
-          "coarse: at 11.6 ms (0.49 over) every step is 0.05");
-    // The mean is the latest 30 samples', not the whole run's: just after a
-    // step, 50 samples at 20 ms (inside the ramp interval: no step), then
-    // 11.6 ms until the next, and that step -- its run 90 samples long, its
-    // latest 30 at 11.6 -- is fine.
+    check(fine >= 2 && other == 0 && p.steps() == 30 + fine && p.stepMeanExcessMs() < 1.0,
+          "steps: at 11.6 ms (0.49 over) every step is 0.05");
+    // The size reads the 30 samples behind the step, not older ones: just
+    // after a step, 50 samples at 20 ms (inside the ramp interval: no step),
+    // then 11.6 ms until the next, whose 30 are all at 11.6: fine.
     Step last = Step::None;
     for (int i = 0; i < 400 && last == Step::None; ++i) last = frame(p, 11.6);
     const int before = p.steps();
@@ -269,30 +292,122 @@ void caseCoarsePolicy() {
     Step next = Step::None;
     for (int i = 0; i < 400 && next == Step::None; ++i) next = frame(p, 11.6);
     check(last == Step::Up && !early && next == Step::Up && p.upQuanta() == 1 && p.steps() == before + 1 &&
-              p.upMeanExcessMs() < 1.0,
-          "coarse: the size reads the 30 samples behind the step, not the run's older ones");
+              p.stepMeanExcessMs() < 1.0,
+          "steps: the size reads the 30 samples behind the step, not older ones");
     // Down is always 0.05, however far under (5.0 ms is 6.1 under).
     for (int i = 0; i < 200; ++i) frame(p, 10.5);   // the dead band: holds, and the ramp interval passes
     const int held = p.steps();
     last = Step::None;
     for (int i = 0; i < 30 && last == Step::None; ++i) last = frame(p, 5.0);
-    check(last == Step::Down && p.steps() == held - 1, "coarse: a down step is 0.05 however far under");
+    check(last == Step::Down && p.steps() == held - 1, "steps: a down step is 0.05 however far under");
+    // Every sample over, their mean 1.5 ms over: 0.25 -- at the 30th sample,
+    // never before (the ring must be full).
+    Policy b;
+    bool bEarly = false;
+    for (int i = 0; i < 29; ++i) bEarly |= frame(b, period + 1.5) != Step::None;
+    check(!bEarly && frame(b, period + 1.5) == Step::Up && b.upQuanta() == kCoarseQuanta && b.stepOver() == 30 &&
+              std::fabs(b.stepMeanExcessMs() - 1.5) < 1e-9 && b.k() == 1.25f,
+          "steps: 30 of 30 over with their mean 1.5 ms over: up 0.25, at the 30th sample and not before");
+    // The 04:23 flight's shape: a third of the samples over (31%, spread
+    // evenly: 9 or 10 in any 30), their mean at the period. Up once a second,
+    // every step 0.05; no run of 30 consecutive misses ever occurs.
+    Policy c;
+    std::vector<uint64_t> stepsAt;
+    int cFine = 0, cOther = 0, cDown = 0;
+    uint32_t cMinOver = 99, cMaxOver = 0;
+    double cMaxMean = 0;
+    for (int i = 0; i < 1000; ++i) {   // 11 s
+        const bool over = std::floor((i + 1) * 0.31) > std::floor(i * 0.31);
+        const Step s = frame(c, over ? period + 0.9 : period - 0.405);
+        if (s == Step::Up) {
+            stepsAt.push_back(t - 11);
+            (c.upQuanta() == 1 ? cFine : cOther)++;
+            if (c.stepOver() < cMinOver) cMinOver = c.stepOver();
+            if (c.stepOver() > cMaxOver) cMaxOver = c.stepOver();
+            if (std::fabs(c.stepMeanExcessMs()) > cMaxMean) cMaxMean = std::fabs(c.stepMeanExcessMs());
+        }
+        if (s == Step::Down) ++cDown;
+    }
+    bool paced = stepsAt.size() >= 2;
+    for (size_t i = 1; i < stepsAt.size(); ++i)
+        paced &= stepsAt[i] - stepsAt[i - 1] >= 1000 && stepsAt[i] - stepsAt[i - 1] <= 1011;
+    check(stepsAt.size() == 11 && cFine == 11 && cOther == 0 && cDown == 0 && paced && cMinOver >= 9 &&
+              cMaxOver <= 10 && cMaxMean < 0.05,
+          "steps: 31% of samples over with the mean at the period steps up once a second, 0.05 each");
+    std::printf("lod_governor_test: 31%% of samples over, mean at the period: %zu steps of 0.05 in 11 s, %u-%u of 30 "
+                "over at each\n", stepsAt.size(), cMinOver, cMaxOver);
+    // 2 of every 30 over, their mean 0.12 ms under: hold (the dead band), at
+    // a k above 1, so neither way.
+    Policy d;
+    for (int i = 0; i < 400; ++i) frame(d, 12.9);
+    const int dSteps = d.steps();
+    invalid(d);
+    bool dAny = false;
+    for (int i = 0; i < 1000; ++i) dAny |= frame(d, i % 15 == 0 ? period + 1.0 : period - 0.2) != Step::None;
+    check(dSteps > 0 && !dAny && d.steps() == dSteps && d.overCount() == 2,
+          "steps: 2 of every 30 over (their mean 0.12 ms under) hold k: the dead band");
+    // None over, the mean 1.2 ms under: down 0.05, once a second.
+    Policy e;
+    for (int i = 0; i < 400; ++i) frame(e, 12.9);
+    const int eSteps = e.steps();
+    int eDowns = 0;
+    bool eOk = true;
+    for (int i = 0; i < 300; ++i) {
+        const Step s = frame(e, period - 1.2);
+        if (s == Step::Down) {
+            ++eDowns;
+            eOk &= e.stepOver() == 0 && std::fabs(e.stepMeanExcessMs() + 1.2) < 1e-9;
+        }
+        eOk &= s != Step::Up;
+    }
+    check(eDowns == 3 && e.steps() == eSteps - 3 && eOk,
+          "steps: none of 30 over with the mean 1.2 ms under steps down 0.05, once a second");
+    // None over, the mean only 0.5 ms under: hold.
+    invalid(e);
+    bool fAny = false;
+    for (int i = 0; i < 300; ++i) fAny |= frame(e, period - 0.5) != Step::None;
+    check(!fAny && e.steps() == eSteps - 3, "steps: none of 30 over with the mean 0.5 ms under holds k");
+    // The ring must be full before a down step too.
+    invalid(e);
+    bool gEarly = false;
+    for (int i = 0; i < 29; ++i) gEarly |= frame(e, period - 2.0) != Step::None;
+    check(!gEarly && frame(e, period - 2.0) == Step::Down && e.steps() == eSteps - 4,
+          "steps: a down step also waits for 30 samples");
+    // Misses scattered at random at a fixed rate (a fixed-seed generator, 56
+    // samples a second as on the 04:23 flight, 60 s from k 1, never 1 ms to
+    // spare): how often "3 or more of the last 30" fires below a tenth.
+    // Printed; pinned only in order.
+    uint64_t rng = 0x9E3779B97F4A7C15ull;
+    auto uniform = [&]() {
+        rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+        return double(rng >> 11) / 9007199254740992.0;
+    };
+    const double rates[5] = {0.10, 0.05, 0.03, 0.02, 0.01};
+    int creep[5] = {};
+    for (int r = 0; r < 5; ++r) {
+        Policy q;
+        for (int i = 0; i < 3360; ++i)
+            if (frame(q, uniform() < rates[r] ? period + 0.9 : period - 0.3, 679, 18) == Step::Up) ++creep[r];
+    }
+    check(creep[0] > creep[2] && creep[1] > creep[4], "steps: rarer misses, fewer up steps");
+    std::printf("lod_governor_test: random misses at a fixed rate, 60 s at 56 Hz from k 1: up steps at 10%% %d, 5%% "
+                "%d, 3%% %d, 2%% %d, 1%% %d\n", creep[0], creep[1], creep[2], creep[3], creep[4]);
     // The cap: k_max 2.1 from k 1 at 12.9 ms -- 1.25, 1.5, 1.75, 2.0, then 2.1
     // (the rule's 0.25, held to k_max), then nothing.
-    Policy c;
-    c.configure(2.1f);
+    Policy cap;
+    cap.configure(2.1f);
     ups = 0;
     bool heldLast = false;
     for (int i = 0; i < 1000; ++i)
-        if (frame(c, 12.9) == Step::Up) {
+        if (frame(cap, 12.9) == Step::Up) {
             ++ups;
-            heldLast = c.upHeld();
+            heldLast = cap.upHeld();
         }
-    check(ups == 5 && heldLast && c.upQuanta() == kCoarseQuanta && c.steps() == 22 && c.k() == 2.1f,
-          "coarse: a 0.25 step is held to k_max (2.0 -> 2.1), and k stops there");
+    check(ups == 5 && heldLast && cap.upQuanta() == kCoarseQuanta && cap.steps() == 22 && cap.k() == 2.1f,
+          "steps: a 0.25 step is held to k_max (2.0 -> 2.1), and k stops there");
     // The clamp: a lowered k_max brings k down at once.
-    c.configure(1.5f);
-    check(frame(c, 12.9) == Step::Clamp && c.k() == 1.5f, "coarse: a lowered k_max still clamps k at once");
+    cap.configure(1.5f);
+    check(frame(cap, 12.9) == Step::Clamp && cap.k() == 1.5f, "steps: a lowered k_max still clamps k at once");
     // From below, without pumping: a synthetic caller work falling linearly
     // with k through the first acting flight's two ends (12.9 ms at k 1, 10.6
     // at 2.70). Coarse steps first, then fine ones, and it settles inside the
@@ -316,7 +431,7 @@ void caseCoarsePolicy() {
     const double settled = 12.9 - (12.9 - 10.6) / 1.7 * (double(m.k()) - 1.0);
     check(mCoarse >= 2 && mFine >= 2 && !fineThenCoarse && mDown == 0 && settled <= period + 0.3 &&
               settled >= period - 1.0,
-          "coarse: on the flight's slope it steps coarse, then fine, and settles in the dead band without pumping");
+          "steps: on the flight's slope it steps coarse, then fine, and settles in the dead band without pumping");
     std::printf("lod_governor_test: the flight's slope (12.9 ms at k 1, 10.6 at 2.70): %d steps of 0.25, then %d of "
                 "0.05, settling at k %.2f (work %.2f ms), %d down\n", mCoarse, mFine, double(m.k()), settled, mDown);
 }
@@ -341,9 +456,9 @@ void caseFootPolicy() {
     Policy p;
     for (int i = 0; i < 400; ++i) frame(p, false, 12.9);
     check(p.k() > 1.0f && p.inSettlement(), "foot: in the cockpit at a busy settlement k has risen");
-    check(frame(p, true, 12.9) == Step::Foot && p.k() == 1.0f && !p.inSettlement() && p.overRun() == 0 &&
-              p.meanExcessMs() == 0.0,
-          "foot: on foot k is 1 at once, the settlement, the runs and the mean forgotten");
+    check(frame(p, true, 12.9) == Step::Foot && p.k() == 1.0f && !p.inSettlement() && p.samples() == 0 &&
+              p.overCount() == 0 && p.meanExcessMs() == 0.0,
+          "foot: on foot k is 1 at once, the settlement and the samples forgotten");
     bool any = false;
     for (int i = 0; i < 1000; ++i) any |= frame(p, true, 14.0) != Step::None;
     check(!any && p.k() == 1.0f && !p.inSettlement(), "foot: held at 1 on foot, however long the frame and however dense");
@@ -953,10 +1068,10 @@ void caseBoundary() {
     check(countLogged("settlement detail: frame work = caller work per cycle (runtime timing v5: the caller thread "
                       "from one pose wait's return to the next one's entry", at) == 1,
           "boundary: the first version 5 frame names the signal, once");
-    check(countLogged("settlement detail (observe only, never writes): k 1.00 -> 1.05, up 0.05: the frame work ran "
-                      "more than 0.30 ms over the period for 30 samples, their mean 0.49 ms over (1.00 ms or less: "
+    check(countLogged("settlement detail (observe only, never writes): k 1.00 -> 1.05, up 0.05: 30 of the last 30 "
+                      "samples ran more than 0.30 ms over the period, their mean 0.49 ms over (1.00 ms over or less: "
                       "the fine step); 250 builder records", at) == 1,
-          "boundary: the first step is logged, 0.05, with the mean excess that sized it");
+          "boundary: the first step is logged, 0.05, with the misses and the mean excess behind it");
     check(countLogged("settlement detail (observe only, never writes): k ", at) >= 4 &&
               countLogged("settlement detail (observe only, never writes): k ", at) <= 7,
           "boundary: step lines are rate-limited to one per 5 s");
@@ -1038,8 +1153,34 @@ void caseBoundary() {
               logged("LOD scale: game s unknown, held unknown (k 1.00)", at),
           "boundary: no LOD scale read -> the effective s x k and the game's s say unknown, not 0");
     at = g_lines.size();
+    // The ring still holds the 12.5 ms samples, and frame work counts whatever
+    // the density: 40 sparse frames within budget replace them first.
+    frames(40, 0, 0, 10.5);
     frames(2800, 250, 20, 10.5);   // dense, inside the margin
     check(logged("k stayed 1: the frame work never ran 0.30 ms over the period", at), "boundary: within budget -> why k stayed 1");
+    // 2 of every 30 samples over budget: the dead band, and the summary says so.
+    at = g_lines.size();
+    for (uint32_t i = 0; i < 2800; ++i) {
+        for (uint32_t r = 0; r < 250; ++r) g_obsBuilder(0, f.ctxAt(), 0, f.nibbles());
+        setTiming(++seq, t, i % 15 == 0 ? 12.2 : 10.9);
+        frameBoundaryAt(t);
+        t += 11;
+    }
+    check(logged("k stayed 1: never 3 of the last 30 samples over budget in a frame with 200 records (1-2 is the dead "
+                 "band)", at) &&
+              !logged("up 0.", at),
+          "boundary: 2 of every 30 samples over -> no step, and the summary names the dead band");
+    // Up, then headroom: none of the last 30 over and their mean 2.11 ms under
+    // steps down 0.05 a second, and the line says why.
+    at = g_lines.size();
+    frames(400, 250, 20, 12.9);
+    const float raised = g_state.policy.k();
+    frames(700, 250, 20, 9.0);
+    check(raised > 1.0f && g_state.policy.k() < raised &&
+              logged("down 0.05: none of the last 30 samples ran more than 0.30 ms over the period, their mean 2.11 ms "
+                     "under (more than 1.00 ms to spare); 250 builder records, frame work = caller work per cycle: 9.00 "
+                     "ms vs period 11.11 ms", at),
+          "boundary: a down step's line names the misses (none) and the millisecond to spare");
     applyConfig("game", 2.0f, true, t);
     // A runtime whose newest frame is invalid: every boundary breaks the runs.
     applyConfig("auto", 2.0f, true, t);
@@ -1063,9 +1204,9 @@ void caseBoundary() {
     at = g_lines.size();
     frames(2800, 250, 20, 14.4);   // version 5: caller 14.4 ms, app 8.4 ms beside it
     check(logged("frame work = caller work per cycle: 14.40 ms mean vs period 11.11 ms", at) &&
-              logged("settlement detail (observe only, never writes): k 1.00 -> 1.25, up 0.25: the frame work ran more "
-                     "than 0.30 ms over the period for 30 samples, their mean 3.29 ms over (more than 1.00 ms: the "
-                     "coarse step)", at) &&
+              logged("settlement detail (observe only, never writes): k 1.00 -> 1.25, up 0.25: 30 of the last 30 "
+                     "samples ran more than 0.30 ms over the period, their mean 3.29 ms over (more than 1.00 ms over: "
+                     "the coarse step)", at) &&
               !logged("k stayed 1", at),
           "boundary: the first flight's frames (caller 14.4 ms, app 8.4 ms) step k up on the caller work, by 0.25");
     applyConfig("game", 2.0f, true, t);
@@ -1267,8 +1408,8 @@ void caseActingBoundary() {
           "acting: the first write to the builder's context is logged once, with the game's s and k");
     check(f.scale() == 3.0f && other.scale() == 1.5f,
           "acting: at k 2 the builder's context holds 3.0 after the rebuild; the other context keeps the game's 1.5");
-    check(logged("settlement detail (acting): k 1.00 -> 1.25, up 0.25: the frame work ran more than 0.30 ms over the "
-                 "period for 30 samples, their mean 1.39 ms over (more than 1.00 ms: the coarse step); 250 builder "
+    check(logged("settlement detail (acting): k 1.00 -> 1.25, up 0.25: 30 of the last 30 samples ran more than 0.30 ms "
+                 "over the period, their mean 1.39 ms over (more than 1.00 ms over: the coarse step); 250 builder "
                  "records, frame work = caller work per cycle: 12.50 ms vs period 11.11 ms -> LOD scale s x k 1.875.",
                  at),
           "acting: a step line names its size, the mean excess, and the LOD scale the next rebuild will write");
@@ -1451,7 +1592,7 @@ int main(int argc, char** argv) {
         fn();
     };
     run("policy", casePolicy);
-    run("coarse policy", caseCoarsePolicy);
+    run("step policy", caseStepPolicy);
     run("foot policy", caseFootPolicy);
     run("reduced policy", caseReducedPolicy);
     run("math", caseMath);

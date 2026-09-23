@@ -9,19 +9,20 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 ## Status
 
 - **State (2026-09-23):** `fix.settlement_detail` SHIPS as a fix, default
-  `auto` (live in edvr.ini, on the F8 Performance page), k_max 6.0 (held to
-  1..8), with a faster ramp (up 0.25 while the 30 samples behind a step ran
-  more than 1.0 ms over on average, else 0.05; down always 0.05) and a
-  cockpit gate (k = 1 on foot, per the journal's Status.json); the HUD's CPU
-  figure is now the caller work per cycle. NOT FLOWN since (section 9,
-  "Refinements after the first acting flight"). The first acting flight
-  (03:30 local, b55e06b, Cranfield, s 1.5, 90 Hz) WORKED: k 1 -> 2.70 in
-  80 s at 0.05 a step, caller work 12.9 -> 10.6 ms, ~50 -> 71-75 fps mean,
-  then held at 2.70-2.75 in the dead band; 0 faults, 0 disagreements;
-  nothing seen in the headset but the slow start. Mechanism: a bracket on
-  the slider's setter FUN_142819D90 scales the game's LOD scale by k each
-  frame (section 9); the shadow governor's two flights and the caller-work
-  signal: section 8.
+  `auto` (live in edvr.ini, F8 Performance page), k_max 6.0 (1..8), with a
+  cockpit gate (k = 1 on foot, per Status.json) and a policy that counts
+  misses: on the latest 30 samples, up while 3 or more ran > 0.3 ms past
+  the period (0.25 if their mean ran > 1.0 ms over, else 0.05), down 0.05
+  when none did with 1 ms to spare, hold between; the HUD's CPU is the
+  caller work per cycle. That policy is NOT FLOWN (section 9's addendum,
+  (5)). The 04:23 flight (fd25af9, s 1.0) ramped 1 -> 2.50 in six 0.25
+  steps but over 15 s, paced by the old trigger (30 consecutive over-budget
+  samples), then held k 2.50 for 30 s while 534 of 1712 samples missed
+  their slot (mean work 10.99 ms against 11.11, median cycle 21.6 ms at
+  56 fps), because such a run never came. The first acting flight (03:30,
+  b55e06b, s 1.5) worked: k 1 -> 2.70 in 80 s, ~50 -> 71-75 fps, 0 faults,
+  0 disagreements. Mechanism: a bracket on the setter FUN_142819D90
+  (section 9); the shadow flights: section 8.
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
   +0x550 = 1/fy, the tangent of one pixel (0.000834297 here), B = +0x560
@@ -62,8 +63,7 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 - **LOD shift is draw-neutral here** (99.0% of admitted eye parts at nibble
   3 or 4, identical meshes in 149 of 151 models); Leg C's LODDistanceScale
   0.001 left 18.9k eye draws: not a draw lever there (section 6).
-- **Open:** the shipped build's first flight (section 9's last checklist):
-  the 0.25 ramp from s 1.0 (k ~4.1), the on-foot lines, the HUD's CPU.
+- **Open:** the miss-counting policy's first flight (section 9's last list).
 - **Ruled out:** see section 6 and section 9 (the builder-site write).
 - **Next:** fly the shipped default parked at Cranfield with the in-game
   detail slider at its default; disembark and board once.
@@ -640,12 +640,14 @@ faults, 0 disagreements. Sean saw nothing change visually; what he noticed
 was that nothing happened for the first minute and a half. Four changes
 follow; none is flown.
 
-**(1) A faster start** (lodgov::Policy). The trigger is unchanged: 30
-consecutive samples over period + 0.3 ms in frames with >= 200 builder
-records, at most one step a second, the clamp, 1 after 30 frames under 150
-records, down after 30 samples under period - 1.0 ms. The SIZE of an up
-step: 0.25 (kCoarseQuanta) when the mean excess (work - period) of the 30
-samples behind the step is more than 1.0 ms (kCoarseExcessMs), else 0.05.
+**(1) A faster start** (lodgov::Policy; built at 58e622f -- its trigger
+was replaced by (5) after the 04:23 flight, its size rule stands). The
+trigger was unchanged: 30 consecutive samples over period + 0.3 ms in
+frames with >= 200 builder records, at most one step a second, the clamp,
+k back to 1 after 30 frames under 150 records, down after 30 samples more
+than 1.0 ms under the period. The SIZE of an up step: 0.25 (kCoarseQuanta)
+when the mean excess (work - period) of the 30 samples behind the step is
+more than 1.0 ms (kCoarseExcessMs), else 0.05.
 Down stays 0.05; k stays quantised to 0.05 and held to k_max (a 0.25 step
 that would pass it stops there: `held to k_max`). The mean is a ring of the
 latest 30 valid samples, emptied with the runs (a bad sample, leaving the
@@ -660,10 +662,10 @@ the run's older samples; down is 0.05 even 6 ms under; k_max 2.1 stops a
 0.25 step at 2.1; a lowered k_max still clamps at once; on a line through
 the flight's two ends (12.9 ms at k 1, 10.6 at 2.70) it takes 3 steps of
 0.25 then 8 of 0.05 and settles at k 2.15 (11.34 ms, in the dead band) with
-no step down. Lines: `k 1.00 -> 1.25, up 0.25: the frame work ran more than
-0.30 ms over the period for 30 samples, their mean 1.79 ms over (more than
-1.00 ms: the coarse step); ...`, `up 0.05: ... (1.00 ms or less: the fine
-step)`, `down 0.05: ...`; the summary's `N up (M by 0.25)`.
+no step down. Lines as first built: `k 1.00 -> 1.25, up 0.25: the frame
+work ran more than 0.30 ms over the period for 30 samples, their mean 1.79
+ms over (more than 1.00 ms: the coarse step); ...` (the current form is in
+(5)); the summary's `N up (M by 0.25)`.
 
 **(2) The perf monitor's CPU figure.** The HUD's `cpu`, the Monitor page's
 CPU TIME tile and its CPU strip showed NativeTimingSnapshot::applicationMs,
@@ -686,8 +688,8 @@ on-foot deferred frame pacing changes the cycle's shape. On foot --
 Flags2 bit 0, polled on the frame thread before the boundary), the signal
 fix.weapon_stability's pacing keys on (native_frame.cpp:405) -- the policy
 holds k = 1 exactly as outside a settlement: at once (Step::Foot), the
-settlement, the runs, the mean and a pending clamp forgotten, reduced
-alike; aboard it starts over (200 records, then 30 samples). One line per
+settlement, the samples and a pending clamp forgotten, reduced alike;
+aboard it starts over (200 records, then 30 samples). One line per
 transition: `settlement detail (acting): on foot (the game's Status.json,
 the flag the on-foot frame pacing reads): k 2.00 -> 1.00, held at 1 while
 on foot -- ...` and `no longer on foot (Status.json) after 11.0 s, 1000
@@ -714,19 +716,72 @@ s 1.5; 12 at the ceiling), a value the game never produces (FUN_144312040's
 main-view pick reads it too). advanced.settlement_detail_max and
 advanced.settlement_detail_observe stay commented templates (the menu's
 developer tier). The contract is still 260 keys; the worst configure line
-is 1159 of 1166 characters.
+is 1155 of 1166 characters (after (5)).
+
+**(5) Misses, not runs** (after the 04:23 flight). That flight (fd25af9,
+04:23 local, the slider at its default, s 1.0; the overseer's reading):
+the coarse ramp worked, k 1.00 -> 2.50 in six 0.25 steps, but over 15 s
+(04:24:51 to 04:25:06), one step per ~2.5 s, paced by the trigger -- 30
+CONSECUTIVE over-budget samples -- not by the one-second cap. Then, in the
+window ending 04:25:44, k held at 2.50 for 30 s with the caller work at
+10.99 ms mean while 534 of 1712 samples ran more than 0.3 ms over the
+period and the runtime's median cycle was 21.6 ms at 56 fps: a third of
+the frames missed their slot and took two, and with a third missing a run
+of 30 consecutive misses essentially never occurs (0.31^30), so no step
+came. The GPU was 5.6-8.3 ms, not the wall. A miss costs a whole display
+slot, so the policy now reacts to the FRACTION of misses. On the latest 30
+valid samples (a ring that must be full before any step; a bad sample,
+leaving the settlement and on foot empty it), a sample being over when it
+ran more than 0.3 ms past the period:
+- up when 3 or more of the 30 are over (in a frame with >= 200 builder
+  records): 0.25 if their mean excess is more than 1.0 ms, else 0.05;
+- down, 0.05, when none of the 30 is over AND their mean is under the
+  period by more than 1.0 ms;
+- between -- 1 or 2 of 30 over, or none without that millisecond -- k
+  holds: the dead band, aimed at under a tenth of the frames missing.
+
+Everything else stands: the one-step-a-second cap, k_max, the density
+gate, the reset under 150 records, on foot, reduced, the write path.
+Lines: `k 1.00 -> 1.05, up 0.05: 7 of the last 30 samples ran more than
+0.30 ms over the period, their mean 0.42 ms over (1.00 ms over or less:
+the fine step); ...`, `down 0.05: none of the last 30 samples ran more
+than 0.30 ms over the period, their mean 2.11 ms under (more than 1.00 ms
+to spare); ...`, and a window with misses that never stepped reads `k
+stayed 1: never 3 of the last 30 samples over budget in a frame with 200
+records (1-2 is the dead band)`. The summary's over/under counts are as
+before. Rig (191 checks): every sample over at 12.9 ms, 2.50 in 6 steps of
+0.25, 5.32 s, as in (1); every sample over with their mean 1.5 ms over,
+0.25 at the 30th sample and not before; 31% over with the mean at the
+period (the 04:23 shape, 9-10 of any 30), 11 steps of 0.05 in 11 s, one a
+second; 2 of every 30 over holds; none over with the mean 1.2 ms under,
+down 0.05 once a second; 0.5 ms under holds; a down step also waits for 30
+samples; 2 of 30 hold and the 3rd steps; the cap and the clamp hold; the
+flight's slope as in (1).
+
+What the dead band is not: a hard 10% line. The up test reads a sliding
+window on every frame once the cap has passed, so misses scattered at
+random below a tenth still fire it. The rig's fixed-seed streams (60 s at
+56 Hz from k 1, never a millisecond to spare) take 50 up steps at 10%
+misses, 28 at 5%, 8 at 3%, 7 at 2% and 0 at 1%. In flight the misses
+fall as k rises, so k should settle where they are rare -- a percent or
+two, with more detail removed than a 10% target implies. A fresh window
+per decision, or a higher count, would move that; not changed here.
 
 ### What the next flight must show (the shipped build)
 
 Parked at Cranfield, the ini as shipped (auto, k_max 6, observe 0), the
 in-game detail slider at its default (s 1.0):
 1. `edvr_log.py --expect-build HEAD` exits 0; the configure line reads
-   `on (auto: acts by ...) -- k in [1, 6.00]: up while ... by 0.25 if their
-   mean ran > 1.00 ms over, else 0.05; ...`, every hook `hooked`/`matched`.
-2. Step lines `up 0.25` while the mean excess is over 1.0 ms, then `up
-   0.05`; the summary's `N up (M by 0.25)`; k settling with the work in the
-   dead band (near k 4.1 if the elasticity holds at s 1.0), with no `down`
-   steps right after the coarse ones (no pumping).
+   `on (auto: acts by ...) -- k in [1, 6.00]: up while a frame has >= 200
+   draw-builder records and >= 3 of the last 30 samples ran > 0.30 ms over
+   the period, 0.25 if ...`, every hook `hooked`/`matched`.
+2. Step lines naming the misses (`N of the last 30 samples ran more than
+   0.30 ms over the period`): `up 0.25` while their mean is over 1.0 ms,
+   then `up 0.05`, at most once a second -- where the 04:23 build held k
+   with a third of the frames missing, this one must keep stepping; the
+   summary's `over by > 0.30 ms` count falling as k rises, k then holding
+   with 1-2 of 30 missing (near k 4.1 if the elasticity holds at s 1.0),
+   and no `down` right after the coarse steps (no pumping).
 3. Disembark and board once: one `on foot` and one `no longer on foot`
    line, beside the pacing's own `native frame: begin ... pacing=turbo` and
    `pacing=runtime` lines (the same flag: turbo with no `on foot` line means
