@@ -7,12 +7,21 @@
 //                 --dry-run convention
 //   --corpus DIR  also the REAL pool-family shaders from an edvr_logs dump
 //                 (DIR\shaders\*.dxbc): each pair derives, patches, reflects
-//                 and creates on WARP. Local only: the game's shaders are not
-//                 in the repository.
+//                 and creates on WARP, and draws SV_Target0..3 and depth
+//                 bit-identically to the stock pair (corpus_identity.h). Local
+//                 only: the game's shaders are not in the repository.
+//   --verbose     also print the log lines the linked engine_velocity.cpp wrote
 //
-// What it covers: the DXBC patcher end to end (shader_tests.h), the emit
-// bracket against a fake engine laid out as build 332841 (emit_tests.h), and
-// the compose's arithmetic from the shipped HLSL text (math_tests.h).
+// What it covers: the DXBC patcher end to end and the slot target's blend
+// states (shader_tests.h), the emit bracket's history rules against a fake
+// engine laid out as build 332841 (emit_tests.h), the compose's arithmetic
+// from the shipped HLSL text (math_tests.h), the production `mv` entry with
+// engine inputs bound -- joined exact, masked with no history, corrupt/stale/
+// cleared declined (consumer_tests.h), engine_velocity.cpp's draw half
+// linked in and driven through the flight's and the review's cases, plus the
+// temporal pass's compute-state save (lifecycle_tests.h). build.bat links
+// src\d3d11\engine_velocity.cpp with EDVR_ENGINE_VELOCITY_RIG and the binding
+// shadow external; lifecycle_tests.h supplies the stubs.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -27,6 +36,9 @@
 #include "shader_tests.h"
 #include "emit_tests.h"
 #include "math_tests.h"
+#include "consumer_tests.h"
+#include "corpus_identity.h"
+#include "lifecycle_tests.h"
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
 
 using Microsoft::WRL::ComPtr;
@@ -52,8 +64,11 @@ std::vector<BYTE> readFile(const std::wstring& path) {
     return file ? bytes : std::vector<BYTE>{};
 }
 
-// The real families, from a dump: every measured (VS, PS) pair.
-void corpus(ID3D11Device* device, const std::wstring& root) {
+// The real families, from a dump: every measured (VS, PS) pair. Each derives,
+// patches, reflects and creates, and then (corpus_identity.h) draws stock and
+// patched over the same inputs: SV_Target0..3 and depth must match byte for
+// byte -- the substitution must not change the game's own G-buffer.
+void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& root) {
     struct Pair { const wchar_t* vs; const wchar_t* ps; bool vsPatch; };
     const Pair pairs[] = {
         {L"vs_EB5234DB6ADB491D", L"ps_CB9F297EFF264251", false}, {L"vs_EB5234DB6ADB491D", L"ps_9ABF60B4B51F2C1F", false},
@@ -82,6 +97,10 @@ void corpus(ID3D11Device* device, const std::wstring& root) {
         std::printf("  corpus: %ls + %ls: slot v%u.%c, SV_Position v%u%s -- patched, reflected, created\n", p.vs, p.ps,
                     in.identityRegister, "xyzw"[in.identityComponent], in.positionRegister,
                     in.slotFromVsPatch ? ", VS exports EDVRPOOLSLOT" : "");
+        char name[80];
+        std::snprintf(name, sizeof(name), "%ls + %ls", p.vs, p.ps);
+        const corpus_identity::Result r = corpus_identity::compare(device, context, ps, pps, in, &check, name);
+        check(r.driven, "real corpus pair driven for the o0..o3 identity check (not skipped)");
     }
 }
 } // namespace
@@ -92,6 +111,7 @@ int wmain(int argc, wchar_t** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
         if (a == L"--self-test" || a == L"--dry-run") selfTest = true;
+        else if (a == L"--verbose") lifecycle_tests::g_verbose = true;
         else if (a == L"--corpus" && i + 1 < argc) corpusRoot = argv[++i];
         else {
             std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir>]\n");
@@ -111,7 +131,9 @@ int wmain(int argc, wchar_t** argv) {
     shader_tests::run({device.Get(), context.Get(), &check});
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});
-    if (!corpusRoot.empty()) corpus(device.Get(), corpusRoot);
+    consumer_tests::run({device.Get(), context.Get(), &check});
+    lifecycle_tests::run({device.Get(), context.Get(), &check});
+    if (!corpusRoot.empty()) corpus(device.Get(), context.Get(), corpusRoot);
     std::printf("engine_velocity_test: %u checks passed%s.\n", g_checks, corpusRoot.empty() ? "" : " including the real shader corpus");
     return 0;
 }

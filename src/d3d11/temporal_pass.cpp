@@ -41,6 +41,7 @@
 #include "celestial_motion.h"
 #include "mesh_motion.h"
 #include "kinematic_motion.h"
+#include "cs_stage_save.h"
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
@@ -624,7 +625,7 @@ struct Slot {
     bool          timeDone = false;
     bool          timing = false;
     bool          statsDone = false;
-    bool          engineStats = false;   // Stats 50..53 hold engine-record velocity's counts
+    bool          engineStats = false;   // Stats 50..54 hold engine-record velocity's counts
     uint64_t      pixels = 0;
     // The instrument's bookkeeping for this call: which candidates had a
     // delta (their pixel totals), the head's turn, whether history ran.
@@ -667,7 +668,7 @@ struct Slot {
     bool          totalValid = false;
 };
 constexpr int kSlots = 16;
-constexpr int kStatCount = 56;   // 50 used since 2026-09-09 (39-45 the moving ships, 46 the second body, 47-49 the stepped parts), 50-53 engine-record velocity's pixel counts (2026-09-23); a 224-byte buffer
+constexpr int kStatCount = 56;   // 50 used since 2026-09-09 (39-45 the moving ships, 46 the second body, 47-49 the stepped parts), 50-54 engine-record velocity's pixel counts (2026-09-23); a 224-byte buffer
 Slot g_slots[kSlots];
 
 // Bumped on every temporalPassConfigure call (both its call sites in
@@ -1191,7 +1192,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                                         D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
             if (SUCCEEDED(hr) && m.pData) {
                 const uint32_t* v = static_cast<const uint32_t*>(m.pData);
-                if (q.engineStats) engineVelocityNotePixels(v[50], v[51], v[52], v[53]);
+                if (q.engineStats) engineVelocityNotePixels(v[50], v[51], v[52], v[53], v[54]);
                 g_rejected += v[0];
                 g_clipped += v[1];
                 g_pixelsSeen += q.pixels;
@@ -4058,7 +4059,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     EngineVelocityViews engineViews{};
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> engineHeldSrv[2];
     Microsoft::WRL::ComPtr<ID3D11Buffer> engineHeldCb[2];
-    bool engineAvailable = false;
+    // Named apart from the trained block's `engineAvailable` (the upscaler's
+    // availability, declared in an inner scope): the flight of 2026-09-23
+    // bound these inputs, unbound, on every DLSS dispatch because that inner
+    // name shadowed this one.
+    bool engineViewsGiven = false;
     ID3D11ShaderResourceView* screenSrv=screenMotionView(eye,sd.Width,sd.Height);
     if (depthSrv) {
         ID3D11Resource* res = nullptr;
@@ -4079,7 +4084,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             meshMotionStageClassification(ctx,scene,g_rowsFrame,src);
             staticOwnerAvailable = staticSurfaceViews(ctx, scene, staticOwnerSrvs);
             for (unsigned i = 0; i < 2; ++i) staticOwnerHeld[i].Attach(staticOwnerSrvs[i]);
-            engineAvailable = engineVelocityViews(ctx, eye, scene, &engineViews);
+            engineViewsGiven = engineVelocityViews(ctx, eye, scene, &engineViews);
             engineHeldSrv[0].Attach(engineViews.slots);
             engineHeldSrv[1].Attach(engineViews.pool);
             engineHeldCb[0].Attach(engineViews.sceneNow);
@@ -5126,16 +5131,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
-        ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv[19] = {};
-        ID3D11UnorderedAccessView* savedUav[7] = {};
-        ID3D11Buffer* savedCb = nullptr;
-        ID3D11SamplerState* savedSamp = nullptr;
-        ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 19, savedSrv);
-        ctx->CSGetUnorderedAccessViews(0, 7, savedUav);
-        ctx->CSGetConstantBuffers(0, 1, &savedCb);
-        ctx->CSGetSamplers(0, 1, &savedSamp);
+        // Every compute slot the dispatches below touch, put back after them
+        // (cs_stage_save.h): t0..t22, u0..u6, b0..b2, s0 and the shader.
+        static_assert(CsStageSave::kSrvs >= 23 && CsStageSave::kCbs >= 3,
+                      "the save covers every slot the dispatches bind: t0..t22 (engine-record velocity's "
+                      "t21/t22 included) and b0..b2");
+        static_assert(CsStageSave::kSrvs > kEngineVelocityPoolSrv && CsStageSave::kSrvs > kEngineVelocitySlotsSrv &&
+                      CsStageSave::kCbs > kEngineVelocityScenePrevCb && CsStageSave::kCbs > kEngineVelocitySceneNowCb,
+                      "engine-record velocity's compute slots are inside the save");
+        CsStageSave csSaved;
+        csSaved.save(ctx);
         // The game's depth target may still be bound on the output-merger
         // stage at submit, and D3D nulls a shader view over a bound target
         // without a word (the depth probe learned that the hard way). The
@@ -5993,7 +5998,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
                     // Engine-record velocity (fix.engine_motion=on): bit 2048
                     // and t21/t22/b1/b2 below; clear = byte-identical.
-                    const bool engineBound = engineAvailable && depthSrv;
+                    const bool engineBound = engineViewsGiven && depthSrv;
                     if (engineBound) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 2048u);
                     engineCounted = engineBound && diagnostics;
@@ -6303,7 +6308,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (kcBound) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
             if (kcBound && g_engineMotionVeto) p.probe[3] =
                 static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
-            engineOwn = engineAvailable && depthSrv;
+            engineOwn = engineViewsGiven && depthSrv;
             if (engineOwn) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 2048u);
             if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
                 g_eyeDecisions[g_eyeRunTaken].kinBound = kcBound;
@@ -7029,25 +7034,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             g_slots[qs].configGen = g_configGeneration;
         }
 
-        ID3D11ShaderResourceView* nullSrv2[19] = {};
-        ID3D11UnorderedAccessView* nullUav2[7] = {};
-        ctx->CSSetShaderResources(0, 19, nullSrv2);
-        ctx->CSSetUnorderedAccessViews(0, 7, nullUav2, nullptr);
+        // The pass's own views off the compute stage first (every slot the
+        // save covers), so none of them is bound for reading when the game's
+        // targets go back on the output merger; then the game's compute
+        // bindings, exactly.
+        ID3D11ShaderResourceView* nullSrv2[CsStageSave::kSrvs] = {};
+        ID3D11UnorderedAccessView* nullUav2[CsStageSave::kUavs] = {};
+        ctx->CSSetShaderResources(0, CsStageSave::kSrvs, nullSrv2);
+        ctx->CSSetUnorderedAccessViews(0, CsStageSave::kUavs, nullUav2, nullptr);
         if (depthSrv) {
             ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtv, savedDsv);
             for (auto* v : savedRtv) if (v) v->Release();
             if (savedDsv) savedDsv->Release();
         }
-        ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 19, savedSrv);
-        ctx->CSSetUnorderedAccessViews(0, 7, savedUav, nullptr);
-        ctx->CSSetConstantBuffers(0, 1, &savedCb);
-        ctx->CSSetSamplers(0, 1, &savedSamp);
-        if (savedCs) savedCs->Release();
-        for (auto* v : savedSrv) if (v) v->Release();
-        for (auto* v : savedUav) if (v) v->Release();
-        if (savedCb) savedCb->Release();
-        if (savedSamp) savedSamp->Release();
+        csSaved.restore(ctx);
 
         // NVIDIA's crop history is live only if the crop eval ran and
         // accumulated THIS frame. Any frame that did not composite the fovea

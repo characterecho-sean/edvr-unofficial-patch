@@ -1,0 +1,747 @@
+#pragma once
+// engine_velocity_test: engine_velocity.cpp's DRAW half, linked into the rig
+// (build.bat compiles it with EDVR_ENGINE_VELOCITY_RIG and the binding
+// shadow external), driven on WARP the way vscreen and device_hook drive it:
+// the fake binding shadow below records what the game "binds" exactly as the
+// hooks do, the fake depth probe names the two eye depths, and the Map/Unmap
+// tees are called in vscreen's order (Map after the real Map, the write tee
+// before the real Unmap). The emit hook's state and the log are stubbed so
+// the stand-down line and every counter can be read back.
+//
+// The cases are the 2026-09-23 fix round's (docs/kinematic-motion-injection-
+// 2026-09-19.md, "Fix round"; reviews\engine-motion-review-2026-09-23.md):
+//   F1  cb1 re-mapped inside an eye pass with rows 270..275 unchanged: kept;
+//       rows changed then a draw of the same eye: dropped; the other eye's
+//       rows through the same buffer between interleaved passes: kept.
+//   R3  t33 or b1 rebound without touching shaders or targets: dropped; the
+//       same view again, or another view over the same elements: kept; a PS
+//       change alone: kept; a view with another FirstElement: dropped.
+//   R3b the pool appended (NO_OVERWRITE) mid-pass: refreshed and kept;
+//       replaced (DISCARD) then drawn: dropped; replaced after the eye's last
+//       draw: kept.
+//   R4  the derived blend state bound for substituted draws, re-derived after
+//       a mid-pass blend change, the game's put back by the next unkeyed draw
+//       and at the frame boundary; MRT6 exact under an additive game state.
+//   F3  a depth that is not 32-bit float: MRT6 refused (counted), nothing
+//       given; a new depth pair: the slot target re-created (logged), given.
+//   R6  the emit hook not installed: STOOD DOWN at configure and in the 30 s
+//       block, no substitution, every view refused; installed: stands up.
+//   R5  CsStageSave (cs_stage_save.h): sentinels in every compute slot the
+//       temporal pass touches come back by identity after the engine path
+//       and after the fallback path.
+
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "../../src/common/log.h"
+#include "../../src/common/timing.h"
+#include "../../src/d3d11/cs_stage_save.h"
+#include "../../src/d3d11/depth_probe.h"
+#include "../../src/d3d11/engine_velocity.h"
+#include "../../src/d3d11/kinematic_eval_hook.h"
+#include "../../src/d3d11/kinematic_motion.h"
+#include "../../src/d3d11/vscreen.h"
+
+namespace lifecycle_fake {
+struct Slot { void* ptr = nullptr; uint32_t gen = 1; uint64_t hash = 0; };
+Slot g_slots[static_cast<unsigned>(edvr::BindSlot::Count)];
+ID3D11DepthStencilView* g_eyeDsv[2] = {};
+bool g_hookLive = true;
+std::vector<std::string> g_log;
+uint64_t g_clock = 1000;
+uint64_t fakeClock() { return g_clock; }
+}  // namespace lifecycle_fake
+
+// --- The stubs engine_velocity.cpp links against -------------------------------
+namespace edvr {
+void* bindingGet(BindSlot s) { return lifecycle_fake::g_slots[static_cast<unsigned>(s)].ptr; }
+uint32_t bindingGeneration(BindSlot s) { return lifecycle_fake::g_slots[static_cast<unsigned>(s)].gen; }
+uint64_t bindingShaderHash(BindSlot s) { return lifecycle_fake::g_slots[static_cast<unsigned>(s)].hash; }
+void bindingSet(BindSlot s, void* p) {
+    auto& x = lifecycle_fake::g_slots[static_cast<unsigned>(s)];
+    x.ptr = p;
+    ++x.gen;
+}
+bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* outTargetIndex) {
+    for (int i = 0; i < 2; ++i)
+        if (dsv && dsv == lifecycle_fake::g_eyeDsv[i]) { *outEye = i; *outTargetIndex = i; return true; }
+    return false;
+}
+void kinematicEvalSetEmitObserver(EngineEmitObserverFn) noexcept {}
+bool kinematicEvalEmitHookLive(const char** why) noexcept {
+    if (why) *why = lifecycle_fake::g_hookLive ? nullptr : "rig: kinematic-build-144312e00 refused";
+    return lifecycle_fake::g_hookLive;
+}
+KinematicMotionStats kinematicMotionStats() noexcept { return KinematicMotionStats{}; }
+void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs,
+                                ID3D11DepthStencilView* dsv) { ctx->OMSetRenderTargets(n, rtvs, dsv); }
+void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs, ID3D11ClassInstance* const* ci,
+                           uint32_t n) { ctx->VSSetShader(vs, ci, n); }
+void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, ID3D11ClassInstance* const* ci,
+                           uint32_t n) { ctx->PSSetShader(ps, ci, n); }
+void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state, const float factor[4], uint32_t mask) {
+    ctx->OMSetBlendState(state, factor, mask);
+}
+Log& Log::get() { static Log instance; return instance; }
+Log::~Log() {}
+void Log::note(const char* fmt, ...) {
+    char text[8192];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    lifecycle_fake::g_log.push_back(text);
+}
+int64_t qpcNow() { LARGE_INTEGER t{}; QueryPerformanceCounter(&t); return t.QuadPart; }
+int64_t qpcFrequency() { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }
+}  // namespace edvr
+
+namespace lifecycle_tests {
+using Microsoft::WRL::ComPtr;
+using edvr::BindSlot;
+using lifecycle_fake::g_log;
+bool g_verbose = false;   // --verbose: print the captured log lines
+
+struct Harness {
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    void (*check)(bool, const char*) = nullptr;
+};
+
+constexpr uint64_t kVsHash = 0xEB5234DB6ADB491Dull;   // the flight's substituted family
+constexpr uint64_t kPsHash = 0xCB9F297EFF264251ull;
+constexpr uint64_t kPsHash2 = 0x3434972DB5336AA4ull;
+constexpr uint64_t kUnkeyedPs = 0x1111222233334444ull;
+constexpr UINT kW = 48, kH = 48;
+constexpr UINT kSceneFloats = 5376 / 4;               // the game's cb1
+
+// The last log line starting with prefix (empty if none since `from`).
+inline std::string lastLine(const char* prefix, size_t from = 0) {
+    for (size_t i = g_log.size(); i > from; --i)
+        if (g_log[i - 1].rfind(prefix, 0) == 0) return g_log[i - 1];
+    return {};
+}
+inline bool logged(const char* fragment, size_t from) {
+    for (size_t i = from; i < g_log.size(); ++i) if (g_log[i].find(fragment) != std::string::npos) return true;
+    return false;
+}
+// The unsigned number right after label in line (~0 if absent).
+inline unsigned long long number(const std::string& line, const char* label) {
+    const size_t at = line.find(label);
+    if (at == std::string::npos) return ~0ull;
+    return std::strtoull(line.c_str() + at + std::strlen(label), nullptr, 10);
+}
+
+struct Game {
+    const Harness& h;
+    ID3D11Device* dev;
+    ID3D11DeviceContext* ctx;
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11PixelShader> ps, ps2, unkeyed;
+    ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11Buffer> vertices, instanceBuffer;
+    ComPtr<ID3D11Texture2D> colour[2][4], depth[2];
+    ComPtr<ID3D11RenderTargetView> rtv[2][4];
+    ComPtr<ID3D11DepthStencilView> dsv[2];
+    ComPtr<ID3D11DepthStencilState> depthState;
+    ComPtr<ID3D11RasterizerState> raster;
+    ComPtr<ID3D11Buffer> poolA, poolB, sceneA, sceneB;
+    ComPtr<ID3D11ShaderResourceView> viewA, viewA2, viewB, viewOffset;
+    std::vector<shader_tests::Record> pool;
+    std::vector<float> rows[2];   // cb1 contents per eye (rows 270..275 differ)
+    uint32_t frame = 100;
+
+    explicit Game(const Harness& harness) : h(harness), dev(harness.device), ctx(harness.context) {}
+
+    ComPtr<ID3DBlob> compile(const std::string& source, const char* profile) { return shader_tests::compile({dev, ctx, h.check}, source, profile); }
+
+    void setup() {
+        const auto vsBlob = compile(std::string(shader_tests::kVsCommon) + shader_tests::kVsA, "vs_5_0");
+        const auto psBlob = compile(shader_tests::kPsA, "ps_5_0");
+        const char* plain = R"HLSL(
+struct PsIn { nointerpolation uint3 id : __USER_MATERIALMODULATION_DATAID; float3 n : __USER_VERTEX_M_LIGHTINGNORMAL;
+              float3 t : __USER_VERTEX_M_LIGHTINGTANGENT; float2 uv : __USER_VERTEX_M_TEXCOORD; };
+float4 main(PsIn i) : SV_Target0 { return float4(i.uv, 1, 1); }
+)HLSL";
+        const auto unkeyedBlob = compile(plain, "ps_5_0");
+        h.check(SUCCEEDED(dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs)), "life: VS");
+        h.check(SUCCEEDED(dev->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps)), "life: PS");
+        h.check(SUCCEEDED(dev->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps2)), "life: PS 2");
+        h.check(SUCCEEDED(dev->CreatePixelShader(unkeyedBlob->GetBufferPointer(), unkeyedBlob->GetBufferSize(), nullptr, &unkeyed)), "life: unkeyed PS");
+        // device_hook's creation tees: the keyed bytecode is remembered.
+        edvr::engineVelocityRememberVs(vs.Get(), kVsHash, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), false);
+        edvr::engineVelocityRememberPs(ps.Get(), kPsHash, psBlob->GetBufferPointer(), psBlob->GetBufferSize(), false);
+        edvr::engineVelocityRememberPs(ps2.Get(), kPsHash2, psBlob->GetBufferPointer(), psBlob->GetBufferSize(), false);
+        const D3D11_INPUT_ELEMENT_DESC layoutDesc[] = {
+            {"INSTANCEANDMODELDATAINDEX", 0, DXGI_FORMAT_R32G32_UINT, 1, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+            {"PACKEDVERTEXDATAA", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        };
+        h.check(SUCCEEDED(dev->CreateInputLayout(layoutDesc, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &layout)), "life: layout");
+        const float quad[] = {-0.4f, -0.4f, 0, 0.4f, -0.4f, 0, -0.4f, 0.4f, 0, 0.4f, 0.4f, 0};
+        D3D11_BUFFER_DESC vd{};
+        vd.ByteWidth = sizeof(quad); vd.Usage = D3D11_USAGE_DEFAULT; vd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA vinit{quad, 0, 0};
+        h.check(SUCCEEDED(dev->CreateBuffer(&vd, &vinit, &vertices)), "life: vertices");
+        const uint32_t instances[] = {5, 0, 9, 0};
+        vd.ByteWidth = sizeof(instances);
+        D3D11_SUBRESOURCE_DATA iinit{instances, 0, 0};
+        h.check(SUCCEEDED(dev->CreateBuffer(&vd, &iinit, &instanceBuffer)), "life: instances");
+        for (int eye = 0; eye < 2; ++eye) makeEye(eye, kW, kH, DXGI_FORMAT_D32_FLOAT);
+        D3D11_DEPTH_STENCIL_DESC dsd{};
+        dsd.DepthEnable = TRUE; dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dsd.DepthFunc = D3D11_COMPARISON_GREATER;
+        h.check(SUCCEEDED(dev->CreateDepthStencilState(&dsd, &depthState)), "life: depth state");
+        D3D11_RASTERIZER_DESC rd{};
+        rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+        h.check(SUCCEEDED(dev->CreateRasterizerState(&rd, &raster)), "life: rasterizer");
+        pool.assign(16, shader_tests::Record{});
+        const float identity[4] = {0, 0, 0, 1};
+        pool[5] = shader_tests::makeRecord(-0.3f, 0.0f, -2.0f, 1.0f, identity);
+        pool[9] = shader_tests::makeRecord(0.4f, 0.1f, -3.0f, 1.0f, identity);
+        D3D11_BUFFER_DESC pd{};
+        pd.ByteWidth = UINT(pool.size() * sizeof(shader_tests::Record));
+        pd.Usage = D3D11_USAGE_DEFAULT; pd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        pd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; pd.StructureByteStride = sizeof(shader_tests::Record);
+        D3D11_SUBRESOURCE_DATA pinit{pool.data(), 0, 0};
+        h.check(SUCCEEDED(dev->CreateBuffer(&pd, &pinit, &poolA)) && SUCCEEDED(dev->CreateBuffer(&pd, &pinit, &poolB)), "life: pools");
+        h.check(SUCCEEDED(dev->CreateShaderResourceView(poolA.Get(), nullptr, &viewA)) &&
+                SUCCEEDED(dev->CreateShaderResourceView(poolA.Get(), nullptr, &viewA2)) &&
+                SUCCEEDED(dev->CreateShaderResourceView(poolB.Get(), nullptr, &viewB)), "life: pool views");
+        D3D11_SHADER_RESOURCE_VIEW_DESC od{};
+        od.Format = DXGI_FORMAT_UNKNOWN; od.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        od.Buffer.FirstElement = 1; od.Buffer.NumElements = 15;
+        h.check(SUCCEEDED(dev->CreateShaderResourceView(poolA.Get(), &od, &viewOffset)), "life: offset view");
+        for (int eye = 0; eye < 2; ++eye) {
+            rows[eye].assign(kSceneFloats, 0.0f);
+            auto& r = rows[eye];
+            r[270 * 4] = 1.0f; r[271 * 4 + 1] = 1.0f; r[272 * 4 + 3] = -1.0f; r[273 * 4 + 2] = 0.025f;
+            r[273 * 4] = eye ? -0.03f : 0.03f;   // the eyes' own offsets: rows 270..275 differ between eyes
+        }
+        D3D11_BUFFER_DESC cd{};
+        cd.ByteWidth = kSceneFloats * 4; cd.Usage = D3D11_USAGE_DEFAULT; cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA cinit{rows[0].data(), 0, 0};
+        h.check(SUCCEEDED(dev->CreateBuffer(&cd, &cinit, &sceneA)) && SUCCEEDED(dev->CreateBuffer(&cd, &cinit, &sceneB)), "life: scene CBs");
+    }
+    void makeEye(int eye, UINT w, UINT hgt, DXGI_FORMAT depthFormat) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w; td.Height = hgt; td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        for (int i = 0; i < 4; ++i) {
+            colour[eye][i].Reset(); rtv[eye][i].Reset();
+            h.check(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &colour[eye][i])), "life: colour");
+            h.check(SUCCEEDED(dev->CreateRenderTargetView(colour[eye][i].Get(), nullptr, &rtv[eye][i])), "life: RTV");
+        }
+        td.Format = depthFormat; td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        depth[eye].Reset(); dsv[eye].Reset();
+        h.check(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &depth[eye])), "life: depth");
+        h.check(SUCCEEDED(dev->CreateDepthStencilView(depth[eye].Get(), nullptr, &dsv[eye])), "life: DSV");
+        lifecycle_fake::g_eyeDsv[eye] = dsv[eye].Get();
+    }
+
+    // --- The game's calls, each with the shadow update its hook makes ---------
+    void shadow(BindSlot s, void* p, uint64_t hash = 0) {
+        auto& x = lifecycle_fake::g_slots[static_cast<unsigned>(s)];
+        x.ptr = p; x.hash = hash; ++x.gen;
+    }
+    void setVs() { ctx->VSSetShader(vs.Get(), nullptr, 0); shadow(BindSlot::Vs, vs.Get(), kVsHash); }
+    void setPs(ID3D11PixelShader* p, uint64_t hash) { ctx->PSSetShader(p, nullptr, 0); shadow(BindSlot::Ps, p, hash); }
+    void setPool(ID3D11ShaderResourceView* v) { ctx->VSSetShaderResources(33, 1, &v); shadow(BindSlot::VsSrv33, v); }
+    void setScene(ID3D11Buffer* b) { ctx->VSSetConstantBuffers(1, 1, &b); shadow(BindSlot::VsCb1, b); }
+    void setBlend(ID3D11BlendState* b) { const float f[4] = {}; ctx->OMSetBlendState(b, f, ~0u); shadow(BindSlot::Blend, b); }
+    void setTargets(int eye) {
+        ID3D11RenderTargetView* r[4] = {rtv[eye][0].Get(), rtv[eye][1].Get(), rtv[eye][2].Get(), rtv[eye][3].Get()};
+        ctx->OMSetRenderTargets(4, r, dsv[eye].Get());
+        shadow(BindSlot::Rtv0, r[0]);
+        shadow(BindSlot::Dsv0, dsv[eye].Get());
+    }
+    // A cb1 write through Map/Unmap as vscreen tees it: the Map tee after the
+    // real Map, the game's write, the write tee before the real Unmap.
+    void writeScene(ID3D11Buffer* b, const std::vector<float>& content) {
+        std::vector<float> mapped = content;   // stands in for the mapped memory
+        edvr::engineVelocityResourceMapped(b, mapped.data(), D3D11_MAP_WRITE_DISCARD);
+        edvr::engineVelocityResourceWritten(b);
+        ctx->UpdateSubresource(b, 0, nullptr, content.data(), 0, 0);
+    }
+    void writePool(ID3D11Buffer* b, D3D11_MAP type) {
+        std::vector<shader_tests::Record> mapped = pool;
+        edvr::engineVelocityResourceMapped(b, mapped.data(), type);
+        edvr::engineVelocityResourceWritten(b);
+        ctx->UpdateSubresource(b, 0, nullptr, pool.data(), 0, 0);
+    }
+    // One eye pass: the game binds its state and draws `count` pool draws.
+    void pass(int eye, int count = 1, UINT instance = 5) {
+        setTargets(eye);
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        D3D11_VIEWPORT vp{0, 0, float(kW), float(kH), 0, 1};
+        ctx->RSSetViewports(1, &vp);
+        ctx->RSSetState(raster.Get());
+        ctx->IASetInputLayout(layout.Get());
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ID3D11Buffer* vbs[2] = {vertices.Get(), instanceBuffer.Get()};
+        UINT strides[2] = {12, 8}, offsets[2] = {0, 0};
+        ctx->IASetVertexBuffers(0, 2, vbs, strides, offsets);
+        setVs();
+        for (int i = 0; i < count; ++i) draw(instance);
+    }
+    void draw(UINT instance = 5) {
+        edvr::engineVelocityBeforeDraw(ctx, true);
+        ctx->DrawInstanced(4, 1, 0, instance == 9 ? 1 : 0);
+    }
+    void clearEye(int eye) {
+        const float black[4] = {};
+        for (auto& r : rtv[eye]) ctx->ClearRenderTargetView(r.Get(), black);
+        ctx->ClearDepthStencilView(dsv[eye].Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+    }
+    // The start of a frame: the present clock, the eyes' clears, the game's
+    // default pool/scene/shader bindings.
+    void beginFrame() {
+        edvr::engineVelocityNotePresentFrame(++frame);
+        clearEye(0);
+        clearEye(1);
+        setPool(viewA.Get());
+        setScene(sceneA.Get());
+        setPs(ps.Get(), kPsHash);
+        setBlend(nullptr);
+    }
+    void endFrame(bool summary = false) {
+        if (summary) lifecycle_fake::g_clock += 31000;
+        edvr::engineVelocityFrameBoundary(ctx);
+        for (auto& s : lifecycle_fake::g_slots) ++s.gen;   // bindingFrameBoundary
+    }
+    // The ordinary frame: eye 0's rows, its pass; eye 1's rows, its pass.
+    void ordinaryFrame(bool summary = false) {
+        beginFrame();
+        writeScene(sceneA.Get(), rows[0]);
+        pass(0);
+        writeScene(sceneA.Get(), rows[1]);
+        pass(1);
+        endFrame(summary);
+    }
+    bool views(int eye, edvr::EngineVelocityViews* out = nullptr) {
+        edvr::EngineVelocityViews v{};
+        const bool given = edvr::engineVelocityViews(ctx, eye, depth[eye].Get(), &v);
+        if (out) *out = v;
+        else {
+            if (v.slots) v.slots->Release();
+            if (v.pool) v.pool->Release();
+            if (v.sceneNow) v.sceneNow->Release();
+            if (v.scenePrev) v.scenePrev->Release();
+        }
+        return given;
+    }
+    // Views asked for after the frame's passes, before its boundary.
+    template <class Body> void frameWithViews(Body body, bool* eye0, bool* eye1, bool summary = false) {
+        beginFrame();
+        body();
+        if (eye0) *eye0 = views(0);
+        if (eye1) *eye1 = views(1);
+        endFrame(summary);
+    }
+    std::string summaryLine(const char* prefix) { return lastLine(prefix); }
+};
+
+constexpr UINT kSrvs = edvr::CsStageSave::kSrvs, kUavs = edvr::CsStageSave::kUavs, kCbs = edvr::CsStageSave::kCbs;
+
+inline void csStageSaveChecks(const Harness& h) {
+    auto* dev = h.device;
+    auto* ctx = h.context;
+    h.check(kSrvs > edvr::kEngineVelocityPoolSrv && kSrvs > edvr::kEngineVelocitySlotsSrv &&
+            kCbs > edvr::kEngineVelocityScenePrevCb, "cs save: covers engine-record velocity's compute slots");
+    ComPtr<ID3D11Buffer> buffers[kSrvs];
+    ComPtr<ID3D11ShaderResourceView> sentinels[kSrvs], ours[2];
+    ComPtr<ID3D11UnorderedAccessView> uavs[kUavs];
+    ComPtr<ID3D11Buffer> cbs[kCbs], ourCbs[2];
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = 64; bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; bd.StructureByteStride = 16;
+    for (UINT i = 0; i < kSrvs; ++i) {
+        h.check(SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &buffers[i])), "cs save: sentinel buffer");
+        h.check(SUCCEEDED(dev->CreateShaderResourceView(buffers[i].Get(), nullptr, &sentinels[i])), "cs save: sentinel SRV");
+    }
+    ComPtr<ID3D11Buffer> ourBuffers[2];
+    for (int i = 0; i < 2; ++i) {
+        h.check(SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &ourBuffers[i])), "cs save: pass buffer");
+        h.check(SUCCEEDED(dev->CreateShaderResourceView(ourBuffers[i].Get(), nullptr, &ours[i])), "cs save: pass SRV");
+    }
+    for (UINT i = 0; i < kUavs; ++i) {
+        ComPtr<ID3D11Buffer> ub;
+        h.check(SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &ub)), "cs save: sentinel UAV buffer");
+        h.check(SUCCEEDED(dev->CreateUnorderedAccessView(ub.Get(), nullptr, &uavs[i])), "cs save: sentinel UAV");
+    }
+    D3D11_BUFFER_DESC cd{};
+    cd.ByteWidth = 256; cd.Usage = D3D11_USAGE_DEFAULT; cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    for (UINT i = 0; i < kCbs; ++i) h.check(SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &cbs[i])), "cs save: sentinel CB");
+    for (auto& c : ourCbs) h.check(SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &c)), "cs save: pass CB");
+    auto bindSentinels = [&] {
+        ID3D11ShaderResourceView* srv[kSrvs] = {};
+        ID3D11UnorderedAccessView* uav[kUavs] = {};
+        ID3D11Buffer* cb[kCbs] = {};
+        for (UINT i = 0; i < kSrvs; ++i) srv[i] = sentinels[i].Get();
+        for (UINT i = 0; i < kUavs; ++i) uav[i] = uavs[i].Get();
+        for (UINT i = 0; i < kCbs; ++i) cb[i] = cbs[i].Get();
+        ctx->CSSetShaderResources(0, kSrvs, srv);
+        ctx->CSSetUnorderedAccessViews(0, kUavs, uav, nullptr);
+        ctx->CSSetConstantBuffers(0, kCbs, cb);
+    };
+    auto sentinelsBack = [&] {
+        ID3D11ShaderResourceView* srv[kSrvs] = {};
+        ID3D11UnorderedAccessView* uav[kUavs] = {};
+        ID3D11Buffer* cb[kCbs] = {};
+        ctx->CSGetShaderResources(0, kSrvs, srv);
+        ctx->CSGetUnorderedAccessViews(0, kUavs, uav);
+        ctx->CSGetConstantBuffers(0, kCbs, cb);
+        bool same = true;
+        for (UINT i = 0; i < kSrvs; ++i) { same = same && srv[i] == sentinels[i].Get(); if (srv[i]) srv[i]->Release(); }
+        for (UINT i = 0; i < kUavs; ++i) { same = same && uav[i] == uavs[i].Get(); if (uav[i]) uav[i]->Release(); }
+        for (UINT i = 0; i < kCbs; ++i) { same = same && cb[i] == cbs[i].Get(); if (cb[i]) cb[i]->Release(); }
+        return same;
+    };
+    // The engine path: t21/t22 and b1/b2 bound for the dispatch, every slot
+    // nulled after it, as temporal_pass.cpp does.
+    bindSentinels();
+    {
+        edvr::CsStageSave saved;
+        saved.save(ctx);
+        ID3D11ShaderResourceView* nulls[kSrvs] = {};
+        ctx->CSSetShaderResources(0, kSrvs, nulls);
+        ID3D11ShaderResourceView* engine[2] = {ours[0].Get(), ours[1].Get()};
+        ctx->CSSetShaderResources(edvr::kEngineVelocitySlotsSrv, 2, engine);
+        ID3D11Buffer* engineCbs[2] = {ourCbs[0].Get(), ourCbs[1].Get()};
+        ctx->CSSetConstantBuffers(edvr::kEngineVelocitySceneNowCb, 2, engineCbs);
+        ctx->CSSetShaderResources(0, kSrvs, nulls);
+        ID3D11Buffer* nullCbs[kCbs] = {};
+        ctx->CSSetConstantBuffers(0, kCbs, nullCbs);
+        saved.restore(ctx);
+    }
+    h.check(sentinelsBack(), "cs save: every sentinel (t0..t22, u0..u6, b0..b2) back by identity after the engine path");
+    // The fallback path: 21 slots, no engine inputs.
+    bindSentinels();
+    {
+        edvr::CsStageSave saved;
+        saved.save(ctx);
+        ID3D11ShaderResourceView* nulls[21] = {};
+        ctx->CSSetShaderResources(0, 21, nulls);
+        saved.restore(ctx);
+    }
+    h.check(sentinelsBack(), "cs save: every sentinel back by identity after the fallback path");
+    // A save that is dropped without restore (an early exit) still releases.
+    bindSentinels();
+    { edvr::CsStageSave saved; saved.save(ctx); }
+    h.check(sentinelsBack(), "cs save: an unrestored save changes nothing and leaks nothing");
+    ctx->ClearState();
+    std::printf("  cs save: %u SRVs, %u UAVs, %u CBs restored by identity on the engine and fallback paths\n", kSrvs, kUavs, kCbs);
+}
+
+inline std::vector<float> readTexture(const Harness& h, ID3D11Resource* resource, UINT channels, UINT* width) {
+    ComPtr<ID3D11Texture2D> tex;
+    h.check(SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(&tex))), "life: a texture to read");
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    *width = d.Width;
+    d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    h.check(SUCCEEDED(h.device->CreateTexture2D(&d, nullptr, &staging)), "life: staging");
+    h.context->CopyResource(staging.Get(), tex.Get());
+    D3D11_MAPPED_SUBRESOURCE m{};
+    h.check(SUCCEEDED(h.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)), "life: map staging");
+    std::vector<float> out(size_t(d.Width) * d.Height * channels);
+    for (UINT y = 0; y < d.Height; ++y)
+        std::memcpy(&out[size_t(y) * d.Width * channels], static_cast<const BYTE*>(m.pData) + y * m.RowPitch, d.Width * channels * 4);
+    h.context->Unmap(staging.Get(), 0);
+    return out;
+}
+
+// MRT6 of views against the eye's depth: pixels that decode to `slot`
+// exactly, and pixels that decode to anything but none/stale.
+inline void ownership(const Harness& h, Game& g, int eye, const edvr::EngineVelocityViews& v, uint32_t slot,
+                      unsigned* exact, unsigned* other) {
+    ComPtr<ID3D11Resource> slotsRes;
+    v.slots->GetResource(&slotsRes);
+    UINT w = 0, wd = 0;
+    const auto slots = readTexture(h, slotsRes.Get(), 2, &w);
+    const auto depth = readTexture(h, g.depth[eye].Get(), 1, &wd);
+    *exact = *other = 0;
+    for (size_t i = 0; i < depth.size(); ++i) {
+        uint32_t s = 0;
+        const int kind = shader_tests::decodeSlot(slots[i * 2], slots[i * 2 + 1], depth[i], &s);
+        if (kind == 1 && s == slot) ++*exact;
+        else if (kind == 1 || kind == 5) ++*other;
+    }
+}
+
+inline void release(edvr::EngineVelocityViews& v) {
+    if (v.slots) v.slots->Release();
+    if (v.pool) v.pool->Release();
+    if (v.sceneNow) v.sceneNow->Release();
+    if (v.scenePrev) v.scenePrev->Release();
+    v = {};
+}
+
+inline void run(const Harness& h) {
+    edvr::g_clockForTest = &lifecycle_fake::fakeClock;
+    size_t mark = g_log.size();
+    Game g(h);
+    g.setup();
+    edvr::engineVelocityConfigure(true);
+    h.check(logged("engine-record velocity live", mark), "life: configure logs live with the hook installed");
+    const char* joined = "engine motion: movers joined";
+    auto body = [&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    };
+    bool e0 = false, e1 = false;
+
+    // Two ordinary frames: the second has last frame's scene constants. The
+    // substituted shader is bound after a keyed draw, a draw elsewhere puts
+    // the game's back, and MRT6 holds the odd code at the depth drawn.
+    g.ordinaryFrame();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0);
+    {
+        ComPtr<ID3D11PixelShader> bound;
+        h.context->PSGetShader(&bound, nullptr, nullptr);
+        h.check(bound && bound.Get() != g.ps.Get(), "life: the keyed draw ran the substituted pixel shader");
+        edvr::engineVelocityBeforeDraw(h.context, false);   // a draw into something that is not an eye
+        bound.Reset();
+        h.context->PSGetShader(&bound, nullptr, nullptr);
+        h.check(bound.Get() == g.ps.Get(), "life: the next draw elsewhere puts the game's pixel shader back");
+    }
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    {
+        edvr::EngineVelocityViews v{};
+        h.check(g.views(0, &v), "life: eye 0 given after two ordinary frames");
+        unsigned exact = 0, other = 0;
+        ownership(h, g, 0, v, 5, &exact, &other);
+        h.check(exact > 0 && other == 0, "life: MRT6 names slot 5, exactly, at the depth drawn");
+        release(v);
+        h.check(g.views(1), "life: eye 1 given");
+    }
+    g.endFrame(true);
+
+    // F1: cb1 re-mapped inside eye 0's pass with rows 270..275 unchanged
+    // (other registers move, as capture 043720 shows): kept.
+    mark = g_log.size();
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        auto other = g.rows[0];
+        other[90 * 4] = 7.0f; other[124 * 4 + 1] = -3.0f; other[311 * 4 + 2] = 0.5f;
+        g.writeScene(g.sceneA.Get(), other); g.draw();
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.draw();
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1, true);
+    std::string line = lastLine(joined, mark);
+    h.check(e0 && e1, "F1: cb1 re-mapped inside the pass with rows 270..275 unchanged keeps the eye-frame");
+    h.check(number(line, "rows 270..275 unchanged ") == 2, "F1: both re-maps counted as kept");
+
+    // F1: rows changed inside eye 0's pass, then a draw of eye 0: dropped.
+    mark = g_log.size();
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        auto moved = g.rows[0];
+        moved[273 * 4] += 0.5f;
+        g.writeScene(g.sceneA.Get(), moved); g.draw();
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1, true);
+    line = lastLine(joined, mark);
+    h.check(!e0 && e1, "F1: rows 270..275 changed then drawn drops that eye-frame only");
+    h.check(number(line, "scene rows 270..275 changed ") == 1, "F1: the drop counted by reason");
+
+    // F1: the capture's interleaving -- eye 0, eye 1, eye 0, eye 1 -- through
+    // ONE cb1 whose rows swap between the eyes: both kept.
+    mark = g_log.size();
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0, 3);
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1, 3);
+    }, &e0, &e1, true);
+    line = lastLine(joined, mark);
+    h.check(e0 && e1, "F1: interleaved eye passes through one cb1 keep both eye-frames");
+    h.check(number(line, "invalidated ") == 0, "F1: nothing invalidated by the other eye's rows");
+
+    // R3: sources rebound without touching shaders or targets.
+    mark = g_log.size();
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.setPool(g.viewB.Get()); g.draw();
+        g.setPool(g.viewA.Get());
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1);
+    h.check(!e0 && e1, "R3: t33 rebound to another pool mid-pass drops the eye-frame");
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.setScene(g.sceneB.Get()); g.draw();
+        g.setScene(g.sceneA.Get());
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1);
+    h.check(!e0 && e1, "R3: b1 rebound to another constant buffer mid-pass drops the eye-frame");
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.setPool(g.viewA.Get()); g.draw();          // the same view object again
+        g.setPool(g.viewA2.Get()); g.draw();         // another view over the same buffer and elements
+        g.setPs(g.ps2.Get(), kPsHash2); g.draw();    // a pixel-shader change alone
+        ComPtr<ID3D11PixelShader> bound;
+        h.context->PSGetShader(&bound, nullptr, nullptr);
+        h.check(bound && bound.Get() != g.ps2.Get() && bound.Get() != g.ps.Get(), "R3: the second keyed PS is substituted too");
+        g.setPool(g.viewA.Get()); g.setPs(g.ps.Get(), kPsHash);
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1);
+    h.check(e0 && e1, "R3: the same view, an equal view, a PS change alone: all kept");
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.setPool(g.viewOffset.Get()); g.draw();
+        g.setPool(g.viewA.Get());
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1, true);
+    h.check(!e0 && e1, "R3: a view with another FirstElement drops the eye-frame");
+    line = lastLine(joined, mark);
+    h.check(number(line, "pool rebound ") == 1 && number(line, "scene constants rebound ") == 1 &&
+            number(line, "pool view changed ") == 1, "R3: each drop counted by its reason");
+
+    // R3b: pool writes between draws of one eye.
+    mark = g_log.size();
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.writePool(g.poolA.Get(), D3D11_MAP_WRITE_NO_OVERWRITE); g.draw();
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1);
+    h.check(e0 && e1, "R3b: a NO_OVERWRITE append mid-pass refreshes the snapshot and keeps the eye-frame");
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.writePool(g.poolA.Get(), D3D11_MAP_WRITE_DISCARD); g.draw();
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1);
+    h.check(!e0 && e1, "R3b: a replaced pool then drawn drops the eye-frame");
+    g.frameWithViews([&] {
+        g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
+        g.writePool(g.poolA.Get(), D3D11_MAP_WRITE_DISCARD);
+        g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
+    }, &e0, &e1, true);
+    h.check(e0 && e1, "R3b: a pool replaced after the eye's last draw keeps it");
+    line = lastLine(joined, mark);
+    h.check(number(line, "pool appended and refreshed ") == 1 && number(line, "pool rewritten ") == 1,
+            "R3b: refresh and drop counted");
+
+    // R4: the blend state through the lifecycle.
+    {
+        D3D11_BLEND_DESC add = edvr::engineVelocityDefaultBlend(), alpha = edvr::engineVelocityDefaultBlend();
+        add.RenderTarget[0].BlendEnable = TRUE;
+        add.RenderTarget[0].SrcBlend = add.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+        add.RenderTarget[0].SrcBlendAlpha = add.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        alpha.RenderTarget[0].BlendEnable = TRUE;
+        alpha.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        alpha.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        ComPtr<ID3D11BlendState> additive, blended;
+        h.check(SUCCEEDED(h.device->CreateBlendState(&add, &additive)) && SUCCEEDED(h.device->CreateBlendState(&alpha, &blended)),
+                "R4: the game's blend states");
+        auto current = [&] {
+            ComPtr<ID3D11BlendState> s;
+            float f[4] = {};
+            UINT m = 0;
+            h.context->OMGetBlendState(&s, f, &m);
+            return s;
+        };
+        g.beginFrame();
+        g.writeScene(g.sceneA.Get(), g.rows[0]);
+        g.setBlend(additive.Get());
+        g.pass(0);
+        auto first = current();
+        D3D11_BLEND_DESC d{};
+        if (first) first->GetDesc(&d);
+        h.check(first && first.Get() != additive.Get(), "R4: a substituted draw runs under a derived state, not the game's");
+        h.check(d.RenderTarget[0].BlendEnable && d.RenderTarget[0].DestBlend == D3D11_BLEND_ONE && d.RenderTarget[1].BlendEnable &&
+                !d.RenderTarget[6].BlendEnable && d.RenderTarget[6].RenderTargetWriteMask == 3,
+                "R4: the derived state keeps the game's blending on its targets and writes MRT6 unblended");
+        g.setBlend(blended.Get());
+        g.draw();
+        auto second = current();
+        D3D11_BLEND_DESC d2{};
+        if (second) second->GetDesc(&d2);
+        h.check(second && second.Get() != blended.Get() && second.Get() != first.Get() &&
+                d2.RenderTarget[0].SrcBlend == D3D11_BLEND_SRC_ALPHA && !d2.RenderTarget[6].BlendEnable,
+                "R4: a blend change mid-pass is re-derived before the next substituted draw");
+        edvr::engineVelocityBeforeDraw(h.context, false);   // a draw elsewhere
+        h.check(current().Get() == blended.Get(), "R4: the next unsubstituted draw puts the game's blend state back");
+        g.setBlend(additive.Get());
+        g.draw();
+        g.writeScene(g.sceneA.Get(), g.rows[1]);
+        g.pass(1);
+        edvr::EngineVelocityViews v{};
+        h.check(g.views(0, &v), "R4: blend changes do not drop the eye-frame");
+        unsigned exact = 0, other = 0;
+        ownership(h, g, 0, v, 5, &exact, &other);
+        h.check(exact > 0 && other == 0, "R4: MRT6 exact under an additive game state (the review's counterexample)");
+        release(v);
+        g.endFrame(true);
+        h.check(current().Get() == additive.Get(), "R4: the frame boundary puts the game's blend state back");
+        g.setBlend(nullptr);
+    }
+
+    // F3: a 24-bit depth is refused MRT6 (counted) and gives nothing; a new
+    // depth pair of another size re-creates the slot target (logged) and gives.
+    mark = g_log.size();
+    g.makeEye(0, kW, kH, DXGI_FORMAT_D24_UNORM_S8_UINT);
+    g.ordinaryFrame();
+    g.frameWithViews(body, &e0, &e1, true);
+    line = lastLine(joined, mark);
+    h.check(!e0 && e1, "F3: a depth that is not 32-bit float gets no MRT6 and gives nothing");
+    h.check(number(line, "depth not 32-bit float ") >= 2, "F3: the refusal counted");
+    mark = g_log.size();
+    g.makeEye(0, 32, 32, DXGI_FORMAT_D32_FLOAT);
+    g.ordinaryFrame();
+    g.frameWithViews(body, &e0, &e1, true);
+    h.check(e0 && e1, "F3: a new depth pair gives again");
+    h.check(logged("eye 0 slot target re-created 32x32", mark), "F3: the slot target's re-creation is logged");
+
+    // R6: the emit hook not installed -> STOOD DOWN, no substitution, nothing given.
+    mark = g_log.size();
+    lifecycle_fake::g_hookLive = false;
+    g.ordinaryFrame();
+    h.check(logged("engine motion: STOOD DOWN -- the emit hook is not installed (rig: kinematic-build-144312e00 refused)", mark),
+            "R6: the stand-down is logged when the hook goes");
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0);
+    {
+        ComPtr<ID3D11PixelShader> bound;
+        h.context->PSGetShader(&bound, nullptr, nullptr);
+        h.check(bound.Get() == g.ps.Get(), "R6: stood down, nothing is substituted");
+    }
+    h.check(!g.views(0), "R6: stood down, every view is refused");
+    const size_t windowMark = g_log.size();
+    g.endFrame(true);
+    h.check(logged("engine motion: STOOD DOWN", windowMark), "R6: the 30 s block repeats the stand-down");
+    line = lastLine(joined, windowMark);
+    h.check(number(line, "refused: stood down ") >= 1, "R6: the refusals counted");
+    mark = g_log.size();
+    lifecycle_fake::g_hookLive = true;
+    g.ordinaryFrame();
+    h.check(logged("engine-record velocity stands up", mark), "R6: installed again, it stands up");
+    g.ordinaryFrame();
+    g.frameWithViews(body, &e0, &e1);
+    h.check(e0 && e1, "R6: and gives again");
+    edvr::engineVelocityShutdown();
+    mark = g_log.size();
+    lifecycle_fake::g_hookLive = false;
+    edvr::engineVelocityConfigure(true);
+    h.check(logged("engine motion: STOOD DOWN -- the emit hook is not installed", mark), "R6: configure logs the stand-down");
+    edvr::engineVelocityShutdown();
+    lifecycle_fake::g_hookLive = true;
+
+    csStageSaveChecks(h);
+    edvr::g_clockForTest = nullptr;
+    if (g_verbose) for (const auto& l : g_log) std::printf("    log| %s\n", l.c_str());
+    std::printf("  lifecycle: engine_velocity.cpp's draw half on WARP -- re-maps, interleaved eyes, source swaps, pool "
+                "writes, blend states, depth formats, stand-down: every case as specified (%zu log lines)\n", g_log.size());
+}
+
+}  // namespace lifecycle_tests

@@ -1005,6 +1005,18 @@ void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept {
     emitObserver.store(fn,std::memory_order_release);
 }
 
+bool kinematicEvalEmitHookLive(const char** why) noexcept {
+    const char* reason=nullptr;
+    if(!g_evalEntry.ready.load(std::memory_order_acquire))
+        reason="the kinematic hook set is not installed; the tracker's attach line names why";
+    else if(!g_directEntries[0].ready.load(std::memory_order_acquire))
+        reason="CodeHook refused kinematic-build-144312e00; its own line names why";
+    else if(evalGate.load(std::memory_order_acquire)==0)
+        reason="the hook set's gate is closed (the tracker is detached), so the relay never calls the bracket";
+    if(why)*why=reason;
+    return reason==nullptr;
+}
+
 const char* kinematicEvalTrackerAttach() noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
