@@ -483,7 +483,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
-    "src\d3d11\mesh_motion.cpp" ^
     "src\d3d11\static_surface.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
@@ -1094,18 +1093,6 @@ if errorlevel 1 ( echo [edvr] ERROR: static surface controller test build failed
 "%OBJ%\staticsurfacetest\controller_test.exe" || exit /b 1
 exit /b 0
 
-:rig_static_surface_consumer_test
-echo [edvr] === static surface temporal consumer regression ===
-if not exist "%OBJ%\staticsurfaceconsumer" mkdir "%OBJ%\staticsurfaceconsumer"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\staticsurfaceconsumer\\" /Fe"%OBJ%\staticsurfaceconsumer\static_surface_consumer_test.exe" ^
-    "tools\static_surface_consumer_test\static_surface_consumer_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
-if errorlevel 1 ( echo [edvr] ERROR: static surface consumer test build failed & exit /b 1 )
-"%OBJ%\staticsurfaceconsumer\static_surface_consumer_test.exe" || exit /b 1
-exit /b 0
-
 :rig_native_deferred_ui
 echo [edvr] === native deferred UI regression ===
 if not exist "%OBJ%\uideferredtest" mkdir "%OBJ%\uideferredtest"
@@ -1160,14 +1147,6 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
     /link /INCREMENTAL:NO d3dcompiler.lib dxguid.lib || exit /b 1
 "%OBJ%\identityfusion\identity_fusion_test.exe" --self-test || exit /b 1
 python "tools\identity_fusion_capture.py" --self-test || exit /b 1
-if not exist "%OBJ%\meshmotion" mkdir "%OBJ%\meshmotion"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\meshmotion\\" /Fe"%OBJ%\meshmotion\mesh_motion_test.exe" ^
-    "tools\mesh_motion_test\mesh_motion_test.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\kinematic_eval_probe.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
-"%OBJ%\meshmotion\mesh_motion_test.exe" --self-test || exit /b 1
-python "tools\mesh_motion_probe.py" --self-test || exit /b 1
 if not exist "%OBJ%\nightvision" mkdir "%OBJ%\nightvision"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\nightvision\\" /Fe"%OBJ%\nightvision\night_vision_test.exe" ^
@@ -1919,16 +1898,6 @@ REM built at all, and a key assembled one field short reads as a plausible
 REM percentage. It fails HERE.
 python "%ROOT%\tools\draw_identity.py" --self-test || (
     echo [edvr] ERROR: the draw identity tool failed its own test
-    exit /b 1
-)
-
-echo [edvr] === pool pair self-test ===
-REM The reader of the object probe's raw pair dumps (edvr_logs\pool\*.bin,
-REM since 2026-09-08): the pose decode, the rigid clustering and the header
-REM layout it shares with src\d3d11\object_probe.cpp. A decode one field off
-REM reads as a plausible cloud of motions. It fails HERE.
-python "%ROOT%\tools\pool_pair.py" --self-test || (
-    echo [edvr] ERROR: the pool pair tool failed its own test
     exit /b 1
 )
 

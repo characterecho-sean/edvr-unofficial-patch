@@ -15,7 +15,7 @@
 
 namespace edvr {
 // Linker stubs for the hook-install paths (arm/finish/reset), which this
-// rig never calls; the pattern is set by mesh_motion_test.
+// rig never calls.
 const char* attachKinematicEvalHooks(KinematicEvalProbe*) noexcept {return "identity_mismatch";}
 void detachKinematicEvalHooks(KinematicEvalProbe*) noexcept {}
 bool kinematicEvalHooksMatch(uintptr_t) noexcept {return false;}

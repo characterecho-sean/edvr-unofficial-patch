@@ -24,12 +24,11 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format for main, and for mv's debug views the trained runtime's OUTPUT texture, which is LARGER under DLSS -- paintDebug, not O[id.xy]
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 pixels on a moving ship's path (tier 2, 2026-09-09); 40-45 the ships' claim by reason: 40 in a ship's footprint with a depth and not claimed, 41 of those outside the box at their depth, 42 behind the tail, 43 beyond the parts' reach, 44 the sum over 41 of (the pixel's depth less the box centre's) in decimetres (signed), 45 in a footprint with no depth
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 the mover mask's pixels; 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-54 the engine path's pixel kinds (mv only, gCount 48-52)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
 Texture2D<float> ZP : register(t3);      // last frame's ZC; movers.x or holoJitter.w validates it
 Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_depth.h), folded into MK when probe.z says it is bound
-Texture3D<float> BG : register(t5);      // the dominant body's occupancy grid over box0..box1 (tier 2), when tvSt.w says the body's path is on
 Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
 Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws
 Texture2D<float4> UP : register(t8);     // previous raw-raster UI colour; alpha is coverage, not opacity
@@ -39,10 +38,6 @@ struct TerrainRecord { uint4 key[12]; float4 q; float4 t; float4 r[3]; };
 Texture2D<float2> HC : register(t12);
 struct HoloRecord { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
 StructuredBuffer<HoloRecord> HR : register(t13);
-Texture2D<float2> MC : register(t15);
-StructuredBuffer<HoloRecord> MR : register(t16);
-Texture2D<uint4> ownerNow : register(t17);
-Texture2D<uint4> ownerPrev : register(t18);
 )HLSL"
 R"HLSL(
 // ENGINE_MOTION_HLSL_BEGIN
@@ -65,7 +60,7 @@ R"HLSL(
 // (no store in any of them), so a constant would false-match stack garbage.
 // It is the tag XOR a hash of the record's own two pose blocks, the same
 // hash engine_velocity_emit.h writes. The pose decode and turn() are the
-// pool vertex shaders' own (mesh_motion_shader.h: 1/32767, not 2/65535).
+// pool vertex shaders' own (1/32767, not 2/65535).
 //
 // The CORE between the two inner markers declares no resource: the on-foot
 // screen shader (screen_motion.h, kScreenMotionPs) is compiled with this same
@@ -199,30 +194,6 @@ cbuffer P : register(b0) {
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
     float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 terrain, 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path)
-    float4 stR0;        // the body's path (tier 2, docs/per-object-motion.md): the composite delta's rows,
-    float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
-    float4 stR2;
-    float4 tvSt;        // xyz its translation term; w 1 = the body's path is on this frame
-    float4 st2R0;       // the second body's path (object_probe.h, 2026-09-09): its composite delta's rows
-    float4 st2R1;
-    float4 st2R2;
-    float4 tv2St;       // xyz its translation term; w 1 = on this frame (its grid cells hold 128)
-    float4 st3R[36];    // the stepped parts' paths (object_probe.h, 2026-09-09): twelve composite deltas, one per
-    float4 tv3[12];     // multiple of the body's turn from kSteppedMin (-3) to kSteppedMax (8); w 1 = filled this frame
-    float4 objects;     // x the reach in metres (for the record; the grid already carries it); y the body's near floor, metres; z a moving ship's reach around each of its parts, squared
-    float4 wR0;         // the camera rows this frame, view -> world: xyz the row, w the position's component,
-    float4 wR1;         // so a view-space point v (the game's, z forward) sits at R v + c in the body's frame
-    float4 wR2;
-    float4 box0;        // xyz the body's box, low corner (world)
-    float4 box1;        // xyz ...high corner; the grid BG spans it
-    float4 ships;       // x the moving ships in hand this frame, 0..8 (object_probe.h, 2026-09-09): each on the body's path with its own motion, its box its claim, no grid
-    float4 shR[24];     // per ship, three rows of its composite delta (stR0..2's shape)
-    float4 shTv[8];     // xyz its translation term
-    float4 shBox0[8];   // xyz its box, low corner (world)
-    float4 shBox1[8];   // xyz ...high corner; w unused
-    float4 shDir[8];    // xyz the way the ship flies (unit, world; zero when unknown), w its tail plane: a point whose dot with xyz is under w is behind the ship -- its plume, which is not the ship's
-    float4 shParts[256];   // per ship kObjectShipParts of its parts' positions (xyz, this frame's frame), shBox0[i].w of them: the ship's claim is the space within objects.z (a reach, squared) of one
-    float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; empty when a corner is behind the eye), for the claim's counters
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
     float4 skip;        // the fovea's own-resolve early-out: x0 y0 x1 y1 in THIS render, all zero = no skip
     float4 lead;        // xy: how far the fovea crop's base slid THIS frame (render pixels, base_now - base_prev), added to the vectors written to ML for NVIDIA's crop alone; zero on every other dispatch. zw unused
@@ -356,134 +327,10 @@ float moverAt(float2 pp, float zPred, bool thick) {
     float tol = movers.y;
     return (zPred < zmin * (1.0 - tol) || zPred > zmax * (1.0 + tol)) ? 1.0 : 0.0;
 }
-// Tier 2 of docs/per-object-motion.md (2026-09-08): the dominant rigid
-// body's own motion -- a station's turn, read from the game's instance
-// pool by object_probe.cpp in the world frame the camera rows share -- as
-// a SECOND reprojection for the world path's pixels, taken by the pixels
-// that are the body's. Which pixels those are is a question of GEOMETRY,
-// not of matching: the first build chose per pixel by a 3x3 match against
-// last frame's image, and took under one pixel in a hundred, because the
-// history it matched against was accumulated at the camera's landing --
-// its smear is centred exactly there, and a comparison against it
-// confirms the camera every time; and a station ten kilometres off turns
-// its parts a tenth of a pixel a frame, under any test's reach. So the
-// pixel's own depth places it in the world, and the body's occupancy grid
-// (its parts' positions, each marking the cells within a reach of it) says
-// whether that place is the body's. No tag and no draw classification,
-// and no comparison; the pool's slots are re-ordered every frame (its
-// fourth flight), so nothing per instance can be trusted from one frame to
-// the next, but a turn shared by a thousand parts and the space they fill
-// can, and this is all it needs.
-int insideBody(float3 d, float z) {
-)HLSL"
-R"HLSL(
-    // The view-space point, the game's way round (z forward), into the
-    // world by this frame's camera rows, into the grid by the box.
-    float3 vg = float3(d.x * z, d.y * z, -d.z * z);
-    float3 w = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg)) +
-               float3(wR0.w, wR1.w, wR2.w);
-    float3 u = (w - box0.xyz) / max(box1.xyz - box0.xyz, 1e-3);
-    if (any(u < 0.0) || any(u >= 1.0)) return 0;
-    // kObjectGrid cells a side (object_probe.h): 255 the body's, 128 the
-    // second body's (ObjectMotion::body2), 64..75 a stepped part's multiple
-    // of the body's turn plus 67 (kSteppedCellBase), 0 the space between.
-    return int(BG.Load(int4(int3(u * 128.0), 0)) * 255.0 + 0.5);
-}
-)HLSL"
-R"HLSL(
-// The moving ships (object_probe.h, 2026-09-09): compact bodies with a box
-// each and no grid. The nearest whose box holds the pixel's world point
-// claims it, and the boxes are tested BEFORE the dominant body's grid: a
-// ship crossing the slot sits inside the station's cells too, and took the
-// station's turn there until the ships had paths of their own.
-int insideShip(float3 d, float z) {
-    float3 vg = float3(d.x * z, d.y * z, -d.z * z);
-    float3 w = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg)) +
-               float3(wR0.w, wR1.w, wR2.w);
-    int n = int(ships.x);
-    for (int i = 0; i < n; ++i) {
-        if (any(w < shBox0[i].xyz) || any(w > shBox1[i].xyz)) continue;
-        // Behind the tail (shDir says): the plume, which is particles
-        // left in space and not the ship's -- "rectangular artifacts in
-        // the smoke trail", the ships' second flight, 2026-09-09.
-        if (dot(w, shDir[i].xyz) < shDir[i].w) continue;
-        // ...and within the reach of one of its parts: the hull, not the
-        // box's empty corners nor a wall the ship skims.
-        int np = int(shBox0[i].w);
-        int base = i * 32;   // kObjectShipParts
-        bool hit = false;
-        for (int j = 0; j < np && !hit; ++j) {
-            float3 e = w - shParts[base + j].xyz;
-            if (dot(e, e) < objects.z) hit = true;
-        }
-        if (hit) return i;
-    }
-    return -1;
-}
-// For the objects view: the ship, if any, whose box this pixel's ray
-// passes through at some depth -- the ship's footprint on the image, so
-// a pixel in it that was not claimed can say why.
-int shipFootprint(float3 d) {
-    float3 o = float3(wR0.w, wR1.w, wR2.w);
-    float3 vg = float3(d.x, d.y, -d.z);
-    float3 r = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg));
-    int n = int(ships.x);
-    for (int i = 0; i < n; ++i) {
-        // A box the eye sits in -- a ship within thirty metres, or the
-        // player's own parts taken as one -- is nobody's footprint: every
-        // ray hits it, and the fourth flight's sky read teal whole.
-        if (all(o >= shBox0[i].xyz) && all(o <= shBox1[i].xyz)) continue;
-        float3 inv = 1.0 / (abs(r) > 1e-9 ? r : 1e-9);
-        float3 t1 = (shBox0[i].xyz - o) * inv;
-        float3 t2 = (shBox1[i].xyz - o) * inv;
-        float3 tlo = min(t1, t2);
-        float3 thi = max(t1, t2);
-        float tmin = max(max(tlo.x, tlo.y), tlo.z);
-        float tmax = min(min(thi.x, thi.y), thi.z);
-        if (tmax >= max(tmin, 0.0)) return i;
-    }
-    return -1;
-}
-// For the claim's counters (the registration line says): the ship whose
-// footprint rectangle holds this pixel, and why that ship refused the
-// pixel's world point -- 1 outside its box at this depth, 2 behind its
-// tail, 3 beyond its parts' reach -- and the view depth of its box centre.
-int shipRect(float2 p) {
-    int n = int(ships.x);
-    for (int i = 0; i < n; ++i) {
-        if (p.x >= shRect[i].x && p.y >= shRect[i].y && p.x <= shRect[i].z && p.y <= shRect[i].w) return i;
-    }
-    return -1;
-}
-int shipRefusal(float3 d, float z, int i) {
-    float3 vg = float3(d.x * z, d.y * z, -d.z * z);
-    float3 w = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg)) +
-               float3(wR0.w, wR1.w, wR2.w);
-    if (any(w < shBox0[i].xyz) || any(w > shBox1[i].xyz)) return 1;
-    if (dot(w, shDir[i].xyz) < shDir[i].w) return 2;
-    return 3;
-}
-float shipCentreZ(int i) {
-    float3 c = 0.5 * (shBox0[i].xyz + shBox1[i].xyz) - float3(wR0.w, wR1.w, wR2.w);
-    return dot(float3(wR0.z, wR1.z, wR2.z), c);
-}
-// bodyPixel's twin for ship i.
-bool shipPixel(int i, float3 d, float z, out float2 pp, out float zp) {
-    float3 dp = float3(dot(shR[i * 3].xyz, d), dot(shR[i * 3 + 1].xyz, d), dot(shR[i * 3 + 2].xyz, d)) * z +
-                shTv[i].xyz;
-    zp = -dp.z;
-    pp = 0.0;
-    if (dp.z >= -1e-6) return false;
-    float xt = dp.x / -dp.z;
-    float yt = dp.y / -dp.z;
-    pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
-    pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
-    return pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0;
-}
 // The interface's pixel, by ui_depth's coverage mask when it is bound
-// (probe.z), as far as the body's path is concerned. The mask's value is
+// (probe.z), as far as the surface paths are concerned. The mask's value is
 // NVIDIA's reactive strength, and its QUANTUM'S PARITY is ui_depth's word
-// on the path (floorBuffer there): even rides a turning body's path where
+// on the path (floorBuffer there): even rides the surface's own path where
 // the pixel sits on it -- a stroke drawn AT the surface, the docking
 // hologram over the hub's drum -- and odd keeps the camera's path at the
 // pixel's depth: the interface proper, the holo material's target markers,
@@ -591,24 +438,6 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
 }
 )HLSL"
 R"HLSL(
-// Rigid draw motion has priority over the distance-based camera fallback.
-// Test original depth at the same raster sample: a later foreground draw
-// or UI must never inherit an occluded hull's transform.
-bool meshPixel(float2 p,float2 offset,out float2 pp,out float zp) {
-    pp=0;zp=0;if(holoJitter.z==0)return false;
-    int2 q=region.xy+int2(round(p+offset));float2 cov=MC.Load(int3(q,0));uint index=uint(cov.x+.5);
-    if(index==0 || index>512 || uiCovered(q) || cov.y<=knobs.x || abs(zSceneAt(q)-cov.y)>abs(cov.y)*1e-6)return false;
-    HoloRecord r=MR[index-1];if(r.meta.w!=1)return false;
-    float z=knobs.z/(cov.y-knobs.x);
-    float2 ndc=(p+offset+region.xy+.5)/r.meta.yz*float2(2,-2)+float2(-1,1);
-    float4 current=float4(ndc*z,z,1);
-    float3 before=float3(dot(r.map[0],current),dot(r.map[1],current),dot(r.map[2],current));
-    if(before.z<=0 || !all(isfinite(before)))return false;
-    pp=(before.xy/before.z*float2(.5,-.5)+.5)*r.meta.yz-.5-region.xy+holoJitter.xy-offset;
-    zp=before.z;return all(isfinite(pp));
-}
-)HLSL"
-R"HLSL(
 // Engine-record motion (with fix.temporal_aa, phase 1; docs/kinematic-motion-
 // injection-2026-09-19.md, 2026-09-23 "Phase 1 built"). The kinds:
 //   0 no engine data at this pixel (unbound, unwritten, UI, screen);
@@ -622,9 +451,9 @@ R"HLSL(
 //     number -- arithmetic (a blend, a sum) reached MRT6; declined, never
 //     read as another record (the 2026-09-23 review, item 4).
 // The arithmetic is the ENGINE_MOTION_HLSL block near the top (the rig cuts
-// out and runs that same text). The ownership test is meshPixel's, but
-// exact: the slot's recorded depth must be the scene depth bit for bit. Jitter as meshPixel: the rows carry the raster
-// jitter, holoJitter.xy takes the current-minus-previous difference out.
+// out and runs that same text). The ownership test is exact: the slot's
+// recorded depth must be the scene depth bit for bit. The rows carry the
+// raster jitter; holoJitter.xy takes the current-minus-previous difference out.
 // haveZ (a literal at every call): the caller already holds the scene depth
 // at exactly this texel -- the mv pass's offset-zero call passes sceneZraw,
 // read from its depth tile at region.xy + id, which is q -- so it is not
@@ -734,33 +563,6 @@ bool terrainPixel(float2 p, float3 d, out float2 pp, out float zp) {
     pp.y=(tanPrev.w-before.y/zp)/(tanPrev.w-tanPrev.z)*size.y-0.5;
     return true;
 }
-// Where this pixel's surface was last frame if it moved with the body:
-// the camera's path composed with the body's turn. False when it lands
-// behind the eye or off the image.
-bool bodyPixelRows(float3 r0, float3 r1, float3 r2, float3 tv, float3 d, float z, out float2 pp, out float zp) {
-    float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d)) * z + tv;
-    zp = -dp.z;
-    pp = 0.0;
-    if (dp.z >= -1e-6) return false;
-    float xt = dp.x / -dp.z;
-    float yt = dp.y / -dp.z;
-    pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
-    pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
-    return pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0;
-}
-bool bodyPixel(float3 d, float z, out float2 pp, out float zp) {
-    return bodyPixelRows(stR0.xyz, stR1.xyz, stR2.xyz, tvSt.xyz, d, z, pp, zp);
-}
-// The second body's (object_probe.h, 2026-09-09): its own rows.
-bool bodyPixel2(float3 d, float z, out float2 pp, out float zp) {
-    return bodyPixelRows(st2R0.xyz, st2R1.xyz, st2R2.xyz, tv2St.xyz, d, z, pp, zp);
-}
-// A stepped part's (object_probe.h): the composite delta for its cell's
-// multiple of the body's turn, v the cell's byte (64..75).
-bool steppedPixel(int v, float3 d, float z, out float2 pp, out float zp) {
-    int e = v - 64;
-    return bodyPixelRows(st3R[e * 3].xyz, st3R[e * 3 + 1].xyz, st3R[e * 3 + 2].xyz, tv3[e].xyz, d, z, pp, zp);
-}
 )HLSL"
 R"HLSL(
 // zPred: the predicted view depth of this pixel's surface in last frame's
@@ -792,7 +594,6 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             return true;
         }
     }
-    float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
     // The world/ship split: the ship's own things (the cockpit, the hull)
     // move with the head's delta; everything farther than split.x metres,
     // and the far plane, moves with the game's CAMERA -- the head and the
@@ -834,17 +635,10 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             if (!far) {
                 dp = dp * z + tvCam.xyz;
                 zPred = -dp.z;
-                zBody = (tvSt.w != 0.0 || ships.x != 0.0) ? z : 0.0;
             }
         } else if (useDepth && !far) {
             dp = dp * z + tv;
             zPred = -dp.z;
-            // Inside the ship split but past the body's own floor
-            // (objects.y): a hangar's walls and floor turn with the station
-            // until the ship is latched to the pad, while the ship's own
-            // hull, within the floor as seen from the seat, does not
-            // (2026-09-09). The claim below decides by the grid as usual.
-            zBody = ((tvSt.w != 0.0 || ships.x != 0.0) && z > objects.y) ? z : 0.0;
         } else if (useDepth && far && split.w != 0.0 && split.z > 0.0) {
             // A menu-like scene's depthless pixels (the main menu's hangar
             // wall reads no depth and reprojected as the far plane, so it
@@ -868,13 +662,6 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             return true;
         }
     }
-    float2 meshP;float meshZ;
-    if(allowWorld && meshPixel(p,jit.xy,meshP,meshZ)) {
-        if(any(meshP<0) || any(meshP>float2(size)-1))return false;
-        mvOut=meshP-p;zPred=meshZ;world=0;
-        hy=rgbToYcocg(catmullRom((meshP+.5)/float2(size),float2(size)).rgb);
-        return true;
-    }
     if (dp.z >= -1e-6) return false;
     float xt = dp.x / -dp.z;
     float yt = dp.y / -dp.z;
@@ -892,65 +679,6 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     // of blend / (1 - blend) times that motion, about 0.7 px on slowly
     // drifting distant content, and differed across the image. The rest
     // lock, experimental.shimmer_rest, holds the pose at rest instead.)
-    // The body's path, where this pixel took the world path with a depth
-    // and that depth places it in the body (insideBody says). world = 2
-    // marks it for the counters and the debug view; the fetch below is
-    // the same either way.
-    if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
-        // A moving ship's box first (insideShip says why), the body's
-        // grid after; world = 3 marks a ship's pixel.
-        int si = ships.x != 0.0 ? insideShip(d, zBody) : -1;
-        bool taken = false;
-        if (si >= 0) {
-            float2 ppS;
-            float zpS;
-            if (shipPixel(si, d, zBody, ppS, zpS)) {
-                pp = ppS;
-                zPred = zpS;
-                world = 3;
-                taken = true;
-            }
-        }
-        // A ship's pixel whose prediction fell off the image is offered to
-        // the body's grid as before the ships (the review of 2026-09-09).
-        if (!taken && tvSt.w != 0.0) {
-            // 1 the body's cells, 2 the second body's: its own path when
-            // one is in hand, else the camera's (the body's would be wrong
-            // there by twice the turn). world = 4 marks the second body's.
-            int inb = insideBody(d, zBody);
-            float2 ppB;
-            float zpB;
-            if (inb == 128) {
-                if (tv2St.w != 0.0 && bodyPixel2(d, zBody, ppB, zpB)) {
-                    pp = ppB;
-                    zPred = zpB;
-                    world = 4;
-                }
-            } else if (inb >= 64 && inb < 76) {
-                // A stepped part's cell (object_probe.h): its own multiple
-                // of the body's turn this frame. world = 5 marks it. Counted
-                // straight into Stats (48 the cell hit, 49 the path refused):
-                // the flight of 18:00 stamped cells on every frame and no
-                // pixel took the path, and the counts say which half failed.
-#if EDVR_TEMPORAL_DIAGNOSTICS
-                InterlockedAdd(Stats[48], 1u);
-#endif
-                if (tv3[0].w != 0.0 && steppedPixel(inb, d, zBody, ppB, zpB)) {
-                    pp = ppB;
-                    zPred = zpB;
-                    world = 5;
-                } else {
-#if EDVR_TEMPORAL_DIAGNOSTICS
-                    InterlockedAdd(Stats[49], 1u);
-#endif
-                }
-            } else if (inb == 255 && bodyPixel(d, zBody, ppB, zpB)) {
-                pp = ppB;
-                zPred = zpB;
-                world = 2;
-            }
-        }
-    }
     float2 terrainP; float terrainZ;
     if (allowWorld && terrainPixel(p,d,terrainP,terrainZ)) {
         pp=terrainP; zPred=terrainZ; world=1;
@@ -985,8 +713,8 @@ R"HLSL(
 #if EDVR_TEMPORAL_DIAGNOSTICS
 // 0..47 are Stats' own slots; mv's 48..52 are engine-record motion's pixel
 // counts (joined, masked, a pool record that is not a rig record, stale
-// slot, corrupt slot code), flushed to Stats 50..54 (48/49 are main's
-// stepped-part slots).
+// slot, corrupt slot code), flushed to Stats 50..54 (48/49 were the
+// stepped-part path's, retired 2026-09-23).
 groupshared uint gCount[53];
 #endif
 // A debug view's pixel, painted into the OUTPUT rather than at this
@@ -1048,9 +776,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
-    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0, count39 = 0, count46 = 0, count47 = 0;
-    uint count40 = 0, count41 = 0, count42 = 0, count43 = 0, count45 = 0;
-    int count44 = 0;
+    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -1063,9 +789,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         const float sceneZraw = zraw;
         float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
         uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
-        float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
-        bool farPx = true;   // the objects view's reasons: no depth here...
-        float zPx = 0.0;     // ...and the depth otherwise
         if (knobs.y != 0.0) {
             float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
@@ -1078,8 +801,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
             bool far = zr <= 0.0 || den <= 0.0;
             float z = far ? 0.0 : knobs.z / den;
-            farPx = far;
-            zPx = z;
             bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
             // The scanner's interface keeps the head's path (fetchHistoryT says).
             bool scannerUi = (uint(probe.w + 0.5) & 128u) != 0u && uiCovered(region.xy + int2(p));
@@ -1089,12 +810,10 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 if (!far) {
                     dp = dp * z + tvCam.xyz;
                     zPred = -dp.z;
-                    zBody = (tvSt.w != 0.0 || ships.x != 0.0) ? z : 0.0;
                 }
             } else if (!far) {
                 dp = dp * z + tvUsed.xyz;
                 zPred = -dp.z;
-                zBody = ((tvSt.w != 0.0 || ships.x != 0.0) && z > objects.y) ? z : 0.0;   // past the body's floor (fetchHistoryT says)
             } else if (split.w != 0.0 && split.z > 0.0) {
                 dp = dp * split.z + tvUsed.xyz;   // the menu's assumed depth (fetchHistoryT says)
             }
@@ -1109,7 +828,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         bool trackedForeground = false;
         uint decisionPath = 0u;
         bool projectionValid = false;
-        bool staticConfirmed = false;
         bool worldAvailable = tvCam.w != 0.0 && split.x > 0.0 && knobs.y != 0.0;
         if (dp.z < -1e-6) {
             float xt = dp.x / -dp.z;
@@ -1120,92 +838,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             motion = pp - p;
             decisionPath = count15 != 0 ? 2u : 1u;
             projectionValid = true;
-            // The body's path for the pixels the body's grid claims, the
-            // interface's excepted.
-            if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
-                int si = ships.x != 0.0 ? insideShip(d, zBody) : -1;
-                bool taken = false;
-                if (si >= 0) {
-                    float2 ppS;
-                    float zpS;
-                    if (shipPixel(si, d, zBody, ppS, zpS)) {
-                        pp = ppS;
-                        motion = pp - p;
-                        zPred = zpS;
-                        count39 = 1;
-                        decisionPath = 3u;
-                        taken = true;
-                    }
-                }
-                if (!taken && tvSt.w != 0.0) {
-                    int inb = insideBody(d, zBody);   // 128 = the second body's cells, 64..75 a stepped part's
-                    float2 ppB;
-                    float zpB;
-                    if (inb == 128) {
-                        if (tv2St.w != 0.0 && bodyPixel2(d, zBody, ppB, zpB)) {
-                            pp = ppB;
-                            motion = pp - p;
-                            zPred = zpB;
-                            count46 = 1;
-                            decisionPath = 5u;
-                        }
-                    } else if (inb >= 64 && inb < 76) {
-                        if (tv3[0].w != 0.0 && steppedPixel(inb, d, zBody, ppB, zpB)) {
-                            pp = ppB;
-                            motion = pp - p;
-                            zPred = zpB;
-                            count47 = 1;
-                            decisionPath = 6u;
-                        }
-                    } else if (inb == 255 && bodyPixel(d, zBody, ppB, zpB)) {
-                        pp = ppB;
-                        motion = pp - p;
-                        zPred = zpB;
-                        count29 = 1;
-                        decisionPath = 4u;
-                    }
-                }
-            }
-            // A rigid surface owner match can promote only a coarse body
-            // proposal. It uses the exact centre depth and the raw previous
-            // coordinate; no neighbourhood erosion or dilated depth is
-            // allowed to manufacture a match.
-            if (haveHistory != 0 && (uint(probe.w + 0.5) & 256u) != 0u &&
-                decisionPath >= 3u && decisionPath <= 6u &&
-                worldAvailable && count15 != 0u &&
-                !uiCovered(region.xy + int2(p)) && isfinite(sceneZraw) &&
-                sceneZraw > knobs.x) {
-                float zactual = knobs.z / (sceneZraw - knobs.x);
-                if (isfinite(zactual) && zactual > split.x) {
-                    uint4 nowOwner = ownerNow.Load(int3(region.xy + int2(id.xy), 0));
-                    if ((nowOwner.x | nowOwner.y | nowOwner.z) != 0u &&
-                        asfloat(nowOwner.w) == sceneZraw) {
-                        float3 worldPP = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d),
-                                                dot(c2R2.xyz, d)) * zactual + tvCam.xyz;
-                        if (worldPP.z < -1e-6) {
-                            float xt = worldPP.x / -worldPP.z;
-                            float yt = worldPP.y / -worldPP.z;
-                            float2 rawPrev;
-                            rawPrev.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
-                            rawPrev.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
-                            int2 prevQ = int2(round(rawPrev - holoJitter.xy));
-                            if (all(prevQ >= 0) && all(prevQ < size)) {
-                                uint4 prevOwner = ownerPrev.Load(int3(prevQ, 0));
-                                if ((prevOwner.x | prevOwner.y | prevOwner.z) != 0u &&
-                                    (prevOwner.x == nowOwner.x && prevOwner.y == nowOwner.y &&
-                                     prevOwner.z == nowOwner.z) && isfinite(asfloat(prevOwner.w)) &&
-                                    asfloat(prevOwner.w) > knobs.x) {
-                                    pp = rawPrev;
-                                    motion = rawPrev - p;
-                                    zPred = -worldPP.z;
-                                    decisionPath = 2u;
-                                    staticConfirmed = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
             float2 terrainP; float terrainZ;
             if (terrainPixel(p,d,terrainP,terrainZ)) {
                 pp=terrainP; motion=pp-p; zPred=terrainZ;
@@ -1217,31 +849,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 trackedForeground=true;
                 decisionPath=8u;
             }
-            // The ships' claim, counted (Stats 40-45, the registration
-            // line): a pixel in a ship's footprint the ship did not claim,
-            // and why.
-            if (ships.x != 0.0 && count39 == 0) {
-                int fr = shipRect(p);
-                if (fr >= 0) {
-                    if (farPx) {
-                        count45 = 1;
-                    } else if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
-                        count40 = 1;
-                        int why = shipRefusal(d, zBody, fr);
-                        if (why == 1) {
-                            count41 = 1;
-                            // Clamped to a hundred metres either way: a footprint over a
-                            // station two kilometres behind the ship summed past 2^31 in
-                            // one frame (the review of 2026-09-09).
-                            count44 = int(round(clamp((zBody - shipCentreZ(fr)) * 10.0, -1000.0, 1000.0)));
-                        } else if (why == 2) {
-                            count42 = 1;
-                        } else {
-                            count43 = 1;
-                        }
-                    }
-                }
-            }
             // The mover mask, where the prediction lands on last frame's
             // image (off it NVIDIA has no history to bias against anyway).
             if (movers.x != 0.0 && pp.x >= 0.0 && pp.y >= 0.0 &&
@@ -1249,13 +856,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 mover = moverAt(pp, zPred, depthN >= 6);
                 if (mover != 0.0) count28 = 1;
             }
-        }
-        float2 meshP;float meshZ;
-        if(meshPixel(p,0,meshP,meshZ)) {
-            motion=meshP-p;zPred=meshZ;
-            trackedForeground=true;
-            decisionPath=9u;projectionValid=true;
-            mover=movers.x!=0 && all(meshP>=0) && all(meshP<float2(size)) ? moverAt(meshP,meshZ,depthN>=6):0;
         }
         if((uint(probe.w+.5)&32u)!=0u) {
             float4 s=Screen.Load(int3(region.xy+int2(p),0));
@@ -1272,8 +872,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 R"HLSL(
         // Engine-record motion LAST (with fix.temporal_aa, probe.w 2048): a
         // pixel the game's own substituted pool draw owns takes the record's
-        // exact motion over every estimate above (the body/ship paths, mesh,
-        // the rigid-owner promotion); a masked one keeps no history. Unbound,
+        // exact motion over every path above; a masked one keeps no history
+        // (the estimated body, ship and mesh paths retired 2026-09-23). Unbound,
         // the call returns 0 before any load and the path is byte-identical.
         bool engineMasked = false;
         float2 engineP; float engineZ;
@@ -1327,8 +927,7 @@ R"HLSL(
         uint decisionFlags=decisionPath | (hidden?16u:0u) |
             (decisionPath==10u && !projectionValid?32u:0u) | (uiHere?64u:0u) |
             (worldAvailable?128u:0u) | (depthValid?256u:0u) |
-            (trackedForeground?512u:0u) | (projectionValid?1024u:0u) |
-            (staticConfirmed?2048u:0u);
+            (trackedForeground?512u:0u) | (projectionValid?1024u:0u);   // 2048 (static_confirmed) retired with the rigid-owner promotion
         DT[id.xy]=float4(decisionMotion,decisionDepth,float(decisionFlags));
 #else
         ML[id.xy] = written + lead.xy;
@@ -1418,43 +1017,6 @@ R"HLSL(
             paintDebug(id.xy, size,
                        float3(saturate(0.5 + motion.x / 16.0), saturate(0.5 + motion.y / 16.0),
                               count15 != 0 ? 1.0 : 0.0));
-        } else if (split.y == 4.0) {
-            // The mover view: the mask white over the frame dimmed, so a
-            // screenshot in the slot shows the rim's edges and nothing else.
-            // Painted the way main's views are, into the output's own size.
-            float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
-            paintDebug(id.xy, size, mover != 0.0 ? float3(1.0, 1.0, 1.0) : dim);
-        } else if (split.y == 5.0) {
-            // The objects view, by reason (2026-09-09, for reading an eye
-            // dump off the desk): white where the body's path was taken;
-            // where the world path had it and the body's path is on, blue
-            // for no depth (the far plane), green for the interface's mask,
-            // red for a depth that lands outside the body's cells, yellow
-            // for one inside them whose prediction fell off the image; the
-            // frame dimmed elsewhere (the ship's path, or the body off).
-            float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
-            float3 o5 = dim;
-            if (count39 != 0) {
-                o5 = float3(0.0, 1.0, 1.0);   // cyan: a moving ship's path
-            } else if (count29 != 0) {
-                o5 = float3(1.0, 1.0, 1.0);
-            } else if (count46 != 0) {
-                o5 = float3(0.7, 0.7, 0.7);   // grey: the second body's path (object_probe.h)
-            } else if (count47 != 0) {
-                o5 = float3(1.0, 0.55, 0.0);   // orange: a stepped part on its own multiple of the turn (object_probe.h)
-            } else if (count15 != 0 && (tvSt.w != 0.0 || ships.x != 0.0)) {
-                // In a moving ship's footprint but not the ship's: teal with
-                // no depth at all, magenta with a depth the claim refused
-                // (outside the box at that depth, behind the tail, or beyond
-                // its parts' reach).
-                int fs = ships.x != 0.0 ? shipFootprint(d) : -1;
-                if (farPx) o5 = fs >= 0 ? float3(0.0, 0.5, 0.5) : float3(0.0, 0.3, 1.0);
-                else if (uiCovered(region.xy + int2(p))) o5 = float3(0.0, 1.0, 0.0);
-                else if (fs >= 0) o5 = float3(1.0, 0.0, 1.0);
-                else if (insideBody(d, zPx) == 0) o5 = float3(1.0, 0.0, 0.0);
-                else o5 = float3(1.0, 1.0, 0.0);
-            }
-            paintDebug(id.xy, size, o5);
         } else if (split.y == 3.0) {
             float zs3 = zSceneAt(region.xy + int2(p));
             float3 o3;
@@ -1502,16 +1064,6 @@ R"HLSL(
     if (count16 != 0) InterlockedAdd(gCount[16], count16);
     if (count17 != 0) InterlockedAdd(gCount[17], count17);
     if (count28 != 0) InterlockedAdd(gCount[28], count28);
-    if (count29 != 0) InterlockedAdd(gCount[29], count29);
-    if (count46 != 0) InterlockedAdd(gCount[46], count46);
-    if (count47 != 0) InterlockedAdd(gCount[47], count47);
-    if (count39 != 0) InterlockedAdd(gCount[39], count39);
-    if (count40 != 0) InterlockedAdd(gCount[40], count40);
-    if (count41 != 0) InterlockedAdd(gCount[41], count41);
-    if (count42 != 0) InterlockedAdd(gCount[42], count42);
-    if (count43 != 0) InterlockedAdd(gCount[43], count43);
-    if (count44 != 0) InterlockedAdd(gCount[44], asuint(count44));
-    if (count45 != 0) InterlockedAdd(gCount[45], count45);
     GroupMemoryBarrierWithGroupSync();
 #endif
     // Only the counters that moved. A group whose counters are all zero --
@@ -1640,10 +1192,6 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                               knobs.y != 0.0 && tvUsed.w != 0.0, true, worldTaken, mvUsed, zPred,
                               depthN, hy)) {
                 if (worldTaken != 0) count[15] = 1;
-                if (worldTaken == 2) count[29] = 1;   // the body's path taken
-                if (worldTaken == 4) count[46] = 1;   // the second body's
-                if (worldTaken == 5) count[47] = 1;   // a stepped part's
-                if (worldTaken == 3) count[39] = 1;   // a moving ship's
                 // The mover mask (moverAt says): a masked pixel keeps less
                 // of its history, by the strength -- at 1 it is the fresh
 )HLSL"
@@ -1805,15 +1353,6 @@ R"HLSL(
                        worldTaken != 0 ? 1.0 : 0.0);
         } else if (split.y == 2.0) {
             o = errUsed.xxx;
-        } else if (split.y == 4.0) {
-            // The mover view: the mask white over the frame dimmed.
-            o = mover != 0.0 ? float3(1.0, 1.0, 1.0) : cur.rgb * 0.25;
-        } else if (split.y == 5.0) {
-            // The objects view: the pixels that took the body's path.
-            o = worldTaken == 2 ? float3(1.0, 1.0, 1.0)
-              : worldTaken == 4 ? float3(0.7, 0.7, 0.7)   // the second body's path grey
-              : worldTaken == 5 ? float3(1.0, 0.55, 0.0)  // a stepped part's path orange
-              : worldTaken == 3 ? float3(0.0, 1.0, 1.0) : cur.rgb * 0.25;   // a moving ship's path cyan
         } else if (split.y == 3.0) {
             // The depth view: where each pixel's depth comes from -- the
             // scene's in grey by distance (near bright, log scale to

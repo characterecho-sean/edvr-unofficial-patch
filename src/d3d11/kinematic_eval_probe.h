@@ -133,10 +133,10 @@ public:
         uint32_t recordId=0,frame=0,kind=0,gapLen=0;
         uint64_t oldNode=0,newNode=0;
     };
-    // One present-clock vs mesh-clock sample, appended once per owned
-    // Present: the mesh-staleness discriminator (flight 083323: 3 mesh
-    // ticks in ~51 rendered frames).
-    struct ClockSample {uint32_t present=0,mesh=0;};
+    // One present-clock sample, appended once per owned Present while
+    // armed (the mesh clock it was once compared against retired with mesh
+    // motion on 2026-09-23).
+    struct ClockSample {uint32_t present=0;};
     struct Summary {
         uint64_t observed=0;uint32_t stored=0;
         uint64_t readFaults=0,recordOverflow=0,transitionOverflow=0,vtableOverflow=0;
@@ -165,7 +165,7 @@ public:
     // device_hook. Replaces setFrame as the clock source (the mesh clock
     // was refuted by flight 083323). Gated on active like the rest of the
     // probe: the clock log lives and dies with the capture lifecycle.
-    void notePresentFrame(uint32_t presentFrame,uint32_t meshClock) noexcept;
+    void notePresentFrame(uint32_t presentFrame) noexcept;
     bool active() const noexcept{return active_.load(std::memory_order_acquire);}
     HookStatus hookStatus() const noexcept{return hookStatus_;}
     const char* hookStatusText() const noexcept;

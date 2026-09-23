@@ -74,7 +74,6 @@
 #include "ui_layer_math.h"
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"
-#include "mesh_motion.h"
 #include "object_classification_probe.h"
 #include "static_surface.h"
 #include "engine_velocity.h"
@@ -112,21 +111,16 @@ namespace {
 // nullptr invalidates every cached input (command-list execution); otherwise
 // only writes to a source instance, bone or camera buffer invalidate them.
 //
-// Reached from every Unmap, Copy and Update on the owner context, so the two
-// callees below whose own first tests are published state are asked inline
-// first (/O2, no /GL: each was a cross-TU call per write). Both tests are the
+// Reached from every Unmap, Copy and Update on the owner context, so the
+// callee below whose own first test is published state is asked inline
+// first (/O2, no /GL: it was a cross-TU call per write). The test is the
 // callee's own, word for word, so the calls skipped are exactly the ones that
 // would return having done nothing:
-//   meshMotionResourceWritten (mesh_motion.cpp) flushes when pendingCount,
-//   clears its depth metadata on a null resource, and otherwise returns at
-//   `!enabled` before anything else;
 //   staticSurfaceResourceWritten (static_surface.cpp) returns at
 //   `!enabled.load()` before anything else.
 static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
     if(!resource && objectClassificationProbe.active())objectClassificationProbe.unknownWrites();
     weaponMotionResourceWritten(resource);
-    if(!resource || mesh_motion_detail::pendingCount || mesh_motion_detail::enabled)
-        meshMotionResourceWritten(resource,first,end);
     if(static_surface_detail::enabled.load())staticSurfaceResourceWritten(resource,first,end);
     uiDepthMotionResourceWritten(resource,first,end);
     // Engine-record velocity: a write to an open eye-frame's pool or scene
@@ -3302,9 +3296,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         if(type!=D3D11_MAP_READ && objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         return s->realMap(self, res, sub, type, flags, mapped);
     }
-    // Nothing captured is waiting to flush (mesh_motion.h): the call would
-    // only re-test pending.count and return.
-    if (meshMotionAnyPending()) meshMotionBeforeMap(res);
     if(type!=D3D11_MAP_READ && uiDeferredResourceWriteLive())uiDeferredResourceWrite(self,res);
     // Timed, not touched: the wait inside the runtime's Map is the game's
     // stall on the GPU, and the native timing line reports it (map_wait.h).
@@ -4782,11 +4773,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
                 screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             }
-            // meshMotionLive() is meshMotionDraw's own first reject, inline
-            // (mesh_motion.h names the census reader and why skipping the
-            // call while the feature is off silences nothing).
-            if (meshMotionLive() && !uiLayerRedirecting())
-                meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
         }
         return true;  // the original draw was issued
     });
@@ -5681,7 +5667,6 @@ void vScreenFrameBoundary() {
         uiLayerFrameBoundary(g_state->ownerCtx);
         screenMotionFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
-        meshMotionFrameBoundary(g_state->ownerCtx);
         staticSurfaceFrameBoundary(g_state->ownerCtx);
         engineVelocityFrameBoundary(g_state->ownerCtx);
         // The sharpening's warm compile and missing-hook note, once a frame,
@@ -7027,7 +7012,6 @@ void shutdownVScreenFixes() {
     screenMotionShutdown();
     nightVisionShutdown();
     celestialMotionShutdown();
-    meshMotionShutdown();
     staticSurfaceShutdown();
     scrimShutdown();
     quadProbeShutdown();

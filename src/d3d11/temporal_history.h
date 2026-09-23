@@ -12,7 +12,7 @@ struct TemporalHistoryEntry {
     // 0 refused, 1 native TAA, 2 full NVIDIA, 3 native + NVIDIA fovea.
     uint32_t output = 0;
     float jitterX = 0, jitterY = 0;
-    float worldTranslation[3] = {}, bodyTranslation[3] = {};
+    float worldTranslation[3] = {};
     // Retrospective camera-row provenance. The temporal path still uses one
     // shared selection; these fields only preserve which write it selected and
     // the first recognised rigid scene draw tagged for this entry's eye. `c`

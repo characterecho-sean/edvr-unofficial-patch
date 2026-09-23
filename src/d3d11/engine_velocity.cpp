@@ -1046,7 +1046,7 @@ void summaryLocked(uint64_t now) {
                     r(g_emit.gapsUnevaluated),
                     g_diagnosticsWanted.load(std::memory_order_relaxed)
                         ? "" : " (the census is off: it runs only with engine motion's diagnostics -- "
-                               "advanced.temporal_aa_diagnostics, the movers view or an eye run; these zeros are not counts)");
+                               "advanced.temporal_aa_diagnostics or an eye run; these zeros are not counts)");
     // The legacy tracker's price (the 2026-09-23 performance review, item 1):
     // diagnostic-only now, measured whenever it runs.
     {
@@ -1062,8 +1062,8 @@ void summaryLocked(uint64_t now) {
                             double(c.presentTicks) * 1e3 / f / double(std::max<uint64_t>(1, c.presentScans)),
                             u(c.presentScans));
         else
-            Log::get().note("engine motion: tracker off (diagnostic-only: advanced.temporal_aa_diagnostics, the movers "
-                            "view or an eye run turn it on): no evaluations observed, no Present scan.");
+            Log::get().note("engine motion: tracker off (diagnostic-only: advanced.temporal_aa_diagnostics or an eye "
+                            "run turns it on): no evaluations observed, no Present scan.");
     }
     uint64_t invalid = 0;
     for (uint64_t v : g_draw.invalid) invalid += v;

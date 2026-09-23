@@ -102,7 +102,7 @@ void KinematicEvalProbe::setFrame(uint32_t meshFrame) noexcept {
     flushFrameStatsLocked();
 }
 
-void KinematicEvalProbe::notePresentFrame(uint32_t presentFrame,uint32_t meshClock) noexcept {
+void KinematicEvalProbe::notePresentFrame(uint32_t presentFrame) noexcept {
     // Gated on active like the rest of the probe: the clock log lives and
     // dies with the capture lifecycle rather than running unarmed.
     if(!active_.load(std::memory_order_acquire))return;
@@ -119,12 +119,8 @@ void KinematicEvalProbe::notePresentFrame(uint32_t presentFrame,uint32_t meshClo
         const uint32_t prev=frame_.exchange(presentFrame,std::memory_order_acq_rel);
         if(prev!=presentFrame)flushFrameStatsLocked();
     }
-    // The mesh counter resets to 0 on every config re-poll (meshMotionShutdown
-    // via the once-per-second re-configure), so absolute mesh values are
-    // only meaningful between configure events; the per-window
-    // mesh-vs-present ratio is the signal.
     if(clockSamples_.size()<kClockSampleCap) {
-        ClockSample c;c.present=presentFrame;c.mesh=meshClock;
+        ClockSample c;c.present=presentFrame;
         clockSamples_.push_back(c);
     } else ++summary_.clockSampleOverflow;
 }
@@ -695,8 +691,7 @@ void KinematicEvalProbe::writeJson(std::ostringstream& j) const {
     j<<"],\"clock_samples\":[";
     for(size_t i=0;i<clockSamples_.size();++i) {
         if(i)j<<',';
-        j<<"{\"present\":"<<clockSamples_[i].present
-         <<",\"mesh\":"<<clockSamples_[i].mesh<<'}';
+        j<<"{\"present\":"<<clockSamples_[i].present<<'}';
     }
     // Per-session counters (relaxed atomics written outside this mutex): a
     // torn cross-field read is acceptable -- flight analysis reads orders
@@ -841,9 +836,9 @@ void KinematicEvalProbe::selfTestPopulateForJson() noexcept {
     e2.oldNode=0x1111222233334444ull;e2.newNode=0x99990000AAAABBBBull;
     events_.push_back(e2);
 
-    // Same mesh value twice: the staleness signature from flight 083323.
-    ClockSample c1{};c1.present=1001u;c1.mesh=13081u;clockSamples_.push_back(c1);
-    ClockSample c2{};c2.present=1002u;c2.mesh=13081u;clockSamples_.push_back(c2);
+    // Two consecutive present ticks.
+    ClockSample c1{};c1.present=1001u;clockSamples_.push_back(c1);
+    ClockSample c2{};c2.present=1002u;clockSamples_.push_back(c2);
 
     jobs_[0].calls.store(2,std::memory_order_relaxed);
     jobs_[0].totalNs.store(1000,std::memory_order_relaxed);

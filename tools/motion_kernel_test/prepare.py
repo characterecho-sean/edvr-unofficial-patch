@@ -40,33 +40,22 @@ for case in range(20):
   struct.pack_into('<'+('i' if integer else 'f')*count,buf,off,*values)
  put('region',[ox,oy,ox+w,oy+h]);put('size',[w,h]);put('texSize',[tw,th])
  put('tanNow',[-1.5,1,-1.2,1.2]);put('tanPrev',[-1.5,1,-1.2,1.2]);put('jit',[-.375,.22,1,.5])
- for prefix in ['dR','c2R','stR','st2R','wR']:
+ for prefix in ['dR','c2R']:
   for i in range(3):
    name=prefix+str(i)
    if name in offsets:put(name,[int(i==0),int(i==1),int(i==2),0])
  put('tvUsed',[.015,-.008,.002,1]);put('tvCam',[.12,.03,-.07,case%3!=0])
- put('tvSt',[.5,-.1,.02,1]);put('tv2St',[-.25,.05,0,1]);put('knobs',[0,case!=18,.025,50000])
- put('split',[10,0,0,0]);put('objects',[1500,30,900,0]);put('probe',[2,1,1,6])
- put('box0',[-1024,-1024,-1024,0]);put('box1',[1024,1024,1024,0])
+ put('knobs',[0,case!=18,.025,50000])
+ put('split',[10,0,0,0]);put('probe',[2,1,1,6])
  # Previous-depth disagreement exercises the optional mover rejection path.
  put('movers',[case%2,1,.65,0])
- if case>=15:
-  put('tvSt',[0,0,0,0]);put('ships',[1,0,0,0])
-  for name,shape,first in [('shR',(24,4),[[1,0,0,0],[0,1,0,0],[0,0,1,0]]),
-                           ('shTv',(8,4),[[.5,-.2,0,1]]),
-                           ('shBox0',(8,4),[[-1024,-1024,-1024,1]]),
-                           ('shBox1',(8,4),[[1024,1024,1024,0]]),
-                           ('shParts',(256,4),[[0,0,50,0]]),
-                           ('shRect',(8,4),[[0,0,w,h]])]:
-   a=np.zeros(shape);a[:len(first)]=first;put(name,a)
-  put('objects',[1500,30,1e7,0])
  rng=np.random.default_rng(7141+case)
  colour=rng.integers(0,256,(th,tw,4),dtype=np.uint8);colour[...,3]=255;colour.tofile(d/'colour.bin')
  rng.integers(0,256,(oh,ow,4),dtype=np.uint8).tofile(d/'history.bin')
  for k in ['depth','smoke','ui_depth']:
   z=rng.choice([0,0,0,.000001,.0005,.0025,.025,.08],(th,tw)).astype('<f4')
   if case>=10:
-   # Coherent far geometry must actually exercise body/ship transforms;
+   # Coherent far geometry exercises the world path's depth layering;
    # per-pixel random near depths would dominate almost every 3x3.
    yy,xx=np.indices((th,tw));z=np.where((xx//17+yy//13)%3,.0005,0).astype('<f4')
   if k!='depth' and case<5:z.fill(0)
