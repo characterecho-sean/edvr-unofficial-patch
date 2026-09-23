@@ -14,14 +14,15 @@
   B' on evidence — the hiding surface is 89.6% open panels, qualified
   solid occluders remove zero draws — and no cull code was built
   ("Gate probe flown", "Probe v2 flown"). The settlement LOD governor
-  has flown five times (2 shadow, 3 acting): held k 2.70-2.75, then
+  has flown seven times (2 shadow, 5 acting): held k 2.70-2.75, then
   90 Hz for 90 s before capping (fixed via k_max 6); the shipped
   build confirms the ramp/gate/reduced-menu but under-reacts near the
-  operating point; refinement 3 shipped, but its flight ran in
-  "reduced" by accident -- saturated at k 6, +1-1.5 ms vs 03:45, a
-  half-rate trap unexplained; refinement 4 (real slot outcome,
-  asymmetric steps, k_max kick, ceiling log) IN BUILD, not merged
-  ("Two more governor flights", "Refinement 3 flight").
+  operating point; a reduced-by-accident flight saturated at k 6 with
+  a half-rate trap unexplained; a close-range auto flight found the
+  LOD lever INERT there (~4 of ~4,800 parts dropped at k 6, vs 532 of
+  9.6k on the pad) -- elasticity is a property of view distance, not
+  k; refinement 4 (+4b's inert-lever detection) IN BUILD, not merged
+  ("Refinement 3 flight", "The LOD lever is INERT at close range").
 
 * **Levers still open:** the draw count, now via the LOD governor's
   acting mode (flown once, in refinement); the last ~0.4-0.6 ms of EDVR's own per-draw
@@ -55,10 +56,9 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next flight:** refinement 4, in AUTO (set the F8 row back),
-  slider default, material quality 0 for a minute then 3 to
-  attribute the millisecond; expect the kick and recovery to full
-  rate, or the ceiling line.
+* **Next flight:** the refinement-4 build, auto, parked ON THE PAD
+  (lat 68.067474 lon 121.028328 heading 42) so the lever has
+  something to bite, material quality 0 for a minute then 3.
 
 ## Frame budget philosophy
 
@@ -3169,3 +3169,80 @@ Next flight: refinement 4, in AUTO (set the F8 row back), slider
 default, material quality 0 for a minute then 3 to attribute the
 millisecond; expect the kick and the recovery to full rate, or the
 ceiling line.
+
+### 2026-09-23 -- The LOD lever is INERT at close range: the 05:53 auto flight parked near the buildings, not the pad, and the governor thinned nothing
+
+Build v0.17.0-382-g8ce12926 (refinement 3), 05:53-06:02 local, gfx
+log edvr_gfx_20260923_055323.log, runtime log
+edvr_openxr_20260923_055324_909_24412.log. fix.settlement_detail =
+auto (the F8 row set back), slider default (s = 1.000), MaterialQuality
+0, BlurEnabled false. "Approx the same spot" per Sean, but by the
+counts a spot much closer to the buildings than the pad.
+
+05:53-05:58: the headset idle (runtime cycles 77.8 ms, next-wait
+72 ms; 12.9 fps; not evidence). 05:59:27 the settlement's records
+begin (599.2/frame in the window ending 05:59:54, 680 from 06:00:24).
+
+**Approach and landing** (05:59:24-06:00:27): caller work 6.8-7.8 ms
+mean, over 9-54 of ~2,600 samples, runtime windows 87.7 / 88.3 /
+86.5 fps (cycle p50 11.12-11.14); eye A parts tested 3,082 -> 5,693
+per frame, engine passed 159 -> 3,167 (approaching: far parts fail
+the screen-size term); k briefly 1.10 then back to 1.00.
+
+**The ramp.** Landed ~06:00:27 at caller work 12.51 ms (first step
+line). 06:00:27 up 0.05 (3/30 over); 06:00:32 up 0.25 to 1.40 (12/30,
+mean 1.07 over); 06:00:37 up 0.25 to 2.45 (26/30, mean 1.56 over);
+06:00:42 down to 3.00; fine steps up through 3.25, 3.40, 3.65, 4.10
+(a down at 4.25), 4.20, 4.35, 4.60, 4.85, 5.10; up 0.25 to 5.55 at
+06:01:39; k_max 6.00 by ~06:01:50; then downs 5.95, 5.85, 5.60, 5.55,
+an up to 5.80, down to 5.65 (06:02:22).
+
+**Windows** (end local; frames (fps); k; caller work mean ms;
+over/under):
+
+| end | frames (fps) | k | caller work | over/under |
+|---|---|---|---|---|
+| 06:00:54 | 1,863 (62) | 1.00 -> 3.45 (24 up, 7 by 0.25; 3 down) | 10.72 | 545/776 |
+| 06:01:24 | 1,881 | -> 4.60 (24 up, 1 by 0.25; 5 down) | 10.53 | 390/772 |
+| 06:01:54 | 1,826 | -> 6.00 (19 up, 3 by 0.25) | 11.06 | 503/479 |
+| 06:02:24 | 2,330 (78) | 5.95 (11 up, 16 down) | 10.02 | 188/1,456 |
+
+**Runtime windows** (cycle mean (p50) ms): 06:00:54 17.69 (21.58,
+half rate typical); 06:01:24 15.50 (11.62); 06:01:54 16.12 (11.85)
+and 16.09 (11.98); 06:02:24 17.86 (21.56); 06:02:54 13.35 (11.34).
+Application-render GPU 4.6-9.1 ms at the settlement: not the wall.
+
+**THE FINDING, per eye per frame.** At s x k 3.45: EDVR dropped 24.3
+parts of 4,879 the engine passed (5,642 tested, 4,807 at EDVR's
+scale). At 4.60: 3.8 of 4,778. At 6.00: 4.0 of 4,815. At 5.95: 3.8 of
+4,417 -- against the first acting flight on the pad at s x k 4.05:
+532 dropped and the passed set halved (9.6k -> 4.85k). At this view
+nearly every passing part sits closer than where the LOD term bites
+(the dominant table's t0 0.2737 with A 0.000834 per metre: parts
+beyond ~55 m at s x k 6, ~73 m at 4.5, ~219 m at the slider's floor
+s 1.5), so the governor thinned nothing; the recovery from the
+landing's 12.5 ms to ~10 ms and ~78 fps came from the game's own
+per-frame work shrinking as the runtime left half rate and from the
+post-landing settle, not from LOD. Zero faults; disagreements 0, as
+read from the summaries.
+
+**Material quality.** This flight at 0 read 12.5 ms on landing
+against the 05:05 flight's 11-12 ms at quality 3 (a different spot):
+the spot dominates, so the millisecond is NOT attributable from
+these two flights.
+
+ruled out: the LOD lever at close range, because at a view where the
+passing parts sit within ~55 m an effective scale of 6 removed ~4
+parts per eye per frame of ~4,800 (05:53 flight); the lever's
+elasticity is a property of the view's distances, not of k.
+
+**Consequence, ordered by the overseer:** refinement 4b adds inert-
+lever detection beside refinement 4's other pieces (the per-second
+miss windows, the 10 s kick, the fast post-kick relaxation, GPU-
+bound classification of misses): hold and log when two consecutive
+up steps change the dropped-part count by under 0.5% of the passed
+parts; re-arm when parts tested change by 20% or after 30 s.
+
+Next flight: the refinement-4 build, auto, parked ON THE PAD (the
+original spot: lat 68.067474 lon 121.028328 heading 42) so the lever
+has something to bite, material quality 0 for a minute then 3.
