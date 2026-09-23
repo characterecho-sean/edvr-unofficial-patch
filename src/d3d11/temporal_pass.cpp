@@ -23,6 +23,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "device_hook.h"   // the auto mip bias's source, to check against a real frame
+#include "ui_surfaces.h"   // nativeTemporalRecommended: what Elite was told, for that check
 #include "../common/native_render_settings.h"   // the published per-eye render size, for the NGX warm-up
 #include "../common/native_frame.h"   // nativeFrameFovTrimDegrees: the FOV trim, for edges-mode fovea
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
@@ -5936,8 +5937,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 // bias disagreed and to restart, which was
                                 // false (the pre-release review of 2026-09-07).
                                 if (oW && oW != w) {
+                                    // Elite's fraction is of what it was TOLD (the host's
+                                    // recommendation), which the output equals unless the
+                                    // served floor cut it (native_temporal.cpp,
+                                    // floorOutput): measured against a cut output, HMD
+                                    // Quality 0.45 would read as 0.50 and "disagree".
+                                    uint32_t toldW = 0, toldH = 0;
+                                    const uint32_t base =
+                                        nativeTemporalRecommended(&toldW, &toldH) && toldW >= oW
+                                            ? toldW : oW;
                                     const float seen =
-                                        static_cast<float>(w) / static_cast<float>(oW);
+                                        static_cast<float>(w) / static_cast<float>(base);
                                     const bool agree = fabsf(seen - autoMult) < 0.02f;
                                     Log::get().note(
                                         "texture filtering: the mip bias %+.2f was derived at launch "

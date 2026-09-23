@@ -1,4 +1,5 @@
 #include "dlaa.h"
+#include "dlss_floor.h"  // dlssModeRanges, defined below beside dlaaAvailable
 
 #include <cmath>
 #include <cstdarg>
@@ -566,6 +567,41 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
     }
     if (reason) *reason = g_reason;
     return g_available;
+#endif
+}
+
+// dlss_floor.h: the four ranges for an output, asked BEFORE that output is
+// (the door's served floor, native_temporal.cpp). The same query and ladder
+// ensureFeature walks, answered and logged the same way; nothing is chosen
+// here, and ensureFeature's own walk and selection are untouched.
+bool dlssModeRanges(ID3D11Device* dev, uint32_t outW, uint32_t outH,
+                    DlssModeRange modes[kDlssModeCount]) {
+    for (int k = 0; k < kDlssModeCount; ++k) modes[k] = DlssModeRange{};
+#ifndef EDVR_HAVE_NGX
+    (void)dev;
+    (void)outW;
+    (void)outH;
+    return false;
+#else
+    if (!outW || !outH || !dlaaAvailable(dev, nullptr) || !g_caps) return false;
+    unsigned errCodes[kDlssModeCount] = {};
+    bool any = false;
+    for (int k = 0; k < kDlssModeCount; ++k) {
+        unsigned oW = 0, oH = 0, mxW = 0, mxH = 0, mnW = 0, mnH = 0;
+        float sh = 0.0f;
+        const NVSDK_NGX_Result r = NGX_DLSS_GET_OPTIMAL_SETTINGS(
+            g_caps, outW, outH, kNgxLadder[k], &oW, &oH, &mxW, &mxH, &mnW, &mnH, &sh);
+        errCodes[k] = static_cast<unsigned>(r);
+        modes[k].ok = !NVSDK_NGX_FAILED(r);
+        if (!modes[k].ok) continue;
+        any = true;
+        modes[k].optW = oW; modes[k].optH = oH;
+        modes[k].minW = mnW; modes[k].minH = mnH;
+        modes[k].maxW = mxW; modes[k].maxH = mxH;
+        modes[k].sharpness = sh;
+    }
+    logDlssModesOnce(outW, outH, modes, errCodes);
+    return any;
 #endif
 }
 

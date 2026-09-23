@@ -1,6 +1,7 @@
 #include "../common/native_temporal.h"
 
 #include "temporal_pass.h"
+#include "dlss_floor.h"
 #include "ui_layer.h"
 #include "ui_surfaces.h"
 #include "../common/config.h"
@@ -40,6 +41,15 @@ struct Settings {
   // that tells the pass it is AMD's rather than NVIDIA's history.
   edvr::TemporalEngine engine=edvr::TemporalEngine::Own;
 };
+// The served floor's decision for one eye (floorOutput below), keyed by the
+// output the door would hand and the input: out is what the pass is asked
+// for, the door's own unless the input is under NVIDIA's floor there.
+// floorW x floorH is that floor as NGX names it (0 when it would not say);
+// failed means no output at or under the door's served the input.
+struct FloorDecision {
+  uint32_t doorW=0,doorH=0,w=0,h=0,outW=0,outH=0,floorW=0,floorH=0;
+  bool known=false,failed=false;
+};
 
 struct State {
   ID3D11Device* device = nullptr;
@@ -65,6 +75,8 @@ struct State {
   float renderedJitter[2][2]{},previousJitter[2][2]{};
   uint64_t treatedCount=0,projectionReads=0,missingProjections=0,jitterFrames=0,resets=0;
   bool flippedNoted=false,engagedNoted=false;
+  FloorDecision floor[2]{}, floorNoted{};
+  uint64_t floorCuts=0;
 };
 
 State pool[16]; unsigned used = 0; State* current = nullptr; std::mutex mutex;
@@ -168,6 +180,70 @@ const char* mode(const Settings& s) {
   return s.upscale?"dlss":s.dlaa?"dlaa":"on";
 }
 
+bool sameFloor(const FloorDecision& a,const FloorDecision& b) {
+  return a.doorW==b.doorW&&a.doorH==b.doorH&&a.w==b.w&&a.h==b.h&&a.outW==b.outW&&a.outH==b.outH&&a.failed==b.failed;
+}
+// fix.temporal_aa = dlss's served floor (dlss_floor.h). NVIDIA serves an
+// input only inside some mode's range for the output it is asked for, and
+// on the 2026-09-23 flights every range but a single point at a third began
+// at half the output: HMD Quality under 0.5, or a trim's two-step adoption,
+// left the input in the hole and the pass ran its own history. Under that
+// floor the door's output (outW x outH, the host's recommendation) is cut
+// to the largest the input reaches -- twice the input on those ranges --
+// and the runtime's submit blit upsamples the rest to the headset. Decided
+// per eye when the door's output or the input moves, never per frame: NGX
+// names the door's ranges, the rule cuts, and NGX's own answer at the cut
+// has the last word -- while the input still misses the floor there, that
+// axis steps down two pixels, eight steps at most. When NGX will not say,
+// or nothing serves, the door's output stands and the pass decides, as
+// before this existed. Logged once per change of the decision (one line
+// for the pair while the eyes agree): the cut, a cut's end, a failure.
+void floorOutput(State& s,unsigned eye,uint32_t w,uint32_t h,unsigned& outW,unsigned& outH) {
+  FloorDecision& f=s.floor[eye];
+  if(f.doorW==outW&&f.doorH==outH&&f.w==w&&f.h==h){outW=f.outW;outH=f.outH;return;}
+  f={};f.doorW=outW;f.doorH=outH;f.w=w;f.h=h;f.outW=outW;f.outH=outH;
+  edvr::DlssModeRange modes[edvr::kDlssModeCount];
+  if(edvr::dlssModeRanges(s.device,outW,outH,modes)) {
+    f.known=true;edvr::dlssRangeFloor(modes,&f.floorW,&f.floorH);
+    uint32_t cw=outW,ch=outH;
+    if(!edvr::dlssRangesServe(modes,w,h)) {
+      f.failed=true;
+      if(edvr::dlssFloorOutput(modes,outW,outH,w,h,&cw,&ch)) {
+        for(unsigned step=0;step<8&&cw>=2&&ch>=2;++step) {
+          edvr::DlssModeRange at[edvr::kDlssModeCount];
+          if(!edvr::dlssModeRanges(s.device,cw,ch,at))break;
+          if(edvr::dlssRangesServe(at,w,h)){f.outW=cw;f.outH=ch;f.failed=false;break;}
+          uint32_t fw=0,fh=0;edvr::dlssRangeFloor(at,&fw,&fh);
+          const bool shortW=fw&&w<fw,shortH=fh&&h<fh;
+          if(!shortW&&!shortH)break;  // over a maximum, or no range there: a smaller output cannot help
+          if(shortW)cw-=2;
+          if(shortH)ch-=2;
+        }
+      }
+    }
+  }
+  outW=f.outW;outH=f.outH;
+  if(!f.known)return;  // NGX said nothing: nothing decided, nothing to say (the pass says why)
+  const bool cut=f.outW!=f.doorW||f.outH!=f.doorH;
+  if(cut)++s.floorCuts;
+  const FloorDecision& n=s.floorNoted;
+  const bool notedCut=n.outW&&(n.outW!=n.doorW||n.outH!=n.doorH);
+  if(sameFloor(f,n)||!(cut||f.failed||notedCut))return;
+  if(cut)
+    edvr::Log::get().note("dlss floor: the game's %ux%u is under the %ux%u floor NVIDIA names for a %ux%u "
+        "output, where no mode serves it; the pass outputs %ux%u (%.2fx the input, the largest output that "
+        "floor reaches) and the runtime's submit upsamples the rest to the headset.",
+        w,h,f.floorW,f.floorH,f.doorW,f.doorH,f.outW,f.outH,double(f.outW)/double(w));
+  else if(f.failed)
+    edvr::Log::get().note("dlss floor: no output at or under %ux%u serves the game's %ux%u (NVIDIA's floor "
+        "there is %ux%u); the door's own output stands, and the pass decides as before.",
+        f.doorW,f.doorH,w,h,f.floorW,f.floorH);
+  else
+    edvr::Log::get().note("dlss floor: the game's %ux%u reaches the floor of the %ux%u output again (%ux%u); "
+        "the pass outputs %ux%u.",w,h,f.doorW,f.doorH,f.floorW,f.floorH,f.doorW,f.doorH);
+  s.floorNoted=f;
+}
+
 HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporalProjection* out) {
   std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
   if(!s||!s->active||s!=current||!f||!out||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||
@@ -258,7 +334,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     return (s->shift[eye][0]||s->shift[eye][1])?E_PENDING:S_FALSE;
   }
   unsigned outW=0,outH=0;
-  if(s->currentSettings.upscale&&w*50<s->recW*49&&h*50<s->recH*49){outW=s->recW;outH=s->recH;}
+  if(s->currentSettings.upscale&&w*50<s->recW*49&&h*50<s->recH*49){
+    outW=s->recW;outH=s->recH;
+    // Under NVIDIA's served floor the output follows the input down rather
+    // than the pass standing aside (floorOutput above; FSR's ranges differ).
+    if(s->currentSettings.engine==edvr::TemporalEngine::Nvidia)floorOutput(*s,eye,w,h,outW,outH);
+  }
   if(s->verdictPending[eye]) {
     const uint32_t verdict=edvr::jumpVerdictPacked();
     if(verdict!=s->verdictSeen[eye] || ++s->verdictWaits[eye]>=4) {
@@ -325,9 +406,9 @@ HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint3
 }
 HRESULT WINAPI close(void* p){
   std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;
-  edvr::Log::get().note("native temporal totals: treated=%llu, jitter_frames=%llu, projection_reads=%llu, missing_projections=%llu, resets=%llu, stood_down=%u.",
+  edvr::Log::get().note("native temporal totals: treated=%llu, jitter_frames=%llu, projection_reads=%llu, missing_projections=%llu, resets=%llu, stood_down=%u, floor_cuts=%llu.",
       (unsigned long long)s->treatedCount,(unsigned long long)s->jitterFrames,(unsigned long long)s->projectionReads,
-      (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown));
+      (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown),(unsigned long long)s->floorCuts);
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
       (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
   reset(*s);s->active=false;s->begun=false;s->device=nullptr;
