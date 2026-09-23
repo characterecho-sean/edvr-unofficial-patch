@@ -161,6 +161,8 @@ struct Feed {
     bool gpuValid = false;
     double gpuMs = 0;
     uint32_t tested = 0, passed = 0, dropped = 0;
+    bool camValid = true;
+    float cam[3] = {0.0f, 0.0f, 0.0f};
     bool expireNext = false;
     uint64_t now() const { return uint64_t(clock); }
     uint64_t next(double cycleMs) const { return uint64_t(clock + cycleMs); }
@@ -183,6 +185,8 @@ struct Feed {
         s.tested = tested;
         s.passed = passed;
         s.dropped = dropped;
+        s.camValid = camValid;
+        std::memcpy(s.cam, cam, sizeof(s.cam));
         return p.update(s);
     }
     // Frames until a window closes: the first `twoSlots` of them take two
@@ -573,9 +577,12 @@ void caseStepPolicy() {
         }
         check(ups == 2 && kicks == 0 && f.p.inert() && f.p.inertHolds() == 1 && f.p.k() == 1.5f &&
                   f.p.lastEffect() == Effect::NoBenefit && f.p.runCoarse() == 2 && f.p.runFine() == 0 &&
-                  f.p.runPassedBefore() == 4800.0 && f.p.runPassedAfter() == 4800.0 &&
-                  std::fabs(f.p.runCallerBefore() - 12.9) < 1e-9 && f.p.triggerRun() == 0,
-              "steps: two 0.25 steps with the passed parts and the caller work unchanged: inert, no step, no kick");
+                  f.p.runFigures().tested[0] == 5500.0 && f.p.runFigures().tested[1] == 5500.0 &&
+                  f.p.runFigures().passed[0] == 4800.0 && f.p.runFigures().passed[1] == 4800.0 &&
+                  std::fabs(f.p.runFigures().caller[0] - 12.9) < 1e-9 && f.p.triggerRun() == 0 &&
+                  f.p.judgedNone() == 2,
+              "steps: two 0.25 steps moving neither the parts tested and passed nor the caller work: inert, no step, "
+              "no kick");
         // 30 s after the hold one step is retried; without a benefit the hold goes on.
         int w = 0;
         while (f.p.retries() == 0 && w < 12) {
@@ -634,12 +641,78 @@ void caseStepPolicy() {
         for (int i = 0; i < 6; ++i) ups += c.window(12.9 - 0.25 * (double(c.p.k()) - 1.0) / 0.25, kAll) == Step::Up;
         check(ups == 6 && !c.p.inert() && c.p.lastEffect() == Effect::Benefit,
               "steps: the caller work falling 0.25 ms a step is a benefit with the passed parts unchanged");
-        // No part tests at all: the benefit is unknown, never a reason to hold.
+        // No part tests at all: not judged, never a reason to hold.
         Feed u;
         ups = 0;
         for (int i = 0; i < 6; ++i) ups += u.window(12.9, kAll) == Step::Up;
-        check(ups == 6 && !u.p.inert() && u.p.lastEffect() == Effect::Unknown,
-              "steps: without part tests the benefit is unknown and the steps go on");
+        check(ups == 6 && !u.p.inert() && u.p.lastEffect() == Effect::NotJudged,
+              "steps: without part tests the benefit is not judged and the steps go on");
+        // A loading scene (07:15: the inert line during the approach): the
+        // records rising 400 -> 680 across each second and the parts with
+        // them -- the steps are not judged, never a hold.
+        Feed ld;
+        ups = 0;
+        for (int wnd = 0; wnd < 6; ++wnd) {
+            int i = 0;
+            Step s = Step::None;
+            do {
+                const double rise = i < 44 ? i / 44.0 : 1.0;
+                const uint32_t records = uint32_t(400.0 + 280.0 * rise);
+                ld.tested = 8 * records;
+                ld.passed = 7 * records;
+                s = ld.frame(12.9, kTwo, records);
+                ++i;
+            } while (!ld.p.windowClosed());
+            ups += s == Step::Up;
+        }
+        check(ups == 6 && !ld.p.inert() && ld.p.lastEffect() == Effect::NotJudged && ld.p.judgedNone() == 0 &&
+                  ld.p.judgedBenefit() == 0 && ld.p.notJudged() >= 5,
+              "steps: a loading scene (records rising 400 -> 680 across each second): not judged, never a hold");
+        // A stable scene where a step takes 10% of the parts tested (whole
+        // records culled before the builder) with the passed parts unchanged:
+        // a benefit.
+        Feed tt;
+        tt.passed = 4800;
+        for (int i = 0; i < 2; ++i) {
+            tt.tested = uint32_t(5500.0 * (1.0 - 0.1 * (double(tt.p.k()) - 1.0) / 0.25) + 0.5);
+            tt.window(12.9, kAll);
+        }
+        const EffectFigures tf = tt.p.lastFigures();
+        check(tt.p.lastEffect() == Effect::Benefit && tf.tested[0] == 5500.0 && tf.tested[1] == 4950.0 &&
+                  tf.passed[0] == 4800.0 && tf.passed[1] == 4800.0,
+              "steps: a stable scene where the parts tested fall 10% with the passed unchanged: a benefit");
+        // The outcome at the ceiling against the k = 1 baseline of the same
+        // view (k_max 1.50, every cycle two slots whatever k): each step
+        // takes 10% of the parts tested -- residual benefit, both ends given.
+        Feed br;
+        br.p.configure(1.5f);
+        br.passed = 4000;
+        for (int i = 0; i < 12 && !br.p.ceilingMissing(); ++i) {
+            br.tested = uint32_t(5500.0 * (1.0 - 0.1 * (double(br.p.k()) - 1.0) / 0.25) + 0.5);
+            br.window(12.9, kAll);
+        }
+        EffectFigures bf;
+        const Outcome bo = br.p.ceilingOutcome(&bf);
+        check(br.p.ceilingMissing() && br.p.haveBaseline() && bo == Outcome::Residual && bf.baseline &&
+                  bf.tested[0] == 5500.0 && bf.tested[1] == 4400.0 && bf.passed[0] == 4000.0 &&
+                  bf.passed[1] == 4000.0,
+              "steps: at the ceiling against the k 1 baseline of this view, tested 5,500 -> 4,400: residual benefit");
+        // Nothing moved: no observed benefit, against the same baseline.
+        Feed bn;
+        bn.p.configure(1.5f);
+        bn.tested = 5500;
+        bn.passed = 4000;
+        for (int i = 0; i < 12 && !bn.p.ceilingMissing(); ++i) bn.window(12.9, kAll);
+        const Outcome no = bn.p.ceilingOutcome(&bf);
+        check(bn.p.ceilingMissing() && no == Outcome::NoBenefit && bf.baseline && bf.tested[1] == 5500.0 &&
+                  bf.passed[1] == 4000.0,
+              "steps: at the ceiling with nothing moved against the baseline: no observed benefit");
+        // Another view -- the eye camera 5 m away -- and the baseline does not
+        // answer; the last judged step does.
+        bn.cam[0] = 5.0f;
+        bn.window(12.9, kAll);
+        bn.p.ceilingOutcome(&bf);
+        check(!bf.baseline, "steps: with the eye camera 5 m from the baseline's, the last judged step answers instead");
     }
     // Cycles taking two slots at random at a fixed rate (a fixed-seed
     // generator, 90 Hz, the caller work at the period): 3% for 300 s steps at
@@ -1436,9 +1509,11 @@ void caseBoundary() {
               logged("(+4 steps since the last line)", at) && logged("(+3 steps since the last line)", at),
           "boundary: step lines are rate-limited to one per 5 s, never a kick or a restore, and count the steps skipped");
     check(logged("decisions: slots missed 389 of 2728 (the CPU's 389, GPU-bound 0, unexplained 0); kicks 1; restores 1 "
-                 "(1 after a failed kick); the next recovery trial after 5 clean seconds; inert holds 0 (retries 0, "
-                 "re-armed 0)", at),
-          "boundary: the decisions line counts the slots and whose, the kick, the restore and the holds");
+                 "(1 after a failed kick); the next recovery trial after 5 clean seconds; up steps' benefit 0 yes, 0 "
+                 "no, ", at) &&
+              logged("not judged (the scene changing, or too few samples); inert holds 0 (retries 0, re-armed 0); parts "
+                     "a frame: tested 20.0, passed at EDVR's scale 0.0", at),
+          "boundary: the decisions line counts the slots and whose, the kick, the restore, the judgements and the holds");
     check(logged("(at k_max now: unknown (no fresh evidence))", at) && !logged("settlement detail: at the ceiling", at),
           "boundary: at k_max the summary gives the outcome (20 parts a frame: not judged); not yet spent");
     check(logged("250 builder records, frame work = caller work per cycle: 11.60 ms vs period 11.11 ms.", at) &&
@@ -1486,8 +1561,11 @@ void caseBoundary() {
     check(countLogged("settlement detail: at the ceiling (k 2.00, s x k 3.000) and still missing ", at) == 2 &&
               countLogged("settlement detail: at the ceiling (k 2.00, s x k 3.000) and still missing 30 of the last 30 "
                           "display slots (30 the CPU's, 0 GPU-bound, 0 unexplained): outcome unknown (no fresh "
-                          "evidence); caller work 12.50 ms mean, GPU unknown (no application-render sample).", at) == 1,
-          "boundary: the lever-spent line names k, s x k, whose misses, the outcome, the caller work and the GPU");
+                          "evidence) (against k 1 at this view: tested 20 -> 20, passed 20 -> 20 parts a frame, caller "
+                          "work 11.60 -> 12.50 ms); caller work 12.50 ms mean, GPU unknown (no application-render "
+                          "sample).", at) == 1,
+          "boundary: the lever-spent line names k, s x k, whose misses, the outcome with both ends against k 1 "
+          "(20 parts a frame, the recompute disagreeing at s 1.5: not judged), the caller work and the GPU");
     put(f.ctx, 0x30, 1.0f);
     // A lowered k_max: logged again, clamps at the next frame.
     at = g_lines.size();
@@ -1817,9 +1895,11 @@ void caseActingBoundary() {
     // (Once a summary window: these 2800 frames end the first and begin the
     // second, where it still holds.)
     check(countLogged("settlement detail: at the ceiling (k 2.00, s x k 3.000) and still missing 30 of the last 30 "
-                      "display slots (30 the CPU's, 0 GPU-bound, 0 unexplained): outcome unknown (no fresh evidence); "
-                      "caller work 12.50 ms mean, GPU unknown (no application-render sample).", at) == 2,
-          "acting: at k_max with five triggering seconds in a row, the lever-spent line, once a summary window");
+                      "display slots (30 the CPU's, 0 GPU-bound, 0 unexplained): outcome unknown (no fresh evidence) "
+                      "(against k 1 at this view: tested 20 -> 20, passed 20 -> 0 parts a frame, caller work 12.50 -> "
+                      "12.50 ms); caller work 12.50 ms mean, GPU unknown (no application-render sample).", at) == 2,
+          "acting: at k_max with five triggering seconds in a row, the lever-spent line with both ends, once a "
+          "summary window");
     check(logged("(window 1.00..2.00 of max 2.00; 4 up (4 by 0.25), 0 down, 0 resets, 0 clamps; held on foot 0 frames)",
                  at) &&
               logged("; kicks 0; restores 0 (0 after a failed kick);", at),
@@ -1986,8 +2066,9 @@ void caseSignalsBoundary() {
     applyConfig("auto", 1.05f, true, t);
     frames(1000, 20, 11.5, 12.5, 5);
     check(countLogged("settlement detail: at the ceiling (k 1.05, s x k 1.050) and still missing 30 of the last 30 "
-                      "display slots (6 the CPU's, 24 GPU-bound, 0 unexplained): outcome unknown (no fresh evidence); "
-                      "caller work 11.50 ms mean, GPU 11.80 ms: the GPU is the wall.", at) == 1 &&
+                      "display slots (6 the CPU's, 24 GPU-bound, 0 unexplained): outcome unknown (no fresh evidence) "
+                      "(against k 1 at this view: tested 20 -> 20, passed 20 -> 20 parts a frame, caller work 11.50 -> "
+                      "11.50 ms); caller work 11.50 ms mean, GPU 11.80 ms: the GPU is the wall.", at) == 1 &&
               !logged("settlement detail: the LOD lever is inert", at),
           "signals: the lever-spent line gives whose misses, the GPU beside the caller work, and when the GPU is the wall");
     applyConfig("game", 2.0f, true, t);
@@ -2000,21 +2081,33 @@ void caseSignalsBoundary() {
     at = g_lines.size();
     applyConfig("auto", 2.0f, true, t);
     frames(2800, 500, 12.9, -1.0);
-    check(countLogged("settlement detail: the LOD lever is inert at this view: no observed benefit: passed parts 500 -> "
-                      "500 a frame, caller work 12.90 -> 12.90 ms across two 0.25 steps; holding k 1.50 (s x k 1.500), "
-                      "no step and no kick; one step is retried every 30 s or when the parts tested a frame move 20%.",
-                      at) == 1 &&
+    check(countLogged("settlement detail: the LOD lever is inert at this view: no observed benefit: tested 500 -> 500, "
+                      "passed 500 -> 500 parts a frame, caller work 12.90 -> 12.90 ms across two 0.25 steps; holding k "
+                      "1.50 (s x k 1.500), no step and no kick; one step is retried every 30 s or when the parts tested "
+                      "a frame move 20%.", at) == 1 &&
               g_state.policy.k() == 1.5f && !logged("kick:", at) && !logged("settlement detail: at the ceiling", at) &&
               logged("; kicks 0; restores 0 (0 after a failed kick); the next recovery trial after 5 clean seconds; "
-                     "inert holds 1 (retries 0, re-armed 0); at EDVR's scale passed 500.0, dropped 0.0 parts a frame",
-                     at),
+                     "up steps' benefit 0 yes, 2 no, 0 not judged (the scene changing, or too few samples); inert holds "
+                     "1 (retries 0, re-armed 0); parts a frame: tested 500.0, passed at EDVR's scale 500.0, dropped "
+                     "0.0", at),
           "signals: two up steps that move nothing: the lever is inert, said once; no step and no kick while it holds");
     const size_t atRetry = g_lines.size();
     frames(300, 500, 12.9, -1.0);
-    check(countLogged("settlement detail: the LOD lever responds again at this view: the retried step moved passed "
-                      "parts 500 -> 0 a frame, caller work 12.90 -> 12.90 ms; stepping resumes at k 1.75.", atRetry) == 1 &&
+    check(countLogged("settlement detail: the LOD lever responds again at this view: the retried step moved tested 500 "
+                      "-> 500, passed 500 -> 0 parts a frame, caller work 12.90 -> 12.90 ms; stepping resumes at k "
+                      "1.75.", atRetry) == 1 &&
               logged("; a retry while the lever is inert here;", atRetry) && g_state.policy.k() == 2.0f,
           "signals: 30 s into the hold a retried step past the plateau shows a benefit: re-armed, stepping resumes");
+    // At k_max 2.00 with every cycle still two slots: the lever-spent line's
+    // outcome against the k 1 baseline of this view -- every part would drop
+    // now (passed 500 -> 0): residual benefit, both ends given.
+    const size_t atCeiling = g_lines.size();
+    frames(600, 500, 12.9, -1.0);
+    check(countLogged("settlement detail: at the ceiling (k 2.00, s x k 2.000) and still missing 30 of the last 30 "
+                      "display slots (30 the CPU's, 0 GPU-bound, 0 unexplained): outcome residual benefit (against k 1 "
+                      "at this view: tested 500 -> 500, passed 500 -> 0 parts a frame, caller work 12.90 -> 12.90 ms); "
+                      "caller work 12.90 ms mean, GPU unknown (no application-render sample).", atCeiling) == 1,
+          "signals: the ceiling's outcome against the k 1 baseline of this view, tested and passed at both ends");
     applyConfig("game", 2.0f, true, t);
     // A settlement's frames at 150-199 records hold k and are counted: the
     // density the lever itself may cut (the review's conditional risk).
