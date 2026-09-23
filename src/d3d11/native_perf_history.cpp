@@ -45,6 +45,21 @@ void NativePerfHistory::clear() noexcept {
     cpu_.floor=applicationCpu_.floor=producer_.floor=applicationGpu_.floor=device_.floor=0;
     generation_=firstSequence_=periodAt_=0;period_=0;
     baseHz_=0;baseHzAt_=0;firstPeriodMs_=0;
+    cpuSource_=NativeCpuSource::None;
+}
+NativeCpuFigure NativePerfHistory::cpuFigure(const NativeTimingSnapshot& t) noexcept {
+    NativeCpuFigure f{};
+    if(!t.haveCpu)return f;
+    if(t.cpu.version>=EDVR_NATIVE_TIMING_VERSION_5) {
+        f.source=NativeCpuSource::CallerWork;
+        f.valid=t.cpu.callerWorkValid==1&&duration(t.cpu.callerWorkMs);
+        f.ms=f.valid?t.cpu.callerWorkMs:0;
+    } else {
+        f.source=NativeCpuSource::PreSubmit;
+        f.valid=t.applicationValid&&duration(t.applicationMs);
+        f.ms=f.valid?t.applicationMs:0;
+    }
+    return f;
 }
 void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const GpuFrameSnapshot& g,uint64_t now) noexcept {
     if(!native||!t.active||!t.generation||!t.firstSequence){clear();return;}
@@ -77,13 +92,22 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
         baseHzAt_=baseHz_?t.capturedAtMs:0;
         if(!firstPeriodMs_&&period_)firstPeriodMs_=period_;
     }
-    const bool applicationCpuOk = t.haveCpu && t.applicationValid &&
+    // The CPU figure (cpuFigure): the caller work per cycle, or an older
+    // runtime's pre-submit application time. A frame without one clears the
+    // stream as an invalid application time always did; a change of figure
+    // starts it over, so one average is never of both.
+    const NativeCpuFigure figure = cpuFigure(t);
+    const bool applicationCpuOk = figure.valid &&
         c.sequence >= firstSequence_ && c.sequence == t.sequence &&
-        age(now, t.capturedAtMs, 2000) && duration(t.applicationMs);
+        age(now, t.capturedAtMs, 2000);
     if (!applicationCpuOk) {
         applicationCpu_.reset(t.haveCpu ? c.sequence : 0);
     } else if (c.sequence > applicationCpu_.floor) {
-        applicationCpu_.add(c.sequence, t.capturedAtMs, t.applicationMs);
+        if (figure.source != cpuSource_) {
+            applicationCpu_.reset();
+            cpuSource_ = figure.source;
+        }
+        applicationCpu_.add(c.sequence, t.capturedAtMs, figure.ms);
     }
     // Include the age accumulated before publication; subtraction guards keep
     // old or malformed timestamps from becoming fresh through integer wrap.

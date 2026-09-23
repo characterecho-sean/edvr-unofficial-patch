@@ -66,7 +66,9 @@ void perfMonitorLastDropLine(char* buf, size_t bufLen);
 // different problem from a frame over budget on the other.
 enum PerfGraph { kGraphGpu = 0, kGraphCpu = 1, kGraphPeriod = 2 };
 // Native mode uses independent unique completion samples for kGraphGpu
-// (producer span) and kGraphCpu (Submit wall), not compositor CPU/GPU frames.
+// (producer span) and kGraphCpu (the CPU figure: the runtime's caller work per
+// cycle, or an older runtime's pre-submit application time --
+// NativePerfHistory::cpuFigure), not compositor CPU/GPU frames.
 // The reference is the fresh runtime-predicted period, or 0 if unavailable.
 int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 
@@ -75,8 +77,11 @@ int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 // and frames dropped in the last ten seconds. Without app timing the CPU
 // fallback is labelled "thread". Needs nothing the slow samplers
 // gather.
-// Native gpu/cpu labels show independent 200ms means of producer GPU and
-// submit wall. Submit includes blocking/rendezvous, not exclusive CPU execution.
+// Native gpu/cpu labels show independent 200ms means of the producer GPU and
+// the CPU figure: "cpu" is the caller work per cycle (timing v5: the game's
+// thread from one pose wait's return to the next, submits and their waits
+// included -- wall time, not exclusive CPU execution); "cpu (pre-submit)" is
+// an older runtime's application time, pose wait end to submit only.
 void perfMonitorOverlayLine(char* buf, size_t bufLen);
 
 // The local D3D11 render-to-submit diagnostic, kept separate from SteamVR's

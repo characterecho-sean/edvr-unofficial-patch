@@ -15,7 +15,7 @@ NativeTimingSnapshot cpu(uint64_t seq,uint64_t at) {
     s.capturedAtMs=at;s.waitMs=4;s.predictedPeriodMs=11;s.haveCpu=true;
     s.applicationMs=3;s.applicationValid=true;
     s.cpu={sizeof(s.cpu),EDVR_NATIVE_TIMING_VERSION_5,seq};s.cpu.submitMs[0]=1;s.cpu.submitMs[1]=2;s.cpu.baseDisplayHz=90;
-    s.cpu.callerWorkMs=14.4;s.cpu.callerWorkValid=1;   // the governor's signal; the monitor never reads it
+    s.cpu.callerWorkMs=14.4;s.cpu.callerWorkValid=1;   // the caller work per cycle: the monitor's CPU on a version 5 frame
     return s;
 }
 GpuFrameSnapshot gpu(uint64_t seq,uint64_t at,uint64_t age=0,double ms=5) {
@@ -44,9 +44,9 @@ void averages() {
 }
 void invalidation() {
     NativePerfHistory h;auto t=cpu(10,10000);auto g=gpu(10,10000);device(t,10,10000);h.observe(true,t,g,10000);
-    auto partial=t;partial.applicationValid=false;h.observe(true,partial,g,10000);
+    auto partial=t;partial.cpu.callerWorkValid=0;partial.cpu.callerWorkMs=0;h.observe(true,partial,g,10000);
     check(!h.applicationCpu(10000,200).count&&h.applicationGpu(10000,200).count==1&&
-          h.submit(10000,200).count==1,"incomplete application CPU does not substitute submit wall or erase GPU");
+          h.submit(10000,200).count==1,"incomplete CPU figure (no caller work) does not substitute submit wall or erase GPU");
     h.clear();auto oldDefinition=g;oldDefinition.result.source=GpuSpanSource::RenderToSubmit;
     h.observe(true,t,oldDefinition,10000);
     check(h.applicationCpu(10000,200).count==1&&!h.applicationGpu(10000,200).count,
@@ -127,29 +127,73 @@ void displayBase() {
     check(NativePerfHistory::displayThrottled(h.predictedPeriod(10050),h.basePeriodMs(10050)),
           "new session resets the base to the new session's prediction");
 }
-// Version 5 adds the caller work per cycle for the settlement governor; the
-// monitor keeps reading what it read. App CPU stays applicationMs, never the
-// caller work, and the base display rate reads from a version 5 frame as from
-// a version 4 one; a version 4 frame (older host: no caller work) reads the
-// same way.
+// The monitor's CPU figure (NativePerfHistory::cpuFigure, the settlement
+// governor's rule): on a version 5 frame the caller work per cycle -- the
+// game's thread per frame, which on the 2026-09-23 flights read 11.7-12.7 ms
+// while the pre-submit application time beside it read under 10 -- labelled
+// as the plain CPU (cpuSource CallerWork); a version 5 frame without valid
+// caller work has no figure, never the application time beside it. An older
+// runtime (version 3 or 4: no caller work) falls back to the application
+// time, labelled pre-submit, and no average ever holds both.
 void callerWorkCrossing() {
     NativePerfHistory h;
+    check(h.cpuSource()==NativeCpuSource::None,"no frame yet: the CPU figure has no source");
     auto t=cpu(1,10000);   // version 5: caller work 14.4 ms beside app 3 ms
     h.observe(true,t,gpu(1,10000),10000);
     check(t.cpu.version==EDVR_NATIVE_TIMING_VERSION_5&&t.cpu.callerWorkValid==1&&
-          h.applicationCpu(10000,200).count==1&&approx(h.applicationCpu(10000,200).meanMs,3),
-          "version 5: the monitor's app CPU stays applicationMs, not the caller work");
+          h.applicationCpu(10000,200).count==1&&approx(h.applicationCpu(10000,200).meanMs,14.4)&&
+          h.cpuSource()==NativeCpuSource::CallerWork,
+          "version 5: the monitor's CPU is the caller work per cycle (14.4), not the pre-submit app time (3)");
+    float graph[2]{};
+    check(h.graph(false,graph,2,10000)==1&&graph[0]==14.4f,"version 5: the CPU graph plots the caller work");
     check(h.basePeriodMs(10000)>11.0&&h.basePeriodMs(10000)<11.2,
           "version 5: the base display rate still reads (version 4 and later)");
-    t=cpu(2,10010);t.cpu.version=EDVR_NATIVE_TIMING_VERSION_4;t.cpu.size=EDVR_NATIVE_TIMING_FRAME_SIZE_4;
-    t.cpu.callerWorkMs=0;t.cpu.callerWorkValid=0;
+    t=cpu(2,10010);t.cpu.callerWorkValid=0;t.cpu.callerWorkMs=0;
     h.observe(true,t,gpu(2,10010),10010);
-    check(h.applicationCpu(10010,200).count==2&&approx(h.applicationCpu(10010,200).meanMs,3)&&
-          h.basePeriodMs(10010)>11.0&&h.basePeriodMs(10010)<11.2,
-          "version 4 (no caller work): app CPU and the base rate read as before");
+    check(!h.applicationCpu(10010,200).count&&h.cpuSource()==NativeCpuSource::CallerWork,
+          "version 5 without valid caller work: no CPU figure, never the app time beside it");
+    t=cpu(3,10020);t.cpu.callerWorkMs=12.2;h.observe(true,t,gpu(3,10020),10020);
+    check(h.applicationCpu(10020,200).count==1&&approx(h.applicationCpu(10020,200).meanMs,12.2),
+          "version 5: the next frame with caller work is the figure again");
+    // An older runtime (a new session, version 4, no caller work): the
+    // pre-submit application time stands in, and says so.
+    t=cpu(4,10030);t.generation=8;t.firstSequence=4;
+    t.cpu.version=EDVR_NATIVE_TIMING_VERSION_4;t.cpu.size=EDVR_NATIVE_TIMING_FRAME_SIZE_4;
+    t.cpu.callerWorkMs=0;t.cpu.callerWorkValid=0;
+    h.observe(true,t,gpu(4,10030),10030);
+    check(h.applicationCpu(10030,200).count==1&&approx(h.applicationCpu(10030,200).meanMs,3)&&
+          h.cpuSource()==NativeCpuSource::PreSubmit&&h.basePeriodMs(10030)>11.0&&h.basePeriodMs(10030)<11.2,
+          "version 4 (no caller work): the CPU falls back to applicationMs, labelled pre-submit; the base rate reads");
+    t=cpu(5,10040);t.generation=8;t.firstSequence=4;t.cpu.version=EDVR_NATIVE_TIMING_VERSION_4;
+    t.cpu.size=EDVR_NATIVE_TIMING_FRAME_SIZE_4;t.cpu.callerWorkMs=0;t.cpu.callerWorkValid=0;t.applicationValid=false;
+    h.observe(true,t,gpu(5,10040),10040);
+    check(!h.applicationCpu(10040,200).count,"version 4 without app time: no CPU figure");
+    // Never one average of both: a version 5 frame after version 4 samples in
+    // the same session starts the stream over.
+    t=cpu(6,10050);t.generation=8;t.firstSequence=4;t.applicationMs=3;
+    h.observe(true,t,gpu(6,10050),10050);
+    auto older=cpu(7,10060);older.generation=8;older.firstSequence=4;older.cpu.version=EDVR_NATIVE_TIMING_VERSION_4;
+    older.cpu.size=EDVR_NATIVE_TIMING_FRAME_SIZE_4;older.cpu.callerWorkMs=0;older.cpu.callerWorkValid=0;
+    h.observe(true,older,gpu(7,10060),10060);
+    check(h.applicationCpu(10060,200).count==1&&approx(h.applicationCpu(10060,200).meanMs,3)&&
+          h.cpuSource()==NativeCpuSource::PreSubmit,"a change of figure starts the average over");
+    // The rule itself, frame by frame.
+    NativeTimingSnapshot f=cpu(8,10070);
+    NativeCpuFigure x=NativePerfHistory::cpuFigure(f);
+    check(x.valid&&x.source==NativeCpuSource::CallerWork&&approx(x.ms,14.4),"rule: version 5 with caller work");
+    f.cpu.callerWorkValid=0;x=NativePerfHistory::cpuFigure(f);
+    check(!x.valid&&x.source==NativeCpuSource::CallerWork,"rule: version 5 without it has no figure");
+    f=cpu(9,10080);f.cpu.callerWorkMs=NAN;x=NativePerfHistory::cpuFigure(f);
+    check(!x.valid,"rule: a NaN caller work is no figure");
+    f=cpu(10,10090);f.cpu.version=EDVR_NATIVE_TIMING_VERSION_3;f.cpu.baseDisplayHz=0;x=NativePerfHistory::cpuFigure(f);
+    check(x.valid&&x.source==NativeCpuSource::PreSubmit&&approx(x.ms,3),"rule: version 3 falls back to applicationMs");
+    f.haveCpu=false;x=NativePerfHistory::cpuFigure(f);
+    check(!x.valid&&x.source==NativeCpuSource::None,"rule: no CPU frame, no figure");
+    h.clear();
+    check(h.cpuSource()==NativeCpuSource::None,"clear forgets the figure's source");
 }
 void graphs() {
-    NativePerfHistory h;for(uint64_t i=1;i<=950;++i){auto t=cpu(i,10000+i);t.cpu.submitMs[0]=double(i);t.cpu.submitMs[1]=0;t.applicationMs=double(i);h.observe(true,t,gpu(i,10000+i,0,double(i)+100),10000+i);}
+    NativePerfHistory h;for(uint64_t i=1;i<=950;++i){auto t=cpu(i,10000+i);t.cpu.submitMs[0]=double(i);t.cpu.submitMs[1]=0;t.cpu.callerWorkMs=double(i);h.observe(true,t,gpu(i,10000+i,0,double(i)+100),10000+i);}
     check(h.submit(10950,10000).count==900&&approx(h.submit(10950,10000).meanMs,500.5),"ring wraps without overweighting or losing ordering");
     float values[5]={-99,-99,-99,-99,-99};check(h.graph(false,values,3,10950)==3&&values[0]==948&&values[1]==949&&values[2]==950&&values[3]==-99,"CPU graph uses newest bounded tail oldest-first");
     check(h.graph(true,values,3,10950)==3&&values[0]==1048&&values[2]==1050,"producer graph uses its own observations");

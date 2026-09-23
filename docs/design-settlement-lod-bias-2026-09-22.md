@@ -1,30 +1,27 @@
 # Design: an EDVR-side LOD bias at the settlement part test
 
 Offline measurement, 2026-09-22 (sections 1-7); the shadow governor built
-on it 2026-09-23 (section 8: flown twice). Capture: eye run 165433
+on it 2026-09-23 (section 8: flown twice); the acting mode (section 9:
+flown once, refined, shipped as the default). Capture: eye run 165433
 (Cranfield, parked on the pad, Pimax OpenXR, 3070x3032 an eye, game build
 332841), frame 2, 18,267 pool eye draws (EB52 10,690).
 
 ## Status
 
-- **State (2026-09-23):** the SHADOW GOVERNOR (section 8) flew twice.
-  First (07:25 UTC, parked, 45 fps): k never left 1, because its frame
-  work was the pre-submit phase (8.4 ms) while the caller thread worked
-  14.4 ms a cycle against 11.1. FIXED and reflown: frame work = the
-  runtime's caller work per cycle (timing ABI v5; v3/v4 fall back to app
-  work, named so); k_max default 4.0 (s saturates at 1.5); the summary
-  prints s x k. Second flight (2026-09-23 02:04 local, fa6565b) confirms
-  the fix: k 1 -> 4 in 142 s, mean caller work 11.4-12.8 ms against the
-  11.11 ms period, 0 disagreements with the engine at k = 1, would-drop
-  saturating at 48-50% of passed parts between s x k 4.5 and 6.0, as the
-  exact draw table predicts (33.5-33.7% ceiling). ACTING MODE BUILT
-  (section 9, merged 1404b1b), NOT FLOWN: a bracket on the slider's
-  setter FUN_142819D90 scales the game's LOD scale by k right after the
-  engine stores it each frame (the builder-site write was refuted: the
-  setter runs every frame); auto = the governed k, reduced = k_max at
-  once, advanced.settlement_detail_observe = 1 keeps the shadow-only
-  behaviour. The v3 tables price the LOD-distance half exactly (section
-  8); the screen-size half is a weak lever.
+- **State (2026-09-23):** `fix.settlement_detail` SHIPS as a fix, default
+  `auto` (live in edvr.ini, on the F8 Performance page), k_max 6.0 (held to
+  1..8), with a faster ramp (up 0.25 while the 30 samples behind a step ran
+  more than 1.0 ms over on average, else 0.05; down always 0.05) and a
+  cockpit gate (k = 1 on foot, per the journal's Status.json); the HUD's CPU
+  figure is now the caller work per cycle. NOT FLOWN since (section 9,
+  "Refinements after the first acting flight"). The first acting flight
+  (03:30 local, b55e06b, Cranfield, s 1.5, 90 Hz) WORKED: k 1 -> 2.70 in
+  80 s at 0.05 a step, caller work 12.9 -> 10.6 ms, ~50 -> 71-75 fps mean,
+  then held at 2.70-2.75 in the dead band; 0 faults, 0 disagreements;
+  nothing seen in the headset but the slow start. Mechanism: a bracket on
+  the slider's setter FUN_142819D90 scales the game's LOD scale by k each
+  frame (section 9); the shadow governor's two flights and the caller-work
+  signal: section 8.
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
   +0x550 = 1/fy, the tangent of one pixel (0.000834297 here), B = +0x560
@@ -59,25 +56,17 @@ on it 2026-09-23 (section 8: flown twice). Capture: eye run 165433
   318 draws, 1.9%; 2.25 -> 1,123, 6.7%; 3.0 -> 3,222, 19.2% (1.21 ms);
   4.5 -> 5,634, 33.5% (2.11 ms); 6.0 -> 33.7%. It levels off near 34%:
   the building shells' tables (t0 21.38) never drop.
-- **Visual cost (screen size):** only parts under k pixels go: at k = 8,
-  radius <= 1.28 m at 77-396 m (p50 279 m), r/d <= 0.191 deg; 16 small
-  records (1-6 parts) go whole, no building; 21 / 19 removed slots were
-  visible (exact re-draw), 2.5% of those removed. Every k <= 10.46 keeps
-  removed parts under 0.25 deg. The t0 half has no such cap: its certain
-  removals at k = 1.25 already reach 0.74 deg and a 4.2 m radius.
-- **LOD shift is draw-neutral here:** 99.0% of admitted eye parts sit at
-  nibble 3 or 4, which draw identical meshes in 149 of 151 models.
-- **Leg C (engine arc, 2026-09-23):** LODDistanceScale 0.001 left the
-  parked view at 18.9k eye draws, as section 5 predicts: ruled out there
-  as a draw lever (section 6).
-- **Open:** the first acting flight (section 9's checklist): whether the
-  frame work falls with k and caller_wait_fps rises toward 90, the
-  disagreement gate at the held scale, and the visual cost in the
-  headset (popping at steps, thinning beyond ~100 m, one-eye artefacts).
+- **Visual cost** (section 5): the screen-size half removes only parts
+  under k pixels (every k <= 10.46 keeps them under 0.25 deg); the t0 half
+  has no such cap (at k = 1.25 already 0.74 deg and a 4.2 m radius).
+- **LOD shift is draw-neutral here** (99.0% of admitted eye parts at nibble
+  3 or 4, identical meshes in 149 of 151 models); Leg C's LODDistanceScale
+  0.001 left 18.9k eye draws: not a draw lever there (section 6).
+- **Open:** the shipped build's first flight (section 9's last checklist):
+  the 0.25 ramp from s 1.0 (k ~4.1), the on-foot lines, the HUD's CPU.
 - **Ruled out:** see section 6 and section 9 (the builder-site write).
-- **Next:** fly `fix.settlement_detail = auto` (observe 0, k_max 4)
-  parked at Cranfield on the acting build; read section 9's "What the
-  first acting flight must show".
+- **Next:** fly the shipped default parked at Cranfield with the in-game
+  detail slider at its default; disembark and board once.
 
 ## 1. The test and what the decompile leaves undefined
 
@@ -390,7 +379,7 @@ six of eight items MET, one not evidenced, one optional and not run):
    the per-eye match above uses the existing 012514 tables, not a fresh
    v3 gate file.
 
-## 9. Acting mode (2026-09-23): built at the setter, NOT FLOWN
+## 9. Acting mode (2026-09-23): built at the setter, flown once, shipped as default auto
 
 The brief: make the governor act by writing s_game x k into ctx+0x30 at
 the draw-item builder, with a shadow copy of the game's value, if the
@@ -637,3 +626,114 @@ observe 0, k_max 4 (the game's s 1.5 at the slider's floor):
    pick reads the same scale).
 9. Switched to `game` mid-flight: `the game's LOD scale written back to 1
    context(s)` and the detail back at once.
+
+### Refinements after the first acting flight (2026-09-23)
+
+**The flight** (as the overseer read the log: 03:30 local, build b55e06b,
+parked at Cranfield, 90 Hz, the game's s = 1.5 at the slider's floor,
+auto, observe 0, k_max 4): k climbed 1 -> 2.70 over 80 s at 0.05 a step
+(a step after each 30 consecutive over-budget samples), the caller work
+per cycle fell 12.9 -> 10.6 ms against the 11.11 ms period, fps rose from
+~50 to 71-75 mean (median cycle one 90 Hz slot), then k HELD at 2.70-2.75
+with zero steps in a whole window (the work inside the dead band). 0
+faults, 0 disagreements. Sean saw nothing change visually; what he noticed
+was that nothing happened for the first minute and a half. Four changes
+follow; none is flown.
+
+**(1) A faster start** (lodgov::Policy). The trigger is unchanged: 30
+consecutive samples over period + 0.3 ms in frames with >= 200 builder
+records, at most one step a second, the clamp, 1 after 30 frames under 150
+records, down after 30 samples under period - 1.0 ms. The SIZE of an up
+step: 0.25 (kCoarseQuanta) when the mean excess (work - period) of the 30
+samples behind the step is more than 1.0 ms (kCoarseExcessMs), else 0.05.
+Down stays 0.05; k stays quantised to 0.05 and held to k_max (a 0.25 step
+that would pass it stops there: `held to k_max`). The mean is a ring of the
+latest 30 valid samples, emptied with the runs (a bad sample, leaving the
+settlement, on foot), so at a step it is exactly the triggering run's
+latest 30. Far from the target big steps (the flight's ramp windows sat
+1.0-1.8 ms over), near it fine ones and the dead band, so the operating
+point is still found from below. Rig (tools\lod_governor_test, 181 checks):
+from k 1 at 12.9 ms against 11.11 the ramp reaches 2.50 in 6 steps of 0.25,
+5.32 s (90 Hz samples; at 0.05 a step that is 30 steps, 29 s or more); at
+11.6 ms (0.49 over) every step is 0.05; the size reads the latest 30, not
+the run's older samples; down is 0.05 even 6 ms under; k_max 2.1 stops a
+0.25 step at 2.1; a lowered k_max still clamps at once; on a line through
+the flight's two ends (12.9 ms at k 1, 10.6 at 2.70) it takes 3 steps of
+0.25 then 8 of 0.05 and settles at k 2.15 (11.34 ms, in the dead band) with
+no step down. Lines: `k 1.00 -> 1.25, up 0.25: the frame work ran more than
+0.30 ms over the period for 30 samples, their mean 1.79 ms over (more than
+1.00 ms: the coarse step); ...`, `up 0.05: ... (1.00 ms or less: the fine
+step)`, `down 0.05: ...`; the summary's `N up (M by 0.25)`.
+
+**(2) The perf monitor's CPU figure.** The HUD's `cpu`, the Monitor page's
+CPU TIME tile and its CPU strip showed NativeTimingSnapshot::applicationMs,
+the pre-submit phase: under 10 ms on the flights while the caller thread
+worked 11.7-12.7 ms a cycle at 50-55 fps. Now NativePerfHistory::cpuFigure,
+readWork's rule: EdvrNativeTimingFrame::callerWorkMs when the frame is
+version 5 and callerWorkValid (a version 5 frame without it has no figure,
+never the app time beside it), else applicationMs from an older runtime.
+Labels: the overlay's `cpu` (the line's width unchanged) or `cpu
+(pre-submit)`; the tile `CPU TIME`, "ms game thread per frame", or `CPU
+PRE-SUBMIT`, "ms; the runtime DLL is older". A change of figure starts the
+average over. The runtime is unchanged; so is the native benchmark
+collector's CPU (perf_monitor.cpp's benchmark.cpuMs, still applicationMs).
+Rig: tools\native_perf_history_test (91 checks) pins the rule, the
+fallback, the invalid version 5 frame and the never-mixed average.
+
+**(3) The cockpit gate.** The arc measured the cockpit only, and the
+on-foot deferred frame pacing changes the cycle's shape. On foot --
+`journalOnFootKnown() && journalOnFoot()` (journal_watch.h: Status.json
+Flags2 bit 0, polled on the frame thread before the boundary), the signal
+fix.weapon_stability's pacing keys on (native_frame.cpp:405) -- the policy
+holds k = 1 exactly as outside a settlement: at once (Step::Foot), the
+settlement, the runs, the mean and a pending clamp forgotten, reduced
+alike; aboard it starts over (200 records, then 30 samples). One line per
+transition: `settlement detail (acting): on foot (the game's Status.json,
+the flag the on-foot frame pacing reads): k 2.00 -> 1.00, held at 1 while
+on foot -- ...` and `no longer on foot (Status.json) after 11.0 s, 1000
+frames held at k 1; the governor resumes ...`; the summary's `held on foot
+N frames`; a window wholly on foot reads `k stayed 1: on foot the whole
+window`. With the journal watcher off (d3d11.journal_watch = 0, or no
+journal folder) on foot cannot be told: one line says so and the governor
+runs as in the cockpit. Status.json is rewritten about once a second, so k
+can stay raised for a second or so after disembarking; the setter call
+before the boundary that sees the flag still writes (one rebuild's lag,
+pinned by the rig). Not gated: the SRV (Status.json Flags bit 26),
+unmeasured like on foot.
+
+**(4) The shipped default.** fix.settlement_detail compiles to `auto`
+(an empty value too) and ships live: `settlement_detail = auto` under [fix]
+with `# ui: Settlement detail | choices game, auto=Auto, reduced | live |
+menu performance` above it (the F8 menu's Performance page and the
+installer's window are generated from it). k_max: kDefaultMax 6.0 (100
+steps), kMaxCeiling 8.0. The flight settled at k 2.70-2.75 on s 1.5 (s x k
+about 4.1); from the slider's default (s 1.0) the same needs k about 4.1,
+past the old ceiling of 4, and the removal levels off between s x k 4.5
+and 6 (section 8). Every reader of the scale now sees up to 9.0 (6 on
+s 1.5; 12 at the ceiling), a value the game never produces (FUN_144312040's
+main-view pick reads it too). advanced.settlement_detail_max and
+advanced.settlement_detail_observe stay commented templates (the menu's
+developer tier). The contract is still 260 keys; the worst configure line
+is 1159 of 1166 characters.
+
+### What the next flight must show (the shipped build)
+
+Parked at Cranfield, the ini as shipped (auto, k_max 6, observe 0), the
+in-game detail slider at its default (s 1.0):
+1. `edvr_log.py --expect-build HEAD` exits 0; the configure line reads
+   `on (auto: acts by ...) -- k in [1, 6.00]: up while ... by 0.25 if their
+   mean ran > 1.00 ms over, else 0.05; ...`, every hook `hooked`/`matched`.
+2. Step lines `up 0.25` while the mean excess is over 1.0 ms, then `up
+   0.05`; the summary's `N up (M by 0.25)`; k settling with the work in the
+   dead band (near k 4.1 if the elasticity holds at s 1.0), with no `down`
+   steps right after the coarse ones (no pumping).
+3. Disembark and board once: one `on foot` and one `no longer on foot`
+   line, beside the pacing's own `native frame: begin ... pacing=turbo` and
+   `pacing=runtime` lines (the same flag: turbo with no `on foot` line means
+   the gate never ran); `held on foot N frames`, k 1 on foot, the ramp again
+   aboard.
+4. The HUD's `cpu` near the summary's `frame work = caller work per cycle`
+   mean, not the ~10 ms pre-submit figure.
+5. As before: implausible 0, faults 0, disagreements 0, no `NOT ACTING`, no
+   `STOOD DOWN`; in the headset, popping at the 0.25 steps and thinning at
+   the larger k.

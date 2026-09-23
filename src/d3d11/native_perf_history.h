@@ -6,6 +6,20 @@
 namespace edvr {
 struct NativePerfAverage { unsigned count=0; double meanMs=0; };
 
+// The monitor's CPU figure from one runtime frame, by the rule the settlement
+// governor's readWork uses: the caller work per cycle when the frame is timing
+// version 5 and carries it (EdvrNativeTimingFrame::callerWorkMs with
+// callerWorkValid) -- the game's thread from one pose wait's return to the
+// next one's entry, submits included: everything the display period must
+// hold. From an older runtime (version 3 or 4, no caller work) the producer's
+// application time stands in (NativeTimingSnapshot::applicationMs: pose wait
+// end to submit plus the eye treatments, the pre-submit phase only; on the
+// 2026-09-23 flights it read under 10 ms while the caller thread worked
+// 11.7-12.7 ms a cycle). A version 5 frame without valid caller work has no
+// figure -- never the application time beside it -- so no average mixes them.
+enum class NativeCpuSource : unsigned char { None, CallerWork, PreSubmit };
+struct NativeCpuFigure { NativeCpuSource source=NativeCpuSource::None; bool valid=false; double ms=0; };
+
 // Menu producer only. Observations are independent completed samples, never
 // assigned to the Present frame that happens to read an asynchronous result.
 class NativePerfHistory final {
@@ -13,10 +27,16 @@ public:
     void observe(bool native, const NativeTimingSnapshot&, const GpuFrameSnapshot&, uint64_t nowMs) noexcept;
     void clear() noexcept;
     NativePerfAverage submit(uint64_t nowMs, uint64_t windowMs) const noexcept;
-    // Application render elapsed time. These streams are independent from
-    // submit wall/XR wait diagnostics and are the values suitable for the UI.
+    // The values suitable for the UI, independent from the submit wall/XR wait
+    // diagnostics: applicationCpu is the CPU figure above (cpuFigure) and the
+    // CPU graph plots it; applicationGpu is the application render's elapsed
+    // GPU time.
     NativePerfAverage applicationCpu(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage applicationGpu(uint64_t nowMs, uint64_t windowMs) const noexcept;
+    static NativeCpuFigure cpuFigure(const NativeTimingSnapshot&) noexcept;
+    // Which figure applicationCpu and the CPU graph hold, for the label:
+    // CallerWork, PreSubmit (an older runtime), or None before the first.
+    NativeCpuSource cpuSource() const noexcept { return cpuSource_; }
     NativePerfAverage wait(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage producer(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage transfer(uint64_t nowMs, uint64_t windowMs) const noexcept;
@@ -48,6 +68,7 @@ private:
         int graph(float* out,int max,uint64_t now) const noexcept;
     } cpu_, applicationCpu_, producer_, applicationGpu_, device_;
     uint64_t generation_=0, firstSequence_=0;
+    NativeCpuSource cpuSource_=NativeCpuSource::None;
     double period_=0;
     uint64_t periodAt_=0;
     double baseHz_=0;

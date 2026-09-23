@@ -1,5 +1,6 @@
 #include "lod_governor.h"
 
+#include "journal_watch.h"
 #include "kinematic_eval_hook.h"
 #include "native_timing.h"
 #include "../common/config.h"
@@ -32,9 +33,37 @@ void Policy::reset() noexcept {
     inSettlement_ = clampPending_ = stepped_ = false;
     over_ = under_ = sparse_ = 0;
     lastStepMs_ = 0;
+    excessNext_ = excessCount_ = 0;
+    upQuanta_ = 0;
+    upHeld_ = false;
+    upMeanExcessMs_ = 0;
+}
+
+double Policy::meanExcessMs() const noexcept {
+    if (!excessCount_) return 0.0;
+    double sum = 0.0;
+    for (uint32_t i = 0; i < excessCount_; ++i) sum += excess_[(excessNext_ + kConsecutive - 1 - i) % kConsecutive];
+    return sum / excessCount_;
 }
 
 Step Policy::update(const FrameSignals& s) noexcept {
+    // On foot (the game's Status.json, the flag the on-foot frame pacing keys
+    // on): the arc measured the cockpit only, so k is held at 1 exactly as
+    // outside a settlement -- at once, the settlement, the runs, the mean and
+    // a pending clamp forgotten -- for as long as it lasts. Back aboard it
+    // starts over: 200 records, then 30 samples, before a step.
+    if (s.onFoot) {
+        clampPending_ = inSettlement_ = false;
+        over_ = under_ = sparse_ = 0;
+        excessCount_ = 0;
+        if (steps_ > 0) {
+            steps_ = 0;
+            lastStepMs_ = s.nowMs;
+            stepped_ = true;
+            return Step::Foot;
+        }
+        return Step::None;
+    }
     // A lowered k_max takes effect at once, whatever the signals say.
     if (clampPending_) {
         clampPending_ = false;
@@ -54,6 +83,7 @@ Step Policy::update(const FrameSignals& s) noexcept {
         if (++sparse_ >= kConsecutive) {
             inSettlement_ = false;
             sparse_ = over_ = under_ = 0;
+            excessCount_ = 0;
             if (steps_ > 0) {
                 steps_ = 0;
                 lastStepMs_ = s.nowMs;
@@ -65,13 +95,18 @@ Step Policy::update(const FrameSignals& s) noexcept {
     } else {
         sparse_ = 0;
     }
-    // Frame work: runs of consecutive samples over and under the budget. A
-    // frame with no new sample holds both runs; a bad sample breaks both.
+    // Frame work: runs of consecutive samples over and under the budget, and
+    // the latest 30 samples' excess over it. A frame with no new sample holds
+    // them; a bad sample breaks both runs and empties the mean.
     if (s.work == Work::Invalid) {
         over_ = under_ = 0;
+        excessCount_ = 0;
     } else if (s.work == Work::Valid) {
         over_ = s.workMs > s.periodMs + kOverMarginMs ? over_ + 1 : 0;
         under_ = s.workMs < s.periodMs - kUnderMarginMs ? under_ + 1 : 0;
+        excess_[excessNext_] = s.workMs - s.periodMs;
+        excessNext_ = (excessNext_ + 1) % kConsecutive;
+        if (excessCount_ < kConsecutive) ++excessCount_;
     }
     // reduced: k_max for as long as the settlement lasts -- at once, no ramp,
     // no frame-work steps (the runs above still feed the summary's counts).
@@ -86,7 +121,14 @@ Step Policy::update(const FrameSignals& s) noexcept {
     }
     if (stepped_ && s.nowMs - lastStepMs_ < kRampIntervalMs) return Step::None;
     if (inSettlement_ && s.records >= kSettlementRecords && over_ >= kConsecutive && steps_ < maxSteps_) {
-        ++steps_;
+        // The step's size: 0.25 while the 30 samples behind it -- the latest 30
+        // valid ones, every one over budget, since over_ >= 30 and whatever
+        // empties the ring also zeroes over_ -- ran more than 1.0 ms over on
+        // average, else 0.05; held to k_max either way.
+        upMeanExcessMs_ = meanExcessMs();
+        upQuanta_ = upMeanExcessMs_ > kCoarseExcessMs ? kCoarseQuanta : 1;
+        upHeld_ = steps_ + upQuanta_ > maxSteps_;
+        steps_ = upHeld_ ? maxSteps_ : steps_ + upQuanta_;
         lastStepMs_ = s.nowMs;
         stepped_ = true;
         return Step::Up;
@@ -561,6 +603,8 @@ struct Window {
     uint32_t recordsMax = 0, partsMax = 0;
     float kLow = 1.0f, kHigh = 1.0f;
     uint32_t up = 0, down = 0, resets = 0, clamps = 0, enters = 0;
+    uint32_t upCoarse = 0;     // up steps of 0.25 (inside up)
+    uint32_t footFrames = 0;   // frames held at k 1 on foot
     uint64_t sum[kCounters] = {};
     uint32_t dropMax[kClasses] = {};
     uint32_t notDispatchedMax = 0;
@@ -596,6 +640,12 @@ struct State {
     uint32_t viewCount = 0;
     bool standDownLogged = false;   // process lifetime, like the stand-down
     bool overflowLogged = false;
+    // The cockpit gate: on foot as the last boundary saw it, since when, for
+    // how many frames; and whether the missing journal watcher was said.
+    bool onFoot = false;
+    uint64_t footStartMs = 0;
+    uint32_t footFrames = 0;
+    bool journalNoted = false;
 };
 
 std::mutex g_mutex;
@@ -755,7 +805,9 @@ void logSummary(State& st, uint64_t nowMs) {
                       w.frames);
     const char* stuck = "";
     if (w.kHigh <= 1.0f) {
-        if (!w.recordsSum)
+        if (w.footFrames >= w.frames)
+            stuck = "; k stayed 1: on foot the whole window (the governor is for the cockpit only)";
+        else if (!w.recordsSum)
             stuck = "; k stayed 1: no draw-item builder calls (no settlement records, or the builder hook ran nothing)";
         else if (!w.denseFrames)
             stuck = "; k stayed 1: never 200 builder records in a frame";
@@ -824,13 +876,14 @@ void logSummary(State& st, uint64_t nowMs) {
     if (w.enters) std::snprintf(enters, sizeof(enters), ", %u to k_max", w.enters);
     Log::get().note(
         "settlement detail (%s): %.1f s, %u frames: k now %.2f, effective s x k %s (window %.2f..%.2f of max %.2f; %u "
-        "up, %u down, %u resets, %u clamps%s); builder records/frame %.1f (max %u, >= 200 on %u frames), part "
-        "tests/frame %.1f (max %u); frame work = %s: %.2f ms mean vs period %.2f ms over %u samples (over by > 0.30 "
-        "ms: %u, under by > 1.00 ms: %u, invalid %u, caller work absent %u); LOD scale: game s %s, held %s (k %.2f); "
-        "setter calls %u (scaled %u) on %u pointers (called with %u; builder contexts %u); implausible %u; faults "
-        "%u; %s%s%s.",
+        "up (%u by 0.25), %u down, %u resets, %u clamps%s; held on foot %u frames); builder records/frame %.1f (max "
+        "%u, >= 200 on %u frames), part tests/frame %.1f (max %u); frame work = %s: %.2f ms mean vs period %.2f ms "
+        "over %u samples (over by > 0.30 ms: %u, under by > 1.00 ms: %u, invalid %u, caller work absent %u); LOD "
+        "scale: game s %s, held %s (k %.2f); setter calls %u (scaled %u) on %u pointers (called with %u; builder "
+        "contexts %u); implausible %u; faults %u; %s%s%s.",
         tag, double(nowMs - w.startMs) / 1000.0, w.frames, kNow, effective, w.kLow, w.kHigh, st.policy.kMax(), w.up,
-        w.down, w.resets, w.clamps, enters, perFrame(w.recordsSum, w.frames), w.recordsMax, w.denseFrames,
+        w.upCoarse, w.down, w.resets, w.clamps, enters, w.footFrames, perFrame(w.recordsSum, w.frames), w.recordsMax,
+        w.denseFrames,
         perFrame(w.partsSum, w.frames), w.partsMax, source, w.workSamples ? w.workSum / w.workSamples : 0.0,
         w.workSamples ? w.periodSum / w.workSamples : 0.0, w.workSamples, w.workOver, w.workUnder, w.workInvalid,
         w.callerAbsent, gameText, heldText, kNow, calls, scaled, scaledPointers, setterPointers, builderContexts,
@@ -908,11 +961,22 @@ void logStep(State& st, lodgov::Step step, float from, const lodgov::FrameSignal
         ++st.stepsUnlogged;
         return;
     }
-    const char* why = step == lodgov::Step::Up ? "up: the frame work ran more than 0.30 ms over the period for 30 samples"
-                    : step == lodgov::Step::Down ? "down: the frame work ran more than 1.00 ms under the period for 30 samples"
-                    : step == lodgov::Step::Reset ? "reset: under 150 builder records for 30 frames"
-                    : step == lodgov::Step::Enter ? "reduced: in a settlement (>= 200 builder records), k = k_max at once"
-                                                  : "clamped to the new advanced.settlement_detail_max";
+    // An up step names its size and the mean excess that chose it; a down
+    // step is always 0.05.
+    char why[200];
+    if (step == lodgov::Step::Up) {
+        const bool coarse = st.policy.upQuanta() > 1;
+        std::snprintf(why, sizeof(why), "up %.2f: the frame work ran more than 0.30 ms over the period for 30 samples, "
+                      "their mean %.2f ms over (%s%s)", double(st.policy.upQuanta()) / lodgov::kQuantaPerUnit,
+                      st.policy.upMeanExcessMs(), coarse ? "more than 1.00 ms: the coarse step" : "1.00 ms or less: the fine step",
+                      st.policy.upHeld() ? ", held to k_max" : "");
+    } else {
+        std::snprintf(why, sizeof(why), "%s",
+                      step == lodgov::Step::Down ? "down 0.05: the frame work ran more than 1.00 ms under the period for 30 samples"
+                      : step == lodgov::Step::Reset ? "reset: under 150 builder records for 30 frames"
+                      : step == lodgov::Step::Enter ? "reduced: in a settlement (>= 200 builder records), k = k_max at once"
+                                                    : "clamped to the new advanced.settlement_detail_max");
+    }
     char more[48] = "";
     if (st.stepsUnlogged) std::snprintf(more, sizeof(more), " (+%u steps since the last line)", st.stepsUnlogged);
     char work[128] = "no frame-work sample this frame";
@@ -982,6 +1046,17 @@ void frameBoundaryAt(uint64_t nowMs) {
     lodgov::FrameSignals sig;
     sig.records = d[cRecords];
     sig.nowMs = nowMs;
+    // The cockpit gate: the journal watcher's Status.json, read on this same
+    // thread each frame before the boundary (device_hook.cpp), exactly as the
+    // on-foot frame pacing reads it (native_frame.cpp). Unknown -- menus, the
+    // watcher off -- is not on foot.
+    sig.onFoot = journalOnFootKnown() && journalOnFoot();
+    if (!st.journalNoted && !journalWatchActive()) {
+        st.journalNoted = true;
+        Log::get().note("settlement detail: the journal watcher is not reading the game's Status.json "
+                        "(d3d11.journal_watch off, or the journal folder not found), so on foot cannot be told from "
+                        "the cockpit: the governor also runs on foot.");
+    }
     readWork(st, nowMs, &sig);
     // The signal the runtime's timing version fixes, said once when it is
     // first known (unless the configure line already named it) and again only
@@ -1001,9 +1076,26 @@ void frameBoundaryAt(uint64_t nowMs) {
     // never writes engine memory itself.
     g_kBits.store(toBits(k), std::memory_order_release);
     logWriteEvents(st);
+    // One line per transition of the cockpit gate, never rate-limited.
+    if (sig.onFoot != st.onFoot) {
+        st.onFoot = sig.onFoot;
+        if (sig.onFoot) {
+            st.footStartMs = nowMs;
+            st.footFrames = 0;
+            Log::get().note("settlement detail (%s): on foot (the game's Status.json, the flag the on-foot frame "
+                            "pacing reads): k %.2f -> %.2f, held at 1 while on foot -- the governor is for the "
+                            "cockpit only; on foot is unmeasured.", modeTag(st), from, k);
+        } else {
+            Log::get().note("settlement detail (%s): no longer on foot (Status.json) after %.1f s, %u frames held at "
+                            "k 1; the governor resumes (a settlement's 200 builder records, then 30 samples, before a "
+                            "step).", modeTag(st), double(nowMs - st.footStartMs) / 1000.0, st.footFrames);
+        }
+    }
+    if (sig.onFoot) ++st.footFrames;
     // The window.
     Window& w = st.w;
     ++w.frames;
+    if (sig.onFoot) ++w.footFrames;
     if (st.eyes != 0xFFFFu) ++w.eyeFrames;
     if (sig.records >= lodgov::kSettlementRecords) ++w.denseFrames;
     w.recordsSum += d[cRecords];
@@ -1033,14 +1125,17 @@ void frameBoundaryAt(uint64_t nowMs) {
     if (k < w.kLow) w.kLow = k;
     if (k > w.kHigh) w.kHigh = k;
     switch (step) {
-    case lodgov::Step::Up: ++w.up; break;
+    case lodgov::Step::Up:
+        ++w.up;
+        if (st.policy.upQuanta() > 1) ++w.upCoarse;
+        break;
     case lodgov::Step::Down: ++w.down; break;
     case lodgov::Step::Reset: ++w.resets; break;
     case lodgov::Step::Clamp: ++w.clamps; break;
     case lodgov::Step::Enter: ++w.enters; break;
-    default: break;
+    default: break;   // Foot: the transition line above says it
     }
-    if (step != lodgov::Step::None) logStep(st, step, from, sig, nowMs);
+    if (step != lodgov::Step::None && step != lodgov::Step::Foot) logStep(st, step, from, sig, nowMs);
     if (nowMs - w.startMs >= 30000) {
         logSummary(st, nowMs);
         startWindow(st, nowMs);
@@ -1061,15 +1156,15 @@ void configureLine(const State& st) {
                       "each frame (FUN_142819D90): the game's value x k", m);
     const char* stood = g_standDown.load(std::memory_order_acquire)
         ? "; acting STOOD DOWN earlier in this process, observing" : "";
-    char policy[320];
+    char policy[400];
     if (st.mode == Mode::Reduced)
         std::snprintf(policy, sizeof(policy), "k = %.2f (advanced.settlement_detail_max) at once from a frame with >= "
-                      "200 draw-builder records, 1 after 30 frames under 150, no ramp", st.policy.kMax());
+                      "200 draw-builder records, 1 after 30 frames under 150 or on foot, no ramp", st.policy.kMax());
     else
-        std::snprintf(policy, sizeof(policy), "k in [1, %.2f], steps of 0.05: up one while a frame has >= 200 "
-                      "draw-builder records and the frame work ran > 0.30 ms over the display period for 30 samples, "
-                      "down one after 30 samples > 1.00 ms under it, at most one step a second, 1 after 30 frames "
-                      "under 150 records", st.policy.kMax());
+        std::snprintf(policy, sizeof(policy), "k in [1, %.2f]: up while a frame has >= 200 draw-builder records and "
+                      "the frame work ran > 0.30 ms over the display period for 30 samples, by 0.25 if their mean ran "
+                      "> 1.00 ms over, else 0.05; down 0.05 after 30 samples > 1.00 ms under it; at most a step a "
+                      "second; 1 after 30 frames under 150 records, and on foot", st.policy.kMax());
     char work[400];
     workSourceClause(st.source, st.timingVersion, work, sizeof(work));
     // The hook statuses are the fixed strings kinematic_eval_hook.cpp names;
@@ -1110,6 +1205,10 @@ bool enableLocked(State& st, uint64_t nowMs) {
     st.lastSeq = 0;
     st.lastStepLogMs = 0;
     st.stepsUnlogged = 0;
+    st.onFoot = false;   // so the first boundary on foot says so
+    st.footStartMs = 0;
+    st.footFrames = 0;
+    st.journalNoted = false;
     g_kBits.store(toBits(1.0f), std::memory_order_release);
     identifyEyes(st);   // from the last context seen, if any; else unnamed until the first boundary
     startWindow(st, nowMs);
@@ -1145,9 +1244,11 @@ void applyConfig(const char* modeText, float kMax, bool observe, uint64_t nowMs)
     const std::string text = modeText ? modeText : "";
     Mode mode = Mode::Game;
     bool unknown = false;
-    if (_stricmp(text.c_str(), "auto") == 0) mode = Mode::Auto;
+    // An empty value is the compiled default (auto), as an empty number or
+    // switch is theirs (Config::getFloat / getBool).
+    if (text.empty() || _stricmp(text.c_str(), "auto") == 0) mode = Mode::Auto;
     else if (_stricmp(text.c_str(), "reduced") == 0) mode = Mode::Reduced;
-    else if (!text.empty() && _stricmp(text.c_str(), "game") != 0) unknown = true;
+    else if (_stricmp(text.c_str(), "game") != 0) unknown = true;
     if (st.configured && mode == st.mode && text == st.modeText && kMax == st.kMaxCfg && observe == st.observe)
         return;   // the 1 Hz re-poll
     const bool first = !st.configured;
@@ -1331,7 +1432,8 @@ void lodGovernorSetterObserver(uintptr_t ctx) noexcept {
 // --- Configuration, the frame boundary and shutdown ----------------------------------------
 
 void lodGovernorConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("fix.settlement_detail", "game");
+    // A shipped fix: auto unless the player chose otherwise.
+    const std::string mode = cfg.getString("fix.settlement_detail", "auto");
     const float kMax = cfg.getFloat("advanced.settlement_detail_max", lodgov::kDefaultMax);
     const bool observe = cfg.getBool("advanced.settlement_detail_observe", false);
     applyConfig(mode.c_str(), kMax, observe, GetTickCount64());
