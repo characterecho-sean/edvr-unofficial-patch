@@ -2543,3 +2543,55 @@ reprojection as the honest fallback where the budget is not met, which
 is what EDVR's per-object motion vectors serve. Both (1) and (2) are
 running as offline work; nothing needs a flight until one of them has
 a number.
+
+### 2026-09-22 -- LOD-bias elasticity measured offline on run 165433: the screen-size half is a weak lever (<= 0.4 ms), the slider's half is the real one and needs the LOD tables to price beyond its floor
+
+Design note docs\design-settlement-lod-bias-2026-09-22.md (on main,
+44c59af) and `tools\cull_gate_probe.py --lod-bias k[,k...]`
+[--settlement-ms 6.3,8.5]. The per-part test FUN_1442B3FC0 reproduced
+from the decompile and the capture: a part passes a view iff (1) its
+sphere spans at least one pixel, 0.5*(A*d + B) <= r with A = view+0x550
+= 1/fy (0.000834297 here) and B = 0 for the eyes; (2) the frustum
+(FUN_1404F4E10); (3) the LOD distance f = A*(d - r)*s + B <= t0, with s
+= ctx+0x30 and t0 the first float of the part's 0x80-byte LOD table;
+the LOD nibble is the first i with f <= t[i+1]. Terms (1) and (2)
+never reject a part the engine passed (0 mismatches over 109,291
+rows); the only mismatch class (8,355 rows) is term (3), whose tables
+the capture does not hold, so the nibbles cannot be reproduced and the
+LOD-distance form is bounded, not priced.
+
+**Elasticity of the screen-size form** (exact join, 18,267 pool eye
+draws, both-eyes rule; ms at the 6.3 ms post-cut share): k = 2 removes
+6 draws; k = 3, 40 (0.01 ms); k = 6, 243 (0.08); k = 8, 613 (3.4%,
+0.21 ms); k = 10.46 is the last factor whose removed parts all stay
+under 0.25 degrees, 1,089 draws, 0.38 ms. What goes: small distant
+details beyond ~150 m (radius <= 1.3 m, angular size <= 0.19 deg at
+k = 8), never a building; visible parts among them: 2 at k = 3, 24 at
+k = 8 (2.5% of removed slots). A LOD shift changes nothing here: 99.0%
+of admitted parts sit at nibble 3 or 4 and those draw the same mesh
+in 149 of 151 models. ruled out: a screen-size bias as the settlement
+lever, because it tops out near 0.4 ms against the 1.5 ms bar.
+
+**The slider's form.** LODDistanceScale does not touch view+0x550/
++0x560 (the projection's pixel size); it enters ctx+0x30 = 2 -
+LODDistanceScale (identified by the settings offset +0x124, not traced
+end to end; the capture's s = 1.0 matches the config's 1.0). Its floor
+of 0.1 is s x 1.9 and moves only term (3). Bounds on 165433 at the
+floor: EB52 0.1..34.2% (measured pass C: -16.9%), 2684 3.1..42.0%
+(measured -14%), 8056 0.0..2.2% (measured immune - the one tight
+agreement), all pool eye draws 0.1..27.2% (measured -18.7%). Every
+measured value sits inside its bound. So the game's own slider at its
+floor removes ~18.7% of the settlement's eye draws, about 1.2 ms on
+the caller thread post-cut, at the game's own low-LOD look; an
+EDVR-side continuation below the floor (s > 1.9, one float in the
+render context) is the lever with teeth, unpriced beyond the floor
+and without a 0.25-degree cap (at k = 1.25 the certain removals
+already reach 0.74 degrees and a 4.2 m radius). Pricing it exactly
+needs the probe to record each LOD table once per table pointer and
+one parked capture.
+
+**Direction:** the cheapest next number costs no code: one parked leg
+at LODDistanceScale 0.1 (the floor) with the same analyzer and the
+GPU line, to measure the slider's own effect on the caller thread and
+the GPU at this view; then decide whether the beyond-the-floor bias is
+worth its visual cost.
