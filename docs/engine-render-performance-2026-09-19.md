@@ -80,6 +80,20 @@
   check ~0.1) armed-only, and a fourth round on the resource hooks.
   Entries: "Per-draw cut, round three", "Leg C".
 
+* **Settlement LOD governor, SHADOW MODE (2026-09-23, BUILT + GATED,
+  a081900, NOT FLOWN):** Sean's two-regime design - k = 1 in space,
+  k > 1 at a settlement only while the frame does not fit, hysteresis
+  against pumping - built as src\d3d11\lod_governor.* that computes k
+  from the builder's record count and the runtime's applicationMs
+  against the display period, recomputes the part test and the record
+  test at s*k on the workers with the engine's own inputs, and logs
+  would-drop / would-change-level counts with an angular-size
+  histogram every 30 s; nothing acts. Keys fix.settlement_detail (game
+  default; auto = shadow) and advanced.settlement_detail_max. EDVRGATE
+  v3 now records the LOD tables. Entry: "The settlement LOD governor".
+  Next: the shadow flight (parked + a short approach, auto at 1.0/MQ3,
+  a census press).
+
 * **Open (arc OPEN on two levers; scope cockpit-only stereo):** (1)
   EDVR's per-draw path, NAMED (2026-09-22 per-draw entry: hookedMap +
   mapWaitNote 0.40 ms, the draw-hook verdict lambda 0.20, the
@@ -2774,3 +2788,65 @@ the instruments that are armed all session (the map-wait timer's QPC
 pair and locked adds ~0.2 ms; the default-on app GPU timing's per-
 command owner check ~0.1 ms) - making those armed-only and a fourth
 round on the resource hooks is ~0.4-0.6 ms; the rest is the game's.
+
+### 2026-09-23 -- The settlement LOD governor, SHADOW MODE, built and gated (a081900), NOT FLOWN
+
+Sean's design (2026-09-23): one slider, tuned for kilometres before
+settlements existed, cannot serve both regimes; a governor should scale
+the LOD-distance term by context - k = 1 in space, k > 1 only at a
+settlement and only while the frame does not fit - with hysteresis so
+it never pumps (the settlement-flicker failure class). Built in shadow
+only: src\d3d11\lod_governor.{h,cpp}; nothing acts. Design section 8 of
+docs\design-settlement-lod-bias-2026-09-22.md.
+
+**Signals**, once per frame on the caller thread at vScreenFrameBoundary:
+density = the draw-item builder's record count and the part-test count
+of the previous frame (one increment per call in the builder bracket
+and the part relay, summed per worker); frame work = the runtime's
+applicationMs (the perf monitor's "app CPU": pose-wait end to submit
+plus the eye treatments), budget = 1000 / baseDisplayHz (11.111 ms at
+90); the engine's own s = ctx+0x30 read at the builder. **Policy**
+(constants): k in [1, k_max] in 0.05 steps; up one step when a frame
+has >= 200 builder records and the last 30 valid samples each ran
+> 0.30 ms over the period; down one step after 30 samples each > 1.0
+ms under it; at most one step per second; straight back to 1 after 30
+frames under 150 records. **Shadow computation** on the workers: after
+each engine part test, with the engine's own d, r, A, B, s and the
+part's LOD table, recompute term 3 at s*k (the engine's SSE
+approximations reproduced; a part counts only when the k = 1 recompute
+reproduces the engine's pass and level, else it is a logged
+disagreement): would-drop, would-change-level, and an angular-size
+histogram (< 0.25, 0.25-0.5, 0.5-1, >= 1 deg) of the would-drops; the
+record-level test FUN_144308B30 is reachable from the builder bracket
+without a new patch (inputs rec+0x240/+0x280/*(rec+0x20), the views
+through ctx+0x1A840; results rec+0x208/+0x210/node+0x6A) and is
+recomputed per eye (a lower bound: a parent's lost view removing its
+children is not modelled). Eyes are named by view bit (B = 0 and the
+finest A; bits 1 and 22 in 165433 - eye B moved from array index 5 to
+6 between frames, so the index cannot be used). **Also:** EDVRGATE v3
+records each part's 0x80-byte LOD table once per table pointer when the
+probe is armed, and the reader (--tables) makes --lod-bias exact for
+rows that name their table - the LOD note's missing number.
+
+**Keys:** fix.settlement_detail = game (default; nothing observed) |
+auto (this build: shadow only, "never acts" in the configure line) |
+reduced (reserved, behaves as auto, logged as such);
+advanced.settlement_detail_max = k_max, default 2.0, held to 1..4.
+**Log:** a configure line; a step line at most every 5 s; every 30 s a
+header, one line per eye and one for the other views with k, its
+min/max, the signals' means, would-drop per frame mean/max, would-
+change-level, the histogram; a window with k stuck at 1 says why; off
+= silent. **Cost:** part observer 14-17 ns and record observer 21-35 ns
+per call on the workers (~0.5-0.6 ms of worker CPU per frame at
+165433's 34k part tests, plus ~0.1-0.2 ms for the part relay), a few
+µs per frame on the caller; with `game`, nothing (the part patch is not
+installed unless the probe or the governor attaches). Gate: 76-check
+rig, config contract 259 keys.
+
+**First flight (shadow):** one parked leg with settlement_detail =
+auto at 1.0 / MaterialQuality 3, plus a short approach; read the 30 s
+summaries: does k rise at the pad and fall on the way out, how many
+parts would drop per frame at the k it settles on and in which angular
+bins, the disagreement count (must be ~0), and the worker-side cost
+in the analyzer's per-thread table; with a census press, the draw
+count for the removal fraction.
