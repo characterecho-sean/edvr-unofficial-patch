@@ -14,11 +14,14 @@
   B' on evidence — the hiding surface is 89.6% open panels, qualified
   solid occluders remove zero draws — and no cull code was built
   ("Gate probe flown", "Probe v2 flown"). The settlement LOD governor
-  has flown twice in shadow; acting mode FLOWN once ("First acting
-  flight"): k settled at 2.70-2.75 (s x k 4.05-4.13), caller work
-  12.9 -> 10.6 ms, 50 -> 71-75 fps, 0 faults, 0 disagreements, nothing
-  noticed visually; refinements and the shipped default (auto) IN
-  BUILD, not merged.
+  has flown four times (two shadow, two acting): the first held k
+  2.70-2.75, then sustained 90 Hz for 90 s at the default slider
+  before capping at k_max 4; the shipped build (fd25af9, k_max 6,
+  cockpit gate) confirms the ramp/on-foot-hold/reduced-from-menu but
+  its 30-consecutive trigger under-reacts at the operating point
+  (56 fps, a third of frames miss); a miss-fraction trigger is IN
+  BUILD, not merged ("First acting flight", "Two more governor
+  flights").
 
 * **Levers still open:** the draw count, now via the LOD governor's
   acting mode (flown once, in refinement); the last ~0.4-0.6 ms of EDVR's own per-draw
@@ -52,10 +55,9 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next flight:** the refined build: default slider (s = 1.0),
-  fix.settlement_detail = auto, k_max 6: the coarse ramp should reach
-  the operating point in ~10 s; then an approach leg for popping
-  during the ramp.
+* **Next flight:** the refinement-3 build, parked at Cranfield at
+  the default slider: expect fine steps once a second until fewer
+  than 3 of 30 frames miss, and the runtime near 90 Hz as on 03:45.
 
 ## Frame budget philosophy
 
@@ -3007,3 +3009,99 @@ restoring it); acting gated to the cockpit (on foot holds k = 1)
 until an on-foot flight.
 
 ruled out: nothing new this flight.
+
+### 2026-09-23 -- Two more governor flights: sustained 90 Hz at the default slider (03:45, b55e06b), then the shipped build confirms the coarse ramp, cockpit gate and reduced-from-menu but finds the 30-consecutive trigger under-reacting (04:23, fd25af9)
+
+**Flight 1, 03:45 local, build b55e06b** (the first acting build: 0.05
+steps, k_max 4, no cockpit gate), the game's detail slider back at
+DEFAULT (s = 1.000), Material Quality unknown, parked at Cranfield.
+gfx log edvr_gfx_20260923_034557.log, runtime log
+edvr_openxr_20260923_034558_980_15616.log.
+
+**The ramp** (window end local; k; caller work mean ms):
+
+| end | k | caller work |
+|---|---|---|
+| 03:47:58 | 1.00 -> 1.80 (16 up, 0 down) | 10.70 |
+| 03:48:28 | -> 2.65 (17 up) | 12.91 |
+| 03:48:58 | 2.65 held (0/0) | 11.25 |
+| 03:49:28 | 2.65 held | 10.92 |
+| 03:49:58 | -> 3.00 (7 up) | 11.57 |
+| 03:50:28 | -> 4.00 (20 up; the ceiling) | - |
+
+LOD scale game s = 1.000, held = k.
+
+**Runtime cycle windows** (window ends local, UTC 09:xx = local 03:xx;
+cycle mean ms (p50)): 03:47:14 14.13 (11.42); 03:47:44 18.51 (20.09);
+03:48:14 16.94 (13.40); 03:48:44 11.23 (11.13); 03:49:14 11.12
+(11.10); 03:49:44 11.65 (11.16); 03:50:14 21.30 (20.94); 03:50:44
+21.39 (21.79); 03:51:14 16.90.
+
+**The first sustained 90 Hz at this settlement.** From 03:48:14 to
+03:49:44, at k 2.65-3.0 on s = 1.0 (effective s x k 2.65-3.0), the
+runtime ran a full 90 Hz for 90 s (cycle mean 11.1-11.6, median one
+slot). Application-render GPU 6-10 ms parked, then 22-23 ms from
+03:50:01 (something else on screen; the caller work rose and k
+climbed to the cap of 4.00). The cap at s = 1.0 is what refinement
+2's k_max 6 fixed.
+
+**Flight 2, 04:23 local, build fd25af9** (the shipped default: coarse
+0.25 steps, k_max 6, cockpit gate, perf-monitor CPU = caller work),
+slider at DEFAULT (s = 1.000). gfx log edvr_gfx_20260923_042313.log,
+runtime log edvr_openxr_20260923_042314_964_2768.log.
+
+**The coarse ramp.** First step 04:24:51 (k 1.00 -> 1.25, the 30
+samples' mean 1.49 ms over: the coarse step), 04:25:00 (-> 1.50, mean
+4.39 over), 04:25:06 (-> 2.50, +3 steps, mean 2.49 over): six 0.25
+steps in 15 s -- one per ~2.5 s, paced by the 30-consecutive-samples
+trigger, not the one-step-a-second cap.
+
+**Windows.** 04:25:14: k 2.50 (6 up, all by 0.25), 9.29 ms mean (ramp
+included), over 772 / under 610 of 1700. 04:25:44: k 2.50 HELD (0 up,
+0 down), 10.99 ms mean, over 534 / under 378 of 1712 -- a third of the
+frames over the period + 0.3 ms; the runtime's window ending 04:25:31:
+56.2 fps, cycle mean 17.8, median 21.6 ms (two slots); Application-
+render GPU 5.6-8.3 ms through 04:25:04-04:26:14 (NOT the wall).
+04:25:48: a coarse step to 2.75 (mean 3.63 over), then 3.00.
+
+**On foot.** Sean disembarked ~04:25:55: the gate held k at 1 -- the
+summary's "held on foot" 1843 frames (window ending 04:26:14; window
+range 1.00..3.00, 2 up), 2223 frames (04:26:44, every frame), 2240
+frames (04:27:14); on foot the caller work read 11.7-13.2 ms at
+74-83 fps with the runtime's next-wait roundtrip 0.2 ms (the on-foot
+deferred frame pacing), GPU 12-15 ms.
+
+**Reduced from the menu.** At ~04:26:14 Sean switched the mode to
+"reduced" from the new F8 menu row (configure line reprinted "on
+(reduced: ...)" at line 1578, live). On re-boarding at 04:27:13 the
+log reads "k 1.00 -> 6.00, reduced: in a settlement (>= 200 builder
+records), k = k_max at once" (caller work 17.66 ms on that frame);
+the window ending 04:27:14 shows k 6.00, held 6.000. At 04:27:42 "k
+6.00 -> 1.00, reset: under 150 builder records for 30 frames" (Sean
+left). Zero faults, zero disagreements at the held scale throughout,
+as read from the summaries' fields.
+
+**Verdict.** The coarse ramp, the cockpit gate, the on-foot hold
+lines, reduced-from-the-menu and the reset all work as designed;
+k_max 4 was the cap at the default slider on 03:45 (fixed at 6 in
+fd25af9). The one fault: the 30-consecutive trigger under-reacts at
+the operating point -- with a third of frames missing their slot no
+run of 30 misses occurs, so the governor holds while the runtime
+half-rates a third of the frames (56 fps at k 2.50 held with the CPU
+mean 10.99 ms and the GPU 5.6-8.3 ms).
+
+**Refinement 3, ordered by the overseer 2026-09-23, IN BUILD:** a
+miss-fraction trigger -- up when at least 3 of the latest 30 valid
+samples run over the period + 0.3 ms (0.25 if their mean excess is
+over 1.0 ms, else 0.05), down when 0 of 30 are over and the mean is
+under by more than 1.0 ms; the dead band targets under 10% of frames
+missing.
+
+ruled out: 30 consecutive over-budget samples as the up trigger,
+because at the operating point a third of the frames miss their slot
+without ever forming a run of 30 (04:23 flight, window ending
+04:25:44).
+
+Next flight: the refinement-3 build, parked at Cranfield at the
+default slider: expect fine steps once a second until fewer than 3 of
+30 frames miss, and the runtime near 90 Hz as on 03:45.
