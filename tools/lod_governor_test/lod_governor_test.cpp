@@ -1,14 +1,20 @@
 // Build gate for the settlement LOD governor (src/d3d11/lod_governor.*,
-// fix.settlement_detail, shipped default auto): the policy's steps and
-// hysteresis on synthetic frame sequences, auto on the display slot (the
-// interval between boundaries; longer than 1.5 periods took two) over the
-// latest 30 samples -- up while 3 or more took two slots with the CPU at the
-// period (0.25 while the 30's mean caller work ran more than 1.0 ms over,
-// else 0.05), two-slot cycles with the CPU under counted apart, the kick to
-// k_max once that has held 3 s (held 2 s, one per 30 s), down 0.05 per 5 s
-// only after 5 s with no two-slot cycle and a millisecond to spare, the
-// lever-spent line at k_max, k_max 6 by default and 8 at most -- and
-// reduced's k_max-at-once, never a kick; the cockpit gate (on foot, per the journal
+// fix.settlement_detail, shipped default auto): the policy on synthetic frame
+// sequences -- auto decided once a second of wall time over the cycles
+// completed in it, on the display slot (the interval between boundaries;
+// longer than 1.5 periods took two): a second of 20 valid cycles or more
+// triggers when a tenth of them took two slots and were not GPU-bound (the
+// application's GPU render at the period - 0.5 ms or more; with no GPU sample
+// a miss is ours), fewer than 20 decide nothing; up 0.25 while its mean
+// caller work ran more than 1.0 ms over, else 0.05; ten triggering seconds in
+// a row below k_max kick to k_max (one per 30 s), and five clean seconds at a
+// time bring k back 0.25 to the pre-kick k + 0.25, then 0.05; down 0.05 after
+// five clean seconds, five more before the next; the lever-spent line at
+// k_max; the inert lever (two up steps that change the dropped parts by under
+// 0.5% of those passed hold k -- no step, no kick -- until the parts tested
+// move 20% or 30 s pass); a runtime without caller work holds; random misses
+// at 3% and 10%; k_max 6 by default and 8 at most -- and reduced's
+// k_max-at-once, never a kick; the cockpit gate (on foot, per the journal
 // watcher's Status.json, k is 1 at once and held; one line per transition,
 // the frames counted in the summary); the engine arithmetic
 // the shadow repeats (FUN_1442B3FC0 / FUN_144308B30's distance, LOD distance,
@@ -34,9 +40,11 @@
 // setter's counts, NOT ACTING when the setter never ran, "k stayed 1", and
 // nothing at all while off. The frame work is the runtime's caller work per
 // cycle (timing v5), never the app work beside it; a v3/v4 runtime falls back
-// to the app work, named as such in every line; a v5 frame without caller
-// work is an invalid sample. Every line fits the real log's line. It then
-// times the observers (the cost the design doc quotes). No hooks, no game.
+// to the app work, named as such in every line, and auto holds; a v5 frame
+// without caller work is an invalid sample; the GPU-bound misses, the
+// lever-spent line with the GPU beside the caller work, and the inert line.
+// Every line fits the real log's line. It then times the observers (the cost
+// the design doc quotes). No hooks, no game.
 #include <windows.h>
 #include <atomic>
 #include <cmath>
@@ -74,6 +82,9 @@ float Config::getFloat(const char*, float def) const { return def; }
 bool Config::getBool(const char*, bool def) const { return def; }
 NativeTimingSnapshot g_timing;
 NativeTimingSnapshot nativeTimingSnapshot() noexcept { return g_timing; }
+// The application-render GPU instrument, faked: off unless a case sets it.
+GpuFrameSnapshot g_gpu;
+GpuFrameSnapshot gpuFrameSnapshot() noexcept { return g_gpu; }
 const char* g_attachResult = "installed";
 const char* g_partStatusStub = "hooked";
 const char* g_setterStatusStub = "hooked";
@@ -146,8 +157,12 @@ constexpr double kP = 1000.0 / 90.0, kTwo = 2.0 * kP;
 struct Feed {
     lodgov::Policy p;
     double clock = 1000.0;
+    lodgov::WorkSource source = lodgov::WorkSource::Caller;
+    bool gpuValid = false;
+    double gpuMs = 0;
+    uint32_t tested = 0, passed = 0, dropped = 0;
+    bool expireNext = false;
     uint64_t now() const { return uint64_t(clock); }
-    // The wall time the next frame of this cycle would carry.
     uint64_t next(double cycleMs) const { return uint64_t(clock + cycleMs); }
     lodgov::Step frame(double workMs, double cycleMs, uint32_t records = 679,
                        lodgov::Work work = lodgov::Work::Valid, bool onFoot = false) {
@@ -156,13 +171,40 @@ struct Feed {
         s.records = records;
         s.onFoot = onFoot;
         s.work = work;
+        s.source = source;
+        s.expired = expireNext;
+        expireNext = false;
         s.workMs = workMs;
         s.periodMs = kP;
         s.nowMs = uint64_t(clock);
         s.clockMs = clock;
+        s.gpuValid = gpuValid;
+        s.gpuMs = gpuMs;
+        s.tested = tested;
+        s.passed = passed;
+        s.dropped = dropped;
         return p.update(s);
     }
+    // Frames until a window closes: the first `twoSlots` of them take two
+    // slots, the rest one. The step the closing frame returned.
+    lodgov::Step window(double workMs, int twoSlots, uint32_t records = 679) {
+        lodgov::Step s = lodgov::Step::None;
+        for (int i = 0; i < 400; ++i) {
+            s = frame(workMs, i < twoSlots ? kTwo : kP, records);
+            if (p.windowClosed()) return s;
+        }
+        return s;
+    }
+    // Windows until one returns a step (at most n): how many it took.
+    int until(lodgov::Step want, double workMs, int twoSlots, int n = 100) {
+        for (int i = 1; i <= n; ++i)
+            if (window(workMs, twoSlots) == want) return i;
+        return 0;
+    }
 };
+constexpr int kAll = 1000;   // every cycle of a window two slots
+constexpr int kFine = 12;    // 12 of ~79 cycles two slots (15%): triggers, a fine step
+constexpr double kClean = kP - 1.2;   // a clean second's caller work: 1.2 ms to spare
 
 void casePolicy() {
     using namespace lodgov;
@@ -177,381 +219,498 @@ void casePolicy() {
         check(p.maxSteps() == 20 && p.k() == 1.0f && p.kMax() == 2.0f,
               "policy: k_max 2.0 is twenty steps of 0.05; k starts at 1");
     }
-    Feed f;
-    f.p.configure(2.0f);
-    // The display slot: the first boundary has no interval; after it every
-    // cycle is measured, and one longer than 1.5 periods took two slots.
-    f.frame(kP, kP, 150);
-    check(!f.p.cycle().measured, "policy: the first boundary after enabling has no interval");
-    f.frame(kP, 1.49 * kP, 150);
-    check(f.p.cycle().measured && !f.p.cycle().missed && std::fabs(f.p.cycle().ms - 1.49 * kP) < 1e-6,
-          "policy: a cycle of 1.49 periods is measured and fits its slot");
-    f.frame(kP, 1.51 * kP, 150);
-    check(f.p.cycle().missed && !f.p.cycle().cpuUnder,
-          "policy: 1.51 periods took two slots, the CPU's (its caller work at the period)");
-    f.frame(kP - 1.0, kTwo, 150);
-    check(f.p.cycle().missed && f.p.cycle().cpuUnder,
-          "policy: two slots with the caller work 1 ms under the period: not the CPU's");
-    bool any = false;
-    for (int i = 0; i < 300; ++i) any |= f.frame(14.0, kTwo, 150) != Step::None;
-    check(!any && f.p.steps() == 0 && !f.p.inSettlement(), "policy: two-slot cycles with 150 records never rise");
-    // A bad sample empties the ring, and the next boundary has no interval.
-    f.frame(0, kP, 150, Work::Invalid);
-    check(f.p.samples() == 0 && f.p.misses() == 0 && !f.p.triggered(), "policy: an invalid sample empties the ring");
-    f.frame(12.0, kTwo);
-    check(!f.p.cycle().measured && f.p.samples() == 1 && f.p.misses() == 0,
-          "policy: ... and the boundary after it has no interval");
-    // The ring must hold 30 before a step.
-    for (int i = 0; i < 28; ++i) any |= f.frame(12.0, kTwo) != Step::None;
-    check(!any && f.p.samples() == 29 && f.p.misses() == 28 && f.p.steps() == 0,
-          "policy: 29 samples, 28 of them two slots, do not step: the ring must hold 30");
-    check(f.frame(12.0, kTwo) == Step::Up && f.p.steps() == 1 && f.p.k() == 1.05f && f.p.upQuanta() == 1 &&
-              !f.p.upHeld() && f.p.stepMisses() == 29,
-          "policy: the 30th steps up by 0.05 (29 of 30 took two slots, the CPU's; 12.0 ms is 0.89 over: fine)");
-    // At most one step up a second.
-    const uint64_t firstUp = f.now();
-    int ups = 0;
-    while (f.next(kTwo) < firstUp + 1000) ups += f.frame(12.0, kTwo) == Step::Up;
-    check(ups == 0, "policy: no second step inside the one-second ramp interval");
-    Step s = Step::None;
-    while (s == Step::None && f.now() < firstUp + 1100) s = f.frame(12.0, kTwo);
-    check(s == Step::Up && f.p.steps() == 2 && f.now() >= firstUp + 1000, "policy: the next step a second later");
-    // A frame with no new sample holds the ring; its cycle is still measured.
-    f.frame(0, kP, 679, Work::None);
-    check(f.p.samples() == 30 && f.p.cycle().measured, "policy: a frame without a sample holds the ring, its cycle measured");
-    // Two-slot cycles with the caller work 1 ms under the period: counted
-    // apart, never the trigger.
-    f.frame(0, kP, 679, Work::Invalid);
-    for (int i = 0; i < 60; ++i) any |= f.frame(kP - 1.0, kTwo) != Step::None;
-    check(!any && f.p.samples() == 30 && f.p.misses() == 0 && f.p.cpuUnderMisses() == 30 && !f.p.triggered() &&
-              f.p.steps() == 2,
-          "policy: two-slot cycles with the caller work 1 ms under the period never trigger: not the CPU's");
-    // Every cycle in its slot, the caller work 0.29 ms over: hold.
-    for (int i = 0; i < 900; ++i) any |= f.frame(11.40, kP) != Step::None;   // 10 s
-    check(!any && f.p.steps() == 2 && f.p.misses() == 0 && f.p.samples() == 30,
-          "policy: every cycle in its slot and no millisecond to spare: k holds");
-    // 2 of the last 30 cycles taking two slots hold; the 3rd steps.
-    any |= f.frame(12.0, kTwo) != Step::None;
-    any |= f.frame(12.0, kTwo) != Step::None;
-    check(!any && f.p.misses() == 2 && f.p.steps() == 2, "policy: 2 of the last 30 cycles taking two slots hold (the dead band)");
-    check(f.frame(12.0, kTwo) == Step::Up && f.p.steps() == 3 && f.p.stepMisses() == 3 && f.p.upQuanta() == 1,
-          "policy: the 3rd steps up, 0.05 (the 30's mean 0.35 ms over)");
-    // 150-199 records: no rise, and the settlement held.
-    for (int i = 0; i < 100; ++i) any |= f.frame(12.0, kTwo, 180) != Step::None;
-    check(!any && f.p.steps() == 3 && f.p.inSettlement(), "policy: 150-199 records hold k and the settlement");
-    // The trigger has held since the 3rd: dense again, one more step, then
-    // at 3 s the kick to k_max at once.
-    ups = 0;
-    s = Step::None;
-    for (int i = 0; i < 200 && s != Step::Kick; ++i) {
-        s = f.frame(12.0, kTwo);
-        ups += s == Step::Up;
-    }
-    check(s == Step::Kick && ups == 1 && f.p.steps() == 20 && f.p.k() == 2.0f && f.p.kickHeldMs() >= 3000 &&
-              f.p.kickHeldMs() < 3030,
-          "policy: the trigger held 3 s below k_max: a kick to k_max, at once");
-    for (int i = 0; i < 100; ++i) any |= f.frame(12.0, kTwo) != Step::None;
-    check(!any && f.p.steps() == 20, "policy: at k_max nothing steps further");
-    // Every cycle in its slot, the caller work only 0.61 ms under: hold.
-    for (int i = 0; i < 900; ++i) any |= f.frame(10.5, kP) != Step::None;   // 10 s
-    check(!any && f.p.steps() == 20, "policy: no cycle taking two slots but no millisecond to spare holds k");
-    // 2.11 ms to spare, no two-slot cycle for over 5 s: down 0.05, then no
-    // sooner than 5 s again.
-    s = Step::None;
-    for (int i = 0; i < 60 && s == Step::None; ++i) s = f.frame(9.0, kP);
-    check(s == Step::Down && f.p.steps() == 19 && f.p.stepMeanExcessMs() < -1.0 && f.p.stepCleanMs() >= 5000,
-          "policy: no cycle taking two slots for 5 s and a millisecond to spare: down 0.05");
-    const uint64_t downAt = f.now();
-    int downs = 0;
-    while (f.next(kP) < downAt + 5000) downs += f.frame(9.0, kP) == Step::Down;
-    check(downs == 0, "policy: the next step down no sooner than 5 s later");
-    s = Step::None;
-    while (s == Step::None && f.now() < downAt + 5100) s = f.frame(9.0, kP);
-    check(s == Step::Down && f.p.steps() == 18, "policy: ... and then 0.05 again");
-    // A lowered k_max clamps at once.
-    f.p.configure(1.5f);
-    check(f.frame(11.0, kP) == Step::Clamp && f.p.steps() == 10, "policy: a lowered k_max clamps k at once");
-    // Leaving the settlement: 29 sparse frames hold, the 30th resets k to 1,
-    // and the boundary after it has no interval.
-    Step last = Step::None;
-    for (int i = 0; i < 29; ++i) last = f.frame(12.0, kP, 20);
-    check(last == Step::None && f.p.steps() == 10 && f.p.inSettlement(), "policy: 29 frames under 150 records hold");
-    check(f.frame(12.0, kP, 20) == Step::Reset && f.p.steps() == 0 && !f.p.inSettlement(),
-          "policy: the 30th frame under 150 records resets k to 1");
-    f.frame(12.0, kP, 20);
-    check(!f.p.cycle().measured, "policy: the boundary after leaving the settlement has no interval");
-    f.p.configure(std::numeric_limits<float>::quiet_NaN());
-    check(f.p.maxSteps() == 0, "policy: a NaN k_max holds k at 1");
-    f.p.configure(9.0f);
-    check(f.p.maxSteps() == 140 && f.p.kMax() == 8.0f, "policy: k_max is held to 8");
-    f.p.configure(6.0f);
-    check(f.p.maxSteps() == 100 && f.p.kMax() == 6.0f, "policy: k_max 6.0 is exactly 100 steps");
-    f.p.configure(1.26f);
-    check(f.p.maxSteps() == 5, "policy: k_max is quantised to the 0.05 step");
-}
-
-// auto on the display slot (refinement 4, after the 05:05 flight): the
-// trigger is 3 or more of the last 30 cycles taking two slots, the CPU's;
-// up at most once a second, 0.25 while the 30's mean caller work ran more
-// than 1.0 ms over, else 0.05; the kick to k_max once the trigger has held
-// 3 s below it (held 2 s, one per 30 s); down 0.05 only after 5 s with no
-// cycle taking two slots and 1 ms to spare, then no sooner than 5 s; the
-// lever spent at k_max with the trigger for 5 s.
-void caseStepPolicy() {
-    using namespace lodgov;
-    // 90 Hz, 30% of the cycles taking two slots (spread evenly: 9 in any 30),
-    // the caller work at the period: up once a second, 0.05 each -- and once
-    // the trigger has held 3 s, the kick; at k_max 5 s more, the lever spent.
+    // The display slot, and whose a miss is.
     {
         Feed f;
-        std::vector<uint64_t> upsAt;
-        int fineUps = 0, otherUps = 0, downs = 0;
-        uint64_t kickAt = 0, triggerAt = 0;
-        float kickFrom = 0;
-        for (int i = 0; i < 700; ++i) {
+        f.frame(kP, kP, 150);
+        check(!f.p.cycle().measured, "policy: the first boundary after enabling has no interval");
+        f.frame(kP, 1.49 * kP, 150);
+        check(f.p.cycle().measured && !f.p.cycle().missed && std::fabs(f.p.cycle().ms - 1.49 * kP) < 1e-6,
+              "policy: a cycle of 1.49 periods is measured and fits its slot");
+        f.frame(kP, 1.51 * kP, 150);
+        check(f.p.cycle().missed && !f.p.cycle().gpuBound && !f.p.cycle().unexplained,
+              "policy: 1.51 periods took two slots; the caller work at the period, no GPU sample: the CPU's");
+        f.frame(kP - 1.0, kTwo, 150);
+        check(f.p.cycle().missed && f.p.cycle().unexplained,
+              "policy: two slots with the caller work 1 ms under and no GPU sample: unexplained, not the CPU's");
+        f.gpuValid = true;
+        f.gpuMs = 11.5;
+        f.frame(kP + 1.0, kTwo, 150);
+        check(f.p.cycle().missed && f.p.cycle().gpuBound,
+              "policy: two slots with the application's GPU render at 11.5 ms (period - 0.5 or more): GPU-bound");
+        f.gpuMs = 6.0;
+        f.frame(kP + 1.0, kTwo, 150);
+        check(f.p.cycle().missed && !f.p.cycle().gpuBound && !f.p.cycle().unexplained,
+              "policy: two slots with the GPU at 6 ms and the caller work over: the CPU's");
+        f.frame(kP - 1.0, kTwo, 150);
+        check(f.p.cycle().unexplained, "policy: two slots with the GPU at 6 ms and the caller work under: unexplained");
+    }
+    // A decision a second; 150 records never rise; a second of 15 fresh
+    // cycles decides nothing and breaks no run.
+    {
+        Feed f;
+        f.p.configure(2.0f);
+        bool any = false;
+        for (int i = 0; i < 300; ++i) any |= f.frame(14.0, kTwo, 150) != Step::None;   // 6.7 s
+        check(!any && f.p.steps() == 0 && !f.p.inSettlement() && f.p.windows() >= 6 && f.p.windows() <= 7 &&
+                  f.p.lastWindow().triggered && f.p.triggerRun() >= 6,
+              "policy: a decision a second; seconds of two-slot cycles with 150 records trigger but never rise");
+        while (!f.p.windowClosed()) f.frame(14.0, kTwo, 150);
+        const uint32_t run = f.p.triggerRun();
+        int n = 0;
+        Step s = Step::None;
+        do {
+            s = f.frame(14.0, kTwo, 679, n++ < 15 ? Work::Valid : Work::None);
+        } while (!f.p.windowClosed());
+        check(s == Step::None && !f.p.lastWindow().decided && f.p.lastWindow().cycles == 15 &&
+                  f.p.triggerRun() == run && f.p.steps() == 0,
+              "policy: a second of 15 fresh cycles decides nothing and breaks no run");
+        // The evidence expires: the ring, the second in progress and the runs
+        // go, and k holds.
+        f.frame(14.0, kTwo);
+        f.expireNext = true;
+        const Step e = f.frame(14.0, kTwo);
+        check(e == Step::None && f.p.samples() == 1 && f.p.triggerRun() == 0 && !f.p.cycle().measured &&
+                  f.p.expiries() == 1 && f.p.k() == 1.0f,
+              "policy: an expiry empties the ring, drops the second in progress and the runs, and holds k");
+    }
+    // The trigger's line, the step's size, the density gate, k_max, down.
+    {
+        Feed f;
+        f.p.configure(2.0f);
+        f.window(kP, 0);   // a first second, every cycle in its slot: nothing
+        const Step s8 = f.window(kP, 8);
+        const WindowResult w8 = f.p.lastWindow();
+        const Step s9 = f.window(kP, 9);
+        const WindowResult w9 = f.p.lastWindow();
+        check(s8 == Step::None && w8.decided && !w8.triggered && w8.misses == 8 && s9 == Step::Up && w9.triggered &&
+                  w9.misses == 9 && f.p.k() == 1.05f && f.p.upQuanta() == 1,
+              "policy: 8 of ~82 cycles taking two slots hold, 9 of ~81 trigger: up 0.05 (under a quarter, the mean at the period)");
+        std::printf("lod_governor_test: the trigger's line at 90 Hz: %u of %u two-slot cycles hold, %u of %u step\n",
+                    w8.misses, w8.cycles, w9.misses, w9.cycles);
+        check(f.window(12.9, kAll) == Step::Up && f.p.upQuanta() == kCoarseQuanta && f.p.k() == 1.30f,
+              "policy: a triggering second, every cycle two slots and 1.79 ms over: up 0.25");
+        check(f.window(12.9, kAll, 180) == Step::None && f.p.k() == 1.30f && f.p.inSettlement(),
+              "policy: 150-199 records hold k and the settlement");
+        for (int i = 0; i < 3; ++i) f.window(12.9, kAll);
+        check(f.p.k() == 2.0f && f.p.upHeld(), "policy: k stops at k_max, the last 0.25 held to it");
+        check(f.window(12.9, kAll) == Step::None && f.p.k() == 2.0f, "policy: at k_max nothing steps further");
+        check(f.until(Step::Down, kClean, 0) == 5 && f.p.k() == 1.95f && f.p.downQuanta() == 1 && !f.p.relaxStep() &&
+                  f.p.haveGood() && f.p.goodK() == 2.0f,
+              "policy: five seconds with headroom in a row: down 0.05, a trial against the working point 2.00");
+        check(f.until(Step::Down, kClean, 0) == 5 && f.p.k() == 1.90f, "policy: ... then five more before the next");
+        f.window(kClean, 0);
+        f.window(kClean, 0);
+        f.window(kP - 0.5, 0);   // clean, but only 0.5 ms under
+        check(f.until(Step::Down, kClean, 0) == 5, "policy: a clean second without the millisecond breaks the run: five more");
+        f.p.configure(1.5f);
+        check(f.frame(kP, kP) == Step::Clamp && f.p.k() == 1.5f, "policy: a lowered k_max clamps k at once");
+        Step last = Step::None;
+        for (int i = 0; i < 29; ++i) last = f.frame(kP, kP, 20);
+        check(last == Step::None && f.p.k() == 1.5f && f.p.inSettlement(), "policy: 29 frames under 150 records hold");
+        check(f.frame(kP, kP, 20) == Step::Reset && f.p.k() == 1.0f && !f.p.inSettlement() && !f.p.haveGood(),
+              "policy: the 30th frame under 150 records resets k to 1 and forgets the working point");
+        f.frame(kP, kP, 20);
+        check(!f.p.cycle().measured, "policy: the boundary after leaving the settlement has no interval");
+        f.p.configure(std::numeric_limits<float>::quiet_NaN());
+        check(f.p.maxSteps() == 0, "policy: a NaN k_max holds k at 1");
+        f.p.configure(9.0f);
+        check(f.p.maxSteps() == 140 && f.p.kMax() == 8.0f, "policy: k_max is held to 8");
+        f.p.configure(6.0f);
+        check(f.p.maxSteps() == 100 && f.p.kMax() == 6.0f, "policy: k_max 6.0 is exactly 100 steps");
+        f.p.configure(1.26f);
+        check(f.p.maxSteps() == 5, "policy: k_max is quantised to the 0.05 step");
+    }
+}
+
+// auto, decided once a second (refinement 4b and the review of 2026-09-23):
+// the step's size, the kick and its trial, the relaxation, the working point,
+// the GPU's and the unexplained misses, a runtime without caller work, the
+// lever's benefit, random misses, and a density the lever itself cuts.
+void caseStepPolicy() {
+    using namespace lodgov;
+    uint64_t rng = 0x9E3779B97F4A7C15ull;
+    auto uniform = [&]() {
+        rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+        return double(rng >> 11) / 9007199254740992.0;
+    };
+    // The size: a quarter of the cycles the CPU's is the coarse step even with
+    // the mean at the period -- the review's finding 2: 31% misses at a mean
+    // near the period took eleven fine steps.
+    {
+        Feed f;
+        f.window(kP, 0);
+        const Step s17 = f.window(kP, 17);
+        const WindowResult w17 = f.p.lastWindow();
+        const int q17 = f.p.upQuanta();
+        const Step s21 = f.window(kP, 21);
+        const WindowResult w21 = f.p.lastWindow();
+        check(s17 == Step::Up && q17 == 1 && s21 == Step::Up && f.p.upQuanta() == kCoarseQuanta &&
+                  w17.misses * 4 < w17.cycles && w21.misses * 4 >= w21.cycles,
+              "steps: at a mean at the period, 17 of ~74 cycles the CPU's take 0.05, 21 of ~69 (a quarter) take 0.25");
+        std::printf("lod_governor_test: the coarse line at 90 Hz, the mean at the period: %u of %u step 0.05, %u of %u "
+                    "step 0.25\n", w17.misses, w17.cycles, w21.misses, w21.cycles);
+    }
+    // 30% of 90 Hz cycles two slots at the period, whatever k: 0.25 a second
+    // (a quarter or more), the kick at the 10th second from where the steps
+    // have got to -- a trial the fifth second at k_max fails, so the pre-kick
+    // k comes back at once and no kick follows for 60 s; the steps climb
+    // again to k_max, where five triggering seconds say the lever is spent.
+    {
+        Feed f;
+        int ups = 0, coarse = 0, kicks = 0, restores = 0;
+        float kickFrom = 0, restoredTo = 0;
+        uint32_t kickWindow = 0, restoreWindow = 0, maxWindow = 0, spentWindow = 0;
+        for (int i = 0; i < 3000 && !spentWindow; ++i) {   // ~43 s at most
             const bool two = std::floor((i + 1) * 0.3) > std::floor(i * 0.3);
             const float k0 = f.p.k();
             const Step s = f.frame(kP, two ? kTwo : kP);
-            if (!triggerAt && f.p.triggered()) triggerAt = f.now();
             if (s == Step::Up) {
-                upsAt.push_back(f.now());
-                (f.p.upQuanta() == 1 ? fineUps : otherUps)++;
-            }
-            if (s == Step::Kick && !kickAt) {
-                kickAt = f.now();
-                kickFrom = k0;
-            }
-            if (s == Step::Down) ++downs;
-        }
-        bool paced = upsAt.size() >= 2;
-        for (size_t i = 1; i < upsAt.size(); ++i)
-            paced &= upsAt[i] - upsAt[i - 1] >= 1000 && upsAt[i] - upsAt[i - 1] <= 1025;
-        check(upsAt.size() == 3 && fineUps == 3 && otherUps == 0 && paced && downs == 0,
-              "steps: 30% of cycles taking two slots, the caller work at the period: up 0.05 once a second");
-        check(kickAt && kickAt - triggerAt >= 3000 && kickAt - triggerAt < 3030 && kickFrom == 1.15f && f.p.k() == 6.0f,
-              "steps: ... and the trigger held 3 s: the kick, from 1.15 to k_max 6.00 at once");
-        check(f.p.ceilingMissing(f.now()), "steps: ... and at k_max with the trigger for 5 s the lever is spent");
-        std::printf("lod_governor_test: 30%% of 90 Hz cycles taking two slots, the caller work at the period: %zu steps "
-                    "of 0.05 a second apart, then the kick from %.2f to %.2f at %.2f s of the trigger\n",
-                    upsAt.size(), double(kickFrom), double(f.p.k()), double(kickAt - triggerAt) / 1000.0);
-    }
-    // Two-slot cycles with the caller work 1 ms under the period: counted
-    // as the CPU under, never the trigger.
-    {
-        Feed f;
-        bool any = false;
-        for (int i = 0; i < 1000; ++i) any |= f.frame(kP - 1.0, i % 3 == 0 ? kTwo : kP) != Step::None;
-        check(!any && f.p.steps() == 0 && f.p.misses() == 0 && f.p.cpuUnderMisses() == 10 && !f.p.triggered(),
-              "steps: two-slot cycles with the caller work 1 ms under the period do not trigger (the CPU under)");
-    }
-    // Every cycle two slots at 12.9 ms (1.79 over): 0.25 once a second, and
-    // at 3 s the kick. Then with 1.2 ms to spare: 4.9 s with no cycle taking
-    // two slots holds, 5.0 s steps down once, the next not before 5 s more;
-    // only 0.5 ms to spare holds.
-    {
-        Feed f;
-        const uint64_t t0 = f.now();
-        int coarseUps = 0;
-        uint64_t kickAt = 0;
-        float kickFrom = 0;
-        for (int i = 0; i < 300; ++i) {
-            const float k0 = f.p.k();
-            const Step s = f.frame(12.9, kTwo);
-            if (s == Step::Up && f.p.upQuanta() == kCoarseQuanta) ++coarseUps;
-            if (s == Step::Kick && !kickAt) {
-                kickAt = f.now();
-                kickFrom = k0;
-            }
-        }
-        check(coarseUps == 3 && kickFrom == 1.75f && f.p.steps() == 100,
-              "steps: every cycle two slots at 12.9 ms: 1.25, 1.50, 1.75 a second apart, then the kick to 6.00");
-        std::printf("lod_governor_test: every 90 Hz cycle two slots at 12.9 ms: %d steps of 0.25, then the kick from %.2f "
-                    "to 6.00 at %.2f s\n", coarseUps, double(kickFrom), double(kickAt - t0) / 1000.0);
-        const uint64_t lastMiss = f.now();
-        bool any = false;
-        while (f.next(kP) < lastMiss + 4900) any |= f.frame(kP - 1.2, kP) != Step::None;
-        check(!any, "steps: 4.9 s with no cycle taking two slots and 1.2 ms to spare holds");
-        Step s = Step::None;
-        while (s == Step::None && f.now() < lastMiss + 5100) s = f.frame(kP - 1.2, kP);
-        check(s == Step::Down && f.p.steps() == 99 && f.now() >= lastMiss + 5000 && f.p.stepCleanMs() >= 5000 &&
-                  std::fabs(f.p.stepMeanExcessMs() + 1.2) < 1e-9,
-              "steps: at 5.0 s with 1.2 ms to spare, one step down, 0.05");
-        const uint64_t downAt = f.now();
-        int downs = 0;
-        while (f.next(kP) < downAt + 5000) downs += f.frame(kP - 1.2, kP) == Step::Down;
-        check(downs == 0, "steps: the next step down not before 5 s more");
-        s = Step::None;
-        while (s == Step::None && f.now() < downAt + 5100) s = f.frame(kP - 1.2, kP);
-        check(s == Step::Down && f.p.steps() == 98, "steps: ... and then it comes");
-        f.frame(0, kP, 679, Work::Invalid);
-        bool hold = false;
-        for (int i = 0; i < 1000; ++i) hold |= f.frame(kP - 0.5, kP) != Step::None;
-        check(!hold && f.p.steps() == 98, "steps: no cycle taking two slots but only 0.5 ms to spare holds");
-    }
-    // The kick from k 2.75, its hold, and one kick per 30 s.
-    {
-        Feed f;
-        // Bursts of 3 two-slot cycles every 90 frames at 12.9 ms: a 0.25 step
-        // a burst, the trigger never held 3 s, so no kick.
-        int kicks = 0;
-        for (int i = 0; f.p.k() < 2.75f && i < 5000; ++i)
-            kicks += f.frame(12.9, i % 90 < 3 ? kTwo : kP) == Step::Kick;
-        check(f.p.k() == 2.75f && kicks == 0, "steps: bursts of cycles taking two slots step a burst at a time, no kick");
-        // Every cycle in its slot at the period, then every cycle two slots:
-        // the trigger holds; 0.05 a second while it does, and at 3 s the kick.
-        for (int i = 0; i < 40; ++i) f.frame(kP, kP);
-        uint64_t triggerAt = 0, kickAt = 0;
-        float kickFrom = 0;
-        for (int i = 0; i < 400 && !kickAt; ++i) {
-            const float k0 = f.p.k();
-            const Step s = f.frame(kP, kTwo);
-            if (!triggerAt && f.p.triggered()) triggerAt = f.now();
-            if (s == Step::Kick) {
-                kickAt = f.now();
-                kickFrom = k0;
-            }
-        }
-        check(kickAt && kickAt - triggerAt >= 3000 && kickFrom == 2.9f && f.p.k() == 6.0f &&
-                  f.p.kickHeldMs() >= 3000 && f.p.stepMisses() >= 3,
-              "steps: the trigger held 3 s from k 2.75 (0.05 a second meanwhile, to 2.90): the kick to k_max 6.00");
-        // Held: every cycle in its slot with 1.2 ms to spare, no step down for
-        // 2 s (nor for 5 s after the last cycle taking two slots).
-        bool down = false;
-        while (f.next(kP) < kickAt + 2000) down |= f.frame(kP - 1.2, kP) == Step::Down;
-        check(!down && f.p.k() == 6.0f, "steps: k_max held 2 s after the kick");
-        // A higher k_max and cycles taking two slots again: 0.05 a second, and
-        // no second kick until 30 s after the first.
-        f.p.configure(8.0f);
-        uint64_t secondKick = 0;
-        int upsBefore = 0;
-        for (int i = 0; i < 3000 && !secondKick; ++i) {
-            const Step s = f.frame(kP, kTwo);
-            if (s == Step::Kick) secondKick = f.now();
-            else if (s == Step::Up) ++upsBefore;
-        }
-        check(secondKick >= kickAt + 30000 && secondKick < kickAt + 30030 && upsBefore >= 20 && f.p.k() == 8.0f,
-              "steps: a second kick within 30 s is refused (0.05 a second meanwhile); at 30 s it comes");
-    }
-    // The lever spent: at k_max with the trigger, not before 5 s there.
-    {
-        Feed f;
-        f.p.configure(1.5f);
-        uint64_t atMax = 0;
-        for (int i = 0; i < 400 && !atMax; ++i)
-            if (f.frame(12.9, kTwo) != Step::None && f.p.steps() == f.p.maxSteps()) atMax = f.now();
-        bool early = false;
-        while (f.next(kTwo) < atMax + 4900) {
-            f.frame(12.9, kTwo);
-            early |= f.p.ceilingMissing(f.now());
-        }
-        bool spent = false;
-        while (!spent && f.now() < atMax + 5100) {
-            f.frame(12.9, kTwo);
-            spent = f.p.ceilingMissing(f.now());
-        }
-        check(atMax && !early && spent && f.now() >= atMax + 5000,
-              "steps: at k_max with the trigger held, the lever is spent at 5 s there, not before");
-    }
-    // Every cycle two slots with the 30's mean 1.5 ms over: 0.25, at the 30th
-    // sample and not before (the first has no interval: 29 of 30).
-    {
-        Feed f;
-        bool early = false;
-        for (int i = 0; i < 29; ++i) early |= f.frame(kP + 1.5, kTwo) != Step::None;
-        check(!early && f.frame(kP + 1.5, kTwo) == Step::Up && f.p.upQuanta() == kCoarseQuanta &&
-                  f.p.stepMisses() == 29 && std::fabs(f.p.stepMeanExcessMs() - 1.5) < 1e-9 && f.p.k() == 1.25f,
-              "steps: every cycle two slots with the mean 1.5 ms over: up 0.25 at the 30th sample and not before");
-    }
-    // The size reads the 30 samples behind the step, not older ones: just
-    // after a step, 10 at 20 ms, then 11.6 ms until the next, whose 30 are
-    // all at 11.6: 0.05.
-    {
-        Feed f;
-        Step last = Step::None;
-        for (int i = 0; i < 200 && last == Step::None; ++i) last = f.frame(11.6, kTwo);
-        const int before = f.p.steps();
-        bool early = false;
-        for (int i = 0; i < 10; ++i) early |= f.frame(20.0, kTwo) != Step::None;
-        Step next = Step::None;
-        for (int i = 0; i < 200 && next == Step::None; ++i) next = f.frame(11.6, kTwo);
-        check(last == Step::Up && !early && next == Step::Up && f.p.upQuanta() == 1 && f.p.steps() == before + 1 &&
-                  f.p.stepMeanExcessMs() < 1.0,
-              "steps: the size reads the 30 samples behind the step, not older ones");
-    }
-    // The cap: k_max 2.1 with bursts at 12.9 ms (a 0.25 step a burst): 1.25,
-    // 1.5, 1.75, 2.0, then 2.1 (the rule's 0.25, held to k_max); the clamp.
-    {
-        Feed f;
-        f.p.configure(2.1f);
-        int ups = 0;
-        bool heldLast = false;
-        for (int i = 0; i < 1000; ++i)
-            if (f.frame(12.9, i % 90 < 3 ? kTwo : kP) == Step::Up) {
                 ++ups;
-                heldLast = f.p.upHeld();
+                coarse += f.p.upQuanta() == kCoarseQuanta;
             }
-        check(ups == 5 && heldLast && f.p.upQuanta() == kCoarseQuanta && f.p.steps() == 22 && f.p.k() == 2.1f,
-              "steps: a 0.25 step is held to k_max (2.0 -> 2.1), and k stops there");
-        f.p.configure(1.5f);
-        check(f.frame(12.9, kP) == Step::Clamp && f.p.k() == 1.5f, "steps: a lowered k_max still clamps k at once");
-    }
-    // The first acting flight's slope (12.9 ms at k 1, 10.6 at 2.70, a line):
-    // a cycle takes two slots while the caller work runs more than 0.3 ms past
-    // the period. The ramp is kicked at 3 s, then k comes back 0.05 per 5 s
-    // to where the work has a millisecond to spare, with no cycle taking two
-    // slots on the way.
-    {
-        Feed f;
-        int coarse = 0, fine = 0, kicks = 0, downs = 0, missesAfterKick = 0;
-        uint64_t kickAt = 0, lastDown = 0;
-        const uint64_t t0 = f.now();
-        for (int i = 0; i < 40000; ++i) {   // ~450 s
-            const double work = 12.9 - (12.9 - 10.6) / 1.7 * (double(f.p.k()) - 1.0);
-            const Step s = f.frame(work, work > kP + 0.3 ? kTwo : kP);
-            if (s == Step::Up) (f.p.upQuanta() == kCoarseQuanta ? coarse : fine)++;
             if (s == Step::Kick) {
                 ++kicks;
-                kickAt = f.now();
+                kickFrom = k0;
+                kickWindow = f.p.windows();
             }
-            if (s == Step::Down) {
-                ++downs;
-                lastDown = f.now();
+            if (s == Step::Restore) {
+                ++restores;
+                restoredTo = f.p.k();
+                restoreWindow = f.p.windows();
             }
-            if (kickAt && s != Step::Kick && f.p.cycle().missed) ++missesAfterKick;   // after the kick's own frame
+            if (!maxWindow && restores && f.p.k() == 6.0f) maxWindow = f.p.windows();
+            if (f.p.ceilingMissing()) spentWindow = f.p.windows();
         }
-        const double settled = 12.9 - (12.9 - 10.6) / 1.7 * (double(f.p.k()) - 1.0);
-        check(kicks == 1 && coarse == 3 && fine == 0 && missesAfterKick == 0 && settled >= kP - 1.0 &&
-                  settled <= kP + 0.3,
-              "steps: on the flight's slope 3 steps of 0.25, the kick at 3 s, then back 0.05 per 5 s with no miss");
-        std::printf("lod_governor_test: the flight's slope (12.9 ms at k 1, 10.6 at 2.70): %d steps of 0.25, the kick "
-                    "at %.1f s, then %d steps down to k %.2f (work %.2f ms) by %.0f s\n", coarse,
-                    double(kickAt - t0) / 1000.0, downs, double(f.p.k()), settled, double(lastDown - t0) / 1000.0);
+        check(kicks == 1 && kickWindow == 10 && kickFrom == 3.25f && restores == 1 && restoreWindow == 15 &&
+                  restoredTo == 3.25f && f.p.restoredAfterKick() && ups == coarse && ups == 20 && maxWindow == 26 &&
+                  spentWindow == 31 && f.p.ceilingOutcome() == Outcome::Unknown,
+              "steps: 30% at the period: 0.25 a second, the kick at the 10th from 3.25, restored at the 15th, back up "
+              "to 6.00 by the 26th, spent at the 31st; no parts measured: the outcome unknown");
+        std::printf("lod_governor_test: 30%% two-slot cycles at the period: %d steps of 0.25, the kick at second %u from "
+                    "%.2f, restored to %.2f at second %u, k_max again at second %u, the lever spent at second %u\n",
+                    ups, kickWindow, double(kickFrom), double(restoredTo), restoreWindow, maxWindow, spentWindow);
+    }
+    // A failed kick blocks the next for 60 s: 15% misses at the period (fine
+    // steps) with k_max 8 -- the kick at the 10th second, restored at the
+    // 15th; ten more triggering seconds below k_max kick again only once 60 s
+    // have passed since the restore.
+    {
+        Feed f;
+        f.p.configure(8.0f);
+        uint32_t kickAt[3] = {}, restoreAt[3] = {};
+        int kicks = 0, restores = 0;
+        while (f.now() < 90000 && kicks < 3) {
+            const Step s = f.window(kP, kFine);
+            if (s == Step::Kick) kickAt[kicks++] = f.p.windows();
+            if (s == Step::Restore && restores < 3) restoreAt[restores++] = f.p.windows();
+        }
+        check(kicks == 2 && kickAt[0] == 10 && restoreAt[0] == 15 && kickAt[1] >= restoreAt[0] + 60 &&
+                  kickAt[1] <= restoreAt[0] + 61 && restores >= 1,
+              "steps: a failed kick's restore blocks the next kick for 60 s");
+        std::printf("lod_governor_test: 15%% at the period, k_max 8: kicks at seconds %u and %u, the first restored at "
+                    "second %u\n", kickAt[0], kickAt[1], restoreAt[0]);
+    }
+    // Every cycle two slots at 12.9 ms until k reaches 2.50: six steps of
+    // 0.25 clear it, no kick.
+    {
+        Feed f;
+        int coarse = 0, kicks = 0;
+        for (int i = 0; i < 1000; ++i) {
+            const bool two = f.p.k() < 2.5f;
+            const Step s = f.frame(two ? 12.9 : 10.9, two ? kTwo : kP);
+            coarse += s == Step::Up && f.p.upQuanta() == kCoarseQuanta;
+            kicks += s == Step::Kick;
+        }
+        check(coarse == 6 && kicks == 0 && f.p.k() == 2.5f,
+              "steps: two-slot cycles at 12.9 ms until k 2.50: six steps of 0.25 clear them, no kick");
+    }
+    // A successful kick from 2.90 and its relaxation: the fifth second at
+    // k_max clean, then 0.25 per five clean seconds to 3.15 (the pre-kick k
+    // + 0.25) in about 60 s, then 0.05.
+    {
+        Feed f;
+        for (int i = 0; i < 5; ++i) {   // 1.25 .. 2.25, a quiet second between: never ten in a row
+            f.window(12.9, kAll);
+            f.window(kP, 0);
+        }
+        for (int i = 0; i < 4; ++i) {   // 2.30 .. 2.45
+            f.window(kP, kFine);
+            f.window(kP, 0);
+        }
+        check(f.p.k() == 2.45f && !f.p.relaxing(), "steps: triggering seconds with quiet ones between: 2.45, no kick");
+        int ups = 0;
+        Step s = Step::None;
+        for (int i = 0; i < 10; ++i) {
+            s = f.window(kP, kFine);
+            ups += s == Step::Up;
+        }
+        check(s == Step::Kick && ups == 9 && f.p.preKickK() == 2.9f && f.p.k() == 6.0f && f.p.relaxing() &&
+                  f.p.kickTrial() && f.p.relaxTargetK() == 3.15f,
+              "steps: ten triggering seconds in a row: 0.05 a second to 2.90, then the kick from 2.90 to 6.00, a trial");
+        const uint64_t cleanFrom = f.now();
+        int relax = 0, other = 0;
+        uint64_t reached = 0;
+        bool trialPassed = false;
+        for (int i = 0; i < 100 && !reached; ++i) {
+            s = f.window(kClean, 0);
+            if (i == 4) trialPassed = !f.p.kickTrial() && s == Step::Down;
+            if (s == Step::Down) (f.p.relaxStep() ? relax : other)++;
+            if (f.p.k() == 3.15f) reached = f.now();
+        }
+        check(trialPassed && relax == 12 && other == 0 && reached && reached - cleanFrom >= 59000 &&
+                  reached - cleanFrom <= 62000 && !f.p.relaxing(),
+              "steps: the fifth second at k_max clean passes the trial; 0.25 per five seconds (the last 0.10) to 3.15 in ~60 s");
+        std::printf("lod_governor_test: the kick from 2.90 to 6.00, then %d relaxing steps to 3.15 in %.1f s\n", relax,
+                    double(reached - cleanFrom) / 1000.0);
+        check(f.until(Step::Down, kClean, 0) == 5 && f.p.downQuanta() == 1 && !f.p.relaxStep() && f.p.k() == 3.1f,
+              "steps: ... then the ordinary 0.05");
+    }
+    // A recovery trial that fails: a second triggering within 10 s of a step
+    // down restores the working point at once and doubles the wait before the
+    // next trial -- 5, 10, 20, 40, 60 clean seconds; back to 5 after 60 s
+    // without a trigger. The same after a relaxing step.
+    {
+        Feed f;
+        for (int i = 0; i < 9; ++i) f.window(12.9, kAll);   // 1.25 .. 3.25, 0.25 a second
+        const bool at325 = f.p.k() == 3.25f;
+        uint32_t waits[6] = {};
+        bool restoresOk = true;
+        for (int t = 0; t < 6; ++t) {
+            const int w = f.until(Step::Down, kClean, 0, 70);
+            waits[t] = uint32_t(w);
+            restoresOk &= f.p.k() == 3.2f && f.p.goodK() == 3.25f;
+            const Step r = f.window(kP, kFine);   // the next second triggers: the trial failed
+            restoresOk &= r == Step::Restore && f.p.k() == 3.25f && !f.p.restoredAfterKick();
+        }
+        check(at325 && restoresOk && waits[0] == 5 && waits[1] == 10 && waits[2] == 20 && waits[3] == 40 &&
+                  waits[4] == 60 && waits[5] == 60 && f.p.downWait() == 60,
+              "steps: each failed recovery trial restores 3.25 at once; the waits 5, 10, 20, 40, 60, 60 clean seconds");
+        // A step down that holds 60 s without a trigger (quiet seconds, no
+        // headroom): the wait is 5 again. The waits themselves never reset
+        // it -- 60 clean seconds are 60 s without a trigger too.
+        const int w60 = f.until(Step::Down, kClean, 0, 70);
+        for (int i = 0; i < 61; ++i) f.window(kP, 0);
+        check(w60 == 60 && f.p.k() == 3.2f && f.p.downWait() == 5 && f.until(Step::Down, kClean, 0) == 5 &&
+                  f.p.k() == 3.15f,
+              "steps: a step down that holds 60 s without a trigger resets the wait to 5 clean seconds");
+        // Near the working point the step is fine, a quarter of misses or not:
+        // 3.15 after the trial, 12 quiet seconds (past its 10 s), then 36% of
+        // the cycles two slots: 0.05, back to the working point 3.20.
+        for (int i = 0; i < 12; ++i) f.window(kP, 0);
+        check(f.window(kP, 24) == Step::Up && f.p.upQuanta() == 1 && f.p.upNearGood() && f.p.k() == 3.2f,
+              "steps: within 0.25 below the working point the step is 0.05, even at a quarter of misses");
+        // At the working point it triggers again: forgotten, and the size
+        // rule is the ordinary one.
+        check(f.window(kP, 24) == Step::Up && f.p.upQuanta() == kCoarseQuanta && !f.p.haveGood() &&
+                  f.p.k() == 3.45f,
+              "steps: triggering at the working point forgets it: 0.25 again");
+        // A relaxing step that fails: the k before it at once, the
+        // relaxation over, 0.05 after ten clean seconds.
+        Feed g;
+        for (int i = 0; i < 10; ++i) g.window(kP, kAll);    // 0.25 a second to 3.25, the kick at the 10th
+        for (int i = 0; i < 10; ++i) g.window(kClean, 0);   // the trial passes; relaxing: 5.75, 5.50
+        const bool relaxed = g.p.k() == 5.5f && g.p.relaxing();
+        const Step r = g.window(kP, kAll);
+        check(relaxed && r == Step::Restore && g.p.k() == 5.75f && !g.p.relaxing() && g.p.downWait() == 10,
+              "steps: a second triggering within 10 s of a relaxing step restores 5.75 and ends the relaxation");
+        check(g.until(Step::Down, kClean, 0) == 10 && g.p.downQuanta() == 1 && !g.p.relaxStep(),
+              "steps: ... then 0.05 after ten clean seconds");
+    }
+    // The GPU's misses and the unexplained ones: two-slot cycles with the
+    // application's GPU render at 11.5 ms never trigger and are counted
+    // GPU-bound; at 6 ms with the caller work over, they trigger; with no
+    // GPU sample and the caller work over, they trigger; with the caller work
+    // under the period - 0.3 ms and the GPU under or unknown, they are
+    // unexplained and never trigger.
+    {
+        Feed f;
+        f.gpuValid = true;
+        f.gpuMs = 11.5;
+        bool any = false;
+        for (int i = 0; i < 20; ++i) any |= f.window(kP + 0.8, kAll) != Step::None;
+        check(!any && f.p.k() == 1.0f && f.p.lastWindow().misses == 0 && f.p.lastWindow().gpuBound > 40 &&
+                  f.p.triggerRun() == 0,
+              "steps: two-slot cycles with the GPU at 11.5 ms never trigger: GPU-bound, counted apart");
+        f.gpuMs = 6.0;
+        check(f.window(kP + 0.8, kAll) == Step::Up && f.p.k() == 1.25f,
+              "steps: with the GPU at 6 ms and the caller work over, they trigger (every cycle: 0.25)");
+        f.gpuValid = false;
+        check(f.window(kP + 0.8, kAll) == Step::Up && f.p.k() == 1.5f, "steps: with no GPU sample, they trigger");
+        any = false;
+        for (int i = 0; i < 10; ++i) any |= f.window(kP - 0.5, kAll) != Step::None;
+        f.gpuValid = true;
+        for (int i = 0; i < 10; ++i) any |= f.window(kP - 0.5, kAll) != Step::None;
+        check(!any && f.p.k() == 1.5f && f.p.lastWindow().unexplained > 40 && f.p.lastWindow().misses == 0,
+              "steps: the caller work 0.5 ms under and the GPU under or unknown: unexplained, never a trigger");
+    }
+    // A runtime without caller work (timing v3/v4): nothing triggers.
+    {
+        Feed f;
+        f.source = WorkSource::App;
+        bool any = false;
+        for (int i = 0; i < 20; ++i) any |= f.window(12.9, kAll) != Step::None;
+        check(!any && f.p.k() == 1.0f && f.p.holding() && !f.p.lastWindow().triggered,
+              "steps: without caller work auto never steps up");
+    }
+    // The lever's benefit (the review's finding on the inert rule): the parts
+    // passed at EDVR's scale and the caller work across each up step.
+    {
+        // 4,800 parts passed a frame and the caller work unchanged through
+        // two 0.25 steps: inert -- no step and no kick; the down rule still
+        // applies.
+        Feed f;
+        f.tested = 5500;
+        f.passed = 4800;
+        f.dropped = 4;
+        int ups = 0, kicks = 0;
+        uint64_t heldAt = 0;
+        for (int i = 0; i < 25; ++i) {
+            const Step s = f.window(12.9, kAll);
+            ups += s == Step::Up;
+            kicks += s == Step::Kick;
+            if (!heldAt && f.p.inert()) heldAt = f.now();
+        }
+        check(ups == 2 && kicks == 0 && f.p.inert() && f.p.inertHolds() == 1 && f.p.k() == 1.5f &&
+                  f.p.lastEffect() == Effect::NoBenefit && f.p.runCoarse() == 2 && f.p.runFine() == 0 &&
+                  f.p.runPassedBefore() == 4800.0 && f.p.runPassedAfter() == 4800.0 &&
+                  std::fabs(f.p.runCallerBefore() - 12.9) < 1e-9 && f.p.triggerRun() == 0,
+              "steps: two 0.25 steps with the passed parts and the caller work unchanged: inert, no step, no kick");
+        // 30 s after the hold one step is retried; without a benefit the hold goes on.
+        int w = 0;
+        while (f.p.retries() == 0 && w < 12) {
+            f.window(12.9, kAll);
+            ++w;
+        }
+        const uint64_t retriedAt = f.now();
+        check(f.p.retries() == 1 && f.p.k() == 1.75f && retriedAt - heldAt >= 29000 && retriedAt - heldAt <= 32000,
+              "steps: 30 s into the hold one step is retried");
+        for (int i = 0; i < 25; ++i) f.window(12.9, kAll);
+        check(f.p.inert() && f.p.retries() == 1 && f.p.k() == 1.75f && f.p.rearms() == 0,
+              "steps: a retry without a benefit keeps the hold, and the next retry waits 30 s");
+        // The view changes -- the parts tested move 25% -- and a step is
+        // retried at once; this one crosses a threshold past the plateau (the
+        // passed parts fall 17%): a benefit, re-armed.
+        f.tested = 6875;
+        check(f.window(12.9, kAll) == Step::Up && f.p.retries() == 2 && f.p.k() == 2.0f && f.p.retrying(),
+              "steps: a 25% change in the parts tested retries a step at once");
+        f.passed = 4000;   // what 2.00 passes here: a threshold past the plateau
+        f.window(12.9, kAll);
+        check(!f.p.inert() && f.p.rearms() == 1 && f.p.lastEffect() == Effect::Benefit && f.p.k() == 2.25f,
+              "steps: a retried step past the plateau shows a benefit and re-arms; the steps go on");
+        // Inert, the down rule still applies.
+        Feed g;
+        g.tested = 5500;
+        g.passed = 4800;
+        for (int i = 0; i < 4; ++i) g.window(12.9, kAll);
+        const float held = g.p.k();
+        check(g.p.inert() && held == 1.5f && g.until(Step::Down, kClean, 0) == 5 && g.p.k() == 1.45f,
+              "steps: inert, clean seconds still give detail back");
+        // Four 0.05 steps without a benefit: inert too.
+        Feed h;
+        h.tested = 5500;
+        h.passed = 4800;
+        ups = 0;
+        for (int i = 0; i < 8; ++i) ups += h.window(12.9 - 1.8, kFine) == Step::Up;
+        check(ups == 4 && h.p.inert() && h.p.runFine() == 4 && h.p.runCoarse() == 0,
+              "steps: four 0.05 steps without a benefit: inert");
+        // Each step passes 3% fewer parts: a benefit every time, it keeps stepping.
+        Feed m;
+        m.tested = 5500;
+        ups = 0;
+        for (int i = 0; i < 8; ++i) {
+            m.passed = uint32_t(4800.0 * (1.0 - 0.03 * (double(m.p.k()) - 1.0) / 0.25));
+            ups += m.window(12.9, kAll) == Step::Up;
+        }
+        check(ups == 8 && !m.p.inert() && m.p.inertHolds() == 0 && m.p.lastEffect() == Effect::Benefit,
+              "steps: each step passing 3% fewer parts keeps stepping");
+        // The passed parts unchanged but the caller work 0.25 ms lower a
+        // step: a benefit (6 steps keep it over the period - 0.3 ms, where a
+        // two-slot cycle would be unexplained).
+        Feed c;
+        c.tested = 5500;
+        c.passed = 4800;
+        ups = 0;
+        for (int i = 0; i < 6; ++i) ups += c.window(12.9 - 0.25 * (double(c.p.k()) - 1.0) / 0.25, kAll) == Step::Up;
+        check(ups == 6 && !c.p.inert() && c.p.lastEffect() == Effect::Benefit,
+              "steps: the caller work falling 0.25 ms a step is a benefit with the passed parts unchanged");
+        // No part tests at all: the benefit is unknown, never a reason to hold.
+        Feed u;
+        ups = 0;
+        for (int i = 0; i < 6; ++i) ups += u.window(12.9, kAll) == Step::Up;
+        check(ups == 6 && !u.p.inert() && u.p.lastEffect() == Effect::Unknown,
+              "steps: without part tests the benefit is unknown and the steps go on");
     }
     // Cycles taking two slots at random at a fixed rate (a fixed-seed
-    // generator, 90 Hz, the caller work at the period, 60 s from k 1): how
-    // often the trigger fires below a tenth, and whether it kicks. Printed;
-    // pinned only in order.
+    // generator, 90 Hz, the caller work at the period): 3% for 300 s steps at
+    // most once; 10% for 60 s steps on a good part of the seconds.
     {
-        uint64_t rng = 0x9E3779B97F4A7C15ull;
-        auto uniform = [&]() {
-            rng = rng * 6364136223846793005ull + 1442695040888963407ull;
-            return double(rng >> 11) / 9007199254740992.0;
-        };
-        const double rates[5] = {0.10, 0.05, 0.03, 0.02, 0.01};
-        int ups[5] = {}, kicks[5] = {};
-        for (int r = 0; r < 5; ++r) {
-            Feed f;
-            while (f.now() < 61000) {
-                const Step s = f.frame(kP, uniform() < rates[r] ? kTwo : kP);
-                ups[r] += s == Step::Up;
-                kicks[r] += s == Step::Kick;
-            }
+        Feed f;
+        int ups = 0, kicks = 0;
+        while (f.now() < 301000) {
+            const Step s = f.frame(kP, uniform() < 0.03 ? kTwo : kP);
+            ups += s == Step::Up;
+            kicks += s == Step::Kick;
         }
-        check(ups[0] + kicks[0] > ups[2] + kicks[2] && ups[1] + kicks[1] > ups[4] + kicks[4],
-              "steps: rarer cycles taking two slots, fewer steps");
-        std::printf("lod_governor_test: two-slot cycles at random, 60 s at 90 Hz from k 1: up steps (kicks) at 10%% %d "
-                    "(%d), 5%% %d (%d), 3%% %d (%d), 2%% %d (%d), 1%% %d (%d)\n", ups[0], kicks[0], ups[1], kicks[1],
-                    ups[2], kicks[2], ups[3], kicks[3], ups[4], kicks[4]);
+        check(ups <= 1 && kicks == 0, "steps: two-slot cycles at random at 3% for 300 s: at most one step up");
+        Feed g;
+        int ups10 = 0, kicks10 = 0;
+        uint32_t decided = 0;
+        while (g.now() < 61000) {
+            const Step s = g.frame(kP, uniform() < 0.10 ? kTwo : kP);
+            ups10 += s == Step::Up;
+            kicks10 += s == Step::Kick;
+            decided += g.p.windowClosed() && g.p.lastWindow().decided;
+        }
+        check(ups10 + kicks10 >= int(decided) / 3, "steps: at 10% for 60 s it steps on a good part of the seconds");
+        std::printf("lod_governor_test: two-slot cycles at random, 90 Hz: 3%% for 300 s -> %d up steps; 10%% for 60 s -> "
+                    "%d up steps and %d kicks in %u seconds\n", ups, ups10, kicks10, decided);
+    }
+    // The first acting flight's slope (12.9 ms at k 1, 10.6 at 2.70, a line),
+    // a cycle taking two slots while the caller work runs more than 0.3 ms
+    // past the period. Printed: where the ramp ends and what it costs.
+    {
+        Feed f;
+        int coarse = 0, fine = 0, kicks = 0, downs = 0, restores = 0;
+        uint64_t lastUp = 0;
+        const uint64_t t0 = f.now();
+        for (int i = 0; i < 20000; ++i) {   // ~220 s
+            const double work = 12.9 - (12.9 - 10.6) / 1.7 * (double(f.p.k()) - 1.0);
+            const Step s = f.frame(work, work > kP + 0.3 ? kTwo : kP);
+            if (s == Step::Up) {
+                (f.p.upQuanta() == kCoarseQuanta ? coarse : fine)++;
+                lastUp = f.now();
+            }
+            kicks += s == Step::Kick;
+            downs += s == Step::Down;
+            restores += s == Step::Restore;
+        }
+        const double settled = 12.9 - (12.9 - 10.6) / 1.7 * (double(f.p.k()) - 1.0);
+        check(settled <= kP + 0.3 && kicks == 0 && f.p.k() == 2.25f,
+              "steps: on the flight's slope 0.25 steps end at 2.25 with every cycle in its slot, no kick");
+        std::printf("lod_governor_test: the flight's slope (12.9 ms at k 1, 10.6 at 2.70): %d steps of 0.25, %d of 0.05 "
+                    "by %.1f s, %d kicks, %d down, %d restores, settling at k %.2f (%.2f ms)\n",
+                    coarse, fine, double(lastUp - t0) / 1000.0, kicks, downs, restores, double(f.p.k()), settled);
+    }
+    // A density the lever itself cuts (the review's conditional risk): the
+    // builder's records fall from 680 at k 1 to 140 at k 2 as whole records
+    // drop out. The current behaviour, pinned until a flight shows it: at
+    // 140 the settlement ends after 30 frames and k resets to 1, and the
+    // ramp starts over.
+    {
+        Feed f;
+        int resets = 0, ups = 0;
+        while (f.now() < 31000) {
+            const double k = f.p.k();
+            const double fall = 680.0 - 540.0 * (k - 1.0);
+            const uint32_t records = uint32_t(fall > 140.0 ? fall : 140.0);
+            const Step s = f.frame(12.9, kTwo, records);
+            resets += s == Step::Reset;
+            ups += s == Step::Up;
+        }
+        check(resets >= 2 && ups >= 8, "steps: records falling to 140 as k rises: k resets to 1 and the ramp repeats");
+        std::printf("lod_governor_test: records 680 -> 140 as k rises 1 -> 2: %d resets and %d up steps in 30 s\n",
+                    resets, ups);
     }
 }
 
@@ -561,24 +720,69 @@ void caseStepPolicy() {
 void caseFootPolicy() {
     using namespace lodgov;
     Feed f;
-    for (int i = 0; i < 150; ++i) f.frame(12.9, kTwo);
-    check(f.p.k() > 1.0f && f.p.inSettlement(), "foot: in the cockpit at a busy settlement k has risen");
+    for (int i = 0; i < 3; ++i) f.window(12.9, kAll);
+    check(f.p.k() == 1.75f && f.p.inSettlement(), "foot: in the cockpit at a busy settlement k has risen");
     check(f.frame(12.9, kTwo, 679, Work::Valid, true) == Step::Foot && f.p.k() == 1.0f && !f.p.inSettlement() &&
-              f.p.samples() == 0 && f.p.misses() == 0 && f.p.meanExcessMs() == 0.0 && !f.p.triggered(),
-          "foot: on foot k is 1 at once, the settlement and the samples forgotten");
+              f.p.samples() == 0 && f.p.triggerRun() == 0 && !f.p.triggered() && !f.p.inert() && !f.p.haveGood(),
+          "foot: on foot k is 1 at once, the settlement, the samples, the runs and the working point forgotten");
     bool any = false;
     for (int i = 0; i < 1000; ++i) any |= f.frame(14.0, kTwo, 679, Work::Valid, true) != Step::None;
     check(!any && f.p.k() == 1.0f && !f.p.inSettlement(), "foot: held at 1 on foot, however long the frame and however dense");
     f.p.configure(1.5f);
     check(f.frame(14.0, kTwo, 679, Work::Valid, true) == Step::None, "foot: a lowered k_max on foot has nothing to clamp");
     f.p.configure(6.0f);
-    // Aboard: the first boundary has no interval, so the 30th sample holds 29
-    // cycles taking two slots, and steps.
-    Step last = Step::None;
-    for (int i = 0; i < 29; ++i) last = f.frame(12.9, kTwo);
-    check(last == Step::None && f.p.k() == 1.0f && f.p.inSettlement(), "foot: aboard again, 29 samples do not step");
-    check(f.frame(12.9, kTwo) == Step::Up && f.p.k() == 1.25f && f.p.stepMisses() == 29,
-          "foot: the 30th steps, as from a fresh start");
+    // Aboard at the settlement: the first boundary has no interval, and the
+    // k from before the hold comes back in one step.
+    const Step back = f.frame(12.9, kTwo);
+    check(!f.p.cycle().measured && back == Step::Aboard && f.p.k() == 1.75f,
+          "foot: aboard again at the settlement, no interval, and the k from before the hold at once");
+    // The 06:53 case: 3.45 held, 2000 frames on foot, 680 records again from
+    // the first frame aboard -- k 3.45 in one step, no ramp.
+    Feed g;
+    for (int i = 0; i < 9; ++i) g.window(12.9, kAll);   // 0.25 a second to 3.25
+    g.window(kP, 0);                                     // a quiet second: no kick
+    for (int i = 0; i < 4; ++i) g.window(kP, kFine);     // 0.05 a second to 3.45
+    const bool at345 = g.p.k() == 3.45f;
+    Step s = g.frame(12.9, kTwo, 680, Work::Valid, true);
+    bool quiet = true;
+    for (int i = 1; i < 2000; ++i) quiet &= g.frame(12.9, kTwo, 680, Work::Valid, true) == Step::None;
+    const bool held1 = g.p.k() == 1.0f;
+    int others = 0, aboard = 0;
+    float firstK = 0;
+    for (int i = 0; i < 450; ++i) {   // 5 s aboard, 680 records from the first frame, every cycle in its slot
+        const Step a = g.frame(kP, kP, 680);
+        if (i == 0) firstK = g.p.k();
+        aboard += a == Step::Aboard;
+        others += a != Step::Aboard && a != Step::None;
+    }
+    check(at345 && s == Step::Foot && quiet && held1 && firstK == 3.45f && aboard == 1 && others == 0 &&
+              g.p.k() == 3.45f,
+          "foot: 3.45 held, 2000 frames on foot, 680 records within 5 s aboard: k 3.45 in one step, no ramp");
+    // On foot again, then aboard where the records stay under 200 for 6 s:
+    // k 1, and then the ordinary ramp.
+    g.frame(12.9, kTwo, 680, Work::Valid, true);
+    for (int i = 1; i < 100; ++i) g.frame(12.9, kTwo, 680, Work::Valid, true);
+    const uint64_t boarded = g.now();
+    bool none = true;
+    while (g.now() < boarded + 6000) none &= g.frame(kP, kP, 150) == Step::None;
+    do {
+        none &= g.frame(kP, kP, 150) == Step::None;   // to the end of the second in progress
+    } while (!g.p.windowClosed());
+    const bool stillOne = g.p.k() == 1.0f;
+    s = g.window(12.9, kAll);
+    check(none && stillOne && s == Step::Up && g.p.k() == 1.25f && g.p.upQuanta() == kCoarseQuanta,
+          "foot: aboard with the records under 200 for 6 s: k 1, then the ordinary ramp");
+    // A hold that begins at k 1 keeps the pending k: aboard, on foot again
+    // within 5 s, aboard at the settlement -- the k from before the first hold.
+    Feed h;
+    for (int i = 0; i < 3; ++i) h.window(12.9, kAll);   // 1.75
+    h.frame(12.9, kTwo, 680, Work::Valid, true);         // on foot: 1.00, 1.75 kept
+    h.frame(kP, kP, 100);                                // aboard, no settlement yet
+    h.frame(kP, kP, 100, Work::Valid, true);             // on foot again, at k 1
+    h.frame(kP, kP, 100, Work::Valid, true);
+    const Step b = h.frame(kP, kP, 680);                 // aboard at the settlement
+    check(b == Step::Aboard && h.p.k() == 1.75f,
+          "foot: a hold that begins at k 1 keeps the k pending from the hold before");
     // reduced: 1 on foot, k_max again aboard.
     Feed r;
     r.p.setFixed(true);
@@ -610,12 +814,10 @@ void caseReducedPolicy() {
     check(f.frame(11.0, kP, 250) == Step::Clamp && f.p.k() == 2.0f, "reduced: a lowered k_max clamps at once");
     f.p.configure(4.0f);
     check(f.frame(11.0, kP, 250) == Step::Enter && f.p.k() == 4.0f, "reduced: a raised k_max is the factor at once");
-    // Every cycle taking two slots for 10 s at k_max: never a kick, and the
-    // lever is spent.
     int kicks = 0;
-    for (int i = 0; i < 450; ++i) kicks += f.frame(14.0, kTwo, 250) == Step::Kick;
-    check(kicks == 0 && f.p.k() == 4.0f && f.p.ceilingMissing(f.now()),
-          "reduced: never kicks; at k_max with the trigger for 5 s the lever is spent");
+    for (int i = 0; i < 700; ++i) kicks += f.frame(14.0, kTwo, 250) == Step::Kick;   // 15 s, every cycle two slots
+    check(kicks == 0 && f.p.k() == 4.0f && f.p.ceilingMissing(),
+          "reduced: never kicks; at k_max with five triggering seconds the lever is spent");
     Step last = Step::None;
     for (int i = 0; i < 29; ++i) last = f.frame(11.0, kP, 100);
     check(last == Step::None && f.p.k() == 4.0f, "reduced: 29 sparse frames hold k_max");
@@ -1135,6 +1337,19 @@ void boundaryAt(uint64_t t, double workMs) {
     boundaryCycle(t, workMs > kPeriodMs + 0.3 ? 2.0 * kPeriodMs : kPeriodMs);
 }
 
+// The application-render GPU instrument's newest sample as the boundary reads
+// it (gpu_frame_timing.h), 5 ms old at `now`; ms < 0 switches it off.
+void setGpu(uint64_t now, double ms) {
+    g_gpu = GpuFrameSnapshot{};
+    if (ms < 0.0) return;
+    g_gpu.enabled = g_gpu.haveResult = true;
+    g_gpu.result.source = GpuSpanSource::ApplicationRender;
+    g_gpu.result.reason = GpuSpanReason::Valid;
+    g_gpu.result.ageMs = 5;
+    g_gpu.result.outerMs = ms;
+    g_gpu.capturedAtMs = now;
+}
+
 // Observe mode (advanced.settlement_detail_observe = 1): everything the
 // shadow governor did, now with the observe tag -- it never writes.
 void caseBoundary() {
@@ -1182,46 +1397,62 @@ void caseBoundary() {
     check(logged("frame work = caller work per cycle if the runtime sends it (timing v5), else app work (pre-submit "
                  "only; host older); the first runtime frame decides and a line names it", at),
           "boundary: before any runtime frame the configure line says the first frame names the signal");
-    check(logged("settlement detail: auto's policy, on the last 30 cycles (one took two display slots when longer "
-                 "than 1.5 x the period;", at) &&
-              logged("to k_max 2.00 at once if that holds 3 s below it (a kick: held 2 s, at most one per 30 s)", at),
-          "boundary: auto's policy follows on a line of its own");
+    check(logged("settlement detail: auto's policy, decided once a second on the cycles completed in it with a fresh "
+                 "timing sample", at) &&
+              logged("to k_max 2.00 at once after 10 such seconds in a row below it (a kick, at most one per 30 s)", at) &&
+              logged("settlement detail: auto's trials: a kick is judged on its fifth second at k_max", at),
+          "boundary: auto's policy and its trials follow on lines of their own");
     at = g_lines.size();
-    // 30.8 s, 250 records a frame; caller work 11.6 ms, 0.49 over budget (the
-    // fine steps), app work 5.6 under; a burst of 3 cycles taking two slots
-    // every 91 frames: a step a second, the trigger never held 3 s, no kick.
+    // 30.8 s, 250 records a frame; caller work 11.6 ms, 0.49 over budget, app
+    // work 5.6 under; one cycle in seven two slots whatever k (14%, under a
+    // quarter: the fine steps): 0.05 a second to 1.45, the kick at the tenth
+    // second, its trial failed on the fifth second at k_max -- 1.45 again, no
+    // kick for 60 s -- and 0.05 a second to k_max 2.00 at the 26th.
     for (uint32_t i = 0; i < 2800; ++i) {
         for (uint32_t r = 0; r < 250; ++r) g_obsBuilder(0, f.ctxAt(), 0, f.nibbles());
         for (uint32_t p = 0; p < 20; ++p) g_obsPart(f.items(), f.outAt(), f.view[p & 1], true);
         setTiming(++seq, t, 11.6);
-        boundaryCycle(t, i % 91 < 3 ? 2.0 * kPeriodMs : kPeriodMs);
+        boundaryCycle(t, i % 7 == 0 ? 2.0 * kPeriodMs : kPeriodMs);
         t += 11;
     }
     check(countLogged("settlement detail: frame work = caller work per cycle (runtime timing v5: the caller thread "
                       "from one pose wait's return to the next one's entry", at) == 1,
           "boundary: the first version 5 frame names the signal, once");
-    check(countLogged("settlement detail (observe only, never writes): k 1.00 -> 1.05, up 0.05: 3 of the last 30 "
-                      "cycles took two display slots with the caller work at the period; the 30's mean caller work "
-                      "0.49 ms over (1.00 ms over or less: the fine step); 250 builder records", at) == 1,
-          "boundary: the first step is logged, 0.05, with the two-slot cycles and the mean excess behind it");
-    check(logged("slots missed 89 of 2728 (CPU under 0); kicks 0; at the ceiling with misses ", at) &&
-              !logged("kick:", at),
-          "boundary: the summary counts the cycles that took two slots, and bursts never kick");
-    check(countLogged("settlement detail (observe only, never writes): k ", at) >= 4 &&
-              countLogged("settlement detail (observe only, never writes): k ", at) <= 7,
-          "boundary: step lines are rate-limited to one per 5 s");
-    check(logged("steps since the last line", at), "boundary: a rate-limited line counts the steps it skipped");
+    check(countLogged("settlement detail (observe only, never writes): k 1.00 -> 1.05, up 0.05: 13 of 91 cycles in the "
+                      "last second took two display slots as the CPU's (0 GPU-bound, 0 unexplained), their mean caller "
+                      "work 0.49 ms over (under a quarter the CPU's and 1.00 ms over or less: the fine step); 250 "
+                      "builder records", at) == 1,
+          "boundary: the first step is logged, 0.05, with the second's two-slot cycles, whose, and their mean excess");
+    check(countLogged("settlement detail (observe only, never writes): k 1.45 -> 2.00, kick: 10 seconds in a row with a "
+                      "tenth or more of the cycles taking two slots as the CPU's (the last 13 of 91), the steps not "
+                      "clearing it: from the pre-kick k 1.45 to k_max 2.00 so consecutive frames fit and the runtime "
+                      "returns to full rate; a trial, judged on the fifth second at k_max; 250 builder records", at) == 1,
+          "boundary: ten triggering seconds below k_max kick, a trial, and the kick line names the pre-kick k");
+    check(countLogged("settlement detail (observe only, never writes): k 2.00 -> 1.45, restored k 1.45 after a failed "
+                      "kick: the fifth second at k_max still had a tenth or more of its cycles take two display slots "
+                      "as the CPU's (13 of 91); no kick for 60 s; 250 builder records", at) == 1,
+          "boundary: the kick's fifth second at k_max still triggering: the pre-kick k back at once, said whole");
+    check(countLogged("settlement detail (observe only, never writes): k ", at) == 6 &&
+              logged("(+4 steps since the last line)", at) && logged("(+3 steps since the last line)", at),
+          "boundary: step lines are rate-limited to one per 5 s, never a kick or a restore, and count the steps skipped");
+    check(logged("decisions: slots missed 389 of 2728 (the CPU's 389, GPU-bound 0, unexplained 0); kicks 1; restores 1 "
+                 "(1 after a failed kick); the next recovery trial after 5 clean seconds; inert holds 0 (retries 0, "
+                 "re-armed 0)", at),
+          "boundary: the decisions line counts the slots and whose, the kick, the restore and the holds");
+    check(logged("(at k_max now: unknown (no fresh evidence))", at) && !logged("settlement detail: at the ceiling", at),
+          "boundary: at k_max the summary gives the outcome (20 parts a frame: not judged); not yet spent");
     check(logged("250 builder records, frame work = caller work per cycle: 11.60 ms vs period 11.11 ms.", at) &&
               !logged("-> LOD scale s x k", at),
           "boundary: a step line names the signal it stepped on; observing, it names no scale to write");
     check(logged("k now 2.00, effective s x k 2.000 (window 1.00..2.00 of max 2.00; 20 up (0 by 0.25), 0 down, 0 "
                  "resets, 0 clamps; held on foot 0 frames)", at),
           "boundary: the summary's k, effective s x k, range, steps and their size, and the frames held on foot");
-    check(logged("builder records/frame 250.0 (max 250", at) && logged("part tests/frame 20.0", at),
-          "boundary: the summary's density means");
+    check(logged("builder records/frame 250.0 (max 250, >= 200 on 2729 frames, 150-199 in a settlement on 0)", at) &&
+              logged("part tests/frame 20.0", at),
+          "boundary: the summary's density means, and the frames a settlement spent at 150-199 records");
     check(logged("frame work = caller work per cycle: 11.60 ms mean vs period 11.11 ms", at) &&
-              logged("invalid 0, caller work absent 0)", at),
-          "boundary: the summary's frame work is the caller work (not the 5.60 ms app work beside it) vs the period");
+              logged("invalid 0, caller work absent 0; no fresh timing on 0 frames, 0 expiries)", at),
+          "boundary: the summary's frame work is the caller work (not the 5.60 ms app work beside it), all fresh");
     check(logged("LOD scale: game s 1.000 (the builder's read: no setter call yet), held 1.000 (k 2.00); setter calls 0 "
                  "(scaled 0) on 0 pointers", at) && !logged("NOT ACTING", at),
           "boundary: observing, the summary's LOD scale and a setter that never ran, without NOT ACTING");
@@ -1240,7 +1471,10 @@ void caseBoundary() {
     // The effective LOD scale is the game's s times k, not k: at the slider's
     // floor the engine holds s = 1.5, and k 2 there is s x k 3 (the LOD note's
     // table is keyed by it). The k = 1 recompute disagrees with the fake's
-    // verdicts at this s; only the header is read here.
+    // verdicts at this s; only the header is read here. Every cycle takes two
+    // slots now: the fifth triggering second at k_max says the lever is spent
+    // (the ring still half the 11.6 ms samples), and again once the next
+    // summary window begins.
     put(f.ctx, 0x30, 1.5f);
     at = g_lines.size();
     frames(2800, 250, 20, 12.5);
@@ -1249,13 +1483,11 @@ void caseBoundary() {
           "boundary: the summary prints the effective s x k beside k, from the engine's s");
     check(countLogged("settlement detail: frame work = ", at) == 0,
           "boundary: the signal line is not repeated while the runtime's version holds");
-    // Every cycle taking two slots at k_max: after 5 s at the ceiling, the
-    // lever is spent, said once a window -- these frames end one window and
-    // begin the next, where it still holds.
-    check(countLogged("settlement detail: at the ceiling (k 2.00, s x k 3.000) and still missing 30 of the last 30 "
-                      "display slots: the remaining caller work (12.50 ms mean, 1.39 ms over the period) is not "
-                      "LOD-elastic; 0 of those misses had the CPU under the period (not ours).", at) == 2,
-          "boundary: at k_max with every cycle taking two slots for 5 s, the ceiling line, once a window");
+    check(countLogged("settlement detail: at the ceiling (k 2.00, s x k 3.000) and still missing ", at) == 2 &&
+              countLogged("settlement detail: at the ceiling (k 2.00, s x k 3.000) and still missing 30 of the last 30 "
+                          "display slots (30 the CPU's, 0 GPU-bound, 0 unexplained): outcome unknown (no fresh "
+                          "evidence); caller work 12.50 ms mean, GPU unknown (no application-render sample).", at) == 1,
+          "boundary: the lever-spent line names k, s x k, whose misses, the outcome, the caller work and the GPU");
     put(f.ctx, 0x30, 1.0f);
     // A lowered k_max: logged again, clamps at the next frame.
     at = g_lines.size();
@@ -1295,14 +1527,16 @@ void caseBoundary() {
               logged("LOD scale: game s unknown, held unknown (k 1.00)", at),
           "boundary: no LOD scale read -> the effective s x k and the game's s say unknown, not 0");
     at = g_lines.size();
-    // The ring still holds the 12.5 ms samples, and frame work counts whatever
-    // the density: 40 sparse frames within budget replace them first.
+    // The second in progress still holds 12.5 ms cycles that took two slots:
+    // 40 sparse frames within budget close it where nothing can rise (no
+    // settlement), before the dense frames.
     frames(40, 0, 0, 10.5);
     frames(2800, 250, 20, 10.5);   // dense, every cycle one slot
-    check(logged("k stayed 1: no cycle took two display slots with the caller work at the period in a frame with 200 "
-                 "records", at),
+    check(logged("k stayed 1: no cycle took two display slots as the CPU's in a frame with 200 records", at) &&
+              !logged("only GPU-bound or unexplained ones", at),
           "boundary: every cycle in its slot -> why k stayed 1");
-    // 2 of every 30 cycles taking two slots: the dead band, and the summary says so.
+    // One cycle in 15 taking two slots (6-7 a second, under a tenth): the
+    // dead band, and the summary says so.
     at = g_lines.size();
     for (uint32_t i = 0; i < 2800; ++i) {
         for (uint32_t r = 0; r < 250; ++r) g_obsBuilder(0, f.ctxAt(), 0, f.nibbles());
@@ -1311,31 +1545,28 @@ void caseBoundary() {
         boundaryAt(t, ms);
         t += 11;
     }
-    check(logged("k stayed 1: never 3 of the last 30 cycles took two display slots with the caller work at the period "
-                 "(1-2 is the dead band)", at) &&
+    check(logged("k stayed 1: no second had a tenth of its cycles take two display slots as the CPU's (under a tenth "
+                 "is the dead band)", at) &&
               !logged("up 0.", at),
-          "boundary: 2 of every 30 cycles taking two slots -> no step, and the summary names the dead band");
-    // Every cycle taking two slots: 0.25 steps a second, and after 3 s of it
-    // below k_max the kick, said whole. Then headroom: 5 s with no cycle
-    // taking two and the mean 2.11 ms under -- one step down, and the line
-    // says why.
+          "boundary: one cycle in 15 taking two slots -> no step, and the summary names the dead band");
+    // Every cycle taking two slots at 12.9 ms: the second in progress, a
+    // quarter of it already two slots, steps 0.25; 0.25 a second to k_max
+    // 2.00 at the fourth -- clear of the ten seconds a kick needs. Then
+    // headroom: five clean seconds with the caller work 2.11 ms under -- one
+    // step down, a trial against 2.00, and the line says so.
     at = g_lines.size();
     frames(400, 250, 20, 12.9);
-    const float raised = g_state.policy.k();
-    // (1.05 first: the ring still held the dead band's samples; then 1.30 and
-    // 1.55 at 0.25; the kick at 3.0 s.)
-    check(raised == 2.0f &&
-              logged("kick: 30 of the last 30 cycles took two slots for 3.0 s at k 1.55: to k_max 2.00 so consecutive "
-                     "frames fit and the runtime returns to full rate; 250 builder records", at),
-          "boundary: the trigger held 3 s below k_max kicks to k_max, and the kick line is never rate-limited");
+    check(g_state.policy.k() == 2.0f && logged("k 1.00 -> 1.25, up 0.25: ", at) && !logged("kick:", at),
+          "boundary: every cycle taking two slots at 12.9 ms: 0.25 a second reaches k_max before a kick could");
     frames(700, 250, 20, 9.0);
     check(g_state.policy.k() == 1.95f &&
-              countLogged("down 0.05: no cycle took two display slots for 5.0 s and the last 30's mean caller work is "
-                          "2.11 ms under the period (more than 1.00 ms to spare); 250 builder records, frame work = "
-                          "caller work per cycle: 9.00 ms vs period 11.11 ms", at) == 1,
-          "boundary: one step down after 5 s with no cycle taking two slots; its line says how long and the margin");
+              countLogged("k 2.00 -> 1.95, down 0.05: 5 clean seconds in a row (no cycle took two display slots), the "
+                          "last one's caller work 2.11 ms under the period (more than 1.00 ms to spare); a trial: k 2.00 "
+                          "comes back if a second triggers within 10 s; 250 builder records, frame work = caller work "
+                          "per cycle: 9.00 ms vs period 11.11 ms", at) == 1,
+          "boundary: one step down after five clean seconds, a trial; its line says so, the margin and the k it risks");
     applyConfig("game", 2.0f, true, t);
-    // A runtime whose newest frame is invalid: every boundary breaks the runs.
+    // A runtime whose newest frame is invalid: every boundary expires the evidence.
     applyConfig("auto", 2.0f, true, t);
     at = g_lines.size();
     for (uint32_t i = 0; i < 2800; ++i) {
@@ -1345,9 +1576,10 @@ void caseBoundary() {
         boundaryAt(t, 12.5);
         t += 11;
     }
-    check(logged("over 0 samples", at) && logged("invalid 2729, caller work absent 0)", at) &&
+    check(logged("over 0 samples", at) &&
+              logged("invalid 2729, caller work absent 0; no fresh timing on 2729 frames, 0 expiries)", at) &&
               logged("k stayed 1: no valid frame-work sample from the native runtime", at),
-          "boundary: invalid runtime frames are counted and hold k at 1");
+          "boundary: invalid runtime frames are counted, never fresh, and hold k at 1");
     applyConfig("game", 2.0f, true, t);
     // THE DEFECT the caller work fixes -- the first shadow flight (2026-09-23
     // 07:25 UTC, parked at the settlement, 45 fps): app work 8.37-8.67 ms,
@@ -1357,9 +1589,9 @@ void caseBoundary() {
     at = g_lines.size();
     frames(2800, 250, 20, 14.4);   // version 5: caller 14.4 ms, app 8.4 ms beside it
     check(logged("frame work = caller work per cycle: 14.40 ms mean vs period 11.11 ms", at) &&
-              logged("settlement detail (observe only, never writes): k 1.00 -> 1.25, up 0.25: 29 of the last 30 "
-                     "cycles took two display slots with the caller work at the period; the 30's mean caller work "
-                     "3.29 ms over (more than 1.00 ms over: the coarse step)", at) &&
+              logged("settlement detail (observe only, never writes): k 1.00 -> 1.25, up 0.25: 91 of 91 cycles in the "
+                     "last second took two display slots as the CPU's (0 GPU-bound, 0 unexplained), their mean caller "
+                     "work 3.29 ms over (a quarter or more the CPU's: the coarse step)", at) &&
               !logged("k stayed 1", at),
           "boundary: the first flight's frames (caller 14.4 ms, app 8.4 ms) step k up on the caller work, by 0.25");
     applyConfig("game", 2.0f, true, t);
@@ -1376,14 +1608,15 @@ void caseBoundary() {
         boundaryAt(t, 14.4);
         t += 11;
     }
-    check(logged("over 0 samples (over by > 0.30 ms: 0, under by > 1.00 ms: 0, invalid 2729, caller work absent 2729)",
-                 at) &&
+    check(logged("over 0 samples (over by > 0.30 ms: 0, under by > 1.00 ms: 0, invalid 2729, caller work absent 2729; "
+                 "no fresh timing on 2729 frames", at) &&
               logged("k stayed 1: no valid frame-work sample from the native runtime", at),
           "boundary: a version 5 frame without caller work is an invalid sample, counted as such");
     applyConfig("game", 2.0f, true, t);
     // An older runtime (timing v4): no caller work crosses, the app work
-    // stands in, and every line says so. At the first flight's 8.4 ms app
-    // work it holds k at 1 -- the defect, reproduced on the fallback.
+    // stands in, and every line says so. Without caller work no miss can be
+    // put on the CPU: auto holds k at 1, says so once, and every summary
+    // carries it.
     applyConfig("auto", 2.0f, true, t);
     at = g_lines.size();
     frames(2800, 250, 20, 8.4, EDVR_NATIVE_TIMING_VERSION_4);
@@ -1391,22 +1624,30 @@ void caseBoundary() {
                       "no caller work", at) == 1,
           "boundary: a version 4 runtime is named once, as the fallback");
     check(logged("frame work = app work (pre-submit only; host older): 8.40 ms mean vs period 11.11 ms", at) &&
-              logged("k stayed 1: no cycle took two display slots with the caller work at the period", at),
-          "boundary: the fallback's summary names the app work; with every cycle in its slot k holds at 1");
+              countLogged("settlement detail: the runtime sends no caller work (timing v4), so misses cannot be "
+                          "attributed to the CPU: auto holds k at 1", at) == 1 &&
+              logged("unexplained 0) (no caller work: holding); kicks 0", at) &&
+              logged("k stayed 1: no caller work from the runtime, so no miss can be attributed to the CPU: holding",
+                     at),
+          "boundary: the fallback's summary names the app work; auto holds, said once and in the summary");
     at = g_lines.size();
     applyConfig("auto", 1.5f, true, t);
     check(logged("; frame work = app work (pre-submit only; host older: runtime timing v4 sends no caller work", at),
           "boundary: the configure line names the fallback once a runtime frame has said which");
     applyConfig("game", 2.0f, true, t);
     // Version 3: no base rate either -- the session's first predicted period
-    // is the budget -- and an over-budget app work still steps.
+    // is the budget. App work over it and every cycle taking two slots: still
+    // no step, auto holds.
     applyConfig("auto", 2.0f, true, t);
     at = g_lines.size();
     frames(2800, 250, 20, 12.5, EDVR_NATIVE_TIMING_VERSION_3);
     check(countLogged("runtime timing v3 sends no caller work", at) == 1 &&
               logged("frame work = app work (pre-submit only; host older): 12.50 ms mean vs period 11.11 ms", at) &&
-              logged("frame work = app work (pre-submit only; host older): 12.50 ms vs period 11.11 ms", at),
-          "boundary: a version 3 runtime falls back to the app work against the first predicted period, and steps");
+              countLogged("settlement detail: the runtime sends no caller work (timing v3)", at) == 1 &&
+              logged("slots missed 2728 of 2728 (the CPU's 2728, GPU-bound 0, unexplained 0) (no caller work: holding)",
+                     at) &&
+              !logged("up 0.", at) && g_state.policy.k() == 1.0f,
+          "boundary: a version 3 runtime falls back to the app work against the first predicted period, and holds");
     applyConfig("game", 2.0f, true, t);
     // An attach refusal: off, said so, nothing counted.
     at = g_lines.size();
@@ -1429,7 +1670,7 @@ void caseBoundary() {
               g_state.policy.kMax() == 6.0f && !g_state.observe &&
               logged("settlement detail: on (auto: acts by scaling the game's LOD scale", at) &&
               logged("-- k in [1, 6.00], auto's policy on the next line", at) &&
-              logged("settlement detail: auto's policy, on the last 30 cycles", at),
+              logged("settlement detail: auto's policy, decided once a second", at),
           "boundary: with the keys unset the governor is on in auto and acts, k_max the compiled 6.0, observe 0");
     applyConfig("game", lodgov::kDefaultMax, false, t);
     at = g_lines.size();
@@ -1466,9 +1707,9 @@ void caseFootBoundary() {
     g_journalActive = true;
     size_t at = g_lines.size();
     applyConfig("auto", 2.0f, false, t);
-    frames(400, 12.9);   // 4.4 s at 12.9 ms, every cycle two slots: 1.25, 1.5, 1.75, then the kick to 2.0
-    check(g_acting.load() && g_state.policy.k() == 2.0f && f.scale() == 3.0f,
-          "foot: in the cockpit the ramp and its kick reach k_max 2.0, and 1.5 x 2 is in force");
+    frames(400, 12.9);   // 4.4 s at 12.9 ms, every cycle two slots: 0.25 a second to k_max 2.0 at the fourth
+    check(g_acting.load() && g_state.policy.k() == 2.0f && f.scale() == 3.0f && !logged("kick:", at),
+          "foot: in the cockpit the ramp reaches k_max 2.0, and 1.5 x 2 is in force");
     const uint32_t scaled0 = g_setterScaled.load();
     const size_t atFoot = g_lines.size();
     g_onFoot = true;
@@ -1480,13 +1721,18 @@ void caseFootBoundary() {
     check(g_setterScaled.load() - scaled0 == 1 && !logged("settlement detail (acting): k ", atFoot),
           "foot: one rebuild's lag (the one before the boundary saw the flag), then nothing written and no step");
     g_onFoot = false;
+    const size_t atAboard = g_lines.size();
     frames(1, 12.9);
     check(countLogged("settlement detail (acting): no longer on foot (Status.json) after 11.0 s, 1000 frames held at "
-                      "k 1; the governor resumes", at) == 1,
-          "foot: aboard again, one line saying how long");
-    frames(1400, 12.9);   // to the 30 s summary; the ramp starts over
-    check(logged("held on foot 1000 frames); ", at) && g_state.policy.k() == 2.0f && f.scale() == 3.0f,
-          "foot: the summary counts the frames held on foot, and aboard the ramp has run again");
+                      "k 1; the governor resumes", at) == 1 &&
+              countLogged("settlement detail (acting): k 1.00 -> 2.00, back aboard: k restored to 2.00 (held on foot "
+                          "1000 frames)", atAboard) == 1 &&
+              g_state.policy.k() == 2.0f,
+          "foot: aboard again at the settlement, one line saying how long, and k 2.00 back in one step");
+    frames(1400, 12.9);   // to the 30 s summary
+    check(logged("1 restored aboard; held on foot 1000 frames); ", at) && g_state.policy.k() == 2.0f &&
+              f.scale() == 3.0f && !logged("k 1.00 -> 1.25", atAboard),
+          "foot: the summary counts the frames held on foot and the return aboard; no ramp from 1");
     // A window wholly on foot: k stayed 1, and why. Switched on while on foot,
     // the first boundary says so.
     applyConfig("game", 2.0f, false, t);
@@ -1557,34 +1803,31 @@ void caseActingBoundary() {
                  "frame (FUN_142819D90): the game's value x k) -- k in [1, 2.00]", at),
           "acting: the configure line names the mode and the mechanism in one clause");
     at = g_lines.size();
-    frames(2800, 250, 20, 12.5);   // 1.39 ms over, every cycle two slots: steps of 0.25, then the kick
+    frames(2800, 250, 20, 12.5);   // 1.39 ms over, every cycle two slots: 0.25 a second to k_max, no kick
     check(countLogged("settlement detail: LOD scale scaled: game s 1.500 -> 1.875 (k 1.25), ctx 0x", at) == 1,
           "acting: the first write to the builder's context is logged once, with the game's s and k");
     check(f.scale() == 3.0f && other.scale() == 1.5f,
           "acting: at k 2 the builder's context holds 3.0 after the rebuild; the other context keeps the game's 1.5");
-    check(logged("settlement detail (acting): k 1.00 -> 1.25, up 0.25: 29 of the last 30 cycles took two display slots "
-                 "with the caller work at the period; the 30's mean caller work 1.39 ms over (more than 1.00 ms over: "
-                 "the coarse step); 250 builder records, frame work = caller work per cycle: 12.50 ms vs period 11.11 "
-                 "ms -> LOD scale s x k 1.875.", at),
-          "acting: a step line names its size, the two-slot cycles, the mean excess, and the scale it will write");
-    check(logged("settlement detail (acting): k 1.75 -> 2.00, kick: 30 of the last 30 cycles took two slots for 3.0 s "
-                 "at k 1.75: to k_max 2.00 so consecutive frames fit and the runtime returns to full rate; 250 builder "
-                 "records, frame work = caller work per cycle: 12.50 ms vs period 11.11 ms -> LOD scale s x k 3.000", at),
-          "acting: the trigger held 3 s below k_max: the kick, logged whole with the scale it will write");
-    // (Once a window: these 2800 frames end the first window and begin the
+    check(logged("settlement detail (acting): k 1.00 -> 1.25, up 0.25: 91 of 91 cycles in the last second took two "
+                 "display slots as the CPU's (0 GPU-bound, 0 unexplained), their mean caller work 1.39 ms over (a "
+                 "quarter or more the CPU's: the coarse step); 250 builder records, frame work = caller work per "
+                 "cycle: 12.50 ms vs period 11.11 ms -> LOD scale s x k 1.875.", at),
+          "acting: a step line names its size and why, the two-slot cycles and whose, and the scale it will write");
+    check(!logged("kick:", at), "acting: four steps of 0.25 reach k_max 2.00 in four seconds: no kick");
+    // (Once a summary window: these 2800 frames end the first and begin the
     // second, where it still holds.)
     check(countLogged("settlement detail: at the ceiling (k 2.00, s x k 3.000) and still missing 30 of the last 30 "
-                      "display slots: the remaining caller work (12.50 ms mean, 1.39 ms over the period) is not "
-                      "LOD-elastic; 0 of those misses had the CPU under the period (not ours).", at) == 2,
-          "acting: at k_max with every cycle taking two slots for 5 s, the ceiling line, once a window");
-    check(logged("(window 1.00..2.00 of max 2.00; 3 up (3 by 0.25), 0 down, 0 resets, 0 clamps; held on foot 0 frames)",
+                      "display slots (30 the CPU's, 0 GPU-bound, 0 unexplained): outcome unknown (no fresh evidence); "
+                      "caller work 12.50 ms mean, GPU unknown (no application-render sample).", at) == 2,
+          "acting: at k_max with five triggering seconds in a row, the lever-spent line, once a summary window");
+    check(logged("(window 1.00..2.00 of max 2.00; 4 up (4 by 0.25), 0 down, 0 resets, 0 clamps; held on foot 0 frames)",
                  at) &&
-              logged("; kicks 1; at the ceiling with misses ", at),
-          "acting: the summary counts three steps of 0.25 and the kick");
-    // The first window: 2729 frames of 11 ms, two rebuilds a frame, the
-    // first 30 at k 1 (nothing to scale).
+              logged("; kicks 0; restores 0 (0 after a failed kick);", at),
+          "acting: the summary counts four steps of 0.25, no kick and no restore");
+    // The first window: 2729 frames of 11 ms, two rebuilds a frame, the first
+    // 92 at k 1 (the first second decides at its 91st cycle).
     check(logged("settlement detail (acting): 30.0 s, 2729 frames: k now 2.00, effective s x k 3.000", at) &&
-              logged("LOD scale: game s 1.500, held 3.000 (k 2.00); setter calls 5458 (scaled 2699) on 1 pointers "
+              logged("LOD scale: game s 1.500, held 3.000 (k 2.00); setter calls 5458 (scaled 2637) on 1 pointers "
                      "(called with 2; builder contexts 1); implausible 0; faults 0;", at) &&
               !logged("NOT ACTING", at),
           "acting: the summary's LOD scale follows k, and the setter's counts name one scaled context of the two");
@@ -1684,6 +1927,180 @@ void caseActingBoundary() {
     g_frustumStub = &fakePlanes;
 }
 
+// The signals beside the caller work, end to end, observing: the
+// application's GPU render time and the caller work class every two-slot
+// cycle (GPU-bound, unexplained, the CPU's; the lever-spent line gives the GPU
+// beside the caller work), the lever's benefit (two up steps that move
+// neither the parts passed at EDVR's scale nor the caller work: inert; a
+// retried step past the plateau re-arms), and the density a settlement spends
+// at 150-199 records.
+void caseSignalsBoundary() {
+    Fake f;
+    freshTable();
+    g_ctx.store(f.ctxAt());
+    uint64_t& t = g_t;
+    uint64_t& seq = g_seq;
+    // Every cycle takes two slots; the GPU sample is gpuMs (< 0: none), or 9.0
+    // ms -- well under the period, so that miss is the CPU's -- on every
+    // oursEvery-th frame.
+    auto frames = [&](uint32_t n, uint32_t parts, double ms, double gpuMs, uint32_t oursEvery = 0,
+                      uint32_t records = 250) {
+        for (uint32_t i = 0; i < n; ++i) {
+            for (uint32_t r = 0; r < records; ++r)
+                if (g_obsBuilder) g_obsBuilder(0, f.ctxAt(), 0, f.nibbles());
+            for (uint32_t p = 0; p < parts; ++p)
+                if (g_obsPart) g_obsPart(f.items(), f.outAt(), f.view[p & 1], true);
+            setTiming(++seq, t, ms);
+            setGpu(t, oursEvery && i % oursEvery == 0 ? 9.0 : gpuMs);
+            boundaryCycle(t, 2.0 * kPeriodMs);
+            t += 11;
+        }
+    };
+    // The GPU at 11.5 ms (the period - 0.5 or more) and the caller work 12.9
+    // (it spans Present, where a GPU-bound game blocks): never a step; the
+    // summary counts every miss GPU-bound and says why k stayed 1.
+    size_t at = g_lines.size();
+    applyConfig("auto", 2.0f, true, t);
+    frames(2800, 20, 12.9, 11.5);
+    check(g_state.policy.k() == 1.0f && !logged("up 0.", at) &&
+              logged("slots missed 2728 of 2728 (the CPU's 0, GPU-bound 2728, unexplained 0); kicks 0;", at) &&
+              logged("k stayed 1: no cycle took two display slots as the CPU's in a frame with 200 records (only "
+                     "GPU-bound or unexplained ones)", at),
+          "signals: two-slot cycles with the GPU at 11.5 ms never step; the summary counts them GPU-bound");
+    applyConfig("game", 2.0f, true, t);
+    // The GPU at 6 ms and the caller work 10.5 (under the period - 0.3):
+    // neither's -- unexplained, counted, never a step.
+    at = g_lines.size();
+    applyConfig("auto", 2.0f, true, t);
+    frames(2800, 20, 10.5, 6.0);
+    check(g_state.policy.k() == 1.0f && !logged("up 0.", at) &&
+              logged("slots missed 2728 of 2728 (the CPU's 0, GPU-bound 0, unexplained 2728); kicks 0;", at),
+          "signals: two-slot cycles with the GPU and the caller work both under: unexplained, never a step");
+    applyConfig("game", 2.0f, true, t);
+    // At the ceiling (k_max 1.05: one fine step) with four cycles in five
+    // GPU-bound at 12.5 ms and the fifth the CPU's (9.0): each second
+    // triggers on the fifth, and after five at k_max the lever-spent line
+    // gives the classes and both figures -- the GPU's mean over the caller
+    // work's: the GPU is the wall.
+    at = g_lines.size();
+    applyConfig("auto", 1.05f, true, t);
+    frames(1000, 20, 11.5, 12.5, 5);
+    check(countLogged("settlement detail: at the ceiling (k 1.05, s x k 1.050) and still missing 30 of the last 30 "
+                      "display slots (6 the CPU's, 24 GPU-bound, 0 unexplained): outcome unknown (no fresh evidence); "
+                      "caller work 11.50 ms mean, GPU 11.80 ms: the GPU is the wall.", at) == 1 &&
+              !logged("settlement detail: the LOD lever is inert", at),
+          "signals: the lever-spent line gives whose misses, the GPU beside the caller work, and when the GPU is the wall");
+    applyConfig("game", 2.0f, true, t);
+    // The lever inert at this view: 500 part tests a frame (250 an eye), each
+    // passed, none dropped until s x k passes 1.52 here (f = 0.099 s k
+    // against t0 0.15), the caller work unchanged: the two 0.25 steps to 1.25
+    // and 1.50 move nothing -- inert, said once with the figures; no step and
+    // no kick while it holds. 30 s on one step is retried: 1.75 is past the
+    // plateau (every part would drop), a benefit, and the lever re-arms.
+    at = g_lines.size();
+    applyConfig("auto", 2.0f, true, t);
+    frames(2800, 500, 12.9, -1.0);
+    check(countLogged("settlement detail: the LOD lever is inert at this view: no observed benefit: passed parts 500 -> "
+                      "500 a frame, caller work 12.90 -> 12.90 ms across two 0.25 steps; holding k 1.50 (s x k 1.500), "
+                      "no step and no kick; one step is retried every 30 s or when the parts tested a frame move 20%.",
+                      at) == 1 &&
+              g_state.policy.k() == 1.5f && !logged("kick:", at) && !logged("settlement detail: at the ceiling", at) &&
+              logged("; kicks 0; restores 0 (0 after a failed kick); the next recovery trial after 5 clean seconds; "
+                     "inert holds 1 (retries 0, re-armed 0); at EDVR's scale passed 500.0, dropped 0.0 parts a frame",
+                     at),
+          "signals: two up steps that move nothing: the lever is inert, said once; no step and no kick while it holds");
+    const size_t atRetry = g_lines.size();
+    frames(300, 500, 12.9, -1.0);
+    check(countLogged("settlement detail: the LOD lever responds again at this view: the retried step moved passed "
+                      "parts 500 -> 0 a frame, caller work 12.90 -> 12.90 ms; stepping resumes at k 1.75.", atRetry) == 1 &&
+              logged("; a retry while the lever is inert here;", atRetry) && g_state.policy.k() == 2.0f,
+          "signals: 30 s into the hold a retried step past the plateau shows a benefit: re-armed, stepping resumes");
+    applyConfig("game", 2.0f, true, t);
+    // A settlement's frames at 150-199 records hold k and are counted: the
+    // density the lever itself may cut (the review's conditional risk).
+    at = g_lines.size();
+    applyConfig("auto", 2.0f, true, t);
+    frames(100, 0, 10.5, 6.0, 0, 250);
+    frames(2700, 0, 10.5, 6.0, 0, 180);
+    check(logged("150-199 in a settlement on 2629)", at) && g_state.policy.inSettlement(),
+          "signals: the summary counts a settlement's frames at 150-199 records");
+    applyConfig("game", 2.0f, true, t);
+    setGpu(t, -1.0);
+    freshTable();
+}
+
+// The review of 2026-09-23 (reviews/lod-governor-review-2026-09-23.md,
+// finding 1, the table at lines 235-240): a governor primed on overloaded
+// fresh samples, then 6.6 s of frames without new timing. At 6964c31 the
+// frozen sequence and the inactive source climbed k 1.25 -> 2.75 on the same
+// 30 samples. Every row must leave k where the priming put it: a decision
+// counts only cycles with a fresh sample, and the evidence expires.
+void caseFreshEvidence() {
+    Fake f;
+    freshTable();
+    g_ctx.store(f.ctxAt());
+    uint64_t& t = g_t;
+    uint64_t& seq = g_seq;
+    auto frame = [&]() {
+        for (uint32_t r = 0; r < 250; ++r) g_obsBuilder(0, f.ctxAt(), 0, f.nibbles());
+        boundaryCycle(t, 2.0 * kPeriodMs);   // overloaded: every cycle two slots
+        t += 11;
+    };
+    // The rows: what the timing does after the priming, where the review has
+    // it, and the readWork branch that meets it now.
+    struct Row {
+        const char* what;
+        const char* review;
+        const char* code;
+    };
+    const Row rows[4] = {
+        {"frozen sequence", "reviews/lod-governor-review-2026-09-23.md:237",
+         "src/d3d11/lod_governor.cpp:1146 (readWork, the unchanged sequence: expired after 2 s)"},
+        {"inactive timing source", "reviews/lod-governor-review-2026-09-23.md:238",
+         "src/d3d11/lod_governor.cpp:1137 (readWork, no lease: expired at once)"},
+        {"new sequence already 3 s old", "reviews/lod-governor-review-2026-09-23.md:239",
+         "src/d3d11/lod_governor.cpp:1158 (readWork, not fresh: invalid, expired)"},
+        {"explicit invalid source", "reviews/lod-governor-review-2026-09-23.md:240",
+         "src/d3d11/lod_governor.cpp:1141 (readWork, an invalid frame: expired)"},
+    };
+    for (int r = 0; r < 4; ++r) {
+        // The priming: a second of fresh overloaded samples -- the first
+        // decision, k 1.00 -> 1.25.
+        applyConfig("game", 6.0f, true, t);
+        applyConfig("auto", 6.0f, true, t);
+        for (int i = 0; i < 92; ++i) {
+            setTiming(++seq, t, 14.0);
+            frame();
+        }
+        const float before = g_state.policy.k();
+        int n = 600;
+        if (r == 1) g_timing.active = false;
+        if (r == 2) {
+            ++g_timing.sequence;
+            g_timing.capturedAtMs = t - 3000;
+            ++n;
+        }
+        if (r == 3) g_timing.invalid = true;
+        for (int i = 0; i < n; ++i) frame();
+        const float after = g_state.policy.k();
+        const Window& w = g_state.w;
+        std::printf("lod_governor_test: review row %d, %s (%s; now %s): k %.2f -> %.2f; valid %u, invalid %u, no "
+                    "fresh timing on %u frames, %u expiries\n", r + 1, rows[r].what, rows[r].review, rows[r].code,
+                    double(before), double(after), w.workSamples, w.workInvalid, w.staleFrames, w.expiries);
+        const bool rowOk = r == 0   ? w.expiries == 1 && w.staleFrames > 400
+                         : r == 1 ? w.expiries == 1 && w.staleFrames == 600
+                         : r == 2 ? w.expiries == 1 && w.workInvalid == 1
+                                  : w.expiries == 1 && w.workInvalid == 600;
+        char what[160];
+        std::snprintf(what, sizeof(what), "fresh: review row %d (%s): k stays 1.25 through 6.6 s without new timing, "
+                      "the evidence expired once", r + 1, rows[r].what);
+        check(before == 1.25f && after == before && rowOk, what);
+        g_timing = NativeTimingSnapshot{};
+    }
+    applyConfig("game", 6.0f, true, t);
+    freshTable();
+}
+
 // The cost the design doc quotes: both observers on hot synthetic memory,
 // observing and acting (an acting reject runs the plane test).
 void caseCost() {
@@ -1768,6 +2185,8 @@ int main(int argc, char** argv) {
     run("boundary", caseBoundary);
     run("foot boundary", caseFootBoundary);
     run("acting boundary", caseActingBoundary);
+    run("signals boundary", caseSignalsBoundary);
+    run("fresh evidence", caseFreshEvidence);
     run("cost", caseCost);
     // Log::note (src/common/log.cpp) formats into 1200 bytes after a 15-byte
     // timestamp and reserves 18 more (the truncation marker and the line end):
