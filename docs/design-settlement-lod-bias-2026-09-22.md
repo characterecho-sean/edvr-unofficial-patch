@@ -1,20 +1,25 @@
 # Design: an EDVR-side LOD bias at the settlement part test
 
 Offline measurement, 2026-09-22 (sections 1-7); the shadow governor built
-on it 2026-09-23 (section 8: flown once). Capture: eye run 165433
+on it 2026-09-23 (section 8: flown twice). Capture: eye run 165433
 (Cranfield, parked on the pad, Pimax OpenXR, 3070x3032 an eye, game build
 332841), frame 2, 18,267 pool eye draws (EB52 10,690).
 
 ## Status
 
-- **State (2026-09-23):** the SHADOW GOVERNOR (section 8) flew once
-  (07:25 UTC, parked, 45 fps): k never left 1, because its frame work was
-  the pre-submit phase (8.4 ms) while the caller thread worked 14.4 ms a
-  cycle against 11.1. FIXED, NOT FLOWN: frame work = the runtime's caller
-  work per cycle (timing ABI v5; v3/v4 fall back to app work, named so);
-  k_max default 4.0 (s saturates at 1.5); the summary prints s x k. It
-  never acts. The v3 tables price the LOD-distance half exactly (section
-  8); the screen-size half is a weak lever.
+- **State (2026-09-23):** the SHADOW GOVERNOR (section 8) flew twice.
+  First (07:25 UTC, parked, 45 fps): k never left 1, because its frame
+  work was the pre-submit phase (8.4 ms) while the caller thread worked
+  14.4 ms a cycle against 11.1. FIXED and reflown: frame work = the
+  runtime's caller work per cycle (timing ABI v5; v3/v4 fall back to app
+  work, named so); k_max default 4.0 (s saturates at 1.5); the summary
+  prints s x k. Second flight (2026-09-23 02:04 local, fa6565b) confirms
+  the fix: k 1 -> 4 in 142 s, mean caller work 11.4-12.8 ms against the
+  11.11 ms period, 0 disagreements with the engine at k = 1, would-drop
+  saturating at 48-50% of passed parts between s x k 4.5 and 6.0, as the
+  exact draw table predicts (33.5-33.7% ceiling). It still never acts.
+  The v3 tables price the LOD-distance half exactly (section 8); the
+  screen-size half is a weak lever.
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
   +0x550 = 1/fy, the tangent of one pixel (0.000834297 here), B = +0x560
@@ -60,13 +65,12 @@ on it 2026-09-23 (section 8: flown once). Capture: eye run 165433
 - **Leg C (engine arc, 2026-09-23):** LODDistanceScale 0.001 left the
   parked view at 18.9k eye draws, as section 5 predicts: ruled out there
   as a draw lever (section 6).
-- **Open:** the shadow flight on the caller-work signal (section 8's
-  checklist).
+- **Open:** whether to build the acting mode (section 8's second flight
+  confirms the signal and the elasticity; nothing technical is blocking
+  it).
 - **Ruled out:** see section 6.
-- **Next:** fly `fix.settlement_detail = auto` parked at Cranfield on a
-  build with timing v5 (the configure/first line must read `frame work =
-  caller work per cycle`); read section 8's checklist. Whether any k is
-  worth ACTING on is Sean's call after that flight.
+- **Next:** Sean's call: build the acting mode (proposal: write s x k
+  into ctx+0x30 per frame; shadow counters stay as the gate).
 
 ## 1. The test and what the decompile leaves undefined
 
@@ -175,6 +179,10 @@ ruled out: NativeTimingSnapshot::applicationMs as the governor's frame
 work, because it is the pre-submit phase only: the first shadow flight
 read 8.4 ms of it against 14.4 ms of caller work a cycle (period 11.1),
 and k never left 1 (section 8).
+ruled out: the perf monitor's CPU figure as evidence the frame fits,
+because it is the pre-submit phase only (applicationMs): 7-8 ms on the
+HUD while the caller thread worked 11.7-12.7 ms a cycle and fps sat at
+50-55 (shadow flight 2).
 
 ## 7. Sources
 
@@ -185,7 +193,7 @@ xref (session scratch, lodbias\ghidra). Scripts: session scratch lodbias\
 join and truth. Tool: `python tools\cull_gate_probe.py <pool> 165433
 --lod-bias 1,1.25,1.5,2,3,4,6,8` reproduces section 3 and the bounds.
 
-## 8. Shadow governor (2026-09-23): flown once, signal fixed, NOT FLOWN since
+## 8. Shadow governor (2026-09-23): flown twice, signal confirmed by the second flight
 
 `fix.settlement_detail` = `game` (default: off, nothing observed) |
 `auto` (this build: shadow only) | `reduced` (reserved: behaves as auto,
@@ -213,6 +221,34 @@ windows read game_before_first_submit 8.24, post_second_submit_to_next_wait
 21.99 - 7.57 = 14.4 ms a cycle against an 11.1 ms period. The signal was
 the pre-submit phase only (section 6's ruled-out line); it is now the
 caller work above, and every line names which figure it read.
+
+**Second flight (2026-09-23 02:04 local, fa6565b), parked at Cranfield,
+02:04-02:09, same spot and settings as the first flight.** Configure
+line at 02:04:37, k in [1, 4.00], both hooks hooked; the one-off line at
+02:04:41 reads `frame work = caller work per cycle (runtime timing v5)`
+-- the fix is in force. Mean caller work climbed 8.82 (still loading) ->
+11.38 -> 12.76 -> 12.47 -> 11.80 -> 12.34 ms across the settlement
+windows, against the 11.11 ms period; caller work absent was 0
+throughout; s held at 1.500, matching the floor. k rose 1.00 -> 4.00 in
+142 s (one step per ~2.6 s: each step needs 30 consecutive over-budget
+samples, slower than the one-step-a-second cap when the load settles
+first, as it did here). At 02:09:12 a reset line took k back to 1.00
+after 30 frames under 150 records (Sean left the view): the reset path
+works. The runtime's own cycle instrument for the same windows (11 s
+earlier) gives caller work (cycle - next_wait_roundtrip) of 11.80 /
+11.70 / 12.71 / 11.79 / 12.11 ms against the governor's 11.38 / 12.76 /
+12.47 / 11.80 / 12.34 for its offset windows -- the same figure by
+construction, agreeing within the window offset. 0 disagreements with
+the engine at k = 1, every window. Per eye, would-drop saturates with
+s x k just as the draw table predicts: 48% of passed parts at 4.5
+(window ending 02:08:08), 49-50% at 6.0 (window ending 02:09:08), against
+the exact draw table's 33.5% -> 33.7% ceiling -- the dropped parts are
+the low-draw ones, the building shells' tables (t0 21.38) never drop.
+Also answers a question about the HUD: its CPU figure is applicationMs,
+the pre-submit phase only (~7 ms), which is why it read under 10 ms
+while the caller thread's real work was 11.7-12.7 ms a cycle at 50-55
+fps; GPU under 10 ms is consistent with the earlier 9.2-10.2 ms
+measurement and is not the limiter.
 
 **k_max default 4.0 (reader run 012514).** The probe's view dump shows
 the engine holding s = ctx+0x30 = 1.5 at LODDistanceScale 0.001 and 1.0 at
@@ -318,30 +354,31 @@ matches the copy); counters kept/dropped. The reader lists them
 term and the pick with each row's own table, and makes `--lod-bias`'s
 LOD-scale and LOD-distance forms exact for those rows. v1/v2 still read.
 
-**What the next flight must show** (parked at Cranfield, the Leg C
-pose):
-1. `edvr_log.py --expect-build HEAD` exits 0; the configure line with
-   both hooks `hooked`; `frame work = caller work per cycle (runtime
-   timing v5` in it or in the line after. `app work (pre-submit only;
-   host older)` means a stale openvr_api.dll: not evidence.
-2. Headers with ~679 builder records a frame (>= 200 on nearly every
-   frame), ~34k part tests, eye bits 1 / 22 named, s 1.000 (1.500 at the
-   slider's floor), and `effective s x k` = s times k.
-3. `frame work = caller work per cycle:` over the period (first flight
-   14.4 ms, Leg C 11.9 ms) with `caller work absent` near 0 -> step lines
-   and k 4.00 within ~60 s; its mean should match the runtime's cycle -
-   next_wait_roundtrip for the same window. If k stays 1, the header's
-   reason is the finding.
-4. Disagreements at k = 1: parts 0 and records 0 per eye, or a handful at
-   thresholds. More, and nothing else on the eye lines is evidence.
-5. Per eye ~11.8k parts tested, ~10.35k passed (165433 frame 2, eye A:
-   11,771 / 10,354); the would-drop parts at the window's k and their
-   histogram (parts, not draws: read them against the s x k table above).
-6. Records not dispatched at all: few expected here (a record any
-   orthographic cascade admits stays dispatched); every one is a whole
-   record's parts in every view, the biggest lever, and is read first.
-7. Census eye draws as in a `game` run (it never acts) and the caller
-   thread no slower than Leg C.
-8. Same flight, optional: `advanced.cull_gate_capture = 1` and one eye
-   run -> a v3 gate file; `--tables-only` must report 0 disagreements off
-   the thresholds, then `--lod-bias 1,1.25,1.5,2` is exact.
+**What the second flight showed** (parked at Cranfield, the Leg C pose;
+six of eight items MET, one not evidenced, one optional and not run):
+1. MET: `edvr_log.py --expect-build HEAD` exit 0; the configure line
+   with both hooks `hooked`; `frame work = caller work per cycle
+   (runtime timing v5` at 02:04:41.
+2. MET: ~680 records/frame from 02:07:08 on (>= 200 on nearly every
+   frame; 474.8 while still loading in), 20.2k-33.3k part tests/frame, s
+   1.500 every window (the slider's floor), `effective s x k` printed
+   throughout.
+3. MET, with a timing caveat: `frame work = caller work per cycle:` mean
+   11.38-12.76 ms over the 11.11 ms period (first flight 14.4 ms, Leg C
+   11.9 ms), `caller work absent` 0 throughout -> step lines to k 4.00 --
+   but in 142 s, not ~60 s, because the 30-consecutive-sample rule
+   outlasts the one-step-a-second cap when the load settles first (two
+   down excursions at 02:06:34/02:07:02); its mean matches the runtime's
+   cycle - next_wait_roundtrip for the same windows, as required.
+4. MET: disagreements at k = 1 were 0 for parts and 0 for records, every
+   window.
+5. MET: per-eye tested/passed and the would-drop histogram were logged
+   every window (e.g. window ending 02:08:08: tested 10,528 / 10,528,
+   passed 9,749 / 9,768, would-drop 4,705 / 4,704, 48%; >= 1 deg 1.316M).
+6. MET: records the builder would not be called for at all were 0.0 per
+   frame, every window.
+7. NOT EVIDENCED this flight: census eye draws as in a `game` run, and
+   an explicit caller-thread comparison to Leg C's 11.9 ms.
+8. NOT RUN, optional: no new `advanced.cull_gate_capture` this flight;
+   the per-eye match above uses the existing 012514 tables, not a fresh
+   v3 gate file.

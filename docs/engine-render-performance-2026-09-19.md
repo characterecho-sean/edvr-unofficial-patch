@@ -80,19 +80,26 @@
   check ~0.1) armed-only, and a fourth round on the resource hooks.
   Entries: "Per-draw cut, round three", "Leg C".
 
-* **Settlement LOD governor, SHADOW MODE (2026-09-23, BUILT + GATED,
-  a081900, NOT FLOWN):** Sean's two-regime design - k = 1 in space,
-  k > 1 at a settlement only while the frame does not fit, hysteresis
-  against pumping - built as src\d3d11\lod_governor.* that computes k
-  from the builder's record count and the runtime's applicationMs
-  against the display period, recomputes the part test and the record
-  test at s*k on the workers with the engine's own inputs, and logs
-  would-drop / would-change-level counts with an angular-size
-  histogram every 30 s; nothing acts. Keys fix.settlement_detail (game
-  default; auto = shadow) and advanced.settlement_detail_max. EDVRGATE
-  v3 now records the LOD tables. Entry: "The settlement LOD governor".
-  Next: the shadow flight (parked + a short approach, auto at 1.0/MQ3,
-  a census press).
+* **Settlement LOD governor (2026-09-23, flown twice): DONE, signal
+  confirmed; acting mode = Sean's call.** `src\d3d11\lod_governor.*`,
+  shadow only (k = 1 in space, k > 1 at a settlement only while the
+  frame does not fit, hysteresis against pumping). Shadow flight 1
+  (a081900) found the signal was applicationMs, the pre-submit phase
+  only, so k never left 1; fixed by 73bfab3 to
+  EdvrNativeTimingFrame::callerWorkMs (timing ABI v5 = cycle -
+  next_wait_roundtrip), k_max default raised 2.0 -> 4.0 (s saturates at
+  1.5). Shadow flight 2 (fa6565b, 2026-09-23 02:04 local) confirms the
+  fix: k rose 1 -> 4 in 142 s, 0 disagreements with the engine at k = 1,
+  would-drop saturates at 48-50% of passed parts between s x k 4.5 and
+  6.0, matching the exact draw table's 33.5-33.7% ceiling. Same flight
+  explains a HUD puzzle: the perf monitor's CPU figure is the pre-submit
+  phase only, so it read under 10 ms while the caller thread actually
+  worked 11.7-12.7 ms a cycle at 50-55 fps. Keys fix.settlement_detail
+  (game default; auto = shadow) and advanced.settlement_detail_max.
+  Entries: "The settlement LOD governor", "Shadow flight 1", "Shadow
+  flight 2". Next: no flight pending; Sean's call on the acting mode
+  (proposal: write s x k into ctx+0x30 once a frame on the caller
+  thread; shadow counters stay as the gate).
 
 * **Open (arc OPEN on two levers; scope cockpit-only stereo):** (1)
   EDVR's per-draw path, NAMED (2026-09-22 per-draw entry: hookedMap +
@@ -2913,3 +2920,115 @@ cost of detail beyond ~100 m. ruled out: the "s = 2 - LODDistanceScale"
 mapping below the slider's floor, because 0.001 yields s = 1.5. ruled
 out: applicationMs as the governor's frame signal, because it omits
 the post-submit phase and reads 8.5 ms in a 22 ms cycle.
+
+### 2026-09-23 -- Shadow flight 2 (gov-parked-2, fa6565b): the caller-work signal works, k 1 -> 4, the exact table confirmed in parts; why the HUD reads under 10 ms CPU at 50-55 fps
+
+Parked at the Cranfield settlement, same spot and settings as shadow
+flight 1 (LODDistanceScale 0.001, MaterialQuality 0), 02:04-02:09 local
+(the gfx log is local time, UTC-6; the openxr log is UTC). Build
+v0.17.0-365-gfa6565b (edvr_log.py --expect-build HEAD exit 0). Logs:
+edvr_gfx_20260923_020437.log, edvr_openxr_20260923_020439_013_4144.log,
+Frontier install. fix.settlement_detail = auto (shadow only, never
+acts), advanced.settlement_detail_max unset (compiled default 4.0).
+Sean's HUD perf monitor read CPU and GPU both under 10 ms while fps sat
+at 50-55 -- explained below.
+
+**The signal works.** Configure line at 02:04:37, k in [1, 4.00], both
+hooks hooked; the one-off line at 02:04:41 reads `settlement detail:
+frame work = caller work per cycle (runtime timing v5: ...)` -- 73bfab3's
+fix is in force, not the applicationMs fallback that stalled k at 1 in
+shadow flight 1. Caller work absent was 0 in every settlement window; s
+held at 1.500 in every window, matching shadow flight 1's floor reading.
+Records/frame rose from 474.8 while still loading in to a steady ~680
+(>= 200 on nearly every frame from 02:07:08 on); part tests 20.2k ->
+27.8k -> ~33-34k.
+
+**30 s summaries** (window end local; mean caller work vs. the 11.11 ms
+period; over/under-budget sample counts; k; effective s x k):
+
+| end | frames | caller work ms | over/under | k | s x k |
+|---|---|---|---|---|---|
+| 02:06:38 | 689 (loading) | 8.82 | 197/410 | 1.00->1.25->1.20 | 1.80-1.88 |
+| 02:07:08 | 1793 | 11.38 | 956/550 | ->1.50 | 2.25 |
+| 02:07:38 | 1564 | 12.76 | 1404/1 | 2.20 | 3.300 |
+| 02:08:08 | 1558 | 12.47 | 1364/0 | 3.00 | 4.500 |
+| 02:08:38 | 1690 | 11.80 | 1243/149 | 3.40 | 5.100 |
+| 02:09:08 | 1624 | 12.34 | 1377/0 | 4.00 | 6.000 |
+
+Pre-settlement windows (02:05:08-02:06:08, menus/loading, no builder
+records): caller work 2.1-2.4 ms, far under the period, as expected. At
+02:09:12, k reset 4.00 -> 1.00 after 30 frames under 150 records (Sean
+left the view): the reset path works.
+
+**Ramp timing.** First step up at 02:06:26 (11.67 ms vs. 11.11); two
+down excursions at 02:06:34 (7.33 ms) and 02:07:02 (9.46 ms) while the
+load settled; then monotone up to 4.00 at 02:09:00. 1.25 -> 4.00 took
+142 s, about one step per 2.6 s -- slower than the one-step-a-second cap
+because each step needs 30 consecutive over-budget samples and any
+under-budget sample restarts the run. Not a fault; see the checklist
+verdict below.
+
+**Runtime cycle instrument** (openxr log; its windows end 11 s before
+the governor's), means in ms:
+
+| end (local) | cycle | before_1st_submit | post_2nd_to_wait | next_wait_roundtrip | caller work (cycle - wait) | fps |
+|---|---|---|---|---|---|---|
+| 02:06:57 | 20.17 | 6.50 | 4.75 | 8.37 | 11.80 | 49.6 |
+| 02:07:27 | 17.05 | 6.73 | 4.44 | 5.35 | 11.70 | 58.7 |
+| 02:07:57 | 19.79 | 7.53 | 4.63 | 7.08 | 12.71 | 50.5 |
+| 02:08:27 | 17.67 | 6.97 | 4.27 | 5.88 | 11.79 | 56.6 |
+| 02:08:57 | 18.25 | 7.21 | 4.36 | 6.14 | 12.11 | 54.8 |
+
+The same figure by construction as the governor's offset windows
+(11.38 / 12.76 / 12.47 / 11.80 / 12.34), agreeing within the window
+offset. Every window admitted = valid; no invalid cycles.
+
+**Why the HUD read under 10 ms CPU at 50-55 fps.** The perf monitor's
+CPU figure is NativeTimingSnapshot::applicationMs, the pre-submit phase
+only (game_before_first_submit ~7 ms, plus the eye treatments); it
+omits the ~4.4 ms the game spends after the second submit before its
+next pose wait. The caller thread's real work is 11.7-12.7 ms a cycle,
+over the 11.11 ms period on 80-90% of samples, so most cycles take two
+90 Hz slots (p50 cycle ~21 ms = 45 fps) and some fit one, giving the
+50-58 fps mean. GPU under 10 ms is consistent with the earlier
+9.2-10.2 ms measurement and is not the limiter. Follow-up, NOT done: the
+perf monitor should show caller work per cycle (timing v5 carries it)
+instead of, or beside, the pre-submit figure.
+
+**Per-eye, saturating exactly as the table predicts.** Window ending
+02:08:08 (s x k 3.3 -> 4.5): tested 10,528 / 10,528, passed 9,749 /
+9,768, would drop 4,705 / 4,704 (48% of passed), >= 1 deg 1.316M
+would-drops (845/frame). Window ending 02:09:08 (s x k 5.1 -> 6.0):
+passed 9,536 / 9,616, would drop 4,703 / 4,798 (49-50%), >= 1 deg 1.45M
+/ 1.49M (894/919 per frame). This matches the exact draw table's
+33.5% -> 33.7% ceiling (reader run 012514): the would-drop share among
+PARTS saturates the same way the draw share does, because the dropped
+parts are the low-draw ones -- the building shells' tables (t0 21.38)
+never drop. 0 disagreements with the engine at k = 1, every window.
+
+**Checklist verdict** (design-settlement-lod-bias-2026-09-22.md section
+8's "what the next flight must show", now "what the second flight
+showed"): items 1, 2, 4, 5, 6 met exactly as specified. Item 3 met with
+a timing caveat: k reached 4.00 in 142 s, not ~60 s, because the
+30-consecutive-sample rule outlasts the one-step-a-second cap when the
+load settles first (the two down excursions above); its mean matches
+the runtime instrument as required. Item 7 (census eye draws vs. a
+`game` run) was not evidenced this flight. Item 8 (optional EDVRGATE v3
+capture) was not run; the match above uses the existing 012514 tables.
+
+**What it means.** Acting at k = 3 (s x k 4.5) would remove ~33.5% of
+the pool eye draws, ~2.1 ms at the post-cut share, taking caller work
+from ~12.3 to ~10.2 ms -- under the 11.11 ms period with ~0.9 ms margin.
+k = 2 (s x k 3.0) removes 19.2% (1.2 ms), to ~11.1 ms: borderline.
+Visual cost at s x k 4.5: ~4.7k parts/eye/frame dropped, 18% of them
+>= 1 deg of angular radius (a 1.75 m radius at 100 m), 41% between 0.5
+and 1 deg; at s x k 3.0: ~2.5k parts, 10% >= 1 deg. Whether to build the
+acting mode is Sean's call.
+
+**Proposal, not a decision:** write s x k into the engine's LOD scale
+(ctx+0x30, the float the slider's setter FUN_142819D90 writes) once a
+frame on the caller thread, keep the shadow counters as the gate, and
+keep a shadow copy so the game's own s can be told from EDVR's write
+when the user moves the slider. Open for an implementer: whether ctx is
+one persistent object (pointer constant across builder calls) and where
+the game re-writes it.
