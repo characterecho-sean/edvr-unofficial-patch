@@ -2,12 +2,12 @@
 
 ## Status
 
-- **State (2026-09-20):** binary-analysis arc against build 332753 (the exe
-  in `analysis\`, SHA-256 e6be8bbe…) has located the projection chokepoint;
-  the flown separability probe (canted-projection.md, 2026-09-09) then
-  reshaped the hypothesis. Goal: a memory patch replacing the
-  render-wider-and-crop cull guard. Patch designed, not yet built; see the
-  dated entry at the bottom.
+- **State (2026-09-23):** the channel question is **answered**. The
+  terrain culler follows the **tangents channel (`GetProjectionRaw`),
+  live**, and nothing else; the matrix channel is irrelevant to culling.
+  The zero-cost memory patch — hook the game's fov getter (RVA 0x4E2F50)
+  to widen its symmetric angle sums — is confirmed as the design. Not yet
+  built. Full flight read in the 2026-09-23 entry at the bottom.
 - **The asymmetry-loss point:** the game wraps IVRSystem in a class
   (vtable VA 0x144E245B8; instance heap-held). Every VR projection query
   flows through exactly two wrapper methods:
@@ -15,50 +15,43 @@
     and returns `{aspect, atan(|r|)+atan(|b|), atan(|l|)+atan(|t|)}` —
     tangent magnitudes folded into symmetric angle sums; the per-side
     asymmetry is discarded here (asm: analysis\decomp\cull_projection9.txt).
+    This is the culler's fov source, and the patch site.
   - `FUN_1404e2d30` (RVA **0x4E2D30**, slot 27): calls
     `GetProjectionMatrix` and returns the matrix with row 3 negated —
     asymmetry (m02/m12) preserved. This is the renderer's path (the game
     extracts the four tangent elements and builds its own projection —
     canted-projection.md, the fold experiment).
-- **Probe-constrained model (H3):** the culler follows neither channel
-  live (`raw` lie inert, `matrix` lie inert for quads) and moved only in
-  `both`, which also rebuilt the eye targets. Working model: the cull
-  frustum is a **cached symmetric frustum computed at eye-target build**
-  from one of these channels, combined per frame with the live view
-  matrix. Which channel the cache derives from is unflown: the missing
-  probe cell is one channel lied-to plus a forced target rebuild.
-  Live-consumption variants (H1: culler reads the fov getter per frame;
-  H2: reads and symmetrizes the matrix per frame) are refuted by the
-  probe.
-- **Ruled out (pointers, do not re-propose):** the
-  `AstroSurfaceRenderManager::Cull` chain (`FUN_1412772b0` ->
-  `FUN_143d097b0` -> `FUN_14444b4a0` -> `FUN_1444d0200`) is a **mono
-  horizon-cone LOD culler**, not the view-frustum culler: its 48-plane
-  table is built once at construction from planet geometry
-  (`FUN_144497d30`), its fov scalar feeds only the LOD screen-size gate
-  (`tan(fov/2)` at subobj+0x8E0, written by `FUN_14448e0b0`), and the
-  per-object worker `FUN_14444d6c0` is LOD-band selection, not a frustum
-  window test. Decompiles in `analysis\decomp\cull_round3*.txt`. Also
-  ruled out: `EnableFrustum0Override` / `CullingBias` are shadow-cascade
-  config (`FUN_1428555A0`), unrelated to terrain tile culling.
+- **Ruled out (pointers, do not re-propose):**
+  - The cached-frustum model (H3: culler derives its frustum at eye-target
+    build and keeps it until the next rebuild) — refuted 2026-09-23:
+    switching to `matrix` (raw channel honest) mid-session brought the
+    squares back with **no** target rebuild in between.
+  - The union model (culler keys on the wider of the two channels;
+    widening either suffices) — refuted by the same observation.
+  - The matrix-channel model (H2) — refuted: `matrix` mode lied wide on
+    the matrix and the squares showed regardless.
+  - The 2026-09-09 legacy-probe `raw`-inert reading — superseded; see the
+    2026-09-23 entry (instrument artifact, marked inference).
+  - The `AstroSurfaceRenderManager::Cull` chain (`FUN_1412772b0` ->
+    `FUN_143d097b0` -> `FUN_14444b4a0` -> `FUN_1444d0200`) is a **mono
+    horizon-cone LOD culler**, not the view-frustum culler: its 48-plane
+    table is built once at construction from planet geometry
+    (`FUN_144497d30`), its fov scalar feeds only the LOD screen-size gate
+    (`tan(fov/2)` at subobj+0x8E0, written by `FUN_14448e0b0`), and the
+    per-object worker `FUN_14444d6c0` is LOD-band selection, not a frustum
+    window test. Decompiles in `analysis\decomp\cull_round3*.txt`. Also
+    ruled out: `EnableFrustum0Override` / `CullingBias` are shadow-cascade
+    config (`FUN_1428555A0`), unrelated to terrain tile culling.
 - **Established:** the game loads `openvr\win64\openvr_api.dll`
   dynamically (RVA 0x4E4870), holds `IVRSystem_012` in global
   VA 0x145F1A860, and reaches it only via the wrapper. LibOVR impl
   vtable at VA 0x144E243F0 with parallel slots (slot 25 -> RVA 0x4E2F30).
-- **Next:** fly the channel probe, which now exists in the native runtime
-  (2026-09-20) as `advanced.cull_guard_channel`: `raw` one session,
-  `matrix` another, guard on, watch the edges over terrain. Covered under
-  `raw` = the cache derives from the fov getter; covered only under
-  `matrix` = from the matrix getter. That answer gates the memory patch:
-  hook the fov getter (`0x4E2F50`) in observe+widen modes,
-  installed at startup so the game's initial eye-target build sees widened
-  values; guard OFF; fly. Tiles clean from session start = the cache
-  derives from this getter and the patch stands. Tiles still dropping =
-  the cache derives from the matrix channel; the getter census plus a
-  matrix-getter census guides the next static round. Note the implication
-  of H3 for tuning: mid-session margin changes are not live for the
-  culler — they take effect at the next target rebuild (quality toggle),
-  not on ini save.
+- **Next:** build the fov-getter hook (code_hook relay at RVA 0x4E2F50,
+  prologue + PE-timestamp gate, inert on other builds): reimplement the
+  getter to return angle sums widened to the per-axis symmetric superset,
+  modes off/observe/widen. Because the culler follows the channel live,
+  no target rebuild is needed and the effect is immediate. Fly: guard
+  OFF, widen from launch, edges over terrain.
 
 *Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609) —
 "Culling of planet surface in VR too aggressive", a recurrence of
@@ -431,3 +424,58 @@ session, `= matrix` for another, parked over terrain, watching the edges.
 Tiles covered under `raw` means the cache derives from the fov getter;
 covered only under `matrix` means it derives from the matrix getter — and
 the patch above hooks the wrong place.
+
+---
+
+## 2026-09-23 — the channel flight: it is the tangents, live
+
+Flown on the Pimax Crystal Super (Pimax OpenXR; per-eye frustum
+`-1.5293/+1.0324` x `±1.2648`, render 3070x3032) on build
+v0.17.0-382-g8ce12926, two sessions. **The Crystal Super reproduces the
+bug** — the first Pimax-family rig here that does; the older "this rig
+never showed the tiles" note below belongs to the Crystal over PiOpenXR.
+
+Session 051523: `channel = raw`, guard on, from launch — Live at 05:15:58
+(+19.4% horizontal), edges clean (trim 0 until 05:16:29; the 10-degree
+outer trim afterwards was the pilot's own menu edit). Switched to
+`channel = matrix` at 05:21:40 — Live immediately at the same size ask,
+so **no target rebuild happened**, and **the black squares came back**.
+Session 053407 repeated it with a guard-off baseline: matrix, off,
+matrix, raw — squares whenever the guard was off or in `matrix`.
+
+The matrix-period squares with no intervening rebuild decide the model:
+
+- **The culler follows `GetProjectionRaw`, live.** With `raw` the only
+  channel lying, the edges were clean; the moment the raw channel went
+  honest (matrix mode), the squares returned — at the same target sizes,
+  so no re-derivation event can explain it. The cached-frustum model
+  (this doc's H3) is refuted, and so is any "wider of the two channels"
+  union model.
+- **The matrix channel feeds nothing the culler reads.** `matrix` mode
+  lied wide on the matrix and the squares showed anyway.
+
+This re-reads the 2026-09-09 legacy-probe `raw`-inert result
+(canted-projection.md): that row said lying through `GetProjectionRaw`
+alone changed nothing. *(Inference, marked as such: the legacy proxy's
+matrix-channel edit was proven live — the fold experiment moved the
+rendered picture through it — but its raw-channel edit was never proven
+to reach the game at all. Today's flight, on an instrument whose raw
+edit demonstrably lands, says the culler does follow that channel. The
+09-09 `raw` row should not be cited as evidence again.)*
+
+**What this settles for the patch.** The culler's fov source is the
+tangents channel, consumed live — and the game's only symmetric
+projection source on that channel is the fov getter `FUN_1404e2f50`
+(RVA 0x4E2F50), which folds the four tangents into angle sums of their
+magnitudes. Hooking it to emit the per-axis symmetric superset covers
+the true per-eye frusta while the renderer (matrix channel) is never
+touched: zero extra pixels, no target growth, no crop, and — because
+the following is live — immediate effect with live tuning. That is the
+build described in the Status block's Next bullet, and it makes the
+whole render-wider-and-crop guard unnecessary on rigs where it flies
+clean.
+
+One caution carried forward: the only other known consumer of the
+getter's outputs is fov-priced LOD (the AstroSurface screen-size gate);
+widening shifts subdivision thresholds slightly. Compare LOD/pop against
+a guard-off baseline on the patch's first flight.
