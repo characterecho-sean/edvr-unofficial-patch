@@ -14,14 +14,14 @@
   B' on evidence — the hiding surface is 89.6% open panels, qualified
   solid occluders remove zero draws — and no cull code was built
   ("Gate probe flown", "Probe v2 flown"). The settlement LOD governor
-  has flown four times (two shadow, two acting): the first held k
-  2.70-2.75, then sustained 90 Hz for 90 s at the default slider
-  before capping at k_max 4; the shipped build (fd25af9, k_max 6,
-  cockpit gate) confirms the ramp/on-foot-hold/reduced-from-menu but
-  its 30-consecutive trigger under-reacts at the operating point
-  (56 fps, a third of frames miss); a miss-fraction trigger is IN
-  BUILD, not merged ("First acting flight", "Two more governor
-  flights").
+  has flown five times (2 shadow, 3 acting): held k 2.70-2.75, then
+  90 Hz for 90 s before capping (fixed via k_max 6); the shipped
+  build confirms the ramp/gate/reduced-menu but under-reacts near the
+  operating point; refinement 3 shipped, but its flight ran in
+  "reduced" by accident -- saturated at k 6, +1-1.5 ms vs 03:45, a
+  half-rate trap unexplained; refinement 4 (real slot outcome,
+  asymmetric steps, k_max kick, ceiling log) IN BUILD, not merged
+  ("Two more governor flights", "Refinement 3 flight").
 
 * **Levers still open:** the draw count, now via the LOD governor's
   acting mode (flown once, in refinement); the last ~0.4-0.6 ms of EDVR's own per-draw
@@ -55,9 +55,10 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next flight:** the refinement-3 build, parked at Cranfield at
-  the default slider: expect fine steps once a second until fewer
-  than 3 of 30 frames miss, and the runtime near 90 Hz as on 03:45.
+* **Next flight:** refinement 4, in AUTO (set the F8 row back),
+  slider default, material quality 0 for a minute then 3 to
+  attribute the millisecond; expect the kick and recovery to full
+  rate, or the ceiling line.
 
 ## Frame budget philosophy
 
@@ -3105,3 +3106,66 @@ without ever forming a run of 30 (04:23 flight, window ending
 Next flight: the refinement-3 build, parked at Cranfield at the
 default slider: expect fine steps once a second until fewer than 3 of
 30 frames miss, and the runtime near 90 Hz as on 03:45.
+
+### 2026-09-23 -- Refinement 3 flight ran in reduced mode by accident: the trigger never fired, k saturated at 6, and a caller-work trap at half rate
+
+Build v0.17.0-382-g8ce12926 (refinement 3: the miss-fraction
+trigger), 05:05-05:09 local, gfx log edvr_gfx_20260923_050551.log,
+runtime log edvr_openxr_20260923_050552_665_11412.log, slider at
+default (s = 1.000), Cranfield. The mode was still "reduced": Sean
+had switched it in the F8 menu during the 04:23 session and the menu
+persists to the ini, so the log reads "k 1.00 -> 6.00, reduced: in a
+settlement (>= 200 builder records), k = k_max at once" at 05:07:27
+(and again at 05:08:05 after boarding) -- the refinement-3 trigger
+never ran. Sean's report: "started off strong in the 80s but then
+dipped into the 40s again and didn't fully recover".
+
+**Windows** (end local; k; caller work mean ms; over/under of
+samples; on foot):
+
+| end | k | caller work | over/under | on foot |
+|---|---|---|---|---|
+| 05:07:51 | 1 -> 6 (1 to k_max) | 9.65 | 670/909 of 1880 | 150 frames |
+| 05:08:21 | 6.00 | 12.08 | 1069/168 of 1900 | 1123 frames |
+| 05:08:51 | 6.00 | 11.95 | 932/94 of 1501 | - |
+| 05:09:21 | 6.00 | 11.00 | 542/397 of 1734 | - |
+| 05:09:34 | reset (left) | - | - | - |
+
+05:07:51's records 504.6/frame (loading). Sean disembarked ~05:07:55
+and re-boarded 05:08:05, inside the 05:08:21 window.
+
+**Runtime windows** (end local, 30 s; cycle mean (p50)): 05:07:22
+13.97 (11.29) -- the arrival, ~72 fps, the "80s"; 05:07:52 20.39
+(21.91), 45 fps; 05:08:22 12.17 (11.52), next_wait 0.2, on foot,
+~82 fps; 05:08:52 20.99 (22.11); 05:09:22 18.86 (21.89); 05:09:52
+17.27 (21.13). Application-render GPU 5.0-8.3 ms throughout the
+cockpit minutes (0.5-0.8 in the menu): not the wall.
+
+**Reading.** Compared with 03:45 at the same spot and slider (90 Hz
+at k 2.65-3.0, 10.9-11.6 ms): at the saturation point of the lever
+(s x k 6, ~34% of pool draws gone) the caller work ran 1-1.5 ms
+higher. Two candidates, neither confirmed: material quality restored
+(leg C measured MaterialQuality 0 worth ~0.7-1 ms of game-side CPU;
+Sean asked whether it's back at default here); and a half-rate trap
+-- the game's own per-frame work grows ~1.2 ms once the runtime
+drops to 45 (the first acting flight measured both its phases
+shrinking as fps rose), so a frame that fits at 90 Hz does not fit
+at 45, and the compositor needs a run of fitting frames to climb
+back out.
+
+ruled out: nothing new -- the flight did not exercise the
+miss-fraction trigger.
+
+**Refinement 4, ordered by Sean ("build all 4 refinements"), IN
+BUILD:** the miss signal becomes the real slot outcome (a two-slot
+cycle measured at the frame boundary; misses with the CPU under the
+period do not count); asymmetric response (down only after 5 s
+without a miss and 1 ms of margin, one step per 5 s); a kick to
+k_max when misses persist 3 s below the ceiling (one per 30 s); a
+ceiling line when k_max still misses ("the remaining caller work is
+not LOD-elastic").
+
+Next flight: refinement 4, in AUTO (set the F8 row back), slider
+default, material quality 0 for a minute then 3 to attribute the
+millisecond; expect the kick and the recovery to full rate, or the
+ceiling line.
