@@ -223,6 +223,9 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
 }
 void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance) {
+    // A GUI composite the UI layer took (ui_layer.h) is not in the pass's
+    // input and its bound target is the layer: no source-UI mask from it.
+    if(uiLayerRedirecting())return;
     if(!detail::g_screenMotionEnabled || detail::g_screenMotionFailed || g.sourceFrame!=g.frame || !draw || !ctx ||
        ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);

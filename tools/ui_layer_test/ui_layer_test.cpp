@@ -213,6 +213,12 @@ void testBlend() {
     check(!uiLayerConvertBlend(blend(true, kBlendFactor, kInvBlendFactor), &c), "a blend factor is refused");
     check(!uiLayerConvertBlend(blend(true, kSrc1Color, kInvSrc1Color), &c), "dual source is refused");
     check(!uiLayerConvertBlend(blend(true, kOne, kInvSrcAlpha, kWriteAlpha), &c), "an alpha-only write is refused");
+    // Transmittance is one number for three channels: a covering draw that
+    // leaves a colour channel out cannot be carried, light that adds can.
+    check(!uiLayerConvertBlend(blend(false, kOne, kZero, 0x3), &c), "an opaque draw without blue is refused");
+    check(!uiLayerConvertBlend(blend(true, kSrcAlpha, kInvSrcAlpha, 0x5), &c), "an over without green is refused");
+    check(uiLayerConvertBlend(blend(true, kOne, kOne, 0x1), &c) && c.mask == (0x1 | kWriteAlpha),
+          "additive light into red alone is carried, its mask kept");
     check(!uiLayerConvertBlend(blend(true, kInvDestAlpha, kOne), &c), "a destination-alpha factor is refused");
     const D3D11_BLEND_DESC d = uiLayerBlendDesc(c = UiBlendRt{});
     check(!d.AlphaToCoverageEnable && !d.IndependentBlendEnable, "the layer's state: no alpha-to-coverage");
@@ -303,6 +309,8 @@ void testGate() {
     check(with([](UiLayerDrawFacts& g) { g.ldrView = false; }) == UiLayerDecision::kHdrTarget, "HDR target");
     check(with([](UiLayerDrawFacts& g) { g.vrs = true; }) == UiLayerDecision::kVrs, "variable-rate shading");
     check(with([](UiLayerDrawFacts& g) { g.eye = -1; }) == UiLayerDecision::kNoEye, "no eye");
+    check(with([](UiLayerDrawFacts& g) { g.targetMatchesEye = false; }) == UiLayerDecision::kTargetSize,
+          "a target that is not the submitted eye's size");
     check(with([](UiLayerDrawFacts& g) { g.late = true; }) == UiLayerDecision::kLate, "late (G1)");
     check(with([](UiLayerDrawFacts& g) { g.armed = false; }) == UiLayerDecision::kNotArmed, "not armed");
     check(with([](UiLayerDrawFacts& g) { g.mrt = true; }) == UiLayerDecision::kMrt, "two targets");
@@ -333,14 +341,26 @@ void testGate() {
     check(!uiLayerArmed(d, 6), "no size, not armed");
 
     float uv[4];
-    uiLayerUvFromBounds(nullptr, uv);
-    check(uv[0] == 0 && uv[1] == 0 && uv[2] == 1 && uv[3] == 1, "no bounds is the whole layer");
-    const float flipped[4] = {1, 0, 0, 1};
-    uiLayerUvFromBounds(flipped, uv);
-    check(uv[0] == 0 && uv[1] == 0 && uv[2] == 1 && uv[3] == 1, "a flip names the same rectangle");
-    const float crop[4] = {0.1f, 0.2f, 0.9f, 0.8f};
-    uiLayerUvFromBounds(crop, uv);
-    check(uv[0] == 0.1f && uv[1] == 0.2f && uv[2] == 0.9f && uv[3] == 0.8f, "a crop names its rectangle");
+    const uint32_t whole3070[4] = {0, 0, 3070, 3032};
+    uiLayerUvFromRegion(whole3070, 3070, 3032, uv);
+    check(uv[0] == 0 && uv[1] == 0 && uv[2] == 1 && uv[3] == 1, "the whole eye is the whole layer");
+    // A guard crop: the region the door rounded, not the raw fraction, so at
+    // 1.0 every output pixel lands on exactly one layer texel.
+    const uint32_t crop[4] = {307, 0, 2763, 3032};
+    uiLayerUvFromRegion(crop, 3070, 3032, uv);
+    check(near1(uv[0] * 3070.0, 307.0, 1e-3) && near1(uv[2] * 3070.0, 2763.0, 1e-3),
+          "a cropped region names its whole-pixel rectangle of the layer");
+    {
+        // ...and through the composite's own arithmetic that is one texel a
+        // pixel at 1.0: footprint of output pixel i = [307 + i, 308 + i).
+        const double span = (static_cast<double>(uv[2]) - uv[0]) * 3070.0 / (2763 - 307);
+        uint32_t first = 0;
+        float w[kUiLayerMaxTaps] = {};
+        const double x0 = uv[0] * 3070.0 + 100 * span;
+        const int n = uiLayerFootprint(x0, x0 + span, 3070, &first, w);
+        // (float uv leaves a neighbour a few millionths of weight: invisible)
+        check(n >= 1 && first == 407 && w[0] > 0.9999f, "a cropped eye at 1.0 composites texel for texel");
+    }
     const float whole[4] = {0, 0, 1, 1}, half[4] = {0, 0, 0.5f, 1}, cropped[4] = {0.1f, 0, 0.9f, 1};
     check(uiLayerRegionMatches(3070, 3032, whole, 3838, 3790), "a per-eye frame matches its layer");
     check(!uiLayerRegionMatches(3070, 3032, half, 3838, 3790), "half of a double-wide texture does not");

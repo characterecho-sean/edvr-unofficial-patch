@@ -31,11 +31,11 @@ extern "C" void* edvrSharpen(void* source,int eye,const float* bounds,float valu
 // into the layer this frame. Stubbed: null by default, so every contract
 // above holds unchanged; `layeredOut` makes it answer a texture.
 unsigned doorSeen=0,composites=0; uint64_t doorSeq=0; unsigned doorEye=9;
-ID3D11Texture2D* layeredOut=nullptr; ID3D11Texture2D* lastFrame=nullptr; uint32_t lastRegion[4]{};
+ID3D11Texture2D* layeredOut=nullptr; ID3D11Texture2D* lastFrame=nullptr; uint32_t lastRegion[4]{}; float lastUv[4]{};
 namespace edvr {
-void uiLayerDoorSeen(uint64_t seq,uint32_t eye,ID3D11Texture2D*,const float*){++doorSeen;doorSeq=seq;doorEye=eye;}
-ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const uint32_t region[4],const float*) {
-  ++composites; lastFrame=frame; std::memcpy(lastRegion,region,sizeof(lastRegion));
+void uiLayerDoorSeen(uint64_t seq,uint32_t eye,ID3D11Texture2D*){++doorSeen;doorSeq=seq;doorEye=eye;}
+ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const uint32_t region[4],const float layerUv[4]) {
+  ++composites; lastFrame=frame; std::memcpy(lastRegion,region,sizeof(lastRegion)); std::memcpy(lastUv,layerUv,sizeof(lastUv));
   if(layeredOut){layeredOut->AddRef();return layeredOut;} return nullptr;
 }
 }
@@ -151,6 +151,7 @@ void run() {
     const float half[4]={0,0,.5f,1};
     check(door.treatEye(door.context,2,0,source.Get(),half,&out,box)==S_OK&&out==layer.Get()&&lastFrame==source.Get()&&
           lastRegion[0]==0&&lastRegion[2]==16&&lastRegion[3]==24,"sharpening off: the layer lands on the frame as it arrived, over its region");
+    check(lastUv[0]==0&&lastUv[1]==0&&lastUv[2]==.5f&&lastUv[3]==1,"the layer's rectangle is the rounded region over the source's size");
     if(out)out->Release(); out=nullptr;
     check(doorSeen==seenBefore+3&&doorSeq==2&&doorEye==0&&composites==compositesBefore+3,"the door is noted for every eye, before its composite");
     layeredOut=nullptr;

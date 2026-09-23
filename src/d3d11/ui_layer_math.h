@@ -260,15 +260,22 @@ inline const char* uiBlendShapeName(UiBlendShape s) {
 // The shape of the colour equation. Refused: a subtract/min/max op,
 // destination-colour or destination-alpha factors (the layer's alpha is not
 // the frame's), dual-source, a blend factor, and a write mask with no colour
-// in it. Alpha-to-coverage and logic ops are refused by the caller, which
-// reads them from the state object.
+// in it -- or, for a shape that COVERS (opaque, over), a mask that leaves
+// any colour channel out: transmittance is one number for all three, so a
+// channel the game kept would come out of the composite covered anyway.
+// Light that covers nothing is exact under any colour mask. Alpha-to-
+// coverage and logic ops are refused by the caller, which reads them from
+// the state object.
 inline UiBlendShape uiLayerBlendShape(const UiBlendRt& b) {
     if ((b.mask & uiblend::kWriteRgb) == 0) return UiBlendShape::kRefused;
-    if (!b.enable) return UiBlendShape::kOpaque;
+    const bool allColour = (b.mask & uiblend::kWriteRgb) == uiblend::kWriteRgb;
+    if (!b.enable) return allColour ? UiBlendShape::kOpaque : UiBlendShape::kRefused;
     if (b.op != uiblend::kOpAdd) return UiBlendShape::kRefused;
     using namespace uiblend;
-    if (b.src == kSrcAlpha && b.dst == kInvSrcAlpha) return UiBlendShape::kOver;
-    if (b.src == kOne && b.dst == kInvSrcAlpha) return UiBlendShape::kPremulOver;
+    if (b.src == kSrcAlpha && b.dst == kInvSrcAlpha)
+        return allColour ? UiBlendShape::kOver : UiBlendShape::kRefused;
+    if (b.src == kOne && b.dst == kInvSrcAlpha)
+        return allColour ? UiBlendShape::kPremulOver : UiBlendShape::kRefused;
     if (b.src == kOne && b.dst == kOne) return UiBlendShape::kAdditive;
     if (b.src == kSrcAlpha && b.dst == kOne) return UiBlendShape::kScaledAdditive;
     return UiBlendShape::kRefused;
@@ -448,6 +455,8 @@ enum class UiLayerDecision : uint8_t {
                      // it would lose the game's exposure, tonemap and bloom
     kVrs,            // variable-rate shading is bound for the eye (foveation)
     kNoEye,          // the eye could not be told
+    kTargetSize,     // the target is not the size of the region the game
+                     // submits for that eye (the map is target-to-layer)
     kLate,           // its eye's composite already ran this frame (gate G1)
     kNotArmed,       // no door frame for this eye last frame (first frames,
                      // key just on, pass not running)
@@ -467,13 +476,15 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
         case UiLayerDecision::kVerdict: return "another fix swallows or re-issues it";
         case UiLayerDecision::kNotEyeTarget: return "not drawn into an eye target";
         case UiLayerDecision::kHdrTarget:
-            return "drawn into the HDR target before the tonemap (the deferred UI replay's, "
-                   "not the layer's)";
+            return "drawn into the HDR target before the tonemap (left in the picture; under an "
+                   "external engine the deferred UI replay re-draws it after the upscale)";
         case UiLayerDecision::kVrs: return "variable-rate shading bound for the eye";
         case UiLayerDecision::kNoEye: return "eye unknown";
+        case UiLayerDecision::kTargetSize:
+            return "its target is not the size of the eye the game submits";
         case UiLayerDecision::kLate: return "arrived after its eye's composite (gate G1)";
         case UiLayerDecision::kNotArmed: return "layer not armed";
-        case UiLayerDecision::kMrt: return "more than one render target";
+        case UiLayerDecision::kMrt: return "more than one render target, or pixel-shader UAVs";
         case UiLayerDecision::kDepthStencil: return "depth- or stencil-tested or -writing";
         case UiLayerDecision::kBlendRefused: return "blend with no premultiplied form";
         case UiLayerDecision::kLayerFailed: return "layer creation failed";
@@ -489,9 +500,10 @@ struct UiLayerDrawFacts {
     bool ldrView = false;         // ... viewed as 8-bit UNORM (post-tonemap)
     bool vrs = false;             // variable-rate shading bound
     int eye = -1;                 // 0 left, 1 right, -1 unknown
+    bool targetMatchesEye = true; // the target is the submitted region's size
     bool late = false;            // its eye's door already ran this frame
     bool armed = false;           // the door and the pass ran for it last frame
-    bool mrt = false;             // a second render target is bound
+    bool mrt = false;             // a second render target, or PS UAVs, bound
     bool depthStencil = false;    // tests/writes depth or stencil vs a bound DSV
     UiBlendShape blend = UiBlendShape::kRefused;
     bool layerReady = true;       // the eye's layer exists at the wanted size
@@ -504,6 +516,7 @@ inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
     if (!f.ldrView) return UiLayerDecision::kHdrTarget;
     if (f.vrs) return UiLayerDecision::kVrs;
     if (f.eye < 0 || f.eye > 1) return UiLayerDecision::kNoEye;
+    if (!f.targetMatchesEye) return UiLayerDecision::kTargetSize;
     if (f.late) return UiLayerDecision::kLate;
     if (!f.armed) return UiLayerDecision::kNotArmed;
     if (f.mrt) return UiLayerDecision::kMrt;
@@ -529,20 +542,23 @@ inline bool uiLayerLateFor(const UiLayerDoorState& d, uint64_t sequence) {
     return sequence != 0 && d.doorSeq == sequence;
 }
 
-// The composite's rectangle of the layer, from the frame's Submit-style
-// bounds {uMin, vMin, uMax, vMax} (null = whole): unflipped. The frame and
-// the layer store the eye in the same orientation (the pass and the sharpen
-// keep the game's), so a flip changes nothing here.
-inline void uiLayerUvFromBounds(const float* bounds, float uv[4]) {
-    if (!bounds) {
+// The composite's rectangle of the layer: the door's input region -- the
+// whole-pixel rectangle supersampleRegionFromBounds made of the Submit
+// bounds, already unflipped (the frame and the layer store the eye in the
+// same orientation) -- over its source's size. From the ROUNDED region and
+// not the raw bounds: a cull-guard crop is an arbitrary fraction, and the
+// half-pixel between the two would shift the UI and straddle every texel.
+inline void uiLayerUvFromRegion(const uint32_t region[4], uint32_t sourceW, uint32_t sourceH,
+                                float uv[4]) {
+    if (!sourceW || !sourceH) {
         uv[0] = uv[1] = 0.0f;
         uv[2] = uv[3] = 1.0f;
         return;
     }
-    uv[0] = bounds[0] < bounds[2] ? bounds[0] : bounds[2];
-    uv[2] = bounds[0] < bounds[2] ? bounds[2] : bounds[0];
-    uv[1] = bounds[1] < bounds[3] ? bounds[1] : bounds[3];
-    uv[3] = bounds[1] < bounds[3] ? bounds[3] : bounds[1];
+    uv[0] = static_cast<float>(static_cast<double>(region[0]) / sourceW);
+    uv[1] = static_cast<float>(static_cast<double>(region[1]) / sourceH);
+    uv[2] = static_cast<float>(static_cast<double>(region[2]) / sourceW);
+    uv[3] = static_cast<float>(static_cast<double>(region[3]) / sourceH);
 }
 
 // Does a frame region, with the layer rectangle it claims, describe the

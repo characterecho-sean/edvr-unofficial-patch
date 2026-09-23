@@ -46,6 +46,7 @@ class Config;
 namespace detail {
 extern bool g_uiLayerLive;
 extern bool g_uiLayerWatching;
+extern bool g_uiLayerRedirecting;
 }  // namespace detail
 
 // The draw path's one gate: fix.ui_quality is on, a temporal mode is on, and
@@ -82,10 +83,13 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int family, bool verdictForwards);
 bool uiLayerBegin(ID3D11DeviceContext* ctx);
 void uiLayerEnd(ID3D11DeviceContext* ctx);
 
-// True between a successful uiLayerBegin and its End on this thread: the
-// screen's motion pass (screen_motion.cpp) stands aside for a composite the
-// layer has taken -- its pixels are no longer in the pass's input.
-bool uiLayerRedirecting();
+// True between a successful uiLayerBegin and its End (owner context only):
+// the passes that ride the game's own draw -- the screen's motion and UI
+// mask, the mesh motion (screen_motion.cpp, vscreen.cpp) -- stand aside for
+// a draw the layer has taken: its pixels are no longer in the pass's input,
+// and the bound target and viewport are the layer's. One load, inline: it
+// is asked on every owner draw those passes see, key off or on.
+inline bool uiLayerRedirecting() { return detail::g_uiLayerRedirecting; }
 
 // After the first redirected draw of a frame: one load. When true, every
 // other owner draw is shown to uiLayerNoteOther, which counts draws that
@@ -111,18 +115,21 @@ void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted
 // (identity only, never dereferenced);
 void uiLayerNoteTemporal(uint64_t sequence, uint32_t eye, const void* output);
 // the door step ran for this eye: `source` is the frame arriving at it (the
-// pass's output or the game's own image), `bounds` its Submit-style bounds
-// (null = whole). Arms the next frame and publishes the size the layer takes.
-void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source,
-                     const float* bounds);
+// pass's output or the game's own image). When it is the pass's output, and
+// a composite over it can run (its format, the GPU's typed stores, the
+// shader), this arms the next frame and publishes the size the layer takes;
+// otherwise the layer is not armed, and says why once.
+void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source);
 // the composite, LAST: the layer over `frame`'s `region` (x0, y0, x1, y1 in
-// frame pixels), whose layer rectangle is `bounds` (the door's input bounds,
-// unflipped by the callee). Returns an AddRef'd EDVR-owned texture of the
-// region's size in the frame's format -- forward it with full bounds -- or
-// null: nothing was redirected into this eye this frame, or the composite
-// refused (said once; a refusal with UI in the layer stands the layer down).
+// frame pixels), whose rectangle of the layer is `layerUv` (u0, v0, u1, v1:
+// the door's input region over its source's size, uiLayerUvFromRegion, so
+// a cropped eye lands texel for texel). Returns an AddRef'd EDVR-owned
+// texture of the region's size in the frame's format -- forward it with
+// full bounds -- or null: nothing was redirected into this eye this frame,
+// or the composite refused (said once; a refusal with UI in the layer
+// stands the layer down).
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
-                                  const uint32_t region[4], const float* bounds);
+                                  const uint32_t region[4], const float layerUv[4]);
 
 // Once per frame, from vScreenFrameBoundary: the shader's warm compile, the
 // 30-second totals, the per-frame watch reset.

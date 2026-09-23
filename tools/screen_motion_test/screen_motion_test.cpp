@@ -42,9 +42,9 @@ ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,const char* s,si
     hr(d->CreatePixelShader(c->GetBufferPointer(),c->GetBufferSize(),nullptr,&p));return p;
 }
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* c,UINT n,ID3D11RenderTargetView*const* r,ID3D11DepthStencilView* d){c->OMSetRenderTargets(n,r,d);}
-// fix.ui_quality (ui_layer.h): true while the UI layer has the draw.
-bool testUiLayerRedirecting=false;
-bool uiLayerRedirecting(){return testUiLayerRedirecting;}
+// fix.ui_quality (ui_layer.h): true while the UI layer has the draw; its
+// inline reader is the production one.
+namespace detail{bool g_uiLayerRedirecting=false;}
 }
 using namespace edvr;
 void __stdcall draw(ID3D11DeviceContext* c,unsigned,unsigned,unsigned,int,unsigned){c->Draw(3,0);}
@@ -206,7 +206,7 @@ int main(int argc,char** argv){
         // fix.ui_quality's layer took the composite (ui_layer.h): the screen
         // is drawn after the upscale, not into the pass's input, so no screen
         // motion is drawn for it and the eye has no map that frame.
-        screenMotionFrameBoundary(ctx.Get());sourceDraw();testUiLayerRedirecting=true;screenDraw(0);testUiLayerRedirecting=false;
+        screenMotionFrameBoundary(ctx.Get());sourceDraw();detail::g_uiLayerRedirecting=true;screenDraw(0);detail::g_uiLayerRedirecting=false;
         check(!screenMotionView(0,W,H),"a composite the UI layer took draws no screen motion");
     }
     // Optional recorded source/eye matrices and double-precision expected

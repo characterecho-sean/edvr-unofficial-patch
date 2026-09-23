@@ -1,6 +1,7 @@
 #include "../common/native_sharpen.h"
 #include "sharpen_pass.h"
 #include "ui_layer.h"
+#include "ui_layer_math.h"  // uiLayerUvFromRegion
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
@@ -61,23 +62,26 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // lands on the frame as it arrived (the pass's output, or the game's own
   // image when the pass declined). The door is noted first, for every eye,
   // so the next frame's draws know it is there to composite them.
-  edvr::uiLayerDoorSeen(seq,eye,source,bounds);
+  edvr::uiLayerDoorSeen(seq,eye,source);
+  // The layer's rectangle: this input region (rounded, unflipped) over the
+  // source's size -- the same whether the frame is the source or the
+  // sharpened copy of that region.
+  float layerUv[4]; edvr::uiLayerUvFromRegion(region,desc.Width,desc.Height,layerUv);
   if(s->strength<=0.f||s->stoodDown) {
     ++s->off; if(s->strength<=0.f&&!s->offNoted){s->offNoted=true;edvr::Log::get().note("native sharpen: off (fix.render_sharpness=0); eyes consumed as passthrough.");}
-    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,bounds)) { *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
+    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,layerUv)) { *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
     return S_FALSE;
   }
   void* raw=edvrSharpen(source,int(eye),bounds,s->strength);
   if(!raw) {
     s->stoodDown=true;++s->refusals; edvr::Log::get().note("native sharpen: pass refused; standing down for this session.");
-    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,bounds)) { *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
+    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,layerUv)) { *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
     return S_FALSE;
   }
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);
-  // The sharpened texture is the input region, region-sized: the layer's
-  // rectangle is still the input's bounds.
+  // The sharpened texture is the input region, region-sized.
   const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]};
-  if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,result,whole,bounds)) result=layered; else result->AddRef();
+  if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,result,whole,layerUv)) result=layered; else result->AddRef();
   *output=result; std::memcpy(outBounds,full,sizeof(full)); ++s->treated; s->engagedMask|=1u<<eye; if(s->engagedMask==3&&!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native sharpen: engaged for both eyes.");} return S_OK;
 }
 HRESULT WINAPI invalidate(void* p) { std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;s->invalidated=true;s->consumed[0]=s->consumed[1]=false;++s->invalidations;return S_OK; }

@@ -4692,15 +4692,17 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             }
             // screenMotionLive() is the first term of both (screen_motion.h);
             // with fix.temporal_aa off these were two calls per draw that only
-            // ever returned.
-            if (screenMotionLive()) {
+            // ever returned. Neither runs for a draw the UI layer took
+            // (ui_layer.h): its pixels are not in the pass's input, and the
+            // bound target and viewport are the layer's.
+            if (screenMotionLive() && !uiLayerRedirecting()) {
                 screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
                 screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             }
             // meshMotionLive() is meshMotionDraw's own first reject, inline
             // (mesh_motion.h names the census reader and why skipping the
             // call while the feature is off silences nothing).
-            if (meshMotionLive())
+            if (meshMotionLive() && !uiLayerRedirecting())
                 meshMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance,bindingShaderHash(BindSlot::Vs));
         }
         return true;  // the original draw was issued

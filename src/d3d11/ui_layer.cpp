@@ -44,6 +44,7 @@ namespace edvr {
 namespace detail {
 bool g_uiLayerLive = false;
 bool g_uiLayerWatching = false;
+bool g_uiLayerRedirecting = false;
 }  // namespace detail
 
 namespace {
@@ -61,12 +62,13 @@ constexpr uint32_t kMaxAfterLines = 16;
 float g_target = 0.0f;     // 0 off, 1.0, 1.25
 bool g_temporal = false;   // a temporal mode is on (the layer's door exists)
 bool g_debugView = false;  // advanced.temporal_aa_debug = ui_layer
+bool g_jitterAsShipped = true;  // advanced.temporal_aa_jitter_sign/lag at their defaults
 bool g_stoodDown = false;
 std::string g_keyText = "?";
 bool g_keyNoted = false;
 
 void refreshLive() {
-    detail::g_uiLayerLive = g_target > 0.0f && g_temporal && !g_stoodDown;
+    detail::g_uiLayerLive = g_target > 0.0f && g_temporal && g_jitterAsShipped && !g_stoodDown;
 }
 
 void standDown(const char* why) {
@@ -89,6 +91,7 @@ struct Eye {
     Ptr<ID3D11RenderTargetView> rtv;
     Ptr<ID3D11ShaderResourceView> srv;
     uint32_t w = 0, h = 0;
+    uint32_t basisW = 0, basisH = 0;  // the door size the layer was made for
     uint64_t seq = 0;            // the frame whose draws it holds
     uint32_t draws = 0;          // redirected into it for that frame
     uint64_t compositedSeq = 0;  // the last frame the door composited (or tried)
@@ -145,7 +148,8 @@ TargetCache g_tc;
 // issue with Begin/End, on the render thread, before the next draw arrives.
 struct Draw {
     bool decided = false, active = false;
-    bool saved = false;  // the game's state is held below: restore it on any exit
+    bool saved = false;    // the game's state is held below: restore it on any exit
+    bool counted = false;  // this decision's draw is counted (a fallback re-issue is not)
     int eye = -1;
     UiLayerFamily family = UiLayerFamily::kNone;
     uint64_t seq = 0;
@@ -165,8 +169,8 @@ struct Draw {
     UINT sampleMask = 0xFFFFFFFFu;
 };
 Draw g_draw;
-thread_local bool t_redirecting = false;
 uint64_t g_lastRedirectSeq = 0;
+bool g_familyEngaged[static_cast<size_t>(UiLayerFamily::kCount)] = {};
 uint32_t g_watchBudget = kWatchPerFrame;
 
 FaultBudget g_drawBudget("uiLayer.draw", 4);
@@ -290,10 +294,45 @@ bool ensureLayerFor(ID3D11DeviceContext* ctx, int eye) {
     Eye& e = g_eye[eye];
     const UiLayerSize s = uiLayerSize(e.door.fullW, e.door.fullH, g_target);
     if (!s.w || !s.h) return false;
-    if (e.tex && e.w == s.w && e.h == s.h) return true;
+    if (e.tex && e.w == s.w && e.h == s.h) {
+        e.basisW = e.door.fullW;
+        e.basisH = e.door.fullH;
+        return true;
+    }
     Ptr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
-    return ensureLayer(dev.Get(), e, s.w, s.h, eye);
+    if (!ensureLayer(dev.Get(), e, s.w, s.h, eye)) return false;
+    e.basisW = e.door.fullW;
+    e.basisH = e.door.fullH;
+    return true;
+}
+
+// Every layer and composite output released (the door state kept): the key
+// went off, the pass went away, or the layer stood down. About 380 MB at
+// 1.25 on a 4340x4284 eye is not left resident for a feature that is off.
+bool releaseLayers() {
+    bool any = false;
+    for (Eye& e : g_eye) {
+        any = any || e.tex || e.out || e.copy || e.frameSrv;
+        e.tex.Reset();
+        e.rtv.Reset();
+        e.srv.Reset();
+        e.w = e.h = e.basisW = e.basisH = 0;
+        e.seq = 0;
+        e.draws = 0;
+        e.out.Reset();
+        e.outUav.Reset();
+        e.outW = e.outH = 0;
+        e.outFmt = DXGI_FORMAT_UNKNOWN;
+        e.frameSrv.Reset();
+        e.frameRes = nullptr;
+        e.frameView = DXGI_FORMAT_UNKNOWN;
+        e.copy.Reset();
+        e.copySrv.Reset();
+        e.copyW = e.copyH = 0;
+        e.copyFmt = DXGI_FORMAT_UNKNOWN;
+    }
+    return any;
 }
 
 ID3D11BlendState* cachedBlend(ID3D11DeviceContext* ctx, const UiBlendRt& conv) {
@@ -476,14 +515,37 @@ bool beginInner(ID3D11DeviceContext* ctx) {
     vScreenSetRenderTargetsRaw(ctx, 1, &layer, nullptr);
     g_draw.active = true;
 
-    ++e.draws;
-    ++g_win.redirected;
-    ++g_sessionRedirected;
-    g_win.viewportRemaps += g_draw.vpCount;
-    if (g_draw.scissorSet) g_win.scissorRemaps += g_draw.scCount;
-    if (g_draw.jx != 0.0f || g_draw.jy != 0.0f) ++g_win.jitterCancels;
+    // Counted once per draw: the curved screen's fall-through re-issues the
+    // same draw after a failed substitution, and that is not a second draw.
+    if (!g_draw.counted) {
+        g_draw.counted = true;
+        ++e.draws;
+        ++g_win.redirected;
+        ++g_sessionRedirected;
+        g_win.viewportRemaps += g_draw.vpCount;
+        if (g_draw.scissorSet) g_win.scissorRemaps += g_draw.scCount;
+        if (g_draw.jx != 0.0f || g_draw.jy != 0.0f) ++g_win.jitterCancels;
+    }
     g_lastRedirectSeq = g_draw.seq;
     detail::g_uiLayerWatching = true;
+    // Once per family: where its first draw landed and the cancel it took,
+    // so a family placed in fixed clip space rather than through the eye's
+    // projection (which the cancel would jitter) can be told on the flight.
+    bool& familyEngaged = g_familyEngaged[static_cast<size_t>(g_draw.family)];
+    if (!familyEngaged && g_draw.vpCount) {
+        familyEngaged = true;
+        const D3D11_VIEWPORT& gv = g_draw.vp[0];
+        Log::get().note(
+            "ui layer: first %s draw in the %s eye's layer -- the game's viewport (%.1f, %.1f) "
+            "%.1fx%.1f became (%.3f, %.3f) %.1fx%.1f, a jitter cancel of (%.3f, %.3f) layer "
+            "pixels.",
+            uiLayerFamilyName(g_draw.family), g_draw.eye == 0 ? "left" : "right",
+            static_cast<double>(gv.TopLeftX), static_cast<double>(gv.TopLeftY),
+            static_cast<double>(gv.Width), static_cast<double>(gv.Height),
+            static_cast<double>(vp[0].TopLeftX), static_cast<double>(vp[0].TopLeftY),
+            static_cast<double>(vp[0].Width), static_cast<double>(vp[0].Height),
+            static_cast<double>(cx), static_cast<double>(cy));
+    }
     if (!g_engageNoted) {
         g_engageNoted = true;
         Log::get().note(
@@ -580,7 +642,8 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI
 }
 
 ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
-                                const uint32_t region[4], const float* bounds, const char** why) {
+                                const uint32_t region[4], const float layerUv[4],
+                                const char** why) {
     D3D11_TEXTURE2D_DESC fd{};
     frame->GetDesc(&fd);
     const DXGI_FORMAT view = uiLayerFrameView(fd.Format);
@@ -599,12 +662,27 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         return nullptr;
     }
     const uint32_t rw = region[2] - region[0], rh = region[3] - region[1];
-    float uv[4];
-    uiLayerUvFromBounds(bounds, uv);
+    float uv[4] = {layerUv[0], layerUv[1], layerUv[2], layerUv[3]};
     if (!uiLayerRegionMatches(rw, rh, uv, e.w, e.h)) {
-        *why = "the frame's region does not describe the layer's eye (a half of a "
-               "double-wide texture, or a size the layer was not made for)";
-        return nullptr;
+        // The frame this layer was sized for (the door's previous size) has
+        // changed aspect this frame -- the per-eye width, an FOV trim: the
+        // layer still covers the same frustum and the shader scales each
+        // axis on its own, so one frame lands stretched and the next layer
+        // is made for the new size. Anything else is a frame that does not
+        // hold the layer's eye (half of a double-wide texture): refused.
+        const bool resized = e.basisW != e.door.fullW || e.basisH != e.door.fullH;
+        if (!resized) {
+            *why = "the frame's region does not describe the layer's eye (a half of a "
+                   "double-wide texture?)";
+            return nullptr;
+        }
+        static bool stretchNoted = false;
+        if (!stretchNoted) {
+            stretchNoted = true;
+            Log::get().note("ui layer: the door's frame changed shape under a layer made for the "
+                            "old one; composited stretched for that frame, the next layer is made "
+                            "for the new size.");
+        }
     }
     Ptr<ID3D11Device> dev;
     frame->GetDevice(&dev);
@@ -785,6 +863,60 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     return out;
 }
 
+// Can a composite run over the frames this door hands on? The format, the
+// GPU's typed stores for it and the shader, each refused once with a line
+// and cached, so the layer is never armed behind a composite that would
+// refuse with UI already in it.
+bool doorCanComposite(ID3D11Texture2D* source) {
+    D3D11_TEXTURE2D_DESC d{};
+    source->GetDesc(&d);
+    const DXGI_FORMAT view = uiLayerFrameView(d.Format);
+    static bool formatNoted = false, uavNoted = false, shaderNoted = false;
+    if (view == DXGI_FORMAT_UNKNOWN || d.SampleDesc.Count != 1 || d.ArraySize != 1 ||
+        d.MipLevels != 1) {
+        if (!formatNoted) {
+            formatNoted = true;
+            Log::get().note("ui layer: the pass hands on a %ux%u %s (DXGI_FORMAT %d, %u samples, "
+                            "%u mips) -- not an 8-bit UNORM eye; the layer is not armed (the "
+                            "composite blends only in the space the game's UI composites did).",
+                            d.Width, d.Height, viewName(d.Format), static_cast<int>(d.Format),
+                            d.SampleDesc.Count, d.MipLevels);
+        }
+        return false;
+    }
+    Ptr<ID3D11Device> dev;
+    source->GetDevice(&dev);
+    Ptr<ID3D11DeviceContext> ctx;
+    if (dev) dev->GetImmediateContext(&ctx);
+    if (!dev || !ctx) return false;
+    const int fi = view == DXGI_FORMAT_R8G8B8A8_UNORM ? 0 : 1;
+    if (!g_fmtChecked[fi]) {
+        g_fmtChecked[fi] = true;
+        UINT support = 0;
+        g_fmtOk[fi] = SUCCEEDED(dev->CheckFormatSupport(view, &support)) &&
+                      (support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) != 0;
+    }
+    if (!g_fmtOk[fi]) {
+        if (!uavNoted) {
+            uavNoted = true;
+            Log::get().note("ui layer: this GPU has no typed unordered-access store for %s; the "
+                            "layer is not armed.",
+                            viewName(view));
+        }
+        return false;
+    }
+    compileOnce(ctx.Get());
+    if (!g_cs) {
+        if (!shaderNoted) {
+            shaderNoted = true;
+            Log::get().note("ui layer: the composite shader did not compile (the line above says "
+                            "why); the layer is not armed.");
+        }
+        return false;
+    }
+    return true;
+}
+
 // ------------------------------------------------------------ the totals
 
 void appendf(std::string& s, const char* fmt, ...) {
@@ -874,14 +1006,23 @@ void uiLayerConfigure(Config& cfg) {
     const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
     const bool debugView = _stricmp(cfg.getString("advanced.temporal_aa_debug", "off").c_str(),
                                     "ui_layer") == 0;
+    // The cancel follows the shipped jitter convention (as_is, no lag); the
+    // two switches that re-read it are diagnostics of the pass's reading,
+    // and while either is set the game's pixels may sit where the cancel
+    // does not expect them -- the layer waits rather than guess.
+    const bool jitterAsShipped =
+        _stricmp(cfg.getString("advanced.temporal_aa_jitter_sign", "as_is").c_str(), "as_is") == 0 &&
+        !(cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f) >= 0.5f);
     const bool changed = !g_keyNoted || text != g_keyText || target != g_target ||
-                         temporal != g_temporal || debugView != g_debugView;
+                         temporal != g_temporal || debugView != g_debugView ||
+                         jitterAsShipped != g_jitterAsShipped;
     // A live change of the key re-arms a stood-down layer: the player asked.
     if (g_keyNoted && (text != g_keyText || target != g_target)) g_stoodDown = false;
     g_keyText = text;
     g_target = target;
     g_temporal = temporal;
     g_debugView = debugView;
+    g_jitterAsShipped = jitterAsShipped;
     refreshLive();
     if (!changed) return;
     g_keyNoted = true;
@@ -907,14 +1048,22 @@ void uiLayerConfigure(Config& cfg) {
             text.c_str());
         return;
     }
+    if (!jitterAsShipped) {
+        Log::get().note(
+            "ui layer: fix.ui_quality = %s, but advanced.temporal_aa_jitter_sign or _lag is set, "
+            "so it waits: the layer cancels the jitter by the shipped convention only.",
+            text.c_str());
+        return;
+    }
     Log::get().note(
         "ui layer: fix.ui_quality = %s (HMD Quality %s) -- the game's post-tonemap UI (the 2D "
         "screen's composite, and every eye draw of a learned interface surface: the menus, the "
         "loading screen) is drawn by its own shaders into a per-eye layer at %s times the size "
         "the door hands on, unjittered, and composited after the upscale and RCAS, before "
         "EDVR's menu. The cockpit's holo panels, flight HUD and target sprite are drawn into the "
-        "HDR target before the tonemap and stay with the deferred UI replay. Draws the layer "
-        "takes get no UI depth and no reactive mask.%s",
+        "HDR target before the tonemap and stay in the picture (under dlss, dlaa and fsr the "
+        "deferred UI replay re-draws them after the upscale). Draws the layer takes get no UI "
+        "depth and no reactive mask.%s",
         text.c_str(), hmdText, text.c_str(),
         debugView ? " advanced.temporal_aa_debug = ui_layer: the layer is shown over black." : "");
 }
@@ -946,6 +1095,7 @@ int uiLayerTargetKind() {
 
 bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards) {
     g_draw.decided = false;
+    g_draw.counted = false;
     if (!ctx || familyInt <= 0 || familyInt >= static_cast<int>(UiLayerFamily::kCount)) return false;
     const UiLayerFamily family = static_cast<UiLayerFamily>(familyInt);
     UiLayerDrawFacts f;
@@ -964,6 +1114,9 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         f.eye = uiDepthEyeOfTarget(g_tc.info.resource, g_tc.info.a, g_tc.info.b, g_tc.info.fmt);
         if (f.eye >= 0 &&
             nativeTemporalDrawJitter(static_cast<uint32_t>(f.eye), &seq, &jx, &jy, &sw, &sh)) {
+            // The map sends the whole target onto the layer: only right when
+            // the target IS the region the game submits for that eye.
+            f.targetMatchesEye = !sw || !sh || (sw == g_tc.info.a && sh == g_tc.info.b);
             f.late = uiLayerLateFor(g_eye[f.eye].door, seq);
             f.armed = uiLayerArmed(g_eye[f.eye].door, seq);
         }
@@ -972,10 +1125,21 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.blend = UiBlendShape::kOpaque;
     UiLayerDecision d = uiLayerDecide(f);
     if (d == UiLayerDecision::kRedirect) {
-        ID3D11RenderTargetView* rtvs[2] = {};
+        // A second render target, or pixel-shader UAVs (which the layer's
+        // raw OMSetRenderTargets would not carry across), refuse the draw.
+        ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
         ID3D11DepthStencilView* dsv = nullptr;
-        ctx->OMGetRenderTargets(2, rtvs, &dsv);
-        f.mrt = rtvs[1] != nullptr;
+        ID3D11UnorderedAccessView* uavs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {};
+        ctx->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs,
+                                                       &dsv, 0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs);
+        bool anyUav = false;
+        for (auto* u : uavs) {
+            if (u) {
+                anyUav = true;
+                u->Release();
+            }
+        }
+        f.mrt = boundCount(rtvs) > 1 || anyUav;
         f.depthStencil = depthStencilEffect(ctx, dsv != nullptr);
         for (auto* r : rtvs)
             if (r) r->Release();
@@ -1015,10 +1179,11 @@ bool uiLayerBegin(ID3D11DeviceContext* ctx) {
         if (g_draw.saved) guarded("uiLayer.restore", [&] { restore(ctx); });
         releaseSaved();
         g_draw.active = false;
+        detail::g_uiLayerRedirecting = false;
         standDown("a fault while binding the layer for a draw");
         return false;
     }
-    t_redirecting = ok;
+    detail::g_uiLayerRedirecting = ok;
     return ok;
 }
 
@@ -1029,10 +1194,8 @@ void uiLayerEnd(ID3D11DeviceContext* ctx) {
     }
     releaseSaved();
     g_draw.active = false;
-    t_redirecting = false;
+    detail::g_uiLayerRedirecting = false;
 }
-
-bool uiLayerRedirecting() { return t_redirecting; }
 
 void uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count) {
     if (!ctx) return;
@@ -1090,15 +1253,20 @@ void uiLayerNoteTemporal(uint64_t sequence, uint32_t eye, const void* output) {
     ++g_win.treated;
 }
 
-void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source,
-                     const float* bounds) {
-    (void)bounds;
+void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source) {
     if (eye > 1 || !source) return;
     Eye& e = g_eye[eye];
     e.door.doorSeq = sequence;
     e.doorFromPass = e.temporalOutSeq == sequence && e.temporalOut == source;
     ++g_win.doors;
-    if (e.doorFromPass) {
+    if (e.doorFromPass && detail::g_uiLayerLive) {
+        // Whether a composite can run over this frame at all is settled
+        // here, before anything is redirected, not at the composite with a
+        // frame's UI already in the layer: an unarmed layer loses nothing.
+        if (!doorCanComposite(source)) {
+            e.door.fullW = e.door.fullH = 0;
+            return;
+        }
         D3D11_TEXTURE2D_DESC d{};
         source->GetDesc(&d);
         if (d.Width != e.door.fullW || d.Height != e.door.fullH) {
@@ -1133,8 +1301,8 @@ void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted
 }
 
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
-                                  const uint32_t region[4], const float* bounds) {
-    if (eye > 1 || !frame || !region) return nullptr;
+                                  const uint32_t region[4], const float layerUv[4]) {
+    if (eye > 1 || !frame || !region || !layerUv) return nullptr;
     Eye& e = g_eye[eye];
     if (!e.srv || !e.rtv || e.compositedSeq == sequence) return nullptr;
     const bool hasUi = e.seq == sequence && e.draws;
@@ -1165,16 +1333,19 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
         } else if (e.target == mine || copied == mine) {
             ++g_win.eyeMatched;
         } else if (theirs && (e.target == theirs || copied == theirs)) {
+            // The game's Submit says this UI belongs to the other eye: every
+            // frame from here would invert the disparity of every menu. Stand
+            // down at once -- the UI goes back into the game's frame, in the
+            // right eyes -- and say how to flip the order rule.
             ++g_win.eyeSwapped;
-            static bool swappedNoted = false;
-            if (!swappedNoted) {
-                swappedNoted = true;
-                Log::get().note(
-                    "ui layer: the %s eye's layer holds UI from the target the game submitted for "
-                    "the %s eye -- the eye rule (first target of a frame = left) is backwards on "
-                    "this rig. advanced.ui_depth_eyes = swapped flips it (and the UI depth's with it).",
-                    eye == 0 ? "left" : "right", eye == 0 ? "right" : "left");
-            }
+            Log::get().note(
+                "ui layer: the %s eye's layer holds UI from the target the game submitted for "
+                "the %s eye -- the eye rule (first target of a frame = left) is backwards on "
+                "this rig. advanced.ui_depth_eyes = swapped flips it (and the UI depth's with "
+                "it); then turn fix.ui_quality off and on.",
+                eye == 0 ? "left" : "right", eye == 0 ? "right" : "left");
+            standDown("the eye check found the layer's eyes swapped");
+            return nullptr;
         } else {
             ++g_win.eyeUntold;
         }
@@ -1182,8 +1353,9 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     if (graphicsRuntimeDisabled()) return nullptr;
     ID3D11Texture2D* result = nullptr;
     const char* why = nullptr;
-    const bool ran =
-        guardedBudget(g_compositeBudget, [&] { result = compositeInner(e, eye, frame, region, bounds, &why); });
+    const bool ran = guardedBudget(g_compositeBudget, [&] {
+        result = compositeInner(e, eye, frame, region, layerUv, &why);
+    });
     if (!result) {
         ++g_win.compositeRefused;
         // The UI of this frame is in the layer and will not reach the eye:
@@ -1209,7 +1381,13 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_win.frames;
     // The warm compile, the sharpen's reason: not a first-use D3DCompile at
     // the door.
-    if (ctx && g_target > 0.0f && g_temporal && !g_stoodDown) compileOnce(ctx);
+    if (ctx && detail::g_uiLayerLive) compileOnce(ctx);
+    // Not live -- off, no pass, the jitter switches set, stood down: this
+    // frame's doors have run, so nothing still needs the layers. Let the
+    // memory go; the next live frame makes them again.
+    if (!detail::g_uiLayerLive && releaseLayers()) {
+        Log::get().note("ui layer: not live -- both eyes' layers and composite outputs released.");
+    }
     const uint64_t now = GetTickCount64();
     if (!g_winStartMs) g_winStartMs = now;
     if (now - g_winStartMs < kTotalsMs) return;
