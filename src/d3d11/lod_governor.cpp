@@ -31,31 +31,47 @@ void Policy::configure(float kMax) noexcept {
 void Policy::reset() noexcept {
     steps_ = 0;
     inSettlement_ = clampPending_ = stepped_ = false;
-    over_ = under_ = sparse_ = 0;
+    sparse_ = 0;
     lastStepMs_ = 0;
-    excessNext_ = excessCount_ = 0;
+    next_ = 0;
+    emptyRing();
+    stepOver_ = 0;
+    stepMeanExcessMs_ = 0;
     upQuanta_ = 0;
     upHeld_ = false;
-    upMeanExcessMs_ = 0;
 }
 
 double Policy::meanExcessMs() const noexcept {
-    if (!excessCount_) return 0.0;
+    if (!count_) return 0.0;
     double sum = 0.0;
-    for (uint32_t i = 0; i < excessCount_; ++i) sum += excess_[(excessNext_ + kConsecutive - 1 - i) % kConsecutive];
-    return sum / excessCount_;
+    for (uint32_t i = 0; i < count_; ++i) sum += excess_[(next_ + kSampleWindow - 1 - i) % kSampleWindow];
+    return sum / count_;
+}
+
+// One valid sample into the ring; once it is full the oldest leaves, and its
+// over flag with it.
+void Policy::push(double excessMs, bool over) noexcept {
+    if (count_ == kSampleWindow) {
+        if (over_[next_]) --overCount_;
+    } else {
+        ++count_;
+    }
+    excess_[next_] = excessMs;
+    over_[next_] = over;
+    if (over) ++overCount_;
+    next_ = (next_ + 1) % kSampleWindow;
 }
 
 Step Policy::update(const FrameSignals& s) noexcept {
     // On foot (the game's Status.json, the flag the on-foot frame pacing keys
     // on): the arc measured the cockpit only, so k is held at 1 exactly as
-    // outside a settlement -- at once, the settlement, the runs, the mean and
-    // a pending clamp forgotten -- for as long as it lasts. Back aboard it
+    // outside a settlement -- at once, the settlement, the samples and a
+    // pending clamp forgotten -- for as long as it lasts. Back aboard it
     // starts over: 200 records, then 30 samples, before a step.
     if (s.onFoot) {
         clampPending_ = inSettlement_ = false;
-        over_ = under_ = sparse_ = 0;
-        excessCount_ = 0;
+        sparse_ = 0;
+        emptyRing();
         if (steps_ > 0) {
             steps_ = 0;
             lastStepMs_ = s.nowMs;
@@ -82,8 +98,8 @@ Step Policy::update(const FrameSignals& s) noexcept {
     } else if (inSettlement_ && s.records + kSettlementBand < kSettlementRecords) {
         if (++sparse_ >= kConsecutive) {
             inSettlement_ = false;
-            sparse_ = over_ = under_ = 0;
-            excessCount_ = 0;
+            sparse_ = 0;
+            emptyRing();
             if (steps_ > 0) {
                 steps_ = 0;
                 lastStepMs_ = s.nowMs;
@@ -95,21 +111,15 @@ Step Policy::update(const FrameSignals& s) noexcept {
     } else {
         sparse_ = 0;
     }
-    // Frame work: runs of consecutive samples over and under the budget, and
-    // the latest 30 samples' excess over it. A frame with no new sample holds
-    // them; a bad sample breaks both runs and empties the mean.
+    // Frame work: the latest 30 valid samples, each over (a missed slot) or
+    // not. A frame with no new sample holds them; a bad sample empties them.
     if (s.work == Work::Invalid) {
-        over_ = under_ = 0;
-        excessCount_ = 0;
+        emptyRing();
     } else if (s.work == Work::Valid) {
-        over_ = s.workMs > s.periodMs + kOverMarginMs ? over_ + 1 : 0;
-        under_ = s.workMs < s.periodMs - kUnderMarginMs ? under_ + 1 : 0;
-        excess_[excessNext_] = s.workMs - s.periodMs;
-        excessNext_ = (excessNext_ + 1) % kConsecutive;
-        if (excessCount_ < kConsecutive) ++excessCount_;
+        push(s.workMs - s.periodMs, s.workMs > s.periodMs + kOverMarginMs);
     }
     // reduced: k_max for as long as the settlement lasts -- at once, no ramp,
-    // no frame-work steps (the runs above still feed the summary's counts).
+    // no frame-work steps.
     if (fixed_) {
         if (inSettlement_ && steps_ != maxSteps_) {
             steps_ = maxSteps_;
@@ -120,20 +130,25 @@ Step Policy::update(const FrameSignals& s) noexcept {
         return Step::None;
     }
     if (stepped_ && s.nowMs - lastStepMs_ < kRampIntervalMs) return Step::None;
-    if (inSettlement_ && s.records >= kSettlementRecords && over_ >= kConsecutive && steps_ < maxSteps_) {
-        // The step's size: 0.25 while the 30 samples behind it -- the latest 30
-        // valid ones, every one over budget, since over_ >= 30 and whatever
-        // empties the ring also zeroes over_ -- ran more than 1.0 ms over on
-        // average, else 0.05; held to k_max either way.
-        upMeanExcessMs_ = meanExcessMs();
-        upQuanta_ = upMeanExcessMs_ > kCoarseExcessMs ? kCoarseQuanta : 1;
+    if (count_ < kSampleWindow) return Step::None;   // 30 samples before any step
+    const double mean = meanExcessMs();
+    // Up while 3 or more of the 30 missed their slot: 0.25 while the 30 ran
+    // more than 1.0 ms over on average, else 0.05; held to k_max either way.
+    if (inSettlement_ && s.records >= kSettlementRecords && overCount_ >= kUpMisses && steps_ < maxSteps_) {
+        stepOver_ = overCount_;
+        stepMeanExcessMs_ = mean;
+        upQuanta_ = mean > kCoarseExcessMs ? kCoarseQuanta : 1;
         upHeld_ = steps_ + upQuanta_ > maxSteps_;
         steps_ = upHeld_ ? maxSteps_ : steps_ + upQuanta_;
         lastStepMs_ = s.nowMs;
         stepped_ = true;
         return Step::Up;
     }
-    if (under_ >= kConsecutive && steps_ > 0) {
+    // Down, 0.05, when none of the 30 did and they had a millisecond to spare.
+    // Anything between holds: the dead band.
+    if (overCount_ == 0 && mean < -kUnderMarginMs && steps_ > 0) {
+        stepOver_ = 0;
+        stepMeanExcessMs_ = mean;
         --steps_;
         lastStepMs_ = s.nowMs;
         stepped_ = true;
@@ -818,7 +833,8 @@ void logSummary(State& st, uint64_t nowMs) {
         else if (!w.denseOver)
             stuck = "; k stayed 1: the frame work never ran 0.30 ms over the period in a frame with 200 records";
         else
-            stuck = "; k stayed 1: over-budget runs with 200 records never reached 30 consecutive samples";
+            stuck = "; k stayed 1: never 3 of the last 30 samples over budget in a frame with 200 records (1-2 is the "
+                    "dead band)";
     }
     // The LOD scale: the game's own (from the setter), what the tests ran at
     // (the builder's read), and the setter's counts. A write path that never
@@ -961,19 +977,23 @@ void logStep(State& st, lodgov::Step step, float from, const lodgov::FrameSignal
         ++st.stepsUnlogged;
         return;
     }
-    // An up step names its size and the mean excess that chose it; a down
-    // step is always 0.05.
-    char why[200];
+    // An up or down step names how many of the last 30 samples missed their
+    // slot and their mean excess; an up step its size too. Down is always 0.05.
+    char why[240];
+    const double mean = st.policy.stepMeanExcessMs();
     if (step == lodgov::Step::Up) {
         const bool coarse = st.policy.upQuanta() > 1;
-        std::snprintf(why, sizeof(why), "up %.2f: the frame work ran more than 0.30 ms over the period for 30 samples, "
-                      "their mean %.2f ms over (%s%s)", double(st.policy.upQuanta()) / lodgov::kQuantaPerUnit,
-                      st.policy.upMeanExcessMs(), coarse ? "more than 1.00 ms: the coarse step" : "1.00 ms or less: the fine step",
+        std::snprintf(why, sizeof(why), "up %.2f: %u of the last 30 samples ran more than 0.30 ms over the period, "
+                      "their mean %.2f ms %s (%s%s)", double(st.policy.upQuanta()) / lodgov::kQuantaPerUnit,
+                      st.policy.stepOver(), std::fabs(mean), mean < 0.0 ? "under" : "over",
+                      coarse ? "more than 1.00 ms over: the coarse step" : "1.00 ms over or less: the fine step",
                       st.policy.upHeld() ? ", held to k_max" : "");
+    } else if (step == lodgov::Step::Down) {
+        std::snprintf(why, sizeof(why), "down 0.05: none of the last 30 samples ran more than 0.30 ms over the period, "
+                      "their mean %.2f ms under (more than 1.00 ms to spare)", std::fabs(mean));
     } else {
         std::snprintf(why, sizeof(why), "%s",
-                      step == lodgov::Step::Down ? "down 0.05: the frame work ran more than 1.00 ms under the period for 30 samples"
-                      : step == lodgov::Step::Reset ? "reset: under 150 builder records for 30 frames"
+                      step == lodgov::Step::Reset ? "reset: under 150 builder records for 30 frames"
                       : step == lodgov::Step::Enter ? "reduced: in a settlement (>= 200 builder records), k = k_max at once"
                                                     : "clamped to the new advanced.settlement_detail_max");
     }
@@ -1162,9 +1182,9 @@ void configureLine(const State& st) {
                       "200 draw-builder records, 1 after 30 frames under 150 or on foot, no ramp", st.policy.kMax());
     else
         std::snprintf(policy, sizeof(policy), "k in [1, %.2f]: up while a frame has >= 200 draw-builder records and "
-                      "the frame work ran > 0.30 ms over the display period for 30 samples, by 0.25 if their mean ran "
-                      "> 1.00 ms over, else 0.05; down 0.05 after 30 samples > 1.00 ms under it; at most a step a "
-                      "second; 1 after 30 frames under 150 records, and on foot", st.policy.kMax());
+                      ">= 3 of the last 30 samples ran > 0.30 ms over the period, 0.25 if their mean ran > 1.00 ms "
+                      "over, else 0.05; down 0.05 when none did and the mean ran > 1.00 ms under; at most a step a "
+                      "second; 1 after 30 frames under 150 records or on foot", st.policy.kMax());
     char work[400];
     workSourceClause(st.source, st.timingVersion, work, sizeof(work));
     // The hook statuses are the fixed strings kinematic_eval_hook.cpp names;

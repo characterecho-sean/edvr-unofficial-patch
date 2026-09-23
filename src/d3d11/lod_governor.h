@@ -79,26 +79,34 @@
 //     passed" per frame from a k = 1 window is the whole of it.
 //
 // THE POLICY (Policy below, pure; tools\lod_governor_test): auto -- k in
-// [1, k_max], quantised to 0.05. One step up while the frame has at least 200
-// builder records AND the frame work has exceeded the period by more than
-// 0.3 ms for 30 consecutive samples: 0.25 when the mean excess of the 30
-// samples behind the step is more than 1.0 ms, else 0.05 (held to k_max) --
-// far from the target big steps, near it fine ones and the dead band, so the
-// operating point is still found from below without pumping (the first
-// acting flight, 2026-09-23, took 80 s at 0.05 a step while 1.0-1.8 ms over).
-// One step down, always 0.05, while it has been under the period minus
-// 1.0 ms for 30; at most one step a second; back to 1 when the records have
-// stayed under 150 for 30 frames, and at once on foot, held there while it
-// lasts. reduced -- k = k_max at once from the frame the records reach 200,
-// 1 when they have stayed under 150 for 30 frames or on foot; no ramp. k_max
-// is advanced.settlement_detail_max (default 6.0, held to [1, 8]): the
-// ceiling in auto, the factor in reduced. It multiplies the game's own
-// scale -- 1.0 at the slider's default, 1.5 at its floor -- and the removal
-// levels off between an effective s x k of 4.5 and 6 (the LOD note, section
-// 8), so 6 reaches that from the default slider. The first acting flight
-// held k 2.70-2.75 on s 1.5 (s x k about 4.1): k ~4.1 from s 1.0.
-// advanced.settlement_detail_observe = 1 computes and logs all of it and
-// never writes.
+// [1, k_max], quantised to 0.05, decided on the latest 30 valid frame-work
+// samples: a ring that must be full before any step, emptied by a bad
+// sample, by leaving the settlement and on foot. A sample is OVER when it ran
+// more than 0.3 ms past the period -- a frame that missed its display slot
+// and took two. One step up while the frame has at least 200 builder records
+// AND at least 3 of the 30 are over: 0.25 when their mean excess is more than
+// 1.0 ms, else 0.05 (held to k_max) -- far from the target big steps, near
+// it fine ones (the first acting flight took 80 s at 0.05 a step while 1.0-
+// 1.8 ms over). One step down, always 0.05, when none of the 30 is over AND
+// their mean is under the period by more than 1.0 ms. Between -- 1 or 2 of
+// 30 over, or none without that millisecond -- k holds: the dead band, aimed
+// at under a tenth of the frames missing their slot. It counts misses, not
+// runs, because a miss costs a whole display slot: on the 04:23 flight
+// (2026-09-23) a third of the frames missed at k 2.50 while the mean work sat
+// under the period (10.99 ms against 11.11), and the old trigger -- 30
+// consecutive over-budget samples -- never came; it had also paced the ramp
+// at one step per ~2.5 s. At most one step a second; back to 1 when the
+// records have stayed under 150 for 30 frames, and at once on foot, held
+// there while it lasts. reduced -- k = k_max at once from the frame the
+// records reach 200, 1 when they have stayed under 150 for 30 frames or on
+// foot; no ramp. k_max is advanced.settlement_detail_max (default 6.0, held
+// to [1, 8]): the ceiling in auto, the factor in reduced. It multiplies the
+// game's own scale -- 1.0 at the slider's default, 1.5 at its floor -- and
+// the removal levels off between an effective s x k of 4.5 and 6 (the LOD
+// note, section 8), so 6 reaches that from the default slider. The first
+// acting flight held k 2.70-2.75 on s 1.5 (s x k about 4.1): k ~4.1 from
+// s 1.0. advanced.settlement_detail_observe = 1 computes and logs all of it
+// and never writes.
 #include <cstdint>
 #include <cstring>
 #include <xmmintrin.h>
@@ -114,10 +122,12 @@ constexpr int kQuantaPerUnit = 20;                 // k moves in steps of 1/20 =
 constexpr int kCoarseQuanta = 5;                   // ... or 5/20 = 0.25 up, far over budget
 constexpr uint32_t kSettlementRecords = 200;       // density: builder records a frame
 constexpr uint32_t kSettlementBand = 50;           // leave only under 200 - 50 = 150
-constexpr double kOverMarginMs = 0.3;              // rise: work > period + 0.3 ms ...
-constexpr double kUnderMarginMs = 1.0;             // fall: work < period - 1.0 ms ...
-constexpr uint32_t kConsecutive = 30;              // ... for 30 consecutive samples
-constexpr double kCoarseExcessMs = 1.0;            // up 0.25 while those 30 ran > 1.0 ms over on average
+constexpr double kOverMarginMs = 0.3;              // a sample is over: work > period + 0.3 ms (a missed slot)
+constexpr double kUnderMarginMs = 1.0;             // down: none over and the 30's mean < period - 1.0 ms
+constexpr uint32_t kSampleWindow = 30;             // the latest 30 valid samples decide a step
+constexpr uint32_t kUpMisses = 3;                  // up: at least 3 of them over
+constexpr uint32_t kConsecutive = 30;              // leaving: 30 consecutive frames under 150 records
+constexpr double kCoarseExcessMs = 1.0;            // up 0.25 while the 30 ran > 1.0 ms over on average
 constexpr uint64_t kRampIntervalMs = 1000;         // at most one step a second
 constexpr float kDefaultMax = 6.0f;                // advanced.settlement_detail_max (100 steps of 0.05)
 constexpr float kMaxCeiling = 8.0f;                // ... held to [1, 8]
@@ -165,33 +175,39 @@ public:
     float kMax() const noexcept { return kOf(maxSteps_); }
     bool fixed() const noexcept { return fixed_; }
     bool inSettlement() const noexcept { return inSettlement_; }
-    uint32_t overRun() const noexcept { return over_; }
-    uint32_t underRun() const noexcept { return under_; }
-    // The last up step: its size by the rule in quanta (1 = 0.05, kCoarseQuanta
-    // = 0.25), whether k_max cut it short, and the mean excess (work - period,
-    // ms) of the 30 samples behind it.
+    // The ring: how many valid samples it holds (a step needs 30), how many of
+    // them are over, and their mean excess (work - period, ms; 0 when empty).
+    uint32_t samples() const noexcept { return count_; }
+    uint32_t overCount() const noexcept { return overCount_; }
+    double meanExcessMs() const noexcept;
+    // The last up or down step: the over count and mean excess of the 30
+    // samples behind it; for an up step, its size by the rule in quanta (1 =
+    // 0.05, kCoarseQuanta = 0.25) and whether k_max cut it short.
+    uint32_t stepOver() const noexcept { return stepOver_; }
+    double stepMeanExcessMs() const noexcept { return stepMeanExcessMs_; }
     int upQuanta() const noexcept { return upQuanta_; }
     bool upHeld() const noexcept { return upHeld_; }
-    double upMeanExcessMs() const noexcept { return upMeanExcessMs_; }
-    // The mean excess of the latest valid samples, at most 30 (0 when none):
-    // at an up step, exactly the 30 of the over-budget run that triggered it.
-    double meanExcessMs() const noexcept;
     static float kOf(int steps) noexcept { return float(kQuantaPerUnit + steps) / float(kQuantaPerUnit); }
 
 private:
+    void emptyRing() noexcept { count_ = overCount_ = 0; }
+    void push(double excessMs, bool over) noexcept;
+
     int steps_ = 0, maxSteps_ = static_cast<int>((kDefaultMax - 1.0f) * kQuantaPerUnit);   // k_max 6.0: 100 steps
     bool fixed_ = false;
     bool inSettlement_ = false, clampPending_ = false;
-    uint32_t over_ = 0, under_ = 0, sparse_ = 0;
+    uint32_t sparse_ = 0;
     uint64_t lastStepMs_ = 0;
     bool stepped_ = false;
-    // The latest valid samples' excess over the period, a ring of 30; a bad
-    // sample, leaving the settlement and on foot empty it with the runs.
-    double excess_[kConsecutive] = {};
-    uint32_t excessNext_ = 0, excessCount_ = 0;
+    // The latest valid samples, a ring of 30: each one's excess over the
+    // period and whether it was over; count_ of them are live.
+    double excess_[kSampleWindow] = {};
+    bool over_[kSampleWindow] = {};
+    uint32_t next_ = 0, count_ = 0, overCount_ = 0;
+    uint32_t stepOver_ = 0;
+    double stepMeanExcessMs_ = 0;
     int upQuanta_ = 0;
     bool upHeld_ = false;
-    double upMeanExcessMs_ = 0;
 };
 
 // --- The engine's arithmetic, exactly as its code does it ------------------
