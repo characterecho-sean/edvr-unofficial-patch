@@ -108,5 +108,14 @@ bool nativeTemporalVerticalTangents(float* up, float* down);
 // against it first (review P3-1, the 2026-09-23 13:23 menu flight). False
 // when the host does not say. Lock-free.
 bool nativeTemporalAsked(uint32_t* w, uint32_t* h);
+// ...and the TRUE display frustum's vertical tangents (eye 0, magnitudes):
+// the headset's own, before a cull guard or a trim -- the engine-side panel
+// sizing's untrimmed k (ui_panel_scale.h). Lock-free.
+bool nativeTemporalTrueVerticalTangents(float* up, float* down);
+
+// HMD Quality as the surfaces last read it (the newest .fxcfg's
+// HMDRenderTargetMultiplier, cached, never read on the frame path); 0
+// while unknown. Lock-free.
+float uiSurfacesHmdQuality();
 
 }  // namespace edvr

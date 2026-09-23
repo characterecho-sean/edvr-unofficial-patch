@@ -38,6 +38,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "ui_surfaces.h"   // the glyph atlas instrument (uiSurfacesWantsAtlas)
+#include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "xinput_watch.h"
 #include "elite_binds.h"
 #include "../common/log.h"
@@ -2816,6 +2817,7 @@ void shutdownDeviceHooks() {
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();
+    uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     shutdownGlitchFrameFix();
     shutdownVScreenFixes();
     shutdownExposureFix();

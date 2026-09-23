@@ -26,6 +26,7 @@
 #include "shader_swap.h"
 #include "ui_deferred.h"   // uiDeferredRouteCapturedThisDraw: the replay's own draws
 #include "ui_depth.h"      // uiDepthEyeOfTarget: the eye, by the pass's own table
+#include "ui_panel_scale.h" // the engine-side panel sizing, configured and ticked with the key
 #include "ui_surfaces.h"   // the surfaces half: the target, and its summary
 #include "vscreen.h"       // the raw OM/RS entry points, vScreenIsEyeSized, vScreenPanelSize
 
@@ -1809,6 +1810,7 @@ void logTotals(double seconds) {
     uiSurfacesSummary(surfaces, sizeof(surfaces));
     Log::get().note("ui quality: %s -- surfaces: %s.", g_keyText.c_str(), surfaces);
     uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
+    uiPanelScaleLog();     // the engine-side panel sizing: its factor, or why it stands down
     // The price: each stage's GPU time per eye-frame it ran in, and the
     // route's -- every stage of an eye-frame added up -- per eye-frame the
     // layer did anything in.
@@ -1932,8 +1934,10 @@ void uiLayerConfigure(Config& cfg) {
     g_debugView = debugView;
     g_jitterAsShipped = jitterAsShipped;
     refreshLive();
-    // The surfaces half follows the same key: one setting, both mechanisms.
+    // The surfaces half follows the same key: one setting, both mechanisms --
+    // and the engine-side panel sizing, which the surfaces' matcher backs up.
     uiSurfacesSetTarget(target, text.c_str());
+    uiPanelScaleSetTarget(target);
     if (!changed) return;
     g_keyNoted = true;
     if (!recognized) {
@@ -2429,6 +2433,8 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     onFootGateTick();
     // A door size change's watch: the dropped line, two seconds on.
     sizeChangeTick();
+    // The engine-side panel sizing's factor, written when its inputs settle.
+    uiPanelScaleFrameBoundary();
     // The warm compile, the sharpen's reason: not a first-use D3DCompile at
     // the door.
     if (ctx && detail::g_uiLayerLive) {

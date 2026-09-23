@@ -11,6 +11,7 @@
 #include "device_hook.h"  // deviceHookHmdQuality: the .fxcfg's HMD Quality
 #include "fss_res.h"      // fssResOrigSize: a surface we grew is learned at its asked size
 #include "ui_depth.h"     // uiDepthLearnedSurfaces: the classifier's GUI surfaces
+#include "ui_panel_scale.h"  // uiPanelScaleLive: the engine sizes the panels; this stands aside
 #include "vscreen.h"      // vScreenInternalResolution: the last fallback
 
 #include "../common/config.h"
@@ -130,6 +131,7 @@ struct State {
     uint32_t examined = 0;  // render or depth creates offered (0: the match never ran)
     uint32_t resized = 0, resizedCensus = 0, resizedLearned = 0, onSubmitted = 0;
     uint32_t unmatched = 0, memoHits = 0;
+    uint32_t engineSized = 0;  // creates left to the engine's own panel sizing
     Resized firsts[kFirsts];
     uint32_t firstCount = 0;
     Basis basis;  // as last read, for the summary
@@ -471,17 +473,22 @@ void noteChainIfNew(const D3D11_TEXTURE2D_DESC* d, const Basis& b) {
     c.chain = captureChain();
     c.verdict = uiChainVerdict(c.chain);
     const double k = uiSizingK(b.T);
-    char rvas[160], verdict[320];
+    // Under the engine-side sizing the game divides by 1920 x f: the stage is
+    // the create's size times f (ui_panel_scale.h).
+    const bool engine = uiPanelScaleLive();
+    const double f = engine ? uiPanelScaleFactor() : 1.0;
+    char rvas[160], verdict[320], sized[64] = "";
     uiChainFormat(c.chain, rvas, sizeof(rvas));
     uiChainVerdictText(c.verdict, verdict, sizeof(verdict));
+    if (engine) std::snprintf(sized, sizeof(sized), " (the engine sizing panels x%.4f)", 1.0 / f);
     Log::get().note(
         "ui quality: sizing chain %u: frame %u, a %ux%u %s surface (DXGI format %u, bind 0x%X) -- "
         "W %ux%u (%s), tangents up %.4f down %.4f, vFOV %.1f degrees, k %.4f, implied stage "
-        "%.0fx%.0f; %u game frames, innermost first: %s; verdict %s.",
+        "%.0fx%.0f%s; %u game frames, innermost first: %s; verdict %s.",
         g_s.chainCount, g_frameNo.load(std::memory_order_relaxed), d->Width, d->Height,
         depth ? "depth" : "colour", static_cast<unsigned>(d->Format), d->BindFlags, W, H, src,
         static_cast<double>(b.up), static_cast<double>(b.down), static_cast<double>(b.vfovDeg), k,
-        uiImpliedStage(d->Width, W, k), uiImpliedStage(d->Height, W, k), c.chain.n,
+        uiImpliedStage(d->Width, W, k) * f, uiImpliedStage(d->Height, W, k) * f, sized, c.chain.n,
         c.chain.n ? rvas : "none", verdict);
 }
 
@@ -510,6 +517,13 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
             ++g_s.resizedCensus;
         }
         return true;
+    }
+    // The engine sizes the panels itself (ui_panel_scale.h): this matcher is
+    // its fallback, and stands aside while the patch is live -- after the
+    // pair memo above, so a partner of a size decided before still matches.
+    if (uiPanelScaleLive()) {
+        ++g_s.engineSized;
+        return false;
     }
     float factor = 0.0f;
     if (!b.hmd) {
@@ -683,6 +697,8 @@ void uiSurfacesNoteCreated(uint32_t origW, uint32_t origH, uint32_t newW, uint32
 void uiSurfacesNoteViewport() { g_viewports.fetch_add(1, std::memory_order_relaxed); }
 void uiSurfacesNoteScissor() { g_scissors.fetch_add(1, std::memory_order_relaxed); }
 void uiSurfacesNoteCopy() { g_copies.fetch_add(1, std::memory_order_relaxed); }
+
+float uiSurfacesHmdQuality() { return hmdCached(); }
 
 // ------------------------------------------------------------ the glyph atlas
 
@@ -902,8 +918,10 @@ void uiSurfacesSummary(char* out, size_t n) {
                        "makes it -- a trip through the main menu)");
         }
         appendf(s, ", %u render and depth creates examined (%u the shape of a surface but on no "
-                   "ratio), %u viewports and %u scissors rescaled into them, %u copies touching one",
-                g_s.examined, g_s.unmatched, g_viewports.load(), g_scissors.load(), g_copies.load());
+                   "ratio, %u left to the engine's own panel sizing), %u viewports and %u scissors "
+                   "rescaled into them, %u copies touching one",
+                g_s.examined, g_s.unmatched, g_s.engineSized, g_viewports.load(), g_scissors.load(),
+                g_copies.load());
     }
     _snprintf_s(out, n, _TRUNCATE, "%s", s.c_str());
 }

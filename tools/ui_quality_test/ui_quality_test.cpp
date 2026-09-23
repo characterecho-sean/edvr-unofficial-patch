@@ -671,6 +671,201 @@ void testChains() {
     check(uiImpliedStage(100, 0, kUntrimmed) == 0.0 && uiSizingK(0.0f) == 0.0, "no W or no FOV: no stage");
 }
 
+// The engine-side panel sizing (ui_sizing_math.h, ui_panel_scale.h): the
+// factor across the flights' states, the cap and the floor, and the four
+// operand sites' bytes -- the embedded build-332841 patterns against the
+// shape, a synthetic scan, the rel32 arithmetic, and, when the game is
+// installed at the usual place and is that build, the executable itself
+// (read-only; any other build is skipped, as the patch stands down on it).
+double panelFactor(uint32_t askW, float hmd, float up, float down, uint32_t outW, float trueUp, float trueDown,
+                   float target, UiPanelClamp* clamp = nullptr) {
+    UiPanelInputs in;
+    in.renderW = uiQualityInternalDim(askW, hmd);
+    in.fovTangent = uiQualityFovTangent(up, down);
+    in.outputW = outW;
+    in.trueTangent = uiQualityFovTangent(trueUp, trueDown);
+    in.target = target;
+    double f = 0.0;
+    return uiPanelFactor(in, &f, clamp) ? f : -1.0;
+}
+
+struct PeFile {
+    std::vector<uint8_t> data;
+    uint32_t stamp = 0, imageSize = 0;
+    struct Section {
+        char name[9] = {};
+        uint32_t va = 0, vsize = 0, raw = 0, rawSize = 0;
+    };
+    std::vector<Section> sections;
+    const uint8_t* at(uint32_t rva, uint32_t n) const {
+        for (const Section& s : sections) {
+            if (rva >= s.va && rva - s.va + n <= (s.rawSize > s.vsize ? s.rawSize : s.vsize) &&
+                s.raw + (rva - s.va) + n <= data.size())
+                return data.data() + s.raw + (rva - s.va);
+        }
+        return nullptr;
+    }
+};
+
+bool readPe(const char* path, PeFile* pe) {
+    FILE* file = nullptr;
+    if (fopen_s(&file, path, "rb") != 0 || !file) return false;
+    std::fseek(file, 0, SEEK_END);
+    const long size = std::ftell(file);
+    std::fseek(file, 0, SEEK_SET);
+    if (size <= 0x400) {
+        std::fclose(file);
+        return false;
+    }
+    pe->data.resize(static_cast<size_t>(size));
+    const size_t got = std::fread(pe->data.data(), 1, pe->data.size(), file);
+    std::fclose(file);
+    if (got != pe->data.size()) return false;
+    const uint8_t* d = pe->data.data();
+    uint32_t lfanew = 0;
+    std::memcpy(&lfanew, d + 0x3C, 4);
+    if (lfanew + 0x108 > pe->data.size() || std::memcmp(d + lfanew, "PE\0\0", 4) != 0) return false;
+    const uint32_t coff = lfanew + 4, opt = coff + 20;
+    uint16_t sections = 0, optSize = 0;
+    std::memcpy(&sections, d + coff + 2, 2);
+    std::memcpy(&pe->stamp, d + coff + 4, 4);
+    std::memcpy(&optSize, d + coff + 16, 2);
+    std::memcpy(&pe->imageSize, d + opt + 56, 4);
+    for (uint16_t i = 0; i < sections; ++i) {
+        const uint8_t* s = d + opt + optSize + 40u * i;
+        if (static_cast<size_t>(s - d) + 40 > pe->data.size()) return false;
+        PeFile::Section sec;
+        std::memcpy(sec.name, s, 8);
+        std::memcpy(&sec.vsize, s + 8, 4);
+        std::memcpy(&sec.va, s + 12, 4);
+        std::memcpy(&sec.rawSize, s + 16, 4);
+        std::memcpy(&sec.raw, s + 20, 4);
+        pe->sections.push_back(sec);
+    }
+    return true;
+}
+
+void testPanelScale() {
+    // The factor: f = (W_ui x k) / (W_out x k_out) / T, the panel s / f.
+    const float pimax = 1.2648f, trim = 1.1779f;
+    double f = panelFactor(3070, 0.65f, pimax, pimax, 3070, pimax, pimax, 1.0f);
+    check(std::fabs(f - 1995.0 / 3070.0) < 1e-6,
+          "untrimmed at 0.65 -> 1.0: f = 1995/3070, the panels x1.539 (their HMD Quality 1.0 size)");
+    f = panelFactor(3070, 0.65f, pimax, pimax, 3070, pimax, pimax, 1.25f);
+    check(std::fabs(1.0 / f - 1.25 * 3070.0 / 1995.0) < 1e-4, "...-> 1.25: x1.924");
+    UiPanelClamp clamp = UiPanelClamp::kNone;
+    f = panelFactor(2458, 0.65f, trim, trim, 3070, pimax, pimax, 1.25f, &clamp);
+    const double cTrim = 1597.0 * uiSizingK(uiQualityFovTangent(trim, trim));
+    const double cOut = 3070.0 * uiSizingK(uiQualityFovTangent(pimax, pimax));
+    check(std::fabs(f - cTrim / cOut / 1.25) < 1e-6 && std::fabs(1.0 / f - 2.2375) < 0.002 &&
+              clamp == UiPanelClamp::kNone,
+          "trimmed 7/5/2 at 0.65 -> 1.25: f = (1597 x 0.8433) / (3070 x 0.7853) / 1.25, x2.24");
+    float d1080 = 0.0f, d1920 = 0.0f;
+    uiPanelDivisors(f, &d1080, &d1920);
+    const uint32_t menuW = uiPanelSize(1920, cTrim, d1920), menuH = uiPanelSize(1080, cTrim, d1920);
+    check(std::abs(static_cast<int>(menuW) - static_cast<int>(1.25 * cOut)) <= 2 &&
+              std::abs(static_cast<int>(menuH) - static_cast<int>(1.25 * cOut * 1080.0 / 1920.0)) <= 2,
+          "...the trimmed menu's 16:9 screen comes out 3013x1695: its untrimmed size at 1.25, not 1346x757");
+    check(uiPanelSize(1920, cTrim, 1920.0f) == 1346,
+          "(the game's own divisor makes the 1346 the flight logged)");
+    f = panelFactor(2458, 0.65f, trim, trim, 3070, pimax, pimax, 1.0f);
+    check(std::fabs(1.0 / f - 1.790) < 0.003, "trimmed at 0.65 -> 1.0: x1.79");
+    // Quest 3 shapes (up 0.9657, down 1.4281): untrimmed, and trimmed 2/2/7.
+    f = panelFactor(3072, 0.65f, 0.9657f, 1.4281f, 3072, 0.9657f, 1.4281f, 1.25f);
+    check(std::fabs(f - 1996.0 / 3072.0 / 1.25) < 1e-6, "Quest 3 untrimmed at 0.65 -> 1.25: f = 1996/3072/1.25");
+    f = panelFactor(2662, 0.65f, 0.7536f, 1.1106f, 3072, 0.9657f, 1.4281f, 1.25f);
+    const double cQ = 1730.0 * uiSizingK(uiQualityFovTangent(0.7536f, 1.1106f));
+    const double cQout = 3072.0 * uiSizingK(uiQualityFovTangent(0.9657f, 1.4281f));
+    check(std::fabs(f - cQ / cQout / 1.25) < 1e-6,
+          "Quest 3 trimmed 2/2/7: k from the narrower frustum it is told, k_out from the headset's");
+    // The cap and the floor.
+    f = panelFactor(3070, 0.2f, pimax, pimax, 3070, pimax, pimax, 1.25f, &clamp);
+    check(f == 0.25 && clamp == UiPanelClamp::kCap, "HMD Quality 0.2 -> 1.25 would be x6.25: capped at 4x");
+    f = panelFactor(3070, 1.5f, pimax, pimax, 3070, pimax, pimax, 1.25f, &clamp);
+    check(f == 1.0 && clamp == UiPanelClamp::kFloor, "HMD Quality 1.5 above 1.25: 1, never smaller than the game's");
+    f = panelFactor(2458, 1.25f, trim, trim, 3070, pimax, pimax, 1.25f, &clamp);
+    check(f < 0.87 && clamp == UiPanelClamp::kNone,
+          "at 1.25 with the trim on the panels still grow back to their untrimmed size");
+    check(panelFactor(3070, 0.0f, pimax, pimax, 3070, pimax, pimax, 1.25f) < 0.0 &&
+              panelFactor(3070, 0.65f, pimax, pimax, 0, pimax, pimax, 1.25f) < 0.0 &&
+              panelFactor(3070, 0.65f, pimax, pimax, 3070, 0.0f, 0.0f, 1.25f) < 0.0 &&
+              panelFactor(3070, 0.65f, pimax, pimax, 3070, pimax, pimax, 0.0f) < 0.0,
+          "an unknown input: no factor (the floats stay as they are)");
+    uiPanelDivisors(1.0, &d1080, &d1920);
+    check(d1080 == 1080.0f && d1920 == 1920.0f, "f = 1 is the game's own 1080 and 1920, bit for bit");
+
+    // The bytes. The embedded patterns are the shape, and read the constants.
+    for (int i = 0; i < 2; ++i) {
+        const UiPanelTargets t = uiPanelTargets(kUiPanelSiteBytes[i], kUiPanelSiteRva[i]);
+        check(uiPanelShapeAt(kUiPanelSiteBytes[i]) && t.aspect == kUiPanelAspectRva && t.d1080 == kUiPanel1080Rva &&
+                  t.d1920 == kUiPanel1920Rva,
+              i == 0 ? "the init site's bytes are the shape, reading 16/9, 1080 and 1920"
+                     : "the view-change site's bytes are the shape, reading 16/9, 1080 and 1920");
+    }
+    check(kUiPanelSiteRva[0] + kUiPanel1080Disp == 0x4570707 && kUiPanelSiteRva[0] + kUiPanel1920Disp == 0x4570714 &&
+              kUiPanelSiteRva[1] + kUiPanel1080Disp == 0x4571212 && kUiPanelSiteRva[1] + kUiPanel1920Disp == 0x457121F,
+          "the four operands are at 0x4570707, 0x4570714, 0x4571212, 0x457121F (the trace's section 3)");
+    std::vector<uint8_t> text(4096, 0x90);
+    std::memcpy(text.data() + 100, kUiPanelSiteBytes[0], 30);
+    std::memcpy(text.data() + 2000, kUiPanelSiteBytes[1], 30);
+    std::vector<uint8_t> decoy(kUiPanelSiteBytes[0], kUiPanelSiteBytes[0] + 30);
+    decoy[20] = 0x29;  // movaps xmm6,xmm1 -> another register: not the shape
+    std::memcpy(text.data() + 3000, decoy.data(), 30);
+    uint32_t found[4] = {};
+    check(uiPanelScan(text.data(), text.size(), 0x1000, found, 4) == 2 && found[0] == 0x1000 + 100 &&
+              found[1] == 0x1000 + 2000,
+          "the scan finds the two shapes and not the decoy one byte off");
+    int32_t disp = 0;
+    check(uiPanelDisp(0x14457070Bull, 0x14457070Bull + 0x86DF55ull, &disp) && disp == 0x86DF55 &&
+              uiPanelDisp(0x140000000ull, 0x13FFF0000ull, &disp) && disp == -0x10000 &&
+              !uiPanelDisp(0x140000000ull, 0x240000000ull, &disp),
+          "rel32 to a page near the image, and refused out of range");
+    check(uiPanelDisp(0x14457070Bull, 0x144DDE660ull, &disp) && disp == uiReadDisp(kUiPanelSiteBytes[0] + 13),
+          "the game's own 1080 operand is exactly that arithmetic");
+
+    // The executable, when it is here and is build 332841.
+    static const char* kExe =
+        "C:\\Users\\seanm\\AppData\\Local\\Frontier_Developments\\Products\\elite-dangerous-odyssey-64\\"
+        "EliteDangerous64.exe";
+    PeFile pe;
+    if (!readPe(kExe, &pe)) {
+        std::printf("  (the game executable is not at the usual place: the embedded patterns stand)\n");
+        return;
+    }
+    if (pe.stamp != kUiPanelStamp || pe.imageSize != kUiPanelImageSize) {
+        std::printf("  (the installed game is not build 332841 -- stamp %u: the patch stands down on it)\n",
+                    pe.stamp);
+        return;
+    }
+    bool sitesOk = true;
+    for (int i = 0; i < 2; ++i) {
+        const uint8_t* p = pe.at(kUiPanelSiteRva[i], 30);
+        sitesOk = sitesOk && p && std::memcmp(p, kUiPanelSiteBytes[i], 30) == 0;
+    }
+    const uint8_t* p0 = pe.at(kUiPanelFuncRva[0], sizeof(kUiPanelProlog0));
+    const uint8_t* p1 = pe.at(kUiPanelFuncRva[1], sizeof(kUiPanelProlog1));
+    check(sitesOk && p0 && p1 && std::memcmp(p0, kUiPanelProlog0, sizeof(kUiPanelProlog0)) == 0 &&
+              std::memcmp(p1, kUiPanelProlog1, sizeof(kUiPanelProlog1)) == 0,
+          "build 332841 on disk: both sites' 30 bytes and both prologues are the embedded ones");
+    float aspect = 0.0f, c1080 = 0.0f, c1920 = 0.0f;
+    const uint8_t* a = pe.at(kUiPanelAspectRva, 4);
+    const uint8_t* b = pe.at(kUiPanel1080Rva, 4);
+    const uint8_t* c = pe.at(kUiPanel1920Rva, 4);
+    if (a) std::memcpy(&aspect, a, 4);
+    if (b) std::memcpy(&c1080, b, 4);
+    if (c) std::memcpy(&c1920, c, 4);
+    check(aspect == 16.0f / 9.0f && c1080 == 1080.0f && c1920 == 1920.0f,
+          "...the constants they read are 16/9, 1080 and 1920");
+    uint32_t count = 0, at[4] = {};
+    for (const PeFile::Section& s : pe.sections) {
+        if (std::strncmp(s.name, ".text", 5) != 0) continue;
+        const uint8_t* t = pe.at(s.va, s.rawSize < s.vsize ? s.rawSize : s.vsize);
+        if (t) count = uiPanelScan(t, s.rawSize < s.vsize ? s.rawSize : s.vsize, s.va, at, 4);
+    }
+    check(count == 2 && at[0] == kUiPanelSiteRva[0] && at[1] == kUiPanelSiteRva[1],
+          "...and the shape occurs exactly twice in .text, at the two sites");
+}
+
 // The family rule (ui_layer_math.h's uiLayerFamilyFor, which vscreen.cpp's
 // uiLayerFamilyOf feeds): the 13:23 flight lost the menu panel when the FOV
 // trim, adopted at the main menu, had the game re-create its interface
@@ -1773,6 +1968,7 @@ int main(int argc, char** argv) {
     testGate();
     testFamilyRule();
     testChains();
+    testPanelScale();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");
