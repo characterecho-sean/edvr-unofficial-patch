@@ -345,3 +345,102 @@ pose):
 8. Same flight, optional: `advanced.cull_gate_capture = 1` and one eye
    run -> a v3 gate file; `--tables-only` must report 0 disagreements off
    the thresholds, then `--lod-bias 1,1.25,1.5,2` is exact.
+
+## 9. Acting mode (2026-09-23): NOT BUILT, the engine rewrites s every frame
+
+The brief: make the governor act by writing s_game x k into ctx+0x30 at
+the draw-item builder, with a shadow copy of the game's value, if the
+object is persistent and its setter runs only on settings changes; if the
+setter runs every frame, write up the evidence and stop. The pointer is
+stable and the setter runs every frame, so nothing was built.
+
+**(1) The object FUN_142819D90 writes** is a member at a fixed offset of
+a long-lived engine object: no global, nothing transient. FUN_1401EA920
+(no code caller; its xrefs are data, 0x144DDC7B8 an .rdata slot) fills
+two: `FUN_142819d90(param_1 + 0xf4b,...` (01EA920:232) and, after
+`pppplVar13 = (longlong ****)(param_1 + 0x4479);` (:233), the same at
+:251 -- this+0x7A58 and this+0x223C8, 0x1A970 apart, the context's own
+size (its last field is +0x1A96C, 2819D90:52). Both are constructed once
+in place: FUN_1401E4FD0, the only other writer of the view count
++0x1A940 (stores_1a940.txt; decompiled for this entry with Ghidra
+-readOnly, not saved under analysis/decomp) is the constructor --
+`param_1[6] = _DAT_144e2f880;` (+0x30 = 1.0), 64 view slots,
+`FUN_14489a600(param_1 + 0x3508,0,0x100);` (the bit table),
+`param_1[0x3528] = 0;`, `return param_1;` -- called twice from
+FUN_1401E42C0 (0x1401E4E79, 0x1401E4E85; <- FUN_1401F0480, FUN_1401F04B0).
+
+**(2) The builder's ctx is that object.** The part test's param_1[5] is
+the builder's param_2: `local_440 = param_2;` (42B4420:240), then
+`pfStack_360 = (float *)local_440;` (:498), the sixth qword of the block
+`&local_388` passed at :512; 3FC0:79 reads `*(float *)(param_1[5] +
+0x30)`. The layout is the setter's: the builder walks `lVar39 = param_2
++ 0x40;` to `*(longlong *)(param_2 + 0x1a940) * 0x6a0 + 0x40 + param_2`
+(:199-201) and maps view bits through `lVar39 + 0x1a840 + uVar34 * 4`
+(:510): 2819D90's count `param_1[0x3528]` (:50), view blocks (param_1 +
+8, stride 0xd4 qwords) and bit table (:90).
+
+**(3) FUN_142819D90 runs every frame.** FUN_1401EA920 is its only code
+caller (its other three xrefs are data). Every call builds up to 64
+source views per context on its own stack (`appplStack_2b888 [11136]`,
+`appplStack_15c78 [11136]`: 64 x 0x570 bytes, 01EA920:70-72, filled at
+:164-176); the setter re-copies each into the context (2819D90:79-103;
+FUN_142819F70 copies the camera, `uVar8 = *(undefined8 *)(param_2 +
+0x30);` ... `param_1[0xa8] = uVar8;` = view +0x540, 2819F70:59/65, and
+the planes), rewrites the count and the bit table, and last of all
+`*(float *)(param_1 + 6) = DAT_144e2f880 + (DAT_144e2f880 - *param_5);`
+(:108), unconditionally, from x = the float at +0x124 of the render
+component's settings (01EA920:137-157, passed at :223/:230). The three
+EDVRGATE captures (three consecutive frames each, parked at Cranfield;
+the gate files' view dumps and builder rows):
+
+| capture | ctx (every builder call, frames 2-4) | s | views | eye cameras moved | bit table |
+|---|---|---|---|---|---|
+| 152632 | 0x54DCACA2A0 | 1.0 | 10, 10, 10 | 1.21, 0.86 mm | same |
+| 165433 | 0x1C44ECA450 | 1.0 | 10, 11, 11 | 0.79, 0.20 mm | rebuilt 2 -> 3 (eye bit 22: view 5 -> 6) |
+| 012514 | 0x2E752CA810 | 1.5 | 10, 10, 11 | 0.46, 0.13 mm | rebuilt 3 -> 4 (5 -> 6) |
+
+All six frame transitions rewrote the context's view records (both eye
+cameras at view +0x540, the planes of 2-4 views); two rewrote the count,
+whose only writers are the constructor and FUN_142819D90. The context is
+persistent; its LOD scale is not: the engine sets it from the settings
+before every frame's tests.
+
+**(4) Other readers of +0x30** in the four decompiles: the record test,
+`*(float *)(lVar4 + 0x30)` with `lVar4 = *(longlong *)*param_1;`, the
+ctx (4308B30:47, :67-68). The builder reads no ctx+0x30 itself (its
+`+ 0x30` at :315, :588 and :666-677 are the model's sub-table and a
+bucket's list tail) but hands the ctx to FUN_142817260 (:308), not
+decompiled here.
+
+**Why the brief's design cannot act.** A write at the builder bracket is
+overwritten by 2819D90:108 before the next frame's tests. Within a frame
+the record test's results are read by the builder's own callers
+(4320340:64-95, 4321940:59-86), so each record's test runs before its
+builder call, at the game's s; the part tests run at the game's s until
+the frame's first builder call writes; `game re-writes` would count once
+a frame per context. The shadow copy's premise (the game writes only on
+a slider change or a re-apply) is false. The disagreement check would
+still read 0 (it recomputes at the value each test read), so the log
+would not show the gap. Section 8's shadow is unaffected: it only reads
+s, always the game's.
+
+- ruled out: FUN_1401EA920 as "a content/load path, not per frame" (the
+  perf doc's 2026-09-20 20:25 entry, the flicker doc's), because the
+  context it builds is rewritten between consecutive frames while parked
+  and the only other writer of its count is its constructor.
+- ruled out: acting by writing ctx+0x30 at the draw-item builder,
+  because FUN_142819D90 rewrites it from the settings every frame, and
+  each record's test runs before its builder call.
+
+**Where the evidence points (Sean's call; not built).** FUN_1401EA920
+builds both contexts (:232, :251) before it hands them on (:253-271), so
+the one write every test of the frame sees is right after FUN_142819D90
+returns: a post-forward hook there (a new build-keyed patch, prologue
+checked like the builder's) could scale the value the engine just wrote
+by k. s_game is then exactly that value, every frame; no shadow copy and
+no restore path (when k returns to 1 or EDVR stands down, the next
+frame's setter writes the game's value back); the record test is
+covered. Open first: both contexts or only the builder's (g_ctx), and
+what FUN_142817260 does with the ctx. Not recommended: writing x itself
+(+0x124, where FUN_142855A50 stores the player's LODDistanceScale,
+section 4): it bypasses that clamp, and the settings path owns it.
