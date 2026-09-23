@@ -3181,10 +3181,11 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                 Log::get().note("cull gate probe: per-part test FUN_1442B3FC0 for eye run %ls: %u calls in the window "
                                 "(%u rows kept, %u dropped over the %u-row cap); of the kept rows %u with the builder's "
                                 "frame unverified (verdict kept, no part identity), %u from a caller other than the "
-                                "builder's sub-item loop, %u outside a kept builder call; verdicts read after the "
+                                "builder's sub-item loop, %u outside a kept builder call; %u distinct LOD tables "
+                                "recorded (%u lost; version 3 rows, one per *(entry+8)); verdicts read after the "
                                 "forward, never written.%s",
                                 g_ledgerStamp, gc.partCalls, gc.partKept, gc.partDropped, CullGateProbe::kPartCap,
-                                gc.partUnverified, gc.partForeign, gc.partUnlinked,
+                                gc.partUnverified, gc.partForeign, gc.partUnlinked, gc.tablesKept, gc.tablesDropped,
                                 gc.partCalls ? "" : " NOTHING captured: no part test ran inside the window.");
         }
         // Which happened to the geometry arm (design doc §10): each outcome

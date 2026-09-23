@@ -67,12 +67,25 @@ std::atomic<bool> gateProbeWanted{false};
 alignas(8) std::atomic<GateProbeGateFn> gateProbeGate{nullptr};
 alignas(8) std::atomic<GateProbeBuilderFn> gateProbeBuilder{nullptr};
 alignas(8) std::atomic<GateProbePartFn> gateProbePart{nullptr};
+// The settlement LOD governor's want (fix.settlement_detail, shadow only):
+// it observes the draw-item builder and the per-part test, nothing else.
+std::atomic<bool> governorWanted{false};
+alignas(8) std::atomic<LodGovernorBuilderFn> governorBuilder{nullptr};
+alignas(8) std::atomic<LodGovernorPartFn> governorPart{nullptr};
 // FUN_1442B3FC0's relay gate: a cell of its own, not evalGate, so the
-// per-part patch (installed only for the gate probe) costs the tracker and
-// the other evalGate consumers nothing. Open only while the probe is
-// attached AND the patch is verified ours.
+// per-part patch (installed only for the gate probe and the governor) costs
+// the tracker and the other evalGate consumers nothing. Open only while the
+// probe or the governor is attached AND the patch is verified ours.
 alignas(8) std::atomic<uintptr_t> partGate{0};
 static_assert(decltype(partGate)::is_always_lock_free,
+              "The x64 relay reads the aligned atomic cell directly.");
+// The draw-item builder bracket's relay gate: evalGate OR the governor's
+// want, so the governor alone opens this one relay (and the part test's)
+// without waking the evaluator, the job brackets or the direct producers.
+// Every evalGate store below keeps it in step (recomputeGateLocked, and the
+// two direct stores in the attach paths).
+alignas(8) std::atomic<uintptr_t> builderGate{0};
+static_assert(decltype(builderGate)::is_always_lock_free,
               "The x64 relay reads the aligned atomic cell directly.");
 // The builder call's return address for the part test (base+0x42B4B96), set
 // before the part patch goes in; the observer compares _ReturnAddress().
@@ -258,7 +271,7 @@ HookEntry g_jobEntries[KinematicEvalProbe::kJobCount]={
     {"kinematic-job-5",kJobRvas[5],reinterpret_cast<void*>(&job5)},
 };
 HookEntry g_bucketEntry{"kinematic-bucket-build",KinematicEvalProbe::kBucketBuildRva,
-                        reinterpret_cast<void*>(&bucketBuildObserved)};
+                        reinterpret_cast<void*>(&bucketBuildObserved),&builderGate};
 HookEntry g_directEntries[KinematicEvalProbe::kDirectProducerCount]={
     {"kinematic-build-144312e00",KinematicEvalProbe::kDirectBuildRvas[0],
      reinterpret_cast<void*>(&directBuild0)},
@@ -496,6 +509,11 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
                                                               uintptr_t e,uintptr_t f) noexcept {
     const auto forward=reinterpret_cast<BucketFn>(g_bucketEntry.forward.load(std::memory_order_acquire));
     if(!forward)return 0; // stood down at install; the relay is unreachable then
+    // The settlement LOD governor (shadow only) reads the record's own LOD
+    // test results as the traversal left them -- rec+0x208/+0x210, before
+    // the builder runs -- and counts the call: one call, one engine record.
+    const auto governor=governorBuilder.load(std::memory_order_acquire);
+    if(governor)governor(a,b,c,d);
     // The cull gate probe sees the builder's inputs as the builder will:
     // before the forward (a = pose context, b = render context, c = the
     // collection's active view mask, d = rec+0x210). The row it keeps is
@@ -503,11 +521,17 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
     const auto builderProbe=gateProbeBuilder.load(std::memory_order_acquire);
     const uint32_t outerRow=t_builderRow;
     t_builderRow=builderProbe?builderProbe(a,b,c,d):kGateProbeNoRow;
+    // The bucket census is the eval-gate consumers' (kinematicEvalProbe's
+    // bucket_items): it runs only while the eval gate is open, exactly as it
+    // did when that gate was this relay's own. The governor alone holding the
+    // builder gate costs the census nothing.
+    const bool census=evalGate.load(std::memory_order_acquire)!=0;
     BucketSnap snaps[kBucketWalkCap];
     uint32_t flags=0;
-    const uint32_t n=collectBuckets(a,snaps,kBucketWalkCap,&flags);
+    const uint32_t n=census?collectBuckets(a,snaps,kBucketWalkCap,&flags):0;
     const uintptr_t result=forward(a,b,c,d,e,f);
     t_builderRow=outerRow;
+    if(!census)return result;
     if(n) {
         uint64_t items=0;
         uint32_t neg=0;
@@ -531,9 +555,11 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
 }
 
 // --- The per-part test's observer (FUN_1442B3FC0) ---------------------------
-// Reached only through its own relay (partGate: the gate probe attached and
-// the patch verified ours). Forwards first; the probe then reads the verdict
-// the call just wrote (param_2) and the builder's frame around it, read-only.
+// Reached only through its own relay (partGate: the gate probe or the LOD
+// governor attached and the patch verified ours). Forwards first; the probe
+// then reads the verdict the call just wrote (param_2) and the builder's
+// frame around it, and the governor recomputes the verdict's LOD term --
+// both read-only: the verdict is never written.
 // The return address names the caller: the relay JUMPS here, so the slot
 // holds the builder's return address (base+0x42B4B96) when the call came
 // from its sub-item loop.
@@ -543,9 +569,12 @@ __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t items,uintp
     if(!forward)return 0; // stood down at install; the relay is unreachable then
     const uintptr_t result=forward(items,out,view);
     const auto part=gateProbePart.load(std::memory_order_acquire);
-    if(part) {
+    const auto governor=governorPart.load(std::memory_order_acquire);
+    if(part||governor) {
         const uintptr_t from=reinterpret_cast<uintptr_t>(_ReturnAddress());
-        part(items,out,view,t_builderRow,from==g_partReturn.load(std::memory_order_relaxed));
+        const bool fromBuilder=from==g_partReturn.load(std::memory_order_relaxed);
+        if(part)part(items,out,view,t_builderRow,fromBuilder);
+        if(governor)governor(items,out,view,fromBuilder);
     }
     return result;
 }
@@ -773,6 +802,7 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
         observer.store(probe,std::memory_order_release);
         evalGate.store(1,std::memory_order_release);
+        builderGate.store(1,std::memory_order_release);   // evalGate open implies it
         return "installed";
     } catch(...) {return "install_failed";}
 }
@@ -789,6 +819,19 @@ void recomputeGateLocked() noexcept {
                     staticGateWanted.load(std::memory_order_acquire) ||
                     gateProbeWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
+    // The builder bracket's own cell: every eval consumer's want, plus the
+    // settlement LOD governor's (which needs this relay and no other).
+    const bool builder=open || governorWanted.load(std::memory_order_acquire);
+    builderGate.store(builder?uintptr_t(1):uintptr_t(0),std::memory_order_release);
+}
+
+// FUN_1442B3FC0's cell, from its two consumers' wants and whether the patch
+// is still ours; every transition holds g_installMutex.
+void recomputePartGateLocked(uintptr_t base) noexcept {
+    const bool wanted=gateProbeWanted.load(std::memory_order_acquire) ||
+                      governorWanted.load(std::memory_order_acquire);
+    partGate.store(wanted && base && partPatchIsOurs(base)?uintptr_t(1):uintptr_t(0),
+                   std::memory_order_release);
 }
 
 void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
@@ -814,6 +857,7 @@ const char* kinematicEvalTrackerAttach() noexcept {
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
         trackerWanted.store(true,std::memory_order_release);
         evalGate.store(1,std::memory_order_release);
+        builderGate.store(1,std::memory_order_release);   // evalGate open implies it
         return "installed";
     } catch(...) {return "install_failed";}
 }
@@ -896,7 +940,7 @@ const char* kinematicEvalGateProbeAttach() noexcept {
         ensurePartTest(base);
         gateProbeWanted.store(true,std::memory_order_release);
         recomputeGateLocked();
-        partGate.store(partPatchIsOurs(base)?uintptr_t(1):uintptr_t(0),std::memory_order_release);
+        recomputePartGateLocked(base);
         return "installed";
     } catch(...) {return "install_failed";}
 }
@@ -904,9 +948,43 @@ const char* kinematicEvalGateProbeAttach() noexcept {
 void kinematicEvalGateProbeDetach() noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
-        partGate.store(0,std::memory_order_release);
         gateProbeWanted.store(false,std::memory_order_release);
         recomputeGateLocked();
+        // Still open while the LOD governor holds it.
+        recomputePartGateLocked(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)));
+    } catch(...) {}
+}
+
+void kinematicEvalSetLodGovernorObservers(LodGovernorBuilderFn builder,LodGovernorPartFn part) noexcept {
+    governorBuilder.store(builder,std::memory_order_release);
+    governorPart.store(part,std::memory_order_release);
+}
+
+const char* kinematicEvalLodGovernorAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        // The per-part test's patch: the probe's, installed once, standing
+        // down alone (kinematicEvalPartTestStatus says why).
+        ensurePartTest(base);
+        governorWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        recomputePartGateLocked(base);
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalLodGovernorDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        governorWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+        recomputePartGateLocked(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)));
     } catch(...) {}
 }
 

@@ -94,6 +94,16 @@ int main(int argc, char** argv) {
     std::memcpy(model1.data(), mc1, 16);
     std::memcpy(model1.data() + 0x10, ms1, 16);
     put<uint64_t>(model1, 0x40, 0x4E55ull);
+    // The entries' LOD tables (+0x08, version 3): entry 0's asset table A
+    // (t0 0.5, t1 0.1, t2 0.3, count 2), which the builder copies into its
+    // frame; table B is swapped in before P9 while the copy keeps A's bytes.
+    std::vector<uint8_t> assetA(0x80, 0), assetB(0x80, 0);
+    const float tA[3] = {0.5f, 0.1f, 0.3f}, tB[4] = {0.9f, 0.2f, 0.4f, 0.6f};
+    for (int i = 0; i < 3; ++i) put(assetA, size_t(0x10 * i), tA[i]);
+    put<uint32_t>(assetA, 0x70, 2);
+    for (int i = 0; i < 4; ++i) put(assetB, size_t(0x10 * i), tB[i]);
+    put<uint32_t>(assetB, 0x70, 3);
+    put<uint64_t>(entries, 0x08, addr(assetA));
     put<uint64_t>(entries, 0x00, addr(model0));
     put<uint64_t>(entries, 0x20, 3);
     put<uint64_t>(entries, 0x28, reinterpret_cast<uint64_t>(subs.data()));
@@ -154,6 +164,7 @@ int main(int argc, char** argv) {
         const float centre[4] = {11.f, 22.f, 33.f, 1.f};
         std::memcpy(frameBlock.data() + itemsOff - 0x20, centre, 16);
         std::memcpy(frameBlock.data() + itemsOff - 0x10, model.data() + 0x10, 16);
+        std::memcpy(frameBlock.data() + itemsOff + 0xD0, assetA.data(), 0x80);   // the builder's table copy
     };
     const uintptr_t entry0 = addr(entries);
     const uintptr_t sub0 = reinterpret_cast<uintptr_t>(subs.data());
@@ -198,6 +209,7 @@ int main(int argc, char** argv) {
     check(probe.noteBuilder(addr(pose), addr(ctx), 0b111ull, addr(record) + 0x210) == CullGateProbe::kNoRow,
           "a builder call outside the window returns no row");
     builderFrame(entry0, model0, sub0, view0, addr(pose));
+    put<uint64_t>(entries, 0x08, addr(assetB));   // a second table pointer; the copy still holds A's bytes
     probe.notePart(items, addr(passOut), view0, row0, true);          // P9: kept with its builder row's frame
     probe.notePart(items, addr(passOut), view0, CullGateProbe::kNoRow, true);   // P10: outside the window, no row
     const CullGateProbe::Counts n = probe.counts();
@@ -210,6 +222,8 @@ int main(int argc, char** argv) {
           "part tests in the window or a kept builder row recorded, a fault not reserved, none outside");
     check(n.partUnverified == 3 && n.partForeign == 1 && n.partUnlinked == 1,
           "an unverified frame, a foreign caller and a missing builder row are each counted");
+    check(n.tablesKept == 2 && n.tablesDropped == 0,
+          "version 3: two LOD table pointers, each recorded once however many parts name it");
     probe.disarm();
     probe.setFrame(101);
     probe.noteGate(addr(gateCtx), addr(passOut), view0);

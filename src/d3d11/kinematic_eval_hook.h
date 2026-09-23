@@ -104,12 +104,33 @@ void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate, GateProbeBuilderFn
 // Installs the shared kinematic hook set (validating the executable) and
 // holds the eval gate open for the probe's window. Same return vocabulary as
 // attachKinematicEvalHooks. It also installs, once, FUN_1442B3FC0's own patch
-// -- for this probe only, never for the other consumers -- after a build-keyed
-// signature (PE timestamp and size, the prologue, the builder's frame and call
-// site the observer reads); its relay has a gate cell of its own, open only
-// while the probe is attached. A mismatch stands that hook down alone.
+// -- for this probe and the settlement LOD governor below, never for the
+// other consumers -- after a build-keyed signature (PE timestamp and size,
+// the prologue, the builder's frame and call site the observer reads); its
+// relay has a gate cell of its own, open only while the probe or the
+// governor is attached. A mismatch stands that hook down alone.
 const char* kinematicEvalGateProbeAttach() noexcept;
 void kinematicEvalGateProbeDetach() noexcept;
+
+// --- The settlement LOD governor's feed (fix.settlement_detail) -------------
+// Shadow only in this build: it reads, it never writes. The builder observer
+// runs BEFORE the draw-item builder's forward (pose, ctx, mask, nibbles =
+// rec+0x210, the same four the probe gets) and the part observer AFTER each
+// FUN_1442B3FC0 forward (items, out, view, fromBuilder). The builder bracket's
+// relay reads a cell of its own that is the eval gate OR this governor's
+// want, so the governor alone opens that one relay and the part test's --
+// never the evaluator's, the job brackets' or the direct producers' -- and
+// the bracket's bucket census still runs only while the eval gate is open.
+// Raw callbacks, no link dependency; null means off (one atomic load).
+using LodGovernorBuilderFn = void (*)(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
+using LodGovernorPartFn = void (*)(uintptr_t items, uintptr_t out, uintptr_t view, bool fromBuilder) noexcept;
+void kinematicEvalSetLodGovernorObservers(LodGovernorBuilderFn builder, LodGovernorPartFn part) noexcept;
+// Installs the shared kinematic hook set and FUN_1442B3FC0's patch (the same
+// build-keyed install the probe uses, standing down alone), then opens the
+// builder bracket's and the part test's relays for the governor. Same return
+// vocabulary as attachKinematicEvalHooks.
+const char* kinematicEvalLodGovernorAttach() noexcept;
+void kinematicEvalLodGovernorDetach() noexcept;
 // True while the builder bracket (FUN_1442B4420) is installed: the probe's
 // builder verdicts depend on it separately from the evaluator.
 bool kinematicEvalBuilderHooked() noexcept;

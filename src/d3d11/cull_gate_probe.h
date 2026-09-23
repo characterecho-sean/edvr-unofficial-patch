@@ -41,7 +41,8 @@
 // its plane array, the context's LOD scale (+0x30) and bit table (+0x1A840).
 //
 // A third function, through its own patch (kinematic_eval_hook.cpp, installed
-// only for this probe after a build-keyed signature): FUN_1442B3FC0, which the
+// only for this probe and the settlement LOD governor after a build-keyed
+// signature): FUN_1442B3FC0, which the
 // builder calls per (sub-item, admitted view) from its sub-item loop
 // (decomp_42B4420.txt:504-523) -- the per-PART admission. It tests the part's
 // own sphere: param_1[0] -> the world centre the builder composed from the
@@ -64,8 +65,16 @@
 // call the stamp moves across keeps all its parts. Everything is
 // preallocated at arm; the workers append with one atomic reservation each
 // and never allocate. The file is edvr_logs\pool\gate_<stamp>.bin
-// ('EDVRGATE' v2; v1 had no part rows and no model spheres);
-// tools/cull_gate_probe.py reads both.
+// ('EDVRGATE' v3; v2 had no LOD tables, v1 no part rows and no model
+// spheres); tools/cull_gate_probe.py reads all three.
+//
+// Version 3: each verified part row carries its LOD table's pointer,
+// *(entry+8) -- the asset table the builder copies into its frame before the
+// part test (decomp_42B4420.txt:410-428) -- and each distinct table is
+// recorded ONCE per pointer: the 0x80 bytes as the test read them (the
+// builder's copy, param_1[4]), the pointer and the entry's model. With the
+// table, the part test's third term (f <= t0) and its LOD pick are exact
+// offline (docs/design-settlement-lod-bias-2026-09-22.md).
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -80,7 +89,7 @@ public:
     // outside a plane, 1 inside all, 0 straddling (decomp_04F4E10.txt).
     using FrustumFn = uint64_t (__fastcall*)(uintptr_t view, const float* point, const float* interval);
 
-    static constexpr uint32_t kVersion = 2;
+    static constexpr uint32_t kVersion = 3;
     static constexpr uint32_t kNoRow = 0xFFFFFFFFu;  // == kGateProbeNoRow (kinematic_eval_hook.h)
     static constexpr uint32_t kFrames = 3;          // the first complete frame and two after it
     static constexpr uint32_t kMaxViews = 64;       // ctx+0x1A940 is capped at 0x40 by its builder
@@ -99,6 +108,12 @@ public:
     // shadow-like views the record admits -- so 2^18 rows hold three frames
     // at up to ~87k tests a frame (~6.5 views a part); past it, counted.
     static constexpr uint32_t kPartCap = 1u << 18;
+    // Distinct LOD tables over the window (165433's parts fit 3,511 models:
+    // one table each at most), each recorded once per pointer; the claimed
+    // pointers live in an open-addressed set twice the row cap.
+    static constexpr uint32_t kTableCap = 1u << 13;
+    static constexpr uint32_t kTableSlots = 1u << 14;
+    static constexpr uint32_t kTableBytes = 0x80;
 
     // Engine offsets (build 332841, the hash-verified executable).
     static constexpr uintptr_t kFrustumRva = 0x4F4E10u;     // FUN_1404F4E10
@@ -157,6 +172,7 @@ public:
         uint64_t pose = 0;       // param_1[2]: the builder's pose context (its row carries the same)
         uint64_t subItem = 0;    // the sub-item under test (the builder's rbp-0x70); 0 unless verified
         uint64_t viewBits = 0;   // view +0x570: what the builder ORs into the item's mask on a pass
+        uint64_t lodTable = 0;   // v3: *(entry+8), the LOD table's pointer (a LodTableObs key); 0 unless verified
         float centre[3] = {};    // *param_1[0]: the part's world sphere centre, as tested
         float radius = 0;        // *param_1[1]: the model's +0x10, as tested
         uint32_t frame = 0, builderRow = kNoRow, entry = kNoRow, sub = kNoRow, lod = 0;
@@ -170,6 +186,19 @@ public:
                              kPartForeignCaller = 4u,    // not called from the builder's sub-item loop
                              kPartOwnerMismatch = 8u,    // the enclosing builder row's pose is not param_1[2]
                              kPartSphereFault = 16u;     // the sphere or the view's bits could not be read
+    // One LOD table (version 3), recorded the first time a verified part
+    // test names its pointer: the bytes the test read (param_1[4], the
+    // builder's copy of *(entry+8)), the pointer, and the entry's model.
+    struct LodTableObs {
+        uint64_t table = 0, model = 0;
+        uint32_t flags = 0;
+        uint8_t bytes[kTableBytes] = {};
+        uint32_t valid = 0;
+    };
+    // LodTableObs.flags
+    static constexpr uint32_t kTableCopyDiffers = 1u,    // the asset table no longer matches the tested copy
+                              kTableAssetUnread = 2u,    // *(entry+8) could not be read (bytes are the copy's)
+                              kTableCopyUnread = 4u;     // the copy could not be read (bytes are the asset's)
     struct ViewDump {
         uint64_t ctx = 0;
         uint32_t frame = 0, count = 0;
@@ -226,6 +255,9 @@ public:
         // calls from another caller; calls outside a kept builder row.
         uint32_t partCalls = 0, partKept = 0, partDropped = 0;
         uint32_t partUnverified = 0, partForeign = 0, partUnlinked = 0;
+        // Version 3: distinct LOD tables kept, and those lost (the set or the
+        // rows full, or both reads faulted).
+        uint32_t tablesKept = 0, tablesDropped = 0;
     };
     Counts counts() const noexcept;
     uint32_t distinctRecords() const noexcept;   // builder records in the kept observations
@@ -233,6 +265,8 @@ public:
 private:
     bool inWindow(uint32_t* frame) const noexcept;
     void dumpViews(uintptr_t ctx, uint32_t frame) noexcept;
+    bool claimTable(uint64_t table) noexcept;
+    void noteTable(uint64_t table, uint64_t model, uintptr_t copy) noexcept;
 
     bool on_ = false;
     std::atomic<bool> armed_{false};
@@ -247,11 +281,14 @@ private:
     std::vector<EntryObs> entries_;
     std::vector<SubItem> subs_;
     std::vector<PartObs> parts_;
+    std::vector<LodTableObs> tables_;
+    std::unique_ptr<std::atomic<uint64_t>[]> tableKey_;   // kTableSlots claimed pointers, zeroed by reset()
     std::unique_ptr<ViewDump[]> dumps_;
-    std::atomic<uint32_t> gateNext_{0}, builderNext_{0}, entryNext_{0}, subNext_{0}, partNext_{0};
+    std::atomic<uint32_t> gateNext_{0}, builderNext_{0}, entryNext_{0}, subNext_{0}, partNext_{0}, tableNext_{0};
     std::atomic<uint32_t> gateCalls_{0}, builderCalls_{0}, faults_{0}, recordMismatch_{0};
     std::atomic<uint32_t> entriesDropped_{0}, subItemsDropped_{0}, dumpsDropped_{0};
     std::atomic<uint32_t> partCalls_{0}, partUnverified_{0}, partForeign_{0}, partUnlinked_{0};
+    std::atomic<uint32_t> tablesDropped_{0};
     std::atomic<uint32_t> dumpCount_{0};
     std::atomic<uint64_t> dumpKey_[kMaxDumps];   // ctx ^ (frame << 48): claimed slots, zeroed by arm()
     std::mutex dumpMutex_;

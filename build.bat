@@ -447,6 +447,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
+    "src\d3d11\lod_governor.cpp" ^
     "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
@@ -2130,9 +2131,10 @@ REM decompiles read it (render context and views, record, pose context with
 REM entries, models and sub-items, the traversal's gate context, the draw
 REM builder's frame around its FUN_1442B3FC0 part test), wild pointers, a
 REM pose mismatch, an unverifiable frame and a foreign caller; the real
-REM writer's version 2 file is then parsed by the reader, which asserts every
-REM field. A probe that records nothing or a writer one field off fails here,
-REM not ten minutes into a settlement capture.
+REM writer's version 3 file (with its LOD table rows, one per pointer) is then
+REM parsed by the reader, which asserts every field and prints the tables. A
+REM probe that records nothing or a writer one field off fails here, not ten
+REM minutes into a settlement capture.
 if not exist "%OBJ%\cullgate" mkdir "%OBJ%\cullgate"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
@@ -2145,4 +2147,30 @@ if errorlevel 1 ( echo [edvr] ERROR: cull gate probe test build failed & exit /b
 "%BUILD%\cull_gate_probe_test.exe" "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
 python "tools\cull_gate_probe.py" --self-test || exit /b 1
 python "tools\cull_gate_probe.py" --verify-fixture "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
+python "tools\cull_gate_probe.py" --tables-only "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
+exit /b 0
+
+:rig_lod_governor_test
+echo [edvr] === lod_governor_test.exe ===
+REM Build gate for the settlement LOD governor (fix.settlement_detail, shadow
+REM only): the policy's steps and hysteresis on synthetic frame sequences; the
+REM engine arithmetic the shadow repeats (FUN_1442B3FC0 / FUN_144308B30's
+REM rsqrt(rcp) distance, LOD distance and LOD pick); both observers on
+REM synthetic engine memory laid out as the decompiles read it, with a wrong
+REM nibble, an engine reject, a foreign caller and wild pointers; the
+REM per-thread counters under four threads; and the frame boundary end to end
+REM against a stub native timing feed and a captured log -- the configure
+REM line ("shadow, never acts"), step lines, 30-second summaries, "k stayed
+REM 1", and silence while off. It prints both observers' cost per call. A
+REM governor that never counts, or counts while off, fails here, not in the
+REM flight that was meant to price it.
+if not exist "%OBJ%\lodgov" mkdir "%OBJ%\lodgov"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\lodgov\\" /Fe"%BUILD%\lod_governor_test.exe" ^
+    "tools\lod_governor_test\lod_governor_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: LOD governor test build failed & exit /b 1 )
+"%BUILD%\lod_governor_test.exe" --dry-run || exit /b 1
+"%BUILD%\lod_governor_test.exe" --self-test || exit /b 1
 exit /b 0

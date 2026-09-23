@@ -38,6 +38,7 @@
 #include "draw_census.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
+#include "lod_governor.h"     // fix.settlement_detail: the shadow LOD governor
 #include "fss_panel.h"
 #include "fss_probe.h"
 #include "fss_panel_rect.h"
@@ -5150,6 +5151,7 @@ void vScreenRefreshConfig() {
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
+    lodGovernorConfigure(cfg);
     billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
@@ -5330,6 +5332,11 @@ void vScreenFrameBoundary() {
     // than about anything decided below. The scene flag is the one the intro
     // fixes above retire on, so the probe's movie account closes with them.
     introProbeFrameBoundary(s->frameNo, s->eyeDrawsLastFrame >= kSceneEyeDraws);
+
+    // The settlement LOD governor (fix.settlement_detail, shadow only): the
+    // frame's draw-builder and part-test counts, the producer's frame work,
+    // one policy step, its log lines. One atomic load while it is off.
+    lodGovernorFrameBoundary();
 
     // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
     // while the scanner's chrome is up is a zoom's first frame, and the
@@ -6311,6 +6318,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
+    lodGovernorConfigure(cfg);
     billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.

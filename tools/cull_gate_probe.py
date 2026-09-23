@@ -7,7 +7,8 @@ print the inputs the occlusion-culling recall measurement needs
     python tools/cull_gate_probe.py <edvr_logs\\pool> <stamp> [<stamp> ...]
            [--frame F] [--radius 1.0] [--occluder-range 120] [--records 40]
            [--parts 40] [--parts-csv FILE] [--lod-bias K[,K...]]
-           [--settlement-ms 6.3,8.5]
+           [--settlement-ms 6.3,8.5] [--tables 10]
+    python tools/cull_gate_probe.py --tables-only <gate file> [--tables 10]
     python tools/cull_gate_probe.py --self-test
     python tools/cull_gate_probe.py --verify-fixture <gate file>   (build.bat)
 
@@ -42,8 +43,16 @@ pool eye draws a bias there removes by the exact instance-range join: the
 screen-size threshold x k (exact), the view's LOD scale x k and the LOD
 distance x k (lower..upper), per eye and in all, as a share of the pool eye
 draws and in ms at --settlement-ms (docs/design-settlement-lod-bias-2026-09-22.md).
+With version 3 the probe records each part's LOD table (once per table
+pointer): the reader lists them (--tables, most-used first), re-runs the
+part test's t0 term and LOD pick on every row that names one -- the
+reproduction must be exact but for the engine's approximate distance at a
+threshold -- and --lod-bias's LOD-distance and LOD-scale forms become exact
+for those rows instead of bracketed. --tables-only prints the file's
+counters and tables without a pool (no depth or ledger needed).
 
-gate_<stamp>.bin ('EDVRGATE' version 2; version 1 lacks every [v2] field),
+gate_<stamp>.bin ('EDVRGATE' version 3; version 2 lacks every [v3] field,
+version 1 also every [v2] field),
 little-endian, written field by field (cull_gate_probe.cpp, write()):
     8s magic, u32 version, u32 first frame, u32 last frame,
     u32 flags (bit 0: the builder's plane test ran; [v2] bit 1: the part
@@ -54,6 +63,7 @@ little-endian, written field by field (cull_gate_probe.cpp, write()):
     [v2] 6 x u32 part counters (calls, kept, dropped over the cap, kept rows
       with the builder frame unverified, from a foreign caller, outside a
       kept builder row),
+    [v3] 2 x u32 LOD table counters (tables kept, tables lost),
     u32 dumps; per dump: u64 ctx, u32 frame, u32 view count, f32 LOD scale
       (ctx+0x30), u32 faults, u32[64] bit table (ctx+0x1A840); per view:
       u32 plane count, f32[4 x count] planes, u8[0x6A0] the raw view record,
@@ -70,12 +80,19 @@ little-endian, written field by field (cull_gate_probe.cpp, write()):
       radius),
     u32 sub-items; per sub-item f32[4] quaternion, f32[4] position,
     [v2] u32 parts; per FUN_1442B3FC0 call: u64 pose context, u64 sub-item
-      address (0 unless verified), u64 view +0x570 bits, f32[3] world centre,
-      f32 radius, u32 frame, u32 builder row (index in this file, 0xFFFFFFFF
+      address (0 unless verified), u64 view +0x570 bits, [v3] u64 LOD table
+      pointer *(entry+8) (0 unless verified), f32[3] world centre, f32
+      radius, u32 frame, u32 builder row (index in this file, 0xFFFFFFFF
       none), u32 entry index, u32 sub-item index (0xFFFFFFFF unverified),
       u32 LOD, u16 view, u8 passed, u8 flags (1 view not in the context's
       array, 2 builder frame unverified, 4 foreign caller, 8 builder row's
       pose differs, 16 sphere unreadable),
+    [v3] u32 tables; per distinct LOD table pointer: u64 the pointer, u64
+      the entry's model, u32 flags (1 the asset table no longer matched the
+      tested copy, 2 the asset was unreadable, 4 the copy was unreadable:
+      the bytes are then the asset's), u8[0x80] the table as the test read
+      it (the builder's copy, param_1[4]): the first float of each 16-byte
+      row is t0..t6, the u32 at +0x70 the level count,
     4s 'EDVE'.
 """
 import argparse
@@ -90,15 +107,20 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
 
 MAGIC = b'EDVRGATE'
-VERSION = 2
-VERSIONS = (1, 2)
+VERSION = 3
+VERSIONS = (1, 2, 3)
 VIEW_BYTES = 0x6A0
 COUNTERS = ('gate_calls', 'gate_kept', 'gate_dropped', 'builder_calls', 'builder_kept', 'builder_dropped',
             'entries_dropped', 'subitems_dropped', 'faults', 'record_mismatch', 'dumps', 'dumps_dropped')
 PART_COUNTERS = ('part_calls', 'part_kept', 'part_dropped', 'part_unverified', 'part_foreign', 'part_unlinked')
+TABLE_COUNTERS = ('tables_kept', 'tables_dropped')
 BUILDER_FIELDS = ('record', 'pose', 'ctx', 'node', 'active_mask', 'rec_mask')
 NO_ROW = 0xFFFFFFFF
-PART_ROW = '<3Q4f5IHBB'   # 64 bytes
+PART_ROW = '<3Q4f5IHBB'      # 64 bytes, version 2
+PART_ROW_V3 = '<4Q4f5IHBB'   # 72 bytes: + the LOD table pointer after the view bits
+TABLE_BYTES = 0x80
+TABLE_ROW = '<QQI%ds' % TABLE_BYTES   # 148 bytes
+TABLE_COPY_DIFFERS, TABLE_ASSET_UNREAD, TABLE_COPY_UNREAD = 1, 2, 4
 PART_VIEW_FOREIGN, PART_UNVERIFIED, PART_FOREIGN_CALLER, PART_OWNER_MISMATCH, PART_SPHERE_FAULT = 1, 2, 4, 8, 16
 FLAG_PART_HOOKED = 2
 NEAR = 0.025
@@ -106,6 +128,32 @@ POOL_RECORD = 336
 
 
 # --------------------------------------------------------------------------- the file
+
+def decode_table(raw):
+    """A 0x80-byte LOD table as FUN_1442B3FC0 reads it (decomp_42B3FC0.txt:
+    76-109): t[i] the first float of each 16-byte row (t0 the reject
+    threshold, t1.. the level thresholds), count the u32 at +0x70. t[7] is
+    the count's own bits as a float: what the engine's loop reads at a count
+    of 7."""
+    t = [struct.unpack_from('<f', raw, 0x10 * i)[0] for i in range(8)]
+    return dict(t=t, count=struct.unpack_from('<I', raw, 0x70)[0])
+
+
+def table_pick(table, f):
+    """The part test's third term and LOD pick on one table: (passed, nibble).
+    Rejected when t0 < f; else the first i < count with f <= t[i+1], else the
+    count. f is a float32 like the engine's; a count past 7 would read past
+    the table and returns None."""
+    t, count = table['t'], table['count']
+    if count > 7:
+        return None
+    if t[0] < f:
+        return False, 0
+    for i in range(count):
+        if not t[i + 1] < f:
+            return True, i
+    return True, count
+
 
 def decode_view(raw):
     """The fields of a 0x6A0 view record the decompiles name (§9 close-out 1)."""
@@ -140,6 +188,8 @@ def read_gate(path):
     counts = dict(zip(COUNTERS, unpack('<12I', 'counters')))
     if version >= 2:
         counts.update(zip(PART_COUNTERS, unpack('<6I', 'part counters')))
+    if version >= 3:
+        counts.update(zip(TABLE_COUNTERS, unpack('<2I', 'table counters')))
     ndumps, = unpack('<I', 'dump count')
     if ndumps > 16:
         raise ValueError('Invalid dump count %d' % ndumps)
@@ -196,13 +246,32 @@ def read_gate(path):
     parts = []
     if version >= 2:
         np_, = unpack('<I', 'part count')
-        blob = take(np_ * struct.calcsize(PART_ROW), 'part rows')
-        for row in struct.iter_unpack(PART_ROW, blob):
-            (pose, sub_item, view_bits, cx, cy, cz, radius, frame, builder, entry, sub, lod,
-             view, passed, pflags) = row
-            parts.append(dict(pose=pose, sub_item=sub_item, view_bits=view_bits, centre=[cx, cy, cz],
-                              radius=radius, frame=frame, builder=builder, entry=entry, sub=sub, lod=lod,
-                              view=view, passed=passed, flags=pflags))
+        row_fmt = PART_ROW_V3 if version >= 3 else PART_ROW
+        blob = take(np_ * struct.calcsize(row_fmt), 'part rows')
+        for row in struct.iter_unpack(row_fmt, blob):
+            if version >= 3:
+                (pose, sub_item, view_bits, lod_table, cx, cy, cz, radius, frame, builder, entry, sub, lod,
+                 view, passed, pflags) = row
+            else:
+                (pose, sub_item, view_bits, cx, cy, cz, radius, frame, builder, entry, sub, lod,
+                 view, passed, pflags) = row
+                lod_table = 0
+            p = dict(pose=pose, sub_item=sub_item, view_bits=view_bits, centre=[cx, cy, cz],
+                     radius=radius, frame=frame, builder=builder, entry=entry, sub=sub, lod=lod,
+                     view=view, passed=passed, flags=pflags)
+            if version >= 3:
+                p['lod_table'] = lod_table
+            parts.append(p)
+    tables = []
+    if version >= 3:
+        nt, = unpack('<I', 'table count')
+        blob = take(nt * struct.calcsize(TABLE_ROW), 'table rows')
+        for table, model, tflags, raw in struct.iter_unpack(TABLE_ROW, blob):
+            t = decode_table(raw)
+            t.update(table=table, model=model, flags=tflags, raw=raw)
+            tables.append(t)
+        if len({t['table'] for t in tables}) != len(tables):
+            raise ValueError('A LOD table pointer recorded twice')
     if take(4, 'end marker') != b'EDVE':
         raise ValueError('Missing end marker')
     if s.read(1):
@@ -217,7 +286,7 @@ def read_gate(path):
         if p['builder'] != NO_ROW and p['builder'] >= nb:
             raise ValueError('Part row names builder row %d of %d' % (p['builder'], nb))
     return dict(version=version, first=first, last=last, flags=flags, vis_global=vis, counts=counts, dumps=dumps,
-                gates=gates, builders=builders, entries=entries, subs=subs, parts=parts)
+                gates=gates, builders=builders, entries=entries, subs=subs, parts=parts, tables=tables)
 
 
 def write_gate(g):
@@ -229,6 +298,8 @@ def write_gate(g):
     out.write(struct.pack('<12I', *[g['counts'][k] for k in COUNTERS]))
     if version >= 2:
         out.write(struct.pack('<6I', *[g['counts'][k] for k in PART_COUNTERS]))
+    if version >= 3:
+        out.write(struct.pack('<2I', *[g['counts'].get(k, 0) for k in TABLE_COUNTERS]))
     out.write(struct.pack('<I', len(g['dumps'])))
     for d in g['dumps']:
         out.write(struct.pack('<QIIfI', d['ctx'], d['frame'], len(d['views']), d['lod_scale'], d['faults']))
@@ -263,11 +334,25 @@ def write_gate(g):
     if version >= 2:
         out.write(struct.pack('<I', len(g['parts'])))
         for p in g['parts']:
-            out.write(struct.pack(PART_ROW, p['pose'], p['sub_item'], p['view_bits'], *p['centre'], p['radius'],
+            head = (p['pose'], p['sub_item'], p['view_bits']) + ((p.get('lod_table', 0),) if version >= 3 else ())
+            out.write(struct.pack(PART_ROW_V3 if version >= 3 else PART_ROW, *head, *p['centre'], p['radius'],
                                   p['frame'], p['builder'], p['entry'], p['sub'], p['lod'], p['view'], p['passed'],
                                   p['flags']))
+    if version >= 3:
+        out.write(struct.pack('<I', len(g.get('tables', ()))))
+        for t in g.get('tables', ()):
+            out.write(struct.pack(TABLE_ROW, t['table'], t['model'], t['flags'], t['raw']))
     out.write(b'EDVE')
     return out.getvalue()
+
+
+def table_bytes(t, count):
+    """A 0x80-byte LOD table from its thresholds (the self-tests' tables)."""
+    raw = bytearray(TABLE_BYTES)
+    for i, v in enumerate(t):
+        struct.pack_into('<f', raw, 0x10 * i, v)
+    struct.pack_into('<I', raw, 0x70, count)
+    return bytes(raw)
 
 
 # --------------------------------------------------------------------------- geometry helpers
@@ -613,6 +698,7 @@ def run(pool_dir, stamp, args):
           'mismatches, builder plane test %s' % (gate['first'], gate['last'], c['gate_calls'], c['gate_kept'],
                                                  c['builder_calls'], c['builder_kept'], c['dumps'], c['faults'],
                                                  c['record_mismatch'], 'ran' if gate['flags'] & 1 else 'ABSENT'))
+    report_tables(gate, args.tables)
     # Name the eye views: the view whose planes share each eye's orientation.
     eye_views, offsets, eye_bits = {}, {}, {}
     for d in gate['dumps']:
@@ -905,8 +991,88 @@ def part_row_terms(gate):
             b = gate['builders'][p['builder']]
             if p['entry'] < b['entries_copied']:
                 model[i] = gate['entries'][b['entry_first'] + p['entry']]['model']
+    # Version 3: each row's own LOD table, when it names one the file carries.
+    by_pointer = {t['table']: t for t in gate.get('tables', ())}
+    tab = [by_pointer.get(p.get('lod_table', 0)) for p in parts]
     return dict(ok=ok, d=d, R=R, A=A, B=B, S=S, size_ok=size_ok, inside=inside, f=f, passed=passed, lod=lod,
-                model=model)
+                model=model, tab=tab)
+
+
+def table_repro(gate, terms=None):
+    """Version 3: FUN_1442B3FC0's third term and LOD pick re-run with each
+    row's own recorded table, on the rows whose first two terms (screen size,
+    frustum) pass. Returns the tally; a disagreement within 0.1% of a
+    threshold is 'near' (the engine's distance is rsqrt(rcp(d^2)), ~2^-11 of
+    this exact one)."""
+    terms = terms or part_row_terms(gate)
+    out = dict(rows=0, agree=0, pass_rejected=0, reject_passed=0, nibble=0, near=0, no_table=0, long_table=0)
+    for i, p in enumerate(gate.get('parts', ())):
+        if not terms['ok'][i] or not (terms['size_ok'][i] and terms['inside'][i]):
+            continue
+        tab = terms['tab'][i]
+        if tab is None:
+            out['no_table'] += 1
+            continue
+        f = float(terms['f'][i])
+        got = table_pick(tab, f)
+        if got is None:
+            out['long_table'] += 1
+            continue
+        out['rows'] += 1
+        if got[0] == bool(p['passed']) and (not got[0] or got[1] == p['lod']):
+            out['agree'] += 1
+            continue
+        if got[0] != bool(p['passed']):
+            out['pass_rejected' if p['passed'] else 'reject_passed'] += 1
+        else:
+            out['nibble'] += 1
+        levels = tab['t'][:1 + min(tab['count'], 7)]
+        if any(abs(f - t) <= 1e-3 * max(abs(t), 1e-12) for t in levels):
+            out['near'] += 1
+    return out
+
+
+def report_tables(gate, limit):
+    """Version 3: the LOD tables the probe recorded, most-used first, and the
+    exact reproduction of the part test's third term with them."""
+    version = gate.get('version', 1)
+    if version < 3:
+        print('  LOD tables: gate file version %d records none (the part rows cannot name their table before version 3)'
+              % version)
+        return
+    c = gate.get('counts', {})
+    tables = gate['tables']
+    uses = {}
+    for p in gate['parts']:
+        if p.get('lod_table'):
+            uses[p['lod_table']] = uses.get(p['lod_table'], 0) + 1
+    named = sum(uses.values())
+    flags = [sum(1 for t in tables if t['flags'] & b) for b in (TABLE_COPY_DIFFERS, TABLE_ASSET_UNREAD, TABLE_COPY_UNREAD)]
+    print('  LOD tables (version 3): %d recorded, %d lost; %d of %d part rows name one (%d distinct pointers, %d '
+          'without a row); %d whose asset no longer matched the tested copy, %d asset unreadable, %d copy unreadable' % (
+              len(tables), c.get('tables_dropped', 0), named, len(gate['parts']), len(uses),
+              len(set(uses) - {t['table'] for t in tables}), flags[0], flags[1], flags[2]))
+    counts = {}
+    for t in tables:
+        counts[t['count']] = counts.get(t['count'], 0) + 1
+    if tables:
+        print('  level counts: %s' % ', '.join('%d levels x %d' % (k, v) for k, v in sorted(counts.items())))
+    for t in sorted(tables, key=lambda t: (-uses.get(t['table'], 0), t['table']))[:limit]:
+        levels = ' '.join('%.6g' % v for v in t['t'][1:1 + min(t['count'], 7)])
+        print('    table %#x  model %#x  %6d rows  t0 %-10.6g  %d levels: %s%s' % (
+            t['table'], t['model'], uses.get(t['table'], 0), t['t'][0], t['count'], levels,
+            '  [flags %d]' % t['flags'] if t['flags'] else ''))
+    if len(tables) > limit:
+        print('    ... %d more (--tables N lists more)' % (len(tables) - limit))
+    if not gate.get('dumps'):
+        print('  no view dump: the third term cannot be re-run')
+        return
+    r = table_repro(gate)
+    print('  the tables re-run FUN_1442B3FC0\'s t0 term and LOD pick on %d rows its screen-size and frustum terms pass: '
+          '%d agree, %d disagree (%d engine passes a table rejects, %d engine rejects a table passes, %d nibbles '
+          'differ; %d of them within 0.1%% of a threshold); %d such rows name no recorded table, %d tables run past 7 '
+          'levels' % (r['rows'], r['agree'], r['rows'] - r['agree'], r['pass_rejected'], r['reject_passed'],
+                      r['nibble'], r['near'], r['no_table'], r['long_table']))
 
 
 def t0_brackets(terms):
@@ -944,9 +1110,10 @@ def lod_bias_verdicts(k, form, rows_of, keys, admitted, terms, brackets):
     'scale': the view's LOD scale A -> k*A, which moves the screen-size
     term and f (t0 half at k*f). form 'distance': the LOD distance f -> k*f
     (s -> k*s: how LODDistanceScale acts, ctx+0x30 = 2 - LODDistanceScale).
-    The t0 half is known only within the model's bracket, so 'scale' and
-    'distance' return (kept for certain, kept possibly): the draws they
-    remove lie between the two."""
+    Without the part's LOD table the t0 half is known only within the
+    model's bracket, so 'scale' and 'distance' return (kept for certain,
+    kept possibly): the draws they remove lie between the two. A version 3
+    row that names its table is exact: both say the same."""
     import numpy as np
     f32 = np.float32
     out = {}
@@ -968,6 +1135,12 @@ def lod_bias_verdicts(k, form, rows_of, keys, admitted, terms, brackets):
                     continue
                 m = int(terms['model'][r])
                 fk = float(f32(k) * terms['f'][r])
+                tab = terms['tab'][r] if 'tab' in terms else None
+                exact = table_pick(tab, fk) if tab is not None else None
+                if exact is not None:
+                    sure[j] = sure[j] or (size and exact[0])
+                    maybe[j] = maybe[j] or (size and exact[0])
+                    continue
                 sure[j] = sure[j] or (size and fk <= brackets['lo'].get(m, -np.inf))
                 maybe[j] = maybe[j] or (size and fk < brackets['hi'].get(m, np.inf))
         out[e] = (sure, maybe)
@@ -1157,9 +1330,24 @@ def fixture_expectations(g):
     assert parts[0]['view_bits'] == 1 and parts[1]['view_bits'] == 2, 'the view bits a pass sets'
     assert parts[0]['sub_item'] and parts[1]['sub_item'] - parts[0]['sub_item'] == 32, 'the sub-item addresses'
     assert all(p['sub_item'] == 0 for p in parts if p['flags'] & PART_UNVERIFIED), 'no address without identity'
+    # Version 3: every verified row names entry 0's table pointer -- A for P1, P2, P5, P6, and B for P9, swapped
+    # into the entry while the builder's copy still held A's bytes; the unverified rows name none.
+    lt = [p['lod_table'] for p in parts]
+    assert lt[0] and lt[0] == lt[1] == lt[4] == lt[5] and lt[2] == lt[3] == lt[6] == 0, 'part table pointers %s' % lt
+    assert lt[7] and lt[7] != lt[0], 'P9 names the second table'
+    assert (c['tables_kept'], c['tables_dropped']) == (2, 0), 'table counters'
+    tabs = {t['table']: t for t in g['tables']}
+    assert set(tabs) == {lt[0], lt[7]}, 'one row per distinct pointer'
+    ta, tb = tabs[lt[0]], tabs[lt[7]]
+    assert ta['flags'] == 0 and tb['flags'] == TABLE_COPY_DIFFERS, 'the copy-differs flag (%d, %d)' % (ta['flags'], tb['flags'])
+    for t in (ta, tb):
+        assert t['model'] == e0['model'] and t['count'] == 2, 'the entry\'s model and the level count'
+        assert all(abs(a - x) < 1e-7 for a, x in zip(t['t'][:3], (0.5, 0.1, 0.3))), 'the bytes the test read'
     # --lod-bias reads the probe's own file: every row has its frame's dump; P1's distance is from view 0's camera.
     t = part_row_terms(g)
     assert t['ok'].all() and abs(float(t['d'][0]) - math.sqrt(134.0)) < 1e-4, 'LOD-bias terms on the rig\'s file'
+    assert t['tab'][0] is ta and t['tab'][7] is tb and t['tab'][2] is None, 'each row joins its own table'
+    table_repro(g, t)
 
 
 def self_test():
@@ -1185,25 +1373,46 @@ def self_test():
              entries=[dict(model=0x5000, sub_count=1, sub_first=0, sub_copied=1,
                            model_centre=[0.5, 0.0, 0.0, 1.0], model_sphere=[2.5, 0.0, 0.0, 0.0])],
              subs=[(0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0, 1.0)],
-             parts=[dict(pose=0x3000, sub_item=0x6000, view_bits=4, centre=[11.5, 2.0, 3.0], radius=2.5, frame=5,
-                         builder=0, entry=0, sub=0, lod=1, view=0, passed=1, flags=0),
-                    dict(pose=0x3000, sub_item=0, view_bits=4, centre=[0.0, 0.0, 0.0], radius=0.0, frame=5,
-                         builder=NO_ROW, entry=NO_ROW, sub=NO_ROW, lod=0, view=0xFFFF, passed=0,
-                         flags=PART_UNVERIFIED | PART_VIEW_FOREIGN)])
+             parts=[dict(pose=0x3000, sub_item=0x6000, view_bits=4, lod_table=0x7000, centre=[11.5, 2.0, 3.0],
+                         radius=2.5, frame=5, builder=0, entry=0, sub=0, lod=1, view=0, passed=1, flags=0),
+                    dict(pose=0x3000, sub_item=0, view_bits=4, lod_table=0, centre=[0.0, 0.0, 0.0], radius=0.0,
+                         frame=5, builder=NO_ROW, entry=NO_ROW, sub=NO_ROW, lod=0, view=0xFFFF, passed=0,
+                         flags=PART_UNVERIFIED | PART_VIEW_FOREIGN)],
+             tables=[dict(table=0x7000, model=0x5000, flags=TABLE_COPY_DIFFERS,
+                          raw=table_bytes([5.0, 1.0, 3.0, 4.0], 3))],
+             version=3)
+    g['counts'].update({k: 20 + i for i, k in enumerate(TABLE_COUNTERS)})
     with tempfile.TemporaryDirectory() as tmp:
         p = os.path.join(tmp, 'gate_TEST.bin')
         blob = write_gate(g)
         open(p, 'wb').write(blob)
         r = read_gate(p)
-        assert r['version'] == 2 and r['flags'] == 1 | FLAG_PART_HOOKED
+        assert r['version'] == 3 and r['flags'] == 1 | FLAG_PART_HOOKED
         assert r['counts']['faults'] == COUNTERS.index('faults') and r['gates'][0]['lod'] == 3
         assert r['counts']['part_unlinked'] == len(COUNTERS) + PART_COUNTERS.index('part_unlinked'), 'part counters'
+        assert (r['counts']['tables_kept'], r['counts']['tables_dropped']) == (20, 21), 'table counters'
         v = r['dumps'][0]['views'][0]
         assert v['camera'] == [1.0, 2.0, 3.0, 1.0] and v['bits'] == 4 and v['bit_index'] == 2 and v['flag68d'] == 1
         b = r['builders'][0]
         assert b['quat'] == g['builders'][0]['quat'] and r['subs'][0][4:7] == (1.0, 2.0, 3.0) and b['index'] == 0
         assert r['entries'][0]['model_sphere'][0] == 2.5 and r['entries'][0]['model_centre'][0] == 0.5
         assert r['parts'] == g['parts'], 'part rows round-trip'
+        tr = r['tables'][0]
+        assert (tr['table'], tr['model'], tr['flags'], tr['count']) == (0x7000, 0x5000, TABLE_COPY_DIFFERS, 3), tr
+        assert tr['t'][:4] == [5.0, 1.0, 3.0, 4.0] and tr['raw'] == g['tables'][0]['raw'], 'table rows round-trip'
+        # A pointer recorded twice is a writer fault, not data.
+        open(p, 'wb').write(write_gate(dict(g, tables=g['tables'] * 2)))
+        try:
+            read_gate(p)
+            raise AssertionError('accepted a table pointer recorded twice')
+        except ValueError:
+            pass
+        # Version 2 (no table counters, part table pointers or tables) still reads.
+        g2 = dict(g, version=2, parts=[{k: v for k, v in q.items() if k != 'lod_table'} for q in g['parts']])
+        open(p, 'wb').write(write_gate(g2))
+        r2 = read_gate(p)
+        assert r2['version'] == 2 and r2['tables'] == [] and 'tables_kept' not in r2['counts'], 'version 2'
+        assert r2['parts'] == g2['parts'], 'version 2 part rows'
         # The record's quaternion decodes to ~identity; its part sits at +(1,2,3).
         pts = part_positions(b, r['entries'], r['subs'], False)
         assert all(abs(a - x) < 1e-3 for a, x in zip(pts[0], [11.0, 2.0, 3.0])), 'part world position'
@@ -1215,8 +1424,9 @@ def self_test():
         assert r1['version'] == 1 and r1['parts'] == [] and 'part_calls' not in r1['counts'], 'version 1'
         assert 'model_sphere' not in r1['entries'][0] and r1['builders'][0]['record'] == 0x2000
         for bad, why in ((b'EDVRDRW1' + blob[8:], 'magic'), (blob[:-1], 'truncated'), (blob + b'\0', 'trailing'),
-                         (blob[:8] + struct.pack('<I', 3) + blob[12:], 'version'),
-                         (blob[:8] + struct.pack('<I', 1) + blob[12:], 'a version 2 body read as version 1')):
+                         (blob[:8] + struct.pack('<I', 4) + blob[12:], 'version'),
+                         (blob[:8] + struct.pack('<I', 2) + blob[12:], 'a version 3 body read as version 2'),
+                         (blob[:8] + struct.pack('<I', 1) + blob[12:], 'a version 3 body read as version 1')):
             open(p, 'wb').write(bad)
             try:
                 read_gate(p)
@@ -1358,6 +1568,38 @@ def lod_bias_self_test():
     assert 'the join removes 0 (must be 0)' in text, text
     six = [ln.split() for ln in text.splitlines() if ln.split()[:1] == ['6']]
     assert six and six[0][:6] == ['6', '1', '1', '1', '1', '2'], six
+    # Version 3: the same rows naming their recorded tables. Model 0x100's table: t0 0.1, no levels (P1 f
+    # 0.099 passes at nibble 0); 0x200's: t0 0.3, one level at 0.15 (P3 f 0.1995 passes at nibble 1, P4 f
+    # 0.398 is rejected). The reproduction agrees on all six rows the first two terms pass, and the LOD
+    # distance x k is exact: 1.5 drops P1 alone (the [1] draws), 2 drops P3 too.
+    tables = [dict(table=0xA100, model=0x100, flags=0, raw=table_bytes([0.1], 0)),
+              dict(table=0xA200, model=0x200, flags=0, raw=table_bytes([0.3, 0.15], 1))]
+    for tb in tables:
+        tb.update(decode_table(tb['raw']))
+    g3 = dict(g, version=3, tables=tables,
+              parts=[dict(p, lod_table=0xA100 if p['entry'] == 0 else 0xA200) for p in parts])
+    t3 = part_row_terms(g3)
+    rep = table_repro(g3, t3)
+    assert (rep['rows'], rep['agree'], rep['no_table']) == (6, 6, 0), rep
+    bad3 = dict(g3, parts=[dict(p, lod=1) if p['entry'] == 0 else p for p in g3['parts']])
+    rep = table_repro(bad3)
+    assert (rep['agree'], rep['nibble']) == (4, 2), rep
+
+    def exact(k, form, which):
+        v = lod_bias_verdicts(k, form, rows_of, keys, admitted, t3, br)
+        return sum(draws_removed({e: v[e][which] for e in 'AB'}, claims, draws))
+    assert (exact(1.5, 'distance', 1), exact(1.5, 'distance', 0)) == (2, 2), 'exact at 1.5'
+    assert (exact(2, 'distance', 1), exact(2, 'distance', 0)) == (6, 6), 'exact at 2'
+    assert exact(1, 'distance', 0) == 0, 'no bias, nothing removed, exactly'
+    assert table_pick(decode_table(table_bytes([1.0], 8)), 0.5) is None, 'a count past 7 is refused'
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report_tables(g3, 1)
+        report_tables(dict(g, version=2), 1)
+    text = buf.getvalue()
+    assert '2 recorded, 0 lost; 10 of 10 part rows name one' in text, text
+    assert 'on 6 rows its screen-size and frustum terms pass: 6 agree, 0 disagree' in text, text
+    assert '... 1 more' in text and 'version 2 records none' in text, text
     for ok, arg in ((True, '1,1.25,2'), (False, '0'), (False, 'x'), (False, 'inf')):
         try:
             assert factors(arg) == [1.0, 1.25, 2.0] and ok, arg
@@ -1379,6 +1621,9 @@ def main():
                     help='version 2: the pool eye draws a bias k at FUN_1442B3FC0 removes (exact join), per k')
     ap.add_argument('--settlement-ms', metavar='POST,PRE', type=factors, default=[6.3, 8.5],
                     help='the settlement\'s draw-submission share in ms, post-cut and pre-cut (default 6.3,8.5)')
+    ap.add_argument('--tables', type=int, default=10, help='version 3: LOD tables to list, most-used first')
+    ap.add_argument('--tables-only', metavar='GATE_FILE',
+                    help='print a gate file\'s counters and LOD tables (and their reproduction) without a pool')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--verify-fixture', metavar='GATE_FILE', help=argparse.SUPPRESS)
     a = ap.parse_args()
@@ -1388,6 +1633,16 @@ def main():
         except (AssertionError, ValueError) as e:
             print('cull_gate_probe self-test FAILED: %s' % e, file=sys.stderr)
             return 2
+        return 0
+    if a.tables_only:
+        try:
+            g = read_gate(a.tables_only)
+        except (OSError, ValueError) as e:
+            print('cull_gate_probe: %s' % e, file=sys.stderr)
+            return 2
+        print('== %s: version %d, frames %d..%d, %d part rows, %d builder rows, %d view dumps' % (
+            a.tables_only, g['version'], g['first'], g['last'], len(g['parts']), len(g['builders']), len(g['dumps'])))
+        report_tables(g, a.tables)
         return 0
     if a.verify_fixture:
         try:

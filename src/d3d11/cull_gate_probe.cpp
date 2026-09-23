@@ -62,6 +62,8 @@ bool CullGateProbe::arm(uint32_t first, FrustumFn frustum, uint8_t visGlobal) no
         if (entries_.size() != kEntryCap) entries_.assign(kEntryCap, EntryObs{});
         if (subs_.size() != kSubItemCap) subs_.assign(kSubItemCap, SubItem{});
         if (parts_.size() != kPartCap) parts_.assign(kPartCap, PartObs{});
+        if (tables_.size() != kTableCap) tables_.assign(kTableCap, LodTableObs{});
+        if (!tableKey_) tableKey_.reset(new std::atomic<uint64_t>[kTableSlots]);
         if (!dumps_) dumps_.reset(new ViewDump[kMaxDumps]);
     } catch (...) {
         return false;
@@ -79,12 +81,67 @@ void CullGateProbe::reset() noexcept {
     for (auto& g : gate_) g.valid = 0;
     for (auto& b : builder_) b.valid = 0;
     for (auto& p : parts_) p.valid = 0;
+    for (auto& t : tables_) t.valid = 0;
+    if (tableKey_) for (uint32_t i = 0; i < kTableSlots; ++i) tableKey_[i].store(0, std::memory_order_relaxed);
     if (dumps_) for (uint32_t i = 0; i < kMaxDumps; ++i) dumps_[i].valid = 0;
     for (auto& k : dumpKey_) k.store(0, std::memory_order_relaxed);
     gateNext_.store(0); builderNext_.store(0); entryNext_.store(0); subNext_.store(0); partNext_.store(0);
+    tableNext_.store(0);
     gateCalls_.store(0); builderCalls_.store(0); faults_.store(0); recordMismatch_.store(0);
     entriesDropped_.store(0); subItemsDropped_.store(0); dumpsDropped_.store(0); dumpCount_.store(0);
     partCalls_.store(0); partUnverified_.store(0); partForeign_.store(0); partUnlinked_.store(0);
+    tablesDropped_.store(0);
+}
+
+// The first caller to name a table pointer claims it (true); a repeat, or a
+// set with no free slot within 64 probes (counted dropped), gets false.
+bool CullGateProbe::claimTable(uint64_t table) noexcept {
+    if (!table || !tableKey_) return false;
+    const uint64_t h = (table * 0x9E3779B97F4A7C15ull) >> 50;   // 14 bits
+    for (uint32_t probe = 0; probe < 64; ++probe) {
+        std::atomic<uint64_t>& slot = tableKey_[(h + probe) & (kTableSlots - 1)];
+        uint64_t cur = slot.load(std::memory_order_acquire);
+        if (cur == table) return false;
+        if (cur == 0) {
+            if (slot.compare_exchange_strong(cur, table, std::memory_order_acq_rel)) return true;
+            if (cur == table) return false;
+        }
+    }
+    tablesDropped_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+// One LOD table, once per pointer: the bytes the part test read (the
+// builder's copy), checked against the asset table they were copied from.
+void CullGateProbe::noteTable(uint64_t table, uint64_t model, uintptr_t copy) noexcept {
+    if (!claimTable(table)) return;
+    const uint32_t i = tableNext_.fetch_add(1, std::memory_order_relaxed);
+    if (i >= tables_.size()) {
+        tablesDropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    LodTableObs& t = tables_[i];
+    t.table = table;
+    t.model = model;
+    t.flags = 0;
+    uint8_t asset[kTableBytes] = {};
+    const bool copyOk = rd(t.bytes, copy, kTableBytes);
+    const bool assetOk = rd(asset, static_cast<uintptr_t>(table), kTableBytes);
+    if (!copyOk && !assetOk) {   // nothing to keep: the slot stays invalid, the loss counted
+        tablesDropped_.fetch_add(1, std::memory_order_relaxed);
+        faults_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (!copyOk) {
+        std::memcpy(t.bytes, asset, kTableBytes);
+        t.flags |= kTableCopyUnread;
+    } else if (!assetOk) {
+        t.flags |= kTableAssetUnread;
+    } else if (std::memcmp(t.bytes, asset, kTableBytes) != 0) {
+        t.flags |= kTableCopyDiffers;
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+    t.valid = 1;
 }
 
 bool CullGateProbe::inWindow(uint32_t* frame) const noexcept {
@@ -358,6 +415,14 @@ void CullGateProbe::notePart(uintptr_t items, uintptr_t out, uintptr_t view, uin
             p.subItem = sub;
             p.entry = static_cast<uint32_t>((entry - entryBase) / 0x58);
             p.sub = static_cast<uint32_t>((sub - subBase) / 0x20);
+            // Version 3: the entry's LOD table, *(entry+8), which the builder
+            // copied into param_1[4] (decomp_42B4420.txt:410-428), recorded
+            // once per pointer with the bytes the test just read.
+            uint64_t table = 0;
+            if (rdv(&table, static_cast<uintptr_t>(entry) + 8) && table) {
+                p.lodTable = table;
+                noteTable(table, model, static_cast<uintptr_t>(block[4]));
+            }
         }
     }
     if (!verified) {
@@ -391,6 +456,10 @@ CullGateProbe::Counts CullGateProbe::counts() const noexcept {
     c.partUnverified = partUnverified_.load();
     c.partForeign = partForeign_.load();
     c.partUnlinked = partUnlinked_.load();
+    const uint32_t tn = tableNext_.load();
+    const uint32_t tr = tn < tables_.size() ? tn : static_cast<uint32_t>(tables_.size());
+    for (uint32_t i = 0; i < tr; ++i) c.tablesKept += tables_[i].valid ? 1u : 0u;
+    c.tablesDropped = tablesDropped_.load();
     return c;
 }
 
@@ -433,6 +502,9 @@ bool CullGateProbe::write(const wchar_t* path) noexcept {
     // Version 2: the part tests' counters.
     for (uint32_t v : {c.partCalls, c.partKept, c.partDropped, c.partUnverified, c.partForeign, c.partUnlinked})
         u32(v);
+    // Version 3: the LOD tables' counters.
+    u32(c.tablesKept);
+    u32(c.tablesDropped);
     // View dumps.
     uint32_t dumps = 0;
     for (uint32_t i = 0; i < c.dumps && i < kMaxDumps; ++i) dumps += dumps_ && dumps_[i].valid ? 1u : 0u;
@@ -504,11 +576,31 @@ bool CullGateProbe::write(const wchar_t* path) noexcept {
         const PartObs& p = parts_[i];
         if (!p.valid) continue;
         u64(p.pose); u64(p.subItem); u64(p.viewBits);
+        u64(p.lodTable);   // version 3
         raw(p.centre, 12); raw(&p.radius, 4);
         u32(p.frame);
         u32(p.builderRow < fileRow.size() ? fileRow[p.builderRow] : kNoRow);
         u32(p.entry); u32(p.sub); u32(p.lod);
         u16(p.view); u8(p.pass); u8(p.flags);
+    }
+    // Version 3: the LOD tables, one row per distinct pointer. The valid rows
+    // are listed once, so the count written is the rows written even if a
+    // late worker completes one meanwhile.
+    std::vector<uint32_t> tableRows;
+    const uint32_t tn = tableNext_.load();
+    const uint32_t tr = tn < tables_.size() ? tn : static_cast<uint32_t>(tables_.size());
+    try {
+        tableRows.reserve(tr);
+        for (uint32_t i = 0; i < tr; ++i)
+            if (tables_[i].valid) tableRows.push_back(i);
+    } catch (...) {
+        tableRows.clear();
+    }
+    u32(static_cast<uint32_t>(tableRows.size()));
+    for (uint32_t i : tableRows) {
+        const LodTableObs& t = tables_[i];
+        u64(t.table); u64(t.model); u32(t.flags);
+        raw(t.bytes, kTableBytes);
     }
     raw("EDVE", 4);
     ok = !ferror(f) && ok;
