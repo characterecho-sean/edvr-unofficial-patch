@@ -93,8 +93,9 @@
   review then kept the mask diagnostic-only: 5fb4f62 (15:20 entry)
   installed to frontier, sha256 d6d5ef39ceb2a0ca; veto dark by default.
   Flight 152934 (kinematic doc same-date entry): all three fixes hold,
-  ~2.6k statics published clean; the cyan check needs a re-flight --
-  the eye burst missed the movers-view window.
+  ~2.6k statics published clean; the cyan check is DEAD -- stage B (the
+  coverage mask, the veto, the movers view's cyan) was removed 2026-09-23,
+  superseded by the engine-record path's exact per-pixel ownership.
 - Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
   DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
   timings are not directly comparable. Installed DLSS Windows file/product
