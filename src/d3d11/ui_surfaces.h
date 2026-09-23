@@ -30,6 +30,7 @@
 #include <cstdint>
 
 struct D3D11_TEXTURE2D_DESC;
+struct ID3D11Texture2D;
 
 namespace edvr {
 
@@ -65,6 +66,31 @@ void uiSurfacesFrameBoundary();
 
 // The surfaces' part of the 30-second "ui quality:" totals line.
 void uiSurfacesSummary(char* out, size_t n);
+
+// THE CONFIRMATION INSTRUMENT (docs/ui-sizing-owner-2026-09-23.md section 8;
+// ui_sizing_math.h). Inside uiSurfacesMatch, every create of a surface's
+// shape gets its game return-address chain once per distinct size and kind
+// (colour or depth), logged with the frame, EDVR's W, tangents, vFOV and k,
+// the implied stage and a verdict (rtt / glyph-cache / other, every key
+// RVA's hit or miss).
+//
+// ...and the glyph atlas (section 8.3): an A8_UNORM texture 1024 or more a
+// side the game creates (hookedCreateTexture2D asks, once created) gets its
+// chain and verdict logged, and its writes counted from the context hooks --
+// UpdateSubresource, a writing Map, a copy into it -- every 30 s: Scaleform's
+// raster cache is written as glyphs arrive, a static font texture never.
+bool uiSurfacesWantsAtlas(const D3D11_TEXTURE2D_DESC& d);
+void uiSurfacesNoteAtlas(ID3D11Texture2D* tex, const D3D11_TEXTURE2D_DESC& d, bool initialData);
+void uiAtlasNoteWriteSlow(const void* res, int how);  // how: 0 update, 1 map, 2 copy
+namespace detail {
+extern bool g_uiAtlasWatching;  // set once the first atlas is registered
+}
+// One load a call on the context hooks until an atlas is watched.
+inline void uiAtlasNoteWrite(const void* res, int how) {
+    if (detail::g_uiAtlasWatching) uiAtlasNoteWriteSlow(res, how);
+}
+// The atlas's 30-second line (from ui_layer's totals), when one is watched.
+void uiSurfacesLogAtlas();
 
 // Defined in native_temporal.cpp, lock-free: the size, max over eyes, the
 // runtime's beginFrame says the frame being drawn was rendered for

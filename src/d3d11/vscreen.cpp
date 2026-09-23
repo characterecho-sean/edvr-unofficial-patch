@@ -72,6 +72,7 @@
 #include "ui_deferred.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
+#include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"
 #include "mesh_motion.h"
 #include "object_classification_probe.h"
@@ -3296,6 +3297,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (gpuFrameCommandMightAct()) gpuFrameCommand(self);
     State* s = g_state;
     ++s->thunkHits[kHitMap];
+    if (type != D3D11_MAP_READ) uiAtlasNoteWrite(res, 1);  // one load until an atlas is watched
     if (foreignContext(self)) {
         if(type!=D3D11_MAP_READ && objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         return s->realMap(self, res, sub, type, flags, mapped);
@@ -4205,6 +4207,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
+    uiAtlasNoteWrite(dst, 2);
     if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
@@ -4351,6 +4354,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::CopyRegion, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
+    uiAtlasNoteWrite(dst, 2);
     if (!foreignContext(self)) {
         // Buffer boxes are byte ranges. Keep the destination offset: a
         // small upload into the shared IB must not invalidate other meshes.
@@ -4392,6 +4396,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Update, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
+    uiAtlasNoteWrite(dst, 0);
     if (!foreignContext(self)) {
         if(box && box->right>=box->left)motionResourceWritten(dst,box->left,box->right);
         else motionResourceWritten(dst);

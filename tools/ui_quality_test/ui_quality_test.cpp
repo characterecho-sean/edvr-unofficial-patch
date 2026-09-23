@@ -51,6 +51,7 @@
 #include "../../src/d3d11/ui_layer_math.h"
 #include "../../src/d3d11/ui_layer_shaders.h"
 #include "../../src/d3d11/ui_quality_math.h"
+#include "../../src/d3d11/ui_sizing_math.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace edvr;
@@ -593,6 +594,83 @@ void testGate() {
 
 // What a draw does with its depth-stencil target, from the D3D11 state the
 // DLL reads (ui_layer_shaders.h's translation, ui_layer_math.h's effect).
+// The confirmation instrument (ui_sizing_math.h; docs/ui-sizing-owner-2026-
+// 09-23.md section 8): a create's chain -- the game's frames, innermost
+// first -- read into a verdict, on synthetic chains.
+void testChains() {
+    const uintptr_t base = 0x140000000ull, size = 104894464ull;  // build 332841's image
+    auto chainOf = [&](std::initializer_list<uint32_t> rvas, bool withForeign) {
+        uintptr_t frames[40] = {};
+        uint32_t n = 0;
+        if (withForeign) {
+            frames[n++] = 0x7FFA12340000ull;  // EDVR's own hook frame
+            frames[n++] = 0x7FFA56780000ull;  // the D3D runtime
+        }
+        for (uint32_t r : rvas) frames[n++] = base + r;
+        UiChain c;
+        uiChainFromFrames(frames, n, base, size, &c);
+        return c;
+    };
+    // The chain section 8 expects, innermost first.
+    const UiChain initColour = chainOf({0x51AF6B, 0x50EC69, 0x5185B3, 0x28148A9, 0x2833883, 0x4551C7D,
+                                        0x45517F6, 0x4570902, 0x456D910, 0x10},
+                                       true);
+    check(initColour.n == 10 && initColour.rva[0] == 0x51AF6B && initColour.rva[5] == 0x4551C7D,
+          "a chain keeps the game's frames, innermost first, and skips EDVR's and the runtime's");
+    UiChainVerdict v = uiChainVerdict(initColour);
+    check(v.kind == UiChainKind::kRtt && v.init && !v.change && v.colour && !v.depth &&
+              std::strcmp(uiChainVerdictShort(v), "rtt init colour") == 0,
+          "0x4551C7D and 0x45517F6, through 0x4570902 and 0x28148A9: rtt init colour");
+    char text[320];
+    uiChainVerdictText(v, text, sizeof(text));
+    check(std::strcmp(text, "rtt init colour (0x4551C7D yes, 0x45517F6 yes, 0x4570902 yes, 0x456DA45 no, "
+                            "0x28148A9 yes, 0x2814686 no, 0x30FC1A no, 0x312450 no)") == 0,
+          "...and the verdict names every key's hit and miss");
+    char rvas[160];
+    uiChainFormat(initColour, rvas, sizeof(rvas));
+    check(std::strcmp(rvas, "0x51AF6B/0x50EC69/0x5185B3/0x28148A9/0x2833883/0x4551C7D/0x45517F6/"
+                            "0x4570902/0x456D910/0x10") == 0,
+          "the chain formatted innermost first");
+    const UiChain changeDepth = chainOf({0x51AF6B, 0x50EC69, 0x5185B3, 0x2814686, 0x28338B0, 0x4551C7D,
+                                         0x45517F6, 0x456DA45},
+                                        false);
+    v = uiChainVerdict(changeDepth);
+    check(v.kind == UiChainKind::kRtt && v.change && v.depth &&
+              std::strcmp(uiChainVerdictShort(v), "rtt change depth") == 0,
+          "through 0x456DA45 and 0x2814686: rtt change depth");
+    v = uiChainVerdict(chainOf({0x51AF6B, 0x4551C7D, 0x4570902}, false));
+    check(v.kind == UiChainKind::kOther && (v.hits & 1u) && !(v.hits & 2u),
+          "0x4551C7D without 0x45517F6 is other (a miss, and it says which)");
+    check(uiChainVerdict(chainOf({0x30C0AA, 0x30FC1A, 0x30F9E0}, true)).kind == UiChainKind::kGlyphCache &&
+              uiChainVerdict(chainOf({0x312450}, false)).kind == UiChainKind::kGlyphCache,
+          "the raster cache's texture maker, init 0x30FC1A or re-create 0x312450: glyph-cache");
+    const UiChain none = chainOf({0x1000, 0x2000}, true);
+    v = uiChainVerdict(none);
+    uiChainVerdictText(v, text, sizeof(text));
+    check(v.kind == UiChainKind::kOther && v.hits == 0 &&
+              std::strcmp(text, "other (0x4551C7D no, 0x45517F6 no, 0x4570902 no, 0x456DA45 no, 0x28148A9 no, "
+                                "0x2814686 no, 0x30FC1A no, 0x312450 no)") == 0,
+          "neither: other, every key a miss");
+    const UiChain deep = chainOf({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x4551C7D, 0x45517F6}, false);
+    check(deep.n == 12 && deep.rva[11] == 12 && uiChainVerdict(deep).kind == UiChainKind::kOther,
+          "twelve game frames kept: keys past the twelfth are not seen");
+    UiChain empty;
+    uiChainFormat(empty, rvas, sizeof(rvas));
+    check(rvas[0] == '\0' && uiChainVerdict(empty).kind == UiChainKind::kOther, "an empty chain");
+    // k and the implied stage: the menu's 16:9 surface reads 1920x1080 on
+    // every frustum it was seen on (the doc's section 6).
+    const double kUntrimmed = uiSizingK(uiQualityFovTangent(1.2648f, 1.2648f));
+    const double kTrimmed = uiSizingK(uiQualityFovTangent(1.1779f, 1.1779f));
+    check(std::fabs(kUntrimmed - 0.7853) < 5e-4 && std::fabs(kTrimmed - 0.8433) < 5e-4,
+          "k = tan(0.782)/tan(vFOV/2): 0.7853 untrimmed, 0.8433 trimmed 7/5/2");
+    check(std::fabs(uiImpliedStage(1566, 1995, kUntrimmed) / 1920.0 - 1.0) < 0.003 &&
+              std::fabs(uiImpliedStage(880, 1995, kUntrimmed) / 1080.0 - 1.0) < 0.003 &&
+              std::fabs(uiImpliedStage(1254, 1597, kUntrimmed) / 1920.0 - 1.0) < 0.003 &&
+              std::fabs(uiImpliedStage(1346, 1597, kTrimmed) / 1920.0 - 1.0) < 0.003,
+          "the menu's 1566x880, 1254x705 (old k) and 1346x757 (new k) imply the same 1920x1080 stage");
+    check(uiImpliedStage(100, 0, kUntrimmed) == 0.0 && uiSizingK(0.0f) == 0.0, "no W or no FOV: no stage");
+}
+
 // The family rule (ui_layer_math.h's uiLayerFamilyFor, which vscreen.cpp's
 // uiLayerFamilyOf feeds): the 13:23 flight lost the menu panel when the FOV
 // trim, adopted at the main menu, had the game re-create its interface
@@ -1694,6 +1772,7 @@ int main(int argc, char** argv) {
     testFootprint();
     testGate();
     testFamilyRule();
+    testChains();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");
