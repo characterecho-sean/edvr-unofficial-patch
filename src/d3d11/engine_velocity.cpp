@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "depth_probe.h"
+#include "gpu_timing.h"
 #include "dxbc_engine_velocity.h"
 #include "engine_velocity_emit.h"
 #include "engine_velocity_state.h"
@@ -184,7 +185,12 @@ struct Eye {
     uint32_t poolReplaceEpoch = 0, poolAppendEpoch = 0, sceneWriteEpoch = 0;
     bool sceneRowsKnown = false;
     uint8_t sceneRows[kRowsBytes] = {};
-    bool bound = false, written = false, invalid = false, consumed = false;
+    // written: a substituted draw was issued this eye-frame (the views need
+    // it); boundCounted: MRT6's bind counted once per eye-frame.
+    bool bound = false, boundCounted = false, written = false, invalid = false, consumed = false;
+    // The frames this eye last saw a pool family draw and last substituted
+    // (the performance review's item 2 accounting).
+    uint32_t seenFrame = ~0u, substFrame = ~0u;
 };
 // Eyes 0 and 1, and the on-foot source (kEngineVelocitySourceEye): the same
 // eye-frame rules for a pass into the source's depth.
@@ -207,16 +213,32 @@ std::atomic<uint64_t> g_emitSampled{0}, g_emitSampledTicks{0};
 const char* g_verifyWhy = nullptr;            // the build check's refusal, null = passed
 const char* g_hookWhy = "not checked yet";    // the emit hook's, null = installed
 std::atomic<bool> g_emitLive{false};          // both passed: the feature stands up
+// The emit's own want on the shared eval hooks (kinematicEvalEmitAttach):
+// the legacy tracker no longer holds them open for it (the 2026-09-23
+// performance review, item 1). Retried quietly at later configures.
+bool g_emitAttached = false;
+// Engine motion's diagnostics (engineVelocityDiagnostics): the emit's census
+// of one record in eight runs only while they are wanted, as the tracker does.
+std::atomic<bool> g_diagnosticsWanted{false};
 
 // --- Draw-side and pixel counters (owner thread) -------------------------------
 struct DrawStats {
     uint64_t slowPaths = 0, slowTicks = 0, quickPaths = 0;
     uint64_t eyeFrames = 0, eyeFramesBound = 0;
+    // Item 2: eye-frames with a pool family draw (the old order prepared all
+    // of these) and with a substitution; eyeFrames above is those prepared.
+    uint64_t eyeFramesSeen = 0, eyeFramesSubstituted = 0;
     uint64_t invalid[kInvalidCount] = {};
     uint64_t poolRefreshed = 0, sceneRowsKept = 0;
     uint64_t targetOccupied = 0, uavBound = 0, bindRejected = 0, depthUnsupported = 0, createFailed = 0;
     uint64_t bindRefused[static_cast<int>(EngineVelocityBindRefusal::Count)] = {};
     uint64_t blendApplied = 0, blendRefused = 0, blendShadowDisagreed = 0;
+    uint64_t settersIssued = 0, settersSkipped = 0;   // item 3: raw shader setters, and those found installed
+    // Item 4 (measure only): the snapshots' copies -- pool and scene constants
+    // at each prepared eye-frame, the pool again on each append refresh -- and
+    // the largest pool (records) and view (elements) seen this window.
+    uint64_t poolSnapshots = 0, poolSnapshotBytes = 0, poolRefreshBytes = 0, sceneSnapshots = 0, sceneSnapshotBytes = 0;
+    uint64_t poolCapacity = 0, poolExposed = 0;
     const char* blendRefusedWhy = nullptr;
     uint64_t viewsAsked = 0, viewsGiven = 0;
     // Why a view request was refused, first failing test: the emit side stood
@@ -248,6 +270,53 @@ constexpr uint32_t kResumeFrames = 90;   // a substitution after this many quiet
 constexpr uint64_t kBurstGaps = 32;      // gaps in one frame that make it a burst
 
 uint32_t frameNow() { return g_frame.load(std::memory_order_acquire); }
+
+// --- The eye-pass capture's GPU time (the performance review, item 5) ---------
+// The slot target's clear, the snapshots at preparation and the append
+// refreshes run in the game's own eye pass, before the temporal pass's prep;
+// its timers never saw them. GPU timestamps around each (GpuTimer: a shared
+// clock lease, polled without flushing or waiting at the owner's frame
+// boundary), taken per price window by the temporal pass.
+enum CaptureKind : int { kCaptureClear = 0, kCaptureSnapshot, kCaptureRefresh, kCaptureKinds };
+static_assert(kCaptureKinds == 3, "EngineVelocityCaptureGpu carries the three kinds");
+struct CaptureTimer { GpuTimer timer; int kind = -1; bool pending = false; };
+constexpr int kCaptureTimers = 24;
+constexpr size_t kCaptureSamples = 4096;
+CaptureTimer g_captureTimers[kCaptureTimers];
+std::vector<double> g_captureMs[kCaptureKinds];
+uint64_t g_captureUntimed = 0, g_captureInvalid = 0;
+
+int beginCapture(ID3D11DeviceContext* ctx, int kind) {
+    for (int i = 0; i < kCaptureTimers; ++i) {
+        CaptureTimer& t = g_captureTimers[i];
+        if (t.pending) continue;
+        Ptr<ID3D11Device> dev;
+        ctx->GetDevice(&dev);
+        if (!dev || !t.timer.begin(dev.Get(), ctx)) { ++g_captureUntimed; return -1; }
+        t.kind = kind;
+        t.pending = true;
+        return i;
+    }
+    ++g_captureUntimed;   // every timer still in flight: this one goes untimed, counted
+    return -1;
+}
+void endCapture(ID3D11DeviceContext* ctx, int i) {
+    if (i >= 0) g_captureTimers[i].timer.end(ctx);   // a refused end polls Invalid
+}
+void pollCaptures(ID3D11DeviceContext* ctx) {
+    for (auto& t : g_captureTimers) {
+        if (!t.pending) continue;
+        double ms = 0.0;
+        const GpuTimerPoll r = t.timer.poll(ctx, ms);
+        if (r == GpuTimerPoll::Pending) continue;
+        if (r == GpuTimerPoll::Ready) {
+            if (g_captureMs[t.kind].size() < kCaptureSamples) g_captureMs[t.kind].push_back(ms);
+        } else {
+            ++g_captureInvalid;
+        }
+        t.pending = false;
+    }
+}
 
 // --- The build-keyed engine side ----------------------------------------------
 // FUN_143696FA0's first 32 bytes (the dictionary lookup the bracket calls) and
@@ -296,8 +365,10 @@ void observeEmit(uintptr_t record, uintptr_t owner, int32_t before, int32_t afte
     const uint64_t n = g_emit.calls.load(std::memory_order_relaxed);
     const bool sample = (n & 63u) == 0;
     const int64_t t0 = sample ? qpcNow() : 0;
+    // The census (a hash, a pose read and a lock even on zero-item calls) is
+    // a diagnostic: off unless engine motion's diagnostics want it.
     emit::observe(record, owner, before, after, frameNow(), g_lookup.load(std::memory_order_acquire), *g_table, g_emit,
-                  g_census.get());
+                  g_diagnosticsWanted.load(std::memory_order_relaxed) ? g_census.get() : nullptr);
     if (sample) {
         g_emitSampled.fetch_add(1, std::memory_order_relaxed);
         g_emitSampledTicks.fetch_add(static_cast<uint64_t>(qpcNow() - t0), std::memory_order_relaxed);
@@ -551,6 +622,15 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
     }
     ctx->CopyResource(e.pool.Get(), poolBuf.Get());
     ctx->CopyResource(e.scene[slot].Get(), scene.Get());
+    // What the snapshots copy (the performance review, item 4: measured
+    // before any storage change): the whole pool buffer, whatever the view
+    // exposes, and the scene constants.
+    ++g_draw.poolSnapshots;
+    g_draw.poolSnapshotBytes += pd.ByteWidth;
+    ++g_draw.sceneSnapshots;
+    g_draw.sceneSnapshotBytes += sd.ByteWidth;
+    g_draw.poolCapacity = std::max<uint64_t>(g_draw.poolCapacity, pd.ByteWidth / emit::kItemBytes);
+    g_draw.poolExposed = std::max<uint64_t>(g_draw.poolExposed, vd.Buffer.NumElements);
     e.sceneFrame[slot] = frame;
     e.poolView = poolView;
     e.poolBuffer = poolBuf;
@@ -603,9 +683,12 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     const WatchInfo& ws = g_watchInfo[static_cast<unsigned>(eye) * 2u + 1u];
     if (wp.replaceEpoch != e.poolReplaceEpoch) { invalidate(e, kPoolRewritten); return; }
     if (wp.appendEpoch != e.poolAppendEpoch) {
+        const int refreshTimer = beginCapture(ctx, kCaptureRefresh);
         ctx->CopyResource(e.pool.Get(), e.poolBuffer.Get());
+        endCapture(ctx, refreshTimer);
         e.poolAppendEpoch = wp.appendEpoch;
         ++g_draw.poolRefreshed;
+        g_draw.poolRefreshBytes += e.poolBytes;
     }
     if (ws.writeEpoch != e.sceneWriteEpoch) {
         if (!ws.rowsKnown || !e.sceneRowsKnown) { invalidate(e, kSceneUnknown); return; }
@@ -685,6 +768,25 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!fam.valid) { restore(ctx); return; }
     Eye& e = g_eyes[eye];
     const uint32_t frame = frameNow();
+    // An eye-frame with a recognised pool family draw: the old order prepared
+    // on this alone (the 2026-09-23 performance review, item 2).
+    if (e.seenFrame != frame) { e.seenFrame = frame; ++g_draw.eyeFramesSeen; }
+    // Eligibility FIRST: a keyed pixel shader whose patch exists, and the
+    // vertex patch where the family needs one. Nothing -- slot target, clear,
+    // snapshot, MRT6 -- is prepared for a draw that cannot export ownership;
+    // a declined draw puts the game's state back, as before.
+    if (!keyedPs(f, psHash)) {
+        if (!anyKeyedPs(psHash)) { ++fam.unkeyedPsDraws; fam.unkeyedPsHash = psHash; }
+        restore(ctx);
+        return;
+    }
+    ID3D11VertexShader* useVs = vs;
+    if (fam.inputs.slotFromVsPatch) {
+        useVs = patchedVsFor(ctx, f, vs);
+        if (!useVs) { restore(ctx); return; }
+    }
+    ID3D11PixelShader* usePs = patchedPsFor(ctx, f, ps);
+    if (!usePs) { restore(ctx); return; }
     const bool newFrame = e.frame != frame;
     Ptr<ID3D11Texture2D> depthTex;
     if (newFrame || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
@@ -698,11 +800,15 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         ++g_draw.eyeFrames;
         if (sourcePass) ++g_draw.sourceFrames;
         e.frame = frame;
-        e.bound = e.written = e.invalid = e.consumed = false;
+        e.bound = e.boundCounted = e.written = e.invalid = e.consumed = false;
         e.rtvGen = e.dsvGen = 0;
         const float cleared[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
+        const int clearTimer = beginCapture(ctx, kCaptureClear);
         ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+        endCapture(ctx, clearTimer);
+        const int snapTimer = beginCapture(ctx, kCaptureSnapshot);
         snapshot(ctx, e, eye, frame);
+        endCapture(ctx, snapTimer);
     }
     if (e.invalid) { restore(ctx); return; }
     if (e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
@@ -712,32 +818,19 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         e.rtvGen = cache.rtv;
         e.dsvGen = cache.dsv;
         e.bound = bindTarget(ctx, e, dsv);
-        if (e.bound && !e.written) {
+        if (e.bound && !e.boundCounted) {
+            e.boundCounted = true;
             ++g_draw.eyeFramesBound;
             if (sourcePass) ++g_draw.sourceFramesBound;
         }
-        e.written = e.written || e.bound;
     }
     if (!e.bound) { restore(ctx); return; }
-    // The substitution.
-    if (!keyedPs(f, psHash)) {
-        if (!anyKeyedPs(psHash)) { ++fam.unkeyedPsDraws; fam.unkeyedPsHash = psHash; }
-        restore(ctx);
-        return;
-    }
     // A draw that will write MRT6 after the eye-frame's first must read what
     // the snapshot holds (the first one's sources ARE the snapshot).
     if (!newFrame) {
         checkSources(ctx, e, eye);
         if (e.invalid) { restore(ctx); return; }
     }
-    ID3D11VertexShader* useVs = vs;
-    if (fam.inputs.slotFromVsPatch) {
-        useVs = patchedVsFor(ctx, f, vs);
-        if (!useVs) { restore(ctx); return; }
-    }
-    ID3D11PixelShader* usePs = patchedPsFor(ctx, f, ps);
-    if (!usePs) { restore(ctx); return; }
     // The blend state MRT6 must not inherit: the derived one, unless it is
     // still bound (the game has not set another since).
     if (!(g_bound.derivedBlend && bindingGeneration(BindSlot::Blend) == g_bound.blendGen)) {
@@ -762,14 +855,31 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         g_bound.blendGen = bindingGeneration(BindSlot::Blend);
         ++g_draw.blendApplied;
     }
-    if (useVs != vs) vScreenVSSetShaderRaw(ctx, useVs, nullptr, 0);
-    vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0);
+    // The setters only where the patched shader is not still installed (the
+    // performance review, item 3): a visit that only re-verified the sources
+    // -- a cb1 re-map, a pool append, a blend change -- finds ours bound when
+    // the game has set nothing in that stage since (same original, same
+    // binding generation). Source checks and the blend stay independent.
+    const bool psInstalled = g_bound.patchedPs == usePs && g_bound.originalPs == ps &&
+                             bindingGeneration(BindSlot::Ps) == g_bound.psGen;
+    const bool vsInstalled = g_bound.patchedVs == useVs && g_bound.originalVs == vs &&
+                             bindingGeneration(BindSlot::Vs) == g_bound.vsGen;
+    if (useVs != vs) {
+        if (vsInstalled) ++g_draw.settersSkipped;
+        else { vScreenVSSetShaderRaw(ctx, useVs, nullptr, 0); ++g_draw.settersIssued; }
+    }
+    if (psInstalled) ++g_draw.settersSkipped;
+    else { vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0); ++g_draw.settersIssued; }
     g_bound.originalPs = ps; g_bound.patchedPs = usePs; g_bound.psGen = cache.ps;
     g_bound.originalVs = useVs != vs ? vs : nullptr; g_bound.patchedVs = useVs != vs ? useVs : nullptr; g_bound.vsGen = cache.vs;
     g_bound.family = f;
     g_anyBound.store(true, std::memory_order_release);
     cache.family = f;
     ++fam.binds;
+    // The eye is usable only now: a draw that exports ownership is about to
+    // be issued (MRT6 bound alone once counted as written).
+    e.written = true;
+    if (e.substFrame != frame) { e.substFrame = frame; ++g_draw.eyeFramesSubstituted; }
     // When substitution starts again after a quiet stretch, for the flight's
     // timeline (boarding, a scene change).
     if (g_lastSubstitution == ~0u || frame - g_lastSubstitution > kResumeFrames) {
@@ -814,13 +924,34 @@ void summaryLocked(uint64_t now) {
                     "%llu), %llu of them in %llu burst frames (%llu or more in one frame); census of one record in eight "
                     "by address: %llu record-frames evaluated, moving since their last %llu drawn + %llu evaluated but not "
                     "drawn (~%.1f + %.1f records/frame scaled by 8); census gaps: %llu evaluated without items in between "
-                    "(culled or not selected), %llu not evaluated at all.",
+                    "(culled or not selected), %llu not evaluated at all%s.",
                     r(g_emit.gaps), r(g_emit.gapAge[0]), r(g_emit.gapAge[1]), r(g_emit.gapAge[2]), r(g_emit.gapAge[3]),
                     r(g_emit.gapAge[4]), u(g_draw.burstGaps), u(g_draw.burstFrames), u(kBurstGaps), r(g_emit.censusFrames),
                     r(g_emit.censusMovingDrawn), r(g_emit.censusMovingUndrawn),
                     8.0 * double(g_emit.censusMovingDrawn.load()) / frames,
                     8.0 * double(g_emit.censusMovingUndrawn.load()) / frames, r(g_emit.gapsEvaluatedBetween),
-                    r(g_emit.gapsUnevaluated));
+                    r(g_emit.gapsUnevaluated),
+                    g_diagnosticsWanted.load(std::memory_order_relaxed)
+                        ? "" : " (the census is off: it runs only with engine motion's diagnostics -- "
+                               "advanced.temporal_aa_diagnostics, the movers view or an eye run; these zeros are not counts)");
+    // The legacy tracker's price (the 2026-09-23 performance review, item 1):
+    // diagnostic-only now, measured whenever it runs.
+    {
+        const KinematicMotionCost c = kinematicMotionTakeCost();
+        const double f = double(std::max<uint64_t>(1, c.qpcFrequency));
+        const double waitUs = c.lockSamples ? double(c.lockWaitTicks) * 1e6 / f / double(c.lockSamples) : 0.0;
+        if (c.evaluations || c.presentScans)
+            Log::get().note("engine motion: tracker (diagnostic-only) cost: %llu evaluations (%.0f a frame), each taking "
+                            "its mutex: lock wait %.2f us sampled (1 in %u, %llu samples), ~%.3f ms/frame summed over the "
+                            "job threads; Present scan %.3f ms/frame on the caller thread (%llu ticks).",
+                            u(c.evaluations), double(c.evaluations) / frames, waitUs, kLockSampleEvery, u(c.lockSamples),
+                            waitUs * double(c.evaluations) / frames / 1000.0,
+                            double(c.presentTicks) * 1e3 / f / double(std::max<uint64_t>(1, c.presentScans)),
+                            u(c.presentScans));
+        else
+            Log::get().note("engine motion: tracker off (diagnostic-only: advanced.temporal_aa_diagnostics, the movers "
+                            "view or an eye run turn it on): no evaluations observed, no Present scan.");
+    }
     uint64_t invalid = 0;
     for (uint64_t v : g_draw.invalid) invalid += v;
     std::string invalidText, refusedText;
@@ -835,18 +966,29 @@ void summaryLocked(uint64_t now) {
                     engineVelocityBindRefusalName(static_cast<EngineVelocityBindRefusal>(i)), u(g_draw.bindRefused[i]));
         refusedText += t;
     }
+    char trackerText[96];
+    if (g_draw.trackerFrames)
+        _snprintf_s(trackerText, _TRUNCATE, "against the tracker's %.1f moving records/frame",
+                    double(g_draw.trackerMovers) / double(g_draw.trackerFrames));
+    else
+        _snprintf_s(trackerText, _TRUNCATE, "(the tracker, diagnostic-only, was off)");
     Log::get().note("engine motion: movers joined %.1f records/frame (moving rig records the emit wrote a previous pose for) "
-                    "against the tracker's %.1f moving records/frame; eye-frames %llu, with MRT6 bound %llu; invalidated "
+                    "%s; eye-frames %llu, with MRT6 bound %llu (prepared only for an eligible draw: %llu eye-frames "
+                    "had a pool family draw, %llu a substitution; prepared for nothing %llu, under the old order %llu); "
+                    "invalidated "
                     "%llu (%s); kept: scene constants re-mapped with rows 270..275 unchanged %llu, pool appended and "
                     "refreshed %llu; MRT6 refused: target 6 occupied %llu, UAV bound %llu, %s, runtime rejected the set "
                     "%llu; depth not single-sample %llu, slot target create failed %llu; blend: derived state bound %llu "
                     "times, refused %llu%s%s%s, shadow disagreed %llu; views asked %llu, given %llu, refused: stood down "
                     "%llu, other depth %llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene "
                     "constants %llu; draw hook slow half %llu calls, %.2f us each, ~%.3f ms/frame on the caller thread "
-                    "(plus %llu lock-free looks); restores %llu.",
-                    double(g_emit.recordsMoving.load()) / frames,
-                    g_draw.trackerFrames ? double(g_draw.trackerMovers) / double(g_draw.trackerFrames) : 0.0,
-                    u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(invalid), invalidText.c_str(),
+                    "(plus %llu lock-free looks); restores %llu; shader setters issued %llu, skipped %llu (ours still "
+                    "bound).",
+                    double(g_emit.recordsMoving.load()) / frames, trackerText,
+                    u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(g_draw.eyeFramesSeen), u(g_draw.eyeFramesSubstituted),
+                    u(g_draw.eyeFrames > g_draw.eyeFramesSubstituted ? g_draw.eyeFrames - g_draw.eyeFramesSubstituted : 0),
+                    u(g_draw.eyeFramesSeen > g_draw.eyeFramesSubstituted ? g_draw.eyeFramesSeen - g_draw.eyeFramesSubstituted : 0),
+                    u(invalid), invalidText.c_str(),
                     u(g_draw.sceneRowsKept), u(g_draw.poolRefreshed), u(g_draw.targetOccupied), u(g_draw.uavBound),
                     refusedText.c_str(), u(g_draw.bindRejected), u(g_draw.depthUnsupported), u(g_draw.createFailed),
                     u(g_draw.blendApplied), u(g_draw.blendRefused), g_draw.blendRefusedWhy ? " (" : "",
@@ -855,7 +997,18 @@ void summaryLocked(uint64_t now) {
                     u(g_draw.refusedDepth), u(g_draw.refusedFrame), u(g_draw.refusedInvalid), u(g_draw.refusedUnwritten),
                     u(g_draw.refusedPrevious), u(g_draw.slowPaths),
                     g_draw.slowPaths ? double(g_draw.slowTicks) * 1e6 / freq / double(g_draw.slowPaths) : 0.0,
-                    double(g_draw.slowTicks) * 1e3 / freq / frames, u(g_draw.quickPaths), u(g_draw.restores));
+                    double(g_draw.slowTicks) * 1e3 / freq / frames, u(g_draw.quickPaths), u(g_draw.restores),
+                    u(g_draw.settersIssued), u(g_draw.settersSkipped));
+    // The snapshots' copy traffic (item 4, measured only): logical bytes
+    // submitted, not GPU time -- a CopyResource's CPU submission prices
+    // nothing on the GPU.
+    Log::get().note("engine motion: snapshots (measure only): pool capacity %llu records (%.1f MB), views expose %llu; "
+                    "copies: pool %llu at preparation (%.1f MB) + %llu on append refreshes (%.1f MB), scene constants "
+                    "%llu (%.1f KB); ~%.2f MB a frame logical.",
+                    u(g_draw.poolCapacity), double(g_draw.poolCapacity) * emit::kItemBytes / 1e6, u(g_draw.poolExposed),
+                    u(g_draw.poolSnapshots), double(g_draw.poolSnapshotBytes) / 1e6, u(g_draw.poolRefreshed),
+                    double(g_draw.poolRefreshBytes) / 1e6, u(g_draw.sceneSnapshots), double(g_draw.sceneSnapshotBytes) / 1e3,
+                    double(g_draw.poolSnapshotBytes + g_draw.poolRefreshBytes + g_draw.sceneSnapshotBytes) / 1e6 / frames);
     if (g_draw.pixelReads)
         Log::get().note("engine motion: pixels per eye-frame on the trained path: engine-joined %.0f (a rig record's "
                         "certified exact motion, moving or still -- not a mover count), masked %.0f "
@@ -948,13 +1101,27 @@ using namespace engine_velocity_detail;
 
 bool engineVelocityActive() noexcept { return live.load(std::memory_order_acquire); }
 
+namespace engine_velocity_detail {
+// The emit's want on the shared hook set; quiet on a retry.
+void attachEmitLocked(bool quiet) {
+    const char* result = kinematicEvalEmitAttach();
+    g_emitAttached = std::strcmp(result, "installed") == 0;
+    if (!g_emitAttached && !quiet)
+        Log::get().note("engine motion: the kinematic eval hook set refused the emit (%s) -- engine-record velocity "
+                        "stands down, the stock motion path is untouched; retried quietly at later config polls.",
+                        result);
+}
+}  // namespace engine_velocity_detail
+
 void engineVelocityConfigure(bool on) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if (on && live.load(std::memory_order_acquire) && !g_emitAttached) { attachEmitLocked(true); return; }
     if (on == live.load(std::memory_order_acquire)) return;
     if (!on) { engineVelocityShutdown(); return; }
-    // The emit bracket rides the tracker's hook set (fix.temporal_aa on
-    // attaches it, just before this, by kinematicMotionConfigure); the
-    // bracket itself needs the lookup verified.
+    // The emit bracket rides the shared eval hooks, held open by its own
+    // want (the legacy tracker is diagnostic-only); the bracket itself needs
+    // the lookup verified.
+    attachEmitLocked(false);
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     g_verifyWhy = verifyEngine(base);
     if (!g_table) g_table = std::make_unique<emit::Table>();
@@ -978,10 +1145,13 @@ void engineVelocityConfigure(bool on) {
                     "below; every zero is printed, not omitted.");
 }
 
+void engineVelocityDiagnostics(bool on) { g_diagnosticsWanted.store(on, std::memory_order_relaxed); }
+
 void engineVelocityShutdown() {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const bool was = live.exchange(false, std::memory_order_acq_rel);
     kinematicEvalSetEmitObserver(nullptr);
+    if (g_emitAttached) { kinematicEvalEmitDetach(); g_emitAttached = false; }
     g_lookup.store(nullptr, std::memory_order_release);
     g_emitLive.store(false, std::memory_order_release);
     clearLocked();
@@ -1119,6 +1289,7 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!live.load(std::memory_order_acquire)) return;
     cache = DrawCache{};
     ++g_draw.frames;
+    if (ctx) pollCaptures(ctx);   // the eye-pass capture's GPU timers, without waiting
     // The on-foot source's slot target lives only while the source is drawn:
     // kSourceIdleFrames present frames without screen_motion naming it and it
     // goes, with its watches and the held depth.
@@ -1134,8 +1305,12 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
         g_sourceNoted = ~0u;
     }
     refreshEmitStatus(false);
-    const KinematicMotionStats k = kinematicMotionStats();
-    if (k.framesCounted) { g_draw.trackerMovers += k.moversLast; ++g_draw.trackerFrames; }
+    // The tracker's comparison count, only while its diagnostics run it (its
+    // stats take the tracker's mutex).
+    if (kinematicMotionActive()) {
+        const KinematicMotionStats k = kinematicMotionStats();
+        if (k.framesCounted) { g_draw.trackerMovers += k.moversLast; ++g_draw.trackerFrames; }
+    }
     // Gaps that land together in one frame are a clock or a scene event, not
     // visibility churn.
     const uint64_t gaps = g_emit.gaps.load(std::memory_order_relaxed);
@@ -1182,6 +1357,28 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
     return giveViewsLocked(g_eyes[eye], sceneDepth, out,
                            {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
                             g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious});
+}
+
+bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
+    if (!out) return false;
+    *out = EngineVelocityCaptureGpu{};
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    bool any = false;
+    for (int k = 0; k < kCaptureKinds; ++k) {
+        std::vector<double>& v = g_captureMs[k];
+        out->events[k] = static_cast<uint32_t>(v.size());
+        if (!v.empty()) {
+            any = true;
+            std::sort(v.begin(), v.end());
+            out->medianMs[k] = v[v.size() / 2];
+            out->p95Ms[k] = v[std::min(v.size() - 1, static_cast<size_t>(double(v.size()) * 0.95))];
+        }
+        v.clear();
+    }
+    out->untimed = g_captureUntimed;
+    out->invalid = g_captureInvalid;
+    g_captureUntimed = g_captureInvalid = 0;
+    return any || out->untimed || out->invalid;
 }
 
 void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth) {

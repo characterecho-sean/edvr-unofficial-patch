@@ -72,6 +72,10 @@ constexpr unsigned kEngineVelocityScenePrevCb = 2;
 void engineVelocityConfigure(bool on);
 void engineVelocityShutdown();
 bool engineVelocityActive() noexcept;
+// Engine motion's diagnostics wanted (temporal_pass: advanced.temporal_aa_
+// diagnostics, the movers view or an eye run): the emit's census runs only
+// then, as the legacy tracker does (the 2026-09-23 performance review).
+void engineVelocityDiagnostics(bool on);
 
 // Shader creation (device_hook): the keyed pool families' bytecode is kept
 // whether or not the feature is on (ten small shaders), so enabling it live
@@ -159,6 +163,18 @@ struct EngineVelocityViews {
     ID3D11Buffer* scenePrev = nullptr;
 };
 bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out);
+// The eye-pass capture's GPU time since the last take (the performance
+// review, item 5): the slot target clear, the snapshots at preparation and
+// the pool refreshes, each a GpuTimer interval polled without waiting. Per
+// event median/p95 ms; untimed (no timer free or no lease) and invalid
+// (disjoint, expired) counted. The temporal pass prints it beside prep's
+// parts and takes it once per price window. False: nothing this window.
+struct EngineVelocityCaptureGpu {
+    uint32_t events[3] = {};            // clear, snapshots, refreshes
+    double medianMs[3] = {}, p95Ms[3] = {};
+    uint64_t untimed = 0, invalid = 0;
+};
+bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out);
 // One eye's compose pixel counts, read back by the temporal pass (Stats
 // 50..54): engine-joined, masked, pool-but-not-a-rig-record, stale slot,
 // corrupt slot code.

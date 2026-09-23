@@ -407,6 +407,30 @@ void caseJobAttribution() {
     check(s.moversTotal == 1, "19: one mover total");
 }
 
+// The 2026-09-23 performance review, item 1: the tracker's price per window --
+// its evaluations (each taking the module mutex), the sampled lock wait and
+// the Present tick -- reset when taken, and nothing while it is off.
+void caseCostWindow() {
+    fresh();
+    (void)kinematicMotionTakeCost();   // the seeding tick and earlier cases
+    FakeRecord a; initRecord(a, 0xE1, 1.f, 2.f, 3.f, 7);
+    FakeDesc d = descFor(a);
+    const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
+    for (uint32_t i = 0; i < 2 * kLockSampleEvery; ++i) kinematicMotionObserve(dp);
+    endFrame(); endFrame();
+    KinematicMotionCost c = kinematicMotionTakeCost();
+    check(c.evaluations == 2 * kLockSampleEvery, "20: every evaluation is counted");
+    check(c.lockSamples == 2, "20: the lock wait is sampled once in kLockSampleEvery per thread");
+    check(c.presentScans == 2 && c.qpcFrequency > 1, "20: each Present tick is timed, with the clock rate");
+    c = kinematicMotionTakeCost();
+    check(c.evaluations == 0 && c.presentScans == 0 && c.lockSamples == 0, "20: taking the window resets it");
+    kinematicMotionConfigure(false);
+    kinematicMotionObserve(dp);
+    kinematicMotionNotePresentFrame(++g_frame);
+    c = kinematicMotionTakeCost();
+    check(c.evaluations == 0 && c.presentScans == 0, "20: off, the tracker costs nothing");
+}
+
 void caseConfigLifecycle() {
     kinematicMotionConfigure(false);
     check(!kinematicMotionActive(), "0: off is inactive");
@@ -442,6 +466,7 @@ int wmain(int argc, wchar_t** argv) {
     caseLodSwapInvalidation();
     caseImplausibleSphereStillStatic();
     caseJobAttribution();
+    caseCostWindow();
     kinematicMotionShutdown();
     std::printf("kinematic_motion_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

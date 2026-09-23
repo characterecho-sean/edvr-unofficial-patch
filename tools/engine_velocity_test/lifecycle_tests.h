@@ -60,6 +60,7 @@ struct Slot { void* ptr = nullptr; uint32_t gen = 1; uint64_t hash = 0; };
 Slot g_slots[static_cast<unsigned>(edvr::BindSlot::Count)];
 ID3D11DepthStencilView* g_eyeDsv[2] = {};
 bool g_hookLive = true;
+unsigned g_emitAttaches = 0, g_emitDetaches = 0, g_trackerStatsReads = 0;
 std::vector<std::string> g_log;
 uint64_t g_clock = 1000;
 uint64_t fakeClock() { return g_clock; }
@@ -85,7 +86,13 @@ bool kinematicEvalEmitHookLive(const char** why) noexcept {
     if (why) *why = lifecycle_fake::g_hookLive ? nullptr : "rig: kinematic-build-144312e00 refused";
     return lifecycle_fake::g_hookLive;
 }
-KinematicMotionStats kinematicMotionStats() noexcept { return KinematicMotionStats{}; }
+// The emit's own want on the hook set: counted, so the rig can see the
+// engine path attach and detach it without the tracker.
+const char* kinematicEvalEmitAttach() noexcept { ++lifecycle_fake::g_emitAttaches; return "installed"; }
+void kinematicEvalEmitDetach() noexcept { ++lifecycle_fake::g_emitDetaches; }
+KinematicMotionStats kinematicMotionStats() noexcept { ++lifecycle_fake::g_trackerStatsReads; return KinematicMotionStats{}; }
+bool kinematicMotionActive() noexcept { return false; }   // the tracker is diagnostic-only: off in the rig
+KinematicMotionCost kinematicMotionTakeCost() noexcept { return KinematicMotionCost{}; }
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs,
                                 ID3D11DepthStencilView* dsv) { ctx->OMSetRenderTargets(n, rtvs, dsv); }
 void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs, ID3D11ClassInstance* const* ci,
@@ -563,6 +570,9 @@ inline void run(const Harness& h) {
     g.setup();
     edvr::engineVelocityConfigure(true);
     h.check(logged("engine-record velocity live", mark), "life: configure logs live with the hook installed");
+    // P1 (the 2026-09-23 performance review, item 1): the emit holds the
+    // shared hooks itself -- the tracker is diagnostic-only and off here.
+    h.check(lifecycle_fake::g_emitAttaches == 1, "P1: configure attaches the emit's own want on the hook set");
     const char* joined = "engine motion: movers joined";
     auto body = [&] {
         g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
@@ -598,6 +608,16 @@ inline void run(const Harness& h) {
         h.check(g.views(1), "life: eye 1 given");
     }
     g.endFrame(true);
+    h.check(logged("engine motion: tracker off (diagnostic-only", mark), "P1: the window says the tracker was off");
+    h.check(logged("(the tracker, diagnostic-only, was off)", mark), "P1: the movers line has no tracker comparison");
+    h.check(logged("(the census is off: it runs only with engine motion's diagnostics", mark),
+            "P1: the emit's census is off without diagnostics, and says its zeros are not counts");
+    h.check(lifecycle_fake::g_trackerStatsReads == 0, "P1: no per-frame tracker stats read (its mutex) while it is off");
+    mark = g_log.size();
+    edvr::engineVelocityDiagnostics(true);
+    g.ordinaryFrame(true);
+    h.check(!logged("(the census is off", mark), "P1: with diagnostics the census runs (no off note)");
+    edvr::engineVelocityDiagnostics(false);
 
     // F1: cb1 re-mapped inside eye 0's pass with rows 270..275 unchanged
     // (other registers move, as capture 043720 shows): kept.
@@ -845,6 +865,113 @@ inline void run(const Harness& h) {
     h.check(logged("on-foot source slot target released (56x20", mark), "S1: the slot target is released when the source stops");
     h.check(!g.sourceViews(), "S1: released, nothing is given");
 
+    // P2 (the performance review, item 2): eligibility before preparation. An
+    // eye whose family draws all carry an unkeyed pixel shader prepares
+    // nothing (no slot target clear, no snapshot, no MRT6) and gives nothing;
+    // the movers line counts what the old order would have prepared. One
+    // accepted draw brings coverage back: its frame lacks last frame's scene
+    // constants (the idle frame took none) and is refused as such, the next
+    // gives, with MRT6 naming the slot exactly.
+    mark = g_log.size();
+    g.ordinaryFrame();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.setPs(g.unkeyed.Get(), kUnkeyedPs);
+    g.pass(0, 3);
+    g.setPs(g.ps.Get(), kPsHash);
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    h.check(!g.views(0), "P2: an eye with only unkeyed pool draws prepares nothing and gives nothing");
+    h.check(g.views(1), "P2: the other eye is untouched");
+    g.endFrame(true);
+    line = lastLine(joined, mark);
+    h.check(number(line, "prepared for nothing ") == 0, "P2: no eye-frame is prepared for nothing");
+    h.check(number(line, "under the old order ") >= 1, "P2: the old order would have prepared the unkeyed-only eye-frame");
+    mark = g_log.size();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.setPs(g.unkeyed.Get(), kUnkeyedPs);
+    g.pass(0, 2);
+    g.setPs(g.ps.Get(), kPsHash);
+    g.draw();   // one accepted draw after the declined ones
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    h.check(!g.views(0), "P2: the first accepted frame has no previous scene constants for that eye: refused");
+    g.endFrame(true);
+    line = lastLine(joined, mark);
+    h.check(number(line, "no previous scene constants ") >= 1, "P2: and the refusal says why");
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0);
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    {
+        edvr::EngineVelocityViews v{};
+        h.check(g.views(0, &v), "P2: the next frame gives again");
+        unsigned exact = 0, other = 0;
+        ownership(h, g, 0, v, 5, &exact, &other);
+        h.check(exact > 0 && other == 0, "P2: coverage restored -- MRT6 names slot 5 exactly");
+        release(v);
+    }
+    g.endFrame();
+
+    // P3 (item 3): a slow-path visit that only re-verified the sources finds
+    // the patched shader still bound and skips the setter; each eye-frame's
+    // first substitution still sets it.
+    mark = g_log.size();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0);
+    {
+        ComPtr<ID3D11PixelShader> patched, after;
+        h.context->PSGetShader(&patched, nullptr, nullptr);
+        auto remap = g.rows[0];
+        remap[90 * 4] = 3.0f;   // other registers move, rows 270..275 do not
+        g.writeScene(g.sceneA.Get(), remap);
+        g.draw();
+        h.context->PSGetShader(&after, nullptr, nullptr);
+        h.check(patched && patched.Get() != g.ps.Get() && after.Get() == patched.Get(),
+                "P3: the patched pixel shader stays bound across a source-only visit");
+    }
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    g.endFrame(true);
+    line = lastLine(joined, mark);
+    h.check(number(line, ", skipped ") >= 1, "P3: the setter a source-only visit would have repeated is skipped, counted");
+    h.check(number(line, "shader setters issued ") >= 2, "P3: each eye-frame's first substitution still sets it");
+
+    // P4 (item 4, measure only): the snapshot copies counted, with the pool's
+    // capacity and the view's exposed records.
+    mark = g_log.size();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0);
+    g.writePool(g.poolA.Get(), D3D11_MAP_WRITE_NO_OVERWRITE);   // an append mid-pass: refreshed
+    g.draw();
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    g.endFrame(true);
+    line = lastLine("engine motion: snapshots (measure only):", mark);
+    h.check(number(line, "pool capacity ") == 16 && number(line, "views expose ") == 16,
+            "P4: the pool's capacity and the view's exposed records");
+    h.check(number(line, "copies: pool ") >= 2 && number(line, "scene constants ") >= 2,
+            "P4: one pool and one scene-constant copy per prepared eye-frame");
+    h.check(number(line, "MB) + ") >= 1, "P4: and the append refresh counted");
+
+    // P5 (attribution gap 1): every prepared eye-frame's clear and snapshot,
+    // and the refresh, went through a GPU timer -- measured, or counted as
+    // untimed/invalid, never silently lost -- and the take resets the window.
+    {
+        edvr::EngineVelocityCaptureGpu c{};
+        edvr::engineVelocityTakeCaptureGpu(&c);
+        h.check(c.events[0] + c.events[1] + c.events[2] + c.untimed + c.invalid >= 1,
+                "P5: the eye-pass capture is timed or its absence counted");
+        edvr::EngineVelocityCaptureGpu again{};
+        edvr::engineVelocityTakeCaptureGpu(&again);
+        h.check(again.events[0] + again.events[1] + again.events[2] + again.untimed + again.invalid == 0,
+                "P5: taking the window resets it");
+    }
+
     // R6: the emit hook not installed -> STOOD DOWN, no substitution, nothing given.
     mark = g_log.size();
     lifecycle_fake::g_hookLive = false;
@@ -872,7 +999,9 @@ inline void run(const Harness& h) {
     g.ordinaryFrame();
     g.frameWithViews(body, &e0, &e1);
     h.check(e0 && e1, "R6: and gives again");
+    const unsigned detachesBefore = lifecycle_fake::g_emitDetaches;
     edvr::engineVelocityShutdown();
+    h.check(lifecycle_fake::g_emitDetaches == detachesBefore + 1, "P1: shutdown detaches the emit's want on the hook set");
     mark = g_log.size();
     lifecycle_fake::g_hookLive = false;
     edvr::engineVelocityConfigure(true);

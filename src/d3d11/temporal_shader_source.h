@@ -625,7 +625,12 @@ R"HLSL(
 // out and runs that same text). The ownership test is meshPixel's, but
 // exact: the slot's recorded depth must be the scene depth bit for bit. Jitter as meshPixel: the rows carry the raster
 // jitter, holoJitter.xy takes the current-minus-previous difference out.
-uint enginePixel(float2 p, float2 offset, out float2 pp, out float zp) {
+// haveZ (a literal at every call): the caller already holds the scene depth
+// at exactly this texel -- the mv pass's offset-zero call passes sceneZraw,
+// read from its depth tile at region.xy + id, which is q -- so it is not
+// loaded again (the performance review's conditional shader change);
+// jittered callers load it here.
+uint enginePixelZ(float2 p, float2 offset, bool haveZ, float knownZ, out float2 pp, out float zp) {
     pp = 0; zp = 0;
     if ((uint(probe.w + 0.5) & 2048u) == 0u || holoJitter.z == 0) return 0u;
     const int2 q = region.xy + int2(round(p + offset));
@@ -635,7 +640,7 @@ uint enginePixel(float2 p, float2 offset, out float2 pp, out float zp) {
     if (!(es.x >= 1.0)) return 0u;
     if (uiCovered(q)) return 0u;
     if ((uint(probe.w + 0.5) & 32u) != 0u && Screen.Load(int3(q, 0)).w > 0) return 0u;
-    const float zr = zSceneAt(q);
+    const float zr = haveZ ? knownZ : zSceneAt(q);
     if (!(zr > 0.0) || asuint(zr) != asuint(es.y)) return 4u;
     const uint code = uint(es.x);
     if (float(code) != es.x || (code & 1u) == 0u) return 5u;
@@ -658,6 +663,9 @@ uint enginePixel(float2 p, float2 offset, out float2 pp, out float zp) {
     zp = before.w;
     if (all(isfinite(pp))) return 1u;
     return engineRecordMoved(r) ? 2u : 0u;
+}
+uint enginePixel(float2 p, float2 offset, out float2 pp, out float zp) {
+    return enginePixelZ(p, offset, false, 0.0, pp, zp);
 }
 // The mv pass's tile of this frame's scene depth: the group's 8x8 with a
 // two-texel apron, filled at the top of mv() and read by the pixel's own
@@ -1269,7 +1277,8 @@ R"HLSL(
         // the call returns 0 before any load and the path is byte-identical.
         bool engineMasked = false;
         float2 engineP; float engineZ;
-        const uint engineKind = enginePixel(p, 0, engineP, engineZ);
+        // Offset zero at p = id: the scene depth here is sceneZraw, held.
+        const uint engineKind = enginePixelZ(p, 0, true, sceneZraw, engineP, engineZ);
 #if EDVR_TEMPORAL_DIAGNOSTICS
         if (engineKind != 0u) InterlockedAdd(gCount[47u + engineKind], 1u);
 #endif

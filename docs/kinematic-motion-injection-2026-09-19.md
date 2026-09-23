@@ -23,10 +23,11 @@
   MERGED and FLOWN (093817, "The re-fly" entry): eye-frames bound and given, cb1
   re-maps kept (invalidated 0), corrupt codes 0, engine-joined 67-73k px an eye-frame.
   FOLLOW-UPS FLOWN (114958, c00af958): cockpit prep 0.15-0.23 ms a pair (copy 0.02, mv
-  0.13-0.21), no faults, the on-foot gate held. STAGE B REMOVED and ITS KEY RETIRED
-  (2026-09-23): engine motion is part of fix.temporal_aa, every mode. ON FOOT BUILT, NOT
-  FLOWN ("On foot" entry): the source pass takes MRT6 into a slot target of the source's
-  size; the screen shader carries certified rig records through the panel.
+  0.13-0.21), no faults. STAGE B REMOVED, ITS KEY RETIRED: engine motion is part of
+  fix.temporal_aa. ON FOOT (merged, not flown): the source pass takes MRT6 at the
+  source's size; the screen shader carries rig records through the panel. PERFORMANCE
+  ROUND BUILT, NOT FLOWN (the review's six items, "Performance round" entry): tracker
+  diagnostic-only, preparation deferred, setters skipped, snapshots and capture priced.
 - **Open:** the on-foot flight (Next); walkers (vs_F516BF0201303B87, unkeyed; w=2 on the
   panel today, the "On foot" entry) wait on phase 2's previous bone palette; a temporal
   pass on the flat source itself is the later remedy for its own
@@ -54,9 +55,11 @@
   pre-pass or a depth bias as the stale cockpit (all three: the re-fly entry); green on
   the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
   cause (the 09:38 entry). Do not re-propose any of the above.
-- **Next:** the on-foot flight (fix.temporal_aa = dlss, diagnostics 1, one leg with
-  advanced.temporal_aa_debug = motion_source): walk near the drone and a landing ship;
-  read the "On foot" entry's signatures -- the drone and the ship green on the panel.
+- **Next:** one controlled comparison (the review's protocol): the build checked first
+  (edvr_log.py --expect-build HEAD); the same pad, headset and runtime, resolution, DLSS
+  version and refresh, warm windows, temporal AA fixed; diagnostics 1 (tracker, census,
+  diagnostic shader) against 0 (lean): the tracker's cost line and the price lines.
+  Then the on-foot walk near the drone and a landing ship, one leg with motion_source.
 
 ## Premise
 
@@ -2446,3 +2449,86 @@ differs). screen_motion_test 56541 (+2: each source frame names its depth to the
 If the new code never runs, the log reads as 114958: no slot-target line, the movers line's
 `eye-frames 0, with MRT6 bound 0`, and no `on foot:` line (or `source frames 0`). Bound but
 never asked: `screen views asked 0`. Asked but refused: the refusal names the reason.
+
+### 2026-09-23 -- Performance round (reviews\engine-motion-performance-review-2026-09-23.md)
+
+One commit per item, built and rigged, none flown.
+
+**1. The legacy tracker is diagnostic-only.** Its observer took one global mutex per
+evaluation on the job threads and its Present tick scanned the tracked population on the
+caller thread, whenever temporal AA was on; since stage B its only consumer was the movers
+line's "against the tracker's N moving records/frame". On foot in 114958 the emit saw 4.5-7M
+calls per 30 s with 390-470 moving records a frame, and the frame was caller-thread bound at
+~16 ms: the prime suspect. Now the emit holds the shared eval hooks itself
+(`kinematicEvalEmitAttach`: the direct-producer relay gates on the same eval gate, so the
+emit's want keeps it open), and the tracker and the emit's census of one record in eight
+run only while engine motion's diagnostics want them -- advanced.temporal_aa_diagnostics,
+the movers view, or an eye run from its arming to the first config poll after it is written
+(`applyEngineMotionDiagnostics`, temporal_pass.cpp). The emit's previous-pose certification
+is its own table and is untouched. Measured whenever the tracker runs, per 30 s: `engine
+motion: tracker (diagnostic-only) cost: N evaluations (X a frame), each taking its mutex:
+lock wait Y us sampled (1 in 64, S samples), ~Z ms/frame summed over the job threads;
+Present scan W ms/frame on the caller thread`. With diagnostics off: `engine motion: tracker
+off (diagnostic-only ...)`, the movers line reads `(the tracker, diagnostic-only, was off)`
+and the census line ends `(the census is off ...)`, emit joins unchanged. Never ran: the old
+movers wording with a tracker number and no cost or off line. Rigs: kinematic_motion_test
+case 20 (the cost window), engine_velocity_test P1.
+
+**2. Preparation waits for an eligible draw.** The slot target's create and clear, the pool
+and scene-constant snapshots and the MRT6 bind ran at an eye-frame's first pool family draw,
+before asking whether its pixel shader was keyed and its patch existed; an eye whose family
+draws were all unkeyed paid for all of it and was then handed to the compose, which scanned
+a cleared map. Now `slowPath` resolves the keyed PS and its patches (VS where the family
+needs one) first, prepares only for such a draw, puts the game's state back on a declined
+draw as before, and marks the eye usable (`written`) only when a substituted draw is about
+to be issued -- MRT6 bound alone no longer counts. One consequence: the first eye-frame after
+one with no eligible draw has no last-frame scene constants for that eye and is refused as
+`no previous scene constants`; the next gives. Signature, in the movers line: `eye-frames N,
+with MRT6 bound B (prepared only for an eligible draw: S eye-frames had a pool family draw,
+U a substitution; prepared for nothing P, under the old order Q)` -- P near 0, Q the waste
+removed. Never ran: no parenthesis. Rig: engine_velocity_test P2 (an unkeyed-only eye
+prepares and gives nothing, Q counts it; one accepted draw restores exact coverage the frame
+after).
+
+**3. No repeated shader setters.** A slow-path visit forced only by a source change -- the
+re-fly's ~11 harmless cb1 re-maps an eye-frame, a pool append, a blend change -- re-issued
+the raw PS (and VS) setters although ours was still bound. Now, after the source checks,
+each setter is skipped when the patched shader is still installed: the same patched and
+original shader and the stage's binding generation unchanged since ours went in (the game
+set nothing there). The blend and the source checks are untouched. Signature, the movers
+line's tail: `restores R; shader setters issued I, skipped K (ours still bound)` -- K
+roughly the kept re-maps and refreshes that reached a draw. Never ran: no setters clause.
+Rig: engine_velocity_test P3 (a re-map inside a pass: the patched PS stays bound, the setter
+skipped and counted).
+
+**4. The snapshot copies, measured only.** Each prepared eye-frame copies the whole pool
+buffer and the scene constants, and every observed append copies the pool again; the stats
+counted refreshes, not bytes. Now, per 30 s: `engine motion: snapshots (measure only): pool
+capacity C records (X MB), views expose E; copies: pool P at preparation (Y MB) + R on
+append refreshes (Z MB), scene constants S (W KB); ~V MB a frame logical` -- logical bytes
+submitted, not GPU time (the GPU time is item 5's). No storage change: if R x capacity is
+material, the next step is copying proven dirty ranges or sizing to the exposed range,
+never sharing one snapshot between eyes unproven. Never ran: no snapshots line. Rig:
+engine_velocity_test P4.
+
+**5. The attribution gaps.** (a) The slot target's clear, the snapshots at preparation and
+the append refreshes run in the game's own eye pass, before prep, so no prep figure contained
+them: each now sits between GPU timestamps (GpuTimer: a lease on the shared clock, polled at
+the owner's frame boundary with DONOTFLUSH, no Flush, no wait), and the price line prints
+them inside prep's parenthesis: `prep a/b (copy c/d mv e/f; eye-pass capture per event,
+before prep: clear m/p xN, snapshots m/p xN, refreshes m/p xN, U untimed, V invalid)`. (b)
+The foveated route's prep now has the same copy/mv parts as the full frame. (c) The price
+line names the shader build: `temporal aa price: <treatment>, WxH, lean shader|diagnostic
+shader, ...` -- and a change of build closes the window, so a diagnostic capture never prices
+the production shader. Never ran: no capture clause (or all three x0 with the capture
+counted untimed), the foveated parts at 0.00/0.00, no shader word. Rig: engine_velocity_test
+P5 (every capture timed or counted, the take resets).
+
+**6. One depth load fewer per engine pixel.** The mv pass holds the scene depth at its own
+texel (`sceneZraw`, from its depth tile at region.xy + id), and its offset-zero engine query
+loaded the same texel again inside enginePixel. `enginePixelZ` takes a held depth (a literal
+flag at each call, so the branch compiles away); the offset-zero call passes `sceneZraw`, the
+jittered callers keep the lookup. Same texel, same value, so the ownership test is unchanged
+bit for bit: engine_velocity_test's consumer cases (joined exact, masked, declined kinds)
+and the real corpus stay green. No log signature -- the pixel counts are the same; its price,
+if any, is inside `mv` in the price line against a build without it.

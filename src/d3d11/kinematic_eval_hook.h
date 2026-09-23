@@ -25,8 +25,9 @@ void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept;
 // --- The kinematic tracker's feed (with fix.temporal_aa) --------------------
 // The tracker needs the eval stream WITHOUT an eye dump armed, so the relay
 // gate is a cell of its own, open while EITHER consumer wants callbacks:
-// the probe while attached (attach/detach above) or the tracker while
-// fix.temporal_aa is on (below). The tracker registers a raw callback;
+// the probe while attached (attach/detach above), the tracker while engine
+// motion's diagnostics want it (below), or the emit (further below). The
+// tracker registers a raw callback;
 // the eval relay invokes it after the probe's observe, gated the same way.
 // jobMask carries the TLS bracket bits (1u<<jobId) active at observation --
 // the job-attribution discriminator (kinematic doc, 2026-09-20 17:10).
@@ -46,17 +47,25 @@ void kinematicEvalTrackerDetach() noexcept;
 // (param_2) and owner+0x2A4 read before and after -- the count of records the
 // call appended -- so engine_velocity.cpp can write the previous pose into
 // exactly those records before the engine's copier uploads them. Runs on the
-// producer's job thread, under the eval gate the tracker holds open (the
-// tracker is what fix.temporal_aa on attaches). Null = off: one atomic load.
+// producer's job thread, under the eval gate the emit holds open itself
+// (kinematicEvalEmitAttach below: the legacy tracker is diagnostic-only since
+// the 2026-09-23 performance review). Null = off: one atomic load.
 using EngineEmitObserverFn = void (*)(uintptr_t record, uintptr_t owner, int32_t before, int32_t after) noexcept;
 void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept;
+// The emit's own want on the shared hook set: validates the executable and
+// installs the same hooks as the tracker's attach, then holds the gate open
+// for the direct-producer relay. Same return vocabulary as
+// attachKinematicEvalHooks. Detach closes the want; the gate stays open while
+// any other consumer holds it.
+const char* kinematicEvalEmitAttach() noexcept;
+void kinematicEvalEmitDetach() noexcept;
 // Whether the observer above can be called at all: the hook set installed,
 // direct producer 0's relay (kinematic-build-144312e00) installed on its
-// own -- it stands down alone when CodeHook refuses it -- and the gate the
-// tracker holds open. False names the first missing piece in *why (a static
-// string). Three relaxed loads: engine-record velocity asks every frame, so
-// that zero emit calls can never pass for correct static motion (the
-// 2026-09-23 review of engine motion).
+// own -- it stands down alone when CodeHook refuses it -- and the gate open.
+// False names the first missing piece in *why (a static string). Three
+// relaxed loads: engine-record velocity asks every frame, so that zero emit
+// calls can never pass for correct static motion (the 2026-09-23 review of
+// engine motion).
 bool kinematicEvalEmitHookLive(const char** why) noexcept;
 
 // --- The scheduler stack probe's feed (advanced.scheduler_probe) ------------
