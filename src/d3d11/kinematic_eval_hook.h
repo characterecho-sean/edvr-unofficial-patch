@@ -39,6 +39,18 @@ const char* kinematicEvalTrackerAttach() noexcept;
 // Closes the tracker's want; the gate stays open while the probe holds it.
 void kinematicEvalTrackerDetach() noexcept;
 
+// --- Engine-record velocity's emit feed (fix.engine_motion=on, phase 1) -----
+// FUN_144312E00 (direct producer 0) appends each kinematic rig record's
+// 0x150-byte pool records to its owner's node lists. The direct bracket calls
+// this observer AFTER the forward with the rig record (param_1), the owner
+// (param_2) and owner+0x2A4 read before and after -- the count of records the
+// call appended -- so engine_velocity.cpp can write the previous pose into
+// exactly those records before the engine's copier uploads them. Runs on the
+// producer's job thread, under the eval gate the tracker holds open (the
+// tracker is what fix.engine_motion=on attaches). Null = off: one atomic load.
+using EngineEmitObserverFn = void (*)(uintptr_t record, uintptr_t owner, int32_t before, int32_t after) noexcept;
+void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept;
+
 // --- The scheduler stack probe's feed (advanced.scheduler_probe) ------------
 // Targets 0/1 of SchedulerStackProbe are the job bodies' own RVAs, which
 // already carry this hook's patch -- CodeHook refuses a second patch and

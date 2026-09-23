@@ -16,7 +16,8 @@ import struct
 import sys
 
 PATHS = {0: 'invalid', 1: 'head', 2: 'world', 3: 'ship', 4: 'body',
-         5: 'body2', 6: 'stepped', 7: 'terrain', 8: 'holo', 9: 'mesh', 10: 'screen'}
+         5: 'body2', 6: 'stepped', 7: 'terrain', 8: 'holo', 9: 'mesh', 10: 'screen',
+         11: 'engine'}
 FLAGS = {16: 'hidden_history', 32: 'screen_invalid_history', 64: 'ui_here',
          128: 'world_available', 256: 'depth_valid', 512: 'tracked_foreground',
          1024: 'projection_valid', 2048: 'static_confirmed'}

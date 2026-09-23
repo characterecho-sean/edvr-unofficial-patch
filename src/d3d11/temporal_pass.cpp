@@ -41,6 +41,7 @@
 #include "celestial_motion.h"
 #include "mesh_motion.h"
 #include "kinematic_motion.h"
+#include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
 #include "static_surface.h"
@@ -623,6 +624,7 @@ struct Slot {
     bool          timeDone = false;
     bool          timing = false;
     bool          statsDone = false;
+    bool          engineStats = false;   // Stats 50..53 hold engine-record velocity's counts
     uint64_t      pixels = 0;
     // The instrument's bookkeeping for this call: which candidates had a
     // delta (their pixel totals), the head's turn, whether history ran.
@@ -665,7 +667,7 @@ struct Slot {
     bool          totalValid = false;
 };
 constexpr int kSlots = 16;
-constexpr int kStatCount = 52;   // 50 used since 2026-09-09 (39-45 the moving ships, 46 the second body, 47-49 the stepped parts); a 208-byte buffer
+constexpr int kStatCount = 56;   // 50 used since 2026-09-09 (39-45 the moving ships, 46 the second body, 47-49 the stepped parts), 50-53 engine-record velocity's pixel counts (2026-09-23); a 224-byte buffer
 Slot g_slots[kSlots];
 
 // Bumped on every temporalPassConfigure call (both its call sites in
@@ -1189,6 +1191,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                                         D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
             if (SUCCEEDED(hr) && m.pData) {
                 const uint32_t* v = static_cast<const uint32_t*>(m.pData);
+                if (q.engineStats) engineVelocityNotePixels(v[50], v[51], v[52], v[53]);
                 g_rejected += v[0];
                 g_clipped += v[1];
                 g_pixelsSeen += q.pixels;
@@ -4050,6 +4053,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     ID3D11ShaderResourceView* staticOwnerSrvs[2] = {};
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> staticOwnerHeld[2];
     bool staticOwnerAvailable = false;
+    // Engine-record velocity's inputs for this eye (engine_velocity.h): MRT6,
+    // the pool snapshot and the scene constants now/before; all four or none.
+    EngineVelocityViews engineViews{};
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> engineHeldSrv[2];
+    Microsoft::WRL::ComPtr<ID3D11Buffer> engineHeldCb[2];
+    bool engineAvailable = false;
     ID3D11ShaderResourceView* screenSrv=screenMotionView(eye,sd.Width,sd.Height);
     if (depthSrv) {
         ID3D11Resource* res = nullptr;
@@ -4070,6 +4079,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             meshMotionStageClassification(ctx,scene,g_rowsFrame,src);
             staticOwnerAvailable = staticSurfaceViews(ctx, scene, staticOwnerSrvs);
             for (unsigned i = 0; i < 2; ++i) staticOwnerHeld[i].Attach(staticOwnerSrvs[i]);
+            engineAvailable = engineVelocityViews(ctx, eye, scene, &engineViews);
+            engineHeldSrv[0].Attach(engineViews.slots);
+            engineHeldSrv[1].Attach(engineViews.pool);
+            engineHeldCb[0].Attach(engineViews.sceneNow);
+            engineHeldCb[1].Attach(engineViews.scenePrev);
             scene->Release();
         }
     }
@@ -5155,6 +5169,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             "instrumented one runs instead (its registration counters stay on).");
         }
         const bool statsWritten = diagnostics || ((flags & 2u) == 0 && !leanOwn) || foveaConfigured();
+        // Engine-record velocity's pixel counts (Stats 50..53) come from the
+        // trained path's instrumented mv entry alone, through its own counter
+        // array -- no barrier or counter is added to the lean variant.
+        bool engineCounted = false;   // the instrumented mv ran with the engine inputs bound
         const bool timingOwner = gpuTimingBind(dev, ctx) && gpuTimingAccepts(ctx);
         // Stage 0 price report: sample every call the timing owner accepts,
         // not just the stats-written 1-in-32 (fovea already ran every call;
@@ -5659,7 +5677,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 g_csUiResolveTried = true;
                 g_csUiResolve = shaderSwapCompileCs(ctx, kUiResolve, sizeof(kUiResolve) - 1, "main", "UI resolve", nullptr, "UI resolve");
             }
-            const bool debugPaintHere = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4 || g_debugMode == 5;
+            const bool debugPaintHere = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4 || g_debugMode == 5 ||
+                                        g_debugMode == 6;
             const bool uiResolveHere = uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaintHere;
             if (!uiResolveHere || deferredActive) return false;
             const bool separated = allowSeparated && separatedCandidate.colour &&
@@ -5832,7 +5851,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     g_eyeDecisions[g_eyeRunTaken].error = "non_nvidia_trace_unsupported";
                 }
                 if (made && setParams(ctx, p)) {
-                    const bool debugPaint = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4 || g_debugMode == 5;
+                    const bool debugPaint = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4 || g_debugMode == 5 ||
+                                            g_debugMode == 6;
                     if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
                         g_csUiResolveTried=true;
                         g_csUiResolve=shaderSwapCompileCs(ctx,kUiResolve,sizeof(kUiResolve)-1,"main","UI resolve",nullptr,"UI resolve");
@@ -5971,20 +5991,31 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // (off): bit 1024 arms it, ownership alone only paints.
                     if (kcBound && g_engineMotionVeto) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
+                    // Engine-record velocity (fix.engine_motion=on): bit 2048
+                    // and t21/t22/b1/b2 below; clear = byte-identical.
+                    const bool engineBound = engineAvailable && depthSrv;
+                    if (engineBound) p.probe[3] =
+                        static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 2048u);
+                    engineCounted = engineBound && diagnostics;
                     if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
                         g_eyeDecisions[g_eyeRunTaken].kinBound = kcBound;
                         g_eyeDecisions[g_eyeRunTaken].kinVeto = kcBound && g_engineMotionVeto;
                     }
-                    if (uiTrack) ensureBiasMask(dev,e,w,h);
+                    // A masked engine pixel sets the bias mask too, for the
+                    // presets and FSR that read it (modern DLSS honours the
+                    // history-invalidate vector the same pixel also gets).
+                    if (uiTrack || engineBound) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
-                    ID3D11ShaderResourceView* nullSrvM[21] = {};
+                    ID3D11ShaderResourceView* nullSrvM[23] = {};
+                    // t21/t22 are touched only while engine-record velocity is bound.
+                    const UINT srvCountM = engineBound ? 23u : 21u;
                     ID3D11UnorderedAccessView* nullUavM[8] = {};
                     ID3D11UnorderedAccessView* savedTraceUav = nullptr;
                     if (traceReady) ctx->CSGetUnorderedAccessViews(7, 1, &savedTraceUav);
-                    ctx->CSSetShaderResources(0, 21, nullSrvM);
+                    ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[21] = {deferredInput?e.dlColourSrv:separated?separatedCandidate.colourView:inSrv,
+                    ID3D11ShaderResourceView* srvsM[23] = {deferredInput?e.dlColourSrv:separated?separatedCandidate.colourView:inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
@@ -5993,20 +6024,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           smokeSrv, separated?separatedCandidate.depth:uiDepthSrv,
                                                           uiTrack && !deferredInput && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], staticOwnerBound ? staticOwner[0] : nullptr, staticOwnerBound ? staticOwner[1] : nullptr,
-                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr};
+                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr,
+                                                          engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr};
                     ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
                                                             uiTrack && !uiResolve && !deferredInput ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
                                                             traceReady ? e.dlDecisionUav : nullptr};
-                    ID3D11Buffer* cbM = g_cb;
+                    ID3D11Buffer* cbM[3] = {g_cb, engineViews.sceneNow, engineViews.scenePrev};
+                    // b1/b2 only while engine-record velocity is bound, and put
+                    // back after: the pass's own save/restore covers b0 alone.
+                    ID3D11Buffer* savedCbM[2] = {};
+                    if (engineBound) ctx->CSGetConstantBuffers(1, 2, savedCbM);
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 21, srvsM);
+                    ctx->CSSetShaderResources(0, srvCountM, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, uavsM, nullptr);
-                    ctx->CSSetConstantBuffers(0, 1, &cbM);
+                    ctx->CSSetConstantBuffers(0, engineBound ? 3 : 1, cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 21, nullSrvM);
+                    if (engineBound) {
+                        ctx->CSSetConstantBuffers(1, 2, savedCbM);
+                        for (auto* b : savedCbM) if (b) b->Release();
+                    }
+                    ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
                     if (traceReady) {
                         EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
@@ -6030,8 +6070,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if(deferredInput && eye==0 && g_eyeInputs[0] && g_eyeInputsFrame==g_rowsFrame){stageEyeRun(ctx,e.dlColour,g_eyeInputs,16);g_eyeInputsUiFlags|=64u;}
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
-                    // the mover mask existed), else nothing.
-                    ID3D11Texture2D* biasMask = ((p.movers[0] != 0.0f || uiTrack) && e.dlMask) ? e.dlMask : reactiveMask;
+                    // the mover mask existed), else nothing. Engine-record
+                    // velocity's masked pixels are in the union too.
+                    ID3D11Texture2D* biasMask = ((p.movers[0] != 0.0f || uiTrack || engineBound) && e.dlMask) ? e.dlMask : reactiveMask;
                     // NVIDIA's evaluation. Its history restarts only when it is
                     // broken: this eye's first frame, a withhold (flags bit 0),
                     // rebuilt textures, or a frame the pass's own history ran in
@@ -6250,6 +6291,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // The own path: the interface's coverage mask at t4 for the body
         // path's exclusion (the trained block above binds its own).
         bool kcBound = false;   // stage B: this eye's kinematic coverage pair is live this frame
+        bool engineOwn = false; // engine-record velocity's inputs bound for the own path (fovea mv, main)
         if (!usedDlaa) {
             if(e.uiResolvedHistory){e.uiHistoryValid=false;e.uiResolvedHistory=false;}
             ID3D11Texture2D* rm = nullptr;
@@ -6261,6 +6303,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (kcBound) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
             if (kcBound && g_engineMotionVeto) p.probe[3] =
                 static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
+            engineOwn = engineAvailable && depthSrv;
+            if (engineOwn) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 2048u);
             if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
                 g_eyeDecisions[g_eyeRunTaken].kinBound = kcBound;
                 g_eyeDecisions[g_eyeRunTaken].kinVeto = kcBound && g_engineMotionVeto;
@@ -6487,19 +6531,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // own copy of the vectors, and this is the ONE dispatch
                     // that binds it -- everywhere else the slot stays null and
                     // the shader's store there is dropped.
-                    ID3D11ShaderResourceView* nullSrvM[21] = {};
+                    ID3D11ShaderResourceView* nullSrvM[23] = {};
+                    const UINT srvCountM = engineOwn ? 23u : 21u;
                     ID3D11UnorderedAccessView* nullUavM[8] = {};
-                    ctx->CSSetShaderResources(0, 21, nullSrvM);
+                    ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 8, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[21] = {inSrv, e.histSrv[readIdx], depthSrv,
+                    ID3D11ShaderResourceView* srvsM[23] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
                                                           p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], nullptr, nullptr,
-                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr};
+                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr,
+                                                          engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
                     // the same slots (15-17), so binding it would double them
@@ -6509,14 +6555,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                            e.dlMvUav, e.dlDepthUav, e.dlMaskUav,
                                                            uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
                                                            e.dlMvLeadUav};
-                    ID3D11Buffer* cbM = g_cb;
+                    ID3D11Buffer* cbM[3] = {g_cb, engineViews.sceneNow, engineViews.scenePrev};
+                    ID3D11Buffer* savedCbM[2] = {};
+                    if (engineOwn) ctx->CSGetConstantBuffers(1, 2, savedCbM);
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 21, srvsM);
+                    ctx->CSSetShaderResources(0, srvCountM, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 8, uavsM, nullptr);
-                    ctx->CSSetConstantBuffers(0, 1, &cbM);
+                    ctx->CSSetConstantBuffers(0, engineOwn ? 3 : 1, cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 21, nullSrvM);
+                    if (engineOwn) {
+                        ctx->CSSetConstantBuffers(1, 2, savedCbM);
+                        for (auto* b : savedCbM) if (b) b->Release();
+                    }
+                    ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 8, nullUavM, nullptr);
                     endRegion(qs, Region::Prep, ctx);
                     // The vectors NVIDIA's crop will read carried the slide on
@@ -6763,9 +6815,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                 }
                 setParams(ctx, p);
-                ID3D11ShaderResourceView* nullSrv[21] = {};
+                ID3D11ShaderResourceView* nullSrv[23] = {};
+                const UINT srvCount = engineOwn ? 23u : 21u;
                 ID3D11UnorderedAccessView* nullUav[7] = {};
-                ctx->CSSetShaderResources(0, 21, nullSrv);
+                ctx->CSSetShaderResources(0, srvCount, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 ctx->CSSetShader(ownCs, nullptr, 0);
                 if (leanOwn && !g_leanNoted) {
@@ -6777,23 +6830,26 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         "compiled out; advanced.temporal_aa_diagnostics = 1 runs the "
                         "instrumented one, live, and the price line names which ran.");
                 }
-                ID3D11ShaderResourceView* srvs[21] = {inSrv, e.histSrv[readIdx], depthSrv,
+                ID3D11ShaderResourceView* srvs[23] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
                                                      p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                      p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                      smokeSrv, uiDepthSrv,
                                                      uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], nullptr, nullptr,
-                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr};
+                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr,
+                                                          engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
                 ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,
                                                       carry ? e.dlDepthUav : nullptr, nullptr,
                                                       uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
-                ID3D11Buffer* cb = g_cb;
+                ID3D11Buffer* cbs[3] = {g_cb, engineViews.sceneNow, engineViews.scenePrev};
+                ID3D11Buffer* savedCbs[2] = {};
+                if (engineOwn) ctx->CSGetConstantBuffers(1, 2, savedCbs);
                 ID3D11SamplerState* smp = g_samp;
-                ctx->CSSetShaderResources(0, 21, srvs);
+                ctx->CSSetShaderResources(0, srvCount, srvs);
                 ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
-                ctx->CSSetConstantBuffers(0, 1, &cb);
+                ctx->CSSetConstantBuffers(0, engineOwn ? 3 : 1, cbs);
                 ctx->CSSetSamplers(0, 1, &smp);
                 // Untimed (falls into the price report's "other") when the
                 // fovea is off -- ordinary, non-fovea TAA's own resolve
@@ -6806,7 +6862,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 if (foveaMode) beginRegion(qs, Region::Periphery, dev, ctx);
                 ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                 if (foveaMode) endRegion(qs, Region::Periphery, ctx);
-                ctx->CSSetShaderResources(0, 21, nullSrv);
+                if (engineOwn) {
+                    ctx->CSSetConstantBuffers(1, 2, savedCbs);
+                    for (auto* b : savedCbs) if (b) b->Release();
+                }
+                ctx->CSSetShaderResources(0, srvCount, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 if (carry) zcWritten = true;
                 if (uiTrack) uiEvidenceWritten = true;
@@ -6933,6 +6993,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             g_slots[qs].inUse = true;
             g_slots[qs].timeDone = !g_slots[qs].timing;
             g_slots[qs].statsDone = !(statsWritten || (ran && !usedDlaa && !leanOwn));
+            g_slots[qs].engineStats = engineCounted;
             g_slots[qs].pixels = static_cast<uint64_t>(w) * h;
             g_slots[qs].hadHistory = useHistory;
             g_slots[qs].headDeg = headDeg;
@@ -7240,14 +7301,21 @@ void temporalPassConfigure(Config& cfg) {
     // against the frame (the terrain frame-time arc, 2026-09-17). Off leaves
     // the camera's motion on their pixels, which ghosts on a moving body,
     // which is the point: a lever, not a setting to fly with.
-    celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.terrain_motion", true));
-    meshMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.mesh_motion", true));
-    // The kinematic tracker (docs/kinematic-motion-injection-2026-09-19.md):
-    // engine-truth stasis for settlement records, feeding the temporal pass's
-    // ownership coverage. The mask is diagnostic-only (the movers view paints
-    // owned pixels cyan) unless fix.engine_motion_veto is on. auto is reserved
-    // until the scene gate lands and behaves as off, said once.
+    // fix.engine_motion (docs/kinematic-motion-injection-2026-09-19.md): on is
+    // engine-record velocity -- the kinematic tracker's hook set, the emit
+    // bracket writing each rig record's previous pose into the pool, the pool
+    // families' own draws recording slot and depth, and the compose taking the
+    // record's exact motion there. auto is reserved until the scene gate
+    // lands and behaves as off, said once. Read first: the estimators below
+    // default off when it is on.
     const std::string engineMotion = cfg.getString("fix.engine_motion", "off");
+    const bool engineMotionOn = detail::g_temporalPassWantedFssChrome && _stricmp(engineMotion.c_str(), "on") == 0;
+    celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.terrain_motion", true));
+    // The per-record rigid match (mesh_motion) estimates a mover's motion by
+    // pairing pool records across frames; with engine-record velocity on it
+    // defaults off (advanced.mesh_motion = on keeps it for an A/B, and the
+    // engine's pixels override it either way).
+    meshMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.mesh_motion", !engineMotionOn));
     {
         static bool engineMotionAutoNoted = false;
         if (_stricmp(engineMotion.c_str(), "auto") == 0 && !engineMotionAutoNoted) {
@@ -7255,7 +7323,8 @@ void temporalPassConfigure(Config& cfg) {
             Log::get().note("engine motion: fix.engine_motion=auto is reserved until the "
                             "scene gate lands -- behaving as off.");
         }
-        kinematicMotionConfigure(detail::g_temporalPassWantedFssChrome && _stricmp(engineMotion.c_str(), "on") == 0);
+        kinematicMotionConfigure(engineMotionOn);
+        engineVelocityConfigure(engineMotionOn);
     }
     // The scheduler stack-capture probe (docs/engine-render-pipeline.md
     // stage 0): read-only return-address signatures at the four
@@ -7286,6 +7355,15 @@ void temporalPassConfigure(Config& cfg) {
                          (staticFovea.empty() || _stricmp(staticFovea.c_str(), "0") == 0) &&
                          cfg.getBool("advanced.temporal_aa_static_surfaces", false);
     staticSurfaceConfigure(g_staticSurfacesOn);
+    if (g_staticSurfacesOn && engineMotionOn) {
+        static bool bothNoted = false;
+        if (!bothNoted) {
+            bothNoted = true;
+            Log::get().note("engine motion: advanced.temporal_aa_static_surfaces and fix.engine_motion=on both replace "
+                            "the pool families' pixel shaders; on a draw engine-record velocity has substituted, the "
+                            "static owner finds a shader it did not patch and declines (its 'shaders' decline count).");
+        }
+    }
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
     float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);
@@ -7317,8 +7395,15 @@ void temporalPassConfigure(Config& cfg) {
     const std::string dbg = cfg.getString("advanced.temporal_aa_debug", "off");
     g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
-                : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : 0;
-    g_objectsOn = detail::g_temporalPassWantedFssChrome;
+                : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : _stricmp(dbg.c_str(), "motion_source") == 0 ? 6 : 0;
+    // Tier 2's estimated object motion (the body/ship paths and the body's
+    // occupancy grid, object_probe.cpp's rigid fit): on with the temporal pass,
+    // off by default while engine-record velocity is on -- it estimates, and
+    // the requirement is no estimation. advanced.temporal_aa_estimated_objects
+    // = on keeps it for an A/B; the engine's own pixels override it either way.
+    // (Not the retired fix.temporal_aa_objects, which config_test keeps unset.)
+    g_objectsOn = detail::g_temporalPassWantedFssChrome &&
+                  cfg.getBool("advanced.temporal_aa_estimated_objects", !engineMotionOn);
     float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 1500.0f);
     if (!std::isfinite(reach)) reach = 1500.0f;
     if (reach < 1.0f) reach = 1.0f;

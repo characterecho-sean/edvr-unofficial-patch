@@ -449,6 +449,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\lod_governor.cpp" ^
     "src\d3d11\kinematic_motion.cpp" ^
+    "src\d3d11\engine_velocity.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
     "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
@@ -2003,6 +2004,27 @@ if errorlevel 1 ( echo [edvr] ERROR: kinematic JSON writer test build failed & e
 "%BUILD%\kinematic_json_test.exe" --dry-run || exit /b 1
 "%BUILD%\kinematic_json_test.exe" --self-test || exit /b 1
 python "tools\kinematic_json_selftest.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_engine_velocity_test
+echo [edvr] === engine_velocity_test.exe ===
+REM Build gate for engine-record velocity (fix.engine_motion=on, phase 1;
+REM docs\kinematic-motion-injection-2026-09-19.md, 2026-09-23): the DXBC
+REM patcher end to end on WARP (patched pool-family shaders disassemble,
+REM reflect, create and DRAW the exact slot and depth at MRT6), the emit
+REM bracket against a fake engine laid out as build 332841 (previous pose,
+REM self-checking marker, the disagreement gate, the table), and the
+REM compose's arithmetic from the shipped HLSL text against a double
+REM reference. A parser or patcher that drifts fails here, not in a flight.
+if not exist "%OBJ%\enginevelocity" mkdir "%OBJ%\enginevelocity"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\enginevelocity\\" /Fe"%OBJ%\enginevelocity\engine_velocity_test.exe" ^
+    "tools\engine_velocity_test\engine_velocity_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b 1 )
+"%OBJ%\enginevelocity\engine_velocity_test.exe" --dry-run || exit /b 1
+"%OBJ%\enginevelocity\engine_velocity_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_kinematic_motion_test

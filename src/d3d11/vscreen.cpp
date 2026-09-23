@@ -74,6 +74,7 @@
 #include "mesh_motion.h"
 #include "object_classification_probe.h"
 #include "static_surface.h"
+#include "engine_velocity.h"
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "intro_panel.h"
 #include "intro_skip.h"
@@ -125,6 +126,9 @@ static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint
         meshMotionResourceWritten(resource,first,end);
     if(static_surface_detail::enabled.load())staticSurfaceResourceWritten(resource,first,end);
     uiDepthMotionResourceWritten(resource,first,end);
+    // Engine-record velocity: a write to an open eye-frame's pool or scene
+    // constants drops that eye-frame's engine data (engine_velocity.h).
+    engineVelocityResourceWritten(resource);
 }
 
 // How often the totals line is written, and how long the starvation notice
@@ -4076,6 +4080,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         uiSeparationUnknownWrite();
         uiDeferredUnknownWrite(self);
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
+        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     }
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawIndexedInstancedIndirect, kOriginalDrawProbeUnknown,
@@ -4100,6 +4105,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         uiSeparationUnknownWrite();
         uiDeferredUnknownWrite(self);
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
+        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     }
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawInstancedIndirect, kOriginalDrawProbeUnknown,
@@ -4356,6 +4362,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     DrawArgs args;
     args.base = static_cast<int32_t>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     forwardWithVerdict(self, v, 'D', count, 1, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
                             uiSeparationLive() && uiSeparationBegin(self);
@@ -4371,7 +4378,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     gpuFrameCommand(self);
-    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
+    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawAuto, kOriginalDrawProbeUnknown,
         kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
@@ -4394,6 +4401,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.start = startIndex;
     args.base = baseVertex;
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     forwardWithVerdict(self, v, 'I', count, 1, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
                             uiSeparationLive() && uiSeparationBegin(self);
@@ -4421,6 +4429,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.base = static_cast<int32_t>(startVertex);
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     // The draw's instance window, for the glare telemetry: the trains
     // share one record buffer at different offsets, and which train a
     // draw carries is only knowable from (start, count).
@@ -4476,6 +4485,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.base = baseVertex;
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    // Engine-record velocity (fix.engine_motion=on): four generation
+    // compares; the pool families' substituted shaders and MRT6 are bound
+    // only when the game has rebound something since the last look. After the
+    // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
         const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
                             uiSeparationLive() && uiSeparationBegin(self);
@@ -5301,6 +5315,7 @@ void vScreenFrameBoundary() {
         celestialMotionFrameBoundary(g_state->ownerCtx);
         meshMotionFrameBoundary(g_state->ownerCtx);
         staticSurfaceFrameBoundary(g_state->ownerCtx);
+        engineVelocityFrameBoundary(g_state->ownerCtx);
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
         sharpenPassTick(g_state->ownerCtx);
