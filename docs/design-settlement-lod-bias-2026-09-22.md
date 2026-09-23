@@ -44,6 +44,11 @@ on it 2026-09-23 (section 8: flown once). Capture: eye run 165433
 | 8 | 613, 3.36%, 0.21/0.29 | 18..11,493 (0.1..62.9%) |
 | 10.46 (0.25 deg cap) | 1,089, 5.96%, 0.38/0.51 | 82..13,033 |
 
+- **LOD distance, now EXACT** (the v3 tables from reader run 012514,
+  keyed by effective s x k on top of the game's s; section 8): 1.875 ->
+  318 draws, 1.9%; 2.25 -> 1,123, 6.7%; 3.0 -> 3,222, 19.2% (1.21 ms);
+  4.5 -> 5,634, 33.5% (2.11 ms); 6.0 -> 33.7%. It levels off near 34%:
+  the building shells' tables (t0 21.38) never drop.
 - **Visual cost (screen size):** only parts under k pixels go: at k = 8,
   radius <= 1.28 m at 77-396 m (p50 279 m), r/d <= 0.191 deg; 16 small
   records (1-6 parts) go whole, no building; 21 / 19 removed slots were
