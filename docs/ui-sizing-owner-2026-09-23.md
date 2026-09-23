@@ -60,6 +60,13 @@ Ruled out: nothing by flight. Inference: vscreen_res.h's 0x288E495 is the
 view-mode 5/6 branch of `FUN_14288E3A0`; the panels follow W, so it never
 sized them.
 
+Later the same day: the instrument is MERGED (e24959dc) and the four-operand
+patch is BUILT (f229753d on the UI agent's branch), held unmerged until the
+chains read `rtt`. Design, safety and the cursor-window finding (the panel
+cursor window divides the panel's own size by the UI screen's, so a
+mouse-driven panel's cursor slows by 1/f under the patch; a fifth site, not
+built) are in docs/ui-layer-2026-09-23.md, "The engine's panel sizing".
+
 ## 1. What the flight logs carry
 
 `src\d3d11\ui_surfaces.cpp` (main 48dcb9b6): the stack is captured only in
