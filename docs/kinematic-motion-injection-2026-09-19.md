@@ -31,14 +31,12 @@
   carried, source rebinds and blend hooked and checked, derived unblended MRT6 state
   with odd slot codes, every compute slot restored) plus the stand-down line; MRT6
   binding validated; a census of evaluated-but-not-drawn movers.
-- **Open:** the fix round's flight (its entry's "What the next flight must show");
-  whether the tracker's extra movers are evaluated-but-not-drawn (the census); the
-  boarding flicker's cause (prime candidate: the LOD governor's ramp from 06:57:14.269,
-  not this arc's code); B's coverage of stations and ships in space (untested);
-  builder-path movers (0x42B4130, 2 of 82 in 165433) and articulated parts (phase 2,
-  per-part transforms); the previous bone palette's residency (skinned motion, phase
-  2); the particle families' inputs; why one extra barrier at the end of `mv` changed
-  its instrumented output on WARP.
+- **Open:** the fix round's flight (its entry's checklist); whether the tracker's extra
+  movers are evaluated-but-not-drawn (the census); the boarding flicker (prime
+  candidate: the LOD governor's ramp from 06:57:14.269, not this arc's code); stations
+  and ships in space (untested); builder-path movers (0x42B4130) and articulated parts
+  (phase 2); skinned motion's previous palette (phase 2); the particle families'
+  inputs; the extra `mv` barrier that changed its instrumented output on WARP.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -51,7 +49,9 @@
   (estimation, the review); the tick straddling two frames as the gap cause (repeats and
   in-frame pose changes 0 in all 8 windows of 065324); rows 270..275 changing inside
   an eye pass (capture 043720: one block per pass); "blending on MRT6 only loses
-  coverage" (the review's WARP counterexample). Do not re-propose any of the above.
+  coverage" (the review's WARP counterexample); the substituted shaders changing the
+  game's G-buffer (o0..o3 and depth bit-identical, all nine real pairs, WARP). Do not
+  re-propose any of the above.
 - **Next:** review and merge the fix round, then the same flight: a ship landing at a
   settlement with fix.engine_motion=on, fix.temporal_aa=dlss,
   advanced.temporal_aa_diagnostics=1 and the motion_source view, read against the Fix
@@ -2036,7 +2036,10 @@ fsr3Available(...) : dlaaAvailable(...)` in an inner scope, so `engineBound =
 engineAvailable && depthSrv` read the UPSCALER's availability. Every DLSS dispatch of the
 flight bound the engine inputs (null views), set probe bit 2048, and cleared CS t21/t22
 after (the save covered t0..t18, so they stayed null). The outer flag is now
-`engineViewsGiven`.
+`engineViewsGiven`. Its signature in the log, with views given 0: `[06:55:35.410] engine
+motion: pixels per eye-frame on the trained path: engine-joined 0, masked 0 (no history),
+pool surface not a rig record 0 (camera term), stale slot 2832665` -- the whole eye
+"stale", because an unbound ES reads (0, 0) and phase 1's decode let x = 0 through.
 
 **Fix.** A write no longer decides anything. The Map tee keeps a watched source's mapped
 pointer and map type; the Unmap tee (before the real Unmap) reads registers 270..275 back
@@ -2066,11 +2069,21 @@ quoted from the log: 06:57:10.333 `luma probe: eye=0 first black stage is game`;
 `dropped (the game's setting would have kept it) 108.2/frame (max 1565)` for each eye. The
 first ship eye-frames of engine motion fall in the 06:57:05-06:57:35 window (2639; the
 on-foot window before it had 0); phase 1 logged neither the slot target's creation nor the
-first substitution. Candidates: (a) from 06:57:14.269 the LOD governor ramping from k 1 --
+first substitution. From 06:56:50 to 06:57:10 engine motion substituted nothing
+(`[06:57:05.409] ... eye-frames 0, with MRT6 bound 0`) and its emit writes only bytes
+288-319, which no pool VS reads (the scan of 89 pool VS above). What did change in that
+stretch: the temporal pass's world path flipped between the scene camera and auxiliary
+camera rows, eleven lines of `auxiliary camera rows do not follow the head; the world path
+waits for the scene camera` / `scene camera accepted` from 06:56:50.111 to 06:57:09.460, the
+transition-flash detector stopped withholding frames that land on a parked auxiliary
+camera (06:57:08.142), and one 22.4 ms frame (06:57:09.838, `LONG FRAME`). Candidates: (a) from 06:57:14.269 the LOD governor ramping from k 1 --
 the prime candidate; nothing changed there (not this arc's code); (b) from ~06:57:11.7 the
-substituted ps_3434 on the first EB52 draw of each ship eye-frame -- the synthetic
-families' four targets are bit-identical patched vs stock (blendChecks), the real pairs'
-check is the corpus identity test; (c) the whole flight: CS t21/t22 left null after every DLSS dispatch -- present in
+substituted ps_3434 on the first EB52 draw of each ship eye-frame -- CLEARED on WARP: all
+nine real pairs, stock vs patched over the same synthetic inputs and patterned resources,
+two data sets, write SV_Target0..3 and depth byte for byte identically (40,960 texels a
+pair, 0 mismatches; a deliberate one-instruction mutation is caught on every pair), MRT6
+exact (the corpus identity test below; WARP, not the RTX 5090's compiler); (c) the whole
+flight: CS t21/t22 left null after every DLSS dispatch -- present in
 every window, not boarding-specific; fixed; (d) MRT6's binding -- the ship depth is a valid
 D32 pair, so the set was legal; it is now validated first and its acceptance read back;
 (e) MRT6 inheriting the blend -- touches MRT6 only (rig: the game's four targets
@@ -2133,8 +2146,12 @@ blend states (shader_tests.h), the history rules across following frames and the
 engine inputs bound (consumer_tests.h: joined exact to 3e-7 px; masked gets the
 no-history vector and MK = 1; even, fractional, zero, stale, cleared and out-of-range
 codes all equal the no-engine result; Stats 50..54 match), and engine_velocity.cpp
-itself linked in and driven on WARP (lifecycle_tests.h). Locally (`--corpus`): all nine
-real pairs patch, reflect and create with the odd-code tail.
+itself linked in and driven on WARP (lifecycle_tests.h). Locally (`--corpus`, 1,073
+checks): all nine real pairs patch, reflect and create with the odd-code tail, and
+corpus_identity.h draws each stock and patched pair over the same inputs (a synthetic VS
+built from the patched PS's input signature; the game's shaders carry no RDEF, so the
+resource declarations come from the disassembly) -- SV_Target0..3 and depth bit-identical,
+MRT6 exact, every pair.
 
 **New counters.** Emit: masked for first seen / gap / reused / same-frame change /
 previous frame not certified / this call unproven / table full; tainted. History: gap
