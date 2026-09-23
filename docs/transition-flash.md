@@ -1,5 +1,20 @@
 # The one-frame flash at transitions
 
+## Status
+
+- **State (2026-09-23):** the shipped fix is still the trap below: detect the
+  bad frame, resubmit the previous one. An in-engine fix is DESIGNED, not
+  built or flown: `docs\design-transition-flash-engine-fix-2026-09-23.md`.
+  Read that doc's Status block first.
+- **What the bad frame is:** the eye origin `cb1[275]` collapses to the head
+  pose alone, so the ship/seat transform is missing for one frame. Statically
+  traced to Elite's camera compose reading a parent node's world block the
+  world pass has not written yet.
+- **Next flight:** the design's Phase 1 anatomy instrument.
+- **Open:** issue #34 (second and later jumps) was closed on timing and never
+  re-measured; false replacements in smooth forward flight.
+- **Ruled out:** listed at the end of the design doc.
+
 *Frontier issue [37825](https://issues.frontierstore.net/issue-detail/37825) —
 "VR - Random, glitchy frame(s) appearing when entering orbital glide on a
 planet"*
