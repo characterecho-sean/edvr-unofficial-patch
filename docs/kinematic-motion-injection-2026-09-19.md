@@ -2,237 +2,40 @@
 
 ## Status
 
-- **State:** DECIDED DIRECTION, 2026-09-19 (Sean): the final design for
-  DLSS motion is engine-level injection from KinematicRig truth, not
-  draw-call interpretation in the render pipeline. Draw-call identity
-  and motion estimation are ruled out as a class (see below). The
-  DLSS-path MV replacement (surface 2) is the end goal; EDVR's own
-  temporal pass (surface 1) is the diagnostic stepping stone that proves
-  the injected MVs are right before they touch DLSS history.
-- **Open:** phase 0 is PARTLY RESOLVED offline after Sean's 2026-09-19
-  21:23 review (settlement doc, same-time entry): the 20:52 flight's "hash
-  stable across 1.4M calls" was never established (transition cap 8192 with
-  1.44M overflowed, no hash-only counter), and +0x268 is a render-config
-  hash that never reads the transform (FUN_14433C750) — retracted as a
-  stasis signal. The 21:58 offline trace resolved collection+0x18 as a
-  backing-owner pointer (ctor FUN_14430A060 param_3, single writer) and
-  mapped the transform chain (FUN_144331300 LOD evaluator ->
-  FUN_14433DB20 world updater; epoch pair collection+0x90 vs record+0x1B8
-  as change-signal candidate). Flight 043344 (settlement doc 05:05
-  entry) then REFUTED owner == rig — collection+0x18 is one shared
-  global owner for every collection, not a per-rig object — and killed
-  the epoch pair as captured (record+0x1B8 a constant small enum, never
-  changing; the eval-hook descriptor +0x38 is a pointer, not the job
-  descriptor's epoch field). Flight 054002 (settlement doc 05:45
-  entry) then CLOSED per-rig reachability: rig -> *(rig+0x348)
-  collection is proven (58/58 job-0 collections joined a rig; one
-  shared global owner on both sides), with ~1,572 stable rigs, one
-  collection each, one FUN_14431AFE0 dispatch per rig per frame. The
-  engine-sourced motion path is now walkable: rig -> collection ->
-  records (+0x280, stride 0x2F0) -> record+0x170/+0x17C per-frame truth.
-  2026-09-21 transform-trace correction: this doc's earlier
-  "record+0x130..0x16C transforms" pointer is the static local 4x4 (init at
-  record creation; no reader in any render-chain function — do not key
-  motion on it). FUN_14433DB20 writes +0x170 (position) + +0x17C (packed
-  quat) + +0x240 bounds, copies +0xF0..0x128 -> +0x1C0..0x1F8 (prior-frame
-  products), and hands render-ward through the vtable interface at
-  record+0x2C8 (+0x68/70/78/80) into the slot array at
-  (*(record+0x290)+0x50, 0x58-stride groups, 0x20 items). The class behind
-  +0x2C8's vtable is the one runtime-only identity; everything upstream is
-  offline-proven (decomp_433DB20, transform_field_refs.txt).
-  Still open: per-record identity (~5 records share one node
-  pointer), pixel ownership, and the job-cost remeasure with the
-  detailed observer disabled (job-3 = PrePhysicsAdvanceJob was never
-  hooked — CodeHook refused a thunk/foreign-hook leading instruction;
-  CurveJob hooked but never invoked). No per-record identity,
-  pixel-ownership, or stasis claim survives without that work.
-- **Ruled out (inherited, do not re-propose):** draw-shape memo identity
-  (~96% misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body
-  match (self-confirming); estimating hidden-bone spin from the pool.
-- **Capture landed (2026-09-20, settlement doc 08:22 entry):** the
-  frame-aligned pose/identity capture is in KinematicEvalProbe
-  (v0.17.0-103-g267d0430-dirty, installed to frontier) -- per-record
-  per-frame translation+quat samples, dup-in-frame, gap-resume and
-  node-change identity events (the slot-reuse probe for the shared-node
-  records), frame stats, bounded mover sample log. Not yet flown.
-  Update 09:35: re-clocked per-present (flight 083323 refuted the mesh
-  clock) with a clock_samples mesh-staleness discriminator,
-  v0.17.0-107-g5fe9c004-dirty. Update 10:38: capture v2 (arm-seed fix,
-  32,768-sample cap, gap re-log backstop) flight-proven clean on 103339
-  -- zero startup gap events, samples survive the full window, drone
-  per-frame series complete (settlement doc 10:38 entry). Update 10:52:
-  the Phase-1 implementation spec landed below (tracker + quarter-res
-  ownership coverage + static-zero compose veto, fix.engine_motion
-  default off) -- the build spec for the next branch, with its own
-  test rig and flight-verification plan.
-  Update 13:30: stage-A.5 -- the stage-B extents question is resolved
-  OFFLINE (settlement doc same-time entry): the record bounds are a
-  bounding SPHERE, centre float4 at +0x270 and radius at +0x280
-  (writer FUN_14433C870 from model data +0x20/+0x2C, unioned over
-  children by sphere-merge FUN_140A8C9A0). The planned wide
-  +0x130..+0x250 capture is replaced by a targeted 32-byte sphere read
-  in the dump line (svalid/s=, v0.17.0-123-gdae06c51-dirty, installed
-  to frontier, verified). Flight 132856 then CONFIRMED the sphere end
-  to end (settlement doc 13:45 entry): sane radii, and world centre
-  +0x240 == R^T x local + T exactly on all statics. Stage B unblocked.
-  Update 13:55: stage B spec'd below against the flight-proven sphere
-  layout -- sphere projection replaces the 10:52 AABB-corners sketch,
-  the stasis compare extends to pose+sphere (the LOD-rewrite case),
-  world centre is computed (R^T x local + T), never read.
-  Update 14:45: stage B LANDED (6b90d0b on codex/stage-b-ownership,
-  frontier install d3d11 sha256 81d5d27f434b2458) -- landed entry at
-  the foot; the 13:55 verification flight is next, not yet flown.
-  Update 15:20: the 13-finding review of 6b90d0b keeps the mask
-  DIAGNOSTIC-ONLY (fix.engine_motion_veto, default off, arms the veto);
-  findings 1/4/5 fixed (5fb4f62, frontier d6d5ef39ceb2a0ca) -- review
-  response entry at the foot. Flight protocol unchanged, veto dark.
-  Update 15:40: flight 152934 (same-date entry) -- all three fixes hold
-  in flight, tracker healthy at settlement scale (~2.6k published); the
-  movers-view cyan question is OPEN: the eye burst missed the debug
-  toggle window. Re-fly with the movers view HELD through the capture.
-  Update 16:10: Sean's headset-only movers test (15:45) answered with a
-  NEW symptom: everything outside the cockpit paints one rapidly-cycling
-  colour -- near-certainly the stage-B cyan owning ~the whole scene and
-  strobing. No log (headset-only, burst missed the toggle again).
-  Hypotheses enumerated in the same-date 16:10 entry: H1 a straddling
-  sphere paints the whole quarter-res texture (the player's own landed
-  ship is the prime suspect), H2 the bind bit flaps per frame, H3
-  interval-union mis-ownership at scale. Instrumented, not fixed blind:
-  the eye burst now also dumps both eyes' coverage pair
-  (KCNear/KCFar0-1.bin, EDVRTEX1 R32_UINT), the GPU sphere upload
-  (KinSpheres.bin, EDVRKSP1) and per-frame kin_bound/kin_veto in
-  decisions.json schema 2. Gates green; frontier d3d11
-  ac6758093e45419d. Re-fly: movers view HELD through the burst.
-  Update 16:20: dump 160734 (ship landing, movers HELD) settles the
-  movers-view question -- and Sean's 16:08 correction reframes 15:45:
-  that strobing was the MOTION view (mvUsed paint), not movers, so the
-  cyan H1/H2/H3 framing never applied to it. From the dump: the
-  coverage pair is 100% claimed with ONE uniform [0.05 m, 671 m]
-  interval in both eyes (straddle paint-all fired; 10 straddlers by
-  the cameraR rows, 92-94 by the now/prev rows); kin_bound solid
-  16/16 (bind flapping refuted); T15 shows ground and settlement cyan,
-  sky correctly rejected by the depth gate, and the LANDING SHIP cyan
-  (Sean confirms in-headset) -- the mask owning a known mover through
-  other spheres' intervals, review finding 2 made visible. Fix
-  direction (design call, unbuilt): straddle -> paint-none. The
-  motion-view whole-scene pulse is the MV field itself -- the
-  pathology this arc is fixing, not a stage-B regression (veto dark);
-  its capture is a burst held in the MOTION view.
-  Update 16:35: the straddle flip is BUILT and installed (frontier
-  d3d11 d0caa44f0e926188) -- kinCover paints NONE for a sphere
-  straddling or containing the eye; the projected rect is unbounded
-  there and a containing sphere proves nothing about pixel ownership.
-  KC bins now carry the pass's own paint frame (e.kcPaintFrame; JSON
-  kc_paint_frame[2]) -- the 16:20 provenance gap is closed. Gates
-  green (82/0, 25/0, contract 252/252 after the vscreen merge took
-  one key). UNFLOWN. Re-fly movers HELD at a settlement: expect no
-  whole-eye cyan; a mover still cyan via non-straddling unions sends
-  the finding-2 per-pixel tightening next.
-  Update 17:05: flip FLIED (flight 163300; dumps 163502 motion,
-  163619+163645 movers; build gc4bceb50-dirty == the 5313a81 content,
-  installed 16:29 -- HEAD moved on docs/tools only, hence the
-  expect-build note). Whole-eye cyan GONE: claimed 100% -> 45-53%,
-  no paint-all signature, dominant interval share 25-31%;
-  kc_paint_frame stamped and equal to kc_frame. Movers still cyan --
-  Sean's moving turret, and a landing ship once near the ground:
-  unioned intervals own mover pixels (finding 2 confirmed on movers).
-  Offline rect reproduction explains only 52-77% of claimed texels by
-  row set -- the pass's exact inputs are not yet dumped; the KCParams
-  cbuffer dump is the next instrument. Motion dump 163502 settles
-  15:45: the MV FIELD oscillates sign-alternating frame to frame at
-  45% of strongly-changing pixels (median ~3.7 px), cadence matching
-  the game's jitter sign flip; originStep zero throughout (rebase
-  refuted this window); jitter scale alone explains ~1/5 of the
-  amplitude; worldTaken (path selection) steady.
-  Update 17:02: disassembly answers Sean's 16:56 questions (entry at
-  the foot). The render path is MOVER-BLIND: eval 0x430EFE0 has exactly
-  one in-code caller (traversal FUN_144312040 at 0x4312504; jobs 0/1
-  call it and it recurses over child contexts -- the ~11x fan-out), and
-  its per-record gates are render-eligibility only (ptr+0x290, bool234,
-  byte+0x298, draw-distance nibble) -- no static/dynamic branch.
-  Mover/static truth lives in the physics jobs (0x432B2A0 / 0x42DF530 /
-  0x42DF550; no decomps yet). Ruled out: return-address caller
-  attribution at the eval hook (degenerate single caller). Next
-  discriminators, no flight needed first: offline vtable/flag
-  clustering on existing capture JSON, then a TLS job-attribution bit
-  on the existing brackets. Landscape-cyan question: terrain has no rig
-  records -- 54.4% of terrain pixels claimed incidentally by structure
-  spheres (dump 163645), benign once the veto arms.
-  Update 17:10: the offline clustering (17:02 plan step a) came back
-  NULL across 12 labeled flights -- pred_vtable_rva/flags/gate2/
-  pred_byte are homogeneous over movers and statics alike (entry at
-  the foot; analysis/kinematic_vtable_cluster.txt). Ruled out:
-  record-field clustering as a mover/static discriminator. The TLS
-  job-attribution bit is now the sole engine-truth candidate.
-  Update 17:50: the job-attribution instrument LANDED (entry at the
-  foot): bracket() keeps a TLS job bitmask, the probe serializes a
-  per-record job_mask, and the tracker censuses physics-touched
-  eligible/movers in the 20 s summary line. Gates 87/0 + 28/0 + json
-  self-test + contract 252/252; frontier d3d11 5502228f87889997,
-  verified. UNFLOWN -- the next flight answers the discriminator
-  question (protocol in the foot entry).
-  Update 18:12: the L1 unblock landed too (perf doc same-time entry) --
-  the brackets now time with the observer OFF, so the same flight
-  batches the brackets-only job-cost remeasure with the discriminator
-  census. Frontier d3d11 87d036727d54c0c6, verified.
-  Update 19:10: FLIGHT 190122 read (entry at the foot) -- job
-  attribution is a SYMMETRIC NULL: ~500 movers/frame and ~2.6k eligible
-  statics, and phys-touched eligible 0 / movers 0 on every summary
-  line. Physics jobs (2 and 4 hooked and firing) never evaluate these
-  records through FUN_14430EFE0. Ruled out as the mover/static
-  discriminator -- all three engine-truth routes at the current hooks
-  are now closed. Next engine-truth point: the +0x170 updater itself
-  (decompile the physics job bodies; serves perf L4 too). L1's numbers
-  still owe an eye burst (jobs[] lands at dump time; none taken).
-  Update 19:11: physics jobs DECOMPILED (entry at the foot) -- physics
-  writes NODE matrices (node+0x90..0xCC) bit-compare-gated, appending
-  changed nodes to a dirty queue; the render updater FUN_14433DB20
-  composes the chain into record+0x170 for every record. Hence the
-  symmetric null. The SURVIVING discriminator: the physics dirty-node
-  queue, joined to records by record+0x18 -- a refuter (physics-inert
-  movers exist), which is exactly the veto's need. Next instrument:
-  job-2 bracket logs the queue's entry/exit counts for one flight, no
-  new hook sites.
-  Update 19:30: the dirty-queue count probe LANDED (entry at the foot):
-  the existing job-2 bracket reads the queue's atomic append counter
-  (descriptor +0x18) at entry and exit; the probe accumulates
-  per-session runs/appended/max_delta/resets plus the first 64
-  non-trivial (entry,exit) pairs, serialized as phys_queue in the
-  kinematicEval JSON. Counts only -- node capture waits on the
-  lifecycle decode. Gates 87/0 + 32/0 + json self-test + contract
-  252/252; frontier d3d11 34f9195432f98190, verified. UNFLOWN -- one
-  eye burst harvests phys_queue (queue lifecycle) and jobs[] (the L1
-  remeasure flight 190122 owed).
-  Update 19:45: FLIGHT 193356 read (entry at the foot) -- the queue
-  lifecycle is DECODED: append-only within job 2, drained ENTIRELY
-  between runs by an external consumer (resets 0 in 8124 runs; 33/64
-  sampled entries exactly 0). A node capture at job-2 exit sees
-  queue[entry..exit) intact -- the capture is unblocked. Write volume:
-  15174 appends over 1196 working runs (~12.7/run, peak 133). L1's
-  brackets-only numbers landed in the same burst (perf doc same-time
-  entry). The runs 8124 vs calls 1196 gap is the timing gate's
-  elapsed>0 dropping sub-QPC-tick early-outs (idle physics array),
-  not a probe defect.
-  Update 20:50: the node-capture refuter LANDED (entry at the foot) --
-  the job-2 bracket now walks queue[entry..exit) at exit (array base
-  descriptor +0x10) and the probe keeps the last 256 node pointers per
-  session as kinematicEval.phys_nodes {total, overflow, nodes[]}, with
-  total == ring + overflow checkable. Gates 35/0 + json round-trip +
-  contract 253/253; frontier d3d11 aa88369d7a608415, verified. UNFLOWN
-  -- one eye burst at a settlement harvests the ring for the offline
-  join against records[].node.
-  Update 21:05: FLIGHT 205106 read (entry at the foot) -- the capture is
-  HEALTHY (total == appended == 178650 exactly, resets 0, invariant
-  holds) and the join is a COMPLETE NULL: 11 distinct nodes in the tail,
-  0/625 record nodes overlap, with 400 movers in-frame at the burst.
-  Update 21:25: both discriminators RESOLVED offline (entry at the
-  foot) -- job 3 has no queue (it walks render records stride 0x2F0 in
-  place; coverage complete) and the two node families are distinct by
-  construction: record+0x18 is a ctor-built render-side sub-object, the
-  dirty nodes are physics-side. The null is a family mismatch, not
-  physics-inert movers; the dirty-queue route to mover/static truth is
-  CLOSED (0-for-4 on engine-truth signals). The veto leans on the
-  tracker's own pose evidence, which is flight-proven.
+- **State:** DECIDED DIRECTION, 2026-09-19 (Sean): engine-level injection from
+  KinematicRig truth is the design, not draw-call interpretation in the render
+  pipeline (ruled out as a class). Phase 0/A/B built and flown clean by 2026-09-20
+  17:05 (tracker, sphere-backed quarter-res ownership mask fix.engine_motion_veto
+  default off, straddle -> paint-none; whole-eye cyan gone, per-pixel ownership
+  still coarse). Four engine-truth routes to a mover/static flag were then tried and
+  closed 0-for-4 by 21:25 that day -- see that entry. RESUMED OFFLINE 2026-09-23
+  (Sean: motion vectors should derive from the engine, not render-time estimates);
+  offline research done, no code. An opus read-only pass reframed the question from
+  "is this record a mover" to "where can a previous-frame pose be read at all," and
+  found: no engine velocity buffer anywhere in the VR path (413 shaders, none
+  two-channel; BlurEnabled false); record+0x1C0..0x1F8 is NOT a previous-frame
+  transform at draw time, only a change detector FUN_14433DB20 sets equal to +0xF0
+  at its own tail; and movers ARE rig records -- a moving t33 pool record matches a
+  tracked record's +0x170 to under 1 mm in the same frame, across four captures.
+  Full evidence and the three designs it permits (A pool-diff, B engine-record, C
+  fifth G-buffer target) are in the 2026-09-23 entry.
+- **Open:** which of designs A/B/C is the general one. B is cheapest and exact if
+  stations and ships -- untested, no tracker capture exists off-settlement --
+  produce tracked records the way settlement movers do; if they do not, A (or C at
+  stations) is the fallback. Per-pixel mover ownership within the existing veto mask
+  stays coarse either way (inherited from the 09-20 arc, not resolved by A or B
+  alone).
+- **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
+  misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
+  (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
+  doc's journal: four engine-truth routes to a mover/static flag (2026-09-20 21:25
+  entry -- return-address attribution, record-field clustering, TLS job-attribution,
+  dirty-node-queue family mismatch); an engine velocity buffer in the VR path, and
+  record+0x1C0..0x1F8 as a previous-frame transform at draw time (both 2026-09-23
+  entry). Do not re-propose any of the above.
+- **Next:** the discriminating flight named in the 2026-09-23 entry -- a tracker-on
+  eye run at a station approach with ship traffic, read with the scripts in
+  analysis\motion\. Sean's call on when to fly it; no code needed first.
 
 ## Premise
 
@@ -1802,3 +1605,121 @@ the capture references them; the gfx log never prints them).
 hide mover appends is disposed of by the decompile above. The 21:05
 runs-vs-calls note stands (94445 runs vs jobs[2].calls 1196 -- the
 elapsed>0 gate).
+
+### 2026-09-23 -- Resumed offline: no engine velocity buffer, the previous-frame block is a change detector, movers are rig records; three designs
+
+Resumed offline after the 2026-09-20 21:25 close (four engine-truth routes to a
+mover/static flag, 0-for-4). An opus research agent ran a read-only pass today and
+reframed the question -- not "is this record a mover" but "where can a
+previous-frame pose be read at all." Findings below are quoted from that pass;
+scratch scripts and decompiles are named under Sources at the foot.
+
+**No velocity buffer in the VR path (confidence high for geometry).** All 413 pixel
+shaders in edvr_logs\shaders (one two-minute dump, 2026-09-06, covering 75-86% of
+eye-sized draws in the Sept 15-18 settlement censuses) were parsed: none writes a
+two-channel target; 134 write several targets and every one writes all four
+channels; the four-target G-buffer's last target is emissive or zero (the dominant
+family ps_CB9F297EFF264251 writes `mov o3.xyzw, l(0,0,0,0)`, disasm line 244; across
+the 71 four-target shaders 38 computed, 30 zero, 3 constant, the computed ones
+emissive-shaped or in shaders with no position input). The three pool vertex-shader
+families (EB52, 5B4D, BBE5, 87% of pool draws) output one SV_POSITION and read one
+pose (t33 +0/+16), one bone palette (t38), the clip matrix cb1[270..273] and the
+origin cb1[275]; no semantic in the 637 dumped shaders is named prev, velocity,
+motion or history. The only motion output anywhere is ps_94106BE6A6ADBF21, a
+ray-marched volume writing o2.xy = uv_prev - uv_cur from cb1[192..195] (camera-only,
+in no census). The game's Custom.4.4.fxcfg has BlurEnabled false (line 3), as do the
+six other saved configs; blur-on shader variants were never dumped. This closes the
+gap per-object-motion.md:1199-1216 left open (the census records only render-target
+slot 0).
+
+ruled out: an engine velocity buffer in the VR path, because none of 413 dumped
+pixel shaders writes a two-channel target and BlurEnabled is false (2026-09-23).
+
+**The previous-frame block is a change detector, not a previous transform
+(confidence high on what and when).** +0xF0..0x12F of a rig record is its world
+transform (three padded rotation rows, translation at +0x120; flight 125207 showed
++0x120 == +0x170 in 16 of 16 records), written by FUN_14432CCC0
+(decomp_432CCC0:442-468) from FUN_14431E860, the PrePhysicsAdvanceJob body (:79),
+only when a collection channel changed or collection+0x98 is set (:44-73). The
+updater FUN_14433DB20 writes +0x170..0x178 (lines 196-198), the packed quaternion
++0x17C (273), the sphere centre +0x240 conditionally (302-305), the pose context via
+FUN_1442B6410 (355) and the flag +0x2E8 (372, 514); at its TAIL it copies +0xF0 to
++0x1C0 (506-513), after its change test (+0x120 against +0x1F0 plus rotation vectors
+from FUN_1405E0A20, 398-424), the notify (427) and the render handoff (436-491);
+both early returns (363-374) skip the copy. So +0x1C0 holds whatever was last
+submitted and equals +0xF0 once the updater has run: at draw time it is not last
+frame's pose. +0x170/+0x17C have no previous copy anywhere in the 0x2F0-byte record;
+their old values exist only at updater entry. The updater runs every frame for every
+record in the LOD/distance view mask (4312040:137-153), no dirty gate.
+
+ruled out: record+0x1C0..0x1F8 as a previous-frame transform at draw time, because
+FUN_14433DB20 copies +0xF0 into it at its tail after the render handoff: a change
+detector that equals +0xF0 once the updater has run (2026-09-23).
+
+**Movers are rig records (confidence medium).** Stations and ships are drawn from
+the t33 pool (per-object-motion.md:2871, 3170-3172). New, offline: at the same frame
+a moving t33 record's position equals a tracked record's +0x170 to under 1 mm for
+235 of 415 (landing-ship run 160734), 34 of 151 (turret run 163619), 44 of 252
+(flight 205106's burst, capture 205407); against neighbouring frames only 3-5 match,
+so pool and record agree within the frame; over 97% of pool movers lie within 2 m of
+a tracked mover against 23-29% of a static control (the offset is parts sitting away
+from the record origin). They are NOT the draw-item builder's records: on capture
+165433 builder parts claim 85.4% of static t33 records but 2 of 82 movers and none
+of 184 skinned records; the likely emitter is FUN_144312E00, the type-2 item path,
+which copies +0x170/+0x17C into a 0x150-byte batch item (decomp_4312E00:66-76).
+Unknown: ships in space, stations, SRVs, doors, lifts (no tracker capture exists in
+space or at a station).
+
+**At draw time.** No pool-family constant buffer carries a per-instance or previous
+matrix (the pool's non-pose words, bytes 28-55 and 288, are packed material words).
+Pool slots are not identities: on a parked run 5.7k-13k of 12.3k slots jump 14-1,100
+m between frames as contents repack. Same-frame joins that exist: draw -> t33 exact
+through the instance range (occlusion design doc section 9); t33 -> record exact for
+single-part movers by pose; multi-part movers need the per-part local transforms in
+the record's pose context (0x58-stride groups at *(record+0x290)+0x50), captured
+today for builder records only. Cost basis: EDVR's per-draw code 1.19 ms for ~18k
+draws; an extra draw with a shader and render-target switch 0.3-0.4 us on the render
+thread and 0.1-0.2 us on the calling thread (terrain-motion-dispatch-cost:280-301);
+per-draw copies cost 2 us plus a sync, avoid; today's tier-2 rigid path samples pool
+pairs every 8th frame (per-object-motion.md:3203-3209).
+
+**Sizes** (offline, consecutive frames; "mover" = the record's pose bytes changed;
+bone-palette limb motion not counted, so lower bounds). Parked views (152632,
+012514, 165433): pool eye draws 16.8k-18.3k, mover draws 132-322 (0.8-1.8%), moving
+t33 records 32-82. Captures 184120 / 201515: 13.7k / 18.1k, movers 22-307 / 266-666,
+records 4-241. Turret (163619): 13.4k, 292-313 (2.2%), 140-151. Flight 205106 burst
+(205407) / capture 163645: 18.3k / 17.2k, 746-908 (4.1-5.3%), 242-333. Landing ship
+(160734): 18.1k, 845-879 (4.7-4.9%), 416-428. Station approach: no captures since
+09-19; from the docs, at 10 km the station alone is 1,334 pool draws (2,966
+instances) and 1.7% of pixels, all rotating (per-object-motion.md:2834, 2851-2856);
+near it and in the slot it fills the frame.
+
+**Three designs the evidence permits.** A, frame-to-frame pool diff (no engine
+hooks): t33 headers this frame against last, matched by content; ownership exact by
+re-issuing only mover draws through an EDVR vertex shader (current header plus
+matched previous) into an RG16F target, depth-equal against the game's depth; same
+frame; cost ~0.2-0.3 ms hashing (worker-able) + 0.1-0.2 ms mover bit + <= 0.36 ms
+re-issue at settlements, ~0.5 ms+ at a station; look-alike props moving together can
+swap identities. B, engine-record truth: +0x170/+0x17C each frame with the previous
+pose from the existing tracker (engine identity, so repacking and look-alikes cannot
+confuse it), joined to t33 by exact pose in the same frame (multi-part movers need
+the per-part local transforms or a sphere-containment join); ownership by the same
+re-issue; same frame; cost the job-thread hooks already running plus a small match
+table. C, a fifth G-buffer target written by patched vertex/pixel shaders of the
+three pool families from a previous-pose table built by A or B: exact for every pool
+pixel and cheapest at stations, at the price of shader-bytecode patching per family
+redone after every game update, declined before. Skinned lead, unverified: every
+capture alternates two bone-palette buffers by frame parity (bones0_* even, bones1_*
+odd), so the previous palette may still be on the GPU.
+
+**What decides between A and B** (one flight, no new code): a tracker-on eye run at
+a station approach with ship traffic, read with the scripts named under Sources
+below. If the station's and ships' pool movers match tracked records exactly in the
+same frame as settlement movers do, B covers every case; if stations produce no
+tracked records, A (or C at stations) is the general design.
+
+**Sources.** Today's decompiles are in analysis\decomp\ (gitignored, alongside the
+arc's existing decompiles). Scripts and capture data are in analysis\motion\
+(gitignored, new today): dxbc_sig.py, mrt_writes.txt, o3_detail.txt,
+mover_draws3.py, mover_join.py, mover_exact.py, mover_vs_tracker.py,
+parts_165433.csv.
