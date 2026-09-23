@@ -50,6 +50,14 @@ void kinematicEvalTrackerDetach() noexcept;
 // tracker is what fix.engine_motion=on attaches). Null = off: one atomic load.
 using EngineEmitObserverFn = void (*)(uintptr_t record, uintptr_t owner, int32_t before, int32_t after) noexcept;
 void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept;
+// Whether the observer above can be called at all: the hook set installed,
+// direct producer 0's relay (kinematic-build-144312e00) installed on its
+// own -- it stands down alone when CodeHook refuses it -- and the gate the
+// tracker holds open. False names the first missing piece in *why (a static
+// string). Three relaxed loads: engine-record velocity asks every frame, so
+// that zero emit calls can never pass for correct static motion (the
+// 2026-09-23 review of engine motion).
+bool kinematicEvalEmitHookLive(const char** why) noexcept;
 
 // --- The scheduler stack probe's feed (advanced.scheduler_probe) ------------
 // Targets 0/1 of SchedulerStackProbe are the job bodies' own RVAs, which

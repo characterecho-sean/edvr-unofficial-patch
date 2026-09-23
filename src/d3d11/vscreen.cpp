@@ -181,7 +181,12 @@ constexpr size_t kSlotMap                   = 14;
 constexpr size_t kSlotUnmap                 = 15;
 constexpr size_t kSlotDrawIndexedInstanced  = 20;
 constexpr size_t kSlotDrawInstanced         = 21;
+// Engine-record velocity's snapshot validity (the 2026-09-23 review, items
+// 3/4): the pool at VS t33 and the blend state its slot target must not
+// inherit. Record-and-forward, owner context only.
+constexpr size_t kSlotVSSetShaderResources  = 25;
 constexpr size_t kSlotOMSetRenderTargets    = 33;
+constexpr size_t kSlotOMSetBlendState       = 35;
 // The other way to bind render targets. Same effect on slot 0, and it is the
 // call an engine makes whenever a UAV is bound alongside -- so leaving it out
 // meant the binding could change without us seeing it.
@@ -304,6 +309,8 @@ typedef void(STDMETHODCALLTYPE* PFN_SetConstantBuffers)(ID3D11DeviceContext*, UI
                                                         ID3D11Buffer* const*);
 typedef void(STDMETHODCALLTYPE* PFN_SetShaderResources)(ID3D11DeviceContext*, UINT, UINT,
                                                         ID3D11ShaderResourceView* const*);
+typedef void(STDMETHODCALLTYPE* PFN_OMSetBlendState)(ID3D11DeviceContext*, ID3D11BlendState*,
+                                                     const FLOAT[4], UINT);
 typedef void(STDMETHODCALLTYPE* PFN_VSSetShader)(ID3D11DeviceContext*, ID3D11VertexShader*,
                                                  ID3D11ClassInstance* const*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_PSSetShader)(ID3D11DeviceContext*, ID3D11PixelShader*,
@@ -371,6 +378,10 @@ struct State {
 
     PFN_SetConstantBuffers   realVSSetConstantBuffers = nullptr;
     PFN_SetShaderResources   realPSSetShaderResources = nullptr;
+    // Engine-record velocity's two extra watches (binding_shadow.h VsSrv33,
+    // Blend): record and forward, nothing else.
+    PFN_SetShaderResources   realVSSetShaderResources = nullptr;
+    PFN_OMSetBlendState      realOMSetBlendState = nullptr;
     PFN_VSSetShader          realVSSetShader = nullptr;
     PFN_PSSetShader          realPSSetShader = nullptr;
     // The shader hash memo the shader hooks fill (shaderHashMemo): the
@@ -3061,7 +3072,27 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
         return;
     }
     if (start == 0 && n && bufs) bindingSet(BindSlot::VsCb0, bufs[0]);
+    // Slot 1, the pool families' scene constants (engine_velocity.h): a call
+    // covering it records it, even when it unbinds.
+    if (start <= 1u && 1u - start < n) bindingSet(BindSlot::VsCb1, bufs ? bufs[1u - start] : nullptr);
     g_state->realVSSetConstantBuffers(self, start, n, bufs);
+}
+
+// The pool at VS t33 (engine-record velocity's snapshot source). Only a call
+// that covers slot 33 records anything; every call forwards.
+void STDMETHODCALLTYPE hookedVSSetShaderResources(ID3D11DeviceContext* self, UINT start, UINT n,
+                                                  ID3D11ShaderResourceView* const* srvs) {
+    if (!foreignContext(self) && start <= kEngineVelocityPoolSlot && kEngineVelocityPoolSlot - start < n)
+        bindingSet(BindSlot::VsSrv33, srvs ? srvs[kEngineVelocityPoolSlot - start] : nullptr);
+    g_state->realVSSetShaderResources(self, start, n, srvs);
+}
+
+// Every blend-state set bumps the Blend generation: EDVR's own derived state
+// for a substituted pool draw is then known to be replaced (engine_velocity).
+void STDMETHODCALLTYPE hookedOMSetBlendState(ID3D11DeviceContext* self, ID3D11BlendState* state,
+                                             const FLOAT factor[4], UINT sampleMask) {
+    if (!foreignContext(self)) bindingSet(BindSlot::Blend, state);
+    g_state->realOMSetBlendState(self, state, factor, sampleMask);
 }
 
 // Everything is unbound. Forget all of it -- this is the one place where
@@ -3342,6 +3373,12 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             }
         }
     }
+    // Engine-record velocity's watch on an open eye-frame's pool and scene
+    // constants: the mapped pointer and the map type, so the Unmap tee can
+    // tell a re-map that keeps registers 270..275 (and a NO_OVERWRITE
+    // append) from a write that changes what the snapshot holds. Four
+    // pointer compares while live, one relaxed load while not.
+    if (mapData0 && type != D3D11_MAP_READ) engineVelocityResourceMapped(res, mapped->pData, static_cast<int>(type));
     // The peek target, independent of the chain above on purpose: the buffer
     // the sprite family reads may BE the composite's or the camera's, and a
     // peek must not steal either shadow's slot. Pointer compare only; the
@@ -5048,6 +5085,12 @@ void vScreenVSSetConstantBuffersRaw(ID3D11DeviceContext* ctx, uint32_t startSlot
     g_state->realVSSetConstantBuffers(ctx, startSlot, numBuffers, buffers);
 }
 
+void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state,
+                               const float blendFactor[4], uint32_t sampleMask) {
+    if (!g_state || !g_state->realOMSetBlendState || !ctx) return;
+    g_state->realOMSetBlendState(ctx, state, blendFactor, sampleMask);
+}
+
 void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
                                  uint32_t dstSubresource, const D3D11_BOX* dstBox,
                                  const void* srcData, uint32_t srcRowPitch, uint32_t srcDepthPitch) {
@@ -6421,6 +6464,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realPSSetShader));
     s.hook.replace(kSlotVSSetConstantBuffers, &hookedVSSetConstantBuffers,
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
+    s.hook.replace(kSlotVSSetShaderResources, &hookedVSSetShaderResources,
+                   reinterpret_cast<void**>(&s.realVSSetShaderResources));
+    s.hook.replace(kSlotOMSetBlendState, &hookedOMSetBlendState,
+                   reinterpret_cast<void**>(&s.realOMSetBlendState));
     s.hook.replace(kSlotCopyResource, &hookedCopyResource,
                    reinterpret_cast<void**>(&s.realCopyResource));
     s.hook.replace(kSlotClearDepthStencilView, &hookedClearDsv,

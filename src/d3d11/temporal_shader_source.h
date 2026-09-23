@@ -605,7 +605,10 @@ R"HLSL(
 //     engine motion (its two pose blocks), projected by last frame's rows;
 //   2 MASKED: a rig record EDVR could not follow -- no history, no vector;
 //   3 a pool record that is not a rig record: the camera term stands;
-//   4 STALE: the slot's depth is not the scene's (a later draw covers it).
+//   4 STALE: the slot's depth is not the scene's (a later draw covers it);
+//   5 CORRUPT: the depth is the scene's but the slot code is not an odd whole
+//     number -- arithmetic (a blend, a sum) reached MRT6; declined, never
+//     read as another record (the 2026-09-23 review, item 4).
 // The arithmetic is the ENGINE_MOTION_HLSL block near the top (the rig cuts
 // out and runs that same text). The ownership test is meshPixel's, but
 // exact: the slot's recorded depth must be the scene depth bit for bit. Jitter as meshPixel: the rows carry the raster
@@ -615,14 +618,18 @@ uint enginePixel(float2 p, float2 offset, out float2 pp, out float zp) {
     if ((uint(probe.w + 0.5) & 2048u) == 0u || holoJitter.z == 0) return 0u;
     const int2 q = region.xy + int2(round(p + offset));
     const float2 es = ES.Load(int3(q, 0));
-    if (!(es.x >= 0.0)) return 0u;
+    // The patched pool shaders write 2 * slot + 1: the cleared -1 and an
+    // untouched texel both fall below 1.
+    if (!(es.x >= 1.0)) return 0u;
     if (uiCovered(q)) return 0u;
     if ((uint(probe.w + 0.5) & 32u) != 0u && Screen.Load(int3(q, 0)).w > 0) return 0u;
     const float zr = zSceneAt(q);
     if (!(zr > 0.0) || asuint(zr) != asuint(es.y)) return 4u;
+    const uint code = uint(es.x);
+    if (float(code) != es.x || (code & 1u) == 0u) return 5u;
     uint count, stride;
     EP.GetDimensions(count, stride);
-    const uint slot = uint(es.x);
+    const uint slot = code >> 1u;
     if (slot >= count) return 0u;
     const EnginePoolRecord r = EP[slot];
     const uint kind = engineRecordKind(r);
@@ -1000,10 +1007,11 @@ uint clipSize(float3 hc, float3 hy) {
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 #if EDVR_TEMPORAL_DIAGNOSTICS
-// 0..47 are Stats' own slots; mv's 48..51 are engine-record motion's pixel
+// 0..47 are Stats' own slots; mv's 48..52 are engine-record motion's pixel
 // counts (joined, masked, a pool record that is not a rig record, stale
-// slot), flushed to Stats 50..53 (48/49 are main's stepped-part slots).
-groupshared uint gCount[52];
+// slot, corrupt slot code), flushed to Stats 50..54 (48/49 are main's
+// stepped-part slots).
+groupshared uint gCount[53];
 #endif
 // A debug view's pixel, painted into the OUTPUT rather than at this
 // thread's own index.
@@ -1058,7 +1066,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     }
     GroupMemoryBarrierWithGroupSync();
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 52) gCount[gi] = 0;
+    if (gi < 53) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
 #endif
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
@@ -1501,12 +1509,14 @@ R"HLSL(
             // engine's own record motion was taken, red where a rig record
             // was masked (no history), blue for a pool surface that is not a
             // rig record (the camera term), yellow for a slot a later draw
-            // covered; the frame dimmed elsewhere (the camera term).
+            // covered, magenta for a slot code arithmetic reached (declined);
+            // the frame dimmed elsewhere (the camera term).
             float3 o6 = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
             if (engineKind == 1u) o6 = float3(0.0, 1.0, 0.0);
             else if (engineKind == 2u) o6 = float3(1.0, 0.0, 0.0);
             else if (engineKind == 3u) o6 = float3(0.0, 0.3, 1.0);
             else if (engineKind == 4u) o6 = float3(1.0, 1.0, 0.0);
+            else if (engineKind == 5u) o6 = float3(1.0, 0.0, 1.0);
             paintDebug(id.xy, size, o6);
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
@@ -1533,10 +1543,10 @@ R"HLSL(
     // -- used to pay forty global atomics onto forty contended addresses
     // regardless. At the Crystal Super's size that is 290,512 groups an
     // eye, so 11.6 million atomic adds an eye and 23 million a frame, for
-    // a set of numbers that only a log line reads. 48..51 are engine-record
-    // motion's, at Stats 50..53.
+    // a set of numbers that only a log line reads. 48..52 are engine-record
+    // motion's, at Stats 50..54.
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 52 && gCount[gi] != 0) InterlockedAdd(Stats[gi < 48u ? gi : gi + 2u], gCount[gi]);
+    if (gi < 53 && gCount[gi] != 0) InterlockedAdd(Stats[gi < 48u ? gi : gi + 2u], gCount[gi]);
 #endif
 }
 )HLSL"
@@ -1852,7 +1862,8 @@ R"HLSL(
             float2 eP6; float eZ6;
             const uint ek6 = enginePixel(float2(ci), jit.xy, eP6, eZ6);
             o = ek6 == 1u ? float3(0.0, 1.0, 0.0) : ek6 == 2u ? float3(1.0, 0.0, 0.0)
-              : ek6 == 3u ? float3(0.0, 0.3, 1.0) : ek6 == 4u ? float3(1.0, 1.0, 0.0) : cur.rgb * 0.25;
+              : ek6 == 3u ? float3(0.0, 0.3, 1.0) : ek6 == 4u ? float3(1.0, 1.0, 0.0)
+              : ek6 == 5u ? float3(1.0, 0.0, 1.0) : cur.rgb * 0.25;
         }
         O[id.xy] = float4(o, cur.a);
     }

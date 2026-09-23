@@ -20,21 +20,25 @@
   pool shaders, no two-channel target, no blur pass before the tone-map), and on the
   landing ship the engine-record join matched all 64 drawn movers exactly (56/56 of
   the fast ones) while design A's content-pairing mis-paired 11-23 of those 56 --
-  DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 BUILT,
-  NOT FLOWN, NOT MERGED (2026-09-23 "Phase 1 built" entry): fix.engine_motion=on now
-  writes each rig record's previous engine pose into its own pool record at
-  FUN_144312E00's emit (bytes 292-319, self-checking marker at 288), the pool families'
-  substituted pixel shaders record slot + depth at MRT6 in the game's own draws, and the
-  compose takes the record's exact motion there (masked = no history; else the camera
-  term). The engine reads bytes 288-319 on the CPU only in whole-record copies (static
-  pass); byte 288 is written by no producer at all.
-- **Open:** the first flight's numbers (the entry's "What the first flight must show":
-  disagreements 0, movers joined ~ tracker movers, families live, views given = asked,
-  the motion_source view green on the ship only, cost); B's coverage of stations and
-  ships in space (untested); builder-path movers (0x42B4130, 2 of 82 in 165433) and
-  articulated parts (phase 2, per-part transforms); the previous bone palette's
-  residency (skinned motion, phase 2); the particle families' inputs; why one extra
-  barrier at the end of `mv` changed its instrumented output on WARP.
+  DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 BUILT and
+  merged (2026-09-23 "Phase 1 built"): previous engine pose written into each rig
+  record's own pool record at FUN_144312E00's emit, slot + depth at MRT6 from the
+  substituted pool shaders, exact motion in the compose. FLOWN ONCE (065324): every
+  eye-frame refused (cb1 re-mapped), a shadowed flag bound the inputs on every DLSS
+  dispatch, gaps masked-as-zero, flicker on re-boarding. FIX ROUND BUILT, NOT FLOWN,
+  NOT MERGED (2026-09-23 "Fix round" entry): rows 270..275 compared at the next draw,
+  not the write; the review's five findings folded (missing history masked, invalidity
+  carried, source rebinds and blend hooked and checked, derived unblended MRT6 state
+  with odd slot codes, every compute slot restored) plus the stand-down line; MRT6
+  binding validated; a census of evaluated-but-not-drawn movers.
+- **Open:** the fix round's flight (its entry's "What the next flight must show");
+  whether the tracker's extra movers are evaluated-but-not-drawn (the census); the
+  boarding flicker's cause (prime candidate: the LOD governor's ramp from 06:57:14.269,
+  not this arc's code); B's coverage of stations and ships in space (untested);
+  builder-path movers (0x42B4130, 2 of 82 in 165433) and articulated parts (phase 2,
+  per-part transforms); the previous bone palette's residency (skinned motion, phase
+  2); the particle families' inputs; why one extra barrier at the end of `mv` changed
+  its instrumented output on WARP.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -43,10 +47,15 @@
   dirty-node-queue family mismatch); an engine velocity buffer in the VR path, and
   record+0x1C0..0x1F8 as a previous-frame transform at draw time (both 2026-09-23
   entry); design A, pool content-pairing, and an engine velocity buffer with motion
-  blur ON (both 2026-09-23 evening entry). Do not re-propose any of the above.
-- **Next:** review and merge phase 1, then one flight: a ship landing at a settlement
-  with fix.engine_motion=on, fix.temporal_aa=dlss, advanced.temporal_aa_diagnostics=1,
-  read against the entry's checklist, and A/B against advanced.mesh_motion=on +
+  blur ON (both 2026-09-23 evening entry); scaling a history delta over a gap
+  (estimation, the review); the tick straddling two frames as the gap cause (repeats and
+  in-frame pose changes 0 in all 8 windows of 065324); rows 270..275 changing inside
+  an eye pass (capture 043720: one block per pass); "blending on MRT6 only loses
+  coverage" (the review's WARP counterexample). Do not re-propose any of the above.
+- **Next:** review and merge the fix round, then the same flight: a ship landing at a
+  settlement with fix.engine_motion=on, fix.temporal_aa=dlss,
+  advanced.temporal_aa_diagnostics=1 and the motion_source view, read against the Fix
+  round entry's checklist, and A/B against advanced.mesh_motion=on +
   advanced.temporal_aa_estimated_objects=on. The station-approach coverage capture
   (blur OFF, glare_shader_dump 0) stays open for stations.
 
@@ -1999,3 +2008,161 @@ the pixel counts would show it. Observed while building: one extra group barrier
 end of `mv` changed the instrumented variant's depth output on WARP
 (screen_consumer_test); not investigated, not shipped -- engine pixel counts ride the
 existing gCount instead.
+
+### 2026-09-23 -- Fix round: the first flight's three failures, the review's six items
+
+**The flight.** `edvr_gfx_20260923_065324.log` (Frontier install), `version
+v0.17.0-390-g21ab1f7d` -- the phase-1 merge, the right build. EDVR's native OpenXR, Pimax
+Crystal Super at 3070x3032 per eye (56.6%), DLSS on an RTX 5090 (the build does not read
+the DLSS version), ship-scene depth 1597x1835 `D32_FLOAT_S8X24_UINT`, 90 Hz.
+
+**1. Every eye-frame refused.** `[06:57:35.614] engine motion: movers joined 42.7
+records/frame ... eye-frames 2639, with MRT6 bound 2639, refused: invalidated 2639 (pool
+re-uploaded 0, scene constants re-mapped 2639, sources changed 0) ... views asked 2638,
+given 0, refused: ... invalidated 2638`. Phase 1 dropped an open eye-frame on ANY write to
+its scene constants. Capture 043720 (`drawstate`, VS b1 as each draw saw it) shows why that
+is every eye-frame: ONE cb1 buffer (identity 23EF98F0960) serves both eyes and every pass;
+inside each eye pass registers 270..275 hold one value (1 distinct block per frame and
+target) while registers 90, 124-126, 287-291, 301, 310-311 and 333 change 3-5 times a pass;
+the two eyes' rows differ, and the passes interleave (target BF60 ordinals 22..65, 56E0
+85..128, BF60 130..2985, 56E0 5050..7784). So a same-rows re-map, or the other eye's rows
+going through the same buffer, dropped the eye-frame. Only its first pool draw was ever
+substituted (family EB52, ps_3434 alone), and the depth-equality gate never ran for real:
+the flight's "stale" pixel counts are an artifact of the next bug, not evidence about it.
+
+**The shadowing bug** (found reading the flight against the code): the trained block of
+`temporal_pass.cpp` declares its own `const bool engineAvailable = amdEngine ?
+fsr3Available(...) : dlaaAvailable(...)` in an inner scope, so `engineBound =
+engineAvailable && depthSrv` read the UPSCALER's availability. Every DLSS dispatch of the
+flight bound the engine inputs (null views), set probe bit 2048, and cleared CS t21/t22
+after (the save covered t0..t18, so they stayed null). The outer flag is now
+`engineViewsGiven`.
+
+**Fix.** A write no longer decides anything. The Map tee keeps a watched source's mapped
+pointer and map type; the Unmap tee (before the real Unmap) reads registers 270..275 back
+and counts a pool write as an append (NO_OVERWRITE) or a replacement; the NEXT substituted
+draw of that eye-frame then compares: rows unchanged -- kept, counted; rows changed --
+dropped ("scene rows 270..275 changed"); a copy or update into cb1 (rows not seen) --
+dropped ("rows unknown"); pool appended -- the snapshot copy refreshed (earlier slots are
+untouched by the NO_OVERWRITE contract); pool replaced -- dropped. A write after the eye's
+last draw changes nothing.
+
+**2. History gaps.** `[06:55:35.410] engine motion: emit (live) over 30 s, 1688 frames: ...
+first seen 1056, gap 13069, reused pointer 0; same-frame repeats 0` (7.74 gaps/frame) and
+`movers joined 9.3 records/frame ... against the tracker's 349.7`; every window (8) had
+same-frame repeats 0 and pose changes
+within one frame 0. Per frame the emit sees 39-693 records with items and 0.16-20.8 gaps
+(at most 3% of emissions), so gaps cannot explain a 10-40x mover shortfall. Most calls
+append nothing (06:57:05: 3,330 calls/frame, 486 with items). Hypothesis for the next
+flight: the tracker's movers are mostly records evaluated but not drawn this frame (culled,
+or selected for no view). The census below measures exactly that. Per the review, no delta
+scaling: a gap is masked.
+
+**3. The boarding flicker** (Sean: right after re-boarding, ~06:57:10-14). Timeline, all
+quoted from the log: 06:57:10.333 `luma probe: eye=0 first black stage is game`; 06:57:11.731
+`the scene's depth is in hand -- the depth probe's 1597x1835 target` (the pair re-created);
+06:57:13.671 `settlement detail (acting): no longer on foot ... the governor resumes`;
+06:57:14.269 `k 1.00 -> 1.25, up 0.25`; 06:57:14.416 `first black stage is none`; 06:57:25.228
+`dropped (the game's setting would have kept it) 108.2/frame (max 1565)` for each eye. The
+first ship eye-frames of engine motion fall in the 06:57:05-06:57:35 window (2639; the
+on-foot window before it had 0); phase 1 logged neither the slot target's creation nor the
+first substitution. Candidates: (a) from 06:57:14.269 the LOD governor ramping from k 1 --
+the prime candidate; nothing changed there (not this arc's code); (b) from ~06:57:11.7 the
+substituted ps_3434 on the first EB52 draw of each ship eye-frame -- the synthetic
+families' four targets are bit-identical patched vs stock (blendChecks), the real pairs'
+check is the corpus identity test; (c) the whole flight: CS t21/t22 left null after every DLSS dispatch -- present in
+every window, not boarding-specific; fixed; (d) MRT6's binding -- the ship depth is a valid
+D32 pair, so the set was legal; it is now validated first and its acceptance read back;
+(e) MRT6 inheriting the blend -- touches MRT6 only (rig: the game's four targets
+bit-identical). The fix round logs `engine motion: eye N slot target created/re-created`
+and `engine motion: substitution starts at present frame N ... after M frames without one`,
+so the next flicker can be lined up against them and against the governor's `k ... up`
+lines.
+
+**The review** (`reviews\engine-motion-review-2026-09-23.md`), all five findings folded
+into this round, plus its stand-down note:
+1. *Missing history masked.* First sight, a gap, a reused pointer: MASKED, the pose kept as
+   the baseline, JOINED only on the next uninterrupted frame. Rig: emit cases at frames
+   100/101, 106/107, 108/109, 118-120; the consumer test shows a masked pixel gets the
+   no-history vector (`float2(size)*2`) AND MK = 1.
+2. *Invalidity carried.* Each table entry says whether its pose is CERTIFIED (one validated
+   pose for its frame). A same-tick pose change, a call whose items do not all validate,
+   a locate failure or an unreadable record uncertifies it: the next frame is masked and
+   re-baselines, the frame after joins. Every item is validated before the table moves; a
+   mixed call writes its valid items masked and its failed ones not at all. Rig: the
+   review's A / B+X / C repro across 111-114 (113 masked, not joined with B), the same-tick
+   p3 held still (102 masked, 103 joined with zero motion), the mixed call 115-117.
+3. *Source rebinds.* VS t33 and VS b1 are hooked (VSSetShaderResources, slot 1 of
+   VSSetConstantBuffers) and in the draw's cache; the snapshot holds both objects and checks
+   the shadow against the context; every later substituted draw compares view, buffer,
+   FirstElement/NumElements. Rig (engine_velocity.cpp linked in): t33 to another pool,
+   b1 to another buffer, a view with FirstElement 1 -- each drops the eye-frame, by
+   reason; the same view again, another view over the same elements, a PS change alone --
+   kept. Not hooked: D3D11.1's VSSetConstantBuffers1; a b1 bound through it shows as
+   "binding shadow disagreed" at the next eye-frame's snapshot (that eye-frame dropped).
+4. *Blend.* OMSetBlendState is hooked; substituted draws run under a DERIVED state (the
+   game's on its targets, independent blend on, target 0's state copied where the game had
+   it off, MRT6 unblended R|G), re-derived after any blend set, the game's put back by the
+   next unsubstituted draw and at the frame boundary. The slot is now written ODD (2 * slot
+   + 1): a sum, a blend or a clear is never an odd whole number, and the compose declines it
+   (kind 5, magenta in `motion_source`). Rig: overwrite, additive, blend factor, R|A mask,
+   MAX, independent per-target states -- the game's four targets bit-identical to the stock
+   pair's, MRT6 exact; the inherited state's arithmetic is declined, never another record
+   (440 pixels); a mid-pass change; depth-write-disabled passes (stale unless over their own
+   depth; the EQUAL pass keeps its record).
+5. *Compute slots.* `cs_stage_save.h` saves t0..t22, u0..u6, b0..b2, s0 and the shader for
+   every branch (t19/t20 had the same gap before this arc), with static_asserts tying the
+   counts to this feature's slots. Rig: sentinels back by identity after the engine path,
+   the fallback path and an unrestored save.
+6. *Stand-down.* `kinematicEvalEmitHookLive` reports whether direct producer 0's relay is
+   installed and gated open. If not (or the build check fails): `engine motion: STOOD DOWN
+   -- the emit hook is not installed (<why>)` at configure, on the change, and in every
+   30 s block; nothing substituted; every view refused (counted). Rig: all three lines,
+   and standing up again.
+
+**Binding.** MRT6 joins a pass only when the depth view is a 2D texture at mip 0, 32-bit
+float, single-sample and the slot target's size, and every game target a single-sample 2D
+texture at mip 0 of the same size; refusals counted by reason, and a set the runtime drops
+is detected (read back) and the game's own put back. A depth texture change inside an
+eye-frame drops it ("depth changed"). Rig: a 24-bit depth refused and counted, a new depth
+pair re-created (logged) and given.
+
+**Rig.** `tools\engine_velocity_test`, in the gate: 838 checks -- the patcher and the
+blend states (shader_tests.h), the history rules across following frames and the census
+(emit_tests.h), the compose's arithmetic (math_tests.h), the production `mv` entry with
+engine inputs bound (consumer_tests.h: joined exact to 3e-7 px; masked gets the
+no-history vector and MK = 1; even, fractional, zero, stale, cleared and out-of-range
+codes all equal the no-engine result; Stats 50..54 match), and engine_velocity.cpp
+itself linked in and driven on WARP (lifecycle_tests.h). Locally (`--corpus`): all nine
+real pairs patch, reflect and create with the odd-code tail.
+
+**New counters.** Emit: masked for first seen / gap / reused / same-frame change /
+previous frame not certified / this call unproven / table full; tainted. History: gap
+ages (2, 3-4, 5-8, 9-64, over 64), burst frames (32 or more gaps in one frame -- a clock or
+scene event), and the CENSUS -- one record in eight by address, every call with or without
+items: record-frames evaluated, moving ones drawn vs evaluated-but-not-drawn (scaled by 8 to
+compare with the tracker), and each sampled gap classed "evaluated without items in
+between" or "not evaluated at all". Draw side: invalidations by reason, kept re-maps,
+refreshed pools, MRT6 refusals by reason, runtime rejections, blend states bound /
+refused / shadow disagreed, views refused while stood down, and pixels "corrupt slot
+code" (must be 0).
+
+**Corrected from phase 1.** "RT6 inherits the pass's blend state; a blended or
+write-masked pass loses coverage (camera term, never a wrong vector)" was wrong: the
+review's WARP counterexample turned (slot 1, 0.5) over (-1, 0) into (slot 0, 0.5) under
+ONE+ONE. Ruled out: the tick straddling two frames as the gap cause, because same-frame
+repeats and pose changes within one frame were 0 in all eight windows; rows 270..275
+changing inside an eye pass, because capture 043720 holds one block per pass.
+
+**What the next flight must show** (the build's own log first:
+`python tools\edvr_log.py --target frontier --expect-build HEAD`): the same scenario --
+landing ship, fix.engine_motion=on, fix.temporal_aa=dlss, advanced.temporal_aa_diagnostics
+=1, the motion_source view. (1) no STOOD DOWN line; views given ~ eye-frames; invalidated
+~0 (if not, the reason names the next fact), binding shadow disagreed 0, blend refused 0,
+MRT6 refusals 0 on the ship. (2) pixels: engine-joined on the ship and turret (green),
+corrupt 0. (3) movers joined ~ the tracker's -- or the census's "evaluated but not drawn"
+movers account for the difference, which would close the gap question as visibility,
+not a defect. (4) pose disagreements, locate failures, write faults 0. (5) cost: the slow
+half's ms/frame on the caller thread (the substitution now runs for the whole pass; target
+under 0.5). (6) flicker: if it recurs, which of `substitution starts`, `slot target
+re-created` or the governor's `k ... up` lines it lines up with.

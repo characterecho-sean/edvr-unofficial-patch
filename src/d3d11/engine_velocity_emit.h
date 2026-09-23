@@ -20,12 +20,28 @@
 //   writes +0x120 at all (it is uninitialised stack in every producer).
 //
 // So the bracket, after the forward, looks the entry up again (a pure read on
-// a hit, no lock), takes the call's k records off the tail, checks each one's
-// current pose against the rig record bit for bit (the disagreement gate),
-// and writes the record's PREVIOUS engine pose into its second block with a
-// self-checking marker at +0x120: tag ^ markerHash(both blocks), the same
-// hash the compose's ENGINE_MOTION_HLSL block (temporal_shader_source.h)
-// recomputes on the GPU.
+// a hit, no lock), takes the call's k records off the tail, checks EVERY one's
+// current pose against the rig record bit for bit (the disagreement gate)
+// before any history is committed, and writes the record's PREVIOUS engine
+// pose into its second block with a self-checking marker at +0x120:
+// tag ^ markerHash(both blocks), the same hash the compose's
+// ENGINE_MOTION_HLSL block (temporal_shader_source.h) recomputes on the GPU.
+//
+// HISTORY RULES (the 2026-09-23 review, reviews\engine-motion-review-2026-
+// 09-23.md, items 1 and 2). Missing motion is not evidence of a stationary
+// object, so a record is JOINED only when its previous frame holds exactly one
+// validated pose:
+//   - first sight, a gap of a frame or more, a reused record pointer: the pose
+//     becomes the baseline and the emission is MASKED (the compose keeps no
+//     history for it); the next uninterrupted frame joins;
+//   - two different poses under one present tick: that record's emissions
+//     after the change are masked, and the tick's pose is not certified, so
+//     the next frame is masked too and re-baselines -- the frame after joins;
+//   - a call whose items do not ALL validate (a read fault, a disagreement),
+//     or a record whose entry cannot be located: nothing is written into an
+//     item that failed, the call's validated items are written MASKED, and
+//     the record's history is uncertified the same way. Mixed calls never
+//     commit a joined history.
 #include <windows.h>
 
 #include <atomic>
@@ -59,6 +75,7 @@ constexpr uintptr_t kItemMarker = 0x120;
 constexpr uintptr_t kItemPrevPos = 0x124;
 constexpr uintptr_t kItemPrevQuat = 0x138;
 constexpr int32_t kMaxAppended = 7;         // one record per LOD with a mask
+constexpr uint32_t kNoTick = ~0u;
 
 // A pose in the rig record's own order: position (3 x f32 bits), then the
 // packed quaternion (2 x u32 = 4 x u16).
@@ -78,6 +95,11 @@ inline uint32_t markerHash(const Pose& now, const Pose& prev) {
     return h;
 }
 
+inline uint64_t mixBits(uint64_t x) {
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdull; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ull; x ^= x >> 33;
+    return x;
+}
+
 // Counters. Relaxed atomics: several job threads emit at once.
 struct Stats {
     std::atomic<uint64_t> calls{0}, callsWithItems{0}, itemsAppended{0}, drained{0}, tooMany{0};
@@ -85,76 +107,118 @@ struct Stats {
     std::atomic<uint64_t> itemsJoined{0}, itemsMoving{0}, itemsMasked{0};
     std::atomic<uint64_t> recordsMoving{0}, firstSeen{0}, gaps{0}, identityResets{0};
     std::atomic<uint64_t> repeats{0}, sameFrameChanges{0}, overflow{0};
+    // Why a call was masked beyond the three baseline cases above: the
+    // previous frame's pose was not certified (a same-tick change or a
+    // failed call then), or this call itself failed provenance.
+    std::atomic<uint64_t> uncertifiedHistory{0}, callsUnproven{0}, taints{0};
+    // Gap ages, frames since the record's last emission: 2, 3-4, 5-8, 9-64, more.
+    std::atomic<uint64_t> gapAge[5] = {};
+    // The evaluation census (one record in eight by address): record-frames
+    // evaluated, of those moving since their previous evaluated frame, split
+    // by whether any call that frame appended items; gaps of census records,
+    // split by whether the record was evaluated (without items) in between.
+    std::atomic<uint64_t> censusFrames{0}, censusMovingDrawn{0}, censusMovingUndrawn{0};
+    std::atomic<uint64_t> gapsEvaluatedBetween{0}, gapsUnevaluated{0};
     void clear() {
         for (auto* c : {&calls, &callsWithItems, &itemsAppended, &drained, &tooMany, &readFaults,
                         &locateFailures, &disagreements, &writeFaults, &itemsJoined, &itemsMoving,
                         &itemsMasked, &recordsMoving, &firstSeen, &gaps, &identityResets, &repeats,
-                        &sameFrameChanges, &overflow})
+                        &sameFrameChanges, &overflow, &uncertifiedHistory, &callsUnproven, &taints,
+                        &censusFrames, &censusMovingDrawn, &censusMovingUndrawn, &gapsEvaluatedBetween,
+                        &gapsUnevaluated})
             c->store(0, std::memory_order_relaxed);
+        for (auto& c : gapAge) c.store(0, std::memory_order_relaxed);
     }
 };
 inline void bump(std::atomic<uint64_t>& c, uint64_t n = 1) { c.fetch_add(n, std::memory_order_relaxed); }
+inline unsigned gapBucket(uint32_t age) { return age <= 2 ? 0u : age <= 4 ? 1u : age <= 8 ? 2u : age <= 64 ? 3u : 4u; }
 
 // The previous-pose table: per engine record (pointer, with record+0x18 as
 // the reuse discriminator, the tracker's rule), the pose its last emission
-// carried and the present frame it was emitted in. Sixteen shards, each an
-// open-addressed array with its own lock; an entry not emitted in the last
-// two frames holds no usable history, so its slot is reclaimable -- the table
-// cannot fill with dead records.
+// carried, the present frame it was emitted in, and whether that pose is
+// CERTIFIED -- one validated pose for its frame, usable as the next frame's
+// history. Sixteen shards, each an open-addressed array with its own lock; an
+// entry not emitted in the last two frames holds no usable history, so its
+// slot is reclaimable -- the table cannot fill with dead records.
 class Table {
 public:
     static constexpr uint32_t kShards = 16, kSlots = 1024, kProbe = 32;
     enum class Result { Joined, Masked };
 
-    // The previous pose for this emission (the current pose when there is
-    // none: first seen, a gap, a reused pointer), or Masked when the table
-    // cannot say (full, or the pose changed between two emissions in one
-    // frame -- two frames' data under one clock tick, which is ambiguous).
-    Result resolve(uint64_t record, uint64_t node, uint32_t frame, const Pose& pose, Pose& prev, Stats& s) {
+    // The previous pose for this emission, or Masked (the rules at the top).
+    // proven: every item the call appended validated. gapAge, when a gap
+    // re-baselined the record, is set to its age.
+    Result resolve(uint64_t record, uint64_t node, uint32_t frame, const Pose& pose, bool proven, Pose& prev,
+                   Stats& s, uint32_t* gapAge = nullptr) {
+        prev = pose;
         Shard& shard = shards_[shardOf(record)];
         std::lock_guard<std::mutex> lock(shard.mutex);
-        const uint32_t start = slotOf(record);
-        Entry* found = nullptr;
         Entry* reuse = nullptr;
-        for (uint32_t i = 0; i < kProbe; ++i) {
-            Entry& e = shard.entries[(start + i) & (kSlots - 1)];
-            if (e.record == record) { found = &e; break; }
-            if (e.record == 0) { if (!reuse) reuse = &e; break; }
-            if (!reuse && frame - e.frame >= 2u) reuse = &e;
+        Entry* found = find(shard, record, frame, &reuse);
+        if (!found) {
+            if (!reuse) { bump(s.overflow); return Result::Masked; }
+            *reuse = Entry{record, node, frame, pose, pose, false, proven};
+            bump(s.firstSeen);
+            return Result::Masked;
         }
-        if (found) {
-            if (found->node != node) {
-                *found = Entry{record, node, frame, pose, pose};
-                prev = pose;
-                bump(s.identityResets);
-                return Result::Joined;
+        if (found->node != node) {
+            *found = Entry{record, node, frame, pose, pose, false, proven};
+            bump(s.identityResets);
+            return Result::Masked;
+        }
+        const uint32_t age = frame - found->frame;
+        if (age == 0) {
+            if (!proven) { found->certified = false; return Result::Masked; }
+            if (pose != found->now) {
+                // Two frames' data under one tick, or a pose that moved inside
+                // the frame: which one was rendered is not known, so neither
+                // this emission nor the next frame's gets this tick as history.
+                bump(s.sameFrameChanges);
+                found->certified = false;
+                return Result::Masked;
             }
-            const uint32_t age = frame - found->frame;
-            if (age == 0) {
-                if (pose != found->now) { bump(s.sameFrameChanges); prev = pose; return Result::Masked; }
-                prev = found->prev;
-                bump(s.repeats);
-                return Result::Joined;
-            }
-            if (age == 1) {
-                found->prev = found->now;
-                found->now = pose;
-                found->frame = frame;
-                prev = found->prev;
-                if (prev != pose) bump(s.recordsMoving);
-                return Result::Joined;
-            }
-            *found = Entry{record, node, frame, pose, pose};
-            prev = pose;
-            bump(s.gaps);
+            bump(s.repeats);
+            if (!found->certified || !found->joined) return Result::Masked;
+            prev = found->prev;
             return Result::Joined;
         }
-        if (!reuse) { bump(s.overflow); prev = pose; return Result::Masked; }
-        *reuse = Entry{record, node, frame, pose, pose};
-        prev = pose;
-        bump(s.firstSeen);
-        return Result::Joined;
+        if (age == 1) {
+            const bool history = found->certified && proven;
+            const Pose last = found->now;
+            found->prev = last;
+            found->now = pose;
+            found->frame = frame;
+            found->certified = proven;
+            found->joined = history;
+            if (!history) {
+                if (proven) bump(s.uncertifiedHistory);
+                return Result::Masked;
+            }
+            prev = last;
+            if (last != pose) bump(s.recordsMoving);
+            return Result::Joined;
+        }
+        // A gap (or a clock that wrapped): no continuous previous observation.
+        bump(s.gaps);
+        bump(s.gapAge[gapBucket(age)]);
+        if (gapAge) *gapAge = age;
+        *found = Entry{record, node, frame, pose, pose, false, proven};
+        return Result::Masked;
     }
+
+    // A call for this record failed before any item could be validated (a
+    // read fault on the record, the entry not located): whatever it emitted
+    // this tick is uncertified. A record with no entry, or last seen in an
+    // earlier tick, needs nothing -- its next emission masks by age anyway.
+    void taint(uint64_t record, uint32_t frame, Stats& s) {
+        Shard& shard = shards_[shardOf(record)];
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        Entry* reuse = nullptr;
+        Entry* found = find(shard, record, frame, &reuse);
+        bump(s.taints);
+        if (found && found->frame == frame) found->certified = false;
+    }
+
     void clear() {
         for (auto& shard : shards_) {
             std::lock_guard<std::mutex> lock(shard.mutex);
@@ -170,23 +234,102 @@ public:
         }
         return n;
     }
+    // The tick of this record's last emission, kNoTick when it has none.
+    uint32_t lastFrame(uint64_t record) {
+        Shard& shard = shards_[shardOf(record)];
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        Entry* reuse = nullptr;
+        Entry* found = find(shard, record, 0, &reuse);
+        return found ? found->frame : kNoTick;
+    }
 
 private:
     struct Entry {
         uint64_t record = 0, node = 0;
         uint32_t frame = 0;
         Pose now{}, prev{};
+        bool joined = false;      // this frame's emissions were joined
+        bool certified = false;   // `now` is one validated pose for `frame`
     };
     struct Shard {
         std::mutex mutex;
         Entry entries[kSlots];
     };
-    static uint64_t mix(uint64_t x) {
-        x ^= x >> 33; x *= 0xff51afd7ed558ccdull; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ull; x ^= x >> 33;
-        return x;
+    Entry* find(Shard& shard, uint64_t record, uint32_t frame, Entry** reuse) {
+        const uint32_t start = slotOf(record);
+        for (uint32_t i = 0; i < kProbe; ++i) {
+            Entry& e = shard.entries[(start + i) & (kSlots - 1)];
+            if (e.record == record) return &e;
+            if (e.record == 0) { if (!*reuse) *reuse = &e; return nullptr; }
+            if (!*reuse && frame - e.frame >= 2u) *reuse = &e;
+        }
+        return nullptr;
     }
-    static uint32_t shardOf(uint64_t record) { return static_cast<uint32_t>(mix(record) >> 60) & (kShards - 1); }
-    static uint32_t slotOf(uint64_t record) { return static_cast<uint32_t>(mix(record)) & (kSlots - 1); }
+    static uint32_t shardOf(uint64_t record) { return static_cast<uint32_t>(mixBits(record) >> 60) & (kShards - 1); }
+    static uint32_t slotOf(uint64_t record) { return static_cast<uint32_t>(mixBits(record)) & (kSlots - 1); }
+    Shard shards_[kShards];
+};
+
+// The evaluation census: for one engine record in eight (by address, so the
+// same records every frame), every FUN_144312E00 call -- with items or
+// without -- notes the record's pose, so the log can say how many of the
+// records the tracker sees moving are evaluated here but not drawn, and
+// whether a history gap is a record evaluated without items (culled, not
+// selected) or not evaluated at all. Instrument only: it decides nothing.
+class Census {
+public:
+    static constexpr uint32_t kShards = 16, kSlots = 1024, kProbe = 16;
+    static bool sampled(uint64_t record) { return (mixBits(record) >> 20 & 7u) == 0; }
+
+    // Returns the last tick BEFORE this one the record was evaluated in
+    // (kNoTick if none): the caller's gap classification.
+    uint32_t note(uint64_t record, uint32_t frame, const Pose& pose, bool drawn, Stats& s) {
+        Shard& shard = shards_[static_cast<uint32_t>(mixBits(record) >> 56) & (kShards - 1)];
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        const uint32_t start = static_cast<uint32_t>(mixBits(record) >> 8) & (kSlots - 1);
+        Entry* e = nullptr;
+        Entry* reuse = nullptr;
+        for (uint32_t i = 0; i < kProbe; ++i) {
+            Entry& c = shard.entries[(start + i) & (kSlots - 1)];
+            if (c.record == record) { e = &c; break; }
+            if (c.record == 0) { if (!reuse) reuse = &c; break; }
+            if (!reuse && frame - c.tick > 64u) reuse = &c;
+        }
+        if (!e) {
+            if (!reuse) return kNoTick;
+            *reuse = Entry{record, frame, kNoTick, pose, false, drawn};
+            bump(s.censusFrames);
+            return kNoTick;
+        }
+        if (e->tick == frame) { e->drawn = e->drawn || drawn; return e->before; }
+        // The record's previous evaluated frame is final now: count it.
+        if (e->moved) bump(e->drawn ? s.censusMovingDrawn : s.censusMovingUndrawn);
+        e->moved = e->tick + 1u == frame && e->pose != pose;
+        e->before = e->tick;
+        e->tick = frame;
+        e->pose = pose;
+        e->drawn = drawn;
+        bump(s.censusFrames);
+        return e->before;
+    }
+    void clear() {
+        for (auto& shard : shards_) {
+            std::lock_guard<std::mutex> lock(shard.mutex);
+            for (auto& e : shard.entries) e = Entry{};
+        }
+    }
+
+private:
+    struct Entry {
+        uint64_t record = 0;
+        uint32_t tick = 0, before = kNoTick;
+        Pose pose{};
+        bool moved = false, drawn = false;
+    };
+    struct Shard {
+        std::mutex mutex;
+        Entry entries[kSlots];
+    };
     Shard shards_[kShards];
 };
 
@@ -247,39 +390,67 @@ inline bool readItemPose(uintptr_t item, Pose& pose) noexcept {
     return read(item + kItemPos, &pose.w[0], 12) && read(item + kItemQuat, &pose.w[3], 8);
 }
 
-// The whole bracket. frame = the present-frame clock at the call.
+// The whole bracket. frame = the present-frame clock at the call. census may
+// be null (no census this run).
 inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t after, uint32_t frame,
-                    LookupFn lookup, Table& table, Stats& s) noexcept {
+                    LookupFn lookup, Table& table, Stats& s, Census* census = nullptr) noexcept {
     bump(s.calls);
-    if (after <= before) { if (after < before) bump(s.drained); return; }
+    if (after < before) { bump(s.drained); return; }
     const int32_t k = after - before;
     if (k > kMaxAppended) { bump(s.tooMany); return; }
-    bump(s.callsWithItems);
-    bump(s.itemsAppended, static_cast<uint64_t>(k));
+    const bool sampled = census && Census::sampled(record);
+    if (k == 0 && !sampled) return;
     Pose pose;
     uint64_t node = 0;
-    if (!readRecordPose(record, pose, node)) { bump(s.readFaults); return; }
+    if (!readRecordPose(record, pose, node)) {
+        bump(s.readFaults);
+        if (k > 0) table.taint(record, frame, s);
+        return;
+    }
+    const uint32_t evaluatedBefore = sampled ? census->note(record, frame, pose, k > 0, s) : kNoTick;
+    if (k == 0) return;
+    bump(s.callsWithItems);
+    bump(s.itemsAppended, static_cast<uint64_t>(k));
     const uintptr_t entry = lookup ? guardedLookup(lookup, owner + kOwnerDictionary, record + kRecordKey) : 0;
     uintptr_t items[kMaxAppended] = {};
-    if (!entry || !collectItems(entry, k, items)) { bump(s.locateFailures); return; }
-    Pose prev;
-    const Table::Result result = table.resolve(record, node, frame, pose, prev, s);
+    if (!entry || !collectItems(entry, k, items)) {
+        bump(s.locateFailures);
+        table.taint(record, frame, s);
+        return;
+    }
+    // Every item validated BEFORE the table moves: the disagreement gate (the
+    // engine's copy in the record must be the rig record's pose bit for bit,
+    // or this is not our record, or the layout moved) and the reads.
+    bool itemOk[kMaxAppended] = {};
+    int32_t valid = 0;
     for (int32_t j = 0; j < k; ++j) {
         Pose itemPose;
         if (!readItemPose(items[j], itemPose)) { bump(s.readFaults); continue; }
-        // The disagreement gate: the engine's copy in the record must be the
-        // rig record's pose bit for bit, or this is not our record (or the
-        // layout moved): write nothing.
         if (itemPose != pose) { bump(s.disagreements); continue; }
-        const bool joined = result == Table::Result::Joined;
-        const Pose& written = joined ? prev : itemPose;   // masked: the engine's own same-frame copy
-        const uint32_t marker = (joined ? kJoined : kMasked) ^ markerHash(itemPose, written);
+        itemOk[j] = true;
+        ++valid;
+    }
+    const bool proven = valid == k;
+    if (!proven) bump(s.callsUnproven);
+    Pose prev;
+    uint32_t gapAge = 0;
+    const Table::Result result = table.resolve(record, node, frame, pose, proven, prev, s, &gapAge);
+    if (gapAge && sampled) {
+        // Evaluated (without items) after its last emission, or not at all.
+        if (evaluatedBefore != kNoTick && frame - evaluatedBefore < gapAge) bump(s.gapsEvaluatedBetween);
+        else bump(s.gapsUnevaluated);
+    }
+    const bool joined = result == Table::Result::Joined;   // implies proven
+    for (int32_t j = 0; j < k; ++j) {
+        if (!itemOk[j]) continue;   // never write into an item that did not validate
+        const Pose& written = joined ? prev : pose;   // masked: the engine's own same-frame copy
+        const uint32_t marker = (joined ? kJoined : kMasked) ^ markerHash(pose, written);
         if (!write(items[j] + kItemPrevPos, &written.w[0], 12) || !write(items[j] + kItemPrevQuat, &written.w[3], 8) ||
             !write(items[j] + kItemMarker, &marker, 4)) {
             bump(s.writeFaults);
             continue;
         }
-        if (joined) { bump(s.itemsJoined); if (written != itemPose) bump(s.itemsMoving); }
+        if (joined) { bump(s.itemsJoined); if (written != pose) bump(s.itemsMoving); }
         else bump(s.itemsMasked);
     }
 }

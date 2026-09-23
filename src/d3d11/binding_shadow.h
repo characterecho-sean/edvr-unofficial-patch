@@ -70,6 +70,13 @@ enum class BindSlot : uint32_t {
     CsUav3,
     Vs,            // the bound vertex shader, with its content hash (bindingShaderHash)
     Ps,            // the bound pixel shader, likewise
+    // Engine-record velocity's snapshot sources and the blend its slot target
+    // must not inherit (engine_velocity.h; the 2026-09-23 review, items 3/4):
+    // a rebind of either source, or any blend-state set, sends the next pool
+    // draw through the slow half's checks.
+    VsSrv33,       // vertex shader resource slot 33, the pool
+    VsCb1,         // vertex shader constant buffer slot 1, the scene constants
+    Blend,         // the output merger's blend state
     Count
 };
 

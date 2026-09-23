@@ -2016,11 +2016,18 @@ REM bracket against a fake engine laid out as build 332841 (previous pose,
 REM self-checking marker, the disagreement gate, the table), and the
 REM compose's arithmetic from the shipped HLSL text against a double
 REM reference. A parser or patcher that drifts fails here, not in a flight.
+REM Since the 2026-09-23 fix round it also links engine_velocity.cpp itself
+REM (EDVR_ENGINE_VELOCITY_RIG: no engine image to verify; the binding shadow
+REM external) and drives its draw half through the flight's and the review's
+REM cases -- cb1 re-maps, interleaved eyes, source swaps, pool writes, blend
+REM states, depth formats, the stand-down -- plus the temporal pass's
+REM compute-state save, sentinel by sentinel.
 if not exist "%OBJ%\enginevelocity" mkdir "%OBJ%\enginevelocity"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL ^
     /Fo"%OBJ%\enginevelocity\\" /Fe"%OBJ%\enginevelocity\engine_velocity_test.exe" ^
-    "tools\engine_velocity_test\engine_velocity_test.cpp" ^
+    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b 1 )
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --dry-run || exit /b 1

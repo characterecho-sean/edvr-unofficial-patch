@@ -8,8 +8,10 @@
 //
 // The pixel shader keeps every original instruction and export and gains one
 // float2 export at MRT6:
-//   x = the t33 slot the draw's vertex shader indexed (bit 31 masked off),
-//       converted to float (exact: the pool holds at most 2^24 records);
+//   x = 2 * slot + 1, the t33 slot the draw's vertex shader indexed (the low
+//       23 bits: a pool of 2^23 records would be 2.8 GB), written odd and
+//       converted to float (exact below 2^24) so that no blend, sum or clear
+//       can pass for a slot;
 //   y = SV_Position.z, the depth this fragment wrote (the consumer's exact
 //       equality test against the scene depth rejects a slot a later,
 //       unpatched draw covered).
@@ -34,6 +36,9 @@ namespace edvr {
 // The render-target slot the patched pixel shaders export to. The game's
 // G-buffer uses 0..3; static_surface's owner export is 7.
 constexpr uint32_t kEngineVelocityTarget = 6;
+// The slot bits kept before the odd encoding (2 * slot + 1 stays below 2^24,
+// where float is still exact).
+constexpr uint32_t kEngineVelocitySlotMask = 0x007fffffu;
 // The semantic the patched UV-only vertex shader exports and its patched
 // pixel shader reads. D3D11 links stages by semantic and register, so both
 // sides must spell it the same.
@@ -162,9 +167,14 @@ inline std::vector<BYTE> patchVsProgram(const std::vector<BYTE>& bytes, uint32_t
 
 // PS: declare the position input (or make its z live), the slot input when
 // it comes from the patched VS, oT.xy and one more temp; before every ret:
-//   and  rN.x, v<id>.<c>, l(0x7fffffff)
+//   and  rN.x, v<id>.<c>, l(0x007fffff)
+//   imad rN.x, rN.x, l(2), l(1)
 //   utof oT.x, rN.x
 //   mov  oT.y, v<pos>.z
+// The slot is written ODD (2 * slot + 1, exact in float below 2^24): a
+// cleared target (-1), an untouched one and any sum or blend of two writes is
+// never an odd whole number, so arithmetic that reached MRT6 is declined by
+// the compose instead of naming another record (the 2026-09-23 review, item 4).
 inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const EngineVelocityInputs& in) {
     auto t = programWords(bytes);
     size_t firstOutput = 0, tempAt = 0, firstExecutable = 0;
@@ -214,7 +224,8 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
     const uint32_t slotDecl[] = {0x03000862u, 0x00101012u, in.identityRegister};    // dcl_input_ps constant v.x
     const uint32_t outDecl[] = {0x03000065u, 0x00102032u, kEngineVelocityTarget};   // dcl_output o6.xy
     const uint32_t tail[] = {
-        0x07000001u, 0x00100012u, temp, identitySelect, in.identityRegister, 0x00004001u, 0x7fffffffu,
+        0x07000001u, 0x00100012u, temp, identitySelect, in.identityRegister, 0x00004001u, kEngineVelocitySlotMask,
+        0x09000023u, 0x00100012u, temp, 0x0010000Au, temp, 0x00004001u, 2u, 0x00004001u, 1u,
         0x05000056u, 0x00102012u, kEngineVelocityTarget, 0x0010000Au, temp,
         0x05000036u, 0x00102022u, kEngineVelocityTarget, 0x0010102Au, in.positionRegister,
     };

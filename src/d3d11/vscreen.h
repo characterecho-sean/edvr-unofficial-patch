@@ -31,6 +31,7 @@ struct ID3D11PixelShader;
 struct ID3D11ClassInstance;
 struct ID3D11Buffer;
 struct ID3D11Resource;
+struct ID3D11BlendState;
 struct D3D11_BOX;
 
 namespace edvr {
@@ -126,6 +127,10 @@ void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps,
                            ID3D11ClassInstance* const* classInstances, uint32_t numClassInstances);
 void vScreenVSSetConstantBuffersRaw(ID3D11DeviceContext* ctx, uint32_t startSlot,
                                     uint32_t numBuffers, ID3D11Buffer* const* buffers);
+// The blend state, past the binding shadow's hook: engine-record velocity's
+// derived state for a substituted pool draw, and the game's put back.
+void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state,
+                               const float blendFactor[4], uint32_t sampleMask);
 void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
                                  uint32_t dstSubresource, const D3D11_BOX* dstBox,
                                  const void* srcData, uint32_t srcRowPitch, uint32_t srcDepthPitch);

@@ -10,9 +10,16 @@
 //                 and creates on WARP. Local only: the game's shaders are not
 //                 in the repository.
 //
-// What it covers: the DXBC patcher end to end (shader_tests.h), the emit
-// bracket against a fake engine laid out as build 332841 (emit_tests.h), and
-// the compose's arithmetic from the shipped HLSL text (math_tests.h).
+// What it covers: the DXBC patcher end to end and the slot target's blend
+// states (shader_tests.h), the emit bracket's history rules against a fake
+// engine laid out as build 332841 (emit_tests.h), the compose's arithmetic
+// from the shipped HLSL text (math_tests.h), the production `mv` entry with
+// engine inputs bound -- joined exact, masked with no history, corrupt/stale/
+// cleared declined (consumer_tests.h), engine_velocity.cpp's draw half
+// linked in and driven through the flight's and the review's cases, plus the
+// temporal pass's compute-state save (lifecycle_tests.h). build.bat links
+// src\d3d11\engine_velocity.cpp with EDVR_ENGINE_VELOCITY_RIG and the binding
+// shadow external; lifecycle_tests.h supplies the stubs.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -27,6 +34,8 @@
 #include "shader_tests.h"
 #include "emit_tests.h"
 #include "math_tests.h"
+#include "consumer_tests.h"
+#include "lifecycle_tests.h"
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
 
 using Microsoft::WRL::ComPtr;
@@ -92,6 +101,7 @@ int wmain(int argc, wchar_t** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
         if (a == L"--self-test" || a == L"--dry-run") selfTest = true;
+        else if (a == L"--verbose") lifecycle_tests::g_verbose = true;
         else if (a == L"--corpus" && i + 1 < argc) corpusRoot = argv[++i];
         else {
             std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir>]\n");
@@ -111,6 +121,8 @@ int wmain(int argc, wchar_t** argv) {
     shader_tests::run({device.Get(), context.Get(), &check});
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});
+    consumer_tests::run({device.Get(), context.Get(), &check});
+    lifecycle_tests::run({device.Get(), context.Get(), &check});
     if (!corpusRoot.empty()) corpus(device.Get(), corpusRoot);
     std::printf("engine_velocity_test: %u checks passed%s.\n", g_checks, corpusRoot.empty() ? "" : " including the real shader corpus");
     return 0;
