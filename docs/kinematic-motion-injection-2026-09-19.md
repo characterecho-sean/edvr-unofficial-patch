@@ -3,39 +3,35 @@
 ## Status
 
 - **State:** DECIDED DIRECTION, 2026-09-19 (Sean): engine-level injection from
-  KinematicRig truth, not draw-call interpretation (ruled out as a class). Phase 0/A/B
-  built and flown clean by 2026-09-20 17:05 (B's veto since removed). Four engine-truth
-  routes to a mover/static flag closed 0-for-4 by 21:25 that day. RESUMED OFFLINE
-  2026-09-23 (Sean: motion vectors should derive from the engine, not render-time
-  estimates); the offline pass then found no engine velocity buffer anywhere in the VR
-  path, the record's +0x1C0..0x1F8 block a same-frame change detector not history, and
-  movers proven to be rig records matching tracked poses to under 1 mm (2026-09-23
-  entry). Sean then set the requirement -- GENERALIZED, no estimation anywhere, not
-  even as a fallback -- and the overseer answered with three sources: camera-only for
-  statics, engine-record delta via substituted pool shaders for movers (design C fed
-  by design B), and the existing DLSS/FSR reactive mask as the only fallback; design A
-  (pool content-pairing) was the open alternative (2026-09-23, later entry). The first
-  half of the resulting flight is now IN: blur ON renders no velocity anywhere (same
-  pool shaders, no two-channel target, no blur pass before the tone-map), and on the
-  landing ship the engine-record join matched all 64 drawn movers exactly (56/56 of
-  the fast ones) while design A's content-pairing mis-paired 11-23 of those 56 --
-  DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 + FIX ROUND
-  MERGED and FLOWN (093817, "The re-fly" entry): eye-frames bound and given, cb1
-  re-maps kept (invalidated 0), corrupt codes 0, engine-joined 67-73k px an eye-frame.
-  FOLLOW-UPS FLOWN (114958, c00af958): cockpit prep 0.15-0.23 ms a pair, no faults.
+  KinematicRig truth, not draw-call interpretation (ruled out as a class); phases 0/A/B
+  flown clean 2026-09-20 (B's veto since removed); four engine-truth flag routes closed.
+  RESUMED 2026-09-23 with Sean's requirement -- GENERALIZED, no estimation anywhere, not
+  even as a fallback: camera-only for statics, engine-record delta via substituted pool
+  shaders for movers (design C fed by B), the reactive mask the only fallback. Design A
+  (pool content-pairing) measured wrong and an engine velocity buffer ruled out with blur
+  off and on (the 2026-09-23 entries); B+C IS THE DESIGN. PHASE 1 + FIX ROUND MERGED and
+  FLOWN (093817, "The re-fly" entry): eye-frames bound and given, invalidated 0, corrupt
+  codes 0, engine-joined 67-73k px an eye-frame. FOLLOW-UPS FLOWN (114958): cockpit prep
+  0.15-0.23 ms a pair, no faults.
   STAGE B REMOVED (engine motion is part of fix.temporal_aa); PERFORMANCE ROUND merged.
   ON FOOT FLOWN (flight 5, 140351, "Flight 5" entry): standing, source views given
   2938/2938; WALKING, EVERY SOURCE FRAME DROPPED (2031/2031) by the eyes' rows rule --
-  the source is drawn by more than one camera. FIXED ON A BRANCH, NOT FLOWN: each source
+  the source is drawn by more than one camera. FIXED, MERGED, NOT FLOWN: each source
   pool draw held to the naming draw's camera, the others declined, the frame kept.
+  STATION (eye run 143416, "The station" entry): the joined station pixels are EXACT
+  (one rigid motion to 0.002 px at the records' own 0.106-0.110 deg a frame), but 55% of
+  its pixels kept the camera term, 0.31-0.35 px a frame short: vs_4361 (no family) and
+  stock pixel shaders. ps_CB429E04 (DE54) and ps_451A82D4 (61AE) KEYED, harness-proven,
+  MERGED, NOT FLOWN; vs_4361 waits on its pixel shader's bytecode.
 - **Open:** walkers (vs_F516BF0201303B87, not a pool family; w=2 on the panel) wait on
-  phase 2's previous bone palette -- a walking NPC still blurs after this fix; which
-  camera the walk's other draws use (the new line's rows and distance say); a temporal
-  pass on the flat source for its own aliasing; the stale cockpit (the commander's legs
-  under unkeyed ps_B7D5 and vs_7B0DC42D, DECIDED not keyed; 35.4% undecided, low
+  phase 2's previous bone palette -- a walking NPC still blurs after the on-foot fix;
+  which camera the walk's other draws use (the new line's rows and distance say); a
+  temporal pass on the flat source for its own aliasing; the stale cockpit (the
+  commander's legs under ps_B7D5 and vs_7B0DC42D, DECIDED not keyed; 35.4% undecided, low
   priority); the tracker's evaluated-but-not-drawn movers (the 09:38 entry); the boarding
-  flicker (the LOD governor, not this arc); stations and ships in space; builder-path
-  movers and articulated parts (phase 2).
+  flicker (the LOD governor, not this arc); the station's vs_436193B352A2897E (derives:
+  slot v0.y) and vs_889A5279E68F0672 (derives: v0.x) as families; ships in space;
+  builder-path movers and articulated parts (phase 2).
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -54,12 +50,14 @@
   on-foot world packed per eye; enginePixel's record fetch as the ~3 ms prep; a depth
   pre-pass or a depth bias as the stale cockpit (all three: the re-fly entry); green on
   the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
-  cause (the 09:38 entry). Do not re-propose any of the above.
-- **Next:** the on-foot re-fly of this branch (--expect-build HEAD first), walking near a
-  drone or a landing ship: `on foot: ... frames dropped: none; screen views asked A,
-  given A` (less the first frame), `camera rule: ... declined D in F frames` with the
-  other camera's rows and distance, `panel pixels per sampled eye draw: engine-joined J`,
-  J > 0. Then the controlled diagnostics 1 vs 0 comparison (the review's protocol).
+  cause (the 09:38 entry); the station's joined motion wrong at range (precision, a
+  stale pose: "The station" entry). Do not re-propose any of the above.
+- **Next:** one flight (--expect-build HEAD first): walking near a drone or a landing
+  ship -- `on foot: ... frames dropped: none; screen views asked A, given A` (less the
+  first frame), `camera rule: ... declined D in F frames`, `panel pixels per sampled eye
+  draw: engine-joined J`, J > 0; then a station approach with advanced.glare_shader_dump
+  = 1 (restart to arm): stale falls by the keyed share and ps_16940F576006BE65 is dumped,
+  then vs_4361 is keyed through the harness. Then the diagnostics 1 vs 0 comparison.
 
 ## Premise
 
@@ -2625,3 +2623,77 @@ pixels per sampled eye draw: engine-joined J` with J > 0 when a pool-family rig 
 on screen. If the new code never ran: no `camera rule:` clause (the old line), and walking
 frames dropped for `scene rows 270..275 changed` as in flight 5. Walkers (vs_F516) are not
 a pool family: a walking NPC still blurs until phase 2's previous bone palette.
+
+### 2026-09-23 -- The station (eye run 143416): the joined motion is exact; half the station is drawn by no keyed shader
+
+**The flight.** Build e1bf2dbd, the trim off, input 2037x2038, DLSS output 4074x4076; the
+station from ~14:33:30 to 14:34:45 (log 142856); the eye run at 14:34:16 turned
+diagnostics on for the 14:34:27 window (lines 18831-18843): emit joined 993,605 pool
+records in 30 s, with motion 986,546 (99%: the station's parts move every frame), masked
+122 (gaps 107, none in bursts); movers joined 371.2 records a frame against the
+tracker's 1424.2; eye-frames 4796, all bound and given, invalidated 0; pixels an
+eye-frame: engine-joined 297,566, masked 0, not a rig record 2,616, STALE 136,878,
+corrupt 0 (32 readbacks); stock pixel shaders: ps_B7D5 (vs_EB52), ps_CB42 (vs_DE54, new
+here), ps_451A (vs_61AE). Sean: the station's rotation blurry. Two hypotheses: (A) the
+blur is on surfaces no substituted draw wrote, which keep the camera term on a turning
+station; (B) the joined motion is wrong at range (engineReproject's precision at
+kilometres, or a stale previous pose).
+
+**The dump.** The decision crops (D00..D15: 1400 x 1400 of the input, motion, predicted
+prior depth and the path per pixel), motion.csv (each frame's camera delta, tangents,
+jitter), the ledger (pool copies, instance streams, 40-byte draw rows with the pixel
+shader). The camera term, recomputed from motion.csv (P_prev = cameraR P + cameraTv, no
+jitter, vector = previous minus current pixel), matches the world path's vectors to
+0.0001 px median, so the arithmetic below is the pass's own. Frames 28800 / 28801:
+
+- Station pixels (depth over 50 m; the station 4.6-8.5 km away): engine path 152.7k /
+  152.4k, camera term 187.0k / 187.3k -- 55.1% of the station on the camera term.
+- The engine pixels' vectors minus the camera term, fitted by ONE rigid motion in view
+  space (trimmed least squares): residual 0.0022 / 0.0029 px median (p90 0.017 /
+  0.007), 0.1125 / 0.1078 deg a frame. The records' own two pose blocks (quaternion now
+  at +8, before at +312): 0.1062 / 0.1084 deg a frame. Neighbouring engine pixels on one
+  surface step 0.002 px (p99 0.01): no float noise at 4.6-8.5 km.
+- What the camera-term station pixels miss under that motion: 0.31 / 0.35 px a frame
+  median, p90 0.63 / 0.70 -- the blur.
+
+ruled out: the station's joined motion wrong at range (B: precision in the world
+reconstruction at kilometres, or a stale previous pose), because the engine pixels are
+one rigid motion to 0.002 px at the records' own rate, 0.106-0.113 deg a frame.
+
+**What draws the camera-term half (the ledger, frame 28800, per eye, by the records the
+instances take).** The station's pool draws: vs_436193B352A2897E + ps_16940F576006BE65
+(136 draws, 547 instances at 7.3 km, 589k indices x instances -- the largest set in the
+eye pass, and no family), vs_EB52 + ps_3434 (264, keyed), vs_DE54 + ps_E46E (145,
+keyed), vs_DE54 + ps_CB42 (108 at 5.5 km, 71k, STOCK), vs_AACF (51, keyed),
+vs_889A5279E68F0672 + ps_B46E52A1E0B2F39C (37 at 8.5 km, no family), vs_EB52 + ps_CB9F
+(15), vs_66DE (9), vs_61AE + ps_451A (7 at 5.8 km, STOCK), vs_61AE + ps_FC43 (6), vs_EB52
++ ps_9ABF (3), vs_DE54 + ps_03B1 (1). 700 of the station's 1193 pool instances are drawn
+by shaders that write no slot, vs_4361 alone 547. Attributed by records, not rasterised;
+per-object-motion.md (the forty-third flight) read vs_4361's position path whole: the
+record's own quaternion, scale and position. ps_B7D5 (vs_EB52) and ps_91F8 (vs_DE54)
+draw the cockpit (records 1-2 m away): the commander's legs, decided, not the station.
+So A holds, and its main term is a whole pool shader outside the families, not the
+stock pixel shader first named.
+
+**The fix (branch claude/station-keying).** ps_CB429E043DBB2506 keyed for vs_DE54 and
+ps_451A82D4DD1BA254 for vs_61AE (src/d3d11/engine_velocity.cpp, kFamilies); both pairs
+pass the corpus identity harness on the real bytecode (edvr_logs\shaders, 09-06): 40,960
+texels, 0 mismatches, MRT6 8192 checked, 0 bad, each. EDHM or a game update changing
+either hash leaves it stock by name, as for every keyed pair. vs_436193B352A2897E
+derives (slot v0.y, SV_Position v5: the DATAID.y pattern of vs_EB52) and so does
+vs_889A5279E68F0672 (v0.x, v4) -- the harness now checks both, derive only -- but
+ps_16940F576006BE65 is in no dump, and nothing is keyed without the harness.
+
+**Coverage.** The station: VERIFIED where a keyed shader draws it (exact, the rigid fit
+above); NOT COVERED: vs_4361's surfaces (the bulk of the camera-term half) and vs_889A's,
+until their pixel shaders are dumped and proven.
+
+**What a flight shows.** At a station on this build, the family lines read
+`vs_DE545DC8EE4FBB87: live; ... patched [ps_E46E3E4832B2FDB0,ps_CB429E043DBB2506]` and
+`vs_61AE8EB05FDC18DD: live; ... patched [ps_FC43E42710010343,ps_451A82D4DD1BA254]`; with
+diagnostics, engine-joined up and stale down by the keyed share -- a modest one, vs_4361
+still dominating. With advanced.glare_shader_dump = 1 for one session (restart to arm),
+edvr_logs\shaders\ps_16940F576006BE65.dxbc appears, and vs_4361 becomes a family through
+the harness. If the new code never ran, the family lines still name ps_CB42 and ps_451A
+"left stock". Rigs: engine_velocity_test 967 checks (the gate), 1254 with --corpus
+(eleven real pairs identical, two derive-only).
