@@ -958,6 +958,20 @@ inline void run(const Harness& h) {
             "P4: one pool and one scene-constant copy per prepared eye-frame");
     h.check(number(line, "MB) + ") >= 1, "P4: and the append refresh counted");
 
+    // P5 (attribution gap 1): every prepared eye-frame's clear and snapshot,
+    // and the refresh, went through a GPU timer -- measured, or counted as
+    // untimed/invalid, never silently lost -- and the take resets the window.
+    {
+        edvr::EngineVelocityCaptureGpu c{};
+        edvr::engineVelocityTakeCaptureGpu(&c);
+        h.check(c.events[0] + c.events[1] + c.events[2] + c.untimed + c.invalid >= 1,
+                "P5: the eye-pass capture is timed or its absence counted");
+        edvr::EngineVelocityCaptureGpu again{};
+        edvr::engineVelocityTakeCaptureGpu(&again);
+        h.check(again.events[0] + again.events[1] + again.events[2] + again.untimed + again.invalid == 0,
+                "P5: taking the window resets it");
+    }
+
     // R6: the emit hook not installed -> STOOD DOWN, no substitution, nothing given.
     mark = g_log.size();
     lifecycle_fake::g_hookLive = false;

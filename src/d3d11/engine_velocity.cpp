@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "depth_probe.h"
+#include "gpu_timing.h"
 #include "dxbc_engine_velocity.h"
 #include "engine_velocity_emit.h"
 #include "engine_velocity_state.h"
@@ -269,6 +270,53 @@ constexpr uint32_t kResumeFrames = 90;   // a substitution after this many quiet
 constexpr uint64_t kBurstGaps = 32;      // gaps in one frame that make it a burst
 
 uint32_t frameNow() { return g_frame.load(std::memory_order_acquire); }
+
+// --- The eye-pass capture's GPU time (the performance review, item 5) ---------
+// The slot target's clear, the snapshots at preparation and the append
+// refreshes run in the game's own eye pass, before the temporal pass's prep;
+// its timers never saw them. GPU timestamps around each (GpuTimer: a shared
+// clock lease, polled without flushing or waiting at the owner's frame
+// boundary), taken per price window by the temporal pass.
+enum CaptureKind : int { kCaptureClear = 0, kCaptureSnapshot, kCaptureRefresh, kCaptureKinds };
+static_assert(kCaptureKinds == 3, "EngineVelocityCaptureGpu carries the three kinds");
+struct CaptureTimer { GpuTimer timer; int kind = -1; bool pending = false; };
+constexpr int kCaptureTimers = 24;
+constexpr size_t kCaptureSamples = 4096;
+CaptureTimer g_captureTimers[kCaptureTimers];
+std::vector<double> g_captureMs[kCaptureKinds];
+uint64_t g_captureUntimed = 0, g_captureInvalid = 0;
+
+int beginCapture(ID3D11DeviceContext* ctx, int kind) {
+    for (int i = 0; i < kCaptureTimers; ++i) {
+        CaptureTimer& t = g_captureTimers[i];
+        if (t.pending) continue;
+        Ptr<ID3D11Device> dev;
+        ctx->GetDevice(&dev);
+        if (!dev || !t.timer.begin(dev.Get(), ctx)) { ++g_captureUntimed; return -1; }
+        t.kind = kind;
+        t.pending = true;
+        return i;
+    }
+    ++g_captureUntimed;   // every timer still in flight: this one goes untimed, counted
+    return -1;
+}
+void endCapture(ID3D11DeviceContext* ctx, int i) {
+    if (i >= 0) g_captureTimers[i].timer.end(ctx);   // a refused end polls Invalid
+}
+void pollCaptures(ID3D11DeviceContext* ctx) {
+    for (auto& t : g_captureTimers) {
+        if (!t.pending) continue;
+        double ms = 0.0;
+        const GpuTimerPoll r = t.timer.poll(ctx, ms);
+        if (r == GpuTimerPoll::Pending) continue;
+        if (r == GpuTimerPoll::Ready) {
+            if (g_captureMs[t.kind].size() < kCaptureSamples) g_captureMs[t.kind].push_back(ms);
+        } else {
+            ++g_captureInvalid;
+        }
+        t.pending = false;
+    }
+}
 
 // --- The build-keyed engine side ----------------------------------------------
 // FUN_143696FA0's first 32 bytes (the dictionary lookup the bracket calls) and
@@ -635,7 +683,9 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     const WatchInfo& ws = g_watchInfo[static_cast<unsigned>(eye) * 2u + 1u];
     if (wp.replaceEpoch != e.poolReplaceEpoch) { invalidate(e, kPoolRewritten); return; }
     if (wp.appendEpoch != e.poolAppendEpoch) {
+        const int refreshTimer = beginCapture(ctx, kCaptureRefresh);
         ctx->CopyResource(e.pool.Get(), e.poolBuffer.Get());
+        endCapture(ctx, refreshTimer);
         e.poolAppendEpoch = wp.appendEpoch;
         ++g_draw.poolRefreshed;
         g_draw.poolRefreshBytes += e.poolBytes;
@@ -753,8 +803,12 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         e.bound = e.boundCounted = e.written = e.invalid = e.consumed = false;
         e.rtvGen = e.dsvGen = 0;
         const float cleared[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
+        const int clearTimer = beginCapture(ctx, kCaptureClear);
         ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+        endCapture(ctx, clearTimer);
+        const int snapTimer = beginCapture(ctx, kCaptureSnapshot);
         snapshot(ctx, e, eye, frame);
+        endCapture(ctx, snapTimer);
     }
     if (e.invalid) { restore(ctx); return; }
     if (e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
@@ -1235,6 +1289,7 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!live.load(std::memory_order_acquire)) return;
     cache = DrawCache{};
     ++g_draw.frames;
+    if (ctx) pollCaptures(ctx);   // the eye-pass capture's GPU timers, without waiting
     // The on-foot source's slot target lives only while the source is drawn:
     // kSourceIdleFrames present frames without screen_motion naming it and it
     // goes, with its watches and the held depth.
@@ -1302,6 +1357,28 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
     return giveViewsLocked(g_eyes[eye], sceneDepth, out,
                            {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
                             g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious});
+}
+
+bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
+    if (!out) return false;
+    *out = EngineVelocityCaptureGpu{};
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    bool any = false;
+    for (int k = 0; k < kCaptureKinds; ++k) {
+        std::vector<double>& v = g_captureMs[k];
+        out->events[k] = static_cast<uint32_t>(v.size());
+        if (!v.empty()) {
+            any = true;
+            std::sort(v.begin(), v.end());
+            out->medianMs[k] = v[v.size() / 2];
+            out->p95Ms[k] = v[std::min(v.size() - 1, static_cast<size_t>(double(v.size()) * 0.95))];
+        }
+        v.clear();
+    }
+    out->untimed = g_captureUntimed;
+    out->invalid = g_captureInvalid;
+    g_captureUntimed = g_captureInvalid = 0;
+    return any || out->untimed || out->invalid;
 }
 
 void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth) {

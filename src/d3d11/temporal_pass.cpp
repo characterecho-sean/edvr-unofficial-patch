@@ -640,6 +640,10 @@ struct Slot {
     // AMD full-frame run from an NVIDIA one, both Treatment::FullFrame.
     edvr::TemporalEngine engine = edvr::TemporalEngine::Own;
     bool          lean = false;   // the own path's dispatch was the lean shader
+    // The motion/compose shader that ran was the diagnostic build (atomics,
+    // counters) rather than the lean one -- the price line says which (the
+    // performance review's attribution gap 4).
+    bool          instrumented = false;
     uint32_t      outW = 0, outH = 0;
     uint32_t      fmt = 0;
     uint32_t      configGen = 0;
@@ -764,10 +768,11 @@ struct WindowKey {
     uint32_t  fmt = 0;
     uint32_t  configGen = 0;
     bool      lean = false;   // the own path ran the lean shader, not the instrumented one
+    bool      instrumented = false;   // the diagnostic shader build ran (any path)
     bool operator==(const WindowKey& o) const {
         return treatment == o.treatment && engine == o.engine && outW == o.outW &&
                outH == o.outH && fmt == o.fmt && configGen == o.configGen &&
-               lean == o.lean;
+               lean == o.lean && instrumented == o.instrumented;
     }
     bool operator!=(const WindowKey& o) const { return !(*this == o); }
 };
@@ -907,21 +912,36 @@ void flushWindow(const char* reason) {
         partMed[pi] = windowPercentile(scratch, n, 0.5);
     }
 
-    char line[1200];
+    // The eye pass's capture work for engine motion (clear, snapshots,
+    // refreshes), GPU-timed there and taken here, printed beside prep's
+    // parts: it runs BEFORE prep, in the game's own eye pass, so neither prep
+    // nor "other" contains it (the performance review, attribution gap 1).
+    EngineVelocityCaptureGpu capture{};
+    const bool captured = engineVelocityTakeCaptureGpu(&capture);
+    char line[1600];
     int len = snprintf(line, sizeof(line),
-        "temporal aa price: %s, %ux%u, %d stereo pairs (%s), ms per pair "
+        "temporal aa price: %s, %ux%u, %s shader, %d stereo pairs (%s), ms per pair "
         "median/p95:",
         treatmentName(g_windowKey.treatment, g_windowKey.engine, g_windowKey.lean),
         g_windowKey.outW,
-        g_windowKey.outH, n, reason);
+        g_windowKey.outH, g_windowKey.instrumented ? "diagnostic" : "lean", n, reason);
     for (int ri = 0; ri < kRegionCount && len > 0 && len < static_cast<int>(sizeof(line)); ++ri) {
         len += snprintf(line + len, sizeof(line) - len, " %s %.2f/%.2f",
                         kRegionNames[ri], regionMed[ri], regionP95[ri]);
         // Prep's parts inside its own figure (PrepPart): on the paths that
         // time them; zeros where a part did not run (the own path).
         if (ri == static_cast<int>(Region::Prep) && len > 0 && len < static_cast<int>(sizeof(line))) {
-            len += snprintf(line + len, sizeof(line) - len, " (%s %.2f/%.2f %s %.2f/%.2f)",
+            len += snprintf(line + len, sizeof(line) - len, " (%s %.2f/%.2f %s %.2f/%.2f",
                             kPrepPartNames[0], partMed[0], partP95[0], kPrepPartNames[1], partMed[1], partP95[1]);
+            if (captured && len > 0 && len < static_cast<int>(sizeof(line)))
+                len += snprintf(line + len, sizeof(line) - len,
+                                "; eye-pass capture per event, before prep: clear %.3f/%.3f x%u, snapshots "
+                                "%.3f/%.3f x%u, refreshes %.3f/%.3f x%u, %llu untimed, %llu invalid",
+                                capture.medianMs[0], capture.p95Ms[0], capture.events[0], capture.medianMs[1],
+                                capture.p95Ms[1], capture.events[1], capture.medianMs[2], capture.p95Ms[2],
+                                capture.events[2], static_cast<unsigned long long>(capture.untimed),
+                                static_cast<unsigned long long>(capture.invalid));
+            if (len > 0 && len < static_cast<int>(sizeof(line))) len += snprintf(line + len, sizeof(line) - len, ")");
         }
     }
     if (len > 0 && len < static_cast<int>(sizeof(line))) {
@@ -1050,7 +1070,7 @@ void finalizePending(PendingPair& p) {
 
 void priceSlot(const Slot& q) {
     if (q.eye != 0 && q.eye != 1) return;   // an eye index this report cannot place
-    const WindowKey key{q.treatment, q.engine, q.outW, q.outH, q.fmt, q.configGen, q.lean};
+    const WindowKey key{q.treatment, q.engine, q.outW, q.outH, q.fmt, q.configGen, q.lean, q.instrumented};
     int idx = -1;
     for (int i = 0; i < kPendingCap; ++i) {
         if (g_pending[i].used && g_pending[i].frame == q.frame) { idx = i; break; }
@@ -6221,6 +6241,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // full path's copy logic).
                     D3D11_BOX box{};
                     beginRegion(qs, Region::Prep, dev, ctx);
+                    // Prep's parts on the foveated route too (the performance
+                    // review's attribution gap 2): the colour copy, then the
+                    // motion-vector dispatch.
+                    beginPart(qs, PrepPart::Copy, dev, ctx);
                     box.left = viaCopy ? 0 : region[0];
                     box.top = viaCopy ? 0 : region[1];
                     box.front = 0;
@@ -6246,6 +6270,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         foveaDeferredInput->GetResource(&clean);
                         ctx->CopyResource(e.dlColour, clean.Get());
                     }
+                    endPart(qs, PrepPart::Copy, ctx);
                     // Motion vectors and the depth copy, full frame (NVIDIA
                     // reads the crop's sub-rectangle of them; the reduction
                     // reads them whole). The mover mask is computed here too
@@ -6288,7 +6313,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetUnorderedAccessViews(0, 8, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, engineOwn ? 3 : 1, cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
+                    beginPart(qs, PrepPart::Mv, dev, ctx);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                    endPart(qs, PrepPart::Mv, ctx);
                     if (engineOwn) {
                         ctx->CSSetConstantBuffers(1, 2, savedCbM);
                         for (auto* b : savedCbM) if (b) b->Release();
@@ -6748,6 +6775,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                  : (flags & 64u)   ? edvr::TemporalEngine::Amd
                                                     : edvr::TemporalEngine::Nvidia;
             g_slots[qs].lean = leanOwn;
+            // The trained paths' motion shader follows `diagnostics`; the own
+            // path's compose is instrumented unless it ran lean.
+            g_slots[qs].instrumented = (foveaComposited || usedDlaa) ? diagnostics : !leanOwn;
             g_slots[qs].outW = foW;
             g_slots[qs].outH = foH;
             g_slots[qs].fmt = static_cast<uint32_t>(sd.Format);

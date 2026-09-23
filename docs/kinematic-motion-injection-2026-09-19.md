@@ -2507,3 +2507,16 @@ submitted, not GPU time (the GPU time is item 5's). No storage change: if R x ca
 material, the next step is copying proven dirty ranges or sizing to the exposed range,
 never sharing one snapshot between eyes unproven. Never ran: no snapshots line. Rig:
 engine_velocity_test P4.
+
+**5. The attribution gaps.** (a) The slot target's clear, the snapshots at preparation and
+the append refreshes run in the game's own eye pass, before prep, so no prep figure contained
+them: each now sits between GPU timestamps (GpuTimer: a lease on the shared clock, polled at
+the owner's frame boundary with DONOTFLUSH, no Flush, no wait), and the price line prints
+them inside prep's parenthesis: `prep a/b (copy c/d mv e/f; eye-pass capture per event,
+before prep: clear m/p xN, snapshots m/p xN, refreshes m/p xN, U untimed, V invalid)`. (b)
+The foveated route's prep now has the same copy/mv parts as the full frame. (c) The price
+line names the shader build: `temporal aa price: <treatment>, WxH, lean shader|diagnostic
+shader, ...` -- and a change of build closes the window, so a diagnostic capture never prices
+the production shader. Never ran: no capture clause (or all three x0 with the capture
+counted untimed), the foveated parts at 0.00/0.00, no shader word. Rig: engine_velocity_test
+P5 (every capture timed or counted, the take resets).
