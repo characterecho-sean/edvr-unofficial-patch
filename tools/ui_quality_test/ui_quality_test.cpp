@@ -494,6 +494,63 @@ void testGate() {
 
 // What a draw does with its depth-stencil target, from the D3D11 state the
 // DLL reads (ui_layer_shaders.h's translation, ui_layer_math.h's effect).
+// The family rule (ui_layer_math.h's uiLayerFamilyFor, which vscreen.cpp's
+// uiLayerFamilyOf feeds): the 13:23 flight lost the menu panel when the FOV
+// trim, adopted at the main menu, had the game re-create its interface
+// surfaces -- a learned surface is no longer what the panel samples, and the
+// panel stays the menu panel by its shader pair.
+void testFamilyRule() {
+    UiFamilyFacts f;
+    f.targetKind = 2;
+    f.vs = kUiVsPanel;
+    f.ps = 0x9107E72CB016CC02ull;
+    UiFamilyWhy why = UiFamilyWhy::kOther;
+    f.learnedSurface = true;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel && why == UiFamilyWhy::kLearnedSurface,
+          "the menu panel over a learned surface: the menu panel");
+    f.learnedSurface = false;  // the surface the game re-created, not learned yet
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel && why == UiFamilyWhy::kShaderPair,
+          "...over a re-created surface nothing has learned: still the menu panel, by its shader pair");
+    f.ps = 0x219323C8C025AD94ull;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel, "...its variant pixel shader too");
+    f.ps = 0x015EF9349EC097E8ull;  // the same vertex shader drawn after the UI, unclassified
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNoSurface,
+          "the same vertex shader with another pixel shader and no learned surface: not UI, and said why");
+    f.vs = kUiVsLoader;
+    f.ps = 0x85565E9261812E2Full;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kLoader && why == UiFamilyWhy::kShaderPair,
+          "the loading screen by its pair; its gamma pass too");
+    f.ps = 0x8ADB2A81A45E8A4Bull;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kLoader, "...the gamma pass (a multiply)");
+    f.targetKind = 0;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotEyeTarget,
+          "not an eye target: none, whatever the shaders");
+    f.targetKind = 1;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
+          "the lit HDR target: not the composite's");
+    f.vs = kUiVsHolo;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kHolo, "...where the holo panels are named");
+    f.targetKind = 2;
+    f.vs = kUiVsPanel;
+    f.ps = 0x9107E72CB016CC02ull;
+    f.excluded = true;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kExcluded,
+          "the exclude list wins over the pair");
+    f.excluded = false;
+    f.panelSized = true;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kScreen, "the 2D screen's SRV names the 2D screen first");
+    UiFamilyFacts g;
+    g.targetKind = 2;
+    g.vs = kUiVsGuiText;
+    check(uiLayerFamilyFor(g) == UiLayerFamily::kGuiDirect, "a GUI draw straight into the eye");
+    g.vs = 0x1234;
+    g.learnedSurface = true;
+    check(uiLayerFamilyFor(g) == UiLayerFamily::kSurface, "any other learned-surface composite");
+    g.learnedSurface = false;
+    check(uiLayerFamilyFor(g, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kOther,
+          "anything else: none");
+}
+
 void testDepthStencil() {
     D3D11_DEPTH_STENCIL_DESC d{};
     // The menu panel, its escape-menu variant and the loader (census
@@ -1130,6 +1187,83 @@ void testComposite(Gpu& g) {
     check(std::abs(int(mid[at]) - int(one[inside])) <= 1, "a cropped rectangle samples the layer's matching pixels");
 }
 
+// A render-size change with the layer engaged (the 13:23 flight: the FOV
+// trim adopted at the main menu took the door from 3070x3032 to 2458x2824 and
+// the game's eye from 1995x1970 to 1597x1835). The old layer no longer
+// describes the new frame (the stretched frame); the layer re-made for the
+// new door is armed for the first frame after the change, the family's next
+// draw is redirected there, and its composite over the new frame is exact.
+void testSizeChange(Gpu& g) {
+    using namespace uiblend;
+    const uint32_t oldW = 40, oldH = 30;  // the door before
+    const uint32_t newW = 32, newH = 36;  // after: another shape
+    const uint32_t rW = 16, rH = 18;      // the game's eye after, upscaled 2x by the door
+    const float uvFull[4] = {0, 0, 1, 1};
+    const UiLayerSize before = uiLayerSize(oldW, oldH, 1.0f), after = uiLayerSize(newW, newH, 1.0f);
+    check(!uiLayerRegionMatches(newW, newH, uvFull, before.w, before.h) &&
+              uiLayerRegionMatches(newW, newH, uvFull, after.w, after.h),
+          "a size change: the old layer does not describe the new frame (the stretched frame), the "
+          "layer re-made for the new door does");
+    // The first frame after the change: the door ran for the new size at
+    // sequence 10, so a draw of sequence 11 is armed, into the game's new
+    // eye target, which is the region it submits.
+    UiLayerDoorState door;
+    door.doorSeq = 10;
+    door.treatedSeq = 10;
+    door.fullW = newW;
+    door.fullH = newH;
+    UiLayerDrawFacts f;
+    f.family = UiLayerFamily::kPanel;
+    f.eyeTarget = f.ldrView = true;
+    f.eye = 0;
+    f.targetMatchesEye = true;
+    f.late = uiLayerLateFor(door, 11);
+    f.armed = uiLayerArmed(door, 11);
+    f.blend = UiBlendShape::kOver;
+    check(uiLayerDecide(f) == UiLayerDecision::kRedirect,
+          "the menu panel's first draw after the change is redirected (armed by the door's new size)");
+
+    Tex layer = makeTex(g, after.w, after.h, false), frame = makeTex(g, newW, newH, false);
+    Tex direct = makeTex(g, newW, newH, false), out = makeTex(g, newW, newH, true);
+    const float base[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+    g.ctx->ClearRenderTargetView(frame.rtv.Get(), base);
+    g.ctx->ClearRenderTargetView(direct.rtv.Get(), base);
+    g.ctx->ClearRenderTargetView(layer.rtv.Get(), kUiLayerClear);
+    // Edges 0.3 of a layer pixel past a boundary (testRedirect's reason).
+    const float left = 5.3f, right = 21.3f, top = 7.3f, bottom = 27.3f;  // new-frame pixels
+    const float rect[4] = {-1.0f + 2.0f * left / newW, 1.0f - 2.0f * bottom / newH,
+                           -1.0f + 2.0f * right / newW, 1.0f - 2.0f * top / newH};
+    const float colour[4] = {0.9f, 0.3f, 0.1f, 1.0f};
+    UiBlendRt opaque, conv;
+    uiLayerConvertBlend(opaque, &conv);
+    D3D11_BLEND_DESC od = uiLayerBlendDesc(opaque);
+    ComPtr<ID3D11BlendState> os;
+    g.dev->CreateBlendState(&od, &os);
+    const D3D11_VIEWPORT full{0, 0, static_cast<float>(newW), static_cast<float>(newH), 0, 1};
+    quad(g, direct, rect, colour, 0, 0, full, os.Get());
+    // The game draws the panel into its 16x18 eye with this frame's jitter;
+    // the redirect maps its viewport onto the new layer and cancels it.
+    float jx = 0, jy = 0;
+    temporalJitter(3, &jx, &jy);
+    const UiLayerMap m = uiLayerMapFromRegion(0, 0, static_cast<float>(rW), static_cast<float>(rH), after.w, after.h);
+    float cx = 0, cy = 0;
+    uiLayerJitterCancel(jx, jy, m, &cx, &cy);
+    UiViewport gv;
+    gv.w = static_cast<float>(rW);
+    gv.h = static_cast<float>(rH);
+    const UiViewport v = uiLayerMapViewport(m, gv, cx, cy);
+    const D3D11_VIEWPORT vp{v.x, v.y, v.w, v.h, v.minZ, v.maxZ};
+    quad(g, layer, rect, colour, 2.0f * jx / rW, -2.0f * jy / rH, vp, state(g, conv).Get());
+    const uint32_t region[4] = {0, 0, newW, newH};
+    composite(g, frame, region, uvFull, layer, out, 0);
+    const std::vector<uint8_t> got = readBack(g, out), want = readBack(g, direct);
+    int worst = 0;
+    for (size_t i = 0; i < got.size(); i += 4)
+        for (int c = 0; c < 3; ++c) worst = (std::max)(worst, std::abs(int(got[i + c]) - int(want[i + c])));
+    check(worst <= 1, "...and composited over the new frame it is the game's own draw, pixel for pixel "
+                      "(the new size's map and jitter cancel)");
+}
+
 // At 1.25 the composite is the box filter of the layer over each pixel.
 void testDownsample(Gpu& g) {
     using namespace uiblend;
@@ -1460,6 +1594,7 @@ int main(int argc, char** argv) {
     testDepthStencil();
     testFootprint();
     testGate();
+    testFamilyRule();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");
@@ -1470,6 +1605,7 @@ int main(int argc, char** argv) {
         testDownsample(g);
         testSeededStencil(g);
         testWriteBack(g);
+        testSizeChange(g);
     }
     std::printf("ui_quality_test: %u checks, %u failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

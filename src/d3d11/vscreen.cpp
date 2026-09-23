@@ -3895,34 +3895,38 @@ __declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, 
 // full rules run for the post-tonemap target alone, where a frame has a few
 // dozen draws. The 2D screen's composite is recognised exactly as the panel
 // distance and the curved screen recognise it (srv0IsPanelSized); the rest
-// by what they sample (ui_depth's learned surfaces), named by vertex shader.
+// by what they sample (ui_depth's learned surfaces), named by vertex shader
+// -- and the menu panel and the loading screen by their shader pairs alone
+// when no learned surface is bound, so a surface the game re-creates at a
+// render-size change is taken from its first draw (ui_layer_math.h's
+// uiLayerFamilyFor, the rule; this gathers its facts, lazily, in its order).
+// The two composites' outcomes are counted for the layer's family census.
 __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {
-    const int target = uiLayerTargetKind();
-    if (target == 0) return UiLayerFamily::kNone;
-    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
-    if (target == 1) {
-        return vs == 0x81216C77F90DEDD6ull   ? UiLayerFamily::kHolo
-               : vs == 0xB7790CBFC6554097ull ? UiLayerFamily::kFlightHud
-               : vs == 0xE508648660A352B2ull ? UiLayerFamily::kSprite
-                                             : UiLayerFamily::kNone;
+    UiFamilyFacts f;
+    f.targetKind = uiLayerTargetKind();
+    f.vs = bindingShaderHash(BindSlot::Vs);
+    if (f.targetKind == 2) {
+        // ui_depth's exclude list (the null-output mesh B018D143700AB803,
+        // which samples a stale surface and draws nothing, and the ini's
+        // additions): not UI to the layer either. The 2026-09-23 flight took
+        // the mesh as an interface composite.
+        f.excluded = uiDepthIsExcluded(f.vs);
+        if (!f.excluded) {
+            f.panelSized = srv0IsPanelSized(s, kind, count);
+            if (!f.panelSized) {
+                f.learnedSurface = uiDepthSampledSurfaceSlot() >= 0;
+                if (!f.learnedSurface && (f.vs == kUiVsPanel || f.vs == kUiVsLoader))
+                    f.ps = bindingShaderHash(BindSlot::Ps);
+            }
+        }
     }
-    // ui_depth's exclude list (the null-output mesh B018D143700AB803, which
-    // samples a stale surface and draws nothing, and the ini's additions):
-    // not UI to the layer either. The 2026-09-23 flight took the mesh as an
-    // interface composite.
-    if (uiDepthIsExcluded(vs)) return UiLayerFamily::kNone;
-    if (srv0IsPanelSized(s, kind, count)) return UiLayerFamily::kScreen;
-    if (uiDepthSampledSurfaceSlot() >= 0) {
-        return vs == 0xA888D51024D9798Eull   ? UiLayerFamily::kPanel
-               : vs == 0x4EF6DDB075A927FAull ? UiLayerFamily::kLoader
-               : vs == 0x81216C77F90DEDD6ull ? UiLayerFamily::kHolo
-               : vs == 0xE508648660A352B2ull ? UiLayerFamily::kSprite
-                                             : UiLayerFamily::kSurface;
+    UiFamilyWhy why = UiFamilyWhy::kOther;
+    const UiLayerFamily family = uiLayerFamilyFor(f, &why);
+    if (f.vs == kUiVsPanel || f.vs == kUiVsLoader) {
+        if (why == UiFamilyWhy::kNoSurface && !f.ps) f.ps = bindingShaderHash(BindSlot::Ps);
+        uiLayerNoteFamilyProbe(f.vs, f.ps, static_cast<int>(family), static_cast<int>(why));
     }
-    if (vs == 0x666EF0C4C616F67Eull || vs == 0x1012E00B3CB44469ull || vs == 0xA3E5D3FCBC1165F8ull)
-        return UiLayerFamily::kGuiDirect;
-    if (vs == 0xB7790CBFC6554097ull) return UiLayerFamily::kFlightHud;
-    return UiLayerFamily::kNone;
+    return family;
 }
 
 // The verdicts that forward the game's own draw -- as it is, or wrapped in
@@ -4031,6 +4035,13 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         if (uiFamily != UiLayerFamily::kNone) {
             uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily), uiLayerVerdictForwards(v),
                                     g_state->curveThisDraw);
+        }
+    } else if (owner && uiLayerLive() && v != DrawVerdict::kQuadSkip) {
+        // The two composites into a target vScreen does not call an eye's:
+        // counted for the family census (one hash load a draw while live).
+        const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+        if (vs == kUiVsPanel || vs == kUiVsLoader) {
+            uiLayerNoteFamilyProbe(vs, 0, 0, static_cast<int>(UiFamilyWhy::kNotEyeTarget));
         }
     }
     // The one order the layer changes: a draw after the UI into (or reading)

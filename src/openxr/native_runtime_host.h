@@ -930,7 +930,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     timingFrame.featureEpoch=featureChanges;
     if(temporal.acquired()&&locatedValid&&frame.shouldRender) {
-      const auto begun=temporal.begin(treatedGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking);
+      // ...and what the game is told now, which leads that during an
+      // adoption: fix.ui_quality's surfaces size a panel the game makes for
+      // the new ask by it (the P3-1 lag, flight 2026-09-23 13:23).
+      const auto begun=temporal.begin(treatedGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking,
+          (std::max)(gameGeometry.width[0],gameGeometry.width[1]),(std::max)(gameGeometry.height[0],gameGeometry.height[1]));
       if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
       ++temporalFrames;
     } else invalidateEyeTreatments();

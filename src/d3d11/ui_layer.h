@@ -87,6 +87,15 @@ int uiLayerTargetKind();
 // the frame).
 bool uiLayerDecide(ID3D11DeviceContext* ctx, int family, bool verdictForwards, bool substituted);
 
+// The family census (vscreen.cpp, owner draws while live): one draw of the
+// menu panel's or the loading screen's composite vertex shader, the family
+// the rule gave it (UiLayerFamily as an int; 0 none) and how
+// (ui_layer_math.h's UiFamilyWhy as an int), with its pixel shader where the
+// rule asked for it. Counted per window and reported every 30 s -- the
+// draws the rule turned away are otherwise invisible, since a draw with no
+// family never reaches uiLayerDecide.
+void uiLayerNoteFamilyProbe(uint64_t vs, uint64_t ps, int family, int why);
+
 // Around one issue of a decided draw: bind the eye's layer as the only
 // render target (with the layer's own seeded depth-stencil target when the
 // draw tests depth or stencil), the viewports and scissors through the map

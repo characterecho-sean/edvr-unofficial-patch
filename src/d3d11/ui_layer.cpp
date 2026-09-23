@@ -240,8 +240,31 @@ struct Window {
     uint64_t gateReads = 0, screenAsked = 0;  // the on-foot gate: frames read, 2D screen draws that asked
     uint32_t timed = 0;
     double timeSum = 0.0, timeMax = 0.0;
+    // The family census: the menu panel's (0) and the loading screen's (1)
+    // composite vertex shader, by how the family rule answered.
+    uint64_t probe[2][static_cast<size_t>(UiFamilyWhy::kCount)] = {};
 };
 Window g_win;
+
+// A change of the door's size (a FOV trim or cull-guard adoption, an HMD
+// Quality change, a per-eye width): the families the layer took in the two
+// seconds before it are watched for their first draw after it -- said, with
+// the delay -- and any not taken again within two seconds is named as
+// dropped, with what the family rule made of its composites since.
+constexpr uint64_t kSizeChangeWatchMs = 2000;
+uint64_t g_familyLastRedirectMs[static_cast<size_t>(UiLayerFamily::kCount)] = {};
+struct SizeChange {
+    bool open = false;
+    uint64_t ms = 0, frames = 0;
+    uint32_t fromW = 0, fromH = 0, toW = 0, toH = 0;
+    uint32_t engaged = 0, reengaged = 0;  // bit per UiLayerFamily
+    bool droppedSaid = false;
+    uint64_t probe[2][static_cast<size_t>(UiFamilyWhy::kCount)] = {};  // since the change
+};
+SizeChange g_sizeChange;
+// Pixel shaders seen with a composite vertex shader and no learned surface
+// that the rule does not know: named once each in the census line.
+uint64_t g_unknownPs[2][4] = {};
 
 // The on-foot gate (ui_layer_math.h): read once a frame at the boundary,
 // so every draw of a frame sees one answer.
@@ -765,6 +788,130 @@ void restore(ID3D11DeviceContext* ctx) {
     ctx->OMSetBlendState(g_draw.blend, g_draw.factor, g_draw.sampleMask);
 }
 
+// ------------------------------------------------------ a door size change
+
+// Which composite vertex shader a census slot is (0 the menu panel's, 1 the
+// loading screen's), or -1.
+int probeSlot(uint64_t vs) {
+    return vs == kUiVsPanel ? 0 : vs == kUiVsLoader ? 1 : -1;
+}
+
+// "N as UI by a learned surface, N by its shader pair alone, not UI: N ..."
+// for one composite's counts.
+std::string probeText(const uint64_t (&counts)[static_cast<size_t>(UiFamilyWhy::kCount)], int slot) {
+    std::string s;
+    char buf[160];
+    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%llu as UI by a learned surface, %llu by its shader pair alone",
+                static_cast<unsigned long long>(counts[static_cast<size_t>(UiFamilyWhy::kLearnedSurface)]),
+                static_cast<unsigned long long>(counts[static_cast<size_t>(UiFamilyWhy::kShaderPair)]));
+    s += buf;
+    static const UiFamilyWhy kNot[] = {UiFamilyWhy::kNotEyeTarget, UiFamilyWhy::kNotPostTonemap,
+                                       UiFamilyWhy::kExcluded, UiFamilyWhy::kNoSurface,
+                                       UiFamilyWhy::kScreen, UiFamilyWhy::kOther};
+    bool any = false;
+    for (UiFamilyWhy w : kNot) {
+        const uint64_t n = counts[static_cast<size_t>(w)];
+        if (!n) continue;
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%s%llu %s", any ? ", " : "; not taken as its family: ",
+                    static_cast<unsigned long long>(n),
+                    w == UiFamilyWhy::kScreen ? "as the 2D screen" : uiFamilyWhyName(w));
+        s += buf;
+        any = true;
+    }
+    if (slot >= 0 && slot < 2) {
+        bool named = false;
+        for (uint64_t ps : g_unknownPs[slot]) {
+            if (!ps) continue;
+            _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%s%016llX", named ? ", " : " (unknown ps ",
+                        static_cast<unsigned long long>(ps));
+            s += buf;
+            named = true;
+        }
+        if (named) s += ")";
+    }
+    return s;
+}
+
+// The door handed on a new size: open the watch over the families the layer
+// took in the two seconds before (the other eye's report of the same change
+// joins it).
+void openSizeChange(uint32_t fromW, uint32_t fromH, uint32_t toW, uint32_t toH) {
+    SizeChange& c = g_sizeChange;
+    const uint64_t now = GetTickCount64();
+    if (c.open && c.toW == toW && c.toH == toH && now - c.ms < kSizeChangeWatchMs) return;
+    uint32_t engaged = 0;
+    std::string names;
+    for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
+        const uint64_t last = g_familyLastRedirectMs[f];
+        if (!last || now - last > kSizeChangeWatchMs) continue;
+        engaged |= 1u << f;
+        if (!names.empty()) names += ", ";
+        names += uiLayerFamilyName(static_cast<UiLayerFamily>(f));
+    }
+    c = SizeChange{};
+    if (!engaged) return;
+    c.open = true;
+    c.ms = now;
+    c.fromW = fromW;
+    c.fromH = fromH;
+    c.toW = toW;
+    c.toH = toH;
+    c.engaged = engaged;
+    Log::get().note("ui quality: layer: the door's frame changed size (%ux%u -> %ux%u) with %s in the "
+                    "layer -- each is watched for its first draw taken after it.",
+                    fromW, fromH, toW, toH, names.c_str());
+}
+
+// A draw of `family` was taken: its re-engagement after a size change, once.
+void noteTaken(UiLayerFamily family, int eye, uint32_t layerW, uint32_t layerH) {
+    const uint64_t now = GetTickCount64();
+    const size_t fi = static_cast<size_t>(family);
+    if (fi >= static_cast<size_t>(UiLayerFamily::kCount)) return;
+    g_familyLastRedirectMs[fi] = now;
+    SizeChange& c = g_sizeChange;
+    const uint32_t bit = 1u << fi;
+    if (!c.open || !(c.engaged & bit) || (c.reengaged & bit)) return;
+    c.reengaged |= bit;
+    Log::get().note("ui quality: layer: %s re-engaged after the door's size change (%ux%u -> %ux%u) -- "
+                    "its first draw taken %llu ms and %llu frames after it, into the %s eye's %ux%u "
+                    "layer%s.",
+                    uiLayerFamilyName(family), c.fromW, c.fromH, c.toW, c.toH,
+                    static_cast<unsigned long long>(now - c.ms), static_cast<unsigned long long>(c.frames),
+                    eye == 0 ? "left" : "right", layerW, layerH,
+                    c.droppedSaid ? " (it had been named as dropped)" : "");
+}
+
+// Once a frame: a family engaged before the change and not taken for two
+// seconds after it is named as dropped, with what the family rule made of
+// its composite's draws since; the watch closes when every family is back,
+// or after thirty seconds.
+void sizeChangeTick() {
+    SizeChange& c = g_sizeChange;
+    if (!c.open) return;
+    ++c.frames;
+    const uint64_t now = GetTickCount64();
+    const uint32_t missing = c.engaged & ~c.reengaged;
+    if (!missing) {
+        c.open = false;
+        return;
+    }
+    if (!c.droppedSaid && now - c.ms >= kSizeChangeWatchMs) {
+        c.droppedSaid = true;
+        for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
+            if (!(missing & (1u << f))) continue;
+            const UiLayerFamily fam = static_cast<UiLayerFamily>(f);
+            const int slot = fam == UiLayerFamily::kPanel ? 0 : fam == UiLayerFamily::kLoader ? 1 : -1;
+            const std::string since = slot >= 0 ? probeText(c.probe[slot], slot) : std::string();
+            Log::get().note("ui quality: layer: the door's size change (%ux%u -> %ux%u) DROPPED the %s -- "
+                            "none of its draws taken in the %.1f s since%s%s.",
+                            c.fromW, c.fromH, c.toW, c.toH, uiLayerFamilyName(fam),
+                            static_cast<double>(now - c.ms) / 1000.0,
+                            slot >= 0 ? "; its composite's draws since: " : "", since.c_str());
+        }
+    }
+    if (now - c.ms > 30000) c.open = false;
+}
+
 // One issue of a decided draw into the layer (which = 0) or into the
 // multiply transmittance (which = 1).
 bool beginInner(ID3D11DeviceContext* ctx, int which) {
@@ -899,6 +1046,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++e.draws;
         ++g_win.redirected;
         ++g_sessionRedirected;
+        noteTaken(g_draw.family, g_draw.eye, e.w, e.h);
         g_win.viewportRemaps += g_draw.vpCount;
         if (g_draw.scissorSet) g_win.scissorRemaps += g_draw.scCount;
         if (g_draw.jx != 0.0f || g_draw.jy != 0.0f) ++g_win.jitterCancels;
@@ -1419,6 +1567,29 @@ void logTotals(double seconds) {
         static_cast<unsigned long long>(g_win.debugComposites));
     Log::get().note("ui quality: left in the game's frame: %s.",
                     left.empty() ? "nothing classified" : left.c_str());
+    // The family census: what the family rule made of the two composites'
+    // draws -- the ones it turned away never reach a decision above.
+    {
+        std::string census;
+        static const char* const kProbeName[2] = {"menu panel composite (vs A888D51024D9798E)",
+                                                  "loading screen composite (vs 4EF6DDB075A927FA)"};
+        const UiLayerFamily kProbeFamily[2] = {UiLayerFamily::kPanel, UiLayerFamily::kLoader};
+        for (int k = 0; k < 2; ++k) {
+            uint64_t total = 0;
+            for (uint64_t n : g_win.probe[k]) total += n;
+            if (!total) continue;
+            const size_t fi = static_cast<size_t>(kProbeFamily[k]);
+            uint64_t leftN = 0;
+            for (size_t d = 2; d < static_cast<size_t>(UiLayerDecision::kCount); ++d) leftN += g_win.decided[fi][d];
+            appendf(census, "%s%s: %llu draws -- %s; decided as the %s: %llu redirected, %llu left",
+                    census.empty() ? "" : "; ", kProbeName[k], static_cast<unsigned long long>(total),
+                    probeText(g_win.probe[k], k).c_str(), uiLayerFamilyName(kProbeFamily[k]),
+                    static_cast<unsigned long long>(
+                        g_win.decided[fi][static_cast<size_t>(UiLayerDecision::kRedirect)]),
+                    static_cast<unsigned long long>(leftN));
+        }
+        Log::get().note("ui quality: families: %s.", census.empty() ? "neither composite drawn" : census.c_str());
+    }
     uint64_t late = 0;
     for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f)
         late += g_win.decided[f][static_cast<size_t>(UiLayerDecision::kLate)];
@@ -1676,6 +1847,22 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     return true;
 }
 
+void uiLayerNoteFamilyProbe(uint64_t vs, uint64_t ps, int family, int why) {
+    (void)family;
+    const int slot = probeSlot(vs);
+    if (slot < 0 || why < 0 || why >= static_cast<int>(UiFamilyWhy::kCount)) return;
+    ++g_win.probe[slot][why];
+    if (g_sizeChange.open) ++g_sizeChange.probe[slot][why];
+    if (why != static_cast<int>(UiFamilyWhy::kNoSurface) || !ps) return;
+    for (uint64_t& known : g_unknownPs[slot]) {
+        if (known == ps) return;
+        if (!known) {
+            known = ps;
+            return;
+        }
+    }
+}
+
 bool uiLayerBegin(ID3D11DeviceContext* ctx) { return beginGuarded(ctx, 0); }
 
 void uiLayerEnd(ID3D11DeviceContext* ctx) {
@@ -1835,6 +2022,7 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source) {
         D3D11_TEXTURE2D_DESC d{};
         source->GetDesc(&d);
         if (d.Width != e.door.fullW || d.Height != e.door.fullH) {
+            if (e.door.fullW && e.door.fullH) openSizeChange(e.door.fullW, e.door.fullH, d.Width, d.Height);
             if (g_target > 0.0f) {
                 const UiLayerSize s = uiLayerSize(d.Width, d.Height, g_target);
                 Log::get().note(
@@ -1948,6 +2136,8 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_win.frames;
     // The next frame's answer to "is the 2D screen the world?".
     onFootGateTick();
+    // A door size change's watch: the dropped line, two seconds on.
+    sizeChangeTick();
     // The warm compile, the sharpen's reason: not a first-use D3DCompile at
     // the door.
     if (ctx && detail::g_uiLayerLive) {

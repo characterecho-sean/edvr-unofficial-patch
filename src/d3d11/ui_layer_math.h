@@ -549,6 +549,115 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
     }
 }
 
+// THE FAMILY RULE, pure: vscreen.cpp's uiLayerFamilyOf gathers these facts
+// for an owner draw into an eye target, in this order and only as far as the
+// rule reads them, and this decides. The shader hashes are the ones the
+// census and every flight since have named.
+constexpr uint64_t kUiVsPanel = 0xA888D51024D9798Eull;   // menu / modal panel composite
+constexpr uint64_t kUiVsLoader = 0x4EF6DDB075A927FAull;  // loading screen composite
+constexpr uint64_t kUiVsHolo = 0x81216C77F90DEDD6ull;
+constexpr uint64_t kUiVsFlightHud = 0xB7790CBFC6554097ull;
+constexpr uint64_t kUiVsSprite = 0xE508648660A352B2ull;
+constexpr uint64_t kUiVsGuiVector = 0x666EF0C4C616F67Eull, kUiVsGuiText = 0x1012E00B3CB44469ull,
+                   kUiVsGuiIcons = 0xA3E5D3FCBC1165F8ull;
+// The two composite families' own pixel shaders, as the layer's and ui_depth's
+// family lines named them on 2026-09-23: the menu panel (and its variant),
+// the loading screen (and its gamma pass). A draw of one of these pairs is
+// that family by its shaders alone -- recognition that does not wait for
+// ui_depth to learn the surface it samples. The 13:23 flight lost the menu
+// panel for the rest of the session when the FOV trim, adopted at the main
+// menu, had the game re-create its interface surfaces: the redirects stopped
+// within a third of a second of the render-size change and never resumed,
+// though ui_depth learned one of the new surfaces a second later.
+constexpr uint64_t kUiPanelPs[] = {0x9107E72CB016CC02ull, 0x219323C8C025AD94ull};
+constexpr uint64_t kUiLoaderPs[] = {0x85565E9261812E2Full, 0x8ADB2A81A45E8A4Bull};
+
+inline bool uiKnownPs(const uint64_t* list, size_t n, uint64_t ps) {
+    for (size_t i = 0; i < n; ++i)
+        if (list[i] == ps) return true;
+    return false;
+}
+
+struct UiFamilyFacts {
+    int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
+    uint64_t vs = 0, ps = 0;      // the bound shaders' hashes (ps asked only where the rule needs it)
+    bool excluded = false;        // ui_depth's exclude list
+    bool panelSized = false;      // srv0IsPanelSized: the 2D screen's composite
+    bool learnedSurface = false;  // a learned interface surface in PS slots 0..3
+};
+
+// How the rule reached its answer, for the family census (ui_layer.cpp).
+enum class UiFamilyWhy : uint8_t {
+    kNotEyeTarget = 0,  // not an eye target (the family rule never ran) -- vscreen's gate
+    kNotPostTonemap,    // an eye target, but not the 8-bit post-tonemap one
+    kExcluded,          // on ui_depth's exclude list
+    kScreen,            // the 2D screen, by its panel-sized SRV
+    kLearnedSurface,    // by a learned interface surface
+    kShaderPair,        // by its shader pair alone (no learned surface)
+    kDirect,            // a GUI or flight-HUD shader straight into the eye
+    kNoSurface,         // a composite shader with no learned surface and an unknown pair
+    kOther,             // any other draw
+    kCount
+};
+
+inline const char* uiFamilyWhyName(UiFamilyWhy w) {
+    switch (w) {
+        case UiFamilyWhy::kNotEyeTarget: return "not an eye target";
+        case UiFamilyWhy::kNotPostTonemap: return "not the post-tonemap target";
+        case UiFamilyWhy::kExcluded: return "excluded";
+        case UiFamilyWhy::kScreen: return "the 2D screen's SRV";
+        case UiFamilyWhy::kLearnedSurface: return "a learned surface";
+        case UiFamilyWhy::kShaderPair: return "its shader pair alone";
+        case UiFamilyWhy::kDirect: return "a direct shader";
+        case UiFamilyWhy::kNoSurface: return "no learned surface, pixel shader not known";
+        default: return "other";
+    }
+}
+
+inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why = nullptr) {
+    UiFamilyWhy w = UiFamilyWhy::kOther;
+    UiLayerFamily out = UiLayerFamily::kNone;
+    if (f.targetKind == 0) {
+        w = UiFamilyWhy::kNotEyeTarget;
+    } else if (f.targetKind == 1) {
+        w = UiFamilyWhy::kNotPostTonemap;
+        out = f.vs == kUiVsHolo        ? UiLayerFamily::kHolo
+              : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud
+              : f.vs == kUiVsSprite    ? UiLayerFamily::kSprite
+                                       : UiLayerFamily::kNone;
+        if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;
+    } else if (f.excluded) {
+        w = UiFamilyWhy::kExcluded;
+    } else if (f.panelSized) {
+        w = UiFamilyWhy::kScreen;
+        out = UiLayerFamily::kScreen;
+    } else if (f.learnedSurface) {
+        w = UiFamilyWhy::kLearnedSurface;
+        out = f.vs == kUiVsPanel    ? UiLayerFamily::kPanel
+              : f.vs == kUiVsLoader ? UiLayerFamily::kLoader
+              : f.vs == kUiVsHolo   ? UiLayerFamily::kHolo
+              : f.vs == kUiVsSprite ? UiLayerFamily::kSprite
+                                    : UiLayerFamily::kSurface;
+    } else if (f.vs == kUiVsPanel && uiKnownPs(kUiPanelPs, sizeof(kUiPanelPs) / sizeof(kUiPanelPs[0]), f.ps)) {
+        w = UiFamilyWhy::kShaderPair;
+        out = UiLayerFamily::kPanel;
+    } else if (f.vs == kUiVsLoader &&
+               uiKnownPs(kUiLoaderPs, sizeof(kUiLoaderPs) / sizeof(kUiLoaderPs[0]), f.ps)) {
+        w = UiFamilyWhy::kShaderPair;
+        out = UiLayerFamily::kLoader;
+    } else if (f.vs == kUiVsGuiVector || f.vs == kUiVsGuiText || f.vs == kUiVsGuiIcons) {
+        w = UiFamilyWhy::kDirect;
+        out = UiLayerFamily::kGuiDirect;
+    } else if (f.vs == kUiVsFlightHud) {
+        w = UiFamilyWhy::kDirect;
+        out = UiLayerFamily::kFlightHud;
+    } else if (f.vs == kUiVsPanel || f.vs == kUiVsLoader) {
+        w = UiFamilyWhy::kNoSurface;
+    }
+    if (why) *why = w;
+    return out;
+}
+
 // THE ON-FOOT GATE. On foot, Odyssey renders the world ONCE, flat, into the
 // 2D screen's 3840x2160 target and shows it as a panel in each eye through
 // the screen's composite (flight 2026-09-23 09:38: vs 5C36AF051B98B9F1 ps
