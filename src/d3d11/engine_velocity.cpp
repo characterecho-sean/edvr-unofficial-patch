@@ -820,9 +820,10 @@ void summaryLocked(uint64_t now) {
                     g_draw.slowPaths ? double(g_draw.slowTicks) * 1e6 / freq / double(g_draw.slowPaths) : 0.0,
                     double(g_draw.slowTicks) * 1e3 / freq / frames, u(g_draw.quickPaths), u(g_draw.restores));
     if (g_draw.pixelReads)
-        Log::get().note("engine motion: pixels per eye-frame on the trained path: engine-joined %.0f, masked %.0f "
-                        "(no history), pool surface not a rig record %.0f (camera term), stale slot %.0f (a later draw covered it), "
-                        "corrupt slot code %.0f (declined; must be 0); %llu readbacks.",
+        Log::get().note("engine motion: pixels per eye-frame on the trained path: engine-joined %.0f (a rig record's "
+                        "certified exact motion, moving or still -- not a mover count), masked %.0f "
+                        "(no history), pool surface not a rig record %.0f (camera term), stale slot %.0f (the slot's "
+                        "recorded depth is not the pixel's), corrupt slot code %.0f (declined; must be 0); %llu readbacks.",
                         double(g_draw.pixelsJoined) / double(g_draw.pixelReads), double(g_draw.pixelsMasked) / double(g_draw.pixelReads),
                         double(g_draw.pixelsCamera) / double(g_draw.pixelReads), double(g_draw.pixelsStale) / double(g_draw.pixelReads),
                         double(g_draw.pixelsCorrupt) / double(g_draw.pixelReads), u(g_draw.pixelReads));

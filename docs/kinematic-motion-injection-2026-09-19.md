@@ -3,44 +3,63 @@
 ## Status
 
 - **State:** DECIDED DIRECTION, 2026-09-19 (Sean): engine-level injection from
-  KinematicRig truth (draw-call interpretation ruled out as a class); GENERALIZED, no
-  estimation even as a fallback (Sean's 2026-09-23 requirement); B+C is the design --
-  camera-only for statics, engine-record delta via substituted pool shaders for
-  movers, the reactive mask the only fallback -- with design A measured wrong and an
-  engine velocity buffer ruled out with blur both off and on (2026-09-19 through
-  2026-09-23 evening entries; ruled-out pointer below). PHASE 1 built and merged:
-  previous pose written into each rig record at FUN_144312E00's emit, MRT6 from the
-  substituted pool shaders. FLOWN ONCE (065324): every eye-frame refused (cb1
-  re-mapped), a shadowed flag, gaps masked-as-zero, boarding flicker. FIX ROUND fixed
-  the review's five findings, MERGED, INSTALLED (7fdc17a9). RE-FLOWN 2026-09-23 09:38
-  (this entry, the fix round's owed flight): cockpit numbers are CLEAN -- 0
-  disagreements, locate failures, faults and invalidated frames across the 30 s
-  window, the tracker's evaluated-but-not-drawn gap now measured directly
-  (~160/frame); the motion-source legend's "a moving record's own motion" was WRONG
-  (green = any certified rig record, still or moving) and is being reworded; on foot
-  the scene's depth vanished from 09:41:04 to boarding at 09:43:08 -- a
-  packed-target/probe-filter bug, not this arc's code, fix in flight with the motion
-  agent.
-- **Open:** on-foot depth (why the eye-sized filter never accepts the 3840x2160
-  on-foot target, so the scene pair drifts to 256x256); the temporal-pass prep cost
-  while the engine path is live in the cockpit (2.9-3.7 ms/pair vs 0.12-0.22 off --
-  suspect enginePixel fetching the 320-byte pool record twice per pixel before the
-  kind is known, unmeasured); why the cockpit's dashboard, consoles, throttle, stick
-  and canopy paint STALE rather than engine-joined (2026-09-23 09:38 entry).
-- **Ruled out (do not re-propose; each closed in its dated entry below):** draw-shape
-  memo identity, pool-slot identity, 3x3 SAD camera-vs-body match, hidden-bone-spin
-  estimation (pre-2026-09-20); the four engine-truth mover/static routes (2026-09-20
-  21:25); an engine velocity buffer with blur off or on, and record+0x1C0..0x1F8 as
-  previous-frame truth (2026-09-23 entries); design A pool content-pairing (2026-09-23
-  evening); the fix round's five closed hypotheses -- a scaled history delta over a
-  gap, a straddling tick, rows 270..275 changing inside a pass, MRT6 blending losing
-  coverage, and the substituted shaders altering the G-buffer (Fix round entry); green
-  cockpit panels as a mover bug, and the engine path's CPU cost as the cause of the
-  higher cockpit figure (2026-09-23 09:38 entry).
-- **Next:** after the motion agent's build (on-foot packed-target fix, prep
-  sub-timers): the same protocol -- pad, walk, re-board -- checking the prep sub-timer
-  split and whether "in hand" returns on foot. The station-approach coverage capture
-  (blur OFF, glare_shader_dump 0) stays open for stations.
+  KinematicRig truth, not draw-call interpretation (ruled out as a class). Phase 0/A/B
+  built and flown clean by 2026-09-20 17:05 (tracker, sphere-backed quarter-res
+  ownership veto, straddle -> paint-none; whole-eye cyan gone). Four engine-truth
+  routes to a mover/static flag closed 0-for-4 by 21:25 that day. RESUMED OFFLINE
+  2026-09-23 (Sean: motion vectors should derive from the engine, not render-time
+  estimates); the offline pass then found no engine velocity buffer anywhere in the VR
+  path, the record's +0x1C0..0x1F8 block a same-frame change detector not history, and
+  movers proven to be rig records matching tracked poses to under 1 mm (2026-09-23
+  entry). Sean then set the requirement -- GENERALIZED, no estimation anywhere, not
+  even as a fallback -- and the overseer answered with three sources: camera-only for
+  statics, engine-record delta via substituted pool shaders for movers (design C fed
+  by design B), and the existing DLSS/FSR reactive mask as the only fallback; design A
+  (pool content-pairing) was the open alternative (2026-09-23, later entry). The first
+  half of the resulting flight is now IN: blur ON renders no velocity anywhere (same
+  pool shaders, no two-channel target, no blur pass before the tone-map), and on the
+  landing ship the engine-record join matched all 64 drawn movers exactly (56/56 of
+  the fast ones) while design A's content-pairing mis-paired 11-23 of those 56 --
+  DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 + FIX ROUND
+  MERGED and FLOWN (093817, "The re-fly" entry): eye-frames bound and given, cb1
+  re-maps kept (invalidated 0), corrupt codes 0, engine-joined 67-73k px an eye-frame.
+  FOLLOW-UPS MERGED, NOT FLOWN (73b6e9cf): the ~3 ms prep is stage B's coverage pass,
+  now run only when read, and prep's parts timed on the price line; a `depth probe
+  layout:` census line; the motion_source legend corrected (green = certified rig
+  record, still or moving).
+- **Open:** the follow-ups' flight (the re-fly entry's expected price line); on foot
+  the eyes show a flat 2D-screen panel (no eye scene), and with fix.ui_quality on the
+  UI layer lifted it past DLSS entirely -- DECIDED (overseer, 2026-09-23): the layer
+  leaves the 2D screen in the eye while the journal says on foot (the UI agent's
+  build); a temporal pass on the flat 3840x2160 source is the later, better remedy;
+  the stale cockpit (62.8% = the commander's legs under unkeyed layers ps_B7D5 and
+  vs_7B0DC42D -- DECIDED: not keyed now, the legs take the ship/world split and cost
+  nothing visible; 35.4% undecided until MRT6 is in the eye dump, wanted, low
+  priority); the tracker's extra movers are evaluated-but-not-drawn (the census, the
+  09:38 entry); the boarding flicker (prime candidate: the LOD governor, not this arc);
+  stations and ships in space; builder-path movers and articulated parts (phase 2);
+  skinned motion's previous palette (phase 2).
+- **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
+  misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
+  (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
+  doc's journal: four engine-truth routes to a mover/static flag (2026-09-20 21:25
+  entry -- return-address attribution, record-field clustering, TLS job-attribution,
+  dirty-node-queue family mismatch); an engine velocity buffer in the VR path, and
+  record+0x1C0..0x1F8 as a previous-frame transform at draw time (both 2026-09-23
+  entry); design A, pool content-pairing, and an engine velocity buffer with motion
+  blur ON (both 2026-09-23 evening entry); scaling a history delta over a gap
+  (estimation, the review); the tick straddling two frames as the gap cause (repeats and
+  in-frame pose changes 0 in all 8 windows of 065324); rows 270..275 changing inside
+  an eye pass (capture 043720: one block per pass); "blending on MRT6 only loses
+  coverage" (the review's WARP counterexample); the substituted shaders changing the
+  game's G-buffer (o0..o3 and depth bit-identical, all nine real pairs, WARP); the
+  on-foot world packed per eye; enginePixel's record fetch as the ~3 ms prep; a depth
+  pre-pass or a depth bias as the stale cockpit (all three: the re-fly entry); green on
+  the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
+  cause (the 09:38 entry). Do not re-propose any of the above.
+- **Next:** the same flight (fix.engine_motion=on, dlss, diagnostics 1; pad, walk,
+  re-board) read against the re-fly entry: prep's parts and the coverage line in the
+  cockpit, `depth probe layout:` and the layer's on-foot line on foot.
 
 ## Premise
 
@@ -2212,5 +2231,129 @@ and prep is 2.9-3.7 ms/pair.
 substitution), no UI depth; the hills shimmered while walking. Cause: the on-foot world is
 drawn into a 3840x2160 depth target (#23, D32_FLOAT_S8X24, 5.5-15.6k draws a frame) that
 the probe's eye-size filter never accepts; the eye-sized list was empty or junk and the
-scene pair drifted to 256x256 targets. Fix in flight with the motion agent (packed-target
-region).
+scene pair drifted to 256x256 targets. CORRECTED the same day (the next entry): there is
+no eye scene to find on foot -- Odyssey draws the on-foot world once, flat, into that
+target and shows it on a panel in each eye; the shimmer came from fix.ui_quality's layer
+lifting that panel out of the eye, so DLSS upscaled black and the on-foot world got no
+temporal pass at all. The UI layer now leaves the 2D screen in the eye while on foot.
+
+### 2026-09-23 -- The re-fly (093817): the fix round holds; on-foot depth, the prep price, the stale cockpit
+
+**The fix round in flight** (`edvr_gfx_20260923_093817.log`, build `v0.17.0-409-g7fdc17a9`,
+Pimax Crystal Super, DLSS 1597x1835 -> 2458x2824, settlement pad). `[09:39:17.316] ... eye-frames
+3018, with MRT6 bound 3018; invalidated 0 ... kept: scene constants re-mapped with rows 270..275
+unchanged 33198`; `[09:40:47.312] ... engine-joined 73036, masked 1 (no history), pool surface
+not a rig record 67923 (camera term), stale slot 181699 ..., corrupt slot code 0`. The cb1
+re-maps are kept, nothing is refused, no slot code was corrupt.
+
+**1. On foot there is no eye scene to take depth from.** From `[09:41:04.474] temporal aa: the
+scene's depth went away` to the boarding at 09:43:08 the pass had no depth. The eyes are not
+drawn with the world on foot: `[09:41:04.442] ui layer: 2D screen (vs 5C36AF051B98B9F1 ps
+CFE84157BC76E921) into a 1597x1835 R8G8B8A8_UNORM target: redirected into the layer` (and
+`panel curvature: substituting the panel's quad`, `vScreen: panel distance x0.700 applied`);
+`vScreen totals: ... (2-2 per frame ...), largest eye-draw count 2 this window` -- one panel
+draw per eye; the world is drawn ONCE into the 2D screen's own 3840x2160 target (#23, `5505
+draws bound to it, 0 of them with an eye-sized colour target`), the picture a flat panel then
+shows. And with fix.ui_quality on, the UI layer takes that panel draw out of the eye image
+into its own layer composited after the upscale: `luma probe: eye=0 game=0.000/0.000/100%` on
+every sample from 09:41:05 to 09:43:08, `ui layer totals ... 2.00 draws a frame redirected (2D
+screen 2.00)`, prep 0.13-0.14 ms a pair. So on foot DLSS was handed black, and the world reached
+the headset without any temporal pass -- the distant hills' shimmer is the 2D screen's own
+aliasing. The previous build (065324, 21ab1f7d, before the UI layer) on foot: `depth probe: the
+eye-sized targets: .` (none; the busiest #28 3840x2160 with 15121 draws) -- no eye depth then
+either -- but the panel was IN the eye image (`luma probe: eye=0 game=0.211/0.806/57%` at
+06:56:50) and went through DLSS with the screen map (`screen motion GPU: ... source 3840x2160`).
+The "went away / is in hand" wording is ddd3dacd (2026-09-03), not this build; the 07:15 log
+(6d34ffd5) has no temporal aa, depth probe, dlaa or luma lines at all -- temporal AA was off in
+that flight -- so it says nothing about depth.
+ruled out: on foot the world drawn packed side by side per eye (a per-eye region of #23 for the
+pass), because each eye gets exactly one 2D-screen panel draw a frame of the whole picture
+(vScreen totals 2-2, the panel's curvature and distance lines) and #23 never has an eye-sized
+colour target beside it.
+Remedy, for the overseer -- it lives in the UI layer's and the screen motion's files, not this
+arc's: (a) leave the 2D screen in the eye image when it carries the world (on foot) and redirect
+only menu and UI screens, so DLSS and the screen map see it as before the layer; or (b) run a
+mono temporal pass on the 3840x2160 source itself (its own depth #23, the desktop camera's
+motion) before the panel samples it. Built here, instrument only: `depth probe layout:` in the
+20 s census -- for a busiest depth target with more than 1000 draws and no eye-sized colour
+target beside any of them, the viewports and scissors its draws set (sampled on the frame's
+first draw and every 1024th), the colour target beside it, and the shaders drawing the
+eye-sized targets meanwhile. Expected on foot: one viewport `(0,0) 3840x2160`, the 2D screen's
+colour target, eye targets drawn by `vs 5C36AF051B98B9F1 ps CFE84157BC76E921` about twice a
+frame. Two viewports would reopen the packed hypothesis. No `depth probe layout:` line = the
+census never saw such a target (or the probe is off).
+
+**2. The prep price is the coverage pass, not the engine path.** `prep` against the lines
+around it: `[09:38:45-09:39:07] prep 3.64-3.73` (the tracker publishing 143 spheres),
+`[09:39:13-09:39:48] 0.15-0.22` (menus: `eligible 0`), `[09:40:04-09:41:08] 2.91-3.13` (2570-2606
+spheres), `[09:41:16 on] 0.13-0.14` (on foot: 2617-2784 spheres but no scene depth, so the
+coverage pass stands down). And the phase-1 flight 065324, whose engine views were NEVER given
+(views given 0 in every window), shows the same shape: prep 8.37-8.50 at 06:53:55-06:54:14 (143
+spheres), 3.87-4.01 through 06:54:41, 0.17 at 06:54:55-06:55:02 (`eligible 0`), 3.16-3.34 from
+06:55:21 (2571-2618). The one thing in prep that runs exactly when spheres are published and
+the scene's depth is in hand is stage B's coverage pass (`kinCover`: one thread per sphere
+walks that sphere's whole quarter-res rectangle with two atomics a texel; a handful of the
+ship's own spheres just in front of the eye keep a wave busy for milliseconds). Its pair has
+three readers -- the compose veto (fix.engine_motion_veto, off), the movers view's cyan, the eye
+run's dump -- and none was on. The production `mv`, compiled (fxc cs_5_0 /O3): 4 `ld_structured`
+from t22 and 1 load from t21 per pixel -- the record fetch is already only the four uint4 the
+kinds and the reprojection read, once per pixel, and a stale pixel (the largest class) never
+reaches it.
+ruled out: enginePixel's record fetch as the ~3 ms prep, because 065324 carried the same 3-8 ms
+prep with the engine views never given, and the compiled `mv` reads 64 bytes of record only
+for a depth-matched pool pixel (joined + camera + masked: 127-141k of 2.93 MP an eye).
+Built: the coverage pass runs only when something reads it (the veto, the movers view, an eye
+run), with a one-time `engine motion coverage: not run -- nothing reads the coverage pair ...`;
+and the price line times prep's parts inside its own figure: `prep a/b (copy c/d coverage e/f
+mv g/h)`, per stereo pair. Not built: the record kind in the slot code -- the pixel shader that
+writes the slot never sees the record (the slot comes from the instance data; the kind is the
+record's marker checked against its hash), so it would take a t33 read in every substituted
+pixel shader or a patched vertex shader in every family, to save a 64-byte fetch on the kind-3
+pixels only (59-90k an eye-frame).
+Expected next flight, cockpit, fix.engine_motion=on, veto off: `prep ~0.2-0.5 (copy ~0.05
+coverage 0.00 mv ~0.1-0.3)`. If the cut does not work, prep stays ~3 and the parts name the
+stage (copy, mv, or the rest = prep less the three). A/B: fix.engine_motion_veto = on runs the
+pass again and its part prices it directly.
+
+**3. The stale cockpit is mostly the commander's own legs, under unkeyed layers.** Eye run
+094048, left eye, ledger frame 13627 (= scene frame 13626), analysed offline (the scripts in
+the session's scratch `task3`): L0 has 515,316 yellow pixels, 194,048 at render resolution --
+the log's 172-225k. The dashboard and console surfaces are mostly DIM (no MRT6 data: the
+cockpit shell is vs_BFE51414CC3024B4 / ps_DB79AE788E049DFD, not a pool family); the big yellow
+areas are the commander's legs and lap (the skinned body, record 5472 and 6297-6299, at 1.62
+m), with cockpit trim and two side-console patches; the "blue seat" is the same body. For
+121,846 of the 194,048 (62.8%) the order is measured: the keyed body layer is drawn first
+(vs_EB5234DB6ADB491D / ps_3434, draws 164-168) and writes MRT6; a later, NEARER, unkeyed draw
+covers it without writing MRT6 -- vs_EB5234 with ps_B7D50283329322C3 (the keyed VS with an
+unkeyed PS; the log's `unkeyed pixel shader ... left stock`) over 65,094 px, the keyed layer a
+median 24.6% deeper; vs_7B0DC42D383F694C / ps_0DF03E64DF9DBEF1 (no keyed family) over 56,752
+px, 10.8% deeper. The exact depth test declines those slots correctly: the visible surface is
+not the slot's record. The other 68,686 (35.4%: 58k cockpit trim at stencil 144/148, 1.5-4 m;
+10.5k world) have no rebuildable keyed surface under them; the cockpit shell is drawn before
+every keyed draw, so whatever keyed draw wrote MRT6 there passed the depth test without
+leaving its depth -- the shape of a keyed overlay drawn with depth writes off (families
+5B4D8E and BBE58E subtract a per-material offset from SV_Position.z, decal-like). The ledger
+holds no depth-stencil or rasterizer state, and MRT6 is not in the eye dump, so that third is
+undecided.
+ruled out: a depth pre-pass (H1) as the stale cause, because none of the 31 draws covering the
+yellow region (rows 151-181) is drawn twice in eye A's pass and the keyed layer lies 10.8-24.6%
+deeper than the visible surface, not an ulp.
+ruled out: a pixel-shader depth output or a depth bias (H4) as the stale cause, because none of
+the 16 disassembled pixel shaders writes oDepth and a bias cannot open a 10-25% gap.
+Remedy, for the overseer (no code yet): (A) key the two missing shaders -- ps_B7D5 into the
+EB5234 family, vs_7B0DC42D / ps_0DF03E64 as a family (its VS is EB5234's plus a normal push of
+up to 5 cm from cb2[6..9]) -- so those pixels carry their own slot: joined motion for the
+commander's legs instead of the decline. Trade-offs: ps_B7D5's depth sits ~1.6e-4 nearer than
+its geometry, an unrecorded rasterizer depth bias -- if SV_Position.z does not carry the bias,
+its pixels stay stale (declined, no gain; the corpus harness under a biased rasterizer state
+answers it on WARP); the 7B0D push is exact rigid motion only if cb2[6..9] hold still across
+frames. (B) a bounded ulp tolerance (meshPixel's 1e-6 relative) does NOT help here -- the gap
+is 10-25% -- and would only matter if the undecided third proves ulp-close. (C) writing the
+slot from a pre-pass: there is none. (D) for the undecided third, instrument first: MRT6 (slot
+and depth) beside SceneZ in the eye dump, and depth-stencil/rasterizer state in the ledger's
+empty geometry section. Stale is a decline (the pass's other motion sources stand), never a
+wrong record; what it costs is coverage on the legs.
+Legend fixed: green is a rig record whose certified previous pose gave its exact motion,
+moving or still -- a still one carries the camera's motion through the record -- not a mover
+count (edvr.ini's temporal_aa_debug block, the shader comment, the pixel line's
+`engine-joined` wording).

@@ -1505,12 +1505,15 @@ R"HLSL(
             }
             paintDebug(id.xy, size, o3);
         } else if (split.y == 6.0) {
-            // The motion-source view (fix.engine_motion): green where the
-            // engine's own record motion was taken, red where a rig record
-            // was masked (no history), blue for a pool surface that is not a
-            // rig record (the camera term), yellow for a slot a later draw
-            // covered, magenta for a slot code arithmetic reached (declined);
-            // the frame dimmed elsewhere (the camera term).
+            // The motion-source view (fix.engine_motion): green where a rig
+            // record's certified previous pose gave the pixel its exact motion
+            // (kind 1) -- moving OR still, a still record yielding the camera
+            // term through the record, so green is not a mover count; red
+            // where a rig record was masked (no history), blue for a pool
+            // surface that is not a rig record (the camera term), yellow for a
+            // slot whose recorded depth is not the pixel's (stale: a later
+            // draw changed it), magenta for a slot code arithmetic reached
+            // (declined); the frame dimmed elsewhere (the camera term).
             float3 o6 = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
             if (engineKind == 1u) o6 = float3(0.0, 1.0, 0.0);
             else if (engineKind == 2u) o6 = float3(1.0, 0.0, 0.0);

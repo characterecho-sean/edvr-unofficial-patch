@@ -87,6 +87,9 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext*, const char*, size
                                          const char*, const char*, const SwapMacro*,
                                          const char*) { return nullptr; }
 void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext*) {}
+// The layout census reads the bound shaders' hashes (binding_shadow.h's
+// inline reader); this rig binds none, so every slot reads zero.
+namespace detail { BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)]; }
 }  // namespace edvr
 
 namespace {
