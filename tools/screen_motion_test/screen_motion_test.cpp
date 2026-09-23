@@ -37,13 +37,20 @@ bool Config::getBool(const char* key,bool def)const{
 // by tools/engine_velocity_test (panel_tests.h). No source views: the screen
 // shader keeps the camera term, byte-identical to before.
 unsigned testSourceNotes=0;ID3D11Buffer* testSourceScene=nullptr;
-void engineVelocityNoteSource(ID3D11Texture2D*,ID3D11Buffer* scene){++testSourceNotes;testSourceScene=scene;}
+EngineVelocitySourceSignal testSourceSignal=EngineVelocitySourceSignal::Terrain;
+void engineVelocityNoteSource(ID3D11Texture2D*,ID3D11Buffer* scene,EngineVelocitySourceSignal signal){++testSourceNotes;testSourceScene=scene;testSourceSignal=signal;}
 bool engineVelocitySourceViews(ID3D11Texture2D*,EngineVelocityViews* out){if(out)*out=EngineVelocityViews{};return false;}
 void engineVelocityNotePanelPixels(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t){}
-void* bindingGet(BindSlot s){return s==BindSlot::Rtv0?testRtv:nullptr;}
+// The hangar cases: vs_EB52 stands for a pool family, vs_AACF for a pool
+// family that is also a first-person weapon or tool shader.
+constexpr uint64_t testPoolVs=0xEB5234DB6ADB491Dull,testWeaponVs=0xAACFDCF2FB9AD809ull;
+bool engineVelocityPoolFamilyVs(uint64_t h) noexcept {return h==testPoolVs || h==testWeaponVs;}
+bool weaponMotionFamilyVs(uint64_t h){return h==testWeaponVs;}
+void* testDsv=nullptr;
+void* bindingGet(BindSlot s){return s==BindSlot::Rtv0?testRtv:s==BindSlot::Dsv0?testDsv:nullptr;}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:s==BindSlot::Ps?testPs:0;}
 bool bindingResolve(void* view,ResourceInfo* info){
-    if(!view)return false;ComPtr<ID3D11Resource> r;static_cast<ID3D11RenderTargetView*>(view)->GetResource(&r);
+    if(!view)return false;ComPtr<ID3D11Resource> r;static_cast<ID3D11View*>(view)->GetResource(&r);
     ComPtr<ID3D11Texture2D> t;if(FAILED(r.As(&t)))return false;D3D11_TEXTURE2D_DESC d{};t->GetDesc(&d);
     info->isTexture2D=true;info->a=d.Width;info->b=d.Height;return true;
 }
@@ -257,6 +264,83 @@ int main(int argc,char** argv){
     const bool secondAdmission=g_gpu.uiClear.begin(ctx.Get(),1,g_gpu.scope,g.frame);
     check(firstAdmission&&!secondAdmission&&g_gpu.uiClear.selected==2&&g_gpu.uiClear.submitted==1&&g_gpu.uiClear.budgetSkipped==1,"screen GPU diagnostics enforce one category admission per frame");
     g_gpu.reset(ctx.Get());
+    // The hangar (flight 6, docs/kinematic-motion-injection-2026-09-19.md "The
+    // hangar"): no terrain or scene draw names the source. The pool family
+    // draws into the screen-sized depth are counted in one frame and name it
+    // in the next, at the first that is not a first-person weapon or tool
+    // shader, with its own VS b1 and the ScreenDepth signal; a shadow atlas
+    // (another size, depth only, two half viewports) that takes MORE pool
+    // draws is never counted and never names; a screen with nothing naming its
+    // source is said after kUnnamedNoteFrames; terrain names and holds the
+    // fallback off while it does.
+    {
+        ctx->ClearState();
+        g=State{};testSourceNotes=0;testSourceScene=nullptr;testDsv=nullptr;
+        D3D11_TEXTURE2D_DESC ad{};ad.Width=W*2;ad.Height=H/2;ad.MipLevels=ad.ArraySize=ad.SampleDesc.Count=1;
+        ad.Format=DXGI_FORMAT_R32_TYPELESS;ad.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> atlas;hr(dev->CreateTexture2D(&ad,nullptr,&atlas));
+        ComPtr<ID3D11DepthStencilView> atlasDs;hr(dev->CreateDepthStencilView(atlas.Get(),&dd,&atlasDs));
+        auto shown=[&](){g.seen=true;g.lastScreen=g.frame;};   // the 2D screen drawn this frame
+        auto poolDraw=[&](ID3D11DepthStencilView* d,ID3D11RenderTargetView* r,uint64_t vsHash){
+            ID3D11RenderTargetView* rts[1]={r};
+            ctx->OMSetRenderTargets(r?1:0,r?rts:nullptr,d);
+            if(d==atlasDs.Get()){D3D11_VIEWPORT half[2]={{0,0,float(W),float(H/2),0,1},{float(W),0,float(W),float(H/2),0,1}};ctx->RSSetViewports(2,half);}
+            testRtv=r;testDsv=d;testVs=vsHash;testPs=0;
+            ctx->UpdateSubresource(sc.Get(),0,nullptr,source,0,0);ctx->VSSetConstantBuffers(1,1,sc.GetAddressOf());
+            screenMotionSource(ctx.Get(),W,H);
+        };
+        // Frame 1: the atlas takes three pool draws, the screen's depth two;
+        // nothing names yet (no candidate from a previous frame).
+        shown();
+        for(int i=0;i<3;++i)poolDraw(atlasDs.Get(),nullptr,testPoolVs);
+        for(int i=0;i<2;++i)poolDraw(ds.Get(),rt.Get(),testPoolVs);
+        check(!testSourceNotes,"hangar: the first frame only counts the screen-sized pool depth");
+        screenMotionFrameBoundary(ctx.Get());
+        check(g.screenDepth==ds.Get() && g.screenDepthDraws==2,"hangar: the screen's depth is the busiest SCREEN-SIZED pool depth, not the atlas that took more");
+        // Frame 2: the atlas again, a first-person tool draw into the screen's
+        // depth (never names), then a world pool draw names it.
+        shown();
+        poolDraw(atlasDs.Get(),nullptr,testPoolVs);
+        check(!testSourceNotes,"hangar: a shadow atlas never names the source");
+        poolDraw(ds.Get(),rt.Get(),testWeaponVs);
+        check(!testSourceNotes,"hangar: a first-person weapon or tool shader never names the source");
+        poolDraw(ds.Get(),rt.Get(),testPoolVs);
+        check(testSourceNotes==1 && testSourceSignal==EngineVelocitySourceSignal::ScreenDepth && testSourceScene==sc.Get() &&
+              g.sourceFrame==g.frame && g.depth.Get()==depth.Get(),
+              "hangar: the first world pool draw into the screen's depth names the source, its signal the screen's depth, its camera the draw's VS b1");
+        poolDraw(ds.Get(),rt.Get(),testPoolVs);
+        check(testSourceNotes==1,"hangar: named once a frame");
+        screenMotionFrameBoundary(ctx.Get());
+        // Only the atlas from here: nothing names, and after
+        // kUnnamedNoteFrames screen frames the log says so.
+        for(unsigned i=0;i<kUnnamedNoteFrames+2;++i){shown();poolDraw(atlasDs.Get(),nullptr,testPoolVs);screenMotionFrameBoundary(ctx.Get());}
+        check(testSourceNotes==1 && g.unnamed>=kUnnamedNoteFrames && g.unnamedNoted,"hangar: a screen with nothing naming its source is counted and said");
+        // Terrain names (its own signal) and holds the fallback off: a pool
+        // draw into the screen's depth BEFORE the next frame's terrain draw
+        // does not name it; the terrain draw does.
+        shown();poolDraw(ds.Get(),rt.Get(),testPoolVs);screenMotionFrameBoundary(ctx.Get());   // counted: the candidate again
+        shown();poolDraw(ds.Get(),rt.Get(),testPoolVs);
+        check(testSourceNotes==2 && testSourceSignal==EngineVelocitySourceSignal::ScreenDepth,"hangar: the screen's depth names again");
+        screenMotionFrameBoundary(ctx.Get());
+        check(!g.unnamedNoted && !g.unnamed,"hangar: a naming clears the unnamed count and its note");
+        // A terrain frame: the terrain draw names first (its own signal), and a
+        // pool draw into the screen's depth after it is still counted.
+        shown();sourceDraw();
+        check(testSourceNotes==3 && testSourceSignal==EngineVelocitySourceSignal::Terrain && g.terrainFrame==g.frame,"hangar: terrain names with its own signal");
+        poolDraw(ds.Get(),rt.Get(),testPoolVs);
+        check(testSourceNotes==3,"hangar: named once a frame, terrain first");
+        screenMotionFrameBoundary(ctx.Get());
+        check(g.screenDepth==ds.Get(),"hangar: the screen's depth stays the candidate beside terrain");
+        // The next frame's first pool draw lands before its terrain draw: the
+        // candidate matches, but terrain named within kTerrainHoldFrames, so it
+        // holds off, and the terrain draw names.
+        shown();poolDraw(ds.Get(),rt.Get(),testPoolVs);
+        check(testSourceNotes==3,"hangar: terrain named last frame, so the screen's depth holds off");
+        sourceDraw();
+        check(testSourceNotes==4 && testSourceSignal==EngineVelocitySourceSignal::Terrain,"hangar: and the terrain draw names this frame");
+        screenMotionFrameBoundary(ctx.Get());
+        g=State{};testDsv=nullptr;
+    }
     ctx->ClearState();
     // The arming pair lives OUTSIDE State (screen_motion.h) so the draw path
     // can read it inline, which means the three places that reset State

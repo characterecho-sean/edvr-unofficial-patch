@@ -307,6 +307,7 @@ struct DrawStats {
     // invalidations by reason (they share g_draw.invalid with the eyes).
     uint64_t sourceHeld = 0, sourceDeclined[kSourceDeclineCount] = {}, sourceDeclinedFamily[kFamilyCount] = {};
     uint64_t sourceDeclineFrames = 0, sourceOtherRows[4] = {}, sourceNamings = 0, sourceNamingsUnseen = 0;
+    uint64_t sourceNamingsBy[2] = {};   // by EngineVelocitySourceSignal: terrain or scene draw, the screen's depth
     double sourceOtherShiftMax = 0.0;
     uint64_t sourceInvalid[kInvalidCount] = {};
     // The screen shader's per-kind eye-pixel counts: [0] every pixel of every
@@ -1187,13 +1188,15 @@ void summaryLocked(uint64_t now) {
         Log::get().note("engine motion: on foot: source frames %llu, with MRT6 bound %llu (slot target %ux%u), "
                         "frames dropped: %s; screen views asked %llu, given %llu, refused: stood down %llu, other depth "
                         "%llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene constants %llu; "
-                        "camera rule: namings %llu (rows not seen %llu), checks held to the naming's camera %llu, "
+                        "camera rule: namings %llu (by terrain or a scene draw %llu, by the screen's own depth %llu; rows "
+                        "not seen %llu), checks held to the naming's camera %llu, "
                         "declined %llu in %llu frames (%s)%s; %s.",
                         u(g_draw.sourceFrames), u(g_draw.sourceFramesBound), source.width, source.height,
                         dropped.empty() ? "none" : dropped.c_str(),
                         u(g_draw.sourceViewsAsked), u(g_draw.sourceViewsGiven), u(g_draw.sourceRefusedNoEmit),
                         u(g_draw.sourceRefusedDepth), u(g_draw.sourceRefusedFrame), u(g_draw.sourceRefusedInvalid),
                         u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious), u(g_draw.sourceNamings),
+                        u(g_draw.sourceNamingsBy[0]), u(g_draw.sourceNamingsBy[1]),
                         u(g_draw.sourceNamingsUnseen), u(g_draw.sourceHeld), u(declinedAll),
                         u(g_draw.sourceDeclineFrames), declined.c_str(), other, pixels);
     }
@@ -1537,7 +1540,10 @@ bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
     return any || out->untimed || out->invalid;
 }
 
-void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants) {
+bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept { return familyOfVs(vsHash) >= 0; }
+
+void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants,
+                              EngineVelocitySourceSignal signal) {
     if (!live.load(std::memory_order_acquire) || !sourceDepth) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (g_sourceDepth.Get() != sourceDepth) g_sourceDepth = sourceDepth;
@@ -1551,6 +1557,7 @@ void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneC
     c.scene = sceneConstants;
     c.rowsKnown = false;
     ++g_draw.sourceNamings;
+    ++g_draw.sourceNamingsBy[signal == EngineVelocitySourceSignal::ScreenDepth ? 1 : 0];
     if (sceneConstants) {
         D3D11_BUFFER_DESC sd{};
         sceneConstants->GetDesc(&sd);
