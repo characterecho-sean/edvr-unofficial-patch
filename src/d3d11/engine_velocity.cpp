@@ -233,6 +233,11 @@ struct DrawStats {
     uint64_t bindRefused[static_cast<int>(EngineVelocityBindRefusal::Count)] = {};
     uint64_t blendApplied = 0, blendRefused = 0, blendShadowDisagreed = 0;
     uint64_t settersIssued = 0, settersSkipped = 0;   // item 3: raw shader setters, and those found installed
+    // Item 4 (measure only): the snapshots' copies -- pool and scene constants
+    // at each prepared eye-frame, the pool again on each append refresh -- and
+    // the largest pool (records) and view (elements) seen this window.
+    uint64_t poolSnapshots = 0, poolSnapshotBytes = 0, poolRefreshBytes = 0, sceneSnapshots = 0, sceneSnapshotBytes = 0;
+    uint64_t poolCapacity = 0, poolExposed = 0;
     const char* blendRefusedWhy = nullptr;
     uint64_t viewsAsked = 0, viewsGiven = 0;
     // Why a view request was refused, first failing test: the emit side stood
@@ -569,6 +574,15 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
     }
     ctx->CopyResource(e.pool.Get(), poolBuf.Get());
     ctx->CopyResource(e.scene[slot].Get(), scene.Get());
+    // What the snapshots copy (the performance review, item 4: measured
+    // before any storage change): the whole pool buffer, whatever the view
+    // exposes, and the scene constants.
+    ++g_draw.poolSnapshots;
+    g_draw.poolSnapshotBytes += pd.ByteWidth;
+    ++g_draw.sceneSnapshots;
+    g_draw.sceneSnapshotBytes += sd.ByteWidth;
+    g_draw.poolCapacity = std::max<uint64_t>(g_draw.poolCapacity, pd.ByteWidth / emit::kItemBytes);
+    g_draw.poolExposed = std::max<uint64_t>(g_draw.poolExposed, vd.Buffer.NumElements);
     e.sceneFrame[slot] = frame;
     e.poolView = poolView;
     e.poolBuffer = poolBuf;
@@ -624,6 +638,7 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
         ctx->CopyResource(e.pool.Get(), e.poolBuffer.Get());
         e.poolAppendEpoch = wp.appendEpoch;
         ++g_draw.poolRefreshed;
+        g_draw.poolRefreshBytes += e.poolBytes;
     }
     if (ws.writeEpoch != e.sceneWriteEpoch) {
         if (!ws.rowsKnown || !e.sceneRowsKnown) { invalidate(e, kSceneUnknown); return; }
@@ -930,6 +945,16 @@ void summaryLocked(uint64_t now) {
                     g_draw.slowPaths ? double(g_draw.slowTicks) * 1e6 / freq / double(g_draw.slowPaths) : 0.0,
                     double(g_draw.slowTicks) * 1e3 / freq / frames, u(g_draw.quickPaths), u(g_draw.restores),
                     u(g_draw.settersIssued), u(g_draw.settersSkipped));
+    // The snapshots' copy traffic (item 4, measured only): logical bytes
+    // submitted, not GPU time -- a CopyResource's CPU submission prices
+    // nothing on the GPU.
+    Log::get().note("engine motion: snapshots (measure only): pool capacity %llu records (%.1f MB), views expose %llu; "
+                    "copies: pool %llu at preparation (%.1f MB) + %llu on append refreshes (%.1f MB), scene constants "
+                    "%llu (%.1f KB); ~%.2f MB a frame logical.",
+                    u(g_draw.poolCapacity), double(g_draw.poolCapacity) * emit::kItemBytes / 1e6, u(g_draw.poolExposed),
+                    u(g_draw.poolSnapshots), double(g_draw.poolSnapshotBytes) / 1e6, u(g_draw.poolRefreshed),
+                    double(g_draw.poolRefreshBytes) / 1e6, u(g_draw.sceneSnapshots), double(g_draw.sceneSnapshotBytes) / 1e3,
+                    double(g_draw.poolSnapshotBytes + g_draw.poolRefreshBytes + g_draw.sceneSnapshotBytes) / 1e6 / frames);
     if (g_draw.pixelReads)
         Log::get().note("engine motion: pixels per eye-frame on the trained path: engine-joined %.0f (a rig record's "
                         "certified exact motion, moving or still -- not a mover count), masked %.0f "

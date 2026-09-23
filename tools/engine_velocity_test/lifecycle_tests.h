@@ -940,6 +940,24 @@ inline void run(const Harness& h) {
     h.check(number(line, ", skipped ") >= 1, "P3: the setter a source-only visit would have repeated is skipped, counted");
     h.check(number(line, "shader setters issued ") >= 2, "P3: each eye-frame's first substitution still sets it");
 
+    // P4 (item 4, measure only): the snapshot copies counted, with the pool's
+    // capacity and the view's exposed records.
+    mark = g_log.size();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0);
+    g.writePool(g.poolA.Get(), D3D11_MAP_WRITE_NO_OVERWRITE);   // an append mid-pass: refreshed
+    g.draw();
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    g.endFrame(true);
+    line = lastLine("engine motion: snapshots (measure only):", mark);
+    h.check(number(line, "pool capacity ") == 16 && number(line, "views expose ") == 16,
+            "P4: the pool's capacity and the view's exposed records");
+    h.check(number(line, "copies: pool ") >= 2 && number(line, "scene constants ") >= 2,
+            "P4: one pool and one scene-constant copy per prepared eye-frame");
+    h.check(number(line, "MB) + ") >= 1, "P4: and the append refresh counted");
+
     // R6: the emit hook not installed -> STOOD DOWN, no substitution, nothing given.
     mark = g_log.size();
     lifecycle_fake::g_hookLive = false;

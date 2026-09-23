@@ -2497,3 +2497,13 @@ line's tail: `restores R; shader setters issued I, skipped K (ours still bound)`
 roughly the kept re-maps and refreshes that reached a draw. Never ran: no setters clause.
 Rig: engine_velocity_test P3 (a re-map inside a pass: the patched PS stays bound, the setter
 skipped and counted).
+
+**4. The snapshot copies, measured only.** Each prepared eye-frame copies the whole pool
+buffer and the scene constants, and every observed append copies the pool again; the stats
+counted refreshes, not bytes. Now, per 30 s: `engine motion: snapshots (measure only): pool
+capacity C records (X MB), views expose E; copies: pool P at preparation (Y MB) + R on
+append refreshes (Z MB), scene constants S (W KB); ~V MB a frame logical` -- logical bytes
+submitted, not GPU time (the GPU time is item 5's). No storage change: if R x capacity is
+material, the next step is copying proven dirty ranges or sizing to the exposed range,
+never sharing one snapshot between eyes unproven. Never ran: no snapshots line. Rig:
+engine_velocity_test P4.
