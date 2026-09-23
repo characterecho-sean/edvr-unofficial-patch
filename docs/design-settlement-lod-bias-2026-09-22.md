@@ -346,13 +346,15 @@ pose):
    run -> a v3 gate file; `--tables-only` must report 0 disagreements off
    the thresholds, then `--lod-bias 1,1.25,1.5,2` is exact.
 
-## 9. Acting mode (2026-09-23): NOT BUILT, the engine rewrites s every frame
+## 9. Acting mode (2026-09-23): built at the setter, NOT FLOWN
 
 The brief: make the governor act by writing s_game x k into ctx+0x30 at
 the draw-item builder, with a shadow copy of the game's value, if the
 object is persistent and its setter runs only on settings changes; if the
 setter runs every frame, write up the evidence and stop. The pointer is
-stable and the setter runs every frame, so nothing was built.
+stable and the setter runs every frame, so phase 1 built nothing; the
+overseer then chose the site the evidence supports -- a bracket on the
+setter itself -- and it is built (As built, below).
 
 **(1) The object FUN_142819D90 writes** is a member at a fixed offset of
 a long-lived engine object: no global, nothing transient. FUN_1401EA920
@@ -432,15 +434,162 @@ s, always the game's.
   because FUN_142819D90 rewrites it from the settings every frame, and
   each record's test runs before its builder call.
 
-**Where the evidence points (Sean's call; not built).** FUN_1401EA920
-builds both contexts (:232, :251) before it hands them on (:253-271), so
-the one write every test of the frame sees is right after FUN_142819D90
-returns: a post-forward hook there (a new build-keyed patch, prologue
-checked like the builder's) could scale the value the engine just wrote
-by k. s_game is then exactly that value, every frame; no shadow copy and
-no restore path (when k returns to 1 or EDVR stands down, the next
-frame's setter writes the game's value back); the record test is
-covered. Open first: both contexts or only the builder's (g_ctx), and
-what FUN_142817260 does with the ctx. Not recommended: writing x itself
-(+0x124, where FUN_142855A50 stores the player's LODDistanceScale,
-section 4): it bypasses that clamp, and the settings path owns it.
+**Where the evidence points (decided by the overseer, built below).**
+FUN_1401EA920 builds both contexts (:232, :251) before it hands them on
+(:253-271), so the one write every test of the frame sees is right after
+FUN_142819D90 returns: a post-forward bracket there scales the value the
+engine just wrote by k. s_game is then exactly that value, every frame;
+when k returns to 1 or EDVR stands down, the next frame's setter writes
+the game's value back itself; the record test is covered. Of the two
+questions left open: only the builder's context is written (the other
+context is rebuilt too but never reaches the builder), and FUN_142817260
+reads only the bit table and view +0x580 from the ctx
+(decomp_2817260.txt:47-48), not +0x30. Not chosen: writing x itself
+(+0x124, where FUN_142855A50 stores the player's LODDistanceScale, section
+4): it bypasses that clamp, and the settings path owns it.
+
+### As built (2026-09-23, not flown)
+
+**The bracket** (kinematic_eval_hook.cpp): `setterObserved` on
+FUN_142819D90 through its own relay cell, patched once per process when
+the governor attaches (`ensureSetter`), standing down alone. Its
+build-keyed signature: build 332841's PE timestamp and size; the prologue
+`48 89 5C 24 20 55 56 41 54 48 83 EC 20 49 8B 28` (read from both
+installs' exe, sha256 e6be8bbe...), of which only `mov [rsp+20h],rbx`
+moves to the trampoline -- five bytes, one instruction, not RIP-relative;
+the function's eight in-body branches land at +0x0AE..+0x1B0, none inside
+it, and its code callers CALL the entry; `mov rbx,rcx` at +0x24 (the
+context held to the end); `movaps xmm1,[1.0]; mov rax,[rsp+60h]; movaps
+xmm0,xmm1; subss xmm0,[rax]; addss xmm1,xmm0` at +0x1B0 (s = 1 + (1 -
+*param_5)); `movups [rbx+30h],xmm1` at +0x1C7; and the epilogue after it
+through the only `ret` at +0x1D8 (nothing stores after the scale). The
+callback forwards all seven arguments (three on the stack) and hands
+param_1 to `lodGovernorSetterObserver`. The builder bracket and the part
+relay are unchanged.
+
+**The write** (lod_governor.cpp, the engine's thread, two calls a
+frame): read ctx+0x30 (SEH) = s_game. Only a context the builder observer
+has registered (a table of 8; a ninth stands acting down): the setter
+rebuilds two contexts a frame and the builder uses one. s_game is held to
+0.25..8 (else counted `implausible`, left alone). While acting and k > 1:
+VirtualQuery once per context (committed, read-write, no guard page),
+then s_game x k is stored under SEH; a refused page or a fault stands
+acting down for the process, logs once and writes the game's value back.
+k is the policy's, computed at the frame boundary, which never writes
+engine memory. Disable (game, observe switched on) and FreeLibrary
+teardown (`lodGovernorShutdown` from `shutdownVScreenFixes`) write s_game
+back once to every context still holding exactly EDVR's value, guarded;
+otherwise the engine's own store each frame is the restore.
+
+**Modes.** `game` off; `auto` the governed k, acting; `reduced`
+(`Policy::setFixed`) k = k_max from the first frame with >= 200 builder
+records, 1 after 30 frames under 150, no ramp and no frame-work steps;
+`advanced.settlement_detail_observe = 1` computes and logs everything and
+writes nothing. The contract is 260 keys.
+
+**Counting.** A test ran at EDVR's scale iff the value it read equals, bit
+for bit, what EDVR wrote after the setter's last call for that context.
+The disagreement gate recomputes at the value read and must read 0. The
+price, one quantity: observing, an engine pass that fails at s x k (`would
+drop`); acting, an engine reject whose LOD term fails at the held scale
+and passes at s_game, whose screen-size term passes (0.5*(1.0*(A*d + B))
+<= r, the part test's +0x63..+0x7F bit for bit) and whose plane test
+passes -- the engine's own FUN_1404F4E10, called after the 16-byte check
+the cull gate probe makes (`dropped (the game's setting would have kept
+it)`; `plane test not run` without it). Level changes are against s x k
+observing and against s_game acting; records alike (FUN_144308B30).
+
+**What acting cannot see.** A record that lost an eye at EDVR's scale has
+that bit cleared in rec+0x208, and the traversal keeps no pre-test mask
+(4312040:135-165): it cannot be told from a view never tested. A record
+with no view left never reaches the builder. Their parts are never tested
+for that eye. Acting's `dropped` is therefore a lower bound; the whole
+effect is the fall of `engine passed` (parts and records, per eye) from a
+k = 1 window, and the census eye draws.
+
+**Other readers the scale reaches.** FUN_144312040:166-184 reads
+ctx+0x30 (`pfVar5[0xc]`) for a main-view LOD pick on the context's header
+(+0x00 camera, +0x10/+0x20 A/B, the setter's copy of the main view).
+Every reader sees what a slider beyond its range would give: s up to 6.0
+(k_max 4 on s 1.5), a value the game itself never produces.
+
+**Log lines** (the rig's `--self-test --print-log`; every line within
+1166 characters, the worst configure line 1113). Tags: `acting` |
+`observe only, never writes` | `acting stood down, observing` | `cannot
+act, observing`. Configure: `settlement detail: on (auto: acts by scaling
+the game's LOD scale right after the engine sets it each frame
+(FUN_142819D90): the game's value x k) -- k in [1, 4.00] ...; frame work =
+...; Hooks: builder FUN_1442B4420 hooked, part test FUN_1442B3FC0 hooked,
+LOD-scale setter FUN_142819D90 hooked, plane test FUN_1404F4E10
+matched.`; observe: `on (auto, observe only: never writes
+(advanced.settlement_detail_observe = 1))`; a refused setter: `on (auto,
+but it cannot act: the LOD-scale setter hook stood down; ...)` and
+`STOOD DOWN (<why>)` in the hooks. Once per context: `settlement detail:
+LOD scale scaled: game s 1.500 -> 1.575 (k 1.05), ctx 0x...`. Steps:
+`settlement detail (acting): k 1.00 -> 1.05, up: ...; 250 builder
+records, frame work = caller work per cycle: 12.50 ms vs period 11.11 ms
+-> LOD scale s x k 1.575.`; reduced: `k 1.00 -> 3.00, reduced: in a
+settlement (>= 200 builder records), k = k_max at once; ... -> LOD scale
+s x k 4.500.` The 30 s header adds `LOD scale: game s 1.500, held 3.000
+(k 2.00); setter calls 5458 (scaled 2699) on 1 pointers (called with 2;
+builder contexts 1); implausible 0; faults 0` and, with k above 1 and no
+setter call or none scaled, `NOT ACTING: k rose above 1 but
+FUN_142819D90's hook ran 0 times, so nothing was written`. Acting eye
+lines: `parts tested 10.0/frame (9.9 at EDVR's LOD scale), engine passed
+0.1; dropped (the game's setting would have kept it) 9.9/frame (max 10),
+LOD level changed from the game's ...`. A stand-down: `settlement
+detail: acting STOOD DOWN for this process: <why> (ctx 0x...)`. Off:
+`... the game's LOD scale written back to N context(s))`.
+
+**Rig** (tools\lod_governor_test, 153 checks): reduced's policy; the
+screen-size term; the setter bracket on a fake context and a fake setter
+storing 1 + (1 - x) (a context the builder never used is never written,
+game 1.5 -> 3.0 at k 2, a k step lands at the next rebuild, k = 1 leaves
+the engine's value, a slider change is taken as stored, 12 and NaN left
+alone, observe never writes, restore never overwrites a value the engine
+stored since, the ninth context and a read-only page stand acting down);
+the acting counts (a kept reject with the plane test passed, failed,
+missing; under a pixel; a level change; the gate at EDVR's scale; a
+record that lost both eyes); and acting end to end with a fake engine
+that tests at whatever the context holds (the lines above, observe on and
+off, game writing back, reduced entering and leaving, a setter that never
+fires). Cost, hot memory: setter observer ~15 ns a call, part observer
+~17 ns observing and for an acting dropped reject with the (fake) plane
+test.
+
+### What the first acting flight must show
+
+Parked at Cranfield (the Leg C pose), `fix.settlement_detail = auto`,
+observe 0, k_max 4 (the game's s 1.5 at the slider's floor):
+1. `edvr_log.py --expect-build HEAD` exits 0; the configure line says
+   `acts by scaling the game's LOD scale right after the engine sets it
+   each frame (FUN_142819D90)`, with the setter and part test `hooked`
+   and the plane test `matched`. A setter `STOOD DOWN` means no acting:
+   not evidence.
+2. One `LOD scale scaled: game s 1.500 -> 1.575 (k 1.05)` line after the
+   first step.
+3. Step lines with `-> LOD scale s x k`, k ramping; each summary's `held`
+   following `game s` x k (one frame's lag); `setter calls` about twice
+   the frames, `scaled` about the frames at k > 1, `on 1 pointers (called
+   with 2; builder contexts 1)`; implausible 0, faults 0; no `NOT
+   ACTING`, no `STOOD DOWN`.
+4. The frame work mean FALLING as k rises, toward under the period, and
+   the runtime's caller_wait_fps rising toward 90 (caller work 14.4 ms on
+   the first shadow flight, 11.9 at Leg C; the table prices ~1.2 ms at s x
+   k 3 and ~2.1 ms at 4.5). auto should settle where the frame work sits
+   between period - 1.0 and period + 0.3 ms, or at k_max.
+5. Disagreements at the LOD scale the engine held: parts 0 and records 0
+   per eye (or a handful at thresholds); dispatch disagreements 0.
+6. Dropped parts per eye per frame against the table: ~2.5k at s x k 3,
+   ~4.7k at 4.5 -- a lower bound while acting, so read them beside the fall
+   of `engine passed` per eye from the first (k = 1) window and the census
+   eye draws.
+7. Builder records per frame staying >= 200 at k_max: acting removes
+   records the cascades do not keep, and under 150 for 30 frames would put
+   k back to 1 and oscillate.
+8. In the headset: popping at each 0.05 step, thinning beyond ~100 m,
+   anything present in one eye only (both eyes' tests read the one scale),
+   and anything else that changes with detail (FUN_144312040's main-view
+   pick reads the same scale).
+9. Switched to `game` mid-flight: `the game's LOD scale written back to 1
+   context(s)` and the detail back at once.

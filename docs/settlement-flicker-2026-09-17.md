@@ -2,6 +2,11 @@
 
 ## Status
 
+- Correction (2026-09-23, design-settlement-lod-bias section 9): FUN_1401EA920
+  is not a load-only path (journal 2026-09-20 20:25): it rebuilds the views
+  while parked -- the view count changed on 2 of 6 consecutive-frame
+  transitions and the eye cameras moved on all 6 -- so a cleared +0x570 bit
+  lasts until the next frame's rebuild, not a reload.
 - Reversing (2026-09-19): KinematicRig pipeline decoded statically (Ghidra
   headless, exe hash-verified), no flight spent. State machine rig+0x380
   (4 = render-ready); dependency tokens +0x188/+0x1A0/+0x1B8 with -1 =

@@ -113,24 +113,42 @@ const char* kinematicEvalGateProbeAttach() noexcept;
 void kinematicEvalGateProbeDetach() noexcept;
 
 // --- The settlement LOD governor's feed (fix.settlement_detail) -------------
-// Shadow only in this build: it reads, it never writes. The builder observer
-// runs BEFORE the draw-item builder's forward (pose, ctx, mask, nibbles =
-// rec+0x210, the same four the probe gets) and the part observer AFTER each
-// FUN_1442B3FC0 forward (items, out, view, fromBuilder). The builder bracket's
-// relay reads a cell of its own that is the eval gate OR this governor's
-// want, so the governor alone opens that one relay and the part test's --
-// never the evaluator's, the job brackets' or the direct producers' -- and
-// the bracket's bucket census still runs only while the eval gate is open.
-// Raw callbacks, no link dependency; null means off (one atomic load).
+// The builder observer runs BEFORE the draw-item builder's forward (pose, ctx,
+// mask, nibbles = rec+0x210, the same four the probe gets) and the part
+// observer AFTER each FUN_1442B3FC0 forward (items, out, view, fromBuilder);
+// both only read. The builder bracket's relay reads a cell of its own that is
+// the eval gate OR this governor's want, so the governor alone opens that one
+// relay and the part test's -- never the evaluator's, the job brackets' or
+// the direct producers' -- and the bracket's bucket census still runs only
+// while the eval gate is open. The setter observer runs AFTER the forward of
+// FUN_142819D90, the engine's per-frame rebuild of the render context, which
+// ends by storing the LOD scale at ctx+0x30 (decomp_2819D90.txt:108): the
+// governor's one write site (it scales that value by k while acting; the
+// bracket itself never writes). Raw callbacks, no link dependency; null means
+// off (one atomic load).
 using LodGovernorBuilderFn = void (*)(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
 using LodGovernorPartFn = void (*)(uintptr_t items, uintptr_t out, uintptr_t view, bool fromBuilder) noexcept;
-void kinematicEvalSetLodGovernorObservers(LodGovernorBuilderFn builder, LodGovernorPartFn part) noexcept;
-// Installs the shared kinematic hook set and FUN_1442B3FC0's patch (the same
-// build-keyed install the probe uses, standing down alone), then opens the
-// builder bracket's and the part test's relays for the governor. Same return
-// vocabulary as attachKinematicEvalHooks.
+using LodGovernorSetterFn = void (*)(uintptr_t ctx) noexcept;
+void kinematicEvalSetLodGovernorObservers(LodGovernorBuilderFn builder, LodGovernorPartFn part,
+                                          LodGovernorSetterFn setter) noexcept;
+// Installs the shared kinematic hook set, FUN_1442B3FC0's patch (the same
+// build-keyed install the probe uses) and FUN_142819D90's (build-keyed: PE
+// timestamp and size, its prologue, and every instruction the post-forward
+// read of ctx+0x30 rests on), each standing down alone, then opens the
+// builder bracket's, the part test's and the setter's relays for the
+// governor. Same return vocabulary as attachKinematicEvalHooks.
 const char* kinematicEvalLodGovernorAttach() noexcept;
 void kinematicEvalLodGovernorDetach() noexcept;
+// FUN_142819D90's hook: "hooked", or why it stood down ("not requested",
+// "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x2819D90",
+// "setter mismatch at RVA 0x... (...)", "CodeHook refused the patch", ...).
+const char* kinematicEvalLodSetterStatus() noexcept;
+// FUN_1404F4E10, the engine's plane test (view, float4 point, float4
+// interval) -> -1 outside a plane (as a 32-bit value), after the same
+// build-keyed check of its first sixteen bytes the cull gate probe makes; null
+// when the image does not match. Never patched: the governor only calls it.
+using LodGovernorFrustumFn = uint64_t (__fastcall*)(uintptr_t view, const float* point, const float* interval);
+LodGovernorFrustumFn kinematicEvalFrustumFn() noexcept;
 // True while the builder bracket (FUN_1442B4420) is installed: the probe's
 // builder verdicts depend on it separately from the evaluator.
 bool kinematicEvalBuilderHooked() noexcept;

@@ -27,6 +27,14 @@ using BucketFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t
 // has four register params, FUN_14369C9C0 three. One four-param forward
 // covers both -- the three-param callee never reads r9, which is volatile.
 using DirectBuildFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t);
+// FUN_142819D90 (decomp_2819D90.txt): f(param_1 ctx, param_2 the 48-byte
+// header, param_3 the view vector, param_4, param_5 float* x, param_6,
+// param_7) -- SEVEN params, the last three on the stack (it reads param_5 at
+// [rsp+60h], param_6/7 at +68h/+70h after its prologue). The callback
+// declares all seven so the compiler lays the forward's stack arguments out
+// exactly as the caller did, the builder bracket's rule.
+using SetterFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
+                                         uintptr_t,uintptr_t,uintptr_t);
 
 // The evaluator and the job bodies live in the GAME'S module; this DLL loads
 // more than two gigabytes away, which a five-byte E9 patch cannot reach
@@ -67,11 +75,18 @@ std::atomic<bool> gateProbeWanted{false};
 alignas(8) std::atomic<GateProbeGateFn> gateProbeGate{nullptr};
 alignas(8) std::atomic<GateProbeBuilderFn> gateProbeBuilder{nullptr};
 alignas(8) std::atomic<GateProbePartFn> gateProbePart{nullptr};
-// The settlement LOD governor's want (fix.settlement_detail, shadow only):
-// it observes the draw-item builder and the per-part test, nothing else.
+// The settlement LOD governor's want (fix.settlement_detail): it observes the
+// draw-item builder and the per-part test, and brackets the LOD-scale setter.
 std::atomic<bool> governorWanted{false};
 alignas(8) std::atomic<LodGovernorBuilderFn> governorBuilder{nullptr};
 alignas(8) std::atomic<LodGovernorPartFn> governorPart{nullptr};
+alignas(8) std::atomic<LodGovernorSetterFn> governorSetter{nullptr};
+// FUN_142819D90's relay gate: a cell of its own, open only while the governor
+// is attached AND the patch is verified ours. Two calls a frame.
+alignas(8) std::atomic<uintptr_t> setterGate{0};
+static_assert(decltype(setterGate)::is_always_lock_free,
+              "The x64 relay reads the aligned atomic cell directly.");
+std::atomic<const char*> g_setterStatus{"not requested"};
 // FUN_1442B3FC0's relay gate: a cell of its own, not evalGate, so the
 // per-part patch (installed only for the gate probe and the governor) costs
 // the tracker and the other evalGate consumers nothing. Open only while the
@@ -248,6 +263,8 @@ __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t,uintptr_t) n
 __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t,uintptr_t,uintptr_t,
                                                               uintptr_t,uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t,uintptr_t,uintptr_t) noexcept;
+__declspec(noinline) uintptr_t __fastcall setterObserved(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
+                                                         uintptr_t,uintptr_t,uintptr_t) noexcept;
 #define EDVR_DIRECT_PROTO(i) \
     __declspec(noinline) uintptr_t __fastcall directBuild##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 EDVR_DIRECT_PROTO(0) EDVR_DIRECT_PROTO(1)
@@ -328,6 +345,43 @@ constexpr CodeBytes kPartFrame[]={
      "call FUN_1442B3FC0)"},
 };
 HookEntry g_partEntry{"cull-gate-part-test",kPartTestRva,reinterpret_cast<void*>(&partTestObserved),&partGate};
+
+// --- The LOD-scale setter (FUN_142819D90), the settlement LOD governor's write site
+// It rebuilds the render context every frame (the views, the view-bit table,
+// the count) and ends by storing the LOD scale, `*(float *)(param_1 + 6) =
+// 1 + (1 - *param_5)` (decomp_2819D90.txt:108; the design note's section 9
+// has the per-frame evidence). Its only code caller is FUN_1401EA920, twice a
+// frame, once per context, before either context is handed to the traversal.
+// The observer reads ctx+0x30 after the forward, so the signature is every
+// instruction that read rests on, in the hash-verified exe (build 332841):
+// the prologue (one five-byte instruction is moved, not RIP-relative; no
+// branch in the function lands inside it), the context kept in rbx, the
+// scale's arithmetic, the 16-byte store at rbx+0x30, and the epilogue right
+// after it (no later store). Any mismatch stands this hook down alone.
+constexpr uintptr_t kSetterRva=0x2819D90u;
+// mov [rsp+20h],rbx; push rbp; push rsi; push r12; sub rsp,20h; mov rbp,[r8]
+constexpr uint8_t kSetterPrologue[16]={0x48,0x89,0x5C,0x24,0x20,0x55,0x56,0x41,0x54,
+                                       0x48,0x83,0xEC,0x20,0x49,0x8B,0x28};
+constexpr CodeBytes kSetterBody[]={
+    {0x2819DB4u,3,{0x48,0x8B,0xD9},
+     "setter mismatch at RVA 0x2819DB4 (mov rbx,rcx: the context)"},
+    {0x2819F40u,7,{0x0F,0x28,0x0D,0x39,0x59,0x61,0x02},
+     "setter mismatch at RVA 0x2819F40 (movaps xmm1,[1.0])"},
+    {0x2819F47u,16,{0x48,0x8B,0x44,0x24,0x60,0x0F,0x28,0xC1,0xF3,0x0F,0x5C,0x00,0xF3,0x0F,0x58,0xC8},
+     "setter mismatch at RVA 0x2819F47 (s = 1 + (1 - *param_5))"},
+    {0x2819F57u,4,{0x0F,0x11,0x4B,0x30},
+     "setter mismatch at RVA 0x2819F57 (movups [rbx+30h]: the store)"},
+    {0x2819F5Bu,14,{0x48,0x8B,0x5C,0x24,0x58,0x48,0x83,0xC4,0x20,0x41,0x5C,0x5E,0x5D,0xC3},
+     "setter mismatch at RVA 0x2819F5B (the epilogue after the store)"},
+};
+HookEntry g_setterEntry{"lod-scale-setter",kSetterRva,reinterpret_cast<void*>(&setterObserved),&setterGate};
+
+// FUN_1404F4E10's first sixteen bytes in the hash-verified executable, as
+// object_probe.cpp checks them before the cull gate probe calls it: movups
+// xmm3,[r8]; xor r9d,r9d; movups xmm2,[rdx]; movaps xmm0,xmm3; movzx r8d,...
+constexpr uintptr_t kFrustumRva=0x4F4E10u;
+constexpr uint8_t kFrustumPrologue[16]={0x41,0x0F,0x10,0x18,0x45,0x33,0xC9,0x0F,
+                                        0x10,0x12,0x0F,0x28,0xC3,0x44,0x0F,0xB7};
 
 // Per-thread mask of the job brackets currently on the stack (1u<<jobId),
 // maintained by bracket() and read by evalObserved: attributes every eval
@@ -579,6 +633,22 @@ __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t items,uintp
     return result;
 }
 
+// --- The LOD-scale setter's bracket (FUN_142819D90) --------------------------
+// Reached only through its own relay (setterGate: the governor attached and
+// the patch verified ours). Forwards first -- the engine rebuilds the context
+// and stores its LOD scale at +0x30 -- then hands the governor the context,
+// which reads that value and, while acting, scales it (lod_governor.cpp).
+// This bracket reads and writes nothing itself.
+__declspec(noinline) uintptr_t __fastcall setterObserved(uintptr_t a,uintptr_t b,uintptr_t c,uintptr_t d,
+                                                         uintptr_t e,uintptr_t f,uintptr_t g) noexcept {
+    const auto forward=reinterpret_cast<SetterFn>(g_setterEntry.forward.load(std::memory_order_acquire));
+    if(!forward)return 0; // stood down at install; the relay is unreachable then
+    const uintptr_t result=forward(a,b,c,d,e,f,g);
+    const auto governor=governorSetter.load(std::memory_order_acquire);
+    if(governor)governor(a);
+    return result;
+}
+
 // --- Direct-producer brackets (bucket = param_2) -----------------------------
 // Same counter-delta discipline as the 42B4420 bracket without the entry
 // walk: param_2 IS the bucket (decomp_4312E00 line 250, decomp_369C9C0 line
@@ -777,6 +847,83 @@ void ensurePartTest(uintptr_t base) noexcept {
                        std::memory_order_release);
 }
 
+// The image is build 332841: null, else why not (the part test's first check).
+const char* buildSignature(uintptr_t base) noexcept {
+    __try {
+        uint32_t peOff=0;
+        std::memcpy(&peOff,reinterpret_cast<const void*>(base+0x3C),4);
+        if(peOff>0x1000)return "not build 332841 (no PE header)";
+        uint32_t timestamp=0,imageSize=0;
+        std::memcpy(&timestamp,reinterpret_cast<const void*>(base+peOff+8),4);
+        std::memcpy(&imageSize,reinterpret_cast<const void*>(base+peOff+0x50),4);
+        if(timestamp!=KinematicEvalProbe::kExpectedTimestamp ||
+           imageSize!=KinematicEvalProbe::kExpectedImageSize)return "not build 332841 (PE timestamp/size)";
+        return nullptr;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return "unreadable executable image";}
+}
+
+// FUN_142819D90's build-keyed signature: null when the image is build 332841
+// and every byte the setter observer's read rests on is in place (the
+// prologue, or our own patch followed by the prologue's rest); otherwise the
+// reason the hook stands down.
+const char* setterSignature(uintptr_t base,const HookEntry& entry) noexcept {
+    if(const char* why=buildSignature(base))return why;
+    __try {
+        uint8_t got[sizeof(kSetterPrologue)]{};
+        std::memcpy(got,reinterpret_cast<const void*>(base+kSetterRva),sizeof(got));
+        if(std::memcmp(got,kSetterPrologue,sizeof(got))!=0) {
+            int32_t actual=0;std::memcpy(&actual,got+1,4);
+            const intptr_t displacement=entry.relay
+                ?reinterpret_cast<intptr_t>(entry.relay)-intptr_t(base+kSetterRva+5):0;
+            if(!(entry.relay && got[0]==0xE9 && actual==displacement &&
+                 std::memcmp(got+5,kSetterPrologue+5,sizeof(got)-5)==0))
+                return "prologue mismatch at RVA 0x2819D90";
+        }
+        for(const CodeBytes& c:kSetterBody)
+            if(std::memcmp(reinterpret_cast<const void*>(base+c.rva),c.b,c.n)!=0)return c.why;
+        return nullptr;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return "unreadable executable image";}
+}
+
+bool setterPatchIsOurs(uintptr_t base) noexcept {
+    if(!g_setterEntry.ready.load(std::memory_order_acquire) || !g_setterEntry.relay)return false;
+    const uintptr_t target=base+kSetterRva;
+    const intptr_t displacement=reinterpret_cast<intptr_t>(g_setterEntry.relay)-intptr_t(target+5);
+    uint8_t bytes[sizeof(kSetterPrologue)]{};
+    __try {std::memcpy(bytes,reinterpret_cast<const void*>(target),sizeof(bytes));}
+    __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+    int32_t actual=0;std::memcpy(&actual,bytes+1,4);
+    return bytes[0]==0xE9 && actual==displacement &&
+           std::memcmp(bytes+5,kSetterPrologue+5,sizeof(bytes)-5)==0;
+}
+
+// Installs the setter's patch once (process lifetime, like the others), under
+// g_installMutex. Stands down alone: the status says why.
+void ensureSetter(uintptr_t base) noexcept {
+    if(g_setterEntry.ready.load(std::memory_order_acquire)) {
+        g_setterStatus.store(setterPatchIsOurs(base)?"hooked"
+                             :"our patch is gone (FUN_142819D90's entry was rewritten)",std::memory_order_release);
+        return;
+    }
+    const char* why=setterSignature(base,g_setterEntry);
+    if(why) {g_setterStatus.store(why,std::memory_order_release);return;}
+    if(!installOne(g_setterEntry,base)) {
+        g_setterStatus.store("CodeHook refused the patch (its lod-scale-setter line says why)",
+                             std::memory_order_release);
+        return;
+    }
+    g_setterStatus.store(setterPatchIsOurs(base)?"hooked":"the patch did not verify after install",
+                         std::memory_order_release);
+}
+
+// FUN_142819D90's cell, from the governor's want and whether the patch is
+// still ours; every transition holds g_installMutex.
+void recomputeSetterGateLocked(uintptr_t base) noexcept {
+    const bool wanted=governorWanted.load(std::memory_order_acquire);
+    setterGate.store(wanted && base && setterPatchIsOurs(base)?uintptr_t(1):uintptr_t(0),
+                     std::memory_order_release);
+}
+
 } // namespace
 
 bool kinematicEvalHooksMatch(uintptr_t evalTarget) noexcept {
@@ -955,9 +1102,11 @@ void kinematicEvalGateProbeDetach() noexcept {
     } catch(...) {}
 }
 
-void kinematicEvalSetLodGovernorObservers(LodGovernorBuilderFn builder,LodGovernorPartFn part) noexcept {
+void kinematicEvalSetLodGovernorObservers(LodGovernorBuilderFn builder,LodGovernorPartFn part,
+                                          LodGovernorSetterFn setter) noexcept {
     governorBuilder.store(builder,std::memory_order_release);
     governorPart.store(part,std::memory_order_release);
+    governorSetter.store(setter,std::memory_order_release);
 }
 
 const char* kinematicEvalLodGovernorAttach() noexcept {
@@ -972,9 +1121,13 @@ const char* kinematicEvalLodGovernorAttach() noexcept {
         // The per-part test's patch: the probe's, installed once, standing
         // down alone (kinematicEvalPartTestStatus says why).
         ensurePartTest(base);
+        // The LOD-scale setter's patch: the governor's own, installed once,
+        // standing down alone (kinematicEvalLodSetterStatus says why).
+        ensureSetter(base);
         governorWanted.store(true,std::memory_order_release);
         recomputeGateLocked();
         recomputePartGateLocked(base);
+        recomputeSetterGateLocked(base);
         return "installed";
     } catch(...) {return "install_failed";}
 }
@@ -984,8 +1137,24 @@ void kinematicEvalLodGovernorDetach() noexcept {
         std::lock_guard<std::mutex> lock(g_installMutex);
         governorWanted.store(false,std::memory_order_release);
         recomputeGateLocked();
-        recomputePartGateLocked(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)));
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        recomputePartGateLocked(base);
+        recomputeSetterGateLocked(base);
     } catch(...) {}
+}
+
+const char* kinematicEvalLodSetterStatus() noexcept {
+    return g_setterStatus.load(std::memory_order_acquire);
+}
+
+LodGovernorFrustumFn kinematicEvalFrustumFn() noexcept {
+    const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if(!base || buildSignature(base))return nullptr;
+    uint8_t got[sizeof(kFrustumPrologue)]{};
+    __try {std::memcpy(got,reinterpret_cast<const void*>(base+kFrustumRva),sizeof(got));}
+    __except(EXCEPTION_EXECUTE_HANDLER){return nullptr;}
+    return std::memcmp(got,kFrustumPrologue,sizeof(got))==0
+        ?reinterpret_cast<LodGovernorFrustumFn>(base+kFrustumRva):nullptr;
 }
 
 bool kinematicEvalBuilderHooked() noexcept {
