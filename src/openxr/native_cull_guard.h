@@ -79,6 +79,25 @@ inline const char* nativeCullNudgeName(NativeCullNudge n) noexcept {
     default: return "none";
   }
 }
+// How the adoption in hand, or the one that went live, was entered: the
+// trace's route=. Scene: a widening, held until a rendered scene has arrived,
+// because the game would render a wider frustum than the headset shows. A
+// trim alone is not held (widens() is false): it tells the game exactly the
+// frustum the headset shows, a function of the runtime's frustum and the
+// settings only. FirstAsk: a trim alone told before the game had read any
+// size, so every pair it renders is rendered for this ask and the first
+// complete pair promotes, with no baseline. Rebuild: a trim alone after the
+// game has read an earlier size: a baseline pair, then its rebuild, as a
+// change while live has always been landed.
+enum class NativeCullRoute : uint32_t { None, Scene, FirstAsk, Rebuild };
+inline const char* nativeCullRouteName(NativeCullRoute r) noexcept {
+  switch (r) {
+    case NativeCullRoute::Scene: return "scene";
+    case NativeCullRoute::FirstAsk: return "first_ask";
+    case NativeCullRoute::Rebuild: return "rebuild";
+    default: return "none";
+  }
+}
 constexpr float kNativeCullPi = 3.1415926535f;
 
 inline float nativeCullDegrees(float tangent) noexcept {
@@ -99,10 +118,14 @@ inline NativeCullDimensions gameFacingDimensions(NativeCullDimensions v) noexcep
 // Owner-thread policy. It does no OpenXR, graphics, or configuration I/O.
 class NativeCullGuard final {
  public:
+  // sizeAsked: whether the game has read a recommended size, through either
+  // channel, before this frame. Only a trim alone reads it (NativeCullRoute).
+  // The default is the conservative answer: a game that has asked may hold
+  // targets for what it was told, and a rebuild is waited for.
   NativeCullStage beginFrame(const NativeCullSettings& settings,
       const NativeCullFrustum (&trueFrusta)[2],
       const NativeCullDimensions (&runtimeDims)[2], bool sceneReady,
-      uint64_t referenceGeneration) noexcept {
+      uint64_t referenceGeneration, bool sizeAsked = true) noexcept {
     changed_ = false; nudge_ = NativeCullNudge::None;
     const bool standDown=pendingStandDown_;pendingStandDown_=false;
     // Every exit records what the game is told from here on, so the next
@@ -124,7 +147,7 @@ class NativeCullGuard final {
       if (validInputs(trueFrusta,runtimeDims)) { copy(trueFrusta, true_); copy(runtimeDims, runtime_); copy(true_, target_); }
       if (stage_ != NativeCullStage::Off) changed_ = true;
       clear();maxFactorW_=maxFactorH_=1;maxWidenW_=maxWidenH_=1;clearApplied();
-      forcedInert_=false; stage_ = NativeCullStage::Off; return finish();
+      forcedInert_=false; stage_ = NativeCullStage::Off; route_ = NativeCullRoute::None; return finish();
     }
     const bool configChanged = !sameSettings(settings, settings_);
     // Recenter moves the reference space, not the optical projection or the
@@ -141,16 +164,23 @@ class NativeCullGuard final {
       // next pair, rendered for what the game was told until this frame.
       resetAdoption(stage_ == NativeCullStage::Adopting && baselineReady_);
       clearApplied();
-      stage_ = NativeCullStage::Off; forcedInert_=false;
+      stage_ = NativeCullStage::Off; forcedInert_=false; route_ = NativeCullRoute::None;
       changed_ = true;
     } else {
       settings_ = settings;
     }
-    if(standDown){stage_=NativeCullStage::Inert;forcedInert_=true;resetAdoption();changed_=true;return finish();}
+    if(standDown){stage_=NativeCullStage::Inert;forcedInert_=true;route_=NativeCullRoute::None;resetAdoption();changed_=true;return finish();}
     if (stage_ == NativeCullStage::Live || stage_ == NativeCullStage::Adopting) {
       if (stage_ == NativeCullStage::Adopting) ++adoptingFrames_;
       // Promotion is deliberately evaluated from the pair completed in the
       // preceding frame. A pair that is incomplete never becomes canonical.
+      // Told before the game read any size, the first complete pair was
+      // rendered for this ask, there being no other it could be for: it is
+      // the evidence itself, with no baseline to measure it against.
+      if (stage_ == NativeCullStage::Adopting && route_ == NativeCullRoute::FirstAsk && submittedReady_) {
+        adopted_[0]=submitted_[0]; adopted_[1]=submitted_[1]; adoptedReady_=true;
+        stage_ = NativeCullStage::Live; changed_ = true; floor_ = 0;
+      }
       if (stage_ == NativeCullStage::Adopting && baselineReady_ && submittedReady_) {
         // The rebuild is measured against the ask the baseline was rendered
         // for, never against the runtime's size: after a change while live
@@ -177,18 +207,31 @@ class NativeCullGuard final {
     if (stage_ == NativeCullStage::Inert && forcedInert_) return finish();
     if (stage_ == NativeCullStage::Off || stage_ == NativeCullStage::WaitingScene ||
         stage_ == NativeCullStage::Inert) {
+      // The scene gate is the widening's: the game must not render a wider
+      // frustum than the headset shows while the movie and the menu are up.
+      // A trim alone tells it exactly the frustum the headset shows, so it
+      // is told from the first frame the runtime's frustum and the settings
+      // are both known -- on 2026-09-23, 86 ms before the game's first size
+      // ask, where the gate held it for 20 s, until the menu's hangar.
+      const bool trimAlone = anyTrim(settings_) && !widens(settings_);
       // The floor outlives the scene as it outlives the guard going off: the
       // game's targets are the graphics settings', not the scene's.
-      if (!sceneReady) { stage_ = NativeCullStage::WaitingScene; nudgeHeight_ = 0; return finish(); }
-      if (!computeWidened()) { stage_ = NativeCullStage::Inert; forcedInert_=true; changed_ = true; return finish(); }
+      if (!trimAlone && !sceneReady) { stage_ = NativeCullStage::WaitingScene; nudgeHeight_ = 0; route_ = NativeCullRoute::Scene; return finish(); }
+      if (!computeWidened()) { stage_ = NativeCullStage::Inert; forcedInert_=true; route_ = NativeCullRoute::None; changed_ = true; return finish(); }
       stage_ = NativeCullStage::Adopting; changed_ = true;
       submittedReady_ = false; submittedMask_ = 0; adoptingFrames_ = 0;
+      route_ = !trimAlone ? NativeCullRoute::Scene
+             : (!sizeAsked && !baselineReady_) ? NativeCullRoute::FirstAsk : NativeCullRoute::Rebuild;
       // A kept baseline keeps its ask. A fresh one is rendered for what the
       // game was told during the previous frame or, before any frame has
-      // run, for the runtime's own size.
-      if (!baselineReady_) for (unsigned e=0;e<2;++e)
+      // run, for the runtime's own size. A first ask has no baseline and no
+      // rebuild behind it for a nudge to measure from: the game will build
+      // for what it is told now, and the temporal pass is sized by that.
+      if (route_ == NativeCullRoute::FirstAsk) floor_ = 0;
+      else if (!baselineReady_) for (unsigned e=0;e<2;++e)
         pendingAsk_[e] = told_[e].width && told_[e].height ? told_[e] : gameFacingDimensions(runtime_[e]);
       startNudge();
+      if (route_ == NativeCullRoute::FirstAsk) for (unsigned e=0;e<2;++e) pendingAsk_[e] = recommended(e);
     }
     return finish();
   }
@@ -197,6 +240,7 @@ class NativeCullGuard final {
     if (eye >= 2 || stage_ != NativeCullStage::Adopting || !width || !height || width>16384 || height>16384 || (submittedMask_&(1u<<eye))) return;
     submitted_[eye] = {width,height}; submittedMask_ |= 1u << eye;
     if (submittedMask_ != 3) return;
+    if (route_ == NativeCullRoute::FirstAsk) { submittedReady_ = true; return; }
     if (!baselineReady_) {
       baseline_[0]=submitted_[0]; baseline_[1]=submitted_[1];
       baselineAsk_[0]=pendingAsk_[0]; baselineAsk_[1]=pendingAsk_[1];
@@ -207,6 +251,7 @@ class NativeCullGuard final {
 
   void standDown() noexcept { pendingStandDown_=true; }
   NativeCullStage stage() const noexcept { return stage_; }
+  NativeCullRoute route() const noexcept { return route_; }
   bool pending() const noexcept { return stage_ == NativeCullStage::WaitingScene || stage_ == NativeCullStage::Adopting; }
   float factorWidth() const noexcept { return maxFactorW_; }
   float factorHeight() const noexcept { return maxFactorH_; }
@@ -264,7 +309,8 @@ class NativeCullGuard final {
   // half of the previous ask, measured against the new one, falls outside
   // NGX's render range (flight 4, 2026-09-16, HMD quality 0.5: "outside
   // every DLSS mode's render range", own history for 14 s). The game itself
-  // is still told recommended().
+  // is still told recommended(). A first ask has only ever been told the
+  // one ask, so that is what its frames are rendered for from frame 1.
   NativeCullDimensions treatedFor(unsigned eye) const noexcept {
     if (eye >= 2) return {};
     if (stage_ == NativeCullStage::Adopting) {
@@ -330,6 +376,15 @@ class NativeCullGuard final {
   }
   static bool anyTrim(const NativeCullSettings& s) noexcept {
     return s.trimOuterDeg>0||s.trimNasalDeg>0||s.trimVerticalDeg>0;
+  }
+  // Whether the settings add a margin to the frustum the game is told. Off,
+  // percent 0, and symmetric at fractions 0 and 0 (Sean's live ini on
+  // 2026-09-23: symmetric, 0.0/0.0, channel raw) all make the lie exactly the
+  // trimmed target, bit for bit (computeWidened), so widenFactor is 1.
+  static bool widens(const NativeCullSettings& s) noexcept {
+    if (s.mode == NativeCullMode::Percent) return s.percent > 0;
+    if (s.mode == NativeCullMode::Symmetric) return s.horizontalFraction > 0 || s.verticalFraction > 0;
+    return false;
   }
   static uint32_t roundDim(float v) noexcept { return v > 0 && std::isfinite(v) && v <= 16384.0f ? uint32_t(std::lround(v)) : 0; }
   // Elite applies HMDRenderTargetMultiplier with integer truncation. An odd
@@ -507,6 +562,6 @@ class NativeCullGuard final {
   uint32_t floor_=0,floorAsk_=0,nudgeHeight_=0,nudgeFloor_=0; NativeCullNudge nudge_=NativeCullNudge::None;
   float factorW_[2]{1,1},factorH_[2]{1,1},widenW_[2]{1,1},widenH_[2]{1,1},maxFactorW_=1,maxFactorH_=1,maxWidenW_=1,maxWidenH_=1;
   float appliedOuter_[2]{0,0},appliedNasal_[2]{0,0},appliedVertical_[2]{0,0};
-  uint64_t referenceGeneration_=0; uint32_t submittedMask_=0; NativeCullStage stage_=NativeCullStage::Off; bool baselineReady_=false,submittedReady_=false,adoptedReady_=false,forcedInert_=false,pendingStandDown_=false,changed_=false;
+  uint64_t referenceGeneration_=0; uint32_t submittedMask_=0; NativeCullStage stage_=NativeCullStage::Off; NativeCullRoute route_=NativeCullRoute::None; bool baselineReady_=false,submittedReady_=false,adoptedReady_=false,forcedInert_=false,pendingStandDown_=false,changed_=false;
 };
 }

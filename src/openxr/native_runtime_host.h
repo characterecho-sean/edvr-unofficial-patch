@@ -283,6 +283,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t frameSequenceOffset=0,lastPublishedFrameSequence=0;
   uint64_t activeFrameSequence=0;
   mutable std::atomic<unsigned> geometryQueryNotes[6][2]{};
+  // Reads that handed the game a recommended size (GetRecommendedRenderTarget-
+  // Size, and the extended display's two, which report the same size), from
+  // any thread, for the life of this host, which is one VR_Init. While it is
+  // 0 the cull guard can tell a trim as the game's first ask
+  // (NativeCullRoute::FirstAsk): the startup frames run inside VR_Init,
+  // before the game holds an interface to ask through.
+  mutable std::atomic<uint64_t> sizeAsks{0};
   unsigned originInvalidationNotes=0;
   bool clean=true;
   bool displayRefreshExtension=false;
@@ -441,6 +448,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return out;
   }
   void traceGeometryQuery(unsigned slot,const SystemRead& snapshot) const noexcept {
+    // Counted before the trace's own cap, and only where the read handed out
+    // a size (a live snapshot; openvr_system.cpp's live()).
+    if((slot==0||slot==5)&&snapshot.connected&&snapshot.generation)sizeAsks.fetch_add(1,std::memory_order_relaxed);
     if(slot>=6||geometryQueryNotes[slot][snapshot.geometryValid?1:0].fetch_add(1,std::memory_order_relaxed)>=4)return;
     nativeTracePrintf("system_geometry_query,slot=%u,generation=%llu,connected=%u,geometry_valid=%u,optics_valid=%u,optics_sequence=%llu,sequence=%llu,recommended=%ux%u/%ux%u\n",
       slot,(unsigned long long)snapshot.generation,unsigned(snapshot.connected),unsigned(snapshot.geometryValid),
@@ -861,19 +871,30 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           const auto& raw=temporalGeometry.raw[e];frusta[e]={raw.left,raw.right,raw.top,raw.bottom};
           dimensions[e]={located.width[e],located.height[e]};
         }
-        cullGuard.beginFrame(settings,frusta,dimensions,featureFrame.sceneReady!=0,poses.read().originGeneration);
+        // Sampled before the frame's size is published (geometry.recommend
+        // below), so 0 means no read the game made could have seen anything
+        // but what this frame tells it.
+        const uint64_t asks=sizeAsks.load(std::memory_order_relaxed);
+        cullGuard.beginFrame(settings,frusta,dimensions,featureFrame.sceneReady!=0,poses.read().originGeneration,asks!=0);
         if(cullGuard.changed()) {
           invalidateEyeTreatments();menu.invalidate();previousPairValid=false;++featureChanges;
           // Eye 0's, as they stand at this stage: the frustum the treated
           // image will hold and where it sits in the eye's full field, which
           // are the runtime's own and identity until the stage goes live. A
           // clamped trim shows as an applied value below the one asked for.
+          // route= says why the stage was entered as it was (NativeCullRoute):
+          // scene for a widening, held until a rendered scene (scene=1);
+          // first_ask for a trim alone told before the game read any size
+          // (asked=0, scene=0), promoted by the first pair; rebuild for a trim
+          // alone after an earlier ask, landed by the game's rebuild without
+          // waiting for the scene.
           const auto target=cullGuard.contentFrustum(0);const auto place=cullGuard.placementBounds(0);
           nativeTracePrintf("native_cull,stage=%u,factors=%.5f/%.5f,recommended=%ux%u,trim=%.1f/%.1f/%.1f,"
-            "target=%.4f/%.4f/%.4f/%.4f,placement=%.4f/%.4f/%.4f/%.4f\n",unsigned(cullGuard.stage()),
+            "target=%.4f/%.4f/%.4f/%.4f,placement=%.4f/%.4f/%.4f/%.4f,route=%s,scene=%u,asked=%llu\n",unsigned(cullGuard.stage()),
             cullGuard.factorWidth(),cullGuard.factorHeight(),cullGuard.recommended(0).width,cullGuard.recommended(0).height,
             cullGuard.appliedOuterDeg(0),cullGuard.appliedNasalDeg(0),cullGuard.appliedVerticalDeg(0),
-            target.left,target.right,target.down,target.up,place.left,place.top,place.right,place.bottom);
+            target.left,target.right,target.down,target.up,place.left,place.top,place.right,place.bottom,
+            nativeCullRouteName(cullGuard.route()),unsigned(featureFrame.sceneReady!=0),(unsigned long long)asks);
           // Once per entry into Adopting: what the guard decided about the
           // game's own rebuild (NativeCullGuard::startNudge and the
           // NativeCullNudge names). `told` is the height the game reads from
@@ -890,11 +911,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         // after it (flight 3, 2026-09-16): once as the baseline is seeded,
         // then every two seconds. `for` is the ask that baseline was
         // rendered for, `ask` what the game is told now, `last` the newest
-        // complete pair.
-        if(cullGuard.stage()==NativeCullStage::Adopting&&cullGuard.baselineReady()&&(cullGuard.adoptingFrames()%180u)==2u) {
-          const auto b=cullGuard.baseline(0),f=cullGuard.baselineAsk(0),a=cullGuard.recommended(0),l=cullGuard.lastSubmitted(0);
-          nativeTracePrintf("native_cull_adopting,frames=%u,baseline=%ux%u,for=%ux%u,ask=%ux%u,last=%ux%u\n",
-            cullGuard.adoptingFrames(),b.width,b.height,f.width,f.height,a.width,a.height,l.width,l.height);
+        // complete pair. A first ask has no baseline (0x0): its `for` is the
+        // ask itself, and it waits only for the game's first complete pair.
+        const bool firstAsk=cullGuard.route()==NativeCullRoute::FirstAsk;
+        if(cullGuard.stage()==NativeCullStage::Adopting&&(cullGuard.baselineReady()||firstAsk)&&(cullGuard.adoptingFrames()%180u)==2u) {
+          const auto b=cullGuard.baseline(0),f=firstAsk?cullGuard.treatedFor(0):cullGuard.baselineAsk(0),a=cullGuard.recommended(0),l=cullGuard.lastSubmitted(0);
+          nativeTracePrintf("native_cull_adopting,frames=%u,route=%s,baseline=%ux%u,for=%ux%u,ask=%ux%u,last=%ux%u\n",
+            cullGuard.adoptingFrames(),nativeCullRouteName(cullGuard.route()),b.width,b.height,f.width,f.height,a.width,a.height,l.width,l.height);
         }
         const auto stage=cullGuard.stage();
         features.cull(stage==NativeCullStage::Live?2u:stage==NativeCullStage::Adopting?1u:0u,

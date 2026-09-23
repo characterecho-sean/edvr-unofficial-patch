@@ -143,9 +143,13 @@ int main(int argc,char** argv) {
   // untouched and the placement a band inside the eye's own field.
   NativeCullSettings trimOnly{}; trimOnly.trimVerticalDeg=10;
   NativeCullGuard trimGuard;
-  CHECK(trimGuard.beginFrame(trimOnly,crystal,crystalDims,false,1)==NativeCullStage::WaitingScene);
-  CHECK(trimGuard.recommended(0).width==3964&&trimGuard.recommended(0).height==3914);
-  CHECK(trimGuard.beginFrame(trimOnly,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
+  // A trim alone does not wait for the scene (2026-09-23): it is the frustum
+  // the headset shows. The game has asked (the default), so its rebuild is
+  // what lands it; the first ask has its own section at the end.
+  CHECK(trimGuard.beginFrame(trimOnly,crystal,crystalDims,false,1)==NativeCullStage::Adopting);
+  CHECK(trimGuard.route()==NativeCullRoute::Rebuild);
+  CHECK(trimGuard.treatedFor(0).width==3964&&trimGuard.treatedFor(0).height==3914);
+  CHECK(trimGuard.beginFrame(trimOnly,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&!trimGuard.changed());
   // 51.673 degrees less ten is 41.673, whose tangent is 0.8901.
   const float trimmedUp=std::tan(std::atan(csVertical)-10.0f*3.1415926535f/180.0f);
   CHECK(std::fabs(trimmedUp-0.8901f)<.001f);
@@ -473,9 +477,12 @@ int main(int argc,char** argv) {
   CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting);
   pair(nudgeGuard,q(nudgeGuard.recommended(0)));
   CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Live);
+  // Since 2026-09-23 a trim alone is not held for the scene at all: the
+  // change is told on the frame it arrives, and the scene arriving later is
+  // no change.
   nudge.trimOuterDeg=10;
-  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,false,1)==NativeCullStage::WaitingScene);
-  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Started);
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,false,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::Started);
+  CHECK(nudgeGuard.beginFrame(nudge,crystal,crystalDims,true,1)==NativeCullStage::Adopting&&nudgeGuard.nudge()==NativeCullNudge::None&&!nudgeGuard.changed());
   CHECK(nudgeGuard.recommended(0).height==2750&&nudgeGuard.nudgeFloor()==2752);
   // Every width-only change costs two more rows until a shrink or an apply
   // re-bases the floor; past kNativeCullNudgeMaxPx the ask is told as it is.
@@ -537,5 +544,153 @@ int main(int argc,char** argv) {
   NativeCullSettings badChannel=s; badChannel.channel=3;
   NativeCullGuard badChannelGuard;
   CHECK(badChannelGuard.beginFrame(badChannel,zf,zd,true,1)==NativeCullStage::Off);
+
+  // ---- the first ask (2026-09-23) ------------------------------------------
+  // Sean's Crystal Super at 3070x3032 and HMD Quality 0.65, from the runtime
+  // log of 2026-09-23: the guard knew the frustum and the trim at
+  // 19:23:50.914 (runtime startup, frame 1), the game first read the size at
+  // 19:23:51.000, and the scene gate held the trim until 19:24:11.212, when
+  // the menu's hangar arrived; the game then rebuilt, DLSS and the UI layer
+  // with it. His live ini: symmetric at fractions 0 and 0 (no margin),
+  // channel raw, headsets 94x99 and 103x103; vertical 2, outer 7, nasal 5.
+  NativeCullFrustum sean[2]{{-1.5293f,1.0324f,-1.2648f,1.2648f},{-1.0324f,1.5293f,-1.2648f,1.2648f}};
+  NativeCullDimensions seanDims[2]{{3070,3032},{3070,3032}};
+  NativeCullSettings seanIni{}; seanIni.mode=NativeCullMode::Symmetric; seanIni.horizontalFraction=0; seanIni.verticalFraction=0;
+  seanIni.percent=20; seanIni.channel=1; seanIni.signatureCount=2; seanIni.signatures[0]={94,99}; seanIni.signatures[1]={103,103};
+  seanIni.trimOuterDeg=7; seanIni.trimNasalDeg=5; seanIni.trimVerticalDeg=2;
+  NativeCullGuard askGuard;
+  // Frame 1: no scene, no size read yet. Told the trimmed size at once.
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,false,1,false)==NativeCullStage::Adopting&&askGuard.changed());
+  CHECK(askGuard.route()==NativeCullRoute::FirstAsk&&askGuard.nudge()==NativeCullNudge::First);
+  CHECK(askGuard.recommended(0).width==2458&&askGuard.recommended(0).height==2824);
+  CHECK(askGuard.recommended(1).width==2458&&askGuard.recommended(1).height==2824);
+  CHECK(std::fabs(askGuard.factorWidth()-0.80056f)<.0005f&&std::fabs(askGuard.factorHeight()-0.93126f)<.0005f);
+  CHECK(askGuard.widenFactorWidth()==1.0f&&askGuard.widenFactorHeight()==1.0f);
+  CHECK(std::fabs(askGuard.appliedOuterDeg(0)-7.f)<.001f&&std::fabs(askGuard.appliedNasalDeg(0)-5.f)<.001f&&std::fabs(askGuard.appliedVerticalDeg(0)-2.f)<.001f);
+  // The temporal pass is sized by the ask from the first frame: nothing was
+  // ever rendered for another, so DLSS is made once, at the trimmed output.
+  CHECK(askGuard.treatedFor(0).width==2458&&askGuard.treatedFor(0).height==2824&&!askGuard.baselineReady());
+  // The projection and the placement stay the runtime's until a pair is seen.
+  CHECK(askGuard.gameFrustumRaw(0).left==sean[0].left&&askGuard.gameFrustumMatrix(0).up==sean[0].up);
+  CHECK(askGuard.placementBounds(0).left==0.f&&askGuard.placementBounds(0).bottom==1.f);
+  // Frame 2 of the runtime's startup: nothing moves.
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,false,1,false)==NativeCullStage::Adopting&&!askGuard.changed());
+  // The game reads 2458x2824 (asked from here on), builds 1597x1835 (0.65,
+  // truncated), and renders its first frame with the runtime's projection.
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Adopting&&!askGuard.changed());
+  askGuard.noteSubmittedSize(0,1597,1835);
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Adopting&&!askGuard.changed()); // half a pair is not one
+  askGuard.noteSubmittedSize(0,1597,1835);askGuard.noteSubmittedSize(1,1597,1835);
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Live&&askGuard.changed());
+  CHECK(askGuard.route()==NativeCullRoute::FirstAsk&&askGuard.adoptingFrames()<6);
+  // Live with no scene and no rebuild, at the flight's own target and
+  // placement (its stage=3 line, 19:24:12.982).
+  const auto seanTarget=askGuard.contentFrustum(0);
+  CHECK(std::fabs(seanTarget.left+1.1841f)<.0005f&&std::fabs(seanTarget.right-0.8666f)<.0005f&&
+        std::fabs(seanTarget.down+1.1779f)<.0005f&&std::fabs(seanTarget.up-1.1779f)<.0005f);
+  const auto seanPlace=askGuard.placementBounds(0);
+  CHECK(std::fabs(seanPlace.left-0.1347f)<.0005f&&std::fabs(seanPlace.top-0.0344f)<.0005f&&
+        std::fabs(seanPlace.right-0.9353f)<.0005f&&std::fabs(seanPlace.bottom-0.9656f)<.0005f);
+  CHECK(std::fabs(askGuard.gameFrustumRaw(0).left+1.1841f)<.0005f&&std::fabs(askGuard.gameFrustumMatrix(0).left+1.1841f)<.0005f);
+  const auto seanCrop=askGuard.cropBounds(0);
+  CHECK(seanCrop.left==0.f&&seanCrop.top==0.f&&seanCrop.right==1.f&&seanCrop.bottom==1.f); // no margin to crop
+  // The size never moved: 2458x2824 from frame 1 through live.
+  CHECK(askGuard.recommended(0).width==2458&&askGuard.recommended(0).height==2824&&askGuard.treatedFor(0).height==2824);
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,true,1,true)==NativeCullStage::Live&&!askGuard.changed()); // the scene is no event
+  // A change once the game has asked is landed by its rebuild, as before,
+  // and still without the scene. Outer 7 to 10 narrows the width alone, so
+  // the nudge dips under the floor the first ask left.
+  seanIni.trimOuterDeg=10;
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Adopting&&askGuard.route()==NativeCullRoute::Rebuild);
+  CHECK(askGuard.nudge()==NativeCullNudge::Started&&askGuard.nudgeFloor()==2824&&askGuard.recommended(0).height==2822);
+  CHECK(askGuard.treatedFor(0).width==2458&&askGuard.treatedFor(0).height==2824); // what the game holds
+  askGuard.noteSubmittedSize(0,1597,1835);askGuard.noteSubmittedSize(1,1597,1835);
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Adopting&&askGuard.baselineReady());
+  const auto narrower=askGuard.recommended(0);
+  const NativeCullDimensions narrower65{uint32_t(narrower.width*.65f),uint32_t(narrower.height*.65f)};
+  CHECK(narrower.width<2458&&narrower65.height==1834);
+  askGuard.noteSubmittedSize(0,narrower65.width,narrower65.height);askGuard.noteSubmittedSize(1,narrower65.width,narrower65.height);
+  CHECK(askGuard.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Live);
+  seanIni.trimOuterDeg=7;
+
+  // A widening keeps the whole machine behind the scene gate, its trim with
+  // it, whether or not the game has asked: it would render a wider frustum
+  // than the headset shows. The adoption then runs exactly as before.
+  NativeCullSettings seanWide=seanIni; seanWide.horizontalFraction=0.25f;
+  NativeCullGuard wide;
+  CHECK(wide.beginFrame(seanWide,sean,seanDims,false,1,false)==NativeCullStage::WaitingScene&&wide.route()==NativeCullRoute::Scene);
+  CHECK(wide.recommended(0).width==3070&&wide.recommended(0).height==3032&&wide.treatedFor(0).width==3070);
+  CHECK(wide.beginFrame(seanWide,sean,seanDims,false,1,true)==NativeCullStage::WaitingScene);
+  CHECK(wide.beginFrame(seanWide,sean,seanDims,true,1,true)==NativeCullStage::Adopting&&wide.route()==NativeCullRoute::Scene);
+  CHECK(wide.widenFactorWidth()>1.0f&&wide.widenFactorHeight()==1.0f&&wide.recommended(0).width<3070);
+  CHECK(wide.gameFrustumRaw(0).left==sean[0].left);
+  wide.noteSubmittedSize(0,1995,1970);wide.noteSubmittedSize(1,1995,1970);
+  CHECK(wide.beginFrame(seanWide,sean,seanDims,true,1,true)==NativeCullStage::Adopting&&wide.baselineReady());
+  const auto wideAsk=wide.recommended(0);
+  wide.noteSubmittedSize(0,uint32_t(wideAsk.width*.65f),uint32_t(wideAsk.height*.65f));
+  wide.noteSubmittedSize(1,uint32_t(wideAsk.width*.65f),uint32_t(wideAsk.height*.65f));
+  CHECK(wide.beginFrame(seanWide,sean,seanDims,true,1,true)==NativeCullStage::Live&&wide.route()==NativeCullRoute::Scene);
+  // Channel raw, as his ini has it: the margin is told on GetProjectionRaw
+  // alone, the matrix channel and the crop keep the trimmed frustum.
+  CHECK(wide.gameFrustumRaw(0).right>wide.contentFrustum(0).right&&wide.gameFrustumMatrix(0).right==wide.contentFrustum(0).right);
+  NativeCullGuard wideNoTrim; // the guard's own first case, before any ask
+  CHECK(wideNoTrim.beginFrame(s,zf,zd,false,1,false)==NativeCullStage::WaitingScene);
+  CHECK(wideNoTrim.beginFrame(s,zf,zd,true,1,false)==NativeCullStage::Adopting&&wideNoTrim.route()==NativeCullRoute::Scene);
+
+  // A margin configured to nothing is a trim alone, in every mode; without a
+  // trim, such a mode still waits for the scene and then stands inert.
+  NativeCullSettings pctZero=seanIni; pctZero.mode=NativeCullMode::Percent; pctZero.percent=0;
+  NativeCullGuard pz;
+  CHECK(pz.beginFrame(pctZero,sean,seanDims,false,1,false)==NativeCullStage::Adopting&&pz.route()==NativeCullRoute::FirstAsk);
+  CHECK(pz.recommended(0).width==2458&&pz.recommended(0).height==2824&&pz.widenFactorWidth()==1.0f);
+  NativeCullSettings offTrim{}; offTrim.trimOuterDeg=7; offTrim.trimNasalDeg=5; offTrim.trimVerticalDeg=2;
+  NativeCullGuard ot;
+  CHECK(ot.beginFrame(offTrim,sean,seanDims,false,1,false)==NativeCullStage::Adopting&&ot.route()==NativeCullRoute::FirstAsk);
+  CHECK(ot.recommended(0).width==2458&&ot.recommended(0).height==2824);
+  NativeCullSettings marginless=seanIni; marginless.trimOuterDeg=marginless.trimNasalDeg=marginless.trimVerticalDeg=0;
+  NativeCullGuard ml;
+  CHECK(ml.beginFrame(marginless,sean,seanDims,false,1,false)==NativeCullStage::WaitingScene&&ml.route()==NativeCullRoute::Scene);
+  CHECK(ml.beginFrame(marginless,sean,seanDims,true,1,true)==NativeCullStage::Inert&&ml.route()==NativeCullRoute::None);
+
+  // The frustum not yet known at the first ask: the host holds its frames
+  // back (no located geometry), the game reads the runtime's own size and
+  // builds for it. The first frame the frustum is known the trim is told,
+  // with no scene, and landed as a change: the pair the game holds seeds the
+  // baseline, its own rebuild (the height shrank) promotes.
+  NativeCullFrustum unknown[2]{sean[0],sean[1]}; unknown[0].right=std::numeric_limits<float>::quiet_NaN();
+  NativeCullGuard late;
+  CHECK(late.beginFrame(seanIni,unknown,seanDims,false,1,false)==NativeCullStage::Off&&late.route()==NativeCullRoute::None);
+  late.noteSubmittedSize(0,1995,1970);late.noteSubmittedSize(1,1995,1970); // while off: not evidence
+  CHECK(late.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Adopting&&late.changed());
+  CHECK(late.route()==NativeCullRoute::Rebuild&&late.recommended(0).width==2458&&late.recommended(0).height==2824);
+  CHECK(late.treatedFor(0).width==3070&&late.treatedFor(0).height==3032); // what the game holds until it rebuilds
+  CHECK(late.gameFrustumRaw(0).left==sean[0].left&&!late.baselineReady());
+  late.noteSubmittedSize(0,1995,1970);late.noteSubmittedSize(1,1995,1970);
+  CHECK(late.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Adopting&&late.baselineReady());
+  CHECK(late.baselineAsk(0).width==3070&&late.baselineAsk(0).height==3032);
+  late.noteSubmittedSize(0,1995,1970);late.noteSubmittedSize(1,1995,1970);
+  CHECK(late.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Adopting); // unchanged is never evidence
+  late.noteSubmittedSize(0,1597,1835);late.noteSubmittedSize(1,1597,1835);
+  CHECK(late.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Live&&late.route()==NativeCullRoute::Rebuild);
+  CHECK(std::fabs(late.contentFrustum(0).left+1.1841f)<.0005f&&late.treatedFor(0).width==2458);
+  // The trim not yet known at the first ask (no headset resolved), on the
+  // same ini: a margin-less mode with no trim waits, as it always has, and
+  // the first frame the trim arrives it is told, before the scene.
+  NativeCullSettings unresolved=seanIni; unresolved.trimOuterDeg=unresolved.trimNasalDeg=unresolved.trimVerticalDeg=0;
+  NativeCullGuard lateTrim;
+  CHECK(lateTrim.beginFrame(unresolved,sean,seanDims,false,1,false)==NativeCullStage::WaitingScene);
+  CHECK(lateTrim.recommended(0).width==3070&&lateTrim.recommended(0).height==3032);
+  CHECK(lateTrim.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Adopting&&lateTrim.route()==NativeCullRoute::Rebuild);
+  CHECK(lateTrim.recommended(0).width==2458&&lateTrim.treatedFor(0).width==3070&&lateTrim.treatedFor(0).height==3032);
+  // ... and known before the ask after all (the runtime's second startup
+  // frame): still the first ask.
+  NativeCullGuard earlyTrim;
+  CHECK(earlyTrim.beginFrame(unresolved,sean,seanDims,false,1,false)==NativeCullStage::WaitingScene);
+  CHECK(earlyTrim.beginFrame(seanIni,sean,seanDims,false,1,false)==NativeCullStage::Adopting&&earlyTrim.route()==NativeCullRoute::FirstAsk);
+  CHECK(earlyTrim.treatedFor(0).width==2458&&earlyTrim.treatedFor(0).height==2824&&earlyTrim.nudge()==NativeCullNudge::First);
+  // A stand-down ends a first ask like any other adoption.
+  earlyTrim.standDown();
+  CHECK(earlyTrim.beginFrame(seanIni,sean,seanDims,false,1,true)==NativeCullStage::Inert&&earlyTrim.route()==NativeCullRoute::None);
+  CHECK(earlyTrim.recommended(0).width==3070&&earlyTrim.recommended(0).height==3032);
   std::printf("native_cull_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
