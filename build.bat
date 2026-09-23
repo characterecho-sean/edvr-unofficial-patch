@@ -450,7 +450,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\lod_governor.cpp" ^
     "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\engine_velocity.cpp" ^
-    "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
+    "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" "src\d3d11\hud_quality_math.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
     "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
     "src\d3d11\fss_dump.cpp" "src\d3d11\fss_heal.cpp" ^
@@ -2200,4 +2200,32 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: LOD governor test build failed & exit /b 1 )
 "%BUILD%\lod_governor_test.exe" --dry-run || exit /b 1
 "%BUILD%\lod_governor_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_hud_quality_test
+echo [edvr] === hud_quality_test.exe ===
+REM Build gate for fix.hud_quality's arithmetic (src/d3d11/hud_quality_math.*,
+REM which fss_res.cpp's match mode calls rather than reimplementing inline):
+REM the key's parsing (off | 1.0 | 1.25, anything else refused as off); the
+REM factor target / HMD-quality multiplier -- 0.7 -> ~1.4286 (the log line's
+REM own worked example), 1.0-at-1.0 a no-op, 1.25-at-1.0 -> 1.25, the 4x cap,
+REM an unknown or non-positive multiplier refusing rather than dividing by it,
+REM and the 1% floor's own edge (1.02 fires, 1.005 does not); the rounding a
+REM fractional factor applies to a texture's width/height -- including the
+REM 908x1361 -> 1297x1944 example the log line quotes, a whole factor (2x, 3x)
+REM reproducing advanced.surface_inflate's existing integer behaviour exactly,
+REM and round-half-up at an exact float boundary; and the match against a set
+REM of sizes fss_res's own classifier (borrowed from ui_depth.cpp) will have
+REM learned -- exact matches, a one-pixel near-miss that must not match, and
+REM an empty or null learned set. Pure arithmetic: no device, no Config, no
+REM Log, so a mismatch between this rig and fss_res.cpp's own use of it is
+REM impossible by construction.
+if not exist "%OBJ%\hudquality" mkdir "%OBJ%\hudquality"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\hudquality\\" /Fe"%BUILD%\hud_quality_test.exe" ^
+    "tools\hud_quality_test\hud_quality_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: hud quality test build failed & exit /b 1 )
+"%BUILD%\hud_quality_test.exe" --self-test || exit /b 1
 exit /b 0

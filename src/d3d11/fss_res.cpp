@@ -4,6 +4,7 @@
 
 #include <d3d11.h>
 
+#include <cstdio>    // _snprintf_s: the hud-quality summary line's pieces
 #include <cstdlib>   // strtoul: the surface_inflate spec parser
 #include <cstring>   // memcpy: the spec string kept to log only on a change
 #include <string>
@@ -11,6 +12,10 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"   // eyeTextureSize: the published per-eye size
 #include "../common/log.h"
+#include "../common/timing.h"       // nowMs/stampMs/elapsedMs/dueMs
+#include "device_hook.h"            // deviceHookHmdQuality
+#include "hud_quality_math.h"
+#include "ui_depth.h"                // uiDepthLearnedSurfaceSizes
 
 namespace edvr {
 
@@ -37,7 +42,10 @@ namespace {
 // STILL BOUND. Its viewport then stops being scaled while its target stays
 // inflated, so that panel draws into a corner of itself -- a loud failure,
 // but one that costs a flight to diagnose. The array is pointers and two
-// sizes; there is no reason to be thrifty with it.
+// sizes; there is no reason to be thrifty with it. fix.hud_quality's match
+// mode adds at most three learned panels (vector/text/icon) and their depth
+// partners -- six more -- so the ring is still comfortably under 32 with
+// every matcher running at once.
 constexpr uint32_t kTracked = 32;
 
 // The game asks for eye/2 per axis. Halving an odd size floors or ceils
@@ -56,36 +64,74 @@ constexpr uint32_t kSpecs = 4;
 
 // D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION. A spec that would cross it is
 // refused when it is read rather than at the create, so the log says the
-// number is impossible instead of the texture quietly staying stock.
+// number is impossible instead of the texture quietly staying stock. Also
+// the runtime ceiling fix.hud_quality's match mode checks at CREATE time,
+// since its factor can change from one create to the next (HMD Quality is
+// read live) where a named spec's factor cannot.
 constexpr uint32_t kMaxDim = 16384;
+
+// How many of ui_depth's learned interface-surface sizes fix.hud_quality
+// asks for on each candidate create. The ring behind them holds 64 total
+// (chrome included); a cockpit census has only ever shown a handful of
+// distinct vector/text/icon panels in one session, so this is headroom, not
+// a tight fit.
+constexpr uint32_t kHqLearnMax = 16;
 
 struct Spec {
     uint32_t w = 0;
     uint32_t h = 0;
-    uint32_t scale = 0;
+    float    scale = 0.0f;
 };
 
 struct Tracked {
-    void*    tex = nullptr;
-    uint32_t w = 0;   // the size the game asked for -- viewports arrive in it
-    uint32_t h = 0;
-    uint32_t scale = 1;   // what it grew by; the viewport paths multiply by it
+    void*         tex = nullptr;
+    uint32_t      w = 0;   // the size the game asked for -- viewports arrive in it
+    uint32_t      h = 0;
+    float         scale = 1.0f;    // what it grew by; the viewport/scissor paths multiply by it
+    InflateSource source = InflateSource::kNone;
 };
 
 struct State {
-    bool     fssRule = false;   // experimental.fss_res: the half-eye matcher
-    bool     announced = false;
-    Spec     specs[kSpecs];
-    uint32_t specCount = 0;
-    char     specStr[128] = {};  // the raw setting, to log only on a change
-    Tracked  tracked[kTracked];
-    uint32_t next = 0;
-    uint32_t inflateNotes = 0;
-    uint32_t scaled = 0;       // viewports scaled at RSSetViewports
-    uint32_t scaledLate = 0;   // caught by the draw-time backstop instead
-    uint32_t scaleNotes = 0;
+    bool        fssRule = false;   // experimental.fss_res: the half-eye matcher
+    bool        announced = false;
+    Spec        specs[kSpecs];
+    uint32_t    specCount = 0;
+    char        specStr[128] = {};  // the raw setting, to log only on a change
+    std::string hudQualityStr;      // fix.hud_quality's raw text, same reason
+    float       hudQualityTarget = 0.0f;   // 0 = off; else 1.0 or 1.25
+    Tracked     tracked[kTracked];
+    uint32_t    next = 0;
+    uint32_t    inflateNotes = 0;
+    uint32_t    scaled = 0;         // viewports scaled at RSSetViewports
+    uint32_t    scaledLate = 0;     // caught by the draw-time backstop instead
+    uint32_t    scaleNotes = 0;
+    uint32_t    scissorScaled = 0;  // scissor rects fixed at the draw-time backstop
+    uint32_t    scissorNotes = 0;
+    uint32_t    copyNotes = 0;      // a copy/resolve touched a tracked texture
 };
 State g_s;
+
+// fix.hud_quality's own running tally, for its resize summary and the "on
+// but nothing matched" warning. Reset whenever the key's TEXT changes (a
+// real change starts the story over), never on an unrelated ini reload.
+struct HudFamilyRecord {
+    bool     have = false;
+    uint32_t origW = 0, origH = 0, newW = 0, newH = 0;
+};
+struct HudQualityStats {
+    uint64_t         firstActiveMs = 0;   // stampMs() the first tick saw the key on
+    bool             saidNoMatch = false;
+    uint64_t         lastSummaryMs = 0;
+    uint32_t         resizedCount = 0;
+    HudFamilyRecord  vec, text, icon;
+    uint32_t         viewportsRescaled = 0;
+    uint32_t         scissorsRescaled = 0;
+    uint32_t         copiesSeen = 0;
+    float            lastMult = 0.0f;
+    float            lastFactor = 0.0f;
+    bool             unknownMultNoted = false;
+};
+HudQualityStats g_hq;
 
 // "1952x1597:2, 908x1361" -- a size, optionally a factor, comma separated.
 // The factor defaults to 2 and is capped at 4, because the point of the
@@ -96,6 +142,13 @@ State g_s;
 // entries it understood. A probe that half-applies is a probe whose result
 // cannot be read: the clear_probe parser next door takes the same line, and
 // for the same reason.
+//
+// The factor is still parsed and bounded as an INTEGER here (strtoul, 2..4)
+// -- advanced.surface_inflate's own syntax is unchanged, on purpose (it is
+// a hand-typed developer instrument; a typo that means something completely
+// different by accident is worse than a feature it doesn't have). Spec::scale
+// is a float only so the SAME viewport/texture-size code beneath both
+// matchers can serve fix.hud_quality's fractional factor too.
 bool parseSpecs(const std::string& text, Spec* out, uint32_t* countOut) {
     uint32_t n = 0;
     const char* p = text.c_str();
@@ -121,12 +174,73 @@ bool parseSpecs(const std::string& text, Spec* out, uint32_t* countOut) {
         if (w * s > kMaxDim || h * s > kMaxDim) return false;
         out[n].w = static_cast<uint32_t>(w);
         out[n].h = static_cast<uint32_t>(h);
-        out[n].scale = static_cast<uint32_t>(s);
+        out[n].scale = static_cast<float>(s);
         ++n;
         p = end;
     }
     *countOut = n;
     return true;
+}
+
+void hudQualityNoteUnknownMultiplier() {
+    if (g_hq.unknownMultNoted) return;
+    g_hq.unknownMultNoted = true;
+    Log::get().note(
+        "hud quality: on, but HMD Quality could not be read (no "
+        "Options\\Graphics\\*.fxcfg under this profile, or no "
+        "HMDRenderTargetMultiplier in the newest one) -- nothing changes "
+        "until it can be. Said once.");
+}
+
+void appendFamilyText(char* buf, size_t n, const char* name,
+                      const HudFamilyRecord& r) {
+    if (r.have) {
+        _snprintf_s(buf, n, _TRUNCATE, "%s %ux%u -> %ux%u", name, r.origW,
+                   r.origH, r.newW, r.newH);
+    } else {
+        _snprintf_s(buf, n, _TRUNCATE, "%s none yet", name);
+    }
+}
+
+// "hud quality: 1.0 (HMD Quality 0.70 -> factor 1.4286): interface surfaces
+// resized N (vector WxH -> WxH, text ..., icon ...), viewports rescaled M,
+// scissors rescaled S, copies touching one: K." At the first surface
+// resized and every 30s after (fssResHudQualityTick), so a flight's log has
+// both the instant the mechanism first engaged and a running total.
+void logHudQualitySummary() {
+    char vecBuf[64], textBuf[64], iconBuf[64];
+    appendFamilyText(vecBuf, sizeof(vecBuf), "vector", g_hq.vec);
+    appendFamilyText(textBuf, sizeof(textBuf), "text", g_hq.text);
+    appendFamilyText(iconBuf, sizeof(iconBuf), "icon", g_hq.icon);
+    Log::get().note(
+        "hud quality: %s (HMD Quality %.2f -> factor %.4f): interface "
+        "surfaces resized %u (%s, %s, %s), viewports rescaled %u, scissors "
+        "rescaled %u, copies touching one: %u.",
+        g_s.hudQualityStr.c_str(), static_cast<double>(g_hq.lastMult),
+        static_cast<double>(g_hq.lastFactor), g_hq.resizedCount, vecBuf,
+        textBuf, iconBuf, g_hq.viewportsRescaled, g_hq.scissorsRescaled,
+        g_hq.copiesSeen);
+}
+
+void hudQualityNoteMatch(char family, uint32_t origW, uint32_t origH,
+                         uint32_t newW, uint32_t newH) {
+    HudFamilyRecord* rec = family == 'V'   ? &g_hq.vec
+                           : family == 'T' ? &g_hq.text
+                           : family == 'I' ? &g_hq.icon
+                                           : nullptr;
+    if (rec) {
+        rec->have = true;
+        rec->origW = origW;
+        rec->origH = origH;
+        rec->newW = newW;
+        rec->newH = newH;
+    }
+    const bool first = g_hq.resizedCount == 0;
+    ++g_hq.resizedCount;
+    if (first) {
+        g_hq.lastSummaryMs = nowMs();
+        logHudQualitySummary();
+    }
 }
 
 }  // namespace
@@ -140,6 +254,38 @@ void fssResConfigure(Config& cfg) {
             "fss res: ON. The scanner's body layer will be created at full "
             "eye resolution instead of half when the FSS is next opened -- "
             "textures are made per zoom, so no restart is needed.");
+    }
+
+    // fix.hud_quality, read and logged BEFORE advanced.surface_inflate
+    // below on purpose: that block returns early whenever ITS OWN text is
+    // unchanged, which is the common case on a reload that touched some
+    // other key, and code placed after it would then never run.
+    const std::string hq = cfg.getString("fix.hud_quality", "off");
+    if (hq != g_s.hudQualityStr) {
+        g_s.hudQualityStr = hq;
+        bool recognized = true;
+        g_s.hudQualityTarget = hudQualityParseTarget(hq.c_str(), &recognized);
+        g_hq = HudQualityStats{};   // a real change starts the story over
+        if (!recognized) {
+            Log::get().note(
+                "hud quality: \"%s\" is not one of off, 1.0, 1.25 -- "
+                "treated as off. The setting is hud_quality under [fix].",
+                hq.c_str());
+        } else if (!(g_s.hudQualityTarget > 0.0f)) {
+            Log::get().note(
+                "hud quality: off. The HUD's interface surfaces follow HMD "
+                "Quality as today.");
+        } else {
+            Log::get().note(
+                "hud quality: %s. The cockpit's vector, text and icon "
+                "surfaces will be created at the size they would have at "
+                "HMD Quality %s, the next time the game makes one -- a trip "
+                "through the main menu for a panel already open. Needs "
+                "fix.temporal_aa on (its own classifier is what learns a "
+                "panel's size); if it has not learned one yet, nothing "
+                "matches and this says so after a minute.",
+                hq.c_str(), hq.c_str());
+        }
     }
 
     // The size-named matcher. Logged only when the setting's TEXT changes,
@@ -180,6 +326,10 @@ void fssResConfigure(Config& cfg) {
     g_s.specCount = n;
     for (uint32_t i = 0; i < n; ++i) {
         g_s.specs[i] = parsed[i];
+        const uint32_t scaledW =
+            static_cast<uint32_t>(g_s.specs[i].w * g_s.specs[i].scale + 0.5f);
+        const uint32_t scaledH =
+            static_cast<uint32_t>(g_s.specs[i].h * g_s.specs[i].scale + 0.5f);
         Log::get().note(
             "surface inflate: a %ux%u render target or depth texture will be "
             "created at %ux%u (%ux) and its viewport scaled to match. Takes "
@@ -187,14 +337,20 @@ void fssResConfigure(Config& cfg) {
             "that is the next trip through the main menu. If nothing below "
             "says a texture WAS created, the size is not one the game asks "
             "for on this rig: read it from your own census.",
-            g_s.specs[i].w, g_s.specs[i].h, g_s.specs[i].w * g_s.specs[i].scale,
-            g_s.specs[i].h * g_s.specs[i].scale, g_s.specs[i].scale);
+            g_s.specs[i].w, g_s.specs[i].h, scaledW, scaledH,
+            static_cast<uint32_t>(g_s.specs[i].scale));
     }
 }
 
-bool fssResWantsCreates() { return g_s.fssRule || g_s.specCount != 0; }
+bool fssResWantsCreates() {
+    return g_s.fssRule || g_s.specCount != 0 || g_s.hudQualityTarget > 0.0f;
+}
 
-bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData) {
+bool fssResWantsMatch() { return g_s.hudQualityTarget > 0.0f; }
+
+bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
+                        float* scaleOut, InflateSource* sourceOut,
+                        char* familyOut) {
     if (!fssResWantsCreates() || !d || hasInitialData) return false;
     // Only the exact shape measured: a single-mip, non-MSAA render target or
     // depth texture. Anything else -- staging, arrays, mip chains -- is not
@@ -216,36 +372,90 @@ bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData) {
             halfOf(d->Height, eh)) {
             d->Width *= 2;
             d->Height *= 2;
+            if (scaleOut) *scaleOut = 2.0f;
+            if (sourceOut) *sourceOut = InflateSource::kFss;
             return true;
         }
     }
+    // The size-named matcher next: an explicit developer choice outranks
+    // fix.hud_quality's automatic one below.
     for (uint32_t i = 0; i < g_s.specCount; ++i) {
         const Spec& s = g_s.specs[i];
         if (d->Width != s.w || d->Height != s.h) continue;
-        d->Width *= s.scale;
-        d->Height *= s.scale;
+        d->Width = static_cast<uint32_t>(d->Width * s.scale + 0.5f);
+        d->Height = static_cast<uint32_t>(d->Height * s.scale + 0.5f);
+        if (scaleOut) *scaleOut = s.scale;
+        if (sourceOut) *sourceOut = InflateSource::kNamed;
         return true;
+    }
+    // fix.hud_quality: a candidate only if it matches a size ui_depth's own
+    // classifier has learned this session (vector/text/icon panels only),
+    // and only by the factor a fresh read of the game's own HMD Quality
+    // earns it -- read here, at the rare moment a texture is actually being
+    // created, rather than cached from the last ini reload, since the
+    // player can change HMD Quality in Elite's own graphics menu without
+    // touching edvr.ini at all.
+    if (g_s.hudQualityTarget > 0.0f) {
+        float mult = 0.0f;
+        if (!deviceHookHmdQuality(&mult) || !(mult > 0.0f)) {
+            hudQualityNoteUnknownMultiplier();
+        } else {
+            float factor = 0.0f;
+            if (hudQualityFactor(g_s.hudQualityTarget, mult, &factor)) {
+                uint32_t lw[kHqLearnMax], lh[kHqLearnMax];
+                char lf[kHqLearnMax];
+                const uint32_t learned =
+                    uiDepthLearnedSurfaceSizes(lw, lh, lf, kHqLearnMax);
+                const int idx =
+                    hudQualityMatchLearned(d->Width, d->Height, lw, lh, learned);
+                if (idx >= 0) {
+                    const uint32_t newW = hudQualityRoundDim(d->Width, factor);
+                    const uint32_t newH = hudQualityRoundDim(d->Height, factor);
+                    // Refuse rather than create past the API's own limit,
+                    // the same ceiling the named matcher is pre-validated
+                    // against at configure time -- this one cannot be,
+                    // because HMD Quality (and so the factor) can change
+                    // between one create and the next.
+                    if (newW <= kMaxDim && newH <= kMaxDim &&
+                        (newW != d->Width || newH != d->Height)) {
+                        d->Width = newW;
+                        d->Height = newH;
+                        if (scaleOut) *scaleOut = factor;
+                        if (sourceOut) *sourceOut = InflateSource::kMatch;
+                        if (familyOut) *familyOut = lf[idx];
+                        g_hq.lastMult = mult;
+                        g_hq.lastFactor = factor;
+                        return true;
+                    }
+                }
+            }
+        }
     }
     return false;
 }
 
 void fssResNoteCreated(void* texture, uint32_t origW, uint32_t origH,
-                       uint32_t scale) {
-    if (!texture || scale < 2) return;
+                       uint32_t newW, uint32_t newH, float scale,
+                       InflateSource source, char family) {
+    if (!texture || !(scale > 1.0f)) return;
     Tracked& t = g_s.tracked[g_s.next];
     g_s.next = (g_s.next + 1) % kTracked;
     t.tex = texture;
     t.w = origW;
     t.h = origH;
     t.scale = scale;
+    t.source = source;
     ++detail::g_fssResCount;
     if (g_s.inflateNotes < 8) {
         ++g_s.inflateNotes;
         Log::get().note(
-            "fss res: a %ux%u texture was created at %ux%u (%ux). Its "
+            "fss res: a %ux%u texture was created at %ux%u (%gx). Its "
             "viewports are scaled to match as they arrive. Said at most 8 "
             "times.",
-            origW, origH, origW * scale, origH * scale, scale);
+            origW, origH, newW, newH, static_cast<double>(scale));
+    }
+    if (source == InflateSource::kMatch) {
+        hudQualityNoteMatch(family, origW, origH, newW, newH);
     }
 }
 
@@ -269,22 +479,33 @@ bool fssResOrigSize(void* resource, uint32_t* w, uint32_t* h) {
     return false;
 }
 
-uint32_t fssResScaleOf(void* resource) {
-    if (!resource || detail::g_fssResCount == 0) return 1;
+float fssResScaleOf(void* resource) {
+    if (!resource || detail::g_fssResCount == 0) return 1.0f;
     for (const Tracked& t : g_s.tracked) {
         if (t.tex == resource) return t.scale;
     }
-    return 1;
+    return 1.0f;
+}
+
+InflateSource fssResSourceOf(void* resource) {
+    if (!resource || detail::g_fssResCount == 0) return InflateSource::kNone;
+    for (const Tracked& t : g_s.tracked) {
+        if (t.tex == resource) return t.source;
+    }
+    return InflateSource::kNone;
 }
 
 // Turning a matcher off does NOT untrack what it already inflated: those
 // textures are still the wrong size for their viewports, and the game holds
 // them until it releases them. So this stays true while anything is tracked.
-void fssResNoteViewportScaled(bool late) {
+void fssResNoteViewportScaled(void* resource, bool late) {
     if (late) {
         ++g_s.scaledLate;
     } else {
         ++g_s.scaled;
+    }
+    if (fssResSourceOf(resource) == InflateSource::kMatch) {
+        ++g_hq.viewportsRescaled;
     }
     // The first few of each kind, then silence: the counts prove the
     // mechanism engaged, and "late" firing at all means the game set the
@@ -297,6 +518,75 @@ void fssResNoteViewportScaled(bool late) {
             "(%s; %u at set, %u at draw so far).",
             late ? "by the draw-time backstop" : "as it was set", g_s.scaled,
             g_s.scaledLate);
+    }
+}
+
+// There is no set-time hook for scissor rects (nothing needed one before
+// fix.hud_quality): this is the draw-time backstop's only half for them,
+// called from the same place the viewport backstop is.
+void fssResNoteScissorScaled(void* resource) {
+    ++g_s.scissorScaled;
+    if (fssResSourceOf(resource) == InflateSource::kMatch) {
+        ++g_hq.scissorsRescaled;
+    }
+    if (g_s.scissorNotes < 6) {
+        ++g_s.scissorNotes;
+        Log::get().note(
+            "fss res: an inflated target's scissor rect was scaled to "
+            "match it at the draw-time backstop (%u so far). There is no "
+            "hook on the game's own RSSetScissorRects, so a rect narrower "
+            "than the whole target is not caught -- only one that still "
+            "spans the pre-inflation size exactly.",
+            g_s.scissorScaled);
+    }
+}
+
+void fssResNoteCopyMaybeMismatched(void* dst, void* src) {
+    if (detail::g_fssResCount == 0) return;
+    void* which = nullptr;
+    if (dst && fssResIsInflated(dst)) {
+        which = dst;
+    } else if (src && fssResIsInflated(src)) {
+        which = src;
+    }
+    if (!which) return;
+    uint32_t ow = 0, oh = 0;
+    fssResOrigSize(which, &ow, &oh);
+    const float scale = fssResScaleOf(which);
+    if (fssResSourceOf(which) == InflateSource::kMatch) {
+        ++g_hq.copiesSeen;
+    }
+    if (g_s.copyNotes < 8) {
+        ++g_s.copyNotes;
+        Log::get().note(
+            "fss res: a copy or resolve touched an inflated texture (%s, "
+            "tracked at %ux%u -> %.0fx%.0f, %gx). This does not rescale the "
+            "copy's own box or check the other side's size -- no such copy "
+            "has been observed landing in one of these surfaces, so this is "
+            "a detector, not a fix, until one is. Said at most 8 times.",
+            which == dst ? "as the destination" : "as the source", ow, oh,
+            static_cast<double>(ow) * static_cast<double>(scale),
+            static_cast<double>(oh) * static_cast<double>(scale),
+            static_cast<double>(scale));
+    }
+}
+
+void fssResHudQualityTick() {
+    if (!(g_s.hudQualityTarget > 0.0f)) return;
+    if (g_hq.firstActiveMs == 0) g_hq.firstActiveMs = stampMs();
+    if (g_hq.resizedCount == 0) {
+        if (!g_hq.saidNoMatch && elapsedMs(g_hq.firstActiveMs, 60000)) {
+            g_hq.saidNoMatch = true;
+            Log::get().note(
+                "hud quality: on but no interface surface matched (the "
+                "classifier saw none / the sizes did not match the learned "
+                "fraction): nothing changed.");
+        }
+        return;
+    }
+    if (dueMs(g_hq.lastSummaryMs, 30000)) {
+        g_hq.lastSummaryMs = nowMs();
+        logHudQualitySummary();
     }
 }
 

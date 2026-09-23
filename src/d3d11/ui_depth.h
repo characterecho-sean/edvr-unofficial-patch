@@ -75,6 +75,17 @@ inline bool uiDepthReissuingScene() {
 // checked to exhaustion is not asked again for a while.
 void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 
+// The interface-surface sizes learned so far this session (vector, text and
+// icon panels only -- not the scanner's own chrome strip), for another
+// matcher (fix.hud_quality's match mode, fss_res.cpp) that wants the same
+// classifier's answer without re-deriving it. Copies up to `max` entries
+// into outW/outH (and outFamily -- 'V'/'T'/'I' -- when not null) and
+// returns the count copied. Independent of fix.hud_quality's own state;
+// empty for the whole session unless fix.temporal_aa has been on long
+// enough for this pass's own classifier to have learned a panel.
+uint32_t uiDepthLearnedSurfaceSizes(uint32_t* outW, uint32_t* outH,
+                                    char* outFamily, uint32_t max);
+
 // Every eye draw: a UI composite (samples a learned surface in a
 // pixel-stage slot 0..3) or a named direct family, with a depth target
 // bound that is the scene pair's. True means the draw should write its

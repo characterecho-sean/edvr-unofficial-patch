@@ -160,6 +160,11 @@ int main(int argc, char** argv) {
               "...its ceiling ships commented out: the compiled 6.0 is in force");
     expectStr("advanced.settlement_detail_observe", "<unset>",
               "...and so does its observe-only switch");
+    // hud_quality generalises advanced.surface_inflate to a learned match
+    // and an HMD-Quality-derived float factor; it ships live in [fix],
+    // default off (the HUD follows HMD Quality as today).
+    expectStr("fix.hud_quality", "off",
+              "hud quality ships live in [fix] and defaults off");
 
     // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
     // This is the claim that a repeated section header is not a parse error

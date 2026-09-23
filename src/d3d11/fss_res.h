@@ -98,6 +98,13 @@ namespace edvr {
 
 class Config;
 
+// Which matcher inflated a tracked texture, so the viewport/scissor
+// backstops and the log can attribute a rescale to the right key. kNone is
+// never stored -- it is what fssResSourceOf returns for an untracked
+// resource -- so it must sort first for any caller that treats 0 as
+// "nothing".
+enum class InflateSource : uint8_t { kNone = 0, kFss, kNamed, kMatch };
+
 // Reads experimental.fss_res and advanced.surface_inflate. Called at install
 // and on the ini reload path, so both are live -- but only for textures
 // created AFTERWARDS. For the FSS that is the next zoom; an interface
@@ -108,20 +115,38 @@ void fssResConfigure(Config& cfg);
 // One bool for the CreateTexture2D hot gate.
 bool fssResWantsCreates();
 
-// The match: if *d is the half-eye body-layer shape, or a size named by
-// advanced.surface_inflate, multiply its Width and Height in place and
-// return true; the caller creates with the modified desc and reports the
-// texture back through fssResNoteCreated. false leaves *d untouched.
-bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData);
+// fix.hud_quality alone, independent of experimental.fss_res and
+// advanced.surface_inflate: is a target quality named at all. Asked by the
+// per-draw tick (fssResHudQualityTick) and the draw-time backstops, which
+// must run even in a session where nothing has matched yet.
+bool fssResWantsMatch();
 
-// Track a texture created inflated, with the size the game ASKED for -- the
-// size its viewports will arrive in -- and the factor it grew by. The caller
-// has both descs in hand and passes the factor rather than this module
-// stashing one between the two calls: CreateTexture2D runs on the game's
-// streaming threads, and a pending-factor global would be a race that
-// mis-scales a viewport rather than one that crashes.
+// The match: if *d is the half-eye body-layer shape, a size named by
+// advanced.surface_inflate, or (fix.hud_quality) a size fss_res's own
+// classifier learned this session, multiply its Width and Height in place
+// and return true; the caller creates with the modified desc and reports
+// the texture back through fssResNoteCreated. *scaleOut is the EXACT float
+// factor applied -- read it back from here rather than dividing the two
+// descs' widths, which rounds to the wrong answer for a fractional factor
+// (1297/908 truncates to 1 under integer division). *sourceOut says which
+// matcher fired, and *familyOut ('V'/'T'/'I') is set only when *sourceOut
+// is kMatch, for the resize summary's per-family line. All three out-params
+// may be null when the caller does not need them. false leaves *d and every
+// out-param untouched.
+bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
+                        float* scaleOut, InflateSource* sourceOut,
+                        char* familyOut);
+
+// Track a texture created inflated: the size the game ASKED for (the size
+// its viewports will arrive in), the size it actually got, the float factor
+// between them, which matcher decided it, and (kMatch only) which family.
+// The caller has all of this in hand already and passes it rather than this
+// module stashing it between the two calls: CreateTexture2D runs on the
+// game's streaming threads, and a pending value stashed between calls would
+// be a race that mis-attributes one create's result to another's.
 void fssResNoteCreated(void* texture, uint32_t origW, uint32_t origH,
-                       uint32_t scale);
+                       uint32_t newW, uint32_t newH, float scale,
+                       InflateSource source, char family);
 
 // Identity test for the eye-classification exclusion and the viewport
 // hooks. Compares pointers only; a stale entry for a texture the game
@@ -133,9 +158,15 @@ bool fssResIsInflated(void* resource);
 bool fssResOrigSize(void* resource, uint32_t* w, uint32_t* h);
 
 // The factor that texture grew by, and 1 for anything untracked. The
-// viewport paths multiply by this rather than by a constant 2: the FSS rule
-// always doubles, but a named surface may ask for more.
-uint32_t fssResScaleOf(void* resource);
+// viewport and scissor paths multiply by this rather than by a constant 2:
+// the FSS rule always doubles, but a named surface -- or fix.hud_quality --
+// may ask for a different, and not necessarily whole, amount.
+float fssResScaleOf(void* resource);
+
+// Which matcher inflated this texture, kNone for anything untracked. Used
+// to attribute a viewport/scissor rescale to fix.hud_quality's own counters
+// without a second, parallel tracking table.
+InflateSource fssResSourceOf(void* resource);
 
 // Anything tracked at all? The viewport paths gate on this so a session
 // that never opens the FSS never pays a resolve.
@@ -149,6 +180,32 @@ inline bool fssResActive() { return detail::g_fssResCount != 0; }
 
 // The viewport paths' receipts: scaled at RSSetViewports, or caught late by
 // the draw-time backstop. Capped log lines; the counts land in the note.
-void fssResNoteViewportScaled(bool late);
+// Takes the resource that was scaled so a fix.hud_quality-sourced rescale
+// can be counted separately for that key's own summary line.
+void fssResNoteViewportScaled(void* resource, bool late);
+
+// The scissor half of the same draw-time backstop. There is no hook on the
+// game's own RSSetScissorRects -- nothing needed one before now -- so this
+// is the only place a scissor rect set at the pre-inflation size can be
+// caught, and it is caught the same way the draw-time viewport backstop
+// is: read the state that is about to be used, and fix it if it still
+// looks like it was set for the original size. Counted the same way.
+void fssResNoteScissorScaled(void* resource);
+
+// A copy or resolve the game issued with a tracked (inflated) texture as
+// either side. This does NOT rescale the copy -- no such copy has ever been
+// observed landing in one of these surfaces (the FSS body layer's own
+// census found none either), and guessing at box math for a shape nobody
+// has seen would be a fix built on an untested hypothesis. It counts and
+// logs instead, capped, so the first flight says whether this ever
+// actually happens and, if so, exactly what shape it is.
+void fssResNoteCopyMaybeMismatched(void* dst, void* src);
+
+// Cheap per-draw (or any sufficiently frequent, already-guarded) tick for
+// fix.hud_quality's own log lines: due at most once for "on but nothing
+// matched in the first minute", and every 30s thereafter for the resize
+// summary once something has. A no-op call while the key is off is two
+// integer compares.
+void fssResHudQualityTick();
 
 }  // namespace edvr
