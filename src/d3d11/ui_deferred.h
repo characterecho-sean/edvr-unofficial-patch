@@ -122,4 +122,9 @@ void uiDeferredUnknownWrite(ID3D11DeviceContext*);
 void uiDeferredFrameBoundary(ID3D11DeviceContext*);
 void uiDeferredShutdown();
 bool uiDeferredInternal();
+// True between uiDeferredBeforeDraw and uiDeferredBegin when this draw was
+// captured by the post-tone route (a post-tone copy or a terminal-canvas
+// tail) for replay after the upscale: the UI layer (ui_layer.h) must not
+// take a draw this replay already redraws, or it would appear twice.
+bool uiDeferredRouteCapturedThisDraw();
 }

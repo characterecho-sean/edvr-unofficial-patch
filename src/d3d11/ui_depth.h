@@ -75,16 +75,20 @@ inline bool uiDepthReissuingScene() {
 // checked to exhaustion is not asked again for a while.
 void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 
-// The interface-surface sizes learned so far this session (vector, text and
-// icon panels only -- not the scanner's own chrome strip), for another
-// matcher (fix.hud_quality's match mode, fss_res.cpp) that wants the same
-// classifier's answer without re-deriving it. Copies up to `max` entries
-// into outW/outH (and outFamily -- 'V'/'T'/'I' -- when not null) and
-// returns the count copied. Independent of fix.hud_quality's own state;
-// empty for the whole session unless fix.temporal_aa has been on long
-// enough for this pass's own classifier to have learned a panel.
-uint32_t uiDepthLearnedSurfaceSizes(uint32_t* outW, uint32_t* outH,
-                                    char* outFamily, uint32_t max);
+// The interface surfaces learned so far this session (vector, text and icon
+// panels only -- not the scanner's own chrome strip), for fix.ui_quality's
+// surfaces (ui_surfaces.cpp), which learns their ratios to the internal
+// resolution and labels its resizes with this classifier's answer rather
+// than re-deriving it. Copies up to `max` entries and returns the count.
+// `res` is an identity only, never dereferenced. Empty for the whole session
+// unless fix.temporal_aa has been on long enough for this pass's own
+// classifier to have learned a panel.
+struct UiDepthLearnedSurface {
+    const void* res = nullptr;
+    uint32_t w = 0, h = 0, fmt = 0;
+    char family = 0;  // 'V' vector, 'T' text, 'I' icons
+};
+uint32_t uiDepthLearnedSurfaces(UiDepthLearnedSurface* out, uint32_t max);
 
 // fix.ui_quality's classifier (ui_layer.h) asks two questions this pass's
 // own classifier already answers, without touching its per-draw state:
@@ -98,6 +102,11 @@ uint32_t uiDepthLearnedSurfaceSizes(uint32_t* outW, uint32_t* outH,
 //     -1 for a third target of one shape, or a full table.
 int uiDepthSampledSurfaceSlot();
 int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt);
+// ...and a third: is this vertex shader on the interface pass's exclude list
+// (the null-output mesh B018D143700AB803 that samples a stale surface
+// binding, plus advanced.ui_depth_exclude)? A draw this pass will never treat
+// as interface is not the layer's either.
+bool uiDepthIsExcluded(uint64_t vsHash);
 
 // Every eye draw: a UI composite (samples a learned surface in a
 // pixel-stage slot 0..3) or a named direct family, with a depth target

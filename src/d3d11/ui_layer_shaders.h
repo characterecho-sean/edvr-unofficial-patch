@@ -1,7 +1,7 @@
 // fix.ui_quality's GPU half that the rig must run exactly as the DLL does:
 // the composite's HLSL and the blend-state translation between D3D11's
 // descriptions and ui_layer_math.h's UiBlendRt. Header-only; the DLL
-// (ui_layer.cpp) and tools/ui_layer_test both include it.
+// (ui_layer.cpp) and tools/ui_quality_test both include it.
 #pragma once
 
 #include <d3d11.h>
@@ -42,6 +42,40 @@ inline UiBlendRt uiLayerBlendRtFrom(const D3D11_RENDER_TARGET_BLEND_DESC& r) {
     return b;
 }
 
+static_assert(uids::kAlways == D3D11_COMPARISON_ALWAYS && uids::kKeep == D3D11_STENCIL_OP_KEEP,
+              "ui_layer_math.h's depth-stencil numbers are D3D11's");
+
+// A bound depth-stencil state (null = D3D11's default: depth on, LESS,
+// writing; stencil off) and the view's read-only flags, as UiDsState.
+inline UiDsState uiLayerDsStateFrom(const D3D11_DEPTH_STENCIL_DESC* d, UINT viewFlags) {
+    UiDsState s;
+    if (!d) {
+        s.depthEnable = true;
+        s.depthFunc = static_cast<uint8_t>(D3D11_COMPARISON_LESS);
+        s.depthWriteAll = true;
+    } else {
+        s.depthEnable = d->DepthEnable != FALSE;
+        s.depthFunc = static_cast<uint8_t>(d->DepthFunc);
+        s.depthWriteAll = d->DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;
+        s.stencilEnable = d->StencilEnable != FALSE;
+        s.readMask = d->StencilReadMask;
+        s.writeMask = d->StencilWriteMask;
+        auto face = [](const D3D11_DEPTH_STENCILOP_DESC& f) {
+            UiDsFace o;
+            o.fail = static_cast<uint8_t>(f.StencilFailOp);
+            o.depthFail = static_cast<uint8_t>(f.StencilDepthFailOp);
+            o.pass = static_cast<uint8_t>(f.StencilPassOp);
+            o.func = static_cast<uint8_t>(f.StencilFunc);
+            return o;
+        };
+        s.front = face(d->FrontFace);
+        s.back = face(d->BackFace);
+    }
+    s.readOnlyDepth = (viewFlags & D3D11_DSV_READ_ONLY_DEPTH) != 0;
+    s.readOnlyStencil = (viewFlags & D3D11_DSV_READ_ONLY_STENCIL) != 0;
+    return s;
+}
+
 // The layer's blend state description for a converted UiBlendRt: one
 // render target, no alpha-to-coverage, no independent blend.
 inline D3D11_BLEND_DESC uiLayerBlendDesc(const UiBlendRt& b) {
@@ -60,21 +94,25 @@ inline D3D11_BLEND_DESC uiLayerBlendDesc(const UiBlendRt& b) {
     return d;
 }
 
-// The layer's clear: nothing drawn, all of the frame showing through.
+// The layer's clear: nothing drawn, all of the frame showing through; and
+// the per-channel transmittance's, which a multiply scales.
 constexpr float kUiLayerClear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+constexpr float kUiLayerMultClear[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
 // The composite: one dispatch per eye over the frame's region, into an
 // EDVR-owned texture of the region's size in the frame's own format. Each
-// output pixel reads the frame at its pixel and the layer over its exact
+// output pixel reads the frame at its pixel and the layer (and, when a
+// multiply drew this frame, the per-channel transmittance M) over its exact
 // footprint (ui_layer_math.h's uiLayerFootprint, separable, at most 4x4
-// taps), then out = L.rgb + F.rgb * L.a in the stored (UNORM-view) space the
-// game's own composite blended in, the frame's alpha kept. mode 1 is the
-// `advanced.temporal_aa_debug = ui_layer` view: the layer over black, with a
-// dark blue wash where it covers anything, so a translucent backing that
-// is nearly black still shows as covered.
+// taps), then out = L.rgb + F.rgb * L.a * M.rgb in the stored (UNORM-view)
+// space the game's own composite blended in, the frame's alpha kept. mode 1
+// is the `advanced.temporal_aa_debug = ui_layer` view: the layer over black,
+// with a dark blue wash where it covers or tints anything, so a translucent
+// backing that is nearly black still shows as covered.
 constexpr char kUiLayerCompositeHlsl[] = R"HLSL(
 Texture2D<float4> Frame : register(t0);
 Texture2D<float4> Layer : register(t1);
+Texture2D<float4> Mult : register(t2);
 RWTexture2D<float4> Out : register(u0);
 cbuffer P : register(b0) {
     int4   region;     // the frame's region in Frame: x0, y0, x1, y1 (exclusive)
@@ -82,7 +120,8 @@ cbuffer P : register(b0) {
     float2 layerSize;  // the layer, texels
     uint2  outSize;    // the region's size, which is the output's
     uint   mode;       // 0 the composite, 1 the ui_layer debug view
-    uint3  pad;
+    uint   useMult;    // 1: a multiply drew into M this frame
+    uint2  pad;
 };
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -95,6 +134,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     int2 k0 = max(int2(floor(x0)), int2(0, 0));
     int2 k1 = min(int2(ceil(x1)) - 1, int2(layerSize) - 1);
     float4 acc = float4(0, 0, 0, 0);
+    float3 accM = float3(0, 0, 0);
     float wsum = 0;
     [loop] for (int j = k0.y; j <= min(k1.y, k0.y + 3); ++j) {
         float wy = min(x1.y, (float)j + 1.0) - max(x0.y, (float)j);
@@ -103,12 +143,14 @@ void main(uint3 id : SV_DispatchThreadID) {
             float wx = min(x1.x, (float)i + 1.0) - max(x0.x, (float)i);
             if (wx <= 0) continue;
             acc += Layer.Load(int3(i, j, 0)) * (wx * wy);
+            if (useMult != 0) accM += Mult.Load(int3(i, j, 0)).rgb * (wx * wy);
             wsum += wx * wy;
         }
     }
     float4 l = wsum > 0 ? acc / wsum : float4(0, 0, 0, 1);
-    float3 c = mode == 1 ? l.rgb + float3(0.0, 0.08, 0.25) * (1.0 - l.a)
-                         : l.rgb + f.rgb * l.a;
+    float3 m = (useMult != 0 && wsum > 0) ? accM / wsum : float3(1, 1, 1);
+    float3 c = mode == 1 ? l.rgb + float3(0.0, 0.08, 0.25) * (1.0 - l.a * dot(m, 1.0 / 3.0))
+                         : l.rgb + f.rgb * l.a * m;
     Out[id.xy] = float4(saturate(c), f.a);
 }
 )HLSL";
@@ -120,7 +162,8 @@ struct UiLayerCompositeParams {
     float layerSize[2];
     uint32_t outSize[2];
     uint32_t mode;
-    uint32_t pad[3];
+    uint32_t useMult;
+    uint32_t pad[2];
 };
 static_assert(sizeof(UiLayerCompositeParams) == 64, "the cbuffer is four 16-byte rows");
 

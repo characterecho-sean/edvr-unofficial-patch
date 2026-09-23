@@ -2,22 +2,27 @@
 
 ## Status
 
-- **Design A (the UI layer): BUILT, phase 1, NOT FLOWN (2026-09-23)** as
-  `fix.ui_quality = off | 1.0 | 1.25` -- see
-  [ui-layer-2026-09-23.md](ui-layer-2026-09-23.md) for the design as built
-  against A1-A8, the gates, the log lines and what the first flight must
-  show. It takes the post-tonemap UI (the 2D screen's composite, the menu,
-  modal and loading-screen composites of learned surfaces) into a per-eye
-  layer at the door's output size x target and composites it after RCAS.
-  The cockpit's HDR families (holo panels, flight HUD, sprite) are LEFT: the
-  first censuses below (G1) put them before the tonemap, and the deferred UI
-  replay (`ui_deferred.cpp`) re-draws them after the upscale at 1.0.
+- **Design A (the UI layer) and A5 (the surfaces): BUILT, one key, second
+  build NOT FLOWN (2026-09-23)** as `fix.ui_quality = off | 1.0 | 1.25` --
+  see [ui-layer-2026-09-23.md](ui-layer-2026-09-23.md), the single note for
+  both: the design as built, the first flight (the menu panel refused as a
+  stencil writer, now kept by a write-back; the loading screen's multiply,
+  now reproduced), the census's five surface ratios, the log lines and what
+  the next flight must show. It takes the post-tonemap UI (the 2D screen's
+  composite, the menu, modal and loading-screen composites of learned
+  surfaces) into a per-eye layer at the door's output size x target and
+  composites it after RCAS; and makes the cockpit's interface surfaces at
+  the target's size. The cockpit's HDR families (holo panels, flight HUD,
+  sprite) are LEFT by the layer: the first censuses below (G1) put them
+  before the tonemap, and the deferred UI replay (`ui_deferred.cpp`,
+  `advanced.ui_replay`) re-draws them after the upscale at 1.0.
 - **Design B0 (the interface depth, `ui_depth.cpp`; once `fix.ui_depth`, now
   gated on `fix.temporal_aa` alone): SHIPPED**; its depth re-issue and
   reactive mask still serve every UI draw the layer does not take, and skip
   the ones it does.
 - The gates: G1, G2, G3, G6, G8, G10 answered from censuses (2026-09-06,
-  below); G9 is `fix.hud_quality`'s flight (docs/hud-quality-2026-09-23.md).
+  below); G9 is `fix.ui_quality`'s surfaces flight (ui-layer-2026-09-23.md;
+  `fix.hud_quality` and its note were folded into that key and that note).
 - The italic status line below is the 2026-09-05 original, kept as written.
 
 *Status: DESIGN, nothing built. Written 2026-09-05 on branch
@@ -1349,8 +1354,9 @@ strengths are unchanged; `probe.w` in the pass is unused.
 ## 2026-09-23: offscreen UI surface inventory (for Design A)
 
 Written for whoever builds Design A's redirect classifier, out of
-`fix.hud_quality`'s ratio-match work (`docs/hud-quality-2026-09-23.md`),
-which needed to enumerate the same offscreen surfaces for a different
+`fix.hud_quality`'s ratio-match work (since folded into `fix.ui_quality`
+and `docs/ui-layer-2026-09-23.md`, which carries the later census of five
+confirmed surface ratios), which needed to enumerate the same offscreen surfaces for a different
 reason (matching by size ratio rather than redirecting the draw). Evidence:
 a source grep across `src\` for named shader-hash constants; the GUI draw
 capture `edvr_logs\pool\gui_043720.bin` (62 draws, parsed with the real
@@ -1390,8 +1396,8 @@ source alone:
   census (908x1361 / 1363x2042, four-significant-figure ratio agreement)
   and this session's capture both show them landing in a target distinct
   from the eye, and the interface-depth pass's classifier (`ui_depth.cpp`
-  -- the historical name `fix.ui_depth` is not a live key, see
-  `docs/hud-quality-2026-09-23.md`; the live gate is `fix.temporal_aa`)
+  -- the historical name `fix.ui_depth` is not a live key; the live gate is
+  `fix.temporal_aa`)
   already tracks them the same way. The FSS/DSS scanner's body layer
   (`fss_res.h`'s FIRST matcher, exactly half the eye size, doubled):
   confirmed offscreen by that module's own measurement history, not part
@@ -1431,7 +1437,7 @@ is rendered at...`) to pair a size against. That line only fires after
 100+ eye-shaped draws land in one frame in a session (`vscreen.h`,
 `kSceneEyeDraws`), which six 2026-08-29 logs show happening in real
 gameplay and today's short, mostly-main-menu toggling sessions did not
-reach. `fix.hud_quality`'s ratio table persists across sessions
-specifically so a future flight that DOES reach a rendered scene, at a
-different HMD Quality than a prior one, closes this gap on its own --
-see `docs/hud-quality-2026-09-23.md`.
+reach. (Superseded the same day: `fix.ui_quality` derives the internal
+resolution from the runtime's recommendation x HMD Quality before any scene
+renders, and a later census of 35 logs confirmed five surface ratios at two
+or more resolutions each -- `docs/ui-layer-2026-09-23.md`.)

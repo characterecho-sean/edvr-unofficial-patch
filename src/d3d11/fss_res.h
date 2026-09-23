@@ -112,25 +112,20 @@ enum class InflateSource : uint8_t { kNone = 0, kFss, kNamed, kMatch };
 // next trip through the main menu, not mid-flight.
 void fssResConfigure(Config& cfg);
 
-// One bool for the CreateTexture2D hot gate.
+// One bool for the CreateTexture2D hot gate: experimental.fss_res,
+// advanced.surface_inflate, or fix.ui_quality's surfaces (ui_surfaces.h).
 bool fssResWantsCreates();
 
-// fix.hud_quality alone, independent of experimental.fss_res and
-// advanced.surface_inflate: is a target quality named at all. Asked by the
-// per-draw tick (fssResHudQualityTick) and the draw-time backstops, which
-// must run even in a session where nothing has matched yet.
-bool fssResWantsMatch();
-
 // The match: if *d is the half-eye body-layer shape, a size named by
-// advanced.surface_inflate, or (fix.hud_quality) a shape whose RATIO to the
-// game's internal render resolution matches one already confirmed across
-// two sessions at different resolutions, multiply its Width and Height in
-// place and return true; the caller creates with the modified desc and
-// reports the texture back through fssResNoteCreated. The ratio match does
-// NOT depend on ui_depth.cpp's classifier -- that learns a surface's size
-// from draws INTO it, which happen after this call, too late to inform it
-// -- the classifier is consulted only afterward, as a cross-check, to
-// LABEL a match's family for the log. *scaleOut is the EXACT float factor
+// advanced.surface_inflate, or (fix.ui_quality, ui_surfaces.cpp) a shape
+// whose RATIO to the game's internal render resolution is on that module's
+// table -- the census's five, and any this rig has learned -- multiply its
+// Width and Height in place and return true; the caller creates with the
+// modified desc and reports the texture back through fssResNoteCreated. The
+// ratio match does NOT depend on ui_depth.cpp's classifier -- that learns a
+// surface's size from draws INTO it, which happen after this call, too late
+// to inform it -- the classifier's answer only LABELS a match's family for
+// the log, and teaches the table a ratio for later creates. *scaleOut is the EXACT float factor
 // applied -- read it back from here rather than dividing the two descs'
 // widths, which rounds to the wrong answer for a fractional factor
 // (1297/908 truncates to 1 under integer division). *sourceOut says which
@@ -164,12 +159,12 @@ bool fssResOrigSize(void* resource, uint32_t* w, uint32_t* h);
 
 // The factor that texture grew by, and 1 for anything untracked. The
 // viewport and scissor paths multiply by this rather than by a constant 2:
-// the FSS rule always doubles, but a named surface -- or fix.hud_quality --
+// the FSS rule always doubles, but a named surface -- or fix.ui_quality --
 // may ask for a different, and not necessarily whole, amount.
 float fssResScaleOf(void* resource);
 
 // Which matcher inflated this texture, kNone for anything untracked. Used
-// to attribute a viewport/scissor rescale to fix.hud_quality's own counters
+// to attribute a viewport/scissor rescale to fix.ui_quality's own counters
 // without a second, parallel tracking table.
 InflateSource fssResSourceOf(void* resource);
 
@@ -185,7 +180,7 @@ inline bool fssResActive() { return detail::g_fssResCount != 0; }
 
 // The viewport paths' receipts: scaled at RSSetViewports, or caught late by
 // the draw-time backstop. Capped log lines; the counts land in the note.
-// Takes the resource that was scaled so a fix.hud_quality-sourced rescale
+// Takes the resource that was scaled so a fix.ui_quality-sourced rescale
 // can be counted separately for that key's own summary line.
 void fssResNoteViewportScaled(void* resource, bool late);
 
@@ -205,12 +200,5 @@ void fssResNoteScissorScaled(void* resource);
 // logs instead, capped, so the first flight says whether this ever
 // actually happens and, if so, exactly what shape it is.
 void fssResNoteCopyMaybeMismatched(void* dst, void* src);
-
-// Cheap per-draw (or any sufficiently frequent, already-guarded) tick for
-// fix.hud_quality's own log lines: due at most once for "on but nothing
-// matched in the first minute", and every 30s thereafter for the resize
-// summary once something has. A no-op call while the key is off is two
-// integer compares.
-void fssResHudQualityTick();
 
 }  // namespace edvr

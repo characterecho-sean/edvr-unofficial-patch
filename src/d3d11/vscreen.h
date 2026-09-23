@@ -109,9 +109,10 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h);
 // The game's own INTERNAL per-eye render resolution (renderW/renderH: what
 // advanced.eye_render_size pins, or what the scene-candidate promotion
 // measured), as distinct from the eye texture size the runtime is handed --
-// fix.hud_quality's ratio match needs this one, because fss_res.h's own
-// census found the interface surfaces are a fixed fraction of THIS number,
-// not of the submitted eye texture. Falls back to the last SESSION's
+// fix.ui_quality's surfaces fall back to it (ui_surfaces.cpp) when neither
+// the runtime's recommendation x HMD Quality nor the submitted size is known,
+// because fss_res.h's own census found the interface surfaces are a fixed
+// fraction of THIS number. Falls back to the last SESSION's
 // measurement for the same eye shape (a small state file next to the
 // logs) when this session has not measured one yet -- the cockpit's own
 // panels can be created before the 100+ eye-shaped draws in one frame the
@@ -157,6 +158,10 @@ void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstRe
 void vScreenRSSetViewportsRaw(ID3D11DeviceContext* ctx, uint32_t n, const D3D11_VIEWPORT* vps);
 void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv,
                                      const float colour[4]);
+// The layer's copy of the game's depth-stencil target, which it seeds its
+// own from (a depth- or stencil-tested UI draw): past the copy hook, which
+// would report the write to the deferred UI and the motion paths.
+void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src);
 
 // Installs the context hooks using the mechanism the caller decided for this
 // device -- shared with the exposure hooks so the two never split modes on

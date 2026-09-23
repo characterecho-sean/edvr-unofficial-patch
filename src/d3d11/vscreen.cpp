@@ -904,7 +904,7 @@ struct State {
     bool     renderAuto = true;        // advanced.eye_render_size
     bool     renderOffNoted = false;
     bool     renderPinned = false;   // the size came from the ini, not a measurement
-    // vScreenInternalResolution's fallback (fix.hud_quality): said once per
+    // vScreenInternalResolution's fallback (fix.ui_quality): said once per
     // session, the first time renderW/renderH are not known yet and a
     // prior session's measurement for this eye shape stands in.
     bool     internalResFallbackNoted = false;
@@ -1654,7 +1654,7 @@ bool scissorIs(const D3D11_RECT& r, uint32_t w, uint32_t h) {
 // -- but while it sat inline, beginPanelOverride carried that cookie on every
 // draw of every session, although this runs only while fssResActive().
 //
-// Also the scissor half (fix.hud_quality): there is no hook on the game's
+// Also the scissor half (fix.ui_quality): there is no hook on the game's
 // own RSSetScissorRects at all, so unlike the viewport there is no set-time
 // path to be a backstop FOR -- this draw-time check is the only mechanism.
 // It only acts on a rect that still spans the pre-inflation target exactly
@@ -2133,14 +2133,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // new. Before the returns below, because a surface is a surface
         // whatever else this draw turns out to be.
         if (uiDepthWantsDraws()) uiDepthNoteOffscreenDraw(self);
-        // fix.hud_quality's own clock: due for its "nothing matched yet"
-        // warning or its 30s resize summary. Gated on fix.hud_quality alone
-        // -- it only BORROWS the interface-depth pass's learned sizes, and
-        // that pass has no independent on/off of its own to depend on (it
-        // is gated by fix.temporal_aa, config_test.cpp asserts fix.ui_depth
-        // itself stays absent) -- two integer compares while there is
-        // nothing to say.
-        if (fssResWantsMatch()) fssResHudQualityTick();
+        // (fix.ui_quality's surfaces keep their clock at the frame boundary,
+        // uiLayerFrameBoundary -> uiSurfacesFrameBoundary, not per draw.)
         // The intro movie's YUV-to-RGB fill: a four-vertex draw with all
         // three planes bound, into the surface the composite reads. It is
         // what tells this frame apart from the splash's, which uses the
@@ -3912,6 +3906,11 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
                : vs == 0xE508648660A352B2ull ? UiLayerFamily::kSprite
                                              : UiLayerFamily::kNone;
     }
+    // ui_depth's exclude list (the null-output mesh B018D143700AB803, which
+    // samples a stale surface and draws nothing, and the ini's additions):
+    // not UI to the layer either. The 2026-09-23 flight took the mesh as an
+    // interface composite.
+    if (uiDepthIsExcluded(vs)) return UiLayerFamily::kNone;
     if (srv0IsPanelSized(s, kind, count)) return UiLayerFamily::kScreen;
     if (uiDepthSampledSurfaceSlot() >= 0) {
         return vs == 0xA888D51024D9798Eull   ? UiLayerFamily::kPanel
@@ -3946,6 +3945,23 @@ bool uiLayerVerdictForwards(DrawVerdict v) {
             return true;
         default:
             return false;
+    }
+}
+
+// A layered draw's second issues (ui_layer.h), each the game's draw exactly
+// as it was issued, while the verdict's own state is still bound: a multiply
+// once more into the layer's per-channel transmittance, and a depth or
+// stencil write once more with no colour target, so the write lands in the
+// game's own buffer for the draws after it that test it.
+void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT instances,
+                         const DrawArgs& args) {
+    if (uiLayerMultiplyBegin(self)) {
+        pureDrawReissue(self, kind, count, instances, args);
+        uiLayerEnd(self);
+    }
+    if (uiLayerWriteBackBegin(self)) {
+        pureDrawReissue(self, kind, count, instances, args);
+        uiLayerWriteBackEnd(self);
     }
 }
 
@@ -4013,7 +4029,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
         const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
         if (uiFamily != UiLayerFamily::kNone) {
-            uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily), uiLayerVerdictForwards(v));
+            uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily), uiLayerVerdictForwards(v),
+                                    g_state->curveThisDraw);
         }
     }
     // The one order the layer changes: a draw after the UI into (or reading)
@@ -4029,8 +4046,14 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         const bool swallowed = loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
                                                      g_state->qsInstances,
                                                      g_state->qsStartInstance);
-        if (!swallowed && draw() && uiDeferred) uiDeferredTraceOriginalIssued();
-        if (layered) uiLayerEnd(self);
+        // The loader panel withholds the draw or forwards the game's own:
+        // the second issues repeat the game's own, so they follow it.
+        const bool issued = !swallowed && draw();
+        if (issued && uiDeferred) uiDeferredTraceOriginalIssued();
+        if (layered) {
+            uiLayerEnd(self);
+            if (issued) uiLayerSecondIssues(self, kind, count, instances, args);
+        }
         return;
     }
     if (v == DrawVerdict::kQuadSkip) {
@@ -4077,7 +4100,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     bool originalIssued=false;
     { OriginalDrawScope original(&originalMetadata);
       originalIssued=draw(); }
-    if (layered) uiLayerEnd(self);
+    if (layered) {
+        uiLayerEnd(self);
+        if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);
+    }
     if(originalIssued && uiDeferred)uiDeferredTraceOriginalIssued();
     if(originalIssued && uiDeferred && uiDeferredWorldReplayBegin(self))
         pureDrawReissue(self,kind,count,instances,args);
@@ -4198,7 +4224,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     // target to, which says which way its depth runs. eye_mask learns
     // whether this is a re-clear of a target it already drew its ring
     // into this frame -- which would wipe the ring -- for its summary.
-    if (!foreignContext(self)) {uiDeferredViewWrite(self,dsv);depthProbeNoteClear(dsv, depth);eyeMaskOnClear(dsv);}
+    if (!foreignContext(self)) {uiDeferredViewWrite(self,dsv);depthProbeNoteClear(dsv, depth);eyeMaskOnClear(dsv);if(uiLayerWatching())uiLayerNoteDepthClear(dsv);}
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
 
@@ -5252,6 +5278,15 @@ void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTarge
     g_state->realClearRtv(ctx, rtv, colour);
 }
 
+void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src) {
+    if (!ctx || !dst || !src) return;
+    if (g_state && g_state->realCopyResource) {
+        g_state->realCopyResource(ctx, dst, src);
+    } else {
+        ctx->CopyResource(dst, src);
+    }
+}
+
 bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     State* s = g_state;
     if (!s || !w || !h) return false;
@@ -5260,10 +5295,12 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     return false;
 }
 
-// fix.hud_quality's fallback for a candidate created before the strong
-// promotion has measured anything this session (the cockpit's own panels
-// can be created in the first few frames, well before the 100+ eye-shaped
-// draws in one frame that promotion needs -- see docs/hud-quality-2026-09-23.md).
+// fix.ui_quality's last fallback (ui_surfaces.cpp: after the runtime's
+// recommendation x HMD Quality and the size the game submits) for a surface
+// created before the strong promotion has measured anything this session
+// (the cockpit's own panels can be created in the first few frames, well
+// before the 100+ eye-shaped draws in one frame that promotion needs -- see
+// docs/ui-layer-2026-09-23.md).
 // A small state file in the log directory, the same raw-WinAPI-I/O
 // discipline as vscreen_auto_state.cpp's (a DIFFERENT module, deliberately
 // free of anything vscreen-specific so it links into minimal test rigs --
@@ -5355,8 +5392,9 @@ bool vScreenInternalResolution(uint32_t* width, uint32_t* height) {
                     "vScreen: the internal render resolution has not been measured "
                     "this session yet (needs over 100 eye-shaped draws in one frame); "
                     "using %ux%u, the last session's measurement for this eye shape "
-                    "(%ux%u), until the real one lands. fix.hud_quality's ratio match "
-                    "is what asked. Said once.",
+                    "(%ux%u), until the real one lands. fix.ui_quality's surfaces "
+                    "asked (no recommendation from the runtime, nothing submitted "
+                    "yet). Said once.",
                     fw, fh, s->eyeW, s->eyeH);
             }
             return true;
@@ -5613,7 +5651,8 @@ void vScreenFrameBoundary() {
         uiSeparationFrameBoundary();
         uiDeferredFrameBoundary(g_state->ownerCtx);
         uiDepthFrameBoundary(g_state->ownerCtx);
-        // fix.ui_quality: its warm compile, its 30-second totals, and the end
+        // fix.ui_quality: the layer's warm compile, the surfaces' five-second
+        // cross-check and learning, the key's 30-second totals, and the end
         // of this frame's watch for draws after the UI.
         uiLayerFrameBoundary(g_state->ownerCtx);
         screenMotionFrameBoundary(g_state->ownerCtx);
