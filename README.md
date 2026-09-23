@@ -303,6 +303,14 @@ standing in the world, or sized for a screen you are not looking at.
 - **The terrain missing at the edges of view** over planets — Elite culls
   against a narrower frustum than it renders, so squares of ground go undrawn.
   Off by default; it costs about 6% GPU at the tested values.
+- **Busy settlements holding your frame rate down.** At a crowded settlement
+  Elite draws tens of thousands of small parts a frame, enough to hold the
+  frame over the headset's refresh rate. `auto` (default) steps distant
+  settlement detail down only while the frame runs long and gives it back the
+  moment there is headroom, back to the game's own detail as soon as you leave;
+  `reduced` keeps it down for as long as you are there. Cockpit only for now.
+  Measured at one settlement: 45-50 fps to 70-80, with no visible change from
+  the cockpit.
 - **On foot:** the grey surround made properly black, the screen moved, bent
   and raised above its forced 1920x1080, and Explorer Cam, which gives you a
   real stereo view of your commander in the external camera.
@@ -593,12 +601,12 @@ to hand the runtime the game's own previous frame in its place: a copy EDVR
 keeps of the last frame it submitted, always the game's content, never EDVR's.
 
 **The temporal pass and the sharpening** (`temporal_aa`, `render_sharpness`,
-both off by default) are each one GPU pass over the game's finished frame,
-into a texture EDVR owns, and that copy is what the runtime receives —
-the game's texture is read, never written, no answer the game asks for
-changes, and nothing is read from memory. The temporal pass also shifts
-the projection the game is told by a fraction of a pixel each frame,
-the way the terrain fix shifts it by a margin.
+both off by default) are each one GPU pass over the game's finished frame, into
+a texture EDVR owns, and that copy is what the runtime receives — the game's
+texture is read, never written, no answer the game asks for changes, and
+nothing is read from memory. The temporal pass also shifts the projection the
+game is told by a fraction of a pixel each frame, the way the terrain fix
+shifts it by a margin.
 
 **Three fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam
@@ -612,13 +620,13 @@ truth, and it validates the runtime's projection against the shape it expects
 before changing anything, standing down loudly on a mismatch. None of the three
 does anything until you configure it.
 
-**The resolution fix, `auto` by default,** rewrites the twelve numbers that
-are the width and height the game forces for the on-foot screen, in the
-places it does so — nothing else: not the surrounding instructions, not the
-game's decision about which screen to draw. `auto` sizes it from what your
-headset actually rendered per eye last session (a fresh install runs it as
-"off," the same stock 1920x1080 as before, until one session with VR running
-has completed); typing a width in pixels overrides it, and the height always
+**The resolution fix, `auto` by default,** rewrites the twelve numbers that are
+the width and height the game forces for the on-foot screen, in the places it
+does so — nothing else: not the surrounding instructions, not the game's
+decision about which screen to draw. `auto` sizes it from what your headset
+actually rendered per eye last session (a fresh install runs it as "off," the
+same stock 1920x1080 as before, until one session with VR running has
+completed); typing a width in pixels overrides it, and the height always
 follows at 16:9. Its safeguards, because they are the reason to trust it:
 
 - **No file on disk is modified.** The change exists only in memory and the
@@ -646,8 +654,7 @@ hide from anything.
 
 If you would rather no part of this went near the game's code or memory, set
 `vscreen_res_width` to `1920` (the stock size, meaning "do not patch") and
-leave Explorer Cam unconfigured — the DLL then behaves as earlier versions
-did.
+leave Explorer Cam unconfigured — the DLL then behaves as earlier versions did.
 
 ## Build
 

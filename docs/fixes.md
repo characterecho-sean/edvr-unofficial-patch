@@ -152,6 +152,18 @@ is why it is off. Three settings, and it wants to be gated to your headset:
 [The terrain fix](../README.md#the-terrain-fix-cull-guard).
 `fix.cull_guard = off`. *[terrain-culling.md](terrain-culling.md).*
 
+**Frame rate dropping at busy settlements.** *Auto by default.* At a crowded
+settlement Elite draws tens of thousands of small parts a frame, enough on its
+own to hold the frame over the headset's refresh rate — the cheapest thing to
+give back is distant detail. `auto` lowers settlement detail only while the
+frame runs long, a step at a time, and gives it back once there is headroom;
+back to the game's own detail the moment you leave the settlement. `reduced`
+keeps detail down the whole time you are at a settlement, whether or not the
+frame is running long. Parts beyond about 100 m thin out and can pop as it
+steps; cockpit only for now. Measured at one settlement: 45-50 fps to 70-80,
+with no visible change from the cockpit. `fix.settlement_detail = auto`
+(default).
+
 ---
 
 ## On foot

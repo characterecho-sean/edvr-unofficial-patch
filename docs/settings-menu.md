@@ -58,6 +58,11 @@ current timing and overlay qualification is linked separately.*
   fix; "What it shows" for the Monitor page's `Compositor_FrameTiming`
   finding; "Phase 0 -- what must be measured before code depends on it"
   for gates G1-G14; "Open questions for Sean"; "Phasing" for phases A/B/C.
+- **2026-09-23:** `fix.settlement_detail` added to the Performance page's
+  row list below, alongside its promotion to a first-class fix (README,
+  docs/fixes.md). It reaches the running menu and the installer's settings
+  window once edvr.ini's key carries a `# ui:` annotation line -- not yet
+  added, since edvr.ini was out of scope for this pass.
 
 *A design document, written before the code. It supersedes and extends
 Feature 4 of [performance.md](performance.md) (2026-09-05), which stays as
@@ -659,9 +664,9 @@ off the edge -- the pages past it could not be seen, and nothing said
 they were there (flown 2026-09-07).
 
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
-   `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default
-   K), `render_sharpness`, `foveation`, `foveation_centre`, and
-   `render_scale` when its branch lands. Costs where they are measured:
+   `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
+   `render_sharpness`, `foveation`, `foveation_centre`, `settlement_detail`,
+   and `render_scale` when its branch lands. Costs where they are measured:
    the temporal pass's own timing, NVIDIA's pass per eye, the sharpen's
    timestamp pair, the pixel fraction under scale. UI/smoke depth and
    station motion follow the AA mode automatically.
