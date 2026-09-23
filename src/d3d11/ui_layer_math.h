@@ -450,6 +450,7 @@ struct UiDsState {
     uint8_t readMask = 0xFF, writeMask = 0xFF;
     UiDsFace front, back;
     bool readOnlyDepth = false, readOnlyStencil = false;  // the view's flags
+    bool stencilPlane = true;  // the view's format has stencil (D32_FLOAT has none)
 };
 
 // What a draw does with the depth-stencil target bound with it: whether its
@@ -472,8 +473,11 @@ inline UiDsEffect uiLayerDsEffect(const UiDsState& s, bool dsvBound) {
     auto faceWrites = [&](const UiDsFace& f) {
         return f.pass != uids::kKeep || f.fail != uids::kKeep || f.depthFail != uids::kKeep;
     };
-    e.stencilTest = s.stencilEnable && (faceTests(s.front) || faceTests(s.back));
-    e.stencilWrite = s.stencilEnable && s.writeMask != 0 && !s.readOnlyStencil &&
+    // A view with no stencil plane: D3D11 passes the stencil test and drops
+    // the write, and so does the layer's copy in the same format -- there is
+    // nothing to test against or seed (review P3-6: it re-seeded every draw).
+    e.stencilTest = s.stencilEnable && s.stencilPlane && (faceTests(s.front) || faceTests(s.back));
+    e.stencilWrite = s.stencilEnable && s.stencilPlane && s.writeMask != 0 && !s.readOnlyStencil &&
                      (faceWrites(s.front) || faceWrites(s.back));
     return e;
 }

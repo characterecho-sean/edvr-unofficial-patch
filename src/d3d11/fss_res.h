@@ -133,9 +133,14 @@ bool fssResWantsCreates();
 // is set only when *sourceOut is kMatch, for the resize summary's
 // per-family line. All three out-params may be null when the caller does
 // not need them. false leaves *d and every out-param untouched.
+// callerIsEdvr: the create came from EDVR's own module (the temporal pass's
+// targets, the deferred UI replay's, the UI layer's): the ratio match is
+// about the game's interface surfaces only, and is not asked -- nor its
+// inputs read -- for those (review P1-1). The other two matchers are as
+// before.
 bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
                         float* scaleOut, InflateSource* sourceOut,
-                        char* familyOut);
+                        char* familyOut, bool callerIsEdvr = false);
 
 // Track a texture created inflated: the size the game ASKED for (the size
 // its viewports will arrive in), the size it actually got, the float factor

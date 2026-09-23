@@ -28,10 +28,10 @@ Log& Log::get(){static Log l;return l;} Log::~Log()=default;
 void Log::note(const char*,...){}
 std::string Config::getString(const char*,const char*)const{return "dlss";}
  float Config::getFloat(const char*,float def)const{return def;}
- // advanced.ui_replay (fix.ui_quality's A/B): the test's replay runs at the
- // shipped default, 1, unless a case sets it.
- static int testUiReplay=1;
- int Config::getInt(const char* key,int def)const{return std::strcmp(key,"advanced.ui_replay")==0?testUiReplay:def;}
+ // advanced.ui_replay (fix.ui_quality's A/B, on | off): the test's replay
+ // runs at the shipped default, on, unless a case sets it.
+ static bool testUiReplay=true;
+ bool Config::getBool(const char* key,bool def)const{return std::strcmp(key,"advanced.ui_replay")==0?testUiReplay:def;}
  Config& Config::get(){static Config c;return c;}
  uint64_t bindingShaderHash(BindSlot s){++bindingHashReads;return s==BindSlot::Vs?vsHash:psHash;}
  void* bindingGet(BindSlot s){return bindings[static_cast<unsigned>(s)];}
@@ -210,12 +210,12 @@ int main(int argc,char**argv){
   printf("Native sampled/tail replay 2644x2610 -> 4068x4016: GPU %.4f ms/eye, prepare CPU %.4f ms/eye, snapshots %.2f MiB, stencil-in-PS=%d (%u samples). Synthetic one HDR UI draw, retained sampled map and one terminal canvas; excludes DLSS, game rendering, pre-tone work and full game materials.\n",gpu/samples,cpu/samples,edvr::snapshots.allocatedBytes()/1048576.,edvr::renderer.depth.usesSpecifiedStencilRef(),samples);return 0;
  }
  bool hardware=argc>1&&strcmp(argv[1],"--hardware")==0;
- // advanced.ui_replay, fix.ui_quality's A/B for the cockpit HUD: 0 turns the
+ // advanced.ui_replay, fix.ui_quality's A/B for the cockpit HUD: off turns the
  // replay off outright (the interface depth then treats those draws, as it
- // does whenever this replay declines); 1, the default, leaves it as it was.
+ // does whenever this replay declines); on, the default, leaves it as it was.
  // The stub config answers fix.temporal_aa = dlss, an external engine.
- edvr::testUiReplay=0;edvr::uiDeferredConfigure(edvr::Config::get());check(!edvr::enabled && !edvr::uiDeferredMayAct(),"advanced.ui_replay = 0 turns the deferred UI replay off");
- edvr::testUiReplay=1;edvr::uiDeferredConfigure(edvr::Config::get());check(edvr::enabled && edvr::uiDeferredMayAct(),"advanced.ui_replay = 1, the default, keeps it on under an external engine");
+ edvr::testUiReplay=false;edvr::uiDeferredConfigure(edvr::Config::get());check(!edvr::enabled && !edvr::uiDeferredMayAct(),"advanced.ui_replay = off turns the deferred UI replay off");
+ edvr::testUiReplay=true;edvr::uiDeferredConfigure(edvr::Config::get());check(edvr::enabled && edvr::uiDeferredMayAct(),"advanced.ui_replay = on, the default, keeps it on under an external engine");
  fanoutDestinationTests();fanoutGpuDifferential(hardware);strippedDeclarationTests(hardware);panelTypelessResourceTests(hardware);
  for(UINT scale:{1u,2u})for(float j:{0.f,.25f,-.25f}){
   Harness h(hardware,8,8*scale);auto*d=h.d.Get();auto*c=h.c.Get();

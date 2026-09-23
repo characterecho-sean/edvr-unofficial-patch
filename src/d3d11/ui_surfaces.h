@@ -14,10 +14,14 @@
 // size the game actually submits.
 //
 // THREADS. uiSurfacesMatch and uiSurfacesNoteCreated run inside the game's
-// CreateTexture2D, on its streaming threads; everything else on the render
-// thread. The module's state is under one lock; the inputs it reads
-// (native_temporal's recommendation, the runtime's sizing, the eye size,
-// the .fxcfg) are each safe to read from any thread.
+// CreateTexture2D, on its streaming threads -- and on the render thread,
+// possibly INSIDE native temporal's treat(), which holds that channel's
+// mutex while the pass creates its targets (review P1-1). So nothing on
+// that path takes a lock anything holds around a create: the recommendation
+// is a lock-free snapshot, HMD Quality a cache (read on configure and on a
+// thread-pool thread, never in a create), the eye size a shared-memory
+// word, and EDVR's own creates are not offered at all (device_hook.cpp).
+// The module's own state is under one SRW lock that never spans a create.
 #pragma once
 
 #include <cstddef>
@@ -34,10 +38,13 @@ void uiSurfacesSetTarget(float target, const char* text);
 bool uiSurfacesWantCreates();
 
 // Inside CreateTexture2D, for a desc fss_res has already found to be a
-// single-mip, non-MSAA render or depth target with no initial data: when its
-// size is a table ratio of the internal resolution, grow *d in place by the
-// factor and return true (*factorOut the exact factor, *familyOut 'V'/'T'/'I'
-// when the classifier already knows a surface of that size, else 0).
+// single-mip, non-MSAA render or depth target with no initial data, from a
+// caller outside EDVR's own module: when its size is a table ratio of the
+// internal resolution, grow *d in place by the factor and return true
+// (*factorOut the exact factor, *familyOut 'V'/'T'/'I' when the classifier
+// already knows a surface of that size, else 0). A create of a size decided
+// in the last two seconds gets that decision again (a colour target and its
+// depth partner stay one size, review P3-9).
 bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut);
 
 // The receipts, from fss_res's tracked paths: a grown texture was created;
@@ -48,18 +55,21 @@ void uiSurfacesNoteViewport();
 void uiSurfacesNoteScissor();
 void uiSurfacesNoteCopy();
 
-// Once a frame from uiLayerFrameBoundary, acting every five seconds: the
-// cross-check of the derived internal size against the submitted one, and
-// the learning of ratios the GUI renderer's own draws have confirmed.
+// Once a frame from uiLayerFrameBoundary, acting every five seconds: HMD
+// Quality's refresh queued to a pool thread, the cross-check of the derived
+// internal size against the submitted one, and the learning (a GUI-drawn
+// surface that scales across two resolutions; ui_quality_math.h).
 void uiSurfacesFrameBoundary();
 
 // The surfaces' part of the 30-second "ui quality:" totals line.
 void uiSurfacesSummary(char* out, size_t n);
 
-// Defined in native_temporal.cpp: the recommendation the runtime gave the
-// game for the frame being drawn (the max over eyes of the game-facing size:
-// fix.openxr_resolution, the FOV trim and the cull guard included). False
-// before the first beginFrame or with no native temporal channel.
+// Defined in native_temporal.cpp, lock-free: the size, max over eyes, the
+// runtime's beginFrame says the frame being drawn was rendered for
+// (fix.openxr_resolution, the FOV trim and the cull guard included) --
+// during a cull-guard or FOV-trim adoption the previous ask, one rebuild
+// behind what the game is told (review P3-1, open). False before the first
+// beginFrame, after an invalidate, or with no native temporal channel.
 bool nativeTemporalRecommended(uint32_t* w, uint32_t* h);
 
 }  // namespace edvr

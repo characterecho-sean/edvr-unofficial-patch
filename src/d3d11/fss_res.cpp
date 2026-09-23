@@ -224,7 +224,7 @@ bool fssResWantsCreates() {
 
 bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
                         float* scaleOut, InflateSource* sourceOut,
-                        char* familyOut) {
+                        char* familyOut, bool callerIsEdvr) {
     if (!fssResWantsCreates() || !d || hasInitialData) return false;
     // Only the exact shape measured: a single-mip, non-MSAA render target or
     // depth texture. Anything else -- staging, arrays, mip chains -- is not
@@ -267,9 +267,11 @@ bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
     // the runtime's recommendation times HMD Quality -- before any draw into
     // the texture could say what it is. (The classifier learns a surface from
     // draws INTO it: too late to size the create it would need to inform.)
+    // Never for EDVR's own creates (review P1-1: those include the ones the
+    // temporal pass makes inside native temporal's locked treat()).
     float factor = 0.0f;
     char family = 0;
-    if (uiSurfacesMatch(d, &factor, &family)) {
+    if (!callerIsEdvr && uiSurfacesMatch(d, &factor, &family)) {
         if (scaleOut) *scaleOut = factor;
         if (sourceOut) *sourceOut = InflateSource::kMatch;
         if (familyOut) *familyOut = family;
