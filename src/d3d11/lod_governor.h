@@ -1,11 +1,18 @@
 #pragma once
-// The settlement LOD governor (fix.settlement_detail) -- SHADOW MODE ONLY in
-// this build. Every frame it computes a factor k from the engine's own
-// signals, recomputes what the engine's LOD tests would decide with the
-// render context's LOD scale times k, and counts the difference. It never
-// changes a verdict, a draw or a mesh: its observers only read, and nothing
-// it computes is written anywhere but its own counters and the log
-// (docs/design-settlement-lod-bias-2026-09-22.md, "Shadow governor").
+// The settlement LOD governor (fix.settlement_detail). Every frame it computes
+// a factor k from the engine's own signals and, while it acts, hands it to
+// the engine the one way the engine already takes it: the render context's
+// LOD scale s (ctx+0x30), which the game's own level-of-detail tests read.
+// The engine rebuilds that context every frame and ends by storing s from
+// the settings (FUN_142819D90, decomp_2819D90.txt:108; per-frame evidence in
+// docs/design-settlement-lod-bias-2026-09-22.md section 9). A bracket on that
+// function (kinematic_eval_hook.cpp) calls lodGovernorSetterObserver right
+// after the store; the governor reads the value the engine just wrote -- the
+// game's s -- and, while acting, writes s x k back. Every test of the frame
+// then runs at the reduced detail, unchanged: no verdict is overridden, no
+// draw or mesh touched. The next frame's rebuild writes the game's value
+// again, so k = 1, observe mode, or EDVR standing down restores the game's
+// detail by the engine's own hand within a frame.
 //
 // SIGNALS, once a frame at the frame boundary (the caller thread):
 //   * density -- the draw-item builder's calls since the last boundary (one
@@ -26,38 +33,57 @@
 //     the log names which. Held against the display period, 1000 /
 //     baseDisplayHz (version 4 and later), else the session's first
 //     predicted period;
-//   * the LOD scale s the engine holds, render context +0x30 (= 2 -
-//     LODDistanceScale above the slider's floor, FUN_142819D90; 1.5 at its
-//     lowest setting), read by the builder observer.
+//   * the game's LOD scale s_game, from the setter bracket (the value the
+//     engine stored on its last call for that context; 1.0 at the slider's
+//     maximum detail, 1.5 at its lowest), and the scale the tests ran with,
+//     ctx+0x30 as the builder observer reads it (s_game x k while acting).
 //
-// THE SHADOW, on the worker threads, read-only:
+// THE WRITE (lodGovernorSetterObserver, the engine's thread, twice a frame):
+// only a context the draw-item builder has used (a table of at most 8; a
+// ninth stands acting down), only a plausible s_game (0.25..8, else counted
+// and left alone), only while acting and k > 1; the page is VirtualQuery'd
+// once before the first write (committed, writable, no guard page) and every
+// read and write is SEH-guarded. A fault stands acting down for the process;
+// observing goes on. On disable and on shutdown the game's value is written
+// back, guarded, to every context still holding EDVR's.
+//
+// THE SHADOW, on the worker threads, read-only -- the correctness gate and the
+// price, the same quantity in both modes:
 //   * per part, after each FUN_1442B3FC0 forward, with the engine's own
-//     inputs (decomp_42B3FC0.txt): the part's world centre and radius, the
-//     view's camera (+0x540), A = +0x550, B = +0x560, s, and the builder's
-//     copy of the part's 0x80-byte LOD table (param_1[4]): d = rsqrt(rcp(
-//     |c - cam|^2)) with the engine's own approximations, f = A*(d - r)*s + B
-//     and f_k = A*(d - r)*(s*k) + B. A part the engine passed would be
-//     dropped when t0 < f_k and would change level when the nibble at f_k
-//     differs. The recompute at k = 1 must reproduce the engine's verdict
-//     and nibble; a part where it does not is counted as a disagreement and
-//     never shadowed.
+//     inputs (decomp_42B3FC0.txt): the part's world centre and sphere, the
+//     view's camera (+0x540), A = +0x550, B = +0x560, the LOD scale the test
+//     ran with s, and the builder's copy of the part's 0x80-byte LOD table
+//     (param_1[4]): d = rsqrt(rcp(|c - cam|^2)) with the engine's own
+//     approximations, f = A*(d - r)*s + B. The recompute at s must reproduce
+//     an engine pass and its nibble; a part where it does not is a
+//     disagreement and never shadowed. The price is a part the game's own
+//     setting passes and s_game x k fails: observing (s is s_game), a pass
+//     that fails at s x k ("would drop"); acting (s is s_game x k), an engine
+//     reject whose LOD term fails at s and passes at s_game while its
+//     screen-size term and the engine's plane test FUN_1404F4E10 pass
+//     ("dropped: the game's setting would have kept it").
 //   * per record, at the builder bracket before its forward: the same for
 //     FUN_144308B30, the record-level test the traversal ran on the record's
 //     centre (+0x240), radius (+0x280) and table (*(rec+0x20)), whose
 //     results the builder's dispatch read (rec+0x208 mask, +0x210 nibbles,
-//     node+0x6A LOD count; decomp_4320340.txt:64-95): per eye, and whether
-//     the record would still be dispatched at all.
+//     node+0x6A LOD count; decomp_4320340.txt:64-95). Acting, a record that
+//     lost an eye (or every view) at EDVR's scale is not visible there: the
+//     traversal keeps no pre-test mask, and a record with no view left never
+//     reaches the builder. Its parts are then never tested for that eye, so
+//     acting's "dropped" is a lower bound of the price; the fall of "engine
+//     passed" per frame from a k = 1 window is the whole of it.
 //
-// THE POLICY (Policy below, pure; tools\lod_governor_test): k in [1, k_max]
-// in steps of 0.05. One step up while the frame has at least 200 builder
-// records AND the frame work has exceeded the period by more than 0.3 ms for
-// 30 consecutive samples; one step down while it has been under the period
-// minus 1.0 ms for 30; at most one step a second; back to 1 when the records
-// have stayed under 150 for 30 frames. k_max is advanced.settlement_detail_max
-// (default 4.0, held to [1, 4]); nothing else is a key. k multiplies whatever
-// s the game holds, and the game's own slider only reaches s = 1.5 (s = 1.0
-// at maximum detail): the LOD note prices removal by s x k (section 8), and
-// s x k = 3 from maximum detail takes k = 3, past the old default of 2.0.
+// THE POLICY (Policy below, pure; tools\lod_governor_test): auto -- k in
+// [1, k_max] in steps of 0.05. One step up while the frame has at least 200
+// builder records AND the frame work has exceeded the period by more than
+// 0.3 ms for 30 consecutive samples; one step down while it has been under
+// the period minus 1.0 ms for 30; at most one step a second; back to 1 when
+// the records have stayed under 150 for 30 frames. reduced -- k = k_max at
+// once from the frame the records reach 200, 1 when they have stayed under
+// 150 for 30 frames; no ramp. k_max is advanced.settlement_detail_max
+// (default 4.0, held to [1, 4]): the ceiling in auto, the factor in reduced.
+// advanced.settlement_detail_observe = 1 computes and logs all of it and
+// never writes.
 #include <cstdint>
 #include <cstring>
 #include <xmmintrin.h>
@@ -78,6 +104,11 @@ constexpr uint32_t kConsecutive = 30;              // ... for 30 consecutive sam
 constexpr uint64_t kRampIntervalMs = 1000;         // at most one step a second
 constexpr float kDefaultMax = 4.0f;                // advanced.settlement_detail_max
 constexpr float kMaxCeiling = 4.0f;                // ... held to [1, 4]
+// The write's plausibility band for the game's own LOD scale: the setter
+// stores 1 + (1 - x) with x the settings' LODDistanceScale; anything outside
+// this is not a value the game's slider produces and is left alone.
+constexpr float kScaleLow = 0.25f, kScaleHigh = 8.0f;
+constexpr uint32_t kContexts = 8;                  // builder contexts the write may touch
 
 // The frame boundary's inputs to one policy step.
 enum class Work : uint8_t { None, Invalid, Valid };   // no new sample / a bad one / a good one
@@ -95,13 +126,18 @@ struct FrameSignals {
     double periodMs = 0;        // the budget it is held against
     uint64_t nowMs = 0;
 };
-enum class Step : uint8_t { None, Up, Down, Reset, Clamp };
+// Enter: reduced mode's k = k_max at once (the settlement started, or k_max
+// rose while in it).
+enum class Step : uint8_t { None, Up, Down, Reset, Clamp, Enter };
 
 class Policy {
 public:
     // k_max, quantised to the step and held to [1, kMaxCeiling]. Lowering it
     // below the current k clamps k at once (Step::Clamp from the next update).
     void configure(float kMax) noexcept;
+    // reduced (fixed = true): k = k_max for as long as the settlement lasts,
+    // 1 outside it, no ramp; auto (false): the governed ramp.
+    void setFixed(bool fixed) noexcept { fixed_ = fixed; }
     Step update(const FrameSignals& s) noexcept;
     void reset() noexcept;
 
@@ -109,6 +145,7 @@ public:
     int maxSteps() const noexcept { return maxSteps_; }
     float k() const noexcept { return kOf(steps_); }
     float kMax() const noexcept { return kOf(maxSteps_); }
+    bool fixed() const noexcept { return fixed_; }
     bool inSettlement() const noexcept { return inSettlement_; }
     uint32_t overRun() const noexcept { return over_; }
     uint32_t underRun() const noexcept { return under_; }
@@ -116,6 +153,7 @@ public:
 
 private:
     int steps_ = 0, maxSteps_ = static_cast<int>((kDefaultMax - 1.0f) * kQuantaPerUnit);   // k_max 4.0
+    bool fixed_ = false;
     bool inSettlement_ = false, clampPending_ = false;
     uint32_t over_ = 0, under_ = 0, sparse_ = 0;
     uint64_t lastStepMs_ = 0;
@@ -137,6 +175,14 @@ inline float engineDistance(const float c[4], const float cam[4]) noexcept {
 // f = A*(d - r)*s + B, the engine's association (3FC0:78-80, 4308B30:67-69).
 inline float lodDistance(float A, float d, float r, float s, float B) noexcept {
     return A * (d - r) * s + B;
+}
+
+// The part test's first term, as its code computes it (FUN_1442B3FC0 +0x63..
+// +0x7F in the build-332841 exe: mulss A,d; addss B; mulss by 1.0
+// (DAT_144E2F880); mulss by 0.5 (DAT_144E2F870); cmpless against r): the
+// part's sphere spans at least one pixel. A NaN fails, as cmpless does.
+inline bool screenSizePasses(float A, float d, float B, float r) noexcept {
+    return 0.5f * (1.0f * (A * d + B)) <= r;
 }
 
 // A LOD table as the tests read it: eight 16-byte rows, the first float of
@@ -170,45 +216,72 @@ inline bool lodPick(const LodTable& table, float f, uint32_t* nibble) noexcept {
     return true;
 }
 
-// The would-drop histogram: the part's angular radius r/d in degrees, in
-// four buckets: < 0.25, 0.25-0.5, 0.5-1, >= 1 (a camera inside the sphere
-// lands in the last).
+// The price's histogram: the part's angular radius r/d in degrees, in four
+// buckets: < 0.25, 0.25-0.5, 0.5-1, >= 1 (a camera inside the sphere lands in
+// the last).
 inline uint32_t angleBucket(float r, float d) noexcept {
     if (!(d > r) || !(d > 0.0f)) return 3;
     const float deg = r / d * 57.2957795f;
     return deg < 0.25f ? 0u : deg < 0.5f ? 1u : deg < 1.0f ? 2u : 3u;
 }
 
+inline uint32_t floatBits(float f) noexcept { uint32_t b; std::memcpy(&b, &f, 4); return b; }
+
 // One part's inputs, as read after the engine's forward.
 struct PartInputs {
     float centre[4] = {}, cam[4] = {};
-    float radius = 0, A = 0, B = 0, s = 0;
+    float sphere[4] = {};     // the builder's copy of the model's +0x10: [0] the radius (the plane test reads all 16 bytes)
+    float A = 0, B = 0;
+    float s = 0;              // the LOD scale the test ran with (ctx+0x30, read after the forward)
+    float sGame = 0;          // the game's own for that context: s, unless EDVR's value was in force
     LodTable table;
     uint32_t engineLod = 0, bit = 64;
     bool enginePass = false;
 };
-// What the shadow makes of it at k.
+// What the shadow makes of it.
 struct PartOutcome {
-    bool mismatch = false;    // the k = 1 recompute disagrees with the engine (never shadowed)
-    bool wouldDrop = false;   // the engine passed it; at k, t0 < f_k
-    bool wouldChange = false; // still passed at k, another nibble
-    uint32_t bucket = 0;      // angleBucket, for a would-drop part
+    bool mismatch = false;     // the recompute at s disagrees with the engine's pass (never shadowed)
+    bool acting = false;       // the test ran at EDVR's value (s != sGame)
+    bool drop = false;         // observing: passes at s, fails at s x k ("would drop")
+    bool change = false;       // passes at both, another nibble (acting: than the game's)
+    bool checkPlanes = false;  // acting, an engine reject: its LOD term fails at s and passes at
+                               // sGame, its screen-size term passes; dropped iff the plane test passes
+    uint32_t bucket = 0;       // angleBucket, for a drop or a checkPlanes part
 };
 inline PartOutcome shadowPart(const PartInputs& in, float k) noexcept {
     PartOutcome o;
-    if (!in.enginePass) return o;   // an engine reject stays one: k >= 1 only raises f for d >= r
+    o.acting = floatBits(in.s) != floatBits(in.sGame);
+    const float r = in.sphere[0];
+    if (!in.enginePass) {
+        // Observing, an engine reject stays one: k >= 1 only raises f for d >= r.
+        if (!o.acting) return o;
+        const float d = engineDistance(in.centre, in.cam);
+        if (!(in.table.t[0] < lodDistance(in.A, d, r, in.s, in.B))) return o;    // the LOD term passed: terms 1-2 rejected it
+        if (in.table.t[0] < lodDistance(in.A, d, r, in.sGame, in.B)) return o;   // the game's setting rejects it too
+        if (!screenSizePasses(in.A, d, in.B, r)) return o;                        // under a pixel either way
+        o.checkPlanes = true;
+        o.bucket = angleBucket(r, d);
+        return o;
+    }
     const float d = engineDistance(in.centre, in.cam);
-    uint32_t n1 = 0, nk = 0;
-    if (!lodPick(in.table, lodDistance(in.A, d, in.radius, in.s, in.B), &n1) || n1 != in.engineLod) {
+    uint32_t n1 = 0, n2 = 0;
+    if (!lodPick(in.table, lodDistance(in.A, d, r, in.s, in.B), &n1) || n1 != in.engineLod) {
         o.mismatch = true;
         return o;
     }
+    if (o.acting) {
+        // Passed at EDVR's scale, so it passes at the game's (s_game < s) for
+        // d >= r; a camera inside the sphere (d < r) could only flip with
+        // t0 < B, which no eye view (B = 0) has -- counted with the changes.
+        if (!lodPick(in.table, lodDistance(in.A, d, r, in.sGame, in.B), &n2) || n2 != n1) o.change = true;
+        return o;
+    }
     if (k == 1.0f) return o;   // s * 1 is s: nothing can differ
-    if (!lodPick(in.table, lodDistance(in.A, d, in.radius, in.s * k, in.B), &nk)) {
-        o.wouldDrop = true;
-        o.bucket = angleBucket(in.radius, d);
-    } else if (nk != n1) {
-        o.wouldChange = true;
+    if (!lodPick(in.table, lodDistance(in.A, d, r, in.s * k, in.B), &n2)) {
+        o.drop = true;
+        o.bucket = angleBucket(r, d);
+    } else if (n2 != n1) {
+        o.change = true;
     }
     return o;
 }
@@ -216,17 +289,25 @@ inline PartOutcome shadowPart(const PartInputs& in, float k) noexcept {
 }  // namespace lodgov
 
 // --- The runtime --------------------------------------------------------------
-// fix.settlement_detail: game (default: off, nothing observed, the relays keep
-// their one load) | auto (this build: the shadow governor, never acts) |
-// reduced (reserved: behaves as auto in this build, and the log says so).
-// advanced.settlement_detail_max: k_max. From the startup and reload sweeps.
+// fix.settlement_detail: game (default: off, nothing observed or changed, the
+// relays keep their one load) | auto (the governed k; acts) | reduced (k_max
+// in a settlement, 1 outside; acts). advanced.settlement_detail_max: k_max.
+// advanced.settlement_detail_observe: 1 = compute and log, never write. From
+// the startup and reload sweeps.
 void lodGovernorConfigure(Config& cfg);
 // Once a frame on the caller thread (vScreenFrameBoundary): the signals, the
-// policy step, and the log lines. Returns at once while off.
+// policy step, and the log lines. Returns at once while off. Never writes
+// engine memory.
 void lodGovernorFrameBoundary();
-// The hook-side observers (kinematicEvalSetLodGovernorObservers), worker
-// threads, noexcept, allocation-free, SEH-guarded reads only.
+// FreeLibrary teardown (shutdownVScreenFixes): stops acting, writes the
+// game's value back to every context still holding EDVR's, detaches.
+void lodGovernorShutdown();
+// The hook-side observers (kinematicEvalSetLodGovernorObservers): the builder
+// and part observers on the worker threads, the setter observer on the
+// engine's thread after FUN_142819D90's forward; noexcept, allocation-free,
+// SEH-guarded.
 void lodGovernorBuilderObserver(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
 void lodGovernorPartObserver(uintptr_t items, uintptr_t out, uintptr_t view, bool fromBuilder) noexcept;
+void lodGovernorSetterObserver(uintptr_t ctx) noexcept;
 
 }  // namespace edvr

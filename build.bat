@@ -2152,18 +2152,23 @@ exit /b 0
 
 :rig_lod_governor_test
 echo [edvr] === lod_governor_test.exe ===
-REM Build gate for the settlement LOD governor (fix.settlement_detail, shadow
-REM only): the policy's steps and hysteresis on synthetic frame sequences; the
-REM engine arithmetic the shadow repeats (FUN_1442B3FC0 / FUN_144308B30's
-REM rsqrt(rcp) distance, LOD distance and LOD pick); both observers on
-REM synthetic engine memory laid out as the decompiles read it, with a wrong
-REM nibble, an engine reject, a foreign caller and wild pointers; the
-REM per-thread counters under four threads; and the frame boundary end to end
-REM against a stub native timing feed and a captured log -- the configure
-REM line ("shadow, never acts"), step lines, 30-second summaries, "k stayed
-REM 1", and silence while off. It prints both observers' cost per call. A
-REM governor that never counts, or counts while off, fails here, not in the
-REM flight that was meant to price it.
+REM Build gate for the settlement LOD governor (fix.settlement_detail: auto and
+REM reduced scale the game's LOD scale right after FUN_142819D90 stores it;
+REM advanced.settlement_detail_observe = 1 never writes): the policy's steps
+REM and hysteresis, reduced's k_max at once; the engine arithmetic the shadow
+REM repeats (FUN_1442B3FC0 / FUN_144308B30's rsqrt(rcp) distance, LOD
+REM distance, LOD pick, the screen-size term); the observers on synthetic
+REM engine memory laid out as the decompiles read it; the setter's bracket
+REM against a fake context and a fake setter (only the builder's context is
+REM written, k = 1 and observe leave the game's value, the table's limit and
+REM an unwritable page stand acting down, off writes the game's value back);
+REM the acting counts; the per-thread counters under four threads; and the
+REM frame boundary end to end against a stub native timing feed, a fake
+REM engine and a captured log -- the configure line naming the mechanism,
+REM the first write, step lines, 30-second summaries, NOT ACTING, "k stayed
+REM 1", and silence while off. It prints the observers' cost per call. A
+REM governor that writes when it should not, or never counts, fails here,
+REM not in the flight that was meant to price it.
 if not exist "%OBJ%\lodgov" mkdir "%OBJ%\lodgov"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^

@@ -38,7 +38,7 @@
 #include "draw_census.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
-#include "lod_governor.h"     // fix.settlement_detail: the shadow LOD governor
+#include "lod_governor.h"     // fix.settlement_detail: the settlement LOD governor
 #include "fss_panel.h"
 #include "fss_probe.h"
 #include "fss_panel_rect.h"
@@ -6623,6 +6623,9 @@ void shutdownVScreenFixes() {
     panelCurveShutdown();
     particleShutdown();
     objectProbeShutdown();
+    // The settlement LOD governor: stop acting and write the game's LOD scale
+    // back to any render context still holding EDVR's.
+    lodGovernorShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;

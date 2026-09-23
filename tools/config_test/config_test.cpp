@@ -149,13 +149,16 @@ int main(int argc, char** argv) {
     else
         fail("eye depth capture is documented but not live under [advanced]",
              "the shipped file defines it live");
-    // The settlement LOD governor is shadow-only in this build: both keys
-    // ship as commented templates, so the compiled defaults -- game (off,
-    // nothing observed) and a ceiling of 4.0 -- are what every user runs.
+    // The settlement LOD governor acts (auto and reduced scale the game's LOD
+    // scale): all three keys ship as commented templates, so the compiled
+    // defaults -- game (off: nothing observed or changed), a ceiling of 4.0,
+    // and observe 0 -- are what every user runs until they choose it.
     expectStr("fix.settlement_detail", "<unset>",
               "settlement detail ships commented out: the compiled default (game) is in force");
     expectStr("advanced.settlement_detail_max", "<unset>",
               "...and so does its ceiling");
+    expectStr("advanced.settlement_detail_observe", "<unset>",
+              "...and its observe-only switch");
 
     // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
     // This is the claim that a repeated section header is not a parse error
