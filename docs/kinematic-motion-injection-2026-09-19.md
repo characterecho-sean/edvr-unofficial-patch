@@ -2486,3 +2486,14 @@ U a substitution; prepared for nothing P, under the old order Q)` -- P near 0, Q
 removed. Never ran: no parenthesis. Rig: engine_velocity_test P2 (an unkeyed-only eye
 prepares and gives nothing, Q counts it; one accepted draw restores exact coverage the frame
 after).
+
+**3. No repeated shader setters.** A slow-path visit forced only by a source change -- the
+re-fly's ~11 harmless cb1 re-maps an eye-frame, a pool append, a blend change -- re-issued
+the raw PS (and VS) setters although ours was still bound. Now, after the source checks,
+each setter is skipped when the patched shader is still installed: the same patched and
+original shader and the stage's binding generation unchanged since ours went in (the game
+set nothing there). The blend and the source checks are untouched. Signature, the movers
+line's tail: `restores R; shader setters issued I, skipped K (ours still bound)` -- K
+roughly the kept re-maps and refreshes that reached a draw. Never ran: no setters clause.
+Rig: engine_velocity_test P3 (a re-map inside a pass: the patched PS stays bound, the setter
+skipped and counted).

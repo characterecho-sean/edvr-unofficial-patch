@@ -915,6 +915,31 @@ inline void run(const Harness& h) {
     }
     g.endFrame();
 
+    // P3 (item 3): a slow-path visit that only re-verified the sources finds
+    // the patched shader still bound and skips the setter; each eye-frame's
+    // first substitution still sets it.
+    mark = g_log.size();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0);
+    {
+        ComPtr<ID3D11PixelShader> patched, after;
+        h.context->PSGetShader(&patched, nullptr, nullptr);
+        auto remap = g.rows[0];
+        remap[90 * 4] = 3.0f;   // other registers move, rows 270..275 do not
+        g.writeScene(g.sceneA.Get(), remap);
+        g.draw();
+        h.context->PSGetShader(&after, nullptr, nullptr);
+        h.check(patched && patched.Get() != g.ps.Get() && after.Get() == patched.Get(),
+                "P3: the patched pixel shader stays bound across a source-only visit");
+    }
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    g.endFrame(true);
+    line = lastLine(joined, mark);
+    h.check(number(line, ", skipped ") >= 1, "P3: the setter a source-only visit would have repeated is skipped, counted");
+    h.check(number(line, "shader setters issued ") >= 2, "P3: each eye-frame's first substitution still sets it");
+
     // R6: the emit hook not installed -> STOOD DOWN, no substitution, nothing given.
     mark = g_log.size();
     lifecycle_fake::g_hookLive = false;

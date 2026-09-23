@@ -232,6 +232,7 @@ struct DrawStats {
     uint64_t targetOccupied = 0, uavBound = 0, bindRejected = 0, depthUnsupported = 0, createFailed = 0;
     uint64_t bindRefused[static_cast<int>(EngineVelocityBindRefusal::Count)] = {};
     uint64_t blendApplied = 0, blendRefused = 0, blendShadowDisagreed = 0;
+    uint64_t settersIssued = 0, settersSkipped = 0;   // item 3: raw shader setters, and those found installed
     const char* blendRefusedWhy = nullptr;
     uint64_t viewsAsked = 0, viewsGiven = 0;
     // Why a view request was refused, first failing test: the emit side stood
@@ -785,8 +786,21 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         g_bound.blendGen = bindingGeneration(BindSlot::Blend);
         ++g_draw.blendApplied;
     }
-    if (useVs != vs) vScreenVSSetShaderRaw(ctx, useVs, nullptr, 0);
-    vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0);
+    // The setters only where the patched shader is not still installed (the
+    // performance review, item 3): a visit that only re-verified the sources
+    // -- a cb1 re-map, a pool append, a blend change -- finds ours bound when
+    // the game has set nothing in that stage since (same original, same
+    // binding generation). Source checks and the blend stay independent.
+    const bool psInstalled = g_bound.patchedPs == usePs && g_bound.originalPs == ps &&
+                             bindingGeneration(BindSlot::Ps) == g_bound.psGen;
+    const bool vsInstalled = g_bound.patchedVs == useVs && g_bound.originalVs == vs &&
+                             bindingGeneration(BindSlot::Vs) == g_bound.vsGen;
+    if (useVs != vs) {
+        if (vsInstalled) ++g_draw.settersSkipped;
+        else { vScreenVSSetShaderRaw(ctx, useVs, nullptr, 0); ++g_draw.settersIssued; }
+    }
+    if (psInstalled) ++g_draw.settersSkipped;
+    else { vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0); ++g_draw.settersIssued; }
     g_bound.originalPs = ps; g_bound.patchedPs = usePs; g_bound.psGen = cache.ps;
     g_bound.originalVs = useVs != vs ? vs : nullptr; g_bound.patchedVs = useVs != vs ? useVs : nullptr; g_bound.vsGen = cache.vs;
     g_bound.family = f;
@@ -899,7 +913,8 @@ void summaryLocked(uint64_t now) {
                     "times, refused %llu%s%s%s, shadow disagreed %llu; views asked %llu, given %llu, refused: stood down "
                     "%llu, other depth %llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene "
                     "constants %llu; draw hook slow half %llu calls, %.2f us each, ~%.3f ms/frame on the caller thread "
-                    "(plus %llu lock-free looks); restores %llu.",
+                    "(plus %llu lock-free looks); restores %llu; shader setters issued %llu, skipped %llu (ours still "
+                    "bound).",
                     double(g_emit.recordsMoving.load()) / frames, trackerText,
                     u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(g_draw.eyeFramesSeen), u(g_draw.eyeFramesSubstituted),
                     u(g_draw.eyeFrames > g_draw.eyeFramesSubstituted ? g_draw.eyeFrames - g_draw.eyeFramesSubstituted : 0),
@@ -913,7 +928,8 @@ void summaryLocked(uint64_t now) {
                     u(g_draw.refusedDepth), u(g_draw.refusedFrame), u(g_draw.refusedInvalid), u(g_draw.refusedUnwritten),
                     u(g_draw.refusedPrevious), u(g_draw.slowPaths),
                     g_draw.slowPaths ? double(g_draw.slowTicks) * 1e6 / freq / double(g_draw.slowPaths) : 0.0,
-                    double(g_draw.slowTicks) * 1e3 / freq / frames, u(g_draw.quickPaths), u(g_draw.restores));
+                    double(g_draw.slowTicks) * 1e3 / freq / frames, u(g_draw.quickPaths), u(g_draw.restores),
+                    u(g_draw.settersIssued), u(g_draw.settersSkipped));
     if (g_draw.pixelReads)
         Log::get().note("engine motion: pixels per eye-frame on the trained path: engine-joined %.0f (a rig record's "
                         "certified exact motion, moving or still -- not a mover count), masked %.0f "
