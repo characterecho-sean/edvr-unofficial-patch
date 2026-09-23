@@ -437,7 +437,8 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\original_draw_probe.cpp" ^
-    "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\transition_flash_prevent.cpp" ^
+    "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
@@ -2073,6 +2074,28 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: kinematic probe test build failed & exit /b 1 )
 "%BUILD%\kinematic_probe_test.exe" --dry-run || exit /b 1
 "%BUILD%\kinematic_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_transition_flash_prevent_test
+echo [edvr] === transition_flash_prevent_test.exe ===
+REM Build gate for transition_flash_prevent_core.h (docs\design-transition-
+REM flash-engine-fix-2026-09-23.md): the pose classifier (and that it truly
+REM ignores the padding lanes [3],[7],[11],[15], not merely documents that
+REM it should), the validation and per-parent guard arithmetic including
+REM LRU eviction, event grouping with the alternate latch, and the ring
+REM window test's overflow safety at both ends of the frame counter. No
+REM game and no CodeHook -- this drives the header directly, so a wrong
+REM guard boundary or a wrapped frame subtraction is caught here rather
+REM than costing a test flight to notice.
+if not exist "%OBJ%\transitionflashprevent" mkdir "%OBJ%\transitionflashprevent"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\transitionflashprevent\\" /Fe"%BUILD%\transition_flash_prevent_test.exe" ^
+    "tools\transition_flash_prevent_test\transition_flash_prevent_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: transition flash prevent test build failed & exit /b 1 )
+"%BUILD%\transition_flash_prevent_test.exe" --dry-run || exit /b 1
+"%BUILD%\transition_flash_prevent_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_scheduler_stack_json_test

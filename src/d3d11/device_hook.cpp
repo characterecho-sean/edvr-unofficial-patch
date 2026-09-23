@@ -66,6 +66,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "perf_monitor.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
+#include "transition_flash_prevent.h"
 #include "vscreen_res.h"
 #include "celestial_motion.h"
 
@@ -1119,6 +1120,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (g_state->dumpKey.pressed()) {
             dumpCameraRing("the history key");
             temporalPassDumpHistory("the history key");
+            transitionFlashPreventDumpRing("the history key");
             g_state->dumpDueMs = nowMs() + kDumpDelayMs;
         }
         // THE PRESS THAT WENT NOWHERE, said out loud.
@@ -1153,6 +1155,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             dumpCameraRing("a key you pressed two seconds ago",
                            (uint32_t)(kDumpDelayMs / 1000));
             temporalPassDumpHistory("a key you pressed two seconds ago");
+            transitionFlashPreventDumpRing("a key you pressed two seconds ago");
         }
         // The draw census key (issue 69074). Same silent-failure shape as the
         // history key, same cure: a diagnostic keypress that another window
@@ -2817,6 +2820,7 @@ void shutdownDeviceHooks() {
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();
     shutdownGlitchFrameFix();
+    transitionFlashPreventShutdown();
     shutdownVScreenFixes();
     shutdownExposureFix();
     // The swap-only or live-only probe's bare table, if that was what ran

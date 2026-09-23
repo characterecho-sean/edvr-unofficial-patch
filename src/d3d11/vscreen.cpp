@@ -61,6 +61,7 @@
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "fov_probe.h"
 #include "glitch_frame.h"
+#include "transition_flash_prevent.h"
 #include "holo_fix.h"
 #include "target_sharp.h"
 #include "hud_sprite.h"
@@ -5498,6 +5499,12 @@ void vScreenRefreshConfig() {
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
+    // advanced.transition_flash_prevent: the engine-side fix (docs/design-
+    // transition-flash-engine-fix-2026-09-23.md). Off leaves this line as
+    // the only thing it does; a non-off value installs its four CodeHooks
+    // the first time this is reached (install or a later reload, whichever
+    // is first), then only moves the live mode.
+    transitionFlashPreventConfigure(cfg);
     // The settings menu: its own keys, then the reload's diff -- every row's
     // value, the restart snapshot, and a toast for what changed from outside.
     menuConfigure(cfg);
@@ -6548,6 +6555,11 @@ void vScreenFrameBoundary() {
     // The flash detector needs the count for the frame that just ended, to tell
     // a rendered scene from a menu. It has to be told before the counter resets.
     glitchFrameBoundary(sceneDraws);
+    // Publishes the frame number the transition-flash-prevent hooks read
+    // from any thread (they can run on a scheduler job thread, off this
+    // one) and services one deferred ring dump if its due frame has
+    // arrived. Never called from inside a game hook.
+    transitionFlashPreventFrameBoundary(s->frameNo);
     // The gate decides on the counts for the frame that just ended, so it is
     // told before they reset -- same rule as the flash detector above.
     headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, sceneDraws);
@@ -6677,6 +6689,12 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
+    // advanced.transition_flash_prevent: the engine-side fix (docs/design-
+    // transition-flash-engine-fix-2026-09-23.md). Off leaves this line as
+    // the only thing it does; a non-off value installs its four CodeHooks
+    // the first time this is reached (install or a later reload, whichever
+    // is first), then only moves the live mode.
+    transitionFlashPreventConfigure(cfg);
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;

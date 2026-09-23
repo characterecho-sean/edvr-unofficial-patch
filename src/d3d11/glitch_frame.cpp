@@ -27,6 +27,7 @@ void glitchFrameSetFssMonoProviders(int (*frames)(), bool (*chrome)()) {
 #include "../common/frame_flag.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "transition_flash_prevent.h"
 
 namespace edvr {
 
@@ -1684,6 +1685,11 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     }
     if (!finite3(pos)) return;
 
+    // H3 (design doc): the same scene-camera read the detector above uses,
+    // reported so it can be compared against the engine fix's own last
+    // pushed pose -- the link the whole recompute chain assumes is real.
+    transitionFlashPreventNoteH3(s->frameNo, pos);
+
     s->sawBuffer = true;
 
     // Record which buffer this was, while validation is still deciding.
@@ -2143,6 +2149,13 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.eyeDraws = eyeDraws;
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
+            // Reported even here, fix.transition_flash = 0: the old
+            // magnitude-based verdict (glitchFrameObserve, gated only on
+            // observing) still runs, so a "would have withheld" is still a
+            // dump trigger for the engine fix's own instrument.
+            transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
+                e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
+                e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
             ++s->ringHead;
@@ -2233,6 +2246,9 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.eyeDraws = eyeDraws;
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
+            transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
+                e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
+                e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
             ++s->ringHead;
@@ -2557,6 +2573,9 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         e.eyeDraws = eyeDraws;
         e.guard = s->guardPacked;
         e.verdict = s->verdictThisFrame;
+        transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
+            e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
+            e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
         recordScenePosition(e,s);
         ++s->ringHead;
