@@ -103,7 +103,7 @@ void run() {
         edvr::gpuFrameCommand(context.Get()); // Same pre-command seam used by the game hooks.
         const float color[4]={.1f,.3f,.6f,1};
         context->ClearRenderTargetView(target.Get(),color);
-        EdvrNativeTimingFrame cpu{sizeof(cpu),EDVR_NATIVE_TIMING_VERSION_4,sequence};
+        EdvrNativeTimingFrame cpu{sizeof(cpu),EDVR_NATIVE_TIMING_VERSION_5,sequence};   // no cycle instrument here: caller work absent
         for (unsigned order=0; order<2; ++order) {
             const unsigned eye=order^(frame&1);
             require(client.applicationSegment(sequence,false), "CPU segment closes at submit route entry");

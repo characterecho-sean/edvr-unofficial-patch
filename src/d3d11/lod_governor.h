@@ -12,15 +12,23 @@
 //     call builds one engine record, FUN_1442B4420) and the per-part tests
 //     inside them (FUN_1442B3FC0), counted in the builder bracket and the
 //     part relay with one owner-thread increment per call;
-//   * frame work -- the native runtime's application time for the newest
-//     submitted frame, NativeTimingSnapshot::applicationMs: wall milliseconds
-//     on the producer (the game's caller) thread from the end of the pose
-//     wait to the submit, plus the per-eye treatment callbacks -- the perf
-//     monitor's "app CPU" -- against the display period, 1000 / baseDisplayHz
-//     (EdvrNativeTimingFrame version 4), else the session's first predicted
-//     period;
+//   * frame work -- the caller work per cycle the native runtime sends with
+//     the newest submitted frame, EdvrNativeTimingFrame::callerWorkMs
+//     (version 5): wall milliseconds on the game's caller thread from one
+//     pose wait's return to the next one's entry, the runtime's cycle minus
+//     its next-wait roundtrip -- the game's work, both submits and the waits
+//     inside them, everything the frame must fit -- for the cycle before
+//     that frame. A version 3 or 4 runtime sends none, and the producer's
+//     application time stands in (NativeTimingSnapshot::applicationMs, the
+//     perf monitor's "app CPU": pose wait end to submit plus the eye
+//     treatments -- the pre-submit phase only, which on the first shadow
+//     flight read 8.4 ms against 14.4 ms of caller work and held k at 1);
+//     the log names which. Held against the display period, 1000 /
+//     baseDisplayHz (version 4 and later), else the session's first
+//     predicted period;
 //   * the LOD scale s the engine holds, render context +0x30 (= 2 -
-//     LODDistanceScale, FUN_142819D90), read by the builder observer.
+//     LODDistanceScale above the slider's floor, FUN_142819D90; 1.5 at its
+//     lowest setting), read by the builder observer.
 //
 // THE SHADOW, on the worker threads, read-only:
 //   * per part, after each FUN_1442B3FC0 forward, with the engine's own
@@ -46,7 +54,10 @@
 // 30 consecutive samples; one step down while it has been under the period
 // minus 1.0 ms for 30; at most one step a second; back to 1 when the records
 // have stayed under 150 for 30 frames. k_max is advanced.settlement_detail_max
-// (default 2.0, held to [1, 4]); nothing else is a key.
+// (default 4.0, held to [1, 4]); nothing else is a key. k multiplies whatever
+// s the game holds, and the game's own slider only reaches s = 1.5 (s = 1.0
+// at maximum detail): the LOD note prices removal by s x k (section 8), and
+// s x k = 3 from maximum detail takes k = 3, past the old default of 2.0.
 #include <cstdint>
 #include <cstring>
 #include <xmmintrin.h>
@@ -65,15 +76,22 @@ constexpr double kOverMarginMs = 0.3;              // rise: work > period + 0.3 
 constexpr double kUnderMarginMs = 1.0;             // fall: work < period - 1.0 ms ...
 constexpr uint32_t kConsecutive = 30;              // ... for 30 consecutive samples
 constexpr uint64_t kRampIntervalMs = 1000;         // at most one step a second
-constexpr float kDefaultMax = 2.0f;                // advanced.settlement_detail_max
+constexpr float kDefaultMax = 4.0f;                // advanced.settlement_detail_max
 constexpr float kMaxCeiling = 4.0f;                // ... held to [1, 4]
 
 // The frame boundary's inputs to one policy step.
 enum class Work : uint8_t { None, Invalid, Valid };   // no new sample / a bad one / a good one
+// Which figure the frame work is, fixed by the runtime's timing version:
+// Caller = EdvrNativeTimingFrame::callerWorkMs (version 5); App = the
+// producer's applicationMs, the fallback for a version 3 or 4 runtime.
+enum class WorkSource : uint8_t { None, Caller, App };
 struct FrameSignals {
     uint32_t records = 0;       // builder calls since the last boundary
     Work work = Work::None;
-    double workMs = 0;          // the new sample's application ms (Work::Valid)
+    WorkSource source = WorkSource::None;   // set with every new sample, valid or not
+    bool callerAbsent = false;  // a version 5 frame without valid caller work (Work::Invalid)
+    uint32_t timingVersion = 0; // the new sample's EdvrNativeTimingFrame version
+    double workMs = 0;          // the new sample's frame work ms (Work::Valid)
     double periodMs = 0;        // the budget it is held against
     uint64_t nowMs = 0;
 };
@@ -97,7 +115,7 @@ public:
     static float kOf(int steps) noexcept { return float(kQuantaPerUnit + steps) / float(kQuantaPerUnit); }
 
 private:
-    int steps_ = 0, maxSteps_ = kQuantaPerUnit;   // k_max 2.0
+    int steps_ = 0, maxSteps_ = static_cast<int>((kDefaultMax - 1.0f) * kQuantaPerUnit);   // k_max 4.0
     bool inSettlement_ = false, clampPending_ = false;
     uint32_t over_ = 0, under_ = 0, sparse_ = 0;
     uint64_t lastStepMs_ = 0;

@@ -14,7 +14,8 @@ NativeTimingSnapshot cpu(uint64_t seq,uint64_t at) {
     NativeTimingSnapshot s{};s.active=true;s.generation=7;s.firstSequence=1;s.sequence=seq;
     s.capturedAtMs=at;s.waitMs=4;s.predictedPeriodMs=11;s.haveCpu=true;
     s.applicationMs=3;s.applicationValid=true;
-    s.cpu={sizeof(s.cpu),EDVR_NATIVE_TIMING_VERSION_4,seq};s.cpu.submitMs[0]=1;s.cpu.submitMs[1]=2;s.cpu.baseDisplayHz=90;
+    s.cpu={sizeof(s.cpu),EDVR_NATIVE_TIMING_VERSION_5,seq};s.cpu.submitMs[0]=1;s.cpu.submitMs[1]=2;s.cpu.baseDisplayHz=90;
+    s.cpu.callerWorkMs=14.4;s.cpu.callerWorkValid=1;   // the governor's signal; the monitor never reads it
     return s;
 }
 GpuFrameSnapshot gpu(uint64_t seq,uint64_t at,uint64_t age=0,double ms=5) {
@@ -125,6 +126,27 @@ void displayBase() {
     h.observe(true,t,gpu(6,10050),10050);
     check(NativePerfHistory::displayThrottled(h.predictedPeriod(10050),h.basePeriodMs(10050)),
           "new session resets the base to the new session's prediction");
+}
+// Version 5 adds the caller work per cycle for the settlement governor; the
+// monitor keeps reading what it read. App CPU stays applicationMs, never the
+// caller work, and the base display rate reads from a version 5 frame as from
+// a version 4 one; a version 4 frame (older host: no caller work) reads the
+// same way.
+void callerWorkCrossing() {
+    NativePerfHistory h;
+    auto t=cpu(1,10000);   // version 5: caller work 14.4 ms beside app 3 ms
+    h.observe(true,t,gpu(1,10000),10000);
+    check(t.cpu.version==EDVR_NATIVE_TIMING_VERSION_5&&t.cpu.callerWorkValid==1&&
+          h.applicationCpu(10000,200).count==1&&approx(h.applicationCpu(10000,200).meanMs,3),
+          "version 5: the monitor's app CPU stays applicationMs, not the caller work");
+    check(h.basePeriodMs(10000)>11.0&&h.basePeriodMs(10000)<11.2,
+          "version 5: the base display rate still reads (version 4 and later)");
+    t=cpu(2,10010);t.cpu.version=EDVR_NATIVE_TIMING_VERSION_4;t.cpu.size=EDVR_NATIVE_TIMING_FRAME_SIZE_4;
+    t.cpu.callerWorkMs=0;t.cpu.callerWorkValid=0;
+    h.observe(true,t,gpu(2,10010),10010);
+    check(h.applicationCpu(10010,200).count==2&&approx(h.applicationCpu(10010,200).meanMs,3)&&
+          h.basePeriodMs(10010)>11.0&&h.basePeriodMs(10010)<11.2,
+          "version 4 (no caller work): app CPU and the base rate read as before");
 }
 void graphs() {
     NativePerfHistory h;for(uint64_t i=1;i<=950;++i){auto t=cpu(i,10000+i);t.cpu.submitMs[0]=double(i);t.cpu.submitMs[1]=0;t.applicationMs=double(i);h.observe(true,t,gpu(i,10000+i,0,double(i)+100),10000+i);}
@@ -305,6 +327,6 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=2)return 2;
     if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_perf_history_test: dry-run (no runtime, device or files)");return 0;}
     if(std::wcscmp(argv[1],L"--self-test"))return 2;
-    averages();invalidation();agesAndValues();displayBase();graphs();benchmarkWindows();benchmarkAdmission();
+    averages();invalidation();agesAndValues();displayBase();callerWorkCrossing();graphs();benchmarkWindows();benchmarkAdmission();
     std::printf("native_perf_history_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

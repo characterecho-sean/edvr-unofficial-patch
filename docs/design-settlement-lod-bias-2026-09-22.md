@@ -1,20 +1,20 @@
 # Design: an EDVR-side LOD bias at the settlement part test
 
 Offline measurement, 2026-09-22 (sections 1-7); the shadow governor built
-on it 2026-09-23, not flown (section 8). Capture: eye run 165433
+on it 2026-09-23 (section 8: flown once). Capture: eye run 165433
 (Cranfield, parked on the pad, Pimax OpenXR, 3070x3032 an eye, game build
 332841), frame 2, 18,267 pool eye draws (EB52 10,690).
 
 ## Status
 
-- **State (2026-09-23):** the SHADOW GOVERNOR is built and gated, NOT
-  FLOWN (section 8): `fix.settlement_detail = auto` derives k every frame
-  from the engine's own signals, re-runs the part test and the record test
-  with ctx+0x30 x k, and logs what would change -- it never acts. EDVRGATE
-  v3 records each part's LOD table once per pointer, so the LOD-distance
-  half below becomes exact from one capture. Offline so far: the
-  screen-size half is priced exactly and is a weak lever; the slider's
-  half is bounded, not priced.
+- **State (2026-09-23):** the SHADOW GOVERNOR (section 8) flew once
+  (07:25 UTC, parked, 45 fps): k never left 1, because its frame work was
+  the pre-submit phase (8.4 ms) while the caller thread worked 14.4 ms a
+  cycle against 11.1. FIXED, NOT FLOWN: frame work = the runtime's caller
+  work per cycle (timing ABI v5; v3/v4 fall back to app work, named so);
+  k_max default 4.0 (s saturates at 1.5); the summary prints s x k. It
+  never acts. The v3 tables price the LOD-distance half exactly (section
+  8); the screen-size half is a weak lever.
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
   +0x550 = 1/fy, the tangent of one pixel (0.000834297 here), B = +0x560
@@ -28,8 +28,9 @@ on it 2026-09-23, not flown (section 8). Capture: eye run 165433
   per model (3,511 models, 0 t0 conflicts, 0 nibble inversions); no global
   table fits. Nibbles and t0 are data, not reproducible.
 - **Slider:** LODDistanceScale acts only on s: ctx+0x30 = 2 -
-  LODDistanceScale (floor 0.1 -> s = 1.9). +0x550/+0x560 are the camera
-  projection's pixel size; the screen-size term has no s.
+  LODDistanceScale above its floor; the engine holds s = 1.5 at 0.001
+  (reader run 012514), so the slider saturates at 1.5. +0x550/+0x560 are
+  the camera projection's pixel size; the screen-size term has no s.
 - **Elasticity** (exact join; ms = share x 6.3 post-cut / x 8.5 pre-cut):
 
 | k | screen size x k (exact): draws A+B, share, ms post/pre | LOD distance x k (the slider's form): bounds |
@@ -54,14 +55,13 @@ on it 2026-09-23, not flown (section 8). Capture: eye run 165433
 - **Leg C (engine arc, 2026-09-23):** LODDistanceScale 0.001 left the
   parked view at 18.9k eye draws, as section 5 predicts: ruled out there
   as a draw lever (section 6).
-- **Open:** the first shadow flight (section 8's checklist); the tables
-  from one v3 capture (BUILT: *(entry+8) per verified row, 0x80 bytes once
-  per pointer; `--lod-bias` exact where a row names one).
+- **Open:** the shadow flight on the caller-work signal (section 8's
+  checklist).
 - **Ruled out:** see section 6.
-- **Next:** fly `fix.settlement_detail = auto` parked at Cranfield, with
-  `advanced.cull_gate_capture = 1` and one eye run for the v3 tables; read
-  section 8's checklist. Whether any k is worth ACTING on is Sean's call
-  after that flight.
+- **Next:** fly `fix.settlement_detail = auto` parked at Cranfield on a
+  build with timing v5 (the configure/first line must read `frame work =
+  caller work per cycle`); read section 8's checklist. Whether any k is
+  worth ACTING on is Sean's call after that flight.
 
 ## 1. The test and what the decompile leaves undefined
 
@@ -164,6 +164,12 @@ it only to 0.1..27.2% of the pool eye draws.
 ruled out: LODDistanceScale as a draw-count lever at the parked cockpit
 view, because 0.001 left the census at 18.8-18.9k eye draws a frame
 (engine arc 2026-09-23, Leg C; the same count as at 1.0).
+ruled out: s = 2 - LODDistanceScale below the slider's floor, because
+the engine holds s = 1.5 at 0.001 (reader run 012514's view dump).
+ruled out: NativeTimingSnapshot::applicationMs as the governor's frame
+work, because it is the pre-submit phase only: the first shadow flight
+read 8.4 ms of it against 14.4 ms of caller work a cycle (period 11.1),
+and k never left 1 (section 8).
 
 ## 7. Sources
 
@@ -174,24 +180,48 @@ xref (session scratch, lodbias\ghidra). Scripts: session scratch lodbias\
 join and truth. Tool: `python tools\cull_gate_probe.py <pool> 165433
 --lod-bias 1,1.25,1.5,2,3,4,6,8` reproduces section 3 and the bounds.
 
-## 8. Shadow governor (2026-09-23): built and gated, NOT FLOWN
+## 8. Shadow governor (2026-09-23): flown once, signal fixed, NOT FLOWN since
 
 `fix.settlement_detail` = `game` (default: off, nothing observed) |
 `auto` (this build: shadow only) | `reduced` (reserved: behaves as auto,
-logged as such); `advanced.settlement_detail_max` = k_max (default 2.0,
-held to 1..4). Both ship commented out. Code: src\d3d11\lod_governor.*,
-the hook side in kinematic_eval_hook.cpp, rig tools\lod_governor_test.
+logged as such); `advanced.settlement_detail_max` = k_max (default 4.0
+since the first flight, was 2.0; held to 1..4). Both ship commented out.
+Code: src\d3d11\lod_governor.*, the hook side in kinematic_eval_hook.cpp,
+rig tools\lod_governor_test.
 
 **Signals**, once a frame at vScreenFrameBoundary (vscreen.cpp:5339, the
 caller thread):
 
 | signal | source |
 |---|---|
-| builder records a frame | the draw-item builder bracket, one call per engine record (kinematic_eval_hook.cpp:516 -> lod_governor.cpp:673); owner-thread counter slots, differenced at the boundary |
-| part tests a frame | FUN_1442B3FC0's relay after its forward (kinematic_eval_hook.cpp:577 -> lod_governor.cpp:704) |
-| frame work | NativeTimingSnapshot::applicationMs (native_timing.h:14, native_timing.cpp:341-347): WALL ms on the producer (the game's caller) thread from the pose wait's end to the submit plus the per-eye treatments, valid only with all four segments; the perf monitor's app CPU (perf_monitor.cpp:765). Read once per new sequence; an invalid newest frame breaks the runs (lod_governor.cpp:407) |
-| budget | 1000 / EdvrNativeTimingFrame::baseDisplayHz (v4), else the session's first predicted period (native_perf_history.cpp:122-125's rule): 11.111 ms at 90 Hz |
-| s | ctx+0x30, read by the builder observer, for the log |
+| builder records a frame | the draw-item builder bracket, one call per engine record (kinematic_eval_hook.cpp:516 -> lod_governor.cpp:773); owner-thread counter slots, differenced at the boundary |
+| part tests a frame | FUN_1442B3FC0's relay after its forward (kinematic_eval_hook.cpp:577 -> lod_governor.cpp:804) |
+| frame work | the caller work per cycle, EdvrNativeTimingFrame::callerWorkMs (timing ABI v5, src\common\native_timing.h): WALL ms on the game's caller thread from one WaitGetPoses return to the next one's entry = cycle - next_wait_roundtrip = before-first + both submit roundtrips (the waits inside them included) + between-eyes + post-second-submit, everything the period must hold. Computed where the cycle completes (frame_cycle_stats.h finishCurrent, at the NEXT wait's return; callerWorkForCurrent) and sent with the next frame's publishCpu (native_runtime_host.h), so it lags one frame and is valid only when that cycle completed whole. A v3/v4 runtime sends none: fallback NativeTimingSnapshot::applicationMs (pose wait end to submit plus the treatments, the monitor's app CPU, which keeps reading it), named `app work (pre-submit only; host older)`; afterSecond never crosses, so there is no better fallback. A v5 frame without caller work is an invalid sample, never the fallback. Read once per new sequence; an invalid newest frame breaks the runs (lod_governor.cpp:448 readWork) |
+| budget | 1000 / EdvrNativeTimingFrame::baseDisplayHz (v4 and later), else the session's first predicted period (native_perf_history.cpp:122-125's rule): 11.111 ms at 90 Hz |
+| s | ctx+0x30, read by the builder observer, for the log (s x k too) |
+
+**First flight (2026-09-23 07:25 UTC, parked at the settlement, 45
+fps).** The 30 s summaries read frame work 8.37-8.67 ms mean vs period
+11.11 ms, so k never left 1; the runtime's cycle instrument for the same
+windows read game_before_first_submit 8.24, post_second_submit_to_next_wait
+5.31, next_wait_roundtrip 7.57, cycle 21.99 ms: the caller thread worked
+21.99 - 7.57 = 14.4 ms a cycle against an 11.1 ms period. The signal was
+the pre-submit phase only (section 6's ruled-out line); it is now the
+caller work above, and every line names which figure it read.
+
+**k_max default 4.0 (reader run 012514).** The probe's view dump shows
+the engine holding s = ctx+0x30 = 1.5 at LODDistanceScale 0.001 and 1.0 at
+1.0: the slider saturates at 1.5, so section 4's `2 - slider` is wrong
+below the floor. k multiplies whatever s the game holds, so what the
+tests see is s x k, which the summary prints beside k. The recorded
+tables give the exact removal at the parked pad by effective s x k:
+
+| s x k | 1.875 | 2.25 | 3.0 | 4.5 | limit |
+|---|---|---|---|---|---|
+| pool eye draws removed | 1.9% | 6.7% | 19.2% (1.21 ms at the 6.3 ms post-cut share) | 33.5% (2.11 ms) | ~34%: the building shells' tables have t0 = 21.38 and never drop |
+
+From the game's maximum setting (s = 1.0), s x k = 3 needs k = 3, past
+the old 2.0 ceiling; hence the default 4.0, still held to 1..4.
 
 **Policy** (lod_governor.cpp:37; constants in lod_governor.h, no keys):
 k = 1 + 0.05 n up to k_max. Up one step while the frame has >= 200 builder
@@ -200,10 +230,10 @@ period; down one after 30 samples each more than 1.00 ms under it; at most
 one step per 1000 ms; k = 1 at once after 30 consecutive frames under 150
 records (in at 200, out under 150). A frame with no new sample holds both
 runs, an invalid one breaks them, a lowered k_max clamps at once. A full
-ramp to 2.0 takes ~20 s.
+ramp to 4.0 takes ~60 s (one step a second after the first 30 samples).
 
 **The shadow** (worker threads, read-only):
-- Per part (lod_governor.h:113-195), the engine's own inputs: c =
+- Per part (lod_governor.h:131-213), the engine's own inputs: c =
   *param_1[0], r = *param_1[1], camera/A/B = view +0x540/+0x550/+0x560, s
   = *(param_1[5]+0x30), the table = param_1[4] (the builder's copy). d =
   rsqrtps(rcpps((dx*dx + dy*dy) + dz*dz)), the engine's SSE approximations;
@@ -233,18 +263,27 @@ ramp to 2.0 takes ~20 s.
   installed for the governor too). The evaluator, job brackets and direct
   producers stay dark; the bucket census runs only with the eval gate.
 
-**Log lines** (the rig's `--self-test --print-log` shows them all):
+**Log lines** (the rig's `--self-test --print-log` shows them all; the
+rig holds every line to the real log's 1166 characters):
 configure `settlement detail: shadow governor on (auto: shadow, never
-acts) -- k in [1, 2.00] ... Hooks: draw-item builder FUN_1442B4420
-hooked, per-part test FUN_1442B3FC0 hooked`; `reduced` reads `(reduced is
-reserved and behaves as auto in this build: shadow, never acts)`; `game`
-reads `settlement detail: off (...)`; a refused attach `could not attach
-its engine hooks (<status>)`. A step, at most one line per 5 s (skipped
-steps counted): `settlement detail (shadow, never acts): k 1.25 -> 1.30,
-up: ...; 679 builder records, frame work 12.41 ms vs period 11.11 ms`.
-Every 30 s a header (k now, window min..max, steps; records and part
-tests a frame, mean and max; frame work mean vs period, samples over and
-under; s; the eye bits), one line per eye (parts tested and passed; would
+acts) -- k in [1, 4.00] ...; frame work = caller work per cycle (runtime
+timing v5: ...). ... Hooks: draw-item builder FUN_1442B4420 hooked,
+per-part test FUN_1442B3FC0 hooked` (before any runtime frame: `frame
+work = caller work per cycle if the runtime sends it (timing v5), else app
+work (pre-submit only; host older); the first runtime frame decides and a
+line names it`); that line, once: `settlement detail: frame work = caller
+work per cycle (runtime timing v5: ...)` or `... = app work (pre-submit
+only; host older: runtime timing v4 sends no caller work, ...)`; `reduced`
+reads `(reduced is reserved and behaves as auto in this build: shadow,
+never acts)`; `game` reads `settlement detail: off (...)`; a refused
+attach `could not attach its engine hooks (<status>)`. A step, at most one
+line per 5 s (skipped steps counted): `settlement detail (shadow, never
+acts): k 1.25 -> 1.30, up: ...; 679 builder records, frame work = caller
+work per cycle: 14.41 ms vs period 11.11 ms`. Every 30 s a header (k now
+and `effective s x k`, window min..max, steps; records and part tests a
+frame, mean and max; `frame work = <signal>:` mean vs period, samples
+over and under, invalid, caller work absent; s; the eye bits), one line
+per eye (parts tested and passed; would
 drop per frame, mean and max; would change level; the histogram; records
 passed, would lose the eye, would change; disagreements at k = 1) and one
 for the other views (records not dispatched, dispatch disagreements,
@@ -274,20 +313,25 @@ matches the copy); counters kept/dropped. The reader lists them
 term and the pick with each row's own table, and makes `--lod-bias`'s
 LOD-scale and LOD-distance forms exact for those rows. v1/v2 still read.
 
-**What the first flight must show** (parked at Cranfield, the Leg C
+**What the next flight must show** (parked at Cranfield, the Leg C
 pose):
 1. `edvr_log.py --expect-build HEAD` exits 0; the configure line with
-   both hooks `hooked`.
+   both hooks `hooked`; `frame work = caller work per cycle (runtime
+   timing v5` in it or in the line after. `app work (pre-submit only;
+   host older)` means a stale openvr_api.dll: not evidence.
 2. Headers with ~679 builder records a frame (>= 200 on nearly every
-   frame), ~34k part tests, eye bits 1 / 22 named, s 1.000.
-3. Frame work over the period (Leg C: caller 11.9 ms) -> step lines and k
-   2.00 within ~25 s; if k stays 1, the header's reason is the finding.
+   frame), ~34k part tests, eye bits 1 / 22 named, s 1.000 (1.500 at the
+   slider's floor), and `effective s x k` = s times k.
+3. `frame work = caller work per cycle:` over the period (first flight
+   14.4 ms, Leg C 11.9 ms) with `caller work absent` near 0 -> step lines
+   and k 4.00 within ~60 s; its mean should match the runtime's cycle -
+   next_wait_roundtrip for the same window. If k stays 1, the header's
+   reason is the finding.
 4. Disagreements at k = 1: parts 0 and records 0 per eye, or a handful at
    thresholds. More, and nothing else on the eye lines is evidence.
 5. Per eye ~11.8k parts tested, ~10.35k passed (165433 frame 2, eye A:
-   11,771 / 10,354); the would-drop parts at k = 2 and their histogram
-   (parts, not draws: the v3 capture's `--lod-bias` turns them into draws
-   against section 3's bounds).
+   11,771 / 10,354); the would-drop parts at the window's k and their
+   histogram (parts, not draws: read them against the s x k table above).
 6. Records not dispatched at all: few expected here (a record any
    orthographic cascade admits stays dispatched); every one is a whole
    record's parts in every view, the biggest lever, and is read first.

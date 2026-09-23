@@ -8,11 +8,21 @@ template<class Check> void runFrameCycleCases(Check check) {
   shape.outputHeight[0]=shape.outputHeight[1]=3264;shape.generation=7;shape.featureEpoch=3;shape.shouldRender=1;shape.sceneReady=1;
   auto wait=[&](uint64_t seq,uint64_t us,uint64_t ms,uint32_t thread=11){auto t=c.waitCallerBegin(us,thread);c.waitOwnerBegin(t,us+100);c.waitOwnerEnd(t,us+300);c.waitCallerEnd(t,seq,us+500,ms,thread,shape,true);};
   auto submit=[&](uint64_t seq,unsigned eye,uint64_t us,uint32_t thread=11){auto t=c.submitCallerBegin(eye,us,thread);c.submitOwnerBegin(t,us+100);c.submitOwnerEnd(t,us+300);c.submitCallerEnd(t,eye,seq,us+500,thread,0.25,true);};
-  wait(100,1000,1000);submit(100,1,3000);submit(100,0,5000);wait(101,16000,16000);
+  double callerWork=-1;
+  wait(100,1000,1000);
+  check(!c.callerWorkForCurrent(callerWork),"frame-cycle caller work absent before any cycle completes");
+  submit(100,1,3000);submit(100,0,5000);wait(101,16000,16000);
   check(c.firstComplete(),"frame-cycle reverse-eye complete");
+  // EdvrNativeTimingFrame v5 callerWorkMs: cycle 15.0 - next wait 0.5 = the
+  // wait return at 1500 us to the next wait's entry at 16000 us, handed to
+  // the cycle that next wait return opened (101), whose frame publishes it.
+  check(c.callerWorkForCurrent(callerWork)&&std::fabs(callerWork-14.5)<1e-9,
+    "frame-cycle caller work is cycle minus next wait, for the cycle in progress");
   // Delayed owner body remains nested while the exclusive roundtrip closes.
   submit(101,0,18000);submit(101,1,24000);wait(102,31000,31000);
   check(c.missingForTest()[FrameCycleStats::BadClock]==0,"frame-cycle delayed owner ordered");
+  check(c.callerWorkForCurrent(callerWork)&&std::fabs(callerWork-14.5)<1e-9,
+    "frame-cycle caller work follows each completed cycle");
   FrameCycleStats::Report report{};check(c.takeReport(report),"frame-cycle 30 second report reachable");
   check(report.valid==2&&report.firstSequence==100&&report.lastSequence==101,"frame-cycle sequence coverage");
   check(report.residual.mean==0.0&&report.cycle.mean>0,"frame-cycle paired partition closes");
@@ -24,6 +34,8 @@ template<class Check> void runFrameCycleCases(Check check) {
   // Deliberately different timing/provider sequence is irrelevant: submits use
   // the compositor sequence published by the successful Wait return.
   submit(102,1,33000);submit(102,0,35000);wait(103,62000,62000);
+  check(c.callerWorkForCurrent(callerWork)&&std::fabs(callerWork-30.5)<1e-9,
+    "frame-cycle caller work stands across a 30-second window boundary");
 
   auto invalidStorage=std::make_unique<FrameCycleStats>();auto& invalid=*invalidStorage;auto wt=invalid.waitCallerBegin(1000,1);invalid.waitOwnerBegin(wt,1100);
   invalid.waitOwnerEnd(wt,1200);invalid.waitCallerEnd(wt,1,1300,1,1,shape,true);
@@ -31,6 +43,7 @@ template<class Check> void runFrameCycleCases(Check check) {
   invalid.submitOwnerBegin(a,1500);invalid.submitOwnerEnd(a,1600);invalid.submitCallerEnd(a,0,1,1700,2,0.1,true);
   check(invalid.missingForTest()[FrameCycleStats::WrongThread]>0,"frame-cycle wrong caller rejected");
   invalid.noteDirectOwner();check(invalid.missingForTest()[FrameCycleStats::DirectOwner]>0,"frame-cycle direct owner counted");
+  check(!invalid.callerWorkForCurrent(callerWork),"frame-cycle a failed cycle carries no caller work");
   auto duplicateStorage=std::make_unique<FrameCycleStats>();auto& duplicate=*duplicateStorage;auto d=duplicate.waitCallerBegin(1000,1);duplicate.waitOwnerBegin(d,1010);duplicate.waitOwnerEnd(d,1020);duplicate.waitCallerEnd(d,9,1030,1,1,shape,true);
   auto s=duplicate.submitCallerBegin(0,1100,1);duplicate.submitOwnerBegin(s,1110);duplicate.submitOwnerEnd(s,1120);duplicate.submitCallerEnd(s,0,9,1130,1,0.01,true);
   check(duplicate.submitCallerBegin(0,1200,1)==0&&duplicate.missingForTest()[FrameCycleStats::DuplicateEye]>0,"frame-cycle duplicate eye rejected");
@@ -42,8 +55,10 @@ template<class Check> void runFrameCycleCases(Check check) {
   auto zw=zeroGap.waitCallerBegin(1230,4);zeroGap.waitOwnerBegin(zw,1240);zeroGap.waitOwnerEnd(zw,1250);zeroGap.waitCallerEnd(zw,21,1260,2,4,shape,true);
   check(zeroGap.firstComplete()&&zeroGap.missingForTest()[FrameCycleStats::BadClock]==0,"frame-cycle zero post-submit gap valid");
   FrameCycleStats::Completed zeroCompleted{};check(zeroGap.takeCompleted(zeroCompleted)&&zeroCompleted.sequence==20,"completed cycle extracted once");
+  check(zeroGap.callerWorkForCurrent(callerWork)&&std::fabs(callerWork-0.2)<1e-9,"frame-cycle zero post-submit gap caller work");
   auto transition=zeroGap.waitCallerBegin(1270,4);zeroGap.waitOwnerBegin(transition,1280);zeroGap.waitOwnerEnd(transition,1290);zeroGap.waitCallerEnd(transition,22,1300,3,4,changed,true);
   check(!zeroGap.takeCompleted(zeroCompleted),"scope-changed cycle has no completed marker");
+  check(!zeroGap.callerWorkForCurrent(callerWork),"frame-cycle a scope change hands on no caller work");
   FrameCycleStats::Report transitionReport{};check(zeroGap.takeReport(transitionReport)&&transitionReport.missing[FrameCycleStats::ShapeChange]>0,"frame-cycle transition flushes prior scope");
   auto badSeq=zeroGap.submitCallerBegin(0,1400,4);zeroGap.submitOwnerBegin(badSeq,1410);zeroGap.submitOwnerEnd(badSeq,1420);zeroGap.submitCallerEnd(badSeq,0,9999,1430,4,0.01,true);
   check(zeroGap.missingForTest()[FrameCycleStats::BadSequence]>0,"frame-cycle mismatched sequence rejected");

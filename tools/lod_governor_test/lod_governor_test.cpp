@@ -9,8 +9,14 @@
 // reject, a foreign caller and a wild pointer; the per-thread counters under
 // four threads; and the frame boundary end to end against a stub native
 // timing feed and a capturing log: the configure line, the step lines, the
-// 30-second summaries, "k stayed 1", and nothing at all while off. It then
-// times both observers (the cost the design doc quotes). No hooks, no game.
+// 30-second summaries, "k stayed 1", and nothing at all while off. The frame
+// work is the runtime's caller work per cycle (timing v5), never the app work
+// beside it -- the first shadow flight's 8.4 ms app / 14.4 ms caller frames
+// must step k up -- and a v3/v4 runtime falls back to the app work, named as
+// such in every line; a v5 frame without caller work is an invalid sample.
+// The summary prints the effective s x k, and every line fits the real log's
+// line. It then times both observers (the cost the design doc quotes). No
+// hooks, no game.
 #include <windows.h>
 #include <atomic>
 #include <cmath>
@@ -99,6 +105,11 @@ void table(std::vector<uint8_t>& b, size_t off, std::initializer_list<float> t, 
 void casePolicy() {
     using namespace lodgov;
     Policy p;
+    // The default ceiling is 4.0: k multiplies the s the game holds, the
+    // slider's floor is s = 1.5 and its maximum detail s = 1.0, and the LOD
+    // note's table needs s x k = 3 from there.
+    check(kDefaultMax == 4.0f && p.maxSteps() == 60 && p.kMax() == 4.0f && p.k() == 1.0f,
+          "policy: the default k_max is 4.0 (sixty steps); k starts at 1");
     p.configure(2.0f);
     check(p.maxSteps() == 20 && p.k() == 1.0f && p.kMax() == 2.0f, "policy: k_max 2.0 is twenty steps of 0.05; k starts at 1");
     uint64_t t = 1000;
@@ -372,7 +383,13 @@ void caseThreads() {
     setK(1.0f);
 }
 
-void setTiming(uint64_t seq, uint64_t now, double ms) {
+// A runtime frame as the graphics half's snapshot holds it, with frame work
+// ms. Version 5 (the default): caller work per cycle ms, beside an app work
+// 6 ms lower -- the first shadow flight's shape (8.4 app, 14.4 caller) -- so a
+// check that reads ms proves the governor read the caller work. Versions 3
+// and 4 carry no caller work (publishCpu zeroes what an older frame lacks):
+// the app work is ms; version 3 has no base rate either.
+void setTiming(uint64_t seq, uint64_t now, double ms, uint32_t version = EDVR_NATIVE_TIMING_VERSION_5) {
     g_timing = NativeTimingSnapshot{};
     g_timing.active = g_timing.haveCpu = g_timing.applicationValid = true;
     g_timing.generation = 1;
@@ -380,23 +397,32 @@ void setTiming(uint64_t seq, uint64_t now, double ms) {
     g_timing.sequence = seq;
     g_timing.capturedAtMs = now;
     g_timing.predictedPeriodMs = 1000.0 / 90.0;
-    g_timing.applicationMs = ms;
-    g_timing.cpu.size = sizeof(g_timing.cpu);
-    g_timing.cpu.version = EDVR_NATIVE_TIMING_VERSION_4;
+    g_timing.cpu.version = version;
     g_timing.cpu.sequence = seq;
-    g_timing.cpu.baseDisplayHz = 90.0f;
+    if (version >= EDVR_NATIVE_TIMING_VERSION_5) {
+        g_timing.cpu.size = sizeof(g_timing.cpu);
+        g_timing.cpu.callerWorkMs = ms;
+        g_timing.cpu.callerWorkValid = 1;
+        g_timing.applicationMs = ms > 6.0 ? ms - 6.0 : 0.0;
+    } else {
+        g_timing.cpu.size = version >= EDVR_NATIVE_TIMING_VERSION_4 ? EDVR_NATIVE_TIMING_FRAME_SIZE_4
+                                                                    : EDVR_NATIVE_TIMING_FRAME_SIZE_3;
+        g_timing.applicationMs = ms;
+    }
+    if (version >= EDVR_NATIVE_TIMING_VERSION_4) g_timing.cpu.baseDisplayHz = 90.0f;
 }
 
 void caseBoundary() {
     Fake f;
     uint64_t t = 50000, seq = 10;
-    auto frames = [&](uint32_t n, uint32_t records, uint32_t parts, double ms) {
+    auto frames = [&](uint32_t n, uint32_t records, uint32_t parts, double ms,
+                      uint32_t version = EDVR_NATIVE_TIMING_VERSION_5) {
         for (uint32_t i = 0; i < n; ++i) {
             for (uint32_t r = 0; r < records; ++r)
                 if (g_obsBuilder) g_obsBuilder(0, f.ctxAt(), 0, f.nibbles());
             for (uint32_t p = 0; p < parts; ++p)
                 if (g_obsPart) g_obsPart(f.items(), f.outAt(), f.view[p & 1], true);
-            setTiming(++seq, t, ms);
+            setTiming(++seq, t, ms, version);
             frameBoundaryAt(t);
             t += 11;
         }
@@ -411,25 +437,38 @@ void caseBoundary() {
     check(g_lines.size() == at, "boundary: while off, 33 s of frames log nothing (never ran reads as silence)");
     applyConfig("game", 2.0f, t);
     check(g_lines.size() == at, "boundary: the same value again is not re-logged");
-    // auto: the configure line, then the ramp.
+    // auto: the configure line, then the ramp. No runtime frame is published
+    // yet, so the configure line cannot name the signal and says who will.
+    g_timing = NativeTimingSnapshot{};
     at = g_lines.size();
     applyConfig("auto", 2.0f, t);
     check(g_live.load() && g_attaches == 1 && g_obsBuilder && g_obsPart, "boundary: auto attaches the observers");
     check(logged("settlement detail: shadow governor on (auto: shadow, never acts)", at) &&
               logged("per-part test FUN_1442B3FC0 hooked", at),
           "boundary: the configure line says shadow, never acts, and the hooks");
+    check(logged("frame work = caller work per cycle if the runtime sends it (timing v5), else app work (pre-submit "
+                 "only; host older); the first runtime frame decides and a line names it", at),
+          "boundary: before any runtime frame the configure line says the first frame names the signal");
     at = g_lines.size();
-    frames(2800, 250, 20, 12.5);   // 30.8 s, over budget, 250 records a frame
+    frames(2800, 250, 20, 12.5);   // 30.8 s, 250 records a frame; caller work 12.5 ms over budget, app work 6.5 under
+    check(countLogged("settlement detail: frame work = caller work per cycle (runtime timing v5: the caller thread "
+                      "from one pose wait's return to the next one's entry", at) == 1,
+          "boundary: the first version 5 frame names the signal, once");
     check(countLogged("settlement detail (shadow, never acts): k 1.00 -> 1.05, up", at) == 1,
           "boundary: the first step is logged");
     check(countLogged("settlement detail (shadow, never acts): k ", at) >= 4 &&
               countLogged("settlement detail (shadow, never acts): k ", at) <= 7,
           "boundary: step lines are rate-limited to one per 5 s");
     check(logged("steps since the last line", at), "boundary: a rate-limited line counts the steps it skipped");
-    check(logged("k now 2.00 (window 1.00..2.00 of max 2.00; 20 up", at), "boundary: the summary's k, range and steps");
+    check(logged("250 builder records, frame work = caller work per cycle: 12.50 ms vs period 11.11 ms", at),
+          "boundary: a step line names the signal it stepped on");
+    check(logged("k now 2.00, effective s x k 2.000 (window 1.00..2.00 of max 2.00; 20 up", at),
+          "boundary: the summary's k, effective s x k, range and steps");
     check(logged("builder records/frame 250.0 (max 250", at) && logged("part tests/frame 20.0", at),
           "boundary: the summary's density means");
-    check(logged("frame work 12.50 ms mean vs period 11.11 ms", at), "boundary: the summary's frame work against the period");
+    check(logged("frame work = caller work per cycle: 12.50 ms mean vs period 11.11 ms", at) &&
+              logged("invalid 0, caller work absent 0)", at),
+          "boundary: the summary's frame work is the caller work (not the 6.50 ms app work beside it) vs the period");
     check(logged("eye views bits 1 / 22", at), "boundary: the summary names the eyes");
     check(logged("settlement detail (shadow) eye A (view bit 1 now): parts tested 10.0/frame, engine passed 10.0", at) &&
               logged("settlement detail (shadow) eye B (view bit 22 now)", at),
@@ -439,12 +478,27 @@ void caseBoundary() {
     check(logged("settlement detail (shadow) other views:", at) && logged("would not be called for at all", at),
           "boundary: the other-views line");
     check(!logged("k stayed 1", at), "boundary: a window that stepped does not say k stayed 1");
+    // The effective LOD scale is the game's s times k, not k: at the slider's
+    // floor the engine holds s = 1.5, and k 2 there is s x k 3 (the LOD note's
+    // table is keyed by it). The k = 1 recompute disagrees with the fake's
+    // verdicts at this s; only the header is read here.
+    put(f.ctx, 0x30, 1.5f);
+    at = g_lines.size();
+    frames(2800, 250, 20, 12.5);
+    check(logged("k now 2.00, effective s x k 3.000 (window 2.00..2.00", at) &&
+              logged("LOD scale s (ctx+0x30) 1.500", at),
+          "boundary: the summary prints the effective s x k beside k, from the engine's s");
+    check(countLogged("settlement detail: frame work = ", at) == 0,
+          "boundary: the signal line is not repeated while the runtime's version holds");
+    put(f.ctx, 0x30, 1.0f);
     // A lowered k_max: logged again, clamps at the next frame.
     at = g_lines.size();
     applyConfig("auto", 1.5f, t);
     frames(1, 250, 0, 12.5);
     check(logged("k in [1, 1.50]", at) && logged("clamped to the new advanced.settlement_detail_max", at),
           "boundary: a lowered k_max re-logs the configure line and clamps");
+    check(logged("; frame work = caller work per cycle (runtime timing v5: the caller thread", at),
+          "boundary: once a runtime frame has said which, the configure line names the signal");
     // reduced: reserved, behaves as auto, says so.
     at = g_lines.size();
     applyConfig("reduced", 1.5f, t);
@@ -456,12 +510,16 @@ void caseBoundary() {
     check(!g_live.load() && g_detaches == 1 && !g_obsBuilder && logged("settlement detail (shadow, never acts): ", at) &&
               logged("settlement detail: off", at),
           "boundary: switching off logs the partial window and detaches");
-    // On again with nothing built: k stuck at 1, and the summary says why.
+    // On again with nothing built: k stuck at 1, and the summary says why --
+    // and, with no LOD scale ever read, that s x k is unknown.
+    g_scaleBits.store(0);
     at = g_lines.size();
     applyConfig("auto", 2.0f, t);
     frames(2800, 0, 0, 12.5);
     check(logged("k stayed 1: no draw-item builder calls", at) && !logged("eye A (view bit", at),
           "boundary: no builder calls -> the header says k stayed 1 and no eye lines");
+    check(logged("k now 1.00, effective s x k unknown (no LOD scale read yet) (window", at),
+          "boundary: no LOD scale read -> the effective s x k says unknown, not 0");
     at = g_lines.size();
     frames(2800, 250, 20, 10.5);   // dense, inside the margin
     check(logged("k stayed 1: the frame work never ran 0.30 ms over the period", at), "boundary: within budget -> why k stayed 1");
@@ -476,9 +534,65 @@ void caseBoundary() {
         frameBoundaryAt(t);
         t += 11;
     }
-    check(logged("over 0 samples", at) && logged("invalid 2729)", at) &&
+    check(logged("over 0 samples", at) && logged("invalid 2729, caller work absent 0)", at) &&
               logged("k stayed 1: no valid frame-work sample from the native runtime", at),
           "boundary: invalid runtime frames are counted and hold k at 1");
+    applyConfig("game", 2.0f, t);
+    // THE DEFECT the caller work fixes -- the first shadow flight (2026-09-23
+    // 07:25 UTC, parked at the settlement, 45 fps): app work 8.37-8.67 ms,
+    // caller work 14.4 ms (cycle 21.99 - next wait 7.57), period 11.11. On the
+    // app figure k never left 1; on the caller work, the same frames step up.
+    applyConfig("auto", 2.0f, t);
+    at = g_lines.size();
+    frames(2800, 250, 20, 14.4);   // version 5: caller 14.4 ms, app 8.4 ms beside it
+    check(logged("frame work = caller work per cycle: 14.40 ms mean vs period 11.11 ms", at) &&
+              logged("settlement detail (shadow, never acts): k 1.00 -> 1.05, up", at) && !logged("k stayed 1", at),
+          "boundary: the first flight's frames (caller 14.4 ms, app 8.4 ms) step k up on the caller work");
+    applyConfig("game", 2.0f, t);
+    // A version 5 frame whose runtime could not close the cycle before it
+    // carries no caller work: an invalid sample, never the app work beside it
+    // (the two figures are never mixed in one run).
+    applyConfig("auto", 2.0f, t);
+    at = g_lines.size();
+    for (uint32_t i = 0; i < 2800; ++i) {
+        for (uint32_t r = 0; r < 250; ++r) g_obsBuilder(0, f.ctxAt(), 0, f.nibbles());
+        setTiming(++seq, t, 14.4);
+        g_timing.cpu.callerWorkValid = 0;
+        g_timing.cpu.callerWorkMs = 0;
+        frameBoundaryAt(t);
+        t += 11;
+    }
+    check(logged("over 0 samples (over by > 0.30 ms: 0, under by > 1.00 ms: 0, invalid 2729, caller work absent 2729)",
+                 at) &&
+              logged("k stayed 1: no valid frame-work sample from the native runtime", at),
+          "boundary: a version 5 frame without caller work is an invalid sample, counted as such");
+    applyConfig("game", 2.0f, t);
+    // An older runtime (timing v4): no caller work crosses, the app work
+    // stands in, and every line says so. At the first flight's 8.4 ms app
+    // work it holds k at 1 -- the defect, reproduced on the fallback.
+    applyConfig("auto", 2.0f, t);
+    at = g_lines.size();
+    frames(2800, 250, 20, 8.4, EDVR_NATIVE_TIMING_VERSION_4);
+    check(countLogged("settlement detail: frame work = app work (pre-submit only; host older: runtime timing v4 sends "
+                      "no caller work", at) == 1,
+          "boundary: a version 4 runtime is named once, as the fallback");
+    check(logged("frame work = app work (pre-submit only; host older): 8.40 ms mean vs period 11.11 ms", at) &&
+              logged("k stayed 1: the frame work never ran 0.30 ms over the period", at),
+          "boundary: the fallback's summary names the app work; at the first flight's 8.4 ms it holds k at 1");
+    at = g_lines.size();
+    applyConfig("auto", 1.5f, t);
+    check(logged("; frame work = app work (pre-submit only; host older: runtime timing v4 sends no caller work", at),
+          "boundary: the configure line names the fallback once a runtime frame has said which");
+    applyConfig("game", 2.0f, t);
+    // Version 3: no base rate either -- the session's first predicted period
+    // is the budget -- and an over-budget app work still steps.
+    applyConfig("auto", 2.0f, t);
+    at = g_lines.size();
+    frames(2800, 250, 20, 12.5, EDVR_NATIVE_TIMING_VERSION_3);
+    check(countLogged("runtime timing v3 sends no caller work", at) == 1 &&
+              logged("frame work = app work (pre-submit only; host older): 12.50 ms mean vs period 11.11 ms", at) &&
+              logged("frame work = app work (pre-submit only; host older): 12.50 ms vs period 11.11 ms", at),
+          "boundary: a version 3 runtime falls back to the app work against the first predicted period, and steps");
     applyConfig("game", 2.0f, t);
     // An attach refusal: off, said so, nothing counted.
     at = g_lines.size();
@@ -492,6 +606,15 @@ void caseBoundary() {
     check(logged("fix.settlement_detail = \"fast\" is not game, auto or reduced", at) && !g_live.load(),
           "boundary: an unknown value is named and treated as game");
     applyConfig("game", 2.0f, t);
+    // The configure sweep with both keys unset (the stub Config answers every
+    // default): off, and the ceiling is the compiled 4.0.
+    at = g_lines.size();
+    lodGovernorConfigure(Config::get());
+    check(!g_live.load() && g_state.kMaxCfg == 4.0f && g_state.policy.kMax() == 4.0f && g_lines.size() == at,
+          "boundary: with the keys unset the governor stays off and k_max is the compiled default 4.0");
+    applyConfig("auto", lodgov::kDefaultMax, t);
+    check(logged("k in [1, 4.00]", at), "boundary: the default ceiling reads k in [1, 4.00] in the configure line");
+    applyConfig("game", lodgov::kDefaultMax, t);
 }
 
 // The cost the design doc quotes: both observers on hot synthetic memory.
@@ -543,6 +666,15 @@ int main(int argc, char** argv) {
     caseThreads();
     caseBoundary();
     caseCost();
+    // Log::note (src/common/log.cpp) formats into 1200 bytes after a 15-byte
+    // timestamp and reserves 18 more (the truncation marker and the line end):
+    // 1166 characters is the longest message that reaches the log whole. The
+    // stub above has room for more, so check here.
+    size_t longest = 0;
+    for (const std::string& line : g_lines)
+        if (line.size() > longest) longest = line.size();
+    std::printf("lod_governor_test: longest log line %zu characters (the real log keeps 1166)\n", longest);
+    check(longest <= 1166, "log: every line fits the real log's line whole (no truncation marker in flight)");
     // --print-log: the captured log lines, for reading what a flight will print.
     if (argc > 2 && std::strcmp(argv[2], "--print-log") == 0)
         for (const std::string& line : g_lines) std::printf("  log | %s\n", line.c_str());

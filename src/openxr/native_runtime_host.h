@@ -204,7 +204,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   std::atomic<bool> timingApplicationOpen{false};
   std::atomic<uint64_t> timingApplicationSequence{0};
   unsigned timingFrameMask=0;
-  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_4};
+  EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_5};
   bool timingGpuBegun[2]{};
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
@@ -677,7 +677,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     for(unsigned i=0;i<count;++i)timing.publishDeviceGpu(samples[i]);
   }
   void timingResetFrame(uint64_t sequence) {
-    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_4};
+    timingFrame={sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_5};   // callerWork absent until the publish fills it
     timingFrame.sequence=sequence;
     const double missing=std::numeric_limits<double>::quiet_NaN();
     for(double& value:timingFrame.submitMs)value=missing;
@@ -1044,6 +1044,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(r==vr::VRCompositorError_None&&timingFrameActive) { timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask==3) {
       deviceTiming.acceptFrame(timingSequence);
       pollDeviceTiming();
+      // Version 5: the caller work of the cycle this frame's own pose wait
+      // closed (frame_cycle_stats.h, callerWorkForCurrent). The caller thread
+      // completed it at this frame's wait return, before either submit, and
+      // is parked in this submit's route now; absent when that cycle failed.
+      double callerWork=0;
+      timingFrame.callerWorkValid=frameCycles.callerWorkForCurrent(callerWork)?1u:0u;
+      timingFrame.callerWorkMs=timingFrame.callerWorkValid?callerWork:0.0;
       if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else {
         submitSample.submitMs=timingFrame.submitMs[0]+timingFrame.submitMs[1];
         submitSample.callbacks=graphicsCalls.calls-submitCallbacksBegin;
