@@ -17,9 +17,10 @@
 //
 // WHAT IT TAKES (phase 1): the post-tonemap composites -- the 2D screen's
 // composite (recognised the way the panel distance and the curved screen
-// recognise it, srv0IsPanelSized) except while the commander is on foot,
-// where that screen IS the world and stays in the picture for the temporal
-// pass (the on-foot gate, ui_layer_math.h), and every eye draw that samples an
+// recognise it, srv0IsPanelSized) except while that screen IS the world --
+// on foot, or a 3D map -- where it stays in the picture for the temporal
+// pass (the world-screen gate, ui_layer_math.h: the journal's on-foot
+// reading OR the screen's own busy depth), and every eye draw that samples an
 // interface surface ui_depth has learned (the menu / modal panel family,
 // the loading screen's composite, the rest), into an 8-bit UNORM eye
 // target, with a blend that has a premultiplied or multiplicative form.

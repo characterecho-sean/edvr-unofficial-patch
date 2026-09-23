@@ -45,6 +45,12 @@ void journalWatchSetEagerStatus(bool eager);
 bool journalFssFocusKnown();
 bool journalFssFocus();
 
+// The GuiFocus value itself (0 none, 5 station services, 6 galaxy map, 7
+// system map, 9 FSS ...), for fix.ui_quality's world-screen gate lines,
+// which name the screen a count was taken on. False under the same
+// conditions as journalFssFocusKnown.
+bool journalGuiFocus(uint32_t* focus);
+
 // Flags bit 4: supercruise, where the FSS keys actually do something.
 bool journalSupercruiseKnown();
 bool journalSupercruise();

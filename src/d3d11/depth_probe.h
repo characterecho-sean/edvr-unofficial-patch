@@ -116,6 +116,16 @@ bool depthProbeClearValueFor(ID3D11DepthStencilView* dsv, float* outClearValue, 
 // Once per frame: the per-frame bookkeeping, the readback poll, the lines.
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);
 
+// The most draws any depth target of exactly w x h took in one frame, over
+// the frame that just ended and the one before it (so the answer does not
+// depend on which side of depthProbeFrameBoundary the caller runs): for
+// fix.ui_quality's world-screen gate, which asks it of the 2D screen's size
+// -- on foot the world's hundreds or thousands, a menu's UI 3 or 4 (ui_layer_
+// math.h). 0 when no target of that size is known; false while the probe is
+// not watching (fix.temporal_aa, fix.eye_mask and eye_depth_capture off).
+// The render thread only, where the counts are kept.
+bool depthProbeDrawsAtSize(uint32_t w, uint32_t h, uint32_t* draws);
+
 // THE SCENE'S DEPTH for one eye of the frame being submitted, for the
 // temporal pass: among the targets of the frame's render size, the ones
 // with the scene's draws (hundreds a frame; the cockpit census of

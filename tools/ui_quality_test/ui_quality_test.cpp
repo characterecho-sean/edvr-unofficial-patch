@@ -405,26 +405,27 @@ void testGate() {
         auto screenWith = [&](bool gateHolds, UiLayerFamily fam = UiLayerFamily::kScreen) {
             UiLayerDrawFacts g = f;
             g.family = fam;
-            g.onFoot = gateHolds;
+            g.worldScreen = gateHolds;
             return uiLayerDecide(g);
         };
         UiOnFootGate gate;
         check(gate.state == -1, "the gate starts unread");
         check(uiLayerOnFootStep(gate, true, true, 1000) &&
-                  screenWith(gate.state == 1) == UiLayerDecision::kOnFootWorld,
+                  screenWith(gate.state == 1) == UiLayerDecision::kWorldScreen,
               "on foot: the 2D screen is not redirected");
-        check(std::strcmp(uiLayerDecisionName(UiLayerDecision::kOnFootWorld),
-                          "on foot: the screen shows the world; the temporal pass keeps it") == 0,
+        check(std::strcmp(uiLayerDecisionName(UiLayerDecision::kWorldScreen),
+                          "the screen shows the world (on foot, or a 3D map); the temporal pass "
+                          "keeps it") == 0,
               "...and the left-in-the-frame line gives the reason");
         check(screenWith(true, UiLayerFamily::kPanel) == UiLayerDecision::kRedirect &&
                   screenWith(true, UiLayerFamily::kLoader) == UiLayerDecision::kRedirect,
               "on foot, the menus and the loading screen are still taken");
         check(with([](UiLayerDrawFacts& g) {
-                  g.onFoot = true;
+                  g.worldScreen = true;
                   g.armed = false;
                   g.late = true;
-              }) == UiLayerDecision::kOnFootWorld,
-              "on foot is the reason whatever else holds");
+              }) == UiLayerDecision::kWorldScreen,
+              "the world screen is the reason whatever else holds");
         check(uiLayerOnFootStep(gate, false, false, 1500) && uiLayerOnFootStep(gate, false, false, 3900),
               "a short unknown (a mid-write read of Status.json) holds the gate");
         check(!uiLayerOnFootStep(gate, false, false, 4001) && gate.state == 0 &&
@@ -440,6 +441,104 @@ void testGate() {
         check(!uiLayerOnFootStep(unknown, false, false, 1000) && !uiLayerOnFootStep(unknown, false, true, 2000) &&
                   unknown.state == 0 && screenWith(unknown.state == 1) == UiLayerDecision::kRedirect,
               "unknown journal (a menu, the watcher off): the 2D screen is redirected, as before the gate");
+
+        // The screen's own identity (review P1): the depth probe's count of
+        // draws into the screen-sized depth target, needing no journal. The
+        // held fact is (journal) OR (depth), as ui_layer.cpp combines them.
+        auto heldBy = [](const UiOnFootGate& j, const UiWorldScreenGate& w) {
+            return j.state == 1 || w.busy;
+        };
+        UiOnFootGate off;  // the journal watcher off: every reading unknown
+        UiWorldScreenGate world;
+        bool held = false;
+        for (int i = 0; i < 2; ++i) {
+            const bool j = uiLayerOnFootStep(off, false, false, 1000 + i * 11);
+            held = j || uiLayerWorldScreenStep(world, true, 5505);  // flight 09:38's first count
+        }
+        check(held && heldBy(off, world) && off.state == 0 &&
+                  screenWith(heldBy(off, world)) == UiLayerDecision::kWorldScreen,
+              "journal off, the screen's depth busy (5505 draws a frame, on foot): left in the eye");
+        UiOnFootGate menuJournal;
+        UiWorldScreenGate menu;
+        bool menuHeld = false;
+        for (int i = 0; i < 200; ++i) {
+            menuHeld = uiLayerOnFootStep(menuJournal, false, false, 1000 + i * 11) ||
+                       uiLayerWorldScreenStep(menu, true, i % 2 ? 4 : 3);  // the UI's own 3 or 4
+        }
+        check(!menuHeld && screenWith(heldBy(menuJournal, menu)) == UiLayerDecision::kRedirect,
+              "journal off, the screen's depth quiet (3 or 4 draws, a menu): taken, the menu stays sharp");
+        UiWorldScreenGate unknownCount;
+        check(!uiLayerWorldScreenStep(unknownCount, false, 9000) &&
+                  !uiLayerWorldScreenStep(unknownCount, false, 9000) && unknownCount.draws == 0,
+              "a count the probe did not take is no count (unknown journal, no count: taken)");
+        UiWorldScreenGate h;
+        check(!uiLayerWorldScreenStep(h, true, 15612) && !uiLayerWorldScreenStep(h, true, 4) &&
+                  !uiLayerWorldScreenStep(h, true, 15612),
+              "hysteresis: one busy transition frame, then a quiet one, does not hold it");
+        check(uiLayerWorldScreenStep(h, true, 187) && h.busy,
+              "...two frames running over 64 do (the census's on-foot minimum, 187)");
+        bool stillHeld = true;
+        for (uint32_t i = 0; i + 1 < kUiWorldLeaveFrames; ++i) stillHeld = stillHeld && uiLayerWorldScreenStep(h, true, 3);
+        check(stillHeld, "...89 quiet frames running do not let go (a loading hitch on foot)");
+        check(uiLayerWorldScreenStep(h, true, 40) && uiLayerWorldScreenStep(h, true, 3),
+              "...a frame between the thresholds (40) restarts the quiet run");
+        bool released = false;
+        for (uint32_t i = 0; i < kUiWorldLeaveFrames && !released; ++i) released = !uiLayerWorldScreenStep(h, true, 3);
+        check(released && !h.busy, "...a second running under 32 lets go");
+        check(!uiLayerWorldScreenStep(h, true, 64) && !uiLayerWorldScreenStep(h, true, 64),
+              "exactly the threshold (64) is not over it");
+        UiOnFootGate journalOnFoot;
+        UiWorldScreenGate quietOnFoot;
+        check((uiLayerOnFootStep(journalOnFoot, true, true, 1000) ||
+               uiLayerWorldScreenStep(quietOnFoot, true, 3)) &&
+                  heldBy(journalOnFoot, quietOnFoot),
+              "the journal on foot holds it whatever the depth says (either signal holds)");
+        check(std::strcmp(uiGuiFocusName(6), "galaxy map") == 0 &&
+                  std::strcmp(uiGuiFocusName(5), "station services") == 0 &&
+                  std::strcmp(uiGuiFocusName(7), "system map") == 0 && uiGuiFocusName(12) == nullptr,
+              "GuiFocus names for the gate's lines");
+    }
+
+    // The route's price (the review's "Findings and costs"): per-eye-frame
+    // sums from samples read in the order they were issued, the eyes
+    // interleaved (eye 1's UI runs before eye 0's composite).
+    {
+        UiRouteSum s0, s1;
+        double out = -1.0;
+        check(!uiRouteAdd(s0, 10, 0.20, true, &out) && !uiRouteAdd(s0, 10, 0.05, true, &out) &&
+                  !uiRouteAdd(s1, 10, 0.30, true, &out) && !uiRouteAdd(s0, 10, 0.07, true, &out),
+              "an eye's samples of one frame add up while the other eye keeps its own sum");
+        check(uiRouteAdd(s0, 11, 0.10, true, &out) && std::fabs(out - 0.32) < 1e-9,
+              "a later frame's sample closes the sum: 0.20 + 0.05 + the composite's 0.07");
+        check(uiRouteLate(s0, 10) && !uiRouteAdd(s0, 10, 5.0, true, &out) && s0.seq == 11 &&
+                  std::fabs(s0.ms - 0.10) < 1e-9,
+              "a sample for a frame already closed is late and changes nothing");
+        out = -1.0;
+        check(!uiRouteAdd(s0, 11, 0.0, false, &out) && !uiRouteAdd(s0, 12, 0.10, true, &out) &&
+                  out == -1.0,
+              "a sample that did not measure drops its eye-frame rather than report it short");
+        uiRouteLost(s0, 13);
+        check(uiRouteAdd(s0, 13, 0.20, true, &out) && std::fabs(out - 0.10) < 1e-9 && s0.bad,
+              "a timer never had for a later frame spoils that frame when it opens");
+        out = -1.0;
+        check(!uiRouteAdd(s0, 14, 0.30, true, &out) && out == -1.0, "...and it is dropped");
+        check(!uiRouteClose(s0, 14, &out) && s0.open,
+              "a sum stays open while a timer of its frame may still be read");
+        check(uiRouteClose(s0, 15, &out) && std::fabs(out - 0.30) < 1e-9 && !s0.open,
+              "...and closes once none can");
+        uiRouteLost(s1, 10);
+        check(!uiRouteClose(s1, 11, &out) && !s1.open, "a timer never had in the open frame spoils it");
+        float v[5] = {5.0f, 1.0f, 4.0f, 2.0f, 3.0f};
+        check(std::fabs(uiLayerPercentile(v, 5, 0.5) - 3.0) < 1e-6 &&
+                  std::fabs(uiLayerPercentile(v, 5, 0.95) - 4.8) < 1e-6,
+              "median 3, p95 4.8 of 1..5 (linear between order statistics)");
+        float one[1] = {0.25f};
+        check(std::fabs(uiLayerPercentile(one, 1, 0.95) - 0.25) < 1e-6 &&
+                  uiLayerPercentile(nullptr, 0, 0.5) == 0.0,
+              "one sample is its own percentile; none reads 0");
+        check(std::strcmp(uiRouteStageName(UiRouteStage::kSeed), "depth-stencil seed") == 0 &&
+                  std::strcmp(uiRouteStageName(UiRouteStage::kComposite), "composite") == 0,
+              "the price line's stage names");
     }
     check(with([](UiLayerDrawFacts& g) { g.layerReady = false; }) == UiLayerDecision::kLayerFailed, "no layer");
     // The first failing test is the one reported: the cockpit's HDR draw

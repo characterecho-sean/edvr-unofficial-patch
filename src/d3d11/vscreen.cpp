@@ -4811,6 +4811,14 @@ uint32_t readDistanceIndex(Config& cfg) {
 
 }  // namespace
 
+bool vScreenPanelSize(uint32_t* width, uint32_t* height) {
+    const State* s = g_state;
+    if (!s) return false;
+    if (width) *width = s->panelW ? s->panelW : 1920;
+    if (height) *height = s->panelH ? s->panelH : 1080;
+    return true;
+}
+
 void vScreenSetPanelSize(uint32_t width, uint32_t height) {
     State* s = g_state;
     if (!s || !width || !height) return;

@@ -2218,16 +2218,19 @@ REM absorbed from fix.hud_quality's rig): the factor target / HMD Quality with
 REM its 1% floor and 4x cap; the rounding (908x1361 -> 1297x1944 at 1/0.7);
 REM the internal resolution from the runtime's recommendation (3070 x 0.65 =
 REM 1995, 3032 x 0.65 = 1970, 3070x3032 x 0.5 = 1535x1516, the 2458x2824
-REM x 0.65 = 1597x1835 of the 2026-09-23 flight); the census's five ratios
-REM matching their own evidence at every eye width, a one-percent miss not
-REM matching, the candidate shape, the learned-ratio file's parser. The LAYER
+REM x 0.65 = 1597x1835 of the 2026-09-23 flight); the census's five panels
+REM in units of U = W / 2 tan(vFOV/2) on every recorded frustum, a
+REM one-percent miss not matching, the candidate shape, the learned-panel
+REM file's parser. The LAYER
 REM (ui_layer_math.h): the key; the layer's size and memory; the viewport and
 REM scissor map and the jitter cancel; the blend conversion table, a multiply
 REM included, and a CPU model proving layer-then-composite equals the game's
 REM own blends over a thousand sequences; the depth-stencil classification
 REM (the menu panel's stencil write, a stencil test, read-only views); the
 REM composite's footprint; the door's arming and G1; every refusal of the
-REM gate, in order. On WARP (ui_layer_shaders.h, ui_deferred_depth.h): a
+REM gate, in order; the world-screen gate (the journal OR the screen's own
+REM depth count, with its hysteresis, journal off both ways); the route's
+REM per-eye-frame price sums. On WARP (ui_layer_shaders.h, ui_deferred_depth.h): a
 REM jittered quad through the redirected viewport lands on the unjittered
 REM pixels at all eight Halton phases; blended draws composited equal the same
 REM draws into the frame, a multiply included; a stencil-tested quad drawn

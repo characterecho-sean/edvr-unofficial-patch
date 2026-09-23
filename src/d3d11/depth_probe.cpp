@@ -910,6 +910,19 @@ bool depthProbeClearValueFor(ID3D11DepthStencilView* dsv, float* outClearValue, 
     return true;
 }
 
+bool depthProbeDrawsAtSize(uint32_t w, uint32_t h, uint32_t* draws) {
+    if (!g_wanted) return false;
+    uint32_t most = 0;
+    for (int i = 0; i < g_targetCount; ++i) {
+        const Target& t = g_targets[i];
+        if (!t.dsv || t.w != w || t.h != h) continue;
+        const uint32_t d = t.drawsThisFrame > t.drawsLastFrame ? t.drawsThisFrame : t.drawsLastFrame;
+        if (d > most) most = d;
+    }
+    if (draws) *draws = most;
+    return true;
+}
+
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_wanted) return;
     // drawsLastFrame, firstBindLastFrame and live target identities all roll

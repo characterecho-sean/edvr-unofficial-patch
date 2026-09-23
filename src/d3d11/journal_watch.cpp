@@ -73,8 +73,9 @@ struct State {
     // land here, which no keypress watcher can promise. Supercruise is
     // Flags bit 4, read to qualify FSS-key presses (the key does nothing
     // outside supercruise).
-    bool         fssFocusKnown = false;
+    bool         fssFocusKnown = false;   // GuiFocus is in Status.json
     bool         fssFocus = false;
+    uint32_t     guiFocus = 0;            // its value, while known
     bool         supercruiseKnown = false;
     bool         supercruise = false;
     uint64_t     statusMs = 0;   // Status.json's own clock
@@ -269,6 +270,7 @@ void pollStatus() {
         }
         g_s.fssFocusKnown = sawGui;
         g_s.fssFocus = fss;
+        g_s.guiFocus = sawGui ? gui : 0;
     } else if (++g_s.statusMisses >= 3) {
         g_s.onFootKnown = false;
         g_s.fsdJumpKnown = false;
@@ -547,6 +549,11 @@ void journalWatchSetEagerStatus(bool eager) { g_s.eagerStatus = eager; }
 
 bool journalFssFocusKnown() { return g_s.active && g_s.fssFocusKnown; }
 bool journalFssFocus() { return g_s.active && g_s.fssFocus; }
+bool journalGuiFocus(uint32_t* focus) {
+    if (!g_s.active || !g_s.fssFocusKnown) return false;
+    if (focus) *focus = g_s.guiFocus;
+    return true;
+}
 bool journalSupercruiseKnown() {
     return g_s.active && g_s.supercruiseKnown;
 }
