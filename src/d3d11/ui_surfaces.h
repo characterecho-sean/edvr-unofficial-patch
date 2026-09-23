@@ -3,15 +3,17 @@
 // ui_layer.h; one key, one configure (uiLayerConfigure hands the target on),
 // one family of log lines.
 //
-// Every offscreen interface surface whose size is a known fraction of the
-// game's internal render resolution (ui_quality_math.h: the census's five,
-// plus any this rig's GUI draws have been seen landing in) is created at the
-// size it would have at HMD Quality = the key's target, through fss_res's
-// inflation mechanism (the tracked ring, the viewport and scissor
-// backstops, the eye-test exclusion). The internal resolution is known from
-// the first frame: the runtime's game-facing recommendation times HMD
-// Quality, truncated as Elite truncates it, and cross-checked against the
-// size the game actually submits.
+// Every offscreen interface panel the game makes -- recognised by the rule
+// its size follows, a constant times U = W / 2 tan(vFOV/2) (ui_quality_math.h:
+// the census's five panels, plus any this rig's GUI draws have been seen
+// landing in at two U) -- is created at the size it would have at HMD
+// Quality = the key's target, through fss_res's inflation mechanism (the
+// tracked ring, the viewport and scissor backstops, the eye-test
+// exclusion). The render width W is known from the first frame: the
+// runtime's game-facing recommendation times HMD Quality, truncated as
+// Elite truncates it, and cross-checked against the size the game actually
+// submits; the vertical field of view is the frame's own frustum (native
+// temporal's beginFrame).
 //
 // THREADS. uiSurfacesMatch and uiSurfacesNoteCreated run inside the game's
 // CreateTexture2D, on its streaming threads -- and on the render thread,
@@ -71,5 +73,8 @@ void uiSurfacesSummary(char* out, size_t n);
 // behind what the game is told (review P3-1, open). False before the first
 // beginFrame, after an invalidate, or with no native temporal channel.
 bool nativeTemporalRecommended(uint32_t* w, uint32_t* h);
+// ...and the same frame's vertical frustum: eye 0's up and down tangents
+// (magnitudes), which the panel rule needs (ui_quality_math.h). Lock-free.
+bool nativeTemporalVerticalTangents(float* up, float* down);
 
 }  // namespace edvr
