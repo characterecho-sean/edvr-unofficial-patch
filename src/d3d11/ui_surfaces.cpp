@@ -6,6 +6,7 @@
 #include "ui_surfaces.h"
 
 #include "ui_quality_math.h"
+#include "ui_sizing_math.h"  // the confirmation instrument: chains and verdicts
 
 #include "device_hook.h"  // deviceHookHmdQuality: the .fxcfg's HMD Quality
 #include "fss_res.h"      // fssResOrigSize: a surface we grew is learned at its asked size
@@ -14,7 +15,6 @@
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"             // eyeTextureSize: what the game submits
-#include "../common/game_call_probe.h"        // captureGameCallStack: the RVA instrument
 #include "../common/log.h"
 #include "../common/native_render_settings.h"  // edvrQueryNativeRenderSizing
 
@@ -57,6 +57,7 @@ struct Basis {
     uint32_t fallbackW = 0, fallbackH = 0;  // vScreen's measurement, when neither is known
     float T = 0.0f;                         // 2 tan(vFOV/2) of the frame's frustum; 0 unknown
     float vfovDeg = 0.0f;
+    float up = 0.0f, down = 0.0f;           // that frustum's vertical tangents (magnitudes)
 };
 
 struct Candidate {
@@ -142,8 +143,78 @@ struct State {
     uint32_t crossDW = 0, crossDH = 0, crossMW = 0, crossMH = 0;
     uint32_t learnNotes = 0;
     uint64_t lastTickMs = 0;
+    // The confirmation instrument: one chain per distinct size and kind.
+    struct ChainSeen {
+        uint32_t w = 0, h = 0;
+        bool depth = false;
+        UiChain chain;
+        UiChainVerdict verdict;
+    };
+    static constexpr uint32_t kChainLines = 32;  // the flight's 13 GUI sizes, doubled by depth
+    ChainSeen chains[kChainLines];
+    uint32_t chainCount = 0;
+    uint32_t chainOverflow = 0;
+    bool chainOverflowNoted = false;
 };
 State g_s;
+
+// EDVR's frame count (uiSurfacesFrameBoundary, once a frame), read by the
+// instrument's lines from the creating threads.
+std::atomic<uint32_t> g_frameNo{0};
+
+// The game module's extent, for the chains.
+uintptr_t gameBase() {
+    static const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    return base;
+}
+uintptr_t gameSize() {
+    static const uintptr_t size = [] {
+        const uintptr_t base = gameBase();
+        if (!base) return uintptr_t(0);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return uintptr_t(0);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return uintptr_t(0);
+        return static_cast<uintptr_t>(nt->OptionalHeader.SizeOfImage);
+    }();
+    return size;
+}
+
+// This thread's return-address chain: the game's frames, innermost first
+// (return addresses only -- no stack memory read, nothing suspended).
+UiChain captureChain() {
+    void* frames[48] = {};
+    const USHORT n = CaptureStackBackTrace(0, 48, frames, nullptr);
+    uintptr_t addrs[48] = {};
+    for (USHORT i = 0; i < n; ++i) addrs[i] = reinterpret_cast<uintptr_t>(frames[i]);
+    UiChain c;
+    uiChainFromFrames(addrs, n, gameBase(), gameSize(), &c);
+    return c;
+}
+
+// Under g_lock: the chain entry of this size and kind, or null.
+State::ChainSeen* chainFor(uint32_t w, uint32_t h, bool depth) {
+    for (uint32_t i = 0; i < g_s.chainCount; ++i) {
+        State::ChainSeen& c = g_s.chains[i];
+        if (c.w == w && c.h == h && c.depth == depth) return &c;
+    }
+    return nullptr;
+}
+
+// The glyph atlas (section 8.3): up to four A8 textures of 1024 or more a
+// side, by identity, their writes counted lock-free from the context hooks.
+struct Atlas {
+    std::atomic<const void*> res{nullptr};
+    uint32_t w = 0, h = 0, frame = 0;
+    UiChain chain;
+    UiChainVerdict verdict;
+    std::atomic<uint32_t> writes[3] = {};  // this window: UpdateSubresource, Map, copies
+    std::atomic<uint64_t> total{0};        // since it was created
+};
+constexpr uint32_t kAtlases = 4;
+Atlas g_atlas[kAtlases];
+std::atomic<uint32_t> g_atlasCount{0};
+uint32_t g_atlasNotes = 0;  // creation lines (under g_lock), capped
 
 std::atomic<uint32_t> g_viewports{0}, g_scissors{0}, g_copies{0};
 
@@ -194,6 +265,8 @@ Basis readBasis() {
     }
     float up = 0.0f, down = 0.0f;
     if (nativeTemporalVerticalTangents(&up, &down)) {
+        b.up = up;
+        b.down = down;
         b.T = uiQualityFovTangent(up, down);
         if (b.T > 0.0f)
             b.vfovDeg = static_cast<float>((std::atan(up) + std::atan(down)) * 57.29577951308232);
@@ -290,13 +363,15 @@ void noteLearning(UiQualityLearn v, char family, uint32_t w, uint32_t h, const U
     if (g_s.learnNotes >= kLearnNotes) return;
     if (v == UiQualityLearn::kPending) {
         ++g_s.learnNotes;
+        const State::ChainSeen* seen = chainFor(w, h, false);
         Log::get().note(
             "ui quality: surfaces: pending -- the GUI renderer draws %s into a %ux%u surface made "
             "at %ux%u with 2 tan(vFOV/2) %.4f (ratio %.4f x %.4f of U = %.1f) that is on no panel "
             "ratio; it is resized once the same ratio is seen at a U more than 1%% different (it "
-            "scales), never if the same size is (it does not).",
+            "scales), never if the same size is (it does not). Its chain: %s.",
             familyName(family), w, h, b.W, b.H, static_cast<double>(b.T),
-            uiQualityPanelX10000(w, b) / 10000.0, uiQualityPanelX10000(h, b) / 10000.0, b.unit());
+            uiQualityPanelX10000(w, b) / 10000.0, uiQualityPanelX10000(h, b) / 10000.0, b.unit(),
+            seen ? uiChainVerdictShort(seen->verdict) : "not captured (past the instrument's cap)");
     } else if (v == UiQualityLearn::kPromoted) {
         ++g_s.learnNotes;
         Log::get().note(
@@ -340,6 +415,76 @@ void uiSurfacesSetTarget(float target, const char* text) {
 
 bool uiSurfacesWantCreates() { return g_on.load(std::memory_order_acquire); }
 
+// The render size the instrument judges a create by: what the game is told
+// now during an adoption, else the derived, else the submitted, else
+// vScreen's measurement.
+void judgedBasis(const Basis& b, uint32_t* W, uint32_t* H, const char** label) {
+    *W = *H = 0;
+    *label = "unknown";
+    if (b.askedDerivedW) {
+        *W = b.askedDerivedW;
+        *H = b.askedDerivedH;
+        *label = "as the game is told now";
+    } else if (b.derivedW) {
+        *W = b.derivedW;
+        *H = b.derivedH;
+        *label = "derived";
+    } else if (b.measuredW) {
+        *W = b.measuredW;
+        *H = b.measuredH;
+        *label = "as the game submits";
+    } else if (b.fallbackW) {
+        *W = b.fallbackW;
+        *H = b.fallbackH;
+        *label = "vScreen's measurement";
+    }
+}
+
+// Under g_lock, inside the game's create: the confirmation instrument's line
+// for a surface-shaped create of a size and kind not seen yet this session
+// (section 8.2) -- before any decision, so pending, learned and made-bigger
+// surfaces alike carry one, and a miss reads as plainly as a hit.
+void noteChainIfNew(const D3D11_TEXTURE2D_DESC* d, const Basis& b) {
+    uint32_t W = 0, H = 0;
+    const char* src = "unknown";
+    judgedBasis(b, &W, &H, &src);
+    const bool shaped = W ? uiQualityCandidateShape(d->Width, d->Height, W, H)
+                          : d->Width >= 16 && d->Height >= 16 && (d->Width & (d->Width - 1)) != 0 &&
+                                (d->Height & (d->Height - 1)) != 0;
+    if (!shaped) return;
+    const bool depth = (d->BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
+    if (chainFor(d->Width, d->Height, depth)) return;
+    if (g_s.chainCount >= State::kChainLines) {
+        ++g_s.chainOverflow;
+        if (!g_s.chainOverflowNoted) {
+            g_s.chainOverflowNoted = true;
+            Log::get().note("ui quality: sizing chain: %u sizes logged; further sizes are counted on "
+                            "the totals line, not logged.",
+                            State::kChainLines);
+        }
+        return;
+    }
+    State::ChainSeen& c = g_s.chains[g_s.chainCount++];
+    c.w = d->Width;
+    c.h = d->Height;
+    c.depth = depth;
+    c.chain = captureChain();
+    c.verdict = uiChainVerdict(c.chain);
+    const double k = uiSizingK(b.T);
+    char rvas[160], verdict[320];
+    uiChainFormat(c.chain, rvas, sizeof(rvas));
+    uiChainVerdictText(c.verdict, verdict, sizeof(verdict));
+    Log::get().note(
+        "ui quality: sizing chain %u: frame %u, a %ux%u %s surface (DXGI format %u, bind 0x%X) -- "
+        "W %ux%u (%s), tangents up %.4f down %.4f, vFOV %.1f degrees, k %.4f, implied stage "
+        "%.0fx%.0f; %u game frames, innermost first: %s; verdict %s.",
+        g_s.chainCount, g_frameNo.load(std::memory_order_relaxed), d->Width, d->Height,
+        depth ? "depth" : "colour", static_cast<unsigned>(d->Format), d->BindFlags, W, H, src,
+        static_cast<double>(b.up), static_cast<double>(b.down), static_cast<double>(b.vfovDeg), k,
+        uiImpliedStage(d->Width, W, k), uiImpliedStage(d->Height, W, k), c.chain.n,
+        c.chain.n ? rvas : "none", verdict);
+}
+
 bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut) {
     if (!d || !g_on.load(std::memory_order_acquire)) return false;
     const Basis b = readBasis();
@@ -348,6 +493,7 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
     ++g_s.examined;
     g_s.basis = b;
     g_s.basisRead = true;
+    noteChainIfNew(d, b);
     // The pair: a create of a size decided within the last two seconds gets
     // that decision, whatever the basis says now (a colour target and its
     // depth partner must stay the same size).
@@ -480,21 +626,17 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
         g_s.sizeW[g_s.sizeNoted] = ow;
         g_s.sizeH[g_s.sizeNoted] = oh;
         ++g_s.sizeNoted;
-        const GameCallStack stack = captureGameCallStack();
-        char rvas[128];
-        _snprintf_s(rvas, _TRUNCATE, "%s", stack.rvas);
-        unsigned slashes = 0;
-        for (char* p = rvas; *p; ++p) {
-            if (*p == '/' && ++slashes == 4) {
-                *p = '\0';
-                break;
-            }
-        }
+        // Its chain, as the instrument took it at this create (above): all
+        // twelve game frames and the verdict (section 8).
+        const State::ChainSeen* seen = chainFor(ow, oh, (d->BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0);
+        const UiChain chain = seen ? seen->chain : captureChain();
+        char rvas[160], verdict[320];
+        uiChainFormat(chain, rvas, sizeof(rvas));
+        uiChainVerdictText(seen ? seen->verdict : uiChainVerdict(chain), verdict, sizeof(verdict));
         Log::get().note(
             "ui quality: surfaces: made bigger -- a %ux%u interface surface (%s) is made at %ux%u "
             "(x%.4f, HMD Quality %.2f -> %s): %s panel ratio %.4f x %.4f of U = %.1f (render %ux%u "
-            "%s, vertical FOV %.1f degrees); created from game RVAs %s (%u of %u captured frames in "
-            "the game module).",
+            "%s, vertical FOV %.1f degrees); created from game RVAs %s, verdict %s.",
             ow, oh, familyName(family), nw, nh, static_cast<double>(factor),
             static_cast<double>(b.hmd), g_s.text.c_str(),
             r.origin == UiQualityOrigin::kCensus ? "the census's" : "a learned",
@@ -503,8 +645,7 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
             : which[used] == 1 ? "as the game submits"
             : which[used] == 3 ? "as the game is told now, a size change in flight"
                                : "vScreen's measurement",
-            static_cast<double>(b.vfovDeg), stack.gameFrames ? rvas : "none", stack.gameFrames,
-            stack.captured);
+            static_cast<double>(b.vfovDeg), chain.n ? rvas : "none", verdict);
     }
     d->Width = nw;
     d->Height = nh;
@@ -543,7 +684,89 @@ void uiSurfacesNoteViewport() { g_viewports.fetch_add(1, std::memory_order_relax
 void uiSurfacesNoteScissor() { g_scissors.fetch_add(1, std::memory_order_relaxed); }
 void uiSurfacesNoteCopy() { g_copies.fetch_add(1, std::memory_order_relaxed); }
 
+// ------------------------------------------------------------ the glyph atlas
+
+namespace detail {
+bool g_uiAtlasWatching = false;
+}
+
+bool uiSurfacesWantsAtlas(const D3D11_TEXTURE2D_DESC& d) {
+    return g_on.load(std::memory_order_acquire) && d.Format == DXGI_FORMAT_A8_UNORM &&
+           (d.Width >= 1024 || d.Height >= 1024);
+}
+
+void uiSurfacesNoteAtlas(ID3D11Texture2D* tex, const D3D11_TEXTURE2D_DESC& d, bool initialData) {
+    if (!tex) return;
+    const UiChain chain = captureChain();
+    const UiChainVerdict verdict = uiChainVerdict(chain);
+    const uint32_t frame = g_frameNo.load(std::memory_order_relaxed);
+    Lock lock;
+    // The same address again is a new texture there (the old one released):
+    // its slot starts over. Otherwise the next free slot, up to four.
+    uint32_t slot = kAtlases;
+    const uint32_t count = g_atlasCount.load(std::memory_order_relaxed);
+    for (uint32_t i = 0; i < count; ++i)
+        if (g_atlas[i].res.load(std::memory_order_relaxed) == tex) slot = i;
+    if (slot == kAtlases && count < kAtlases) slot = count;
+    char rvas[160], text[320];
+    uiChainFormat(chain, rvas, sizeof(rvas));
+    uiChainVerdictText(verdict, text, sizeof(text));
+    if (g_atlasNotes < 8) {
+        ++g_atlasNotes;
+        Log::get().note(
+            "ui quality: glyph atlas: a %ux%u A8_UNORM texture (usage %u, bind 0x%X, CPU access 0x%X, "
+            "misc 0x%X, %u mips, %s) created at frame %u -- %u game frames, innermost first: %s; "
+            "verdict %s. Its writes are counted every 30 s: Scaleform's raster cache is written as "
+            "glyphs arrive, a static font texture never after its creation%s.",
+            d.Width, d.Height, static_cast<unsigned>(d.Usage), d.BindFlags, d.CPUAccessFlags,
+            d.MiscFlags, d.MipLevels, initialData ? "with initial data" : "no initial data", frame,
+            chain.n, chain.n ? rvas : "none", text, slot == kAtlases ? " (not watched: four already are)" : "");
+    }
+    if (slot == kAtlases) return;
+    Atlas& a = g_atlas[slot];
+    a.res.store(nullptr, std::memory_order_release);
+    a.w = d.Width;
+    a.h = d.Height;
+    a.frame = frame;
+    a.chain = chain;
+    a.verdict = verdict;
+    for (auto& w : a.writes) w.store(0, std::memory_order_relaxed);
+    a.total.store(0, std::memory_order_relaxed);
+    a.res.store(tex, std::memory_order_release);
+    if (slot == count) g_atlasCount.store(count + 1, std::memory_order_release);
+    detail::g_uiAtlasWatching = true;
+}
+
+void uiAtlasNoteWriteSlow(const void* res, int how) {
+    if (!res || how < 0 || how > 2) return;
+    const uint32_t count = g_atlasCount.load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < count; ++i) {
+        Atlas& a = g_atlas[i];
+        if (a.res.load(std::memory_order_acquire) != res) continue;
+        a.writes[how].fetch_add(1, std::memory_order_relaxed);
+        a.total.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+}
+
+void uiSurfacesLogAtlas() {
+    Lock lock;  // the slots' sizes and chains are written under it
+    const uint32_t count = g_atlasCount.load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < count; ++i) {
+        Atlas& a = g_atlas[i];
+        const uint32_t u = a.writes[0].exchange(0, std::memory_order_relaxed);
+        const uint32_t m = a.writes[1].exchange(0, std::memory_order_relaxed);
+        const uint32_t c = a.writes[2].exchange(0, std::memory_order_relaxed);
+        Log::get().note("ui quality: glyph atlas %u: %ux%u (created at frame %u, verdict %s) -- %u writes "
+                        "this window (%u UpdateSubresource, %u Map, %u copies into it), %llu since it "
+                        "was created.",
+                        i + 1, a.w, a.h, a.frame, uiChainVerdictShort(a.verdict), u + m + c, u, m, c,
+                        static_cast<unsigned long long>(a.total.load(std::memory_order_relaxed)));
+    }
+}
+
 void uiSurfacesFrameBoundary() {
+    g_frameNo.fetch_add(1, std::memory_order_relaxed);
     if (!g_on.load(std::memory_order_acquire)) return;
     const uint64_t now = GetTickCount64();
     {

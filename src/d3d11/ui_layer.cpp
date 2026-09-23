@@ -1808,6 +1808,7 @@ void logTotals(double seconds) {
     char surfaces[1100];
     uiSurfacesSummary(surfaces, sizeof(surfaces));
     Log::get().note("ui quality: %s -- surfaces: %s.", g_keyText.c_str(), surfaces);
+    uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
     // The price: each stage's GPU time per eye-frame it ran in, and the
     // route's -- every stage of an eye-frame added up -- per eye-frame the
     // layer did anything in.

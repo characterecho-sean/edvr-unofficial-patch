@@ -65,7 +65,9 @@ ID3D11ShaderResourceView* screenMotionView(int eye,unsigned width,unsigned heigh
 // not a rig record, a stale slot and a corrupt code keep the camera term.
 // engine.y (the motion_source view): the validity carries 16 + that source
 // kind instead, for the compose to paint through the panel. engine.z: count
-// the kinds per eye pixel into PanelCounts (diagnostics).
+// the kinds into PanelCounts on the eye pixels of a grid of that stride -- 1,
+// every pixel, with diagnostics or motion_source; kPanelSampleStride on the
+// sampled frames otherwise (engine_velocity.h); 0, not counted.
 constexpr char kScreenMotionPs[]=R"HLSL(
 Texture2D<float> Depth:register(t8);
 ByteAddressBuffer Sizes:register(t9);
@@ -140,7 +142,7 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
     if(!ui && !attached) {
     float2 carried;
     sk=sourceEngine(texel,uv,z,carried);
-    if(engine.z!=0 && sk!=0u)InterlockedAdd(PanelCounts[sk-1u],1u);
+    if(engine.z!=0 && sk!=0u && all(uint2(pos.xy)%uint(engine.z)==0u))InterlockedAdd(PanelCounts[sk-1u],1u);
     // A rig record EDVR cannot follow keeps no history, as in the eye.
     if(sk==2u)return tagged(float4(0,0,z,2),sk);
     if(sk==1u) {

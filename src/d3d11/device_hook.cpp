@@ -37,6 +37,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "camera_view.h"
 #include "fss_res.h"
 #include "journal_watch.h"
+#include "ui_surfaces.h"   // the glyph atlas instrument (uiSurfacesWantsAtlas)
 #include "xinput_watch.h"
 #include "elite_binds.h"
 #include "../common/log.h"
@@ -723,14 +724,19 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_TEXTURE2D_DESC* desc,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out) {
-    const HRESULT hr = createTexture2DForwarded(self, desc, init, out,
-                                                addressInEdvr(_ReturnAddress()));
+    const bool fromEdvr = addressInEdvr(_ReturnAddress());
+    const HRESULT hr = createTexture2DForwarded(self, desc, init, out, fromEdvr);
     if (self == g_state->device) {
         if (FAILED(hr)) {
             noteDeviceCreateFailure(kDevCreateTexture2D, hr, desc, init, false);
         } else if (desc) {
             g_createTextures.fetch_add(1, std::memory_order_relaxed);
             g_createTextureBytes.fetch_add(texture2DBytes(*desc), std::memory_order_relaxed);
+            // fix.ui_quality's glyph atlas instrument: a large A8 texture the
+            // game made, with the chain it was made from (ui_surfaces.h).
+            if (!fromEdvr && out && *out && uiSurfacesWantsAtlas(*desc)) {
+                guardedBudget(g_createBudget, [&] { uiSurfacesNoteAtlas(*out, *desc, init != nullptr); });
+            }
         }
     }
     return hr;

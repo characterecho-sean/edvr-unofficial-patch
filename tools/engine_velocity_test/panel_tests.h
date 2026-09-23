@@ -19,8 +19,11 @@
 //   X  a corrupt (even) code: camera term, never read as another record;
 //   Z  no slot at all: camera term.
 // With engine.x clear every texel is the camera term (today's behaviour);
-// engine.z counts the kinds per eye pixel (u1); engine.y (the motion_source
-// view) puts 16 + the kind in the validity for the compose to paint.
+// engine.z counts the kinds on the eye pixels of a grid of that stride (u1):
+// 1 counts every pixel (diagnostics), kPanelSampleStride only those with both
+// coordinates on its grid (the sampled count without diagnostics, flight 5);
+// engine.y (the motion_source view) puts 16 + the kind in the validity for the
+// compose to paint.
 //
 // The panel mapping is made trivial on purpose -- a flat screen of half-size
 // 1 at the origin, an identity model and eye rows that pass x, y through --
@@ -41,6 +44,7 @@
 #include <string>
 #include <vector>
 
+#include "../../src/d3d11/engine_velocity.h"   // kPanelSampleStride
 #include "../../src/d3d11/engine_velocity_emit.h"
 #include "../../src/d3d11/screen_motion.h"
 #include "temporal_shader_bytecode.h"   // kEngineMotionCoreHlsl, the production text
@@ -290,6 +294,8 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     const auto on = drawWith(1, 0, 1);
     const auto onCounts = readCounts();
     const auto painted = drawWith(1, 1, 0);
+    const auto sampled = drawWith(1, 0, float(edvr::kPanelSampleStride));
+    const auto sampledCounts = readCounts();
 
     // --- the CPU references -----------------------------------------------------
     // The camera term at a texel: the surface point, the camera's move, last
@@ -360,6 +366,17 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     // The counts: joined A and C, masked B, not a rig record N, stale S, corrupt X.
     h.check(onCounts[0] == 2 && onCounts[1] == 1 && onCounts[2] == 1 && onCounts[3] == 1 && onCounts[4] == 1,
             "panel: the eye-pixel counts per kind (joined 2, masked 1, not a rig record 1, stale 1, corrupt 1)");
+    // Sampled (engine.z = kPanelSampleStride, 4): only eye pixels with both
+    // coordinates on the 4 x 4 grid count -- N (8,8) and X (12,8); A, B, C and
+    // S lie off it and Z has no slot -- and the motion itself is unchanged.
+    h.check(sampledCounts[0] == 0 && sampledCounts[1] == 0 && sampledCounts[2] == 1 && sampledCounts[3] == 0 &&
+            sampledCounts[4] == 1,
+            "panel: sampled counting counts only the eye pixels on its grid (not a rig record 1 at N, corrupt 1 at X)");
+    {
+        bool same = true;
+        for (size_t i = 0; i < on.size(); ++i) same = same && on[i] == sampled[i];
+        h.check(same, "panel: sampling changes the counts only, never the motion written");
+    }
     // The motion_source view's encoding: 16 + the source kind; no slot keeps 1.
     h.check(at(painted, pxA)[3] == 17.0f && at(painted, pxB)[3] == 18.0f && at(painted, pxC)[3] == 17.0f &&
             at(painted, pxN)[3] == 19.0f && at(painted, pxS)[3] == 20.0f && at(painted, pxX)[3] == 21.0f &&

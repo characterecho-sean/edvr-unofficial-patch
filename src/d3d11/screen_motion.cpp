@@ -61,9 +61,12 @@ struct State {
     // Engine-record motion on foot: the screen shader's per-kind eye-pixel
     // counts (u1, cleared at the frame's first counted draw), copied out at
     // the frame boundary and read a few frames later without waiting.
+    // Without diagnostics the counts are sampled (engine_velocity.h): one
+    // frame in kPanelSampleFrames, one eye pixel in kPanelSampleStride^2;
+    // the stride travels with each ring slot.
     Ptr<ID3D11Buffer> counts,countsStaging[4];
     Ptr<ID3D11UnorderedAccessView> countsUav;
-    unsigned countsDraws[4]{},countsWrite=0,countFrame=~0u,countDraws=0;
+    unsigned countsDraws[4]{},countsStride[4]{},countsWrite=0,countFrame=~0u,countDraws=0,countStride=1;
     bool countsPending[4]{},engineNoted=false;
 } g;
 // What the screen shader does with the source's engine data beyond using it
@@ -252,8 +255,10 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     g.sourcePrevious=g.sourceFrame;g.sourceFrame=g.frame;g.sourceWrite=next;
     g_gpu.noteSource(tex.Get(),td.Width,td.Height,g.frame);
     weaponMotionSource(tex.Get());
-    // The source pass's pool draws take MRT6 into this depth's slot target.
-    engineVelocityNoteSource(tex.Get());
+    // The source pass's pool draws take MRT6 into this depth's slot target,
+    // held to the camera this draw reads (the one g.camera just copied).
+    Ptr<ID3D11Buffer> scene;ctx->VSGetConstantBuffers(1,1,&scene);
+    engineVelocityNoteSource(tex.Get(),scene.Get());
 }
 void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance) {
@@ -355,9 +360,15 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         // nothing -- the shader then keeps today's camera term everywhere.
         EngineVelocityViews ev{};
         const bool engine=engineVelocitySourceViews(g.depth.Get(),&ev);
-        const bool counting=engine && g_countKinds && prepareCounts(dev.Get());
+        // The kinds counted: every eye pixel of every frame with diagnostics
+        // or motion_source; otherwise a sample -- one frame in
+        // kPanelSampleFrames, one eye pixel in kPanelSampleStride^2 (engine.z
+        // carries the grid's stride) -- so the on-foot line always has them.
+        const unsigned countGrid=g_countKinds?1u:kPanelSampleStride;
+        const bool counting=engine && (g_countKinds || g.frame%kPanelSampleFrames==0) &&
+                            (g.countFrame!=g.frame || g.countStride==countGrid) && prepareCounts(dev.Get());
         float data[12]={e.shape[0],e.shape[1],e.shape[2],e.shape[3],float(e.width),float(e.height),ui?1.0f:0.0f,weapon?1.0f:0.0f,
-                        engine?1.0f:0.0f,engine && g_paintKinds?1.0f:0.0f,counting?1.0f:0.0f,0.0f};
+                        engine?1.0f:0.0f,engine && g_paintKinds?1.0f:0.0f,counting?float(countGrid):0.0f,0.0f};
         ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
         ID3D11RenderTargetView* savedRt[8]{};Ptr<ID3D11DepthStencilView> savedDepth;ctx->OMGetRenderTargets(8,savedRt,&savedDepth);
         Ptr<ID3D11BlendState> savedBlend;FLOAT factors[4];UINT mask;ctx->OMGetBlendState(&savedBlend,factors,&mask);
@@ -376,7 +387,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         // hook leaves the shadow alone for exactly that call.
         constexpr UINT kKeepTargets=0xFFFFFFFFu;
         if(counting) {
-            if(g.countFrame!=g.frame){const UINT zeros[4]{};ctx->ClearUnorderedAccessViewUint(g.countsUav.Get(),zeros);g.countFrame=g.frame;g.countDraws=0;}
+            if(g.countFrame!=g.frame){const UINT zeros[4]{};ctx->ClearUnorderedAccessViewUint(g.countsUav.Get(),zeros);g.countFrame=g.frame;g.countDraws=0;g.countStride=countGrid;}
             ctx->OMSetRenderTargetsAndUnorderedAccessViews(kKeepTargets,nullptr,nullptr,1,1,g.countsUav.GetAddressOf(),nullptr);
         }
         const bool projectionTimed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.projection.begin(ctx,16,g_gpu.scope,g.frame);
@@ -392,7 +403,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         ctx->PSSetConstantBuffers(2,7,savedCb);ctx->PSSetShaderResources(8,7,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
         for(auto* p:savedRt)if(p)p->Release();for(auto* p:savedCb)if(p)p->Release();for(auto* p:savedSrv)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
         if(ev.slots)ev.slots->Release();if(ev.pool)ev.pool->Release();if(ev.sceneNow)ev.sceneNow->Release();if(ev.scenePrev)ev.scenePrev->Release();
-        if(engine && !g.engineNoted){g.engineNoted=true;Log::get().note("screen motion: the source pass's engine data is bound: certified rig records carry their own engine motion to their previous source UV before the panel mapping; masked ones keep no history%s.",g_countKinds?", counted per eye pixel":"");}
+        if(engine && !g.engineNoted){g.engineNoted=true;Log::get().note("screen motion: the source pass's engine data is bound: certified rig records carry their own engine motion to their previous source UV before the panel mapping; masked ones keep no history%s.",g_countKinds?", counted per eye pixel":", counted on a sample (one frame in 300, one eye pixel in 16)");}
         e.written=true;
         if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil selects original-vertex weapon motion; uncovered or invalid history rejected.");}
         if(!g.noted){g.noted=true;Log::get().note("screen motion: source camera/depth projected through the actual screen mesh at %ux%u per eye; GPU-only history, no source colour copies.",e.width,e.height);}
@@ -414,7 +425,7 @@ static void flushPanelCounts(ID3D11DeviceContext* ctx) {
         const unsigned w=g.countsWrite;
         if(!g.countsPending[w]) {
             ctx->CopyResource(g.countsStaging[w].Get(),g.counts.Get());
-            g.countsDraws[w]=g.countDraws;g.countsPending[w]=true;g.countsWrite=(w+1)%4;
+            g.countsDraws[w]=g.countDraws;g.countsStride[w]=g.countStride;g.countsPending[w]=true;g.countsWrite=(w+1)%4;
         }
     }
     for(unsigned k=0;k<4;++k) {
@@ -423,7 +434,7 @@ static void flushPanelCounts(ID3D11DeviceContext* ctx) {
         D3D11_MAPPED_SUBRESOURCE m{};
         if(ctx->Map(g.countsStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m)!=S_OK)break;
         uint32_t c[kPanelKinds]{};std::memcpy(c,m.pData,sizeof(c));ctx->Unmap(g.countsStaging[i].Get(),0);
-        engineVelocityNotePanelPixels(c[0],c[1],c[2],c[3],c[4],g.countsDraws[i]);
+        engineVelocityNotePanelPixels(c[0],c[1],c[2],c[3],c[4],g.countsDraws[i],g.countsStride[i]);
         g.countsPending[i]=false;
     }
 }
