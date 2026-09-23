@@ -22,21 +22,20 @@
   DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 + FIX ROUND
   MERGED and FLOWN (093817, "The re-fly" entry): eye-frames bound and given, cb1
   re-maps kept (invalidated 0), corrupt codes 0, engine-joined 67-73k px an eye-frame.
-  FOLLOW-UPS FLOWN (114958, c00af958): cockpit prep 0.15-0.23 ms a pair (copy 0.02, mv
-  0.13-0.21), no faults. STAGE B REMOVED, ITS KEY RETIRED: engine motion is part of
-  fix.temporal_aa. ON FOOT (merged, not flown): the source pass takes MRT6 at the
-  source's size; the screen shader carries rig records through the panel. PERFORMANCE
-  ROUND BUILT, NOT FLOWN (the review's six items, "Performance round" entry): tracker
-  diagnostic-only, preparation deferred, setters skipped, snapshots and capture priced.
-- **Open:** the on-foot flight (Next); walkers (vs_F516BF0201303B87, unkeyed; w=2 on the
-  panel today, the "On foot" entry) wait on phase 2's previous bone palette; a temporal
-  pass on the flat source itself is the later remedy for its own
-  aliasing; the stale cockpit (62.8% = the commander's legs under unkeyed layers ps_B7D5
-  and vs_7B0DC42D -- DECIDED: not keyed now, the legs take the ship/world split and cost
-  nothing visible; 35.4% undecided until MRT6 is in the eye dump, wanted, low priority);
-  the tracker's extra movers are evaluated-but-not-drawn (the census, the 09:38 entry);
-  the boarding flicker (prime candidate: the LOD governor, not this arc); stations and
-  ships in space; builder-path movers and articulated parts (phase 2).
+  FOLLOW-UPS FLOWN (114958, c00af958): cockpit prep 0.15-0.23 ms a pair, no faults.
+  STAGE B REMOVED (engine motion is part of fix.temporal_aa); PERFORMANCE ROUND merged.
+  ON FOOT FLOWN (flight 5, 140351, "Flight 5" entry): standing, source views given
+  2938/2938; WALKING, EVERY SOURCE FRAME DROPPED (2031/2031) by the eyes' rows rule --
+  the source is drawn by more than one camera. FIXED ON A BRANCH, NOT FLOWN: each source
+  pool draw held to the naming draw's camera, the others declined, the frame kept.
+- **Open:** walkers (vs_F516BF0201303B87, not a pool family; w=2 on the panel) wait on
+  phase 2's previous bone palette -- a walking NPC still blurs after this fix; which
+  camera the walk's other draws use (the new line's rows and distance say); a temporal
+  pass on the flat source for its own aliasing; the stale cockpit (the commander's legs
+  under unkeyed ps_B7D5 and vs_7B0DC42D, DECIDED not keyed; 35.4% undecided, low
+  priority); the tracker's evaluated-but-not-drawn movers (the 09:38 entry); the boarding
+  flicker (the LOD governor, not this arc); stations and ships in space; builder-path
+  movers and articulated parts (phase 2).
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -48,18 +47,19 @@
   blur ON (both 2026-09-23 evening entry); scaling a history delta over a gap
   (estimation, the review); the tick straddling two frames as the gap cause (repeats and
   in-frame pose changes 0 in all 8 windows of 065324); rows 270..275 changing inside
-  an eye pass (capture 043720: one block per pass); "blending on MRT6 only loses
-  coverage" (the review's WARP counterexample); the substituted shaders changing the
-  game's G-buffer (o0..o3 and depth bit-identical, all nine real pairs, WARP); the
+  an eye pass (capture 043720: one block per pass); one camera per ON-FOOT SOURCE frame
+  (flight 5: every walking frame dropped, the "Flight 5" entry); "blending on MRT6 only
+  loses coverage" (the review's WARP counterexample); the substituted shaders changing
+  the game's G-buffer (o0..o3 and depth bit-identical, all nine real pairs, WARP); the
   on-foot world packed per eye; enginePixel's record fetch as the ~3 ms prep; a depth
   pre-pass or a depth bias as the stale cockpit (all three: the re-fly entry); green on
   the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
   cause (the 09:38 entry). Do not re-propose any of the above.
-- **Next:** one controlled comparison (the review's protocol): the build checked first
-  (edvr_log.py --expect-build HEAD); the same pad, headset and runtime, resolution, DLSS
-  version and refresh, warm windows, temporal AA fixed; diagnostics 1 (tracker, census,
-  diagnostic shader) against 0 (lean): the tracker's cost line and the price lines.
-  Then the on-foot walk near the drone and a landing ship, one leg with motion_source.
+- **Next:** the on-foot re-fly of this branch (--expect-build HEAD first), walking near a
+  drone or a landing ship: `on foot: ... frames dropped: none; screen views asked A,
+  given A` (less the first frame), `camera rule: ... declined D in F frames` with the
+  other camera's rows and distance, `panel pixels per sampled eye draw: engine-joined J`,
+  J > 0. Then the controlled diagnostics 1 vs 0 comparison (the review's protocol).
 
 ## Premise
 
@@ -2532,3 +2532,96 @@ jittered callers keep the lookup. Same texel, same value, so the ownership test 
 bit for bit: engine_velocity_test's consumer cases (joined exact, masked, declined kinds)
 and the real corpus stay green. No log signature -- the pixel counts are the same; its price,
 if any, is inside `mv` in the price line against a build without it.
+
+### 2026-09-23 -- Flight 5 (140351): the on-foot source is drawn by more than one camera
+
+**The flight.** Build 48dcb9b6 (the on-foot path and the performance round), Frontier,
+DLSS, settlement; disembarked 14:06:24 (the journal), aboard again ~14:08:48. Sean: the
+on-foot movers still blur, no change. The on-foot line per 30 s window:
+
+| window | source frames | views asked / given | dropped (all "scene rows 270..275 changed") | re-maps kept |
+|---|---|---|---|---|
+| 14:06:51 (standing) | 1470 | 2938 / 2938 | 0 | 134170 (with the ship's ~7k) |
+| 14:07:21 (starts walking) | 1902 | 3804 / 2922 | 441 | 109202 |
+| 14:07:51 (walking) | 2031 | 4062 / 0 | 2031 | 0 |
+| 14:08:21 (walking) | 2405 | 4810 / 0 | 2405 | 0 |
+
+In the two all-dropped windows the only family substituted is vs_AACFDCF2FB9AD809: 4062
+and 4810 binds -- exactly two a source frame -- and ~7 draws a frame; every other family
+(EB52 included, ~6100 substituted draws a standing source frame) 0. So each walking frame
+took its snapshot at an AACF draw, a second AACF visit passed, and the first cb1 re-map
+after them carried other rows 270..275: the eyes' rule (hold the eye-frame to its first
+draw's rows, correct for an eye pass: capture 043720, one block per pass) dropped the
+whole frame. Standing, the ~87 re-maps a frame all carried the snapshot's rows.
+
+**The ledgers (eye runs 115325/115351, 4096 source draws each, standing).** Two camera
+blocks through the one cb1 inside a source frame: the world's (4092 draws, every pool
+family draw, row 273.z = 0.025) and a first-person one (draws 68-71: vs_7B0DC42D x3,
+vs_CFCA8FFC x1; 273.z = 0.0675, rows 270..272 x/y x1.23, rows 274/275 the same). The frame
+opens with the walkers (vs_F516 x67), then the terrain vs_ACE405F4 -- screen_motion's
+naming draw, whose cb1 its camera term copies -- then the weapon, then the world's pool
+draws (vs_EB52 from draw 75). vs_AACF is in weapon_motion's weapon/tool family set (7B0D,
+8B58, 114A, AACF, 174E) as well as a generic detail shader. What camera the walk's AACF
+draws used is not in this log (no rows are printed); a camera attached to the body (a head
+or weapon bob) is the reading that fits "equal standing, different walking".
+
+ruled out: one camera per on-foot source frame (the eyes' rows rule applied to the
+source), because flight 5 dropped every walking source frame (2031/2031, 2405/2405) at the
+first re-map after an AACF-first snapshot while 0 of 1470 standing frames dropped, and the
+eye runs draw a first-person block under a second camera inside the source pass.
+
+**The fix (branch claude/onfoot-source-camera).** The source is held to the NAMING's
+camera, draw by draw, instead of to its first draw's. screen_motion names the source at
+the terrain/scene draw and now passes the cb1 that draw reads
+(src/d3d11/screen_motion.cpp:261); engineVelocityNoteSource records it and its rows
+270..275 as the watch last saw them written, for that present frame
+(src/d3d11/engine_velocity.cpp:1517). Each source pool draw, before anything is prepared
+(engine_velocity.cpp:878, sourceCameraHolds at :749), must be after this frame's naming,
+read the naming's cb1, and carry its rows; otherwise it is DECLINED -- not substituted,
+the frame and its other draws kept -- and counted by reason (before this frame's naming,
+the naming's rows not seen, other scene constants, rows not seen, another camera), another
+camera also by family, by which rows differ (270..272, 273, 274, 275) and by the largest
+camera-position distance. The frame's snapshot is taken at its first held draw, so SEN is
+the world's rows by construction -- the camera screen_motion's camera term already uses.
+The other camera's pixels keep what they had: first-person meshes are carried by the
+weapon path (the stencil), anything else takes the camera term, as before. Per-camera
+views (the other camera's records reprojected with its own rows) were not built: the
+slot target cannot say which camera wrote a pixel without another target, and the flight
+gives no sign the declined draws are movers. The eyes' rule is unchanged.
+
+The on-foot line now prints the source's own drops by reason (`frames dropped: none` or
+the reasons) and `camera rule: namings N (rows not seen U), checks held to the naming's
+camera H, declined D in F frames (<by reason>); another camera changed rows 270..272 on
+a, 273 on b, 274 on c, 275 on d, its position up to X m from the naming's, by family: ...`.
+Checks, not draws: a draw repeating the last one's state (no new binding, no cb1 write)
+skips the slow path and runs as its predecessor did.
+
+**The panel's kinds without diagnostics.** The screen shader counted its kinds only with
+advanced.temporal_aa_diagnostics or the motion_source view (an atomic per panel pixel with
+engine data, millions a frame on five addresses). Now, otherwise, one frame in 300
+(kPanelSampleFrames) counts on a 4 x 4 grid of eye pixels (engine.z carries the stride,
+src/d3d11/screen_motion.h:145; screen_motion.cpp:367): at most ~370k atomics on the
+sampled frame against ~5.9M for a full count, about 0.25 us a frame averaged even at a
+pessimistic 1 ns an atomic, plus a 20-byte clear, copy and a DO_NOT_WAIT read. The line
+says `panel pixels per sampled eye draw: ... (sampled: one frame in 300, one eye pixel in
+16 on a 4x4 grid; raw counts, not scaled)`; with diagnostics it counts every pixel as
+before.
+
+**Rigs.** engine_velocity_test S2 (lifecycle_tests.h:896): the walk's interleaving -- the
+naming's world rows, two draws of another camera (a 4 cm bob on row 275), the world's
+draws -- drops an EYE-frame (the eyes' rule, as the flight counted it) but on the source
+declines only the other camera's checks: every frame given from the second, frames
+dropped none, the view's scene constants the world's rows 270..275 exactly (this frame's
+and last), MRT6 the world's slot and never the other camera's, a draw before the naming
+declined as such, the rows and 4 cm distance and family printed, standing nothing
+declined. The panel case: the stride-4 grid counts only the pixels on it and changes no
+motion. screen_motion_test: the naming hands over the naming draw's VS b1. engine_velocity_test
+1008 checks, screen motion 56542, kinematic_motion_test 71; config contract 261.
+
+**What a flight shows.** Walking, near a drone or a landing ship: `frames dropped: none`,
+`screen views asked A, given A` less the first frame's `no previous scene constants`, the
+camera rule's declines with their rows and distance (which camera it is), and `panel
+pixels per sampled eye draw: engine-joined J` with J > 0 when a pool-family rig record is
+on screen. If the new code never ran: no `camera rule:` clause (the old line), and walking
+frames dropped for `scene rows 270..275 changed` as in flight 5. Walkers (vs_F516) are not
+a pool family: a walking NPC still blurs until phase 2's previous bone palette.

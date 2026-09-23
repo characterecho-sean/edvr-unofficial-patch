@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -201,6 +202,25 @@ static_assert(kEngineVelocitySourceEye == 2 && kWatchSlots == 6, "one watch pair
 // while the naming is at most two frames old.
 Ptr<ID3D11Texture2D> g_sourceDepth;
 uint32_t g_sourceNoted = ~0u;
+// The source camera (flight 5, 2026-09-23 140351): the scene constants the
+// naming draw reads (screen_motion's terrain/scene draw, the camera its own
+// camera term uses) and their rows 270..275 as the watch last saw them
+// written, for the present frame of that naming. The source's pool draws are
+// held to it draw by draw: a handful drawn under other rows (the same as the
+// world's standing still, different walking) no longer drop the frame.
+struct SourceCamera {
+    Ptr<ID3D11Buffer> scene;
+    bool rowsKnown = false;
+    uint8_t rows[kRowsBytes] = {};
+    uint32_t frame = ~0u;
+};
+SourceCamera g_sourceCamera;
+// Why a source pool draw was declined (not substituted; the frame kept).
+enum SourceDecline : int { kBeforeNaming = 0, kNamingUnseen, kOtherScene, kRowsUnseen, kOtherCamera, kSourceDeclineCount };
+const char* const kSourceDeclineNames[kSourceDeclineCount] = {
+    "before this frame's naming", "the naming's rows not seen", "other scene constants", "rows not seen",
+    "another camera"};
+uint32_t g_sourceDeclineFrame = ~0u;   // the present frame whose first decline was counted
 
 std::atomic<uint32_t> g_frame{0};
 
@@ -256,7 +276,22 @@ struct DrawStats {
     uint64_t sourceViewsAsked = 0, sourceViewsGiven = 0;
     uint64_t sourceRefusedNoEmit = 0, sourceRefusedDepth = 0, sourceRefusedFrame = 0, sourceRefusedInvalid = 0,
              sourceRefusedUnwritten = 0, sourceRefusedPrevious = 0;
-    uint64_t panelJoined = 0, panelMasked = 0, panelCamera = 0, panelStale = 0, panelCorrupt = 0, panelDraws = 0;
+    // The source camera rule (flight 5), per check (a slow-path visit: a new
+    // binding or a cb1 write; a draw repeating the last one's state runs as
+    // it did): checks held to the naming's camera, checks declined by reason
+    // and (another camera) by family, the frames with a decline, which rows
+    // the other cameras changed (270..272, 273, 274, 275) and the largest
+    // camera-position distance among them (m);
+    // namings whose rows the watch had not seen; the source's own
+    // invalidations by reason (they share g_draw.invalid with the eyes).
+    uint64_t sourceHeld = 0, sourceDeclined[kSourceDeclineCount] = {}, sourceDeclinedFamily[kFamilyCount] = {};
+    uint64_t sourceDeclineFrames = 0, sourceOtherRows[4] = {}, sourceNamings = 0, sourceNamingsUnseen = 0;
+    double sourceOtherShiftMax = 0.0;
+    uint64_t sourceInvalid[kInvalidCount] = {};
+    // The screen shader's per-kind eye-pixel counts: [0] every pixel of every
+    // frame (diagnostics or motion_source), [1] sampled (one frame in
+    // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared).
+    uint64_t panel[2][5] = {}, panelDraws[2] = {};
     uint64_t trackerMovers = 0, trackerFrames = 0;
     uint64_t burstFrames = 0, burstGaps = 0;
     void clear() { *this = DrawStats{}; }
@@ -513,7 +548,10 @@ WatchInfo& assignWatch(unsigned index, const ID3D11Resource* resource) {
 }
 
 void invalidate(Eye& e, Invalid why) {
-    if (!e.invalid) ++g_draw.invalid[why];
+    if (!e.invalid) {
+        ++g_draw.invalid[why];
+        if (&e == &g_eyes[kEngineVelocitySourceEye]) ++g_draw.sourceInvalid[why];
+    }
     e.invalid = true;
 }
 
@@ -698,6 +736,56 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     }
 }
 
+// The source camera rule (flight 5, 2026-09-23 140351). The eyes' rule above
+// holds an eye-frame to its first draw's rows; the on-foot source is drawn by
+// more than one camera -- every source frame of that flight's walk was dropped
+// after two runs of vs_AACF draws, the first substituted, whose rows 270..275
+// matched the world's standing still and not walking -- so a source pool draw
+// is held to the NAMING's camera instead (engineVelocityNoteSource: the
+// scene constants the terrain/scene draw read this present frame, the camera
+// screen_motion's own camera term uses). A draw before this frame's naming,
+// under other scene constants, with rows the watch has not seen, or under
+// other rows is declined -- not substituted, the frame and its other draws
+// kept -- and counted; the frame's snapshot is then taken at its first draw
+// under the naming's camera, so SEN is the world's rows by construction.
+bool sourceCameraHolds(ID3D11DeviceContext* ctx, int f, uint32_t frame) {
+    const SourceCamera& c = g_sourceCamera;
+    int why = -1;
+    if (c.frame != frame) why = kBeforeNaming;
+    else if (!c.scene || !c.rowsKnown) why = kNamingUnseen;
+    else if (bindingGet(BindSlot::VsCb1) != c.scene.Get()) {
+        // The shadow first; a different pointer is asked of the context.
+        Ptr<ID3D11Buffer> scene;
+        ctx->VSGetConstantBuffers(kEngineVelocitySceneSlot, 1, &scene);
+        if (scene.Get() != c.scene.Get()) why = kOtherScene;
+    }
+    if (why < 0) {
+        const WatchInfo& ws = g_watchInfo[static_cast<unsigned>(kEngineVelocitySourceEye) * 2u + 1u];
+        if (ws.resource != static_cast<const ID3D11Resource*>(c.scene.Get()) || !ws.rowsKnown) why = kRowsUnseen;
+        else if (std::memcmp(ws.rows, c.rows, kRowsBytes) != 0) {
+            why = kOtherCamera;
+            ++g_draw.sourceDeclinedFamily[f];
+            // Which rows the other camera changed: 270..272 (the clip rows'
+            // xyz: rotation and projection), 273 (the near plane and the
+            // jitter), 274 (the view axis), 275 (the camera position).
+            float a[24], b[24];
+            std::memcpy(a, ws.rows, kRowsBytes);
+            std::memcpy(b, c.rows, kRowsBytes);
+            if (std::memcmp(a, b, 48) != 0) ++g_draw.sourceOtherRows[0];
+            if (std::memcmp(a + 12, b + 12, 16) != 0) ++g_draw.sourceOtherRows[1];
+            if (std::memcmp(a + 16, b + 16, 16) != 0) ++g_draw.sourceOtherRows[2];
+            if (std::memcmp(a + 20, b + 20, 16) != 0) ++g_draw.sourceOtherRows[3];
+            const double dx = double(a[20]) - b[20], dy = double(a[21]) - b[21], dz = double(a[22]) - b[22];
+            const double shift = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (std::isfinite(shift) && shift > g_draw.sourceOtherShiftMax) g_draw.sourceOtherShiftMax = shift;
+        }
+    }
+    if (why < 0) { ++g_draw.sourceHeld; return true; }
+    ++g_draw.sourceDeclined[why];
+    if (g_sourceDeclineFrame != frame) { g_sourceDeclineFrame = frame; ++g_draw.sourceDeclineFrames; }
+    return false;
+}
+
 // Add MRT6 to the game's binding, once per pass binding, only where the
 // binding can take it (engine_velocity_state.h), and only if the runtime
 // kept it. False: not here.
@@ -787,6 +875,9 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     }
     ID3D11PixelShader* usePs = patchedPsFor(ctx, f, ps);
     if (!usePs) { restore(ctx); return; }
+    // The source's camera, draw by draw, before anything is prepared: the
+    // frame starts at its first draw under the naming's camera.
+    if (sourcePass && !sourceCameraHolds(ctx, f, frame)) { restore(ctx); return; }
     const bool newFrame = e.frame != frame;
     Ptr<ID3D11Texture2D> depthTex;
     if (newFrame || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
@@ -1025,24 +1116,65 @@ void summaryLocked(uint64_t now) {
     // pixels through the panel (docs/kinematic-motion-injection-2026-09-19.md,
     // 2026-09-23 "On foot"). Printed whenever the source was about.
     const Eye& source = g_eyes[kEngineVelocitySourceEye];
-    if (g_draw.sourceFrames || g_draw.sourceViewsAsked || g_draw.panelDraws || source.slots) {
-        const double draws = double(std::max<uint64_t>(1, g_draw.panelDraws));
-        Log::get().note("engine motion: on foot: source frames %llu, with MRT6 bound %llu (slot target %ux%u); screen "
-                        "views asked %llu, given %llu, refused: stood down %llu, other depth %llu, other frame %llu, "
-                        "invalidated %llu, unwritten %llu, no previous scene constants %llu; panel pixels per eye draw: "
-                        "engine-joined %.0f (a rig record's certified exact motion, carried through the panel), masked "
-                        "%.0f (no history), pool surface not a rig record %.0f (camera term), stale slot %.0f, corrupt "
-                        "slot code %.0f (declined; must be 0) over %llu counted eye draws%s.",
+    if (g_draw.sourceFrames || g_draw.sourceViewsAsked || g_draw.panelDraws[0] || g_draw.panelDraws[1] ||
+        g_draw.sourceNamings || source.slots) {
+        // The source's own invalidations by reason, then the camera rule's
+        // declines by reason and another camera's by family and rows.
+        std::string dropped, declined, families;
+        const auto add = [](std::string& s, const char* name, uint64_t n) {
+            char t[96];
+            _snprintf_s(t, _TRUNCATE, "%s%s %llu", s.empty() ? "" : ", ", name, static_cast<unsigned long long>(n));
+            s += t;
+        };
+        for (int k = 0; k < kInvalidCount; ++k) if (g_draw.sourceInvalid[k]) add(dropped, kInvalidNames[k], g_draw.sourceInvalid[k]);
+        uint64_t declinedAll = 0;
+        for (int k = 0; k < kSourceDeclineCount; ++k) {
+            declinedAll += g_draw.sourceDeclined[k];
+            add(declined, kSourceDeclineNames[k], g_draw.sourceDeclined[k]);
+        }
+        for (int f = 0; f < kFamilyCount; ++f)
+            if (g_draw.sourceDeclinedFamily[f]) add(families, kFamilies[f].name, g_draw.sourceDeclinedFamily[f]);
+        char other[768] = "";
+        if (g_draw.sourceDeclined[kOtherCamera])
+            _snprintf_s(other, _TRUNCATE, "; another camera changed rows 270..272 on %llu, 273 on %llu, 274 on %llu, 275 "
+                        "on %llu, its position up to %.3f m from the naming's, by family: %s",
+                        u(g_draw.sourceOtherRows[0]), u(g_draw.sourceOtherRows[1]), u(g_draw.sourceOtherRows[2]),
+                        u(g_draw.sourceOtherRows[3]), g_draw.sourceOtherShiftMax, families.c_str());
+        // The panel's kinds: every pixel (diagnostics, motion_source) when
+        // counted, else the sampled count, else nothing.
+        const int mode = g_draw.panelDraws[0] ? 0 : g_draw.panelDraws[1] ? 1 : -1;
+        char pixels[640];
+        if (mode >= 0) {
+            const double draws = double(g_draw.panelDraws[mode]);
+            const uint64_t* p = g_draw.panel[mode];
+            char sampleNote[160] = "";
+            if (mode == 1)
+                _snprintf_s(sampleNote, _TRUNCATE, " (sampled: one frame in %u, one eye pixel in %u on a %ux%u grid; raw "
+                            "counts, not scaled)", kPanelSampleFrames, kPanelSampleStride * kPanelSampleStride,
+                            kPanelSampleStride, kPanelSampleStride);
+            _snprintf_s(pixels, _TRUNCATE, "panel pixels per %s eye draw: engine-joined %.0f (a rig record's certified "
+                        "exact motion, carried through the panel), masked %.0f (no history), pool surface not a rig "
+                        "record %.0f (camera term), stale slot %.0f, corrupt slot code %.0f (declined; must be 0) over "
+                        "%llu counted eye draws%s", mode ? "sampled" : "counted", double(p[0]) / draws,
+                        double(p[1]) / draws, double(p[2]) / draws, double(p[3]) / draws, double(p[4]) / draws,
+                        u(g_draw.panelDraws[mode]), sampleNote);
+        } else {
+            _snprintf_s(pixels, _TRUNCATE, "panel pixels: none counted this window (sampled one frame in %u while the "
+                        "source's views are given; every pixel with advanced.temporal_aa_diagnostics = 1 or the "
+                        "motion_source view; not a zero count)", kPanelSampleFrames);
+        }
+        Log::get().note("engine motion: on foot: source frames %llu, with MRT6 bound %llu (slot target %ux%u), "
+                        "frames dropped: %s; screen views asked %llu, given %llu, refused: stood down %llu, other depth "
+                        "%llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene constants %llu; "
+                        "camera rule: namings %llu (rows not seen %llu), checks held to the naming's camera %llu, "
+                        "declined %llu in %llu frames (%s)%s; %s.",
                         u(g_draw.sourceFrames), u(g_draw.sourceFramesBound), source.width, source.height,
+                        dropped.empty() ? "none" : dropped.c_str(),
                         u(g_draw.sourceViewsAsked), u(g_draw.sourceViewsGiven), u(g_draw.sourceRefusedNoEmit),
                         u(g_draw.sourceRefusedDepth), u(g_draw.sourceRefusedFrame), u(g_draw.sourceRefusedInvalid),
-                        u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious),
-                        double(g_draw.panelJoined) / draws, double(g_draw.panelMasked) / draws,
-                        double(g_draw.panelCamera) / draws, double(g_draw.panelStale) / draws,
-                        double(g_draw.panelCorrupt) / draws, u(g_draw.panelDraws),
-                        g_draw.panelDraws ? "" : " (not counted this window: the screen shader counts with "
-                                                 "advanced.temporal_aa_diagnostics = 1 or the motion_source view; "
-                                                 "not a zero count)");
+                        u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious), u(g_draw.sourceNamings),
+                        u(g_draw.sourceNamingsUnseen), u(g_draw.sourceHeld), u(declinedAll),
+                        u(g_draw.sourceDeclineFrames), declined.c_str(), other, pixels);
     }
     for (int f = 0; f < kFamilyCount; ++f) {
         FamilyState& s = g_families[f];
@@ -1075,6 +1207,8 @@ void clearLocked() {
     for (auto& e : g_eyes) e = Eye{};
     g_sourceDepth.Reset();
     g_sourceNoted = ~0u;
+    g_sourceCamera = SourceCamera{};
+    g_sourceDeclineFrame = ~0u;
     for (auto& w : watch) w.store(nullptr);
     for (auto& w : g_watchInfo) w = WatchInfo{};
     for (auto& s : g_families) {
@@ -1303,6 +1437,7 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
         for (unsigned i = 4; i < kWatchSlots; ++i) { watch[i].store(nullptr); g_watchInfo[i] = WatchInfo{}; }
         g_sourceDepth.Reset();
         g_sourceNoted = ~0u;
+        g_sourceCamera = SourceCamera{};
     }
     refreshEmitStatus(false);
     // The tracker's comparison count, only while its diagnostics run it (its
@@ -1381,11 +1516,33 @@ bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
     return any || out->untimed || out->invalid;
 }
 
-void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth) {
+void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants) {
     if (!live.load(std::memory_order_acquire) || !sourceDepth) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (g_sourceDepth.Get() != sourceDepth) g_sourceDepth = sourceDepth;
     g_sourceNoted = frameNow();
+    // The source camera for this present frame: the naming draw's scene
+    // constants and their rows as last written (the watch's source-scene
+    // slot follows this buffer from here; a first sight copies what another
+    // slot knows of it, else the rows are unseen until its next write).
+    SourceCamera& c = g_sourceCamera;
+    c.frame = g_sourceNoted;
+    c.scene = sceneConstants;
+    c.rowsKnown = false;
+    ++g_draw.sourceNamings;
+    if (sceneConstants) {
+        D3D11_BUFFER_DESC sd{};
+        sceneConstants->GetDesc(&sd);
+        if (sd.ByteWidth >= (kRowsFirst + 6u) * 16u && sd.ByteWidth <= 65536u) {
+            const WatchInfo& ws = assignWatch(static_cast<unsigned>(kEngineVelocitySourceEye) * 2u + 1u, sceneConstants);
+            c.rowsKnown = ws.rowsKnown;
+            if (ws.rowsKnown) std::memcpy(c.rows, ws.rows, kRowsBytes);
+        }
+    }
+    if (!c.rowsKnown) ++g_draw.sourceNamingsUnseen;
+    // The next pool draw is checked against this camera even if nothing it
+    // binds has changed since a draw declined before the naming.
+    cache = DrawCache{};
 }
 
 bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews* out) {
@@ -1400,15 +1557,13 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
 }
 
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
-                                   uint32_t eyeDraws) {
+                                   uint32_t eyeDraws, uint32_t pixelStride) {
     if (!live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    g_draw.panelJoined += joined;
-    g_draw.panelMasked += masked;
-    g_draw.panelCamera += camera;
-    g_draw.panelStale += stale;
-    g_draw.panelCorrupt += corrupt;
-    g_draw.panelDraws += eyeDraws;
+    const int mode = pixelStride > 1u ? 1 : 0;
+    const uint32_t k[5] = {joined, masked, camera, stale, corrupt};
+    for (int i = 0; i < 5; ++i) g_draw.panel[mode][i] += k[i];
+    g_draw.panelDraws[mode] += eyeDraws;
 }
 
 void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt) {
