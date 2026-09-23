@@ -19,8 +19,9 @@ this doc changes. Last updated 2026-09-23 for the served floor.*
   the input, the runtime upsampling the rest) instead of DLSS standing
   aside -- BUILT, NOT FLOWN ("The served floor", at the end).
 - **Open:**
-  - Next flight, the served floor: HMD Quality 0.45 then 0.5 at the
-    Pimax's 4074 wide; the signature is in "The served floor".
+  - The served floor: 0.5 FLOWN 16:27 (f05c84bf), not exercised (exactly
+    on the floor: 2037x1969 -> 4074x3938 at 50%, standard scaling); 0.45
+    still owed; signature in "The served floor".
   - Features C and D: unbuilt. DLSS/FSR 2 as default engines (Phasing
     step 6): not phased in; the every-vendor design is
     fsr-upscaler-design-2026-09-16.md (AMD has no D3D11 backend).
