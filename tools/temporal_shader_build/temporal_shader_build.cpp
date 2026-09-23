@@ -209,8 +209,7 @@ static int generate(const Options& o) {
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
         {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},
         {"kTemporalAaBytecode", "temporal_aa_cs", "main", diagnostic, {}},
-        {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}},
-        {"kTemporalKinBytecode", "temporal_kin_cs", "kinCover", fast, {}}
+        {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}}
     };
     const std::string key = sourceKey(edvr::kTemporalCsHlsl, variants, compilerPath());
     if (outputCurrent(o.output, key)) {

@@ -23,11 +23,11 @@
   DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 + FIX ROUND
   MERGED and FLOWN (093817, "The re-fly" entry): eye-frames bound and given, cb1
   re-maps kept (invalidated 0), corrupt codes 0, engine-joined 67-73k px an eye-frame.
-  FOLLOW-UPS MERGED, NOT FLOWN (73b6e9cf): the ~3 ms prep is stage B's coverage pass,
-  now run only when read, and prep's parts timed on the price line; a `depth probe
-  layout:` census line; the motion_source legend corrected (green = certified rig
-  record, still or moving).
-- **Open:** the follow-ups' flight (the re-fly entry's expected price line); on foot
+  FOLLOW-UPS MERGED, NOT FLOWN (73b6e9cf): prep's parts priced; a `depth probe layout:`
+  census; the motion_source legend corrected (green = certified rig record, still or
+  moving). STAGE B REMOVED 2026-09-23 (its coverage pass was the ~3 ms prep),
+  superseded by the engine path's exact per-pixel ownership; the veto never shipped on.
+- **Open:** the follow-ups' flight (the expected price line is under Next); on foot
   the eyes show a flat 2D-screen panel (no eye scene), and with fix.ui_quality on the
   UI layer lifted it past DLSS entirely -- DECIDED (overseer, 2026-09-23): the layer
   leaves the 2D screen in the eye while the journal says on foot (the UI agent's
@@ -58,8 +58,8 @@
   the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
   cause (the 09:38 entry). Do not re-propose any of the above.
 - **Next:** the same flight (fix.engine_motion=on, dlss, diagnostics 1; pad, walk,
-  re-board) read against the re-fly entry: prep's parts and the coverage line in the
-  cockpit, `depth probe layout:` and the layer's on-foot line on foot.
+  re-board) read against the re-fly entry: in the cockpit `prep ~0.2-0.5 (copy ~0.05
+  mv ~0.1-0.3)`; on foot `depth probe layout:` and the layer's on-foot line.
 
 ## Premise
 

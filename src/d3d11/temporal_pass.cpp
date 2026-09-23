@@ -397,21 +397,6 @@ struct EyeState {
     // identity, remade when ui_depth remakes it.
     void*                      uiMaskRes = nullptr;
     ID3D11ShaderResourceView*  uiMaskSrv = nullptr;
-    // The kinematic ownership coverage pair (stage B, the 2026-09-20 13:55
-    // spec in docs/kinematic-motion-injection-2026-09-19.md): quarter-res
-    // R32_UINT [near,far] reversed-Z span textures, cleared and repainted by
-    // the coverage pass each frame while fix.engine_motion is live and its
-    // upload is non-empty; untouched otherwise. kcFrame names the tracker
-    // snapshot the pair describes. Live and die with the dl set.
-    ID3D11Texture2D*           kcNear = nullptr;
-    ID3D11Texture2D*           kcFar = nullptr;
-    ID3D11ShaderResourceView*  kcNearSrv = nullptr;
-    ID3D11ShaderResourceView*  kcFarSrv = nullptr;
-    ID3D11UnorderedAccessView* kcNearUav = nullptr;
-    ID3D11UnorderedAccessView* kcFarUav = nullptr;
-    uint32_t                   kcW = 0, kcH = 0;
-    uint32_t                   kcFrame = UINT32_MAX;   // the tracker snapshot's ended frame
-    uint32_t                   kcPaintFrame = 0;       // the game frame the pair was last painted on
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
     ID3D11ShaderResourceView*  copySrv = nullptr;
     uint32_t                   copyW = 0, copyH = 0;
@@ -503,7 +488,6 @@ void releasePeriph(EyeState& e) {
     e.prReduced = false;
     e.prHaveHistory = false;
 }
-void releaseKc(EyeState& e);   // the kinematic coverage pair, defined beside the coverage pass
 void releaseDl(EyeState& e) {
     releasePeriph(e);   // the periphery's sizes follow the render's
     if (e.zPrevUav) { e.zPrevUav->Release(); e.zPrevUav = nullptr; }
@@ -514,7 +498,6 @@ void releaseDl(EyeState& e) {
     if (e.dlMask) { e.dlMask->Release(); e.dlMask = nullptr; }
     if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
     e.uiMaskRes = nullptr;
-    releaseKc(e);   // the kinematic coverage pair lives and dies with the dl set
     if (e.dlColourSrv) { e.dlColourSrv->Release(); e.dlColourSrv = nullptr; }
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
@@ -614,14 +597,15 @@ const char* const kRegionNames[kRegionCount] = {
 // Prep's own parts, on the full-frame path (the engine-motion re-fly of
 // 2026-09-23, log 093817: "prep" read ~3 ms a stereo pair in the cockpit
 // with fix.engine_motion on against ~0.2 in menus and on foot, and one
-// region cannot say which of its dispatches that is). The colour copies,
-// the kinematic coverage pass and the motion-vector dispatch, timed the same
-// way and printed INSIDE prep's figure: they are parts of prep, so "other",
-// the seven exported medians and the F8 line are unchanged. The rest of
-// prep (the constants, the masks' lookups) is prep less the three.
-enum class PrepPart { Copy = 0, Coverage, Mv, Count };
+// region cannot say which of its dispatches that is). The colour copies
+// and the motion-vector dispatch, timed the same way and printed INSIDE
+// prep's figure: they are parts of prep, so "other", the seven exported
+// medians and the F8 line are unchanged. The rest of prep (the constants,
+// the masks' lookups) is prep less the two. (A third part, stage B's
+// kinematic coverage pass, went with stage B on 2026-09-23.)
+enum class PrepPart { Copy = 0, Mv, Count };
 constexpr int kPrepParts = static_cast<int>(PrepPart::Count);
-const char* const kPrepPartNames[kPrepParts] = {"copy", "coverage", "mv"};
+const char* const kPrepPartNames[kPrepParts] = {"copy", "mv"};
 
 // Which path this eye's call is routed through, decided once per call
 // (temporalInner, alongside foveaMode) before either branch below runs, so
@@ -934,12 +918,10 @@ void flushWindow(const char* reason) {
         len += snprintf(line + len, sizeof(line) - len, " %s %.2f/%.2f",
                         kRegionNames[ri], regionMed[ri], regionP95[ri]);
         // Prep's parts inside its own figure (PrepPart): on the paths that
-        // time them; zeros where a part did not run (the own path, a
-        // coverage pass that stood down).
+        // time them; zeros where a part did not run (the own path).
         if (ri == static_cast<int>(Region::Prep) && len > 0 && len < static_cast<int>(sizeof(line))) {
-            len += snprintf(line + len, sizeof(line) - len, " (%s %.2f/%.2f %s %.2f/%.2f %s %.2f/%.2f)",
-                            kPrepPartNames[0], partMed[0], partP95[0], kPrepPartNames[1], partMed[1], partP95[1],
-                            kPrepPartNames[2], partMed[2], partP95[2]);
+            len += snprintf(line + len, sizeof(line) - len, " (%s %.2f/%.2f %s %.2f/%.2f)",
+                            kPrepPartNames[0], partMed[0], partP95[0], kPrepPartNames[1], partMed[1], partP95[1]);
         }
     }
     if (len > 0 && len < static_cast<int>(sizeof(line))) {
@@ -1440,40 +1422,6 @@ ID3D11ComputeShader* ownShader(ID3D11DeviceContext* ctx, bool diagnostics) {
     }
     return shader;
 }
-// The kinematic ownership coverage entry (stage B): one thread per uploaded
-// sphere, painting the quarter-res [near,far] span pair the compose's
-// kinematicStatic consults.
-ID3D11ComputeShader*       g_csKin = nullptr;
-bool                       g_csKinTried = false;
-bool                       g_csKinNoted = false;   // a failed create notes once
-ID3D11ComputeShader* kinShader(ID3D11DeviceContext* ctx) {
-    if (!g_csKin && !g_csKinTried) {
-        g_csKinTried = true;
-        g_csKin = shaderSwapCreateCs(ctx, kTemporalKinBytecode, sizeof(kTemporalKinBytecode),
-                                     "temporal_kin_cs", "temporal aa");
-    }
-    return g_csKin;
-}
-// The coverage pass's own state: the KCParams cbuffer and the uploaded sphere
-// set (structured, 4096 x 80 B -- the tracker's kTrackCap cap, so overflow is
-// impossible by construction). g_kinSphereGen/g_kinSphereSession are the last
-// tracker generation and session epoch uploaded; an unchanged pair skips the
-// copy (the session half closes the restart reuse, 2026-09-20 review
-// finding 4).
-ID3D11Buffer*              g_kinCb = nullptr;
-ID3D11Buffer*              g_kinSphereBuf = nullptr;
-ID3D11ShaderResourceView*  g_kinSphereSrv = nullptr;
-uint64_t                   g_kinSphereGen = 0;
-uint32_t                   g_kinSphereSession = 0;
-uint32_t                   g_kinSphereCount = 0;
-uint64_t                   g_kinEmptyFrames = 0;   // active frames with an empty upload (stand-down count)
-bool                       g_kinEmptyNoted = false;
-bool                       g_kinNoCamNoted = false;   // finding-1 stand-down, once
-uint64_t                   g_kinSkippedFrames = 0; // eye calls it did not run: nothing reads the pair
-bool                       g_kinSkippedNoted = false;
-// fix.engine_motion_veto (off): ownership alone paints the movers-view cyan;
-// the compose veto waits on the mask's flight validation (2026-09-20 review).
-bool                       g_engineMotionVeto = false;
 ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
 ID3D11ComputeShader*       g_csUiResolve = nullptr;
 bool                      g_csUiResolveTried = false, g_uiResolveNoted = false;
@@ -1762,10 +1710,6 @@ struct EyeDecisionFrame {
     uint32_t decisionCrop[4] = {}, outputCrop[4] = {};
     bool diagnostic = false, preUi = false, dlssSuccess = false;
     bool dlssHistory = false, dlssReset = false;
-    // Stage B diagnostic: bit 512 (the coverage pair was live) and bit 1024
-    // (the compose veto was armed) as this frame ran, for kin_bound/kin_veto
-    // in the manifest -- whether a strobing movers view was a flapping bind.
-    bool kinBound = false, kinVeto = false;
     EyeUiMode uiMode = EyeUiMode::None;
     const char* error = "capture_not_reached";
 };
@@ -2393,95 +2337,6 @@ bool writeEyeDecisionBin(ID3D11DeviceContext* ctx, ID3D11Texture2D* texture,
     return ok;
 }
 
-// Stage B eye-burst diagnostics (2026-09-20 15:45: movers view showed the
-// whole scene strobing one colour): dump the coverage pair and the sphere
-// upload a movers view is painted from, captured WITH the burst, so a
-// full-coverage report is settled offline instead of by another flight.
-// Same EDVRTEX1 container as the decision bins; format field R32_UINT.
-bool writeEyeKcBin(ID3D11DeviceContext* ctx, ID3D11Texture2D* src,
-                   uint32_t frame, const wchar_t* path) {
-    if (!ctx || !src) return false;
-    D3D11_TEXTURE2D_DESC d{};
-    src->GetDesc(&d);
-    if (d.Format != DXGI_FORMAT_R32_UINT) return false;
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) return false;
-    D3D11_TEXTURE2D_DESC sd = d;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.BindFlags = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    sd.MiscFlags = 0;
-    ID3D11Texture2D* st = nullptr;
-    const HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &st);
-    dev->Release();
-    if (FAILED(hr) || !st) return false;
-    ctx->CopyResource(st, src);
-    D3D11_MAPPED_SUBRESOURCE map{};
-    const bool mapped = SUCCEEDED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &map));
-    bool ok = false;
-    if (mapped) {
-        FILE* f = nullptr;
-        _wfopen_s(&f, path, L"wb");
-        ok = f != nullptr;
-        if (f) {
-            const uint32_t rowBytes = d.Width * 4;
-            const uint32_t header[9] = {1, d.Width, d.Height, static_cast<uint32_t>(d.Format),
-                                        rowBytes, frame, 0, 0, 0};
-            ok = fwrite("EDVRTEX1", 1, 8, f) == 8 && fwrite(header, sizeof(header), 1, f) == 1;
-            for (uint32_t y = 0; y < d.Height && ok; ++y)
-                ok = fwrite(static_cast<const char*>(map.pData) + y * map.RowPitch,
-                            1, rowBytes, f) == rowBytes;
-            if (fclose(f) != 0) ok = false;
-        }
-        ctx->Unmap(st, 0);
-    }
-    st->Release();
-    return ok;
-}
-
-// The sphere set the coverage pair was painted from: the GPU upload buffer
-// itself, not a fresh tracker snapshot -- the tracker may have published
-// again during the burst, and it is the GPU copy the last frame composed
-// with. EDVRKSP1: count, session, generation (lo, hi), then count x
-// KinematicSphereGpu rows.
-bool writeEyeKinSpheres(ID3D11DeviceContext* ctx, const wchar_t* path) {
-    if (!ctx || !g_kinSphereBuf || !g_kinSphereCount) return false;
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) return false;
-    D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = 4096 * sizeof(KinematicSphereGpu);
-    bd.Usage = D3D11_USAGE_STAGING;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-    bd.StructureByteStride = sizeof(KinematicSphereGpu);
-    ID3D11Buffer* st = nullptr;
-    const HRESULT hr = dev->CreateBuffer(&bd, nullptr, &st);
-    dev->Release();
-    if (FAILED(hr) || !st) return false;
-    ctx->CopyResource(st, g_kinSphereBuf);
-    D3D11_MAPPED_SUBRESOURCE map{};
-    const bool mapped = SUCCEEDED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &map));
-    bool ok = false;
-    if (mapped) {
-        FILE* f = nullptr;
-        _wfopen_s(&f, path, L"wb");
-        ok = f != nullptr;
-        if (f) {
-            const uint32_t header[4] = {g_kinSphereCount, g_kinSphereSession,
-                                        static_cast<uint32_t>(g_kinSphereGen & 0xFFFFFFFFu),
-                                        static_cast<uint32_t>(g_kinSphereGen >> 32)};
-            ok = fwrite("EDVRKSP1", 1, 8, f) == 8 && fwrite(header, sizeof(header), 1, f) == 1 &&
-                 fwrite(map.pData, sizeof(KinematicSphereGpu), g_kinSphereCount, f) == g_kinSphereCount;
-            if (fclose(f) != 0) ok = false;
-        }
-        ctx->Unmap(st, 0);
-    }
-    st->Release();
-    return ok;
-}
-
 void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir) {
     for (int k = 0; k < g_eyeRunTaken; ++k) {
         EyeDecisionFrame& d = g_eyeDecisions[k];
@@ -2505,30 +2360,6 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         if (g_eyePreUiStaging[k]) { g_eyePreUiStaging[k]->Release(); g_eyePreUiStaging[k]=nullptr; }
         if (g_eyeDecisionStaging[k]) { g_eyeDecisionStaging[k]->Release(); g_eyeDecisionStaging[k]=nullptr; }
     }
-    // The stage B diagnostics: each eye's coverage pair as of the run's last
-    // treated frame (the textures persist post-run) and the sphere upload
-    // they were painted from. kc_frame links the pair to the T crops.
-    const uint32_t kcFrame = g_eyeRunTaken > 0 ? g_eyeDecisions[g_eyeRunTaken - 1].frame : 0;
-    bool kcNearOk[2] = {}, kcFarOk[2] = {};
-    uint32_t kcDim[2] = {};
-    for (int i = 0; i < 2; ++i) {
-        wchar_t kcPath[MAX_PATH];
-        // Header frame: the pass's own paint frame when it is known (the
-        // textures persist post-run), else the last captured frame.
-        const uint32_t hdrFrame = g_eye[i].kcPaintFrame ? g_eye[i].kcPaintFrame : kcFrame;
-        if (g_eye[i].kcNear) {
-            _snwprintf_s(kcPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_KCNear%d.bin", dir.c_str(), g_eyeRunStamp, i);
-            kcNearOk[i] = writeEyeKcBin(ctx, g_eye[i].kcNear, hdrFrame, kcPath);
-        }
-        if (g_eye[i].kcFar) {
-            _snwprintf_s(kcPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_KCFar%d.bin", dir.c_str(), g_eyeRunStamp, i);
-            kcFarOk[i] = writeEyeKcBin(ctx, g_eye[i].kcFar, hdrFrame, kcPath);
-        }
-        if (kcNearOk[i] || kcFarOk[i]) { kcDim[0] = g_eye[i].kcW; kcDim[1] = g_eye[i].kcH; }
-    }
-    wchar_t sphPath[MAX_PATH];
-    _snwprintf_s(sphPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_KinSpheres.bin", dir.c_str(), g_eyeRunStamp);
-    const bool kinSpheresOk = writeEyeKinSpheres(ctx, sphPath);
     wchar_t manifest[MAX_PATH];
     _snwprintf_s(manifest, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_decisions.json", dir.c_str(), g_eyeRunStamp);
     FILE* f = nullptr;
@@ -2540,26 +2371,8 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         }
         return;
     }
-    fprintf(f, "{\n  \"schema\": 2,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n",
+    fprintf(f, "{\n  \"schema\": 1,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n  \"frames\": [\n",
             g_eyeRunStamp, kEyeRun);
-    fprintf(f, "  \"kinematic\": {\"session\": %u, \"generation\": %llu, \"count\": %u, "
-               "\"kc_frame\": %u, \"kc_paint_frame\": [%u, %u], \"kc_size\": [%u, %u],\n",
-            g_kinSphereSession, static_cast<unsigned long long>(g_kinSphereGen),
-            g_kinSphereCount, kcFrame, g_eye[0].kcPaintFrame, g_eye[1].kcPaintFrame,
-            kcDim[0], kcDim[1]);
-    fputs("    \"spheres_file\": ", f);
-    if (kinSpheresOk) fprintf(f, "\"eye_%ls_KinSpheres.bin\"", g_eyeRunStamp); else fputs("null", f);
-    fputs(", \"kc_near\": [", f);
-    for (int i = 0; i < 2; ++i) {
-        if (kcNearOk[i]) fprintf(f, "\"eye_%ls_KCNear%d.bin\"", g_eyeRunStamp, i); else fputs("null", f);
-        if (!i) fputs(", ", f);
-    }
-    fputs("], \"kc_far\": [", f);
-    for (int i = 0; i < 2; ++i) {
-        if (kcFarOk[i]) fprintf(f, "\"eye_%ls_KCFar%d.bin\"", g_eyeRunStamp, i); else fputs("null", f);
-        if (!i) fputs(", ", f);
-    }
-    fputs("]},\n  \"frames\": [\n", f);
     for (int k = 0; k < g_eyeRunTaken; ++k) {
         const EyeDecisionFrame& d = g_eyeDecisions[k];
         fprintf(f, "    {\"index\": %d, \"frame\": %u, \"diagnostic_frame\": %u, ",
@@ -2579,11 +2392,9 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         if (g_eyeTreatedWritten[k]) fprintf(f, "\"treated_file\": \"eye_%ls_T%02d.bmp\", ", g_eyeRunStamp, k);
         else fputs("\"treated_file\": null, ", f);
         fprintf(f, "\"ui_mode\": \"%s\", \"dlss_success\": %s, \"dlss_history\": %s, "
-                   "\"dlss_reset\": %s, \"kin_bound\": %s, \"kin_veto\": %s, "
-                   "\"error\": \"%s\"}%s\n",
+                   "\"dlss_reset\": %s, \"error\": \"%s\"}%s\n",
                 eyeUiModeName(d.uiMode), d.dlssSuccess ? "true" : "false",
                 d.dlssHistory ? "true" : "false", d.dlssReset ? "true" : "false",
-                d.kinBound ? "true" : "false", d.kinVeto ? "true" : "false",
                 d.error ? d.error : "", k + 1 == g_eyeRunTaken ? "" : ",");
     }
     fputs("  ]\n}\n", f);
@@ -3292,189 +3103,6 @@ bool ensureDecisionTexture(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t 
     if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
     if (e.dlDecision) { e.dlDecision->Release(); e.dlDecision = nullptr; }
     return false;
-}
-
-// -- Stage B: the kinematic ownership coverage pass ------------------------------
-// (docs/kinematic-motion-injection-2026-09-19.md, the 2026-09-20 13:55 spec.)
-// One bounded compute dispatch per eye per frame while fix.engine_motion is
-// live: one thread per uploaded sphere paints the sphere's conservative
-// quarter-res screen rect with its [near,far] reversed-Z span. Returns true
-// only when this eye's pair was rebuilt off a non-empty current upload -- the
-// caller then binds the pair at t19/t20 and sets probe.w bit 512. Every other
-// path leaves the bit clear and the frame byte-identical to before.
-
-void releaseKc(EyeState& e) {
-    if (e.kcNearSrv) { e.kcNearSrv->Release(); e.kcNearSrv = nullptr; }
-    if (e.kcFarSrv) { e.kcFarSrv->Release(); e.kcFarSrv = nullptr; }
-    if (e.kcNearUav) { e.kcNearUav->Release(); e.kcNearUav = nullptr; }
-    if (e.kcFarUav) { e.kcFarUav->Release(); e.kcFarUav = nullptr; }
-    if (e.kcNear) { e.kcNear->Release(); e.kcNear = nullptr; }
-    if (e.kcFar) { e.kcFar->Release(); e.kcFar = nullptr; }
-    e.kcW = e.kcH = 0;
-    e.kcFrame = UINT32_MAX;
-    e.kcPaintFrame = 0;
-}
-
-// The pair has three readers: the compose veto (fix.engine_motion_veto, off
-// by default), the movers debug view's cyan (advanced.temporal_aa_debug =
-// movers) and the eye run's dump (KCNear/KCFar). With none of them it paints
-// for nobody -- and it is not cheap: one thread per proven-static sphere walks
-// that sphere's whole quarter-res rectangle with two atomics a texel, so a
-// handful of spheres just in front of the eye (the ship's own records) keep
-// one wave busy for milliseconds. Flights 065324 and 093817: "prep" read 3-8
-// ms a stereo pair whenever the tracker published spheres with the scene's
-// depth in hand, and 0.13-0.22 whenever it did not -- in 065324 with the
-// engine-motion views never given at all, so the per-pixel engine path was
-// not what cost it.
-bool kinematicCoverageWanted() {
-    return g_engineMotionVeto || g_debugMode == 4 || g_eyeRunLeft > 0 || g_eyeRunReady;
-}
-
-bool kinematicCoveragePass(ID3D11DeviceContext* ctx, ID3D11Device* dev, EyeState& e,
-                           const PassParams& p, uint32_t w, uint32_t h) {
-    if (!kinematicMotionActive()) return false;
-    if (p.knobs[1] == 0.0f) return false;   // no scene depth bound: nothing to gate with
-    if (!kinematicCoverageWanted()) {
-        ++g_kinSkippedFrames;
-        if (!g_kinSkippedNoted) {
-            g_kinSkippedNoted = true;
-            Log::get().note("engine motion coverage: not run -- nothing reads the coverage pair "
-                            "(fix.engine_motion_veto off, no movers view, no eye run), and it cost "
-                            "~3 ms a stereo pair in the cockpit (flight 093817's prep). The veto or "
-                            "the movers view runs it again; the price line's prep parts time it "
-                            "(coverage).");
-        }
-        return false;
-    }
-    g_kinSkippedNoted = false;
-    // The camera rows come from the frame's chosen set, not p.wR0..2: those
-    // are filled only by the body/ship motion paths, and a zero camera reads
-    // every sphere as straddling the eye -- a full-eye paint and a veto on
-    // real object motion (2026-09-20 review finding 1). Stand down instead.
-    chooseCameraRows();   // idempotent within the frame
-    if (!g_curValid) {
-        if (!g_kinNoCamNoted) {
-            g_kinNoCamNoted = true;
-            Log::get().note("engine motion coverage: no valid camera rows this frame -- the "
-                            "coverage pass stands down rather than project against a zero "
-                            "camera (2026-09-20 review finding 1). The stock path is untouched.");
-        }
-        return false;
-    }
-    ID3D11ComputeShader* cs = kinShader(ctx);
-    if (!cs) {
-        if (!g_csKinNoted) {
-            g_csKinNoted = true;
-            Log::get().note("engine motion coverage: the temporal_kin_cs shader could not be "
-                            "created; the ownership veto stands down, the stock path is untouched.");
-        }
-        return false;
-    }
-    uint32_t count = 0, snapFrame = 0;
-    const uint64_t gen = kinematicMotionSphereSnapshot(nullptr, 0, &count, &snapFrame);
-    if (gen == 0 || count == 0) {
-        // A live tracker with an empty upload: a stand-down count, never a
-        // pass (the 13:55 spec's failure list).
-        ++g_kinEmptyFrames;
-        if (!g_kinEmptyNoted) {
-            g_kinEmptyNoted = true;
-            Log::get().note("engine motion coverage: the tracker is live but the upload snapshot "
-                            "is empty -- no proven-static spheres published. The coverage pass "
-                            "stands down; counted (see the tracker's summary line), not a pass.");
-        }
-        return false;
-    }
-    g_kinEmptyNoted = false;
-    if (!g_kinSphereBuf) {
-        D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 4096 * sizeof(KinematicSphereGpu);   // the tracker's kTrackCap
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        bd.StructureByteStride = sizeof(KinematicSphereGpu);
-        if (FAILED(dev->CreateBuffer(&bd, nullptr, &g_kinSphereBuf)) || !g_kinSphereBuf) return false;
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.Format = DXGI_FORMAT_UNKNOWN;
-        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-        sd.Buffer.FirstElement = 0;
-        sd.Buffer.NumElements = 4096;
-        if (FAILED(dev->CreateShaderResourceView(g_kinSphereBuf, &sd, &g_kinSphereSrv)) ||
-            !g_kinSphereSrv) return false;
-    }
-    const uint32_t kinSession = kinematicMotionSession();
-    if (gen != g_kinSphereGen || kinSession != g_kinSphereSession) {
-        // The (session, generation) pair changed: one copy. An idle
-        // settlement frame pays none -- the coverage textures still rebuild
-        // (the camera moves). The session half makes a tracker restart's
-        // generation collision a fresh upload, never a reuse (finding 4).
-        static std::vector<KinematicSphereGpu> staging(4096);
-        const uint64_t upGen = kinematicMotionSphereSnapshot(staging.data(), 4096, &count, &snapFrame);
-        ctx->UpdateSubresource(g_kinSphereBuf, 0, nullptr, staging.data(), 0, 0);
-        g_kinSphereGen = upGen;
-        g_kinSphereCount = count;
-        g_kinSphereSession = kinSession;
-    }
-    const uint32_t qw = (w + 3) / 4, qh = (h + 3) / 4;   // quarter-res, rounded out
-    if (e.kcNear && (e.kcW != qw || e.kcH != qh)) releaseKc(e);
-    if (!e.kcNear) {
-        const bool okA = makeTex(dev, qw, qh, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT,
-                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                 &e.kcNear, &e.kcNearSrv, &e.kcNearUav);
-        const bool okB = okA && makeTex(dev, qw, qh, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT,
-                                        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                        &e.kcFar, &e.kcFarSrv, &e.kcFarUav);
-        if (!okB) { releaseKc(e); return false; }
-        e.kcW = qw; e.kcH = qh;
-    }
-    if (!g_kinCb) {
-        D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 96;   // KCParams: tanNow, wR0..wR2, knobs, size+count
-        bd.Usage = D3D11_USAGE_DYNAMIC;
-        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(dev->CreateBuffer(&bd, nullptr, &g_kinCb)) || !g_kinCb) return false;
-    }
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(ctx->Map(g_kinCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
-    float* f = static_cast<float*>(mapped.pData);
-    // The camera rows of THIS frame, the same frame the compose projects by
-    // (the 10:52 spec's #1 expected bug class is a last-frame matrix here).
-    // g_curRows is the frame's chosen set, gated on g_curValid above --
-    // p.wR0..2 are only populated when the body/ship motion paths ran.
-    memcpy(f, p.tanNow, 16);
-    memcpy(f + 4, g_curRows + 0, 16);
-    memcpy(f + 8, g_curRows + 4, 16);
-    memcpy(f + 12, g_curRows + 8, 16);
-    memcpy(f + 16, p.knobs, 16);
-    int32_t* ii = reinterpret_cast<int32_t*>(f + 20);
-    ii[0] = static_cast<int32_t>(e.kcW);
-    ii[1] = static_cast<int32_t>(e.kcH);
-    ii[2] = static_cast<int32_t>(g_kinSphereCount);
-    ii[3] = 0;
-    ctx->Unmap(g_kinCb, 0);
-    const UINT clrNear[4] = {0u, 0u, 0u, 0u};   // near's empty sentinel
-    const UINT clrFar[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
-    ctx->ClearUnorderedAccessViewUint(e.kcNearUav, clrNear);
-    ctx->ClearUnorderedAccessViewUint(e.kcFarUav, clrFar);
-    ctx->CSSetShader(cs, nullptr, 0);
-    ctx->CSSetShaderResources(0, 1, &g_kinSphereSrv);
-    ID3D11UnorderedAccessView* uavs[2] = {e.kcNearUav, e.kcFarUav};
-    ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
-    ctx->CSSetConstantBuffers(0, 1, &g_kinCb);
-    ctx->Dispatch((g_kinSphereCount + 63) / 64, 1, 1);
-    ID3D11ShaderResourceView* nullKcSrv = nullptr;
-    ID3D11UnorderedAccessView* nullKcUav[2] = {};
-    ID3D11Buffer* nullKcCb = nullptr;
-    ctx->CSSetShaderResources(0, 1, &nullKcSrv);
-    ctx->CSSetUnorderedAccessViews(0, 2, nullKcUav, nullptr);
-    ctx->CSSetConstantBuffers(0, 1, &nullKcCb);
-    e.kcFrame = snapFrame;
-    // The frame the pair was painted ON, for the burst dump: the textures
-    // persist post-run, so a readback at burst-write time shows the LAST
-    // painted frame, which can post-date the last captured crop (dump
-    // 160734's far lane did not reproduce from frame 14954's camera rows).
-    e.kcPaintFrame = g_rowsFrame;
-    return true;
 }
 
 // The mask NVIDIA is handed is R8_UNORM written from a compute shader,
@@ -6099,37 +5727,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     if (staticOwnerBound) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 256u);
-                    // Stage B: rebuild this eye's kinematic ownership coverage
-                    // off the tracker's current upload; bound = bit 512 and the
-                    // t19/t20 pair below, clear = the stock path, byte-identical.
-                    // Only where something reads it (kinematicCoverageWanted).
-                    beginPart(qs, PrepPart::Coverage, dev, ctx);
-                    const bool kcBound = kinematicCoveragePass(ctx, dev, e, p, w, h);
-                    endPart(qs, PrepPart::Coverage, ctx);
-                    if (kcBound) p.probe[3] =
-                        static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
-                    // The compose veto itself waits on fix.engine_motion_veto
-                    // (off): bit 1024 arms it, ownership alone only paints.
-                    if (kcBound && g_engineMotionVeto) p.probe[3] =
-                        static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
                     // Engine-record velocity (fix.engine_motion=on): bit 2048
                     // and t21/t22/b1/b2 below; clear = byte-identical.
                     const bool engineBound = engineViewsGiven && depthSrv;
                     if (engineBound) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 2048u);
                     engineCounted = engineBound && diagnostics;
-                    if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
-                        g_eyeDecisions[g_eyeRunTaken].kinBound = kcBound;
-                        g_eyeDecisions[g_eyeRunTaken].kinVeto = kcBound && g_engineMotionVeto;
-                    }
                     // A masked engine pixel sets the bias mask too, for the
                     // presets and FSR that read it (modern DLSS honours the
                     // history-invalidate vector the same pixel also gets).
                     if (uiTrack || engineBound) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[23] = {};
-                    // t21/t22 are touched only while engine-record velocity is bound.
-                    const UINT srvCountM = engineBound ? 23u : 21u;
+                    // t19..t22 are touched only while engine-record velocity is bound.
+                    const UINT srvCountM = engineBound ? 23u : 19u;
                     ID3D11UnorderedAccessView* nullUavM[8] = {};
                     ID3D11UnorderedAccessView* savedTraceUav = nullptr;
                     if (traceReady) ctx->CSGetUnorderedAccessViews(7, 1, &savedTraceUav);
@@ -6145,7 +5756,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           smokeSrv, separated?separatedCandidate.depth:uiDepthSrv,
                                                           uiTrack && !deferredInput && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], staticOwnerBound ? staticOwner[0] : nullptr, staticOwnerBound ? staticOwner[1] : nullptr,
-                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr,
+                                                          nullptr, nullptr,   // t19/t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr};
                     ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
@@ -6413,7 +6024,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const int writeIdx = 1 - readIdx;
         // The own path: the interface's coverage mask at t4 for the body
         // path's exclusion (the trained block above binds its own).
-        bool kcBound = false;   // stage B: this eye's kinematic coverage pair is live this frame
         bool engineOwn = false; // engine-record velocity's inputs bound for the own path (fovea mv, main)
         if (!usedDlaa) {
             if(e.uiResolvedHistory){e.uiHistoryValid=false;e.uiResolvedHistory=false;}
@@ -6422,16 +6032,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                ensureUiMaskSrv(dev, e, rm);
             p.probe[2] = uiOwn ? 1.0f : 0.0f;
             p.probe[3] = uiFlags();
-            kcBound = kinematicCoveragePass(ctx, dev, e, p, w, h);
-            if (kcBound) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
-            if (kcBound && g_engineMotionVeto) p.probe[3] =
-                static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 1024u);
             engineOwn = engineViewsGiven && depthSrv;
             if (engineOwn) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 2048u);
-            if (eye == 0 && g_eyeRunPaired && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
-                g_eyeDecisions[g_eyeRunTaken].kinBound = kcBound;
-                g_eyeDecisions[g_eyeRunTaken].kinVeto = kcBound && g_engineMotionVeto;
-            }
         }
         bool ran = usedDlaa || (ensureNative(dev, e, viewFmt) && setParams(ctx, p));
         // A native fallback also writes counters, even when the requested
@@ -6655,7 +6257,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // that binds it -- everywhere else the slot stays null and
                     // the shader's store there is dropped.
                     ID3D11ShaderResourceView* nullSrvM[23] = {};
-                    const UINT srvCountM = engineOwn ? 23u : 21u;
+                    const UINT srvCountM = engineOwn ? 23u : 19u;
                     ID3D11UnorderedAccessView* nullUavM[8] = {};
                     ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 8, nullUavM, nullptr);
@@ -6667,7 +6269,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], nullptr, nullptr,
-                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr,
+                                                          nullptr, nullptr,   // t19/t20: free since stage B's removal
                                                           engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
@@ -6939,7 +6541,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
                 setParams(ctx, p);
                 ID3D11ShaderResourceView* nullSrv[23] = {};
-                const UINT srvCount = engineOwn ? 23u : 21u;
+                const UINT srvCount = engineOwn ? 23u : 19u;
                 ID3D11UnorderedAccessView* nullUav[7] = {};
                 ctx->CSSetShaderResources(0, srvCount, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
@@ -6960,7 +6562,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                      smokeSrv, uiDepthSrv,
                                                      uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], nullptr, nullptr,
-                                                          kcBound ? e.kcNearSrv : nullptr, kcBound ? e.kcFarSrv : nullptr,
+                                                          nullptr, nullptr,   // t19/t20: free since stage B's removal
                                                           engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
                 ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,
@@ -7455,18 +7057,6 @@ void temporalPassConfigure(Config& cfg) {
     // job-0 entry. Default off; Phase 1 build, the Phase-2 flight must show
     // census draw-count equality before this can default on.
     staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
-    // fix.engine_motion_veto (off): the compose veto the coverage mask exists
-    // for. It waits on the mask's flight validation (2026-09-20 review); the
-    // bit arms per frame at the compose, only while coverage is bound.
-    g_engineMotionVeto = cfg.getBool("fix.engine_motion_veto", false);
-    if (g_engineMotionVeto && _stricmp(engineMotion.c_str(), "on") != 0) {
-        static bool vetoDarkNoted = false;
-        if (!vetoDarkNoted) {
-            vetoDarkNoted = true;
-            Log::get().note("engine motion: fix.engine_motion_veto=on but fix.engine_motion is "
-                            "not on -- there is no coverage to veto with; the veto is dark.");
-        }
-    }
     const std::string staticFovea = cfg.getString("advanced.temporal_aa_fovea", "0");
     g_staticSurfacesOn = detail::g_temporalPassWantedFssChrome && g_trainedWanted &&
                          g_temporalEngine == edvr::TemporalEngine::Nvidia &&
@@ -8691,13 +8281,6 @@ void temporalPassShutdown() {
     if (g_stats) { g_stats->Release(); g_stats = nullptr; }
     if (g_samp) { g_samp->Release(); g_samp = nullptr; }
     if (g_cb) { g_cb->Release(); g_cb = nullptr; }
-    if (g_kinCb) { g_kinCb->Release(); g_kinCb = nullptr; }
-    if (g_kinSphereSrv) { g_kinSphereSrv->Release(); g_kinSphereSrv = nullptr; }
-    if (g_kinSphereBuf) { g_kinSphereBuf->Release(); g_kinSphereBuf = nullptr; }
-    if (g_csKin) { g_csKin->Release(); g_csKin = nullptr; }
-    g_kinSphereGen = 0;
-    g_kinSphereCount = 0;
-    g_kinSphereSession = 0;
     if (g_cs) { g_cs->Release(); g_cs = nullptr; }
     if (g_csFast) { g_csFast->Release(); g_csFast = nullptr; }
 }
