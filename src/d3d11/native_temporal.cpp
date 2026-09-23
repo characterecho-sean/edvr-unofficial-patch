@@ -1,6 +1,7 @@
 #include "../common/native_temporal.h"
 
 #include "temporal_pass.h"
+#include "ui_layer.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
@@ -192,6 +193,9 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   const uint32_t w=region[2]-region[0],h=region[3]-region[1];if(!w||!h)return E_INVALIDARG;
   if (s->flipped[eye] != (flipU||flipV)) { s->history[eye]={}; s->flipped[eye]=(flipU||flipV); }
   s->width[eye]=w;s->height[eye]=h;s->pendingSettings=readConfig();
+  // fix.ui_quality's eye check (ui_layer.h): what the game submitted for
+  // this eye, the one authority on which eye is which.
+  edvr::uiLayerNoteSubmitted(seq,eye,source);
   if (eye==0) {
     edvr::announceEyeTextureSize(w,h);
     const float outer=-s->frusta[0][0], inner=s->frusta[0][1];
@@ -255,6 +259,9 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   s->treated[eye]=true;
   if(!raw){s->standDown=true;edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);result->AddRef();*output=result;++s->treatedCount;
+  // fix.ui_quality's door (ui_layer.h): the pass handed this eye on; the
+  // layer arms for the next frame only behind a frame the pass produced.
+  edvr::uiLayerNoteTemporal(seq,eye,result);
   if(resetHistory)++s->resets;
   if(!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native temporal: engaged mode=%s, input=%ux%u, output=%ux%u, sequence=%llu; producer filtering before menu and shared capture.",mode(s->currentSettings),w,h,outW?outW:w,outH?outH:h,(unsigned long long)seq);}
   outBox[0]=b[0]>b[2]?1.f:0.f;outBox[2]=b[0]>b[2]?0.f:1.f;outBox[1]=b[1]>b[3]?1.f:0.f;outBox[3]=b[1]>b[3]?0.f:1.f;
@@ -301,6 +308,28 @@ bool nativeTemporalWarmTarget(ID3D11Device** dev, unsigned long* thread) {
   if (!current || !current->active || !current->device) return false;
   if (dev) *dev = current->device;
   if (thread) *thread = current->thread;
+  return true;
+}
+
+// fix.ui_quality (ui_layer.h declares it), at DRAW time: the frame the game
+// is drawing (the sequence beginFrame opened) and the jitter that frame's
+// projection carries for `eye`, in render pixels over the region the shift
+// was computed for (w x h, the eye's last submitted region) -- the same
+// inverse treat() takes above, before its sign and lag switches, which are
+// the pass's reading of the jitter, not where the game put the pixels.
+// (0, 0) when the pass is not jittering. False before the first beginFrame
+// or once the channel closes.
+bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float* jy,
+                              uint32_t* w, uint32_t* h) {
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active || !current->begun || eye > 1) return false;
+  const State& s = *current;
+  const float rl = s.frusta[eye][1] - s.frusta[eye][0], bt = s.frusta[eye][3] - s.frusta[eye][2];
+  if (sequence) *sequence = s.sequence;
+  if (jx) *jx = (s.width[eye] && rl != 0.0f) ? -s.shift[eye][0] * float(s.width[eye]) / rl : 0.0f;
+  if (jy) *jy = (s.height[eye] && bt != 0.0f) ? s.shift[eye][1] * float(s.height[eye]) / bt : 0.0f;
+  if (w) *w = s.width[eye];
+  if (h) *h = s.height[eye];
   return true;
 }
 }

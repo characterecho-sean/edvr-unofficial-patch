@@ -86,6 +86,19 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 uint32_t uiDepthLearnedSurfaceSizes(uint32_t* outW, uint32_t* outH,
                                     char* outFamily, uint32_t max);
 
+// fix.ui_quality's classifier (ui_layer.h) asks two questions this pass's
+// own classifier already answers, without touching its per-draw state:
+//   - which pixel-stage slot 0..3 of the bound draw holds a learned
+//     interface surface (the same memoised test uiDepthOnEyeDraw makes), or
+//     -1 for none -- always -1 while this pass is off or stood down, since
+//     it learns nothing then;
+//   - which eye a colour target is: eyeIndexFor's per-frame table, first
+//     target of a shape = left, advanced.ui_depth_eyes = swapped applied --
+//     SHARED, so the layer and this pass can never disagree about an eye.
+//     -1 for a third target of one shape, or a full table.
+int uiDepthSampledSurfaceSlot();
+int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt);
+
 // Every eye draw: a UI composite (samples a learned surface in a
 // pixel-stage slot 0..3) or a named direct family, with a depth target
 // bound that is the scene pair's. True means the draw should write its

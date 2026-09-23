@@ -25,6 +25,20 @@ extern "C" void* edvrSharpen(void* source,int eye,const float* bounds,float valu
   const float full[4]={0,0,1,1}; std::memcpy(lastBounds,bounds?bounds:full,sizeof(lastBounds));
   return passSucceeds?source:nullptr;
 }
+// fix.ui_quality's door (src/d3d11/ui_layer.h): the provider notes every eye
+// it treats, then hands the frame it is about to return -- sharpened or not
+// -- to the UI layer's composite, which answers null when nothing was drawn
+// into the layer this frame. Stubbed: null by default, so every contract
+// above holds unchanged; `layeredOut` makes it answer a texture.
+unsigned doorSeen=0,composites=0; uint64_t doorSeq=0; unsigned doorEye=9;
+ID3D11Texture2D* layeredOut=nullptr; ID3D11Texture2D* lastFrame=nullptr; uint32_t lastRegion[4]{};
+namespace edvr {
+void uiLayerDoorSeen(uint64_t seq,uint32_t eye,ID3D11Texture2D*,const float*){++doorSeen;doorSeq=seq;doorEye=eye;}
+ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const uint32_t region[4],const float*) {
+  ++composites; lastFrame=frame; std::memcpy(lastRegion,region,sizeof(lastRegion));
+  if(layeredOut){layeredOut->AddRef();return layeredOut;} return nullptr;
+}
+}
 struct Device {
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
@@ -117,6 +131,37 @@ void run() {
   check(t.close(t.context)==S_FALSE&&edvr::nativeSharpenActive(),"stale close cannot retire fresh session");
   check(treat(fresh,1,0,source.Get())==S_OK,"new session resets stand-down and sequence");
   check(fresh.close(fresh.context)==S_OK,"fresh close");
+  // The UI layer's door, in both of the provider's shapes.
+  {
+    auto door=acquire(device,12); auto layer=device.texture();
+    cfg.set("fix.render_sharpness","0.5");
+    const auto seenBefore=doorSeen, compositesBefore=composites;
+    layeredOut=layer.Get();
+    ID3D11Texture2D* out=nullptr; float box[4]{};
+    check(door.treatEye(door.context,1,0,source.Get(),nullptr,&out,box)==S_OK&&out==layer.Get()&&
+          box[0]==0&&box[1]==0&&box[2]==1&&box[3]==1,"sharpening on: the layer's composite is what leaves, full bounds");
+    check(lastFrame==source.Get()&&lastRegion[0]==0&&lastRegion[1]==0&&lastRegion[2]==32&&lastRegion[3]==24,
+          "the composite is handed the sharpened, region-sized texture whole");
+    check(refs(layer.Get())==2,"the provider returns exactly one owned reference to the layered frame");
+    if(out)out->Release(); out=nullptr;
+    cfg.set("fix.render_sharpness","0");
+    check(door.treatEye(door.context,1,1,source.Get(),nullptr,&out,box)==S_OK&&out==layer.Get(),
+          "the strength is frozen for the pair: the second eye is sharpened and layered too");
+    if(out)out->Release(); out=nullptr;
+    const float half[4]={0,0,.5f,1};
+    check(door.treatEye(door.context,2,0,source.Get(),half,&out,box)==S_OK&&out==layer.Get()&&lastFrame==source.Get()&&
+          lastRegion[0]==0&&lastRegion[2]==16&&lastRegion[3]==24,"sharpening off: the layer lands on the frame as it arrived, over its region");
+    if(out)out->Release(); out=nullptr;
+    check(doorSeen==seenBefore+3&&doorSeq==2&&doorEye==0&&composites==compositesBefore+3,"the door is noted for every eye, before its composite");
+    layeredOut=nullptr;
+    check(door.treatEye(door.context,2,1,source.Get(),nullptr,&out,box)==S_FALSE&&!out,
+          "nothing in the layer and sharpening off: the eye passes through exactly as before");
+    const auto seenInvalid=doorSeen;
+    check(door.treatEye(door.context,2,1,source.Get(),nullptr,&out,box)==E_INVALIDARG&&doorSeen==seenInvalid,
+          "a rejected eye never reaches the door");
+    check(door.close(door.context)==S_OK,"door close");
+    cfg.set("fix.render_sharpness","0.5");   // the client section below sharpens
+  }
   edvr::openxr::NativeSharpenClient client;
   require(client.acquire(GetModuleHandleW(nullptr),device.device.Get(),11)==S_OK,"client validates same-module export table");
   ComPtr<ID3D11Texture2D> result; vr::VRTextureBounds_t box{};

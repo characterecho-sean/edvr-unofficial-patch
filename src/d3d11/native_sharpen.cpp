@@ -1,5 +1,6 @@
 #include "../common/native_sharpen.h"
 #include "sharpen_pass.h"
+#include "ui_layer.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
@@ -52,11 +53,32 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   if(!edvr::supersampleRegionFromBounds(desc.Width,desc.Height,bounds,region,&flipU,&flipV))return E_INVALIDARG;
   if(seq>s->floor) { s->floor=seq;s->consumed[0]=s->consumed[1]=false;s->invalidated=false;s->strength=readStrength(); }
   s->consumed[eye]=true;
-  if(s->strength<=0.f||s->stoodDown) { ++s->off; if(s->strength<=0.f&&!s->offNoted){s->offNoted=true;edvr::Log::get().note("native sharpen: off (fix.render_sharpness=0); eyes consumed as passthrough.");} return S_FALSE; }
   const float full[4]={flipU?1.f:0.f,flipV?1.f:0.f,flipU?0.f:1.f,flipV?0.f:1.f};
+  // fix.ui_quality's door (ui_layer.h). This is the last d3d11 step before
+  // the runtime composites EDVR's own menu and captures the eye, so the UI
+  // layer is composited here, AFTER RCAS: the sharpener never rings the
+  // text. It runs whether or not sharpening is on -- with it off the layer
+  // lands on the frame as it arrived (the pass's output, or the game's own
+  // image when the pass declined). The door is noted first, for every eye,
+  // so the next frame's draws know it is there to composite them.
+  edvr::uiLayerDoorSeen(seq,eye,source,bounds);
+  if(s->strength<=0.f||s->stoodDown) {
+    ++s->off; if(s->strength<=0.f&&!s->offNoted){s->offNoted=true;edvr::Log::get().note("native sharpen: off (fix.render_sharpness=0); eyes consumed as passthrough.");}
+    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,bounds)) { *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
+    return S_FALSE;
+  }
   void* raw=edvrSharpen(source,int(eye),bounds,s->strength);
-  if(!raw) { s->stoodDown=true;++s->refusals; edvr::Log::get().note("native sharpen: pass refused; standing down for this session."); return S_FALSE; }
-  ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw); result->AddRef(); *output=result; std::memcpy(outBounds,full,sizeof(full)); ++s->treated; s->engagedMask|=1u<<eye; if(s->engagedMask==3&&!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native sharpen: engaged for both eyes.");} return S_OK;
+  if(!raw) {
+    s->stoodDown=true;++s->refusals; edvr::Log::get().note("native sharpen: pass refused; standing down for this session.");
+    if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,bounds)) { *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
+    return S_FALSE;
+  }
+  ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);
+  // The sharpened texture is the input region, region-sized: the layer's
+  // rectangle is still the input's bounds.
+  const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]};
+  if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,result,whole,bounds)) result=layered; else result->AddRef();
+  *output=result; std::memcpy(outBounds,full,sizeof(full)); ++s->treated; s->engagedMask|=1u<<eye; if(s->engagedMask==3&&!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native sharpen: engaged for both eyes.");} return S_OK;
 }
 HRESULT WINAPI invalidate(void* p) { std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;s->invalidated=true;s->consumed[0]=s->consumed[1]=false;++s->invalidations;return S_OK; }
 HRESULT WINAPI close(void* p) { std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;edvr::Log::get().note("native sharpen totals: treated=%llu, off=%llu, refusals=%llu, invalidations=%llu, stood_down=%u.",(unsigned long long)s->treated,(unsigned long long)s->off,(unsigned long long)s->refusals,(unsigned long long)s->invalidations,unsigned(s->stoodDown));s->active=false;s->device=nullptr;s->invalidated=true;available.store(false);if(current==s)current=nullptr;return S_OK; }

@@ -5,6 +5,7 @@
 #include "binding_shadow.h"
 #include "gpu_interval.h"
 #include "shader_swap.h"
+#include "ui_layer.h"
 #include "vscreen.h"
 #include "../common/config.h"
 #include "../common/temporal_mode.h"
@@ -280,6 +281,10 @@ void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned 
 }
 void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                       unsigned start,int base,unsigned startInstance,const float* curve) {
+    // fix.ui_quality's layer took this composite (ui_layer.h): the screen is
+    // drawn after the upscale, not into the pass's input, so the pass needs
+    // no motion for it -- and the bound target is the layer, not the eye.
+    if(uiLayerRedirecting())return;
     if(!screenMotionRecognize() || g.sourceFrame!=g.frame || instances!=1 || !draw || !ctx)return;
     Ptr<ID3D11RenderTargetView> target;ctx->OMGetRenderTargets(1,&target,nullptr);if(!target)return;
     Ptr<ID3D11Resource> res;target->GetResource(&res);Ptr<ID3D11Texture2D> texture;if(FAILED(res.As(&texture)))return;

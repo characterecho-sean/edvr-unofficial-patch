@@ -472,6 +472,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_separation.cpp" ^
     "src\d3d11\ui_deferred.cpp" ^
+    "src\d3d11\ui_layer.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
@@ -2228,4 +2229,34 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: hud quality test build failed & exit /b 1 )
 "%BUILD%\hud_quality_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_ui_layer_test
+echo [edvr] === ui_layer_test.exe ===
+REM Build gate for fix.ui_quality, the UI layer (src/d3d11/ui_layer.*,
+REM docs/ui-layer-2026-09-23.md), from the same headers the DLL compiles:
+REM ui_layer_math.h (the key; the layer's size and memory at 1.0 and 1.25;
+REM the viewport and scissor map; the jitter cancel from pixels and from the
+REM tangent shift temporal_math.h gives the projection; the tangent form of
+REM the map against the region form; the blend conversion table and a CPU
+REM model proving layer-then-composite equals the game's own blends over a
+REM thousand sequences; the composite's footprint weights; the door's arming
+REM and gate G1's "late"; every refusal of the classifier gate, in order) and
+REM ui_layer_shaders.h on WARP (a jittered quad through the redirected
+REM viewport lands on the unjittered pixels at all eight Halton phases, at 1.0
+REM and 1.25, and does not without the cancel; draws blended into the layer
+REM and composited equal the same draws blended into the frame; a coloured
+REM quad over a known frame is the expected colour; the 1.25 composite is the
+REM box filter; the debug view; a cropped layer rectangle). A layer that
+REM lands its UI a pixel off, or a composite that darkens it, fails here --
+REM not in the headset.
+if not exist "%OBJ%\uilayertest" mkdir "%OBJ%\uilayertest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\uilayertest\\" /Fe"%BUILD%\ui_layer_test.exe" ^
+    "tools\ui_layer_test\ui_layer_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui layer test build failed & exit /b 1 )
+"%BUILD%\ui_layer_test.exe" --dry-run || exit /b 1
+"%BUILD%\ui_layer_test.exe" --self-test || exit /b 1
 exit /b 0
