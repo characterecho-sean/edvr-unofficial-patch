@@ -19,12 +19,14 @@
   tracked record's +0x170 to under 1 mm in the same frame, across four captures.
   Full evidence and the three designs it permits (A pool-diff, B engine-record, C
   fifth G-buffer target) are in the 2026-09-23 entry.
-- **Open:** which of designs A/B/C is the general one. B is cheapest and exact if
-  stations and ships -- untested, no tracker capture exists off-settlement --
-  produce tracked records the way settlement movers do; if they do not, A (or C at
-  stations) is the fallback. Per-pixel mover ownership within the existing veto mask
-  stays coarse either way (inherited from the 09-20 arc, not resolved by A or B
-  alone).
+- **Open:** superseded by Sean's requirement and the overseer's answer in the
+  2026-09-23, later entry -- generalized: camera-only through depth for statics, exact
+  engine-record delta via substituted pool shaders for movers (design C fed by design
+  B), and the existing DLSS/FSR reactive mask as the only fallback; design A (pool
+  content-diffing) dropped as guesswork. Still to verify before code: stations and
+  ships in space as rig records; the previous bone palette's residency; the particle
+  families' inputs; the substitution cost for the three pool families and the skinned
+  ones.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -33,9 +35,13 @@
   dirty-node-queue family mismatch); an engine velocity buffer in the VR path, and
   record+0x1C0..0x1F8 as a previous-frame transform at draw time (both 2026-09-23
   entry). Do not re-propose any of the above.
-- **Next:** the discriminating flight named in the 2026-09-23 entry -- a tracker-on
-  eye run at a station approach with ship traffic, read with the scripts in
-  analysis\motion\. Sean's call on when to fly it; no code needed first.
+- **Next:** the combined flight in the 2026-09-23, later entry, awaiting Sean's go --
+  motion blur ON, `advanced.glare_shader_dump = 1` (restart), the tracker on; one
+  eye-run capture at a station approach with ship traffic, then a settlement with a
+  landing ship. Read the blur-on shaders via analysis\motion\dxbc_sig.py (two-channel
+  targets, previous-pose SRVs) and the station's movers via mover_exact.py /
+  mover_vs_tracker.py against tracked records; if blur is per-object the engine may
+  already carry the buffer design C wants.
 
 ## Premise
 
@@ -1723,3 +1729,46 @@ arc's existing decompiles). Scripts and capture data are in analysis\motion\
 (gitignored, new today): dxbc_sig.py, mrt_writes.txt, o3_detail.txt,
 mover_draws3.py, mover_join.py, mover_exact.py, mover_vs_tracker.py,
 parts_165433.csv.
+
+### 2026-09-23, later -- The requirement: generalized, no estimation even as a fallback; the blur check
+
+**Sean's requirement (2026-09-23).** A generalized solution for motion vectors, with no
+guesswork estimation anywhere -- not even as a fallback.
+
+**The overseer's answer: possible, with three sources and nothing else.** (a)
+Camera-only through depth for everything static relative to the world (settlement
+statics, terrain, station structure, the cockpit): exact by construction. (b) Exact
+object motion from engine data, written by the game's own draws: the truth is the
+kinematic record's pose each frame, with the previous pose held by the tracker EDVR
+already runs, keyed by the engine's record; the delta reaches each draw as a per-slot
+table, and the pool families' shaders are substituted -- hash-keyed like every other
+keyed fix -- to write a velocity target in the same pass: design C fed by design B, so
+no re-issued draws, exact ownership including occlusion, and the same cost at a station
+as at a settlement; articulated parts come from the record's per-part transforms,
+skinned characters from the previous bone palette (the engine appears to keep it
+resident by frame parity, unverified), and procedurally animated geometry by evaluating
+the same animation at the previous time. (c) A declared "no history" mask for anything
+not joined or not coherent (particles): EDVR already drives DLSS's bias-current-colour
+mask from the UI depth classifier (src\d3d11\dlaa.cpp:576, `ep.pInBiasCurrentColorMask =
+reactive`) and FSR's reactive input (fsr3_engine.cpp:834), so the fallback is never an
+invented vector. The rigid fit and the occupancy grid retire once movers are covered.
+
+Still to verify before code: stations and ships in space as rig records; the previous
+bone palette's residency; the particle families' inputs; the substitution cost for the
+three pool families and the skinned ones.
+
+**The blur check (Sean's question; the overseer's answer: yes, first).** The shader dump
+that ruled out a velocity buffer was taken with motion blur off, and blur-on variants
+were never dumped. If the engine's blur is per-object, its blur-on vertex shaders carry
+a previous pose and its pixel shaders a two-channel target: the engine would then
+already render the buffer above for every class, and EDVR would enable blur, read that
+target, and drop the blur's composite draw (the draw hook already skips draws). If the
+blur is camera-only, the shader set shows it and the substitution design stands.
+
+**Next flight, combined, no code.** Motion blur ON in the game's graphics options;
+`advanced.glare_shader_dump = 1` (needs a restart, writes files during loading); the
+tracker on; one eye-run capture during a station approach with ship traffic, then a
+settlement with a landing ship. Read: the blur-on shaders through
+analysis\motion\dxbc_sig.py for two-channel targets and previous-pose SRVs; the
+station's movers through mover_exact.py / mover_vs_tracker.py against tracked records.
+Awaiting Sean's go.
