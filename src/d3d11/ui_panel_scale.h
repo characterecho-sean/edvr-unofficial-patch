@@ -49,8 +49,8 @@ void uiPanelScaleSetTarget(float target);
 void uiPanelScaleFrameBoundary();
 
 // The engine is sizing the panels: the operands swapped, the key on and a
-// factor written. The surfaces' CreateTexture2D matcher stands aside while
-// it is (it would size a panel twice). Lock-free.
+// factor written. Standing down (a game build these bytes are not), the
+// panels stay at the game's own size until the patch is re-keyed. Lock-free.
 bool uiPanelScaleLive();
 
 // The factor the floats hold (1 when not live).

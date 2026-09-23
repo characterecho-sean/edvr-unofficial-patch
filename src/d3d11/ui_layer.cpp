@@ -1,8 +1,9 @@
 // fix.ui_quality -- the UI layer half. ui_layer.h says what it is and why;
 // ui_layer_math.h holds its arithmetic and ui_layer_shaders.h its composite,
-// both shared with tools/ui_quality_test; ui_surfaces.* is the other half
-// (every offscreen UI surface at the target's size); docs/ui-layer-2026-09-23.md
-// is the design as built.
+// both shared with tools/ui_quality_test; ui_panel_scale.* is the other half
+// (every render-to-texture panel at the target's size, by the game's own panel
+// formula), ui_surfaces.* its instruments; docs/ui-layer-2026-09-23.md is the
+// design as built.
 //
 // THREADS. Everything here runs on the game's render thread: the draws, the
 // door (native_temporal.cpp and native_sharpen.cpp run inside the game's
@@ -27,7 +28,7 @@
 #include "ui_deferred.h"   // uiDeferredRouteCapturedThisDraw: the replay's own draws
 #include "ui_depth.h"      // uiDepthEyeOfTarget: the eye, by the pass's own table
 #include "ui_panel_scale.h" // the engine-side panel sizing, configured and ticked with the key
-#include "ui_surfaces.h"   // the surfaces half: the target, and its summary
+#include "ui_surfaces.h"   // the instruments: the target, the frame count, the atlas line
 #include "vscreen.h"       // the raw OM/RS entry points, vScreenIsEyeSized, vScreenPanelSize
 
 #include "../common/config.h"
@@ -86,7 +87,7 @@ void standDown(const char* why) {
     Log::get().note(
         "ui quality: the layer stands down for the rest of the session -- %s. The UI goes into "
         "the game's frame as before (and gets the UI depth and reactive mask again); the "
-        "surfaces stay as they are. Turning fix.ui_quality off and on re-arms it.",
+        "panels stay as they are. Turning fix.ui_quality off and on re-arms it.",
         why ? why : "a refusal");
 }
 
@@ -1804,13 +1805,10 @@ void logTotals(double seconds) {
                     uiLayerDecisionName(static_cast<UiLayerDecision>(d)));
         }
     }
-    // The surfaces and the layer on lines of their own: Log's line holds 1200
-    // characters, and the two halves together no longer fit in one.
-    char surfaces[1100];
-    uiSurfacesSummary(surfaces, sizeof(surfaces));
-    Log::get().note("ui quality: %s -- surfaces: %s.", g_keyText.c_str(), surfaces);
-    uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
+    // The panels and the layer on lines of their own: Log's line holds 1200
+    // characters. The panels' line is the engine-side sizing's own.
     uiPanelScaleLog();     // the engine-side panel sizing: its factor, or why it stands down
+    uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
     // The price: each stage's GPU time per eye-frame it ran in, and the
     // route's -- every stage of an eye-frame added up -- per eye-frame the
     // layer did anything in.
@@ -1934,9 +1932,9 @@ void uiLayerConfigure(Config& cfg) {
     g_debugView = debugView;
     g_jitterAsShipped = jitterAsShipped;
     refreshLive();
-    // The surfaces half follows the same key: one setting, both mechanisms --
-    // and the engine-side panel sizing, which the surfaces' matcher backs up.
-    uiSurfacesSetTarget(target, text.c_str());
+    // The panels follow the same key -- one setting, both halves -- and the
+    // instruments with them.
+    uiSurfacesSetTarget(target);
     uiPanelScaleSetTarget(target);
     if (!changed) return;
     g_keyNoted = true;
@@ -1955,9 +1953,8 @@ void uiLayerConfigure(Config& cfg) {
     char hmdText[64] = "unknown";
     if (hmdKnown) std::snprintf(hmdText, sizeof(hmdText), "%.2f", static_cast<double>(hmd));
     Log::get().note(
-        "ui quality: %s (HMD Quality %s) -- surfaces: every offscreen UI surface whose size is a "
-        "known fraction of the internal render resolution is created at the size it would have "
-        "at HMD Quality %s; layer: %s",
+        "ui quality: %s (HMD Quality %s) -- panels: the game's own panel formula makes every "
+        "render-to-texture panel at its untrimmed size at HMD Quality %s; layer: %s",
         text.c_str(), hmdText, text.c_str(),
         !temporal ? "waits -- fix.temporal_aa is off, and the layer is composited at that "
                     "pass's door."

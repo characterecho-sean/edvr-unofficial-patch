@@ -1,6 +1,6 @@
 // fix.ui_quality -- the UI layer (docs/ui-layer-2026-09-23.md; Design A of
-// docs/crisp-ui-handoff.md, phase 1). The key's other half, every offscreen
-// UI surface at the target's size, is ui_surfaces.h.
+// docs/crisp-ui-handoff.md, phase 1). The key's other half, every
+// render-to-texture panel at the target's size, is ui_panel_scale.h.
 //
 // The game composites its menus, the 2D screen and the loading screen into
 // each eye at the scene's render size (HMD Quality x the headset's size),

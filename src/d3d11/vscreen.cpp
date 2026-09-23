@@ -905,10 +905,6 @@ struct State {
     bool     renderAuto = true;        // advanced.eye_render_size
     bool     renderOffNoted = false;
     bool     renderPinned = false;   // the size came from the ini, not a measurement
-    // vScreenInternalResolution's fallback (fix.ui_quality): said once per
-    // session, the first time renderW/renderH are not known yet and a
-    // prior session's measurement for this eye shape stands in.
-    bool     internalResFallbackNoted = false;
     bool     renderBadNoted = false;
 
     // Render targets that were looked at and NOT counted, and how many times
@@ -1639,34 +1635,11 @@ void bindingAudit(State* s, ID3D11DeviceContext* ctx) {
         static_cast<unsigned long long>(s->psSetsNoHash));
 }
 
-
-// A scissor rect that still spans exactly the pre-inflation target, the
-// scissor analogue of viewportIs. Integer coordinates, so no float
-// tolerance is needed the way the viewport check carries one.
-bool scissorIs(const D3D11_RECT& r, uint32_t w, uint32_t h) {
-    return r.left == 0 && r.top == 0 &&
-           static_cast<uint32_t>(r.right) == w &&
-           static_cast<uint32_t>(r.bottom) == h;
-}
-
 // The FSS resolution fix's viewport scaling for one draw, lifted out of
 // beginPanelOverride verbatim and NOINLINE. Its D3D11_VIEWPORT is filled by
 // RSGetViewports -- a real /GS buffer, and the cookie on it is worth keeping
 // -- but while it sat inline, beginPanelOverride carried that cookie on every
 // draw of every session, although this runs only while fssResActive().
-//
-// Also the scissor half (fix.ui_quality): there is no hook on the game's
-// own RSSetScissorRects at all, so unlike the viewport there is no set-time
-// path to be a backstop FOR -- this draw-time check is the only mechanism.
-// It only acts on a rect that still spans the pre-inflation target exactly
-// (scissorIs), the same conservative match the FSS rule itself uses for
-// sizes: a narrower, genuinely clipping rect is left alone rather than
-// guessed at, and re-checking the CURRENT rect against the ORIGINAL size
-// before scaling is what keeps this idempotent across the many draws a
-// panel issues with one scissor state -- once scaled, the rect no longer
-// matches (ow, oh) and later draws skip it, the same way the viewport
-// backstop stops firing once the set-time hook (or this one) has already
-// corrected it.
 __declspec(noinline) void fssResScaleDrawViewport(ID3D11DeviceContext* self, State* s) {
     void* res = currentRtv0Resource(s);
     uint32_t ow = 0, oh = 0;
@@ -1681,27 +1654,7 @@ __declspec(noinline) void fssResScaleDrawViewport(ID3D11DeviceContext* self, Sta
         vp.Width *= k;
         vp.Height *= k;
         s->realRSSetViewports(self, 1, &vp);
-        fssResNoteViewportScaled(res, true);
-    }
-    D3D11_RASTERIZER_DESC rd{};
-    ID3D11RasterizerState* rsState = nullptr;
-    self->RSGetState(&rsState);
-    if (rsState) {
-        rsState->GetDesc(&rd);
-        rsState->Release();
-    }
-    if (rd.ScissorEnable) {
-        UINT nr = 1;
-        D3D11_RECT rect{};
-        self->RSGetScissorRects(&nr, &rect);
-        if (nr >= 1 && scissorIs(rect, ow, oh)) {
-            rect.left = static_cast<LONG>(rect.left * k + 0.5f);
-            rect.top = static_cast<LONG>(rect.top * k + 0.5f);
-            rect.right = static_cast<LONG>(rect.right * k + 0.5f);
-            rect.bottom = static_cast<LONG>(rect.bottom * k + 0.5f);
-            self->RSSetScissorRects(1, &rect);
-            fssResNoteScissorScaled(res);
-        }
+        fssResNoteViewportScaled(true);
     }
 }
 
@@ -4496,7 +4449,7 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
         v.Width *= k;
         v.Height *= k;
         s->realRSSetViewports(self, 1, &v);
-        fssResNoteViewportScaled(res, false);
+        fssResNoteViewportScaled(false);
         return;
     }
     s->realRSSetViewports(self, n, vps);
@@ -5316,114 +5269,6 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     if (!s || !w || !h) return false;
     if (s->eyeW && near2(w, s->eyeW) && near2(h, s->eyeH)) return true;
     if (s->renderW && near2(w, s->renderW) && near2(h, s->renderH)) return true;
-    return false;
-}
-
-// fix.ui_quality's last fallback (ui_surfaces.cpp: after the runtime's
-// recommendation x HMD Quality and the size the game submits) for a surface
-// created before the strong promotion has measured anything this session
-// (the cockpit's own panels can be created in the first few frames, well
-// before the 100+ eye-shaped draws in one frame that promotion needs -- see
-// docs/ui-layer-2026-09-23.md).
-// A small state file in the log directory, the same raw-WinAPI-I/O
-// discipline as vscreen_auto_state.cpp's (a DIFFERENT module, deliberately
-// free of anything vscreen-specific so it links into minimal test rigs --
-// this one is vscreen-specific on purpose, so it stays local here instead).
-// Format: "eyeW eyeH internalW internalH", one line. The eye shape is the
-// fallback's "same headset" test: a resolution measured on a different
-// headset must not be handed to this session's ratio match.
-namespace {
-constexpr wchar_t kInternalResStateFile[] = L"vscreen_internal_res.txt";
-
-std::wstring internalResStatePath(const std::wstring& logDir) {
-    return logDir + L"\\" + kInternalResStateFile;
-}
-
-bool lastKnownInternalResolutionFor(const std::wstring& logDir, uint32_t eyeW, uint32_t eyeH,
-                                    uint32_t* outW, uint32_t* outH) {
-    if (outW) *outW = 0;
-    if (outH) *outH = 0;
-    if (logDir.empty() || !eyeW || !eyeH) return false;
-    HANDLE f = CreateFileW(internalResStatePath(logDir).c_str(), GENERIC_READ, FILE_SHARE_READ,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-    char buf[64] = {};
-    DWORD got = 0;
-    const BOOL ok = ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr);
-    CloseHandle(f);
-    if (!ok || !got) return false;
-    buf[got] = '\0';
-    char* p = buf;
-    const unsigned long fEyeW = strtoul(p, &p, 10);
-    const unsigned long fEyeH = strtoul(p, &p, 10);
-    const unsigned long fW = strtoul(p, &p, 10);
-    const unsigned long fH = strtoul(p, &p, 10);
-    if (!fEyeW || !fEyeH || fW < 100 || fH < 100) return false;
-    if (!near2(eyeW, static_cast<uint32_t>(fEyeW)) || !near2(eyeH, static_cast<uint32_t>(fEyeH))) {
-        return false;   // a different headset's (or a stale) measurement
-    }
-    if (outW) *outW = static_cast<uint32_t>(fW);
-    if (outH) *outH = static_cast<uint32_t>(fH);
-    return true;
-}
-
-void noteResolvedInternalResolutionFor(const std::wstring& logDir, uint32_t eyeW, uint32_t eyeH,
-                                       uint32_t internalW, uint32_t internalH) {
-    if (logDir.empty() || !eyeW || !eyeH || !internalW || !internalH) return;
-    CreateDirectoryW(logDir.c_str(), nullptr);
-    HANDLE f = CreateFileW(internalResStatePath(logDir).c_str(), GENERIC_WRITE, 0, nullptr,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return;
-    char text[64];
-    const int n = snprintf(text, sizeof(text), "%u %u %u %u\n", eyeW, eyeH, internalW, internalH);
-    DWORD written = 0;
-    if (n > 0) WriteFile(f, text, static_cast<DWORD>(n), &written, nullptr);
-    CloseHandle(f);
-}
-}  // namespace
-
-bool vScreenInternalResolution(uint32_t* width, uint32_t* height) {
-    if (width) *width = 0;
-    if (height) *height = 0;
-    State* s = g_state;
-    if (!s) return false;
-    if (s->renderW && s->renderH) {
-        if (width) *width = s->renderW;
-        if (height) *height = s->renderH;
-        // Kept fresh for a FUTURE session's fallback below.
-        if (s->eyeW && s->eyeH) {
-            noteResolvedInternalResolutionFor(Config::get().logDir(), s->eyeW, s->eyeH,
-                                              s->renderW, s->renderH);
-        }
-        return true;
-    }
-    // Not measured yet this session: the strong promotion needs over 100
-    // eye-shaped draws in one frame (kSceneEyeDraws), and the cockpit's own
-    // interface panels can be created before that many have landed. Answer
-    // with the last session's measurement for the SAME eye shape rather
-    // than false, so a candidate created this early still gets a real
-    // number instead of being refused for however many frames the
-    // promotion takes to catch up -- said once, and superseded the moment
-    // the real measurement lands (the branch above then answers instead).
-    if (s->eyeW && s->eyeH) {
-        uint32_t fw = 0, fh = 0;
-        if (lastKnownInternalResolutionFor(Config::get().logDir(), s->eyeW, s->eyeH, &fw, &fh)) {
-            if (width) *width = fw;
-            if (height) *height = fh;
-            if (!s->internalResFallbackNoted) {
-                s->internalResFallbackNoted = true;
-                Log::get().note(
-                    "vScreen: the internal render resolution has not been measured "
-                    "this session yet (needs over 100 eye-shaped draws in one frame); "
-                    "using %ux%u, the last session's measurement for this eye shape "
-                    "(%ux%u), until the real one lands. fix.ui_quality's surfaces "
-                    "asked (no recommendation from the runtime, nothing submitted "
-                    "yet). Said once.",
-                    fw, fh, s->eyeW, s->eyeH);
-            }
-            return true;
-        }
-    }
     return false;
 }
 

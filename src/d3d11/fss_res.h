@@ -1,13 +1,10 @@
 // Render targets created larger than the game asked for: the Full System
-// Scanner's body layer, and any surface named by size.
+// Scanner's body layer (experimental.fss_res).
 //
-// Two matchers share one mechanism here -- the tracking, the viewport
-// scaling and the eye-test exclusion are the same three moves whichever
-// rule fired. The FSS rule is described first because it is the one that
-// was measured into existence; the size-named rule is a developer
-// instrument added 2026-09-02 and is described under THE SECOND MATCHER.
-// (If that instrument ever graduates to a shipped fix, this module wants
-// renaming: it is no longer only about the scanner.)
+// (Two other matchers shared this mechanism until 2026-09-23 -- a developer
+// instrument that grew surfaces named by size, and fix.ui_quality's ratio
+// match on the interface surfaces. Both are retired: fix.ui_quality sizes
+// the interface panels in the game's own panel formula, ui_panel_scale.h.)
 //
 // WHY THIS EXISTS (docs/fss-scanner.md, 2026-08-25)
 //
@@ -51,43 +48,6 @@
 // REFUSAL: any doubt (initial data, mips, MSAA, arrays, no eye size
 // published yet, a failed create) falls through to the stock size, and the
 // game renders exactly as without EDVR.
-//
-// THE SECOND MATCHER: advanced.surface_inflate (2026-09-02)
-//
-// Elite builds the cockpit's holographic panels in offscreen INTERFACE
-// SURFACES -- vector geometry (vs 666EF0C4C616F67E, whose pixel shader has
-// no sample instruction at all) and text from a 2048x2048 glyph atlas,
-// rasterised into a texture that the cockpit's own meshes then sample onto
-// the panel surfaces. Read out of a cockpit census: an interface surface is
-// an odd, non-power-of-two render target with a depth partner of the same
-// size, and the cockpit's mesh draws carry it in a sampler slot.
-//
-// Those surfaces are a fixed fraction of the game's INTERNAL render
-// resolution, not of the submitted eye texture. Measured across two
-// sessions on one rig: a panel came out 908x1361 with the scene rendering
-// at 4340x4284, and 1363x2042 with the scene at 6510x6426 -- the same
-// fraction to four significant figures, three surfaces agreeing. So the
-// game already has this knob, and it is its own supersampling setting:
-// turning it up re-rasterises the panels sharper, and charges 2.25x the
-// pixels for the WHOLE SCENE to do it.
-//
-// This matcher separates the two. A size named in advanced.surface_inflate
-// is created N times larger and its viewport scaled to match, so the game
-// rasterises that one panel bigger while the scene is left alone. The
-// content is vector and a large glyph atlas, so what comes back is real
-// detail and not a resample -- which is why this is here rather than in the
-// FSR path. docs/intro-video.md is the opposite case and says so: a fixed
-// 1920x1080 decode, nothing to re-render, resampling the only option.
-//
-// The strongest evidence that this is safe to do is that the game already
-// does it to itself: the same GUI renderer produces correct panels at both
-// 1.0x and 1.5x, so it is not carrying a hardcoded surface size. What EDVR
-// changes is which textures get the larger one.
-//
-// A DEVELOPER INSTRUMENT, and named by size on purpose: which surface is
-// which is not knowable from outside a session. Take a cockpit census with
-// advanced.census_offscreen = 1, read the odd sizes that have a depth
-// partner, and name one. Off by default, and free when off.
 #pragma once
 
 #include <cstdint>
@@ -98,60 +58,27 @@ namespace edvr {
 
 class Config;
 
-// Which matcher inflated a tracked texture, so the viewport/scissor
-// backstops and the log can attribute a rescale to the right key. kNone is
-// never stored -- it is what fssResSourceOf returns for an untracked
-// resource -- so it must sort first for any caller that treats 0 as
-// "nothing".
-enum class InflateSource : uint8_t { kNone = 0, kFss, kNamed, kMatch };
-
-// Reads experimental.fss_res and advanced.surface_inflate. Called at install
-// and on the ini reload path, so both are live -- but only for textures
-// created AFTERWARDS. For the FSS that is the next zoom; an interface
-// surface is built when its panel is, so a named size takes effect on the
-// next trip through the main menu, not mid-flight.
+// Reads experimental.fss_res. Called at install and on the ini reload path,
+// so it is live -- but only for textures created AFTERWARDS: the next zoom.
 void fssResConfigure(Config& cfg);
 
-// One bool for the CreateTexture2D hot gate: experimental.fss_res,
-// advanced.surface_inflate, or fix.ui_quality's surfaces (ui_surfaces.h).
+// One bool for the CreateTexture2D hot gate: experimental.fss_res.
 bool fssResWantsCreates();
 
-// The match: if *d is the half-eye body-layer shape, a size named by
-// advanced.surface_inflate, or (fix.ui_quality, ui_surfaces.cpp) a shape
-// whose RATIO to the game's internal render resolution is on that module's
-// table -- the census's five, and any this rig has learned -- multiply its
-// Width and Height in place and return true; the caller creates with the
-// modified desc and reports the texture back through fssResNoteCreated. The
-// ratio match does NOT depend on ui_depth.cpp's classifier -- that learns a
-// surface's size from draws INTO it, which happen after this call, too late
-// to inform it -- the classifier's answer only LABELS a match's family for
-// the log, and teaches the table a ratio for later creates. *scaleOut is the EXACT float factor
-// applied -- read it back from here rather than dividing the two descs'
-// widths, which rounds to the wrong answer for a fractional factor
-// (1297/908 truncates to 1 under integer division). *sourceOut says which
-// matcher fired, and *familyOut ('V'/'T'/'I', or 0 for "other, unlabelled")
-// is set only when *sourceOut is kMatch, for the resize summary's
-// per-family line. All three out-params may be null when the caller does
-// not need them. false leaves *d and every out-param untouched.
-// callerIsEdvr: the create came from EDVR's own module (the temporal pass's
-// targets, the deferred UI replay's, the UI layer's): the ratio match is
-// about the game's interface surfaces only, and is not asked -- nor its
-// inputs read -- for those (review P1-1). The other two matchers are as
-// before.
-bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
-                        float* scaleOut, InflateSource* sourceOut,
-                        char* familyOut, bool callerIsEdvr = false);
+// The match: if *d is the half-eye body-layer shape, double its Width and
+// Height in place and return true; the caller creates with the modified desc
+// and reports the texture back through fssResNoteCreated. *scaleOut (may be
+// null) is the factor applied. false leaves *d and *scaleOut untouched.
+bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData, float* scaleOut);
 
 // Track a texture created inflated: the size the game ASKED for (the size
-// its viewports will arrive in), the size it actually got, the float factor
-// between them, which matcher decided it, and (kMatch only) which family.
-// The caller has all of this in hand already and passes it rather than this
-// module stashing it between the two calls: CreateTexture2D runs on the
-// game's streaming threads, and a pending value stashed between calls would
-// be a race that mis-attributes one create's result to another's.
+// its viewports will arrive in), the size it actually got and the factor
+// between them. The caller has all of this in hand already and passes it
+// rather than this module stashing it between the two calls: CreateTexture2D
+// runs on the game's streaming threads, and a pending value stashed between
+// calls would be a race that mis-attributes one create's result to another's.
 void fssResNoteCreated(void* texture, uint32_t origW, uint32_t origH,
-                       uint32_t newW, uint32_t newH, float scale,
-                       InflateSource source, char family);
+                       uint32_t newW, uint32_t newH, float scale);
 
 // Identity test for the eye-classification exclusion and the viewport
 // hooks. Compares pointers only; a stale entry for a texture the game
@@ -163,15 +90,8 @@ bool fssResIsInflated(void* resource);
 bool fssResOrigSize(void* resource, uint32_t* w, uint32_t* h);
 
 // The factor that texture grew by, and 1 for anything untracked. The
-// viewport and scissor paths multiply by this rather than by a constant 2:
-// the FSS rule always doubles, but a named surface -- or fix.ui_quality --
-// may ask for a different, and not necessarily whole, amount.
+// viewport paths multiply by this.
 float fssResScaleOf(void* resource);
-
-// Which matcher inflated this texture, kNone for anything untracked. Used
-// to attribute a viewport/scissor rescale to fix.ui_quality's own counters
-// without a second, parallel tracking table.
-InflateSource fssResSourceOf(void* resource);
 
 // Anything tracked at all? The viewport paths gate on this so a session
 // that never opens the FSS never pays a resolve.
@@ -185,25 +105,15 @@ inline bool fssResActive() { return detail::g_fssResCount != 0; }
 
 // The viewport paths' receipts: scaled at RSSetViewports, or caught late by
 // the draw-time backstop. Capped log lines; the counts land in the note.
-// Takes the resource that was scaled so a fix.ui_quality-sourced rescale
-// can be counted separately for that key's own summary line.
-void fssResNoteViewportScaled(void* resource, bool late);
-
-// The scissor half of the same draw-time backstop. There is no hook on the
-// game's own RSSetScissorRects -- nothing needed one before now -- so this
-// is the only place a scissor rect set at the pre-inflation size can be
-// caught, and it is caught the same way the draw-time viewport backstop
-// is: read the state that is about to be used, and fix it if it still
-// looks like it was set for the original size. Counted the same way.
-void fssResNoteScissorScaled(void* resource);
+void fssResNoteViewportScaled(bool late);
 
 // A copy or resolve the game issued with a tracked (inflated) texture as
 // either side. This does NOT rescale the copy -- no such copy has ever been
 // observed landing in one of these surfaces (the FSS body layer's own
-// census found none either), and guessing at box math for a shape nobody
-// has seen would be a fix built on an untested hypothesis. It counts and
-// logs instead, capped, so the first flight says whether this ever
-// actually happens and, if so, exactly what shape it is.
+// census found none), and guessing at box math for a shape nobody has seen
+// would be a fix built on an untested hypothesis. It counts and logs
+// instead, capped, so a flight says whether this ever actually happens and,
+// if so, exactly what shape it is.
 void fssResNoteCopyMaybeMismatched(void* dst, void* src);
 
 }  // namespace edvr

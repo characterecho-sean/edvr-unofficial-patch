@@ -75,21 +75,6 @@ inline bool uiDepthReissuingScene() {
 // checked to exhaustion is not asked again for a while.
 void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 
-// The interface surfaces learned so far this session (vector, text and icon
-// panels only -- not the scanner's own chrome strip), for fix.ui_quality's
-// surfaces (ui_surfaces.cpp), which learns their ratios to the internal
-// resolution and labels its resizes with this classifier's answer rather
-// than re-deriving it. Copies up to `max` entries and returns the count.
-// `res` is an identity only, never dereferenced. Empty for the whole session
-// unless fix.temporal_aa has been on long enough for this pass's own
-// classifier to have learned a panel.
-struct UiDepthLearnedSurface {
-    const void* res = nullptr;
-    uint32_t w = 0, h = 0, fmt = 0;
-    char family = 0;  // 'V' vector, 'T' text, 'I' icons
-};
-uint32_t uiDepthLearnedSurfaces(UiDepthLearnedSurface* out, uint32_t max);
-
 // fix.ui_quality's classifier (ui_layer.h) asks two questions this pass's
 // own classifier already answers, without touching its per-draw state:
 //   - which pixel-stage slot 0..3 of the bound draw holds a learned

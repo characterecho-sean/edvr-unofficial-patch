@@ -2,8 +2,8 @@
 // Design A of docs/crisp-ui-handoff.md) -- pure and header-only: no device,
 // no Config, no Log. The DLL (src/d3d11/ui_layer.cpp) and its build-gate rig
 // (tools/ui_quality_test) both include this one file, so the rig cannot test
-// a copy that has drifted from the code that flies. The key's surfaces half
-// has its own arithmetic, ui_quality_math.h.
+// a copy that has drifted from the code that flies. The key's panel half has
+// its own arithmetic, ui_sizing_math.h.
 //
 // WHAT THE LAYER IS. A classified UI draw is rasterised, with the game's own
 // shaders and state, into an EDVR-owned per-eye RGBA target at the size of
@@ -49,7 +49,7 @@ namespace edvr {
 // "off" | "1.0" | "1.25" -> 0 (off) | 1.0 | 1.25. Exact text, the way
 // fix.settlement_detail reads its choices: "1.00" is not "1.0". Anything
 // else is off, and *recognized says so for the log. One reader for both
-// halves (uiLayerConfigure hands the target to ui_surfaces).
+// halves (uiLayerConfigure hands the target to ui_panel_scale).
 inline float uiQualityParse(const char* text, bool* recognized) {
     if (recognized) *recognized = true;
     if (!text) {

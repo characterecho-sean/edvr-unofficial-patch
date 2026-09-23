@@ -1472,29 +1472,6 @@ void restoreOm(ID3D11DeviceContext* ctx) {
 
 }  // namespace
 
-// The interface surfaces this session's classifier has learned so far
-// (vector, text and icon -- the scanner chrome strip learned at the other
-// addSurface call site is a different shape and excluded), for
-// fix.ui_quality's surfaces. Deduplicated by construction: addSurface
-// already refuses a resource it has seen, but two DIFFERENT resources can
-// share a size, so the caller gets the raw list. Render thread only: the
-// caller is uiSurfacesFrameBoundary.
-uint32_t uiDepthLearnedSurfaces(UiDepthLearnedSurface* out, uint32_t max) {
-    if (!out || !max) return 0;
-    uint32_t n = 0;
-    for (uint32_t i = 0; i < g_surfaceCount && n < max; ++i) {
-        const Surface& s = g_surfaces[i];
-        if (s.family != 'V' && s.family != 'T' && s.family != 'I') continue;
-        out[n].res = s.res;
-        out[n].w = s.w;
-        out[n].h = s.h;
-        out[n].fmt = s.fmt;
-        out[n].family = s.family;
-        ++n;
-    }
-    return n;
-}
-
 // fix.ui_quality's two questions (ui_depth.h says why they live here).
 // Neither writes this pass's per-draw state; eyeIndexFor does register a
 // new target in the frame's table, exactly as the pass's own classifier

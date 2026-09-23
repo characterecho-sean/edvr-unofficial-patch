@@ -2215,15 +2215,13 @@ exit /b 0
 :rig_ui_quality_test
 echo [edvr] === ui_quality_test.exe ===
 REM Build gate for fix.ui_quality (docs/ui-layer-2026-09-23.md), both halves,
-REM from the same headers the DLL compiles. The SURFACES (ui_quality_math.h,
-REM absorbed from fix.hud_quality's rig): the factor target / HMD Quality with
-REM its 1% floor and 4x cap; the rounding (908x1361 -> 1297x1944 at 1/0.7);
-REM the internal resolution from the runtime's recommendation (3070 x 0.65 =
-REM 1995, 3032 x 0.65 = 1970, 3070x3032 x 0.5 = 1535x1516, the 2458x2824
-REM x 0.65 = 1597x1835 of the 2026-09-23 flight); the census's five panels
-REM in units of U = W / 2 tan(vFOV/2) on every recorded frustum, a
-REM one-percent miss not matching, the candidate shape, the learned-panel
-REM file's parser. The LAYER
+REM from the same headers the DLL compiles. The PANELS (ui_quality_math.h,
+REM ui_sizing_math.h): the internal resolution from the runtime's
+REM recommendation (3070 x 0.65 = 1995, 3032 x 0.65 = 1970, 3070x3032 x 0.5 =
+REM 1535x1516, the 2458x2824 x 0.65 = 1597x1835 of the 2026-09-23 flight);
+REM 2 tan(vFOV/2) on every recorded frustum; the interface surface's shape;
+REM the sizing chains' formatter and verdicts; the engine-side panel factor
+REM across the flights' states and the build-332841 bytes it patches. The LAYER
 REM (ui_layer_math.h): the key; the layer's size and memory; the viewport and
 REM scissor map and the jitter cancel; the blend conversion table, a multiply
 REM included, and a CPU model proving layer-then-composite equals the game's

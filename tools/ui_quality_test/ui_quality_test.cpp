@@ -1,15 +1,12 @@
 // Build gate for fix.ui_quality (docs/ui-layer-2026-09-23.md), both halves
 // of the one key, from the headers the DLL compiles:
 //
-//   * the surfaces (src/d3d11/ui_quality_math.h, absorbed from
-//     fix.hud_quality's rig): the factor, its floor and cap; the rounding;
-//     the internal render resolution from the runtime's recommendation and
-//     HMD Quality (3070 x 0.65 = 1995 and the rest); the panel rule -- a
-//     constant times W / 2 tan(vFOV/2) -- matching the census's five panels
-//     on Sean's FOV-trimmed eye, the untrimmed Pimax, the Quest 3 and the
-//     cull guard's frusta, and refusing near misses; learning in units of
-//     U (pending, learned at a second U, fixed); the panels' file parser;
-//     the pair memo.
+//   * the panels (src/d3d11/ui_quality_math.h and ui_sizing_math.h): the
+//     internal render resolution from the runtime's recommendation and HMD
+//     Quality (3070 x 0.65 = 1995 and the rest), the vertical field of view
+//     as the panel formula reads it, the interface surface's shape; the
+//     sizing chains' formatter and verdicts; the engine-side panel factor
+//     across the flights' states and the build-332841 bytes it patches.
 //   * the layer's arithmetic (src/d3d11/ui_layer_math.h): the key; the
 //     layer's size and memory at 1.0 and 1.25; the viewport and scissor map;
 //     the jitter cancel, both from pixels and from the tangent shift the
@@ -978,42 +975,11 @@ void testDepthStencil() {
           "without one, neither does: no seed, every draw");
 }
 
-// ---------------------------------------------------------- the surfaces
+// ------------------------------------------------------- the render state
 
-UiQualityBasis basis(uint32_t W, uint32_t H, float up, float down) {
-    UiQualityBasis b;
-    b.W = W;
-    b.H = H;
-    b.T = uiQualityFovTangent(up, down);
-    return b;
-}
-
-// Does w x h, made at W x H with this vertical frustum, match census panel
-// `want` (-1: none)?
-bool panelAt(uint32_t w, uint32_t h, uint32_t W, uint32_t H, float up, float down, const UiQualityRatio* t,
-             uint32_t n, int want) {
-    const UiQualityBasis b = basis(W, H, up, down);
-    if (!uiQualityCandidateShape(w, h, W, H)) return want < 0;
-    return uiQualityRatioFind(t, n, uiQualityPanelX10000(w, b), uiQualityPanelX10000(h, b)) == want;
-}
-
-void testSurfaces() {
-    float f = 0.0f;
-    check(uiQualityFactor(1.0f, 0.65f, &f) && near1(f, 1.0 / 0.65, 1e-5), "1.0 at HMD Quality 0.65: x1.5385");
-    check(uiQualityFactor(1.25f, 0.65f, &f) && near1(f, 1.25 / 0.65, 1e-5), "1.25 at 0.65: x1.9231");
-    check(uiQualityFactor(1.25f, 1.0f, &f) && near1(f, 1.25, 1e-6), "1.25 at 1.0: x1.25");
-    check(!uiQualityFactor(1.0f, 1.0f, &f), "1.0 at 1.0 is a no-op");
-    check(!uiQualityFactor(1.0f, 1.25f, &f), "HMD Quality above the target is a no-op");
-    check(uiQualityFactor(1.0f, 0.98f, &f) && !uiQualityFactor(1.0f, 0.995f, &f), "the 1% floor's edge");
-    check(uiQualityFactor(1.0f, 0.2f, &f) && f == 4.0f, "the 4x cap");
-    check(!uiQualityFactor(1.0f, 0.0f, &f) && !uiQualityFactor(0.0f, 0.65f, &f) &&
-              !uiQualityFactor(1.0f, -1.0f, &f),
-          "an unknown HMD Quality or an off key does nothing");
-    check(uiQualityRoundDim(908, 1.0f / 0.7f) == 1297 && uiQualityRoundDim(1361, 1.0f / 0.7f) == 1944,
-          "908x1361 at 1/0.7 is 1297x1944");
-    check(uiQualityRoundDim(908, 2.0f) == 1816 && uiQualityRoundDim(1361, 3.0f) == 4083,
-          "a whole factor is exact");
-
+// The panel formula's inputs as ui_panel_scale.cpp and the sizing chains
+// read them (ui_quality_math.h), and the chain instrument's shape gate.
+void testRenderState() {
     // The internal resolution, known before anything is submitted.
     check(uiQualityInternalDim(3070, 0.65f) == 1995 && uiQualityInternalDim(3032, 0.65f) == 1970,
           "3070x3032 at HMD Quality 0.65 renders 1995x1970");
@@ -1040,159 +1006,11 @@ void testSurfaces() {
           "2.3938), either sign, either order");
     check(uiQualityFovTangent(0.0f, 1.0f) == 0.0f && uiQualityFovTangent(1.0f, NAN) == 0.0f,
           "no usable tangent, no rule");
-    UiQualityRatio t[32];
-    uint32_t n = uiQualitySeedTable(t, 32);
-    check(n == kUiQualitySeedCount && n == 5, "five census panels");
-    // Every panel on Sean's rig with the trim on -- the 2026-09-23 11:49
-    // flight's, which the first rule matched none of.
-    check(panelAt(358, 537, 1597, 1835, 1.1779f, 1.1779f, t, n, 0) &&
-              panelAt(717, 448, 1597, 1835, 1.1779f, 1.1779f, t, n, 1) &&
-              panelAt(740, 462, 1597, 1835, 1.1779f, 1.1779f, t, n, 2) &&
-              panelAt(771, 630, 1597, 1835, 1.1779f, 1.1779f, t, n, 3) &&
-              panelAt(1076, 231, 1597, 1835, 1.1779f, 1.1779f, t, n, 4),
-          "the trimmed Pimax at 0.65 (1597x1835, vFOV 99.3): 358x537, 717x448, 740x462, 771x630, 1076x231");
-    check(panelAt(417, 625, 1995, 1970, 1.2648f, 1.2648f, t, n, 0) &&
-              panelAt(861, 538, 1995, 1970, 1.2648f, 1.2648f, t, n, 2) &&
-              panelAt(897, 734, 1995, 1970, 1.2648f, 1.2648f, t, n, 3) &&
-              panelAt(1252, 269, 1995, 1970, 1.2648f, 1.2648f, t, n, 4),
-          "...and untrimmed at 0.65 (1995x1970): 417x625, 861x538, 897x734, 1252x269");
-    check(panelAt(539, 807, 2576, 2544, 1.2648f, 1.2648f, t, n, 0) &&
-              panelAt(1078, 674, 2576, 2544, 1.2648f, 1.2648f, t, n, 1) &&
-              panelAt(1112, 695, 2576, 2544, 1.2648f, 1.2648f, t, n, 2) &&
-              panelAt(1158, 947, 2576, 2544, 1.2648f, 1.2648f, t, n, 3) &&
-              panelAt(1617, 347, 2576, 2544, 1.2648f, 1.2648f, t, n, 4) &&
-              panelAt(1135, 1701, 5424, 5356, 1.2648f, 1.2648f, t, n, 0) &&
-              panelAt(3407, 732, 5424, 5356, 1.2648f, 1.2648f, t, n, 4),
-          "the untrimmed Pimax at 2576x2544 and 5424x5356: all five");
-    check(panelAt(451, 676, 1996, 2121, 0.9657f, 1.4281f, t, n, 0) &&
-              panelAt(931, 581, 1996, 2121, 0.9657f, 1.4281f, t, n, 2) &&
-              panelAt(969, 793, 1996, 2121, 0.9657f, 1.4281f, t, n, 3) &&
-              panelAt(1354, 290, 1996, 2121, 0.9657f, 1.4281f, t, n, 4) &&
-              panelAt(466, 699, 2064, 2208, 1.4281f, 0.9657f, t, n, 0) &&
-              panelAt(933, 583, 2064, 2208, 1.4281f, 0.9657f, t, n, 1) &&
-              panelAt(1002, 820, 2064, 2208, 1.4281f, 0.9657f, t, n, 3) &&
-              panelAt(1400, 300, 2064, 2208, 1.4281f, 0.9657f, t, n, 4),
-          "the Quest 3 (1996x2121 native, 2064x2208 over OpenVR): the census's fifth seed is panel 4");
-    check(panelAt(666, 998, 2307, 1652, 0.7536f, 1.1106f, t, n, 0) &&
-              panelAt(1375, 859, 2307, 1652, 0.7536f, 1.1106f, t, n, 2) &&
-              panelAt(2000, 429, 2307, 1652, 0.7536f, 1.1106f, t, n, 4) &&
-              panelAt(661, 990, 2646, 2206, 1.06f, 1.06f, t, n, 0) &&
-              panelAt(1983, 426, 2646, 2206, 1.06f, 1.06f, t, n, 4),
-          "trimmed and cull-guarded frusta (Quest 2307x1652 vFOV 85, Pimax 2646x2206 vFOV 93.3)");
-    check(panelAt(362, 537, 1597, 1835, 1.1779f, 1.1779f, t, n, -1) &&
-              panelAt(358, 537, 1597, 1835, 1.2648f, 1.2648f, t, n, -1) &&
-              panelAt(1346, 757, 1597, 1835, 1.1779f, 1.1779f, t, n, -1) &&
-              panelAt(512, 512, 1597, 1835, 1.1779f, 1.1779f, t, n, -1),
-          "1% wider, the untrimmed frustum's panel at the trimmed size, a 16:9 surface, a power of two: none");
-    {
-        // The factor makes the panel the size the rule gives at the target:
-        // trimmed at HMD Quality 1.0 the render is 2458 wide.
-        uiQualityFactor(1.0f, 0.65f, &f);
-        const UiQualityBasis at1 = basis(2458, 2824, 1.1779f, 1.1779f);
-        const double w1 = 0.5291 * at1.unit(), h1 = 0.7929 * at1.unit();
-        check(std::fabs(uiQualityRoundDim(358, f) / w1 - 1.0) < 0.005 &&
-                  std::fabs(uiQualityRoundDim(537, f) / h1 - 1.0) < 0.005,
-              "358x537 x 1/0.65 = 551x826, the rule's panel 1 at HMD Quality 1.0 on the trimmed eye");
-        // The sizes the next flight's `made bigger` lines name at 1.25 on the
-        // trimmed eye (the doc's "What the next flight must show", item 3).
-        uiQualityFactor(1.25f, 0.65f, &f);
-        check(uiQualityRoundDim(358, f) == 688 && uiQualityRoundDim(537, f) == 1033 &&
-                  uiQualityRoundDim(717, f) == 1379 && uiQualityRoundDim(448, f) == 862 &&
-                  uiQualityRoundDim(740, f) == 1423 && uiQualityRoundDim(462, f) == 888 &&
-                  uiQualityRoundDim(771, f) == 1483 && uiQualityRoundDim(630, f) == 1212 &&
-                  uiQualityRoundDim(1076, f) == 2069 && uiQualityRoundDim(231, f) == 444,
-              "at 1.25 on the trimmed eye (x1.9231): 688x1033, 1379x862, 1423x888, 1483x1212, 2069x444");
-    }
     check(!uiQualityCandidateShape(512, 512, 1995, 1970) && !uiQualityCandidateShape(256, 1, 1995, 1970) &&
               !uiQualityCandidateShape(1995, 1970, 1995, 1970) &&
               !uiQualityCandidateShape(3840, 2160, 1995, 1970) && !uiQualityCandidateShape(10, 12, 1995, 1970) &&
               uiQualityCandidateShape(417, 625, 1995, 1970),
           "the candidate shape: smaller than the eye, no power of two, no sliver");
-    check(!uiQualityLearn(t, &n, 32, 5300, 7920) && uiQualityLearn(t, &n, 32, 20000, 12000) && n == 6 &&
-              !uiQualityLearn(t, &n, 32, 1000000, 5),
-          "a ratio within 0.5% of one on the table is not added twice");
-
-    // Learning (review P2-1), in units of U: the caller offers only
-    // GUI-drawn surfaces (is it UI); the table takes one only once the same
-    // ratio holds at a second U (does it scale). Both questions, not either.
-    {
-        const UiQualityBasis menu = basis(1995, 1970, 1.2648f, 1.2648f);    // U 788.7
-        const UiQualityBasis trimmed = basis(1597, 1835, 1.1779f, 1.1779f); // U 677.9
-        const UiQualityBasis full = basis(3070, 3032, 1.2648f, 1.2648f);    // U 1213.6
-        UiQualityLearning L;
-        L.reset();
-        check(L.n == 5 && L.learnedCount() == 0 && L.np == 0 && L.nf == 0, "learning starts from the census alone");
-        check(L.observe(358, 537, trimmed) == UiQualityLearn::kIgnored, "a census panel is not learned again");
-        // The 11:49 flight's menu text surface and its cockpit twin: one
-        // panel at two U 14% apart.
-        check(L.observe(1566, 880, menu) == UiQualityLearn::kPending, "a GUI surface on no panel ratio is pending first");
-        check(L.observe(1566, 880, menu) == UiQualityLearn::kSameBasis &&
-                  uiQualityRatioFind(L.table, L.n, uiQualityPanelX10000(1566, menu),
-                                     uiQualityPanelX10000(880, menu)) < 0,
-              "...seen again at the same U it is still pending, and matches nothing");
-        uint32_t lw = 0, lh = 0;
-        check(L.observe(1346, 757, trimmed, &lw, &lh) == UiQualityLearn::kPromoted && L.learnedCount() == 1 &&
-                  L.np == 0 && uiQualityRatioFind(L.table, L.n, uiQualityPanelX10000(1346, trimmed),
-                                                  uiQualityPanelX10000(757, trimmed)) >= 0,
-              "1566x880 at the menu and 1346x757 in the trimmed cockpit: the same ratio of U, it scales, learned");
-        check(L.observe(1280, 720, menu) == UiQualityLearn::kPending, "a fixed-size GUI surface is pending first too");
-        check(L.observe(1280, 720, trimmed) == UiQualityLearn::kNotScaling && L.isFixed(1280, 720) && L.np == 0,
-              "...the same pixel size at another U: it does not scale, refused for good");
-        check(L.observe(1280, 720, full) == UiQualityLearn::kFixed && L.learnedCount() == 1,
-              "...and never learned after");
-        check(L.observe(800, 600, menu) == UiQualityLearn::kPending, "another pending sighting");
-        // The file keeps all three kinds of fact across sessions.
-        const std::string text = uiQualityFormatLearning(L);
-        UiQualityLearning R;
-        R.reset();
-        check(uiQualityParseLearning(text.c_str(), R) == 3 && R.learnedCount() == 1 && R.np == 1 && R.nf == 1 &&
-                  R.isFixed(1280, 720) && R.pending[0].w == 800 && R.pending[0].b.W == 1995 &&
-                  std::fabs(R.pending[0].b.T - menu.T) < 1e-3f,
-              "the file keeps the learned ratio, the pending sighting with its frustum and the fixed size");
-        UiQualityLearning O;
-        O.reset();
-        check(uiQualityParseLearning("# the first builds' file\n2092 3175\nlearned 4000\nlearned 4000 2000 7\n"
-                                     "pending 3509 2538 700 500 1995 1970\nfixed 0 5\nfoo 1 2\nlearned 5292 7930\n",
-                                     O) == 0 &&
-                  O.n == 5 && O.np == 0,
-              "bare ratios, a pending line without its frustum, short, long, zero, unknown and census lines refused");
-        UiQualityLearning P;
-        P.reset();
-        char line[96];
-        std::snprintf(line, sizeof(line), "pending %u %u 1566 880 1995 1970 %u\n", uiQualityPanelX10000(1566, menu),
-                      uiQualityPanelX10000(880, menu), static_cast<uint32_t>(menu.T * 10000.0f + 0.5f));
-        check(uiQualityParseLearning(line, P) == 1 && P.observe(1346, 757, trimmed) == UiQualityLearn::kPromoted,
-              "a sighting pending from an earlier session is promoted by this one's");
-    }
-
-    // The pair (review P3-9): a colour target and its depth partner stay one
-    // size though the basis moves between the two creates.
-    {
-        UiQualityMemo memo;
-        UiQualityDecision made;
-        made.ow = 417;
-        made.oh = 625;
-        made.nw = 642;
-        made.nh = 962;
-        made.factor = 1.5385f;
-        made.origin = UiQualityOrigin::kCensus;
-        made.ms = 1000;
-        memo.put(made);
-        const UiQualityDecision* m = memo.find(417, 625, 1400);
-        check(m && m->nw == 642 && m->nh == 962 && m->origin == UiQualityOrigin::kCensus,
-              "the partner of a resized surface gets the same size");
-        check(!memo.find(417, 625, 1000 + kUiQualityMemoMs + 1) && !memo.find(418, 625, 1400),
-              "...within the window, for the same asked size only");
-        UiQualityDecision left;
-        left.ow = left.nw = 500;
-        left.oh = left.nh = 300;
-        left.ms = 2000;
-        memo.put(left);
-        const UiQualityDecision* k = memo.find(500, 300, 2100);
-        check(k && k->nw == 500 && k->nh == 300, "the partner of a surface left alone is left alone");
-        memo.clear();
-        check(!memo.find(417, 625, 1400) && !memo.find(500, 300, 2100), "cleared when the key changes");
-    }
 }
 
 // ------------------------------------------------------------ the GPU
@@ -1957,7 +1775,7 @@ int main(int argc, char** argv) {
         std::puts("usage: ui_quality_test --self-test | --hardware | --dry-run");
         return 2;
     }
-    testSurfaces();
+    testRenderState();
     testKey();
     testSize();
     testMap();
