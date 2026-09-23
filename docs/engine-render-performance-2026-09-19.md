@@ -2,217 +2,60 @@
 
 ## Status
 
-* **State (2026-09-21, Phase 1 built):** the change gate is implemented
-  (`fix.static_prop_updates`, default off) and build-gated; the Phase-1
-  flight is next. Mechanism: at the job-0 entry the bracket consults a
-  bounded cache keyed by the call's record-array pointer; if every record's
-  truth bytes (+0x170 x16, +0x570 x8, memcmp) match and the entry is younger
-  than 30 frames, the call forwards past with no engine work. Invalidation:
-  reset path (FUN_1436a0f50 via the existing scheduler hook), journal
-  boundaries polled per frame (LoadGame/Disembark/StartJump), session
-  boundaries, enable. Phase-2 gate before default-on: zero census delta +
-  zero flicker-instrument hits + wall saving >= the Phase-0 number.
+* **State, 2026-09-23 (scope: cockpit, stereo only).** The settlement
+  CPU wall is the caller thread's own draw submission, not the job
+  pipeline: the pipeline's critical-path share is 0.78-0.81 ms against
+  a 1.5 ms bar ("Phase A, valid: KILL" — the occlusion-culling arc is
+  KILLED). EDVR's own pre-submit leaf cost is cut 3.94 -> 1.19 ms over
+  three measured rounds (-70%); the caller thread is down 15.1 -> 11.9
+  ms, 50-52 fps at leg C; GPU is 9.2-10.2 ms at 0.566 ("EDVR's per-draw
+  path named", "Per-draw cut, round three", "Leg C", "The GPU side
+  of the same parked leg"). The re-scoped occlusion cull FAILED Phase
+  B' on evidence — the hiding surface is 89.6% open panels, qualified
+  solid occluders remove zero draws — and no cull code was built
+  ("Gate probe flown", "Probe v2 flown"). The settlement LOD governor
+  has flown twice in shadow; its acting mode is BUILT (4200182, merged
+  in b55e06b) but NOT FLOWN ("The settlement LOD governor, SHADOW
+  MODE", "Shadow flight 1", "Shadow flight 2").
 
-* **State (2026-09-21, offline trace complete):** the consumer/scheduling
-  trace is done — 21 new decompiles plus DAT_145f27db4/vtable xref and
-  +0x2a0/+0x2b0 offset scans, all under `analysis/decomp/` and VA-specific to
-  binary E6BE8BBE…988. The bucket lifecycle is mapped end to end: factory →
-  vtable-worker entry → rekey → four producers append (0x150 record, u64 key)
-  batch nodes → drainer → per-bit weighted counting → lightweight command
-  enqueue into ring buffers. No L2 suppression is implemented; none is now
-  justified. This doc owns the engine-performance arc; the settlement flicker
-  arc shares instruments and flights.
+* **Levers still open:** the draw count, now via the LOD governor's
+  unflown acting mode; the last ~0.4-0.6 ms of EDVR's own per-draw
+  path — the always-on instruments armed-only, plus a fourth round on
+  the resource hooks ("Leg C").
 
-* **Suppression refuted as scoped (2026-09-21):** five independent grounds —
-  (1) merge keys are copies of DAT_145f27db4, an unrelated Wwise
-  memory-category counter bumped unconditionally in FUN_1405d6260, so there is
-  no render generation or dirty surface to key on; (2) bucket items are not
-  draws — consumption is per-bit counting plus pointer/offset command records
-  (FUN_144c837b0 → FUN_144c7ef70), so the census 82% eye share has no proven
-  route from these lists; (3) the +0x2B0 dirty flag is written only inside
-  FUN_1401ea920's rekey sequence and has no conditional reader in .text; (4)
-  the frame scheduler is reachable only through vtable-table callbacks and is
-  unnamed by static RE; (5) one producer appends transform-derived packed
-  vectors (FUN_14434d470), so the subsystem may be light/probe batching, not
-  mesh draws. Do not build bucket clearing, rekeying or mask edits. See the
-  2026-09-21 trace entry at the end.
+* **Open items (pointers; open the named entry for the evidence):**
+  settlement admission (C2) untested from a real arrival ("The ~1 km
+  onset"); eye depth capture is native-VR-only by design ("Phase A
+  verdict: KILL"); the object classification ownership join,
+  unwind_failed ~90% in all four Phase A runs (same entry);
+  depth-capture constants keying, a structure-family draw ("The
+  visibility prize, measured"); the per-record identity/change signal
+  (motion arc); ring-buffer command consumers, the scheduler still
+  unnamed ("offline consumer/scheduling trace closed"); leg A at LOD
+  1.0 / MaterialQuality 3 unflown ("Leg C"); the perf monitor's CPU
+  figure is the pre-submit phase only, not caller work ("Shadow
+  flight 2").
 
-* **Boundary-first attribution (2026-09-21):** the armed-census tally of the
-  2026-09-19..21 settlement flights isolates ~78% of the retained eye-pass
-  draws to one instanced sourceMesh family (vh=EB5234DB6ADB491D, ~282 verts x
-  ~5 instances per draw, stable across three flights), ~9% to an unidentified
-  instanced family (vh=8056C9D5F22007F9) and ~3% to small-instance draws
-  (vh=2684F02B9B0BB0DE). Eye pass is ~18.3k draws/frame, offscreen ~4.1k. The
-  high settlement draw count is one dominant small-batch scenery family — not
-  the bucket subsystem, whose items never reach the boundary as draws.
+* **Ruled out (pointers, do not re-propose):** merge-key control of
+  any kind — the key is an incidental audio counter ("offline
+  consumer/scheduling trace closed"); the 82% bucket attribution and
+  40-frame cadence — no evidence route to eye-pass draws (same entry);
+  draw-call identity/motion estimation as a class
+  (kinematic-motion-injection-2026-09-19.md); compensation-style
+  tweaks (AGENTS.md diagnosis discipline); reusing prior zero samples
+  from unchanged bindings/payload (settlement arc's 2026-09-18
+  flight); the per-draw lever as a route to 90 Hz by itself, exhausted
+  at ~2 ms bought ("Round two measured"); the record-level cull unit,
+  0.5-0.9 ms even with ideal occluders ("Gate probe flown");
+  closed-solid and eroded-box occluders, remove zero draws ("Probe v2
+  flown"); LODDistanceScale as a draw-count lever at this view ("Leg
+  C"); applicationMs as a frame-fit signal, it omits the post-submit
+  phase ("Shadow flight 1").
 
-* **State (2026-09-22 evening, VALID Phase A flown: the occlusion
-  arc is KILLED, the wall is named):** two clean file-mode legs on build
-  2d8fbda, reconciled to the runtime log within 0.001 ms. Parked cockpit
-  at 45 fps: the caller thread RUNS 15.1 ms per 22.2 ms cycle (10.97 of
-  the 11.14 ms before first submit, 98.6% running), so it alone cannot
-  fit a 90 Hz frame. The job pipeline is 5.24 ms thread-summed on seven
-  workers but only 0.81 ms on the caller's critical path (0.67 running,
-  all post-present, + 0.14 waits): recall x critical path = 0.78 ms
-  against the 1.5 ms bar. The pre-submit 11 ms is draw submission:
-  3.94 ms innermost in EDVR's OWN d3d11.dll (46% of samples pass through
-  it), 4.45 ms game code, ~2.4 ms D3D runtime + NVIDIA driver + kernel.
-  The approach onset is a RAMP (R1 4.0 -> 12.7 ms from 5.3 km to
-  landing, r = 0.97 with job-0 samples), no step. Nothing of the design
-  is built or will be. Entry: 2026-09-22 "Phase A, valid: KILL".
-
-* **Per-draw cut, round three (2026-09-22, MEASURED on leg C,
-  2026-09-23):** parked-5's numbers re-read against the flown DLL: 0.67
-  ms/frame of the 2.74 ms innermost-EDVR population is the game's
-  forwarded D3D calls, guarded<> is the COM inside it, the map find was
-  ui_depth's holo geometry. Cut: ~20 per-draw cross-TU calls behind
-  inline first tests, the Unmap holo finds, srv0IsPanelSized's cookie,
-  the wake pulse resolve, owns(), the shader memo 1024. Measured: EDVR's
-  pre-submit leaf 1.69 -> 1.19 ms (3.94 at the baseline, -70% in three
-  rounds), the draw-hook line 2.11 -> 1.55, on the same 18.9k draws.
-  LODDistanceScale at 0.001 left the draw count at 18.9k (RULED OUT as
-  a draw-count lever at this view) but, together with MaterialQuality
-  0, bought ~1 ms of game-side caller time and 0.5 ms of GPU
-  (unattributed; leg A at 1.0/3 not flown). State of the caller thread
-  at this view: 11.9 ms per frame, GPU 8.9-9.5, 50-52 fps with the
-  runtime alternating full and half rate. Last ~0.5 ms that is ours:
-  the always-on instruments (map-wait QPC ~0.2, app GPU timing owner
-  check ~0.1) armed-only, and a fourth round on the resource hooks.
-  Entries: "Per-draw cut, round three", "Leg C".
-
-* **Settlement LOD governor (2026-09-23, flown twice in shadow; ACTING
-  MODE BUILT 1404b1b, NOT FLOWN).** `src\d3d11\lod_governor.*` (k = 1 in
-  space, k > 1 at a settlement only while the frame does not fit,
-  hysteresis against pumping). Acting = a bracket on the slider's setter
-  FUN_142819D90 that scales the game's LOD scale (ctx+0x30) by k right
-  after the engine stores it each frame; the builder-site write was
-  REFUTED (the setter runs every frame: design note section 9); auto =
-  the governed k, reduced = k_max at once at a settlement,
-  advanced.settlement_detail_observe = 1 keeps shadow-only. Shadow flight 1
-  (a081900) found the signal was applicationMs, the pre-submit phase
-  only, so k never left 1; fixed by 73bfab3 to
-  EdvrNativeTimingFrame::callerWorkMs (timing ABI v5 = cycle -
-  next_wait_roundtrip), k_max default raised 2.0 -> 4.0 (s saturates at
-  1.5). Shadow flight 2 (fa6565b, 2026-09-23 02:04 local) confirms the
-  fix: k rose 1 -> 4 in 142 s, 0 disagreements with the engine at k = 1,
-  would-drop saturates at 48-50% of passed parts between s x k 4.5 and
-  6.0, matching the exact draw table's 33.5-33.7% ceiling. Same flight
-  explains a HUD puzzle: the perf monitor's CPU figure is the pre-submit
-  phase only, so it read under 10 ms while the caller thread actually
-  worked 11.7-12.7 ms a cycle at 50-55 fps. Keys fix.settlement_detail
-  (game default; auto and reduced act), advanced.settlement_detail_max,
-  advanced.settlement_detail_observe. Entries: "The settlement LOD
-  governor", "Shadow flight 1", "Shadow flight 2". Next: the first ACTING
-  flight, parked at Cranfield, auto, observe 0 (design note section 9's
-  checklist): the frame work should fall with k toward under the period
-  and caller_wait_fps rise toward 90; disagreements at the held scale 0;
-  the visual cost judged in the headset.
-
-* **Open (arc OPEN on two levers; scope cockpit-only stereo):** (1)
-  EDVR's per-draw path, NAMED (2026-09-22 per-draw entry: hookedMap +
-  mapWaitNote 0.40 ms, the draw-hook verdict lambda 0.20, the
-  CreateBuffer hook 0.17, /GS cookies 0.16, guarded<> 0.11, qpcNow per
-  draw 0.09, binding hash 0.11, and a tail of per-draw predicates) and
-  CUT and BUILT (2026-09-22 per-draw-cut entry: the tail was cross-TU
-  call overhead under /O2 without /GL; inline readers and live guards,
-  noinline for the two GS-buffer bodies) and MEASURED like for like
-  (2026-09-22 parked-4 entry, Pimax OpenXR 0.566, ~30 m from the pad):
-  EDVR's per-draw cost -0.7-0.8 ms per frame by both instruments (R1
-  EDVR leaf 3.94 -> 3.25 ms; the gfx log's own draw-hook line 3.84-3.98
-  -> 2.98-3.17), the targeted functions gone, the inlined loads moved
-  into forwardWithVerdict's body and the forty-term hoist inert with
-  panel distance on; the caller thread unchanged at 15.1 ms (the view's
-  draw set +0.7 ms of game-side submission, same pipeline), still 45
-  fps. EDVR's remaining 3.2 ms: dispatch bodies 1.6 (forwardWithVerdict
-  0.60, verdict lambda 0.36, beginPanelOverride body 0.51), resource
-  hooks 0.7, wrappers 0.26, live per-draw features ~0.5, the DrawClock's
-  2 ms every-16th-frame hitch. Even at zero EDVR cost the caller sits at
-  ~11.9 ms: necessary, not sufficient — the draw count (1b) is what
-  reaches 90 Hz; round two of the cut (a606157: verdict ladder,
-  deferred-UI guard, the draw clock's spike, cookies, 38 more inline
-  predicates, the SRV private-data tag, the Map/Create guards) is
-  MEASURED like for like (parked-5 entry): EDVR's pre-submit leaf time
-  3.94 -> 3.25 -> 1.69 ms across baseline / round 1 / round 2, the
-  caller thread 15.1 -> 13.2 ms per frame, still 45 fps (13.2 does not
-  fit 11.1; the caller idles 6.7 ms per cycle). What remains, 1.69 ms:
-  the resource hooks ~0.7 (hookedMap 0.37, CreateBuffer 0.19),
-  beginPanelOverride's body 0.32, guarded<> 0.19, forwardWithVerdict
-  0.21. The lever is EXHAUSTED as a route to 90 Hz at this view; it
-  bought 2 ms of headroom that the draw-count lever needs; Phase B'
-  of the re-scoped cull is DONE offline (design doc §9, 2026-09-22):
-  the record -> draw join is exact (each eye draw names its pool
-  records through its instance range), 71-72% of the settlement's eye
-  draws come only from unseen records at three identical parked runs
-  (6.0-6.1 ms of the 8.5 ms), the §3.2 coverage buffer with ideal
-  occluders removes 36-53% (3.1-4.5 ms) against the 1.5 ms bar, so B'
-  PASSES on its ceiling but CONDITIONALLY: the occluders are the front
-  buildings' exteriors 30-100 m out (not the cockpit, <= 2%) and a
-  qualified inventory of their solid parts must reproduce >= ~45% of
-  the ideal; and the gate's camera is its own argument (a view record
-  per eye at ctx+0x40) BUT its verdict feeds only the type-2 item path
-  - which test admits the pool draws (FUN_144308B30) was unproven; B'
-  CLOSE-OUT (design doc §9, on main): FUN_144308B30 decompiled - it is
-  a per-view screen-size test that trims the collection's active mask
-  into rec+0x208, the frustum verdict of FUN_14430EFE0 never reaches the
-  pool draws (type-2 singletons only), and the draw-item builder runs
-  its own per-view test (view+0x570, FUN_1404F4E10), so the candidate
-  reject site MOVES to the builder's view loop; the eye depth capture's
-  constants block is fixed (file version 2, the camera registers
-  270-275); the gate probe FLOWN (run 152632, design doc §10,
-  2026-09-22 gate-probe entry): the builder's view loop predicts the
-  pool draws exactly at the ENGINE-RECORD level, but that unit FAILS
-  the bar even with ideal occluders (5.9-10.7% of draws, 0.5-0.9 ms:
-  one visible part keeps a 1,287-part record); the per-PART split
-  lives in FUN_1442B3FC0, where ideal occluders remove 29.8-38.5%
-  (2.5-3.3 ms at the pre-cut share) with zero false rejects - the open
-  site, conditional on real occluders reproducing ~62-80% of the ideal
-  at the post-cut share; the geometry capture came back empty (a probe
-  bug in the pool-first-seen path), so the real-occluder recall is
-  then MEASURED with probe v2 (run 165433, design doc §12, 2026-09-22
-  probe-v2 entry): the part site is PROVEN (FUN_1442B3FC0's verdicts
-  admit exactly the pool draws, 0 / 0 / 20,728), but the hiding
-  surface is 89.6% open panels and shells, closed-solid and eroded-box
-  occluders remove ZERO draws at both buffer sizes, and even ideal
-  occluders at the part unit reach only 1.2-1.6 ms post-cut, so the
-  re-scoped cull FAILS Phase B' on evidence; 0 false rejects against
-  the exact re-draw truth. The arc is CLOSED on that evidence; the one
-  offline question left (open-panel quads + terrain within a 30-60k
-  triangle budget, measured on 165433, ceiling the ideal row) is
-  Sean's call and reopens nothing by itself; no cull code was built;
-  cutting all of it lands the caller at ~11.2 ms, the edge of 90 Hz, so
-  the GPU side (unmeasured here; addendum 2: 8-15 ms app GPU at 0.7559)
-  must be read next to it; (1b) the RE-SCOPED cull (design doc §8):
-  draw submission is the prize (settlement share ~8.5 ms per frame,
-  91-96% of records unseen), same site and safety architecture, new
-  gate B' = the record -> draw join and the unseen share of the
-  caller's draw time; (2)
-  the settlement admission (C2, reset-repopulate) stays untested: the
-  approach leg began after a reload at the settlement — a leg that
-  starts from a real 10 km arrival would test it; (3) DONE 2026-09-22:
-  the 13.7 s memory ring — file mode is the default now, --memory-ring
-  restores the ring; (4) eye depth capture
-  is native-VR-only by design (the flat panel forms no scene pair) —
-  document or extend; (5) the object classification ownership join failed
-  in all four Phase A runs (unwind_failed ~90%) — the record-to-object
-  join the flicker/object arcs need; (6) depth-capture constants keying
-  (structure-family draw); (7) per-record identity/change signal (motion
-  arc); (8) ring-buffer command consumers.
-
-* **Ruled out (pointers, do not re-propose):** draw-call identity/motion
-  estimation as a class — kinematic-motion-injection-2026-09-19.md.
-  Compensation-style tweaks (sharpening over blur, threshold nudges) —
-  AGENTS.md diagnosis discipline. Reusing prior zero samples solely from
-  unchanged bindings/payload was refuted by the settlement arc's 2026-09-18
-  targeted flight: three identical captures became visible next frame.
-  Merge-key control of any kind — the key is an incidental audio counter
-  sampled at rekey. The 82% bucket attribution and 40-frame cadence — no
-  evidence route exists from the bucket lists to eye-pass draws.
-  Occlusion culling of the job pipeline is NOT ruled out: the 2026-09-22
-  KILL was withdrawn the same day — its trace never covered the cockpit
-  leg and the analyzer measures only the post-present slice (withdrawal
-  entry). Its Phase A gate is unmeasured. What IS closed: any prize
-  arithmetic that multiplies the unseen fraction by thread-summed job
-  time without a measured critical-path share.
+* **Next flight:** the first ACTING flight, parked at Cranfield,
+  fix.settlement_detail = auto, advanced.settlement_detail_observe =
+  0, k_max 4 — docs\design-settlement-lod-bias-2026-09-22.md section
+  9's checklist.
 
 ## Frame budget philosophy
 
@@ -949,6 +792,10 @@ count, sequence) plus return-address stacks at FUN_144321940/0x144320340/
 0x1442df940/0x1436a0f50 to name the scheduler, correlated with the existing
 eye census to identify what the command rings drive. No bucket mutation, no
 clearing, no suppression build is justified by current evidence.
+
+2026-09-23 -- carried from the Status block: this doc owns the
+engine-performance arc; the settlement-flicker arc shares instruments
+and flights with it.
 
 
 ### 2026-09-21 -- boundary-first attribution: the settlement draws are one scenery family
@@ -1857,6 +1704,11 @@ number is read); leg 1 gives the gate (caller pipeline running +
 pipeline-attributed waits, the critical-path share, recall x share x
 5.3 ms against ~1.5 ms); leg 2 gives the onset per the signatures
 above, joined to distance by UTC.
+
+2026-09-23 -- carried from the Status block: a valid C2 test needs a
+leg that starts from a real 10 km arrival, before any admission (the
+flown approach leg began after a reload already at the settlement, so
+C2 stayed untested).
 
 ### 2026-09-22 -- Retake tooling proven offline: file-mode capture, hotkey legs, and an analyzer that reproduces the runtime's cycle phases to 0.001 ms
 
@@ -3039,3 +2891,16 @@ keep a shadow copy so the game's own s can be told from EDVR's write
 when the user moves the slider. Open for an implementer: whether ctx is
 one persistent object (pointer constant across builder calls) and where
 the game re-writes it.
+
+2026-09-23 -- carried from the Status block: the acting mode (built
+on 4200182, merged in 1404b1b/b55e06b, NOT FLOWN) is a bracket on the
+slider's setter FUN_142819D90 that scales the engine's LOD scale
+(ctx+0x30) by k right after it stores the value each frame; writing
+ctx+0x30 directly at the builder site was considered and REFUTED
+because the setter runs every frame
+(docs\design-settlement-lod-bias-2026-09-22.md section 9).
+fix.settlement_detail = auto governs k; reduced holds k_max at once
+at a settlement; advanced.settlement_detail_observe = 1 keeps the
+prior shadow-only behaviour. The caller-work signal is
+EdvrNativeTimingFrame::callerWorkMs (timing ABI v5), landed by
+73bfab3.
