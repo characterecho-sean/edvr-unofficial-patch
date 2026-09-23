@@ -22,23 +22,20 @@
   DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 + FIX ROUND
   MERGED and FLOWN (093817, "The re-fly" entry): eye-frames bound and given, cb1
   re-maps kept (invalidated 0), corrupt codes 0, engine-joined 67-73k px an eye-frame.
-  FOLLOW-UPS MERGED, NOT FLOWN (73b6e9cf): prep's parts priced; a `depth probe layout:`
-  census; the motion_source legend corrected (green = certified rig record, still or
-  moving). STAGE B REMOVED 2026-09-23 (its coverage pass was the ~3 ms prep),
-  superseded by the engine path's exact per-pixel ownership; the veto never shipped on.
-  ITS KEY RETIRED 2026-09-23: engine motion is part of fix.temporal_aa, every mode.
-- **Open:** the follow-ups' flight (the expected price line is under Next); on foot
-  the eyes show a flat 2D-screen panel (no eye scene), and with fix.ui_quality on the
-  UI layer lifted it past DLSS entirely -- DECIDED (overseer, 2026-09-23): the layer
-  leaves the 2D screen in the eye while the journal says on foot (the UI agent's
-  build); a temporal pass on the flat 3840x2160 source is the later, better remedy;
-  the stale cockpit (62.8% = the commander's legs under unkeyed layers ps_B7D5 and
-  vs_7B0DC42D -- DECIDED: not keyed now, the legs take the ship/world split and cost
-  nothing visible; 35.4% undecided until MRT6 is in the eye dump, wanted, low
-  priority); the tracker's extra movers are evaluated-but-not-drawn (the census, the
-  09:38 entry); the boarding flicker (prime candidate: the LOD governor, not this arc);
-  stations and ships in space; builder-path movers and articulated parts (phase 2);
-  skinned motion's previous palette (phase 2).
+  FOLLOW-UPS FLOWN (114958, c00af958): cockpit prep 0.15-0.23 ms a pair (copy 0.02, mv
+  0.13-0.21), no faults, the on-foot gate held. STAGE B REMOVED and ITS KEY RETIRED
+  (2026-09-23): engine motion is part of fix.temporal_aa, every mode. ON FOOT BUILT, NOT
+  FLOWN ("On foot" entry): the source pass takes MRT6 into a slot target of the source's
+  size; the screen shader carries certified rig records through the panel.
+- **Open:** the on-foot flight (Next); walkers (vs_F516BF0201303B87, unkeyed; w=2 on the
+  panel today, the "On foot" entry) wait on phase 2's previous bone palette; a temporal
+  pass on the flat source itself is the later remedy for its own
+  aliasing; the stale cockpit (62.8% = the commander's legs under unkeyed layers ps_B7D5
+  and vs_7B0DC42D -- DECIDED: not keyed now, the legs take the ship/world split and cost
+  nothing visible; 35.4% undecided until MRT6 is in the eye dump, wanted, low priority);
+  the tracker's extra movers are evaluated-but-not-drawn (the census, the 09:38 entry);
+  the boarding flicker (prime candidate: the LOD governor, not this arc); stations and
+  ships in space; builder-path movers and articulated parts (phase 2).
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -57,9 +54,9 @@
   pre-pass or a depth bias as the stale cockpit (all three: the re-fly entry); green on
   the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
   cause (the 09:38 entry). Do not re-propose any of the above.
-- **Next:** the same flight (fix.temporal_aa = dlss, diagnostics 1; pad, walk,
-  re-board) read against the re-fly entry: in the cockpit `prep ~0.2-0.5 (copy ~0.05
-  mv ~0.1-0.3)`; on foot `depth probe layout:` and the layer's on-foot line.
+- **Next:** the on-foot flight (fix.temporal_aa = dlss, diagnostics 1, one leg with
+  advanced.temporal_aa_debug = motion_source): walk near the drone and a landing ship;
+  read the "On foot" entry's signatures -- the drone and the ship green on the panel.
 
 ## Premise
 
@@ -2357,3 +2354,95 @@ Legend fixed: green is a rig record whose certified previous pose gave its exact
 moving or still -- a still one carries the camera's motion through the record -- not a mover
 count (edvr.ini's temporal_aa_debug block, the shader comment, the pixel line's
 `engine-joined` wording).
+
+### 2026-09-23 -- On foot: the source pass gets MRT6, the screen shader carries rig records (built, not flown)
+
+**Hypothesis.** Walking NPCs, the drone and a ship blur on foot because every panel pixel's
+motion is the camera term. On foot the world is drawn once into the 2D screen's source (its
+own depth, D32_FLOAT_S8X24; 3840x2160 at vscreen_res_width) and each eye gets one panel draw
+of it; the screen shader (screen_motion.h) recovers each source pixel from the source depth
+and rows 270..275 and reprojects it as static -- exact for scenery, the camera term for
+anything that moved in the source. The engine path never reaches it. Confirmed by the 11:50
+flight (`edvr_gfx_20260923_114958.log`, build c00af958): on every on-foot window the emit's
+CPU half works (pool records joined 1.07M-2.59M per 30 s, movers joined 27-153 records a
+frame, masked 41k-364k, disagreements 0) while the draw half reads `eye-frames 0, with MRT6
+bound 0; views asked 0, given 0` with every MRT6 refusal 0 -- the bind is never attempted,
+because it keys on an eye scene depth and on foot no pool draw targets one (`depth probe
+layout:` names the busiest target 3840x2160 with no eye-sized colour target beside any of
+its draws; the eyes get 2.0 draws a frame from vs 5C36AF051B98B9F1 ps CFE84157BC76E921).
+**Fixtures, offline** (eye runs 115325 and 115351, eye 0, 1597x1835; scripts in the
+session's scratch `onfoot`). ScreenMotion: w=1 on 63.0% / 61.3% of the pixels, median 1.25 /
+0.58 eye px; one smooth camera-only field, fitted by depth to the surroundings, explains
+every valid pixel to p99.9 0.0016 px. Over the ship (115325, 4,440 px at 165-212 m) the
+motion is (+0.776, +0.356) against (+0.777, +0.355) in a 6-px ring; over the drone (115351,
+238 px at 135-160 m) (+0.184, -0.098) against (+0.185, -0.099): the camera term, nothing of
+their own. The pool ledger (`pool_*.bin`, byte-identical in all 40 files) is the last EYE
+pool, from before the on-foot scene: it does not hold the on-foot records. `drawstate_*.bin`
+does, for one frame (4,095 source draws into 3840x2160, capped at 4,096): a 20,480-record
+source pool with 1,137 joined records, 236 of them with a changed pose (217 over 1 mm, 65 in
+the captured draws). Through the source rows the drone's own motion is (+0.01, +0.22)
+source px a frame, about 0.12 eye px (the scale, ~0.55 eye px per source px, inferred from
+a walker's height) -- 50-70x the fit error, and what the lookup adds; the ship's, at 173-204
+m, about 0.02 eye px (0.14 at most). The walkers are rig records too (joined, 10-12.6 mm a
+frame, limbs up to 11 degrees a frame) but drawn by vs_F516BF0201303B87, not one of the
+seven keyed families: this build does not reach them. And today the near walker's whole
+figure is w=2 -- no history every frame, not the camera term (inferred cause: the
+first-person stencil bit the weapon path keys on, with no weapon motion under it).
+
+**Built** (branch claude/engine-motion-on-foot). The source is a third eye:
+- `engine_velocity.cpp`: screen_motion names the source depth each source frame
+  (`engineVelocityNoteSource`, at screenMotionSource); a pool family draw into that depth,
+  named this frame or the last two, is the SOURCE pass (`slowPath`, `sourcePass`) and takes
+  the eye path's whole rule set -- the snapshot of t33 and b1 at its first substituted draw,
+  rows 270..275 held or the frame dropped, pool appends refreshed, MRT6 only where the
+  binding validates, the derived unblended state, odd codes -- into a slot target made from
+  the source depth's own size (never assumed), created only while the source is drawn,
+  logged once with its size and reason, released after 120 present frames without the
+  source (logged). `engineVelocitySourceViews` gives the screen shader the slot target, the
+  pool snapshot and the source's scene constants this frame and last, with the eyes'
+  refusal rules and counters of its own.
+- `temporal_shader_source.h`: an ENGINE_MOTION_CORE (no resources) inside the block;
+  `engineReprojectRows` takes the rows as arguments and `engineReproject` is the eye's
+  wrapper over EN/EB, byte for byte the old arithmetic. `tools/temporal_shader_build` emits
+  the core as `kEngineMotionCoreHlsl` (key /2; the build fails on a missing, doubled or
+  resource-bearing core), and screen_motion.cpp compiles it in front of `kScreenMotionPs`.
+- `screen_motion.h`: before the camera term, `sourceEngine` runs enginePixel's tests on the
+  source texel -- cleared, stale (the slot's depth is not the source depth, bit for bit),
+  corrupt (not an odd whole code), out of range, the marker. Kind 1 is carried by
+  `engineReprojectRows` through the source pool draws' own scene constants (this frame's and
+  last: the rows that wrote the depth, the same rule as the eye's EN/EB; in a single-camera
+  source pass they are src/old) to its previous source UV, and the existing mapping through
+  the panel and the previous eye projection does the rest; a previous UV off the source is
+  disocclusion (code 2). Kind 2 returns `(0, 0, z, 2)`; 3, 4 and 5 keep the camera term.
+  engine.z counts the kinds per eye pixel into a UAV at u1 (diagnostics 1 or the view),
+  read back without waiting; engine.y (`advanced.temporal_aa_debug = motion_source`) puts
+  16 + the kind in the map's validity and the compose paints it through the panel.
+- Cost: the slot target is 66.4 MB at 3840x2160 and is cleared once a source frame; MRT6
+  rides the source pass's pool draws; the screen shader adds one texel load a pixel, and a
+  record fetch where a slot is.
+
+**Rig.** engine_velocity_test 938 checks (837 before): `panel_tests.h` drives the production
+screen shader (core in front) on WARP -- a moving joined record (translated, turned 12
+degrees) lands on its CPU-double previous pixel within 4.4e-7 px, (-1.24, -0.25) px against
+the camera term's (0.20, 0.08); masked gives `(0, 0, z, 2)`; unmoved, not-a-rig-record,
+stale, corrupt and cleared keep the camera term; with engine.x clear every texel is today's
+shader; the counts and the view's encoding exact. Lifecycle S1: a pool draw into the named
+source depth (D32_FLOAT_S8X24, 40x24) gets a 40x24 slot target (logged), MRT6 names its slot
+exactly, views from the second frame; re-made at 56x20 it follows; an unnamed depth of the
+same shape gets nothing; 122 frames without the source release it (logged). The corpus
+identity harness is unchanged (the patched shaders are the same; only the bound target
+differs). screen_motion_test 56541 (+2: each source frame names its depth to the engine).
+
+**What the flight must show** (on foot, dlss, diagnostics 1):
+- `engine motion: on-foot source slot target created 3840x2160 R32G32 (66.4 MB) for the
+  source depth ...` once, and `substitution starts ... (on-foot source, vs_...)`.
+- `screen motion: the source pass's engine data is bound ...` once.
+- Each on-foot window: the movers line with `eye-frames N, with MRT6 bound N` non-zero
+  (the source frames are eye-frames) and `engine motion: on foot: source frames N, with MRT6
+  bound N (slot target 3840x2160); screen views asked ~2N, given ~2N ...; panel pixels per
+  eye draw: engine-joined J, masked M, pool surface not a rig record C, stale S, corrupt 0`.
+- After boarding: `on-foot source slot target released (3840x2160, 66.4 MB) ...`.
+- motion_source leg: the drone and the ship green on the panel, walkers red or dim.
+If the new code never runs, the log reads as 114958: no slot-target line, the movers line's
+`eye-frames 0, with MRT6 bound 0`, and no `on foot:` line (or `source frames 0`). Bound but
+never asked: `screen views asked 0`. Asked but refused: the refusal names the reason.

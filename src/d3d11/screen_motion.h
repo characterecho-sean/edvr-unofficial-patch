@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 #include "panel_curve.h"
 struct ID3D11ShaderResourceView;
 namespace edvr {
@@ -51,20 +52,70 @@ ID3D11ShaderResourceView* screenMotionView(int eye,unsigned width,unsigned heigh
 // including the curved mesh and the live panel-distance transform.
 // Recover scene motion inside that image, then place its previous UV on
 // the previous screen. There is no headset approximation in either step.
+//
+// Engine-record motion on foot (docs/kinematic-motion-injection-2026-09-19.md,
+// 2026-09-23 "On foot"): the shader is compiled with the engine-motion CORE in
+// front of it (kEngineMotionCoreHlsl, the text the compose's enginePixel uses;
+// screen_motion.cpp joins them). While engine.x says the source's views are
+// bound, a source pixel whose MRT6 slot holds a certified rig record is
+// carried by the record's own two pose blocks through the source pool draws'
+// own scene constants (this frame's and last: SEN/SEB, the source rows) to
+// its previous source UV; the panel mapping below takes it from there. A rig
+// record EDVR cannot follow keeps no history (code 2); a pool surface that is
+// not a rig record, a stale slot and a corrupt code keep the camera term.
+// engine.y (the motion_source view): the validity carries 16 + that source
+// kind instead, for the compose to paint through the panel. engine.z: count
+// the kinds per eye pixel into PanelCounts (diagnostics).
 constexpr char kScreenMotionPs[]=R"HLSL(
 Texture2D<float> Depth:register(t8);
 ByteAddressBuffer Sizes:register(t9);
 Texture2D<float> UiTransparency:register(t10);
 Texture2D<uint2> SourceStencil:register(t11);
 Texture2D<float4> WeaponMotion:register(t12);
+Texture2D<float2> SourceSlots:register(t13);
+StructuredBuffer<EnginePoolRecord> SourcePool:register(t14);
 cbuffer SourceNow:register(b2){float4 src[276];}
 cbuffer SourceBefore:register(b3){float4 old[276];}
 cbuffer ScreenBefore:register(b4){float4 model[12];}
 cbuffer EyeBefore:register(b5){float4 eye[274];}
-cbuffer Settings:register(b6){float4 shape;float4 extent;}
+cbuffer Settings:register(b6){float4 shape;float4 extent;float4 engine;}
+cbuffer EngineSourceNow:register(b7){float4 SEN[276];}
+cbuffer EngineSourceBefore:register(b8){float4 SEB[276];}
+RWStructuredBuffer<uint> PanelCounts:register(u1);
+// enginePixel's kinds for the source texel q: 0 no engine data, 1 joined
+// (prev = the surface's previous source UV), 2 masked, 3 not a rig record,
+// 4 stale slot, 5 corrupt slot code -- the same tests in the same order.
+uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
+    prev=uv;
+    if(engine.x==0)return 0u;
+    const float2 es=SourceSlots.Load(int3(q,0));
+    // The patched pool shaders write 2 * slot + 1: the cleared -1 and an
+    // untouched texel both fall below 1.
+    if(!(es.x>=1.0))return 0u;
+    if(!(z>0.0) || asuint(z)!=asuint(es.y))return 4u;
+    const uint code=uint(es.x);
+    if(float(code)!=es.x || (code&1u)==0u)return 5u;
+    uint count,stride;SourcePool.GetDimensions(count,stride);
+    const uint slot=code>>1u;
+    if(slot>=count)return 0u;
+    const EnginePoolRecord r=SourcePool[slot];
+    const uint kind=engineRecordKind(r);
+    if(kind!=1u)return kind;
+    float4 before;
+    if(!engineReprojectRows(r,uv*float2(2,-2)+float2(-1,1),z,SEN[270],SEN[271],SEN[272],SEN[273],SEN[275].xyz,
+                            SEB[270],SEB[271],SEB[272],SEB[273],SEB[275].xyz,before))
+        return engineRecordMoved(r)?2u:0u;
+    prev=before.xy/before.w*float2(.5,-.5)+.5;
+    if(all(isfinite(prev)))return 1u;
+    prev=uv;
+    return engineRecordMoved(r)?2u:0u;
+}
+// Under the motion_source view the validity carries the source kind.
+float4 tagged(float4 v,uint kind){return engine.y!=0 && kind!=0u?float4(v.xyz,16.0+kind):v;}
 float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Target {
     uint w,h;Depth.GetDimensions(w,h);
-    float z=Depth.Load(int3(clamp(int2(uv*float2(w,h)),0,int2(w,h)-1),0));
+    const int2 texel=clamp(int2(uv*float2(w,h)),0,int2(w,h)-1);
+    float z=Depth.Load(int3(texel,0));
     bool ui=false;
     if(extent.z>0) {
         // Cover the actual source-filter footprint, including thin strokes.
@@ -85,7 +136,17 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
         prev+=motion.xy/float2(w,h);
         if(any(prev<0) || any(prev>1))return float4(0,0,z,2);
     }
+    uint sk=0u;   // the source-space engine kind of this pixel (sourceEngine)
     if(!ui && !attached) {
+    float2 carried;
+    sk=sourceEngine(texel,uv,z,carried);
+    if(engine.z!=0 && sk!=0u)InterlockedAdd(PanelCounts[sk-1u],1u);
+    // A rig record EDVR cannot follow keeps no history, as in the eye.
+    if(sk==2u)return tagged(float4(0,0,z,2),sk);
+    if(sk==1u) {
+        prev=carried;
+        if(any(prev<0) || any(prev>1))return tagged(float4(0,0,z,2),sk);
+    } else {
     float3 a=float3(src[270].x,src[271].x,src[272].x);
     float3 b=float3(src[270].y,src[271].y,src[272].y);
     float3 c=float3(src[270].w,src[271].w,src[272].w);
@@ -104,7 +165,8 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
     if(before.w<=0 || !all(isfinite(before)))return 0;
     prev=before.xy/before.w*float2(.5,-.5)+.5;
     // Leaving the source image is disocclusion, not an extrapolated panel.
-    if(any(prev<0) || any(prev>1))return float4(0,0,z,2);
+    if(any(prev<0) || any(prev>1))return tagged(float4(0,0,z,2),sk);
+    }
     }
     float2 size=asfloat(Sizes.Load2(0));
     float x=prev.x*2-1,zz=0;
@@ -123,7 +185,11 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
     float2 previous=(clip.xy/clip.w*float2(.5,-.5)+.5)*extent.xy;
     // UI is already composited into the source image. Its visible current
     // samples must not accumulate history along the scenery behind it.
-    return float4(previous-pos.xy,z,ui?3:1);
+    return tagged(float4(previous-pos.xy,z,ui?3:1),sk);
 }
 )HLSL";
+// The screen shader's whole text: the engine-motion core (kEngineMotionCoreHlsl,
+// generated from temporal_shader_source.h) in front of kScreenMotionPs. One
+// function, so production and tools/engine_velocity_test compile the same.
+inline std::string screenMotionPsSource(const char* engineCore) { return std::string(engineCore)+kScreenMotionPs; }
 }

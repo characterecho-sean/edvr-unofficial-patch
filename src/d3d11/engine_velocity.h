@@ -99,8 +99,10 @@ extern std::atomic<bool> live;
 extern DrawCache cache;                        // owner thread only
 extern uint64_t familyDraws[kMaxFamilies];     // owner thread only: draws that ran substituted
 // The resources an open eye-frame's snapshot came from (eye0 pool, eye0
-// scene, eye1 pool, eye1 scene). Identities only, never dereferenced here.
-extern std::atomic<const ID3D11Resource*> watch[4];
+// scene, eye1 pool, eye1 scene, then the on-foot source's pool and scene).
+// Identities only, never dereferenced here.
+constexpr unsigned kWatchSlots = 6;
+extern std::atomic<const ID3D11Resource*> watch[kWatchSlots];
 void beforeDrawSlow(ID3D11DeviceContext*, bool rtv0Eye);
 void noteResourceMapped(const ID3D11Resource*, void* data, int mapType) noexcept;
 void noteResourceWrite(const ID3D11Resource*) noexcept;
@@ -161,5 +163,20 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
 // 50..54): engine-joined, masked, pool-but-not-a-rig-record, stale slot,
 // corrupt slot code.
 void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt);
+// On foot (docs/kinematic-motion-injection-2026-09-19.md, 2026-09-23 "On
+// foot"): the world is drawn into a flat SOURCE image that the 2D screen
+// shows in each eye, and no pool draw targets an eye. screen_motion names the
+// source's depth once per source frame; a pool family draw into that depth is
+// the source pass, which gets MRT6 like an eye pass, into a slot target of the
+// source's own size -- made only while the source is drawn, released when it
+// has not been for kSourceIdleFrames present frames. The views and their
+// refusals follow engineVelocityViews; the screen shader (screen_motion.h)
+// consumes them and hands back its per-eye-draw pixel counts.
+constexpr int kEngineVelocitySourceEye = 2;
+constexpr uint32_t kSourceIdleFrames = 120;
+void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth);
+bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews* out);
+void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
+                                   uint32_t eyeDraws);
 
 }  // namespace edvr

@@ -17,9 +17,13 @@
 // engine laid out as build 332841 (emit_tests.h), the compose's arithmetic
 // from the shipped HLSL text (math_tests.h), the production `mv` entry with
 // engine inputs bound -- joined exact, masked with no history, corrupt/stale/
-// cleared declined (consumer_tests.h), engine_velocity.cpp's draw half
-// linked in and driven through the flight's and the review's cases, plus the
-// temporal pass's compute-state save (lifecycle_tests.h). build.bat links
+// cleared declined (consumer_tests.h), the on-foot path through the
+// production screen shader -- a record carried to its previous source UV and
+// through the panel, the declined kinds on the camera term, the counts and
+// the motion_source encoding (panel_tests.h) -- engine_velocity.cpp's draw
+// half linked in and driven through the flight's and the review's cases and
+// the on-foot source's slot target, plus the temporal pass's compute-state
+// save (lifecycle_tests.h). build.bat links
 // src\d3d11\engine_velocity.cpp with EDVR_ENGINE_VELOCITY_RIG and the binding
 // shadow external; lifecycle_tests.h supplies the stubs.
 #include <windows.h>
@@ -37,6 +41,7 @@
 #include "emit_tests.h"
 #include "math_tests.h"
 #include "consumer_tests.h"
+#include "panel_tests.h"
 #include "corpus_identity.h"
 #include "lifecycle_tests.h"
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
@@ -132,6 +137,7 @@ int wmain(int argc, wchar_t** argv) {
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});
     consumer_tests::run({device.Get(), context.Get(), &check});
+    panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
     if (!corpusRoot.empty()) corpus(device.Get(), context.Get(), corpusRoot);
     std::printf("engine_velocity_test: %u checks passed%s.\n", g_checks, corpusRoot.empty() ? "" : " including the real shader corpus");

@@ -66,11 +66,13 @@ R"HLSL(
 // It is the tag XOR a hash of the record's own two pose blocks, the same
 // hash engine_velocity_emit.h writes. The pose decode and turn() are the
 // pool vertex shaders' own (mesh_motion_shader.h: 1/32767, not 2/65535).
+//
+// The CORE between the two inner markers declares no resource: the on-foot
+// screen shader (screen_motion.h, kScreenMotionPs) is compiled with this same
+// text in front of it -- tools/temporal_shader_build emits it as
+// kEngineMotionCoreHlsl -- and carries source pixels by the same arithmetic.
+// ENGINE_MOTION_CORE_BEGIN
 struct EnginePoolRecord { uint4 data[21]; };
-Texture2D<float2> ES : register(t21);
-StructuredBuffer<EnginePoolRecord> EP : register(t22);
-cbuffer EngineNow : register(b1) { float4 EN[276]; };
-cbuffer EngineBefore : register(b2) { float4 EB[276]; };
 float4 engineQuat(uint2 packed) {
     return float4(packed.x & 65535u, packed.x >> 16, packed.y & 65535u, packed.y >> 16) * (1.0 / 32767.0) - 1.0;
 }
@@ -99,27 +101,31 @@ bool engineRecordMoved(EnginePoolRecord r) {
 }
 // The surface point under ndc at raw depth zr, carried by the record's own
 // engine motion (current pose -> the previous pose EDVR wrote) and projected
-// by last frame's clip rows. False when either frame's rows are not the pool
-// families' encoding (constant clip z, zero z column) or are degenerate.
-bool engineReproject(EnginePoolRecord r, float2 ndc, float zr, out float4 before) {
+// by last frame's clip rows. n0..n3 and nCam are this frame's rows 270..273
+// and 275 of the scene constants the pool draw read, b0..b3 and bCam last
+// frame's. False when either frame's rows are not the pool families'
+// encoding (constant clip z, zero z column) or are degenerate.
+bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
+                         float4 n0, float4 n1, float4 n2, float4 n3, float3 nCam,
+                         float4 b0, float4 b1, float4 b2, float4 b3, float3 bCam, out float4 before) {
     before = 0;
-    if (EN[270].z != 0.0 || EN[271].z != 0.0 || EN[272].z != 0.0 || EN[273].w != 0.0 || !(EN[273].z > 0.0) ||
-        EB[270].z != 0.0 || EB[271].z != 0.0 || EB[272].z != 0.0 || EB[273].w != 0.0 || !(zr > 0.0))
+    if (n0.z != 0.0 || n1.z != 0.0 || n2.z != 0.0 || n3.w != 0.0 || !(n3.z > 0.0) ||
+        b0.z != 0.0 || b1.z != 0.0 || b2.z != 0.0 || b3.w != 0.0 || !(zr > 0.0))
         return false;
-    // This frame: clip.xyw = world.x*EN[270] + world.y*EN[271] + world.z*EN[272] + EN[273]
-    // with clip.w = the view depth = EN[273].z / zr. Solve the x, y, w rows.
-    const float z = EN[273].z / zr;
-    const float3 a = float3(EN[270].x, EN[271].x, EN[272].x);
-    const float3 b = float3(EN[270].y, EN[271].y, EN[272].y);
-    const float3 c = float3(EN[270].w, EN[271].w, EN[272].w);
+    // This frame: clip.xyw = world.x*n0 + world.y*n1 + world.z*n2 + n3 with
+    // clip.w = the view depth = n3.z / zr. Solve the x, y, w rows.
+    const float z = n3.z / zr;
+    const float3 a = float3(n0.x, n1.x, n2.x);
+    const float3 b = float3(n0.y, n1.y, n2.y);
+    const float3 c = float3(n0.w, n1.w, n2.w);
     const float3 ca = cross(b, c), cb = cross(c, a), cc = cross(a, b);
     const float det = dot(a, ca);
     if (!(abs(det) > 1e-12) || !isfinite(det)) return false;
-    const float3 rhs = float3(ndc * z - EN[273].xy, z);
-    const float3 world = (ca * rhs.x + cb * rhs.y + cc * rhs.z) / det;   // less EN[275]
-    float3 prevWorld;                                                    // less EB[275]
+    const float3 rhs = float3(ndc * z - n3.xy, z);
+    const float3 world = (ca * rhs.x + cb * rhs.y + cc * rhs.z) / det;   // less nCam
+    float3 prevWorld;                                                    // less bCam
     if (!engineRecordMoved(r)) {
-        prevWorld = world + (EN[275].xyz - EB[275].xyz);                 // did not move: the camera term
+        prevWorld = world + (nCam - bCam);                               // did not move: the camera term
     } else {
         const float scaleNow = asfloat(r.data[0].y), scalePrev = asfloat(r.data[19].y);
         const float4 qNow = engineQuat(r.data[0].zw), qPrev = engineQuat(r.data[19].zw);
@@ -129,12 +135,22 @@ bool engineReproject(EnginePoolRecord r, float2 ndc, float zr, out float4 before
         const float3 ix = cross(my, mz), iy = cross(mz, mx), iz = cross(mx, my);
         const float mdet = dot(mx, ix);
         if (!(abs(mdet) > 1e-30) || !isfinite(mdet)) return false;
-        const float3 local = world - (asfloat(r.data[1].xyz) - EN[275].xyz);   // scale * turn(qNow, v), as the VS formed it
+        const float3 local = world - (asfloat(r.data[1].xyz) - nCam);   // scale * turn(qNow, v), as the VS formed it
         const float3 v = float3(dot(ix, local), dot(iy, local), dot(iz, local)) / mdet;
-        prevWorld = (asfloat(r.data[18].yzw) - EB[275].xyz) + scalePrev * engineTurn(qPrev, v);
+        prevWorld = (asfloat(r.data[18].yzw) - bCam) + scalePrev * engineTurn(qPrev, v);
     }
-    before = prevWorld.x * EB[270] + prevWorld.y * EB[271] + prevWorld.z * EB[272] + EB[273];
+    before = prevWorld.x * b0 + prevWorld.y * b1 + prevWorld.z * b2 + b3;
     return before.w > 0.0 && all(isfinite(before));
+}
+// ENGINE_MOTION_CORE_END
+Texture2D<float2> ES : register(t21);
+StructuredBuffer<EnginePoolRecord> EP : register(t22);
+cbuffer EngineNow : register(b1) { float4 EN[276]; };
+cbuffer EngineBefore : register(b2) { float4 EB[276]; };
+// The eye path: this eye's own scene constants, this frame's and last.
+bool engineReproject(EnginePoolRecord r, float2 ndc, float zr, out float4 before) {
+    return engineReprojectRows(r, ndc, zr, EN[270], EN[271], EN[272], EN[273], EN[275].xyz,
+                               EB[270], EB[271], EB[272], EB[273], EB[275].xyz, before);
 }
 // ENGINE_MOTION_HLSL_END
 )HLSL"
@@ -1452,13 +1468,22 @@ R"HLSL(
             // surface that is not a rig record (the camera term), yellow for a
             // slot whose recorded depth is not the pixel's (stale: a later
             // draw changed it), magenta for a slot code arithmetic reached
-            // (declined); the frame dimmed elsewhere (the camera term).
+            // (declined); the frame dimmed elsewhere (the camera term). On
+            // foot the same colours come through the panel: the screen map's
+            // validity carries 16 + the SOURCE-space kind under this view
+            // (screen_motion.h), and an eye pixel showing the 2D screen is
+            // painted by the kind of the source pixel it shows.
             float3 o6 = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
-            if (engineKind == 1u) o6 = float3(0.0, 1.0, 0.0);
-            else if (engineKind == 2u) o6 = float3(1.0, 0.0, 0.0);
-            else if (engineKind == 3u) o6 = float3(0.0, 0.3, 1.0);
-            else if (engineKind == 4u) o6 = float3(1.0, 1.0, 0.0);
-            else if (engineKind == 5u) o6 = float3(1.0, 0.0, 1.0);
+            uint k6 = engineKind;
+            if (k6 == 0u && (uint(probe.w + 0.5) & 32u) != 0u) {
+                const float sw6 = Screen.Load(int3(region.xy + int2(p), 0)).w;
+                if (sw6 >= 16.0) k6 = uint(sw6) - 16u;
+            }
+            if (k6 == 1u) o6 = float3(0.0, 1.0, 0.0);
+            else if (k6 == 2u) o6 = float3(1.0, 0.0, 0.0);
+            else if (k6 == 3u) o6 = float3(0.0, 0.3, 1.0);
+            else if (k6 == 4u) o6 = float3(1.0, 1.0, 0.0);
+            else if (k6 == 5u) o6 = float3(1.0, 0.0, 1.0);
             paintDebug(id.xy, size, o6);
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
@@ -1797,9 +1822,14 @@ R"HLSL(
                 o = float3(1.0, 0.0, 1.0);
             }
         } else if (split.y == 6.0) {
-            // The motion-source view, as the mv entry paints it.
+            // The motion-source view, as the mv entry paints it (the panel's
+            // source-space kind included).
             float2 eP6; float eZ6;
-            const uint ek6 = enginePixel(float2(ci), jit.xy, eP6, eZ6);
+            uint ek6 = enginePixel(float2(ci), jit.xy, eP6, eZ6);
+            if (ek6 == 0u && (uint(probe.w + 0.5) & 32u) != 0u) {
+                const float sw6 = Screen.Load(int3(region.xy + ci, 0)).w;
+                if (sw6 >= 16.0) ek6 = uint(sw6) - 16u;
+            }
             o = ek6 == 1u ? float3(0.0, 1.0, 0.0) : ek6 == 2u ? float3(1.0, 0.0, 0.0)
               : ek6 == 3u ? float3(0.0, 0.3, 1.0) : ek6 == 4u ? float3(1.0, 1.0, 0.0)
               : ek6 == 5u ? float3(1.0, 0.0, 1.0) : cur.rgb * 0.25;

@@ -24,6 +24,12 @@
 //       and at the frame boundary; MRT6 exact under an additive game state.
 //   F3  a depth that is not 32-bit float: MRT6 refused (counted), nothing
 //       given; a new depth pair: the slot target re-created (logged), given.
+//   S1  on foot (2026-09-23): a pool draw into the source depth screen_motion
+//       names gets MRT6 into a slot target of the SOURCE's size (created,
+//       logged; re-created when the source is re-made at another size);
+//       the screen's views given from the second frame; an unnamed depth of
+//       the same shape gets nothing; kSourceIdleFrames without the source
+//       release it (logged).
 //   R6  the emit hook not installed: STOOD DOWN at configure and in the 30 s
 //       block, no substitution, every view refused; installed: stands up.
 //   R5  CsStageSave (cs_stage_save.h): sentinels in every compute slot the
@@ -157,6 +163,12 @@ struct Game {
     std::vector<shader_tests::Record> pool;
     std::vector<float> rows[2];   // cb1 contents per eye (rows 270..275 differ)
     uint32_t frame = 100;
+    // The on-foot source (S1): a depth and colour set of its own size, NOT an
+    // eye depth -- the fake depth probe never names it.
+    ComPtr<ID3D11Texture2D> sourceColour[4], sourceDepth;
+    ComPtr<ID3D11RenderTargetView> sourceRtv[4];
+    ComPtr<ID3D11DepthStencilView> sourceDsv;
+    UINT sourceW = 0, sourceH = 0;
 
     explicit Game(const Harness& harness) : h(harness), dev(harness.device), ctx(harness.context) {}
 
@@ -242,6 +254,66 @@ float4 main(PsIn i) : SV_Target0 { return float4(i.uv, 1, 1); }
         h.check(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &depth[eye])), "life: depth");
         h.check(SUCCEEDED(dev->CreateDepthStencilView(depth[eye].Get(), nullptr, &dsv[eye])), "life: DSV");
         lifecycle_fake::g_eyeDsv[eye] = dsv[eye].Get();
+    }
+
+    // The on-foot source: D32_FLOAT_S8X24 like the flight's #28, any size.
+    void makeSource(UINT w, UINT hgt) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w; td.Height = hgt; td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        for (int i = 0; i < 4; ++i) {
+            sourceColour[i].Reset(); sourceRtv[i].Reset();
+            h.check(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &sourceColour[i])), "life: source colour");
+            h.check(SUCCEEDED(dev->CreateRenderTargetView(sourceColour[i].Get(), nullptr, &sourceRtv[i])), "life: source RTV");
+        }
+        td.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        sourceDepth.Reset(); sourceDsv.Reset();
+        h.check(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &sourceDepth)), "life: source depth");
+        h.check(SUCCEEDED(dev->CreateDepthStencilView(sourceDepth.Get(), nullptr, &sourceDsv)), "life: source DSV");
+        sourceW = w; sourceH = hgt;
+    }
+    // The source pass as the game draws it on foot: rtv0 is no eye target.
+    void sourcePass(int count = 1, UINT instance = 5) {
+        const float black[4] = {};
+        for (auto& r : sourceRtv) ctx->ClearRenderTargetView(r.Get(), black);
+        ctx->ClearDepthStencilView(sourceDsv.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.0f, 0);
+        ID3D11RenderTargetView* r[4] = {sourceRtv[0].Get(), sourceRtv[1].Get(), sourceRtv[2].Get(), sourceRtv[3].Get()};
+        ctx->OMSetRenderTargets(4, r, sourceDsv.Get());
+        shadow(BindSlot::Rtv0, r[0]);
+        shadow(BindSlot::Dsv0, sourceDsv.Get());
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        D3D11_VIEWPORT vp{0, 0, float(sourceW), float(sourceH), 0, 1};
+        ctx->RSSetViewports(1, &vp);
+        ctx->RSSetState(raster.Get());
+        ctx->IASetInputLayout(layout.Get());
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ID3D11Buffer* vbs[2] = {vertices.Get(), instanceBuffer.Get()};
+        UINT strides[2] = {12, 8}, offsets[2] = {0, 0};
+        ctx->IASetVertexBuffers(0, 2, vbs, strides, offsets);
+        setVs();
+        for (int i = 0; i < count; ++i) {
+            edvr::engineVelocityBeforeDraw(ctx, false);
+            ctx->DrawInstanced(4, 1, 0, instance == 9 ? 1 : 0);
+        }
+    }
+    // An on-foot frame: screen_motion names the source, the game draws it.
+    void sourceFrame(bool named = true) {
+        beginFrame();
+        if (named) edvr::engineVelocityNoteSource(sourceDepth.Get());
+        writeScene(sceneA.Get(), rows[0]);
+        sourcePass();
+    }
+    bool sourceViews(edvr::EngineVelocityViews* out = nullptr) {
+        edvr::EngineVelocityViews v{};
+        const bool given = edvr::engineVelocitySourceViews(sourceDepth.Get(), &v);
+        if (out) *out = v;
+        else {
+            if (v.slots) v.slots->Release();
+            if (v.pool) v.pool->Release();
+            if (v.sceneNow) v.sceneNow->Release();
+            if (v.scenePrev) v.scenePrev->Release();
+        }
+        return given;
     }
 
     // --- The game's calls, each with the shadow update its hook makes ---------
@@ -702,6 +774,77 @@ inline void run(const Harness& h) {
     h.check(e0 && e1, "F3: a new depth pair gives again");
     h.check(logged("eye 0 slot target re-created 32x32", mark), "F3: the slot target's re-creation is logged");
 
+    // S1: the on-foot source (2026-09-23 "On foot"). A pool draw into the
+    // depth screen_motion names -- not an eye's, rtv0 not an eye target --
+    // gets MRT6 into a slot target of the SOURCE's size (chosen by the depth,
+    // never assumed), logged once; the screen shader's views are given from
+    // the second frame; the target follows a re-made source; an unnamed depth
+    // of the same shape gets nothing; and kSourceIdleFrames frames without the
+    // source release it (logged).
+    mark = g_log.size();
+    g.makeSource(40, 24);
+    g.sourceFrame();
+    h.check(!g.sourceViews(), "S1: the first source frame has no previous scene constants: nothing given");
+    g.endFrame();
+    h.check(logged("on-foot source slot target created 40x24 R32G32 (0.0 MB)", mark),
+            "S1: the source's slot target is created at the source's own size, logged with its size");
+    g.sourceFrame();
+    {
+        edvr::EngineVelocityViews v{};
+        h.check(g.sourceViews(&v), "S1: the second source frame gives the screen shader its views");
+        ComPtr<ID3D11Resource> slotsRes;
+        v.slots->GetResource(&slotsRes);
+        ComPtr<ID3D11Texture2D> slotsTex;
+        h.check(SUCCEEDED(slotsRes.As(&slotsTex)), "S1: a slot texture");
+        D3D11_TEXTURE2D_DESC sd{};
+        slotsTex->GetDesc(&sd);
+        h.check(sd.Width == 40 && sd.Height == 24 && sd.Format == DXGI_FORMAT_R32G32_FLOAT, "S1: the slot target is 40x24 R32G32");
+        UINT w = 0, wd = 0;
+        const auto slots = readTexture(h, slotsRes.Get(), 2, &w);
+        const auto depth = readTexture(h, g.sourceDepth.Get(), 2, &wd);   // D32_FLOAT_S8X24: depth, then stencil
+        unsigned exact = 0, other = 0;
+        for (size_t i = 0; i < slots.size() / 2; ++i) {
+            uint32_t s = 0;
+            const int kind = shader_tests::decodeSlot(slots[i * 2], slots[i * 2 + 1], depth[i * 2], &s);
+            if (kind == 1 && s == 5) ++exact;
+            else if (kind == 1 || kind == 5) ++other;
+        }
+        h.check(exact > 0 && other == 0, "S1: the source's MRT6 names slot 5, exactly, at the source depth drawn");
+        release(v);
+        h.check(!g.views(0) && !g.views(1), "S1: on foot the eyes get nothing: their passes drew no pool draw");
+    }
+    g.endFrame(true);
+    line = lastLine("engine motion: on foot:", mark);
+    h.check(number(line, "source frames ") >= 2 && number(line, "with MRT6 bound ") >= 2,
+            "S1: the on-foot line counts the source frames, MRT6 bound in each");
+    h.check(number(line, "screen views asked ") >= 2 && number(line, "given ") >= 1, "S1: and the screen's views asked and given");
+    h.check(number(lastLine(joined, mark), "eye-frames ") >= 2 && number(lastLine(joined, mark), "with MRT6 bound ") >= 2,
+            "S1: the movers line's eye-frames include the source's, bound");
+    // The source re-made at another size: the slot target follows it.
+    mark = g_log.size();
+    g.makeSource(56, 20);
+    g.sourceFrame();
+    g.endFrame();
+    g.sourceFrame();
+    h.check(g.sourceViews(), "S1: a re-made source gives again");
+    g.endFrame();
+    h.check(logged("on-foot source slot target re-created 56x20", mark), "S1: the slot target follows the source's size");
+    // A depth of the source's shape that screen_motion did not name: nothing.
+    {
+        g.makeSource(56, 20);   // new textures; the engine still holds the named one
+        g.sourceFrame(false);
+        ComPtr<ID3D11PixelShader> bound;
+        h.context->PSGetShader(&bound, nullptr, nullptr);
+        h.check(bound.Get() == g.ps.Get(), "S1: a pool draw into an unnamed depth is not substituted");
+        h.check(!g.sourceViews(), "S1: and an unnamed depth gets no views");
+        g.endFrame();
+    }
+    // kSourceIdleFrames frames without the source: released.
+    mark = g_log.size();
+    for (uint32_t i = 0; i < edvr::kSourceIdleFrames + 2; ++i) { g.beginFrame(); g.endFrame(); }
+    h.check(logged("on-foot source slot target released (56x20", mark), "S1: the slot target is released when the source stops");
+    h.check(!g.sourceViews(), "S1: released, nothing is given");
+
     // R6: the emit hook not installed -> STOOD DOWN, no substitution, nothing given.
     mark = g_log.size();
     lifecycle_fake::g_hookLive = false;
@@ -741,7 +884,8 @@ inline void run(const Harness& h) {
     edvr::g_clockForTest = nullptr;
     if (g_verbose) for (const auto& l : g_log) std::printf("    log| %s\n", l.c_str());
     std::printf("  lifecycle: engine_velocity.cpp's draw half on WARP -- re-maps, interleaved eyes, source swaps, pool "
-                "writes, blend states, depth formats, stand-down: every case as specified (%zu log lines)\n", g_log.size());
+                "writes, blend states, depth formats, the on-foot source's slot target, stand-down: every case as "
+                "specified (%zu log lines)\n", g_log.size());
 }
 
 }  // namespace lifecycle_tests
