@@ -9,32 +9,31 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 ## Status
 
 - **State (2026-09-23):** `fix.settlement_detail` SHIPS as a fix, default
-  `auto` (live in edvr.ini, F8 Performance page), k_max 6.0 (1..8), with a
-  cockpit gate (k = 1 on foot, per Status.json) and a policy that counts
-  misses: on the latest 30 samples, up while 3 or more ran > 0.3 ms past
-  the period (0.25 if their mean ran > 1.0 ms over, else 0.05), down 0.05
-  when none did with 1 ms to spare, hold between; the HUD's CPU is the
-  caller work per cycle. That policy is NOT FLOWN (section 9's addendum,
-  (5)). The 04:23 flight (fd25af9, s 1.0) ramped 1 -> 2.50 in six 0.25
-  steps but over 15 s, paced by the old trigger (30 consecutive over-budget
-  samples), then held k 2.50 for 30 s while 534 of 1712 samples missed
-  their slot (mean work 10.99 ms against 11.11, median cycle 21.6 ms at
-  56 fps), because such a run never came. The first acting flight (03:30,
-  b55e06b, s 1.5) worked: k 1 -> 2.70 in 80 s, ~50 -> 71-75 fps, 0 faults,
-  0 disagreements. Mechanism: a bracket on the setter FUN_142819D90
-  (section 9); the shadow flights: section 8.
+  `auto` (live in edvr.ini, F8 Performance page), k_max 6.0 (1..8), cockpit
+  only (k = 1 on foot). Since refinement 4b and the review's fixes (section
+  9 part (6), NOT FLOWN): a decision a second on that second's cycles with
+  FRESH timing (older than 2 s expires; k holds); a cycle > 1.5 periods took
+  two slots, classed GPU-bound / unexplained / the CPU's; up while a tenth
+  are the CPU's (0.25 at a quarter or > 1 ms over, else 0.05); a kick to
+  k_max after 10 s, a trial restored if its fifth second still misses; down
+  0.05 after 5 clean seconds, a trial restored within 10 s, the wait
+  doubling; inert after up steps with no benefit (passed parts < 1%, caller
+  work < 0.2 ms); at k_max an outcome line; back aboard, the k from before
+  on foot in one step. Flights: 03:30 (b55e06b, s 1.5) k 1 -> 2.70 in 80 s,
+  ~50 -> 71-75 fps; 04:23 a third of the frames took two slots at a mean at
+  the period, no step; 05:05 (reduced, k 6.00) two slots a cycle at 45-56
+  fps (the half-rate trap); 05:53 (close range) k 6 in ~83 s dropped ~4 of
+  4,800 parts, inert; 06:53 re-boarding re-ramped from 1 and flickered.
+  Review: reviews/lod-governor-review-2026-09-23.md (main, gitignored).
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
-  +0x550 = 1/fy, the tangent of one pixel (0.000834297 here), B = +0x560
-  = 0 for the eyes: the part's sphere spans at least one pixel; (2) the
+  +0x550 = 1/fy (0.000834297 here), B = +0x560 = 0 for the eyes; (2) the
   frustum (FUN_1404F4E10); (3) `f = A*(d - r)*s + B <= t0`, s = ctx+0x30,
-  t0 the first float of the part's 0x80-byte LOD table (*(entry+8)). The
-  LOD nibble is the first i with f <= t[i+1].
-- **Reproduction:** (1)+(2) exact over all 109,291 rows: 0 engine passes
-  they reject. 8,355 engine rejects (2,352 in frame 2's eye rows) pass
-  both: class (3), the unrecorded table. The rows fit one monotone table
-  per model (3,511 models, 0 t0 conflicts, 0 nibble inversions); no global
-  table fits. Nibbles and t0 are data, not reproducible.
+  t0 the first float of the part's 0x80-byte LOD table. The LOD nibble is
+  the first i with f <= t[i+1].
+- **Reproduction:** (1)+(2) exact over all 109,291 rows; 8,355 engine
+  rejects pass both: class (3), the unrecorded table. One monotone table
+  per model fits (3,511 models, 0 conflicts); no global one does.
 - **Slider:** LODDistanceScale acts only on s: ctx+0x30 = 2 -
   LODDistanceScale above its floor; the engine holds s = 1.5 at 0.001
   (reader run 012514), so the slider saturates at 1.5. +0x550/+0x560 are
@@ -52,21 +51,21 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 | 8 | 613, 3.36%, 0.21/0.29 | 18..11,493 (0.1..62.9%) |
 | 10.46 (0.25 deg cap) | 1,089, 5.96%, 0.38/0.51 | 82..13,033 |
 
-- **LOD distance, now EXACT** (the v3 tables from reader run 012514,
-  keyed by effective s x k on top of the game's s; section 8): 1.875 ->
-  318 draws, 1.9%; 2.25 -> 1,123, 6.7%; 3.0 -> 3,222, 19.2% (1.21 ms);
-  4.5 -> 5,634, 33.5% (2.11 ms); 6.0 -> 33.7%. It levels off near 34%:
-  the building shells' tables (t0 21.38) never drop.
+- **LOD distance, EXACT** (the v3 tables, reader run 012514, keyed by s x
+  k; section 8): 1.875 -> 318 draws, 1.9%; 2.25 -> 1,123, 6.7%; 3.0 ->
+  3,222, 19.2% (1.21 ms); 4.5 -> 5,634, 33.5% (2.11 ms); 6.0 -> 33.7%. It
+  levels off near 34%: the building shells' tables (t0 21.38) never drop.
 - **Visual cost** (section 5): the screen-size half removes only parts
-  under k pixels (every k <= 10.46 keeps them under 0.25 deg); the t0 half
-  has no such cap (at k = 1.25 already 0.74 deg and a 4.2 m radius).
+  under k pixels; the t0 half has no such cap (at k = 1.25 already 0.74
+  deg and a 4.2 m radius).
 - **LOD shift is draw-neutral here** (99.0% of admitted eye parts at nibble
-  3 or 4, identical meshes in 149 of 151 models); Leg C's LODDistanceScale
-  0.001 left 18.9k eye draws: not a draw lever there (section 6).
-- **Open:** the miss-counting policy's first flight (section 9's last list).
-- **Ruled out:** see section 6 and section 9 (the builder-site write).
+  3 or 4); Leg C's LODDistanceScale 0.001 left 18.9k eye draws (section 6).
+- **Open:** the first flight of part (6) (section 9's last list).
+- **Ruled out:** section 6 (the mean as the miss signal and the step size,
+  the sliding window, the dropped count as the inert test) and section 9.
 - **Next:** fly the shipped default parked at Cranfield with the in-game
-  detail slider at its default; disembark and board once.
+  detail slider at its default, then close to the buildings; disembark and
+  board once.
 
 ## 1. The test and what the decompile leaves undefined
 
@@ -179,6 +178,24 @@ ruled out: the perf monitor's CPU figure as evidence the frame fits,
 because it is the pre-submit phase only (applicationMs): 7-8 ms on the
 HUD while the caller thread worked 11.7-12.7 ms a cycle and fps sat at
 50-55 (shadow flight 2).
+ruled out: 30 consecutive over-budget samples as the governor's trigger,
+because with a third of the frames missing their slot such a run never
+comes (04:23: k held at 2.50 for 30 s while 534 of 1712 samples ran over).
+ruled out: a threshold on the mean caller work as the miss signal, because
+a mean at the period hides a third of the frames taking two slots (04:23),
+and at half rate the game's own work grows ~1.2 ms so the mean cannot say
+whether the frame would fit at full rate (05:05).
+ruled out: a sliding 30-sample window read every frame as the trigger,
+because scattered two-slot cycles creep k up (3% at random fired it 19
+times a minute in the rig); a decision a second on that second's own
+cycles fires 0 times in 300 s at 3%.
+ruled out: the all-sample mean as the up step's size, because good frames
+cancel bad ones: 31% misses at a mean near the period took eleven 0.05
+steps (the review of 2026-09-23, finding 2).
+ruled out: the dropped-part count as the test of an inert lever, because
+whole records culled upstream never reach the part observer and a nibble
+change cuts work without dropping a part (the review); the benefit test
+reads the parts passed at EDVR's scale and the caller work.
 
 ## 7. Sources
 
@@ -767,28 +784,174 @@ fall as k rises, so k should settle where they are rare -- a percent or
 two, with more detail removed than a 10% target implies. A fresh window
 per decision, or a higher count, would move that; not changed here.
 
+**(6) Refinements 4 and 4b, and the review: the slot, once a second,
+measured** (after the 05:05 and 05:53 flights, and the independent review
+of 6964c31, `reviews/lod-governor-review-2026-09-23.md` in the main
+checkout, gitignored). The evidence. 05:05 (build 8ce12926, the slider at
+its default; the mode had persisted as `reduced` from the F8 menu, so k sat
+at 6.00; the overseer's reading): in the cockpit the caller work averaged
+11.0-12.1 ms with 31-62% of samples over the period, the GPU 5-8 ms, and
+the runtime's median cycle was two slots (45-56 fps) for four windows; at
+03:45 at the same spot k 2.65-3.0 gave 90 Hz at 10.9-11.6 ms. Two
+mechanisms: (a) the trap -- at half rate the game's own per-frame work
+grows ~1.2 ms, so a frame that fits at 90 does not fit at 45, and the
+compositor needs a run of fitting frames before it returns; (b) the lever
+saturates at s x k ~6. 05:53 (close to the buildings): k climbed to 6 in
+about 83 s and dropped about 4 of 4,800 passed parts a frame -- the lever
+inert at that view. The review found in 6964c31: decisions on old samples
+(a frozen or lost timing feed climbed k 1.25 -> 2.75 in 6.6 s on the same
+30 samples), the step's size from the all-sample mean (31% misses at a
+mean near the period took eleven 0.05 steps), upward drift from a window
+read every frame, recovery on a third of a second of good frames; and that
+a dropped-part count cannot show the lever inert (whole records culled
+upstream never reach the part observer; a nibble change cuts work without
+dropping a part). As built (lodgov::Policy, the boundary, readWork):
+1. Fresh evidence. A timing sample counts once, at the boundary that
+   first sees its new sequence, and only if captured within 2 s. A lost
+   lease, an invalid frame, a sample already older than 2 s, a sequence
+   unchanged for more than 2 s, or a change of the timing generation,
+   source or display period EXPIRES the evidence: the ring and the second
+   in progress go, the runs restart, k holds. The summary counts `no fresh
+   timing on N frames, E expiries`.
+2. The slot. One QueryPerformanceCounter read a boundary; a cycle longer
+   than 1.5 periods took two slots. It is GPU-bound when the application's
+   GPU render time (the newest valid gpu_frame_timing sample, at most 2 s
+   old) was at least the period - 0.5 ms; else unexplained when the caller
+   work was under the period - 0.3 ms (the GPU under that or unknown); else
+   the CPU's. Only the CPU's trigger; the others are counted per second,
+   per summary and in the ceiling line, and neither class is called
+   LOD-fixable or LOD-inelastic.
+3. Once a second: the cycles completed in each second of wall time with a
+   fresh sample; fewer than 20 decide nothing and break no run. A second
+   triggers when a tenth of its cycles were the CPU's misses. Up (a frame
+   with >= 200 records): 0.25 when a quarter or more were, or the second's
+   mean caller work ran more than 1.0 ms over; else 0.05, and 0.05 always
+   within 0.25 below a remembered working point.
+4. The kick, a trial -- the one kick rule (refinement 4's first, 3eacf58,
+   never flew). Ten triggering seconds in a row below k_max put k at k_max
+   at once, at most one per 30 s, never in reduced. If the fifth second at
+   k_max still triggers, the pre-kick k comes back at once (`restored k X
+   after a failed kick`) and no kick follows for 60 s; if not, five clean
+   seconds at a time bring k back 0.25 to the pre-kick k + 0.25 (unless a
+   second triggers again), then 0.05.
+5. Down, a trial, and the working point. After five clean seconds in a row
+   (no two-slot cycle of any kind, the mean more than 1.0 ms under): 0.05
+   (0.25 while relaxing after a kick). The k before it is the working
+   point: a second that triggers within 10 s restores it at once
+   (`restored k 3.25 after a failed recovery trial`) and doubles the clean
+   seconds the next trial waits for -- 5, 10, 20, 40, 60. A step down that
+   holds 60 s without a trigger puts the wait back at 5, counted from the
+   step: counted from the last trigger, every 60-second wait would reset
+   itself and the cap would never hold. Triggering at or above the working
+   point forgets it.
+6. Benefit, and the inert lever. Each up step is measured: the parts
+   passed at EDVR's scale a frame, both eyes (acting, the engine's own
+   passes; observing, those less the shadow's would-drop), and the caller
+   work, over the 30 frames and samples after it against the 30 before.
+   No benefit when the passed parts move less than 1% (judged at 200 a
+   frame or more) and the caller work falls less than 0.2 ms; unknown when
+   either side cannot be judged, never a reason to hold. Two such 0.25
+   steps in a row, or four 0.05 steps, and the lever is inert at this
+   view: no up step and no kick (a held second restarts the kick's run),
+   said once with the run's figures; one step is retried 30 s after the
+   hold or the last retry, or at once when the parts tested a frame move
+   more than 20%, and a retry with a benefit re-arms (`the LOD lever
+   responds again`). Down still applies.
+7. The outcome at k_max. Five triggering seconds in a row there: once a
+   summary window, `at the ceiling (k, s x k) and still missing N of the
+   last 30 display slots (C the CPU's, G GPU-bound, U unexplained): outcome
+   X; caller work M ms mean, GPU G ms` (`: the GPU is the wall` when it is
+   the larger), X one of `target reached`, `residual benefit`, `no observed
+   benefit` (these two with the last step's figures) or `unknown (no fresh
+   evidence)`. The summary gives the outcome while k is at k_max. Nothing
+   acts on it.
+8. Kept: without caller work (timing v3/v4) auto holds, said once and in
+   each summary; in at 200 records, out after 30 frames under 150 (k 1 at
+   once). The summary now counts a settlement's frames at 150-199 records,
+   and the rig pins today's behaviour when the lever itself cuts the
+   records (680 at k 1 to 140 at k 2: k resets and the ramp repeats, 6
+   resets in 30 s); no flight has shown it.
+9. Back aboard (after the 06:53 flight: re-boarding from on foot, every
+   settlement structure flickered -- the gate's release re-ramped k 1 -> 5
+   in ~20 s at the default slider, 0.25 a step, popping LOD levels across
+   the whole settlement at each). On foot k is still 1 at once, but the k
+   in force when the hold began is kept; aboard, a frame with 200 records
+   within 5 s brings it back in one step, `back aboard: k restored to 3.45
+   (held on foot 1843 frames)`, no ramp; no such frame within 5 s and it
+   starts from 1 as before. A hold that begins at 1 keeps the pending k;
+   reduced's own jump to k_max does the same work there.
+
+Lines: the policy is two lines after the configure line (`auto's policy,
+decided once a second ...`, `auto's trials: ...`); `up 0.25: 91 of 91
+cycles in the last second took two display slots as the CPU's (0
+GPU-bound, 0 unexplained), their mean caller work 3.29 ms over (a quarter
+or more the CPU's: the coarse step)`; `down 0.05: 5 clean seconds in a row
+(...); a trial: k 2.00 comes back if a second triggers within 10 s`;
+`kick: 10 seconds in a row ...: from the pre-kick k 1.45 to k_max 2.00
+...; a trial, judged on the fifth second at k_max`; the two restores; `the
+LOD lever is inert at this view: no observed benefit: passed parts 500 ->
+500 a frame, caller work 12.90 -> 12.90 ms across two 0.25 steps; holding
+k 1.50 (...)`; and a second summary line, `decisions: slots missed N of S
+(the CPU's C, GPU-bound G, unexplained U); kicks K; restores R (F after a
+failed kick); the next recovery trial after W clean seconds; inert holds H
+(retries, re-armed); at EDVR's scale passed P, dropped D parts a frame; at
+the ceiling with misses T s (at k_max now: X)`. Longest line 950 of 1166.
+
+Rig (229 checks): the trigger's line at 90 Hz, 8 of 82 hold and 9 of 81
+step; at a mean at the period 17 of 73 step 0.05 and 21 of 69 (a quarter)
+0.25; 30% misses at the period whatever k: 0.25 a second to 3.25, the kick
+at the 10th second, restored at the 15th, k_max again at the 26th, spent at
+the 31st (no part tests: outcome unknown); 15% misses with k_max 8: kicks
+at seconds 10 and 75, the failed first blocking the next 60 s; every cycle
+two slots at 12.9 ms until 2.50: six 0.25 steps, no kick; a kick from 2.90
+whose trial passes: 12 relaxing steps to 3.15 in 60.0 s, then 0.05; failed
+recovery trials restore 3.25 at once, the waits 5, 10, 20, 40, 60, 60; a
+failed relaxing step restores 5.75 and ends the relaxation; the GPU at
+11.5 ms never triggers, at 6 ms with the caller work over it does, as with
+no GPU sample; the caller work 0.5 ms under is unexplained; v3/v4 hold; two
+0.25 steps moving neither figure hold, a retry 30 s on without a benefit
+keeps the hold, a 25% change in the parts tested retries at once, a retry
+past a plateau (passed parts -17%) re-arms; four 0.05 steps without a
+benefit hold; 3% fewer passed parts a step, or the caller work 0.25 ms
+lower a step, keep stepping; no part tests: unknown, the steps go on;
+random two-slot cycles at 3% for 300 s: no step; at 10% for 60 s: 23 steps
+in 59 seconds (at exactly the trigger's rate a second's count straddles
+the line); the flight's slope (12.9 ms at k 1, 10.6 at 2.70): five 0.25
+steps to 2.25 (11.21 ms) by 5.0 s, no kick -- refinement 4b alone kicked
+there at 10 s from 2.05 and relaxed only to 3.00, where 1 ms of headroom
+ends; the review's four rows (its lines 237-240: a frozen sequence, an
+inactive source, a sequence already 3 s old, an explicit invalid source)
+all hold k at 1.25 through 6.6 s, each expiring the evidence once; back
+aboard, 3.45 held and 2000 frames on foot, 680 records within 5 s: k 3.45
+in one step and no step after; records under 200 for 6 s: k 1, then the
+ordinary 0.25 ramp; a hold that begins at 1 keeps the pending k.
+
 ### What the next flight must show (the shipped build)
 
 Parked at Cranfield, the ini as shipped (auto, k_max 6, observe 0), the
-in-game detail slider at its default (s 1.0):
+in-game detail slider at its default (s 1.0); then close to the buildings:
 1. `edvr_log.py --expect-build HEAD` exits 0; the configure line reads
-   `on (auto: acts by ...) -- k in [1, 6.00]: up while a frame has >= 200
-   draw-builder records and >= 3 of the last 30 samples ran > 0.30 ms over
-   the period, 0.25 if ...`, every hook `hooked`/`matched`.
-2. Step lines naming the misses (`N of the last 30 samples ran more than
-   0.30 ms over the period`): `up 0.25` while their mean is over 1.0 ms,
-   then `up 0.05`, at most once a second -- where the 04:23 build held k
-   with a third of the frames missing, this one must keep stepping; the
-   summary's `over by > 0.30 ms` count falling as k rises, k then holding
-   with 1-2 of 30 missing (near k 4.1 if the elasticity holds at s 1.0),
-   and no `down` right after the coarse steps (no pumping).
-3. Disembark and board once: one `on foot` and one `no longer on foot`
+   `on (auto: acts by ...) -- k in [1, 6.00], auto's policy on the next
+   line`, every hook `hooked`/`matched`, and the two policy lines follow.
+2. Step lines naming the slots and whose: `up 0.25` while a quarter of a
+   second's cycles are the CPU's misses or it runs over 1 ms, then `up
+   0.05`, at most one a second; after ten seconds that do not clear, one
+   `kick:` line and k 6.00, then `restored k X after a failed kick` five
+   seconds later or relaxing `down 0.25` lines five seconds apart; `down
+   0.05` trials, and `restored k X after a failed recovery trial` if one
+   fails; in `decisions:`, the CPU's share falling as k rises, and `no fresh
+   timing on 0 frames` while the runtime feeds it.
+3. Close to the buildings: the inert line with its figures and no steps
+   after it, one retried step every 30 s; any `at the ceiling` line names
+   its outcome.
+4. Disembark and board once: one `on foot` and one `no longer on foot`
    line, beside the pacing's own `native frame: begin ... pacing=turbo` and
    `pacing=runtime` lines (the same flag: turbo with no `on foot` line means
-   the gate never ran); `held on foot N frames`, k 1 on foot, the ramp again
-   aboard.
-4. The HUD's `cpu` near the summary's `frame work = caller work per cycle`
+   the gate never ran); `held on foot N frames`, k 1 on foot, and aboard
+   `back aboard: k restored to X (held on foot N frames)` with no ramp and
+   no flicker in the headset.
+5. The HUD's `cpu` near the summary's `frame work = caller work per cycle`
    mean, not the ~10 ms pre-submit figure.
-5. As before: implausible 0, faults 0, disagreements 0, no `NOT ACTING`, no
+6. As before: implausible 0, faults 0, disagreements 0, no `NOT ACTING`, no
    `STOOD DOWN`; in the headset, popping at the 0.25 steps and thinning at
    the larger k.

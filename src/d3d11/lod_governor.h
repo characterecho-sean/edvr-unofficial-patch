@@ -30,9 +30,34 @@
 //     perf monitor's "app CPU": pose wait end to submit plus the eye
 //     treatments -- the pre-submit phase only, which on the first shadow
 //     flight read 8.4 ms against 14.4 ms of caller work and held k at 1);
-//     the log names which. Held against the display period, 1000 /
-//     baseDisplayHz (version 4 and later), else the session's first
-//     predicted period;
+//     the log names which, and without caller work auto holds. Held against
+//     the display period, 1000 / baseDisplayHz (version 4 and later), else
+//     the session's first predicted period. FRESH evidence only: a sample
+//     counts once, at the boundary that first sees its new sequence, and
+//     only if it was captured within 2 s. A lost lease, a sample already
+//     older than 2 s, a sequence unchanged for more than 2 s, an invalid
+//     frame, or a change of the timing generation, source or display period
+//     EXPIRES the evidence: the policy empties its ring and drops the second
+//     in progress, and k holds (reviews/lod-governor-review-2026-09-23.md,
+//     finding 1: a frozen feed climbed k 1.25 -> 2.75 in 6.6 s on the same
+//     30 samples);
+//   * the display slot -- one QueryPerformanceCounter read a boundary, the
+//     interval since the previous boundary this frame's cycle: longer than
+//     1.5 x the period, it took two slots (a miss). The first boundary after
+//     enabling, after an expiry or a bad sample, on foot and after leaving
+//     the settlement has no interval. A miss is classed on its frame's
+//     fresh sample: GPU-bound while the application's GPU render time -- the
+//     newest valid application-render sample of gpu_frame_timing.h, the
+//     "Application-render GPU" instrument -- was at or over the period - 0.5
+//     ms (the caller work cannot tell: it spans Present, where a GPU-bound
+//     game blocks); else UNEXPLAINED while the caller work was under the
+//     period - 0.3 ms (the GPU under that or unknown); else the CPU's. Only
+//     the CPU's trigger; the other two are counted and named, and none is
+//     called LOD-fixable or LOD-inelastic on its class alone;
+//   * the lever's effect -- per frame, both eyes, the parts tested and the
+//     parts passed at EDVR's scale (acting: the engine's own passes, run at
+//     s_game x k; observing: those less the shadow's would-drop), beside the
+//     caller work: a step's benefit is what both did across it;
 //   * the game's LOD scale s_game, from the setter bracket (the value the
 //     engine stored on its last call for that context; 1.0 at the slider's
 //     maximum detail, 1.5 at its lowest), and the scale the tests ran with,
@@ -79,34 +104,62 @@
 //     passed" per frame from a k = 1 window is the whole of it.
 //
 // THE POLICY (Policy below, pure; tools\lod_governor_test): auto -- k in
-// [1, k_max], quantised to 0.05, decided on the latest 30 valid frame-work
-// samples: a ring that must be full before any step, emptied by a bad
-// sample, by leaving the settlement and on foot. A sample is OVER when it ran
-// more than 0.3 ms past the period -- a frame that missed its display slot
-// and took two. One step up while the frame has at least 200 builder records
-// AND at least 3 of the 30 are over: 0.25 when their mean excess is more than
-// 1.0 ms, else 0.05 (held to k_max) -- far from the target big steps, near
-// it fine ones (the first acting flight took 80 s at 0.05 a step while 1.0-
-// 1.8 ms over). One step down, always 0.05, when none of the 30 is over AND
-// their mean is under the period by more than 1.0 ms. Between -- 1 or 2 of
-// 30 over, or none without that millisecond -- k holds: the dead band, aimed
-// at under a tenth of the frames missing their slot. It counts misses, not
-// runs, because a miss costs a whole display slot: on the 04:23 flight
-// (2026-09-23) a third of the frames missed at k 2.50 while the mean work sat
-// under the period (10.99 ms against 11.11), and the old trigger -- 30
-// consecutive over-budget samples -- never came; it had also paced the ramp
-// at one step per ~2.5 s. At most one step a second; back to 1 when the
-// records have stayed under 150 for 30 frames, and at once on foot, held
-// there while it lasts. reduced -- k = k_max at once from the frame the
-// records reach 200, 1 when they have stayed under 150 for 30 frames or on
-// foot; no ramp. k_max is advanced.settlement_detail_max (default 6.0, held
-// to [1, 8]): the ceiling in auto, the factor in reduced. It multiplies the
-// game's own scale -- 1.0 at the slider's default, 1.5 at its floor -- and
-// the removal levels off between an effective s x k of 4.5 and 6 (the LOD
-// note, section 8), so 6 reaches that from the default slider. The first
-// acting flight held k 2.70-2.75 on s 1.5 (s x k about 4.1): k ~4.1 from
-// s 1.0. advanced.settlement_detail_observe = 1 computes and logs all of it
-// and never writes.
+// [1, k_max], quantised to 0.05, decided ONCE A SECOND of wall time on the
+// cycles completed in that second with a fresh sample (about 90 at 90 Hz):
+// non-overlapping windows, so scattered misses cannot creep k up (a sliding
+// 30-sample window read every frame fired on 3% of random misses 19 times a
+// minute). A second of fewer than 20 such cycles decides nothing and counts
+// neither way. It TRIGGERS when a tenth or more of its cycles took two slots
+// as the CPU's (the real slot outcome, not a threshold on the mean: a mean at
+// the period hid a third of the frames taking two slots on the 04:23 flight,
+// and at half rate the game's own work grows ~1.2 ms -- 05:05). A triggering
+// second, in a frame with at least 200 builder records: one step up -- 0.25
+// when a quarter or more of its cycles were the CPU's misses or its mean
+// caller work ran more than 1.0 ms over (good frames cancel bad ones in the
+// mean: 31% misses at a mean near the period took eleven fine steps), else
+// 0.05, and 0.05 within 0.25 below a remembered working point; held to
+// k_max. Ten triggering seconds in a row below k_max put k at k_max at once
+// (a KICK, at most one per 30 s, never in reduced), a bounded trial: if the
+// fifth second at k_max still triggers, the pre-kick k comes back at once and
+// no kick follows for 60 s; if not, five clean seconds at a time bring k back
+// 0.25 to the pre-kick k + 0.25 (unless a second triggers again). Down, 0.05,
+// after five clean seconds in a row -- no cycle of any kind taking two slots
+// and the mean more than 1.0 ms under the period -- then five more before the
+// next. Each down step is a recovery TRIAL: the k before it is the working
+// point, and a second that triggers within 10 s restores it at once and
+// doubles the clean seconds the next trial waits for (5, 10, 20, 40, 60;
+// back to 5 once a step down has held 60 s without a trigger -- counted from
+// the step, as 60 clean seconds of waiting are 60 s without one too). Each
+// up step's BENEFIT is
+// measured -- the parts passed at EDVR's scale a frame and the caller work,
+// over the 30 frames and samples after it against the 30 before: none when
+// the passed parts move less than 1% (judged at 200 a frame or more) and the
+// caller work falls less than 0.2 ms, unknown when either cannot be judged.
+// Two such 0.25 steps in a row, or four 0.05 ones, and the lever is INERT at
+// this view (05:53: about 4 of 4,800 parts dropped at k 6): no up step and no
+// kick, said once; one step is retried every 30 s or when the parts tested a
+// frame move by more than 20%, and a retry with a benefit re-arms; a held
+// second starts the kick's run of ten over; down still applies. At k_max with
+// five triggering seconds in a row a line gives the outcome -- target
+// reached, residual benefit, no observed benefit, or unknown (no fresh
+// evidence) -- and nothing acts on it. Without caller work (a timing v3/v4
+// runtime) a miss cannot be attributed: nothing triggers, and auto holds.
+// Back to 1 when the records have stayed under 150 for 30 frames, and at once
+// on foot, held there while it lasts; back aboard, a frame with 200 records
+// within 5 s brings the k from before the hold back in one step, else it
+// starts from 1 (06:53: re-ramping from 1 in 0.25 steps after re-boarding
+// flickered every structure of the settlement at each step). reduced -- k =
+// k_max at once from the
+// frame the records reach 200, 1 when they have stayed under 150 for 30
+// frames or on foot; no ramp and no kick (the ceiling line still speaks).
+// k_max is advanced.settlement_detail_max (default 6.0, held to [1, 8]): the
+// ceiling in auto, the factor in reduced. It multiplies the game's own scale
+// -- 1.0 at the slider's default, 1.5 at its floor -- and the removal levels
+// off between an effective s x k of 4.5 and 6 (the LOD note, section 8), so
+// 6 reaches that from the default slider. The first acting flight held k
+// 2.70-2.75 on s 1.5 (s x k about 4.1): k ~4.1 from s 1.0.
+// advanced.settlement_detail_observe = 1 computes and logs all of it and
+// never writes.
 #include <cstdint>
 #include <cstring>
 #include <xmmintrin.h>
@@ -122,13 +175,37 @@ constexpr int kQuantaPerUnit = 20;                 // k moves in steps of 1/20 =
 constexpr int kCoarseQuanta = 5;                   // ... or 5/20 = 0.25 up, far over budget
 constexpr uint32_t kSettlementRecords = 200;       // density: builder records a frame
 constexpr uint32_t kSettlementBand = 50;           // leave only under 200 - 50 = 150
-constexpr double kOverMarginMs = 0.3;              // a sample is over: work > period + 0.3 ms (a missed slot)
-constexpr double kUnderMarginMs = 1.0;             // down: none over and the 30's mean < period - 1.0 ms
-constexpr uint32_t kSampleWindow = 30;             // the latest 30 valid samples decide a step
-constexpr uint32_t kUpMisses = 3;                  // up: at least 3 of them over
+constexpr double kOverMarginMs = 0.3;              // the summary's "over": work > period + 0.3 ms
+constexpr double kMissFactor = 1.5;                // a cycle > 1.5 x the period took two display slots
+constexpr double kGpuBoundMarginMs = 0.5;          // ... GPU-bound with its render time >= period - 0.5 ms
+constexpr double kUnexplainedMarginMs = 0.3;       // ... else unexplained with the caller work < period - 0.3 ms
+constexpr double kUnderMarginMs = 1.0;             // headroom: a window's mean caller work < period - 1.0 ms
+constexpr uint32_t kSampleWindow = 30;             // the ring of the latest samples (the lines, a step's before)
+constexpr uint64_t kFreshMs = 2000;                // evidence: a new sample captured within 2 s, else it expires
+constexpr uint64_t kWindowMs = 1000;               // a decision: once a second of wall time ...
+constexpr uint32_t kWindowMinCycles = 20;          // ... over at least 20 cycles with a fresh sample, or none
+constexpr uint32_t kTriggerDivisor = 10;           // a window triggers with >= 1/10 of its cycles the CPU's misses
+constexpr uint32_t kCoarseDivisor = 4;             // up 0.25 with >= 1/4 of them the CPU's misses ...
+constexpr double kCoarseExcessMs = 1.0;            // ... or the window > 1.0 ms over on average
 constexpr uint32_t kConsecutive = 30;              // leaving: 30 consecutive frames under 150 records
-constexpr double kCoarseExcessMs = 1.0;            // up 0.25 while the 30 ran > 1.0 ms over on average
-constexpr uint64_t kRampIntervalMs = 1000;         // at most one step a second
+constexpr uint32_t kCleanWindows = 5;              // down: 5 windows with headroom in a row ...
+constexpr uint32_t kCleanWindowsMax = 60;          // ... doubled after each failed trial, to at most 60
+constexpr uint64_t kTrialMs = 10000;               // a trigger within 10 s of a down step fails the trial
+constexpr uint64_t kBackoffResetMs = 60000;        // a step down held 60 s without a trigger: the wait is 5 again
+constexpr uint32_t kKickWindows = 10;              // kick: 10 triggering windows in a row below k_max ...
+constexpr uint64_t kKickIntervalMs = 30000;        // ... at most one per 30 s ...
+constexpr uint32_t kKickTrialWindows = 5;          // ... judged on the 5th window at k_max ...
+constexpr uint64_t kKickBlockMs = 60000;           // ... failed: the pre-kick k, and no kick for 60 s
+constexpr uint32_t kCeilingWindows = 5;            // the lever spent: 5 triggering windows in a row at k_max
+constexpr uint32_t kEffectFrames = 30;             // a step's benefit: 30 frames/samples after vs 30 before
+constexpr uint32_t kEffectMin = 10;                // ... each side judged on at least 10
+constexpr double kBenefitPassedShare = 0.01;       // a benefit: passed parts moved >= 1% ...
+constexpr double kBenefitCallerMs = 0.2;           // ... or the caller work fell >= 0.2 ms
+constexpr double kInertMinPassed = 200.0;          // the parts judged at >= 200 passed a frame
+constexpr uint32_t kInertUnits = 4;                // inert: steps without benefit, 0.25 = 2 units, 0.05 = 1
+constexpr double kRearmShare = 0.20;               // retry a step: the parts tested a frame moved > 20% ...
+constexpr uint64_t kRetryMs = 30000;               // ... or 30 s since the hold or the last retry
+constexpr uint64_t kAboardMs = 5000;               // back aboard: the k from before on foot if 200 records within 5 s
 constexpr float kDefaultMax = 6.0f;                // advanced.settlement_detail_max (100 steps of 0.05)
 constexpr float kMaxCeiling = 8.0f;                // ... held to [1, 8]
 // The write's plausibility band for the game's own LOD scale: the setter
@@ -146,17 +223,58 @@ enum class WorkSource : uint8_t { None, Caller, App };
 struct FrameSignals {
     uint32_t records = 0;       // builder calls since the last boundary
     bool onFoot = false;        // Status.json says on foot (journalOnFootKnown && journalOnFoot)
-    Work work = Work::None;
+    Work work = Work::None;     // Valid only for a NEW sequence captured within 2 s
     WorkSource source = WorkSource::None;   // set with every new sample, valid or not
     bool callerAbsent = false;  // a version 5 frame without valid caller work (Work::Invalid)
+    bool expired = false;       // the evidence expired at this boundary (lease lost, stale, epoch changed)
     uint32_t timingVersion = 0; // the new sample's EdvrNativeTimingFrame version
     double workMs = 0;          // the new sample's frame work ms (Work::Valid)
     double periodMs = 0;        // the budget it is held against
-    uint64_t nowMs = 0;
+    uint64_t nowMs = 0;         // wall time: the policy's clock for its seconds
+    double clockMs = -1;        // this boundary's QueryPerformanceCounter time, ms (< 0: none)
+    bool gpuValid = false;      // a fresh, valid application-render GPU sample (gpu_frame_timing.h)
+    double gpuMs = 0;           // ... its render time, ms
+    // The lever's effect, both eyes, this frame: parts tested, parts passed
+    // at EDVR's scale (acting: the engine's passes; observing: those less the
+    // shadow's would-drop), parts dropped at EDVR's scale.
+    uint32_t tested = 0, passed = 0, dropped = 0;
 };
 // Enter: reduced mode's k = k_max at once (the settlement started, or k_max
-// rose while in it). Foot: k back to 1 at once, on foot.
-enum class Step : uint8_t { None, Up, Down, Reset, Clamp, Enter, Foot };
+// rose while in it). Foot: k back to 1 at once, on foot. Kick: k = k_max at
+// once, ten triggering windows in a row having not been cleared. Restore: a
+// failed trial undone at once -- the working point after a down step, or the
+// pre-kick k after a kick (restoredAfterKick() says which).
+// Aboard: back from on foot into a settlement, the k in force when the hold
+// began, in one step.
+enum class Step : uint8_t { None, Up, Down, Reset, Clamp, Enter, Foot, Kick, Restore, Aboard };
+// This boundary's cycle: an interval to the previous boundary or none, its
+// length, whether it took two display slots, and whose: GPU-bound (the
+// application's GPU render at or over the period - 0.5 ms), unexplained (the
+// GPU under that or unknown and the caller work under the period - 0.3 ms),
+// else the CPU's. The caller work cannot say on its own: it spans Present,
+// where a GPU-bound game blocks.
+struct Cycle {
+    bool measured = false, missed = false, gpuBound = false, unexplained = false;
+    double ms = 0;
+};
+// One decision window: the cycles completed in one second of wall time.
+struct WindowResult {
+    bool decided = false;      // at least 20 cycles with a fresh sample: it counts, one way or the other
+    uint32_t cycles = 0;       // cycles measured on a frame with a fresh valid sample
+    uint32_t misses = 0;       // of those, two slots and the CPU's (the trigger's)
+    uint32_t gpuBound = 0;     // ... two slots, GPU-bound
+    uint32_t unexplained = 0;  // ... two slots, neither: counted, never a reason to step
+    uint32_t anyMisses = 0;    // two-slot cycles of any kind, with or without a sample
+    double meanExcessMs = 0;   // the cycles' mean caller work over the period
+    bool triggered = false;    // decided, >= a tenth of the cycles the CPU's misses, caller work to say so
+    bool headroom = false;     // decided, no two-slot cycle at all, the mean more than 1.0 ms under
+};
+// A step's measured benefit: the parts passed at EDVR's scale moved 1% or
+// more, or the caller work fell 0.2 ms or more (Benefit); neither, with both
+// judged (NoBenefit); or it could not be judged (Unknown).
+enum class Effect : uint8_t { Unknown, Benefit, NoBenefit };
+// At k_max: what the lever did there.
+enum class Outcome : uint8_t { Reached, Residual, NoBenefit, Unknown };
 
 class Policy {
 public:
@@ -164,7 +282,7 @@ public:
     // below the current k clamps k at once (Step::Clamp from the next update).
     void configure(float kMax) noexcept;
     // reduced (fixed = true): k = k_max for as long as the settlement lasts,
-    // 1 outside it, no ramp; auto (false): the governed ramp.
+    // 1 outside it, no ramp, no kick; auto (false): the governed ramp.
     void setFixed(bool fixed) noexcept { fixed_ = fixed; }
     Step update(const FrameSignals& s) noexcept;
     void reset() noexcept;
@@ -175,39 +293,175 @@ public:
     float kMax() const noexcept { return kOf(maxSteps_); }
     bool fixed() const noexcept { return fixed_; }
     bool inSettlement() const noexcept { return inSettlement_; }
-    // The ring: how many valid samples it holds (a step needs 30), how many of
-    // them are over, and their mean excess (work - period, ms; 0 when empty).
+    // The latest update's cycle.
+    const Cycle& cycle() const noexcept { return cycle_; }
+    // The ring of the latest 30 valid samples: how many it holds, how many
+    // took two slots as the CPU's, GPU-bound and unexplained, their mean
+    // caller-work excess over the period (ms; 0 when empty), and the mean GPU
+    // render time of those with a GPU sample (-1 when none had one).
     uint32_t samples() const noexcept { return count_; }
-    uint32_t overCount() const noexcept { return overCount_; }
+    uint32_t misses() const noexcept { return missCount_; }
+    uint32_t gpuBoundMisses() const noexcept { return gpuCount_; }
+    uint32_t unexplainedMisses() const noexcept { return unexCount_; }
     double meanExcessMs() const noexcept;
-    // The last up or down step: the over count and mean excess of the 30
-    // samples behind it; for an up step, its size by the rule in quanta (1 =
-    // 0.05, kCoarseQuanta = 0.25) and whether k_max cut it short.
-    uint32_t stepOver() const noexcept { return stepOver_; }
-    double stepMeanExcessMs() const noexcept { return stepMeanExcessMs_; }
+    double meanGpuMs() const noexcept;
+    // The period the latest valid sample was held against (0 before one).
+    double periodMs() const noexcept { return periodMs_; }
+    // How many times the evidence expired (or a sample was invalid) since reset.
+    uint32_t expiries() const noexcept { return expiries_; }
+    // The decision windows: whether this update closed one, the last closed
+    // one, how many have closed since reset, and the runs of decided ones --
+    // triggering in a row, with headroom in a row, triggering in a row at
+    // k_max. An undecided window leaves every run as it was; an expiry
+    // restarts them.
+    bool windowClosed() const noexcept { return windowClosed_; }
+    const WindowResult& lastWindow() const noexcept { return lastWin_; }
+    uint32_t windows() const noexcept { return windows_; }
+    uint32_t triggerRun() const noexcept { return trigRun_; }
+    uint32_t cleanRun() const noexcept { return cleanRun_; }
+    bool triggered() const noexcept { return lastWin_.triggered; }
+    // At k_max with five triggering windows in a row: the lever is spent.
+    bool ceilingMissing() const noexcept { return steps_ == maxSteps_ && ceilRun_ >= kCeilingWindows; }
+    // What the lever did at k_max: the target reached (the last window did
+    // not trigger), else the last judged step's benefit -- residual, none,
+    // or unknown (no fresh evidence).
+    Outcome ceilingOutcome() const noexcept;
+    // The latest valid sample carried no caller work (a timing v3/v4
+    // runtime): a miss cannot be attributed to the CPU, nothing triggers.
+    bool holding() const noexcept { return holding_; }
+    // The kick: a bounded trial, judged on the fifth window at k_max; after a
+    // successful one five clean windows at a time bring k back 0.25 (the last
+    // step less) to the pre-kick k + 0.25, unless a window triggers again.
+    bool kickTrial() const noexcept { return kickTrial_; }
+    bool relaxing() const noexcept { return relaxing_; }
+    float preKickK() const noexcept { return kOf(preKickSteps_); }
+    float relaxTargetK() const noexcept { return kOf(relaxTarget_); }
+    // The working point: the k before the last down step (it held with no
+    // miss for the clean windows); a trigger within 10 s of the step restores
+    // it and doubles the clean windows the next trial waits for (5 .. 60),
+    // back to 5 once a step down has held 60 s without a trigger.
+    bool haveGood() const noexcept { return good_ >= 0; }
+    float goodK() const noexcept { return kOf(good_ < 0 ? 0 : good_); }
+    uint32_t downWait() const noexcept { return downWait_; }
+    bool restoredAfterKick() const noexcept { return restoreKick_; }
+    // The last up or down: its size in quanta (1 = 0.05, kCoarseQuanta =
+    // 0.25), whether k_max cut an up step short, whether an up step was held
+    // fine by a working point just above, whether a down step was the kick's
+    // relaxation.
     int upQuanta() const noexcept { return upQuanta_; }
     bool upHeld() const noexcept { return upHeld_; }
+    bool upNearGood() const noexcept { return upNear_; }
+    int downQuanta() const noexcept { return downQuanta_; }
+    bool relaxStep() const noexcept { return relaxStep_; }
+    // The lever's benefit: the last judged step's effect and its cohorts
+    // (passed parts a frame and caller work ms, before -> after; -1 unknown);
+    // INERT at this view after 4 units of steps without a benefit in a row
+    // (0.25 = 2, 0.05 = 1): no up step and no kick, one step retried every
+    // 30 s or when the parts tested a frame move by more than 20% (a retry
+    // with a benefit re-arms). The run that made it inert: its first before,
+    // its last after, its steps. The latest 30 frames' part means.
+    Effect lastEffect() const noexcept { return lastEffect_; }
+    double effectPassedBefore() const noexcept { return lastPassed_[0]; }
+    double effectPassedAfter() const noexcept { return lastPassed_[1]; }
+    double effectCallerBefore() const noexcept { return lastCaller_[0]; }
+    double effectCallerAfter() const noexcept { return lastCaller_[1]; }
+    bool inert() const noexcept { return inert_; }
+    bool inertStarted() const noexcept { return inertStarted_; }
+    bool rearmed() const noexcept { return rearmed_; }
+    bool retrying() const noexcept { return retry_; }
+    uint32_t inertHolds() const noexcept { return inertHolds_; }
+    uint32_t retries() const noexcept { return retries_; }
+    uint32_t rearms() const noexcept { return rearms_; }
+    double runPassedBefore() const noexcept { return runPassed_[0]; }
+    double runPassedAfter() const noexcept { return runPassed_[1]; }
+    double runCallerBefore() const noexcept { return runCaller_[0]; }
+    double runCallerAfter() const noexcept { return runCaller_[1]; }
+    uint32_t runCoarse() const noexcept { return runCoarse_; }
+    uint32_t runFine() const noexcept { return runFine_; }
+    double testedMean() const noexcept { return partsMean(0); }
+    double passedMean() const noexcept { return partsMean(1); }
+    double droppedMean() const noexcept { return partsMean(2); }
     static float kOf(int steps) noexcept { return float(kQuantaPerUnit + steps) / float(kQuantaPerUnit); }
 
 private:
-    void emptyRing() noexcept { count_ = overCount_ = 0; }
-    void push(double excessMs, bool over) noexcept;
+    // One window being gathered.
+    struct Gather {
+        uint32_t cycles = 0, misses = 0, gpuBound = 0, unexplained = 0, anyMisses = 0;
+        double excessSum = 0;
+    };
+    enum class Opened : uint8_t { Up, Kick, Enter };
+    void emptyRing() noexcept { count_ = missCount_ = gpuCount_ = unexCount_ = 0; }
+    void push(double excessMs, bool miss, bool gpuBound, bool unexplained, double gpuMs) noexcept;   // gpuMs < 0: none
+    // A window restarts on enabling, on foot and on leaving the settlement,
+    // and its runs with it -- and the lever's effect and the working point,
+    // the view being new.
+    void restart(uint64_t nowMs) noexcept;
+    // The evidence expired or a sample was invalid: the ring, the second in
+    // progress, the runs, an open step's cohorts and a kick's trial go; k holds.
+    void expire(uint64_t nowMs) noexcept;
+    void closeWindow(uint64_t nowMs) noexcept;
+    double partsMean(int field) const noexcept;       // 0 tested, 1 passed at EDVR's scale, 2 dropped
+    void openEffect(Opened kind, bool coarse) noexcept;
+    void judgeEffect(uint64_t nowMs) noexcept;
 
     int steps_ = 0, maxSteps_ = static_cast<int>((kDefaultMax - 1.0f) * kQuantaPerUnit);   // k_max 6.0: 100 steps
     bool fixed_ = false;
     bool inSettlement_ = false, clampPending_ = false;
     uint32_t sparse_ = 0;
-    uint64_t lastStepMs_ = 0;
-    bool stepped_ = false;
     // The latest valid samples, a ring of 30: each one's excess over the
-    // period and whether it was over; count_ of them are live.
-    double excess_[kSampleWindow] = {};
-    bool over_[kSampleWindow] = {};
-    uint32_t next_ = 0, count_ = 0, overCount_ = 0;
-    uint32_t stepOver_ = 0;
-    double stepMeanExcessMs_ = 0;
-    int upQuanta_ = 0;
-    bool upHeld_ = false;
+    // period, its GPU render time (-1: no sample), and its cycle's class.
+    double excess_[kSampleWindow] = {}, gpuMs_[kSampleWindow] = {};
+    bool miss_[kSampleWindow] = {}, gpu_[kSampleWindow] = {}, unex_[kSampleWindow] = {};
+    uint32_t next_ = 0, count_ = 0, missCount_ = 0, gpuCount_ = 0, unexCount_ = 0;
+    double periodMs_ = 0;
+    bool holding_ = false;
+    uint32_t expiries_ = 0;
+    // The clock: the previous boundary's time, if the next one may measure.
+    bool haveClock_ = false;
+    double lastClockMs_ = 0;
+    Cycle cycle_;
+    // The windows.
+    bool started_ = false, windowClosed_ = false;
+    uint64_t winStartMs_ = 0;
+    Gather gather_;
+    WindowResult lastWin_;
+    uint32_t windows_ = 0, trigRun_ = 0, cleanRun_ = 0, ceilRun_ = 0;
+    uint64_t lastTriggerMs_ = 0;
+    // The kick, its trial and its relaxation.
+    bool kicked_ = false, relaxing_ = false, kickTrial_ = false;
+    uint64_t lastKickMs_ = 0, kickBlockedUntilMs_ = 0;
+    uint32_t trialWindows_ = 0;
+    int preKickSteps_ = 0, relaxTarget_ = 0;
+    // The working point and its trials.
+    int good_ = -1;
+    uint64_t lastDownMs_ = 0;
+    uint32_t downWait_ = kCleanWindows;
+    bool restoreKick_ = false;
+    int upQuanta_ = 0, downQuanta_ = 0;
+    bool upHeld_ = false, upNear_ = false, relaxStep_ = false;
+    // The lever's benefit: the latest 30 frames' parts, the open step's
+    // cohorts, the run without benefit, and the hold.
+    double parts_[kEffectFrames][3] = {};
+    uint32_t partsNext_ = 0, partsCount_ = 0;
+    bool effectOpen_ = false, effectCoarse_ = false, effectRetry_ = false;
+    Opened effectKind_ = Opened::Up;
+    double effectBeforePassed_ = -1, effectBeforeCaller_ = -1;
+    double effectPassedSum_ = 0, effectCallerSum_ = 0;
+    uint32_t effectPassedN_ = 0, effectCallerN_ = 0;
+    Effect lastEffect_ = Effect::Unknown;
+    double lastPassed_[2] = {-1, -1}, lastCaller_[2] = {-1, -1};
+    uint32_t inertUnits_ = 0, runCoarse_ = 0, runFine_ = 0;
+    double runPassed_[2] = {-1, -1}, runCaller_[2] = {-1, -1};
+    bool inert_ = false, inertStarted_ = false, rearmed_ = false, retry_ = false, retryArmed_ = false;
+    uint64_t inertSinceMs_ = 0;
+    double testedAtHold_ = 0;
+    uint32_t inertHolds_ = 0, retries_ = 0, rearms_ = 0;
+    // On foot: the k in force when the hold began (0: none pending), and
+    // when the hold ended -- a frame with 200 records within 5 s of it
+    // restores that k in one step.
+    bool onFoot_ = false;
+    int footSteps_ = 0;
+    uint64_t boardedMs_ = 0;
 };
 
 // --- The engine's arithmetic, exactly as its code does it ------------------
