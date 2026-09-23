@@ -23,10 +23,11 @@
   MERGED and FLOWN (093817, "The re-fly" entry): eye-frames bound and given, cb1
   re-maps kept (invalidated 0), corrupt codes 0, engine-joined 67-73k px an eye-frame.
   FOLLOW-UPS FLOWN (114958, c00af958): cockpit prep 0.15-0.23 ms a pair (copy 0.02, mv
-  0.13-0.21), no faults, the on-foot gate held. STAGE B REMOVED and ITS KEY RETIRED
-  (2026-09-23): engine motion is part of fix.temporal_aa, every mode. ON FOOT BUILT, NOT
-  FLOWN ("On foot" entry): the source pass takes MRT6 into a slot target of the source's
-  size; the screen shader carries certified rig records through the panel.
+  0.13-0.21), no faults. STAGE B REMOVED, ITS KEY RETIRED: engine motion is part of
+  fix.temporal_aa. ON FOOT (merged, not flown): the source pass takes MRT6 at the
+  source's size; the screen shader carries rig records through the panel. PERFORMANCE
+  ROUND BUILT, NOT FLOWN (the review's six items, "Performance round" entry): tracker
+  diagnostic-only, preparation deferred, setters skipped, snapshots and capture priced.
 - **Open:** the on-foot flight (Next); walkers (vs_F516BF0201303B87, unkeyed; w=2 on the
   panel today, the "On foot" entry) wait on phase 2's previous bone palette; a temporal
   pass on the flat source itself is the later remedy for its own
@@ -54,9 +55,11 @@
   pre-pass or a depth bias as the stale cockpit (all three: the re-fly entry); green on
   the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
   cause (the 09:38 entry). Do not re-propose any of the above.
-- **Next:** the on-foot flight (fix.temporal_aa = dlss, diagnostics 1, one leg with
-  advanced.temporal_aa_debug = motion_source): walk near the drone and a landing ship;
-  read the "On foot" entry's signatures -- the drone and the ship green on the panel.
+- **Next:** one controlled comparison (the review's protocol): the build checked first
+  (edvr_log.py --expect-build HEAD); the same pad, headset and runtime, resolution, DLSS
+  version and refresh, warm windows, temporal AA fixed; diagnostics 1 (tracker, census,
+  diagnostic shader) against 0 (lean): the tracker's cost line and the price lines.
+  Then the on-foot walk near the drone and a landing ship, one leg with motion_source.
 
 ## Premise
 
@@ -2520,3 +2523,12 @@ shader, ...` -- and a change of build closes the window, so a diagnostic capture
 the production shader. Never ran: no capture clause (or all three x0 with the capture
 counted untimed), the foveated parts at 0.00/0.00, no shader word. Rig: engine_velocity_test
 P5 (every capture timed or counted, the take resets).
+
+**6. One depth load fewer per engine pixel.** The mv pass holds the scene depth at its own
+texel (`sceneZraw`, from its depth tile at region.xy + id), and its offset-zero engine query
+loaded the same texel again inside enginePixel. `enginePixelZ` takes a held depth (a literal
+flag at each call, so the branch compiles away); the offset-zero call passes `sceneZraw`, the
+jittered callers keep the lookup. Same texel, same value, so the ownership test is unchanged
+bit for bit: engine_velocity_test's consumer cases (joined exact, masked, declined kinds)
+and the real corpus stay green. No log signature -- the pixel counts are the same; its price,
+if any, is inside `mv` in the price line against a build without it.
