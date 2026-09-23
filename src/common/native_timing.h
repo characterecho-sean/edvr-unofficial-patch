@@ -11,6 +11,12 @@
 // of the smaller size; it simply carries no base display rate, and the
 // consumer falls back to the session's first predicted period.
 #define EDVR_NATIVE_TIMING_VERSION_4 4u
+// Version 5 appends callerWorkMs and callerWorkValid to the END and nothing
+// else, under the same hand-copied-DLLs rule: publishCpu still accepts a
+// version 3 or 4 frame of its smaller size, whose missing caller work reads
+// as absent (0, not valid), and the consumer falls back to the producer's
+// application time.
+#define EDVR_NATIVE_TIMING_VERSION_5 5u
 // Private paired-module measurement capability. Acquire binds the producer;
 // gpuEye runs only on that thread. All other callbacks are CPU-only and may
 // run on the XR owner. The host retains the module/device through close.
@@ -39,11 +45,31 @@ struct EdvrNativeTimingFrame {
     // runtime has published none). The consumer compares the predicted period
     // against this base to flag a throttled display rate.
     float baseDisplayHz;
+    // Version 5 and later. The caller (game) thread's wall time per frame
+    // cycle outside the pose wait: from one WaitGetPoses return to the next
+    // one's entry -- the runtime's cycle minus its next-wait roundtrip
+    // (native_frame_cycle_phase cycle - next_wait_roundtrip), i.e. the game's
+    // work before the first submit, both submit roundtrips with the waits
+    // inside them, the time between the eyes and after the second submit:
+    // everything the display period has to hold. A cycle completes only at
+    // the NEXT wait's return, so a frame carries the cycle before it.
+    // callerWorkValid is 1 only when the cycle that ended at this frame's own
+    // pose wait completed whole (both eyes, consistent clocks); else 0, and
+    // callerWorkMs is 0.
+    double callerWorkMs;
+    uint32_t callerWorkValid;
 };
 // The size the fields through featureEpoch occupy, which is what a version 3
 // caller's struct is. baseDisplayHz follows with no tail padding in play.
 #define EDVR_NATIVE_TIMING_FRAME_SIZE_3 \
     ((uint32_t)offsetof(EdvrNativeTimingFrame, baseDisplayHz))
+// A version 4 caller's struct ends at baseDisplayHz plus its tail padding to
+// the struct's 8-byte alignment, which is exactly where the double
+// callerWorkMs lands; the two sizes below are the shipped ABI.
+#define EDVR_NATIVE_TIMING_FRAME_SIZE_4 \
+    ((uint32_t)offsetof(EdvrNativeTimingFrame, callerWorkMs))
+static_assert(EDVR_NATIVE_TIMING_FRAME_SIZE_3 == 168 && EDVR_NATIVE_TIMING_FRAME_SIZE_4 == 176,
+              "the version 3 and 4 timing frame sizes are fixed by shipped DLLs");
 enum EdvrNativeGpuStatus : uint32_t {
     EdvrNativeGpuPending, EdvrNativeGpuValid, EdvrNativeGpuDisabled,
     EdvrNativeGpuIncomplete, EdvrNativeGpuQueryFailure, EdvrNativeGpuStale,

@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
              "the shipped file defines it live");
     // The settlement LOD governor is shadow-only in this build: both keys
     // ship as commented templates, so the compiled defaults -- game (off,
-    // nothing observed) and a ceiling of 2.0 -- are what every user runs.
+    // nothing observed) and a ceiling of 4.0 -- are what every user runs.
     expectStr("fix.settlement_detail", "<unset>",
               "settlement detail ships commented out: the compiled default (game) is in force");
     expectStr("advanced.settlement_detail_max", "<unset>",

@@ -312,12 +312,15 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
 HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
     std::lock_guard<std::mutex> lock(lifetime);
     Context* c = identify(p);
-    // A version 3 caller's struct ends at featureEpoch; accept it and let the
-    // missing baseDisplayHz read as 0 (the consumer's fallback covers it).
-    const bool frameV4 = frame && frame->version == EDVR_NATIVE_TIMING_VERSION_4;
-    if (!c || !c->active || c != current || !frame ||
-        (frame->version != EDVR_NATIVE_TIMING_VERSION_3 && !frameV4) ||
-        frame->size != (frameV4 ? uint32_t(sizeof(*frame)) : EDVR_NATIVE_TIMING_FRAME_SIZE_3) ||
+    // A version 3 caller's struct ends at featureEpoch and a version 4 one at
+    // baseDisplayHz; accept both and let the missing fields read as 0 -- no
+    // base rate, no caller work (callerWorkValid 0): the consumers' fallbacks
+    // cover both.
+    const uint32_t frameSize = !frame ? 0u
+        : frame->version == EDVR_NATIVE_TIMING_VERSION_5 ? uint32_t(sizeof(*frame))
+        : frame->version == EDVR_NATIVE_TIMING_VERSION_4 ? EDVR_NATIVE_TIMING_FRAME_SIZE_4
+        : frame->version == EDVR_NATIVE_TIMING_VERSION_3 ? EDVR_NATIVE_TIMING_FRAME_SIZE_3 : 0u;
+    if (!c || !c->active || c != current || !frame || !frameSize || frame->size != frameSize ||
         !c->waitValid || c->published || frame->sequence != c->waitSequence) return E_INVALIDARG;
     bool fieldsValid = finiteNonnegative(frame->composeMs);
     for (unsigned eye = 0; eye < 2; ++eye) fieldsValid = fieldsValid &&

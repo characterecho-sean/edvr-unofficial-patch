@@ -326,6 +326,8 @@ struct Window {
     uint64_t startMs = 0;
     uint32_t frames = 0, denseFrames = 0, eyeFrames = 0;
     uint32_t workSamples = 0, workOver = 0, workUnder = 0, workInvalid = 0;
+    uint32_t callerSamples = 0, appSamples = 0;   // the valid samples by signal (WorkSource)
+    uint32_t callerAbsent = 0;   // version 5 frames without valid caller work (inside workInvalid)
     uint32_t denseOver = 0;   // over-budget samples in frames with >= 200 records: what a rise needs
     double workSum = 0, periodSum = 0;
     uint64_t recordsSum = 0, partsSum = 0;
@@ -349,6 +351,11 @@ struct State {
     uint32_t prev[kCounters] = {};
     uint64_t lastSeq = 0;
     double firstPeriodMs = 0;
+    // The frame-work signal the runtime's timing version fixes (a property of
+    // the runtime, kept across off/on), and that version; logged when it is
+    // first known and if it ever changes.
+    lodgov::WorkSource source = lodgov::WorkSource::None;
+    uint32_t timingVersion = 0;
     Window w;
     uint64_t lastStepLogMs = 0;
     uint32_t stepsUnlogged = 0;
@@ -402,8 +409,42 @@ void identifyEyes(State& st) noexcept {
     g_eyes.store(eyes, std::memory_order_release);
 }
 
-// The newest producer sample, once: NativeTimingSnapshot::applicationMs
-// (the monitor's "app CPU") against the display period.
+// The frame-work signal a runtime's timing frame version fixes: version 5 and
+// later carry the caller work per cycle; 3 and 4 do not, and the producer's
+// application time stands in.
+lodgov::WorkSource sourceOf(uint32_t timingVersion) noexcept {
+    return timingVersion >= EDVR_NATIVE_TIMING_VERSION_5 ? lodgov::WorkSource::Caller
+         : timingVersion >= EDVR_NATIVE_TIMING_VERSION_3 ? lodgov::WorkSource::App
+                                                         : lodgov::WorkSource::None;
+}
+
+// The signal's name, as the summary and the step lines print it.
+const char* workSourceName(lodgov::WorkSource s) noexcept {
+    return s == lodgov::WorkSource::Caller ? "caller work per cycle"
+         : s == lodgov::WorkSource::App ? "app work (pre-submit only; host older)"
+                                        : "no runtime frame yet";
+}
+
+// The signal in full, as the configure line and the one-off source line say
+// it. Short: the configure line is already most of the log's 1200-byte line.
+void workSourceClause(lodgov::WorkSource s, uint32_t timingVersion, char* out, size_t n) noexcept {
+    if (s == lodgov::WorkSource::Caller)
+        std::snprintf(out, n, "frame work = caller work per cycle (runtime timing v%u: the caller thread from one pose "
+                      "wait's return to the next one's entry, submits included)", timingVersion);
+    else if (s == lodgov::WorkSource::App)
+        std::snprintf(out, n, "frame work = app work (pre-submit only; host older: runtime timing v%u sends no caller "
+                      "work, so pose wait end to submit plus the eye treatments stands in)", timingVersion);
+    else
+        std::snprintf(out, n, "frame work = caller work per cycle if the runtime sends it (timing v5), else app work "
+                      "(pre-submit only; host older); the first runtime frame decides and a line names it");
+}
+
+// The newest producer sample, once: the runtime's caller work per cycle
+// (EdvrNativeTimingFrame version 5, callerWorkMs) against the display period.
+// A version 3 or 4 runtime sends none, and NativeTimingSnapshot::applicationMs
+// (the monitor's "app CPU", the pre-submit phase only) stands in. A version 5
+// frame without valid caller work is an invalid sample: the two figures are
+// never mixed in one run.
 void readWork(State& st, uint64_t nowMs, lodgov::FrameSignals* sig) noexcept {
     const NativeTimingSnapshot t = nativeTimingSnapshot();
     if (!t.active) return;   // no native timing lease: no sample (Work::None)
@@ -421,10 +462,21 @@ void readWork(State& st, uint64_t nowMs, lodgov::FrameSignals* sig) noexcept {
         t.cpu.baseDisplayHz > 0 && t.cpu.baseDisplayHz <= 1000)
         period = 1000.0 / double(t.cpu.baseDisplayHz);
     const bool fresh = t.capturedAtMs && t.capturedAtMs <= nowMs && nowMs - t.capturedAtMs <= 2000;
-    const bool ok = t.haveCpu && !t.invalid && t.applicationValid && fresh && std::isfinite(t.applicationMs) &&
-                    t.applicationMs >= 0 && t.applicationMs <= 600000 && period > 0;
+    sig->timingVersion = t.cpu.version;
+    sig->source = sourceOf(t.cpu.version);
+    double ms = 0;
+    bool have = false;
+    if (sig->source == lodgov::WorkSource::Caller) {
+        ms = t.cpu.callerWorkMs;
+        have = t.cpu.callerWorkValid == 1 && std::isfinite(ms) && ms >= 0 && ms <= 600000;
+        sig->callerAbsent = !have;
+    } else if (sig->source == lodgov::WorkSource::App) {
+        ms = t.applicationMs;
+        have = t.applicationValid && std::isfinite(ms) && ms >= 0 && ms <= 600000;
+    }
+    const bool ok = have && fresh && period > 0;
     sig->work = ok ? lodgov::Work::Valid : lodgov::Work::Invalid;
-    sig->workMs = ok ? t.applicationMs : 0;
+    sig->workMs = ok ? ms : 0;
     sig->periodMs = period;
 }
 
@@ -456,15 +508,36 @@ void logSummary(State& st, uint64_t nowMs) {
             stuck = "; k stayed 1: over-budget runs with 200 records never reached 30 consecutive samples";
     }
     uint32_t sBits = g_scaleBits.load(std::memory_order_relaxed);
+    // The LOD scale the tests would run with: the game's s (ctx+0x30, from the
+    // newest builder call) times k -- what the LOD note's table is keyed by.
+    const float sNow = fromBits(sBits);
+    char effective[48];
+    if (std::isfinite(sNow) && sNow > 0.0f)
+        std::snprintf(effective, sizeof(effective), "%.3f", double(sNow) * double(kNow));
+    else
+        std::snprintf(effective, sizeof(effective), "unknown (no LOD scale read yet)");
+    // Which figure the frame work was: one per runtime in practice, both
+    // named if a window ever saw both.
+    char source[160];
+    if (w.callerSamples && w.appSamples)
+        std::snprintf(source, sizeof(source), "%s on %u samples and %s on %u",
+                      workSourceName(lodgov::WorkSource::Caller), w.callerSamples,
+                      workSourceName(lodgov::WorkSource::App), w.appSamples);
+    else
+        std::snprintf(source, sizeof(source), "%s",
+                      workSourceName(w.callerSamples ? lodgov::WorkSource::Caller
+                                     : w.appSamples  ? lodgov::WorkSource::App
+                                                     : st.source));
     Log::get().note(
-        "settlement detail (shadow, never acts): %.1f s, %u frames: k now %.2f (window %.2f..%.2f of max %.2f; %u up, "
-        "%u down, %u resets, %u clamps); builder records/frame %.1f (max %u, >= 200 on %u frames), part tests/frame "
-        "%.1f (max %u); frame work %.2f ms mean vs period %.2f ms over %u samples (over by > 0.30 ms: %u, under by > "
-        "1.00 ms: %u, invalid %u); LOD scale s (ctx+0x30) %.3f; %s%s.",
-        double(nowMs - w.startMs) / 1000.0, w.frames, kNow, w.kLow, w.kHigh, st.policy.kMax(), w.up, w.down, w.resets,
-        w.clamps, perFrame(w.recordsSum, w.frames), w.recordsMax, w.denseFrames, perFrame(w.partsSum, w.frames),
-        w.partsMax, w.workSamples ? w.workSum / w.workSamples : 0.0, w.workSamples ? w.periodSum / w.workSamples : 0.0,
-        w.workSamples, w.workOver, w.workUnder, w.workInvalid, double(fromBits(sBits)), eyesText, stuck);
+        "settlement detail (shadow, never acts): %.1f s, %u frames: k now %.2f, effective s x k %s (window %.2f..%.2f "
+        "of max %.2f; %u up, %u down, %u resets, %u clamps); builder records/frame %.1f (max %u, >= 200 on %u frames), "
+        "part tests/frame %.1f (max %u); frame work = %s: %.2f ms mean vs period %.2f ms over %u samples (over by > "
+        "0.30 ms: %u, under by > 1.00 ms: %u, invalid %u, caller work absent %u); LOD scale s (ctx+0x30) %.3f; %s%s.",
+        double(nowMs - w.startMs) / 1000.0, w.frames, kNow, effective, w.kLow, w.kHigh, st.policy.kMax(), w.up, w.down,
+        w.resets, w.clamps, perFrame(w.recordsSum, w.frames), w.recordsMax, w.denseFrames,
+        perFrame(w.partsSum, w.frames), w.partsMax, source, w.workSamples ? w.workSum / w.workSamples : 0.0,
+        w.workSamples ? w.periodSum / w.workSamples : 0.0, w.workSamples, w.workOver, w.workUnder, w.workInvalid,
+        w.callerAbsent, double(sNow), eyesText, stuck);
     if (!w.recordsSum && !w.partsSum) return;   // nothing built: the header says so
     for (uint32_t e = 0; e < 2; ++e) {
         const uint64_t* p = &w.sum[cPartBase + e * kPartFields];
@@ -512,9 +585,10 @@ void logStep(State& st, lodgov::Step step, float from, const lodgov::FrameSignal
                                                   : "clamped to the new advanced.settlement_detail_max";
     char more[48] = "";
     if (st.stepsUnlogged) std::snprintf(more, sizeof(more), " (+%u steps since the last line)", st.stepsUnlogged);
-    char work[64] = "no frame-work sample this frame";
+    char work[128] = "no frame-work sample this frame";
     if (sig.work == lodgov::Work::Valid)
-        std::snprintf(work, sizeof(work), "frame work %.2f ms vs period %.2f ms", sig.workMs, sig.periodMs);
+        std::snprintf(work, sizeof(work), "frame work = %s: %.2f ms vs period %.2f ms", workSourceName(sig.source),
+                      sig.workMs, sig.periodMs);
     Log::get().note("settlement detail (shadow, never acts): k %.2f -> %.2f, %s; %u builder records, %s%s.",
                     from, st.policy.k(), why, sig.records, work, more);
     st.lastStepLogMs = nowMs;
@@ -536,6 +610,17 @@ void frameBoundaryAt(uint64_t nowMs) {
     sig.records = d[cRecords];
     sig.nowMs = nowMs;
     readWork(st, nowMs, &sig);
+    // The signal the runtime's timing version fixes, said once when it is
+    // first known (unless the configure line already named it) and again only
+    // if it changes: a log that never shows this line never had a new frame.
+    if (sig.source != lodgov::WorkSource::None &&
+        (sig.source != st.source || sig.timingVersion != st.timingVersion)) {
+        st.source = sig.source;
+        st.timingVersion = sig.timingVersion;
+        char clause[400];
+        workSourceClause(st.source, st.timingVersion, clause, sizeof(clause));
+        Log::get().note("settlement detail: %s.", clause);
+    }
     const float from = st.policy.k();
     const lodgov::Step step = st.policy.update(sig);
     const float k = st.policy.k();
@@ -551,6 +636,8 @@ void frameBoundaryAt(uint64_t nowMs) {
     if (d[cParts] > w.partsMax) w.partsMax = d[cParts];
     if (sig.work == lodgov::Work::Valid) {
         ++w.workSamples;
+        if (sig.source == lodgov::WorkSource::Caller) ++w.callerSamples;
+        else if (sig.source == lodgov::WorkSource::App) ++w.appSamples;
         w.workSum += sig.workMs;
         w.periodSum += sig.periodMs;
         if (sig.workMs > sig.periodMs + lodgov::kOverMarginMs) {
@@ -560,6 +647,7 @@ void frameBoundaryAt(uint64_t nowMs) {
         if (sig.workMs < sig.periodMs - lodgov::kUnderMarginMs) ++w.workUnder;
     } else if (sig.work == lodgov::Work::Invalid) {
         ++w.workInvalid;
+        if (sig.callerAbsent) ++w.callerAbsent;
     }
     for (uint32_t c = 0; c < kCounters; ++c) w.sum[c] += d[c];
     for (uint32_t cls = 0; cls < kClasses; ++cls)
@@ -587,16 +675,18 @@ void configureLine(const State& st) {
     char part[160];
     if (partOk) std::snprintf(part, sizeof(part), "hooked");
     else std::snprintf(part, sizeof(part), "STOOD DOWN (%s): no part counts, the record test still runs", st.partStatus);
+    char work[400];
+    workSourceClause(st.source, st.timingVersion, work, sizeof(work));
     Log::get().note(
         "settlement detail: shadow governor on (%s: shadow, never acts) -- k in [1, %.2f] in steps of 0.05: up one "
-        "step while a frame has >= 200 draw-builder records and the producer's frame work has run more than 0.30 ms "
-        "over the display period for 30 samples, down one while it has run more than 1.00 ms under it for 30, at most "
-        "one step a second, back to 1 after 30 frames under 150 records. It recomputes the engine's LOD tests with "
-        "the LOD scale (ctx+0x30) x k -- the per-part test FUN_1442B3FC0 and the record test FUN_144308B30 at the "
-        "draw-item builder -- and counts what would change; no verdict, draw or mesh is touched. Hooks: draw-item "
-        "builder FUN_1442B4420 %s, per-part test FUN_1442B3FC0 %s. Summaries every 30 s.",
+        "step while a frame has >= 200 draw-builder records and the frame work has run more than 0.30 ms over the "
+        "display period for 30 samples, down one while it has run more than 1.00 ms under it for 30, at most one step "
+        "a second, back to 1 after 30 frames under 150 records; %s. It recomputes the engine's LOD tests with the LOD "
+        "scale (ctx+0x30) x k -- the per-part test FUN_1442B3FC0 and the record test FUN_144308B30 at the draw-item "
+        "builder -- and counts what would change; no verdict, draw or mesh is touched. Hooks: draw-item builder "
+        "FUN_1442B4420 %s, per-part test FUN_1442B3FC0 %s. Summaries every 30 s.",
         st.mode == Mode::Reduced ? "reduced is reserved and behaves as auto in this build" : "auto",
-        st.policy.kMax(), st.builderHooked ? "hooked" : "NOT hooked (no records, no record test)", part);
+        st.policy.kMax(), work, st.builderHooked ? "hooked" : "NOT hooked (no records, no record test)", part);
 }
 
 bool enableLocked(State& st, uint64_t nowMs) {
@@ -662,6 +752,16 @@ void applyConfig(const char* modeText, float kMax, uint64_t nowMs) {
         Log::get().note("settlement detail: the shadow governor could not attach its engine hooks (%s); off, nothing "
                         "observed (fix.settlement_detail = %s).", st.attach, modeName(mode));
         return;
+    }
+    // The configure line names the frame-work signal when a runtime frame has
+    // already said which (the runtime is fixed for the process); else it says
+    // the first frame decides, and frameBoundaryAt logs that.
+    if (st.source == lodgov::WorkSource::None) {
+        const NativeTimingSnapshot t = nativeTimingSnapshot();
+        if (t.active && t.haveCpu && sourceOf(t.cpu.version) != lodgov::WorkSource::None) {
+            st.source = sourceOf(t.cpu.version);
+            st.timingVersion = t.cpu.version;
+        }
     }
     configureLine(st);
 }

@@ -82,7 +82,7 @@ class FrameCycleStats final {
   void waitOwnerBegin(uint64_t token,uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(token&&wait_.token==token&&!wait_.ownerBegin)wait_.ownerBegin=tick;else ++missing_[Reentrant]; }
   void waitOwnerEnd(uint64_t token,uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(token&&wait_.token==token&&wait_.ownerBegin&&tick>=wait_.ownerBegin)wait_.ownerEnd=tick;else ++missing_[BadClock]; }
   void waitCallerEnd(uint64_t token,uint64_t sequence,uint64_t tick,uint64_t nowMs,uint32_t thread,const Shape& shape,bool ok) noexcept {
-    std::lock_guard<std::mutex> l(m_);completedReady_=false;
+    std::lock_guard<std::mutex> l(m_);completedReady_=false;callerWorkFor_=0;callerWorkMeasured_=false;
     if(!ok||!token||wait_.token!=token||!wait_.open||!ordered(wait_.begin,wait_.ownerBegin,wait_.ownerEnd,tick)||thread!=wait_.thread){advanceWindow(nowMs,shape,sequence);bad(!ok?PartialStereo:BadClock);if(wait_.token==token)wait_={};return;}
     if(current_.active&& !sameShape(current_.shape,shape)){++missing_[ShapeChange];if(windowStartMs_)makeReport(lastAttemptedSequence_,nowMs);current_={};}
     else if(current_.active) finishCurrent(tick,nowMs,thread);
@@ -90,6 +90,24 @@ class FrameCycleStats final {
     current_={};current_.active=true;current_.sequence=sequence;current_.waitReturn=tick;
     current_.waitRound=tick-wait_.begin;current_.waitOwner=wait_.ownerEnd-wait_.ownerBegin;
     current_.callerThread=thread;current_.waitThread=thread;current_.shape=shape;current_.atMs=nowMs;wait_={};
+    // The cycle this wait return just closed hands its caller work to the
+    // cycle it opens, and to nothing later.
+    if(callerWorkMeasured_)callerWorkFor_=sequence;
+    callerWorkMeasured_=false;
+  }
+  // The caller thread's wall time outside the pose wait for the cycle that
+  // ended at the wait return which opened the cycle in progress: cycle minus
+  // next-wait roundtrip = beforeFirst + both submit roundtrips + betweenEyes +
+  // afterSecond, the waits inside the submits included (the time from one
+  // WaitGetPoses return to the next one's entry). It crosses to the graphics
+  // half as EdvrNativeTimingFrame::callerWorkMs (version 5) with the frame in
+  // progress, because a cycle completes only at the next wait's return. False
+  // before the first completed cycle, after one that failed (partial stereo,
+  // bad clocks, a scope change), and once the cycle in progress has failed.
+  bool callerWorkForCurrent(double& ms) const noexcept {
+    std::lock_guard<std::mutex> l(m_);
+    if(!current_.active||!current_.sequence||callerWorkFor_!=current_.sequence)return false;
+    ms=callerWorkMs_;return true;
   }
   uint64_t submitCallerBegin(unsigned eye,uint64_t tick,uint32_t thread) noexcept {
     std::lock_guard<std::mutex> l(m_);
@@ -199,6 +217,10 @@ class FrameCycleStats final {
     uint64_t unionBegin=0,unionEnd=0,unionUs=0;for(unsigned i=0;i<current_.handoffCount;++i){const auto& h=current_.handoffs[i];if(h.end>wait_.begin)continue;if(!unionBegin){unionBegin=h.begin;unionEnd=h.end;}else if(h.begin<=unionEnd)unionEnd=(std::max)(unionEnd,h.end);else{unionUs+=unionEnd-unionBegin;unionBegin=h.begin;unionEnd=h.end;}}if(unionBegin)unionUs+=unionEnd-unionBegin;s.handoffNested=double(unionUs)*toMs;
     handoffInvalid_+=current_.handoffInvalid;handoffOverflow_+=current_.handoffOverflow;
     if(std::fabs(s.residual)>0.01||!current_.sequence){bad(BadClock);return;}
+    // A whole, consistent cycle: its caller work stands whether or not the
+    // 30-second window has room to keep the sample (callerWorkForCurrent).
+    callerWorkMs_=s.cycle-s.nextWait;
+    callerWorkMeasured_=std::isfinite(callerWorkMs_)&&callerWorkMs_>=0;
     if(!admit(s,current_.shape,nowMs))return;
     completed_={};completed_.sequence=current_.sequence;completed_.generation=current_.shape.generation;
     completed_.featureEpoch=current_.shape.featureEpoch;completed_.waitReturnUs=current_.waitReturn;
@@ -230,6 +252,7 @@ class FrameCycleStats final {
     report_.handoffMissing=handoffMissing_;report_.handoffInvalid=handoffInvalid_;report_.handoffOverflow=handoffOverflow_;ready_=true;count_=0;attempted_=0;missing_={};windowStart_=windowStartMs_=lastAttemptedSequence_=0;observedWaitThread_=observedSubmitThread_=0;observedThreadMismatch_=false;handoffMissing_=handoffInvalid_=handoffOverflow_=0;}
   Dist manual(std::array<double,capacity>&v)const{double t=0;for(unsigned i=0;i<count_;++i)t+=v[i];std::sort(v.begin(),v.begin()+count_);auto p=[&](unsigned x){return count_?v[(count_*x+99)/100-1]:0;};return{count_?t/count_:0,p(50),p(95)};}
   mutable std::mutex m_;bool enabled_=false,everComplete_=false,ready_=false,completedReady_=false;Wait wait_{};Current current_{};Completed completed_{};
+  double callerWorkMs_=0;bool callerWorkMeasured_=false;uint64_t callerWorkFor_=0;
   std::unique_ptr<std::array<Sample,capacity>> samples_;std::array<uint64_t,MissingCount> missing_{};unsigned count_=0;uint64_t attempted_=0,window_=0,windowStart_=0,windowStartMs_=0,lastAttemptedSequence_=0,nextToken_=0;uint64_t handoffMissing_=0,handoffInvalid_=0,handoffOverflow_=0;Shape shape_{};uint32_t firstThread_=0,waitThread_=0,observedWaitThread_=0,observedSubmitThread_=0;bool observedThreadMismatch_=false;Report report_{};
 };
 } // namespace edvr::openxr
