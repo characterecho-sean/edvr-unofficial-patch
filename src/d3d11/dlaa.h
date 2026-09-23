@@ -27,6 +27,93 @@ struct ID3D11Texture2D;
 
 namespace edvr {
 
+// The DLSS quality-mode ladder's pure decision, factored out of the NGX
+// glue below so a rig with no SDK and no device (tools/dlaa_mode_test)
+// can drive it directly: four modes, largest render fraction first,
+// matching the order NVIDIA's own enum has always been walked in.
+// docs/anti-aliasing.md, "DLSS mode selection hardened (2026-09-23)".
+enum class DlssMode : int { Quality = 0, Balanced = 1, Performance = 2, UltraPerformance = 3 };
+constexpr int kDlssModeCount = 4;
+constexpr const char* kDlssModeNames[kDlssModeCount] = {"quality", "balanced", "performance",
+                                                         "ultra performance"};
+
+// One mode's answer to NGX_DLSS_GET_OPTIMAL_SETTINGS for a given output
+// size: `ok` false means the query itself failed and the rest of the
+// struct is unset. min/max are the INPUT render size this mode accepts,
+// inclusive at both ends; opt is the runtime's own recommended render
+// size for this mode at this output; sharpness is its suggestion, kept
+// only for parity with the DLAA-equal-size query (nothing downstream
+// reads it, same as before this hardening).
+struct DlssModeRange {
+    bool     ok = false;
+    unsigned optW = 0, optH = 0;
+    unsigned minW = 0, minH = 0;
+    unsigned maxW = 0, maxH = 0;
+    float    sharpness = 0.0f;
+};
+
+// The render-ratio fallback shared by every selection site that cannot
+// trust a range query -- ensureFeature when NGX will not name ranges at
+// all, or named an incomplete ladder, and evaluateCrop's per-frame crop
+// mode, which is never range-queried. One helper, one set of thresholds:
+// before the 2026-09-23 hardening these were two separate copies (0.66
+// with no epsilon in one, 0.667 with +0.002 in the other) that could pick
+// different modes for the same ratio. The epsilon keeps an exact half on
+// Performance rather than Ultra Performance (a 1/2-scale input is not the
+// 1/3-scale mode; the evaluateCrop review of 2026-09-05, F1).
+inline DlssMode dlssModeByRatio(unsigned w, unsigned outW) {
+    if (!outW) return DlssMode::UltraPerformance;
+    const float ratio = static_cast<float>(w) / static_cast<float>(outW) + 0.002f;
+    return ratio >= 0.667f ? DlssMode::Quality
+         : ratio >= 0.58f  ? DlssMode::Balanced
+         : ratio >= 0.5f   ? DlssMode::Performance
+         :                   DlssMode::UltraPerformance;
+}
+
+// Chooses a mode from four already-queried ranges (ensureFeature now
+// queries all four every time -- see the 2026-09-23 entry in
+// docs/anti-aliasing.md: a `break` on the first failed query used to hide
+// every mode below it on the ladder, and cost a flight where ultra
+// performance should have held a 1229x1412 input against a 3070x3032
+// output but was, on the evidence available, never even tried). In order:
+//   1. Among modes whose [min,max] holds w x h (>= min, <= max on both
+//      axes -- exactly-at-minimum stays in that mode), the one whose own
+//      optimal render size is nearest w wins.
+//   2. Otherwise, if every query succeeded, the ladder is a complete and
+//      honest "no": returns false (a real refusal).
+//   3. Otherwise -- no mode held it AND at least one query failed -- the
+//      ladder is incomplete, not a real refusal: the nearest mode by
+//      ratio is picked and NGX's own create call decides (its failure
+//      path already logs the NGX result).
+// On a pick, *fromRange says whether it came from rule 1 (*range is that
+// mode's own queried data) or rule 3 (a ratio guess: *range is zeroed,
+// since nothing about it is actually known).
+inline bool dlssChooseMode(const DlssModeRange modes[kDlssModeCount], unsigned w, unsigned h,
+                           unsigned outW, DlssMode* chosen, bool* fromRange,
+                           DlssModeRange* range) {
+    int best = -1;
+    unsigned bestDiff = ~0u;
+    bool anyFailed = false;
+    for (int k = 0; k < kDlssModeCount; ++k) {
+        const DlssModeRange& m = modes[k];
+        if (!m.ok) { anyFailed = true; continue; }
+        const bool inRange = w >= m.minW && h >= m.minH && w <= m.maxW && h <= m.maxH;
+        const unsigned diff = m.optW > w ? m.optW - w : w - m.optW;
+        if (inRange && diff < bestDiff) { best = k; bestDiff = diff; }
+    }
+    if (best >= 0) {
+        if (chosen) *chosen = static_cast<DlssMode>(best);
+        if (fromRange) *fromRange = true;
+        if (range) *range = modes[best];
+        return true;
+    }
+    if (!anyFailed) return false;
+    if (chosen) *chosen = dlssModeByRatio(w, outW);
+    if (fromRange) *fromRange = false;
+    if (range) *range = DlssModeRange{};
+    return true;
+}
+
 // Is DLAA usable on this device? Initialises NGX on the first ask (once
 // per session, whatever the answer) and says why not when it is not:
 // the reason is a static string for the log. Cheap after the first call.

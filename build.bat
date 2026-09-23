@@ -798,6 +798,17 @@ if errorlevel 1 ( echo [edvr] ERROR: native cull policy test build failed & exit
 "%BUILD%\native_cull_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_dlaa_mode_test
+echo [edvr] === dlaa_mode_test.exe ===
+if not exist "%OBJ%\dlaa_mode" mkdir "%OBJ%\dlaa_mode"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\dlaa_mode\\" /Fe"%BUILD%\dlaa_mode_test.exe" ^
+    "tools\dlaa_mode_test\dlaa_mode_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: dlaa_mode_test build failed & exit /b 1 )
+"%BUILD%\dlaa_mode_test.exe" --dry-run || exit /b 1
+"%BUILD%\dlaa_mode_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_native_temporal_test
 echo [edvr] === native_temporal_test.exe ===
 if not exist "%OBJ%\native_temporal" mkdir "%OBJ%\native_temporal"
