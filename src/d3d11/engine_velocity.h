@@ -188,11 +188,25 @@ void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera,
 // has not been for kSourceIdleFrames present frames. The views and their
 // refusals follow engineVelocityViews; the screen shader (screen_motion.h)
 // consumes them and hands back its per-eye-draw pixel counts.
+//
+// The naming also says which camera the source's engine data is for: the
+// scene constants the naming draw reads (screen_motion's terrain/scene draw,
+// whose camera its camera term uses). The source is drawn by more than one
+// camera (flight 5, 2026-09-23 140351: a few pool draws under rows 270..275
+// that equal the world's standing still and differ walking dropped every
+// walking frame under the eyes' first-draw rule), so each source pool draw
+// is held to the naming's camera and a draw that is not -- before this
+// frame's naming, other scene constants, rows unseen, other rows -- is
+// declined, not substituted, without dropping the frame.
 constexpr int kEngineVelocitySourceEye = 2;
 constexpr uint32_t kSourceIdleFrames = 120;
-void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth);
+void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants);
 bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews* out);
+// The screen shader's panel counts without diagnostics: one present frame in
+// kPanelSampleFrames, one eye pixel in kPanelSampleStride squared (a grid on
+// the eye pixel), raw; pixelStride 1 = every pixel (diagnostics, motion_source).
+constexpr uint32_t kPanelSampleFrames = 300, kPanelSampleStride = 4;
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
-                                   uint32_t eyeDraws);
+                                   uint32_t eyeDraws, uint32_t pixelStride);
 
 }  // namespace edvr

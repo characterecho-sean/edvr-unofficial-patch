@@ -36,10 +36,10 @@ bool Config::getBool(const char* key,bool def)const{
 // engine_velocity.cpp is not linked here: the on-foot engine path is driven
 // by tools/engine_velocity_test (panel_tests.h). No source views: the screen
 // shader keeps the camera term, byte-identical to before.
-unsigned testSourceNotes=0;
-void engineVelocityNoteSource(ID3D11Texture2D*){++testSourceNotes;}
+unsigned testSourceNotes=0;ID3D11Buffer* testSourceScene=nullptr;
+void engineVelocityNoteSource(ID3D11Texture2D*,ID3D11Buffer* scene){++testSourceNotes;testSourceScene=scene;}
 bool engineVelocitySourceViews(ID3D11Texture2D*,EngineVelocityViews* out){if(out)*out=EngineVelocityViews{};return false;}
-void engineVelocityNotePanelPixels(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t){}
+void engineVelocityNotePanelPixels(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t){}
 void* bindingGet(BindSlot s){return s==BindSlot::Rtv0?testRtv:nullptr;}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:s==BindSlot::Ps?testPs:0;}
 bool bindingResolve(void* view,ResourceInfo* info){
@@ -115,6 +115,7 @@ int main(int argc,char** argv){
     sourceDraw();check(!g.depth,"source work waits for actual screen");check(!testSourceNotes,"no source named to the engine path before the screen");
     screenDraw(0);screenDraw(1);screenMotionFrameBoundary(ctx.Get());
     sourceDraw();check(testSourceNotes==1,"each source frame names its depth to the engine path (its MRT6 slot target follows it)");
+    check(testSourceScene==sc.Get(),"the naming hands the engine path the camera its draw reads (VS b1), for the source's camera rule");
     screenDraw(0);screenDraw(1);check(!screenMotionView(0,W,H),"first source frame has no invented history");
     screenMotionFrameBoundary(ctx.Get());source[275][0]=.1f;sourceDraw();
     // The game clears depth later in the frame: read completed depth now,

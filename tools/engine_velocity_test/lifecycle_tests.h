@@ -30,6 +30,13 @@
 //       the screen's views given from the second frame; an unnamed depth of
 //       the same shape gets nothing; kSourceIdleFrames without the source
 //       release it (logged).
+//   S2  the source's camera rule (flight 5, 2026-09-23 140351): the walk's
+//       interleaving -- the naming's world rows, two pool draws of another
+//       camera (a 4 cm bob), the world's draws -- drops an EYE-frame (the
+//       eyes' rule, unchanged) but on the source declines only the other
+//       camera's draws: every frame given from the second, the view's scene
+//       constants the world's rows exactly, MRT6 the world's slot only; a
+//       draw before the naming declined as such; standing, nothing declined.
 //   R6  the emit hook not installed: STOOD DOWN at configure and in the 30 s
 //       block, no substitution, every view refused; installed: stands up.
 //   R5  CsStageSave (cs_stage_save.h): sentinels in every compute slot the
@@ -298,16 +305,20 @@ float4 main(PsIn i) : SV_Target0 { return float4(i.uv, 1, 1); }
         UINT strides[2] = {12, 8}, offsets[2] = {0, 0};
         ctx->IASetVertexBuffers(0, 2, vbs, strides, offsets);
         setVs();
-        for (int i = 0; i < count; ++i) {
-            edvr::engineVelocityBeforeDraw(ctx, false);
-            ctx->DrawInstanced(4, 1, 0, instance == 9 ? 1 : 0);
-        }
+        for (int i = 0; i < count; ++i) sourceDraw(instance);
     }
-    // An on-foot frame: screen_motion names the source, the game draws it.
+    // One more pool draw of the source pass, its bindings as they stand.
+    void sourceDraw(UINT instance = 5) {
+        edvr::engineVelocityBeforeDraw(ctx, false);
+        ctx->DrawInstanced(4, 1, 0, instance == 9 ? 1 : 0);
+    }
+    // An on-foot frame as the game draws it: the naming draw's cb1 write,
+    // screen_motion naming the source with the camera that draw reads, then
+    // the pool draws.
     void sourceFrame(bool named = true) {
         beginFrame();
-        if (named) edvr::engineVelocityNoteSource(sourceDepth.Get());
         writeScene(sceneA.Get(), rows[0]);
+        if (named) edvr::engineVelocityNoteSource(sourceDepth.Get(), sceneA.Get());
         sourcePass();
     }
     bool sourceViews(edvr::EngineVelocityViews* out = nullptr) {
@@ -533,6 +544,23 @@ inline std::vector<float> readTexture(const Harness& h, ID3D11Resource* resource
     std::vector<float> out(size_t(d.Width) * d.Height * channels);
     for (UINT y = 0; y < d.Height; ++y)
         std::memcpy(&out[size_t(y) * d.Width * channels], static_cast<const BYTE*>(m.pData) + y * m.RowPitch, d.Width * channels * 4);
+    h.context->Unmap(staging.Get(), 0);
+    return out;
+}
+
+// A buffer's contents as floats (the views' scene constants).
+inline std::vector<float> readBuffer(const Harness& h, ID3D11Buffer* buffer) {
+    D3D11_BUFFER_DESC d{};
+    buffer->GetDesc(&d);
+    d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
+    d.StructureByteStride = 0;
+    ComPtr<ID3D11Buffer> staging;
+    h.check(SUCCEEDED(h.device->CreateBuffer(&d, nullptr, &staging)), "life: buffer staging");
+    h.context->CopyResource(staging.Get(), buffer);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    h.check(SUCCEEDED(h.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)), "life: map buffer staging");
+    std::vector<float> out(d.ByteWidth / 4);
+    std::memcpy(out.data(), m.pData, out.size() * 4);
     h.context->Unmap(staging.Get(), 0);
     return out;
 }
@@ -864,6 +892,106 @@ inline void run(const Harness& h) {
     for (uint32_t i = 0; i < edvr::kSourceIdleFrames + 2; ++i) { g.beginFrame(); g.endFrame(); }
     h.check(logged("on-foot source slot target released (56x20", mark), "S1: the slot target is released when the source stops");
     h.check(!g.sourceViews(), "S1: released, nothing is given");
+
+    // S2: the source's camera rule (flight 5, 2026-09-23 140351: every walking
+    // source frame dropped for "scene rows 270..275 changed" after two runs of
+    // vs_AACF draws, the first substituted). The frames as the game draws them
+    // walking: the naming draw reads the world's rows W(k); two pool draws of
+    // another camera (W(k) standing, W(k) with a 4 cm bob walking); the
+    // world's pool draws under W(k) again. The same interleaving in an EYE
+    // pass still drops the eye-frame (the eyes' rule, unchanged: the flight's
+    // drop). On the source: the other camera's draws declined and counted by
+    // reason, family and rows; the world's substituted; every frame given from
+    // the second; the view's scene constants the world's rows exactly, this
+    // frame's and last; MRT6 names only the world's slot. A draw before this
+    // frame's naming (last frame's rows still in cb1) is declined as such; a
+    // standing frame declines nothing.
+    {
+        const auto world = [&](int k) {
+            std::vector<float> r = g.rows[0];
+            r[275 * 4 + 0] = 0.05f * float(k); r[275 * 4 + 2] = -0.05f * float(k);   // walking: the position moves
+            return r;
+        };
+        const auto bobbed = [&](int k) { std::vector<float> r = world(k); r[275 * 4 + 1] += 0.04f; return r; };
+        mark = g_log.size();
+        g.ordinaryFrame();
+        g.beginFrame();
+        g.writeScene(g.sceneA.Get(), bobbed(1));
+        g.pass(0, 2, 9);
+        g.writeScene(g.sceneA.Get(), world(1));
+        g.draw();
+        g.writeScene(g.sceneA.Get(), g.rows[1]);
+        g.pass(1);
+        h.check(!g.views(0) && g.views(1), "S2: the flight's interleaving in an eye pass still drops that eye-frame (the eyes' rule)");
+        g.endFrame(true);
+        h.check(number(lastLine(joined, mark), "scene rows 270..275 changed ") == 1, "S2: counted as the flight counted it");
+        mark = g_log.size();
+        g.makeSource(40, 24);
+        const auto walk = [&](int k, bool walking, bool staleFirst) {
+            g.beginFrame();
+            if (staleFirst) {   // a pool draw under last frame's rows, before this frame's naming
+                g.writeScene(g.sceneA.Get(), world(k - 1));
+                g.sourcePass(1, 9);
+            }
+            g.writeScene(g.sceneA.Get(), world(k));
+            edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+            g.writeScene(g.sceneA.Get(), walking ? bobbed(k) : world(k));
+            if (staleFirst) { g.sourceDraw(9); g.sourceDraw(9); }
+            else g.sourcePass(2, 9);   // the other camera's two draws, first in the frame
+            g.writeScene(g.sceneA.Get(), world(k));
+            for (int i = 0; i < 3; ++i) g.sourceDraw(5);   // the world's
+        };
+        bool given[5] = {};
+        for (int k = 1; k <= 4; ++k) {
+            walk(k, true, k == 4);
+            edvr::EngineVelocityViews v{};
+            given[k] = g.sourceViews(&v);
+            if (given[k] && k == 3) {
+                const auto now = readBuffer(h, v.sceneNow), before = readBuffer(h, v.scenePrev);
+                const auto want = world(3), wantBefore = world(2);
+                h.check(now.size() >= 276 * 4 && std::memcmp(&now[270 * 4], &want[270 * 4], 24 * 4) == 0,
+                        "S2: the source's scene constants now are the world's rows 270..275, exactly");
+                h.check(before.size() >= 276 * 4 && std::memcmp(&before[270 * 4], &wantBefore[270 * 4], 24 * 4) == 0,
+                        "S2: and last frame's are the world's rows of last frame");
+                ComPtr<ID3D11Resource> slotsRes;
+                v.slots->GetResource(&slotsRes);
+                UINT w = 0, wd = 0;
+                const auto slots = readTexture(h, slotsRes.Get(), 2, &w);
+                const auto depth = readTexture(h, g.sourceDepth.Get(), 2, &wd);
+                unsigned five = 0, nine = 0;
+                for (size_t i = 0; i < slots.size() / 2; ++i) {
+                    uint32_t s = 0;
+                    const int kind = shader_tests::decodeSlot(slots[i * 2], slots[i * 2 + 1], depth[i * 2], &s);
+                    if (kind == 1 && s == 5) ++five;
+                    if (kind == 1 && s == 9) ++nine;
+                }
+                h.check(five > 0 && nine == 0, "S2: MRT6 names the world's slot and never the other camera's");
+            }
+            release(v);
+            g.endFrame(k == 4);
+        }
+        h.check(!given[1] && given[2] && given[3] && given[4], "S2: walking, every source frame is given from the second");
+        // Counted per CHECK -- a slow-path visit: a new binding or a cb1
+        // write; a draw repeating the last one's state is its twin -- so one
+        // world check a frame, one other-camera check, the early one.
+        line = lastLine("engine motion: on foot:", mark);
+        const auto shown = [&](bool ok) { if (!ok) std::printf("    on-foot line| %s\n", line.c_str()); return ok; };
+        h.check(shown(line.find("frames dropped: none") != std::string::npos), "S2: no source frame dropped");
+        h.check(shown(number(line, "namings ") == 4 && number(line, "rows not seen ") == 0), "S2: four namings, their rows seen");
+        h.check(shown(number(line, "held to the naming's camera ") == 4), "S2: each frame's world check held to the naming's camera");
+        h.check(shown(line.find("declined 5 in 4 frames") != std::string::npos), "S2: five checks declined, in all four frames");
+        h.check(shown(number(line, "another camera ") == 4), "S2: the other camera's, one a frame, as another camera");
+        h.check(shown(number(line, "before this frame's naming ") == 1), "S2: the draw before the naming as such");
+        h.check(shown(number(line, "275 on ") == 4 && number(line, "270..272 on ") == 0 && number(line, "273 on ") == 0 &&
+                      number(line, "274 on ") == 0), "S2: the other camera changed row 275 only");
+        h.check(shown(line.find("its position up to 0.040 m") != std::string::npos), "S2: by the bob's 4 cm");
+        h.check(shown(line.find("by family: vs_EB5234DB6ADB491D 4") != std::string::npos), "S2: counted by family");
+        mark = g_log.size();
+        for (int k = 0; k < 2; ++k) { walk(5, false, false); g.sourceViews(); g.endFrame(k == 1); }
+        line = lastLine("engine motion: on foot:", mark);
+        h.check(shown(number(line, "declined ") == 0 && number(line, "held to the naming's camera ") == 4),
+                "S2: standing still every check is held and none declined");
+    }
 
     // P2 (the performance review, item 2): eligibility before preparation. An
     // eye whose family draws all carry an unkeyed pixel shader prepares
