@@ -35,10 +35,17 @@ void Policy::reset() noexcept {
     lastStepMs_ = 0;
     next_ = 0;
     emptyRing();
-    stepOver_ = 0;
+    periodMs_ = 0;
+    haveClock_ = false;
+    lastClockMs_ = 0;
+    cycle_ = Cycle{};
+    triggered_ = started_ = downed_ = kicked_ = atMax_ = false;
+    triggerSinceMs_ = lastMissMs_ = lastDownMs_ = lastKickMs_ = atMaxSinceMs_ = kickHoldUntilMs_ = 0;
+    stepMisses_ = 0;
     stepMeanExcessMs_ = 0;
     upQuanta_ = 0;
     upHeld_ = false;
+    stepCleanMs_ = kickHeldMs_ = 0;
 }
 
 double Policy::meanExcessMs() const noexcept {
@@ -48,47 +55,82 @@ double Policy::meanExcessMs() const noexcept {
     return sum / count_;
 }
 
+bool Policy::ceilingMissing(uint64_t nowMs) const noexcept {
+    if (!triggered_ || !atMax_) return false;
+    const uint64_t since = triggerSinceMs_ > atMaxSinceMs_ ? triggerSinceMs_ : atMaxSinceMs_;
+    return nowMs - since >= kCeilingMs;
+}
+
 // One valid sample into the ring; once it is full the oldest leaves, and its
-// over flag with it.
-void Policy::push(double excessMs, bool over) noexcept {
+// flags with it.
+void Policy::push(double excessMs, bool miss, bool under) noexcept {
     if (count_ == kSampleWindow) {
-        if (over_[next_]) --overCount_;
+        if (miss_[next_]) --missCount_;
+        if (under_[next_]) --underCount_;
     } else {
         ++count_;
     }
     excess_[next_] = excessMs;
-    over_[next_] = over;
-    if (over) ++overCount_;
+    miss_[next_] = miss;
+    under_[next_] = under;
+    if (miss) ++missCount_;
+    if (under) ++underCount_;
     next_ = (next_ + 1) % kSampleWindow;
 }
 
+// Every update ends here: since when k has sat at k_max (the ceiling line's
+// clock) follows whatever the update did to it.
+Step Policy::finish(Step step, uint64_t nowMs) noexcept {
+    const bool atMax = steps_ == maxSteps_;
+    if (atMax && !atMax_) atMaxSinceMs_ = nowMs;
+    atMax_ = atMax;
+    return step;
+}
+
 Step Policy::update(const FrameSignals& s) noexcept {
+    // "No cycle has taken two slots for 5 s" counts from the first update
+    // until there is one.
+    if (!started_) {
+        started_ = true;
+        lastMissMs_ = s.nowMs;
+    }
+    cycle_ = Cycle{};
     // On foot (the game's Status.json, the flag the on-foot frame pacing keys
     // on): the arc measured the cockpit only, so k is held at 1 exactly as
-    // outside a settlement -- at once, the settlement, the samples and a
-    // pending clamp forgotten -- for as long as it lasts. Back aboard it
+    // outside a settlement -- at once, the settlement, the samples, the clock
+    // and a pending clamp forgotten -- for as long as it lasts. Back aboard it
     // starts over: 200 records, then 30 samples, before a step.
     if (s.onFoot) {
         clampPending_ = inSettlement_ = false;
         sparse_ = 0;
         emptyRing();
+        haveClock_ = triggered_ = false;
         if (steps_ > 0) {
             steps_ = 0;
             lastStepMs_ = s.nowMs;
             stepped_ = true;
-            return Step::Foot;
+            return finish(Step::Foot, s.nowMs);
         }
-        return Step::None;
+        return finish(Step::None, s.nowMs);
     }
-    // A lowered k_max takes effect at once, whatever the signals say.
-    if (clampPending_) {
-        clampPending_ = false;
-        if (steps_ > maxSteps_) {
-            steps_ = maxSteps_;
-            lastStepMs_ = s.nowMs;
-            stepped_ = true;
-            return Step::Clamp;
+    // This boundary's cycle: the interval since the previous one, when that
+    // one may be measured from. A two-slot cycle of any kind stamps the down
+    // rule's clock, with or without a new sample (the period is then the
+    // last sample's).
+    if (s.clockMs >= 0.0) {
+        if (haveClock_) {
+            cycle_.measured = true;
+            cycle_.ms = s.clockMs - lastClockMs_;
         }
+        lastClockMs_ = s.clockMs;
+        haveClock_ = true;
+    } else {
+        haveClock_ = false;
+    }
+    const double period = s.work == Work::Valid ? s.periodMs : periodMs_;
+    if (cycle_.measured && period > 0.0 && cycle_.ms > kMissFactor * period) {
+        cycle_.missed = true;
+        lastMissMs_ = s.nowMs;
     }
     // Density, with hysteresis: in at 200 records a frame; out only after
     // 30 consecutive frames under 150, and then k is 1 at once.
@@ -100,61 +142,103 @@ Step Policy::update(const FrameSignals& s) noexcept {
             inSettlement_ = false;
             sparse_ = 0;
             emptyRing();
+            haveClock_ = triggered_ = false;   // the next boundary has no interval
             if (steps_ > 0) {
                 steps_ = 0;
                 lastStepMs_ = s.nowMs;
                 stepped_ = true;
-                return Step::Reset;
+                return finish(Step::Reset, s.nowMs);
             }
-            return Step::None;
+            return finish(Step::None, s.nowMs);
         }
     } else {
         sparse_ = 0;
     }
-    // Frame work: the latest 30 valid samples, each over (a missed slot) or
-    // not. A frame with no new sample holds them; a bad sample empties them.
+    // Frame work: the latest 30 valid samples, each with its cycle -- two
+    // slots with the CPU at the period (ours) or under it (not ours). A frame
+    // with no new sample holds them; a bad sample empties them, and the next
+    // boundary has no interval.
     if (s.work == Work::Invalid) {
         emptyRing();
+        haveClock_ = false;
     } else if (s.work == Work::Valid) {
-        push(s.workMs - s.periodMs, s.workMs > s.periodMs + kOverMarginMs);
+        periodMs_ = s.periodMs;
+        cycle_.cpuUnder = cycle_.missed && s.workMs < s.periodMs - kCpuUnderMarginMs;
+        push(s.workMs - s.periodMs, cycle_.missed && !cycle_.cpuUnder, cycle_.cpuUnder);
+    }
+    // The trigger -- 3 or more of the 30 took two slots, the CPU's -- and
+    // since when it has held without a break.
+    const bool trigger = count_ == kSampleWindow && missCount_ >= kUpMisses;
+    if (trigger && !triggered_) triggerSinceMs_ = s.nowMs;
+    triggered_ = trigger;
+    // A lowered k_max takes effect at once, whatever the signals say.
+    if (clampPending_) {
+        clampPending_ = false;
+        if (steps_ > maxSteps_) {
+            steps_ = maxSteps_;
+            lastStepMs_ = s.nowMs;
+            stepped_ = true;
+            return finish(Step::Clamp, s.nowMs);
+        }
     }
     // reduced: k_max for as long as the settlement lasts -- at once, no ramp,
-    // no frame-work steps.
+    // no frame-work steps, no kick.
     if (fixed_) {
         if (inSettlement_ && steps_ != maxSteps_) {
             steps_ = maxSteps_;
             lastStepMs_ = s.nowMs;
             stepped_ = true;
-            return Step::Enter;
+            return finish(Step::Enter, s.nowMs);
         }
-        return Step::None;
+        return finish(Step::None, s.nowMs);
     }
-    if (stepped_ && s.nowMs - lastStepMs_ < kRampIntervalMs) return Step::None;
-    if (count_ < kSampleWindow) return Step::None;   // 30 samples before any step
+    if (count_ < kSampleWindow) return finish(Step::None, s.nowMs);   // 30 samples before any step
     const double mean = meanExcessMs();
-    // Up while 3 or more of the 30 missed their slot: 0.25 while the 30 ran
-    // more than 1.0 ms over on average, else 0.05; held to k_max either way.
-    if (inSettlement_ && s.records >= kSettlementRecords && overCount_ >= kUpMisses && steps_ < maxSteps_) {
-        stepOver_ = overCount_;
+    const bool dense = inSettlement_ && s.records >= kSettlementRecords;
+    // The kick: the trigger has held 3 s below k_max, the steps have not
+    // cleared it -- k_max at once, so consecutive frames fit and the runtime
+    // returns to full rate. Held 2 s at least; at most one per 30 s.
+    if (trigger && dense && steps_ < maxSteps_ && s.nowMs - triggerSinceMs_ >= kKickAfterMs &&
+        (!kicked_ || s.nowMs - lastKickMs_ >= kKickIntervalMs)) {
+        kickHeldMs_ = s.nowMs - triggerSinceMs_;
+        stepMisses_ = missCount_;
+        stepMeanExcessMs_ = mean;
+        steps_ = maxSteps_;
+        kicked_ = true;
+        lastKickMs_ = s.nowMs;
+        kickHoldUntilMs_ = s.nowMs + kKickHoldMs;
+        lastStepMs_ = s.nowMs;
+        stepped_ = true;
+        return finish(Step::Kick, s.nowMs);
+    }
+    // Up, at most one a second, while the trigger holds: 0.25 while the 30
+    // ran more than 1.0 ms over on average, else 0.05; held to k_max.
+    if (trigger && dense && steps_ < maxSteps_ && !(stepped_ && s.nowMs - lastStepMs_ < kRampIntervalMs)) {
+        stepMisses_ = missCount_;
         stepMeanExcessMs_ = mean;
         upQuanta_ = mean > kCoarseExcessMs ? kCoarseQuanta : 1;
         upHeld_ = steps_ + upQuanta_ > maxSteps_;
         steps_ = upHeld_ ? maxSteps_ : steps_ + upQuanta_;
         lastStepMs_ = s.nowMs;
         stepped_ = true;
-        return Step::Up;
+        return finish(Step::Up, s.nowMs);
     }
-    // Down, 0.05, when none of the 30 did and they had a millisecond to spare.
-    // Anything between holds: the dead band.
-    if (overCount_ == 0 && mean < -kUnderMarginMs && steps_ > 0) {
-        stepOver_ = 0;
+    // Down, 0.05, only once no cycle has taken two slots for 5 s and the 30
+    // have a millisecond to spare; then no sooner than 5 s again, and never
+    // inside a kick's hold. Anything else holds.
+    if (steps_ > 0 && s.nowMs - lastMissMs_ >= kCleanMs && mean < -kUnderMarginMs &&
+        (!downed_ || s.nowMs - lastDownMs_ >= kDownIntervalMs) && s.nowMs >= kickHoldUntilMs_) {
+        stepMisses_ = missCount_;
         stepMeanExcessMs_ = mean;
+        stepCleanMs_ = s.nowMs - lastMissMs_;
         --steps_;
+        downed_ = true;
+        lastDownMs_ = s.nowMs;
         lastStepMs_ = s.nowMs;
         stepped_ = true;
-        return Step::Down;
+        return finish(Step::Down, s.nowMs);
     }
-    return Step::None;
+    return finish(Step::None, s.nowMs);
 }
 
 }  // namespace lodgov
@@ -612,7 +696,14 @@ struct Window {
     uint32_t workSamples = 0, workOver = 0, workUnder = 0, workInvalid = 0;
     uint32_t callerSamples = 0, appSamples = 0;   // the valid samples by signal (WorkSource)
     uint32_t callerAbsent = 0;   // version 5 frames without valid caller work (inside workInvalid)
-    uint32_t denseOver = 0;   // over-budget samples in frames with >= 200 records: what a rise needs
+    // The display slots, over the valid samples with a measured cycle: how
+    // many, how many took two slots, how many of those had the CPU under the
+    // period (not ours), and the CPU's in frames with >= 200 records (what a
+    // rise needs).
+    uint32_t cycles = 0, slotMisses = 0, slotCpuUnder = 0, denseOurMisses = 0;
+    uint32_t kicks = 0;
+    double ceilingMs = 0;         // wall time at k_max with the trigger holding
+    bool ceilingLogged = false;   // the ceiling line, once a window
     double workSum = 0, periodSum = 0;
     uint64_t recordsSum = 0, partsSum = 0;
     uint32_t recordsMax = 0, partsMax = 0;
@@ -661,6 +752,7 @@ struct State {
     uint64_t footStartMs = 0;
     uint32_t footFrames = 0;
     bool journalNoted = false;
+    uint64_t prevBoundaryMs = 0;   // the previous boundary's wall time (the ceiling clock's steps)
 };
 
 std::mutex g_mutex;
@@ -818,23 +910,25 @@ void logSummary(State& st, uint64_t nowMs) {
     else
         std::snprintf(eyesText, sizeof(eyesText), "eye views NOT named now (named on %u of %u frames)", w.eyeFrames,
                       w.frames);
-    const char* stuck = "";
+    char stuck[200] = "";
     if (w.kHigh <= 1.0f) {
         if (w.footFrames >= w.frames)
-            stuck = "; k stayed 1: on foot the whole window (the governor is for the cockpit only)";
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: on foot the whole window (the governor is for the cockpit only)");
         else if (!w.recordsSum)
-            stuck = "; k stayed 1: no draw-item builder calls (no settlement records, or the builder hook ran nothing)";
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: no draw-item builder calls (no settlement records, or the "
+                          "builder hook ran nothing)");
         else if (!w.denseFrames)
-            stuck = "; k stayed 1: never 200 builder records in a frame";
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: never 200 builder records in a frame");
         else if (st.policy.fixed())
-            stuck = "";
+            stuck[0] = '\0';
         else if (!w.workSamples)
-            stuck = "; k stayed 1: no valid frame-work sample from the native runtime";
-        else if (!w.denseOver)
-            stuck = "; k stayed 1: the frame work never ran 0.30 ms over the period in a frame with 200 records";
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: no valid frame-work sample from the native runtime");
+        else if (!w.denseOurMisses)
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: no cycle took two display slots with the caller work at "
+                          "the period in a frame with 200 records%s", w.slotCpuUnder ? " (only with the CPU under: not ours)" : "");
         else
-            stuck = "; k stayed 1: never 3 of the last 30 samples over budget in a frame with 200 records (1-2 is the "
-                    "dead band)";
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: never 3 of the last 30 cycles took two display slots with "
+                          "the caller work at the period (1-2 is the dead band)");
     }
     // The LOD scale: the game's own (from the setter), what the tests ran at
     // (the builder's read), and the setter's counts. A write path that never
@@ -894,16 +988,18 @@ void logSummary(State& st, uint64_t nowMs) {
         "settlement detail (%s): %.1f s, %u frames: k now %.2f, effective s x k %s (window %.2f..%.2f of max %.2f; %u "
         "up (%u by 0.25), %u down, %u resets, %u clamps%s; held on foot %u frames); builder records/frame %.1f (max "
         "%u, >= 200 on %u frames), part tests/frame %.1f (max %u); frame work = %s: %.2f ms mean vs period %.2f ms "
-        "over %u samples (over by > 0.30 ms: %u, under by > 1.00 ms: %u, invalid %u, caller work absent %u); LOD "
-        "scale: game s %s, held %s (k %.2f); setter calls %u (scaled %u) on %u pointers (called with %u; builder "
-        "contexts %u); implausible %u; faults %u; %s%s%s.",
+        "over %u samples (over by > 0.30 ms: %u, under by > 1.00 ms: %u, invalid %u, caller work absent %u); slots "
+        "missed %u of %u (CPU under %u); kicks %u; at the ceiling with misses %.1f s; LOD scale: game s %s, held %s "
+        "(k %.2f); setter calls %u (scaled %u) on %u pointers (called with %u; builder contexts %u); implausible %u; "
+        "faults %u; %s%s%s.",
         tag, double(nowMs - w.startMs) / 1000.0, w.frames, kNow, effective, w.kLow, w.kHigh, st.policy.kMax(), w.up,
         w.upCoarse, w.down, w.resets, w.clamps, enters, w.footFrames, perFrame(w.recordsSum, w.frames), w.recordsMax,
         w.denseFrames,
         perFrame(w.partsSum, w.frames), w.partsMax, source, w.workSamples ? w.workSum / w.workSamples : 0.0,
         w.workSamples ? w.periodSum / w.workSamples : 0.0, w.workSamples, w.workOver, w.workUnder, w.workInvalid,
-        w.callerAbsent, gameText, heldText, kNow, calls, scaled, scaledPointers, setterPointers, builderContexts,
-        implausible, faults, eyesText, stuck, notActing);
+        w.callerAbsent, w.slotMisses, w.cycles, w.slotCpuUnder, w.kicks, w.ceilingMs / 1000.0, gameText, heldText,
+        kNow, calls, scaled, scaledPointers, setterPointers, builderContexts, implausible, faults, eyesText, stuck,
+        notActing);
     if (!w.recordsSum && !w.partsSum) return;   // nothing built: the header says so
     for (uint32_t e = 0; e < 2; ++e) {
         const uint64_t* p = &w.sum[cPartBase + e * kPartFields];
@@ -973,24 +1069,33 @@ void startWindow(State& st, uint64_t nowMs) {
 }
 
 void logStep(State& st, lodgov::Step step, float from, const lodgov::FrameSignals& sig, uint64_t nowMs) {
-    if (st.lastStepLogMs && nowMs - st.lastStepLogMs < 5000) {
+    // A kick is never held back by the 5 s rate limit: it is the line that
+    // says the ordinary steps failed.
+    if (step != lodgov::Step::Kick && st.lastStepLogMs && nowMs - st.lastStepLogMs < 5000) {
         ++st.stepsUnlogged;
         return;
     }
-    // An up or down step names how many of the last 30 samples missed their
-    // slot and their mean excess; an up step its size too. Down is always 0.05.
-    char why[240];
+    // An up step names how many of the last 30 cycles took two slots and the
+    // 30's mean caller work, and its size; a down step how long no cycle has
+    // taken two and the margin (always 0.05); a kick how long the trigger held.
+    char why[260];
     const double mean = st.policy.stepMeanExcessMs();
     if (step == lodgov::Step::Up) {
         const bool coarse = st.policy.upQuanta() > 1;
-        std::snprintf(why, sizeof(why), "up %.2f: %u of the last 30 samples ran more than 0.30 ms over the period, "
-                      "their mean %.2f ms %s (%s%s)", double(st.policy.upQuanta()) / lodgov::kQuantaPerUnit,
-                      st.policy.stepOver(), std::fabs(mean), mean < 0.0 ? "under" : "over",
+        std::snprintf(why, sizeof(why), "up %.2f: %u of the last 30 cycles took two display slots with the caller "
+                      "work at the period; the 30's mean caller work %.2f ms %s (%s%s)",
+                      double(st.policy.upQuanta()) / lodgov::kQuantaPerUnit, st.policy.stepMisses(), std::fabs(mean),
+                      mean < 0.0 ? "under" : "over",
                       coarse ? "more than 1.00 ms over: the coarse step" : "1.00 ms over or less: the fine step",
                       st.policy.upHeld() ? ", held to k_max" : "");
     } else if (step == lodgov::Step::Down) {
-        std::snprintf(why, sizeof(why), "down 0.05: none of the last 30 samples ran more than 0.30 ms over the period, "
-                      "their mean %.2f ms under (more than 1.00 ms to spare)", std::fabs(mean));
+        std::snprintf(why, sizeof(why), "down 0.05: no cycle took two display slots for %.1f s and the last 30's mean "
+                      "caller work is %.2f ms under the period (more than 1.00 ms to spare)",
+                      double(st.policy.stepCleanMs()) / 1000.0, std::fabs(mean));
+    } else if (step == lodgov::Step::Kick) {
+        std::snprintf(why, sizeof(why), "kick: %u of the last 30 cycles took two slots for %.1f s at k %.2f: to k_max "
+                      "%.2f so consecutive frames fit and the runtime returns to full rate", st.policy.stepMisses(),
+                      double(st.policy.kickHeldMs()) / 1000.0, double(from), double(st.policy.kMax()));
     } else {
         std::snprintf(why, sizeof(why), "%s",
                       step == lodgov::Step::Reset ? "reset: under 150 builder records for 30 frames"
@@ -1052,7 +1157,9 @@ void logWriteEvents(State& st) {
     }
 }
 
-void frameBoundaryAt(uint64_t nowMs) {
+// nowMs: wall time (the windows, the policy's seconds); clockMs: this
+// boundary's QueryPerformanceCounter time in ms (the display slot).
+void frameBoundaryAt(uint64_t nowMs, double clockMs) {
     if (!g_live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     State& st = g_state;
@@ -1066,6 +1173,7 @@ void frameBoundaryAt(uint64_t nowMs) {
     lodgov::FrameSignals sig;
     sig.records = d[cRecords];
     sig.nowMs = nowMs;
+    sig.clockMs = clockMs;   // the display slot: the interval to the previous boundary
     // The cockpit gate: the journal watcher's Status.json, read on this same
     // thread each frame before the boundary (device_hook.cpp), exactly as the
     // on-foot frame pacing reads it (native_frame.cpp). Unknown -- menus, the
@@ -1128,11 +1236,18 @@ void frameBoundaryAt(uint64_t nowMs) {
         else if (sig.source == lodgov::WorkSource::App) ++w.appSamples;
         w.workSum += sig.workMs;
         w.periodSum += sig.periodMs;
-        if (sig.workMs > sig.periodMs + lodgov::kOverMarginMs) {
-            ++w.workOver;
-            if (sig.records >= lodgov::kSettlementRecords) ++w.denseOver;
-        }
+        if (sig.workMs > sig.periodMs + lodgov::kOverMarginMs) ++w.workOver;
         if (sig.workMs < sig.periodMs - lodgov::kUnderMarginMs) ++w.workUnder;
+        // The display slots, as the policy classed this frame's cycle.
+        const lodgov::Cycle& cycle = st.policy.cycle();
+        if (cycle.measured) {
+            ++w.cycles;
+            if (cycle.missed) {
+                ++w.slotMisses;
+                if (cycle.cpuUnder) ++w.slotCpuUnder;
+                else if (sig.records >= lodgov::kSettlementRecords) ++w.denseOurMisses;
+            }
+        }
     } else if (sig.work == lodgov::Work::Invalid) {
         ++w.workInvalid;
         if (sig.callerAbsent) ++w.callerAbsent;
@@ -1153,9 +1268,31 @@ void frameBoundaryAt(uint64_t nowMs) {
     case lodgov::Step::Reset: ++w.resets; break;
     case lodgov::Step::Clamp: ++w.clamps; break;
     case lodgov::Step::Enter: ++w.enters; break;
+    case lodgov::Step::Kick: ++w.kicks; break;
     default: break;   // Foot: the transition line above says it
     }
     if (step != lodgov::Step::None && step != lodgov::Step::Foot) logStep(st, step, from, sig, nowMs);
+    // The lever spent: at k_max with the trigger holding. The window counts
+    // the time; after 5 s of it a line says so, once a window. Nothing acts.
+    if (st.policy.triggered() && st.policy.steps() == st.policy.maxSteps() && st.prevBoundaryMs &&
+        nowMs >= st.prevBoundaryMs)
+        w.ceilingMs += double(nowMs - st.prevBoundaryMs);
+    st.prevBoundaryMs = nowMs;
+    if (!w.ceilingLogged && st.policy.ceilingMissing(nowMs)) {
+        w.ceilingLogged = true;
+        bool fromSetter = false;
+        const float sGame = gameScaleNow(&fromSetter);
+        char effective[40];
+        if (sGame > 0.0f) std::snprintf(effective, sizeof(effective), "%.3f", double(sGame) * double(k));
+        else std::snprintf(effective, sizeof(effective), "unknown");
+        const double excess = st.policy.meanExcessMs();
+        Log::get().note("settlement detail: at the ceiling (k %.2f, s x k %s) and still missing %u of the last 30 "
+                        "display slots: the remaining caller work (%.2f ms mean, %.2f ms %s the period) is not "
+                        "LOD-elastic; %u of those misses had the CPU under the period (not ours).",
+                        double(k), effective, st.policy.misses() + st.policy.cpuUnderMisses(),
+                        st.policy.periodMs() + excess, std::fabs(excess), excess < 0.0 ? "under" : "over",
+                        st.policy.cpuUnderMisses());
+    }
     if (nowMs - w.startMs >= 30000) {
         logSummary(st, nowMs);
         startWindow(st, nowMs);
@@ -1181,10 +1318,7 @@ void configureLine(const State& st) {
         std::snprintf(policy, sizeof(policy), "k = %.2f (advanced.settlement_detail_max) at once from a frame with >= "
                       "200 draw-builder records, 1 after 30 frames under 150 or on foot, no ramp", st.policy.kMax());
     else
-        std::snprintf(policy, sizeof(policy), "k in [1, %.2f]: up while a frame has >= 200 draw-builder records and "
-                      ">= 3 of the last 30 samples ran > 0.30 ms over the period, 0.25 if their mean ran > 1.00 ms "
-                      "over, else 0.05; down 0.05 when none did and the mean ran > 1.00 ms under; at most a step a "
-                      "second; 1 after 30 frames under 150 records or on foot", st.policy.kMax());
+        std::snprintf(policy, sizeof(policy), "k in [1, %.2f], auto's policy on the next line", st.policy.kMax());
     char work[400];
     workSourceClause(st.source, st.timingVersion, work, sizeof(work));
     // The hook statuses are the fixed strings kinematic_eval_hook.cpp names;
@@ -1201,6 +1335,18 @@ void configureLine(const State& st) {
         "FUN_1442B3FC0 %s, LOD-scale setter FUN_142819D90 %s, plane test FUN_1404F4E10 %s. Summaries every 30 s.",
         mode, stood, policy, work, st.builderHooked ? "hooked" : "NOT hooked (no records, no record test)", part,
         setter, st.planesMatched ? "matched" : "MISMATCHED (acting drops unverified)");
+    // auto's policy, whole, on a line of its own: the configure line is
+    // already most of the log's line in its worst case.
+    if (st.mode == Mode::Auto)
+        Log::get().note(
+            "settlement detail: auto's policy, on the last 30 cycles (one took two display slots when longer than "
+            "1.5 x the period; the CPU's when its caller work was at least the period - 0.30 ms): up at most once a "
+            "second while a frame has >= 200 draw-builder records and >= 3 of the 30 took two slots, the CPU's -- "
+            "0.25 if the 30's mean caller work ran > 1.00 ms over the period, else 0.05; to k_max %.2f at once if "
+            "that holds 3 s below it (a kick: held 2 s, at most one per 30 s); down 0.05 once no cycle has taken two "
+            "slots for 5 s and the 30's mean runs > 1.00 ms under, then no sooner than 5 s again; 1 after 30 frames "
+            "under 150 records, and on foot. At k_max with that for 5 s a line says the lever is spent.",
+            st.policy.kMax());
 }
 
 bool enableLocked(State& st, uint64_t nowMs) {
@@ -1229,6 +1375,7 @@ bool enableLocked(State& st, uint64_t nowMs) {
     st.footStartMs = 0;
     st.footFrames = 0;
     st.journalNoted = false;
+    st.prevBoundaryMs = 0;
     g_kBits.store(toBits(1.0f), std::memory_order_release);
     identifyEyes(st);   // from the last context seen, if any; else unnamed until the first boundary
     startWindow(st, nowMs);
@@ -1461,7 +1608,15 @@ void lodGovernorConfigure(Config& cfg) {
 
 void lodGovernorFrameBoundary() {
     if (!g_live.load(std::memory_order_acquire)) return;
-    frameBoundaryAt(GetTickCount64());
+    // One QueryPerformanceCounter read a frame: the interval between two
+    // boundaries is the frame's cycle, one display slot or two.
+    static const double qpcMsPerTick = [] {
+        LARGE_INTEGER f;
+        return QueryPerformanceFrequency(&f) && f.QuadPart > 0 ? 1000.0 / double(f.QuadPart) : 0.0;
+    }();
+    LARGE_INTEGER c{};
+    const bool clock = qpcMsPerTick > 0.0 && QueryPerformanceCounter(&c);
+    frameBoundaryAt(GetTickCount64(), clock ? double(c.QuadPart) * qpcMsPerTick : -1.0);
 }
 
 void lodGovernorShutdown() {

@@ -10,19 +10,19 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 
 - **State (2026-09-23):** `fix.settlement_detail` SHIPS as a fix, default
   `auto` (live in edvr.ini, F8 Performance page), k_max 6.0 (1..8), with a
-  cockpit gate (k = 1 on foot, per Status.json) and a policy that counts
-  misses: on the latest 30 samples, up while 3 or more ran > 0.3 ms past
-  the period (0.25 if their mean ran > 1.0 ms over, else 0.05), down 0.05
-  when none did with 1 ms to spare, hold between; the HUD's CPU is the
-  caller work per cycle. That policy is NOT FLOWN (section 9's addendum,
-  (5)). The 04:23 flight (fd25af9, s 1.0) ramped 1 -> 2.50 in six 0.25
-  steps but over 15 s, paced by the old trigger (30 consecutive over-budget
-  samples), then held k 2.50 for 30 s while 534 of 1712 samples missed
-  their slot (mean work 10.99 ms against 11.11, median cycle 21.6 ms at
-  56 fps), because such a run never came. The first acting flight (03:30,
-  b55e06b, s 1.5) worked: k 1 -> 2.70 in 80 s, ~50 -> 71-75 fps, 0 faults,
-  0 disagreements. Mechanism: a bracket on the setter FUN_142819D90
-  (section 9); the shadow flights: section 8.
+  cockpit gate (k = 1 on foot) and, since refinement 4 (section 9 part (6),
+  NOT FLOWN), a policy on the real display slot: a cycle between two frame
+  boundaries longer than 1.5 periods took two slots; up (0.25 or 0.05, at
+  most 1/s) while 3 or more of the last 30 did with the CPU at the period;
+  a kick to k_max once that has held 3 s; down 0.05 per 5 s only after 5 s
+  with no two-slot cycle and 1 ms to spare; a line when even k_max is not
+  enough. The HUD's CPU is the caller work per cycle. Flights: 03:30
+  (b55e06b, s 1.5) k 1 -> 2.70 in 80 s, ~50 -> 71-75 fps; 04:23 (fd25af9,
+  s 1.0) a third of the frames took two slots with the mean at the period,
+  and no step came (part (5)); 05:05 (8ce12926, reduced, k 6.00) still
+  31-62% over at the ceiling, two slots a cycle at 45-56 fps: at half rate
+  the game's own work grows ~1.2 ms, and the lever saturates near s x k 6
+  (part (6)). Mechanism: the setter bracket, section 9; shadow: section 8.
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
   +0x550 = 1/fy, the tangent of one pixel (0.000834297 here), B = +0x560
@@ -63,8 +63,8 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 - **LOD shift is draw-neutral here** (99.0% of admitted eye parts at nibble
   3 or 4, identical meshes in 149 of 151 models); Leg C's LODDistanceScale
   0.001 left 18.9k eye draws: not a draw lever there (section 6).
-- **Open:** the miss-counting policy's first flight (section 9's last list).
-- **Ruled out:** see section 6 and section 9 (the builder-site write).
+- **Open:** refinement 4's first flight (section 9's last list).
+- **Ruled out:** section 6 (the mean as the miss signal too) and section 9.
 - **Next:** fly the shipped default parked at Cranfield with the in-game
   detail slider at its default; disembark and board once.
 
@@ -179,6 +179,13 @@ ruled out: the perf monitor's CPU figure as evidence the frame fits,
 because it is the pre-submit phase only (applicationMs): 7-8 ms on the
 HUD while the caller thread worked 11.7-12.7 ms a cycle and fps sat at
 50-55 (shadow flight 2).
+ruled out: 30 consecutive over-budget samples as the governor's trigger,
+because with a third of the frames missing their slot such a run never
+comes (04:23: k held at 2.50 for 30 s while 534 of 1712 samples ran over).
+ruled out: a threshold on the mean caller work as the miss signal, because
+a mean at the period hides a third of the frames taking two slots (04:23),
+and at half rate the game's own work grows ~1.2 ms so the mean cannot say
+whether the frame would fit at full rate (05:05).
 
 ## 7. Sources
 
@@ -767,21 +774,97 @@ fall as k rises, so k should settle where they are rare -- a percent or
 two, with more detail removed than a 10% target implies. A fresh window
 per decision, or a higher count, would move that; not changed here.
 
+**(6) Refinement 4: the slot itself** (after the 05:05 flight). The
+evidence (build 8ce12926, 05:05 local, the slider at its default; the mode
+had persisted as `reduced` from the F8 menu, so k sat at 6.00, the ceiling
+and the saturation point; the overseer's reading): in the cockpit the
+caller work averaged 11.0-12.1 ms with 31-62% of samples over the period,
+the GPU 5-8 ms, and the runtime's median cycle was two slots (45-56 fps)
+for four windows; at 03:45 at the same spot k 2.65-3.0 gave 90 Hz at
+10.9-11.6 ms. Two mechanisms: (a) the trap -- once the runtime drops to
+half rate the game's own per-frame work grows ~1.2 ms (both phases shrank
+as fps rose on the first acting flight), so a frame that fits at 90 does
+not fit at 45, and the compositor needs a run of fitting frames before it
+returns; (b) the lever saturates at s x k ~6, and the remaining work is
+not LOD-elastic. Four changes (lodgov::Policy and the boundary):
+1. The miss signal is the slot's outcome. One QueryPerformanceCounter read
+   a boundary; the interval since the previous one is the frame's cycle,
+   and one longer than 1.5 x the period took two slots. The first boundary
+   after enabling, after a bad sample, on foot and after leaving the
+   settlement has no interval. Each of the ring's 30 entries carries its
+   caller-work excess (the size rule, the ceiling line) and its slot: two
+   slots with the caller work at least the period - 0.3 ms (the CPU's:
+   the trigger) or under it (the GPU's or the compositor's: counted apart,
+   never a reason to step). The trigger: 3 or more of the 30 took two
+   slots, the CPU's.
+2. Quick up, slow down. Up as before (at most one a second; 0.25 while the
+   30's mean ran more than 1.0 ms over, else 0.05). Down, 0.05, only once
+   no cycle of any kind has taken two slots for 5 s AND the 30's mean is
+   more than 1.0 ms under the period, then no sooner than 5 s again.
+3. The kick. The trigger held 3 s below k_max -- the steps have not
+   cleared it -- puts k at k_max at once (Step::Kick) so consecutive frames
+   fit and the runtime returns to full rate; held at least 2 s, then the
+   down rule relaxes it; at most one per 30 s; none in reduced. The 2 s
+   hold never binds on its own: the kick comes on a window with misses, so
+   the 5 s clean rule is later anyway.
+4. The lever spent. At k_max with the trigger held 5 s there, once a 30 s
+   window, reduced included: `settlement detail: at the ceiling (k 6.00, s
+   x k 6.000) and still missing N of the last 30 display slots: the
+   remaining caller work (X ms mean, Y ms over the period) is not
+   LOD-elastic; M of those misses had the CPU under the period (not
+   ours).` Nothing acts on it.
+
+Lines: auto's policy is a line of its own after the configure line, which
+now says `k in [1, 6.00], auto's policy on the next line` (its worst case
+fell to 948 of 1166 characters); `up 0.05: 3 of the last 30 cycles took
+two display slots with the caller work at the period; the 30's mean caller
+work 0.49 ms over (...)`; `down 0.05: no cycle took two display slots for
+5.0 s and the last 30's mean caller work is 2.11 ms under the period (more
+than 1.00 ms to spare)`; `kick: 30 of the last 30 cycles took two slots
+for 3.0 s at k 1.75: to k_max 2.00 so consecutive frames fit and the
+runtime returns to full rate`, never held back by the step lines' 5 s
+limit; the summary adds `slots missed N of S (CPU under M); kicks K; at
+the ceiling with misses T s`, and a window that never stepped names why
+(`no cycle took two display slots with the caller work at the period`, or
+the dead band). Rig (211 checks): 30% of 90 Hz cycles taking two slots (9
+of any 30), the caller work at the period, 3 steps of 0.05 a second apart,
+then the kick from 1.15 to 6.00 at 3.00 s of the trigger; every cycle two
+slots at 12.9 ms, 1.25, 1.50, 1.75, then the kick at 3.67 s; two-slot
+cycles with the caller work 1 ms under the period never trigger; 4.9 s
+without one holds, 5.0 s with 1.2 ms to spare steps down once, the next
+not before 5 s more, 0.5 ms to spare holds; the trigger held 3 s from k
+2.75 (0.05 a second meanwhile, to 2.90) kicks to 6.00, k_max held 2 s, a
+second kick refused until 30 s after the first; the lever spent at 5 s at
+k_max and not before, its line once a window; reduced never kicks; the
+ring must still be full; the cap and the clamp hold.
+
+What it costs, measured in the rig and not changed: the kick is not only
+the trap's escape. Any ramp that takes more than 3 s to clear its misses
+ends in one, an ordinary start from k 1 included (at 12.9 ms the 0.25
+steps reach 1.75 by then), and the way back is 0.05 per 5 s: on a line
+through the first acting flight's ends (12.9 ms at k 1, 10.6 at 2.70) the
+model kicks at 3.7 s, then takes 59 steps down to k 3.05 (10.13 ms) by
+299 s -- five minutes of more thinning than the frame needs, with no cycle
+taking two slots on the way. And the trigger still reads a sliding window
+on every frame past the cap: two-slot cycles scattered at random (60 s at
+90 Hz from k 1) took 52 up steps at 10%, 30 at 5%, 19 at 3%, 7 at 2%, 0
+at 1%, with no kick (at those rates the trigger breaks within 3 s).
+
 ### What the next flight must show (the shipped build)
 
 Parked at Cranfield, the ini as shipped (auto, k_max 6, observe 0), the
 in-game detail slider at its default (s 1.0):
 1. `edvr_log.py --expect-build HEAD` exits 0; the configure line reads
-   `on (auto: acts by ...) -- k in [1, 6.00]: up while a frame has >= 200
-   draw-builder records and >= 3 of the last 30 samples ran > 0.30 ms over
-   the period, 0.25 if ...`, every hook `hooked`/`matched`.
-2. Step lines naming the misses (`N of the last 30 samples ran more than
-   0.30 ms over the period`): `up 0.25` while their mean is over 1.0 ms,
-   then `up 0.05`, at most once a second -- where the 04:23 build held k
-   with a third of the frames missing, this one must keep stepping; the
-   summary's `over by > 0.30 ms` count falling as k rises, k then holding
-   with 1-2 of 30 missing (near k 4.1 if the elasticity holds at s 1.0),
-   and no `down` right after the coarse steps (no pumping).
+   `on (auto: acts by ...) -- k in [1, 6.00], auto's policy on the next
+   line`, every hook `hooked`/`matched`, and the policy line follows.
+2. Step lines naming the slots (`N of the last 30 cycles took two display
+   slots with the caller work at the period`): `up 0.25` while the 30's
+   mean is over 1.0 ms, then `up 0.05`, at most once a second; if that
+   has not cleared in 3 s, one `kick:` line and k 6.00, then `down 0.05`
+   lines 5 s apart once no cycle takes two slots; the summary's `slots
+   missed N of S` falling as k rises and `(CPU under M)` naming the misses
+   that are not ours. A `settlement detail: at the ceiling` line means
+   even k 6 is not enough there -- the lever is spent, not broken.
 3. Disembark and board once: one `on foot` and one `no longer on foot`
    line, beside the pacing's own `native frame: begin ... pacing=turbo` and
    `pacing=runtime` lines (the same flag: turbo with no `on foot` line means

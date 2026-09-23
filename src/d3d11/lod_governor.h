@@ -33,6 +33,13 @@
 //     the log names which. Held against the display period, 1000 /
 //     baseDisplayHz (version 4 and later), else the session's first
 //     predicted period;
+//   * the display slot -- one QueryPerformanceCounter read a boundary, the
+//     interval since the previous boundary this frame's cycle: longer than
+//     1.5 x the period, it took two slots (a miss). The first boundary after
+//     enabling, after a bad sample, on foot and after leaving the settlement
+//     has no interval. A miss whose caller work was under the period - 0.3
+//     ms is not the CPU's (the GPU or the compositor owns it): counted
+//     apart, never a reason to step;
 //   * the game's LOD scale s_game, from the setter bracket (the value the
 //     engine stored on its last call for that context; 1.0 at the slider's
 //     maximum detail, 1.5 at its lowest), and the scale the tests ran with,
@@ -79,34 +86,36 @@
 //     passed" per frame from a k = 1 window is the whole of it.
 //
 // THE POLICY (Policy below, pure; tools\lod_governor_test): auto -- k in
-// [1, k_max], quantised to 0.05, decided on the latest 30 valid frame-work
-// samples: a ring that must be full before any step, emptied by a bad
-// sample, by leaving the settlement and on foot. A sample is OVER when it ran
-// more than 0.3 ms past the period -- a frame that missed its display slot
-// and took two. One step up while the frame has at least 200 builder records
-// AND at least 3 of the 30 are over: 0.25 when their mean excess is more than
-// 1.0 ms, else 0.05 (held to k_max) -- far from the target big steps, near
-// it fine ones (the first acting flight took 80 s at 0.05 a step while 1.0-
-// 1.8 ms over). One step down, always 0.05, when none of the 30 is over AND
-// their mean is under the period by more than 1.0 ms. Between -- 1 or 2 of
-// 30 over, or none without that millisecond -- k holds: the dead band, aimed
-// at under a tenth of the frames missing their slot. It counts misses, not
-// runs, because a miss costs a whole display slot: on the 04:23 flight
-// (2026-09-23) a third of the frames missed at k 2.50 while the mean work sat
-// under the period (10.99 ms against 11.11), and the old trigger -- 30
-// consecutive over-budget samples -- never came; it had also paced the ramp
-// at one step per ~2.5 s. At most one step a second; back to 1 when the
+// [1, k_max], quantised to 0.05, decided on the latest 30 valid samples, each
+// carrying its caller-work excess over the period and its display slot: a
+// ring that must be full before any step, emptied by a bad sample, by
+// leaving the settlement and on foot. The trigger: at least 3 of the 30
+// cycles took two slots with the CPU at the period (the real slot outcome,
+// not a threshold on the mean: a mean at the period hid a third of the
+// frames taking two slots on the 04:23 flight, and at half rate the game's
+// own work grows ~1.2 ms, so no mean says whether a frame would fit at full
+// rate -- 05:05). While it holds, in a frame with at least 200 builder
+// records: one step up, at most one a second, 0.25 when the 30's mean excess
+// is more than 1.0 ms, else 0.05 (held to k_max). If it has held 3 s below
+// k_max -- the steps have not cleared it -- k goes to k_max at once (a KICK,
+// held at least 2 s, at most one per 30 s), so consecutive frames fit and
+// the runtime returns to full rate. Down, always 0.05, only once no cycle
+// has taken two slots for 5 s AND the 30's mean is more than 1.0 ms under
+// the period, and then no sooner than 5 s again: quick up, slow down.
+// Between, k holds. At k_max with the trigger held 5 s the lever is spent:
+// a line says so once a window; nothing acts on it. Back to 1 when the
 // records have stayed under 150 for 30 frames, and at once on foot, held
 // there while it lasts. reduced -- k = k_max at once from the frame the
 // records reach 200, 1 when they have stayed under 150 for 30 frames or on
-// foot; no ramp. k_max is advanced.settlement_detail_max (default 6.0, held
-// to [1, 8]): the ceiling in auto, the factor in reduced. It multiplies the
-// game's own scale -- 1.0 at the slider's default, 1.5 at its floor -- and
-// the removal levels off between an effective s x k of 4.5 and 6 (the LOD
-// note, section 8), so 6 reaches that from the default slider. The first
-// acting flight held k 2.70-2.75 on s 1.5 (s x k about 4.1): k ~4.1 from
-// s 1.0. advanced.settlement_detail_observe = 1 computes and logs all of it
-// and never writes.
+// foot; no ramp and no kick (the ceiling line still speaks). k_max is
+// advanced.settlement_detail_max (default 6.0, held to [1, 8]): the ceiling
+// in auto, the factor in reduced. It multiplies the game's own scale -- 1.0
+// at the slider's default, 1.5 at its floor -- and the removal levels off
+// between an effective s x k of 4.5 and 6 (the LOD note, section 8), so 6
+// reaches that from the default slider. The first acting flight held k
+// 2.70-2.75 on s 1.5 (s x k about 4.1): k ~4.1 from s 1.0.
+// advanced.settlement_detail_observe = 1 computes and logs all of it and
+// never writes.
 #include <cstdint>
 #include <cstring>
 #include <xmmintrin.h>
@@ -122,13 +131,21 @@ constexpr int kQuantaPerUnit = 20;                 // k moves in steps of 1/20 =
 constexpr int kCoarseQuanta = 5;                   // ... or 5/20 = 0.25 up, far over budget
 constexpr uint32_t kSettlementRecords = 200;       // density: builder records a frame
 constexpr uint32_t kSettlementBand = 50;           // leave only under 200 - 50 = 150
-constexpr double kOverMarginMs = 0.3;              // a sample is over: work > period + 0.3 ms (a missed slot)
-constexpr double kUnderMarginMs = 1.0;             // down: none over and the 30's mean < period - 1.0 ms
+constexpr double kOverMarginMs = 0.3;              // the summary's "over": work > period + 0.3 ms
+constexpr double kMissFactor = 1.5;                // a cycle > 1.5 x the period took two display slots
+constexpr double kCpuUnderMarginMs = 0.3;          // ... not the CPU's with its caller work < period - 0.3 ms
+constexpr double kUnderMarginMs = 1.0;             // down: the 30's mean caller work < period - 1.0 ms
 constexpr uint32_t kSampleWindow = 30;             // the latest 30 valid samples decide a step
-constexpr uint32_t kUpMisses = 3;                  // up: at least 3 of them over
+constexpr uint32_t kUpMisses = 3;                  // the trigger: at least 3 of them took two slots, the CPU's
 constexpr uint32_t kConsecutive = 30;              // leaving: 30 consecutive frames under 150 records
 constexpr double kCoarseExcessMs = 1.0;            // up 0.25 while the 30 ran > 1.0 ms over on average
-constexpr uint64_t kRampIntervalMs = 1000;         // at most one step a second
+constexpr uint64_t kRampIntervalMs = 1000;         // up: at most one step a second
+constexpr uint64_t kCleanMs = 5000;                // down: no two-slot cycle for 5 s ...
+constexpr uint64_t kDownIntervalMs = 5000;         // ... and at most one down step per 5 s
+constexpr uint64_t kKickAfterMs = 3000;            // kick: the trigger held 3 s below k_max ...
+constexpr uint64_t kKickHoldMs = 2000;             // ... k_max held at least 2 s ...
+constexpr uint64_t kKickIntervalMs = 30000;        // ... and at most one kick per 30 s
+constexpr uint64_t kCeilingMs = 5000;              // the lever spent: at k_max with the trigger for 5 s
 constexpr float kDefaultMax = 6.0f;                // advanced.settlement_detail_max (100 steps of 0.05)
 constexpr float kMaxCeiling = 8.0f;                // ... held to [1, 8]
 // The write's plausibility band for the game's own LOD scale: the setter
@@ -152,11 +169,20 @@ struct FrameSignals {
     uint32_t timingVersion = 0; // the new sample's EdvrNativeTimingFrame version
     double workMs = 0;          // the new sample's frame work ms (Work::Valid)
     double periodMs = 0;        // the budget it is held against
-    uint64_t nowMs = 0;
+    uint64_t nowMs = 0;         // wall time: the policy's clock for its seconds
+    double clockMs = -1;        // this boundary's QueryPerformanceCounter time, ms (< 0: none)
 };
 // Enter: reduced mode's k = k_max at once (the settlement started, or k_max
-// rose while in it). Foot: k back to 1 at once, on foot.
-enum class Step : uint8_t { None, Up, Down, Reset, Clamp, Enter, Foot };
+// rose while in it). Foot: k back to 1 at once, on foot. Kick: k = k_max at
+// once, the trigger having held 3 s below it.
+enum class Step : uint8_t { None, Up, Down, Reset, Clamp, Enter, Foot, Kick };
+// This boundary's cycle: an interval to the previous boundary or none, its
+// length, whether it took two display slots, and whether the caller work was
+// under the period - 0.3 ms then (a miss that is not the CPU's).
+struct Cycle {
+    bool measured = false, missed = false, cpuUnder = false;
+    double ms = 0;
+};
 
 class Policy {
 public:
@@ -164,7 +190,7 @@ public:
     // below the current k clamps k at once (Step::Clamp from the next update).
     void configure(float kMax) noexcept;
     // reduced (fixed = true): k = k_max for as long as the settlement lasts,
-    // 1 outside it, no ramp; auto (false): the governed ramp.
+    // 1 outside it, no ramp, no kick; auto (false): the governed ramp.
     void setFixed(bool fixed) noexcept { fixed_ = fixed; }
     Step update(const FrameSignals& s) noexcept;
     void reset() noexcept;
@@ -175,23 +201,41 @@ public:
     float kMax() const noexcept { return kOf(maxSteps_); }
     bool fixed() const noexcept { return fixed_; }
     bool inSettlement() const noexcept { return inSettlement_; }
-    // The ring: how many valid samples it holds (a step needs 30), how many of
-    // them are over, and their mean excess (work - period, ms; 0 when empty).
+    // The latest update's cycle.
+    const Cycle& cycle() const noexcept { return cycle_; }
+    // The ring: how many valid samples it holds (a step needs 30), how many
+    // took two slots with the CPU at the period (the trigger's count) and
+    // with it under (not ours), and their mean excess (caller work - period,
+    // ms; 0 when empty).
     uint32_t samples() const noexcept { return count_; }
-    uint32_t overCount() const noexcept { return overCount_; }
+    uint32_t misses() const noexcept { return missCount_; }
+    uint32_t cpuUnderMisses() const noexcept { return underCount_; }
     double meanExcessMs() const noexcept;
-    // The last up or down step: the over count and mean excess of the 30
-    // samples behind it; for an up step, its size by the rule in quanta (1 =
-    // 0.05, kCoarseQuanta = 0.25) and whether k_max cut it short.
-    uint32_t stepOver() const noexcept { return stepOver_; }
+    // The trigger: a full ring with at least 3 misses of the CPU's; and for
+    // how long it has held without a break (0 when it does not hold).
+    bool triggered() const noexcept { return triggered_; }
+    uint64_t triggerHeldMs(uint64_t nowMs) const noexcept { return triggered_ ? nowMs - triggerSinceMs_ : 0; }
+    // At k_max with the trigger held there for 5 s: the lever is spent.
+    bool ceilingMissing(uint64_t nowMs) const noexcept;
+    // The period the latest valid sample was held against (0 before one).
+    double periodMs() const noexcept { return periodMs_; }
+    // The last up, down or kick: the trigger's count and the 30's mean excess
+    // behind it; for an up step its size by the rule in quanta (1 = 0.05,
+    // kCoarseQuanta = 0.25) and whether k_max cut it short; for a down step
+    // how long no cycle had taken two slots; for a kick how long the trigger
+    // had held.
+    uint32_t stepMisses() const noexcept { return stepMisses_; }
     double stepMeanExcessMs() const noexcept { return stepMeanExcessMs_; }
     int upQuanta() const noexcept { return upQuanta_; }
     bool upHeld() const noexcept { return upHeld_; }
+    uint64_t stepCleanMs() const noexcept { return stepCleanMs_; }
+    uint64_t kickHeldMs() const noexcept { return kickHeldMs_; }
     static float kOf(int steps) noexcept { return float(kQuantaPerUnit + steps) / float(kQuantaPerUnit); }
 
 private:
-    void emptyRing() noexcept { count_ = overCount_ = 0; }
-    void push(double excessMs, bool over) noexcept;
+    void emptyRing() noexcept { count_ = missCount_ = underCount_ = 0; }
+    void push(double excessMs, bool miss, bool under) noexcept;
+    Step finish(Step step, uint64_t nowMs) noexcept;   // keeps the at-k_max clock, returns step
 
     int steps_ = 0, maxSteps_ = static_cast<int>((kDefaultMax - 1.0f) * kQuantaPerUnit);   // k_max 6.0: 100 steps
     bool fixed_ = false;
@@ -200,14 +244,27 @@ private:
     uint64_t lastStepMs_ = 0;
     bool stepped_ = false;
     // The latest valid samples, a ring of 30: each one's excess over the
-    // period and whether it was over; count_ of them are live.
+    // period, and whether its cycle took two slots with the CPU at the period
+    // (miss_) or under it (under_); count_ of them are live.
     double excess_[kSampleWindow] = {};
-    bool over_[kSampleWindow] = {};
-    uint32_t next_ = 0, count_ = 0, overCount_ = 0;
-    uint32_t stepOver_ = 0;
+    bool miss_[kSampleWindow] = {}, under_[kSampleWindow] = {};
+    uint32_t next_ = 0, count_ = 0, missCount_ = 0, underCount_ = 0;
+    double periodMs_ = 0;
+    // The clock: the previous boundary's time, if the next one may measure.
+    bool haveClock_ = false;
+    double lastClockMs_ = 0;
+    Cycle cycle_;
+    // The seconds: the trigger's start, the last two-slot cycle of any kind
+    // (the first update's time until one), the last down step and kick, and
+    // since when k has been at k_max.
+    bool triggered_ = false, started_ = false, downed_ = false, kicked_ = false, atMax_ = false;
+    uint64_t triggerSinceMs_ = 0, lastMissMs_ = 0, lastDownMs_ = 0, lastKickMs_ = 0, atMaxSinceMs_ = 0;
+    uint64_t kickHoldUntilMs_ = 0;
+    uint32_t stepMisses_ = 0;
     double stepMeanExcessMs_ = 0;
     int upQuanta_ = 0;
     bool upHeld_ = false;
+    uint64_t stepCleanMs_ = 0, kickHeldMs_ = 0;
 };
 
 // --- The engine's arithmetic, exactly as its code does it ------------------
