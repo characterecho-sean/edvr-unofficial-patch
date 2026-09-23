@@ -14,15 +14,15 @@
   B' on evidence — the hiding surface is 89.6% open panels, qualified
   solid occluders remove zero draws — and no cull code was built
   ("Gate probe flown", "Probe v2 flown"). The settlement LOD governor
-  has flown seven times (2 shadow, 5 acting): held k 2.70-2.75, then
-  90 Hz for 90 s before capping (fixed via k_max 6); the shipped
-  build confirms the ramp/gate/reduced-menu but under-reacts near the
-  operating point; a reduced-by-accident flight saturated at k 6 with
-  a half-rate trap unexplained; a close-range auto flight found the
-  LOD lever INERT there (~4 of ~4,800 parts dropped at k 6, vs 532 of
-  9.6k on the pad) -- elasticity is a property of view distance, not
-  k; refinement 4 (+4b's inert-lever detection) IN BUILD, not merged
-  ("Refinement 3 flight", "The LOD lever is INERT at close range").
+  has flown eight times (2 shadow, 6 acting): sustained 90 Hz for
+  90 s before the k_max 4 cap (fixed via k_max 6); a reduced-by-
+  accident flight saturated at k 6; a close-range flight found the
+  lever INERT there; 4b flown at the pad -- every rule fired, but at
+  the ceiling (half the k=1 parts passed) 25-34% of cycles still
+  take two slots at 10.1-10.7 ms MEAN: the wall is now the frame's
+  TAIL, not its mean, past the kick's reach ("Refinement 3 flight",
+  "The LOD lever is INERT at close range", "Refinement 4b flown at
+  the pad").
 
 * **Levers still open:** the draw count, now via the LOD governor's
   acting mode (flown once, in refinement); the last ~0.4-0.6 ms of EDVR's own per-draw
@@ -56,9 +56,9 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next flight:** the refinement-4 build, auto, parked ON THE PAD
-  (lat 68.067474 lon 121.028328 heading 42) so the lever has
-  something to bite, material quality 0 for a minute then 3.
+* **Next flight:** a cpu_profile leg at the pad, k 6 (F9/F11), to
+  see what the slow 30% of frames do; the 4b benefit judgement gets
+  a stable-scene-only correction, in build.
 
 ## Frame budget philosophy
 
@@ -3246,3 +3246,88 @@ parts; re-arm when parts tested change by 20% or after 30 s.
 Next flight: the refinement-4 build, auto, parked ON THE PAD (the
 original spot: lat 68.067474 lon 121.028328 heading 42) so the lever
 has something to bite, material quality 0 for a minute then 3.
+
+### 2026-09-23 -- Refinement 4b flown at the pad: every rule fires as designed, but at the ceiling the wall becomes the frame-time TAIL, not the mean
+
+Build v0.17.0-393-g6d34ffd5 (refinement 4b, review folded in),
+07:15-07:20 local, gfx log edvr_gfx_20260923_071521.log, runtime log
+edvr_openxr_20260923_071527_692_27576.log. auto, slider default
+(s = 1.000), fix.engine_motion off, parked on the pad. Sean:
+material quality 0 for the first minute with a disembark and
+re-board, then material quality 3.
+
+**Every 4b rule fired.** Pre-settlement windows show the fresh-timing
+rule ("no fresh timing on 2030 frames, 4 expiries" during the load,
+then 0-1). Arrival (07:17:21): k 1.00 -> 2.65, slots missed 330 of
+2290 (269 the CPU's, 15 GPU-bound, 46 unexplained), per-second lines
+e.g. "26 of 37 cycles in the last second took two display slots as
+the CPU's". A coarse step to 2.90, then "k 3.15 -> 6.00, kick: 10
+seconds in a row with a tenth or more of the cycles taking two slots
+as the CPU's (the last 40 of 48)", then "k 6.00 -> 3.15, restored
+k 3.15 after a failed kick: the fifth second at k_max still had a
+tenth or more of its cycles take two display slots". An "inert at
+this view: no observed benefit: passed parts 9,720 -> 9,618 a frame"
+hold fired at 07:17:3x during the approach -- a judgement on a
+changing scene, the fix this flight orders (below). On foot: "held
+on foot" 161 then 1167 frames; "k 1.00 -> 3.90, back aboard: k
+restored to 3.90 (held on foot 1328 frames)"; then steps to 6.00 with
+"at the ceiling ... (at k_max now: residual benefit)" for the windows
+ending 07:18:21, 07:18:51, 07:19:21; reset at ~07:19:4x on leaving.
+
+**Windows** (end; k; caller work mean ms; slots missed of samples --
+the CPU's / GPU-bound / unexplained):
+
+| end | k | caller work | slots missed |
+|---|---|---|---|
+| 07:17:51 | 1.00 (on foot) | 11.27 | 858 of 1619 (732/2/124) |
+| 07:18:21 | 6.00 (1167 on-foot frames in it) | 11.92 | 580 of 806 (531/0/49) |
+| 07:18:51 (MQ3) | 6.00 | 10.70 | 792 of 1890 (645/1/146) |
+| 07:19:21 (MQ3) | 6.00 | 10.12 | 604 of 2089 (479/0/125) |
+
+**Runtime windows** (window ends; cycle mean (p50) ms): 07:18:27
+17.92 (21.60, half rate typical); 07:18:57 12.93 (11.27); 07:19:27
+(on foot) 12.34 (11.55), next-wait 0.24; 07:19:57 17.28 (21.42);
+07:20:27 14.84 (11.49). Application-render GPU 4.7-7.4 ms at the
+settlement (MQ0 and MQ3 alike): not the wall.
+
+**Per eye A.** 07:17:21 (arrival, k -> 2.65): tested 2109 (1945 at
+EDVR's scale), passed 1779, dropped 134.6/frame (max 844), dropped
+angular radius <0.25 deg 35k, 0.25-0.5 112k, 0.5-1 129k, >= 1 deg
+32k. 07:18:21 (k 6): tested 2477, passed 2180, dropped 1.5. 07:18:51:
+tested 5515, passed 4650, dropped 4.0. 07:19:21: tested 5432, passed
+4420, dropped 3.3. Disagreements at the held scale 0 parts, 0
+records, every window.
+
+**Reading.** At the ceiling the passed set is about half of the
+k = 1 baseline ("Shadow flight 2" on the pad: tested ~10.5k, passed
+~9.6k per eye) -- the removal is at the RECORD level, invisible to
+the "dropped" counter, as the design note predicted -- yet 25-34% of
+cycles still take two slots with the caller work at 10.1-10.7 ms
+MEAN: the frame's tail, not its mean, is the wall now; the kick
+could not clear it because the lever is already at its ceiling.
+
+**Material quality.** MQ3's windows read 10.70 and 10.12 ms against
+MQ0's 11.92 (with on-foot frames): no CPU cost to MQ3, so the
+millisecond between the 03:45 and 05:05 flights was not material
+quality.
+
+**The LOD tables.** Recorded at slider 0.001 (gate_012514.bin: t0
+21.3833 / 0.273707 / 0.07698, 4 levels 0.01283 / 0.02566 / 0.05132 /
+0.10264, etc.) and at slider 1.0 (gate_043720.bin) are IDENTICAL: the
+slider does not change the tables. The differing elasticity between
+captures is the VIEW's composition -- 043720 at the close spot: 86%
+of tested rows in the shell family, whose t0 21.38 nothing reaches;
+012514 at the pad: 56%.
+
+ruled out: the draw-distance slider as a change of the LOD tables,
+because the tables recorded at 0.001 and 1.0 are byte-identical (gate
+012514 vs 043720). ruled out: material quality as the caller-thread
+cost between visits, because MQ3 read 10.1-10.7 ms against MQ0's
+11.9 in the same flight.
+
+No flicker reported this flight (engine motion off; back-aboard
+restore in force).
+
+Next: a cpu_profile leg at the pad at k 6 (F9/F11 hotkeys) to see
+what the slow 30% of frames do; the 4b correction to the benefit
+judgement (stable scene only, tested+passed) is in build.
