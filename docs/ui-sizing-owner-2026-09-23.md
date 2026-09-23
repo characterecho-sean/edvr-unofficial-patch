@@ -66,6 +66,9 @@ chains read `rtt`. Design, safety and the cursor-window finding (the panel
 cursor window divides the panel's own size by the UI screen's, so a
 mouse-driven panel's cursor slows by 1/f under the patch; a fifth site, not
 built) are in docs/ui-layer-2026-09-23.md, "The engine's panel sizing".
+Flight 162703 (16:27, f05c84bf) CLOSED that finding: the cursor was fine
+over the menus and station services with the sizing patch live, no fifth
+site needed.
 
 ## 1. What the flight logs carry
 

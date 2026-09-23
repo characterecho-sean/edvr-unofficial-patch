@@ -3,29 +3,34 @@
 ## Status
 
 - **State:** DECIDED DIRECTION, 2026-09-19 (Sean): engine-level injection from
-  KinematicRig truth, not draw-call interpretation (ruled out as a class); phases 0/A/B
-  flown clean 2026-09-20 (B's veto since removed); four engine-truth flag routes closed.
-  RESUMED 2026-09-23 with Sean's requirement -- GENERALIZED, no estimation anywhere, not
-  even as a fallback: camera-only for statics, engine-record delta via substituted pool
-  shaders for movers (design C fed by B), the reactive mask the only fallback. Design A
-  (pool content-pairing) measured wrong and an engine velocity buffer ruled out with blur
-  off and on (the 2026-09-23 entries); B+C IS THE DESIGN. PHASE 1 + FIX ROUND MERGED and
-  FLOWN (093817, "The re-fly" entry): eye-frames bound and given, invalidated 0, corrupt
-  codes 0, engine-joined 67-73k px an eye-frame. FOLLOW-UPS FLOWN (114958): cockpit prep
-  0.15-0.23 ms a pair, no faults.
-  STAGE B REMOVED (engine motion is part of fix.temporal_aa); PERFORMANCE ROUND merged.
-  ON FOOT FLOWN (flight 5, 140351, "Flight 5" entry): standing, source views given
+  KinematicRig truth, not draw-call interpretation (ruled out as a class); phases
+  0/A/B flown clean 2026-09-20 (B's veto since removed); four engine-truth flag routes
+  closed. RESUMED 2026-09-23 with Sean's requirement -- GENERALIZED, no estimation
+  anywhere, not even as a fallback: camera-only for statics, engine-record delta via
+  substituted pool shaders for movers (design C fed by B), the reactive mask the only
+  fallback. Design A (pool content-pairing) measured wrong and an engine velocity
+  buffer ruled out with blur off and on (the 2026-09-23 entries); B+C IS THE DESIGN.
+  PHASE 1 + FIX ROUND MERGED and FLOWN (093817, "The re-fly" entry): eye-frames bound
+  and given, invalidated 0, corrupt codes 0, engine-joined 67-73k px an eye-frame.
+  FOLLOW-UPS FLOWN (114958): cockpit prep 0.15-0.23 ms a pair, no faults. STAGE B
+  REMOVED (engine motion is part of fix.temporal_aa); PERFORMANCE ROUND merged. ON
+  FOOT FLOWN (flight 5, 140351, "Flight 5" entry): standing, source views given
   2938/2938; WALKING, EVERY SOURCE FRAME DROPPED (2031/2031) by the eyes' rows rule --
   the source is drawn by more than one camera. FIXED, MERGED, NOT FLOWN: each source
   pool draw held to the naming draw's camera, the others declined, the frame kept.
   HANGAR (flight 6, "The hangar" entry): no terrain draw, so NOTHING NAMED the source
   (no on-foot line at all); now the screen's own depth names it. BUILT, NOT FLOWN.
   STATION (eye run 143416, "The station" entry): the joined station pixels are EXACT
-  (one rigid motion to 0.002 px at the records' own 0.106-0.110 deg a frame), but 55% of
-  its pixels kept the camera term, 0.31-0.35 px a frame short. KEYED, harness-proven,
-  NOT FLOWN: ps_CB42 (DE54) and ps_451A (61AE); then from flight 6's dump ("Flight 6"
-  entry) vs_4361 + ps_1694 (547 of the station's 1193 instances a frame) and vs_889A +
-  ps_B46E / ps_EBA9. vs_DE54's ps_91F8 and ps_A607: refused by the patcher.
+  (one rigid motion to 0.002 px at the records' own 0.106-0.110 deg a frame), but 55%
+  of its pixels kept the camera term, 0.31-0.35 px a frame short. KEYED,
+  harness-proven, NOT FLOWN: ps_CB42 (DE54) and ps_451A (61AE); then from flight 6's
+  dump ("Flight 6" entry) vs_4361 + ps_1694 (547 of the station's 1193 instances a
+  frame) and vs_889A + ps_B46E / ps_EBA9. vs_DE54's ps_91F8 and ps_A607: refused by
+  the patcher. TODAY (162703, 16:27, build f05c84bf): the hangar and the station FLOWN
+  OK -- no faults or stand-downs; vs_4361+ps_1694 and vs_889A+ps_B46E/ps_EBA9 live and
+  substituted at the station (2982/29422 and 360/2206 draws per window); the hangar
+  source named by its own depth as built (5088x2862 R32G32, 116.5 MB); on-foot windows
+  clean (764/764 then 5398/5398 given, 0 invalidated); Sean judged both good.
 - **Open:** walkers (vs_F516BF0201303B87, not a pool family; w=2 on the panel) wait on
   phase 2's previous bone palette -- a walking NPC still blurs after the on-foot fix;
   which camera the walk's other draws use (the new line's rows and distance say); a
@@ -35,31 +40,20 @@
   flicker (the LOD governor, not this arc); vs_DE54's ps_91F8 and ps_A607 (the family's
   SV_Position register holds another semantic in them: a patcher extension); ships in
   space; builder-path movers and articulated parts (phase 2).
-- **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
-  misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
-  (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
-  doc's journal: four engine-truth routes to a mover/static flag (2026-09-20 21:25
-  entry -- return-address attribution, record-field clustering, TLS job-attribution,
-  dirty-node-queue family mismatch); an engine velocity buffer in the VR path, and
-  record+0x1C0..0x1F8 as a previous-frame transform at draw time (both 2026-09-23
-  entry); design A, pool content-pairing, and an engine velocity buffer with motion
-  blur ON (both 2026-09-23 evening entry); scaling a history delta over a gap
-  (estimation, the review); the tick straddling two frames as the gap cause (repeats and
-  in-frame pose changes 0 in all 8 windows of 065324); rows 270..275 changing inside
-  an eye pass (capture 043720: one block per pass); one camera per ON-FOOT SOURCE frame
-  (flight 5: every walking frame dropped, the "Flight 5" entry); "blending on MRT6 only
-  loses coverage" (the review's WARP counterexample); the substituted shaders changing
-  the game's G-buffer (o0..o3 and depth bit-identical, all nine real pairs, WARP); the
-  on-foot world packed per eye; enginePixel's record fetch as the ~3 ms prep; a depth
-  pre-pass or a depth bias as the stale cockpit (all three: the re-fly entry); green on
-  the cockpit panels as a mover bug, and the engine path's CPU cost as the frame-time
-  cause (the 09:38 entry); the station's joined motion wrong at range (precision, a
-  stale pose: "The station" entry). Do not re-propose any of the above.
-- **Next:** one flight (--expect-build HEAD first): walking near a drone or a landing
-  ship, and in a hangar -- `on foot: ... frames dropped: none; screen views asked A,
-  given A`, `camera rule: namings N (by terrain T, by the screen's own depth S ...)`,
-  `panel pixels per sampled eye draw: engine-joined J`, J > 0; a station approach: vs_4361
-  and vs_889A patched, stale down to the stock remainder. Then diagnostics 1 vs 0.
+- **Ruled out (do not re-propose; each closed in its dated entry):** draw-shape memo
+  identity, pool-slot identity, 3x3 SAD camera-vs-body match, hidden-bone-spin
+  estimation (pre-2026-09-20); four engine-truth mover/static routes (2026-09-20
+  21:25); an engine velocity buffer with blur off or on, and record+0x1C0..0x1F8 as
+  previous-frame truth (2026-09-23 entries); design A pool content-pairing (evening
+  entry); the fix round's five hypotheses -- a scaled history delta, a straddling
+  tick, rows 270..275 mid-pass, MRT6-blend coverage loss, and the substituted shaders
+  altering the G-buffer (Fix round entry); one camera per on-foot source frame (Flight
+  5); the on-foot world packed per eye, enginePixel's fetch as the ~3 ms prep, and a
+  depth pre-pass/bias as the stale cockpit (the re-fly entry); green cockpit panels as
+  a mover bug, and engine-path CPU cost as the frame-time cause (09:38 entry); the
+  station's joined motion wrong at range (The station entry).
+- **Next:** the controlled diagnostics 1 vs 0 comparison, and a walker near a drone
+  with the motion_source view.
 
 ## Premise
 
@@ -2801,3 +2795,22 @@ on foot: ... frames dropped: none; screen views asked A, given A`, `camera rule:
 lines (the map is made); and engine-joined panel pixels when a pool family mover is on
 screen. If the new code never ran: no on-foot line in a hangar, as in flight 6. If nothing
 names the source: the "nothing named its source" line with its reason.
+
+### 2026-09-23 16:27 flight (f05c84bf): the hangar and the station, FLOWN OK
+
+Build f05c84bf (v0.17.0-458-gf05c84bf), HMD Quality 0.5 into a 4074x3938 eye, trim off,
+ui_quality 1.25, DLSS performance mode at exactly the floor (gfx log
+edvr_gfx_20260923_162703.log). FLOWN OK: no faults or stand-downs anywhere in the log.
+
+**The station.** Both rotating families are live and substituted: vs_436193B352A2897E with
+ps_16940F576006BE65 (2982 draws per window, then 29422); vs_889A5279E68F0672 with
+ps_B46E52A1E0B2F39C (360, then 2206).
+
+**The hangar.** No terrain or scene draw names the on-foot source here (a hangar): it is
+named by its own depth instead -- the 5088x2862 depth that took the most pool-family draws
+last frame (1156). The source slot target was created at 5088x2862, R32G32 (116.5 MB). The
+on-foot windows read "frames dropped: none; screen views asked 764, given 764" then "asked
+5398, given 5398", invalidated 0. The world screen held on foot: the journal shows the
+screen's own depth at 553-3648 draws a frame.
+
+Sean judged the station rotation and the hangar good ("All looks good to me now").
