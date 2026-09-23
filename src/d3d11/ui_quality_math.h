@@ -1,19 +1,27 @@
 // fix.ui_quality's surfaces half, the pure arithmetic: the factor a surface
 // grows by, the game's internal render resolution derived from the runtime's
-// recommendation and HMD Quality, and the table of interface-surface ratios
-// a create is matched against. Header-only, no device, no Config, no Log:
-// ui_surfaces.cpp and tools/ui_quality_test compile exactly this.
-// (Absorbed 2026-09-23 from fix.hud_quality's hud_quality_math.*, which the
-// one key replaced.)
+// recommendation and HMD Quality, the rule an interface panel's size follows,
+// the table of panels a create is matched against, learning and the pair
+// memo. Header-only, no device, no Config, no Log: ui_surfaces.cpp and
+// tools/ui_quality_test compile exactly this.
 //
-// WHY RATIOS. Elite draws the cockpit's panels -- vector, text, icons -- into
-// offscreen interface surfaces whose size is a fixed fraction of its
-// internal render resolution (fss_res.h's census: 908x1361 at 4340x4284 and
-// 1363x2042 at 6510x6426, the same fraction to four figures), so HMD
-// Quality 0.65 rasterises them at 0.65 of what 1.0 would. A create whose
-// size is one of those fractions of the internal resolution is made at the
-// size it would have at the key's target instead; fss_res.cpp's viewport
-// and scissor backstops make the game's draws fill it.
+// THE RULE (fitted 2026-09-23 from every September flight log: 33 distinct
+// render states in 126 log-states, three headset shapes, FOV trims, the cull
+// guard's widened frusta, HMD Quality 0.5 to 1.27). Elite sizes a cockpit
+// interface panel -- both
+// axes, one scale -- as a constant times
+//
+//     U = W / (2 tan(vFOV / 2)),   vFOV = atan(tanUp) + atan(tanDown),
+//
+// W the render width in pixels and vFOV the game's vertical field of view
+// (the frustum's up and down half-angles added, so an asymmetric frustum
+// counts as the symmetric one of the same angle). Every panel made in the
+// state it was first seen fits within 0.28%, the median 0.04%. The first
+// build's rule -- width over the render width, height over the render
+// height -- holds only while the frustum stays the Pimax's untrimmed one: on
+// Sean's FOV-trimmed eye (1597x1835, vFOV 99.3 degrees) the panels are 7.9%
+// off it, on a Quest 3 8.1%, under the cull guard's symmetric frusta up to
+// 90% -- which is why the 2026-09-23 11:49 flight matched nothing.
 #pragma once
 
 #include <cmath>
@@ -31,7 +39,8 @@ namespace edvr {
 // already far past any panel's need). False -- nothing to do -- when the key
 // is off, HMD Quality is unknown, or the factor does not exceed 1 by more
 // than 1% (HMD Quality already at or above the target: the game's own
-// surface is already that size or bigger).
+// surface is already that size or bigger). At a fixed frustum U is linear in
+// W, so the panel grows by exactly this to the size it has at the target.
 inline bool uiQualityFactor(float target, float hmd, float* factorOut) {
     if (!(target > 0.0f) || !(hmd > 0.0f) || !std::isfinite(hmd)) return false;
     float factor = target / hmd;
@@ -71,31 +80,57 @@ inline void uiQualityRecommendedFromEyes(const uint32_t w[2], const uint32_t h[2
     if (outH) *outH = openxr::gameFacingDimension(mh);
 }
 
-// ---------------------------------------------------------- the ratios --
+// --------------------------------------------------------------- the rule --
 
-// A surface's size over the internal size, in ten-thousandths (four
-// significant figures); 0 with nothing to divide by.
-inline uint32_t uiQualityRatioX10000(uint32_t dim, uint32_t internalDim) {
-    if (!internalDim) return 0;
-    return static_cast<uint32_t>(static_cast<double>(dim) * 10000.0 /
-                                     static_cast<double>(internalDim) +
-                                 0.5);
+// 2 tan(vFOV / 2) for a frustum's up and down tangents (their magnitudes:
+// the sign conventions differ between OpenVR and OpenXR, the angle does
+// not). Pimax Crystal Super untrimmed (1.2648, 1.2648): 2.5296; trimmed 2
+// degrees top and bottom (1.1779, 1.1779): 2.3558; Quest 3 (0.9657, 1.4281):
+// 2.3417 (not the tangents' sum, 2.3938). 0 when either is not usable.
+inline float uiQualityFovTangent(float up, float down) {
+    up = std::fabs(up);
+    down = std::fabs(down);
+    if (!(up > 0.01f) || !(down > 0.01f) || !(up < 100.0f) || !(down < 100.0f)) return 0.0f;
+    return 2.0f * std::tan((std::atan(up) + std::atan(down)) * 0.5f);
 }
 
-inline bool uiQualityRatioNear(uint32_t a, uint32_t b, uint32_t tolerance) {
-    return (a > b ? a - b : b - a) <= tolerance;
+// The render state a create is judged in: the render size and the vertical
+// field of view as 2 tan(vFOV / 2).
+struct UiQualityBasis {
+    uint32_t W = 0, H = 0;
+    float T = 0.0f;
+    bool valid() const { return W && H && T > 0.0f; }
+    double unit() const { return valid() ? static_cast<double>(W) / T : 0.0; }  // U
+};
+
+// A panel dimension over U, in ten-thousandths; 0 with no basis.
+inline uint32_t uiQualityPanelX10000(uint32_t dim, const UiQualityBasis& b) {
+    const double u = b.unit();
+    if (!(u > 0.0)) return 0;
+    return static_cast<uint32_t>(static_cast<double>(dim) * 10000.0 / u + 0.5);
 }
 
-// Two roundings of the same fraction at two resolutions differ by a few
-// parts in 10000 (the census's own spread is 6 on the worst axis); 10 takes
-// that without joining two different panels (the nearest two seeds differ
-// by 5 on one axis and 503 on the other).
-constexpr uint32_t kUiQualityRatioTolerance = 10;
+// Within 0.5% of each other (and a unit for the rounding). The rule's worst
+// residual over the September logs is 0.28%; the nearest two panels (2a and
+// 2b below, the same aspect) are 3.2% apart.
+inline bool uiQualityRatioNear(uint32_t a, uint32_t b) {
+    const uint32_t d = a > b ? a - b : b - a;
+    return static_cast<uint64_t>(d) * 1000u <= static_cast<uint64_t>(b) * 5u + 1000u;
+}
 
-// The shape an interface surface has: smaller than the internal size on
-// both axes (the eye targets and the 3840x2160 2D screen are not), not a
-// power of two on either (atlases, icon caches and shadow maps are), and not
-// a sliver (a 256x1 lookup strip, a 1x1 target).
+// Two bases are different resolutions when their units differ by more than
+// 1% -- an HMD Quality change, a FOV trim (at HMD Quality 0.65 Sean's trim
+// takes U from 788.7 to 677.9), another headset.
+inline bool uiQualityBasisDiffers(const UiQualityBasis& a, const UiQualityBasis& b) {
+    const double ua = a.unit(), ub = b.unit();
+    if (!(ua > 0.0) || !(ub > 0.0)) return false;
+    return std::fabs(ua - ub) > 0.01 * ua;
+}
+
+// The shape an interface surface has: smaller than the render size on both
+// axes (the eye targets and the 3840x2160 2D screen are not), not a power of
+// two on either (atlases, icon caches and shadow maps are), and not a sliver
+// (a 256x1 lookup strip, a 1x1 target).
 inline bool uiQualityCandidateShape(uint32_t w, uint32_t h, uint32_t internalW,
                                     uint32_t internalH) {
     if (w < 16 || h < 16 || !internalW || !internalH) return false;
@@ -108,47 +143,40 @@ enum class UiQualityOrigin : uint8_t {
     kNone = 0,
     kCensus,   // compiled in: the census below
     kLearned,  // this rig: the GUI renderer's own draws were seen landing in
-               // surfaces of this ratio (ui_depth's classifier: it is UI) made
-               // at two internal resolutions more than 1% apart (it scales),
-               // kept in ui_quality_ratios.txt beside the logs
+               // surfaces of this ratio (ui_depth's classifier: it is UI) at
+               // two units more than 1% apart (it scales), kept in
+               // ui_quality_panels.txt beside the logs
 };
 
 struct UiQualityRatio {
-    uint32_t w = 0, h = 0;  // ten-thousandths of the internal width, height
+    uint32_t w = 0, h = 0;  // ten-thousandths of U
     UiQualityOrigin origin = UiQualityOrigin::kNone;
 };
 
-// THE CENSUS (2026-09-23): every census frame in the 35 flight logs since
-// 2026-08 that carries GUI draws (vs 666EF0C4C616F67E vector,
-// 1012E00B3CB44469 text, A3E5D3FCBC1165F8 icon) into an offscreen target,
-// grouped by ratio to that frame's eye viewport. These five were seen at two
-// or more eye widths more than 1% apart, agreeing within the tolerance, all
-// DXGI format 27 and all three families drawn into each: panels that scale
-// with the internal resolution, drawn by the GUI renderer. Surfaces that
-// held one pixel size across a resolution change, powers of two, eye-sized
-// and larger-than-eye targets are not here.
+// THE CENSUS (2026-09-23): the medians of every first sighting of the five
+// cockpit panels in the September logs, each in the render state it was
+// made in (the depth probe names their depth partners; the classifier the
+// GUI drawing into them). 2a and 2b share an aspect and are 3.2% apart; the
+// first build's fifth seed (1354x290 on the Quest) is panel 4.
 struct UiQualitySeed {
     uint32_t w, h;
     const char* evidence;
 };
 constexpr UiQualitySeed kUiQualitySeeds[] = {
-    {2092, 3175, "539x807 at 2576x2544, 589x883 at 2818x2784, 1135x1701 at 5424x5356 (6 logs)"},
-    {4187, 2649, "1078x674 at 2576x2544, 2271x1419 at 5424x5356 (5 logs)"},
-    {4498, 3726, "1267x1036 at 2818x2784, 2440x1996 at 5424x5356 (5 logs)"},
-    {6280, 1367, "1769x380 at 2818x2784, 3407x732 at 5424x5356 (5 logs)"},
-    {6783, 1362, "1354x290 at 1996x2121, 1400x300 at 2064x2208 (5 logs)"},
+    {5291, 7929, "panel 1: 539x807 @2576x2544 Pimax, 358x537 @1597x1835 trimmed, 451x676 @1996x2121 Quest 3, 666x998 @2307x1652 (130 sightings)"},
+    {10576, 6608, "panel 2a: 1078x674 @2576x2544 Pimax, 717x448 @1597x1835 trimmed"},
+    {10919, 6822, "panel 2b: 1112x695 @2576x2544 Pimax, 740x462 @1597x1835 trimmed, 931x581 @1996x2121 Quest 3 (52)"},
+    {11371, 9303, "panel 3: 1158x947 @2576x2544 Pimax, 771x630 @1597x1835 trimmed, 969x793 @1996x2121 Quest 3 (131)"},
+    {15885, 3408, "panel 4: 1617x347 @2576x2544 Pimax, 1076x231 @1597x1835 trimmed, 1354x290 @1996x2121 Quest 3 (130)"},
 };
 constexpr uint32_t kUiQualitySeedCount = sizeof(kUiQualitySeeds) / sizeof(kUiQualitySeeds[0]);
 
-// The entry whose ratio is within the tolerance on both axes, or -1.
-inline int uiQualityRatioFind(const UiQualityRatio* table, uint32_t n, uint32_t rw, uint32_t rh,
-                              uint32_t tolerance = kUiQualityRatioTolerance) {
+// The entry whose ratio is within 0.5% on both axes, or -1.
+inline int uiQualityRatioFind(const UiQualityRatio* table, uint32_t n, uint32_t rw, uint32_t rh) {
     if (!table) return -1;
     for (uint32_t i = 0; i < n; ++i) {
-        if (uiQualityRatioNear(rw, table[i].w, tolerance) &&
-            uiQualityRatioNear(rh, table[i].h, tolerance)) {
+        if (uiQualityRatioNear(rw, table[i].w) && uiQualityRatioNear(rh, table[i].h))
             return static_cast<int>(i);
-        }
     }
     return -1;
 }
@@ -165,11 +193,13 @@ inline uint32_t uiQualitySeedTable(UiQualityRatio* table, uint32_t max) {
     return n;
 }
 
+inline bool uiQualityRatioPlausible(uint32_t r) { return r > 0 && r < 1000000u; }
+
 // Appends a learned ratio unless one within the tolerance is already there
 // (census or learned). True only when it was added.
 inline bool uiQualityLearn(UiQualityRatio* table, uint32_t* n, uint32_t max, uint32_t rw,
                            uint32_t rh) {
-    if (!table || !n || !rw || !rh || rw >= 10000 || rh >= 10000) return false;
+    if (!table || !n || !uiQualityRatioPlausible(rw) || !uiQualityRatioPlausible(rh)) return false;
     if (uiQualityRatioFind(table, *n, rw, rh) >= 0) return false;
     if (*n >= max) return false;
     table[*n].w = rw;
@@ -183,28 +213,21 @@ inline bool uiQualityLearn(UiQualityRatio* table, uint32_t* n, uint32_t max, uin
 //
 // Two questions, and both are needed: IS IT UI -- ui_depth's classifier saw
 // the GUI renderer's draws land in the surface -- and DOES IT SCALE -- the
-// same ratio at a second internal resolution more than 1% away. A GUI
-// surface of fixed pixel size (the census's 666x998: one size at two
-// resolutions 7.5% apart) answers yes to the first and no to the second,
-// and enlarging it in every later session would be wrong (review P2-1). So
-// a GUI-drawn surface is first PENDING, with the basis it was made against;
-// the same ratio at a basis more than 1% different PROMOTES it to the
-// table; the same pixel size at such a basis marks the size FIXED, for good.
+// same ratio at a second unit more than 1% away. A GUI surface of fixed
+// pixel size answers yes to the first and no to the second, and enlarging it
+// in every later session would be wrong (review P2-1). So a GUI-drawn
+// surface is first PENDING, with the basis it was made against; the same
+// ratio at a unit more than 1% different PROMOTES it to the table; the same
+// pixel size at such a unit marks the size FIXED, for good.
 
 struct UiQualityPending {
     uint32_t rw = 0, rh = 0;  // its ratio against the basis it was made at
     uint32_t w = 0, h = 0;    // its pixel size
-    uint32_t bw = 0, bh = 0;  // that basis, the internal render size
+    UiQualityBasis b;         // that basis
 };
 struct UiQualitySize {
     uint32_t w = 0, h = 0;
 };
-
-// Two bases are different resolutions when either axis differs by more than
-// 1% (and a pixel, for the rounding).
-inline bool uiQualityBasisDiffers(uint32_t aw, uint32_t ah, uint32_t bw, uint32_t bh) {
-    return !uiQualityRatioNear(aw, bw, aw / 100 + 1) || !uiQualityRatioNear(ah, bh, ah / 100 + 1);
-}
 
 enum class UiQualityLearn : uint8_t {
     kIgnored,     // not a surface's shape, or its ratio is already on the table
@@ -249,25 +272,25 @@ struct UiQualityLearning {
         if (i < np) pending[i] = pending[--np];
     }
     bool addPending(const UiQualityPending& p) {
-        if (np >= kMaxPending || !p.rw || !p.rh || !p.w || !p.h || !p.bw || !p.bh) return false;
+        if (np >= kMaxPending || !uiQualityRatioPlausible(p.rw) || !uiQualityRatioPlausible(p.rh) ||
+            !p.w || !p.h || !p.b.valid()) {
+            return false;
+        }
         pending[np++] = p;
         return true;
     }
 
-    // One sighting of a GUI-drawn surface of w x h made against bw x bh.
+    // One sighting of a GUI-drawn surface of w x h made in basis b.
     // *outW / *outH: the ratio promoted, on kPromoted.
-    UiQualityLearn observe(uint32_t w, uint32_t h, uint32_t bw, uint32_t bh,
-                           uint32_t* outW = nullptr, uint32_t* outH = nullptr) {
-        if (!uiQualityCandidateShape(w, h, bw, bh)) return UiQualityLearn::kIgnored;
+    UiQualityLearn observe(uint32_t w, uint32_t h, const UiQualityBasis& b, uint32_t* outW = nullptr,
+                           uint32_t* outH = nullptr) {
+        if (!b.valid() || !uiQualityCandidateShape(w, h, b.W, b.H)) return UiQualityLearn::kIgnored;
         if (isFixed(w, h)) return UiQualityLearn::kFixed;
-        const uint32_t rw = uiQualityRatioX10000(w, bw), rh = uiQualityRatioX10000(h, bh);
+        const uint32_t rw = uiQualityPanelX10000(w, b), rh = uiQualityPanelX10000(h, b);
         if (uiQualityRatioFind(table, n, rw, rh) >= 0) return UiQualityLearn::kIgnored;
         // The same pixel size at another resolution: it does not scale.
         for (uint32_t i = 0; i < np; ++i) {
-            if (pending[i].w != w || pending[i].h != h ||
-                !uiQualityBasisDiffers(pending[i].bw, pending[i].bh, bw, bh)) {
-                continue;
-            }
+            if (pending[i].w != w || pending[i].h != h || !uiQualityBasisDiffers(pending[i].b, b)) continue;
             addFixed(w, h);
             for (uint32_t k = np; k-- > 0;)
                 if (pending[k].w == w && pending[k].h == h) dropPending(k);
@@ -277,11 +300,8 @@ struct UiQualityLearning {
         // says nothing new.
         for (uint32_t i = 0; i < np; ++i) {
             const UiQualityPending p = pending[i];
-            if (!uiQualityRatioNear(p.rw, rw, kUiQualityRatioTolerance) ||
-                !uiQualityRatioNear(p.rh, rh, kUiQualityRatioTolerance)) {
-                continue;
-            }
-            if (!uiQualityBasisDiffers(p.bw, p.bh, bw, bh)) return UiQualityLearn::kSameBasis;
+            if (!uiQualityRatioNear(rw, p.rw) || !uiQualityRatioNear(rh, p.rh)) continue;
+            if (!uiQualityBasisDiffers(p.b, b)) return UiQualityLearn::kSameBasis;
             const uint32_t lw = (p.rw + rw + 1) / 2, lh = (p.rh + rh + 1) / 2;
             dropPending(i);
             if (!uiQualityLearn(table, &n, kMaxRatios, lw, lh)) return UiQualityLearn::kFull;
@@ -289,18 +309,25 @@ struct UiQualityLearning {
             if (outH) *outH = lh;
             return UiQualityLearn::kPromoted;
         }
-        return addPending({rw, rh, w, h, bw, bh}) ? UiQualityLearn::kPending : UiQualityLearn::kFull;
+        UiQualityPending p;
+        p.rw = rw;
+        p.rh = rh;
+        p.w = w;
+        p.h = h;
+        p.b = b;
+        return addPending(p) ? UiQualityLearn::kPending : UiQualityLearn::kFull;
     }
 };
 
-// ui_quality_ratios.txt, one fact a line ('#' starts a comment):
-//   learned RW RH                -- a ratio on the table
-//   pending RW RH W H BW BH      -- a GUI surface waiting for a second resolution
-//   fixed W H                    -- a GUI surface size that does not scale
-// Ratios in ten-thousandths. Anything else -- malformed, out of range, the
-// first build's bare "W H" lines, which were learned without the scaling
-// test -- is skipped a line at a time, never trusted. Appends to `l` (after
-// reset(): the census first); returns the lines taken.
+// ui_quality_panels.txt, one fact a line ('#' starts a comment):
+//   learned RW RH                     -- a panel ratio on the table
+//   pending RW RH W H BW BH BT        -- a GUI surface waiting for a second
+//                                        resolution (BT: 2 tan(vFOV/2) x 10000)
+//   fixed W H                         -- a GUI surface size that does not scale
+// Ratios in ten-thousandths of U. Anything else -- malformed, out of range --
+// is skipped a line at a time, never trusted. (The first builds' file,
+// ui_quality_ratios.txt, held ratios to the render size, not to U: not read.)
+// Appends to `l` (after reset(): the census first); returns the lines taken.
 inline uint32_t uiQualityParseLearning(const char* text, UiQualityLearning& l) {
     if (!text) return 0;
     uint32_t taken = 0;
@@ -317,11 +344,11 @@ inline uint32_t uiQualityParseLearning(const char* text, UiQualityLearning& l) {
                 word[k] = p[k];
                 ++k;
             }
-            unsigned long v[6] = {};
+            unsigned long v[8] = {};
             int count = 0;
             const char* q = p + k;
             bool clean = k > 0 && (q < lineEnd && (*q == ' ' || *q == '\t'));
-            while (clean && count < 6) {
+            while (clean && count < 8) {
                 while (q < lineEnd && (*q == ' ' || *q == '\t')) ++q;
                 if (q >= lineEnd || *q == '\r') break;
                 char* end = nullptr;
@@ -335,17 +362,24 @@ inline uint32_t uiQualityParseLearning(const char* text, UiQualityLearning& l) {
             }
             while (clean && q < lineEnd && (*q == ' ' || *q == '\t' || *q == '\r')) ++q;
             clean = clean && q == lineEnd;
-            auto ratio = [](unsigned long x) { return x > 0 && x < 10000; };
+            auto ratio = [](unsigned long x) { return uiQualityRatioPlausible(static_cast<uint32_t>(x)) && x < 1000000ul; };
             auto pixels = [](unsigned long x) { return x > 0 && x <= 16384; };
             bool ok = false;
             if (clean && std::strcmp(word, "learned") == 0 && count == 2 && ratio(v[0]) && ratio(v[1])) {
                 ok = uiQualityLearn(l.table, &l.n, UiQualityLearning::kMaxRatios,
                                     static_cast<uint32_t>(v[0]), static_cast<uint32_t>(v[1]));
-            } else if (clean && std::strcmp(word, "pending") == 0 && count == 6 && ratio(v[0]) &&
-                       ratio(v[1]) && pixels(v[2]) && pixels(v[3]) && pixels(v[4]) && pixels(v[5])) {
-                ok = l.addPending({static_cast<uint32_t>(v[0]), static_cast<uint32_t>(v[1]),
-                                   static_cast<uint32_t>(v[2]), static_cast<uint32_t>(v[3]),
-                                   static_cast<uint32_t>(v[4]), static_cast<uint32_t>(v[5])});
+            } else if (clean && std::strcmp(word, "pending") == 0 && count == 7 && ratio(v[0]) &&
+                       ratio(v[1]) && pixels(v[2]) && pixels(v[3]) && pixels(v[4]) && pixels(v[5]) &&
+                       v[6] > 100 && v[6] < 1000000ul) {
+                UiQualityPending e;
+                e.rw = static_cast<uint32_t>(v[0]);
+                e.rh = static_cast<uint32_t>(v[1]);
+                e.w = static_cast<uint32_t>(v[2]);
+                e.h = static_cast<uint32_t>(v[3]);
+                e.b.W = static_cast<uint32_t>(v[4]);
+                e.b.H = static_cast<uint32_t>(v[5]);
+                e.b.T = static_cast<float>(v[6]) / 10000.0f;
+                ok = l.addPending(e);
             } else if (clean && std::strcmp(word, "fixed") == 0 && count == 2 && pixels(v[0]) &&
                        pixels(v[1])) {
                 ok = l.addFixed(static_cast<uint32_t>(v[0]), static_cast<uint32_t>(v[1]));
@@ -361,10 +395,11 @@ inline uint32_t uiQualityParseLearning(const char* text, UiQualityLearning& l) {
 // fixed sizes (the census is compiled in and not written).
 inline std::string uiQualityFormatLearning(const UiQualityLearning& l) {
     std::string s =
-        "# fix.ui_quality: interface surfaces on this rig, in ten-thousandths of the internal\n"
-        "# render size. learned: GUI-drawn and seen to scale; pending: GUI-drawn, waiting for\n"
-        "# a second resolution; fixed: GUI-drawn at one size across resolutions. Delete to forget.\n";
-    char line[96];
+        "# fix.ui_quality: interface panels on this rig, in ten-thousandths of U = W / (2 tan(vFOV/2)).\n"
+        "# learned: GUI-drawn and seen to scale; pending: GUI-drawn, waiting for a second resolution\n"
+        "# (W H BW BH BT: its size, the render size and 2 tan(vFOV/2) x 10000 it was made at);\n"
+        "# fixed: GUI-drawn at one size across resolutions. Delete to forget.\n";
+    char line[112];
     for (uint32_t i = 0; i < l.n; ++i) {
         if (l.table[i].origin != UiQualityOrigin::kLearned) continue;
         std::snprintf(line, sizeof(line), "learned %u %u\n", l.table[i].w, l.table[i].h);
@@ -372,8 +407,8 @@ inline std::string uiQualityFormatLearning(const UiQualityLearning& l) {
     }
     for (uint32_t i = 0; i < l.np; ++i) {
         const UiQualityPending& p = l.pending[i];
-        std::snprintf(line, sizeof(line), "pending %u %u %u %u %u %u\n", p.rw, p.rh, p.w, p.h, p.bw,
-                      p.bh);
+        std::snprintf(line, sizeof(line), "pending %u %u %u %u %u %u %u\n", p.rw, p.rh, p.w, p.h, p.b.W,
+                      p.b.H, static_cast<uint32_t>(p.b.T * 10000.0f + 0.5f));
         s += line;
     }
     for (uint32_t i = 0; i < l.nf; ++i) {

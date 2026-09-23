@@ -37,11 +37,15 @@ constexpr uint32_t kMaxDim = 16384;  // D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION
 constexpr uint32_t kSizeNotes = 8;   // distinct sizes named (with their RVAs) a session
 constexpr uint32_t kCandidates = 32; // unmatched candidate creates remembered for learning
 constexpr uint32_t kSnapshot = 32;   // learned surfaces kept for the family label
-constexpr uint32_t kFirsts = 4;      // resizes quoted on the totals line
+constexpr uint32_t kFirsts = 6;      // resizes quoted on the totals line (the census has five panels)
 constexpr uint32_t kLearnNotes = 16; // learning lines a session
-constexpr wchar_t kRatioFile[] = L"ui_quality_ratios.txt";
+// The panels' file. The first builds' ui_quality_ratios.txt held ratios to
+// the render size, which is not what the game sizes panels by (the rule in
+// ui_quality_math.h); it is not read.
+constexpr wchar_t kRatioFile[] = L"ui_quality_panels.txt";
 
-// The internal render resolution, as read at one moment.
+// The internal render resolution and the vertical field of view, as read
+// at one moment.
 struct Basis {
     uint32_t recW = 0, recH = 0;
     int recSource = 0;  // 1 the runtime's frame, 2 its swapchain sizing (before the first frame)
@@ -49,10 +53,13 @@ struct Basis {
     uint32_t derivedW = 0, derivedH = 0;    // recommended x HMD Quality, truncated
     uint32_t measuredW = 0, measuredH = 0;  // the eye the game submits
     uint32_t fallbackW = 0, fallbackH = 0;  // vScreen's measurement, when neither is known
+    float T = 0.0f;                         // 2 tan(vFOV/2) of the frame's frustum; 0 unknown
+    float vfovDeg = 0.0f;
 };
 
 struct Candidate {
-    uint32_t w = 0, h = 0, basisW = 0, basisH = 0;
+    uint32_t w = 0, h = 0;
+    UiQualityBasis b;
 };
 
 struct Resized {
@@ -128,6 +135,7 @@ struct State {
     uint32_t sizeW[kSizeNotes] = {}, sizeH[kSizeNotes] = {};
     uint32_t sizeNoted = 0;
     bool noHmdNoted = false, noBasisNoted = false, atTargetNoted = false, agreeNoted = false;
+    bool noFovNoted = false;
     uint32_t crossNotes = 0;
     uint32_t crossDW = 0, crossDH = 0, crossMW = 0, crossMH = 0;
     uint32_t learnNotes = 0;
@@ -172,6 +180,12 @@ Basis readBasis() {
     if (!b.derivedW && !b.measuredW && vScreenInternalResolution(&w, &h) && w && h) {
         b.fallbackW = w;
         b.fallbackH = h;
+    }
+    float up = 0.0f, down = 0.0f;
+    if (nativeTemporalVerticalTangents(&up, &down)) {
+        b.T = uiQualityFovTangent(up, down);
+        if (b.T > 0.0f)
+            b.vfovDeg = static_cast<float>((std::atan(up) + std::atan(down)) * 57.29577951308232);
     }
     return b;
 }
@@ -245,37 +259,43 @@ std::string basisText(const Basis& b) {
     } else {
         s = "unknown";
     }
+    if (b.T > 0.0f) {
+        const uint32_t W = b.derivedW ? b.derivedW : b.measuredW ? b.measuredW : b.fallbackW;
+        appendf(s, ", with a vertical FOV of %.1f degrees", static_cast<double>(b.vfovDeg));
+        if (W) appendf(s, " (U = %u / 2 tan(vFOV/2) = %.1f)", W, static_cast<double>(W / b.T));
+    } else {
+        appendf(s, ", vertical FOV not known yet");
+    }
     return s;
 }
 
 // Under g_lock: what one sighting taught, said at most kLearnNotes times.
-void noteLearning(UiQualityLearn v, char family, uint32_t w, uint32_t h, uint32_t bw, uint32_t bh,
+void noteLearning(UiQualityLearn v, char family, uint32_t w, uint32_t h, const UiQualityBasis& b,
                   uint32_t lw, uint32_t lh) {
     if (g_s.learnNotes >= kLearnNotes) return;
     if (v == UiQualityLearn::kPending) {
         ++g_s.learnNotes;
         Log::get().note(
             "ui quality: surfaces: pending -- the GUI renderer draws %s into a %ux%u surface made "
-            "against an internal %ux%u (ratio %.4f x %.4f) that is on no ratio; it is resized once "
-            "the same ratio is seen at an internal size more than 1%% different (it scales), "
-            "never if the same size is (it does not).",
-            familyName(family), w, h, bw, bh, uiQualityRatioX10000(w, bw) / 10000.0,
-            uiQualityRatioX10000(h, bh) / 10000.0);
+            "at %ux%u with 2 tan(vFOV/2) %.4f (ratio %.4f x %.4f of U = %.1f) that is on no panel "
+            "ratio; it is resized once the same ratio is seen at a U more than 1%% different (it "
+            "scales), never if the same size is (it does not).",
+            familyName(family), w, h, b.W, b.H, static_cast<double>(b.T),
+            uiQualityPanelX10000(w, b) / 10000.0, uiQualityPanelX10000(h, b) / 10000.0, b.unit());
     } else if (v == UiQualityLearn::kPromoted) {
         ++g_s.learnNotes;
         Log::get().note(
-            "ui quality: surfaces: learned -- a %s surface's ratio %.4f x %.4f held at a second "
-            "internal size (now %ux%u against %ux%u): it scales, so it is resized from its next "
-            "creation (a trip through the main menu) and in later sessions (ui_quality_ratios.txt "
-            "beside the logs).",
-            familyName(family), lw / 10000.0, lh / 10000.0, w, h, bw, bh);
+            "ui quality: surfaces: learned -- a %s surface's ratio %.4f x %.4f of U held at a "
+            "second U (now %ux%u at U = %.1f): it scales, so it is resized from its next creation "
+            "(a trip through the main menu) and in later sessions (ui_quality_panels.txt beside "
+            "the logs).",
+            familyName(family), lw / 10000.0, lh / 10000.0, w, h, b.unit());
     } else if (v == UiQualityLearn::kNotScaling) {
         ++g_s.learnNotes;
         Log::get().note(
-            "ui quality: surfaces: a %ux%u %s surface kept its pixel size at a second internal "
-            "size (%ux%u): it does not scale, and is never resized (kept in "
-            "ui_quality_ratios.txt).",
-            w, h, familyName(family), bw, bh);
+            "ui quality: surfaces: a %ux%u %s surface kept its pixel size at a second U (%.1f, "
+            "%ux%u): it does not scale, and is never resized (kept in ui_quality_panels.txt).",
+            w, h, familyName(family), b.unit(), b.W, b.H);
     } else if (v == UiQualityLearn::kFull) {
         ++g_s.learnNotes;
         Log::get().note("ui quality: surfaces: the learning table is full; a %ux%u surface is "
@@ -350,28 +370,25 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
         }
         return false;
     }
-    // The bases a ratio is taken against: the derived size, and the size
-    // the game submits where it differs (a FOV-trim or cull-guard change in
-    // flight, or an HMD Quality the .fxcfg does not hold); vScreen's own
-    // measurement only when neither is known.
-    uint32_t bw[2] = {}, bh[2] = {};
+    // The bases a panel is judged against: the derived render size, and the
+    // size the game submits where it differs (a FOV-trim or cull-guard
+    // change in flight, or an HMD Quality the .fxcfg does not hold); vScreen's
+    // own measurement only when neither is known. Each with the frame's
+    // vertical field of view: the game sizes a panel by W / 2 tan(vFOV/2)
+    // (ui_quality_math.h's rule), not by the render size alone.
+    UiQualityBasis bases[2];
     int which[2] = {};
     uint32_t nb = 0;
-    if (b.derivedW) {
-        bw[nb] = b.derivedW;
-        bh[nb] = b.derivedH;
-        which[nb++] = 0;
-    }
-    if (b.measuredW && (b.measuredW != b.derivedW || b.measuredH != b.derivedH)) {
-        bw[nb] = b.measuredW;
-        bh[nb] = b.measuredH;
-        which[nb++] = 1;
-    }
-    if (!nb && b.fallbackW) {
-        bw[nb] = b.fallbackW;
-        bh[nb] = b.fallbackH;
-        which[nb++] = 2;
-    }
+    auto add = [&](uint32_t W, uint32_t H, int w) {
+        bases[nb].W = W;
+        bases[nb].H = H;
+        bases[nb].T = b.T;
+        which[nb++] = w;
+    };
+    if (b.derivedW) add(b.derivedW, b.derivedH, 0);
+    if (b.measuredW && (b.measuredW != b.derivedW || b.measuredH != b.derivedH))
+        add(b.measuredW, b.measuredH, 1);
+    if (!nb && b.fallbackW) add(b.fallbackW, b.fallbackH, 2);
     if (!nb) {
         if (!g_s.noBasisNoted) {
             g_s.noBasisNoted = true;
@@ -381,16 +398,25 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
         }
         return false;
     }
+    if (!(b.T > 0.0f)) {
+        if (!g_s.noFovNoted) {
+            g_s.noFovNoted = true;
+            Log::get().note("ui quality: surfaces: the game's vertical field of view is not known yet "
+                            "(no frame has begun in EDVR's runtime) -- a surface made now is left "
+                            "as the game asks; the cockpit's panels are made after it is.");
+        }
+        return false;
+    }
     if (!g_s.loaded) loadTable();
     const UiQualityLearning& L = g_s.learn;
     int found = -1;
     uint32_t used = 0;
     bool candidate = false;
     for (uint32_t i = 0; i < nb && found < 0; ++i) {
-        if (!uiQualityCandidateShape(d->Width, d->Height, bw[i], bh[i])) continue;
+        if (!uiQualityCandidateShape(d->Width, d->Height, bases[i].W, bases[i].H)) continue;
         candidate = true;
-        found = uiQualityRatioFind(L.table, L.n, uiQualityRatioX10000(d->Width, bw[i]),
-                                   uiQualityRatioX10000(d->Height, bh[i]));
+        found = uiQualityRatioFind(L.table, L.n, uiQualityPanelX10000(d->Width, bases[i]),
+                                   uiQualityPanelX10000(d->Height, bases[i]));
         used = i;
     }
     const uint32_t ow = d->Width, oh = d->Height;
@@ -405,8 +431,7 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
             if (g_s.candCount < kCandidates) ++g_s.candCount;
             c.w = ow;
             c.h = oh;
-            c.basisW = bw[0];
-            c.basisH = bh[0];
+            c.b = bases[0];
             UiQualityDecision keep;
             keep.ow = keep.nw = ow;
             keep.oh = keep.nh = oh;
@@ -446,17 +471,19 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
             }
         }
         Log::get().note(
-            "ui quality: surfaces: a %ux%u interface surface (%s) is made at %ux%u (x%.4f, HMD "
-            "Quality %.2f -> %s) -- %s ratio %.4f x %.4f of the internal %ux%u (%s); created from "
-            "game RVAs %s (%u of %u captured frames in the game module).",
+            "ui quality: surfaces: made bigger -- a %ux%u interface surface (%s) is made at %ux%u "
+            "(x%.4f, HMD Quality %.2f -> %s): %s panel ratio %.4f x %.4f of U = %.1f (render %ux%u "
+            "%s, vertical FOV %.1f degrees); created from game RVAs %s (%u of %u captured frames in "
+            "the game module).",
             ow, oh, familyName(family), nw, nh, static_cast<double>(factor),
             static_cast<double>(b.hmd), g_s.text.c_str(),
             r.origin == UiQualityOrigin::kCensus ? "the census's" : "a learned",
-            r.w / 10000.0, r.h / 10000.0, bw[used], bh[used],
+            r.w / 10000.0, r.h / 10000.0, bases[used].unit(), bases[used].W, bases[used].H,
             which[used] == 0   ? "derived"
-            : which[used] == 1 ? "the size the game submits"
+            : which[used] == 1 ? "as the game submits"
                                : "vScreen's measurement",
-            stack.gameFrames ? rvas : "none", stack.gameFrames, stack.captured);
+            static_cast<double>(b.vfovDeg), stack.gameFrames ? rvas : "none", stack.gameFrames,
+            stack.captured);
     }
     d->Width = nw;
     d->Height = nh;
@@ -561,29 +588,26 @@ void uiSurfacesFrameBoundary() {
             ++g_s.snapCount;
         }
         // The distinct bases this size was created against.
-        uint32_t basesW[4] = {}, basesH[4] = {}, nBases = 0;
+        UiQualityBasis bases[4];
+        uint32_t nBases = 0;
         for (uint32_t k = 0; k < g_s.candCount; ++k) {
             const Candidate& c = g_s.cand[k];
-            if (c.w != w || c.h != h) continue;
+            if (c.w != w || c.h != h || !c.b.valid()) continue;
             bool seen = false;
             for (uint32_t j = 0; j < nBases; ++j)
-                seen = seen || (basesW[j] == c.basisW && basesH[j] == c.basisH);
-            if (!seen && nBases < 4) {
-                basesW[nBases] = c.basisW;
-                basesH[nBases] = c.basisH;
-                ++nBases;
-            }
+                seen = seen || (bases[j].W == c.b.W && bases[j].H == c.b.H && bases[j].T == c.b.T);
+            if (!seen && nBases < 4) bases[nBases++] = c.b;
         }
         if (!nBases) continue;
         if (!g_s.loaded) loadTable();
         for (uint32_t j = 0; j < nBases; ++j) {
             uint32_t lw = 0, lh = 0;
-            const UiQualityLearn v = g_s.learn.observe(w, h, basesW[j], basesH[j], &lw, &lh);
+            const UiQualityLearn v = g_s.learn.observe(w, h, bases[j], &lw, &lh);
             if (v == UiQualityLearn::kPending || v == UiQualityLearn::kPromoted ||
                 v == UiQualityLearn::kNotScaling) {
                 changed = true;
             }
-            noteLearning(v, learned[i].family, w, h, basesW[j], basesH[j], lw, lh);
+            noteLearning(v, learned[i].family, w, h, bases[j], lw, lh);
         }
     }
     if (changed) saveTable();
@@ -612,14 +636,14 @@ void uiSurfacesSummary(char* out, size_t n) {
         }
         // Commas only inside: the totals line puts "; layer:" after this.
         if (!g_s.loaded) {
-            appendf(s, ", %u census ratios", kUiQualitySeedCount);
+            appendf(s, ", %u census panels", kUiQualitySeedCount);
         } else {
-            appendf(s, ", ratios %u census + %u learned (%u pending a second resolution, %u sizes "
+            appendf(s, ", panels %u census + %u learned (%u pending a second resolution, %u sizes "
                        "that do not scale)",
                     kUiQualitySeedCount, g_s.learn.learnedCount(), g_s.learn.np, g_s.learn.nf);
         }
         if (g_s.resized) {
-            appendf(s, ", %u made bigger this session (%u by census ratio, %u learned%s, %u as a "
+            appendf(s, ", %u made bigger this session (%u by census panel, %u learned%s, %u as a "
                        "pair's partner:",
                     g_s.resized, g_s.resizedCensus, g_s.resizedLearned,
                     g_s.onSubmitted ? ", some against the submitted size" : "", g_s.memoHits);
