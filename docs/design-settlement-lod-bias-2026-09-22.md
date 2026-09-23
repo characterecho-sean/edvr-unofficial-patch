@@ -17,9 +17,14 @@ on it 2026-09-23 (section 8: flown twice). Capture: eye run 165433
   the fix: k 1 -> 4 in 142 s, mean caller work 11.4-12.8 ms against the
   11.11 ms period, 0 disagreements with the engine at k = 1, would-drop
   saturating at 48-50% of passed parts between s x k 4.5 and 6.0, as the
-  exact draw table predicts (33.5-33.7% ceiling). It still never acts.
-  The v3 tables price the LOD-distance half exactly (section 8); the
-  screen-size half is a weak lever.
+  exact draw table predicts (33.5-33.7% ceiling). ACTING MODE BUILT
+  (section 9, merged 1404b1b), NOT FLOWN: a bracket on the slider's
+  setter FUN_142819D90 scales the game's LOD scale by k right after the
+  engine stores it each frame (the builder-site write was refuted: the
+  setter runs every frame); auto = the governed k, reduced = k_max at
+  once, advanced.settlement_detail_observe = 1 keeps the shadow-only
+  behaviour. The v3 tables price the LOD-distance half exactly (section
+  8); the screen-size half is a weak lever.
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
   +0x550 = 1/fy, the tangent of one pixel (0.000834297 here), B = +0x560
@@ -65,12 +70,14 @@ on it 2026-09-23 (section 8: flown twice). Capture: eye run 165433
 - **Leg C (engine arc, 2026-09-23):** LODDistanceScale 0.001 left the
   parked view at 18.9k eye draws, as section 5 predicts: ruled out there
   as a draw lever (section 6).
-- **Open:** whether to build the acting mode (section 8's second flight
-  confirms the signal and the elasticity; nothing technical is blocking
-  it).
-- **Ruled out:** see section 6.
-- **Next:** Sean's call: build the acting mode (proposal: write s x k
-  into ctx+0x30 per frame; shadow counters stay as the gate).
+- **Open:** the first acting flight (section 9's checklist): whether the
+  frame work falls with k and caller_wait_fps rises toward 90, the
+  disagreement gate at the held scale, and the visual cost in the
+  headset (popping at steps, thinning beyond ~100 m, one-eye artefacts).
+- **Ruled out:** see section 6 and section 9 (the builder-site write).
+- **Next:** fly `fix.settlement_detail = auto` (observe 0, k_max 4)
+  parked at Cranfield on the acting build; read section 9's "What the
+  first acting flight must show".
 
 ## 1. The test and what the decompile leaves undefined
 

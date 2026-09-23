@@ -80,10 +80,15 @@
   check ~0.1) armed-only, and a fourth round on the resource hooks.
   Entries: "Per-draw cut, round three", "Leg C".
 
-* **Settlement LOD governor (2026-09-23, flown twice): DONE, signal
-  confirmed; acting mode = Sean's call.** `src\d3d11\lod_governor.*`,
-  shadow only (k = 1 in space, k > 1 at a settlement only while the
-  frame does not fit, hysteresis against pumping). Shadow flight 1
+* **Settlement LOD governor (2026-09-23, flown twice in shadow; ACTING
+  MODE BUILT 1404b1b, NOT FLOWN).** `src\d3d11\lod_governor.*` (k = 1 in
+  space, k > 1 at a settlement only while the frame does not fit,
+  hysteresis against pumping). Acting = a bracket on the slider's setter
+  FUN_142819D90 that scales the game's LOD scale (ctx+0x30) by k right
+  after the engine stores it each frame; the builder-site write was
+  REFUTED (the setter runs every frame: design note section 9); auto =
+  the governed k, reduced = k_max at once at a settlement,
+  advanced.settlement_detail_observe = 1 keeps shadow-only. Shadow flight 1
   (a081900) found the signal was applicationMs, the pre-submit phase
   only, so k never left 1; fixed by 73bfab3 to
   EdvrNativeTimingFrame::callerWorkMs (timing ABI v5 = cycle -
@@ -95,11 +100,13 @@
   explains a HUD puzzle: the perf monitor's CPU figure is the pre-submit
   phase only, so it read under 10 ms while the caller thread actually
   worked 11.7-12.7 ms a cycle at 50-55 fps. Keys fix.settlement_detail
-  (game default; auto = shadow) and advanced.settlement_detail_max.
-  Entries: "The settlement LOD governor", "Shadow flight 1", "Shadow
-  flight 2". Next: no flight pending; Sean's call on the acting mode
-  (proposal: write s x k into ctx+0x30 once a frame on the caller
-  thread; shadow counters stay as the gate).
+  (game default; auto and reduced act), advanced.settlement_detail_max,
+  advanced.settlement_detail_observe. Entries: "The settlement LOD
+  governor", "Shadow flight 1", "Shadow flight 2". Next: the first ACTING
+  flight, parked at Cranfield, auto, observe 0 (design note section 9's
+  checklist): the frame work should fall with k toward under the period
+  and caller_wait_fps rise toward 90; disagreements at the held scale 0;
+  the visual cost judged in the headset.
 
 * **Open (arc OPEN on two levers; scope cockpit-only stereo):** (1)
   EDVR's per-draw path, NAMED (2026-09-22 per-draw entry: hookedMap +
