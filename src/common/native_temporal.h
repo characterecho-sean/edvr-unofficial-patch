@@ -19,7 +19,12 @@ struct EdvrNativeTemporalFrame {
   uint64_t generation, referenceGeneration, sequence;
   float head[12], eyeToHead[2][12]; // rigid row-major 3x4, exactly as given to Elite
   float frusta[2][4];             // unjittered signed {left,right,down,up}
-  uint32_t recommendedWidth, recommendedHeight;
+  uint32_t recommendedWidth, recommendedHeight;  // what this frame was rendered for
+  // What the game is told now, max over eyes: during a cull-guard or FOV-trim
+  // adoption the game re-creates its targets for this size before a frame of
+  // it arrives, while the recommendation above is still the previous ask.
+  // 0 when the host does not say (the recommendation is then the answer).
+  uint32_t askedWidth, askedHeight;
 };
 struct EdvrNativeTemporalProjection {
   uint32_t size, version;

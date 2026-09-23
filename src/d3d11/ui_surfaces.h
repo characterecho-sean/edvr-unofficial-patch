@@ -76,5 +76,11 @@ bool nativeTemporalRecommended(uint32_t* w, uint32_t* h);
 // ...and the same frame's vertical frustum: eye 0's up and down tangents
 // (magnitudes), which the panel rule needs (ui_quality_math.h). Lock-free.
 bool nativeTemporalVerticalTangents(float* up, float* down);
+// ...and what the game is told now, the host's ask (max over eyes): during an
+// adoption it leads the recommendation above, and the game re-creates its
+// surfaces for it before a frame of it arrives -- so a create is judged
+// against it first (review P3-1, the 2026-09-23 13:23 menu flight). False
+// when the host does not say. Lock-free.
+bool nativeTemporalAsked(uint32_t* w, uint32_t* h);
 
 }  // namespace edvr

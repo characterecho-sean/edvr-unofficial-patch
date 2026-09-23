@@ -17,9 +17,10 @@
 //
 // WHAT IT TAKES (phase 1): the post-tonemap composites -- the 2D screen's
 // composite (recognised the way the panel distance and the curved screen
-// recognise it, srv0IsPanelSized) except while the commander is on foot,
-// where that screen IS the world and stays in the picture for the temporal
-// pass (the on-foot gate, ui_layer_math.h), and every eye draw that samples an
+// recognise it, srv0IsPanelSized) except while that screen IS the world --
+// on foot, or a 3D map -- where it stays in the picture for the temporal
+// pass (the world-screen gate, ui_layer_math.h: the journal's on-foot
+// reading OR the screen's own busy depth), and every eye draw that samples an
 // interface surface ui_depth has learned (the menu / modal panel family,
 // the loading screen's composite, the rest), into an 8-bit UNORM eye
 // target, with a blend that has a premultiplied or multiplicative form.
@@ -86,6 +87,15 @@ int uiLayerTargetKind();
 // cannot repeat (so a multiply or a depth/stencil write through it stays in
 // the frame).
 bool uiLayerDecide(ID3D11DeviceContext* ctx, int family, bool verdictForwards, bool substituted);
+
+// The family census (vscreen.cpp, owner draws while live): one draw of the
+// menu panel's or the loading screen's composite vertex shader, the family
+// the rule gave it (UiLayerFamily as an int; 0 none) and how
+// (ui_layer_math.h's UiFamilyWhy as an int), with its pixel shader where the
+// rule asked for it. Counted per window and reported every 30 s -- the
+// draws the rule turned away are otherwise invisible, since a draw with no
+// family never reaches uiLayerDecide.
+void uiLayerNoteFamilyProbe(uint64_t vs, uint64_t ps, int family, int why);
 
 // Around one issue of a decided draw: bind the eye's layer as the only
 // render target (with the layer's own seeded depth-stencil target when the

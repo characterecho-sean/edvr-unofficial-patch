@@ -17,16 +17,17 @@
 #include "ui_deferred_depth.h"  // the Seeder: the game's depth-stencil at the layer's size
 
 #include "binding_shadow.h"
+#include "depth_probe.h"   // depthProbeDrawsAtSize: the world-screen gate's own count
 #include "device_hook.h"   // deviceHookHmdQuality, for the configure line
 #include "foveation.h"     // whether a shading-rate image is bound for the eye
 #include "gpu_timing.h"
 #include "graphics_runtime.h"
-#include "journal_watch.h" // the on-foot gate's reading: Status.json's Flags2 bit 0
+#include "journal_watch.h" // the on-foot gate's reading: Status.json's Flags2 bit 0, GuiFocus
 #include "shader_swap.h"
 #include "ui_deferred.h"   // uiDeferredRouteCapturedThisDraw: the replay's own draws
 #include "ui_depth.h"      // uiDepthEyeOfTarget: the eye, by the pass's own table
 #include "ui_surfaces.h"   // the surfaces half: the target, and its summary
-#include "vscreen.h"       // the raw OM/RS entry points, vScreenIsEyeSized
+#include "vscreen.h"       // the raw OM/RS entry points, vScreenIsEyeSized, vScreenPanelSize
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -201,6 +202,10 @@ struct Draw {
     ID3D11RenderTargetView* wbRtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
     ID3D11DepthStencilView* wbDsv = nullptr;
     bool wbActive = false;
+    // The route's timers open across the game's own issue (the price, below):
+    // a multiply's second issue, and a write-back's re-issue. -1: none.
+    int routeSlot = -1;
+    int wbRouteSlot = -1;
 };
 Draw g_draw;
 uint64_t g_lastRedirectSeq = 0;
@@ -237,17 +242,172 @@ struct Window {
     uint64_t lostLayers = 0, doors = 0, treated = 0, composites = 0, overGameImage = 0;
     uint64_t compositeRefused = 0, afterWrites = 0, afterReads = 0, debugComposites = 0;
     uint64_t eyeMatched = 0, eyeSwapped = 0, eyeUntold = 0, seedStale = 0;
-    uint64_t gateReads = 0, screenAsked = 0;  // the on-foot gate: frames read, 2D screen draws that asked
-    uint32_t timed = 0;
-    double timeSum = 0.0, timeMax = 0.0;
+    // The world-screen gate: frames read, 2D screen draws that asked, and the
+    // frames each signal held the screen in the picture.
+    uint64_t gateReads = 0, screenAsked = 0;
+    uint64_t heldJournal = 0, heldDepth = 0, heldBoth = 0, depthCounted = 0;
+    uint32_t depthMax = 0;
+    // The screen's depth at most, by Status.json's GuiFocus: 0..11 the named
+    // values, 12 another, 13 GuiFocus not known.
+    static constexpr size_t kFocusSlots = 14;
+    uint32_t focusMax[kFocusSlots] = {};
+    bool focusSeen[kFocusSlots] = {};
+    // The route's price: timers never had (no free one) and samples that did
+    // not measure, by stage.
+    uint64_t routeUntimed[static_cast<size_t>(UiRouteStage::kCount)] = {};
+    uint64_t routeInvalid[static_cast<size_t>(UiRouteStage::kCount)] = {};
+    uint64_t routeLate[static_cast<size_t>(UiRouteStage::kCount)] = {};
+    // The family census: the menu panel's (0) and the loading screen's (1)
+    // composite vertex shader, by how the family rule answered.
+    uint64_t probe[2][static_cast<size_t>(UiFamilyWhy::kCount)] = {};
 };
 Window g_win;
 
-// The on-foot gate (ui_layer_math.h): read once a frame at the boundary,
-// so every draw of a frame sees one answer.
+// A change of the door's size (a FOV trim or cull-guard adoption, an HMD
+// Quality change, a per-eye width): the families the layer took in the two
+// seconds before it are watched for their first draw after it -- said, with
+// the delay -- and any not taken again within two seconds is named as
+// dropped, with what the family rule made of its composites since.
+constexpr uint64_t kSizeChangeWatchMs = 2000;
+uint64_t g_familyLastRedirectMs[static_cast<size_t>(UiLayerFamily::kCount)] = {};
+struct SizeChange {
+    bool open = false;
+    uint64_t ms = 0, frames = 0;
+    uint32_t fromW = 0, fromH = 0, toW = 0, toH = 0;
+    uint32_t engaged = 0, reengaged = 0;  // bit per UiLayerFamily
+    bool droppedSaid = false;
+    uint64_t probe[2][static_cast<size_t>(UiFamilyWhy::kCount)] = {};  // since the change
+};
+SizeChange g_sizeChange;
+// Pixel shaders seen with a composite vertex shader and no learned surface
+// that the rule does not know: named once each in the census line.
+uint64_t g_unknownPs[2][4] = {};
+
+// The world-screen gate (ui_layer_math.h): the journal's on-foot reading and
+// the screen's own depth, read once a frame at the boundary, so every draw
+// of a frame sees one answer.
 UiOnFootGate g_onFoot;
-uint64_t g_onFootSinceMs = 0;
+UiWorldScreenGate g_world;
+int8_t g_screenHeld = -1;  // -1 never read; 0 the screen is taken; 1 it is the world: left
+uint64_t g_heldSinceMs = 0;
 bool g_journalOffNoted = false;
+
+// ------------------------------------------------------------ the price
+//
+// ui_layer_math.h's route: each stage's GPU interval timed with GpuTimer (no
+// Flush, no wait) in a FIFO -- begun at the head, read at the tail, oldest
+// first, stopping at the first not ready -- so each eye's samples arrive in
+// the order they were issued, and summed per eye-frame.
+struct RouteSlot {
+    GpuTimer timer;
+    bool inUse = false;
+    UiRouteStage stage = UiRouteStage::kClear;
+    int eye = 0;
+    uint64_t seq = 0;
+};
+constexpr uint32_t kRouteRing = 64;
+RouteSlot g_route[kRouteRing];
+uint32_t g_routeHead = 0, g_routeTail = 0;  // monotonic; a slot is index % kRouteRing
+uint64_t g_routeLatestSeq = 0;              // the newest frame a stage began in
+constexpr size_t kStages = static_cast<size_t>(UiRouteStage::kCount);
+constexpr size_t kRouteTotal = kStages;     // the stats slot of the whole route's sum
+UiRouteSum g_stageSum[kStages][2];
+UiRouteSum g_routeSum[2];
+// One window's per-eye-frame sums, by stage and for the route.
+constexpr uint32_t kRouteSamples = 8192;    // 30 s of both eyes at 136 Hz
+struct RouteStats {
+    float v[kRouteSamples];
+    uint32_t n = 0;
+};
+RouteStats g_routeStats[kStages + 1];
+
+void routeSample(size_t stat, double ms) {
+    RouteStats& r = g_routeStats[stat];
+    if (r.n < kRouteSamples) r.v[r.n++] = static_cast<float>(ms);
+}
+
+// Opens a timer for one stage of one eye-frame; -1 when none could be had
+// (the ring full, or the timing domain not ours), and that eye-frame's sums
+// are then dropped rather than reported short.
+int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t seq) {
+    if (!ctx || eye < 0 || eye > 1 || !seq) return -1;
+    const size_t si = static_cast<size_t>(stage);
+    RouteSlot& s = g_route[g_routeHead % kRouteRing];
+    bool ok = false;
+    if (!s.inUse) {
+        Ptr<ID3D11Device> dev;
+        ctx->GetDevice(&dev);
+        ok = dev && (gpuTimingAccepts(ctx) || gpuTimingBind(dev.Get(), ctx)) &&
+             s.timer.begin(dev.Get(), ctx);
+    }
+    if (!ok) {
+        ++g_win.routeUntimed[si];
+        uiRouteLost(g_stageSum[si][eye], seq);
+        uiRouteLost(g_routeSum[eye], seq);
+        return -1;
+    }
+    s.inUse = true;
+    s.stage = stage;
+    s.eye = eye;
+    s.seq = seq;
+    if (seq > g_routeLatestSeq) g_routeLatestSeq = seq;
+    const int idx = static_cast<int>(g_routeHead % kRouteRing);
+    ++g_routeHead;
+    return idx;
+}
+
+void routeEnd(ID3D11DeviceContext* ctx, int idx) {
+    if (idx < 0 || idx >= static_cast<int>(kRouteRing) || !ctx) return;
+    g_route[idx].timer.end(ctx);  // a failed end reads back as not measured
+}
+
+// The ready samples, oldest first, into their sums; then every sum no
+// sample can still reach is closed: all the timers of its frame are read,
+// and a later frame has begun.
+void routePoll(ID3D11DeviceContext* ctx) {
+    if (!ctx || !gpuTimingOwns(ctx)) return;
+    double closed = 0.0;
+    while (g_routeTail != g_routeHead) {
+        RouteSlot& s = g_route[g_routeTail % kRouteRing];
+        double ms = 0.0;
+        const GpuTimerPoll r = s.timer.poll(ctx, ms);
+        if (r == GpuTimerPoll::Pending) break;
+        const bool valid = r == GpuTimerPoll::Ready;
+        const size_t si = static_cast<size_t>(s.stage);
+        if (!valid) ++g_win.routeInvalid[si];
+        if (uiRouteLate(g_stageSum[si][s.eye], s.seq)) ++g_win.routeLate[si];
+        if (uiRouteAdd(g_stageSum[si][s.eye], s.seq, ms, valid, &closed)) routeSample(si, closed);
+        if (uiRouteAdd(g_routeSum[s.eye], s.seq, ms, valid, &closed)) routeSample(kRouteTotal, closed);
+        s.inUse = false;
+        ++g_routeTail;
+    }
+    uint64_t before[2] = {g_routeLatestSeq, g_routeLatestSeq};
+    for (uint32_t i = g_routeTail; i != g_routeHead; ++i) {
+        const RouteSlot& s = g_route[i % kRouteRing];
+        if (s.seq < before[s.eye]) before[s.eye] = s.seq;
+    }
+    for (int e = 0; e < 2; ++e) {
+        for (size_t si = 0; si < kStages; ++si) {
+            if (uiRouteClose(g_stageSum[si][e], before[e], &closed)) routeSample(si, closed);
+        }
+        if (uiRouteClose(g_routeSum[e], before[e], &closed)) routeSample(kRouteTotal, closed);
+    }
+}
+
+// "median/p95 (n)" of one window's sums, or "-" when the stage never ran.
+void appendPrice(std::string& s, size_t stat) {
+    RouteStats& r = g_routeStats[stat];
+    if (!r.n) {
+        s += "-";
+        return;
+    }
+    const double p95 = uiLayerPercentile(r.v, r.n, 0.95);  // sorts; the median reads the same order
+    const double med = uiLayerPercentile(r.v, r.n, 0.5);
+    char buf[64];
+    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%.3f/%.3f (%u)", med, p95, r.n);
+    s += buf;
+}
+
 uint64_t g_winStartMs = 0;
 uint64_t g_sessionRedirected = 0;
 
@@ -264,7 +424,7 @@ struct AfterSeen {
 };
 AfterSeen g_afterSeen[kMaxAfterLines];
 uint32_t g_afterSeenCount = 0;
-bool g_engageNoted = false, g_compositeNoted = false, g_timingNoted = false;
+bool g_engageNoted = false, g_compositeNoted = false;
 
 const char* viewName(DXGI_FORMAT f) {
     switch (f) {
@@ -281,6 +441,10 @@ const char* viewName(DXGI_FORMAT f) {
         case DXGI_FORMAT_D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
         case DXGI_FORMAT_D32_FLOAT: return "D32_FLOAT";
         case DXGI_FORMAT_D16_UNORM: return "D16_UNORM";
+        case DXGI_FORMAT_R32G8X24_TYPELESS: return "R32G8X24_TYPELESS";
+        case DXGI_FORMAT_R24G8_TYPELESS: return "R24G8_TYPELESS";
+        case DXGI_FORMAT_R32_TYPELESS: return "R32_TYPELESS";
+        case DXGI_FORMAT_R16_TYPELESS: return "R16_TYPELESS";
         default: return "another format";
     }
 }
@@ -704,6 +868,9 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11DepthStenci
                         uiLayerMB(uiLayerBytes(e.w, e.h, bpp) +
                                   uiLayerBytes(td.Width, td.Height, bpp)));
     }
+    // The seed's price (review P3-4): the copy and the Seeder's passes, one
+    // interval of this eye-frame's route.
+    const int timer = routeBegin(ctx, UiRouteStage::kSeed, eye, g_draw.seq);
     vScreenCopyResourceRaw(ctx, e.dsCopy.Get(), tex.Get());
     bool recorded = false;
     try {
@@ -715,8 +882,12 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11DepthStenci
     }
     Ptr<ID3D11CommandList> list;
     const HRESULT fin = g_deferred->FinishCommandList(FALSE, &list);
-    if (!recorded || FAILED(fin) || !list) return false;
+    if (!recorded || FAILED(fin) || !list) {
+        routeEnd(ctx, timer);
+        return false;
+    }
     vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    routeEnd(ctx, timer);
     // What the seed wrote: with SV_StencilRef, one pass copies the depth and
     // all eight stencil bits whenever it draws at all; without it, the depth
     // when asked and one pass per asked bit (the rest cleared to 0).
@@ -765,6 +936,130 @@ void restore(ID3D11DeviceContext* ctx) {
     ctx->OMSetBlendState(g_draw.blend, g_draw.factor, g_draw.sampleMask);
 }
 
+// ------------------------------------------------------ a door size change
+
+// Which composite vertex shader a census slot is (0 the menu panel's, 1 the
+// loading screen's), or -1.
+int probeSlot(uint64_t vs) {
+    return vs == kUiVsPanel ? 0 : vs == kUiVsLoader ? 1 : -1;
+}
+
+// "N as UI by a learned surface, N by its shader pair alone, not UI: N ..."
+// for one composite's counts.
+std::string probeText(const uint64_t (&counts)[static_cast<size_t>(UiFamilyWhy::kCount)], int slot) {
+    std::string s;
+    char buf[160];
+    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%llu as UI by a learned surface, %llu by its shader pair alone",
+                static_cast<unsigned long long>(counts[static_cast<size_t>(UiFamilyWhy::kLearnedSurface)]),
+                static_cast<unsigned long long>(counts[static_cast<size_t>(UiFamilyWhy::kShaderPair)]));
+    s += buf;
+    static const UiFamilyWhy kNot[] = {UiFamilyWhy::kNotEyeTarget, UiFamilyWhy::kNotPostTonemap,
+                                       UiFamilyWhy::kExcluded, UiFamilyWhy::kNoSurface,
+                                       UiFamilyWhy::kScreen, UiFamilyWhy::kOther};
+    bool any = false;
+    for (UiFamilyWhy w : kNot) {
+        const uint64_t n = counts[static_cast<size_t>(w)];
+        if (!n) continue;
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%s%llu %s", any ? ", " : "; not taken as its family: ",
+                    static_cast<unsigned long long>(n),
+                    w == UiFamilyWhy::kScreen ? "as the 2D screen" : uiFamilyWhyName(w));
+        s += buf;
+        any = true;
+    }
+    if (slot >= 0 && slot < 2) {
+        bool named = false;
+        for (uint64_t ps : g_unknownPs[slot]) {
+            if (!ps) continue;
+            _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%s%016llX", named ? ", " : " (unknown ps ",
+                        static_cast<unsigned long long>(ps));
+            s += buf;
+            named = true;
+        }
+        if (named) s += ")";
+    }
+    return s;
+}
+
+// The door handed on a new size: open the watch over the families the layer
+// took in the two seconds before (the other eye's report of the same change
+// joins it).
+void openSizeChange(uint32_t fromW, uint32_t fromH, uint32_t toW, uint32_t toH) {
+    SizeChange& c = g_sizeChange;
+    const uint64_t now = GetTickCount64();
+    if (c.open && c.toW == toW && c.toH == toH && now - c.ms < kSizeChangeWatchMs) return;
+    uint32_t engaged = 0;
+    std::string names;
+    for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
+        const uint64_t last = g_familyLastRedirectMs[f];
+        if (!last || now - last > kSizeChangeWatchMs) continue;
+        engaged |= 1u << f;
+        if (!names.empty()) names += ", ";
+        names += uiLayerFamilyName(static_cast<UiLayerFamily>(f));
+    }
+    c = SizeChange{};
+    if (!engaged) return;
+    c.open = true;
+    c.ms = now;
+    c.fromW = fromW;
+    c.fromH = fromH;
+    c.toW = toW;
+    c.toH = toH;
+    c.engaged = engaged;
+    Log::get().note("ui quality: layer: the door's frame changed size (%ux%u -> %ux%u) with %s in the "
+                    "layer -- each is watched for its first draw taken after it.",
+                    fromW, fromH, toW, toH, names.c_str());
+}
+
+// A draw of `family` was taken: its re-engagement after a size change, once.
+void noteTaken(UiLayerFamily family, int eye, uint32_t layerW, uint32_t layerH) {
+    const uint64_t now = GetTickCount64();
+    const size_t fi = static_cast<size_t>(family);
+    if (fi >= static_cast<size_t>(UiLayerFamily::kCount)) return;
+    g_familyLastRedirectMs[fi] = now;
+    SizeChange& c = g_sizeChange;
+    const uint32_t bit = 1u << fi;
+    if (!c.open || !(c.engaged & bit) || (c.reengaged & bit)) return;
+    c.reengaged |= bit;
+    Log::get().note("ui quality: layer: %s re-engaged after the door's size change (%ux%u -> %ux%u) -- "
+                    "its first draw taken %llu ms and %llu frames after it, into the %s eye's %ux%u "
+                    "layer%s.",
+                    uiLayerFamilyName(family), c.fromW, c.fromH, c.toW, c.toH,
+                    static_cast<unsigned long long>(now - c.ms), static_cast<unsigned long long>(c.frames),
+                    eye == 0 ? "left" : "right", layerW, layerH,
+                    c.droppedSaid ? " (it had been named as dropped)" : "");
+}
+
+// Once a frame: a family engaged before the change and not taken for two
+// seconds after it is named as dropped, with what the family rule made of
+// its composite's draws since; the watch closes when every family is back,
+// or after thirty seconds.
+void sizeChangeTick() {
+    SizeChange& c = g_sizeChange;
+    if (!c.open) return;
+    ++c.frames;
+    const uint64_t now = GetTickCount64();
+    const uint32_t missing = c.engaged & ~c.reengaged;
+    if (!missing) {
+        c.open = false;
+        return;
+    }
+    if (!c.droppedSaid && now - c.ms >= kSizeChangeWatchMs) {
+        c.droppedSaid = true;
+        for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
+            if (!(missing & (1u << f))) continue;
+            const UiLayerFamily fam = static_cast<UiLayerFamily>(f);
+            const int slot = fam == UiLayerFamily::kPanel ? 0 : fam == UiLayerFamily::kLoader ? 1 : -1;
+            const std::string since = slot >= 0 ? probeText(c.probe[slot], slot) : std::string();
+            Log::get().note("ui quality: layer: the door's size change (%ux%u -> %ux%u) DROPPED the %s -- "
+                            "none of its draws taken in the %.1f s since%s%s.",
+                            c.fromW, c.fromH, c.toW, c.toH, uiLayerFamilyName(fam),
+                            static_cast<double>(now - c.ms) / 1000.0,
+                            slot >= 0 ? "; its composite's draws since: " : "", since.c_str());
+        }
+    }
+    if (now - c.ms > 30000) c.open = false;
+}
+
 // One issue of a decided draw into the layer (which = 0) or into the
 // multiply transmittance (which = 1).
 bool beginInner(ID3D11DeviceContext* ctx, int which) {
@@ -791,14 +1086,18 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // never composited (the frame took a path without a door, or a withhold).
     if (which == 0 && e.seq != g_draw.seq) {
         if (e.seq && e.draws && e.compositedSeq != e.seq) ++g_win.lostLayers;
+        const int timer = routeBegin(ctx, UiRouteStage::kClear, g_draw.eye, g_draw.seq);
         vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
+        routeEnd(ctx, timer);
         e.seq = g_draw.seq;
         e.draws = 0;
         e.target = g_draw.targetRes;
         ++g_win.clears;
     }
     if (which == 1 && e.mSeq != g_draw.seq) {
+        const int timer = routeBegin(ctx, UiRouteStage::kMultiply, g_draw.eye, g_draw.seq);
         vScreenClearRenderTargetViewRaw(ctx, e.mRtv.Get(), kUiLayerMultClear);
+        routeEnd(ctx, timer);
         e.mSeq = g_draw.seq;
     }
     // Save.
@@ -890,6 +1189,10 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     ctx->OMSetBlendState(layerBlend, factor, sampleMask);
     vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
     g_draw.active = true;
+    // A multiply's second issue -- the game's draw again, into the
+    // transmittance -- is the layer's own work: timed to uiLayerEnd. (The
+    // first issue is the game's UI, only moved, and is not.)
+    if (which == 1) g_draw.routeSlot = routeBegin(ctx, UiRouteStage::kMultiply, g_draw.eye, g_draw.seq);
 
     // Counted once per draw: the curved screen's fall-through re-issues the
     // same draw after a failed substitution, and a multiply's second draw is
@@ -899,6 +1202,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++e.draws;
         ++g_win.redirected;
         ++g_sessionRedirected;
+        noteTaken(g_draw.family, g_draw.eye, e.w, e.h);
         g_win.viewportRemaps += g_draw.vpCount;
         if (g_draw.scissorSet) g_win.scissorRemaps += g_draw.scCount;
         if (g_draw.jx != 0.0f || g_draw.jy != 0.0f) ++g_win.jitterCancels;
@@ -942,6 +1246,11 @@ bool beginGuarded(ID3D11DeviceContext* ctx, int which) {
     if (!g_draw.decided || g_draw.active || !ctx) return false;
     bool ok = false;
     const bool ran = guardedBudget(g_drawBudget, [&] { ok = beginInner(ctx, which); });
+    if (!ran || !ok) {
+        // A timer opened for this issue closes with it (the issue is not made).
+        routeEnd(ctx, g_draw.routeSlot);
+        g_draw.routeSlot = -1;
+    }
     if (!ran) {
         // Whatever was changed before the fault, put the game's state back.
         if (g_draw.saved) guarded("uiLayer.restore", [&] { restore(ctx); });
@@ -961,43 +1270,6 @@ ID3D11ComputeShader* g_cs = nullptr;
 bool g_csTried = false;
 ID3D11Buffer* g_cb = nullptr;
 bool g_fmtChecked[2] = {}, g_fmtOk[2] = {};
-
-struct QuerySlot {
-    GpuTimer timer;
-    bool inUse = false;
-};
-constexpr int kQueryRing = 8;
-QuerySlot g_qring[kQueryRing];
-
-void pollTiming(ID3D11DeviceContext* ctx) {
-    if (!gpuTimingOwns(ctx)) return;
-    for (QuerySlot& q : g_qring) {
-        if (!q.inUse) continue;
-        double ms = 0.0;
-        const GpuTimerPoll r = q.timer.poll(ctx, ms);
-        if (r == GpuTimerPoll::Pending) continue;
-        q.inUse = false;
-        if (r != GpuTimerPoll::Ready) continue;
-        ++g_win.timed;
-        g_win.timeSum += ms;
-        if (ms > g_win.timeMax) g_win.timeMax = ms;
-    }
-}
-
-int acquireSlot(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
-    if (!dev || !ctx) return -1;
-    if (!gpuTimingAccepts(ctx) && !gpuTimingBind(dev, ctx)) return -1;
-    for (int i = 0; i < kQueryRing; ++i) {
-        QuerySlot& q = g_qring[i];
-        if (q.inUse) continue;
-        if (q.timer.begin(dev, ctx)) {
-            q.inUse = true;
-            return i;
-        }
-        return -1;
-    }
-    return -1;
-}
 
 void compileOnce(ID3D11DeviceContext* ctx) {
     if (g_cs || g_csTried || !ctx) return;
@@ -1087,7 +1359,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         *why = "no device";
         return nullptr;
     }
-    pollTiming(ctx.Get());
+    routePoll(ctx.Get());
     compileOnce(ctx.Get());
     if (!g_cs) {
         *why = "the composite shader did not compile";
@@ -1206,7 +1478,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
     ctx->CSGetConstantBuffers(0, 1, &savedCb);
 
-    const int qs = acquireSlot(dev.Get(), ctx.Get());
+    const int qs = routeBegin(ctx.Get(), UiRouteStage::kComposite, static_cast<int>(eye), e.seq);
     if (viaCopy) {
         D3D11_BOX box{region[0], region[1], 0, region[2], region[3], 1};
         ctx->CopySubresourceRegion(e.copy.Get(), 0, 0, 0, 0, frame, 0, &box);
@@ -1222,7 +1494,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     ID3D11UnorderedAccessView* uav = e.outUav.Get();
     ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
     ctx->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
-    if (qs >= 0) g_qring[qs].timer.end(ctx.Get());
+    routeEnd(ctx.Get(), qs);
 
     ctx->CSSetShaderResources(0, 3, nullSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
@@ -1314,52 +1586,6 @@ bool doorCanComposite(ID3D11Texture2D* source) {
     return true;
 }
 
-// ------------------------------------------------------- the on-foot gate
-
-// Once a frame while the layer is live, on the render thread -- the thread
-// that ticks the journal watcher, and the one the LOD governor reads it on.
-// Every flip is one line, either way, never rate-limited: the journal flips
-// it only at a disembark, an embark, or a trip through the menus.
-void onFootGateTick() {
-    if (!detail::g_uiLayerLive) return;
-    const bool active = journalWatchActive();
-    const bool known = journalOnFootKnown(), onFoot = journalOnFoot();
-    const uint64_t now = GetTickCount64();
-    const int8_t before = g_onFoot.state;
-    const bool held = uiLayerOnFootStep(g_onFoot, known, onFoot, now);
-    ++g_win.gateReads;
-    if (!active && !g_journalOffNoted) {
-        g_journalOffNoted = true;
-        Log::get().note("ui quality: layer: the journal watcher is not reading the game's Status.json "
-                        "(d3d11.journal_watch off, or the journal folder not found), so on foot cannot be "
-                        "told: the 2D screen is taken on foot too, where it is the world.");
-    }
-    if (g_onFoot.state == before) return;
-    if (held) {
-        g_onFootSinceMs = now;
-        Log::get().note(
-            "ui quality: layer: on foot%s (the game's Status.json, Flags2 bit 0, through the journal "
-            "watcher -- about a second behind the game) -- the 2D screen shows the world now: it stays "
-            "in the game's frame for the temporal pass, the helmet HUD with it; the rest of the UI goes "
-            "into the layer as before.",
-            before < 0 ? ", at the on-foot gate's first reading" : "");
-    } else if (before < 0) {
-        Log::get().note("ui quality: layer: not on foot at the on-foot gate's first reading (%s) -- the "
-                        "2D screen goes into the layer.",
-                        known    ? "the game's Status.json says aboard"
-                        : active ? "no Flags2 in Status.json: a menu, or no file yet"
-                                 : "the journal watcher is off");
-    } else {
-        Log::get().note("ui quality: layer: no longer on foot after %.1f s (%s) -- the 2D screen goes "
-                        "into the layer again.",
-                        static_cast<double>(now - g_onFootSinceMs) / 1000.0,
-                        known ? "the game's Status.json says aboard"
-                              : "Status.json has not said so for 3 s: a menu, or the watcher stopped");
-    }
-}
-
-// ------------------------------------------------------------ the totals
-
 void appendf(std::string& s, const char* fmt, ...) {
     char buf[320];
     va_list ap;
@@ -1368,6 +1594,194 @@ void appendf(std::string& s, const char* fmt, ...) {
     va_end(ap);
     if (n > 0) s.append(buf, static_cast<size_t>(n) < sizeof(buf) ? static_cast<size_t>(n)
                                                                   : sizeof(buf) - 1);
+}
+
+// --------------------------------------------------- the world-screen gate
+
+// The most draws a depth target of the 2D screen's own size took in the
+// last frame (the depth probe's count; ui_layer_math.h). False while the
+// probe is not counting or vScreen does not know the screen.
+bool screenDepthDraws(uint32_t* draws, uint32_t* w, uint32_t* h) {
+    if (!vScreenPanelSize(w, h)) return false;
+    return depthProbeDrawsAtSize(*w, *h, draws);
+}
+
+const char* journalReading(bool active, bool known, bool onFoot) {
+    return !active ? "off" : !known ? "no Flags2 in Status.json (a menu, or no file yet)"
+                   : onFoot ? "on foot"
+                            : "aboard";
+}
+
+// Once a frame while the layer is live, on the render thread -- the thread
+// that ticks the journal watcher and counts the depth probe's draws. Every
+// flip of the combined gate is one line, either way, never rate-limited,
+// naming which signal held and the count it judged by.
+void onFootGateTick() {
+    if (!detail::g_uiLayerLive) return;
+    const bool active = journalWatchActive();
+    const bool known = journalOnFootKnown(), onFoot = journalOnFoot();
+    const uint64_t now = GetTickCount64();
+    const bool byJournal = uiLayerOnFootStep(g_onFoot, known, onFoot, now);
+    uint32_t draws = 0, sw = 0, sh = 0;
+    const bool counted = screenDepthDraws(&draws, &sw, &sh);
+    const bool byDepth = uiLayerWorldScreenStep(g_world, counted, draws);
+    ++g_win.gateReads;
+    if (byJournal && byDepth) {
+        ++g_win.heldBoth;
+    } else if (byJournal) {
+        ++g_win.heldJournal;
+    } else if (byDepth) {
+        ++g_win.heldDepth;
+    }
+    if (counted) {
+        ++g_win.depthCounted;
+        if (draws > g_win.depthMax) g_win.depthMax = draws;
+        uint32_t focus = 0;
+        const size_t slot = !journalGuiFocus(&focus)                 ? Window::kFocusSlots - 1
+                            : focus < Window::kFocusSlots - 2 ? focus
+                                                              : Window::kFocusSlots - 2;
+        g_win.focusSeen[slot] = true;
+        if (draws > g_win.focusMax[slot]) g_win.focusMax[slot] = draws;
+    }
+    if (!active && !g_journalOffNoted) {
+        g_journalOffNoted = true;
+        Log::get().note("ui quality: layer: the journal watcher is not reading the game's Status.json "
+                        "(d3d11.journal_watch off, or the journal folder not found) -- %s.",
+                        counted ? "the 2D screen is told to be the world by its own depth alone"
+                                : "and the depth probe is not counting the screen's depth either: the "
+                                  "2D screen is taken on foot too, where it is the world");
+    }
+    const int8_t before = g_screenHeld;
+    const bool held = byJournal || byDepth;
+    g_screenHeld = held ? 1 : 0;
+    if (g_screenHeld == before) return;
+    char depth[128];
+    if (counted) {
+        _snprintf_s(depth, sizeof(depth), _TRUNCATE, "%u draws a frame into its %ux%u depth target",
+                    draws, sw, sh);
+    } else {
+        _snprintf_s(depth, sizeof(depth), _TRUNCATE,
+                    "not counted (the depth probe is off, or the screen's size is not known)");
+    }
+    const char* journal = journalReading(active, known, onFoot);
+    if (held) {
+        g_heldSinceMs = now;
+        Log::get().note(
+            "ui quality: layer: the 2D screen shows the world%s -- held by %s (the journal: %s; the "
+            "screen's depth: %s, over %u for %u frames holds it) -- it stays in the game's frame for "
+            "the temporal pass, the helmet HUD with it; the rest of the UI goes into the layer as before.",
+            before < 0 ? ", at the gate's first reading" : "",
+            byJournal && byDepth ? "both signals" : byJournal ? "the journal" : "the screen's own depth",
+            journal, depth, kUiWorldEnterDraws, kUiWorldEnterFrames);
+    } else if (before < 0) {
+        Log::get().note("ui quality: layer: the 2D screen is not the world at the gate's first reading "
+                        "(the journal: %s; the screen's depth: %s) -- it goes into the layer.",
+                        journal, depth);
+    } else {
+        Log::get().note("ui quality: layer: the 2D screen no longer shows the world after %.1f s (the "
+                        "journal: %s; the screen's depth: %s, under %u for %u frames lets go) -- it goes "
+                        "into the layer again.",
+                        static_cast<double>(now - g_heldSinceMs) / 1000.0, journal, depth,
+                        kUiWorldLeaveDraws, kUiWorldLeaveFrames);
+    }
+}
+
+// The 30 s line of the world-screen gate: its state, both signals, the frames
+// each held it, and the screen's depth by GuiFocus -- the counts the
+// thresholds were set from, now on the screens no log had caught.
+void logWorldScreen() {
+    std::string focus;
+    for (size_t i = 0; i < Window::kFocusSlots; ++i) {
+        if (!g_win.focusSeen[i]) continue;
+        char name[48];
+        if (i == Window::kFocusSlots - 1) {
+            _snprintf_s(name, sizeof(name), _TRUNCATE, "GuiFocus unknown");
+        } else if (i == Window::kFocusSlots - 2) {
+            _snprintf_s(name, sizeof(name), _TRUNCATE, "GuiFocus 12 or more");
+        } else {
+            _snprintf_s(name, sizeof(name), _TRUNCATE, "%u %s", static_cast<unsigned>(i),
+                        uiGuiFocusName(static_cast<uint32_t>(i)));
+        }
+        appendf(focus, "%s%s %u", focus.empty() ? "" : ", ", name, g_win.focusMax[i]);
+    }
+    const bool active = journalWatchActive();
+    Log::get().note(
+        "ui quality: world screen: the gate %s (the journal: %s; the screen's depth: %u draws a frame "
+        "now, %u at most this window, %llu frames counted; over %u for %u frames holds it, under %u for "
+        "%u frames lets go); held %llu of %llu frames -- %llu by the journal alone, %llu by the depth "
+        "alone, %llu by both; %llu 2D screen draws asked, %llu left in the picture; the screen's depth "
+        "at most, by GuiFocus: %s.",
+        g_screenHeld == 1 ? "holds" : g_screenHeld == 0 ? "is open" : "has never been read",
+        journalReading(active, journalOnFootKnown(), journalOnFoot()), g_world.draws, g_win.depthMax,
+        static_cast<unsigned long long>(g_win.depthCounted), kUiWorldEnterDraws, kUiWorldEnterFrames,
+        kUiWorldLeaveDraws, kUiWorldLeaveFrames,
+        static_cast<unsigned long long>(g_win.heldJournal + g_win.heldDepth + g_win.heldBoth),
+        static_cast<unsigned long long>(g_win.gateReads),
+        static_cast<unsigned long long>(g_win.heldJournal),
+        static_cast<unsigned long long>(g_win.heldDepth),
+        static_cast<unsigned long long>(g_win.heldBoth),
+        static_cast<unsigned long long>(g_win.screenAsked),
+        static_cast<unsigned long long>(
+            g_win.decided[static_cast<size_t>(UiLayerFamily::kScreen)]
+                         [static_cast<size_t>(UiLayerDecision::kWorldScreen)]),
+        focus.empty() ? "nothing counted" : focus.c_str());
+}
+
+// ------------------------------------------------------------ the totals
+
+// Bytes a pixel, for the formats the layer allocates: its own RGBA8
+// targets, the frame's families for the composite output and its copy,
+// and the game's depth-stencil families for the seed's target and copy.
+uint32_t formatBytes(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+            return 8u;
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_D16_UNORM:
+            return 2u;
+        default:
+            return 4u;  // the 8-bit RGBA families, R10G10B10A2, R11G11B10, D24S8, D32
+    }
+}
+
+void appendResource(std::string& s, const char* name, uint32_t w, uint32_t h, DXGI_FORMAT f,
+                    uint64_t* total) {
+    if (!w || !h) return;
+    const uint64_t bytes = uiLayerBytes(w, h, formatBytes(f));
+    *total += bytes;
+    appendf(s, "%s%s %ux%u %s %.1f MB", s.empty() ? "" : ", ", name, w, h, viewName(f),
+            uiLayerMB(bytes));
+}
+
+// Every layer resource allocated right now, by eye, with its size -- not
+// the design's estimate: the multiply transmittance and the depth-stencil
+// pair exist only once a multiply or a tested draw has been seen, and a
+// frame copy only when the frame refuses a shader view.
+void logMemory() {
+    std::string s;
+    uint64_t total = 0;
+    for (int i = 0; i < 2; ++i) {
+        const Eye& e = g_eye[i];
+        std::string one;
+        if (e.tex) appendResource(one, "layer colour", e.w, e.h, DXGI_FORMAT_R8G8B8A8_UNORM, &total);
+        if (e.out) appendResource(one, "composite output", e.outW, e.outH, e.outFmt, &total);
+        if (e.copy) appendResource(one, "frame copy", e.copyW, e.copyH, e.copyFmt, &total);
+        if (e.mTex) {
+            appendResource(one, "multiply transmittance", e.mW, e.mH, DXGI_FORMAT_R8G8B8A8_UNORM,
+                           &total);
+        }
+        if (e.dsTex) appendResource(one, "depth-stencil", e.dsW, e.dsH, e.dsViewFmt, &total);
+        if (e.dsCopy) {
+            appendResource(one, "its copy of the game's depth-stencil", e.dsCopyW, e.dsCopyH,
+                           e.dsCopyFmt, &total);
+        }
+        appendf(s, "%s%s eye -- %s", i ? "; " : "", i ? "right" : "left",
+                one.empty() ? "nothing" : one.c_str());
+    }
+    Log::get().note("ui quality: memory: allocated now -- %s; %.1f MB in all.", s.c_str(),
+                    uiLayerMB(total));
 }
 
 void logTotals(double seconds) {
@@ -1389,20 +1803,41 @@ void logTotals(double seconds) {
                     uiLayerDecisionName(static_cast<UiLayerDecision>(d)));
         }
     }
-    char surfaces[640];
+    // The surfaces and the layer on lines of their own: Log's line holds 1200
+    // characters, and the two halves together no longer fit in one.
+    char surfaces[1100];
     uiSurfacesSummary(surfaces, sizeof(surfaces));
+    Log::get().note("ui quality: %s -- surfaces: %s.", g_keyText.c_str(), surfaces);
+    // The price: each stage's GPU time per eye-frame it ran in, and the
+    // route's -- every stage of an eye-frame added up -- per eye-frame the
+    // layer did anything in.
+    std::string price;
+    for (size_t si = 0; si < kStages; ++si) {
+        appendf(price, "%s%s ", si ? ", " : "", uiRouteStageName(static_cast<UiRouteStage>(si)));
+        appendPrice(price, si);
+    }
+    price += "; the route ";
+    appendPrice(price, kRouteTotal);
+    uint64_t untimed = 0, invalid = 0, lateSamples = 0;
+    for (size_t si = 0; si < kStages; ++si) {
+        untimed += g_win.routeUntimed[si];
+        invalid += g_win.routeInvalid[si];
+        lateSamples += g_win.routeLate[si];
+    }
+    if (untimed || invalid || lateSamples) {
+        appendf(price, " (%llu intervals had no free timer, %llu did not measure, %llu arrived after "
+                       "their frame closed: their eye-frames are left out)",
+                static_cast<unsigned long long>(untimed), static_cast<unsigned long long>(invalid),
+                static_cast<unsigned long long>(lateSamples));
+    }
     const Eye& l = g_eye[0];
     Log::get().note(
-        "ui quality: %s -- surfaces: %s; layer: %.0f s, %llu frames, %ux%u per eye (%.1f MB "
-        "each) + composite output %ux%u (%.1f MB each)%s; %.2f draws a frame redirected (%s), "
-        "%.2f multiplies, %.2f depth/stencil write-backs, %.2f tested against a seeded copy "
-        "(%llu seeds, %llu failed, %llu stale); per frame %.2f viewport remaps, %.2f scissor "
-        "remaps, %.2f jitter cancels; composite %.3f ms per eye average, %.3f max, %u timed of "
-        "%llu composites (%llu over the game's own image, %llu in the ui_layer debug view).",
-        g_keyText.c_str(), surfaces, seconds, static_cast<unsigned long long>(g_win.frames),
-        l.w, l.h, uiLayerMB(uiLayerBytes(l.w, l.h)), l.outW, l.outH,
-        uiLayerMB(uiLayerBytes(l.outW, l.outH)),
-        l.mTex ? " + multiply transmittance" : "",
+        "ui quality: layer: %.0f s, %llu frames, %ux%u per eye + composite output %ux%u; %.2f draws "
+        "a frame redirected (%s), %.2f multiplies, %.2f depth/stencil write-backs, %.2f tested "
+        "against a seeded copy (%llu seeds, %llu failed, %llu stale); per frame %.2f viewport remaps, "
+        "%.2f scissor remaps, %.2f jitter cancels; %llu composites (%llu over the game's own image, "
+        "%llu in the ui_layer debug view); GPU ms per eye-frame, median/p95 (eye-frames): %s.",
+        seconds, static_cast<unsigned long long>(g_win.frames), l.w, l.h, l.outW, l.outH,
         static_cast<double>(g_win.redirected) / frames, taken.empty() ? "none" : taken.c_str(),
         static_cast<double>(g_win.multiplies) / frames,
         static_cast<double>(g_win.writeBacks) / frames,
@@ -1413,12 +1848,35 @@ void logTotals(double seconds) {
         static_cast<double>(g_win.viewportRemaps) / frames,
         static_cast<double>(g_win.scissorRemaps) / frames,
         static_cast<double>(g_win.jitterCancels) / frames,
-        g_win.timed ? g_win.timeSum / g_win.timed : 0.0, g_win.timeMax, g_win.timed,
         static_cast<unsigned long long>(g_win.composites),
         static_cast<unsigned long long>(g_win.overGameImage),
-        static_cast<unsigned long long>(g_win.debugComposites));
+        static_cast<unsigned long long>(g_win.debugComposites), price.c_str());
+    logMemory();
     Log::get().note("ui quality: left in the game's frame: %s.",
                     left.empty() ? "nothing classified" : left.c_str());
+    // The family census: what the family rule made of the two composites'
+    // draws -- the ones it turned away never reach a decision above.
+    {
+        std::string census;
+        static const char* const kProbeName[2] = {"menu panel composite (vs A888D51024D9798E)",
+                                                  "loading screen composite (vs 4EF6DDB075A927FA)"};
+        const UiLayerFamily kProbeFamily[2] = {UiLayerFamily::kPanel, UiLayerFamily::kLoader};
+        for (int k = 0; k < 2; ++k) {
+            uint64_t total = 0;
+            for (uint64_t n : g_win.probe[k]) total += n;
+            if (!total) continue;
+            const size_t fi = static_cast<size_t>(kProbeFamily[k]);
+            uint64_t leftN = 0;
+            for (size_t d = 2; d < static_cast<size_t>(UiLayerDecision::kCount); ++d) leftN += g_win.decided[fi][d];
+            appendf(census, "%s%s: %llu draws -- %s; decided as the %s: %llu redirected, %llu left",
+                    census.empty() ? "" : "; ", kProbeName[k], static_cast<unsigned long long>(total),
+                    probeText(g_win.probe[k], k).c_str(), uiLayerFamilyName(kProbeFamily[k]),
+                    static_cast<unsigned long long>(
+                        g_win.decided[fi][static_cast<size_t>(UiLayerDecision::kRedirect)]),
+                    static_cast<unsigned long long>(leftN));
+        }
+        Log::get().note("ui quality: families: %s.", census.empty() ? "neither composite drawn" : census.c_str());
+    }
     uint64_t late = 0;
     for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f)
         late += g_win.decided[f][static_cast<size_t>(UiLayerDecision::kLate)];
@@ -1429,8 +1887,7 @@ void logTotals(double seconds) {
         "refused at issue (a changed blend, or a seed that failed); after the UI the game drew "
         "%llu times into, and %llu times read, an eye target the UI was taken from (those now "
         "land under it, or miss it); eye check against the game's Submit: %llu matched, %llu "
-        "SWAPPED, %llu could not be told; the on-foot gate %s, read %llu times, asked by %llu 2D "
-        "screen draws (%llu left in the picture on foot); %llu redirected this session%s.",
+        "SWAPPED, %llu could not be told; %llu redirected this session%s.",
         static_cast<unsigned long long>(late), static_cast<unsigned long long>(g_win.lostLayers),
         static_cast<unsigned long long>(g_win.doors), static_cast<unsigned long long>(g_win.treated),
         static_cast<unsigned long long>(g_win.compositeRefused),
@@ -1440,14 +1897,9 @@ void logTotals(double seconds) {
         static_cast<unsigned long long>(g_win.eyeMatched),
         static_cast<unsigned long long>(g_win.eyeSwapped),
         static_cast<unsigned long long>(g_win.eyeUntold),
-        g_onFoot.state == 1 ? "holds (on foot)" : g_onFoot.state == 0 ? "is open" : "has never read the journal",
-        static_cast<unsigned long long>(g_win.gateReads),
-        static_cast<unsigned long long>(g_win.screenAsked),
-        static_cast<unsigned long long>(
-            g_win.decided[static_cast<size_t>(UiLayerFamily::kScreen)]
-                         [static_cast<size_t>(UiLayerDecision::kOnFootWorld)]),
         static_cast<unsigned long long>(g_sessionRedirected),
         g_stoodDown ? " -- the layer STOOD DOWN (the line above says why)" : "");
+    logWorldScreen();
 }
 
 }  // namespace
@@ -1510,9 +1962,10 @@ void uiLayerConfigure(Config& cfg) {
             : "the game's post-tonemap UI (the 2D screen, the menus, the loading screen) is drawn "
               "by its own shaders into a per-eye layer at that size times the door's output, "
               "unjittered, and composited after the upscale and RCAS, before EDVR's menu -- "
-              "except the 2D screen while on foot, where it shows the world and stays in the "
-              "picture for the temporal pass (the game's Status.json says when, a second or so "
-              "late); the cockpit's holo panels, flight HUD and target sprite are drawn before "
+              "except the 2D screen while it shows the world -- on foot, or a 3D map -- where it "
+              "stays in the picture for the temporal pass (the game's Status.json says on foot, a "
+              "second or so late; the screen's own depth, busy with the world, says so within "
+              "two frames); the cockpit's holo panels, flight HUD and target sprite are drawn before "
               "the tonemap and stay in the picture (advanced.ui_replay says whether the deferred "
               "UI replay redraws them). Draws the layer takes get no UI depth and no reactive "
               "mask.");
@@ -1560,8 +2013,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.family = family;
     f.verdictForwards = verdictForwards;
     f.substituted = substituted;
-    // The on-foot gate, as this frame's boundary read it.
-    f.onFoot = g_onFoot.state == 1;
+    // The world-screen gate, as this frame's boundary read it.
+    f.worldScreen = g_screenHeld == 1;
     if (family == UiLayerFamily::kScreen) ++g_win.screenAsked;
     const int kind = uiLayerTargetKind();
     f.eyeTarget = kind != 0;
@@ -1676,10 +2129,28 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     return true;
 }
 
+void uiLayerNoteFamilyProbe(uint64_t vs, uint64_t ps, int family, int why) {
+    (void)family;
+    const int slot = probeSlot(vs);
+    if (slot < 0 || why < 0 || why >= static_cast<int>(UiFamilyWhy::kCount)) return;
+    ++g_win.probe[slot][why];
+    if (g_sizeChange.open) ++g_sizeChange.probe[slot][why];
+    if (why != static_cast<int>(UiFamilyWhy::kNoSurface) || !ps) return;
+    for (uint64_t& known : g_unknownPs[slot]) {
+        if (known == ps) return;
+        if (!known) {
+            known = ps;
+            return;
+        }
+    }
+}
+
 bool uiLayerBegin(ID3D11DeviceContext* ctx) { return beginGuarded(ctx, 0); }
 
 void uiLayerEnd(ID3D11DeviceContext* ctx) {
     if (!g_draw.active) return;
+    routeEnd(ctx, g_draw.routeSlot);  // a multiply's second issue, drawn
+    g_draw.routeSlot = -1;
     if (!guarded("uiLayer.end", [&] { restore(ctx); })) {
         standDown("a fault while putting the game's state back after a draw");
     }
@@ -1717,11 +2188,15 @@ bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx) {
     }
     g_draw.wbActive = true;
     ++g_win.writeBacks;
+    // The colourless re-issue is the layer's own work: timed to its End.
+    g_draw.wbRouteSlot = routeBegin(ctx, UiRouteStage::kWriteBack, g_draw.eye, g_draw.seq);
     return true;
 }
 
 void uiLayerWriteBackEnd(ID3D11DeviceContext* ctx) {
     if (!g_draw.wbActive) return;
+    routeEnd(ctx, g_draw.wbRouteSlot);
+    g_draw.wbRouteSlot = -1;
     guarded("uiLayer.writeBackEnd", [&] {
         vScreenSetRenderTargetsRaw(ctx, boundCount(g_draw.wbRtv), g_draw.wbRtv, g_draw.wbDsv);
     });
@@ -1835,6 +2310,7 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source) {
         D3D11_TEXTURE2D_DESC d{};
         source->GetDesc(&d);
         if (d.Width != e.door.fullW || d.Height != e.door.fullH) {
+            if (e.door.fullW && e.door.fullH) openSizeChange(e.door.fullW, e.door.fullH, d.Width, d.Height);
             if (g_target > 0.0f) {
                 const UiLayerSize s = uiLayerSize(d.Width, d.Height, g_target);
                 Log::get().note(
@@ -1946,8 +2422,12 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     detail::g_uiLayerWatching = false;
     g_watchBudget = kWatchPerFrame;
     ++g_win.frames;
+    // The route's timers read back (the door reads them too).
+    routePoll(ctx);
     // The next frame's answer to "is the 2D screen the world?".
     onFootGateTick();
+    // A door size change's watch: the dropped line, two seconds on.
+    sizeChangeTick();
     // The warm compile, the sharpen's reason: not a first-use D3DCompile at
     // the door.
     if (ctx && detail::g_uiLayerLive) {
@@ -1973,17 +2453,9 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_winStartMs) g_winStartMs = now;
     if (now - g_winStartMs < kTotalsMs) return;
     const bool anything = g_win.redirected || g_win.composites || g_win.compositeRefused;
-    if (g_target > 0.0f || anything) {
-        logTotals(static_cast<double>(now - g_winStartMs) / 1000.0);
-        if (!g_timingNoted && g_win.timed) {
-            g_timingNoted = true;
-            Log::get().note("ui quality: layer: the composite measured %.3f ms per eye on average "
-                            "over its first %u timed composites (RCAS, the step before it, "
-                            "measured 0.23 ms an eye at 5792x5356).",
-                            g_win.timeSum / g_win.timed, g_win.timed);
-        }
-    }
+    if (g_target > 0.0f || anything) logTotals(static_cast<double>(now - g_winStartMs) / 1000.0);
     g_win = Window{};
+    for (RouteStats& r : g_routeStats) r.n = 0;
     g_winStartMs = now;
 }
 
@@ -1991,10 +2463,11 @@ void uiLayerShutdown() {
     if (g_draw.active) releaseSaved();
     g_draw = Draw{};
     releaseLayers();
-    for (QuerySlot& q : g_qring) {
-        q.timer.reset();
-        q.inUse = false;
+    for (RouteSlot& s : g_route) {
+        s.timer.reset();
+        s.inUse = false;
     }
+    g_routeHead = g_routeTail = 0;
     for (uint32_t i = 0; i < g_blendCount; ++i) g_blends[i] = BlendEntry{};
     g_blendCount = 0;
     g_seeder.reset();

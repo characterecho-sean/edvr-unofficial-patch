@@ -111,8 +111,12 @@ void run(){
   check(closeFloat(reentryUp,.9f)&&closeFloat(reentryDown,1.1f),"...and so is its vertical frustum (the panel rule's field of view)");
   check(!reentryJitter&&!reentryWarm,"...and the readers that take the lock answer no there instead of throwing");
   {uint32_t rw=0,rh=0;check(edvr::nativeTemporalRecommended(&rw,&rh)&&rw==480&&rh==360,"the recommendation outside treat");}
+  {uint32_t aw=1,ah=1;check(!edvr::nativeTemporalAsked(&aw,&ah),"no ask when the host does not say (the recommendation is the answer)");}
   check(calls.back().flags&1,"first history reset");check(!calls.back().head,"first frame has no invented head pair");
-  f=frame(11,2);f.head[3]=.1f;p=begin(t,f);t.noteProjection(t.context,2,0,.1f,1000);
+  f=frame(11,2);f.head[3]=.1f;f.askedWidth=384;f.askedHeight=441;p=begin(t,f);t.noteProjection(t.context,2,0,.1f,1000);
+  {uint32_t aw=0,ah=0,rw=0,rh=0;
+   check(edvr::nativeTemporalAsked(&aw,&ah)&&aw==384&&ah==441&&edvr::nativeTemporalRecommended(&rw,&rh)&&rw==480&&rh==360,
+         "an adoption's ask is published beside the frame's own recommendation, which it leads (review P3-1)");}
   check(treat(t,2,0,source.Get())==S_OK,"second left");auto c=calls.back();
   check(closeFloat(c.jx,-p.tangentShift[0][0]*320/1.9f)&&closeFloat(c.jy,p.tangentShift[0][1]*240/2.f),"consumer jitter uses pixels and correct signs");
   // fix.ui_quality reads the same jitter at DRAW time (ui_layer.h): the
@@ -133,7 +137,7 @@ void run(){
   f=frame(11,4);begin(t,f);check(treat(t,4,0,source.Get())==S_OK&&(calls.back().flags&1),"sequence gap reset");
   f=frame(11,5);f.referenceGeneration=2;begin(t,f);check(treat(t,5,0,source.Get())==S_OK&&(calls.back().flags&1),"reference change reset");
   check(t.invalidate(t.context)==S_OK,"CPU invalidation");check(treat(t,5,0,source.Get())==E_INVALIDARG,"invalidated frame cannot treat");check(t.beginFrame(t.context,&f,&p)==E_INVALIDARG,"invalidated sequence cannot reopen");
-  {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn),"no recommendation or frustum once the channel is invalidated");}
+  {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh),"no recommendation, frustum or ask once the channel is invalidated");}
   f=frame(11,6);p=begin(t,f);auto larger=d.texture(640,480);check(treat(t,6,0,larger.Get())==S_OK,"resize treatment");c=calls.back();
   check(c.flags&1,"resize reset");check(closeFloat(c.jx,-p.tangentShift[0][0]*640/1.9f),"resize converts jitter to actual pixels");
   Device other;auto foreign=other.texture();check(treat(t,6,1,foreign.Get())==E_INVALIDARG,"wrong device rejected");
@@ -147,7 +151,7 @@ void run(){
   check(t.close(t.context)==S_OK&&t.close(t.context)==S_FALSE,"idempotent CPU close");
   warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
-  {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn),"no recommendation or frustum once the channel closes");}
+  {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh),"no recommendation, frustum or ask once the channel closes");}
   auto fresh=acquire(d,12);f=frame(12,1);begin(fresh,f);check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
   // Previous eye yaw 90 degrees, current yaw zero, head translates +X:
   // the translation is +Z in the previous eye and head rotation is zero.

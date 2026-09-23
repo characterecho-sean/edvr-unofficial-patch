@@ -37,6 +37,7 @@
 // the unjittered projection would put it; texture rows count downward.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -549,6 +550,115 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
     }
 }
 
+// THE FAMILY RULE, pure: vscreen.cpp's uiLayerFamilyOf gathers these facts
+// for an owner draw into an eye target, in this order and only as far as the
+// rule reads them, and this decides. The shader hashes are the ones the
+// census and every flight since have named.
+constexpr uint64_t kUiVsPanel = 0xA888D51024D9798Eull;   // menu / modal panel composite
+constexpr uint64_t kUiVsLoader = 0x4EF6DDB075A927FAull;  // loading screen composite
+constexpr uint64_t kUiVsHolo = 0x81216C77F90DEDD6ull;
+constexpr uint64_t kUiVsFlightHud = 0xB7790CBFC6554097ull;
+constexpr uint64_t kUiVsSprite = 0xE508648660A352B2ull;
+constexpr uint64_t kUiVsGuiVector = 0x666EF0C4C616F67Eull, kUiVsGuiText = 0x1012E00B3CB44469ull,
+                   kUiVsGuiIcons = 0xA3E5D3FCBC1165F8ull;
+// The two composite families' own pixel shaders, as the layer's and ui_depth's
+// family lines named them on 2026-09-23: the menu panel (and its variant),
+// the loading screen (and its gamma pass). A draw of one of these pairs is
+// that family by its shaders alone -- recognition that does not wait for
+// ui_depth to learn the surface it samples. The 13:23 flight lost the menu
+// panel for the rest of the session when the FOV trim, adopted at the main
+// menu, had the game re-create its interface surfaces: the redirects stopped
+// within a third of a second of the render-size change and never resumed,
+// though ui_depth learned one of the new surfaces a second later.
+constexpr uint64_t kUiPanelPs[] = {0x9107E72CB016CC02ull, 0x219323C8C025AD94ull};
+constexpr uint64_t kUiLoaderPs[] = {0x85565E9261812E2Full, 0x8ADB2A81A45E8A4Bull};
+
+inline bool uiKnownPs(const uint64_t* list, size_t n, uint64_t ps) {
+    for (size_t i = 0; i < n; ++i)
+        if (list[i] == ps) return true;
+    return false;
+}
+
+struct UiFamilyFacts {
+    int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
+    uint64_t vs = 0, ps = 0;      // the bound shaders' hashes (ps asked only where the rule needs it)
+    bool excluded = false;        // ui_depth's exclude list
+    bool panelSized = false;      // srv0IsPanelSized: the 2D screen's composite
+    bool learnedSurface = false;  // a learned interface surface in PS slots 0..3
+};
+
+// How the rule reached its answer, for the family census (ui_layer.cpp).
+enum class UiFamilyWhy : uint8_t {
+    kNotEyeTarget = 0,  // not an eye target (the family rule never ran) -- vscreen's gate
+    kNotPostTonemap,    // an eye target, but not the 8-bit post-tonemap one
+    kExcluded,          // on ui_depth's exclude list
+    kScreen,            // the 2D screen, by its panel-sized SRV
+    kLearnedSurface,    // by a learned interface surface
+    kShaderPair,        // by its shader pair alone (no learned surface)
+    kDirect,            // a GUI or flight-HUD shader straight into the eye
+    kNoSurface,         // a composite shader with no learned surface and an unknown pair
+    kOther,             // any other draw
+    kCount
+};
+
+inline const char* uiFamilyWhyName(UiFamilyWhy w) {
+    switch (w) {
+        case UiFamilyWhy::kNotEyeTarget: return "not an eye target";
+        case UiFamilyWhy::kNotPostTonemap: return "not the post-tonemap target";
+        case UiFamilyWhy::kExcluded: return "excluded";
+        case UiFamilyWhy::kScreen: return "the 2D screen's SRV";
+        case UiFamilyWhy::kLearnedSurface: return "a learned surface";
+        case UiFamilyWhy::kShaderPair: return "its shader pair alone";
+        case UiFamilyWhy::kDirect: return "a direct shader";
+        case UiFamilyWhy::kNoSurface: return "no learned surface, pixel shader not known";
+        default: return "other";
+    }
+}
+
+inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why = nullptr) {
+    UiFamilyWhy w = UiFamilyWhy::kOther;
+    UiLayerFamily out = UiLayerFamily::kNone;
+    if (f.targetKind == 0) {
+        w = UiFamilyWhy::kNotEyeTarget;
+    } else if (f.targetKind == 1) {
+        w = UiFamilyWhy::kNotPostTonemap;
+        out = f.vs == kUiVsHolo        ? UiLayerFamily::kHolo
+              : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud
+              : f.vs == kUiVsSprite    ? UiLayerFamily::kSprite
+                                       : UiLayerFamily::kNone;
+        if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;
+    } else if (f.excluded) {
+        w = UiFamilyWhy::kExcluded;
+    } else if (f.panelSized) {
+        w = UiFamilyWhy::kScreen;
+        out = UiLayerFamily::kScreen;
+    } else if (f.learnedSurface) {
+        w = UiFamilyWhy::kLearnedSurface;
+        out = f.vs == kUiVsPanel    ? UiLayerFamily::kPanel
+              : f.vs == kUiVsLoader ? UiLayerFamily::kLoader
+              : f.vs == kUiVsHolo   ? UiLayerFamily::kHolo
+              : f.vs == kUiVsSprite ? UiLayerFamily::kSprite
+                                    : UiLayerFamily::kSurface;
+    } else if (f.vs == kUiVsPanel && uiKnownPs(kUiPanelPs, sizeof(kUiPanelPs) / sizeof(kUiPanelPs[0]), f.ps)) {
+        w = UiFamilyWhy::kShaderPair;
+        out = UiLayerFamily::kPanel;
+    } else if (f.vs == kUiVsLoader &&
+               uiKnownPs(kUiLoaderPs, sizeof(kUiLoaderPs) / sizeof(kUiLoaderPs[0]), f.ps)) {
+        w = UiFamilyWhy::kShaderPair;
+        out = UiLayerFamily::kLoader;
+    } else if (f.vs == kUiVsGuiVector || f.vs == kUiVsGuiText || f.vs == kUiVsGuiIcons) {
+        w = UiFamilyWhy::kDirect;
+        out = UiLayerFamily::kGuiDirect;
+    } else if (f.vs == kUiVsFlightHud) {
+        w = UiFamilyWhy::kDirect;
+        out = UiLayerFamily::kFlightHud;
+    } else if (f.vs == kUiVsPanel || f.vs == kUiVsLoader) {
+        w = UiFamilyWhy::kNoSurface;
+    }
+    if (why) *why = w;
+    return out;
+}
+
 // THE ON-FOOT GATE. On foot, Odyssey renders the world ONCE, flat, into the
 // 2D screen's 3840x2160 target and shows it as a panel in each eye through
 // the screen's composite (flight 2026-09-23 09:38: vs 5C36AF051B98B9F1 ps
@@ -591,6 +701,76 @@ inline bool uiLayerOnFootStep(UiOnFootGate& g, bool known, bool onFoot, uint64_t
     return g.state == 1;
 }
 
+// THE SCREEN'S OWN IDENTITY (the UI architecture review's P1, 2026-09-23).
+// The journal is optional -- d3d11.journal_watch, and its folder must be
+// found -- and a second late: with it off the gate above never holds and
+// the on-foot world goes back into the layer. The world on the 2D screen is
+// told by its content too: a depth target of the 2D screen's own size takes
+// the world's draws. The depth probe's census over every September log of
+// both installs: 175 to 17,799 draws a frame in 206 samples across 57
+// on-foot sessions (the six of 2026-09-23: 381 to 15,612), while no census
+// outside an on-foot session shows a screen-sized depth target with even
+// 10 -- the UI's own take 3 or 4 a frame. No log caught station services
+// or a map on the screen (Status.json's GuiFocus is logged beside the
+// count now, so the next flight names them). A map, or any
+// other 3D scene drawn through the 2D screen, is moving content for the
+// same reason as the world, and is held the same way; only a static screen
+// -- the menus, station services' panels -- is quiet, and goes to the layer.
+//
+// Hysteresis both ways: the screen becomes the world after
+// kUiWorldEnterFrames frames running over kUiWorldEnterDraws, and stops
+// being it after kUiWorldLeaveFrames frames running under
+// kUiWorldLeaveDraws (a frame between the two restarts that run): one busy
+// transition frame does not blur a menu, one quiet frame on foot does not
+// hand the temporal pass a black eye. Either signal holds the screen in the
+// picture (the journal's or this one); neither: the layer takes it, so an
+// unknown journal with a quiet screen -- the main menu -- stays sharp.
+constexpr uint32_t kUiWorldEnterDraws = 64;   // 2.7x under the on-foot minimum, 16x the UI's
+constexpr uint32_t kUiWorldEnterFrames = 2;
+constexpr uint32_t kUiWorldLeaveDraws = 32;
+constexpr uint32_t kUiWorldLeaveFrames = 90;  // a second at 90 Hz
+
+struct UiWorldScreenGate {
+    bool busy = false;
+    uint32_t run = 0;    // frames running toward the other state
+    uint32_t draws = 0;  // the count the last step judged by
+};
+
+// One frame's count: the most draws a depth target of the 2D screen's size
+// took (known: the depth probe watches and the screen's size is known; an
+// unknown count is none). True while the screen is the world.
+inline bool uiLayerWorldScreenStep(UiWorldScreenGate& g, bool known, uint32_t draws) {
+    g.draws = known ? draws : 0;
+    if (!g.busy) {
+        if (g.draws > kUiWorldEnterDraws) {
+            if (++g.run >= kUiWorldEnterFrames) {
+                g.busy = true;
+                g.run = 0;
+            }
+        } else {
+            g.run = 0;
+        }
+    } else if (g.draws < kUiWorldLeaveDraws) {
+        if (++g.run >= kUiWorldLeaveFrames) {
+            g.busy = false;
+            g.run = 0;
+        }
+    } else {
+        g.run = 0;
+    }
+    return g.busy;
+}
+
+// Status.json's GuiFocus, named for the gate's lines (Frontier's journal
+// manual); nullptr past the known values.
+inline const char* uiGuiFocusName(uint32_t focus) {
+    static const char* const kNames[] = {"no focus",     "right panel",   "left panel",
+                                         "comms panel",  "role panel",    "station services",
+                                         "galaxy map",   "system map",    "orrery",
+                                         "FSS",          "SAA",           "codex"};
+    return focus < sizeof(kNames) / sizeof(kNames[0]) ? kNames[focus] : nullptr;
+}
+
 // Why a UI draw was left in the game's frame (or kRedirect). The order is
 // the order of the tests in uiLayerDecide, so the reason reported is the
 // first that failed.
@@ -598,10 +778,11 @@ enum class UiLayerDecision : uint8_t {
     kRedirect = 0,
     kNotUi,          // no family
     kVerdict,        // another fix swallows or re-issues the draw
-    kOnFootWorld,    // the 2D screen while the commander is on foot: there the
-                     // screen IS the game world (Odyssey renders it once, flat,
-                     // into the screen's target), and taking it would hand the
-                     // temporal pass a black eye (the on-foot gate, below)
+    kWorldScreen,    // the 2D screen while it shows the world: on foot (Odyssey
+                     // renders the world once, flat, into the screen's target)
+                     // or a 3D map; taking it would hand the temporal pass a
+                     // black eye (the on-foot gate and the screen's own
+                     // identity, above)
     kNotEyeTarget,   // the colour target is not an eye-sized 2D target
     kHdrTarget,      // drawn into the lit HDR target BEFORE exposure and the
                      // tonemap: the layer is composited after both, so taking
@@ -633,8 +814,8 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
         case UiLayerDecision::kRedirect: return "redirected into the layer";
         case UiLayerDecision::kNotUi: return "not UI";
         case UiLayerDecision::kVerdict: return "another fix swallows or re-issues it";
-        case UiLayerDecision::kOnFootWorld:
-            return "on foot: the screen shows the world; the temporal pass keeps it";
+        case UiLayerDecision::kWorldScreen:
+            return "the screen shows the world (on foot, or a 3D map); the temporal pass keeps it";
         case UiLayerDecision::kNotEyeTarget: return "not drawn into an eye target";
         case UiLayerDecision::kHdrTarget:
             return "drawn into the HDR target before the tonemap (left in the picture; under an "
@@ -663,7 +844,8 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
 struct UiLayerDrawFacts {
     UiLayerFamily family = UiLayerFamily::kNone;
     bool verdictForwards = true;  // the draw is forwarded as-is by its verdict
-    bool onFoot = false;          // the on-foot gate holds (uiLayerOnFootStep)
+    bool worldScreen = false;     // the 2D screen shows the world: the journal says on
+                                  // foot, or the screen's own depth is busy
     bool eyeTarget = false;       // an eye-sized 2D colour target
     bool ldrView = false;         // ... viewed as 8-bit UNORM (post-tonemap)
     bool vrs = false;             // variable-rate shading bound
@@ -684,8 +866,8 @@ inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
     if (f.family == UiLayerFamily::kNone) return UiLayerDecision::kNotUi;
     if (!f.verdictForwards) return UiLayerDecision::kVerdict;
     // Before every other test, so the reason is the same whatever else holds
-    // (armed or not, late or not): on foot the screen is the world.
-    if (f.onFoot && f.family == UiLayerFamily::kScreen) return UiLayerDecision::kOnFootWorld;
+    // (armed or not, late or not): the screen that shows the world stays.
+    if (f.worldScreen && f.family == UiLayerFamily::kScreen) return UiLayerDecision::kWorldScreen;
     if (!f.eyeTarget) return UiLayerDecision::kNotEyeTarget;
     if (!f.ldrView) return UiLayerDecision::kHdrTarget;
     if (f.vrs) return UiLayerDecision::kVrs;
@@ -750,6 +932,113 @@ inline bool uiLayerRegionMatches(uint32_t regionW, uint32_t regionH, const float
     const double impliedAspect = (regionW / du) / (regionH / dv);
     const double layerAspect = static_cast<double>(layerW) / layerH;
     return std::fabs(impliedAspect / layerAspect - 1.0) < 0.05;
+}
+
+// ------------------------------------------------------- the route's price --
+//
+// The layer's whole route, not only its composite (the UI architecture
+// review, "Findings and costs"): every GPU interval the layer ADDS to a
+// frame is timed -- the layer's clear, the depth-stencil seed (a copy of the
+// game's depth plus the Seeder's passes), the multiply's transmittance (its
+// clear and the draw's second issue), a depth-writing draw's colourless
+// re-issue, and the composite -- with GpuTimer (never a Flush or a wait),
+// and summed per eye-frame, the unit a frame's budget is spent in: a stage
+// can run more than once in an eye's frame (a write-back per depth-writing
+// draw). The UI draws themselves, rasterised into the layer instead of the
+// eye, are the game's own work and are not timed.
+enum class UiRouteStage : uint8_t { kClear = 0, kSeed, kMultiply, kWriteBack, kComposite, kCount };
+
+inline const char* uiRouteStageName(UiRouteStage s) {
+    switch (s) {
+        case UiRouteStage::kClear: return "clear";
+        case UiRouteStage::kSeed: return "depth-stencil seed";
+        case UiRouteStage::kMultiply: return "multiply";
+        case UiRouteStage::kWriteBack: return "write-back";
+        case UiRouteStage::kComposite: return "composite";
+        default: return "?";
+    }
+}
+
+// One eye's open sum. Samples arrive in submission order (the timers are
+// polled oldest first, and the GPU finishes them in order), but the eyes
+// interleave -- eye 0's composite runs after eye 1's UI -- so each eye (and
+// each stage) keeps its own: a sample of a later frame closes the open sum.
+// A sample that did not measure (a disjoint interval, an expiry) or one
+// never taken (no free timer) spoils its eye-frame, which is dropped rather
+// than reported short; one that arrives for a frame already closed is LATE
+// (the caller counts it) and changes nothing.
+struct UiRouteSum {
+    uint64_t seq = 0;        // the eye-frame being summed
+    uint64_t lostSeq = 0;    // the newest eye-frame a sample of which was never taken
+    uint64_t closedSeq = 0;  // the newest eye-frame closed
+    double ms = 0.0;
+    bool open = false, bad = false;
+};
+
+// A sample of frame `seq` was never taken (no free timer).
+inline void uiRouteLost(UiRouteSum& s, uint64_t seq) {
+    if (s.open && s.seq == seq) {
+        s.bad = true;
+    } else if (seq > s.lostSeq) {
+        s.lostSeq = seq;
+    }
+}
+
+// A sample for a frame this sum has already closed, or passed.
+inline bool uiRouteLate(const UiRouteSum& s, uint64_t seq) {
+    return seq <= s.closedSeq || (s.open && seq < s.seq);
+}
+
+// A sample of frame `seq`: `valid` with `ms`, or one that did not measure.
+// True when it closed an earlier eye-frame's good sum, into *closedMs.
+inline bool uiRouteAdd(UiRouteSum& s, uint64_t seq, double ms, bool valid, double* closedMs) {
+    if (uiRouteLate(s, seq)) return false;
+    bool closed = false;
+    if (s.open && seq != s.seq) {
+        s.closedSeq = s.seq;
+        if (!s.bad && closedMs) {
+            *closedMs = s.ms;
+            closed = true;
+        }
+        s.open = false;
+    }
+    if (!s.open) {
+        s.open = true;
+        s.seq = seq;
+        s.ms = 0.0;
+        s.bad = seq == s.lostSeq;
+    }
+    if (valid && ms >= 0.0) {
+        s.ms += ms;
+    } else {
+        s.bad = true;
+    }
+    return closed;
+}
+
+// Closes the open sum when no sample of its frame can still arrive (every
+// timer of that frame or earlier is read). True when that closed a good sum.
+inline bool uiRouteClose(UiRouteSum& s, uint64_t oldestPendingSeq, double* closedMs) {
+    if (!s.open || s.seq >= oldestPendingSeq) return false;
+    s.open = false;
+    s.closedSeq = s.seq;
+    if (s.bad || !closedMs) return false;
+    *closedMs = s.ms;
+    return true;
+}
+
+// v[0..n) sorted in place, one percentile read off by linear interpolation
+// between the two bracketing order statistics (temporal_pass.cpp's
+// windowPercentile, the definition numpy uses).
+inline double uiLayerPercentile(float* v, uint32_t n, double frac) {
+    if (!v || !n) return 0.0;
+    std::sort(v, v + n);
+    const double pos = frac * static_cast<double>(n - 1);
+    uint32_t lo = static_cast<uint32_t>(pos);
+    if (lo > n - 1) lo = n - 1;
+    const uint32_t hi = lo + 1 < n ? lo + 1 : lo;
+    const double t = pos - static_cast<double>(lo);
+    return static_cast<double>(v[lo]) * (1.0 - t) + static_cast<double>(v[hi]) * t;
 }
 
 }  // namespace edvr

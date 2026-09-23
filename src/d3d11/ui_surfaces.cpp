@@ -51,6 +51,8 @@ struct Basis {
     int recSource = 0;  // 1 the runtime's frame, 2 its swapchain sizing (before the first frame)
     float hmd = 0.0f;
     uint32_t derivedW = 0, derivedH = 0;    // recommended x HMD Quality, truncated
+    uint32_t askedW = 0, askedH = 0;        // what the game is told now (the host's ask)
+    uint32_t askedDerivedW = 0, askedDerivedH = 0;  // ... x HMD Quality, when it differs
     uint32_t measuredW = 0, measuredH = 0;  // the eye the game submits
     uint32_t fallbackW = 0, fallbackH = 0;  // vScreen's measurement, when neither is known
     float T = 0.0f;                         // 2 tan(vFOV/2) of the frame's frustum; 0 unknown
@@ -173,6 +175,15 @@ Basis readBasis() {
     b.derivedW = uiQualityInternalDim(b.recW, b.hmd);
     b.derivedH = uiQualityInternalDim(b.recH, b.hmd);
     if (!b.derivedW || !b.derivedH) b.derivedW = b.derivedH = 0;
+    // The ask leads the frame's recommendation through an adoption (P3-1):
+    // judged first where the two differ.
+    if (nativeTemporalAsked(&w, &h) && w && h && (w != b.recW || h != b.recH)) {
+        b.askedW = w;
+        b.askedH = h;
+        b.askedDerivedW = uiQualityInternalDim(w, b.hmd);
+        b.askedDerivedH = uiQualityInternalDim(h, b.hmd);
+        if (!b.askedDerivedW || !b.askedDerivedH) b.askedDerivedW = b.askedDerivedH = 0;
+    }
     if (eyeTextureSize(&w, &h) && w && h) {
         b.measuredW = w;
         b.measuredH = h;
@@ -251,6 +262,10 @@ std::string basisText(const Basis& b) {
             appendf(s, " -- but the game submits %ux%u", b.measuredW, b.measuredH);
         else if (b.measuredW)
             appendf(s, ", as the game submits");
+        if (b.askedDerivedW) {
+            appendf(s, " -- the game is told %ux%u now (%ux%u: a size change in flight)", b.askedW,
+                    b.askedH, b.askedDerivedW, b.askedDerivedH);
+        }
     } else if (b.measuredW) {
         appendf(s, "%ux%u (the size the game submits; %s)", b.measuredW, b.measuredH,
                 !b.recW ? "no recommendation from the runtime" : "HMD Quality unread");
@@ -370,24 +385,29 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
         }
         return false;
     }
-    // The bases a panel is judged against: the derived render size, and the
-    // size the game submits where it differs (a FOV-trim or cull-guard
-    // change in flight, or an HMD Quality the .fxcfg does not hold); vScreen's
-    // own measurement only when neither is known. Each with the frame's
-    // vertical field of view: the game sizes a panel by W / 2 tan(vFOV/2)
+    // The bases a panel is judged against: the size the game is told now,
+    // where it differs from the frame's (a FOV-trim or cull-guard adoption:
+    // the game re-creates its surfaces for the new ask before a frame of it
+    // arrives -- review P3-1, the 13:23 flight's 1254x705 judged against the
+    // old size); the derived render size; the size the game submits where it
+    // differs (an HMD Quality the .fxcfg does not hold); vScreen's own
+    // measurement only when none is known. Each with the frame's vertical
+    // field of view: the game sizes a panel by W / 2 tan(vFOV/2)
     // (ui_quality_math.h's rule), not by the render size alone.
-    UiQualityBasis bases[2];
-    int which[2] = {};
+    UiQualityBasis bases[3];
+    int which[3] = {};
     uint32_t nb = 0;
     auto add = [&](uint32_t W, uint32_t H, int w) {
+        for (uint32_t i = 0; i < nb; ++i)
+            if (bases[i].W == W && bases[i].H == H) return;
         bases[nb].W = W;
         bases[nb].H = H;
         bases[nb].T = b.T;
         which[nb++] = w;
     };
+    if (b.askedDerivedW) add(b.askedDerivedW, b.askedDerivedH, 3);
     if (b.derivedW) add(b.derivedW, b.derivedH, 0);
-    if (b.measuredW && (b.measuredW != b.derivedW || b.measuredH != b.derivedH))
-        add(b.measuredW, b.measuredH, 1);
+    if (b.measuredW) add(b.measuredW, b.measuredH, 1);
     if (!nb && b.fallbackW) add(b.fallbackW, b.fallbackH, 2);
     if (!nb) {
         if (!g_s.noBasisNoted) {
@@ -481,6 +501,7 @@ bool uiSurfacesMatch(D3D11_TEXTURE2D_DESC* d, float* factorOut, char* familyOut)
             r.w / 10000.0, r.h / 10000.0, bases[used].unit(), bases[used].W, bases[used].H,
             which[used] == 0   ? "derived"
             : which[used] == 1 ? "as the game submits"
+            : which[used] == 3 ? "as the game is told now, a size change in flight"
                                : "vScreen's measurement",
             static_cast<double>(b.vfovDeg), stack.gameFrames ? rvas : "none", stack.gameFrames,
             stack.captured);

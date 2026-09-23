@@ -405,26 +405,27 @@ void testGate() {
         auto screenWith = [&](bool gateHolds, UiLayerFamily fam = UiLayerFamily::kScreen) {
             UiLayerDrawFacts g = f;
             g.family = fam;
-            g.onFoot = gateHolds;
+            g.worldScreen = gateHolds;
             return uiLayerDecide(g);
         };
         UiOnFootGate gate;
         check(gate.state == -1, "the gate starts unread");
         check(uiLayerOnFootStep(gate, true, true, 1000) &&
-                  screenWith(gate.state == 1) == UiLayerDecision::kOnFootWorld,
+                  screenWith(gate.state == 1) == UiLayerDecision::kWorldScreen,
               "on foot: the 2D screen is not redirected");
-        check(std::strcmp(uiLayerDecisionName(UiLayerDecision::kOnFootWorld),
-                          "on foot: the screen shows the world; the temporal pass keeps it") == 0,
+        check(std::strcmp(uiLayerDecisionName(UiLayerDecision::kWorldScreen),
+                          "the screen shows the world (on foot, or a 3D map); the temporal pass "
+                          "keeps it") == 0,
               "...and the left-in-the-frame line gives the reason");
         check(screenWith(true, UiLayerFamily::kPanel) == UiLayerDecision::kRedirect &&
                   screenWith(true, UiLayerFamily::kLoader) == UiLayerDecision::kRedirect,
               "on foot, the menus and the loading screen are still taken");
         check(with([](UiLayerDrawFacts& g) {
-                  g.onFoot = true;
+                  g.worldScreen = true;
                   g.armed = false;
                   g.late = true;
-              }) == UiLayerDecision::kOnFootWorld,
-              "on foot is the reason whatever else holds");
+              }) == UiLayerDecision::kWorldScreen,
+              "the world screen is the reason whatever else holds");
         check(uiLayerOnFootStep(gate, false, false, 1500) && uiLayerOnFootStep(gate, false, false, 3900),
               "a short unknown (a mid-write read of Status.json) holds the gate");
         check(!uiLayerOnFootStep(gate, false, false, 4001) && gate.state == 0 &&
@@ -440,6 +441,104 @@ void testGate() {
         check(!uiLayerOnFootStep(unknown, false, false, 1000) && !uiLayerOnFootStep(unknown, false, true, 2000) &&
                   unknown.state == 0 && screenWith(unknown.state == 1) == UiLayerDecision::kRedirect,
               "unknown journal (a menu, the watcher off): the 2D screen is redirected, as before the gate");
+
+        // The screen's own identity (review P1): the depth probe's count of
+        // draws into the screen-sized depth target, needing no journal. The
+        // held fact is (journal) OR (depth), as ui_layer.cpp combines them.
+        auto heldBy = [](const UiOnFootGate& j, const UiWorldScreenGate& w) {
+            return j.state == 1 || w.busy;
+        };
+        UiOnFootGate off;  // the journal watcher off: every reading unknown
+        UiWorldScreenGate world;
+        bool held = false;
+        for (int i = 0; i < 2; ++i) {
+            const bool j = uiLayerOnFootStep(off, false, false, 1000 + i * 11);
+            held = j || uiLayerWorldScreenStep(world, true, 5505);  // flight 09:38's first count
+        }
+        check(held && heldBy(off, world) && off.state == 0 &&
+                  screenWith(heldBy(off, world)) == UiLayerDecision::kWorldScreen,
+              "journal off, the screen's depth busy (5505 draws a frame, on foot): left in the eye");
+        UiOnFootGate menuJournal;
+        UiWorldScreenGate menu;
+        bool menuHeld = false;
+        for (int i = 0; i < 200; ++i) {
+            menuHeld = uiLayerOnFootStep(menuJournal, false, false, 1000 + i * 11) ||
+                       uiLayerWorldScreenStep(menu, true, i % 2 ? 4 : 3);  // the UI's own 3 or 4
+        }
+        check(!menuHeld && screenWith(heldBy(menuJournal, menu)) == UiLayerDecision::kRedirect,
+              "journal off, the screen's depth quiet (3 or 4 draws, a menu): taken, the menu stays sharp");
+        UiWorldScreenGate unknownCount;
+        check(!uiLayerWorldScreenStep(unknownCount, false, 9000) &&
+                  !uiLayerWorldScreenStep(unknownCount, false, 9000) && unknownCount.draws == 0,
+              "a count the probe did not take is no count (unknown journal, no count: taken)");
+        UiWorldScreenGate h;
+        check(!uiLayerWorldScreenStep(h, true, 15612) && !uiLayerWorldScreenStep(h, true, 4) &&
+                  !uiLayerWorldScreenStep(h, true, 15612),
+              "hysteresis: one busy transition frame, then a quiet one, does not hold it");
+        check(uiLayerWorldScreenStep(h, true, 187) && h.busy,
+              "...two frames running over 64 do (the census's on-foot minimum, 187)");
+        bool stillHeld = true;
+        for (uint32_t i = 0; i + 1 < kUiWorldLeaveFrames; ++i) stillHeld = stillHeld && uiLayerWorldScreenStep(h, true, 3);
+        check(stillHeld, "...89 quiet frames running do not let go (a loading hitch on foot)");
+        check(uiLayerWorldScreenStep(h, true, 40) && uiLayerWorldScreenStep(h, true, 3),
+              "...a frame between the thresholds (40) restarts the quiet run");
+        bool released = false;
+        for (uint32_t i = 0; i < kUiWorldLeaveFrames && !released; ++i) released = !uiLayerWorldScreenStep(h, true, 3);
+        check(released && !h.busy, "...a second running under 32 lets go");
+        check(!uiLayerWorldScreenStep(h, true, 64) && !uiLayerWorldScreenStep(h, true, 64),
+              "exactly the threshold (64) is not over it");
+        UiOnFootGate journalOnFoot;
+        UiWorldScreenGate quietOnFoot;
+        check((uiLayerOnFootStep(journalOnFoot, true, true, 1000) ||
+               uiLayerWorldScreenStep(quietOnFoot, true, 3)) &&
+                  heldBy(journalOnFoot, quietOnFoot),
+              "the journal on foot holds it whatever the depth says (either signal holds)");
+        check(std::strcmp(uiGuiFocusName(6), "galaxy map") == 0 &&
+                  std::strcmp(uiGuiFocusName(5), "station services") == 0 &&
+                  std::strcmp(uiGuiFocusName(7), "system map") == 0 && uiGuiFocusName(12) == nullptr,
+              "GuiFocus names for the gate's lines");
+    }
+
+    // The route's price (the review's "Findings and costs"): per-eye-frame
+    // sums from samples read in the order they were issued, the eyes
+    // interleaved (eye 1's UI runs before eye 0's composite).
+    {
+        UiRouteSum s0, s1;
+        double out = -1.0;
+        check(!uiRouteAdd(s0, 10, 0.20, true, &out) && !uiRouteAdd(s0, 10, 0.05, true, &out) &&
+                  !uiRouteAdd(s1, 10, 0.30, true, &out) && !uiRouteAdd(s0, 10, 0.07, true, &out),
+              "an eye's samples of one frame add up while the other eye keeps its own sum");
+        check(uiRouteAdd(s0, 11, 0.10, true, &out) && std::fabs(out - 0.32) < 1e-9,
+              "a later frame's sample closes the sum: 0.20 + 0.05 + the composite's 0.07");
+        check(uiRouteLate(s0, 10) && !uiRouteAdd(s0, 10, 5.0, true, &out) && s0.seq == 11 &&
+                  std::fabs(s0.ms - 0.10) < 1e-9,
+              "a sample for a frame already closed is late and changes nothing");
+        out = -1.0;
+        check(!uiRouteAdd(s0, 11, 0.0, false, &out) && !uiRouteAdd(s0, 12, 0.10, true, &out) &&
+                  out == -1.0,
+              "a sample that did not measure drops its eye-frame rather than report it short");
+        uiRouteLost(s0, 13);
+        check(uiRouteAdd(s0, 13, 0.20, true, &out) && std::fabs(out - 0.10) < 1e-9 && s0.bad,
+              "a timer never had for a later frame spoils that frame when it opens");
+        out = -1.0;
+        check(!uiRouteAdd(s0, 14, 0.30, true, &out) && out == -1.0, "...and it is dropped");
+        check(!uiRouteClose(s0, 14, &out) && s0.open,
+              "a sum stays open while a timer of its frame may still be read");
+        check(uiRouteClose(s0, 15, &out) && std::fabs(out - 0.30) < 1e-9 && !s0.open,
+              "...and closes once none can");
+        uiRouteLost(s1, 10);
+        check(!uiRouteClose(s1, 11, &out) && !s1.open, "a timer never had in the open frame spoils it");
+        float v[5] = {5.0f, 1.0f, 4.0f, 2.0f, 3.0f};
+        check(std::fabs(uiLayerPercentile(v, 5, 0.5) - 3.0) < 1e-6 &&
+                  std::fabs(uiLayerPercentile(v, 5, 0.95) - 4.8) < 1e-6,
+              "median 3, p95 4.8 of 1..5 (linear between order statistics)");
+        float one[1] = {0.25f};
+        check(std::fabs(uiLayerPercentile(one, 1, 0.95) - 0.25) < 1e-6 &&
+                  uiLayerPercentile(nullptr, 0, 0.5) == 0.0,
+              "one sample is its own percentile; none reads 0");
+        check(std::strcmp(uiRouteStageName(UiRouteStage::kSeed), "depth-stencil seed") == 0 &&
+                  std::strcmp(uiRouteStageName(UiRouteStage::kComposite), "composite") == 0,
+              "the price line's stage names");
     }
     check(with([](UiLayerDrawFacts& g) { g.layerReady = false; }) == UiLayerDecision::kLayerFailed, "no layer");
     // The first failing test is the one reported: the cockpit's HDR draw
@@ -494,6 +593,63 @@ void testGate() {
 
 // What a draw does with its depth-stencil target, from the D3D11 state the
 // DLL reads (ui_layer_shaders.h's translation, ui_layer_math.h's effect).
+// The family rule (ui_layer_math.h's uiLayerFamilyFor, which vscreen.cpp's
+// uiLayerFamilyOf feeds): the 13:23 flight lost the menu panel when the FOV
+// trim, adopted at the main menu, had the game re-create its interface
+// surfaces -- a learned surface is no longer what the panel samples, and the
+// panel stays the menu panel by its shader pair.
+void testFamilyRule() {
+    UiFamilyFacts f;
+    f.targetKind = 2;
+    f.vs = kUiVsPanel;
+    f.ps = 0x9107E72CB016CC02ull;
+    UiFamilyWhy why = UiFamilyWhy::kOther;
+    f.learnedSurface = true;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel && why == UiFamilyWhy::kLearnedSurface,
+          "the menu panel over a learned surface: the menu panel");
+    f.learnedSurface = false;  // the surface the game re-created, not learned yet
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel && why == UiFamilyWhy::kShaderPair,
+          "...over a re-created surface nothing has learned: still the menu panel, by its shader pair");
+    f.ps = 0x219323C8C025AD94ull;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel, "...its variant pixel shader too");
+    f.ps = 0x015EF9349EC097E8ull;  // the same vertex shader drawn after the UI, unclassified
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNoSurface,
+          "the same vertex shader with another pixel shader and no learned surface: not UI, and said why");
+    f.vs = kUiVsLoader;
+    f.ps = 0x85565E9261812E2Full;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kLoader && why == UiFamilyWhy::kShaderPair,
+          "the loading screen by its pair; its gamma pass too");
+    f.ps = 0x8ADB2A81A45E8A4Bull;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kLoader, "...the gamma pass (a multiply)");
+    f.targetKind = 0;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotEyeTarget,
+          "not an eye target: none, whatever the shaders");
+    f.targetKind = 1;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
+          "the lit HDR target: not the composite's");
+    f.vs = kUiVsHolo;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kHolo, "...where the holo panels are named");
+    f.targetKind = 2;
+    f.vs = kUiVsPanel;
+    f.ps = 0x9107E72CB016CC02ull;
+    f.excluded = true;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kExcluded,
+          "the exclude list wins over the pair");
+    f.excluded = false;
+    f.panelSized = true;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kScreen, "the 2D screen's SRV names the 2D screen first");
+    UiFamilyFacts g;
+    g.targetKind = 2;
+    g.vs = kUiVsGuiText;
+    check(uiLayerFamilyFor(g) == UiLayerFamily::kGuiDirect, "a GUI draw straight into the eye");
+    g.vs = 0x1234;
+    g.learnedSurface = true;
+    check(uiLayerFamilyFor(g) == UiLayerFamily::kSurface, "any other learned-surface composite");
+    g.learnedSurface = false;
+    check(uiLayerFamilyFor(g, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kOther,
+          "anything else: none");
+}
+
 void testDepthStencil() {
     D3D11_DEPTH_STENCIL_DESC d{};
     // The menu panel, its escape-menu variant and the loader (census
@@ -1130,6 +1286,83 @@ void testComposite(Gpu& g) {
     check(std::abs(int(mid[at]) - int(one[inside])) <= 1, "a cropped rectangle samples the layer's matching pixels");
 }
 
+// A render-size change with the layer engaged (the 13:23 flight: the FOV
+// trim adopted at the main menu took the door from 3070x3032 to 2458x2824 and
+// the game's eye from 1995x1970 to 1597x1835). The old layer no longer
+// describes the new frame (the stretched frame); the layer re-made for the
+// new door is armed for the first frame after the change, the family's next
+// draw is redirected there, and its composite over the new frame is exact.
+void testSizeChange(Gpu& g) {
+    using namespace uiblend;
+    const uint32_t oldW = 40, oldH = 30;  // the door before
+    const uint32_t newW = 32, newH = 36;  // after: another shape
+    const uint32_t rW = 16, rH = 18;      // the game's eye after, upscaled 2x by the door
+    const float uvFull[4] = {0, 0, 1, 1};
+    const UiLayerSize before = uiLayerSize(oldW, oldH, 1.0f), after = uiLayerSize(newW, newH, 1.0f);
+    check(!uiLayerRegionMatches(newW, newH, uvFull, before.w, before.h) &&
+              uiLayerRegionMatches(newW, newH, uvFull, after.w, after.h),
+          "a size change: the old layer does not describe the new frame (the stretched frame), the "
+          "layer re-made for the new door does");
+    // The first frame after the change: the door ran for the new size at
+    // sequence 10, so a draw of sequence 11 is armed, into the game's new
+    // eye target, which is the region it submits.
+    UiLayerDoorState door;
+    door.doorSeq = 10;
+    door.treatedSeq = 10;
+    door.fullW = newW;
+    door.fullH = newH;
+    UiLayerDrawFacts f;
+    f.family = UiLayerFamily::kPanel;
+    f.eyeTarget = f.ldrView = true;
+    f.eye = 0;
+    f.targetMatchesEye = true;
+    f.late = uiLayerLateFor(door, 11);
+    f.armed = uiLayerArmed(door, 11);
+    f.blend = UiBlendShape::kOver;
+    check(uiLayerDecide(f) == UiLayerDecision::kRedirect,
+          "the menu panel's first draw after the change is redirected (armed by the door's new size)");
+
+    Tex layer = makeTex(g, after.w, after.h, false), frame = makeTex(g, newW, newH, false);
+    Tex direct = makeTex(g, newW, newH, false), out = makeTex(g, newW, newH, true);
+    const float base[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+    g.ctx->ClearRenderTargetView(frame.rtv.Get(), base);
+    g.ctx->ClearRenderTargetView(direct.rtv.Get(), base);
+    g.ctx->ClearRenderTargetView(layer.rtv.Get(), kUiLayerClear);
+    // Edges 0.3 of a layer pixel past a boundary (testRedirect's reason).
+    const float left = 5.3f, right = 21.3f, top = 7.3f, bottom = 27.3f;  // new-frame pixels
+    const float rect[4] = {-1.0f + 2.0f * left / newW, 1.0f - 2.0f * bottom / newH,
+                           -1.0f + 2.0f * right / newW, 1.0f - 2.0f * top / newH};
+    const float colour[4] = {0.9f, 0.3f, 0.1f, 1.0f};
+    UiBlendRt opaque, conv;
+    uiLayerConvertBlend(opaque, &conv);
+    D3D11_BLEND_DESC od = uiLayerBlendDesc(opaque);
+    ComPtr<ID3D11BlendState> os;
+    g.dev->CreateBlendState(&od, &os);
+    const D3D11_VIEWPORT full{0, 0, static_cast<float>(newW), static_cast<float>(newH), 0, 1};
+    quad(g, direct, rect, colour, 0, 0, full, os.Get());
+    // The game draws the panel into its 16x18 eye with this frame's jitter;
+    // the redirect maps its viewport onto the new layer and cancels it.
+    float jx = 0, jy = 0;
+    temporalJitter(3, &jx, &jy);
+    const UiLayerMap m = uiLayerMapFromRegion(0, 0, static_cast<float>(rW), static_cast<float>(rH), after.w, after.h);
+    float cx = 0, cy = 0;
+    uiLayerJitterCancel(jx, jy, m, &cx, &cy);
+    UiViewport gv;
+    gv.w = static_cast<float>(rW);
+    gv.h = static_cast<float>(rH);
+    const UiViewport v = uiLayerMapViewport(m, gv, cx, cy);
+    const D3D11_VIEWPORT vp{v.x, v.y, v.w, v.h, v.minZ, v.maxZ};
+    quad(g, layer, rect, colour, 2.0f * jx / rW, -2.0f * jy / rH, vp, state(g, conv).Get());
+    const uint32_t region[4] = {0, 0, newW, newH};
+    composite(g, frame, region, uvFull, layer, out, 0);
+    const std::vector<uint8_t> got = readBack(g, out), want = readBack(g, direct);
+    int worst = 0;
+    for (size_t i = 0; i < got.size(); i += 4)
+        for (int c = 0; c < 3; ++c) worst = (std::max)(worst, std::abs(int(got[i + c]) - int(want[i + c])));
+    check(worst <= 1, "...and composited over the new frame it is the game's own draw, pixel for pixel "
+                      "(the new size's map and jitter cancel)");
+}
+
 // At 1.25 the composite is the box filter of the layer over each pixel.
 void testDownsample(Gpu& g) {
     using namespace uiblend;
@@ -1460,6 +1693,7 @@ int main(int argc, char** argv) {
     testDepthStencil();
     testFootprint();
     testGate();
+    testFamilyRule();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");
@@ -1470,6 +1704,7 @@ int main(int argc, char** argv) {
         testDownsample(g);
         testSeededStencil(g);
         testWriteBack(g);
+        testSizeChange(g);
     }
     std::printf("ui_quality_test: %u checks, %u failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

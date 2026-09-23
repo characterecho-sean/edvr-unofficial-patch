@@ -182,6 +182,13 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode);
 // Both end with the fix quietly doing nothing.
 void vScreenSetPanelSize(uint32_t width, uint32_t height);
 
+// ...and the size the panel recogniser uses: the one set above, or the
+// stock 1920x1080 until it is. False when vScreen is not installed (then
+// no 2D screen composite is recognised either). For fix.ui_quality's
+// world-screen gate, which asks the depth probe how busy a depth target of
+// exactly this size was.
+bool vScreenPanelSize(uint32_t* width, uint32_t* height);
+
 // Re-read the settings that are documented as changeable while the game runs.
 //
 // Both black_void and panel_distance say so in the README and in edvr.ini, and
