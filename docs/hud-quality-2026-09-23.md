@@ -2,157 +2,348 @@
 
 ## Status
 
-BUILT, NOT FLOWN. `hud_quality_test.exe --self-test` covers the arithmetic;
-no headset session yet.
+BUILT, NOT FLOWN (the ratio-match rewrite; the classifier-match build was
+flown and is superseded, see "Flight 1" below). `hud_quality_test.exe
+--self-test` covers the arithmetic and the ratio state machine; no headset
+session against this build yet.
 
 State: `fix.hud_quality = off | 1.0 | 1.25`, on the Performance page,
 generalises `advanced.surface_inflate` (fss_res.cpp) from a named `WxH` and
-an integer 2..4 to a size learned from the interface-depth pass's own
-classifier (`ui_depth.cpp`, gated on `fix.temporal_aa`) and a float factor
-derived from the game's live HMD Quality. Viewports and (new)
-scissor rects are rescaled at the draw-time backstop; copies/resolves onto a
-tracked surface are detected and logged, not rescaled (see Mechanism).
+an integer 2..4 to a size matched by its RATIO to the game's internal
+render resolution (seeded from a documented census for the interface
+surfaces, so one cockpit session at any HMD Quality is enough; any other
+ratio still needs two sessions at different resolutions to confirm) and a
+float factor derived from the game's live HMD Quality. The classifier
+(`ui_depth.cpp`) is no longer the matcher -- see "Why the rewrite" -- and is
+kept only as a same-session cross-check that labels a match vector/text/icon
+for the log. The internal render resolution itself falls back to the last
+session's reading for the same eye shape when this session has not
+measured one yet (`vScreenInternalResolution()`, `vscreen.cpp`), so the
+cockpit's own panels -- created before the strong measurement's 100+
+eye-shaped-draws-in-one-frame bar is usually cleared -- still get a real
+number to match against.
 
 Open: **gate G9** (`docs/crisp-ui-handoff.md:1017`) -- does inflating a
 surface sharpen its TEXT, or only its vector lines. Never flown for any
-inflation mechanism, named or matched. This ships specifically to run that
-flight with a float factor tied to a real target (HMD Quality 1.0 or 1.25)
-instead of an arbitrary named multiplier.
+inflation mechanism. This ships to run that flight, and now also to name
+the allocating game function (the new RVA log line) in case the answer is
+"build it into the engine instead", the way `vscreen_res.h` already does
+for the on-foot screen.
 
-Next flight: HMD Quality 0.7 or lower, `fix.temporal_aa` on (a UI-swim fix
-is not this doc's subject, but G9 asks to judge text, and DLSS is where the
-text is soft to begin with), `fix.hud_quality = 1.0`. See "What the first
-flight must show" below.
+Ruled out: **the classifier as the primary matcher** (2026-09-23, Flight 1).
+It learns a surface's size from draws INTO it, which happen after
+`CreateTexture2D` -- too late to size the create itself. A panel created
+before any draw into it (every session's first one, and every short
+menu-only session that never revisits a panel) matches nothing through it.
+Kept only as a cross-check counter now.
 
-Ruled out: nothing yet -- unflown.
+Next flight: HMD Quality 0.7 or lower, in the **cockpit** (not the main
+menu -- see Flight 1), `fix.hud_quality = 1.0`. See "What the first flight
+must show". Seeding and the internal-resolution fallback (both 2026-09-23,
+same day, third commit) mean Sean's tenth session, at his usual HMD
+Quality 0.65, should now resize the interface surfaces on its own -- the
+first build of the day needed a second, different-resolution session that
+never came.
+
+## Flight 1 (2026-09-23, build 7a47fd3c, gfx log edvr_gfx_20260923_073156.log
+and edvr_gfx_20260923_073409.log)
+
+Sean toggled `off -> 1.0 -> 1.25` from the F8 menu several times, mostly
+from the **main menu**. `073156.log`: the configure-time line appears at
+every toggle; no `fss res: a WxH texture was created` line and no resize
+line at all that session -- nothing was tracked. `073409.log` (a later,
+longer session): one match, `vector 1346x757 -> 2071x1165` then
+`-> 2588x1456` as the target was re-toggled, via the old classifier path.
+
+Two things follow, both addressed in this build:
+
+- **The classifier-timing flaw** above -- fixed by the ratio match.
+- **Why nothing renders yet at the main menu, under either mechanism.**
+  `vScreenInternalResolution()` (this build's new dependency, `vscreen.h`)
+  answers false until the game has rendered over 100 eye-shaped draws in
+  one frame (`kSceneEyeDraws`, `vscreen.h`) -- ordinary gameplay reaches
+  this in the first loaded frame, but the main menu's own 3D backdrop
+  apparently does not, or not reliably: across the ten `edvr_gfx_2026
+  0923_*.log` (04:23-07:36) flown today, the promotion log line ("vScreen:
+  the world on this rig is rendered at...") never once appears, while it
+  appears in six logs from 2026-08-29 (real play sessions). **A ratio
+  cannot be matched, named or otherwise, before the internal resolution is
+  known** -- this is a lower bar than "the specific panel has been drawn
+  into" (which the classifier needed and the ratio match does not), but it
+  is still a bar, and testing entirely from the main menu does not clear
+  it. `fix.hud_quality` now says so once it is on: "the game's internal
+  render resolution is not known yet".
+
+## Why the rewrite: the classifier could never inform the create it needed to
+
+`ui_depth.cpp`'s classifier (`uiDepthNoteOffscreenDraw`) learns a render
+target's size from a draw that lands in it, and a draw can only land in a
+texture that already exists. `fssResMaybeInflate` runs INSIDE
+`CreateTexture2D`, before the texture exists and before any draw of it is
+possible. So the classifier could only ever help a texture's SECOND
+creation in a session where its first creation was ALSO watched by the
+classifier being on (`fix.temporal_aa`) -- Flight 1 shows this is rare in
+practice, not the edge case it reads as on paper.
+
+fss_res.h's own two-session census is the fix: interface surfaces are a
+fixed fraction of the game's internal render resolution, not of anything
+learned from a draw --
+
+    908x1361 at scene 4340x4284       -> 0.2092 x 0.3177
+    1363x2042 at scene 6510x6426      -> 0.2094 x 0.3178
+
+agreeing to within a few parts in 10000 across two sessions at two
+different resolutions. That fraction is exactly what `CreateTexture2D`
+already carries in its own desc, the moment the game asks -- no draw, no
+classifier, no prior session even required for the FIRST sighting (only
+for using it).
+
+## Seeding, and why a second flight still needed it (2026-09-23, third commit)
+
+Even with the ratio match built, Sean's next flight would still have
+matched nothing: the table starts EMPTY, and his sessions all run HMD
+Quality 0.65 -- with no second, DIFFERENT resolution ever seen, nothing on
+file could reach `kConfirmed`. The two-session proof already exists,
+though -- it is fss_res.h's own census above, already measured, already
+agreeing to four figures. `hudQualityLoadRatios` now seeds the table with
+it (`hudQualitySeedCensusRatio`, averaged to one canonical ratio,
+`kHudQualityCensusRatioW`/`H` = 2093/3178 ten-thousandths) whenever it is
+not already present, marked BOTH `confirmed` and `seeded` -- usable from
+the very first `CreateTexture2D` of the very first session, at any HMD
+Quality, with no local evidence required. The first match against a
+seeded entry logs which one it was ("matched a ratio seeded from the
+2026-09 census... not yet independently confirmed on this rig"), so the
+distinction between "the census's number" and "this rig's own measurement"
+stays visible in the log. Any OTHER ratio -- a holo panel, a menu screen,
+anything not in the census -- gets no such head start and still needs two
+different-resolution sessions, exactly as before.
+
+The internal resolution itself has the matching problem one level up: the
+strong measurement needs over 100 eye-shaped draws in one frame
+(`kSceneEyeDraws`), and the cockpit's own interface panels can be created
+in the first few frames, before that bar is cleared. `vScreenInternalResolution()`
+now falls back to the last SESSION's measurement for the same eye shape
+(a new small state file, `vscreen_internal_res.txt` next to the logs, the
+same raw-WinAPI discipline as `vscreen_auto_state.cpp`'s own file) when
+this session has not measured one yet, logged once
+("...using WxH, the last session's measurement for this eye shape...").
+The eye-shape check is the fallback's "same headset" test: a resolution
+measured on a different headset must not be handed to this session's ratio
+match. Superseded automatically the moment the real measurement lands
+later in the same session (and that value is then saved for the NEXT
+session's own fallback).
 
 ## The mechanism
 
-`fss_res.cpp` already creates a named surface N times larger at
-`CreateTexture2D` and rescales the game's viewport to match
-(`advanced.surface_inflate`, integers 2..4, `fss_res.cpp:114`). This adds a
-second way to reach the same code path:
-
-1. **Which surfaces.** The interface-depth pass's classifier (`ui_depth.cpp`,
-   gated on `fix.temporal_aa` -- there is no separate `fix.ui_depth` key;
-   `config_test.cpp` asserts it stays absent) already learns, for its own
-   purpose (giving UI draws depth under temporal AA),
-   every render target a draw with vertex shader `666EF0C4C616F67E`
-   (vector), `1012E00B3CB44469` (text) or `A3E5D3FCBC1165F8` (icons) lands
-   in. `uiDepthLearnedSurfaceSizes()` (`ui_depth.h`) exposes that table's
-   sizes (excluding the scanner's own chrome strip, a different shape
-   learned at a second call site) to `fss_res.cpp`, so `fix.hud_quality`
-   recognises the same three interface shaders without re-deriving the
-   classifier. This is a real coupling: if `fix.temporal_aa` has never been
-   on this session, the table is empty and nothing matches. The "on
-   but no interface surface matched" log line covers both causes (the
-   classifier saw nothing, or saw sizes that never matched) without trying
-   to tell them apart.
-2. **The factor.** `deviceHookHmdQuality()` reads the game's own
-   `HMDRenderTargetMultiplier` from its newest `.fxcfg` (cached one second
-   per thread). `factor = target / thatMultiplier`, applied only when it
-   exceeds 1.0 by more than 1%, capped at 4 (the same ceiling
-   `advanced.surface_inflate` uses, for the same reason). Unknown
-   multiplier (no fxcfg, or no usable value in it) -- logged once, nothing
-   changes. Read fresh at each candidate `CreateTexture2D`, not cached at
-   ini-reload, because HMD Quality can change from Elite's own graphics
-   menu without touching `edvr.ini`.
-3. **Why the factor was integer-only, and what fractional needs.** The
-   parser (`strtoul`) and the stored type (`uint32_t`) both refused a
-   decimal point; the viewport paths already multiplied by a
-   `static_cast<float>` of that integer, so the arithmetic was already
-   float-shaped underneath. The change: `Spec::scale` and `Tracked::scale`
-   are now `float`; a texture's Width/Height (which must land on an exact
-   pixel count) round with `hudQualityRoundDim` (`v*factor + 0.5f`,
-   truncate); viewport coordinates stay float and need no rounding, D3D11
-   accepts them as given. `advanced.surface_inflate` itself still only
-   accepts integers 2..4 -- its parser is unchanged on purpose, a hand-typed
-   developer instrument keeping its own syntax -- it just now shares the
-   float-capable storage and multiply code underneath.
-4. **Viewports and scissors.** The existing `RSSetViewports` hook and its
-   draw-time backstop (`fssResScaleDrawViewport`, `vscreen.cpp`) now
-   multiply by a float rather than an integer scale, and take the target
-   resource so a match-mode rescale can be counted separately. Scissor rects
-   have no equivalent set-time hook -- nothing needed one before this -- so
-   the draw-time backstop is their ONLY mechanism: it reads the current
-   rasterizer state and scissor rect via `RSGetState`/`RSGetScissorRects`
-   (no hook needed to call the GET side) and rescales only a rect that still
-   spans the pre-inflation target exactly, leaving a genuinely narrower
-   (clipping) scissor rect untouched rather than guessing at it.
-5. **Copies and resolves.** `hookedCopyResource`, `hookedCopySubresourceRegion`
-   and `hookedResolveSubresource` (already-existing hooks, used by several
-   other features) now also call `fssResNoteCopyMaybeMismatched`, which logs
-   (capped, 8 times) when either side of a copy is a tracked/inflated
-   texture. **This does not rescale the copy** -- no such copy has ever been
-   observed landing in one of these surfaces (the FSS body layer's own
-   census found none either, `fss_res.h:46-49`), and box math for a shape
-   nobody has seen would be a fix built on an untested hypothesis
-   (AGENTS.md's own rule). It is a detector: the first flight's log says
-   whether this ever happens at all, and if so, exactly what shape.
+1. **The ratio table.** `hud_quality_math.h`'s `HudQualityRatioSlot` /
+   `hudQualityRatioObserve` is a small, pure (no file I/O, no D3D11) state
+   machine: given a candidate's ratio (rounded to four significant
+   figures, `hudQualityRatioX10000`) and the internal width it was seen
+   at, it returns `kNewCandidate` (not seen before -- recorded, not used),
+   `kSameSession` (matches an unconfirmed entry, but at an internal width
+   already on file -- no new evidence), or `kConfirmed` (matches at a
+   DIFFERENT internal width than it was last seen at -- usable from this
+   call on). `fss_res.cpp` owns the table (16 slots) and persists it to
+   `<log dir>\hud_quality_ratios.txt` (the same raw-WinAPI-I/O discipline
+   as `vscreen_auto_state.cpp`'s `vscreen_auto_eye_width.txt`), loaded
+   lazily on the first candidate create. **A ratio is trusted only once
+   two DIFFERENT sessions' resolutions have agreed on it** -- a fresh
+   install's first-ever sighting of a shape is recorded and logged "seen,
+   not resized", never guessed into an inflate.
+2. **Which surfaces are candidates.** At each `CreateTexture2D`, a
+   single-mip, non-MSAA, render-target-or-depth desc (shared with the
+   other two matchers) that is also smaller than the internal resolution
+   and non-power-of-two on both axes (fss_res.h: "an odd, non-power-of-two
+   render target") is offered to the ratio table. `vScreenInternalResolution()`
+   (new, `vscreen.h`/`.cpp`) publishes `vscreen.cpp`'s own `renderW`/`renderH`
+   -- the MEASURED (not guessed) internal per-eye render resolution
+   already used to decide `vScreenIsEyeSized` -- false before it has been
+   measured (Flight 1, above).
+3. **The classifier, now a cross-check only.** Once a candidate is
+   confirmed and about to be inflated, `uiDepthLearnedSurfaceSizes()`
+   (`ui_depth.h`) is asked whether it already knows a surface of this
+   exact (pre-inflate) size this session; if so, its family ('V'/'T'/'I')
+   labels the log line. If not (the common case at the moment of a FIRST
+   confirmation, or whenever `fix.temporal_aa` is off), the match still
+   happens -- it is logged as "other", not blocked.
+4. **The factor.** Unchanged from the first build: `deviceHookHmdQuality()`
+   reads Elite's own `HMDRenderTargetMultiplier` from its newest `.fxcfg`
+   (cached one second per thread); `factor = target / that`, applied only
+   above a 1% floor, capped at 4. Read fresh at each candidate create, not
+   cached at ini-reload.
+5. **Why the factor was integer-only, and what fractional needs.**
+   Unchanged: `Spec::scale`/`Tracked::scale` are `float` now so the SAME
+   viewport/texture-size code serves both matchers; `advanced.surface_inflate`
+   keeps its own integer-only syntax on purpose. A texture's Width/Height
+   round with `hudQualityRoundDim` (`v*factor + 0.5f`); viewport
+   coordinates are native float and need no rounding.
+6. **Viewports and scissors.** Unchanged: the `RSSetViewports` hook and its
+   draw-time backstop multiply by the tracked float scale; scissor rects,
+   which have no set-time hook at all, are corrected only at the draw-time
+   backstop, and only when the current rect still spans the pre-inflation
+   target exactly (a genuinely narrower, clipping rect is left alone).
+7. **Copies and resolves.** Unchanged: detected and logged, not rescaled
+   -- no such copy has ever been observed landing in one of these
+   surfaces, and box math for an unseen shape would be an untested-hypothesis
+   fix.
+8. **The RVA instrument (new).** Sean asked whether the size could be
+   patched in the engine instead of intercepted after the fact, the way
+   `vscreen_res.h` already rewrites the numbers the game forces for the
+   on-foot screen. The moment a surface is confirmed and about to be
+   inflated, `captureGameCallStack()` (`common/game_call_probe.h`, already
+   used by the exit probe and the object-classification probe -- reused
+   here, not rebuilt) captures the return-address chain and filters it to
+   frames inside the game's own module; the first four are logged once per
+   distinct surface SIZE per session, gated on the key being on. This
+   names the allocating call for a human to decompile toward a
+   `vscreen_res.h`-style engine patch, which would size the game's own
+   viewports/scissors/copies itself rather than needing any of the above.
 
 ## Log lines
 
-At the first surface resized, and every 30s after:
+At the first surface resized, and every 30s after while something has
+matched:
 
-    hud quality: 1.0 (HMD Quality 0.70 -> factor 1.4286): interface
-    surfaces resized 3 (vector 908x1361 -> 1297x1944, text 512x724 ->
-    731x1034, icon 256x256 -> 366x366), viewports rescaled 42, scissors
+    hud quality: 1.0 (HMD Quality 0.65 -> factor 1.5385): cockpit panels
+    resized 1 (vector 1346x757 -> 2071x1165, text none yet, icon none yet),
+    FSS 0, other 0, seen not resized 2, viewports rescaled 6, scissors
     rescaled 0, copies touching one: 0.
 
-A family not yet resized reads "vector none yet" rather than being omitted,
-so the line always names all three. If the key is on and nothing has
-matched after a minute:
+"FSS" counts the existing half-eye matcher's own hits while the key is on
+(a different code path; fix.hud_quality never causes them, but a flight
+with the scanner open alongside the key wants one total picture). "other"
+is a ratio match the classifier has not labelled vector/text/icon --
+common, since the classifier depends on `fix.temporal_aa` and the ratio
+match does not. "seen not resized" is the count of distinct candidate
+ratios on file that are not yet confirmed at a second, different internal
+resolution.
 
-    hud quality: on but no interface surface matched (the classifier saw
-    none / the sizes did not match the learned fraction): nothing changed.
+If the key is on and nothing has matched after a minute:
+
+    hud quality: on but nothing has matched by ratio yet (2 candidate
+    ratio(s) seen, none confirmed at a second, different internal
+    resolution -- an earlier session's data counts, so this is common only
+    on a fresh install or one that has always run the same HMD Quality):
+    nothing changed.
+
+A candidate seen but not yet confirmable, capped at 8 lines:
+
+    hud quality: seen, not resized -- a 1346x757 candidate's ratio to the
+    internal render resolution is on file but not yet confirmed at a
+    second, different resolution. Said at most 8 times.
+
+The first match against a seeded (not locally measured) ratio, once per
+slot per session:
+
+    hud quality: 908x1361 matched a ratio seeded from the 2026-09 census
+    (fss_res.h's own two-session measurement: 908x1361 at scene 4340x4284,
+    1363x2042 at 6510x6426) -- not yet independently confirmed on this
+    rig, inflating from this session's first sighting rather than waiting
+    for a second.
+
+The internal-resolution fallback, once per session:
+
+    vScreen: the internal render resolution has not been measured this
+    session yet (needs over 100 eye-shaped draws in one frame); using
+    1995x1970, the last session's measurement for this eye shape
+    (1995x1970), until the real one lands. fix.hud_quality's ratio match
+    is what asked. Said once.
+
+The RVA instrument, once per distinct size per session:
+
+    hud quality: interface surface 1346x757 (vector) created from game
+    RVAs 0x2A1F3C0/0x2A1E8B0/0x2A1D440/0x2A15E20 (4 of 12 captured frames
+    were in the game module).
 
 Distinguishing "the new code never ran" from "it ran and did nothing": the
-configure-time line ("hud quality: 1.0. The cockpit's vector...") fires the
-moment the key is read, whether or not anything ever matches; the two lines
-above are the only ones gated on the feature actually doing something, and
-between them cover both "never even tried" (wrong build, key not read) and
-"tried, matched nothing" (classifier empty or sizes disagree).
+configure-time line fires the moment the key is read, whether or not
+anything ever matches. "internal render resolution is not known yet" (once)
+means the game never rendered a real scene this session -- test from the
+cockpit, not the main menu (Flight 1). "seen, not resized" means a
+candidate exists but is unconfirmed. The resize/summary line is the only
+one that means the feature acted.
 
 ## What the first flight must show
 
-HMD Quality 0.7 or lower (Elite's own graphics options, not an EDVR
-setting), `fix.temporal_aa` on, `fix.hud_quality = 1.0`:
+HMD Quality 0.7 or lower (Elite's own graphics options), `fix.hud_quality
+= 1.0`, **flown from inside the cockpit or another real rendered scene**,
+not only from the main menu (Flight 1's session never measured an internal
+resolution at all):
 
-1. The resize line above, naming all three surfaces -- vector, text and
-   icon all matched and resized. If any reads "none yet" after opening the
-   cockpit and visiting a panel that draws it, that family's classifier
-   never saw it this session (check `fix.temporal_aa` is on).
+1. The resize line, naming at least one surface -- expected on the FIRST
+   session now, since the interface surfaces' own ratio is seeded (see
+   "Seeding" above); no second session should be needed for those three.
+   "seen not resized" > 0 alongside it is fine -- some OTHER surface's
+   ratio, not yet in the census, still needs its own second session to
+   confirm.
 2. The HUD text judged in the headset, at `off`, `1.0` and `1.25` in turn
-   (a menu trip between each, since the surfaces only resize at the next
+   (a menu trip between each, since surfaces only resize at their next
    creation) -- sharper or not. This is gate G9 itself: inflation has been
    measured reaching vector lines (the widget shader draws in a normalised
    space, so more pixels is more detail by construction); the glyph text
    samples a 2048x2048 A8 atlas whose own lifetime under inflation is
-   unmeasured, and no inflation flight -- named or matched -- has ever been
-   judged on the letters before this one.
+   unmeasured, and no inflation flight has ever been judged on the letters
+   before this one.
 3. Frame time unchanged (the target-indicator arc's own inflation flights
-   measured no cost; a fixed-size surface a few hundred pixels larger is
-   not where a frame budget goes).
-4. **If the text is not sharper**, gate G9 fails and the lever beyond
-   inflation is Design A in `docs/crisp-ui-handoff.md` (the UI-layer
-   redirect, `## A5`) -- the extra texels this mechanism creates do not
-   survive the render-resolution composite before EDVR's own upscale, and
-   no factor or cap here changes that. This build does not attempt Design A;
-   it is parked, per that doc's own status.
+   measured no cost).
+4. The RVA line for whatever resized, for the record -- it does not need
+   judging in the headset, only capturing.
+5. **If the text is not sharper**, gate G9 fails and the lever beyond
+   inflation is Design A in `docs/crisp-ui-handoff.md` (`## A5`) -- the
+   extra texels this mechanism creates do not survive the render-resolution
+   composite before EDVR's own upscale. Design A composites at OUTPUT
+   resolution, but the panel TEXTURES it samples are still rendered at
+   scene resolution -- so the cockpit text most likely needs BOTH this
+   inflation and Design A's layer, not either alone; the two keys are
+   meant to unify once both have flown (`fix.hud_quality` driving the
+   inflation target when set). This build does not attempt Design A.
 
-**Do not judge on the target direction indicator.** The
-target-indicator-hunt arc (`docs/edvr-target-indicator-hunt.md` in memory;
-see also `crisp-ui-handoff.md:875-879`) already ruled that artefact's sprite
-is laid out at a fixed pixel size inside its surface and does not sharpen
-however big the surface is -- it is the wrong instrument for this question,
-however tempting to glance at since it is the easiest thing to find in the
-headset.
+**Do not judge on the target direction indicator.** The target-indicator-
+hunt arc already ruled that artefact's sprite is laid out at a fixed pixel
+size inside its surface and does not sharpen however big the surface is.
 
 ## Contract
 
-`fix.hud_quality` documented in `edvr.ini` under `[fix]` with a `# ui:` line
-(Performance page, matching `fix.settlement_detail`'s precedent); read in
-`fss_res.cpp`; asserted in `tools/config_test/config_test.cpp`. Contract
-count +1 (one key, read and documented). `hud_quality_test.exe --self-test`
-is a new rig in `build.bat`'s gate (auto-discovered by
-`tools/run_jobs.py`'s `:rig_<label>` scan, the same as every other rig).
+`fix.hud_quality` documented in `edvr.ini` under `[fix]` with a `# ui:`
+line (Performance page, matching `fix.settlement_detail`'s precedent);
+read in `fss_res.cpp`; asserted in `tools/config_test/config_test.cpp`.
+Contract count +1 over pre-hud_quality (one key, read and documented; 261
+read / 261 documented with this build). `hud_quality_test.exe --self-test`
+covers the parsing, the factor arithmetic, the rounding, the ratio state
+machine (new-candidate / same-session / confirmed / table-full, and the
+founding two-session census numbers themselves), and the seeding rig
+(a fresh table matches the seeded ratio at a new internal resolution on
+the first call; seeding twice is idempotent; an unseeded ratio in the same
+table still needs two different-resolution sessions); auto-discovered by
+`tools/run_jobs.py`'s `:rig_<label>` scan in `build.bat`'s gate.
+
+## Doubt, stated plainly
+
+- The ratio table's tolerance (10 ten-thousandths, 0.1%) is chosen from
+  ONE documented two-session comparison (fss_res.h's own census); it is
+  not independently re-derived from today's flight, since today's flight
+  never logged an internal resolution to pair with a panel size.
+- `vScreenInternalResolution()` uses the STRONG promotion
+  (`renderW`/`renderH`, eye-shape-corroborated) rather than the weaker
+  "busiest render target" one (`sceneW`/`sceneH` alone) that fires more
+  often but is not guaranteed to be one undistorted eye's worth of scene
+  -- chosen for correctness over availability; the cross-session fallback
+  (this commit) covers most of the gap this left, and the log says
+  plainly when the fallback itself has nothing to offer either.
+- The seeded ratio is ONE canonical value (the two census readings
+  averaged), not three separate per-family entries -- the census itself
+  measured "three surfaces agreeing" on one fraction, so one seed serves
+  vector, text and icon alike; a family whose real ratio turns out to
+  differ from the seed would still need its own two-session confirmation,
+  same as any other unseeded shape.
+- The internal-resolution fallback is keyed to eye SHAPE (width and height
+  within `near2`, 2 pixels), not to a headset name -- two different
+  headsets that happen to submit the same eye size would be treated as
+  "the same" by this check. Judged an acceptable, rare edge case rather
+  than plumbing a headset identity string through for it.
+- The inventory of every offscreen UI surface (shader family, ratio,
+  what it shows) is in `docs/crisp-ui-handoff.md`'s "Offscreen UI surface
+  inventory" section, written for the Design A build; only the vector/
+  text/icon family has size evidence from more than one shape in this
+  session's own captures, and none of it pairs with a logged internal
+  resolution (see that section's own caveats).

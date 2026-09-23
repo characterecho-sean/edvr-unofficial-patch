@@ -104,6 +104,20 @@ inline bool eyeShapedAtScale(uint32_t w, uint32_t h, uint32_t eyeW, uint32_t eye
 // is the same "disable yourself" answer those two already acted on.
 bool vScreenIsEyeSized(uint32_t w, uint32_t h);
 
+// The game's own INTERNAL per-eye render resolution (renderW/renderH: what
+// advanced.eye_render_size pins, or what the scene-candidate promotion
+// measured), as distinct from the eye texture size the runtime is handed --
+// fix.hud_quality's ratio match needs this one, because fss_res.h's own
+// census found the interface surfaces are a fixed fraction of THIS number,
+// not of the submitted eye texture. Falls back to the last SESSION's
+// measurement for the same eye shape (a small state file next to the
+// logs) when this session has not measured one yet -- the cockpit's own
+// panels can be created before the 100+ eye-shaped draws in one frame the
+// live measurement needs -- logged once when the fallback is used. False,
+// both outputs 0, only when neither this session nor a prior one (for
+// this eye shape) has an answer -- callers must not guess a size then.
+bool vScreenInternalResolution(uint32_t* width, uint32_t* height);
+
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and
 // puts the game's bindings back before anything else looks (ui_depth binds

@@ -122,17 +122,22 @@ bool fssResWantsCreates();
 bool fssResWantsMatch();
 
 // The match: if *d is the half-eye body-layer shape, a size named by
-// advanced.surface_inflate, or (fix.hud_quality) a size fss_res's own
-// classifier learned this session, multiply its Width and Height in place
-// and return true; the caller creates with the modified desc and reports
-// the texture back through fssResNoteCreated. *scaleOut is the EXACT float
-// factor applied -- read it back from here rather than dividing the two
-// descs' widths, which rounds to the wrong answer for a fractional factor
+// advanced.surface_inflate, or (fix.hud_quality) a shape whose RATIO to the
+// game's internal render resolution matches one already confirmed across
+// two sessions at different resolutions, multiply its Width and Height in
+// place and return true; the caller creates with the modified desc and
+// reports the texture back through fssResNoteCreated. The ratio match does
+// NOT depend on ui_depth.cpp's classifier -- that learns a surface's size
+// from draws INTO it, which happen after this call, too late to inform it
+// -- the classifier is consulted only afterward, as a cross-check, to
+// LABEL a match's family for the log. *scaleOut is the EXACT float factor
+// applied -- read it back from here rather than dividing the two descs'
+// widths, which rounds to the wrong answer for a fractional factor
 // (1297/908 truncates to 1 under integer division). *sourceOut says which
-// matcher fired, and *familyOut ('V'/'T'/'I') is set only when *sourceOut
-// is kMatch, for the resize summary's per-family line. All three out-params
-// may be null when the caller does not need them. false leaves *d and every
-// out-param untouched.
+// matcher fired, and *familyOut ('V'/'T'/'I', or 0 for "other, unlabelled")
+// is set only when *sourceOut is kMatch, for the resize summary's
+// per-family line. All three out-params may be null when the caller does
+// not need them. false leaves *d and every out-param untouched.
 bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
                         float* scaleOut, InflateSource* sourceOut,
                         char* familyOut);

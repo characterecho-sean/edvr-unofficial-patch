@@ -891,6 +891,10 @@ struct State {
     bool     renderAuto = true;        // advanced.eye_render_size
     bool     renderOffNoted = false;
     bool     renderPinned = false;   // the size came from the ini, not a measurement
+    // vScreenInternalResolution's fallback (fix.hud_quality): said once per
+    // session, the first time renderW/renderH are not known yet and a
+    // prior session's measurement for this eye shape stands in.
+    bool     internalResFallbackNoted = false;
     bool     renderBadNoted = false;
 
     // Render targets that were looked at and NOT counted, and how many times
@@ -5110,6 +5114,111 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     if (!s || !w || !h) return false;
     if (s->eyeW && near2(w, s->eyeW) && near2(h, s->eyeH)) return true;
     if (s->renderW && near2(w, s->renderW) && near2(h, s->renderH)) return true;
+    return false;
+}
+
+// fix.hud_quality's fallback for a candidate created before the strong
+// promotion has measured anything this session (the cockpit's own panels
+// can be created in the first few frames, well before the 100+ eye-shaped
+// draws in one frame that promotion needs -- see docs/hud-quality-2026-09-23.md).
+// A small state file in the log directory, the same raw-WinAPI-I/O
+// discipline as vscreen_auto_state.cpp's (a DIFFERENT module, deliberately
+// free of anything vscreen-specific so it links into minimal test rigs --
+// this one is vscreen-specific on purpose, so it stays local here instead).
+// Format: "eyeW eyeH internalW internalH", one line. The eye shape is the
+// fallback's "same headset" test: a resolution measured on a different
+// headset must not be handed to this session's ratio match.
+namespace {
+constexpr wchar_t kInternalResStateFile[] = L"vscreen_internal_res.txt";
+
+std::wstring internalResStatePath(const std::wstring& logDir) {
+    return logDir + L"\\" + kInternalResStateFile;
+}
+
+bool lastKnownInternalResolutionFor(const std::wstring& logDir, uint32_t eyeW, uint32_t eyeH,
+                                    uint32_t* outW, uint32_t* outH) {
+    if (outW) *outW = 0;
+    if (outH) *outH = 0;
+    if (logDir.empty() || !eyeW || !eyeH) return false;
+    HANDLE f = CreateFileW(internalResStatePath(logDir).c_str(), GENERIC_READ, FILE_SHARE_READ,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    char buf[64] = {};
+    DWORD got = 0;
+    const BOOL ok = ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr);
+    CloseHandle(f);
+    if (!ok || !got) return false;
+    buf[got] = '\0';
+    char* p = buf;
+    const unsigned long fEyeW = strtoul(p, &p, 10);
+    const unsigned long fEyeH = strtoul(p, &p, 10);
+    const unsigned long fW = strtoul(p, &p, 10);
+    const unsigned long fH = strtoul(p, &p, 10);
+    if (!fEyeW || !fEyeH || fW < 100 || fH < 100) return false;
+    if (!near2(eyeW, static_cast<uint32_t>(fEyeW)) || !near2(eyeH, static_cast<uint32_t>(fEyeH))) {
+        return false;   // a different headset's (or a stale) measurement
+    }
+    if (outW) *outW = static_cast<uint32_t>(fW);
+    if (outH) *outH = static_cast<uint32_t>(fH);
+    return true;
+}
+
+void noteResolvedInternalResolutionFor(const std::wstring& logDir, uint32_t eyeW, uint32_t eyeH,
+                                       uint32_t internalW, uint32_t internalH) {
+    if (logDir.empty() || !eyeW || !eyeH || !internalW || !internalH) return;
+    CreateDirectoryW(logDir.c_str(), nullptr);
+    HANDLE f = CreateFileW(internalResStatePath(logDir).c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    char text[64];
+    const int n = snprintf(text, sizeof(text), "%u %u %u %u\n", eyeW, eyeH, internalW, internalH);
+    DWORD written = 0;
+    if (n > 0) WriteFile(f, text, static_cast<DWORD>(n), &written, nullptr);
+    CloseHandle(f);
+}
+}  // namespace
+
+bool vScreenInternalResolution(uint32_t* width, uint32_t* height) {
+    if (width) *width = 0;
+    if (height) *height = 0;
+    State* s = g_state;
+    if (!s) return false;
+    if (s->renderW && s->renderH) {
+        if (width) *width = s->renderW;
+        if (height) *height = s->renderH;
+        // Kept fresh for a FUTURE session's fallback below.
+        if (s->eyeW && s->eyeH) {
+            noteResolvedInternalResolutionFor(Config::get().logDir(), s->eyeW, s->eyeH,
+                                              s->renderW, s->renderH);
+        }
+        return true;
+    }
+    // Not measured yet this session: the strong promotion needs over 100
+    // eye-shaped draws in one frame (kSceneEyeDraws), and the cockpit's own
+    // interface panels can be created before that many have landed. Answer
+    // with the last session's measurement for the SAME eye shape rather
+    // than false, so a candidate created this early still gets a real
+    // number instead of being refused for however many frames the
+    // promotion takes to catch up -- said once, and superseded the moment
+    // the real measurement lands (the branch above then answers instead).
+    if (s->eyeW && s->eyeH) {
+        uint32_t fw = 0, fh = 0;
+        if (lastKnownInternalResolutionFor(Config::get().logDir(), s->eyeW, s->eyeH, &fw, &fh)) {
+            if (width) *width = fw;
+            if (height) *height = fh;
+            if (!s->internalResFallbackNoted) {
+                s->internalResFallbackNoted = true;
+                Log::get().note(
+                    "vScreen: the internal render resolution has not been measured "
+                    "this session yet (needs over 100 eye-shaped draws in one frame); "
+                    "using %ux%u, the last session's measurement for this eye shape "
+                    "(%ux%u), until the real one lands. fix.hud_quality's ratio match "
+                    "is what asked. Said once.",
+                    fw, fh, s->eyeW, s->eyeH);
+            }
+            return true;
+        }
+    }
     return false;
 }
 

@@ -11,11 +11,13 @@
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"   // eyeTextureSize: the published per-eye size
+#include "../common/game_call_probe.h"  // captureGameCallStack: the RVA instrument
 #include "../common/log.h"
 #include "../common/timing.h"       // nowMs/stampMs/elapsedMs/dueMs
 #include "device_hook.h"            // deviceHookHmdQuality
 #include "hud_quality_math.h"
-#include "ui_depth.h"                // uiDepthLearnedSurfaceSizes
+#include "ui_depth.h"                // uiDepthLearnedSurfaceSizes: the cross-check counter
+#include "vscreen.h"                 // vScreenInternalResolution
 
 namespace edvr {
 
@@ -42,10 +44,14 @@ namespace {
 // STILL BOUND. Its viewport then stops being scaled while its target stays
 // inflated, so that panel draws into a corner of itself -- a loud failure,
 // but one that costs a flight to diagnose. The array is pointers and two
-// sizes; there is no reason to be thrifty with it. fix.hud_quality's match
-// mode adds at most three learned panels (vector/text/icon) and their depth
-// partners -- six more -- so the ring is still comfortably under 32 with
-// every matcher running at once.
+// sizes; there is no reason to be thrifty with it. fix.hud_quality's ratio
+// match can in principle confirm and inflate more distinct surfaces than
+// the classifier-based design this replaced (its own table holds up to
+// kRatioSlots, 16, candidate ratios; every CONFIRMED one that is actually
+// created, plus its depth partner, is two more entries here) -- a cockpit
+// census has only ever shown a handful in one session, so 32 is headroom
+// today, not a proven ceiling; if a flight ever fills this ring while the
+// key is on, that is the number to raise.
 constexpr uint32_t kTracked = 32;
 
 // The game asks for eye/2 per axis. Halving an odd size floors or ceils
@@ -71,11 +77,32 @@ constexpr uint32_t kSpecs = 4;
 constexpr uint32_t kMaxDim = 16384;
 
 // How many of ui_depth's learned interface-surface sizes fix.hud_quality
-// asks for on each candidate create. The ring behind them holds 64 total
-// (chrome included); a cockpit census has only ever shown a handful of
-// distinct vector/text/icon panels in one session, so this is headroom, not
-// a tight fit.
+// asks for on each match, now used only to LABEL a ratio-matched surface's
+// family for the log (vector/text/icon) when the classifier happens to
+// have already learned it -- the cross-check counter, not the gate. The
+// ring behind them holds 64 total (chrome included); a cockpit census has
+// only ever shown a handful of distinct vector/text/icon panels in one
+// session, so this is headroom, not a tight fit.
 constexpr uint32_t kHqLearnMax = 16;
+
+// The ratio table: how many distinct (width, height) fractions of the
+// internal render resolution fix.hud_quality tracks across sessions at
+// once. Generous headroom over the handful of interface surfaces a cockpit
+// census has ever shown in one frame.
+constexpr uint32_t kRatioSlots = 16;
+
+// Two independent roundings of the same real fraction, taken at different
+// pixel counts, do not land on the same four-significant-figure value
+// exactly -- fss_res.h's own two-session census differed by a few parts in
+// 10000 on the width ratio. Ten (0.1%) accepts that noise without being
+// loose enough to conflate two genuinely different panels.
+constexpr uint32_t kRatioToleranceX10000 = 10;
+
+// At most this many distinct interface-surface sizes get their creating
+// call's RVA chain logged in one session -- the instrument exists to name
+// the game's allocating function for a human to decompile, not to grow
+// without bound in a session with many small panels.
+constexpr uint32_t kRvaLogMax = 8;
 
 struct Spec {
     uint32_t w = 0;
@@ -122,16 +149,140 @@ struct HudQualityStats {
     uint64_t         firstActiveMs = 0;   // stampMs() the first tick saw the key on
     bool             saidNoMatch = false;
     uint64_t         lastSummaryMs = 0;
-    uint32_t         resizedCount = 0;
+    uint32_t         resizedCount = 0;    // cockpit-labelled (vector/text/icon) total
     HudFamilyRecord  vec, text, icon;
+    uint32_t         fssResized = 0;      // the FSS/DSS half-eye matcher, while the key is on
+    uint32_t         otherResized = 0;    // ratio-matched, not classifier-labelled this session
     uint32_t         viewportsRescaled = 0;
     uint32_t         scissorsRescaled = 0;
     uint32_t         copiesSeen = 0;
     float            lastMult = 0.0f;
     float            lastFactor = 0.0f;
     bool             unknownMultNoted = false;
+    bool             unknownInternalResNoted = false;
+    uint32_t         seenNotResizedNotes = 0;   // capped "seen, not resized" lines
+    uint32_t         rvaLoggedCount = 0;        // distinct sizes RVA-logged so far (kRvaLogMax cap)
+    uint32_t         rvaLoggedW[kRvaLogMax] = {};
+    uint32_t         rvaLoggedH[kRvaLogMax] = {};
+    // Session-only (never persisted): has slot i's seeded-ratio use already
+    // been announced this session? Indexed by g_ratioTable slot index,
+    // which is stable once assigned (the table only grows).
+    bool             seededAnnounced[kRatioSlots] = {};
 };
 HudQualityStats g_hq;
+
+// The cross-session ratio table (hud_quality_math.h's pure state machine)
+// plus its file, and whether this process has loaded it yet. Loaded lazily
+// on the first candidate create rather than at configure time, so a
+// session that never turns the key on never touches disk for it.
+struct RatioTableState {
+    HudQualityRatioSlot slots[kRatioSlots];
+    uint32_t            count = 0;
+    bool                loaded = false;
+};
+RatioTableState g_ratioTable;
+
+constexpr wchar_t kRatioStateFile[] = L"hud_quality_ratios.txt";
+
+std::wstring ratioStatePath(const std::wstring& logDir) {
+    return logDir + L"\\" + kRatioStateFile;
+}
+
+void hudQualitySaveRatios();   // forward: hudQualityLoadRatios persists a newly-added seed
+
+// Same discipline as vscreen_auto_state.cpp's lastKnownEyeWidth/
+// noteResolvedEyeWidthForVScreenAuto: raw WinAPI file I/O, no exceptions,
+// a corrupt or hand-edited file is ignored a line at a time rather than
+// trusted or treated as fatal. Format: a count line, then one line per
+// slot of "ratioW ratioH lastInternalW confirmed seeded" (space-separated
+// integers; confirmed and seeded are 0 or 1). lastInternalW of 0 is valid
+// for a seeded entry that has not been used by any session yet.
+//
+// Ends by seeding fss_res.h's own documented census ratio
+// (hudQualitySeedCensusRatio) if it is not already present, so the table
+// is always ready to match the interface surfaces from the very first
+// CreateTexture2D of a session -- a fresh install (no file at all) still
+// gets the seed, not just an ordinary re-load of an existing one.
+void hudQualityLoadRatios() {
+    g_ratioTable.count = 0;
+    g_ratioTable.loaded = true;
+    const std::wstring& logDir = Config::get().logDir();
+    // A file to read is optional below (a fresh install has none); reaching
+    // the seed step either way is what matters, so parsing just skips
+    // itself rather than returning early.
+    HANDLE f = logDir.empty()
+                  ? INVALID_HANDLE_VALUE
+                  : CreateFileW(ratioStatePath(logDir).c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE) {
+        char buf[2048] = {};
+        DWORD got = 0;
+        const BOOL ok = ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr);
+        CloseHandle(f);
+        if (ok && got) {
+            buf[got] = '\0';
+            char* p = buf;
+            // First line: a declared count, read but not trusted past
+            // kRatioSlots or past what the rest of the file actually holds.
+            strtoul(p, &p, 10);
+            while (*p && g_ratioTable.count < kRatioSlots) {
+                while (*p == '\r' || *p == '\n') ++p;
+                if (!*p) break;
+                char* end = nullptr;
+                const unsigned long rw = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                const unsigned long rh = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                const unsigned long lastW = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                const unsigned long conf = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                const unsigned long seeded = strtoul(p, &end, 10);
+                if (end == p) break;
+                p = end;
+                if (rw == 0 || rh == 0 || rw > 10000 || rh > 10000 ||
+                    (lastW != 0 && lastW < 100)) {
+                    while (*p && *p != '\n') ++p;   // skip the rest of a bad line
+                    continue;
+                }
+                HudQualityRatioSlot& s = g_ratioTable.slots[g_ratioTable.count++];
+                s.ratioWx10000 = static_cast<uint32_t>(rw);
+                s.ratioHx10000 = static_cast<uint32_t>(rh);
+                s.lastInternalW = static_cast<uint32_t>(lastW);
+                s.confirmed = conf != 0;
+                s.seeded = seeded != 0;
+            }
+        }
+    }
+    if (hudQualitySeedCensusRatio(g_ratioTable.slots, &g_ratioTable.count, kRatioSlots,
+                                  kRatioToleranceX10000)) {
+        hudQualitySaveRatios();   // a newly-added seed is written back at once
+    }
+}
+
+void hudQualitySaveRatios() {
+    const std::wstring& logDir = Config::get().logDir();
+    if (logDir.empty()) return;
+    CreateDirectoryW(logDir.c_str(), nullptr);
+    HANDLE f = CreateFileW(ratioStatePath(logDir).c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    char line[128];
+    int n = snprintf(line, sizeof(line), "%u\n", g_ratioTable.count);
+    DWORD written = 0;
+    if (n > 0) WriteFile(f, line, static_cast<DWORD>(n), &written, nullptr);
+    for (uint32_t i = 0; i < g_ratioTable.count; ++i) {
+        const HudQualityRatioSlot& s = g_ratioTable.slots[i];
+        n = snprintf(line, sizeof(line), "%u %u %u %u %u\n", s.ratioWx10000, s.ratioHx10000,
+                    s.lastInternalW, s.confirmed ? 1u : 0u, s.seeded ? 1u : 0u);
+        if (n > 0) WriteFile(f, line, static_cast<DWORD>(n), &written, nullptr);
+    }
+    CloseHandle(f);
+}
 
 // "1952x1597:2, 908x1361" -- a size, optionally a factor, comma separated.
 // The factor defaults to 2 and is capped at 4, because the point of the
@@ -202,45 +353,131 @@ void appendFamilyText(char* buf, size_t n, const char* name,
     }
 }
 
-// "hud quality: 1.0 (HMD Quality 0.70 -> factor 1.4286): interface surfaces
-// resized N (vector WxH -> WxH, text ..., icon ...), viewports rescaled M,
-// scissors rescaled S, copies touching one: K." At the first surface
-// resized and every 30s after (fssResHudQualityTick), so a flight's log has
-// both the instant the mechanism first engaged and a running total.
+// "hud quality: 1.0 (HMD Quality 0.70 -> factor 1.4286): cockpit panels
+// resized N (vector WxH -> WxH, text ..., icon ...), FSS N, other N, seen
+// not resized N, viewports rescaled M, scissors rescaled S, copies
+// touching one: K." At the first surface resized and every 30s after
+// (fssResHudQualityTick), so a flight's log has both the instant the
+// mechanism first engaged and a running total.
+//
+// "other" is a ratio match the classifier has not (yet, or ever, since it
+// depends on fix.temporal_aa) labelled vector/text/icon -- the cross-check
+// only names what it happens to know; the ratio match does not need it to
+// have resized the surface. "seen not resized" is the distinct ratio
+// candidates on file that are not yet confirmed at a second, different
+// internal resolution -- present, not guessed at.
 void logHudQualitySummary() {
     char vecBuf[64], textBuf[64], iconBuf[64];
     appendFamilyText(vecBuf, sizeof(vecBuf), "vector", g_hq.vec);
     appendFamilyText(textBuf, sizeof(textBuf), "text", g_hq.text);
     appendFamilyText(iconBuf, sizeof(iconBuf), "icon", g_hq.icon);
+    uint32_t pending = 0;
+    for (uint32_t i = 0; i < g_ratioTable.count; ++i) {
+        if (!g_ratioTable.slots[i].confirmed) ++pending;
+    }
     Log::get().note(
-        "hud quality: %s (HMD Quality %.2f -> factor %.4f): interface "
-        "surfaces resized %u (%s, %s, %s), viewports rescaled %u, scissors "
-        "rescaled %u, copies touching one: %u.",
+        "hud quality: %s (HMD Quality %.2f -> factor %.4f): cockpit panels "
+        "resized %u (%s, %s, %s), FSS %u, other %u, seen not resized %u, "
+        "viewports rescaled %u, scissors rescaled %u, copies touching "
+        "one: %u.",
         g_s.hudQualityStr.c_str(), static_cast<double>(g_hq.lastMult),
         static_cast<double>(g_hq.lastFactor), g_hq.resizedCount, vecBuf,
-        textBuf, iconBuf, g_hq.viewportsRescaled, g_hq.scissorsRescaled,
-        g_hq.copiesSeen);
+        textBuf, iconBuf, g_hq.fssResized, g_hq.otherResized, pending,
+        g_hq.viewportsRescaled, g_hq.scissorsRescaled, g_hq.copiesSeen);
 }
 
+// family is 'V'/'T'/'I' (the cross-check labelled it) or 0 ("other": a
+// ratio match the classifier has not named).
 void hudQualityNoteMatch(char family, uint32_t origW, uint32_t origH,
                          uint32_t newW, uint32_t newH) {
     HudFamilyRecord* rec = family == 'V'   ? &g_hq.vec
                            : family == 'T' ? &g_hq.text
                            : family == 'I' ? &g_hq.icon
                                            : nullptr;
+    const bool first = g_hq.resizedCount == 0 && g_hq.otherResized == 0;
     if (rec) {
         rec->have = true;
         rec->origW = origW;
         rec->origH = origH;
         rec->newW = newW;
         rec->newH = newH;
+        ++g_hq.resizedCount;
+    } else {
+        ++g_hq.otherResized;
     }
-    const bool first = g_hq.resizedCount == 0;
-    ++g_hq.resizedCount;
     if (first) {
         g_hq.lastSummaryMs = nowMs();
         logHudQualitySummary();
     }
+}
+
+void hudQualityNoteUnknownInternalRes() {
+    if (g_hq.unknownInternalResNoted) return;
+    g_hq.unknownInternalResNoted = true;
+    Log::get().note(
+        "hud quality: on, but the game's internal render resolution is not "
+        "known yet (no scene has rendered enough frames to settle it) -- "
+        "nothing can be matched by ratio until it is. Said once.");
+}
+
+// A ratio candidate that is on file but not yet confirmed at a second,
+// different internal resolution: recorded, not resized. Capped like the
+// other diagnostics here.
+void hudQualityNoteSeenNotResized(uint32_t w, uint32_t h) {
+    if (g_hq.seenNotResizedNotes >= 8) return;
+    ++g_hq.seenNotResizedNotes;
+    Log::get().note(
+        "hud quality: seen, not resized -- a %ux%u candidate's ratio to "
+        "the internal render resolution is on file but not yet confirmed "
+        "at a second, different resolution. Said at most 8 times.",
+        w, h);
+}
+
+// Sean asked whether the size could be patched in the engine instead of
+// intercepted after the fact, the way the on-foot screen's resolution is
+// (vscreen_res.h). This names the allocating call so that can be tried:
+// the first four game-module return addresses on the stack the moment
+// EDVR decides to inflate a given surface SIZE, once per distinct size
+// per session, only while the key is on.
+void hudQualityNoteRva(uint32_t w, uint32_t h, char family) {
+    for (uint32_t i = 0; i < g_hq.rvaLoggedCount; ++i) {
+        if (g_hq.rvaLoggedW[i] == w && g_hq.rvaLoggedH[i] == h) return;
+    }
+    if (g_hq.rvaLoggedCount >= kRvaLogMax) return;
+    g_hq.rvaLoggedW[g_hq.rvaLoggedCount] = w;
+    g_hq.rvaLoggedH[g_hq.rvaLoggedCount] = h;
+    ++g_hq.rvaLoggedCount;
+    const GameCallStack stack = captureGameCallStack();
+    // The first four game frames only, matching what a human decompiling
+    // the allocator actually needs -- captureGameCallStack's own string can
+    // hold more; cut at the fourth '/'.
+    char rvas[128];
+    _snprintf_s(rvas, _TRUNCATE, "%s", stack.rvas);
+    unsigned slashes = 0;
+    for (char* p = rvas; *p; ++p) {
+        if (*p == '/' && ++slashes == 4) { *p = '\0'; break; }
+    }
+    Log::get().note(
+        "hud quality: interface surface %ux%u (%s) created from game RVAs "
+        "%s (%u of %u captured frames were in the game module).",
+        w, h, family == 'V' ? "vector" : family == 'T' ? "text"
+             : family == 'I' ? "icon" : "other",
+        stack.gameFrames ? rvas : "none", stack.gameFrames, stack.captured);
+}
+
+// The first time a match uses a SEEDED ratio (fss_res.h's own documented
+// census, not yet independently confirmed on this rig), said once per
+// slot so the log is honest about where the number came from.
+void hudQualityNoteSeededUse(uint32_t slotIndex, uint32_t w, uint32_t h) {
+    if (slotIndex >= kRatioSlots || g_hq.seededAnnounced[slotIndex]) return;
+    g_hq.seededAnnounced[slotIndex] = true;
+    Log::get().note(
+        "hud quality: %ux%u matched a ratio seeded from the 2026-09 census "
+        "(fss_res.h's own two-session measurement: 908x1361 at scene "
+        "4340x4284, 1363x2042 at 6510x6426) -- not yet independently "
+        "confirmed on this rig, inflating from this session's first "
+        "sighting rather than waiting for a second.",
+        w, h);
 }
 
 }  // namespace
@@ -277,13 +514,14 @@ void fssResConfigure(Config& cfg) {
                 "Quality as today.");
         } else {
             Log::get().note(
-                "hud quality: %s. The cockpit's vector, text and icon "
-                "surfaces will be created at the size they would have at "
-                "HMD Quality %s, the next time the game makes one -- a trip "
-                "through the main menu for a panel already open. Needs "
-                "fix.temporal_aa on (its own classifier is what learns a "
-                "panel's size); if it has not learned one yet, nothing "
-                "matches and this says so after a minute.",
+                "hud quality: %s. The cockpit's interface surfaces will be "
+                "created at the size they would have at HMD Quality %s, the "
+                "next time the game makes one -- a trip through the main "
+                "menu for a panel already open. Matched by their fixed "
+                "ratio to the internal render resolution, confirmed once "
+                "seen at a second, different resolution (any earlier "
+                "session counts); until then a candidate is only logged as "
+                "\"seen, not resized\".",
                 hq.c_str(), hq.c_str());
         }
     }
@@ -388,13 +626,20 @@ bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
         if (sourceOut) *sourceOut = InflateSource::kNamed;
         return true;
     }
-    // fix.hud_quality: a candidate only if it matches a size ui_depth's own
-    // classifier has learned this session (vector/text/icon panels only),
-    // and only by the factor a fresh read of the game's own HMD Quality
-    // earns it -- read here, at the rare moment a texture is actually being
-    // created, rather than cached from the last ini reload, since the
-    // player can change HMD Quality in Elite's own graphics menu without
-    // touching edvr.ini at all.
+    // fix.hud_quality: matched by RATIO to the internal render resolution,
+    // not through the classifier. The classifier (ui_depth.cpp) learns a
+    // surface's size from draws INTO it, which happen after this very
+    // call -- so it can never help the create it would need to inform, and
+    // every session's first panel (and every panel with fix.temporal_aa
+    // off) matched nothing through it. fss_res.h's own census measured the
+    // interface surfaces as a fixed fraction of the internal render
+    // resolution, stable across sessions at different resolutions; that
+    // fraction is knowable the moment the game asks to create the texture,
+    // once it has been confirmed -- either by a second session at a
+    // different resolution (hudQualityRatioObserve), or from the first
+    // CreateTexture2D of ANY session for the one ratio the census already
+    // documented (hudQualityLoadRatios seeds it). The classifier is kept
+    // only as a cross-check below, to LABEL a match's family for the log.
     if (g_s.hudQualityTarget > 0.0f) {
         float mult = 0.0f;
         if (!deviceHookHmdQuality(&mult) || !(mult > 0.0f)) {
@@ -402,30 +647,69 @@ bool fssResMaybeInflate(D3D11_TEXTURE2D_DESC* d, bool hasInitialData,
         } else {
             float factor = 0.0f;
             if (hudQualityFactor(g_s.hudQualityTarget, mult, &factor)) {
-                uint32_t lw[kHqLearnMax], lh[kHqLearnMax];
-                char lf[kHqLearnMax];
-                const uint32_t learned =
-                    uiDepthLearnedSurfaceSizes(lw, lh, lf, kHqLearnMax);
-                const int idx =
-                    hudQualityMatchLearned(d->Width, d->Height, lw, lh, learned);
-                if (idx >= 0) {
-                    const uint32_t newW = hudQualityRoundDim(d->Width, factor);
-                    const uint32_t newH = hudQualityRoundDim(d->Height, factor);
-                    // Refuse rather than create past the API's own limit,
-                    // the same ceiling the named matcher is pre-validated
-                    // against at configure time -- this one cannot be,
-                    // because HMD Quality (and so the factor) can change
-                    // between one create and the next.
-                    if (newW <= kMaxDim && newH <= kMaxDim &&
-                        (newW != d->Width || newH != d->Height)) {
-                        d->Width = newW;
-                        d->Height = newH;
-                        if (scaleOut) *scaleOut = factor;
-                        if (sourceOut) *sourceOut = InflateSource::kMatch;
-                        if (familyOut) *familyOut = lf[idx];
-                        g_hq.lastMult = mult;
-                        g_hq.lastFactor = factor;
-                        return true;
+                uint32_t internalW = 0, internalH = 0;
+                if (!vScreenInternalResolution(&internalW, &internalH)) {
+                    hudQualityNoteUnknownInternalRes();
+                } else if (d->Width < internalW && d->Height < internalH &&
+                          (d->Width & (d->Width - 1)) != 0 &&
+                          (d->Height & (d->Height - 1)) != 0) {
+                    // Non-power-of-two on both axes and smaller than the
+                    // scene: the documented shape of an interface surface
+                    // (fss_res.h). Filters out shadow maps, post buffers
+                    // and the scene target itself before they ever reach
+                    // the ratio table.
+                    if (!g_ratioTable.loaded) hudQualityLoadRatios();
+                    g_hq.lastMult = mult;
+                    g_hq.lastFactor = factor;
+                    const uint32_t rw = hudQualityRatioX10000(d->Width, internalW);
+                    const uint32_t rh = hudQualityRatioX10000(d->Height, internalH);
+                    uint32_t matchedIdx = 0;
+                    const HudQualityRatioVerdict verdict = hudQualityRatioObserve(
+                        g_ratioTable.slots, &g_ratioTable.count, kRatioSlots, rw, rh,
+                        internalW, kRatioToleranceX10000, &matchedIdx);
+                    if (verdict == HudQualityRatioVerdict::kNewCandidate) {
+                        hudQualitySaveRatios();
+                        hudQualityNoteSeenNotResized(d->Width, d->Height);
+                    } else if (verdict == HudQualityRatioVerdict::kSameSession) {
+                        hudQualityNoteSeenNotResized(d->Width, d->Height);
+                    } else if (verdict == HudQualityRatioVerdict::kConfirmed) {
+                        hudQualitySaveRatios();
+                        const uint32_t origW = d->Width, origH = d->Height;
+                        const uint32_t newW = hudQualityRoundDim(origW, factor);
+                        const uint32_t newH = hudQualityRoundDim(origH, factor);
+                        // Refuse rather than create past the API's own
+                        // limit, the same ceiling the named matcher is
+                        // pre-validated against at configure time -- this
+                        // one cannot be, because HMD Quality (and so the
+                        // factor) can change between one create and the
+                        // next.
+                        if (newW <= kMaxDim && newH <= kMaxDim &&
+                            (newW != origW || newH != origH)) {
+                            d->Width = newW;
+                            d->Height = newH;
+                            if (scaleOut) *scaleOut = factor;
+                            if (sourceOut) *sourceOut = InflateSource::kMatch;
+                            if (matchedIdx < g_ratioTable.count &&
+                                g_ratioTable.slots[matchedIdx].seeded) {
+                                hudQualityNoteSeededUse(matchedIdx, origW, origH);
+                            }
+                            // The classifier, as a cross-check only: does it
+                            // already know this ORIGINAL (pre-inflate) size
+                            // by name? If so, label the log with its family;
+                            // otherwise this is "other" -- ratio-matched,
+                            // not (yet, or ever, without fix.temporal_aa)
+                            // named by the classifier.
+                            uint32_t lw[kHqLearnMax], lh[kHqLearnMax];
+                            char lf[kHqLearnMax];
+                            const uint32_t learned =
+                                uiDepthLearnedSurfaceSizes(lw, lh, lf, kHqLearnMax);
+                            const int idx =
+                                hudQualityMatchLearned(origW, origH, lw, lh, learned);
+                            const char family = idx >= 0 ? lf[idx] : 0;
+                            if (familyOut) *familyOut = family;
+                            hudQualityNoteRva(origW, origH, family);
+                            return true;
+                        }
                     }
                 }
             }
@@ -456,6 +740,18 @@ void fssResNoteCreated(void* texture, uint32_t origW, uint32_t origH,
     }
     if (source == InflateSource::kMatch) {
         hudQualityNoteMatch(family, origW, origH, newW, newH);
+    } else if (source == InflateSource::kFss && g_s.hudQualityTarget > 0.0f) {
+        // Counted in the hud-quality summary too, so a flight with the FSS
+        // open alongside the key reads one total picture of what got
+        // bigger this session -- not gated on the key having CAUSED this
+        // match, which fix.hud_quality never does for the FSS rule.
+        const bool first = g_hq.resizedCount == 0 && g_hq.otherResized == 0 &&
+                           g_hq.fssResized == 0;
+        ++g_hq.fssResized;
+        if (first) {
+            g_hq.lastSummaryMs = nowMs();
+            logHudQualitySummary();
+        }
     }
 }
 
@@ -574,13 +870,24 @@ void fssResNoteCopyMaybeMismatched(void* dst, void* src) {
 void fssResHudQualityTick() {
     if (!(g_s.hudQualityTarget > 0.0f)) return;
     if (g_hq.firstActiveMs == 0) g_hq.firstActiveMs = stampMs();
-    if (g_hq.resizedCount == 0) {
+    const bool anyMatch = g_hq.resizedCount != 0 || g_hq.otherResized != 0 ||
+                         g_hq.fssResized != 0;
+    if (!anyMatch) {
         if (!g_hq.saidNoMatch && elapsedMs(g_hq.firstActiveMs, 60000)) {
             g_hq.saidNoMatch = true;
+            if (!g_ratioTable.loaded) hudQualityLoadRatios();
+            uint32_t pending = 0;
+            for (uint32_t i = 0; i < g_ratioTable.count; ++i) {
+                if (!g_ratioTable.slots[i].confirmed) ++pending;
+            }
             Log::get().note(
-                "hud quality: on but no interface surface matched (the "
-                "classifier saw none / the sizes did not match the learned "
-                "fraction): nothing changed.");
+                "hud quality: on but nothing has matched by ratio yet (%u "
+                "candidate ratio(s) seen, none confirmed at a second, "
+                "different internal resolution -- an earlier session's "
+                "data counts, so this is common only on a fresh install or "
+                "one that has always run the same HMD Quality): nothing "
+                "changed.",
+                pending);
         }
         return;
     }

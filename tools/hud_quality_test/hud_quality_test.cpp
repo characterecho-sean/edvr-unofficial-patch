@@ -108,6 +108,43 @@ void expectMatch(uint32_t w, uint32_t h, const uint32_t* lw,
     fail(what, buf);
 }
 
+void expectRatioNear(uint32_t a, uint32_t b, uint32_t tolerance, bool want,
+                     const char* what) {
+    const bool got = edvr::hudQualityRatioNear(a, b, tolerance);
+    if (got == want) {
+        ok(what);
+        return;
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "near() returned %s, wanted %s",
+                 got ? "true" : "false", want ? "true" : "false");
+    fail(what, buf);
+}
+
+const char* verdictName(edvr::HudQualityRatioVerdict v) {
+    switch (v) {
+        case edvr::HudQualityRatioVerdict::kNoSlot: return "kNoSlot";
+        case edvr::HudQualityRatioVerdict::kNewCandidate: return "kNewCandidate";
+        case edvr::HudQualityRatioVerdict::kSameSession: return "kSameSession";
+        case edvr::HudQualityRatioVerdict::kConfirmed: return "kConfirmed";
+    }
+    return "?";
+}
+
+void expectVerdict(edvr::HudQualityRatioSlot* slots, uint32_t* count, uint32_t capacity,
+                   uint32_t rw, uint32_t rh, uint32_t internalW, uint32_t tolerance,
+                   edvr::HudQualityRatioVerdict want, const char* what) {
+    const edvr::HudQualityRatioVerdict got =
+        edvr::hudQualityRatioObserve(slots, count, capacity, rw, rh, internalW, tolerance);
+    if (got == want) {
+        ok(what);
+        return;
+    }
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "verdict %s, wanted %s", verdictName(got), verdictName(want));
+    fail(what, buf);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -173,6 +210,154 @@ int main(int argc, char** argv) {
         expectMatch(100, 100, lw, lh, 3, -1, "a size the classifier never learned does not match");
         expectMatch(908, 1361, lw, lh, 0, -1, "an empty learned set never matches");
         expectMatch(908, 1361, nullptr, nullptr, 0, -1, "null learned arrays are handled, not dereferenced");
+    }
+
+    // --- ratio-to-internal-resolution arithmetic -------------------------
+    {
+        // fss_res.h's own two-session census, the founding evidence for the
+        // whole match: 908x1361 at scene 4340x4284, and 1363x2042 at scene
+        // 6510x6426 -- "the same fraction to four significant figures".
+        const uint32_t rw1 = edvr::hudQualityRatioX10000(908, 4340);
+        const uint32_t rh1 = edvr::hudQualityRatioX10000(1361, 4284);
+        const uint32_t rw2 = edvr::hudQualityRatioX10000(1363, 6510);
+        const uint32_t rh2 = edvr::hudQualityRatioX10000(2042, 6426);
+        char what[128];
+        std::snprintf(what, sizeof(what),
+                     "the width ratio (908/4340=%u, 1363/6510=%u ten-thousandths) agrees within tolerance",
+                     rw1, rw2);
+        if (edvr::hudQualityRatioNear(rw1, rw2, 10)) ok(what); else fail(what, "did not agree");
+        std::snprintf(what, sizeof(what),
+                     "the height ratio (1361/4284=%u, 2042/6426=%u ten-thousandths) agrees within tolerance",
+                     rh1, rh2);
+        if (edvr::hudQualityRatioNear(rh1, rh2, 10)) ok(what); else fail(what, "did not agree");
+    }
+    {
+        const uint32_t r = edvr::hudQualityRatioX10000(0, 4340);
+        if (r == 0) ok("a zero width ratios to 0, not a crash");
+        else fail("a zero width ratios to 0, not a crash", "nonzero");
+    }
+    {
+        const uint32_t r = edvr::hudQualityRatioX10000(1000, 0);
+        if (r == 0) ok("a zero internal dimension ratios to 0 (nothing to divide by)");
+        else fail("a zero internal dimension ratios to 0 (nothing to divide by)", "nonzero");
+    }
+    expectRatioNear(2092, 2094, 10, true, "two ten-thousandths apart, tolerance 10: near");
+    expectRatioNear(2092, 2103, 10, false, "eleven ten-thousandths apart, tolerance 10: not near");
+    expectRatioNear(2092, 2092, 0, true, "exact equality passes a zero tolerance");
+
+    // --- the ratio-observation state machine (replaces the classifier) ----
+    {
+        edvr::HudQualityRatioSlot slots[4];
+        uint32_t count = 0;
+        // "First panel created before any draw": hudQualityRatioObserve's
+        // own signature takes only a ratio and an internal width -- no
+        // learned-surface table, no classifier, no draw of any kind is an
+        // input to it, so its very first call (an empty table, exactly a
+        // cold session's first candidate) already proves the match does
+        // not and cannot depend on anything happening after this call.
+        expectVerdict(slots, &count, 4, 2092, 3177, 4340, 10,
+                     edvr::HudQualityRatioVerdict::kNewCandidate,
+                     "the first-ever candidate (before any draw anywhere) is recorded, not used");
+        if (count == 1) ok("...and the table now holds one entry");
+        else fail("...and the table now holds one entry", "did not grow");
+
+        // A second sighting at the SAME internal width (a second panel this
+        // same session, or a second session that happened to run the same
+        // HMD Quality): no new evidence, still not usable.
+        expectVerdict(slots, &count, 4, 2092, 3177, 4340, 10,
+                     edvr::HudQualityRatioVerdict::kSameSession,
+                     "a repeat at the same internal width is not new evidence");
+        if (count == 1) ok("...and no second entry was created for it");
+        else fail("...and no second entry was created for it", "table grew");
+
+        // A DIFFERENT internal width (a later session at a different HMD
+        // Quality, fss_res.h's own two-resolution proof) confirms it --
+        // and the very same call is where a caller would inflate.
+        expectVerdict(slots, &count, 4, 2094, 3178, 6510, 10,
+                     edvr::HudQualityRatioVerdict::kConfirmed,
+                     "a different internal width now confirms the ratio (usable from this call on)");
+
+        // Once confirmed, it stays confirmed on the next sighting, at
+        // either width.
+        expectVerdict(slots, &count, 4, 2092, 3177, 4340, 10,
+                     edvr::HudQualityRatioVerdict::kConfirmed,
+                     "an already-confirmed ratio stays confirmed");
+
+        // A genuinely different ratio (not a rounding of the same one)
+        // gets its OWN entry rather than corrupting the first.
+        expectVerdict(slots, &count, 4, 1500, 2800, 4340, 10,
+                     edvr::HudQualityRatioVerdict::kNewCandidate,
+                     "a different ratio is tracked separately, not conflated");
+        if (count == 2) ok("...and the table now holds two entries");
+        else fail("...and the table now holds two entries", "did not grow to 2");
+
+        // Filling the table, then a third distinct ratio with no room left.
+        uint32_t fillCount = count;
+        edvr::HudQualityRatioSlot fillSlots[2] = {slots[0], slots[1]};
+        expectVerdict(fillSlots, &fillCount, 2, 9000, 100, 5000, 10,
+                     edvr::HudQualityRatioVerdict::kNoSlot,
+                     "a third distinct ratio is refused once the table is full");
+        if (fillCount == 2) ok("...and the full table is left unchanged");
+        else fail("...and the full table is left unchanged", "count moved");
+    }
+
+    // --- seeding the documented census ratio ------------------------------
+    {
+        // A fresh table, exactly a fresh install with no persisted file.
+        edvr::HudQualityRatioSlot slots[8];
+        uint32_t count = 0;
+        const bool added = edvr::hudQualitySeedCensusRatio(slots, &count, 8, 10);
+        if (added && count == 1) ok("seeding a fresh table adds exactly one entry");
+        else fail("seeding a fresh table adds exactly one entry",
+                 added ? "count was not 1" : "hudQualitySeedCensusRatio returned false");
+        if (slots[0].seeded && slots[0].confirmed) {
+            ok("...marked both seeded and confirmed (usable without a session's own evidence)");
+        } else {
+            fail("...marked both seeded and confirmed (usable without a session's own evidence)",
+                 "one of the two flags was not set");
+        }
+
+        // The whole point: one cockpit session, any HMD Quality, matches on
+        // the very first CreateTexture2D -- no second, different-resolution
+        // session required the way an ordinary (unseeded) ratio needs.
+        uint32_t matchedIdx = 12345;
+        expectVerdict(slots, &count, 8, edvr::kHudQualityCensusRatioW,
+                     edvr::kHudQualityCensusRatioH, 5000, 10,
+                     edvr::HudQualityRatioVerdict::kConfirmed,
+                     "the seeded vector ratio matches at a NEW internal resolution on the first call");
+        // hudQualityRatioObserve's own out-param, so the caller can label
+        // the log line -- fss_res.cpp's actual use of this.
+        edvr::hudQualityRatioObserve(slots, &count, 8, edvr::kHudQualityCensusRatioW,
+                                     edvr::kHudQualityCensusRatioH, 7000, 10, &matchedIdx);
+        if (matchedIdx == 0 && slots[matchedIdx].seeded) {
+            ok("...and the match reports back which slot, so the caller can tell it was seeded");
+        } else {
+            fail("...and the match reports back which slot, so the caller can tell it was seeded",
+                 "wrong index or not marked seeded");
+        }
+
+        // Calling it again (the next session's load, or a reload this
+        // session) must not add a duplicate.
+        const bool addedAgain = edvr::hudQualitySeedCensusRatio(slots, &count, 8, 10);
+        if (!addedAgain && count == 1) {
+            ok("seeding twice is idempotent -- no duplicate entry");
+        } else {
+            fail("seeding twice is idempotent -- no duplicate entry",
+                addedAgain ? "returned true the second time" : "count changed");
+        }
+
+        // An UNSEEDED ratio in the SAME (already-seeded) table still needs
+        // two different-resolution sessions -- seeding one shape does not
+        // give every shape a free pass.
+        expectVerdict(slots, &count, 8, 1500, 2800, 4340, 10,
+                     edvr::HudQualityRatioVerdict::kNewCandidate,
+                     "an unseeded ratio in a seeded table still starts as a new candidate");
+        expectVerdict(slots, &count, 8, 1500, 2800, 4340, 10,
+                     edvr::HudQualityRatioVerdict::kSameSession,
+                     "...and still waits at the same internal width");
+        expectVerdict(slots, &count, 8, 1500, 2800, 6510, 10,
+                     edvr::HudQualityRatioVerdict::kConfirmed,
+                     "...confirming only once a second, different width agrees");
     }
 
     if (g_fails) {
