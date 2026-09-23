@@ -36,7 +36,12 @@
 //   * the game's LOD scale s_game, from the setter bracket (the value the
 //     engine stored on its last call for that context; 1.0 at the slider's
 //     maximum detail, 1.5 at its lowest), and the scale the tests ran with,
-//     ctx+0x30 as the builder observer reads it (s_game x k while acting).
+//     ctx+0x30 as the builder observer reads it (s_game x k while acting);
+//   * on foot -- the journal watcher's reading of the game's Status.json
+//     (journalOnFootKnown() && journalOnFoot(), Flags2 bit 0), the one signal
+//     fix.weapon_stability's deferred frame pacing keys on (native_frame.cpp).
+//     The arc measured the cockpit only; with the watcher off it cannot be
+//     told, the log says so once, and the governor runs as in the cockpit.
 //
 // THE WRITE (lodGovernorSetterObserver, the engine's thread, twice a frame):
 // only a context the draw-item builder has used (a table of at most 8; a
@@ -74,14 +79,24 @@
 //     passed" per frame from a k = 1 window is the whole of it.
 //
 // THE POLICY (Policy below, pure; tools\lod_governor_test): auto -- k in
-// [1, k_max] in steps of 0.05. One step up while the frame has at least 200
+// [1, k_max], quantised to 0.05. One step up while the frame has at least 200
 // builder records AND the frame work has exceeded the period by more than
-// 0.3 ms for 30 consecutive samples; one step down while it has been under
-// the period minus 1.0 ms for 30; at most one step a second; back to 1 when
-// the records have stayed under 150 for 30 frames. reduced -- k = k_max at
-// once from the frame the records reach 200, 1 when they have stayed under
-// 150 for 30 frames; no ramp. k_max is advanced.settlement_detail_max
-// (default 4.0, held to [1, 4]): the ceiling in auto, the factor in reduced.
+// 0.3 ms for 30 consecutive samples: 0.25 when the mean excess of the 30
+// samples behind the step is more than 1.0 ms, else 0.05 (held to k_max) --
+// far from the target big steps, near it fine ones and the dead band, so the
+// operating point is still found from below without pumping (the first
+// acting flight, 2026-09-23, took 80 s at 0.05 a step while 1.0-1.8 ms over).
+// One step down, always 0.05, while it has been under the period minus
+// 1.0 ms for 30; at most one step a second; back to 1 when the records have
+// stayed under 150 for 30 frames, and at once on foot, held there while it
+// lasts. reduced -- k = k_max at once from the frame the records reach 200,
+// 1 when they have stayed under 150 for 30 frames or on foot; no ramp. k_max
+// is advanced.settlement_detail_max (default 6.0, held to [1, 8]): the
+// ceiling in auto, the factor in reduced. It multiplies the game's own
+// scale -- 1.0 at the slider's default, 1.5 at its floor -- and the removal
+// levels off between an effective s x k of 4.5 and 6 (the LOD note, section
+// 8), so 6 reaches that from the default slider. The first acting flight
+// held k 2.70-2.75 on s 1.5 (s x k about 4.1): k ~4.1 from s 1.0.
 // advanced.settlement_detail_observe = 1 computes and logs all of it and
 // never writes.
 #include <cstdint>
@@ -96,14 +111,16 @@ namespace lodgov {
 
 // --- The policy's parameters (documented defaults; not keys) --------------
 constexpr int kQuantaPerUnit = 20;                 // k moves in steps of 1/20 = 0.05
+constexpr int kCoarseQuanta = 5;                   // ... or 5/20 = 0.25 up, far over budget
 constexpr uint32_t kSettlementRecords = 200;       // density: builder records a frame
 constexpr uint32_t kSettlementBand = 50;           // leave only under 200 - 50 = 150
 constexpr double kOverMarginMs = 0.3;              // rise: work > period + 0.3 ms ...
 constexpr double kUnderMarginMs = 1.0;             // fall: work < period - 1.0 ms ...
 constexpr uint32_t kConsecutive = 30;              // ... for 30 consecutive samples
+constexpr double kCoarseExcessMs = 1.0;            // up 0.25 while those 30 ran > 1.0 ms over on average
 constexpr uint64_t kRampIntervalMs = 1000;         // at most one step a second
-constexpr float kDefaultMax = 4.0f;                // advanced.settlement_detail_max
-constexpr float kMaxCeiling = 4.0f;                // ... held to [1, 4]
+constexpr float kDefaultMax = 6.0f;                // advanced.settlement_detail_max (100 steps of 0.05)
+constexpr float kMaxCeiling = 8.0f;                // ... held to [1, 8]
 // The write's plausibility band for the game's own LOD scale: the setter
 // stores 1 + (1 - x) with x the settings' LODDistanceScale; anything outside
 // this is not a value the game's slider produces and is left alone.
@@ -118,6 +135,7 @@ enum class Work : uint8_t { None, Invalid, Valid };   // no new sample / a bad o
 enum class WorkSource : uint8_t { None, Caller, App };
 struct FrameSignals {
     uint32_t records = 0;       // builder calls since the last boundary
+    bool onFoot = false;        // Status.json says on foot (journalOnFootKnown && journalOnFoot)
     Work work = Work::None;
     WorkSource source = WorkSource::None;   // set with every new sample, valid or not
     bool callerAbsent = false;  // a version 5 frame without valid caller work (Work::Invalid)
@@ -127,8 +145,8 @@ struct FrameSignals {
     uint64_t nowMs = 0;
 };
 // Enter: reduced mode's k = k_max at once (the settlement started, or k_max
-// rose while in it).
-enum class Step : uint8_t { None, Up, Down, Reset, Clamp, Enter };
+// rose while in it). Foot: k back to 1 at once, on foot.
+enum class Step : uint8_t { None, Up, Down, Reset, Clamp, Enter, Foot };
 
 class Policy {
 public:
@@ -149,15 +167,31 @@ public:
     bool inSettlement() const noexcept { return inSettlement_; }
     uint32_t overRun() const noexcept { return over_; }
     uint32_t underRun() const noexcept { return under_; }
+    // The last up step: its size by the rule in quanta (1 = 0.05, kCoarseQuanta
+    // = 0.25), whether k_max cut it short, and the mean excess (work - period,
+    // ms) of the 30 samples behind it.
+    int upQuanta() const noexcept { return upQuanta_; }
+    bool upHeld() const noexcept { return upHeld_; }
+    double upMeanExcessMs() const noexcept { return upMeanExcessMs_; }
+    // The mean excess of the latest valid samples, at most 30 (0 when none):
+    // at an up step, exactly the 30 of the over-budget run that triggered it.
+    double meanExcessMs() const noexcept;
     static float kOf(int steps) noexcept { return float(kQuantaPerUnit + steps) / float(kQuantaPerUnit); }
 
 private:
-    int steps_ = 0, maxSteps_ = static_cast<int>((kDefaultMax - 1.0f) * kQuantaPerUnit);   // k_max 4.0
+    int steps_ = 0, maxSteps_ = static_cast<int>((kDefaultMax - 1.0f) * kQuantaPerUnit);   // k_max 6.0: 100 steps
     bool fixed_ = false;
     bool inSettlement_ = false, clampPending_ = false;
     uint32_t over_ = 0, under_ = 0, sparse_ = 0;
     uint64_t lastStepMs_ = 0;
     bool stepped_ = false;
+    // The latest valid samples' excess over the period, a ring of 30; a bad
+    // sample, leaving the settlement and on foot empty it with the runs.
+    double excess_[kConsecutive] = {};
+    uint32_t excessNext_ = 0, excessCount_ = 0;
+    int upQuanta_ = 0;
+    bool upHeld_ = false;
+    double upMeanExcessMs_ = 0;
 };
 
 // --- The engine's arithmetic, exactly as its code does it ------------------
@@ -289,11 +323,11 @@ inline PartOutcome shadowPart(const PartInputs& in, float k) noexcept {
 }  // namespace lodgov
 
 // --- The runtime --------------------------------------------------------------
-// fix.settlement_detail: game (default: off, nothing observed or changed, the
-// relays keep their one load) | auto (the governed k; acts) | reduced (k_max
-// in a settlement, 1 outside; acts). advanced.settlement_detail_max: k_max.
-// advanced.settlement_detail_observe: 1 = compute and log, never write. From
-// the startup and reload sweeps.
+// fix.settlement_detail: auto (the shipped default, also for an empty value:
+// the governed k; acts) | game (off: nothing observed or changed, the relays
+// keep their one load) | reduced (k_max in a settlement, 1 outside; acts).
+// advanced.settlement_detail_max: k_max. advanced.settlement_detail_observe:
+// 1 = compute and log, never write. From the startup and reload sweeps.
 void lodGovernorConfigure(Config& cfg);
 // Once a frame on the caller thread (vScreenFrameBoundary): the signals, the
 // policy step, and the log lines. Returns at once while off. Never writes

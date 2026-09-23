@@ -986,10 +986,17 @@ bool nativeCpuReady(const NativeTimingSnapshot& timing) {
            timing.cpu.sequence >= timing.firstSequence && nativeTimingAge(timing.capturedAtMs) <= 2000;
 }
 
+// The newest frame carries the CPU figure the history averages: the caller
+// work per cycle (timing v5), or an older runtime's pre-submit application
+// time (NativePerfHistory::cpuFigure).
 bool nativeApplicationCpuReady(const NativeTimingSnapshot& timing) {
-    return nativeCpuReady(timing) && timing.applicationValid &&
-           std::isfinite(timing.applicationMs) && timing.applicationMs >= 0.0 &&
-           timing.applicationMs <= 600000.0;
+    return nativeCpuReady(timing) && NativePerfHistory::cpuFigure(timing).valid;
+}
+
+// The CPU figure's label: plain for the caller work per cycle, named as the
+// pre-submit phase when an older runtime sends no caller work.
+bool nativeCpuPreSubmit(const NativePerfHistory& history) {
+    return history.cpuSource() == NativeCpuSource::PreSubmit;
 }
 
 bool nativeGpuReady(const NativeTimingSnapshot& timing, const GpuFrameSnapshot& gpu) {
@@ -1119,9 +1126,13 @@ int perfMonitorTiles(PerfTile* out, int max) {
         tile("GPU TIME", "--", noTiming);
     }
     if (native && nativeApplicationCpu.count) {
+        // The caller work per cycle: the game's thread from one pose wait's
+        // return to the next, submits included. An older runtime sends none,
+        // and its pre-submit time is named as such.
+        const bool preSubmit = nativeCpuPreSubmit(s.nativeHistory);
         snprintf(v, sizeof(v), "%.1f", nativeApplicationCpu.meanMs);
-        snprintf(sub, sizeof(sub), "ms render thread; XR waits excluded");
-        tile("CPU TIME", v, sub);
+        snprintf(sub, sizeof(sub), preSubmit ? "ms; the runtime DLL is older" : "ms game thread per frame");
+        tile(preSubmit ? "CPU PRE-SUBMIT" : "CPU TIME", v, sub);
     } else if (ps.count && !native) {
         const PerfStats bs = perfStatsOf(busy, cnt);
         if (recentAppCpu > 0.0f) {
@@ -1494,8 +1505,11 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
         char gpuValue[24] = "--", cpuValue[24] = "--";
         if (haveGpu) snprintf(gpuValue, sizeof(gpuValue), "%.1f", render.meanMs);
         if (haveCpu) snprintf(cpuValue, sizeof(cpuValue), "%.1f", submit.meanMs);
-        snprintf(buf, bufLen, "%.0f fps   gpu %s ms   cpu %s ms",
-            perfFpsOf(ps.avgMs), gpuValue, cpuValue);
+        // "cpu" is the caller work per cycle, the line's width unchanged; an
+        // older runtime's stand-in says what it is.
+        snprintf(buf, bufLen, "%.0f fps   gpu %s ms   %s %s ms",
+            perfFpsOf(ps.avgMs), gpuValue, nativeCpuPreSubmit(s.nativeHistory) ? "cpu (pre-submit)" : "cpu",
+            cpuValue);
         return;
     }
     const char* cpuLabel = recent.appCount ? "cpu" : "thread";

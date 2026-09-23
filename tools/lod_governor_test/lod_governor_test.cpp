@@ -1,6 +1,11 @@
 // Build gate for the settlement LOD governor (src/d3d11/lod_governor.*,
-// fix.settlement_detail): the policy's steps and hysteresis on synthetic frame
-// sequences, auto's ramp and reduced's k_max-at-once; the engine arithmetic
+// fix.settlement_detail, shipped default auto): the policy's steps and
+// hysteresis on synthetic frame sequences, auto's ramp -- 0.25 a step while the
+// 30 samples behind it ran more than 1.0 ms over on average, 0.05 near the
+// target and always down, held to k_max (default 6, ceiling 8) -- and
+// reduced's k_max-at-once; the cockpit gate (on foot, per the journal
+// watcher's Status.json, k is 1 at once and held; one line per transition,
+// the frames counted in the summary); the engine arithmetic
 // the shadow repeats (FUN_1442B3FC0 / FUN_144308B30's distance, LOD distance,
 // LOD pick and the part test's screen-size term); the two observers on
 // synthetic engine memory laid out as the decompiles read it -- a render
@@ -86,6 +91,12 @@ uint64_t g_planeVerdict = 1;   // 1 inside every plane, 0xFFFFFFFF outside one
 uint64_t __fastcall fakePlanes(uintptr_t, const float*, const float*) { return g_planeVerdict; }
 LodGovernorFrustumFn g_frustumStub = &fakePlanes;
 LodGovernorFrustumFn kinematicEvalFrustumFn() noexcept { return g_frustumStub; }
+// The journal watcher, faked (journal_watch.h): on foot is whatever the case
+// sets; with the watcher inactive nothing is known, as in journal_watch.cpp.
+bool g_journalActive = true, g_onFoot = false;
+bool journalWatchActive() { return g_journalActive; }
+bool journalOnFootKnown() { return g_journalActive; }
+bool journalOnFoot() { return g_onFoot; }
 }  // namespace edvr
 
 using namespace edvr;
@@ -126,11 +137,12 @@ void table(std::vector<uint8_t>& b, size_t off, std::initializer_list<float> t, 
 void casePolicy() {
     using namespace lodgov;
     Policy p;
-    // The default ceiling is 4.0: k multiplies the s the game holds, the
-    // slider's floor is s = 1.5 and its maximum detail s = 1.0, and the LOD
-    // note's table needs s x k = 3 from there.
-    check(kDefaultMax == 4.0f && p.maxSteps() == 60 && p.kMax() == 4.0f && p.k() == 1.0f,
-          "policy: the default k_max is 4.0 (sixty steps); k starts at 1");
+    // The default ceiling is 6.0: k multiplies the s the game holds -- 1.0 at
+    // the slider's default, 1.5 at its floor -- and the removal levels off
+    // between an effective s x k of 4.5 and 6. The first acting flight held k
+    // 2.70-2.75 on s 1.5 (s x k ~4.1), which from s 1.0 takes k ~4.1.
+    check(kDefaultMax == 6.0f && kMaxCeiling == 8.0f && p.maxSteps() == 100 && p.kMax() == 6.0f && p.k() == 1.0f,
+          "policy: the default k_max is 6.0 (a hundred steps of 0.05, exactly), the ceiling 8; k starts at 1");
     p.configure(2.0f);
     check(p.maxSteps() == 20 && p.k() == 1.0f && p.kMax() == 2.0f, "policy: k_max 2.0 is twenty steps of 0.05; k starts at 1");
     uint64_t t = 1000;
@@ -151,7 +163,9 @@ void casePolicy() {
     check(!any && p.steps() == 0 && p.inSettlement(), "policy: 679 records within the 0.3 ms margin holds k at 1");
     for (int i = 0; i < 29; ++i) any |= frame(679, Work::Valid, 12.0) != Step::None;
     check(!any && p.overRun() == 29, "policy: 29 over-budget samples do not step");
-    check(frame(679, Work::Valid, 12.0) == Step::Up && p.steps() == 1 && p.k() == 1.05f, "policy: the 30th steps up by 0.05");
+    check(frame(679, Work::Valid, 12.0) == Step::Up && p.steps() == 1 && p.k() == 1.05f && p.upQuanta() == 1 &&
+              !p.upHeld(),
+          "policy: the 30th steps up by 0.05 (12.0 ms is 0.89 over: within 1.0, the fine step)");
     int ups = 0;
     for (int i = 0; i < 90; ++i) ups += frame(679, Work::Valid, 12.0) == Step::Up;   // 990 ms
     check(ups == 0, "policy: no second step inside the one-second ramp interval");
@@ -190,9 +204,166 @@ void casePolicy() {
     p.configure(std::numeric_limits<float>::quiet_NaN());
     check(p.maxSteps() == 0, "policy: a NaN k_max holds k at 1");
     p.configure(9.0f);
-    check(p.maxSteps() == 60 && p.kMax() == 4.0f, "policy: k_max is held to 4");
+    check(p.maxSteps() == 140 && p.kMax() == 8.0f, "policy: k_max is held to 8");
+    p.configure(6.0f);
+    check(p.maxSteps() == 100 && p.kMax() == 6.0f, "policy: k_max 6.0 is exactly 100 steps");
     p.configure(1.26f);
     check(p.maxSteps() == 5, "policy: k_max is quantised to the 0.05 step");
+}
+
+// auto's faster start (after the first acting flight, 2026-09-23: 80 s from k
+// 1 to 2.70 at 0.05 a step while the work sat 1.0-1.8 ms over): an up step is
+// 0.25 while the 30 samples that triggered it ran more than 1.0 ms over the
+// period on average, else 0.05; a down step is always 0.05; k stays quantised
+// to 0.05 and held to k_max. The trigger is unchanged: 30 consecutive samples
+// over by more than 0.3 ms, at most one step a second.
+void caseCoarsePolicy() {
+    using namespace lodgov;
+    const double period = 1000.0 / 90.0;
+    uint64_t t = 1000;
+    auto frame = [&](Policy& p, double ms, uint32_t records = 679) {
+        FrameSignals s;
+        s.records = records;
+        s.work = Work::Valid;
+        s.workMs = ms;
+        s.periodMs = period;
+        s.nowMs = t;
+        t += 11;
+        return p.update(s);
+    };
+    // The first acting flight's start: caller work 12.9 ms against 11.11.
+    Policy p;   // the default k_max, 6.0
+    int ups = 0, coarse = 0;
+    bool meanOk = true;
+    const uint64_t t0 = t;
+    uint64_t reachedMs = 0;
+    for (int i = 0; i < 2000 && p.k() < 2.5f; ++i) {
+        if (frame(p, 12.9) != Step::Up) continue;
+        ++ups;
+        if (p.upQuanta() == kCoarseQuanta && !p.upHeld()) ++coarse;
+        meanOk &= std::fabs(p.upMeanExcessMs() - (12.9 - period)) < 1e-9;
+        reachedMs = t - 11 - t0;   // the step's own frame
+    }
+    check(ups == 6 && coarse == 6 && p.steps() == 30 && p.k() == 2.5f,
+          "coarse: from k 1 at 12.9 ms against 11.11 the ramp reaches 2.50 in 6 steps of 0.25");
+    check(meanOk, "coarse: each step's mean excess is its 30 samples' own (1.79 ms)");
+    check(reachedMs > 5000 && reachedMs < 5600,
+          "coarse: ... in about 5.3 s -- the first step at the 30th sample, then one a second");
+    std::printf("lod_governor_test: ramp at 12.9 ms against 11.11 (90 Hz samples): k 1.00 -> %.2f in %d steps of "
+                "0.25, %.2f s\n", double(p.k()), ups, double(reachedMs) / 1000.0);
+    // Near the target, fine steps: 11.6 ms is 0.49 over.
+    int fine = 0, other = 0;
+    for (int i = 0; i < 300; ++i)
+        if (frame(p, 11.6) == Step::Up) (p.upQuanta() == 1 ? fine : other)++;
+    check(fine >= 2 && other == 0 && p.steps() == 30 + fine && p.upMeanExcessMs() < 1.0,
+          "coarse: at 11.6 ms (0.49 over) every step is 0.05");
+    // The mean is the latest 30 samples', not the whole run's: just after a
+    // step, 50 samples at 20 ms (inside the ramp interval: no step), then
+    // 11.6 ms until the next, and that step -- its run 90 samples long, its
+    // latest 30 at 11.6 -- is fine.
+    Step last = Step::None;
+    for (int i = 0; i < 400 && last == Step::None; ++i) last = frame(p, 11.6);
+    const int before = p.steps();
+    bool early = false;
+    for (int i = 0; i < 50; ++i) early |= frame(p, 20.0) != Step::None;
+    Step next = Step::None;
+    for (int i = 0; i < 400 && next == Step::None; ++i) next = frame(p, 11.6);
+    check(last == Step::Up && !early && next == Step::Up && p.upQuanta() == 1 && p.steps() == before + 1 &&
+              p.upMeanExcessMs() < 1.0,
+          "coarse: the size reads the 30 samples behind the step, not the run's older ones");
+    // Down is always 0.05, however far under (5.0 ms is 6.1 under).
+    for (int i = 0; i < 200; ++i) frame(p, 10.5);   // the dead band: holds, and the ramp interval passes
+    const int held = p.steps();
+    last = Step::None;
+    for (int i = 0; i < 30 && last == Step::None; ++i) last = frame(p, 5.0);
+    check(last == Step::Down && p.steps() == held - 1, "coarse: a down step is 0.05 however far under");
+    // The cap: k_max 2.1 from k 1 at 12.9 ms -- 1.25, 1.5, 1.75, 2.0, then 2.1
+    // (the rule's 0.25, held to k_max), then nothing.
+    Policy c;
+    c.configure(2.1f);
+    ups = 0;
+    bool heldLast = false;
+    for (int i = 0; i < 1000; ++i)
+        if (frame(c, 12.9) == Step::Up) {
+            ++ups;
+            heldLast = c.upHeld();
+        }
+    check(ups == 5 && heldLast && c.upQuanta() == kCoarseQuanta && c.steps() == 22 && c.k() == 2.1f,
+          "coarse: a 0.25 step is held to k_max (2.0 -> 2.1), and k stops there");
+    // The clamp: a lowered k_max brings k down at once.
+    c.configure(1.5f);
+    check(frame(c, 12.9) == Step::Clamp && c.k() == 1.5f, "coarse: a lowered k_max still clamps k at once");
+    // From below, without pumping: a synthetic caller work falling linearly
+    // with k through the first acting flight's two ends (12.9 ms at k 1, 10.6
+    // at 2.70). Coarse steps first, then fine ones, and it settles inside the
+    // dead band (period - 1.0 .. period + 0.3) with no step down.
+    Policy m;
+    int mCoarse = 0, mFine = 0, mDown = 0;
+    bool fineThenCoarse = false;
+    for (int i = 0; i < 5000; ++i) {   // 55 s
+        const double work = 12.9 - (12.9 - 10.6) / 1.7 * (double(m.k()) - 1.0);
+        const Step s = frame(m, work);
+        if (s == Step::Up) {
+            if (m.upQuanta() == kCoarseQuanta) {
+                ++mCoarse;
+                fineThenCoarse |= mFine > 0;
+            } else {
+                ++mFine;
+            }
+        }
+        if (s == Step::Down) ++mDown;
+    }
+    const double settled = 12.9 - (12.9 - 10.6) / 1.7 * (double(m.k()) - 1.0);
+    check(mCoarse >= 2 && mFine >= 2 && !fineThenCoarse && mDown == 0 && settled <= period + 0.3 &&
+              settled >= period - 1.0,
+          "coarse: on the flight's slope it steps coarse, then fine, and settles in the dead band without pumping");
+    std::printf("lod_governor_test: the flight's slope (12.9 ms at k 1, 10.6 at 2.70): %d steps of 0.25, then %d of "
+                "0.05, settling at k %.2f (work %.2f ms), %d down\n", mCoarse, mFine, double(m.k()), settled, mDown);
+}
+
+// The cockpit gate: on foot (Status.json via the journal watcher) k is 1 at
+// once and held there, exactly as outside a settlement; aboard again the ramp
+// starts over. reduced alike.
+void caseFootPolicy() {
+    using namespace lodgov;
+    uint64_t t = 1000;
+    auto frame = [&](Policy& p, bool foot, double ms, uint32_t records = 679) {
+        FrameSignals s;
+        s.records = records;
+        s.onFoot = foot;
+        s.work = Work::Valid;
+        s.workMs = ms;
+        s.periodMs = 1000.0 / 90.0;
+        s.nowMs = t;
+        t += 11;
+        return p.update(s);
+    };
+    Policy p;
+    for (int i = 0; i < 400; ++i) frame(p, false, 12.9);
+    check(p.k() > 1.0f && p.inSettlement(), "foot: in the cockpit at a busy settlement k has risen");
+    check(frame(p, true, 12.9) == Step::Foot && p.k() == 1.0f && !p.inSettlement() && p.overRun() == 0 &&
+              p.meanExcessMs() == 0.0,
+          "foot: on foot k is 1 at once, the settlement, the runs and the mean forgotten");
+    bool any = false;
+    for (int i = 0; i < 1000; ++i) any |= frame(p, true, 14.0) != Step::None;
+    check(!any && p.k() == 1.0f && !p.inSettlement(), "foot: held at 1 on foot, however long the frame and however dense");
+    p.configure(1.5f);
+    check(frame(p, true, 14.0) == Step::None, "foot: a lowered k_max on foot has nothing to clamp");
+    p.configure(6.0f);
+    Step last = Step::None;
+    for (int i = 0; i < 29; ++i) last = frame(p, false, 12.9);
+    check(last == Step::None && p.k() == 1.0f && p.inSettlement(), "foot: aboard again, 29 samples do not step");
+    check(frame(p, false, 12.9) == Step::Up && p.k() == 1.25f, "foot: the 30th steps, as from a fresh start");
+    // reduced: 1 on foot, k_max again aboard.
+    Policy r;
+    r.setFixed(true);
+    r.configure(3.0f);
+    check(frame(r, false, 9.0, 250) == Step::Enter && r.k() == 3.0f, "foot: reduced puts k at k_max in the cockpit");
+    check(frame(r, true, 9.0, 250) == Step::Foot && r.k() == 1.0f, "foot: reduced puts k at 1 on foot at once");
+    any = false;
+    for (int i = 0; i < 100; ++i) any |= frame(r, true, 9.0, 250) != Step::None;
+    check(!any && r.k() == 1.0f, "foot: reduced holds 1 on foot at a dense settlement");
+    check(frame(r, false, 9.0, 250) == Step::Enter && r.k() == 3.0f, "foot: reduced is k_max again aboard");
 }
 
 // reduced: k = k_max at once on entering a settlement, 1 on leaving it, no
@@ -776,26 +947,31 @@ void caseBoundary() {
                  "only; host older); the first runtime frame decides and a line names it", at),
           "boundary: before any runtime frame the configure line says the first frame names the signal");
     at = g_lines.size();
-    frames(2800, 250, 20, 12.5);   // 30.8 s, 250 records a frame; caller work 12.5 ms over budget, app work 6.5 under
+    // 30.8 s, 250 records a frame; caller work 11.6 ms, 0.49 over budget (the
+    // fine steps), app work 5.6 under.
+    frames(2800, 250, 20, 11.6);
     check(countLogged("settlement detail: frame work = caller work per cycle (runtime timing v5: the caller thread "
                       "from one pose wait's return to the next one's entry", at) == 1,
           "boundary: the first version 5 frame names the signal, once");
-    check(countLogged("settlement detail (observe only, never writes): k 1.00 -> 1.05, up", at) == 1,
-          "boundary: the first step is logged");
+    check(countLogged("settlement detail (observe only, never writes): k 1.00 -> 1.05, up 0.05: the frame work ran "
+                      "more than 0.30 ms over the period for 30 samples, their mean 0.49 ms over (1.00 ms or less: "
+                      "the fine step); 250 builder records", at) == 1,
+          "boundary: the first step is logged, 0.05, with the mean excess that sized it");
     check(countLogged("settlement detail (observe only, never writes): k ", at) >= 4 &&
               countLogged("settlement detail (observe only, never writes): k ", at) <= 7,
           "boundary: step lines are rate-limited to one per 5 s");
     check(logged("steps since the last line", at), "boundary: a rate-limited line counts the steps it skipped");
-    check(logged("250 builder records, frame work = caller work per cycle: 12.50 ms vs period 11.11 ms.", at) &&
+    check(logged("250 builder records, frame work = caller work per cycle: 11.60 ms vs period 11.11 ms.", at) &&
               !logged("-> LOD scale s x k", at),
           "boundary: a step line names the signal it stepped on; observing, it names no scale to write");
-    check(logged("k now 2.00, effective s x k 2.000 (window 1.00..2.00 of max 2.00; 20 up", at),
-          "boundary: the summary's k, effective s x k, range and steps");
+    check(logged("k now 2.00, effective s x k 2.000 (window 1.00..2.00 of max 2.00; 20 up (0 by 0.25), 0 down, 0 "
+                 "resets, 0 clamps; held on foot 0 frames)", at),
+          "boundary: the summary's k, effective s x k, range, steps and their size, and the frames held on foot");
     check(logged("builder records/frame 250.0 (max 250", at) && logged("part tests/frame 20.0", at),
           "boundary: the summary's density means");
-    check(logged("frame work = caller work per cycle: 12.50 ms mean vs period 11.11 ms", at) &&
+    check(logged("frame work = caller work per cycle: 11.60 ms mean vs period 11.11 ms", at) &&
               logged("invalid 0, caller work absent 0)", at),
-          "boundary: the summary's frame work is the caller work (not the 6.50 ms app work beside it) vs the period");
+          "boundary: the summary's frame work is the caller work (not the 5.60 ms app work beside it) vs the period");
     check(logged("LOD scale: game s 1.000 (the builder's read: no setter call yet), held 1.000 (k 2.00); setter calls 0 "
                  "(scaled 0) on 0 pointers", at) && !logged("NOT ACTING", at),
           "boundary: observing, the summary's LOD scale and a setter that never ran, without NOT ACTING");
@@ -839,8 +1015,8 @@ void caseBoundary() {
     check(logged("settlement detail: on (reduced, observe only: never writes (advanced.settlement_detail_observe = 1)) "
                  "-- k = 1.50 "
                  "(advanced.settlement_detail_max) at once from a frame with >= 200 draw-builder records, 1 after 30 "
-                 "frames under 150, no ramp", at) && g_attaches == 1,
-          "boundary: reduced's configure line says k_max at once, no ramp");
+                 "frames under 150 or on foot, no ramp", at) && g_attaches == 1,
+          "boundary: reduced's configure line says k_max at once, no ramp, 1 on foot");
     // Off mid-window: the partial summary, then the off line.
     at = g_lines.size();
     applyConfig("game", 1.5f, true, t);
@@ -887,8 +1063,11 @@ void caseBoundary() {
     at = g_lines.size();
     frames(2800, 250, 20, 14.4);   // version 5: caller 14.4 ms, app 8.4 ms beside it
     check(logged("frame work = caller work per cycle: 14.40 ms mean vs period 11.11 ms", at) &&
-              logged("settlement detail (observe only, never writes): k 1.00 -> 1.05, up", at) && !logged("k stayed 1", at),
-          "boundary: the first flight's frames (caller 14.4 ms, app 8.4 ms) step k up on the caller work");
+              logged("settlement detail (observe only, never writes): k 1.00 -> 1.25, up 0.25: the frame work ran more "
+                     "than 0.30 ms over the period for 30 samples, their mean 3.29 ms over (more than 1.00 ms: the "
+                     "coarse step)", at) &&
+              !logged("k stayed 1", at),
+          "boundary: the first flight's frames (caller 14.4 ms, app 8.4 ms) step k up on the caller work, by 0.25");
     applyConfig("game", 2.0f, true, t);
     // A version 5 frame whose runtime could not close the cycle before it
     // carries no caller work: an invalid sample, never the app work beside it
@@ -948,15 +1127,95 @@ void caseBoundary() {
           "boundary: an unknown value is named and treated as game");
     applyConfig("game", 2.0f, true, t);
     // The configure sweep with every key unset (the stub Config answers every
-    // default): off, the ceiling is the compiled 4.0, and observe is 0.
+    // default): the shipped fix -- auto, acting, the compiled k_max 6.0,
+    // observe 0.
     at = g_lines.size();
     lodGovernorConfigure(Config::get());
-    check(!g_live.load() && g_state.kMaxCfg == 4.0f && g_state.policy.kMax() == 4.0f && !g_state.observe &&
-              g_lines.size() == at,
-          "boundary: with the keys unset the governor stays off, k_max is the compiled 4.0 and observe is 0");
-    applyConfig("auto", lodgov::kDefaultMax, true, t);
-    check(logged("k in [1, 4.00]", at), "boundary: the default ceiling reads k in [1, 4.00] in the configure line");
-    applyConfig("game", lodgov::kDefaultMax, true, t);
+    check(g_live.load() && g_acting.load() && g_state.mode == Mode::Auto && g_state.kMaxCfg == 6.0f &&
+              g_state.policy.kMax() == 6.0f && !g_state.observe &&
+              logged("settlement detail: on (auto: acts by scaling the game's LOD scale", at) &&
+              logged("-- k in [1, 6.00]: up while a frame has >= 200 draw-builder records", at),
+          "boundary: with the keys unset the governor is on in auto and acts, k_max the compiled 6.0, observe 0");
+    applyConfig("game", lodgov::kDefaultMax, false, t);
+    at = g_lines.size();
+    applyConfig("", lodgov::kDefaultMax, false, t);
+    check(g_live.load() && g_state.mode == Mode::Auto && logged("settlement detail: on (auto:", at),
+          "boundary: an empty fix.settlement_detail is the compiled default, auto");
+    applyConfig("game", lodgov::kDefaultMax, false, t);
+}
+
+// The cockpit gate end to end, acting: on foot (the journal watcher's
+// Status.json) k is 1 at once and the engine's next rebuild keeps the game's
+// value; one line per transition; the summary counts the frames held; a
+// window wholly on foot says why k stayed 1; and with the watcher off the log
+// says once that on foot cannot be told, and the governor runs.
+void caseFootBoundary() {
+    Fake f;
+    table(f.recTable, 0, {0.9f, 0.1f, 0.2f}, 2);
+    uint64_t& t = g_t;
+    uint64_t& seq = g_seq;
+    g_standDown.store(nullptr);
+    auto frames = [&](uint32_t n, double ms) {
+        for (uint32_t i = 0; i < n; ++i) {
+            f.engineSetsScale(0.5f);   // the game's 1.5
+            if (g_obsSetter) g_obsSetter(f.ctxAt());
+            f.engineRecord();
+            for (uint32_t r = 0; r < 250; ++r)
+                if (g_obsBuilder) g_obsBuilder(0, f.ctxAt(), 0, f.nibbles());
+            setTiming(++seq, t, ms);
+            frameBoundaryAt(t);
+            t += 11;
+        }
+    };
+    g_onFoot = false;
+    g_journalActive = true;
+    size_t at = g_lines.size();
+    applyConfig("auto", 2.0f, false, t);
+    frames(400, 12.9);   // 4.4 s at 12.9 ms: 1.25, 1.5, 1.75, 2.0
+    check(g_acting.load() && g_state.policy.k() == 2.0f && f.scale() == 3.0f,
+          "foot: in the cockpit the ramp reaches k_max 2.0 in 0.25 steps, and 1.5 x 2 is in force");
+    const uint32_t scaled0 = g_setterScaled.load();
+    const size_t atFoot = g_lines.size();
+    g_onFoot = true;
+    frames(1000, 12.9);   // 11 s on foot, far over budget, dense
+    check(countLogged("settlement detail (acting): on foot (the game's Status.json, the flag the on-foot frame pacing "
+                      "reads): k 2.00 -> 1.00, held at 1 while on foot -- the governor is for the cockpit only", at) == 1 &&
+              g_state.policy.k() == 1.0f && f.scale() == 1.5f,
+          "foot: on foot, one line and k at 1 at once; the engine's rebuild keeps the game's 1.5");
+    check(g_setterScaled.load() - scaled0 == 1 && !logged("settlement detail (acting): k ", atFoot),
+          "foot: one rebuild's lag (the one before the boundary saw the flag), then nothing written and no step");
+    g_onFoot = false;
+    frames(1, 12.9);
+    check(countLogged("settlement detail (acting): no longer on foot (Status.json) after 11.0 s, 1000 frames held at "
+                      "k 1; the governor resumes", at) == 1,
+          "foot: aboard again, one line saying how long");
+    frames(1400, 12.9);   // to the 30 s summary; the ramp starts over
+    check(logged("held on foot 1000 frames); ", at) && g_state.policy.k() == 2.0f && f.scale() == 3.0f,
+          "foot: the summary counts the frames held on foot, and aboard the ramp has run again");
+    // A window wholly on foot: k stayed 1, and why. Switched on while on foot,
+    // the first boundary says so.
+    applyConfig("game", 2.0f, false, t);
+    g_onFoot = true;
+    at = g_lines.size();
+    applyConfig("auto", 2.0f, false, t);
+    frames(2800, 12.9);
+    check(countLogged("on foot (the game's Status.json", at) == 1 && logged("k 1.00 -> 1.00, held at 1 while on foot", at) &&
+              logged("held on foot 2729 frames); ", at) &&
+              logged("k stayed 1: on foot the whole window (the governor is for the cockpit only)", at) &&
+              !logged("up 0.", at) && f.scale() == 1.5f,
+          "foot: a window wholly on foot holds k at 1, writes nothing, and says why k stayed 1");
+    // The watcher off: nothing is known, the log says so once, the governor runs.
+    applyConfig("game", 2.0f, false, t);
+    g_journalActive = false;   // g_onFoot is still set: unknown is not on foot
+    at = g_lines.size();
+    applyConfig("auto", 2.0f, false, t);
+    frames(400, 12.9);
+    check(countLogged("settlement detail: the journal watcher is not reading the game's Status.json", at) == 1 &&
+              !logged("on foot (the game's Status.json", at) && g_state.policy.k() == 2.0f,
+          "foot: with the journal watcher off the log says once that on foot cannot be told, and the governor runs");
+    applyConfig("game", 2.0f, false, t);
+    g_journalActive = true;
+    g_onFoot = false;
 }
 
 // Acting end to end: auto and reduced write the game's LOD scale x k at the
@@ -1003,15 +1262,19 @@ void caseActingBoundary() {
                  "frame (FUN_142819D90): the game's value x k) -- k in [1, 2.00]", at),
           "acting: the configure line names the mode and the mechanism in one clause");
     at = g_lines.size();
-    frames(2800, 250, 20, 12.5);
-    check(countLogged("settlement detail: LOD scale scaled: game s 1.500 -> 1.575 (k 1.05), ctx 0x", at) == 1,
+    frames(2800, 250, 20, 12.5);   // 1.39 ms over: steps of 0.25
+    check(countLogged("settlement detail: LOD scale scaled: game s 1.500 -> 1.875 (k 1.25), ctx 0x", at) == 1,
           "acting: the first write to the builder's context is logged once, with the game's s and k");
     check(f.scale() == 3.0f && other.scale() == 1.5f,
           "acting: at k 2 the builder's context holds 3.0 after the rebuild; the other context keeps the game's 1.5");
-    check(logged("settlement detail (acting): k 1.00 -> 1.05, up: the frame work ran more than 0.30 ms over the period "
-                 "for 30 samples; 250 builder records, frame work = caller work per cycle: 12.50 ms vs period 11.11 ms "
-                 "-> LOD scale s x k 1.575.", at),
-          "acting: a step line names the LOD scale the next rebuild will write");
+    check(logged("settlement detail (acting): k 1.00 -> 1.25, up 0.25: the frame work ran more than 0.30 ms over the "
+                 "period for 30 samples, their mean 1.39 ms over (more than 1.00 ms: the coarse step); 250 builder "
+                 "records, frame work = caller work per cycle: 12.50 ms vs period 11.11 ms -> LOD scale s x k 1.875.",
+                 at),
+          "acting: a step line names its size, the mean excess, and the LOD scale the next rebuild will write");
+    check(logged("(window 1.00..2.00 of max 2.00; 4 up (4 by 0.25), 0 down, 0 resets, 0 clamps; held on foot 0 frames)",
+                 at),
+          "acting: the summary counts the steps of 0.25: 1 -> 2 in four");
     // The first window: 2729 frames of 11 ms, two rebuilds a frame, the
     // first 30 at k 1 (nothing to scale).
     check(logged("settlement detail (acting): 30.0 s, 2729 frames: k now 2.00, effective s x k 3.000", at) &&
@@ -1084,7 +1347,7 @@ void caseActingBoundary() {
           "acting: a refused setter hook is named, and the governor only observes");
     frames(2800, 250, 20, 12.5);
     check(f.scale() == 1.5f && logged("settlement detail (cannot act, observing): 30.0 s", at) &&
-              logged("settlement detail (cannot act, observing): k 1.00 -> 1.05, up", at),
+              logged("settlement detail (cannot act, observing): k 1.00 -> 1.25, up 0.25", at),
           "acting: without the setter hook nothing is written, and every line says why");
     applyConfig("game", 2.0f, false, t);
     g_setterStatusStub = "hooked";
@@ -1188,6 +1451,8 @@ int main(int argc, char** argv) {
         fn();
     };
     run("policy", casePolicy);
+    run("coarse policy", caseCoarsePolicy);
+    run("foot policy", caseFootPolicy);
     run("reduced policy", caseReducedPolicy);
     run("math", caseMath);
     run("observers", caseObservers);
@@ -1195,6 +1460,7 @@ int main(int argc, char** argv) {
     run("acting counts", caseActingCounts);
     run("threads", caseThreads);
     run("boundary", caseBoundary);
+    run("foot boundary", caseFootBoundary);
     run("acting boundary", caseActingBoundary);
     run("cost", caseCost);
     // Log::note (src/common/log.cpp) formats into 1200 bytes after a 15-byte
