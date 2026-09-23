@@ -18,7 +18,7 @@
 //     footprint weights; the door's arming and G1's "late"; the classifier
 //     gate's every refusal, in order.
 //   * the GPU half on WARP, with the production HLSL (ui_layer_shaders.h)
-//     and the production seed (ui_deferred_depth.h): a jittered quad
+//     and the production seed (ui_layer_seed.h): a jittered quad
 //     rasterised through the redirected viewport lands on exactly the pixels
 //     of the unjittered reference at 1.0 and 1.25, at all eight Halton
 //     phases -- and does not without the cancel, so the check has teeth;
@@ -44,7 +44,7 @@
 #include <vector>
 
 #include "../../src/common/temporal_math.h"
-#include "../../src/d3d11/ui_deferred_depth.h"
+#include "../../src/d3d11/ui_layer_seed.h"
 #include "../../src/d3d11/ui_layer_math.h"
 #include "../../src/d3d11/ui_layer_shaders.h"
 #include "../../src/d3d11/ui_quality_math.h"
@@ -362,8 +362,6 @@ void testGate() {
           "a target that is not the submitted eye's size");
     check(with([](UiLayerDrawFacts& g) { g.late = true; }) == UiLayerDecision::kLate, "late (G1)");
     check(with([](UiLayerDrawFacts& g) { g.armed = false; }) == UiLayerDecision::kNotArmed, "not armed");
-    check(with([](UiLayerDrawFacts& g) { g.replayOwns = true; }) == UiLayerDecision::kReplayOwns,
-          "the deferred replay's own capture");
     check(with([](UiLayerDrawFacts& g) { g.mrt = true; }) == UiLayerDecision::kMrt, "two targets");
     check(with([](UiLayerDrawFacts& g) { g.ds.stencilTest = true; }) == UiLayerDecision::kRedirect,
           "a stencil test the layer can seed is taken");
@@ -1606,7 +1604,7 @@ std::vector<uint8_t> readBackDs(Gpu& g, const Ds& d) {
 
 // The menu panel writes its footprint into stencil; a later draw tests it.
 // The layer takes the tester: the layer's depth-stencil target is seeded
-// from the game's (ui_deferred_depth.h's Seeder, the DLL's own) with the
+// from the game's (ui_layer_seed.h's Seeder, the DLL's own) with the
 // frame's jitter cancelled, the tester is drawn into the layer against it
 // through the redirected viewport, and the composite must equal the tester
 // drawn into the frame against an UNJITTERED footprint -- exactly, at 1.0
@@ -1617,7 +1615,7 @@ std::vector<uint8_t> readBackDs(Gpu& g, const Ds& d) {
 // -- the one error the seed makes, at a mask's rim; the last case measures
 // that it stays inside the rim's own row of pixels.)
 void testSeededStencil(Gpu& g) {
-    edvr_deferred_depth::Seeder seeder;
+    edvr_layer_seed::Seeder seeder;
     try {
         seeder.init(g.dev.Get());
     } catch (const std::exception& e) {

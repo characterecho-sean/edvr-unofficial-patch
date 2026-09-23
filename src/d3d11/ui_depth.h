@@ -40,13 +40,11 @@ void uiDepthConfigure(Config& cfg);
 // cross-TU call in a build with no /GL -- and it is asked from the subscriber
 // gate and again inside beginPanelOverride, every draw.
 //
-// uiDepthPlanetPending() and uiDepthReissuingScene() are published for the
-// same reason and are each the FIRST test of the function they guard, so a
-// call declined out here is a call that would have declined inside:
-//   - uiDepthPlanetBegin clears both pending flags and then returns false
-//     unless one of them was set; clearing flags that are already false is
-//     what the guard skips, and nothing else.
-//   - uiDepthDeferredEye returns -1 unless the mode is kReissueScene.
+// uiDepthPlanetPending() is published for the same reason and is the FIRST
+// test of the function it guards, so a call declined out here is a call that
+// would have declined inside: uiDepthPlanetBegin clears both pending flags
+// and then returns false unless one of them was set; clearing flags that are
+// already false is what the guard skips, and nothing else.
 // The MODE ITSELF moves here rather than a bool mirroring it. ui_depth.cpp
 // writes g_uiDepthMode in seven places, and a mirror maintained at seven call
 // sites is a desync waiting to happen -- the failure this codebase has paid
@@ -64,9 +62,6 @@ inline bool uiDepthWantsDraws() {
 }
 inline bool uiDepthPlanetPending() {
     return detail::g_uiDepthPlanetPending || detail::g_uiDepthPlanetSolarPending;
-}
-inline bool uiDepthReissuingScene() {
-    return detail::g_uiDepthMode == detail::UiDepthMode::kReissueScene;
 }
 
 // Every draw that did NOT land in an eye texture: learn the target as a UI
@@ -115,7 +110,6 @@ bool uiDepthLearnScannerChrome(ID3D11DeviceContext* ctx, uint64_t vs,
 // coverage reissue.  The flag is per-draw and is cleared by uiDepthEnd().
 void uiDepthSetTargetSeparated(bool separated);
 int uiDepthTargetSpriteEye();
-int uiDepthDeferredEye();
 // After the original private coverage draw, bind the same reissue shader to
 // clean sidecars and a private clean depth copy for one pure replay.
 bool uiDepthSeparatedReissueBegin(ID3D11DeviceContext* ctx);

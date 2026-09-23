@@ -471,7 +471,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\hud_grain.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_separation.cpp" ^
-    "src\d3d11\ui_deferred.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
@@ -1106,30 +1105,8 @@ if errorlevel 1 ( echo [edvr] ERROR: static surface consumer test build failed &
 "%OBJ%\staticsurfaceconsumer\static_surface_consumer_test.exe" || exit /b 1
 exit /b 0
 
-:rig_native_deferred_ui
-echo [edvr] === native deferred UI regression ===
-if not exist "%OBJ%\uideferredtest" mkdir "%OBJ%\uideferredtest"
-rem controller_test alone unity-builds ui_deferred.cpp (tools\ui_deferred_test\controller_test.cpp),
-rem which now calls into luma_probe.cpp's real implementation; depth_test/draw_test only
-rem exercise ui_deferred_depth.h/ui_deferred_draw.h and never reach it, so they stay in the
-rem shared loop below without it (and without its own Log::get() requirement).
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uideferredtest\\" /Fe"%OBJ%\uideferredtest\controller_test.exe" ^
-    "tools\ui_deferred_test\controller_test.cpp" ^
-    "src\d3d11\luma_probe.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
-if errorlevel 1 ( echo [edvr] ERROR: deferred UI controller_test build failed & exit /b 1 )
-"%OBJ%\uideferredtest\controller_test.exe" --self-test || exit /b 1
-for %%T in (depth_test draw_test) do (
-    cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-        /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-        /Fo"%OBJ%\uideferredtest\\" /Fe"%OBJ%\uideferredtest\%%T.exe" ^
-        "tools\ui_deferred_test\%%T.cpp" ^
-        /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
-    if errorlevel 1 ( echo [edvr] ERROR: deferred UI %%T build failed & exit /b 1 )
-    "%OBJ%\uideferredtest\%%T.exe" --self-test || exit /b 1
-)
+:rig_native_motion_rigs
+echo [edvr] === native motion, fusion and night-vision rigs ===
 
 if not exist "%OBJ%\holomotion" mkdir "%OBJ%\holomotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
@@ -2230,7 +2207,7 @@ REM (the menu panel's stencil write, a stencil test, read-only views); the
 REM composite's footprint; the door's arming and G1; every refusal of the
 REM gate, in order; the world-screen gate (the journal OR the screen's own
 REM depth count, with its hysteresis, journal off both ways); the route's
-REM per-eye-frame price sums. On WARP (ui_layer_shaders.h, ui_deferred_depth.h): a
+REM per-eye-frame price sums. On WARP (ui_layer_shaders.h, ui_layer_seed.h): a
 REM jittered quad through the redirected viewport lands on the unjittered
 REM pixels at all eight Halton phases; blended draws composited equal the same
 REM draws into the frame, a multiply included; a stencil-tested quad drawn
@@ -2245,4 +2222,16 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: ui quality test build failed & exit /b 1 )
 "%BUILD%\ui_quality_test.exe" --dry-run || exit /b 1
 "%BUILD%\ui_quality_test.exe" --self-test || exit /b 1
+REM The layer's depth-stencil seed on its own (ui_layer_seed.h): the three
+REM depth formats, every stencil value class, a scale, a jitter and a reused
+REM seeder, read back texel for texel. Built outside build\ so its imported
+REM D3D11CreateDevice resolves to System32's, not EDVR's proxy.
+if not exist "%OBJ%\uilayerseed" mkdir "%OBJ%\uilayerseed"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\uilayerseed\\" /Fe"%OBJ%\uilayerseed\seed_test.exe" ^
+    "tools\ui_layer_seed_test\seed_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui layer seed test build failed & exit /b 1 )
+"%OBJ%\uilayerseed\seed_test.exe" --self-test || exit /b 1
 exit /b 0

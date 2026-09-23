@@ -69,7 +69,6 @@
 #include "hud_grain.h"
 #include "ui_depth.h"
 #include "ui_separation.h"
-#include "ui_deferred.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
@@ -2920,7 +2919,7 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
     }
     if(rtv) {
         ID3D11Resource* destination=nullptr;rtv->GetResource(&destination);
-        uiSeparationResourceWrite(destination);uiDeferredResourceWrite(self,destination);if(destination)destination->Release();
+        uiSeparationResourceWrite(destination);if(destination)destination->Release();
     }
     // The census's record of this clear, before the probes and before
     // the void fix touches the colour: the line carries what the GAME
@@ -2968,20 +2967,19 @@ void STDMETHODCALLTYPE hookedClearUavUint(ID3D11DeviceContext* self,
                                           ID3D11UnorderedAccessView* uav,
                                           const UINT c[4]) {
     gpuFrameCommand(self);
-    if (!foreignContext(self)) {uiSeparationViewWrite(uav);uiDeferredViewWrite(self,uav);}
+    if (!foreignContext(self)) uiSeparationViewWrite(uav);
     g_state->realClearUavUint(self, uav, c);
 }
 void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
                                            ID3D11UnorderedAccessView* uav,
                                            const FLOAT c[4]) {
     gpuFrameCommand(self);
-    if (!foreignContext(self)) {uiSeparationViewWrite(uav);uiDeferredViewWrite(self,uav);}
+    if (!foreignContext(self)) uiSeparationViewWrite(uav);
     g_state->realClearUavFloat(self, uav, c);
 }
 void STDMETHODCALLTYPE hookedGenerateMips(ID3D11DeviceContext* self,
                                           ID3D11ShaderResourceView* srv) {
     gpuFrameCommand(self);
-    if(!foreignContext(self))uiDeferredViewWrite(self,srv);
     g_state->realGenerateMips(self, srv);
 }
 
@@ -3206,7 +3204,6 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (!privateExecution) {
         originalDrawProbeExecuteCommandListNote(self);
         uiSeparationUnknownWrite();
-        uiDeferredUnknownWrite(self);
         graphicsBridgeNoteUnknownExecution();
         motionResourceWritten(nullptr);
         celestialMotionConstantsUnknownWrite(nullptr);
@@ -3258,7 +3255,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // Nothing captured is waiting to flush (mesh_motion.h): the call would
     // only re-test pending.count and return.
     if (meshMotionAnyPending()) meshMotionBeforeMap(res);
-    if(type!=D3D11_MAP_READ && uiDeferredResourceWriteLive())uiDeferredResourceWrite(self,res);
     // Timed, not touched: the wait inside the runtime's Map is the game's
     // stall on the GPU, and the native timing line reports it (map_wait.h).
     //
@@ -3666,7 +3662,7 @@ void originalDrawNativeEnd(ID3D11DeviceContext* self,
 // real array that a D3D call writes into, and it still does, here, where the
 // array is. Only the hot path is relieved of it.
 __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
-    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
+    if(self==g_state->ownerCtx)uiSeparationUnknownWrite();
     State* s = g_state;
     const UINT total = s->qsIndexCount;
     const UINT cut0 = s->quadSkip.lo * 6;
@@ -3823,8 +3819,8 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
 }
 
 // forwardWithVerdict's re-issue of the game's own draw, straight to the
-// runtime, for the rare passes that draw it again (the deferred-UI world
-// replay, the tone separation, the interface depth re-issues). A NOINLINE
+// runtime, for the rare passes that draw it again (the tone separation, the
+// interface depth re-issues). A NOINLINE
 // function taking VALUES, where it used to be a [&] lambda: the flown
 // forwardWithVerdict built that lambda's closure -- the addresses of self,
 // kind, count, instances and args -- on every draw, which also pinned those
@@ -3940,18 +3936,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // compiler must reload across every call, and it was re-reading and
     // re-comparing it at each of a dozen sites per draw.
     const bool owner = self == g_state->ownerCtx;
-    // The deferred-UI family (ui_deferred.h): eight calls per owner draw, and
-    // every one of them returns without effect unless the feature is enabled
-    // or a diagnostic window was ever requested -- uiDeferredMayAct() is that
-    // condition, read inline. ui_deferred.h holds the proof, including why the
-    // two per-draw resets the family performs at entry are already in their
-    // reset state whenever this is false.
-    const bool uiDeferred = owner && uiDeferredMayAct();
-    if(uiDeferred){
-        uiDeferredTraceDrawEnter(self,g_state->rtv0Eye,kind,count,instances,
-                                 static_cast<uint32_t>(v));
-        uiDeferredBeforeDraw(self,kind,count,instances,args.start,args.base,args.startInstance,static_cast<uint32_t>(v));
-    }
     struct EffectCaptureScope {
         ID3D11DeviceContext* ctx;
         ~EffectCaptureScope(){if(ctx)objectProbeSourceDrawEnd(ctx);}
@@ -4007,7 +3991,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // because both swallow, and two swallows would draw the quads twice.
     // The resized panel, which swallows the draw only when it succeeds.
     if (v == DrawVerdict::kLoaderPanel) {
-        if(owner){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
+        if(owner)uiSeparationUnknownWrite();
         const bool layered = uiLayer && uiLayerBegin(self);
         const bool swallowed = loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
                                                      g_state->qsInstances,
@@ -4015,7 +3999,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         // The loader panel withholds the draw or forwards the game's own:
         // the second issues repeat the game's own, so they follow it.
         const bool issued = !swallowed && draw();
-        if (issued && uiDeferred) uiDeferredTraceOriginalIssued();
         if (layered) {
             uiLayerEnd(self);
             if (issued) uiLayerSecondIssues(self, kind, count, instances, args);
@@ -4030,7 +4013,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // succeeds and forwards it untouched when it does not -- so a failure
     // here is a flat screen, never a missing one.
     if (g_state->curveThisDraw) {
-        if(owner){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
+        if(owner)uiSeparationUnknownWrite();
         g_state->curveThisDraw = false;
         const bool layered = uiLayer && uiLayerBegin(self);
         const bool swallowed = panelCurveSubstitute(self, g_state->realDrawIndexedInstanced);
@@ -4047,18 +4030,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     const bool terrainOriginal=owner && celestialMotionLive() &&
         celestialMotionBeginOriginal(self,bindingShaderHash(BindSlot::Vs));
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
-    if(uiDeferred){uiDeferredTraceBeforeTone(self);uiDeferredBeforeTone(self,kind,count,instances,args.start,args.base,args.startInstance);}
-    const bool glassQueryActive=owner &&
-        bindingShaderHash(BindSlot::Vs)==kUiDeferredGlassVs && bindingShaderHash(BindSlot::Ps)==kUiDeferredGlassPs &&
-        g_state->gameQueries.countingActive();
-    // uiDepthDeferredEye() returns -1 unless the mode is kReissueScene, which
-    // uiDepthReissuingScene() answers inline (ui_depth.h): same value, no call
-    // on the draws that are not a scene re-issue. And uiDeferredBegin is
-    // false whenever uiDeferredMayAct() is (ui_deferred.h), so `deferred` is
-    // the same value on the draws that no longer make the call.
-    const bool deferred=uiDeferred && uiDeferredBegin(self,uiDepthReissuingScene()?uiDepthDeferredEye():-1,kind,count,instances,args.start,args.base,args.startInstance,
-        static_cast<uint32_t>(v),glassQueryActive);
-    originalMetadata.modified = terrainOriginal || deferred;
+    originalMetadata.modified = terrainOriginal;
     // The layer's bracket goes innermost: after the verdict's own Begin (a
     // RemLok scissor, a slot swap) so the layer maps the state the draw is
     // actually issued with, and around nothing but the game's own draw.
@@ -4070,10 +4042,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         uiLayerEnd(self);
         if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);
     }
-    if(originalIssued && uiDeferred)uiDeferredTraceOriginalIssued();
-    if(originalIssued && uiDeferred && uiDeferredWorldReplayBegin(self))
-        pureDrawReissue(self,kind,count,instances,args);
-    if(uiDeferred)uiDeferredEnd(self);
     // uiSeparationLive() first: bundled with fix.temporal_aa's external
     // engines, so with temporal off this was a call per draw that only ever
     // returned false (ui_separation.h). Same first test, inline.
@@ -4105,7 +4073,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // a second time, in full colour, over itself -- and the paths that
     // decline latch, so it would last the session (the pre-release review
     // of 2026-09-07). splashDimBegin below has had this shape all along.
-    if (!deferred && !layered && uiDepthScope.on && uiDepthWantsReissue()) {
+    if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {
         if (uiDepthReissueBegin(self)) {
             pureDrawReissue(self,kind,count,instances,args);
             if(uiDepthSeparatedReissueBegin(self)) {
@@ -4161,7 +4129,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
     uiAtlasNoteWrite(dst, 2);
-    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
+    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -4191,7 +4159,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     // target to, which says which way its depth runs. eye_mask learns
     // whether this is a re-clear of a target it already drew its ring
     // into this frame -- which would wipe the ring -- for its summary.
-    if (!foreignContext(self)) {uiDeferredViewWrite(self,dsv);depthProbeNoteClear(dsv, depth);eyeMaskOnClear(dsv);if(uiLayerWatching())uiLayerNoteDepthClear(dsv);}
+    if (!foreignContext(self)) {depthProbeNoteClear(dsv, depth);eyeMaskOnClear(dsv);if(uiLayerWatching())uiLayerNoteDepthClear(dsv);}
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
 
@@ -4246,7 +4214,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     }
     if (!foreignContext(self)) {
         uiSeparationUnknownWrite();
-        uiDeferredUnknownWrite(self);
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     }
@@ -4271,7 +4238,6 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     }
     if (!foreignContext(self)) {
         uiSeparationUnknownWrite();
-        uiDeferredUnknownWrite(self);
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     }
@@ -4289,7 +4255,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
                                                 ID3D11Buffer* dst, UINT off,
                                                 ID3D11UnorderedAccessView* src) {
     gpuFrameCommand(self);
-    if(!foreignContext(self)){uiDeferredResourceWrite(self,dst);motionResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
+    if(!foreignContext(self)){motionResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusStructCount(dst, off, src, foreignContext(self));
     }
@@ -4316,8 +4282,6 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         else motionResourceWritten(dst);
         celestialMotionConstantsUnknownWrite(dst);
         uiSeparationResourceWrite(dst);
-        uiDeferredResourceWrite(self,dst);
-        uiDeferredCopyRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,box);
         glitchFrameInvalidatePool(dst);
         if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
         if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
@@ -4355,7 +4319,6 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         else motionResourceWritten(dst);
         celestialMotionConstantsWritten(dst, data, box);
         uiSeparationResourceWrite(dst);
-        uiDeferredResourceWrite(self,dst);
         glitchFrameInvalidatePool(dst);
     }
     if (drawCensusArmed()) {
@@ -4395,7 +4358,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Resolve, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
-    if(!foreignContext(self)){uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
+    if(!foreignContext(self)){uiSeparationResourceWrite(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
     if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
@@ -4550,7 +4513,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     gpuFrameCommand(self);
-    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
+    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawAuto, kOriginalDrawProbeUnknown,
         kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
@@ -5315,7 +5278,6 @@ void vScreenRefreshConfig() {
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
-    uiDeferredConfigure(cfg);
     uiLayerConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
@@ -5518,7 +5480,6 @@ void vScreenFrameBoundary() {
         panelUpscaleFrameEnd();
         wakePulseReport();
         uiSeparationFrameBoundary();
-        uiDeferredFrameBoundary(g_state->ownerCtx);
         uiDepthFrameBoundary(g_state->ownerCtx);
         // fix.ui_quality: the layer's warm compile, the surfaces' five-second
         // cross-check and learning, the key's 30-second totals, and the end
@@ -6494,7 +6455,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
-    uiDeferredConfigure(cfg);
     uiLayerConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
@@ -6866,7 +6826,6 @@ void shutdownVScreenFixes() {
     remlokShutdown();
     holoShutdown();
     uiSeparationShutdown();
-    uiDeferredShutdown();
     uiDepthShutdown();
     uiLayerShutdown();
     screenMotionShutdown();

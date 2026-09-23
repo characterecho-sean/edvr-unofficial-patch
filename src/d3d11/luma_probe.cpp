@@ -1,5 +1,4 @@
 #include "luma_probe.h"
-#include "ui_deferred.h"
 #include "../common/log.h"
 
 #include <windows.h>
@@ -17,9 +16,9 @@ namespace {
 
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
 
-constexpr int kStages = 5;
+constexpr int kStages = 3;
 constexpr int kGrid = 16;
-constexpr const char* kStageNames[kStages] = {"game", "clean_hdr", "dlss_in", "dlss_out", "final"};
+constexpr const char* kStageNames[kStages] = {"game", "dlss_out", "final"};
 
 // A 5-bit-exponent, N-bit-mantissa unsigned mini-float, bias 15 -- the
 // shape shared by half floats (10-bit mantissa, plus a sign this helper
@@ -155,13 +154,12 @@ struct EyeState {
     StageSlot stages[kStages];
     LARGE_INTEGER lastReportQpc{};
     bool haveLastReport = false;
-    // Sentinel distinct from every real outcome (-1 = "none", 0..4 = a
+    // Sentinel distinct from every real outcome (-1 = "none", 0..2 = a
     // stage index), so the confirming line fires on the very first
     // report even when that report's answer is "none".
     int firstBlackStagePrev = -2;
     // Passes ended since the round was armed. A round is armed at the end
-    // of a pass, so the next frame's draws (where clean_hdr is sampled)
-    // and the next pass (the other four stages) both belong to it.
+    // of a pass, so the next pass's stages belong to it.
     int endsSinceArm = 0;
 };
 
@@ -172,10 +170,10 @@ void noteArmedOnce() {
     if (g_armedLogged) return;
     g_armedLogged = true;
     Log::get().note(
-        "luma probe: armed -- five stages sampled on a 16x16 grid every 2 s per eye: "
-        "game (the texture the game submits), clean_hdr (the deferred UI's world "
-        "snapshot), dlss_in (what DLSS receives), dlss_out (DLSS output before the UI "
-        "replay), final (the texture handed to the VR half).");
+        "luma probe: armed -- three stages sampled on a 16x16 grid every 2 s per eye: "
+        "game (the texture the game submits), dlss_out (the upscaler's output as the "
+        "pass hands it on, the UI resolve applied), final (the texture handed to the VR "
+        "half).");
 }
 
 void decodeSlot(StageSlot& slot, const D3D11_MAPPED_SUBRESOURCE& mapped) {
@@ -226,15 +224,10 @@ void formatStage(const StageSlot& slot, char* out, size_t outSize) {
     }
 }
 
-void reportRound(int eye, EyeState& es, const LumaProbeState& state) {
+void reportRound(int eye, EyeState& es) {
     char bufs[kStages][32];
     for (int s = 0; s < kStages; ++s) formatStage(es.stages[s], bufs[s], sizeof(bufs[s]));
-    Log::get().note(
-        "luma probe: eye=%d game=%s clean_hdr=%s dlss_in=%s dlss_out=%s final=%s | "
-        "deferred=%u sampled=%u aliases=%u draws=%u apply=%u",
-        eye, bufs[0], bufs[1], bufs[2], bufs[3], bufs[4],
-        state.deferredEnabled ? 1u : 0u, state.sampled ? 1u : 0u, state.aliases, state.draws,
-        state.applied ? 1u : 0u);
+    Log::get().note("luma probe: eye=%d game=%s dlss_out=%s final=%s", eye, bufs[0], bufs[1], bufs[2]);
 
     int firstBlack = -1;
     for (int s = 0; s < kStages; ++s) {
@@ -253,10 +246,9 @@ void reportRound(int eye, EyeState& es, const LumaProbeState& state) {
             else
                 snprintf(meanBufs[s], sizeof(meanBufs[s]), "-");
         }
-        Log::get().note(
-            "luma probe: eye=%d first black stage is %s (game %s clean_hdr %s dlss_in %s dlss_out %s final %s).",
-            eye, firstBlack < 0 ? "none" : kStageNames[firstBlack],
-            meanBufs[0], meanBufs[1], meanBufs[2], meanBufs[3], meanBufs[4]);
+        Log::get().note("luma probe: eye=%d first black stage is %s (game %s dlss_out %s final %s).", eye,
+                        firstBlack < 0 ? "none" : kStageNames[firstBlack], meanBufs[0], meanBufs[1],
+                        meanBufs[2]);
     }
 }
 
@@ -292,8 +284,7 @@ void armIfDue(EyeState& es) {
 void lumaProbeBegin(int eye) {
     noteArmedOnce();
     // Arming happens in lumaProbeEnd after the previous round is complete.
-    // This call only marks the probe live in the log; clean_hdr is sampled
-    // in deferred preparation after the world draw sequence has finished.
+    // This call only marks the probe live in the log.
     (void)eye;
 }
 
@@ -355,7 +346,7 @@ void lumaProbeSample(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye, in
     slot.waitFrames = 0;
 }
 
-void lumaProbeEnd(ID3D11DeviceContext* ctx, int eye, const LumaProbeState& state) {
+void lumaProbeEnd(ID3D11DeviceContext* ctx, int eye) {
     noteArmedOnce();
     if (eye < 0 || eye > 1) return;
     EyeState& es = g_eyes[eye];
@@ -388,7 +379,7 @@ void lumaProbeEnd(ID3D11DeviceContext* ctx, int eye, const LumaProbeState& state
         for (auto& slot : es.stages) {
             if (slot.status == SlotStatus::Empty) slot.status = SlotStatus::Absent;
         }
-        reportRound(eye, es, state);
+        reportRound(eye, es);
         es.armed = false;
         QueryPerformanceCounter(&es.lastReportQpc);
         es.haveLastReport = true;

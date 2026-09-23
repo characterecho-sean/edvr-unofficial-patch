@@ -33,12 +33,11 @@
 // screen's gamma pass) scales the layer and a per-channel transmittance the
 // composite applies to the frame. WHAT IT LEAVES: the cockpit's holo
 // panels, flight HUD and target sprite, which the game draws into the lit
-// HDR target before exposure and the tonemap -- the deferred UI replay
-// (ui_deferred.cpp, advanced.ui_replay) re-draws those after the upscale at
-// the output size under an external engine, and the layer, composited after
-// the tonemap, cannot take them without transcribing it; and any draw the
-// replay itself captured. Every family it leaves is named in the log with
-// the reason.
+// HDR target before exposure and the tonemap -- they stay in the picture the
+// upscaler reconstructs, steadied by the UI depth and the reactive mask, and
+// the layer, composited after the tonemap, cannot take them without
+// transcribing it. Every family it leaves is named in the log with the
+// reason.
 //
 // THE ORDER IT CHANGES, and the only one: anything the game drew into an
 // eye AFTER a redirected draw now lands UNDER it. The totals line counts

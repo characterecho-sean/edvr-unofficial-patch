@@ -794,9 +794,6 @@ enum class UiLayerDecision : uint8_t {
     kLate,           // its eye's composite already ran this frame (gate G1)
     kNotArmed,       // no door frame for this eye last frame (first frames,
                      // key just on, pass not running)
-    kReplayOwns,     // the deferred UI replay captured it (a post-tone copy
-                     // or a terminal-canvas tail) and redraws it after the
-                     // upscale itself: taking it too would draw it twice
     kMrt,            // more than one render target bound, or PS UAVs
     kDepthStencilTest,  // tests depth or stencil against a depth target the
                         // layer cannot reproduce at its size (the format, an
@@ -818,16 +815,13 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
             return "the screen shows the world (on foot, or a 3D map); the temporal pass keeps it";
         case UiLayerDecision::kNotEyeTarget: return "not drawn into an eye target";
         case UiLayerDecision::kHdrTarget:
-            return "drawn into the HDR target before the tonemap (left in the picture; under an "
-                   "external engine the deferred UI replay re-draws it after the upscale)";
+            return "drawn into the HDR target before the tonemap (left in the picture)";
         case UiLayerDecision::kVrs: return "variable-rate shading bound for the eye";
         case UiLayerDecision::kNoEye: return "eye unknown";
         case UiLayerDecision::kTargetSize:
             return "its target is not the size of the eye the game submits";
         case UiLayerDecision::kLate: return "arrived after its eye's composite (gate G1)";
         case UiLayerDecision::kNotArmed: return "layer not armed";
-        case UiLayerDecision::kReplayOwns:
-            return "the deferred UI replay already redraws it after the upscale";
         case UiLayerDecision::kMrt: return "more than one render target, or pixel-shader UAVs";
         case UiLayerDecision::kDepthStencilTest:
             return "tests depth or stencil against a target the layer cannot reproduce";
@@ -853,8 +847,7 @@ struct UiLayerDrawFacts {
     bool targetMatchesEye = true; // the target is the submitted region's size
     bool late = false;            // its eye's door already ran this frame
     bool armed = false;           // the door and the pass ran for it last frame
-    bool replayOwns = false;      // the deferred UI replay captured this draw
-    bool mrt = false;             // a second render target, or PS UAVs, bound
+    bool mrt = false;            // a second render target, or PS UAVs, bound
     UiDsEffect ds;                // what it does with the bound depth target
     bool dsReproducible = true;   // ... and whether the layer can seed its own
     bool substituted = false;     // drawn by a substitution's own geometry
@@ -875,7 +868,6 @@ inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
     if (!f.targetMatchesEye) return UiLayerDecision::kTargetSize;
     if (f.late) return UiLayerDecision::kLate;
     if (!f.armed) return UiLayerDecision::kNotArmed;
-    if (f.replayOwns) return UiLayerDecision::kReplayOwns;
     if (f.mrt) return UiLayerDecision::kMrt;
     if (f.ds.tests() && !f.dsReproducible) return UiLayerDecision::kDepthStencilTest;
     if (f.ds.writes() && f.substituted) return UiLayerDecision::kSubstitutedWrite;

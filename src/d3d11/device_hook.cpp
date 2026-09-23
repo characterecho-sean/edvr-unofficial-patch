@@ -50,7 +50,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "eye_draw_snapshot.h"
 #include "eye_tonemap_snapshot.h"
 #include "ui_separation.h"
-#include "ui_deferred.h"
 #include "static_surface.h"
 #include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
@@ -605,7 +604,6 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // vertices it is handed decides whether the curved screen is possible
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
-        uiDeferredRemember(static_cast<ID3D11VertexShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         staticSurfaceRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
@@ -631,7 +629,6 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
-        uiDeferredRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         staticSurfaceRememberPs(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
@@ -663,8 +660,8 @@ __declspec(noinline) void noteDeviceCreateFailure(size_t slot, HRESULT hr, const
 
 // Is this return address inside EDVR's own image? The CreateTexture2D hook
 // is a vtable slot, so its return address is its caller's: EDVR's own
-// creates (the temporal pass's targets, the deferred UI replay's, the UI
-// layer's) come from this module, the game's from its own. Two compares
+// creates (the temporal pass's targets, the UI layer's) come from this
+// module, the game's from its own. Two compares
 // against the image's extent, read once from its own headers.
 bool addressInEdvr(const void* address) {
     static const uintptr_t base = reinterpret_cast<uintptr_t>(&__ImageBase);

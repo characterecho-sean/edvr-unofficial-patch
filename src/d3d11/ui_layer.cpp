@@ -15,7 +15,7 @@
 
 #include "ui_layer_math.h"
 #include "ui_layer_shaders.h"
-#include "ui_deferred_depth.h"  // the Seeder: the game's depth-stencil at the layer's size
+#include "ui_layer_seed.h"  // the Seeder: the game's depth-stencil at the layer's size
 
 #include "binding_shadow.h"
 #include "depth_probe.h"   // depthProbeDrawsAtSize: the world-screen gate's own count
@@ -25,7 +25,6 @@
 #include "graphics_runtime.h"
 #include "journal_watch.h" // the on-foot gate's reading: Status.json's Flags2 bit 0, GuiFocus
 #include "shader_swap.h"
-#include "ui_deferred.h"   // uiDeferredRouteCapturedThisDraw: the replay's own draws
 #include "ui_depth.h"      // uiDepthEyeOfTarget: the eye, by the pass's own table
 #include "ui_panel_scale.h" // the engine-side panel sizing, configured and ticked with the key
 #include "ui_surfaces.h"   // the instruments: the target, the frame count, the atlas line
@@ -225,10 +224,10 @@ struct BlendEntry {
 BlendEntry g_blends[16];
 uint32_t g_blendCount = 0;
 
-// The seed's machinery: ui_deferred_depth.h's Seeder (rig-tested in
-// tools/ui_deferred_test/depth_test.cpp) on a deferred context, executed on
+// The seed's machinery: ui_layer_seed.h's Seeder (rig-tested in
+// tools/ui_layer_seed_test/seed_test.cpp) on a deferred context, executed on
 // the immediate one with its state restored.
-std::unique_ptr<edvr_deferred_depth::Seeder> g_seeder;
+std::unique_ptr<edvr_layer_seed::Seeder> g_seeder;
 Ptr<ID3D11DeviceContext> g_deferred;
 bool g_seederTried = false;
 
@@ -713,7 +712,7 @@ bool ensureSeeder(ID3D11Device* dev) {
     if (g_seederTried || !dev) return false;
     g_seederTried = true;
     try {
-        auto seeder = std::make_unique<edvr_deferred_depth::Seeder>();
+        auto seeder = std::make_unique<edvr_layer_seed::Seeder>();
         seeder->init(dev);
         Ptr<ID3D11DeviceContext> deferred;
         if (FAILED(dev->CreateDeferredContext(0, &deferred)) || !deferred) {
@@ -1968,9 +1967,8 @@ void uiLayerConfigure(Config& cfg) {
               "stays in the picture for the temporal pass (the game's Status.json says on foot, a "
               "second or so late; the screen's own depth, busy with the world, says so within "
               "two frames); the cockpit's holo panels, flight HUD and target sprite are drawn before "
-              "the tonemap and stay in the picture (advanced.ui_replay says whether the deferred "
-              "UI replay redraws them). Draws the layer takes get no UI depth and no reactive "
-              "mask.");
+              "the tonemap and stay in the picture, steadied by the UI depth and the reactive "
+              "mask. Draws the layer takes get no UI depth and no reactive mask.");
     if (debugView && temporal) {
         Log::get().note("ui quality: advanced.temporal_aa_debug = ui_layer -- the layer is shown "
                         "over black.");
@@ -2038,8 +2036,6 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             f.armed = uiLayerArmed(g_eye[f.eye].door, seq);
         }
     }
-    // The flag is only ever set, and consumed, while the replay may act.
-    f.replayOwns = uiDeferredMayAct() && uiDeferredRouteCapturedThisDraw();
     // The cheap facts first; the state reads only when none of them refused.
     f.blend = UiBlendShape::kOpaque;
     UiLayerDecision d = uiLayerDecide(f);

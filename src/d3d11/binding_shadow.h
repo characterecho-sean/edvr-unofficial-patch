@@ -113,9 +113,9 @@ struct ResourceInfo {
 // generation policy in the comment above is worth keeping in one place.
 // EDVR_BINDING_SHADOW_EXTERNAL: a standalone test rig that supplies its own
 // three readers defines this before including, and gets declarations instead.
-// Several rigs drive a fake shadow, and one of them (ui_deferred_test) asserts
-// how many hash reads the code under test performs -- a contract an inline
-// field read cannot keep, and worth keeping.
+// Several rigs drive a fake shadow, and a rig may assert how many hash reads
+// the code under test performs -- a contract an inline field read cannot
+// keep, and worth keeping.
 #ifndef EDVR_BINDING_SHADOW_EXTERNAL
 namespace detail {
 struct BindingSlot {
