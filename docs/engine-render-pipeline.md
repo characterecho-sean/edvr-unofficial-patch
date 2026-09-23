@@ -34,13 +34,15 @@ otherwise.
   instruments (hookedMap/mapWaitNote 0.40 ms, the draw-hook verdict
   lambda 0.20, the CreateBuffer hook 0.17, /GS cookies 0.16, guarded<>
   0.11, qpcNow 0.09, binding hash 0.11, ...) each run ~18k times per
-  frame; the cut is MEASURED in two rounds (engine arc, parked-4 and
-  parked-5 entries): the tail was cross-TU call overhead (/O2 without
-  /GL) and disabled features being called; EDVR's pre-submit leaf time
-  3.94 -> 3.25 -> 1.69 ms, the caller thread 15.1 -> 13.2 ms per frame,
-  still 45 fps because 13.2 ms does not fit a 90 Hz frame - the
-  per-draw lever is exhausted as a route to 90 Hz and bought 2 ms of
-  headroom for the draw-count lever. The cull design is RE-SCOPED to draw submission as the prize
+  frame; the cut is MEASURED in three rounds (engine arc, parked-4,
+  parked-5 and leg C entries): the tail was cross-TU call overhead (/O2
+  without /GL), disabled features being called, and forwarded game
+  calls sampled inside EDVR frames; EDVR's pre-submit leaf time 3.94 ->
+  3.25 -> 1.69 -> 1.19 ms. Stage 1's LODDistanceScale at 0.001 leaves
+  the parked view's draw count at 18.9k (parts swap meshes at the last
+  LOD levels, draws stay) - not a draw-count lever here - though with
+  MaterialQuality 0 it took ~1 ms off the game's own caller time and
+  0.5 ms off the GPU. Caller thread now 11.9 ms, GPU ~9.2, 50-52 fps. The cull design is RE-SCOPED to draw submission as the prize
   (design doc §8; the pipeline prize stays KILLED): same frustum-reject
   site, gate B' = the record -> draw join and the unseen share of the
   caller's draw time. B' DONE offline (design doc §9): the join is exact

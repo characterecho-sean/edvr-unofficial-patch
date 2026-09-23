@@ -61,17 +61,24 @@
   landing, r = 0.97 with job-0 samples), no step. Nothing of the design
   is built or will be. Entry: 2026-09-22 "Phase A, valid: KILL".
 
-* **Per-draw cut, round three (2026-09-22, BUILT + GATED, NOT FLOWN):**
-  parked-5's per-function numbers re-read against the flown DLL's own
-  disassembly: 0.67 ms/frame of the 2.74 ms innermost-EDVR population is
-  the game's forwarded D3D calls (realMap, CreateBuffer, Unmap,
-  CreateTexture2D, the draw itself), guarded<> is the COM calls inside it
-  (the guard is free), and the unordered_map find was ui_depth's holo
-  geometry on every Unmap, not the shader registry. Cut: ~20 per-draw
-  cross-TU calls behind their own first tests inline, the Unmap path's
-  holo finds, srv0IsPanelSized's /GS cookie, the wake pulse's per-draw
-  resolve, owns() in gpuFrameCommand, the shader memo 64 -> 1024.
-  Paper ceiling ~0.5 ms/frame. Entry: "Per-draw cut, round three".
+* **Per-draw cut, round three (2026-09-22, MEASURED on leg C,
+  2026-09-23):** parked-5's numbers re-read against the flown DLL: 0.67
+  ms/frame of the 2.74 ms innermost-EDVR population is the game's
+  forwarded D3D calls, guarded<> is the COM inside it, the map find was
+  ui_depth's holo geometry. Cut: ~20 per-draw cross-TU calls behind
+  inline first tests, the Unmap holo finds, srv0IsPanelSized's cookie,
+  the wake pulse resolve, owns(), the shader memo 1024. Measured: EDVR's
+  pre-submit leaf 1.69 -> 1.19 ms (3.94 at the baseline, -70% in three
+  rounds), the draw-hook line 2.11 -> 1.55, on the same 18.9k draws.
+  LODDistanceScale at 0.001 left the draw count at 18.9k (RULED OUT as
+  a draw-count lever at this view) but, together with MaterialQuality
+  0, bought ~1 ms of game-side caller time and 0.5 ms of GPU
+  (unattributed; leg A at 1.0/3 not flown). State of the caller thread
+  at this view: 11.9 ms per frame, GPU 8.9-9.5, 50-52 fps with the
+  runtime alternating full and half rate. Last ~0.5 ms that is ours:
+  the always-on instruments (map-wait QPC ~0.2, app GPU timing owner
+  check ~0.1) armed-only, and a fourth round on the resource hooks.
+  Entries: "Per-draw cut, round three", "Leg C".
 
 * **Open (arc OPEN on two levers; scope cockpit-only stereo):** (1)
   EDVR's per-draw path, NAMED (2026-09-22 per-draw entry: hookedMap +
@@ -2711,3 +2718,59 @@ count, on the round-three build; read against leg A (the same build at
 1.0 / 3 / 2) on the caller thread, the pipeline, the draw count and the
 GPU line. ruled out: nothing - this leg measures two knobs and no
 count.
+
+### 2026-09-23 -- Leg C (build\phaseA-parked-8, round-three build, LODDistanceScale 0.001 with MaterialQuality still 0): draws UNCHANGED at 18.9k, the caller thread 11.9 ms, EDVR's leaf 1.19 ms, 50-52 fps
+
+Flown on the installed round-three build 8c33258 (check exit 0),
+Pimax OpenXR 0.566, the same pad and heading (lat 68.067238 lon
+121.02597 heading 52), 18.5 s recorded (452 MB; 599 frames, 598
+covered; windows 7-8 partially). The fxcfg at launch: LODDistanceScale
+0.00100 (set by hand), MaterialQuality 0 (left from the previous
+leg), SurfaceMaterialQuality 2. Leg A (the same build at 1.0 / 3 / 2)
+was NOT flown, so the game-side changes below cannot be attributed
+between the two knobs; EDVR's own leaf time can, because it does not
+depend on them.
+
+| caller thread, per frame | parked-5 (round 2, 1.0/3/2) | parked-8 (round 3, 0.001/0/2), window 7 (304 frames) |
+|---|---|---|
+| runtime windows' fps | 45.2 | 50.1-51.6 (the trace's own frames: cycle 22.0 ms) |
+| R1 length / running | 9.08 / 8.90 | 7.96 / 7.81 |
+| R5c length / running | 5.03 / 3.83 | 4.39 / 3.29 |
+| R6 next wait | 6.66 | 8.33 |
+| caller running, whole cycle | 13.18 | 11.88 |
+| thread-summed pipeline | 5.10 | 4.91 |
+| R1 leaf: game exe / EDVR / sys d3d11 / kernel / ntdll / NVIDIA | 4.71 / 1.69 / 0.73 / 0.53 / 0.61 / 0.51 | 4.20 / 1.19 / 0.71 / 0.52 / 0.47 / 0.47 |
+| gfx "draw hook CPU" (estimate) | 2.11-2.13 | 1.52-1.60 |
+| app GPU (perf monitor) | 9.2-10.2 | 8.9-9.5 |
+| census eye draws per frame | ~18.3k (2026-09-19..21 flights) | 18,808 / 18,934 / 18,931 (three censuses) |
+
+**Round three works:** EDVR's pre-submit leaf time 1.69 -> 1.19 ms
+by top module (3.94 at the baseline: -70% in three rounds) and the
+draw-hook line 2.11 -> 1.55, on the same draw count; that is
+independent of the settings.
+
+**The LOD setting did not remove draws at this view.** At
+LODDistanceScale 0.001 the census still counts 18.8-18.9k eye draws
+per frame, the same as at 1.0. This is what the LOD note predicted for
+this range: 99% of admitted parts sit at the last two LOD levels and a
+lower level is a different mesh, not a removed draw; the 2026-09-21
+pass C's -18.7% was measured at another pose. ruled out:
+LODDistanceScale as a draw-count lever at the parked cockpit view,
+because 0.001 leaves the count at 18.9k.
+
+**What the settings did buy, unattributed:** the game's own pre-submit
+code -0.5 ms and its post-present code -0.5 ms on the same draw count,
+the pipeline -4%, the GPU -0.5 ms - cheaper meshes and materials per
+draw, from LOD 0.001 and/or MaterialQuality 0. With round three's
+-0.5 that puts the caller thread at 11.9 ms, 0.8 ms over a 90 Hz
+frame, and the runtime's rate moved from a steady 45 to 50-52 (it
+alternates between full and half rate when the app sits just over the
+period). Leg A at 1.0 / 3 / 2 on this build would split the game-side
+saving between the two knobs; MaterialQuality 0 is a large visual
+cost, LOD 0.001 at this view a smaller one.
+
+**Where the last millisecond is:** EDVR's remaining 1.19 ms leaf plus
+the instruments that are armed all session (the map-wait timer's QPC
+pair and locked adds ~0.2 ms; the default-on app GPU timing's per-
+command owner check ~0.1 ms) - making those armed-only and a fourth
+round on the resource hooks is ~0.4-0.6 ms; the rest is the game's.
