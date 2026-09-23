@@ -536,15 +536,17 @@ void backdropConfigure(Config& cfg) {
 bool backdropOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     uint32_t instances) {
     if (!detail::g_backdropOn || g_failed || !ctx) return false;
+    // The cheap half of the signature first, so a frame full of other draws
+    // costs two comparisons each -- and ahead of the journal below, which is
+    // a cross-TU call for one bool (/O2, no /GL). Both are pure reads, so
+    // only the order changed; backdropOnComposite made the same swap.
+    if (!backdropBlitShape(kind, count, instances)) return false;
     // This is the MENU's backdrop. The first field run had no such gate, kept
     // matching after LoadGame, and spent its rebuild budget on in-game
     // textures -- eye-draw count 22 (menu) to 724 (flying) in the same
     // session, the fix still hunting throughout. Once gameplay has started
     // there is no backdrop to fix and nothing here should run again.
     if (journalGameplay()) return false;
-    // The cheap half of the signature first, so a frame full of other draws
-    // costs two comparisons each.
-    if (kind != 'N' || count != 4 || instances != 1) return false;
 
     ID3D11ShaderResourceView* srv = static_cast<ID3D11ShaderResourceView*>(
         bindingGet(BindSlot::PsSrv0));
@@ -639,7 +641,7 @@ bool backdropOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // made for six-index quads rather than for every draw in the frame. 59
     // innermost samples of the 1349-frame window of 2026-09-22 were spent in
     // journalGameplay, reached from here.
-    if (kind != 'X' || count != 6 || instances != 1) return false;
+    if (!backdropCompositeShape(kind, count, instances)) return false;
     if (journalGameplay()) return false;
 
     void* srv = bindingGet(BindSlot::PsSrv0);

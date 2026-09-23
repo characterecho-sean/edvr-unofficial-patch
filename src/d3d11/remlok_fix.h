@@ -72,6 +72,15 @@ inline bool remlokWantsDraws() { return detail::g_remlokMode != detail::RemlokMo
 // per-frame arrival order -- the game draws the left eye's final block
 // first (EVIDENCE 6y.10), and advanced.remlok_swap_eyes exists for a rig
 // that proves otherwise.
+//
+// remlokOverlayShape is the shape half of that match, inline so the draw
+// path asks it before the call: remlokOnEyeDraw answers kNone, having
+// touched nothing, for any other shape. remlok_fix.cpp matches through this
+// same function.
+inline bool remlokOverlayShape(char kind, uint32_t count, uint32_t instances) {
+    // A fullscreen triangle, one instance, DrawInstanced ('N').
+    return kind == 'N' && count == 3 && instances == 1;
+}
 RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances);
 
 // Around the real draw, for kScissor: set a scissor-enabled rasterizer

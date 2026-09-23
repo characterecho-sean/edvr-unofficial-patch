@@ -82,7 +82,11 @@ extern float g_panelCurveCurvature;
 extern int   g_panelCurveSegments;
 extern float g_panelCurveZTest;
 }  // namespace detail
-inline bool panelCurveWants() {
+// __forceinline, not inline: beginPanelOverride is large enough that MSVC's
+// inliner declined this one and called an out-of-line copy per eye draw
+// (21 innermost samples of the 1355-frame parked-5 window; the built DLL of
+// 2026-09-22 round three still called it).
+__forceinline bool panelCurveWants() {
     if (detail::g_panelCurveStoodDown) return false;
     // Curvature 0 at the default segment count is the shipped state and does
     // nothing at all. A non-default segment count at curvature 0 is the

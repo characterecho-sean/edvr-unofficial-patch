@@ -467,6 +467,12 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
     // including multi-instance indices and restoration of both shader stages.
     {
         ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_holoMotion[0]=HoloMotion{};
+        // The inline write guard (ui_depth.h): the frame boundary recomputes
+        // it from both eyes' geometry maps, so with neither holding a corona
+        // it stands down, and a resource write then skips the body -- which
+        // could only have missed two empty maps.
+        g_holoMotion[1]=HoloMotion{};detail::g_holoGeometryTracked.store(true);uiDepthFrameBoundary(ctx.Get());
+        check(!detail::g_holoGeometryTracked.load(),"write guard stands down with no corona geometry tracked");
         auto code=compile(kOrbitalCoverageVs,"vs_5_0");hr(dev->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&g_orbitalVs));
         D3D11_INPUT_ELEMENT_DESC elements[]={{"POSTANGENT",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},{"OSTOWST",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,0,D3D11_INPUT_PER_INSTANCE_DATA,1},{"OSTOWSR",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,16,D3D11_INPUT_PER_INSTANCE_DATA,1},{"OSTOWSS",0,DXGI_FORMAT_R32G32B32_FLOAT,1,32,D3D11_INPUT_PER_INSTANCE_DATA,1},{"COLOUR",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,44,D3D11_INPUT_PER_INSTANCE_DATA,1}};
         ComPtr<ID3D11InputLayout> layout;hr(dev->CreateInputLayout(elements,5,code->GetBufferPointer(),code->GetBufferSize(),&layout));

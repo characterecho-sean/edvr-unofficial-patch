@@ -17,9 +17,13 @@
 
 namespace edvr {
 
-// The probe's arming, out here only so depth_probe.h can read it inline.
+// The probe's arming, out here only so depth_probe.h can read it inline --
+// and, since 2026-09-22 round three, the two fields depthProbeNoteEyeDraw's
+// one-compare common case reads, for depthProbeEyeDrawNeedsNote there.
 namespace detail {
 bool g_depthProbeWanted = false;
+void* g_depthProbeLastDsv = nullptr;
+bool g_depthProbeEyeDrawThisFrame = false;
 }  // namespace detail
 
 namespace {
@@ -87,7 +91,9 @@ struct Target {
 };
 Target   g_targets[kMaxTargets];
 int      g_targetCount = 0;
-void*    g_lastDsv = nullptr;
+// Bound to the published field depthProbeEyeDrawNeedsNote reads
+// (depth_probe.h), the g_wanted pattern below.
+void*&   g_lastDsv = detail::g_depthProbeLastDsv;
 void*    g_lastDrawDsv = nullptr;   // the per-draw fast path's cache
 int      g_lastDrawIdx = -1;
 // Bound to the published flag depthProbeWanted() reads (depth_probe.h), so
@@ -96,7 +102,7 @@ bool&    g_wanted = detail::g_depthProbeWanted;
 uint32_t g_distinctThisFrame = 0;
 uint32_t g_maxDistinct = 0;
 uint32_t g_eyeFrames = 0;   // frames that had at least one eye draw
-bool     g_eyeDrawThisFrame = false;
+bool&    g_eyeDrawThisFrame = detail::g_depthProbeEyeDrawThisFrame;   // likewise
 bool     g_summaryNoted = false;
 // The census of all draws, per frame.
 uint32_t g_drawsThisFrame = 0, g_drawsLastFrame = 0;

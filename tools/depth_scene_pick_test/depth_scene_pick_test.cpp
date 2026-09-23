@@ -654,6 +654,26 @@ int main(int argc, char** argv) {
         check(edvr::g_scenePickScans == configScan + 1,
               "reconfigure invalidates the last query");
 
+        // The draw path's inline eye-draw pre-check (depth_probe.h) against
+        // the callee's own common case: a frame's first eye draw is always
+        // noted, the same view again needs no call, and a different view or
+        // a new frame does. (A null view keeps the callee away from COM.)
+        {
+            int token = 0;
+            void* const other = &token;   // only ever handed to the predicate
+            edvr::depthProbeFrameBoundary(nullptr);
+            check(edvr::depthProbeEyeDrawNeedsNote(nullptr),
+                  "eye-draw pre-check: a frame's first eye draw reaches the note");
+            edvr::depthProbeNoteEyeDraw(context.Get(), nullptr, 1);
+            check(edvr::g_eyeDrawThisFrame && !edvr::depthProbeEyeDrawNeedsNote(nullptr),
+                  "eye-draw pre-check: the same view again is the note's one-compare return");
+            check(edvr::depthProbeEyeDrawNeedsNote(other),
+                  "eye-draw pre-check: a different view reaches the note");
+            edvr::depthProbeFrameBoundary(nullptr);
+            check(edvr::depthProbeEyeDrawNeedsNote(nullptr),
+                  "eye-draw pre-check: a new frame reaches the note again");
+        }
+
         const uint32_t shutdownScan = edvr::g_scenePickScans;
         edvr::depthProbeShutdown();
         scene(100, 100, 0, false);

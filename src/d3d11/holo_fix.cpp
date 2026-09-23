@@ -30,6 +30,10 @@ constexpr uint32_t kInstances = 1;
 constexpr uint32_t kPatternW = 256;
 constexpr uint32_t kPatternH = 256;
 constexpr uint32_t kPatternFmt = 70;   // BC1-class, as the census resolves it
+// The shape test itself is holoPatternShape (holo_fix.h), inline so the draw
+// path can ask it first; it must say what the three constants above say.
+static_assert(kKind == 'X' && kIndices == 6 && kInstances == 1,
+              "holoPatternShape (holo_fix.h) must match the composite's measured shape");
 
 uint32_t g_level = 255;      // the uniform's channel value, live-tuned
 
@@ -131,7 +135,7 @@ void holoConfigure(Config& cfg) {
 
 bool holoOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     if (!detail::g_holoSteady) return false;
-    if (kind != kKind || count != kIndices || instances != kInstances) {
+    if (!holoPatternShape(kind, count, instances)) {
         return false;
     }
     // Slot 1 first: the 256x256 pattern is the cheaper resolve and the rarer

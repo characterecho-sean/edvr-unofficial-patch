@@ -95,7 +95,7 @@ void nightVisionConfigure(Config& cfg){
     configured=true;enabled=on;pulseEnabled=pulse;brightness=gain;
 }
 bool nightVisionMatches(char kind,uint32_t count,uint32_t instances){
-    return variant()!=0 && !state.failed[variant()] && kind=='X' && count==240 && instances==1 &&
+    return variant()!=0 && !state.failed[variant()] && nightVisionShape(kind,count,instances) &&
         bindingShaderHash(BindSlot::Vs)==0xFCF7BD2896751D96ull &&
         bindingShaderHash(BindSlot::Ps)==0xF786D34B5E118D5Eull;
 }

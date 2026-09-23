@@ -51,6 +51,13 @@ inline bool holoWantsDraws() { return detail::g_holoSteady; }
 // discriminator is what it samples: slot 0 resolves to the eye-sized depth
 // texture and slot 1 to the 256x256 pattern. True means the thunk should
 // wrap the draw in holoBegin/holoEnd.
+//
+// holoPatternShape is the shape half, inline so the draw path asks it before
+// the call: holoOnEyeDraw answers false, having resolved nothing, for any
+// other shape. holo_fix.cpp matches through this same function.
+inline bool holoPatternShape(char kind, uint32_t count, uint32_t instances) {
+    return kind == 'X' && count == 6 && instances == 1;   // a 6-index quad, one instance
+}
 bool holoOnEyeDraw(char kind, uint32_t count, uint32_t instances);
 
 // Around the real draw: bind the uniform texture into PS slot 1, restore

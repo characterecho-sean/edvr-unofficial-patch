@@ -34,6 +34,10 @@ constexpr uint32_t kVertices = 3;
 constexpr uint32_t kInstances = 1;
 constexpr uint32_t kSrvW = 1024;
 constexpr uint32_t kSrvH = 512;
+// The shape test itself is remlokOverlayShape (remlok_fix.h), inline so the
+// draw path can ask it first; it must say what the three constants say.
+static_assert(kKind == 'N' && kVertices == 3 && kInstances == 1,
+              "remlokOverlayShape (remlok_fix.h) must match the overlay's measured shape");
 
 float g_keep = 0.55f;
 bool  g_swap = false;
@@ -230,7 +234,7 @@ float effectiveScale() {
 
 RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     if (detail::g_remlokMode == Mode::kStock) return RemlokAction::kNone;
-    if (kind != kKind || count != kVertices || instances != kInstances) {
+    if (!remlokOverlayShape(kind, count, instances)) {
         return RemlokAction::kNone;
     }
     // The overlay binds no depth; scene and HUD draws do. Checked before the

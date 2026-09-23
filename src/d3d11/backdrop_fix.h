@@ -106,6 +106,14 @@ inline bool backdropWantsDraws() { return detail::g_backdropOn; }
 // True means the substitute is built and ready to bind, so the caller should
 // wrap the draw in backdropBegin/backdropEnd. A first match builds it; a
 // build that fails answers false forever after and says why once.
+//
+// backdropBlitShape is the shape half (a four-vertex Draw*Instanced, one
+// instance), inline so the draw path asks it before the call: the call was
+// made for every offscreen draw and answered false, having touched nothing,
+// for any other shape. backdrop_fix.cpp matches through this same function.
+inline bool backdropBlitShape(char kind, uint32_t count, uint32_t instances) {
+    return kind == 'N' && count == 4 && instances == 1;
+}
 bool backdropOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     uint32_t instances);
 
@@ -115,6 +123,12 @@ bool backdropOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 // yes. True means the caller should wrap the draw in backdropBegin/End, which
 // hands the composite our FULL-RESOLUTION bake and so bypasses the engine's
 // downsample of the still into a smaller intermediate.
+//
+// backdropCompositeShape is its shape half (the six-index quad, one
+// instance), inline for the same reason as backdropBlitShape above.
+inline bool backdropCompositeShape(char kind, uint32_t count, uint32_t instances) {
+    return kind == 'X' && count == 6 && instances == 1;
+}
 bool backdropOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                          uint32_t instances);
 
