@@ -14,9 +14,11 @@
   B' on evidence — the hiding surface is 89.6% open panels, qualified
   solid occluders remove zero draws — and no cull code was built
   ("Gate probe flown", "Probe v2 flown"). The settlement LOD governor
-  has flown twice in shadow; its acting mode is BUILT (4200182, merged
-  in b55e06b) but NOT FLOWN ("The settlement LOD governor, SHADOW
-  MODE", "Shadow flight 1", "Shadow flight 2").
+  has flown twice in shadow; acting mode FLOWN once ("First acting
+  flight"): k settled at 2.70-2.75 (s x k 4.05-4.13), caller work
+  12.9 -> 10.6 ms, 50 -> 71-75 fps, 0 faults, 0 disagreements, nothing
+  noticed visually; refinements and the shipped default (auto) IN
+  BUILD, not merged.
 
 * **Levers still open:** the draw count, now via the LOD governor's
   unflown acting mode; the last ~0.4-0.6 ms of EDVR's own per-draw
@@ -32,9 +34,7 @@
   visibility prize, measured"); the per-record identity/change signal
   (motion arc); ring-buffer command consumers, the scheduler still
   unnamed ("offline consumer/scheduling trace closed"); leg A at LOD
-  1.0 / MaterialQuality 3 unflown ("Leg C"); the perf monitor's CPU
-  figure is the pre-submit phase only, not caller work ("Shadow
-  flight 2").
+  1.0 / MaterialQuality 3 unflown ("Leg C").
 
 * **Ruled out (pointers, do not re-propose):** merge-key control of
   any kind — the key is an incidental audio counter ("offline
@@ -52,10 +52,10 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next flight:** the first ACTING flight, parked at Cranfield,
-  fix.settlement_detail = auto, advanced.settlement_detail_observe =
-  0, k_max 4 — docs\design-settlement-lod-bias-2026-09-22.md section
-  9's checklist.
+* **Next flight:** the refined build: default slider (s = 1.0),
+  fix.settlement_detail = auto, k_max 6: the coarse ramp should reach
+  the operating point in ~10 s; then an approach leg for popping
+  during the ramp.
 
 ## Frame budget philosophy
 
@@ -2904,3 +2904,106 @@ at a settlement; advanced.settlement_detail_observe = 1 keeps the
 prior shadow-only behaviour. The caller-work signal is
 EdvrNativeTimingFrame::callerWorkMs (timing ABI v5), landed by
 73bfab3.
+
+### 2026-09-23 -- First acting flight (b55e06b): the governor finds and holds its operating point, 50 -> 71-75 fps at the parked pad, unnoticed from the cockpit
+
+Build v0.17.0-370-gb55e06b (edvr_log.py --expect-build b55e06b exit
+0), 03:30-03:35 local (gfx log edvr_gfx_20260923_033053.log; runtime
+log edvr_openxr_20260923_033054_701_6520.log, UTC). Parked at
+Cranfield, same spot and settings as the shadow flights
+(LODDistanceScale 0.001, so the game's s = 1.500, MaterialQuality 0),
+fix.settlement_detail = auto, advanced.settlement_detail_observe = 0,
+k_max 4 (compiled default). Sean's report: nothing visible at first,
+fps in the upper 40s, then as time went on it jumped into the 80s;
+nothing different visually in the parked scene.
+
+**Hooked and acting.** Configure line at 03:30:53: "acts by scaling
+the game's LOD scale right after the engine sets it each frame
+(FUN_142819D90)", builder, part test and LOD-scale setter hooked,
+plane test matched. First "LOD scale scaled: game s 1.500 -> 1.575
+(k 1.05)" line at 03:32:34.
+
+**The ramp.** First step up at 03:32:34 (14.35 ms vs 11.11), monotone
+up with NO down steps to 2.70 at 03:33:53 (80 s, one 0.05 step per
+~2.4 s: each needs 30 consecutive over-budget samples), a pause, 2.75
+at 03:34:48, reset to 1.00 at 03:35:03 (under 150 records for 30
+frames: Sean left the view). The 80 s ramp is the one fault Sean felt.
+
+**30 s summaries** (window end local; frames; k; s x k; caller work
+mean ms; over/under-budget samples):
+
+| end | frames | k | s x k | caller work | over/under |
+|---|---|---|---|---|---|
+| 03:32:53 | 1507 (loading in) | 1.00 -> 1.75 (15 up, 0 down) | 2.625 | 12.88 | 1267/107 |
+| 03:33:23 | 1669 | -> 2.30 (11 up) | 3.450 | 12.42 | 1289/79 |
+| 03:33:53 | 1814 | -> 2.70 (8 up) | 4.050 | 12.07 | 1197/75 |
+| 03:34:23 | 2344 | 2.70 HELD (0 up, 0 down) | 4.050 | 10.62 | 392/728 |
+| 03:34:53 | 2111 | -> 2.75 (1 up) | 4.125 | 11.15 | 731/280 |
+
+At 03:34:23 the work sat inside the dead band (10.11-11.41 ms), 0
+up/0 down. Every settlement window: LOD scale game s 1.500, held =
+s x k; setter calls 2 per frame, scaled exactly once per frame
+(1814/1814, 2344/2344, 2111/2111) on 1 pointer (called with 2;
+builder contexts 1); implausible 0; faults 0; disagreements at the
+held scale: parts 0, records 0; builder records 680 per frame on
+every frame from 03:33:23 (no oscillation: checklist item 7 met).
+
+**Per eye (A / B, per frame).** Window ending 03:33:53 (s x k ->
+4.05): parts tested 6169 / 6230 (all at EDVR's scale), engine passed
+4865 / 5021, dropped (the game's setting would have kept it) 487 /
+519 (max 891), LOD level changed 296 / 305, records passed 519.2.
+Window ending 03:34:23 (4.05 held): tested 6158 / 6192, passed 4800 /
+4914, dropped 532 / 574 (max 578), level changed 280 / 292, records
+passed 529.0; dropped angular radius, eye A over the window: < 0.25
+deg 66.5k, 0.25-0.5 236k, 0.5-1 465k, >= 1 deg 479k (per frame 28 /
+101 / 198 / 204). Window ending 03:34:53 (4.125): tested 6178 / 6045,
+passed 4729 / 4712, dropped 549 / 582 (max 609), records passed
+528.7. Plane test not run 0. Other views: dropped 19-215 per frame.
+
+Against shadow flight 2 at k = 1 (parts tested ~10.5k, passed ~9.6k,
+records passed ~605): at s x k 4.05 the engine passes ~4.85k parts
+per eye (-49%) and 529 records (-12.6%); acting's own "dropped" count
+(532-582) is the lower bound the design note predicted (records that
+lost the eye never reach the builder); the fall of "engine passed" is
+the whole effect.
+
+**Runtime cycle instrument** (window end local; cycle mean ms (p50);
+before_1st_submit; post_2nd_to_wait; next_wait_roundtrip; caller
+work; fps):
+
+| end | cycle mean (p50) | before_1st | post_2nd | next_wait | caller work | fps |
+|---|---|---|---|---|---|---|
+| 03:33:12 | 18.21 (21.16) | 7.28 | 4.71 | 5.65 | 12.56 | 54.9 |
+| 03:33:42 | 17.51 (20.78) | 7.28 | 4.52 | 5.15 | 12.36 | 57.1 |
+| 03:34:12 | 14.06 (11.49) | 6.64 | 3.93 | 2.93 | 11.13 | 71.1 |
+| 03:34:42 | 13.26 (11.36) | 6.44 | 3.86 | 2.42 | 10.85 | 75.4 |
+
+All windows admitted = valid. From k 2.7 the MEDIAN cycle is one
+90 Hz slot (11.4-11.5 ms) with a two-slot tail (p95 22 ms): mean
+71-75 fps, runs in the 80s. Part of the gain is the game's own: as
+fps rose, its pre-submit work fell 7.28 -> 6.44 ms and its
+post-submit work 4.71 -> 3.86 ms (per-frame work that scales with
+frame time).
+
+**Verdict: the acting mode works and is safe at this view.** The
+governor found and held its operating point (k 2.70-2.75, s x k
+4.05-4.13, caller work 10.6-11.2 ms inside the dead band); the visual
+cost at s x k 4 was not noticed from the cockpit with ~half the eye
+parts and 13% of the records gone. Checklist items 1-8 met (8:
+nothing noticed; design-settlement-lod-bias-2026-09-22.md section 8);
+item 9 not exercised (Sean quit rather than switching to game).
+
+**Decisions after the flight (Sean, 2026-09-23), all IN BUILD by two
+agents, not merged:** a faster start (up steps of 0.25 while the 30
+triggering samples average more than 1.0 ms over the period, 0.05
+near the target; down steps stay 0.05; no warm start); the perf
+monitor's CPU figure becomes the caller work per cycle (timing v5),
+with the pre-submit figure as the labelled fallback; promote
+fix.settlement_detail to a shipped fix (compiled default auto, live
+in edvr.ini, in the F8 settings menu and the installer's settings
+app, README and release notes); k_max default raised to 6 and the
+ceiling to 8, because the default slider holds s = 1.0 (Sean is
+restoring it); acting gated to the cockpit (on foot holds k = 1)
+until an on-foot flight.
+
+ruled out: nothing new this flight.
