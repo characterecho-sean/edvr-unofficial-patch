@@ -36,7 +36,6 @@
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "ui_resolve.h"
 #include "ui_separation.h"
-#include "ui_deferred.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
 #include "celestial_motion.h"
@@ -371,11 +370,10 @@ struct EyeState {
     ID3D11Texture2D*           dlOut = nullptr;
     ID3D11UnorderedAccessView* dlOutUav = nullptr;   // the debug motion view paints here
     ID3D11ShaderResourceView*  dlOutSrv = nullptr;   // the fovea composite reads NVIDIA's crop through this
-    ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out. The fovea path's UI resolve/deferred replay (below, sharing the trained block's own logic) write the composite's finished frame in here too, sized foW x foH, the same value as oW x oH
+    ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out. The fovea path's UI resolve (below, sharing the trained block's own logic) writes the composite's finished frame in here too, sized foW x foH, the same value as oW x oH
     ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
     bool                      uiResolvedHistory = false;
     bool                      uiSeparatedHistory = false;
-    bool                      uiDeferredHistory = false;
     bool                      screenHistory = false;
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
@@ -435,9 +433,9 @@ struct EyeState {
     // an SRV to hand the shared UI resolve helper in NVIDIA's-output's
     // role (dlSubmit is a submit-only target, never bound as an SRV), and
     // a same-resource SRV+UAV bind is never safe within one dispatch.
-    // dlSubmit above holds the FINAL frame once the resolve or the
-    // deferred replay has run on this texture; when neither runs, this
-    // texture is itself what goes out.
+    // dlSubmit above holds the FINAL frame once the resolve has run on
+    // this texture; when it does not run, this texture is itself what goes
+    // out.
     ID3D11Texture2D*           foveaOut = nullptr;
     ID3D11UnorderedAccessView* foveaOutUav = nullptr;
     ID3D11ShaderResourceView*  foveaOutSrv = nullptr;   // the shared UI resolve helper reads the composite through this, standing in for NVIDIA's output
@@ -518,7 +516,6 @@ void releaseDl(EyeState& e) {
     if (e.dlSubmitUav) { e.dlSubmitUav->Release(); e.dlSubmitUav = nullptr; }
     e.uiResolvedHistory = false;
     e.uiSeparatedHistory = false;
-    e.uiDeferredHistory = false;
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
     e.dlHaveHistory = false;
@@ -1724,7 +1721,7 @@ bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
 uint32_t         g_eyeRawInputW[kEyeRun] = {}, g_eyeRawInputH[kEyeRun] = {};
 uint32_t         g_eyeCaptureFrame = 0; // current scene frame, stamped before treatment
-enum class EyeUiMode : uint8_t { None, Legacy, Separated, Deferred };
+enum class EyeUiMode : uint8_t { None, Legacy, Separated };
 struct EyeDecisionFrame {
     uint32_t frame = 0, diagnosticFrame = 0;
     uint32_t inputW = 0, inputH = 0, outputW = 0, outputH = 0;
@@ -2328,7 +2325,6 @@ const char* eyeUiModeName(EyeUiMode mode) {
     switch (mode) {
     case EyeUiMode::Legacy: return "legacy";
     case EyeUiMode::Separated: return "separated";
-    case EyeUiMode::Deferred: return "deferred";
     default: return "none";
     }
 }
@@ -5015,22 +5011,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         bool foveaMode = false;
         bool foveaComposited = false;
         bool foveaEvalOk = false;   // the crop eval ran and NVIDIA accumulated: history is live
-        // UI parity on the fovea path: this path's own deferredInput (the
-        // full-frame trained block's own copy, below, falls out of scope
-        // before the compose runs). Non-null once uiDeferredPrepare has
-        // captured this frame's UI against e.dlSubmit, for uiDeferredApply
-        // to replay after the compose writes it. deferredActive (declared
-        // with usedDlaa below) is shared: the two paths are exclusive.
-        ID3D11ShaderResourceView* foveaDeferredInput = nullptr;
         // Whether the own resolve's interior skip (p.skip below) applied
         // this frame, and why not when it did not -- read by the edges
         // mode ENGAGED line. Default covers the frame the own resolve does
         // not run at all (the steady periphery covers the whole output).
         const char* foveaSkipNote = "did not run this frame (the steady periphery covered it)";
         // What actually goes out once the compose has run: the composite
-        // itself (e.foveaOut) until the shared UI resolve or the deferred
-        // replay writes the finished frame into e.dlSubmit instead -- read
-        // by result= below and reported on the edges mode ENGAGED line.
+        // itself (e.foveaOut) until the shared UI resolve writes the
+        // finished frame into e.dlSubmit instead -- read by result= below
+        // and reported on the edges mode ENGAGED line.
         ID3D11Texture2D* foveaSubmit = nullptr;
         const char* foveaUiTreatment = "no UI treatment (ui_depth off)";
         // The steady periphery (feature 6): NVIDIA's DLAA around the fovea
@@ -5347,12 +5336,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
 
         bool usedDlaa = false;
-        // The luma probe's applied flag needs deferredInput's truth value at
-        // the pass's true end, below, but deferredInput itself (declared
-        // further down) falls out of scope well before that point -- this
-        // mirrors it at the same scope as usedDlaa, set once deferredInput
-        // is computed.
-        bool deferredActive = false;
         // Tier 1's depth carry: true once a dispatch this frame wrote ZC into
         // e.dlDepth with a depth bound and a twin to swap it with, so the
         // frame's end can make it last frame's.
@@ -5410,8 +5393,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // read from state already shared between the two paths, so it is
         // identical by construction rather than by two call sites agreeing:
         // uiTrack (outer scope), e.dlSubmitUav/g_csUiResolve/the lazy
-        // compile, deferredActive (already set by whichever path ran this
-        // call, before this would be reached), p.probe[2] for the UI mask
+        // compile, p.probe[2] for the UI mask
         // (already set fresh by either the trained block's own preamble or
         // the own-path preamble that runs ahead of the fovea block), and
         // e.uiHistoryValid/e.uiHistoryRead. Returns whether it actually
@@ -5445,7 +5427,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             const bool debugPaintHere = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4 || g_debugMode == 5 ||
                                         g_debugMode == 6;
             const bool uiResolveHere = uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaintHere;
-            if (!uiResolveHere || deferredActive) return false;
+            if (!uiResolveHere) return false;
             const bool separated = allowSeparated && separatedCandidate.colour &&
                                     region[0] == 0 && region[1] == 0 && w == sd.Width && h == sd.Height;
             const bool uiBoundHere = p.probe[2] != 0.0f;
@@ -5623,30 +5605,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         g_csUiResolve=shaderSwapCompileCs(ctx,kUiResolve,sizeof(kUiResolve)-1,"main","UI resolve",nullptr,"UI resolve");
                     }
                     const bool uiResolve=uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaint;
-                    // luma probe stage 0: the texture the game submits, right
-                    // before it is offered to the deferred UI's own snapshot.
+                    // luma probe stage 0: the texture the game submits.
                     lumaProbeSample(ctx,src,eye,0);
-                    ID3D11ShaderResourceView* deferredInput=nullptr;
-                    if(!debugPaint && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height)
-                        deferredInput=uiDeferredPrepare(ctx,src,depthSrv,e.dlSubmit,eye,w,h,jxNow,jyNow);
-                    deferredActive=deferredInput!=nullptr;
-                    // luma probe stage 2: what DLSS receives -- deferredInput's
-                    // own resource when the deferred route is live, else absent.
-                    if(deferredInput){
-                        Microsoft::WRL::ComPtr<ID3D11Resource> lumaDiRes;
-                        deferredInput->GetResource(&lumaDiRes);
-                        Microsoft::WRL::ComPtr<ID3D11Texture2D> lumaDiTex;
-                        lumaDiRes.As(&lumaDiTex);
-                        lumaProbeSample(ctx,lumaDiTex.Get(),eye,2);
-                    } else {
-                        lumaProbeSample(ctx,nullptr,eye,2);
-                    }
-                    // Deferred replay owns both clean input and final native UI
-                    // when it succeeds. The older separation/resolve path stays
-                    // available as the fallback, but must not replace that clean
-                    // input or modify dlSubmit before uiDeferredApply reads it.
-                    const bool applyLegacyResolve=uiResolve && !deferredInput;
-                    const bool separated=applyLegacyResolve && separatedCandidate.colour && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height;
+                    const bool separated=uiResolve && separatedCandidate.colour && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height;
                     // The colour, typed, whichever way the source came.
                     D3D11_BOX box{};
                     box.left = viaCopy ? 0 : region[0];
@@ -5672,17 +5633,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
-                    const bool currentDeferred=deferredInput!=nullptr;
-                    const bool currentSeparated=separated || currentDeferred;
-                    const bool deferredFallbackReset=uiDeferredFallbackReset(eye);
-                    const bool separationChanged=currentSeparated!=e.uiSeparatedHistory || currentDeferred!=e.uiDeferredHistory || deferredFallbackReset;
+                    const bool separationChanged=separated!=e.uiSeparatedHistory;
                     if(separationChanged){e.dlHaveHistory=false;e.uiHistoryValid=false;e.zPrevValid=false;}
-                    e.uiSeparatedHistory=currentSeparated;
-                    e.uiDeferredHistory=currentDeferred;
-                    if(currentDeferred)e.uiHistoryValid=false;
+                    e.uiSeparatedHistory=separated;
                     // The eye run's raw frame (g_eyeRawStaging says why).
                     if (eye == 0 && g_eyeRunLeft > 0) captureEyeRunRaw(ctx, e.dlColour);
-                    if(deferredInput){Microsoft::WRL::ComPtr<ID3D11Resource> clean;deferredInput->GetResource(&clean);ctx->CopyResource(e.dlColour,clean.Get());}
                     endPart(qs, PrepPart::Copy, ctx);
                     // The motion vectors and the depth copy -- and, with the
                     // mover mask on, last frame's depth read at t3 and the
@@ -5728,7 +5683,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Modern DLSS presets ignore the bias mask. The final UI
                     // resolve writes its own influence history below; avoid
                     // the ineffective adaptive colour work in the MV shader.
-                    if(uiResolve || deferredInput) p.probe[3]=float(uint32_t(p.probe[3])&~6u);
+                    if(uiResolve) p.probe[3]=float(uint32_t(p.probe[3])&~6u);
                     ID3D11ShaderResourceView* staticOwner[2] = {};
                     bool staticOwnerBound = false;
                     // Owner history is meaningful only for NVIDIA's
@@ -5768,21 +5723,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[23] = {deferredInput?e.dlColourSrv:separated?separatedCandidate.colourView:inSrv,
+                    ID3D11ShaderResourceView* srvsM[23] = {separated?separatedCandidate.colourView:inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
                                                           uiBound ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, separated?separatedCandidate.depth:uiDepthSrv,
-                                                          uiTrack && !deferredInput && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
+                                                          uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, meshSrvs[0], meshSrvs[1], staticOwnerBound ? staticOwner[0] : nullptr, staticOwnerBound ? staticOwner[1] : nullptr,
                                                           nullptr, nullptr,   // t19/t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr};
                     ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
-                                                            uiTrack && !uiResolve && !deferredInput ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
+                                                            uiTrack && !uiResolve ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
                                                             traceReady ? e.dlDecisionUav : nullptr};
                     ID3D11Buffer* cbM[3] = {g_cb, engineViews.sceneNow, engineViews.scenePrev};
                     // b1/b2 only while engine-record velocity is bound, and put
@@ -5820,9 +5775,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
-                    if (uiTrack && !uiResolve && !deferredInput) uiEvidenceWritten = true;
+                    if (uiTrack && !uiResolve) uiEvidenceWritten = true;
                     if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],p,flags,separated?&separatedCandidate:nullptr);
-                    if(deferredInput && eye==0 && g_eyeInputs[0] && g_eyeInputsFrame==g_rowsFrame){stageEyeRun(ctx,e.dlColour,g_eyeInputs,16);g_eyeInputsUiFlags|=64u;}
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
                     // the mover mask existed), else nothing. Engine-record
@@ -6005,10 +5959,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
                         decision.dlssSuccess = !amdEngine && !debugPaint;
                         decision.outputW = oW; decision.outputH = oH;
-                        decision.uiMode = deferredInput ? EyeUiMode::Deferred
-                                          : separated ? EyeUiMode::Separated
-                                          : applyLegacyResolve ? EyeUiMode::Legacy
-                                                               : EyeUiMode::None;
+                        decision.uiMode = separated ? EyeUiMode::Separated
+                                          : uiResolve ? EyeUiMode::Legacy
+                                                      : EyeUiMode::None;
                         uint32_t wantW=0,wantH=0,cw=0,ch=0,cx=0,cy=0;
                         eyeOutputCropSize(g_eyeRunTaken,e.dlOut,&wantW,&wantH);
                         if (stageEyeCrop(ctx,e.dlOut,&g_eyePreUiStaging[g_eyeRunTaken],&cw,&ch,
@@ -6021,21 +5974,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
                     // applyUiResolve (shared with the fovea path, above) folds
-                    // uiResolve/applyLegacyResolve/separated and the dispatch
+                    // uiResolve/separated and the dispatch
                     // itself into one call: it returns false exactly when the
                     // old `else` branch used to run, so the copy-through below
                     // is unchanged. (Main's corona hold, b1's second float and
                     // its once-only note, lives inside the helper.)
                     if (usedDlaa && !applyUiResolve(e.dlOutSrv, true, true)) ctx->CopyResource(e.dlSubmit, e.dlOut);
-                    // luma probe stage 3: DLSS output before the UI replay --
-                    // e.dlSubmit already holds it here on every usedDlaa path,
-                    // legacy-resolved or copied straight from e.dlOut above.
-                    lumaProbeSample(ctx, usedDlaa ? e.dlSubmit : nullptr, eye, 3);
-                    // "ui" for the deferred route instead: the replay of the
-                    // captured UI onto the submit. Exclusive with the legacy
-                    // resolve above (applyLegacyResolve is uiResolve without a
-                    // deferred input), so the region begins once per slot.
-                    if(usedDlaa && deferredInput){beginRegion(qs, Region::Ui, dev, ctx);uiDeferredApply(ctx,eye);endRegion(qs, Region::Ui, ctx);}
+                    // luma probe stage 1, dlss_out: e.dlSubmit already holds it
+                    // here on every usedDlaa path, UI-resolved or copied
+                    // straight from e.dlOut above.
+                    lumaProbeSample(ctx, usedDlaa ? e.dlSubmit : nullptr, eye, 1);
                 }
             }
         }
@@ -6234,19 +6182,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 p.lead[0] = leadBound ? static_cast<float>(foveaLeadDelta[0]) : 0.0f;
                 p.lead[1] = leadBound ? static_cast<float>(foveaLeadDelta[1]) : 0.0f;
                 if (made && e.outSrv && e.dlOutSrv && setParams(ctx,p)) {
-                    // The deferred UI capture (ui_deferred.cpp), recorded now
-                    // against e.dlSubmit as its future "world colour": not
-                    // written until after the compose, when the deferred
-                    // replay branch below copies the finished composite into
-                    // it before uiDeferredApply reads it (that field's own
-                    // comment says why the read happens at command-list
-                    // execution time, not here at record time). Gated
-                    // exactly as the full-frame trained block gates its own
-                    // call; debugPaint is omitted because foveaWanted
-                    // already requires g_debugMode==0.
-                    if (region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height)
-                        foveaDeferredInput=uiDeferredPrepare(ctx,src,depthSrv,e.dlSubmit,eye,w,h,jxNow,jyNow);
-                    deferredActive=foveaDeferredInput!=nullptr;
                     // The colour, typed, whichever way the source came (the
                     // full path's copy logic).
                     D3D11_BOX box{};
@@ -6269,16 +6204,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, e.copyTex, 0, &box);
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
-                    }
-                    // The deferred route's clean input replaces the raw copy
-                    // above with the pre-UI frame the draw hooks captured, so
-                    // NVIDIA and the composite never see this frame's UI --
-                    // the replay reapplies it after the compose (mirrors the
-                    // full-frame trained block's own override).
-                    if (foveaDeferredInput) {
-                        Microsoft::WRL::ComPtr<ID3D11Resource> clean;
-                        foveaDeferredInput->GetResource(&clean);
-                        ctx->CopyResource(e.dlColour, clean.Get());
                     }
                     endPart(qs, PrepPart::Copy, ctx);
                     // Motion vectors and the depth copy, full frame (NVIDIA
@@ -6663,25 +6588,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 endRegion(qs, Region::Compose, ctx);
                 foveaComposited = true;
                 // UI parity with the full-frame trained path: the same
-                // three-way choice it makes (legacy resolve, else deferred
-                // replay, else neither), sharing applyUiResolve above so
-                // the two paths can never drift. e.foveaOutSrv stands in
-                // for "NVIDIA's output" -- the compose already blended
-                // NVIDIA's crop into the composite, so the resolve reads
-                // the FINISHED frame here, not the bare crop.
+                // choice it makes (the UI resolve, else none), sharing
+                // applyUiResolve above so the two paths can never drift.
+                // e.foveaOutSrv stands in for "NVIDIA's output" -- the
+                // compose already blended NVIDIA's crop into the composite,
+                // so the resolve reads the FINISHED frame here, not the bare
+                // crop.
                 if (applyUiResolve(e.foveaOutSrv, false, false)) {
                     foveaSubmit = e.dlSubmit;
                     foveaUiTreatment = "the UI resolve (from the current raster alone: the UI history stays the periphery's)";
-                } else if (foveaDeferredInput) {
-                    beginRegion(qs, Region::Ui, dev, ctx);
-                    // dlSubmit needs the composite's content before the
-                    // replay reads it as "world colour" (mirrors the
-                    // trained path's own CopyResource fallback above).
-                    ctx->CopyResource(e.dlSubmit, e.foveaOut);
-                    uiDeferredApply(ctx, eye);
-                    endRegion(qs, Region::Ui, ctx);
-                    foveaSubmit = e.dlSubmit;
-                    foveaUiTreatment = "the deferred replay";
                 } else {
                     foveaSubmit = e.foveaOut;
                     foveaUiTreatment = "no UI treatment (ui_depth off)";
@@ -6872,10 +6787,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
             e.dlHaveHistory = false;   // NVIDIA's FULL-frame history did not see this frame
             // The fovea composite, when it ran, is what goes out: foveaSubmit
-            // -- e.dlSubmit once the shared UI resolve or the deferred
-            // replay has run on it (the same post-resolve state the full-
-            // frame trained branch submits), or the bare composite when
-            // neither applied. The own history is still the periphery it
+            // -- e.dlSubmit once the shared UI resolve has run on it (the
+            // same post-resolve state the full-frame trained branch
+            // submits), or the bare composite when it did not. The own history is still the periphery it
             // was blended over, so its ping-pong above stands. NVIDIA's
             // crop history lives in the fovea feature (e.foveaHaveHistory),
             // kept apart from both.
@@ -6906,23 +6820,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         } else {
             failOnce("the parameter buffer could not be written");
         }
-        // luma probe stage 4 and the end-of-round report: `result` is the
-        // true texture handed to the VR half (e.dlSubmit on the trained
-        // path, the own pass's or the fovea composite's output otherwise,
-        // or null on the failure branch just above) -- not literally the
-        // line-4288 apply, which only covers the trained-and-deferred case
-        // and precedes two more branches that can still change what goes
-        // out. No submit-affecting write and no early return happens
-        // between there and here, so this is the last safe moment.
-        UiDeferredEyeState lumaUiState = uiDeferredEyeState(eye);
-        LumaProbeState lumaState{};
-        lumaState.deferredEnabled = lumaUiState.enabled;
-        lumaState.sampled = lumaUiState.sampled;
-        lumaState.aliases = lumaUiState.aliases;
-        lumaState.draws = lumaUiState.draws;
-        lumaState.applied = (usedDlaa || foveaComposited) && deferredActive;
-        lumaProbeSample(ctx, static_cast<ID3D11Texture2D*>(result), eye, 4);
-        lumaProbeEnd(ctx, eye, lumaState);
+        // luma probe stage 2, final, and the end-of-round report: `result`
+        // is the true texture handed to the VR half (e.dlSubmit on the
+        // trained path, the own pass's or the fovea composite's output
+        // otherwise, or null on the failure branch just above). No
+        // submit-affecting write and no early return happens between there
+        // and here, so this is the last safe moment.
+        lumaProbeSample(ctx, static_cast<ID3D11Texture2D*>(result), eye, 2);
+        lumaProbeEnd(ctx, eye);
     }
 
     // The eye dump, armed by its key or the menu: this treated eye, as it goes

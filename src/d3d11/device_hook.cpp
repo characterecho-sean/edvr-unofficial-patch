@@ -37,7 +37,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "camera_view.h"
 #include "fss_res.h"
 #include "journal_watch.h"
-#include "ui_surfaces.h"   // the glyph atlas instrument (uiSurfacesWantsAtlas)
+#include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "xinput_watch.h"
 #include "elite_binds.h"
@@ -50,7 +50,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "eye_draw_snapshot.h"
 #include "eye_tonemap_snapshot.h"
 #include "ui_separation.h"
-#include "ui_deferred.h"
 #include "static_surface.h"
 #include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
@@ -605,7 +604,6 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // vertices it is handed decides whether the curved screen is possible
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
-        uiDeferredRemember(static_cast<ID3D11VertexShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         staticSurfaceRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
@@ -631,7 +629,6 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
-        uiDeferredRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         staticSurfaceRememberPs(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
@@ -643,10 +640,10 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
     return hr;
 }
 
-// Render targets made larger than asked: the FSS body layer, and surfaces
-// named by size (fss_res.h). The match, the scaling and the refusal rules
-// all live in that module; this hook only carries descs to it and created
-// textures back. One bool per create when both matchers are off.
+// Render targets made larger than asked: the FSS body layer (fss_res.h). The
+// match, the scaling and the refusal rules all live in that module; this
+// hook only carries descs to it and created textures back. One bool per
+// create when the rule is off.
 // Defined with the other six creates below; this one is hooked already, for a
 // different reason, and only borrows the reporting.
 //
@@ -663,8 +660,8 @@ __declspec(noinline) void noteDeviceCreateFailure(size_t slot, HRESULT hr, const
 
 // Is this return address inside EDVR's own image? The CreateTexture2D hook
 // is a vtable slot, so its return address is its caller's: EDVR's own
-// creates (the temporal pass's targets, the deferred UI replay's, the UI
-// layer's) come from this module, the game's from its own. Two compares
+// creates (the temporal pass's targets, the UI layer's) come from this
+// module, the game's from its own. Two compares
 // against the image's extent, read once from its own headers.
 bool addressInEdvr(const void* address) {
     static const uintptr_t base = reinterpret_cast<uintptr_t>(&__ImageBase);
@@ -680,17 +677,15 @@ bool addressInEdvr(const void* address) {
 HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
                                                    const D3D11_TEXTURE2D_DESC* desc,
                                                    const D3D11_SUBRESOURCE_DATA* init,
-                                                   ID3D11Texture2D** out, bool fromEdvr) {
+                                                   ID3D11Texture2D** out) {
     if (self != g_state->device || !desc || !fssResWantsCreates()) {
         return g_state->realCreateTexture2D(self, desc, init, out);
     }
     D3D11_TEXTURE2D_DESC d = *desc;
     bool inflated = false;
     float scale = 1.0f;
-    InflateSource source = InflateSource::kNone;
-    char family = 0;
     guardedBudget(g_createBudget, [&] {
-        inflated = fssResMaybeInflate(&d, init != nullptr, &scale, &source, &family, fromEdvr);
+        inflated = fssResMaybeInflate(&d, init != nullptr, &scale);
     });
     if (!inflated) {
         return g_state->realCreateTexture2D(self, desc, init, out);
@@ -704,16 +699,12 @@ HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
     }
     if (out && *out) {
         guardedBudget(g_createBudget, [&] {
-            // The exact scale/source/family come from the match call above
-            // rather than being re-derived here (dividing the two descs'
-            // widths rounds to the wrong answer for a fractional factor --
-            // 1297/908 truncates to 1 under integer division), and are
-            // passed straight through rather than stashed in the module
-            // between the two calls: this hook runs on the game's
-            // streaming threads, and a pending value would be a race that
-            // mis-attributes one create's result to another's.
-            fssResNoteCreated(*out, desc->Width, desc->Height, d.Width,
-                              d.Height, scale, source, family);
+            // The exact scale comes from the match call above and is passed
+            // straight through rather than stashed in the module between the
+            // two calls: this hook runs on the game's streaming threads, and
+            // a pending value would be a race that mis-attributes one
+            // create's result to another's.
+            fssResNoteCreated(*out, desc->Width, desc->Height, d.Width, d.Height, scale);
         });
     }
     return hr;
@@ -726,17 +717,23 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out) {
     const bool fromEdvr = addressInEdvr(_ReturnAddress());
-    const HRESULT hr = createTexture2DForwarded(self, desc, init, out, fromEdvr);
+    const HRESULT hr = createTexture2DForwarded(self, desc, init, out);
     if (self == g_state->device) {
         if (FAILED(hr)) {
             noteDeviceCreateFailure(kDevCreateTexture2D, hr, desc, init, false);
         } else if (desc) {
             g_createTextures.fetch_add(1, std::memory_order_relaxed);
             g_createTextureBytes.fetch_add(texture2DBytes(*desc), std::memory_order_relaxed);
-            // fix.ui_quality's glyph atlas instrument: a large A8 texture the
-            // game made, with the chain it was made from (ui_surfaces.h).
-            if (!fromEdvr && out && *out && uiSurfacesWantsAtlas(*desc)) {
-                guardedBudget(g_createBudget, [&] { uiSurfacesNoteAtlas(*out, *desc, init != nullptr); });
+            // fix.ui_quality's instruments, on the game's own creates only: a
+            // large A8 texture (the glyph atlas), and a render or depth
+            // surface of an interface panel's shape (its creating chain, once
+            // per size) -- each with the chain it was made from (ui_surfaces.h).
+            if (!fromEdvr && out && *out) {
+                if (uiSurfacesWantsAtlas(*desc)) {
+                    guardedBudget(g_createBudget, [&] { uiSurfacesNoteAtlas(*out, *desc, init != nullptr); });
+                } else if (uiSurfacesWantsChain(*desc, init != nullptr)) {
+                    guardedBudget(g_createBudget, [&] { uiSurfacesNoteChain(*desc); });
+                }
             }
         }
     }

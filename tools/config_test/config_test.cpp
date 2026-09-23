@@ -170,10 +170,6 @@ int main(int argc, char** argv) {
               "ui quality ships live in [fix] and defaults off");
     expectStr("fix.hud_quality", "<unset>",
               "...and the separate HUD key it absorbed is gone");
-    // The deferred UI replay's A/B ships commented out: the compiled 1 (the
-    // replay on, as it always was) is in force.
-    expectStr("advanced.ui_replay", "<unset>",
-              "the ui replay switch ships commented out: the compiled 1 is in force");
 
     // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
     // This is the claim that a repeated section header is not a parse error

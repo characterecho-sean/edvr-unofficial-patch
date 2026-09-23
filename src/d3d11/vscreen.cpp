@@ -69,7 +69,6 @@
 #include "hud_grain.h"
 #include "ui_depth.h"
 #include "ui_separation.h"
-#include "ui_deferred.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
@@ -905,10 +904,6 @@ struct State {
     bool     renderAuto = true;        // advanced.eye_render_size
     bool     renderOffNoted = false;
     bool     renderPinned = false;   // the size came from the ini, not a measurement
-    // vScreenInternalResolution's fallback (fix.ui_quality): said once per
-    // session, the first time renderW/renderH are not known yet and a
-    // prior session's measurement for this eye shape stands in.
-    bool     internalResFallbackNoted = false;
     bool     renderBadNoted = false;
 
     // Render targets that were looked at and NOT counted, and how many times
@@ -1639,34 +1634,11 @@ void bindingAudit(State* s, ID3D11DeviceContext* ctx) {
         static_cast<unsigned long long>(s->psSetsNoHash));
 }
 
-
-// A scissor rect that still spans exactly the pre-inflation target, the
-// scissor analogue of viewportIs. Integer coordinates, so no float
-// tolerance is needed the way the viewport check carries one.
-bool scissorIs(const D3D11_RECT& r, uint32_t w, uint32_t h) {
-    return r.left == 0 && r.top == 0 &&
-           static_cast<uint32_t>(r.right) == w &&
-           static_cast<uint32_t>(r.bottom) == h;
-}
-
 // The FSS resolution fix's viewport scaling for one draw, lifted out of
 // beginPanelOverride verbatim and NOINLINE. Its D3D11_VIEWPORT is filled by
 // RSGetViewports -- a real /GS buffer, and the cookie on it is worth keeping
 // -- but while it sat inline, beginPanelOverride carried that cookie on every
 // draw of every session, although this runs only while fssResActive().
-//
-// Also the scissor half (fix.ui_quality): there is no hook on the game's
-// own RSSetScissorRects at all, so unlike the viewport there is no set-time
-// path to be a backstop FOR -- this draw-time check is the only mechanism.
-// It only acts on a rect that still spans the pre-inflation target exactly
-// (scissorIs), the same conservative match the FSS rule itself uses for
-// sizes: a narrower, genuinely clipping rect is left alone rather than
-// guessed at, and re-checking the CURRENT rect against the ORIGINAL size
-// before scaling is what keeps this idempotent across the many draws a
-// panel issues with one scissor state -- once scaled, the rect no longer
-// matches (ow, oh) and later draws skip it, the same way the viewport
-// backstop stops firing once the set-time hook (or this one) has already
-// corrected it.
 __declspec(noinline) void fssResScaleDrawViewport(ID3D11DeviceContext* self, State* s) {
     void* res = currentRtv0Resource(s);
     uint32_t ow = 0, oh = 0;
@@ -1681,27 +1653,7 @@ __declspec(noinline) void fssResScaleDrawViewport(ID3D11DeviceContext* self, Sta
         vp.Width *= k;
         vp.Height *= k;
         s->realRSSetViewports(self, 1, &vp);
-        fssResNoteViewportScaled(res, true);
-    }
-    D3D11_RASTERIZER_DESC rd{};
-    ID3D11RasterizerState* rsState = nullptr;
-    self->RSGetState(&rsState);
-    if (rsState) {
-        rsState->GetDesc(&rd);
-        rsState->Release();
-    }
-    if (rd.ScissorEnable) {
-        UINT nr = 1;
-        D3D11_RECT rect{};
-        self->RSGetScissorRects(&nr, &rect);
-        if (nr >= 1 && scissorIs(rect, ow, oh)) {
-            rect.left = static_cast<LONG>(rect.left * k + 0.5f);
-            rect.top = static_cast<LONG>(rect.top * k + 0.5f);
-            rect.right = static_cast<LONG>(rect.right * k + 0.5f);
-            rect.bottom = static_cast<LONG>(rect.bottom * k + 0.5f);
-            self->RSSetScissorRects(1, &rect);
-            fssResNoteScissorScaled(res);
-        }
+        fssResNoteViewportScaled(true);
     }
 }
 
@@ -2967,7 +2919,7 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
     }
     if(rtv) {
         ID3D11Resource* destination=nullptr;rtv->GetResource(&destination);
-        uiSeparationResourceWrite(destination);uiDeferredResourceWrite(self,destination);if(destination)destination->Release();
+        uiSeparationResourceWrite(destination);if(destination)destination->Release();
     }
     // The census's record of this clear, before the probes and before
     // the void fix touches the colour: the line carries what the GAME
@@ -3015,20 +2967,19 @@ void STDMETHODCALLTYPE hookedClearUavUint(ID3D11DeviceContext* self,
                                           ID3D11UnorderedAccessView* uav,
                                           const UINT c[4]) {
     gpuFrameCommand(self);
-    if (!foreignContext(self)) {uiSeparationViewWrite(uav);uiDeferredViewWrite(self,uav);}
+    if (!foreignContext(self)) uiSeparationViewWrite(uav);
     g_state->realClearUavUint(self, uav, c);
 }
 void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
                                            ID3D11UnorderedAccessView* uav,
                                            const FLOAT c[4]) {
     gpuFrameCommand(self);
-    if (!foreignContext(self)) {uiSeparationViewWrite(uav);uiDeferredViewWrite(self,uav);}
+    if (!foreignContext(self)) uiSeparationViewWrite(uav);
     g_state->realClearUavFloat(self, uav, c);
 }
 void STDMETHODCALLTYPE hookedGenerateMips(ID3D11DeviceContext* self,
                                           ID3D11ShaderResourceView* srv) {
     gpuFrameCommand(self);
-    if(!foreignContext(self))uiDeferredViewWrite(self,srv);
     g_state->realGenerateMips(self, srv);
 }
 
@@ -3253,7 +3204,6 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (!privateExecution) {
         originalDrawProbeExecuteCommandListNote(self);
         uiSeparationUnknownWrite();
-        uiDeferredUnknownWrite(self);
         graphicsBridgeNoteUnknownExecution();
         motionResourceWritten(nullptr);
         celestialMotionConstantsUnknownWrite(nullptr);
@@ -3305,7 +3255,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // Nothing captured is waiting to flush (mesh_motion.h): the call would
     // only re-test pending.count and return.
     if (meshMotionAnyPending()) meshMotionBeforeMap(res);
-    if(type!=D3D11_MAP_READ && uiDeferredResourceWriteLive())uiDeferredResourceWrite(self,res);
     // Timed, not touched: the wait inside the runtime's Map is the game's
     // stall on the GPU, and the native timing line reports it (map_wait.h).
     //
@@ -3713,7 +3662,7 @@ void originalDrawNativeEnd(ID3D11DeviceContext* self,
 // real array that a D3D call writes into, and it still does, here, where the
 // array is. Only the hot path is relieved of it.
 __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
-    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
+    if(self==g_state->ownerCtx)uiSeparationUnknownWrite();
     State* s = g_state;
     const UINT total = s->qsIndexCount;
     const UINT cut0 = s->quadSkip.lo * 6;
@@ -3870,8 +3819,8 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
 }
 
 // forwardWithVerdict's re-issue of the game's own draw, straight to the
-// runtime, for the rare passes that draw it again (the deferred-UI world
-// replay, the tone separation, the interface depth re-issues). A NOINLINE
+// runtime, for the rare passes that draw it again (the tone separation, the
+// interface depth re-issues). A NOINLINE
 // function taking VALUES, where it used to be a [&] lambda: the flown
 // forwardWithVerdict built that lambda's closure -- the addresses of self,
 // kind, count, instances and args -- on every draw, which also pinned those
@@ -3987,18 +3936,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // compiler must reload across every call, and it was re-reading and
     // re-comparing it at each of a dozen sites per draw.
     const bool owner = self == g_state->ownerCtx;
-    // The deferred-UI family (ui_deferred.h): eight calls per owner draw, and
-    // every one of them returns without effect unless the feature is enabled
-    // or a diagnostic window was ever requested -- uiDeferredMayAct() is that
-    // condition, read inline. ui_deferred.h holds the proof, including why the
-    // two per-draw resets the family performs at entry are already in their
-    // reset state whenever this is false.
-    const bool uiDeferred = owner && uiDeferredMayAct();
-    if(uiDeferred){
-        uiDeferredTraceDrawEnter(self,g_state->rtv0Eye,kind,count,instances,
-                                 static_cast<uint32_t>(v));
-        uiDeferredBeforeDraw(self,kind,count,instances,args.start,args.base,args.startInstance,static_cast<uint32_t>(v));
-    }
     struct EffectCaptureScope {
         ID3D11DeviceContext* ctx;
         ~EffectCaptureScope(){if(ctx)objectProbeSourceDrawEnd(ctx);}
@@ -4054,7 +3991,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // because both swallow, and two swallows would draw the quads twice.
     // The resized panel, which swallows the draw only when it succeeds.
     if (v == DrawVerdict::kLoaderPanel) {
-        if(owner){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
+        if(owner)uiSeparationUnknownWrite();
         const bool layered = uiLayer && uiLayerBegin(self);
         const bool swallowed = loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
                                                      g_state->qsInstances,
@@ -4062,7 +3999,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         // The loader panel withholds the draw or forwards the game's own:
         // the second issues repeat the game's own, so they follow it.
         const bool issued = !swallowed && draw();
-        if (issued && uiDeferred) uiDeferredTraceOriginalIssued();
         if (layered) {
             uiLayerEnd(self);
             if (issued) uiLayerSecondIssues(self, kind, count, instances, args);
@@ -4077,7 +4013,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // succeeds and forwards it untouched when it does not -- so a failure
     // here is a flat screen, never a missing one.
     if (g_state->curveThisDraw) {
-        if(owner){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);}
+        if(owner)uiSeparationUnknownWrite();
         g_state->curveThisDraw = false;
         const bool layered = uiLayer && uiLayerBegin(self);
         const bool swallowed = panelCurveSubstitute(self, g_state->realDrawIndexedInstanced);
@@ -4094,18 +4030,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     const bool terrainOriginal=owner && celestialMotionLive() &&
         celestialMotionBeginOriginal(self,bindingShaderHash(BindSlot::Vs));
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
-    if(uiDeferred){uiDeferredTraceBeforeTone(self);uiDeferredBeforeTone(self,kind,count,instances,args.start,args.base,args.startInstance);}
-    const bool glassQueryActive=owner &&
-        bindingShaderHash(BindSlot::Vs)==kUiDeferredGlassVs && bindingShaderHash(BindSlot::Ps)==kUiDeferredGlassPs &&
-        g_state->gameQueries.countingActive();
-    // uiDepthDeferredEye() returns -1 unless the mode is kReissueScene, which
-    // uiDepthReissuingScene() answers inline (ui_depth.h): same value, no call
-    // on the draws that are not a scene re-issue. And uiDeferredBegin is
-    // false whenever uiDeferredMayAct() is (ui_deferred.h), so `deferred` is
-    // the same value on the draws that no longer make the call.
-    const bool deferred=uiDeferred && uiDeferredBegin(self,uiDepthReissuingScene()?uiDepthDeferredEye():-1,kind,count,instances,args.start,args.base,args.startInstance,
-        static_cast<uint32_t>(v),glassQueryActive);
-    originalMetadata.modified = terrainOriginal || deferred;
+    originalMetadata.modified = terrainOriginal;
     // The layer's bracket goes innermost: after the verdict's own Begin (a
     // RemLok scissor, a slot swap) so the layer maps the state the draw is
     // actually issued with, and around nothing but the game's own draw.
@@ -4117,10 +4042,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         uiLayerEnd(self);
         if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);
     }
-    if(originalIssued && uiDeferred)uiDeferredTraceOriginalIssued();
-    if(originalIssued && uiDeferred && uiDeferredWorldReplayBegin(self))
-        pureDrawReissue(self,kind,count,instances,args);
-    if(uiDeferred)uiDeferredEnd(self);
     // uiSeparationLive() first: bundled with fix.temporal_aa's external
     // engines, so with temporal off this was a call per draw that only ever
     // returned false (ui_separation.h). Same first test, inline.
@@ -4152,7 +4073,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // a second time, in full colour, over itself -- and the paths that
     // decline latch, so it would last the session (the pre-release review
     // of 2026-09-07). splashDimBegin below has had this shape all along.
-    if (!deferred && !layered && uiDepthScope.on && uiDepthWantsReissue()) {
+    if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {
         if (uiDepthReissueBegin(self)) {
             pureDrawReissue(self,kind,count,instances,args);
             if(uiDepthSeparatedReissueBegin(self)) {
@@ -4208,7 +4129,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
     uiAtlasNoteWrite(dst, 2);
-    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
+    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -4238,7 +4159,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     // target to, which says which way its depth runs. eye_mask learns
     // whether this is a re-clear of a target it already drew its ring
     // into this frame -- which would wipe the ring -- for its summary.
-    if (!foreignContext(self)) {uiDeferredViewWrite(self,dsv);depthProbeNoteClear(dsv, depth);eyeMaskOnClear(dsv);if(uiLayerWatching())uiLayerNoteDepthClear(dsv);}
+    if (!foreignContext(self)) {depthProbeNoteClear(dsv, depth);eyeMaskOnClear(dsv);if(uiLayerWatching())uiLayerNoteDepthClear(dsv);}
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
 
@@ -4293,7 +4214,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     }
     if (!foreignContext(self)) {
         uiSeparationUnknownWrite();
-        uiDeferredUnknownWrite(self);
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     }
@@ -4318,7 +4238,6 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     }
     if (!foreignContext(self)) {
         uiSeparationUnknownWrite();
-        uiDeferredUnknownWrite(self);
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     }
@@ -4336,7 +4255,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
                                                 ID3D11Buffer* dst, UINT off,
                                                 ID3D11UnorderedAccessView* src) {
     gpuFrameCommand(self);
-    if(!foreignContext(self)){uiDeferredResourceWrite(self,dst);motionResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
+    if(!foreignContext(self)){motionResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
     if (drawCensusArmed()) {
         drawCensusStructCount(dst, off, src, foreignContext(self));
     }
@@ -4363,8 +4282,6 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         else motionResourceWritten(dst);
         celestialMotionConstantsUnknownWrite(dst);
         uiSeparationResourceWrite(dst);
-        uiDeferredResourceWrite(self,dst);
-        uiDeferredCopyRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,box);
         glitchFrameInvalidatePool(dst);
         if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
         if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
@@ -4402,7 +4319,6 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         else motionResourceWritten(dst);
         celestialMotionConstantsWritten(dst, data, box);
         uiSeparationResourceWrite(dst);
-        uiDeferredResourceWrite(self,dst);
         glitchFrameInvalidatePool(dst);
     }
     if (drawCensusArmed()) {
@@ -4442,7 +4358,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Resolve, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
-    if(!foreignContext(self)){uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
+    if(!foreignContext(self)){uiSeparationResourceWrite(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
     if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
@@ -4496,7 +4412,7 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
         v.Width *= k;
         v.Height *= k;
         s->realRSSetViewports(self, 1, &v);
-        fssResNoteViewportScaled(res, false);
+        fssResNoteViewportScaled(false);
         return;
     }
     s->realRSSetViewports(self, n, vps);
@@ -4597,7 +4513,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     gpuFrameCommand(self);
-    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();uiDeferredUnknownWrite(self);engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
+    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawAuto, kOriginalDrawProbeUnknown,
         kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
@@ -5319,114 +5235,6 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     return false;
 }
 
-// fix.ui_quality's last fallback (ui_surfaces.cpp: after the runtime's
-// recommendation x HMD Quality and the size the game submits) for a surface
-// created before the strong promotion has measured anything this session
-// (the cockpit's own panels can be created in the first few frames, well
-// before the 100+ eye-shaped draws in one frame that promotion needs -- see
-// docs/ui-layer-2026-09-23.md).
-// A small state file in the log directory, the same raw-WinAPI-I/O
-// discipline as vscreen_auto_state.cpp's (a DIFFERENT module, deliberately
-// free of anything vscreen-specific so it links into minimal test rigs --
-// this one is vscreen-specific on purpose, so it stays local here instead).
-// Format: "eyeW eyeH internalW internalH", one line. The eye shape is the
-// fallback's "same headset" test: a resolution measured on a different
-// headset must not be handed to this session's ratio match.
-namespace {
-constexpr wchar_t kInternalResStateFile[] = L"vscreen_internal_res.txt";
-
-std::wstring internalResStatePath(const std::wstring& logDir) {
-    return logDir + L"\\" + kInternalResStateFile;
-}
-
-bool lastKnownInternalResolutionFor(const std::wstring& logDir, uint32_t eyeW, uint32_t eyeH,
-                                    uint32_t* outW, uint32_t* outH) {
-    if (outW) *outW = 0;
-    if (outH) *outH = 0;
-    if (logDir.empty() || !eyeW || !eyeH) return false;
-    HANDLE f = CreateFileW(internalResStatePath(logDir).c_str(), GENERIC_READ, FILE_SHARE_READ,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-    char buf[64] = {};
-    DWORD got = 0;
-    const BOOL ok = ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr);
-    CloseHandle(f);
-    if (!ok || !got) return false;
-    buf[got] = '\0';
-    char* p = buf;
-    const unsigned long fEyeW = strtoul(p, &p, 10);
-    const unsigned long fEyeH = strtoul(p, &p, 10);
-    const unsigned long fW = strtoul(p, &p, 10);
-    const unsigned long fH = strtoul(p, &p, 10);
-    if (!fEyeW || !fEyeH || fW < 100 || fH < 100) return false;
-    if (!near2(eyeW, static_cast<uint32_t>(fEyeW)) || !near2(eyeH, static_cast<uint32_t>(fEyeH))) {
-        return false;   // a different headset's (or a stale) measurement
-    }
-    if (outW) *outW = static_cast<uint32_t>(fW);
-    if (outH) *outH = static_cast<uint32_t>(fH);
-    return true;
-}
-
-void noteResolvedInternalResolutionFor(const std::wstring& logDir, uint32_t eyeW, uint32_t eyeH,
-                                       uint32_t internalW, uint32_t internalH) {
-    if (logDir.empty() || !eyeW || !eyeH || !internalW || !internalH) return;
-    CreateDirectoryW(logDir.c_str(), nullptr);
-    HANDLE f = CreateFileW(internalResStatePath(logDir).c_str(), GENERIC_WRITE, 0, nullptr,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return;
-    char text[64];
-    const int n = snprintf(text, sizeof(text), "%u %u %u %u\n", eyeW, eyeH, internalW, internalH);
-    DWORD written = 0;
-    if (n > 0) WriteFile(f, text, static_cast<DWORD>(n), &written, nullptr);
-    CloseHandle(f);
-}
-}  // namespace
-
-bool vScreenInternalResolution(uint32_t* width, uint32_t* height) {
-    if (width) *width = 0;
-    if (height) *height = 0;
-    State* s = g_state;
-    if (!s) return false;
-    if (s->renderW && s->renderH) {
-        if (width) *width = s->renderW;
-        if (height) *height = s->renderH;
-        // Kept fresh for a FUTURE session's fallback below.
-        if (s->eyeW && s->eyeH) {
-            noteResolvedInternalResolutionFor(Config::get().logDir(), s->eyeW, s->eyeH,
-                                              s->renderW, s->renderH);
-        }
-        return true;
-    }
-    // Not measured yet this session: the strong promotion needs over 100
-    // eye-shaped draws in one frame (kSceneEyeDraws), and the cockpit's own
-    // interface panels can be created before that many have landed. Answer
-    // with the last session's measurement for the SAME eye shape rather
-    // than false, so a candidate created this early still gets a real
-    // number instead of being refused for however many frames the
-    // promotion takes to catch up -- said once, and superseded the moment
-    // the real measurement lands (the branch above then answers instead).
-    if (s->eyeW && s->eyeH) {
-        uint32_t fw = 0, fh = 0;
-        if (lastKnownInternalResolutionFor(Config::get().logDir(), s->eyeW, s->eyeH, &fw, &fh)) {
-            if (width) *width = fw;
-            if (height) *height = fh;
-            if (!s->internalResFallbackNoted) {
-                s->internalResFallbackNoted = true;
-                Log::get().note(
-                    "vScreen: the internal render resolution has not been measured "
-                    "this session yet (needs over 100 eye-shaped draws in one frame); "
-                    "using %ux%u, the last session's measurement for this eye shape "
-                    "(%ux%u), until the real one lands. fix.ui_quality's surfaces "
-                    "asked (no recommendation from the runtime, nothing submitted "
-                    "yet). Said once.",
-                    fw, fh, s->eyeW, s->eyeH);
-            }
-            return true;
-        }
-    }
-    return false;
-}
-
 void vScreenRefreshConfig() {
     State* s = g_state;
     if (!s) return;
@@ -5470,7 +5278,6 @@ void vScreenRefreshConfig() {
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
-    uiDeferredConfigure(cfg);
     uiLayerConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
@@ -5673,7 +5480,6 @@ void vScreenFrameBoundary() {
         panelUpscaleFrameEnd();
         wakePulseReport();
         uiSeparationFrameBoundary();
-        uiDeferredFrameBoundary(g_state->ownerCtx);
         uiDepthFrameBoundary(g_state->ownerCtx);
         // fix.ui_quality: the layer's warm compile, the surfaces' five-second
         // cross-check and learning, the key's 30-second totals, and the end
@@ -6649,7 +6455,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
     uiDepthConfigure(cfg);
-    uiDeferredConfigure(cfg);
     uiLayerConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
@@ -7021,7 +6826,6 @@ void shutdownVScreenFixes() {
     remlokShutdown();
     holoShutdown();
     uiSeparationShutdown();
-    uiDeferredShutdown();
     uiDepthShutdown();
     uiLayerShutdown();
     screenMotionShutdown();

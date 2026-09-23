@@ -16,8 +16,8 @@
 // The surface scales with render resolution, so its neighbours sharpen when
 // that goes up. The indicator does not: measured across a 3072x3264 eye and
 // a 5424x5356 one, everything around it improved and it did not. Creating
-// the surface larger (fss_res.h's surface_inflate) changed nothing visible
-// either, with the mechanism confirmed working. What survives both results
+// the surface larger (a developer instrument, since retired) changed nothing
+// visible either, with the mechanism confirmed working. What survives both results
 // is that the indicator's content occupies a fixed number of surface texels
 // however large the surface is -- so the quad magnifies it by the same
 // factor at every resolution, and the magnification is where the blockiness

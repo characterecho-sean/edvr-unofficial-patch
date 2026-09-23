@@ -1,6 +1,6 @@
 // fix.ui_quality -- the UI layer (docs/ui-layer-2026-09-23.md; Design A of
-// docs/crisp-ui-handoff.md, phase 1). The key's other half, every offscreen
-// UI surface at the target's size, is ui_surfaces.h.
+// docs/crisp-ui-handoff.md, phase 1). The key's other half, every
+// render-to-texture panel at the target's size, is ui_panel_scale.h.
 //
 // The game composites its menus, the 2D screen and the loading screen into
 // each eye at the scene's render size (HMD Quality x the headset's size),
@@ -33,12 +33,11 @@
 // screen's gamma pass) scales the layer and a per-channel transmittance the
 // composite applies to the frame. WHAT IT LEAVES: the cockpit's holo
 // panels, flight HUD and target sprite, which the game draws into the lit
-// HDR target before exposure and the tonemap -- the deferred UI replay
-// (ui_deferred.cpp, advanced.ui_replay) re-draws those after the upscale at
-// the output size under an external engine, and the layer, composited after
-// the tonemap, cannot take them without transcribing it; and any draw the
-// replay itself captured. Every family it leaves is named in the log with
-// the reason.
+// HDR target before exposure and the tonemap -- they stay in the picture the
+// upscaler reconstructs, steadied by the UI depth and the reactive mask, and
+// the layer, composited after the tonemap, cannot take them without
+// transcribing it. Every family it leaves is named in the log with the
+// reason.
 //
 // THE ORDER IT CHANGES, and the only one: anything the game drew into an
 // eye AFTER a redirected draw now lands UNDER it. The totals line counts

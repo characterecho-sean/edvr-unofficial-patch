@@ -457,7 +457,7 @@ bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float
   if (h) *h = s.height[eye];
   return true;
 }
-// fix.ui_quality's surfaces (ui_surfaces.h): the size, max over eyes, the
+// fix.ui_quality's panels and instruments (ui_surfaces.h): the size, max over eyes, the
 // runtime's beginFrame says the frame being drawn was rendered for (the
 // host's treatedGeometry: the FOV trim and the cull guard included). Outside
 // an adoption that is what GetRecommendedRenderTargetSize answers; DURING a

@@ -217,8 +217,9 @@ void standDown(const uint8_t* base) {
     g_patch.store(kStoodDown, std::memory_order_release);
     const uint32_t shapes = base ? shapeCount(base) : 0;
     Log::get().note("ui quality: panels: STANDING DOWN, nothing written -- %s (the panel formula's shape "
-                    "occurs %u time(s) in the game's code). The surfaces' matcher sizes the panels it "
-                    "knows instead.",
+                    "occurs %u time(s) in the game's code). The panels stay at the game's own size "
+                    "until the patch is re-keyed for this build; the sizing chains below are the "
+                    "record to re-key it against.",
                     g_why, shapes);
 }
 
@@ -327,7 +328,7 @@ void uiPanelScaleFrameBoundary() {
     if (g_patch.load(std::memory_order_acquire) != kApplied) return;
     const float target = g_target.load(std::memory_order_acquire);
     if (!(target > 0.0f)) {
-        // Key off: the game's own values, and the matcher back.
+        // Key off: the game's own values.
         if (g_live.load(std::memory_order_acquire) || g_written != 1.0) {
             writeFloats(1.0);
             g_written = 1.0;
