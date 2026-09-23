@@ -16,6 +16,7 @@
 // Performance's, which match the field exactly (see the CHECKs just
 // after buildLadder).
 #include "../../src/d3d11/dlaa.h"
+#include "../../src/d3d11/dlss_floor.h"  // the served floor's rule, SDK-free the same way
 
 #include <cstdio>
 #include <cstring>
@@ -167,6 +168,113 @@ int main(int argc, char** argv) {
     buildLadder(1000, 1000, out1000);
     CHECK(dlssChooseMode(out1000, 1000, 1000, 1000, &picked, &fromRange, &range) &&
           picked == DlssMode::Quality && fromRange);  // held by all four; quality's optimal is nearest
+
+    // --- The served floor (dlss_floor.h, 2026-09-23). The first modes line
+    // a flight printed (edvr_gfx_20260923_153446.log line 435) is not the
+    // stacked ladder above: the three upper modes share a floor at half the
+    // output, and ultra performance's range is a single point at a third.
+    //   dlss: modes for 4074x4076: quality 2716x2717 (2037x2038..4074x4076),
+    //   balanced 2363x2364 (2037x2038..4074x4076), performance 2037x2038
+    //   (2037x2038..4074x4076), ultra performance 1358x1359
+    //   (1358x1359..1358x1359)
+    // Every input between a third and a half, and under a third, is served
+    // by no mode; the rule cuts the output to twice the input instead. ---
+    const auto flightLadder = [](unsigned outW, unsigned outH, DlssModeRange m[kDlssModeCount]) {
+        const unsigned hw = (outW + 1) / 2, hh = (outH + 1) / 2;
+        const unsigned optW[3] = {(outW * 2 + 1) / 3, (outW * 58 + 50) / 100, hw};
+        const unsigned optH[3] = {(outH * 2 + 1) / 3, (outH * 58 + 50) / 100, hh};
+        for (int k = 0; k < 3; ++k) {
+            m[k] = DlssModeRange{};
+            m[k].ok = true;
+            m[k].optW = optW[k]; m[k].optH = optH[k];
+            m[k].minW = hw; m[k].minH = hh;
+            m[k].maxW = outW; m[k].maxH = outH;
+        }
+        m[3] = DlssModeRange{};
+        m[3].ok = true;
+        m[3].optW = m[3].minW = m[3].maxW = (outW + 1) / 3;
+        m[3].optH = m[3].minH = m[3].maxH = (outH + 1) / 3;
+    };
+    DlssModeRange pimax[kDlssModeCount];
+    flightLadder(4074, 4076, pimax);
+    // The fixture IS the logged line, number for number.
+    CHECK(pimax[0].optW == 2716 && pimax[0].optH == 2717 && pimax[1].optW == 2363 &&
+          pimax[1].optH == 2364 && pimax[2].optW == 2037 && pimax[2].optH == 2038);
+    CHECK(pimax[0].minW == 2037 && pimax[0].minH == 2038 && pimax[1].minW == 2037 &&
+          pimax[2].maxW == 4074 && pimax[2].maxH == 4076);
+    CHECK(pimax[3].minW == 1358 && pimax[3].minH == 1359 && pimax[3].maxW == 1358 &&
+          pimax[3].maxH == 1359);
+    uint32_t fw = 0, fh = 0;
+    CHECK(dlssRangeFloor(pimax, &fw, &fh) && fw == 2037 && fh == 2038);  // the point is no floor
+    CHECK(!dlssRangeIsRange(pimax[3]) && dlssRangeIsRange(pimax[2]));
+    uint32_t ow = 0, oh = 0;
+    int m = -2;
+    const auto rule = [&](const DlssModeRange* modes, uint32_t dw, uint32_t dh, uint32_t w,
+                          uint32_t h) { return dlssFloorOutput(modes, dw, dh, w, h, &ow, &oh, &m); };
+    // HMD Quality 0.5 sits exactly on the floor (line 436 created there).
+    CHECK(rule(pimax, 4074, 4076, 2037, 2038) && ow == 4074 && oh == 4076 && m == -1);
+    CHECK(dlssChooseMode(pimax, 2037, 2038, 4074, &picked, &fromRange, &range) &&
+          picked == DlssMode::Performance && fromRange);
+    // One pixel under, on both axes: the selection refuses, the rule halves.
+    CHECK(!dlssChooseMode(pimax, 2036, 2037, 4074, &picked, &fromRange, &range));
+    CHECK(rule(pimax, 4074, 4076, 2036, 2037) && ow == 4072 && oh == 4074 && m >= 0 && m <= 2);
+    // HMD Quality 0.45 (1833x1834): 3666x3668.
+    CHECK(!dlssRangesServe(pimax, 1833, 1834));
+    CHECK(rule(pimax, 4074, 4076, 1833, 1834) && ow == 3666 && oh == 3668);
+    // Ultra performance's own point is served as it stands; a pixel off it
+    // is not, and is cut like any other input under the floor.
+    CHECK(rule(pimax, 4074, 4076, 1358, 1359) && ow == 4074 && oh == 4076 && m == -1);
+    CHECK(dlssChooseMode(pimax, 1358, 1359, 4074, &picked, &fromRange, &range) &&
+          picked == DlssMode::UltraPerformance);
+    CHECK(rule(pimax, 4074, 4076, 1358, 1358) && ow == 2716 && oh == 2716);
+    CHECK(rule(pimax, 4074, 4076, 1300, 1300) && ow == 2600 && oh == 2600);
+    // Each cut output is served by NGX's own rule at that output.
+    {
+        const unsigned cuts[4][4] = {{4072, 4074, 2036, 2037}, {3666, 3668, 1833, 1834},
+                                     {2716, 2716, 1358, 1358}, {2600, 2600, 1300, 1300}};
+        for (const auto& c : cuts) {
+            DlssModeRange at[kDlssModeCount];
+            flightLadder(c[0], c[1], at);
+            CHECK(dlssRangesServe(at, c[2], c[3]) &&
+                  dlssChooseMode(at, c[2], c[3], c[0], &picked, &fromRange, &range) &&
+                  picked == DlssMode::Performance && fromRange);
+        }
+    }
+    // The FOV-trim session's untrimmed 3070x3032 (edvr_gfx_20260923_092848:
+    // performance 1535x1516..3070x3032), and the trim's two-step adoption:
+    // 1229x1412 against the still-untrimmed door, refused at 09:29:10, cut
+    // to 2458x2824 -- exactly the trimmed door the promotion then hands.
+    DlssModeRange trimDoor[kDlssModeCount];
+    flightLadder(3070, 3032, trimDoor);
+    CHECK(trimDoor[2].minW == 1535 && trimDoor[2].minH == 1516);
+    CHECK(rule(trimDoor, 3070, 3032, 1535, 1516) && ow == 3070 && oh == 3032 && m == -1);
+    CHECK(rule(trimDoor, 3070, 3032, 1534, 1515) && ow == 3068 && oh == 3030);
+    CHECK(rule(trimDoor, 3070, 3032, 1229, 1412) && ow == 2458 && oh == 2824);
+    CHECK(rule(trimDoor, 3070, 3032, 1229, 1213) && ow == 2458 && oh == 2426);
+    DlssModeRange trimmed[kDlssModeCount];
+    flightLadder(2458, 2824, trimmed);
+    CHECK(rule(trimmed, 2458, 2824, 1229, 1412) && ow == 2458 && oh == 2824 && m == -1);
+    // Even rounding: an odd door is cut to an even output; an axis the input
+    // already serves keeps the door's own size, odd or not.
+    DlssModeRange odd[kDlssModeCount];
+    flightLadder(4075, 4077, odd);
+    CHECK(odd[2].minW == 2038 && odd[2].minH == 2039);
+    CHECK(rule(odd, 4075, 4077, 2036, 2037) && ow == 4070 && oh == 4072 &&
+          (ow & 1u) == 0 && (oh & 1u) == 0);
+    CHECK(rule(odd, 4075, 4077, 2040, 2037) && ow == 4075 && oh == 4072);
+    CHECK(dlssFloorAxis(4075, 2038, 2036) == 4070 && dlssFloorAxis(3, 2, 1) == 0 &&
+          dlssFloorAxis(4074, 2037, 1) == 2 && dlssFloorAxis(4074, 2037, 2037) == 4074 &&
+          dlssFloorAxis(0, 2037, 1000) == 0 && dlssFloorAxis(4074, 2037, 0) == 0);
+    // Nothing known to stand on: no answered query, or only the point --
+    // the door's output stands and the selection decides, as before.
+    DlssModeRange none[kDlssModeCount];
+    CHECK(!rule(none, 4074, 4076, 1833, 1834) && ow == 4074 && oh == 4076);
+    DlssModeRange pointOnly[kDlssModeCount];
+    flightLadder(4074, 4076, pointOnly);
+    pointOnly[0].ok = pointOnly[1].ok = pointOnly[2].ok = false;
+    CHECK(!dlssRangeFloor(pointOnly, &fw, &fh));
+    CHECK(!rule(pointOnly, 4074, 4076, 1833, 1834) && ow == 4074 && oh == 4076);
+    CHECK(!rule(pimax, 0, 4076, 1833, 1834) && !rule(pimax, 4074, 4076, 0, 1834));
 
     std::printf("dlaa_mode_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

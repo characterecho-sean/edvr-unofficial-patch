@@ -2,79 +2,64 @@
 
 ## Status
 
-*Written 2026-09-15 from the entries dated 2026-09-10, 2026-09-08,
-2026-09-06 and 2026-09-02 through 09-04. Restates the journal below;
-not new evidence — update it whenever this doc changes.
-Updated 2026-09-16 for Feature A's retirement.*
+*Restates the journal below; not new evidence -- update it whenever
+this doc changes. Last updated 2026-09-23 for the served floor.*
 
-- **State:** Per "Current defaults" (2026-09-10): TAA/DLSS includes
-  UI/smoke depth and station motion automatically. Feature A (the
-  supersample resolve) is RETIRED 2026-09-16: built and field-verified on
-  both rigs on the legacy OpenVR proxy (`auto` shipped 2026-09-03,
-  `off` from 6d22901 in v0.15.0), never called on the native OpenXR
-  runtime after the 2026-09-14 port, removed with its key rather
-  than ported; the eye-region rule it introduced stays in
-  `supersample_math.h`. Feature B (temporal AA,
-  DLAA/DLSS) is built, flown almost daily 2026-09-02 to 09-08, but
-  "is on its branch" per "Guidance for players now"; a 2026-09-06
-  pass cut its cost 2.80 -> 2.02 ms/eye. C and D remain unbuilt
-  sketches. The rest lock shipped 09-03, retired 09-04.
-  2026-09-16: TAA's own resolve was shipping with the registration
-  instrument compiled in; a lean variant is BUILT, NOT FLOWN (see the
-  2026-09-16 entry at the end).
-  2026-09-23: the DLSS quality-mode ladder walk no longer breaks on a
-  failed query, and the shared refusal reason no longer goes stale after
-  a create succeeds (see the 2026-09-23 entry at the end).
+- **State:** TAA/DLSS carries UI/smoke depth and station motion by
+  default ("Current defaults", 2026-09-10). Feature A (the supersample
+  resolve) is RETIRED 2026-09-16: field-verified on the legacy OpenVR
+  proxy, never called on the native runtime, removed with its key; its
+  eye-region rule stays in `supersample_math.h`. Feature B (temporal
+  AA, DLAA/DLSS) is built and flown near-daily since 2026-09-02 (2.80
+  -> 2.02 ms/eye on 09-06); the own resolve's lean variant is BUILT,
+  NOT FLOWN (2026-09-16). C and D remain sketches; the rest lock shipped
+  09-03, retired 09-04. 2026-09-23: the DLSS ladder walk no longer
+  breaks on a failed query; that evening's modes line showed the floor
+  is real, and the door's output now follows an input under it (twice
+  the input, the runtime upsampling the rest) instead of DLSS standing
+  aside -- BUILT, NOT FLOWN ("The served floor", at the end).
 - **Open:**
-  - Features C and D: still unbuilt design sketches.
-  - DLSS/FSR 2 as default engines behind the door (Phasing step 6): not
-    phased in; the every-vendor engine's design is
+  - Next flight, the served floor: HMD Quality 0.45 then 0.5 at the
+    Pimax's 4074 wide; the signature is in "The served floor".
+  - Features C and D: unbuilt. DLSS/FSR 2 as default engines (Phasing
+    step 6): not phased in; the every-vendor design is
     fsr-upscaler-design-2026-09-16.md (AMD has no D3D11 backend).
-  - Whether the 2026-09-04 far-warp/darkness review's four fixes and
-    that evening's five-lever cleanup hold up in flight — "Unflown as
-    of the commit."
-  - Phase 0 items 1, 7, 8, 9, 11 unaddressed (AA-option census, HUD
-    legibility under jitter, crop-edge behaviour, feature D's passes,
-    foveation reach) — see "Phase 0".
-  - Whether `shimmer_rest_still`/`_moving` can be raised past the Quest
-    3's tracker-noise floor was left as "the next flight's question" at
-    retirement; not answered later here.
-  - The lean own shader's price: one flight, toggle
-    `advanced.temporal_aa_diagnostics` live.
+  - The 2026-09-04 far-warp/darkness review's four fixes and that
+    evening's five-lever cleanup: "Unflown as of the commit."
+  - Phase 0 items 1, 7, 8, 9, 11 (AA-option census, HUD legibility under
+    jitter, crop edges, feature D's passes, foveation reach).
+  - `shimmer_rest_still`/`_moving` past the Quest 3's tracker floor:
+    left as "the next flight's question" at retirement. The lean own
+    shader's price: one flight, `advanced.temporal_aa_diagnostics` live.
 - **Ruled out:**
-  - MSAA from outside a deferred renderer: structurally unreachable
-    (views, shading and every downstream pass would need rewriting).
-  - Conservative rasterisation for the menu-ship seam: built, flown
-    2026-09-03, reverted the same day — no effect, new artifacts.
-  - The rest lock (`shimmer_rest`): shipped 2026-09-03, retired
-    2026-09-04 — TAA integrates the wander instead, and it could not
-    engage on the Quest 3's noisier tracker.
-  - Five TAA levers named dead in "The cleanup of the same evening"
-    (2026-09-04): the rest snap, HUD depth layers, the assumed HUD
-    distance, the `camera` motion source, the transposed-reading A/B.
-  - Full per-object motion-vector matrices: declined — the neighbourhood
-    clamp already handles unmatched motion (unbuilt; per-object-motion.md).
-  - Feature A on the native runtime: retired 2026-09-16, not ported — the
-    native submit blit minifies an oversize eye with one bilinear tap
-    (`src/openxr/d3d11_stereo.cpp`), and the resolve had no caller there.
-- **Environment:** Native SteamVR is measured; under OpenComposite the
-  game-side half "works regardless" but reaching the OpenXR layer is
-  unverified. Two rigs disagree sharply: Pimax Crystal Super (~42
-  px/deg, tracking floors at 0.53 arcmin/frame) vs. Quest 3 (~20-40.6
-  px/deg, never under 1.9 arcmin/frame) — why the rest lock shipped on
-  one and not the other. Eye texture `R8G8B8A8_TYPELESS`, linear light;
-  depth reversed-Z, two plane pairs seen (0.025..50000 for the scene,
-  0.1..1000 elsewhere). DLSS/DLAA need an NVIDIA RTX GPU (Turing+) and
-  the NGX runtime; the field rig is an RTX 5090.
-- **Detail:** "What EDVR already owns" has the shared hooks. "Feature
-  A" and "Feature B" carry each feature's mechanism, settings and full
-  flight log (dates inline). "Considered and declined" and "The tracker
-  never rests: the rest lock" hold the retired ideas. "Phase 0" lists
-  what's unmeasured; "Phasing" is the build order. Linked:
-  performance.md (render_scale, HMD Quality), per-object-motion.md
-  (per-mover vectors), rest-lock-handoff.md, and the two 2026-09-04
-  adversarial reviews (review-motion-vectors and
-  review-temporal-far-warp-darkness).
+  - MSAA from outside a deferred renderer: structurally unreachable.
+  - Conservative rasterisation for the menu-ship seam: flown 2026-09-03,
+    reverted the same day (no effect, new artifacts).
+  - The rest lock (`shimmer_rest`): retired 2026-09-04 (TAA integrates
+    the wander; it never engaged on the Quest 3's tracker). Five TAA
+    levers (2026-09-04 cleanup): the rest snap, HUD depth layers, the
+    assumed HUD distance, `camera` motion, the transposed-reading A/B.
+  - Full per-object motion matrices: declined (per-object-motion.md).
+  - Feature A on the native runtime: not ported (the submit blit
+    minifies an oversize eye with one bilinear tap, d3d11_stereo.cpp).
+  - A failed mid-ladder query hiding the mode that serves a 40% input
+    (the 2026-09-23 hardening's cause): the 15:34 modes line answered
+    all four, and no mode serves between a third and a half.
+- **Environment:** Native SteamVR is measured; OpenComposite's OpenXR
+  leg is unverified. Pimax Crystal Super (~42 px/deg, tracking floor
+  0.53 arcmin/frame) vs. Quest 3 (~20-40.6 px/deg, never under 1.9).
+  Eye texture `R8G8B8A8_TYPELESS`, linear; depth reversed-Z (0.025..
+  50000 scene, 0.1..1000 elsewhere). DLSS/DLAA need an RTX GPU and the
+  NGX runtime (field rig: RTX 5090); per output, NGX serves half to full
+  size in three modes and a single point at a third in the fourth.
+- **Detail:** "What EDVR already owns" has the shared hooks; "Feature
+  A"/"Feature B" each feature's mechanism, settings and flight log;
+  "Considered and declined" and the rest lock the retired ideas;
+  "Phase 0" the unmeasured; "Phasing" the build order. Linked:
+  performance.md, per-object-motion.md, rest-lock-handoff.md, and the
+  two 2026-09-04 reviews (motion vectors; far-warp darkness).
+
+## The ask
 
 *A design document, written before the code, as a companion to
 [performance.md](performance.md). Claims about EDVR cite the source; claims
@@ -86,8 +71,6 @@ on 2026-09-02, field-verified on both rigs by 2026-09-03 on the legacy OpenVR
 proxy, shipped `auto` then `off`, and was retired on 2026-09-16 — its
 section is the record of what was built and measured; everything
 else here is design.*
-
-## The ask
 
 Two questions, asked together. The anti-aliasing Elite offers is widely
 held to be bad, worst of all in a headset — could EDVR supply its own MSAA
@@ -2114,3 +2097,71 @@ support (the break, the two ratio rules, the stale reason), but no flight
 yet carries the "modes for WxH" line. Next flight: read it at the
 09:29:10 output size and confirm which query, if any, was the one that
 failed that day.
+
+## The served floor: the output follows the input (2026-09-23)
+
+Sean: "setting HMD Quality 0.5 causes DLSS to disengage." The first flight
+to carry the modes line (edvr_gfx_20260923_153446.log, v0.17.0-451, Pimax
+Crystal Super at `openxr_resolution` 4074 = 4074x4076, RTX 5090, preset K)
+names the floor exactly, line 435:
+`dlss: modes for 4074x4076: quality 2716x2717 (2037x2038..4074x4076),
+balanced 2363x2364 (2037x2038..4074x4076), performance 2037x2038
+(2037x2038..4074x4076), ultra performance 1358x1359 (1358x1359..1358x1359)`.
+The three upper modes share one floor at half the output; ultra
+performance's range is a single point at a third. Every input between a
+third and a half of the output, and every input under a third, is served
+by no mode. HMD Quality 0.5 sits exactly on the floor (2037x2038 in,
+created fine, line 436); a pixel under it, a 0.45 setting, or the trim's
+two-step adoption (092848, 09:29:10: 1229x1412 against a still-untrimmed
+3070x3032, 40%) falls into the hole, and the pass runs its own history.
+
+ruled out: a failed mid-ladder query hid the mode that would have served
+the 40% input (the hardening's cause above), because the 15:34 line has
+all four queries answering and no range between a third and a half.
+
+The selection refuses correctly there; the fix is the OUTPUT the pass is
+asked for. The door's output is chosen in native_temporal.cpp's treat():
+the host's recommendation (`recW x recH`, the runtime's treatedGeometry)
+whenever dlss upscales. Now, for NVIDIA only, `floorOutput` asks NGX for
+that output's four ranges (`dlssModeRanges`, dlaa.cpp: ensureFeature's
+query, its walk and selection untouched), and where no mode serves the
+input, cuts the output to the largest one, at or under the door's, that a
+mode's floor lets the input reach -- per axis input x door / floor, made
+even (dlss_floor.h, SDK-free): twice the input on the flights' ranges.
+NGX's own answer at the cut has the last word: while the input still
+misses the floor there, that axis steps down two pixels (eight steps at
+most). Decided when the door's output or the input changes, never per
+frame; undone when the input rises back; NGX silent or no served cut:
+the door's output stands, as before. FSR is untouched.
+
+What keys on the door's output follows it by itself: the runtime's submit
+blit samples whatever the door hands into the full swapchain, or the
+trim's placement viewport, with the same field of view
+(src/openxr/d3d11_stereo.cpp: the rest of the way is a bilinear
+upsample); the UI layer re-sizes from the door's texture
+(ui_layer.cpp, "the door hands on"); the sharpen and EDVR's menu run on
+the texture they are handed; the eye capture copies any size; the price
+lines print the pass's output. One reader did not: the mip-bias check
+(temporal_pass.cpp) divided the input by the output, so a cut at 0.45
+would have printed "they DISAGREE ... only a restart can fix it"; it now
+divides by the recommendation Elite was told.
+
+Rigs: `dlaa_mode_test` 61 checks (28 before): the logged line as the
+fixture, number for number, and the rule at 4074x4076 for 2037, 2036,
+1833, 1358 (point and off it), 1300; at 3070x3032 for 1535, 1534, 1229
+(the transient, cut to 2458x2824, the very door the promotion hands
+next); odd doors cut even. `native_temporal_test` 345 (230 before): the
+same sizes through treat(), NGX asked once per change, a stingier floor
+stepped down (3656x3658 for 1831x1832), NGX silent at the cut, FSR.
+
+Log signature (not flown). The rule firing at HMD Quality 0.45:
+`dlss floor: the game's 1833x1834 is under the 2037x2038 floor NVIDIA
+names for a 4074x4076 output, where no mode serves it; the pass outputs
+3666x3668 (2.00x the input, ...)`, then `dlss: modes for 3666x3668`,
+`dlss: the feature is created for eye 0, 1833x1834 in and 3666x3668 out
+(50% per axis), the performance mode`, `the left eye's door hands on
+3666x3668`, and `floor_cuts=` above 0 in the totals; back at 0.5, `...
+reaches the floor of the 4074x4076 output again`. If the rule never
+fired: `temporal aa: dlaa was asked for, but a 1833x1834 frame sits
+outside every DLSS mode's render range for a 4074x4076 output (...). The
+pass's own history runs instead.` and the door handing on 1833x1834.
