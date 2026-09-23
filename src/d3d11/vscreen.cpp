@@ -5099,6 +5099,16 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     return false;
 }
 
+bool vScreenInternalResolution(uint32_t* width, uint32_t* height) {
+    if (width) *width = 0;
+    if (height) *height = 0;
+    State* s = g_state;
+    if (!s || !s->renderW || !s->renderH) return false;
+    if (width) *width = s->renderW;
+    if (height) *height = s->renderH;
+    return true;
+}
+
 void vScreenRefreshConfig() {
     State* s = g_state;
     if (!s) return;

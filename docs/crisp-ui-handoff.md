@@ -1325,3 +1325,93 @@ scene's depth, and where that depth fell inside the station's cells the
 core rode the station's spin -- the station's target brackets shimmered
 on the side over the silhouette and not on the side over the sky. The
 strengths are unchanged; `probe.w` in the pass is unused.
+
+## 2026-09-23: offscreen UI surface inventory (for Design A)
+
+Written for whoever builds Design A's redirect classifier, out of
+`fix.hud_quality`'s ratio-match work (`docs/hud-quality-2026-09-23.md`),
+which needed to enumerate the same offscreen surfaces for a different
+reason (matching by size ratio rather than redirecting the draw). Evidence:
+a source grep across `src\` for named shader-hash constants; the GUI draw
+capture `edvr_logs\pool\gui_043720.bin` (62 draws, parsed with the real
+`tools\gui_draw_snapshot.py`, 0 declined/failed); and ten
+`edvr_gfx_20260923_*.log` flight logs (04:23-07:36 local) plus six older
+ones from 2026-08-29. A background research pass gathered the raw numbers;
+the reading and the caveats below are mine.
+
+**The shader families**, by hash (`...ull`), collected under whichever
+names different files gave the SAME hash -- this repo has named several of
+these independently more than once:
+
+| Hash | Names (file) | Role |
+|---|---|---|
+| `0x666EF0C4C616F67E` | `kGuiVector` (ui_depth.cpp) | flat-UI vector geometry |
+| `0x1012E00B3CB44469` | `kGuiText` (ui_depth.cpp) | flat-UI glyph text (2048x2048 A8 atlas) |
+| `0xA3E5D3FCBC1165F8` | `kGuiIcons` (ui_depth.cpp) | flat-UI icons |
+| `0xA888D51024D9798E` | `kPanelVs`/`kColorHash`/`kTailVs`/`kPanel` (ui_depth.cpp, fss_panel.cpp, ui_deferred.cpp, eye_draw_snapshot.h) | the menu's and the loader's panel |
+| `0x4EF6DDB075A927FA` | `kScreenVs`/`kScreen` (ui_depth.cpp, eye_draw_snapshot.h) | the loader's curved screen; `kScreenGammaPs` names a "Comms-panel gamma variant" of its pixel shader |
+| `0x81216C77F90DEDD6` | `kHoloPanel`/`kCompactPanelVs`/`kHolo` (ui_depth.cpp, ui_deferred.cpp, eye_draw_snapshot.h) | the cockpit's holo-panel MESH (panel_upscale.h consumes it) |
+| `0xB7790CBFC6554097` | `kFlightHud`/`kHud` (ui_depth.cpp, eye_draw_snapshot.h) | the flight HUD's strokes |
+| `0xE508648660A352B2` | `kHudSprite`/`kSprite` (ui_depth.cpp, eye_draw_snapshot.h) | sprite composite (target indicator and kin) |
+| `0x953C8123AD8DC13B` | `kCompositeHash` (fss_probe.cpp) | the FSS body composite |
+
+No named constant exists anywhere in `src\` for a station-services,
+galaxy-map, system-map or comms-panel-specific shader -- those screens are
+served by the SAME `kPanelVs`/`kScreenVs` family above, distinguished only
+in prose comments, not by their own hash. `fss_scan.cpp` and
+`native_fss.cpp` carry no shader-hash constants at all.
+
+**Offscreen surface, or drawn direct into the eye?** This is the split
+Design A's classifier needs and this inventory can only partly settle from
+source alone:
+
+- **Confirmed offscreen** (a render target that is not the eye, sampled
+  later): the GUI vector/text/icon family -- `fss_res.h`'s own two-session
+  census (908x1361 / 1363x2042, four-significant-figure ratio agreement)
+  and this session's capture both show them landing in a target distinct
+  from the eye, and the interface-depth pass's classifier (`ui_depth.cpp`
+  -- the historical name `fix.ui_depth` is not a live key, see
+  `docs/hud-quality-2026-09-23.md`; the live gate is `fix.temporal_aa`)
+  already tracks them the same way. The FSS/DSS scanner's body layer
+  (`fss_res.h`'s FIRST matcher, exactly half the eye size, doubled):
+  confirmed offscreen by that module's own measurement history, not part
+  of this session's evidence.
+- **Confirmed DIRECT** (drawn into the eye/scene target, no separate
+  surface of its own): the flight HUD (`kFlightHud`) and the sprite
+  composite (`kHudSprite`) -- `ui_depth.cpp`'s own classifier groups both
+  under `sceneFamily`, the same treatment as the stellar/ring draws, and
+  this doc's own A5 section already says so ("Direct UI has no surface").
+  The holo panel's MESH draw (`kHoloPanel`) is ALSO grouped under
+  `sceneFamily` in `ui_depth.cpp` -- the panel mesh itself is scene-family,
+  drawn direct -- but this does not settle whether the TEXTURE it samples
+  (the holo material) is itself rendered offscreen upstream by some other,
+  unnamed draw; nothing in this pass's evidence answers that either way.
+- **Unconfirmed**: the loader/menu panel and the loader's curved screen
+  (`kPanelVs`/`kScreenVs`). Plausibly offscreen (a "screen" composited onto
+  a curved surface reads that way), but nothing in this session's captures
+  or logs shows either drawing into a non-eye target -- `gui_draw_snapshot.h`'s
+  own capture gate only ever records the three GUI hashes above, by
+  construction, so it cannot corroborate or refute this family regardless
+  of what the game actually did. Do not assume offscreen for these without
+  a targeted census (`advanced.census_offscreen = 1`) confirming it.
+
+**Size evidence, with its own gap.** This session's capture
+(`gui_043720.bin`, taken inside `edvr_gfx_20260923_043410.log`, real HMD
+Quality 0.65) shows all three GUI-family shaders landing in exactly two
+target shapes: 652x652 and 1252x269. A LATER session the same nominal HMD
+Quality (`edvr_gfx_20260923_073409.log`) shows the classifier learning a
+THIRD size for the vector shader alone, 1346x757. None of these three
+numbers are wrong -- the GUI shaders are the game's general flat-UI
+rasteriser, reused across many differently-sized screens/widgets in
+different UI states, not one fixed panel -- but it means today's flights
+do not by themselves prove any ONE of these sizes' ratio to the internal
+resolution, because **no log in the whole ten-session set from today ever
+printed the internal render resolution** (`vScreen: the world on this rig
+is rendered at...`) to pair a size against. That line only fires after
+100+ eye-shaped draws land in one frame in a session (`vscreen.h`,
+`kSceneEyeDraws`), which six 2026-08-29 logs show happening in real
+gameplay and today's short, mostly-main-menu toggling sessions did not
+reach. `fix.hud_quality`'s ratio table persists across sessions
+specifically so a future flight that DOES reach a rendered scene, at a
+different HMD Quality than a prior one, closes this gap on its own --
+see `docs/hud-quality-2026-09-23.md`.
