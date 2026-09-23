@@ -1,10 +1,10 @@
 // Build gate for the production kinematic tracker (src/d3d11/kinematic_motion.cpp).
-// The tracker decides which records are proven-static; a wrong label becomes a
-// wrong motion vector in stage B, and compilation cannot catch a state-machine
-// bug. The rig feeds synthetic eval-hook streams through the real module and
-// asserts the emitted labels and counters (the 8 cases of the 2026-09-20
-// 10:52 spec plus the stage-B sphere/upload cases of the 13:55 spec, both in
-// docs/kinematic-motion-injection-2026-09-19.md).
+// The tracker decides which records are proven-static, and compilation cannot
+// catch a state-machine bug. The rig feeds synthetic eval-hook streams through
+// the real module and asserts the emitted labels and counters (the 8 cases of
+// the 2026-09-20 10:52 spec plus the sphere-compare cases of the 13:55 spec,
+// both in docs/kinematic-motion-injection-2026-09-19.md; the 13:55 spec's
+// upload cases went with stage B, removed 2026-09-23).
 #include "../../src/d3d11/kinematic_motion.h"
 #include "../../src/d3d11/kinematic_eval_hook.h"
 #include "../../src/common/log.h"
@@ -63,17 +63,6 @@ void setPose(FakeRecord& r, float x, float y, float z,
 void setBounds(FakeRecord& r, uint8_t seed) {
     for (unsigned i = 0; i < 128; ++i) r.b[0xB0 + i] = static_cast<uint8_t>(seed + i);
 }
-// The world transform inside the bounds block: three padded float4 rows at
-// +0xF0 (block +0x40), translation at +0x120 (block +0x70). rows is 9 floats
-// (3 rows x xyz); the pad lanes write zero.
-void setTransform(FakeRecord& r, const float* rows, const float* t) {
-    for (int i = 0; i < 3; ++i) {
-        std::memcpy(r.b + 0xF0 + i * 16, rows + i * 3, 12);
-        const float pad = 0.f;
-        std::memcpy(r.b + 0xF0 + i * 16 + 12, &pad, 4);
-    }
-    std::memcpy(r.b + 0x120, t, 12);
-}
 // The local bounding sphere: centre float3 at +0x270 (lane 3 stays zero),
 // radius float at +0x280.
 void setSphere(FakeRecord& r, float cx, float cy, float cz, float radius) {
@@ -86,7 +75,7 @@ void initRecord(FakeRecord& r, uint64_t node, float x, float y, float z, uint8_t
     std::memset(&r, 0, sizeof(r));
     setNode(r, node);
     setPose(r, x, y, z, 0, 0, 0, 65535); // identity quat
-    setBounds(r, boundsSeed);            // NOTE: garbage transform -- no real sphere map
+    setBounds(r, boundsSeed);
 }
 uint64_t ptrOf(FakeRecord& r) { return reinterpret_cast<uint64_t>(&r); }
 
@@ -131,8 +120,6 @@ void caseBitExactStatic() {
     check(s.eligibleLast == 1 && s.eligibleFrames == 1, "2: eligibility counted per frame");
     check(s.poseChanges == 0 && s.moversTotal == 0, "2: a static record is not a mover");
     check(s.sphereChanges == 0, "2: an untouched sphere is no sphere change");
-    check(s.sphereRejected == 1 && s.uploadedLast == 0 && s.uploadGeneration == 0,
-          "2: eligible but sphere-less (zero radius) uploads nothing, rejection counted");
 }
 
 void caseNearMiss() {
@@ -338,32 +325,23 @@ void caseBoundsDumpWaitsForStatics() {
     check(kinematicMotionBoundsDumpStage() == 2, "12: part B completes the one-shot dump");
 }
 
-// -- Stage B (2026-09-20 13:55 spec): the sphere is part of the stasis
-// compare, and eligible records' world spheres publish to the upload snapshot.
+// -- The sphere bytes (+0x270..+0x28F) are part of the stasis compare
+// (2026-09-20 13:55 spec). Stage B's world-sphere upload that once rode on
+// them was removed 2026-09-23; the compare stays.
 
 // Spec case 1: the sphere has a writer independent of pose. An LOD refresh
 // (sphere bytes change, pose bit-static) invalidates exactly like a pose
-// change: the label dies, the upload drops the record at the next ended
-// frame, and 3 clean frames re-prove it with the NEW sphere uploaded.
+// change: the label dies and 3 clean frames re-prove it.
 void caseLodSwapInvalidation() {
     fresh();
     FakeRecord a; initRecord(a, 0x1A, 100.f, 200.f, 300.f, 30);
-    const float rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
-    const float t[3] = { 1000.f, 2000.f, 3000.f };
-    setTransform(a, rot, t);
     setSphere(a, 1.f, 2.f, 3.f, 4.f);
     FakeDesc d = descFor(a);
     const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
     for (int i = 0; i < 3; ++i) { kinematicMotionObserve(dp); endFrame(); } // runs 0..2
     kinematicMotionObserve(dp);                 // run 3, mid-frame
     check(kinematicMotionRecordEligible(ptrOf(a)), "13: eligible before the LOD refresh");
-    endFrame();                                 // the frame's census publishes the sphere
-    KinematicSphereGpu sbuf[1]; uint32_t count = 0, sframe = 0;
-    uint64_t gen = kinematicMotionSphereSnapshot(sbuf, 1, &count, &sframe);
-    check(count == 1 && gen == 1, "13: the static publishes one sphere");
-    check(sbuf[0].radius == 4.f && sbuf[0].centre[0] == 1001.f &&
-          sbuf[0].centre[1] == 2002.f && sbuf[0].centre[2] == 3003.f,
-          "13: the world sphere is R^T x local + T (identity case)");
+    endFrame();
     setSphere(a, 1.f, 2.f, 3.f, 4.5f);          // the LOD refresh: pose untouched
     kinematicMotionObserve(dp);
     KinematicMotionStats s = kinematicMotionStats();
@@ -371,138 +349,23 @@ void caseLodSwapInvalidation() {
     check(s.poseChanges == 0 && s.moversTotal == 0, "13: an LOD refresh is not a mover");
     check(!kinematicMotionRecordEligible(ptrOf(a)), "13: the label dies with the sphere");
     endFrame();
-    gen = kinematicMotionSphereSnapshot(sbuf, 1, &count, &sframe);
-    check(count == 0 && gen == 2, "13: the upload drops the record at the ended frame");
+    s = kinematicMotionStats();
+    check(s.eligibleLast == 0, "13: the ended frame censuses the record as not eligible");
     kinematicMotionObserve(dp); endFrame();     // run 1
     kinematicMotionObserve(dp); endFrame();     // run 2
     kinematicMotionObserve(dp);                 // run 3
     check(kinematicMotionRecordEligible(ptrOf(a)), "13: re-proven after 3 clean frames");
-    endFrame();
-    gen = kinematicMotionSphereSnapshot(sbuf, 1, &count, &sframe);
-    check(count == 1 && gen == 3 && sbuf[0].radius == 4.5f,
-          "13: the re-proved record uploads the NEW sphere");
 }
 
-// Spec case 2: the 132856 flight fixtures anchor the transpose convention
-// against any future "cleanup": R rows / T / local sphere -> the world centre
-// the dump showed at +0x240, asserted under 1 mm.
-void caseFlightFixtures() {
-    fresh();
-    FakeRecord recs[3];
-    const float r0[9] = { 0.0649095997f, -0.312504649f, 0.947695911f,      // id=143
-                          -0.192730457f, 0.927891433f, 0.319174558f,
-                          -0.979102492f, -0.203367367f, -9.93261224e-08f };
-    const float t0[3] = { -80.0905457f, 68.4580307f, -232.082138f };
-    const float r1[9] = { -0.979102492f, -0.203367487f, 2.42143869e-07f,   // id=147
-                          -0.192685574f, 0.927675307f, 0.319829315f,
-                          -0.0650431067f, 0.313145638f, -0.947475195f };
-    const float t1[3] = { -257.662079f, 44.2694321f, -267.809143f };
-    const float r2[9] = { 0.0612900965f, 0.336678147f, -0.939623058f,      // id=149
-                          -0.19268547f, 0.927675605f, 0.319828689f,
-                          0.979344606f, 0.161449358f, 0.121730298f };
-    const float t2[3] = { -146.491287f, 66.0164032f, -281.153717f };
-    const float* rots[3] = { r0, r1, r2 };
-    const float* ts[3] = { t0, t1, t2 };
-    const float lcs[3][3] = { { -2.50109434f, 2.1240499f, -1.44535255f },
-                              { -2.50109434f, 2.1240499f, -1.44535255f },
-                              { -0.000706672668f, -0.254451215f, -0.00101515651f } };
-    const float radii[3] = { 3.77981496f, 3.77981496f, 6.59033394f };
-    const float expect[3][3] = { { -79.2471161f, 71.5044556f, -233.77446f },
-                                 { -255.528519f, 46.2958946f, -265.760376f },
-                                 { -146.443298f, 65.779953f, -281.234558f } };
-    FakeDesc ds[3];
-    for (int i = 0; i < 3; ++i) {
-        initRecord(recs[i], 0x143 + i, 0.f, 0.f, 0.f, static_cast<uint8_t>(50 + i));
-        setTransform(recs[i], rots[i], ts[i]);
-        setSphere(recs[i], lcs[i][0], lcs[i][1], lcs[i][2], radii[i]);
-        ds[i] = descFor(recs[i]);
-    }
-    for (int f = 0; f < 4; ++f) {
-        for (int i = 0; i < 3; ++i) kinematicMotionObserve(reinterpret_cast<uintptr_t>(&ds[i]));
-        endFrame();
-    }
-    KinematicSphereGpu buf[4]; uint32_t count = 0, sframe = 0;
-    kinematicMotionSphereSnapshot(buf, 4, &count, &sframe);
-    check(count == 3, "14: all three flight fixtures upload");
-    bool centresOk = count == 3, radiiOk = count == 3;
-    for (int i = 0; i < 3; ++i) {
-        for (int a = 0; a < 3; ++a)
-            if (std::fabs(buf[i].centre[a] - expect[i][a]) > 0.001f) centresOk = false;
-        // unit column scale observed on 132856: world radius == local radius
-        if (std::fabs(buf[i].radius - radii[i]) > 0.001f) radiiOk = false;
-    }
-    check(centresOk, "14: world centres match the dumped +0x240 values under 1 mm");
-    check(radiiOk, "14: unit column scale leaves the radius untouched");
-    check(count == 3 && buf[0].kind == 0 && buf[0].prevMap[0] == 0.f &&
-          buf[0].reserved[0] == 0, "14: the phase-1 seam fields are zero");
-}
-
-// Spec case 3: the world radius scales by the max 3x3 column scale.
-void caseRadiusScale() {
-    fresh();
-    FakeRecord a; initRecord(a, 0x2B, 0.f, 0.f, 0.f, 60);
-    const float rot[9] = { 2,0,0, 0,2,0, 0,0,2 }; // column scale 2
-    const float t[3] = { 10.f, 20.f, 30.f };
-    setTransform(a, rot, t);
-    setSphere(a, 1.f, 1.f, 1.f, 3.f);
-    FakeDesc d = descFor(a);
-    const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
-    for (int i = 0; i < 4; ++i) { kinematicMotionObserve(dp); endFrame(); }
-    KinematicSphereGpu buf[1]; uint32_t count = 0, sframe = 0;
-    kinematicMotionSphereSnapshot(buf, 1, &count, &sframe);
-    check(count == 1 && std::fabs(buf[0].radius - 6.f) < 1e-4f,
-          "15: column scale 2 doubles the uploaded radius");
-    check(count == 1 && std::fabs(buf[0].centre[0] - 12.f) < 1e-3f &&
-          std::fabs(buf[0].centre[1] - 22.f) < 1e-3f &&
-          std::fabs(buf[0].centre[2] - 32.f) < 1e-3f,
-          "15: the centre maps through the scaled matrix");
-}
-
-// Spec case 4: the generation is content-addressed -- bump on set or member
-// change, hold when idle; a record losing eligibility shrinks the set.
-void caseUploadGeneration() {
-    fresh();
-    FakeRecord a, b;
-    const float rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
-    const float t[3] = { 0.f, 0.f, 0.f };
-    initRecord(a, 0x3C, 0.f, 0.f, 0.f, 70); setTransform(a, rot, t); setSphere(a, 0,0,0, 2.f);
-    initRecord(b, 0x3D, 0.f, 0.f, 0.f, 71); setTransform(b, rot, t); setSphere(b, 5,5,5, 3.f);
-    FakeDesc da = descFor(a), db = descFor(b);
-    const uintptr_t pa = reinterpret_cast<uintptr_t>(&da);
-    const uintptr_t pb = reinterpret_cast<uintptr_t>(&db);
-    for (int i = 0; i < 4; ++i) { kinematicMotionObserve(pa); kinematicMotionObserve(pb); endFrame(); }
-    KinematicSphereGpu buf[2]; uint32_t count = 0, sframe = 0;
-    const uint64_t gen = kinematicMotionSphereSnapshot(buf, 2, &count, &sframe);
-    check(count == 2 && gen == 1, "16: the eligible set publishes once");
-    const uint32_t firstFrame = sframe;
-    kinematicMotionObserve(pa); kinematicMotionObserve(pb); endFrame(); // idle frame
-    uint64_t gen2 = kinematicMotionSphereSnapshot(buf, 2, &count, &sframe);
-    check(gen2 == gen && count == 2 && sframe == firstFrame + 1,
-          "16: an unchanged set uploads nothing (the generation holds, the frame advances)");
-    setPose(a, 50.f, 0.f, 0.f, 0, 0, 0, 65535);   // a starts moving
-    kinematicMotionObserve(pa); kinematicMotionObserve(pb); endFrame();
-    gen2 = kinematicMotionSphereSnapshot(buf, 2, &count, &sframe);
-    check(gen2 == gen + 1 && count == 1, "16: a mover leaving eligibility bumps the generation");
-    check(std::fabs(buf[0].centre[0] - 5.f) < 1e-6f, "16: the remaining sphere is b's");
-    setSphere(b, 5.f, 5.f, 5.f, 3.25f);           // b LOD-refreshes mid-stream
-    for (int i = 0; i < 4; ++i) { kinematicMotionObserve(pb); endFrame(); }
-    gen2 = kinematicMotionSphereSnapshot(buf, 2, &count, &sframe);
-    check(count == 1 && gen2 == gen + 3 && std::fabs(buf[0].radius - 3.25f) < 1e-6f,
-          "16: a member sphere change bumps the generation (drop + republish)");
-}
-
-// Spec case 5: radius <= 0 or non-finite sphere bytes never upload, and the
-// rejection is counted. The eligible label itself is untouched -- the record
-// IS bit-static; it just has nothing the coverage pass may use.
-void caseImplausibleSphereRejected() {
+// Spec case 5, reduced: the compare is bytewise, so zero-radius and NaN
+// sphere bytes still prove static -- the label is pose truth.
+void caseImplausibleSphereStillStatic() {
     fresh();
     FakeRecord z, n, m;
-    const float rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
-    const float t[3] = { 0.f, 0.f, 0.f };
     const float nan = std::nanf("");
-    initRecord(z, 0x4E, 0.f, 0.f, 0.f, 80); setTransform(z, rot, t); setSphere(z, 0,0,0, 0.f);
-    initRecord(n, 0x4F, 0.f, 0.f, 0.f, 81); setTransform(n, rot, t); setSphere(n, nan, 0.f, 0.f, 2.f);
-    initRecord(m, 0x50, 0.f, 0.f, 0.f, 82); setTransform(m, rot, t); setSphere(m, 0,0,0, nan);
+    initRecord(z, 0x4E, 0.f, 0.f, 0.f, 80); setSphere(z, 0,0,0, 0.f);
+    initRecord(n, 0x4F, 0.f, 0.f, 0.f, 81); setSphere(n, nan, 0.f, 0.f, 2.f);
+    initRecord(m, 0x50, 0.f, 0.f, 0.f, 82); setSphere(m, 0,0,0, nan);
     FakeDesc dz = descFor(z), dn = descFor(n), dm = descFor(m);
     const uintptr_t pz = reinterpret_cast<uintptr_t>(&dz);
     const uintptr_t pn = reinterpret_cast<uintptr_t>(&dn);
@@ -513,37 +376,7 @@ void caseImplausibleSphereRejected() {
     }
     const KinematicMotionStats s = kinematicMotionStats();
     check(s.eligibleLast == 3, "17: implausible spheres still prove static (the label is pose truth)");
-    check(s.sphereRejected == 3, "17: every rejection is counted at the rebuild");
-    check(s.uploadedLast == 0 && s.uploadGeneration == 0, "17: nothing implausible ever uploads");
-    KinematicSphereGpu buf[1]; uint32_t count = 1, sframe = 0;
-    kinematicMotionSphereSnapshot(buf, 1, &count, &sframe);
-    check(count == 0, "17: the published set is empty");
-}
-
-// 2026-09-20 review finding 4: the generation restarts from zero on a
-// tracker restart, so the GPU upload cache keys on (session, generation).
-// The session epoch must change across any state reset and hold within a
-// session, or an off/on cycle can re-publish different spheres under a
-// generation the renderer already holds.
-void caseSessionEpoch() {
-    fresh();
-    const uint32_t s0 = kinematicMotionSession();
-    check(kinematicMotionSession() == s0, "18: the session holds within a session");
-    FakeRecord a;
-    const float rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
-    const float t[3] = { 0.f, 0.f, 0.f };
-    initRecord(a, 0x5A, 0.f, 0.f, 0.f, 90); setTransform(a, rot, t); setSphere(a, 0,0,0, 2.f);
-    FakeDesc da = descFor(a);
-    const uintptr_t pa = reinterpret_cast<uintptr_t>(&da);
-    for (int i = 0; i < 4; ++i) { kinematicMotionObserve(pa); endFrame(); }
-    uint32_t count = 0, sframe = 0;
-    check(kinematicMotionSphereSnapshot(nullptr, 0, &count, &sframe) == 1 && count == 1,
-          "18: a published set before the restart (generation 1)");
-    fresh();   // shutdown + configure: state reset twice over
-    const uint32_t s1 = kinematicMotionSession();
-    check(s1 != s0, "18: a restart bumps the session epoch");
-    check(kinematicMotionSphereSnapshot(nullptr, 0, &count, &sframe) == 0 && count == 0,
-          "18: the restarted tracker has nothing published");
+    check(s.sphereChanges == 0, "17: unchanged NaN bytes are no sphere change");
 }
 
 void caseJobAttribution() {
@@ -607,11 +440,7 @@ int wmain(int argc, wchar_t** argv) {
     caseIdenticalDupStillDedups();
     caseBoundsDumpWaitsForStatics();
     caseLodSwapInvalidation();
-    caseFlightFixtures();
-    caseRadiusScale();
-    caseUploadGeneration();
-    caseImplausibleSphereRejected();
-    caseSessionEpoch();
+    caseImplausibleSphereStillStatic();
     caseJobAttribution();
     kinematicMotionShutdown();
     std::printf("kinematic_motion_test: %u checks, %u failures\n", checks, failures);

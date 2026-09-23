@@ -6,15 +6,12 @@
 // quaternion, bit-exact over consecutive rendered frames, clocked by the
 // per-present frame counter (the mesh clock is refuted, flight 083323).
 //
-// STAGE B: eligible records' world bounding SPHERES are published for the
-// temporal pass's ownership coverage (the t19/t20 compose veto). The sphere
-// layout is flight-proven (132856): local centre float4 at record+0x270,
-// radius float at +0x280, written at spawn/LOD refresh by FUN_14433C870;
-// world centre = R^T x local + T off the +0xF0/+0x120 matrix (exact to
-// 0.0000 on every dumped static), world radius = local radius x max 3x3
-// column scale. The sphere bytes are part of the stasis compare because an
-// LOD refresh rewrites them with zero pose change. Spec: docs/kinematic-
-// motion-injection-2026-09-19.md, 2026-09-20 13:55 entry.
+// The record's bounding-sphere bytes (+0x270..+0x28F, written at spawn and
+// at an LOD refresh by FUN_14433C870) stay part of the stasis compare: an
+// LOD refresh rewrites them with zero pose change. Stage B -- publishing the
+// eligible records' world spheres for a coverage pass and its compose veto --
+// was removed 2026-09-23, superseded by the engine path's exact per-pixel
+// ownership (engine_velocity.h; docs/kinematic-motion-injection-2026-09-19.md).
 //
 // Rules that are the whole point: a static label is per-frame evidence,
 // never sticky; unknown identity, any gap, a node change, a read fault and
@@ -43,35 +40,19 @@ struct KinematicMotionStats {
     uint64_t sameFrameChanges = 0;  // identity/pose changed between dups of one frame
     uint64_t boundsChanges = 0;     // bounds-block byte changes (diagnostic)
     uint64_t sphereChanges = 0;     // sphere-byte (+0x270..+0x28F) changes: LOD refresh shape
-    uint64_t sphereRejected = 0;    // eligible records refused for the upload (bad/absent sphere or matrix)
     uint64_t framesCounted = 0;     // ended frames with the clock live
     uint64_t zeroRecordFrames = 0;  // ended frames with zero records (stand-down shape)
     uint64_t eligibleFrames = 0;    // ended frames with >=1 eligible record
-    uint64_t uploadGeneration = 0;  // bumps when the published sphere set changes
-    uint64_t uploadStuck = 0;       // eligible census moved but the generation held a whole summary window
     uint32_t tracked = 0;           // table size at snapshot
     uint32_t seenLast = 0;          // records seen in the last ended frame
     uint32_t eligibleLast = 0;      // proven-static records in the last ended frame
     uint32_t moversLast = 0;        // records whose pose changed in it
-    uint32_t uploadedLast = 0;      // spheres in the current upload snapshot
     // Job attribution (bits 2|3|4 = the physics-side jobs): records in the
     // last ended frame EVER observed under a physics job. The discriminator
     // flight asks whether movers carry these bits and eligible statics do not.
     uint32_t eligiblePhysLast = 0;
     uint32_t moversPhysLast = 0;
 };
-
-// One uploaded record for the ownership coverage pass: the world bounding
-// sphere plus the phase-2 seam fields. 80 bytes, matching the HLSL side's
-// KinSphere layout field for field (temporal_shader_source.h).
-struct KinematicSphereGpu {
-    float    centre[3];        // world, R^T x local + T
-    float    radius;           // world, local x max 3x3 column scale
-    uint32_t kind;             // 0 = static-zero (phase 1)
-    uint32_t reserved[3];
-    float    prevMap[12];      // 3x4 prev-frame map, zero-filled in phase 1
-};
-static_assert(sizeof(KinematicSphereGpu) == 80, "the HLSL KinSphere stride contract");
 
 // Idempotent across the once-per-second config re-poll: configure(true)
 // while live is a no-op, configure(false) stands down and clears state.
@@ -85,21 +66,6 @@ void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept;
 // jobMask carries the bracket TLS bits (1u<<jobId) at observation time.
 void kinematicMotionObserve(uintptr_t descriptor, uint32_t jobMask = 0) noexcept;
 KinematicMotionStats kinematicMotionStats() noexcept;
-// The upload snapshot for the coverage pass: reports the current published
-// sphere set (built at each ended frame) and copies up to cap entries into
-// out, under the module mutex. Returns the generation -- a caller compares it
-// against its last-upload generation and skips the copy when unchanged.
-// Generation 0 = never published (tracker fresh off); *frame is the ended
-// frame the snapshot describes, *count the published set's size (a null out
-// with cap 0 peeks count and generation without copying).
-uint64_t kinematicMotionSphereSnapshot(KinematicSphereGpu* out, uint32_t cap,
-                                       uint32_t* count, uint32_t* frame) noexcept;
-// The tracker's session epoch: bumped on every configure/shutdown state
-// reset (2026-09-20 review finding 4 -- the generation restarts from zero,
-// so without it an off/on cycle can re-publish different spheres under a
-// generation the GPU already holds). The coverage pass keys its upload
-// cache on (session, generation).
-uint32_t kinematicMotionSession() noexcept;
 // Test-rig introspection: eligibility of one record by its live pointer.
 bool kinematicMotionRecordEligible(uint64_t record) noexcept;
 // Test-rig introspection: the once-per-session bounds dump stage (0 = armed,

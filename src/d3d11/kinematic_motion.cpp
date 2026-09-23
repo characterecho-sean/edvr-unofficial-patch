@@ -66,12 +66,6 @@ std::vector<TrackedRecord> records_;
 KinematicMotionStats stats_;
 uint64_t seenThisFrame_ = 0;
 uint64_t configureTickMs_ = 0, lastSummaryMs_ = 0;
-// Stale-upload suspicion window (2026-09-20 13:55 spec failure mode): the
-// previous summary's eligible census, published generation and rejection
-// count. The census moving while the generation AND the rejections hold
-// means the temporal pass would be vetoing off a stale sphere buffer.
-uint32_t lastSummaryEligible_ = 0;
-uint64_t lastSummaryGeneration_ = 0, lastSummaryRejected_ = 0;
 bool standDownNoted_ = false, noMoverNoted_ = false, boundsWaitNoted_ = false;
 // Bounds-layout decode dump: part A on the first ended frame with BOTH
 // populations present (>=8 movers AND >=8 eligible statics -- movers qualify
@@ -82,19 +76,6 @@ bool standDownNoted_ = false, noMoverNoted_ = false, boundsWaitNoted_ = false;
 // motion separates both from the view products). Once per session.
 int boundsDumpStage_ = 0;
 std::vector<uint32_t> boundsDumpIds_;
-// The stage-B upload snapshot: world spheres of the records eligible at the
-// last ended frame, rebuilt at the frame census (kinematicMotionNotePresentFrame).
-// The generation bumps only on content change; the temporal pass compares it
-// against its last upload and skips the copy when unchanged.
-std::vector<KinematicSphereGpu> snapshot_;
-uint64_t snapshotGeneration_ = 0;
-uint32_t snapshotFrame_ = 0;
-// The GPU cache key's other half (2026-09-20 review finding 4): the
-// generation restarts from zero on every clearLocked, so a tracker off/on
-// cycle could re-publish different spheres under a generation the renderer
-// already holds. clearLocked bumps the session; the coverage pass uploads
-// on a (session, generation) mismatch, never a generation mismatch alone.
-std::atomic<uint32_t> sessionEpoch_{0};
 
 bool guardedRead(uintptr_t address, void* output, size_t bytes) noexcept {
     __try { std::memcpy(output, reinterpret_cast<const void*>(address), bytes); return true; }
@@ -111,80 +92,10 @@ void clearLocked() {
     clockSeeded_ = false;
     standDownNoted_ = false; noMoverNoted_ = false; boundsWaitNoted_ = false;
     boundsDumpStage_ = 0; boundsDumpIds_.clear();
-    snapshot_.clear(); snapshotGeneration_ = 0; snapshotFrame_ = 0;
-    sessionEpoch_.fetch_add(1, std::memory_order_release);
-    lastSummaryEligible_ = 0; lastSummaryGeneration_ = 0; lastSummaryRejected_ = 0;
 }
 
 bool eligibleLocked(const TrackedRecord& r, uint32_t frame) {
     return r.hasPrev && r.lastFrame == frame && r.staticRun >= kStaticRunRequired;
-}
-
-// The uploadable sphere needs finite centre lanes and a positive finite
-// radius (a centre lane w drifted off zero by the sphere-merge is normal,
-// flight 132856 id=148, and the padding lanes carry nothing). Anything less
-// is a bad read or an uninitialised record: counted, never uploaded -- the
-// failed-reads-fabricate-motion class (2026-09-20 review finding 2).
-bool spherePlausibleBytes(const uint8_t* sphere) {
-    float f[8];
-    std::memcpy(f, sphere, sizeof(f));
-    for (int i = 0; i < 3; ++i) if (!std::isfinite(f[i])) return false;
-    return std::isfinite(f[4]) && f[4] > 0.0f;
-}
-
-// The flight-proven world-sphere map (132856): the +0xF0 3x3's rows are the
-// basis vectors' images, so the world centre is R^T x local + T -- exact to
-// 0.0000 on every dumped static -- and the world radius scales by the max
-// 3x3 column scale. The matrix lives inside the record's bounds block
-// (+0xF0 rows at block +0x40, +0x120 translation at block +0x70). +0x240 is
-// the game's own world centre but zero for guard-off records; we never read
-// it. Returns false when the inputs were never validly read.
-bool worldSphereLocked(const TrackedRecord& r, KinematicSphereGpu& out) {
-    if (!r.boundsValid || !r.sphereValid || !spherePlausibleBytes(r.prevSphere)) return false;
-    float rot[12], t[3], lc[4];
-    std::memcpy(rot, r.bounds + 0x40, sizeof(rot));   // three padded float4 rows
-    std::memcpy(t, r.bounds + 0x70, sizeof(t));
-    std::memcpy(lc, r.prevSphere, sizeof(lc));        // local centre, lane 3 ignored
-    const float* r0 = rot;      const float* r1 = rot + 4;      const float* r2 = rot + 8;
-    const double cx = (double)r0[0] * lc[0] + (double)r1[0] * lc[1] + (double)r2[0] * lc[2] + t[0];
-    const double cy = (double)r0[1] * lc[0] + (double)r1[1] * lc[1] + (double)r2[1] * lc[2] + t[1];
-    const double cz = (double)r0[2] * lc[0] + (double)r1[2] * lc[1] + (double)r2[2] * lc[2] + t[2];
-    const double s0 = std::sqrt((double)r0[0]*r0[0] + (double)r1[0]*r1[0] + (double)r2[0]*r2[0]);
-    const double s1 = std::sqrt((double)r0[1]*r0[1] + (double)r1[1]*r1[1] + (double)r2[1]*r2[1]);
-    const double s2 = std::sqrt((double)r0[2]*r0[2] + (double)r1[2]*r1[2] + (double)r2[2]*r2[2]);
-    float radius;
-    std::memcpy(&radius, r.prevSphere + 16, 4);
-    const double wr = (double)radius * std::max(s0, std::max(s1, s2));
-    if (!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(cz) ||
-        !std::isfinite(wr) || wr <= 0.0) return false;
-    out.centre[0] = (float)cx; out.centre[1] = (float)cy; out.centre[2] = (float)cz;
-    out.radius = (float)wr;
-    out.kind = 0;                // static-zero (phase 1)
-    out.reserved[0] = out.reserved[1] = out.reserved[2] = 0;
-    std::memset(out.prevMap, 0, sizeof(out.prevMap));
-    return true;
-}
-
-// Rebuild the upload snapshot from the just-ended frame's eligibility census.
-// Content-addressed: the generation bumps only when the set or a member's
-// sphere bytes change, so an idle settlement uploads nothing per frame.
-void rebuildSnapshotLocked(uint32_t endedFrame) {
-    std::vector<KinematicSphereGpu> next;
-    for (const TrackedRecord& r : records_) {
-        if (!eligibleLocked(r, endedFrame)) continue;
-        KinematicSphereGpu s;
-        if (!worldSphereLocked(r, s)) { ++stats_.sphereRejected; continue; }
-        next.push_back(s);
-    }
-    if (next.size() != snapshot_.size() ||
-        (!next.empty() && std::memcmp(next.data(), snapshot_.data(),
-                                      next.size() * sizeof(KinematicSphereGpu)) != 0)) {
-        snapshot_.swap(next);
-        ++snapshotGeneration_;
-    }
-    snapshotFrame_ = endedFrame;
-    stats_.uploadedLast = static_cast<uint32_t>(snapshot_.size());
-    stats_.uploadGeneration = snapshotGeneration_;
 }
 
 // One pose change, classified: translation vs quat-only (the 103339
@@ -288,34 +199,13 @@ void maybeDumpBoundsLocked(uint32_t endedFrame, uint32_t movers, uint32_t eligib
 void summaryLocked(uint64_t now) {
     if (now - lastSummaryMs_ < kSummaryMs) return;
     lastSummaryMs_ = now;
-    // Stale-upload suspicion (2026-09-20 13:55 spec): the eligible census
-    // moved over the window yet the published generation AND the rejection
-    // count both held -- the set did not change when it should have, so the
-    // coverage pass would be vetoing off a stale sphere buffer. A census
-    // move explained by rejections (new eligibles with implausible spheres)
-    // is legitimate and does not trip this.
-    if (stats_.eligibleLast != lastSummaryEligible_ &&
-        snapshotGeneration_ == lastSummaryGeneration_ &&
-        stats_.sphereRejected == lastSummaryRejected_) {
-        ++stats_.uploadStuck;
-        Log::get().note("engine motion: STALE-UPLOAD suspicion -- eligible census moved "
-                        "(%u -> %u) over the summary window but the upload generation held "
-                        "at %llu with no new rejections; the coverage pass would be reading "
-                        "a stale sphere buffer.",
-                        lastSummaryEligible_, stats_.eligibleLast,
-                        (unsigned long long)snapshotGeneration_);
-    }
-    lastSummaryEligible_ = stats_.eligibleLast;
-    lastSummaryGeneration_ = snapshotGeneration_;
-    lastSummaryRejected_ = stats_.sphereRejected;
     Log::get().note(
         "engine motion: tracked %llu; last frame seen %llu, eligible %llu, movers %llu; "
         "observed %llu dup %llu faults %llu overflow %llu; pose changes %llu "
         "(translation %llu, quat-only %llu, near-miss %llu), movers total %llu; "
         "gap drops %llu, node changes %llu, bounds changes %llu, same-frame "
-        "invalidations %llu; sphere changes %llu, rejected %llu; frames %llu, "
-        "zero-record %llu, eligible-frames %llu; phys-touched eligible %u movers %u; "
-        "upload gen %llu, spheres %u. "
+        "invalidations %llu; sphere changes %llu; frames %llu, "
+        "zero-record %llu, eligible-frames %llu; phys-touched eligible %u movers %u. "
         "Absence of this line with fix.engine_motion on reads as a dead "
         "instrument, never as success.",
         (unsigned long long)records_.size(),
@@ -328,11 +218,10 @@ void summaryLocked(uint64_t now) {
         (unsigned long long)stats_.moversTotal,
         (unsigned long long)stats_.gapDrops, (unsigned long long)stats_.nodeChanges,
         (unsigned long long)stats_.boundsChanges, (unsigned long long)stats_.sameFrameChanges,
-        (unsigned long long)stats_.sphereChanges, (unsigned long long)stats_.sphereRejected,
+        (unsigned long long)stats_.sphereChanges,
         (unsigned long long)stats_.framesCounted, (unsigned long long)stats_.zeroRecordFrames,
         (unsigned long long)stats_.eligibleFrames,
-        stats_.eligiblePhysLast, stats_.moversPhysLast,
-        (unsigned long long)stats_.uploadGeneration, stats_.uploadedLast);
+        stats_.eligiblePhysLast, stats_.moversPhysLast);
 }
 
 } // namespace kinematic_motion_detail
@@ -365,11 +254,9 @@ void kinematicMotionConfigure(bool on) {
         lastSummaryMs_ = configureTickMs_;
     }
     active_.store(true, std::memory_order_release);
-    Log::get().note("engine motion: tracker live (fix.engine_motion=on) -- proven-static records' "
-                    "world spheres feed the temporal pass's ownership coverage: the movers debug "
-                    "view paints owned pixels cyan, and with fix.engine_motion_veto=on they also "
-                    "take camera-only motion (the t19/t20 compose veto, off by default). Movers "
-                    "and unknowns keep the stock path. Stand-downs and zero-record frames are "
+    Log::get().note("engine motion: tracker live (fix.engine_motion=on) -- proves per-record "
+                    "stasis from engine truth; the engine-record path's summary reads its "
+                    "movers count as a cross-check. Stand-downs and zero-record frames are "
                     "logged, never read as pass.");
 }
 
@@ -414,7 +301,6 @@ void kinematicMotionNotePresentFrame(uint32_t presentFrame) noexcept {
     stats_.moversLast = movers;
     stats_.tracked = static_cast<uint32_t>(records_.size());
     if (eligible > 0) ++stats_.eligibleFrames;
-    rebuildSnapshotLocked(prev); // the coverage pass uploads off this generation
     maybeDumpBoundsLocked(prev, movers, eligible);
     seenThisFrame_ = 0;
     const uint64_t now = GetTickCount64();
@@ -614,21 +500,6 @@ KinematicMotionStats kinematicMotionStats() noexcept {
     KinematicMotionStats out = stats_;
     out.tracked = static_cast<uint32_t>(records_.size());
     return out;
-}
-
-uint64_t kinematicMotionSphereSnapshot(KinematicSphereGpu* out, uint32_t cap,
-                                       uint32_t* count, uint32_t* frame) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const uint32_t n = static_cast<uint32_t>(snapshot_.size());
-    const uint32_t ncopy = (cap < n) ? cap : n;
-    if (out && ncopy) std::memcpy(out, snapshot_.data(), ncopy * sizeof(KinematicSphereGpu));
-    if (count) *count = n;   // the published set's size, even when cap truncates the copy
-    if (frame) *frame = snapshotFrame_;
-    return snapshotGeneration_;
-}
-
-uint32_t kinematicMotionSession() noexcept {
-    return sessionEpoch_.load(std::memory_order_acquire);
 }
 
 bool kinematicMotionRecordEligible(uint64_t record) noexcept {
