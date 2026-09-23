@@ -1,5 +1,6 @@
 // fix.ui_quality -- the UI layer (docs/ui-layer-2026-09-23.md; Design A of
-// docs/crisp-ui-handoff.md, phase 1).
+// docs/crisp-ui-handoff.md, phase 1). The key's other half, every offscreen
+// UI surface at the target's size, is ui_surfaces.h.
 //
 // The game composites its menus, the 2D screen and the loading screen into
 // each eye at the scene's render size (HMD Quality x the headset's size),
@@ -19,14 +20,22 @@
 // recognise it, srv0IsPanelSized), and every eye draw that samples an
 // interface surface ui_depth has learned (the menu / modal panel family,
 // the loading screen's composite, the rest), into an 8-bit UNORM eye
-// target, with no depth or stencil test or write, and a blend with a
-// premultiplied form. WHAT IT LEAVES: the cockpit's holo panels, flight HUD
-// and target sprite, which the game draws into the lit HDR target before
-// exposure and the tonemap -- the deferred UI replay (ui_deferred.cpp)
-// already re-draws those after the upscale at the output size under an
-// external engine, and the layer, composited after the tonemap, cannot take
-// them without transcribing it. Every family it leaves is named in the log
-// with the reason.
+// target, with a blend that has a premultiplied or multiplicative form.
+// Depth and stencil: a draw that WRITES them (the menu panel marks its
+// footprint in stencil for the draws after it) draws its colour into the
+// layer and is issued once more with no colour target, so the write lands
+// in the game's own buffer exactly as before; a draw that TESTS them is
+// drawn against the layer's own depth-stencil target, the game's resampled
+// to the layer's size with the jitter cancelled. A multiply (the loading
+// screen's gamma pass) scales the layer and a per-channel transmittance the
+// composite applies to the frame. WHAT IT LEAVES: the cockpit's holo
+// panels, flight HUD and target sprite, which the game draws into the lit
+// HDR target before exposure and the tonemap -- the deferred UI replay
+// (ui_deferred.cpp, advanced.ui_replay) re-draws those after the upscale at
+// the output size under an external engine, and the layer, composited after
+// the tonemap, cannot take them without transcribing it; and any draw the
+// replay itself captured. Every family it leaves is named in the log with
+// the reason.
 //
 // THE ORDER IT CHANGES, and the only one: anything the game drew into an
 // eye AFTER a redirected draw now lands UNDER it. The totals line counts
@@ -70,18 +79,35 @@ int uiLayerTargetKind();
 // the game's own, the curved screen's and the loader panel's substitutions
 // -- with uiLayerBegin/uiLayerEnd. verdictForwards: the draw's verdict
 // forwards it as the game's (with or without its own state wrap), rather
-// than swallowing it or re-issuing it.
-bool uiLayerDecide(ID3D11DeviceContext* ctx, int family, bool verdictForwards);
+// than swallowing it or re-issuing it. substituted: the draw will be issued
+// through the curved screen's own geometry, which the second issues below
+// cannot repeat (so a multiply or a depth/stencil write through it stays in
+// the frame).
+bool uiLayerDecide(ID3D11DeviceContext* ctx, int family, bool verdictForwards, bool substituted);
 
 // Around one issue of a decided draw: bind the eye's layer as the only
-// render target (no depth), the viewports and scissors through the map with
-// the jitter cancelled, the blend converted (ui_layer_math.h). Begin returns
-// false -- and End is then a no-op -- if the draw's state at the moment of
-// issue refuses (a blend changed by a verdict's own Begin), in which case the
-// draw goes to the game's frame as always. Every state change goes through
-// the raw entry points, so the binding shadow keeps describing the game's.
+// render target (with the layer's own seeded depth-stencil target when the
+// draw tests depth or stencil), the viewports and scissors through the map
+// with the jitter cancelled, the blend converted (ui_layer_math.h). Begin
+// returns false -- and End is then a no-op -- if the draw's state at the
+// moment of issue refuses (a blend changed by a verdict's own Begin, a seed
+// that failed), in which case the draw goes to the game's frame as always.
+// Every state change goes through the raw entry points, so the binding
+// shadow keeps describing the game's.
 bool uiLayerBegin(ID3D11DeviceContext* ctx);
 void uiLayerEnd(ID3D11DeviceContext* ctx);
+
+// After a decided draw's issue, its second issues -- each only when it
+// returns true, each closed by the End beside it:
+//
+// a multiply's second draw, into the per-channel transmittance, bracketed
+// like the first (the draw re-issued as it was; closed by uiLayerEnd);
+bool uiLayerMultiplyBegin(ID3D11DeviceContext* ctx);
+// a depth or stencil write, kept in the game's own buffer: the game's depth
+// target and state with NO colour target bound, the game's viewports and
+// scissors (the draw re-issued as it was; closed by uiLayerWriteBackEnd).
+bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx);
+void uiLayerWriteBackEnd(ID3D11DeviceContext* ctx);
 
 // True between a successful uiLayerBegin and its End (owner context only):
 // the passes that ride the game's own draw -- the screen's motion and UI
@@ -98,6 +124,11 @@ inline bool uiLayerRedirecting() { return detail::g_uiLayerRedirecting; }
 // under the UI, or no longer see it).
 inline bool uiLayerWatching() { return detail::g_uiLayerWatching; }
 void uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count);
+// A game clear of a depth-stencil view, while watching: when it clears the
+// buffer a layer's depth-stencil target was seeded from this frame, the
+// layer's copy is stale and the next tested draw seeds it again. (A game
+// draw that writes it is caught by uiLayerNoteOther the same way.)
+void uiLayerNoteDepthClear(void* dsv);
 
 // The eye check, the one authority on which eye is which: the game's
 // Submit names it. A copy out of a target the UI was taken from this frame

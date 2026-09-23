@@ -160,16 +160,19 @@ int main(int argc, char** argv) {
               "...its ceiling ships commented out: the compiled 6.0 is in force");
     expectStr("advanced.settlement_detail_observe", "<unset>",
               "...and so does its observe-only switch");
-    // hud_quality generalises advanced.surface_inflate to a learned match
-    // and an HMD-Quality-derived float factor; it ships live in [fix],
-    // default off (the HUD follows HMD Quality as today).
-    expectStr("fix.hud_quality", "off",
-              "hud quality ships live in [fix] and defaults off");
-    // ui_quality is the UI layer (docs/ui-layer-2026-09-23.md): the game's
-    // post-tonemap UI drawn into a per-eye layer after the upscale; ships
-    // live in [fix], default off (the UI is drawn into the picture as today).
+    // ui_quality (docs/ui-layer-2026-09-23.md) is one key for both halves:
+    // the cockpit's interface surfaces made at the target's size, and the
+    // game's post-tonemap UI drawn into a per-eye layer after the upscale.
+    // Ships live in [fix], default off (the interface is drawn as today).
+    // fix.hud_quality, the surfaces' own key for one day, is gone: absorbed.
     expectStr("fix.ui_quality", "off",
               "ui quality ships live in [fix] and defaults off");
+    expectStr("fix.hud_quality", "<unset>",
+              "...and the separate HUD key it absorbed is gone");
+    // The deferred UI replay's A/B ships commented out: the compiled 1 (the
+    // replay on, as it always was) is in force.
+    expectStr("advanced.ui_replay", "<unset>",
+              "the ui replay switch ships commented out: the compiled 1 is in force");
 
     // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
     // This is the claim that a repeated section header is not a parse error

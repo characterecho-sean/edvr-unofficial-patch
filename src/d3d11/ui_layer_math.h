@@ -1,8 +1,9 @@
 // fix.ui_quality's arithmetic -- the UI layer (docs/ui-layer-2026-09-23.md,
 // Design A of docs/crisp-ui-handoff.md) -- pure and header-only: no device,
 // no Config, no Log. The DLL (src/d3d11/ui_layer.cpp) and its build-gate rig
-// (tools/ui_layer_test) both include this one file, so the rig cannot test a
-// copy that has drifted from the code that flies.
+// (tools/ui_quality_test) both include this one file, so the rig cannot test
+// a copy that has drifted from the code that flies. The key's surfaces half
+// has its own arithmetic, ui_quality_math.h.
 //
 // WHAT THE LAYER IS. A classified UI draw is rasterised, with the game's own
 // shaders and state, into an EDVR-owned per-eye RGBA target at the size of
@@ -45,8 +46,9 @@ namespace edvr {
 // ---------------------------------------------------------------- the key --
 
 // "off" | "1.0" | "1.25" -> 0 (off) | 1.0 | 1.25. Exact text, the way
-// fix.hud_quality and fix.settlement_detail read their choices: "1.00" is
-// not "1.0". Anything else is off, and *recognized says so for the log.
+// fix.settlement_detail reads its choices: "1.00" is not "1.0". Anything
+// else is off, and *recognized says so for the log. One reader for both
+// halves (uiLayerConfigure hands the target to ui_surfaces).
 inline float uiQualityParse(const char* text, bool* recognized) {
     if (recognized) *recognized = true;
     if (!text) {
@@ -238,11 +240,14 @@ struct UiBlendRt {
 
 // What a draw's colour blend does to the frame beneath it.
 enum class UiBlendShape : uint8_t {
-    kOpaque,          // blending off: covers what it draws
+    kOpaque,          // blending off (or ONE, ZERO): covers what it draws
     kOver,            // SRC_ALPHA, INV_SRC_ALPHA: the classic over
     kPremulOver,      // ONE, INV_SRC_ALPHA: premultiplied over
     kAdditive,        // ONE, ONE: light added, covers nothing
     kScaledAdditive,  // SRC_ALPHA, ONE: light added, covers nothing
+    kMultiply,        // ZERO, SRC_COLOR or DEST_COLOR, ZERO: the frame tinted
+                      // by the source colour (the loading screen's gamma
+                      // variant, ps 8ADB2A81A45E8A4B, census 2026-09-08)
     kRefused,         // anything else: the draw stays in the game's frame
 };
 
@@ -253,31 +258,36 @@ inline const char* uiBlendShapeName(UiBlendShape s) {
         case UiBlendShape::kPremulOver: return "premultiplied over";
         case UiBlendShape::kAdditive: return "additive";
         case UiBlendShape::kScaledAdditive: return "scaled additive";
+        case UiBlendShape::kMultiply: return "multiply";
         default: return "refused";
     }
 }
 
 // The shape of the colour equation. Refused: a subtract/min/max op,
-// destination-colour or destination-alpha factors (the layer's alpha is not
-// the frame's), dual-source, a blend factor, and a write mask with no colour
-// in it -- or, for a shape that COVERS (opaque, over), a mask that leaves
-// any colour channel out: transmittance is one number for all three, so a
-// channel the game kept would come out of the composite covered anyway.
-// Light that covers nothing is exact under any colour mask. Alpha-to-
-// coverage and logic ops are refused by the caller, which reads them from
-// the state object.
+// destination-alpha factors (the layer's alpha is not the frame's), dual-
+// source, a blend factor, and a write mask with no colour in it -- or, for
+// a shape that COVERS (opaque, over), a mask that leaves any colour channel
+// out: transmittance is one number for all three, so a channel the game kept
+// would come out of the composite covered anyway. Light that covers nothing
+// and a multiply (per-channel by construction) are exact under any colour
+// mask. Alpha-to-coverage and logic ops are refused by the caller, which
+// reads them from the state object.
 inline UiBlendShape uiLayerBlendShape(const UiBlendRt& b) {
     if ((b.mask & uiblend::kWriteRgb) == 0) return UiBlendShape::kRefused;
     const bool allColour = (b.mask & uiblend::kWriteRgb) == uiblend::kWriteRgb;
     if (!b.enable) return allColour ? UiBlendShape::kOpaque : UiBlendShape::kRefused;
     if (b.op != uiblend::kOpAdd) return UiBlendShape::kRefused;
     using namespace uiblend;
+    if (b.src == kOne && b.dst == kZero)
+        return allColour ? UiBlendShape::kOpaque : UiBlendShape::kRefused;
     if (b.src == kSrcAlpha && b.dst == kInvSrcAlpha)
         return allColour ? UiBlendShape::kOver : UiBlendShape::kRefused;
     if (b.src == kOne && b.dst == kInvSrcAlpha)
         return allColour ? UiBlendShape::kPremulOver : UiBlendShape::kRefused;
     if (b.src == kOne && b.dst == kOne) return UiBlendShape::kAdditive;
     if (b.src == kSrcAlpha && b.dst == kOne) return UiBlendShape::kScaledAdditive;
+    if ((b.src == kZero && b.dst == kSrcColor) || (b.src == kDestColor && b.dst == kZero))
+        return UiBlendShape::kMultiply;
     return UiBlendShape::kRefused;
 }
 
@@ -293,6 +303,13 @@ inline UiBlendShape uiLayerBlendShape(const UiBlendRt& b) {
 //   | ONE, INV_SRC_ALPHA         | as the game  | ZERO, INV_SRC_ALPHA     |
 //   | ONE, ONE                   | as the game  | ZERO, ONE    T' = T     |
 //   | SRC_ALPHA, ONE             | as the game  | ZERO, ONE    T' = T     |
+//   | ZERO, SRC_COLOR (multiply) | as the game  | not written  T' = T     |
+//
+// A multiply also scales a second, per-channel transmittance M (its own
+// RGBA8 target, cleared to 1), drawn by the same draw once more with
+// uiLayerMultiplyBlend: the composite is then out = L.rgb + F.rgb * T * M.rgb,
+// exact for any order of the accepted shapes (over: L' = c + L(1-a),
+// T' = T(1-a); additive: L' = L + c; multiply: L' = L s, M' = M s).
 //
 // False for a refused shape: the draw is not redirected.
 inline bool uiLayerConvertBlend(const UiBlendRt& in, UiBlendRt* out) {
@@ -315,12 +332,34 @@ inline bool uiLayerConvertBlend(const UiBlendRt& in, UiBlendRt* out) {
             o.dst = in.dst;
             o.dstA = uiblend::kInvSrcAlpha;
             break;
+        case UiBlendShape::kMultiply:
+            o.src = in.src;
+            o.dst = in.dst;
+            o.dstA = uiblend::kOne;
+            o.mask = static_cast<uint8_t>(in.mask & uiblend::kWriteRgb);  // T untouched
+            break;
         default:  // the additive shapes
             o.src = in.src;
             o.dst = in.dst;
             o.dstA = uiblend::kOne;
             break;
     }
+    *out = o;
+    return true;
+}
+
+// The second draw of a multiply, into the per-channel transmittance M: the
+// game's own colour factors and colour mask, alpha not written.
+inline bool uiLayerMultiplyBlend(const UiBlendRt& in, UiBlendRt* out) {
+    if (uiLayerBlendShape(in) != UiBlendShape::kMultiply || !out) return false;
+    UiBlendRt o;
+    o.enable = true;
+    o.op = o.opA = uiblend::kOpAdd;
+    o.src = in.src;
+    o.dst = in.dst;
+    o.srcA = uiblend::kZero;
+    o.dstA = uiblend::kOne;
+    o.mask = static_cast<uint8_t>(in.mask & uiblend::kWriteRgb);
     *out = o;
     return true;
 }
@@ -332,8 +371,12 @@ struct UiPx {
     float r = 0, g = 0, b = 0, a = 0;
 };
 inline float uiSat(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
-inline float uiBlendFactor(uint8_t f, const UiPx& s, const UiPx& d) {
+// One factor for channel c (0..2 colour, 3 alpha): the colour factors read
+// the same channel of the source or the destination, as the hardware does.
+inline float uiBlendFactor(uint8_t f, const UiPx& s, const UiPx& d, int c) {
     using namespace uiblend;
+    const float sc = c == 0 ? s.r : c == 1 ? s.g : c == 2 ? s.b : s.a;
+    const float dc = c == 0 ? d.r : c == 1 ? d.g : c == 2 ? d.b : d.a;
     switch (f) {
         case kZero: return 0.0f;
         case kOne: return 1.0f;
@@ -341,38 +384,98 @@ inline float uiBlendFactor(uint8_t f, const UiPx& s, const UiPx& d) {
         case kInvSrcAlpha: return 1.0f - s.a;
         case kDestAlpha: return d.a;
         case kInvDestAlpha: return 1.0f - d.a;
-        default: return 0.0f;  // colour factors are refused shapes
+        case kSrcColor: return sc;
+        case kInvSrcColor: return 1.0f - sc;
+        case kDestColor: return dc;
+        case kInvDestColor: return 1.0f - dc;
+        default: return 0.0f;
     }
 }
 inline UiPx uiBlendApply(const UiBlendRt& b, const UiPx& s, const UiPx& d) {
     UiPx o = d;
-    if (!b.enable) {
-        if (b.mask & 1) o.r = uiSat(s.r);
-        if (b.mask & 2) o.g = uiSat(s.g);
-        if (b.mask & 4) o.b = uiSat(s.b);
-        if (b.mask & 8) o.a = uiSat(s.a);
-        return o;
+    const float sv[4] = {s.r, s.g, s.b, s.a}, dv[4] = {d.r, d.g, d.b, d.a};
+    float ov[4] = {d.r, d.g, d.b, d.a};
+    for (int c = 0; c < 4; ++c) {
+        if (!(b.mask & (1 << c))) continue;
+        if (!b.enable) {
+            ov[c] = uiSat(sv[c]);
+            continue;
+        }
+        const uint8_t fsrc = c < 3 ? b.src : b.srcA, fdst = c < 3 ? b.dst : b.dstA;
+        ov[c] = uiSat(sv[c] * uiBlendFactor(fsrc, s, d, c) + dv[c] * uiBlendFactor(fdst, s, d, c));
     }
-    const float fs = uiBlendFactor(b.src, s, d), fd = uiBlendFactor(b.dst, s, d);
-    const float fsa = uiBlendFactor(b.srcA, s, d), fda = uiBlendFactor(b.dstA, s, d);
-    if (b.mask & 1) o.r = uiSat(s.r * fs + d.r * fd);
-    if (b.mask & 2) o.g = uiSat(s.g * fs + d.g * fd);
-    if (b.mask & 4) o.b = uiSat(s.b * fs + d.b * fd);
-    if (b.mask & 8) o.a = uiSat(s.a * fsa + d.a * fda);
+    o.r = ov[0];
+    o.g = ov[1];
+    o.b = ov[2];
+    o.a = ov[3];
     return o;
 }
 
-// The composite, per pixel: out = L.rgb + F.rgb * L.a (L.a = transmittance),
-// in the space the game's own composite blended in -- the stored, encoded
-// values through a UNORM view -- with the frame's alpha kept. The layer is
-// cleared to (0, 0, 0, 1): nothing drawn, everything of the frame shows.
-inline UiPx uiLayerCompositePx(const UiPx& layer, const UiPx& frame) {
+// The composite, per pixel: out = L.rgb + F.rgb * L.a * M.rgb (L.a = the
+// scalar transmittance, M = the per-channel one a multiply leaves; 1 where
+// none drew), in the space the game's own composite blended in -- the
+// stored, encoded values through a UNORM view -- with the frame's alpha
+// kept. The layer is cleared to (0, 0, 0, 1) and M to (1, 1, 1, 1): nothing
+// drawn, everything of the frame shows.
+inline UiPx uiLayerCompositePx(const UiPx& layer, const UiPx& mult, const UiPx& frame) {
     UiPx o;
-    o.r = uiSat(layer.r + frame.r * layer.a);
-    o.g = uiSat(layer.g + frame.g * layer.a);
-    o.b = uiSat(layer.b + frame.b * layer.a);
+    o.r = uiSat(layer.r + frame.r * layer.a * mult.r);
+    o.g = uiSat(layer.g + frame.g * layer.a * mult.g);
+    o.b = uiSat(layer.b + frame.b * layer.a * mult.b);
     o.a = frame.a;
     return o;
+}
+inline UiPx uiLayerCompositePx(const UiPx& layer, const UiPx& frame) {
+    UiPx one;
+    one.r = one.g = one.b = one.a = 1.0f;
+    return uiLayerCompositePx(layer, one, frame);
+}
+
+// ------------------------------------------------ depth and stencil --
+
+// A draw's depth-stencil state, in D3D11_DEPTH_STENCIL_DESC's numbers
+// (comparison 8 = ALWAYS, stencil op 1 = KEEP), plus the view's read-only
+// flags, for the pure classification below.
+namespace uids {
+constexpr uint8_t kAlways = 8, kKeep = 1;
+}
+struct UiDsFace {
+    uint8_t fail = uids::kKeep, depthFail = uids::kKeep, pass = uids::kKeep, func = uids::kAlways;
+};
+struct UiDsState {
+    bool depthEnable = false;
+    uint8_t depthFunc = uids::kAlways;
+    bool depthWriteAll = false;
+    bool stencilEnable = false;
+    uint8_t readMask = 0xFF, writeMask = 0xFF;
+    UiDsFace front, back;
+    bool readOnlyDepth = false, readOnlyStencil = false;  // the view's flags
+};
+
+// What a draw does with the depth-stencil target bound with it: whether its
+// colour output depends on it (a TEST), and whether it changes it (a
+// WRITE). Neither with no target bound: D3D11 passes both tests then.
+struct UiDsEffect {
+    bool depthTest = false, stencilTest = false, depthWrite = false, stencilWrite = false;
+    bool tests() const { return depthTest || stencilTest; }
+    bool writes() const { return depthWrite || stencilWrite; }
+};
+inline UiDsEffect uiLayerDsEffect(const UiDsState& s, bool dsvBound) {
+    UiDsEffect e;
+    if (!dsvBound) return e;
+    e.depthTest = s.depthEnable && s.depthFunc != uids::kAlways;
+    e.depthWrite = s.depthEnable && s.depthWriteAll && !s.readOnlyDepth;
+    // Any function but ALWAYS is a test, whatever the read mask: with a mask
+    // of 0 the outcome is constant, but NOT_EQUAL, LESS, GREATER and NEVER
+    // are a constant FAIL, and a layer with no depth target would pass them.
+    auto faceTests = [&](const UiDsFace& f) { return f.func != uids::kAlways; };
+    auto faceWrites = [&](const UiDsFace& f) {
+        return f.pass != uids::kKeep || f.fail != uids::kKeep || f.depthFail != uids::kKeep;
+    };
+    e.stencilTest = s.stencilEnable && (faceTests(s.front) || faceTests(s.back));
+    e.stencilWrite = s.stencilEnable && s.writeMask != 0 && !s.readOnlyStencil &&
+                     (faceWrites(s.front) || faceWrites(s.back));
+    return e;
 }
 
 // ------------------------------------------------------ the composite filter --
@@ -460,12 +563,18 @@ enum class UiLayerDecision : uint8_t {
     kLate,           // its eye's composite already ran this frame (gate G1)
     kNotArmed,       // no door frame for this eye last frame (first frames,
                      // key just on, pass not running)
-    kMrt,            // more than one render target bound
-    kDepthStencil,   // tests or writes depth, or stencil, against a bound
-                     // depth target: the layer has none, and dropping a write
-                     // another draw reads would change the game's picture
-    kBlendRefused,   // a blend with no premultiplied form
-    kLayerFailed,    // the layer could not be created
+    kReplayOwns,     // the deferred UI replay captured it (a post-tone copy
+                     // or a terminal-canvas tail) and redraws it after the
+                     // upscale itself: taking it too would draw it twice
+    kMrt,            // more than one render target bound, or PS UAVs
+    kDepthStencilTest,  // tests depth or stencil against a depth target the
+                        // layer cannot reproduce at its size (the format, an
+                        // array, MSAA, a read-only view, another size)
+    kSubstitutedWrite,  // writes depth or stencil, but through a substitution
+                        // (the loader panel, the curved screen) whose own
+                        // geometry the write-back cannot re-issue
+    kBlendRefused,   // a blend with no premultiplied or multiplicative form
+    kLayerFailed,    // the layer (or its depth target) could not be created
     kCount
 };
 
@@ -484,9 +593,15 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
             return "its target is not the size of the eye the game submits";
         case UiLayerDecision::kLate: return "arrived after its eye's composite (gate G1)";
         case UiLayerDecision::kNotArmed: return "layer not armed";
+        case UiLayerDecision::kReplayOwns:
+            return "the deferred UI replay already redraws it after the upscale";
         case UiLayerDecision::kMrt: return "more than one render target, or pixel-shader UAVs";
-        case UiLayerDecision::kDepthStencil: return "depth- or stencil-tested or -writing";
-        case UiLayerDecision::kBlendRefused: return "blend with no premultiplied form";
+        case UiLayerDecision::kDepthStencilTest:
+            return "tests depth or stencil against a target the layer cannot reproduce";
+        case UiLayerDecision::kSubstitutedWrite:
+            return "writes depth or stencil through a substituted geometry";
+        case UiLayerDecision::kBlendRefused:
+            return "blend with no premultiplied or multiplicative form";
         case UiLayerDecision::kLayerFailed: return "layer creation failed";
         default: return "?";
     }
@@ -503,8 +618,11 @@ struct UiLayerDrawFacts {
     bool targetMatchesEye = true; // the target is the submitted region's size
     bool late = false;            // its eye's door already ran this frame
     bool armed = false;           // the door and the pass ran for it last frame
+    bool replayOwns = false;      // the deferred UI replay captured this draw
     bool mrt = false;             // a second render target, or PS UAVs, bound
-    bool depthStencil = false;    // tests/writes depth or stencil vs a bound DSV
+    UiDsEffect ds;                // what it does with the bound depth target
+    bool dsReproducible = true;   // ... and whether the layer can seed its own
+    bool substituted = false;     // drawn by a substitution's own geometry
     UiBlendShape blend = UiBlendShape::kRefused;
     bool layerReady = true;       // the eye's layer exists at the wanted size
 };
@@ -519,9 +637,12 @@ inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
     if (!f.targetMatchesEye) return UiLayerDecision::kTargetSize;
     if (f.late) return UiLayerDecision::kLate;
     if (!f.armed) return UiLayerDecision::kNotArmed;
+    if (f.replayOwns) return UiLayerDecision::kReplayOwns;
     if (f.mrt) return UiLayerDecision::kMrt;
-    if (f.depthStencil) return UiLayerDecision::kDepthStencil;
+    if (f.ds.tests() && !f.dsReproducible) return UiLayerDecision::kDepthStencilTest;
+    if (f.ds.writes() && f.substituted) return UiLayerDecision::kSubstitutedWrite;
     if (f.blend == UiBlendShape::kRefused) return UiLayerDecision::kBlendRefused;
+    if (f.blend == UiBlendShape::kMultiply && f.substituted) return UiLayerDecision::kBlendRefused;
     if (!f.layerReady) return UiLayerDecision::kLayerFailed;
     return UiLayerDecision::kRedirect;
 }

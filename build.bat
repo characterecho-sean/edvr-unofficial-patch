@@ -450,7 +450,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\lod_governor.cpp" ^
     "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\engine_velocity.cpp" ^
-    "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" "src\d3d11\hud_quality_math.cpp" ^
+    "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
     "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
     "src\d3d11\fss_dump.cpp" "src\d3d11\fss_heal.cpp" ^
@@ -472,7 +472,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_separation.cpp" ^
     "src\d3d11\ui_deferred.cpp" ^
-    "src\d3d11\ui_layer.cpp" ^
+    "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
@@ -2210,60 +2210,36 @@ if errorlevel 1 ( echo [edvr] ERROR: LOD governor test build failed & exit /b 1 
 "%BUILD%\lod_governor_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_hud_quality_test
-echo [edvr] === hud_quality_test.exe ===
-REM Build gate for fix.hud_quality's arithmetic (src/d3d11/hud_quality_math.*,
-REM which fss_res.cpp's match mode calls rather than reimplementing inline):
-REM the key's parsing (off | 1.0 | 1.25, anything else refused as off); the
-REM factor target / HMD-quality multiplier -- 0.7 -> ~1.4286 (the log line's
-REM own worked example), 1.0-at-1.0 a no-op, 1.25-at-1.0 -> 1.25, the 4x cap,
-REM an unknown or non-positive multiplier refusing rather than dividing by it,
-REM and the 1% floor's own edge (1.02 fires, 1.005 does not); the rounding a
-REM fractional factor applies to a texture's width/height -- including the
-REM 908x1361 -> 1297x1944 example the log line quotes, a whole factor (2x, 3x)
-REM reproducing advanced.surface_inflate's existing integer behaviour exactly,
-REM and round-half-up at an exact float boundary; and the match against a set
-REM of sizes fss_res's own classifier (borrowed from ui_depth.cpp) will have
-REM learned -- exact matches, a one-pixel near-miss that must not match, and
-REM an empty or null learned set. Pure arithmetic: no device, no Config, no
-REM Log, so a mismatch between this rig and fss_res.cpp's own use of it is
-REM impossible by construction.
-if not exist "%OBJ%\hudquality" mkdir "%OBJ%\hudquality"
+:rig_ui_quality_test
+echo [edvr] === ui_quality_test.exe ===
+REM Build gate for fix.ui_quality (docs/ui-layer-2026-09-23.md), both halves,
+REM from the same headers the DLL compiles. The SURFACES (ui_quality_math.h,
+REM absorbed from fix.hud_quality's rig): the factor target / HMD Quality with
+REM its 1% floor and 4x cap; the rounding (908x1361 -> 1297x1944 at 1/0.7);
+REM the internal resolution from the runtime's recommendation (3070 x 0.65 =
+REM 1995, 3032 x 0.65 = 1970, 3070x3032 x 0.5 = 1535x1516, the 2458x2824
+REM x 0.65 = 1597x1835 of the 2026-09-23 flight); the census's five ratios
+REM matching their own evidence at every eye width, a one-percent miss not
+REM matching, the candidate shape, the learned-ratio file's parser. The LAYER
+REM (ui_layer_math.h): the key; the layer's size and memory; the viewport and
+REM scissor map and the jitter cancel; the blend conversion table, a multiply
+REM included, and a CPU model proving layer-then-composite equals the game's
+REM own blends over a thousand sequences; the depth-stencil classification
+REM (the menu panel's stencil write, a stencil test, read-only views); the
+REM composite's footprint; the door's arming and G1; every refusal of the
+REM gate, in order. On WARP (ui_layer_shaders.h, ui_deferred_depth.h): a
+REM jittered quad through the redirected viewport lands on the unjittered
+REM pixels at all eight Halton phases; blended draws composited equal the same
+REM draws into the frame, a multiply included; a stencil-tested quad drawn
+REM against the layer's seeded copy of a stencil the game wrote matches the
+REM same quad drawn into the frame; the 1.25 box filter; the debug view.
+if not exist "%OBJ%\uiqualitytest" mkdir "%OBJ%\uiqualitytest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\hudquality\\" /Fe"%BUILD%\hud_quality_test.exe" ^
-    "tools\hud_quality_test\hud_quality_test.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib
-if errorlevel 1 ( echo [edvr] ERROR: hud quality test build failed & exit /b 1 )
-"%BUILD%\hud_quality_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_ui_layer_test
-echo [edvr] === ui_layer_test.exe ===
-REM Build gate for fix.ui_quality, the UI layer (src/d3d11/ui_layer.*,
-REM docs/ui-layer-2026-09-23.md), from the same headers the DLL compiles:
-REM ui_layer_math.h (the key; the layer's size and memory at 1.0 and 1.25;
-REM the viewport and scissor map; the jitter cancel from pixels and from the
-REM tangent shift temporal_math.h gives the projection; the tangent form of
-REM the map against the region form; the blend conversion table and a CPU
-REM model proving layer-then-composite equals the game's own blends over a
-REM thousand sequences; the composite's footprint weights; the door's arming
-REM and gate G1's "late"; every refusal of the classifier gate, in order) and
-REM ui_layer_shaders.h on WARP (a jittered quad through the redirected
-REM viewport lands on the unjittered pixels at all eight Halton phases, at 1.0
-REM and 1.25, and does not without the cancel; draws blended into the layer
-REM and composited equal the same draws blended into the frame; a coloured
-REM quad over a known frame is the expected colour; the 1.25 composite is the
-REM box filter; the debug view; a cropped layer rectangle). A layer that
-REM lands its UI a pixel off, or a composite that darkens it, fails here --
-REM not in the headset.
-if not exist "%OBJ%\uilayertest" mkdir "%OBJ%\uilayertest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uilayertest\\" /Fe"%BUILD%\ui_layer_test.exe" ^
-    "tools\ui_layer_test\ui_layer_test.cpp" ^
+    /Fo"%OBJ%\uiqualitytest\\" /Fe"%BUILD%\ui_quality_test.exe" ^
+    "tools\ui_quality_test\ui_quality_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: ui layer test build failed & exit /b 1 )
-"%BUILD%\ui_layer_test.exe" --dry-run || exit /b 1
-"%BUILD%\ui_layer_test.exe" --self-test || exit /b 1
+if errorlevel 1 ( echo [edvr] ERROR: ui quality test build failed & exit /b 1 )
+"%BUILD%\ui_quality_test.exe" --dry-run || exit /b 1
+"%BUILD%\ui_quality_test.exe" --self-test || exit /b 1
 exit /b 0

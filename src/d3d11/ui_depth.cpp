@@ -1472,29 +1472,24 @@ void restoreOm(ID3D11DeviceContext* ctx) {
 
 }  // namespace
 
-// The interface-surface sizes this session's classifier has learned so far
+// The interface surfaces this session's classifier has learned so far
 // (vector, text and icon -- the scanner chrome strip learned at the other
 // addSurface call site is a different shape and excluded), for
-// fix.hud_quality's match mode, which wants the same answer without
-// re-deriving the classifier. Deduplicated by construction: addSurface
+// fix.ui_quality's surfaces. Deduplicated by construction: addSurface
 // already refuses a resource it has seen, but two DIFFERENT resources can
-// share a size (a colour target and its depth partner), so the caller gets
-// the raw list and matches by size itself, not by count of surfaces.
-//
-// Only ever non-empty once fix.temporal_aa has been on long enough for
-// this pass's own classifier to have learned at least one panel this
-// session -- hud_quality's own log says so in as many words when this
-// comes back empty.
-uint32_t uiDepthLearnedSurfaceSizes(uint32_t* outW, uint32_t* outH,
-                                    char* outFamily, uint32_t max) {
-    if (!outW || !outH || !max) return 0;
+// share a size, so the caller gets the raw list. Render thread only: the
+// caller is uiSurfacesFrameBoundary.
+uint32_t uiDepthLearnedSurfaces(UiDepthLearnedSurface* out, uint32_t max) {
+    if (!out || !max) return 0;
     uint32_t n = 0;
     for (uint32_t i = 0; i < g_surfaceCount && n < max; ++i) {
         const Surface& s = g_surfaces[i];
         if (s.family != 'V' && s.family != 'T' && s.family != 'I') continue;
-        outW[n] = s.w;
-        outH[n] = s.h;
-        if (outFamily) outFamily[n] = s.family;
+        out[n].res = s.res;
+        out[n].w = s.w;
+        out[n].h = s.h;
+        out[n].fmt = s.fmt;
+        out[n].family = s.family;
         ++n;
     }
     return n;
@@ -1519,6 +1514,10 @@ int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt) {
     int eye = eyeIndexFor(res, w, h, fmt);
     if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
     return eye;
+}
+
+bool uiDepthIsExcluded(uint64_t vsHash) {
+    return vsHash && inList(g_exclude, g_excludeCount, vsHash);
 }
 
 void uiDepthConfigure(Config& cfg) {

@@ -2,6 +2,7 @@
 
 #include "temporal_pass.h"
 #include "ui_layer.h"
+#include "ui_surfaces.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
@@ -330,6 +331,17 @@ bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float
   if (jy) *jy = (s.height[eye] && bt != 0.0f) ? s.shift[eye][1] * float(s.height[eye]) / bt : 0.0f;
   if (w) *w = s.width[eye];
   if (h) *h = s.height[eye];
+  return true;
+}
+// fix.ui_quality's surfaces (ui_surfaces.h): the recommendation the runtime
+// gave the game for the frame being drawn, max over eyes -- what
+// GetRecommendedRenderTargetSize answers, the FOV trim and the cull guard
+// included. Read from CreateTexture2D's threads, so under the lock.
+bool nativeTemporalRecommended(uint32_t* w, uint32_t* h) {
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active || !current->begun || !current->recW || !current->recH) return false;
+  if (w) *w = current->recW;
+  if (h) *h = current->recH;
   return true;
 }
 }
