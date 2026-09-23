@@ -58,6 +58,8 @@ static_assert(decltype(evalGate)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 std::atomic<bool> trackerWanted{false};
 alignas(8) std::atomic<KinematicTrackerObserverFn> trackerObserver{nullptr};
+// Engine-record velocity's emit observer (direct producer 0's post-forward).
+alignas(8) std::atomic<EngineEmitObserverFn> emitObserver{nullptr};
 // The scheduler stack probe's want: its targets 0/1 are the job bodies
 // themselves, already patched by this file, so it observes through the
 // job-0/1 relays and holds this gate open while armed.
@@ -667,9 +669,9 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
     const uintptr_t result=forward(a,b,c,d);
     uint64_t items=0;
     uint32_t neg=0;
+    int32_t end=0;
     if(!fault) {
         __try {
-            int32_t end=0;
             std::memcpy(&end,reinterpret_cast<const void*>(b+0x2A4),4);
             const int64_t delta=static_cast<int64_t>(end)-static_cast<int64_t>(start);
             if(delta>0)items=static_cast<uint64_t>(delta);
@@ -677,6 +679,12 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
         } __except(EXCEPTION_EXECUTE_HANDLER) {items=0;neg=0;fault=true;}
     }
     kinematicEvalProbe.noteDirectBuild(producer,items,neg,fault);
+    // Engine-record velocity: FUN_144312E00 (producer 0) only, after the
+    // forward, while the records it appended are still this job's alone.
+    if(producer==0 && !fault) {
+        const auto emit=emitObserver.load(std::memory_order_acquire);
+        if(emit)emit(a,b,start,end);
+    }
     return result;
 }
 
@@ -991,6 +999,10 @@ void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
 
 void kinematicEvalSetTrackerObserver(KinematicTrackerObserverFn fn) noexcept {
     trackerObserver.store(fn,std::memory_order_release);
+}
+
+void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept {
+    emitObserver.store(fn,std::memory_order_release);
 }
 
 const char* kinematicEvalTrackerAttach() noexcept {

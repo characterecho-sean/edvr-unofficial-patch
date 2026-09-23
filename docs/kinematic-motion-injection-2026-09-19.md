@@ -20,12 +20,21 @@
   pool shaders, no two-channel target, no blur pass before the tone-map), and on the
   landing ship the engine-record join matched all 64 drawn movers exactly (56/56 of
   the fast ones) while design A's content-pairing mis-paired 11-23 of those 56 --
-  DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry).
-- **Open:** B's coverage of stations and ships in space (untested, no tracker capture
-  exists off-settlement); the previous bone palette's residency; the particle
-  families' inputs; the substitution cost for the seven families (the three pool
-  families plus the landing ship's four); and whether the engine reads t33 bytes
-  288-319 on the CPU side.
+  DESIGN A IS DEAD, B+C IS THE DESIGN (2026-09-23, evening entry). PHASE 1 BUILT,
+  NOT FLOWN, NOT MERGED (2026-09-23 "Phase 1 built" entry): fix.engine_motion=on now
+  writes each rig record's previous engine pose into its own pool record at
+  FUN_144312E00's emit (bytes 292-319, self-checking marker at 288), the pool families'
+  substituted pixel shaders record slot + depth at MRT6 in the game's own draws, and the
+  compose takes the record's exact motion there (masked = no history; else the camera
+  term). The engine reads bytes 288-319 on the CPU only in whole-record copies (static
+  pass); byte 288 is written by no producer at all.
+- **Open:** the first flight's numbers (the entry's "What the first flight must show":
+  disagreements 0, movers joined ~ tracker movers, families live, views given = asked,
+  the motion_source view green on the ship only, cost); B's coverage of stations and
+  ships in space (untested); builder-path movers (0x42B4130, 2 of 82 in 165433) and
+  articulated parts (phase 2, per-part transforms); the previous bone palette's
+  residency (skinned motion, phase 2); the particle families' inputs; why one extra
+  barrier at the end of `mv` changed its instrumented output on WARP.
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -33,12 +42,13 @@
   entry -- return-address attribution, record-field clustering, TLS job-attribution,
   dirty-node-queue family mismatch); an engine velocity buffer in the VR path, and
   record+0x1C0..0x1F8 as a previous-frame transform at draw time (both 2026-09-23
-  entry). Do not re-propose any of the above.
-- **Next:** the station-approach capture with the tracker on (blur back OFF,
-  glare_shader_dump back to 0) for coverage; then, Sean's call, phase 1 of B+C -- the
-  per-record delta from the tracker, the pool families' VS/PS substituted to write a
-  velocity target in the game's own pass, the reactive mask as the only fallback,
-  measured before/after on a landing ship.
+  entry); design A, pool content-pairing, and an engine velocity buffer with motion
+  blur ON (both 2026-09-23 evening entry). Do not re-propose any of the above.
+- **Next:** review and merge phase 1, then one flight: a ship landing at a settlement
+  with fix.engine_motion=on, fix.temporal_aa=dlss, advanced.temporal_aa_diagnostics=1,
+  read against the entry's checklist, and A/B against advanced.mesh_motion=on +
+  advanced.temporal_aa_estimated_objects=on. The station-approach coverage capture
+  (blur OFF, glare_shader_dump 0) stays open for stations.
 
 ## Premise
 
@@ -1838,3 +1848,154 @@ EDVR could write the previous pose there at the pool's Unmap and a substituted V
 read t33 +292/+312 with no extra SRV; whether the engine reads that block on the CPU side
 is unknown. The ship adds four families with the pool layout to C's substitution set
 (DE54, AACF, 66DE, 61AE) beside the three pool families, blur setting irrelevant.
+
+### 2026-09-23 -- Phase 1 built: engine-record velocity for movers
+
+Built on the worktree branch (not merged, not flown), gate green with symbols.
+`fix.engine_motion = on` now means this path; off is unchanged. Exact per-pixel motion
+for rig-record movers from the engine's own records, no estimate anywhere: the only
+fallback is no history. Three parts.
+
+**1. Emit (job threads): the previous pose travels with the record, so no slot map is
+needed.** The record -> slot question dissolves at the source. FUN_144312E00
+(param_1 = the 0x2F0-byte rig record, param_2 = the owner) builds each pool record on its
+stack at RSP+0x60 via the initializer FUN_144c835d0, copies rig+0x170/+0x178 (position)
+and +0x17C/+0x180 (packed quaternion) into BOTH pose blocks (decomp_4312E00:67-76; the
+second block is record +0x124/+0x12C/+0x138/+0x13C, RBP+0x84..+0x9C in
+funasm_4312E00), then per LOD with a mask appends the whole 0x150 bytes to the tail node
+of `FUN_143696fa0(param_2 + 0x260, param_1 + 0x250)` (:179) and counts it
+(`plVar10[3] + 1`, `*(param_2 + 0x2a4) + 1`, :248-250; asm 0x144313185-0x14431319B:
+`mov rax,[rdx+18h]; mov [rdx+rax*8+0AA0h],r15; inc qword [rdx+18h]; inc dword
+[r13+2A4h]`). The copier 0x4C81BE0 later copies whole records from node+0x20+i*0x150 into
+the mapped pool (settlement-flicker doc, 2026-09-19). A post-forward bracket on
+FUN_144312E00 -- the direct-producer relay kinematic_eval_hook.cpp already installs, with
+a new emit observer -- takes k = the +0x2A4 increase (k <= 7, one entry per call), looks
+the entry up again (FUN_143696FA0 is a pure read on a hit, no lock; the owner is per
+collection with one writer, the job running the call), takes the tail node's last k
+records (and the full previous node's last k-n when they span), checks each one's pose
+words against the rig record's +0x170/+0x17C bit for bit (the disagreement gate: a
+mismatch is counted and left unwritten), and writes the record's PREVIOUS engine pose
+into bytes 292-303 and 312-319 plus a marker at byte 288. Build-keyed: PE 332841, the
+lookup's first 32 bytes and the append sequence above; a mismatch stands the emit down
+alone (every record then reads as not a rig record: the camera term).
+
+The previous pose comes from a per-record table in engine_velocity_emit.h, filled at the
+same bracket: keyed by the record pointer with record+0x18 as the reuse discriminator
+(the tracker's rule), stamped with the present-frame clock. It holds exactly what the
+previous frame's upload carried for that record, which is the tracker's +0x170/+0x17C
+history captured at the moment the engine copies it. First seen, a gap or a reused
+pointer: the current pose (delta zero, the spec's rule). Two emissions of one record under
+one clock tick with different poses: masked (two frames' data, ambiguous). Table full:
+masked. Stale entries (two frames unseen) are reclaimed.
+
+CPU readers of bytes 288-319 (a read-only research pass today, decompiles and asm scans;
+files decomp_4C835D0, 3696FA0, 4C81BE0, 4C7BD80..4C7D8A0, pose_block_*.txt under
+analysis\decomp): none but whole-record copies (the producers, the merge FUN_14434e200 /
+FUN_14434e740, the copier). The bridge 0x434D7A0, 0x4C837B0 and 0x4C7EF70 pass pointers
+or read masks; the eight instance-index emitters read only word28; no readback of the
+pool. Static, not a runtime capture. Correction to the 2026-09-23 first entry: byte 288
+is not a packed material word -- no producer writes it at all (uninitialised stack in
+FUN_144312E00, 0x42B4130, the builder's inline producer, FUN_14369C9C0 and
+FUN_14434D470). So the marker checks itself: tag XOR a hash of both pose blocks
+(joined 0x7FC0ED01, masked 0x7FC0ED02), recomputed on the GPU.
+
+**2. Draw (render thread): the game's own draws write which record owns each pixel.**
+The pool families are hash-keyed (engine_velocity.cpp kFamilies: vs EB52 -> ps
+CB9F/9ABF/3434, 5B4D -> 4375, BBE5 -> DB3E, DE54 -> E46E, AACF -> CF53, 66DE -> 864F,
+61AE -> FC43; any other pairing is left stock and named in the log). Their pixel shaders
+are patched (dxbc_engine_velocity.h) to add one float2 export at MRT6: x = the t33 slot
+(the identity the VS already exports, `bfi o0.x, l(31), l(0), v0.x, flag` -> masked
+0x7fffffff), y = SV_Position.z. The UV-only family (5B4D/4375) exports no slot, so its
+VS gains `mov o2.x, v0.x` under a new EDVRPOOLSLOT output and its PS reads that. No other
+instruction changes: position math, depth bias and G-buffer exports stay byte-for-byte.
+Substitution happens when the game rebinds (the binding shadow's generations), not per
+draw: one PSSetShader per game PS change, MRT6 added once per pass binding, the per-draw
+cost four compares. At the first family draw of each eye-frame the slot target is
+cleared to (-1, 0) and the pool (VS t33, view at element 0) and the scene constants (VS
+b1) are copied on the GPU; a later write to either source while that eye's pass is
+open, or a later pass drawing from other ones, invalidates the eye-frame (counted).
+
+**3. Compose (temporal pass): exact motion where the slot's depth is the scene's.**
+ENGINE_MOTION_HLSL (temporal_shader_source.h, the block the rig also compiles) and
+enginePixel: MRT6 depth must equal the scene depth bit for bit (a later draw covering a
+slot fails it); the record's marker decides joined / masked / not a rig record. Joined:
+the surface point under the pixel from this frame's clip rows (x, y, w columns, w =
+EN[273].z / depth), carried by the record's own motion (the exact adjugate inverse of the
+VS's turn() for the current pose -- quantised quaternions are not unit -- then the
+previous pose), projected by last frame's rows; holoJitter as meshPixel. A record that did
+not move reduces to the camera term exactly. Masked: MV gets the history-invalidate
+sentinel (what modern DLSS presets honour) and the bias mask 1 (preset F, FSR with its
+reactive key, own TAA returns no history). Neither: the camera term. The engine pixel is
+taken LAST in `mv`, over the body/ship paths, mesh and the owner promotion (decision
+path 11); in `main` before the mesh block.
+
+**Mechanism, and why this one.** The spec's sketch was a VS computing the previous clip
+position per vertex. Rejected for phase 1: the seven VS families place the pose
+transform differently (skinning loops, and 5B4D/BBE5 apply a cb2 depth bias to o.z), so a
+per-vertex previous position means family-specific surgery on the position math and an
+invariance risk on SV_POSITION. Re-issue was the other exact option (0.3-0.4 us render
+thread per mover draw). Chosen: a generic, family-independent PS patch writing ownership
+(slot + depth), with the motion computed from engine poses in the compose, where the
+camera handling (jitter, rows) already lives. Exact under the same definition; the one
+caveat: the surface point comes from the scene depth, so 5B4D/BBE5 draws reconstruct
+at their engine-biased depth exactly as the camera term already does. Rig evidence
+(tools\engine_velocity_test, in the gate): three synthetic families (DATAID.y,
+FACEINVARIANT.x + SV_Position, UV-only) patch, disassemble, reflect and DRAW on WARP --
+MRT6 holds the exact slot and depth bits, an unpatched occluder leaves stale slots the
+depth test rejects; the emit bracket against a fake owner/entry/nodes laid out as 332841;
+the compose's arithmetic from the header's own text against a double reference (worst
+previous-NDC error 2.7e-7 over a still record, a mover 540 m out, a scaled part and a
+quantised 90-degree turn; markers, behind-camera, foreign projection). Local only
+(`--corpus <edvr_logs>`): all nine real (VS, PS) pairs derive, patch, reflect and create.
+
+**Keys.** `fix.engine_motion = on` (this path, needs temporal_aa; auto still reserved).
+`advanced.mesh_motion` and the new `advanced.temporal_aa_estimated_objects` (tier 2's
+body/ship paths and occupancy grid; not the retired fix.temporal_aa_objects) default off
+while it is on, on for an A/B; engine pixels override them either way. New debug view
+`advanced.temporal_aa_debug = motion_source`: green joined, red masked, blue a pool
+surface that is not a rig record, yellow a stale slot. `fix.engine_motion_veto` is
+untouched (still the stage-B compose veto; it acts only where no engine pixel is taken).
+Contract 260 -> 261 keys. `advanced.temporal_aa_static_surfaces` also replaces these pixel
+shaders; with both on, it declines on substituted draws (noted once).
+
+**Log lines (every 30 s; every zero printed).** `engine motion: emit (...)` -- calls,
+appended, pool records joined (with motion) / masked, first seen / gap / reused pointer,
+same-frame changes, table full, **pose disagreements (must be 0)**, locate failures,
+read/write faults, bracket us/call and ms/frame on the job threads. `engine motion:
+movers joined N records/frame ... against the tracker's M` -- plus eye-frames bound,
+invalidations by cause, views asked/given/refused by cause (another frame = a clock-order
+problem), and the draw hook's slow half us/call and ms/frame on the caller thread.
+`engine motion: pixels per eye-frame` -- joined, masked, pool-not-rig (camera), stale;
+counted only by the instrumented DLSS/FSR shader (advanced.temporal_aa_diagnostics = 1 or
+a debug view), else the line says "not counted", never zero. `engine motion: family
+vs_...: live | STOOD DOWN -- reason | not drawn yet` with binds, draws and patched PS.
+If the emit never runs: calls 0 (and the status says why); if the substitution never
+runs: MRT6 bound 0 and every family "not drawn yet"; if the compose never runs: views
+asked 0.
+
+**What the first flight must show** (Frontier or Steam, the build's own log first):
+`fix.engine_motion = on`, `fix.temporal_aa = dlss`, `advanced.temporal_aa_diagnostics =
+1`, a ship landing at a settlement. (1) pose disagreements 0, locate failures 0, write
+faults 0. (2) movers joined per frame near the tracker's movers (the research joined 64/64
+on the landing ship); records with motion > 0 while the ship moves. (3) the ship's families
+(DE54, AACF, 66DE, 61AE, EB52, 5B4D) "live" with draws, no refusals. (4) eye-frames
+bound = eye-frames, views given = asked, invalidations near 0. (5) pixels: joined on the
+order of the ship's silhouette, masked near 0. (6) `motion_source` view: green on the
+ship and its turret only, blue on the settlement's buildings. (7) no ghosting on the ship
+under DLSS against `advanced.mesh_motion = on` + `advanced.temporal_aa_estimated_objects
+= on` (the old estimates). (8) cost: the draw hook's slow half ms/frame (target under 0.5
+on the caller thread) and the emit's job-thread ms/frame.
+
+**Not covered, stated plainly.** Movers the draw-item builder (0x42B4130) emits -- 2 of 82
+in capture 165433 -- are "not a rig record" to the compose and keep the camera term (their
+per-part previous transforms are phase 2); articulated parts on still records likewise.
+Skinned records move as their record (phase 1 by spec). Stations and ships in space are
+untested (the coverage flight). The frame clock is the present counter: one render-data
+update per present is what the research's exact per-frame join measured; a violation shows
+as same-frame changes (masked) or gaps. The per-eye scene-constant snapshot assumes one cb1
+per eye pass; a violation shows as invalidations. RT6 inherits the pass's blend state; a
+blended or write-masked pass loses coverage (camera term, never a wrong vector) and only
+the pixel counts would show it. Observed while building: one extra group barrier at the
+end of `mv` changed the instrumented variant's depth output on WARP
+(screen_consumer_test); not investigated, not shipped -- engine pixel counts ride the
+existing gCount instead.

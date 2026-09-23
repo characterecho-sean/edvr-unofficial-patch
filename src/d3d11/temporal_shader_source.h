@@ -47,6 +47,102 @@ Texture2D<uint> KCNear : register(t19);   // kinematic static ownership, quarter
 Texture2D<uint> KCFar  : register(t20);   // kinematic-motion-injection-2026-09-19.md): the
                                           // asuint(zraw) [near,far] span of the proven-static
                                           // records projecting to the texel; near 0 = unowned
+)HLSL"
+R"HLSL(
+// ENGINE_MOTION_HLSL_BEGIN
+// Engine-record motion (fix.engine_motion=on, phase 1; docs/kinematic-motion-
+// injection-2026-09-19.md, 2026-09-23 "Phase 1 built"). This block is the one
+// text both the compose and tools/engine_velocity_test compile: the rig cuts
+// it out between the two marker lines, so keep it self-contained.
+// Bound only while probe.w bit 2048 says all four are: ES t21 is MRT6 of the
+// game's own substituted pool draws (x = the t33 slot the draw read, -1 =
+// none; y = the depth the fragment wrote), EP t22 the pool exactly as this
+// eye's draws read it (the previous pose block and marker EDVR wrote at the
+// engine's emit), EN b1 / EB b2 the game's scene constants this frame and last.
+//
+// EnginePoolRecord is the t33 record (the 0x150-byte batch item):
+//   data[0]  = base u32 (bytes 0-3), scale f32 (4-7), packed quaternion (8-15)
+//   data[1]  = position f32x3 (16-27), word28
+//   data[18] = marker (288) + the PREVIOUS position EDVR wrote (292-303)
+//   data[19] = base (304), scale (308), the PREVIOUS packed quaternion (312-319)
+// The marker is self-checking: byte 288 is uninitialised in every producer
+// (no store in any of them), so a constant would false-match stack garbage.
+// It is the tag XOR a hash of the record's own two pose blocks, the same
+// hash engine_velocity_emit.h writes. The pose decode and turn() are the
+// pool vertex shaders' own (mesh_motion_shader.h: 1/32767, not 2/65535).
+struct EnginePoolRecord { uint4 data[21]; };
+Texture2D<float2> ES : register(t21);
+StructuredBuffer<EnginePoolRecord> EP : register(t22);
+cbuffer EngineNow : register(b1) { float4 EN[276]; };
+cbuffer EngineBefore : register(b2) { float4 EB[276]; };
+float4 engineQuat(uint2 packed) {
+    return float4(packed.x & 65535u, packed.x >> 16, packed.y & 65535u, packed.y >> 16) * (1.0 / 32767.0) - 1.0;
+}
+float3 engineTurn(float4 q, float3 v) {
+    return (2.0 * q.w * q.w - 1.0) * v + 2.0 * dot(q.xyz, v) * q.xyz + 2.0 * q.w * cross(q.xyz, v);
+}
+uint engineMarkerHash(EnginePoolRecord r) {
+    uint words[10] = {r.data[1].x, r.data[1].y, r.data[1].z, r.data[0].z, r.data[0].w,
+                      r.data[18].y, r.data[18].z, r.data[18].w, r.data[19].z, r.data[19].w};
+    uint h = 0x811C9DC5u;
+    [unroll] for (uint i = 0; i < 10; ++i) { h = (h ^ words[i]) * 0x01000193u; h ^= h >> 13; }
+    return h;
+}
+// 1 joined (EDVR wrote the record's previous pose), 2 masked (a rig record
+// EDVR could not follow), 3 neither (not a rig record: the camera term).
+uint engineRecordKind(EnginePoolRecord r) {
+    const uint h = engineMarkerHash(r);
+    if (r.data[18].x == (0x7FC0ED01u ^ h)) return 1u;
+    if (r.data[18].x == (0x7FC0ED02u ^ h)) return 2u;
+    return 3u;
+}
+// Did the record's pose change between the two blocks (scale, quaternion,
+// position, bit for bit)?
+bool engineRecordMoved(EnginePoolRecord r) {
+    return !(all(r.data[0].yzw == uint3(r.data[19].y, r.data[19].zw)) && all(r.data[1].xyz == r.data[18].yzw));
+}
+// The surface point under ndc at raw depth zr, carried by the record's own
+// engine motion (current pose -> the previous pose EDVR wrote) and projected
+// by last frame's clip rows. False when either frame's rows are not the pool
+// families' encoding (constant clip z, zero z column) or are degenerate.
+bool engineReproject(EnginePoolRecord r, float2 ndc, float zr, out float4 before) {
+    before = 0;
+    if (EN[270].z != 0.0 || EN[271].z != 0.0 || EN[272].z != 0.0 || EN[273].w != 0.0 || !(EN[273].z > 0.0) ||
+        EB[270].z != 0.0 || EB[271].z != 0.0 || EB[272].z != 0.0 || EB[273].w != 0.0 || !(zr > 0.0))
+        return false;
+    // This frame: clip.xyw = world.x*EN[270] + world.y*EN[271] + world.z*EN[272] + EN[273]
+    // with clip.w = the view depth = EN[273].z / zr. Solve the x, y, w rows.
+    const float z = EN[273].z / zr;
+    const float3 a = float3(EN[270].x, EN[271].x, EN[272].x);
+    const float3 b = float3(EN[270].y, EN[271].y, EN[272].y);
+    const float3 c = float3(EN[270].w, EN[271].w, EN[272].w);
+    const float3 ca = cross(b, c), cb = cross(c, a), cc = cross(a, b);
+    const float det = dot(a, ca);
+    if (!(abs(det) > 1e-12) || !isfinite(det)) return false;
+    const float3 rhs = float3(ndc * z - EN[273].xy, z);
+    const float3 world = (ca * rhs.x + cb * rhs.y + cc * rhs.z) / det;   // less EN[275]
+    float3 prevWorld;                                                    // less EB[275]
+    if (!engineRecordMoved(r)) {
+        prevWorld = world + (EN[275].xyz - EB[275].xyz);                 // did not move: the camera term
+    } else {
+        const float scaleNow = asfloat(r.data[0].y), scalePrev = asfloat(r.data[19].y);
+        const float4 qNow = engineQuat(r.data[0].zw), qPrev = engineQuat(r.data[19].zw);
+        const float3 mx = engineTurn(qNow, float3(scaleNow, 0, 0));
+        const float3 my = engineTurn(qNow, float3(0, scaleNow, 0));
+        const float3 mz = engineTurn(qNow, float3(0, 0, scaleNow));
+        const float3 ix = cross(my, mz), iy = cross(mz, mx), iz = cross(mx, my);
+        const float mdet = dot(mx, ix);
+        if (!(abs(mdet) > 1e-30) || !isfinite(mdet)) return false;
+        const float3 local = world - (asfloat(r.data[1].xyz) - EN[275].xyz);   // scale * turn(qNow, v), as the VS formed it
+        const float3 v = float3(dot(ix, local), dot(iy, local), dot(iz, local)) / mdet;
+        prevWorld = (asfloat(r.data[18].yzw) - EB[275].xyz) + scalePrev * engineTurn(qPrev, v);
+    }
+    before = prevWorld.x * EB[270] + prevWorld.y * EB[271] + prevWorld.z * EB[272] + EB[273];
+    return before.w > 0.0 && all(isfinite(before));
+}
+// ENGINE_MOTION_HLSL_END
+)HLSL"
+R"HLSL(
 Texture2D<float4> Screen : register(t14);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
@@ -499,6 +595,51 @@ bool meshPixel(float2 p,float2 offset,out float2 pp,out float zp) {
     pp=(before.xy/before.z*float2(.5,-.5)+.5)*r.meta.yz-.5-region.xy+holoJitter.xy-offset;
     zp=before.z;return all(isfinite(pp));
 }
+)HLSL"
+R"HLSL(
+// Engine-record motion (fix.engine_motion=on, phase 1; docs/kinematic-motion-
+// injection-2026-09-19.md, 2026-09-23 "Phase 1 built"). The kinds:
+//   0 no engine data at this pixel (unbound, unwritten, UI, screen);
+//   1 JOINED: pp/zp hold the surface's exact previous position -- the point
+//     under the pixel from this frame's clip rows, carried by the record's own
+//     engine motion (its two pose blocks), projected by last frame's rows;
+//   2 MASKED: a rig record EDVR could not follow -- no history, no vector;
+//   3 a pool record that is not a rig record: the camera term stands;
+//   4 STALE: the slot's depth is not the scene's (a later draw covers it).
+// The arithmetic is the ENGINE_MOTION_HLSL block near the top (the rig cuts
+// out and runs that same text). The ownership test is meshPixel's, but
+// exact: the slot's recorded depth must be the scene depth bit for bit. Jitter as meshPixel: the rows carry the raster
+// jitter, holoJitter.xy takes the current-minus-previous difference out.
+uint enginePixel(float2 p, float2 offset, out float2 pp, out float zp) {
+    pp = 0; zp = 0;
+    if ((uint(probe.w + 0.5) & 2048u) == 0u || holoJitter.z == 0) return 0u;
+    const int2 q = region.xy + int2(round(p + offset));
+    const float2 es = ES.Load(int3(q, 0));
+    if (!(es.x >= 0.0)) return 0u;
+    if (uiCovered(q)) return 0u;
+    if ((uint(probe.w + 0.5) & 32u) != 0u && Screen.Load(int3(q, 0)).w > 0) return 0u;
+    const float zr = zSceneAt(q);
+    if (!(zr > 0.0) || asuint(zr) != asuint(es.y)) return 4u;
+    uint count, stride;
+    EP.GetDimensions(count, stride);
+    const uint slot = uint(es.x);
+    if (slot >= count) return 0u;
+    const EnginePoolRecord r = EP[slot];
+    const uint kind = engineRecordKind(r);
+    if (kind != 1u) return kind;
+    uint w, h;
+    ES.GetDimensions(w, h);
+    const float2 dims = float2(w, h);
+    const float2 ndc = (p + offset + region.xy + 0.5) / dims * float2(2, -2) + float2(-1, 1);
+    float4 before;
+    // A moving record whose motion cannot be computed here keeps no history
+    // (masked); one that did not move keeps the camera term.
+    if (!engineReproject(r, ndc, zr, before)) return engineRecordMoved(r) ? 2u : 0u;
+    pp = (before.xy / before.w * float2(0.5, -0.5) + 0.5) * dims - 0.5 - region.xy + holoJitter.xy - offset;
+    zp = before.w;
+    if (all(isfinite(pp))) return 1u;
+    return engineRecordMoved(r) ? 2u : 0u;
+}
 // Kinematic static ownership (stage B, docs/kinematic-motion-injection-2026-09-19.md,
 // 2026-09-20 13:55 spec): the coverage pass's quarter-res [near,far] reversed-Z
 // span of the union of proven-static engine records projecting to this texel.
@@ -728,6 +869,19 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         }
     }
     hy = 0.0;
+    // Engine-record motion FIRST (fix.engine_motion=on, probe.w 2048): the
+    // record's exact motion, or no history at all for a masked rig record.
+    if (allowWorld) {
+        float2 engineP; float engineZ;
+        const uint engineKind = enginePixel(p, jit.xy, engineP, engineZ);
+        if (engineKind == 2u) return false;
+        if (engineKind == 1u) {
+            if (any(engineP < 0) || any(engineP > float2(size) - 1)) return false;
+            mvOut = engineP - p; zPred = engineZ; world = 0;
+            hy = rgbToYcocg(catmullRom((engineP + .5) / float2(size), float2(size)).rgb);
+            return true;
+        }
+    }
     float2 meshP;float meshZ;
     // Kinematic ownership FIRST (stage B), when the veto is armed: an owned
     // pixel takes the camera/depth path below and never the draw's own
@@ -846,7 +1000,10 @@ uint clipSize(float3 hc, float3 hy) {
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 #if EDVR_TEMPORAL_DIAGNOSTICS
-groupshared uint gCount[48];
+// 0..47 are Stats' own slots; mv's 48..51 are engine-record motion's pixel
+// counts (joined, masked, a pool record that is not a rig record, stale
+// slot), flushed to Stats 50..53 (48/49 are main's stepped-part slots).
+groupshared uint gCount[52];
 #endif
 // A debug view's pixel, painted into the OUTPUT rather than at this
 // thread's own index.
@@ -901,7 +1058,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     }
     GroupMemoryBarrierWithGroupSync();
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 48) gCount[gi] = 0;
+    if (gi < 52) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
 #endif
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
@@ -1136,6 +1293,28 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 mover=0;
             }
         }
+)HLSL"
+R"HLSL(
+        // Engine-record motion LAST (fix.engine_motion=on, probe.w 2048): a
+        // pixel the game's own substituted pool draw owns takes the record's
+        // exact motion over every estimate above (the body/ship paths, mesh,
+        // the rigid-owner promotion); a masked one keeps no history. Unbound,
+        // the call returns 0 before any load and the path is byte-identical.
+        bool engineMasked = false;
+        float2 engineP; float engineZ;
+        const uint engineKind = enginePixel(p, 0, engineP, engineZ);
+#if EDVR_TEMPORAL_DIAGNOSTICS
+        if (engineKind != 0u) InterlockedAdd(gCount[47u + engineKind], 1u);
+#endif
+        if (engineKind == 1u) {
+            motion = engineP - p; zPred = engineZ;
+            trackedForeground = true;
+            decisionPath = 11u; projectionValid = true;
+            mover = 0;
+        } else if (engineKind == 2u) {
+            engineMasked = true;
+            mover = 0;
+        }
         // Combine detected UI changes and the optional fixed UI bias.
         // World-mover rejection must not override stable marked UI.
         uint mark = probe.z != 0.0 ? uint(UM.Load(int3(id.xy,0))*255.0+0.5) : 0u;
@@ -1143,7 +1322,10 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float ui = (kind == 3u || (uint(probe.w + 0.5) & 1u) != 0u) ? float(mark >> 2u)/63.0 : 0.0;
         float adaptive = adaptiveUiReactive(int2(id.xy), p + motion - holoJitter.xy);
         bool uiHere = kind == 1u || kind == 2u;
-        bool hidden = !trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred);
+        // A masked engine pixel invalidates NVIDIA's history lookup the way a
+        // hidden background does (modern presets honour only this), and sets
+        // the reactive mask for the presets and FSR that read it.
+        bool hidden = engineMasked || (!trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred));
         // Keep physical motion for diagnostics/reactivity. Only NVIDIA's
         // history lookup is invalidated, as with new source-screen pixels.
         float2 written = hidden ? float2(size)*2 : motion;
@@ -1177,7 +1359,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 #endif
 )HLSL"
 R"HLSL(
-        MK[id.xy] = max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
+        MK[id.xy] = engineMasked ? 1.0 : max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
         // -- the history as the runtime accumulated it, bound at t1 in place
@@ -1314,6 +1496,18 @@ R"HLSL(
                 o3 = float3(1.0, 0.0, 1.0);
             }
             paintDebug(id.xy, size, o3);
+        } else if (split.y == 6.0) {
+            // The motion-source view (fix.engine_motion): green where the
+            // engine's own record motion was taken, red where a rig record
+            // was masked (no history), blue for a pool surface that is not a
+            // rig record (the camera term), yellow for a slot a later draw
+            // covered; the frame dimmed elsewhere (the camera term).
+            float3 o6 = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
+            if (engineKind == 1u) o6 = float3(0.0, 1.0, 0.0);
+            else if (engineKind == 2u) o6 = float3(1.0, 0.0, 0.0);
+            else if (engineKind == 3u) o6 = float3(0.0, 0.3, 1.0);
+            else if (engineKind == 4u) o6 = float3(1.0, 1.0, 0.0);
+            paintDebug(id.xy, size, o6);
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
@@ -1339,9 +1533,10 @@ R"HLSL(
     // -- used to pay forty global atomics onto forty contended addresses
     // regardless. At the Crystal Super's size that is 290,512 groups an
     // eye, so 11.6 million atomic adds an eye and 23 million a frame, for
-    // a set of numbers that only a log line reads.
+    // a set of numbers that only a log line reads. 48..51 are engine-record
+    // motion's, at Stats 50..53.
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 48 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 52 && gCount[gi] != 0) InterlockedAdd(Stats[gi < 48u ? gi : gi + 2u], gCount[gi]);
 #endif
 }
 )HLSL"
@@ -1652,6 +1847,12 @@ R"HLSL(
             } else {
                 o = float3(1.0, 0.0, 1.0);
             }
+        } else if (split.y == 6.0) {
+            // The motion-source view, as the mv entry paints it.
+            float2 eP6; float eZ6;
+            const uint ek6 = enginePixel(float2(ci), jit.xy, eP6, eZ6);
+            o = ek6 == 1u ? float3(0.0, 1.0, 0.0) : ek6 == 2u ? float3(1.0, 0.0, 0.0)
+              : ek6 == 3u ? float3(0.0, 0.3, 1.0) : ek6 == 4u ? float3(1.0, 1.0, 0.0) : cur.rgb * 0.25;
         }
         O[id.xy] = float4(o, cur.a);
     }

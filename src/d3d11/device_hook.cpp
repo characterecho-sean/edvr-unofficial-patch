@@ -54,6 +54,7 @@
 #include "mesh_motion.h"
 #include "kinematic_eval_probe.h"
 #include "kinematic_motion.h"
+#include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
@@ -600,6 +601,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
         uiDeferredRemember(static_cast<ID3D11VertexShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         staticSurfaceRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
@@ -625,6 +627,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         uiDeferredRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         staticSurfaceRememberPs(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11PixelShader*>(*out));
@@ -1018,6 +1021,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // The kinematic tracker's clock, same call site for the same
         // exactly-once-per-owned-present guarantee. One atomic load when off.
         kinematicMotionNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+        // Engine-record velocity's clock (the emit table's frame stamps and
+        // the per-eye snapshots), the same exactly-once-per-owned-present tick.
+        engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
         // The scheduler stack probe's report tick, same call site and the
         // same one-atomic-load-when-off cost.
         schedulerStackProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
