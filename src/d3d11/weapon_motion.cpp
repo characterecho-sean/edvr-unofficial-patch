@@ -261,6 +261,7 @@ void weaponMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     r.frame[next]=g.frame;
     if(valid && !g.noted){g.noted=true;Log::get().note("weapon motion: original animated vertices supply skeleton/projection-matched source motion at %ux%u; aiming, skinning and projection included. GPU-only, bounded 32 MiB vertex history.",g.width,g.height);}
 }
+bool weaponMotionFamilyVs(uint64_t vsHash){return weapon_motion_detail::family(vsHash);}
 bool weaponMotionWants(uint64_t vsHash){
     using namespace weapon_motion_detail;
     return enabled && !g.failed && g.sourceFrame==g.frame && family(vsHash);

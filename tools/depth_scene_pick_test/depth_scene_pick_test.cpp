@@ -677,6 +677,51 @@ int main(int argc, char** argv) {
                   "eye-draw pre-check: a new frame reaches the note again");
         }
 
+        // The layout census (flight 6, 153446: "now #0 2048x1024" beside a
+        // 5088x2862 viewport). A screen-sized target and a shadow atlas that
+        // take turns as the busiest each keep their own record -- the atlas
+        // never shows the screen's viewport -- and a sample drawn with a
+        // viewport outside its own target is counted as such. The views the
+        // probe tracks are held while tracked and released when evicted.
+        {
+            DepthTarget screen = makeTarget(device.Get(), 100, 60), atlas = makeTarget(device.Get(), 64, 32);
+            auto refs = [](ID3D11DepthStencilView* v) { v->AddRef(); return v->Release(); };
+            const ULONG screenRefs = refs(screen.view.Get());
+            auto noted = [&](const DepthTarget& t, unsigned n, std::initializer_list<D3D11_VIEWPORT> vps) {
+                context->RSSetViewports(static_cast<UINT>(vps.size()), vps.begin());
+                for (unsigned i = 0; i < n; ++i) edvr::depthProbeNoteDraw(context.Get(), t.view.Get(), false, false);
+            };
+            const D3D11_VIEWPORT full{0, 0, 100, 60, 0, 1}, halfA{0, 0, 32, 32, 0, 1}, halfB{32, 0, 32, 32, 0, 1};
+            edvr::layoutReset();
+            noted(screen, 1100, {full});
+            noted(atlas, 10, {halfA, halfB});
+            edvr::depthProbeFrameBoundary(nullptr);                     // the screen is the busiest
+            check(refs(screen.view.Get()) == screenRefs + 1, "census: a tracked depth view is held (its address cannot be reused)");
+            noted(screen, 1100, {full});                                // sampled into the screen's record
+            noted(atlas, 1500, {halfA, halfB});
+            edvr::depthProbeFrameBoundary(nullptr);                     // now the atlas is
+            noted(atlas, 1500, {halfA, halfB});                         // sampled into the atlas's record
+            noted(screen, 10, {full});
+            edvr::depthProbeFrameBoundary(nullptr);                     // the atlas again
+            noted(atlas, 1, {full});                                    // a viewport the atlas cannot hold
+            const int si = edvr::findTarget(screen.view.Get()), ai = edvr::findTarget(atlas.view.Get());
+            const edvr::LayoutRecord* rs = nullptr;
+            const edvr::LayoutRecord* ra = nullptr;
+            for (const auto& r : edvr::g_layoutRecords) {
+                if (r.target == si) rs = &r;
+                if (r.target == ai) ra = &r;
+            }
+            check(si >= 0 && ai >= 0 && rs && ra, "census: each target that was the busiest has its own record");
+            check(rs->w == 100 && rs->h == 60 && rs->samples == 2 && rs->viewports[0].w == 100 && rs->viewports[0].h == 60 &&
+                  !rs->viewports[1].count && rs->outside == 0,
+                  "census: the screen's record holds only the screen's own viewport");
+            check(ra->w == 64 && ra->h == 32 && ra->samples == 3 && ra->viewports[0].w == 32 && ra->viewports[1].x == 32 &&
+                  ra->outside == 1,
+                  "census: the atlas's record holds its two half viewports, and the one draw outside it is counted as such");
+            for (unsigned i = 0; i < edvr::kReleaseAfterFrames + 2; ++i) edvr::depthProbeFrameBoundary(nullptr);
+            check(refs(screen.view.Get()) == screenRefs, "census: an evicted target's view is released");
+        }
+
         const uint32_t shutdownScan = edvr::g_scenePickScans;
         edvr::depthProbeShutdown();
         scene(100, 100, 0, false);

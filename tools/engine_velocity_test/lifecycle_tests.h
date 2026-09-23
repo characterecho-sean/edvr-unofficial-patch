@@ -991,6 +991,23 @@ inline void run(const Harness& h) {
         line = lastLine("engine motion: on foot:", mark);
         h.check(shown(number(line, "declined ") == 0 && number(line, "held to the naming's camera ") == 4),
                 "S2: standing still every check is held and none declined");
+        // S3 (flight 6, the hangar): a source named by its own depth -- no
+        // terrain or scene draw -- is held by the same camera rule and counted
+        // under its own signal on the on-foot line.
+        mark = g_log.size();
+        for (int k = 0; k < 2; ++k) {
+            g.beginFrame();
+            g.writeScene(g.sceneA.Get(), world(6));
+            edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get(),
+                                           edvr::EngineVelocitySourceSignal::ScreenDepth);
+            g.sourcePass(2);
+            h.check(g.sourceViews(), "S3: the screen's depth names a source frame like terrain does (given)");
+            g.endFrame(k == 1);
+        }
+        line = lastLine("engine motion: on foot:", mark);
+        h.check(shown(number(line, "namings ") == 2 && number(line, "by the screen's own depth ") == 2 &&
+                      number(line, "by terrain or a scene draw ") == 0 && line.find("frames dropped: none") != std::string::npos),
+                "S3: the on-foot line counts the namings by the screen's own depth under their signal");
     }
 
     // P2 (the performance review, item 2): eligibility before preparation. An

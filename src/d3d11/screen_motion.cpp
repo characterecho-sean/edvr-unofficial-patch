@@ -2,6 +2,7 @@
 #include "weapon_motion.h"
 #include <d3d11.h>
 #include <wrl/client.h>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include "binding_shadow.h"
@@ -68,7 +69,23 @@ struct State {
     Ptr<ID3D11UnorderedAccessView> countsUav;
     unsigned countsDraws[4]{},countsStride[4]{},countsWrite=0,countFrame=~0u,countDraws=0,countStride=1;
     bool countsPending[4]{},engineNoted=false;
+    // The naming without terrain (flight 6, docs/kinematic-motion-injection-
+    // 2026-09-19.md "The hangar"): a hangar has no terrain or scene draw, so
+    // nothing named the source there. The pool family draws (not a first-person
+    // weapon or tool shader) into each depth of the screen's size are counted
+    // per frame; last frame's busiest names the source at its first such draw
+    // this frame, while no terrain or scene draw has named it for
+    // kTerrainHoldFrames. The per-frame table resolves each depth view once.
+    struct DepthCount { void* dsv=nullptr; bool screenSized=false; unsigned draws=0; };
+    DepthCount depthCounts[8]; unsigned depthCountN=0;
+    void* screenDepth=nullptr;           // last frame's busiest screen-sized pool depth, identity only
+    unsigned screenDepthDraws=0;         // its pool family draws last frame
+    unsigned terrainFrame=~0u;           // the last frame a terrain or scene draw named the source
+    unsigned unnamed=0,unnamedPoolDraws=0;   // screen frames with no naming, and their screen-sized pool draws
+    bool unnamedNoted=false,screenDepthNoted=false;
 } g;
+constexpr unsigned kTerrainHoldFrames=2;     // a terrain naming this recent keeps the fallback off
+constexpr unsigned kUnnamedNoteFrames=90;    // screen frames with no naming before the log says so
 // What the screen shader does with the source's engine data beyond using it
 // (screenMotionConfigure): count its kinds (advanced.temporal_aa_diagnostics or
 // the motion_source view) and hand them to the view (motion_source). Outside
@@ -224,10 +241,37 @@ bool screenMotionRecognize() {
         bindingShaderHash(BindSlot::Ps)==0xCFE84157BC76E921ull;
     if(matched){g.seen=true;g.lastScreen=g.frame;}return matched;
 }
+// A pool family draw into a depth of the screen's size, counted for this
+// frame's census (the naming without terrain); true when that depth is last
+// frame's busiest. Each depth view is resolved once a frame.
+static bool screenPoolDraw(void* dsv,unsigned w,unsigned h) {
+    State::DepthCount* c=nullptr;
+    for(unsigned i=0;i<g.depthCountN;++i)if(g.depthCounts[i].dsv==dsv){c=&g.depthCounts[i];break;}
+    if(!c) {
+        if(g.depthCountN>=sizeof(g.depthCounts)/sizeof(g.depthCounts[0]))return false;
+        c=&g.depthCounts[g.depthCountN++];
+        c->dsv=dsv;c->draws=0;
+        ResourceInfo d;c->screenSized=bindingResolve(dsv,&d) && d.isTexture2D && d.a==w && d.b==h;
+    }
+    if(!c->screenSized)return false;
+    ++c->draws;
+    return dsv==g.screenDepth;
+}
 void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
-    if(!detail::g_screenMotionEnabled || detail::g_screenMotionFailed || !g.seen || g.frame-g.lastScreen>2 || g.sourceFrame==g.frame || !ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
-    uint64_t vs=bindingShaderHash(BindSlot::Vs);
-    if(vs!=0xACE405F428C17EF6ull && vs!=0x4435F2E50020E7F3ull)return;
+    if(!detail::g_screenMotionEnabled || detail::g_screenMotionFailed || !g.seen || g.frame-g.lastScreen>2 || !ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
+    const uint64_t vs=bindingShaderHash(BindSlot::Vs);
+    // Terrain or a scene draw names the source (the world camera by
+    // construction; the settlements, flight 5). Without either -- a hangar --
+    // the first pool family draw (not a first-person weapon or tool shader)
+    // into last frame's busiest screen-sized pool depth does, once no terrain
+    // or scene draw has named it for kTerrainHoldFrames.
+    const bool terrain=vs==0xACE405F428C17EF6ull || vs==0x4435F2E50020E7F3ull;
+    if(!terrain) {
+        if(!engineVelocityPoolFamilyVs(vs) || weaponMotionFamilyVs(vs))return;
+        void* dsvView=bindingGet(BindSlot::Dsv0);
+        if(!dsvView || !screenPoolDraw(dsvView,w,h))return;
+        if(g.sourceFrame==g.frame || (g.terrainFrame!=~0u && g.frame-g.terrainFrame<=kTerrainHoldFrames))return;
+    } else if(g.sourceFrame==g.frame)return;
     ResourceInfo colour;
     if(!bindingResolve(bindingGet(BindSlot::Rtv0),&colour) || !colour.isTexture2D || colour.a!=w || colour.b!=h)return;
     Ptr<ID3D11DepthStencilView> dsv;ctx->OMGetRenderTargets(0,nullptr,&dsv);if(!dsv)return;
@@ -253,12 +297,14 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     unsigned next=1-g.sourceWrite;
     if(!copyCb(ctx,dev.Get(),1,g.camera[next],276*16))return;
     g.sourcePrevious=g.sourceFrame;g.sourceFrame=g.frame;g.sourceWrite=next;
+    if(terrain)g.terrainFrame=g.frame;
+    else if(!g.screenDepthNoted){g.screenDepthNoted=true;Log::get().note("screen motion: no terrain or scene draw names the on-foot source here (a hangar): it is named by its own depth -- the %ux%u depth that took the most pool family draws last frame (%u), at its first pool family draw this frame that is not a first-person weapon or tool shader; that draw's camera is the source camera.",w,h,g.screenDepthDraws);}
     g_gpu.noteSource(tex.Get(),td.Width,td.Height,g.frame);
     weaponMotionSource(tex.Get());
     // The source pass's pool draws take MRT6 into this depth's slot target,
     // held to the camera this draw reads (the one g.camera just copied).
     Ptr<ID3D11Buffer> scene;ctx->VSGetConstantBuffers(1,1,&scene);
-    engineVelocityNoteSource(tex.Get(),scene.Get());
+    engineVelocityNoteSource(tex.Get(),scene.Get(),terrain?EngineVelocitySourceSignal::Terrain:EngineVelocitySourceSignal::ScreenDepth);
 }
 void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance) {
@@ -442,6 +488,36 @@ void screenMotionFrameBoundary(ID3D11DeviceContext* ctx){
     weaponMotionFrameBoundary(ctx);
     g_gpu.tick(ctx,g.frame);
     flushPanelCounts(ctx);
+    // The naming without terrain: this frame's busiest screen-sized pool depth
+    // is the next frame's candidate. A frame that showed the 2D screen with no
+    // source named is counted, and said once an episode (kUnnamedNoteFrames).
+    {
+        const State::DepthCount* best=nullptr;
+        unsigned poolDraws=0;
+        for(unsigned i=0;i<g.depthCountN;++i) {
+            const State::DepthCount& c=g.depthCounts[i];
+            if(!c.screenSized)continue;
+            poolDraws+=c.draws;
+            if(!best || c.draws>best->draws)best=&c;
+        }
+        g.screenDepth=best && best->draws?best->dsv:nullptr;
+        g.screenDepthDraws=best?best->draws:0;
+        g.depthCountN=0;
+        if(g.seen && g.lastScreen==g.frame && g.sourceFrame!=g.frame) {
+            ++g.unnamed;
+            g.unnamedPoolDraws+=poolDraws;
+            if(g.unnamed==kUnnamedNoteFrames && !g.unnamedNoted) {
+                g.unnamedNoted=true;
+                char why[224];
+                if(g.unnamedPoolDraws)_snprintf_s(why,_TRUNCATE,"%.1f pool family draws a frame went to a depth of the screen's size without naming it (its colour target or depth format refused, or a new depth every frame)",double(g.unnamedPoolDraws)/g.unnamed);
+                else _snprintf_s(why,_TRUNCATE,"no pool family draw went to a depth of the screen's size");
+                Log::get().note("screen motion: the 2D screen showed for %u frames and nothing named its source -- no terrain or scene draw, and %s -- so no screen motion map is made and the engine's on-foot path stands idle.",kUnnamedNoteFrames,why);
+            }
+        } else if(g.sourceFrame==g.frame) {
+            if(g.unnamedNoted)Log::get().note("screen motion: the source is named again after %u screen frames with nothing naming it.",g.unnamed);
+            g.unnamed=g.unnamedPoolDraws=0;g.unnamedNoted=false;
+        }
+    }
     ++g.frame;
     if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool weapon=g.weapon;g=State{};g.weapon=weapon;detail::g_screenMotionFailed=false;}
 }

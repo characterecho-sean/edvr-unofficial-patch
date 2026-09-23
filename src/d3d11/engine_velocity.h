@@ -98,7 +98,7 @@ struct DrawCache {
     bool eye = false;
     int family = -1;   // the family whose substituted shaders are bound, -1 none
 };
-constexpr int kMaxFamilies = 8;
+constexpr int kMaxFamilies = 10;
 extern std::atomic<bool> live;
 extern DrawCache cache;                        // owner thread only
 extern uint64_t familyDraws[kMaxFamilies];     // owner thread only: draws that ran substituted
@@ -200,7 +200,15 @@ void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera,
 // declined, not substituted, without dropping the frame.
 constexpr int kEngineVelocitySourceEye = 2;
 constexpr uint32_t kSourceIdleFrames = 120;
-void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants);
+// Which signal named the source (flight 6, the hangar): a terrain or scene
+// draw (settlements), or -- where there is neither -- the pool family draw
+// into the screen-sized depth that took the most of them last frame.
+enum class EngineVelocitySourceSignal { Terrain = 0, ScreenDepth = 1 };
+void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants,
+                              EngineVelocitySourceSignal signal = EngineVelocitySourceSignal::Terrain);
+// Is this vertex shader one of the pool families (the naming without
+// terrain counts their draws)? Pure: the family table, no state.
+bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept;
 bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews* out);
 // The screen shader's panel counts without diagnostics: one present frame in
 // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared (a grid on

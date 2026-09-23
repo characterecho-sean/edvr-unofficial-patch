@@ -18,20 +18,23 @@
   2938/2938; WALKING, EVERY SOURCE FRAME DROPPED (2031/2031) by the eyes' rows rule --
   the source is drawn by more than one camera. FIXED, MERGED, NOT FLOWN: each source
   pool draw held to the naming draw's camera, the others declined, the frame kept.
+  HANGAR (flight 6, "The hangar" entry): no terrain draw, so NOTHING NAMED the source
+  (no on-foot line at all); now the screen's own depth names it. BUILT, NOT FLOWN.
   STATION (eye run 143416, "The station" entry): the joined station pixels are EXACT
   (one rigid motion to 0.002 px at the records' own 0.106-0.110 deg a frame), but 55% of
-  its pixels kept the camera term, 0.31-0.35 px a frame short: vs_4361 (no family) and
-  stock pixel shaders. ps_CB429E04 (DE54) and ps_451A82D4 (61AE) KEYED, harness-proven,
-  MERGED, NOT FLOWN; vs_4361 waits on its pixel shader's bytecode.
+  its pixels kept the camera term, 0.31-0.35 px a frame short. KEYED, harness-proven,
+  NOT FLOWN: ps_CB42 (DE54) and ps_451A (61AE); then from flight 6's dump ("Flight 6"
+  entry) vs_4361 + ps_1694 (547 of the station's 1193 instances a frame) and vs_889A +
+  ps_B46E / ps_EBA9. vs_DE54's ps_91F8 and ps_A607: refused by the patcher.
 - **Open:** walkers (vs_F516BF0201303B87, not a pool family; w=2 on the panel) wait on
   phase 2's previous bone palette -- a walking NPC still blurs after the on-foot fix;
   which camera the walk's other draws use (the new line's rows and distance say); a
   temporal pass on the flat source for its own aliasing; the stale cockpit (the
   commander's legs under ps_B7D5 and vs_7B0DC42D, DECIDED not keyed; 35.4% undecided, low
   priority); the tracker's evaluated-but-not-drawn movers (the 09:38 entry); the boarding
-  flicker (the LOD governor, not this arc); the station's vs_436193B352A2897E (derives:
-  slot v0.y) and vs_889A5279E68F0672 (derives: v0.x) as families; ships in space;
-  builder-path movers and articulated parts (phase 2).
+  flicker (the LOD governor, not this arc); vs_DE54's ps_91F8 and ps_A607 (the family's
+  SV_Position register holds another semantic in them: a patcher extension); ships in
+  space; builder-path movers and articulated parts (phase 2).
 - **Ruled out (inherited, do not re-propose):** draw-shape memo identity (~96%
   misnaming); pool-slot identity (repacks); 3x3 SAD camera-vs-body match
   (self-confirming); estimating hidden-bone spin from the pool. Also closed, in this
@@ -53,11 +56,10 @@
   cause (the 09:38 entry); the station's joined motion wrong at range (precision, a
   stale pose: "The station" entry). Do not re-propose any of the above.
 - **Next:** one flight (--expect-build HEAD first): walking near a drone or a landing
-  ship -- `on foot: ... frames dropped: none; screen views asked A, given A` (less the
-  first frame), `camera rule: ... declined D in F frames`, `panel pixels per sampled eye
-  draw: engine-joined J`, J > 0; then a station approach with advanced.glare_shader_dump
-  = 1 (restart to arm): stale falls by the keyed share and ps_16940F576006BE65 is dumped,
-  then vs_4361 is keyed through the harness. Then the diagnostics 1 vs 0 comparison.
+  ship, and in a hangar -- `on foot: ... frames dropped: none; screen views asked A,
+  given A`, `camera rule: namings N (by terrain T, by the screen's own depth S ...)`,
+  `panel pixels per sampled eye draw: engine-joined J`, J > 0; a station approach: vs_4361
+  and vs_889A patched, stale down to the stock remainder. Then diagnostics 1 vs 0.
 
 ## Premise
 
@@ -2697,3 +2699,105 @@ edvr_logs\shaders\ps_16940F576006BE65.dxbc appears, and vs_4361 becomes a family
 the harness. If the new code never ran, the family lines still name ps_CB42 and ps_451A
 "left stock". Rigs: engine_velocity_test 967 checks (the gate), 1254 with --corpus
 (eleven real pairs identical, two derive-only).
+
+### 2026-09-23 -- Flight 6 (153446): the station's biggest family keyed
+
+**The flight.** Build 1eae654d (the on-foot and station fixes merged), the shader dump
+armed; eye 4074x4076 output from 2037x2038 (DLSS performance, exactly 50%), the 2D screen
+5088x2862. Docked at a station (still blurry turning: vs_4361 unkeyed, as expected),
+disembarked into the HANGAR on foot 15:37:20-15:38:12. The dump wrote
+ps_16940F576006BE65.dxbc (9148 bytes, 15:36:12) beside vs_436193B352A2897E.dxbc (09-06).
+
+**The station's families, through the corpus identity harness** (engine_velocity_test
+--corpus edvr_logs: derive, patch, reflect, create, then stock and patched drawn over the
+same inputs, SV_Target0..3 and depth compared bit for bit, MRT6 checked against the slot):
+
+| pair | result |
+|---|---|
+| vs_436193B352A2897E + ps_16940F576006BE65 | 40,960 texels, 0 mismatches; MRT6 8192 checked, 0 bad (slot v0.y, SV_Position v5) -- KEYED |
+| vs_889A5279E68F0672 + ps_B46E52A1E0B2F39C (the station's) | 40,960, 0 mismatches; 8192, 0 bad (v0.x, v4) -- KEYED |
+| vs_889A5279E68F0672 + ps_EBA95E15B0A66102 | 40,960, 0 mismatches; 8192, 0 bad -- KEYED |
+| vs_DE545DC8EE4FBB87 + ps_91F8937EDA723663 | refused by the patcher: "position input register holds another semantic" |
+| vs_DE545DC8EE4FBB87 + ps_A6070F9DD1CFB601 | refused, the same |
+
+Two new families in src/d3d11/engine_velocity.cpp kFamilies (nine now; kMaxFamilies 10,
+four pixel shaders a family). The refused two stay stock: the family's SV_Position sits
+in v4 of its vertex outputs, and these two pixel shaders declare another semantic in
+that register -- a patcher that finds SV_Position by semantic in the pixel shader's own
+input signature would take them; not built. The rig now splits its corpus into keyed
+pairs (each must pass: 14) and candidates (tried and reported, never failing the run:
+the refused two), and takes each call's result before its check -- a reason written by
+the call was printed from a dangling pointer before (the first run's garbled FAIL).
+engine_velocity_test 1008 checks (the gate), 1373 with --corpus.
+
+**What a flight shows.** At a station: `engine motion: family vs_436193B352A2897E: live;
+substituted N binds ...; patched [ps_16940F576006BE65]` and the same for vs_889A; with
+diagnostics, stale per eye-frame down from 136,878 toward the stock remainder (ps_91F8 and
+ps_A607 are the cockpit's and the on-foot views', not the station's). If the new code
+never ran: no family line for either.
+
+### 2026-09-23 -- The hangar (flight 6): the source named without terrain; the layout census by target
+
+**The hangar.** On foot in the station's hangar (15:37:20-15:38:12) the source path never
+engaged: no "on-foot source slot target created" line and no "engine motion: on foot:"
+line in the whole log, and no "screen motion:" line either -- screen motion's own map
+hangs on the same naming -- while the world screen was held ("the journal: on foot; the
+screen's depth: 420 draws a frame now, 3422 at most", 15:37:46). The source was named
+only by a terrain draw (vs_ACE405F428C17EF6) or a settlement scene draw
+(vs_4435F2E50020E7F3) into the screen's colour and depth; a hangar has neither.
+
+**The naming now (src/d3d11/screen_motion.cpp:260, screenMotionSource).** Terrain or a
+scene draw names first, as before (the world camera by construction). Where neither has
+named it for kTerrainHoldFrames (2) frames, the pool family draws (the engine's families,
+minus weapon_motion's first-person weapon and tool shaders) into each depth of the
+screen's size (vscreen's panel size: 5088x2862 this session) are counted per frame
+(screenPoolDraw, :247, each view resolved once a frame), and LAST frame's busiest names the
+source at its first such draw this frame, through the same colour and depth checks. That
+draw's VS b1 is the source camera for both screen motion's camera term and the engine's
+per-draw camera rule, which holds every other pool draw to it as on the walk; the
+first-person shaders are skipped because their camera is not the world's (flight 5's
+vs_AACF-first frames). Signals in the log: once, "screen motion: no terrain or scene draw
+names the on-foot source here (a hangar): it is named by its own depth -- the WxH depth
+that took the most pool family draws last frame (N) ..."; on the on-foot line, `camera
+rule: namings N (by terrain or a scene draw T, by the screen's own depth S; rows not seen
+U)`. When NEITHER names it, after 90 frames of the 2D screen: "screen motion: the 2D screen
+showed for 90 frames and nothing named its source -- no terrain or scene draw, and <no
+pool family draw went to a depth of the screen's size | X a frame went there without
+naming it (its colour target or depth format refused)> -- so no screen motion map is made
+and the engine's on-foot path stands idle", and "named again after N" when it resumes.
+
+**The layout census (src/d3d11/depth_probe.cpp:151 LayoutRecord, :178 layoutSample, :222
+layoutPickRecord).** Its 15:37:53 line read "the busiest depth target (now #0 2048x1024,
+1045 draws last frame) ... viewports [(0,0) 1024x1024 x298, (1024,0) 1024x1024 x263,
+(0,0) 5088x2862 x2253]": the samples were pooled across frames while the busiest target
+alternated between a 2048x1024 shadow atlas (two 1024 viewports) and the 5088x2862 screen
+(up to 3422 draws a frame), and the line named only the current one -- 561 atlas samples
+and 2253 screen samples under one name. Each sampled target now keeps its own record
+(frames, samples, viewports, scissors, the colour beside it), and a sample whose viewport
+lies outside its own target is counted ("N samples with a viewport outside it (drawn with
+another depth than the one counted)"), so a per-draw misattribution, if one exists, shows
+as a number instead of a mixed list. The probe also HOLDS each tracked depth view now
+(:583), released on eviction and shutdown: targets are matched by the view's pointer on
+every draw, and a view the game released could come back at the same address for another
+texture, its draws counted under the old entry's size. The naming does not read the
+census: it counts its own pool family draws per screen-sized view.
+
+**Rigs.** screen_motion_test (the hangar): the first frame only counts; the second names
+at the first world pool draw, with the ScreenDepth signal and the draw's VS b1; a shadow
+atlas (another size, depth only, two half viewports) that takes MORE pool draws is never
+counted and never names; a first-person tool shader never names; 90 screen frames with
+only the atlas are counted and said; a naming clears it; terrain names with its own
+signal and holds the fallback off even when a pool draw precedes it. depth_scene_pick_test
+(the census): a screen-sized target and an atlas taking turns as the busiest keep their own
+records (the screen's holds only its viewport, the atlas's its two halves), a draw with a
+viewport outside the atlas is counted as such, a tracked view is held and an evicted one
+released. engine_velocity_test S3: namings by the screen's own depth counted under their
+signal, the frame given, nothing dropped. Screen motion 56558 checks, depth_scene_pick_test
+173, engine_velocity_test 1011; contract 261.
+
+**What a flight shows.** In a hangar: the "named by its own depth" line once; `engine motion:
+on foot: ... frames dropped: none; screen views asked A, given A`, `camera rule: namings N
+(by terrain or a scene draw 0, by the screen's own depth N ...)`; the "screen motion GPU"
+lines (the map is made); and engine-joined panel pixels when a pool family mover is on
+screen. If the new code never ran: no on-foot line in a hangar, as in flight 6. If nothing
+names the source: the "nothing named its source" line with its reason.

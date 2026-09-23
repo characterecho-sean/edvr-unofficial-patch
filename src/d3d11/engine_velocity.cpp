@@ -53,22 +53,32 @@ std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 // kept the camera term while the station turned; both keyed, each proven by
 // the corpus identity harness (o0..o3 and depth bit-identical). Not keyed:
 // ps_B7D50283329322C3 (vs_EB52 -- the commander's legs, records 2 m away;
-// decided), and vs_436193B352A2897E, the station's biggest pool shader, which
-// is no family yet: its only pixel shader, ps_16940F576006BE65, is not in any
-// dump, and nothing is keyed without the harness.
+// decided).
+//
+// Flight 6 (153446: the shader dump armed at a station, the "Flight 6" entry):
+// vs_436193B352A2897E, the station's biggest pool shader (547 of its 1193
+// instances a frame, 143416) with its only pixel shader ps_16940F576006BE65;
+// vs_889A5279E68F0672 with ps_B46E52A1E0B2F39C (the station) and
+// ps_EBA95E15B0A66102 -- each pair through the corpus identity harness
+// (40,960 texels, 0 mismatches; MRT6 8192 checked, 0 bad). Not keyable:
+// vs_DE54's ps_91F8937EDA723663 and ps_A6070F9DD1CFB601, whose input register
+// the family's SV_Position sits at holds another semantic (the patcher's
+// refusal; engine_velocity_test's --corpus candidates print it).
 struct Family {
     uint64_t vs;
     const char* name;
-    uint64_t ps[3];
+    uint64_t ps[4];
 };
 constexpr Family kFamilies[] = {
-    {0xEB5234DB6ADB491Dull, "vs_EB5234DB6ADB491D", {0xCB9F297EFF264251ull, 0x9ABF60B4B51F2C1Full, 0x3434972DB5336AA4ull}},
-    {0x5B4D8E894EEDA8B4ull, "vs_5B4D8E894EEDA8B4", {0x4375B72964F386CDull, 0, 0}},
-    {0xBBE58E40FE88EC80ull, "vs_BBE58E40FE88EC80", {0xDB3E8D20CF53FBC0ull, 0, 0}},
-    {0xDE545DC8EE4FBB87ull, "vs_DE545DC8EE4FBB87", {0xE46E3E4832B2FDB0ull, 0xCB429E043DBB2506ull, 0}},
-    {0xAACFDCF2FB9AD809ull, "vs_AACFDCF2FB9AD809", {0xCF534B32F491561Aull, 0, 0}},
-    {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0, 0}},
-    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0}},
+    {0xEB5234DB6ADB491Dull, "vs_EB5234DB6ADB491D", {0xCB9F297EFF264251ull, 0x9ABF60B4B51F2C1Full, 0x3434972DB5336AA4ull, 0}},
+    {0x5B4D8E894EEDA8B4ull, "vs_5B4D8E894EEDA8B4", {0x4375B72964F386CDull, 0, 0, 0}},
+    {0xBBE58E40FE88EC80ull, "vs_BBE58E40FE88EC80", {0xDB3E8D20CF53FBC0ull, 0, 0, 0}},
+    {0xDE545DC8EE4FBB87ull, "vs_DE545DC8EE4FBB87", {0xE46E3E4832B2FDB0ull, 0xCB429E043DBB2506ull, 0, 0}},
+    {0xAACFDCF2FB9AD809ull, "vs_AACFDCF2FB9AD809", {0xCF534B32F491561Aull, 0, 0, 0}},
+    {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0, 0, 0}},
+    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0, 0}},
+    {0x436193B352A2897Eull, "vs_436193B352A2897E", {0x16940F576006BE65ull, 0, 0, 0}},
+    {0x889A5279E68F0672ull, "vs_889A5279E68F0672", {0xB46E52A1E0B2F39Cull, 0xEBA95E15B0A66102ull, 0, 0}},
 };
 constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
 static_assert(kFamilyCount <= kMaxFamilies, "familyDraws holds every family");
@@ -297,6 +307,7 @@ struct DrawStats {
     // invalidations by reason (they share g_draw.invalid with the eyes).
     uint64_t sourceHeld = 0, sourceDeclined[kSourceDeclineCount] = {}, sourceDeclinedFamily[kFamilyCount] = {};
     uint64_t sourceDeclineFrames = 0, sourceOtherRows[4] = {}, sourceNamings = 0, sourceNamingsUnseen = 0;
+    uint64_t sourceNamingsBy[2] = {};   // by EngineVelocitySourceSignal: terrain or scene draw, the screen's depth
     double sourceOtherShiftMax = 0.0;
     uint64_t sourceInvalid[kInvalidCount] = {};
     // The screen shader's per-kind eye-pixel counts: [0] every pixel of every
@@ -1177,13 +1188,15 @@ void summaryLocked(uint64_t now) {
         Log::get().note("engine motion: on foot: source frames %llu, with MRT6 bound %llu (slot target %ux%u), "
                         "frames dropped: %s; screen views asked %llu, given %llu, refused: stood down %llu, other depth "
                         "%llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene constants %llu; "
-                        "camera rule: namings %llu (rows not seen %llu), checks held to the naming's camera %llu, "
+                        "camera rule: namings %llu (by terrain or a scene draw %llu, by the screen's own depth %llu; rows "
+                        "not seen %llu), checks held to the naming's camera %llu, "
                         "declined %llu in %llu frames (%s)%s; %s.",
                         u(g_draw.sourceFrames), u(g_draw.sourceFramesBound), source.width, source.height,
                         dropped.empty() ? "none" : dropped.c_str(),
                         u(g_draw.sourceViewsAsked), u(g_draw.sourceViewsGiven), u(g_draw.sourceRefusedNoEmit),
                         u(g_draw.sourceRefusedDepth), u(g_draw.sourceRefusedFrame), u(g_draw.sourceRefusedInvalid),
                         u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious), u(g_draw.sourceNamings),
+                        u(g_draw.sourceNamingsBy[0]), u(g_draw.sourceNamingsBy[1]),
                         u(g_draw.sourceNamingsUnseen), u(g_draw.sourceHeld), u(declinedAll),
                         u(g_draw.sourceDeclineFrames), declined.c_str(), other, pixels);
     }
@@ -1527,7 +1540,10 @@ bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
     return any || out->untimed || out->invalid;
 }
 
-void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants) {
+bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept { return familyOfVs(vsHash) >= 0; }
+
+void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants,
+                              EngineVelocitySourceSignal signal) {
     if (!live.load(std::memory_order_acquire) || !sourceDepth) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (g_sourceDepth.Get() != sourceDepth) g_sourceDepth = sourceDepth;
@@ -1541,6 +1557,7 @@ void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneC
     c.scene = sceneConstants;
     c.rowsKnown = false;
     ++g_draw.sourceNamings;
+    ++g_draw.sourceNamingsBy[signal == EngineVelocitySourceSignal::ScreenDepth ? 1 : 0];
     if (sceneConstants) {
         D3D11_BUFFER_DESC sd{};
         sceneConstants->GetDesc(&sd);
