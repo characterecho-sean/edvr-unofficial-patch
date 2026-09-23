@@ -261,6 +261,28 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Finding 1 of the 2026-09-23 review: EventTracker::treatment() above
+// decides only the EVENT's watched/acted answer, so every call inside one
+// event -- both eyes, every parent that happens to disagree while it is
+// open -- reads the same thing. Whether THIS call may actually overwrite
+// the compose's output is a second, per-call question: this call's own
+// parent must currently read eligible from ParentGuardTable::onClassified,
+// and the session cap must not already be reached. Without this, a parent
+// that has been disagreeing for a while gets silently overwritten the
+// moment some OTHER, well-behaved parent happens to open an event.
+inline bool callMayAct(Treatment eventTreatment, bool guardEligible, bool sessionCapReached) noexcept {
+    return eventTreatment == Treatment::Act && guardEligible && !sessionCapReached;
+}
+
+// Finding 3: the session-wide acted-frame cap (sessionCapReached above) has
+// to count distinct acted FRAMES, not acted CALLS -- several calls, both
+// eyes and sometimes more than one parent, can all act within one frame.
+// Pure comparison: is `frame` one the caller has not already counted?
+inline bool isNewActedFrame(uint32_t frame, uint32_t lastActedFrame, bool hasActedFrame) noexcept {
+    return !hasActedFrame || frame != lastActedFrame;
+}
+
+// ---------------------------------------------------------------------------
 // Ring window selection: does a ring entry stamped `frame` belong in the
 // dump window [triggerFrame-before, triggerFrame+after]? Saturating on the
 // low side and widened on the high side so a trigger near frame 0 or near
@@ -271,6 +293,123 @@ inline bool ringFrameInWindow(uint32_t frame, uint32_t triggerFrame,
     const uint32_t lo = triggerFrame > before ? triggerFrame - before : 0;
     const uint64_t hi = uint64_t(triggerFrame) + uint64_t(after);
     return frame >= lo && uint64_t(frame) <= hi;
+}
+
+// ---------------------------------------------------------------------------
+// Finding 4: dump-request merging. An automatic trigger (our own event, the
+// detector's verdict) is serviced kDumpWindowFrames after it fires, so by
+// the time the dump actually runs the ring already holds the frames up to
+// triggerFrame+kDumpWindowFrames and the window
+// [triggerFrame-kDumpWindowFrames, triggerFrame+kDumpWindowFrames] is
+// complete. A second trigger arriving before a pending dump is serviced
+// must not be dropped -- foldDumpTrigger widens the same pending dump
+// instead, and frameInDumpWindow decides which ring entries the resulting
+// dump keeps. The Pause/history-key trigger is different (it wants the
+// WHOLE ring, not a window) and is not built from these two -- see the
+// wholeRing flag the .cpp keeps beside its own PendingDumpWindow.
+constexpr uint32_t kDumpWindowFrames = 30;
+
+struct PendingDumpWindow {
+    bool active = false;
+    uint32_t lowTriggerFrame = 0;  // earliest trigger folded into this dump
+    uint32_t dueFrame = 0;         // latest trigger+defer folded in; serviced here
+};
+
+inline PendingDumpWindow foldDumpTrigger(const PendingDumpWindow& current, uint32_t triggerFrame,
+                                          uint32_t deferFrames) noexcept {
+    const uint32_t due = triggerFrame + deferFrames;
+    if (!current.active) return PendingDumpWindow{true, triggerFrame, due};
+    PendingDumpWindow next = current;
+    if (triggerFrame < next.lowTriggerFrame) next.lowTriggerFrame = triggerFrame;
+    if (due > next.dueFrame) next.dueFrame = due;
+    return next;
+}
+
+// Whether a ring entry stamped `frame` belongs in the dump the pending
+// window above will produce: from lowTriggerFrame-before (saturating, the
+// same underflow guard ringFrameInWindow uses above) up to dueFrame itself,
+// inclusive.
+inline bool frameInDumpWindow(uint32_t frame, uint32_t lowTriggerFrame, uint32_t dueFrame,
+                               uint32_t before = kDumpWindowFrames) noexcept {
+    const uint32_t lo = lowTriggerFrame > before ? lowTriggerFrame - before : 0;
+    return frame >= lo && frame <= dueFrame;
+}
+
+// ---------------------------------------------------------------------------
+// H3 (finding 2 of the 2026-09-23 review): the design's link check between
+// the engine's last few pushed translations and what glitch_frame.cpp
+// separately reads off the scene camera. Comparing against a SINGLE last
+// push floods "mismatch" the moment the sim runs a frame ahead of the
+// render thread -- a pipelined push then never lines up with the
+// observation that follows it. Keeping the last 4 gives the observation a
+// real chance to match whichever of them it actually belongs to.
+class RecentPushes {
+public:
+    static constexpr uint32_t kCount = 4;
+
+    // Most recent first: after push(), slot 0 is what was just pushed: the
+    // previous slot 0..2 shift down and slot 3 (once full) is dropped.
+    void push(const double t[3]) noexcept {
+        for (uint32_t i = kCount - 1; i > 0; --i) {
+            slot_[i][0] = slot_[i - 1][0];
+            slot_[i][1] = slot_[i - 1][1];
+            slot_[i][2] = slot_[i - 1][2];
+        }
+        slot_[0][0] = t[0]; slot_[0][1] = t[1]; slot_[0][2] = t[2];
+        if (filled_ < kCount) ++filled_;
+    }
+
+    bool hasAny() const noexcept { return filled_ > 0; }
+    uint32_t filled() const noexcept { return filled_; }
+
+    void translationAt(uint32_t slot, double out[3]) const noexcept {
+        if (slot >= filled_) { out[0] = out[1] = out[2] = 0.0; return; }
+        out[0] = slot_[slot][0]; out[1] = slot_[slot][1]; out[2] = slot_[slot][2];
+    }
+
+    // The minimum Euclidean distance from `pos` to any push held so far, and
+    // which slot (0 = most recent) produced it. hasAny() must be true.
+    double minDistance(const float pos[3], uint32_t* slotOut) const noexcept {
+        double best = 0.0; uint32_t bestSlot = 0;
+        for (uint32_t i = 0; i < filled_; ++i) {
+            double sq = 0.0;
+            for (int a = 0; a < 3; ++a) {
+                const double e = double(pos[a]) - slot_[i][a];
+                sq += e * e;
+            }
+            const double d = std::sqrt(sq);
+            if (i == 0 || d < best) { best = d; bestSlot = i; }
+        }
+        if (slotOut) *slotOut = bestSlot;
+        return best;
+    }
+
+private:
+    double slot_[kCount][3] = {};
+    uint32_t filled_ = 0;
+};
+
+// Within one frame, many observation calls can each test against the last 4
+// pushes (glitchFrameObserve runs for every observed 5376-byte constant
+// buffer, not just the eye camera's); the frame's verdict is its BEST
+// (smallest-distance) match, not its first or its last. Pure comparison so
+// "is this candidate the new best" is tested on its own.
+inline bool isNewH3Best(bool hasComparisonYet, double currentBest, double candidate) noexcept {
+    return !hasComparisonYet || candidate < currentBest;
+}
+
+enum class H3Bucket : uint8_t { Under1Cm = 0, Under10Cm = 1, Under1M = 2, OneMPlus = 3, NoObservation = 4 };
+
+// Classifies one finished frame's best H3 match. "No observation / no push"
+// covers both a frame with no 5376-byte buffer observed at all, and one with
+// observations but nothing yet pushed to compare against (RecentPushes
+// empty) -- both say nothing about whether the link held this frame.
+inline H3Bucket classifyH3Frame(bool hasObservation, bool hasComparison, double minDist) noexcept {
+    if (!hasObservation || !hasComparison) return H3Bucket::NoObservation;
+    if (minDist < 0.01) return H3Bucket::Under1Cm;
+    if (minDist < 0.10) return H3Bucket::Under10Cm;
+    if (minDist < 1.0) return H3Bucket::Under1M;
+    return H3Bucket::OneMPlus;
 }
 
 }  // namespace tfp

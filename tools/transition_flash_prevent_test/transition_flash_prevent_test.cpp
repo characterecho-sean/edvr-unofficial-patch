@@ -2,9 +2,13 @@
 // classifier (and that it truly ignores the padding lanes, not merely
 // documents that it should), the validation and per-parent guard
 // arithmetic (including LRU eviction), event grouping with the alternate
-// latch, and the ring window test's overflow safety. No game, no Windows
-// hook -- this drives the header directly, the kinematic_probe_test
+// latch, the ring window test's overflow safety, and the four 2026-09-23
+// review findings whose logic lives here (finding 1: the per-call act gate;
+// finding 2: H3's recent-pushes match and frame bucketing; finding 3: the
+// acted-frame dedup; finding 4: dump-request window folding). No game, no
+// Windows hook -- this drives the header directly, the kinematic_probe_test
 // pattern (single-TU, production source compiled into the rig).
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
@@ -246,6 +250,159 @@ void caseRingWindow() {
     check(!ringFrameInWindow(hiTrigger - 31, hiTrigger),
           "ring: still excludes a frame just past the low edge near the top of the range");
 }
+
+// --- Finding 1 (2026-09-23 review): the per-call act gate -----------------
+
+void caseCallMayActGates() {
+    check(callMayAct(Treatment::Act, true, false),
+          "callMayAct: acted event, this call's own guard eligible, cap not reached -> acts");
+    check(!callMayAct(Treatment::Act, true, true),
+          "callMayAct: same, but the session cap is already reached -> refused");
+    check(!callMayAct(Treatment::Act, false, false),
+          "callMayAct: same, but THIS call's own guard is not eligible -> refused");
+    check(!callMayAct(Treatment::Watch, true, false),
+          "callMayAct: a watched event never acts, whatever the guard and cap say");
+}
+
+void caseEventActRequiresPerCallGuard() {
+    // The bug this finding fixes: the OLD code read only
+    // EventTracker::treatment(), so once an event latched Act, EVERY
+    // disagreeing call inside it was acted on -- including a parent that
+    // had been disagreeing on its own the whole time. Reproduce that shape:
+    // two parents disagree in the same event, one fresh (opens it), one
+    // already past its streak cap.
+    ParentGuardTable table;
+    EventTracker events;
+
+    // Parent B has been drifting on its own for a few frames before this
+    // transition and crosses the persistent-disagree streak.
+    table.onClassified(0xB, 1, PoseClass::Disagree);
+    table.onClassified(0xB, 2, PoseClass::Disagree);
+    table.onClassified(0xB, 3, PoseClass::Disagree);
+    const ParentGuardTable::Verdict bVerdict = table.onClassified(0xB, 4, PoseClass::Disagree);
+    check(!bVerdict.eligible, "precondition: B's own guard is not eligible (streak over 3)");
+
+    // A brand new parent A disagrees at the same frame -- a real transition
+    // can affect more than one camera parent at once -- and opens event 1.
+    const ParentGuardTable::Verdict aVerdict = table.onClassified(0xA, 4, PoseClass::Disagree);
+    check(aVerdict.eligible, "precondition: a brand-new parent A is eligible coming into its first disagree");
+    const EventTracker::Note note = events.note(4);
+    check(note.isNewEvent, "precondition: this is a new event");
+    events.latch(Treatment::Act);
+    check(events.treatment() == Treatment::Act,
+          "break-it precondition: the event itself latches Act (the old code's only test)");
+
+    // A's own call may act; B's, in the very same event and frame, must not.
+    check(callMayAct(events.treatment(), aVerdict.eligible, /*sessionCapReached=*/false),
+          "finding 1: parent A, whose own guard opened this event, may act");
+    check(!callMayAct(events.treatment(), bVerdict.eligible, /*sessionCapReached=*/false),
+          "finding 1: parent B's persistent disagree streak still blocks it inside an acted event");
+}
+
+// --- Finding 3: the session cap counts frames, not calls -------------------
+
+void caseActedFrameDedup() {
+    check(isNewActedFrame(100, 0, false), "actedFrame: the first acted call ever is a new frame");
+    check(!isNewActedFrame(100, 100, true), "actedFrame: a second call, same frame (the other eye), is not new");
+    check(isNewActedFrame(101, 100, true), "actedFrame: the next frame is new again");
+    check(!isNewActedFrame(101, 101, true), "actedFrame: a third call at the new frame is still not new");
+}
+
+// --- Finding 2: H3's recent-pushes match and per-frame bucketing ----------
+
+void caseRecentPushesMinDistance() {
+    RecentPushes pushes;
+    check(!pushes.hasAny(), "RecentPushes: starts empty");
+    const double p0[3] = {0, 0, 0};
+    pushes.push(p0);
+    check(pushes.hasAny() && pushes.filled() == 1, "RecentPushes: one push held");
+    const double p1[3] = {10, 0, 0};
+    pushes.push(p1);
+    const double p2[3] = {20, 0, 0};
+    pushes.push(p2);
+    const double p3[3] = {30, 0, 0};
+    pushes.push(p3);
+    check(pushes.filled() == 4, "RecentPushes: fills to its 4-deep capacity");
+    const double p4[3] = {40, 0, 0};
+    pushes.push(p4);  // pushes p0 (the oldest) out
+    check(pushes.filled() == 4, "RecentPushes: stays at capacity 4, does not grow further");
+
+    // Held translations are now (most recent first) 40,30,20,10 -- 0 was
+    // dropped. An observation near 20 should match slot 2, not slot 0: this
+    // is the finding-2 fix -- comparing against only the single last push
+    // (slot 0 == 40) would flood "mismatch" for exactly this shape.
+    uint32_t slot = 0xFFFFFFFFu;
+    const float near20[3] = {21.0f, 0.0f, 0.0f};
+    const double d = pushes.minDistance(near20, &slot);
+    check(std::fabs(d - 1.0) < 1e-9, "RecentPushes: minDistance finds the closest of the 4, not just the newest");
+    check(slot == 2, "RecentPushes: reports which of the 4 slots matched (0 = most recent)");
+
+    double out[3];
+    pushes.translationAt(slot, out);
+    check(out[0] == 20.0 && out[1] == 0.0 && out[2] == 0.0,
+          "RecentPushes: translationAt returns the push that slot actually holds");
+}
+
+void caseIsNewH3Best() {
+    check(isNewH3Best(false, 0.0, 5.0), "isNewH3Best: the first candidate is always the new best");
+    check(isNewH3Best(true, 5.0, 4.999), "isNewH3Best: a strictly smaller candidate replaces the best");
+    check(!isNewH3Best(true, 5.0, 5.0), "isNewH3Best: an equal candidate does not replace the first-seen best");
+    check(!isNewH3Best(true, 5.0, 5.001), "isNewH3Best: a larger candidate is not the new best");
+}
+
+void caseClassifyH3FrameBuckets() {
+    check(classifyH3Frame(false, false, 0.0) == H3Bucket::NoObservation,
+          "H3 bucket: nothing observed this frame -> no observation / no push");
+    check(classifyH3Frame(true, false, 0.0) == H3Bucket::NoObservation,
+          "H3 bucket: observed, but nothing pushed yet to compare against -> same bucket");
+    check(classifyH3Frame(true, true, 0.005) == H3Bucket::Under1Cm, "H3 bucket: 5mm is under 1cm");
+    check(classifyH3Frame(true, true, 0.0099) == H3Bucket::Under1Cm, "H3 bucket: just under 1cm still counts");
+    check(classifyH3Frame(true, true, 0.01) == H3Bucket::Under10Cm, "H3 bucket: exactly 1cm rolls into the next bucket");
+    check(classifyH3Frame(true, true, 0.05) == H3Bucket::Under10Cm, "H3 bucket: 5cm is under 10cm");
+    check(classifyH3Frame(true, true, 0.0999) == H3Bucket::Under10Cm, "H3 bucket: just under 10cm still counts");
+    check(classifyH3Frame(true, true, 0.10) == H3Bucket::Under1M, "H3 bucket: exactly 10cm rolls into the next bucket");
+    check(classifyH3Frame(true, true, 0.5) == H3Bucket::Under1M, "H3 bucket: 50cm is under 1m");
+    check(classifyH3Frame(true, true, 0.999) == H3Bucket::Under1M, "H3 bucket: just under 1m still counts");
+    check(classifyH3Frame(true, true, 1.0) == H3Bucket::OneMPlus, "H3 bucket: exactly 1m rolls into the top bucket");
+    check(classifyH3Frame(true, true, 50.0) == H3Bucket::OneMPlus, "H3 bucket: far apart stays in the top bucket");
+}
+
+// --- Finding 4: dump-request window folding --------------------------------
+
+void caseFoldDumpTrigger() {
+    PendingDumpWindow w;
+    check(!w.active, "foldDumpTrigger: a fresh window starts inactive");
+    w = foldDumpTrigger(w, 100, 30);
+    check(w.active && w.lowTriggerFrame == 100 && w.dueFrame == 130,
+          "foldDumpTrigger: the first trigger opens the window at [trigger, trigger+defer]");
+
+    // A second trigger, EARLIER than the first (say a detector verdict
+    // landing just before our own event's trigger), widens the low edge
+    // without moving the due frame backwards.
+    w = foldDumpTrigger(w, 90, 30);
+    check(w.lowTriggerFrame == 90, "foldDumpTrigger: a lower trigger frame pulls lowTriggerFrame down");
+    check(w.dueFrame == 130, "foldDumpTrigger: a due frame that is not later leaves dueFrame alone");
+
+    // A third trigger arriving before the dump was serviced, LATER than
+    // both, pushes dueFrame out -- this is the "extend, don't drop" fix
+    // (finding 4): the old code simply returned once a dump was pending,
+    // without folding the new trigger in at all.
+    w = foldDumpTrigger(w, 110, 30);
+    check(w.lowTriggerFrame == 90, "foldDumpTrigger: a trigger between the edges moves neither edge down");
+    check(w.dueFrame == 140, "foldDumpTrigger: the later trigger's own due frame becomes the new maximum");
+}
+
+void caseFrameInDumpWindow() {
+    // lowTriggerFrame=90, dueFrame=140 (the merge above): window is
+    // [90-30, 140] = [60, 140].
+    check(!frameInDumpWindow(59, 90, 140), "frameInDumpWindow: just below the low edge is out");
+    check(frameInDumpWindow(60, 90, 140), "frameInDumpWindow: the low edge itself is in (inclusive)");
+    check(frameInDumpWindow(140, 90, 140), "frameInDumpWindow: the due frame itself is in (inclusive)");
+    check(!frameInDumpWindow(141, 90, 140), "frameInDumpWindow: just past the due frame is out");
+    // Saturates instead of underflowing near frame 0, the same footgun
+    // ringFrameInWindow guards against above.
+    check(frameInDumpWindow(0, 10, 40), "frameInDumpWindow: a low trigger near zero clamps rather than wraps");
+}
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -266,6 +423,14 @@ int wmain(int argc, wchar_t** argv) {
     caseEventGrouping();
     caseEventLatch();
     caseRingWindow();
+    caseCallMayActGates();
+    caseEventActRequiresPerCallGuard();
+    caseActedFrameDedup();
+    caseRecentPushesMinDistance();
+    caseIsNewH3Best();
+    caseClassifyH3FrameBuckets();
+    caseFoldDumpTrigger();
+    caseFrameInDumpWindow();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

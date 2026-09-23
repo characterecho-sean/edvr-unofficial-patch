@@ -9,8 +9,11 @@
 #include <intrin.h>
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <string>
 
 namespace edvr {
@@ -51,8 +54,16 @@ constexpr uint8_t kRecomputeBytes[16] = {
 
 constexpr uint32_t kRecomputeBudgetPerFrame = 512;
 constexpr uint32_t kSessionActCap = 200;
-constexpr uint32_t kOwnEventDumpDeferFrames = 12;  // so N+1.. are in, per the design
-constexpr uint32_t kRingCapacity = 8192;
+// 2026-09-23 review, finding 4: BOTH automatic triggers (our own event, the
+// detector's verdict) defer to tfp::kDumpWindowFrames so the window
+// [trigger-kDumpWindowFrames, trigger+kDumpWindowFrames] is complete by the
+// time the dump is serviced -- a detector verdict used to dump at defer 0,
+// immediately, which meant N+1.. were never in it.
+constexpr uint32_t kAutoDumpDeferFrames = tfp::kDumpWindowFrames;
+// Finding 5: sized for about 600 frames at the real call rate (H3 alone is
+// now one entry a frame; see the static_assert below the struct for the
+// ~16 MB budget this stays under).
+constexpr uint32_t kRingCapacity = 65536;
 constexpr uint32_t kMaxDumpsPerSession = 16;
 
 // --- Game-side signatures (signed off against the decompiles in
@@ -204,9 +215,21 @@ std::mutex g_guardMutex;
 tfp::ValidationCounts g_validation;
 tfp::ParentGuardTable g_parentTable;
 tfp::EventTracker g_eventTracker;
+// Finding 3 (2026-09-23 review): the session cap counts distinct acted
+// FRAMES, not acted calls. Both under g_guardMutex, touched only from the
+// acted-decision block below.
+uint32_t g_lastActedFrame = 0;
+bool g_hasActedFrame = false;
+// Finding 1: log the "refused by its own guard" line at most once per
+// event; also under g_guardMutex. 0 is a safe sentinel -- EventTracker's
+// event numbers start at 1.
+uint32_t g_lastGuardRefusalEvent = 0;
 
-// The push hook's last recorded pose, for H3 and for the call-stack capture
-// on event frames.
+// The push hook's last recorded pose, for the call-stack capture on event
+// frames, and the last 4 pushed translations for H3 (finding 2: comparing
+// against a single last push floods "mismatch" once the sim runs a frame
+// ahead of the render thread, since a pipelined push then never lines up
+// with the observation right after it).
 struct LastPushed {
     bool valid = false;
     uint32_t frame = 0;
@@ -217,6 +240,7 @@ struct LastPushed {
 };
 std::mutex g_pushMutex;
 LastPushed g_lastPushed;
+tfp::RecentPushes g_recentPushes;
 
 // So the push hook can tell "is this frame part of an active event" without
 // taking g_guardMutex on every call: set by the decode hook on every
@@ -224,14 +248,34 @@ LastPushed g_lastPushed;
 std::atomic<uint32_t> g_lastEventFrame{0};
 std::atomic<bool> g_hasEvent{false};
 
+// H3's per-frame accumulator (finding 2): folded by every observation this
+// frame (transitionFlashPreventNoteH3, the render thread, possibly many
+// calls), finalised and reset once per frame at the frame boundary (also
+// the render thread) -- single-threaded end to end, so this needs no lock
+// of its own, only g_pushMutex's brief copy of g_recentPushes above.
+struct H3Accum {
+    bool hasObservation = false;
+    bool hasComparison = false;
+    double minDist = 0.0;
+    uint32_t bestSlot = 0;
+    double bestPos[3] = {0, 0, 0};
+    double bestPushPos[3] = {0, 0, 0};
+};
+H3Accum g_h3Accum;
+
 // Session counters. Monotonic; the periodic line and the shutdown summary
 // both read a snapshot rather than resetting anything.
 std::atomic<uint64_t> g_composeCalls{0};
 std::atomic<uint64_t> g_decodeAgree{0}, g_decodeNear{0}, g_decodeDisagree{0};
 std::atomic<uint64_t> g_recomputeFaults{0}, g_budgetSkips{0};
 std::atomic<uint64_t> g_eventsWatched{0}, g_eventsActed{0}, g_eventsNotValidated{0};
-std::atomic<uint64_t> g_h3Match{0}, g_h3Mismatch{0};
+// H3, bucketed per frame (finding 2) rather than a single match/mismatch
+// count against only the last push.
+std::atomic<uint64_t> g_h3Under1Cm{0}, g_h3Under10Cm{0}, g_h3Under1M{0}, g_h3OneMPlus{0}, g_h3NoObservation{0};
 std::atomic<uint64_t> g_pushes{0}, g_latchCalls{0}, g_actedFrames{0};
+// Finding 1: calls refused by their own parent guard during an otherwise-
+// acted event (the event latched Act, but THIS call's parent did not).
+std::atomic<uint64_t> g_actGuardRefusals{0};
 
 // The recompute's own per-frame call budget: 512, then skips are counted
 // instead of spending more CPU walking the ancestor chain. Touched only from
@@ -260,8 +304,8 @@ struct RingEntry {
     uint32_t frame = 0;
     uint32_t threadId = 0;
     RingKind kind = RingKind::Decode;
-    uint8_t site = 0;       // decode: 0 primary compose, 1 twin compose
-    uint8_t cls = 0;        // decode: tfp::PoseClass
+    uint8_t site = 0;       // decode: 0 primary compose, 1 twin compose. H3: which of the last 4 pushes matched (0 = most recent)
+    uint8_t cls = 0;        // decode: tfp::PoseClass. H3: tfp::H3Bucket
     uint8_t treatment = 0;  // decode: 1 if this call acted
     uint64_t retAddr = 0;   // decode/push: _ReturnAddress()
     uint64_t parent = 0;    // decode: parent. push: target. latch: item.
@@ -269,37 +313,70 @@ struct RingEntry {
     uint32_t eventNumber = 0;
     uint64_t count = 0;     // decode: *(container+0x380). latch: mgr (this)
     uint64_t chain = 0;     // decode: *(parent+0x350). latch: *(item+0x18)
-    double a[3] = {0, 0, 0};  // decode: cached t. push: pushed t. H3: cb1 t
-    double b[3] = {0, 0, 0};  // decode: recompute t. H3: last-pushed t
+    double a[3] = {0, 0, 0};  // decode: cached t. push: pushed t. H3: the frame's best-match cb1 t
+    double b[3] = {0, 0, 0};  // decode: recompute t. H3: that match's pushed t
     double dt = 0, dr = 0;
 };
 
-RingEntry g_ring[kRingCapacity];
+// Finding 5 (2026-09-23 review): kRingCapacity sized for ~600 frames at the
+// real call rate; this keeps the whole ring comfortably under the ~16 MB
+// budget the design allows for it regardless of the exact packed size of
+// RingEntry above.
+static_assert(sizeof(RingEntry) * uint64_t(kRingCapacity) <= 16ull * 1024 * 1024,
+             "transition flash prevent: the ring must stay under ~16 MB");
+
+// Heap-allocated once, at arm time (doInstall), rather than a static array:
+// a static kRingCapacity-entry array would grow this DLL's on-disk image by
+// the ring's own size for no benefit. Still available even when the rest of
+// installation fails (identity mismatch): H3 and the detector-verdict notes
+// keep working off nothing but g_armed, so the ring has to be ready before
+// doInstall's identity check can bail out.
+std::atomic<RingEntry*> g_ring{nullptr};
 std::atomic<uint64_t> g_ringHead{0};
 
 void pushRing(const RingEntry& e) noexcept {
+    RingEntry* const ring = g_ring.load(std::memory_order_acquire);
+    if (!ring) return;  // allocation failed or has not run yet; drop silently, nothing to index into
     const uint64_t slot = g_ringHead.fetch_add(1, std::memory_order_relaxed);
-    g_ring[slot % kRingCapacity] = e;
+    ring[slot % kRingCapacity] = e;
 }
 
 // --- Dumps: one pending slot, serviced from the frame boundary (never from
-// inside a game hook -- a dump can be dozens of Log::note calls, and the
-// hooks can run on a scheduler job thread where that latency is the game's).
+// inside a game hook -- a dump can be a megabyte of text, and the hooks can
+// run on a scheduler job thread where that latency is the game's).
 struct PendingDump {
-    bool active = false;
-    uint32_t triggerFrame = 0;
-    uint32_t dueFrame = 0;
-    const char* reason = "";
+    tfp::PendingDumpWindow window;  // .active says whether one is pending (tfp::foldDumpTrigger)
+    bool wholeRing = false;         // the Pause/history-key trigger: dump everything held, not a window
+    static constexpr uint32_t kMaxReasons = 4;
+    const char* reasons[kMaxReasons] = {};
+    uint32_t reasonCount = 0;
 };
 std::mutex g_dumpMutex;
 PendingDump g_pendingDump;
 std::atomic<uint32_t> g_dumpsThisSession{0};
 
-void requestDump(const char* reason, uint32_t triggerFrame, uint32_t deferFrames) noexcept {
-    if (g_dumpsThisSession.load(std::memory_order_relaxed) >= kMaxDumpsPerSession) return;
+void addReason(PendingDump& d, const char* reason) noexcept {
+    if (!reason) return;
+    for (uint32_t i = 0; i < d.reasonCount; ++i) {
+        if (std::strcmp(d.reasons[i], reason) == 0) return;  // already recorded
+    }
+    if (d.reasonCount < PendingDump::kMaxReasons) d.reasons[d.reasonCount++] = reason;
+}
+
+// Finding 4 (2026-09-23 review): a trigger arriving while a dump is already
+// pending folds into it (tfp::foldDumpTrigger widens the window; a trigger
+// that wants the whole ring upgrades wholeRing) instead of being dropped, so
+// this file's own event dump can no longer be lost to a detector verdict
+// landing on the same frame. The session cap only gates OPENING a brand new
+// pending dump -- folding another trigger into one already open does not
+// spend a second slot of the 16.
+void requestDump(const char* reason, uint32_t triggerFrame, uint32_t deferFrames, bool wholeRing) noexcept {
     std::lock_guard<std::mutex> lock(g_dumpMutex);
-    if (g_pendingDump.active) return;  // one at a time; the next trigger tries again later
-    g_pendingDump = PendingDump{true, triggerFrame, triggerFrame + deferFrames, reason};
+    const bool creatingNew = !g_pendingDump.window.active;
+    if (creatingNew && g_dumpsThisSession.load(std::memory_order_relaxed) >= kMaxDumpsPerSession) return;
+    g_pendingDump.window = tfp::foldDumpTrigger(g_pendingDump.window, triggerFrame, deferFrames);
+    if (wholeRing) g_pendingDump.wholeRing = true;
+    addReason(g_pendingDump, reason);
 }
 
 const char* classText(uint8_t cls) noexcept {
@@ -307,22 +384,72 @@ const char* classText(uint8_t cls) noexcept {
          : cls == uint8_t(tfp::PoseClass::Near)  ? "near" : "disagree";
 }
 
-void performDump(const char* reason, uint32_t triggerFrame) noexcept {
-    g_dumpsThisSession.fetch_add(1, std::memory_order_relaxed);
+const char* h3BucketText(tfp::H3Bucket b) noexcept {
+    switch (b) {
+    case tfp::H3Bucket::Under1Cm: return "<1cm";
+    case tfp::H3Bucket::Under10Cm: return "<10cm";
+    case tfp::H3Bucket::Under1M: return "<1m";
+    case tfp::H3Bucket::OneMPlus: return ">=1m";
+    case tfp::H3Bucket::NoObservation: return "no observation / no push";
+    }
+    return "?";
+}
+
+// Appends one printf-style line (plus \r\n) to the text this file's dumps
+// write to their own file (finding 5) -- the same style Log::get().note
+// already uses in this file, just collected into a buffer instead of
+// written line by line.
+void appendLine(std::string& out, const char* fmt, ...) noexcept {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        out.append(buf, static_cast<size_t>(n) < sizeof(buf) ? static_cast<size_t>(n) : sizeof(buf) - 1);
+    }
+    out += "\r\n";
+}
+
+// Finding 5: full per-entry detail goes to its own file in edvr_logs\flash\
+// (the log directory accessor and CreateDirectoryW/CreateFileW shape match
+// ui_surfaces.cpp's ratioPath()/saveTable() and temporal_pass.cpp's eye
+// dump); the gfx log gets exactly one pointer line at it. Writing only ever
+// happens here, called from serviceDump, which is only ever called from the
+// frame boundary -- never from inside a game hook.
+void performDump(const PendingDump& due) noexcept {
+    const uint32_t dumpIndex = g_dumpsThisSession.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    std::string reasonsText;
+    for (uint32_t i = 0; i < due.reasonCount; ++i) {
+        if (i) reasonsText += ", ";
+        reasonsText += due.reasons[i];
+    }
+    if (reasonsText.empty()) reasonsText = "unknown";
+
+    RingEntry* const ring = g_ring.load(std::memory_order_acquire);
     const uint64_t head = g_ringHead.load(std::memory_order_relaxed);
-    const uint64_t have = head < kRingCapacity ? head : kRingCapacity;
+    const uint64_t have = ring ? (head < kRingCapacity ? head : kRingCapacity) : 0;
     const uint64_t first = head - have;
-    const uint32_t lo = triggerFrame > 30 ? triggerFrame - 30 : 0;
-    Log::get().note("--- transition flash prevent: ring dump, trigger=\"%s\" frame=%u, window "
-                    "[%u,%u] ---", reason, triggerFrame, lo, triggerFrame + 30);
-    uint32_t printed = 0;
+
+    std::string text;
+    appendLine(text,
+        "transition flash prevent: ring dump, reasons=(%s), %s, requested trigger frames %u..%u",
+        reasonsText.c_str(), due.wholeRing ? "WHOLE RING (everything still held)" : "windowed",
+        due.window.lowTriggerFrame, due.window.dueFrame);
+
+    uint32_t printed = 0, lo = 0, hi = 0;
+    bool any = false;
     for (uint64_t i = first; i < head; ++i) {
-        const RingEntry e = g_ring[i % kRingCapacity];
-        if (!tfp::ringFrameInWindow(e.frame, triggerFrame)) continue;
+        const RingEntry e = ring[i % kRingCapacity];
+        if (!due.wholeRing &&
+            !tfp::frameInDumpWindow(e.frame, due.window.lowTriggerFrame, due.window.dueFrame)) continue;
+        if (!any) { lo = e.frame; hi = e.frame; any = true; }
+        else { if (e.frame < lo) lo = e.frame; if (e.frame > hi) hi = e.frame; }
         ++printed;
         switch (e.kind) {
         case RingKind::Decode:
-            Log::get().note(
+            appendLine(text,
                 "  f%-7u t%-6u DECODE site=%u parent=0x%llX idx=%u/%llu chain=0x%llX class=%s "
                 "cached=(%+.3f %+.3f %+.3f) recompute=(%+.3f %+.3f %+.3f) dt=%.4f dr=%.6f "
                 "event=%u treat=%s",
@@ -332,36 +459,62 @@ void performDump(const char* reason, uint32_t triggerFrame) noexcept {
                 e.eventNumber, e.treatment ? "ACT" : "watch");
             break;
         case RingKind::Push:
-            Log::get().note("  f%-7u t%-6u PUSH target=0x%llX t=(%+.3f %+.3f %+.3f) ret=0x%llX",
-                            e.frame, e.threadId, (unsigned long long)e.parent,
-                            e.a[0], e.a[1], e.a[2], (unsigned long long)e.retAddr);
+            appendLine(text, "  f%-7u t%-6u PUSH target=0x%llX t=(%+.3f %+.3f %+.3f) ret=0x%llX",
+                      e.frame, e.threadId, (unsigned long long)e.parent,
+                      e.a[0], e.a[1], e.a[2], (unsigned long long)e.retAddr);
             break;
         case RingKind::Latch:
-            Log::get().note("  f%-7u t%-6u LATCH mgr=0x%llX item=0x%llX key=0x%llX",
-                            e.frame, e.threadId, (unsigned long long)e.count,
-                            (unsigned long long)e.parent, (unsigned long long)e.chain);
+            appendLine(text, "  f%-7u t%-6u LATCH mgr=0x%llX item=0x%llX key=0x%llX",
+                      e.frame, e.threadId, (unsigned long long)e.count,
+                      (unsigned long long)e.parent, (unsigned long long)e.chain);
             break;
         case RingKind::H3:
-            Log::get().note(
-                "  f%-7u t%-6u H3 cb1=(%+.3f %+.3f %+.3f) pushed=(%+.3f %+.3f %+.3f) dt=%.4f %s",
-                e.frame, e.threadId, e.a[0], e.a[1], e.a[2], e.b[0], e.b[1], e.b[2], e.dt,
-                e.dt < 0.01 ? "match" : "mismatch");
+            appendLine(text,
+                "  f%-7u t%-6u H3 cb1=(%+.3f %+.3f %+.3f) pushed=(%+.3f %+.3f %+.3f) slot=%u dt=%.4f %s",
+                e.frame, e.threadId, e.a[0], e.a[1], e.a[2], e.b[0], e.b[1], e.b[2], e.site, e.dt,
+                h3BucketText(tfp::H3Bucket(e.cls)));
             break;
         }
     }
-    Log::get().note("--- transition flash prevent: ring dump done, %u entries in the window ---",
-                    printed);
+    if (!any) { lo = due.window.lowTriggerFrame; hi = due.window.dueFrame; }
+    appendLine(text, "transition flash prevent: ring dump done, %u entries", printed);
+
+    const std::wstring logDir = Log::get().dir();
+    std::wstring path;
+    bool wrote = false;
+    if (!logDir.empty()) {
+        const std::wstring dir = logDir + L"\\flash";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        SYSTEMTIME stm{};
+        GetLocalTime(&stm);
+        wchar_t filename[64];
+        _snwprintf_s(filename, _TRUNCATE, L"prevent_%02u%02u%02u_f%u.txt",
+                     static_cast<unsigned>(stm.wHour), static_cast<unsigned>(stm.wMinute),
+                     static_cast<unsigned>(stm.wSecond), due.window.lowTriggerFrame);
+        path = dir + L"\\" + filename;
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            wrote = WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) != 0;
+            CloseHandle(f);
+        }
+    }
+    Log::get().note(
+        "transition flash prevent: dump %u/%u (%s) frames %u..%u, %u entries -> %ls",
+        dumpIndex, kMaxDumpsPerSession, reasonsText.c_str(), lo, hi, printed,
+        wrote ? path.c_str() : L"(could not write the file; see the log directory)");
 }
 
 void serviceDump(uint32_t nowFrame) noexcept {
     PendingDump due;
     {
         std::lock_guard<std::mutex> lock(g_dumpMutex);
-        if (!g_pendingDump.active || nowFrame < g_pendingDump.dueFrame) return;
+        if (!g_pendingDump.window.active || nowFrame < g_pendingDump.window.dueFrame) return;
         due = g_pendingDump;
         g_pendingDump = PendingDump{};
     }
-    performDump(due.reason, due.triggerFrame);
+    performDump(due);
 }
 
 // --- SEH-guarded reads. Each is its own small function: mixing __try with
@@ -434,7 +587,8 @@ void reportLine(const char* prefix) noexcept {
     Log::get().note(
         "%s mode=%s compose=%llu decode(agree/near/disagree)=%llu/%llu/%llu "
         "recompute(faults/skips)=%llu/%llu events(watched/acted/not-validated)=%llu/%llu/%llu "
-        "validated=%s h3(match/mismatch)=%llu/%llu pushes=%llu latch=%llu acted-frames=%llu",
+        "validated=%s h3(<1cm/<10cm/<1m/>=1m/none)=%llu/%llu/%llu/%llu/%llu pushes=%llu latch=%llu "
+        "acted-frames=%llu act-guard-refused=%llu",
         prefix, modeName(mode),
         (unsigned long long)g_composeCalls.load(std::memory_order_relaxed),
         (unsigned long long)g_decodeAgree.load(std::memory_order_relaxed),
@@ -446,17 +600,21 @@ void reportLine(const char* prefix) noexcept {
         (unsigned long long)g_eventsActed.load(std::memory_order_relaxed),
         (unsigned long long)g_eventsNotValidated.load(std::memory_order_relaxed),
         currentlyValidated() ? "yes" : "no",
-        (unsigned long long)g_h3Match.load(std::memory_order_relaxed),
-        (unsigned long long)g_h3Mismatch.load(std::memory_order_relaxed),
+        (unsigned long long)g_h3Under1Cm.load(std::memory_order_relaxed),
+        (unsigned long long)g_h3Under10Cm.load(std::memory_order_relaxed),
+        (unsigned long long)g_h3Under1M.load(std::memory_order_relaxed),
+        (unsigned long long)g_h3OneMPlus.load(std::memory_order_relaxed),
+        (unsigned long long)g_h3NoObservation.load(std::memory_order_relaxed),
         (unsigned long long)g_pushes.load(std::memory_order_relaxed),
         (unsigned long long)g_latchCalls.load(std::memory_order_relaxed),
-        (unsigned long long)g_actedFrames.load(std::memory_order_relaxed));
+        (unsigned long long)g_actedFrames.load(std::memory_order_relaxed),
+        (unsigned long long)g_actGuardRefusals.load(std::memory_order_relaxed));
 }
 
 // Touched only from the frame boundary (vscreen.cpp, one thread), so a plain
 // snapshot-and-compare needs no lock of its own.
 uint64_t g_lastReportTickMs = 0;
-uint64_t g_lastReportBits[14] = {};
+uint64_t g_lastReportBits[18] = {};
 
 uint64_t reportBit(uint32_t i) noexcept {
     switch (i) {
@@ -469,11 +627,15 @@ uint64_t reportBit(uint32_t i) noexcept {
     case 6: return g_eventsWatched.load(std::memory_order_relaxed);
     case 7: return g_eventsActed.load(std::memory_order_relaxed);
     case 8: return g_eventsNotValidated.load(std::memory_order_relaxed);
-    case 9: return g_h3Match.load(std::memory_order_relaxed);
-    case 10: return g_h3Mismatch.load(std::memory_order_relaxed);
-    case 11: return g_pushes.load(std::memory_order_relaxed);
-    case 12: return g_latchCalls.load(std::memory_order_relaxed);
-    default: return g_actedFrames.load(std::memory_order_relaxed);
+    case 9: return g_h3Under1Cm.load(std::memory_order_relaxed);
+    case 10: return g_h3Under10Cm.load(std::memory_order_relaxed);
+    case 11: return g_h3Under1M.load(std::memory_order_relaxed);
+    case 12: return g_h3OneMPlus.load(std::memory_order_relaxed);
+    case 13: return g_h3NoObservation.load(std::memory_order_relaxed);
+    case 14: return g_pushes.load(std::memory_order_relaxed);
+    case 15: return g_latchCalls.load(std::memory_order_relaxed);
+    case 16: return g_actedFrames.load(std::memory_order_relaxed);
+    default: return g_actGuardRefusals.load(std::memory_order_relaxed);
     }
 }
 
@@ -482,7 +644,7 @@ void maybeReportPeriodic() noexcept {
     if (now - g_lastReportTickMs < 20000) return;
     g_lastReportTickMs = now;
     bool moved = false;
-    for (uint32_t i = 0; i < 14; ++i) {
+    for (uint32_t i = 0; i < 18; ++i) {
         const uint64_t v = reportBit(i);
         if (v != g_lastReportBits[i]) { moved = true; g_lastReportBits[i] = v; }
     }
@@ -629,15 +791,42 @@ double* __fastcall decodeObserved(uintptr_t parent, double* out) noexcept {
                     (unsigned long long)parent, idx, (unsigned long long)count,
                     cachedT[0], cachedT[1], cachedT[2], recomputeT[0], recomputeT[1], recomputeT[2],
                     delta.dt, delta.dr);
-                requestDump("our own event", frame, kOwnEventDumpDeferFrames);
+                requestDump("our own event", frame, kAutoDumpDeferFrames, /*wholeRing=*/false);
             }
-            actedThisCall = g_eventTracker.treatment() == tfp::Treatment::Act;
+
+            // Finding 1 (2026-09-23 review): the event latch above decides
+            // only the EVENT's treatment, so every call inside it reads the
+            // same watched/acted answer -- but THIS call still needs its
+            // own parent's guard verdict and the session cap, checked fresh
+            // here rather than only once at the event's first disagreement.
+            // Both can change mid-event: a different, badly-behaved parent
+            // disagreeing under the same acted event; the cap being reached
+            // by other acted frames since the event opened.
+            const bool capReachedNow =
+                tfp::sessionCapReached(g_actedFrames.load(std::memory_order_relaxed), kSessionActCap);
+            actedThisCall = tfp::callMayAct(g_eventTracker.treatment(), guardVerdict.eligible, capReachedNow);
+            if (g_eventTracker.treatment() == tfp::Treatment::Act && !guardVerdict.eligible) {
+                g_actGuardRefusals.fetch_add(1, std::memory_order_relaxed);
+                if (g_lastGuardRefusalEvent != eventNumber) {
+                    g_lastGuardRefusalEvent = eventNumber;
+                    Log::get().note(
+                        "transition flash prevent: event %u frame %u -- a call was refused by its "
+                        "own parent guard although this event is acted (parent=0x%llX not in good "
+                        "standing right now) -- other parents in this event may still act. Logged "
+                        "once per event; the periodic line counts every refusal.",
+                        eventNumber, frame, (unsigned long long)parent);
+                }
+            }
+            if (actedThisCall && tfp::isNewActedFrame(frame, g_lastActedFrame, g_hasActedFrame)) {
+                g_lastActedFrame = frame;
+                g_hasActedFrame = true;
+                g_actedFrames.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
     if (actedThisCall) {
         std::memcpy(out, rc, 16 * sizeof(double));
-        g_actedFrames.fetch_add(1, std::memory_order_relaxed);
     }
 
     RingEntry e{};
@@ -679,6 +868,10 @@ void __fastcall pushObserved(uintptr_t target, double* pose) noexcept {
         g_lastPushed.target = target;
         g_lastPushed.t[0] = pose[12]; g_lastPushed.t[1] = pose[13]; g_lastPushed.t[2] = pose[14];
         if (eventFrame) { g_lastPushed.stack = stack; g_lastPushed.hasStack = true; }
+        // Finding 2: keep the last 4, not just the one -- H3 compares
+        // against all of them, since the sim can run a frame ahead of the
+        // render thread and a single "last" push then never matches.
+        g_recentPushes.push(g_lastPushed.t);
     }
     if (eventFrame && stack.gameFrames > 0) {
         Log::get().note("transition flash prevent: push at frame %u came through %s",
@@ -713,6 +906,21 @@ uintptr_t __fastcall latchObserved(uintptr_t mgr, uintptr_t item) noexcept {
 
 // --- Install -------------------------------------------------------------
 void doInstall(tfp::Mode mode) noexcept {
+    // Finding 5: allocated once, here at arm time, rather than a static
+    // array -- and FIRST, before the identity check below can bail out,
+    // because H3 and the detector-verdict notes keep recording into the
+    // ring off nothing but g_armed even when identity fails and the four
+    // hooks never install.
+    RingEntry* const ring = new (std::nothrow) RingEntry[kRingCapacity];
+    g_ring.store(ring, std::memory_order_release);
+    if (!ring) {
+        Log::get().note(
+            "transition flash prevent: could not allocate the %u-entry ring (%zu bytes) -- dumps "
+            "and the ring-backed history are unavailable this session; counters and the periodic "
+            "line still work.",
+            kRingCapacity, sizeof(RingEntry) * size_t(kRingCapacity));
+    }
+
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* why = nullptr;
     if (!base || !checkIdentity(base, &why)) {
@@ -750,6 +958,37 @@ void doInstall(tfp::Mode mode) noexcept {
         kRingCapacity, kSessionActCap, kRecomputeBudgetPerFrame);
 }
 
+// Finding 2: finalises whatever transitionFlashPreventNoteH3 folded into
+// g_h3Accum since the last call here into ONE ring entry and ONE bucket
+// count for the frame that just finished, then resets the accumulator for
+// the next one. Called only from transitionFlashPreventFrameBoundary, which
+// -- like this function, and like every NoteH3 call that fed it -- only
+// ever runs on the render thread, so g_h3Accum needs no lock of its own
+// (only the brief copy of g_recentPushes in NoteH3 does, since pushes come
+// from job threads).
+void finalizeH3Frame(uint32_t frameNo) noexcept {
+    const tfp::H3Bucket bucket =
+        tfp::classifyH3Frame(g_h3Accum.hasObservation, g_h3Accum.hasComparison, g_h3Accum.minDist);
+    switch (bucket) {
+    case tfp::H3Bucket::Under1Cm: g_h3Under1Cm.fetch_add(1, std::memory_order_relaxed); break;
+    case tfp::H3Bucket::Under10Cm: g_h3Under10Cm.fetch_add(1, std::memory_order_relaxed); break;
+    case tfp::H3Bucket::Under1M: g_h3Under1M.fetch_add(1, std::memory_order_relaxed); break;
+    case tfp::H3Bucket::OneMPlus: g_h3OneMPlus.fetch_add(1, std::memory_order_relaxed); break;
+    case tfp::H3Bucket::NoObservation: g_h3NoObservation.fetch_add(1, std::memory_order_relaxed); break;
+    }
+    if (g_h3Accum.hasObservation) {
+        RingEntry e{};
+        e.frame = frameNo; e.threadId = GetCurrentThreadId(); e.kind = RingKind::H3;
+        e.site = static_cast<uint8_t>(g_h3Accum.bestSlot);
+        e.cls = uint8_t(bucket);
+        e.a[0] = g_h3Accum.bestPos[0]; e.a[1] = g_h3Accum.bestPos[1]; e.a[2] = g_h3Accum.bestPos[2];
+        e.b[0] = g_h3Accum.bestPushPos[0]; e.b[1] = g_h3Accum.bestPushPos[1]; e.b[2] = g_h3Accum.bestPushPos[2];
+        e.dt = g_h3Accum.minDist;
+        pushRing(e);
+    }
+    g_h3Accum = H3Accum{};
+}
+
 }  // namespace
 
 // --- Public API ------------------------------------------------------------
@@ -780,6 +1019,15 @@ void transitionFlashPreventConfigure(Config& cfg) {
 }
 
 void transitionFlashPreventFrameBoundary(uint32_t frameNo) {
+    // Finding 2: finalise the frame that just ended's H3 accumulator before
+    // publishing the new frame number -- gated exactly like NoteH3 itself
+    // (armed and not off) so a session with the fix off does not spend the
+    // periodic line's "no observation" bucket counting frames that were
+    // never fed anything.
+    if (g_armed.load(std::memory_order_relaxed) &&
+        g_mode.load(std::memory_order_relaxed) != uint8_t(tfp::Mode::Off)) {
+        finalizeH3Frame(frameNo);
+    }
     g_frame.store(frameNo, std::memory_order_relaxed);
     if (!g_armed.load(std::memory_order_relaxed)) return;
     serviceDump(frameNo);
@@ -789,32 +1037,45 @@ void transitionFlashPreventFrameBoundary(uint32_t frameNo) {
 void transitionFlashPreventNoteH3(uint32_t frame, const float pos[3]) {
     if (!g_armed.load(std::memory_order_relaxed)) return;
     if (g_mode.load(std::memory_order_relaxed) == uint8_t(tfp::Mode::Off)) return;
-    LastPushed snap;
+    // Finding 2 (2026-09-23 review): glitchFrameObserve calls this for
+    // EVERY observed 5376-byte constant buffer, not just the eye camera's,
+    // so one frame can bring many calls here. Each folds into the running
+    // per-frame accumulator (g_h3Accum); transitionFlashPreventFrameBoundary
+    // finalises it into one bucket count and one ring entry per frame, so
+    // `frame` itself is not needed here -- the eventual ring entry is
+    // stamped with whatever frame number the boundary call finalises it
+    // with, the same convention every other ring entry in this file follows.
+    (void)frame;
+    g_h3Accum.hasObservation = true;
+
+    tfp::RecentPushes snap;
     {
         std::lock_guard<std::mutex> lock(g_pushMutex);
-        snap = g_lastPushed;
+        snap = g_recentPushes;
     }
-    if (!snap.valid) return;
-    const double dx = double(pos[0]) - snap.t[0];
-    const double dy = double(pos[1]) - snap.t[1];
-    const double dz = double(pos[2]) - snap.t[2];
-    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (dist < 0.01) g_h3Match.fetch_add(1, std::memory_order_relaxed);
-    else g_h3Mismatch.fetch_add(1, std::memory_order_relaxed);
+    if (!snap.hasAny()) return;  // nothing pushed yet this session: no comparison to fold in
 
-    RingEntry e{};
-    e.frame = frame; e.threadId = GetCurrentThreadId(); e.kind = RingKind::H3;
-    e.a[0] = pos[0]; e.a[1] = pos[1]; e.a[2] = pos[2];
-    e.b[0] = snap.t[0]; e.b[1] = snap.t[1]; e.b[2] = snap.t[2];
-    e.dt = dist;
-    pushRing(e);
+    uint32_t slot = 0;
+    const double dist = snap.minDistance(pos, &slot);
+    if (tfp::isNewH3Best(g_h3Accum.hasComparison, g_h3Accum.minDist, dist)) {
+        g_h3Accum.minDist = dist;
+        g_h3Accum.bestSlot = slot;
+        g_h3Accum.bestPos[0] = pos[0]; g_h3Accum.bestPos[1] = pos[1]; g_h3Accum.bestPos[2] = pos[2];
+        snap.translationAt(slot, g_h3Accum.bestPushPos);
+    }
+    g_h3Accum.hasComparison = true;
 }
 
 void transitionFlashPreventNoteDetectorVerdict(uint32_t frame, uint8_t verdict, bool withheldClass) {
     (void)verdict;
     if (!g_armed.load(std::memory_order_relaxed)) return;
     if (!withheldClass) return;
-    requestDump("the transition-flash detector's verdict", frame, 0);
+    // Finding 4: used to dump immediately (defer 0), which lost frames
+    // N+1.. and, whenever this landed on the same frame as our own event's
+    // trigger, dropped that dump outright (one-pending-slot, no merging).
+    // Now it folds into the shared window like our own event's trigger does.
+    requestDump("the transition-flash detector's verdict", frame, kAutoDumpDeferFrames,
+               /*wholeRing=*/false);
 }
 
 void transitionFlashPreventDumpRing(const char* trigger) {
@@ -825,7 +1086,12 @@ void transitionFlashPreventDumpRing(const char* trigger) {
             trigger ? trigger : "?");
         return;
     }
-    requestDump(trigger ? trigger : "a key you pressed", g_frame.load(std::memory_order_relaxed), 0);
+    // Finding 4: different from the two automatic triggers above -- the
+    // user presses this a second or two AFTER seeing a flash, so the
+    // capture worth having is the WHOLE ring (everything still held), not a
+    // window around the press itself.
+    requestDump(trigger ? trigger : "a key you pressed", g_frame.load(std::memory_order_relaxed), 0,
+               /*wholeRing=*/true);
 }
 
 void transitionFlashPreventShutdown() {

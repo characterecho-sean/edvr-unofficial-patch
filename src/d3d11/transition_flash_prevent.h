@@ -51,10 +51,15 @@ void transitionFlashPreventFrameBoundary(uint32_t frameNo);
 
 // H3 (design doc): glitch_frame.cpp's glitchFrameObserve already reads the
 // scene camera each frame (cb1[275], the float b1 buffer) to feed the
-// transition-flash DETECTOR; this reports the same read so it can be
-// compared, in float precision, against the last pose this file's push
-// hook (FUN_143d0cf10) recorded. `pos` is the three floats already read
-// from the constant buffer at the configured offset.
+// transition-flash DETECTOR, for EVERY observed 5376-byte constant buffer
+// (every pass, not just the eye camera) -- this reports the same read so it
+// can be compared, in float precision, against the last 4 poses this file's
+// push hook (FUN_143d0cf10) recorded, so a pipelined push (the sim can run a
+// frame ahead of the render thread) still has something to match. Each call
+// folds into a running per-frame minimum; transitionFlashPreventFrameBoundary
+// finalises the frame that just ended into one bucket count and one ring
+// entry. `pos` is the three floats already read from the constant buffer at
+// the configured offset.
 void transitionFlashPreventNoteH3(uint32_t frame, const float pos[3]);
 
 // The existing transition-flash DETECTOR's per-frame verdict
@@ -72,7 +77,11 @@ void transitionFlashPreventNoteDetectorVerdict(uint32_t frame, uint8_t verdict, 
 // The camera history key (device_hook.cpp's dumpCameraRing call sites,
 // bound to Pause by default): dumps this file's own ring in the same
 // gesture as the camera history dump, so both rings describe the same
-// keypress.
+// keypress. Unlike the two automatic triggers (our own event,
+// transitionFlashPreventNoteDetectorVerdict), which each dump a window
+// around the moment they fired, this one dumps the WHOLE ring -- everything
+// still held -- because the player presses it a second or two AFTER seeing
+// a flash, so the useful capture is not centred on the press itself.
 void transitionFlashPreventDumpRing(const char* trigger);
 
 // Final session summary. Mirrors shutdownGlitchFrameFix's call site
