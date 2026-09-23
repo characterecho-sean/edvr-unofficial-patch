@@ -611,6 +611,17 @@ constexpr int kRegionCount = static_cast<int>(Region::Count);
 const char* const kRegionNames[kRegionCount] = {
     "prep", "reduce", "periphery", "centre", "full", "compose", "ui"
 };
+// Prep's own parts, on the full-frame path (the engine-motion re-fly of
+// 2026-09-23, log 093817: "prep" read ~3 ms a stereo pair in the cockpit
+// with fix.engine_motion on against ~0.2 in menus and on foot, and one
+// region cannot say which of its dispatches that is). The colour copies,
+// the kinematic coverage pass and the motion-vector dispatch, timed the same
+// way and printed INSIDE prep's figure: they are parts of prep, so "other",
+// the seven exported medians and the F8 line are unchanged. The rest of
+// prep (the constants, the masks' lookups) is prep less the three.
+enum class PrepPart { Copy = 0, Coverage, Mv, Count };
+constexpr int kPrepParts = static_cast<int>(PrepPart::Count);
+const char* const kPrepPartNames[kPrepParts] = {"copy", "coverage", "mv"};
 
 // Which path this eye's call is routed through, decided once per call
 // (temporalInner, alongside foveaMode) before either branch below runs, so
@@ -653,6 +664,12 @@ struct Slot {
     bool          regionEnded[kRegionCount] = {};
     bool          regionDone[kRegionCount] = {};
     double        regionMs[kRegionCount] = {};
+    // Prep's parts, the same bookkeeping (PrepPart above).
+    GpuTimer      partTimer[kPrepParts];
+    bool          partTiming[kPrepParts] = {};
+    bool          partEnded[kPrepParts] = {};
+    bool          partDone[kPrepParts] = {};
+    double        partMs[kPrepParts] = {};
     bool          regionsDone = false;
     // The total timer's own polled milliseconds, retained here (the poll
     // loop otherwise only folds it into the pooled globals below) so the
@@ -680,6 +697,7 @@ uint32_t g_configGeneration = 0;
 void releaseSlot(Slot& q) {
     q.timer.reset();
     for (auto& t : q.regionTimer) t.reset();
+    for (auto& t : q.partTimer) t.reset();
     if (q.staging) { q.staging->Release(); q.staging = nullptr; }
     q = Slot{};
 }
@@ -727,6 +745,27 @@ void endRegion(int qs, Region r, ID3D11DeviceContext* ctx) {
     q.regionEnded[i] = true;
 }
 
+// A part of prep: the same lease rule as a region (only inside a call the
+// total timer leased, a refused lease dropped and counted with the regions').
+void beginPart(int qs, PrepPart part, ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (qs < 0 || !g_slots[qs].timing) return;
+    const int i = static_cast<int>(part);
+    Slot& q = g_slots[qs];
+    q.partTiming[i] = q.partTimer[i].begin(dev, ctx);
+    if (!q.partTiming[i]) ++g_regionBeginFailed;
+}
+
+void endPart(int qs, PrepPart part, ID3D11DeviceContext* ctx) {
+    if (qs < 0) return;
+    const int i = static_cast<int>(part);
+    Slot& q = g_slots[qs];
+    if (q.partTiming[i] && !q.partTimer[i].end(ctx)) {
+        q.partTimer[i].reset(ctx);
+        q.partTiming[i] = false;
+    }
+    q.partEnded[i] = true;
+}
+
 // The window a price sample falls into: it closes (docs/foveated-dlss-
 // design-2026-09-14.md Stage 0) on a treatment change, an output size or
 // format change, or an NGX feature recreation. This build's feature
@@ -755,6 +794,7 @@ bool      g_windowKeyValid = false;
 int       g_windowCount = 0;
 double    g_windowTotal[kWindowPairs];
 double    g_windowRegion[kRegionCount][kWindowPairs];
+double    g_windowPart[kPrepParts][kWindowPairs];   // prep's parts, per pair (PrepPart)
 
 // The most recently CLOSED window's per-region median/p95, for the F8
 // line's live figures; kept even while the next window is still filling.
@@ -875,7 +915,15 @@ void flushWindow(const char* reason) {
     for (int k = 0; k < n; ++k) scratch[k] = otherScratch[k];
     const double otherMed = windowPercentile(scratch, n, 0.5);
 
-    char line[1100];
+    double partMed[kPrepParts] = {}, partP95[kPrepParts] = {};
+    for (int pi = 0; pi < kPrepParts; ++pi) {
+        for (int k = 0; k < n; ++k) scratch[k] = g_windowPart[pi][k];
+        partP95[pi] = windowPercentile(scratch, n, 0.95);
+        for (int k = 0; k < n; ++k) scratch[k] = g_windowPart[pi][k];
+        partMed[pi] = windowPercentile(scratch, n, 0.5);
+    }
+
+    char line[1200];
     int len = snprintf(line, sizeof(line),
         "temporal aa price: %s, %ux%u, %d stereo pairs (%s), ms per pair "
         "median/p95:",
@@ -885,6 +933,14 @@ void flushWindow(const char* reason) {
     for (int ri = 0; ri < kRegionCount && len > 0 && len < static_cast<int>(sizeof(line)); ++ri) {
         len += snprintf(line + len, sizeof(line) - len, " %s %.2f/%.2f",
                         kRegionNames[ri], regionMed[ri], regionP95[ri]);
+        // Prep's parts inside its own figure (PrepPart): on the paths that
+        // time them; zeros where a part did not run (the own path, a
+        // coverage pass that stood down).
+        if (ri == static_cast<int>(Region::Prep) && len > 0 && len < static_cast<int>(sizeof(line))) {
+            len += snprintf(line + len, sizeof(line) - len, " (%s %.2f/%.2f %s %.2f/%.2f %s %.2f/%.2f)",
+                            kPrepPartNames[0], partMed[0], partP95[0], kPrepPartNames[1], partMed[1], partP95[1],
+                            kPrepPartNames[2], partMed[2], partP95[2]);
+        }
     }
     if (len > 0 && len < static_cast<int>(sizeof(line))) {
         len += snprintf(line + len, sizeof(line) - len, " other %.2f/%.2f", otherMed, otherP95);
@@ -949,7 +1005,8 @@ void flushWindow(const char* reason) {
 // Folds one resolved stereo pair (both eyes' totals and region prices,
 // already summed) into the current window, opening or closing a window as
 // the key requires.
-void accumulateWindow(const WindowKey& key, double totalSum, const double regionSum[kRegionCount]) {
+void accumulateWindow(const WindowKey& key, double totalSum, const double regionSum[kRegionCount],
+                      const double partSum[kPrepParts]) {
     if (!g_windowKeyValid || key != g_windowKey) {
         if (g_windowKeyValid) flushWindow("window closed");
         g_windowKey = key;
@@ -959,6 +1016,7 @@ void accumulateWindow(const WindowKey& key, double totalSum, const double region
     if (g_windowCount < kWindowPairs) {
         g_windowTotal[g_windowCount] = totalSum;
         for (int ri = 0; ri < kRegionCount; ++ri) g_windowRegion[ri][g_windowCount] = regionSum[ri];
+        for (int pi = 0; pi < kPrepParts; ++pi) g_windowPart[pi][g_windowCount] = partSum[pi];
         ++g_windowCount;
     }
     if (g_windowCount >= kWindowPairs) flushWindow("600 pairs");
@@ -979,6 +1037,7 @@ struct PendingPair {
     bool      valid[2] = {false, false};
     double    totalMs[2] = {0.0, 0.0};
     double    regionMs[2][kRegionCount] = {};
+    double    partMs[2][kPrepParts] = {};
     WindowKey key[2];
 };
 constexpr int kPendingCap = 8;
@@ -995,7 +1054,9 @@ void finalizePending(PendingPair& p) {
             double totalSum = p.totalMs[0] + p.totalMs[1];
             double regionSum[kRegionCount] = {};
             for (int ri = 0; ri < kRegionCount; ++ri) regionSum[ri] = p.regionMs[0][ri] + p.regionMs[1][ri];
-            accumulateWindow(p.key[0], totalSum, regionSum);
+            double partSum[kPrepParts] = {};
+            for (int pi = 0; pi < kPrepParts; ++pi) partSum[pi] = p.partMs[0][pi] + p.partMs[1][pi];
+            accumulateWindow(p.key[0], totalSum, regionSum, partSum);
         } else {
             ++g_droppedUnmeasured;
         }
@@ -1031,6 +1092,7 @@ void priceSlot(const Slot& q) {
     p.valid[q.eye] = q.totalValid;
     p.totalMs[q.eye] = q.totalMs;
     for (int ri = 0; ri < kRegionCount; ++ri) p.regionMs[q.eye][ri] = q.regionMs[ri];
+    for (int pi = 0; pi < kPrepParts; ++pi) p.partMs[q.eye][pi] = q.partMs[pi];
     p.key[q.eye] = key;
     if (p.have[0] && p.have[1]) finalizePending(p);
 }
@@ -1269,6 +1331,19 @@ void pollSlots(ID3D11DeviceContext* ctx) {
             else if (rstatus == GpuTimerPoll::Invalid) q.regionDone[ri] = true;
             if (!q.regionDone[ri]) regionsDone = false;
         }
+        // Prep's parts, the same way.
+        for (int pi = 0; pi < kPrepParts; ++pi) {
+            if (q.partDone[pi]) continue;
+            if (!q.partEnded[pi] || !q.partTiming[pi]) {
+                q.partDone[pi] = true;
+                continue;
+            }
+            double pms = 0.0;
+            const auto pstatus = q.partTimer[pi].poll(ctx, pms);
+            if (pstatus == GpuTimerPoll::Ready) { q.partMs[pi] = pms; q.partDone[pi] = true; }
+            else if (pstatus == GpuTimerPoll::Invalid) q.partDone[pi] = true;
+            if (!q.partDone[pi]) regionsDone = false;
+        }
         q.regionsDone = regionsDone;
         if (q.timeDone && q.regionsDone && !q.priced) {
             q.priced = true;
@@ -1394,6 +1469,8 @@ uint32_t                   g_kinSphereCount = 0;
 uint64_t                   g_kinEmptyFrames = 0;   // active frames with an empty upload (stand-down count)
 bool                       g_kinEmptyNoted = false;
 bool                       g_kinNoCamNoted = false;   // finding-1 stand-down, once
+uint64_t                   g_kinSkippedFrames = 0; // eye calls it did not run: nothing reads the pair
+bool                       g_kinSkippedNoted = false;
 // fix.engine_motion_veto (off): ownership alone paints the movers-view cyan;
 // the compose veto waits on the mask's flight validation (2026-09-20 review).
 bool                       g_engineMotionVeto = false;
@@ -3238,10 +3315,38 @@ void releaseKc(EyeState& e) {
     e.kcPaintFrame = 0;
 }
 
+// The pair has three readers: the compose veto (fix.engine_motion_veto, off
+// by default), the movers debug view's cyan (advanced.temporal_aa_debug =
+// movers) and the eye run's dump (KCNear/KCFar). With none of them it paints
+// for nobody -- and it is not cheap: one thread per proven-static sphere walks
+// that sphere's whole quarter-res rectangle with two atomics a texel, so a
+// handful of spheres just in front of the eye (the ship's own records) keep
+// one wave busy for milliseconds. Flights 065324 and 093817: "prep" read 3-8
+// ms a stereo pair whenever the tracker published spheres with the scene's
+// depth in hand, and 0.13-0.22 whenever it did not -- in 065324 with the
+// engine-motion views never given at all, so the per-pixel engine path was
+// not what cost it.
+bool kinematicCoverageWanted() {
+    return g_engineMotionVeto || g_debugMode == 4 || g_eyeRunLeft > 0 || g_eyeRunReady;
+}
+
 bool kinematicCoveragePass(ID3D11DeviceContext* ctx, ID3D11Device* dev, EyeState& e,
                            const PassParams& p, uint32_t w, uint32_t h) {
     if (!kinematicMotionActive()) return false;
     if (p.knobs[1] == 0.0f) return false;   // no scene depth bound: nothing to gate with
+    if (!kinematicCoverageWanted()) {
+        ++g_kinSkippedFrames;
+        if (!g_kinSkippedNoted) {
+            g_kinSkippedNoted = true;
+            Log::get().note("engine motion coverage: not run -- nothing reads the coverage pair "
+                            "(fix.engine_motion_veto off, no movers view, no eye run), and it cost "
+                            "~3 ms a stereo pair in the cockpit (flight 093817's prep). The veto or "
+                            "the movers view runs it again; the price line's prep parts time it "
+                            "(coverage).");
+        }
+        return false;
+    }
+    g_kinSkippedNoted = false;
     // The camera rows come from the frame's chosen set, not p.wR0..2: those
     // are filled only by the body/ship motion paths, and a zero camera reads
     // every sphere as straddling the eye -- a full-eye paint and a veto on
@@ -5212,6 +5317,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 slot.regionDone[ri] = false;
                 slot.regionMs[ri] = 0.0;
             }
+            for (int pi = 0; pi < kPrepParts; ++pi) {
+                slot.partTiming[pi] = false;
+                slot.partEnded[pi] = false;
+                slot.partDone[pi] = false;
+                slot.partMs[pi] = 0.0;
+            }
         }
         const UINT zeros[4] = {0, 0, 0, 0};
         if (statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
@@ -5898,6 +6009,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // "prep": the colour copy and the motion-vector dispatch
                     // below, NVIDIA's inputs.
                     beginRegion(qs, Region::Prep, dev, ctx);
+                    beginPart(qs, PrepPart::Copy, dev, ctx);
                     if (viaCopy) {
                         D3D11_BOX full{};
                         full.left = region[0];
@@ -5922,6 +6034,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // The eye run's raw frame (g_eyeRawStaging says why).
                     if (eye == 0 && g_eyeRunLeft > 0) captureEyeRunRaw(ctx, e.dlColour);
                     if(deferredInput){Microsoft::WRL::ComPtr<ID3D11Resource> clean;deferredInput->GetResource(&clean);ctx->CopyResource(e.dlColour,clean.Get());}
+                    endPart(qs, PrepPart::Copy, ctx);
                     // The motion vectors and the depth copy -- and, with the
                     // mover mask on, last frame's depth read at t3 and the
                     // mask written at u5 (tier 1, docs/per-object-motion.md).
@@ -5989,7 +6102,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Stage B: rebuild this eye's kinematic ownership coverage
                     // off the tracker's current upload; bound = bit 512 and the
                     // t19/t20 pair below, clear = the stock path, byte-identical.
+                    // Only where something reads it (kinematicCoverageWanted).
+                    beginPart(qs, PrepPart::Coverage, dev, ctx);
                     const bool kcBound = kinematicCoveragePass(ctx, dev, e, p, w, h);
+                    endPart(qs, PrepPart::Coverage, ctx);
                     if (kcBound) p.probe[3] =
                         static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
                     // The compose veto itself waits on fix.engine_motion_veto
@@ -6046,7 +6162,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, engineBound ? 3 : 1, cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
+                    beginPart(qs, PrepPart::Mv, dev, ctx);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                    endPart(qs, PrepPart::Mv, ctx);
                     if (engineBound) {
                         ctx->CSSetConstantBuffers(1, 2, savedCbM);
                         for (auto* b : savedCbM) if (b) b->Release();

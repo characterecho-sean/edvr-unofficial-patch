@@ -12,6 +12,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/timing.h"
+#include "binding_shadow.h"
 #include "shader_swap.h"
 #include "temporal_pass.h"
 
@@ -116,6 +117,101 @@ uint64_t g_boundaryLastMs = 0;
 bool     g_stagingAtBoundary = false;
 uint32_t g_frameNo = 0;
 constexpr uint32_t kReleaseAfterFrames = 120;
+
+// THE LAYOUT CENSUS (2026-09-23, the on-foot walk of flight 093817: the
+// scene's depth "went away" for the whole walk while target #23, 3840x2160,
+// took 5505 draws a frame with no eye-sized colour target beside it). When
+// the frame's busiest depth target is like that -- more than a thousand
+// draws, none of them beside an eye-sized colour target -- its draws'
+// viewports and scissors are sampled (the first draw of the frame and every
+// 1024th), with the colour target bound beside it, and the eye-sized
+// targets' draws meanwhile are counted by shader. The line says whether that
+// target is one view or several packed ones, and what paints the eyes: a
+// packed per-eye layout would show two viewports; one full viewport and a
+// single full-screen draw per eye is a flat picture shown on a panel. No
+// line at all means the census never saw such a target.
+constexpr uint32_t kLayoutMinDraws = 1000;
+constexpr int kLayoutKeep = 4;
+struct LayoutRect { int32_t x = 0, y = 0; int32_t w = 0, h = 0; uint32_t count = 0; };
+struct LayoutShader { uint64_t vs = 0, ps = 0; uint32_t count = 0; };
+int          g_layoutTarget = -1;          // the target sampled this frame, -1 none
+uint32_t     g_layoutSamples = 0;          // samples since the last census line
+LayoutRect   g_layoutViewports[kLayoutKeep];
+LayoutRect   g_layoutScissors[kLayoutKeep];
+uint32_t     g_layoutViewportOther = 0, g_layoutScissorOther = 0;
+uint32_t     g_layoutColourW = 0, g_layoutColourH = 0;
+DXGI_FORMAT  g_layoutColourFmt = DXGI_FORMAT_UNKNOWN;
+bool         g_layoutColourSeen = false, g_layoutColourNone = false;
+LayoutShader g_layoutEyeShaders[kLayoutKeep];
+uint32_t     g_layoutEyeShaderOther = 0, g_layoutEyeDraws = 0, g_layoutFrames = 0;
+
+void layoutKeepRect(LayoutRect* rects, uint32_t& other, int32_t x, int32_t y, int32_t w, int32_t h) {
+    for (int i = 0; i < kLayoutKeep; ++i) {
+        LayoutRect& r = rects[i];
+        if (r.count && r.x == x && r.y == y && r.w == w && r.h == h) { ++r.count; return; }
+        if (!r.count) { r = LayoutRect{x, y, w, h, 1}; return; }
+    }
+    ++other;
+}
+
+void layoutSample(ID3D11DeviceContext* ctx, bool firstOfFrame) {
+    ++g_layoutSamples;
+    D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    UINT n = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ctx->RSGetViewports(&n, vp);
+    for (UINT i = 0; i < n; ++i)
+        layoutKeepRect(g_layoutViewports, g_layoutViewportOther, static_cast<int32_t>(vp[i].TopLeftX),
+                       static_cast<int32_t>(vp[i].TopLeftY), static_cast<int32_t>(vp[i].Width),
+                       static_cast<int32_t>(vp[i].Height));
+    D3D11_RECT sc[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    UINT m = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ctx->RSGetScissorRects(&m, sc);
+    for (UINT i = 0; i < m; ++i)
+        layoutKeepRect(g_layoutScissors, g_layoutScissorOther, sc[i].left, sc[i].top, sc[i].right - sc[i].left,
+                       sc[i].bottom - sc[i].top);
+    if (!firstOfFrame) return;
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) { g_layoutColourNone = true; return; }
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    rtv->Release();
+    if (!res) return;
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    res->GetType(&dim);
+    if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC d{};
+        static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+        g_layoutColourW = d.Width;
+        g_layoutColourH = d.Height;
+        g_layoutColourFmt = d.Format;
+        g_layoutColourSeen = true;
+    }
+    res->Release();
+}
+
+void layoutNoteEyeDraw() {
+    ++g_layoutEyeDraws;
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs), ps = bindingShaderHash(BindSlot::Ps);
+    for (int i = 0; i < kLayoutKeep; ++i) {
+        LayoutShader& s = g_layoutEyeShaders[i];
+        if (s.count && s.vs == vs && s.ps == ps) { ++s.count; return; }
+        if (!s.count) { s = LayoutShader{vs, ps, 1}; return; }
+    }
+    ++g_layoutEyeShaderOther;
+}
+
+void layoutReset() {
+    g_layoutSamples = 0;
+    for (auto& r : g_layoutViewports) r = LayoutRect{};
+    for (auto& r : g_layoutScissors) r = LayoutRect{};
+    g_layoutViewportOther = g_layoutScissorOther = 0;
+    g_layoutColourW = g_layoutColourH = 0;
+    g_layoutColourFmt = DXGI_FORMAT_UNKNOWN;
+    g_layoutColourSeen = g_layoutColourNone = false;
+    for (auto& s : g_layoutEyeShaders) s = LayoutShader{};
+    g_layoutEyeShaderOther = g_layoutEyeDraws = g_layoutFrames = 0;
+}
 
 struct ScenePickCache {
     uint32_t w = 0, h = 0;
@@ -460,7 +556,12 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     (void)ctx;
     if (!g_wanted) return;
     ++g_drawsThisFrame;
-    if (rtvEyeSized) ++g_eyeRtvDrawsThisFrame;
+    if (rtvEyeSized) {
+        ++g_eyeRtvDrawsThisFrame;
+        // The layout census: what paints the eyes while a non-eye target is
+        // the busiest (g_layoutTarget, chosen at the frame boundary).
+        if (g_layoutTarget >= 0) layoutNoteEyeDraw();
+    }
     if (!dsv) return;
     ++g_drawsWithDsvThisFrame;
     int idx;
@@ -475,6 +576,8 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     if (idx < 0) return;
     Target& t = g_targets[idx];
     ++t.drawsThisFrame;
+    if (idx == g_layoutTarget && ctx && (t.drawsThisFrame == 1 || (t.drawsThisFrame & 1023u) == 0))
+        layoutSample(ctx, t.drawsThisFrame == 1);
     // The temporal pass's camera latch: the frame's FIRST draw into the
     // scene pair's depth is drawn with the scene camera by construction,
     // whichever eye it is (the first bound is the first rendered). The
@@ -977,6 +1080,20 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 : "No shader-resource bind: v2 would copy it out once per "
                   "eye (CopyResource, same typeless family) before reading.");
     }
+    // The layout census's target for the frame beginning now: the busiest
+    // depth target, when none of its draws had an eye-sized colour target
+    // beside them (THE LAYOUT CENSUS above).
+    {
+        int busiest = -1;
+        for (int i = 0; i < g_targetCount; ++i) {
+            const Target& t = g_targets[i];
+            if (t.dsv && (busiest < 0 || t.drawsLastFrame > g_targets[busiest].drawsLastFrame)) busiest = i;
+        }
+        const bool layout = busiest >= 0 && g_targets[busiest].drawsLastFrame > kLayoutMinDraws &&
+                            g_targets[busiest].eyeRtvDrawsLastFrame == 0;
+        g_layoutTarget = layout ? busiest : -1;
+        if (layout) ++g_layoutFrames;
+    }
     // The census, again every 20 s: the second depth flight showed the
     // scene's draws moving between pairs of targets and dropping to a
     // cockpit-only pass for a minute, which one line at 120 frames could
@@ -1030,6 +1147,52 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 }
             }
             Log::get().note("depth probe: the eye-sized targets: %s.", eyes);
+        }
+        if (g_layoutFrames > 0 && g_layoutSamples > 0) {
+            auto rects = [](const LayoutRect* r, uint32_t other, char* out, size_t cap) {
+                size_t u = 0;
+                out[0] = '\0';
+                for (int i = 0; i < kLayoutKeep && r[i].count && u < cap; ++i) {
+                    const int k = snprintf(out + u, cap - u, "%s(%d,%d) %dx%d x%u", i ? ", " : "", r[i].x, r[i].y,
+                                           r[i].w, r[i].h, r[i].count);
+                    if (k > 0) u += static_cast<size_t>(k);
+                }
+                if (other && u < cap) snprintf(out + u, cap - u, "%s+%u more", u ? ", " : "", other);
+                if (!out[0]) snprintf(out, cap, "none");
+            };
+            char vps[200], scs[200], shaders[400], colour[96];
+            rects(g_layoutViewports, g_layoutViewportOther, vps, sizeof(vps));
+            rects(g_layoutScissors, g_layoutScissorOther, scs, sizeof(scs));
+            size_t u = 0;
+            shaders[0] = '\0';
+            for (int i = 0; i < kLayoutKeep && g_layoutEyeShaders[i].count && u < sizeof(shaders); ++i) {
+                const int k = snprintf(shaders + u, sizeof(shaders) - u, "%svs %016llX ps %016llX x%u", i ? ", " : "",
+                                       static_cast<unsigned long long>(g_layoutEyeShaders[i].vs),
+                                       static_cast<unsigned long long>(g_layoutEyeShaders[i].ps),
+                                       g_layoutEyeShaders[i].count);
+                if (k > 0) u += static_cast<size_t>(k);
+            }
+            if (g_layoutEyeShaderOther && u < sizeof(shaders))
+                snprintf(shaders + u, sizeof(shaders) - u, "%s+%u more", u ? ", " : "", g_layoutEyeShaderOther);
+            if (!shaders[0]) snprintf(shaders, sizeof(shaders), "no draw");
+            if (g_layoutColourSeen)
+                snprintf(colour, sizeof(colour), "%ux%u %s", g_layoutColourW, g_layoutColourH, fmtName(g_layoutColourFmt));
+            else
+                snprintf(colour, sizeof(colour), "%s", g_layoutColourNone ? "none (depth only)" : "not read");
+            char now[96] = "";
+            if (g_layoutTarget >= 0)
+                snprintf(now, sizeof(now), " (now #%d %ux%u, %u draws last frame)", g_layoutTarget,
+                         g_targets[g_layoutTarget].w, g_targets[g_layoutTarget].h,
+                         g_targets[g_layoutTarget].drawsLastFrame);
+            Log::get().note(
+                "depth probe layout: on %u frames the busiest depth target%s had no eye-sized colour target beside "
+                "any of its draws; %u samples of its draws set viewports [%s] and scissors [%s]; the colour target "
+                "beside it: %s; meanwhile the eye-sized targets took %.1f draws a frame, drawn by [%s]. Two viewports "
+                "would be a packed per-eye layout; one full viewport with a full-screen draw per eye is a flat "
+                "picture the eyes show on a panel.",
+                g_layoutFrames, now, g_layoutSamples, vps, scs, colour,
+                static_cast<double>(g_layoutEyeDraws) / static_cast<double>(g_layoutFrames), shaders);
+            layoutReset();
         }
     }
     if (!g_summaryNoted && g_eyeFrames >= 120) {
