@@ -60,9 +60,11 @@ current timing and overlay qualification is linked separately.*
   for gates G1-G14; "Open questions for Sean"; "Phasing" for phases A/B/C.
 - **2026-09-23:** `fix.settlement_detail` added to the Performance page's
   row list below, alongside its promotion to a first-class fix (README,
-  docs/fixes.md). It reaches the running menu and the installer's settings
-  window once edvr.ini's key carries a `# ui:` annotation line -- not yet
-  added, since edvr.ini was out of scope for this pass.
+  docs/fixes.md). The `# ui:` annotation that generates its row for the
+  running menu and the installer's settings window landed with the
+  governor's refinements the same day (`Settlement detail | choices game,
+  auto=Auto, reduced | live | menu performance`); its two [advanced]
+  tuning keys appear only in the developer tier.
 
 *A design document, written before the code. It supersedes and extends
 Feature 4 of [performance.md](performance.md) (2026-09-05), which stays as

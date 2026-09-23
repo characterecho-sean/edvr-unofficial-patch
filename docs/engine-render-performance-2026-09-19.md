@@ -21,7 +21,7 @@
   BUILD, not merged.
 
 * **Levers still open:** the draw count, now via the LOD governor's
-  unflown acting mode; the last ~0.4-0.6 ms of EDVR's own per-draw
+  acting mode (flown once, in refinement); the last ~0.4-0.6 ms of EDVR's own per-draw
   path — the always-on instruments armed-only, plus a fourth round on
   the resource hooks ("Leg C").
 
