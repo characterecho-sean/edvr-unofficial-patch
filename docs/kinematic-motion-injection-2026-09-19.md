@@ -2470,3 +2470,19 @@ off (diagnostic-only ...)`, the movers line reads `(the tracker, diagnostic-only
 and the census line ends `(the census is off ...)`, emit joins unchanged. Never ran: the old
 movers wording with a tracker number and no cost or off line. Rigs: kinematic_motion_test
 case 20 (the cost window), engine_velocity_test P1.
+
+**2. Preparation waits for an eligible draw.** The slot target's create and clear, the pool
+and scene-constant snapshots and the MRT6 bind ran at an eye-frame's first pool family draw,
+before asking whether its pixel shader was keyed and its patch existed; an eye whose family
+draws were all unkeyed paid for all of it and was then handed to the compose, which scanned
+a cleared map. Now `slowPath` resolves the keyed PS and its patches (VS where the family
+needs one) first, prepares only for such a draw, puts the game's state back on a declined
+draw as before, and marks the eye usable (`written`) only when a substituted draw is about
+to be issued -- MRT6 bound alone no longer counts. One consequence: the first eye-frame after
+one with no eligible draw has no last-frame scene constants for that eye and is refused as
+`no previous scene constants`; the next gives. Signature, in the movers line: `eye-frames N,
+with MRT6 bound B (prepared only for an eligible draw: S eye-frames had a pool family draw,
+U a substitution; prepared for nothing P, under the old order Q)` -- P near 0, Q the waste
+removed. Never ran: no parenthesis. Rig: engine_velocity_test P2 (an unkeyed-only eye
+prepares and gives nothing, Q counts it; one accepted draw restores exact coverage the frame
+after).

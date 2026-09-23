@@ -184,7 +184,12 @@ struct Eye {
     uint32_t poolReplaceEpoch = 0, poolAppendEpoch = 0, sceneWriteEpoch = 0;
     bool sceneRowsKnown = false;
     uint8_t sceneRows[kRowsBytes] = {};
-    bool bound = false, written = false, invalid = false, consumed = false;
+    // written: a substituted draw was issued this eye-frame (the views need
+    // it); boundCounted: MRT6's bind counted once per eye-frame.
+    bool bound = false, boundCounted = false, written = false, invalid = false, consumed = false;
+    // The frames this eye last saw a pool family draw and last substituted
+    // (the performance review's item 2 accounting).
+    uint32_t seenFrame = ~0u, substFrame = ~0u;
 };
 // Eyes 0 and 1, and the on-foot source (kEngineVelocitySourceEye): the same
 // eye-frame rules for a pass into the source's depth.
@@ -219,6 +224,9 @@ std::atomic<bool> g_diagnosticsWanted{false};
 struct DrawStats {
     uint64_t slowPaths = 0, slowTicks = 0, quickPaths = 0;
     uint64_t eyeFrames = 0, eyeFramesBound = 0;
+    // Item 2: eye-frames with a pool family draw (the old order prepared all
+    // of these) and with a substitution; eyeFrames above is those prepared.
+    uint64_t eyeFramesSeen = 0, eyeFramesSubstituted = 0;
     uint64_t invalid[kInvalidCount] = {};
     uint64_t poolRefreshed = 0, sceneRowsKept = 0;
     uint64_t targetOccupied = 0, uavBound = 0, bindRejected = 0, depthUnsupported = 0, createFailed = 0;
@@ -694,6 +702,25 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!fam.valid) { restore(ctx); return; }
     Eye& e = g_eyes[eye];
     const uint32_t frame = frameNow();
+    // An eye-frame with a recognised pool family draw: the old order prepared
+    // on this alone (the 2026-09-23 performance review, item 2).
+    if (e.seenFrame != frame) { e.seenFrame = frame; ++g_draw.eyeFramesSeen; }
+    // Eligibility FIRST: a keyed pixel shader whose patch exists, and the
+    // vertex patch where the family needs one. Nothing -- slot target, clear,
+    // snapshot, MRT6 -- is prepared for a draw that cannot export ownership;
+    // a declined draw puts the game's state back, as before.
+    if (!keyedPs(f, psHash)) {
+        if (!anyKeyedPs(psHash)) { ++fam.unkeyedPsDraws; fam.unkeyedPsHash = psHash; }
+        restore(ctx);
+        return;
+    }
+    ID3D11VertexShader* useVs = vs;
+    if (fam.inputs.slotFromVsPatch) {
+        useVs = patchedVsFor(ctx, f, vs);
+        if (!useVs) { restore(ctx); return; }
+    }
+    ID3D11PixelShader* usePs = patchedPsFor(ctx, f, ps);
+    if (!usePs) { restore(ctx); return; }
     const bool newFrame = e.frame != frame;
     Ptr<ID3D11Texture2D> depthTex;
     if (newFrame || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
@@ -707,7 +734,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         ++g_draw.eyeFrames;
         if (sourcePass) ++g_draw.sourceFrames;
         e.frame = frame;
-        e.bound = e.written = e.invalid = e.consumed = false;
+        e.bound = e.boundCounted = e.written = e.invalid = e.consumed = false;
         e.rtvGen = e.dsvGen = 0;
         const float cleared[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
         ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
@@ -721,32 +748,19 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         e.rtvGen = cache.rtv;
         e.dsvGen = cache.dsv;
         e.bound = bindTarget(ctx, e, dsv);
-        if (e.bound && !e.written) {
+        if (e.bound && !e.boundCounted) {
+            e.boundCounted = true;
             ++g_draw.eyeFramesBound;
             if (sourcePass) ++g_draw.sourceFramesBound;
         }
-        e.written = e.written || e.bound;
     }
     if (!e.bound) { restore(ctx); return; }
-    // The substitution.
-    if (!keyedPs(f, psHash)) {
-        if (!anyKeyedPs(psHash)) { ++fam.unkeyedPsDraws; fam.unkeyedPsHash = psHash; }
-        restore(ctx);
-        return;
-    }
     // A draw that will write MRT6 after the eye-frame's first must read what
     // the snapshot holds (the first one's sources ARE the snapshot).
     if (!newFrame) {
         checkSources(ctx, e, eye);
         if (e.invalid) { restore(ctx); return; }
     }
-    ID3D11VertexShader* useVs = vs;
-    if (fam.inputs.slotFromVsPatch) {
-        useVs = patchedVsFor(ctx, f, vs);
-        if (!useVs) { restore(ctx); return; }
-    }
-    ID3D11PixelShader* usePs = patchedPsFor(ctx, f, ps);
-    if (!usePs) { restore(ctx); return; }
     // The blend state MRT6 must not inherit: the derived one, unless it is
     // still bound (the game has not set another since).
     if (!(g_bound.derivedBlend && bindingGeneration(BindSlot::Blend) == g_bound.blendGen)) {
@@ -779,6 +793,10 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     g_anyBound.store(true, std::memory_order_release);
     cache.family = f;
     ++fam.binds;
+    // The eye is usable only now: a draw that exports ownership is about to
+    // be issued (MRT6 bound alone once counted as written).
+    e.written = true;
+    if (e.substFrame != frame) { e.substFrame = frame; ++g_draw.eyeFramesSubstituted; }
     // When substitution starts again after a quiet stretch, for the flight's
     // timeline (boarding, a scene change).
     if (g_lastSubstitution == ~0u || frame - g_lastSubstitution > kResumeFrames) {
@@ -872,7 +890,9 @@ void summaryLocked(uint64_t now) {
     else
         _snprintf_s(trackerText, _TRUNCATE, "(the tracker, diagnostic-only, was off)");
     Log::get().note("engine motion: movers joined %.1f records/frame (moving rig records the emit wrote a previous pose for) "
-                    "%s; eye-frames %llu, with MRT6 bound %llu; invalidated "
+                    "%s; eye-frames %llu, with MRT6 bound %llu (prepared only for an eligible draw: %llu eye-frames "
+                    "had a pool family draw, %llu a substitution; prepared for nothing %llu, under the old order %llu); "
+                    "invalidated "
                     "%llu (%s); kept: scene constants re-mapped with rows 270..275 unchanged %llu, pool appended and "
                     "refreshed %llu; MRT6 refused: target 6 occupied %llu, UAV bound %llu, %s, runtime rejected the set "
                     "%llu; depth not single-sample %llu, slot target create failed %llu; blend: derived state bound %llu "
@@ -881,7 +901,10 @@ void summaryLocked(uint64_t now) {
                     "constants %llu; draw hook slow half %llu calls, %.2f us each, ~%.3f ms/frame on the caller thread "
                     "(plus %llu lock-free looks); restores %llu.",
                     double(g_emit.recordsMoving.load()) / frames, trackerText,
-                    u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(invalid), invalidText.c_str(),
+                    u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(g_draw.eyeFramesSeen), u(g_draw.eyeFramesSubstituted),
+                    u(g_draw.eyeFrames > g_draw.eyeFramesSubstituted ? g_draw.eyeFrames - g_draw.eyeFramesSubstituted : 0),
+                    u(g_draw.eyeFramesSeen > g_draw.eyeFramesSubstituted ? g_draw.eyeFramesSeen - g_draw.eyeFramesSubstituted : 0),
+                    u(invalid), invalidText.c_str(),
                     u(g_draw.sceneRowsKept), u(g_draw.poolRefreshed), u(g_draw.targetOccupied), u(g_draw.uavBound),
                     refusedText.c_str(), u(g_draw.bindRejected), u(g_draw.depthUnsupported), u(g_draw.createFailed),
                     u(g_draw.blendApplied), u(g_draw.blendRefused), g_draw.blendRefusedWhy ? " (" : "",

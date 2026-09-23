@@ -865,6 +865,56 @@ inline void run(const Harness& h) {
     h.check(logged("on-foot source slot target released (56x20", mark), "S1: the slot target is released when the source stops");
     h.check(!g.sourceViews(), "S1: released, nothing is given");
 
+    // P2 (the performance review, item 2): eligibility before preparation. An
+    // eye whose family draws all carry an unkeyed pixel shader prepares
+    // nothing (no slot target clear, no snapshot, no MRT6) and gives nothing;
+    // the movers line counts what the old order would have prepared. One
+    // accepted draw brings coverage back: its frame lacks last frame's scene
+    // constants (the idle frame took none) and is refused as such, the next
+    // gives, with MRT6 naming the slot exactly.
+    mark = g_log.size();
+    g.ordinaryFrame();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.setPs(g.unkeyed.Get(), kUnkeyedPs);
+    g.pass(0, 3);
+    g.setPs(g.ps.Get(), kPsHash);
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    h.check(!g.views(0), "P2: an eye with only unkeyed pool draws prepares nothing and gives nothing");
+    h.check(g.views(1), "P2: the other eye is untouched");
+    g.endFrame(true);
+    line = lastLine(joined, mark);
+    h.check(number(line, "prepared for nothing ") == 0, "P2: no eye-frame is prepared for nothing");
+    h.check(number(line, "under the old order ") >= 1, "P2: the old order would have prepared the unkeyed-only eye-frame");
+    mark = g_log.size();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.setPs(g.unkeyed.Get(), kUnkeyedPs);
+    g.pass(0, 2);
+    g.setPs(g.ps.Get(), kPsHash);
+    g.draw();   // one accepted draw after the declined ones
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    h.check(!g.views(0), "P2: the first accepted frame has no previous scene constants for that eye: refused");
+    g.endFrame(true);
+    line = lastLine(joined, mark);
+    h.check(number(line, "no previous scene constants ") >= 1, "P2: and the refusal says why");
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0);
+    g.writeScene(g.sceneA.Get(), g.rows[1]);
+    g.pass(1);
+    {
+        edvr::EngineVelocityViews v{};
+        h.check(g.views(0, &v), "P2: the next frame gives again");
+        unsigned exact = 0, other = 0;
+        ownership(h, g, 0, v, 5, &exact, &other);
+        h.check(exact > 0 && other == 0, "P2: coverage restored -- MRT6 names slot 5 exactly");
+        release(v);
+    }
+    g.endFrame();
+
     // R6: the emit hook not installed -> STOOD DOWN, no substitution, nothing given.
     mark = g_log.size();
     lifecycle_fake::g_hookLive = false;
