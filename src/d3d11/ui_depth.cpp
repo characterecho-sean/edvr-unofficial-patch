@@ -271,6 +271,7 @@ PtrMemo<kMemoSize> g_psMemo;     // pixel shader -> its bytecode hash
 struct Surface {
     void*    res = nullptr;
     uint32_t w = 0, h = 0, fmt = 0;
+    char     family = 0;   // 'V' vector, 'T' text, 'I' icons, 'C' scanner chrome
 };
 Surface  g_surfaces[kMaxSurfaces];
 uint32_t g_surfaceCount = 0;
@@ -896,13 +897,14 @@ bool surfaceMatches(const ResourceInfo& info) {
     return false;
 }
 
-void addSurface(const void* res, uint32_t w, uint32_t h, uint32_t fmt) {
+void addSurface(const void* res, uint32_t w, uint32_t h, uint32_t fmt, char family) {
     if (surfaceIndex(res) >= 0) return;
     Surface s;
     s.res = const_cast<void*>(res);
     s.w = w;
     s.h = h;
     s.fmt = fmt;
+    s.family = family;
     if (g_surfaceCount < kMaxSurfaces) {
         g_surfaces[g_surfaceCount++] = s;
     } else {
@@ -1470,6 +1472,34 @@ void restoreOm(ID3D11DeviceContext* ctx) {
 
 }  // namespace
 
+// The interface-surface sizes this session's classifier has learned so far
+// (vector, text and icon -- the scanner chrome strip learned at the other
+// addSurface call site is a different shape and excluded), for
+// fix.hud_quality's match mode, which wants the same answer without
+// re-deriving the classifier. Deduplicated by construction: addSurface
+// already refuses a resource it has seen, but two DIFFERENT resources can
+// share a size (a colour target and its depth partner), so the caller gets
+// the raw list and matches by size itself, not by count of surfaces.
+//
+// Only ever non-empty once fix.temporal_aa has been on long enough for
+// this pass's own classifier to have learned at least one panel this
+// session -- hud_quality's own log says so in as many words when this
+// comes back empty.
+uint32_t uiDepthLearnedSurfaceSizes(uint32_t* outW, uint32_t* outH,
+                                    char* outFamily, uint32_t max) {
+    if (!outW || !outH || !max) return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g_surfaceCount && n < max; ++i) {
+        const Surface& s = g_surfaces[i];
+        if (s.family != 'V' && s.family != 'T' && s.family != 'I') continue;
+        outW[n] = s.w;
+        outH[n] = s.h;
+        if (outFamily) outFamily[n] = s.family;
+        ++n;
+    }
+    return n;
+}
+
 void uiDepthConfigure(Config& cfg) {
     float cockpit = cfg.getFloat("advanced.temporal_aa_ship_metres", kTemporalShipMetres);
     if (!std::isfinite(cockpit) || cockpit < 0) cockpit = 0;
@@ -1713,7 +1743,7 @@ bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs,
         }
         return false;
     }
-    addSurface(info.resource, info.a, info.b, info.fmt);
+    addSurface(info.resource, info.a, info.b, info.fmt, 'C');
     // The view may have been judged "not a surface" this frame or last;
     // the memo answers viewIsSurface for a hundred frames, so overwrite it.
     if (view) g_viewMemo.put(view, g_frame, 1u);
@@ -1777,7 +1807,8 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
     ++g_rtvChecks;
     const uint64_t h = boundVsHash(ctx);
     if (h == kGuiVector || h == kGuiText || h == kGuiIcons) {
-        addSurface(g_rtvRes, g_rtvW, g_rtvH, g_rtvFmt);
+        addSurface(g_rtvRes, g_rtvW, g_rtvH, g_rtvFmt,
+                   h == kGuiVector ? 'V' : h == kGuiText ? 'T' : 'I');
         g_rtvKnown = true;
     } else if (g_rtvChecks >= kChecksPerTarget) {
         noteExhausted(g_rtvRes);

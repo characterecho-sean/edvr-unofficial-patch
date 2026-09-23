@@ -1618,27 +1618,67 @@ void bindingAudit(State* s, ID3D11DeviceContext* ctx) {
 }
 
 
+// A scissor rect that still spans exactly the pre-inflation target, the
+// scissor analogue of viewportIs. Integer coordinates, so no float
+// tolerance is needed the way the viewport check carries one.
+bool scissorIs(const D3D11_RECT& r, uint32_t w, uint32_t h) {
+    return r.left == 0 && r.top == 0 &&
+           static_cast<uint32_t>(r.right) == w &&
+           static_cast<uint32_t>(r.bottom) == h;
+}
+
 // The FSS resolution fix's viewport scaling for one draw, lifted out of
 // beginPanelOverride verbatim and NOINLINE. Its D3D11_VIEWPORT is filled by
 // RSGetViewports -- a real /GS buffer, and the cookie on it is worth keeping
 // -- but while it sat inline, beginPanelOverride carried that cookie on every
 // draw of every session, although this runs only while fssResActive().
+//
+// Also the scissor half (fix.hud_quality): there is no hook on the game's
+// own RSSetScissorRects at all, so unlike the viewport there is no set-time
+// path to be a backstop FOR -- this draw-time check is the only mechanism.
+// It only acts on a rect that still spans the pre-inflation target exactly
+// (scissorIs), the same conservative match the FSS rule itself uses for
+// sizes: a narrower, genuinely clipping rect is left alone rather than
+// guessed at, and re-checking the CURRENT rect against the ORIGINAL size
+// before scaling is what keeps this idempotent across the many draws a
+// panel issues with one scissor state -- once scaled, the rect no longer
+// matches (ow, oh) and later draws skip it, the same way the viewport
+// backstop stops firing once the set-time hook (or this one) has already
+// corrected it.
 __declspec(noinline) void fssResScaleDrawViewport(ID3D11DeviceContext* self, State* s) {
     void* res = currentRtv0Resource(s);
     uint32_t ow = 0, oh = 0;
-    if (res && fssResOrigSize(res, &ow, &oh)) {
-        UINT nvp = 1;
-        D3D11_VIEWPORT vp{};
-        self->RSGetViewports(&nvp, &vp);
-        if (nvp >= 1 && viewportIs(vp, ow, oh)) {
-            const float k =
-                static_cast<float>(fssResScaleOf(res));
-            vp.TopLeftX *= k;
-            vp.TopLeftY *= k;
-            vp.Width *= k;
-            vp.Height *= k;
-            s->realRSSetViewports(self, 1, &vp);
-            fssResNoteViewportScaled(true);
+    if (!res || !fssResOrigSize(res, &ow, &oh)) return;
+    const float k = fssResScaleOf(res);
+    UINT nvp = 1;
+    D3D11_VIEWPORT vp{};
+    self->RSGetViewports(&nvp, &vp);
+    if (nvp >= 1 && viewportIs(vp, ow, oh)) {
+        vp.TopLeftX *= k;
+        vp.TopLeftY *= k;
+        vp.Width *= k;
+        vp.Height *= k;
+        s->realRSSetViewports(self, 1, &vp);
+        fssResNoteViewportScaled(res, true);
+    }
+    D3D11_RASTERIZER_DESC rd{};
+    ID3D11RasterizerState* rsState = nullptr;
+    self->RSGetState(&rsState);
+    if (rsState) {
+        rsState->GetDesc(&rd);
+        rsState->Release();
+    }
+    if (rd.ScissorEnable) {
+        UINT nr = 1;
+        D3D11_RECT rect{};
+        self->RSGetScissorRects(&nr, &rect);
+        if (nr >= 1 && scissorIs(rect, ow, oh)) {
+            rect.left = static_cast<LONG>(rect.left * k + 0.5f);
+            rect.top = static_cast<LONG>(rect.top * k + 0.5f);
+            rect.right = static_cast<LONG>(rect.right * k + 0.5f);
+            rect.bottom = static_cast<LONG>(rect.bottom * k + 0.5f);
+            self->RSSetScissorRects(1, &rect);
+            fssResNoteScissorScaled(res);
         }
     }
 }
@@ -2072,6 +2112,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // new. Before the returns below, because a surface is a surface
         // whatever else this draw turns out to be.
         if (uiDepthWantsDraws()) uiDepthNoteOffscreenDraw(self);
+        // fix.hud_quality's own clock: due for its "nothing matched yet"
+        // warning or its 30s resize summary. Gated on fix.hud_quality alone
+        // -- it only BORROWS the interface-depth pass's learned sizes, and
+        // that pass has no independent on/off of its own to depend on (it
+        // is gated by fix.temporal_aa, config_test.cpp asserts fix.ui_depth
+        // itself stays absent) -- two integer compares while there is
+        // nothing to say.
+        if (fssResWantsMatch()) fssResHudQualityTick();
         // The intro movie's YUV-to-RGB fill: a four-vertex draw with all
         // three planes bound, into the surface the composite reads. It is
         // what tells this frame apart from the splash's, which uses the
@@ -3989,7 +4037,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
-    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);}
+    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);uiDeferredCopy(dst,src,true);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -4144,6 +4192,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         uiDeferredResourceWrite(self,dst);
         uiDeferredCopyRegion(dst,dstSub,dstX,dstY,dstZ,src,srcSub,box);
         glitchFrameInvalidatePool(dst);
+        if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
     }
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
@@ -4217,7 +4266,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Resolve, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
-    if(!foreignContext(self)){uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);}
+    if(!foreignContext(self)){uiSeparationResourceWrite(dst);uiDeferredResourceWrite(self,dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
     if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
@@ -4264,14 +4313,14 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
     uint32_t ow = 0, oh = 0;
     void* res = currentRtv0Resource(s);
     if (res && fssResOrigSize(res, &ow, &oh) && viewportIs(vps[0], ow, oh)) {
-        const float k = static_cast<float>(fssResScaleOf(res));
+        const float k = fssResScaleOf(res);
         D3D11_VIEWPORT v = vps[0];
         v.TopLeftX *= k;
         v.TopLeftY *= k;
         v.Width *= k;
         v.Height *= k;
         s->realRSSetViewports(self, 1, &v);
-        fssResNoteViewportScaled(false);
+        fssResNoteViewportScaled(res, false);
         return;
     }
     s->realRSSetViewports(self, n, vps);

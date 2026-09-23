@@ -661,8 +661,11 @@ HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
     }
     D3D11_TEXTURE2D_DESC d = *desc;
     bool inflated = false;
+    float scale = 1.0f;
+    InflateSource source = InflateSource::kNone;
+    char family = 0;
     guardedBudget(g_createBudget, [&] {
-        inflated = fssResMaybeInflate(&d, init != nullptr);
+        inflated = fssResMaybeInflate(&d, init != nullptr, &scale, &source, &family);
     });
     if (!inflated) {
         return g_state->realCreateTexture2D(self, desc, init, out);
@@ -676,12 +679,16 @@ HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
     }
     if (out && *out) {
         guardedBudget(g_createBudget, [&] {
-            // The factor comes from the two descs we already hold rather
-            // than from the module, which would have to stash it between
-            // the match and this call -- and this hook runs on the game's
-            // streaming threads.
-            fssResNoteCreated(*out, desc->Width, desc->Height,
-                              desc->Width ? d.Width / desc->Width : 0);
+            // The exact scale/source/family come from the match call above
+            // rather than being re-derived here (dividing the two descs'
+            // widths rounds to the wrong answer for a fractional factor --
+            // 1297/908 truncates to 1 under integer division), and are
+            // passed straight through rather than stashed in the module
+            // between the two calls: this hook runs on the game's
+            // streaming threads, and a pending value would be a race that
+            // mis-attributes one create's result to another's.
+            fssResNoteCreated(*out, desc->Width, desc->Height, d.Width,
+                              d.Height, scale, source, family);
         });
     }
     return hr;
