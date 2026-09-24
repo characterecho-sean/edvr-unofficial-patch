@@ -470,7 +470,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\wake_pulse.cpp" ^
     "src\d3d11\hud_grain.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_separation.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
@@ -1051,25 +1050,6 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
     echo [edvr] ERROR: private UI depth regression
     exit /b 1
 )
-exit /b 0
-
-:rig_hologram_motion
-echo [edvr] === hologram motion regression ===
-if not exist "%OBJ%\uicolourtest" mkdir "%OBJ%\uicolourtest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uicolourtest\\" /Fe"%OBJ%\uicolourtest\ui_colour_layer_test.exe" ^
-    "tools\ui_colour_layer_test\ui_colour_layer_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: UI colour layer test build failed & exit /b 1 )
-"%OBJ%\uicolourtest\ui_colour_layer_test.exe" || exit /b 1
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uicolourtest\\" /Fe"%OBJ%\uicolourtest\controller_test.exe" ^
-    "tools\ui_colour_layer_test\controller_test.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: UI separation controller test build failed & exit /b 1 )
-"%OBJ%\uicolourtest\controller_test.exe" || exit /b 1
 exit /b 0
 
 :rig_native_motion_rigs

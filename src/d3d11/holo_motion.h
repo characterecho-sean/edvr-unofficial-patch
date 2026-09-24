@@ -196,16 +196,9 @@ class HoloMotion {
     std::unordered_map<ID3D11Resource*,GeometryStamp> geometry;
     unsigned geometryEpoch=1,unknownEpoch=0,frame=0;
     Ptr<ID3D11Texture2D> scene,coverage;
-    // Optional world-only coverage twin.  It is deliberately separate from
-    // the live HC surface: callers may omit a mode-3 sprite from the clean
-    // colour path while retaining the normal UI motion inputs.
-    Ptr<ID3D11Texture2D> separatedCoverage;
-    ID3D11Texture2D* separatedScene=nullptr;
-    bool separatedReady=false;
     Ptr<ID3D11RenderTargetView> rtv;
     Ptr<ID3D11BlendState> motionBlendState;
-    Ptr<ID3D11ShaderResourceView> coverageSrv,instanceSrv,separatedCoverageSrv;
-    Ptr<ID3D11RenderTargetView> separatedRtv;
+    Ptr<ID3D11ShaderResourceView> coverageSrv,instanceSrv;
     Ptr<ID3D11Buffer> draw,instance;
     Ptr<ID3D11ComputeShader> shader;
     bool create(ID3D11DeviceContext* ctx,ID3D11Device* dev,ID3D11Texture2D* source) {
@@ -242,39 +235,6 @@ class HoloMotion {
         return shader!=nullptr;
     }
 public:
-    // Allocate the optional clean-world HC twin at the same size/format as
-    // the live coverage.  No allocation occurs unless a caller explicitly
-    // opts into separated coverage for the frame.
-    bool ensureSeparated(ID3D11DeviceContext* ctx, ID3D11Texture2D* source) {
-        if (!ctx || !source || scene.Get()!=source) return false;
-        if (separatedCoverage && separatedRtv && separatedCoverageSrv && separatedScene==source) return true;
-        Ptr<ID3D11Device> dev; ctx->GetDevice(&dev); if (!dev) return false;
-        D3D11_TEXTURE2D_DESC td{}; source->GetDesc(&td);
-        td.MipLevels=1; td.ArraySize=1;
-        td.Format=DXGI_FORMAT_R32G32_FLOAT; td.SampleDesc.Count=1; td.SampleDesc.Quality=0;
-        td.Usage=D3D11_USAGE_DEFAULT; td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags=0; td.MiscFlags=0;
-        separatedCoverage.Reset(); separatedRtv.Reset(); separatedCoverageSrv.Reset();
-        separatedScene=source; separatedReady=false;
-        if (FAILED(dev->CreateTexture2D(&td,nullptr,&separatedCoverage)) ||
-            FAILED(dev->CreateRenderTargetView(separatedCoverage.Get(),nullptr,&separatedRtv)) ||
-            FAILED(dev->CreateShaderResourceView(separatedCoverage.Get(),nullptr,&separatedCoverageSrv))) {
-            separatedCoverage.Reset(); separatedRtv.Reset(); separatedCoverageSrv.Reset(); separatedScene=nullptr; separatedReady=false; return false;
-        }
-        return true;
-    }
-    // Seed the clean twin from the live HC before the first separated draw.
-    // This is a GPU copy; no readback and no change to the live surface.
-    bool snapshotSeparated(ID3D11DeviceContext* ctx) {
-        if (!ctx || !coverage || !separatedCoverage) return false;
-        ctx->CopyResource(separatedCoverage.Get(), coverage.Get()); separatedReady=true; return true;
-    }
-    void invalidateSeparated() { separatedReady=false; }
-    ID3D11RenderTargetView* separatedTarget() const { return separatedRtv.Get(); }
-    ID3D11ShaderResourceView* separatedView() const { return separatedCoverageSrv.Get(); }
-    bool separatedValid(ID3D11Texture2D* source) const {
-        return separatedReady && separatedScene==source && separatedCoverageSrv && separatedRtv;
-    }
     // Called only for the recognized holo VS/PS, one unskinned instance,
     // and the normal full-eye viewport. Does not replace the original draw.
     // mode 0: cockpit pool, 1: ring local-to-clip, 2: orbital instance stream,
@@ -406,7 +366,6 @@ public:
         if(!failed && cleared && scene.Get()==source) { out[0]=coverageSrv.Get(); out[1]=history[write].srv.Get(); }
     }
     void frameBoundary() {
-        separatedReady=false;
         write=1-write; auto& next=history[write];
         for(unsigned i=0;i<next.count;++i) for(auto& p:next.sources[i]) p.Reset();
         next.count=0; cleared=false; noteFrame();

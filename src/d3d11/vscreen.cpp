@@ -69,7 +69,6 @@
 #include "wake_pulse.h"
 #include "hud_grain.h"
 #include "ui_depth.h"
-#include "ui_separation.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
@@ -2900,10 +2899,6 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
         s->realClearRtv(self, rtv, c);
         return;
     }
-    if(rtv) {
-        ID3D11Resource* destination=nullptr;rtv->GetResource(&destination);
-        uiSeparationResourceWrite(destination);if(destination)destination->Release();
-    }
     // The census's record of this clear, before the probes and before
     // the void fix touches the colour: the line carries what the GAME
     // asked for.
@@ -2950,14 +2945,12 @@ void STDMETHODCALLTYPE hookedClearUavUint(ID3D11DeviceContext* self,
                                           ID3D11UnorderedAccessView* uav,
                                           const UINT c[4]) {
     gpuFrameCommand(self);
-    if (!foreignContext(self)) uiSeparationViewWrite(uav);
     g_state->realClearUavUint(self, uav, c);
 }
 void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
                                            ID3D11UnorderedAccessView* uav,
                                            const FLOAT c[4]) {
     gpuFrameCommand(self);
-    if (!foreignContext(self)) uiSeparationViewWrite(uav);
     g_state->realClearUavFloat(self, uav, c);
 }
 void STDMETHODCALLTYPE hookedGenerateMips(ID3D11DeviceContext* self,
@@ -3186,7 +3179,6 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     const bool privateExecution = graphicsBridgeConsumePermit(self, list, restoreContextState);
     if (!privateExecution) {
         originalDrawProbeExecuteCommandListNote(self);
-        uiSeparationUnknownWrite();
         graphicsBridgeNoteUnknownExecution();
         motionResourceWritten(nullptr);
         celestialMotionConstantsUnknownWrite(nullptr);
@@ -3561,8 +3553,7 @@ OriginalDrawKind originalDrawKind(char kind) {
     }
 }
 
-OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
-                                                bool uiSeparated) {
+OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self) {
     if constexpr (!kControlledBaselineOriginalDrawDiagnostics) return {};
     else {
     if (!t_colourOriginal || !t_originalDrawMetadata || self != g_state->ownerCtx) {
@@ -3576,7 +3567,7 @@ OriginalDrawProbeTicket originalDrawNativeBegin(ID3D11DeviceContext* self,
     input.originalVsHash = metadata.vsHash;
     input.originalPsHash = metadata.psHash;
     input.verdict = metadata.verdict;
-    input.modified = uiSeparated || metadata.modified ||
+    input.modified = metadata.modified ||
         metadata.verdict != static_cast<uint32_t>(DrawVerdict::kNone);
     input.startIndex = metadata.startIndex;
     input.baseVertex = metadata.baseVertex;
@@ -3642,7 +3633,6 @@ void originalDrawNativeEnd(ID3D11DeviceContext* self,
 // real array that a D3D call writes into, and it still does, here, where the
 // array is. Only the hot path is relieved of it.
 __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
-    if(self==g_state->ownerCtx)uiSeparationUnknownWrite();
     State* s = g_state;
     const UINT total = s->qsIndexCount;
     const UINT cut0 = s->quadSkip.lo * 6;
@@ -3970,7 +3960,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // because both swallow, and two swallows would draw the quads twice.
     // The resized panel, which swallows the draw only when it succeeds.
     if (v == DrawVerdict::kLoaderPanel) {
-        if(owner)uiSeparationUnknownWrite();
         const bool layered = uiLayer && uiLayerBegin(self);
         const bool swallowed = loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
                                                      g_state->qsInstances,
@@ -3992,7 +3981,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // succeeds and forwards it untouched when it does not -- so a failure
     // here is a flat screen, never a missing one.
     if (g_state->curveThisDraw) {
-        if(owner)uiSeparationUnknownWrite();
         g_state->curveThisDraw = false;
         const bool layered = uiLayer && uiLayerBegin(self);
         const bool swallowed = panelCurveSubstitute(self, g_state->realDrawIndexedInstanced);
@@ -4021,17 +4009,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         uiLayerEnd(self);
         if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);
     }
-    // uiSeparationLive() first: bundled with fix.temporal_aa's external
-    // engines, so with temporal off this was a call per draw that only ever
-    // returned false (ui_separation.h). Same first test, inline.
-    // A draw the UI layer took is not in the eye's colour at all, so neither
-    // the tone separation nor the interface depth below re-issues it: its
-    // depth and its reactive mask exist to tell the upscaler about pixels
-    // the upscaler no longer sees.
-    if(owner && !layered && uiSeparationLive() &&
-       uiSeparationToneBegin(self,kind,count,instances)) {
-        pureDrawReissue(self,kind,count,instances,args);uiSeparationToneEnd(self);
-    }
+    // A draw the UI layer took is not in the eye's colour at all, so the
+    // interface depth below does not re-issue it: its depth and its
+    // reactive mask exist to tell the upscaler about pixels the upscaler no
+    // longer sees.
     if (effectCaptureScope.ctx) objectProbePanelDrawEnd(self);
     if(terrainOriginal)celestialMotionEnd(self);
     // The interface's alpha-aware depth pass (ui_depth.h): a composite
@@ -4053,12 +4034,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // decline latch, so it would last the session (the pre-release review
     // of 2026-09-07). splashDimBegin below has had this shape all along.
     if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {
-        if (uiDepthReissueBegin(self)) {
-            pureDrawReissue(self,kind,count,instances,args);
-            if(uiDepthSeparatedReissueBegin(self)) {
-                pureDrawReissue(self,kind,count,instances,args);uiDepthSeparatedReissueEnd(self);
-            }
-        }
+        if (uiDepthReissueBegin(self)) pureDrawReissue(self,kind,count,instances,args);
         uiDepthReissueEnd(self);
     }
     // uiDepthPlanetPending() is the function's own first test, inline: it
@@ -4067,7 +4043,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
     if(owner && uiDepthPlanetPending() && uiDepthPlanetBegin(self)) {
         pureDrawReissue(self,kind,count,instances,args);uiDepthPlanetEnd(self);
-        uiDepthSeparatedInvalidate();
     }
     if (!terrainOriginal && owner && celestialMotionLive() &&
         celestialMotionBegin(self, bindingShaderHash(BindSlot::Vs))) {
@@ -4108,7 +4083,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
     uiAtlasNoteWrite(dst, 2);
-    if (!foreignContext(self)) {uiSeparationResourceWrite(dst);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
+    if (!foreignContext(self)) {motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -4192,7 +4167,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) {
-        uiSeparationUnknownWrite();
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     }
@@ -4201,7 +4175,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
         originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
-    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
+    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self);
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
     originalDrawNativeEnd(self, sample);
 }
@@ -4216,7 +4190,6 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) {
-        uiSeparationUnknownWrite();
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     }
@@ -4225,7 +4198,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
         originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
-    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
+    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self);
     g_state->realDrawInstancedIndirect(self, args, off);
     originalDrawNativeEnd(self, sample);
 }
@@ -4260,7 +4233,6 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
             motionResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
         else motionResourceWritten(dst);
         celestialMotionConstantsUnknownWrite(dst);
-        uiSeparationResourceWrite(dst);
         glitchFrameInvalidatePool(dst);
         if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
         if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
@@ -4297,7 +4269,6 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         if(box && box->right>=box->left)motionResourceWritten(dst,box->left,box->right);
         else motionResourceWritten(dst);
         celestialMotionConstantsWritten(dst, data, box);
-        uiSeparationResourceWrite(dst);
         glitchFrameInvalidatePool(dst);
     }
     if (drawCensusArmed()) {
@@ -4337,7 +4308,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Resolve, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
-    if(!foreignContext(self)){uiSeparationResourceWrite(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
+    if(!foreignContext(self)){if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
     if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
@@ -4478,27 +4449,24 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     forwardWithVerdict(self, v, 'D', count, 1, args, [&] {
-        const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
-                            uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self);
         g_state->realDraw(self, count, start);
         originalDrawNativeEnd(self, sample);
         if (clock.on) clock.realCall(r0);
-        if(separate)uiSeparationEnd(self);
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     gpuFrameCommand(self);
-    if(self==g_state->ownerCtx){uiSeparationUnknownWrite();engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
+    if(self==g_state->ownerCtx)engineVelocityBeforeDraw(self,g_state->rtv0Eye);
     const OriginalDrawMetadata metadata{
         OriginalDrawKind::DrawAuto, kOriginalDrawProbeUnknown,
         kOriginalDrawProbeUnknown, originalDrawDiagnosticShaderHash(BindSlot::Vs),
         originalDrawDiagnosticShaderHash(BindSlot::Ps), 0};
     OriginalDrawScope original(&metadata);
-    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, false);
+    const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self);
     g_state->realDrawAuto(self);
     originalDrawNativeEnd(self, sample);
 }
@@ -4517,14 +4485,11 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     forwardWithVerdict(self, v, 'I', count, 1, args, [&] {
-        const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
-                            uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self);
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         originalDrawNativeEnd(self, sample);
         if (clock.on) clock.realCall(r0);
-        if(separate)uiSeparationEnd(self);
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
@@ -4557,15 +4522,12 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                            ? g_state->glareClamp
                            : instances;
     forwardWithVerdict(self, v, 'N', perInstance, drawn, args, [&] {
-        const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
-                            uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self);
         g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                    startInstance);
         originalDrawNativeEnd(self, sample);
         if (clock.on) clock.realCall(r0);
-        if(separate)uiSeparationEnd(self);
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
@@ -4605,10 +4567,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
-        const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
-                            uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self);
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
         originalDrawNativeEnd(self, sample);
@@ -4618,7 +4578,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             weaponMotionDraw(self, g_state->realDrawIndexedInstanced, perInstance, instances,
                              startIndex, baseVertex, startInstance);
         if (clock.on) clock.realCall(r0);
-        if(separate)uiSeparationEnd(self);
         if(self==g_state->ownerCtx) {
             // ORDERED BY COST, not by narrative. The common case here is an
             // ordinary scene draw that none of these three want, and it used
@@ -5450,7 +5409,6 @@ void vScreenFrameBoundary() {
         objectProbeFrameBoundary(g_state->ownerCtx);
         panelUpscaleFrameEnd();
         wakePulseReport();
-        uiSeparationFrameBoundary();
         uiDepthFrameBoundary(g_state->ownerCtx);
         // fix.ui_quality: the layer's warm compile, the surfaces' five-second
         // cross-check and learning, the key's 30-second totals, and the end
@@ -6805,7 +6763,6 @@ void shutdownVScreenFixes() {
     }
     remlokShutdown();
     holoShutdown();
-    uiSeparationShutdown();
     uiDepthShutdown();
     uiLayerShutdown();
     screenMotionShutdown();

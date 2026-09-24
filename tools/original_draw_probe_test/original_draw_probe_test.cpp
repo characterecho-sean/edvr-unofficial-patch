@@ -675,7 +675,7 @@ void sourceContract() {
           "one helper declaration plus seven native End call sites");
     check(text.find("originalDrawProbeInternalQuery()") != std::string::npos,
           "hook guard excludes only probe-owned shared timer traffic");
-    check(text.find("originalDrawNativeBegin(self, separate);\n"
+    check(text.find("originalDrawNativeBegin(self);\n"
                     "        g_state->realDrawIndexedInstanced") != std::string::npos,
           "indexed-instanced original draw remains immediately after probe Begin");
     check(text.find("baseVertex, startInstance);\n"
