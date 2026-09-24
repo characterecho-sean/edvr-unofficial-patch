@@ -335,6 +335,62 @@ uint32_t g_heldBaseFrame = 0;
 uint64_t g_heldBaseShip = 0;
 bool g_haveHeldBase = false;
 
+// CHANGE 11 (2026-09-24, the render-time patch sim's NEW-base candidate):
+// the last REFILLED mode==2 mailbox, kept as the full 4x4 the consumer read,
+// with the frame/ship/sequence it came from. Mode==2 only (the eye path,
+// FUN_142868c30's caller), where the held base above deliberately takes any
+// mode!=1: at a low-wake drop-in the writer's first post-skip refill -- the
+// NEW base the scene at R wants -- lands on a mode==2 consume, and a
+// non-eye mode's refill must not overwrite the candidate between the skip
+// and the render. Shares g_heldBaseMutex: updated in the same refilled-call
+// block, read from transitionFlashEyeBaseNoteSceneCamera's render-path sim.
+float g_lastRefilledM[16] = {};
+uint32_t g_lastRefilledFrame = 0;
+uint64_t g_lastRefilledShip = 0;
+uint64_t g_lastRefilledSequence = 0;
+bool g_haveLastRefilled = false;
+
+// CHANGE 12 (2026-09-24, "render-time patch simulation (watch-only)"): the
+// pending sim, armed on a mode==2 mode-switch ENTRY edge in consumerObserved
+// and fired from transitionFlashEyeBaseNoteSceneCamera on the render frames
+// N+1..N+3. One slot: a new entry edge replaces an unfired pending sim and
+// says so in the log. Purely passive -- nothing here ever writes game
+// memory; the sim computes what the ACTING build (after this validation
+// flies) would premultiply into the bad frame's eye and logs it, once per
+// covered render frame, never per consume.
+struct PatchSimPending {
+    bool active = false;
+    uint32_t skipFrame = 0;   // N: the un-refilled ENTRY-edge consume's frame
+    float heldM[16] = {};     // the held base copied at arm time
+    bool haveHeld = false;    // a held base existed at arm time
+};
+std::mutex g_patchSimMutex;
+PatchSimPending g_patchSim;
+std::atomic<uint64_t> g_patchSimFired{0};      // sim frames logged (session)
+std::atomic<uint64_t> g_patchSimReplaced{0};   // pending sims an entry edge replaced
+std::atomic<uint64_t> g_patchSimExpired{0};    // windows that passed with no covered scene frame
+
+void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase) noexcept {
+    uint32_t replacedSkip = 0;
+    bool replaced = false;
+    {
+        std::lock_guard<std::mutex> lock(g_patchSimMutex);
+        replaced = g_patchSim.active;
+        if (replaced) replacedSkip = g_patchSim.skipFrame;
+        g_patchSim.active = true;
+        g_patchSim.skipFrame = frame;
+        g_patchSim.haveHeld = haveHeldBase;
+        if (haveHeldBase) std::memcpy(g_patchSim.heldM, heldM, sizeof(g_patchSim.heldM));
+    }
+    if (replaced) {
+        g_patchSimReplaced.fetch_add(1, std::memory_order_relaxed);
+        Log::get().note(
+            "transition flash eye base: patch sim armed at frame %u, replacing an unfired pending "
+            "sim (skip %u).",
+            frame, replacedSkip);
+    }
+}
+
 // CHANGE 2: the writer-watch gate's own half of "flight, with the writer
 // active" -- the consumer's count of consecutive refilled mode!=1 calls,
 // read by frameBoundaryWriterWatch beside the existing ship-pointer
@@ -523,6 +579,22 @@ struct EyeBaseFrameRecord {
     GlitchSceneGeometry geometry;
     bool geometryFresh = false;
     GlitchSceneDecision decision = GlitchSceneDecision::Unknown;
+    // CHANGE 12: this frame's patch-sim outcome, when a pending sim's window
+    // covered it and the scene position was valid. Folded in beside the
+    // geometry the choice was computed from, so the dump's sim section can
+    // replay exactly what the log line said. NAN defaults mean "no sim this
+    // frame".
+    bool patchSim = false;
+    uint32_t patchSimSkipFrame = 0;
+    float patchSimP[3] = {NAN, NAN, NAN};
+    float patchSimHeld[3] = {NAN, NAN, NAN};
+    float patchSimNew[3] = {NAN, NAN, NAN};
+    float patchSimCamStep = 0.0f;
+    float patchSimPoolStep = 0.0f;
+    uint8_t patchSimChoice = 0;   // tfeb::SceneChoice (held as uint8_t; 0 = Old)
+    int32_t patchSimRefilledAge = -1;
+    bool patchSimHaveHeld = false;
+    bool patchSimHaveNew = false;
 };
 
 static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 1ull * 1024 * 1024,
@@ -645,6 +717,18 @@ void performDump(const PendingDump& due) noexcept {
               (unsigned long long)g_controllerCallsTotal.load(std::memory_order_relaxed),
               (unsigned long long)g_writerEnteredTotal.load(std::memory_order_relaxed),
               (unsigned long long)g_writerWroteTotal.load(std::memory_order_relaxed));
+    // CHANGE 12: the passive patch sim's own session totals, beside round 7's
+    // above -- printed only once the sim has ever done anything, so dumps
+    // from sessions without a covered transition stay byte-identical to the
+    // pre-sim format.
+    const uint64_t simFired = g_patchSimFired.load(std::memory_order_relaxed);
+    const uint64_t simReplaced = g_patchSimReplaced.load(std::memory_order_relaxed);
+    const uint64_t simExpired = g_patchSimExpired.load(std::memory_order_relaxed);
+    if (simFired || simReplaced || simExpired) {
+        appendLine(text, "patch sim (passive): fired=%llu replaced_pending=%llu expired=%llu (session totals)",
+                  (unsigned long long)simFired, (unsigned long long)simReplaced,
+                  (unsigned long long)simExpired);
+    }
 
     EyeBaseRingEntry* const ring = g_ring.load(std::memory_order_acquire);
     const uint64_t head = g_ringHead.load(std::memory_order_relaxed);
@@ -684,6 +768,8 @@ void performDump(const PendingDump& due) noexcept {
         frameRing ? (frameHead < kEyeBaseFrameRingCapacity ? frameHead : kEyeBaseFrameRingCapacity) : 0;
     const uint64_t frameFirst = frameHead - frameHave;
     uint32_t framePrinted = 0;
+    uint32_t simPrinted = 0;
+    std::string simText;
     for (uint64_t i = frameFirst; i < frameHead; ++i) {
         const EyeBaseFrameRecord r = frameRing[i % kEyeBaseFrameRingCapacity];
         if (!tfp::frameInDumpWindow(r.frame, due.window.lowTriggerFrame, due.window.dueFrame,
@@ -715,8 +801,33 @@ void performDump(const PendingDump& due) noexcept {
             glitchSceneGeometryFreshText(r.geometryFresh), r.geometry.matched, r.geometry.predicted,
             r.geometry.cameraStep, r.geometry.poolStep, r.geometry.relativeMedian, r.geometry.relativeP90,
             r.geometry.predictionP90, glitchSceneDecisionText(r.decision));
+        // CHANGE 12: this frame's patch-sim outcome, printed into the dump's
+        // own separate section (below "per-frame rows done") rather than
+        // appended to the per-frame row -- the row format above is parsed
+        // offline (tools\flash_patch_residual.py) and must not grow.
+        if (r.patchSim) {
+            ++simPrinted;
+            appendLine(simText,
+                "  patch-sim f%u (skip %u): P=(%+.3f %+.3f %+.3f) held->(%s%+.3f %+.3f %+.3f) "
+                "new->(%s%+.3f %+.3f %+.3f) cam=%.3f pool=%.3f choice=%s->%s (refilled age=%d)",
+                r.frame, r.patchSimSkipFrame, r.patchSimP[0], r.patchSimP[1], r.patchSimP[2],
+                r.patchSimHaveHeld ? "" : "n/a ", r.patchSimHeld[0], r.patchSimHeld[1], r.patchSimHeld[2],
+                r.patchSimHaveNew ? "" : "n/a ", r.patchSimNew[0], r.patchSimNew[1], r.patchSimNew[2],
+                r.patchSimCamStep, r.patchSimPoolStep,
+                tfeb::sceneChoiceText(static_cast<tfeb::SceneChoice>(r.patchSimChoice)),
+                static_cast<tfeb::SceneChoice>(r.patchSimChoice) == tfeb::SceneChoice::New ? "new" : "held",
+                r.patchSimRefilledAge);
+        }
     }
     appendLine(text, "per-frame rows done, %u entries", framePrinted);
+    // CHANGE 12: the sim section -- only when this dump's window saw any.
+    // The leading "patch-sim" prefix keeps these lines from ever matching
+    // the offline parser's per-row pattern.
+    if (simPrinted) {
+        appendLine(text, "patch sim rows:");
+        text += simText;
+        appendLine(text, "patch sim rows done, %u entries", simPrinted);
+    }
 
     const std::wstring logDir = Log::get().dir();
     std::wstring path;
@@ -1314,6 +1425,10 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     bool unrefilled = false;
     uint8_t treatmentOutcome = 0;  // 0 none, 1 watched, 2 acted
     double dt = 0.0, dr = 0.0;
+    // CHANGE 12: the mode-switch edge this call crossed, if any (filled by
+    // the un-refilled CAS loop inside the haveM block below; the patch sim
+    // arms on it after the held-base read, which lives outside that block).
+    tfeb::ModeSwitchEdge modeSwitchEdge = tfeb::ModeSwitchEdge::None;
 
     if (haveM) {
         unrefilled = (gameMode != 1) && tfeb::isResetMailbox(m);
@@ -1337,6 +1452,9 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
         // the compare-exchange (compare_exchange_weak leaves it unchanged on
         // success), the same value edge/next were computed from -- exactly
         // "how many un-refilled consumes" for the EXIT log line below.
+        // CHANGE 12: `modeSwitchEdge` is a function-scope local (declared
+        // with the other per-call locals above) because the patch sim arms
+        // on it below, after the held-base read outside this block.
         {
             uint32_t cur = g_ebConsecutiveUnrefilled.load(std::memory_order_relaxed);
             uint32_t next;
@@ -1345,6 +1463,7 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
                 edge = tfeb::classifyModeSwitchEdge(gameMode, unrefilled, cur);
                 next = tfeb::updateConsecutiveUnrefilled(cur, gameMode, unrefilled);
             } while (!g_ebConsecutiveUnrefilled.compare_exchange_weak(cur, next, std::memory_order_relaxed));
+            modeSwitchEdge = edge;
             if (edge == tfeb::ModeSwitchEdge::Entry) {
                 requestDump("a mode-switch entry", frame);
                 const uint32_t already = g_modeSwitchEdgeLinesLogged.fetch_add(1, std::memory_order_relaxed);
@@ -1370,6 +1489,17 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
             g_heldBaseFrame = frame;
             g_heldBaseShip = ship;
             g_haveHeldBase = true;
+            // CHANGE 11: the render-time patch sim's NEW-base candidate --
+            // mode==2 only, so a non-eye refilled consume cannot overwrite
+            // the post-skip refill the scene at R wants before the render
+            // reads it (see the globals' own comment).
+            if (gameMode == 2) {
+                std::memcpy(g_lastRefilledM, m, sizeof(g_lastRefilledM));
+                g_lastRefilledFrame = frame;
+                g_lastRefilledShip = ship;
+                g_lastRefilledSequence = seq;
+                g_haveLastRefilled = true;
+            }
         }
     }
 
@@ -1390,6 +1520,17 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     }
     const int32_t heldAgeFrames =
         haveHeldBase ? (frame >= heldFrame ? static_cast<int32_t>(frame - heldFrame) : 0) : -1;
+
+    // CHANGE 12: arm the render-time patch sim on a mode==2 ENTRY edge. The
+    // entry classification ran in the un-refilled CAS loop above; heldM here
+    // is exactly the candidate the act guard judged (this un-refilled call
+    // left the cache untouched), which is the sim's "held" candidate. The
+    // condition implies haveM: `unrefilled` is only ever set under haveM,
+    // and ENTRY requires mode!=1. Runs in every non-off mode -- watch, on
+    // and alternate alike -- and never writes game memory.
+    if (unrefilled && gameMode == 2 && modeSwitchEdge == tfeb::ModeSwitchEdge::Entry) {
+        armPatchSim(frame, heldM, haveHeldBase);
+    }
 
     if (haveM && unrefilled) {
         g_totalUnrefilled.fetch_add(1, std::memory_order_relaxed);
@@ -1763,6 +1904,92 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
         total = static_cast<uint16_t>(total + c);
     }
     r.calls = total;
+
+    // CHANGE 12: the passive render-time patch sim. A pending sim armed at
+    // the skip consume's frame N covers the render frames N+1..N+3 (the bad
+    // render is N+2; one frame of consume/render skew slack either side),
+    // and fires only on a covered frame whose scene position is valid. The
+    // work is a few memcpys and floats under two short-held mutexes, on a
+    // render-path thread -- no allocation, no game memory. The camera step
+    // is the geometry's OWN cameraStep: glitch_frame.cpp fills the pool
+    // sample's camera with this same sceneDrawPos, so that field already is
+    // |pos - previous frame's pos| and is only meaningful when the geometry
+    // is fresh (patchSceneChoice reads it regardless and the freshness flag
+    // is what keeps a stale zero from deciding).
+    if (static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) != tfp::Mode::Off) {
+        std::lock_guard<std::mutex> lock(g_patchSimMutex);
+        if (g_patchSim.active) {
+            if (tfeb::patchSimWindowCovers(frame, g_patchSim.skipFrame)) {
+                if (valid) {
+                    const float P[3] = {pos[0], pos[1], pos[2]};
+                    float patchHeld[3] = {NAN, NAN, NAN};
+                    float patchNew[3] = {NAN, NAN, NAN};
+                    float newM[16] = {};
+                    uint32_t newFrame = 0;
+                    bool haveNew = false;
+                    {
+                        // g_heldBaseMutex also guards the CHANGE 11
+                        // last-refilled copy; consumerObserved never takes
+                        // g_patchSimMutex, so this order cannot deadlock.
+                        std::lock_guard<std::mutex> heldLock(g_heldBaseMutex);
+                        haveNew = g_haveLastRefilled;
+                        if (haveNew) {
+                            std::memcpy(newM, g_lastRefilledM, sizeof(newM));
+                            newFrame = g_lastRefilledFrame;
+                        }
+                    }
+                    const bool haveHeld = g_patchSim.haveHeld;
+                    if (haveHeld) tfeb::patchEyeOrigin(g_patchSim.heldM, P, patchHeld);
+                    if (haveNew) tfeb::patchEyeOrigin(newM, P, patchNew);
+                    const tfeb::SceneChoice choice =
+                        tfeb::patchSceneChoice(geometry.cameraStep, geometry.poolStep, geometryFresh);
+                    const int32_t refilledAge =
+                        haveNew ? (frame >= newFrame ? static_cast<int32_t>(frame - newFrame) : -1) : -1;
+                    g_patchSimFired.fetch_add(1, std::memory_order_relaxed);
+                    // One line per covered render frame (at most three per
+                    // event), never per consume -- per-consume spam filled
+                    // the log once before (CHANGE 9's own history). Both
+                    // candidates print regardless of the choice; the arrow
+                    // names which the acting build would write (Unclear
+                    // defaults to held, the proven-safe side).
+                    Log::get().note(
+                        "transition flash eye base: patch sim frame %u (skip %u): P=(%+.3f %+.3f %+.3f) "
+                        "held->(%s%+.3f %+.3f %+.3f) new->(%s%+.3f %+.3f %+.3f) cam=%.3f pool=%.3f "
+                        "choice=%s->%s (refilled age=%d)",
+                        frame, g_patchSim.skipFrame, P[0], P[1], P[2],
+                        haveHeld ? "" : "n/a ", patchHeld[0], patchHeld[1], patchHeld[2],
+                        haveNew ? "" : "n/a ", patchNew[0], patchNew[1], patchNew[2],
+                        geometry.cameraStep, geometry.poolStep,
+                        tfeb::sceneChoiceText(choice),
+                        choice == tfeb::SceneChoice::New ? "new" : "held",
+                        refilledAge);
+                    r.patchSim = true;
+                    r.patchSimSkipFrame = g_patchSim.skipFrame;
+                    r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];
+                    r.patchSimHeld[0] = patchHeld[0]; r.patchSimHeld[1] = patchHeld[1]; r.patchSimHeld[2] = patchHeld[2];
+                    r.patchSimNew[0] = patchNew[0]; r.patchSimNew[1] = patchNew[1]; r.patchSimNew[2] = patchNew[2];
+                    r.patchSimCamStep = geometry.cameraStep;
+                    r.patchSimPoolStep = geometry.poolStep;
+                    r.patchSimChoice = static_cast<uint8_t>(choice);
+                    r.patchSimRefilledAge = refilledAge;
+                    r.patchSimHaveHeld = haveHeld;
+                    r.patchSimHaveNew = haveNew;
+                    if (frame - g_patchSim.skipFrame >= tfeb::kPatchSimWindowFrames) {
+                        // Fired on the window's last frame: retire the sim
+                        // here so the next frame's expiry branch does not
+                        // count a completed run as expired.
+                        g_patchSim.active = false;
+                    }
+                }
+            } else if (frame - g_patchSim.skipFrame > tfeb::kPatchSimWindowFrames) {
+                // The window passed with no covered scene frame at all (a
+                // covered frame with an invalid scene= neither logs nor
+                // clears -- the next covered frame may still be valid).
+                g_patchSim.active = false;
+                g_patchSimExpired.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
     pushFrameRing(r);
 }
 
