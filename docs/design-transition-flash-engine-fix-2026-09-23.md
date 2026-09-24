@@ -32,6 +32,44 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
+- **LOW-WAKE MEASUREMENT FLOWN (100043).** Every transition flash is a
+  one-frame skip of the eye-base writer.
+  - At a low-wake entry the scene is already in the new frame on the skipped
+    frame, so the NEW base is right. At a hyperspace exit the scene is still
+    in the old frame, so the held base is right (proven).
+  - The new base only exists a consume later.
+  - This withdraws 091726's "low wake is a long mode switch" reading.
+  - The Steam ini is restored; the decision on the next step is Sean's.
+- **The measurement build (d28f9ada, on main), as installed:**
+  - The eye-base dumps now carry the detector's per-frame object geometry
+    (matched, cameraStep, poolStep, relativeMedian/P90, predictionP90, the
+    decision) beside the camera mailbox state.
+  - Dumps fire on mode-switch EDGES: the entry (first un-refilled), the exit
+    (first refilled after 30 or more un-refilled), and scene-judged resets.
+  - The Steam copy runs d28f9ada with the trap ON and
+    `transition_flash_eye_base = watch` (one marked ini line; nothing acts).
+  - The aim is the frame offset between the camera's and the objects' mode
+    switches at supercruise entry and exit.
+  - Read with `--expect-build d28f9ada`.
+- **FLOWN 091726: high wakes fixed, low wakes not.**
+  - The skip is the controller not running for the camera that frame.
+  - A low wake is a supercruise MODE switch (the controller idle for the
+    whole of supercruise, base identity). Its flash is the camera and the
+    objects switching modes on different frames, which the held or offered
+    base cannot align.
+  - The Steam ini is restored; Sean's own `temporal_aa = off` from mid-flight
+    is kept.
+- **OFFERED-BASE build (3b5736d7 + aecf9800, on main), as installed:**
+  - A DR1 EXECUTE breakpoint on the writer `0x2874B20` records the matrix it
+    was offered (R8) for our ship. DR0 hits inside the writer's extent mean
+    it wrote.
+  - A read-only CodeHook counts the controller `0x10730A0` calls.
+  - The substitute on an un-refilled consume: the matrix the writer was
+    offered and refused this frame, if fresh; otherwise the held base.
+  - The watch bounds are 300 s and 150,000 hits; the call ring is 65,536
+    entries.
+  - The Steam copy runs aecf9800 with the trap OFF and `alternate` (two
+    marked ini lines). Read with `--expect-build aecf9800`.
 - **HELD-BASE fix FLOWN (073114): it fixes hyperspace exits and fails the
   low wake.**
   - The writer is found (`0x2874BC9` from `0x10734D8`). It SKIPS the
@@ -340,6 +378,70 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
   0x6BF929 / 0x594C3E / 0x2869073`.
 
+## Flight 100043 (2026-09-24 10:00, Steam copy, build d28f9ada): the low-wake measurement
+
+Trap ON, `watch` (nothing acted); the build matched. Sean flew three low
+wakes and saw no flashes, because the trap hid them.
+
+- **Seven scene-judged eye resets.** Frames 13549, 13939, 15653, 15965,
+  17586, 17905 and 23340 (median object error 6.2-8.6 m; 264.6 m for the
+  last). Each sits exactly 2 frames after a single-frame ENTRY edge (an
+  un-refilled consume at 13547, 13937, ...): the consume-to-render offset.
+  The first six come in pairs 3.7-5 s apart, the three low wakes' entry and
+  exit.
+- **Two long identity stretches** (2,729 and 5,813 consumes, both with
+  EXIT edges) produced no reset at either edge.
+- **The low-wake ENTRY (skip 13547, world to ship-centred).** On the
+  skipped frame's render (f13549) the camera fell to head-only (step
+  2,925.8). The ship's own geometry (the pool's matched records are the
+  ship's parts; ordinary frames show cam = pool, relMed 0) had ALREADY
+  rebased into the ship-centred frame on that same frame (pool step
+  2,927.2). The right base there was the NEW one,
+  (-0.660, +11.066, -7.725), which the writer produced only on the next
+  consume. The held (old) base would be ~2.9 km off. This is the opposite
+  of the hyperspace exit, where the scene was still in the old frame on the
+  skipped frame.
+- **The second skip of the pair (13937, ship-centred static to moving).**
+  The ship's parts moved 14.7 m and then 17.2 m around the skip (matched
+  57 of 87). Neither the held base (0 m) nor the next write (2.6 m) matches
+  that. Object matching at this edge is too thin to call.
+- **Conclusion.** Every transition flash is a one-frame skip of the eye-base
+  writer. What differs by transition is whether the scene switches frames
+  on the skipped frame (low-wake entry: yes) or a frame later (hyperspace
+  exit: no). The correct base is the new one in the first case and the old
+  one in the second. At consume time neither the new base nor the scene's
+  switch is visible; at render time (2 frames later) both are.
+
+## Flight 091726 (2026-09-24 09:17, Steam copy, build aecf9800)
+
+Offered-base fix, trap OFF, `alternate`; the build matched.
+
+- **Sean's report:** "low wakes entry/exit still flash, but high wakes
+  don't".
+- **The controller does not run on the event frame.** Every event frame
+  shows `controller_calls=0 writer_entered=0 writer_wrote=0`, so the name
+  gate is not it. No offered matrix was ever fresh, and every acted event
+  used the held base. The skip is the controller's job not running for this
+  camera that frame (round 7's candidate 3 or 5).
+- **A low-wake entry is a MODE switch, not a skip.** At event #2 (5597) the
+  controller stopped running altogether. The mailbox stayed at identity for
+  5,041 consecutive consumes (frames 5597-10637, about a minute: the time
+  in supercruise). So in supercruise identity is the base the engine means
+  to use: the eye is the head pose relative to a camera-centred frame. The
+  low-wake flash is the camera and the objects switching modes on different
+  frames, at entry and at exit.
+  - Holding the world base for up to 2 frames at the entry (acted at 5597
+    and 5598) still flashed.
+  - The exit refills the mailbox (the controller resumes), so there is no
+    un-refilled frame to act on at all.
+- **High wakes:** no flash reported. The one-frame skip there is fixed by
+  the held base, as in 073114.
+- **`ship+0x130`'s translation is (0,0,0) in every frame**, world frames
+  included. It is not the ship's placement in the render frame, and nothing
+  can be rebuilt from it.
+- **During the flight** (09:23) the Steam ini's `temporal_aa` went from
+  `dlss` to `off`. That was not EDVR's flight edit; it was left as found.
+
 ## Static round 7: the writer and its gates (dumps `analysis\decomp\flash\r7\`)
 
 - **The writer is `FUN_142874b20`** (true entry `0x2874B20`, 239 bytes,
@@ -535,6 +637,17 @@ through `pdata_functions.csv`.
 Each was ruled out on 2026-09-23 from existing flight data and static
 analysis, or from flight 184826 or 195435 where marked:
 
+- **Ruled out (091726): the writer's name gate as the skip, and the
+  offered-and-refused matrix as the low-wake answer.** On every event frame
+  the controller made no call at all (`controller_calls=0`), so no matrix
+  was ever offered.
+- **WITHDRAWN (100043 contradicts it): "ruled out (091726): a low-wake
+  flash as a one-frame skip".** The low-wake entry and exit flashes ARE
+  one-frame skips. Six scene-judged resets in 100043 each sit on a
+  single-frame un-refilled consume (render offset +2). The long 30-70 s
+  identity stretches are something else: none of their edges produced a
+  reset. The 091726 reading mistook one of those stretches for
+  supercruise.
 - **Ruled out (073114): one fixed substitute for every transition.** The
   held base fixed both hyperspace exits (Sean: "hyperspace worked") but not
   the low wake. The objects change frame on different frames by

@@ -23,6 +23,22 @@
 // at a time), CHANGE 2's consecutive-refilled counter that gates the writer
 // watch alongside the existing stability gate, and CHANGE 3's dump-trigger
 // predicate, which takes no eye-trace flag at all.
+//
+// The same day's static round 7 (the writer FUN_142874b20 and its caller,
+// the controller FUN_1410730a0 -- design doc "Static round 7: the writer and
+// its gates") adds four more: CHANGE 5's Dr7 slot-1 EXECUTE composition
+// (armed/disarmed, leaving slot 0 untouched either way) and the writer's own
+// body-extent classifier; CHANGE 6's offeredSubstituteUsable, the policy that
+// prefers the writer's OFFERED matrix over the held base when it was entered
+// for our ship, refused by its name gate, and still fresh; and CHANGE 7's
+// per-frame classifier, which tells apart "the controller didn't run" from
+// "it ran but the writer wasn't entered" from "entered but didn't write".
+//
+// The task of 2026-09-24 ("dump triggers become mode-switch edges") adds a
+// last one: CHANGE 9's classifyModeSwitchEdge/updateConsecutiveUnrefilled,
+// which turn "every un-refilled call dumps" (flight 091726: 5,041 of them in
+// one low wake) into ENTRY/EXIT edges, plus glitch_scene.h's own fresh/
+// decision print text for the per-frame dump row those edges feed.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -31,6 +47,7 @@
 #include "../../src/d3d11/transition_flash_prevent_core.h"
 #include "../../src/d3d11/pose_reader_watch_core.h"
 #include "../../src/d3d11/transition_flash_eye_base_core.h"
+#include "../../src/d3d11/glitch_scene.h"
 
 using namespace edvr::tfp;
 namespace prw = edvr::prw;
@@ -756,6 +773,241 @@ void caseConsumerExtentClassifier() {
           "consumerExtent: exactly at the end (one past the body) is outside");
 }
 
+// --- transition_flash_eye_base_core.h: CHANGE 5, the writer's own extent --
+
+void caseWriterExtentClassifier() {
+    // Hardcoded literals, independent of kWriterExtentRva/kWriterExtentSize
+    // themselves (verified against analysis\EliteDangerous64.exe's PE
+    // section table directly, not just the decompiler dump): the boundary
+    // checks below compare against the constants, so alone they cannot
+    // catch a wrong SIZE (a mutation to 0xEE instead of 0xEF passed every
+    // one of them during this cell's own break-it pass); this pins the
+    // entry and one-past-the-end RVAs independently.
+    check(tfeb::kWriterExtentRva == 0x2874B20u, "writerExtent: entry RVA is 0x2874B20");
+    check(tfeb::kWriterExtentRva + tfeb::kWriterExtentSize == 0x2874C0Fu,
+          "writerExtent: one past the end is 0x2874C0F (239 bytes)");
+    check(!tfeb::rvaInsideWriterExtent(tfeb::kWriterExtentRva - 1),
+          "writerExtent: one byte before the entry is outside");
+    check(tfeb::rvaInsideWriterExtent(tfeb::kWriterExtentRva),
+          "writerExtent: the entry point itself is inside");
+    check(tfeb::rvaInsideWriterExtent(tfeb::kWriterExtentRva + tfeb::kWriterExtentSize - 1),
+          "writerExtent: the last byte of the body is inside");
+    check(!tfeb::rvaInsideWriterExtent(tfeb::kWriterExtentRva + tfeb::kWriterExtentSize),
+          "writerExtent: exactly at the end (one past the body) is outside");
+    // The writer and consumer extents must not overlap -- they are two
+    // different functions the design doc found in two different rounds.
+    check(!tfeb::rvaInsideConsumerExtent(tfeb::kWriterExtentRva),
+          "writerExtent: the writer's entry is not inside the consumer's extent");
+    check(!tfeb::rvaInsideWriterExtent(tfeb::kConsumerExtentRva),
+          "writerExtent: the consumer's entry is not inside the writer's extent");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 5, Dr7 slot 1 (EXECUTE) -----
+
+void caseDr7ArmSlot1ExecuteLeavesSlot0Alone() {
+    const uint32_t armed = tfeb::armSlot1ExecuteDr7(0);
+    // Hardcoded literal, independent of kDr7L1Bit itself -- the same
+    // property caseDr7ArmLeavesOtherSlotsAlone pins for slot 0's own
+    // 0x000F0001u, so a wrong bit position in the constant (not just a
+    // wrong mask) is caught here directly, not only via the mask-consistency
+    // checks below.
+    check(armed == 0x00000004u, "Dr7 slot1 arm: from a clear register, exactly bit 2 (L1) comes on");
+    check((armed & tfeb::kDr7L1Bit) != 0, "Dr7 slot1 arm: L1 comes on");
+    check(((armed >> 20) & 0x3u) == 0, "Dr7 slot1 arm: RW1 is 00b (execute)");
+    check(((armed >> 22) & 0x3u) == 0, "Dr7 slot1 arm: LEN1 is 00b");
+
+    // Slot 0 already armed (L0=bit0, RW0=bits16-17, LEN0=bits18-19) plus a
+    // reserved bit (bit10): every one of those must survive untouched, the
+    // same property caseDr7ArmLeavesOtherSlotsAlone asserts for slot 0's own
+    // arm, mirrored here for slot 1.
+    const uint32_t otherSlotBits = prw::kDr7L0Bit | (0x3u << 16) | (0x3u << 18) | (1u << 10);
+    const uint32_t armedWithOthers = tfeb::armSlot1ExecuteDr7(otherSlotBits);
+    check((armedWithOthers & ~tfeb::kDr7Slot1Mask) == otherSlotBits,
+          "Dr7 slot1 arm: every bit outside slot 1's mask survives untouched");
+    check((armedWithOthers & prw::kDr7L0Bit) != 0, "Dr7 slot1 arm: slot 0's own L0 is still set");
+    check(((armedWithOthers >> 16) & 0x3u) == 0x3u, "Dr7 slot1 arm: slot 0's own RW0 is untouched");
+
+    const uint32_t disarmed = tfeb::disarmSlot1Dr7(armedWithOthers);
+    check((disarmed & tfeb::kDr7L1Bit) == 0, "Dr7 slot1 disarm: L1 clears");
+    check((disarmed & otherSlotBits) == otherSlotBits,
+          "Dr7 slot1 disarm: slot 0's bits (and the reserved bit) survive untouched");
+
+    // disarmSlot1Dr7 only clears L1 -- RW1/LEN1 left behind are inert, the
+    // same rule prw::disarmSlot0Dr7 states for its own slot. armSlot1Execute-
+    // Dr7 always writes 00b/00b, so that path alone can never tell "left
+    // behind" apart from "cleared to the same value" -- disarm a hand-built
+    // Dr7 with non-zero RW1/LEN1 (as if some other debugger had set them)
+    // directly, the same way caseDr7DisarmClearsOnlyL0 tests slot 0's own
+    // disarm independently of that slot's own arm.
+    const uint32_t nonZeroRw1Len1 = tfeb::kDr7L1Bit | (0x3u << 20) | (0x3u << 22);
+    const uint32_t disarmedFromNonZero = tfeb::disarmSlot1Dr7(nonZeroRw1Len1);
+    check((disarmedFromNonZero & tfeb::kDr7L1Bit) == 0, "Dr7 slot1 disarm: L1 clears from a non-zero RW1/LEN1 start");
+    check(((disarmedFromNonZero >> 20) & 0xFu) == 0xFu,
+          "Dr7 slot1 disarm: non-zero RW1/LEN1 bits are left behind, not cleared");
+}
+
+void caseDr6Slot1Hit() {
+    check(tfeb::dr6HasSlot1Hit(tfeb::kDr6B1Bit), "Dr6: B1 alone reads as a slot-1 hit");
+    check(!tfeb::dr6HasSlot1Hit(prw::kDr6B0Bit), "Dr6: B0 alone does not read as a slot-1 hit");
+    check(tfeb::dr6HasSlot1Hit(prw::kDr6B0Bit | tfeb::kDr6B1Bit),
+          "Dr6: B0 and B1 together still reads as a slot-1 hit");
+    check(!tfeb::dr6HasSlot1Hit(0), "Dr6: no bits set is not a slot-1 hit");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 6, the substitute policy ----
+// (offered vs. held).
+
+void caseOfferedSubstituteUsable() {
+    float goodOffered[16];
+    eyeBaseIdentityMailbox(goodOffered);
+    goodOffered[12] = 55.0f;  // a real translation, not the reset value
+
+    // Baseline: entered, did not write since, an offer captured this frame,
+    // finite, not reset -> usable.
+    check(tfeb::offeredSubstituteUsable(true, false, true, 100, 100, goodOffered),
+          "offeredSubstituteUsable: entered, refused, fresh this frame -> offered");
+    // Fresh also covers "the frame before".
+    check(tfeb::offeredSubstituteUsable(true, false, true, 100, 99, goodOffered),
+          "offeredSubstituteUsable: fresh from the previous frame -> offered");
+    // Two frames old is stale (kOfferedMaxAgeFrames=1, tighter than the held
+    // base's own 2-frame cap).
+    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 98, goodOffered),
+          "offeredSubstituteUsable: two frames old is stale -> refused");
+
+    // Not entered at all (skip candidate 1: the controller's own gate) ->
+    // held, regardless of anything else being otherwise usable.
+    check(!tfeb::offeredSubstituteUsable(false, false, true, 100, 100, goodOffered),
+          "offeredSubstituteUsable: the writer was not entered -> held");
+
+    // Entered AND wrote: the name gate did NOT refuse it, so this call would
+    // not even be unrefilled -- still must not be treated as offered-usable
+    // if asked.
+    check(!tfeb::offeredSubstituteUsable(true, true, true, 100, 100, goodOffered),
+          "offeredSubstituteUsable: the writer wrote since the previous consume -> held");
+
+    // No offer ever captured.
+    check(!tfeb::offeredSubstituteUsable(true, false, false, 100, 100, goodOffered),
+          "offeredSubstituteUsable: nothing captured -> held");
+
+    // Stale, non-finite, and reset-value offers each refuse alone, with
+    // every other guard held at the acting baseline.
+    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 50, goodOffered),
+          "offeredSubstituteUsable: a far-stale offer -> held");
+    float infOffered[16];
+    eyeBaseIdentityMailbox(infOffered);
+    infOffered[9] = bitsToFloat(0x7F800000u);  // +Inf
+    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 100, infOffered),
+          "offeredSubstituteUsable: a non-finite offer -> held");
+    float resetOffered[16];
+    eyeBaseIdentityMailbox(resetOffered);
+    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 100, resetOffered),
+          "offeredSubstituteUsable: the offer itself is the reset value -> held");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 7, per-frame classification -
+
+void caseClassifyFrameWriter() {
+    check(tfeb::classifyFrameWriter(0, 0, 0) == tfeb::FrameWriterClass::ControllerNotCalled,
+          "classifyFrameWriter: no controller calls -> controller not called");
+    check(tfeb::classifyFrameWriter(0, 5, 5) == tfeb::FrameWriterClass::ControllerNotCalled,
+          "classifyFrameWriter: controller calls checked first, regardless of the other counts");
+    check(tfeb::classifyFrameWriter(3, 0, 0) == tfeb::FrameWriterClass::ControllerCalledWriterNotEntered,
+          "classifyFrameWriter: controller ran, writer never entered -> skip candidate 1");
+    check(tfeb::classifyFrameWriter(3, 2, 0) == tfeb::FrameWriterClass::WriterEnteredNotWritten,
+          "classifyFrameWriter: entered but did not write -> skip candidate 2 (the name gate)");
+    check(tfeb::classifyFrameWriter(3, 2, 1) == tfeb::FrameWriterClass::WriterWrote,
+          "classifyFrameWriter: entered and wrote -> an ordinary frame");
+    check(tfeb::classifyFrameWriter(3, 2, 2) == tfeb::FrameWriterClass::WriterWrote,
+          "classifyFrameWriter: writerWrote need not equal writerEntered to still read as WriterWrote");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 9, mode-switch edges --------
+// (task 2026-09-24: dump triggers become entry/exit edges instead of firing
+// on every un-refilled call -- flight 091726's low wake alone was 5,041 of
+// them, one dump trigger each.)
+
+void caseModeSwitchEdgeEntryFiresOnce() {
+    uint32_t c = 0;
+    // A refilled call from a zero streak is not an edge -- nothing to enter.
+    check(tfeb::classifyModeSwitchEdge(/*gameMode=*/2, /*unrefilled=*/false, c) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: a refilled call from a zero streak is not an edge");
+
+    // The first un-refilled call after a refilled one: ENTRY.
+    check(tfeb::classifyModeSwitchEdge(2, true, c) == tfeb::ModeSwitchEdge::Entry,
+          "modeSwitchEdge: the first un-refilled call after a refilled one is ENTRY");
+    c = tfeb::updateConsecutiveUnrefilled(c, 2, true);
+    check(c == 1, "modeSwitchEdge: the streak counter reaches 1 after that call");
+
+    // The second consecutive un-refilled call is not another entry -- entry
+    // fires once per run, not on every call inside it.
+    check(tfeb::classifyModeSwitchEdge(2, true, c) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: entry fires once -- the second un-refilled call in the run is not an edge");
+}
+
+void caseModeSwitchEdgeNoneInsideRun() {
+    uint32_t c = 1;  // the entry has already fired; this run is under way
+    for (int i = 0; i < 28; ++i) {
+        check(tfeb::classifyModeSwitchEdge(2, true, c) == tfeb::ModeSwitchEdge::None,
+              "modeSwitchEdge: no trigger inside an un-refilled run");
+        c = tfeb::updateConsecutiveUnrefilled(c, 2, true);
+    }
+    check(c == 29, "modeSwitchEdge: 29 consecutive un-refilled calls (1 entry + 28 more, still no exit)");
+}
+
+void caseModeSwitchEdgeExitAfterThirty() {
+    // One short of the exit run length: a refilled call here is not an exit.
+    uint32_t c29 = 0;
+    for (int i = 0; i < 29; ++i) c29 = tfeb::updateConsecutiveUnrefilled(c29, 2, true);
+    check(c29 == 29, "modeSwitchEdge: 29 consecutive un-refilled calls, one short of the exit run");
+    check(tfeb::classifyModeSwitchEdge(2, false, c29) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: exit fires only after >= 30 -- a refilled call after 29 is not one");
+
+    // Exactly 30: the next refilled call IS the exit.
+    uint32_t c30 = c29;
+    c30 = tfeb::updateConsecutiveUnrefilled(c30, 2, true);
+    check(c30 == 30, "modeSwitchEdge: 30 consecutive un-refilled calls reaches the exit run length");
+    check(tfeb::classifyModeSwitchEdge(2, false, c30) == tfeb::ModeSwitchEdge::Exit,
+          "modeSwitchEdge: a refilled call after 30 consecutive un-refilled ones is EXIT");
+
+    // A mode==1 call neither breaks nor extends the run, and is never itself
+    // an edge -- the same exclusion updateConsecutiveRefilled already
+    // applies to the refilled-streak counter.
+    const uint32_t afterMode1 = tfeb::updateConsecutiveUnrefilled(c30, /*gameMode=*/1, /*unrefilled=*/true);
+    check(afterMode1 == c30, "modeSwitchEdge: a mode==1 call leaves the streak untouched");
+    check(tfeb::classifyModeSwitchEdge(1, true, c30) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: a mode==1 call is never itself an edge");
+}
+
+void caseModeSwitchEdgeSingleFrameSkip() {
+    uint32_t c = 0;
+    // Refilled, then a single un-refilled frame: ENTRY.
+    check(tfeb::classifyModeSwitchEdge(2, true, c) == tfeb::ModeSwitchEdge::Entry,
+          "modeSwitchEdge: a single-frame skip's own un-refilled call is ENTRY");
+    c = tfeb::updateConsecutiveUnrefilled(c, 2, true);
+    check(c == 1, "modeSwitchEdge: the skip's streak reaches 1");
+
+    // Refilled again immediately: not an exit -- the run never reached 30.
+    check(tfeb::classifyModeSwitchEdge(2, false, c) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: a single-frame skip's recovery fires no exit (run length 1 < 30)");
+}
+
+// --- glitch_scene.h: CHANGE 9, the per-frame dump row's own fresh/decision
+// print text (recordScenePosition's own zeroed-when-stale fold, glitch_
+// frame.cpp, given a name a reader -- and this test -- can ask for).
+
+void caseSceneGeometryFreshAndDecisionText() {
+    check(std::strcmp(edvr::glitchSceneGeometryFreshText(true), "") == 0,
+          "sceneGeometryFreshText: a fresh record prints no prefix");
+    check(std::strcmp(edvr::glitchSceneGeometryFreshText(false), "STALE-") == 0,
+          "sceneGeometryFreshText: a stale-geometry record prints as not fresh");
+    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::Unknown), "unknown") == 0,
+          "sceneDecisionText: Unknown prints as unknown");
+    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::Coherent), "coherent") == 0,
+          "sceneDecisionText: Coherent prints as coherent");
+    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::CameraReset), "cameraReset") == 0,
+          "sceneDecisionText: CameraReset prints as cameraReset");
+}
+
 // --- pose_reader_watch_core.h: the write-mode Dr7 slot-0 composition ------
 // (design doc round 6, part B: the writer watch wants RW0=01b where the
 // render-pose read watch above wants RW0=11b -- armSlot0Dr7's own new
@@ -831,6 +1083,16 @@ int wmain(int argc, wchar_t** argv) {
     caseEyeBaseFiniteCheck();
     caseConsumerExtentClassifier();
     caseDr7ArmWriteModeSlot0();
+    caseWriterExtentClassifier();
+    caseDr7ArmSlot1ExecuteLeavesSlot0Alone();
+    caseDr6Slot1Hit();
+    caseOfferedSubstituteUsable();
+    caseClassifyFrameWriter();
+    caseModeSwitchEdgeEntryFiresOnce();
+    caseModeSwitchEdgeNoneInsideRun();
+    caseModeSwitchEdgeExitAfterThirty();
+    caseModeSwitchEdgeSingleFrameSkip();
+    caseSceneGeometryFreshAndDecisionText();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

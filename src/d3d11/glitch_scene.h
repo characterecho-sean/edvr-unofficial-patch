@@ -38,6 +38,26 @@ inline GlitchSceneDecision glitchSceneDecision(const GlitchSceneGeometry& g,cons
     return GlitchSceneDecision::Unknown;
 }
 
+// CHANGE 9 (2026-09-24, task "the object side and the camera side of each
+// frame on one line"): text for the two things a per-frame dump row prints
+// beside the seven numbers above -- whether this frame's pool geometry was
+// actually sampled (as opposed to the all-zero default recordScenePosition
+// folds in when it was not, glitch_frame.cpp -- a real coherent frame can
+// also measure all-zero, so the flag says what the numbers alone cannot) and
+// the decision it fed. Pure formatting, kept beside the enum/struct they
+// describe, the way this file already keeps glitchSceneDecision next to
+// GlitchSceneDecision.
+inline const char* glitchSceneGeometryFreshText(bool fresh) { return fresh ? "" : "STALE-"; }
+
+inline const char* glitchSceneDecisionText(GlitchSceneDecision d) {
+    switch(d) {
+    case GlitchSceneDecision::Unknown:     return "unknown";
+    case GlitchSceneDecision::Coherent:    return "coherent";
+    case GlitchSceneDecision::CameraReset: return "cameraReset";
+    }
+    return "?";
+}
+
 namespace glitch_scene_detail {
 constexpr unsigned kSamples=128, kPoolStride=336;
 struct Point {

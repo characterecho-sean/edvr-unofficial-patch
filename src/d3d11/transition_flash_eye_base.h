@@ -6,12 +6,21 @@
 // views, then (mode != 1) resets the mailbox to an identity constant. Some
 // writer has to refill it every frame; on the frame after a render-frame
 // switch it is not refilled in time, so the eye composes against the head
-// pose alone -- the flash. The candidate written back is the mailbox's OWN
-// last known-refilled value, cached every refilled call and guarded call by
-// call (age, ship pointer, finite, not itself the reset value, session cap)
+// pose alone -- the flash.
+//
+// Static round 7 (design doc, "Static round 7: the writer and its gates")
+// found that writer, FUN_142874b20, and its own name-gate skip. A DR1
+// EXECUTE breakpoint at its entry (alongside DR0's existing write watch, one
+// VEH, one lifecycle) captures what it was OFFERED whether or not the name
+// gate let it through; when the writer was entered for our ship and refused
+// by that gate, the offered matrix -- fresh, finite, not the reset value --
+// is "the base the writer would have written" and takes priority over the
+// held base. Otherwise the candidate is still the mailbox's OWN last
+// known-refilled value, cached every refilled call and guarded call by call
+// (age, ship pointer, finite, not itself the reset value, session cap)
 // before anything acts on it -- see transition_flash_eye_base_core.h's
-// heldBaseRefusal. ship+0x130 is still read and logged, for the record, but
-// no longer gates or supplies the write.
+// offeredSubstituteUsable and heldBaseRefusal. ship+0x130 is still read and
+// logged, for the record, but no longer gates or supplies the write.
 //
 //   advanced.transition_flash_eye_base = off | watch | on | alternate
 //     off        nothing installed. One log line.
@@ -27,6 +36,8 @@
 // tools\transition_flash_prevent_test drives. Deliberately a separate module
 // from transition_flash_prevent.cpp/pose_reader_watch.cpp: neither of those
 // is touched by this file (both are left exactly as they were).
+#include "glitch_scene.h"
+
 #include <cmath>
 #include <cstdint>
 
@@ -55,8 +66,10 @@ void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo);
 // The existing transition-flash DETECTOR's scene-judged eye-camera-reset
 // verdict (glitch_frame.cpp's kVerdictSceneReset, from each of its three
 // ring-write sites -- the same tap pose_reader_watch.h's dump-trigger narrow
-// uses), one of this file's two automatic dump triggers. The other (any
-// unrefilled consumer call) is internal and needs no call from outside.
+// uses), one of this file's two automatic dump triggers. The other (CHANGE
+// 9: a mode-switch entry or exit edge, not every unrefilled consumer call --
+// see transition_flash_eye_base_core.h's classifyModeSwitchEdge) is internal
+// and needs no call from outside.
 void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVerdict);
 
 // The detector's own per-frame scene-camera tap -- glitch_frame.cpp's
@@ -69,7 +82,18 @@ void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVe
 // right after recordScenePosition; a read-and-reset per real frame, folded
 // straight into this module's own per-frame dump row (no snapshot struct --
 // nothing outside this file needs the value back).
-void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid);
+//
+// CHANGE 9 (2026-09-24, "the object side and the camera side of each frame
+// on one line"): `geometry`/`decision` are glitch_scene.h's own per-frame
+// measurement of the object pool matched against the camera -- the same
+// value recordScenePosition folds into e.geometry, and glitchSceneDecision()
+// classifies. `geometryFresh` is recordScenePosition's own freshness gate
+// (the pool was actually compared this frame), handed back explicitly
+// rather than inferred from an all-zero geometry, which a real coherent
+// frame can also measure.
+void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid,
+                                            const GlitchSceneGeometry& geometry, bool geometryFresh,
+                                            GlitchSceneDecision decision);
 
 // This frame's consumer/writer activity, read once per ring-write site
 // (glitch_frame.cpp's RingEntry) -- poseReaderWatchFrameSnapshot's read-and-
