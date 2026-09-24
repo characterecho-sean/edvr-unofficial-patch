@@ -1487,6 +1487,11 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 // a State member so a draw recorded on a deferred context by another thread
 // cannot take a flag the render thread set for its own next draw.
 thread_local bool t_uiDepthThisDraw = false;
+// The generic hologram/icon depth pass's own flag, alongside the above:
+// a separate classification (ui_depth.cpp's uiDepthHologramOnEyeDraw), so
+// it composes independently of whether the family reissue above also
+// claims this draw.
+thread_local bool t_holoDepthThisDraw = false;
 
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo,
@@ -2343,6 +2348,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // below; forwardWithVerdict's scope consumes it.
     if (uiDepthWantsDraws()) t_uiDepthThisDraw = uiDepthOnEyeDraw(self,
         {kind,count,instances,args.start,args.base,args.startInstance});
+    // The generic hologram/icon depth pass (ui_depth.h): its own family
+    // list, checked independently of the classification above.
+    if (uiDepthHologramWantsDraws()) t_holoDepthThisDraw = uiDepthHologramOnEyeDraw(self);
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix
@@ -3736,12 +3744,19 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     struct UiDepthScope {
         ID3D11DeviceContext* ctx;
         bool                 on;
+        bool                 holoOn;   // the generic hologram/icon pass's own classification
         explicit UiDepthScope(ID3D11DeviceContext* c)
-            : ctx(c), on(t_uiDepthThisDraw) {
+            : ctx(c), on(t_uiDepthThisDraw), holoOn(t_holoDepthThisDraw) {
             t_uiDepthThisDraw = false;
+            t_holoDepthThisDraw = false;
         }
         ~UiDepthScope() {
             if (on) uiDepthEnd(ctx);
+            // holoOn needs no matching End here: uiDepthHologramOnEyeDraw
+            // resets its own classification at the top of every call, and
+            // the reissue below is the only caller of the two Begins it
+            // feeds, so an early return that skips the reissue leaves
+            // nothing armed to clean up.
         }
     } uiDepthScope(self);
     if (v == DrawVerdict::kSkip) {
@@ -3854,6 +3869,18 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {
         if (uiDepthReissueBegin(self)) pureDrawReissue(self,kind,count,instances,args);
         uiDepthReissueEnd(self);
+    }
+    // The generic hologram/icon depth pass (ui_depth.h): the same draw twice
+    // more, its light into a scratch target through its own blend, then its
+    // nearest depth into another. Both test only the pass's own radius
+    // target, so they need nothing from the family reissue above.
+    // uiDepthWantsReissue() answers for that reissue alone; holoOn is this
+    // pass's own classification.
+    if (!layered && uiDepthScope.holoOn) {
+        if (uiDepthHologramContributionBegin(self)) pureDrawReissue(self,kind,count,instances,args);
+        uiDepthHologramContributionEnd(self);
+        if (uiDepthHologramElementDepthBegin(self)) pureDrawReissue(self,kind,count,instances,args);
+        uiDepthHologramElementDepthEnd(self);
     }
     // uiDepthPlanetPending() is the function's own first test, inline: it
     // clears both flags and then declines unless one was set, so skipping it

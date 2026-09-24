@@ -1583,7 +1583,7 @@ bool             g_eyeRawWritten[kEyeRun] = {};
 constexpr int kEyeInputs=16;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"Free11",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext"};
+const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"HoloContribution",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext"};
 uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
 bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
@@ -1922,6 +1922,15 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
         if(holo[0]) {
             ID3D11Resource* res=nullptr; holo[0]->GetResource(&res);
             if(res) { res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[7])); res->Release(); }
+        }
+        // The generic hologram/icon depth pass's raw contribution (ui_depth.h):
+        // the same RGBA16F target its resolve reads, sized like the scene
+        // depth textures[4] already is, so a dump shows where coverage landed.
+        D3D11_TEXTURE2D_DESC sceneDesc{}; textures[4]->GetDesc(&sceneDesc);
+        ID3D11ShaderResourceView* holoContrib=nullptr;
+        if(uiDepthHologramContribution(sceneDesc.Width,sceneDesc.Height,0,&holoContrib) && holoContrib) {
+            ID3D11Resource* res=nullptr; holoContrib->GetResource(&res);
+            if(res) { res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[11])); res->Release(); }
         }
     }
     // Copy before the depth swap; an absent file means history was invalid.
@@ -3470,6 +3479,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             res->Release();
         }
         if (scene) {
+            // The hologram/icon depth resolve (ui_depth.h) writes into the
+            // private scene-depth copy, so it runs before
+            // uiDepthTemporalDepth hands that copy to the pass. inSrv is this
+            // eye's finished colour, for the resolve's share test.
+            uiDepthHologramResolve(ctx, eye, scene, sd.Width, sd.Height, inSrv);
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
             celestialMotionViews(ctx, scene, terrainSrvs);
             uiDepthHoloMotion(eye,scene,holoSrvs);
