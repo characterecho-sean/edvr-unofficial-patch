@@ -82,36 +82,17 @@ struct Shared {
     // aligned volatile store is atomic on x64, so no reader tears one.
     // Zero is "nobody has published", the eyeSize discipline.
     volatile LONG64 submitTex[2];
-    // fssMonoFrames  frames the openvr half should submit the RIGHT eye's
-    //                texture for BOTH eyes, counting down, set by d3d11
-    //                when a camera jump lands while the Full System
-    //                Scanner's screen is up
-    //
-    // The measured defect (docs/fss-scanner.md, round 33): for ~10 frames
-    // of the zoom arrival the LEFT submitted image carries hard-black
-    // unresolved tiles the right does not (16 vs 2 measured). The body
-    // sits at optical infinity, so the right eye's image is correct for
-    // both during that window; holdFrames' disciplines carry over whole.
-    volatile LONG fssMonoFrames;
     // fssChromeStamp  bumped by d3d11 on every frame that draws the
     //                 scanner's chrome -- externalCamStamp's discipline:
     //                 a counter, compared with !=, staleness judged by
     //                 the reader against its own frame count. The eye
     //                 heal's gate.
     volatile LONG fssChromeStamp;
-    // fssBodyStamp  bumped by d3d11 on every frame the scanner's BODY
-    //               layer draws -- the fully-zoomed state, the theater's
-    //               gate. The chrome stamp covers the whole scanner; this
-    //               one only the final zoom.
-    volatile LONG fssBodyStamp;
     // The scanner screen's rectangle in the (left) eye, derived by d3d11
     // once per theater engage from the composite's own constants; the
     // openvr half crops the cinema screen's content to it. seq bumps per
     // publish; 0 means never published.
     volatile LONG fssPanelRectSeq;
-    // The centring servo's re-derive request: the openvr half nudges the
-    // frozen pose toward square-on and asks for a fresh derivation.
-    volatile LONG fssPanelRectRedo;
     // The arrival stamp: bumped by d3d11 each frame the zoom-press
     // window is open. The heal scopes itself to exactly these frames.
     volatile LONG fssArrivalStamp;
@@ -184,14 +165,6 @@ struct Shared {
     //               cull guard so it does not lie about the frustum while
     //               the intro is still on screen. See frame_flag.h.
     volatile LONG sceneArrived;
-    // gaze  the eye-tracked gaze as head-frame tangents, headForward's
-    //       packing (presence bit, biased milli-tangents), written by
-    //       openvr_api.dll every frame it has one and as ZERO when it has
-    //       not -- so a reader falls back the frame the tracker is lost.
-    // gazeStamp  bumped on every write of gaze, lost included, so a reader
-    //            can tell a fresh publish from a held one.
-    volatile LONG gaze;
-    volatile LONG gazeStamp;
     // The settings menu (docs/settings-menu.md): the anchor pose the panel
     // was summoned at (d3d11 -> openvr, headPose's layout, seq as presence
     // and change stamp), the per-frame visibility heartbeat with the fade
@@ -202,20 +175,9 @@ struct Shared {
     volatile LONG menuAlphaMille;
     volatile LONG menuVisibleStamp;
     volatile LONG menuDrawn;
-    // The compositor's frame timing (openvr -> d3d11), for the monitor:
-    // a seqlock -- perfSeq is odd while a write is in flight, and a reader
-    // that sees it odd, or sees it change across its copy, tries again.
-    volatile LONG     perfSeq;
-    FrameTimingSample perf;
     // The overlay's head lock: bit 31 on, then yaw and pitch as tenths of a
     // degree, each biased into twelve bits (kHeadLockBias).
     volatile LONG     menuHeadLock;
-    // EDVR's activity this frame, openvr -> d3d11: event bits ORed in, the
-    // door's CPU microseconds added; both taken (cleared) at the d3d11
-    // frame boundary.
-    volatile LONG     edvrEvents;
-    volatile LONG     doorCpuUs;
-    volatile LONG     waitCpuUs;
     // The detector's verdict on the last jump, d3d11 -> openvr: bits 0-1 say
     // whether the camera came back (1, a glitch) or stayed (2, a change of
     // reference frame), and the bits above them count the verdicts, so a
@@ -223,7 +185,7 @@ struct Shared {
     // from the last jump's. One word, so the two never tear.
     volatile LONG     jumpVerdict;
     // The runtime-supplied hidden-area mesh's triangle count per eye,
-    // openvr -> d3d11, gaze's packing (presence bit, two biased fields): see
+    // openvr -> d3d11, headForward's packing (presence bit, two biased fields): see
     // announceRuntimeMaskTriangles in frame_flag.h.
     volatile LONG     runtimeMaskTri;
     // introRecentre  d3d11 -> openvr, requestIntroRecentre's one-shot ask:
@@ -247,6 +209,11 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v34 because the channels only the legacy openvr half ever wrote left
+// the layout -- fssMonoFrames, fssBodyStamp, fssPanelRectRedo, the gaze,
+// the compositor's frame timing and EDVR's activity words -- nothing had
+// written them since that proxy was deleted; and because the halves now
+// sign the roll-call below, so the next mismatch is refused aloud.
 // _v33 because the intro panel's recentre request joined (introRecentre),
 // for the seated-origin fix in docs/intro-video.md, 2026-09-17.
 // _v32 because runtimeKind left the layout -- its only writer was the
@@ -308,14 +275,14 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v33_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v34_%lu",
                      GetCurrentProcessId());
         built = true;
     }
     return name;
 }
 
-Shared* map() {
+Shared* block() {
     static Shared* s = [] () -> Shared* {
         HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                                       sizeof(Shared), mappingName());
@@ -328,7 +295,86 @@ Shared* map() {
     return s;
 }
 
+// THE ROLL-CALL (since v34; frame_flag.h, "The layout version"). Its name
+// carries no version, so it outlives every layout change. Each half signs
+// it once, at its first use of the channel: `first` takes the version of
+// whichever half came first, a later half on a different version writes
+// its own into `other`, and `signers` counts the signatures. Both slots
+// are read on every call, so the half that came first refuses the moment a
+// mismatched partner signs; neither slot is ever cleared. These three words
+// are fixed for good: a mapping keeps the size its creator gave it, so a
+// later build that grew the struct could not map an older half's roll-call
+// and would see no partner at all.
+struct RollCall {
+    volatile LONG first;
+    volatile LONG other;
+    volatile LONG signers;
+};
+
+// The last layout that predates the roll-call (v0.17.0 shipped it). A half
+// built with it never signs, so its block is looked for by name instead.
+constexpr uint32_t kUnsignedLayout = 33;
+
+RollCall* rollCall() {
+    static RollCall* r = [] () -> RollCall* {
+        wchar_t name[64];
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_frame_flag_rollcall_%lu",
+                     GetCurrentProcessId());
+        HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                      sizeof(RollCall), name);
+        if (!h) return nullptr;
+        // Not closed, for the block's reason above.
+        auto* p = static_cast<RollCall*>(
+            MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(RollCall)));
+        if (!p) return nullptr;
+        const LONG ours = static_cast<LONG>(kFrameFlagVersion);
+        const LONG was = InterlockedCompareExchange(&p->first, ours, 0);
+        if (was != 0 && was != ours) InterlockedCompareExchange(&p->other, ours, 0);
+        InterlockedIncrement(&p->signers);
+        return p;
+    }();
+    return r;
+}
+
+// An unsigned (v33) partner, once found. Latched, because finding it takes
+// a kernel call and it cannot leave a process it has loaded into.
+volatile LONG g_unsignedPeer = 0;
+
+// The partner's version when it differs from ours, else 0.
+LONG peerMismatch() {
+    if (const LONG unsignedPeer = g_unsignedPeer) return unsignedPeer;
+    const RollCall* r = rollCall();
+    if (!r) return 0;
+    const LONG ours = static_cast<LONG>(kFrameFlagVersion);
+    const LONG first = r->first, other = r->other;
+    if (first && first != ours) return first;
+    if (other && other != ours) return other;
+    return 0;
+}
+
+// Every accessor comes through here: a half whose partner runs another
+// layout reads "no answer" and writes nothing.
+Shared* map() {
+    if (peerMismatch()) return nullptr;
+    return block();
+}
+
 }  // namespace
+
+uint32_t frameFlagPeerMismatch() {
+    if (const LONG theirs = peerMismatch()) return static_cast<uint32_t>(theirs);
+    // A second signature is a partner on our own layout: nothing to look for.
+    const RollCall* r = rollCall();
+    if (r && r->signers >= 2) return 0;
+    wchar_t name[64];
+    _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v%u_%lu", kUnsignedLayout,
+                 GetCurrentProcessId());
+    HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+    if (!h) return 0;
+    CloseHandle(h);
+    InterlockedCompareExchange(&g_unsignedPeer, static_cast<LONG>(kUnsignedLayout), 0);
+    return kUnsignedLayout;
+}
 
 namespace {
 volatile LONG g_worldJump = 0;
@@ -359,11 +405,6 @@ void publishFssPanelRect(const float* corners16) {
     InterlockedIncrement(&s->fssPanelRectSeq);
 }
 
-long fssPanelRectSeqValue() {
-    Shared* s = map();
-    return s ? s->fssPanelRectSeq : 0;
-}
-
 void bumpFssArrivalStamp() {
     Shared* s = map();
     if (s) InterlockedIncrement(&s->fssArrivalStamp);
@@ -374,31 +415,11 @@ long fssArrivalStampValue() {
     return s ? s->fssArrivalStamp : 0;
 }
 
-void bumpFssPanelRectRedo() {
-    Shared* s = map();
-    if (s) InterlockedIncrement(&s->fssPanelRectRedo);
-}
-
-long fssPanelRectRedoValue() {
-    Shared* s = map();
-    return s ? s->fssPanelRectRedo : 0;
-}
-
 bool readFssPanelRect(float* out16) {
     Shared* s = map();
     if (!s || !out16 || s->fssPanelRectSeq == 0) return false;
     for (int i = 0; i < 16; ++i) out16[i] = s->fssPanelRect[i];
     return true;
-}
-
-void bumpFssBodyStamp() {
-    Shared* s = map();
-    if (s) ++s->fssBodyStamp;
-}
-
-LONG fssBodyStampValue() {
-    Shared* s = map();
-    return s ? s->fssBodyStamp : 0;
 }
 
 void bumpFssChromeStamp() {
@@ -409,24 +430,6 @@ void bumpFssChromeStamp() {
 LONG fssChromeStampValue() {
     Shared* s = map();
     return s ? s->fssChromeStamp : 0;
-}
-
-void setFssMonoFrames(int n) {
-    Shared* s = map();
-    if (!s || n < 0 || n > 60) return;
-    // Extend, never shorten: two jumps in quick succession keep the
-    // longer window.
-    if (n > s->fssMonoFrames) s->fssMonoFrames = n;
-}
-
-int fssMonoRemaining() {
-    Shared* s = map();
-    return s ? s->fssMonoFrames : 0;
-}
-
-void decFssMonoFrames() {
-    Shared* s = map();
-    if (s && s->fssMonoFrames > 0) --s->fssMonoFrames;
 }
 
 void publishSubmitTexture(int eye, void* texture) {
@@ -687,40 +690,6 @@ bool headForward(float* tx, float* ty) {
     return true;
 }
 
-void announceGaze(float tx, float ty) {
-    Shared* s = map();
-    if (!s) return;
-    auto biased = [](float t) -> uint32_t {
-        float c = t;
-        if (!(c > -3.0f)) c = -3.0f;
-        if (!(c < 3.0f)) c = 3.0f;
-        const int32_t milli = static_cast<int32_t>(c * 1000.0f);
-        return static_cast<uint32_t>(milli + 16384) & 0x7FFFu;
-    };
-    const uint32_t packed = 0x80000000u | (biased(tx) << 15) | biased(ty);
-    InterlockedExchange(&s->gaze, static_cast<LONG>(packed));
-    InterlockedIncrement(&s->gazeStamp);
-}
-
-void announceGazeLost() {
-    Shared* s = map();
-    if (!s) return;
-    InterlockedExchange(&s->gaze, 0);
-    InterlockedIncrement(&s->gazeStamp);
-}
-
-bool gazeCentre(float* tx, float* ty, uint32_t* stamp) {
-    Shared* s = map();
-    if (!s) return false;
-    if (stamp) *stamp = static_cast<uint32_t>(InterlockedCompareExchange(&s->gazeStamp, 0, 0));
-    const LONG packed = InterlockedCompareExchange(&s->gaze, 0, 0);
-    if (!packed) return false;
-    const uint32_t v = static_cast<uint32_t>(packed);
-    if (tx) *tx = (static_cast<int32_t>((v >> 15) & 0x7FFFu) - 16384) / 1000.0f;
-    if (ty) *ty = (static_cast<int32_t>(v & 0x7FFFu) - 16384) / 1000.0f;
-    return true;
-}
-
 void announceRuntimeMaskTriangles(uint32_t leftTri, uint32_t rightTri) {
     Shared* s = map();
     if (!s) return;
@@ -815,68 +784,6 @@ bool menuHeadLock(float* yawDeg, float* pitchDeg) {
     return true;
 }
 
-void noteEdvrEvent(uint32_t bits) {
-    Shared* s = map();
-    if (s && bits) InterlockedOr(&s->edvrEvents, static_cast<LONG>(bits));
-}
-
-uint32_t takeEdvrEvents() {
-    Shared* s = map();
-    return s ? static_cast<uint32_t>(InterlockedExchange(&s->edvrEvents, 0)) : 0u;
-}
-
-void addDoorCpuUs(uint32_t us) {
-    Shared* s = map();
-    if (s && us) InterlockedExchangeAdd(&s->doorCpuUs, static_cast<LONG>(us > 1000000u ? 1000000u : us));
-}
-
-uint32_t takeDoorCpuUs() {
-    Shared* s = map();
-    return s ? static_cast<uint32_t>(InterlockedExchange(&s->doorCpuUs, 0)) : 0u;
-}
-
-void addWaitCpuUs(uint32_t us) {
-    Shared* s = map();
-    if (s && us) InterlockedExchangeAdd(&s->waitCpuUs, static_cast<LONG>(us > 1000000u ? 1000000u : us));
-}
-
-uint32_t takeWaitCpuUs() {
-    Shared* s = map();
-    return s ? static_cast<uint32_t>(InterlockedExchange(&s->waitCpuUs, 0)) : 0u;
-}
-
-void publishFrameTiming(const FrameTimingSample& sample) {
-    Shared* s = map();
-    if (!s) return;
-    // Odd while writing. One writer (the openvr half's frame boundary), so
-    // the increments need no exchange loop; the barriers keep the payload
-    // between them.
-    InterlockedIncrement(&s->perfSeq);
-    MemoryBarrier();
-    s->perf = sample;
-    MemoryBarrier();
-    InterlockedIncrement(&s->perfSeq);
-}
-
-bool frameTimingSample(FrameTimingSample* out, uint32_t* seq) {
-    Shared* s = map();
-    if (!s || !out) return false;
-    for (int tries = 0; tries < 4; ++tries) {
-        const LONG a = InterlockedCompareExchange(&s->perfSeq, 0, 0);
-        if (a == 0) return false;          // never published
-        if (a & 1) continue;               // a write in flight
-        MemoryBarrier();
-        const FrameTimingSample copy = s->perf;
-        MemoryBarrier();
-        const LONG b = InterlockedCompareExchange(&s->perfSeq, 0, 0);
-        if (a != b) continue;
-        *out = copy;
-        if (seq) *seq = static_cast<uint32_t>(a >> 1);
-        return true;
-    }
-    return false;
-}
-
 bool takeSubmitHoldFrame() {
     Shared* s = map();
     if (!s) return false;
@@ -900,13 +807,6 @@ bool introRecentreRequested() {
 void clearIntroRecentreRequest() {
     Shared* s = map();
     if (s) InterlockedExchange(&s->introRecentre, 0);
-}
-
-bool externalCameraEverPublished() {
-    Shared* s = map();
-    // The stamp only ever moves when setExternalCameraOnFoot is called, so a
-    // nonzero stamp is proof somebody published -- regardless of what they said.
-    return s && InterlockedCompareExchange(&s->externalCamStamp, 0, 0) != 0;
 }
 
 bool externalCameraOnFootLive(uint32_t maxAgeFrames) {

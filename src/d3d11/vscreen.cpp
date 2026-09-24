@@ -461,7 +461,6 @@ struct State {
     int      fssHealOn = 0;
     int      censusFssJump = 0;
     int      fssTheaterOn = 0;
-    uint32_t fssBodyStampFrame = 0;
     uint32_t fssJumpFrame = 0;   // the zoom-start camera jump, for the
                                  // reveal's arrival window
     bool     fssArrivalOpen = false;
@@ -2248,18 +2247,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 // land before the eye composites in the frame, so the
                 // stamp is fresh by the time the composites ask.
                 s->fssBodyFrame = s->frameNo;
-                // The theater's gate signal: only the final zoom draws
-                // the body layer. Bumped once per frame at most.
-                if (s->fssTheaterOn && s->fssBodyStampFrame != s->frameNo) {
-                    const bool first = s->fssBodyStampFrame == 0;
-                    s->fssBodyStampFrame = s->frameNo;
-                    bumpFssBodyStamp();
-                    if (first) {
-                        Log::get().note(
-                            "fss theater: the body layer is up -- the stamp "
-                            "is flowing to the vr half.");
-                    }
-                }
                 if (fssScanWantsDraws() && fssScanOnBodyDraw()) {
                     return DrawVerdict::kFssScan;
                 }
@@ -5209,18 +5196,6 @@ void vScreenFrameBoundary() {
                 s->fssArrivalRecogs);
         }
         s->fssArrivalOpen = open;
-    }
-
-    // The theater's MODE gate (round 44): device_hook's latch -- the
-    // player's own FSS keys for frame-exact edges, the game's GuiFocus
-    // as the authority underneath. While open, the stamp flows and the
-    // vr half keeps the screen up. Structurally immune to the loading
-    // screen the chrome recognition was not: nothing here reads pixels.
-    // The body-draw bump below remains as a subsumed second voice.
-    if (s->fssTheaterOn && deviceHookFssModeLatch() &&
-        s->fssBodyStampFrame != s->frameNo) {
-        s->fssBodyStampFrame = s->frameNo;
-        bumpFssBodyStamp();
     }
 
     // Before this frame's counters are read or reset: a pending census starts

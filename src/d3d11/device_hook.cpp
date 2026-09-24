@@ -1474,6 +1474,26 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (menuTakeConfigPollRequest() || dueMs(g_state->configPollMs, kConfigPollMs)) {
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
+            // frame_flag's layout check (frame_flag.h). The VR runtime half
+            // can load at any point in the session, so it is asked on this
+            // cadence; the first mismatch is said once.
+            {
+                static bool frameFlagMismatchNoted = false;
+                if (!frameFlagMismatchNoted) {
+                    if (const uint32_t theirs = frameFlagPeerMismatch()) {
+                        frameFlagMismatchNoted = true;
+                        Log::get().note(
+                            "frame_flag: LAYOUT MISMATCH -- this d3d11.dll was built with the "
+                            "shared channel's v%u, the VR runtime half beside it with v%u. They "
+                            "come from different EDVR builds, so the channel between them is "
+                            "refused: everything that crosses it (the transition-flash hold, "
+                            "the on-foot camera, the cull guard, the intro recentre, the "
+                            "settings menu's door) is absent this session. Reinstall EDVR so "
+                            "both halves match.",
+                            kFrameFlagVersion, theirs);
+                    }
+                }
+            }
             g_state->fssTheaterWanted =
                 Config::get().getFloat("experimental.fss_theater", 0.0f) > 0.0f ||
                 eyeSyncFromConfig(Config::get()).any();

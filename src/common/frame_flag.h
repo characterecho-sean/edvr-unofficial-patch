@@ -20,6 +20,29 @@
 
 namespace edvr {
 
+// ---- The layout version ---------------------------------------------------
+//
+// Both DLLs compile frame_flag.cpp, and the shared block's layout changes
+// with it, so the block's name carries the version
+// (Local\edvr_glitch_frame_v34_<pid>): halves from different builds never
+// share one. That kept a mismatched pair inert, but silently. Since v34
+// each half also signs a small version-independent roll-call with the
+// version it was built with, and looks for the last unsigned layout's
+// block (v33, v0.17.0's) by name. A half that finds its partner on another
+// version REFUSES the channel -- from then on every call here reads as "no
+// answer" and writes nothing -- and frameFlagPeerMismatch() names the
+// partner's version so the caller's log can say both.
+constexpr uint32_t kFrameFlagVersion = 34;
+
+// The partner half's layout version when it differs from kFrameFlagVersion,
+// else 0. Nonzero means the channel is refused. Each half asks on a cadence
+// of its own and logs the first nonzero answer: the d3d11 half once a
+// second (the partner can load at any point in the session), the VR
+// runtime half each frame. Until a matching partner has signed, a call
+// costs one OpenFileMapping lookup for the v33 block; after that, two
+// loads.
+uint32_t frameFlagPeerMismatch();
+
 // Mark the frame in progress as one that should not reach the headset. Cheap and
 // safe to call from the draw path.
 void markGlitchFrame();
@@ -87,25 +110,11 @@ bool sceneArrived();
 void  publishGameDevice(void* device);
 void* gameDevice();
 
-// The FSS arrival-mono window: d3d11 sets the frame count when a camera
-// jump lands while the scanner's screen is up; the openvr half submits
-// the right eye's texture for both eyes while it counts down (one
-// decrement per frame, its own call so the reader cannot double-count a
-// frame with two submits).
-void setFssMonoFrames(int n);
-int  fssMonoRemaining();
-void decFssMonoFrames();
-
 // The scanner-chrome stamp: bumped by d3d11 on every frame the scanner's
 // screen is drawn; the openvr half judges staleness against its own frame
 // count. The eye heal's gate.
 void bumpFssChromeStamp();
 long fssChromeStampValue();
-
-// The scanner-BODY stamp: bumped by d3d11 on every frame the fully-zoomed
-// body layer draws. The theater's gate -- the final zoom, and only it.
-void bumpFssBodyStamp();
-long fssBodyStampValue();
 
 // The scanner screen's PROJECTED CORNERS in the eye -- TL,TR,BR,BL as
 // (u,v) pairs, 8 floats -- derived by d3d11 once per theater engage. The
@@ -113,13 +122,7 @@ long fssBodyStampValue();
 // through a square-to-quad homography: the content arrives level and
 // fully framed whatever the screen's tilt or the head's pose at engage.
 void publishFssPanelRect(const float* corners16);   // both eyes, L then R
-long fssPanelRectSeqValue();
 bool readFssPanelRect(float* out16);
-
-// The centring servo: the openvr half rotates the frozen pose toward
-// square-on and bumps this to request a fresh derivation.
-void bumpFssPanelRectRedo();
-long fssPanelRectRedoValue();
 
 // The zoom-press arrival window, one bump per open frame: the squares'
 // ~10 frames, and the only frames the window-scoped heal touches.
@@ -207,16 +210,6 @@ bool externalCameraOnFoot();
 // frame, so the units match without a clock, and a stall that freezes both
 // halves together does not age the flag while nothing is being drawn anyway.
 bool externalCameraOnFootLive(uint32_t maxAgeFrames);
-
-// Has ANYTHING ever published the mode, whatever it said?
-//
-// "Nobody is publishing" and "the publisher says no" are different facts and a
-// reader that cannot tell them apart will accuse a healthy install of being
-// broken. That is not hypothetical: the openvr side warned "nothing has
-// reported the player's mode" on every correctly-configured session about forty
-// seconds in, because until the player first enters the camera the gate is
-// publishing "no" continuously and the two look identical from here.
-bool externalCameraEverPublished();
 
 // Ask the openvr half to decline the next `frames` frames.
 //
@@ -356,7 +349,7 @@ bool eyeTangentsVertical(float* topMag, float* botMag);
 // Zero triangles for an eye is a real, common answer (the Pimax OpenXR route
 // supplies none), not a sentinel -- unlike eyeTangents above, so this cannot
 // pack "no answer" as the all-zero word. It carries an explicit presence bit
-// instead, gaze's discipline: bit 31 set means "the openvr half has
+// instead, headForward's discipline: bit 31 set means "the openvr half has
 // published", and only then are the two 15-bit counts (0..32767, clamped)
 // meaningful. False means nobody has published -- an older openvr_api.dll,
 // or no openvr half at all -- and fix.eye_mask's auto mode must not guess.
@@ -385,17 +378,6 @@ void announceHeadForward(float tx, float ty);
 void publishHeadPose(const float* m12);
 bool headPose(float* out12);
 bool headForward(float* tx, float* ty);
-
-// The eye-tracked gaze, published by openvr_api.dll every frame it has one
-// (docs/eye-tracking.md: on the Pimax, the repair d = t - p, one subtraction
-// a frame), as head-frame tangents packed the way headForward is, with a
-// stamp bumped on every publish. "Lost" is a publish too: it writes a zero
-// word, so the reader falls back at once rather than by staleness. Read by
-// d3d11.dll's foveation to centre its rings. The stamp is filled whether or
-// not a gaze is present; the return says whether one is.
-void announceGaze(float tx, float ty);
-void announceGazeLost();
-bool gazeCentre(float* tx, float* ty, uint32_t* stamp);
 
 // THE SETTINGS MENU'S CHANNEL (docs/settings-menu.md). The d3d11 half owns
 // the menu -- its rows, its keys, its bitmap -- and the openvr half owns the
@@ -430,60 +412,6 @@ bool menuVisible(float* alpha, uint32_t* stamp);
 // must never take the keyboard (the fail-open rule).
 void bumpMenuDrawn();
 uint32_t menuDrawnValue();
-
-// THE COMPOSITOR'S FRAME TIMING (docs/settings-menu.md, the Monitor page):
-// what the runtime itself measured for a SETTLED frame -- the one two
-// compositor frames back, whose GPU timestamps have resolved (the most
-// recent record is still in flight at the boundary, and reads its GPU
-// fields as a fraction of a millisecond) -- read by the openvr half through
-// IVRCompositor::GetFrameTiming at each WaitGetPoses and published whole.
-// The d3d11 half's monitor rings it up against the frame it describes.
-// Published under a sequence counter that is odd while a write is in
-// flight, so the reader never sees half a sample; a reader that catches an
-// odd count tries again.
-constexpr uint32_t kFrameTimingLag = 2;   // the record read: this many compositor frames back
-struct FrameTimingSample {
-    uint32_t layout;          // which layout the runtime was measured to be filling: 176 (openvr 0.9.20 / IVRCompositor_014, which Elite binds) or 184 (the current openvr.h)
-    uint32_t frameIndex;      // the compositor's, increments per compositor frame
-    uint32_t presents;        // times this frame was presented
-    uint32_t droppedTotal;    // dropped frames since launch, as counted by the reader
-    uint32_t reprojFlags;     // the compositor's reprojection flags for this frame
-    float    appGpuMs;        // pre-submit + post-submit GPU time, the app's
-    float    totalGpuMs;      // from the previous present to the end of compositor work
-    float    compGpuMs;       // the compositor's own GPU time
-    float    compCpuMs;       // the compositor's own CPU time submitting that work
-    float    cpuFrameMs;      // unused: no layout this build reads carries a usable frame interval
-    float    appCpuMs;        // the app's CPU frame: poses ready to second submit, plus the compositor's submit cost -- fpsVR's CPU frametime
-    float    posesReadyMs;    // when WaitGetPoses returned, ms from the frame's vsync (running start is negative)
-    float    frameReadyMs;    // when the second Submit landed, ms from the same vsync
-    float    presentCpuMs;    // time blocked in Present
-    float    idleCpuMs;       // compositor-measured slack before running start
-    float    displayHz;       // the headset's refresh, or 0 when unknown
-};
-void publishFrameTiming(const FrameTimingSample& s);
-// The latest sample; false when none has been published. `seq` receives
-// the publish count so a reader can tell a fresh sample from a repeat.
-bool frameTimingSample(FrameTimingSample* out, uint32_t* seq);
-
-// EDVR'S OWN ACTIVITY, for the monitor's drop attribution: the openvr half
-// ORs in the events it causes during a frame (a withhold, a resubmit --
-// perf_monitor.h names the bits) and adds the CPU time its door work took
-// in microseconds; the d3d11 half takes both at its frame boundary, which
-// clears them. One frame's worth crosses at a time.
-void     noteEdvrEvent(uint32_t bits);
-uint32_t takeEdvrEvents();
-void     addDoorCpuUs(uint32_t us);
-uint32_t takeDoorCpuUs();
-// The microseconds the game's thread spent BLOCKED inside the runtime's
-// WaitGetPoses this frame (the openvr half clocks the real call). With the
-// time blocked in Present, it is what the Monitor page subtracts from the
-// frame period to get the render thread's own busy time. That is a LARGER
-// window than the compositor's poses-to-submit one -- by the work after the
-// second submit -- and the more useful of the two when a frame is CPU
-// bound; the compositor's is the one that matches fpsVR, so the tile shows
-// that and this on its sub-line.
-void     addWaitCpuUs(uint32_t us);
-uint32_t takeWaitCpuUs();
 
 // THE HEAD-LOCKED OVERLAY'S ANGLES cross as tenths of a degree in twelve
 // bits each, so they carry a bias: 1800 puts -180.0 at 0 and +180.0 at
