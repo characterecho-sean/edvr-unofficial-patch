@@ -1,28 +1,42 @@
 # Transition flash: preventing it inside the engine
 
-*Design, 2026-09-23. Static analysis only: three Ghidra rounds against the
-installed build and a re-read of existing flight logs. Nothing here is built or
-flown.*
+*Design, 2026-09-23, from three Ghidra rounds and a re-read of existing flight
+logs. Built and flown the same evening (flight 184826). The flight REFUTED the
+static chain: see "Flight 184826".*
 
 ## Status
 
-- **State:** Phases 1 and 2 BUILT TOGETHER, NOT FLOWN (Sean chose one flight
-  for both). `advanced.transition_flash_prevent = off|watch|on|alternate`,
-  default off: 0290e101, with five review fixes in 980a0c84 (per-call parent
-  guard, H3 aggregated per frame, the cap counts frames, dumps widen instead
-  of dropping, a 65536-entry ring dumped to `edvr_logs\flash\`). On main via
-  31330089.
-- **Installed (2026-09-23 17:58):** build 980a0c84 in the STEAM copy only;
-  the Frontier copy keeps the engine-motion session's f05c84bf. The Steam
-  `edvr.ini` has `transition_flash = 0` (the trap off, so the A/B is visible)
-  and `[advanced] transition_flash_prevent = alternate` (events alternate
-  watched, acted, starting watched). Both lines are marked in the ini: after
-  the flight, put back `transition_flash = 1` and remove the prevent line.
-  Backup:
-  `scratchpad\steam-edvr.ini.pre-flash-flight.bak` (this session).
+- **State:** the fix as designed is REFUTED. The chain it hooks is not the eye
+  camera's. The code (`advanced.transition_flash_prevent`, 0290e101 plus
+  980a0c84, default off) is on main and does nothing unless set. The Steam
+  copy still holds build 980a0c84, but its `edvr.ini` is RESTORED: the trap
+  is on and there is no prevent line. Sean's in-flight `ui_quality = 1.25`
+  was kept.
 - **Goal (Sean, 2026-09-23):** stop trapping the bad frame (detecting it, then
   resubmitting the previous one) and stop Elite rendering it at all, by fixing
-  the order inside the game.
+  the order inside the game. Unchanged.
+- **What flight 184826 settled:**
+  - The compose `0x23BC8A0` attaches system-scale objects. It pushes about 5
+    targets a frame at ~9e9 m, 1e8 m apart. The eye origin came within 1 m of
+    none of them (H3 confirmed).
+  - The recompute `0x3CEE650` disagreed with the cached block on 12,906 of
+    12,906 calls.
+  - The guards held: the fix never validated and never acted.
+- **Next:** re-anchor on the render side. Capture the game's call stack where
+  it writes the 5376-byte VS b1 buffer (the eye origin's real source), and
+  record the eye camera's `cb1[275]` per frame explicitly. Drop the compose,
+  decode, push and latch hooks, and bound all per-event logging. A short
+  session gives the anchor; a jump adds the bad frame's path. Then static
+  analysis from the fill function.
+- **Instrument defects (fix before any re-fly):**
+  - Per-push stack lines, logged for as long as the event lasted (it never
+    ended), filled the gfx log to its cap at 18:50:40 (f~13459). The rest of
+    that session's gfx log is lost; the dumps survived.
+  - H3's per-frame pick is the observation nearest any push, taken across all
+    5376-byte buffers, so the dumps' series is not an eye trace.
+  - The flown DLL stamps `0290e101-dirty` because it was built before its
+    commit. Its sources equal 980a0c84 by mtime: feature files 17:43-17:50,
+    link 17:54:08, commit 17:57:24. Commit before the final build.
 - **What the bad frame is (measured):** the eye origin the vertex shaders
   subtract, `cb1[275]`, lands on the head pose alone: (-0.02, 0, -0.02) at
   f16450, and five more captures on native builds, all within 14 cm of the
@@ -30,22 +44,10 @@ flown.*
   frame. Withholding that frame cures the visible flash (17:58 flight,
   2026-09-12). The frame after, in two different high wakes, is the same
   canonical placement (-0.02, +3.51, +1613.23).
-- **Leading hypothesis (H1):** the camera's parent node has a world block the
-  engine's world pass has not written yet, and the compose reads it with no
-  check: an identity parent, so the eye is the head alone.
-- **Proposed fix:** at the camera compose, compare the parent's cached world
-  block with the engine's own from-root recompute (`0x3CEE650`). When they
-  disagree, use the recompute. The frame renders from the right place and
-  nothing is withheld.
-- **Next flight:** on the Steam copy, the Phase 1 list below. Note which
-  jumps flashed; press Pause within a couple of seconds of any flash that
-  shows (it dumps the whole ring). First read:
-  `python tools\edvr_log.py --target steam --expect-build 980a0c84`, then
-  the `transition flash prevent:` lines and `edvr_logs\flash\`.
-- **Pass:** the watched events show the detector's CameraReset and a
-  visible flash; the acted events show neither. The recompute agrees with
-  the cached block on ordinary frames (`validated=yes`). H3 frames land in
-  the `<1cm`/`<10cm` buckets.
+- **Hypothesis H1, as tested:** an unwritten parent world block read by the
+  compose at `0x23BC8A0`. REFUTED at that chain (H3 held). The "identity
+  parent, head-only eye" reading of the bad frame still stands; its code is
+  not found yet.
 - **Environment:** game build 332841 (PE TimeDateStamp 1788384820, image
   104,894,464), the same exe in both installs. Independent of VR runtime,
   headset, eye size and DLSS: the code is Elite's camera, below all of them. It
@@ -205,10 +207,46 @@ showing one act per transition and none anywhere else.
 - The branches `transition-flash-run-radius` (PR #16) and `flash-cap-one`
   (PR #18) were never merged, and this supersedes both.
 
+## Flight 184826 (2026-09-23 18:48, Steam copy, build 980a0c84)
+
+Sean flew high and low wakes, a supercruise drop and the galaxy map, and
+skipped the glide and dock/undock. He pressed Pause five times; each press
+wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
+`edvr_gfx_20260923_184826.log` up to its cap and in those dumps.
+
+- **The hooks ran.** The armed line shows all four installed and the
+  recompute verified. Compose, decode and push stayed at zero through the
+  loader, then started at f10385, when flight began. The latch never fired.
+- **Not the eye.** Every compose-site push is at system scale, about
+  (-1.6e8..-8.3e8, 1.6e9, -9e9) m. There are five distinct targets a frame,
+  up to about 7e8 m apart, moving ~76 m a frame together. By the log cap,
+  H3 read 1,844 frames at `>=1m` and none closer.
+- **Unusable recompute.** At f10385, parent `0x17E10E2FB00` had its cached
+  world at about 9e9 m and the recompute at about 1e12 m, with dr 1.78. Every
+  compose-site decode of the flight disagreed, so the fix never validated.
+- **Head-offset eye origins occur on ordinary frames.** From f10386 some
+  5376-byte buffer's float 1100 sat at (-0.105, +0.055, -0.047). That is the
+  docked-style, seat-centred frame (`per-object-motion.md`: docked
+  `cb1[275]` = (0.030, -0.002, 0.000)). So a head-offset eye origin alone is
+  not the bad frame; the detector's CameraReset rule rightly also needs the
+  objects to disagree.
+- **One canonical placement.** At f11068 the same pick was exactly
+  (0, 0, +2.000), between head-offset values and km-scale ones: another
+  transition placement, beside the high wake's (-0.02, +3.51, +1613.23).
+
 ## Ruled out
 
 Each was ruled out on 2026-09-23 from existing flight data and static
-analysis:
+analysis, or from flight 184826 where marked:
+
+- **Ruled out (184826): the compose `0x23BC8A0` as the eye camera's
+  compose.** It pushes about 5 system-scale targets a frame, ~1e8 m apart,
+  and the eye origin came within 1 m of none of the last 4 pushes in 1,844
+  of 1,844 frames. Round 1's evidence was an offset coincidence (`+0x1130`)
+  and a compose-and-push shape.
+- **Ruled out (184826): `0x3CEE650` as a stand-in for the cached parent world
+  block.** It disagreed on 12,906 of 12,906 compose-site decodes: at f10385
+  the cached world was at ~9e9 m and the recompute at ~1e12 m, with dr 1.78.
 
 - **Ruled out: objects lag the camera by a frame (stale objects).** On the
   frame after, objects and camera move together to 2.0 m median in both high
