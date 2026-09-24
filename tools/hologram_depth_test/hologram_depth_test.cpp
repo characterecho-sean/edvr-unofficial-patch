@@ -238,6 +238,39 @@ int main() {
     svUnorm.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; svUnorm.Texture2D.MipLevels = 1;
     ComPtr<ID3D11ShaderResourceView> toySrvUnorm; hr(dev->CreateShaderResourceView(toyTex.Get(), &svUnorm, &toySrvUnorm));
 
+    // The HDR scene target the elements actually blend into (float, no
+    // sRGB anything -- R11G11B10_FLOAT in the field, R16G16B16A16_FLOAT
+    // here) -- and a second copy with no SHADER_RESOURCE bind, for the
+    // "unviewable target" case. Separate from the toy target above: the
+    // whole point of this block is that this one and the "display"
+    // texture below are NOT the same resource.
+    D3D11_TEXTURE2D_DESC hd{};
+    hd.Width = hd.Height = 8; hd.MipLevels = hd.ArraySize = 1;
+    hd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; hd.SampleDesc.Count = 1;
+    hd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> hdrTex; hr(dev->CreateTexture2D(&hd, nullptr, &hdrTex));
+    ComPtr<ID3D11RenderTargetView> hdrRtv; hr(dev->CreateRenderTargetView(hdrTex.Get(), nullptr, &hdrRtv));
+    D3D11_TEXTURE2D_DESC hdNoSrv = hd; hdNoSrv.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> hdrTexNoSrv; hr(dev->CreateTexture2D(&hdNoSrv, nullptr, &hdrTexNoSrv));
+    ComPtr<ID3D11RenderTargetView> hdrRtvNoSrv; hr(dev->CreateRenderTargetView(hdrTexNoSrv.Get(), nullptr, &hdrRtvNoSrv));
+
+    // A flat-colour "display" texture+SRV standing in for the submitted,
+    // tonemapped image -- a UNORM resource wholly separate from the HDR
+    // target above.
+    auto makeDisplay = [&](float v) {
+        D3D11_TEXTURE2D_DESC dd{};
+        dd.Width = dd.Height = 8; dd.MipLevels = dd.ArraySize = 1;
+        dd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; dd.SampleDesc.Count = 1;
+        dd.BindFlags = D3D11_BIND_SHADER_RESOURCE; dd.Usage = D3D11_USAGE_DEFAULT;
+        const BYTE b = static_cast<BYTE>(v * 255.0f + 0.5f);
+        BYTE pixels[8 * 8 * 4];
+        for (int i = 0; i < 64; ++i) { pixels[i*4] = b; pixels[i*4+1] = b; pixels[i*4+2] = b; pixels[i*4+3] = 255; }
+        D3D11_SUBRESOURCE_DATA sd{pixels, 8 * 4, 0};
+        ComPtr<ID3D11Texture2D> tex; hr(dev->CreateTexture2D(&dd, &sd, &tex));
+        ComPtr<ID3D11ShaderResourceView> srv; hr(dev->CreateShaderResourceView(tex.Get(), nullptr, &srv));
+        return srv;
+    };
+
     auto vsCode = compile(kToyVsHlsl, "vs_5_0");
     auto psCode = compile(kToyPsHlsl, "ps_5_0");
     ComPtr<ID3D11VertexShader> toyVs; ComPtr<ID3D11PixelShader> toyPs;
@@ -280,10 +313,10 @@ int main() {
     // place (a second draw over the first, for the grey-background share
     // case); newFrame false accumulates onto the SAME eye/frame's
     // scratch, for the sun-corona case (two listed draws, one frame).
-    auto originalDraw = [&](float z, const float leftRgba[4], const float rightRgba[4],
-                            ID3D11BlendState* blend, bool srgbView, const float* clearColour, bool newFrame) {
+    auto drawIntoRtv = [&](ID3D11RenderTargetView* rtv, float z, const float leftRgba[4],
+                          const float rightRgba[4], ID3D11BlendState* blend,
+                          const float* clearColour, bool newFrame) {
         if (newFrame) { ++frame; g_frame = frame; }
-        ID3D11RenderTargetView* rtv = srgbView ? toyRtvSrgb.Get() : toyRtvUnorm.Get();
         if (clearColour) ctx->ClearRenderTargetView(rtv, clearColour);
         float data[12] = {leftRgba[0], leftRgba[1], leftRgba[2], leftRgba[3],
                           rightRgba[0], rightRgba[1], rightRgba[2], rightRgba[3], z, 0, 0, 0};
@@ -292,6 +325,10 @@ int main() {
         ctx->OMSetBlendState(blend, nullptr, 0xFFFFFFFFu);
         ctx->Draw(3, 0);
         g_holoEye = 0; g_holoW = 8; g_holoH = 8;
+    };
+    auto originalDraw = [&](float z, const float leftRgba[4], const float rightRgba[4],
+                            ID3D11BlendState* blend, bool srgbView, const float* clearColour, bool newFrame) {
+        drawIntoRtv(srgbView ? toyRtvSrgb.Get() : toyRtvUnorm.Get(), z, leftRgba, rightRgba, blend, clearColour, newFrame);
     };
     auto listedReissue = [&]() {
         check(uiDepthHologramContributionBegin(ctx.Get()), "contribution begins");
@@ -388,11 +425,16 @@ int main() {
         for (float v : privateDepth()) check(std::fabs(v - 0.5f) < 1e-6f, "behind nearer scene: untouched");
     }
 
-    // Share: an element that adds exactly +0.1 over an RT pre-cleared to
-    // 0.8 is not a big enough share of the finished 0.9 (share 0.5 wants
-    // at least 0.45); the same over black (finished 0.1) is; with colour
-    // null the share test is skipped outright and the no-colour counter
-    // moves.
+    // Share: the toy target and the toy display happen to be the same
+    // resource here (target is auto-tracked from RTV0; display is passed
+    // explicitly), so these are a degenerate but valid case -- the
+    // dedicated HDR block below is where they differ. An element that
+    // adds exactly +0.1 over an RT pre-cleared to 0.8 is not a big enough
+    // share of the finished 0.9 (share 0.5 wants at least 0.45); the same
+    // over black (finished 0.1) is; with display null the floor falls
+    // back to the contribution's own space (the target is still viewable,
+    // so the share test still runs, and still passes: the fallback
+    // counter moves, not the no-target one).
     {
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
         const float rgba[4] = {0.1f, 0.1f, 0.1f, 1.0f};
@@ -400,7 +442,6 @@ int main() {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         originalDraw(kNear5m, rgba, rgba, blendSrcAlphaOne.Get(), false, grey, true);
         listedReissue();
-        const uint32_t noColourBefore = g_holoWindowNoColour;
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, toySrvUnorm.Get()), "resolve runs (share, over grey)");
         for (float v : privateDepth()) check(v == 0.0f, "share: +0.1 over 0.8 is not enough of the finished pixel");
 
@@ -413,9 +454,71 @@ int main() {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         originalDraw(kNear5m, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
         listedReissue();
-        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (share, no colour)");
-        for (float v : privateDepth()) check(std::fabs(v - kNear5m) < 1e-5f, "share: null colour is covered outright");
-        check(g_holoWindowNoColour == noColourBefore + 1, "share: the no-colour counter moved exactly once");
+        const uint32_t fallbackBefore = g_holoWindowFloorFallback;
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (share, no display)");
+        for (float v : privateDepth()) check(std::fabs(v - kNear5m) < 1e-5f, "share: null display still covers via the floor fallback");
+        check(g_holoWindowFloorFallback == fallbackBefore + 1, "share: the floor-fallback counter moved exactly once");
+    }
+
+    // HDR: the target the elements blend into (float, no tonemapping) and
+    // the display image (UNORM, tonemapped) are now genuinely different
+    // resources at different brightness -- flight 20260924_155636's own
+    // mismatch (HDR luma ~0.078, display luma ~0.273), reproduced here and
+    // read correctly on both sides.
+    {
+        // 0.078 luma over black in the HDR target, display 0.27: the
+        // flight's own failure -- the old code compared 0.078 against
+        // 0.27 and refused it.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        const float dim[4] = {0.078f, 0.078f, 0.078f, 1.0f};
+        drawIntoRtv(hdrRtv.Get(), kNear5m, dim, dim, blendSrcAlphaOne.Get(), kBlack, true);
+        listedReissue();
+        auto display27 = makeDisplay(0.27f);
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, display27.Get()), "resolve runs (HDR, the flight's own case)");
+        for (float v : privateDepth()) check(std::fabs(v - kNear5m) < 1e-5f, "HDR: 0.078 HDR luma against 0.27 display luma is covered");
+
+        // +0.1 over an HDR target pre-filled to 0.8 (finished 0.9), display
+        // 0.9: not covered, the share test in the target's own space.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        const float grey[4] = {0.8f, 0.8f, 0.8f, 1.0f};
+        const float add[4] = {0.1f, 0.1f, 0.1f, 1.0f};
+        drawIntoRtv(hdrRtv.Get(), kNear5m, add, add, blendSrcAlphaOne.Get(), grey, true);
+        listedReissue();
+        auto display9 = makeDisplay(0.9f);
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, display9.Get()), "resolve runs (HDR, share)");
+        for (float v : privateDepth()) check(v == 0.0f, "HDR: +0.1 over 0.8 is not enough of the finished HDR pixel");
+
+        // Over black, display 0.02, floor 0.05: not covered, because the
+        // floor now reads the DISPLAY, not the (otherwise ample) HDR light.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        const float bright[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+        drawIntoRtv(hdrRtv.Get(), kNear5m, bright, bright, blendSrcAlphaOne.Get(), kBlack, true);
+        listedReissue();
+        auto display02 = makeDisplay(0.02f);
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, display02.Get()), "resolve runs (HDR, floor on display)");
+        for (float v : privateDepth()) check(v == 0.0f, "HDR: a dim display pixel is not covered despite ample HDR light");
+
+        // A target with no SHADER_RESOURCE bind: the share test is skipped
+        // outright (the no-target counter moves), the floor on the display
+        // image alone still covers it.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        drawIntoRtv(hdrRtvNoSrv.Get(), kNear5m, bright, bright, blendSrcAlphaOne.Get(), kBlack, true);
+        listedReissue();
+        const uint32_t noTargetBefore = g_holoWindowNoTarget;
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, display27.Get()), "resolve runs (HDR, unviewable target)");
+        for (float v : privateDepth()) check(std::fabs(v - kNear5m) < 1e-5f, "HDR: an unviewable target is covered on the floor alone");
+        check(g_holoWindowNoTarget == noTargetBefore + 1, "HDR: the no-target counter moved exactly once");
+
+        // Display null over the (viewable) HDR target: the contribution
+        // floor applies, and its counter moves.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        drawIntoRtv(hdrRtv.Get(), kNear5m, bright, bright, blendSrcAlphaOne.Get(), kBlack, true);
+        listedReissue();
+        const uint32_t fallbackBefore2 = g_holoWindowFloorFallback;
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (HDR, null display)");
+        for (float v : privateDepth()) check(std::fabs(v - kNear5m) < 1e-5f, "HDR: null display falls back to the contribution floor");
+        check(g_holoWindowFloorFallback == fallbackBefore2 + 1, "HDR: the floor-fallback counter moved exactly once more");
     }
 
     // Sun corona: a bright listed quad beyond the radius, plus a listed
@@ -489,11 +592,17 @@ int main() {
         g_holoFloor = savedFloor;
     }
 
-    // The family builder refuses the canopy, however it is named, and
-    // says so once.
+    // The family builder covers the eleven built-ins (the holo panel, the
+    // icon core, the corona, its two stalks, the target sphere and the
+    // five contact markers) and refuses the canopy, however it is named,
+    // and says so once.
     {
         uint64_t fam[kMaxHashes];
         const uint32_t famCount = holoBuildFamilyList("8C091FFD08644E02", fam, kMaxHashes);
+        check(famCount == 11, "family builder: eleven built-in families");
+        check(inList(fam, famCount, kHoloTargetSphere), "family builder: the target sphere is built in");
+        check(inList(fam, famCount, kHoloContactA) && inList(fam, famCount, kHoloContactE),
+              "family builder: the contact markers are built in");
         check(!inList(fam, famCount, kHoloCanopy), "family builder: the canopy is refused");
         check(g_lastLog.find("canopy") != std::string::npos, "family builder: the refusal is logged");
     }
@@ -504,7 +613,8 @@ int main() {
     // (covered above, before any scratch existed).
     {
         g_holoWindowStartMs = GetTickCount64() - 30001;
-        g_holoWindowListed = g_holoWindowResolved = g_holoWindowNoColour = 0;
+        g_holoWindowListed = g_holoWindowResolved = 0;
+        g_holoWindowNoTarget = g_holoWindowFloorFallback = 0;
         g_holoWindowDeclinedNotCleared = g_holoWindowDeclinedNoPrivate = 0;
         g_holoWindowDeclinedNoProjection = g_holoWindowDeclinedFault = 0;
         g_holoPixelSampleCount = 0;
@@ -512,7 +622,8 @@ int main() {
         holoDepthWindowTick(ctx.Get());
         check(g_lastLog.find("hologram depth:") != std::string::npos, "census: the line printed");
         check(g_lastLog.find("resolved eye-frames 0") != std::string::npos, "census: zero resolved eye-frames printed");
-        check(g_lastLog.find("share test skipped 0") != std::string::npos, "census: zero skipped-share printed");
+        check(g_lastLog.find("share test skipped 0 (no target view)") != std::string::npos, "census: zero skipped-share printed");
+        check(g_lastLog.find("floor on contribution 0 (no display view)") != std::string::npos, "census: zero floor-fallback printed");
         check(g_lastLog.find("declined 0 ") != std::string::npos, "census: zero declined printed");
         check(g_holoWindowStartMs != 0, "census: the window reset after printing");
     }
@@ -527,8 +638,9 @@ int main() {
     ctx->ClearState(); uiDepthShutdown();
     check(gpuTimingShutdown(ctx.Get()), "explicit shared timer shutdown before WARP release");
     std::printf("PASS: %d checks; the generic hologram/icon depth pass mirrors the game's own blend "
-                "(including alpha), gates by the cockpit radius before accumulation, checks its share "
-                "of the finished pixel, restores every piece of state it touches, and the family "
-                "builder and periodic census behave.\n", checks);
+                "(including alpha), gates by the cockpit radius before accumulation, reads its floor "
+                "off the displayed image and its share off the game's own HDR target (never each "
+                "other), restores every piece of state it touches, and the family builder and "
+                "periodic census behave.\n", checks);
     return 0;
 }

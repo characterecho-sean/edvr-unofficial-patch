@@ -2,7 +2,18 @@
 
 ## Status
 
-- **State:** BUILT 2026-09-24 on `claude/openxr-perf-gaps`, NOT FLOWN.
+- **State:** first build ON MAIN (986ebaad) FLOWN ONCE (20260924_155636,
+  dump eye_155832, rolling): the inner quarters still blurred, two defects
+  found (below). Round 3 BUILT on `claude/openxr-perf-gaps`, green
+  (`hologram_depth_test`: 1270 checks), NOT FLOWN:
+  - the share test now reads the game's own RT0 resource back (a per-eye
+    cached SRV, in that RTV's own view format), never the tonemapped
+    `inSrv` -- comparing the two was the defect 986ebaad flew with;
+  - the floor now reads the displayed (tonemapped) pixel, falling back to
+    the contribution's own space only without one;
+  - the target hologram and the five radar-contact families are built in
+    (eleven built-in families total; `holoBuildFamilyList` is the pure,
+    rig-tested builder).
   `advanced.temporal_aa_hologram_depth` (default on), with
   `advanced.temporal_aa_hologram_families`, `_floor` and `_share`. It runs
   inside `fix.temporal_aa`'s interface depth (`ui_depth.cpp`) and needs it on.
@@ -11,25 +22,35 @@
   sky's depth and motion while they move with the cockpit, and FSR's
   history lands about a pixel a frame off (worst under FSR, Sean
   2026-09-24). Over the cockpit they inherit cockpit motion and stay sharp.
-- **Families (default list):** holo panels `81216C77F90DEDD6` (also the
+- **Families (eleven built in):** holo panels `81216C77F90DEDD6` (also the
   ship/shield hologram, ps `A2965EC2931A39C8`); the icon core
   `F8D8A92E96419901` (ps `16196F69ADE35E77`); the corona family
   `D1281DF454A153AD` (ps `97DBC87FCAA429C4`: the icon's glow AND the real
-  sun's corona); the stalks `DF3503CD07F9B10C` and `5453D19B6D362364`
-  (believed: named by the probe's neighbourhood, not caught painting the
-  stalk). The canopy `8C091FFD08644E02` is refused even if listed.
+  sun's corona); the stalks `DF3503CD07F9B10C` (caught by the pixel probe
+  at the radar, frame 8548) and `5453D19B6D362364` (drawn next to it in
+  the ledger's radar section); the target hologram sphere `5559BD94B6852E83` (two premultiplied
+  quads, ps `EA02FAC2BD6C643C`/`E95634B0F61D218F`, named by the pixel
+  probe, flight 20260924_155636); the five radar-contact families
+  `A2C2D5510BF1926D`, `9B34C331902DC1ED`, `9611A454527F7FEB`,
+  `B932058F26B76691`, `94D5C556DFD6D705` (named by their position in the
+  draw ledger, right after the two stalks in each eye's cockpit section --
+  which one paints the visible bars is still open). The canopy
+  `8C091FFD08644E02` is refused even if listed.
 - **Mechanism:** each listed draw is issued twice more after the game's.
   The first pass adds the element's own blended light into a scratch
   target. It counts only fragments nearer than the cockpit radius
   (`advanced.temporal_aa_ship_metres`, 10 m), clipped by a depth target
   cleared at that radius. The second pass writes the element's nearest
   depth. Once per eye, before the temporal pass reads the private AA depth
-  copy, a resolve stamps that depth wherever two things hold: the
-  element's light clears the floor (display brightness) and it supplies at
-  least `share` of the finished pixel's light.
-- **Open:** the target hologram's draw is not caught (the probe point
-  missed it). The stalk hashes are believed, not measured. The GPU cost of
-  two extra passes per listed draw is unmeasured.
+  copy, a resolve stamps that depth wherever two things hold:
+  - the pixel as displayed clears the floor on its brightest channel;
+  - the element supplies at least `share` of that pixel's light in the
+    game's own HDR target.
+- **Open:** which of the five radar-contact families paints the bars
+  (all five are listed, taken from the ledger's cockpit section, not
+  individually confirmed by the pixel probe). The GPU cost of two extra
+  passes per listed draw is unmeasured. Round 3 itself is unflown --
+  20260924_155636 is evidence for the defect it fixes, not for the fix.
 - **Risks the first flight must look at:**
   - target markers on a target inside 10 m (the holo material draws the
     markers at the target; beyond the radius they are clipped);
@@ -47,18 +68,27 @@
     (the first draft, never flown): it ignores the blend's alpha, so a
     constant-tint glow with an alpha falloff would stamp its whole quad --
     the "small blurry quads under each bracket" of 2026-09-09 again.
+  - The share test against the submitted (tonemapped) image, as flown in
+    986ebaad: the holograms draw into the HDR scene target
+    (R11G11B10_FLOAT) before tonemapping, so the contribution is about
+    3.6x smaller than the displayed pixel. The test passed 2% of the
+    over-sky pixels that cleared the floor (eye_155832).
 - **Next flight:**
-  1. Supercruise under FSR, with the star icon above the radar disc and
-     the ship and target holograms over sky. Take an eye dump.
+  1. Supercruise under FSR, rolling the ship, with the star icon above
+     the radar disc, the contact bars, and the ship and target holograms
+     over sky. Take an eye dump while rolling.
   2. Near a station with a target locked, with a hologram over the
      station. Take a second dump.
   3. Fly a key-off leg for the GPU time.
 
   Read these log lines:
   - the `hologram depth:` configure line;
-  - the first-listed-draw line (the blend space);
+  - the first-listed-draw line (the blend space, and now target view
+    yes/no -- no should not happen for the HDR scene target itself);
   - the 30 s census: listed draws per frame, stamped pixels p50, share
-    skipped, declines.
+    test skipped (no target view) and floor on contribution (no display
+    view) should both read at or near 0 -- either climbing back up means
+    round 3's own fix is not reaching its inputs.
 
   In the dumps, read the new `HoloContribution` input against `C00` and
   `Z` at the icon, the holograms and the marker corners.
@@ -88,6 +118,31 @@ All Frontier, Pimax OpenXR, FSR 3.1.2 at 2037x1969 per eye.
     the cockpit.
   - The eye target is `R8G8B8A8_TYPELESS`, viewed `R8G8B8A8_UNORM` by the
     temporal pass.
+
+## Flight 20260924_155636 (986ebaad, Frontier, FSR, rolling)
+
+Sean: "just rolling the ship visibly blurs those inner quarters". The
+eye dump eye_155832 was taken while rolling. Sky MV p50 was 13.3 px,
+cockpit 0.26 px.
+
+- The pass ran: 27.5 listed draws a frame, both eyes resolved every
+  frame, no declines, 5788 stamped pixels per eye-frame (p50).
+- **Target hologram sphere:** vs `5559BD94B6852E83`, two premultiplied
+  quads with depth off (ps `EA02FAC2BD6C643C`, `E95634B0F61D218F`),
+  named by the pixel probe (frame 8548, eye 0, point 3). It was not
+  listed. Over sky (1080 px) it had 1% contribution and 1% stamped, with
+  MV (-3.85,-6.14), which is the sky's.
+- **Radar contact bars over sky (1103 px):** 0% contribution. The draw
+  ledger (`pool\draws_155832.bin`) shows the radar cluster right after
+  the stalks in each eye's cockpit section, and none of it was listed:
+  - `A2C2D5510BF1926D` (6 verts, 5 instances);
+  - `9B34C331902DC1ED`;
+  - `9611A454527F7FEB`;
+  - `B932058F26B76691`;
+  - `94D5C556DFD6D705` (6 verts, 19 instances).
+- **Listed elements:** the share-space defect above refused them.
+- The first-listed-draw line gave the target as format 26 (HDR). The
+  hologram section is the last group of draws into each eye's HDR target.
 
 ## Decisions, 2026-09-24
 
