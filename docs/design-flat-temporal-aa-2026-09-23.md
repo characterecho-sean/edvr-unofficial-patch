@@ -3,26 +3,15 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. The distinct flat installer, runtime scope enforcement
-  and capture probes pass all 83 existing build jobs and the 254-key config
-  contract. Epic captures establish current-frame scene/depth/camera ownership
-  and the tone/copy/UI handoff at native and 0.75x SS (sections 10 and 12).
-  Epic 88a04caa closes the measured lighting-grid/consumer contract with zero
-  capture drops (section 13). Functional zero-jitter mono reconstruction now
-  passes all 84 build jobs and the 254-key config contract (section 14). Epic
-  27217a7d runs DLSS at 0.75x SS, but intermittent HDR/camera refusals break
-  history (section 15). Projection jitter remains disabled. The bounded refusal
-  witness and history counters pass all 84 jobs and the 254-key contract. Epic
-  e24b1201 isolates the recurring refusal to unused tone camera data (section
-  16); renderer rebuilds and texture identity churn are ruled out. The scene
-  camera authority correction passes all 84 jobs and the 254-key contract. Epic
-  e99c0010 confirms 6,144 consecutive treated frames and zero backend failures
-  (section 17). The recurring handoff-camera rejection is resolved. Jitter
-  input/fallback tests and the focused depth-writer probe pass all 84 jobs and
-  the 254-key contract (section 18); live projection jitter remains disabled.
-  Sean requested merging main into this branch before the next build; the
-  integration of main `28ee5f73` passes all 82 jobs and the 255-key contract
-  (section 19).
+  before qualification. Main `28ee5f73` is merged into this branch as
+  requested; clean `10cb20f0` passes all 82 jobs and the 255-key contract
+  (section 19). Its Epic flight confirms scaled DLSS at 1920x1080 to 2560x1440,
+  4,922 consecutive treated frames, no backend failures or camera-cut resets,
+  and two focused depth-writer samples without observation drops (section 20).
+  Exact bytecode proves the selected scene-depth to view-Z conversion. Sean did
+  not see the star-corona smear this time; it is not reproduced, not proved
+  fixed. Earlier scene admission, lighting-grid and projection evidence is in
+  sections 10-18. Live projection jitter remains disabled.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -39,11 +28,11 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** one focused Epic F10 capture near the star while turning, to
-  identify the R32 view-Z producer and the corona draw path. Keep jitter
-  disabled until private substitutions and inverse/depth ownership are ready.
-  Stable zero-jitter admission and grid inventory are already verified. Use
-  `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
+- **Next flight:** no repeat of the completed zero-jitter capture is needed.
+  Implement qualified private bindings and output fallback offline before
+  requesting rendered-jitter qualification; the view-Z producer is now known.
+  Keep jitter disabled until those requirements are met. Use
+  `tools/edvr_log.py` with the actual `--target`, `--expect-build 10cb20f0` and
   `--grep "flat (runtime|temporal|discover|compute)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
@@ -977,3 +966,52 @@ deployment.
 The merged source passes `build/flat-main-merge-qualified.log`: 79 parallel
 jobs plus three quiet jobs, the 255-key config contract, flat mono WARP and
 capture policy tests, and both installer payload checks.
+
+## 20. Stable scaled DLSS and depth-writer capture, 2026-09-24
+
+Epic `edvr_gfx_20260924_102404.log` matches clean `10cb20f0`, version
+v0.17.0-554-g10cb20f0, build `6AB54DBF`. NVIDIA creates scaled DLSS with
+1920x1080 input and 2560x1440 output, quality mode and preset K, on RTX 5090.
+This is the requested game SS 0.75x run; unlike section 17, it is not native
+DLAA. Projection jitter remains zero. Driver and DLSS runtime versions remain
+unreported; this mono run has no headset or VR runtime dependency.
+
+The last renderer report has 4,951 successful evaluations, 4,949 history
+continuations and two requested/lost-history resets. Camera cuts, frame gaps,
+invalid previous cameras, format changes and backend failures are zero. Init=1,
+allocations=1, context-change=0 and full-reset=0. The longest treated streak is
+4,922 frames and the longest continuation run is 4,921. The final no-known-tone
+transition adds 269 refusals after sustained flight. Sean reports no visible
+corona smearing this time. Record that as not reproduced; no star rendering fix
+was applied and the conditions differ from the prior native run.
+
+F10 samples at frames 58340 and 58789 each identify one R32_FLOAT RTV writer
+before both active lighting consumers. Both have zero writer, draw-query,
+dispatch-query and fallback drops, and zero unknown command lists. The matched
+writer uses VS DEF19B035D5EDEDC / PS CB95394B50D737D6 at 1920x1080. All four
+required producer/glare shader saves succeed despite one unrelated cache drop.
+Sample two completes all three queued CB readbacks (VS b1 5376 bytes, VS b2 48
+bytes, PS b2 16 bytes). The active stock glare shader pair remains
+94D5C556DFD6D705 / 912477AEF6958379.
+
+The saved writer VS (332 bytes) passes POSITION and TEXCOORD0 unchanged; it
+does not consume the bound VS constants. Its PS (384 bytes) samples PS t0,
+computes `min(cb2[0].z / (sample + cb2[0].w), 1e17)`, and writes target0.x. In
+both samples, t0 is the selected scene depth (resource ending E7E0, view format
+21), and the output is the lighting consumers' R32 view-Z texture (resource
+ending DCE0, format 41). Sample two's completed PS b2 readback is `(0.025, -0,
+0.025, -0)`, establishing positive view-Z = 0.025 / reversed Z. Sample one's PS
+constant was unavailable; do not claim it was independently measured twice. The
+unrelated bound VS b1/b2 need no substitution for this shader pair. This proves
+the captured source, output and shader transform, not actual pixel
+correspondence under a nonzero raster phase.
+
+Ruled out: an additional projection-matrix consumer inside this captured R32
+conversion pass, because neither saved shader reads a projection matrix. Retain
+its original UV mapping and depth coefficients when implementing jitter
+upstream. Private scene and lighting bindings, raw engine snapshots, resource
+preflight and post-rasterization fallback remain implementation work; rendered
+alignment under nonzero jitter remains a qualification requirement.
+
+This flight review changes documentation only. Epic remains on `10cb20f0`;
+subsequent documentation commits do not require another build or flight.
