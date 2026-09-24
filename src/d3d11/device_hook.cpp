@@ -350,7 +350,6 @@ struct State {
     ID3D11Multithread* multithread = nullptr;
     int       mtProtected = -1;      // -1 until asked; 0 or 1 after
     uint32_t  mtChanges = 0;         // how many times it has flipped
-    uint32_t  mtReports = 0;         // change lines printed
     uint64_t  mtFrames = 0;          // frames it has been sampled over
     bool      mtSettledNoted = false;  // the standing answer, said once
     bool      recoveryDisabled = false;
@@ -1438,7 +1437,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                 ++g_state->mtChanges;
                 const uint32_t n = g_state->mtChanges;
                 if (n <= 4 || (n & (n - 1)) == 0) {
-                    ++g_state->mtReports;
                     Log::get().note(
                         "multithread protection CHANGED to %s (change #%u, "
                         "frame %llu). Every one of these makes Windows re-lay "

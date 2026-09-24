@@ -370,12 +370,12 @@ void uiPanelScaleFrameBoundary() {
     Log::get().note(
         "ui quality: panels: the engine now sizes every render-to-texture panel x%.4f (the four "
         "operands at 0x%X/0x%X and 0x%X/0x%X read 1080 -> %.2f, 1920 -> %.2f): f %.4f = (W_ui %u x k "
-        "%.4f) / (W_out %u x k_out %.4f) / target %.2f%s -- HMD Quality %.2f, the game told %ux%u, its "
+        "%.4f) / (W_out %u x k_out %.4f) / target %.0f%%%s -- HMD Quality %.2f, the game told %ux%u, its "
         "vertical FOV %.1f degrees, the headset's %.1f. From the next panel init or view change.",
         1.0 / f, kUiPanelSiteRva[0] + kUiPanel1080Disp, kUiPanelSiteRva[0] + kUiPanel1920Disp,
         kUiPanelSiteRva[1] + kUiPanel1080Disp, kUiPanelSiteRva[1] + kUiPanel1920Disp,
         static_cast<double>(d1080), static_cast<double>(d1920), f, in.renderW, k, in.outputW, kOut,
-        static_cast<double>(in.target),
+        static_cast<double>(in.target) * 100.0,
         clamp == UiPanelClamp::kCap     ? " (capped: no panel above four times its game size)"
         : clamp == UiPanelClamp::kFloor ? " (at 1: HMD Quality is at or above the target)"
                                         : "",
@@ -410,10 +410,10 @@ void uiPanelScaleLog() {
     }
     const UiPanelInputs& in = g_lastInputs;
     Log::get().note("ui quality: panels: the engine sizes panels x%.4f since frame %u (%u writes; f %.4f "
-                    "= (W_ui %u x k %.4f) / (W_out %u x k_out %.4f) / target %.2f).",
+                    "= (W_ui %u x k %.4f) / (W_out %u x k_out %.4f) / target %.0f%%).",
                     1.0 / g_written, g_liveSince, g_writes, g_written, in.renderW,
                     uiSizingK(in.fovTangent), in.outputW, uiSizingK(in.trueTangent),
-                    static_cast<double>(in.target));
+                    static_cast<double>(in.target) * 100.0);
 }
 
 }  // namespace edvr

@@ -139,13 +139,13 @@ void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstRe
 // set around a redirected draw -- the RSSetViewports hook would scale them
 // again for a tracked surface and count them -- and its per-frame clear,
 // which the ClearRenderTargetView hook would otherwise report to the
-// deferred UI and the separation as a write to a target they track.
+// separation as a write to a target it tracks.
 void vScreenRSSetViewportsRaw(ID3D11DeviceContext* ctx, uint32_t n, const D3D11_VIEWPORT* vps);
 void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv,
                                      const float colour[4]);
 // The layer's copy of the game's depth-stencil target, which it seeds its
 // own from (a depth- or stencil-tested UI draw): past the copy hook, which
-// would report the write to the deferred UI and the motion paths.
+// would report the write to the motion paths.
 void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src);
 
 // Installs the context hooks using the mechanism the caller decided for this

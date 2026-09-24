@@ -121,10 +121,6 @@ enum PerfEvent : uint32_t {
 // where one is known (a compile, a reload), 0 otherwise. Any thread.
 void perfMonitorNoteEvent(uint32_t bits, double ms = 0.0);
 
-// Changes for settings, menu and capture disturbances, independently of a
-// diagnostic's intentional variant changes. Safe to read on the frame thread.
-uint64_t perfMonitorBenchmarkDisturbanceEpoch() noexcept;
-
 // EDVR's CPU time, credited to the frame most recently ringed: the frame
 // boundary's body, or the door's (the latter arrives over the channel).
 enum PerfCpu { kCpuBoundary = 0, kCpuDoor = 1 };

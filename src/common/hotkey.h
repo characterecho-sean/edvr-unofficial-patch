@@ -52,7 +52,6 @@ public:
     // Default false: a binding is EDVR's own until something says otherwise,
     // so a new call site cannot pick up the permissive behaviour by accident.
     void setGameMirrored(bool mirrored) { m_gameMirrored = mirrored; }
-    bool gameMirrored() const { return m_gameMirrored; }
 
     // Did a press get thrown away because another window had focus?
     //
@@ -122,9 +121,6 @@ int virtualKeyFromName(const char* name);
 // be a strictly better match (so one press cannot fire two bindings and toggle
 // an intent straight back off).
 bool hotkeyWouldFire(int vk, uint32_t mods, uint32_t held);
-
-// Forget every registered binding. For tests; bindings re-register on setBinding.
-void hotkeyResetBindings();
 
 // The virtual keys every registered binding sits on, at most `max` of them;
 // returns how many were copied. The settings menu asks before adopting one

@@ -48,7 +48,6 @@ class NativeFrameClient final {
       out.cullChannel=0;
     return r;
   }
-  bool legacyProvider() const{return providerVersion_==EDVR_NATIVE_FRAME_VERSION_1;}
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {
     out={sizeof(out),EDVR_NATIVE_FRAME_VERSION_1};
     return acquired()?table_.latchSubmit(table_.context,sequence,&out):S_FALSE;

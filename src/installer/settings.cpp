@@ -218,7 +218,6 @@ void SettingsModel::refreshRows() {
             }
         }
         row.isRecommended = sameValue(def, row.value, def.recommended);
-        row.isShipped = sameValue(def, row.value, def.shipped);
         m_rows.push_back(row);
     }
 }

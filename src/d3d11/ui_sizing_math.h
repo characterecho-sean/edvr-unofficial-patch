@@ -245,7 +245,7 @@ struct UiPanelInputs {
     float fovTangent = 0.0f;  // 2 tan(vFOV/2) of the frustum the game is told
     uint32_t outputW = 0;     // W_out: the runtime's untrimmed recommendation
     float trueTangent = 0.0f; // 2 tan(vFOV/2) of the true display frustum
-    float target = 0.0f;      // T: fix.ui_quality's 1.0 or 1.25
+    float target = 0.0f;      // T: fix.ui_quality's 100 or 125, as 1.0 or 1.25
 };
 
 enum class UiPanelClamp : uint8_t { kNone = 0, kCap, kFloor };

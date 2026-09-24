@@ -477,14 +477,6 @@ public:
     uint32_t writeCount() const{return summary().writes;}
     uint64_t observedWriteCount() const{return summary().observedWrites;}
     bool sealed() const{return summary().sealed;}
-    uint32_t captureSourceOwnerForTest(ID3D11Resource* resource,uintptr_t nestedOwner,uint32_t event=0) {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);const uint32_t r=findResource(resource);if(r==kNone)return kNone;
-        const uint64_t writerCutoff=objectRecordWriterProbe.sampleUploadCutoff();
-        const uint32_t attempt=sourceOwner_.captureSynthetic(event,r,resources_[r].generation,currentFrame_,
-            foreignEpoch_.load(std::memory_order_acquire),resource,resources_[r].buffer.ByteWidth,nestedOwner);
-        if(event<events_.size())events_[event].sourceOwnerAttempt=attempt;
-        objectRecordWriterProbe.noteUpload(attempt,r,resources_[r].generation,writerCutoff);return attempt;
-    }
     uint32_t noteMapSourceOwnerForTest(ID3D11DeviceContext* ctx,ID3D11Resource* resource,
                                        uint32_t subresource,D3D11_MAP type,uintptr_t nestedOwner) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);const uint32_t r=findResource(resource);if(!nominated(r))return kNone;

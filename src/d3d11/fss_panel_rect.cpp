@@ -14,12 +14,10 @@
 
 namespace edvr {
 namespace {
-uint32_t g_argStartIndex2 = 0, g_argStartInstance2 = 0;
+uint32_t g_argStartInstance2 = 0;
 int32_t g_argBaseVertex2 = 0;
 }  // namespace
-void fssPanelRectDrawArgs(uint32_t startIndex, int32_t baseVertex,
-                          uint32_t startInstance) {
-    g_argStartIndex2 = startIndex;
+void fssPanelRectDrawArgs(int32_t baseVertex, uint32_t startInstance) {
     g_argBaseVertex2 = baseVertex;
     g_argStartInstance2 = startInstance;
 }

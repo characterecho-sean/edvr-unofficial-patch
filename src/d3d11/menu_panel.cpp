@@ -1716,28 +1716,6 @@ bool menuPanelBuildOverlayContent(MenuContent& c, const char* line, float textDe
     return true;
 }
 
-int menuPanelLayoutHeightForTest(const MenuContent& c, int* footTop, int* footBottom,
-                                 float* rowEdges, int maxRows, int* footLines) {
-    std::vector<Op> ops;
-    std::vector<LineRect> lines;
-    int H = 0;
-    int scrollMax = 0;
-    RECT foot = {-1, -1, -1, -1};
-    int footN = 0;
-    layout(c, ops, lines, &H, 0, &scrollMax, &foot, &footN);
-    if (footTop) *footTop = foot.top;
-    if (footBottom) *footBottom = foot.bottom;
-    if (footLines) *footLines = footN;
-    if (rowEdges && maxRows > 0) {
-        for (int i = 0; i < maxRows; ++i) {
-            const bool have = i < static_cast<int>(lines.size());
-            rowEdges[i * 2] = have ? lines[static_cast<size_t>(i)].y0 : -1.0f;
-            rowEdges[i * 2 + 1] = have ? lines[static_cast<size_t>(i)].y1 : -1.0f;
-        }
-    }
-    return H;
-}
-
 void menuPanelShutdown() {
     {
         std::lock_guard<std::mutex> lock(g_w.m);
