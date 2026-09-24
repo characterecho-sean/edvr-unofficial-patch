@@ -526,18 +526,41 @@ inline bool isOrtho3x3(const float m[16], float tol) noexcept {
 }
 
 // |t + origin.R| for a candidate group: the row-vector eye origin through
-// the 3x3, negated, against the translation row. ZERO when the group IS
-// this frame's view (v_view = v_world.R + t maps the eye origin to 0).
+// the 3x3, negated, against the translation. ZERO when the group IS this
+// frame's view (v_view = v_world.R + t maps the eye origin to 0).
 // A previous frame's view is orthonormal too -- but its translation belongs
 // to the previous frame's eye, which at a transition is metres to
 // kilometres away, so this is what rejects it.
+//
+// CHANGE 17 (flight 160557): the buffer's view groups are float3x4 -- THREE
+// float4 rows with the translation in the per-row w lanes (flat [3],[7],
+// [11]), the first three rows of the row-major 4x4 with t folded into the
+// padding lanes. Verified against dump eyebase_160745_f11731.txt: the group
+// at fill3 rows 282-284 decodes (t = -(eye.R)) to the PREVIOUS frame's
+// base (+6.119,-3.432,+11.511) to 5 cm, and the old m[12+k] read saw row
+// 285's zeros -- which is why the old match degenerated to exactly |origin|
+// on head-only frames (originMatch=0.0556 == |(+0.051,-0.016,+0.016)| to
+// the digit) and accepted ANY orthonormal group: every "located view" on
+// every flight was a head-only-frame spurious match, and every ordinary
+// frame read view=-1 (|origin| = 21 m > tol).
 inline float viewOriginMatch(const float m[16], const float origin[3]) noexcept {
     float d2 = 0.0f;
     for (int k = 0; k < 3; ++k) {
-        const float e = m[12 + k] + origin[0] * m[k] + origin[1] * m[4 + k] + origin[2] * m[8 + k];
+        const float e = m[4 * k + 3] + origin[0] * m[k] + origin[1] * m[4 + k] + origin[2] * m[8 + k];
         d2 += e * e;
     }
     return std::sqrt(d2);
+}
+
+// The float3x4 group's implied eye, decoded from the w-lane translation:
+// t = -(eye.R) (row convention), so eye = -t.R^T -- out[k] =
+// -(t0*R[k][0] + t1*R[k][1] + t2*R[k][2]) with R[k][j] = m[k*4+j]. Same
+// dump evidence as viewOriginMatch's own comment.
+inline void viewImpliedEye(const float m[16], float eye[3]) noexcept {
+    const float t0 = m[3], t1 = m[7], t2 = m[11];
+    for (int k = 0; k < 3; ++k) {
+        eye[k] = -(t0 * m[k * 4 + 0] + t1 * m[k * 4 + 1] + t2 * m[k * 4 + 2]);
+    }
 }
 
 inline constexpr int kSceneCBFindMaxCandidates = 8;
@@ -549,20 +572,31 @@ struct SceneCBViewFind {
     int originRejected = 0;    // orthonormal groups failing the origin test
     int candidateCount = 0;    // stored start rows (capped at kSceneCBFindMaxCandidates)
     int candidateRows[kSceneCBFindMaxCandidates] = {};
+    // CHANGE 17: each stored candidate's implied eye, decoded from its w
+    // lane (viewImpliedEye) -- the dump's candidate line prints these, so
+    // current-vs-prev groups show directly on the flight.
+    float candidateEye[kSceneCBFindMaxCandidates][3] = {};
 };
 
-// Scan float4 rows [0, float4Rows-4] for the group whose 3x3 is orthonormal
-// within orthoTol AND whose translation matches `origin` within originTol;
-// the winner is the closest match. NaN origins never match (every
-// comparison is false), so a garbage fill reads as "none", not a false hit.
+// Scan float4 rows for the group whose 3x3 is orthonormal within orthoTol
+// AND whose w-lane translation matches `origin` within originTol; the winner
+// is the closest match. CHANGE 17: the groups are float3x4 -- each window is
+// THREE float4 rows (the 4th row of the old 4-row window was the next
+// structure in the buffer, and reading it is what fed the old match zeros).
+// NaN origins never match (every comparison is false), so a garbage fill
+// reads as "none", not a false hit.
 inline SceneCBViewFind locateSceneCBView(const float* cb, int float4Rows, const float origin[3],
                                          float orthoTol, float originTol) noexcept {
     SceneCBViewFind out;
-    for (int r = 0; r + 4 <= float4Rows; ++r) {
+    for (int r = 0; r + 3 <= float4Rows; ++r) {
         const float* m = cb + r * 4;
         if (!isOrtho3x3(m, orthoTol)) continue;
         ++out.orthoGroups;
-        if (out.candidateCount < kSceneCBFindMaxCandidates) out.candidateRows[out.candidateCount++] = r;
+        if (out.candidateCount < kSceneCBFindMaxCandidates) {
+            const int slot = out.candidateCount++;
+            out.candidateRows[slot] = r;
+            viewImpliedEye(m, out.candidateEye[slot]);
+        }
         const float match = viewOriginMatch(m, origin);
         if (match <= originTol && (out.startRow < 0 || match < out.originMatch)) {
             out.startRow = r;
@@ -573,6 +607,7 @@ inline SceneCBViewFind locateSceneCBView(const float* cb, int float4Rows, const 
     }
     return out;
 }
+
 
 // The general 3x3+translation inverse, row convention (translation row at
 // [12..14], last row (0,0,0,1)). Exact for orthonormal 3x3s (the common
@@ -613,6 +648,49 @@ inline void affineInverse4x4(const float m[16], float out[16]) noexcept {
 // the way the math is described.
 inline void postmul4x4(const float a[16], const float b[16], float out[16]) noexcept {
     premul4x4(a, b, out);
+}
+
+// CHANGE 17: correct a stored float3x4 view group. The stored 12 floats are
+// the first three rows of the row-major 4x4 view V with the translation
+// folded into the w lanes (V = [R 0; t 1]).
+//
+// The correction direction, pinned by the flight-verified origin math: the
+// scene eye corrects as a ROW-VECTOR POINT transform -- corrected origin =
+// patchEyeOrigin(B, P) = P.B (verified against the engine's next frame to
+// the millimetre on 125237/134813/151942/160557). Points transform as
+// w' = w.B, so the eye POSE postmultiplies (E' = E.B, translation
+// e.R(B) + t(B) -- exactly patchEyeOrigin) and the view, its inverse,
+// PREMULTIPLIES: V' = B^-1 x V. (The acting build's original V x B^-1 was
+// backwards AND read the raw 16-float window -- w-lane translations fed
+// B^-1's translation row, the dump's +55/+206 rows -- and the 4th written
+// row clobbered whatever followed the group.)
+//
+// Rebuilds V from the 12 floats, premultiplies by B^-1, folds t' back into
+// the w lanes, and REFUSES (returns false) when the result's 3x3 is not
+// orthonormal within tol -- the write-time guard; the 160557 corruption
+// would have been caught here. out holds 12 meaningful floats (3 rows).
+//
+// (The review's suggested premultiply-by-transpose(B^-1) has the right
+// side (a premultiply) but the wrong matrix: its 3x3 is R(B^-1)^T x R, not
+// R(B^-1) x R. The rig's end-to-end case pins t' = -(eye' . R(V')) for
+// THIS form and shows both the old postmultiply and the transpose form
+// failing it.)
+inline bool correctViewColumnMajor(const float B[16], const float stored[16], float out[16],
+                                   float orthoTol) noexcept {
+    const float v4[16] = {
+        stored[0], stored[1], stored[2], 0.0f,
+        stored[4], stored[5], stored[6], 0.0f,
+        stored[8], stored[9], stored[10], 0.0f,
+        stored[3], stored[7], stored[11], 1.0f,
+    };
+    float bInv[16], vCorr[16];
+    affineInverse4x4(B, bInv);
+    premul4x4(bInv, v4, vCorr);
+    if (!isOrtho3x3(vCorr, orthoTol)) return false;
+    out[0] = vCorr[0];  out[1] = vCorr[1];  out[2] = vCorr[2];  out[3] = vCorr[12];
+    out[4] = vCorr[4];  out[5] = vCorr[5];  out[6] = vCorr[6];  out[7] = vCorr[13];
+    out[8] = vCorr[8];  out[9] = vCorr[9];  out[10] = vCorr[10]; out[11] = vCorr[14];
+    return true;
 }
 
 // ---------------------------------------------------------------------------

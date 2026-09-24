@@ -1365,52 +1365,83 @@ void caseIsOrtho3x3() {
 
 void caseViewOriginMatch() {
     const float origin[3] = {1, 2, 3};
-    // Identity view: t = -origin matches to 0.
-    const float V[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, -2, -3, 1};
+    // CHANGE 17: float3x4 storage -- the translation lives in the w lanes:
+    // rows (I | -origin). A zero match when the group IS this frame's view.
+    const float V[16] = {1, 0, 0, -1, 0, 1, 0, -2, 0, 0, 1, -3, 0, 0, 0, 0};
     check(std::fabs(tfeb::viewOriginMatch(V, origin)) < 1e-6f, "viewOriginMatch: t = -origin reads as 0");
-    const float Voff[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -2, -3, 1};
+    const float Voff[16] = {1, 0, 0, 0, 0, 1, 0, -2, 0, 0, 1, -3, 0, 0, 0, 0};
     check(std::fabs(tfeb::viewOriginMatch(Voff, origin) - 1.0f) < 1e-6f,
-          "viewOriginMatch: a 1 m translation error reads as 1");
+          "viewOriginMatch: a 1 m w-lane translation error reads as 1");
     const float nanOrigin[3] = {NAN, 0, 0};
     check(std::isnan(tfeb::viewOriginMatch(V, nanOrigin)),
           "viewOriginMatch: a NaN origin reads as NaN (never a false match)");
+    // CHANGE 17 regression note: with the old m[12+k] read these w-lane
+    // groups all read translation ZERO, so the match degenerated to
+    // |origin.R| = |origin| -- on a head-only frame within any tolerance,
+    // which is exactly flight 160557's originMatch=0.0556 == |origin|.
 }
 
 void caseLocateSceneCBView() {
-    // A synthetic scene CB: the CURRENT view planted at row 40, the PREVIOUS
-    // frame's view (orthonormal, but the old frame's eye -- 5 km away) at
-    // row 60, and an orthonormal group with an unrelated translation at row
-    // 200. The finder must pick row 40.
+    // CHANGE 17: the TRUE buffer layout, verified against dump
+    // eyebase_160745_f11731.txt -- view groups are float3x4: THREE float4
+    // rows, translation in the per-row w lanes. The old 4-row window with
+    // an m[12+k] translation read degenerated: on a head-only frame the
+    // match was exactly |origin|, so the finder accepted ANY orthonormal
+    // group (dump: originMatch=0.0556 == |(+0.051,-0.016,+0.016)|), and
+    // every ordinary frame read view=-1 (|origin| = 21 m > tol).
     float cb[tfeb::kSceneCBSimFloat4Rows * 4] = {};
     const float origin[3] = {-0.66f, 11.08f, -7.64f};
 
-    // Current view: 90-degree Z rotation, t = -origin.R (exactly this
-    // frame's eye, per the design doc's signature).
-    float cur[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    tfeb::patchEyeOrigin(cur, origin, &cur[12]);
-    cur[12] = -cur[12]; cur[13] = -cur[13]; cur[14] = -cur[14];
-    std::memcpy(cb + 40 * 4, cur, sizeof(cur));
+    // The CURRENT view at row 40: a real rotation (15 deg Z then 10 deg X),
+    // w-lane translation t = -(origin.R).
+    float cur[16] = {};
+    {
+        const float cz = 0.9659258f, sz = 0.2588190f;
+        const float cx = 0.9848078f, sx = 0.1736482f;
+        const float rz[16] = {cz, sz, 0, 0, -sz, cz, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const float rx[16] = {1, 0, 0, 0, 0, cx, sx, 0, 0, -sx, cx, 0, 0, 0, 0, 1};
+        float rzrx[16];
+        tfeb::premul4x4(rz, rx, rzrx);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) cur[r * 4 + c] = rzrx[r * 4 + c];
+        float t[3];
+        tfeb::patchEyeOrigin(cur, origin, t);
+        cur[3] = -t[0]; cur[7] = -t[1]; cur[11] = -t[2];
+    }
+    std::memcpy(cb + 40 * 4, cur, 12 * sizeof(float));   // 3 rows only
 
-    // Previous view: a different rotation, t = -R.prevOrigin with the
-    // previous frame's eye 5 km away (a transition rebase).
+    // The PREVIOUS frame's view at row 60: a different rotation, w-lane
+    // translation from the previous frame's eye 5 km away (a transition
+    // rebase) -- the 160557 located group was exactly this.
     const float prevOrigin[3] = {origin[0] + 5000.0f, origin[1], origin[2]};
     float prev[16] = {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    tfeb::patchEyeOrigin(prev, prevOrigin, &prev[12]);
-    prev[12] = -prev[12]; prev[13] = -prev[13]; prev[14] = -prev[14];
-    std::memcpy(cb + 60 * 4, prev, sizeof(prev));
+    {
+        float t[3];
+        tfeb::patchEyeOrigin(prev, prevOrigin, t);
+        prev[3] = -t[0]; prev[7] = -t[1]; prev[11] = -t[2];
+    }
+    std::memcpy(cb + 60 * 4, prev, 12 * sizeof(float));
 
-    // Unrelated orthonormal group: identity rotation, far translation.
-    const float other[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 123, 456, 789, 1};
-    std::memcpy(cb + 200 * 4, other, sizeof(other));
+    // An unrelated orthonormal group at row 200: identity rotation, far
+    // translation.
+    const float other[16] = {1, 0, 0, 123, 0, 1, 0, 456, 0, 0, 1, 789, 0, 0, 0, 0};
+    std::memcpy(cb + 200 * 4, other, 12 * sizeof(float));
 
     const tfeb::SceneCBViewFind found = tfeb::locateSceneCBView(
         cb, tfeb::kSceneCBSimFloat4Rows, origin, 0.01f, 0.5f);
     check(found.startRow == 40, "locateSceneCBView: the current view wins over the previous one");
-    check(std::fabs(found.originMatch) < 1e-4f, "locateSceneCBView: the winner's origin match is ~0");
+    check(std::fabs(found.originMatch) < 1e-3f, "locateSceneCBView: the winner's origin match is ~0");
     check(found.orthoGroups == 3 && found.originRejected == 2,
           "locateSceneCBView: three orthonormal groups, two origin-rejected");
     check(found.candidateCount == 3 && found.candidateRows[0] == 40 && found.candidateRows[1] == 60 &&
           found.candidateRows[2] == 200, "locateSceneCBView: every candidate's row is recorded");
+    // The candidates carry their implied eyes: the current decodes to this
+    // frame's origin, the prev to the old eye (the dump's candidate line
+    // prints exactly these).
+    check(near3(found.candidateEye[0], origin, 1e-3f),
+          "locateSceneCBView: the current candidate's implied eye is this frame's origin");
+    check(near3(found.candidateEye[1], prevOrigin, 1e-2f),
+          "locateSceneCBView: the prev candidate's implied eye is the previous frame's eye");
 
     // A NaN origin (a garbage fill) finds nothing rather than something.
     const float nanOrigin[3] = {NAN, 0, 0};
@@ -1419,6 +1450,87 @@ void caseLocateSceneCBView() {
     check(nanFound.startRow < 0, "locateSceneCBView: a NaN origin matches no group");
     check(nanFound.orthoGroups == 3 && nanFound.originRejected == 3,
           "locateSceneCBView: NaN origin rejects every orthonormal group");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 17, the view correction -----
+
+void caseCorrectViewColumnMajor() {
+    // A non-degenerate case (a degenerate one is what hid 160557): real
+    // rotation AND translation for the eye and for the base.
+    float eyeM[16] = {};
+    {
+        const float cz = 0.9396926f, sz = 0.3420201f;   // 20 degrees
+        const float cx = 0.9659258f, sx = 0.2588190f;   // 15 degrees
+        const float rz[16] = {cz, sz, 0, 0, -sz, cz, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const float rx[16] = {1, 0, 0, 0, 0, cx, sx, 0, 0, -sx, cx, 0, 0, 0, 0, 1};
+        tfeb::premul4x4(rz, rx, eyeM);
+        eyeM[12] = 12.3f; eyeM[13] = -45.6f; eyeM[14] = 789.0f;
+    }
+    float view[16];
+    tfeb::affineInverse4x4(eyeM, view);          // V = E^-1
+    // Store as the buffer keeps it: 3 rows, translation in the w lanes.
+    float stored[16] = {};
+    for (int r = 0; r < 3; ++r) {
+        stored[r * 4 + 0] = view[r * 4 + 0];
+        stored[r * 4 + 1] = view[r * 4 + 1];
+        stored[r * 4 + 2] = view[r * 4 + 2];
+        stored[r * 4 + 3] = view[12 + r];
+    }
+    // The base: a different rotation and a real translation.
+    float B[16] = {};
+    {
+        const float cy = 0.9848078f, sy = 0.1736482f;
+        const float ry[16] = {cy, 0, -sy, 0, 0, 1, 0, 0, sy, 0, cy, 0, 0, 0, 0, 1};
+        const float rz[16] = {0.9961947f, 0.0871557f, 0, 0, -0.0871557f, 0.9961947f, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        tfeb::premul4x4(ry, rz, B);
+        B[12] = 1.7f; B[13] = -2.9f; B[14] = 3.4f;
+    }
+
+    float out12[16];
+    check(tfeb::correctViewColumnMajor(B, stored, out12, 0.01f),
+          "correctViewColumnMajor: a rotation+translation case passes the guard");
+    check(tfeb::isOrtho3x3(out12, 0.01f), "correctViewColumnMajor: the output 3x3 is orthonormal");
+    // End-to-end invariant: the corrected view's implied eye is the
+    // premultiplied eye -- eye' = patchEyeOrigin(B, eye).
+    const float eyePos[3] = {eyeM[12], eyeM[13], eyeM[14]};
+    float eyeExpected[3];
+    tfeb::patchEyeOrigin(B, eyePos, eyeExpected);
+    float eyeDecoded[3];
+    tfeb::viewImpliedEye(out12, eyeDecoded);
+    check(near3(eyeDecoded, eyeExpected, 1e-2f),
+          "correctViewColumnMajor: the corrected view's implied eye is B x eye");
+    // ...equivalently the corrected eye maps to the view origin:
+    // |t' + eye' . R(V')| = 0 -- which is viewOriginMatch itself on the
+    // float3x4 output (the w-lane read is under test here too).
+    check(std::fabs(tfeb::viewOriginMatch(out12, eyeExpected)) < 1e-2f,
+          "correctViewColumnMajor: t' = -(eye' . R(V')) -- the corrected eye maps to the view origin");
+
+    // The review's suggested transpose-premultiply form, evaluated on the
+    // same data: under the verified float3x4 layout its 3x3 is
+    // R(B^-1)^T x R, not R x R(B^-1), and its implied eye lands far from
+    // B x eye -- the evidence for rebuilding the 4x4 and postmultiplying
+    // instead.
+    {
+        float bInv[16], bInvT[16], v4[16] = {}, wrong[16];
+        tfeb::affineInverse4x4(B, bInv);
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) bInvT[r * 4 + c] = bInv[c * 4 + r];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 4; ++c) v4[r * 4 + c] = stored[r * 4 + c];
+        tfeb::premul4x4(bInvT, v4, wrong);
+        float eyeWrong[3];
+        tfeb::viewImpliedEye(wrong, eyeWrong);
+        check(!near3(eyeWrong, eyeExpected, 0.5f),
+              "correctViewColumnMajor: the transpose-premultiply form fails the end-to-end invariant (why this rebuilds and postmultiplies)");
+    }
+
+    // The guard refuses to write garbage: a 2x scale on the base's first
+    // column makes the product non-orthonormal.
+    float scaleB[16];
+    std::memcpy(scaleB, B, sizeof(scaleB));
+    scaleB[0] *= 2.0f;
+    check(!tfeb::correctViewColumnMajor(scaleB, stored, out12, 0.01f),
+          "correctViewColumnMajor: a non-orthonormal result refuses to write");
 }
 
 }  // namespace
@@ -1491,6 +1603,7 @@ int wmain(int argc, wchar_t** argv) {
     caseIsOrtho3x3();
     caseViewOriginMatch();
     caseLocateSceneCBView();
+    caseCorrectViewColumnMajor();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
