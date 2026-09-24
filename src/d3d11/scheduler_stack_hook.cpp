@@ -249,7 +249,7 @@ const char* attachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
         if(!schedulerStackHooksMatch(base))return "opcode_mismatch";
         // Targets 0/1 are observed through the kinematic eval hook's job
         // relays; hold that gate open (it may already be open for the probe
-        // or the tracker -- the gate is recomputed from all four cells).
+        // or the emit -- the gate is recomputed from every consumer's cell).
         const char* feed=kinematicEvalSchedulerAttach();
         if(std::strcmp(feed,"installed")!=0)return feed;
         observer.store(probe,std::memory_order_release);

@@ -56,9 +56,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "quad_probe.h"
 #include "exposure_fix.h"
 #include "menu.h"
-#include "mesh_motion.h"
 #include "kinematic_eval_probe.h"
-#include "kinematic_motion.h"
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
@@ -1048,11 +1046,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // The kinematic probe's clock: exactly once per owned Present. Here,
         // not beside vScreenFrameBoundary below -- that site sits behind the
         // graphicsRuntimeDisabled early return and would skip those presents.
-        kinematicEvalProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter),
-            meshMotionFrameCount());
-        // The kinematic tracker's clock, same call site for the same
-        // exactly-once-per-owned-present guarantee. One atomic load when off.
-        kinematicMotionNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+        kinematicEvalProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
         // Engine-record velocity's clock (the emit table's frame stamps and
         // the per-eye snapshots), the same exactly-once-per-owned-present tick.
         engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
@@ -1720,9 +1714,6 @@ void menuActionResetView(void*) {
 void menuActionDumpEyes(void*) {
     temporalPassArmEyeDump();
 }
-void menuActionCompareMotion(void*) {
-    meshMotionRequestComparison();
-}
 void menuActionMarker(void*) {
     static uint32_t n = 0;
     Log::get().note("----- marker %u, from the settings menu -----", ++n);
@@ -1756,9 +1747,6 @@ State& ensureState() {
         menuRegisterAction("Dump both eyes as seen",
                            "The dump_eyes key's job: the treated frame, both eyes, to edvr_logs\\eyes as BMP.",
                            &menuActionDumpEyes, nullptr);
-        menuRegisterAction("Compare motion performance",
-                           "Land facing a busy scene, then close the menu and hold the view for about two minutes. Opening the menu during the comparison cancels it.",
-                           &menuActionCompareMotion, nullptr);
         menuConfigure(Config::get());
         // Empty default: the census is chased-bug instrumentation, and an
         // unbound key is how "off" is spelled for a hotkey.

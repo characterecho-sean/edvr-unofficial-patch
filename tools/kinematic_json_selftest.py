@@ -99,9 +99,9 @@ def self_test():
         dict(record=0, frame=43,
              t=['0x3f000000', '0x40000000', '0x40400000'],
              q=[32768, 32768, 32768, 65534])], ke['mover_samples']
-    # Same mesh value twice: the staleness signature from flight 083323.
-    assert ke['clock_samples'] == [dict(present=1001, mesh=13081),
-                                   dict(present=1002, mesh=13081)], ke['clock_samples']
+    # Two consecutive present ticks (the mesh clock retired 2026-09-23).
+    assert ke['clock_samples'] == [dict(present=1001),
+                                   dict(present=1002)], ke['clock_samples']
     # Physics dirty-queue counts: max_delta 5 exceeds every kept sample's
     # delta (4, 1), proving the counter is independent of the sample cap.
     assert ke['phys_queue'] == dict(runs=3, appended=7, max_delta=5, resets=1,

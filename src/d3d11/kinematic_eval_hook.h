@@ -22,23 +22,11 @@ bool kinematicEvalHooksMatch(uintptr_t evalTarget) noexcept;
 // already loaded the pointer finishes safely.
 void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept;
 
-// --- The kinematic tracker's feed (with fix.temporal_aa) --------------------
-// The tracker needs the eval stream WITHOUT an eye dump armed, so the relay
-// gate is a cell of its own, open while EITHER consumer wants callbacks:
-// the probe while attached (attach/detach above), the tracker while engine
-// motion's diagnostics want it (below), or the emit (further below). The
-// tracker registers a raw callback;
-// the eval relay invokes it after the probe's observe, gated the same way.
-// jobMask carries the TLS bracket bits (1u<<jobId) active at observation --
-// the job-attribution discriminator (kinematic doc, 2026-09-20 17:10).
-using KinematicTrackerObserverFn = void (*)(uintptr_t descriptor, uint32_t jobMask) noexcept;
-void kinematicEvalSetTrackerObserver(KinematicTrackerObserverFn fn) noexcept;
-// Validates the executable (PE header + evaluator prologue, or our own patch
-// already in place) and installs the same hooks, then opens the gate for the
-// tracker. Same return vocabulary as attachKinematicEvalHooks.
-const char* kinematicEvalTrackerAttach() noexcept;
-// Closes the tracker's want; the gate stays open while the probe holds it.
-void kinematicEvalTrackerDetach() noexcept;
+// The relay gate is a cell of its own, open while ANY consumer wants
+// callbacks: the probe while attached (attach/detach above), the emit
+// (below), and the scheduler stack probe, the static prop gate and the cull
+// gate probe (further below). (The legacy kinematic tracker, once one of
+// them, retired 2026-09-23.)
 
 // --- Engine-record velocity's emit feed (with fix.temporal_aa, phase 1) -----
 // FUN_144312E00 (direct producer 0) appends each kinematic rig record's
@@ -48,12 +36,12 @@ void kinematicEvalTrackerDetach() noexcept;
 // call appended -- so engine_velocity.cpp can write the previous pose into
 // exactly those records before the engine's copier uploads them. Runs on the
 // producer's job thread, under the eval gate the emit holds open itself
-// (kinematicEvalEmitAttach below: the legacy tracker is diagnostic-only since
-// the 2026-09-23 performance review). Null = off: one atomic load.
+// (kinematicEvalEmitAttach below, since the 2026-09-23 performance review).
+// Null = off: one atomic load.
 using EngineEmitObserverFn = void (*)(uintptr_t record, uintptr_t owner, int32_t before, int32_t after) noexcept;
 void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept;
 // The emit's own want on the shared hook set: validates the executable and
-// installs the same hooks as the tracker's attach, then holds the gate open
+// installs the same hooks as the probe's attach, then holds the gate open
 // for the direct-producer relay. Same return vocabulary as
 // attachKinematicEvalHooks. Detach closes the want; the gate stays open while
 // any other consumer holds it.
@@ -75,8 +63,7 @@ bool kinematicEvalEmitHookLive(const char** why) noexcept;
 // wrappers call schedulerStackNoteJobEntry() (scheduler_stack_hook.h) before
 // their timed bracket, at exactly the pre-forward point a dedicated hook
 // would sit. For that to happen the eval relays must be live even when the
-// eval probe and the tracker are both dark, so the scheduler probe is a
-// third gate consumer:
+// eval probe is dark, so the scheduler probe is a gate consumer of its own:
 void schedulerStackNoteJobEntry(uint32_t target, uintptr_t entryRsp) noexcept;
 // Installs the shared kinematic hook set (validating the executable) and
 // holds the eval gate open for the scheduler probe. Same return vocabulary
@@ -93,8 +80,8 @@ void kinematicEvalSchedulerDetach() noexcept;
 // a skip verdict, forwards past the call entirely: skipped calls never
 // enter the timed bracket, so the gate's wall share reads off the jobs[0]
 // counter's drop against a no-gate baseline. The gate module (which owns
-// the cache) registers decide here, exactly the way the tracker registers
-// its observer above; this file carries no link dependency on it.
+// the cache) registers decide here, exactly the way the emit registers its
+// observer above; this file carries no link dependency on it.
 using StaticGateDecideFn = uint32_t (*)(uintptr_t job0Param) noexcept;
 void kinematicEvalSetStaticGateObserver(StaticGateDecideFn fn) noexcept;
 // Installs the shared kinematic hook set (validating the executable) and

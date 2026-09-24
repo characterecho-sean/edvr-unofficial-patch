@@ -94,7 +94,7 @@ void seed(KinematicEvalProbe& p, uint32_t meshStamp) {
 void caseSeedWithoutFlush() {
     KinematicEvalProbe p;
     seed(p, 998);
-    p.notePresentFrame(1000, 998);
+    p.notePresentFrame(1000);
     KinematicEvalProbe::Summary s = p.summary();
     check(s.framesCounted == 0, "1: the seed tick counts no frame");
     check(s.zeroRecordFrames == 0, "1: the seed tick is not a zero-record frame");
@@ -102,11 +102,11 @@ void caseSeedWithoutFlush() {
     FakeRec r{}; setNode(r.b, 0xA1); setPose(r.b, 10.f, 20.f, 30.f);
     FakeDesc d = descFor(r.b); FakeRender rd{};
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
-    p.notePresentFrame(1001, 998);
+    p.notePresentFrame(1001);
     s = p.summary();
     check(s.framesCounted == 1 && s.zeroRecordFrames == 0 && s.minFrameRecords == 1,
           "1: the first real frame counts exactly one record");
-    p.notePresentFrame(1002, 998); // nothing observed
+    p.notePresentFrame(1002); // nothing observed
     s = p.summary();
     check(s.zeroRecordFrames == 1, "1: a genuinely empty frame still counts");
 }
@@ -117,7 +117,7 @@ void caseSeedWithoutFlush() {
 void caseFaultedReadCreatesNothing() {
     KinematicEvalProbe p;
     seed(p, 998);
-    p.notePresentFrame(2000, 998);
+    p.notePresentFrame(2000);
     auto* pages = static_cast<uint8_t*>(
         VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     check(pages != nullptr, "2: VirtualAlloc");
@@ -134,9 +134,9 @@ void caseFaultedReadCreatesNothing() {
     check(s.readFaults > 0, "2: the fault is counted");
     check(p.records_.empty(), "2: no record from a partial read");
     if (!VirtualProtect(pages, 4096, PAGE_READWRITE, &old)) { check(false, "2: unprotect"); VirtualFree(pages, 0, MEM_RELEASE); return; }
-    p.notePresentFrame(2001, 998);
+    p.notePresentFrame(2001);
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
-    p.notePresentFrame(2002, 998);
+    p.notePresentFrame(2002);
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
     s = p.summary();
     check(p.records_.size() == 1, "2: recovery creates the record once");
@@ -153,11 +153,11 @@ void caseFaultedReadCreatesNothing() {
 void caseNodeSwapCrossesNothing() {
     KinematicEvalProbe p;
     seed(p, 998);
-    p.notePresentFrame(3000, 998);
+    p.notePresentFrame(3000);
     FakeRec r{}; setNode(r.b, 0xC1); setPose(r.b, 10.f, 20.f, 30.f);
     FakeDesc d = descFor(r.b); FakeRender rd{};
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
-    p.notePresentFrame(3001, 998);
+    p.notePresentFrame(3001);
     setNode(r.b, 0xC2); setPose(r.b, 100.f, 20.f, 30.f); // new occupant, 90 m away
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
     const KinematicEvalProbe::Summary s = p.summary();
@@ -169,7 +169,7 @@ void caseNodeSwapCrossesNothing() {
     check(p.events_.size() == 1 && p.events_[0].kind == 2 &&
           p.events_[0].oldNode == 0xC1 && p.events_[0].newNode == 0xC2,
           "3: the event carries both nodes");
-    p.notePresentFrame(3002, 998);
+    p.notePresentFrame(3002);
     setPose(r.b, 103.f, 20.f, 30.f); // the new occupant really moves 3 m
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
     check(p.records_[0].totalJump > 2.9 && p.records_[0].totalJump < 3.1,
@@ -183,11 +183,11 @@ void caseNodeSwapCrossesNothing() {
 void caseNonFiniteRejected() {
     KinematicEvalProbe p;
     seed(p, 998);
-    p.notePresentFrame(4000, 998);
+    p.notePresentFrame(4000);
     FakeRec r{}; setNode(r.b, 0xD1); setPose(r.b, 1.f, 2.f, 3.f);
     FakeDesc d = descFor(r.b); FakeRender rd{};
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
-    p.notePresentFrame(4001, 998);
+    p.notePresentFrame(4001);
     setTranslationBits(r.b, 0x7FC00000u, 2.f, 3.f); // NaN x
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
     KinematicEvalProbe::Summary s = p.summary();
@@ -195,7 +195,7 @@ void caseNonFiniteRejected() {
     check(p.records_[0].totalJump == 0.0 && p.records_[0].maxJump == 0.f,
           "4: accumulators stay finite");
     check(s.xfMovers == 1, "4: the raw bits still classify as motion");
-    p.notePresentFrame(4002, 998);
+    p.notePresentFrame(4002);
     setPose(r.b, 4.f, 2.f, 3.f); // recovery: jump from NaN is NaN, rejected too
     p.observe(reinterpret_cast<uintptr_t>(&d), reinterpret_cast<uintptr_t>(&rd));
     s = p.summary();
@@ -216,16 +216,16 @@ void caseNonFiniteRejected() {
 void caseJobMaskAccumulates() {
     KinematicEvalProbe p;
     seed(p, 998);
-    p.notePresentFrame(5000, 998);
+    p.notePresentFrame(5000);
     FakeRec r{}; setNode(r.b, 0xE2); setPose(r.b, 1.f, 2.f, 3.f);
     FakeDesc d = descFor(r.b); FakeRender rd{};
     const uintptr_t dp = reinterpret_cast<uintptr_t>(&d);
     const uintptr_t rp = reinterpret_cast<uintptr_t>(&rd);
     p.observe(dp, rp, 0x2u);
-    p.notePresentFrame(5001, 998);
+    p.notePresentFrame(5001);
     p.observe(dp, rp, 0x10u);
     check(p.records_[0].jobMask == 0x12u, "5: job bits accumulate across observations");
-    p.notePresentFrame(5002, 998);
+    p.notePresentFrame(5002);
     p.observe(dp, rp); // default zero mask: no bit, no harm
     check(p.records_[0].jobMask == 0x12u, "5: a zero-mask observation keeps the bits");
     std::ostringstream j;

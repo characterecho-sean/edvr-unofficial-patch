@@ -132,6 +132,12 @@ int main(int argc, char** argv) {
     expectStr("fix.temporal_aa_objects", "<unset>", "station motion is bundled with temporal AA");
     expectStr("fix.temporal_aa_smoke", "<unset>", "smoke depth is bundled with temporal AA");
     expectStr("fix.engine_motion", "<unset>", "engine motion is bundled with temporal AA: its own key is retired");
+    // The estimation paths the engine records superseded (2026-09-23): their
+    // keys are retired, not merely off.
+    expectStr("advanced.temporal_aa_estimated_objects", "<unset>", "the retired estimated station/ship paths' key is absent");
+    expectStr("advanced.mesh_motion", "<unset>", "the retired mesh record pairing's key is absent");
+    expectStr("advanced.temporal_aa_objects_reach", "<unset>", "the retired station path's reach is absent");
+    expectStr("advanced.temporal_aa_objects_ships_metres", "<unset>", "the retired ship path's range is absent");
     expectBool("fix.share_exposure", true, "a key in the first [fix] reads");
     expectBool("fix.transition_flash", true, "...and another beside it");
     expectStr("hotkey.toggle_exposure", "SCROLLLOCK",

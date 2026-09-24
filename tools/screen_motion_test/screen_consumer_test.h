@@ -174,6 +174,7 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
         ComPtr<ID3D11ComputeShader> tested=mv;
         if(variant)hr(dev->CreateComputeShader(embedded[variant-1].data,embedded[variant-1].size,nullptr,&tested));
         for(int test=0;test<23;++test) {
+            if(test==12)continue;   // the mesh records' path (t15/t16), retired 2026-09-23
             std::fill(z.begin(),z.end(),0.f);std::fill(prior.begin(),prior.end(),0.f);
             std::fill(pixels.begin(),pixels.end(),0.f);std::fill(marks.begin(),marks.end(),0.f);
             floats("probe",1,0,1,32);floats("holoJitter",.75f,.25f,1,1);
@@ -191,7 +192,7 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
             // a surface at the same depth, or in front, keeps its history.
             if(test>=8 && test<=10)std::fill(z.begin(),z.end(),test==8?.000025f:test==9?.025f:.05f);
             if(test==11)floats("dR0",1,0,-4,0); // off-image history
-            if(test==12 || test==13){std::fill(z.begin(),z.end(),.000025f);floats("probe",1,0,1,48);}
+            if(test==13){std::fill(z.begin(),z.end(),.000025f);floats("probe",1,0,1,48);}
             if(test==14 || test==15){std::fill(z.begin(),z.end(),.025f);prior[4*8+6]=.025f*(test==14?1.02f:1.04f);}
             reinterpret_cast<UINT*>(record)[15]=test>=16 && test<20?4:1;
             record[46]=test>=16 && test<20?.5f:.15625f;
@@ -217,7 +218,7 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
             ctx->ClearState();ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
             ctx->CSSetShaderResources(2,1,zs.GetAddressOf());ctx->CSSetShaderResources(3,1,previousView.GetAddressOf());
             ctx->CSSetShaderResources(4,1,uiView.GetAddressOf());ctx->CSSetShaderResources(14,1,ms.GetAddressOf());
-            if(test==12 || test==13 || (test>=16 && test<20)){ID3D11ShaderResourceView* exact[2]={coverageView.Get(),recordView.Get()};ctx->CSSetShaderResources(test==12?15:12,2,exact);}
+            if(test==13 || (test>=16 && test<20)){ID3D11ShaderResourceView* exact[2]={coverageView.Get(),recordView.Get()};ctx->CSSetShaderResources(12,2,exact);}
             ctx->CSSetSamplers(0,1,sampler.GetAddressOf());
             ID3D11UnorderedAccessView* outputs[3]={mu.Get(),zu.Get(),ku.Get()};ctx->CSSetUnorderedAccessViews(3,3,outputs,nullptr);
             ctx->CSSetShader(tested.Get(),nullptr,0);ctx->Dispatch(1,1,1);
