@@ -340,6 +340,42 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
   0x6BF929 / 0x594C3E / 0x2869073`.
 
+## Static round 7: the writer and its gates (dumps `analysis\decomp\flash\r7\`)
+
+- **The writer is `FUN_142874b20`** (true entry `0x2874B20`, 239 bytes,
+  chained pdata). It copies 64 bytes from `param_3` into
+  `*(param_1+0x38)+0x3330` (the mailbox), then makes a notify call. It
+  does this ONLY if `_stricmp(name1, name2) == 0`:
+  - name1 comes from the last node of `param_2`'s chain;
+  - name2 from `(*(param_1-8))->vtable[0x50]()`;
+  - both are runtime strings with no literal xrefs.
+  The first bytes are `48 85 D2 0F 84 E5 00 00 00` (TEST RDX,RDX; JZ
+  rel32), a relocatable 9-byte steal.
+- **Its caller is the camera controller tick `FUN_1410730a0`** (`0x10730A0`,
+  first bytes `48 89 5C 24 10`, clean). It skips everything when
+  `(*(param_1+0x190))->vtable[0x80]()` is false. Otherwise it fetches the
+  base by a named lookup (registries `DAT_145f2afa0`, `DAT_145f501e8`, then
+  the target's `vtable+0x20`), falling back to its own previous `+0x70`
+  block, and hands that verbatim to the writer.
+- **The job chain.** Per-slot iterator `0x10672C0`, job body `0x106F210`
+  (busy gate, inline or deferred), system dispatcher `0x106C840`, frame
+  tick `0x7F32D0` ("Long frame time"), outer driver `0x7F8B60`.
+- **Skip candidates, ranked:**
+  - (1) the controller's `vtable[0x80]` check is false for one frame;
+  - (2) the writer's name gate fails for one frame. The matrix is offered
+    and refused, as it would be if the camera's target name changes at the
+    transition;
+  - (3) the slot loop's bound is 0 for one frame;
+  - (4) the writer's `param_2` is null.
+- **Running the writer ourselves: rejected.** The objects differ from the
+  consumer's (ship is at `+0x38` here, `+0x50` there, with no pointer path
+  found). The chain has side effects: a notify call, a refcount release,
+  the job loop's lock-free state.
+- **What a flight can settle.** Whether the writer is called on the skipped
+  frame, which gate fails, and what matrix it was offered. If (2), that
+  offered-and-refused matrix is exactly "the base the writer would have
+  written".
+
 ## Flight 073114 (2026-09-24 07:31, Steam copy, build b0d3632a)
 
 Held-base fix, trap OFF, `alternate`; the build matched.
