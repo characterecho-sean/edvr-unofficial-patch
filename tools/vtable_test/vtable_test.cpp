@@ -1000,6 +1000,22 @@ int main() {
               "the prefix threw the displacement offset out, so the fixup would "
               "rewrite the wrong four bytes");
 
+        // lea rbp, [rsp-0x17B0] -- SIB with a disp32 base (mod=10, rm=100), not
+        // rip-relative: eight bytes (REX, opcode, ModRM, SIB, disp32), no
+        // fixup needed since the operand does not move with the instruction.
+        // The actual fourth instruction of FUN_1428431d0 (docs\design-
+        // transition-flash-engine-fix-2026-09-23.md's round 6 consumer hook,
+        // RVA 0x28431D0): three one-byte pushes steal 4 bytes, so this LEA is
+        // the one that has to be decoded and relocated to clear the 5-byte
+        // patch, taking the steal to CodeHook's actual 12 bytes there.
+        const uint8_t spBaseLea[] = {0x48, 0x8D, 0xAC, 0x24, 0x50, 0xE8, 0xFF, 0xFF};
+        check(codeInstructionLength(spBaseLea, sizeof(spBaseLea), &disp) == 8 &&
+                  disp == 0,
+              "...and a SIB-with-disp32 lea off rsp, reporting no rip-relative "
+              "displacement",
+              "FUN_1428431d0's own prologue would misdecode: either refused "
+              "(no hook) or stolen at the wrong length (a corrupted trampoline)");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};
