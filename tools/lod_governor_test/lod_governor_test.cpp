@@ -1,5 +1,5 @@
 // Build gate for the settlement LOD governor (src/d3d11/lod_governor.*,
-// fix.settlement_detail, shipped default auto): the policy on synthetic frame
+// fix.settlement_detail, shipped default game): the policy on synthetic frame
 // sequences -- auto decided once a second of wall time over the cycles
 // completed in it, on the display slot (the interval between boundaries;
 // longer than 1.5 periods took two): a second of 20 valid cycles or more
@@ -1740,21 +1740,21 @@ void caseBoundary() {
           "boundary: an unknown value is named and treated as game");
     applyConfig("game", 2.0f, true, t);
     // The configure sweep with every key unset (the stub Config answers every
-    // default): the shipped fix -- auto, acting, the compiled k_max 6.0,
-    // observe 0.
+    // default): the shipped default -- game, off, nothing observed or
+    // changed, with the compiled k_max 6.0 and observe 0 held for auto.
+    // Started from a live auto so the switch to off is logged.
+    applyConfig("auto", 2.0f, true, t);
     at = g_lines.size();
     lodGovernorConfigure(Config::get());
-    check(g_live.load() && g_acting.load() && g_state.mode == Mode::Auto && g_state.kMaxCfg == 6.0f &&
-              g_state.policy.kMax() == 6.0f && !g_state.observe &&
-              logged("settlement detail: on (auto: acts by scaling the game's LOD scale", at) &&
-              logged("-- k in [1, 6.00], auto's policy on the next line", at) &&
-              logged("settlement detail: auto's policy, decided once a second", at),
-          "boundary: with the keys unset the governor is on in auto and acts, k_max the compiled 6.0, observe 0");
-    applyConfig("game", lodgov::kDefaultMax, false, t);
+    check(!g_live.load() && g_state.mode == Mode::Game && g_state.kMaxCfg == 6.0f && !g_state.observe &&
+              logged("settlement detail: off (fix.settlement_detail = game", at),
+          "boundary: with the keys unset the governor is off (game), k_max the compiled 6.0, observe 0");
+    applyConfig("auto", lodgov::kDefaultMax, false, t);
     at = g_lines.size();
     applyConfig("", lodgov::kDefaultMax, false, t);
-    check(g_live.load() && g_state.mode == Mode::Auto && logged("settlement detail: on (auto:", at),
-          "boundary: an empty fix.settlement_detail is the compiled default, auto");
+    check(!g_live.load() && g_state.mode == Mode::Game &&
+              logged("settlement detail: off (fix.settlement_detail = game", at),
+          "boundary: an empty fix.settlement_detail is the compiled default, game");
     applyConfig("game", lodgov::kDefaultMax, false, t);
 }
 
