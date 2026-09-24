@@ -317,6 +317,13 @@ def child_env(env, job, exe_dir=None):
     return child
 
 
+def child_process_kwargs():
+    """Keep rig command shells from creating or foregrounding a console window."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def spawner(script, root, env, exe_dir=None):
     def spawn(job):
         if exe_dir is not None:
@@ -324,7 +331,8 @@ def spawner(script, root, env, exe_dir=None):
             os.makedirs(log_dir(exe_dir, job), exist_ok=True)
         completed = subprocess.run(child_command(script, job.rig.label), cwd=str(root),
                                    env=child_env(env, job, exe_dir), stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   **child_process_kwargs())
         return completed.returncode, completed.stdout
     return spawn
 
@@ -748,6 +756,10 @@ def self_test():
 
     check(child_command(Path(r"C:\x y\build.bat"), "alpha") == r'cmd.exe /d /c ""C:\x y\build.bat" --rig alpha"',
           "child command quotes the script for cmd /c")
+    expected_process_kwargs = ({"creationflags": subprocess.CREATE_NO_WINDOW}
+                                if os.name == "nt" else {})
+    check(child_process_kwargs() == expected_process_kwargs,
+          "rig command shells use CREATE_NO_WINDOW on Windows: %r" % child_process_kwargs())
     env = {"CL": "/MP4"}
     check(child_env(env, Job(alpha)) == env and "EDVR_RIG_STEP" not in child_env(env, Job(alpha)),
           "a whole rig's child gets the runner's environment as it is")
