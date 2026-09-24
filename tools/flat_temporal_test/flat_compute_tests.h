@@ -25,6 +25,25 @@ inline int flatComputeTests() {
     }
     check(flatComputeHashIndex(0) == -1 && flatComputeRole(0) == FlatComputeRole::Unknown &&
           flatComputeHashIndex(0x074CB657FDBD43E7ull) == -1, "unknown and near hashes refused");
+    const void* r32 = reinterpret_cast<const void*>(uintptr_t(0x1234));
+    const void* other = reinterpret_cast<const void*>(uintptr_t(0x5678));
+    check(flatR32WriterRelation(r32,10,12,r32,13)==FlatR32WriterRelation::BeforeConsumer &&
+          flatR32WriterRelation(r32,10,13,r32,13)==FlatR32WriterRelation::SpansConsumer,
+          "R32 producer order separates definite writes from coalesced overlap");
+    check(flatR32WriterRelation(r32,10,12,other,13)==FlatR32WriterRelation::Unrelated &&
+          flatR32WriterRelation(r32,13,13,r32,13)==FlatR32WriterRelation::Unrelated &&
+          flatR32WriterRelation(r32,12,10,r32,13)==FlatR32WriterRelation::Unrelated,
+          "R32 provenance rejects other resources, late writes and invalid ranges");
+    check(flatR32ProbeExtent(1280,720,1280,720)==FlatR32ProbeExtent::Native &&
+          flatR32ProbeExtent(960,540,1280,720)==FlatR32ProbeExtent::ThreeQuarter &&
+          flatR32ProbeExtent(1920,1080,2560,1440)==FlatR32ProbeExtent::ThreeQuarter,
+          "R32 producer probe admits only measured native and 0.75x extents");
+    check(flatR32ProbeExtent(960,539,1280,720)==FlatR32ProbeExtent::Unsupported &&
+          flatR32ProbeExtent(959,539,1279,719)==FlatR32ProbeExtent::Unsupported &&
+          flatR32ProbeExtent(1024,1024,1280,720)==FlatR32ProbeExtent::Unsupported &&
+          flatR32ProbeExtent(0,540,1280,720)==FlatR32ProbeExtent::Unsupported &&
+          flatR32ProbeExtent(960,540,0xffffffffu,0xffffffffu)==FlatR32ProbeExtent::Unsupported,
+          "R32 producer probe refuses off-by-one, odd unsupported, unrelated and invalid extents");
     const uint32_t counts[3] = {3, 5, 4}; // Raw UINT bits, never float(3)/float(5)/float(4).
     uint64_t offsets[12]{};
     const uint64_t expectedIndices[12] = {0, 2, 12, 14, 30, 32, 42, 44, 45, 47, 57, 59};

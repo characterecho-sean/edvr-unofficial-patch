@@ -27,6 +27,9 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 #include <atomic>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <vector>
 
 #include "../common/config.h"
 #include "../common/temporal_mode.h"
@@ -215,6 +218,12 @@ struct State {
     std::wstring shaderDumpDir;
     std::atomic<bool> shaderDumpDirMade{false};
     std::atomic<uint32_t> flatShaderCaptureAttempted{0};
+    // Experimental flat producer probe: shader creation precedes the manual
+    // capture. Keep bounded bytes, then write only the measured writer hashes.
+    std::mutex flatProbeShaderMutex;
+    std::map<std::pair<char, uint64_t>, std::vector<uint8_t>> flatProbeShaders;
+    size_t flatProbeShaderBytes = 0;
+    uint32_t flatProbeShaderDrops = 0;
     PFN_Present      realPresent = nullptr;
     PFN_ResizeBuffers realResizeBuffers = nullptr;
     PFN_ResizeBuffers1 realResizeBuffers1 = nullptr;
@@ -599,6 +608,19 @@ void captureFlatShader(char stage, uint64_t hash, const void* bytecode, SIZE_T l
                     static_cast<unsigned long long>(len), unsigned(result.bytes), unsigned(result.existed),
                     unsigned(result.error));
 }
+void rememberFlatProbeShader(char stage, uint64_t hash, const void* bytecode, SIZE_T len) {
+    if (!runtimeFlatProfile() || !bytecode || !len) return;
+    auto& s = *g_state;
+    std::lock_guard<std::mutex> lock(s.flatProbeShaderMutex);
+    const auto key = std::make_pair(stage, hash);
+    if (s.flatProbeShaders.find(key) != s.flatProbeShaders.end()) return;
+    if (!flatProbeShaderFits(s.flatProbeShaders.size(), s.flatProbeShaderBytes, len)) {
+        ++s.flatProbeShaderDrops; return;
+    }
+    const auto* begin = static_cast<const uint8_t*>(bytecode);
+    s.flatProbeShaders.emplace(key, std::vector<uint8_t>(begin, begin + len));
+    s.flatProbeShaderBytes += len;
+}
 
 // The game's own creations, counted for the monitor's long-frame line
 // (2026-09-08: the hitches on a station approach came with the instance
@@ -667,6 +689,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         captureFlatShader('v', hash, bytecode, len);
+        rememberFlatProbeShader('v', hash, bytecode, len);
         registerShaderHash(*out, hash);
         // ...and its INPUT SIGNATURE, which is a different question from its
         // identity: whether the panel composite's shader reads the z of the
@@ -696,6 +719,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         captureFlatShader('p', hash, bytecode, len);
+        rememberFlatProbeShader('p', hash, bytecode, len);
         registerShaderHash(*out, hash);
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
@@ -1010,6 +1034,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
         // COMPUTE shaders dump too (2026-09-07), and they had to start.
+        rememberFlatProbeShader('c', hash, bytecode, len);
         //
         // This hook has registered their hashes since it was written, so a
         // census could NAME a dispatch -- and the dump wrote only vs_ and
@@ -2036,6 +2061,29 @@ State& ensureState() {
 }
 
 }  // namespace
+
+bool captureFlatProbeShader(char stage, uint64_t hash) {
+    if (!g_state || !runtimeFlatProfile() || !hash ||
+        (stage != 'v' && stage != 'p' && stage != 'c')) return false;
+    auto& s = *g_state;
+    std::lock_guard<std::mutex> lock(s.flatProbeShaderMutex);
+    const auto found = s.flatProbeShaders.find(std::make_pair(stage, hash));
+    if (found == s.flatProbeShaders.end()) {
+        Log::get().note("flat producer shader: missing stage=%cs hash=%016llX retained=%llu bytes=%llu drops=%u",
+            stage, static_cast<unsigned long long>(hash),
+            static_cast<unsigned long long>(s.flatProbeShaders.size()),
+            static_cast<unsigned long long>(s.flatProbeShaderBytes), s.flatProbeShaderDrops);
+        return false;
+    }
+    const auto& bytes = found->second;
+    const auto result = dumpShaderBlob(stage == 'v' ? L"vs" : stage == 'p' ? L"ps" : L"cs",
+        hash, bytes.data(), bytes.size(), true);
+    Log::get().note("flat producer shader: %s stage=%cs hash=%016llX bytes=%llu saved-bytes=%u existing=%u error=%u cache-drops=%u",
+        result.success ? "succeeded" : "failed", stage, static_cast<unsigned long long>(hash),
+        static_cast<unsigned long long>(bytes.size()), unsigned(result.bytes), unsigned(result.existed),
+        unsigned(result.error), s.flatProbeShaderDrops);
+    return result.success;
+}
 
 // The two entries the investigation turns on, named at install. See the header
 // for what they are and why the departure point matters as much as the

@@ -36,6 +36,7 @@ void flatTemporalConstantBuffers(bool pixelStage, UINT start, UINT count, ID3D11
 void flatTemporalClearBindings();  // an observed ClearState, explicitly unbound
 void flatTemporalDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances);
 void flatTemporalClearColor(ID3D11RenderTargetView* rtv);
+void flatTemporalClearUav(ID3D11UnorderedAccessView* uav);
 void flatTemporalClearDepth(ID3D11DepthStencilView* dsv, UINT flags, float depth);
 void flatTemporalTransfer(ID3D11Resource* dst, ID3D11Resource* src, char kind);
 void flatTemporalDispatch(ID3D11DeviceContext* ctx, UINT x, UINT y, UINT z, ID3D11Buffer* args = nullptr, UINT offset = 0);

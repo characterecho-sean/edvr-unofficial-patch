@@ -15,7 +15,8 @@ using Microsoft::WRL::ComPtr;
 namespace {
 int failures=0,backendCalls=0;
 bool backendFail=false,backendReset=false,infiniteSeen=false;
-float observedMotion=0,observedDepth=0;unsigned observedReject=0;
+float expectedJx=0,expectedJy=0;
+float observedMotion=0,observedMotionY=0,observedDepth=0;unsigned observedReject=0;
 void check(bool ok,const char* text){if(!ok){std::printf("FAIL: %s\n",text);++failures;}}
 bool readPixel(ID3D11DeviceContext* context,ID3D11Texture2D* texture,void* out,size_t bytes,UINT x=8,UINT y=8) {
     ComPtr<ID3D11Device> device;context->GetDevice(device.GetAddressOf());
@@ -33,11 +34,12 @@ float half(uint16_t value) {
 }
 bool backend(ID3D11DeviceContext* c,ID3D11Texture2D* depth,ID3D11Texture2D* mv,ID3D11Texture2D* mask,
              ID3D11Texture2D* out,float jx,float jy,bool reset,const char** reason) {
-    ++backendCalls;backendReset=reset;check(jx==0 && jy==0,"backend receives zero jitter");
+    ++backendCalls;backendReset=reset;
+    check(jx==expectedJx && jy==expectedJy,"backend receives actual rendered phase");
     uint16_t motion[2]{};unsigned char reject=0;
     check(readPixel(c,mv,motion,sizeof(motion)) && readPixel(c,depth,&observedDepth,sizeof(float)) &&
           readPixel(c,mask,&reject,1),"backend inputs readable");
-    observedMotion=half(motion[0]);observedReject=reject;
+    observedMotion=half(motion[0]);observedMotionY=half(motion[1]);observedReject=reject;
     c->ClearState(); // Both successful and refused backends may clobber all stages.
     if(backendFail){if(reason)*reason="injected-backend-refusal";return false;}
     ComPtr<ID3D11Device> d;c->GetDevice(d.GetAddressOf());ComPtr<ID3D11UnorderedAccessView> uav;
@@ -136,6 +138,11 @@ int main(int argc,char** argv) {
           "continuous frame reuses state and textures without a reset");
     check(pixel(second.Get())==0xff00ff00,"valid pixel uses trained output");
     check(pixel(second.Get(),31,16)==0xff0000ff,"offscreen reprojection displays current spatial color");
+    f.jitterX=expectedJx=.25f;f.jitterY=expectedJy=-.375f;
+    f.previousJitterX=-.25f;f.previousJitterY=.375f;++f.frame;
+    run(true);
+    check(!backendReset && std::abs(observedMotion-1)<.001f && std::abs(observedMotionY)<.001f,
+          "unjittered camera reconstructs depth at the current raster phase; SDK vector excludes both phases");
     // A matched pixel's own rigid record moves oppositely: exact engine vector
     // must replace the positive camera vector, not estimate it from a heuristic.
     record[1]=record[77]=bits(1);record[2]=record[78]=0x7fff7fff;record[3]=record[79]=0xfffe7fff;
@@ -146,9 +153,10 @@ int main(int argc,char** argv) {
     record[72]=0x7FC0ED01u^edvr::engine_velocity_emit::markerHash(np,pp);
     context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
     slots[(8*w+8)*2]=1;context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
-    f.frame=3;run(true);
+    ++f.frame;run(true);
     if(std::abs(observedMotion+1)>=.001 || observedReject!=0)std::printf("info: joined motion=%g reject=%u\n",observedMotion,observedReject);
-    check(std::abs(observedMotion+1)<.001 && observedReject==0,"joined engine pose gives exact negative one pixel motion");
+    check(std::abs(observedMotion+1)<.001 && std::abs(observedMotionY)<.001 && observedReject==0,
+          "joined engine pose uses shared exact reprojection at unjittered UV despite raster phase");
     for(unsigned kind=0;kind<3;++kind){
         if(kind==0)slots[(8*w+8)*2]=2; // corrupt even code
         if(kind==1){slots[(8*w+8)*2]=1;slots[(8*w+8)*2+1]=.02f;} // stale depth
@@ -156,7 +164,12 @@ int main(int argc,char** argv) {
         context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);++f.frame;
         auto rejected=run(true);check(observedReject==255 && pixel(rejected.Get())==0xff0000ff,"corrupt/stale/masked pixel displays current color");
     }
-    backendFail=true;++f.frame;run(false);backendFail=false;++f.frame;run(true);check(backendReset,"backend failure invalidates history");
+    backendFail=true;++f.frame;run(false);backendFail=false;
+    bindOriginal();ComPtr<ID3D11ShaderResourceView> recovered;const char* fallbackReason=nullptr;
+    check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,recovered.GetAddressOf(),&fallbackReason) &&
+          recovered && restored() && pixel(recovered.Get())==0xff0000ff,
+          "preallocated spatial fallback restores state and displays current jittered frame after SDK refusal");
+    ++f.frame;run(true);check(backendReset,"backend failure and fallback invalidate history");
     stats=edvr::flatMonoResolveStats();check(stats.backendFailures==1 && stats.currentContinueRun==0,
         "backend failure and following accepted reset are visible in cumulative statistics");
     f.mode=edvr::FlatMonoResolveMode::Taa;f.reset=true;++f.frame;auto taa=run(true);
@@ -196,6 +209,42 @@ int main(int argc,char** argv) {
     ++f.frame;f.camera[5][0]=51;run(true);stats=edvr::flatMonoResolveStats();
     check(backendReset && stats.cameraCuts==1,"camera cut produces a counted reset");
     f.camera[0][0]=0;run(false);check(backendCalls==callsBefore+3,"singular camera declines before backend");
+    f.camera[0][0]=1;
+    std::vector<uint32_t> step(w*h,0xff000000);
+    for(UINT y=0;y<h;++y)for(UINT x=9;x<w;++x)step[y*w+x]=0xff0000ff;
+    context->UpdateSubresource(color.Get(),0,nullptr,step.data(),w*4,0);
+    f.jitterX=0;f.jitterY=0;
+    bindOriginal();ComPtr<ID3D11ShaderResourceView> spatialZero;
+    check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,spatialZero.GetAddressOf(),&fallbackReason) &&
+          restored() && (pixel(spatialZero.Get())&255)==0,"zero-phase fallback samples the output grid directly");
+    f.jitterX=.5f;
+    bindOriginal();ComPtr<ID3D11ShaderResourceView> spatialJitter;
+    check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,spatialJitter.GetAddressOf(),&fallbackReason) &&
+          restored() && (pixel(spatialJitter.Get())&255)>0 && (pixel(spatialJitter.Get())&255)<255,
+          "nonzero-phase fallback shifts the spatial sample to undo raster displacement");
+    // At output pixel 17, the previous unjittered coordinate is render x=8.75.
+    // Its old raster phase +.5 selects depth texel 9. A lookup without that
+    // phase would select texel 8 and reject valid history in this fixture.
+    f.mode=edvr::FlatMonoResolveMode::Taa;f.reset=true;++f.frame;
+    camera(f.camera);camera(f.previousCamera);f.jitterY=f.previousJitterY=0;
+    for(UINT y=0;y<h;++y)z[y*w+8]=.02f;
+    context->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);
+    std::fill(step.begin(),step.end(),0xff0000ff);
+    context->UpdateSubresource(color.Get(),0,nullptr,step.data(),w*4,0);
+    f.jitterX=.5f;f.previousJitterX=0;
+    auto phaseHistory=run(true);
+    check((pixel(phaseHistory.Get(),17,16)&255)==255,"TAA reset places current color on the unjittered output grid");
+    std::fill(step.begin(),step.end(),0xffff0000);
+    for(UINT y=0;y<h;++y)step[y*w+8]=0xff0000ff; // keep red within the 3x3 history clamp
+    context->UpdateSubresource(color.Get(),0,nullptr,step.data(),w*4,0);
+    f.reset=false;++f.frame;f.jitterX=.25f;f.previousJitterX=.5f;
+    phaseHistory=run(true);
+    check((pixel(phaseHistory.Get(),17,16)&255)>200,
+          "TAA compares expected depth at the previous frame's raster phase and retains aligned history");
+    f.jitterX=std::nanf("");
+    bindOriginal();ComPtr<ID3D11ShaderResourceView> badJitter;
+    check(!edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,badJitter.GetAddressOf(),&fallbackReason) &&
+          !badJitter && restored(),"nonfinite jitter cannot silently reach spatial fallback");
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessages();++i){SIZE_T n=0;messages->GetMessage(i,nullptr,&n);std::vector<unsigned char> bytes(n);
         auto* msg=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());messages->GetMessage(i,msg,&n);
         if(msg->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::printf("D3D: %s\n",msg->pDescription);check(false,"no D3D resource hazards/errors/warnings");}}

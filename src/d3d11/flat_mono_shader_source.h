@@ -1,12 +1,13 @@
 #pragma once
 namespace edvr {
 // Prepend the generated kEngineMotionCoreHlsl: rigid-record arithmetic is shared
-// verbatim with VR. This source has no eye, headset, panel or jitter globals.
+// verbatim with VR. This source has no eye, headset or panel globals.
 inline constexpr char kFlatMonoShaderSource[] = R"HLSL(
 cbuffer Mono : register(b0) {
     float4 now[6]; float4 old[6];
     uint4 size; // render width/height, output width/height
     uint4 flags; // reset, complete engine views, TAA, reserved
+    float4 jitter; // current xy, previous zw; actual raster phase in render pixels
 };
 cbuffer EngineNow : register(b1) { float4 EN[276]; };
 cbuffer EngineBefore : register(b2) { float4 EB[276]; };
@@ -64,18 +65,23 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before) {
 void prep(uint3 id:SV_DispatchThreadID) {
     if(any(id.xy>=size.xy))return;
     int2 q=int2(id.xy); float2 uv=(float2(q)+.5)/float2(size.xy);
+    // The depth belongs to the raster pixel q. Both raw camera and engine
+    // rows describe the same surface at its unjittered screen coordinate.
+    float2 rawUv=uv-jitter.xy/float2(size.xy);
     float depth=SceneDepth.Load(int3(q,0));
     float2 motion=0; float reject=1, expected=0;
     if(flags.x==0 && isfinite(depth) && depth>=0 && depth<=1) {
         float4 before;
-        uint kind=engineBefore(q,uv,depth,before);
+        uint kind=engineBefore(q,rawUv,depth,before);
         // HLSL logical operators do not short-circuit: putting cameraBefore's
         // out parameter in || would overwrite the exact engine result.
         bool valid=kind==1;
-        if(kind==0)valid=cameraBefore(uv,depth,before);
+        if(kind==0)valid=cameraBefore(rawUv,depth,before);
         if(valid) {
             float2 prev=before.xy/before.w*float2(.5,-.5)+.5;
-            motion=(prev-uv)*float2(size.xy);
+            // SDK vectors exclude both raster phases; the backend receives
+            // the actual current phase separately and tracks its own history.
+            motion=(prev-rawUv)*float2(size.xy);
             expected=before.z/before.w;
             valid=all(isfinite(motion)) && all(abs(motion)<=65504) &&
                   all(prev>=0) && all(prev<=1) && isfinite(expected) && expected>=0 && expected<=1;
@@ -91,12 +97,13 @@ void prep(uint3 id:SV_DispatchThreadID) {
 void taa(uint3 id:SV_DispatchThreadID) {
     if(any(id.xy>=size.zw))return;
     float2 uv=(float2(id.xy)+.5)/float2(size.zw);
-    int2 q=clamp(int2(uv*float2(size.xy)),0,int2(size.xy)-1);
-    float4 current=Color.SampleLevel(LinearClamp,uv,0);
+    float2 rasterUv=uv+jitter.xy/float2(size.xy);
+    int2 q=clamp(int2(rasterUv*float2(size.xy)),0,int2(size.xy)-1);
+    float4 current=Color.SampleLevel(LinearClamp,rasterUv,0);
     float2 previous=uv+Motion.Load(int3(q,0))/float2(size.xy);
     float weight=0;
     if(flags.x==0 && Rejection.Load(int3(q,0))==0 && all(previous>=0) && all(previous<=1)) {
-        int2 oldQ=clamp(int2(previous*float2(size.xy)),0,int2(size.xy)-1);
+        int2 oldQ=clamp(int2(previous*float2(size.xy)+jitter.zw),0,int2(size.xy)-1);
         float was=HistoryDepth.Load(int3(oldQ,0)), predicted=ExpectedDepth.Load(int3(q,0));
         if(abs(was-predicted)<=max(1e-6,predicted*.01))weight=.9;
     }
@@ -115,11 +122,20 @@ void taa(uint3 id:SV_DispatchThreadID) {
 void finish(uint3 id:SV_DispatchThreadID) {
     if(any(id.xy>=size.zw))return;
     float2 uv=(float2(id.xy)+.5)/float2(size.zw);
-    int2 q=int2(floor(uv*float2(size.xy)-.5));
+    float2 rasterUv=uv+jitter.xy/float2(size.xy);
+    int2 q=int2(floor(rasterUv*float2(size.xy)-.5));
     float reject=0;
     [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
         reject=max(reject,Rejection.Load(int3(clamp(q+int2(x,y),0,int2(size.xy)-1),0)));
-    OutColor[id.xy]=reject>0?Color.SampleLevel(LinearClamp,uv,0):History.Load(int3(id.xy,0));
+    OutColor[id.xy]=reject>0?Color.SampleLevel(LinearClamp,rasterUv,0):History.Load(int3(id.xy,0));
+}
+// Single-frame recovery after a temporal backend declines already-jittered
+// input. The result lands on the same output grid as the successful backend.
+[numthreads(8,8,1)]
+void spatial(uint3 id:SV_DispatchThreadID) {
+    if(any(id.xy>=size.zw))return;
+    float2 uv=(float2(id.xy)+.5)/float2(size.zw);
+    OutColor[id.xy]=Color.SampleLevel(LinearClamp,uv+jitter.xy/float2(size.xy),0);
 }
 )HLSL";
 } // namespace edvr

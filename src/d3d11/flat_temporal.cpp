@@ -698,7 +698,8 @@ void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags) {
         Log::get().note("flat temporal: passive discovery complete; flat runtime treatment continues independently and reports its own results");
     }
     clearFrame();
-    if (!deadline && result == S_OK && !(flags & DXGI_PRESENT_TEST)) flatComputeBoundary(frame, g.epoch);
+    if (!deadline && result == S_OK && !(flags & DXGI_PRESENT_TEST))
+        flatComputeBoundary(frame, g.epoch, g.backW, g.backH);
 }
 
 void flatTemporalBind(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv) {
@@ -748,6 +749,7 @@ void flatTemporalClearBindings() {
 void flatTemporalDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances) {
     if (!flatTemporalCapturing()) return;
     ++g.serial;
+    if (!g.forwardingPresent && flatComputeCandidate()) flatComputeProbeDraw(ctx,g.epoch,g.serial);
     if (!g.current) {
         // The shadow includes explicit null binds. Never replace a null bind
         // with an older non-null collector value.
@@ -851,10 +853,16 @@ void flatTemporalDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
 void flatTemporalClearColor(ID3D11RenderTargetView* rtv) {
     if (!flatTemporalCapturing()) return;
     ++g.serial;
+    if (!g.forwardingPresent && flatComputeCandidate()) flatComputeProbeClear(rtv,g.epoch,g.serial,"RTV-clear");
     bool matched = false;
     for (uint32_t i = 0; i < g.targetCount; ++i)
         if (g.targets[i].rtv == rtv) { ++g.targets[i].clearColor; matched = true; }
     (void)matched;
+}
+void flatTemporalClearUav(ID3D11UnorderedAccessView* uav) {
+    if (!flatTemporalCapturing()) return;
+    ++g.serial;
+    if (!g.forwardingPresent && flatComputeCandidate()) flatComputeProbeClear(uav,g.epoch,g.serial,"UAV-clear");
 }
 void flatTemporalClearDepth(ID3D11DepthStencilView* dsv, UINT flags, float depth) {
     if (!flatTemporalCapturing()) return;
@@ -873,6 +881,7 @@ void flatTemporalClearDepth(ID3D11DepthStencilView* dsv, UINT flags, float depth
 void flatTemporalTransfer(ID3D11Resource* dst, ID3D11Resource* src, char kind) {
     if (!flatTemporalCapturing()) return;
     ++g.serial; ++g.totalCopies;
+    if (!g.forwardingPresent && flatComputeCandidate()) flatComputeProbeTransfer(dst,src,g.epoch,g.serial,kind);
     if (g.forwardingPresent) ++g.forwardedCopies;
     invalidateCb(dst);  // a destination CB no longer has known CPU-write bytes
     edge(src, dst, kind);
@@ -885,6 +894,7 @@ void flatTemporalDispatch(ID3D11DeviceContext* ctx, UINT x, UINT y, UINT z, ID3D
 void flatTemporalExecuteList(bool foreign) {
     if (!flatTemporalCapturing()) return;
     ++g.serial; ++g.unknownLists;
+    if (flatComputeCandidate()) flatComputeProbeUnknown(g.epoch,g.serial);
     g.proof.unknownDeferredWork = true;
     g.current = nullptr;
     g.viewportW = g.viewportH = 0;
@@ -932,6 +942,10 @@ void flatTemporalUnmap(ID3D11Resource* res) {
 }
 void flatTemporalUpdate(ID3D11Resource* dst, const void* data, const D3D11_BOX* box) {
     if (!flatTemporalCapturing() || !dst) return;
+    if (!g.forwardingPresent && flatComputeCandidate()) {
+        ++g.serial;
+        flatComputeProbeUpdate(dst,g.epoch,g.serial,data && !box);
+    }
     if (!data || box) { invalidateCb(dst); return; }
     const uint32_t width = bufferWidth(dst);
     if (!width || width > 65536) { invalidateCb(dst); return; }

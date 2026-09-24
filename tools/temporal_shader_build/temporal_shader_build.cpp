@@ -261,7 +261,8 @@ static int generate(const Options& o) {
         {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}},
         {"kFlatMonoPrepBytecode", "flat_mono_prep_cs", "prep", nullptr, {}, true},
         {"kFlatMonoTaaBytecode", "flat_mono_taa_cs", "taa", nullptr, {}, true},
-        {"kFlatMonoFinishBytecode", "flat_mono_finish_cs", "finish", nullptr, {}, true}
+        {"kFlatMonoFinishBytecode", "flat_mono_finish_cs", "finish", nullptr, {}, true},
+        {"kFlatMonoSpatialBytecode", "flat_mono_spatial_cs", "spatial", nullptr, {}, true}
     };
     const std::string core = extractCore(edvr::kTemporalCsHlsl);   // throws on a broken core before any work
     const std::string flat = core + edvr::kFlatMonoShaderSource;
@@ -337,7 +338,7 @@ static void selfTest() {
           "a missing, reordered or doubled marker, or a resource inside, fails the build");
     const std::string production = extractCore(edvr::kTemporalCsHlsl);
     const std::string flat = production + edvr::kFlatMonoShaderSource;
-    for (const char* entry : {"prep", "taa", "finish"}) {
+    for (const char* entry : {"prep", "taa", "finish", "spatial"}) {
         Variant mono{"kFlatSelfTest", "flat_mono_self_test", entry, nullptr, {}, true};
         check(compile(compiler.fn, flat.c_str(), mono), "production flat mono shader compilation");
     }

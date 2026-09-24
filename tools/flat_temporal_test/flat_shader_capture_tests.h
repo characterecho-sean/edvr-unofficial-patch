@@ -4,6 +4,14 @@
 #include <cstdio>
 
 inline int flatShaderCaptureTests() {
+    using edvr::flatProbeShaderFits;
+    static_assert(flatProbeShaderFits(0, 0, 1), "first shader fits");
+    static_assert(flatProbeShaderFits(2047, 15u * 1024u * 1024u, 1024u * 1024u), "exact capacity fits");
+    static_assert(!flatProbeShaderFits(2048, 0, 1), "count capacity refuses");
+    static_assert(!flatProbeShaderFits(0, 16u * 1024u * 1024u, 1), "byte capacity refuses");
+    static_assert(!flatProbeShaderFits(0, size_t(-1), 1), "overflow cannot admit");
+    static_assert(!flatProbeShaderFits(0, 0, 0), "empty shader refuses");
+    static_assert(!flatProbeShaderFits(0, 0, 1024u * 1024u + 1), "single shader size is bounded");
     int failures = 0;
     auto check = [&](bool ok, const char* what) {
         if (!ok) { std::printf("FAIL: flat shader capture %s\n", what); ++failures; }

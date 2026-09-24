@@ -6,6 +6,27 @@
 #include <limits>
 
 namespace edvr {
+
+enum class FlatR32ProbeExtent { Unsupported, Native, ThreeQuarter };
+inline FlatR32ProbeExtent flatR32ProbeExtent(uint32_t width, uint32_t height,
+    uint32_t outputWidth, uint32_t outputHeight) {
+    if (!width || !height || !outputWidth || !outputHeight ||
+        width > 8192 || height > 8192 || outputWidth > 8192 || outputHeight > 8192)
+        return FlatR32ProbeExtent::Unsupported;
+    if (width == outputWidth && height == outputHeight) return FlatR32ProbeExtent::Native;
+    return uint64_t(width)*4 == uint64_t(outputWidth)*3 &&
+           uint64_t(height)*4 == uint64_t(outputHeight)*3 ?
+        FlatR32ProbeExtent::ThreeQuarter : FlatR32ProbeExtent::Unsupported;
+}
+
+enum class FlatR32WriterRelation { Unrelated, BeforeConsumer, SpansConsumer };
+inline FlatR32WriterRelation flatR32WriterRelation(const void* writerResource,
+    uint32_t first, uint32_t last, const void* consumerResource, uint32_t consumerSequence) {
+    if (!writerResource || writerResource != consumerResource || !first ||
+        first >= consumerSequence || last < first) return FlatR32WriterRelation::Unrelated;
+    return last < consumerSequence ? FlatR32WriterRelation::BeforeConsumer :
+        FlatR32WriterRelation::SpansConsumer;
+}
 // Four graphics rows and CS fallbacks use the same exact byte-boundary rule.
 inline bool flatComputeCopyRow(uint8_t (&out)[16], const void* source, uint32_t width, uint32_t row) {
     const uint64_t offset = uint64_t(row) * 16;

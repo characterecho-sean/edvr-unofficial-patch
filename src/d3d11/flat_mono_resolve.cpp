@@ -21,7 +21,7 @@ struct State {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext1> context;
     ComPtr<ID3DDeviceContextState> isolated;
-    ComPtr<ID3D11ComputeShader> prep, taa, finish;
+    ComPtr<ID3D11ComputeShader> prep, taa, finish, spatial;
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11SamplerState> sampler;
     Image color, depth[2], motion, rejection, expected, output[2];
@@ -35,8 +35,8 @@ struct State {
 // destructor during DLL detach would run under the loader lock.
 State& g=*new State;
 FlatMonoResolveStats& stats=*new FlatMonoResolveStats;
-struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; };
-static_assert(sizeof(Constants)==224, "HLSL cbuffer layout");
+struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4]; };
+static_assert(sizeof(Constants)==240, "HLSL cbuffer layout");
 struct Isolate {
     ID3D11DeviceContext1* context;
     ComPtr<ID3DDeviceContextState> previous;
@@ -65,6 +65,12 @@ bool cameraValid(const float (&c)[6][4]) {
     const double det=ax*(by*cz-bz*cy)+ay*(bz*cx-bx*cz)+az*(bx*cy-by*cx);
     return std::isfinite(det) && std::abs(det)>1e-8;
 }
+bool jitterValid(const FlatMonoResolveFrame& f) {
+    return std::isfinite(f.jitterX) && std::isfinite(f.jitterY) &&
+        std::isfinite(f.previousJitterX) && std::isfinite(f.previousJitterY) &&
+        std::abs(f.jitterX)<=.5f && std::abs(f.jitterY)<=.5f &&
+        std::abs(f.previousJitterX)<=.5f && std::abs(f.previousJitterY)<=.5f;
+}
 bool image(ID3D11Device* device,uint32_t width,uint32_t height,DXGI_FORMAT format,Image& out,bool writable=true) {
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width=width;desc.Height=height;desc.MipLevels=desc.ArraySize=1;desc.Format=format;
@@ -83,7 +89,7 @@ bool image(ID3D11Device* device,uint32_t width,uint32_t height,DXGI_FORMAT forma
     return true;
 }
 bool initialize(ID3D11Device* device,ID3D11DeviceContext* context,const char** reason) {
-    if(g.device.Get()==device && g.context.Get()==context && g.prep && g.taa && g.finish && g.constants && g.sampler && g.isolated)return true;
+    if(g.device.Get()==device && g.context.Get()==context && g.prep && g.taa && g.finish && g.spatial && g.constants && g.sampler && g.isolated)return true;
     if(g.device.Get()==device && g.context && g.context.Get()!=context)++stats.contextPointerMismatches;
     ++stats.initializations;
     g=State{};
@@ -101,7 +107,8 @@ bool initialize(ID3D11Device* device,ID3D11DeviceContext* context,const char** r
         __uuidof(ID3D11Device),&selected,g.isolated.GetAddressOf())))return fail(reason,"flat-resolve-context-state-create-failed");
     if(FAILED(device->CreateComputeShader(kFlatMonoPrepBytecode,sizeof(kFlatMonoPrepBytecode),nullptr,g.prep.GetAddressOf())) ||
        FAILED(device->CreateComputeShader(kFlatMonoTaaBytecode,sizeof(kFlatMonoTaaBytecode),nullptr,g.taa.GetAddressOf())) ||
-       FAILED(device->CreateComputeShader(kFlatMonoFinishBytecode,sizeof(kFlatMonoFinishBytecode),nullptr,g.finish.GetAddressOf())))
+       FAILED(device->CreateComputeShader(kFlatMonoFinishBytecode,sizeof(kFlatMonoFinishBytecode),nullptr,g.finish.GetAddressOf())) ||
+       FAILED(device->CreateComputeShader(kFlatMonoSpatialBytecode,sizeof(kFlatMonoSpatialBytecode),nullptr,g.spatial.GetAddressOf())))
         return fail(reason,"flat-resolve-shader-create-failed");
     D3D11_BUFFER_DESC cb{};cb.ByteWidth=sizeof(Constants);cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     if(FAILED(device->CreateBuffer(&cb,nullptr,g.constants.GetAddressOf())))return fail(reason,"flat-resolve-constants-create-failed");
@@ -159,7 +166,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(!output || !device || !context || !f.renderWidth || !f.renderHeight || !f.outputWidth || !f.outputHeight ||
        f.renderWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || f.renderHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
        f.outputWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || f.outputHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
-       !std::isfinite(f.deltaMs) || f.deltaMs<0 || !cameraValid(f.camera))return fail(reason,"flat-resolve-invalid-frame");
+       !std::isfinite(f.deltaMs) || f.deltaMs<0 || !cameraValid(f.camera) || !jitterValid(f))return fail(reason,"flat-resolve-invalid-frame");
     if(f.mode!=FlatMonoResolveMode::Taa && f.mode!=FlatMonoResolveMode::Dlaa && f.mode!=FlatMonoResolveMode::Dlss &&
        f.mode!=FlatMonoResolveMode::Fsr)return fail(reason,"flat-resolve-invalid-mode");
     if(f.mode==FlatMonoResolveMode::Dlaa && (f.renderWidth!=f.outputWidth || f.renderHeight!=f.outputHeight))
@@ -192,6 +199,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     std::memcpy(constants.previous,reset?f.camera:f.previousCamera,sizeof(f.previousCamera));
     constants.size[0]=f.renderWidth;constants.size[1]=f.renderHeight;constants.size[2]=f.outputWidth;constants.size[3]=f.outputHeight;
     constants.flags[0]=reset;constants.flags[1]=engine;constants.flags[2]=taa;
+    constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
+    constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
     context->UpdateSubresource(g.constants.Get(),0,nullptr,&constants,0,0);
     context->CopyResource(g.color.texture.Get(),color.Get());
     ID3D11Buffer* cb[]={g.constants.Get(),f.engine.sceneNow,f.engine.scenePrev};
@@ -215,11 +224,11 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     } else if(f.mode==FlatMonoResolveMode::Fsr) {
         const float sy=std::sqrt(f.camera[0][1]*f.camera[0][1]+f.camera[1][1]*f.camera[1][1]+f.camera[2][1]*f.camera[2][1]);
         ok=fsr3Evaluate(context,0,g.color.texture.Get(),g.depth[0].texture.Get(),g.motion.texture.Get(),g.rejection.texture.Get(),
-            g.output[0].texture.Get(),f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,0,0,reset,f.deltaMs,
+            g.output[0].texture.Get(),f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,f.jitterX,f.jitterY,reset,f.deltaMs,
             f.camera[3][2],(std::numeric_limits<float>::max)(),2*std::atan(1/sy),reason,true);
     } else {
         ok=dlaaEvaluate(context,0,g.color.texture.Get(),g.depth[0].texture.Get(),g.motion.texture.Get(),g.output[0].texture.Get(),
-            g.rejection.texture.Get(),f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,0,0,reset,f.deltaMs,reason);
+            g.rejection.texture.Get(),f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,f.jitterX,f.jitterY,reset,f.deltaMs,reason);
     }
     if(!ok) {++stats.backendFailures;g.history=false;stats.currentContinueRun=0;return false;}
     if(!taa) {
@@ -248,6 +257,40 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         if(++stats.currentContinueRun>stats.longestContinueRun)stats.longestContinueRun=stats.currentContinueRun;
     }
     *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[taa?index:1].srgb:g.output[taa?index:1].srv).Get();
+    (*output)->AddRef();
+    return true;
+}
+
+bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,
+                                    ID3D11ShaderResourceView** output,const char** reason) {
+    if(output)*output=nullptr;
+    if(reason)*reason=nullptr;
+    g.history=false;stats.currentContinueRun=0;
+    if(!output || !device || !context || !f.renderWidth || !f.renderHeight || !f.outputWidth || !f.outputHeight ||
+       f.renderWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || f.renderHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+       f.outputWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || f.outputHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+       !jitterValid(f) || (f.mode!=FlatMonoResolveMode::Taa && f.mode!=FlatMonoResolveMode::Dlaa &&
+       f.mode!=FlatMonoResolveMode::Dlss && f.mode!=FlatMonoResolveMode::Fsr))
+        return fail(reason,"flat-spatial-invalid-frame");
+    if(!initialize(device,context,reason))return false;
+    ComPtr<ID3D11Texture2D> color;
+    if(!inputTexture(f.color,f.renderWidth,f.renderHeight,true,color))return fail(reason,"flat-spatial-input-view-mismatch");
+    if(!resources(f,reason))return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC colorDesc{};f.color->GetDesc(&colorDesc);
+    Isolate isolated(g.context.Get(),g.isolated.Get());
+    context->CopyResource(g.color.texture.Get(),color.Get());
+    Constants constants{};
+    constants.size[0]=f.renderWidth;constants.size[1]=f.renderHeight;
+    constants.size[2]=f.outputWidth;constants.size[3]=f.outputHeight;
+    constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
+    context->UpdateSubresource(g.constants.Get(),0,nullptr,&constants,0,0);
+    ID3D11Buffer* cb=g.constants.Get();context->CSSetConstantBuffers(0,1,&cb);
+    ID3D11ShaderResourceView* source=g.color.srv.Get();context->CSSetShaderResources(0,1,&source);
+    ID3D11SamplerState* sampler=g.sampler.Get();context->CSSetSamplers(0,1,&sampler);
+    ID3D11UnorderedAccessView* target=g.output[1].uav.Get();context->CSSetUnorderedAccessViews(4,1,&target,nullptr);
+    context->CSSetShader(g.spatial.Get(),nullptr,0);
+    context->Dispatch((f.outputWidth+7)/8,(f.outputHeight+7)/8,1);
+    *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[1].srgb:g.output[1].srv).Get();
     (*output)->AddRef();
     return true;
 }

@@ -15,8 +15,11 @@
   witness and history counters pass all 84 jobs and the 254-key contract. Epic
   e24b1201 isolates the recurring refusal to unused tone camera data (section
   16); renderer rebuilds and texture identity churn are ruled out. The scene
-  camera authority correction passes all 84 jobs and the 254-key contract;
-  verify uninterrupted history in Epic next.
+  camera authority correction passes all 84 jobs and the 254-key contract. Epic
+  e99c0010 confirms 6,144 consecutive treated frames and zero backend failures
+  (section 17). The recurring handoff-camera rejection is resolved. Jitter
+  input/fallback tests and the focused depth-writer probe pass all 84 jobs and
+  the 254-key contract (section 18); live projection jitter remains disabled.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -24,20 +27,20 @@
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
-- **Open:** projection jitter, in-game backend qualification, rendered
-  inverse/depth consistency and mod effect ordering. Captured mono frames
-  establish scene/depth identity, camera encoding, tone/copy handoff and later
-  panel ordering at 1280x720 and 960x540. Projection algebra is verified
-  offline; rendered consistency and safe failure after jitter still need
-  qualification.
+- **Open:** reported star-corona smearing during camera turns, projection
+  jitter, in-game backend qualification, rendered inverse/depth consistency and
+  mod effect ordering. Captured mono frames establish scene/depth identity,
+  camera encoding, tone/copy handoff and later panel ordering at 1280x720 and
+  960x540. Projection algebra is verified offline; rendered consistency and
+  safe failure after jitter still need qualification.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** after auditing and correcting camera authority, Epic flat
-  DLSS at 0.75x SS with zero jitter. Verify sustained scene admission and
-  uninterrupted history before enabling jitter; do not repeat the completed
-  grid inventory. Use `tools/edvr_log.py` with the actual `--target`,
-  `--expect-build HEAD` and
+- **Next flight:** one focused Epic F10 capture near the star while turning, to
+  identify the R32 view-Z producer and the corona draw path. Keep jitter
+  disabled until private substitutions and inverse/depth ownership are ready.
+  Stable zero-jitter admission and grid inventory are already verified. Use
+  `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
   `--grep "flat (runtime|temporal|discover|compute)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
@@ -857,3 +860,98 @@ verify substitution, restoration and signs. Rendered inverse/depth consistency,
 the R32 view-Z writer, mod ordering and a de-jittered current-frame fallback
 after a late backend failure still require qualification. Do not enable jitter
 merely because the camera-authority correction passes.
+
+## 17. Stable scene admission, 2026-09-24
+
+Epic `edvr_gfx_20260924_093108.log` matches clean `e99c0010`, version
+v0.17.0-498-ge99c0010, build `6AB54179`. The final sample reports 6,169
+successful evaluations, 6,164 history continuations and five resets. The
+longest consecutive treated sequence is 6,144 frames; the longest renderer
+continuation sequence is 1,797. Two resets follow requested/lost history; three
+are the renderer's existing camera-cut detection. Backend failures, frame gaps,
+invalid previous cameras and format changes remain zero. Init=1, allocations=1,
+context-change=0 and full-reset=0 confirm stable renderer resources.
+
+Ruled out: recurring scene-camera rejection after the authority correction,
+because the sustained flight intervals admit 449-450 frames per five seconds
+without increasing the refusal total. No `selector-hdr-vs-tone-camera` witness
+appears. Earlier missing-depth refusals and the final no-known-tone transition
+remain explicit; this does not establish support for those routes. The three
+camera-cut resets are separate from the fixed refusal bursts and do not justify
+changing their threshold without further evidence.
+
+The NVIDIA backend is evaluating successfully, with game SS still owning render
+scale. The feature-creation line identifies native 2560x1440 DLAA, preset K, on
+an RTX 5090; no scaled DLSS feature is created in this run. Read-only
+inspection of the saved graphics profiles shows SSAAMultiplier=1.0. Do not
+describe this flight as 0.75x qualification just because the requested EDVR
+mode is named dlss. Record the next capture's actual input/output extents and
+set game SS to 0.75x for that test. The driver and DLSS DLL version are not
+reported by this build; flat has no headset/runtime dependency. Projection
+jitter is zero, so this run qualifies continuous reconstruction plumbing rather
+than final anti-aliasing quality. The next work is the actual rendered phase
+contract and its safe output path, not another zero-jitter flight.
+
+Sean reports smearing around the nearby star's corona during camera turns in
+this run. This is a distinct image-quality failure; stable DLSS evaluation does
+not certify the motion/depth semantics of translucent celestial effects. Do not
+attribute it to missing jitter or alter sharpening/brightness clamps. Compare
+the exact active corona family and its source depth with the VR corona
+motion/rejection path before choosing a correction.
+
+## 18. Jitter inputs and focused depth provenance, 2026-09-24
+
+The mono frame now carries actual current and previous raster phases in input
+pixels, positive right/down; camera and engine scene rows remain unjittered.
+The prep shader subtracts the current phase before raw-camera/engine
+reprojection. SDK motion excludes both phases, and the same current phase is
+passed separately to DLSS/FSR. TAA and rejected-pixel output sample the current
+raster at the output coordinate plus its phase; previous depth lookup includes
+the previous phase. The WARP rig verifies both camera and exact engine motion,
+backend phase delivery, TAA depth lookup and zero-phase compatibility.
+
+A standalone spatial output path cancels the input raster phase and invalidates
+history after a backend refusal. Its WARP tests include a backend that clears
+all context state before failing. This is not yet the runtime's guarantee
+against late failure: future nonzero projection integration must prepare
+resources before rasterization and invoke the fallback at the qualified
+handoff. Allocation/device failure cannot be repaired by the fallback itself.
+The live caller continues to supply zero jitter.
+
+The existing two manually armed F10 samples now trace bounded R32 output
+candidates before the lighting consumer. Probe admission is limited to the
+actual backbuffer extent or exactly 0.75x in both axes; unrelated sizes cannot
+consume writer slots. This restriction is diagnostic, not the runtime's
+render-scale contract. The capture inspects all eight MRT and UAV slots,
+records shader hashes, source views and DSV, and tracks observed copy, clear
+and CPU update events. It retains resource identities and never coalesces
+shader-write snapshots across commands. There are 96 event slots and
+independent 4,096 draw/dispatch query limits; drops and unknown work are
+explicit. Selection joins lighting t3 to the same frame's scene depth/HDR.
+Bound-output candidates are not automatically proved shader writes: the saved
+bytecode must establish actual output consumption.
+
+Writer VS/PS/CS b0..b2 carry frozen CPU data where available. Sample one learns
+the selected candidate hashes; sample two can queue up to six nonblocking full
+CB readbacks for missing/prefix-only data. Payloads use heap storage and the
+sample reset also uses a heap temporary. A flat-only creation cache retains at
+most 2,048 shader entries and 16 MiB, then writes only matched candidate hashes
+through the existing exact-byte dump helper. Cache/readback misses are explicit
+missing evidence. Draw capture now precedes the temporal runtime scope so
+actual getters see game bindings before EDVR's motion/output substitutions.
+
+The star report has two separate candidate paths. Earlier Epic frame 36865
+records the stock glare train as VS 94D5C556DFD6D705 / PS 912477AEF6958379. It
+projects anchors with clip W=1 and samples R32 positive view-Z. Flat has no
+dedicated glare coverage/motion or post-DLSS star-glow history treatment. Do
+not confuse it with the VR `corona motion` log: that implementation names
+thruster-smoke VS 5E417E9DF2E7F9E6 / PS BD801F2FB02522EB. The new flight must
+identify the active star draw and depth path; pixel-level motion, coverage and
+raw-versus-trained output remain necessary if those do not isolate the smear.
+No star rendering fix or brightness threshold change is included here.
+
+The final source build passes in `build/flat-jitter-contract-qualified.log`: 81
+parallel jobs plus three quiet jobs, the 254-key config contract and both
+installer payload checks. The new phase-aware WARP resolver and capture model
+tests pass. Earlier full passes preceded the final capture labels and extent
+filter; use the qualified log for the committed source validation.

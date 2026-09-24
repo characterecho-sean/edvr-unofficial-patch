@@ -4,6 +4,13 @@
 #include <cstdint>
 
 namespace edvr {
+// Creation-time cache for the manually armed, exact-resource producer probe.
+// Count and byte budgets are independent; arithmetic never wraps.
+inline constexpr bool flatProbeShaderFits(size_t count, size_t used, size_t incoming) {
+    constexpr size_t budget = 16u * 1024u * 1024u;
+    return count < 2048 && incoming > 0 && incoming <= 1024u * 1024u &&
+        used <= budget && incoming <= budget - used;
+}
 // Missing bytecodes in the verified Epic 37062878/frame36865 contract.
 // This is capture admission only; it grants no motion or treatment support.
 struct FlatShaderCaptureKey { char stage; uint64_t hash; };

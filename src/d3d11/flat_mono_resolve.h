@@ -13,6 +13,10 @@ struct FlatMonoResolveFrame {
     ID3D11ShaderResourceView* depth = nullptr;
     uint32_t renderWidth = 0, renderHeight = 0, outputWidth = 0, outputHeight = 0;
     float camera[6][4] = {}, previousCamera[6][4] = {}; // unjittered b1[270..275]
+    // Actual raster phases in render pixels, positive right/down. Camera rows
+    // and engine scene snapshots above remain raw and unjittered. Zero defaults
+    // preserve the current runtime until projection coverage is qualified.
+    float jitterX = 0, jitterY = 0, previousJitterX = 0, previousJitterY = 0;
     EngineVelocityViews engine{};
     uint64_t frame = 0;
     float deltaMs = 0;
@@ -35,9 +39,18 @@ FlatMonoResolveStats flatMonoResolveStats();
 // Owner immediate context only. Inputs borrowed for this call; successful output
 // is AddRef'd and output-sized. The caller suppresses hook observations throughout
 // this call. D3D11.1 context-state isolation is required and restored on every exit.
-// This first integration deliberately supplies ZERO jitter to all backends.
+// The caller supplies only jitter that was actually rendered into these inputs.
 bool flatMonoResolve(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&,
                      ID3D11ShaderResourceView** output, const char** reason);
+// Recover an already rendered jittered frame after backend refusal. This
+// spatial resolve uses no temporal history or SDK and borrows the same frame
+// inputs; successful output is AddRef'd. It leaves history invalid. A normal
+// flatMonoResolve call allocates this output before it asks a backend to run,
+// so backend refusal reuses that allocation. Future nonzero-raster callers
+// must preflight allocation before drawing; this API cannot recover from a
+// device or allocation failure by itself.
+bool flatMonoResolveSpatialFallback(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&,
+                                    ID3D11ShaderResourceView** output, const char** reason);
 // Owner thread: release renderer resources/history. Does not shut down shared SDKs.
 void flatMonoResolveReset();
 // Owner thread: a refused/missing frame breaks only history, preserving resources.
