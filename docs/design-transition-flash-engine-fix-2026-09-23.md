@@ -336,6 +336,41 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   the flight stay: `ui_quality = 125` (the new values) and
   `openxr_resolution`.
 
+## Static round 6: the eye's base is a consume-and-reset mailbox
+
+This comes from the `WaitGetPoses` anchor of flight 045636. Dumps are in
+`analysis\decomp\flash\r6\`; the key file is `follow_28431D0.txt`.
+
+- **One job does both.** The per-frame VR job `FUN_142868c30`
+  (`0x2868C30..0x286938A`) calls the camera driver `FUN_1428431d0`, then
+  `FUN_140594b60`, which uploads `cb1[275]`. The pose-fetch and eye-write
+  stacks meet in this one function, confirmed by the exact call
+  instructions.
+- **The chain.** The camera driver `0x28431D0` calls the eye/base composer
+  `0x283D4C0` (base matrix x eye pose). That calls a per-eye wrapper
+  `0x8D2510`, then `VRDevice::GetEyePose` `0x4E25A0` (eye-to-head x head
+  pose), then `0x4E3690`, which calls `WaitGetPoses` into its own stack
+  buffer.
+- **The mailbox.** Let `ship = *(driver+0x50)`. The driver copies
+  `ship+0x3330..+0x336F` (a 4x4) into a local. If mode != 1 (the job passes
+  2 every frame) it resets that field to the constant at `0x1450C8090`,
+  checked from the exe's bytes to be an exact identity, and zeroes its
+  translation (`+0x3360/+0x3368`). It then composes the eye views from the
+  LOCAL copy (line 170). Those outputs are copied into both eye view
+  objects (`FUN_14059f1a0(eyeView+0x20, ...)`).
+- **The second composition.** A second call composes from `ship+0x130`
+  (never reset, mode 3) into separate buffers.
+- **Reading.** The mailbox must be refilled every frame by a writer
+  (not yet found). On the switch frame it is not refilled before the
+  driver reads it, so the eye composes against identity: head only. That
+  matches every measured bad frame, including the 13.5 m eye point
+  missing.
+- **Not yet fixable blind.** On a frame switch the last good base is in
+  the OLD render frame, so holding it would repeat the ruled-out
+  last-good-pose error. The fix needs either the writer's ordering, or a
+  fallback base (for example `ship+0x130`) proven equal to the mailbox on
+  ordinary frames.
+
 ## Static rounds 4-5 (after 195435; leads, not proof)
 
 Dumps are in `analysis\decomp\flash\r4\` and `\r5\`. Ghidra holds phantom
