@@ -313,6 +313,44 @@ void frameEndOwnerBodyStatsTest() {
     "owner-body stats: next_wait_queue_delay sees the wait sitting queued behind it");
 }
 
+// The actual frame_end_overlap race frameEndOwnerBodyStatsTest above does not
+// reach: the queued finishPendingFrameEnd job's frameEndOwnerBegin/End can run
+// on the owner before the caller thread gets back around to submitCallerEnd
+// for this same pair's second eye, so current_.eyes is still 1, not 2, while
+// they run. frameEndOwnerBegin/End must not gate on that (frame_cycle_stats.h).
+void frameEndOwnerBodyRaceTest() {
+  FrameCycleStats stats;
+  FrameCycleStats::Shape shape{}; shape.width[0]=shape.width[1]=shape.height[0]=shape.height[1]=2;
+  uint64_t tick=1000;
+  const auto waitToken=stats.waitCallerBegin(tick,7); check(waitToken!=0,"owner-body race: first wait admitted");
+  tick+=10;stats.waitOwnerBegin(waitToken,tick);
+  tick+=5;stats.waitOwnerEnd(waitToken,tick);
+  tick+=5;const auto openNowMs=tick;stats.waitCallerEnd(waitToken,1,tick,openNowMs,7,shape,true);
+  tick+=20;const auto submitToken1=stats.submitCallerBegin(0,tick,7);check(submitToken1!=0,"owner-body race: first submit admitted");
+  tick+=1;stats.submitOwnerBegin(submitToken1,tick);
+  tick+=1;stats.submitOwnerEnd(submitToken1,tick);
+  stats.submitCallerEnd(submitToken1,0,1,tick,7,0.0,true);
+  // current_.eyes==1 here: only the left eye's submitCallerEnd has landed.
+  // The deferred finish's owner body brackets itself anyway.
+  tick+=5;const auto ownerBodyBegan=tick;stats.frameEndOwnerBegin(ownerBodyBegan);
+  tick+=40;const auto ownerBodyEnded=tick;stats.frameEndOwnerEnd(ownerBodyEnded);
+  tick+=2;const auto submitToken2=stats.submitCallerBegin(1,tick,7);
+  check(submitToken2!=0,"owner-body race: second submit admitted after the deferred finish already ran");
+  tick+=1;stats.submitOwnerBegin(submitToken2,tick);
+  tick+=1;stats.submitOwnerEnd(submitToken2,tick);
+  stats.submitCallerEnd(submitToken2,1,1,tick,7,0.0,true);
+  tick+=10;const auto nextWaitToken=stats.waitCallerBegin(tick,7);check(nextWaitToken!=0,"owner-body race: next wait admitted");
+  tick+=1;stats.waitOwnerBegin(nextWaitToken,tick);
+  tick+=1;stats.waitOwnerEnd(nextWaitToken,tick);
+  // nowMs (not tick) jumps past the 30-second window on its own so this one
+  // cycle's report is reachable without a second, throwaway cycle.
+  tick+=1;stats.waitCallerEnd(nextWaitToken,2,tick,openNowMs+30001,7,shape,true);
+  FrameCycleStats::Report r{};
+  check(stats.takeReport(r)&&r.valid==1,"owner-body race: the raced cycle still completes and reports");
+  check(r.frameEndOwnerBody.max>=double(ownerBodyEnded-ownerBodyBegan)/1000.0-0.001,
+    "owner-body race: frame_end_owner_body survives begin/end that ran before the caller's own second-eye end");
+}
+
 // FrameBoundary::noteReal's late-frame counter
 // (lateFrames/takeLateFramesWindow, native_pacing_summary/native_frame_
 // cycle_window). No submit()/eyes needed: waitAndBegin()'s own clear() closes
@@ -831,6 +869,7 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) { std::puts("Would test injected OpenXR frame boundary; no runtime or files."); return 0; }
   if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
   gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); publishFinishPairSplitTest(); frameEndOwnerBodyStatsTest();
+  frameEndOwnerBodyRaceTest();
   latePacingSteadyTest(); latePacingSkippedPeriodTest(); latePacingPeriodChangeTest();
   blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();turboPacingTest();
   std::printf("openxr_frame_test: %u checks, %u failures\n", checks.load(), failures.load()); return failures.load() ? 1 : 0;

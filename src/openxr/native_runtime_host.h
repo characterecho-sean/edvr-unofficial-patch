@@ -229,6 +229,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   unsigned timingFrameMask=0;
   EdvrNativeTimingFrame timingFrame{sizeof(timingFrame),EDVR_NATIVE_TIMING_VERSION_5};
   bool timingGpuBegun[2]{};
+  // frame_end_overlap: a deferred pair publishes its CPU timing record before
+  // finishPair() has composed it, so composeMs is the PREVIOUS overlapped
+  // pair's measured value instead -- one frame stale. Updated at the end of
+  // every deferred finish (finishPendingFrameEndBody), read at the next
+  // deferred pair's early publish (publishSubmitTimingCpu). Stays the
+  // "missing" sentinel until the first one completes.
+  double lastOverlappedComposeMs=std::numeric_limits<double>::quiet_NaN();
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
   FrameCycleStats frameCycles;
@@ -271,13 +278,25 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // startupOptions in start(). When the second Submit of a runtime-paced,
   // separate-device pair completes, finishPair() (consumer copy, compose,
   // xrEndFrame) is queued to the owner instead of run inline, so Elite's
-  // Submit returns as soon as its texture is free to reuse. pendingFrameEnd*
-  // is owner-thread-only state read back by the queued job or, if OwnerService
-  // cancelled it unrun, by close()'s inline fallback; frameEnd*Count are the
-  // native_frame_end_overlap_summary tallies at session close.
+  // Submit returns as soon as its texture is free to reuse. Before it does,
+  // submitEye already runs publishSubmitTimingCpu and retires the
+  // caller-visible timing context exactly as the synchronous path leaves it
+  // by the time Submit returns -- otherwise the caller's post-Submit
+  // producerResume/applicationSegment(seq,true) would reopen a segment on a
+  // pair finishPair has not even started (docs/openxr-performance-review-
+  // 2026-09-14.md). pendingFrameEnd* is owner-thread-only state read back by
+  // the queued job or, if OwnerService cancelled it unrun, by close()'s
+  // inline fallback: the eye and its own copy of the sequence (so the job
+  // never depends on timingSequence still holding this pair's value by the
+  // time it runs) and whether the early publish above actually ran, so the
+  // job's own finishPair()-dependent half never publishes twice.
+  // frameEnd*Count are the native_frame_end_overlap_summary tallies at
+  // session close.
   bool frameEndOverlapEnabled=false;
   bool pendingFrameEndFinish=false;
   vr::EVREye pendingFrameEndEye=vr::Eye_Left;
+  uint64_t pendingFrameEndSequence=0;
+  bool pendingFrameEndPublished=false;
   uint64_t frameEndOverlapCount=0,frameEndSyncCount=0,frameEndInlineAtCloseCount=0,frameEndFailureCount=0;
   RuntimeGate gate; uint64_t runtimeGeneration=0;
   // frameViews is the projection the XR layer advertises: the located one,
@@ -1225,7 +1244,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const bool eligible=published==vr::VRCompositorError_None&&pairReady&&
       separateGraphics()&&!boundary.turbo()&&frameEndOverlapEnabled&&!pendingFrameEndFinish;
     const bool deferred=eligible&&service.submit([this]{finishPendingFrameEnd();});
-    if(deferred){pendingFrameEndFinish=true;pendingFrameEndEye=eye;++frameEndOverlapCount;}
+    if(deferred){pendingFrameEndFinish=true;pendingFrameEndEye=eye;pendingFrameEndSequence=timingSequence;++frameEndOverlapCount;}
     const bool pairSync=!deferred&&published==vr::VRCompositorError_None&&pairReady;
     if(pairSync)++frameEndSyncCount;
     const auto r=deferred?vr::VRCompositorError_None:
@@ -1236,11 +1255,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(deferred) {
       // The producer copy is already done and Elite's texture is free to
       // reuse: give its still-parked thread the GPU marker now, then let it
-      // go. finishSubmitTail (failed/invalidate/timing/compositorSubmits)
-      // runs later, from finishPendingFrameEnd, after finishPair -- consumer
-      // copy, compose, xrEndFrame -- completes on the owner, overlapping
-      // Elite's own post-Submit work instead of blocking it.
+      // go. Only then publish this pair's CPU timing record and retire the
+      // caller-visible context (publishSubmitTimingCpu) -- dispatchGpuEyeMarker
+      // needs c->published still false on the D3D11 side, exactly like the
+      // synchronous call below. The caller's post-Submit producerResume/
+      // applicationSegment(seq,true), reached once this returns, then finds
+      // the retired context precisely as a synchronous pair already leaves
+      // it, long before finishPair -- consumer copy, compose, xrEndFrame --
+      // ever runs. finishSubmitTail and the finishPair()-dependent half of
+      // the timing publish run later, from finishPendingFrameEnd, after
+      // finishPair completes on the owner, overlapping Elite's own
+      // post-Submit work instead of blocking it.
       dispatchGpuEyeMarker(eye,texture,true);
+      if(timingFrameActive) {
+        timingFrame.composeMs=lastOverlappedComposeMs; // this pair's own compose() has not run yet
+        pendingFrameEndPublished=publishSubmitTimingCpu(eye);
+      } else pendingFrameEndPublished=false;
       return vr::VRCompositorError_None;
     }
     dispatchGpuEyeMarker(eye,texture,r==vr::VRCompositorError_None);
@@ -1264,12 +1294,23 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       // fallback below finishes this pair before it drains the boundary.
       return;
     }
-    const auto eye=pendingFrameEndEye;pendingFrameEndFinish=false;
+    const auto eye=pendingFrameEndEye;const auto sequence=pendingFrameEndSequence;
+    const auto published=pendingFrameEndPublished;pendingFrameEndFinish=false;
     frameCycles.frameEndOwnerBegin(frameCycleUs());
+    finishPendingFrameEndBody(eye,sequence,published);
+    frameCycles.frameEndOwnerEnd(frameCycleUs());
+  }
+  // The finishPair()-side half of an overlapped pair's finish: shared by the
+  // queued job above and close()'s inline fallback for one OwnerService::
+  // stop() cancelled before it ran. eye/sequence/published are what submitEye
+  // captured at deferral -- published because publishSubmitTimingCpu already
+  // ran there (or didn't) and this must not publish the CPU record again.
+  void finishPendingFrameEndBody(vr::EVREye eye,uint64_t sequence,bool published) {
     const auto r=boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture;
     lastCompositorResult=boundary.lastResult();
     finishSubmitTail(eye,r);
-    frameCycles.frameEndOwnerEnd(frameCycleUs());
+    if(published&&r==vr::VRCompositorError_None)publishSubmitTimingDevice(sequence);
+    lastOverlappedComposeMs=timingFrame.composeMs;
   }
   // Needs Elite's own texture pointer and its thread still parked in this
   // rendezvous, so both submitEye (synchronous or about to defer) call this
@@ -1301,6 +1342,55 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(r==vr::VRCompositorError_None&&timingFrameActive)publishSubmitTimingIfComplete(eye);
     if(r==vr::VRCompositorError_None){++compositorSubmits;if(loading.sceneSubmitted())++loadingToScene;}
     return r;
+  }
+  // frame_end_overlap's early half of publishSubmitTimingIfComplete below,
+  // called from submitEye itself before a deferred Submit returns to Elite:
+  // caller work and timing.publishCpu(timingFrame), then -- only once that
+  // succeeds -- the same caller-visible retire timingRetire() performs
+  // (timingFrameActive, timingApplicationOpen, timingApplicationSequence,
+  // timingGpuBegun), so the caller's post-Submit producerResume/
+  // applicationSegment(seq,true) find it retired exactly as a synchronous
+  // pair already leaves it (native_timing.cpp's c->published gate) -- long
+  // before finishPair() has even run. timingSequence and timingFrameMask are
+  // left alone: publishSubmitTimingDevice below still needs both once
+  // finishPair()'s results exist. Device timing (which needs those results)
+  // and the submitSample fill/add/report stay there too, which is why this
+  // does not simply call publishSubmitTimingIfComplete early -- that
+  // function polls device timing before publishing CPU, an order only the
+  // synchronous path, where finishPair() has already run, can keep.
+  bool publishSubmitTimingCpu(vr::EVREye eye) {
+    timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask!=3)return false;
+    double callerWork=0;
+    timingFrame.callerWorkValid=frameCycles.callerWorkForCurrent(callerWork)?1u:0u;
+    timingFrame.callerWorkMs=timingFrame.callerWorkValid?callerWork:0.0;
+    if(FAILED(timing.publishCpu(timingFrame))){timingInvalidate();return false;}
+    timingFrameActive=false;timingApplicationOpen.store(false,std::memory_order_release);
+    timingApplicationSequence.store(0,std::memory_order_release);timingGpuBegun[0]=timingGpuBegun[1]=false;
+    return true;
+  }
+  // The finishPair()-dependent half publishSubmitTimingCpu above defers:
+  // device GPU spans for the consumer copy and compose finishPair() just
+  // ran, the submitSample fields it measured, and the final owner-side clear
+  // of timingSequence/timingFrameMask that function left in place. sequence
+  // is pendingFrameEndSequence, captured at deferral. Called only when
+  // publishSubmitTimingCpu returned true for this pair (finishPendingFrameEndBody).
+  void publishSubmitTimingDevice(uint64_t sequence) {
+    deviceTiming.acceptFrame(sequence);
+    pollDeviceTiming();
+    submitSample.submitMs=timingFrame.submitMs[0]+timingFrame.submitMs[1];
+    submitSample.callbacks=graphicsCalls.calls-submitCallbacksBegin;
+    submitSample.featureEpoch=featureChanges;
+    submitSample.producerDispatchMs=transferWall.producerDispatch;
+    submitSample.producerAcquireMs=transferWall.producerAcquire;
+    submitSample.producerFlushMs=transferWall.producerFlush;
+    submitSample.consumerAcquireMs=transferWall.consumerAcquire;
+    submitSample.consumerFlushMs=transferWall.consumerFlush;
+    submitSample.endFrameMs=boundary.endFrameMs();
+    submitSample.waitFrameMs=boundary.waitBlockMs();
+    submitSample.pacerBlockMs=boundary.pacerBlockMs();
+    submitSample.deferred=boundary.turbo()?1u:0u;
+    if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
+    timingSequence=0;timingFrameMask=0;
   }
   void publishSubmitTimingIfComplete(vr::EVREye eye) {
     timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask!=3)return;
@@ -2060,10 +2150,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       // to run already cleared the flag itself.
       if(pendingFrameEndFinish) {
         pendingFrameEndFinish=false;
-        const auto r=boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture;
-        lastCompositorResult=boundary.lastResult();
         ++frameEndInlineAtCloseCount;
-        finishSubmitTail(pendingFrameEndEye,r);
+        finishPendingFrameEndBody(pendingFrameEndEye,pendingFrameEndSequence,pendingFrameEndPublished);
       }
       const auto drained=boundary.drain();
       if(drained!=XR_SUCCESS)nativeTracePrintf("native_pacing,drain_result=%d\n",int(drained));

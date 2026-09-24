@@ -76,7 +76,7 @@ class FrameCycleStats final {
 
   void enabled() noexcept { std::lock_guard<std::mutex> l(m_); enabled_=true; }
   bool firstComplete() const noexcept { std::lock_guard<std::mutex> l(m_); return everComplete_; }
-  void reset(Missing why=ShapeChange) noexcept { std::lock_guard<std::mutex> l(m_); fail(why); current_={}; wait_={};completedReady_=false; }
+  void reset(Missing why=ShapeChange) noexcept { std::lock_guard<std::mutex> l(m_); fail(why); current_={}; wait_={};completedReady_=false; pendingFrameEndOwnerBegin_=0;pendingFrameEndOwnerMs_=0; }
 
   PostRequest postRequest() const noexcept {
     std::lock_guard<std::mutex> l(m_);
@@ -93,11 +93,18 @@ class FrameCycleStats final {
   void waitOwnerBegin(uint64_t token,uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(token&&wait_.token==token&&!wait_.ownerBegin)wait_.ownerBegin=tick;else ++missing_[Reentrant]; }
   void waitOwnerEnd(uint64_t token,uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(token&&wait_.token==token&&wait_.ownerBegin&&tick>=wait_.ownerBegin)wait_.ownerEnd=tick;else ++missing_[BadClock]; }
   // Owner-thread-only, no token: frame_end_overlap's deferred finishPair()
-  // wall time, bracketing the already-paired cycle (current_.eyes==2)
-  // between its second submitCallerEnd and the following waitCallerBegin.
-  // A synchronous pair never calls these, so frameEndOwnerBody reads 0.
-  void frameEndOwnerBegin(uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(current_.active&&current_.eyes==2&&!current_.frameEndOwnerBegin)current_.frameEndOwnerBegin=tick; }
-  void frameEndOwnerEnd(uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(current_.frameEndOwnerBegin&&tick>=current_.frameEndOwnerBegin&&!current_.frameEndOwnerEnd)current_.frameEndOwnerEnd=tick; }
+  // wall time. The queued job usually runs before the caller has recorded
+  // this same cycle's second eye (submitCallerEnd races it), so this cannot
+  // gate on current_.eyes==2 the way the other owner-body brackets do --
+  // tracked outside current_ instead, and finishCurrent() below consumes it
+  // into the cycle it completes. A synchronous pair never calls these, so
+  // frameEndOwnerBody reads 0.
+  void frameEndOwnerBegin(uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(tick&&!pendingFrameEndOwnerBegin_)pendingFrameEndOwnerBegin_=tick; }
+  void frameEndOwnerEnd(uint64_t tick) noexcept {
+    std::lock_guard<std::mutex> l(m_);
+    if(!pendingFrameEndOwnerBegin_||tick<pendingFrameEndOwnerBegin_)return;
+    pendingFrameEndOwnerMs_=double(tick-pendingFrameEndOwnerBegin_)*0.001;pendingFrameEndOwnerBegin_=0;
+  }
   void waitCallerEnd(uint64_t token,uint64_t sequence,uint64_t tick,uint64_t nowMs,uint32_t thread,const Shape& shape,bool ok) noexcept {
     std::lock_guard<std::mutex> l(m_);completedReady_=false;callerWorkFor_=0;callerWorkMeasured_=false;
     if(!ok||!token||wait_.token!=token||!wait_.open||!ordered(wait_.begin,wait_.ownerBegin,wait_.ownerEnd,tick)||thread!=wait_.thread){advanceWindow(nowMs,shape,sequence);bad(!ok?PartialStereo:BadClock);if(wait_.token==token)wait_={};return;}
@@ -168,8 +175,8 @@ class FrameCycleStats final {
   struct Handoff {uint64_t begin=0,end=0;};
   struct Wait {bool open=false;uint64_t token=0,begin=0,ownerBegin=0,ownerEnd=0;uint32_t thread=0;};
   struct Current {bool active=false,submitOpen=false;uint64_t sequence=0,waitReturn=0,waitRound=0,waitOwner=0,
-    beforeFirst=0,between=0,afterSecond=0,submitToken=0,submitBegin=0,ownerBegin=0,ownerEnd=0,submitReturn[2]{},submitRound[2]{},owner[2]{},atMs=0,
-    frameEndOwnerBegin=0,frameEndOwnerEnd=0;bool afterSecondReady=false;
+    beforeFirst=0,between=0,afterSecond=0,submitToken=0,submitBegin=0,ownerBegin=0,ownerEnd=0,submitReturn[2]{},submitRound[2]{},owner[2]{},atMs=0;
+    bool afterSecondReady=false;
     double park[2]{},presentCount=0,rawPresent=0,edvrBeforePresent=0,edvrAfterPresent=0,edvrPresent=0,trailingCallback=0,outsidePresent=0,postResidual=0,beforePresent=0,afterPresent=0,syncNonzeroPresent=0;
     uint64_t presentBegin=0,presentEnd=0;
     uint32_t callerThread=0,waitThread=0,submitThread=0,order[2]{},seenEyes=0,eyes=0;
@@ -227,7 +234,12 @@ class FrameCycleStats final {
     // ordinarily nothing -- until its owner body actually started; with
     // frame_end_overlap on that can be a still-running deferred finishPair().
     s.nextWaitQueueDelay=double(wait_.ownerBegin-wait_.begin)*toMs;
-    s.frameEndOwnerBody=current_.frameEndOwnerEnd?double(current_.frameEndOwnerEnd-current_.frameEndOwnerBegin)*toMs:0;
+    // Consumed here regardless of current_ (frameEndOwnerBegin/End above
+    // cannot gate on it): the job always runs before the next WaitGetPoses's
+    // own owner body, and this runs at that wait's waitCallerEnd, so a
+    // pending value here belongs to the cycle just closed, not the new one
+    // current_ becomes below.
+    s.frameEndOwnerBody=pendingFrameEndOwnerMs_;pendingFrameEndOwnerMs_=0;
     for(unsigned i=0;i<2;++i){s.submitOwner[i]=double(current_.owner[i])*toMs;s.renderPark[i]=current_.park[i];s.eyeOrder[i]=current_.order[i];}
     s.callerThread=current_.callerThread;s.waitThread=waitThread;
     s.postValid=current_.postValid;s.postUnavailable=current_.postUnavailable;s.singlePresent=current_.singlePresent;
@@ -283,6 +295,10 @@ class FrameCycleStats final {
   Dist manual(std::array<double,capacity>&v)const{double t=0;for(unsigned i=0;i<count_;++i)t+=v[i];std::sort(v.begin(),v.begin()+count_);auto p=[&](unsigned x){return count_?v[(count_*x+99)/100-1]:0;};return{count_?t/count_:0,p(50),p(95),p(99),count_?v[count_-1]:0};}
   mutable std::mutex m_;bool enabled_=false,everComplete_=false,ready_=false,completedReady_=false;Wait wait_{};Current current_{};Completed completed_{};
   double callerWorkMs_=0;bool callerWorkMeasured_=false;uint64_t callerWorkFor_=0;
+  // frameEndOwnerBegin/End's pending value: outside current_ because the
+  // deferred job they bracket usually finishes before current_.eyes reaches
+  // 2 for that same cycle. See frameEndOwnerBegin's comment.
+  uint64_t pendingFrameEndOwnerBegin_=0;double pendingFrameEndOwnerMs_=0;
   std::unique_ptr<std::array<Sample,capacity>> samples_;std::array<uint64_t,MissingCount> missing_{};unsigned count_=0;uint64_t attempted_=0,window_=0,windowStart_=0,windowStartMs_=0,lastAttemptedSequence_=0,nextToken_=0;uint64_t handoffMissing_=0,handoffInvalid_=0,handoffOverflow_=0;Shape shape_{};uint32_t firstThread_=0,waitThread_=0,observedWaitThread_=0,observedSubmitThread_=0;bool observedThreadMismatch_=false;Report report_{};
 };
 } // namespace edvr::openxr
