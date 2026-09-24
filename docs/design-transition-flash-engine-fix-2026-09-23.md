@@ -30,12 +30,13 @@ static chain: see "Flight 184826".*
   the refill the bad render needs is already LIVE in the mailbox at the tap,
   not in any consume-indexed record. The sim's window starts at N+1, not N,
   for the same skew.
-- **The render-time patch simulation is on main** (310d9883, then the live
-  read e9fefca0): `advanced.transition_flash_eye_base = off|watch|on|
-  alternate`; every non-off mode runs the passive sim. The Steam copy runs
-  the live-read build with the trap ON and `transition_flash_eye_base =
-  watch` (one marked ini line). Read each flight with `--expect-build` set
-  to the stamped commit its section names.
+- **The render-time patch simulation is on main** (310d9883, the live read
+  e9fefca0, the buffer-row locator 7eb4a536):
+  `advanced.transition_flash_eye_base = off|watch|on|alternate`; every
+  non-off mode runs the passive sim. The Steam copy runs the locator build
+  7eb4a536 with the trap ON and `transition_flash_eye_base = watch` (one
+  marked ini line). Read each flight with `--expect-build` set to the
+  stamped commit its section names.
 - **Hyperspace exits can be scene-new too** (125237): the second scene-new
   event on record after 100043's f23338. The live-read design is indifferent
   to the timing case by construction -- which is why the selector is
