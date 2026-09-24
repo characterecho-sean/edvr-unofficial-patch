@@ -36,6 +36,7 @@
 #include "draw_census.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
+#include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
 #include "lod_governor.h"     // fix.settlement_detail: the settlement LOD governor
 #include "fss_panel.h"
 #include "fss_probe.h"
@@ -1708,6 +1709,67 @@ __forceinline const ResourceInfo* rtv0Resolved(State* s) {
         s->rtv0InfoGen = gen;
     }
     return &s->rtv0Info;
+}
+
+// advanced.pixel_probe: resolves this draw's eye once more (the rtv0Eye
+// pattern again) and hands the identity to pixel_probe.h, which decides
+// on its own whether a run is armed and this is its frame. Unconfigured
+// costs the one bool load pixelProbeWantsDraws() is for; nothing below it
+// runs.
+void pixelProbeBefore(State* s, ID3D11DeviceContext* self) {
+    if (!pixelProbeWantsDraws() || !s->rtv0Eye) return;
+    const ResourceInfo* info = rtv0Resolved(s);
+    if (!info) return;
+    const int eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
+    pixelProbeBeforeDraw(self, static_cast<ID3D11Resource*>(info->resource), eye);
+}
+
+// The after half: gathers DrawInfo from whatever this draw's bindings
+// already are -- the shadowed shader hashes, a live IA/OM query for
+// topology, blend and depth (eye_draw_snapshot.h's capture() reads the
+// same three the same way) -- and hands it to pixel_probe.h with the same
+// resolved identity. Called once the real draw and any EDVR reissues for
+// it have fully returned.
+void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
+                        uint32_t instances, bool indirect) {
+    if (!pixelProbeWantsDraws() || !s->rtv0Eye) return;
+    const ResourceInfo* info = rtv0Resolved(s);
+    if (!info) return;
+    const int eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
+    if (eye < 0) return;
+    DrawInfo di;
+    di.count = count;
+    di.instances = instances;
+    di.indirect = indirect;
+    di.vsHash = bindingShaderHash(BindSlot::Vs);
+    di.psHash = bindingShaderHash(BindSlot::Ps);
+    D3D11_PRIMITIVE_TOPOLOGY topo{};
+    self->IAGetPrimitiveTopology(&topo);
+    di.topology = static_cast<uint32_t>(topo);
+    ID3D11BlendState* bs = nullptr;
+    FLOAT bf[4]{};
+    UINT bm = 0;
+    self->OMGetBlendState(&bs, bf, &bm);
+    if (bs) {
+        D3D11_BLEND_DESC bd{};
+        bs->GetDesc(&bd);
+        di.blendEnable = bd.RenderTarget[0].BlendEnable != 0;
+        di.blendSrc = static_cast<uint32_t>(bd.RenderTarget[0].SrcBlend);
+        di.blendDest = static_cast<uint32_t>(bd.RenderTarget[0].DestBlend);
+        bs->Release();
+    }
+    ID3D11DepthStencilState* ds = nullptr;
+    UINT stencilRef = 0;
+    self->OMGetDepthStencilState(&ds, &stencilRef);
+    if (ds) {
+        D3D11_DEPTH_STENCIL_DESC dd{};
+        ds->GetDesc(&dd);
+        di.depthEnable = dd.DepthEnable != 0;
+        di.depthWriteMask = static_cast<uint32_t>(dd.DepthWriteMask);
+        di.depthFunc = static_cast<uint32_t>(dd.DepthFunc);
+        ds->Release();
+    }
+    pixelProbeAfterDraw(self, static_cast<ID3D11Resource*>(info->resource), eye, di);
 }
 
 // kind, count and instances describe the draw for the census and the census
@@ -3917,8 +3979,12 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        pixelProbeBefore(g_state, self);
     }
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
+    // Indirect: the GPU-side argument buffer means count/instances are not
+    // knowable here, the same reason drawCensusDrawDirect above logs 0,0.
+    if (!foreignContext(self)) pixelProbeAfterEye(g_state, self, 0, 0, true);
 }
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
@@ -3933,8 +3999,10 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        pixelProbeBefore(g_state, self);
     }
     g_state->realDrawInstancedIndirect(self, args, off);
+    if (!foreignContext(self)) pixelProbeAfterEye(g_state, self, 0, 0, true);
 }
 
 void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
@@ -4169,6 +4237,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     args.base = static_cast<int32_t>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'D', count, 1, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDraw(self, count, start);
@@ -4176,6 +4245,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
+    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     gpuFrameCommand(self);
@@ -4196,6 +4266,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.base = baseVertex;
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'I', count, 1, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
@@ -4203,6 +4274,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
+    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
@@ -4219,6 +4291,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     // The draw's instance window, for the glare telemetry: the trains
     // share one record buffer at different offsets, and which train a
     // draw carries is only knowable from (start, count).
@@ -4237,6 +4310,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
+    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
 }
 void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
@@ -4272,6 +4346,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // only when the game has rebound something since the last look. After the
     // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
@@ -4336,6 +4411,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
+    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, instances, false);
 }
 
 // Read panel_distance_index, refusing anything that cannot be a float index.
@@ -4978,6 +5054,7 @@ void vScreenRefreshConfig() {
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
+    pixelProbeConfigure(cfg);
     lodGovernorConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
@@ -5111,6 +5188,7 @@ void vScreenFrameBoundary() {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
         objectProbeFrameBoundary(g_state->ownerCtx);
+        pixelProbeFrameBoundary(g_state->ownerCtx);
         panelUpscaleFrameEnd();
         wakePulseReport();
         uiDepthFrameBoundary(g_state->ownerCtx);
@@ -6154,6 +6232,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
+    pixelProbeConfigure(cfg);
     lodGovernorConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
@@ -6451,6 +6530,7 @@ void shutdownVScreenFixes() {
     panelCurveShutdown();
     particleShutdown();
     objectProbeShutdown();
+    pixelProbeShutdown();
     // The settlement LOD governor: stop acting and write the game's LOD scale
     // back to any render context still holding EDVR's.
     lodGovernorShutdown();

@@ -5,27 +5,23 @@
 *Added 2026-09-24. Restates the journal below; update it whenever this doc
 changes.*
 
-- **State:** on main and FLOWN twice 2026-09-24 (SteamVR OpenXR, Pimax;
-  entries below): the long-cycle breakdown, p99/max, late frames,
-  producer-copy GPU timing, thread priority, and Meta metrics work.
-  `frame_end_overlap` cut Elite's second-Submit park to 0.17-0.24 ms but
-  BROKE the Application-render GPU timing (old sequence), so it now
-  defaults OFF.
-- **Open:** the overlap's timing-order fix is ON MAIN (2026-09-24,
-  build.bat green, NOT FLOWN; still off unless `frame_end_overlap=on` is
-  set): submitEye's deferred branch now retires the caller-visible timing
-  context before Submit returns, the way the synchronous path already does,
-  and `frame_end_owner_body` no longer gates on the eye-count race. Needs a
-  flight before it can default on. The depth layer is set aside (Sean,
-  2026-09-24). No controlled comparison with the old OpenVR path exists; one
-  now needs a v0.16.2 build.
+- **State:** on main and FLOWN 2026-09-24 (entries below): the long-cycle
+  breakdown, p99/max, late frames, producer-copy GPU timing, thread
+  priority, and Meta metrics work. `frame_end_overlap` first broke the
+  Application-render GPU timing; with the timing retired before Submit
+  returns it FLEW CLEAN (flight 124504, Pimax OpenXR: invalid 5, Elite's
+  second-Submit park p50 0.16-0.18 ms) and now DEFAULTS ON.
+- **Open:** the overlap is flown on Pimax OpenXR and SteamVR OpenXR; the
+  Quest runtimes are unflown with it. The depth layer is set aside
+  (Sean, 2026-09-24). No controlled comparison with the old OpenVR path
+  exists; one now needs a v0.16.2 build.
 - **Closed:** sections 5 and 6 below (the private and producer copies): the
   producer copy measured 0.039 ms p50 per eye at 4100x3962, under the
   0.1 ms bar.
 - **Ruled out:** at the end of each 2026-09-24 entry.
-- **Next flight:** after the overlap's timing fix: Frontier install,
-  SteamVR OpenXR, Elite Supersampling 1.0; check the Application-render GPU
-  line's invalid count stays near zero.
+- **Next flight:** any flight on a Quest runtime with the default build:
+  check the Application-render GPU invalid count stays near zero and
+  `native_frame_end_overlap_summary` reads failures=0.
 - **Environment:** the numbers in the entry are Pimax Crystal Super, 90 Hz,
   separate device: Pimax OpenXR at 2600x2514, SteamVR OpenXR (`aapvr`) at
   4100x4050 and 2665x2087.
@@ -635,3 +631,36 @@ Branch `claude/openxr-perf-gaps`. Addresses this doc's Open item above.
 - Still defaults off (`frame_end_overlap`): this closes the two symptoms
   above, not a decision to ship it on. Needs the flight this doc's Next
   flight line already names.
+
+## 2026-09-24: flight 124504, the overlap flown clean
+
+Frontier install, build `58b6c085`, Pimax Crystal Super on Pimax OpenXR,
+`frame_end_overlap=on` added to the installed edvr_openxr.ini. Sean: GPU
+frame times work again.
+
+- `native_frame_end_overlap_summary`: overlapped 25545, synchronous 0,
+  failures 0.
+- Application-render GPU: valid 25304, invalid 5 (43706 invalid before the
+  fix); the Monitor benchmark reads cpu p50/p95/p99 3.32/4.13/4.36 ms.
+- `second_submit_render_park` p50 0.16-0.18 ms, p99 0.35-1.12;
+  `frame_end_owner_body` p50 0.29-0.32 ms, now recorded;
+  `next_wait_queue_delay` p50 0.005-0.006 ms, p99 at most 0.06: the moved
+  work did not come back as a wait.
+
+The overlap now defaults on.
+
+## 2026-09-24: flight 125717, the overlap on SteamVR OpenXR
+
+Same build and switch, Pimax Crystal Super on SteamVR OpenXR (`aapvr`).
+
+- Overlapped 9937, synchronous 0, failures 0. Application-render GPU valid
+  9625, invalid 4.
+- `second_submit_render_park` p50 0.16-0.19 ms, p99 0.37-0.44 (0.76 ms p50
+  before on SteamVR at 4100x4050).
+- `frame_end_owner_body` p50 0.62-0.70 ms, p95 0.9-3.4, p99 1.1-7.8: this
+  is mostly SteamVR's own xrEndFrame, and before the overlap all of it sat
+  on Elite's render thread inside the second Submit. Now it finishes before
+  Elite's next WaitGetPoses (`next_wait_queue_delay` p99 0.011-0.030 ms).
+- For issue #38 (random CPU frame-time jumps on SteamVR in 0.17.0): that
+  xrEndFrame tail on Elite's thread is a plausible contributor, and this
+  build takes it off. Not proven as the reporter's cause.
