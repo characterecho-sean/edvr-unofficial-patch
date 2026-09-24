@@ -362,7 +362,7 @@ FlatMonoFrame printMonoInput(uint64_t frame) {
     const FlatMonoFrame mono = flatSelectMonoFrame(input);
     // Always print a verdict, even for an empty report or refused metadata.
     // This is report-time selection only; it does not arm the motion producer.
-    Log::get().note("flat discover mono-input frame=%llu epoch=%llu selector-called=1 status=%s reason=%s color=%p hdr=%p depth=%p dsv=%p depth-fmt=%u VSb1=%p camera-hash=%016llX near=%.9g render=%ux%u output=%p %ux%u supported-pair-draws=%u unsupported-pair-draws=%u source-q=%u..%u hdr-q=%u..%u tone-q=%u copy-q=%u later-output-q=%u; observational candidate, identities frame-local, treatment=inactive certificate=0",
+    Log::get().note("flat discover mono-input frame=%llu epoch=%llu selector-called=1 status=%s reason=%s color=%p hdr=%p depth=%p dsv=%p depth-fmt=%u VSb1=%p camera-hash=%016llX near=%.9g render=%ux%u output=%p %ux%u supported-pair-draws=%u unsupported-pair-draws=%u source-q=%u..%u hdr-q=%u..%u tone-q=%u copy-q=%u later-output-q=%u; observational candidate, identities frame-local, observer=passive runtime-status=separate certificate=0",
         static_cast<unsigned long long>(mono.frame), static_cast<unsigned long long>(mono.epoch),
         mono.selected() ? "selected" : "refused", flatMonoReasonName(mono.reason),
         mono.color, mono.hdr, mono.depth, mono.dsv, mono.depthFormat, mono.sceneConstants,
@@ -466,7 +466,7 @@ void printProjections(uint64_t frame, const FlatMonoFrame& mono, bool details) {
 }
 
 void report(uint64_t frame, const char* phase) {
-    Log::get().note("flat discover %s frame=%llu profile=flat request=%s treatment=refused reason=uncertified-scene-projection-depth-boundary certificate=%u presents=%u useful-frames=%u test=%u failed=%u depth-frames=%u output-frames=%u draws=%u depth-draws=%u copies=%u dispatches=%u unknown-lists=%u foreign-thread-calls=%llu frame-dropped-observations(view,target,edge,output-edge,large-cb,small-cb,clear)=%u,%u,%u,%u,%u,%u,%u output=%p %ux%u fmt=%u",
+    Log::get().note("flat discover %s frame=%llu profile=flat request=%s observer=passive runtime-status=separate certificate=%u presents=%u useful-frames=%u test=%u failed=%u depth-frames=%u output-frames=%u draws=%u depth-draws=%u copies=%u dispatches=%u unknown-lists=%u foreign-thread-calls=%llu frame-dropped-observations(view,target,edge,output-edge,large-cb,small-cb,clear)=%u,%u,%u,%u,%u,%u,%u output=%p %ux%u fmt=%u",
                     phase, static_cast<unsigned long long>(frame),
                     Config::get().requestedTemporalMode().c_str(),
                     flatTemporalEvidenceComplete(g.proof) ? 1 : 0, g.presents,
@@ -606,7 +606,7 @@ void flatTemporalStart(ID3D11Device* device) {
     g.epoch = 1;
     g.device = device;
     g_waitingForPresent.store(true, std::memory_order_release);
-    Log::get().note("flat temporal: discovery armed, awaiting first owned Present thread; then at most 120 s / 12000 useful frames (all Presents counted separately). Requested=%s; AA treatment refused until desktop camera, projection, depth and handoff are certified",
+    Log::get().note("flat temporal: passive discovery armed, awaiting first owned Present thread; then at most 120 s / 12000 useful frames (all Presents counted separately). Requested=%s; treatment is reported separately by flat runtime",
                     Config::get().requestedTemporalMode().c_str());
 }
 
@@ -695,7 +695,7 @@ void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags) {
     }
     if (deadline) {
         detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
-        Log::get().note("flat temporal: discovery complete; treatment stayed inactive: no flat scene/projection/depth/output certificate or verified jitter fallback");
+        Log::get().note("flat temporal: passive discovery complete; flat runtime treatment continues independently and reports its own results");
     }
     clearFrame();
     if (!deadline && result == S_OK && !(flags & DXGI_PRESENT_TEST)) flatComputeBoundary(frame, g.epoch);

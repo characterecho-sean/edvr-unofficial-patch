@@ -34,6 +34,7 @@ struct State {
 // Explicit owner-thread cleanup only: releasing driver objects from a static
 // destructor during DLL detach would run under the loader lock.
 State& g=*new State;
+FlatMonoResolveStats& stats=*new FlatMonoResolveStats;
 struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; };
 static_assert(sizeof(Constants)==224, "HLSL cbuffer layout");
 struct Isolate {
@@ -52,6 +53,7 @@ struct Isolate {
 };
 bool fail(const char** reason, const char* text) {
     g.history=false;
+    stats.currentContinueRun=0;
     if(reason)*reason=text;
     return false;
 }
@@ -82,7 +84,10 @@ bool image(ID3D11Device* device,uint32_t width,uint32_t height,DXGI_FORMAT forma
 }
 bool initialize(ID3D11Device* device,ID3D11DeviceContext* context,const char** reason) {
     if(g.device.Get()==device && g.context.Get()==context && g.prep && g.taa && g.finish && g.constants && g.sampler && g.isolated)return true;
+    if(g.device.Get()==device && g.context && g.context.Get()!=context)++stats.contextPointerMismatches;
+    ++stats.initializations;
     g=State{};
+    stats.currentContinueRun=0;
     if(context->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return fail(reason,"flat-resolve-requires-immediate-context");
     ComPtr<ID3D11Device> contextDevice;context->GetDevice(contextDevice.GetAddressOf());
     if(contextDevice.Get()!=device)return fail(reason,"flat-resolve-context-device-mismatch");
@@ -109,6 +114,7 @@ bool initialize(ID3D11Device* device,ID3D11DeviceContext* context,const char** r
 bool resources(const FlatMonoResolveFrame& f,const char** reason) {
     if(g.width==f.renderWidth && g.height==f.renderHeight && g.outWidth==f.outputWidth &&
        g.outHeight==f.outputHeight && g.mode==f.mode)return true;
+    ++stats.allocations;
     g.color={};g.depth[0]={};g.depth[1]={};g.motion={};g.rejection={};g.expected={};g.output[0]={};g.output[1]={};
     g.width=g.height=g.outWidth=g.outHeight=0;g.current=0;g.history=false;
     const bool taa=f.mode==FlatMonoResolveMode::Taa;
@@ -141,11 +147,13 @@ bool inputTexture(ID3D11ShaderResourceView* view,uint32_t width,uint32_t height,
 }
 } // namespace
 
-void flatMonoResolveReset() { g=State{}; }
-void flatMonoResolveInvalidateHistory() { g.history=false; }
+FlatMonoResolveStats flatMonoResolveStats() { return stats; }
+void flatMonoResolveReset() { ++stats.fullResets;stats.currentContinueRun=0;g=State{}; }
+void flatMonoResolveInvalidateHistory() { ++stats.invalidations;stats.currentContinueRun=0;g.history=false; }
 
 bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,
                      ID3D11ShaderResourceView** output,const char** reason) {
+    ++stats.calls;
     if(output)*output=nullptr;
     if(reason)*reason=nullptr;
     if(!output || !device || !context || !f.renderWidth || !f.renderHeight || !f.outputWidth || !f.outputHeight ||
@@ -165,15 +173,20 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(!resources(f,reason))return false;
     const bool taa=f.mode==FlatMonoResolveMode::Taa;
     D3D11_SHADER_RESOURCE_VIEW_DESC colorDesc{};f.color->GetDesc(&colorDesc);
-    bool reset=f.reset || !g.history || f.frame!=g.lastFrame+1 || !cameraValid(f.previousCamera) || g.inputFormat!=colorDesc.Format;
-    if(!reset)for(unsigned i=0;i<3;++i)if(std::abs(f.camera[5][i]-f.previousCamera[5][i])>50)reset=true;
+    const bool requestedReset=f.reset, lostHistory=!g.history, frameGap=f.frame!=g.lastFrame+1;
+    const bool invalidPreviousCamera=!cameraValid(f.previousCamera);
+    const bool formatChange=g.inputFormat!=colorDesc.Format;
+    bool cameraCut=false;
+    if(!requestedReset && !lostHistory && !frameGap && !invalidPreviousCamera && !formatChange)
+        for(unsigned i=0;i<3;++i)if(std::abs(f.camera[5][i]-f.previousCamera[5][i])>50)cameraCut=true;
+    const bool reset=requestedReset || lostHistory || frameGap || invalidPreviousCamera || formatChange || cameraCut;
     const bool engine=f.engine.slots && f.engine.pool && f.engine.sceneNow && f.engine.scenePrev;
     if(!reset && !engine)return fail(reason,"flat-resolve-engine-source-views-unavailable");
     // All external backend work is inside the same complete state isolation.
     Isolate isolated(g.context.Get(),g.isolated.Get());
     if(f.mode==FlatMonoResolveMode::Dlaa || f.mode==FlatMonoResolveMode::Dlss) {
-        if(!dlaaAvailable(device,reason)) {g.history=false;return false;}
-    } else if(f.mode==FlatMonoResolveMode::Fsr && !fsr3Available(device,reason)) {g.history=false;return false;}
+        if(!dlaaAvailable(device,reason)) {++stats.backendFailures;g.history=false;stats.currentContinueRun=0;return false;}
+    } else if(f.mode==FlatMonoResolveMode::Fsr && !fsr3Available(device,reason)) {++stats.backendFailures;g.history=false;stats.currentContinueRun=0;return false;}
     const uint32_t index=taa?g.current:0;
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
     std::memcpy(constants.previous,reset?f.camera:f.previousCamera,sizeof(f.previousCamera));
@@ -208,7 +221,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         ok=dlaaEvaluate(context,0,g.color.texture.Get(),g.depth[0].texture.Get(),g.motion.texture.Get(),g.output[0].texture.Get(),
             g.rejection.texture.Get(),f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,0,0,reset,f.deltaMs,reason);
     }
-    if(!ok) {g.history=false;return false;}
+    if(!ok) {++stats.backendFailures;g.history=false;stats.currentContinueRun=0;return false;}
     if(!taa) {
         // SDKs may alter every stage. Start our final composite from the isolated
         // empty state; the outer guard still owns the untouched game's state.
@@ -222,6 +235,18 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         context->CSSetShader(g.finish.Get(),nullptr,0);context->Dispatch((f.outputWidth+7)/8,(f.outputHeight+7)/8,1);
     }
     g.history=true;g.lastFrame=f.frame;g.current=index^1;g.inputFormat=colorDesc.Format;
+    if(reset) {
+        ++stats.acceptedResets;stats.currentContinueRun=0;
+        if(requestedReset)++stats.requestedResets;
+        if(lostHistory)++stats.lostHistory;
+        if(frameGap && !lostHistory)++stats.frameGaps;
+        if(invalidPreviousCamera)++stats.invalidPreviousCameras;
+        if(formatChange && !lostHistory)++stats.formatChanges;
+        if(cameraCut)++stats.cameraCuts;
+    } else {
+        ++stats.acceptedContinues;
+        if(++stats.currentContinueRun>stats.longestContinueRun)stats.longestContinueRun=stats.currentContinueRun;
+    }
     *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[taa?index:1].srgb:g.output[taa?index:1].srv).Get();
     (*output)->AddRef();
     return true;

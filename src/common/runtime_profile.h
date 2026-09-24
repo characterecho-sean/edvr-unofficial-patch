@@ -86,7 +86,7 @@ inline const char* runtimeProfileName() {
     switch (g_runtimeProfile) {
     case RuntimeProfile::LegacyVr: return "legacy-vr";
     case RuntimeProfile::Vr: return "vr";
-    case RuntimeProfile::Flat: return "flat-discovery";
+    case RuntimeProfile::Flat: return "flat";
     default: return "invalid";
     }
 }

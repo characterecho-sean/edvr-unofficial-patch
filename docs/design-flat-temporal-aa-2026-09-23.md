@@ -9,8 +9,11 @@
   and the tone/copy/UI handoff at native and 0.75x SS (sections 10 and 12).
   Epic 88a04caa closes the measured lighting-grid/consumer contract with zero
   capture drops (section 13). Functional zero-jitter mono reconstruction now
-  passes all 84 build jobs and the 254-key config contract (section 14).
-  Projection jitter remains disabled; functional Epic qualification is next.
+  passes all 84 build jobs and the 254-key config contract (section 14). Epic
+  27217a7d runs DLSS at 0.75x SS, but intermittent HDR/camera refusals break
+  history (section 15). Projection jitter remains disabled. The bounded refusal
+  witness and history counters pass all 84 jobs and the 254-key contract; their
+  Epic qualification is next.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -27,11 +30,11 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** after building and verifying the functional mono route, Epic
-  flat DLSS at 0.75x SS (Sean's choice), initially with zero jitter. Qualify
-  actual treatment, depth/motion, output scaling and original-frame fallback
-  before enabling jitter; do not repeat the completed grid inventory. Use
-  `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
+- **Next flight:** after building and verifying the bounded refusal witness,
+  Epic flat DLSS at 0.75x SS with zero jitter. Identify the first conflicting
+  HDR write/camera and measure uninterrupted history before enabling jitter; do
+  not repeat the completed grid inventory. Use `tools/edvr_log.py` with the
+  actual `--target`, `--expect-build HEAD` and
   `--grep "flat (runtime|temporal|discover|compute)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
@@ -758,3 +761,40 @@ Sean selected DLSS at 0.75x SS for the first functional Epic flight. This is a
 plumbing qualification, not yet the final jittered AA quality test. DLSS uses
 the existing default preset K. Other temporal modes and VR regression remain to
 be qualified in game.
+
+## 15. First functional flight: interrupted history, 2026-09-24
+
+Epic `edvr_gfx_20260924_080753.log` matches clean `27217a7d`, build `6AB52DDC`.
+Sean reports no visible DLSS engagement and continued shimmer and aliasing. The
+runtime reaches 6,705 treated copies. Between 08:09:29 and 08:10:59, counters
+increase by 6,486 treated and 1,411 refused (82.1% / 17.9%). The sampled
+refusal is `conflicting-hdr-target-or-camera`. Earlier `no-known-tone-pass`
+intervals are excluded from that calculation; their screen content is not
+established by the log.
+
+DLSS feature creation succeeds for 1920x1080 -> 2560x1440, then 2880x1620 ->
+3840x2160 at 08:10:11, then back at 08:10:51, all 0.75x SS and preset K. Source
+motion views are given after one warm-up miss per recreated source, with no
+producer invalidations. Ruled out: DLSS never engaging, because runtime
+acceptance occurs only after `dlaaEvaluate` returns success, which follows a
+successful NGX evaluation. Acceptance does not prove useful accumulated pixels:
+a reset's final composite deliberately displays current spatial colour, and
+this build still supplies zero jitter.
+
+Every refused copy invalidates history. The current aggregate reason cannot
+distinguish HDR viewport/depth changes, conflicting camera words/provenance,
+explicit resource writes, or disagreement between HDR and tone cameras. Do not
+loosen those checks without a witness. A bounded first-cause record for the HDR
+actually selected by tone will name the draw, resource identities, viewport and
+exact differing camera words. Unrelated HDR targets must not consume this
+evidence budget. Cumulative refusal counts and uninterrupted treated streaks
+will quantify the effect.
+
+A separate adapter count names missing prior history, frame gaps, changed
+colour/depth identities and changed extents. A separate renderer counter will
+distinguish requested resets from internal reinitialization, resource/format
+changes, frame gaps and camera cuts. This also tests whether hardware interface
+identity causes repeated initialization; that remains a hypothesis, not a
+rendering fix. No GPU readback or changed acceptance rule is required for this
+instrument. Stale capture-only log messages are corrected to identify the
+passive observer and direct readers to the actual flat runtime counters.

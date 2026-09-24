@@ -123,9 +123,17 @@ int main(int argc,char** argv) {
         check(tex && readPixel(context.Get(),tex.Get(),&value,4,x,y),"resolved pixel readback");return value;};
     if(messages)messages->ClearStoredMessages();
     auto first=run(true);check(backendReset && observedReject==255 && pixel(first.Get())==0xff0000ff,"reset seeds backend but displays current color");
+    auto stats=edvr::flatMonoResolveStats();
+    check(stats.calls==1 && stats.initializations==1 && stats.allocations==1 && stats.acceptedResets==1 &&
+          stats.acceptedContinues==0 && stats.lostHistory==1 && stats.currentContinueRun==0,
+          "first frame reports one state build, one texture allocation and one accepted reset");
     f.reset=false;f.frame=2;f.camera[5][0]=.3125f;
     auto second=run(true);check(!backendReset && std::abs(observedMotion-1)<.001 && observedDepth==.01f,
         "camera translation gives positive one-render-pixel current-to-previous motion and unchanged raw depth");
+    stats=edvr::flatMonoResolveStats();
+    check(stats.initializations==1 && stats.allocations==1 && stats.acceptedContinues==1 &&
+          stats.currentContinueRun==1 && stats.longestContinueRun==1 && stats.contextPointerMismatches==0,
+          "continuous frame reuses state and textures without a reset");
     check(pixel(second.Get())==0xff00ff00,"valid pixel uses trained output");
     check(pixel(second.Get(),31,16)==0xff0000ff,"offscreen reprojection displays current spatial color");
     // A matched pixel's own rigid record moves oppositely: exact engine vector
@@ -149,13 +157,20 @@ int main(int argc,char** argv) {
         auto rejected=run(true);check(observedReject==255 && pixel(rejected.Get())==0xff0000ff,"corrupt/stale/masked pixel displays current color");
     }
     backendFail=true;++f.frame;run(false);backendFail=false;++f.frame;run(true);check(backendReset,"backend failure invalidates history");
+    stats=edvr::flatMonoResolveStats();check(stats.backendFailures==1 && stats.currentContinueRun==0,
+        "backend failure and following accepted reset are visible in cumulative statistics");
     f.mode=edvr::FlatMonoResolveMode::Taa;f.reset=true;++f.frame;auto taa=run(true);
     check(pixel(taa.Get())==0xff0000ff,"TAA reset spatial upsample");f.reset=false;++f.frame;taa=run(true);
     check(pixel(taa.Get())==0xff0000ff,"TAA static color remains stable");
     f.mode=edvr::FlatMonoResolveMode::Fsr;++f.frame;run(true);check(infiniteSeen,"FSR receives explicit infinite-depth mode");
     f.mode=edvr::FlatMonoResolveMode::Dlss;++f.frame;auto retained=run(true);
+    auto beforeInvalidate=edvr::flatMonoResolveStats();
     edvr::flatMonoResolveInvalidateHistory();++f.frame;auto invalidated=run(true);
     check(backendReset && retained.Get()==invalidated.Get(),"history-only invalidation preserves allocated output");
+    stats=edvr::flatMonoResolveStats();
+    check(stats.invalidations==beforeInvalidate.invalidations+1 && stats.allocations==beforeInvalidate.allocations &&
+          stats.initializations==beforeInvalidate.initializations && stats.currentContinueRun==0,
+          "history-only invalidation resets accumulation without rebuilding resources");
     // Original copy may decode SRGB. Keep encoded bits during reconstruction and
     // return that same view format, rather than silently changing its transfer.
     std::vector<uint32_t> encoded(w*h,0xff4080a0);
@@ -168,16 +183,27 @@ int main(int argc,char** argv) {
     D3D11_SHADER_RESOURCE_VIEW_DESC resultDesc{};if(srgbResult)srgbResult->GetDesc(&resultDesc);
     check(resultDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB && pixel(srgbResult.Get())==encoded[0],
           "DLSS reset preserves encoded bytes and original SRGB view transfer");
+    stats=edvr::flatMonoResolveStats();check(stats.formatChanges==1,"input view format change is counted");
     f.mode=edvr::FlatMonoResolveMode::Taa;
     for(unsigned i=0;i<2;++i){++f.frame;srgbResult=run(true);if(srgbResult)srgbResult->GetDesc(&resultDesc);
         check(resultDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB && pixel(srgbResult.Get())==encoded[0],
               "both TAA history surfaces preserve SRGB copy contract");f.reset=false;}
     const int callsBefore=backendCalls;f.mode=edvr::FlatMonoResolveMode::Dlaa;run(false);
     check(backendCalls==callsBefore,"DLAA scale mismatch declines before backend");
-    f.mode=edvr::FlatMonoResolveMode::Dlss;f.camera[0][0]=0;run(false);check(backendCalls==callsBefore,"singular camera declines before backend");
+    f.mode=edvr::FlatMonoResolveMode::Dlss;f.color=colorView.Get();++f.frame;run(true);
+    f.frame+=2;run(true);stats=edvr::flatMonoResolveStats();
+    check(backendReset && stats.frameGaps>=1 && stats.currentContinueRun==0,"frame gap produces a counted reset");
+    ++f.frame;f.camera[5][0]=51;run(true);stats=edvr::flatMonoResolveStats();
+    check(backendReset && stats.cameraCuts==1,"camera cut produces a counted reset");
+    f.camera[0][0]=0;run(false);check(backendCalls==callsBefore+3,"singular camera declines before backend");
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessages();++i){SIZE_T n=0;messages->GetMessage(i,nullptr,&n);std::vector<unsigned char> bytes(n);
         auto* msg=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());messages->GetMessage(i,msg,&n);
         if(msg->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::printf("D3D: %s\n",msg->pDescription);check(false,"no D3D resource hazards/errors/warnings");}}
-    edvr::flatMonoResolveReset();context->ClearState();
+    stats=edvr::flatMonoResolveStats();edvr::flatMonoResolveReset();
+    auto afterReset=edvr::flatMonoResolveStats();
+    check(afterReset.fullResets==stats.fullResets+1 && afterReset.acceptedResets==stats.acceptedResets &&
+          afterReset.acceptedContinues==stats.acceptedContinues && afterReset.currentContinueRun==0,
+          "full renderer reset preserves session diagnostics");
+    context->ClearState();
     if(!failures)std::puts("flat mono resolve: PASS");return failures?1:0;
 }

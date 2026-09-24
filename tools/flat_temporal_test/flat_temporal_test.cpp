@@ -694,6 +694,50 @@ void flatRuntimePrefixTests() {
         flatRuntimeWritten(*unchanged, MonoFixture::token(0xDEAD));
         check(flatRuntimeObserve(*unchanged, copy).selected(), "unrelated resource writes do not invalidate established lineage");
 
+        auto witness = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        FlatRuntimeDraw bad{}; bad.key = fixture.world[9].key;
+        std::memcpy(bad.camera, fixture.world[9].camera, sizeof(bad.camera));
+        bad.key.writeEpoch = witness->frame; bad.key.writeSeq = witness->sequence + 1;
+        bad.key.viewport[4] = .25f;
+        flatRuntimeObserve(*witness, bad);
+        bad.key.depth = MonoFixture::token(0xBAD0);
+        bad.key.dsv = MonoFixture::token(0xBAD1);
+        flatRuntimeObserve(*witness, bad);
+        bool hdrWitness = false;
+        for (uint32_t i = 0; i < witness->targetsUsed; ++i)
+            if (witness->targets[i].resource == MonoFixture::token(0x2600))
+                hdrWitness = witness->targets[i].firstBad.cause == FlatRuntimeConflict::Viewport;
+        check(hdrWitness, "a malformed HDR draw stores its first bad event");
+        auto conflicted = flatRuntimeObserve(*witness, copy);
+        check(conflicted.reason == FlatMonoReason::ConflictingHdr &&
+              witness->selectedConflict.cause == FlatRuntimeConflict::Viewport &&
+              witness->selectedConflict.current.viewport[4] == .25f,
+              "selected HDR witness preserves the first cause despite later mismatches");
+
+        auto selectorWitness = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        for (uint32_t i = 0; i < selectorWitness->targetsUsed; ++i) {
+            auto& t = selectorWitness->targets[i];
+            if (t.resource != MonoFixture::token(0x2600)) continue;
+            t.tone.camera[20] ^= 1;
+            t.tone.key.cameraHash = flatCameraHash(t.tone.camera);
+        }
+        conflicted = flatRuntimeObserve(*selectorWitness, copy);
+        check(conflicted.reason == FlatMonoReason::ConflictingHdr &&
+              selectorWitness->selectedConflict.cause == FlatRuntimeConflict::SelectorCamera &&
+              selectorWitness->selectedConflict.reference.b1 == fixture.handoff[0].key.b1,
+              "late selector camera conflict retains HDR and tone evidence");
+
+        auto noisy = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        auto* unrelated = flatRuntimeTarget(*noisy, MonoFixture::token(0xDEAD));
+        check(unrelated != nullptr, "unrelated HDR target fits bounded prefix");
+        if (unrelated) {
+            unrelated->writes = noisy->targets[0].writes;
+            flatRuntimeWritten(*noisy, MonoFixture::token(0xDEAD));
+            check(flatRuntimeObserve(*noisy, copy).selected() &&
+                  noisy->selectedConflict.cause == FlatRuntimeConflict::None,
+                  "bad unrelated HDR target does not contaminate selected witness or admission");
+        }
+
         prefix->copies = 0; flatRuntimeWritten(*prefix, selected.color);
         check(!flatRuntimeObserve(*prefix, copy).selected(), "write after tone invalidates current handoff");
     }

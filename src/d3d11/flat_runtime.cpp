@@ -9,6 +9,8 @@
 #include "../common/temporal_mode.h"
 #include <wrl/client.h>
 #include <cstring>
+#include <cstdio>
+#include <map>
 #include <string>
 
 namespace edvr {
@@ -38,12 +40,66 @@ struct State {
     FlatMonoFrame previous{}; bool havePrevious = false, treated = false;
     std::string mode; FlatMonoResolveMode engine = FlatMonoResolveMode::Taa;
     uint64_t lastMs = 0, lastReport = 0, accepted = 0, refused = 0;
+    uint64_t acceptedResetWindow = 0, acceptedHistoryWindow = 0;
+    uint64_t resetMissingWindow = 0, resetGapWindow = 0, resetDepthWindow = 0;
+    uint64_t resetColorWindow = 0, resetExtentWindow = 0;
+    uint64_t streak = 0, longestStreak = 0;
+    std::map<std::string, uint64_t> refusedWindow;
+    std::map<std::string, uint64_t> conflictWindow;
+    uint32_t conflictDetails[static_cast<uint32_t>(FlatRuntimeConflict::Count)]{};
+    uint64_t lastConflictDetailMs[static_cast<uint32_t>(FlatRuntimeConflict::Count)]{};
     const char* reason = "warming-current-frame";
 };
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
 bool owner() { return state().thread == GetCurrentThreadId(); }
 void reset() { auto& s = state(); s.havePrevious = false; FlatComputeInternalScope guard; flatMonoResolveInvalidateHistory(); }
+void refuse(State& s) {
+    ++s.refused; ++s.refusedWindow[s.reason]; s.streak = 0; reset();
+}
+void reportConflict(State& s) {
+    const auto& w = s.prefix.selectedConflict;
+    const auto index = static_cast<uint32_t>(w.cause);
+    if (!index || index >= static_cast<uint32_t>(FlatRuntimeConflict::Count)) return;
+    ++s.conflictWindow[flatRuntimeConflictName(w.cause)];
+    const uint64_t now = GetTickCount64();
+    if (s.conflictDetails[index] >= 4 ||
+        (s.conflictDetails[index] && now - s.lastConflictDetailMs[index] < 10000)) return;
+    ++s.conflictDetails[index]; s.lastConflictDetailMs[index] = now;
+    const auto& a = w.reference; const auto& b = w.current;
+    uint32_t rowMask = 0, wordMask = 0;
+    char words[700]{}; size_t used = 0;
+    if (a.hasCamera && b.hasCamera) for (uint32_t i = 0; i < 24; ++i) {
+        uint32_t before = 0, after = 0;
+        std::memcpy(&before, a.camera + i * 4, 4);
+        std::memcpy(&after, b.camera + i * 4, 4);
+        if (before == after) continue;
+        rowMask |= 1u << (i / 4); wordMask |= 1u << i;
+        const int n = std::snprintf(words + used, sizeof(words) - used,
+            "%s%u.%u:%08X>%08X", used ? "," : "", 270 + i / 4, i % 4, before, after);
+        if (n > 0 && static_cast<size_t>(n) < sizeof(words) - used) used += static_cast<size_t>(n);
+    }
+    Log::get().note("flat runtime conflict: frame=%llu cause=%s seq=%u hdr=%p ref-q=%u cur-q=%u "
+        "ref-vs=%016llX ref-ps=%016llX cur-vs=%016llX cur-ps=%016llX "
+        "ref-rtv=%p ref-depth=%p ref-dsv=%p ref-dim=%ux%u/%ux%u ref-fmt=%u/%u "
+        "cur-rtv=%p cur-depth=%p cur-dsv=%p cur-dim=%ux%u/%ux%u cur-fmt=%u/%u "
+        "ref-vp=%u(%.3g,%.3g,%.3g,%.3g,%.3g,%.3g) cur-vp=%u(%.3g,%.3g,%.3g,%.3g,%.3g,%.3g) "
+        "ref-b1=%p ref-cam=%u ref-epoch=%llu ref-write=%u cur-b1=%p cur-cam=%u cur-epoch=%llu cur-write=%u",
+        static_cast<unsigned long long>(s.prefix.frame), flatRuntimeConflictName(w.cause), w.sequence, w.hdr,
+        a.first, b.first,
+        static_cast<unsigned long long>(a.vs), static_cast<unsigned long long>(a.ps),
+        static_cast<unsigned long long>(b.vs), static_cast<unsigned long long>(b.ps),
+        a.rtv, a.depth, a.dsv, a.width, a.height, a.depthWidth, a.depthHeight, a.format, a.depthFormat,
+        b.rtv, b.depth, b.dsv, b.width, b.height, b.depthWidth, b.depthHeight, b.format, b.depthFormat,
+        a.viewportCount, a.viewport[0], a.viewport[1], a.viewport[2], a.viewport[3], a.viewport[4], a.viewport[5],
+        b.viewportCount, b.viewport[0], b.viewport[1], b.viewport[2], b.viewport[3], b.viewport[4], b.viewport[5],
+        a.b1, a.hasCamera ? 1u : 0u, static_cast<unsigned long long>(a.writeEpoch), a.writeSeq,
+        b.b1, b.hasCamera ? 1u : 0u, static_cast<unsigned long long>(b.writeEpoch), b.writeSeq);
+    Log::get().note("flat runtime conflict camera: frame=%llu cause=%s seq=%u ref-hash=%016llX cur-hash=%016llX row-mask=%02X word-mask=%06X changed-words=%s",
+        static_cast<unsigned long long>(s.prefix.frame), flatRuntimeConflictName(w.cause), w.sequence,
+        static_cast<unsigned long long>(a.cameraHash), static_cast<unsigned long long>(b.cameraHash),
+        rowMask, wordMask, a.hasCamera && b.hasCamera ? words : "unavailable");
+}
 ResourceInfo view(BindSlot slot, uint32_t cache) {
     auto& v = state().views[cache]; const auto generation = bindingGeneration(slot);
     void* identity = bindingGet(slot);
@@ -126,7 +182,32 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     for (uint32_t i = 0; i < s.cameraCount; ++i) { s.cameras[i].valid = false; s.cameras[i].mapped = nullptr; }
     const auto now = GetTickCount64();
     if (now - s.lastReport >= 5000) {
-        Log::get().note("flat runtime: treated=%llu refused=%llu last=%s render-source=game-SS jitter=0", static_cast<unsigned long long>(s.accepted), static_cast<unsigned long long>(s.refused), s.reason);
+        Log::get().note("flat runtime: treated=%llu refused=%llu last=%s render-source=game-SS jitter=0 accepted-reset-5s=%llu accepted-history-5s=%llu treated-streak=%llu longest-treated-streak=%llu",
+            static_cast<unsigned long long>(s.accepted), static_cast<unsigned long long>(s.refused), s.reason,
+            static_cast<unsigned long long>(s.acceptedResetWindow), static_cast<unsigned long long>(s.acceptedHistoryWindow),
+            static_cast<unsigned long long>(s.streak), static_cast<unsigned long long>(s.longestStreak));
+        for (const auto& entry : s.refusedWindow)
+            Log::get().note("flat runtime refusal 5s: reason=%s count=%llu", entry.first.c_str(), static_cast<unsigned long long>(entry.second));
+        for (const auto& entry : s.conflictWindow)
+            Log::get().note("flat runtime conflict 5s: cause=%s count=%llu", entry.first.c_str(), static_cast<unsigned long long>(entry.second));
+        Log::get().note("flat runtime adapter reset 5s: no-previous=%llu frame-gap=%llu depth-change=%llu color-change=%llu extent-change=%llu",
+            static_cast<unsigned long long>(s.resetMissingWindow), static_cast<unsigned long long>(s.resetGapWindow),
+            static_cast<unsigned long long>(s.resetDepthWindow), static_cast<unsigned long long>(s.resetColorWindow),
+            static_cast<unsigned long long>(s.resetExtentWindow));
+        const auto renderer = flatMonoResolveStats();
+        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu",
+            static_cast<unsigned long long>(renderer.calls), static_cast<unsigned long long>(renderer.initializations),
+            static_cast<unsigned long long>(renderer.contextPointerMismatches), static_cast<unsigned long long>(renderer.allocations),
+            static_cast<unsigned long long>(renderer.fullResets), static_cast<unsigned long long>(renderer.invalidations),
+            static_cast<unsigned long long>(renderer.acceptedResets), static_cast<unsigned long long>(renderer.acceptedContinues),
+            static_cast<unsigned long long>(renderer.requestedResets), static_cast<unsigned long long>(renderer.lostHistory),
+            static_cast<unsigned long long>(renderer.frameGaps), static_cast<unsigned long long>(renderer.invalidPreviousCameras),
+            static_cast<unsigned long long>(renderer.formatChanges), static_cast<unsigned long long>(renderer.cameraCuts),
+            static_cast<unsigned long long>(renderer.backendFailures), static_cast<unsigned long long>(renderer.currentContinueRun),
+            static_cast<unsigned long long>(renderer.longestContinueRun));
+        s.refusedWindow.clear(); s.acceptedResetWindow = s.acceptedHistoryWindow = 0;
+        s.resetMissingWindow = s.resetGapWindow = s.resetDepthWindow = s.resetColorWindow = s.resetExtentWindow = 0;
+        s.conflictWindow.clear();
         s.lastReport = now;
     }
     g_flatRuntimeLive.store(true, std::memory_order_release);
@@ -214,9 +295,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     if (!copy) return;
     s.reason = flatMonoReasonName(selected.reason);
-    if (!selected.selected()) { ++s.refused; reset(); return; }
+    if (!selected.selected()) {
+        if (selected.reason == FlatMonoReason::ConflictingHdr) reportConflict(s);
+        refuse(s); return;
+    }
     if (s.treated || selected.depth != s.namedDepth || selected.sceneConstants != s.namedConstants) {
-        s.reason = s.treated ? "already-treated-this-frame" : "producer-source-identity-mismatch"; ++s.refused; reset(); return;
+        s.reason = s.treated ? "already-treated-this-frame" : "producer-source-identity-mismatch"; refuse(s); return;
     }
     FlatComputeInternalScope guard;
     // Verify the actual handoff once. Cached bindings only nominate this draw.
@@ -230,20 +314,32 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (actualColor.Get() != selected.color || actualOut.Get() != s.output.Get() || actualDs ||
         lookupShaderHash(actualVs.Get()) != k.vs || lookupShaderHash(actualPs.Get()) != k.ps || actualB1.Get() != k.b1 ||
         viewportCount != 1 || std::memcmp(&viewport, &s.viewport, sizeof(viewport)) != 0 ||
-        !depthView(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)))) { s.reason = "actual-handoff-or-depth-view-refused"; ++s.refused; reset(); return; }
+        !depthView(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)))) { s.reason = "actual-handoff-or-depth-view-refused"; refuse(s); return; }
     FlatMonoResolveFrame f{}; f.color = original; f.depth = s.depthView.Get(); f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
     std::memcpy(f.camera, selected.camera, sizeof(f.camera));
-    f.reset = !s.havePrevious || s.previous.frame + 1 != selected.frame || s.previous.depth != selected.depth || s.previous.color != selected.color || s.previous.outputWidth != selected.outputWidth || s.previous.outputHeight != selected.outputHeight || s.previous.renderWidth != selected.renderWidth || s.previous.renderHeight != selected.renderHeight;
+    const bool resetMissing = !s.havePrevious;
+    const bool resetGap = s.havePrevious && s.previous.frame + 1 != selected.frame;
+    const bool resetDepth = s.havePrevious && s.previous.depth != selected.depth;
+    const bool resetColor = s.havePrevious && s.previous.color != selected.color;
+    const bool resetExtent = s.havePrevious &&
+        (s.previous.outputWidth != selected.outputWidth || s.previous.outputHeight != selected.outputHeight ||
+         s.previous.renderWidth != selected.renderWidth || s.previous.renderHeight != selected.renderHeight);
+    f.reset = resetMissing || resetGap || resetDepth || resetColor || resetExtent;
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
     const auto now = GetTickCount64(); f.deltaMs = s.lastMs ? static_cast<float>(now - s.lastMs) : 16.667f;
-    if (!engineVelocitySourceViews(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)), &f.engine)) { s.reason = "engine-source-not-ready"; ++s.refused; reset(); return; }
+    if (!engineVelocitySourceViews(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)), &f.engine)) { s.reason = "engine-source-not-ready"; refuse(s); return; }
     Ptr<ID3D11ShaderResourceView> engineSlots, enginePool, outputView; Ptr<ID3D11Buffer> nowCb, prevCb;
     engineSlots.Attach(f.engine.slots); enginePool.Attach(f.engine.pool); nowCb.Attach(f.engine.sceneNow); prevCb.Attach(f.engine.scenePrev);
-    if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) { ++s.refused; reset(); return; }
+    if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) { refuse(s); return; }
     s.reason = "treated-zero-jitter";
     ID3D11ShaderResourceView* replacement = outputView.Get(); ctx->PSSetShaderResources(0, 1, &replacement); replaced = true;
     s.previous = selected; s.previousColor = actualColor; s.havePrevious = s.treated = true; s.lastMs = now; ++s.accepted;
+    s.resetMissingWindow += resetMissing; s.resetGapWindow += resetGap; s.resetDepthWindow += resetDepth;
+    s.resetColorWindow += resetColor; s.resetExtentWindow += resetExtent;
+    if (f.reset) { ++s.acceptedResetWindow; s.streak = 1; }
+    else { ++s.acceptedHistoryWindow; ++s.streak; }
+    if (s.streak > s.longestStreak) s.longestStreak = s.streak;
 }
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if (!ctx) return; FlatComputeInternalScope guard;

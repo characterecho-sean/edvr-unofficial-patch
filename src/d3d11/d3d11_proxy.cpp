@@ -278,7 +278,7 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().note("edvr d3d11 proxy attached; module dir %S",
                           g_moduleDir->c_str());
     edvr::Log::get().note("installation profile: %s; %s", edvr::runtimeProfileName(),
-        edvr::runtimeFlatProfile() ? "qualification capture only; temporal AA and unrelated fixes are inactive" :
+        edvr::runtimeFlatProfile() ? "experimental mono temporal adapter; zero jitter; stereo and unrelated fixes suppressed" :
         edvr::runtimeFeaturesAllowed() ? "VR configuration retained" :
         "invalid edvr_profile.ini; fixes disabled, proxy chaining retained; repair the installation");
     edvr::oculusRouteReport();

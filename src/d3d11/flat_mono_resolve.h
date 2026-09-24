@@ -19,6 +19,19 @@ struct FlatMonoResolveFrame {
     bool reset = true;
     FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
 };
+// Owner-thread cumulative diagnostics. A full renderer reset preserves these
+// counts so a session summary can expose repeated state or texture rebuilds.
+struct FlatMonoResolveStats {
+    uint64_t calls = 0;
+    uint64_t initializations = 0, contextPointerMismatches = 0;
+    uint64_t allocations = 0, fullResets = 0, invalidations = 0;
+    uint64_t acceptedResets = 0, acceptedContinues = 0;
+    uint64_t requestedResets = 0, lostHistory = 0, frameGaps = 0;
+    uint64_t invalidPreviousCameras = 0, formatChanges = 0, cameraCuts = 0;
+    uint64_t backendFailures = 0;
+    uint64_t currentContinueRun = 0, longestContinueRun = 0;
+};
+FlatMonoResolveStats flatMonoResolveStats();
 // Owner immediate context only. Inputs borrowed for this call; successful output
 // is AddRef'd and output-sized. The caller suppresses hook observations throughout
 // this call. D3D11.1 context-state isolation is required and restored on every exit.
