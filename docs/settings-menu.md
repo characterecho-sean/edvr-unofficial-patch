@@ -88,6 +88,10 @@ current timing and overlay qualification is linked separately.*
   (docs/ui-layer-2026-09-23.md); `fix.hud_quality` is no longer read.
   `advanced.ui_replay` (on | off, developer tier) is the A/B for the deferred
   UI replay of the cockpit HUD.
+- **2026-09-23 (later still):** `advanced.ui_replay` is gone with the
+  deferred UI replay it switched (retired the same day, 48ad7689): the
+  developer tier no longer has the row, and the cockpit HUD stays in the
+  picture the upscaler reconstructs.
 
 *A design document, written before the code. It supersedes and extends
 Feature 4 of [performance.md](performance.md) (2026-09-05), which stays as
