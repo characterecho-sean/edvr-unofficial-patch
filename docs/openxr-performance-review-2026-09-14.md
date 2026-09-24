@@ -11,11 +11,14 @@ changes.*
   `frame_end_overlap` cut Elite's second-Submit park to 0.17-0.24 ms but
   BROKE the Application-render GPU timing (old sequence), so it now
   defaults OFF.
-- **Open:** make the overlap retire the frame's timing before Submit
-  returns (compose, xrEndFrame and device timing stay queued), and record
-  `frame_end_owner_body` without the eye-count race; then fly it on. The
-  depth layer is set aside (Sean, 2026-09-24). No controlled comparison with
-  the old OpenVR path exists; one now needs a v0.16.2 build.
+- **Open:** the overlap's timing-order fix is ON MAIN (2026-09-24,
+  build.bat green, NOT FLOWN; still off unless `frame_end_overlap=on` is
+  set): submitEye's deferred branch now retires the caller-visible timing
+  context before Submit returns, the way the synchronous path already does,
+  and `frame_end_owner_body` no longer gates on the eye-count race. Needs a
+  flight before it can default on. The depth layer is set aside (Sean,
+  2026-09-24). No controlled comparison with the old OpenVR path exists; one
+  now needs a v0.16.2 build.
 - **Closed:** sections 5 and 6 below (the private and producer copies): the
   producer copy measured 0.039 ms p50 per eye at 4100x3962, under the
   0.1 ms bar.
@@ -600,3 +603,35 @@ Ruled out:
   matched; with Supersampling 1.0 (104337) both work on the same build.
 - ruled out: the producer-copy queries as the GPU timing fault, because the
   rejected samples read `old sequence`, never `disjoint`.
+
+## 2026-09-24: overlap timing fix implemented, not yet flown
+
+Branch `claude/openxr-perf-gaps`. Addresses this doc's Open item above.
+
+- submitEye's deferred branch now publishes the frame's CPU record and
+  retires timingFrameActive/timingApplicationOpen/timingApplicationSequence/
+  timingGpuBegun itself, before Submit returns to Elite -- the same state
+  the synchronous path already leaves by then (publishSubmitTimingCpu). Only
+  what finishPair() actually produces (device GPU spans, the consumer/
+  endFrame/wait/pacer submitSample fields, the final timingSequence/
+  timingFrameMask clear) stays in the queued job (publishSubmitTimingDevice,
+  called from the new finishPendingFrameEndBody, shared with close()'s
+  inline fallback). publishSubmitTimingIfComplete, the synchronous path, is
+  untouched. composeMs, the one CPU-record field finishPair() itself
+  produces, is a frame stale under the overlap: the deferred publish carries
+  the previous overlapped pair's measured value (lastOverlappedComposeMs).
+- frameEndOwnerBegin/End (frame_cycle_stats.h) moved off current_.eyes==2:
+  the queued job usually finishes before the caller's own second-eye
+  submitCallerEnd lands, so the bracket is now a pending value tracked
+  outside current_, consumed by finishCurrent() into whichever cycle is
+  closing.
+- New tests: openxr_native_test's frame_end_overlap_cases.h drives a real
+  deferred pair through submitEye's own caller/owner split with a fake
+  EdvrNativeTimingTable, asserting publishCpu runs before the caller's
+  post-Submit producerResume/applicationSegment(seq,true) and that those
+  then find it retired, not reopened; openxr_frame_test's
+  frameEndOwnerBodyRaceTest reproduces the eye-count race directly.
+  build.bat green (297 + 4811 checks, both new tests passing).
+- Still defaults off (`frame_end_overlap`): this closes the two symptoms
+  above, not a decision to ship it on. Needs the flight this doc's Next
+  flight line already names.
