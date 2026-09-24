@@ -1750,14 +1750,6 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // and this one was left behind when that was fixed.
     if (static_cast<uint64_t>(s->posOffset) * 4u + 12u > bytes) return;
 
-    // advanced.transition_flash_eye_base (CHANGE 14): the patch sim's
-    // buffer-row locator sees this same pre-Unmap fill. The module gates on
-    // its own pending-sim state (one atomic load per fill when nothing is
-    // armed), and the frame is s->frameNo -- the PRE-advance counter (the
-    // boundary that closes this frame records it one higher); the module
-    // compensates.
-    transitionFlashEyeBaseNoteSceneCB(s->frameNo, data, bytes);
-
     const float* pos = &static_cast<const float*>(data)[s->posOffset];
     // Non-finite values compare false in both directions, so a NaN here would
     // pass every threshold test silently rather than failing one.
@@ -1798,10 +1790,29 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     }
     if (!finite3(pos)) return;
 
+    // advanced.transition_flash_eye_base (CHANGE 14/15): the patch sim --
+    // and, on a patched event's act frame, the render patch itself -- sees
+    // this same pre-Unmap fill. ORDER MATTERS: this runs AFTER the
+    // sceneWrites update above, so the detector's per-fill record of row
+    // 275 (w.pos, which its scene verdict reads back through
+    // s->sceneDrawPos) always holds the ORIGINAL bad values even when the
+    // patch rewrites the buffer here. The frame is s->frameNo -- the
+    // PRE-advance counter (the boundary that closes this frame records it
+    // one higher); the module compensates. The geometry is the detector's
+    // own pool measurement for this counter frame, the patch selector's
+    // inputs.
+    const bool sceneGeomFresh = s->scenePoolFrame == s->frameNo;
+    transitionFlashEyeBaseNoteSceneCB(s->frameNo, data, bytes,
+                                      sceneGeomFresh ? s->sceneGeometry : GlitchSceneGeometry{},
+                                      sceneGeomFresh);
+
     // H3 (design doc): the same scene-camera read the detector above uses,
     // reported so it can be compared against the engine fix's own last
     // pushed pose -- the link the whole recompute chain assumes is real.
-    transitionFlashPreventNoteH3(s->frameNo, pos);
+    // An acted fill has rewritten row 275 above, so H3 (a record-only
+    // input) gets the original value through this snapshot.
+    const float posSnapshot[3] = {pos[0], pos[1], pos[2]};
+    transitionFlashPreventNoteH3(s->frameNo, posSnapshot);
 
     s->sawBuffer = true;
 

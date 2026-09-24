@@ -6,6 +6,19 @@ static chain: see "Flight 184826".*
 
 ## Status
 
+- **Locator VALIDATED; the selector is the decision (flight 134813, build
+  7eb4a536).** Per-fill structural view location works (the row moves
+  64/85/233/282 by pass); corrO within 6 cm of the next frame's eye at every
+  scene-new event. Skip 22726 (a scene-old hyperspace entry: the objects had
+  not switched, the mailbox already held the tunnel base) proved the patch
+  base must be chosen by the pool/cam selector: scene-new -> live,
+  scene-old -> held, unclear -> held; a selector-less live patch would have
+  flashed 1614 m there (the cross-residual flagged it on its own). The
+  writer's scene graph and the rendered object pool can switch a frame
+  apart; the patch agrees with the POOL. live=RESET happened at one control
+  tap (bad-frame taps 10/10 ok). Next: the acting build (trap off,
+  alternate).
+
 - **LIVE-READ VALIDATED (flight 125237, build e9fefca0).** At all four skips
   (supercruise entry/exit, hyperspace entry/exit) the live mailbox at the bad
   render's tap, premultiplied onto the head-only eye, equals the engine's own
@@ -202,6 +215,26 @@ showing one act per transition and none anywhere else.
   nothing waits. The eye copy stays with the runtime.
 - The branches `transition-flash-run-radius` (PR #16) and `flash-cap-one`
   (PR #18) were never merged, and this supersedes both.
+
+## Flight 134813 (2026-09-24 13:48, Steam copy, build 7eb4a536)
+
+watch, trap on; build matched. One supercruise entry, exit, entry again,
+then a hyperspace entry/exit. No flashes (trap).
+- Six skips (6729, 17703, 18021, 19945, 22726, 23885). At every scene-new
+  event live-> == the next frame's eye exactly; corrO within 6 cm of it.
+- The located view row varies by fill/pass (64/85/233/282): per-fill
+  structural location is required; no fixed row. match275 ran 75-96% of
+  fills (the rest are other views).
+- **Skip 22726 (hyperspace entry) was scene-old**: pool 2.951 vs cam 13.525
+  at the bad render while the mailbox already held the tunnel base.
+  scene-old->held was right; a selector-less live patch would have been
+  1614 m wrong (crossO flagged it). The writer's scene graph and the
+  rendered object pool can switch a frame apart; the selector reads the
+  POOL, which is what the patch must agree with.
+- **live=RESET at one N+3 control tap (23888)**: the reset window is real;
+  bad-frame taps stand at 10/10 live=ok across 125237+134813.
+- Ruled out (134813): the live mailbox as the patch base WITHOUT the
+  selector; a fixed view-matrix row.
 
 ## Flight 125237 (2026-09-24 12:52, Steam copy, build e9fefca0)
 

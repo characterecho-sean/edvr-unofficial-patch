@@ -14,24 +14,28 @@
 // render-frame switch it is not refilled in time, so the copy IS the reset
 // value and the eye composes against the head pose alone -- the flash.
 //
-// The candidate written back is the mailbox's OWN last known-refilled value
-// (flight 062910: the never-reset ship+0x130 block agreed with a refilled
-// mailbox 0 times in 11,084 calls, so it is not a fit stand-in -- see "Ruled
-// out (062910)" in the design doc). transition_flash_eye_base.cpp caches M
-// every time it sees a refilled mode!=1 call; heldBaseRefusal below is the
-// guard an un-refilled call's cached candidate must clear before anything
-// writes it back.
+// Round 6's fix idea was a consume-time write: cache the mailbox's OWN last
+// known-refilled value (flight 062910: the never-reset ship+0x130 block
+// agreed with a refilled mailbox 0 times in 11,084 calls, so it is not a fit
+// stand-in -- see "Ruled out (062910)" in the design doc) and write it back
+// into the mailbox on an un-refilled call. That idea is SUPERSEDED as of
+// CHANGE 15 (2026-09-24): flight 134813's skip 22726 proved a consume-time
+// write cannot serve scene-new transitions (the base the scene wants is not
+// in any consume-indexed record), and flight 125237 proved the render-time
+// patch with the live mailbox. What remains from round 6 is the WATCH
+// machinery (this header's reset-value compare, the writer watch) and the
+// held base as one of the render patch's candidate bases.
 //
 // off | watch | on | alternate is the same four-way shape as advanced.
 // transition_flash_prevent, so this reuses tfp::Mode/parseMode/Treatment/
-// alternateTreatmentFor/modeAllowsActing/EventTracker/sessionCapReached/
-// isNewActedFrame/ringFrameInWindow/foldDumpTrigger/frameInDumpWindow
-// directly rather than re-deriving them -- see this header's own tests for
-// what is NOT shared (the reset-mailbox bit compare and the M/F validation
-// arithmetic both use different thresholds and a different index set than
-// transition_flash_prevent_core.h's comparePose/classify/isValidated, which
-// compare a cached DOUBLE pose against a from-root recompute; the mailbox and
-// its stand-in are FLOATS read straight out of game memory).
+// alternateTreatmentFor/modeAllowsActing/EventTracker/ringFrameInWindow/
+// foldDumpTrigger/frameInDumpWindow directly rather than re-deriving them --
+// see this header's own tests for what is NOT shared (the reset-mailbox bit
+// compare and the M/F validation arithmetic both use different thresholds
+// and a different index set than transition_flash_prevent_core.h's
+// comparePose/classify/isValidated, which compare a cached DOUBLE pose
+// against a from-root recompute; the mailbox and its stand-in are FLOATS
+// read straight out of game memory).
 #include "transition_flash_prevent_core.h"
 
 #include <cmath>
@@ -139,59 +143,14 @@ inline bool allFinite16(const float v[16]) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// CHANGE 1 (task of 2026-09-24, "the substitute becomes the held base"):
-// ship+0x130 (F) is no longer the candidate written into the mailbox -- flight
-// 062910 measured it agreeing with a refilled mailbox 0 times in 11,084 calls
-// (see "Ruled out (062910)" in the design doc). The candidate is now the
-// mailbox's OWN last known-refilled value, cached by transition_flash_eye_
-// base.cpp on every mode!=1 call whose mailbox was not the reset value. Every
-// guard below is ANDed together in the priority this enum's order states, so
-// a test can flip each one alone (the rest held at the acting baseline) and
-// see it -- and only it -- refuse. F-vs-M agreement (EyeBaseValidation above)
-// no longer participates: it stays only for transition_flash_eye_base.cpp's
-// periodic report line, which costs nothing extra to keep computing.
-enum class HeldBaseRefusal {
-    None,            // every guard passed; the caller may act
-    WatchSlot,       // this event's latched treatment is Watch, not Act
-    Stale,           // no cache yet, or cached more than kHeldBaseMaxAgeFrames earlier
-    PointerChanged,  // the cached ship pointer differs from this call's ship
-    NotFinite,       // a cached lane is not finite
-    Reset,           // the cached M is itself the reset value
-    Cap,             // the session act cap is reached
-};
-
-inline const char* heldBaseRefusalText(HeldBaseRefusal r) noexcept {
-    switch (r) {
-    case HeldBaseRefusal::None:           return "none";
-    case HeldBaseRefusal::WatchSlot:      return "watch slot";
-    case HeldBaseRefusal::Stale:          return "stale";
-    case HeldBaseRefusal::PointerChanged: return "pointer changed";
-    case HeldBaseRefusal::NotFinite:      return "not finite";
-    case HeldBaseRefusal::Reset:          return "reset";
-    case HeldBaseRefusal::Cap:            return "cap";
-    }
-    return "?";
-}
-
-// Cached no more than this many frames earlier still counts as fresh (task:
-// "current frame minus cached frame <= 2").
-inline constexpr uint32_t kHeldBaseMaxAgeFrames = 2;
-
-inline HeldBaseRefusal heldBaseRefusal(tfp::Treatment treatment, bool haveHeldBase, uint32_t currentFrame,
-                                       uint32_t heldFrame, uint64_t currentShip, uint64_t heldShip,
-                                       const float heldM[16], bool sessionCapReached) noexcept {
-    if (treatment != tfp::Treatment::Act) return HeldBaseRefusal::WatchSlot;
-    if (!haveHeldBase) return HeldBaseRefusal::Stale;
-    const uint32_t age = currentFrame >= heldFrame ? currentFrame - heldFrame : 0xFFFFFFFFu;
-    if (age > kHeldBaseMaxAgeFrames) return HeldBaseRefusal::Stale;
-    if (currentShip != heldShip) return HeldBaseRefusal::PointerChanged;
-    if (!allFinite16(heldM)) return HeldBaseRefusal::NotFinite;
-    if (isResetMailbox(heldM)) return HeldBaseRefusal::Reset;
-    if (sessionCapReached) return HeldBaseRefusal::Cap;
-    return HeldBaseRefusal::None;
-}
-
-inline bool heldBaseMayAct(HeldBaseRefusal r) noexcept { return r == HeldBaseRefusal::None; }
+// CHANGE 1 (task of 2026-09-24, "the substitute becomes the held base"), as
+// SUPERSEDED by CHANGE 15: the held base survives as the render-time patch's
+// scene-old/unclear base (choosePatchBase below), but the guard chain that
+// gated writing it into the mailbox at consume time (HeldBaseRefusal and
+// friends) is gone with that write. What remains of CHANGE 1: the held-base
+// cache itself, in transition_flash_eye_base.cpp, and the M/F agreement
+// counter (EyeBaseValidation above), which stays only for the periodic
+// report line.
 
 // ---------------------------------------------------------------------------
 // CHANGE 2 ("the writer watch gate is self-contained"): the consumer's own
@@ -297,36 +256,18 @@ inline bool dr6HasSlot1Hit(uint32_t dr6) noexcept { return (dr6 & kDr6B1Bit) != 
 // better substitute than the held base for an un-refilled consume, because
 // it is the frame's own value rather than up to two frames old.
 //
-// "Fresh": stamped this frame or the frame before -- deliberately tighter
-// than the held base's own 2-frame cap (kHeldBaseMaxAgeFrames above),
-// because an offered matrix only exists at all when the writer ran moments
-// before the consume judging it.
-inline constexpr uint32_t kOfferedMaxAgeFrames = 1;
+// ("Fresh" once gated the offered matrix's use as a consume-time
+// substitute; CHANGE 15 removed that use with the write it gated.)
+// (kOfferedMaxAgeFrames / offeredIsFresh / offeredSubstituteUsable lived
+// here until CHANGE 15, 2026-09-24, superseded them with the consume-time
+// write they gated: the offered matrix survives as instrumentation -- the
+// DR1 capture, the per-frame dump row, the event log line all still show it
+// -- but the render-time patch chooses its base with choosePatchBase below,
+// never from the offered matrix.)
 
-inline bool offeredIsFresh(uint32_t currentFrame, uint32_t offeredFrame) noexcept {
-    const uint32_t age = currentFrame >= offeredFrame ? currentFrame - offeredFrame : 0xFFFFFFFFu;
-    return age <= kOfferedMaxAgeFrames;
-}
 
-// All five conditions the design doc's substitute policy lists, ANDed in
-// order so a test can flip each alone: entered for our ship, not written
-// since the previous consume (the name gate is what refused it -- if it HAD
-// written, this call would not be unrefilled in the first place), an
-// offered matrix actually captured, fresh, finite, and not itself the reset
-// value. The session act cap is NOT one of these -- it gates both
-// substitutes alike, applied once at the call site rather than duplicated in
-// here (see transition_flash_eye_base.cpp's own mayActOffered).
-inline bool offeredSubstituteUsable(bool writerEnteredForShip, bool writerWroteSincePriorConsume,
-                                     bool haveOffered, uint32_t currentFrame, uint32_t offeredFrame,
-                                     const float offeredM[16]) noexcept {
-    if (!writerEnteredForShip) return false;
-    if (writerWroteSincePriorConsume) return false;
-    if (!haveOffered) return false;
-    if (!offeredIsFresh(currentFrame, offeredFrame)) return false;
-    if (!allFinite16(offeredM)) return false;
-    if (isResetMailbox(offeredM)) return false;
-    return true;
-}
+// (The substitute policy's five-condition gate, offeredSubstituteUsable,
+// lived here until CHANGE 15 removed it with the consume-time write.)
 
 // ---------------------------------------------------------------------------
 // CHANGE 7 (2026-09-24, static round 7's per-frame classification): which of
@@ -642,6 +583,69 @@ inline void affineInverse4x4(const float m[16], float out[16]) noexcept {
 // the way the math is described.
 inline void postmul4x4(const float a[16], const float b[16], float out[16]) noexcept {
     premul4x4(a, b, out);
+}
+
+// ---------------------------------------------------------------------------
+// CHANGE 15 (2026-09-24, "the acting render-time patch"): the pure logic the
+// act path runs per fill.
+
+// Which base the patch premultiplies with, chosen by the detector's own
+// pool-vs-camera selector -- the rule flight 134813 measured on 16 events
+// across three flights, and whose necessity skip 22726 proved (scene-old
+// hyperspace entry: the objects had NOT switched while the mailbox already
+// held the tunnel base -- a selector-less live patch would have flashed
+// 1614 m there). The writer's scene graph and the rendered object pool can
+// switch a frame apart; the patch agrees with the POOL.
+//   scene-new   -> the LIVE mailbox base (NoPatch when the probe gave
+//                  nothing usable -- never guess);
+//   scene-old   -> the HELD base, NEVER the live one (22726);
+//   unclear     -> the HELD base, the proven-safe side (NoPatch when there
+//                  is no held base).
+enum class PatchBaseChoice : uint8_t { UseLive, UseHeld, NoPatch };
+
+inline const char* patchBaseChoiceText(PatchBaseChoice c) noexcept {
+    switch (c) {
+    case PatchBaseChoice::UseLive: return "live";
+    case PatchBaseChoice::UseHeld: return "held";
+    case PatchBaseChoice::NoPatch: return "none";
+    }
+    return "?";
+}
+
+inline PatchBaseChoice choosePatchBase(SceneChoice scene, bool haveLive, bool haveHeld) noexcept {
+    switch (scene) {
+    case SceneChoice::New:     return haveLive ? PatchBaseChoice::UseLive : PatchBaseChoice::NoPatch;
+    case SceneChoice::Old:     return haveHeld ? PatchBaseChoice::UseHeld : PatchBaseChoice::NoPatch;
+    case SceneChoice::Unclear: return haveHeld ? PatchBaseChoice::UseHeld : PatchBaseChoice::NoPatch;
+    }
+    return PatchBaseChoice::NoPatch;
+}
+
+// The VP-defense shape test. A group X found near the located view is the
+// composed view-projection only if V_bad^-1 x X comes out PROJ-LIKE: the
+// strict D3D perspective shape, row convention, v' = v.M:
+//   [ sx  0  0  0 ]      zero lanes:    [1],[2],[3],[4],[6],[7],[8],[9],
+//   [ 0 sy  0  0 ]                       [12],[13],[15]
+//   [ 0  0 sz  w ]      [11] ~= +/-1    (the perspective-divide lane)
+//   [ 0  0 tz  0 ]      [0],[5] same sign, sane magnitude; [10],[14] live.
+// STRICT on purpose: a false VP identification must never write, so the
+// zero lanes are absolute (1e-3), the perspective lane is within 1% of
+// exactly +/-1, and any second candidate makes the whole check ambiguous
+// (the caller writes the view group only and logs it).
+inline bool projLike4x4(const float m[16]) noexcept {
+    const float zeroTol = 1e-3f;
+    const int zeroLanes[10] = {1, 2, 3, 4, 6, 7, 8, 9, 12, 13};
+    for (int lane : zeroLanes) {
+        if (std::fabs(m[lane]) > zeroTol) return false;
+    }
+    if (std::fabs(m[15]) > zeroTol) return false;
+    if (std::fabs(std::fabs(m[11]) - 1.0f) > 0.01f) return false;
+    if (m[0] * m[5] <= 0.0f) return false;                 // same sign, both live
+    if (std::fabs(m[0]) < 0.01f || std::fabs(m[0]) > 100.0f) return false;
+    if (std::fabs(m[5]) < 0.01f || std::fabs(m[5]) > 100.0f) return false;
+    if (std::fabs(m[10]) < 1e-6f || std::fabs(m[10]) > 1e6f) return false;
+    if (std::fabs(m[14]) < 1e-6f || std::fabs(m[14]) > 1e8f) return false;
+    return true;
 }
 
 }  // namespace tfeb

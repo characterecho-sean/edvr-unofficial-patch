@@ -20,9 +20,12 @@
 // The 2026-09-24 revision of transition_flash_eye_base_core.h (flight
 // 062910: the F stand-in never matched a refilled mailbox) adds three more
 // cells here: CHANGE 1's held-base guard (every refusal reason, flipped one
-// at a time), CHANGE 2's consecutive-refilled counter that gates the writer
-// watch alongside the existing stability gate, and CHANGE 3's dump-trigger
-// predicate, which takes no eye-trace flag at all.
+// at a time -- REMOVED by CHANGE 15 with the consume-time write it gated;
+// the held base itself lives on as the render patch's scene-old base, and
+// its guard's cell became caseChoosePatchBase), CHANGE 2's consecutive-
+// refilled counter that gates the writer watch alongside the existing
+// stability gate, and CHANGE 3's dump-trigger predicate, which takes no
+// eye-trace flag at all.
 //
 // The same day's static round 7 (the writer FUN_142874b20 and its caller,
 // the controller FUN_1410730a0 -- design doc "Static round 7: the writer and
@@ -30,7 +33,10 @@
 // (armed/disarmed, leaving slot 0 untouched either way) and the writer's own
 // body-extent classifier; CHANGE 6's offeredSubstituteUsable, the policy that
 // prefers the writer's OFFERED matrix over the held base when it was entered
-// for our ship, refused by its name gate, and still fresh; and CHANGE 7's
+// for our ship, refused by its name gate, and still fresh (REMOVED by
+// CHANGE 15 with the consume-time write it gated; the offered matrix itself
+// is record-only instrumentation now, and its cell became caseProjLike4x4);
+// and CHANGE 7's
 // per-frame classifier, which tells apart "the controller didn't run" from
 // "it ran but the writer wasn't entered" from "entered but didn't write".
 //
@@ -650,76 +656,94 @@ void caseEyeBaseValidationArithmetic() {
 // (task of 2026-09-24: F is retired as the candidate; the mailbox's own last
 // known-refilled value, cached and aged in frames, is judged instead).
 
-void caseHeldBaseGuardRefusals() {
-    float goodM[16];
-    eyeBaseIdentityMailbox(goodM);
-    goodM[12] = 100.0f;  // a real translation, not the reset value
+// --- transition_flash_eye_base_core.h: CHANGE 15, the acting patch's base --
+// selector (task 2026-09-24, "the acting render-time patch"). The guard chain
+// that used to live here (caseHeldBaseGuardRefusals) gated the consume-time
+// mailbox write, superseded with that write; the held base it guarded is now
+// simply one of the render patch's candidate bases.
 
-    // Baseline: every guard satisfied -> acts. currentFrame=100, cached at
-    // frame 98 (age 2, the boundary itself -- see the "exactly 2" case
-    // below), same ship, finite, not the reset value, cap not reached.
-    check(tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: every guard satisfied acts");
+void caseChoosePatchBase() {
+    using tfeb::PatchBaseChoice;
+    using tfeb::SceneChoice;
+    // The flight-measured rule (134813, 16 events / 3 flights), the full
+    // 3 x 2 x 2 table:
+    //   scene         haveLive haveHeld -> choice
+    //   new           yes      *        -> UseLive
+    //   new           no       *        -> NoPatch
+    //   old           *        yes      -> UseHeld
+    //   old           *        no       -> NoPatch
+    //   unclear       *        yes      -> UseHeld
+    //   unclear       *        no       -> NoPatch
+    check(tfeb::choosePatchBase(SceneChoice::New, true, true) == PatchBaseChoice::UseLive,
+          "choosePatchBase: scene-new uses the live base");
+    check(tfeb::choosePatchBase(SceneChoice::New, true, false) == PatchBaseChoice::UseLive,
+          "choosePatchBase: scene-new uses the live base even with no held cache");
+    check(tfeb::choosePatchBase(SceneChoice::New, false, true) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: scene-new without a usable live base patches nothing (never guesses)");
+    check(tfeb::choosePatchBase(SceneChoice::New, false, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: scene-new with neither base patches nothing");
+    check(tfeb::choosePatchBase(SceneChoice::Old, true, true) == PatchBaseChoice::UseHeld,
+          "choosePatchBase: scene-old uses the held base");
+    check(tfeb::choosePatchBase(SceneChoice::Old, true, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: scene-old without a held base patches nothing");
+    check(tfeb::choosePatchBase(SceneChoice::Old, false, true) == PatchBaseChoice::UseHeld,
+          "choosePatchBase: scene-old NEVER falls back to the live base (skip 22726: 1614 m wrong)");
+    check(tfeb::choosePatchBase(SceneChoice::Old, false, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: scene-old with neither base patches nothing");
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, true, true) == PatchBaseChoice::UseHeld,
+          "choosePatchBase: unclear defaults to the held base (the proven-safe side)");
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, false, true) == PatchBaseChoice::UseHeld,
+          "choosePatchBase: unclear uses the held base even when a live base exists");
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, true, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: unclear without a held base patches nothing");
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, false, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: unclear with neither base patches nothing");
+    check(std::strcmp(tfeb::patchBaseChoiceText(PatchBaseChoice::UseLive), "live") == 0 &&
+          std::strcmp(tfeb::patchBaseChoiceText(PatchBaseChoice::UseHeld), "held") == 0 &&
+          std::strcmp(tfeb::patchBaseChoiceText(PatchBaseChoice::NoPatch), "none") == 0,
+          "choosePatchBase: the choice prints as live/held/none");
+}
 
-    // Each guard flipped alone refuses, with the rest held at the acting
-    // baseline -- and names itself with the right HeldBaseRefusal.
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Watch, true, 100, 98, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: watch slot alone refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Watch, true, 100, 98, 0x1000, 0x1000, goodM, false) ==
-              tfeb::HeldBaseRefusal::WatchSlot,
-          "heldBaseRefusal: watch slot names itself");
+// --- transition_flash_eye_base_core.h: CHANGE 15, the VP-defense shape -----
 
-    // Stale at 3 frames (age = 100 - 97 = 3, over kHeldBaseMaxAgeFrames=2).
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 97, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: stale at 3 frames refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 97, 0x1000, 0x1000, goodM, false) ==
-              tfeb::HeldBaseRefusal::Stale,
-          "heldBaseRefusal: stale at 3 frames names itself");
-    // Exactly 2 frames old is still fresh (<=, not <).
-    check(tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: exactly 2 frames old still acts");
-    // No cache at all (haveHeldBase=false) refuses as stale too, regardless
-    // of the frame numbers passed.
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, false, 100, 98, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: no cache at all refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, false, 100, 98, 0x1000, 0x1000, goodM, false) ==
-              tfeb::HeldBaseRefusal::Stale,
-          "heldBaseRefusal: no cache at all names itself stale");
+void caseProjLike4x4() {
+    // A canonical D3D perspective projection, row convention:
+    //   [ sx 0  0  0 ]
+    //   [ 0  sy 0  0 ]
+    //   [ 0  0  sz 1 ]
+    //   [ 0  0  tz 0 ]
+    float proj[16] = {1.2f, 0, 0, 0, 0, 2.0f, 0, 0, 0, 0, -1.001f, 1.0f, 0, 0, 0.1f, 0};
+    check(tfeb::projLike4x4(proj), "projLike: a canonical perspective projection passes");
+    // The -w convention (left-handed / flipped) also passes: [11] = -1.
+    proj[11] = -1.0f;
+    check(tfeb::projLike4x4(proj), "projLike: the -1 perspective-divide convention passes");
+    proj[11] = 1.0f;
 
-    // Pointer changed: the cached ship differs from this call's ship.
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x2000, goodM, false)),
-          "heldBaseRefusal: pointer changed refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x2000, goodM, false) ==
-              tfeb::HeldBaseRefusal::PointerChanged,
-          "heldBaseRefusal: pointer changed names itself");
-
-    // Non-finite: a single +Inf lane in the CACHED M.
-    float infM[16];
-    eyeBaseIdentityMailbox(infM);
-    infM[9] = bitsToFloat(0x7F800000u);  // +Inf
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, infM, false)),
-          "heldBaseRefusal: non-finite cache refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, infM, false) ==
-              tfeb::HeldBaseRefusal::NotFinite,
-          "heldBaseRefusal: non-finite cache names itself");
-
-    // Reset value: the cache itself is the identity/reset mailbox -- caching
-    // logic should never store this (only refilled calls are cached), but
-    // the guard still refuses it if it somehow got in.
-    float resetM[16];
-    eyeBaseIdentityMailbox(resetM);
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, resetM, false)),
-          "heldBaseRefusal: the cache itself being the reset value refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, resetM, false) ==
-              tfeb::HeldBaseRefusal::Reset,
-          "heldBaseRefusal: reset value names itself");
-
-    // Session cap reached.
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, true)),
-          "heldBaseRefusal: session cap reached refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, true) ==
-              tfeb::HeldBaseRefusal::Cap,
-          "heldBaseRefusal: cap names itself");
+    // Any nonzero zero-lane rejects (a view matrix's dense 3x3 is the main
+    // false candidate): each lane alone.
+    for (int lane : {1, 2, 3, 4, 6, 7, 8, 9, 12, 13, 15}) {
+        float bad[16];
+        std::memcpy(bad, proj, sizeof(bad));
+        bad[lane] = 0.01f;
+        check(!tfeb::projLike4x4(bad), "projLike: one dirty zero-lane rejects");
+    }
+    // [11] off +/-1 by more than 1%: orthographic shape, rejected.
+    float ortho[16];
+    std::memcpy(ortho, proj, sizeof(ortho));
+    ortho[11] = 0.0f;
+    check(!tfeb::projLike4x4(ortho), "projLike: an orthographic shape (no perspective lane) rejects");
+    // Opposite signs or dead diagonals on [0]/[5].
+    float signBad[16];
+    std::memcpy(signBad, proj, sizeof(signBad));
+    signBad[5] = -2.0f;
+    check(!tfeb::projLike4x4(signBad), "projLike: opposite signs on the x/y gains reject");
+    float deadBad[16];
+    std::memcpy(deadBad, proj, sizeof(deadBad));
+    deadBad[0] = 0.0f;
+    check(!tfeb::projLike4x4(deadBad), "projLike: a dead [0] rejects");
+    // A view matrix (orthonormal 3x3 + translation) is not proj-like.
+    const float view[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, -1, -2, -3, 1};
+    check(!tfeb::projLike4x4(view), "projLike: a view matrix rejects");
 }
 
 // --- transition_flash_eye_base_core.h: CHANGE 2, the writer-watch gate's --
@@ -871,53 +895,6 @@ void caseDr6Slot1Hit() {
 
 // --- transition_flash_eye_base_core.h: CHANGE 6, the substitute policy ----
 // (offered vs. held).
-
-void caseOfferedSubstituteUsable() {
-    float goodOffered[16];
-    eyeBaseIdentityMailbox(goodOffered);
-    goodOffered[12] = 55.0f;  // a real translation, not the reset value
-
-    // Baseline: entered, did not write since, an offer captured this frame,
-    // finite, not reset -> usable.
-    check(tfeb::offeredSubstituteUsable(true, false, true, 100, 100, goodOffered),
-          "offeredSubstituteUsable: entered, refused, fresh this frame -> offered");
-    // Fresh also covers "the frame before".
-    check(tfeb::offeredSubstituteUsable(true, false, true, 100, 99, goodOffered),
-          "offeredSubstituteUsable: fresh from the previous frame -> offered");
-    // Two frames old is stale (kOfferedMaxAgeFrames=1, tighter than the held
-    // base's own 2-frame cap).
-    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 98, goodOffered),
-          "offeredSubstituteUsable: two frames old is stale -> refused");
-
-    // Not entered at all (skip candidate 1: the controller's own gate) ->
-    // held, regardless of anything else being otherwise usable.
-    check(!tfeb::offeredSubstituteUsable(false, false, true, 100, 100, goodOffered),
-          "offeredSubstituteUsable: the writer was not entered -> held");
-
-    // Entered AND wrote: the name gate did NOT refuse it, so this call would
-    // not even be unrefilled -- still must not be treated as offered-usable
-    // if asked.
-    check(!tfeb::offeredSubstituteUsable(true, true, true, 100, 100, goodOffered),
-          "offeredSubstituteUsable: the writer wrote since the previous consume -> held");
-
-    // No offer ever captured.
-    check(!tfeb::offeredSubstituteUsable(true, false, false, 100, 100, goodOffered),
-          "offeredSubstituteUsable: nothing captured -> held");
-
-    // Stale, non-finite, and reset-value offers each refuse alone, with
-    // every other guard held at the acting baseline.
-    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 50, goodOffered),
-          "offeredSubstituteUsable: a far-stale offer -> held");
-    float infOffered[16];
-    eyeBaseIdentityMailbox(infOffered);
-    infOffered[9] = bitsToFloat(0x7F800000u);  // +Inf
-    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 100, infOffered),
-          "offeredSubstituteUsable: a non-finite offer -> held");
-    float resetOffered[16];
-    eyeBaseIdentityMailbox(resetOffered);
-    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 100, resetOffered),
-          "offeredSubstituteUsable: the offer itself is the reset value -> held");
-}
 
 // --- transition_flash_eye_base_core.h: CHANGE 7, per-frame classification -
 
@@ -1386,7 +1363,7 @@ int wmain(int argc, wchar_t** argv) {
     caseResetMailboxBitExact();
     caseEyeBaseAgreementThresholds();
     caseEyeBaseValidationArithmetic();
-    caseHeldBaseGuardRefusals();
+    caseChoosePatchBase();
     caseWriterWatchGateConsecutiveRefilled();
     caseEyeBaseDumpTriggerIndependentOfEyeTrace();
     caseEyeBaseFiniteCheck();
@@ -1395,7 +1372,7 @@ int wmain(int argc, wchar_t** argv) {
     caseWriterExtentClassifier();
     caseDr7ArmSlot1ExecuteLeavesSlot0Alone();
     caseDr6Slot1Hit();
-    caseOfferedSubstituteUsable();
+    caseProjLike4x4();
     caseClassifyFrameWriter();
     caseModeSwitchEdgeEntryFiresOnce();
     caseModeSwitchEdgeNoneInsideRun();
