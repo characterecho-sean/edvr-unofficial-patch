@@ -17,6 +17,7 @@
 #include "../common/log.h"
 #include "eye_origin_trace.h"
 #include "transition_flash_prevent.h"
+#include "pose_reader_watch.h"
 
 namespace edvr {
 
@@ -436,6 +437,16 @@ struct RingEntry {
     bool     eyeBufferWritten;  // same test as sceneValid
     uint32_t eyeTraceWrites;    // 5376-byte writes observed this frame
     uint64_t eyeTraceMask;      // bit N set: stack id N wrote it this frame
+
+    // advanced.eye_origin_readers (docs/design-transition-flash-engine-
+    // fix-2026-09-23.md, parts A2/B). Zero/false for every frame while the
+    // key is off, or before the hardware breakpoint has armed --
+    // pose_reader_watch.h's PoseReaderFrameSnapshot, read once here the
+    // way guard is read from cullGuardStatePacked() just above.
+    uint32_t poseReaderMask;         // bit N: unique-reader table id N fired this frame
+    uint16_t positionerTickCalls;
+    uint16_t positionerSwapSyncCalls;
+    bool     positionerSwapDetected;
 };
 
 // What ended up in RingEntry::verdict. Order is the order the detector tests
@@ -1606,6 +1617,13 @@ void installGlitchFrameFix() {
     // glitchFrameObserve, glitchFrameNoteSceneDraw, glitchFrameBoundary or
     // dumpCameraRing.
     s.eyeOriginTraceOn = cfg.getBool("advanced.eye_origin_trace", false);
+    // advanced.eye_origin_readers (docs/design-transition-flash-engine-fix-
+    // 2026-09-23.md) needs this instrument's stack capture running too, so
+    // the two share one dump timeline -- read once, here, the same rule as
+    // eye_origin_trace just above. pose_reader_watch.cpp reads the key
+    // itself for its own (hot-reloadable) purposes; this is only about
+    // whether ITS dump machinery is live.
+    if (cfg.getBool("advanced.eye_origin_readers", false)) s.eyeOriginTraceOn = true;
     if (s.eyeOriginTraceOn) {
         Log::get().note(
             "eye-origin trace armed (advanced.eye_origin_trace=on): capturing the "
@@ -2146,6 +2164,31 @@ void eyeOriginTracePerformDump(State* s,const eot::PendingWindow& window){
         eyeOriginTraceAppend(text,"  #%u count=%u eyeFrames=%u %s",i,se.count,se.eyeFrames,se.chain);
     }
 
+    // advanced.eye_origin_readers (design doc part C): the unique-reader
+    // table, dump time only -- id is the row number, pose_reader_watch.h's
+    // own convention, eot::StackTable's above. Omitted when the instrument
+    // is off: nothing populated it, and an empty "0 of 32" section would
+    // only be noise on eye_origin_trace's own flights.
+    if(poseReaderWatchOn()){
+        const uint32_t readerCount=poseReaderWatchTableCount();
+        eyeOriginTraceAppend(text,
+            "pose-reader table: %u of %u unique reader(s)",
+            readerCount,prw::kMaxReaders);
+        for(uint32_t i=0;i<readerCount;++i){
+            const PoseReaderTableEntry re=poseReaderWatchTableEntry(i);
+            std::string callers;
+            for(uint32_t u=0;u<re.unwindCount;++u){
+                char piece[16];
+                std::snprintf(piece,sizeof(piece),"%s0x%X",callers.empty()?"":"/",re.unwindRvas[u]);
+                callers+=piece;
+            }
+            if(callers.empty())callers="(none)";
+            eyeOriginTraceAppend(text,
+                "  #%u rip=0x%llX count=%u firstFrame=%u lastFrame=%u callers=%s",
+                i,(unsigned long long)re.rip,re.count,re.firstFrame,re.lastFrame,callers.c_str());
+        }
+    }
+
     const uint64_t have=s->ringHead<kRingFrames?s->ringHead:kRingFrames;
     const uint64_t first=s->ringHead-have;
     uint32_t printed=0;
@@ -2159,11 +2202,13 @@ void eyeOriginTracePerformDump(State* s,const eot::PendingWindow& window){
         else std::snprintf(stackText,sizeof(stackText),"#%u",e.eyeOriginStackId);
         eyeOriginTraceAppend(text,
             "f%-7u eye=%-3u verdict=%-40s pos=(%+.2f %+.2f %+.2f) scene=(%+.2f %+.2f %+.2f) "
-            "stack=%-8s buf=%-7s writes=%u mask=0x%016llX",
+            "stack=%-8s buf=%-7s writes=%u mask=0x%016llX reader=0x%08X tick=%u swapsync=%u swap=%s",
             e.frame,e.eyeDraws,ringVerdictName(e.verdict),
             e.pos[0],e.pos[1],e.pos[2],e.scenePos[0],e.scenePos[1],e.scenePos[2],
             stackText,e.eyeBufferWritten?"written":"no",
-            e.eyeTraceWrites,(unsigned long long)e.eyeTraceMask);
+            e.eyeTraceWrites,(unsigned long long)e.eyeTraceMask,
+            e.poseReaderMask,unsigned(e.positionerTickCalls),unsigned(e.positionerSwapSyncCalls),
+            e.positionerSwapDetected?"yes":"no");
     }
     eyeOriginTraceAppend(text,"eye-origin trace dump done, %u entries",printed);
 
@@ -2241,15 +2286,28 @@ void eyeOriginTraceReport(State* s){
 // Called from all three of glitchFrameBoundary's verdict sites (the
 // fix-off path, the disabled-for-session path, and the normal path) with
 // the same withheldClass test transition_flash_prevent.cpp's own tap uses
-// at each -- so one flight needs no key presses. Off is the only real gate;
-// once on, this runs every boundary call so a pending dump becomes due even
-// on a frame with no new trigger.
-void eyeOriginTraceBoundary(State* s,uint32_t frame,bool withheldClass){
+// at each -- so one flight needs no key presses -- plus sceneResetVerdict,
+// the narrower test advanced.eye_origin_readers wants (pose_reader_watch_
+// core.h's dumpVerdictTrigger; see the design doc's part C). Off is the
+// only real gate; once on, this runs every boundary call so a pending
+// dump becomes due even on a frame with no new trigger.
+void eyeOriginTraceBoundary(State* s,uint32_t frame,bool withheldClass,bool sceneResetVerdict){
     if(!s->eyeOriginTraceOn)return;
-    if(withheldClass){
+    const bool readersOn=poseReaderWatchOn();
+    if(prw::dumpVerdictTrigger(readersOn,withheldClass,sceneResetVerdict)){
         const bool creatingNew=!s->eyeTraceDump.active;
         if(!creatingNew || s->eyeTraceDumpsThisSession<eot::kMaxAutoDumps){
             s->eyeTraceDump=eot::foldTrigger(s->eyeTraceDump,frame);
+        }
+    }
+    // The design doc's part C, trigger 2: a positioner swap. Only a
+    // possibility once advanced.eye_origin_readers is on -- pose_reader_
+    // watch.cpp never raises this trigger otherwise.
+    uint32_t swapFrame=0;
+    if(readersOn && poseReaderTakeSwapTrigger(&swapFrame)){
+        const bool creatingNew=!s->eyeTraceDump.active;
+        if(!creatingNew || s->eyeTraceDumpsThisSession<eot::kMaxAutoDumps){
+            s->eyeTraceDump=eot::foldTrigger(s->eyeTraceDump,swapFrame);
         }
     }
     if(s->eyeTraceDump.active && frame>=s->eyeTraceDump.dueFrame){
@@ -2388,10 +2446,23 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
+            // advanced.eye_origin_readers: read-and-reset (see the
+            // function's own comment), so this must run exactly once per
+            // real frame -- true here, since this block and its siblings
+            // at glitchFrameBoundary's other two verdict sites are
+            // mutually exclusive.
+            {
+                const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
+                e.poseReaderMask = pr.readerMask;
+                e.positionerTickCalls = pr.tickCalls;
+                e.positionerSwapSyncCalls = pr.swapSyncCalls;
+                e.positionerSwapDetected = pr.swapDetected;
+            }
             ++s->ringHead;
         }
         eyeOriginTraceBoundary(s, s->frameNo,
             s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
+            s->verdictThisFrame==kVerdictSceneReset,
             s->verdictThisFrame==kVerdictSceneReset);
         s->frameFarMag2 = -1.0f;
         s->verdictThisFrame = kVerdictQuiet;
@@ -2484,10 +2555,23 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
+            // advanced.eye_origin_readers: read-and-reset (see the
+            // function's own comment), so this must run exactly once per
+            // real frame -- true here, since this block and its siblings
+            // at glitchFrameBoundary's other two verdict sites are
+            // mutually exclusive.
+            {
+                const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
+                e.poseReaderMask = pr.readerMask;
+                e.positionerTickCalls = pr.tickCalls;
+                e.positionerSwapSyncCalls = pr.swapSyncCalls;
+                e.positionerSwapDetected = pr.swapDetected;
+            }
             ++s->ringHead;
         }
         eyeOriginTraceBoundary(s, s->frameNo,
             s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
+            s->verdictThisFrame==kVerdictSceneReset,
             s->verdictThisFrame==kVerdictSceneReset);
         s->frameFarMag2 = -1.0f;
         s->verdictThisFrame = kVerdictQuiet;
@@ -2813,6 +2897,17 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
         recordScenePosition(e,s);
+        // advanced.eye_origin_readers: read-and-reset: see
+        // poseReaderWatchFrameSnapshot's own comment, and the identical
+        // tap at glitchFrameBoundary's other two (mutually exclusive)
+        // verdict sites.
+        {
+            const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
+            e.poseReaderMask = pr.readerMask;
+            e.positionerTickCalls = pr.tickCalls;
+            e.positionerSwapSyncCalls = pr.swapSyncCalls;
+            e.positionerSwapDetected = pr.swapDetected;
+        }
         ++s->ringHead;
     }
 
@@ -2909,6 +3004,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->driftSuppressedThisFrame = false;
     eyeOriginTraceBoundary(s, s->frameNo,
         s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
+        s->verdictThisFrame==kVerdictSceneReset,
         s->verdictThisFrame==kVerdictSceneReset);
     s->frameFarMag2 = -1.0f;
     s->verdictThisFrame = kVerdictQuiet;

@@ -270,6 +270,41 @@ bool introRecentreRequested();
 // Clears the request. Called only once it has actually been acted on.
 void clearIntroRecentreRequest();
 
+// advanced.eye_origin_readers (docs/design-transition-flash-engine-fix-
+// 2026-09-23.md, part A1): d3d11.dll's pose_reader_watch asks the runtime
+// to start capturing its own call stack at WaitGetPoses/GetLastPoses --
+// who is calling INTO the OpenVR API -- and to keep publishing every
+// call's details below. Polled, not taken: several publishes can happen
+// while the request stays set. Cheap to check when off, which is the
+// common case (the whole point is to keep the per-call cost negligible
+// until somebody has actually turned the key on).
+void requestPoseReaderTrace(bool on);
+bool poseReaderTraceRequested();
+
+// Published by openvr_api.dll at EVERY WaitGetPoses/GetLastPoses call: the
+// caller-supplied render/game array pointers and counts -- Elite's OWN
+// buffers, and so the exact memory pose_reader_watch's hardware breakpoint
+// eventually watches -- the calling thread id, a QueryPerformanceCounter
+// stamp, and whether each pointer lies inside the calling thread's own
+// stack (GetCurrentThreadStackLimits): a stack-resident buffer is gone the
+// moment the function that owns it returns, so it can never be watched
+// across frames. seq is the presence/change stamp, headPoseSeq's
+// discipline: 0 means nobody has published yet.
+struct PoseReaderCall {
+    uint64_t renderPtr = 0;
+    uint64_t gamePtr = 0;
+    uint64_t qpc = 0;
+    uint32_t renderCount = 0;
+    uint32_t gameCount = 0;
+    uint32_t threadId = 0;
+    uint32_t seq = 0;
+    bool     renderOnStack = false;
+    bool     gameOnStack = false;
+    bool     wasGetLastPoses = false;  // false: WaitGetPoses published this; true: GetLastPoses did
+};
+void publishPoseReaderCall(const PoseReaderCall& call);
+PoseReaderCall poseReaderCall();
+
 // The size of the texture the game hands the headset, as openvr_api.dll read it
 // off the Submit argument.
 //

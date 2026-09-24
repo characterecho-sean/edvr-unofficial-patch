@@ -62,6 +62,7 @@
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "transition_flash_prevent.h"
+#include "pose_reader_watch.h"
 #include "holo_fix.h"
 #include "target_sharp.h"
 #include "hud_sprite.h"
@@ -5276,6 +5277,13 @@ void vScreenRefreshConfig() {
     // the first time this is reached (install or a later reload, whichever
     // is first), then only moves the live mode.
     transitionFlashPreventConfigure(cfg);
+    // advanced.eye_origin_readers: the same design doc's parts A2/B (who
+    // reads the pose, and the positioner swap). Off leaves this line as
+    // the only thing it does; a non-off value installs its two CodeHooks
+    // the first time this is reached, then only moves the live on/off bit
+    // -- the hardware breakpoint itself arms and disarms on its own
+    // schedule from poseReaderWatchFrameBoundary, not from here.
+    poseReaderWatchConfigure(cfg);
     // The settings menu: its own keys, then the reload's diff -- every row's
     // value, the restart snapshot, and a toast for what changed from outside.
     menuConfigure(cfg);
@@ -6328,6 +6336,14 @@ void vScreenFrameBoundary() {
     // one) and services one deferred ring dump if its due frame has
     // arrived. Never called from inside a game hook.
     transitionFlashPreventFrameBoundary(s->frameNo);
+    // Publishes the frame number the positioner hooks read (also, possibly,
+    // a scheduler job thread) and runs the 60-frame stability gate / arms
+    // or sweeps the hardware breakpoint. Deliberately AFTER glitchFrameBoundary:
+    // that call already read this frame's pose-reader snapshot (read-and-
+    // reset, poseReaderWatchFrameSnapshot's own comment) for its own ring
+    // entry, so the accumulators this call would otherwise finalise are
+    // already clear.
+    poseReaderWatchFrameBoundary(s->frameNo);
     // The gate decides on the counts for the frame that just ended, so it is
     // told before they reset -- same rule as the flash detector above.
     headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, sceneDraws);
@@ -6462,6 +6478,9 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // the first time this is reached (install or a later reload, whichever
     // is first), then only moves the live mode.
     transitionFlashPreventConfigure(cfg);
+    // advanced.eye_origin_readers: the same design doc's parts A2/B. See
+    // the other call site's comment above.
+    poseReaderWatchConfigure(cfg);
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
