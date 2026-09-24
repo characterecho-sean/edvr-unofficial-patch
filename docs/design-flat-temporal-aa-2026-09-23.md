@@ -5,8 +5,10 @@
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. First milestone is a capture-only flat installer,
   runtime scope enforcement and bounded desktop probes. Corrected capture
-  passed all 83 build jobs and the 254-key config contract; Epic replay is
-  next. Flat temporal reconstruction/jitter are NOT enabled in this build.
+  passed all 83 build jobs and the 254-key config contract. Epic replay on
+  2026-09-24 confirms scaled target families and draw-time b1 evidence. The
+  focused camera/handoff probe also passes those gates and awaits replay; see
+  section 9. Flat temporal reconstruction/jitter are NOT enabled.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -16,18 +18,17 @@
   only temporal AA and its required support services.
 - **Open:** flat camera/projection ownership, scene/depth identity, resolve
   boundary, UI ordering, render-scale ownership, and mod hook ordering need a
-  corrected desktop capture. The first Epic capture reached the draw hooks, but
-  selected a depth-only target and misassociated reused CB bytes. See section 8
-  for ruled-out evidence before interpreting projection shapes. The separate
-  0.75x session captured 960x540 with output 1280x720; scene identity and
-  supersampling ownership remain unqualified.
+  focused mono frame contract. The corrected capture sees 1280x720 and 960x540
+  scene-target families, the shared 5376-byte VS b1, and a later
+  full-resolution panel draw. Camera registers 270..275 and the exact
+  pixel-shader handoff are not yet captured; sections 8 and 9 record limits.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next session:** correct and validate the probe, then enter the Epic 2D
-  cockpit and press F10 (`hotkey.dump_draws`) for a fresh bounded capture.
-  Repeat on foot and with each mod arrangement. Use `tools/edvr_log.py` with
-  the actual `--target`, `--expect-build HEAD` and
+- **Next session:** qualify the focused camera/handoff probe, then enter the
+  Epic 2D cockpit and press F10 (`hotkey.dump_draws`) for a fresh bounded
+  capture. Repeat on foot and with each mod arrangement. Use
+  `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
   `--grep "flat (temporal|discover)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
@@ -357,3 +358,80 @@ startup Presents are counted separately. ClearState resets the viewport.
 Shader-input routes cover shadowed PS slots 0..3; implicit alias unbinds and
 higher slots are not observed. Frozen bound bytes do not prove shader reads.
 Truncated tables, missing snapshots and absent routes remain inconclusive.
+
+## 9. Epic capture, 2026-09-24: scaled scene and handoff candidates
+
+`edvr_gfx_20260924_050253.log` matches 2f9c5bdb, version
+v0.17.0-490-g2f9c5bdb/build 6AB49053. F10 windows start at 05:04:35.492 and
+05:05:18.661. The same scene-target family changes from 1280x720 to 960x540
+while the swapchain stays 1280x720. This supports retaining Elite's
+supersampling as the input-size control; no setting write is implemented.
+
+At 05:05:23.672, frame 36282, all target/edge tables fit (17 targets, 117
+general edges, three output edges). The CB pool drops 27 observations, so
+missing CB evidence is inconclusive. Failed/test Presents, foreign-thread calls
+and unknown command lists remain zero.
+
+- Format 23 colour with the scene-sized depth takes 66 draws q301..413. VS b1
+  is 5376 bytes; observed write q297 precedes its frozen draw q301. f932 view
+  rows are populated; a projection-like shape begins at byte 3792.
+- The same depth also serves format 26 colour, 64 draws q436..618. Its b1
+  exemplar at q476 uses VS 68DDDEF04D9894AF, with a slightly different camera
+  from the earlier target. One frame need not have only one camera.
+- Observed PS-binding edges connect format 23 to format 26 at q436..437, format
+  26 to format 27 at q636 (VS F9CFC798F21E9AEA), then format 27 to the
+  full-resolution backbuffer at q639 (VS 20F383BBAC05C031). The later panel VS
+  A888D51024D9798E draws to the output at q644.
+- The matched scene DSV clear is depth=0 at q295. Its identity is shared across
+  the format 23/26 targets; encoding and projection still need proof.
+
+Ruled out: treating the format 23 highest-draw candidate as the final scene
+colour, because later format 26 and format 27 passes feed output. Its first VS
+FC1193AFFC596F74 is already documented as a fullscreen stencil triangle in
+`per-object-motion.md`, not proof of world-camera consumption.
+
+Ruled out: the 4096-byte snapshot proving compatibility with engine motion's
+camera contract, because `engine_velocity.cpp` reads registers 270..275 at
+bytes 4320..4415. Those bytes are outside this capture. f932 and the
+projection-shaped block alone cannot replace that evidence.
+
+The first 1280x720 candidate's byte-3792 diagonal is 0.139315/-0.139315,
+whereas later snapshots show 1.8495/-1.04034. This block varies by write; do
+not treat its shape as a single authoritative projection for the frame.
+
+The next passive contract probe must capture these camera rows at actual known
+motion-family draws, VS/PS identities and depth metadata at the observed colour
+handoff, and ordering relative to late UI. Keep it bounded, without jitter or
+treatment. Reuse pure family/math helpers where useful; the eventual mono
+adapter should pass explicit colour, depth, camera and input/output sizes to
+shared backends, rather than pretending to be a VR eye.
+
+Reuse boundary: `engineVelocityNoteSource` and `engineVelocitySourceViews`
+already maintain mono source motion in SourceEye 2, including the matched
+depth, object-record pool and current/previous scene constants. A future flat
+adapter can name this source directly after qualification. Its present caller
+is the VR on-foot `screenMotionSource` path; do not enable that path's panel
+sizing/UI/weapon behavior to obtain motion. Decouple producer readiness from VR
+backend warm-up and measure the cost of MRT6 and snapshot work.
+
+Next flight can stay at 0.75x SS: the scale comparison is already recorded. Use
+the same Epic cockpit, F10, and a brief camera movement followed by a steady
+view for about 20 seconds. The focused probe must distinguish the actual
+motion-family camera from the first fullscreen draw's constants and record the
+pixel shaders and bound sources at the colour handoff together.
+
+Focused probe design: retain 224 world records and reserve 32 for format-27
+screen/output handoffs. Each key includes target/depth, VS/PS, b1 identity, all
+96 camera bytes, first-viewport fields/count, and PS0..3 view/resource
+identities. Identical keys coalesce with first/last draw and write provenance;
+different camera bytes remain separate. Copy the sparse camera slice at the CPU
+write and into newly admitted records only. Report missing/invalid/stale camera
+writes and per-bank drops distinctly. The family lookup is pure and does not
+start the engine motion producer. AA and jitter remain disabled.
+
+Validation: the focused MSVC compile/self-test and full build passed (80
+parallel jobs plus three quiet jobs, 254-key config contract, installer
+resource checks). Regressions cover the exact 4416-byte camera boundary,
+old/later writes, immutable buffer reuse, distinct cameras/shaders/sources/
+viewports, and handoff retention when world records fill. Runtime hook,
+invalidation, report and reset paths were traced before the next Epic run.

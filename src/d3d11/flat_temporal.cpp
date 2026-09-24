@@ -10,6 +10,7 @@
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "binding_shadow.h"
+#include "engine_velocity.h"
 
 namespace edvr {
 namespace detail {
@@ -27,6 +28,8 @@ constexpr uint32_t kTargets = 128;
 constexpr uint32_t kEdges = 256;
 constexpr uint32_t kOutputEdges = 64;
 constexpr uint32_t kCbs = 64;  // 32 large scene-size and 32 small buffers per frame
+constexpr uint32_t kContracts = 224;
+constexpr uint32_t kHandoffContracts = 32;  // reserved; 256 total records
 constexpr uint32_t kCbBytes = kFlatCbExemplarBytes;
 constexpr uint64_t kCaptureMs = 120000;
 constexpr uint32_t kMaxUsefulFrames = 12000;
@@ -45,10 +48,11 @@ struct Target {
     void* depth = nullptr;
     uint32_t w = 0, h = 0, fmt = 0;
     uint32_t draws = 0, depthDraws = 0, first = 0, last = 0;
+    uint32_t depthW = 0, depthH = 0, depthFmt = 0;
     uint32_t clearColor = 0, clearDepth = 0;
     uint32_t vpW = 0, vpH = 0;
     void* vsCb[2] = {};
-    uint64_t vsHash = 0;
+    uint64_t vsHash = 0, psHash = 0;
 };
 struct Edge {
     const void* src = nullptr;
@@ -64,6 +68,9 @@ struct Cb {
     uint64_t writeEpoch = 0, drawEpoch = 0;
     uint64_t vsHash = 0;
     unsigned char bytes[kCbBytes] = {};
+    unsigned char camera[kFlatCameraBytes] = {};
+    uint64_t cameraHash = 0;
+    bool cameraValid = false;
 };
 struct DepthClear {
     void* dsv = nullptr;
@@ -80,11 +87,13 @@ struct State {
     uint32_t totalDispatches = 0, unknownLists = 0;
     uint32_t forwardedDraws = 0, forwardedCopies = 0;
     uint32_t viewOverflow = 0, targetOverflow = 0, edgeOverflow = 0;
-    uint32_t outputEdgeOverflow = 0, cbOverflow = 0;
+    uint32_t outputEdgeOverflow = 0, largeCbOverflow = 0, smallCbOverflow = 0;
     bool inheritedVrWork = false;
     FlatTemporalProof proof;
     bool forwardingPresent = false;
     uint32_t viewportW = 0, viewportH = 0;
+    float viewport[6] = {};
+    uint32_t viewportCount = 0;
     void* backbuffer = nullptr;
     uint32_t backW = 0, backH = 0, backFmt = 0;
     View views[kViewSlots] = {};
@@ -97,6 +106,13 @@ struct State {
     uint32_t outputEdgeCount = 0;
     Cb cbs[kCbs] = {};
     uint32_t largeCbCount = 0, smallCbCount = 0;
+    FlatContractRecord contracts[kContracts] = {};
+    uint32_t contractCount = 0, contractOverflow = 0;
+    FlatContractRecord handoffContracts[kHandoffContracts] = {};
+    uint32_t handoffContractCount = 0, handoffContractOverflow = 0;
+    uint32_t contractDraws[4] = {};
+    uint32_t contractCamera[kFlatCameraAvailabilityCount] = {};
+    uint32_t poolCameraDraws = 0;
     DepthClear depthClears[kTargets] = {};
     uint32_t depthClearCount = 0, depthClearOverflow = 0;
     Target* current = nullptr;
@@ -120,9 +136,11 @@ View* viewOf(void* p) {
         if (!v.view) {
             v.view = p;
             ResourceInfo info{};
-            if (bindingResolve(p, &info) && info.isTexture2D) {
+            if (bindingResolve(p, &info)) {
                 v.resource = info.resource;
-                v.w = info.a; v.h = info.b; v.fmt = info.fmt;
+                if (info.isTexture2D) {
+                    v.w = info.a; v.h = info.b; v.fmt = info.fmt;
+                }
                 v.resolved = true;
             }
             return &v;
@@ -143,7 +161,10 @@ Target* targetOf(void* rtv, void* dsv) {
     if (View* v = viewOf(rtv)) {
         t.color = v->resource; t.w = v->w; t.h = v->h; t.fmt = v->fmt;
     }
-    if (View* v = viewOf(dsv)) t.depth = v->resource;
+    if (View* v = viewOf(dsv)) {
+        t.depth = v->resource;
+        t.depthW = v->w; t.depthH = v->h; t.depthFmt = v->fmt;
+    }
     return slot;
 }
 
@@ -158,13 +179,17 @@ Cb* cbOf(void* res, uint32_t width) {
     uint32_t& count = width >= 3776 ? g.largeCbCount : g.smallCbCount;
     for (uint32_t i = 0; i < count; ++i)
         if (g.cbs[base + i].resource == res) return &g.cbs[base + i];
-    if (count == kCbs / 2) { ++g.cbOverflow; return nullptr; }
+    if (count == kCbs / 2) {
+        ++(width >= 3776 ? g.largeCbOverflow : g.smallCbOverflow);
+        return nullptr;
+    }
     Cb& cb = g.cbs[base + count++];
     // Do not clear the 4 KiB payload each frame; copied remains zero until a
     // complete CPU write has filled it.
     cb.resource = res; cb.width = width; cb.mapped = nullptr;
     cb.copied = cb.writes = cb.draws = cb.writeSeq = cb.drawSeq = 0;
     cb.writeEpoch = cb.drawEpoch = cb.vsHash = 0;
+    cb.cameraValid = false; cb.cameraHash = 0;
     return &cb;
 }
 
@@ -182,6 +207,7 @@ void invalidateCb(void* res) {
         cb->copied = 0;
         cb->writeEpoch = 0;
         cb->mapped = nullptr;
+        cb->cameraValid = false; cb->cameraHash = 0;
     }
 }
 
@@ -249,8 +275,50 @@ void printCb(const Target& t, uint32_t slot, const FlatCbExemplar& cb) {
     else if (plausible > 4) Log::get().note("flat discover projection-like bytes: VS b%u %u further candidates omitted", slot, plausible - 4);
 }
 
+void printContracts(uint64_t frame) {
+    Log::get().note("flat discover contract inventory frame=%llu world-retained=%u world-capacity=%u world-dropped-draw-observations=%u handoff-retained=%u handoff-capacity=%u handoff-dropped-draw-observations=%u eligible-draws(pool,screen,output)=%u,%u,%u camera-draws(available,missing-buffer,invalid-write,old-frame,later-write)=%u,%u,%u,%u,%u pool-camera-draws=%u; zero eligible is no matching draw, dropped observations are incomplete evidence; family declaration and PS bindings only, shader consumption unproved",
+        static_cast<unsigned long long>(frame), g.contractCount, kContracts,
+        g.contractOverflow, g.handoffContractCount, kHandoffContracts,
+        g.handoffContractOverflow, g.contractDraws[kFlatContractPool],
+        g.contractDraws[kFlatContractScreen], g.contractDraws[kFlatContractOutput],
+        g.contractCamera[kFlatCameraAvailable], g.contractCamera[kFlatCameraMissingBuffer],
+        g.contractCamera[kFlatCameraInvalidWrite], g.contractCamera[kFlatCameraOldFrame],
+        g.contractCamera[kFlatCameraLaterWrite], g.poolCameraDraws);
+    for (uint32_t i = 0; i < g.contractCount + g.handoffContractCount; ++i) {
+        const bool handoff = i >= g.contractCount;
+        const FlatContractRecord& r = handoff ? g.handoffContracts[i - g.contractCount] : g.contracts[i];
+        const FlatContractObservation& k = r.key;
+        const char* kind = k.kind == kFlatContractPool ? "declared-pool-family" :
+                           k.kind == kFlatContractOutput ? "output" : "screen-format";
+        Log::get().note("flat discover contract frame=%llu index=%u bank=%s class=%s color=%p depth=%p rtv=%p dsv=%p target=%ux%u fmt=%u depth-size=%ux%u depth-fmt=%u VS=%016llX PS=%016llX VSb1=%p draws=%u q=%u..%u count=%u..%u instances=%u..%u viewport-count=%u viewport=%.9g,%.9g,%.9g,%.9g,%.9g,%.9g camera=%s hash=%016llX write-epoch=%llu..%llu write-q=%u..%u draw-epoch=%llu",
+            static_cast<unsigned long long>(frame), i, handoff ? "handoff" : "world", kind, k.color, k.depth,
+            k.rtv, k.dsv, k.width, k.height, k.format,
+            k.depthWidth, k.depthHeight, k.depthFormat,
+            static_cast<unsigned long long>(k.vs), static_cast<unsigned long long>(k.ps),
+            k.b1, r.draws, r.first, r.last, r.firstCount, r.lastCount,
+            r.firstInstances, r.lastInstances, k.viewportCount,
+            k.viewport[0], k.viewport[1], k.viewport[2], k.viewport[3], k.viewport[4], k.viewport[5],
+            k.camera ? "same-frame-write-frozen" : "unavailable",
+            static_cast<unsigned long long>(k.cameraHash),
+            static_cast<unsigned long long>(r.firstWriteEpoch),
+            static_cast<unsigned long long>(r.lastWriteEpoch), r.firstWriteSeq, r.lastWriteSeq,
+            static_cast<unsigned long long>(g.epoch));
+        Log::get().note("flat discover contract sources frame=%llu index=%u PS0(view,resource)=%p,%p PS1=%p,%p PS2=%p,%p PS3=%p,%p; shadow-observed bindings, alias unbinds/higher slots unobserved",
+            static_cast<unsigned long long>(frame), i,
+            k.srvView[0], k.srvResource[0], k.srvView[1], k.srvResource[1],
+            k.srvView[2], k.srvResource[2], k.srvView[3], k.srvResource[3]);
+        if (!k.camera) continue;
+        float rows[6][4];
+        std::memcpy(rows, r.camera, sizeof(rows));
+        for (uint32_t row = 0; row < 6; ++row)
+            Log::get().note("flat discover contract camera frame=%llu index=%u row=%u %.9g %.9g %.9g %.9g; exact captured CPU bytes, consumption unproved",
+                static_cast<unsigned long long>(frame), i, 270 + row,
+                rows[row][0], rows[row][1], rows[row][2], rows[row][3]);
+    }
+}
+
 void report(uint64_t frame, const char* phase) {
-    Log::get().note("flat discover %s frame=%llu profile=flat request=%s treatment=refused reason=uncertified-scene-projection-depth-boundary certificate=%u presents=%u useful-frames=%u test=%u failed=%u depth-frames=%u output-frames=%u draws=%u depth-draws=%u copies=%u dispatches=%u unknown-lists=%u foreign-thread-calls=%llu frame-dropped-observations(view,target,edge,output-edge,cb,clear)=%u,%u,%u,%u,%u,%u output=%p %ux%u fmt=%u",
+    Log::get().note("flat discover %s frame=%llu profile=flat request=%s treatment=refused reason=uncertified-scene-projection-depth-boundary certificate=%u presents=%u useful-frames=%u test=%u failed=%u depth-frames=%u output-frames=%u draws=%u depth-draws=%u copies=%u dispatches=%u unknown-lists=%u foreign-thread-calls=%llu frame-dropped-observations(view,target,edge,output-edge,large-cb,small-cb,clear)=%u,%u,%u,%u,%u,%u,%u output=%p %ux%u fmt=%u",
                     phase, static_cast<unsigned long long>(frame),
                     Config::get().requestedTemporalMode().c_str(),
                     flatTemporalEvidenceComplete(g.proof) ? 1 : 0, g.presents,
@@ -259,7 +327,7 @@ void report(uint64_t frame, const char* phase) {
                     g.totalCopies, g.totalDispatches, g.unknownLists,
                     static_cast<unsigned long long>(detail::g_flatTemporalForeignCalls.load(std::memory_order_relaxed)),
                     g.viewOverflow, g.targetOverflow, g.edgeOverflow,
-                    g.outputEdgeOverflow, g.cbOverflow,
+                    g.outputEdgeOverflow, g.largeCbOverflow, g.smallCbOverflow,
                     g.depthClearOverflow,
                     g.backbuffer, g.backW, g.backH, g.backFmt);
     // At most 128 admitted target pairs per sampled frame. Every row matters:
@@ -272,13 +340,14 @@ void report(uint64_t frame, const char* phase) {
         if (!t.color && t.depth) ++depthOnly;
         if (t.color && t.depth) ++colorDepth;
         if (t.rtv && !t.color) ++unresolved;
-        Log::get().note("flat discover target frame=%llu index=%u color=%p depth=%p rtv=%p dsv=%p target=%ux%u viewport=%ux%u fmt=%u draws=%u depth-draws=%u q=%u..%u clears(color,depth)=%u,%u VSb0=%p VSb1=%p VS=%016llX class=%s",
+        Log::get().note("flat discover target frame=%llu index=%u color=%p depth=%p rtv=%p dsv=%p target=%ux%u viewport=%ux%u fmt=%u draws=%u depth-draws=%u q=%u..%u clears(color,depth)=%u,%u VSb0=%p VSb1=%p VS=%016llX first-PS=%016llX depth-size=%ux%u depth-fmt=%u class=%s",
                         static_cast<unsigned long long>(frame), i,
                         t.color, t.depth, t.rtv, t.dsv, t.w, t.h,
                         t.vpW, t.vpH, t.fmt, t.draws, t.depthDraws,
                         t.first, t.last, t.clearColor, t.clearDepth,
                         t.vsCb[0], t.vsCb[1],
                         static_cast<unsigned long long>(t.vsHash),
+                        static_cast<unsigned long long>(t.psHash), t.depthW, t.depthH, t.depthFmt,
                         flatSceneCandidateEligible(t.color, t.depth, t.depthDraws)
                             ? "color+depth-candidate" :
                         !t.color && t.depth ? "depth-only-excluded" : "other-unproved");
@@ -291,6 +360,7 @@ void report(uint64_t frame, const char* phase) {
     Log::get().note("flat discover inventory frame=%llu admitted=%u capacity=%u dropped-target-observations=%u depth-only=%u color+depth=%u unresolved-color-views=%u; target pointers are frame-local, classifications are not scene proof",
                     static_cast<unsigned long long>(frame), g.targetCount,
                     kTargets, g.targetOverflow, depthOnly, colorDepth, unresolved);
+    printContracts(frame);
     if (best) {
         Log::get().note("flat discover candidate frame=%llu color=%p depth=%p target=%ux%u viewport=%ux%u fmt=%u draws=%u depth-draws=%u q=%u..%u clears(color,depth)=%u,%u VSb0=%p VSb1=%p VS=%016llX; strongest admitted color+depth shape only, not scene certificate",
                         static_cast<unsigned long long>(frame), best->color, best->depth,
@@ -347,7 +417,12 @@ void clearFrame() {
     g.targetCount = g.edgeCount = g.outputEdgeCount = g.serial = 0;
     g.largeCbCount = g.smallCbCount = 0;
     g.viewOverflow = g.targetOverflow = g.edgeOverflow = 0;
-    g.outputEdgeOverflow = g.cbOverflow = g.depthClearOverflow = 0;
+    g.outputEdgeOverflow = g.largeCbOverflow = g.smallCbOverflow = g.depthClearOverflow = 0;
+    // Entries are replaced on admission; no payload clearing/copying per draw.
+    g.contractCount = g.contractOverflow = g.poolCameraDraws = 0;
+    g.handoffContractCount = g.handoffContractOverflow = 0;
+    std::memset(g.contractDraws, 0, sizeof(g.contractDraws));
+    std::memset(g.contractCamera, 0, sizeof(g.contractCamera));
     g.depthClearCount = 0;
     ++g.epoch;
     g.current = nullptr; g.sampledTarget = nullptr;
@@ -466,8 +541,13 @@ void flatTemporalViewport(UINT count, const D3D11_VIEWPORT* vps) {
     if (count && vps) {
         g.viewportW = static_cast<uint32_t>(vps[0].Width);
         g.viewportH = static_cast<uint32_t>(vps[0].Height);
+        g.viewport[0] = vps[0].TopLeftX; g.viewport[1] = vps[0].TopLeftY;
+        g.viewport[2] = vps[0].Width; g.viewport[3] = vps[0].Height;
+        g.viewport[4] = vps[0].MinDepth; g.viewport[5] = vps[0].MaxDepth;
+        g.viewportCount = count;
     } else {
         g.viewportW = g.viewportH = 0;
+        std::memset(g.viewport, 0, sizeof(g.viewport)); g.viewportCount = 0;
     }
 }
 
@@ -493,6 +573,7 @@ void flatTemporalDraw(uint32_t count, uint32_t instances) {
         t->vsCb[0] = bindingGet(BindSlot::VsCb0);
         t->vsCb[1] = bindingGet(BindSlot::VsCb1);
         t->vsHash = bindingShaderHash(BindSlot::Vs);
+        t->psHash = bindingShaderHash(BindSlot::Ps);
     }
     const uint32_t targetIndex = static_cast<uint32_t>(t - g.targets);
     const uint64_t vsHash = bindingShaderHash(BindSlot::Vs);
@@ -511,17 +592,56 @@ void flatTemporalDraw(uint32_t count, uint32_t instances) {
                                  g.serial, vsHash);
         }
     }
+    const FlatContractKind kind = flatContractKind(engineVelocityPoolFamilyVs(vsHash),
+        t->color, t->depth, t->w, t->h, t->fmt, g.backW, g.backH,
+        t->color && t->color == g.backbuffer);
+    FlatContractObservation observation{};
+    if (kind != kFlatContractNone) {
+        ++g.contractDraws[kind];
+        observation.kind = kind;
+        observation.color = t->color; observation.depth = t->depth;
+        observation.rtv = t->rtv; observation.dsv = t->dsv;
+        observation.width = t->w; observation.height = t->h; observation.format = t->fmt;
+        observation.depthWidth = t->depthW; observation.depthHeight = t->depthH;
+        observation.depthFormat = t->depthFmt;
+        observation.vs = vsHash; observation.ps = bindingShaderHash(BindSlot::Ps);
+        observation.b1 = bindingGet(BindSlot::VsCb1);
+        observation.sequence = g.serial; observation.count = count; observation.instances = instances;
+        observation.viewportCount = g.viewportCount;
+        std::memcpy(observation.viewport, g.viewport, sizeof(g.viewport));
+        const Cb* cameraCb = findCb(const_cast<void*>(observation.b1));
+        const FlatCameraAvailability availability = flatCameraAvailability(cameraCb != nullptr,
+            cameraCb && cameraCb->cameraValid, cameraCb ? cameraCb->writeEpoch : 0,
+            cameraCb ? cameraCb->writeSeq : 0, g.epoch, g.serial);
+        ++g.contractCamera[availability];
+        if (availability == kFlatCameraAvailable) {
+            observation.camera = cameraCb->camera;
+            observation.cameraHash = cameraCb->cameraHash;
+            observation.writeEpoch = cameraCb->writeEpoch;
+            observation.writeSeq = cameraCb->writeSeq;
+            if (kind == kFlatContractPool) ++g.poolCameraDraws;
+        }
+    }
     if (g.sampledTarget != t->color) {
         g.sampledTarget = t->color;
         std::memset(g.sampledSrv, 0, sizeof(g.sampledSrv));
     }
     for (uint32_t i = 0; i < 4; ++i) {
         void* srv = bindingGet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + i));
+        // Resolve a view only once per frame via the existing cache. No
+        // context getters, GPU copies, or full CB copies are added at draws.
+        View* v = kind != kFlatContractNone ? viewOf(srv) : nullptr;
+        if (kind != kFlatContractNone) {
+            observation.srvView[i] = srv;
+            observation.srvResource[i] = v ? v->resource : nullptr;
+        }
         if (srv == g.sampledSrv[i]) continue;
         g.sampledSrv[i] = srv;
-        if (View* v = viewOf(srv)) edge(v->resource, t->color, 'S');
+        if (!v) v = viewOf(srv);
+        if (v) edge(v->resource, t->color, 'S');
     }
-    (void)count; (void)instances;
+    flatRecordContractReserved(g.contracts, g.contractCount, g.contractOverflow,
+        g.handoffContracts, g.handoffContractCount, g.handoffContractOverflow, observation);
 }
 
 void flatTemporalClearColor(ID3D11RenderTargetView* rtv) {
@@ -563,6 +683,7 @@ void flatTemporalExecuteList(bool foreign) {
     g.proof.unknownDeferredWork = true;
     g.current = nullptr;
     g.viewportW = g.viewportH = 0;
+    std::memset(g.viewport, 0, sizeof(g.viewport)); g.viewportCount = 0;
     for (uint32_t i = 0; i < g.largeCbCount; ++i) invalidateCb(g.cbs[i].resource);
     for (uint32_t i = 0; i < g.smallCbCount; ++i)
         invalidateCb(g.cbs[kCbs / 2 + i].resource);
@@ -576,9 +697,10 @@ void flatTemporalMap(ID3D11Resource* res, UINT sub, D3D11_MAP type, void* data) 
     // A small b0/b1 write can precede the later bind. Keep bounded separate
     // large and small pools so unrelated small writes cannot evict scene-size
     // buffers. Neither size proves camera ownership.
-    if (!width || width > 65536) return;
+    if (!width || width > 65536) { invalidateCb(res); return; }
     if (Cb* cb = cbOf(res, width)) {
         cb->copied = 0; cb->writeEpoch = 0;
+        cb->cameraValid = false; cb->cameraHash = 0;
         cb->mapped = data;
     }
 }
@@ -589,6 +711,8 @@ void flatTemporalUnmap(ID3D11Resource* res) {
         if (!cb.mapped) return;
         cb.copied = std::min(cb.width, kCbBytes);
         std::memcpy(cb.bytes, cb.mapped, cb.copied);
+        cb.cameraValid = flatCaptureCameraRows(cb.camera, cb.mapped, cb.width);
+        cb.cameraHash = cb.cameraValid ? flatCameraHash(cb.camera) : 0;
         cb.mapped = nullptr; cb.writeSeq = ++g.serial; ++cb.writes;
         cb.writeEpoch = g.epoch;
     }
@@ -601,6 +725,9 @@ void flatTemporalUpdate(ID3D11Resource* dst, const void* data, const D3D11_BOX* 
     if (Cb* cb = cbOf(dst, width)) {
         cb->copied = std::min(width, kCbBytes);
         std::memcpy(cb->bytes, data, cb->copied);
+        cb->cameraValid = flatCaptureCameraRows(cb->camera, data, width);
+        cb->cameraHash = cb->cameraValid ? flatCameraHash(cb->camera) : 0;
+        cb->mapped = nullptr;
         cb->writeSeq = ++g.serial; ++cb->writes;
         cb->writeEpoch = g.epoch;
     }
