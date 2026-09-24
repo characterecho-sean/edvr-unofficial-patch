@@ -271,9 +271,8 @@ enum class Mode { Off, Quality, Balanced, Performance };
 Mode     g_mode = Mode::Off;
 float    g_innerDeg = 50.0f;   // degrees across the full-rate disc
 float    g_outerDeg = 84.0f;   // degrees across the 2x2 ring's outer edge
-float    g_distance = 0.7f;    // metres, the nasal shift's fixation distance
+float    g_distance = 0.0f;    // metres, the nasal shift's fixation distance (0: none)
 bool     g_geometryOnly = false;
-bool     g_followEyes = true;   // experimental.foveation_centre = eyes
 // advanced.foveation_outer_rate. The sentinel for "the preset's own" is NOT
 // zero: zero is NV_PIXEL_X0_CULL_RASTER_PIXELS, the cull rate itself, and
 // while it was the sentinel the cull setting fell straight through to the
@@ -330,9 +329,9 @@ bool     g_configured = false;
 
 // The eye-tracked centre retired 2026-09-23 (frame_flag v34): its gaze came
 // from the legacy openvr half, and nothing has published one since that
-// proxy was deleted. experimental.foveation_centre still reads -- "ahead"
-// or "eyes" sets advanced.foveation_distance's default -- and the rings
-// sit where that distance puts them.
+// proxy was deleted. Its key, experimental.foveation_centre, retired
+// 2026-09-24. The rings sit on each eye's straight ahead, shifted by
+// advanced.foveation_distance.
 uint32_t g_maskLines = 0;       // the geometry lines a session prints, capped
 uint64_t g_maskRefills = 0;    // refills done at the frame boundary
 uint32_t g_wantedFrames = 0;    // frames wanted but never armed
@@ -1400,14 +1399,6 @@ void arm(ID3D11DeviceContext* ctx) {
         suspectModules());
 }
 
-const char* centreText() {
-    // With no gaze reaching EDVR the centre is straight ahead either way;
-    // the key's value still decides the distance default, so it is named.
-    return g_followEyes
-        ? "straight ahead (experimental.foveation_centre = eyes, but no gaze source reaches EDVR)"
-        : "straight ahead (experimental.foveation_centre = ahead)";
-}
-
 const char* gpuBusyText() {
     static char text[160];
     if (g_gpuBusyN == 0) {
@@ -1482,8 +1473,8 @@ void summary(const char* when) {
         Log::get().note("foveation: %s, by target size -- %s.", when, bl ? by : "none seen");
     }
     Log::get().note("foveation: %s, the eye targets -- %s.", when, targetsText());
-    Log::get().note("foveation: %s, the GPU busy since the last summary: %s. The centre: %s.", when,
-                    gpuBusyText(), centreText());
+    Log::get().note("foveation: %s, the GPU busy since the last summary: %s. The centre: each eye's "
+                    "straight ahead, fused at %.2f m (0: infinity).", when, gpuBusyText(), g_distance);
     Log::get().note("foveation: %s, the state the eye draws run under -- %s.", when, stateText());
     g_gpuBusySum = 0;
     g_gpuBusyN = 0;
@@ -1516,44 +1507,22 @@ void foveationConfigure(Config& cfg) {
     if (std::isfinite(innerKey) && innerKey >= 10.0f) inner = innerKey > 170.0f ? 170.0f : innerKey;
     if (std::isfinite(outerKey) && outerKey >= 10.0f) outer = outerKey > 178.0f ? 178.0f : outerKey;
     if (outer < inner + 4.0f) outer = inner + 4.0f;
-    const std::string centre = cfg.getString("experimental.foveation_centre", "eyes");
-    const bool follow = centre != "ahead";
-    // Anything that is not "ahead" follows the eyes, which means a typo
-    // gets the default silently. Sean's own ini was found carrying
-    // "follows" on 2026-09-06 -- the second word of this key's settings
-    // label, hand-copied -- and it had been working by accident for an
-    // unknown number of flights. Say so once: a value this file does not
-    // recognise should never pass without the log naming what it became.
-    static bool centreWarned = false;
-    if (!centreWarned && centre != "eyes" && centre != "ahead") {
-        centreWarned = true;
-        Log::get().note(
-            "foveation: experimental.foveation_centre = \"%s\" is not one of this key's values (eyes, ahead). "
-            "Reading it as eyes, so the rings follow the gaze; write \"eyes\" to say so outright, or "
-            "\"ahead\" for the fixed centre.",
-            centre.c_str());
-    }
-    // THE DEFAULT DEPENDS ON WHO IS AIMING THE DISC.
+    // THE SHIFT, AND ITS DEFAULT OF 0.
     //
     // The shift aims each eye's disc at a point this far ahead, so the two
     // discs fuse at that depth and NOWHERE ELSE: at any other distance the
     // eyes' coarse/fine boundaries sit apart by the vergence angle, and
     // whatever falls between them is sharp in one eye and blocky in the
-    // other. That is a rivalry the commander cannot look away from.
+    // other. That is a rivalry the commander cannot look away from -- "the
+    // left eye had VRS shading in the middle" on 2026-09-06, at 0.086
+    // tangent between the two discs, 5 degrees of rivalry on menu text.
     //
-    // It exists for the FIXED centre, where a disc pinned to each eye's
-    // straight ahead otherwise fuses at infinity and reads as a window set
-    // in space rather than glasses on the face. When the EYES aim the disc
-    // there is nothing to correct: the gaze is already a direction in the
-    // head frame and both eyes take the same one, so a shift can only pull
-    // them apart. Twice now a flight has found the same symptom with the
-    // fixed default under the eye-tracked centre -- "the left eye had VRS
-    // shading in the middle" on 2026-09-06, at 0.086 tangent between the
-    // two discs, which is 5 degrees of rivalry on menu text.
-    //
-    // So: no shift when the eyes are driving, the cockpit's depth when
-    // they are not. Either can still be set outright.
-    float dist = cfg.getFloat("advanced.foveation_distance", follow ? 0.0f : 0.7f);
+    // The default was experimental.foveation_centre's to choose: 0 under
+    // its default, eyes, and 0.7 (the cockpit's depth) under ahead. That key
+    // retired 2026-09-24 with the eye-tracked centre it switched, and the
+    // default stays what its own default gave: 0, no shift, the discs fused
+    // at infinity. 0.7 can still be set outright.
+    float dist = cfg.getFloat("advanced.foveation_distance", 0.0f);
     if (!std::isfinite(dist) || dist < 0.0f) dist = 0.0f;
     if (dist > 0.0f && dist < 0.2f) dist = 0.2f;
     const std::string passes = cfg.getString("advanced.foveation_passes", "all");
@@ -1575,7 +1544,7 @@ void foveationConfigure(Config& cfg) {
     else if (outerRateKey == "cull_right") cullEye = 1;
 
     const bool changed = m != g_mode || inner != g_innerDeg || outer != g_outerDeg ||
-                         dist != g_distance || geom != g_geometryOnly || follow != g_followEyes ||
+                         dist != g_distance || geom != g_geometryOnly ||
                          outerOverride != g_outerOverride || cullInner != g_cullInner || cullAll != g_cullAll ||
                          cullEye != g_cullEye || mono != g_monoEdge || overlapKeep != g_overlapKeep;
     const bool first = !g_configured;
@@ -1585,7 +1554,6 @@ void foveationConfigure(Config& cfg) {
     g_outerDeg = outer;
     g_distance = dist;
     g_geometryOnly = geom;
-    g_followEyes = follow;
     g_outerOverride = outerOverride;
     g_cullInner = cullInner;
     g_cullAll = cullAll;
