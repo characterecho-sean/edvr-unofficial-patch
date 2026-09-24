@@ -33,6 +33,12 @@
 // for our ship, refused by its name gate, and still fresh; and CHANGE 7's
 // per-frame classifier, which tells apart "the controller didn't run" from
 // "it ran but the writer wasn't entered" from "entered but didn't write".
+//
+// The task of 2026-09-24 ("dump triggers become mode-switch edges") adds a
+// last one: CHANGE 9's classifyModeSwitchEdge/updateConsecutiveUnrefilled,
+// which turn "every un-refilled call dumps" (flight 091726: 5,041 of them in
+// one low wake) into ENTRY/EXIT edges, plus glitch_scene.h's own fresh/
+// decision print text for the per-frame dump row those edges feed.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -41,6 +47,7 @@
 #include "../../src/d3d11/transition_flash_prevent_core.h"
 #include "../../src/d3d11/pose_reader_watch_core.h"
 #include "../../src/d3d11/transition_flash_eye_base_core.h"
+#include "../../src/d3d11/glitch_scene.h"
 
 using namespace edvr::tfp;
 namespace prw = edvr::prw;
@@ -914,6 +921,93 @@ void caseClassifyFrameWriter() {
           "classifyFrameWriter: writerWrote need not equal writerEntered to still read as WriterWrote");
 }
 
+// --- transition_flash_eye_base_core.h: CHANGE 9, mode-switch edges --------
+// (task 2026-09-24: dump triggers become entry/exit edges instead of firing
+// on every un-refilled call -- flight 091726's low wake alone was 5,041 of
+// them, one dump trigger each.)
+
+void caseModeSwitchEdgeEntryFiresOnce() {
+    uint32_t c = 0;
+    // A refilled call from a zero streak is not an edge -- nothing to enter.
+    check(tfeb::classifyModeSwitchEdge(/*gameMode=*/2, /*unrefilled=*/false, c) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: a refilled call from a zero streak is not an edge");
+
+    // The first un-refilled call after a refilled one: ENTRY.
+    check(tfeb::classifyModeSwitchEdge(2, true, c) == tfeb::ModeSwitchEdge::Entry,
+          "modeSwitchEdge: the first un-refilled call after a refilled one is ENTRY");
+    c = tfeb::updateConsecutiveUnrefilled(c, 2, true);
+    check(c == 1, "modeSwitchEdge: the streak counter reaches 1 after that call");
+
+    // The second consecutive un-refilled call is not another entry -- entry
+    // fires once per run, not on every call inside it.
+    check(tfeb::classifyModeSwitchEdge(2, true, c) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: entry fires once -- the second un-refilled call in the run is not an edge");
+}
+
+void caseModeSwitchEdgeNoneInsideRun() {
+    uint32_t c = 1;  // the entry has already fired; this run is under way
+    for (int i = 0; i < 28; ++i) {
+        check(tfeb::classifyModeSwitchEdge(2, true, c) == tfeb::ModeSwitchEdge::None,
+              "modeSwitchEdge: no trigger inside an un-refilled run");
+        c = tfeb::updateConsecutiveUnrefilled(c, 2, true);
+    }
+    check(c == 29, "modeSwitchEdge: 29 consecutive un-refilled calls (1 entry + 28 more, still no exit)");
+}
+
+void caseModeSwitchEdgeExitAfterThirty() {
+    // One short of the exit run length: a refilled call here is not an exit.
+    uint32_t c29 = 0;
+    for (int i = 0; i < 29; ++i) c29 = tfeb::updateConsecutiveUnrefilled(c29, 2, true);
+    check(c29 == 29, "modeSwitchEdge: 29 consecutive un-refilled calls, one short of the exit run");
+    check(tfeb::classifyModeSwitchEdge(2, false, c29) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: exit fires only after >= 30 -- a refilled call after 29 is not one");
+
+    // Exactly 30: the next refilled call IS the exit.
+    uint32_t c30 = c29;
+    c30 = tfeb::updateConsecutiveUnrefilled(c30, 2, true);
+    check(c30 == 30, "modeSwitchEdge: 30 consecutive un-refilled calls reaches the exit run length");
+    check(tfeb::classifyModeSwitchEdge(2, false, c30) == tfeb::ModeSwitchEdge::Exit,
+          "modeSwitchEdge: a refilled call after 30 consecutive un-refilled ones is EXIT");
+
+    // A mode==1 call neither breaks nor extends the run, and is never itself
+    // an edge -- the same exclusion updateConsecutiveRefilled already
+    // applies to the refilled-streak counter.
+    const uint32_t afterMode1 = tfeb::updateConsecutiveUnrefilled(c30, /*gameMode=*/1, /*unrefilled=*/true);
+    check(afterMode1 == c30, "modeSwitchEdge: a mode==1 call leaves the streak untouched");
+    check(tfeb::classifyModeSwitchEdge(1, true, c30) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: a mode==1 call is never itself an edge");
+}
+
+void caseModeSwitchEdgeSingleFrameSkip() {
+    uint32_t c = 0;
+    // Refilled, then a single un-refilled frame: ENTRY.
+    check(tfeb::classifyModeSwitchEdge(2, true, c) == tfeb::ModeSwitchEdge::Entry,
+          "modeSwitchEdge: a single-frame skip's own un-refilled call is ENTRY");
+    c = tfeb::updateConsecutiveUnrefilled(c, 2, true);
+    check(c == 1, "modeSwitchEdge: the skip's streak reaches 1");
+
+    // Refilled again immediately: not an exit -- the run never reached 30.
+    check(tfeb::classifyModeSwitchEdge(2, false, c) == tfeb::ModeSwitchEdge::None,
+          "modeSwitchEdge: a single-frame skip's recovery fires no exit (run length 1 < 30)");
+}
+
+// --- glitch_scene.h: CHANGE 9, the per-frame dump row's own fresh/decision
+// print text (recordScenePosition's own zeroed-when-stale fold, glitch_
+// frame.cpp, given a name a reader -- and this test -- can ask for).
+
+void caseSceneGeometryFreshAndDecisionText() {
+    check(std::strcmp(edvr::glitchSceneGeometryFreshText(true), "") == 0,
+          "sceneGeometryFreshText: a fresh record prints no prefix");
+    check(std::strcmp(edvr::glitchSceneGeometryFreshText(false), "STALE-") == 0,
+          "sceneGeometryFreshText: a stale-geometry record prints as not fresh");
+    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::Unknown), "unknown") == 0,
+          "sceneDecisionText: Unknown prints as unknown");
+    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::Coherent), "coherent") == 0,
+          "sceneDecisionText: Coherent prints as coherent");
+    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::CameraReset), "cameraReset") == 0,
+          "sceneDecisionText: CameraReset prints as cameraReset");
+}
+
 // --- pose_reader_watch_core.h: the write-mode Dr7 slot-0 composition ------
 // (design doc round 6, part B: the writer watch wants RW0=01b where the
 // render-pose read watch above wants RW0=11b -- armSlot0Dr7's own new
@@ -994,6 +1088,11 @@ int wmain(int argc, wchar_t** argv) {
     caseDr6Slot1Hit();
     caseOfferedSubstituteUsable();
     caseClassifyFrameWriter();
+    caseModeSwitchEdgeEntryFiresOnce();
+    caseModeSwitchEdgeNoneInsideRun();
+    caseModeSwitchEdgeExitAfterThirty();
+    caseModeSwitchEdgeSingleFrameSkip();
+    caseSceneGeometryFreshAndDecisionText();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

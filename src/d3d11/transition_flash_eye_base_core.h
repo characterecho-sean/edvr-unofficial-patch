@@ -361,5 +361,42 @@ inline const char* frameWriterClassText(FrameWriterClass c) noexcept {
     return "?";
 }
 
+// ---------------------------------------------------------------------------
+// CHANGE 9 (2026-09-24, task "dump triggers become mode-switch edges"): a low
+// wake's controller-idle stretch is thousands of un-refilled consumes long
+// (flight 091726, design doc: 5,041 of them, one dump trigger each, 2.3 MB
+// for a single low wake) -- only the EDGES are informative. ENTRY is the
+// first un-refilled mode!=1 consume after a refilled one (a single-frame
+// skip is its own entry, with no exit to follow); EXIT is the first refilled
+// mode!=1 consume after a run of at least kModeSwitchExitRun consecutive
+// un-refilled ones. The detector's scene-judged CameraReset verdict
+// (tfeb::eyeBaseDumpTrigger) is a separate, untouched trigger.
+//
+// updateConsecutiveUnrefilled is the mirror of updateConsecutiveRefilled
+// above: a mode==1 call carries no information about the mailbox either way
+// and leaves the streak untouched, exactly as that function already treats
+// it. classifyModeSwitchEdge takes the streak's value from BEFORE this call
+// folds in (updateConsecutiveUnrefilled's own `counter` argument, not its
+// return), so entry/exit are each named on the one call that crosses the
+// edge, not on every call inside the run.
+inline constexpr uint32_t kModeSwitchExitRun = 30;
+
+enum class ModeSwitchEdge : uint8_t { None, Entry, Exit };
+
+inline uint32_t updateConsecutiveUnrefilled(uint32_t counter, int32_t gameMode, bool unrefilled) noexcept {
+    if (gameMode == 1) return counter;
+    if (!unrefilled) return 0u;
+    return counter < 0xFFFFFFFFu ? counter + 1 : counter;
+}
+
+inline ModeSwitchEdge classifyModeSwitchEdge(int32_t gameMode, bool unrefilled,
+                                              uint32_t consecutiveUnrefilledBeforeThisCall) noexcept {
+    if (gameMode == 1) return ModeSwitchEdge::None;
+    if (unrefilled) {
+        return consecutiveUnrefilledBeforeThisCall == 0 ? ModeSwitchEdge::Entry : ModeSwitchEdge::None;
+    }
+    return consecutiveUnrefilledBeforeThisCall >= kModeSwitchExitRun ? ModeSwitchEdge::Exit : ModeSwitchEdge::None;
+}
+
 }  // namespace tfeb
 }  // namespace edvr

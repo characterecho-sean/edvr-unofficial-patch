@@ -2145,11 +2145,21 @@ bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     return false;
 }
 namespace {
-void recordScenePosition(RingEntry& e,const State* s){
+// CHANGE 9 (2026-09-24, task "the object side and the camera side of each
+// frame on one line"): recordScenePosition's own fold, handed back so the
+// three call sites can pass it straight to transitionFlashEyeBaseNoteScene-
+// Camera without recomputing the same frame-arithmetic gates a second time.
+struct SceneGeometryTap {
+    bool fresh;
+    GlitchSceneDecision decision;
+};
+
+SceneGeometryTap recordScenePosition(RingEntry& e,const State* s){
     // Boundary advances frameNo before recording the frame just completed.
     e.sceneValid=s->sceneDrawFrame+1==s->frameNo;
     for(unsigned a=0;a<3;++a)e.scenePos[a]=s->sceneDrawPos[a];
-    e.geometry=s->scenePoolFrame+1==s->frameNo?s->sceneGeometry:GlitchSceneGeometry{};
+    const bool geometryFresh=s->scenePoolFrame+1==s->frameNo;
+    e.geometry=geometryFresh?s->sceneGeometry:GlitchSceneGeometry{};
     // advanced.eye_origin_trace: eyeBufferWritten uses the SAME test as
     // sceneValid above, on purpose (see the field comment on RingEntry).
     e.eyeBufferWritten=s->sceneDrawFrame+1==s->frameNo;
@@ -2157,6 +2167,14 @@ void recordScenePosition(RingEntry& e,const State* s){
     const bool freshTrace=s->eyeTraceFrame+1==s->frameNo;
     e.eyeTraceWrites=freshTrace?s->eyeTraceWritesThisFrame:0;
     e.eyeTraceMask=freshTrace?s->eyeTraceMaskThisFrame:0;
+    // CHANGE 9: the detector's decision for the SAME just-completed frame --
+    // sceneDecisionFrame only advances when glitchSceneDecision returned
+    // non-Unknown (the compare-and-decide site below), so a frame whose pool
+    // matched too few points to decide reads back Unknown here, not a stale
+    // older verdict.
+    const GlitchSceneDecision decision=
+        s->sceneDecisionFrame+1==s->frameNo?s->sceneDecision:GlitchSceneDecision::Unknown;
+    return {geometryFresh, decision};
 }
 
 // appendLine's own copy for this instrument (transition_flash_prevent.cpp
@@ -2480,11 +2498,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 e.verdict==kVerdictSceneReset);
             transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-            recordScenePosition(e,s);
+            const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
             // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
             // tap, independent of advanced.eye_origin_trace -- the value
-            // recordScenePosition just folded into e.scenePos/e.sceneValid.
-            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
+            // recordScenePosition just folded into e.scenePos/e.sceneValid/
+            // e.geometry, plus this frame's own geometry freshness and
+            // detector decision (CHANGE 9).
+            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+                e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
             // advanced.eye_origin_readers: read-and-reset (see the
             // function's own comment), so this must run exactly once per
             // real frame -- true here, since this block and its siblings
@@ -2608,11 +2629,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 e.verdict==kVerdictSceneReset);
             transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-            recordScenePosition(e,s);
+            const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
             // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
             // tap, independent of advanced.eye_origin_trace -- the value
-            // recordScenePosition just folded into e.scenePos/e.sceneValid.
-            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
+            // recordScenePosition just folded into e.scenePos/e.sceneValid/
+            // e.geometry, plus this frame's own geometry freshness and
+            // detector decision (CHANGE 9).
+            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+                e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
             // advanced.eye_origin_readers: read-and-reset (see the
             // function's own comment), so this must run exactly once per
             // real frame -- true here, since this block and its siblings
@@ -2968,11 +2992,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.verdict==kVerdictSceneReset);
         transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-        recordScenePosition(e,s);
+        const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
         // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame tap,
         // independent of advanced.eye_origin_trace -- the value
-        // recordScenePosition just folded into e.scenePos/e.sceneValid.
-        transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
+        // recordScenePosition just folded into e.scenePos/e.sceneValid/
+        // e.geometry, plus this frame's own geometry freshness and detector
+        // decision (CHANGE 9).
+        transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+            e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
         // advanced.eye_origin_readers: read-and-reset: see
         // poseReaderWatchFrameSnapshot's own comment, and the identical
         // tap at glitchFrameBoundary's other two (mutually exclusive)

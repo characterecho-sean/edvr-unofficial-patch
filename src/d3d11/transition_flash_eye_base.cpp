@@ -77,6 +77,9 @@ constexpr uint32_t kDumpWindowFrames = 60;
 constexpr uint32_t kMaxDumpsPerSession = 12;
 constexpr uint32_t kMaxShipPointerChangeLines = 16;
 constexpr uint32_t kMaxReArms = 8;
+// CHANGE 9 (2026-09-24): the mode-switch entry/exit log lines, the same
+// session-cap idiom as kMaxShipPointerChangeLines above.
+constexpr uint32_t kMaxModeSwitchEdgeLines = 40;
 // CHANGE 8 (static round 7): raised from 180s/100,000 hits -- the previous
 // bound, sized for round 6's discovery phase. A longer flight with the
 // writer now identified wants more headroom before the watch self-disarms.
@@ -299,6 +302,9 @@ std::atomic<uint64_t> g_eventsWatched{0}, g_eventsActed{0};
 std::atomic<uint64_t> g_actedFrames{0};
 std::atomic<uint64_t> g_shipPointerChangesTotal{0};
 std::atomic<uint32_t> g_shipPointerChangeLinesLogged{0};
+// CHANGE 9: the mode-switch ENTRY/EXIT log lines' own session cap counter,
+// same idiom as g_shipPointerChangeLinesLogged just above.
+std::atomic<uint32_t> g_modeSwitchEdgeLinesLogged{0};
 std::atomic<uint64_t> g_modeHistogram[9] = {};  // 0-7, 8 = "other"; session total
 // CHANGE 4: the same bucketing, but per real frame -- read-and-reset by
 // transitionFlashEyeBaseNoteSceneCamera into the frame ring below, so the
@@ -336,6 +342,13 @@ bool g_haveHeldBase = false;
 // design doc's own two callers (FUN_142868c30, FUN_14287b030) can both
 // consume on one frame, so this is not single-writer.
 std::atomic<uint32_t> g_wwConsecutiveRefilled{0};
+
+// CHANGE 9: the mirror of g_wwConsecutiveRefilled above -- the run of
+// consecutive UN-REFILLED mode!=1 calls, which classifyModeSwitchEdge reads
+// to tell a mode-switch ENTRY/EXIT from an ordinary call inside the run. Same
+// CAS-loop, not-single-writer rationale as g_wwConsecutiveRefilled states for
+// itself.
+std::atomic<uint32_t> g_ebConsecutiveUnrefilled{0};
 
 // Per-frame accumulators for glitch_frame.cpp's RingEntry (read-and-reset,
 // poseReaderWatchFrameSnapshot's own convention). Touched from whichever
@@ -499,6 +512,17 @@ struct EyeBaseFrameRecord {
     uint32_t writerEntered = 0;
     uint32_t writerWrote = 0;
     float offeredTranslation[3] = {NAN, NAN, NAN};
+    // CHANGE 9 (2026-09-24): the detector's own per-frame geometry
+    // (glitch_scene.h's GlitchSceneGeometry -- matched/predicted point
+    // counts, the camera's and the object pool's own step, and how far the
+    // two disagree) and the decision it fed, folded in beside the scene
+    // camera above so the object side and the camera side of one frame read
+    // on one line. `geometryFresh` is false on a frame the pool was not
+    // sampled on -- distinct from a real, freshly-measured all-zero
+    // geometry (recordScenePosition's own freshness gate, glitch_frame.cpp).
+    GlitchSceneGeometry geometry;
+    bool geometryFresh = false;
+    GlitchSceneDecision decision = GlitchSceneDecision::Unknown;
 };
 
 static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 1ull * 1024 * 1024,
@@ -674,13 +698,23 @@ void performDump(const PendingDump& due) noexcept {
         }
         if (modes.empty()) modes = "(none)";
         ++framePrinted;
+        // CHANGE 9: the detector's own per-frame geometry and decision,
+        // beside the scene camera above -- the object side and the camera
+        // side of this frame on one line. geom=STALE-(...) mirrors scene=
+        // STALE-'s own prefix: the pool was not sampled this frame, so every
+        // number in it is the zeroed default, not a measurement.
         appendLine(text,
             "  f%-7u calls=%-3u %-24s scene=%s(%+.2f %+.2f %+.2f) writerHits=%u "
-            "controllerCalls=%u writerEntered=%u writerWrote=%u offered=(%+.3f %+.3f %+.3f)",
+            "controllerCalls=%u writerEntered=%u writerWrote=%u offered=(%+.3f %+.3f %+.3f) "
+            "geom=%s(matched=%u predicted=%u cam=%.3f pool=%.3f relMed=%.3f relP90=%.3f predP90=%.3f) "
+            "decision=%s",
             r.frame, r.calls, modes.c_str(), r.sceneValid ? "" : "STALE-",
             r.scenePos[0], r.scenePos[1], r.scenePos[2], r.writerHits,
             r.controllerCalls, r.writerEntered, r.writerWrote,
-            r.offeredTranslation[0], r.offeredTranslation[1], r.offeredTranslation[2]);
+            r.offeredTranslation[0], r.offeredTranslation[1], r.offeredTranslation[2],
+            glitchSceneGeometryFreshText(r.geometryFresh), r.geometry.matched, r.geometry.predicted,
+            r.geometry.cameraStep, r.geometry.poolStep, r.geometry.relativeMedian, r.geometry.relativeP90,
+            r.geometry.predictionP90, glitchSceneDecisionText(r.decision));
     }
     appendLine(text, "per-frame rows done, %u entries", framePrinted);
 
@@ -1295,6 +1329,39 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
             } while (!g_wwConsecutiveRefilled.compare_exchange_weak(cur, next, std::memory_order_relaxed));
         }
 
+        // CHANGE 9: the mirror CAS loop, tracking the run of consecutive
+        // un-refilled mode!=1 calls instead, and firing the mode-switch
+        // ENTRY/EXIT dump trigger and log line on the one call that crosses
+        // the edge -- see tfeb::classifyModeSwitchEdge's own comment.
+        // `cur` after the loop is the streak's value from the call that WON
+        // the compare-exchange (compare_exchange_weak leaves it unchanged on
+        // success), the same value edge/next were computed from -- exactly
+        // "how many un-refilled consumes" for the EXIT log line below.
+        {
+            uint32_t cur = g_ebConsecutiveUnrefilled.load(std::memory_order_relaxed);
+            uint32_t next;
+            tfeb::ModeSwitchEdge edge;
+            do {
+                edge = tfeb::classifyModeSwitchEdge(gameMode, unrefilled, cur);
+                next = tfeb::updateConsecutiveUnrefilled(cur, gameMode, unrefilled);
+            } while (!g_ebConsecutiveUnrefilled.compare_exchange_weak(cur, next, std::memory_order_relaxed));
+            if (edge == tfeb::ModeSwitchEdge::Entry) {
+                requestDump("a mode-switch entry", frame);
+                const uint32_t already = g_modeSwitchEdgeLinesLogged.fetch_add(1, std::memory_order_relaxed);
+                if (already < kMaxModeSwitchEdgeLines) {
+                    Log::get().note("transition flash eye base: mode switch ENTRY at frame %u", frame);
+                }
+            } else if (edge == tfeb::ModeSwitchEdge::Exit) {
+                requestDump("a mode-switch exit", frame);
+                const uint32_t already = g_modeSwitchEdgeLinesLogged.fetch_add(1, std::memory_order_relaxed);
+                if (already < kMaxModeSwitchEdgeLines) {
+                    Log::get().note(
+                        "transition flash eye base: mode switch EXIT at frame %u after %u un-refilled consumes",
+                        frame, cur);
+                }
+            }
+        }
+
         // CHANGE 1: cache every refilled mode!=1 mailbox -- the held base an
         // un-refilled call's act guard judges below.
         if (gameMode != 1 && !unrefilled) {
@@ -1327,10 +1394,12 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     if (haveM && unrefilled) {
         g_totalUnrefilled.fetch_add(1, std::memory_order_relaxed);
         g_unrefilledThisFrame.fetch_add(1, std::memory_order_relaxed);
-        // CHANGE 3: every un-refilled call is its own dump trigger --
-        // tfeb::eyeBaseDumpTrigger takes no eye-trace flag at all, so this
-        // does not depend on advanced.eye_origin_trace.
-        requestDump("an un-refilled consumer call", frame);
+        // CHANGE 9 replaced CHANGE 3's own per-call trigger here (every
+        // un-refilled call dumped -- flight 091726's low wake alone was
+        // 5,041 of them) with the mode-switch edge fired above, inside the
+        // `if (haveM)` block. The detector's scene-judged verdict, this
+        // predicate's other half, is untouched
+        // (transitionFlashEyeBaseNoteDetectorVerdict below).
 
         bool isNewEvent = false;
         uint32_t eventNumber = 0;
@@ -1647,12 +1716,25 @@ void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVe
 // its own ring for the next dump, whether or not one is pending -- cheap
 // (one memcpy-sized struct) and it is what lets a dump requested a few
 // frames from now still show frames already past.
-void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid) {
+//
+// CHANGE 9: geometry/geometryFresh/decision are the detector's own per-frame
+// pool-vs-camera measurement and verdict (glitch_scene.h), folded in beside
+// the scene camera above.
+void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid,
+                                            const GlitchSceneGeometry& geometry, bool geometryFresh,
+                                            GlitchSceneDecision decision) {
     if (!g_armed.load(std::memory_order_relaxed)) return;
     EyeBaseFrameRecord r;
     r.frame = frame;
     r.sceneValid = valid;
     r.scenePos[0] = pos[0]; r.scenePos[1] = pos[1]; r.scenePos[2] = pos[2];
+    // CHANGE 9: folded in unmodified -- the caller (glitch_frame.cpp's
+    // recordScenePosition) already zeroed geometry itself when the pool was
+    // not sampled this frame; geometryFresh is what tells that apart from a
+    // real measured zero.
+    r.geometry = geometry;
+    r.geometryFresh = geometryFresh;
+    r.decision = decision;
     r.writerHits = g_writerHitsThisFrame.exchange(0, std::memory_order_relaxed);
     // CHANGE 6/8: the controller's own call count and the writer's DR1/DR0
     // counts, read-and-reset the same way as writerHits above.
