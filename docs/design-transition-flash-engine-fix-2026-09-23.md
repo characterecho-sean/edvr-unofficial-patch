@@ -32,6 +32,21 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
+- **Eye-base FIX + writer watch BUILT and INSTALLED, NOT FLOWN
+  (2026-09-24).**
+  - `advanced.transition_flash_eye_base = off|watch|on|alternate`:
+    a375b0dc and 04db82fa, on main via 20fd26e9.
+  - A CodeHook on the camera driver `0x28431D0` detects an un-refilled
+    mailbox (bit-exact reset value, mode != 1). On acted events it writes
+    `ship+0x130` into it BEFORE the engine reads it. That happens only once
+    `+0x130` has matched the refilled mailbox on ordinary frames this
+    session (120 agreements, under 2% disagreement), with a 60-frame cap.
+  - A hardware WRITE watch on `ship+0x3360` names the mailbox's writer, and
+    whether it ran before each consume.
+  - The Steam copy runs 04db82fa with the trap OFF and `alternate`: both
+    ini lines are marked, and must be put back after the flight.
+  - Read with `--expect-build 04db82fa`.
+  - Do not arm this together with `eye_origin_readers`: both use DR0.
 - **Reader hunt FLOWN (045636, 2026-09-24).**
   - The positioner lead is ruled out, and the pose buffer is on the stack
     (no watch).
