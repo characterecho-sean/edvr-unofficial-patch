@@ -32,6 +32,18 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
+- **OFFERED-BASE fix + writer-gate instrument BUILT and INSTALLED, NOT
+  FLOWN (2026-09-24, 3b5736d7 + aecf9800, on main).**
+  - A DR1 EXECUTE breakpoint on the writer `0x2874B20` records the matrix it
+    was offered (R8) for our ship. DR0 hits inside the writer's extent mean
+    it wrote.
+  - A read-only CodeHook counts the controller `0x10730A0` calls.
+  - The substitute on an un-refilled consume: the matrix the writer was
+    offered and refused this frame, if fresh; otherwise the held base.
+  - The watch bounds are 300 s and 150,000 hits; the call ring is 65,536
+    entries.
+  - The Steam copy runs aecf9800 with the trap OFF and `alternate` (two
+    marked ini lines). Read with `--expect-build aecf9800`.
 - **HELD-BASE fix FLOWN (073114): it fixes hyperspace exits and fails the
   low wake.**
   - The writer is found (`0x2874BC9` from `0x10734D8`). It SKIPS the
