@@ -11,6 +11,7 @@
 #include "flat_projection_ownership_tests.h"
 #include "flat_compute_tests.h"
 #include "flat_lighting_tests.h"
+#include "flat_live_phase_tests.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -846,6 +847,7 @@ int main(int argc, char** argv) {
     failures += flatProjectionOwnershipTests();
     failures += flatComputeTests();
     failures += flatLightingTests();
+    failures += flatLivePhaseTests();
     flatRuntimePrefixTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");

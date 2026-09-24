@@ -21,6 +21,21 @@ bool same(const FlatProjectionRuntimeRequest& a, const FlatProjectionRuntimeRequ
     for (uint32_t i = 0; i < a.patchCount; ++i) if (!same(a.patches[i], b.patches[i])) return false;
     return true;
 }
+bool sameStructure(const FlatProjectionPatchRequest& a, const FlatProjectionPatchRequest& b) {
+    if (a.layout != b.layout || a.byteOffset != b.byteOffset) return false;
+    if (a.layout != FlatProjectionPatchLayout::LightingUvRay) return true;
+    const auto& x = a.lighting; const auto& y = b.lighting;
+    return x.width == y.width && x.height == y.height && x.tileWidth == y.tileWidth &&
+           x.gridX == y.gridX && x.gridY == y.gridY && x.sampleCount == y.sampleCount;
+}
+bool sameStructure(const FlatProjectionRuntimeRequest& a, const FlatProjectionRuntimeRequest& b) {
+    if (a.stage != b.stage || a.slot != b.slot || a.original != b.original ||
+        a.firstConstant != b.firstConstant || a.constantCount != b.constantCount ||
+        a.patchCount != b.patchCount) return false;
+    for (uint32_t i = 0; i < a.patchCount; ++i)
+        if (!sameStructure(a.patches[i], b.patches[i])) return false;
+    return true;
+}
 bool zero(const FlatProjectionJitter& j) {
     return j.ndcX == 0 && j.ndcY == 0 && j.uvX == 0 && j.uvY == 0;
 }
@@ -318,6 +333,23 @@ FlatProjectionRuntime::CachedPlan* FlatProjectionRuntime::findPlan(
     for (auto& plan : plans_) if (sameRecipe(plan, requests, count, jitter, phase)) return &plan;
     return nullptr;
 }
+bool FlatProjectionRuntime::sameTopology(const CachedPlan& plan,
+    const FlatProjectionRuntimeRequest* requests, uint32_t count) const {
+    if (!plan.used || plan.count != count) return false;
+    for (uint32_t i = 0; i < count; ++i)
+        if (!sameStructure(plan.requests[i], requests[i])) return false;
+    return true;
+}
+FlatProjectionRuntime::CachedPlan* FlatProjectionRuntime::findTopology(
+    const FlatProjectionRuntimeRequest* requests, uint32_t count) {
+    for (auto& plan : plans_) if (sameTopology(plan, requests, count)) return &plan;
+    return nullptr;
+}
+void FlatProjectionRuntime::invalidatePreparedPlans() {
+    // A plan pointer may outlive the request that produced it. Refusing a draw
+    // revokes every handed-out token until its exact recipe is prepared again.
+    for (auto& entry : tracked_) if (entry.privateReady) entry.privateBuffer.invalidate();
+}
 bool FlatProjectionRuntime::actualBindings(const FlatProjectionRuntimeRequest* requests,
                                             uint32_t count) {
     FlatComputeInternalScope internal;
@@ -335,12 +367,14 @@ bool FlatProjectionRuntime::actualBindings(const FlatProjectionRuntimeRequest* r
     return true;
 }
 bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* requests,
-    uint32_t count, const FlatProjectionJitter& jitter, uint32_t phase) {
+    uint32_t count, const FlatProjectionJitter& jitter, uint32_t phase, bool allowAllocation) {
     if (!owner()) return refuse(FlatProjectionRuntimeRefusal::WrongThread);
     if (!requests || !count || count > FlatProjectionBindingPlan::kCapacity ||
         !flat_projection_detail::finite(jitter)) return refuse(FlatProjectionRuntimeRefusal::InvalidRecipe);
     CachedPlan* cached = findPlan(requests, count, jitter, phase);
+    if (!cached) cached = findTopology(requests, count);
     if (!cached) {
+        if (!allowAllocation) return refuse(FlatProjectionRuntimeRefusal::PlanFailure);
         for (auto& slot : plans_) if (!slot.used) { cached = &slot; break; }
         if (!cached) return refuse(FlatProjectionRuntimeRefusal::NoCapacity);
     }
@@ -368,16 +402,17 @@ bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* reques
         // history. Register only this explicitly admitted identity, once; a
         // cold GPU snapshot may then establish its full current contents.
         Tracked* entry = find(r.original);
-        if (!entry) entry = track(r.original);
+        if (!entry && allowAllocation) entry = track(r.original);
         if (!entry) return refuse(FlatProjectionRuntimeRefusal::UnknownBuffer);
         FlatProjectionShadowView view{};
         if (!shadows_.lookup(r.original, entry->generation, view)) {
-            queueCold(*entry);
+            if (allowAllocation) queueCold(*entry);
             return refuse(FlatProjectionRuntimeRefusal::MissingFullWrite);
         }
         if (!lightingMatchesShadow(r, view))
             return refuse(FlatProjectionRuntimeRefusal::InvalidRecipe);
         if (!entry->privateReady) {
+            if (!allowAllocation) return refuse(FlatProjectionRuntimeRefusal::PrivateFailure);
             if (!entry->privateBuffer.initialize(context_.Get(), entry->buffer.Get(), entry->generation))
                 return refuse(FlatProjectionRuntimeRefusal::PrivateFailure);
             entry->privateReady = true;
@@ -400,28 +435,40 @@ const FlatProjectionBindingPlan* FlatProjectionRuntime::prepare(
     const FlatProjectionJitter& jitter, uint32_t phase) {
     if (!owner()) { refuse(FlatProjectionRuntimeRefusal::WrongThread); return nullptr; }
     if (!requests || !count || count > FlatProjectionBindingPlan::kCapacity) {
+        invalidatePreparedPlans();
         refuse(FlatProjectionRuntimeRefusal::InvalidRecipe); return nullptr;
     }
     CachedPlan* cached = findPlan(requests, count, jitter, phase);
-    if (!cached) { refuse(FlatProjectionRuntimeRefusal::PlanFailure); return nullptr; }
-    if (!actualBindings(requests, count)) return nullptr;
+    if (!cached) {
+        invalidatePreparedPlans();
+        refuse(FlatProjectionRuntimeRefusal::PlanFailure); return nullptr;
+    }
+    auto fail = [&](FlatProjectionRuntimeRefusal reason) -> const FlatProjectionBindingPlan* {
+        invalidatePreparedPlans();
+        refuse(reason);
+        return nullptr;
+    };
+    if (!actualBindings(requests, count)) {
+        invalidatePreparedPlans();
+        return nullptr;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         const auto& r = requests[i];
         Tracked* entry = find(r.original);
-        if (!entry) { refuse(FlatProjectionRuntimeRefusal::UnknownBuffer); return nullptr; }
+        if (!entry) return fail(FlatProjectionRuntimeRefusal::UnknownBuffer);
         FlatProjectionShadowView view{};
         if (!shadows_.lookup(r.original, entry->generation, view)) {
-            refuse(FlatProjectionRuntimeRefusal::MissingFullWrite); return nullptr;
+            return fail(FlatProjectionRuntimeRefusal::MissingFullWrite);
         }
         if (!lightingMatchesShadow(r, view)) {
-            refuse(FlatProjectionRuntimeRefusal::InvalidRecipe); return nullptr;
+            return fail(FlatProjectionRuntimeRefusal::InvalidRecipe);
         }
         if (!entry->privateBuffer.prepare(shadows_, r.patches, r.patchCount, jitter, phase)) {
-            refuse(FlatProjectionRuntimeRefusal::PrivateFailure); return nullptr;
+            return fail(FlatProjectionRuntimeRefusal::PrivateFailure);
         }
     }
     if (!cached->plan.refreshPrepared()) {
-        refuse(FlatProjectionRuntimeRefusal::PlanFailure); return nullptr;
+        return fail(FlatProjectionRuntimeRefusal::PlanFailure);
     }
     ++status_.prepared;
     if (zero(jitter)) { ++status_.zeroPhaseReady; return nullptr; }

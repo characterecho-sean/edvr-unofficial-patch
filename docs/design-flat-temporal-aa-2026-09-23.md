@@ -12,7 +12,9 @@
   backend failures or unknown scene draws occurred during the audit. One
   compute preparation lacked a full write; a cold snapshot became stale.
   Section 26 rejects scene-camera equality as a jitter precondition. The
-  missing shader pair remains unobserved. Live jitter is zero.
+  missing shader pair remains unobserved. Section 28 implements experimental
+  live jitter with scoped projection bindings and warm-up/recovery policy; the
+  latest reviewed flight remains the zero-phase build `25a634b2`.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -29,15 +31,16 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next work:** reuse VR's shader knowledge and shared motion/backend math; do
-  not require local matrices to match the scene camera. Finish flat target,
-  inverse/lighting and failure integration at the D3D11 boundary. The focused
-  solar/smoke binding question is answered for this scene; do not repeat the
-  same flight to fill untouched material constants or camera-equality labels.
-  Next is a coherent live-phase and recovery implementation, with offline
-  checks before another game build. Latest reviewed and installed build is
-  `25a634b2`; use it with `tools/edvr_log.py --expect-build` until another
-  build is installed. No headset is needed for flat; VR still needs regression
+- **Next work:** qualify the live flat integration, reusing VR's shader
+  knowledge and shared motion/backend math without requiring local matrices to
+  match the scene camera. The focused solar/smoke binding question is answered
+  for this scene; do not repeat the same flight to fill untouched material
+  constants or camera-equality labels. Section 28 wires coherent live phase and
+  recovery; offline checks precede installation. Next Epic flight: DLSS at
+  0.75x SS, F10 once, turn/fly near the star for 20-30 seconds. Check actual
+  jittered draws/dispatches, accepted history and fallback/refusal counters
+  together. The installed build SHA must match `tools/edvr_log.py
+  --expect-build`. No headset is needed for flat; VR still needs regression
   tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
@@ -1528,3 +1531,65 @@ material/scale data, not b0[4..7]. These results close the focused binding
 question for this scene. Remaining work is live phase scheduling/binding,
 coherent inverse/lighting inputs and recovery on earlier handoff/source
 refusal. No rendering code or Epic files changed during this review.
+
+## 28. Live phase and refusal recovery, 2026-09-24
+
+The runtime now uses the existing eight-phase `temporalJitter` sequence after
+two accepted, complete zero-phase frames. The existing
+`experimental.temporal_aa_jitter=off` setting keeps rendering at zero phase.
+The flat shadow bank persists across frames rather than being an F10-only
+allocation. F10 reports the active path without destroying its resources.
+Engine motion still sees the original game constants; the raster command alone
+sees private jittered buffers. The mono renderer receives the current phase and
+the previous accepted phase in render pixels. Camera rows and engine snapshots
+remain unjittered.
+
+Draw scopes apply the exact forward/inverse recipes immediately before the
+original draw and restore all original CB identities and ranges afterward.
+Dispatch scopes similarly wrap the two qualified lighting CS variants after the
+raw diagnostic observer has run. Their inverse-ray patch uses the actual frame
+phase, retaining the established 120-pixel tile/grid checks and shared Halton
+bounds. Actual shaders and CB bindings are verified; actual draw DSV and
+compute depth inputs associate the command with the current named scene depth
+or the preceding accepted frame's retained depth. Local projection matrices are
+not required to equal the scene camera.
+
+Warm-up may allocate private resources or request bounded cold snapshots.
+During a nonzero frame, preflight can only reuse established buffer/recipe
+topology: it cannot allocate a new private buffer/plan or queue a cold copy.
+Topology cache entries retarget phase values instead of consuming another of
+the 32 plan slots per phase. Exact phase/write validation and prepared-token
+revocation still prevent stale plans from binding. WARP regressions cycle 64
+ordinary and 64 lighting phases, refresh after source writes, and verify
+no-allocation refusal plus old-plan invalidation.
+
+A refusal before the first applied projection makes the remaining frame
+zero-phase. A refusal after an application keeps the chosen phase fixed for
+remaining known commands, rejects temporal history, and selects single-frame
+spatial recovery at the output copy. Early scene/handoff/source refusals can
+recover through independently checked actual copy shaders, input texture,
+output target and viewport, without inventing a scene camera. If that copy
+cannot be verified, the original command is preserved and recovery failure is
+reported. Following frames return to zero-phase warm-up. Spatial recovery does
+not recreate a missed draw or promise that a partially patched frame has no
+transient mismatch; it prevents that frame from entering temporal history.
+
+The pure phase controller tests warm-up, fixed phase, early/late refusal,
+recovery, previous accepted phase, disablement and resize. Existing WARP
+resolver tests cover nonzero raster phases with raw engine snapshots, backend
+failure, spatial displacement and state restoration. Runtime logs distinguish
+actual jittered draw/dispatch counts, accepted temporal frames, partial
+coverage and spatial fallback. Preparation counts alone remain insufficient to
+claim live operation or image quality. Installer components and EDHM/ReShade
+forwarding are unchanged.
+
+Validation: the full build and all gates pass in
+`build/flat-live-jitter-final.log`. The first attempt exposed a test-only
+expectation error: both 64-phase loops include one zero-offset phase, for which
+a null binding plan is intentional. The corrected tests require no binding for
+that phase and active bindings for the other 63. Their focused WARP rerun and
+the full suite pass; production behavior was unchanged by the test correction.
+Final review removed a duplicated preflight reset and updated stale audit-only
+comments; `build/flat-live-jitter-verified.log` confirms the final source also
+passes the full build and all gates before commit. In-game nonzero phase,
+visual quality and VR regression remain unqualified.

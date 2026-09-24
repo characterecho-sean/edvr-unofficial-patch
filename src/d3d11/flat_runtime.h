@@ -3,6 +3,8 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include "flat_compute_readback.h"
+#include "flat_projection_scope.h"
+#include <optional>
 namespace edvr {
 extern std::atomic<bool> g_flatRuntimeLive;
 inline bool flatRuntimeActive() { return g_flatRuntimeLive.load(std::memory_order_relaxed) && !g_flatComputeInternal; }
@@ -11,7 +13,10 @@ void flatRuntimeBeforePresent();
 void flatRuntimeResize();
 void flatRuntimeConstantBuffers(UINT start, UINT count, ID3D11Buffer* const*);
 void flatRuntimeUavs(UINT start, UINT count, ID3D11UnorderedAccessView* const*);
-void flatRuntimeDispatch(ID3D11DeviceContext*);
+struct FlatRuntimeDispatchScope {
+    std::optional<FlatProjectionBindingScope> projection;
+    explicit FlatRuntimeDispatchScope(ID3D11DeviceContext*);
+};
 void flatRuntimeViewport(UINT, const D3D11_VIEWPORT*);
 void flatRuntimeMap(ID3D11Resource*, D3D11_MAP, void*);
 void flatRuntimeUnmap(ID3D11Resource*);
@@ -27,7 +32,9 @@ struct FlatRuntimeDrawScope {
     ID3D11DepthStencilView* depth = nullptr;
     ID3D11ShaderResourceView* original = nullptr;
     bool producer = false, replaced = false;
+    std::optional<FlatProjectionBindingScope> projection;
     FlatRuntimeDrawScope(ID3D11DeviceContext*, uint32_t instances);
     ~FlatRuntimeDrawScope();
+    bool recover(const char* reason);
 };
 } // namespace edvr

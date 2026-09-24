@@ -51,11 +51,14 @@ public:
     // exposes retained byte pointers; missing/stale/ranged data leaves out alone.
     bool copyConstants(ID3D11Buffer*, uint32_t byteOffset, uint32_t byteCount, void* out);
 
-    // Preflight is required before a nonzero raster phase. It may allocate D3D
-    // private buffers and plans. Calls after a phase starts may only use an
-    // identical preflighted recipe; prepare never allocates or queries descs.
+    // Preflight is required before a nonzero raster phase. Warm calls may
+    // allocate private buffers and a structural binding plan. With allocation
+    // disabled, only an existing topology and private buffers may be retargeted
+    // to the current phase; no descriptors/devices are queried or cold reads queued.
+    // Prepare requires the exact most recently preflighted recipe and never allocates.
     bool preflight(const FlatProjectionRuntimeRequest* requests, uint32_t count,
-                   const FlatProjectionJitter& jitter, uint32_t phase);
+                   const FlatProjectionJitter& jitter, uint32_t phase,
+                   bool allowAllocation = true);
     const FlatProjectionBindingPlan* prepare(const FlatProjectionRuntimeRequest* requests,
                                              uint32_t count, const FlatProjectionJitter& jitter,
                                              uint32_t phase);
@@ -108,8 +111,12 @@ private:
     void clearCold(ColdReadback& item);
     bool sameRecipe(const CachedPlan& plan, const FlatProjectionRuntimeRequest* requests,
                     uint32_t count, const FlatProjectionJitter& jitter, uint32_t phase) const;
+    bool sameTopology(const CachedPlan& plan, const FlatProjectionRuntimeRequest* requests,
+                      uint32_t count) const;
     CachedPlan* findPlan(const FlatProjectionRuntimeRequest* requests, uint32_t count,
                          const FlatProjectionJitter& jitter, uint32_t phase);
+    CachedPlan* findTopology(const FlatProjectionRuntimeRequest* requests, uint32_t count);
+    void invalidatePreparedPlans();
     bool actualBindings(const FlatProjectionRuntimeRequest* requests, uint32_t count);
 };
 

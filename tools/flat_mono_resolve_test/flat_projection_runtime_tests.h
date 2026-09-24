@@ -46,7 +46,51 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     {ComPtr<ID3D11Buffer> seen;UINT f=999,n=0;
      ctx->VSGetConstantBuffers1(1,1,seen.GetAddressOf(),&f,&n);
      check(seen.Get()==original.Get() && f==0 && n==4096,"scope restores original binding");}
+    const auto plansBeforePhases=runtime.status().preflights;
+    const auto zeroBeforePhases=runtime.status().zeroPhaseReady;
+    bool phasesReady=true;
+    for(uint32_t i=0;i<64;++i){
+        FlatProjectionJitter current{};
+        const float pixelX=float(int(i%8)-4)/16.0f;
+        const float pixelY=float(int((i/8)%8)-4)/16.0f;
+        phasesReady=flatProjectionJitter(pixelX,pixelY,960,540,current) &&
+            runtime.preflight(&request,1,current,100+i,false);
+        const auto* currentPlan=phasesReady ? runtime.prepare(&request,1,current,100+i) : nullptr;
+        const bool zeroPhase=pixelX==0.0f && pixelY==0.0f;
+        phasesReady=phasesReady && (zeroPhase ? currentPlan==nullptr : currentPlan!=nullptr);
+        if(!phasesReady) break;
+        if(zeroPhase) continue;
+        FlatProjectionBindingScope scope(*currentPlan);
+        phasesReady=scope.active();
+        if(!phasesReady) break;
+    }
+    check(phasesReady && runtime.status().preflights==plansBeforePhases+64 &&
+          runtime.status().zeroPhaseReady==zeroBeforePhases+1,
+          "64 live phases reuse one preflighted topology without plan exhaustion");
+    FlatProjectionRuntimeRequest missingTopology=request;missingTopology.slot=2;
+    const auto queuedBefore=runtime.status().coldQueued;
+    check(!runtime.preflight(&missingTopology,1,phase,1,false) &&
+          runtime.status().last==FlatProjectionRuntimeRefusal::PlanFailure &&
+          runtime.status().coldQueued==queuedBefore,
+          "live preflight refuses unknown topology without allocation or cold readback");
+    check(runtime.preflight(&missingTopology,1,phase,1),
+          "warm preflight can allocate a fresh structural plan after live refusal");
+    check(runtime.prepare(&request,1,phase,1)==nullptr &&
+          runtime.status().last==FlatProjectionRuntimeRefusal::PlanFailure,
+          "prepare requires a newly preflighted phase after topology retarget");
+    {FlatProjectionBindingScope stale(*plan);
+     check(!stale.active(),"failed prepare invalidates old plan token");}
+    check(runtime.preflight(&request,1,phase,1,false) &&
+          runtime.prepare(&request,1,phase,1)!=nullptr,
+          "live retarget recovers old topology without allocating");
     runtime.invalidate(original.Get());
+    runtime.enableColdReadback(true);
+    const auto queuedAfterInvalidation=runtime.status().coldQueued;
+    check(!runtime.preflight(&request,1,phase,1,false) &&
+          runtime.status().last==FlatProjectionRuntimeRefusal::MissingFullWrite &&
+          runtime.status().coldQueued==queuedAfterInvalidation,
+          "live preflight does not queue a cold readback for missing source bytes");
+    runtime.enableColdReadback(false);
     check(!runtime.copyConstants(original.Get(),0,sizeof(copied),copied) &&
           copied[0]==123,"invalidated shadow cannot establish diagnostic camera identity");
     check(runtime.prepare(&request,1,phase,1)==nullptr &&
@@ -54,8 +98,8 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
           "copy or unknown write invalidates private preparation");
     raw[0]=2;
     runtime.observeUpdate(original.Get(),raw,nullptr);
-    check(runtime.preflight(&request,1,phase,1) && runtime.prepare(&request,1,phase,1)!=nullptr,
-          "full update restores provenance without allocating another plan");
+    check(runtime.preflight(&request,1,phase,1,false) && runtime.prepare(&request,1,phase,1)!=nullptr,
+          "late full update restores provenance in no-allocation mode");
     UINT rangedFirst=16,rangedCount=16;
     ctx->VSSetConstantBuffers1(1,1,&bound,&rangedFirst,&rangedCount);
     check(runtime.prepare(&request,1,phase,1)==nullptr &&
@@ -85,6 +129,29 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
             {.25f,-.25f,960,540,120,8,5,1}};
         check(runtime.preflight(&lit,1,phase,1) && runtime.prepare(&lit,1,phase,1)!=nullptr,
               "lighting contract agrees with actual UINT image/grid/tile CB rows");
+        bool lightingPhasesReady=true;
+        const auto lightingZeroBefore=runtime.status().zeroPhaseReady;
+        for(uint32_t i=0;i<64;++i){
+            const float pixelX=float(int(i%8)-4)/16.0f;
+            const float pixelY=float(int((i/8)%8)-4)/16.0f;
+            FlatProjectionJitter current{};
+            lit.patches[0].lighting.pixelX=pixelX;
+            lit.patches[0].lighting.pixelY=pixelY;
+            lightingPhasesReady=flatProjectionJitter(pixelX,pixelY,960,540,current) &&
+                runtime.preflight(&lit,1,current,200+i,false);
+            const auto* currentPlan=lightingPhasesReady ? runtime.prepare(&lit,1,current,200+i) : nullptr;
+            const bool zeroPhase=pixelX==0.0f && pixelY==0.0f;
+            if(!lightingPhasesReady || (zeroPhase ? currentPlan!=nullptr : currentPlan==nullptr)){
+                lightingPhasesReady=false;break;
+            }
+            if(zeroPhase) continue;
+            FlatProjectionBindingScope scope(*currentPlan);
+            if(!scope.active()){lightingPhasesReady=false;break;}
+        }
+        check(lightingPhasesReady && runtime.status().zeroPhaseReady==lightingZeroBefore+1,
+              "lighting phase metadata retargets structural topology across 64 phases");
+        lit.patches[0].lighting.pixelX=.25f;
+        lit.patches[0].lighting.pixelY=-.25f;
         lightingWords[7]=128;runtime.observeUpdate(light.Get(),lightingWords,nullptr);
         check(!runtime.preflight(&lit,1,phase,1) &&
               runtime.status().last==FlatProjectionRuntimeRefusal::InvalidRecipe,
