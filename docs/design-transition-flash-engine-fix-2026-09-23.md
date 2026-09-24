@@ -324,6 +324,37 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
   0x6BF929 / 0x594C3E / 0x2869073`.
 
+## Flight 062910 (2026-09-24 06:29, Steam copy, build 04db82fa)
+
+`advanced.transition_flash_eye_base = alternate`, trap OFF; the build
+matched. Sean flew the low wakes, then the high wakes. EVERY transition
+flashed, including the exits from high wakes.
+
+- **The fix never acted.** Every acted slot says "not validated yet": the
+  refilled mailbox and `ship+0x130` agreed 0 times in 11,084 comparisons.
+  Both translations were (0,0,0) at every un-refilled call.
+- **The mechanism holds.** In flight (after ~06:30:51) the un-refilled count
+  rose by exactly one per event: 7 events (#3-#9, frames 11980, 12846,
+  15342, 16455, 19183, 20164 and 20712) for Sean's 7-8 transitions, in
+  entry/exit pairs 10-13 s apart. There were none otherwise.
+  - Before flight (menu/loader) about half of all calls were un-refilled
+    (1,411 of 2,821). That burst is unexplained.
+- **Instrument defect 1: the writer watch never armed.** Its flight gate
+  waits for the detector's camera validation ("transition flash fix
+  ACTIVE"), and with the trap off the detector never validates.
+- **Instrument defect 2: no dumps.** The dumps are serviced by the eye-trace
+  code, which runs only when `eye_origin_trace` is also on.
+- **A reading to test next, not yet proof.** On the 2026-09-12 flash frame
+  21467 the objects had NOT moved from the frame before (65 pairs, pool step
+  0.000). The detector's verdict on every reset is "without a matching
+  object rebase". Both say the objects are still in the OLD frame on the
+  switch frame. If so, the base the mailbox held one frame earlier is the
+  right base for that frame, and only the camera switches early. The
+  earlier ruling against holding the last good pose rested on pool
+  statistics (f16451's 2 m residual, 16450's 1600 m object step) that are
+  noisy across a transition, and it was made against the refuted
+  compose-chain parent pose, not this mailbox.
+
 ## Flight 045636 (2026-09-24 04:56, Steam copy, build 014edc20)
 
 `advanced.eye_origin_readers = on`, trap on; the build matched.
@@ -412,6 +443,9 @@ through `pdata_functions.csv`.
 Each was ruled out on 2026-09-23 from existing flight data and static
 analysis, or from flight 184826 or 195435 where marked:
 
+- **Ruled out (062910): `ship+0x130` as a stand-in for the eye-base
+  mailbox.** On refilled frames it agreed 0 times in 11,084 comparisons, and
+  its translation is (0,0,0) on the flash frames too.
 - **Ruled out (045636): round 5's camera positioner (Tick `0x107C760`,
   swap-sync `0x1090420`) as the cockpit camera's.** Neither ran on any
   dumped frame in flight, across four eye resets.
