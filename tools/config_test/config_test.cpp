@@ -140,6 +140,9 @@ int main(int argc, char** argv) {
     expectStr("advanced.temporal_aa_objects_ships_metres", "<unset>", "the retired ship path's range is absent");
     // The particle facing measurement (dead since 2026-08-23) retired 2026-09-23.
     expectStr("advanced.particle_face_emitter", "<unset>", "the retired particle facing key is absent");
+    // The foveation's eye-tracked centre went with its gaze source (2026-09-23);
+    // its key retired 2026-09-24, and advanced.foveation_distance defaults to 0.
+    expectStr("experimental.foveation_centre", "<unset>", "the retired foveation centre key is absent");
     expectBool("fix.share_exposure", true, "a key in the first [fix] reads");
     expectBool("fix.transition_flash", true, "...and another beside it");
     expectStr("hotkey.toggle_exposure", "SCROLLLOCK",
