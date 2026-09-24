@@ -59,7 +59,6 @@
 #include "../../src/d3d11/depth_probe.h"
 #include "../../src/d3d11/engine_velocity.h"
 #include "../../src/d3d11/kinematic_eval_hook.h"
-#include "../../src/d3d11/kinematic_motion.h"
 #include "../../src/d3d11/vscreen.h"
 
 namespace lifecycle_fake {
@@ -67,7 +66,7 @@ struct Slot { void* ptr = nullptr; uint32_t gen = 1; uint64_t hash = 0; };
 Slot g_slots[static_cast<unsigned>(edvr::BindSlot::Count)];
 ID3D11DepthStencilView* g_eyeDsv[2] = {};
 bool g_hookLive = true;
-unsigned g_emitAttaches = 0, g_emitDetaches = 0, g_trackerStatsReads = 0;
+unsigned g_emitAttaches = 0, g_emitDetaches = 0;
 std::vector<std::string> g_log;
 uint64_t g_clock = 1000;
 uint64_t fakeClock() { return g_clock; }
@@ -94,12 +93,9 @@ bool kinematicEvalEmitHookLive(const char** why) noexcept {
     return lifecycle_fake::g_hookLive;
 }
 // The emit's own want on the hook set: counted, so the rig can see the
-// engine path attach and detach it without the tracker.
+// engine path attach and detach it.
 const char* kinematicEvalEmitAttach() noexcept { ++lifecycle_fake::g_emitAttaches; return "installed"; }
 void kinematicEvalEmitDetach() noexcept { ++lifecycle_fake::g_emitDetaches; }
-KinematicMotionStats kinematicMotionStats() noexcept { ++lifecycle_fake::g_trackerStatsReads; return KinematicMotionStats{}; }
-bool kinematicMotionActive() noexcept { return false; }   // the tracker is diagnostic-only: off in the rig
-KinematicMotionCost kinematicMotionTakeCost() noexcept { return KinematicMotionCost{}; }
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs,
                                 ID3D11DepthStencilView* dsv) { ctx->OMSetRenderTargets(n, rtvs, dsv); }
 void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs, ID3D11ClassInstance* const* ci,
@@ -599,7 +595,7 @@ inline void run(const Harness& h) {
     edvr::engineVelocityConfigure(true);
     h.check(logged("engine-record velocity live", mark), "life: configure logs live with the hook installed");
     // P1 (the 2026-09-23 performance review, item 1): the emit holds the
-    // shared hooks itself -- the tracker is diagnostic-only and off here.
+    // shared hooks itself (the legacy tracker retired 2026-09-23).
     h.check(lifecycle_fake::g_emitAttaches == 1, "P1: configure attaches the emit's own want on the hook set");
     const char* joined = "engine motion: movers joined";
     auto body = [&] {
@@ -636,11 +632,11 @@ inline void run(const Harness& h) {
         h.check(g.views(1), "life: eye 1 given");
     }
     g.endFrame(true);
-    h.check(logged("engine motion: tracker off (diagnostic-only", mark), "P1: the window says the tracker was off");
-    h.check(logged("(the tracker, diagnostic-only, was off)", mark), "P1: the movers line has no tracker comparison");
+    h.check(!logged("engine motion: tracker", mark), "C: no tracker line: the legacy tracker retired 2026-09-23");
+    h.check(logged("(moving rig records the emit wrote a previous pose for); eye-frames", mark),
+            "C: the movers line reads without a tracker comparison");
     h.check(logged("(the census is off: it runs only with engine motion's diagnostics", mark),
             "P1: the emit's census is off without diagnostics, and says its zeros are not counts");
-    h.check(lifecycle_fake::g_trackerStatsReads == 0, "P1: no per-frame tracker stats read (its mutex) while it is off");
     mark = g_log.size();
     edvr::engineVelocityDiagnostics(true);
     g.ordinaryFrame(true);

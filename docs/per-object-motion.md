@@ -2,29 +2,38 @@
 
 ## Status
 
-*Written 2026-09-15 from the entries dated 2026-09-07 through
-2026-09-10 (the journal) and 2026-09-11 (the preamble it replaces). It
-restates the journal below and is not new evidence; update it whenever
-this doc changes.*
+*Rewritten 2026-09-23 at the retirement (the last entry below). The journal
+is history: the paths it builds were removed from the code that day.*
 
-- **State:** Reprojects movers (stations, ships) by their own rigid
-  motion instead of the camera-only path. Tier 1 (a depth-consistency
-  mask, `fix.temporal_aa_movers`) flew 2026-09-08, shipped OFF by
-  default. Tier 2 dropped the designed stencil tags for a simpler
-  "body path" (`fix.temporal_aa_objects`, geometry-grid membership),
-  built 2026-09-08 and refined over 48 flights to 2026-09-10. The last
-  entry here (review-smoke-voids-2026-09-10.md's fix) leaves the
-  station and ships mostly fixed, smoke-trail voids partly fixed; this
-  journal stops there and twelve later reviews carry the arc on.
-- **Open:**
-  - Smoke-trail voids: cause (injected pass, history, or game's own
-    draws) undecided pending the Next-flight A/B.
-  - Far station detail's real spin (a skinning bone the pool can't see)
-    is unmodelled; fixed-range vs. LOD "not yet known".
-  - Ships' applied rate is up to 8 frames stale; a per-frame diff would
-    close it "if the flights ask for it".
-  - A bias-mask switch for the ring/hub point lights was built, unflown.
-- **Ruled out:**
+- **State:** RETIRED 2026-09-23 (Sean's teardown). Every path here that
+  ESTIMATED a per-object transform is gone from the code: tier 2's body
+  path and its occupancy grid, the second body, the stepped parts, the
+  moving ships, object_probe.cpp's rigid fit, the per-record mesh pairing
+  (mesh_motion), the rigid-owner promotion and the static owner that fed
+  it, the eye run's motion trigger, and the `movers` and `objects` debug
+  views. Keys retired: `advanced.temporal_aa_estimated_objects`,
+  `advanced.mesh_motion`, `advanced.temporal_aa_objects_reach`,
+  `advanced.temporal_aa_objects_ships_metres`, then the same day
+  `advanced.temporal_aa_static_surfaces` and `advanced.eye_run_trigger`
+  (the last two entries). Superseded by engine-record
+  velocity (part of `fix.temporal_aa`):
+  [kinematic-motion-injection-2026-09-19.md](kinematic-motion-injection-2026-09-19.md)
+  -- the exact motion the game recorded, where these paths guessed it.
+- **What stayed:** tier 1's mover mask (`experimental.temporal_aa_movers`,
+  default off, now without a view; its share prints on the registration
+  line), the world/ship depth split (`advanced.temporal_aa_ship_metres`),
+  the holo panel path, terrain motion, the screen motion map, the engine
+  path, everything on foot, `advanced.object_probe`'s eye-run ledger (the
+  pool recognition and the per-frame pool, instance, bone and draw-state
+  files for tools\eye_run_ledger.py), and the manual eye run
+  (hotkey.dump_eyes).
+- **Open:** nothing on this arc. The smoke-trail voids (cause undecided
+  on 2026-09-10) were never an estimate's problem; they stay open for
+  whichever arc next works on smoke.
+- **Ruled out (do not re-propose):**
+  - Estimating per-object motion at all -- rigid fits over pool pairs,
+    records paired by content, grid membership: retired 2026-09-23,
+    because the engine's own records give the motion exactly.
   - Tier 1's mask moving geometry: it can't; a mover's interior still
     ghosts (2026-09-08).
   - A draw-shape memo for per-draw identity: order agreed ~0% across
@@ -39,26 +48,11 @@ this doc changes.*
     flight), records show no net turn; the spin is in a hidden bone.
   - Distant shimmer as a pure sampling limit (8th flight): retired by
     the 9th -- it was the reversed-Z depth decode.
-- **Next flight:** Two eye runs of the smoke trail mid-view (DLSS on,
-  `drives_smoke` on), raw crops plus a treated overview, with
-  `fix.temporal_aa_smoke` on then off, to tell the voids' cause apart.
-- **Environment:** DLSS at varying render fractions (Elite's HMD
-  Quality) and under the pass's own non-DLSS history; only one flight
-  names the headset, a Pimax (2026-09-04); eye sizes from 2514x2482 to
-  5424x5356 appear across sessions. Depth decode needs the game's own
-  reversed-Z, no-far-plane row, not the runtime's 0.025-50000 m planes.
-  Fixed tables: a 128-cell/side grid; up to 8 ships and 2 rigid bodies
-  per frame.
-- **Detail:** The flight log (48 numbered flights) is inline under
-  "Phasing" item 3 (Tier 2, `fix.temporal_aa_objects`); "Phase 0 --
-  what must be measured, not assumed" holds the census/stencil/pool
-  questions feeding it. "The moving ships", "The second body" and "The
-  stepped parts" cover those three sub-mechanisms on their own. This
-  journal ends at the 2026-09-10 smoke-voids review; twelve later
-  reviews (2026-09-10/11) carry the arc on, filed beside this doc as
-  review-<topic>-<date>.md (distance-motion, smoke-voids/toggles/
-  captures x2, station-flicker/depth, ui-panels/coverage,
-  yaw-sprite-depth, planet-panels, roll-and-orbits).
+- **Next flight:** none on this doc.
+- **Detail:** "Retired, 2026-09-23" and "The two keys left over" (the last
+  two sections) say what went and what stayed. The flight log (48 numbered flights) is inline under
+  "Phasing" item 3; twelve later reviews (2026-09-10/11) sit beside this
+  doc as review-<topic>-<date>.md.
 
 *A design document, written before the code, as a companion to
 [anti-aliasing.md](anti-aliasing.md) (feature B, the temporal pass) and to
@@ -3365,3 +3359,55 @@ bone can carry a spin the pool never shows. The stamps are off. What the
 hub actually does from one frame to the next is measured from the
 picture now: the dump key takes four consecutive frames of the left eye,
 and `tools/eye_run_spin.py` reads a ring's turn per frame off them.
+
+## Retired, 2026-09-23
+
+Sean's decision: tear down the estimates. Every path this doc built that
+ESTIMATED a per-object transform is removed from the code, superseded by
+engine-record velocity -- the previous pose the game itself wrote for each
+rig record, emitted into the pool and composed exactly
+([kinematic-motion-injection-2026-09-19.md](kinematic-motion-injection-2026-09-19.md)).
+Guessing what the engine already knows was the wrong layer.
+
+What went. The shader's body path, second body, stepped parts and moving
+ships (their constants, the grid at t5, Stats 29 and 39-49), the mesh
+records' path and its coverage (t15/t16), and the rigid-owner promotion
+(t17/t18); the temporal pass's tier-2 fill, the body's frame gate and
+origin carry, and their registration-line clauses; object_probe.cpp's
+diff worker, rigid fit, clustering, stepped-part tracking, ships and grid;
+mesh_motion.* whole, with the settings menu's "Compare motion performance",
+its benchmark hooks, the kinematic eval probe's mesh clock and the object
+classification's mesh-record discovery it fed (the classification is still
+armed with each run, for the record-writer and kinematic eval probes'
+sections); the `movers` and `objects` debug views; the eye
+run's `motion` trigger (advanced.eye_run_trigger now reads manual); their
+rigs (mesh_motion_test, the static-surface consumer test, temporal_test's
+body-path and rigid-fit cases) and readers (mesh_motion_probe.py,
+pool_pair.py). The four keys above are asserted unset by config_test.
+
+What stayed, and why. The mover mask (tier 1) is a history mask, not an
+estimate. The world/ship depth split, the holo panel path and terrain
+motion take the camera's or a recorded transform. `advanced.object_probe`
+keeps the pool's recognition (with `fix.temporal_aa`, as before, so a run
+finds the pool on its first frame) and the eye run's ledger, which copies
+the pool every frame of the run. The static owner still marks and dumps
+its surfaces; with its consumer gone it changes nothing in the picture,
+and retiring its key is Sean's call.
+
+ruled out: estimating per-object motion (rigid fits over pool pairs,
+records paired by content, grid membership), because the engine's own
+records give the exact motion (the kinematic doc).
+
+## The two keys left over, 2026-09-23
+
+Sean's decision on the retirement's loose ends: both keys go.
+`advanced.temporal_aa_static_surfaces` marked stationary surfaces with an
+owner target on eligible original draws for the rigid-owner promotion,
+which retired with the estimates; with nothing reading its output it went
+too -- static_surface.* (the owner target, its shader patcher and its eye-run
+StaticOwner dumps), the draw hook's static-owner arm, its shader and
+layout bookkeeping at creation, and its rig. The DXBC container and
+signature helpers that engine-record velocity's patcher shares moved to
+dxbc_container.h. `advanced.eye_run_trigger` read `manual` only once the
+motion trigger went; the key and its note are gone, and the eye-dump key
+starts the run at once, as it did under `manual`.

@@ -31,12 +31,14 @@
   substituted at the station (2982/29422 and 360/2206 draws per window); the hangar
   source named by its own depth as built (5088x2862 R32G32, 116.5 MB); on-foot windows
   clean (764/764 then 5398/5398 given, 0 invalidated); Sean judged both good.
+  TEARDOWN (last entry): the per-object estimates (per-object-motion.md) and the legacy
+  kinematic tracker retired 2026-09-23; the emit's census still counts the undrawn movers.
 - **Open:** walkers (vs_F516BF0201303B87, not a pool family; w=2 on the panel) wait on
   phase 2's previous bone palette -- a walking NPC still blurs after the on-foot fix;
   which camera the walk's other draws use (the new line's rows and distance say); a
   temporal pass on the flat source for its own aliasing; the stale cockpit (the
   commander's legs under ps_B7D5 and vs_7B0DC42D, DECIDED not keyed; 35.4% undecided, low
-  priority); the tracker's evaluated-but-not-drawn movers (the 09:38 entry); the boarding
+  priority); the census's evaluated-but-not-drawn movers (the 09:38 entry); the boarding
   flicker (the LOD governor, not this arc); vs_DE54's ps_91F8 and ps_A607 (the family's
   SV_Position register holds another semantic in them: a patcher extension); ships in
   space; builder-path movers and articulated parts (phase 2).
@@ -2814,3 +2816,28 @@ on-foot windows read "frames dropped: none; screen views asked 764, given 764" t
 screen's own depth at 553-3648 draws a frame.
 
 Sean judged the station rotation and the hangar good ("All looks good to me now").
+
+### 2026-09-23 -- Teardown: the estimates and the legacy tracker retired
+
+Sean's decision: tear down what the engine records superseded. Two commits on
+claude/teardown-estimates-tracker.
+
+**A.** Every path that estimated a per-object transform is gone, with its four keys: the
+body, second-body, stepped-part and ship paths, mesh_motion's record pairing (records
+paired across frames by what they look like), object_probe.cpp's rigid fit and the
+rigid-owner promotion. per-object-motion.md's retirement entry has the list. The engine
+path, the mover mask, terrain and holo motion, the screen motion map and the eye run's
+ledger stay.
+
+**C.** The legacy kinematic tracker is gone: kinematic_motion.*, its eval-hook observer and
+gate want, its Present-time population scan, its two cost lines and kinematic_motion_test.
+It was diagnostic-only since the performance round, and the emit needs nothing of it. The
+eval hook set (kinematic_eval_hook.*: the emit bracket, the probe, the scheduler stack
+probe, the static prop gate, the cull gate probe and the settlement LOD governor's hooks)
+stays whole, and the previous-pose certification lives in the emit's own table. The
+census of one record in eight still counts movers evaluated but not drawn.
+
+The movers line now reads "engine motion: movers joined N records/frame (moving rig
+records the emit wrote a previous pose for); eye-frames ...", without "against the
+tracker's N moving records/frame" or "(the tracker, diagnostic-only, was off)". The
+"engine motion: tracker (diagnostic-only) cost" and "tracker off" lines are gone.

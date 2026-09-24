@@ -2,6 +2,17 @@
 
 ## Status
 
+**RETIRED 2026-09-23.** The deferred UI replay this arc chased is removed
+(`ui_deferred.*`, its rigs, `advanced.ui_replay`): Sean's decision after
+flight 162703. The post-tonemap UI is carried at the output size by the UI
+layer (`fix.ui_quality`, docs/ui-layer-2026-09-23.md); the cockpit's holo
+panels, flight HUD and target sprite stay in the picture DLSS reconstructs,
+steadied by the UI depth and the reactive mask. The architecture review
+(reviews\ui-resolution-architecture-review-2026-09-23.md) wanted the replay
+kept as the baseline until measured; Sean's decision overrides it. The luma
+probe stays, three stages (game, dlss_out, final): `clean_hdr` and
+`dlss_in` were the replay's and went with it. Below is the record.
+
 Updated 2026-09-16 (later morning). Cause FOUND in code by a parallel
 session on main; fix BUILT and INSTALLED to Frontier, NOT FLOWN.
 
@@ -40,19 +51,9 @@ The second instrument (eight stages, sentinels, reference replay; design
 kept under Flight design) was never built: its implementer was stopped
 when the fix landed. Build it only if the flight below is still black.
 
-Next flight: Frontier, EDHM chained, `fix.temporal_aa = dlss`, build
-v0.17.0-rc.2-16-g2c6e820 installed 2026-09-16. Confirming lines:
-`luma probe: eye=N first black stage is none` on every report while
-`deferred=1 apply=1`, and `Deferred UI: replayed dual-source glass into
-clean HDR`; the cockpit visible in the headset with its HUD. Read with
-`python tools\edvr_log.py --target frontier --expect-build HEAD --grep
-"luma probe|Deferred UI"`. A still-black flight reads `dlss_in` 0.000
-again and reopens `## Ruled out`; a decline line means the path was
-off, which is not a pass.
-
-Ini note: `fix.temporal_aa` restored to `dlss` on 2026-09-16 in the live
-Frontier ini and its mirror; `real_dll = d3d11_edhm.dll` (line 1216)
-stays; comment it out for a no-EDHM control.
+Next flight: none -- the flight planned for 2c6e820 on 2026-09-16
+(Frontier, EDHM chained, `fix.temporal_aa = dlss`) is moot with the replay
+retired.
 
 ## Evidence, 2026-09-15
 

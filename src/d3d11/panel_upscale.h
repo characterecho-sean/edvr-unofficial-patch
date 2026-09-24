@@ -16,9 +16,9 @@
 //
 //   * it does not sharpen when render resolution rises, while its
 //     neighbours do -- measured across a 3072x3264 eye and a 5424x5356 one;
-//   * creating the surface at double size (fss_res.h's surface_inflate,
-//     mechanism confirmed engaging: textures created, viewports scaled)
-//     changed nothing visible.
+//   * creating the surface at double size (a developer instrument, since
+//     retired; mechanism confirmed engaging: textures created, viewports
+//     scaled) changed nothing visible.
 //
 // Both results say the same thing: the panel's content is laid out at a
 // FIXED PIXEL SIZE inside the surface however large the surface is, so the

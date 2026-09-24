@@ -245,7 +245,7 @@ inline void run(const Harness& h) {
     floats("dR2", 0, 0, 1, 0);
     floats("knobs", 0, 1, .025f, 0);      // y != 0: depth counts as bound
     floats("movers", 0, 0, 0, 0);         // mover mask off
-    // holoJitter: z = 1 arms enginePixel/meshPixel; xy = 0 keeps enginePixel's
+    // holoJitter: z = 1 arms enginePixel; xy = 0 keeps enginePixel's
     // pixel map free of an extra offset term; w = 0 keeps
     // backgroundHistoryHidden's gate closed (avoids needing ZP/t3 bound).
     floats("holoJitter", 0, 0, 1, 0);

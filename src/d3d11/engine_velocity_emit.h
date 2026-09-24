@@ -56,7 +56,7 @@ namespace engine_velocity_emit {
 constexpr uint32_t kJoined = 0x7FC0ED01u;
 constexpr uint32_t kMasked = 0x7FC0ED02u;
 
-constexpr uintptr_t kRecordNode = 0x18;     // the reuse discriminator the tracker keys on
+constexpr uintptr_t kRecordNode = 0x18;     // the reuse discriminator
 constexpr uintptr_t kRecordPos = 0x170;     // f32 x3
 constexpr uintptr_t kRecordQuat = 0x17C;    // u16 x4
 constexpr uintptr_t kRecordKey = 0x250;     // FUN_143696FA0's key argument
@@ -134,7 +134,7 @@ inline void bump(std::atomic<uint64_t>& c, uint64_t n = 1) { c.fetch_add(n, std:
 inline unsigned gapBucket(uint32_t age) { return age <= 2 ? 0u : age <= 4 ? 1u : age <= 8 ? 2u : age <= 64 ? 3u : 4u; }
 
 // The previous-pose table: per engine record (pointer, with record+0x18 as
-// the reuse discriminator, the tracker's rule), the pose its last emission
+// the reuse discriminator), the pose its last emission
 // carried, the present frame it was emitted in, and whether that pose is
 // CERTIFIED -- one validated pose for its frame, usable as the next frame's
 // history. Sixteen shards, each an open-addressed array with its own lock; an
@@ -272,8 +272,8 @@ private:
 
 // The evaluation census: for one engine record in eight (by address, so the
 // same records every frame), every FUN_144312E00 call -- with items or
-// without -- notes the record's pose, so the log can say how many of the
-// records the tracker sees moving are evaluated here but not drawn, and
+// without -- notes the record's pose, so the log can say how many moving
+// records are evaluated here but not drawn, and
 // whether a history gap is a record evaluated without items (culled, not
 // selected) or not evaluated at all. Instrument only: it decides nothing.
 class Census {

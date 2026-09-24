@@ -1,7 +1,10 @@
 #pragma once
 
-// Deferred UI depth/stencil copy. This header is self contained so the
-// test harness can exercise the exact
+// The UI layer's depth-stencil seed (ui_layer.cpp): the game's depth and
+// stencil copied into a target of another size, through a deferred context,
+// nearest-sample with the jitter applied. Written for the deferred UI replay
+// (retired 2026-09-23); the layer is its reader now. Self contained, so
+// tools/ui_layer_seed_test and tools/ui_quality_test exercise the exact
 // D3D11 path without linking the game DLL.
 #include <windows.h>
 #include <d3d11.h>
@@ -11,7 +14,7 @@
 #include <string>
 #include <cstring>
 
-namespace edvr_deferred_depth {
+namespace edvr_layer_seed {
 using Microsoft::WRL::ComPtr;
 
 static const char* kVs = R"(
@@ -54,7 +57,7 @@ class Seeder {
   UINT inW_=0,inH_=0,outW_=0,outH_=0;
   struct C { UINT inSize[2], outSize[2]; float jitter[2]; UINT writeBit; };
   static ComPtr<ID3DBlob> compile(const char* src,const char* entry,const char* profile) {
-    ComPtr<ID3DBlob> b,e; HRESULT h=D3DCompile(src,strlen(src),"ui_deferred_depth",nullptr,nullptr,entry,profile,0,0,&b,&e);
+    ComPtr<ID3DBlob> b,e; HRESULT h=D3DCompile(src,strlen(src),"ui_layer_seed",nullptr,nullptr,entry,profile,0,0,&b,&e);
     if(FAILED(h)) throw std::runtime_error(e?std::string((char*)e->GetBufferPointer(),e->GetBufferSize()):"D3DCompile failed"); return b;
   }
   void state(ID3D11Device* d) {

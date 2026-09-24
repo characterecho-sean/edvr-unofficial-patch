@@ -449,7 +449,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\lod_governor.cpp" ^
-    "src\d3d11\kinematic_motion.cpp" ^
     "src\d3d11\engine_velocity.cpp" ^
     "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
     "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
@@ -472,7 +471,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\hud_grain.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_separation.cpp" ^
-    "src\d3d11\ui_deferred.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
@@ -484,8 +482,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
-    "src\d3d11\mesh_motion.cpp" ^
-    "src\d3d11\static_surface.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
@@ -1076,61 +1072,8 @@ if errorlevel 1 ( echo [edvr] ERROR: UI separation controller test build failed 
 "%OBJ%\uicolourtest\controller_test.exe" || exit /b 1
 exit /b 0
 
-:rig_static_surface_test
-echo [edvr] === static surface ownership regression ===
-if not exist "%OBJ%\staticsurfacetest" mkdir "%OBJ%\staticsurfacetest"
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\staticsurfacetest\\" /Fe"%OBJ%\staticsurfacetest\static_surface_test.exe" ^
-    "tools\static_surface_test\static_surface_test.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: static surface shader test build failed & exit /b 1 )
-"%OBJ%\staticsurfacetest\static_surface_test.exe" || exit /b 1
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\staticsurfacetest\\" /Fe"%OBJ%\staticsurfacetest\controller_test.exe" ^
-    "tools\static_surface_test\controller_test.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: static surface controller test build failed & exit /b 1 )
-"%OBJ%\staticsurfacetest\controller_test.exe" || exit /b 1
-exit /b 0
-
-:rig_static_surface_consumer_test
-echo [edvr] === static surface temporal consumer regression ===
-if not exist "%OBJ%\staticsurfaceconsumer" mkdir "%OBJ%\staticsurfaceconsumer"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\staticsurfaceconsumer\\" /Fe"%OBJ%\staticsurfaceconsumer\static_surface_consumer_test.exe" ^
-    "tools\static_surface_consumer_test\static_surface_consumer_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
-if errorlevel 1 ( echo [edvr] ERROR: static surface consumer test build failed & exit /b 1 )
-"%OBJ%\staticsurfaceconsumer\static_surface_consumer_test.exe" || exit /b 1
-exit /b 0
-
-:rig_native_deferred_ui
-echo [edvr] === native deferred UI regression ===
-if not exist "%OBJ%\uideferredtest" mkdir "%OBJ%\uideferredtest"
-rem controller_test alone unity-builds ui_deferred.cpp (tools\ui_deferred_test\controller_test.cpp),
-rem which now calls into luma_probe.cpp's real implementation; depth_test/draw_test only
-rem exercise ui_deferred_depth.h/ui_deferred_draw.h and never reach it, so they stay in the
-rem shared loop below without it (and without its own Log::get() requirement).
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uideferredtest\\" /Fe"%OBJ%\uideferredtest\controller_test.exe" ^
-    "tools\ui_deferred_test\controller_test.cpp" ^
-    "src\d3d11\luma_probe.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
-if errorlevel 1 ( echo [edvr] ERROR: deferred UI controller_test build failed & exit /b 1 )
-"%OBJ%\uideferredtest\controller_test.exe" --self-test || exit /b 1
-for %%T in (depth_test draw_test) do (
-    cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-        /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-        /Fo"%OBJ%\uideferredtest\\" /Fe"%OBJ%\uideferredtest\%%T.exe" ^
-        "tools\ui_deferred_test\%%T.cpp" ^
-        /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
-    if errorlevel 1 ( echo [edvr] ERROR: deferred UI %%T build failed & exit /b 1 )
-    "%OBJ%\uideferredtest\%%T.exe" --self-test || exit /b 1
-)
+:rig_native_motion_rigs
+echo [edvr] === native motion, fusion and night-vision rigs ===
 
 if not exist "%OBJ%\holomotion" mkdir "%OBJ%\holomotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
@@ -1161,14 +1104,6 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
     /link /INCREMENTAL:NO d3dcompiler.lib dxguid.lib || exit /b 1
 "%OBJ%\identityfusion\identity_fusion_test.exe" --self-test || exit /b 1
 python "tools\identity_fusion_capture.py" --self-test || exit /b 1
-if not exist "%OBJ%\meshmotion" mkdir "%OBJ%\meshmotion"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\meshmotion\\" /Fe"%OBJ%\meshmotion\mesh_motion_test.exe" ^
-    "tools\mesh_motion_test\mesh_motion_test.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\kinematic_eval_probe.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
-"%OBJ%\meshmotion\mesh_motion_test.exe" --self-test || exit /b 1
-python "tools\mesh_motion_probe.py" --self-test || exit /b 1
 if not exist "%OBJ%\nightvision" mkdir "%OBJ%\nightvision"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\nightvision\\" /Fe"%OBJ%\nightvision\night_vision_test.exe" ^
@@ -1923,16 +1858,6 @@ python "%ROOT%\tools\draw_identity.py" --self-test || (
     exit /b 1
 )
 
-echo [edvr] === pool pair self-test ===
-REM The reader of the object probe's raw pair dumps (edvr_logs\pool\*.bin,
-REM since 2026-09-08): the pose decode, the rigid clustering and the header
-REM layout it shares with src\d3d11\object_probe.cpp. A decode one field off
-REM reads as a plausible cloud of motions. It fails HERE.
-python "%ROOT%\tools\pool_pair.py" --self-test || (
-    echo [edvr] ERROR: the pool pair tool failed its own test
-    exit /b 1
-)
-
 echo [edvr] === eye-run ledger self-test ===
 REM The reader of the object probe's eye-run ledger (draws_HHMMSS.bin beside
 REM the crops, since 2026-09-10; version 2 rows since 2026-09-21 also carry
@@ -2036,25 +1961,6 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b 1 )
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --dry-run || exit /b 1
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_kinematic_motion_test
-echo [edvr] === kinematic_motion_test.exe ===
-REM Build gate for the production kinematic tracker: the tracker decides
-REM which records are proven-static, a wrong label becomes a wrong motion
-REM vector in stage B, and compilation cannot catch a state-machine bug.
-REM The rig feeds synthetic eval-hook streams through the real module and
-REM asserts the labels and counters (the 8 cases of the 2026-09-20 10:52
-REM spec in docs\kinematic-motion-injection-2026-09-19.md).
-if not exist "%OBJ%\kinematicmotion" mkdir "%OBJ%\kinematicmotion"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
-    /Fo"%OBJ%\kinematicmotion\\" /Fe"%BUILD%\kinematic_motion_test.exe" ^
-    "tools\kinematic_motion_test\kinematic_motion_test.cpp" "src\d3d11\kinematic_motion.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: kinematic motion tracker test build failed & exit /b 1 )
-"%BUILD%\kinematic_motion_test.exe" --dry-run || exit /b 1
-"%BUILD%\kinematic_motion_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_kinematic_probe_test
@@ -2238,15 +2144,13 @@ exit /b 0
 :rig_ui_quality_test
 echo [edvr] === ui_quality_test.exe ===
 REM Build gate for fix.ui_quality (docs/ui-layer-2026-09-23.md), both halves,
-REM from the same headers the DLL compiles. The SURFACES (ui_quality_math.h,
-REM absorbed from fix.hud_quality's rig): the factor target / HMD Quality with
-REM its 1% floor and 4x cap; the rounding (908x1361 -> 1297x1944 at 1/0.7);
-REM the internal resolution from the runtime's recommendation (3070 x 0.65 =
-REM 1995, 3032 x 0.65 = 1970, 3070x3032 x 0.5 = 1535x1516, the 2458x2824
-REM x 0.65 = 1597x1835 of the 2026-09-23 flight); the census's five panels
-REM in units of U = W / 2 tan(vFOV/2) on every recorded frustum, a
-REM one-percent miss not matching, the candidate shape, the learned-panel
-REM file's parser. The LAYER
+REM from the same headers the DLL compiles. The PANELS (ui_quality_math.h,
+REM ui_sizing_math.h): the internal resolution from the runtime's
+REM recommendation (3070 x 0.65 = 1995, 3032 x 0.65 = 1970, 3070x3032 x 0.5 =
+REM 1535x1516, the 2458x2824 x 0.65 = 1597x1835 of the 2026-09-23 flight);
+REM 2 tan(vFOV/2) on every recorded frustum; the interface surface's shape;
+REM the sizing chains' formatter and verdicts; the engine-side panel factor
+REM across the flights' states and the build-332841 bytes it patches. The LAYER
 REM (ui_layer_math.h): the key; the layer's size and memory; the viewport and
 REM scissor map and the jitter cancel; the blend conversion table, a multiply
 REM included, and a CPU model proving layer-then-composite equals the game's
@@ -2255,7 +2159,7 @@ REM (the menu panel's stencil write, a stencil test, read-only views); the
 REM composite's footprint; the door's arming and G1; every refusal of the
 REM gate, in order; the world-screen gate (the journal OR the screen's own
 REM depth count, with its hysteresis, journal off both ways); the route's
-REM per-eye-frame price sums. On WARP (ui_layer_shaders.h, ui_deferred_depth.h): a
+REM per-eye-frame price sums. On WARP (ui_layer_shaders.h, ui_layer_seed.h): a
 REM jittered quad through the redirected viewport lands on the unjittered
 REM pixels at all eight Halton phases; blended draws composited equal the same
 REM draws into the frame, a multiply included; a stencil-tested quad drawn
@@ -2270,4 +2174,16 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: ui quality test build failed & exit /b 1 )
 "%BUILD%\ui_quality_test.exe" --dry-run || exit /b 1
 "%BUILD%\ui_quality_test.exe" --self-test || exit /b 1
+REM The layer's depth-stencil seed on its own (ui_layer_seed.h): the three
+REM depth formats, every stencil value class, a scale, a jitter and a reused
+REM seeder, read back texel for texel. Built outside build\ so its imported
+REM D3D11CreateDevice resolves to System32's, not EDVR's proxy.
+if not exist "%OBJ%\uilayerseed" mkdir "%OBJ%\uilayerseed"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\uilayerseed\\" /Fe"%OBJ%\uilayerseed\seed_test.exe" ^
+    "tools\ui_layer_seed_test\seed_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui layer seed test build failed & exit /b 1 )
+"%OBJ%\uilayerseed\seed_test.exe" --self-test || exit /b 1
 exit /b 0

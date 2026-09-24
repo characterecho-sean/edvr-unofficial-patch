@@ -60,10 +60,6 @@ int main(){
         auto previous=tex(w,h,DXGI_FORMAT_R8G8B8A8_UNORM,4,"ui_previous.bin");
         Tex outputs[]={tex(w,h,DXGI_FORMAT_R16G16_FLOAT,4),tex(w,h,DXGI_FORMAT_R32_FLOAT,4),
                        tex(w,h,DXGI_FORMAT_R8_UNORM,1),tex(w,h,DXGI_FORMAT_R8G8B8A8_UNORM,4)};
-        D3D11_TEXTURE3D_DESC gd{};gd.Width=gd.Height=gd.Depth=gd.MipLevels=1;gd.Format=DXGI_FORMAT_R8_UNORM;
-        gd.BindFlags=D3D11_BIND_SHADER_RESOURCE;unsigned char occupied=fixture%2?128:255;D3D11_SUBRESOURCE_DATA init{&occupied,1,1};
-        ComPtr<ID3D11Texture3D> grid;ComPtr<ID3D11ShaderResourceView> gridView;
-        hr(dev->CreateTexture3D(&gd,&init,&grid));hr(dev->CreateShaderResourceView(grid.Get(),nullptr,&gridView));
         auto parameters=load("params.bin");D3D11_BUFFER_DESC bd{};bd.ByteWidth=UINT(parameters.size());
         bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;D3D11_SUBRESOURCE_DATA ci{parameters.data(),0,0};
         ComPtr<ID3D11Buffer> cb;hr(dev->CreateBuffer(&bd,&ci,&cb));
@@ -76,8 +72,9 @@ int main(){
         ComPtr<ID3D11SamplerState> sampler;hr(dev->CreateSamplerState(&sd,&sampler));
         std::vector<char> reference[4];
         for(int variant=0;variant<3;++variant){
+            // t5 is free since the body path's grid retired (2026-09-23).
             ID3D11ShaderResourceView* srvs[]={colour.s.Get(),history.s.Get(),depth.s.Get(),prevDepth.s.Get(),mask.s.Get(),
-                                            gridView.Get(),smoke.s.Get(),uiDepth.s.Get(),previous.s.Get()};
+                                            nullptr,smoke.s.Get(),uiDepth.s.Get(),previous.s.Get()};
             ID3D11UnorderedAccessView* uavs[]={nullptr,nullptr,variant==2?nullptr:statsView.Get(),outputs[0].u.Get(),
                                             outputs[1].u.Get(),outputs[2].u.Get(),outputs[3].u.Get()};
             ctx->CSSetShader(shaders[variant].Get(),nullptr,0);ctx->CSSetShaderResources(0,9,srvs);

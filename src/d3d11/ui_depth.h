@@ -40,13 +40,11 @@ void uiDepthConfigure(Config& cfg);
 // cross-TU call in a build with no /GL -- and it is asked from the subscriber
 // gate and again inside beginPanelOverride, every draw.
 //
-// uiDepthPlanetPending() and uiDepthReissuingScene() are published for the
-// same reason and are each the FIRST test of the function they guard, so a
-// call declined out here is a call that would have declined inside:
-//   - uiDepthPlanetBegin clears both pending flags and then returns false
-//     unless one of them was set; clearing flags that are already false is
-//     what the guard skips, and nothing else.
-//   - uiDepthDeferredEye returns -1 unless the mode is kReissueScene.
+// uiDepthPlanetPending() is published for the same reason and is the FIRST
+// test of the function it guards, so a call declined out here is a call that
+// would have declined inside: uiDepthPlanetBegin clears both pending flags
+// and then returns false unless one of them was set; clearing flags that are
+// already false is what the guard skips, and nothing else.
 // The MODE ITSELF moves here rather than a bool mirroring it. ui_depth.cpp
 // writes g_uiDepthMode in seven places, and a mirror maintained at seven call
 // sites is a desync waiting to happen -- the failure this codebase has paid
@@ -65,30 +63,12 @@ inline bool uiDepthWantsDraws() {
 inline bool uiDepthPlanetPending() {
     return detail::g_uiDepthPlanetPending || detail::g_uiDepthPlanetSolarPending;
 }
-inline bool uiDepthReissuingScene() {
-    return detail::g_uiDepthMode == detail::UiDepthMode::kReissueScene;
-}
 
 // Every draw that did NOT land in an eye texture: learn the target as a UI
 // surface when the bound vertex shader is one of the GUI renderer's
 // families. The hash is asked only while a target is new, and a target
 // checked to exhaustion is not asked again for a while.
 void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
-
-// The interface surfaces learned so far this session (vector, text and icon
-// panels only -- not the scanner's own chrome strip), for fix.ui_quality's
-// surfaces (ui_surfaces.cpp), which learns their ratios to the internal
-// resolution and labels its resizes with this classifier's answer rather
-// than re-deriving it. Copies up to `max` entries and returns the count.
-// `res` is an identity only, never dereferenced. Empty for the whole session
-// unless fix.temporal_aa has been on long enough for this pass's own
-// classifier to have learned a panel.
-struct UiDepthLearnedSurface {
-    const void* res = nullptr;
-    uint32_t w = 0, h = 0, fmt = 0;
-    char family = 0;  // 'V' vector, 'T' text, 'I' icons
-};
-uint32_t uiDepthLearnedSurfaces(UiDepthLearnedSurface* out, uint32_t max);
 
 // fix.ui_quality's classifier (ui_layer.h) asks two questions this pass's
 // own classifier already answers, without touching its per-draw state:
@@ -130,7 +110,6 @@ bool uiDepthLearnScannerChrome(ID3D11DeviceContext* ctx, uint64_t vs,
 // coverage reissue.  The flag is per-draw and is cleared by uiDepthEnd().
 void uiDepthSetTargetSeparated(bool separated);
 int uiDepthTargetSpriteEye();
-int uiDepthDeferredEye();
 // After the original private coverage draw, bind the same reissue shader to
 // clean sidecars and a private clean depth copy for one pure replay.
 bool uiDepthSeparatedReissueBegin(ID3D11DeviceContext* ctx);

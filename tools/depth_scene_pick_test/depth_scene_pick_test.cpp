@@ -142,7 +142,8 @@ bool samePickState(const PickState& a, const PickState& b) {
            a.scans == b.scans;
 }
 
-// Literal copy of meshMotionDraw's former membership + two-eye format loop.
+// Literal copy of the retired mesh-record capture's former membership +
+// two-eye format loop.
 bool oldSceneTextureEye(uint32_t w, uint32_t h, const void* resource, int* outEye) {
     *outEye = -1;
     if (!edvr::depthProbeIsSceneDepth(resource)) return false;

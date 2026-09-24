@@ -133,10 +133,10 @@ public:
         uint32_t recordId=0,frame=0,kind=0,gapLen=0;
         uint64_t oldNode=0,newNode=0;
     };
-    // One present-clock vs mesh-clock sample, appended once per owned
-    // Present: the mesh-staleness discriminator (flight 083323: 3 mesh
-    // ticks in ~51 rendered frames).
-    struct ClockSample {uint32_t present=0,mesh=0;};
+    // One present-clock sample, appended once per owned Present while
+    // armed (the mesh clock it was once compared against retired with mesh
+    // motion on 2026-09-23).
+    struct ClockSample {uint32_t present=0;};
     struct Summary {
         uint64_t observed=0;uint32_t stored=0;
         uint64_t readFaults=0,recordOverflow=0,transitionOverflow=0,vtableOverflow=0;
@@ -165,7 +165,7 @@ public:
     // device_hook. Replaces setFrame as the clock source (the mesh clock
     // was refuted by flight 083323). Gated on active like the rest of the
     // probe: the clock log lives and dies with the capture lifecycle.
-    void notePresentFrame(uint32_t presentFrame,uint32_t meshClock) noexcept;
+    void notePresentFrame(uint32_t presentFrame) noexcept;
     bool active() const noexcept{return active_.load(std::memory_order_acquire);}
     HookStatus hookStatus() const noexcept{return hookStatus_;}
     const char* hookStatusText() const noexcept;
@@ -187,8 +187,8 @@ public:
     // The job-2 bracket reads the physics dirty-queue append counter at job
     // entry and exit (descriptor +0x18 points at it; decomp_432B2A0,
     // param_1[3]). Counts only, per-session like jobs[] -- NOT cleared by
-    // clearLocked -- and never gated on active(): a tracker-only flight
-    // harvests the lifecycle too.
+    // clearLocked -- and never gated on active(): a flight without an eye
+    // run harvests the lifecycle too.
     void notePhysQueue(uint32_t entryCount,uint32_t exitCount) noexcept;
     // The job-2 node capture (lifecycle decoded on flight 193356, kinematic
     // arc 19:45 entry; sanctioned 2026-09-20 20:27): node pointers walked
@@ -207,7 +207,7 @@ public:
     // walk faulted or found no sane array, bit1 an exit read faulted (that
     // call's items dropped), bit2 the walk hit its bucket cap. Per-session,
     // never gated on active(), NOT cleared by clearLocked -- same
-    // discipline as notePhysQueue, so tracker-only flights harvest it.
+    // discipline as notePhysQueue, so flights without an eye run harvest it.
     static constexpr uint32_t kBucketFlagEntryWild=1u;
     static constexpr uint32_t kBucketFlagExitFault=2u;
     static constexpr uint32_t kBucketFlagOverflow=4u;

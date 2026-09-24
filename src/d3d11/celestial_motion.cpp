@@ -454,9 +454,8 @@ void celestialMotionEnd(ID3D11DeviceContext* ctx) {
     g_saved=Saved{};
 }
 // Batch the still-pending [built,count) records of one eye into a single
-// dispatch, the same shape as mesh_motion's flushCapture: the per-draw
-// hook only ever snapshots and swaps render targets, and the actual GPU
-// work happens once, here, on demand.
+// dispatch: the per-draw hook only ever snapshots and swaps render
+// targets, and the actual GPU work happens once, here, on demand.
 static void flush(ID3D11DeviceContext* ctx, Eye& e) {
     Records& now=e.records[e.write]; Records& prev=e.records[1-e.write];
     if (now.count<=now.built) return;

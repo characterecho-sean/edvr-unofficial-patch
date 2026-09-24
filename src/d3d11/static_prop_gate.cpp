@@ -32,7 +32,7 @@ bool guardedRead(uintptr_t address, void* output, size_t bytes) noexcept {
 }
 
 // Observer thunks registered with the hook modules: the gate decides through
-// these so the hook files carry no link dependency on this one (the tracker
+// these so the hook files carry no link dependency on this one (the
 // observer pattern in kinematic_eval_hook.h).
 uint32_t decideThunk(uintptr_t job0Param) noexcept {
     return staticPropGate.decide(job0Param) == StaticPropGate::Verdict::Skip ? 1u : 0u;

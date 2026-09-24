@@ -297,9 +297,10 @@ standing in the world, or sized for a screen you are not looking at.
 - **The one-frame flash** each time you jump or drop out of supercruise —
   detected and not sent, so the runtime holds the previous frame instead.
 - **Shimmer and sharpness.** Temporal anti-aliasing, with DLAA and DLSS on RTX
-  cards, includes UI and smoke depth and rotating-station motion automatically.
-  Choose it and the **DLSS preset** (default K) on Performance; AA remains off
-  by default. RCAS sharpening is available separately.
+  cards, includes UI and smoke depth and the exact motion of moving ships,
+  vehicles and settlement parts from Elite's own records automatically. Choose
+  it and the **DLSS preset** (default K) on Performance; AA remains off by
+  default. RCAS sharpening is available separately.
 - **The terrain missing at the edges of view** over planets — Elite culls
   against a narrower frustum than it renders, so squares of ground go undrawn.
   Off by default; it costs about 6% GPU at the tested values.
