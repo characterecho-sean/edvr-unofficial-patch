@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <type_traits>
 
 #include "../common/config.h"
 #include "../common/log.h"
@@ -24,10 +25,11 @@ namespace {
 constexpr uint32_t kViewSlots = 1024;
 constexpr uint32_t kTargets = 128;
 constexpr uint32_t kEdges = 256;
-constexpr uint32_t kCbs = 32;
-constexpr uint32_t kCbBytes = 4096;
+constexpr uint32_t kOutputEdges = 64;
+constexpr uint32_t kCbs = 64;  // 32 large scene-size and 32 small buffers per frame
+constexpr uint32_t kCbBytes = kFlatCbExemplarBytes;
 constexpr uint64_t kCaptureMs = 120000;
-constexpr uint32_t kMaxPresents = 12000;
+constexpr uint32_t kMaxUsefulFrames = 12000;
 constexpr uint64_t kReportMs = 5000;
 
 struct View {
@@ -45,12 +47,12 @@ struct Target {
     uint32_t draws = 0, depthDraws = 0, first = 0, last = 0;
     uint32_t clearColor = 0, clearDepth = 0;
     uint32_t vpW = 0, vpH = 0;
-    void* vsCb = nullptr;
+    void* vsCb[2] = {};
     uint64_t vsHash = 0;
 };
 struct Edge {
-    void* src = nullptr;
-    void* dst = nullptr;
+    const void* src = nullptr;
+    const void* dst = nullptr;
     char kind = 0;  // S: bound shader input, R/C/V: game copy/resolve
     uint32_t count = 0, first = 0, last = 0;
 };
@@ -72,12 +74,13 @@ struct State {
     ID3D11Device* device = nullptr;  // identity only
     uint64_t startedMs = 0, nextReportMs = 0;
     uint32_t presents = 0, rejectedPresents = 0, testPresents = 0;
-    uint32_t serial = 0, framesWithDepth = 0, framesToOutput = 0;
+    uint32_t serial = 0, usefulFrames = 0, framesWithDepth = 0, framesToOutput = 0;
     uint64_t epoch = 1;
     uint32_t totalDraws = 0, totalDepthDraws = 0, totalCopies = 0;
     uint32_t totalDispatches = 0, unknownLists = 0;
     uint32_t forwardedDraws = 0, forwardedCopies = 0;
-    uint32_t viewOverflow = 0, targetOverflow = 0, edgeOverflow = 0, cbOverflow = 0;
+    uint32_t viewOverflow = 0, targetOverflow = 0, edgeOverflow = 0;
+    uint32_t outputEdgeOverflow = 0, cbOverflow = 0;
     bool inheritedVrWork = false;
     FlatTemporalProof proof;
     bool forwardingPresent = false;
@@ -87,18 +90,21 @@ struct State {
     View views[kViewSlots] = {};
     Target targets[kTargets] = {};
     uint32_t targetCount = 0;
+    FlatCbExemplar exemplars[kTargets][2] = {};
     Edge edges[kEdges] = {};
     uint32_t edgeCount = 0;
+    Edge outputEdges[kOutputEdges] = {};
+    uint32_t outputEdgeCount = 0;
     Cb cbs[kCbs] = {};
-    uint32_t cbCount = 0;
+    uint32_t largeCbCount = 0, smallCbCount = 0;
     DepthClear depthClears[kTargets] = {};
     uint32_t depthClearCount = 0, depthClearOverflow = 0;
     Target* current = nullptr;
-    void* boundRtv = nullptr;
-    void* boundDsv = nullptr;
     void* sampledTarget = nullptr;
     void* sampledSrv[4] = {};
 };
+static_assert(std::is_trivially_copyable<State>::value,
+              "flat discovery State must support direct static reset");
 State g;
 std::atomic<bool> g_waitingForPresent{false};
 
@@ -142,23 +148,41 @@ Target* targetOf(void* rtv, void* dsv) {
 }
 
 void edge(void* src, void* dst, char kind) {
-    if (!src || !dst) return;
-    Edge* slot = flatFindOrAdd(g.edges, g.edgeCount, g.edgeOverflow,
-        [=](const Edge& e) { return e.src == src && e.dst == dst && e.kind == kind; });
-    if (!slot) return;
-    Edge& e = *slot;
-    if (e.count) { ++e.count; e.last = g.serial; return; }
-    e.src = src; e.dst = dst; e.kind = kind;
-    e.count = 1; e.first = e.last = g.serial;
+    flatRecordEdge(g.edges, g.edgeCount, g.edgeOverflow,
+                   g.outputEdges, g.outputEdgeCount, g.outputEdgeOverflow,
+                   src, dst, kind, g.backbuffer, g.serial);
 }
 
 Cb* cbOf(void* res, uint32_t width) {
-    Cb* slot = flatFindOrAdd(g.cbs, g.cbCount, g.cbOverflow,
-        [=](const Cb& cb) { return cb.resource == res; });
-    if (!slot) return nullptr;
-    Cb& cb = *slot;
-    cb.resource = res; cb.width = width;
-    return slot;
+    const uint32_t base = width >= 3776 ? 0 : kCbs / 2;
+    uint32_t& count = width >= 3776 ? g.largeCbCount : g.smallCbCount;
+    for (uint32_t i = 0; i < count; ++i)
+        if (g.cbs[base + i].resource == res) return &g.cbs[base + i];
+    if (count == kCbs / 2) { ++g.cbOverflow; return nullptr; }
+    Cb& cb = g.cbs[base + count++];
+    // Do not clear the 4 KiB payload each frame; copied remains zero until a
+    // complete CPU write has filled it.
+    cb.resource = res; cb.width = width; cb.mapped = nullptr;
+    cb.copied = cb.writes = cb.draws = cb.writeSeq = cb.drawSeq = 0;
+    cb.writeEpoch = cb.drawEpoch = cb.vsHash = 0;
+    return &cb;
+}
+
+Cb* findCb(void* res) {
+    if (!res) return nullptr;
+    for (uint32_t i = 0; i < g.largeCbCount; ++i)
+        if (g.cbs[i].resource == res) return &g.cbs[i];
+    for (uint32_t i = 0; i < g.smallCbCount; ++i)
+        if (g.cbs[kCbs / 2 + i].resource == res) return &g.cbs[kCbs / 2 + i];
+    return nullptr;
+}
+
+void invalidateCb(void* res) {
+    if (Cb* cb = findCb(res)) {
+        cb->copied = 0;
+        cb->writeEpoch = 0;
+        cb->mapped = nullptr;
+    }
 }
 
 // GetType before GetDesc: a stale identity may now be a texture, and calling
@@ -179,39 +203,26 @@ uint32_t hashBytes(const unsigned char* data, uint32_t n) {
     return h;
 }
 
-void printCb(const Target& t) {
-    Cb* found = nullptr;
-    for (uint32_t i = 0; i < g.cbCount; ++i) {
-        if (g.cbs[i].resource == t.vsCb) { found = &g.cbs[i]; break; }
-    }
-    if (!found) {
-        Log::get().note("flat discover CB: target=%p VS b0=%p no captured CPU write; projection owner unknown",
-                        t.color, t.vsCb);
+void printCb(const Target& t, uint32_t slot, const FlatCbExemplar& cb) {
+    if (!cb.copied) {
+        Log::get().note("flat discover CB: target=%p VS b%u first-bound=%p no draw-frozen current-frame CPU write; projection owner unknown",
+                        t.color, slot, t.vsCb[slot]);
         return;
     }
-    const Cb& cb = *found;
-    if (cb.writeEpoch != g.epoch || cb.drawEpoch != g.epoch ||
-        cb.writeSeq > cb.drawSeq) {
-        Log::get().note("flat discover CB: target=%p VS b0=%p width=%u current-frame-write=%u current-frame-draw=%u write-before-draw=%u; retained address/bytes may be recycled or newer than draw, projection owner unknown",
-                        t.color, cb.resource, cb.width,
-                        cb.writeEpoch == g.epoch ? 1 : 0,
-                        cb.drawEpoch == g.epoch ? 1 : 0,
-                        cb.writeEpoch == g.epoch && cb.drawEpoch == g.epoch &&
-                            cb.writeSeq <= cb.drawSeq ? 1 : 0);
-        return;
-    }
-    Log::get().note("flat discover CB: target=%p VS b0=%p width=%u copied=%u hash=%08X writes=%u depth-draws=%u write-q=%u draw-q=%u vs=%016llX (same-frame candidate bytes only)",
-                    t.color, cb.resource, cb.width, cb.copied,
-                    hashBytes(cb.bytes, cb.copied), cb.writes, cb.draws,
+    Log::get().note("flat discover CB: target=%p VS b%u=%p width=%u copied=%u hash=%08X depth-draws=%u write-epoch=%llu draw-epoch=%llu write-q=%u draw-q=%u vs=%016llX (bytes frozen at this target draw; shader binding observed, consumption unproved)",
+                    t.color, slot, cb.resource, cb.width, cb.copied,
+                    hashBytes(cb.bytes, cb.copied), t.depthDraws,
+                    static_cast<unsigned long long>(cb.writeEpoch),
+                    static_cast<unsigned long long>(cb.drawEpoch),
                     cb.writeSeq, cb.drawSeq,
-                    static_cast<unsigned long long>(cb.vsHash));
+                    static_cast<unsigned long long>(cb.shader));
     // The known VR scene block has view rows at float 932. Printing them is
     // evidence to compare, not permission to assume flat uses the same block.
     if (cb.copied >= (932 + 12) * sizeof(float)) {
         float row[12];
         std::memcpy(row, cb.bytes + 932 * sizeof(float), sizeof(row));
-        Log::get().note("flat discover CB candidate f932 rows: %.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g",
-                        row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
+        Log::get().note("flat discover CB VS b%u candidate f932 rows: %.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g | %.5g %.5g %.5g %.5g",
+                        slot, row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
                         row[8], row[9], row[10], row[11]);
     }
     uint32_t plausible = 0;
@@ -229,52 +240,65 @@ void printCb(const Target& t) {
         if (!axis || !corners || !perspective) continue;
         ++plausible;
         if (plausible <= 4) {
-            Log::get().note("flat discover projection-like bytes: VSb0=%p byte-offset=%u diag=%.6g,%.6g,%.6g tail=%.6g,%.6g,%.6g,%.6g; shape only, draw consumption/inverse unproved",
-                            cb.resource, offset, m[0], m[5], m[10],
+            Log::get().note("flat discover projection-like bytes: VS b%u=%p byte-offset=%u diag=%.6g,%.6g,%.6g tail=%.6g,%.6g,%.6g,%.6g; shape only, shader consumption/inverse unproved",
+                            slot, cb.resource, offset, m[0], m[5], m[10],
                             m[11], m[12], m[14], m[15]);
         }
     }
-    if (!plausible) Log::get().note("flat discover projection-like bytes: none in captured VS b0; projection owner unknown");
-    else if (plausible > 4) Log::get().note("flat discover projection-like bytes: %u further candidates omitted", plausible - 4);
+    if (!plausible) Log::get().note("flat discover projection-like bytes: none in frozen VS b%u; projection owner unknown", slot);
+    else if (plausible > 4) Log::get().note("flat discover projection-like bytes: VS b%u %u further candidates omitted", slot, plausible - 4);
 }
 
 void report(uint64_t frame, const char* phase) {
-    uint32_t frameDraws = 0, frameDepth = 0, outDraws = 0;
-    for (uint32_t i = 0; i < g.targetCount; ++i) {
-        const Target& t = g.targets[i];
-        frameDraws += t.draws; frameDepth += t.depthDraws;
-        if (t.color == g.backbuffer) outDraws += t.draws;
-    }
-    if (frameDepth) ++g.framesWithDepth;
-    if (outDraws) ++g.framesToOutput;
-    g.totalDraws += frameDraws; g.totalDepthDraws += frameDepth;
-    Log::get().note("flat discover %s frame=%llu profile=flat request=%s treatment=refused reason=uncertified-scene-projection-depth-boundary certificate=%u presents=%u test=%u failed=%u depth-frames=%u output-frames=%u draws=%u depth-draws=%u copies=%u dispatches=%u unknown-lists=%u foreign-thread-calls=%llu overflow(view,target,edge,cb,clear)=%u,%u,%u,%u,%u output=%p %ux%u fmt=%u",
+    Log::get().note("flat discover %s frame=%llu profile=flat request=%s treatment=refused reason=uncertified-scene-projection-depth-boundary certificate=%u presents=%u useful-frames=%u test=%u failed=%u depth-frames=%u output-frames=%u draws=%u depth-draws=%u copies=%u dispatches=%u unknown-lists=%u foreign-thread-calls=%llu frame-dropped-observations(view,target,edge,output-edge,cb,clear)=%u,%u,%u,%u,%u,%u output=%p %ux%u fmt=%u",
                     phase, static_cast<unsigned long long>(frame),
                     Config::get().requestedTemporalMode().c_str(),
                     flatTemporalEvidenceComplete(g.proof) ? 1 : 0, g.presents,
-                    g.testPresents, g.rejectedPresents, g.framesWithDepth,
+                    g.usefulFrames, g.testPresents, g.rejectedPresents, g.framesWithDepth,
                     g.framesToOutput, g.totalDraws, g.totalDepthDraws,
                     g.totalCopies, g.totalDispatches, g.unknownLists,
                     static_cast<unsigned long long>(detail::g_flatTemporalForeignCalls.load(std::memory_order_relaxed)),
-                    g.viewOverflow, g.targetOverflow, g.edgeOverflow, g.cbOverflow,
+                    g.viewOverflow, g.targetOverflow, g.edgeOverflow,
+                    g.outputEdgeOverflow, g.cbOverflow,
                     g.depthClearOverflow,
                     g.backbuffer, g.backW, g.backH, g.backFmt);
-    // One frame's strongest depth-bearing target and up to its direct output
-    // routes. This keeps a busy renderer's log bounded; raw pointer identities
-    // are expressly only valid for this one frame.
+    // At most 128 admitted target pairs per sampled frame. Every row matters:
+    // depth-only passes and intermediate colour paths can outdraw the scene.
+    uint32_t depthOnly = 0, colorDepth = 0, unresolved = 0;
     const Target* best = nullptr;
     for (uint32_t i = 0; i < g.targetCount; ++i) {
         const Target& t = g.targets[i];
-        if (!best || t.depthDraws > best->depthDraws) best = &t;
+        if (!t.draws) continue;
+        if (!t.color && t.depth) ++depthOnly;
+        if (t.color && t.depth) ++colorDepth;
+        if (t.rtv && !t.color) ++unresolved;
+        Log::get().note("flat discover target frame=%llu index=%u color=%p depth=%p rtv=%p dsv=%p target=%ux%u viewport=%ux%u fmt=%u draws=%u depth-draws=%u q=%u..%u clears(color,depth)=%u,%u VSb0=%p VSb1=%p VS=%016llX class=%s",
+                        static_cast<unsigned long long>(frame), i,
+                        t.color, t.depth, t.rtv, t.dsv, t.w, t.h,
+                        t.vpW, t.vpH, t.fmt, t.draws, t.depthDraws,
+                        t.first, t.last, t.clearColor, t.clearDepth,
+                        t.vsCb[0], t.vsCb[1],
+                        static_cast<unsigned long long>(t.vsHash),
+                        flatSceneCandidateEligible(t.color, t.depth, t.depthDraws)
+                            ? "color+depth-candidate" :
+                        !t.color && t.depth ? "depth-only-excluded" : "other-unproved");
+        if (flatSceneCandidateEligible(t.color, t.depth, t.depthDraws))
+            for (uint32_t slot = 0; slot < 2; ++slot)
+                printCb(t, slot, g.exemplars[i][slot]);
+        if (flatSceneCandidateEligible(t.color, t.depth, t.depthDraws) &&
+            (!best || t.depthDraws > best->depthDraws)) best = &t;
     }
+    Log::get().note("flat discover inventory frame=%llu admitted=%u capacity=%u dropped-target-observations=%u depth-only=%u color+depth=%u unresolved-color-views=%u; target pointers are frame-local, classifications are not scene proof",
+                    static_cast<unsigned long long>(frame), g.targetCount,
+                    kTargets, g.targetOverflow, depthOnly, colorDepth, unresolved);
     if (best) {
-        Log::get().note("flat discover candidate frame=%llu color=%p depth=%p target=%ux%u viewport=%ux%u fmt=%u draws=%u depth-draws=%u q=%u..%u clears(color,depth)=%u,%u VSb0=%p VS=%016llX; candidate only",
+        Log::get().note("flat discover candidate frame=%llu color=%p depth=%p target=%ux%u viewport=%ux%u fmt=%u draws=%u depth-draws=%u q=%u..%u clears(color,depth)=%u,%u VSb0=%p VSb1=%p VS=%016llX; strongest admitted color+depth shape only, not scene certificate",
                         static_cast<unsigned long long>(frame), best->color, best->depth,
                         best->w, best->h, best->vpW, best->vpH,
                         best->fmt, best->draws, best->depthDraws,
                         best->first, best->last, best->clearColor, best->clearDepth,
-                        best->vsCb, static_cast<unsigned long long>(best->vsHash));
-        printCb(*best);
+                        best->vsCb[0], best->vsCb[1],
+                        static_cast<unsigned long long>(best->vsHash));
         bool foundClear = false;
         for (uint32_t i = 0; i < g.depthClearCount; ++i) {
             const DepthClear& clear = g.depthClears[i];
@@ -288,18 +312,25 @@ void report(uint64_t frame, const char* phase) {
         if (!foundClear)
             Log::get().note("flat discover matched depth clear: none in sampled frame; depth ownership/encoding unproved");
     } else {
-        Log::get().note("flat discover candidate: none in sampled frame; no scene certificate");
+        Log::get().note("flat discover candidate: no admitted color+depth draw in sampled frame; depth-only targets excluded, no scene certificate");
     }
-    uint32_t printed = 0;
-    for (uint32_t i = 0; i < g.edgeCount && printed < 10; ++i) {
-        const Edge& e = g.edges[i];
-        if (e.dst != g.backbuffer && (!best || e.src != best->color)) continue;
-        Log::get().note("flat discover lineage frame=%llu kind=%c source=%p dest=%p calls=%u q=%u..%u (S means bound SRV, not proved shader read)",
+    for (uint32_t i = 0; i < g.outputEdgeCount; ++i) {
+        const Edge& e = g.outputEdges[i];
+        Log::get().note("flat discover output-lineage frame=%llu kind=%c source=%p dest=%p calls=%u q=%u..%u (S is PS slots 0..3 shadow-observed only; alias unbinds and higher slots unobserved)",
                         static_cast<unsigned long long>(frame), e.kind,
                         e.src, e.dst, e.count, e.first, e.last);
-        ++printed;
     }
-    if (!printed) Log::get().note("flat discover lineage: no direct sampled/copy edge to output or from candidate in sampled frame");
+    Log::get().note("flat discover output-lineage inventory retained=%u capacity=%u dropped-route-observations=%u output-known=%u; absent routes do not prove separation",
+                    g.outputEdgeCount, kOutputEdges, g.outputEdgeOverflow,
+                    g.backbuffer ? 1 : 0);
+    for (uint32_t i = 0; i < g.edgeCount; ++i) {
+        const Edge& e = g.edges[i];
+        Log::get().note("flat discover general-lineage frame=%llu kind=%c source=%p dest=%p calls=%u q=%u..%u (S is PS slots 0..3 shadow-observed only; alias unbinds and higher slots unobserved)",
+                        static_cast<unsigned long long>(frame), e.kind,
+                        e.src, e.dst, e.count, e.first, e.last);
+    }
+    Log::get().note("flat discover general-lineage inventory retained=%u capacity=%u dropped-route-observations=%u; absent route is inconclusive",
+                    g.edgeCount, kEdges, g.edgeOverflow);
     Log::get().note("flat discover forward-Present evidence: draws=%u copies=%u; Present1 and upstream mod effects are not observed, so mod order is unqualified",
                     g.forwardedDraws, g.forwardedCopies);
 }
@@ -308,12 +339,18 @@ void clearFrame() {
     std::memset(g.views, 0, sizeof(g.views));
     std::memset(g.targets, 0, sizeof(g.targets));
     std::memset(g.edges, 0, sizeof(g.edges));
+    std::memset(g.outputEdges, 0, sizeof(g.outputEdges));
     std::memset(g.depthClears, 0, sizeof(g.depthClears));
-    g.targetCount = g.edgeCount = g.serial = 0;
+    for (uint32_t i = 0; i < g.targetCount; ++i)
+        for (uint32_t slot = 0; slot < 2; ++slot)
+            g.exemplars[i][slot].copied = 0;
+    g.targetCount = g.edgeCount = g.outputEdgeCount = g.serial = 0;
+    g.largeCbCount = g.smallCbCount = 0;
+    g.viewOverflow = g.targetOverflow = g.edgeOverflow = 0;
+    g.outputEdgeOverflow = g.cbOverflow = g.depthClearOverflow = 0;
     g.depthClearCount = 0;
     ++g.epoch;
     g.current = nullptr; g.sampledTarget = nullptr;
-    g.boundRtv = g.boundDsv = nullptr;
     g.forwardingPresent = false;
     std::memset(g.sampledSrv, 0, sizeof(g.sampledSrv));
 }
@@ -325,10 +362,13 @@ void flatTemporalStart(ID3D11Device* device) {
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
     detail::g_flatTemporalOwnerThread.store(0, std::memory_order_release);
     detail::g_flatTemporalForeignCalls.store(0, std::memory_order_release);
-    g = State{};
+    // State includes fixed CB exemplar payloads exceeding a default Windows
+    // thread stack. Zero the static object directly, never assign State{}.
+    std::memset(&g, 0, sizeof(g));
+    g.epoch = 1;
     g.device = device;
     g_waitingForPresent.store(true, std::memory_order_release);
-    Log::get().note("flat temporal: discovery armed, awaiting first owned Present thread; then at most 120 s / 12000 Presents. Requested=%s; AA treatment refused until desktop camera, projection, depth and handoff are certified",
+    Log::get().note("flat temporal: discovery armed, awaiting first owned Present thread; then at most 120 s / 12000 useful frames (all Presents counted separately). Requested=%s; AA treatment refused until desktop camera, projection, depth and handoff are certified",
                     Config::get().requestedTemporalMode().c_str());
 }
 
@@ -389,21 +429,21 @@ void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags) {
     ++g.presents;
     if (FAILED(result) && !(flags & DXGI_PRESENT_TEST)) ++g.rejectedPresents;
     const uint64_t now = nowMs();
-    const bool deadline = flatCaptureExpired(g.startedMs, now, g.presents,
-                                             kCaptureMs, kMaxPresents);
+    uint32_t frameDraws = 0, frameDepth = 0, outputDraws = 0;
+    for (uint32_t i = 0; i < g.targetCount; ++i) {
+        const Target& t = g.targets[i];
+        frameDraws += t.draws; frameDepth += t.depthDraws;
+        if (t.color == g.backbuffer) outputDraws += t.draws;
+    }
+    g.totalDraws += frameDraws; g.totalDepthDraws += frameDepth;
+    if (frameDraws) ++g.usefulFrames;
+    if (frameDepth) ++g.framesWithDepth;
+    if (outputDraws) ++g.framesToOutput;
+    const bool deadline = flatCaptureExpired(g.startedMs, now, g.usefulFrames,
+                                             kCaptureMs, kMaxUsefulFrames);
     if (g.presents == 1 || now >= g.nextReportMs || deadline) {
         report(frame, deadline ? "final" : "sample");
         g.nextReportMs = now + kReportMs;
-    } else {
-        uint32_t depth = 0, output = 0;
-        for (uint32_t i = 0; i < g.targetCount; ++i) {
-            const Target& t = g.targets[i];
-            g.totalDraws += t.draws; g.totalDepthDraws += t.depthDraws;
-            depth += t.depthDraws;
-            if (t.color == g.backbuffer) output += t.draws;
-        }
-        if (depth) ++g.framesWithDepth;
-        if (output) ++g.framesToOutput;
     }
     if (deadline) {
         detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
@@ -415,9 +455,9 @@ void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags) {
 void flatTemporalBind(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv) {
     if (!flatTemporalCapturing()) return;
     ++g.serial;
-    g.boundRtv = rtv; g.boundDsv = dsv;
     g.current = nullptr;
     g.sampledTarget = nullptr;
+    (void)rtv; (void)dsv;  // the binding shadow records explicit nulls too
 }
 
 void flatTemporalViewport(UINT count, const D3D11_VIEWPORT* vps) {
@@ -435,8 +475,10 @@ void flatTemporalDraw(uint32_t count, uint32_t instances) {
     if (!flatTemporalCapturing()) return;
     ++g.serial;
     if (!g.current) {
-        void* rtv = g.boundRtv ? g.boundRtv : bindingGet(BindSlot::Rtv0);
-        void* dsv = g.boundDsv ? g.boundDsv : bindingGet(BindSlot::Dsv0);
+        // The shadow includes explicit null binds. Never replace a null bind
+        // with an older non-null collector value.
+        void* rtv = bindingGet(BindSlot::Rtv0);
+        void* dsv = bindingGet(BindSlot::Dsv0);
         g.current = targetOf(rtv, dsv);
     }
     Target* t = g.current;
@@ -447,19 +489,26 @@ void flatTemporalDraw(uint32_t count, uint32_t instances) {
     if (t->dsv) ++t->depthDraws;
     if (!t->first) t->first = g.serial;
     t->last = g.serial;
-    if (!t->vsCb) {
-        t->vsCb = bindingGet(BindSlot::VsCb0);
+    if (t->draws == 1) {
+        t->vsCb[0] = bindingGet(BindSlot::VsCb0);
+        t->vsCb[1] = bindingGet(BindSlot::VsCb1);
         t->vsHash = bindingShaderHash(BindSlot::Vs);
     }
-    const void* cbPtr = bindingGet(BindSlot::VsCb0);
-    for (uint32_t i = 0; i < g.cbCount; ++i) {
-        Cb& cb = g.cbs[i];
-        if (cb.resource == cbPtr) {
+    const uint32_t targetIndex = static_cast<uint32_t>(t - g.targets);
+    const uint64_t vsHash = bindingShaderHash(BindSlot::Vs);
+    for (uint32_t slot = 0; slot < 2; ++slot) {
+        const BindSlot bindSlot = slot ? BindSlot::VsCb1 : BindSlot::VsCb0;
+        void* cbPtr = bindingGet(bindSlot);
+        if (Cb* found = findCb(cbPtr)) {
+            Cb& cb = *found;
             if (cb.drawEpoch != g.epoch) cb.draws = 0;
             ++cb.draws; cb.drawSeq = g.serial;
             cb.drawEpoch = g.epoch;
-            cb.vsHash = bindingShaderHash(BindSlot::Vs);
-            break;
+            cb.vsHash = vsHash;
+            flatFreezeCbExemplar(g.exemplars[targetIndex][slot], cbPtr,
+                                 cb.bytes, cb.width, cb.copied,
+                                 cb.writeEpoch, cb.writeSeq, g.epoch,
+                                 g.serial, vsHash);
         }
     }
     if (g.sampledTarget != t->color) {
@@ -501,6 +550,7 @@ void flatTemporalTransfer(ID3D11Resource* dst, ID3D11Resource* src, char kind) {
     if (!flatTemporalCapturing()) return;
     ++g.serial; ++g.totalCopies;
     if (g.forwardingPresent) ++g.forwardedCopies;
+    invalidateCb(dst);  // a destination CB no longer has known CPU-write bytes
     edge(src, dst, kind);
 }
 void flatTemporalDispatch() {
@@ -511,6 +561,11 @@ void flatTemporalExecuteList(bool foreign) {
     if (!flatTemporalCapturing()) return;
     ++g.serial; ++g.unknownLists;
     g.proof.unknownDeferredWork = true;
+    g.current = nullptr;
+    g.viewportW = g.viewportH = 0;
+    for (uint32_t i = 0; i < g.largeCbCount; ++i) invalidateCb(g.cbs[i].resource);
+    for (uint32_t i = 0; i < g.smallCbCount; ++i)
+        invalidateCb(g.cbs[kCbs / 2 + i].resource);
     static uint32_t notes = 0;
     if (notes++ < 4) Log::get().note("flat discover ExecuteCommandList q=%u foreign=%u; deferred writes/camera order unqualified",
                                    g.serial, foreign ? 1 : 0);
@@ -518,27 +573,31 @@ void flatTemporalExecuteList(bool foreign) {
 void flatTemporalMap(ID3D11Resource* res, UINT sub, D3D11_MAP type, void* data) {
     if (!flatTemporalCapturing() || !res || !data || sub || type == D3D11_MAP_READ) return;
     const uint32_t width = bufferWidth(res);
-    // The known VR scene block is at least 3776 bytes. Also sample a bound
-    // smaller VS b0 buffer, but do not infer that either is flat's camera.
-    if ((!width || width > 65536) || (width < 3776 && res != bindingGet(BindSlot::VsCb0))) return;
-    if (Cb* cb = cbOf(res, width)) cb->mapped = data;
+    // A small b0/b1 write can precede the later bind. Keep bounded separate
+    // large and small pools so unrelated small writes cannot evict scene-size
+    // buffers. Neither size proves camera ownership.
+    if (!width || width > 65536) return;
+    if (Cb* cb = cbOf(res, width)) {
+        cb->copied = 0; cb->writeEpoch = 0;
+        cb->mapped = data;
+    }
 }
 void flatTemporalUnmap(ID3D11Resource* res) {
     if (!flatTemporalCapturing() || !res) return;
-    for (uint32_t i = 0; i < g.cbCount; ++i) {
-        Cb& cb = g.cbs[i];
-        if (cb.resource != res || !cb.mapped) continue;
+    if (Cb* found = findCb(res)) {
+        Cb& cb = *found;
+        if (!cb.mapped) return;
         cb.copied = std::min(cb.width, kCbBytes);
         std::memcpy(cb.bytes, cb.mapped, cb.copied);
         cb.mapped = nullptr; cb.writeSeq = ++g.serial; ++cb.writes;
         cb.writeEpoch = g.epoch;
-        return;
     }
 }
 void flatTemporalUpdate(ID3D11Resource* dst, const void* data, const D3D11_BOX* box) {
-    if (!flatTemporalCapturing() || !dst || !data || box) return;
+    if (!flatTemporalCapturing() || !dst) return;
+    if (!data || box) { invalidateCb(dst); return; }
     const uint32_t width = bufferWidth(dst);
-    if (!width || width > 65536 || (width < 3776 && dst != bindingGet(BindSlot::VsCb0))) return;
+    if (!width || width > 65536) { invalidateCb(dst); return; }
     if (Cb* cb = cbOf(dst, width)) {
         cb->copied = std::min(width, kCbBytes);
         std::memcpy(cb->bytes, data, cb->copied);

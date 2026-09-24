@@ -10,10 +10,10 @@ struct Pair {
     unsigned draws = 0;
 };
 struct Route {
-    void* source = nullptr;
-    void* dest = nullptr;
+    const void* src = nullptr;
+    const void* dst = nullptr;
     char kind = 0;
-    unsigned uses = 0;
+    unsigned count = 0, first = 0, last = 0;
 };
 int failures = 0;
 void check(bool condition, const char* what) {
@@ -46,14 +46,74 @@ void testAssociationAndBounds() {
     Route routes[2]{};
     used = overflow = 0;
     Route* r = edvr::flatFindOrAdd(routes, used, overflow,
-        [=](const Route& e) { return e.source == c && e.dest == d1 && e.kind == 'S'; });
-    r->source = c; r->dest = d1; r->kind = 'S'; r->uses = 1;
+        [=](const Route& e) { return e.src == c && e.dst == d1 && e.kind == 'S'; });
+    r->src = c; r->dst = d1; r->kind = 'S'; r->count = 1;
     Route* repeat = edvr::flatFindOrAdd(routes, used, overflow,
-        [=](const Route& e) { return e.source == c && e.dest == d1 && e.kind == 'S'; });
+        [=](const Route& e) { return e.src == c && e.dst == d1 && e.kind == 'S'; });
     check(repeat == r && used == 1, "bound-SRV route coalesces");
     Route* copy = edvr::flatFindOrAdd(routes, used, overflow,
-        [=](const Route& e) { return e.source == c && e.dest == d1 && e.kind == 'R'; });
+        [=](const Route& e) { return e.src == c && e.dst == d1 && e.kind == 'R'; });
     check(copy != nullptr && copy != r, "copy and sampled routes are distinct evidence");
+}
+void testFrozenEvidence() {
+    void* color = reinterpret_cast<void*>(0x1000);
+    void* depth = reinterpret_cast<void*>(0x2000);
+    check(!edvr::flatSceneCandidateEligible(nullptr, depth, 80),
+          "depth-only high-draw target excluded from scene candidate");
+    check(!edvr::flatSceneCandidateEligible(color, nullptr, 80),
+          "color without depth excluded from scene candidate");
+    check(edvr::flatSceneCandidateEligible(color, depth, 2),
+          "color and depth draw remains candidate, not certificate");
+
+    unsigned char bytes[4] = {1, 2, 3, 4};
+    edvr::FlatCbExemplar a{}, b{}, b1{};
+    const void* buffer = reinterpret_cast<void*>(0x3000);
+    check(edvr::flatFreezeCbExemplar(a, buffer, bytes, 4096, 4,
+                                     11, 101, 11, 105, 0xA1),
+          "target A freezes same-frame write at its draw");
+    bytes[0] = 9;
+    check(edvr::flatFreezeCbExemplar(b, buffer, bytes, 4096, 4,
+                                     11, 594, 11, 601, 0xB2),
+          "same buffer can have distinct cross-pass exemplar");
+    check(a.bytes[0] == 1 && a.writeSeq == 101 && a.drawSeq == 105 &&
+          a.shader == 0xA1 && b.bytes[0] == 9 && b.shader == 0xB2,
+          "later buffer reuse cannot replace earlier target bytes or shader");
+    check(!edvr::flatFreezeCbExemplar(a, buffer, bytes, 4096, 4,
+                                      11, 594, 11, 601, 0xB2) && a.bytes[0] == 1,
+          "a second draw cannot overwrite frozen target exemplar");
+    check(!edvr::flatFreezeCbExemplar(b1, buffer, bytes, 4096, 4,
+                                      10, 80, 11, 105, 0xA1),
+          "prior-frame shadow is not draw-frozen evidence");
+    check(!edvr::flatFreezeCbExemplar(b1, buffer, bytes, 4096, 4,
+                                      11, 106, 11, 105, 0xA1),
+          "later write cannot be associated with earlier draw");
+    check(!edvr::flatFreezeCbExemplar(b1, buffer, bytes, 4096, 4,
+                                      0, 0, 11, 105, 0xA1),
+          "invalidated unsupported write cannot supply old shadow bytes");
+    check(edvr::flatFreezeCbExemplar(b1, buffer, bytes, 4096, 4,
+                                     11, 104, 11, 105, 0xA1),
+          "independent b1 slot freezes a valid draw write");
+}
+void testOutputEdgeReservation() {
+    Route all[2]{}, output[2]{};
+    uint32_t used = 0, overflow = 0, outputUsed = 0, outputOverflow = 0;
+    const void* backbuffer = reinterpret_cast<void*>(0x9000);
+    const void* mid = reinterpret_cast<void*>(0x8000);
+    edvr::flatRecordEdge(all, used, overflow, output, outputUsed, outputOverflow,
+                         reinterpret_cast<void*>(0x1000), mid, 'S', backbuffer, 1);
+    edvr::flatRecordEdge(all, used, overflow, output, outputUsed, outputOverflow,
+                         reinterpret_cast<void*>(0x2000), mid, 'S', backbuffer, 2);
+    edvr::flatRecordEdge(all, used, overflow, output, outputUsed, outputOverflow,
+                         reinterpret_cast<void*>(0x3000), backbuffer, 'R', backbuffer, 3);
+    check(used == 2 && overflow == 1 && outputUsed == 1 && outputOverflow == 0,
+          "full general edge table still retains output route");
+    check(output[0].src == reinterpret_cast<void*>(0x3000) &&
+          output[0].dst == backbuffer && output[0].first == 3,
+          "reserved output edge has exact route and order");
+    edvr::flatRecordEdge(all, used, overflow, output, outputUsed, outputOverflow,
+                         reinterpret_cast<void*>(0x3000), backbuffer, 'R', backbuffer, 4);
+    check(output[0].count == 2 && output[0].last == 4,
+          "output route coalesces despite general saturation");
 }
 void testAdmissionAndWindow() {
     check(!edvr::flatCaptureThreadEligible(false, 7, 7),
@@ -86,6 +146,8 @@ void testAdmissionAndWindow() {
           "Present budget is exact");
     check(!edvr::flatCaptureExpired(2000, 2000, 0, 1000, 10),
           "rearmed window starts fresh");
+    check(!edvr::flatCaptureExpired(100, 200, 0, 1000, 10),
+          "startup Present traffic with zero useful frames does not exhaust frame budget");
 }
 } // namespace
 
@@ -95,6 +157,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     testAssociationAndBounds();
+    testFrozenEvidence();
+    testOutputEdgeReservation();
     testAdmissionAndWindow();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");

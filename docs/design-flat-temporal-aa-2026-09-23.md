@@ -4,9 +4,9 @@
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. First milestone is a capture-only flat installer,
-  runtime scope enforcement and bounded desktop probes. The full build's 83
-  jobs and config contract passed; the final committed build must also pass.
-  Flat temporal reconstruction/jitter are NOT enabled in this build.
+  runtime scope enforcement and bounded desktop probes. Corrected capture
+  passed all 83 build jobs and the 254-key config contract; Epic replay is
+  next. Flat temporal reconstruction/jitter are NOT enabled in this build.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -16,11 +16,15 @@
   only temporal AA and its required support services.
 - **Open:** flat camera/projection ownership, scene/depth identity, resolve
   boundary, UI ordering, render-scale ownership, and mod hook ordering need a
-  measured desktop capture. Working VR inputs do not prove these paths.
+  corrected desktop capture. The first Epic capture reached the draw hooks, but
+  selected a depth-only target and misassociated reused CB bytes. See section 8
+  for ruled-out evidence before interpreting projection shapes. The separate
+  0.75x session captured 960x540 with output 1280x720; scene identity and
+  supersampling ownership remain unqualified.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next session:** install the flat artifact, launch Elite in 2D, enter a
+- **Next session:** correct and validate the probe, then enter the Epic 2D
   cockpit and press F10 (`hotkey.dump_draws`) for a fresh bounded capture.
   Repeat on foot and with each mod arrangement. Use `tools/edvr_log.py` with
   the actual `--target`, `--expect-build HEAD` and
@@ -293,3 +297,63 @@ rejection, resource/reset lifetime and profile enforcement with stale INIs.
 Extend installer chain tests at
 `tools/installer_test/installer_test.cpp:553-577,683+`. Every C++ change builds
 through absolute `build.bat`. Flat quality and VR parity remain measured gates.
+
+## 8. Epic capture journal, 2026-09-23
+
+The Epic log `edvr_gfx_20260923_202701.log` matches branch commit fc5f5353
+(v0.17.0-489-gfc5f5353). F10 rearmed at 20:28:57.070. Output was 1280x720;
+draw, depth, copy and dispatch hooks ran on the owned thread with zero foreign
+calls or unknown command lists. Sean ran 0.75x supersampling in a separate
+session; compare that log independently, never infer a mid-session change.
+
+- Ruled out: the highest depth-draw target as scene colour, because the
+  20:29:02.107 sample reports colour=null, target=0x0, viewport=1024x1024. A
+  shadow pass is possible but not proven. Inventory colour/depth targets and
+  their output routes before choosing the world scene.
+- Ruled out: same-frame latest CB bytes as target-consumed projection, because
+  candidate draws span q101..259 with VS BA415283FF452DB2, while reported CB
+  write/draw q594/601 uses VS DEF19B035D5EDEDC. Freeze bytes and provenance at
+  the actual target draw; later reuse must not replace them.
+- Incomplete evidence: the 256-edge table overflows (61 at the first useful
+  sample, 2560 cumulatively by 20:29:27). Reserve output-edge evidence and
+  report truncation explicitly; missing routes cannot certify separation.
+- Startup capture exhausted 12000 Presents in four seconds without draws. F10
+  successfully restarted collection. Preserve a bounded window while
+  distinguishing startup Present traffic from useful rendered frames.
+
+Next probe must show a bounded target inventory with dimensions, draw-time
+snapshots of observed bound CB bytes, and retained output lineage in the same
+sampled frame. Reused-buffer, depth-only and full-table regressions must pass
+before the next Epic run. AA, jitter and render-scale writes remain disabled.
+
+The separate 0.75x session, `edvr_gfx_20260923_203031.log`, also matches
+fc5f5353/build 6AB48917. F10 rearmed at 20:32:27.646. At 20:32:52.764, frame
+31384 reports a colour/depth target and viewport of 960x540, format 23, with
+two draws q115..130; output remains 1280x720, format 28. This is exactly 0.75
+of each output dimension. VS b0 is null on that candidate, so camera ownership
+remains unknown. A matched DSV clear at q110 has depth=0; the DSV view and
+depth resource naturally have different addresses. A colour copy at q120 is
+observed, but the complete route to output is not established.
+
+This supports testing the existing supersampling control for flat render scale.
+It does not yet prove the candidate is the world scene or identify the
+setting's write owner. Do not hook or enable scaling based on the ratio alone.
+
+Code cross-check: `binding_shadow.h` and the VS constant-buffer hook already
+track scene constants in VS b1. The initial flat probe inspected only b0;
+therefore a null b0 is not evidence that a draw lacks camera constants. The
+corrected capture must snapshot both b0 and b1 at the draw and print the slot
+with its provenance. Existing VR f932 view rows remain a comparison point, not
+a flat-camera certificate.
+
+The corrected probe keeps up to 128 target pairs, 256 general edges and 64
+reserved direct-output edges per frame. It captures at most 32 large and 32
+small constant buffers and freezes up to 4 KiB per target/slot exemplar for VS
+b0 and b1. Unsupported writes invalidate the CPU shadow. Snapshot storage is
+static, and frame reset invalidates metadata without clearing all payload
+bytes. The capture ends after 120 seconds or 12000 frames containing draws;
+startup Presents are counted separately. ClearState resets the viewport.
+
+Shader-input routes cover shadowed PS slots 0..3; implicit alias unbinds and
+higher slots are not observed. Frozen bound bytes do not prove shader reads.
+Truncated tables, missing snapshots and absent routes remain inconclusive.

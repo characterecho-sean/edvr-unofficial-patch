@@ -3165,7 +3165,10 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
                         kSlotClearState);
     }
     forgetBindings(s);
-    if (flatTemporalCapturing()) flatTemporalBind(nullptr, nullptr);
+    if (flatTemporalCapturing()) {
+        flatTemporalBind(nullptr, nullptr);
+        flatTemporalViewport(0, nullptr);
+    }
     foveationOnClearState();
     // ClearState changes bindings, not resource contents. Retain the
     // captured weapon vertices and attachment inputs across this call.
