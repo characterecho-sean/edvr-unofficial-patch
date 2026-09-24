@@ -644,7 +644,7 @@ struct Slot {
     bool          totalValid = false;
 };
 constexpr int kSlots = 16;
-constexpr int kStatCount = 56;   // 50 used since 2026-09-09 (39-45 the moving ships, 46 the second body, 47-49 the stepped parts), 50-54 engine-record velocity's pixel counts (2026-09-23); a 224-byte buffer
+constexpr int kStatCount = 56;   // 0-28 and 30-38 used; 29 and 39-49 free since the estimated body, ship and stepped-part paths retired (2026-09-23), the rest keeping their numbers; 50-54 engine-record velocity's pixel counts; a 224-byte buffer
 Slot g_slots[kSlots];
 
 // Bumped on every temporalPassConfigure call (both its call sites in
