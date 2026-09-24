@@ -474,15 +474,40 @@ int main(int argc, char** argv) {
         parseRuntimeProfile(std::string(4097, 'x')) != RuntimeProfile::Invalid)
         fail("profile descriptor", "invalid schema/duplicate/oversize admitted");
     else ok("profile descriptor refuses ambiguous or unsupported scope");
+    g_runtimeProfile = RuntimeProfile::Flat;
+    // The flat adapter reads this through getString with an on default. A
+    // refused key turns that default into off, so exercise the actual getter.
+    if (argc >= 3) {
+        const std::wstring scratch = widen(argv[2]);
+        if (!writeIni(scratch, "[fix]\r\nblack_void = on\r\n"))
+            fail("flat jitter scratch ini", "could not write it");
+        else {
+            Config::get().init(scratch);
+            g_runtimeProfile = RuntimeProfile::Flat;
+            if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "on")
+                ok("flat jitter uses on default when absent");
+            else fail("flat jitter default", "missing key was not on");
+        }
+    }
+    Config::get().set("experimental.temporal_aa_jitter", "on");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
+        ok("flat jitter reads explicit on");
+    else fail("flat jitter enabled", "explicit on was suppressed");
+    Config::get().set("experimental.temporal_aa_jitter", "off");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
+        ok("flat jitter preserves explicit off");
+    else fail("flat jitter override", "explicit off was not read");
     Config::get().set("fix.temporal_aa", "dlss");
     Config::get().set("fix.black_void", "on");
     Config::get().set("fix.head_offset_forward", "12");
+    Config::get().set("experimental.night_vision_realistic", "on");
     Config::get().set("advanced.real_dll", "d3d11_edhm.dll");
-    g_runtimeProfile = RuntimeProfile::Flat;
     expectStr("fix.temporal_aa", "off", "flat discovery cannot activate stereo temporal AA");
     if (Config::get().requestedTemporalMode() != "dlss") fail("flat request", "intent lost");
     else ok("flat diagnostic retains requested temporal mode");
     expectBool("fix.black_void", false, "flat profile suppresses restored unrelated fix");
+    expectBool("experimental.night_vision_realistic", false,
+               "flat jitter exception leaves unrelated experimental settings suppressed");
     expectInt("fix.head_offset_forward", 0, "flat profile suppresses numeric fix");
     expectFloat("fix.head_offset_forward", 0.0f, "flat profile suppresses float fix");
     if (Config::get().getIntInRange("fix.head_offset_forward", 12, 1, 100) != 0)
@@ -495,8 +520,19 @@ int main(int argc, char** argv) {
     g_runtimeProfile = RuntimeProfile::Invalid;
     expectBool("advanced.d3d11_fixes", false, "bad descriptor disables graphics hooks");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "bad descriptor preserves mod chaining");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
+        ok("invalid profile suppresses flat jitter");
+    else fail("invalid profile jitter", "flat key widened invalid scope");
     g_runtimeProfile = RuntimeProfile::LegacyVr;
     expectBool("fix.black_void", true, "legacy profile retains original behavior");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
+        ok("legacy profile retains explicit jitter setting");
+    else fail("legacy profile jitter", "flat exception changed VR read");
+    g_runtimeProfile = RuntimeProfile::Vr;
+    Config::get().set("experimental.temporal_aa_jitter", "on");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
+        ok("VR profile reads explicit jitter setting");
+    else fail("VR profile jitter", "flat exception changed VR scope");
     g_runtimeProfile = savedProfile;
 
     if (g_fails) {

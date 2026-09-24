@@ -3,18 +3,16 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `28ee5f73` is merged into this branch as requested
-  (section 19). Epic flight `25a634b2` confirms 112,589 of 112,590 private
-  preparations over 900 frames, including both lighting compute shaders
-  (section 27). All four focused solar/smoke samples have actual HDR/depth
-  bindings matching the modeled selected scene. Their projection rows are
-  current; missing material CB slices are not needed for homogeneous jitter. No
-  backend failures or unknown scene draws occurred during the audit. One
-  compute preparation lacked a full write; a cold snapshot became stale.
-  Section 26 rejects scene-camera equality as a jitter precondition. The
-  missing shader pair remains unobserved. Section 28 implements experimental
-  live jitter with scoped projection bindings and warm-up/recovery policy; the
-  latest reviewed flight remains the zero-phase build `25a634b2`.
+  before qualification. Main `28ee5f73` is merged as requested (section 19).
+  Section 27's solar/smoke bindings establish the earlier star scene, and
+  section 26 rejects scene-camera equality as a jitter precondition. Section 28
+  implements experimental live jitter with scoped projection bindings and
+  warm-up/recovery policy. Flight `0150638a` reached neither resolve nor jitter
+  (section 29): flat's key allowlist suppressed the jitter setting, and HDR
+  selection rejected a depthless `CFA91824129ECBBC` / `DFCBA0EC70B03C9B` pass.
+  Eleven unknown scene shader pairs also appeared. Do not repeat a
+  qualification flight until the config wiring and this scene's refusal
+  evidence are addressed.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -35,13 +33,13 @@
   knowledge and shared motion/backend math without requiring local matrices to
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. Section 28 wires coherent live phase and
-  recovery; offline checks precede installation. Next Epic flight: DLSS at
-  0.75x SS, F10 once, turn/fly near the star for 20-30 seconds. Check actual
-  jittered draws/dispatches, accepted history and fallback/refusal counters
-  together. The installed build SHA must match `tools/edvr_log.py
-  --expect-build`. No headset is needed for flat; VR still needs regression
-  tests.
+  constants or camera-equality labels. The key fix passes its Config
+  regression; section 29 identifies the HDR copy and inventories all eleven
+  shader pairs. Next Epic capture: reproduce this refused scene, F10 once, stay
+  20-30 seconds. Check actual HDR copy input/output provenance and the two
+  missing shader blobs before changing scene admission. This is a diagnostic
+  capture, not visual qualification. No headset is needed; VR still needs
+  regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -1593,3 +1591,106 @@ Final review removed a duplicated preflight reset and updated stale audit-only
 comments; `build/flat-live-jitter-verified.log` confirms the final source also
 passes the full build and all gates before commit. In-game nonzero phase,
 visual quality and VR regression remain unqualified.
+
+## 29. Live integration flight refused, 2026-09-24
+
+Epic `edvr_gfx_20260924_165053.log` matches `0150638a`, version
+`v0.17.0-563-g0150638a`, build `6AB5A844`, linked 22:46:28 UTC. DLSS was
+requested, with 1920x1080 scene resources and 2560x1440 output. This was not a
+successful live-jitter test: all reported phases, applied draws/dispatches,
+accepted frames and history counters remained zero. The final runtime total was
+17,244 refused copies. Backend preflight never ran.
+
+Two independent blockers are evidenced:
+
+- `Config::getString` returns `off` for keys rejected by
+  `runtimeProfileAllowsKey`. Flat's allowlist omitted
+  `experimental.temporal_aa_jitter`, so the newly wired default-on read was
+  always off. This also explains zero jitter-refusal counters despite unknown
+  projection recipes in the F10 audit. Fix the existing key's flat allowance
+  and exercise the actual Config getter in a regression; preserve explicit off
+  and suppression of unrelated VR features.
+- Main-scene conflict witnesses at frames 32715, 33613 and 34509 identify VS
+  `CFA91824129ECBBC` / PS `DFCBA0EC70B03C9B` writing the selected 1920x1080 HDR
+  target with no DSV. The preceding reference draw uses `7E38A6AA1269C901` /
+  `7CECABDE34FFBE9E` with matching scene depth. The selector marks this
+  `missing-depth-or-dsv` before any backend call. Earlier frame 25275 is a
+  different depthless copy pair. Determine the exact main pass's semantics
+  before admitting a depthless HDR write; do not globally remove depth checks
+  or label this a motion/jitter math failure.
+
+The 900-frame audit observed 276,575 candidates, 261,131 preparations, zero
+private-preparation refusals, 12,744 depth-unassociated observations and 20,173
+unknown scene draws across eleven pairs. These are zero-phase preparations, not
+raster bindings. The previously missing `5EAFFCD01B97D0C4` / `DD371C57C9093BB8`
+pair appeared 4,395 times, and F10 saved both creation blobs (1,768 and 5,880
+bytes). Its earlier absence is no longer a reason to defer offline shader
+analysis.
+
+Ruled out: stale DLL, because the log stamp matches the installed commit. Ruled
+out: backend failure caused this flight's refusal, because selection never
+reached backend preflight or resolve. The allowlist defect and HDR selection
+refusal are separate; fixing only the former cannot make this captured scene
+resolve. Scene context and remaining shader coverage still need analysis before
+another qualification build is installed.
+
+Offline bytecode resolves the missing-depth pass's role. The exact Steam
+`edvr_logs/shaders/vs_CFA91824129ECBBC.dxbc` (332 bytes) forwards position and
+UV with two moves, without CBs or resources. Its paired PS (372 bytes) samples
+t0, copies RGBA to RT0, and writes luminance to RT1 using `0.2125, 0.7154,
+0.0721`. It has no depth, camera, projection or discard. This is an image
+copy/luminance pass, distinct from the four-input deferred scene resolve. No
+active VR code special-cases these hashes. Its input image still must be
+associated with the scene: the conflict witness lacks that SRV identity, so
+bytecode alone does not justify preserving the preceding HDR depth/camera
+across this write. The next bounded F10 instrument records the actual copy
+input/output and prior source/destination provenance together.
+
+The eleven unknown pairs were checked against exact Steam creation blobs under
+`C:\Steam\steamapps\common\Elite
+Dangerous\Products\elite-dangerous-odyssey-64\edvr_logs\shaders` and the Epic
+shader directory. This inventory records algebra/consumers, not live scene
+ownership or admission. Existing projection layouts cover the known VS algebra;
+no new recipe is authorized solely by this table.
+
+| VS / PS | VS projection | PS consumption / remaining limit |
+|---|---|---|
+| `A1B7CFCD0BE7493E` / `2DB678B6B558B604` | b2 rows 10-13, DP4 | SV_Position depth t0 Load, G-buffer t1-3, discard, two MRTs |
+| `CE24A73943632F55` / `1F64463B15189104` | b2 rows 10-13, DP4 | SV_Position depth t0 Load, G-buffer t1-3, discard, two MRTs |
+| `41E245D488BFE83E` / `6EF82262EB12A037` | b0 rows 4-7, DP4 | projected depth t0 sample/discard, material t1-3, b2 direction basis |
+| `B12F7A618E1BDE98` / `42AC0CACC9CDF72B` | b0 rows 4-7, DP4 | varying/CB texture coordinates, cube t2; no evident depth compare |
+| `203DF51758AADC4D` / `EEAAC839A9F09448` | b0 rows 4-7, DP4 | t0 uses SV_Position scaled by b1[332].zw; t1-6 also sampled |
+| `5EAFFCD01B97D0C4` / `DD371C57C9093BB8` | b0 rows 4-7, DP4 | projected depth t0 compare, five discard sites, material t1, one MRT |
+| `98397963AAEC45D3` / `CAB49794BB439D03` | b1 rows 270-273, columns | PS creation blob missing in both dump directories |
+| `B75A6FF2CA9FA5D6` / `D56F859BE4781431` | VS creation blob missing | PS conditional screen t0 sample; t1/t2 UV samples |
+| `124D7F3F649138D4` / `8085AE8DD1906CDC` | b1 rows 270-273, columns; b2[2] alters clip z | varying UV t0/t1, four MRTs, no screen/depth sampling |
+| `5C1D8EF529324A22` / `C49F999F7D3C801D` | b0 rows 4-7, DP4 | varying UV t1/t2, fixed tiny t0 loads, b2 effects |
+| `820E5C131B99361D` / `6EAA86EFE135B2D4` | b0 rows 4-7, DP4 | projected t0 sample plus t1; no depth compare |
+
+The flat key fix's actual Config regression and full build pass in
+`build/flat-profile-jitter-fix.log`. Additional capture code must pass its own
+full build before installation; this log validates the key fix only.
+
+The F10 capture now samples exact `CFA91824129ECBBC` / `DFCBA0EC70B03C9B`
+before `flatRuntimeObserve`, on two distinct frames at least 90 frames apart.
+It reads actual shaders, RT0/RT1/DSV, PS t0 view and resource dimensions, and
+viewport under the internal guard. Separate lines show prior source/destination
+prefix records, including first writer, aggregate first/last sequence, recorded
+depth/camera provenance and prior HDR conflict. Absent records are explicitly
+unobserved. No source identity is invented, and scene selection is unchanged.
+Summary counters distinguish never observed, shader mismatch, missing records
+and rearming. Per-F10 creation-cache requests cover all eleven unfamiliar pairs
+and the exact HDR copy; missing caches remain explicit. Periodic jitter logs
+expose both temporal enablement and the requested jitter flag.
+
+Review caught the first draft targeting the final output copy instead of the
+HDR copy, plus a rearm counter checking the already-reset frame count. Both
+were corrected before building or flying. The instrument now checks the
+intended exact hashes and does not require the destination to be the final
+output. It preserves all admission checks.
+
+The corrected capture and key fix pass the full build and all gates in
+`build/flat-hdr-copy-provenance.log`. The maximum conservatively formatted new
+log line is 775 characters, below the logger's 1166-character limit. The next
+Epic run is for this exact image connection and missing bytecode, not a claim
+that temporal AA now resolves this scene.

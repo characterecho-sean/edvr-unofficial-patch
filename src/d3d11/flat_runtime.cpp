@@ -78,6 +78,11 @@ struct State {
         uint32_t attempts = 0, complete = 0;
     };
     LocalProjectionSample localSamples[2]{};
+    struct CopyProvenanceSample {
+        uint64_t firstFrame = 0, frames[2]{};
+        uint32_t attempts = 0, completed = 0, missingSource = 0, missingDestination = 0;
+        uint32_t actualMismatch = 0, rearmedBeforeComplete = 0;
+    } copyProvenance{};
     FlatMonoResolvePreflight plannedResolve{};
     FlatMonoResolvePreflightResult resolvePreflight{};
     bool haveResolvePlan = false;
@@ -174,6 +179,81 @@ void reportProjection(State& s, const char* event) {
         event,i,s.localSamples[i].attempts,s.localSamples[i].complete,
         (s.localSamples[i].closed[0]?1u:0u)+(s.localSamples[i].closed[1]?1u:0u),
         (unsigned long long)s.localSamples[i].firstFrame);
+    const auto& copy=s.copyProvenance;
+    Log::get().note("flat copy provenance capture: event=%s attempts=%u completed=%u missing-source-record=%u missing-destination-record=%u actual-shader-mismatch=%u rearmed-before-complete=%u first-frame=%llu result=%s; two distinct frames per F10 arm separated by at least 90 frames",
+        event,copy.attempts,copy.completed,copy.missingSource,copy.missingDestination,
+        copy.actualMismatch,copy.rearmedBeforeComplete,(unsigned long long)copy.firstFrame,
+        copy.attempts?"observed":"exact-copy-never-observed");
+}
+// This HDR copy is distinct from the final-output copy admitted by the resolver.
+constexpr uint64_t kHdrCopyVs=0xCFA91824129ECBBCull;
+constexpr uint64_t kHdrCopyPs=0xDFCBA0EC70B03C9Bull;
+void captureCopyProvenance(State& s, ID3D11DeviceContext* ctx, const FlatRuntimeDraw& d) {
+    const auto& k=d.key;
+    if(!s.projectionFrames || k.vs!=kHdrCopyVs || k.ps!=kHdrCopyPs) return;
+    auto& sample=s.copyProvenance;
+    if(sample.attempts==2 || (sample.attempts && s.prefix.frame-sample.firstFrame<90))return;
+    if(!sample.attempts)sample.firstFrame=s.prefix.frame;
+    const uint32_t attempt=++sample.attempts;
+    sample.frames[attempt-1]=s.prefix.frame;
+    FlatComputeInternalScope guard;
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    Ptr<ID3D11RenderTargetView> rt[2];Ptr<ID3D11DepthStencilView> ds;
+    Ptr<ID3D11ShaderResourceView> input;
+    ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+    ID3D11RenderTargetView* targets[2]{};ctx->OMGetRenderTargets(2,targets,&ds);
+    rt[0].Attach(targets[0]);rt[1].Attach(targets[1]);
+    ctx->PSGetShaderResources(0,1,&input);
+    Ptr<ID3D11Resource> dst[2],source,depthResource;
+    for(uint32_t i=0;i<2;++i)if(rt[i])rt[i]->GetResource(&dst[i]);
+    if(input)input->GetResource(&source);
+    if(ds)ds->GetResource(&depthResource);
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};if(input)input->GetDesc(&viewDesc);
+    D3D11_RESOURCE_DIMENSION sourceType=D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    if(source)source->GetType(&sourceType);
+    Ptr<ID3D11Texture2D> sourceTexture;if(source)source.As(&sourceTexture);
+    D3D11_TEXTURE2D_DESC sourceDesc{};if(sourceTexture)sourceTexture->GetDesc(&sourceDesc);
+    Ptr<ID3D11Texture2D> destinationTexture;if(dst[0])dst[0].As(&destinationTexture);
+    D3D11_TEXTURE2D_DESC destinationDesc{};if(destinationTexture)destinationTexture->GetDesc(&destinationDesc);
+    UINT viewportCount=1;D3D11_VIEWPORT viewport{};ctx->RSGetViewports(&viewportCount,&viewport);
+    const uint64_t actualVs=lookupShaderHash(vs.Get()),actualPs=lookupShaderHash(ps.Get());
+    const bool exact=actualVs==kHdrCopyVs && actualPs==kHdrCopyPs;
+    sample.completed+=exact;sample.actualMismatch+=!exact;
+    const FlatRuntimeTarget* inputTarget=nullptr,*outputTarget=nullptr;
+    for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
+        const auto& target=s.prefix.targets[i];
+        if(target.resource==source.Get())inputTarget=&target;
+        if(target.resource==dst[0].Get())outputTarget=&target;
+    }
+    sample.missingSource+=!inputTarget;sample.missingDestination+=!outputTarget;
+    Log::get().note("flat copy provenance: attempt=%u frame=%llu pre-seq=%u cached-VS=%016llX cached-PS=%016llX actual-VS=%016llX actual-PS=%016llX exact=%u rt0-view=%p rt0-resource=%p rt1-view=%p rt1-resource=%p dsv=%p dsv-resource=%p ps-t0-view=%p ps-t0-resource=%p viewport-count=%u viewport=(%.1f,%.1f,%.1f,%.1f,%.2f,%.2f)",
+        attempt,(unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)k.vs,(unsigned long long)k.ps,
+        (unsigned long long)actualVs,(unsigned long long)actualPs,exact?1u:0u,rt[0].Get(),dst[0].Get(),rt[1].Get(),dst[1].Get(),
+        ds.Get(),depthResource.Get(),input.Get(),source.Get(),viewportCount,viewport.TopLeftX,viewport.TopLeftY,
+        viewport.Width,viewport.Height,viewport.MinDepth,viewport.MaxDepth);
+    Log::get().note("flat copy provenance view: attempt=%u frame=%llu t0-view-dimension=%u t0-view-format=%u t0-mip=%u t0-mip-levels=%u t0-resource-type=%u t0-resource-size=%ux%u t0-resource-format=%u t0-samples=%u t0-array=%u rt0-resource-size=%ux%u rt0-resource-format=%u; missing view/texture fields are zero",
+        attempt,(unsigned long long)s.prefix.frame,(unsigned)viewDesc.ViewDimension,(unsigned)viewDesc.Format,
+        viewDesc.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D?viewDesc.Texture2D.MostDetailedMip:0u,
+        viewDesc.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D?viewDesc.Texture2D.MipLevels:0u,
+        (unsigned)sourceType,sourceDesc.Width,sourceDesc.Height,
+        (unsigned)sourceDesc.Format,sourceDesc.SampleDesc.Count,sourceDesc.ArraySize,
+        destinationDesc.Width,destinationDesc.Height,(unsigned)destinationDesc.Format);
+    for(uint32_t role=0;role<2;++role) {
+        const auto* target=role?outputTarget:inputTarget;
+        if(!target) {
+            Log::get().note("flat copy provenance prior: attempt=%u frame=%llu role=%s resource=%p prefix-target=unobserved; no scene identity inferred",
+                attempt,(unsigned long long)s.prefix.frame,role?"destination":"source",role?dst[0].Get():source.Get());
+            continue;
+        }
+        const auto& writes=target->writes;
+        Log::get().note("flat copy provenance prior: attempt=%u frame=%llu role=%s resource=%p writes=%u first=%u last=%u first-VS=%016llX first-PS=%016llX first-RTV=%p first-depth=%p first-DSV=%p first-b1=%p first-camera-hash=%016llX first-camera-present=%u first-write-epoch=%llu first-write-seq=%u last-camera-write-epoch=%llu last-camera-write-seq=%u hdr-bad=%u bad-cause=%s tones=%u tone-input=%p",
+            attempt,(unsigned long long)s.prefix.frame,role?"destination":"source",target->resource,
+            writes.draws,writes.first,writes.last,(unsigned long long)writes.key.vs,(unsigned long long)writes.key.ps,
+            writes.key.rtv,writes.key.depth,writes.key.dsv,writes.key.b1,(unsigned long long)writes.key.cameraHash,
+            writes.key.camera?1u:0u,(unsigned long long)writes.firstWriteEpoch,writes.firstWriteSeq,
+            (unsigned long long)writes.lastWriteEpoch,writes.lastWriteSeq,target->hdrBad?1u:0u,
+            flatRuntimeConflictName(target->firstBad.cause),target->tones,target->tone.key.srvResource[1]);
+    }
 }
 struct LocalRows { bool pixel; UINT slot, row, count; const char* name; };
 // These are the rows the four captured DXBC shaders actually consume for clip,
@@ -553,21 +633,36 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             if(s.projection && !s.projection->initialize(s.context.Get()))s.projection.reset();
         }
         if(s.projection && s.projectionContext) {
+            const uint32_t interrupted=s.projectionFrames && s.copyProvenance.attempts<2?
+                s.copyProvenance.rearmedBeforeComplete+1:0;
             s.projectionFrames=900;s.projectionDraws=s.projectionDispatches=s.projectionCandidates=0;
             s.projectionReady=s.projectionMissing=s.projectionUnowned=s.projectionUnknown=0;
             s.projectionUnchanged=0;
             s.projectionDetailsUsed=0;
             s.projectionOutcomesUsed=0;s.projectionOutcomeOverflow=0;
             s.localSamples[0]={};s.localSamples[1]={};
+            s.copyProvenance={};s.copyProvenance.rearmedBeforeComplete=interrupted;
             s.resolvePreflightRetryMs=0;
             s.resolvePreflight=s.haveResolvePlan ? flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve) : FlatMonoResolvePreflightResult{};
             if(s.haveResolvePlan)s.resolvePreflightRetryMs=GetTickCount64();
             Log::get().note("flat projection: armed 900-frame live preparation audit; frame phase governs raster and backend; F10 does not reset live projection resources");
-            // The previous flight observed this pair but retained no file.
-            // One attempt per manual arm saves exact creation bytes or emits
+            // Refresh exact creation bytecode once per manual arm, or emit
             // an explicit missing-cache result; no inferred shader admission.
             captureFlatProbeShader('v',0x5EAFFCD01B97D0C4ull);
             captureFlatProbeShader('p',0xDD371C57C9093BB8ull);
+            captureFlatProbeShader('v',kHdrCopyVs);
+            captureFlatProbeShader('p',kHdrCopyPs);
+            // Exact unknown scene pairs observed in build 0150638a. These
+            // creation-cache probes run once per manual F10 arm, never per draw.
+            constexpr uint64_t unknownVs[]={0xA1B7CFCD0BE7493Eull,0xCE24A73943632F55ull,
+                0x41E245D488BFE83Eull,0xB12F7A618E1BDE98ull,0x203DF51758AADC4Dull,
+                0x98397963AAEC45D3ull,0xB75A6FF2CA9FA5D6ull,0x124D7F3F649138D4ull,
+                0x5C1D8EF529324A22ull,0x820E5C131B99361Dull};
+            constexpr uint64_t unknownPs[]={0x2DB678B6B558B604ull,0x1F64463B15189104ull,
+                0x6EF82262EB12A037ull,0x42AC0CACC9CDF72Bull,0xEEAAC839A9F09448ull,
+                0xCAB49794BB439D03ull,0xD56F859BE4781431ull,0x8085AE8DD1906CDCull,
+                0xC49F999F7D3C801Dull,0x6EAA86EFE135B2D4ull};
+            for(uint32_t i=0;i<10;++i){captureFlatProbeShader('v',unknownVs[i]);captureFlatProbeShader('p',unknownPs[i]);}
         } else {s.projection.reset();s.projectionContext.Reset();s.projectionFrames=0;
             Log::get().note("flat projection: arm refused (allocation/context1/runtime unavailable), raster-phase=0");}
     }
@@ -604,7 +699,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const auto now = GetTickCount64();
     if (now - s.lastReport >= 5000) {
         if(s.projectionFrames)reportProjection(s,"progress");
-        Log::get().note("flat jitter: phase=(%.5g,%.5g) previous=(%.5g,%.5g) warm=%u frames=%llu draws=%llu dispatches=%llu refusals=%llu state=%s history-valid=%u",
+        Log::get().note("flat jitter: enabled=%u wanted=%u phase=(%.5g,%.5g) previous=(%.5g,%.5g) warm=%u frames=%llu draws=%llu dispatches=%llu refusals=%llu state=%s history-valid=%u",
+            enabled?1u:0u,s.jitterWanted?1u:0u,
             s.phase.currentX,s.phase.currentY,s.phase.previousX,s.phase.previousY,s.phase.warmFrames,
             (unsigned long long)s.jitteredFrames,(unsigned long long)s.jitterDraws,(unsigned long long)s.jitterDispatches,
             (unsigned long long)s.jitterRefusals,s.jitterReason,s.phase.previousAcceptedValid?1u:0u);
@@ -733,6 +829,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
     }
     if (foreignWork.load(std::memory_order_acquire)) s.prefix.uncertain = true;
+    captureCopyProvenance(s,ctx,d);
     const auto oldTargets = s.prefix.targetsUsed;
     const auto selected = flatRuntimeObserve(s.prefix, d);
     if (s.prefix.targetsUsed > oldTargets) {

@@ -100,6 +100,7 @@ inline bool runtimeProfileAllowsKey(const char* key) {
     if (std::strncmp(key, "log.", 4) == 0 || std::strcmp(key, "advanced.real_dll") == 0)
         return true;
     return runtimeFlatProfile() && (std::strcmp(key, "advanced.d3d11_fixes") == 0 ||
-        std::strcmp(key, "hotkey.dump_draws") == 0);
+        std::strcmp(key, "hotkey.dump_draws") == 0 ||
+        std::strcmp(key, "experimental.temporal_aa_jitter") == 0);
 }
 } // namespace edvr
