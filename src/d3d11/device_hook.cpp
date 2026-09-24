@@ -3,7 +3,6 @@
 #include "game_exit_probe.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
-#include "original_draw_probe.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
 
@@ -576,7 +575,6 @@ HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPU
             const uint64_t hash=fnv1a64(bytecode,len);
             GuiDrawSnapshot::rememberLayout(*out,elements,count,hash);
             EyeDrawSnapshot::rememberLayout(*out,elements,count,hash);
-            originalDrawProbeRememberLayout(*out,elements,count,hash);
             EyeTonemapSnapshot::rememberLayout(*out,elements,count,hash);
             EyePanelSnapshot::rememberLayout(*out,elements,count,hash);
         });
