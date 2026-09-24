@@ -5,7 +5,6 @@
 #include "../common/code_hook.h"
 #include "../common/config.h"
 #include "../common/log.h"
-#include "glitch_frame.h"  // glitchFrameCameraValidated: arm the writer watch in flight, not the menu
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -254,11 +253,17 @@ std::atomic<uint64_t> g_eventsWatched{0}, g_eventsActed{0};
 std::atomic<uint64_t> g_actedFrames{0};
 std::atomic<uint64_t> g_shipPointerChangesTotal{0};
 std::atomic<uint32_t> g_shipPointerChangeLinesLogged{0};
-std::atomic<uint64_t> g_modeHistogram[9] = {};  // 0-7, 8 = "other"
+std::atomic<uint64_t> g_modeHistogram[9] = {};  // 0-7, 8 = "other"; session total
+// CHANGE 4: the same bucketing, but per real frame -- read-and-reset by
+// transitionFlashEyeBaseNoteSceneCamera into the frame ring below, so the
+// dump can show whether two callers (FUN_142868c30 mode 2, FUN_14287b030 its
+// own mode) both consumed on one frame.
+std::atomic<uint16_t> g_modeCountsThisFrame[9] = {};
 
 void noteGameMode(int32_t gameMode) noexcept {
     const uint32_t slot = (gameMode >= 0 && gameMode <= 7) ? uint32_t(gameMode) : 8u;
     g_modeHistogram[slot].fetch_add(1, std::memory_order_relaxed);
+    g_modeCountsThisFrame[slot].fetch_add(1, std::memory_order_relaxed);
 }
 
 // The ship pointer (*(cameraObj+0x50)), published every successful read so
@@ -266,6 +271,25 @@ void noteGameMode(int32_t gameMode) noexcept {
 // touching game memory itself, and so the ring snapshot can report a change.
 std::atomic<uint64_t> g_lastShip{0};
 std::atomic<uint64_t> g_previousShipForChangeTest{0};
+
+// CHANGE 1: the held base. The last mailbox M cached from a REFILLED mode!=1
+// call -- the substitute an un-refilled call's act guard judges (transition_
+// flash_eye_base_core.h's heldBaseRefusal), and what the per-call ring entry
+// reports regardless of treatment, so a dump shows the candidate even for a
+// watched or refused call.
+std::mutex g_heldBaseMutex;
+float g_heldBaseM[16] = {};
+uint32_t g_heldBaseFrame = 0;
+uint64_t g_heldBaseShip = 0;
+bool g_haveHeldBase = false;
+
+// CHANGE 2: the writer-watch gate's own half of "flight, with the writer
+// active" -- the consumer's count of consecutive refilled mode!=1 calls,
+// read by frameBoundaryWriterWatch beside the existing ship-pointer
+// stability gate. Updated with a CAS loop, not a plain load/store: the
+// design doc's own two callers (FUN_142868c30, FUN_14287b030) can both
+// consume on one frame, so this is not single-writer.
+std::atomic<uint32_t> g_wwConsecutiveRefilled{0};
 
 // Per-frame accumulators for glitch_frame.cpp's RingEntry (read-and-reset,
 // poseReaderWatchFrameSnapshot's own convention). Touched from whichever
@@ -307,7 +331,9 @@ struct EyeBaseRingEntry {
     bool shipChanged = false;
     uint64_t ship = 0;
     float m[3] = {0, 0, 0};
-    float f[3] = {0, 0, 0};
+    float f[3] = {0, 0, 0};      // F is read and logged for the record only (CHANGE 1)
+    float cachedM[3] = {0, 0, 0};    // the held base at the time of this call
+    int32_t cachedAgeFrames = -1;    // frames since cached; -1 = no cache yet
     double dt = 0.0, dr = 0.0;   // only meaningful when a validation fold ran this call
 };
 
@@ -322,6 +348,37 @@ void pushRing(const EyeBaseRingEntry& e) noexcept {
     if (!ring) return;
     const uint64_t slot = g_ringHead.fetch_add(1, std::memory_order_relaxed);
     ring[slot % kEyeBaseRingCapacity] = e;
+}
+
+// --- The frame ring: one entry per REAL frame (not per call), pushed from
+// transitionFlashEyeBaseNoteSceneCamera -- CHANGE 3/4's per-frame dump rows
+// (the detector's scene camera, the writer hits, and the mode breakdown that
+// frame). Same concurrent-read-during-write acceptance as the call ring
+// above; there is only ever one writer (glitch_frame.cpp's own per-frame
+// tap), so unlike the call ring this one needs no fetch_add race tolerance
+// beyond that already-accepted read.
+constexpr uint32_t kEyeBaseFrameRingCapacity = 4096;
+
+struct EyeBaseFrameRecord {
+    uint32_t frame = 0;
+    bool sceneValid = false;
+    float scenePos[3] = {NAN, NAN, NAN};
+    uint32_t writerHits = 0;
+    uint16_t calls = 0;
+    uint16_t modeCounts[9] = {};
+};
+
+static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 1ull * 1024 * 1024,
+             "transition flash eye base: the frame ring must stay small");
+
+std::atomic<EyeBaseFrameRecord*> g_frameRing{nullptr};
+std::atomic<uint64_t> g_frameRingHead{0};
+
+void pushFrameRing(const EyeBaseFrameRecord& r) noexcept {
+    EyeBaseFrameRecord* const ring = g_frameRing.load(std::memory_order_acquire);
+    if (!ring) return;
+    const uint64_t slot = g_frameRingHead.fetch_add(1, std::memory_order_relaxed);
+    ring[slot % kEyeBaseFrameRingCapacity] = r;
 }
 
 // --- Dumps: one pending slot, serviced from the frame boundary (never from
@@ -440,14 +497,47 @@ void performDump(const PendingDump& due) noexcept {
         ++printed;
         appendLine(text,
             "  f%-7u seq=%-8llu t%-6u mode=%-3d %-10s treat=%-7s ship=0x%llX "
-            "M=(%+.3f %+.3f %+.3f) F=(%+.3f %+.3f %+.3f) dt=%.4f dr=%.6f wsince=%s shipchg=%s",
+            "M=(%+.3f %+.3f %+.3f) cachedM=(%+.3f %+.3f %+.3f) age=%-4d F=(%+.3f %+.3f %+.3f) "
+            "dt=%.4f dr=%.6f wsince=%s shipchg=%s",
             e.frame, (unsigned long long)e.sequence, e.threadId, e.gameMode,
             e.unrefilled ? "UNREFILLED" : "refilled", treatmentText(e.treatment),
-            (unsigned long long)e.ship, e.m[0], e.m[1], e.m[2], e.f[0], e.f[1], e.f[2], e.dt, e.dr,
+            (unsigned long long)e.ship, e.m[0], e.m[1], e.m[2], e.cachedM[0], e.cachedM[1], e.cachedM[2],
+            e.cachedAgeFrames, e.f[0], e.f[1], e.f[2], e.dt, e.dr,
             e.writerSinceLastConsume ? "yes" : "no", e.shipChanged ? "yes" : "no");
     }
     if (!any) { lo = due.window.lowTriggerFrame; hi = due.window.dueFrame; }
     appendLine(text, "transition flash eye base: dump done, %u entries", printed);
+
+    // CHANGE 3/4: the per-frame rows -- the detector's own scene camera
+    // (cb1[275], independent of advanced.eye_origin_trace), the writer hits
+    // that frame, and the mode breakdown (so the dump shows whether two
+    // callers both consumed on one frame).
+    appendLine(text, "per-frame rows:");
+    EyeBaseFrameRecord* const frameRing = g_frameRing.load(std::memory_order_acquire);
+    const uint64_t frameHead = g_frameRingHead.load(std::memory_order_relaxed);
+    const uint64_t frameHave =
+        frameRing ? (frameHead < kEyeBaseFrameRingCapacity ? frameHead : kEyeBaseFrameRingCapacity) : 0;
+    const uint64_t frameFirst = frameHead - frameHave;
+    uint32_t framePrinted = 0;
+    for (uint64_t i = frameFirst; i < frameHead; ++i) {
+        const EyeBaseFrameRecord r = frameRing[i % kEyeBaseFrameRingCapacity];
+        if (!tfp::frameInDumpWindow(r.frame, due.window.lowTriggerFrame, due.window.dueFrame,
+                                    kDumpWindowFrames)) continue;
+        std::string modes;
+        for (uint32_t md = 0; md < 9; ++md) {
+            if (!r.modeCounts[md]) continue;
+            char piece[24];
+            if (md == 8) std::snprintf(piece, sizeof(piece), "%smode-other=%u", modes.empty() ? "" : " ", r.modeCounts[md]);
+            else std::snprintf(piece, sizeof(piece), "%smode%u=%u", modes.empty() ? "" : " ", md, r.modeCounts[md]);
+            modes += piece;
+        }
+        if (modes.empty()) modes = "(none)";
+        ++framePrinted;
+        appendLine(text, "  f%-7u calls=%-3u %-24s scene=%s(%+.2f %+.2f %+.2f) writerHits=%u",
+                  r.frame, r.calls, modes.c_str(), r.sceneValid ? "" : "STALE-",
+                  r.scenePos[0], r.scenePos[1], r.scenePos[2], r.writerHits);
+    }
+    appendLine(text, "per-frame rows done, %u entries", framePrinted);
 
     const std::wstring logDir = Log::get().dir();
     std::wstring path;
@@ -471,8 +561,8 @@ void performDump(const PendingDump& due) noexcept {
         }
     }
     Log::get().note(
-        "transition flash eye base: dump %u/%u (%s) frames %u..%u, %u entries -> %ls",
-        dumpIndex, kMaxDumpsPerSession, reasonsText.c_str(), lo, hi, printed,
+        "transition flash eye base: dump %u/%u (%s) frames %u..%u, %u call(s) %u frame(s) -> %ls",
+        dumpIndex, kMaxDumpsPerSession, reasonsText.c_str(), lo, hi, printed, framePrinted,
         wrote ? path.c_str() : L"(could not write the file; see the log directory)");
 }
 
@@ -629,6 +719,10 @@ std::atomic<uint32_t> g_frameWriterMask{0};
 std::atomic<uint64_t> g_wwGameHitsTotal{0};
 std::atomic<uint64_t> g_consumerResetHitsTotal{0};
 std::atomic<uint64_t> g_writerHitsTotal{0};
+// CHANGE 3/4: writer hits THIS frame (not the consumer's own reset writes --
+// same exclusion as g_writerHitsTotal above), read-and-reset by
+// transitionFlashEyeBaseNoteSceneCamera into the frame ring's row.
+std::atomic<uint32_t> g_writerHitsThisFrame{0};
 
 // RtlLookupFunctionEntry + RtlVirtualUnwind from a copy of the faulting
 // context -- crash_context.h's emitUnwind shape, SEH-guarded, POD locals
@@ -729,6 +823,7 @@ void recordWriterHit(const CONTEXT& originalCtx, uint64_t hitAddress) noexcept {
     InterlockedExchange(&g_writerTableLock, 0);
 
     g_writerHitsTotal.fetch_add(1, std::memory_order_relaxed);
+    g_writerHitsThisFrame.fetch_add(1, std::memory_order_relaxed);
     g_writerHitSincePriorConsume.store(true, std::memory_order_relaxed);
 }
 
@@ -770,9 +865,12 @@ uint64_t g_wwLastRearmSweepMs = 0;
 uint64_t g_wwArmedShip = 0;
 uint32_t g_wwReArmCount = 0;
 prw::StabilityState g_wwStability;
-bool g_wwFlightSeen = false;
 
-void armWriterWatch(uint64_t shipPointer) noexcept {
+// CHANGE 2: `stableFrames`/`consecutiveRefilled` are the gate counts at the
+// moment of this call, logged so the arm line names what satisfied it --
+// not necessarily the exact gate-crossing values on a re-arm, which calls
+// this again with whatever the counts are at that later moment.
+void armWriterWatch(uint64_t shipPointer, uint32_t stableFrames, uint32_t consecutiveRefilled) noexcept {
     g_wwArmedShip = shipPointer;
     g_wwWatchAddress = shipPointer + 0x3360;
     installVeh();
@@ -781,8 +879,10 @@ void armWriterWatch(uint64_t shipPointer) noexcept {
     g_wwHwArmedAtMs = GetTickCount64();
     g_wwLastRearmSweepMs = g_wwHwArmedAtMs;
     Log::get().note(
-        "transition flash eye base: writer watch armed at 0x%llX (ship 0x%llX + 0x3360), %u thread(s).",
-        (unsigned long long)g_wwWatchAddress, (unsigned long long)shipPointer, g_wwArmedThreads.count);
+        "transition flash eye base: writer watch armed at 0x%llX (ship 0x%llX + 0x3360), %u thread(s); "
+        "gate: ship pointer stable %u consecutive frame(s), %u consecutive refilled call(s).",
+        (unsigned long long)g_wwWatchAddress, (unsigned long long)shipPointer, g_wwArmedThreads.count,
+        stableFrames, consecutiveRefilled);
 }
 
 void disarmWriterWatch(const char* reason) noexcept {
@@ -819,10 +919,11 @@ WriterTableEntry writerTableEntry(uint32_t index) noexcept {
 }
 
 // Called once a frame (transitionFlashEyeBaseFrameBoundary). Owns the whole
-// writer-watch lifecycle: the flight + 60-consecutive-frame ship-pointer
-// stability gate before the first arm, the ~2s re-arm sweep for new threads,
-// an immediate disarm/re-arm (capped at 8, logged) on a ship-pointer change,
-// and the 180s/100,000-hit bound.
+// writer-watch lifecycle: the self-contained flight gate (CHANGE 2; the
+// 60-consecutive-frame ship-pointer stability gate AND 300 consecutive
+// refilled consumer calls) before the first arm, the ~2s re-arm sweep for
+// new threads, an immediate disarm/re-arm (capped at 8, logged) on a
+// ship-pointer change, and the 180s/100,000-hit bound.
 void frameBoundaryWriterWatch(uint32_t frameNo) noexcept {
     (void)frameNo;
     const tfp::Mode fixMode = static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed));
@@ -857,7 +958,8 @@ void frameBoundaryWriterWatch(uint32_t frameNo) noexcept {
                     "transition flash eye base: writer watch re-armed on a new ship pointer "
                     "(0x%llX -> 0x%llX), re-arm %u/%u.",
                     (unsigned long long)oldShip, (unsigned long long)currentShip, g_wwReArmCount, kMaxReArms);
-                armWriterWatch(currentShip);
+                armWriterWatch(currentShip, g_wwStability.consecutive,
+                               g_wwConsecutiveRefilled.load(std::memory_order_relaxed));
             } else {
                 disarmWriterWatch("ship pointer changed and the re-arm cap (8) is reached");
             }
@@ -868,13 +970,14 @@ void frameBoundaryWriterWatch(uint32_t frameNo) noexcept {
         return;
     }
 
-    if (!g_wwFlightSeen) {
-        if (!glitchFrameCameraValidated()) return;
-        g_wwFlightSeen = true;
-        g_wwStability = prw::StabilityState{};
-    }
-    if (prw::isStable(g_wwStability) && currentShip != 0) {
-        armWriterWatch(currentShip);
+    // CHANGE 2: self-contained -- no glitchFrameCameraValidated (pose_reader_
+    // watch.cpp keeps its own dependency on it). The ship pointer's own
+    // 60-consecutive-frame stability plus 300 consecutive refilled mode!=1
+    // consumer calls together ARE "in flight, with the writer active",
+    // whatever fix.transition_flash says.
+    const uint32_t consecutiveRefilled = g_wwConsecutiveRefilled.load(std::memory_order_relaxed);
+    if (tfeb::writerWatchGateSatisfied(prw::isStable(g_wwStability), consecutiveRefilled) && currentShip != 0) {
+        armWriterWatch(currentShip, g_wwStability.consecutive, consecutiveRefilled);
     }
 }
 
@@ -925,6 +1028,8 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
 
     float m[16] = {}, f[16] = {};
     const bool haveM = haveShip && sehReadBlock64(ship + 0x3330, m);
+    // CHANGE 1: F (ship+0x130) is read and logged for the record only -- it
+    // no longer gates or supplies the act-path write.
     const bool haveF = haveShip && sehReadBlock64(ship + 0x130, f);
 
     bool unrefilled = false;
@@ -933,79 +1038,122 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
 
     if (haveM) {
         unrefilled = (gameMode != 1) && tfeb::isResetMailbox(m);
+
+        // CHANGE 2: the writer-watch gate's consecutive-refilled count. A CAS
+        // loop, not load-then-store: FUN_142868c30 and FUN_14287b030 can both
+        // consume on one frame, so this is not single-writer.
+        {
+            uint32_t cur = g_wwConsecutiveRefilled.load(std::memory_order_relaxed);
+            uint32_t next;
+            do {
+                next = tfeb::updateConsecutiveRefilled(cur, gameMode, unrefilled);
+            } while (!g_wwConsecutiveRefilled.compare_exchange_weak(cur, next, std::memory_order_relaxed));
+        }
+
+        // CHANGE 1: cache every refilled mode!=1 mailbox -- the held base an
+        // un-refilled call's act guard judges below.
+        if (gameMode != 1 && !unrefilled) {
+            std::lock_guard<std::mutex> lock(g_heldBaseMutex);
+            std::memcpy(g_heldBaseM, m, sizeof(g_heldBaseM));
+            g_heldBaseFrame = frame;
+            g_heldBaseShip = ship;
+            g_haveHeldBase = true;
+        }
     }
 
-    if (haveM && haveF) {
-        if (unrefilled) {
-            g_totalUnrefilled.fetch_add(1, std::memory_order_relaxed);
-            g_unrefilledThisFrame.fetch_add(1, std::memory_order_relaxed);
+    // The held base as it now stands. For an un-refilled call the cache
+    // above was untouched this call, so this is exactly the candidate the
+    // act guard judges; for a refilled call it is simply M again, read back
+    // only for the ring entry below.
+    float heldM[16] = {};
+    uint32_t heldFrame = 0;
+    uint64_t heldShip = 0;
+    bool haveHeldBase = false;
+    {
+        std::lock_guard<std::mutex> lock(g_heldBaseMutex);
+        haveHeldBase = g_haveHeldBase;
+        std::memcpy(heldM, g_heldBaseM, sizeof(heldM));
+        heldFrame = g_heldBaseFrame;
+        heldShip = g_heldBaseShip;
+    }
+    const int32_t heldAgeFrames =
+        haveHeldBase ? (frame >= heldFrame ? static_cast<int32_t>(frame - heldFrame) : 0) : -1;
 
-            bool isNewEvent = false;
-            uint32_t eventNumber = 0;
-            tfp::Treatment treatment = tfp::Treatment::Watch;
-            tfeb::EyeBaseValidation validationSnapshot;
-            {
-                std::lock_guard<std::mutex> lock(g_guardMutex);
-                const tfp::EventTracker::Note note = g_eventTracker.note(frame);
-                isNewEvent = note.isNewEvent;
-                eventNumber = note.eventNumber;
-                if (isNewEvent) {
-                    treatment = tfp::modeAllowsActing(fixMode, eventNumber) ? tfp::Treatment::Act
-                                                                            : tfp::Treatment::Watch;
-                    g_eventTracker.latch(treatment);
-                    if (treatment == tfp::Treatment::Act) g_eventsActed.fetch_add(1, std::memory_order_relaxed);
-                    else g_eventsWatched.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    treatment = g_eventTracker.treatment();
-                }
-                validationSnapshot = g_validation;
-            }
+    if (haveM && unrefilled) {
+        g_totalUnrefilled.fetch_add(1, std::memory_order_relaxed);
+        g_unrefilledThisFrame.fetch_add(1, std::memory_order_relaxed);
+        // CHANGE 3: every un-refilled call is its own dump trigger --
+        // tfeb::eyeBaseDumpTrigger takes no eye-trace flag at all, so this
+        // does not depend on advanced.eye_origin_trace.
+        requestDump("an un-refilled consumer call", frame);
 
-            const bool validated = tfeb::isEyeBaseValidated(validationSnapshot);
-            const bool fIsReset = tfeb::isResetMailbox(f);
-            const bool fFinite = tfeb::allFinite16(f);
-            const uint64_t actedFrames = g_actedFrames.load(std::memory_order_relaxed);
-            const bool capReached = tfp::sessionCapReached(actedFrames, kSessionActCap);
-            const bool mayAct = tfeb::eyeBaseMayAct(treatment, validated, fIsReset, fFinite, capReached);
-
-            bool acted = false;
-            if (mayAct) {
-                // Write F into the mailbox BEFORE the original runs, so the
-                // engine snapshots F as the base and resets as usual.
-                acted = sehWriteBlock64(ship + 0x3330, f);
-                if (acted) {
-                    std::lock_guard<std::mutex> lock(g_guardMutex);
-                    if (tfp::isNewActedFrame(frame, g_lastActedFrame, g_hasActedFrame)) {
-                        g_actedFrames.fetch_add(1, std::memory_order_relaxed);
-                        g_lastActedFrame = frame;
-                        g_hasActedFrame = true;
-                    }
-                }
-            }
-            treatmentOutcome = acted ? 2 : 1;
-
-            if (isNewEvent) {
-                const char* reason;
-                if (acted) reason = "acted";
-                else if (treatment != tfp::Treatment::Act) reason = "treatment is watch this event";
-                else if (!validated) reason = "not validated yet";
-                else if (fIsReset) reason = "F is itself the reset value";
-                else if (!fFinite) reason = "F is not finite";
-                else if (capReached) reason = "session act cap reached";
-                else reason = "act guard refused";
-                Log::get().note(
-                    "transition flash eye base: event #%u frame %u %s -- %s (mode=%s). "
-                    "M=(%+.3f %+.3f %+.3f) F=(%+.3f %+.3f %+.3f). validation so far: %llu agree / %llu disagree.",
-                    eventNumber, frame, acted ? "ACTED" : "WATCHED", reason, modeName(fixMode),
-                    m[12], m[13], m[14], f[12], f[13], f[14],
-                    (unsigned long long)validationSnapshot.agree, (unsigned long long)validationSnapshot.disagree);
-            }
-        } else if (gameMode != 1) {
-            const tfeb::EyeBaseDelta d = tfeb::compareEyeBase(m, f);
-            dt = d.dt; dr = d.dr;
+        bool isNewEvent = false;
+        uint32_t eventNumber = 0;
+        tfp::Treatment treatment = tfp::Treatment::Watch;
+        {
             std::lock_guard<std::mutex> lock(g_guardMutex);
-            if (tfeb::eyeBaseAgrees(d)) ++g_validation.agree; else ++g_validation.disagree;
+            const tfp::EventTracker::Note note = g_eventTracker.note(frame);
+            isNewEvent = note.isNewEvent;
+            eventNumber = note.eventNumber;
+            if (isNewEvent) {
+                treatment = tfp::modeAllowsActing(fixMode, eventNumber) ? tfp::Treatment::Act
+                                                                        : tfp::Treatment::Watch;
+                g_eventTracker.latch(treatment);
+                if (treatment == tfp::Treatment::Act) g_eventsActed.fetch_add(1, std::memory_order_relaxed);
+                else g_eventsWatched.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                treatment = g_eventTracker.treatment();
+            }
         }
+
+        const uint64_t actedFrames = g_actedFrames.load(std::memory_order_relaxed);
+        const bool capReached = tfp::sessionCapReached(actedFrames, kSessionActCap);
+        const tfeb::HeldBaseRefusal refusal = tfeb::heldBaseRefusal(
+            treatment, haveHeldBase, frame, heldFrame, ship, heldShip, heldM, capReached);
+        const bool mayAct = tfeb::heldBaseMayAct(refusal);
+
+        bool acted = false;
+        if (mayAct) {
+            // Write the held base into the mailbox BEFORE the original runs,
+            // exactly where F used to be written -- so the engine snapshots
+            // it as the base and resets as usual.
+            acted = sehWriteBlock64(ship + 0x3330, heldM);
+            if (acted) {
+                std::lock_guard<std::mutex> lock(g_guardMutex);
+                if (tfp::isNewActedFrame(frame, g_lastActedFrame, g_hasActedFrame)) {
+                    g_actedFrames.fetch_add(1, std::memory_order_relaxed);
+                    g_lastActedFrame = frame;
+                    g_hasActedFrame = true;
+                }
+            }
+        }
+        treatmentOutcome = acted ? 2 : 1;
+
+        if (isNewEvent) {
+            // refusal can be None here with acted==false only if the SEH
+            // write itself faulted -- every guard passed but the store did
+            // not happen.
+            const char* reason = acted ? "acted"
+                                : refusal != tfeb::HeldBaseRefusal::None ? tfeb::heldBaseRefusalText(refusal)
+                                                                          : "write faulted";
+            char heldText[64];
+            if (haveHeldBase) {
+                std::snprintf(heldText, sizeof(heldText), "(%+.3f %+.3f %+.3f) age=%d",
+                              heldM[12], heldM[13], heldM[14], heldAgeFrames);
+            } else {
+                std::snprintf(heldText, sizeof(heldText), "none cached");
+            }
+            Log::get().note(
+                "transition flash eye base: event #%u frame %u %s -- %s (mode=%s). "
+                "substitute=%s. M=(%+.3f %+.3f %+.3f) F=(%+.3f %+.3f %+.3f).",
+                eventNumber, frame, acted ? "ACTED" : "WATCHED", reason, modeName(fixMode), heldText,
+                m[12], m[13], m[14], haveF ? f[12] : NAN, haveF ? f[13] : NAN, haveF ? f[14] : NAN);
+        }
+    } else if (haveM && haveF && gameMode != 1) {
+        const tfeb::EyeBaseDelta d = tfeb::compareEyeBase(m, f);
+        dt = d.dt; dr = d.dr;
+        std::lock_guard<std::mutex> lock(g_guardMutex);
+        if (tfeb::eyeBaseAgrees(d)) ++g_validation.agree; else ++g_validation.disagree;
     }
 
     g_treatmentThisFrame.store(treatmentOutcome, std::memory_order_relaxed);
@@ -1028,6 +1176,8 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     e.ship = ship;
     e.m[0] = m[12]; e.m[1] = m[13]; e.m[2] = m[14];
     e.f[0] = f[12]; e.f[1] = f[13]; e.f[2] = f[14];
+    e.cachedM[0] = heldM[12]; e.cachedM[1] = heldM[13]; e.cachedM[2] = heldM[14];
+    e.cachedAgeFrames = heldAgeFrames;
     e.dt = dt; e.dr = dr;
     pushRing(e);
 
@@ -1040,6 +1190,10 @@ void doInstall(tfp::Mode mode) noexcept {
     if (!g_ring.load(std::memory_order_acquire)) {
         auto* ring = new (std::nothrow) EyeBaseRingEntry[kEyeBaseRingCapacity];
         if (ring) g_ring.store(ring, std::memory_order_release);
+    }
+    if (!g_frameRing.load(std::memory_order_acquire)) {
+        auto* ring = new (std::nothrow) EyeBaseFrameRecord[kEyeBaseFrameRingCapacity];
+        if (ring) g_frameRing.store(ring, std::memory_order_release);
     }
 
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -1159,8 +1313,37 @@ void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo) {
 
 void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVerdict) {
     if (!g_armed.load(std::memory_order_relaxed)) return;
-    if (!sceneResetVerdict) return;
+    // CHANGE 3: the scene-reset-verdict trigger, expressed with the same
+    // predicate as the unrefilled-call trigger in consumerObserved -- see
+    // tfeb::eyeBaseDumpTrigger's own comment for why it takes no eye-trace
+    // flag.
+    if (!tfeb::eyeBaseDumpTrigger(/*unrefilledCall=*/false, sceneResetVerdict)) return;
     requestDump("the transition-flash detector's scene-judged eye-reset verdict", frame);
+}
+
+// CHANGE 3/4: the per-frame record -- glitch_frame.cpp's own scene-camera
+// tap (computed whether or not advanced.eye_origin_trace is on; see this
+// function's declaration), folded together with this module's own per-frame
+// writer-hit count and mode breakdown, read-and-reset the same way
+// transitionFlashEyeBaseFrameSnapshot reads its per-call counters. Pushed to
+// its own ring for the next dump, whether or not one is pending -- cheap
+// (one memcpy-sized struct) and it is what lets a dump requested a few
+// frames from now still show frames already past.
+void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid) {
+    if (!g_armed.load(std::memory_order_relaxed)) return;
+    EyeBaseFrameRecord r;
+    r.frame = frame;
+    r.sceneValid = valid;
+    r.scenePos[0] = pos[0]; r.scenePos[1] = pos[1]; r.scenePos[2] = pos[2];
+    r.writerHits = g_writerHitsThisFrame.exchange(0, std::memory_order_relaxed);
+    uint16_t total = 0;
+    for (uint32_t i = 0; i < 9; ++i) {
+        const uint16_t c = g_modeCountsThisFrame[i].exchange(0, std::memory_order_relaxed);
+        r.modeCounts[i] = c;
+        total = static_cast<uint16_t>(total + c);
+    }
+    r.calls = total;
+    pushFrameRing(r);
 }
 
 EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot() {

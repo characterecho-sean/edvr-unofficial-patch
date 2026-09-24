@@ -6,8 +6,12 @@
 // views, then (mode != 1) resets the mailbox to an identity constant. Some
 // writer has to refill it every frame; on the frame after a render-frame
 // switch it is not refilled in time, so the eye composes against the head
-// pose alone -- the flash. ship+0x130 (mode 3, never reset) is a candidate
-// stand-in, validated call by call before anything acts on it.
+// pose alone -- the flash. The candidate written back is the mailbox's OWN
+// last known-refilled value, cached every refilled call and guarded call by
+// call (age, ship pointer, finite, not itself the reset value, session cap)
+// before anything acts on it -- see transition_flash_eye_base_core.h's
+// heldBaseRefusal. ship+0x130 is still read and logged, for the record, but
+// no longer gates or supplies the write.
 //
 //   advanced.transition_flash_eye_base = off | watch | on | alternate
 //     off        nothing installed. One log line.
@@ -54,6 +58,18 @@ void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo);
 // uses), one of this file's two automatic dump triggers. The other (any
 // unrefilled consumer call) is internal and needs no call from outside.
 void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVerdict);
+
+// The detector's own per-frame scene-camera tap -- glitch_frame.cpp's
+// s->sceneDrawPos/e.scenePos/e.sceneValid, cb1[275], the same value
+// recordScenePosition folds into its own ring entry. Computed whether or not
+// advanced.eye_origin_trace is on (only the call-stack id beside it is
+// trace-gated), so this module's own dump can show it regardless of that
+// key. Called from the same three ring-write sites as
+// transitionFlashEyeBaseNoteDetectorVerdict/transitionFlashEyeBaseFrameSnapshot,
+// right after recordScenePosition; a read-and-reset per real frame, folded
+// straight into this module's own per-frame dump row (no snapshot struct --
+// nothing outside this file needs the value back).
+void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid);
 
 // This frame's consumer/writer activity, read once per ring-write site
 // (glitch_frame.cpp's RingEntry) -- poseReaderWatchFrameSnapshot's read-and-

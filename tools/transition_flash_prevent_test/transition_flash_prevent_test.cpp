@@ -16,6 +16,13 @@
 // narrows eye_origin_trace's own dump condition when this instrument is on.
 // Same rig rather than a second one -- both headers describe the one design
 // doc and neither needs the game.
+//
+// The 2026-09-24 revision of transition_flash_eye_base_core.h (flight
+// 062910: the F stand-in never matched a refilled mailbox) adds three more
+// cells here: CHANGE 1's held-base guard (every refusal reason, flipped one
+// at a time), CHANGE 2's consecutive-refilled counter that gates the writer
+// watch alongside the existing stability gate, and CHANGE 3's dump-trigger
+// predicate, which takes no eye-trace flag at all.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -607,23 +614,122 @@ void caseEyeBaseValidationArithmetic() {
     check(tfeb::isEyeBaseValidated({4901, 99}), "eyeBaseValidated: 99/5000 (1.98%) at scale passes");
 }
 
-// --- transition_flash_eye_base_core.h: the act guards, every one refuses --
+// --- transition_flash_eye_base_core.h: CHANGE 1, the held-base guard ------
+// (task of 2026-09-24: F is retired as the candidate; the mailbox's own last
+// known-refilled value, cached and aged in frames, is judged instead).
 
-void caseEyeBaseActGuards() {
-    // Baseline: every guard satisfied -> acts.
-    check(tfeb::eyeBaseMayAct(Treatment::Act, true, false, true, false),
-          "eyeBaseMayAct: every guard satisfied acts");
-    // Each guard flipped alone refuses, with the rest held at the acting baseline.
-    check(!tfeb::eyeBaseMayAct(Treatment::Watch, true, false, true, false),
-          "eyeBaseMayAct: treatment watch alone refuses");
-    check(!tfeb::eyeBaseMayAct(Treatment::Act, false, false, true, false),
-          "eyeBaseMayAct: not validated alone refuses");
-    check(!tfeb::eyeBaseMayAct(Treatment::Act, true, true, true, false),
-          "eyeBaseMayAct: F itself the reset value alone refuses");
-    check(!tfeb::eyeBaseMayAct(Treatment::Act, true, false, false, false),
-          "eyeBaseMayAct: F not finite alone refuses");
-    check(!tfeb::eyeBaseMayAct(Treatment::Act, true, false, true, true),
-          "eyeBaseMayAct: session cap reached alone refuses");
+void caseHeldBaseGuardRefusals() {
+    float goodM[16];
+    eyeBaseIdentityMailbox(goodM);
+    goodM[12] = 100.0f;  // a real translation, not the reset value
+
+    // Baseline: every guard satisfied -> acts. currentFrame=100, cached at
+    // frame 98 (age 2, the boundary itself -- see the "exactly 2" case
+    // below), same ship, finite, not the reset value, cap not reached.
+    check(tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, false)),
+          "heldBaseRefusal: every guard satisfied acts");
+
+    // Each guard flipped alone refuses, with the rest held at the acting
+    // baseline -- and names itself with the right HeldBaseRefusal.
+    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Watch, true, 100, 98, 0x1000, 0x1000, goodM, false)),
+          "heldBaseRefusal: watch slot alone refuses");
+    check(tfeb::heldBaseRefusal(Treatment::Watch, true, 100, 98, 0x1000, 0x1000, goodM, false) ==
+              tfeb::HeldBaseRefusal::WatchSlot,
+          "heldBaseRefusal: watch slot names itself");
+
+    // Stale at 3 frames (age = 100 - 97 = 3, over kHeldBaseMaxAgeFrames=2).
+    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 97, 0x1000, 0x1000, goodM, false)),
+          "heldBaseRefusal: stale at 3 frames refuses");
+    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 97, 0x1000, 0x1000, goodM, false) ==
+              tfeb::HeldBaseRefusal::Stale,
+          "heldBaseRefusal: stale at 3 frames names itself");
+    // Exactly 2 frames old is still fresh (<=, not <).
+    check(tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, false)),
+          "heldBaseRefusal: exactly 2 frames old still acts");
+    // No cache at all (haveHeldBase=false) refuses as stale too, regardless
+    // of the frame numbers passed.
+    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, false, 100, 98, 0x1000, 0x1000, goodM, false)),
+          "heldBaseRefusal: no cache at all refuses");
+    check(tfeb::heldBaseRefusal(Treatment::Act, false, 100, 98, 0x1000, 0x1000, goodM, false) ==
+              tfeb::HeldBaseRefusal::Stale,
+          "heldBaseRefusal: no cache at all names itself stale");
+
+    // Pointer changed: the cached ship differs from this call's ship.
+    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x2000, goodM, false)),
+          "heldBaseRefusal: pointer changed refuses");
+    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x2000, goodM, false) ==
+              tfeb::HeldBaseRefusal::PointerChanged,
+          "heldBaseRefusal: pointer changed names itself");
+
+    // Non-finite: a single +Inf lane in the CACHED M.
+    float infM[16];
+    eyeBaseIdentityMailbox(infM);
+    infM[9] = bitsToFloat(0x7F800000u);  // +Inf
+    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, infM, false)),
+          "heldBaseRefusal: non-finite cache refuses");
+    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, infM, false) ==
+              tfeb::HeldBaseRefusal::NotFinite,
+          "heldBaseRefusal: non-finite cache names itself");
+
+    // Reset value: the cache itself is the identity/reset mailbox -- caching
+    // logic should never store this (only refilled calls are cached), but
+    // the guard still refuses it if it somehow got in.
+    float resetM[16];
+    eyeBaseIdentityMailbox(resetM);
+    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, resetM, false)),
+          "heldBaseRefusal: the cache itself being the reset value refuses");
+    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, resetM, false) ==
+              tfeb::HeldBaseRefusal::Reset,
+          "heldBaseRefusal: reset value names itself");
+
+    // Session cap reached.
+    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, true)),
+          "heldBaseRefusal: session cap reached refuses");
+    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, true) ==
+              tfeb::HeldBaseRefusal::Cap,
+          "heldBaseRefusal: cap names itself");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 2, the writer-watch gate's --
+// consecutive-refilled counter.
+
+void caseWriterWatchGateConsecutiveRefilled() {
+    uint32_t c = 0;
+    for (int i = 0; i < 300; ++i) c = tfeb::updateConsecutiveRefilled(c, /*gameMode=*/2, /*unrefilled=*/false);
+    check(c == 300, "consecutiveRefilled: 300 refilled mode!=1 calls in a row reaches 300");
+    check(!tfeb::writerWatchGateSatisfied(false, c),
+          "writerWatchGate: 300 refilled calls without a stable ship pointer still refuses");
+    check(tfeb::writerWatchGateSatisfied(true, c),
+          "writerWatchGate: stable pointer + 300 refilled calls satisfies the gate");
+    check(!tfeb::writerWatchGateSatisfied(true, c - 1),
+          "writerWatchGate: 299 is one short");
+
+    // A mode==1 call is excluded from the sequence: neither breaks nor
+    // extends the streak.
+    const uint32_t afterMode1 = tfeb::updateConsecutiveRefilled(c, /*gameMode=*/1, /*unrefilled=*/false);
+    check(afterMode1 == c, "consecutiveRefilled: a mode==1 call leaves the streak untouched");
+    const uint32_t afterMode1Unrefilled = tfeb::updateConsecutiveRefilled(c, /*gameMode=*/1, /*unrefilled=*/true);
+    check(afterMode1Unrefilled == c,
+          "consecutiveRefilled: a mode==1 call leaves the streak untouched even if it LOOKS unrefilled");
+
+    // The required cell: an un-refilled mode!=1 call resets the streak.
+    const uint32_t resetFrom = tfeb::updateConsecutiveRefilled(250, /*gameMode=*/2, /*unrefilled=*/true);
+    check(resetFrom == 0, "consecutiveRefilled: an un-refilled call resets the streak to 0");
+    check(!tfeb::writerWatchGateSatisfied(true, resetFrom),
+          "writerWatchGate: a freshly reset streak no longer satisfies the gate");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 3, the dump trigger ---------
+
+void caseEyeBaseDumpTriggerIndependentOfEyeTrace() {
+    // eyeBaseDumpTrigger takes no eye-trace flag: an un-refilled call and a
+    // scene-reset verdict are its only two inputs, so exhausting their four
+    // combinations IS the independence proof -- advanced.eye_origin_trace
+    // has nothing here it could gate.
+    check(tfeb::eyeBaseDumpTrigger(true, false), "eyeBaseDumpTrigger: an un-refilled call alone triggers");
+    check(tfeb::eyeBaseDumpTrigger(false, true), "eyeBaseDumpTrigger: a scene-reset verdict alone triggers");
+    check(tfeb::eyeBaseDumpTrigger(true, true), "eyeBaseDumpTrigger: both together still triggers");
+    check(!tfeb::eyeBaseDumpTrigger(false, false), "eyeBaseDumpTrigger: neither does not trigger");
 }
 
 void caseEyeBaseFiniteCheck() {
@@ -719,7 +825,9 @@ int wmain(int argc, wchar_t** argv) {
     caseResetMailboxBitExact();
     caseEyeBaseAgreementThresholds();
     caseEyeBaseValidationArithmetic();
-    caseEyeBaseActGuards();
+    caseHeldBaseGuardRefusals();
+    caseWriterWatchGateConsecutiveRefilled();
+    caseEyeBaseDumpTriggerIndependentOfEyeTrace();
     caseEyeBaseFiniteCheck();
     caseConsumerExtentClassifier();
     caseDr7ArmWriteModeSlot0();

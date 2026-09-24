@@ -2481,6 +2481,10 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
+            // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
+            // tap, independent of advanced.eye_origin_trace -- the value
+            // recordScenePosition just folded into e.scenePos/e.sceneValid.
+            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
             // advanced.eye_origin_readers: read-and-reset (see the
             // function's own comment), so this must run exactly once per
             // real frame -- true here, since this block and its siblings
@@ -2605,6 +2609,10 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
+            // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
+            // tap, independent of advanced.eye_origin_trace -- the value
+            // recordScenePosition just folded into e.scenePos/e.sceneValid.
+            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
             // advanced.eye_origin_readers: read-and-reset (see the
             // function's own comment), so this must run exactly once per
             // real frame -- true here, since this block and its siblings
@@ -2961,6 +2969,10 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
         recordScenePosition(e,s);
+        // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame tap,
+        // independent of advanced.eye_origin_trace -- the value
+        // recordScenePosition just folded into e.scenePos/e.sceneValid.
+        transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
         // advanced.eye_origin_readers: read-and-reset: see
         // poseReaderWatchFrameSnapshot's own comment, and the identical
         // tap at glitchFrameBoundary's other two (mutually exclusive)

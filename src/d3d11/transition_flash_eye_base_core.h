@@ -12,9 +12,15 @@
 // (mode != 1) resets the mailbox to the identity constant below right after
 // the copy. Some writer has to refill it every frame; on the frame after a
 // render-frame switch it is not refilled in time, so the copy IS the reset
-// value and the eye composes against the head pose alone -- the flash. A
-// second, never-reset block at ship+0x130 (mode 3) is the candidate stand-in
-// this file's math validates before anything acts on it.
+// value and the eye composes against the head pose alone -- the flash.
+//
+// The candidate written back is the mailbox's OWN last known-refilled value
+// (flight 062910: the never-reset ship+0x130 block agreed with a refilled
+// mailbox 0 times in 11,084 calls, so it is not a fit stand-in -- see "Ruled
+// out (062910)" in the design doc). transition_flash_eye_base.cpp caches M
+// every time it sees a refilled mode!=1 call; heldBaseRefusal below is the
+// guard an un-refilled call's cached candidate must clear before anything
+// writes it back.
 //
 // off | watch | on | alternate is the same four-way shape as advanced.
 // transition_flash_prevent, so this reuses tfp::Mode/parseMode/Treatment/
@@ -133,14 +139,93 @@ inline bool allFinite16(const float v[16]) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// The act decision: every guard the design lists, ANDed together, so a test
-// can flip each one alone and see it -- and only it -- refuse. `treatment`
-// is the event's latched tfp::Treatment (Watch/Act, from tfp::EventTracker
-// via tfp::modeAllowsActing); `fIsReset` and `fFinite` describe the
-// candidate stand-in F, not the mailbox M.
-inline bool eyeBaseMayAct(tfp::Treatment treatment, bool validated, bool fIsReset, bool fFinite,
-                          bool sessionCapReached) noexcept {
-    return treatment == tfp::Treatment::Act && validated && !fIsReset && fFinite && !sessionCapReached;
+// CHANGE 1 (task of 2026-09-24, "the substitute becomes the held base"):
+// ship+0x130 (F) is no longer the candidate written into the mailbox -- flight
+// 062910 measured it agreeing with a refilled mailbox 0 times in 11,084 calls
+// (see "Ruled out (062910)" in the design doc). The candidate is now the
+// mailbox's OWN last known-refilled value, cached by transition_flash_eye_
+// base.cpp on every mode!=1 call whose mailbox was not the reset value. Every
+// guard below is ANDed together in the priority this enum's order states, so
+// a test can flip each one alone (the rest held at the acting baseline) and
+// see it -- and only it -- refuse. F-vs-M agreement (EyeBaseValidation above)
+// no longer participates: it stays only for transition_flash_eye_base.cpp's
+// periodic report line, which costs nothing extra to keep computing.
+enum class HeldBaseRefusal {
+    None,            // every guard passed; the caller may act
+    WatchSlot,       // this event's latched treatment is Watch, not Act
+    Stale,           // no cache yet, or cached more than kHeldBaseMaxAgeFrames earlier
+    PointerChanged,  // the cached ship pointer differs from this call's ship
+    NotFinite,       // a cached lane is not finite
+    Reset,           // the cached M is itself the reset value
+    Cap,             // the session act cap is reached
+};
+
+inline const char* heldBaseRefusalText(HeldBaseRefusal r) noexcept {
+    switch (r) {
+    case HeldBaseRefusal::None:           return "none";
+    case HeldBaseRefusal::WatchSlot:      return "watch slot";
+    case HeldBaseRefusal::Stale:          return "stale";
+    case HeldBaseRefusal::PointerChanged: return "pointer changed";
+    case HeldBaseRefusal::NotFinite:      return "not finite";
+    case HeldBaseRefusal::Reset:          return "reset";
+    case HeldBaseRefusal::Cap:            return "cap";
+    }
+    return "?";
+}
+
+// Cached no more than this many frames earlier still counts as fresh (task:
+// "current frame minus cached frame <= 2").
+inline constexpr uint32_t kHeldBaseMaxAgeFrames = 2;
+
+inline HeldBaseRefusal heldBaseRefusal(tfp::Treatment treatment, bool haveHeldBase, uint32_t currentFrame,
+                                       uint32_t heldFrame, uint64_t currentShip, uint64_t heldShip,
+                                       const float heldM[16], bool sessionCapReached) noexcept {
+    if (treatment != tfp::Treatment::Act) return HeldBaseRefusal::WatchSlot;
+    if (!haveHeldBase) return HeldBaseRefusal::Stale;
+    const uint32_t age = currentFrame >= heldFrame ? currentFrame - heldFrame : 0xFFFFFFFFu;
+    if (age > kHeldBaseMaxAgeFrames) return HeldBaseRefusal::Stale;
+    if (currentShip != heldShip) return HeldBaseRefusal::PointerChanged;
+    if (!allFinite16(heldM)) return HeldBaseRefusal::NotFinite;
+    if (isResetMailbox(heldM)) return HeldBaseRefusal::Reset;
+    if (sessionCapReached) return HeldBaseRefusal::Cap;
+    return HeldBaseRefusal::None;
+}
+
+inline bool heldBaseMayAct(HeldBaseRefusal r) noexcept { return r == HeldBaseRefusal::None; }
+
+// ---------------------------------------------------------------------------
+// CHANGE 2 ("the writer watch gate is self-contained"): the consumer's own
+// count of consecutive REFILLED mode!=1 calls -- with the existing 60-
+// consecutive-frame ship-pointer stability gate (pose_reader_watch_core.h's
+// StabilityState/isStable, unchanged), the second half of "flight, with the
+// writer active" that replaces glitchFrameCameraValidated for this module
+// only (pose_reader_watch.cpp keeps its own dependency on it). A mode==1
+// call is excluded from the sequence -- neither increments nor resets it,
+// since the driver never resets the mailbox on mode==1 either, so mode==1
+// calls carry no information about the writer either way. An un-refilled
+// mode!=1 call breaks the streak.
+inline constexpr uint32_t kWriterWatchGateConsecutiveRefilled = 300;
+
+inline uint32_t updateConsecutiveRefilled(uint32_t counter, int32_t gameMode, bool unrefilled) noexcept {
+    if (gameMode == 1) return counter;
+    if (unrefilled) return 0u;
+    return counter < 0xFFFFFFFFu ? counter + 1 : counter;
+}
+
+inline bool writerWatchGateSatisfied(bool shipPointerStable, uint32_t consecutiveRefilled) noexcept {
+    return shipPointerStable && consecutiveRefilled >= kWriterWatchGateConsecutiveRefilled;
+}
+
+// ---------------------------------------------------------------------------
+// CHANGE 3 ("dumps work on their own"): which stimuli are this module's own
+// dump triggers. Deliberately takes no eye-trace flag at all -- glitch_
+// frame.cpp's eyeOriginTraceBoundary gates ITS OWN dump on advanced.eye_
+// origin_trace (s->eyeOriginTraceOn); this module's dump must not, so there
+// is no such parameter here for it to gate on. The two triggers are an
+// un-refilled consumer call and the detector's scene-judged eye-reset
+// verdict, ORed.
+inline bool eyeBaseDumpTrigger(bool unrefilledCall, bool sceneResetVerdict) noexcept {
+    return unrefilledCall || sceneResetVerdict;
 }
 
 // ---------------------------------------------------------------------------
