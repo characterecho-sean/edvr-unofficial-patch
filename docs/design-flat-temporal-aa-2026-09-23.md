@@ -3,18 +3,16 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `28ee5f73` is merged into this branch as
-  requested; clean `10cb20f0` passes all 82 jobs and the 255-key contract
-  (section 19). Its Epic flight confirms scaled DLSS at 1920x1080 to 2560x1440,
-  4,922 consecutive treated frames, no backend failures or camera-cut resets,
-  and two focused depth-writer samples without observation drops (section 20).
-  Exact bytecode proves the selected scene-depth to view-Z conversion. Sean did
-  not see the star-corona smear this time; it is not reproduced, not proved
-  fixed. Earlier scene admission, lighting-grid and projection evidence is in
-  sections 10-18. Private buffer snapshots, uploads and scoped VS/PS/CS
-  bindings pass offline qualification (section 21). F10 now measures full
-  buffer/range preparation and resolver readiness without binding private
-  buffers (section 22). Live projection jitter remains disabled.
+  before qualification. Main `28ee5f73` is merged into this branch as requested
+  (section 19). Epic flight `f1ea02fe` confirms all 47,107 recognized draw
+  preparations succeeded over 900 frames, with no outcome overflow or backend
+  failures (section 23). Resolver and fallback preflight pass. Its compute
+  preparation audit was blind: CS uses a pointer-only binding shadow; the
+  separate capture proves both lighting shaders ran. An audit-local hash lookup
+  corrects this. Offline classification finds 33 additional projection pairs,
+  three unchanged passes and one missing-bytecode pair (section 23). Earlier
+  depth conversion, camera and binding evidence remains in sections 10-22. Live
+  jitter is zero.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -31,16 +29,15 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** Epic, DLSS at 0.75x game SS, F10 once in flight and turn
-  near the star for 20-30 seconds. This measures the new 900-frame
-  private-buffer readiness audit, including static CB snapshots and resolver
-  preflight. Check `flat projection` summaries/refusals, cold-readback outcomes
-  and existing shader captures together. Preparation success does not authorize
-  jitter: camera/material/HDR coverage and earlier handoff-refusal recovery
-  remain open. Use `tools/edvr_log.py` with the actual `--target`, the
-  installed build
-  SHA in `--expect-build`, and `--grep "flat (projection|runtime|temporal|compute)"`.
-  No headset is needed; VR still needs regression testing.
+- **Next:** qualify recipes/ownership for the 33 additional projection pairs;
+  the next capture also needs both lighting preparations and the missing
+  `5EAFFCD01B97D0C4 / DD371C57C9093BB8` bytecode. The corrected audit looks up
+  the CS pointer's registered hash and requests those two files once per arm.
+  Successful draw preparation does not establish lighting readiness or complete
+  camera/material/HDR coverage. Earlier handoff-refusal recovery also remains
+  open. Epic remains on `f1ea02fe`; use `--expect-build f1ea02fe` with
+  `tools/edvr_log.py`, even after subsequent code/documentation commits. No
+  headset is needed for flat; VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -1143,3 +1140,86 @@ Final source validation: `build/flat-readiness-final.log` passes all 79 pooled
 jobs and three quiet jobs, both flat test rigs, the 255-key config contract and
 both installer payload checks. This includes per-shader outcome reporting,
 preflight retry cadence and filtering non-CBs from the creation observer.
+
+## 23. Readiness flight and compute audit correction, 2026-09-24
+
+Epic `edvr_gfx_20260924_112608.log` verifies `v0.17.0-557-gf1ea02fe`, build
+`6AB55BF9`, linked 17:20:57 UTC. The run begins with native-size DLAA, then
+creates DLSS at 11:28:04.750 for 1920x1080 input and 2560x1440 output, quality
+mode, preset K. The F10 audit starts at 11:28:17.092 and completes all 900
+frames at 11:28:27.185. Its scene samples confirm the scaled dimensions.
+
+The final runtime summary reports 6,092 temporal calls, 6,084 history
+continuations and eight resets: three requested/lost-history resets and five
+camera-cut detections. No backend failures, invalid previous cameras, frame
+gaps or format changes occur. The longest adapter-treated streak is 4,333; the
+longest renderer history-continuation streak is 1,363. Earlier startup refusals
+include conflicting HDR/camera and missing tone passes; during the F10 interval
+the refusal count stays at 7,439, then 51 missing-tone refusals appear at the
+end. Do not describe the whole session as refusal-free or camera-cut-free. No
+visual symptom report was provided with "flew it".
+
+The completed preparation audit counts 362,165 draws, 19,477 dispatches, 47,107
+candidates and 47,107 successful preparations, with zero refusals. All 21
+recognized draw tuples prepare, including 900 stock-glare draws. It records 900
+depth-unassociated candidates, 81,566 unknown draw observations and 58 distinct
+outcomes without overflow. There are 188,507 observed full writes and no
+cold-readback attempts: this flight does not exercise that fallback. Renderer,
+spatial-output and backend-availability preflight all pass; size-specific
+backend feature creation remains deferred. There are no spatial fallback
+attempts. Actual raster and backend phases remain zero.
+
+The separate compute capture proves both lighting shaders `5998146D464F5C0E`
+and `EB0245DE0BB23BB6` ran in samples 1 and 2, with matching 1920x1080 R32
+inputs and selected scene depth/HDR. Yet the readiness outcome table contains
+no CS entries. Source trace confirms the cause: `hookedCSSetShader` calls
+pointer-only `bindingSet`, while the audit read `bindingShaderHash(Cs)`, whose
+hash was never populated. The correction resolves the registered hash from
+`bindingGet(Cs)` inside the audit only, then retains actual-CS verification in
+`qualifyProjection`. It adds no lookup to normal unaudited dispatches.
+
+Ruled out: missing CPU writes prevented the recognized draw preparations,
+because every one of their 47,107 attempts succeeded. Ruled out: absent
+lighting dispatches explain the missing readiness CS entries, because both
+exact shader hashes appear in both independent compute samples. Lighting
+preparation readiness itself remains unmeasured; the previous aggregate success
+cannot establish it.
+
+Offline exact-hash bytecode classification divides the 37 unknown tuples:
+
+| Classification | Pairs | Observations |
+| --- | ---: | ---: |
+| VS b1 rows 270-273 projection | 22 | 50,732 |
+| VS b0 rows 4-7 projection | 5 | 20,934 |
+| VS b2 rows 10-13 projection | 3 | 2,700 |
+| VS b2 rows 6-9 projection | 2 | 1,800 |
+| VS b2 rows 7-10 projection | 1 | 900 |
+| Pass-through/zero or inert full-screen pass | 3 | 2,700 |
+| Bytecode unavailable | 1 | 1,800 |
+
+The largest missing projection recipes are `BFE51414CC3024B4 /
+DB79AE788E049DFD` (11,700), `81216C77F90DEDD6 / A2965EC2931A39C8` (9,910),
+`B7790CBFC6554097 / 8DEF46452FA459F5` (8,324) and `7B0DC42D383F694C /
+0DF03E64DF9DBEF1` (6,300). B779's PS samples depth using interpolated clip
+coordinates, requiring aligned upstream projection. `EB5234DB6ADB491D /
+B7D50283329322C3` and `DE545DC8EE4FBB87 / 91F8937EDA723663` are additional
+material companions of known projection-bearing VS hashes. Projection use is
+not proof of camera or HUD/radar ownership and does not authorize jitter.
+
+The three unchanged tuples are `FC1193AFFC596F74 / 258B95AC99520C1F`,
+`E8FDC0D92EEBA6D7 / 258B95AC99520C1F` (position pass-through, zero output), and
+`53211E8C072CD02E / B403F48CB35D9739` (full-screen triangle, inert PS). The
+unclassified pair is `5EAFFCD01B97D0C4 / DD371C57C9093BB8`; neither shader
+exists in the saved ASM or Epic DXBC corpus. Each future F10 arm now requests
+those exact creation bytes once using the existing bounded cache and logs
+success or explicit missing evidence. This does not add a shader recipe. Local
+evidence is under `build/flat-audit/coverage-classified.json` and
+`build/flat-audit-current/missing-shader-closure.md`, with exact-hash ASM.
+
+Keep the installed Epic build at `f1ea02fe` while qualifying these gaps. A
+repeat of the same installed flight would not measure the corrected CS audit.
+
+Validation: `build/flat-flight-audit-final.log` compiles the CS lookup and
+one-shot shader requests, and passes all 79 pooled plus three quiet jobs, both
+flat rigs, the 255-key config contract and installer payload checks. No new
+Epic installation or flight is claimed for these corrections.

@@ -4,6 +4,7 @@
 #include "flat_projection_recipes.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"
+#include "device_hook.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
@@ -311,6 +312,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.resolvePreflight=s.haveResolvePlan ? flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve) : FlatMonoResolvePreflightResult{};
             if(s.haveResolvePlan)s.resolvePreflightRetryMs=GetTickCount64();
             Log::get().note("flat projection: armed 900-frame preparation audit; proposed private phase=(0.25,-0.25), actual raster/backend phase=(0,0); no private plans will be bound");
+            // The previous flight observed this pair but retained no file.
+            // One attempt per manual arm saves exact creation bytes or emits
+            // an explicit missing-cache result; no inferred shader admission.
+            captureFlatProbeShader('v',0x5EAFFCD01B97D0C4ull);
+            captureFlatProbeShader('p',0xDD371C57C9093BB8ull);
         } else {s.projection.reset();s.projectionContext.Reset();s.projectionFrames=0;
             Log::get().note("flat projection: arm refused (allocation/context1/runtime unavailable), raster-phase=0");}
     }
@@ -385,7 +391,10 @@ void flatRuntimeDispatch(ID3D11DeviceContext* ctx) {
     auto& s = state(); if (!owner() || ctx != s.context.Get()) { foreignWork.store(true, std::memory_order_release); return; }
     if(s.projection) {
         ++s.projectionDispatches;
-        const auto cs=bindingShaderHash(BindSlot::Cs);
+        // CSSetShader records only the pointer via bindingSet, unlike the
+        // VS/PS hash-caching setters. Resolve its registered hash here, only
+        // during the bounded audit; qualifyProjection verifies the actual CS.
+        const auto cs=lookupShaderHash(bindingGet(BindSlot::Cs));
         if(cs==0x5998146D464F5C0Eull || cs==0xEB0245DE0BB23BB6ull) {
             FlatComputeInternalScope internal;
             Ptr<ID3D11ShaderResourceView> depth,material;ctx->CSGetShaderResources(3,1,&depth);ctx->CSGetShaderResources(4,1,&material);
