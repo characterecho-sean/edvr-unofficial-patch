@@ -99,10 +99,6 @@ public:
         return prepared_ && source_ == scene && w_ == w && h_ == h ? srv_ : nullptr;
     }
 
-    ID3D11DepthStencilView* target(ID3D11Texture2D* scene, UINT w, UINT h) const {
-        return prepared_ && source_ == scene && w_ == w && h_ == h ? dsv_ : nullptr;
-    }
-
     // Floating HUD strokes preserve the scene's device depth verbatim.
     // The original DSV must be unbound before this view is bound; the
     // coverage pass writes tex_, so it never reads its own output.

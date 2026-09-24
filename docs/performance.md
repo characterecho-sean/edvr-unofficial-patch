@@ -6,6 +6,12 @@
 file's own log) and its header redirect notices. It restates the journal
 below and is not new evidence; update it whenever this doc changes.*
 
+- **2026-09-23:** feature 3's eye-tracked centre is gone from
+  foveation.cpp (frame_flag v34): its gaze came from the legacy openvr
+  half, and nothing has published one since that proxy was deleted, so the
+  rings sit where `advanced.foveation_distance` puts them. On 2026-09-24
+  `experimental.foveation_centre` retired as well; that distance now
+  defaults to 0, the value the key's shipped default (`eyes`) gave.
 - **State:** A pre-implementation design doc, now mostly historical — see
   Detail for the three newer docs with the current picture. Within this
   file's own log (the foveation branch, 2026-09-04 to 2026-09-06):

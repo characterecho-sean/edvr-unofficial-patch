@@ -62,7 +62,7 @@ bool ObjectRecordWriterProbe::guardedRead(uintptr_t address,void* output,size_t 
 
 void ObjectRecordWriterProbe::clearLocked() {
     summary_=Summary{};ownershipSummary_=OwnershipSummary{};eventSequence_=0;if(++epoch_==0)++epoch_;
-    records_.clear();ownerships_.clear();ownershipIndex_.clear();ancestorTraces_.clear();uploads_.clear();imageBase_=0;ownershipOpcodesValid_=false;
+    records_.clear();ownerships_.clear();ownershipIndex_.clear();ancestorTraces_.clear();imageBase_=0;ownershipOpcodesValid_=false;
     hookStatus_=HookStatus::NotRun;active_.store(false,std::memory_order_release);
 }
 
@@ -464,13 +464,6 @@ void ObjectRecordWriterProbe::completeLookup(Pending pending,uintptr_t entry) no
     if(r.entrySnapshot.status=="available")r.lookupStatus="complete";else {r.lookupStatus="completion_failed";++summary_.completionFailures;}
 }
 
-uint64_t ObjectRecordWriterProbe::sampleUploadCutoff() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);return eventSequence_;
-}
-void ObjectRecordWriterProbe::noteUpload(uint32_t attempt,uint32_t resource,uint64_t generation,uint64_t cutoff) noexcept {
-    if(attempt==kNone)return;std::lock_guard<std::mutex> lock(mutex_);
-    try {uploads_.push_back({attempt,resource,generation,cutoff});}catch(...){++summary_.contextFailures;}
-}
 ObjectRecordWriterProbe::Summary ObjectRecordWriterProbe::summary() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return summary_;}
 ObjectRecordWriterProbe::OwnershipSummary ObjectRecordWriterProbe::ownershipSummary() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return ownershipSummary_;}
 ObjectRecordWriterProbe::HookStatus ObjectRecordWriterProbe::hookStatus() const noexcept {std::lock_guard<std::mutex> lock(mutex_);return hookStatus_;}
@@ -513,7 +506,7 @@ const char* ObjectRecordWriterProbe::ownershipTopStatus(const OwnershipSummary& 
     return "partial";
 }
 void ObjectRecordWriterProbe::writeJson(std::ostringstream& j) const {
-    std::lock_guard<std::mutex> lock(mutex_);j<<"  \"record_writers\":{\"version\":2,\"status\":\""<<topStatus(summary_,hookStatus_)<<"\",\"hook_status\":\""<<hookStatusName(hookStatus_)
+    std::lock_guard<std::mutex> lock(mutex_);j<<"  \"record_writers\":{\"version\":3,\"status\":\""<<topStatus(summary_,hookStatus_)<<"\",\"hook_status\":\""<<hookStatusName(hookStatus_)
       <<"\",\"ownership_status\":\""<<ownershipTopStatus(ownershipSummary_,hookStatus_)<<"\",\"limits\":{\"records\":"<<kRecordCap<<",\"bytes\":"<<kByteCap
       <<",\"ownership_records\":"<<kOwnershipCap<<",\"ownership_unwind_depth\":"<<kOwnershipUnwindDepth<<",\"ownership_traces\":"<<kAncestorTraceCap
       <<",\"ownership_trace_frames\":"<<kAncestorTraceFrameCap<<",\"ownership_outer_bytes\":"<<kOuterBytes<<",\"ownership_collection_bytes\":"<<kCollectionBytes
@@ -527,9 +520,7 @@ void ObjectRecordWriterProbe::writeJson(std::ostringstream& j) const {
       <<",\"tuple_read_fault\":"<<ownershipSummary_.tupleReadFault<<",\"tuple_mismatch\":"<<ownershipSummary_.tupleMismatch<<",\"registry_read_fault\":"<<ownershipSummary_.registryReadFault
       <<",\"registry_mismatch\":"<<ownershipSummary_.registryMismatch<<",\"record_range_mismatch\":"<<ownershipSummary_.recordRangeMismatch<<",\"record_read_fault\":"<<ownershipSummary_.recordReadFault
       <<",\"cache_conflicts\":"<<ownershipSummary_.cacheConflicts<<",\"record_overflow\":"<<ownershipSummary_.recordOverflow<<",\"byte_budget_declines\":"<<ownershipSummary_.byteBudgetDeclines
-      <<",\"read_faults\":"<<ownershipSummary_.readFaults<<",\"ancestor_traces\":"<<ownershipSummary_.ancestorTraces<<",\"ancestor_trace_overflow\":"<<ownershipSummary_.ancestorTraceOverflow<<"},\"uploads\":[";
-    for(size_t i=0;i<uploads_.size();++i){if(i)j<<',';const auto& u=uploads_[i];j<<"{\"attempt\":"<<u.attempt<<",\"resource\":"<<u.resource<<",\"generation\":"<<u.generation<<",\"cutoff\":"<<u.cutoff<<'}';}
-    j<<"],\"records\":[";
+      <<",\"read_faults\":"<<ownershipSummary_.readFaults<<",\"ancestor_traces\":"<<ownershipSummary_.ancestorTraces<<",\"ancestor_trace_overflow\":"<<ownershipSummary_.ancestorTraceOverflow<<"},\"records\":[";
     auto snapshot=[&](const Snapshot& s){j<<"{\"status\":\""<<s.status<<"\",\"offset\":"<<s.offset<<",\"bytes\":"<<(s.status=="available"?s.data.size():0)<<'}';};
     for(size_t i=0;i<records_.size();++i){if(i)j<<',';const auto& r=records_[i];j<<"{\"id\":"<<r.id<<",\"sequence\":"<<r.sequence<<",\"writer\":\""<<r.writer<<"\",\"return_rva\":";jsonAddress(j,r.returnRva);
         j<<",\"thread_id\":"<<r.threadId<<",\"observed_frame\":"<<r.observedFrame<<",\"completion_sequence\":"<<r.completionSequence<<",\"lookup_status\":\""<<r.lookupStatus<<"\",\"owner\":";jsonAddress(j,r.owner);j<<",\"key\":";jsonAddress(j,r.key);j<<",\"builder\":";jsonAddress(j,r.builder);j<<",\"object\":";jsonAddress(j,r.object);j<<",\"entry\":";jsonAddress(j,r.entry);

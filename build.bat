@@ -437,8 +437,9 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
-    "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\original_draw_probe.cpp" ^
+    "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\transition_flash_prevent.cpp" ^
+    "src\d3d11\pose_reader_watch.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -462,7 +463,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_theater.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
-    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
+    "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
     "src\d3d11\shader_sig.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
@@ -471,7 +472,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\wake_pulse.cpp" ^
     "src\d3d11\hud_grain.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_separation.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
@@ -492,8 +492,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
-    "src\d3d11\witchstar_fix.cpp" "src\d3d11\fov_probe.cpp" ^
-    "src\d3d11\cb_peek.cpp" "src\d3d11\billboard_fix.cpp" ^
+    "src\d3d11\billboard_fix.cpp" ^
     "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
@@ -596,11 +595,15 @@ REM The --quiet rigs hold wall-clock intervals to tight bounds; they run alone,
 REM after the rest, with the whole machine. Only their test runs need that, so
 REM each is split (see the rig area below): its compiles run in the pool like
 REM any other rig's and only its runs wait their turn.
+REM openxr_module_test loads openxr_export_fixture.dll, which
+REM :rig_openxr_exports_test builds; --after holds the reader back until the
+REM writer has actually finished (see the rig rules below).
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%~f0" --times "%BUILD%\rig_times.json" ^
     --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,vtable_test ^
+    --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
 echo [edvr] === config contract ===
@@ -652,7 +655,16 @@ REM  environment: ROOT, BUILD, OBJ, GEN, CFLAGS, EDVR_VER, the
 REM  INSTALLER_* lists and the compiler on PATH. Rigs run in any order and at the
 REM  same time as one another, so a rig must not depend on another rig's
 REM  output, must not share an obj directory, and must not write a file
-REM  another rig reads. The DLLs a rig copies are the main flow's, above.
+REM  another rig reads -- unless that dependency is declared to run_jobs.py
+REM  with --after (see the invocation above), which holds the reader back
+REM  until the writer has actually finished, not merely started. This was an
+REM  unenforced rule once: openxr_module_test loaded openxr_export_fixture.dll
+REM  (built by :rig_openxr_exports_test) with no ordering between the two
+REM  rigs, and only ran clean because a stale fixture DLL from an earlier
+REM  build was normally still sitting in %BUILD%; a build whose mid-link
+REM  failure had deleted it surfaced the race. --after is now the one
+REM  sanctioned way to write a rig that reads another's output -- do not add
+REM  a second one without it. The DLLs a rig copies are the main flow's, above.
 REM
 REM  A rig named in --quiet (or --serial, see tools\run_jobs.py) is written
 REM  in two steps so that only its test runs are held back:
@@ -1077,25 +1089,6 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
 )
 exit /b 0
 
-:rig_hologram_motion
-echo [edvr] === hologram motion regression ===
-if not exist "%OBJ%\uicolourtest" mkdir "%OBJ%\uicolourtest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uicolourtest\\" /Fe"%OBJ%\uicolourtest\ui_colour_layer_test.exe" ^
-    "tools\ui_colour_layer_test\ui_colour_layer_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: UI colour layer test build failed & exit /b 1 )
-"%OBJ%\uicolourtest\ui_colour_layer_test.exe" || exit /b 1
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uicolourtest\\" /Fe"%OBJ%\uicolourtest\controller_test.exe" ^
-    "tools\ui_colour_layer_test\controller_test.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: UI separation controller test build failed & exit /b 1 )
-"%OBJ%\uicolourtest\controller_test.exe" || exit /b 1
-exit /b 0
-
 :rig_native_motion_rigs
 echo [edvr] === native motion, fusion and night-vision rigs ===
 
@@ -1225,9 +1218,9 @@ exit /b 0
 :rig_object_classification
 echo [edvr] === object classification provenance regression ===
 if not exist "%OBJ%\classification" mkdir "%OBJ%\classification"
-ml64.exe /nologo /c /Fo"%OBJ%\classification\source_owner_unwind.obj" ^
-    "tools\object_classification_test\source_owner_unwind.asm"
-if errorlevel 1 ( echo [edvr] ERROR: source owner unwind fixture build failed & exit /b 1 )
+ml64.exe /nologo /c /Fo"%OBJ%\classification\unwind_stubs.obj" ^
+    "tools\object_classification_test\unwind_stubs.asm"
+if errorlevel 1 ( echo [edvr] ERROR: unwind fixture build failed & exit /b 1 )
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_RECORD_WRITER_TEST ^
     /Fo"%OBJ%\classification\\" /Fe"%OBJ%\classification\object_classification_test.exe" ^
@@ -1237,13 +1230,12 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\common\code_hook.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" "src\common\guard.cpp" ^
-    "%OBJ%\classification\source_owner_unwind.obj" ^
+    "%OBJ%\classification\unwind_stubs.obj" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: object classification test build failed & exit /b 1 )
 "%OBJ%\classification\object_classification_test.exe" "%OBJ%\classification" || exit /b 1
 python "tools\object_classification.py" --self-test || exit /b 1
-python "tools\object_classification.py" "%OBJ%\classification\classification_fixture.json" --verify-fixture || exit /b 1
-python "tools\object_classification.py" "%OBJ%\classification\classification_source_fixture.json" --verify-source-fixture || exit /b 1
+python "tools\object_classification.py" "%OBJ%\classification\classification_fixture.json" || exit /b 1
 exit /b 0
 
 :rig_eye_draw_snapshot
@@ -1368,22 +1360,6 @@ if "%EDVR_RIG_STEP%"=="build" exit /b 0
 :gpu_timing_test_run
 "%OBJ%\gputiming\gpu_timing_test.exe" --dry-run || exit /b 1
 "%OBJ%\gputiming\gpu_timing_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_original_draw_probe_test
-REM Sparse original-draw diagnostics must preserve rendering, never Flush, and
-REM distinguish passed-sample, query-guard, invalid and bounded-timeout outcomes.
-if not exist "%OBJ%\originaldrawprobe" mkdir "%OBJ%\originaldrawprobe"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\originaldrawprobe\\" ^
-    /Fe"%OBJ%\originaldrawprobe\original_draw_probe_test.exe" ^
-    "tools\original_draw_probe_test\original_draw_probe_test.cpp" ^
-    "src\d3d11\original_draw_probe.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: original draw probe test build failed & exit /b 1 )
-"%OBJ%\originaldrawprobe\original_draw_probe_test.exe" --dry-run || exit /b 1
-"%OBJ%\originaldrawprobe\original_draw_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_openvr_abi_test
@@ -1638,7 +1614,7 @@ if not exist "%OBJ%\openxr_compositor_test" mkdir "%OBJ%\openxr_compositor_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_compositor_test\\" /Fe"%BUILD%\openxr_compositor_test.exe" ^
     "tools\openxr_compositor_test\openxr_compositor_test.cpp" "tools\openxr_compositor_test\abi_caller.cpp" ^
-    "src\openxr\openvr_compositor.cpp" /link /INCREMENTAL:NO
+    "src\openxr\openvr_compositor.cpp" "src\common\frame_flag.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: owned OpenVR compositor test build failed & exit /b 1 )
 "%BUILD%\openxr_compositor_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_compositor_test.exe" --self-test || exit /b 1
@@ -1662,6 +1638,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_exports_test\\" /Fe"%BUILD%\openxr_export_fixture.dll" ^
     "tools\openxr_exports_test\fixture.cpp" "src\openxr\runtime_exports.cpp" ^
     "src\openxr\openvr_system.cpp" "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
+    "src\common\frame_flag.cpp" ^
     /link /INCREMENTAL:NO /DEF:"tools\openxr_exports_test\fixture.def"
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR export fixture build failed & exit /b 1 )
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^

@@ -5,6 +5,14 @@
 *Updated 2026-09-15. Historical findings summarize the journal below; the
 current timing and overlay qualification is linked separately.*
 
+- **2026-09-24:** the Performance page's Foveation centre row is gone
+  with its key (`experimental.foveation_centre`, retired).
+- **2026-09-23, later:** the Monitor page drops the rows the compositor's
+  frame timing filled -- DROPPED, BY CAUSE and REPROJECTED always, APP GPU
+  and GPU TIME off the native path -- instead of showing "--" for good:
+  that timing crossed from the legacy openvr half, and frame_flag v34
+  retired the channel nothing had written since the proxy went. The drop
+  log line and the last-drop line speak of long frames only.
 - **2026-09-23:** the Performance page's `UI quality` row (`fix.ui_quality`)
   is one row for the cockpit panels' size and the UI layer; the one-day
   `HUD quality` row is gone (see the journal's dated entries). Its choices
@@ -695,7 +703,7 @@ they were there (flown 2026-09-07).
 
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
    `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
-   `render_sharpness`, `foveation`, `foveation_centre`, `settlement_detail`,
+   `render_sharpness`, `foveation`, `settlement_detail`,
    `ui_quality` (labelled **UI quality**, off / 100% / 125%, default off:
    the interface panels' size and the UI layer, one row), and `render_scale`
    when its branch lands. Costs where they are measured:

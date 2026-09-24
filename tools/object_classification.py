@@ -5,6 +5,18 @@ The input is ``classification_<stamp>.json``.  Its named binary sibling is
 read without modification.  Visible ownership is reported only for a valid
 MeshCoverage record whose stored depth exactly equals SceneZ and whose exact-
 frame Mesh bytes agree with the draw-generation ID and t33 snapshots.
+
+Captures written since 2026-09-23 are ``edvr_object_classification_v3``:
+EDVR's draw/mesh capture retired, so they carry the executable identity,
+``summary.binary_ok`` and the record-writer section only, and load with every
+draw/mesh section empty (status ``draw_capture_retired``). v1 and v2 captures
+read exactly as before.
+
+The record-writer section is version 3 from 2026-09-24: the upload join
+(``uploads``, the writer's Map cutoff per source-owner attempt) retired with
+the source-owner probe that fed it, so a version 3 section has no ``uploads``
+array. Versions 1 and 2 carry one and read as before (the 2026-09-23 builds
+wrote version 2 with it always empty).
 """
 
 import argparse
@@ -21,6 +33,7 @@ import tempfile
 
 SCHEMA_V1 = "edvr_object_classification_v1"
 SCHEMA_V2 = "edvr_object_classification_v2"
+SCHEMA_V3 = "edvr_object_classification_v3"
 SCHEMA = SCHEMA_V1
 MESH_STRIDE = 240
 POOL_STRIDE = 336
@@ -625,8 +638,11 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
         return None, [], [], [], [], packed_bytes
     diagnostic = _dict(diagnostic, "record_writers")
     version = _u32(diagnostic.get("version"), "record_writers.version")
-    if version not in {1, 2}:
+    if version not in {1, 2, 3}:
         raise CaptureError("record_writers.version is unsupported")
+    # Version 2 added the KinematicRig ownership; version 3 keeps it and
+    # drops the upload join.
+    ownership = version >= 2
     status = _string(diagnostic.get("status"), "record_writers.status", 32)
     hook_status = _string(diagnostic.get("hook_status"), "record_writers.hook_status", 32)
     statuses = {"not_run", "captured", "partial", "unavailable"}
@@ -642,7 +658,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
 
     limits = _dict(diagnostic.get("limits"), "record_writers.limits")
     limit_bounds = dict(RECORD_WRITER_LIMITS)
-    if version == 2:
+    if ownership:
         limit_bounds.update(RECORD_OWNERSHIP_LIMITS)
     for field, maximum in limit_bounds.items():
         value = _uint(limits.get(field), "record_writers.limits.%s" % field)
@@ -658,7 +674,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
 
     ownership_status = None
     ownership_summary = None
-    if version == 2:
+    if ownership:
         ownership_status = _string(diagnostic.get("ownership_status"),
                                    "record_writers.ownership_status", 32)
         if ownership_status not in {"not_run", "unavailable", "captured", "partial"}:
@@ -676,7 +692,13 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
         for field in ownership_summary_fields:
             _uint(ownership_summary.get(field), "record_writers.ownership_summary.%s" % field)
 
-    uploads = _list(diagnostic.get("uploads"), "record_writers.uploads", len(attempts))
+    if version >= 3:
+        # Retired with the source-owner probe that fed it (2026-09-24).
+        if "uploads" in diagnostic:
+            raise CaptureError("record_writers version 3 carries the retired uploads array")
+        uploads = []
+    else:
+        uploads = _list(diagnostic.get("uploads"), "record_writers.uploads", len(attempts))
     upload_attempts = set()
     for ui, upload in enumerate(uploads):
         label = "record_writers.uploads[%u]" % ui
@@ -736,7 +758,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
             if completion_sequence <= sequence or completion_sequence in event_sequences:
                 raise CaptureError("record_writers completion event must uniquely follow its begin event")
             event_sequences.add(completion_sequence)
-        if version == 2:
+        if ownership:
             ownership_link = record.get("ownership_id")
             if ownership_link is not None:
                 ownership_link = _u32(ownership_link, label + ".ownership_id")
@@ -754,7 +776,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
         sizes = {"record": POOL_STRIDE, "key_snapshot": 32,
                  "builder_snapshot": 96,
                  "object_snapshot": (416 if writer == "helper_434d149" else
-                                     192 if version == 2 else 176),
+                                     192 if ownership else 176),
                  "entry_snapshot": 0x38}
         snapshots = {}
         for field in ("record", "key_snapshot", "builder_snapshot", "object_snapshot", "entry_snapshot"):
@@ -811,7 +833,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
 
     ownerships = []
     ancestor_traces = []
-    if version == 2:
+    if ownership:
         ownerships = _list(diagnostic.get("ownerships"), "record_writers.ownerships",
                            limits["ownership_records"])
         snapshot_statuses = {"available", "not_applicable", "null_pointer", "read_fault",
@@ -1102,7 +1124,7 @@ def _validate_record_writers(root, executable, resources, attempts, packed_bytes
 
 
 def _validate_record_ownership_contents(binary, diagnostic, records, ownerships):
-    if not diagnostic or diagnostic["version"] != 2:
+    if not diagnostic or diagnostic["version"] < 2:
         return
 
     def payload(ownership, field):
@@ -1252,10 +1274,82 @@ def _validate_draws(root, resources, snapshots, selected_frame):
     return draws
 
 
+def _capture_binary(path, binary_name, total_packed_bytes, binary_ok):
+    binary_path = path.with_name(binary_name)
+    try:
+        if binary_path.exists():
+            if binary_path.stat().st_size > MAX_BINARY_BYTES:
+                raise CaptureError("binary exceeds reader safety bound")
+            binary = binary_path.read_bytes()
+        else:
+            binary = None
+    except OSError as exc:
+        raise CaptureError("%s: %s" % (binary_path, exc)) from exc
+    if total_packed_bytes:
+        if binary is None:
+            raise CaptureError("available blob payload is missing")
+        if len(binary) != total_packed_bytes:
+            raise CaptureError("binary length does not match packed available blobs")
+    elif binary is not None and len(binary):
+        raise CaptureError("binary has bytes but no available blob spans")
+    elif binary is None and binary_ok:
+        raise CaptureError("successful capture is missing its declared binary")
+    return binary_path, binary
+
+
+V3_RETIRED_SECTIONS = ("selection", "limits", "resources", "stacks", "events", "snapshots",
+                       "draws", "blobs", "source_owner", "cpu_blobs")
+
+
+def _load_capture_v3(path, root):
+    """A capture from after the draw/mesh half retired (2026-09-23).
+
+    It holds the executable identity, summary.binary_ok and the record-writer
+    section. It comes back in load_capture's shape with every draw/mesh
+    section empty, so analyse() treats it like any capture without a sealed
+    frame. A v3 file that carries a retired section is refused rather than
+    half-read.
+    """
+    binary_name = _string(root.get("binary"), "binary", 255)
+    if not binary_name or Path(binary_name).name != binary_name:
+        raise CaptureError("binary must be a leaf filename")
+    executable = _dict(root.get("executable"), "executable")
+    _u32(executable.get("pe_timestamp"), "executable.pe_timestamp")
+    _u32(executable.get("image_size"), "executable.image_size")
+    summary = _dict(root.get("summary"), "summary")
+    binary_ok = _boolean(summary.get("binary_ok"), "summary.binary_ok")
+    for retired in V3_RETIRED_SECTIONS:
+        if retired in root:
+            raise CaptureError("v3 capture carries the retired %s section" % retired)
+    (record_writers, writer_uploads, writer_records, writer_ownerships,
+     writer_ancestor_traces, total_packed_bytes) = _validate_record_writers(
+        root, executable, [], [], 0, binary_ok)
+    binary_path, binary = _capture_binary(path, binary_name, total_packed_bytes, binary_ok)
+    _validate_record_ownership_contents(binary or b"", record_writers,
+                                        writer_records, writer_ownerships)
+    selection = {"discovery_mesh_frame": 0, "selected_mesh_frame": 0, "scene_frame": 0,
+                 "has_discovery": False, "has_selection": False, "sealed": False,
+                 "missed_window": False}
+    return {
+        "path": path, "binary_path": binary_path, "binary": binary or b"", "root": root,
+        "selection": selection,
+        "summary": {"status": "draw_capture_retired", "binary_ok": binary_ok,
+                    "cpu_provenance_available": True, "foreign_writes": 0},
+        "resources": [], "stacks": [], "events": [], "event_by_version": {},
+        "snapshots": [], "draws": [], "blobs": [],
+        "source_owner": None, "source_owner_attempts": [], "cpu_blobs": [],
+        "record_writers": record_writers, "writer_uploads": writer_uploads,
+        "writer_records": writer_records, "writer_ownerships": writer_ownerships,
+        "writer_ancestor_traces": writer_ancestor_traces,
+    }
+
+
 def load_capture(path):
     path = Path(path)
     root = _read_json(path)
     schema = root.get("schema")
+    if schema == SCHEMA_V3:
+        return _load_capture_v3(path, root)
     if schema not in {SCHEMA_V1, SCHEMA_V2}:
         raise CaptureError("unsupported object-classification schema")
     binary_name = _string(root.get("binary"), "binary", 255)
@@ -1347,25 +1441,7 @@ def load_capture(path):
     expected_status = "sealed" if sealed else ("selection_window_missed" if selection["missed_window"] else ("stage_missing" if has_selection else "no_selected_frame"))
     if status != expected_status:
         raise CaptureError("summary.status disagrees with selection")
-    binary_path = path.with_name(binary_name)
-    try:
-        if binary_path.exists():
-            if binary_path.stat().st_size > MAX_BINARY_BYTES:
-                raise CaptureError("binary exceeds reader safety bound")
-            binary = binary_path.read_bytes()
-        else:
-            binary = None
-    except OSError as exc:
-        raise CaptureError("%s: %s" % (binary_path, exc)) from exc
-    if total_packed_bytes:
-        if binary is None:
-            raise CaptureError("available blob payload is missing")
-        if len(binary) != total_packed_bytes:
-            raise CaptureError("binary length does not match packed available blobs")
-    elif binary is not None and len(binary):
-        raise CaptureError("binary has bytes but no available blob spans")
-    elif binary is None and summary["binary_ok"]:
-        raise CaptureError("successful capture is missing its declared binary")
+    binary_path, binary = _capture_binary(path, binary_name, total_packed_bytes, summary["binary_ok"])
     if schema == SCHEMA_V2:
         _validate_cpu_blob_contents(binary or b"", source_owner_attempts, cpu_blobs)
         _validate_record_ownership_contents(binary or b"", record_writers,
@@ -1467,9 +1543,9 @@ def _record_writer_candidates(capture, cpu_source, cpu_record):
             "builder_snapshot_status": record["builder_snapshot"]["status"],
             "object_snapshot_status": record["object_snapshot"]["status"],
             "entry_snapshot_status": record["entry_snapshot"]["status"],
-            "ownership_status": (record["ownership_status"] if diagnostic["version"] == 2
+            "ownership_status": (record["ownership_status"] if diagnostic["version"] >= 2
                                  else "unavailable_legacy_capture"),
-            "ownership_id": (record["ownership_id"] if diagnostic["version"] == 2 else None),
+            "ownership_id": (record["ownership_id"] if diagnostic["version"] >= 2 else None),
         })
     result.update(candidate_count=len(candidates), candidates=candidates,
                   eligible_records=len(eligible), unreadable_eligible_records=unreadable)
@@ -2446,146 +2522,6 @@ def _verify_self_fixture(report):
         raise CaptureError("self-test copy-source provenance changed")
 
 
-def verify_fixture(capture, report):
-    selection = capture["selection"]
-    if (selection["selected_mesh_frame"], selection["scene_frame"], selection["sealed"]) != (23, 900, True):
-        raise CaptureError("fixture selected/scene frame changed")
-    if len(capture["draws"]) != 3 or report["counts"]["mesh_records"] != 3:
-        raise CaptureError("fixture draw/record count changed")
-    counts = report["counts"]
-    if (counts["coverage_pixels"], counts["depth_agreeing_pixels"],
-            counts["owned_visible_pixels"], counts["owned_visible_records"]) != (2, 1, 1, 1):
-        raise CaptureError("fixture exact-depth ownership interpretation changed")
-    records = report.get("records", [])
-    if len(records) != 1:
-        raise CaptureError("fixture owner detail is unavailable")
-    owner = records[0]
-    expected = (1, 1, 1, 0xB0B00028, 0xB0B00140, 0x22222222)
-    actual = (owner["record"], owner["draw"], owner["pool_slot"], owner["t33_word28"],
-              owner["t33_word320"], owner["instance_second_word"])
-    if actual != expected:
-        raise CaptureError("fixture exact draw/ID/t33 join changed")
-    if len(report["groups"]) != 1:
-        raise CaptureError("fixture metadata grouping changed")
-    sources = report["groups"][0]["source_versions"]
-    pool_route = sources["t33_pool"]["upload_route"]
-    ids_route = sources["ia_ids"]["upload_route"]
-    if pool_route["status"] != "matched" or pool_route.get("endpoint_kind") != "update":
-        raise CaptureError("fixture pool rewrite provenance changed")
-    if ids_route["status"] != "matched" or ids_route.get("endpoint_kind") != "map":
-        raise CaptureError("fixture ID Map provenance changed")
-    if not ids_route["chain"] or ids_route["chain"][-1].get("completion_status") != "matched":
-        raise CaptureError("fixture ID Map/Unmap completion changed")
-    missing_draw = capture["draws"][2]
-    if any(missing_draw[field] for field in ("pool_write_observed", "pool_matched", "id_write_observed", "id_matched")):
-        raise CaptureError("fixture missing-provenance control changed")
-
-
-def verify_pipeline(capture, report):
-    selection = capture["selection"]
-    if (selection["selected_mesh_frame"], selection["scene_frame"], selection["sealed"]) != (3, 10003, True):
-        raise CaptureError("pipeline fixture selected/scene frame changed")
-    if len(capture["draws"]) != 1:
-        raise CaptureError("pipeline fixture must contain one draw")
-    draw = capture["draws"][0]
-    if (draw["mesh_frame"], draw["eye"], draw["first_record"], draw["instances"], draw["id_byte_offset"]) != (3, 0, 0, 1, 0):
-        raise CaptureError("pipeline fixture draw metadata changed")
-    if report["counts"]["owned_visible_pixels"] < 1 or report["counts"]["owned_visible_records"] != 1:
-        raise CaptureError("pipeline fixture produced no matched visible ownership")
-    records = report.get("records", [])
-    if len(records) != 1 or records[0]["record"] != 0 or records[0]["pool_slot"] != 0:
-        raise CaptureError("pipeline fixture record/ID/pool join changed")
-    if len(report["groups"]) != 1:
-        raise CaptureError("pipeline fixture metadata grouping changed")
-    sources = report["groups"][0]["source_versions"]
-    for label in ("t33_pool", "ia_ids"):
-        source = sources[label]
-        route = source["upload_route"]
-        if route["status"] != "matched" or route.get("endpoint_kind") != "update":
-            raise CaptureError("pipeline fixture %s current generation lacks an observed Update route" % label)
-        event = capture["events"][route["endpoint_event"]]
-        if event["resource"] != source["resource"] or event["generation"] != source["generation"]:
-            raise CaptureError("pipeline fixture %s upload-route version mismatch" % label)
-
-
-def verify_source_fixture(capture, report):
-    owner_capture = capture.get("source_owner")
-    if not owner_capture or not owner_capture["synthetic_fixture"]:
-        raise CaptureError("source-owner fixture lacks its explicit synthetic marker")
-    selection = capture["selection"]
-    if (selection["selected_mesh_frame"], selection["scene_frame"], selection["sealed"]) != (103, 701, True):
-        raise CaptureError("source-owner fixture selected/scene frame changed")
-    if len(capture["draws"]) != 1 or report["counts"]["mesh_records"] != 1:
-        raise CaptureError("source-owner fixture draw/record count changed")
-    counts = report["counts"]
-    if (counts["coverage_pixels"], counts["depth_agreeing_pixels"],
-            counts["owned_visible_pixels"], counts["owned_visible_records"]) != (1, 1, 1, 1):
-        raise CaptureError("source-owner fixture visible ownership changed")
-    if report["cpu_source_owner"]["visible_record_outcomes"] != {"matched": 1}:
-        raise CaptureError("source-owner fixture did not prove one exact CPU source record")
-    records = report.get("records", [])
-    if len(records) != 1:
-        raise CaptureError("source-owner fixture record detail is unavailable")
-    proof = records[0]["cpu_source_owner"]
-    if (proof["status"] != "matched" or proof.get("proof") != "same_generation_exact_bytes" or
-            proof["pool_slot"] != 0 or proof["source_record"] != 0 or not proof["byte_equal"]):
-        raise CaptureError("source-owner fixture exact-byte proof changed")
-    attempt = capture["source_owner_attempts"][proof["attempt"]]
-    event = capture["events"][proof["event"]]
-    draw = capture["draws"][0]
-    if (attempt["status"] != "captured" or attempt["mesh_frame"] != 101 or
-            event["resource"] != draw["pool_resource"] or
-            event["generation"] != draw["pool_generation"] or event["generation"] != 1):
-        raise CaptureError("source-owner fixture generation/event join changed")
-    descriptor = attempt["descriptors"][proof["descriptor"]]
-    payload = capture["cpu_blobs"][descriptor["payload_blob"]]
-    if descriptor["record_count"] != 1 or payload["status"] != "available" or payload["bytes"] != POOL_STRIDE:
-        raise CaptureError("source-owner fixture descriptor payload changed")
-    writer_capture = capture.get("record_writers")
-    if not writer_capture or writer_capture["status"] != "captured" or writer_capture["hook_status"] != "finished":
-        raise CaptureError("source-owner fixture lacks its completed record-writer diagnostic")
-    if report["record_writers"]["visible_record_outcomes"] != {"unique_candidate": 1}:
-        raise CaptureError("source-owner fixture did not retain one pre-upload writer candidate")
-    writer = records[0]["record_writer_candidates"]
-    if (writer["attribution"] != "candidate_provenance_only" or writer["candidate_count"] != 1 or
-            writer["opaque_context_consensus"] != "single_candidate" or
-            writer["candidates"][0]["lookup_status"] != "complete" or
-            writer["candidates"][0]["context_status"] != "complete" or
-            writer["candidates"][0]["completion_sequence"] > writer["cutoff"]):
-        raise CaptureError("source-owner fixture writer cutoff/context join changed")
-    if writer_capture["version"] == 1:
-        if writer["candidates"][0]["writer"] != "direct_369ce91":
-            raise CaptureError("legacy source-owner fixture writer changed")
-    else:
-        candidate = writer["candidates"][0]
-        if (candidate["writer"] != "inline_42b4ed6" or
-                candidate["ownership_status"] != "linked" or candidate["ownership_id"] != 0):
-            raise CaptureError("source-owner fixture writer/ownership link changed")
-        ownership_capture = report["kinematic_ownership"]
-        ownership_result = records[0]["kinematic_ownership_candidates"]
-        if (ownership_capture["capture_status"] != "captured" or
-                ownership_capture["visible_record_outcomes"] != {"unique_candidate": 1} or
-                ownership_result["attribution"] != "candidate_ownership_provenance_only" or
-                ownership_result["writer_candidate_count"] != 1 or
-                ownership_result["linked_candidate_count"] != 1 or
-                ownership_result["ownership_count"] != 1):
-            raise CaptureError("source-owner fixture ownership candidate join changed")
-        ownership = ownership_result["candidates"][0]["ownership"]
-        stored = capture["writer_ownerships"][0]
-        summary = writer_capture["ownership_summary"]
-        if (ownership["branch"] != "virtual_50" or
-                ownership["ancestor_return_rva"] != "0x431b21f" or
-                ownership["writer_relation"] != "inline_registry_plus_78" or
-                int(ownership["registry"], 16) + 0x78 != int(candidate["owner"], 16) or
-                ownership["context"] != candidate["object"] or
-                ownership["parent_status"] != "available" or
-                stored["context_snapshot"]["status"] != "available" or
-                stored["context_snapshot"]["bytes"] != 0xC0 or
-                summary["attempted"] != 1 or summary["linked"] != 1 or
-                summary["stored"] != 1 or summary["deduplicated"] != 0):
-            raise CaptureError("source-owner fixture retained KinematicRig tuple changed")
-
-
 def self_test():
     root, binary = _fixture_value()
     with tempfile.TemporaryDirectory() as temp_name:
@@ -2900,6 +2836,62 @@ def self_test():
             assert inactive_v2_report["kinematic_ownership"]["visible_record_outcomes"] == {
                 "unavailable": 2}
 
+            # v3 (2026-09-23): the same writer section and nothing of the
+            # retired draw/mesh capture. It loads, reports why no record is
+            # owned, and refuses a file that still carries a retired section.
+            v3 = {"schema": SCHEMA_V3, "binary": inactive_v2["binary"],
+                  "executable": copy.deepcopy(inactive_v2["executable"]),
+                  "summary": {"binary_ok": True},
+                  "record_writers": copy.deepcopy(inactive_v2["record_writers"])}
+            v3["record_writers"]["uploads"] = []
+            path = _write_fixture(temp, v3, b"")
+            v3_report = analyse(load_capture(path), include_records=True)
+            assert v3_report["status"] == "draw_capture_retired"
+            assert v3_report["record_writers"]["capture_status"] == top_status
+            assert v3_report["missing"] == [{"scope": "capture", "reason": "draw_capture_retired"}]
+            assert v3_report["records"] == []
+            for retired in ("draws", "source_owner"):
+                stale = copy.deepcopy(v3)
+                stale[retired] = copy.deepcopy(inactive_v2[retired])
+                path = _write_fixture(temp, stale, b"")
+                try:
+                    load_capture(path)
+                except CaptureError:
+                    pass
+                else:
+                    raise AssertionError("v3 capture carrying %s accepted" % retired)
+            uploaded = copy.deepcopy(v3)
+            uploaded["record_writers"]["uploads"] = copy.deepcopy(
+                inactive_v2["record_writers"]["uploads"])
+            path = _write_fixture(temp, uploaded, b"")
+            try:
+                load_capture(path)
+            except CaptureError:
+                pass
+            else:
+                raise AssertionError("v3 capture with an upload join accepted")
+
+            # The record-writer section as version 3 (2026-09-24): no upload
+            # join at all. It loads the same way, and a version 3 section
+            # that still carries an uploads array is refused.
+            v3_writers = copy.deepcopy(v3)
+            v3_writers["record_writers"]["version"] = 3
+            del v3_writers["record_writers"]["uploads"]
+            path = _write_fixture(temp, v3_writers, b"")
+            v3_writers_report = analyse(load_capture(path), include_records=True)
+            assert v3_writers_report["status"] == "draw_capture_retired"
+            assert v3_writers_report["record_writers"]["capture_status"] == top_status
+            assert v3_writers_report["kinematic_ownership"]["capture_status"] == top_status
+            stale_uploads = copy.deepcopy(v3_writers)
+            stale_uploads["record_writers"]["uploads"] = []
+            path = _write_fixture(temp, stale_uploads, b"")
+            try:
+                load_capture(path)
+            except CaptureError:
+                pass
+            else:
+                raise AssertionError("record_writers version 3 carrying uploads accepted")
+
         def rejected_writer(mutator):
             value = copy.deepcopy(writer_root)
             mutator(value)
@@ -3004,39 +2996,22 @@ def main(argv=None):
     parser.add_argument("path", nargs="?", help="classification_<stamp>.json")
     parser.add_argument("--json", action="store_true", help="write machine-readable JSON to stdout")
     parser.add_argument("--records", action="store_true", help="include bounded per-owner record details")
-    parser.add_argument("--verify-fixture", action="store_true", help="assert the WARP fixture semantics")
-    parser.add_argument("--verify-pipeline", action="store_true", help="assert the production mesh-motion pipeline fixture")
-    parser.add_argument("--verify-source-fixture", action="store_true", help="assert the generated CPU source-owner fixture")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
-        if args.path or args.verify_fixture or args.verify_pipeline or args.verify_source_fixture or args.records or args.json:
+        if args.path or args.records or args.json:
             parser.error("--self-test must be used alone")
         self_test()
         return 0
-    if sum((args.verify_fixture, args.verify_pipeline, args.verify_source_fixture)) > 1:
-        parser.error("fixture verification modes are mutually exclusive")
     if not args.path:
         parser.error("path is required unless --self-test is used")
     try:
         capture = load_capture(args.path)
-        report = analyse(capture, include_records=args.records or args.verify_fixture or args.verify_pipeline or args.verify_source_fixture)
-        if args.verify_fixture:
-            verify_fixture(capture, report)
-        if args.verify_pipeline:
-            verify_pipeline(capture, report)
-        if args.verify_source_fixture:
-            verify_source_fixture(capture, report)
+        report = analyse(capture, include_records=args.records)
     except CaptureError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
-    if args.verify_source_fixture and not args.json:
-        print("CPU source-owner fixture verified")
-    elif args.verify_fixture and not args.json:
-        print("GPU object-classification fixture verified")
-    elif args.verify_pipeline and not args.json:
-        print("Object-classification pipeline fixture verified")
-    elif args.json:
+    if args.json:
         json.dump(report, sys.stdout, indent=2, sort_keys=True)
         print()
     else:

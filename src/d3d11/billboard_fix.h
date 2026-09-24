@@ -1,4 +1,5 @@
-// Billboard sprites that keep their orientation when your head moves.
+// The billboard constants' shadow and shape check, loaned to the sun-glare
+// fix's world shader as its constants tee.
 //
 // THE CLASS (measured 2026-08-19/20 at a parked sun; the witchspace corona
 // is the same artifact): world-positioned sprites -- the sun's flare
@@ -6,70 +7,41 @@
 // built from the camera's axes, so they spin about their own centre under
 // head roll and yaw. A monitor never shows it; a headset always does.
 //
-// THE MEASUREMENT THAT MAKES THE FIX (cb_peek, 2026-08-20): each sprite's
-// vertex constants -- a small per-sprite buffer the game multiplexes
-// write-by-write -- carry BOTH orientations. Floats [16..22] are the DRAWN
-// basis: two orthogonal vectors, magnitude = the sprite's scale, rotating
-// with the head across a recorded roll/yaw sweep. Floats [36..46] are a
-// clean world-anchored frame -- middle row exactly (0,1,0) -- that never
-// moved through the same sweep. The game hands us the correct answer and
-// then draws with the wrong one.
+// THE MEASUREMENT (cb_peek, 2026-08-20): each sprite's vertex constants --
+// a small per-sprite buffer the game multiplexes write-by-write -- carry
+// BOTH orientations. Floats [16..22] are the DRAWN basis: two orthogonal
+// vectors, magnitude = the sprite's scale, rotating with the head across a
+// recorded roll/yaw sweep. Floats [36..46] are a clean world-anchored frame
+// -- middle row exactly (0,1,0) -- that never moved through the same sweep.
 //
-// THE FIX: for each matched draw whose freshly-written constants pass a
-// shape check, substitute a copy in which the drawn basis is rebuilt from
-// the buffer's OWN world frame, preserving the original magnitude --
-// orientation from the world, scale from the sprite, per write. No head
-// data is consulted at all; the correction is self-contained in what the
-// game wrote. The game's buffer is never modified -- the panel-distance
-// substitution discipline, aimed at eleven floats.
+// The billboard orientation fix that substituted a world-stable basis into
+// these constants was retired on 2026-08-23 (the sprite family did not read
+// what it substituted), and its code went on 2026-09-23 with the glare's
+// corner-rotation steady path. What remains is the capture of the glare
+// train's writes and the shape check, which the world shader's telemetry
+// reads.
 //
 // The shape check is the safety: two equal-magnitude orthogonal vectors in
 // the drawn slots, an orthonormal frame in the world slots. A write that is
-// not a billboard's fails it and draws untouched.
+// not a billboard's fails it and is not offered.
 #pragma once
 
 #include <cstdint>
 
-struct ID3D11DeviceContext;
-
 namespace edvr {
 
-class Config;
-
-// Retired as a user fix (no keys read; always stock). The module stays
-// for its shadow machinery, loaned to the sun-glare fix as its
-// constants tee.
-void billboardConfigure(Config& cfg);
-
-// Inline: asked per draw, and the build has no /GL to fold a cross-TU
-// getter for one scalar load. The enum lives here too, so this can name
-// its kStock value.
-namespace detail {
-enum class BillboardMode : uint32_t { kStock, kSteady, kProbe };
-extern BillboardMode g_billboardMode;
-}  // namespace detail
-inline bool billboardWantsDraws() { return detail::g_billboardMode != detail::BillboardMode::kStock; }
-
-// Every eye draw while enabled: matches the sprite family (X, eye-sized
-// depth in PS slot 0, a texture in slot 1, 64+ indices) and tracks which
-// constant buffer the family is writing through. True when THIS draw is a
-// match with a captured, shape-approved write to substitute -- the thunk
-// then wraps the draw in billboardBegin/End.
-bool billboardOnEyeDraw(char kind, uint32_t count, uint32_t instances);
-
-// The glare-steady loan: sun_glare_steady borrows this module's shadow
-// and substitution wholesale -- the glare train writes the same 208-byte
-// camera-standard layout. The matching already happened in sunglare_fix;
-// this is the family path minus the family test. billboardGlareWatch
-// arms the tee while the borrower is configured on.
+// The glare train writes the SAME 208-byte camera-standard layout the family
+// matcher was built for (the sweep of 2026-08-21 showed its rows pass the
+// shape check exactly). The matching already happened in sunglare_fix;
+// billboardGlareWatch arms the tee while fix.sun_glare's world shader or its
+// probe is configured on, and billboardOnGlareDraw follows the train's
+// buffer and says whether this draw's shadowed write passes the shape check.
 void billboardGlareWatch(bool on);
 bool billboardOnGlareDraw(uint32_t count, uint32_t instances);
 
 // The shadowed write's floats, for a borrower that only MEASURES: the
-// glare steer reads the head's roll out of the camera rows and touches
-// nothing -- both replacement formulas displaced the elements per eye,
-// because the rows are the view matrix and position flows through them.
-// Null until a write has been captured for the current target.
+// glare telemetry reads the head's roll out of the camera rows and touches
+// nothing. Null until a write has been captured for the current target.
 const float* billboardShadowFloats(uint32_t* count);
 
 // Milliseconds since the shadow content last updated (~0 if none). A
@@ -83,12 +55,6 @@ void* billboardTarget();
 
 // A fresh write to the watched buffer, from the Unmap tee.
 void billboardCapture(const void* data, uint32_t bytes);
-
-// Around the real draw: bind our substituted copy of the constants;
-// restore the game's buffer after. Begin failing to build degrades to the
-// draw running untouched.
-void billboardBegin(ID3D11DeviceContext* ctx);
-void billboardEnd(ID3D11DeviceContext* ctx);
 
 void billboardShutdown();
 

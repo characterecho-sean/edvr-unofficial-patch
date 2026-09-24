@@ -71,7 +71,6 @@ public:
         uint32_t writerRecord=0;uint64_t returnRva=0;std::string status;
         std::vector<AncestorFrame> frames;
     };
-    struct Upload {uint32_t attempt=0,resource=0;uint64_t generation=0,cutoff=0;};
     struct Summary {
         uint64_t observed=0;uint32_t stored=0,completed=0;uint64_t retainedBytes=0;
         uint64_t recordOverflow=0,byteBudgetDeclines=0,readFaults=0;
@@ -122,8 +121,6 @@ public:
     Pending beginLookupRvaForTest(uint64_t returnRva,uintptr_t callerRsp,
                                   uintptr_t dictionary,uintptr_t key,
                                   const CONTEXT& caller) noexcept;
-    uint64_t sampleUploadCutoff() const noexcept;
-    void noteUpload(uint32_t attempt,uint32_t resource,uint64_t generation,uint64_t cutoff) noexcept;
 
     Summary summary() const noexcept;
     OwnershipSummary ownershipSummary() const noexcept;
@@ -131,7 +128,6 @@ public:
     const char* hookStatusText() const noexcept;
     const std::vector<Record>& recordsForTest() const noexcept{return records_;}
     const std::vector<Ownership>& ownershipsForTest() const noexcept{return ownerships_;}
-    const std::vector<Upload>& uploadsForTest() const noexcept{return uploads_;}
     bool writeBinary(FILE* file,uint64_t& offset,bool& binOk) noexcept;
     void writeJson(std::ostringstream& json) const;
 
@@ -149,7 +145,6 @@ private:
     std::unordered_multimap<uint64_t,uint32_t> ownershipIndex_;
     std::vector<AncestorTrace> ancestorTraces_;
     bool ownershipOpcodesValid_=false;
-    std::vector<Upload> uploads_;
 
     void clearLocked();
     bool validateExecutableLocked() noexcept;

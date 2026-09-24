@@ -10,9 +10,9 @@ native package.
    `Products\elite-dangerous-odyssey-64` under the Frontier launcher, Steam's
    `Elite Dangerous` directory, or the Epic installation.
 3. If another mod already owns `d3d11.dll`, preserve it and configure the
-   `advanced.real_dll` chain as described in [Running alongside other
-   mods](../README.md#running-alongside-other-mods). Never overwrite another
-   mod's only DLL.
+   `advanced.real_dll` chain as described in [Running alongside EDHM by
+   hand](#running-alongside-edhm-by-hand) below. Never overwrite another mod's
+   only DLL.
 4. Place the release's `d3d11.dll` beside `EliteDangerous64.exe`. Copy
    `edvr.ini` there only if you do not already have one; otherwise keep your
    existing settings.
@@ -43,3 +43,22 @@ For uninstall, close Elite and use the installer, or remove the EDVR files and
 restore the original `openvr_api.dll` and any graphics-mod chain. Restore the
 original before launching the unmodified game. Preserve your `edvr.ini` if you
 intend to reinstall.
+
+## Running alongside EDHM by hand
+
+EDHM also installs as `d3d11.dll`. To run both:
+
+1. Rename EDHM's `d3d11.dll` (say, to `d3d11_edhm.dll`) and leave it where it
+   is.
+2. Put EDVR's `d3d11.dll` in its place.
+3. In `edvr.ini`, under `[advanced]`, set `real_dll = d3d11_edhm.dll`.
+
+EDVR passes everything through EDHM, and anything EDHM doesn't handle falls
+through to Windows' own `d3d11.dll`. Restart the game for this to take effect.
+If the name is wrong or the file won't load, EDVR says so in the log and
+carries on without it. This is the same procedure the installer follows, and
+what it will tell you it did.
+
+EDHM's uninstaller runs `del d3d11.dll`, which after this is EDVR's file. To
+undo the pair cleanly, delete `d3d11.dll` and `edvr.ini`, rename
+`d3d11_edhm.dll` back, then run EDHM's uninstaller if you want to.

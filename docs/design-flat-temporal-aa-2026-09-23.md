@@ -20,6 +20,9 @@
   (section 17). The recurring handoff-camera rejection is resolved. Jitter
   input/fallback tests and the focused depth-writer probe pass all 84 jobs and
   the 254-key contract (section 18); live projection jitter remains disabled.
+  Sean requested merging main into this branch before the next build; the
+  integration of main `28ee5f73` passes all 82 jobs and the 255-key contract
+  (section 19).
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -955,3 +958,22 @@ parallel jobs plus three quiet jobs, the 254-key config contract and both
 installer payload checks. The new phase-aware WARP resolver and capture model
 tests pass. Earlier full passes preceded the final capture labels and extent
 filter; use the qualified log for the committed source validation.
+
+## 19. Main integration, 2026-09-24
+
+Merge main `28ee5f73` into `codex/flat-temporal-aa` after the clean `a5f979c1`
+build, as Sean requested. Keep the experimental flat implementation on this
+branch. Main retires UI separation and several old probes, adds pose-reader and
+transition-flash diagnostics, and updates build scheduling. Resolve the vscreen
+conflicts by retaining flat clear/copy capture and original-binding draw
+ordering while taking main's retired-path removals. The new diagnostics read
+profile-gated configuration, so flat cannot enable their VR hooks.
+
+The next Epic flight remains a focused F10 capture near the star while turning
+the camera, with game SS set to 0.75x. Projection jitter is still disabled and
+the star-corona smear is not yet fixed. Preserve the live INI during
+deployment.
+
+The merged source passes `build/flat-main-merge-qualified.log`: 79 parallel
+jobs plus three quiet jobs, the 255-key config contract, flat mono WARP and
+capture policy tests, and both installer payload checks.

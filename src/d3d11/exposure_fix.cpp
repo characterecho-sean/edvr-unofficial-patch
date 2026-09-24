@@ -17,7 +17,6 @@
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
-#include "ui_separation.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
 #include "flat_runtime.h"
@@ -222,23 +221,8 @@ struct State {
     uint64_t applied = 0;
     bool     rejected = false;
 
-    // The exposure peek (the damping workstream's measurement instrument):
-    // once a second, staging-copy the pass's output buffers and log their
-    // floats. The breathing the field sees under head pitch lives in one
-    // of these values; the sweep names WHICH, and the damper then knows
-    // what to hold. Read-only -- the same discipline as every peek.
-    bool           peek = false;
-    ID3D11Buffer*  peekStaging[4] = {};   // owned; per UAV slot, buffers only
-    uint32_t       peekBytes[4] = {};
-    ID3D11Texture2D* peekStripStaging = nullptr;   // owned; the strip
-    uint32_t       peekStripW = 0;
-    uint32_t       peekStripFmt = 0;
-    bool           peekPending = false;
-    uint64_t       peekCopyMs = 0;
-    uint64_t       peekLastMs = 0;
-    uint32_t       peekLines = 0;
-
-    // The damper. The peek's sweep decoded the 8-byte state buffer: float
+    // The damper. The exposure peek's sweep (the retired measurement
+    // instrument, removed 2026-09-23) decoded the 8-byte state buffer: float
     // [0] a constant luminance floor (-9.9658 in every sample), float [1]
     // the adaptation value in log2 stops -- and a four-stop swing under
     // an ordinary head pitch at a star, because the metering runs on the
@@ -282,12 +266,6 @@ struct State {
 // Consecutive frames a detected candidate must run exactly twice before the
 // fix acts on it.
 constexpr uint32_t kConfirmFrames = 5;
-
-// The peek's cadence, readback lag, and line budget.
-constexpr uint64_t kPeekTickMs = 1000;
-constexpr uint64_t kPeekLagMs = 50;
-constexpr uint32_t kPeekMaxLines = 400;
-constexpr uint32_t kPeekMaxBytes = 256;
 
 // The damper's constants. The strip as measured 2026-08-21: 6x1, R32
 // float, texels [raw luminance, smoothed luminance, gain, gain again,
@@ -428,200 +406,6 @@ void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* f
                             s->copyBtoA ? "second eye -> first" : "first eye -> second");
         }
     }
-}
-
-void exposurePeekStrip(ID3D11DeviceContext* ctx, char* line, int* at,
-                       size_t lineSize);
-
-// The peek: consume last tick's staging copies, then queue this tick's.
-// Runs right after the second eye's dispatch, with the pass's UAVs still
-// bound and shared -- what is read here is what the tonemap reads.
-void exposurePeek(ID3D11DeviceContext* ctx) {
-    State* s = g_state;
-    if (s->peekLines >= kPeekMaxLines) return;
-    const uint64_t now = nowMs();
-
-    if (s->peekPending && now - s->peekCopyMs >= kPeekLagMs) {
-        char line[480];
-        int at = 0;
-        for (uint32_t slot = 0; slot < 4 && at < 400; ++slot) {
-            if (!s->peekStaging[slot]) continue;
-            D3D11_MAPPED_SUBRESOURCE m{};
-            if (FAILED(ctx->Map(s->peekStaging[slot], 0, D3D11_MAP_READ, 0,
-                                &m)) ||
-                !m.pData) {
-                continue;
-            }
-            const float* f = static_cast<const float*>(m.pData);
-            const uint32_t n = s->peekBytes[slot] / 4;
-            at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE,
-                              "%su%u[", at ? "  " : "", slot);
-            for (uint32_t i = 0; i < n && i < 12 && at < 440; ++i) {
-                at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE,
-                                  "%s%.5g", i ? " " : "",
-                                  static_cast<double>(f[i]));
-            }
-            at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE, "]");
-            ctx->Unmap(s->peekStaging[slot], 0);
-        }
-        exposurePeekStrip(ctx, line, &at, sizeof(line));
-        s->peekPending = false;
-        if (at) {
-            ++s->peekLines;
-            Log::get().note("EXP %s", line);
-            if (s->peekLines == kPeekMaxLines) {
-                Log::get().note("exposure peek: line budget spent; set "
-                                "exposure_peek = 0 and back to 1 for more.");
-            }
-        }
-    }
-
-    if (now - s->peekLastMs < kPeekTickMs) return;
-    s->peekLastMs = now;
-
-    for (uint32_t slot = 0; slot < 4; ++slot) {
-        ID3D11UnorderedAccessView* view =
-            static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(slot)));
-        if (!view) continue;
-        ResourceInfo info;
-        if (!bindingResolve(view, &info) || !info.isBuffer ||
-            info.a == 0 || info.a > kPeekMaxBytes) {
-            continue;   // buffers only; the strip texture's turn comes if
-                        // the buffers hold nothing that moves
-        }
-        if (s->peekStaging[slot] && s->peekBytes[slot] != info.a) {
-            s->peekStaging[slot]->Release();
-            s->peekStaging[slot] = nullptr;
-        }
-        if (!s->peekStaging[slot]) {
-            ID3D11Device* dev = nullptr;
-            ctx->GetDevice(&dev);
-            if (!dev) continue;
-            D3D11_BUFFER_DESC bd{};
-            bd.ByteWidth = info.a;
-            bd.Usage = D3D11_USAGE_STAGING;
-            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            dev->CreateBuffer(&bd, nullptr, &s->peekStaging[slot]);
-            dev->Release();
-            if (!s->peekStaging[slot]) continue;
-            s->peekBytes[slot] = info.a;
-        }
-        ID3D11Resource* res = nullptr;
-        view->GetResource(&res);
-        if (res) {
-            ctx->CopyResource(s->peekStaging[slot], res);
-            res->Release();
-            s->peekPending = true;
-            s->peekCopyMs = now;
-        }
-    }
-}
-
-// Half-precision decode for the strip's texels, local and tiny -- the
-// corner-stream capture in sunglare_fix carries its own copy for the
-// same reason: a shared header for twenty lines buys a dependency.
-float expHalfToFloat(uint16_t h) {
-    const uint32_t sign = (h & 0x8000u) << 16;
-    const uint32_t exp = (h >> 10) & 0x1Fu;
-    const uint32_t man = h & 0x3FFu;
-    uint32_t bits;
-    if (exp == 0) bits = sign;
-    else if (exp == 31) bits = sign | 0x7F800000u | (man << 13);
-    else bits = sign | ((exp + 112u) << 23) | (man << 13);
-    float f;
-    memcpy(&f, &bits, 4);
-    return f;
-}
-
-// Dump the strip texture's texels, decoded by format. The state-buffer
-// damper measured beta of roughly one -- the game re-adapts from any
-// written state within a frame, so holding the STATE cannot hold the
-// IMAGE. What the tonemap actually reads is this strip, written by the
-// pass as pure output; the damper's next form rewrites texels here, and
-// this dump is how the sweep names which texel carries the exposure.
-void exposurePeekStrip(ID3D11DeviceContext* ctx, char* line, int* at,
-                       size_t lineSize) {
-    State* s = g_state;
-    ID3D11UnorderedAccessView* view =
-        static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(1)));
-    if (!view) return;
-    ID3D11Resource* res = nullptr;
-    view->GetResource(&res);
-    if (!res) return;
-    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-    res->GetType(&dim);
-    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-        res->Release();
-        return;
-    }
-    D3D11_TEXTURE2D_DESC td{};
-    static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
-    if (td.Height != 1 || td.Width == 0 || td.Width > 64) {
-        res->Release();
-        return;
-    }
-    if (s->peekStripStaging &&
-        (s->peekStripW != td.Width ||
-         s->peekStripFmt != static_cast<uint32_t>(td.Format))) {
-        s->peekStripStaging->Release();
-        s->peekStripStaging = nullptr;
-    }
-    if (!s->peekStripStaging) {
-        ID3D11Device* dev = nullptr;
-        ctx->GetDevice(&dev);
-        if (!dev) {
-            res->Release();
-            return;
-        }
-        D3D11_TEXTURE2D_DESC sd = td;
-        sd.Usage = D3D11_USAGE_STAGING;
-        sd.BindFlags = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        sd.MiscFlags = 0;
-        dev->CreateTexture2D(&sd, nullptr, &s->peekStripStaging);
-        dev->Release();
-        if (!s->peekStripStaging) {
-            res->Release();
-            return;
-        }
-        s->peekStripW = td.Width;
-        s->peekStripFmt = static_cast<uint32_t>(td.Format);
-        Log::get().note("exposure peek: strip is %ux1 fmt=%u.", td.Width,
-                        s->peekStripFmt);
-    }
-    // The strip is tiny and this runs on the peek's one-second cadence:
-    // copy and read back immediately, accepting the one stall a second.
-    ctx->CopyResource(s->peekStripStaging, res);
-    res->Release();
-    D3D11_MAPPED_SUBRESOURCE m{};
-    if (FAILED(ctx->Map(s->peekStripStaging, 0, D3D11_MAP_READ, 0, &m)) ||
-        !m.pData) {
-        return;
-    }
-    *at += _snprintf_s(line + *at, lineSize - *at, _TRUNCATE, "%sstrip[",
-                       *at ? "  " : "");
-    const uint32_t fmt = s->peekStripFmt;
-    const uint32_t w = s->peekStripW;
-    for (uint32_t x = 0; x < w && *at < 420; ++x) {
-        float v0 = 0;
-        if (fmt == 41 || fmt == 39) {          // R32_FLOAT / R32_TYPELESS
-            v0 = static_cast<const float*>(m.pData)[x];
-        } else if (fmt == 10 || fmt == 9) {    // RGBA16F: first channel
-            v0 = expHalfToFloat(
-                reinterpret_cast<const uint16_t*>(m.pData)[x * 4]);
-        } else if (fmt == 2 || fmt == 1) {     // RGBA32F: first channel
-            v0 = static_cast<const float*>(m.pData)[x * 4];
-        } else if (fmt == 54 || fmt == 53) {   // R16_FLOAT
-            v0 = expHalfToFloat(
-                reinterpret_cast<const uint16_t*>(m.pData)[x]);
-        } else {
-            v0 = static_cast<const float*>(m.pData)[x];   // best effort
-        }
-        *at += _snprintf_s(line + *at, lineSize - *at, _TRUNCATE, "%s%.5g",
-                           x ? " " : "", static_cast<double>(v0));
-    }
-    *at += _snprintf_s(line + *at, lineSize - *at, _TRUNCATE, "]");
-    ctx->Unmap(s->peekStripStaging, 0);
 }
 
 // One damping step, run right after the second eye's dispatch with the
@@ -872,9 +656,6 @@ void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UI
         return;
     }
     for (UINT i = 0; i < n && uavs; ++i) {
-        // Binding tracked colour for compute writes cannot be mirrored by
-        // the graphics MRT path. Decline before a dispatch can change it.
-        uiSeparationViewWrite(uavs[i]);
         const UINT slot = start + i;
         if (slot < 4) {
             bindingSet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::CsUav0) + slot),
@@ -1169,7 +950,6 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
                                 static_cast<unsigned long long>(hashOf(bindingGet(BindSlot::Cs))));
             }
             shareExposure(self, s->firstEye, second);
-            if (s->peek) exposurePeek(self);
             if (s->dampK > 0.0f) exposureDamp(self, s->firstEye[1]);
         }
     });
@@ -1182,32 +962,6 @@ uint64_t lookupShaderHash(void* shader) { return hashOf(shader); }
 void exposureConfigure(Config& cfg) {
     State* s = g_state;
     if (!s) return;
-    const bool was = s->peek;
-    s->peek = false;   // retired instrument: the damping arc it served is closed
-    if (s->peek && !was) {
-        s->peekLines = 0;
-        s->peekLastMs = 0;
-        s->peekPending = false;
-        Log::get().note("exposure peek: ON -- the exposure pass's output "
-                        "buffers log once a second. Park at the star, hold "
-                        "still, then pitch up, centre, pitch down, centre, "
-                        "~4s each; the float that tracks the brightness "
-                        "swing is the one the damper will hold.");
-    }
-    if (!s->peek && was) {
-        for (uint32_t i = 0; i < 4; ++i) {
-            if (s->peekStaging[i]) {
-                s->peekStaging[i]->Release();
-                s->peekStaging[i] = nullptr;
-            }
-            s->peekBytes[i] = 0;
-        }
-        if (s->peekStripStaging) {
-            s->peekStripStaging->Release();
-            s->peekStripStaging = nullptr;
-        }
-        s->peekPending = false;
-    }
 
     // The dispatch-skip probe's spec: up to four 16-digit hex hashes (the
     // census's ch= column), comma separated; "ch:" prefixes tolerated since
@@ -1710,21 +1464,11 @@ void exposureFixReclaimTick() {
 void shutdownExposureFix() {
     if (!g_state) return;
     g_state->enabled = false;
-    for (uint32_t i = 0; i < 4; ++i) {
-        if (g_state->peekStaging[i]) {
-            g_state->peekStaging[i]->Release();
-            g_state->peekStaging[i] = nullptr;
-        }
-    }
     for (int i = 0; i < 2; ++i) {
         if (g_state->dampStaging[i]) {
             g_state->dampStaging[i]->Release();
             g_state->dampStaging[i] = nullptr;
         }
-    }
-    if (g_state->peekStripStaging) {
-        g_state->peekStripStaging->Release();
-        g_state->peekStripStaging = nullptr;
     }
     if (g_state->cb1Remembered) {
         g_state->cb1Remembered->Release();

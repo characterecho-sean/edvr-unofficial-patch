@@ -22,12 +22,127 @@ static chain: see "Flight 184826".*
   - The recompute `0x3CEE650` disagreed with the cached block on 12,906 of
     12,906 calls.
   - The guards held: the fix never validated and never acted.
-- **Next:** re-anchor on the render side. Capture the game's call stack where
-  it writes the 5376-byte VS b1 buffer (the eye origin's real source), and
-  record the eye camera's `cb1[275]` per frame explicitly. Drop the compose,
-  decode, push and latch hooks, and bound all per-event logging. A short
-  session gives the anchor; a jump adds the bad frame's path. Then static
-  analysis from the fill function.
+- **Anchor FOUND (flight 195435, 19:54).**
+  - On both captured bad frames the eye origin was written by the same code
+    path (stack #0) as every ordinary frame. The same function receives a
+    wrong value.
+  - What is missing is the cockpit EYE POINT: 13.5 m from the ship's
+    reference point for Sean's ship.
+  - It is missing on the first frame after a switch between a world frame
+    and a ship-centred frame, in both directions. See "Flight 195435".
+  - Static round 4 is working back from that stack. The Steam ini is
+    restored (identical to before the flight).
+- **LOW-WAKE MEASUREMENT FLOWN (100043).** Every transition flash is a
+  one-frame skip of the eye-base writer.
+  - At a low-wake entry the scene is already in the new frame on the skipped
+    frame, so the NEW base is right. At a hyperspace exit the scene is still
+    in the old frame, so the held base is right (proven).
+  - The new base only exists a consume later.
+  - This withdraws 091726's "low wake is a long mode switch" reading.
+  - The Steam ini is restored; the decision on the next step is Sean's.
+- **The measurement build (d28f9ada, on main), as installed:**
+  - The eye-base dumps now carry the detector's per-frame object geometry
+    (matched, cameraStep, poolStep, relativeMedian/P90, predictionP90, the
+    decision) beside the camera mailbox state.
+  - Dumps fire on mode-switch EDGES: the entry (first un-refilled), the exit
+    (first refilled after 30 or more un-refilled), and scene-judged resets.
+  - The Steam copy runs d28f9ada with the trap ON and
+    `transition_flash_eye_base = watch` (one marked ini line; nothing acts).
+  - The aim is the frame offset between the camera's and the objects' mode
+    switches at supercruise entry and exit.
+  - Read with `--expect-build d28f9ada`.
+- **FLOWN 091726: high wakes fixed, low wakes not.**
+  - The skip is the controller not running for the camera that frame.
+  - A low wake is a supercruise MODE switch (the controller idle for the
+    whole of supercruise, base identity). Its flash is the camera and the
+    objects switching modes on different frames, which the held or offered
+    base cannot align.
+  - The Steam ini is restored; Sean's own `temporal_aa = off` from mid-flight
+    is kept.
+- **OFFERED-BASE build (3b5736d7 + aecf9800, on main), as installed:**
+  - A DR1 EXECUTE breakpoint on the writer `0x2874B20` records the matrix it
+    was offered (R8) for our ship. DR0 hits inside the writer's extent mean
+    it wrote.
+  - A read-only CodeHook counts the controller `0x10730A0` calls.
+  - The substitute on an un-refilled consume: the matrix the writer was
+    offered and refused this frame, if fresh; otherwise the held base.
+  - The watch bounds are 300 s and 150,000 hits; the call ring is 65,536
+    entries.
+  - The Steam copy runs aecf9800 with the trap OFF and `alternate` (two
+    marked ini lines). Read with `--expect-build aecf9800`.
+- **HELD-BASE fix FLOWN (073114): it fixes hyperspace exits and fails the
+  low wake.**
+  - The writer is found (`0x2874BC9` from `0x10734D8`). It SKIPS the
+    transition frame.
+  - Next is static round 7 on the writer: compute its base on demand.
+  - The Steam ini is restored.
+  - The build as installed then (b0d3632a, on main via bfd16cce):
+  - The substitute is the mailbox's own last refilled value: at most 2
+    frames old, same ship object, finite, not reset, 60-frame cap. It is
+    written before the engine reads.
+  - The writer watch arms on 60 stable frames plus 300 consecutive refilled
+    calls, whatever the trap says.
+  - Every un-refilled call dumps to `edvr_logs\flash\eyebase_*.txt`, with the
+    per-frame eye origin and the writer hits.
+  - The Steam copy runs b0d3632a with the trap OFF and `alternate` (two
+    marked ini lines). Read with `--expect-build b0d3632a`.
+- **The previous build (04db82fa, flown 062910) used the refuted
+  `+0x130` stand-in.**
+  - `advanced.transition_flash_eye_base = off|watch|on|alternate`:
+    a375b0dc and 04db82fa, on main via 20fd26e9.
+  - A CodeHook on the camera driver `0x28431D0` detects an un-refilled
+    mailbox (bit-exact reset value, mode != 1). On acted events it writes
+    `ship+0x130` into it BEFORE the engine reads it. That happens only once
+    `+0x130` has matched the refilled mailbox on ordinary frames this
+    session (120 agreements, under 2% disagreement), with a 60-frame cap.
+  - A hardware WRITE watch on `ship+0x3360` names the mailbox's writer, and
+    whether it ran before each consume.
+  - The Steam copy runs 04db82fa with the trap OFF and `alternate`: both
+    ini lines are marked, and must be put back after the flight.
+  - Read with `--expect-build 04db82fa`.
+  - Do not arm this together with `eye_origin_readers`: both use DR0.
+- **Reader hunt FLOWN (045636, 2026-09-24).**
+  - The positioner lead is ruled out, and the pose buffer is on the stack
+    (no watch).
+  - The new anchor is the `WaitGetPoses` stack (`0x4E3718 ...`), which
+    shares its frame job with the eye-origin write.
+  - Static round 6 starts from it. The Steam ini is restored.
+  - The build as installed:
+  - `advanced.eye_origin_readers = off|on`: b9a73fcb, on main via
+    0d99246b.
+  - Part A is a hardware read-watchpoint on the head pose EDVR's runtime
+    returns. It arms only on a stable, non-stack address and self-disarms
+    after 30 s or 5000 hits. It records the game code that reads the pose,
+    with unwound stacks. The runtime logs its `WaitGetPoses` stacks to
+    `edvr_openxr_*.log`.
+  - Part B is read-only hooks on the positioner Tick (`0x107C760`) and
+    swap-sync (`0x1090420`).
+  - Dumps fire only on scene-judged eye resets or positioner swaps.
+  - The Steam copy runs 014edc20 (b9a73fcb plus the v35 merge and a
+    flight gate) with the trap on and one marked `eye_origin_readers = on`
+    line; remove it after the flight.
+  - The flight gate: the watch arms only after the detector's camera
+    validation ("transition flash fix ACTIVE"), because the pose address
+    is stable from the VR menu on. Its bounds are 180 s and 100,000 hits.
+    Read the flight with `--expect-build 014edc20`.
+  - The merge with main moved frame_flag to v35: both branches had taken
+    v34 for different layouts.
+- **Before that flight:** the render-side anchor was built and installed.
+  - `advanced.eye_origin_trace = off|on`: e8b37bb7, on main via 337a1893.
+    It captures the game's call stack at every write of the 5376-byte camera
+    buffer, dedupes the stacks, and marks which write the eye draw used.
+  - Around every detector verdict it dumps ±60 frames to
+    `edvr_logs\flash\eyetrace_*.txt` on its own; nothing per frame reaches
+    the gfx log.
+  - The Steam copy runs e8b37bb7 with the trap ON and one marked
+    `[advanced] eye_origin_trace = on` line; remove it after the flight.
+  - Blind spot: writes by `UpdateSubresource` or on a deferred context never
+    reach the detector, so "eye buffer not written this frame" is itself a
+    finding.
+  - After the flight: `edvr_log.py --target steam --expect-build e8b37bb7`,
+    then static analysis from the eye origin's write stack.
+  - The old `transition_flash_prevent` hooks stay inert until Sean says to
+    remove them.
 - **Instrument defects (fix before any re-fly):**
   - Per-push stack lines, logged for as long as the event lasted (it never
     ended), filled the gfx log to its cap at 18:50:40 (f~13459). The rest of
@@ -234,10 +349,324 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   (0, 0, +2.000), between head-offset values and km-scale ones: another
   transition placement, beside the high wake's (-0.02, +3.51, +1613.23).
 
+## Flight 195435 (2026-09-23 19:54, Steam copy, build e8b37bb7)
+
+`advanced.eye_origin_trace = on`, trap on. The build matched
+(`--expect-build e8b37bb7`). Sean flew the list in reverse.
+
+- **Coverage:** 18,582 frames traced, about 60 writes of the 5376-byte
+  buffer a frame, 36 distinct write stacks.
+- **Cost:** stack capture cost about 180 us a frame (diagnostic only).
+- **Dumps:** 12 automatic dumps (the cap). Ten came from the detector's usual
+  render-pass jumps (4,991, 16,256 and 153,410 units), which also used the
+  cap up by 19:58:33.
+- **f12604, world to ship-centred.** The eye origin goes from
+  (-1174, +3425, +1439) to (-0.02, -0.01, +0.02) on the bad frame, then
+  holds at (-5.97, +11.98, +2.02).
+- **f13072, ship-centred to world.** It goes from (-5.98, +11.97, +2.00) to
+  (-0.03, -0.01, +0.02) on the bad frame, then (-229.8, +663.0, +274.5),
+  moving hundreds of units a frame.
+- **One path.** Both bad frames were written with the eye buffer
+  `buf=written` and by stack #0, like every ordinary frame. So the capture's
+  blind spots (UpdateSubresource, deferred contexts) did not matter.
+- **What is missing is the eye point.** |(-5.97, +11.98, +2.02)| is 13.5 m,
+  the same size as the 13.505 m reset of the 2026-09-12 small-origin high
+  wake.
+- **Stack #0**, return addresses innermost first:
+  `0x523207 / 0x51B69A / 0x501A4F / 0x4F8C98 / 0x5D92FD` (the upload path,
+  common to all 36 stacks), then
+  `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
+  0x6BF929 / 0x594C3E / 0x2869073`.
+
+## Flight 100043 (2026-09-24 10:00, Steam copy, build d28f9ada): the low-wake measurement
+
+Trap ON, `watch` (nothing acted); the build matched. Sean flew three low
+wakes and saw no flashes, because the trap hid them.
+
+- **Seven scene-judged eye resets.** Frames 13549, 13939, 15653, 15965,
+  17586, 17905 and 23340 (median object error 6.2-8.6 m; 264.6 m for the
+  last). Each sits exactly 2 frames after a single-frame ENTRY edge (an
+  un-refilled consume at 13547, 13937, ...): the consume-to-render offset.
+  The first six come in pairs 3.7-5 s apart, the three low wakes' entry and
+  exit.
+- **Two long identity stretches** (2,729 and 5,813 consumes, both with
+  EXIT edges) produced no reset at either edge.
+- **The low-wake ENTRY (skip 13547, world to ship-centred).** On the
+  skipped frame's render (f13549) the camera fell to head-only (step
+  2,925.8). The ship's own geometry (the pool's matched records are the
+  ship's parts; ordinary frames show cam = pool, relMed 0) had ALREADY
+  rebased into the ship-centred frame on that same frame (pool step
+  2,927.2). The right base there was the NEW one,
+  (-0.660, +11.066, -7.725), which the writer produced only on the next
+  consume. The held (old) base would be ~2.9 km off. This is the opposite
+  of the hyperspace exit, where the scene was still in the old frame on the
+  skipped frame.
+- **The second skip of the pair (13937, ship-centred static to moving).**
+  The ship's parts moved 14.7 m and then 17.2 m around the skip (matched
+  57 of 87). Neither the held base (0 m) nor the next write (2.6 m) matches
+  that. Object matching at this edge is too thin to call.
+- **Conclusion.** Every transition flash is a one-frame skip of the eye-base
+  writer. What differs by transition is whether the scene switches frames
+  on the skipped frame (low-wake entry: yes) or a frame later (hyperspace
+  exit: no). The correct base is the new one in the first case and the old
+  one in the second. At consume time neither the new base nor the scene's
+  switch is visible; at render time (2 frames later) both are.
+
+## Flight 091726 (2026-09-24 09:17, Steam copy, build aecf9800)
+
+Offered-base fix, trap OFF, `alternate`; the build matched.
+
+- **Sean's report:** "low wakes entry/exit still flash, but high wakes
+  don't".
+- **The controller does not run on the event frame.** Every event frame
+  shows `controller_calls=0 writer_entered=0 writer_wrote=0`, so the name
+  gate is not it. No offered matrix was ever fresh, and every acted event
+  used the held base. The skip is the controller's job not running for this
+  camera that frame (round 7's candidate 3 or 5).
+- **A low-wake entry is a MODE switch, not a skip.** At event #2 (5597) the
+  controller stopped running altogether. The mailbox stayed at identity for
+  5,041 consecutive consumes (frames 5597-10637, about a minute: the time
+  in supercruise). So in supercruise identity is the base the engine means
+  to use: the eye is the head pose relative to a camera-centred frame. The
+  low-wake flash is the camera and the objects switching modes on different
+  frames, at entry and at exit.
+  - Holding the world base for up to 2 frames at the entry (acted at 5597
+    and 5598) still flashed.
+  - The exit refills the mailbox (the controller resumes), so there is no
+    un-refilled frame to act on at all.
+- **High wakes:** no flash reported. The one-frame skip there is fixed by
+  the held base, as in 073114.
+- **`ship+0x130`'s translation is (0,0,0) in every frame**, world frames
+  included. It is not the ship's placement in the render frame, and nothing
+  can be rebuilt from it.
+- **During the flight** (09:23) the Steam ini's `temporal_aa` went from
+  `dlss` to `off`. That was not EDVR's flight edit; it was left as found.
+
+## Static round 7: the writer and its gates (dumps `analysis\decomp\flash\r7\`)
+
+- **The writer is `FUN_142874b20`** (true entry `0x2874B20`, 239 bytes,
+  chained pdata). It copies 64 bytes from `param_3` into
+  `*(param_1+0x38)+0x3330` (the mailbox), then makes a notify call. It
+  does this ONLY if `_stricmp(name1, name2) == 0`:
+  - name1 comes from the last node of `param_2`'s chain;
+  - name2 from `(*(param_1-8))->vtable[0x50]()`;
+  - both are runtime strings with no literal xrefs.
+  The first bytes are `48 85 D2 0F 84 E5 00 00 00` (TEST RDX,RDX; JZ
+  rel32), a relocatable 9-byte steal.
+- **Its caller is the camera controller tick `FUN_1410730a0`** (`0x10730A0`,
+  first bytes `48 89 5C 24 10`, clean). It skips everything when
+  `(*(param_1+0x190))->vtable[0x80]()` is false. Otherwise it fetches the
+  base by a named lookup (registries `DAT_145f2afa0`, `DAT_145f501e8`, then
+  the target's `vtable+0x20`), falling back to its own previous `+0x70`
+  block, and hands that verbatim to the writer.
+- **The job chain.** Per-slot iterator `0x10672C0`, job body `0x106F210`
+  (busy gate, inline or deferred), system dispatcher `0x106C840`, frame
+  tick `0x7F32D0` ("Long frame time"), outer driver `0x7F8B60`.
+- **Skip candidates, ranked:**
+  - (1) the controller's `vtable[0x80]` check is false for one frame;
+  - (2) the writer's name gate fails for one frame. The matrix is offered
+    and refused, as it would be if the camera's target name changes at the
+    transition;
+  - (3) the slot loop's bound is 0 for one frame;
+  - (4) the writer's `param_2` is null.
+- **Running the writer ourselves: rejected.** The objects differ from the
+  consumer's (ship is at `+0x38` here, `+0x50` there, with no pointer path
+  found). The chain has side effects: a notify call, a refcount release,
+  the job loop's lock-free state.
+- **What a flight can settle.** Whether the writer is called on the skipped
+  frame, which gate fails, and what matrix it was offered. If (2), that
+  offered-and-refused matrix is exactly "the base the writer would have
+  written".
+
+## Flight 073114 (2026-09-24 07:31, Steam copy, build b0d3632a)
+
+Held-base fix, trap OFF, `alternate`; the build matched.
+
+- **Sean's report:** "Hyperspace worked, the low wake didn't." The low wake
+  was the first transition (event #2, acted, held base (17.6, -38.8, -68.2)
+  m, age 1).
+- **The fix acted on #2, #4, #6 and #8.** #6 and #8 were the two hyperspace
+  exits. There the eye origin held the tunnel base for the switch frame,
+  (-3.43, -0.63, +3860.50) and (-0.95, +3.38, +3860.89), where the watched
+  control #3 showed head-only (-0.01, 0, 0). Then it went to the
+  ship-centred eye point (13.5 m).
+- **THE WRITER FOUND.** There is one: RIP `0x2874BC9`, called from camera
+  code `0x10734D8` in the `0x107xxxx` camera region. Its stack is
+  `0x10734D8 / 0x1067316 / 0x106F2F1 / 0x7EB63D / 0x106C9B9 / 0x1E8202 /
+  0x1ECA51 / 0x7EB63D / 0x1EB6AF / 0x7F3862 / ...`. This job differs from
+  the VR consumer's (`0x1E7906 / 0x1EE0F1`).
+- **The order of calls.** Per frame: the writer writes, then the consumer's
+  mode-1 peek, then its mode-2 read-and-reset. Both run on one thread
+  (t4532), and the mode histogram is exactly 50/50.
+- **THE REAL MECHANISM.** On the event frame the writer SKIPS the frame
+  entirely: no write between consumes (`wsince=no`, `writerHits=0`). Both
+  calls see the reset value. The next frame's write already carries the NEW
+  state: (-14.640, +6.774, +1.296) after 12591, the ship-centred
+  (-6.890, -10.898, +4.043) after the tunnel exit 16619.
+- **Why one substitute cannot serve.** The objects switch coordinate frames
+  at different moments by transition type. At a hyperspace exit they are
+  still in the old frame on the skipped frame, so the held base is right
+  (confirmed by eye). At the low wake they have already switched, so the
+  held base is wrong and only the value the writer would have written is
+  right.
+- **Next:** static round 7 on the writer (`0x2874BC9`'s function and
+  `0x10734D8`'s): what it computes into `ship+0x3330`, and why it skips
+  the transition frame. If its computation can run on demand at an
+  un-refilled consume, the camera gets the base for whichever frame the
+  engine is in.
+- **The dump for #2** was overwritten before it was serviced (the call
+  ring is 8192 entries, and the dump was written a minute later), so the low
+  wake's per-call detail is lost.
+
+## Flight 062910 (2026-09-24 06:29, Steam copy, build 04db82fa)
+
+`advanced.transition_flash_eye_base = alternate`, trap OFF; the build
+matched. Sean flew the low wakes, then the high wakes. EVERY transition
+flashed, including the exits from high wakes.
+
+- **The fix never acted.** Every acted slot says "not validated yet": the
+  refilled mailbox and `ship+0x130` agreed 0 times in 11,084 comparisons.
+  Both translations were (0,0,0) at every un-refilled call.
+- **The mechanism holds.** In flight (after ~06:30:51) the un-refilled count
+  rose by exactly one per event: 7 events (#3-#9, frames 11980, 12846,
+  15342, 16455, 19183, 20164 and 20712) for Sean's 7-8 transitions, in
+  entry/exit pairs 10-13 s apart. There were none otherwise.
+  - Before flight (menu/loader) about half of all calls were un-refilled
+    (1,411 of 2,821). That burst is unexplained.
+- **Instrument defect 1: the writer watch never armed.** Its flight gate
+  waits for the detector's camera validation ("transition flash fix
+  ACTIVE"), and with the trap off the detector never validates.
+- **Instrument defect 2: no dumps.** The dumps are serviced by the eye-trace
+  code, which runs only when `eye_origin_trace` is also on.
+- **A reading to test next, not yet proof.** On the 2026-09-12 flash frame
+  21467 the objects had NOT moved from the frame before (65 pairs, pool step
+  0.000). The detector's verdict on every reset is "without a matching
+  object rebase". Both say the objects are still in the OLD frame on the
+  switch frame. If so, the base the mailbox held one frame earlier is the
+  right base for that frame, and only the camera switches early. The
+  earlier ruling against holding the last good pose rested on pool
+  statistics (f16451's 2 m residual, 16450's 1600 m object step) that are
+  noisy across a transition, and it was made against the refuted
+  compose-chain parent pose, not this mailbox.
+
+## Flight 045636 (2026-09-24 04:56, Steam copy, build 014edc20)
+
+`advanced.eye_origin_readers = on`, trap on; the build matched.
+
+- **No watchpoint.** The watch waited for flight (04:58:06), then declined
+  to arm: the buffer the game passes to `WaitGetPoses` (`0xD3084FD7EC`) is
+  on the calling thread's own stack.
+- **The pose-fetch stack.** It is in the runtime log
+  (`edvr_openxr_20260924_045637_834_4220.log`), innermost first:
+  `0x4E3718 / 0x4E2651 / 0x8D2588 / 0x283D548 / 0x2843324 / 0x2868C90 /
+  0x1E7906 / 0x1EE0F1 / 0x7EB63D / ...`.
+  - `0x4E3718` sits beside round 1's OpenVR setup (`0x4E4870`, `0x4E5900`):
+    the VR device class.
+  - The tail from `0x1E7906` is the same job framework as the eye-origin
+    write stack, whose frame there is `0x2869073` (here `0x2868C90`).
+- **The positioner never ran.** Tick `0x107C760` and swap-sync `0x1090420`
+  logged 0 calls on every dumped frame.
+- **Four eye resets.** f12358 (median object error 6.6 m), f13498
+  (1,075 m), f16711 (13.515 m) and f17854 (820 m).
+  - f16711 is a high wake. The eye goes from (+10.10, +8.97, -0.02)
+    (13.5 m, the eye point on other axes) to head only, then to
+    (-0.01, +3.51, +1613.24), the same tunnel placement as on 2026-09-12.
+  - The objects did not follow the camera's 13.5 m jump.
+- **The Steam ini.** The flight line is removed. EDVR's own writes during
+  the flight stay: `ui_quality = 125` (the new values) and
+  `openxr_resolution`.
+
+## Static round 6: the eye's base is a consume-and-reset mailbox
+
+This comes from the `WaitGetPoses` anchor of flight 045636. Dumps are in
+`analysis\decomp\flash\r6\`; the key file is `follow_28431D0.txt`.
+
+- **One job does both.** The per-frame VR job `FUN_142868c30`
+  (`0x2868C30..0x286938A`) calls the camera driver `FUN_1428431d0`, then
+  `FUN_140594b60`, which uploads `cb1[275]`. The pose-fetch and eye-write
+  stacks meet in this one function, confirmed by the exact call
+  instructions.
+- **The chain.** The camera driver `0x28431D0` calls the eye/base composer
+  `0x283D4C0` (base matrix x eye pose). That calls a per-eye wrapper
+  `0x8D2510`, then `VRDevice::GetEyePose` `0x4E25A0` (eye-to-head x head
+  pose), then `0x4E3690`, which calls `WaitGetPoses` into its own stack
+  buffer.
+- **The mailbox.** Let `ship = *(driver+0x50)`. The driver copies
+  `ship+0x3330..+0x336F` (a 4x4) into a local. If mode != 1 (the job passes
+  2 every frame) it resets that field to the constant at `0x1450C8090`,
+  checked from the exe's bytes to be an exact identity, and zeroes its
+  translation (`+0x3360/+0x3368`). It then composes the eye views from the
+  LOCAL copy (line 170). Those outputs are copied into both eye view
+  objects (`FUN_14059f1a0(eyeView+0x20, ...)`).
+- **The second composition.** A second call composes from `ship+0x130`
+  (never reset, mode 3) into separate buffers.
+- **Reading.** The mailbox must be refilled every frame by a writer
+  (not yet found). On the switch frame it is not refilled before the
+  driver reads it, so the eye composes against identity: head only. That
+  matches every measured bad frame, including the 13.5 m eye point
+  missing.
+- **Not yet fixable blind.** On a frame switch the last good base is in
+  the OLD render frame, so holding it would repeat the ruled-out
+  last-good-pose error. The fix needs either the writer's ordering, or a
+  fallback base (for example `ship+0x130`) proven equal to the mailbox on
+  ordinary frames.
+
+## Static rounds 4-5 (after 195435; leads, not proof)
+
+Dumps are in `analysis\decomp\flash\r4\` and `\r5\`. Ghidra holds phantom
+functions at earlier rounds' return addresses, so resolve true entries
+through `pdata_functions.csv`.
+
+- **The upload path.** The stack #0 frames `0x5015C4..` are the generic
+  `f3dxEffect::ConstantBuffer` commit. `0x4C82BE0` is the per-item submission
+  loop and `0x4C813A0` a dedup cache. It runs as a scheduled job. A stack
+  taken at Unmap names the commit, not the code that set the value.
+- **`gCameraPos`.** It and `gPreviousCameraPos` are resolved BY NAME, once
+  per effect instance, at `0x57B99E` (`FUN_1404fc6a0(effect,0,name,1)`,
+  handles cached in the effect object). The per-frame setter was NOT found.
+- **The positioner swap.** A per-frame Tick at `0x107C760` checks the
+  `+0x450` positioner against the `+0x2A0` cache. On a change it calls
+  `0x1090420`, which zeroes `+0x2A8/+0x2B0` and recomputes an offset block
+  only if `info[+0x61]`. The Tick re-seeds (`0x1093650`) only if
+  `info[+0x62]`. INFERENCE: a skipped re-seed on the swap frame. There is no
+  static tie to `gCameraPos`, and nothing yet shows this positioner is the
+  cockpit VR camera's.
+
 ## Ruled out
 
 Each was ruled out on 2026-09-23 from existing flight data and static
-analysis, or from flight 184826 where marked:
+analysis, or from flight 184826 or 195435 where marked:
+
+- **Ruled out (091726): the writer's name gate as the skip, and the
+  offered-and-refused matrix as the low-wake answer.** On every event frame
+  the controller made no call at all (`controller_calls=0`), so no matrix
+  was ever offered.
+- **WITHDRAWN (100043 contradicts it): "ruled out (091726): a low-wake
+  flash as a one-frame skip".** The low-wake entry and exit flashes ARE
+  one-frame skips. Six scene-judged resets in 100043 each sit on a
+  single-frame un-refilled consume (render offset +2). The long 30-70 s
+  identity stretches are something else: none of their edges produced a
+  reset. The 091726 reading mistook one of those stretches for
+  supercruise.
+- **Ruled out (073114): one fixed substitute for every transition.** The
+  held base fixed both hyperspace exits (Sean: "hyperspace worked") but not
+  the low wake. The objects change frame on different frames by
+  transition type.
+- **Ruled out (073114): waiting for the writer inside the frame.** The
+  writer skips the transition frame entirely (no write between consumes),
+  so there is no late write to wait for.
+- **Ruled out (062910): `ship+0x130` as a stand-in for the eye-base
+  mailbox.** (Dump 4 of 073114 shows why: it is the ship's placement
+  without the eye point, 13.5 m and a rotation away from the mailbox.) On refilled frames it agreed 0 times in 11,084 comparisons, and
+  its translation is (0,0,0) on the flash frames too.
+- **Ruled out (045636): round 5's camera positioner (Tick `0x107C760`,
+  swap-sync `0x1090420`) as the cockpit camera's.** Neither ran on any
+  dumped frame in flight, across four eye resets.
+- **Ruled out (045636): a hardware watch on the returned head pose.** The
+  game's `WaitGetPoses` buffer is on the caller's own stack.
+- **Ruled out (195435): a different code path writing the eye origin on the
+  bad frame.** Both reset frames (f12604, f13072) were written by stack #0,
+  like every ordinary frame.
 
 - **Ruled out (184826): the compose `0x23BC8A0` as the eye camera's
   compose.** It pushes about 5 system-scale targets a frame, ~1e8 m apart,

@@ -1,29 +1,12 @@
 option casemap:none
 
-EXTERN sourceOwnerTestCapture:PROC
 EXTERN recordWriterUnwindCapture:PROC
 EXTERN recordWriterOwnershipUnwindCapture:PROC
-PUBLIC sourceOwnerUnwindStub
 PUBLIC recordWriterUnwindStub
 PUBLIC kinematicOwnerDirectUnwindStub
 PUBLIC kinematicOwnerVirtualUnwindStub
 
 _TEXT SEGMENT
-sourceOwnerUnwindStub PROC FRAME
-    push rbx
-    .pushreg rbx
-    sub rsp,20h
-    .allocstack 20h
-    .endprolog
-    mov rbx,rcx
-    call sourceOwnerTestCapture
-sourceOwnerUnwindResume LABEL NEAR
-PUBLIC sourceOwnerUnwindResume
-    add rsp,20h
-    pop rbx
-    ret
-sourceOwnerUnwindStub ENDP
-
 ; Copy one exact 0x150-byte record into the direct-writer caller's stack
 ; layout, then call a normal C++ observer.  Its RtlCaptureContext must unwind
 ; back to recordWriterUnwindResume without first unwinding this frame.

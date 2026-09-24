@@ -2084,11 +2084,11 @@ void applyConfig(const char* modeText, float kMax, bool observe, uint64_t nowMs)
     const std::string text = modeText ? modeText : "";
     Mode mode = Mode::Game;
     bool unknown = false;
-    // An empty value is the compiled default (auto), as an empty number or
+    // An empty value is the compiled default (game), as an empty number or
     // switch is theirs (Config::getFloat / getBool).
-    if (text.empty() || _stricmp(text.c_str(), "auto") == 0) mode = Mode::Auto;
+    if (_stricmp(text.c_str(), "auto") == 0) mode = Mode::Auto;
     else if (_stricmp(text.c_str(), "reduced") == 0) mode = Mode::Reduced;
-    else if (_stricmp(text.c_str(), "game") != 0) unknown = true;
+    else if (!text.empty() && _stricmp(text.c_str(), "game") != 0) unknown = true;
     if (st.configured && mode == st.mode && text == st.modeText && kMax == st.kMaxCfg && observe == st.observe)
         return;   // the 1 Hz re-poll
     const bool first = !st.configured;
@@ -2272,8 +2272,8 @@ void lodGovernorSetterObserver(uintptr_t ctx) noexcept {
 // --- Configuration, the frame boundary and shutdown ----------------------------------------
 
 void lodGovernorConfigure(Config& cfg) {
-    // A shipped fix: auto unless the player chose otherwise.
-    const std::string mode = cfg.getString("fix.settlement_detail", "auto");
+    // A shipped fix, off (game) unless the player chooses auto or reduced.
+    const std::string mode = cfg.getString("fix.settlement_detail", "game");
     const float kMax = cfg.getFloat("advanced.settlement_detail_max", lodgov::kDefaultMax);
     const bool observe = cfg.getBool("advanced.settlement_detail_observe", false);
     applyConfig(mode.c_str(), kMax, observe, GetTickCount64());

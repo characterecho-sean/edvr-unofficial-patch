@@ -35,7 +35,6 @@
 #include "object_probe.h"   // objectProbeArmLedger, objectProbeLedgerMark: the eye run's draw ledger
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "ui_resolve.h"
-#include "ui_separation.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
 #include "celestial_motion.h"
@@ -347,7 +346,6 @@ struct EyeState {
     ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out. The fovea path's UI resolve (below, sharing the trained block's own logic) writes the composite's finished frame in here too, sized foW x foH, the same value as oW x oH
     ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
     bool                      uiResolvedHistory = false;
-    bool                      uiSeparatedHistory = false;
     bool                      screenHistory = false;
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
@@ -489,7 +487,6 @@ void releaseDl(EyeState& e) {
     if (e.dlSubmit) { e.dlSubmit->Release(); e.dlSubmit = nullptr; }
     if (e.dlSubmitUav) { e.dlSubmitUav->Release(); e.dlSubmitUav = nullptr; }
     e.uiResolvedHistory = false;
-    e.uiSeparatedHistory = false;
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
     e.dlHaveHistory = false;
@@ -1581,17 +1578,18 @@ bool             g_eyeTreatedWritten[kEyeRun] = {};
 bool             g_eyeTreatedTaken[kEyeRun] = {};
 bool             g_eyeRawWritten[kEyeRun] = {};
 // Slot 11 is free since the mesh records' coverage retired (2026-09-23);
-// the slots after it keep their numbers.
-constexpr int kEyeInputs=19;
+// the slots after it keep their numbers. 16..18 (DlssColour, UiInfluence,
+// UiDepth) went with the UI separation that filled them (2026-09-23).
+constexpr int kEyeInputs=16;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"Free11",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext",L"DlssColour",L"UiInfluence",L"UiDepth"};
+const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"Free11",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext"};
 uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
 bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
 uint32_t         g_eyeRawInputW[kEyeRun] = {}, g_eyeRawInputH[kEyeRun] = {};
 uint32_t         g_eyeCaptureFrame = 0; // current scene frame, stamped before treatment
-enum class EyeUiMode : uint8_t { None, Legacy, Separated };
+enum class EyeUiMode : uint8_t { None, Legacy };
 struct EyeDecisionFrame {
     uint32_t frame = 0, diagnosticFrame = 0;
     uint32_t inputW = 0, inputH = 0, outputW = 0, outputH = 0;
@@ -1894,8 +1892,7 @@ struct TemporalHistoryScope {
 
 // Preserve the actual first-frame inputs before the next eye overwrites them.
 void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceView* scene,
-                    ID3D11Texture2D* ui,float uiBound,float uiFlags,
-                    const UiSeparatedInputs* separated=nullptr) {
+                    ID3D11Texture2D* ui,float uiBound,float uiFlags) {
     if(g_eyeRunLeft<=0 || g_eyeRunTaken!=0 || g_eyeInputs[0])return;
     ID3D11Texture2D* textures[kEyeInputs]={e.dlMv,e.dlDepth,ui,e.dlMask};
     if(e.dlMv) {
@@ -1932,19 +1929,11 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     if(e.uiHistoryValid && e.uiHistory[e.uiHistoryRead]) {
         textures[14]=e.uiHistory[e.uiHistoryRead];textures[14]->AddRef();
     }
-    if(separated) {
-        const int slots[5]={7,8,16,17,18};
-        ID3D11ShaderResourceView* views[5]={separated->holo,separated->edits,separated->colourView,separated->influence,separated->depth};
-        for(int i=0;i<5;++i) {
-            const int slot=slots[i];if(textures[slot]){textures[slot]->Release();textures[slot]=nullptr;}
-            if(views[i]){Microsoft::WRL::ComPtr<ID3D11Resource> r;views[i]->GetResource(&r);r->QueryInterface(IID_PPV_ARGS(&textures[slot]));}
-        }
-    }
     for(int k=0;k<kEyeInputs;++k)if(textures[k])stageEyeRun(ctx,textures[k],g_eyeInputs,k);
     for(int k=5;k<kEyeInputs;++k)if(textures[k])textures[k]->Release();
     if(textures[4])textures[4]->Release();
     g_eyeInputsFrame=g_rowsFrame;g_eyeInputsUiBound=static_cast<uint32_t>(uiBound);
-    g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags)|(separated?64u:0u);
+    g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags);
 }
 ID3D11ComputeShader* motionTraceShader(ID3D11DeviceContext* ctx) {
     if (!g_csMvTrace && !g_csMvTraceTried) {
@@ -2085,7 +2074,6 @@ void eyeOutputCropSize(int k, ID3D11Texture2D* output, uint32_t* wantW, uint32_t
 const char* eyeUiModeName(EyeUiMode mode) {
     switch (mode) {
     case EyeUiMode::Legacy: return "legacy";
-    case EyeUiMode::Separated: return "separated";
     default: return "none";
     }
 }
@@ -3459,7 +3447,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     ID3D11ShaderResourceView* smokeSrv = nullptr;
     if (depthSrv && !uiDepthSmokeDepth(sd.Width, sd.Height, eye, &smokeSrv)) smokeSrv = nullptr;
 
-    UiSeparatedInputs separatedCandidate{};
     ID3D11ShaderResourceView* uiDepthSrv = nullptr;
     ID3D11ShaderResourceView* terrainSrvs[3] = {};
     ID3D11ShaderResourceView* holoSrvs[2] = {};
@@ -3486,7 +3473,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
             celestialMotionViews(ctx, scene, terrainSrvs);
             uiDepthHoloMotion(eye,scene,holoSrvs);
-            uiSeparationInputs(src,scene,eye,sd.Width,sd.Height,separatedCandidate);
             engineViewsGiven = engineVelocityViews(ctx, eye, scene, &engineViews);
             engineHeldSrv[0].Attach(engineViews.slots);
             engineHeldSrv[1].Attach(engineViews.pool);
@@ -4559,14 +4545,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // resolved frame or must fall back (the copy-through on the trained
         // path, the composite itself on the fovea path).
         //
-        // allowSeparated is false on the fovea call: the separated
-        // candidate is the raw eye texture's own crop machinery (a second,
-        // independent capture of the source texture), which the fovea path
-        // -- already reading the source through NVIDIA's own crop -- has no
-        // cheap analogue for it. The fovea call always takes the plain,
-        // non-separated inputs instead.
-        //
-        // withHistory is false on the fovea call too: e.uiHistory[1-read] is
+        // withHistory is false on the fovea call: e.uiHistory[1-read] is
         // ONE texture with ONE writer a frame by design -- on the trained path
         // the motion pass writes it as UI evidence only when this resolve
         // will not run (4412), and the own-path epilogue (4581) throws a
@@ -4576,8 +4555,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // neither read nor write it, nor mark uiResolveWritten: it runs on
         // the composite from the current raster alone, and the periphery's
         // evidence pipeline stays exactly as it was before UI parity.
-        auto applyUiResolve = [&](ID3D11ShaderResourceView* nvidiaOutput, bool allowSeparated,
-                                  bool withHistory) -> bool {
+        auto applyUiResolve = [&](ID3D11ShaderResourceView* nvidiaOutput, bool withHistory) -> bool {
             if (uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
                 g_csUiResolveTried = true;
                 g_csUiResolve = shaderSwapCompileCs(ctx, kUiResolve, sizeof(kUiResolve) - 1, "main", "UI resolve", nullptr, "UI resolve");
@@ -4586,8 +4564,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                         g_debugMode == 6;
             const bool uiResolveHere = uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaintHere;
             if (!uiResolveHere) return false;
-            const bool separated = allowSeparated && separatedCandidate.colour &&
-                                    region[0] == 0 && region[1] == 0 && w == sd.Width && h == sd.Height;
             const bool uiBoundHere = p.probe[2] != 0.0f;
             // "ui": the UI resolve dispatch, after DLAA/DLSS/the compose.
             beginRegion(qs, Region::Ui, dev, ctx);
@@ -4603,20 +4579,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 for (int i = 0; i < 4; ++i) resolveParams.region[i] = int32_t(region[i]);
                 if (!setParams(ctx, resolveParams)) resolveScreen = nullptr;
             }
-            ID3D11ShaderResourceView* srvs[9] = {
-                separated ? separatedCandidate.colourView : e.dlColourSrv,
+            ID3D11ShaderResourceView* srvs[7] = {
+                e.dlColourSrv,
                 nvidiaOutput,
                 uiBoundHere ? e.uiMaskSrv : nullptr,
                 (withHistory && e.uiHistoryValid) ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                 e.dlMvSrv,
-                separated ? separatedCandidate.edits : uiDepthContentChanges(w, h, eye),
-                resolveScreen,
-                separated ? e.dlColourSrv : nullptr,
-                separated ? separatedCandidate.influence : nullptr};
+                uiDepthContentChanges(w, h, eye),
+                resolveScreen};
             ID3D11UnorderedAccessView* uavs[2] = {
                 e.dlSubmitUav, withHistory ? e.uiHistoryUav[1 - e.uiHistoryRead] : nullptr};
             ctx->CSSetShader(g_csUiResolve, nullptr, 0);
-            ctx->CSSetShaderResources(0, 9, srvs);
+            ctx->CSSetShaderResources(0, 7, srvs);
             ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
             // NGX may change compute bindings, including b0.
             ctx->CSSetConstantBuffers(0, 1, &g_cb);
@@ -4648,7 +4622,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             ctx->CSSetUnorderedAccessViews(0, 7, nullUavR, nullptr);
             endRegion(qs, Region::Ui, ctx);
             if (withHistory) uiEvidenceWritten = uiResolveWritten = true;
-            if (separated) uiSeparationEvaluated();
             const bool captureResolve = withHistory && eye == 0 && g_eyeRunLeft > 0 && g_eyeRunTaken == 0 &&
                                          g_eyeInputs[0] && g_eyeInputsFrame == g_rowsFrame && !g_eyeInputs[13];
             if (captureResolve) stageEyeRun(ctx, e.uiHistory[1 - e.uiHistoryRead], g_eyeInputs, 15);
@@ -4765,7 +4738,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const bool uiResolve=uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaint;
                     // luma probe stage 0: the texture the game submits.
                     lumaProbeSample(ctx,src,eye,0);
-                    const bool separated=uiResolve && separatedCandidate.colour && region[0]==0 && region[1]==0 && w==sd.Width && h==sd.Height;
                     // The colour, typed, whichever way the source came.
                     D3D11_BOX box{};
                     box.left = viaCopy ? 0 : region[0];
@@ -4791,9 +4763,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
-                    const bool separationChanged=separated!=e.uiSeparatedHistory;
-                    if(separationChanged){e.dlHaveHistory=false;e.uiHistoryValid=false;e.zPrevValid=false;}
-                    e.uiSeparatedHistory=separated;
                     // The eye run's raw frame (g_eyeRawStaging says why).
                     if (eye == 0 && g_eyeRunLeft > 0) captureEyeRunRaw(ctx, e.dlColour);
                     endPart(qs, PrepPart::Copy, ctx);
@@ -4827,7 +4796,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (!uiDepthReactiveMask(w, h, eye, &reactiveMask)) reactiveMask = nullptr;
                     ID3D11Texture2D* coverageMask = nullptr;
                     if (!uiDepthCoverageMask(w, h, eye, &coverageMask)) coverageMask = nullptr;
-                    if(separated)coverageMask=separatedCandidate.mask;
                     // Bound for the fold when the mover mask is on.
                     p.holoJitter[3] = haveDepth && e.zPrevValid && e.zPrevSrv && useTanPrev && haveDelta && p.holoJitter[2] != 0 ? 1.0f : 0.0f;
                     const bool wantUi = coverageMask != nullptr &&
@@ -4861,15 +4829,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[23] = {separated?separatedCandidate.colourView:inSrv,
+                    ID3D11ShaderResourceView* srvsM[23] = {inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
                                                           uiBound ? e.uiMaskSrv : nullptr,
                                                           nullptr,   // t5: free since the body path retired (2026-09-23)
-                                                          smokeSrv, separated?separatedCandidate.depth:uiDepthSrv,
+                                                          smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], separated?separatedCandidate.holo:holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           nullptr, nullptr,   // t19/t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr};
                     ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
@@ -4914,7 +4882,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack && !uiResolve) uiEvidenceWritten = true;
-                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],separated?&separatedCandidate:nullptr);
+                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3]);
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
                     // the mover mask existed), else nothing. Engine-record
@@ -4975,12 +4943,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else if ((beginRegion(qs, Region::Full, dev, ctx),
                                 amdEngine
                                     ? edvr::fsr3Evaluate(ctx, static_cast<unsigned>(eye),
-                                                        separated?separatedCandidate.colour:e.dlColour,
+                                                        e.dlColour,
                                                         e.dlDepth, e.dlMv,
                                                         fsrSettings.reactive ? biasMask : nullptr, e.dlOut,
                                                         w, h, oW, oH, jxNow, jyNow, resetHist, frameMs,
                                                         nearZ, farZ, fovY, &why)
-                                    : dlaaEvaluate(ctx, eye, separated?separatedCandidate.colour:e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
+                                    : dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
                                                   biasMask, w, h,
                                                   oW, oH, jxNow, jyNow, resetHist, frameMs, &why))) {
                         endRegion(qs, Region::Full, ctx);
@@ -5097,9 +5065,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
                         decision.dlssSuccess = !amdEngine && !debugPaint;
                         decision.outputW = oW; decision.outputH = oH;
-                        decision.uiMode = separated ? EyeUiMode::Separated
-                                          : uiResolve ? EyeUiMode::Legacy
-                                                      : EyeUiMode::None;
+                        decision.uiMode = uiResolve ? EyeUiMode::Legacy : EyeUiMode::None;
                         uint32_t wantW=0,wantH=0,cw=0,ch=0,cx=0,cy=0;
                         eyeOutputCropSize(g_eyeRunTaken,e.dlOut,&wantW,&wantH);
                         if (stageEyeCrop(ctx,e.dlOut,&g_eyePreUiStaging[g_eyeRunTaken],&cw,&ch,
@@ -5112,12 +5078,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
                     // applyUiResolve (shared with the fovea path, above) folds
-                    // uiResolve/separated and the dispatch
-                    // itself into one call: it returns false exactly when the
+                    // uiResolve and the dispatch itself into one call: it returns false exactly when the
                     // old `else` branch used to run, so the copy-through below
                     // is unchanged. (Main's corona hold, b1's second float and
                     // its once-only note, lives inside the helper.)
-                    if (usedDlaa && !applyUiResolve(e.dlOutSrv, true, true)) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                    if (usedDlaa && !applyUiResolve(e.dlOutSrv, true)) ctx->CopyResource(e.dlSubmit, e.dlOut);
                     // luma probe stage 1, dlss_out: e.dlSubmit already holds it
                     // here on every usedDlaa path, UI-resolved or copied
                     // straight from e.dlOut above.
@@ -5732,7 +5697,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // compose already blended NVIDIA's crop into the composite,
                 // so the resolve reads the FINISHED frame here, not the bare
                 // crop.
-                if (applyUiResolve(e.foveaOutSrv, false, false)) {
+                if (applyUiResolve(e.foveaOutSrv, false)) {
                     foveaSubmit = e.dlSubmit;
                     foveaUiTreatment = "the UI resolve (from the current raster alone: the UI history stays the periphery's)";
                 } else {

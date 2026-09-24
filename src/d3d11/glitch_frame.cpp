@@ -6,14 +6,19 @@
 #include <windows.h>
 
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <string>
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"
+#include "../common/game_call_probe.h"
 #include "../common/log.h"
+#include "eye_origin_trace.h"
 #include "transition_flash_prevent.h"
+#include "pose_reader_watch.h"
+#include "transition_flash_eye_base.h"
 
 namespace edvr {
 
@@ -36,7 +41,9 @@ namespace {
 // only at 90Hz: 12.5 seconds at 72 and 7.5 at 120. Sized for the fastest
 // supported rate instead, so ten seconds is the FLOOR at every rate rather
 // than the value at one of them. Nothing is written to disk unless the dump
-// key is pressed, so the cost is one 40-byte struct per frame -- 48KB.
+// key is pressed, so the only cost is kRingFrames copies of RingEntry below
+// (a few dozen bytes each; advanced.eye_origin_trace, off by default, adds
+// a handful more when it is on).
 constexpr uint32_t kRingFrames = 1200;   // 10 s at 120Hz, 16.7 s at 72Hz
 
 // How long to stand down for after deciding a jump was a change of reference
@@ -422,6 +429,38 @@ struct RingEntry {
     // rate limit is needed because nothing is written until somebody asks, and
     // the answer is then guaranteed to be there for the frame they care about.
     uint8_t  verdict;
+
+    // advanced.eye_origin_trace (off by default; see eye_origin_trace.h).
+    // Deliberately independent of sceneValid/scenePos above, which serve the
+    // H3 cross-check and read fine with this whole instrument off: a reader
+    // following just these four fields needs nothing else in the struct.
+    uint8_t  eyeOriginStackId;  // eot::kStackNoneId when eyeBufferWritten is false
+    bool     eyeBufferWritten;  // same test as sceneValid
+    uint32_t eyeTraceWrites;    // 5376-byte writes observed this frame
+    uint64_t eyeTraceMask;      // bit N set: stack id N wrote it this frame
+
+    // advanced.eye_origin_readers (docs/design-transition-flash-engine-
+    // fix-2026-09-23.md, parts A2/B). Zero/false for every frame while the
+    // key is off, or before the hardware breakpoint has armed --
+    // pose_reader_watch.h's PoseReaderFrameSnapshot, read once here the
+    // way guard is read from cullGuardStatePacked() just above.
+    uint32_t poseReaderMask;         // bit N: unique-reader table id N fired this frame
+    uint16_t positionerTickCalls;
+    uint16_t positionerSwapSyncCalls;
+    bool     positionerSwapDetected;
+
+    // advanced.transition_flash_eye_base (docs/design-transition-flash-
+    // engine-fix-2026-09-23.md, "Static round 6"). Zero/false for every
+    // frame while the key is off -- transition_flash_eye_base.h's
+    // EyeBaseFrameSnapshot, read once here the way poseReaderMask is above.
+    uint16_t eyeBaseCalls;            // consumer hook calls this frame
+    uint16_t eyeBaseUnrefilledCalls;  // of those, how many read the mailbox as the reset value
+    uint8_t  eyeBaseTreatment;        // this frame's last unrefilled call: 0 none, 1 watched, 2 acted
+    uint32_t eyeBaseWriterMask;       // bit N: writer-table id N hit this frame
+    bool     eyeBaseWriterSinceLastConsume;  // any writer hit since the previous consumer call
+    bool     eyeBaseShipChanged;      // the ship pointer differed from the previous consumer call's
+    float    eyeBaseM[3];             // last call this frame: the mailbox's translation
+    float    eyeBaseF[3];             // last call this frame: the stand-in's translation
 };
 
 // What ended up in RingEntry::verdict. Order is the order the detector tests
@@ -457,6 +496,13 @@ const char* ringVerdictName(uint8_t v) {
         case kVerdictSceneReset:  return "WITHHELD -- eye camera reset without matching object rebase";
         default:                  return "";
     }
+}
+
+// RingEntry::eyeBaseTreatment's three values (transition_flash_eye_base.h's
+// own 0/1/2 convention, kept as a raw byte there for the same reason verdict
+// is one here: private to that file's event logic).
+const char* eyeBaseTreatmentName(uint8_t t) {
+    return t == 2 ? "acted" : t == 1 ? "watched" : "none";
 }
 
 struct State {
@@ -735,11 +781,34 @@ struct State {
     uint32_t validateMoved = 0;
     uint32_t revalidations = 0;
 
-    struct SceneWrite { const void* resource=nullptr; float pos[3]{}; uint32_t frame=0; bool valid=false; };
+    struct SceneWrite { const void* resource=nullptr; float pos[3]{}; uint32_t frame=0; bool valid=false;
+        uint8_t stackId=eot::kStackNoneId; };
     SceneWrite sceneWrites[16];
     uint32_t sceneDrawFrame=~0u;
     float sceneDrawPos[3]{};
     bool sceneDrawNoted=false;
+    uint8_t sceneDrawStackId=eot::kStackNoneId;  // the matched write's stack id (eye_origin_trace)
+
+    // advanced.eye_origin_trace (off by default). Off: none of this is
+    // touched anywhere in this file -- not the unwind, not the hash, not the
+    // per-frame counters, not the dump scheduling. See eye_origin_trace.h.
+    bool eyeOriginTraceOn=false;
+    eot::StackTable eyeOriginStacks;
+    uint32_t eyeTraceFrame=~0u;              // which frame the two counters below describe
+    uint32_t eyeTraceWritesThisFrame=0;
+    uint64_t eyeTraceMaskThisFrame=0;
+    uint32_t eyeTraceFramesTotal=0;          // session-cumulative: frames with >=1 write
+    uint32_t eyeTraceWritesTotal=0;          // session-cumulative: writes observed
+    uint64_t eyeTraceCaptureUs=0;            // session-cumulative: time spent in captureGameCallStack()
+    eot::PendingWindow eyeTraceDump;
+    uint32_t eyeTraceDumpsThisSession=0;
+    // The ~20s summary line (kTotalsEveryMs), printed only when a counter
+    // below has moved since the last one -- see eyeOriginTraceReport().
+    uint64_t eyeTraceReportAtMs=0;
+    uint32_t eyeTraceReportWrites=0;
+    uint32_t eyeTraceReportFrames=0;
+    uint32_t eyeTraceReportStacks=0;
+    uint32_t eyeTraceReportDumps=0;
     struct ScenePool {
         const void* resource=nullptr;
         uint32_t bytes=0,lastBound=0;
@@ -1561,6 +1630,31 @@ void installGlitchFrameFix() {
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
 
+    // advanced.eye_origin_trace: read once, here, like camera_buffer_bytes/
+    // offset just above -- this file is only ever installed once (device_
+    // hook.cpp), so there is no later config poll to hot-reload it from.
+    // Off (the default): nothing below this read ever touches
+    // eyeOriginStacks, captureGameCallStack(), or a file, in any of
+    // glitchFrameObserve, glitchFrameNoteSceneDraw, glitchFrameBoundary or
+    // dumpCameraRing.
+    s.eyeOriginTraceOn = cfg.getBool("advanced.eye_origin_trace", false);
+    // advanced.eye_origin_readers (docs/design-transition-flash-engine-fix-
+    // 2026-09-23.md) needs this instrument's stack capture running too, so
+    // the two share one dump timeline -- read once, here, the same rule as
+    // eye_origin_trace just above. pose_reader_watch.cpp reads the key
+    // itself for its own (hot-reloadable) purposes; this is only about
+    // whether ITS dump machinery is live.
+    if (cfg.getBool("advanced.eye_origin_readers", false)) s.eyeOriginTraceOn = true;
+    if (s.eyeOriginTraceOn) {
+        Log::get().note(
+            "eye-origin trace armed (advanced.eye_origin_trace=on): capturing the "
+            "game's own call stack at every write to the camera buffer, deduped "
+            "into a %u-entry table (a %uth distinct stack reports as overflow). "
+            "Automatic dumps go to edvr_logs\\flash\\eyetrace_HHMMSS_fN.txt, at "
+            "most %u a session.",
+            eot::kMaxStacks, eot::kMaxStacks + 1, eot::kMaxAutoDumps);
+    }
+
     if (!s.enabled) {
         // Off, but still watching. See State::observing.
         if (static_cast<uint64_t>(s.posOffset) * 4u + 12u <= s.bufferBytes &&
@@ -1668,6 +1762,31 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         }
         auto& w=s->sceneWrites[at];w.resource=resource;w.frame=s->frameNo;w.valid=finite3(pos);
         for(unsigned a=0;a<3;++a)w.pos[a]=pos[a];
+        // advanced.eye_origin_trace: the robust anchor for WHICH game code
+        // writes the eye origin is the game's own call stack at the moment
+        // of this write, not a guessed address -- a guessed address was
+        // already flown and refuted. Reset first so a slot recycled from an
+        // earlier resource (the LRU eviction above) never carries a stale
+        // id forward; off, it stays this way -- not even the unwind runs.
+        w.stackId=eot::kStackNoneId;
+        if(s->eyeOriginTraceOn){
+            const int64_t t0=qpcNow();
+            const GameCallStack stack=captureGameCallStack();
+            const int64_t t1=qpcNow();
+            const int64_t freq=qpcFrequency();
+            if(freq>0)s->eyeTraceCaptureUs+=static_cast<uint64_t>((t1-t0)*1000000/freq);
+            const size_t len=std::strlen(stack.rvas);
+            w.stackId=s->eyeOriginStacks.intern(stack.rvas,fnv1a64(stack.rvas,len));
+            if(s->eyeTraceFrame!=s->frameNo){
+                s->eyeTraceFrame=s->frameNo;
+                s->eyeTraceWritesThisFrame=0;
+                s->eyeTraceMaskThisFrame=0;
+                ++s->eyeTraceFramesTotal;
+            }
+            ++s->eyeTraceWritesThisFrame;
+            ++s->eyeTraceWritesTotal;
+            s->eyeTraceMaskThisFrame=eot::addToMask(s->eyeTraceMaskThisFrame,w.stackId);
+        }
     }
     if (!finite3(pos)) return;
 
@@ -1996,12 +2115,27 @@ bool glitchFrameWantsSceneDraw(uint64_t hash) {
     if(!s || !s->observing || s->sceneDrawFrame==s->frameNo)return false;
     return glitchFrameIsSceneDraw(hash);
 }
+// True once the camera validation behind "transition flash fix ACTIVE" has
+// passed -- the scene camera moved through its first rendered frames, which
+// is flight, not the menu or the loader. advanced.eye_origin_readers waits for
+// it before arming its time-bounded watch, so the watch is spent in flight.
+bool glitchFrameCameraValidated() {
+    State* s=g_state;
+    return s && s->validated;
+}
 bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     State* s=g_state;
     if(!s || !s->observing || !resource || s->sceneDrawFrame==s->frameNo)return false;
     for(const auto& w:s->sceneWrites)if(w.resource==resource && w.frame==s->frameNo && w.valid){
         s->sceneDrawFrame=s->frameNo;
         for(unsigned a=0;a<3;++a){s->sceneDrawPos[a]=w.pos[a];if(sampledPosition)sampledPosition[a]=w.pos[a];}
+        // advanced.eye_origin_trace: this write's stack id IS the eye
+        // origin's stack for the frame -- w.stackId is eot::kStackNoneId
+        // whenever tracing is off, so noteEyeOrigin's bound check (id<used_,
+        // and used_ is 0 when nothing has ever been interned) already
+        // no-ops in that case without a separate gate.
+        s->sceneDrawStackId=w.stackId;
+        if(s->eyeOriginTraceOn)s->eyeOriginStacks.noteEyeOrigin(w.stackId);
         if(!s->sceneDrawNoted){s->sceneDrawNoted=true;Log::get().note(
             "transition flash: bound eye-draw camera cross-check is recording "
             "VS b1's current write, independently of AA; Pause history includes "
@@ -2011,11 +2145,231 @@ bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     return false;
 }
 namespace {
-void recordScenePosition(RingEntry& e,const State* s){
+// CHANGE 9 (2026-09-24, task "the object side and the camera side of each
+// frame on one line"): recordScenePosition's own fold, handed back so the
+// three call sites can pass it straight to transitionFlashEyeBaseNoteScene-
+// Camera without recomputing the same frame-arithmetic gates a second time.
+struct SceneGeometryTap {
+    bool fresh;
+    GlitchSceneDecision decision;
+};
+
+SceneGeometryTap recordScenePosition(RingEntry& e,const State* s){
     // Boundary advances frameNo before recording the frame just completed.
     e.sceneValid=s->sceneDrawFrame+1==s->frameNo;
     for(unsigned a=0;a<3;++a)e.scenePos[a]=s->sceneDrawPos[a];
-    e.geometry=s->scenePoolFrame+1==s->frameNo?s->sceneGeometry:GlitchSceneGeometry{};
+    const bool geometryFresh=s->scenePoolFrame+1==s->frameNo;
+    e.geometry=geometryFresh?s->sceneGeometry:GlitchSceneGeometry{};
+    // advanced.eye_origin_trace: eyeBufferWritten uses the SAME test as
+    // sceneValid above, on purpose (see the field comment on RingEntry).
+    e.eyeBufferWritten=s->sceneDrawFrame+1==s->frameNo;
+    e.eyeOriginStackId=e.eyeBufferWritten?s->sceneDrawStackId:eot::kStackNoneId;
+    const bool freshTrace=s->eyeTraceFrame+1==s->frameNo;
+    e.eyeTraceWrites=freshTrace?s->eyeTraceWritesThisFrame:0;
+    e.eyeTraceMask=freshTrace?s->eyeTraceMaskThisFrame:0;
+    // CHANGE 9: the detector's decision for the SAME just-completed frame --
+    // sceneDecisionFrame only advances when glitchSceneDecision returned
+    // non-Unknown (the compare-and-decide site below), so a frame whose pool
+    // matched too few points to decide reads back Unknown here, not a stale
+    // older verdict.
+    const GlitchSceneDecision decision=
+        s->sceneDecisionFrame+1==s->frameNo?s->sceneDecision:GlitchSceneDecision::Unknown;
+    return {geometryFresh, decision};
+}
+
+// appendLine's own copy for this instrument (transition_flash_prevent.cpp
+// has one too, for its own dump; see AGENTS.md on copy-culture). Appends
+// one printf-style line plus \r\n to a std::string dump buffer.
+void eyeOriginTraceAppend(std::string& out,const char* fmt,...){
+    char buf[640];
+    va_list ap;
+    va_start(ap,fmt);
+    const int n=std::vsnprintf(buf,sizeof(buf),fmt,ap);
+    va_end(ap);
+    if(n>0)out.append(buf,static_cast<size_t>(n)<sizeof(buf)?static_cast<size_t>(n):sizeof(buf)-1);
+    out+="\r\n";
+}
+
+// One automatic dump file: edvr_logs\flash\eyetrace_HHMMSS_fN.txt, the
+// unique-stack table first (point 4 of the design: this file is read
+// stack-first), then every ring frame inside the folded trigger window.
+// Mirrors transition_flash_prevent.cpp's performDump in shape (same log
+// directory accessor, same CreateDirectoryW/CreateFileW pattern) but is
+// this file's own function: that module stays untouched.
+void eyeOriginTracePerformDump(State* s,const eot::PendingWindow& window){
+    const uint32_t dumpIndex=++s->eyeTraceDumpsThisSession;
+
+    std::string text;
+    eyeOriginTraceAppend(text,
+        "eye-origin trace: dump %u/%u, window frames %u..%u",
+        dumpIndex,eot::kMaxAutoDumps,window.lowFrame,window.dueFrame);
+    eyeOriginTraceAppend(text,
+        "eye-origin call-stack table: %u of %u slot(s) used, %u write(s) overflowed it",
+        s->eyeOriginStacks.used(),eot::kMaxStacks,s->eyeOriginStacks.overflowed());
+    for(uint32_t i=0;i<s->eyeOriginStacks.used();++i){
+        const auto& se=s->eyeOriginStacks.entry(i);
+        eyeOriginTraceAppend(text,"  #%u count=%u eyeFrames=%u %s",i,se.count,se.eyeFrames,se.chain);
+    }
+
+    // advanced.eye_origin_readers (design doc part C): the unique-reader
+    // table, dump time only -- id is the row number, pose_reader_watch.h's
+    // own convention, eot::StackTable's above. Omitted when the instrument
+    // is off: nothing populated it, and an empty "0 of 32" section would
+    // only be noise on eye_origin_trace's own flights.
+    if(poseReaderWatchOn()){
+        const uint32_t readerCount=poseReaderWatchTableCount();
+        eyeOriginTraceAppend(text,
+            "pose-reader table: %u of %u unique reader(s)",
+            readerCount,prw::kMaxReaders);
+        for(uint32_t i=0;i<readerCount;++i){
+            const PoseReaderTableEntry re=poseReaderWatchTableEntry(i);
+            std::string callers;
+            for(uint32_t u=0;u<re.unwindCount;++u){
+                char piece[16];
+                std::snprintf(piece,sizeof(piece),"%s0x%X",callers.empty()?"":"/",re.unwindRvas[u]);
+                callers+=piece;
+            }
+            if(callers.empty())callers="(none)";
+            eyeOriginTraceAppend(text,
+                "  #%u rip=0x%llX count=%u firstFrame=%u lastFrame=%u callers=%s",
+                i,(unsigned long long)re.rip,re.count,re.firstFrame,re.lastFrame,callers.c_str());
+        }
+    }
+
+    const uint64_t have=s->ringHead<kRingFrames?s->ringHead:kRingFrames;
+    const uint64_t first=s->ringHead-have;
+    uint32_t printed=0;
+    for(uint64_t i=first;i<s->ringHead;++i){
+        const RingEntry& e=s->ring[i%kRingFrames];
+        if(!eot::frameInWindow(e.frame,window.lowFrame,window.dueFrame))continue;
+        ++printed;
+        char stackText[16];
+        if(!e.eyeBufferWritten)std::snprintf(stackText,sizeof(stackText),"none");
+        else if(e.eyeOriginStackId==eot::kStackOverflowId)std::snprintf(stackText,sizeof(stackText),"overflow");
+        else std::snprintf(stackText,sizeof(stackText),"#%u",e.eyeOriginStackId);
+        eyeOriginTraceAppend(text,
+            "f%-7u eye=%-3u verdict=%-40s pos=(%+.2f %+.2f %+.2f) scene=(%+.2f %+.2f %+.2f) "
+            "stack=%-8s buf=%-7s writes=%u mask=0x%016llX reader=0x%08X tick=%u swapsync=%u swap=%s "
+            "eyebase calls=%u unref=%u treat=%-7s wmask=0x%08X wsince=%s shipchg=%s "
+            "M=(%+.2f %+.2f %+.2f) F=(%+.2f %+.2f %+.2f)",
+            e.frame,e.eyeDraws,ringVerdictName(e.verdict),
+            e.pos[0],e.pos[1],e.pos[2],e.scenePos[0],e.scenePos[1],e.scenePos[2],
+            stackText,e.eyeBufferWritten?"written":"no",
+            e.eyeTraceWrites,(unsigned long long)e.eyeTraceMask,
+            e.poseReaderMask,unsigned(e.positionerTickCalls),unsigned(e.positionerSwapSyncCalls),
+            e.positionerSwapDetected?"yes":"no",
+            unsigned(e.eyeBaseCalls),unsigned(e.eyeBaseUnrefilledCalls),eyeBaseTreatmentName(e.eyeBaseTreatment),
+            e.eyeBaseWriterMask,e.eyeBaseWriterSinceLastConsume?"yes":"no",e.eyeBaseShipChanged?"yes":"no",
+            e.eyeBaseM[0],e.eyeBaseM[1],e.eyeBaseM[2],e.eyeBaseF[0],e.eyeBaseF[1],e.eyeBaseF[2]);
+    }
+    eyeOriginTraceAppend(text,"eye-origin trace dump done, %u entries",printed);
+
+    const std::wstring logDir=Log::get().dir();
+    std::wstring path;
+    bool wrote=false;
+    if(!logDir.empty()){
+        const std::wstring dir=logDir+L"\\flash";
+        CreateDirectoryW(dir.c_str(),nullptr);
+        SYSTEMTIME stm{};
+        GetLocalTime(&stm);
+        wchar_t filename[64];
+        _snwprintf_s(filename,_TRUNCATE,L"eyetrace_%02u%02u%02u_f%u.txt",
+                     static_cast<unsigned>(stm.wHour),static_cast<unsigned>(stm.wMinute),
+                     static_cast<unsigned>(stm.wSecond),window.lowFrame);
+        path=dir+L"\\"+filename;
+        HANDLE f=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(f!=INVALID_HANDLE_VALUE){
+            DWORD written=0;
+            wrote=WriteFile(f,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)!=0;
+            CloseHandle(f);
+        }
+    }
+    Log::get().note(
+        "eye-origin trace: dump %u/%u, frames %u..%u, %u entries -> %ls",
+        dumpIndex,eot::kMaxAutoDumps,window.lowFrame,window.dueFrame,printed,
+        wrote?path.c_str():L"(could not write the file; see the log directory)");
+}
+
+// The ~20s summary (kTotalsEveryMs), printed only when a counter has moved
+// -- see the totals block in glitchFrameBoundary for the same discipline.
+void eyeOriginTraceReport(State* s){
+    const uint32_t stacks=s->eyeOriginStacks.used();
+    if(s->eyeTraceWritesTotal==s->eyeTraceReportWrites &&
+       s->eyeTraceFramesTotal==s->eyeTraceReportFrames &&
+       stacks==s->eyeTraceReportStacks &&
+       s->eyeTraceDumpsThisSession==s->eyeTraceReportDumps)return;
+    s->eyeTraceReportWrites=s->eyeTraceWritesTotal;
+    s->eyeTraceReportFrames=s->eyeTraceFramesTotal;
+    s->eyeTraceReportStacks=stacks;
+    s->eyeTraceReportDumps=s->eyeTraceDumpsThisSession;
+
+    // Top 8 stack ids by eye-origin frame count -- the same top-N selection
+    // scheduler_stack_probe.cpp uses for its own per-target report, kept as
+    // its own copy here (different table, different field to rank by).
+    uint32_t top[8];
+    for(uint32_t i=0;i<8;++i)top[i]=0xFFFFFFFFu;
+    for(uint32_t rank=0;rank<8 && rank<stacks;++rank){
+        uint32_t best=0xFFFFFFFFu;
+        for(uint32_t k=0;k<stacks;++k){
+            bool used=false;for(uint32_t r=0;r<rank;++r)if(top[r]==k)used=true;
+            if(used || s->eyeOriginStacks.entry(k).eyeFrames==0)continue;
+            if(best==0xFFFFFFFFu || s->eyeOriginStacks.entry(k).eyeFrames>s->eyeOriginStacks.entry(best).eyeFrames)best=k;
+        }
+        if(best!=0xFFFFFFFFu)top[rank]=best;
+    }
+    std::string topText;
+    for(uint32_t rank=0;rank<8;++rank){
+        if(top[rank]==0xFFFFFFFFu)break;
+        char piece[32];
+        std::snprintf(piece,sizeof(piece),"%s#%u:%u",topText.empty()?"":" ",
+                     top[rank],s->eyeOriginStacks.entry(top[rank]).eyeFrames);
+        topText+=piece;
+    }
+    if(topText.empty())topText="(none)";
+
+    Log::get().note(
+        "eye-origin trace: %u frame(s) traced, %u write(s), %u unique stack(s), top: %s, "
+        "%u automatic dump(s), %llu us spent capturing stacks so far.",
+        s->eyeTraceFramesTotal,s->eyeTraceWritesTotal,stacks,topText.c_str(),
+        s->eyeTraceDumpsThisSession,(unsigned long long)s->eyeTraceCaptureUs);
+}
+
+// Called from all three of glitchFrameBoundary's verdict sites (the
+// fix-off path, the disabled-for-session path, and the normal path) with
+// the same withheldClass test transition_flash_prevent.cpp's own tap uses
+// at each -- so one flight needs no key presses -- plus sceneResetVerdict,
+// the narrower test advanced.eye_origin_readers wants (pose_reader_watch_
+// core.h's dumpVerdictTrigger; see the design doc's part C). Off is the
+// only real gate; once on, this runs every boundary call so a pending
+// dump becomes due even on a frame with no new trigger.
+void eyeOriginTraceBoundary(State* s,uint32_t frame,bool withheldClass,bool sceneResetVerdict){
+    if(!s->eyeOriginTraceOn)return;
+    const bool readersOn=poseReaderWatchOn();
+    if(prw::dumpVerdictTrigger(readersOn,withheldClass,sceneResetVerdict)){
+        const bool creatingNew=!s->eyeTraceDump.active;
+        if(!creatingNew || s->eyeTraceDumpsThisSession<eot::kMaxAutoDumps){
+            s->eyeTraceDump=eot::foldTrigger(s->eyeTraceDump,frame);
+        }
+    }
+    // The design doc's part C, trigger 2: a positioner swap. Only a
+    // possibility once advanced.eye_origin_readers is on -- pose_reader_
+    // watch.cpp never raises this trigger otherwise.
+    uint32_t swapFrame=0;
+    if(readersOn && poseReaderTakeSwapTrigger(&swapFrame)){
+        const bool creatingNew=!s->eyeTraceDump.active;
+        if(!creatingNew || s->eyeTraceDumpsThisSession<eot::kMaxAutoDumps){
+            s->eyeTraceDump=eot::foldTrigger(s->eyeTraceDump,swapFrame);
+        }
+    }
+    if(s->eyeTraceDump.active && frame>=s->eyeTraceDump.dueFrame){
+        eyeOriginTracePerformDump(s,s->eyeTraceDump);
+        s->eyeTraceDump=eot::PendingWindow{};
+    }
+    if(dueMs(s->eyeTraceReportAtMs,kTotalsEveryMs)){
+        s->eyeTraceReportAtMs=stampMs();
+        eyeOriginTraceReport(s);
+    }
 }
 }
 uint32_t glitchFrameWantsPool(const void* resource){
@@ -2142,10 +2496,48 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
                 e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
                 e.verdict==kVerdictSceneReset);
+            transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-            recordScenePosition(e,s);
+            const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
+            // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
+            // tap, independent of advanced.eye_origin_trace -- the value
+            // recordScenePosition just folded into e.scenePos/e.sceneValid/
+            // e.geometry, plus this frame's own geometry freshness and
+            // detector decision (CHANGE 9).
+            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+                e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
+            // advanced.eye_origin_readers: read-and-reset (see the
+            // function's own comment), so this must run exactly once per
+            // real frame -- true here, since this block and its siblings
+            // at glitchFrameBoundary's other two verdict sites are
+            // mutually exclusive.
+            {
+                const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
+                e.poseReaderMask = pr.readerMask;
+                e.positionerTickCalls = pr.tickCalls;
+                e.positionerSwapSyncCalls = pr.swapSyncCalls;
+                e.positionerSwapDetected = pr.swapDetected;
+            }
+            // advanced.transition_flash_eye_base: read-and-reset, the same
+            // convention and the same "exactly once per real frame" note as
+            // the pose-reader tap just above.
+            {
+                const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
+                e.eyeBaseCalls = eb.calls;
+                e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
+                e.eyeBaseTreatment = eb.treatment;
+                e.eyeBaseWriterMask = eb.writerMask;
+                e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
+                e.eyeBaseShipChanged = eb.shipChanged;
+                e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
+                e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
+            }
             ++s->ringHead;
         }
+        eyeOriginTraceBoundary(s, s->frameNo,
+            s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
+            s->verdictThisFrame==kVerdictSceneReset,
+            s->verdictThisFrame==kVerdictSceneReset);
         s->frameFarMag2 = -1.0f;
         s->verdictThisFrame = kVerdictQuiet;
         s->jumpedThisFrame = false;
@@ -2235,10 +2627,47 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
                 e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
                 e.verdict==kVerdictSceneReset);
+            transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-            recordScenePosition(e,s);
+            const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
+            // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
+            // tap, independent of advanced.eye_origin_trace -- the value
+            // recordScenePosition just folded into e.scenePos/e.sceneValid/
+            // e.geometry, plus this frame's own geometry freshness and
+            // detector decision (CHANGE 9).
+            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+                e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
+            // advanced.eye_origin_readers: read-and-reset (see the
+            // function's own comment), so this must run exactly once per
+            // real frame -- true here, since this block and its siblings
+            // at glitchFrameBoundary's other two verdict sites are
+            // mutually exclusive.
+            {
+                const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
+                e.poseReaderMask = pr.readerMask;
+                e.positionerTickCalls = pr.tickCalls;
+                e.positionerSwapSyncCalls = pr.swapSyncCalls;
+                e.positionerSwapDetected = pr.swapDetected;
+            }
+            // advanced.transition_flash_eye_base: read-and-reset, the same
+            // convention as the pose-reader tap just above.
+            {
+                const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
+                e.eyeBaseCalls = eb.calls;
+                e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
+                e.eyeBaseTreatment = eb.treatment;
+                e.eyeBaseWriterMask = eb.writerMask;
+                e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
+                e.eyeBaseShipChanged = eb.shipChanged;
+                e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
+                e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
+            }
             ++s->ringHead;
         }
+        eyeOriginTraceBoundary(s, s->frameNo,
+            s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
+            s->verdictThisFrame==kVerdictSceneReset,
+            s->verdictThisFrame==kVerdictSceneReset);
         s->frameFarMag2 = -1.0f;
         s->verdictThisFrame = kVerdictQuiet;
         s->jumpedThisFrame = false;
@@ -2561,8 +2990,40 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
             e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
             e.verdict==kVerdictSceneReset);
+        transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-        recordScenePosition(e,s);
+        const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
+        // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame tap,
+        // independent of advanced.eye_origin_trace -- the value
+        // recordScenePosition just folded into e.scenePos/e.sceneValid/
+        // e.geometry, plus this frame's own geometry freshness and detector
+        // decision (CHANGE 9).
+        transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+            e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
+        // advanced.eye_origin_readers: read-and-reset: see
+        // poseReaderWatchFrameSnapshot's own comment, and the identical
+        // tap at glitchFrameBoundary's other two (mutually exclusive)
+        // verdict sites.
+        {
+            const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
+            e.poseReaderMask = pr.readerMask;
+            e.positionerTickCalls = pr.tickCalls;
+            e.positionerSwapSyncCalls = pr.swapSyncCalls;
+            e.positionerSwapDetected = pr.swapDetected;
+        }
+        // advanced.transition_flash_eye_base: read-and-reset, the same
+        // convention as the pose-reader tap just above.
+        {
+            const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
+            e.eyeBaseCalls = eb.calls;
+            e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
+            e.eyeBaseTreatment = eb.treatment;
+            e.eyeBaseWriterMask = eb.writerMask;
+            e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
+            e.eyeBaseShipChanged = eb.shipChanged;
+            e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
+            e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
+        }
         ++s->ringHead;
     }
 
@@ -2657,6 +3118,10 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->radiusSuppressedThisFrame = false;
     s->parkSuppressedThisFrame = false;
     s->driftSuppressedThisFrame = false;
+    eyeOriginTraceBoundary(s, s->frameNo,
+        s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
+        s->verdictThisFrame==kVerdictSceneReset,
+        s->verdictThisFrame==kVerdictSceneReset);
     s->frameFarMag2 = -1.0f;
     s->verdictThisFrame = kVerdictQuiet;
 }
@@ -2747,6 +3212,20 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
         const auto& g=e.geometry;
         Log::get().note("    f%u geometry matched=%u predicted=%u cameraStep=%.3f poolStep=%.3f relativeMedian=%.3f relativeP90=%.3f predictionP90=%.3f",
             e.frame,g.matched,g.predicted,g.cameraStep,g.poolStep,g.relativeMedian,g.relativeP90,g.predictionP90);
+        // advanced.eye_origin_trace: printed only when the session actually
+        // ran it -- off, every one of these fields is a meaningless zero,
+        // and printing them on every ring line of every Pause dump ever
+        // taken would be exactly the per-frame log noise AGENTS.md's
+        // logging-bounded rule exists to prevent.
+        if(s->eyeOriginTraceOn){
+            char stackText[16];
+            if(!e.eyeBufferWritten)std::snprintf(stackText,sizeof(stackText),"none");
+            else if(e.eyeOriginStackId==eot::kStackOverflowId)std::snprintf(stackText,sizeof(stackText),"overflow");
+            else std::snprintf(stackText,sizeof(stackText),"#%u",e.eyeOriginStackId);
+            Log::get().note("    f%u eyetrace stack=%s buf=%s writes=%u mask=0x%016llX",
+                e.frame,stackText,e.eyeBufferWritten?"written":"no",
+                e.eyeTraceWrites,(unsigned long long)e.eyeTraceMask);
+        }
     }
     // WAS ANY OF THIS OURS? The question every one of these dumps has been
     // opened to answer, worked out by hand every time.
@@ -2859,6 +3338,17 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
         }
     }
     Log::get().note("--- bound-pool coherence: %u auxiliary jumps excused, %u eye-reset frames marked; %u frame(s) exceeded the four-write sampling cap. Unavailable pairs stay matched=0 and retain the legacy decision. ---",s->sceneExcused,s->sceneResets,s->scenePoolCapped);
+    // advanced.eye_origin_trace: the unique-stack table, once, at the end of
+    // the dump -- the per-frame eyetrace lines above name a stack by id;
+    // this is where that id's RVA chain actually lives.
+    if(s->eyeOriginTraceOn){
+        Log::get().note("--- eye-origin call-stack table: %u of %u slot(s) used, %u write(s) overflowed it ---",
+            s->eyeOriginStacks.used(),eot::kMaxStacks,s->eyeOriginStacks.overflowed());
+        for(uint32_t i=0;i<s->eyeOriginStacks.used();++i){
+            const auto& se=s->eyeOriginStacks.entry(i);
+            Log::get().note("  #%u count=%u eyeFrames=%u %s",i,se.count,se.eyeFrames,se.chain);
+        }
+    }
     Log::get().note("--- end camera history ---");
 }
 

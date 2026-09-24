@@ -3,7 +3,6 @@
 #include "game_exit_probe.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
-#include "original_draw_probe.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
 
@@ -54,7 +53,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
 #include "eye_tonemap_snapshot.h"
-#include "ui_separation.h"
 #include "eye_panel_snapshot.h"
 #include "gui_draw_snapshot.h"
 #include "quad_probe.h"
@@ -72,6 +70,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vscreen.h"
 #include "glitch_frame.h"
 #include "transition_flash_prevent.h"
+#include "pose_reader_watch.h"
+#include "transition_flash_eye_base.h"
 #include "vscreen_res.h"
 #include "celestial_motion.h"
 
@@ -671,7 +671,6 @@ HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPU
             const uint64_t hash=fnv1a64(bytecode,len);
             GuiDrawSnapshot::rememberLayout(*out,elements,count,hash);
             EyeDrawSnapshot::rememberLayout(*out,elements,count,hash);
-            originalDrawProbeRememberLayout(*out,elements,count,hash);
             EyeTonemapSnapshot::rememberLayout(*out,elements,count,hash);
             EyePanelSnapshot::rememberLayout(*out,elements,count,hash);
         });
@@ -721,7 +720,6 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         captureFlatShader('p', hash, bytecode, len);
         rememberFlatProbeShader('p', hash, bytecode, len);
         registerShaderHash(*out, hash);
-        uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
@@ -1596,6 +1594,26 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (menuTakeConfigPollRequest() || dueMs(g_state->configPollMs, kConfigPollMs)) {
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
+            // frame_flag's layout check (frame_flag.h). The VR runtime half
+            // can load at any point in the session, so it is asked on this
+            // cadence; the first mismatch is said once.
+            {
+                static bool frameFlagMismatchNoted = false;
+                if (!frameFlagMismatchNoted) {
+                    if (const uint32_t theirs = frameFlagPeerMismatch()) {
+                        frameFlagMismatchNoted = true;
+                        Log::get().note(
+                            "frame_flag: LAYOUT MISMATCH -- this d3d11.dll was built with the "
+                            "shared channel's v%u, the VR runtime half beside it with v%u. They "
+                            "come from different EDVR builds, so the channel between them is "
+                            "refused: everything that crosses it (the transition-flash hold, "
+                            "the on-foot camera, the cull guard, the intro recentre, the "
+                            "settings menu's door) is absent this session. Reinstall EDVR so "
+                            "both halves match.",
+                            kFrameFlagVersion, theirs);
+                    }
+                }
+            }
             g_state->fssTheaterWanted =
                 Config::get().getFloat("experimental.fss_theater", 0.0f) > 0.0f ||
                 eyeSyncFromConfig(Config::get()).any();
@@ -2442,10 +2460,8 @@ void hookDevice(ID3D11Device* device) {
     if (s.shaderDump) {
         Log::get().note("shader dump ARMED: every vertex and pixel shader "
                         "the game creates is written to edvr_logs\\shaders "
-                        "by hash. Park at a star with sun_glare_steady on; "
-                        "the log names the glare train's pair. Set "
-                        "glare_shader_dump = 0 afterwards -- this costs "
-                        "file writes during loading.");
+                        "by hash. Set glare_shader_dump = 0 afterwards -- "
+                        "this costs file writes during loading.");
     }
     s.deviceHook.replace(kDevCreateVertexShader, &hookedCreateVS,
                          reinterpret_cast<void**>(&s.realCreateVS));
@@ -2963,6 +2979,8 @@ void shutdownDeviceHooks() {
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     shutdownGlitchFrameFix();
     transitionFlashPreventShutdown();
+    poseReaderWatchShutdown();
+    transitionFlashEyeBaseShutdown();
     shutdownVScreenFixes();
     shutdownExposureFix();
     // The swap-only or live-only probe's bare table, if that was what ran
