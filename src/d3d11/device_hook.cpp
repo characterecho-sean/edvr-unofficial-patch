@@ -2294,10 +2294,8 @@ void hookDevice(ID3D11Device* device) {
     if (s.shaderDump) {
         Log::get().note("shader dump ARMED: every vertex and pixel shader "
                         "the game creates is written to edvr_logs\\shaders "
-                        "by hash. Park at a star with sun_glare_steady on; "
-                        "the log names the glare train's pair. Set "
-                        "glare_shader_dump = 0 afterwards -- this costs "
-                        "file writes during loading.");
+                        "by hash. Set glare_shader_dump = 0 afterwards -- "
+                        "this costs file writes during loading.");
     }
     s.deviceHook.replace(kDevCreateVertexShader, &hookedCreateVS,
                          reinterpret_cast<void**>(&s.realCreateVS));

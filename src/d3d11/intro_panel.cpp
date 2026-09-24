@@ -85,8 +85,8 @@ constexpr float kScreenDistDefault = 3.35f;
 // matters.
 constexpr float kHalfIpd = 0.0315f;
 
-// World lock (part of fix.intro_video = screen). The counter-move is witchstar_fix's,
-// which already holds a head-locked sprite on a world direction by shifting
+// World lock (part of fix.intro_video = screen). The counter-move is the
+// retired witchstar fix's (removed 2026-09-23), which held a head-locked sprite on a world direction by shifting
 // the VIEWPORT for one draw -- no matrix, no new channel, and field-proven on
 // a different draw. It counter-moves against the game's world forward, and
 // that is exactly the anchor wanted here -- the field's own words, "the
@@ -501,8 +501,8 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
     // The world lock is not a nudge to the game's geometry -- it is a
     // REPLACEMENT transform, built here and written into cb2 exactly as the
-    // splash's own is. A viewport shift (the first attempt, witchstar_fix's
-    // pattern) can only translate: it gives no stereo, so the picture always
+    // splash's own is. A viewport shift (the first attempt, the retired
+    // witchstar fix's pattern) can only translate: it gives no stereo, so the picture always
     // reads as being at infinity, and the splash's screen is not at
     // infinity. That is why it could never have worked, whatever its sign.
     //

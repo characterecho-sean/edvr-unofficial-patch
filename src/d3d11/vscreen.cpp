@@ -28,12 +28,10 @@
 #include "backdrop_fix.h"
 #include "billboard_fix.h"
 #include "binding_shadow.h"
-#include "cb_peek.h"
 #include "panel_curve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
 #include "night_vision.h"
-#include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
@@ -59,7 +57,6 @@
 #include "menu.h"              // the settings menu's reload: its keys, then the row diff
 #include "perf_monitor.h"      // the draw hooks' sampled cost, and the reload as an event
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
-#include "fov_probe.h"
 #include "glitch_frame.h"
 #include "transition_flash_prevent.h"
 #include "holo_fix.h"
@@ -89,7 +86,6 @@
 #include "exposure_fix.h"
 #include "particle_fix.h"
 #include "sunglare_fix.h"
-#include "witchstar_fix.h"
 #include "graphics_bridge.h"
 #include "game_query_probe.h"
 #include "original_draw_probe.h"
@@ -739,19 +735,12 @@ struct State {
     void* scenePoolData = nullptr;
     uint32_t scenePoolBytes = 0;
 
-    // A third mapped-buffer shadow, for the constant-buffer peek. Separate
-    // from the two above for the reason they are separate from each other:
-    // any pair of these buffers can be mapped at the same time, and sharing
-    // a slot lets whichever unmaps second overwrite the other's record.
-    void*    peekResource = nullptr;
-    void*    peekData = nullptr;
-    uint32_t peekBytes = 0;
-
-    // And a fourth, for the billboard fix's per-write capture of the sprite
-    // constants. Same separation argument; the peek and the fix can watch
-    // the SAME buffer at the same time, and each keeps its own record.
-    // And a fifth, the world shader's true-camera feed: the scene CB
-    // nominated at the last big eye draw.
+    // More mapped-buffer shadows, separate from the two above for the reason
+    // they are separate from each other: any pair of these buffers can be
+    // mapped at the same time, and sharing a slot lets whichever unmaps
+    // second overwrite the other's record. The world shader's true-camera
+    // feed, the scene CB nominated at the last big eye draw; the billboard
+    // loan's per-write capture of the glare train's constants.
     void*    sceneCbResource = nullptr;
     void*    sceneCbData = nullptr;
     uint32_t sceneCbBytes = 0;
@@ -1489,12 +1478,7 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 // match, or the RemLok overlay in hide mode); kRemlok means the RemLok
 // overlay in outer mode -- forward it wrapped in remlokScissorBegin/End;
 // kHolo means the loading hologram composite -- forward it wrapped in
-// holoBegin/End, which substitutes its pattern texture for the draw;
-// kWitchstar the jump tunnel's star cluster -- forward it wrapped in
-// witchstarBegin/End, which shifts its viewport to hold the star's
-// direction under head rotation; kBillboard a flare or corona sprite whose
-// freshly-written constants passed the billboard shape check -- forward it
-// wrapped in billboardBegin/End, which substitutes a world-stable basis.
+// holoBegin/End, which substitutes its pattern texture for the draw.
 // kGlareClamp is DrawInstanced-only: the sun-glare element train drawn
 // with its instance count clamped to sunglareKeep() -- SV_InstanceID
 // restarts at zero per call, so a prefix is the only subset that keeps
@@ -1508,7 +1492,7 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 thread_local bool t_uiDepthThisDraw = false;
 
 enum class DrawVerdict {
-    kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
+    kNone, kPanel, kSkip, kRemlok, kHolo,
     // The target direction indicator, reconstructed rather than smeared
     // (target_sharp.h): forwarded through a replacement pixel shader.
     kTargetSharp,
@@ -1688,9 +1672,9 @@ bool drawGateSubscribed(State* s) {
         stencilProbeWantsDraws() || resolveBindWants() ||
         remlokWantsDraws() || holoWantsDraws() || targetSharpWantsDraws() ||
         hudSpriteWantsDraws() || panelUpscaleWantsDraws() || hudGrainWantsDraws() ||
-        uiDepthWantsDraws() || witchstarWantsDraws() ||
-        sunglareWantsDraws() || cbPeekEnabled() || billboardWantsDraws() ||
-        drawCensusArmed() || objectProbeWantsDraws() || panelQuadWants() ||
+        uiDepthWantsDraws() ||
+        sunglareWantsDraws() ||
+        drawCensusArmed() || objectProbeWantsDraws() ||
         panelCurveWants() || particleWantsDraws() || backdropWantsDraws() ||
         scrimWantsDraws() || quadProbeWants() || loaderPanelWants() ||
         introProbeWants() || introPanelWants();
@@ -2601,25 +2585,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kFssRing;
     }
 
-    // The witchspace star, called for EVERY eye draw while enabled -- its
-    // cluster is recognised as a contiguous run, and the run state needs to
-    // see the draws that break it, not only the ones that belong.
-    if (witchstarWantsDraws() && witchstarOnEyeDraw(kind, count, instances)) {
-        return DrawVerdict::kWitchstar;
-    }
-
-    // The constant-buffer peek BEFORE the glare verdict, the census's rule
-    // again: observation must see the draws an intervention is about to
-    // eat, or the steer's decode instrument starves the moment the fix it
-    // serves is switched on.
-    if (cbPeekEnabled()) cbPeekOnEyeDraw(self, kind, count, instances);
-
-    // The sun-glare element train: off skips it, first:K clamps it, and
-    // steady wraps whatever survives in the corner counter-rotation. The
-    // billboard loan is measurement now -- its shadow supplies the roll,
-    // its buffer is never substituted for these draws. Clamp and steady
-    // compose: the clamp count rides glareClamp to the DrawInstanced
-    // thunk regardless of which verdict carries the draw there.
+    // The sun-glare element train: off skips it, first:K clamps it, and the
+    // world shader draws whatever survives. The billboard loan is
+    // measurement -- its shadow feeds the world shader's telemetry, its
+    // buffer is never substituted for these draws. The clamp count rides
+    // glareClamp to the DrawInstanced thunk.
     // The train's shape first, inline (sunglare_fix.h): for any other shape
     // sunglareOnEyeDraw answers kStock and this block does nothing, and both
     // calls -- sunglareWantsDraws is cross-TU too -- were made per eye draw.
@@ -2644,18 +2614,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 billboardOnGlareDraw(count, instances);
                 return DrawVerdict::kGlareSteady;
             }
-            if (sunglareSteady() && billboardOnGlareDraw(count, instances)) {
-                return DrawVerdict::kGlareSteady;
-            }
             if (s->glareClamp) return DrawVerdict::kGlareClamp;
         }
-    }
-
-    // The billboard orientation fix: a matched sprite draw whose captured
-    // constants passed the shape check gets a world-stable basis.
-    if (billboardWantsDraws() &&
-        billboardOnEyeDraw(kind, count, instances)) {
-        return DrawVerdict::kBillboard;
     }
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
@@ -2673,23 +2633,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // wants it.
     if (headOffsetGateWantsPanel() && srv0IsPanelSized(s, kind, count)) {
         ++s->panelCompositeDraws;
-    }
-
-    // The quad capture, and deliberately ABOVE the distanceEnabled return.
-    //
-    // It needs the composite recognised, which is exactly what the next few
-    // lines do -- but panel_distance sits at its shipped default of 1.0 on
-    // most rigs, including the one that flew the census, so everything below
-    // that return is unreachable there. Putting the capture under it would
-    // make an instrument for the curved screen silently require an unrelated
-    // comfort setting to be turned on first. That is the starvation this
-    // function's own comment block is about, and it has cost this file five
-    // separate bugs; the capture is not going to be the sixth.
-    //
-    // srv0IsPanelSized memoises against the binding generation, so asking here
-    // and again below is one resolve, not two.
-    if (panelQuadWants() && srv0IsPanelSized(s, kind, count)) {
-        panelQuadOnComposite(self);
     }
 
     // The curved screen, recognised here and acted on in forwardWithVerdict.
@@ -3350,17 +3293,10 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // append) from a write that changes what the snapshot holds. Four
     // pointer compares while live, one relaxed load while not.
     if (mapData0 && type != D3D11_MAP_READ) engineVelocityResourceMapped(res, mapped->pData, static_cast<int>(type));
-    // The peek target, independent of the chain above on purpose: the buffer
-    // the sprite family reads may BE the composite's or the camera's, and a
-    // peek must not steal either shadow's slot. Pointer compare only; the
-    // resolve happened at learn time.
-    if (mapSub0 && cbPeekEnabled() && res == cbPeekTarget()) {
-        s->peekResource = res;
-        s->peekData = mapped->pData;
-        s->peekBytes = 0;
-        mapBufferDesc(res, &s->peekBytes);   // stays 0 for a texture
-    }
-    // The billboard fix's target, the same way and for the same reasons.
+    // The billboard loan's target, independent of the chain above on
+    // purpose: the buffer the glare train reads may BE the composite's or
+    // the camera's, and must not steal either shadow's slot. Pointer compare
+    // only; the resolve happened at learn time.
     if (mapSub0 && res == billboardTarget()) {
         s->bbResource = res;
         s->bbData = mapped->pData;
@@ -3440,9 +3376,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         // Unmap the memory is no longer ours to look at.
         guardedBudget(g_cameraBudget, [&] {
             glitchFrameObserve(s->camData, s->camBytes, s->camResource);
-            // The projection hunt reads the same bytes on its own clock;
-            // one tee, no second map.
-            fovProbeObserve(s->camData, s->camBytes);
             // The world shader's desk-side offset hunt: one whole-buffer
             // dump of the big scene block per session.
             sunglareSceneDump(s->camData, s->camBytes);
@@ -3456,16 +3389,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->camResource = nullptr;
         s->camData = nullptr;
         s->camBytes = 0;
-    }
-    if (res == s->peekResource && s->peekData) {
-        // Same rule again, same budget as the camera read: both are reads of
-        // a buffer the game just wrote, and a fault in one means neither can
-        // be trusted this session.
-        guardedBudget(g_cameraBudget,
-                      [&] { cbPeekCapture(s->peekData, s->peekBytes); });
-        s->peekResource = nullptr;
-        s->peekData = nullptr;
-        s->peekBytes = 0;
     }
     if (res == s->sceneCbResource && s->sceneCbData) {
         guardedBudget(g_cameraBudget, [&] {
@@ -3752,8 +3675,6 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
     case DrawVerdict::kPanelUpscale: panelUpscaleBegin(self); break;
     case DrawVerdict::kHudGrain:     hudGrainBegin(self); break;
     case DrawVerdict::kScrim:        scrimBegin(self); break;
-    case DrawVerdict::kWitchstar:    witchstarBegin(self); break;
-    case DrawVerdict::kBillboard:    billboardBegin(self); break;
     case DrawVerdict::kGlareSteady:  sunglareBegin(self); break;
     case DrawVerdict::kParticle:     particleBegin(self); break;
     case DrawVerdict::kBackdrop:     backdropBegin(self); break;
@@ -3765,8 +3686,6 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
     switch (v) {
     case DrawVerdict::kParticle:     particleEnd(self); break;
     case DrawVerdict::kGlareSteady:  sunglareEnd(self); break;
-    case DrawVerdict::kBillboard:    billboardEnd(self); break;
-    case DrawVerdict::kWitchstar:    witchstarEnd(self); break;
     case DrawVerdict::kScrim:        scrimEnd(self); break;
     case DrawVerdict::kHudGrain:     hudGrainEnd(self); break;
     case DrawVerdict::kPanelUpscale: panelUpscaleEnd(self); break;
@@ -4515,9 +4434,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (v == DrawVerdict::kGlareSteady) sunglareDrawArgs(instances, startInstance);
     // The glare clamp only ever applies in this thunk -- the train is
     // DrawInstanced -- so it lives here rather than in the shared tail,
-    // where three other thunks could never receive it. glareClamp rather
-    // than the verdict, because clamp composes with the steady
-    // substitution, whose draws arrive under kBillboard.
+    // where three other thunks could never receive it.
     const UINT drawn = g_state->glareClamp && g_state->glareClamp < instances
                            ? g_state->glareClamp
                            : instances;
@@ -5257,17 +5174,12 @@ void vScreenRefreshConfig() {
                   : "fss eye heal: off.");
         }
     }
-    witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
-    fovProbeConfigure(cfg);
-    cbPeekConfigure(cfg);
-    panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     lodGovernorConfigure(cfg);
-    billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -5578,7 +5490,6 @@ void vScreenFrameBoundary() {
         }
     }
     remlokFrameBoundary();
-    witchstarFrameBoundary();
 
     // The per-frame invalidation lives in binding_shadow now, and device_hook
     // calls it once for both fixes. Doing it here as well would be harmless but
@@ -5849,7 +5760,7 @@ void vScreenFrameBoundary() {
                 "put %u draws into it while the submitted size peaked at %u for the "
                 "whole session. It now counts as an eye texture as well, which is what "
                 "feeds the black void, Explorer Cam, the transition flash detector, the "
-                "RemLok lines, the loading hologram and the witchspace star -- all of "
+                "RemLok lines and the loading hologram -- all of "
                 "them inert until this line. If something now lands on the wrong pass, "
                 "set advanced.eye_render_size = off under [advanced] in edvr.ini and "
                 "report this log.",
@@ -5865,7 +5776,7 @@ void vScreenFrameBoundary() {
             // wanted from this count, so they get it.
             //
             // It does NOT make the target an eye texture. The black void, the
-            // RemLok lines, the loading hologram and the witchspace star
+            // RemLok lines and the loading hologram
             // WRITE to what they match, and a target that only dominance
             // vouches for could be a shadow atlas on a frame with a light-
             // heavy pass. Guessing wrong there is visible in a headset;
@@ -5896,7 +5807,7 @@ void vScreenFrameBoundary() {
                 "transition flash detector and the camera scan actually ask about, and "
                 "all three work again. It is NOT treated as an eye texture: the fixes "
                 "that draw into one -- the black void, the RemLok lines, the loading "
-                "hologram, the witchspace star -- need the real thing and stay off "
+                "hologram -- need the real thing and stay off "
                 "rather than write to a target only its draw count vouches for. A "
                 "layout that reaches this line is one EDVR should learn to name, so "
                 "this log is worth reporting.",
@@ -6436,17 +6347,12 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                   : "fss eye heal: off.");
         }
     }
-    witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
-    fovProbeConfigure(cfg);
-    cbPeekConfigure(cfg);
-    panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     lodGovernorConfigure(cfg);
-    billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
@@ -6750,7 +6656,6 @@ void shutdownVScreenFixes() {
                     g_state->eyeDrawsMax);
 
     g_state->distanceEnabled = false;
-    panelQuadShutdown();
     panelCurveShutdown();
     particleShutdown();
     objectProbeShutdown();

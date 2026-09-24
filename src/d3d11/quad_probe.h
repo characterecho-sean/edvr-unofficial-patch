@@ -28,8 +28,9 @@
 // THE INSTRUMENT: GPU-copy at the matched draws, read back a few frames
 // later when the copies have certainly executed and mapping will not stall,
 // log, stand down for the session. Setting the spec again -- off and back on
-// -- asks for another capture without a relaunch. panel_quad.h established
-// the copy-settle-map shape for a simpler case.
+// -- asks for another capture without a relaunch. The panel quad capture
+// (retired 2026-09-23) established the copy-settle-map shape for a simpler
+// case.
 //
 // Off by default, and free when off: nothing is created, nothing is copied,
 // and the draw path does not call in.
