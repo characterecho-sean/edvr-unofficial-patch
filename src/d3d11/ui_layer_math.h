@@ -46,21 +46,41 @@ namespace edvr {
 
 // ---------------------------------------------------------------- the key --
 
-// "off" | "1.0" | "1.25" -> 0 (off) | 1.0 | 1.25. Exact text, the way
-// fix.settlement_detail reads its choices: "1.00" is not "1.0". Anything
-// else is off, and *recognized says so for the log. One reader for both
-// halves (uiLayerConfigure hands the target to ui_panel_scale).
-inline float uiQualityParse(const char* text, bool* recognized) {
+// "off" | "100" | "125" -> 0 (off) | 1.0 | 1.25: the target HMD Quality, as
+// a percentage of HMD Quality 1.0 in the file (a plain number, like every
+// numeric key) and "100%" / "125%" in the F8 menu. Exact text, the way
+// fix.settlement_detail reads its choices: "100.0" is not "100". The first
+// spellings -- "1.0", "1" and "1.25" -- are read for one release as 100 and
+// 125, with *alias set to the new spelling for the log's one-time note.
+// Anything else is off, and *recognized says so for the log. One reader for
+// both halves (uiLayerConfigure hands the target to ui_panel_scale).
+inline float uiQualityParse(const char* text, bool* recognized, const char** alias = nullptr) {
     if (recognized) *recognized = true;
+    if (alias) *alias = nullptr;
     if (!text) {
         if (recognized) *recognized = false;
         return 0.0f;
     }
     if (std::strcmp(text, "off") == 0) return 0.0f;
-    if (std::strcmp(text, "1.0") == 0) return 1.0f;
-    if (std::strcmp(text, "1.25") == 0) return 1.25f;
+    if (std::strcmp(text, "100") == 0) return 1.0f;
+    if (std::strcmp(text, "125") == 0) return 1.25f;
+    if (std::strcmp(text, "1.0") == 0 || std::strcmp(text, "1") == 0) {
+        if (alias) *alias = "100";
+        return 1.0f;
+    }
+    if (std::strcmp(text, "1.25") == 0) {
+        if (alias) *alias = "125";
+        return 1.25f;
+    }
     if (recognized) *recognized = false;
     return 0.0f;
+}
+
+// The target as the menu and the log say it: "100%", "125%", else "off".
+inline const char* uiQualityLabel(float target) {
+    if (target == 1.0f) return "100%";
+    if (target == 1.25f) return "125%";
+    return "off";
 }
 
 // --------------------------------------------------------- size and memory --

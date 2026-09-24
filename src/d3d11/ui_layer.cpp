@@ -67,13 +67,14 @@ constexpr uint32_t kMaxAfterLines = 16;
 
 // ------------------------------------------------------------ configuration
 
-float g_target = 0.0f;     // 0 off, 1.0, 1.25
+float g_target = 0.0f;     // 0 off, 1.0 (the file's 100), 1.25 (125)
 bool g_temporal = false;   // a temporal mode is on (the layer's door exists)
 bool g_debugView = false;  // advanced.temporal_aa_debug = ui_layer
 bool g_jitterAsShipped = true;  // advanced.temporal_aa_jitter_sign/lag at their defaults
 bool g_stoodDown = false;
 std::string g_keyText = "?";
 bool g_keyNoted = false;
+bool g_aliasNoted = false;  // the old spelling's note, once a session
 
 void refreshLive() {
     detail::g_uiLayerLive = g_target > 0.0f && g_temporal && g_jitterAsShipped && !g_stoodDown;
@@ -1909,7 +1910,14 @@ void logTotals(double seconds) {
 void uiLayerConfigure(Config& cfg) {
     const std::string text = cfg.getString("fix.ui_quality", "off");
     bool recognized = true;
-    const float target = uiQualityParse(text.c_str(), &recognized);
+    const char* newSpelling = nullptr;
+    const float target = uiQualityParse(text.c_str(), &recognized, &newSpelling);
+    if (newSpelling && !g_aliasNoted) {
+        g_aliasNoted = true;
+        Log::get().note("ui quality: fix.ui_quality = %s is the first spelling, read as %s (%s); write "
+                        "ui_quality = %s -- the old one is read for this release only.",
+                        text.c_str(), newSpelling, uiQualityLabel(target), newSpelling);
+    }
     const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
     const bool debugView = _stricmp(cfg.getString("advanced.temporal_aa_debug", "off").c_str(),
                                     "ui_layer") == 0;
@@ -1938,7 +1946,7 @@ void uiLayerConfigure(Config& cfg) {
     if (!changed) return;
     g_keyNoted = true;
     if (!recognized) {
-        Log::get().note("ui quality: fix.ui_quality = '%s' is not off, 1.0 or 1.25 -- off.",
+        Log::get().note("ui quality: fix.ui_quality = '%s' is not off, 100 or 125 -- off.",
                         text.c_str());
         return;
     }
@@ -1953,8 +1961,8 @@ void uiLayerConfigure(Config& cfg) {
     if (hmdKnown) std::snprintf(hmdText, sizeof(hmdText), "%.2f", static_cast<double>(hmd));
     Log::get().note(
         "ui quality: %s (HMD Quality %s) -- panels: the game's own panel formula makes every "
-        "render-to-texture panel at its untrimmed size at HMD Quality %s; layer: %s",
-        text.c_str(), hmdText, text.c_str(),
+        "render-to-texture panel at its untrimmed size at HMD Quality %.2f; layer: %s",
+        uiQualityLabel(target), hmdText, static_cast<double>(target),
         !temporal ? "waits -- fix.temporal_aa is off, and the layer is composited at that "
                     "pass's door."
         : !jitterAsShipped
@@ -2314,7 +2322,7 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source) {
                 Log::get().note(
                     "ui quality: layer: the %s eye's door hands on %ux%u; its layer is %ux%u at %s "
                     "(%.1f MB).",
-                    eye == 0 ? "left" : "right", d.Width, d.Height, s.w, s.h, g_keyText.c_str(),
+                    eye == 0 ? "left" : "right", d.Width, d.Height, s.w, s.h, uiQualityLabel(g_target),
                     uiLayerMB(uiLayerBytes(s.w, s.h)));
             }
             e.door.fullW = d.Width;

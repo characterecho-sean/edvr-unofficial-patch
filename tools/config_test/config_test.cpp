@@ -168,9 +168,11 @@ int main(int argc, char** argv) {
     expectStr("advanced.settlement_detail_observe", "<unset>",
               "...and so does its observe-only switch");
     // ui_quality (docs/ui-layer-2026-09-23.md) is one key for both halves:
-    // the cockpit's interface surfaces made at the target's size, and the
-    // game's post-tonemap UI drawn into a per-eye layer after the upscale.
-    // Ships live in [fix], default off (the interface is drawn as today).
+    // the interface panels made at the target's size, and the game's
+    // post-tonemap UI drawn into a per-eye layer after the upscale. Values
+    // off | 100 | 125 (percent of HMD Quality 1.0; ui_layer_math.h parses
+    // them, and the first spellings 1.0 / 1.25, for one release). Ships live
+    // in [fix], default off (the interface is drawn as today).
     // fix.hud_quality, the surfaces' own key for one day, is gone: absorbed.
     expectStr("fix.ui_quality", "off",
               "ui quality ships live in [fix] and defaults off");
