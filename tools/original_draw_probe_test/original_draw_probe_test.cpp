@@ -8,7 +8,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -659,40 +658,7 @@ void timingDomainLossCase(Device& d, Scene& scene) {
           "shared timing domain cleanly rebinds after loss");
 }
 
-size_t occurrences(const std::string& text, const char* needle) {
-    size_t count = 0, at = 0;
-    while ((at = text.find(needle, at)) != std::string::npos) { ++count; at += std::strlen(needle); }
-    return count;
-}
-
-void sourceContract() {
-    std::ifstream file("src/d3d11/vscreen.cpp", std::ios::binary);
-    check(bool(file), "open vscreen source contract");
-    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    check(occurrences(text, "originalDrawNativeBegin(") == 8,
-          "one helper declaration plus seven native Begin call sites");
-    check(occurrences(text, "originalDrawNativeEnd(") == 8,
-          "one helper declaration plus seven native End call sites");
-    check(text.find("originalDrawProbeInternalQuery()") != std::string::npos,
-          "hook guard excludes only probe-owned shared timer traffic");
-    check(text.find("originalDrawNativeBegin(self, separate);\n"
-                    "        g_state->realDrawIndexedInstanced") != std::string::npos,
-          "indexed-instanced original draw remains immediately after probe Begin");
-    check(text.find("baseVertex, startInstance);\n"
-                    "        originalDrawNativeEnd(self, sample);\n"
-                    "        // The weapon's temporal-AA motion vectors") != std::string::npos,
-          "indexed-instanced probe End remains adjacent to the original draw");
-    check(text.find("!originalDrawProbeSelect(self, &input)") != std::string::npos,
-          "selected-only resource capture remains gated by cheap metadata Select");
-    check(text.find("constexpr bool kControlledBaselineOriginalDrawDiagnostics = false;") != std::string::npos &&
-          text.find("if constexpr (!kControlledBaselineOriginalDrawDiagnostics) return {};") != std::string::npos,
-          "controlled baseline exits before original-draw metadata and query bookkeeping");
-    check(text.find("Original draw diagnostic: controlled baseline OFF; coarse application GPU timing %s.") != std::string::npos,
-          "controlled baseline has an explicit probe-off/coarse-timer startup marker");
-}
-
 void run() {
-    sourceContract();
     Device d;
     check(gpuTimingBind(d.device.Get(), d.context.Get(), timingOps()),
           "bind shared GPU timer owner");

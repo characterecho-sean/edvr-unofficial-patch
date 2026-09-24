@@ -7,6 +7,12 @@
 Restates the journal below; not new evidence. Update it whenever this doc
 changes.*
 
+- **2026-09-23:** frame_flag is v34. The channels only the deleted legacy
+  openvr half ever wrote left the shared layout (FSS mono frames, the body
+  stamp, the servo's redo, the gaze, the compositor's frame timing, EDVR's
+  activity words), and each half now signs a version-independent roll-call:
+  a d3d11.dll and runtime from different builds refuse the channel, and
+  both logs name both versions (frame_flag.h, "The layout version").
 - **State:** Reviewed against source 2026-09-11 (then: transport and GPU
   instrument not implemented; inventory below already historical). By
   2026-09-14 (latest): Luna agents implement under parent review, a native

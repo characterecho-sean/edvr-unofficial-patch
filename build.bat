@@ -436,7 +436,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
-    "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\original_draw_probe.cpp" ^
+    "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\transition_flash_prevent.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
@@ -461,7 +461,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_theater.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
-    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
+    "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
     "src\d3d11\shader_sig.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
@@ -470,7 +470,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\wake_pulse.cpp" ^
     "src\d3d11\hud_grain.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_separation.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
@@ -491,8 +490,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
-    "src\d3d11\witchstar_fix.cpp" "src\d3d11\fov_probe.cpp" ^
-    "src\d3d11\cb_peek.cpp" "src\d3d11\billboard_fix.cpp" ^
+    "src\d3d11\billboard_fix.cpp" ^
     "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
@@ -1053,25 +1051,6 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
 )
 exit /b 0
 
-:rig_hologram_motion
-echo [edvr] === hologram motion regression ===
-if not exist "%OBJ%\uicolourtest" mkdir "%OBJ%\uicolourtest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uicolourtest\\" /Fe"%OBJ%\uicolourtest\ui_colour_layer_test.exe" ^
-    "tools\ui_colour_layer_test\ui_colour_layer_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: UI colour layer test build failed & exit /b 1 )
-"%OBJ%\uicolourtest\ui_colour_layer_test.exe" || exit /b 1
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\uicolourtest\\" /Fe"%OBJ%\uicolourtest\controller_test.exe" ^
-    "tools\ui_colour_layer_test\controller_test.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: UI separation controller test build failed & exit /b 1 )
-"%OBJ%\uicolourtest\controller_test.exe" || exit /b 1
-exit /b 0
-
 :rig_native_motion_rigs
 echo [edvr] === native motion, fusion and night-vision rigs ===
 
@@ -1201,9 +1180,9 @@ exit /b 0
 :rig_object_classification
 echo [edvr] === object classification provenance regression ===
 if not exist "%OBJ%\classification" mkdir "%OBJ%\classification"
-ml64.exe /nologo /c /Fo"%OBJ%\classification\source_owner_unwind.obj" ^
-    "tools\object_classification_test\source_owner_unwind.asm"
-if errorlevel 1 ( echo [edvr] ERROR: source owner unwind fixture build failed & exit /b 1 )
+ml64.exe /nologo /c /Fo"%OBJ%\classification\unwind_stubs.obj" ^
+    "tools\object_classification_test\unwind_stubs.asm"
+if errorlevel 1 ( echo [edvr] ERROR: unwind fixture build failed & exit /b 1 )
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_RECORD_WRITER_TEST ^
     /Fo"%OBJ%\classification\\" /Fe"%OBJ%\classification\object_classification_test.exe" ^
@@ -1213,13 +1192,12 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\common\code_hook.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" "src\common\guard.cpp" ^
-    "%OBJ%\classification\source_owner_unwind.obj" ^
+    "%OBJ%\classification\unwind_stubs.obj" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: object classification test build failed & exit /b 1 )
 "%OBJ%\classification\object_classification_test.exe" "%OBJ%\classification" || exit /b 1
 python "tools\object_classification.py" --self-test || exit /b 1
-python "tools\object_classification.py" "%OBJ%\classification\classification_fixture.json" --verify-fixture || exit /b 1
-python "tools\object_classification.py" "%OBJ%\classification\classification_source_fixture.json" --verify-source-fixture || exit /b 1
+python "tools\object_classification.py" "%OBJ%\classification\classification_fixture.json" || exit /b 1
 exit /b 0
 
 :rig_eye_draw_snapshot

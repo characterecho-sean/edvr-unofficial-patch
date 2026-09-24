@@ -44,10 +44,9 @@ void installExposureFix(ID3D11Device* device, HookMode mode);
 // report, truthfully and uselessly, that nothing ever happened.
 void** exposureFixContextTable(size_t* spanOut);
 
-// Retired instrument (no key read; always off) -- the damping workstream's measurement
-// instrument: log the exposure pass's output buffers once a second so a
-// head-pitch sweep can name the float the breathing lives in. Called on
-// the install path (by installExposureFix itself) and the reload path.
+// The exposure pass's live keys: the dispatch-skip probe, the dispatch
+// experiments and the damper. Called on the install path (by
+// installExposureFix itself) and the reload path.
 void exposureConfigure(Config& cfg);
 
 // Records shader pointer -> bytecode hash, so a bound shader can be identified
