@@ -769,6 +769,16 @@ void caseConsumerExtentClassifier() {
 // --- transition_flash_eye_base_core.h: CHANGE 5, the writer's own extent --
 
 void caseWriterExtentClassifier() {
+    // Hardcoded literals, independent of kWriterExtentRva/kWriterExtentSize
+    // themselves (verified against analysis\EliteDangerous64.exe's PE
+    // section table directly, not just the decompiler dump): the boundary
+    // checks below compare against the constants, so alone they cannot
+    // catch a wrong SIZE (a mutation to 0xEE instead of 0xEF passed every
+    // one of them during this cell's own break-it pass); this pins the
+    // entry and one-past-the-end RVAs independently.
+    check(tfeb::kWriterExtentRva == 0x2874B20u, "writerExtent: entry RVA is 0x2874B20");
+    check(tfeb::kWriterExtentRva + tfeb::kWriterExtentSize == 0x2874C0Fu,
+          "writerExtent: one past the end is 0x2874C0F (239 bytes)");
     check(!tfeb::rvaInsideWriterExtent(tfeb::kWriterExtentRva - 1),
           "writerExtent: one byte before the entry is outside");
     check(tfeb::rvaInsideWriterExtent(tfeb::kWriterExtentRva),
@@ -789,6 +799,12 @@ void caseWriterExtentClassifier() {
 
 void caseDr7ArmSlot1ExecuteLeavesSlot0Alone() {
     const uint32_t armed = tfeb::armSlot1ExecuteDr7(0);
+    // Hardcoded literal, independent of kDr7L1Bit itself -- the same
+    // property caseDr7ArmLeavesOtherSlotsAlone pins for slot 0's own
+    // 0x000F0001u, so a wrong bit position in the constant (not just a
+    // wrong mask) is caught here directly, not only via the mask-consistency
+    // checks below.
+    check(armed == 0x00000004u, "Dr7 slot1 arm: from a clear register, exactly bit 2 (L1) comes on");
     check((armed & tfeb::kDr7L1Bit) != 0, "Dr7 slot1 arm: L1 comes on");
     check(((armed >> 20) & 0x3u) == 0, "Dr7 slot1 arm: RW1 is 00b (execute)");
     check(((armed >> 22) & 0x3u) == 0, "Dr7 slot1 arm: LEN1 is 00b");
