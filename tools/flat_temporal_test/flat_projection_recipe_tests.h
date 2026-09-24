@@ -73,8 +73,112 @@ inline int flatProjectionRecipeTests() {
             flatProjectionDrawRecipes(pair[0],pair[1]).count==0,"inert Epic pair explicitly unchanged");
         expect(!flatProjectionDrawUnchanged(pair[0],pair[1]^1ull),"inert classification requires exact PS");
     }
-    expect(flatProjectionDrawRecipes(0x5EAFFCD01B97D0C4ull,0xDD371C57C9093BB8ull).count==0 &&
-        !flatProjectionDrawUnchanged(0x5EAFFCD01B97D0C4ull,0xDD371C57C9093BB8ull),"missing-bytecode pair remains unknown");
+    // Complete ce715126 unknown-pair census. The three exclusions below have
+    // no proven complete clip/PS contract in the captured creation blobs.
+    const ObservedPair latest[] = {
+        {0x84F6596FAF22CCFAull,0,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xDE545DC8EE4FBB87ull,0x03B17F89B31C4788ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x124D7F3F649138D4ull,0x8085AE8DD1906CDCull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x361CD4B7FF213A01ull,0xFA7411BF7E4C4088ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x3064D7F445192FDDull,0xCCDB2A91490F8755ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x9AEC596A2B036EA6ull,0x3789CA2062E196FBull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xEB787F983BC1F5A3ull,0x8591A46B10497299ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x8106B439CD518CFCull,0x3BC6B5B66B852BB5ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xAFBCD3ADB9092F78ull,0x2BAE3742FEB916D9ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xCFC9094F7EEE21E2ull,0xFD77C2EBFFAC7D9Cull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xCFC9094F7EEE21E2ull,0xAE3D10F3D40D688Cull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xCFC9094F7EEE21E2ull,0x4DBE9258D3C4D3DAull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x41E245D488BFE83Eull,0x6EF82262EB12A037ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xB12F7A618E1BDE98ull,0x42AC0CACC9CDF72Bull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x203DF51758AADC4Dull,0xEEAAC839A9F09448ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x5EAFFCD01B97D0C4ull,0xDD371C57C9093BB8ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x46546443FD3C3F88ull,0xAD050E528C0E8B17ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x95D01BA609BF7500ull,0x067CBE05E7EF7F32ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xE508648660A352B2ull,0x63ABD86359B57D01ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x381D80284FE236F8ull,0x72BBDA3D4CD3E39Bull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x71DD8B8B09060A81ull,0x2D037A047171BF3Bull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x939D01F28D1FEEA8ull,0xC5DF9CC943476289ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x5C1D8EF529324A22ull,0xC49F999F7D3C801Dull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x820E5C131B99361Dull,0x6EAA86EFE135B2D4ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xB75A6FF2CA9FA5D6ull,0xD56F859BE4781431ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x24214E7C45496BE0ull,0x0C8FCDB6A3BECCE6ull,2,FlatProjectionPatchLayout::ForwardColumns,8},
+        {0xA1B7CFCD0BE7493Eull,0x2DB678B6B558B604ull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+        {0xCE24A73943632F55ull,0x1F64463B15189104ull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+    };
+    expect(sizeof(latest)/sizeof(latest[0])==28,"latest supported ordinary pair census size");
+    FlatProjectionJitter jitter{};
+    expect(flatProjectionJitter(.375f,-.25f,1280,720,jitter),"recipe pixel offset constructed");
+    for (const auto& pair : latest) {
+        const auto recipe=flatProjectionDrawRecipes(pair.vs,pair.ps);
+        expect(recipe.count==1 && recipe.requests[0].stage==FlatProjectionStage::Vertex &&
+            recipe.requests[0].slot==pair.slot && recipe.requests[0].patchCount==1 &&
+            recipe.requests[0].patches[0].layout==pair.layout &&
+            recipe.requests[0].patches[0].byteOffset==pair.row*16,"latest exact pair patches measured clip span");
+        expect(flatProjectionDrawRecipes(pair.vs,pair.ps^1ull).count==0,"latest companion identity required");
+        // For the exact selected layout, a test point moves by the requested
+        // subpixel offset; depth and W stay identical. This tests the algebra
+        // that makes each recorded span a projection rather than just a hash.
+        if (pair.layout==FlatProjectionPatchLayout::ForwardColumns) {
+            float rows[4][4]={{1,0,0,0},{0,1,0,0},{0,0,1,0},{2,-3,4,1}};
+            expect(flatJitterForwardColumns(rows,jitter) &&
+                std::abs((rows[0][0]*.5f+rows[1][0]*-.25f+rows[2][0]+rows[3][0])-(2.5f+jitter.ndcX))<.00001f &&
+                std::abs((rows[0][1]*.5f+rows[1][1]*-.25f+rows[2][1]+rows[3][1])-(-3.25f+jitter.ndcY))<.00001f &&
+                rows[3][2]==4 && rows[3][3]==1,"column clip shift preserves depth and W");
+        } else {
+            float rows[4][4]={{1,0,0,2},{0,1,0,-3},{0,0,1,4},{0,0,0,1}};
+            expect(flatJitterForwardDp4(rows,jitter) &&
+                std::abs(rows[0][3]-(2+jitter.ndcX))<.00001f &&
+                std::abs(rows[1][3]-(-3+jitter.ndcY))<.00001f &&
+                rows[2][3]==4 && rows[3][3]==1,"dp4 clip shift preserves depth and W");
+        }
+    }
+    const auto oldCab=flatProjectionDrawRecipes(0x98397963AAEC45D3ull,0xCAB49794BB439D03ull);
+    expect(oldCab.count==1 && oldCab.requests[0].slot==1 && oldCab.requests[0].patchCount==1 &&
+        oldCab.requests[0].patches[0].layout==FlatProjectionPatchLayout::ForwardColumns &&
+        oldCab.requests[0].patches[0].byteOffset==270*16 &&
+        flatProjectionDrawRecipes(0x98397963AAEC45D3ull,0xCAB49794BB439D02ull).count==0,
+        "earlier pair admitted after exact Epic CAB pixel blob capture");
+    // B75's CB0[4,5,7] is used to project an anchor, then divided before
+    // building its occlusion sample centers and nonlinear billboard shape.
+    // Test that anchor/centers track jitter and the comparison W is intact;
+    // the resulting quad is not promised a uniform screen translation.
+    float anchor[4][4]={{2,0,0,0},{0,2,0,0},{0,0,1,0},{0,0,0,2}};
+    const float anchorX=4,anchorY=-2,anchorZ=3,anchorW=2;
+    expect(flatJitterForwardDp4(anchor,jitter),"billboard anchor matrix patched");
+    const float shiftedX=anchor[0][0]*2+anchor[0][3];
+    const float shiftedY=anchor[1][1]*-1+anchor[1][3];
+    const float shiftedZ=anchor[2][2]*3+anchor[2][3];
+    const float shiftedW=anchor[3][3];
+    expect(std::abs(shiftedX/shiftedW-anchorX/anchorW-jitter.ndcX)<.00001f &&
+        std::abs(shiftedY/shiftedW-anchorY/anchorW-jitter.ndcY)<.00001f &&
+        std::abs((.5f+.5f*shiftedX/shiftedW)-(.5f+.5f*anchorX/anchorW)-jitter.uvX)<.00001f &&
+        std::abs((.5f+.5f*shiftedY/shiftedW)-(.5f+.5f*anchorY/anchorW)+jitter.uvY)<.00001f &&
+        shiftedZ==anchorZ && shiftedW==anchorW,
+        "billboard divided anchor and depth sample centers follow jitter with Z/W intact");
+    const auto branching=flatProjectionDrawRecipes(0x1F17BF54DB6EE407ull,0xA75C1DB6562B8CA7ull);
+    expect(branching.count==1 && branching.requests[0].slot==1 && branching.requests[0].patchCount==2 &&
+        branching.requests[0].patches[0].byteOffset==41*16 &&
+        branching.requests[0].patches[1].byteOffset==45*16 &&
+        branching.requests[0].patches[1].layout==FlatProjectionPatchLayout::ForwardColumns &&
+        flatProjectionDrawRecipes(0x1F17BF54DB6EE407ull,0xA75C1DB6562B8CA6ull).count==0,
+        "both conditional clip branches patched together");
+    for (const auto& patch : branching.requests[0].patches) {
+        if (patch.byteOffset!=41*16 && patch.byteOffset!=45*16) continue;
+        float branchRows[4][4]={{1,0,0,0},{0,1,0,0},{0,0,1,0},{7,-2,3,1}};
+        expect(flatJitterForwardColumns(branchRows,jitter) &&
+            std::abs(branchRows[3][0]-(7+jitter.ndcX))<.00001f &&
+            std::abs(branchRows[3][1]-(-2+jitter.ndcY))<.00001f &&
+            branchRows[3][2]==3 && branchRows[3][3]==1,
+            "either conditional clip branch shifts xy and preserves zw");
+    }
+    const uint64_t unresolved[][2] = {
+        {0x436193B352A2897Eull,0x51EE1F922FD220B0ull}, // PS blob unavailable
+        {0xF512712C40D93C12ull,0xD0B9213C1F248335ull}, // PS blob unavailable
+        {0xCC2BA2E2A927CBD3ull,0x8A7FB2DB7A33279Eull}, // both blobs unavailable
+    };
+    for (const auto& pair : unresolved)
+        expect(flatProjectionDrawRecipes(pair[0],pair[1]).count==0 &&
+            !flatProjectionDrawUnchanged(pair[0],pair[1]),"unproven latest pair stays unknown");
     expect(flatProjectionDispatchRecipes(0x823CC578F5510B24ull,1920,1080).count==0,"offline-only lighting variant is not live-associated");
     const auto lighting=flatProjectionDispatchRecipes(0x5998146D464F5C0Eull,1920,1080);
     expect(lighting.count==1 && lighting.requests[0].stage==FlatProjectionStage::Compute &&

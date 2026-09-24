@@ -86,6 +86,63 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x9611A454527F7FEBull: if (ps == 0x1E1C49DC51C0E509ull) result.add(S::Vertex,2,L::ForwardColumns,7); break;
     default: break;
     }
+    // Epic ce715126, 2026-09-24: exact companions in the scene draw audit.
+    // These offsets follow the instructions that write SV_Position, not other
+    // view-space varyings. A PS screen/depth lookup alone is not an inverse
+    // projection: none of these PS blobs consumes a patchable inverse matrix.
+    if (result.count == 0) switch (vs) {
+    // CB1 rows 270..273 are scalar-weighted clip columns, including the
+    // depth-only draw with no PS. Local/object transforms before these rows
+    // do not require equality with the scene camera.
+    case 0x84F6596FAF22CCFAull: if (ps == 0) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xDE545DC8EE4FBB87ull: if (ps == 0x03B17F89B31C4788ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x361CD4B7FF213A01ull: if (ps == 0xFA7411BF7E4C4088ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x124D7F3F649138D4ull: if (ps == 0x8085AE8DD1906CDCull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x3064D7F445192FDDull: if (ps == 0xCCDB2A91490F8755ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x9AEC596A2B036EA6ull: if (ps == 0x3789CA2062E196FBull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xEB787F983BC1F5A3ull: if (ps == 0x8591A46B10497299ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x8106B439CD518CFCull: if (ps == 0x3BC6B5B66B852BB5ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xAFBCD3ADB9092F78ull: if (ps == 0x2BAE3742FEB916D9ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    // Earlier 0150638a pair: Epic F10 now includes the exact CAB... PS.
+    // Its CB1[277..279] terms rotate directions; SV_Position remains the
+    // VS CB1[270..273] column sum, with no PS inverse projection.
+    case 0x98397963AAEC45D3ull: if (ps == 0xCAB49794BB439D03ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    // This VS selects between CB1[41..44] and CB1[45..48] before o5
+    // (SV_Position); jitter both possible clip matrices atomically.
+    case 0x1F17BF54DB6EE407ull:
+        if (ps == 0xA75C1DB6562B8CA7ull) {
+            result.add(S::Vertex,1,L::ForwardColumns,41);
+            result.requests[0].patchCount = 2;
+            result.requests[0].patches[1] = {L::ForwardColumns,45*16,{}};
+        } break;
+    // Four DP4 clip rows; partial-z variants still use rows 4,5,7 for
+    // xyw, so the homogeneous xy += jitter*W identity is unchanged.
+    case 0xCFC9094F7EEE21E2ull:
+        if (ps == 0xFD77C2EBFFAC7D9Cull || ps == 0xAE3D10F3D40D688Cull ||
+            ps == 0x4DBE9258D3C4D3DAull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x41E245D488BFE83Eull: if (ps == 0x6EF82262EB12A037ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0xB12F7A618E1BDE98ull: if (ps == 0x42AC0CACC9CDF72Bull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x203DF51758AADC4Dull: if (ps == 0xEEAAC839A9F09448ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x5EAFFCD01B97D0C4ull: if (ps == 0xDD371C57C9093BB8ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x46546443FD3C3F88ull: if (ps == 0xAD050E528C0E8B17ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x95D01BA609BF7500ull: if (ps == 0x067CBE05E7EF7F32ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0xE508648660A352B2ull: if (ps == 0x63ABD86359B57D01ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x381D80284FE236F8ull: if (ps == 0x72BBDA3D4CD3E39Bull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x71DD8B8B09060A81ull: if (ps == 0x2D037A047171BF3Bull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x939D01F28D1FEEA8ull: if (ps == 0xC5DF9CC943476289ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x5C1D8EF529324A22ull: if (ps == 0xC49F999F7D3C801Dull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x820E5C131B99361Dull: if (ps == 0x6EAA86EFE135B2D4ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    // Billboard VS reads CB0 only at instructions 5-7 for anchor xyw.
+    // Its subsequent divide and depth occlusion samples must see the same
+    // jittered camera anchor; the final screen quad is intentionally nonlinear.
+    case 0xB75A6FF2CA9FA5D6ull: if (ps == 0xD56F859BE4781431ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    // The direct depthless effect emits o2 = sum(coord * CB2[8..10])
+    // + CB2[11], the same column convention at a different offset.
+    case 0x24214E7C45496BE0ull: if (ps == 0x0C8FCDB6A3BECCE6ull) result.add(S::Vertex,2,L::ForwardColumns,8); break;
+    case 0xA1B7CFCD0BE7493Eull: if (ps == 0x2DB678B6B558B604ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0xCE24A73943632F55ull: if (ps == 0x1F64463B15189104ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    default: break;
+    }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);
     return result;
 }

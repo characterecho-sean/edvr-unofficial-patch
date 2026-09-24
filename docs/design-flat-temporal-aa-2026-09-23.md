@@ -7,12 +7,13 @@
   Section 27's solar/smoke bindings establish the earlier star scene, and
   section 26 rejects scene-camera equality as a jitter precondition. Section 28
   implements experimental live jitter with scoped projection bindings and
-  warm-up/recovery policy. Flight `0150638a` reached neither resolve nor jitter
-  (section 29): flat's key allowlist suppressed the jitter setting, and HDR
-  selection rejected a depthless `CFA91824129ECBBC` / `DFCBA0EC70B03C9B` pass.
-  Eleven unknown scene shader pairs also appeared. Do not repeat a
-  qualification flight until the config wiring and this scene's refusal
-  evidence are addressed.
+  warm-up/recovery policy. Flight `ce715126` confirms the key fix and captures
+  the HDR copy's real image connection (section 30). It treated 809 frames, all
+  reset, with no applied jitter. Both input samples have prior writes naming
+  the HDR scene depth. The implementation now checks every such input write
+  before continuing HDR lineage and adds 29 of this flight's 32 unknown shader
+  pairs. Three pairs and the image-input PS need missing creation bytes; F10
+  now captures newly observed unknown pairs without a hand-maintained list.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -33,12 +34,11 @@
   knowledge and shared motion/backend math without requiring local matrices to
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. The key fix passes its Config
-  regression; section 29 identifies the HDR copy and inventories all eleven
-  shader pairs. Next Epic capture: reproduce this refused scene, F10 once, stay
-  20-30 seconds. Check actual HDR copy input/output provenance and the two
-  missing shader blobs before changing scene admission. This is a diagnostic
-  capture, not visual qualification. No headset is needed; VR still needs
+  constants or camera-equality labels. Next Epic run: same scene, F10 once,
+  20-30 seconds; inspect HDR continuation accepted/refused counts, offending
+  input-write witness, and automatic unknown-pair shader captures together.
+  Missing recipes still reject jitter warm-up; do not claim visual
+  qualification from preparation counts. No headset is needed; VR still needs
   regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
@@ -1694,3 +1694,91 @@ The corrected capture and key fix pass the full build and all gates in
 log line is 775 characters, below the logger's 1166-character limit. The next
 Epic run is for this exact image connection and missing bytecode, not a claim
 that temporal AA now resolves this scene.
+
+## 30. Proven HDR image connection and expanded coverage, 2026-09-24
+
+Epic `edvr_gfx_20260924_174156.log` matches `ce715126`, version
+`v0.17.0-564-gce715126`, build `6AB5ADB3`, linked 23:09:39 UTC. The key fix
+works: `enabled=1 wanted=1`. The renderer accepted 809 frames, each a reset,
+with zero continued histories and zero backend failures. Applied jitter
+frames/draws/dispatches stayed zero. The last runtime sample reports 18,398
+refusals and 2,406,699 jitter refusals. The first detailed jitter refusals
+identify unknown projection recipes and one preparation refusal; the later HDR
+selector still rejected the depthless image copy.
+
+The targeted probe completed both samples, frames 53307 and 53397, with no
+shader mismatch or missing source/destination record. Actual shaders are
+`CFA91824129ECBBC` / `DFCBA0EC70B03C9B`. RT0 is the main HDR resource
+`0000021C31CA4BA0`, RT1 is `0000021C31CA14A0`, with no DSV. Actual t0 is
+`0000021F23884520`: 1920x1080 resource format 9, view format 10, Texture2D, mip
+0/count 1, single sample and array element. The actual viewport is full
+1920x1080 with depth range 0..1; HDR resource format is 26.
+
+In each sample the input has two earlier writes. The first uses
+`CFA91824129ECBBC` / `FCFAD73924BF45B9`, current camera provenance, and the
+same depth `0000021C31CA3B20` / DSV `0000021C31303DE0` as the prior HDR writes.
+The destination has 20 previous writes beginning with the known deferred
+resolve and no conflict. Input write sequences are 1307/1309 and 1214/1216; the
+HDR copy immediately follows destination sequences 1338 and
+1245. This establishes the sampled connection, but the old aggregate does
+not prove the second input write's depth/camera/viewport. Format-9 `hdr-bad=0`
+previously said nothing about consistency: checks covered only format 26.
+
+The model now tracks consistency on every format-9 input write. The exact image
+copy may continue a previously valid HDR target only when all input writes have
+current, matching camera bytes/provenance, depth/DSV/format and full viewport,
+with no explicit resource write or source/destination alias. The D3D11 bridge
+verifies actual shaders, RT0, absent DSV, t0 view/texture, formats, extent,
+sample/array counts and viewport. A successful continuation advances the HDR
+write interval while retaining its established camera and depth; the image-copy
+shader does not consume its bound b1. A failure keeps the original refusal,
+with the offending input-write witness when available. This is shared scene
+provenance, not a claim about full overwrite blend state.
+
+Regression cases replay two input writes, the image copy, tone and final copy.
+They accept the matching connection and unused copy-camera differences, and
+reject second-write depth/camera/viewport changes, missing/stale input,
+explicit writes, unverified bindings, aliasing, wrong shaders and previously
+bad HDR. A prior HDR failure keeps its original witness even if the input is
+also bad.
+
+The 900-frame audit observed 115,823 unknown draws across 32 exact pairs, 89
+total outcomes and no outcome overflow. Exact-bytecode review adds 29 of those
+pairs (106,762 observations), plus the earlier `98397963AAEC45D3` /
+`CAB49794BB439D03` companion now available in Epic. The recipes use existing
+forward row/column layouts; `1F17BF54DB6EE407` patches both possible clip
+matrices in b1 rows 41-44 and 45-48 in one binding request. No reviewed PS
+requires an additional inverse-projection matrix patch.
+
+`B75A6FF2CA9FA5D6` / `D56F859BE4781431` is admitted by its projected anchor
+contract: the VS's only b0 reads compute anchor x/y/W from rows 4/5/7.
+Jittering these rows moves the divided anchor and depth-sample centers while
+preserving W and comparison distance. Its subsequent nonlinear size and
+visibility calculations are the response to the jittered projection; uniform
+final billboard translation is not the required contract. Focused tests check
+anchor/UV displacement and unchanged depth/W. Do not revive a camera-equality
+gate or label the billboard inert.
+
+Still missing are PS `51EE1F922FD220B0` (VS `436193B352A2897E`), PS
+`D0B9213C1F248335` (VS `F512712C40D93C12`), and both stages of
+`CC2BA2E2A927CBD3` / `8A7FB2DB7A33279E`. Image-input PS `FCFAD73924BF45B9` also
+lacks a saved blob; its projection/depth behavior remains unproved. Format-9
+scene intermediates now enter projection coverage checks, so unknown inputs
+refuse jitter warm-up instead of being silently ignored. During F10, each newly
+observed unknown pair requests exact cached creation bytes once, bounded to 64
+pairs per arm with explicit overflow and missing-cache reports. This also
+captures later input writers without guessing their hashes. No new GPU
+copy/readback is added.
+
+Ruled out: the fixed jitter setting is still being suppressed, because both
+enabled/wanted flags are one. Ruled out: a different depth lineage in the two
+sampled first input writes, because their actual resource/DSV matches the HDR
+reference. Do not infer coherence of unrecorded writes from those samples; the
+new per-write guard establishes it dynamically.
+
+Validation: the complete build and all gates pass in
+`build/flat-hdr-continuation.log`, including the new continuation and expanded
+recipe tests. Review corrected the prior-conflict fixture expectation and kept
+the original destination witness when input validation also fails. In-game
+continuation and nonzero jitter remain to be verified on the next Epic run;
+missing shader bytes are still an explicit qualification limit.

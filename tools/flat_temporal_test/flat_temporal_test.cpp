@@ -1,5 +1,6 @@
 #include <memory>
 #include <algorithm>
+#include <utility>
 #include "../../src/d3d11/flat_temporal_model.h"
 #include "../../src/d3d11/flat_mono_frame.h"
 #include "../../src/d3d11/flat_runtime_model.h"
@@ -825,6 +826,102 @@ void flatRuntimePrefixTests() {
     }
 }
 
+void flatRuntimeImageCopyTests() {
+    using namespace edvr;
+    enum Scenario { Valid, SourceDepth, SourceCamera, SourceViewport, MissingSource,
+                    SourceExplicitWrite, SourceStale, Unverified, WrongPair,
+                    Alias, PriorHdrBad, PriorAndSourceBad, CopyCameraUnused };
+    auto replay = [](Scenario scenario) {
+        MonoFixture fixture;
+        FlatContractRecord source[2]{}, imageCopy{};
+        for (uint32_t i = 0; i < 2; ++i)
+            fixture.fill(source[i], kFlatContractScreen, 0x2900, 9, 485 + i, 485 + i,
+                         1, 0x10203040ull, 0x50607080ull, 484 + i, 484 + i);
+        fixture.fill(imageCopy, kFlatContractScreen, 0x2600, 26, 494, 494, 1,
+                     0xCFA91824129ECBBCull, 0xDFCBA0EC70B03C9Bull, 0, 0, false);
+        imageCopy.key.depth = imageCopy.key.dsv = nullptr;
+        imageCopy.key.depthWidth = imageCopy.key.depthHeight = imageCopy.key.depthFormat = 0;
+        imageCopy.key.srvResource[0] = MonoFixture::token(0x2900);
+        imageCopy.key.srvView[0] = MonoFixture::token(0x2902);
+        if (scenario == SourceDepth || scenario == PriorAndSourceBad)
+            source[1].key.dsv = MonoFixture::token(0xDEAD);
+        if (scenario == SourceCamera) {
+            float changed[6][4]; std::memcpy(changed, fixture.rows, sizeof(changed));
+            changed[5][0] += 1;
+            MonoFixture::setCamera(source[1], changed);
+        }
+        if (scenario == SourceViewport) source[1].key.viewport[0] = 1;
+        if (scenario == WrongPair) ++imageCopy.key.ps;
+        if (scenario == Alias) imageCopy.key.srvResource[0] = imageCopy.key.color;
+        if (scenario == PriorHdrBad || scenario == PriorAndSourceBad)
+            fixture.world[20].key.viewport[0] = 1;
+        struct Event { const FlatContractRecord* r; uint32_t q; } events[200]{};
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < fixture.input.worldCount; ++i) {
+            const auto& r = fixture.world[i];
+            for (uint32_t n = 0; n < r.draws; ++n)
+                events[count++] = {&r, r.first + (r.last-r.first)*n/(r.draws>1?r.draws-1:1)};
+        }
+        if (scenario != MissingSource) for (const auto& r : source) events[count++] = {&r, r.first};
+        events[count++] = {&imageCopy, imageCopy.first};
+        events[count++] = {&fixture.handoff[0], fixture.handoff[0].first};
+        events[count++] = {&fixture.handoff[1], fixture.handoff[1].first};
+        std::sort(events, events + count, [](const Event& a, const Event& b) { return a.q < b.q; });
+        auto prefix = std::make_unique<FlatRuntimePrefix>();
+        prefix->frame = fixture.input.frame; prefix->output = fixture.input.output;
+        prefix->width = 1280; prefix->height = 720; prefix->format = 28;
+        FlatMonoFrame selected{};
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& r = *events[i].r;
+            FlatRuntimeDraw d{}; d.key = r.key;
+            std::memcpy(d.camera, r.camera, sizeof(d.camera));
+            d.key.writeEpoch = prefix->frame; d.key.writeSeq = prefix->sequence + 1;
+            if (scenario == SourceStale && events[i].r == &source[1]) --d.key.writeEpoch;
+            if (scenario == CopyCameraUnused && events[i].r == &imageCopy) {
+                d.key.b1 = MonoFixture::token(0xBAAD);
+                d.key.camera = d.camera; d.key.cameraHash = 0xBAD;
+                d.key.writeEpoch = 0;
+            }
+            d.hdrCopyVerified = events[i].r == &imageCopy && scenario != Unverified;
+            d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
+            d.instances = r.firstInstances;
+            if (scenario == SourceExplicitWrite && events[i].r == &imageCopy)
+                flatRuntimeWritten(*prefix, MonoFixture::token(0x2900));
+            selected = flatRuntimeObserve(*prefix, d);
+        }
+        return std::make_pair(std::move(prefix), selected);
+    };
+    for (Scenario s : {Valid, CopyCameraUnused}) {
+        auto result = replay(s);
+        check(result.second.selected() && result.first->imageCopiesAccepted == 1 &&
+              result.first->imageCopiesRefused == 0 && result.second.hdr == MonoFixture::token(0x2600),
+              "verified image copy continues prior HDR lineage despite unused copy VS camera");
+    }
+    for (Scenario s : {SourceDepth, SourceCamera, SourceViewport, MissingSource,
+                       SourceExplicitWrite, SourceStale, Unverified, Alias}) {
+        auto result = replay(s);
+        check(!result.second.selected() && result.first->imageCopiesAccepted == 0 &&
+              result.first->imageCopiesRefused == 1 &&
+              result.first->selectedConflict.cause == FlatRuntimeConflict::ImageCopySource,
+              "image copy source or prior HDR inconsistency preserves refusal witness");
+    }
+    auto depth = replay(SourceDepth);
+    check(depth.first->selectedConflict.reference.dsv == MonoFixture::token(0xD001) &&
+          depth.first->selectedConflict.current.dsv == MonoFixture::token(0xDEAD),
+          "image copy witness names the conflicting second source write");
+    for (Scenario s : {PriorHdrBad, PriorAndSourceBad}) {
+        auto result = replay(s);
+        check(!result.second.selected() && result.first->imageCopiesRefused == 1 &&
+              result.first->selectedConflict.cause == FlatRuntimeConflict::Viewport &&
+              result.first->selectedConflict.current.viewport[0] == 1,
+              "earlier HDR viewport failure remains the first witness after refused image copy");
+    }
+    auto wrong = replay(WrongPair);
+    check(!wrong.second.selected() && wrong.first->imageCopiesAccepted == 0 &&
+          wrong.first->imageCopiesRefused == 0,
+          "unrecognized depthless HDR shader pair remains refused by ordinary HDR rules");
+}
+
 int main(int argc, char** argv) {
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) {
         std::puts("usage: flat_temporal_test --self-test");
@@ -849,6 +946,7 @@ int main(int argc, char** argv) {
     failures += flatLightingTests();
     failures += flatLivePhaseTests();
     flatRuntimePrefixTests();
+    flatRuntimeImageCopyTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;
