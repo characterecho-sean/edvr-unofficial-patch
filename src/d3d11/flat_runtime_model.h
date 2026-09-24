@@ -26,7 +26,7 @@ inline const char* flatRuntimeConflictName(FlatRuntimeConflict c) {
     case FlatRuntimeConflict::CameraProvenance: return "hdr-camera-provenance";
     case FlatRuntimeConflict::ExplicitWrite: return "explicit-resource-write";
     case FlatRuntimeConflict::SelectorLayout: return "selector-hdr-layout";
-    case FlatRuntimeConflict::SelectorCamera: return "selector-hdr-vs-tone-camera";
+    case FlatRuntimeConflict::SelectorCamera: return "selector-hdr-camera-conflict";
     case FlatRuntimeConflict::SelectorCameraProvenance: return "selector-hdr-camera-provenance";
     default: return "none";
     }
@@ -147,11 +147,11 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
                 if (t.resource != tone->tone.key.srvResource[1] || !t.writes.draws) continue;
                 auto& w = p.selectedConflict;
                 w.hdr = t.resource; w.sequence = t.hdrCamera ? t.tone.first : t.writes.first;
-                w.reference = flatRuntimeWitnessDraw(tone->tone);
+                w.reference = flatRuntimeWitnessDraw(t.writes);
                 w.current = flatRuntimeWitnessDraw(t.hdrCamera ? t.tone : t.writes);
                 w.cause = t.hdrCamera && !cameraCurrent(t.tone, p.frame)
                     ? FlatRuntimeConflict::SelectorCameraProvenance
-                    : t.hdrCamera && !sameCamera(t.tone, tone->tone)
+                    : t.hdrCamera && t.writes.key.camera && !sameCamera(t.tone, t.writes)
                     ? FlatRuntimeConflict::SelectorCamera : FlatRuntimeConflict::SelectorLayout;
                 break;
             }

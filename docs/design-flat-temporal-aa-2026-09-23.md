@@ -12,8 +12,11 @@
   passes all 84 build jobs and the 254-key config contract (section 14). Epic
   27217a7d runs DLSS at 0.75x SS, but intermittent HDR/camera refusals break
   history (section 15). Projection jitter remains disabled. The bounded refusal
-  witness and history counters pass all 84 jobs and the 254-key contract; their
-  Epic qualification is next.
+  witness and history counters pass all 84 jobs and the 254-key contract. Epic
+  e24b1201 isolates the recurring refusal to unused tone camera data (section
+  16); renderer rebuilds and texture identity churn are ruled out. The scene
+  camera authority correction passes all 84 jobs and the 254-key contract;
+  verify uninterrupted history in Epic next.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -30,11 +33,11 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** after building and verifying the bounded refusal witness,
-  Epic flat DLSS at 0.75x SS with zero jitter. Identify the first conflicting
-  HDR write/camera and measure uninterrupted history before enabling jitter; do
-  not repeat the completed grid inventory. Use `tools/edvr_log.py` with the
-  actual `--target`, `--expect-build HEAD` and
+- **Next flight:** after auditing and correcting camera authority, Epic flat
+  DLSS at 0.75x SS with zero jitter. Verify sustained scene admission and
+  uninterrupted history before enabling jitter; do not repeat the completed
+  grid inventory. Use `tools/edvr_log.py` with the actual `--target`,
+  `--expect-build HEAD` and
   `--grep "flat (runtime|temporal|discover|compute)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
@@ -798,3 +801,59 @@ identity causes repeated initialization; that remains a hypothesis, not a
 rendering fix. No GPU readback or changed acceptance rule is required for this
 instrument. Stale capture-only log messages are corrected to identify the
 passive observer and direct readers to the actual flat runtime counters.
+
+## 16. Scene camera versus unused handoff binding, 2026-09-24
+
+Epic `edvr_gfx_20260924_091127.log` matches clean `e24b1201`, build `6AB53251`.
+The final renderer sample reports 9,921 accepted evaluations: 359 resets and
+9,562 continuations, with a longest run of 73 continuations. Ruled out:
+repeated renderer/context reconstruction, because init=1, context-change=0,
+allocations=1 and full-reset=0. Ruled out: texture identity or extent churn as
+the reset source, because adapter depth/color/extent changes remain zero.
+Backend failures are zero; one camera-cut reset occurs near the end and does
+not explain the recurring refusal bursts.
+
+Four steady-flight witnesses (frames 62688, 63521, 64425 and 65329) identify
+`selector-hdr-vs-tone-camera`. The HDR writer is VS 68DDDEF04D9894AF / PS
+06332CA168B6DA63, sharing the selected 1920x1080 depth and full XY viewport
+with depth range zero. Tone VS F9CFC798F21E9AEA / PS FEE777E92850B390 has the
+same VS b1 buffer identity, but a later current-frame upload contains different
+rows 270-272, 274 and 275 (word mask 770BBB). This is actual different camera
+data, not float noise or an unused single-word mismatch. Refusal windows
+contain 60-72 such copies per five seconds, with 10-12 following history
+resets. The isolated missing-depth witness during earlier loading remains a
+legitimate refusal and is not covered by this fix.
+
+Exact bytecode proves the ownership error: tone VS has no constant-buffer
+declaration; tone PS declares only PS b2. The original copy VS 20F383BBAC05C031
+has no constant buffer and forwards position/UV; copy PS DED8796049C7BB4A has
+only t0/s0 and samples the source directly. In contrast, HDR VS
+68DDDEF04D9894AF instructions 77-80 consume VS b1[270..273]. The already saved
+copy/tone/HDR vertex bytecodes and copy pixel bytecode match their repository
+FNV64 identities. These are offline reads of existing shader captures; the game
+test remains Epic only.
+
+The collector correctly records which buffer is bound, but binding alone does
+not make its camera rows inputs to a shader. The selector must take its camera
+from current-frame HDR scene draws and require agreement with the supported
+engine-motion source. Tone/copy prove colour lineage, dimensions and ordering;
+their unused b1 binding must neither supply nor reject the scene camera. Keep
+strict refusal for genuine HDR/source camera conflicts, stale/missing scene
+provenance, depth changes, ambiguous sources and broken colour lineage. No
+floating-point tolerance or visual compensation is involved. Engine motion uses
+its owned current/previous scene CB copies taken during the source draws, so a
+later upload into the game's live b1 does not rewrite those snapshots.
+
+Jitter readiness review: the next implementation needs private,
+shader-qualified CB bindings, restored after each draw/dispatch, with engine
+snapshots taken before substitution. `flat_projection_math.h` covers the five
+measured forward and inverse layouts; active lighting also needs CS b0[10..12]
+ray correction under `flat_lighting_contract.h`. Extend the existing dispatch
+scopes in `exposure_fix.cpp`, not a second hook chain. Cache private buffers by
+observed write provenance; the runtime currently retains only 96 camera bytes,
+so full qualified CB contents need bounded shadows. Pass the same pixel phase
+to the backend while keeping reconstruction camera rows raw. Offline tests can
+verify substitution, restoration and signs. Rendered inverse/depth consistency,
+the R32 view-Z writer, mod ordering and a de-jittered current-frame fallback
+after a late backend failure still require qualification. Do not enable jitter
+merely because the camera-authority correction passes.

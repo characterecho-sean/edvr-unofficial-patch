@@ -183,12 +183,10 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
     if (!tk.srvView[1] || !tk.srvResource[1] || tk.srvResource[1] == tk.color ||
         tk.srvResource[1] == in.output) return refuse(FlatMonoReason::BrokenLineage);
     if (tone->last >= copy->first) return refuse(FlatMonoReason::WrongOrder);
-    if (!cameraCurrent(*tone, in.epoch) || !cameraCurrent(*copy, in.epoch) || !sameCamera(*tone, *copy))
-        return refuse(FlatMonoReason::MissingCamera);
-    float camera[6][4];
-    if (!cameraShape(tone->camera, camera)) return refuse(FlatMonoReason::InvalidCamera);
-
+    // Tone and copy are texture operations. Their bound VS b1 can have been
+    // reused by unrelated work; the current scene camera belongs to HDR.
     const FlatContractRecord* hdr = nullptr;
+    const FlatContractRecord* hdrCamera = nullptr;
     uint32_t hdrFirst = 0, hdrLast = 0, hdrCameraDraws = 0;
     for (uint32_t i = 0; i < count; ++i) {
         const auto& r = record(in, i);
@@ -202,8 +200,9 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
         if (hdr && (k.depth != hdr->key.depth || k.dsv != hdr->key.dsv ||
                     k.depthFormat != hdr->key.depthFormat)) return refuse(FlatMonoReason::ConflictingHdr);
         if (k.camera) {
-            if (!cameraCurrent(r, in.epoch) || !sameCamera(r, *tone))
+            if (!cameraCurrent(r, in.epoch) || (hdrCamera && !sameCamera(r, *hdrCamera)))
                 return refuse(FlatMonoReason::ConflictingHdr);
+            if (!hdrCamera || r.first < hdrCamera->first) hdrCamera = &r;
             hdrCameraDraws += r.draws;
         }
         if (!hdrFirst || r.first < hdrFirst) hdrFirst = r.first;
@@ -212,6 +211,8 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
     }
     if (!hdr) return refuse(FlatMonoReason::NoHdr);
     if (!hdrCameraDraws) return refuse(FlatMonoReason::NoHdrCamera);
+    float camera[6][4];
+    if (!cameraShape(hdrCamera->camera, camera)) return refuse(FlatMonoReason::InvalidCamera);
 
     uint32_t sourceFirst = 0, sourceLast = 0;
     for (uint32_t i = 0; i < count; ++i) {
@@ -225,7 +226,7 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
             return refuse(FlatMonoReason::AmbiguousSource);
         if (!cameraCurrent(r, in.epoch) || !fullViewport(k, tk.width, tk.height))
             return refuse(FlatMonoReason::InvalidSource);
-        if (!sameCamera(r, *tone)) return refuse(FlatMonoReason::AmbiguousSource);
+        if (!sameCamera(r, *hdrCamera)) return refuse(FlatMonoReason::AmbiguousSource);
         if (r.last >= tone->first || r.first > hdrLast) return refuse(FlatMonoReason::WrongOrder);
         out.supportedDraws += r.draws;
         if (!sourceFirst || r.first < sourceFirst) sourceFirst = r.first;
@@ -240,7 +241,7 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
         const auto& k = r.key;
         if (k.kind == kFlatContractPool && k.width == tk.width && k.height == tk.height &&
             k.depth && k.depth != hdr->key.depth && in.supportedPair(k.vs, k.ps) &&
-            cameraCurrent(r, in.epoch) && sameCamera(r, *tone))
+            cameraCurrent(r, in.epoch) && sameCamera(r, *hdrCamera))
             return refuse(FlatMonoReason::AmbiguousSource);
         // Another write into the tone target between tone and copy breaks
         // this handoff, including a coalesced record spanning the interval.
@@ -251,11 +252,11 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
     }
     out.color = tk.color; out.hdr = tk.srvResource[1];
     out.depth = hdr->key.depth; out.dsv = hdr->key.dsv; out.depthFormat = hdr->key.depthFormat;
-    out.sceneConstants = tk.b1; out.output = in.output;
+    out.sceneConstants = hdrCamera->key.b1; out.output = in.output;
     out.renderWidth = tk.width; out.renderHeight = tk.height;
     out.outputWidth = in.outputWidth; out.outputHeight = in.outputHeight;
     std::memcpy(out.camera, camera, sizeof(camera));
-    out.nearPlane = camera[3][2]; out.cameraHash = tk.cameraHash;
+    out.nearPlane = camera[3][2]; out.cameraHash = hdrCamera->key.cameraHash;
     out.sourceFirst = sourceFirst; out.sourceLast = sourceLast;
     out.hdrFirst = hdrFirst; out.hdrLast = hdrLast;
     out.toneSequence = tone->first; out.copySequence = copy->first;

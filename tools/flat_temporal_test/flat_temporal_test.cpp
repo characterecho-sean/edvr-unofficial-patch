@@ -437,6 +437,31 @@ struct MonoFixture {
         r.key.camera = r.camera;
         r.key.cameraHash = edvr::flatCameraHash(r.camera);
     }
+    void applyEpic63521CameraWords() {
+        // The log captured these 15 differing raw words at frame 63521:
+        // tone's unused VS b1 on the left, current HDR camera on the right.
+        // Unreported words retain the valid shape from the older fixture;
+        // these are a partial witness, not the full captured camera hashes.
+        struct Difference { uint8_t row, column; uint32_t tone, hdr; };
+        const Difference differences[] = {
+            {0,0,0xBF7D7BF9,0xBDB4CA1D}, {0,1,0xBDE8121A,0xBE5E301D},
+            {0,3,0xBDA7D984,0x3F7D7BFA}, {1,0,0xBDC84103,0xBE3F6EF5},
+            {1,1,0x3F7ADE67,0x3FF02F7C}, {1,3,0xBE31BB57,0x3DC84104},
+            {2,0,0x3DCCC3D1,0xBF874DE2}, {2,1,0xBE27C76E,0xBEA0A256},
+            {2,3,0xBF7B3D6D,0xBDCCC3D2}, {4,0,0xBDA7D984,0x3F7D7BFA},
+            {4,1,0xBE31BB57,0x3DC84104}, {4,2,0xBF7B3D6D,0xBDCCC3D2},
+            {5,0,0x41474D18,0x4148624A}, {5,1,0x40930C74,0x4096BEB6},
+            {5,2,0xBFED2CC0,0xBFF08358}
+        };
+        float toneRows[6][4]; std::memcpy(toneRows, rows, sizeof(rows));
+        for (const auto& d : differences) {
+            std::memcpy(&toneRows[d.row][d.column], &d.tone, sizeof(d.tone));
+            std::memcpy(&rows[d.row][d.column], &d.hdr, sizeof(d.hdr));
+        }
+        for (uint32_t i = 0; i < 7; ++i) setCamera(world[i], rows);
+        for (uint32_t i : {9u, 19u, 20u}) setCamera(world[i], rows);
+        setCamera(handoff[0], toneRows); setCamera(handoff[1], toneRows);
+    }
     void fill(edvr::FlatContractRecord& r, edvr::FlatContractKind kind,
               uintptr_t color, uint32_t fmt, uint32_t first, uint32_t last,
               uint32_t draws, uint64_t vs, uint64_t ps, uint32_t firstWrite,
@@ -554,7 +579,7 @@ void testMonoFrameSelection() {
               out.copySequence == (width == 960 ? 515u : 941u) &&
               out.firstLaterOutput == (width == 960 ? 520u : 946u),
               "observed tone/copy/later-panel ordering is preserved");
-        f.handoff[0].camera[0] ^= 0xFF;
+        f.world[19].camera[0] ^= 0xFF;
         check(std::memcmp(out.camera, f.rows, sizeof(out.camera)) == 0,
               "selected metadata owns camera rows independently of collector reuse");
     }
@@ -564,6 +589,37 @@ void testMonoFrameSelection() {
         const auto out = flatSelectMonoFrame(f.input);
         check(!out.selected() && out.reason == reason, message);
     };
+    auto acceptHandoffCamera = [](auto mutate, const char* message) {
+        MonoFixture f; mutate(f);
+        const auto out = flatSelectMonoFrame(f.input);
+        check(out.selected() && out.sceneConstants == f.world[19].key.b1 &&
+              out.cameraHash == f.world[19].key.cameraHash &&
+              std::memcmp(out.camera, f.world[19].camera, sizeof(out.camera)) == 0, message);
+    };
+    acceptHandoffCamera([](auto& f) {
+        f.handoff[0].firstWriteEpoch--; f.handoff[1].firstWriteEpoch--;
+    }, "stale tone and copy camera writes do not name the scene camera");
+    acceptHandoffCamera([](auto& f) {
+        f.handoff[0].key.camera = f.handoff[1].key.camera = nullptr;
+        f.handoff[0].key.b1 = f.handoff[1].key.b1 = nullptr;
+    }, "tone and copy need no VS camera binding");
+    acceptHandoffCamera([](auto& f) {
+        f.handoff[0].key.b1 = f.handoff[1].key.b1 = MonoFixture::token(0xBAAD);
+        f.handoff[0].camera[0] ^= 1; f.handoff[1].camera[1] ^= 1;
+    }, "rebound or mismatched fullscreen VS constants do not replace scene camera");
+    acceptHandoffCamera([](auto& f) {
+        float invalid[6][4]{}; invalid[0][0] = std::numeric_limits<float>::quiet_NaN();
+        MonoFixture::setCamera(f.handoff[0], invalid);
+        MonoFixture::setCamera(f.handoff[1], invalid);
+    }, "malformed fullscreen camera bytes are irrelevant to texture-only passes");
+    for (uint32_t width : {960u, 1280u}) {
+        MonoFixture f(width); f.applyEpic63521CameraWords();
+        const auto out = flatSelectMonoFrame(f.input);
+        check(out.selected() && out.renderWidth == width &&
+              out.cameraHash == f.world[19].key.cameraHash &&
+              std::memcmp(out.camera, f.rows, sizeof(out.camera)) == 0,
+              "Epic 63521 changed raw words preserve HDR camera authority at both extents");
+    }
     reject([](auto& f) { f.input.worldCount = f.input.handoffCount = 0; }, FlatMonoReason::NoOutputCopy,
         "empty capture reports no copy instead of a selected empty frame");
     reject([](auto& f) { f.handoff[1].key.srvResource[0] = MonoFixture::token(0xBAD); }, FlatMonoReason::NoTonePass,
@@ -590,8 +646,10 @@ void testMonoFrameSelection() {
         "HDR zero-depth viewport exception cannot qualify output copy");
     reject([](auto& f) { f.world[0].key.viewport[4] = .25f; }, FlatMonoReason::InvalidSource,
         "source depth viewport range must match measured contract");
-    reject([](auto& f) { f.handoff[0].firstWriteEpoch--; }, FlatMonoReason::MissingCamera,
-        "old-frame camera cannot name this handoff");
+    reject([](auto& f) { f.world[9].firstWriteEpoch--; }, FlatMonoReason::ConflictingHdr,
+        "old-frame HDR camera cannot name this scene");
+    reject([](auto& f) { f.world[19].firstWriteSeq = f.world[19].first + 1; }, FlatMonoReason::ConflictingHdr,
+        "later HDR camera write cannot supply an earlier draw");
     reject([](auto& f) { f.world[0].firstWriteSeq = f.world[0].first + 1; }, FlatMonoReason::InvalidSource,
         "later write cannot supply an earlier source draw");
     reject([](auto& f) { f.world[0].lastWriteSeq = f.world[0].last + 1; }, FlatMonoReason::InvalidSource,
@@ -632,7 +690,7 @@ void testMonoFrameSelection() {
             if (bad == 2) f.rows[0][2] = .001f;
             if (bad == 3) for (uint32_t i = 0; i < 3; ++i) f.rows[i][0] = 0;
             if (bad == 4) f.rows[4][0] += 1;
-            MonoFixture::setCamera(f.handoff[0], f.rows); MonoFixture::setCamera(f.handoff[1], f.rows);
+            for (uint32_t i : {9u, 19u, 20u}) MonoFixture::setCamera(f.world[i], f.rows);
         }, FlatMonoReason::InvalidCamera, "invalid camera near/finite/clip/basis/axis shape refuses selection");
     }
     reject([](auto& f) { f.world[21] = f.world[9]; f.input.worldCount = 22;
@@ -648,8 +706,9 @@ void testMonoFrameSelection() {
 void flatRuntimePrefixTests() {
     using namespace edvr;
     check(flatRuntimeDepthReadFormat(19) == 21 && flatRuntimeDepthReadFormat(39) == 41 && flatRuntimeDepthReadFormat(44) == 46 && !flatRuntimeDepthReadFormat(45), "captured format19 depth maps to depth-only float view; typed incompatible formats refuse");
-    for (uint32_t width : {960u, 1280u}) {
+    for (uint32_t width : {960u, 1280u}) for (bool epicWords : {false, true}) {
         MonoFixture fixture(width);
+        if (epicWords) fixture.applyEpic63521CameraWords();
         auto prefix = std::make_unique<FlatRuntimePrefix>();
         prefix->frame = fixture.input.frame; prefix->output = fixture.input.output;
         prefix->width = 1280; prefix->height = 720; prefix->format = 28;
@@ -674,7 +733,10 @@ void flatRuntimePrefixTests() {
             if (i + 1 == count) beforeCopy = std::make_unique<FlatRuntimePrefix>(*prefix);
             selected = flatRuntimeObserve(*prefix, d); copy = d;
         }
-        check(selected.selected() && selected.renderWidth == width, "online captured prefix admits actual native/scaled chain including missing HDR cameras and zero-depth viewport draws");
+        check(selected.selected() && selected.renderWidth == width &&
+              selected.cameraHash == fixture.world[19].key.cameraHash &&
+              std::memcmp(selected.camera, fixture.rows, sizeof(selected.camera)) == 0,
+              "online native/scaled replay selects current HDR camera including overwritten handoff words");
         check(!flatRuntimeObserve(*prefix, copy).selected(), "second output copy in same prefix is rejected");
         auto refusal = [&](auto change, const char* message) {
             auto p = std::make_unique<FlatRuntimePrefix>(*beforeCopy); auto d = copy;
@@ -682,8 +744,23 @@ void flatRuntimePrefixTests() {
         };
         refusal([](auto& p, auto&) { p.uncertain = true; }, "unknown/foreign/truncated work denies online resolve");
         refusal([](auto&, auto& d) { d.key.viewport[0] = 1; }, "actual copy viewport must cover full backbuffer");
-        refusal([](auto&, auto& d) { --d.key.writeEpoch; }, "previous-frame camera cannot name current copy");
-        refusal([](auto& p, auto& d) { d.key.writeSeq = p.sequence + 100; }, "camera write after draw is rejected");
+        auto inertCopy = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        auto staleCopy = copy; --staleCopy.key.writeEpoch;
+        staleCopy.key.writeSeq = inertCopy->sequence + 100;
+        staleCopy.key.b1 = MonoFixture::token(0xBAAD);
+        staleCopy.key.camera = nullptr;
+        check(flatRuntimeObserve(*inertCopy, staleCopy).selected(),
+              "stale, later or missing copy VS camera does not gate current HDR scene");
+        auto inertTone = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        for (uint32_t i = 0; i < inertTone->targetsUsed; ++i) {
+            auto& t = inertTone->targets[i];
+            if (t.resource != MonoFixture::token(0x2700)) continue;
+            t.tone.key.b1 = MonoFixture::token(0xBAAD);
+            t.tone.key.camera = nullptr;
+            t.tone.firstWriteEpoch = 0;
+        }
+        check(flatRuntimeObserve(*inertTone, copy).selected(),
+              "missing or rebound tone VS camera does not gate current HDR scene");
         refusal([](auto&, auto& d) { d.key.srvResource[0] = MonoFixture::token(0xDEAD); }, "output copy cannot use unrelated tone resource");
         refusal([](auto& p, auto&) { p.sourcesUsed = 0; }, "no supported current-frame source denies treatment");
         refusal([](auto& p, auto&) { auto r = p.sources[0]; r.key.depth = MonoFixture::token(0xBAD0); p.sources[p.sourcesUsed++] = r; }, "another same-camera scene depth is ambiguous");
@@ -714,18 +791,19 @@ void flatRuntimePrefixTests() {
               witness->selectedConflict.current.viewport[4] == .25f,
               "selected HDR witness preserves the first cause despite later mismatches");
 
-        auto selectorWitness = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
-        for (uint32_t i = 0; i < selectorWitness->targetsUsed; ++i) {
-            auto& t = selectorWitness->targets[i];
-            if (t.resource != MonoFixture::token(0x2600)) continue;
-            t.tone.camera[20] ^= 1;
-            t.tone.key.cameraHash = flatCameraHash(t.tone.camera);
-        }
-        conflicted = flatRuntimeObserve(*selectorWitness, copy);
+        auto cameraWitness = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        FlatRuntimeDraw changed{}; changed.key = fixture.world[19].key;
+        std::memcpy(changed.camera, fixture.world[19].camera, sizeof(changed.camera));
+        changed.camera[20] ^= 1; changed.key.cameraHash = flatCameraHash(changed.camera);
+        changed.key.writeEpoch = cameraWitness->frame;
+        changed.key.writeSeq = cameraWitness->sequence + 1;
+        flatRuntimeObserve(*cameraWitness, changed);
+        conflicted = flatRuntimeObserve(*cameraWitness, copy);
         check(conflicted.reason == FlatMonoReason::ConflictingHdr &&
-              selectorWitness->selectedConflict.cause == FlatRuntimeConflict::SelectorCamera &&
-              selectorWitness->selectedConflict.reference.b1 == fixture.handoff[0].key.b1,
-              "late selector camera conflict retains HDR and tone evidence");
+              cameraWitness->selectedConflict.cause == FlatRuntimeConflict::CameraChange &&
+              cameraWitness->selectedConflict.reference.b1 == fixture.world[19].key.b1 &&
+              cameraWitness->selectedConflict.current.b1 == changed.key.b1,
+              "changed HDR camera records HDR-to-HDR witness without naming tone");
 
         auto noisy = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
         auto* unrelated = flatRuntimeTarget(*noisy, MonoFixture::token(0xDEAD));
