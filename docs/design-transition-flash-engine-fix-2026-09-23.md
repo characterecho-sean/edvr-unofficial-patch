@@ -283,6 +283,27 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
   0x6BF929 / 0x594C3E / 0x2869073`.
 
+## Static rounds 4-5 (after 195435; leads, not proof)
+
+Dumps are in `analysis\decomp\flash\r4\` and `\r5\`. Ghidra holds phantom
+functions at earlier rounds' return addresses, so resolve true entries
+through `pdata_functions.csv`.
+
+- **The upload path.** The stack #0 frames `0x5015C4..` are the generic
+  `f3dxEffect::ConstantBuffer` commit. `0x4C82BE0` is the per-item submission
+  loop and `0x4C813A0` a dedup cache. It runs as a scheduled job. A stack
+  taken at Unmap names the commit, not the code that set the value.
+- **`gCameraPos`.** It and `gPreviousCameraPos` are resolved BY NAME, once
+  per effect instance, at `0x57B99E` (`FUN_1404fc6a0(effect,0,name,1)`,
+  handles cached in the effect object). The per-frame setter was NOT found.
+- **The positioner swap.** A per-frame Tick at `0x107C760` checks the
+  `+0x450` positioner against the `+0x2A0` cache. On a change it calls
+  `0x1090420`, which zeroes `+0x2A8/+0x2B0` and recomputes an offset block
+  only if `info[+0x61]`. The Tick re-seeds (`0x1093650`) only if
+  `info[+0x62]`. INFERENCE: a skipped re-seed on the swap frame. There is no
+  static tie to `gCameraPos`, and nothing yet shows this positioner is the
+  cockpit VR camera's.
+
 ## Ruled out
 
 Each was ruled out on 2026-09-23 from existing flight data and static
