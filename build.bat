@@ -1324,22 +1324,6 @@ if "%EDVR_RIG_STEP%"=="build" exit /b 0
 "%OBJ%\gputiming\gpu_timing_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_original_draw_probe_test
-REM Sparse original-draw diagnostics must preserve rendering, never Flush, and
-REM distinguish passed-sample, query-guard, invalid and bounded-timeout outcomes.
-if not exist "%OBJ%\originaldrawprobe" mkdir "%OBJ%\originaldrawprobe"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\originaldrawprobe\\" ^
-    /Fe"%OBJ%\originaldrawprobe\original_draw_probe_test.exe" ^
-    "tools\original_draw_probe_test\original_draw_probe_test.cpp" ^
-    "src\d3d11\original_draw_probe.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: original draw probe test build failed & exit /b 1 )
-"%OBJ%\originaldrawprobe\original_draw_probe_test.exe" --dry-run || exit /b 1
-"%OBJ%\originaldrawprobe\original_draw_probe_test.exe" --self-test || exit /b 1
-exit /b 0
-
 :rig_openvr_abi_test
 if not exist "%OBJ%\openvr_abi" mkdir "%OBJ%\openvr_abi"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^

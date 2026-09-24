@@ -64,6 +64,9 @@ context; every load-bearing claim cites its evidence.
   thread's critical path (x recall = 0.78 ms against ~1.5 ms). The
   caller thread's wall is draw submission (3.94 ms of it innermost in
   EDVR's own d3d11.dll); §8 re-scoped the arc to it (engine arc Status).
+- **2026-09-24:** `src/d3d11/original_draw_probe.cpp`, cited in §3, §7
+  and §9 as the in-tree per-draw occlusion-query truth, was deleted with
+  its rig; the citations stand as history.
 
 ## 1. Context and goal
 
