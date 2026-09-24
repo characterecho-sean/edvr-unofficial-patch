@@ -39,6 +39,9 @@ extern bool g_glitchFrameObserving;
 }  // namespace detail
 inline bool glitchFrameInstalled() { return detail::g_glitchFrameInstalled; }
 inline bool glitchFrameObserving() { return detail::g_glitchFrameObserving; }
+// The camera validation behind "transition flash fix ACTIVE" has passed: the
+// scene camera moved through its first rendered frames (flight, not the menu).
+bool glitchFrameCameraValidated();
 
 // Called from the Map/Unmap hooks. The detector picks out the buffers it cares
 // about by size, so passing it everything is intended.

@@ -1,13 +1,105 @@
 #include "openvr_compositor.h"
 #include "native_cpu_trace.h"
+#include "native_trace.h"
+#include "../common/frame_flag.h"
+#include "../common/game_call_probe.h"
 
+#include <windows.h>
 #include <cstring>
 #include <cmath>
+#include <mutex>
 
 namespace edvr::openxr {
 namespace {
 
 constexpr vr::EVRCompositorError kInvalid = vr::VRCompositorError_InvalidTexture;
+
+// --- advanced.eye_origin_readers, part A1 (docs/design-transition-flash-
+// engine-fix-2026-09-23.md): every WaitGetPoses/GetLastPoses call publishes
+// the CALLER's own render/game array pointers -- Elite's memory, not ours --
+// through frame_flag.h, so pose_reader_watch.cpp (d3d11.dll) can hardware-
+// watch the exact address Elite passed us. When the graphics half has asked
+// (frame_flag.h's poseReaderTraceRequested), this also captures this DLL's
+// own call stack: who is calling INTO the OpenVR API. Off, the cost is one
+// relaxed read of the request flag plus the handful of volatile writes
+// publishPoseReaderCall already does for every other WaitGetPoses/
+// GetLastPoses field.
+
+// A small FNV-1a-64 dedupe table for the captured stacks, capped at 16 and
+// logged once each -- eye_origin_trace.h's StackTable shape, kept as its
+// own copy here rather than shared: that header has no game or Windows
+// dependency by design, and this is a different process (openvr_api.dll,
+// not d3d11.dll) with its own log to write to.
+constexpr uint32_t kPoseReaderStackCap = 16;
+struct PoseReaderStackTable {
+    uint64_t hash[kPoseReaderStackCap]{};
+    char     chain[kPoseReaderStackCap][512]{};
+    uint32_t used = 0;
+};
+std::mutex g_poseReaderStackMutex;
+PoseReaderStackTable g_poseReaderStackTable;
+
+uint64_t fnv1a64OfChain(const char* s) noexcept {
+    uint64_t h = 1469598103934665603ull;
+    for (; *s; ++s) {
+        h ^= static_cast<unsigned char>(*s);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+void noteGameCallStack(bool wasGetLastPoses) noexcept {
+    const GameCallStack stack = captureGameCallStack();
+    if (stack.gameFrames == 0) return;
+    const uint64_t hash = fnv1a64OfChain(stack.rvas);
+    bool isNew = false;
+    {
+        std::lock_guard<std::mutex> lock(g_poseReaderStackMutex);
+        PoseReaderStackTable& t = g_poseReaderStackTable;
+        bool found = false;
+        for (uint32_t i = 0; i < t.used; ++i) {
+            if (t.hash[i] == hash && std::strcmp(t.chain[i], stack.rvas) == 0) { found = true; break; }
+        }
+        if (!found && t.used < kPoseReaderStackCap) {
+            t.hash[t.used] = hash;
+            strncpy_s(t.chain[t.used], sizeof(t.chain[t.used]), stack.rvas, _TRUNCATE);
+            ++t.used;
+            isNew = true;
+        }
+    }
+    if (isNew) {
+        nativeTracePrintf(
+            "pose_reader_call_stack,api=%s,game_frames=%u,game_rvas=%s\n",
+            wasGetLastPoses ? "GetLastPoses" : "WaitGetPoses", stack.gameFrames, stack.rvas);
+    }
+}
+
+void notePoseReaderCall(bool wasGetLastPoses, vr::TrackedDevicePose_t* render, uint32_t renderCount,
+                        vr::TrackedDevicePose_t* game, uint32_t gameCount) noexcept {
+    ULONG_PTR stackLow = 0, stackHigh = 0;
+    GetCurrentThreadStackLimits(&stackLow, &stackHigh);
+    const auto onStack = [&](void* p) noexcept {
+        if (!p) return false;
+        const auto a = reinterpret_cast<ULONG_PTR>(p);
+        return a >= stackLow && a < stackHigh;
+    };
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+
+    PoseReaderCall call{};
+    call.renderPtr = reinterpret_cast<uint64_t>(render);
+    call.gamePtr = reinterpret_cast<uint64_t>(game);
+    call.qpc = static_cast<uint64_t>(qpc.QuadPart);
+    call.renderCount = renderCount;
+    call.gameCount = gameCount;
+    call.threadId = GetCurrentThreadId();
+    call.renderOnStack = onStack(render);
+    call.gameOnStack = onStack(game);
+    call.wasGetLastPoses = wasGetLastPoses;
+    publishPoseReaderCall(call);
+
+    if (poseReaderTraceRequested()) noteGameCallStack(wasGetLastPoses);
+}
 
 void identity(vr::TrackedDevicePose_t& pose) noexcept {
   std::memset(&pose, 0, sizeof(pose));
@@ -79,6 +171,7 @@ vr::EVRCompositorError OpenVRCompositor::WaitGetPoses(
     vr::TrackedDevicePose_t* render, uint32_t renderCount,
     vr::TrackedDevicePose_t* game, uint32_t gameCount) {
   NativeCpuTraceSpan trace(EdvrCpuWaitGetPoses);
+  notePoseReaderCall(false, render, renderCount, game, gameCount);
   // Validate and initialize caller buffers before asking the source to wait.
   initialize(render, renderCount);
   initialize(game, gameCount);
@@ -100,7 +193,9 @@ vr::EVRCompositorError OpenVRCompositor::WaitGetPoses(
 vr::EVRCompositorError OpenVRCompositor::GetLastPoses(
     vr::TrackedDevicePose_t* render, uint32_t renderCount,
     vr::TrackedDevicePose_t* game, uint32_t gameCount) {
-  NativeCpuTraceSpan trace(EdvrCpuGetLastPoses);initialize(render, renderCount); initialize(game, gameCount);
+  NativeCpuTraceSpan trace(EdvrCpuGetLastPoses);
+  notePoseReaderCall(true, render, renderCount, game, gameCount);
+  initialize(render, renderCount); initialize(game, gameCount);
   if ((renderCount && !render) || (gameCount && !game) ||
       renderCount > vr::k_unMaxTrackedDeviceCount ||
       gameCount > vr::k_unMaxTrackedDeviceCount) return trace.finish(kInvalid);

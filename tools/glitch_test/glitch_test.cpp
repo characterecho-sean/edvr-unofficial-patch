@@ -35,6 +35,7 @@
 #include "../../src/d3d11/eye_origin_trace.h"
 #include "../../src/d3d11/glitch_frame.h"
 #include "../../src/d3d11/transition_flash_prevent.h"
+#include "../../src/d3d11/pose_reader_watch.h"
 
 namespace edvr {
 // Linker stubs: this rig drives glitch_frame.cpp alone, the way it always
@@ -43,6 +44,14 @@ namespace edvr {
 // are no-ops here -- the header's declarations keep these signatures honest.
 void transitionFlashPreventNoteH3(uint32_t, const float*) {}
 void transitionFlashPreventNoteDetectorVerdict(uint32_t, uint8_t, bool) {}
+// Same reason, for pose_reader_watch.cpp (needs CodeHook, a hardware
+// breakpoint and the game): advanced.eye_origin_readers reads as
+// permanently off here, its dump section and per-frame columns as empty.
+bool poseReaderWatchOn() { return false; }
+bool poseReaderTakeSwapTrigger(uint32_t*) { return false; }
+PoseReaderFrameSnapshot poseReaderWatchFrameSnapshot() { return PoseReaderFrameSnapshot{}; }
+uint32_t poseReaderWatchTableCount() { return 0; }
+PoseReaderTableEntry poseReaderWatchTableEntry(uint32_t) { return PoseReaderTableEntry{}; }
 }  // namespace edvr
 
 using namespace edvr;

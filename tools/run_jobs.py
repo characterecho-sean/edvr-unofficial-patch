@@ -10,7 +10,8 @@ still reads as if the rigs had run one after another.
 
   python tools\\run_jobs.py --script build.bat [--jobs N] [--mp N]
                            [--exe-dir build] [--serial a,b,c]... [--quiet d,e]
-                           [--times build\\rig_times.json] [--dry-run]
+                           [--after c=p,p]... [--times build\\rig_times.json]
+                           [--dry-run]
   python tools\\run_jobs.py --sweep-exe-dir build [--dry-run]
   python tools\\run_jobs.py --self-test
 
@@ -50,6 +51,21 @@ any of them may run beside the rest: rigs whose test processes share state
 that --exe-dir cannot separate. Each --serial is one such group; the group is
 scheduled as a chain, started early because its members can only follow one
 another.
+
+--after declares a one-way dependency: CONSUMER=PRODUCER[,PRODUCER...] holds
+CONSUMER back until every PRODUCER has finished successfully -- for a rig
+that reads a file another rig's subroutine writes (an export fixture DLL,
+say), which is otherwise exactly the thing build.bat's rig block forbids.
+Repeat --after for another consumer, or again for the same one to add more
+producers. Unlike --serial it is one-way and not about exclusion: PRODUCER
+runs alongside whatever else is ready; CONSUMER simply will not start before
+PRODUCER succeeds. Neither side may name a --quiet rig: a quiet rig's real
+finish happens in a separate pool run only after this one completes with no
+failure, so a dependency on or across that boundary could never be
+satisfied and would strand the job silently rather than fail it. --after is
+checked once, at the plan, not discovered later as a hang: an unknown label,
+a --quiet rig on either side, or a cycle (a rig named after itself is one)
+is rejected before any rig runs.
 
 --quiet names rigs that must not share the machine with anything: timing tests
 that compare wall-clock intervals against tight bounds. They run one at a time
@@ -120,11 +136,12 @@ PROTECTED_EXE_DIR_ENTRIES = {
 
 
 class Rig:
-    __slots__ = ("label", "line", "sources", "two_step", "group")
+    __slots__ = ("label", "line", "sources", "two_step", "group", "after")
 
     def __init__(self, label, line, sources=0, two_step=False):
         self.label, self.line, self.sources, self.two_step = label, line, sources, two_step
         self.group = None   # index of its --serial group, if any; set by plan()
+        self.after = ()     # labels it must not start before finish; set by plan()
 
     def __repr__(self):
         return "Rig(%r, %d, %d%s)" % (self.label, self.line, self.sources,
@@ -193,20 +210,58 @@ def estimate(job, times):
     return 2.0 if job.step == "run" else 2.0 + 0.7 * job.rig.sources
 
 
-def plan(rigs, quiet, times, serial=()):
+def check_acyclic(after):
+    """Raise ValueError naming the loop if `after` (consumer label -> tuple
+    of producer labels) has a cycle -- a rig named after itself is one."""
+    WHITE, GRAY, BLACK = range(3)
+    color = {}
+
+    def visit(label, stack):
+        color[label] = GRAY
+        stack.append(label)
+        for producer in after.get(label, ()):
+            state = color.get(producer, WHITE)
+            if state == GRAY:
+                loop = stack[stack.index(producer):] + [producer]
+                raise ValueError("--after has a cycle: %s" % " -> ".join(loop))
+            if state == WHITE:
+                visit(producer, stack)
+        stack.pop()
+        color[label] = BLACK
+
+    for label in after:
+        if color.get(label, WHITE) == WHITE:
+            visit(label, [])
+
+
+def plan(rigs, quiet, times, serial=(), after=None):
     """The pool, longest expected first, and the quiet jobs in the order
-    named. Every quiet or serial label must be a rig, and a rig belongs to at
-    most one of the serial groups. A serial or quiet rig that splits itself
-    puts its build step in the pool and only its run step under the rule. A
-    serial group's jobs -- a whole rig, or the build step whose run step will
-    join the chain -- are ranked by the whole chain's expected length rather
-    than their own: the chain starts first and never becomes the tail."""
+    named. Every quiet, serial or after label must be a rig, and a rig
+    belongs to at most one of the serial groups. A serial or quiet rig that
+    splits itself puts its build step in the pool and only its run step
+    under the rule. A serial group's jobs -- a whole rig, or the build step
+    whose run step will join the chain -- are ranked by the whole chain's
+    expected length rather than their own: the chain starts first and never
+    becomes the tail. `after` is {consumer_label: [producer_label, ...]}
+    (see run_group and launchable for how it holds a job back); neither a
+    consumer nor a producer may be a --quiet rig, and the whole relation
+    must be acyclic -- both raise ValueError here, before anything runs,
+    rather than stranding a job that can never become launchable."""
+    after = {label: tuple(producers) for label, producers in (after or {}).items()}
     by_label = {rig.label: rig for rig in rigs}
-    for option, labels in [("--quiet", quiet)] + [("--serial", group) for group in serial]:
+    for option, labels in ([("--quiet", quiet)] + [("--serial", group) for group in serial]
+                           + [("--after", (consumer,) + producers)
+                              for consumer, producers in after.items()]):
         unknown = [label for label in labels if label not in by_label]
         if unknown:
             raise ValueError("%s names rigs the script does not define: %s"
                              % (option, ", ".join(unknown)))
+    quiet_set = set(quiet)
+    for consumer, producers in after.items():
+        named = [label for label in (consumer,) + producers if label in quiet_set]
+        if named:
+            raise ValueError("--after cannot name a --quiet rig: %s" % ", ".join(named))
+    check_acyclic(after)
     group_of = {}
     for index, group in enumerate(serial):
         for label in group:
@@ -218,6 +273,7 @@ def plan(rigs, quiet, times, serial=()):
             group_of[label] = index
     for rig in rigs:
         rig.group = group_of.get(rig.label)
+        rig.after = after.get(rig.label, ())
 
     def split(rig):
         return rig.two_step and (rig.group is not None or rig.label in quiet)
@@ -376,37 +432,47 @@ def report(out, job, code, seconds, output, kept=()):
     out.flush()
 
 
-def launchable(pending, busy):
-    """The first pending job that no group rule holds back; None when every
-    pending job is waiting on its group."""
+def launchable(pending, busy, done):
+    """The first pending job that no group rule holds back and whose --after
+    producers have all finished (given in `done`, a set of rig labels);
+    None when every pending job is waiting on its group or a producer."""
     for job in pending:
-        if not job.constrained or job.rig.group not in busy:
+        if (not job.constrained or job.rig.group not in busy) and done.issuperset(job.rig.after):
             return job
     return None
 
 
-def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, labels=()):
-    """Start spawn(job) for the jobs in order, at most jobs at a time and
-    never two held-back jobs of one serial group. A serial rig's run step is
-    queued, at the front, the moment its build step succeeds. Each result is
-    printed as it completes, except failures, which are held and printed
-    after the group drains. Given exe_dir, each job's own job_exe_dirs are
-    cleaned up (cleanup_job_exe_dirs) the moment it finishes, pass or fail.
-    Returns (results, failures) where each entry is (job, code, seconds,
-    output, kept) in completion order; kept is empty except for a failed
-    job with a directory of its own."""
-    done = queue.Queue()
+def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, labels=(), done=None):
+    """Start spawn(job) for the jobs in order, at most jobs at a time, never
+    two held-back jobs of one serial group, and never a job before every rig
+    named in its --after has finished. A serial rig's run step is queued, at
+    the front, the moment its build step succeeds. Each result is printed as
+    it completes, except failures, which are held and printed after the
+    group drains. Given exe_dir, each job's own job_exe_dirs are cleaned up
+    (cleanup_job_exe_dirs) the moment it finishes, pass or fail. `done` is
+    the set of rig labels that have fully finished (an --after producer
+    counts once its last step succeeds, so a split rig's build step does not
+    count); pass one to seed it with labels finished before this call, or
+    omit it for a fresh set -- a fresh set is correct whenever no pending
+    job's --after can point outside this call's own order, which plan()
+    guarantees by refusing a --quiet rig on either side. Returns (results,
+    failures) where each entry is (job, code, seconds, output, kept) in
+    completion order; kept is empty except for a failed job with a directory
+    of its own."""
+    if done is None:
+        done = set()
+    outcomes = queue.Queue()
 
     def worker(job):
         started = clock()
         code, output = spawn(job)
         kept = cleanup_job_exe_dirs(exe_dir, job, labels, code == 0) if exe_dir is not None else ()
-        done.put((job, code, clock() - started, output, kept))
+        outcomes.put((job, code, clock() - started, output, kept))
 
     pending, running, busy, results, failures = list(order), 0, set(), [], []
     while pending or running:
         while pending and running < jobs and not failures:
-            job = launchable(pending, busy)
+            job = launchable(pending, busy, done)
             if job is None:
                 break
             pending.remove(job)
@@ -416,7 +482,7 @@ def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, label
             running += 1
         if not running:
             break
-        job, code, seconds, output, kept = done.get()
+        job, code, seconds, output, kept = outcomes.get()
         running -= 1
         if job.constrained:
             busy.discard(job.rig.group)
@@ -425,6 +491,8 @@ def run_group(order, jobs, spawn, out, clock=time.monotonic, exe_dir=None, label
             report(out, job, code, seconds, output)
             if job.step == "build" and job.rig.group is not None:
                 pending.insert(0, Job(job.rig, "run"))
+            else:
+                done.add(job.rig.label)
             continue
         failures.append((job, code, seconds, output, kept))
         if len(failures) == 1:
@@ -465,7 +533,7 @@ def wrap(labels, indent="       "):
     return "\n".join(lines)
 
 
-def describe(pool, quiet, times, serial=()):
+def describe(pool, quiet, times, serial=(), after=None):
     split = {job.rig.label for job in pool if job.step == "build"}
 
     def name(label):
@@ -476,22 +544,24 @@ def describe(pool, quiet, times, serial=()):
                  for job in pool) + "\n"
     for group in serial:
         text += "[edvr] one at a time among themselves: " + " ".join(name(label) for label in group) + "\n"
+    for consumer, producers in (after or {}).items():
+        text += "[edvr] %s waits for: %s\n" % (name(consumer), " ".join(name(label) for label in producers))
     if quiet:
         text += "[edvr] quiet, one at a time afterwards: " + " ".join(name(job.rig.label) for job in quiet) + "\n"
     return text
 
 
 def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=time.monotonic,
-        serial=(), exe_dir=None):
+        serial=(), exe_dir=None, after=None):
     text = script.read_text(encoding="utf-8", errors="replace")
     rigs = parse_rigs(text)
     labels = tuple(rig.label for rig in rigs)
     times = load_times(times_path)
-    pool, later = plan(rigs, quiet, times, serial)
+    pool, later = plan(rigs, quiet, times, serial, after)
     mp_flag = "/MP%d" % mp if mp else "/MP"
     emit(out, "[edvr] %d rigs from %s: %d jobs in the pool, %d at a time (CL=%s), %d quiet\n"
          % (len(rigs), script.name, len(pool), jobs, mp_flag, len(later)))
-    emit(out, describe(pool, later, times, serial))
+    emit(out, describe(pool, later, times, serial, after))
     if exe_dir is not None:
         emit(out, "[edvr] each rig's processes log under %s\n" % os.path.join(exe_dir, "edvr_logs", "<rig>"))
     out.flush()
@@ -645,6 +715,37 @@ def self_test():
         except ValueError as error:
             check(named in str(error), "the offending serial label is named: %s" % error)
 
+    # --after: a one-way dependency, unlike --serial's mutual exclusion --
+    # only the consumer is held back, and only by name, not by rank.
+    pool, _ = plan(rigs, [], seconds, after={"gamma": ["alpha", "beta"]})
+    check(gamma.after == ("alpha", "beta") and alpha.after == () == beta.after and gamma.group is None,
+          "plan records --after on the consumer only, joining no serial group: %r" % (gamma.after,))
+    check({job.rig.label for job in pool} == {"alpha", "beta", "gamma", "timing"},
+          "a consumer still joins the pool like any other rig: %r" % pool)
+    for after, named, why in (
+            ({"nope": ["alpha"]}, "nope", "an unknown consumer is an error"),
+            ({"alpha": ["nope"]}, "nope", "an unknown producer is an error"),
+            ({"alpha": ["alpha"]}, "alpha", "a rig named --after itself is a cycle"),
+            ({"alpha": ["beta"], "beta": ["alpha"]}, "alpha", "a two-rig cycle is an error")):
+        try:
+            plan(rigs, [], {}, after=after)
+            check(False, why)
+        except ValueError as error:
+            check(named in str(error), "the offending label is named: %s" % error)
+    try:
+        plan(rigs, ["alpha"], {}, after={"gamma": ["alpha"]})
+        check(False, "a --quiet rig cannot be an --after producer")
+    except ValueError as error:
+        check("alpha" in str(error), "the quiet producer is named: %s" % error)
+    try:
+        plan(rigs, ["gamma"], {}, after={"gamma": ["alpha"]})
+        check(False, "a --quiet rig cannot be an --after consumer")
+    except ValueError as error:
+        check("gamma" in str(error), "the quiet consumer is named: %s" % error)
+
+    text = describe(pool, [], seconds, after={"gamma": ["alpha", "beta"]})
+    check("gamma waits for: alpha beta" in text, "describe names a consumer's producers: %r" % text)
+
     check(child_command(Path(r"C:\x y\build.bat"), "alpha") == r'cmd.exe /d /c ""C:\x y\build.bat" --rig alpha"',
           "child command quotes the script for cmd /c")
     env = {"CL": "/MP4"}
@@ -731,6 +832,49 @@ def self_test():
     check(starts == ["gamma", "beta (build)", "alpha", "timing", "beta (run)"],
           "a waiting run step yields its slot and starts when its group frees: %r" % starts)
 
+    # --after through run_group: gamma must wait for alpha's real finish, not
+    # merely for a launch slot -- proven by giving gamma the longest estimate
+    # (so ranking alone would start it first) and --jobs wide enough that
+    # nothing but the dependency could be holding it back.
+    seconds2 = {"alpha": 1.0, "beta": 1.0, "gamma": 9.0, "timing": 1.0}
+    pool, _ = plan(rigs, [], seconds2, after={"gamma": ["alpha"]})
+    check(titles(pool) == ["gamma", "alpha", "beta", "timing"],
+          "the consumer ranks by its own estimate, first here despite --after: %r" % pool)
+
+    starts.clear()
+    alpha_done, order_ok = [False], [True]
+
+    def after_spawn(job):
+        with lock:
+            starts.append(job.title)
+            if job.rig.label == "gamma" and not alpha_done[0]:
+                order_ok[0] = False
+        time.sleep(0.15 if job.rig.label == "alpha" else 0.0)
+        if job.rig.label == "alpha":
+            with lock:
+                alpha_done[0] = True
+        return 0, b""
+
+    results, failed = run_group(pool, 4, after_spawn, io.BytesIO())
+    check(not failed and len(results) == 4 and order_ok[0],
+          "gamma never starts before alpha finishes, though it ranks first and jobs=4 "
+          "leaves it a free slot from the start: %r" % starts)
+
+    # A consumer whose producer fails never gets the chance to start: once
+    # anything has failed, run_group stops launching -- the same rule that
+    # already left an ordinary pending job unstarted, just now also covering
+    # the one --after was specifically added to hold back.
+    starts.clear()
+
+    def failing_after_spawn(job):
+        with lock:
+            starts.append(job.title)
+        return (3, b"alpha broke") if job.rig.label == "alpha" else (0, b"")
+
+    results, failed = run_group(pool, 4, failing_after_spawn, io.BytesIO())
+    check([job.title for job, *_ in failed] == ["alpha"] and "gamma" not in starts,
+          "gamma never starts once its producer has failed: %r" % starts)
+
     with tempfile.TemporaryDirectory() as scratch:
         script = Path(scratch) / "build.bat"
         script.write_text(SAMPLE, encoding="utf-8")
@@ -756,6 +900,10 @@ def self_test():
               and b"gamma~5s beta(build)~3s alpha~3s" in out.getvalue(),
               "dry run prints the serial groups, the chain leads, split members are marked: %r"
               % out.getvalue())
+        out = io.BytesIO()
+        code = run(script, 3, 2, ["timing"], times, True, out, after={"gamma": ["alpha"]})
+        check(code == 0 and b"gamma waits for: alpha" in out.getvalue(),
+              "run() threads --after through to plan() and describe(): %r" % out.getvalue())
         starts.clear()
         out = io.BytesIO()
         code = run(script, 3, 2, ["timing"], times, False, out,
@@ -911,6 +1059,10 @@ def main(argv=None):
                         help="comma-separated rigs that never run at the same time as one "
                              "another (repeat for another such group)")
     parser.add_argument("--quiet", default="", help="comma-separated rigs to run alone afterwards")
+    parser.add_argument("--after", action="append", default=[], metavar="CONSUMER=PRODUCERS",
+                        help="CONSUMER does not start until every comma-separated PRODUCER has "
+                             "finished (repeat for another consumer, or the same one again to "
+                             "add producers); neither side may be --quiet")
     parser.add_argument("--times", type=Path, default=None, help="where rig durations are recorded")
     parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing "
                                                                 "(or, with --sweep-exe-dir, remove nothing)")
@@ -934,6 +1086,13 @@ def main(argv=None):
     mp = args.mp if args.mp is not None else (0 if args.jobs == 1 else 4)
     quiet = [label for label in args.quiet.split(",") if label]
     serial = [[label for label in group.split(",") if label] for group in args.serial]
+    after = {}
+    for spec in args.after:
+        consumer, sep, producers = spec.partition("=")
+        producer_labels = [label for label in producers.split(",") if label]
+        if not sep or not consumer or not producer_labels:
+            parser.error("--after must be CONSUMER=PRODUCER[,PRODUCER...]: %r" % spec)
+        after.setdefault(consumer, []).extend(producer_labels)
     exe_dir = None
     if args.exe_dir is not None:
         if not args.exe_dir.is_dir():
@@ -943,7 +1102,7 @@ def main(argv=None):
         exe_dir = os.path.abspath(str(args.exe_dir))
     try:
         return run(args.script.resolve(), args.jobs, mp, quiet, args.times, args.dry_run,
-                   sys.stdout.buffer, serial=serial, exe_dir=exe_dir)
+                   sys.stdout.buffer, serial=serial, exe_dir=exe_dir, after=after)
     except ValueError as error:
         print("[edvr] ERROR: %s" % error)
         return 1

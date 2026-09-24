@@ -8,13 +8,23 @@
 // acted-frame dedup; finding 4: dump-request window folding). No game, no
 // Windows hook -- this drives the header directly, the kinematic_probe_test
 // pattern (single-TU, production source compiled into the rig).
+//
+// Also covers pose_reader_watch_core.h's pure logic (advanced.eye_origin_
+// readers, the same design doc's parts A2/B): Dr7's slot-0 composition,
+// stack-range classification, the 60-frame stability gate, the unique-
+// reader table's dedupe/cap arithmetic, and the dump-trigger filter that
+// narrows eye_origin_trace's own dump condition when this instrument is on.
+// Same rig rather than a second one -- both headers describe the one design
+// doc and neither needs the game.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
 #include "../../src/d3d11/transition_flash_prevent_core.h"
+#include "../../src/d3d11/pose_reader_watch_core.h"
 
 using namespace edvr::tfp;
+namespace prw = edvr::prw;
 
 namespace {
 unsigned checks = 0, failures = 0;
@@ -403,6 +413,118 @@ void caseFrameInDumpWindow() {
     // ringFrameInWindow guards against above.
     check(frameInDumpWindow(0, 10, 40), "frameInDumpWindow: a low trigger near zero clamps rather than wraps");
 }
+
+// --- pose_reader_watch_core.h: Dr7 slot-0 composition ----------------------
+
+void caseDr7ArmLeavesOtherSlotsAlone() {
+    check(prw::armSlot0Dr7(0) == 0x000F0001u, "Dr7 arm: from a clear register, exactly L0/RW0/LEN0 come on");
+    // Slot 1 already armed (L1=bit2, RW1=bits20-21, LEN1=bits22-23) plus a
+    // reserved bit (10) some other debugger set: none of that is this
+    // module's to touch.
+    const uint32_t otherSlotBits = (1u << 2) | (0x3u << 20) | (0x3u << 22) | (1u << 10);
+    const uint32_t armed = prw::armSlot0Dr7(otherSlotBits);
+    check((armed & ~prw::kDr7Slot0Mask) == otherSlotBits,
+          "Dr7 arm: every bit outside slot 0's mask survives untouched");
+    check((armed & prw::kDr7Slot0Mask) == prw::kDr7Slot0ArmedBits,
+          "Dr7 arm: slot 0's own bits read exactly L0=1, RW0=11b, LEN0=11b");
+}
+
+void caseDr7DisarmClearsOnlyL0() {
+    const uint32_t armed = prw::armSlot0Dr7(0);
+    const uint32_t disarmed = prw::disarmSlot0Dr7(armed);
+    check((disarmed & prw::kDr7L0Bit) == 0, "Dr7 disarm: L0 comes off");
+    check((disarmed & ~prw::kDr7L0Bit) == (armed & ~prw::kDr7L0Bit),
+          "Dr7 disarm: RW0/LEN0 and every other bit are left exactly as they were");
+    // Idempotent, and never disturbs a DIFFERENT slot's enable bit.
+    const uint32_t withSlot2 = armed | (1u << 4);  // L2
+    check((prw::disarmSlot0Dr7(withSlot2) & (1u << 4)) != 0,
+          "Dr7 disarm: another slot's own enable bit is not this call's to clear");
+}
+
+void caseDr6Slot0Hit() {
+    check(prw::dr6HasSlot0Hit(0x1), "Dr6: bit 0 set reads as our hit");
+    check(!prw::dr6HasSlot0Hit(0x0), "Dr6: clear reads as not ours");
+    check(!prw::dr6HasSlot0Hit(0x2), "Dr6: B1 alone (a slot this module never arms) is not ours");
+    check(prw::dr6HasSlot0Hit(0x200F), "Dr6: our bit still reads even mixed with the other sticky bits");
+}
+
+// --- pose_reader_watch_core.h: stack-range classification -------------------
+
+void caseStackRangeClassification() {
+    check(prw::pointerOnStack(0x1000, 0x1000, 0x2000), "onStack: the low limit itself is in (inclusive)");
+    check(!prw::pointerOnStack(0x2000, 0x1000, 0x2000), "onStack: the high limit itself is out (exclusive)");
+    check(prw::pointerOnStack(0x1FFF, 0x1000, 0x2000), "onStack: just under the high limit is in");
+    check(!prw::pointerOnStack(0x0FFF, 0x1000, 0x2000), "onStack: just under the low limit is out");
+    check(!prw::pointerOnStack(0x5000, 0x1000, 0x2000), "onStack: far above the range is out");
+    check(!prw::pointerOnStack(0x1500, 0x2000, 0x1000), "onStack: an inverted range is never 'on it'");
+}
+
+// --- pose_reader_watch_core.h: the 60-frame stability gate ------------------
+
+void caseStabilityGateReachesStableAt60() {
+    prw::StabilityState s;
+    for (uint32_t frame = 1; frame <= 59; ++frame) {
+        s = prw::observeAddress(s, 0xABCD0000ull);
+        check(!prw::isStable(s), "stability: not yet stable before the 60th consecutive frame");
+    }
+    s = prw::observeAddress(s, 0xABCD0000ull);
+    check(s.consecutive == 60 && prw::isStable(s), "stability: the 60th consecutive same address is stable");
+}
+
+void caseStabilityGateResetsOnChange() {
+    prw::StabilityState s;
+    for (uint32_t i = 0; i < 59; ++i) s = prw::observeAddress(s, 0x1000ull);
+    check(!prw::isStable(s), "stability: precondition -- 59 in, not yet stable");
+    s = prw::observeAddress(s, 0x2000ull);  // the address changes on what would have been frame 60
+    check(s.address == 0x2000ull && s.consecutive == 1,
+          "stability: a changed address restarts the run at 1, it does not carry the count over");
+    check(!prw::isStable(s), "stability: restarted run is not stable");
+}
+
+void caseStabilityGateZeroNeverStable() {
+    prw::StabilityState s;
+    for (uint32_t i = 0; i < 200; ++i) s = prw::observeAddress(s, 0);
+    check(!prw::isStable(s), "stability: a nobody-has-published (0) address never counts, however long");
+}
+
+// --- pose_reader_watch_core.h: the unique-reader dedupe table --------------
+
+void caseReaderTableFindsExistingAndReportsNew() {
+    prw::ReaderKey table[prw::kMaxReaders];
+    table[0] = prw::ReaderKey{0x1000, 0x2000, 0x3000};
+    table[1] = prw::ReaderKey{0x1500, 0, 0};
+    const uint32_t used = 2;
+    check(prw::findReaderSlot(table, used, prw::ReaderKey{0x1000, 0x2000, 0x3000}) == 0,
+          "readerTable: an exact repeat of entry 0 finds slot 0");
+    check(prw::findReaderSlot(table, used, prw::ReaderKey{0x1500, 0, 0}) == 1,
+          "readerTable: an exact repeat of entry 1 finds slot 1");
+    check(prw::findReaderSlot(table, used, prw::ReaderKey{0x1000, 0x2000, 0x9999}) == prw::kMaxReaders,
+          "readerTable: same rip and first caller but a different second caller is a NEW key");
+    check(prw::findReaderSlot(table, used, prw::ReaderKey{0x9999, 0x2000, 0x3000}) == prw::kMaxReaders,
+          "readerTable: a different rip alone makes it a new key");
+}
+
+void caseReaderTableCap() {
+    check(!prw::readerTableFull(prw::kMaxReaders - 1), "readerTable: one short of the cap is not full");
+    check(prw::readerTableFull(prw::kMaxReaders), "readerTable: exactly at the cap is full");
+    check(prw::readerTableFull(prw::kMaxReaders + 1), "readerTable: past the cap stays full");
+}
+
+// --- pose_reader_watch_core.h: the dump-trigger filter ----------------------
+
+void caseDumpVerdictTriggerNarrowsWhenReadersOn() {
+    check(prw::dumpVerdictTrigger(false, /*withheldClass=*/true, /*sceneReset=*/false),
+          "dumpTrigger: readers off falls back to the old broad withheld-class trigger");
+    check(!prw::dumpVerdictTrigger(false, false, false),
+          "dumpTrigger: readers off, nothing withheld -> no trigger");
+    check(!prw::dumpVerdictTrigger(true, /*withheldClass=*/true, /*sceneReset=*/false),
+          "dumpTrigger: readers on -- a render-pass withhold ALONE no longer triggers "
+          "(flight 195435's 10-of-12 problem)");
+    check(prw::dumpVerdictTrigger(true, /*withheldClass=*/true, /*sceneReset=*/true),
+          "dumpTrigger: readers on -- the scene-reset verdict still triggers");
+    check(prw::dumpVerdictTrigger(true, /*withheldClass=*/false, /*sceneReset=*/true),
+          "dumpTrigger: readers on -- scene-reset triggers even when the old broad test would not have");
+}
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -431,6 +553,16 @@ int wmain(int argc, wchar_t** argv) {
     caseClassifyH3FrameBuckets();
     caseFoldDumpTrigger();
     caseFrameInDumpWindow();
+    caseDr7ArmLeavesOtherSlotsAlone();
+    caseDr7DisarmClearsOnlyL0();
+    caseDr6Slot0Hit();
+    caseStackRangeClassification();
+    caseStabilityGateReachesStableAt60();
+    caseStabilityGateResetsOnChange();
+    caseStabilityGateZeroNeverStable();
+    caseReaderTableFindsExistingAndReportsNew();
+    caseReaderTableCap();
+    caseDumpVerdictTriggerNarrowsWhenReadersOn();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -193,6 +193,26 @@ struct Shared {
     //                current head pose", taken (cleared) by the vr half's
     //                own poll. See frame_flag.h.
     volatile LONG     introRecentre;
+    // advanced.eye_origin_readers (docs/design-transition-flash-engine-fix-
+    // 2026-09-23.md, part A1): d3d11 -> openvr, the request to start
+    // capturing the runtime's own WaitGetPoses/GetLastPoses call stack.
+    volatile LONG     poseReaderRequest;
+    // The rest of this family runs openvr -> d3d11, published at EVERY
+    // WaitGetPoses/GetLastPoses call: PoseReaderCall's fields (frame_flag.h)
+    // packed the same way submitTex/gameDev use LONG64 for a pointer. seq is
+    // bumped last, so a reader who samples it before and after a read can
+    // tell a torn snapshot from a fresh one (it never blocks on it -- this
+    // is a diagnostic, not a lock).
+    volatile LONG     poseReaderSeq;
+    volatile LONG64   poseReaderRenderPtr;
+    volatile LONG64   poseReaderGamePtr;
+    volatile LONG64   poseReaderQpc;
+    volatile LONG     poseReaderRenderCount;
+    volatile LONG     poseReaderGameCount;
+    volatile LONG     poseReaderThreadId;
+    // bit0 render ptr on the calling thread's stack, bit1 game ptr on it,
+    // bit2 this publish came from GetLastPoses rather than WaitGetPoses.
+    volatile LONG     poseReaderFlags;
 };
 
 // Per PROCESS, not per logon session.
@@ -209,6 +229,10 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v35 because the pose-reader hunt joined (poseReaderRequest and the
+// poseReader* call snapshot), for advanced.eye_origin_readers (docs/design-
+// transition-flash-engine-fix-2026-09-23.md). Two branches each took _v34
+// for different layouts on 2026-09-23; the merge of both is _v35.
 // _v34 because the channels only the legacy openvr half ever wrote left
 // the layout -- fssMonoFrames, fssBodyStamp, fssPanelRectRedo, the gaze,
 // the compositor's frame timing and EDVR's activity words -- nothing had
@@ -275,7 +299,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v34_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v35_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -807,6 +831,54 @@ bool introRecentreRequested() {
 void clearIntroRecentreRequest() {
     Shared* s = map();
     if (s) InterlockedExchange(&s->introRecentre, 0);
+}
+
+void requestPoseReaderTrace(bool on) {
+    Shared* s = map();
+    if (!s) return;
+    InterlockedExchange(&s->poseReaderRequest, on ? 1 : 0);
+}
+
+bool poseReaderTraceRequested() {
+    Shared* s = map();
+    return s && InterlockedCompareExchange(&s->poseReaderRequest, 0, 0) != 0;
+}
+
+void publishPoseReaderCall(const PoseReaderCall& call) {
+    Shared* s = map();
+    if (!s) return;
+    s->poseReaderRenderPtr = static_cast<LONG64>(call.renderPtr);
+    s->poseReaderGamePtr = static_cast<LONG64>(call.gamePtr);
+    s->poseReaderQpc = static_cast<LONG64>(call.qpc);
+    s->poseReaderRenderCount = static_cast<LONG>(call.renderCount);
+    s->poseReaderGameCount = static_cast<LONG>(call.gameCount);
+    s->poseReaderThreadId = static_cast<LONG>(call.threadId);
+    LONG flags = 0;
+    if (call.renderOnStack) flags |= 1;
+    if (call.gameOnStack) flags |= 2;
+    if (call.wasGetLastPoses) flags |= 4;
+    s->poseReaderFlags = flags;
+    // Last: a reader that samples seq before touching the rest of the
+    // fields and again after can tell a torn read from a fresh one.
+    InterlockedIncrement(&s->poseReaderSeq);
+}
+
+PoseReaderCall poseReaderCall() {
+    PoseReaderCall out{};
+    Shared* s = map();
+    if (!s) return out;
+    out.seq = static_cast<uint32_t>(s->poseReaderSeq);
+    out.renderPtr = static_cast<uint64_t>(s->poseReaderRenderPtr);
+    out.gamePtr = static_cast<uint64_t>(s->poseReaderGamePtr);
+    out.qpc = static_cast<uint64_t>(s->poseReaderQpc);
+    out.renderCount = static_cast<uint32_t>(s->poseReaderRenderCount);
+    out.gameCount = static_cast<uint32_t>(s->poseReaderGameCount);
+    out.threadId = static_cast<uint32_t>(s->poseReaderThreadId);
+    const LONG flags = s->poseReaderFlags;
+    out.renderOnStack = (flags & 1) != 0;
+    out.gameOnStack = (flags & 2) != 0;
+    out.wasGetLastPoses = (flags & 4) != 0;
+    return out;
 }
 
 bool externalCameraOnFootLive(uint32_t maxAgeFrames) {

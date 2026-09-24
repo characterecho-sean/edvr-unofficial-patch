@@ -438,6 +438,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\transition_flash_prevent.cpp" ^
+    "src\d3d11\pose_reader_watch.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -593,11 +594,15 @@ REM The --quiet rigs hold wall-clock intervals to tight bounds; they run alone,
 REM after the rest, with the whole machine. Only their test runs need that, so
 REM each is split (see the rig area below): its compiles run in the pool like
 REM any other rig's and only its runs wait their turn.
+REM openxr_module_test loads openxr_export_fixture.dll, which
+REM :rig_openxr_exports_test builds; --after holds the reader back until the
+REM writer has actually finished (see the rig rules below).
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%~f0" --times "%BUILD%\rig_times.json" ^
     --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,vtable_test ^
+    --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
 echo [edvr] === config contract ===
@@ -649,7 +654,16 @@ REM  environment: ROOT, BUILD, OBJ, GEN, CFLAGS, EDVR_VER, the
 REM  INSTALLER_* lists and the compiler on PATH. Rigs run in any order and at the
 REM  same time as one another, so a rig must not depend on another rig's
 REM  output, must not share an obj directory, and must not write a file
-REM  another rig reads. The DLLs a rig copies are the main flow's, above.
+REM  another rig reads -- unless that dependency is declared to run_jobs.py
+REM  with --after (see the invocation above), which holds the reader back
+REM  until the writer has actually finished, not merely started. This was an
+REM  unenforced rule once: openxr_module_test loaded openxr_export_fixture.dll
+REM  (built by :rig_openxr_exports_test) with no ordering between the two
+REM  rigs, and only ran clean because a stale fixture DLL from an earlier
+REM  build was normally still sitting in %BUILD%; a build whose mid-link
+REM  failure had deleted it surfaced the race. --after is now the one
+REM  sanctioned way to write a rig that reads another's output -- do not add
+REM  a second one without it. The DLLs a rig copies are the main flow's, above.
 REM
 REM  A rig named in --quiet (or --serial, see tools\run_jobs.py) is written
 REM  in two steps so that only its test runs are held back:
@@ -1576,7 +1590,7 @@ if not exist "%OBJ%\openxr_compositor_test" mkdir "%OBJ%\openxr_compositor_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_compositor_test\\" /Fe"%BUILD%\openxr_compositor_test.exe" ^
     "tools\openxr_compositor_test\openxr_compositor_test.cpp" "tools\openxr_compositor_test\abi_caller.cpp" ^
-    "src\openxr\openvr_compositor.cpp" /link /INCREMENTAL:NO
+    "src\openxr\openvr_compositor.cpp" "src\common\frame_flag.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: owned OpenVR compositor test build failed & exit /b 1 )
 "%BUILD%\openxr_compositor_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_compositor_test.exe" --self-test || exit /b 1
@@ -1600,6 +1614,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_exports_test\\" /Fe"%BUILD%\openxr_export_fixture.dll" ^
     "tools\openxr_exports_test\fixture.cpp" "src\openxr\runtime_exports.cpp" ^
     "src\openxr\openvr_system.cpp" "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
+    "src\common\frame_flag.cpp" ^
     /link /INCREMENTAL:NO /DEF:"tools\openxr_exports_test\fixture.def"
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR export fixture build failed & exit /b 1 )
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^

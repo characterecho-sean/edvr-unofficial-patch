@@ -32,6 +32,32 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
+- **Reader hunt FLOWN (045636, 2026-09-24).**
+  - The positioner lead is ruled out, and the pose buffer is on the stack
+    (no watch).
+  - The new anchor is the `WaitGetPoses` stack (`0x4E3718 ...`), which
+    shares its frame job with the eye-origin write.
+  - Static round 6 starts from it. The Steam ini is restored.
+  - The build as installed:
+  - `advanced.eye_origin_readers = off|on`: b9a73fcb, on main via
+    0d99246b.
+  - Part A is a hardware read-watchpoint on the head pose EDVR's runtime
+    returns. It arms only on a stable, non-stack address and self-disarms
+    after 30 s or 5000 hits. It records the game code that reads the pose,
+    with unwound stacks. The runtime logs its `WaitGetPoses` stacks to
+    `edvr_openxr_*.log`.
+  - Part B is read-only hooks on the positioner Tick (`0x107C760`) and
+    swap-sync (`0x1090420`).
+  - Dumps fire only on scene-judged eye resets or positioner swaps.
+  - The Steam copy runs 014edc20 (b9a73fcb plus the v35 merge and a
+    flight gate) with the trap on and one marked `eye_origin_readers = on`
+    line; remove it after the flight.
+  - The flight gate: the watch arms only after the detector's camera
+    validation ("transition flash fix ACTIVE"), because the pose address
+    is stable from the VR menu on. Its bounds are 180 s and 100,000 hits.
+    Read the flight with `--expect-build 014edc20`.
+  - The merge with main moved frame_flag to v35: both branches had taken
+    v34 for different layouts.
 - **Before that flight:** the render-side anchor was built and installed.
   - `advanced.eye_origin_trace = off|on`: e8b37bb7, on main via 337a1893.
     It captures the game's call stack at every write of the 5376-byte camera
@@ -283,6 +309,68 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
   0x6BF929 / 0x594C3E / 0x2869073`.
 
+## Flight 045636 (2026-09-24 04:56, Steam copy, build 014edc20)
+
+`advanced.eye_origin_readers = on`, trap on; the build matched.
+
+- **No watchpoint.** The watch waited for flight (04:58:06), then declined
+  to arm: the buffer the game passes to `WaitGetPoses` (`0xD3084FD7EC`) is
+  on the calling thread's own stack.
+- **The pose-fetch stack.** It is in the runtime log
+  (`edvr_openxr_20260924_045637_834_4220.log`), innermost first:
+  `0x4E3718 / 0x4E2651 / 0x8D2588 / 0x283D548 / 0x2843324 / 0x2868C90 /
+  0x1E7906 / 0x1EE0F1 / 0x7EB63D / ...`.
+  - `0x4E3718` sits beside round 1's OpenVR setup (`0x4E4870`, `0x4E5900`):
+    the VR device class.
+  - The tail from `0x1E7906` is the same job framework as the eye-origin
+    write stack, whose frame there is `0x2869073` (here `0x2868C90`).
+- **The positioner never ran.** Tick `0x107C760` and swap-sync `0x1090420`
+  logged 0 calls on every dumped frame.
+- **Four eye resets.** f12358 (median object error 6.6 m), f13498
+  (1,075 m), f16711 (13.515 m) and f17854 (820 m).
+  - f16711 is a high wake. The eye goes from (+10.10, +8.97, -0.02)
+    (13.5 m, the eye point on other axes) to head only, then to
+    (-0.01, +3.51, +1613.24), the same tunnel placement as on 2026-09-12.
+  - The objects did not follow the camera's 13.5 m jump.
+- **The Steam ini.** The flight line is removed. EDVR's own writes during
+  the flight stay: `ui_quality = 125` (the new values) and
+  `openxr_resolution`.
+
+## Static round 6: the eye's base is a consume-and-reset mailbox
+
+This comes from the `WaitGetPoses` anchor of flight 045636. Dumps are in
+`analysis\decomp\flash\r6\`; the key file is `follow_28431D0.txt`.
+
+- **One job does both.** The per-frame VR job `FUN_142868c30`
+  (`0x2868C30..0x286938A`) calls the camera driver `FUN_1428431d0`, then
+  `FUN_140594b60`, which uploads `cb1[275]`. The pose-fetch and eye-write
+  stacks meet in this one function, confirmed by the exact call
+  instructions.
+- **The chain.** The camera driver `0x28431D0` calls the eye/base composer
+  `0x283D4C0` (base matrix x eye pose). That calls a per-eye wrapper
+  `0x8D2510`, then `VRDevice::GetEyePose` `0x4E25A0` (eye-to-head x head
+  pose), then `0x4E3690`, which calls `WaitGetPoses` into its own stack
+  buffer.
+- **The mailbox.** Let `ship = *(driver+0x50)`. The driver copies
+  `ship+0x3330..+0x336F` (a 4x4) into a local. If mode != 1 (the job passes
+  2 every frame) it resets that field to the constant at `0x1450C8090`,
+  checked from the exe's bytes to be an exact identity, and zeroes its
+  translation (`+0x3360/+0x3368`). It then composes the eye views from the
+  LOCAL copy (line 170). Those outputs are copied into both eye view
+  objects (`FUN_14059f1a0(eyeView+0x20, ...)`).
+- **The second composition.** A second call composes from `ship+0x130`
+  (never reset, mode 3) into separate buffers.
+- **Reading.** The mailbox must be refilled every frame by a writer
+  (not yet found). On the switch frame it is not refilled before the
+  driver reads it, so the eye composes against identity: head only. That
+  matches every measured bad frame, including the 13.5 m eye point
+  missing.
+- **Not yet fixable blind.** On a frame switch the last good base is in
+  the OLD render frame, so holding it would repeat the ruled-out
+  last-good-pose error. The fix needs either the writer's ordering, or a
+  fallback base (for example `ship+0x130`) proven equal to the mailbox on
+  ordinary frames.
+
 ## Static rounds 4-5 (after 195435; leads, not proof)
 
 Dumps are in `analysis\decomp\flash\r4\` and `\r5\`. Ghidra holds phantom
@@ -309,6 +397,11 @@ through `pdata_functions.csv`.
 Each was ruled out on 2026-09-23 from existing flight data and static
 analysis, or from flight 184826 or 195435 where marked:
 
+- **Ruled out (045636): round 5's camera positioner (Tick `0x107C760`,
+  swap-sync `0x1090420`) as the cockpit camera's.** Neither ran on any
+  dumped frame in flight, across four eye resets.
+- **Ruled out (045636): a hardware watch on the returned head pose.** The
+  game's `WaitGetPoses` buffer is on the caller's own stack.
 - **Ruled out (195435): a different code path writing the eye origin on the
   bad frame.** Both reset frames (f12604, f13072) were written by stack #0,
   like every ordinary frame.

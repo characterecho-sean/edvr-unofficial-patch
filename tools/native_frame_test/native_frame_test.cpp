@@ -390,10 +390,10 @@ int wmain(int argc, wchar_t** argv) {
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");
 
-    // frame_flag's layout check (v34). Last, because a refusal it provokes
+    // frame_flag's layout check (the roll-call, since v34). Last, because a refusal it provokes
     // is meant to outlast it. This process holds one half, so the roll-call
     // has one signature and there is nothing to name...
-    check(edvr::kFrameFlagVersion == 34, "frame_flag layout is v34");
+    check(edvr::kFrameFlagVersion == 35, "frame_flag layout is v35");
     check(edvr::frameFlagPeerMismatch() == 0, "one half alone is no mismatch");
     {
         wchar_t name[64];
@@ -403,14 +403,18 @@ int wmain(int argc, wchar_t** argv) {
         auto* roll = h ? static_cast<volatile LONG*>(
                              MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 3 * sizeof(LONG)))
                        : nullptr;
-        check(roll && roll[0] == 34 && roll[1] == 0 && roll[2] == 1,
-              "one signature, v34 first, nobody else");
+        // Relative to kFrameFlagVersion, so only the pin above moves when the
+        // layout does; the roll-call's own behaviour does not change with it.
+        const LONG ours = static_cast<LONG>(edvr::kFrameFlagVersion);
+        check(roll && roll[0] == ours && roll[1] == 0 && roll[2] == 1,
+              "one signature, this layout first, nobody else");
         if (roll) {
             // ...a half on another layout signing second is named at once,
             // and the channel refuses: a mark reads back as absent...
             edvr::clearGlitchFrame();
-            InterlockedExchange(&roll[1], 35);
-            check(edvr::frameFlagPeerMismatch() == 35, "a v35 half signing second is named");
+            InterlockedExchange(&roll[1], ours + 1);
+            check(edvr::frameFlagPeerMismatch() == static_cast<uint32_t>(ours + 1),
+                  "a half on the next layout signing second is named");
             edvr::markGlitchFrame();
             check(!edvr::glitchFrameMarked(), "the refused channel reads as absent");
             InterlockedExchange(&roll[1], 0);
