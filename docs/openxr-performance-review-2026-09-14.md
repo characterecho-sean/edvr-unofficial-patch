@@ -5,21 +5,24 @@
 *Added 2026-09-24. Restates the journal below; update it whenever this doc
 changes.*
 
-- **State:** built on main 2026-09-24, NOT FLOWN (entry "2026-09-24: issue
-  #38 and the five gaps"): a per-cycle long-frame breakdown, p99/max, late
-  frames and producer-copy GPU timing; the second Submit no longer holds
-  Elite through compose and xrEndFrame (`frame_end_overlap`); the XR owner
-  and pacer threads run at THREAD_PRIORITY_HIGHEST; performance settings and
-  Meta metrics are requested when a runtime offers them.
-- **Open:** sections 5 and 6 below (the private copy, the producer copy)
-  wait on `native_producer_gpu`: build either only if a copy costs more than
-  about 0.1 ms per eye. The depth layer is set aside (Sean, 2026-09-24). No
-  controlled comparison with the old OpenVR path exists; one now needs a
-  v0.16.2 build.
-- **Ruled out:** at the end of the 2026-09-24 entry.
-- **Next flight:** Frontier install, one session: 5+ minutes steady in a
-  ship, then a station. Pimax through SteamVR's OpenXR runtime if possible
-  (issue #38's configuration). Read the lines under "What the flight reads".
+- **State:** on main and FLOWN twice 2026-09-24 (SteamVR OpenXR, Pimax;
+  entries below): the long-cycle breakdown, p99/max, late frames,
+  producer-copy GPU timing, thread priority, and Meta metrics work.
+  `frame_end_overlap` cut Elite's second-Submit park to 0.17-0.24 ms but
+  BROKE the Application-render GPU timing (old sequence), so it now
+  defaults OFF.
+- **Open:** make the overlap retire the frame's timing before Submit
+  returns (compose, xrEndFrame and device timing stay queued), and record
+  `frame_end_owner_body` without the eye-count race; then fly it on. The
+  depth layer is set aside (Sean, 2026-09-24). No controlled comparison with
+  the old OpenVR path exists; one now needs a v0.16.2 build.
+- **Closed:** sections 5 and 6 below (the private and producer copies): the
+  producer copy measured 0.039 ms p50 per eye at 4100x3962, under the
+  0.1 ms bar.
+- **Ruled out:** at the end of each 2026-09-24 entry.
+- **Next flight:** after the overlap's timing fix: Frontier install,
+  SteamVR OpenXR, Elite Supersampling 1.0; check the Application-render GPU
+  line's invalid count stays near zero.
 - **Environment:** the numbers in the entry are Pimax Crystal Super, 90 Hz,
   separate device: Pimax OpenXR at 2600x2514, SteamVR OpenXR (`aapvr`) at
   4100x4050 and 2665x2087.
@@ -557,3 +560,43 @@ Ruled out:
   runtime enables only XR_KHR_D3D11_enable and uses the loader once, at
   startup.
 - ruled out: the owner rendezvous as a cost, because it measures 10-60 us.
+
+## 2026-09-24: flights 103456 and 104337
+
+Frontier install, build `74255330`, Pimax Crystal Super on SteamVR OpenXR
+(`aapvr`), 4100x3962 out, DLSS quality (2665x2575 in), HMD Quality 0.65.
+Sean reported DLSS broken, no GPU frame time, and the loading-screen
+hologram fix not working. The second flight, with Elite's Supersampling
+back at 1.0, restored DLSS and the hologram; the GPU frame time stayed
+broken.
+
+- The overlap works as a performance change: `second_submit_render_park`
+  p50 0.17-0.24 ms (0.76 ms before at 4100x4050), `next_wait_queue_delay`
+  p50 0.006 ms, so the wait did not move to the next WaitGetPoses.
+- It breaks GPU timing. Elite's thread resumes the producer and reopens an
+  application segment right after the second Submit (native_runtime_host.h,
+  the caller path); in the synchronous path the owner had already published
+  and retired the frame, so both were no-ops. With the finish queued, they
+  land on a live sequence and the Application-render GPU ring rejects the
+  frame's segments: `old sequence`, valid 8725 invalid 43706 (104337),
+  against invalid 2-3 on the older builds; the Monitor benchmark reads
+  `cpu --/--/-- valid 0`. The overlap now defaults off.
+- `frame_end_owner_body` reads 0 at p50: the queued job usually runs before
+  Elite's thread records its second eye, which the stats require.
+- `native_producer_gpu` copy p50 0.039 ms, p99 0.34-1.7 ms in steady windows
+  (the first window, loading in, 1.15 ms). Under the 0.1 ms bar: sections 5
+  and 6 are closed.
+- SteamVR's OpenXR runtime offers XR_META_performance_metrics
+  (`/perfmetrics_meta/app/gpu_frametime`, 3.8-6.1 ms by window) and not
+  XR_EXT_performance_settings.
+- `late_frames` 600 and `native_long_cycle` 50 in the 103456 session.
+
+Ruled out:
+
+- ruled out: this build breaking DLSS or the hologram fix, because Elite's
+  Supersampling (`SSAAMultiplier`) was below 1 in flight 103456: the world
+  was drawn into 1998x1931, 75% of the 2665x2575 eye texture ("busiest render
+  target" line), so DLSS got an upscaled image and the hologram draw never
+  matched; with Supersampling 1.0 (104337) both work on the same build.
+- ruled out: the producer-copy queries as the GPU timing fault, because the
+  rejected samples read `old sequence`, never `disjoint`.

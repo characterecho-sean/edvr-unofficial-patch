@@ -10,9 +10,9 @@ enum class LocalConfigResult { Absent, Ready, Invalid };
 struct LocalConfig {
   std::wstring loader, graphics, runtime;
   bool separateDevice=false;
-  // Both optional; absent means the default (high priority, overlap on).
+  // Both optional; absent means the default (high priority, overlap off).
   bool frameThreadPriorityHigh=true;
-  bool frameEndOverlap=true;
+  bool frameEndOverlap=false;
 };
 
 inline bool localConfigUsesSystemRuntime(const std::wstring& value) noexcept {

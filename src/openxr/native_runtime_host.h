@@ -80,8 +80,13 @@ struct RuntimeOptions {
   // module references remain alive through owner shutdown and callback release.
   HMODULE graphicsProvider = nullptr;
   // edvr_openxr.ini frame_thread_priority=high|normal and frame_end_overlap=on|off.
+  // The overlap defaults OFF: its queued finish publishes and retires the
+  // frame's timing after Elite has resumed, so Elite's post-Submit
+  // producerResume/applicationSegment land on a live sequence and the
+  // Application-render GPU ring rejects the frame's segments as old
+  // sequences (flight 20260924_104337: valid 8725, invalid 43706).
   bool frameThreadPriorityHigh=true;
-  bool frameEndOverlap=true;
+  bool frameEndOverlap=false;
 };
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
@@ -270,7 +275,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // is owner-thread-only state read back by the queued job or, if OwnerService
   // cancelled it unrun, by close()'s inline fallback; frameEnd*Count are the
   // native_frame_end_overlap_summary tallies at session close.
-  bool frameEndOverlapEnabled=true;
+  bool frameEndOverlapEnabled=false;
   bool pendingFrameEndFinish=false;
   vr::EVREye pendingFrameEndEye=vr::Eye_Left;
   uint64_t frameEndOverlapCount=0,frameEndSyncCount=0,frameEndInlineAtCloseCount=0,frameEndFailureCount=0;
