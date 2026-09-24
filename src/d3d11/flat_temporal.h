@@ -30,6 +30,8 @@ void flatTemporalBeforePresent(IDXGISwapChain* swap, uint64_t frame, UINT flags)
 void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags);
 void flatTemporalBind(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv);
 void flatTemporalViewport(UINT count, const D3D11_VIEWPORT* viewports);
+void flatTemporalConstantBuffers(bool pixelStage, UINT start, UINT count, ID3D11Buffer* const* buffers);
+void flatTemporalClearBindings();  // an observed ClearState, explicitly unbound
 void flatTemporalDraw(uint32_t count, uint32_t instances);
 void flatTemporalClearColor(ID3D11RenderTargetView* rtv);
 void flatTemporalClearDepth(ID3D11DepthStencilView* dsv, UINT flags, float depth);

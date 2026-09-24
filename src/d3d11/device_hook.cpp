@@ -26,6 +26,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "render_boundary.h"
 
 #include <atomic>
+#include <cstring>
 
 #include "../common/config.h"
 #include "../common/temporal_mode.h"
@@ -62,6 +63,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "static_prop_gate.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "flat_temporal.h"   // flat profile discovery at owned Present
+#include "flat_shader_capture.h"
 #include "perf_monitor.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -207,7 +209,8 @@ struct State {
     // disassemble. Diagnostic; costs file writes on the streaming threads.
     bool         shaderDump = false;
     std::wstring shaderDumpDir;
-    bool         shaderDumpDirMade = false;
+    std::atomic<bool> shaderDumpDirMade{false};
+    std::atomic<uint32_t> flatShaderCaptureAttempted{0};
     PFN_Present      realPresent = nullptr;
     PFN_CreateSwapChain        realCreateSwapChain = nullptr;
     PFN_CreateSwapChainForHwnd realCreateSwapChainForHwnd = nullptr;
@@ -511,23 +514,84 @@ FaultBudget g_frameBudget("deviceHook.frameBoundary", 8);
 // the game's asset-streaming threads while armed; CreateDirectory once,
 // CreateFile per blob, and a blob that already exists is skipped so a
 // session's repeated creates cost one write each.
-void dumpShaderBlob(const wchar_t* prefix, uint64_t hash, const void* bytecode,
-                    SIZE_T len) {
+struct ShaderDumpResult {
+    bool success = false;
+    bool existed = false;
+    DWORD bytes = 0;
+    DWORD error = ERROR_SUCCESS;
+};
+ShaderDumpResult dumpShaderBlob(const wchar_t* prefix, uint64_t hash, const void* bytecode,
+                               SIZE_T len, bool verifyExisting = false) {
+    ShaderDumpResult result;
+    if (!bytecode || !len || len > MAXDWORD) { result.error = ERROR_INVALID_PARAMETER; return result; }
     State* s = g_state;
-    if (!s->shaderDumpDirMade) {
-        s->shaderDumpDirMade = true;
-        CreateDirectoryW(s->shaderDumpDir.c_str(), nullptr);
+    if (!s->shaderDumpDirMade.load(std::memory_order_acquire)) {
+        if (!CreateDirectoryW(s->shaderDumpDir.c_str(), nullptr)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_ALREADY_EXISTS) { result.error = error; return result; }
+        }
+        s->shaderDumpDirMade.store(true, std::memory_order_release);
     }
     wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\%s_%016llX.dxbc",
-                 s->shaderDumpDir.c_str(), prefix,
-                 static_cast<unsigned long long>(hash));
+    if (_snwprintf_s(path, _TRUNCATE, L"%s\\%s_%016llX.dxbc",
+                    s->shaderDumpDir.c_str(), prefix,
+                    static_cast<unsigned long long>(hash)) < 0) {
+        result.error = ERROR_FILENAME_EXCED_RANGE;
+        return result;
+    }
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return;   // exists already, or unwritable
+    if (h == INVALID_HANDLE_VALUE) {
+        result.error = GetLastError();
+        if (result.error != ERROR_FILE_EXISTS && result.error != ERROR_ALREADY_EXISTS) return result;
+        result.existed = true;
+        if (!verifyExisting) { result.success = true; result.error = ERROR_SUCCESS; return result; }
+        // A pre-existing partial/corrupt dump is not successful evidence.
+        h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) { result.error = GetLastError(); return result; }
+        LARGE_INTEGER size{};
+        bool ok = GetFileSizeEx(h, &size) != FALSE;
+        result.error = ok ? ERROR_INVALID_DATA : GetLastError();
+        ok = ok && size.QuadPart == static_cast<LONGLONG>(len);
+        const BYTE* expected = static_cast<const BYTE*>(bytecode);
+        BYTE chunk[4096];
+        while (ok && result.bytes < len) {
+            const DWORD want = static_cast<DWORD>((len - result.bytes) < sizeof(chunk) ?
+                                                 len - result.bytes : sizeof(chunk));
+            DWORD got = 0;
+            if (!ReadFile(h, chunk, want, &got, nullptr)) { result.error = GetLastError(); ok = false; }
+            else if (got != want || std::memcmp(chunk, expected + result.bytes, want) != 0) ok = false;
+            else result.bytes += got;
+        }
+        CloseHandle(h);
+        result.success = ok;
+        if (ok) result.error = ERROR_SUCCESS;
+        return result;
+    }
     DWORD written = 0;
-    WriteFile(h, bytecode, static_cast<DWORD>(len), &written, nullptr);
-    CloseHandle(h);
+    const BOOL wrote = WriteFile(h, bytecode, static_cast<DWORD>(len), &written, nullptr);
+    result.error = wrote ? (written == len ? ERROR_SUCCESS : ERROR_WRITE_FAULT) : GetLastError();
+    const BOOL closed = CloseHandle(h);
+    if (!closed && result.error == ERROR_SUCCESS) result.error = GetLastError();
+    result.bytes = written;
+    result.success = result.error == ERROR_SUCCESS;
+    if (!result.success) DeleteFileW(path); // only the new file this call created
+    return result;
+}
+
+void captureFlatShader(char stage, uint64_t hash, const void* bytecode, SIZE_T len) {
+    // hash is the repository fnv1a64 of these exact creation bytes, computed
+    // upstream. One atomic admission per stage/hash per device, across streams.
+    const uint32_t bit = flatShaderCaptureBit(runtimeFlatProfile(), stage, hash);
+    if (!bit || (g_state->flatShaderCaptureAttempted.fetch_or(bit, std::memory_order_relaxed) & bit)) return;
+    Log::get().note("flat shader capture: attempted stage=%cs hash=%016llX bytes=%llu",
+                    stage, static_cast<unsigned long long>(hash), static_cast<unsigned long long>(len));
+    const auto result = dumpShaderBlob(stage == 'v' ? L"vs" : L"ps", hash, bytecode, len, true);
+    Log::get().note("flat shader capture: %s stage=%cs hash=%016llX bytes=%llu saved-bytes=%u existing=%u error=%u",
+                    result.success ? "succeeded" : "failed", stage, static_cast<unsigned long long>(hash),
+                    static_cast<unsigned long long>(len), unsigned(result.bytes), unsigned(result.existed),
+                    unsigned(result.error));
 }
 
 // The game's own creations, counted for the monitor's long-frame line
@@ -596,6 +660,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
+        captureFlatShader('v', hash, bytecode, len);
         registerShaderHash(*out, hash);
         // ...and its INPUT SIGNATURE, which is a different question from its
         // identity: whether the panel composite's shader reads the z of the
@@ -624,6 +689,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
+        captureFlatShader('p', hash, bytecode, len);
         registerShaderHash(*out, hash);
         uiSeparationRemember(static_cast<ID3D11PixelShader*>(*out),bytecode,static_cast<size_t>(len),linkage!=nullptr);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
@@ -2306,6 +2372,8 @@ void hookDevice(ID3D11Device* device) {
 
     s.shaderDump = sentinelCfg.getBool("advanced.glare_shader_dump", false);
     s.shaderDumpDir = sentinelCfg.logDir() + L"\\shaders";
+    if (runtimeFlatProfile())
+        Log::get().note("flat shader capture: armed targets=13 stages=VS,PS directory=%ls; watching successful creations, one attempt per exact stage/hash per device; absent attempted lines mean no capture attempt", s.shaderDumpDir.c_str());
     if (s.shaderDump) {
         Log::get().note("shader dump ARMED: every vertex and pixel shader "
                         "the game creates is written to edvr_logs\\shaders "

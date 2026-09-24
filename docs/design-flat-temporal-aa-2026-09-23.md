@@ -11,7 +11,8 @@
   measured tone/copy/UI chain. Passive mono selection now replays all 70 world
   and three handoff records at both sizes; the selector build also passes all
   83 jobs and the 254-key contract. See section 10. Flat temporal
-  reconstruction/jitter are NOT enabled.
+  reconstruction/jitter are NOT enabled. The focused shader/projection capture
+  passes all 83 build jobs and is ready for Epic qualification (section 11).
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -30,10 +31,12 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next session:** qualify the paired scene/deferred projection correction and
-  remaining consumers before jitter. Avoid another broad discovery flight.
-  Later qualify treatment, on-foot scenes and each mod arrangement. Use
-  `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
+- **Next session:** one Epic flat session in the same cockpit at 0.75x SS;
+  press F10 once, gently move the camera for 20 seconds, then exit. Read the
+  focused shader/projection evidence (section 11) before enabling jitter. Avoid
+  another broad discovery flight. Later qualify treatment, on-foot scenes and
+  each mod arrangement. Use `tools/edvr_log.py` with the actual `--target`,
+  `--expect-build HEAD` and
   `--grep "flat (temporal|discover)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
@@ -552,3 +555,35 @@ restoring a binding alone cannot undo jitter already rendered into pixels. The
 next focused qualification must cover displacement/sign at both sizes,
 forward/inverse agreement, world coverage, unchanged late UI and injected
 backend failure. No additional general capture is needed for frame selection.
+
+## 11. Focused projection capture, 2026-09-24
+
+Prepare one Epic run to collect the missing shader bytes and actual projection
+buffer ownership together. The flat profile now admits only the 13 missing
+stage/hash pairs listed above, once per device, through the existing shader
+dump path. It logs armed, attempted and succeeded/failed separately. Existing
+files must match the creation bytes exactly; partial or corrupt files cannot
+count as successful evidence. Admission tests and a harness for actual writes,
+existing-file verification and failure paths pass. General shader dumping is
+not enabled.
+
+The companion records VS b0[4..7], VS b2[0..16] and PS b2[0..16] from observed
+CPU writes, with exact buffer identity, byte hash and write timing. Format-60
+scene records are now retained individually. Startup uses compact summaries;
+manual F10 permits two full detailed reports, with one bounded fallback if
+selection refuses. Repeated refusals preserve the last selected sample.
+Projection payloads deduplicate with a cap of 128 per report and explicit
+overflow counts, carrying exact uint32 bits as well as floats. The small-buffer
+bank grows from 32 to 128 based on the observed at-most-62 distinct buffers per
+frame; the large-buffer bank remains 32. Bindings are stage-specific, observed
+through forwarding setters rather than GPU readback; unknown, unbound, missing,
+invalid, stale and short writes remain distinct. A single 0.75x SS session is
+sufficient for this evidence; the existing native/scaled comparison need not be
+repeated. AA and jitter stay inactive during this capture.
+
+Validation: targeted collector, hook and regression builds pass, including
+exact-byte shader-file checks and both complete prior flight replays. Full
+`build/flat-projection-capture-build-retry.log` passes all 83 jobs, the 254-key
+contract and installer payload gates. The first full attempt stopped at the
+existing wall-clock-sensitive run_jobs self-test's start-order assertion; that
+check passed alone and in the full retry without changing its source.

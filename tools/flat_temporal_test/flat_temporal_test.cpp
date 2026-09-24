@@ -1,8 +1,10 @@
 #include "../../src/d3d11/flat_temporal_model.h"
 #include "../../src/d3d11/flat_mono_frame.h"
 #include "../../src/d3d11/engine_velocity_families.h"
+#include "flat_shader_capture_tests.h"
 
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <limits>
 
@@ -21,6 +23,128 @@ struct Route {
 int failures = 0;
 void check(bool condition, const char* what) {
     if (!condition) { std::printf("FAIL: %s\n", what); ++failures; }
+}
+void testProjectionSlices() {
+    using namespace edvr;
+    using Status = FlatProjectionStatus;
+    unsigned char prefix[4096]{};
+    for (unsigned i = 0; i < sizeof(prefix); ++i) prefix[i] = static_cast<unsigned char>(i);
+    FlatProjectionBinding vs{}, ps{};
+    const void* buffer = reinterpret_cast<void*>(0xB200);
+    auto observe = [&](const FlatProjectionBinding& binding, uint32_t slot, uint32_t width,
+                       uint32_t bytes, uint64_t epoch = 11, uint32_t seq = 20,
+                       bool tracked = true) {
+        const uint32_t offset = flatProjectionOffset(slot);
+        const uint32_t copied = bytes > offset ? std::min(bytes - offset, flatProjectionCapacity(slot)) : 0;
+        return flatObserveProjection(binding, tracked, width, prefix, bytes,
+            epoch, seq, 11, 30, slot, flatProjectionHash(prefix + offset, copied));
+    };
+    check(observe(vs, 1, 272, 272).status == Status::BindingUnknown,
+          "unseen setter is unknown even when CPU bytes exist");
+    check(!flatProjectionBind(vs, 2, 3, 1, buffer) && !vs.observed,
+          "setter range cannot invent a b2 binding");
+    check(flatProjectionBind(vs, 2, 0, 3, buffer) && vs.observed && vs.resource == buffer && !ps.observed,
+          "VS b2 observation does not establish PS b2 ownership");
+    flatProjectionBind(ps, 2, 2, 1, nullptr);
+    check(observe(ps, 2, 272, 272).status == Status::Unbound,
+          "explicit PS null binding differs from unknown");
+    check(observe(vs, 1, 272, 272, 11, 20, false).status == Status::MissingWrite,
+          "bound resource without CPU write is missing");
+    check(observe(vs, 1, 272, 0).status == Status::InvalidWrite &&
+          observe(vs, 1, 272, 273).status == Status::InvalidWrite,
+          "invalidated or impossible CPU prefix is not available");
+    check(observe(vs, 1, 272, 272, 10).status == Status::OldFrame &&
+          observe(vs, 1, 272, 272, 11, 31).status == Status::LaterWrite,
+          "old-frame and post-draw writes are distinguished");
+    auto b0 = observe(vs, 0, 128, 128);
+    check(b0.status == Status::Available && b0.copied == 64 && b0.bytes == prefix + 64,
+          "b0 rows4..7 require exactly 128 bytes and skip rows0..3");
+    check(observe(vs, 0, 127, 127).copied == 63 && observe(vs, 0, 127, 127).status == Status::ShortRange &&
+          observe(vs, 0, 80, 80).copied == 16 && observe(vs, 0, 64, 64).copied == 0,
+          "short b0 widths expose only available requested bytes");
+    check(observe(vs, 1, 272, 272).status == Status::Available &&
+          observe(vs, 2, 271, 271).status == Status::ShortRange &&
+          observe(vs, 1, 65536, 4096).copied == 272,
+          "VS and PS b2 stop at row16 and respect exact 272-byte boundary");
+
+    FlatContractRecord records[12]{};
+    uint32_t used = 0, dropped = 0;
+    unsigned char camera[kFlatCameraBytes]{};
+    FlatContractObservation draw{};
+    draw.kind = kFlatContractScreen; draw.camera = camera; draw.cameraHash = flatCameraHash(camera);
+    draw.b1 = reinterpret_cast<void*>(0xB100); draw.sequence = 30;
+    draw.projection[1] = observe(vs, 1, 272, 272);
+    auto* first = flatRecordContract(records, used, dropped, draw);
+    const unsigned char old = prefix[0]; prefix[0] ^= 1;
+    // Force equal hashes: exact bytes must distinguish reuse and NaN payloads.
+    auto* changed = flatRecordContract(records, used, dropped, draw);
+    check(first != changed && used == 2 && first->vsB2[0] == old && changed->vsB2[0] == prefix[0],
+          "same camera and reused b2 resource freeze different bytes despite hash collision");
+    draw.projection[2] = draw.projection[1];
+    auto* psBound = flatRecordContract(records, used, dropped, draw);
+    check(psBound != changed, "independent PS b2 binding is part of the contract key");
+    draw.projection[2].resource = reinterpret_cast<void*>(0xB201);
+    check(flatRecordContract(records, used, dropped, draw) != psBound,
+          "identical bytes with distinct PS buffer identities remain distinct");
+    draw.projection[2] = {}; draw.projection[1].writeSeq = 24; draw.sequence = 35;
+    check(flatRecordContract(records, used, dropped, draw) == changed && changed->firstProjectionSeq[1] == 20 &&
+          changed->lastProjectionSeq[1] == 24 && changed->first == 30 && changed->last == 35,
+          "equal frozen bytes aggregate first and last write/draw provenance");
+    uint32_t nanBits = 0x7FC00001u; std::memcpy(prefix, &nanBits, sizeof(nanBits));
+    auto* nanOne = flatRecordContract(records, used, dropped, draw);
+    nanBits = 0x7FC00002u; std::memcpy(prefix, &nanBits, sizeof(nanBits));
+    auto* nanTwo = flatRecordContract(records, used, dropped, draw);
+    uint32_t frozenBits = 0; std::memcpy(&frozenBits, nanOne->vsB2, sizeof(frozenBits));
+    check(nanOne != nanTwo && frozenBits == 0x7FC00001u,
+          "different NaN payload bit patterns survive freezing and never coalesce");
+    draw.projection[1] = observe(vs, 1, 272, 272, 10);
+    auto* stale = flatRecordContract(records, used, dropped, draw);
+    draw.projection[1] = observe(vs, 1, 272, 272, 11, 31);
+    auto* later = flatRecordContract(records, used, dropped, draw);
+    draw.projection[1] = observe(vs, 1, 272, 272, 11, 20, false);
+    auto* missing = flatRecordContract(records, used, dropped, draw);
+    check(stale != later && later != missing && stale->key.projection[1].copied == 0 &&
+          later->key.projection[1].copied == 0, "unavailable write causes stay separate without stale payload");
+    draw.projection[1].copied = 273; draw.projection[1].bytes = prefix;
+    const uint32_t before = used;
+    check(!flatRecordContract(records, used, dropped, draw) && dropped == 1 && used == before,
+          "oversized projection observation is refused before copying");
+    check(flatContractKind(false, buffer, buffer, 960, 540, 60, 1280, 720, false) == kFlatContractScreen &&
+          flatContractKind(false, buffer, buffer, 320, 180, 60, 1280, 720, false) == kFlatContractNone,
+          "screen-sized format60 inverse pass captured without admitting small auxiliary target");
+    FlatContractRecord inverse[2]{}; used = dropped = 0;
+    draw = {}; draw.kind = flatContractKind(false, buffer, buffer, 960, 540, 60, 1280, 720, false);
+    draw.color = draw.depth = buffer; draw.width = 960; draw.height = 540; draw.format = 60;
+    draw.vs = 0x53211E8C072CD02Eull; draw.ps = 0x7EAC71963E66C5FEull;
+    draw.sequence = 322; draw.projection[2] = observe(vs, 2, 272, 272);
+    auto* inverseFirst = flatRecordContract(inverse, used, dropped, draw);
+    draw.sequence = 323; draw.ps ^= 1;
+    auto* inverseSecond = flatRecordContract(inverse, used, dropped, draw);
+    check(inverseFirst && inverseSecond && inverseFirst != inverseSecond && inverseFirst->key.format == 60 &&
+          inverseFirst->key.projection[2].status == Status::Available && inverseFirst->first == 322 &&
+          inverseSecond->first == 323 && used == 2 && dropped == 0,
+          "format60's two draw-time shader pairs and PS-owned inverse constants remain distinguishable");
+}
+void testDetailBudget() {
+    using namespace edvr;
+    uint32_t remaining = 2; bool refusal = false;
+    check(flatTakeDetailSample(false, 10, 70, true, remaining, refusal) == FlatDetailAdmission::Startup && remaining == 2,
+          "startup never emits full capture details");
+    check(flatTakeDetailSample(true, 0, 70, true, remaining, refusal) == FlatDetailAdmission::Empty &&
+          flatTakeDetailSample(true, 10, 0, false, remaining, refusal) == FlatDetailAdmission::Empty && remaining == 2,
+          "rearm and empty presents cannot spend a detail sample");
+    check(flatTakeDetailSample(true, 10, 70, false, remaining, refusal) == FlatDetailAdmission::Refusal && remaining == 1,
+          "first useful manual refusal retains diagnostic contracts");
+    check(flatTakeDetailSample(true, 11, 70, false, remaining, refusal) == FlatDetailAdmission::RefusalAlreadyReported && remaining == 1,
+          "repeated refusal preserves remaining selected sample");
+    check(flatTakeDetailSample(true, 12, 70, true, remaining, refusal) == FlatDetailAdmission::Selected && remaining == 0 &&
+          flatTakeDetailSample(true, 13, 70, true, remaining, refusal) == FlatDetailAdmission::Exhausted,
+          "refusal plus selected frame cannot exceed two whole detailed reports");
+    remaining = 2; refusal = false;
+    check(flatTakeDetailSample(true, 20, 70, true, remaining, refusal) == FlatDetailAdmission::Selected &&
+          flatTakeDetailSample(true, 21, 70, true, remaining, refusal) == FlatDetailAdmission::Selected &&
+          flatTakeDetailSample(true, 22, 70, false, remaining, refusal) == FlatDetailAdmission::Exhausted && remaining == 0,
+          "two selected reports exhaust budget before any later refusal");
 }
 void testAssociationAndBounds() {
     Pair pairs[2]{};
@@ -528,6 +652,9 @@ int main(int argc, char** argv) {
     testContractAdmissionAndReservation();
     testAdmissionAndWindow();
     testMonoFrameSelection();
+    testProjectionSlices();
+    testDetailBudget();
+    failures += flatShaderCaptureTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

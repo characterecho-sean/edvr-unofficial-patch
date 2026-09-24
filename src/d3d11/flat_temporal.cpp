@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <type_traits>
 
@@ -28,7 +29,12 @@ constexpr uint32_t kViewSlots = 1024;
 constexpr uint32_t kTargets = 128;
 constexpr uint32_t kEdges = 256;
 constexpr uint32_t kOutputEdges = 64;
-constexpr uint32_t kCbs = 64;  // 32 large scene-size and 32 small buffers per frame
+constexpr uint32_t kLargeCbs = 32;
+// Prior Epic frames admitted 32 small buffers and dropped at most 30 write
+// observations: at most 62 distinct small buffers. Keep bounded headroom for
+// their newly needed VS/PS projection slices without evicting scene buffers.
+constexpr uint32_t kSmallCbs = 128;
+constexpr uint32_t kCbs = kLargeCbs + kSmallCbs;
 constexpr uint32_t kContracts = 224;
 constexpr uint32_t kHandoffContracts = 32;  // reserved; 256 total records
 constexpr uint32_t kCbBytes = kFlatCbExemplarBytes;
@@ -72,6 +78,7 @@ struct Cb {
     unsigned char camera[kFlatCameraBytes] = {};
     uint64_t cameraHash = 0;
     bool cameraValid = false;
+    uint32_t b0Hash = 0, b2Hash = 0;
 };
 struct DepthClear {
     void* dsv = nullptr;
@@ -107,6 +114,11 @@ struct State {
     uint32_t outputEdgeCount = 0;
     Cb cbs[kCbs] = {};
     uint32_t largeCbCount = 0, smallCbCount = 0;
+    FlatProjectionBinding projectionBindings[kFlatProjectionSlots] = {};
+    uint32_t projectionBindCalls[2] = {};
+    uint32_t projectionDetailsRemaining = 0;
+    bool projectionManual = false;
+    bool detailRefusalReported = false;
     FlatContractRecord contracts[kContracts] = {};
     uint32_t contractCount = 0, contractOverflow = 0;
     FlatContractRecord handoffContracts[kHandoffContracts] = {};
@@ -176,11 +188,11 @@ void edge(void* src, void* dst, char kind) {
 }
 
 Cb* cbOf(void* res, uint32_t width) {
-    const uint32_t base = width >= 3776 ? 0 : kCbs / 2;
+    const uint32_t base = width >= 3776 ? 0 : kLargeCbs;
     uint32_t& count = width >= 3776 ? g.largeCbCount : g.smallCbCount;
     for (uint32_t i = 0; i < count; ++i)
         if (g.cbs[base + i].resource == res) return &g.cbs[base + i];
-    if (count == kCbs / 2) {
+    if (count == (width >= 3776 ? kLargeCbs : kSmallCbs)) {
         ++(width >= 3776 ? g.largeCbOverflow : g.smallCbOverflow);
         return nullptr;
     }
@@ -191,6 +203,7 @@ Cb* cbOf(void* res, uint32_t width) {
     cb.copied = cb.writes = cb.draws = cb.writeSeq = cb.drawSeq = 0;
     cb.writeEpoch = cb.drawEpoch = cb.vsHash = 0;
     cb.cameraValid = false; cb.cameraHash = 0;
+    cb.b0Hash = cb.b2Hash = 0;
     return &cb;
 }
 
@@ -199,7 +212,7 @@ Cb* findCb(void* res) {
     for (uint32_t i = 0; i < g.largeCbCount; ++i)
         if (g.cbs[i].resource == res) return &g.cbs[i];
     for (uint32_t i = 0; i < g.smallCbCount; ++i)
-        if (g.cbs[kCbs / 2 + i].resource == res) return &g.cbs[kCbs / 2 + i];
+        if (g.cbs[kLargeCbs + i].resource == res) return &g.cbs[kLargeCbs + i];
     return nullptr;
 }
 
@@ -209,6 +222,7 @@ void invalidateCb(void* res) {
         cb->writeEpoch = 0;
         cb->mapped = nullptr;
         cb->cameraValid = false; cb->cameraHash = 0;
+        cb->b0Hash = cb->b2Hash = 0;
     }
 }
 
@@ -228,6 +242,12 @@ uint32_t hashBytes(const unsigned char* data, uint32_t n) {
     uint32_t h = 2166136261u;
     for (uint32_t i = 0; i < n; ++i) h = (h ^ data[i]) * 16777619u;
     return h;
+}
+
+void projectionHashes(Cb& cb) {
+    const uint32_t b0Bytes = cb.copied > 64 ? std::min(cb.copied - 64, kFlatB0Bytes) : 0;
+    cb.b0Hash = flatProjectionHash(cb.bytes + 64, b0Bytes);
+    cb.b2Hash = flatProjectionHash(cb.bytes, std::min(cb.copied, kFlatB2Bytes));
 }
 
 void printCb(const Target& t, uint32_t slot, const FlatCbExemplar& cb) {
@@ -276,7 +296,7 @@ void printCb(const Target& t, uint32_t slot, const FlatCbExemplar& cb) {
     else if (plausible > 4) Log::get().note("flat discover projection-like bytes: VS b%u %u further candidates omitted", slot, plausible - 4);
 }
 
-void printContracts(uint64_t frame) {
+void printContracts(uint64_t frame, bool details) {
     Log::get().note("flat discover contract inventory frame=%llu world-retained=%u world-capacity=%u world-dropped-draw-observations=%u handoff-retained=%u handoff-capacity=%u handoff-dropped-draw-observations=%u eligible-draws(pool,screen,output)=%u,%u,%u camera-draws(available,missing-buffer,invalid-write,old-frame,later-write)=%u,%u,%u,%u,%u pool-camera-draws=%u; zero eligible is no matching draw, dropped observations are incomplete evidence; family declaration and PS bindings only, shader consumption unproved",
         static_cast<unsigned long long>(frame), g.contractCount, kContracts,
         g.contractOverflow, g.handoffContractCount, kHandoffContracts,
@@ -285,6 +305,7 @@ void printContracts(uint64_t frame) {
         g.contractCamera[kFlatCameraAvailable], g.contractCamera[kFlatCameraMissingBuffer],
         g.contractCamera[kFlatCameraInvalidWrite], g.contractCamera[kFlatCameraOldFrame],
         g.contractCamera[kFlatCameraLaterWrite], g.poolCameraDraws);
+    if (!details) return;
     for (uint32_t i = 0; i < g.contractCount + g.handoffContractCount; ++i) {
         const bool handoff = i >= g.contractCount;
         const FlatContractRecord& r = handoff ? g.handoffContracts[i - g.contractCount] : g.contracts[i];
@@ -318,7 +339,7 @@ void printContracts(uint64_t frame) {
     }
 }
 
-void printMonoInput(uint64_t frame) {
+FlatMonoFrame printMonoInput(uint64_t frame) {
     FlatMonoFrameInput input{};
     input.world = g.contracts; input.worldCount = g.contractCount;
     input.handoff = g.handoffContracts; input.handoffCount = g.handoffContractCount;
@@ -342,6 +363,99 @@ void printMonoInput(uint64_t frame) {
         mono.renderWidth, mono.renderHeight, mono.output, mono.outputWidth, mono.outputHeight,
         mono.supportedDraws, mono.unsupportedDraws, mono.sourceFirst, mono.sourceLast,
         mono.hdrFirst, mono.hdrLast, mono.toneSequence, mono.copySequence, mono.firstLaterOutput);
+    return mono;
+}
+
+void printProjectionPayload(uint64_t frame, uint32_t id, uint32_t offset,
+                            const unsigned char* bytes, uint32_t copied) {
+    // Four float4 rows per line, at most 17 rows per bounded payload. Printed
+    // once per identical offset/byte payload in this selected report.
+    const uint32_t rows = copied / 16;
+    for (uint32_t row = 0; row < rows; row += 4) {
+        char values[512] = {}, bits[160] = {};
+        size_t used = 0, bitsUsed = 0;
+        const uint32_t count = std::min(4u, rows - row);
+        for (uint32_t n = 0; n < count; ++n) {
+            float v[4]; std::memcpy(v, bytes + (row + n) * 16, sizeof(v));
+            const int written = std::snprintf(values + used, sizeof(values) - used,
+                "%s%.9g %.9g %.9g %.9g", n ? " | " : "", v[0], v[1], v[2], v[3]);
+            if (written < 0 || static_cast<size_t>(written) >= sizeof(values) - used) break;
+            used += static_cast<size_t>(written);
+            uint32_t raw[4]; std::memcpy(raw, bytes + (row + n) * 16, sizeof(raw));
+            const int bitCount = std::snprintf(bits + bitsUsed, sizeof(bits) - bitsUsed,
+                "%s%08X %08X %08X %08X", n ? " | " : "", raw[0], raw[1], raw[2], raw[3]);
+            if (bitCount < 0 || static_cast<size_t>(bitCount) >= sizeof(bits) - bitsUsed) break;
+            bitsUsed += static_cast<size_t>(bitCount);
+        }
+        Log::get().note("flat discover projection-payload frame=%llu ref=%u rows=%u..%u values=%s bits-u32=%s",
+            static_cast<unsigned long long>(frame), id, offset / 16 + row,
+            offset / 16 + row + count - 1, values, bits);
+    }
+    // Normal D3D CB widths are 16-byte aligned; preserve any short diagnostic
+    // tail too, so the printed bytes always reconstruct the recorded hash.
+    if (copied % 16) {
+        char tail[31] = {};
+        for (uint32_t i = 0; i < copied % 16; ++i)
+            std::snprintf(tail + i * 2, sizeof(tail) - i * 2, "%02X", bytes[rows * 16 + i]);
+        Log::get().note("flat discover projection-payload-tail frame=%llu ref=%u byte-offset=%u bytes-hex=%s",
+            static_cast<unsigned long long>(frame), id, offset + rows * 16, tail);
+    }
+}
+
+void printProjections(uint64_t frame, const FlatMonoFrame& mono, bool details) {
+    const char* status = !g.projectionManual ? "not-manually-armed" :
+        !mono.selected() ? "selector-refused-no-projection-payload" :
+        !details ? "detail-not-admitted" : "emitted";
+    Log::get().note("flat discover projection-summary frame=%llu details=%s selector=%s detail-budget=%u bindings-observed(VS,PS)=%u,%u cb-pool-used(large,small)=%u,%u cb-pool-capacity=%u,%u cb-drops=%u,%u; VS b0 rows4..7, VS b2 rows0..16, PS b2 rows0..16; stage bindings are independent and unobserved is not unbound",
+        static_cast<unsigned long long>(frame), status, flatMonoReasonName(mono.reason),
+        g.projectionDetailsRemaining, g.projectionBindCalls[0], g.projectionBindCalls[1],
+        g.largeCbCount, g.smallCbCount, kLargeCbs, kSmallCbs, g.largeCbOverflow, g.smallCbOverflow);
+    if (!details || !mono.selected()) return;
+    struct Payload { const unsigned char* bytes = nullptr; uint32_t copied = 0, hash = 0, offset = 0; };
+    constexpr uint32_t kPayloads = 128; // bounded log payload; all binding metadata still prints
+    Payload payloads[kPayloads] = {};
+    uint32_t used = 0, records = 0, format60 = 0, dropped = 0;
+    uint32_t coverage[kFlatProjectionSlots][8] = {};
+    static const char* stages[kFlatProjectionSlots] = {"VSb0", "VSb2", "PSb2"};
+    for (uint32_t index = 0; index < g.contractCount + g.handoffContractCount; ++index) {
+        const auto& r = index < g.contractCount ? g.contracts[index] : g.handoffContracts[index - g.contractCount];
+        const auto& k = r.key;
+        if (k.depth != mono.depth && k.color != mono.hdr && k.color != mono.color && k.color != mono.output) continue;
+        ++records;
+        if (k.format == 60 && k.depth == mono.depth) format60 += r.draws;
+        for (uint32_t slot = 0; slot < kFlatProjectionSlots; ++slot) {
+            const auto& p = k.projection[slot];
+            ++coverage[slot][static_cast<uint32_t>(p.status)];
+            uint32_t ref = 0;
+            if (p.copied) {
+                const uint32_t offset = flatProjectionOffset(slot);
+                for (uint32_t i = 0; i < used; ++i) {
+                    const auto& known = payloads[i];
+                    if (known.copied == p.copied && known.hash == p.hash && known.offset == offset &&
+                        std::memcmp(known.bytes, r.projectionBytes(slot), p.copied) == 0) { ref = i + 1; break; }
+                }
+                if (!ref && used < kPayloads) {
+                    payloads[used] = {r.projectionBytes(slot), p.copied, p.hash, offset};
+                    ref = ++used;
+                    printProjectionPayload(frame, ref, offset, r.projectionBytes(slot), p.copied);
+                } else if (!ref) ++dropped;
+            }
+            Log::get().note("flat discover projection-binding frame=%llu index=%u stage=%s resource=%p width=%u offset=%u requested=%u copied=%u hash=%08X status=%s ref=%u write-epoch=%llu..%llu write-q=%u..%u draw-epoch=%llu q=%u..%u; bytes frozen at draw, ownership and correction eligibility unproved",
+                static_cast<unsigned long long>(frame), index, stages[slot], p.resource, p.width,
+                flatProjectionOffset(slot), flatProjectionCapacity(slot), p.copied, p.hash,
+                flatProjectionStatusName(p.status), ref,
+                static_cast<unsigned long long>(r.firstProjectionEpoch[slot]),
+                static_cast<unsigned long long>(r.lastProjectionEpoch[slot]),
+                r.firstProjectionSeq[slot], r.lastProjectionSeq[slot],
+                static_cast<unsigned long long>(g.epoch), r.first, r.last);
+        }
+    }
+    for (uint32_t slot = 0; slot < kFlatProjectionSlots; ++slot) {
+        const auto* c = coverage[slot];
+        Log::get().note("flat discover projection-coverage frame=%llu stage=%s records=%u state-counts(binding-unknown,unbound,write-missing,invalid,old,later,short,complete)=%u,%u,%u,%u,%u,%u,%u,%u selected-depth-format60-draws=%u payloads=%u payload-drops=%u detail-budget-left=%u; coverage counts availability only",
+            static_cast<unsigned long long>(frame), stages[slot], records, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+            format60, used, dropped, g.projectionDetailsRemaining);
+    }
 }
 
 void report(uint64_t frame, const char* phase) {
@@ -357,6 +471,16 @@ void report(uint64_t frame, const char* phase) {
                     g.outputEdgeOverflow, g.largeCbOverflow, g.smallCbOverflow,
                     g.depthClearOverflow,
                     g.backbuffer, g.backW, g.backH, g.backFmt);
+    const FlatMonoFrame mono = printMonoInput(frame);
+    const auto admission = flatTakeDetailSample(g.projectionManual, frame,
+        g.contractCount + g.handoffContractCount, mono.selected(),
+        g.projectionDetailsRemaining, g.detailRefusalReported);
+    const bool details = admission == FlatDetailAdmission::Selected || admission == FlatDetailAdmission::Refusal;
+    Log::get().note("flat discover detail-policy frame=%llu decision=%s detail-budget-left=%u max-full-reports=2 payload-capacity-per-report=128; startup summary only, first useful manual refusal may consume one sample",
+        static_cast<unsigned long long>(frame), flatDetailAdmissionName(admission), g.projectionDetailsRemaining);
+    printContracts(frame, details);
+    printProjections(frame, mono, details);
+    if (!details) return;
     // At most 128 admitted target pairs per sampled frame. Every row matters:
     // depth-only passes and intermediate colour paths can outdraw the scene.
     uint32_t depthOnly = 0, colorDepth = 0, unresolved = 0;
@@ -378,18 +502,15 @@ void report(uint64_t frame, const char* phase) {
                         flatSceneCandidateEligible(t.color, t.depth, t.depthDraws)
                             ? "color+depth-candidate" :
                         !t.color && t.depth ? "depth-only-excluded" : "other-unproved");
-        if (flatSceneCandidateEligible(t.color, t.depth, t.depthDraws))
-            for (uint32_t slot = 0; slot < 2; ++slot)
-                printCb(t, slot, g.exemplars[i][slot]);
         if (flatSceneCandidateEligible(t.color, t.depth, t.depthDraws) &&
             (!best || t.depthDraws > best->depthDraws)) best = &t;
     }
     Log::get().note("flat discover inventory frame=%llu admitted=%u capacity=%u dropped-target-observations=%u depth-only=%u color+depth=%u unresolved-color-views=%u; target pointers are frame-local, classifications are not scene proof",
                     static_cast<unsigned long long>(frame), g.targetCount,
                     kTargets, g.targetOverflow, depthOnly, colorDepth, unresolved);
-    printContracts(frame);
-    printMonoInput(frame);
     if (best) {
+        const uint32_t index = static_cast<uint32_t>(best - g.targets);
+        for (uint32_t slot = 0; slot < 2; ++slot) printCb(*best, slot, g.exemplars[index][slot]);
         Log::get().note("flat discover candidate frame=%llu color=%p depth=%p target=%ux%u viewport=%ux%u fmt=%u draws=%u depth-draws=%u q=%u..%u clears(color,depth)=%u,%u VSb0=%p VSb1=%p VS=%016llX; strongest admitted color+depth shape only, not scene certificate",
                         static_cast<unsigned long long>(frame), best->color, best->depth,
                         best->w, best->h, best->vpW, best->vpH,
@@ -483,6 +604,8 @@ void flatTemporalArm() {
     ID3D11Device* device = g.device;
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
     flatTemporalStart(device);
+    g.projectionDetailsRemaining = 2;
+    g.projectionManual = true;
     Log::get().note("flat temporal: dump_draws started a fresh bounded desktop discovery window");
 }
 
@@ -579,6 +702,26 @@ void flatTemporalViewport(UINT count, const D3D11_VIEWPORT* vps) {
     }
 }
 
+void flatTemporalConstantBuffers(bool pixelStage, UINT start, UINT count, ID3D11Buffer* const* buffers) {
+    if (!flatTemporalCapturing()) return;
+    ++g.serial;
+    ++g.projectionBindCalls[pixelStage ? 1 : 0];
+    auto observe = [&](uint32_t index, uint32_t slot) {
+        if (start > slot || slot - start >= count) return;
+        flatProjectionBind(g.projectionBindings[index], slot, start, count,
+                           buffers ? buffers[slot - start] : nullptr);
+    };
+    if (pixelStage) observe(2, 2);
+    else { observe(0, 0); observe(1, 2); }
+}
+
+void flatTemporalClearBindings() {
+    if (!flatTemporalCapturing()) return;
+    for (auto& binding : g.projectionBindings) {
+        binding.resource = nullptr; binding.observed = true;
+    }
+}
+
 void flatTemporalDraw(uint32_t count, uint32_t instances) {
     if (!flatTemporalCapturing()) return;
     ++g.serial;
@@ -649,6 +792,14 @@ void flatTemporalDraw(uint32_t count, uint32_t instances) {
             observation.writeSeq = cameraCb->writeSeq;
             if (kind == kFlatContractPool) ++g.poolCameraDraws;
         }
+        for (uint32_t i = 0; i < kFlatProjectionSlots; ++i) {
+            const auto& binding = g.projectionBindings[i];
+            const Cb* cb = findCb(const_cast<void*>(binding.resource));
+            observation.projection[i] = flatObserveProjection(binding, cb != nullptr,
+                cb ? cb->width : 0, cb ? cb->bytes : nullptr, cb ? cb->copied : 0,
+                cb ? cb->writeEpoch : 0, cb ? cb->writeSeq : 0, g.epoch, g.serial,
+                i, cb ? (i ? cb->b2Hash : cb->b0Hash) : 0);
+        }
     }
     if (g.sampledTarget != t->color) {
         g.sampledTarget = t->color;
@@ -714,7 +865,10 @@ void flatTemporalExecuteList(bool foreign) {
     std::memset(g.viewport, 0, sizeof(g.viewport)); g.viewportCount = 0;
     for (uint32_t i = 0; i < g.largeCbCount; ++i) invalidateCb(g.cbs[i].resource);
     for (uint32_t i = 0; i < g.smallCbCount; ++i)
-        invalidateCb(g.cbs[kCbs / 2 + i].resource);
+        invalidateCb(g.cbs[kLargeCbs + i].resource);
+    // Unknown deferred work may alter bindings even when the caller asks to
+    // restore state. Await an observed setter; never label this as unbound.
+    for (auto& binding : g.projectionBindings) binding = FlatProjectionBinding{};
     static uint32_t notes = 0;
     if (notes++ < 4) Log::get().note("flat discover ExecuteCommandList q=%u foreign=%u; deferred writes/camera order unqualified",
                                    g.serial, foreign ? 1 : 0);
@@ -729,6 +883,7 @@ void flatTemporalMap(ID3D11Resource* res, UINT sub, D3D11_MAP type, void* data) 
     if (Cb* cb = cbOf(res, width)) {
         cb->copied = 0; cb->writeEpoch = 0;
         cb->cameraValid = false; cb->cameraHash = 0;
+        cb->b0Hash = cb->b2Hash = 0;
         cb->mapped = data;
     }
 }
@@ -739,6 +894,7 @@ void flatTemporalUnmap(ID3D11Resource* res) {
         if (!cb.mapped) return;
         cb.copied = std::min(cb.width, kCbBytes);
         std::memcpy(cb.bytes, cb.mapped, cb.copied);
+        projectionHashes(cb);
         cb.cameraValid = flatCaptureCameraRows(cb.camera, cb.mapped, cb.width);
         cb.cameraHash = cb.cameraValid ? flatCameraHash(cb.camera) : 0;
         cb.mapped = nullptr; cb.writeSeq = ++g.serial; ++cb.writes;
@@ -753,6 +909,7 @@ void flatTemporalUpdate(ID3D11Resource* dst, const void* data, const D3D11_BOX* 
     if (Cb* cb = cbOf(dst, width)) {
         cb->copied = std::min(width, kCbBytes);
         std::memcpy(cb->bytes, data, cb->copied);
+        projectionHashes(*cb);
         cb->cameraValid = flatCaptureCameraRows(cb->camera, data, width);
         cb->cameraHash = cb->cameraValid ? flatCameraHash(cb->camera) : 0;
         cb->mapped = nullptr;

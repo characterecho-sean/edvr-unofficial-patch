@@ -169,6 +169,7 @@ constexpr size_t kSlotDraw                  = 13;
 constexpr size_t kSlotDrawAuto              = kGpuSlotDrawAuto;
 constexpr size_t kSlotMap                   = 14;
 constexpr size_t kSlotUnmap                 = 15;
+constexpr size_t kSlotPSSetConstantBuffers  = 16;  // D3D11 context ABI: follows Unmap
 constexpr size_t kSlotDrawIndexedInstanced  = 20;
 constexpr size_t kSlotDrawInstanced         = 21;
 // Engine-record velocity's snapshot validity (the 2026-09-23 review, items
@@ -367,6 +368,7 @@ struct State {
     ID3D11DeviceContext* ownerCtx = nullptr;
 
     PFN_SetConstantBuffers   realVSSetConstantBuffers = nullptr;
+    PFN_SetConstantBuffers   realPSSetConstantBuffers = nullptr;  // flat diagnostic observer only
     PFN_SetShaderResources   realPSSetShaderResources = nullptr;
     // Engine-record velocity's two extra watches (binding_shadow.h VsSrv33,
     // Blend): record and forward, nothing else.
@@ -3064,7 +3066,17 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
     // Slot 1, the pool families' scene constants (engine_velocity.h): a call
     // covering it records it, even when it unbinds.
     if (start <= 1u && 1u - start < n) bindingSet(BindSlot::VsCb1, bufs ? bufs[1u - start] : nullptr);
+    if (flatTemporalCapturing()) flatTemporalConstantBuffers(false, start, n, bufs);
     g_state->realVSSetConstantBuffers(self, start, n, bufs);
+}
+
+void STDMETHODCALLTYPE hookedPSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
+                                                  UINT n, ID3D11Buffer* const* bufs) {
+    // Installed only for flat discovery. Forward exactly once, including
+    // foreign contexts and every call outside the bounded capture window.
+    if (!foreignContext(self) && flatTemporalCapturing())
+        flatTemporalConstantBuffers(true, start, n, bufs);
+    g_state->realPSSetConstantBuffers(self, start, n, bufs);
 }
 
 // The pool at VS t33 (engine-record velocity's snapshot source). Only a call
@@ -3168,6 +3180,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     if (flatTemporalCapturing()) {
         flatTemporalBind(nullptr, nullptr);
         flatTemporalViewport(0, nullptr);
+        flatTemporalClearBindings();
     }
     foveationOnClearState();
     // ClearState changes bindings, not resource contents. Retain the
@@ -6636,6 +6649,12 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realPSSetShader));
     s.hook.replace(kSlotVSSetConstantBuffers, &hookedVSSetConstantBuffers,
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
+    if (runtimeFlatProfile()) {
+        const bool installed = s.hook.replace(kSlotPSSetConstantBuffers, &hookedPSSetConstantBuffers,
+            reinterpret_cast<void**>(&s.realPSSetConstantBuffers));
+        Log::get().note("flat discover PS constant-buffer observer: slot=%zu installed=%u; active only during owned capture",
+                       kSlotPSSetConstantBuffers, installed && s.realPSSetConstantBuffers ? 1u : 0u);
+    }
     s.hook.replace(kSlotVSSetShaderResources, &hookedVSSetShaderResources,
                    reinterpret_cast<void**>(&s.realVSSetShaderResources));
     s.hook.replace(kSlotOMSetBlendState, &hookedOMSetBlendState,

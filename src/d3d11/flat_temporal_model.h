@@ -101,7 +101,7 @@ inline FlatContractKind flatContractKind(bool knownPoolFamily,
                                          uint32_t outputHeight, bool isOutput) {
     if (isOutput && color) return kFlatContractOutput;
     if (knownPoolFamily && color && depth) return kFlatContractPool;
-    const bool screenFormat = format == 23 || format == 26 || format == 27;
+    const bool screenFormat = format == 23 || format == 26 || format == 27 || format == 60;
     const bool screenExtent = outputWidth && outputHeight && width && height &&
         uint64_t(width) * outputHeight == uint64_t(height) * outputWidth &&
         uint64_t(width) * 2 >= outputWidth &&
@@ -109,6 +109,93 @@ inline FlatContractKind flatContractKind(bool knownPoolFamily,
         width <= outputWidth && height <= outputHeight;
     return color && screenFormat && screenExtent
         ? kFlatContractScreen : kFlatContractNone;
+}
+
+constexpr uint32_t kFlatProjectionSlots = 3;  // VS b0, VS b2, PS b2
+enum class FlatDetailAdmission : uint8_t { Startup, Empty, Exhausted, RefusalAlreadyReported, Selected, Refusal };
+inline FlatDetailAdmission flatTakeDetailSample(bool manual, uint64_t frame, uint32_t draws,
+        bool selected, uint32_t& remaining, bool& refusalReported) {
+    if (!manual) return FlatDetailAdmission::Startup;
+    if (!frame || !draws) return FlatDetailAdmission::Empty;
+    if (!remaining) return FlatDetailAdmission::Exhausted;
+    if (!selected && refusalReported) return FlatDetailAdmission::RefusalAlreadyReported;
+    --remaining;
+    if (!selected) refusalReported = true;
+    return selected ? FlatDetailAdmission::Selected : FlatDetailAdmission::Refusal;
+}
+inline const char* flatDetailAdmissionName(FlatDetailAdmission admission) {
+    switch (admission) {
+    case FlatDetailAdmission::Startup: return "startup-summary-only";
+    case FlatDetailAdmission::Empty: return "empty-or-rearm-budget-unspent";
+    case FlatDetailAdmission::Exhausted: return "two-detail-budget-exhausted";
+    case FlatDetailAdmission::RefusalAlreadyReported: return "refusal-already-detailed-budget-unspent";
+    case FlatDetailAdmission::Selected: return "selected-frame-details";
+    case FlatDetailAdmission::Refusal: return "first-refusal-details";
+    }
+    return "unknown";
+}
+constexpr uint32_t kFlatB0Bytes = 4u * 16u;
+constexpr uint32_t kFlatB2Bytes = 17u * 16u;
+inline uint32_t flatProjectionOffset(uint32_t slot) { return slot ? 0u : 4u * 16u; }
+inline uint32_t flatProjectionCapacity(uint32_t slot) { return slot ? kFlatB2Bytes : kFlatB0Bytes; }
+inline uint32_t flatProjectionHash(const unsigned char* data, uint32_t bytes) {
+    if (!bytes) return 0;
+    uint32_t hash = 2166136261u;
+    for (uint32_t i = 0; i < bytes; ++i) hash = (hash ^ data[i]) * 16777619u;
+    return hash;
+}
+enum class FlatProjectionStatus : uint8_t {
+    BindingUnknown, Unbound, MissingWrite, InvalidWrite, OldFrame, LaterWrite, ShortRange, Available
+};
+inline const char* flatProjectionStatusName(FlatProjectionStatus status) {
+    switch (status) {
+    case FlatProjectionStatus::BindingUnknown: return "binding-unobserved";
+    case FlatProjectionStatus::Unbound: return "explicitly-unbound";
+    case FlatProjectionStatus::MissingWrite: return "cpu-write-unobserved";
+    case FlatProjectionStatus::InvalidWrite: return "write-invalidated";
+    case FlatProjectionStatus::OldFrame: return "prior-frame-write";
+    case FlatProjectionStatus::LaterWrite: return "write-after-draw";
+    case FlatProjectionStatus::ShortRange: return "buffer-shorter-than-requested-rows";
+    case FlatProjectionStatus::Available: return "same-frame-draw-frozen";
+    }
+    return "unknown";
+}
+struct FlatProjectionBinding { const void* resource = nullptr; bool observed = false; };
+inline bool flatProjectionBind(FlatProjectionBinding& binding, uint32_t slot,
+        uint32_t start, uint32_t count, const void* resource) {
+    if (start > slot || slot - start >= count) return false;
+    binding.resource = resource; binding.observed = true;
+    return true;
+}
+struct FlatProjectionObservation {
+    const void* resource = nullptr;
+    const unsigned char* bytes = nullptr;
+    uint32_t width = 0, copied = 0, hash = 0, writeSeq = 0;
+    uint64_t writeEpoch = 0;
+    FlatProjectionStatus status = FlatProjectionStatus::BindingUnknown;
+};
+inline FlatProjectionObservation flatObserveProjection(const FlatProjectionBinding& binding,
+        bool tracked, uint32_t width, const unsigned char* prefix, uint32_t prefixBytes,
+        uint64_t writeEpoch, uint32_t writeSeq, uint64_t drawEpoch, uint32_t drawSeq,
+        uint32_t slot, uint32_t hash) {
+    FlatProjectionObservation out{};
+    out.resource = binding.resource;
+    if (!binding.observed) return out;
+    if (!binding.resource) { out.status = FlatProjectionStatus::Unbound; return out; }
+    if (!tracked) { out.status = FlatProjectionStatus::MissingWrite; return out; }
+    out.width = width; out.writeEpoch = writeEpoch; out.writeSeq = writeSeq;
+    if (!prefix || !prefixBytes || prefixBytes > width) {
+        out.status = FlatProjectionStatus::InvalidWrite; return out;
+    }
+    if (writeEpoch != drawEpoch) { out.status = FlatProjectionStatus::OldFrame; return out; }
+    if (writeSeq > drawSeq) { out.status = FlatProjectionStatus::LaterWrite; return out; }
+    const uint32_t offset = flatProjectionOffset(slot), capacity = flatProjectionCapacity(slot);
+    out.copied = prefixBytes > offset ? prefixBytes - offset : 0;
+    if (out.copied > capacity) out.copied = capacity;
+    out.bytes = out.copied ? prefix + offset : nullptr;
+    out.hash = out.copied ? hash : 0;
+    out.status = out.copied == capacity ? FlatProjectionStatus::Available : FlatProjectionStatus::ShortRange;
+    return out;
 }
 
 struct FlatContractObservation {
@@ -123,6 +210,7 @@ struct FlatContractObservation {
     uint32_t viewportCount = 0;
     uint32_t sequence = 0, count = 0, instances = 0, writeSeq = 0;
     FlatContractKind kind = kFlatContractNone;
+    FlatProjectionObservation projection[kFlatProjectionSlots] = {};
 };
 struct FlatContractRecord {
     FlatContractObservation key{};  // key.camera is not retained
@@ -132,6 +220,11 @@ struct FlatContractRecord {
     uint32_t lastCount = 0, lastInstances = 0;
     uint64_t firstWriteEpoch = 0, lastWriteEpoch = 0;
     uint32_t firstWriteSeq = 0, lastWriteSeq = 0;
+    unsigned char b0[kFlatB0Bytes] = {}, vsB2[kFlatB2Bytes] = {}, psB2[kFlatB2Bytes] = {};
+    uint64_t firstProjectionEpoch[kFlatProjectionSlots] = {}, lastProjectionEpoch[kFlatProjectionSlots] = {};
+    uint32_t firstProjectionSeq[kFlatProjectionSlots] = {}, lastProjectionSeq[kFlatProjectionSlots] = {};
+    unsigned char* projectionBytes(uint32_t slot) { return slot == 0 ? b0 : slot == 1 ? vsB2 : psB2; }
+    const unsigned char* projectionBytes(uint32_t slot) const { return slot == 0 ? b0 : slot == 1 ? vsB2 : psB2; }
 };
 inline bool flatContractMatches(const FlatContractRecord& record,
                                 const FlatContractObservation& draw) {
@@ -149,6 +242,12 @@ inline bool flatContractMatches(const FlatContractRecord& record,
     for (uint32_t i = 0; i < 4; ++i)
         if (k.srvView[i] != draw.srvView[i] ||
             k.srvResource[i] != draw.srvResource[i]) return false;
+    for (uint32_t i = 0; i < kFlatProjectionSlots; ++i) {
+        const auto& a = k.projection[i]; const auto& b = draw.projection[i];
+        if (a.resource != b.resource || a.status != b.status || a.width != b.width ||
+            a.copied != b.copied || a.hash != b.hash ||
+            (b.copied && std::memcmp(record.projectionBytes(i), b.bytes, b.copied) != 0)) return false;
+    }
     return !draw.camera ||
         std::memcmp(record.camera, draw.camera, kFlatCameraBytes) == 0;
 }
@@ -157,12 +256,19 @@ FlatContractRecord* flatRecordContract(FlatContractRecord (&records)[N],
                                        uint32_t& used, uint32_t& dropped,
                                        const FlatContractObservation& draw) {
     if (draw.kind == kFlatContractNone) return nullptr;
+    for (uint32_t i = 0; i < kFlatProjectionSlots; ++i)
+        if (draw.projection[i].copied > flatProjectionCapacity(i) ||
+            (draw.projection[i].copied && !draw.projection[i].bytes)) { ++dropped; return nullptr; }
     for (uint32_t i = 0; i < used; ++i) {
         FlatContractRecord& r = records[i];
         if (!flatContractMatches(r, draw)) continue;
         ++r.draws; r.last = draw.sequence;
         r.lastCount = draw.count; r.lastInstances = draw.instances;
         r.lastWriteEpoch = draw.writeEpoch; r.lastWriteSeq = draw.writeSeq;
+        for (uint32_t j = 0; j < kFlatProjectionSlots; ++j) {
+            r.lastProjectionEpoch[j] = draw.projection[j].writeEpoch;
+            r.lastProjectionSeq[j] = draw.projection[j].writeSeq;
+        }
         return &r;
     }
     if (used == N) { ++dropped; return nullptr; }
@@ -178,6 +284,13 @@ FlatContractRecord* flatRecordContract(FlatContractRecord (&records)[N],
     r.firstInstances = r.lastInstances = draw.instances;
     r.firstWriteEpoch = r.lastWriteEpoch = draw.writeEpoch;
     r.firstWriteSeq = r.lastWriteSeq = draw.writeSeq;
+    for (uint32_t i = 0; i < kFlatProjectionSlots; ++i) {
+        const auto& p = draw.projection[i];
+        r.key.projection[i].bytes = p.copied ? r.projectionBytes(i) : nullptr;
+        if (p.copied) std::memcpy(r.projectionBytes(i), p.bytes, p.copied);
+        r.firstProjectionEpoch[i] = r.lastProjectionEpoch[i] = p.writeEpoch;
+        r.firstProjectionSeq[i] = r.lastProjectionSeq[i] = p.writeSeq;
+    }
     return &r;
 }
 
