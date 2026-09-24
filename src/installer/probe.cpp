@@ -359,20 +359,6 @@ DllInfo probeDll(const std::wstring& path) {
     return info;
 }
 
-bool validateNativeGraphics(const DllInfo& info) {
-    return info.kind == DllKind::Edvr && info.is64 && info.nativeMarkerValid && info.nativeGraphicsProviders;
-}
-
-bool validateNativeRuntime(const DllInfo& info) {
-    return info.kind == DllKind::Edvr && info.is64 && info.hasEdvrExports &&
-           info.nativeRuntimeExports;
-}
-
-bool validateOpenxrLoader(const DllInfo& info) {
-    return info.is64 && info.hasXrGetInstanceProcAddr && info.kind != DllKind::Unreadable &&
-           info.kind != DllKind::Absent;
-}
-
 bool qualifiedEliteExecutable(const std::wstring& path) {
     // Pinned profile digest from tools/elite_oculus.py. Hashing is read-only
     // and avoids executing an untrusted game image during installation.

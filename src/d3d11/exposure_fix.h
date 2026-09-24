@@ -98,7 +98,6 @@ void exposureFixReclaimTick();
 
 // Runtime toggle, for comparing against stock behaviour without restarting.
 void toggleExposureFix();
-bool exposureFixEnabled();
 
 // Whether the damper is configured on -- sunglare's matcher keeps running
 // while it is, because the train's last-seen stamp is what scopes the

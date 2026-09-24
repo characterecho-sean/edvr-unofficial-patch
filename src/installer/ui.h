@@ -117,7 +117,6 @@ void drawButton(const DRAWITEMSTRUCT* item, UINT dpi);
 // so it is kept here and read back with checkboxChecked().
 HWND makeCheckbox(HWND parent, const wchar_t* text, int id, bool checked, HFONT font);
 bool checkboxChecked(HWND box);
-void setCheckboxChecked(HWND box, bool checked);
 void toggleCheckbox(HWND box);
 void drawCheckbox(const DRAWITEMSTRUCT* item, UINT dpi);
 

@@ -84,10 +84,6 @@ const char* vrRuntimeShortWhy();
 // happening. The first caller prints; the rest cost a flag.
 void vrRuntimeExplainOnce();
 
-// The verdict as a short noun phrase for a totals line: "Elite's native Oculus
-// back end", "EDVR's own openvr_api.dll", and so on. Never null.
-const char* vrRuntimeName();
-
 // One "vr runtime:" line, said once, from the frame boundary. Held back for
 // ten seconds so a launch that has not reached its runtime yet is not reported
 // as having none; said immediately once the verdict is NativeOpenXR, since

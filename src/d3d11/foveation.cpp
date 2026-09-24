@@ -340,7 +340,6 @@ bool     g_maskCentreValid = false;
 float    g_maskTx = 0.0f, g_maskTy = 0.0f;
 float    g_builtTx = 0.0f, g_builtTy = 0.0f;   // the centre the last mask was actually built on
 uint32_t g_maskLines = 0;       // the geometry lines a session prints, capped
-uint32_t g_masksMade = 0;
 uint64_t g_maskRefills = 0;    // refills done at the frame boundary
 uint32_t g_gazeRefills = 0;
 uint32_t g_gazeLosses = 0;      // frames the source published "lost", blinks included
@@ -740,7 +739,6 @@ const char* fmtName(uint32_t fmt) {
     }
 }
 
-bool      g_ratesOn = false;
 uint32_t  g_lastRtvGen = ~0u;
 Mask*     g_lastMask = nullptr;
 bool      g_lastEyeUnknown = false;
@@ -759,11 +757,9 @@ uint32_t g_switchesFrame = 0;
 uint32_t g_switchesMax = 0;
 uint64_t g_targetsSum[2] = {};
 uint32_t g_targetsFrame[2] = {};
-uint64_t g_submitMatched = 0;
 uint32_t g_imagesMade = 0;
 uint32_t g_noTangentFrames = 0;
 bool     g_noTangentNoted = false;
-bool     g_summaryDone = false;
 bool     g_boundOnce = false;
 // The GPU's busy figure, one sample a second since the last summary.
 uint64_t g_gpuBusySum = 0;
@@ -865,7 +861,6 @@ void applyView(ID3D11DeviceContext* ctx, IUnknown* view) {
     if (!survived || rc1 != kNvOk || rc2 != kNvOk) {
         detail::g_foveationBound = nullptr;
         detail::g_foveationBoundUnknown = false;
-        g_ratesOn = false;
         char e[96], why[240];
         snprintf(why, sizeof(why), "%s answered %s while %s the image",
                  rc1 != kNvOk ? "NvAPI_D3D11_RSSetViewportsPixelShadingRates"
@@ -882,7 +877,6 @@ void applyView(ID3D11DeviceContext* ctx, IUnknown* view) {
     }
     detail::g_foveationBound = view;
     detail::g_foveationBoundUnknown = false;
-    g_ratesOn = view != nullptr;
     ++g_switches;
     ++g_switchesFrame;
 }
@@ -903,7 +897,6 @@ void standDown(ID3D11DeviceContext* ctx, const char* why) {
     }
     detail::g_foveationBound = nullptr;
     detail::g_foveationBoundUnknown = false;
-    g_ratesOn = false;
 }
 
 // The eye's frustum in the RENDERED image: the true tangents the openvr
@@ -1220,7 +1213,6 @@ Mask* maskFor(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, int eye) {
     slot->gen = 0;
     slot->lastFrame = g_frame;
     ++g_imagesMade;
-    ++g_masksMade;
     // ...and the slot keeps gen 0 until a fill succeeds, so the branch
     // above refuses it until then.
     if (g_imagesMade <= 8) {
@@ -1262,7 +1254,6 @@ int eyeOf(const ResourceInfo& info) {
     if (eye < 0 && k && k->everSubmitted) eye = k->submittedAs;
     if (eye >= 0) {
         bySubmit = true;
-        ++g_submitMatched;
         ++g_settledBySubmit;
         if (k) {
             if (k->settled && k->eye != eye) {
@@ -1888,7 +1879,6 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
         // seconds at 90 Hz): the loading screen's targets are not the
         // scene's, and the scene changes.
         if (g_framesArmed == 600) {
-            g_summaryDone = true;
             summary("after 600 frames");
         } else if (g_framesArmed % 1800 == 0) {
             char when[48];
@@ -1958,7 +1948,6 @@ void foveationShutdown() {
     g_scratchCap = 0;
     detail::g_foveationBound = nullptr;
     detail::g_foveationBoundUnknown = false;
-    g_ratesOn = false;
 }
 
 }  // namespace edvr

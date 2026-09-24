@@ -855,10 +855,10 @@ ID3D11DepthStencilView*   g_reissueTarget = nullptr;
 ID3D11Texture2D*          g_reissueScene = nullptr;
 
 // Counters: this window, and the session.
-uint32_t g_wComposite = 0, g_wDirect = 0, g_wWrote = 0, g_wDepthless = 0,
+uint32_t g_wComposite = 0, g_wDirect = 0, g_wWrote = 0,
          g_wNotScene = 0, g_wRebound = 0, g_wNoPair = 0, g_wReissued = 0,
          g_wNoShader = 0, g_wNoTwin = 0, g_wLearned = 0,
-         g_wMarked = 0, g_wFrames = 0;
+         g_wFrames = 0;
 uint64_t g_sessionWrote = 0;
 bool     g_maskNotedOnce = false;
 struct StellarCpu { uint32_t calls=0,samples=0; int64_t ticks=0; } g_stellarCpu[2];
@@ -867,9 +867,9 @@ int64_t g_stellarCpuStart=0;
 GpuIntervals<64> g_stellarGpu[2];
 
 void resetWindow() {
-    g_wComposite = g_wDirect = g_wWrote = g_wDepthless = g_wNotScene = 0;
+    g_wComposite = g_wDirect = g_wWrote = g_wNotScene = 0;
     g_wRebound = g_wNoPair = g_wReissued = g_wNoShader = 0;
-    g_wNoTwin = g_wLearned = g_wMarked = 0;
+    g_wNoTwin = g_wLearned = 0;
     g_wFrames = 0;
     for(auto& sample:g_stellarCpu) sample={};
     for(auto& sample:g_stellarGpu) sample.totals={};
@@ -1829,10 +1829,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     // Cheapest first: no depth target, nothing to write (the post chain's
     // fullscreen draws, ten a frame).
     const void* dsv = bindingGet(BindSlot::Dsv0);
-    if (!dsv) {
-        ++g_wDepthless;
-        return false;
-    }
+    if (!dsv) return false;
     // WHICH SLOT held the learned surface, not just whether one did: a
     // transcription reads a named register, so the slot is what says
     // whether it can stand in for a pixel shader it does not name.
@@ -2392,7 +2389,6 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         }
         if (mask) {
             mask->marked = true;
-            ++g_wMarked;
             ID3D11BlendState* bs = g_coronaMotion ? g_holoMotion[g_drawEye].motionBlend() : maskBlend(ctx);
             const FLOAT one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
             if (bs) ctx->OMSetBlendState(bs, one, 0xFFFFFFFFu);

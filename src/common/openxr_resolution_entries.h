@@ -188,10 +188,6 @@ inline uint32_t resolveHeadsetValue(const HeadsetEntry* entries, size_t count,
     return 0;
 }
 
-inline bool parseResolutionEntry(const std::string& piece, ResolutionEntry* out) {
-    return parseHeadsetEntry(piece, out, kResolutionWidthMin, kResolutionWidthMax);
-}
-
 inline size_t parseResolutionEntries(const char* value,
                                      ResolutionEntry out[kResolutionEntryMax],
                                      std::vector<std::string>* skipped) {
@@ -275,10 +271,6 @@ inline std::string removeHeadsetEntry(const std::string& list, const std::string
         kept[keptCount++] = entries[i];
     }
     return formatHeadsetEntries(kept, keptCount);
-}
-
-inline std::string formatResolutionEntry(const ResolutionEntry& entry) {
-    return formatHeadsetEntry(entry);
 }
 
 inline std::string formatResolutionEntries(const ResolutionEntry* entries, size_t count) {

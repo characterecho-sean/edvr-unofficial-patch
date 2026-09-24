@@ -140,8 +140,6 @@ bool hotkeyWouldFire(int vk, uint32_t mods, uint32_t held) {
     return modsSatisfied(mods, held) && !betterMatchExists(vk, mods, held);
 }
 
-void hotkeyResetBindings() { g_bindingCount = 0; }
-
 int hotkeyRegisteredKeys(int* vks, int max) {
     if (!vks || max <= 0) return 0;
     int n = 0;

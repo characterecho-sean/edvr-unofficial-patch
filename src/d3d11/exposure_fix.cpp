@@ -185,8 +185,6 @@ struct State {
     uint64_t       cb1LendHash = 0;
     uint64_t       cb1StripHash = 0;
     ID3D11Buffer*  cb1Remembered = nullptr;
-    uint64_t       cb1Lent = 0;
-    uint64_t       cb1Stripped = 0;
     bool           cb1LendNoted = false;
     bool           cb1StripNoted = false;
     char           cb1LendSpec[48] = {};
@@ -1019,7 +1017,6 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
                         handled = true;
                         s->realDispatch(self, x, y, z);
                         self->CSSetConstantBuffers(1, 1, &b);
-                        ++s->cb1Stripped;
                         if (!s->cb1StripNoted) {
                             s->cb1StripNoted = true;
                             Log::get().note(
@@ -1036,7 +1033,6 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
                     s->realDispatch(self, x, y, z);
                     ID3D11Buffer* none = nullptr;
                     self->CSSetConstantBuffers(1, 1, &none);
-                    ++s->cb1Lent;
                     if (!s->cb1LendNoted) {
                         s->cb1LendNoted = true;
                         Log::get().note(
@@ -1515,8 +1511,6 @@ void toggleExposureFix() {
                     static_cast<unsigned long long>(s->applied),
                     s->pinned ? "pinned" : (s->announced ? "detected" : "not yet found"));
 }
-
-bool exposureFixEnabled() { return g_state && g_state->enabled; }
 
 bool exposureDampingActive() { return g_state && g_state->dampK > 0.0f; }
 

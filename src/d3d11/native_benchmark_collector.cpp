@@ -262,8 +262,6 @@ bool NativeBenchmarkCollector::takeReport(NativeBenchmarkReport* out) noexcept {
     *out = {};
     out->window = window_++;
     out->scope = scope_;
-    out->warmupMs = kWarmupMs;
-    out->sampleMs = kSampleMs;
     out->startedAtMs = sampleStartMs_;
     out->sampleEndedAtMs = (std::max)(sampleStartMs_, (std::min)(sampleEndMs_,lastNowMs_));
     out->drainMs = lastNowMs_ > out->sampleEndedAtMs ? lastNowMs_ - out->sampleEndedAtMs : 0;

@@ -308,7 +308,6 @@ IniDoc iniParse(const std::string& text) {
 
     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
         static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF) {
-        doc.hadBom = true;
         p = 3;
     }
 

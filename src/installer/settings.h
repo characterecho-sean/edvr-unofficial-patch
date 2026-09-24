@@ -65,7 +65,6 @@ struct SettingRow {
     std::string         value;  // what the user's edvr.ini says now
     std::vector<Choice> choices;
     bool                isRecommended = false;
-    bool                isShipped = false;
 
     // "default 45", plus the bounds when they are known. Empty for a toggle:
     // on and off need no explaining, and a row of them repeating "default on"

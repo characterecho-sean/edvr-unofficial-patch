@@ -82,8 +82,8 @@ struct State {
 State pool[16]; unsigned used = 0; State* current = nullptr; std::mutex mutex;
 
 // fix.ui_quality's surfaces read the recommendation from INSIDE
-// CreateTexture2D, and the temporal pass makes its targets (the deferred UI
-// replay's, NGX's) inside treat(), which holds `mutex` across the pass:
+// CreateTexture2D, and the temporal pass makes its targets (NGX's) inside
+// treat(), which holds `mutex` across the pass:
 // re-locking it on that thread throws -- MSVC's std::mutex is not recursive
 // -- and each throw would charge the create hook's shared fault budget
 // until shader registration stopped for the session (review 2026-09-23,

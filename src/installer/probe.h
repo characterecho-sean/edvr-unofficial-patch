@@ -58,9 +58,6 @@ DllInfo probeDll(const std::wstring& path);
 
 // Read-only package and executable qualification. These never load or execute
 // the inspected image.
-bool validateNativeGraphics(const DllInfo& info);
-bool validateNativeRuntime(const DllInfo& info);
-bool validateOpenxrLoader(const DllInfo& info);
 bool qualifiedEliteExecutable(const std::wstring& path);
 enum class NativeImageKind { Graphics, Runtime, Loader };
 bool validateNativePayloadBytes(const void* data, size_t size, NativeImageKind kind);

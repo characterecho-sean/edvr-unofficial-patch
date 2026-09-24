@@ -209,7 +209,7 @@ bool isFiniteF(float v) { return v == v && v <= 3.4e38f && v >= -3.4e38f; }
 // the pose this transform was built from -- menu.cpp's reading (minus the
 // pose's third column), for the one "holding" line, so it says what the
 // game's forward was being held against.
-bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
+bool buildWorldCb(bool leftEye, float dist,
                   float* out, const char** why, float* yawDeg = nullptr) {
     float pose[12];
     if (!headPose(pose)) { *why = "no head pose has been published"; return false; }
@@ -576,8 +576,7 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 float yawDeg = 0.0f;
                 const char* why = "the viewport is degenerate";
                 if (nvp == 0 || vp.Width <= 0.0f || vp.Height <= 0.0f ||
-                    !buildWorldCb(s->leftEye, g_screenDist, vp.Width,
-                                  vp.Height, world, &why,
+                    !buildWorldCb(s->leftEye, g_screenDist, world, &why,
                                   g_anchored ? nullptr : &yawDeg)) {
                     // No pose, no tangents, no viewport: stock rather than a
                     // panel placed on guesses.

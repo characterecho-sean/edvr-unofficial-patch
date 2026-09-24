@@ -49,7 +49,6 @@ D3D11_TEXTURE2D_DESC      g_lsDesc[4] = {};
 bool                      g_lsHave[4] = {};
 ID3D11ShaderResourceView* g_lsDisplaced[4] = {};
 bool     g_lsBound = false;
-uint64_t g_lsApplied = 0;
 bool     g_lsNoted = false;
 bool     g_lsFailNoted = false;
 
@@ -346,7 +345,6 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                 };
                 ctx->PSSetShaderResources(0, 4, set);
                 g_lsBound = true;
-                ++g_lsApplied;
                 if (!g_lsNoted) {
                     g_lsNoted = true;
                     Log::get().note(

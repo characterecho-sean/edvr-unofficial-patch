@@ -308,9 +308,7 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
         return result;
     }
 
-    result.needsElevation = (err == ERROR_ACCESS_DENIED || err == ERROR_WRITE_PROTECT ||
-                             err == ERROR_PRIVILEGE_NOT_HELD);
-    result.error = "Could not finish: " + errorText(err) + " (at " + toUtf8(failedAt) + ")";
+    result.error ="Could not finish: " + errorText(err) + " (at " + toUtf8(failedAt) + ")";
 
     // Walk it back. Anything that cannot be undone is left alone rather than
     // retried: the backup folder is the safety net, and a rollback that fights

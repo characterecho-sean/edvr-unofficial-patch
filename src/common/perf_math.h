@@ -18,7 +18,6 @@ struct PerfStats {
     float avgMs = 0.0f;
     float maxMs = 0.0f;
     float p99Ms = 0.0f;   // the 1% low, as a frame time: the slowest 1% averaged
-    float p50Ms = 0.0f;   // the median
     int   count = 0;
 };
 
@@ -41,12 +40,6 @@ inline PerfStats perfStatsOf(const float* ms, int n, float capMs = 500.0f) {
     if (v.empty()) return s;
     s.count = static_cast<int>(v.size());
     s.avgMs = static_cast<float>(sum / static_cast<double>(v.size()));
-    // The median: the middle element by selection.
-    {
-        const size_t k = v.size() / 2;
-        std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(k), v.end());
-        s.p50Ms = v[k];
-    }
     // The 1% low: the slowest ceil(n / 100) frames, averaged. With fewer
     // than a hundred frames that is the single worst one.
     {

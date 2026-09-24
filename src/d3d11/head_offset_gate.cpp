@@ -179,18 +179,16 @@ struct Gate {
     // journal's own declaration instead of losing entries to the window.
     bool     liveOnFootSeenThisFoot = false;
     bool     footGraceJournal = false;   // Disembark declared, flag not yet true
-    uint32_t footGraceFrame = 0;         // when that declaration landed
-    uint64_t footGraceMs = 0;            // ...and the same, on the clock
+    uint64_t footGraceMs = 0;            // when that declaration landed, on the clock
     bool     gateKeylessOn = false;      // experimental.keyless_camera (parked)
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
     uint64_t gateIntentMs = 0;           // ...and when, on the clock
     uint64_t gateIntentGraceMs = 2000;   // how long a press gets to take effect
     bool     gateInCamera = false;       // in the camera, whatever the view
-    uint32_t gateEnters = 0, gateExits = 0;
-    // Camera entries (the gateInCamera latch), distinct from gateEnters which
-    // counts the OFFSET arming: the scan nudge wants the camera edge, before
-    // the player has cycled to the right view.
+    // Camera entries (the gateInCamera latch), not the OFFSET arming: the
+    // scan nudge wants the camera edge, before the player has cycled to the
+    // right view.
     uint32_t gateCameraEnters = 0;
 
     // Set by headOffsetGateSetView. -1 means nobody can tell us, so the
@@ -372,7 +370,6 @@ void headOffsetGateNewFootSession(const char* source, bool journalSaysSo) {
     // nothing.
     if (journalSaysSo) {
         g.footGraceJournal = true;
-        g.footGraceFrame = g.gateFrameNo ? g.gateFrameNo : 1;
         g.footGraceMs = stampMs();
     }
     // ONE BOUNDARY, POSSIBLY TWO DETECTORS. The journal's Disembark and the
@@ -646,7 +643,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             g.gateIntent = false;
             g.gateIntentAge = 0;
             g.gateIntentMs = 0;
-            ++g.gateExits;
             edvr::setExternalCameraOnFoot(false);
             Log::get().note("head offset OFF: the flat panel is back, so this is "
                             "on-foot first person again (%u frame(s) in the "
@@ -668,7 +664,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // and the offset followed the player into the cockpit.
         g.gateInCamera = false;
         g.gateExternal = false;
-        ++g.gateExits;
         edvr::setExternalCameraOnFoot(false);
         Log::get().note("head offset OFF: the external camera key was pressed "
                         "again (%u frame(s) in). Not waiting for the flat panel, "
@@ -831,7 +826,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             g.liveOnFootSeenThisFoot) {
             g.gateInCamera = false;
             g.gateExternal = false;
-            ++g.gateExits;
             edvr::setExternalCameraOnFoot(false);
             Log::get().note(
                 "head offset OFF: the game's status says you are no longer on "
@@ -853,7 +847,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             if (elapsedMs(g.idleMs, kIdleDropMs) && g.gateInCamera) {
                 g.gateInCamera = false;
                 g.gateExternal = false;
-                ++g.gateExits;
                 edvr::setExternalCameraOnFoot(false);
                 Log::get().note("head offset OFF: neither the panel nor a drawn "
                                 "scene for %u frames over %llu ms, so the latch "
@@ -1182,7 +1175,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     if (wantOffset != g.gateExternal) {
         g.gateExternal = wantOffset;
         if (wantOffset) {
-            ++g.gateEnters;
             g.gateSinceEnter = 0;
             g.heartbeatMs = stampMs();
             Log::get().note("head offset ON: on foot in the external camera, "
@@ -1205,7 +1197,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                 vrRuntimeExplainOnce();
             }
         } else {
-            ++g.gateExits;
             Log::get().note("head offset OFF: camera view is %d and the offset "
                             "is for view %d (advanced.head_offset_view). Still in "
                             "the camera.", g.gateViewIndex, g.gateWantView);

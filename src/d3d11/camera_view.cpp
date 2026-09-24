@@ -258,7 +258,6 @@ struct State {
     size_t    regionOffset = 0;
     uint64_t  bytesScanned = 0;
     uint64_t  faults = 0;
-    uint64_t  regionsGone = 0;
 
     // The record finally chosen, rather than an index into `records`.
     //
@@ -337,7 +336,6 @@ struct State {
     std::vector<const uint8_t* const*> anchorSites;
     const uint8_t* huntedBase = nullptr;   // the base the sites were hunted for
     uint32_t hunts = 0;
-    uint32_t anchorSurvived = 0;
     uint32_t anchorFollowedMoves = 0;      // moves resolved by a pointer, not a scan
     uint32_t stepNotes = 0;                // candidate step evidence, capped
     bool     candNoted = false;
@@ -528,7 +526,6 @@ bool scanSlice() {
                 g_s.regionIndex = g_s.regions.size();
                 break;
             }
-            ++g_s.regionsGone;
             ++g_s.regionIndex;
             g_s.regionOffset = 0;
             continue;
@@ -623,7 +620,6 @@ void checkAnchors(const uint8_t* oldBase) {
         });
         if (v == 0) { ++followed; if (!firstNew) firstNew = now; }
     }
-    ++g_s.anchorSurvived;
     Log::get().note(
         "camera view: the array moved, and of the %zu place(s) that held its "
         "address, %zu now point at a camera record, %zu still hold the old "

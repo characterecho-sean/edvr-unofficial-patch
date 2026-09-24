@@ -105,10 +105,7 @@ int      g_sign = 1;              // +1 or -1: which way z goes. See below.
 // multiplying z by size.x. That is read from the game's own SIZE buffer
 // rather than guessed, and overridable when the reading is not available.
 float    g_zGainCfg = 0.0f;      // advanced key; 0 means "use what was read"
-float    g_sizeX = 0.0f;         // read from the game's SIZE buffer
 bool     g_sizeLearned = false;
-void*    g_sizeSrc = nullptr;    // which buffer it was read from, so a panel
-                                 // of a different size relearns
 ID3D11Buffer* g_sizeStaging = nullptr;
 uint32_t g_sizeStagingBytes = 0;
 bool     g_sizePending = false;
@@ -308,7 +305,6 @@ bool learnSize(ID3D11DeviceContext* ctx) {
             memcpy(sz, m.pData, sizeof(sz));
             ctx->Unmap(g_sizeStaging, 0);
             if (sz[0] > 0.0f && sz[1] > 0.0f) {
-                g_sizeX = sz[0];
                 g_sizeY = sz[1];
                 g_sizeLearned = true;
                 Log::get().note(
@@ -388,7 +384,6 @@ bool learnSize(ID3D11DeviceContext* ctx) {
             // first record, and a SIZE buffer that needed an offset would be a
             // pooled one, which the size cap above has already refused.
             ctx->CopyResource(g_sizeStaging, vbs[pick]);
-            g_sizeSrc = vbs[pick];
             g_sizeCopyMs = nowMs();
             g_sizePending = true;
             if (!g_sizeNoted) {

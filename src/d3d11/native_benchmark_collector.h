@@ -57,8 +57,6 @@ enum NativeBenchmarkAbortReason : uint32_t {
 struct NativeBenchmarkReport {
     uint64_t window = 0;
     uint64_t scope = 0;
-    uint64_t warmupMs = 0;
-    uint64_t sampleMs = 0;
     uint64_t drainMs = 0;
     uint64_t startedAtMs = 0;
     uint64_t sampleEndedAtMs = 0;

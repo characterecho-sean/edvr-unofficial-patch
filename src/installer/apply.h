@@ -25,7 +25,6 @@ using PayloadProvider = std::function<bool(const std::string& item, const void**
 
 struct ApplyResult {
     bool ok = false;
-    bool needsElevation = false;  // a write was refused; the same run as admin would work
     bool rolledBack = false;
     // A file was replaced before the failure. The transaction attempts to
     // restore its pre-write snapshot, while ordinary backups remain available.

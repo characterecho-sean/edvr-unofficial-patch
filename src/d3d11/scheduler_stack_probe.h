@@ -52,7 +52,6 @@ public:
     // for 0x4321940/0x4320340/0x36A0F50; 0x42DF940 verified by hand from
     // analysis/EliteDangerous64.exe, 2026-09-21).
     static constexpr uintptr_t kHookRvas[2]={0x42DF940u,0x36A0F50u};
-    static constexpr uint32_t kHookTargetIndex[2]={2u,3u};
 
     enum class HookStatus:uint32_t {NotRun,Installed,IdentityMismatch,OpcodeMismatch,InstallFailed};
 

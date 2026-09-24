@@ -693,13 +693,6 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
     return true;
 }
-bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
-    uint wd = 0;
-    float2 mvd = 0.0;
-    float zd = 0.0;
-    uint dn = 0;
-    return fetchHistoryT(p, r0, r1, r2, float3(0.0, 0.0, 0.0), false, false, wd, mvd, zd, dn, hy);
-}
 // How far a clip moved the history, in luma, as a count of 1/255ths: a
 // nudge on a text edge is a few, a history that landed somewhere else
 // entirely is tens. Summed per reading, it separates the two where a

@@ -62,7 +62,6 @@ struct IniLine {
 
 struct IniDoc {
     std::vector<IniLine> lines;
-    bool hadBom = false;
 
     // Last match wins, as Config::parse does by assigning into a flat map.
     // Matching is case-insensitive: a key whose case does not match the shipped
