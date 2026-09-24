@@ -6,6 +6,7 @@
 #include "../../src/d3d11/engine_velocity_families.h"
 #include "flat_shader_capture_tests.h"
 #include "flat_projection_math_tests.h"
+#include "flat_projection_bindings_tests.h"
 #include "flat_compute_tests.h"
 #include "flat_lighting_tests.h"
 
@@ -838,6 +839,7 @@ int main(int argc, char** argv) {
     testDetailBudget();
     failures += flatShaderCaptureTests();
     failures += flatProjectionMathTests();
+    failures += flatProjectionBindingsTests();
     failures += flatComputeTests();
     failures += flatLightingTests();
     flatRuntimePrefixTests();

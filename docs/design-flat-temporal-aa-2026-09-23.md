@@ -11,7 +11,9 @@
   Exact bytecode proves the selected scene-depth to view-Z conversion. Sean did
   not see the star-corona smear this time; it is not reproduced, not proved
   fixed. Earlier scene admission, lighting-grid and projection evidence is in
-  sections 10-18. Live projection jitter remains disabled.
+  sections 10-18. Private buffer snapshots, uploads and scoped VS/PS/CS
+  bindings are implemented for offline qualification (section 21). Live
+  projection jitter remains disabled.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -29,7 +31,8 @@
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
 - **Next flight:** no repeat of the completed zero-jitter capture is needed.
-  Implement qualified private bindings and output fallback offline before
+  Wire exact shader/owner admission and full write/range observation into the
+  tested private binding layer, then preflight and handoff fallback before
   requesting rendered-jitter qualification; the view-Z producer is now known.
   Keep jitter disabled until those requirements are met. Use
   `tools/edvr_log.py` with the actual `--target`, `--expect-build 10cb20f0` and
@@ -1015,3 +1018,62 @@ alignment under nonzero jitter remains a qualification requirement.
 
 This flight review changes documentation only. Epic remains on `10cb20f0`;
 subsequent documentation commits do not require another build or flight.
+
+## 21. Private projection binding foundation, 2026-09-24
+
+`flat_projection_bindings.h` adds a bounded full-width constant-buffer shadow
+bank (default 64 identities, 64 KiB each, one 4 MiB payload allocation). A
+resource lifetime token, write generation and bank epoch distinguish reusable
+COM addresses and replaced data. Map start, incomplete writes and unknown
+mutations invalidate old bytes. Only a complete observed write can publish a
+new snapshot. Registration, lookup and writes allocate nothing after bank
+construction. Callers retain source resources and supply new lifetime tokens
+after release; these are owner-thread APIs.
+
+Pure patch preparation validates up to eight nonoverlapping spans before
+changing any destination bytes. It supports the five measured projection
+layouts plus the lighting UV-ray layout with its explicit tile/phase contract.
+It clones full buffers, preserves unrelated bytes, and never changes the raw
+camera/engine snapshot. A shader hash is not admission by itself: the caller
+still must establish the exact draw, camera ownership and full write history.
+
+`flat_projection_scope` preflights private dynamic buffers and caches uploads
+by current source provenance, phase and complete patch request. It always looks
+up fresh bank contents; callers cannot reuse a stale snapshot after
+invalidation. Invalid preparation hides the old replacement. A reusable binding
+plan performs immutable device, descriptor and D3D11.1 capability checks once.
+The scope checks all actual VS/PS/CS buffers and first/count ranges before
+changing any binding, then restores exact originals on exit. Its internal calls
+suppress EDVR observers without suppressing the enclosed game work. No
+allocation, feature query or descriptor query occurs in the draw scope.
+Prepared-resource tokens invalidate retained plans after failed preparation or
+owner destruction. A new upload requires explicit token refresh, which does not
+repeat static resource checks. Callers must prepare from the current bank
+before executing a plan; tokens do not replace source-write observation.
+
+CPU tests cover full 64 KiB snapshots, stale/partial/mapped data, identity
+reuse, all patch layouts, untouched raw bytes and late atomic refusal. WARP
+uses a real CS with a nonzero CB range to verify the private patch reaches the
+GPU and the original is read after restoration. It checks all three stages,
+restoration after ClearState, stale second-slot refusal without partial
+binding, duplicate slots, deferred-context refusal, nested observer guards,
+cache reuse and upload invalidation. Tests also reject retained plans after
+failed preparation, changed upload revision and owner destruction. Zero-phase
+lighting accepts either sign of floating-point zero and preserves the full
+original buffer.
+
+This foundation is not wired into game draws or dispatches yet, and adds no
+per-draw work to the active zero-jitter renderer. Existing base setters do not
+observe Context1 range binds, PS observation is capture-only, and CS has no
+general CB bind observer. Runtime integration must either observe those ranges
+and full write lifetimes or explicitly refuse them, then supply the measured
+shader/owner admission table. Resource preflight and the already tested spatial
+fallback must also be joined to the actual handoff before any nonzero phase.
+The R32 depth conversion stays unchanged; star glare is a separate qualified
+consumer. No Epic reinstall or repeat zero-jitter flight is warranted for this
+offline layer. Keep installed build `10cb20f0` for interpreting existing logs.
+
+Final source validation: `build/flat-private-bindings-final.log` passes all 79
+parallel jobs and three quiet jobs, the 255-key config contract and both
+installer payload checks. The final run includes the prepared-token lifetime
+tests and signed-zero lighting test; earlier passes preceded those additions.

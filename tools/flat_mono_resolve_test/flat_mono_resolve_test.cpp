@@ -62,6 +62,7 @@ void camera(float (&rows)[6][4]) {
 uint32_t bits(float f){uint32_t v;std::memcpy(&v,&f,4);return v;}
 } // namespace
 namespace edvr {
+thread_local bool g_flatComputeInternal = false;
 bool dlaaAvailable(ID3D11Device*,const char**){return true;}
 bool fsr3Available(ID3D11Device*,const char**){return true;}
 bool dlaaEvaluate(ID3D11DeviceContext* c,int,ID3D11Texture2D*,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
@@ -75,6 +76,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned,ID3D11Texture2D*,ID3D11Texture
     return backend(c,depth,mv,mask,out,jx,jy,reset,why);
 }
 } // namespace edvr
+#include "flat_projection_scope_tests.h"
 int main(int argc,char** argv) {
     if(argc!=2 || (std::strcmp(argv[1],"--self-test") && std::strcmp(argv[1],"--dry-run"))){std::puts("usage: flat_mono_resolve_test --self-test|--dry-run");return 2;}
     if(!std::strcmp(argv[1],"--dry-run")){std::puts("Would exercise mono resolve WARP shaders, backend inputs and state restoration; writes no files.");return 0;}
@@ -85,6 +87,7 @@ int main(int argc,char** argv) {
         device.GetAddressOf(),&level,context.GetAddressOf());
     check(SUCCEEDED(hr),"WARP device");if(FAILED(hr))return 1;
     ComPtr<ID3D11InfoQueue> messages;device.As(&messages);
+    projectionScopeTests(device.Get(), context.Get());
     const UINT w=16,h=16;std::vector<uint32_t> red(w*h,0xff0000ff);std::vector<float> z(w*h,.01f),slots(w*h*2);
     for(size_t i=0;i<slots.size();i+=2){slots[i]=-1;slots[i+1]=.01f;}
     auto color=texture(device.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM,D3D11_BIND_SHADER_RESOURCE,red.data(),w*4);
