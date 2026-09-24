@@ -32,8 +32,15 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
-- **LOW-WAKE MEASUREMENT BUILT and INSTALLED, NOT FLOWN (2026-09-24,
-  d28f9ada, on main).**
+- **LOW-WAKE MEASUREMENT FLOWN (100043).** Every transition flash is a
+  one-frame skip of the eye-base writer.
+  - At a low-wake entry the scene is already in the new frame on the skipped
+    frame, so the NEW base is right. At a hyperspace exit the scene is still
+    in the old frame, so the held base is right (proven).
+  - The new base only exists a consume later.
+  - This withdraws 091726's "low wake is a long mode switch" reading.
+  - The Steam ini is restored; the decision on the next step is Sean's.
+- **The measurement build (d28f9ada, on main), as installed:**
   - The eye-base dumps now carry the detector's per-frame object geometry
     (matched, cameraStep, poolStep, relativeMedian/P90, predictionP90, the
     decision) beside the camera mailbox state.
@@ -371,6 +378,40 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
   0x6BF929 / 0x594C3E / 0x2869073`.
 
+## Flight 100043 (2026-09-24 10:00, Steam copy, build d28f9ada): the low-wake measurement
+
+Trap ON, `watch` (nothing acted); the build matched. Sean flew three low
+wakes and saw no flashes, because the trap hid them.
+
+- **Seven scene-judged eye resets.** Frames 13549, 13939, 15653, 15965,
+  17586, 17905 and 23340 (median object error 6.2-8.6 m; 264.6 m for the
+  last). Each sits exactly 2 frames after a single-frame ENTRY edge (an
+  un-refilled consume at 13547, 13937, ...): the consume-to-render offset.
+  The first six come in pairs 3.7-5 s apart, the three low wakes' entry and
+  exit.
+- **Two long identity stretches** (2,729 and 5,813 consumes, both with
+  EXIT edges) produced no reset at either edge.
+- **The low-wake ENTRY (skip 13547, world to ship-centred).** On the
+  skipped frame's render (f13549) the camera fell to head-only (step
+  2,925.8). The ship's own geometry (the pool's matched records are the
+  ship's parts; ordinary frames show cam = pool, relMed 0) had ALREADY
+  rebased into the ship-centred frame on that same frame (pool step
+  2,927.2). The right base there was the NEW one,
+  (-0.660, +11.066, -7.725), which the writer produced only on the next
+  consume. The held (old) base would be ~2.9 km off. This is the opposite
+  of the hyperspace exit, where the scene was still in the old frame on the
+  skipped frame.
+- **The second skip of the pair (13937, ship-centred static to moving).**
+  The ship's parts moved 14.7 m and then 17.2 m around the skip (matched
+  57 of 87). Neither the held base (0 m) nor the next write (2.6 m) matches
+  that. Object matching at this edge is too thin to call.
+- **Conclusion.** Every transition flash is a one-frame skip of the eye-base
+  writer. What differs by transition is whether the scene switches frames
+  on the skipped frame (low-wake entry: yes) or a frame later (hyperspace
+  exit: no). The correct base is the new one in the first case and the old
+  one in the second. At consume time neither the new base nor the scene's
+  switch is visible; at render time (2 frames later) both are.
+
 ## Flight 091726 (2026-09-24 09:17, Steam copy, build aecf9800)
 
 Offered-base fix, trap OFF, `alternate`; the build matched.
@@ -600,10 +641,13 @@ analysis, or from flight 184826 or 195435 where marked:
   offered-and-refused matrix as the low-wake answer.** On every event frame
   the controller made no call at all (`controller_calls=0`), so no matrix
   was ever offered.
-- **Ruled out (091726): a low-wake flash as a one-frame skip.** The
-  controller stops for the whole of supercruise (5,041 frames of identity),
-  and the exit has no un-refilled frame. It is a camera/object mode-switch
-  mismatch.
+- **WITHDRAWN (100043 contradicts it): "ruled out (091726): a low-wake
+  flash as a one-frame skip".** The low-wake entry and exit flashes ARE
+  one-frame skips. Six scene-judged resets in 100043 each sit on a
+  single-frame un-refilled consume (render offset +2). The long 30-70 s
+  identity stretches are something else: none of their edges produced a
+  reset. The 091726 reading mistook one of those stretches for
+  supercruise.
 - **Ruled out (073114): one fixed substitute for every transition.** The
   held base fixed both hyperspace exits (Sean: "hyperspace worked") but not
   the low wake. The objects change frame on different frames by
