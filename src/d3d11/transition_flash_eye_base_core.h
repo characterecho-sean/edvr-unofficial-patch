@@ -414,13 +414,27 @@ inline const char* sceneChoiceText(SceneChoice c) noexcept {
 // Unclear, not guessed. `geometryFresh` false (the pool was not sampled this
 // frame) is Unclear regardless of the numbers: a zeroed default geometry
 // would otherwise read as a scene-old 0.
+//
+// The detector's own evidence floor (review of the acting build,
+// finding 1b, the rule glitch_scene.h:23-25's
+// glitchSceneDecision already applies): fewer than 32 matched or predicted
+// points, or a non-finite step, is NO evidence -- Unclear. Without the
+// floor, a fresh 0/0 geometry (pool bound but not uploaded this frame, or
+// the four-read cap) divides 0 by the camera floor and reads as scene-old,
+// choosing held on exactly the scene-new frames held is kilometres wrong
+// on. The floor is what lets a fresh-but-empty geometry mean "no evidence"
+// instead of "the objects did not move".
+inline constexpr uint32_t kSceneChoiceMinMatched = 32;
 inline constexpr float kSceneChoiceCamFloor = 1e-6f;
 inline constexpr float kSceneNewRatioMin = 0.5f;
 inline constexpr float kSceneNewRatioMax = 2.0f;
 inline constexpr float kSceneOldRatioMax = 0.25f;
 
-inline SceneChoice patchSceneChoice(float camStep, float poolStep, bool geometryFresh) noexcept {
+inline SceneChoice patchSceneChoice(uint32_t matched, uint32_t predicted, float camStep, float poolStep,
+                                    bool geometryFresh) noexcept {
     if (!geometryFresh) return SceneChoice::Unclear;
+    if (matched < kSceneChoiceMinMatched || predicted < kSceneChoiceMinMatched) return SceneChoice::Unclear;
+    if (!std::isfinite(camStep) || !std::isfinite(poolStep)) return SceneChoice::Unclear;
     const float denom = camStep > kSceneChoiceCamFloor ? camStep : kSceneChoiceCamFloor;
     const float ratio = poolStep / denom;
     if (ratio >= kSceneNewRatioMin && ratio <= kSceneNewRatioMax) return SceneChoice::New;
@@ -476,6 +490,7 @@ inline bool mailboxPlausible(const float m[16]) noexcept {
 inline constexpr uint32_t kSceneCBSimBytes = 5376;
 inline constexpr int kSceneCBSimFloat4Rows = 5376 / 16;   // 336 float4 rows
 inline constexpr int kSceneCBSimOriginFloat = 1100;       // cb1[275] = floats [1100..1102]
+inline constexpr int kSceneCBSimBasisFloat = 1104;        // cb1[276..279] = floats [1104..1119]
 
 // A 4x4 group is a view-matrix candidate when its 3x3 (storage [r*4+c]) is
 // orthonormal: unit-length, mutually perpendicular columns. The test is
@@ -599,8 +614,11 @@ inline void postmul4x4(const float a[16], const float b[16], float out[16]) noex
 //   scene-new   -> the LIVE mailbox base (NoPatch when the probe gave
 //                  nothing usable -- never guess);
 //   scene-old   -> the HELD base, NEVER the live one (22726);
-//   unclear     -> the HELD base, the proven-safe side (NoPatch when there
-//                  is no held base).
+//   unclear     -> NoPatch -- NOT held (review of the acting build,
+//                  finding 1, fix step 4: held
+//                  is proven only for scene-old; on a scene-new frame it is
+//                  kilometres wrong, far worse than the 13.5 m head-only
+//                  eye it replaces).
 enum class PatchBaseChoice : uint8_t { UseLive, UseHeld, NoPatch };
 
 inline const char* patchBaseChoiceText(PatchBaseChoice c) noexcept {
@@ -616,7 +634,7 @@ inline PatchBaseChoice choosePatchBase(SceneChoice scene, bool haveLive, bool ha
     switch (scene) {
     case SceneChoice::New:     return haveLive ? PatchBaseChoice::UseLive : PatchBaseChoice::NoPatch;
     case SceneChoice::Old:     return haveHeld ? PatchBaseChoice::UseHeld : PatchBaseChoice::NoPatch;
-    case SceneChoice::Unclear: return haveHeld ? PatchBaseChoice::UseHeld : PatchBaseChoice::NoPatch;
+    case SceneChoice::Unclear: return PatchBaseChoice::NoPatch;   // missing evidence patches NOTHING
     }
     return PatchBaseChoice::NoPatch;
 }

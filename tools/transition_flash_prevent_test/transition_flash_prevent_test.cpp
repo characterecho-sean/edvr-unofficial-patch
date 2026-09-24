@@ -690,10 +690,14 @@ void caseChoosePatchBase() {
           "choosePatchBase: scene-old NEVER falls back to the live base (skip 22726: 1614 m wrong)");
     check(tfeb::choosePatchBase(SceneChoice::Old, false, false) == PatchBaseChoice::NoPatch,
           "choosePatchBase: scene-old with neither base patches nothing");
-    check(tfeb::choosePatchBase(SceneChoice::Unclear, true, true) == PatchBaseChoice::UseHeld,
-          "choosePatchBase: unclear defaults to the held base (the proven-safe side)");
-    check(tfeb::choosePatchBase(SceneChoice::Unclear, false, true) == PatchBaseChoice::UseHeld,
-          "choosePatchBase: unclear uses the held base even when a live base exists");
+    // Unclear is NoPatch, NOT held -- the review's step-4 argument: held is
+    // proven only for scene-old; on a scene-new frame it is kilometres
+    // wrong, far worse than the 13.5 m head-only eye it replaces. Missing
+    // evidence patches NOTHING.
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, true, true) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: unclear patches nothing even with both bases");
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, false, true) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: unclear never takes the held base");
     check(tfeb::choosePatchBase(SceneChoice::Unclear, true, false) == PatchBaseChoice::NoPatch,
           "choosePatchBase: unclear without a held base patches nothing");
     check(tfeb::choosePatchBase(SceneChoice::Unclear, false, false) == PatchBaseChoice::NoPatch,
@@ -1105,48 +1109,75 @@ void casePremul4x4() {
 
 void casePatchSceneChoiceFlightPoints() {
     using tfeb::SceneChoice;
+    constexpr uint32_t M = 128, P = 128;   // a full pool sample, above the floor
     // 2026-09-12 hyperspace exit: the pool is still in the old frame while
     // the camera rebases -- pool 0.0 against a 1600-unit camera step.
-    check(tfeb::patchSceneChoice(1600.0f, 0.0f, true) == SceneChoice::Old,
+    check(tfeb::patchSceneChoice(M, P, 1600.0f, 0.0f, true) == SceneChoice::Old,
           "patchSceneChoice: hyperspace exit (cam 1600, pool 0) is scene-old");
     // Flight 100043's scene-new resets: the pool stepped with the camera.
-    check(tfeb::patchSceneChoice(2925.8f, 2927.2f, true) == SceneChoice::New,
+    check(tfeb::patchSceneChoice(M, P, 2925.8f, 2927.2f, true) == SceneChoice::New,
           "patchSceneChoice: f13549 (2925.8/2927.2) is scene-new");
-    check(tfeb::patchSceneChoice(13.5f, 14.7f, true) == SceneChoice::New,
-          "patchSceneChoice: f13939 (13.5/14.7) is scene-new");
-    check(tfeb::patchSceneChoice(3594.2f, 3567.3f, true) == SceneChoice::New,
+    check(tfeb::patchSceneChoice(57, 87, 13.5f, 14.7f, true) == SceneChoice::New,
+          "patchSceneChoice: f13939 (13.5/14.7, matched 57) is scene-new");
+    check(tfeb::patchSceneChoice(M, P, 3594.2f, 3567.3f, true) == SceneChoice::New,
           "patchSceneChoice: f22217 (3594.2/3567.3) is scene-new");
-    check(tfeb::patchSceneChoice(3860.4f, 3861.7f, true) == SceneChoice::New,
+    check(tfeb::patchSceneChoice(M, P, 3860.4f, 3861.7f, true) == SceneChoice::New,
           "patchSceneChoice: f23340 (3860.4/3861.7) is scene-new");
 }
 
 void casePatchSceneChoiceBands() {
     using tfeb::SceneChoice;
-    // Band edges, fresh geometry: the new band is inclusive at both ends.
-    check(tfeb::patchSceneChoice(100.0f, 50.0f, true) == SceneChoice::New,
+    constexpr uint32_t M = 128, P = 128;
+    // Band edges, fresh geometry, full evidence: the new band is inclusive at
+    // both ends.
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 50.0f, true) == SceneChoice::New,
           "patchSceneChoice: ratio exactly 0.5 is scene-new (inclusive)");
-    check(tfeb::patchSceneChoice(100.0f, 200.0f, true) == SceneChoice::New,
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 200.0f, true) == SceneChoice::New,
           "patchSceneChoice: ratio exactly 2.0 is scene-new (inclusive)");
     // The old band is exclusive: exactly 0.25 is neither band.
-    check(tfeb::patchSceneChoice(100.0f, 25.0f, true) == SceneChoice::Unclear,
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 25.0f, true) == SceneChoice::Unclear,
           "patchSceneChoice: ratio exactly 0.25 is the dead band, not scene-old");
     // Inside the dead band, either side.
-    check(tfeb::patchSceneChoice(100.0f, 30.0f, true) == SceneChoice::Unclear,
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 30.0f, true) == SceneChoice::Unclear,
           "patchSceneChoice: ratio 0.3 above the old band is unclear");
-    check(tfeb::patchSceneChoice(100.0f, 250.0f, true) == SceneChoice::Unclear,
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 250.0f, true) == SceneChoice::Unclear,
           "patchSceneChoice: ratio 2.5 above the new band is unclear");
     // Just inside the old band.
-    check(tfeb::patchSceneChoice(100.0f, 24.9f, true) == SceneChoice::Old,
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 24.9f, true) == SceneChoice::Old,
           "patchSceneChoice: ratio 0.249 is scene-old");
     // Stale geometry is unclear whatever the numbers say -- a zeroed default
     // geometry (cam 0, pool 0) would otherwise read as scene-old 0.
-    check(tfeb::patchSceneChoice(0.0f, 0.0f, false) == SceneChoice::Unclear,
+    check(tfeb::patchSceneChoice(0, 0, 0.0f, 0.0f, false) == SceneChoice::Unclear,
           "patchSceneChoice: not-fresh geometry is unclear even at ratio 0");
-    check(tfeb::patchSceneChoice(2925.8f, 2927.2f, false) == SceneChoice::Unclear,
+    check(tfeb::patchSceneChoice(M, P, 2925.8f, 2927.2f, false) == SceneChoice::Unclear,
           "patchSceneChoice: not-fresh geometry is unclear even at a scene-new ratio");
-    // A zero camera step divides by the floor, not by zero.
-    check(tfeb::patchSceneChoice(0.0f, 0.0f, true) == SceneChoice::Old,
-          "patchSceneChoice: fresh zero-over-zero reads as scene-old 0 through the cam floor");
+}
+
+void casePatchSceneChoiceEvidenceFloor() {
+    using tfeb::SceneChoice;
+    // The review's finding 1b: the detector's own floor (glitch_scene.h:23-
+    // 25's rule). Fresh 0/0 is NO EVIDENCE, not scene-old -- a pool bound
+    // but not uploaded this frame divides 0 by the camera floor without the
+    // floor and would pick held on exactly the scene-new frames held is
+    // kilometres wrong on.
+    check(tfeb::patchSceneChoice(0, 0, 0.0f, 0.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: fresh 0/0 (no upload) is unclear, not scene-old");
+    check(tfeb::patchSceneChoice(0, 0, 2925.8f, 2927.2f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: 0/0 points is unclear whatever the steps say");
+    // One short of the floor on either count.
+    check(tfeb::patchSceneChoice(31, 128, 1600.0f, 0.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: matched 31 is unclear even at a scene-old ratio");
+    check(tfeb::patchSceneChoice(128, 31, 1600.0f, 0.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: predicted 31 is unclear even at a scene-old ratio");
+    check(tfeb::patchSceneChoice(32, 32, 1600.0f, 0.0f, true) == SceneChoice::Old,
+          "patchSceneChoice floor: exactly 32/32 still reads the ratio");
+    // A non-finite step is no evidence either way.
+    check(tfeb::patchSceneChoice(128, 128, NAN, 0.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: a NaN camera step is unclear");
+    check(tfeb::patchSceneChoice(128, 128, 1600.0f, NAN, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: a NaN pool step is unclear");
+    check(tfeb::patchSceneChoice(128, 128, 2925.8f, INFINITY, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: an infinite pool step is unclear");
 }
 
 void casePatchSimWindow() {
@@ -1383,6 +1414,7 @@ int wmain(int argc, wchar_t** argv) {
     casePremul4x4();
     casePatchSceneChoiceFlightPoints();
     casePatchSceneChoiceBands();
+    casePatchSceneChoiceEvidenceFloor();
     casePatchSimWindow();
     caseLiveMailboxPlausible();
     caseAffineInverse4x4();

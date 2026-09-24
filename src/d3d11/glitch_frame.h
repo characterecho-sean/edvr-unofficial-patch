@@ -79,6 +79,17 @@ void glitchFrameObservePool(const void* resource, const void* data, uint32_t byt
 void glitchFrameInvalidatePool(const void* resource);
 GlitchSceneGeometry glitchFrameSceneGeometry();
 
+// advanced.transition_flash_eye_base's per-bad-frame latch asks, at a
+// head-only fill, whether the pool's OWN upload for this counter frame is
+// already in the store, and if so gets the detector's own comparison run on
+// a COPY of that upload with its camera lane set to `camera` (the fill's row
+// 275 -- the same value s->sceneDrawPos will get at the draw). READ-ONLY
+// with respect to the store: never advances p.prev/p.older (only
+// glitchFrameNoteScenePool owns that) and never touches p.write. Returns
+// false when no pool slot holds this frame's upload -- the caller reads
+// that as "no evidence yet".
+bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchSceneGeometry* out);
+
 // Called once per frame, after Present. eyeDraws is the number of draws that
 // reached the eye textures in the frame just finished -- used to tell a rendered
 // scene from a menu or a loading screen, where the camera legitimately teleports

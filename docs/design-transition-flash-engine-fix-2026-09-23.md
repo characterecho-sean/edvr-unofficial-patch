@@ -6,30 +6,40 @@ static chain: see "Flight 184826".*
 
 ## Status
 
+- **Review finding FIXED (2026-09-24, build pending the flight): the
+  fill-time selector read evidence computed after the fills.** Review
+  (reviews\review-flash-render-time-patch-acting-2026-09-24.md) caught that
+  pool geometry only exists after the frame's first eye draw, so early
+  fills of a scene-new bad frame would have taken held (km wrong) and later
+  fills live -- one frame, two cameras. The boundary-time validation never
+  saw it. The patch now decides ONCE at the frame's first head-only fill
+  from the pool's own upload when present (compare on a copy, camera = row
+  275), latches base and B for every fill of the frame, and is
+  all-or-nothing: no evidence at the first fill -> no patch that frame
+  (poolLate counted per frame, the review's ordering measurement).
+  Unclear/thin evidence -> NoPatch (was held); the detector's
+  matched>=32/finite floor adopted. Also fixed: frameFarPos/H3 read the
+  patched buffer (pre-tap copies now), VP scan runs on original rows only,
+  rows 276-279 dumped before/after for the basis question. Flight checks
+  per acted event: one base all frame, boundary-line agreement,
+  fillsSkippedNoView=0, poolEarly=yes.
+
 - **Locator VALIDATED; the selector is the decision (flight 134813, build
   7eb4a536).** Per-fill structural view location works (the row moves
   64/85/233/282 by pass); corrO within 6 cm of the next frame's eye at every
   scene-new event. Skip 22726 (a scene-old hyperspace entry: the objects had
-  not switched, the mailbox already held the tunnel base) proved the patch
-  base must be chosen by the pool/cam selector: scene-new -> live,
-  scene-old -> held, unclear -> held; a selector-less live patch would have
-  flashed 1614 m there (the cross-residual flagged it on its own). The
-  writer's scene graph and the rendered object pool can switch a frame
-  apart; the patch agrees with the POOL. live=RESET happened at one control
-  tap (bad-frame taps 10/10 ok). Next: the acting build (trap off,
-  alternate).
+  not switched, the mailbox already held the tunnel base) proved the base
+  must be selector-chosen: scene-new -> live, scene-old -> held; a
+  selector-less live patch would have flashed 1614 m there. The pool and
+  the writer's scene graph can switch a frame apart; the patch agrees with
+  the POOL. live=RESET at one control tap (bad-frame taps 10/10 ok).
 
-- **LIVE-READ VALIDATED (flight 125237, build e9fefca0).** At all four skips
-  (supercruise entry/exit, hyperspace entry/exit) the live mailbox at the bad
-  render's tap, premultiplied onto the head-only eye, equals the engine's own
-  next-frame eye to the millimetre (exact on 3 of 4, 1 mm on the fourth).
-  Zero live=RESET taps; on the 16 m/frame moving exits the match was still
-  exact, so the tap sits between the writer's write and the mode-2 reset.
-  The record-indexed new candidate was stale at every tap (refilled age=3)
-  and is ruled out as the patch's source. The acting patch:
-  premul4x4(liveM, badEye) at R = N+2; the pool/cam selector demoted to a
-  sanity log. Next: the buffer-row locator (watch-only), then the acting
-  build.
+- **LIVE-READ VALIDATED (flight 125237, build e9fefca0).** At all four
+  skips the live mailbox at the bad render's tap, premultiplied onto the
+  head-only eye, equals the engine's own next-frame eye to the millimetre;
+  zero live=RESET taps at bad frames; the record-indexed new candidate was
+  stale at every tap (refilled age=3) and is ruled out as the patch's
+  source.
 - **Goal (Sean, 2026-09-23):** stop trapping the bad frame and stop Elite
   rendering it at all, by fixing the order inside the game. The trap stays
   on as referee until the acting build verifies.
@@ -40,20 +50,18 @@ static chain: see "Flight 184826".*
   is not refilled that frame. Every flash is a one-frame writer skip
   (100043, 125237).
 - **Consume frame numbers lag render taps by ~1 wall-clock frame** (125237):
-  the refill the bad render needs is already LIVE in the mailbox at the tap,
-  not in any consume-indexed record. The sim's window starts at N+1, not N,
-  for the same skew.
-- **The render-time patch simulation is on main** (310d9883, the live read
-  e9fefca0, the buffer-row locator 7eb4a536):
-  `advanced.transition_flash_eye_base = off|watch|on|alternate`; every
-  non-off mode runs the passive sim. The Steam copy runs the locator build
-  7eb4a536 with the trap ON and `transition_flash_eye_base = watch` (one
-  marked ini line). Read each flight with `--expect-build` set to the
-  stamped commit its section names.
+  the refill the bad render needs is already LIVE in the mailbox at the tap;
+  the sim's window starts at N+1, not N, and the act fires at tap frame
+  skip+1 (6/6 on 134813).
+- **The render-time patch is on main** (simulation 310d9883, live read
+  e9fefca0, locator 7eb4a536, the acting build 9a243675 plus the review
+  fixes): `advanced.transition_flash_eye_base = off|watch|on|alternate`.
+  The Steam copy runs the acting build, trap OFF, `alternate` (two marked
+  ini lines). Read each flight with `--expect-build` set to the stamped
+  commit its section names.
 - **Hyperspace exits can be scene-new too** (125237): the second scene-new
-  event on record after 100043's f23338. The live-read design is indifferent
-  to the timing case by construction -- which is why the selector is
-  demoted, not removed.
+  event on record after 100043's f23338. 22726 then proved the selector is
+  NOT demotable: scene-old and scene-new both occur at hyperspace entries.
 - **Environment:** game build 332841 (PE TimeDateStamp 1788384820, image
   104,894,464), the same exe in both installs. Independent of VR runtime,
   headset, eye size and DLSS: the code is Elite's camera, below all of them.
