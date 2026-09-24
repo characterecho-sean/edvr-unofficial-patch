@@ -4,6 +4,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/frame_flag.h"
+#include "glitch_frame.h"  // glitchFrameCameraValidated: arm in flight, not the menu
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -553,8 +554,10 @@ LONG CALLBACK poseReaderVeh(EXCEPTION_POINTERS* ep) {
 }
 
 // --- Stability gate and the arm/disarm lifecycle --------------------------
-constexpr uint64_t kBoundArmedMs = 30000;      // 30s
-constexpr uint64_t kBoundGameHits = 5000;
+// Long enough, once armed in flight, to reach a first jump; a few reads a
+// frame at ~90 fps would spend a 5000-hit cap in about 14 s.
+constexpr uint64_t kBoundArmedMs = 180000;     // 180s
+constexpr uint64_t kBoundGameHits = 100000;
 constexpr uint64_t kRearmSweepMs = 2000;       // ~2s
 constexpr uint64_t kNeverStabilizedMs = 30000; // 30s of never reaching 60 consecutive frames
 
@@ -725,8 +728,21 @@ void poseReaderWatchFrameBoundary(uint32_t frameNo) {
         return;
     }
 
-    // Not yet armed: the 60-frame stability gate against the runtime's
-    // published render-pose pointer (frame_flag.h).
+    // Not yet armed. First the flight gate: the render-pose address is
+    // stable from the VR menu on, and a time-bounded watch armed there would
+    // be spent before the cockpit camera ever ran. Wait for the flash
+    // detector's camera validation ("transition flash fix ACTIVE").
+    static bool flightSeen = false;
+    if (!flightSeen) {
+        if (!glitchFrameCameraValidated()) { maybeReportPeriodic(); return; }
+        flightSeen = true;
+        g_onSinceMs = now;  // the never-stabilised clock starts in flight
+        g_stability = prw::StabilityState{};
+        Log::get().note("pose reader watch: the rendered scene is validated (flight); the "
+                        "arming gate starts now.");
+    }
+    // Then the 60-frame stability gate against the runtime's published
+    // render-pose pointer (frame_flag.h).
     const PoseReaderCall call = poseReaderCall();
     uint64_t address = 0;
     bool onStack = false;

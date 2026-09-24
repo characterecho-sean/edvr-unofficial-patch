@@ -2094,6 +2094,14 @@ bool glitchFrameWantsSceneDraw(uint64_t hash) {
     if(!s || !s->observing || s->sceneDrawFrame==s->frameNo)return false;
     return glitchFrameIsSceneDraw(hash);
 }
+// True once the camera validation behind "transition flash fix ACTIVE" has
+// passed -- the scene camera moved through its first rendered frames, which
+// is flight, not the menu or the loader. advanced.eye_origin_readers waits for
+// it before arming its time-bounded watch, so the watch is spent in flight.
+bool glitchFrameCameraValidated() {
+    State* s=g_state;
+    return s && s->validated;
+}
 bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     State* s=g_state;
     if(!s || !s->observing || !resource || s->sceneDrawFrame==s->frameNo)return false;
