@@ -2,6 +2,7 @@
 #include "../../src/openxr/runtime_gate.h"
 #include "../../src/openxr/system_publication.h"
 #include "../../src/openxr/loading_state.h"
+#include "../../src/openxr/frame_cycle_stats.h"
 
 #include <condition_variable>
 #include <atomic>
@@ -197,6 +198,119 @@ void frameBoundaryTest() {
   fake.endResult=XR_ERROR_RUNTIME_FAILURE;boundary.submit(vr::Eye_Left,&texture);
   check(boundary.submit(vr::Eye_Right,&texture)==vr::VRCompositorError_InvalidTexture&&
     sink.finishedResult==XR_ERROR_RUNTIME_FAILURE,"failed endFrame reports failure to shadow commit policy");
+}
+
+// publish()/finishPair(): submit()'s own split, native_runtime_host.h's
+// frame_end_overlap defers exactly the finishPair() half past a Submit
+// call's return. publish() must never call finish() itself -- that is the
+// one property the deferral relies on -- and submit() must still behave
+// exactly as frameBoundaryTest() above already pins it doing.
+void publishFinishPairSplitTest() {
+  Fake fake; SessionState session; Sink sink(fake); vr::Texture_t texture{};
+  check(start(session, fake), "split: session starts");
+  FrameBoundary boundary(session, sink);
+  check(boundary.waitAndBegin() == XR_SUCCESS, "split: wait begins frame");
+  const auto predicted = boundary.frame().predictedDisplayTime; boundary.setGeometryReady(true);
+  bool pairReady = true;
+  check(boundary.publish(vr::Eye_Right, &texture, nullptr, vr::Submit_Default, pairReady) == vr::VRCompositorError_None &&
+    !pairReady && fake.captureCalls == 1 && !fake.composeCalls && !fake.endCalls,
+    "split: one eye published, pair not ready, finish not called");
+  check(boundary.publish(vr::Eye_Left, &texture, nullptr, vr::Submit_Default, pairReady) == vr::VRCompositorError_None &&
+    pairReady && fake.captureCalls == 2 && !fake.composeCalls && !fake.endCalls,
+    "split: second eye makes the pair ready but STILL does not finish it");
+  check(boundary.publish(vr::Eye_Right, &texture, nullptr, vr::Submit_Default, pairReady) == vr::VRCompositorError_InvalidTexture &&
+    !pairReady && fake.captureCalls == 2, "split: duplicate eye rejected without a third capture, pairReady reset");
+  check(boundary.finishPair() == XR_SUCCESS && fake.composeCalls == 1 && fake.endCalls == 1 &&
+    fake.lastHadLayers && fake.lastDisplayTime == predicted, "split: finishPair composes and ends the pair publish() left open");
+
+  // Deferred by a whole wait: nothing about a pair sitting ready between
+  // publish() and finishPair() may depend on finishing it before returning
+  // to the caller, so drive one from a different call than the one that
+  // completed it -- the shape a queued finish (frame_end_overlap) takes.
+  check(boundary.waitAndBegin() == XR_SUCCESS, "split: next wait begins frame");boundary.setGeometryReady(true);
+  check(boundary.publish(vr::Eye_Left, &texture, nullptr, vr::Submit_Default, pairReady) == vr::VRCompositorError_None && !pairReady,
+    "split: deferred fixture first eye");
+  const auto composedBefore = fake.composeCalls, endedBefore = fake.endCalls;
+  check(boundary.publish(vr::Eye_Right, &texture, nullptr, vr::Submit_Default, pairReady) == vr::VRCompositorError_None && pairReady &&
+    fake.composeCalls == composedBefore && fake.endCalls == endedBefore, "split: deferred fixture pair ready, still unfinished");
+  check(boundary.finishPair() == XR_SUCCESS && fake.composeCalls == composedBefore + 1 && fake.endCalls == endedBefore + 1,
+    "split: finishPair from a later call still completes the pair exactly once");
+
+  // finishPair() failure reports through failed()/lastResult() exactly as
+  // submit()'s own compose/end failures do in boundaryFailures() below --
+  // the deferred caller (native_runtime_host.h's finishPendingFrameEnd) reads
+  // both instead of a return value nobody is still waiting on.
+  check(boundary.waitAndBegin() == XR_SUCCESS, "split: failure fixture wait");boundary.setGeometryReady(true);
+  fake.endResult = XR_ERROR_RUNTIME_FAILURE;
+  boundary.publish(vr::Eye_Left, &texture, nullptr, vr::Submit_Default, pairReady);
+  check(boundary.publish(vr::Eye_Right, &texture, nullptr, vr::Submit_Default, pairReady) == vr::VRCompositorError_None && pairReady,
+    "split: failure fixture pair ready");
+  check(boundary.finishPair() == XR_ERROR_RUNTIME_FAILURE && boundary.failed() && boundary.lastResult() == XR_ERROR_RUNTIME_FAILURE,
+    "split: finishPair failure is reported through failed()/lastResult()");
+  session.abandonAfterOwnerDestruction();
+
+  // submit() is publish()+finishPair() glued back together for every caller
+  // that still wants one call: same capture/compose/end counts and outcome
+  // as driving the two halves by hand above, on a fresh, otherwise identical
+  // pair.
+  Fake glued; SessionState gluedSession; check(start(gluedSession, glued), "split: submit() comparison session starts");
+  Sink gluedSink(glued); FrameBoundary gluedBoundary(gluedSession, gluedSink);
+  check(gluedBoundary.waitAndBegin() == XR_SUCCESS, "split: submit() comparison wait");gluedBoundary.setGeometryReady(true);
+  check(gluedBoundary.submit(vr::Eye_Right, &texture) == vr::VRCompositorError_None &&
+    glued.captureCalls == 1 && !glued.composeCalls, "split: submit() first eye matches publish() alone");
+  check(gluedBoundary.submit(vr::Eye_Left, &texture) == vr::VRCompositorError_None &&
+    glued.captureCalls == 2 && glued.composeCalls == 1 && glued.endCalls == 1,
+    "split: submit()'s second eye still finishes inline, same totals as publish()+finishPair()");
+  gluedSession.abandonAfterOwnerDestruction();
+}
+
+// FrameCycleStats::frameEndOwnerBegin/End and nextWaitQueueDelay:
+// native_frame_end_overlap's frame_end_owner_body and next_wait_queue_delay
+// nested phases (native_runtime_host.h's reportFrameCycles). No submit()
+// eyes needed; a bare wait/submit/wait cycle admits one sample, exactly like
+// latePacingSteadyTest above drives noteReal with bare waits.
+void frameEndOwnerBodyStatsTest() {
+  FrameCycleStats stats;
+  FrameCycleStats::Shape shape{}; shape.width[0]=shape.width[1]=shape.height[0]=shape.height[1]=2;
+  // Every tick advance is its own statement (never a mutating +=  alongside
+  // another read of the same variable in one call's argument list, where
+  // evaluation order is unspecified) so this stays deterministic.
+  uint64_t tick=1000;
+  const auto waitToken=stats.waitCallerBegin(tick,7); check(waitToken!=0,"owner-body stats: first wait admitted");
+  tick+=10;stats.waitOwnerBegin(waitToken,tick);
+  tick+=5;stats.waitOwnerEnd(waitToken,tick);
+  tick+=5;stats.waitCallerEnd(waitToken,1,tick,tick,7,shape,true);
+  tick+=20;const auto submitToken1=stats.submitCallerBegin(0,tick,7);check(submitToken1!=0,"owner-body stats: first submit admitted");
+  tick+=1;stats.submitOwnerBegin(submitToken1,tick);
+  tick+=1;stats.submitOwnerEnd(submitToken1,tick);
+  stats.submitCallerEnd(submitToken1,0,1,tick,7,0.0,true);
+  tick+=5;const auto submitToken2=stats.submitCallerBegin(1,tick,7);check(submitToken2!=0,"owner-body stats: second submit admitted");
+  tick+=1;stats.submitOwnerBegin(submitToken2,tick);
+  tick+=1;stats.submitOwnerEnd(submitToken2,tick);
+  stats.submitCallerEnd(submitToken2,1,1,tick,7,0.0,true);
+  // A deferred finish now runs on the owner, overlapping the caller's own
+  // work: frameEndOwnerBegin/End bracket it, entirely inside the interval
+  // the next waitCallerBegin below measures as afterSecond/next_wait.
+  tick+=3;const auto ownerBodyBegan=tick;stats.frameEndOwnerBegin(ownerBodyBegan);
+  tick+=40;const auto ownerBodyEnded=tick;stats.frameEndOwnerEnd(ownerBodyEnded);
+  tick+=10;const auto queueDelayBegan=tick; // the caller invokes the next wait...
+  tick+=6;const auto ownerPicksUp=tick;     // ...but it queues behind that finish
+  const auto nextWaitToken=stats.waitCallerBegin(queueDelayBegan,7);check(nextWaitToken!=0,"owner-body stats: next wait admitted");
+  stats.waitOwnerBegin(nextWaitToken,ownerPicksUp);
+  tick+=2;stats.waitOwnerEnd(nextWaitToken,tick);
+  tick+=8;stats.waitCallerEnd(nextWaitToken,2,tick,tick,7,shape,true);
+  FrameCycleStats::Report r{}; check(stats.takeReport(r)==false,"owner-body stats: window still open, no report yet");
+  // Force the report: a second (partial, discarded) cycle 30s later by clock.
+  tick+=20;const auto laterToken=stats.waitCallerBegin(tick,7);
+  tick+=1;stats.waitOwnerBegin(laterToken,tick);
+  tick+=1;stats.waitOwnerEnd(laterToken,tick);
+  const auto laterNowMs=tick+30001;
+  tick+=1;stats.waitCallerEnd(laterToken,3,tick,laterNowMs,7,shape,true);
+  check(stats.takeReport(r) && r.valid>=1, "owner-body stats: report produced after the window elapsed");
+  check(r.frameEndOwnerBody.max >= double(ownerBodyEnded-ownerBodyBegan)/1000.0 - 0.001,
+    "owner-body stats: frame_end_owner_body sees the deferred finish's own wall time");
+  check(r.nextWaitQueueDelay.max >= double(ownerPicksUp-queueDelayBegan)/1000.0 - 0.001,
+    "owner-body stats: next_wait_queue_delay sees the wait sitting queued behind it");
 }
 
 // FrameBoundary::noteReal's late-frame counter
@@ -716,7 +830,8 @@ void turboPacingTest() {
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) { std::puts("Would test injected OpenXR frame boundary; no runtime or files."); return 0; }
   if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); latePacingSteadyTest(); latePacingSkippedPeriodTest(); latePacingPeriodChangeTest();
+  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); publishFinishPairSplitTest(); frameEndOwnerBodyStatsTest();
+  latePacingSteadyTest(); latePacingSkippedPeriodTest(); latePacingPeriodChangeTest();
   blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();turboPacingTest();
   std::printf("openxr_frame_test: %u checks, %u failures\n", checks.load(), failures.load()); return failures.load() ? 1 : 0;
 }

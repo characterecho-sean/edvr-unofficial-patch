@@ -78,6 +78,9 @@ struct RuntimeOptions {
   // Borrowed validated provider from NativeRenderBinding. Its device and
   // module references remain alive through owner shutdown and callback release.
   HMODULE graphicsProvider = nullptr;
+  // edvr_openxr.ini frame_thread_priority=high|normal and frame_end_overlap=on|off.
+  bool frameThreadPriorityHigh=true;
+  bool frameEndOverlap=true;
 };
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
@@ -253,6 +256,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // the PREVIOUS frame's features.begin (native_frame_client.h's begin() is
   // called after this frame's boundary.waitAndBegin), a one-frame lag.
   FramePacing lastPacing=FramePacing::Runtime; uint64_t pacingChanges=0;
+  // Overlapped frame end (edvr_openxr.ini frame_end_overlap): set once from
+  // startupOptions in start(). When the second Submit of a runtime-paced,
+  // separate-device pair completes, finishPair() (consumer copy, compose,
+  // xrEndFrame) is queued to the owner instead of run inline, so Elite's
+  // Submit returns as soon as its texture is free to reuse. pendingFrameEnd*
+  // is owner-thread-only state read back by the queued job or, if OwnerService
+  // cancelled it unrun, by close()'s inline fallback; frameEnd*Count are the
+  // native_frame_end_overlap_summary tallies at session close.
+  bool frameEndOverlapEnabled=true;
+  bool pendingFrameEndFinish=false;
+  vr::EVREye pendingFrameEndEye=vr::Eye_Left;
+  uint64_t frameEndOverlapCount=0,frameEndSyncCount=0,frameEndInlineAtCloseCount=0,frameEndFailureCount=0;
   RuntimeGate gate; uint64_t runtimeGeneration=0;
   // frameViews is the projection the XR layer advertises: the located one,
   // always, so every runtime composes it the way it composes an untouched
@@ -594,6 +609,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // members. The diagnostic owns its device; game-device use remains separate.
     if(GetCurrentThreadId()!=ownerThread||starts!=1)return vr::VRInitError_Init_Internal;
     if(cancelled.load(std::memory_order_acquire))return vr::VRInitError_Init_ShuttingDown;
+    if(startupOptions.frameThreadPriorityHigh)raiseCurrentThreadPriority("owner");
+    pacer.priorityHigh=startupOptions.frameThreadPriorityHigh;
+    frameEndOverlapEnabled=startupOptions.frameEndOverlap;
+    nativeTracePrintf("native_frame_end_overlap,enabled=%u,reason=%s\n",
+      unsigned(frameEndOverlapEnabled&&startupOptions.separateDevice),
+      !frameEndOverlapEnabled?"config":!startupOptions.separateDevice?"borrowed_device":"config");
     const auto openBegan=StepClock::now();
     if(!open(startupOptions))return vr::VRInitError_Init_Internal;
     const double openMs=stepMs(openBegan);
@@ -665,6 +686,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void pumpEvents() {
     if(GetCurrentThreadId()!=ownerThread||!runtimeGeneration||serviceFailed)return;
+    // owner_service.h's idle callback: fires when the queue is empty, but
+    // also on its own 5 ms cadence right after ANY request finishes, whether
+    // or not another one is already queued behind it. A frame_end_overlap
+    // finish can be that next item -- pair fully captured, frame still open,
+    // waiting to be composed and ended -- so if this ran now, the STOPPING
+    // branch below would drain() the boundary and end that pair empty out
+    // from under the pending finish. Skip this whole tick and let the next
+    // one (or the finish job itself) proceed once pendingFrameEndFinish clears.
+    if(pendingFrameEndFinish)return;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation){publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"service_operation");return;}
     ++eventPumps;
@@ -1172,56 +1202,124 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       lastCompositorResult=boundary.lastResult();return rejected;
     }
     LARGE_INTEGER submitBegin{},submitEnd{}; const auto submitClock=QueryPerformanceCounter(&submitBegin);
-    const auto r=boundary.submit(eye,texture,bounds,flags);
+    bool pairReady=false;
+    // Not `captured`: that name is the EyeCapture member (C4458).
+    const auto published=boundary.publish(eye,texture,bounds,flags,pairReady);
+    // frame_end_overlap scope: separate device (finishPair below then needs
+    // no graphicsCalls rendezvous with Elite's thread -- capture() above,
+    // reached from publish(), already ran any producer copy that did),
+    // runtime pacing (turbo already overlaps its own wait against the game,
+    // so there is nothing left to gain here), the switch, and no earlier
+    // pair's finish still outstanding.
+    const bool eligible=published==vr::VRCompositorError_None&&pairReady&&
+      separateGraphics()&&!boundary.turbo()&&frameEndOverlapEnabled&&!pendingFrameEndFinish;
+    const bool deferred=eligible&&service.submit([this]{finishPendingFrameEnd();});
+    if(deferred){pendingFrameEndFinish=true;pendingFrameEndEye=eye;++frameEndOverlapCount;}
+    const bool pairSync=!deferred&&published==vr::VRCompositorError_None&&pairReady;
+    if(pairSync)++frameEndSyncCount;
+    const auto r=deferred?vr::VRCompositorError_None:
+      (pairSync?(boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture):published);
     const auto submitClockEnd=QueryPerformanceCounter(&submitEnd);
     if(submitClock&&submitClockEnd) timingFrame.submitMs[unsigned(eye)]=elapsedMs(submitBegin,submitEnd);
     lastCompositorResult=boundary.lastResult();
+    if(deferred) {
+      // The producer copy is already done and Elite's texture is free to
+      // reuse: give its still-parked thread the GPU marker now, then let it
+      // go. finishSubmitTail (failed/invalidate/timing/compositorSubmits)
+      // runs later, from finishPendingFrameEnd, after finishPair -- consumer
+      // copy, compose, xrEndFrame -- completes on the owner, overlapping
+      // Elite's own post-Submit work instead of blocking it.
+      dispatchGpuEyeMarker(eye,texture,true);
+      return vr::VRCompositorError_None;
+    }
+    dispatchGpuEyeMarker(eye,texture,r==vr::VRCompositorError_None);
+    return finishSubmitTail(eye,r);
+  }
+  // Queued via service.submit from inside the second Submit's owner body
+  // above when frame_end_overlap applies. owner_service.h's FIFO guarantees
+  // this runs before the next WaitGetPoses or Submit invoke, so nothing else
+  // touches the shared capture/eye-capture state, submitSample, transferWall
+  // or timingFrame for this frame before it does. Also run inline by close()
+  // when OwnerService::stop() cancelled this job before it got to run.
+  void finishPendingFrameEnd() {
+    if(!pendingFrameEndFinish)return;
+    auto operation=gate.tryEnter(runtimeGeneration);
+    if(!operation) {
+      // Cannot happen today -- gate.requestStop() is only called from
+      // close(), which only runs once OwnerService::stop() has fully
+      // drained this queue, so this job and that call can never be
+      // concurrent -- but if it ever did, leave pendingFrameEndFinish set:
+      // close() is what would have stopped the gate, and its own inline
+      // fallback below finishes this pair before it drains the boundary.
+      return;
+    }
+    const auto eye=pendingFrameEndEye;pendingFrameEndFinish=false;
+    frameCycles.frameEndOwnerBegin(frameCycleUs());
+    const auto r=boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture;
+    lastCompositorResult=boundary.lastResult();
+    finishSubmitTail(eye,r);
+    frameCycles.frameEndOwnerEnd(frameCycleUs());
+  }
+  // Needs Elite's own texture pointer and its thread still parked in this
+  // rendezvous, so both submitEye (synchronous or about to defer) call this
+  // themselves before a deferral could let that thread go; finishSubmitTail
+  // below, which the deferred path only reaches later, never does.
+  void dispatchGpuEyeMarker(vr::EVREye eye,const vr::Texture_t* texture,bool ok) {
+    if(!ok||!timingGpuBegun[unsigned(eye)])return;
+    const bool markerDispatched=graphicsCalls.invoke([&]{
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+      ID3D11Texture2D* raw=nullptr;
+      if(texture&&texture->handle&&SUCCEEDED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source))))
+        raw=source.Get();
+      if(raw) timing.gpuEye(timingSequence,unsigned(eye),false,true,raw);
+    });
+    if(!markerDispatched) timingInvalidate();
+    timingGpuBegun[unsigned(eye)]=false;
+  }
+  // Shared by the synchronous pair-finish in submitEye and the deferred one
+  // in finishPendingFrameEnd: everything that depends on finishPair()'s
+  // outcome (or, for a non-pairing eye, just on the capture result already
+  // in r).
+  vr::EVRCompositorError finishSubmitTail(vr::EVREye eye,vr::EVRCompositorError r) {
     if(boundary.failed()) {
+      ++frameEndFailureCount;
       publishFatalFailure(boundary.lastResult(),"submit_boundary");
       return vr::VRCompositorError_InvalidTexture;
     }
-    if(r!=vr::VRCompositorError_None)invalidateEyeTreatments();
-    if(r==vr::VRCompositorError_None&&timingGpuBegun[unsigned(eye)]) {
-      const bool markerDispatched=graphicsCalls.invoke([&]{
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
-        ID3D11Texture2D* raw=nullptr;
-        if(texture&&texture->handle&&SUCCEEDED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source))))
-          raw=source.Get();
-        if(raw) timing.gpuEye(timingSequence,unsigned(eye),false,true,raw);
-      });
-      if(!markerDispatched) timingInvalidate();
-      timingGpuBegun[unsigned(eye)]=false;
-    }
-    if(r!=vr::VRCompositorError_None) timingInvalidate();
-    if(r==vr::VRCompositorError_None&&timingFrameActive) { timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask==3) {
-      deviceTiming.acceptFrame(timingSequence);
-      pollDeviceTiming();
-      // Version 5: the caller work of the cycle this frame's own pose wait
-      // closed (frame_cycle_stats.h, callerWorkForCurrent). The caller thread
-      // completed it at this frame's wait return, before either submit, and
-      // is parked in this submit's route now; absent when that cycle failed.
-      double callerWork=0;
-      timingFrame.callerWorkValid=frameCycles.callerWorkForCurrent(callerWork)?1u:0u;
-      timingFrame.callerWorkMs=timingFrame.callerWorkValid?callerWork:0.0;
-      if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else {
-        submitSample.submitMs=timingFrame.submitMs[0]+timingFrame.submitMs[1];
-        submitSample.callbacks=graphicsCalls.calls-submitCallbacksBegin;
-        submitSample.featureEpoch=featureChanges;
-        submitSample.producerDispatchMs=transferWall.producerDispatch;
-        submitSample.producerAcquireMs=transferWall.producerAcquire;
-        submitSample.producerFlushMs=transferWall.producerFlush;
-        submitSample.consumerAcquireMs=transferWall.consumerAcquire;
-        submitSample.consumerFlushMs=transferWall.consumerFlush;
-        submitSample.endFrameMs=boundary.endFrameMs();
-        submitSample.waitFrameMs=boundary.waitBlockMs();
-        submitSample.pacerBlockMs=boundary.pacerBlockMs();
-        submitSample.deferred=boundary.turbo()?1u:0u;
-        if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
-        timingRetire();
-      }
-    } }
+    if(r!=vr::VRCompositorError_None){invalidateEyeTreatments();timingInvalidate();}
+    if(r==vr::VRCompositorError_None&&timingFrameActive)publishSubmitTimingIfComplete(eye);
     if(r==vr::VRCompositorError_None){++compositorSubmits;if(loading.sceneSubmitted())++loadingToScene;}
     return r;
+  }
+  void publishSubmitTimingIfComplete(vr::EVREye eye) {
+    timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask!=3)return;
+    deviceTiming.acceptFrame(timingSequence);
+    pollDeviceTiming();
+    // Version 5: the caller work of the cycle this frame's own pose wait
+    // closed (frame_cycle_stats.h, callerWorkForCurrent). The caller thread
+    // completed it at this frame's wait return, before either submit. With
+    // frame_end_overlap the caller may already be past this Submit, but its
+    // next wait cannot close the cycle until this job has run (the owner
+    // queue is FIFO). Absent when that cycle failed.
+    double callerWork=0;
+    timingFrame.callerWorkValid=frameCycles.callerWorkForCurrent(callerWork)?1u:0u;
+    timingFrame.callerWorkMs=timingFrame.callerWorkValid?callerWork:0.0;
+    if(FAILED(timing.publishCpu(timingFrame))) timingInvalidate(); else {
+      submitSample.submitMs=timingFrame.submitMs[0]+timingFrame.submitMs[1];
+      submitSample.callbacks=graphicsCalls.calls-submitCallbacksBegin;
+      submitSample.featureEpoch=featureChanges;
+      submitSample.producerDispatchMs=transferWall.producerDispatch;
+      submitSample.producerAcquireMs=transferWall.producerAcquire;
+      submitSample.producerFlushMs=transferWall.producerFlush;
+      submitSample.consumerAcquireMs=transferWall.consumerAcquire;
+      submitSample.consumerFlushMs=transferWall.consumerFlush;
+      submitSample.endFrameMs=boundary.endFrameMs();
+      submitSample.waitFrameMs=boundary.waitBlockMs();
+      submitSample.pacerBlockMs=boundary.pacerBlockMs();
+      submitSample.deferred=boundary.turbo()?1u:0u;
+      if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
+      timingRetire();
+    }
   }
   bool clearSubmitted(uint64_t generation) override {
     if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=clearSubmitted(generation);})&&result;}
@@ -1611,17 +1709,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
     FrameCycleStats::Report r{};if(!frameCycles.takeReport(r))return;
     const auto& c=r.cycle;const double validSum=c.mean*double(r.valid);
-    nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu,late_frames=%llu\n",
+    nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu,late_frames=%llu,frame_end_overlap=%u\n",
       (unsigned long long)r.window,(unsigned long long)r.admitted,r.valid,(unsigned long long)r.firstSequence,(unsigned long long)r.lastSequence,(unsigned long long)r.elapsedMs,validSum,
       r.elapsedMs?double(r.admitted)*1000.0/double(r.elapsedMs):0.0,r.elapsedMs?double(r.valid)*1000.0/double(r.elapsedMs):0.0,r.callerThread,r.waitThread,unsigned(r.threadConsistent),
       r.shape.width[0],r.shape.height[0],r.shape.width[1],r.shape.height[1],r.shape.outputWidth[0],r.shape.outputHeight[0],r.shape.outputWidth[1],r.shape.outputHeight[1],r.shape.pacing,r.shape.shouldRender,r.shape.sceneReady,
       (unsigned long long)r.shape.generation,(unsigned long long)r.shape.featureEpoch,
       (unsigned long long)r.missing[FrameCycleStats::BadClock],(unsigned long long)r.missing[FrameCycleStats::Reentrant],(unsigned long long)r.missing[FrameCycleStats::WrongThread],(unsigned long long)r.missing[FrameCycleStats::BadSequence],(unsigned long long)r.missing[FrameCycleStats::PartialStereo],(unsigned long long)r.missing[FrameCycleStats::DuplicateEye],(unsigned long long)r.missing[FrameCycleStats::DirectOwner],(unsigned long long)r.missing[FrameCycleStats::ShapeChange],(unsigned long long)r.missing[FrameCycleStats::Overflow],
-      (unsigned long long)boundary.takeLateFramesWindow());
+      (unsigned long long)boundary.takeLateFramesWindow(),
+      // Eligibility for this window's shape, not a per-sample count: pacing
+      // 0 is FramePacing::Runtime (frame_boundary.h), the only pacing
+      // frame_end_overlap ever applies to.
+      unsigned(frameEndOverlapEnabled&&separateGraphics()&&r.shape.pacing==0));
     const auto phase=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,p99=%.4f,max=%.4f,units=wall_ms,nested=0\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95,d.p99,d.max);};
     phase("cycle",r.cycle);phase("game_before_first_submit",r.beforeFirst);phase("first_submit_roundtrip",r.firstSubmit);phase("between_eye_calls",r.betweenEyes);phase("second_submit_roundtrip",r.secondSubmit);phase("post_second_submit_to_next_wait",r.afterSecond);phase("next_wait_roundtrip",r.nextWait);phase("per_frame_residual",r.residual);
     const auto nested=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,p99=%.4f,max=%.4f,units=wall_ms,nested=1\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95,d.p99,d.max);};
     nested("next_wait_owner_body",r.waitOwner);nested("first_submit_owner_body",r.submitOwner[0]);nested("second_submit_owner_body",r.submitOwner[1]);nested("first_submit_render_park",r.renderPark[0]);nested("second_submit_render_park",r.renderPark[1]);
+    nested("frame_end_owner_body",r.frameEndOwnerBody);nested("next_wait_queue_delay",r.nextWaitQueueDelay);
     if(r.postValid&&!postSubmitFirstNoted.exchange(true))
       nativeTracePrintf("native_post_submit,first_complete=1,window=%llu,sequence=%llu\n",
         (unsigned long long)r.window,(unsigned long long)r.firstPostSequence);
@@ -1686,11 +1789,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     phase("xr_end_frame",&SubmissionStats::Sample::endFrameMs);
     phase("wait_frame",&SubmissionStats::Sample::waitFrameMs);
     phase("pacer_block",&SubmissionStats::Sample::pacerBlockMs);
-    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,cull_stage=%u,cull_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0\n",
+    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,cull_stage=%u,cull_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0,frame_end_overlap=%u\n",
       (unsigned long long)submitStats.window(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
       last.outputWidth[0],last.outputHeight[0],last.outputWidth[1],last.outputHeight[1],last.treatments[0],last.treatments[1],
       (unsigned long long)last.featureEpoch,unsigned(cullGuard.stage()),cullGuard.factorWidth(),cullGuard.factorHeight(),
-      unsigned(last.deferred),unsigned(separateGraphics()),phases);
+      unsigned(last.deferred),unsigned(separateGraphics()),phases,
+      // last.deferred==0 is FramePacing::Runtime, the only pacing this
+      // window's last sample could have taken the overlapped path under.
+      unsigned(frameEndOverlapEnabled&&separateGraphics()&&last.deferred==0));
   }
   XrResult compose(XrCompositionLayerProjection& layer) override {
     LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
@@ -1935,6 +2041,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // xrDestroySession. drain() also closes a frame this boundary still had
     // open (a close() reached without ever going through STOPPING).
     if(state.running()&&!state.terminal()&&GetCurrentThreadId()==ownerThread) {
+      // A deferred finish OwnerService::stop() cancelled before it ran (its
+      // job was still queued, not started) leaves pendingFrameEndFinish true
+      // and the pair's frame still open with no xrEndFrame sent: finish it
+      // here, inline, before drain() -- otherwise drain()'s own clear() would
+      // end that already-captured pair empty instead. A finish that DID get
+      // to run already cleared the flag itself.
+      if(pendingFrameEndFinish) {
+        pendingFrameEndFinish=false;
+        const auto r=boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture;
+        lastCompositorResult=boundary.lastResult();
+        ++frameEndInlineAtCloseCount;
+        finishSubmitTail(pendingFrameEndEye,r);
+      }
       const auto drained=boundary.drain();
       if(drained!=XR_SUCCESS)nativeTracePrintf("native_pacing,drain_result=%d\n",int(drained));
     }
@@ -1960,6 +2079,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       (unsigned long long)pacingChanges,(unsigned long long)boundary.deferredFrames(),(unsigned long long)boundary.synthesized(),
       (unsigned long long)boundary.readyAtWait(),(unsigned long long)boundary.kicks(),(unsigned long long)boundary.drainedFrames(),
       (unsigned long long)boundary.drainedWaits(),(unsigned long long)boundary.lateFrames(),(unsigned long long)perfSettingsEvents);
+    if(tracing)nativeTracePrintf("native_frame_end_overlap_summary,overlapped=%llu,synchronous=%llu,inline_at_close=%llu,failures=%llu\n",
+      (unsigned long long)frameEndOverlapCount,(unsigned long long)frameEndSyncCount,
+      (unsigned long long)frameEndInlineAtCloseCount,(unsigned long long)frameEndFailureCount);
     if(tracing)nativeTracePrintf("native_long_cycle_summary,count=%llu,logged=%llu,threshold=2x_period\n",
       (unsigned long long)longCycleCount,(unsigned long long)longCycleLogged);
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",

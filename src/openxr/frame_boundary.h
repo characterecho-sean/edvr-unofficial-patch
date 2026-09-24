@@ -106,9 +106,15 @@ class FrameBoundary final {
     if (ownerThread() && session_.frameOpen() && !accepted_[0] && !accepted_[1])
       geometryReady_ = ready;
   }
-  vr::EVRCompositorError submit(vr::EVREye eye, const vr::Texture_t* texture,
-      const vr::VRTextureBounds_t* bounds = nullptr,
-      vr::EVRSubmitFlags flags = vr::Submit_Default) {
+  // Captures one eye and marks it accepted; never calls finish(). pairReady
+  // is true once both eyes are in, at which point the caller may complete the
+  // pair with finishPair() -- synchronously, right away, or deferred past
+  // this call's return (native_runtime_host.h's frame_end_overlap). Keeping
+  // the split here means FrameBoundary itself stays synchronous and
+  // engine-agnostic; only the caller decides whether to defer.
+  vr::EVRCompositorError publish(vr::EVREye eye, const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags, bool& pairReady) {
+    pairReady = false;
     if (!ownerThread()) return vr::VRCompositorError_InvalidTexture;
     if (eye != vr::Eye_Left && eye != vr::Eye_Right)
       return vr::VRCompositorError_IndexOutOfRange;
@@ -121,8 +127,19 @@ class FrameBoundary final {
     const auto captured = sink_.capture(eye, texture, bounds, flags, pixels);
     if (captured != vr::VRCompositorError_None) return captured;
     accepted_[index] = true;
-    if (!accepted_[0] || !accepted_[1]) return vr::VRCompositorError_None;
-    return finish(false)==XR_SUCCESS ? vr::VRCompositorError_None : vr::VRCompositorError_InvalidTexture;
+    pairReady = accepted_[0] && accepted_[1];
+    return vr::VRCompositorError_None;
+  }
+  // Today's finish(false) made public: the consumer copy, compose and
+  // xrEndFrame for a pair publish() has already marked complete.
+  XrResult finishPair() { return finish(false); }
+  vr::EVRCompositorError submit(vr::EVREye eye, const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds = nullptr,
+      vr::EVRSubmitFlags flags = vr::Submit_Default) {
+    bool pairReady = false;
+    const auto captured = publish(eye, texture, bounds, flags, pairReady);
+    if (captured != vr::VRCompositorError_None || !pairReady) return captured;
+    return finishPair()==XR_SUCCESS ? vr::VRCompositorError_None : vr::VRCompositorError_InvalidTexture;
   }
 
   // Owner-only loading frame. It must have its own wait/begin and cannot

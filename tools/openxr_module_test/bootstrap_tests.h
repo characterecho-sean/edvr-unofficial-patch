@@ -97,6 +97,30 @@ void runBootstrapTests(Check&& check) {
     LocalConfig config;check(writeLocalFixture(localPath,system)&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&
       localConfigUsesSystemRuntime(config.runtime), "system runtime sentinel parses strictly");
   }
+  {
+    // frame_thread_priority and frame_end_overlap are optional, unlike the
+    // five keys above: absent means the documented default (high, on), not
+    // a parse failure. Reuses `valid`, which names neither key.
+    LocalConfig config;check(writeLocalFixture(localPath,valid)&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&
+      config.frameThreadPriorityHigh&&config.frameEndOverlap,
+      "frame_thread_priority/frame_end_overlap default to high/on when absent");
+  }
+  {
+    const std::string switchedOff="[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\n"
+      "separate_device=1\nframe_thread_priority=normal\nframe_end_overlap=off\n";
+    LocalConfig config;check(writeLocalFixture(localPath,switchedOff)&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&
+      !config.frameThreadPriorityHigh&&!config.frameEndOverlap,
+      "frame_thread_priority=normal and frame_end_overlap=off both parse switched off");
+  }
+  for(const std::string& badNewKey:{
+      "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\nframe_thread_priority=low\n",
+      "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\nframe_end_overlap=1\n",
+      "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n"
+        "frame_thread_priority=high\nframe_thread_priority=high\n"}) {
+    LocalConfig config{{L"stale"},{L"stale"},{L"stale"},true};check(writeLocalFixture(localPath,badNewKey)&&readLocalConfig(localPath,config)==LocalConfigResult::Invalid&&
+      config.loader.empty(),
+      "bad value or duplicate for a new key fails closed like the original five");
+  }
   for(const std::string& malformed:{
       "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\n",
       "[openxr]\nversion=1\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n",

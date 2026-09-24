@@ -24,6 +24,12 @@ class FrameCycleStats final {
     double cycle=0,beforeFirst=0,firstSubmit=0,betweenEyes=0,secondSubmit=0,
       afterSecond=0,nextWait=0,residual=0;
     double waitOwner=0,submitOwner[2]{},renderPark[2]{};
+    // frame_end_owner_body: the owner's wall time actually running a deferred
+    // finishPair() (frame_end_overlap), 0 when this cycle's pair finished
+    // synchronously. next_wait_queue_delay: wait_.ownerBegin - wait_.begin,
+    // the time this cycle's own next-wait invoke sat queued before its owner
+    // body started -- with overlap on, that queue can hold a pending finish.
+    double frameEndOwnerBody=0,nextWaitQueueDelay=0;
     double presentCount=0,rawPresent=0,edvrBeforePresent=0,edvrAfterPresent=0,
       edvrPresent=0,trailingCallback=0,outsidePresent=0,postResidual=0,
       beforePresent=0,afterPresent=0,handoffCount=0,handoffNested=0,syncNonzeroPresent=0;
@@ -57,7 +63,8 @@ class FrameCycleStats final {
     uint64_t window=0,firstSequence=0,lastSequence=0,elapsedMs=0,admitted=0;
     unsigned valid=0; Shape shape{}; std::array<uint64_t,MissingCount> missing{};
     Dist cycle,beforeFirst,firstSubmit,betweenEyes,secondSubmit,afterSecond,nextWait,residual,waitOwner;
-    Dist submitOwner[2],renderPark[2]; uint32_t callerThread=0,waitThread=0; bool threadConsistent=false;
+    Dist submitOwner[2],renderPark[2],frameEndOwnerBody,nextWaitQueueDelay;
+    uint32_t callerThread=0,waitThread=0; bool threadConsistent=false;
     unsigned postValid=0,zeroPresentValid=0,singlePresentValid=0,multiplePresentValid=0,handoffValid=0;uint64_t firstPostSequence=0,syncNonzeroPresent=0;
     std::array<uint64_t,PostUnavailableCount> postUnavailable{};
     uint64_t handoffMissing=0,handoffInvalid=0,handoffOverflow=0;
@@ -85,6 +92,12 @@ class FrameCycleStats final {
   }
   void waitOwnerBegin(uint64_t token,uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(token&&wait_.token==token&&!wait_.ownerBegin)wait_.ownerBegin=tick;else ++missing_[Reentrant]; }
   void waitOwnerEnd(uint64_t token,uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(token&&wait_.token==token&&wait_.ownerBegin&&tick>=wait_.ownerBegin)wait_.ownerEnd=tick;else ++missing_[BadClock]; }
+  // Owner-thread-only, no token: frame_end_overlap's deferred finishPair()
+  // wall time, bracketing the already-paired cycle (current_.eyes==2)
+  // between its second submitCallerEnd and the following waitCallerBegin.
+  // A synchronous pair never calls these, so frameEndOwnerBody reads 0.
+  void frameEndOwnerBegin(uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(current_.active&&current_.eyes==2&&!current_.frameEndOwnerBegin)current_.frameEndOwnerBegin=tick; }
+  void frameEndOwnerEnd(uint64_t tick) noexcept { std::lock_guard<std::mutex> l(m_); if(current_.frameEndOwnerBegin&&tick>=current_.frameEndOwnerBegin&&!current_.frameEndOwnerEnd)current_.frameEndOwnerEnd=tick; }
   void waitCallerEnd(uint64_t token,uint64_t sequence,uint64_t tick,uint64_t nowMs,uint32_t thread,const Shape& shape,bool ok) noexcept {
     std::lock_guard<std::mutex> l(m_);completedReady_=false;callerWorkFor_=0;callerWorkMeasured_=false;
     if(!ok||!token||wait_.token!=token||!wait_.open||!ordered(wait_.begin,wait_.ownerBegin,wait_.ownerEnd,tick)||thread!=wait_.thread){advanceWindow(nowMs,shape,sequence);bad(!ok?PartialStereo:BadClock);if(wait_.token==token)wait_={};return;}
@@ -155,7 +168,8 @@ class FrameCycleStats final {
   struct Handoff {uint64_t begin=0,end=0;};
   struct Wait {bool open=false;uint64_t token=0,begin=0,ownerBegin=0,ownerEnd=0;uint32_t thread=0;};
   struct Current {bool active=false,submitOpen=false;uint64_t sequence=0,waitReturn=0,waitRound=0,waitOwner=0,
-    beforeFirst=0,between=0,afterSecond=0,submitToken=0,submitBegin=0,ownerBegin=0,ownerEnd=0,submitReturn[2]{},submitRound[2]{},owner[2]{},atMs=0;bool afterSecondReady=false;
+    beforeFirst=0,between=0,afterSecond=0,submitToken=0,submitBegin=0,ownerBegin=0,ownerEnd=0,submitReturn[2]{},submitRound[2]{},owner[2]{},atMs=0,
+    frameEndOwnerBegin=0,frameEndOwnerEnd=0;bool afterSecondReady=false;
     double park[2]{},presentCount=0,rawPresent=0,edvrBeforePresent=0,edvrAfterPresent=0,edvrPresent=0,trailingCallback=0,outsidePresent=0,postResidual=0,beforePresent=0,afterPresent=0,syncNonzeroPresent=0;
     uint64_t presentBegin=0,presentEnd=0;
     uint32_t callerThread=0,waitThread=0,submitThread=0,order[2]{},seenEyes=0,eyes=0;
@@ -209,6 +223,11 @@ class FrameCycleStats final {
     s.secondSubmit=double(current_.submitRound[1])*toMs;s.afterSecond=double(current_.afterSecond)*toMs;s.nextWait=double(nextWaitReturn-wait_.begin)*toMs;
     const double parts=s.beforeFirst+s.firstSubmit+s.betweenEyes+s.secondSubmit+s.afterSecond+s.nextWait;
     s.residual=s.cycle-parts;s.waitOwner=double(wait_.ownerEnd-wait_.ownerBegin)*toMs;
+    // The wait invoke sat queued behind whatever the owner was still doing --
+    // ordinarily nothing -- until its owner body actually started; with
+    // frame_end_overlap on that can be a still-running deferred finishPair().
+    s.nextWaitQueueDelay=double(wait_.ownerBegin-wait_.begin)*toMs;
+    s.frameEndOwnerBody=current_.frameEndOwnerEnd?double(current_.frameEndOwnerEnd-current_.frameEndOwnerBegin)*toMs:0;
     for(unsigned i=0;i<2;++i){s.submitOwner[i]=double(current_.owner[i])*toMs;s.renderPark[i]=current_.park[i];s.eyeOrder[i]=current_.order[i];}
     s.callerThread=current_.callerThread;s.waitThread=waitThread;
     s.postValid=current_.postValid;s.postUnavailable=current_.postUnavailable;s.singlePresent=current_.singlePresent;
@@ -254,7 +273,9 @@ class FrameCycleStats final {
   Dist dist(double Sample::*field)const{std::array<double,capacity>v{};double total=0;for(unsigned i=0;i<count_;++i){v[i]=(*samples_)[i].*field;total+=v[i];}std::sort(v.begin(),v.begin()+count_);auto p=[&](unsigned x){return count_?v[(count_*x+99)/100-1]:0;};return{count_?total/count_:0,p(50),p(95),p(99),count_?v[count_-1]:0};}
   template<class Include> Dist filteredDist(double Sample::*field,Include include)const{std::array<double,capacity>v{};double total=0;unsigned n=0;for(unsigned i=0;i<count_;++i)if(include((*samples_)[i])){v[n]=(*samples_)[i].*field;total+=v[n++];}std::sort(v.begin(),v.begin()+n);auto p=[&](unsigned x){return n?v[(n*x+99)/100-1]:0;};return{n?total/n:0,p(50),p(95),p(99),n?v[n-1]:0};}
   void makeReport(uint64_t last,uint64_t nowMs){report_={};report_.window=++window_;report_.firstSequence=count_?(*samples_)[0].sequence:windowStart_;report_.lastSequence=last;report_.elapsedMs=nowMs>=windowStartMs_?nowMs-windowStartMs_:0;report_.admitted=attempted_;report_.valid=count_;report_.shape=shape_;report_.missing=missing_;report_.callerThread=observedSubmitThread_;report_.waitThread=observedWaitThread_;report_.threadConsistent=!observedThreadMismatch_;
-    report_.cycle=dist(&Sample::cycle);report_.beforeFirst=dist(&Sample::beforeFirst);report_.firstSubmit=dist(&Sample::firstSubmit);report_.betweenEyes=dist(&Sample::betweenEyes);report_.secondSubmit=dist(&Sample::secondSubmit);report_.afterSecond=dist(&Sample::afterSecond);report_.nextWait=dist(&Sample::nextWait);report_.residual=dist(&Sample::residual);report_.waitOwner=dist(&Sample::waitOwner);for(unsigned i=0;i<2;++i){std::array<double,capacity>v{};for(unsigned j=0;j<count_;++j)v[j]=(*samples_)[j].submitOwner[i];report_.submitOwner[i]=manual(v);for(unsigned j=0;j<count_;++j)v[j]=(*samples_)[j].renderPark[i];report_.renderPark[i]=manual(v);}for(unsigned j=0;j<count_;++j)if((*samples_)[j].callerThread!=observedSubmitThread_||(*samples_)[j].waitThread!=observedWaitThread_)report_.threadConsistent=false;
+    report_.cycle=dist(&Sample::cycle);report_.beforeFirst=dist(&Sample::beforeFirst);report_.firstSubmit=dist(&Sample::firstSubmit);report_.betweenEyes=dist(&Sample::betweenEyes);report_.secondSubmit=dist(&Sample::secondSubmit);report_.afterSecond=dist(&Sample::afterSecond);report_.nextWait=dist(&Sample::nextWait);report_.residual=dist(&Sample::residual);report_.waitOwner=dist(&Sample::waitOwner);
+    report_.frameEndOwnerBody=dist(&Sample::frameEndOwnerBody);report_.nextWaitQueueDelay=dist(&Sample::nextWaitQueueDelay);
+    for(unsigned i=0;i<2;++i){std::array<double,capacity>v{};for(unsigned j=0;j<count_;++j)v[j]=(*samples_)[j].submitOwner[i];report_.submitOwner[i]=manual(v);for(unsigned j=0;j<count_;++j)v[j]=(*samples_)[j].renderPark[i];report_.renderPark[i]=manual(v);}for(unsigned j=0;j<count_;++j)if((*samples_)[j].callerThread!=observedSubmitThread_||(*samples_)[j].waitThread!=observedWaitThread_)report_.threadConsistent=false;
     for(unsigned i=0;i<count_;++i){const auto&s=(*samples_)[i];if(s.postValid){++report_.postValid;if(!report_.firstPostSequence)report_.firstPostSequence=s.sequence;if(s.presentCount==0)++report_.zeroPresentValid;else if(s.singlePresent)++report_.singlePresentValid;else ++report_.multiplePresentValid;report_.syncNonzeroPresent+=uint64_t(s.syncNonzeroPresent);}else if(s.postUnavailable<PostUnavailableCount)++report_.postUnavailable[s.postUnavailable];if(s.handoffValid)++report_.handoffValid;}
     auto post=[](const Sample&s){return s.postValid;};auto single=[](const Sample&s){return s.postValid&&s.singlePresent;};auto handoff=[](const Sample&s){return s.handoffValid;};
     report_.presentCount=filteredDist(&Sample::presentCount,post);report_.rawPresent=filteredDist(&Sample::rawPresent,post);report_.edvrBeforePresent=filteredDist(&Sample::edvrBeforePresent,post);report_.edvrAfterPresent=filteredDist(&Sample::edvrAfterPresent,post);report_.edvrPresent=filteredDist(&Sample::edvrPresent,post);report_.trailingCallback=filteredDist(&Sample::trailingCallback,post);report_.outsidePresent=filteredDist(&Sample::outsidePresent,post);report_.postResidual=filteredDist(&Sample::postResidual,post);report_.postGap=filteredDist(&Sample::afterSecond,post);report_.beforePresent=filteredDist(&Sample::beforePresent,single);report_.afterPresent=filteredDist(&Sample::afterPresent,single);report_.handoffCount=filteredDist(&Sample::handoffCount,handoff);report_.handoffNested=filteredDist(&Sample::handoffNested,handoff);

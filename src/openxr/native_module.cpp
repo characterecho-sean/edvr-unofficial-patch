@@ -53,6 +53,10 @@ class ModuleBackend final : public RuntimeBackend {
     if (cancelled.load(std::memory_order_acquire)) return vr::VRInitError_Init_ShuttingDown;
     generation->route.present=&generation->binding.work();
     if (!generation->route.bind()) return vr::VRInitError_Init_Internal;
+    // Read-only: Elite's own thread, never adjusted. For comparison against
+    // native_thread_priority,thread=owner|pacer, which EDVR does raise.
+    nativeTracePrintf("native_thread_priority,thread=render,tid=%lu,priority=%d\n",
+        (unsigned long)GetCurrentThreadId(),GetThreadPriority(GetCurrentThread()));
     if (!generation->owner.start([generation] {
       if (generation->host) generation->host->pumpEvents();
     })) return vr::VRInitError_Init_Internal;
@@ -358,6 +362,7 @@ extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,
          readableRegularFile(local.graphics)&&(localConfigUsesSystemRuntime(local.runtime)||readableRegularFile(local.runtime))) {
         RuntimeOptions options;options.loader=std::move(local.loader);options.graphicsProxy=std::move(local.graphics);
         options.separateDevice=local.separateDevice;localManifest=std::move(local.runtime);
+        options.frameThreadPriorityHigh=local.frameThreadPriorityHigh;options.frameEndOverlap=local.frameEndOverlap;
         const auto configured=configureModule(std::move(options),5000,localManifest);
         if(configured!=S_OK&&configured!=E_PENDING){if(error)*error=vr::VRInitError_Init_InstallationCorrupt;return 0;}
         if(configured==S_OK){nativeTracePuts("module_configuration,source=local");std::fflush(stdout);}
