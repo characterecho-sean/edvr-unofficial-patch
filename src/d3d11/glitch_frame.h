@@ -87,8 +87,14 @@ GlitchSceneGeometry glitchFrameSceneGeometry();
 // with respect to the store: never advances p.prev/p.older (only
 // glitchFrameNoteScenePool owns that) and never touches p.write. Returns
 // false when no pool slot holds this frame's upload -- the caller reads
-// that as "no evidence yet".
-bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchSceneGeometry* out);
+// that as "no evidence yet". `snapshot`, when non-null, receives the
+// triple the comparison used -- [0] the (camera-replaced) frame upload,
+// [1] p.prev, [2] p.older, all COPIES -- so the caller can re-evaluate
+// later fills against the LATCH-TIME history instead of the live store
+// (which NoteScenePool advances; comparing against it measures the upload
+// against itself, the 151942 wouldDiffer artifact).
+bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchSceneGeometry* out,
+                                  glitch_scene_detail::Sample snapshot[3]);
 
 // Called once per frame, after Present. eyeDraws is the number of draws that
 // reached the eye textures in the frame just finished -- used to tell a rendered

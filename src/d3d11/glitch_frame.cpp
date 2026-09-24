@@ -2427,7 +2427,8 @@ void glitchFrameInvalidatePool(const void* resource){
 // header's own comment for the contract. A copy of the frame's pool upload
 // goes into compare with the fill's row 275 as the camera; the store itself
 // (p.write/p.prev/p.older) is never advanced or mutated here.
-bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchSceneGeometry* out) {
+bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchSceneGeometry* out,
+                                  glitch_scene_detail::Sample snapshot[3]) {
     State* s = g_state;
     if (!s || !s->observing || !camera || !out) return false;
     for (const auto& p : s->scenePools) {
@@ -2437,6 +2438,11 @@ bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchS
         copy.camera[1] = camera[1];
         copy.camera[2] = camera[2];
         *out = glitch_scene_detail::compare(copy, p.prev, p.older);
+        if (snapshot) {
+            snapshot[0] = copy;
+            snapshot[1] = p.prev;
+            snapshot[2] = p.older;
+        }
         return true;
     }
     return false;

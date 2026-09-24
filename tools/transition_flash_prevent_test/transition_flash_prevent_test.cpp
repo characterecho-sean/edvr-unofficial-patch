@@ -1078,6 +1078,74 @@ void casePatchEyeOrigin() {
     check(near3(out, wantR, 1e-6f), "patchEyeOrigin: 90-degree Z rotation rotates P");
 }
 
+void caseRotateByBase() {
+    const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+    float out[3];
+
+    // Identity: a direction passes through unchanged (and, unlike
+    // patchEyeOrigin, gains NO translation).
+    const float v[3] = {0.3f, -0.8f, 0.5f};
+    tfeb::rotateByBase(I, v, out);
+    check(near3(out, v, 1e-6f), "rotateByBase: identity passes directions through");
+
+    // A pure-translation base leaves directions untouched (this is the
+    // whole point of the translation-free twin).
+    const float T[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -0.660f, 11.066f, -7.725f, 0};
+    tfeb::rotateByBase(T, v, out);
+    check(near3(out, v, 1e-6f), "rotateByBase: a translation-only base leaves directions alone");
+
+    // 90-degree Z rotation, same mapping as patchEyeOrigin's rotation case:
+    // (1,2,3) -> (2,-1,3).
+    const float R[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+    const float p2[3] = {1, 2, 3};
+    const float want[3] = {2, -1, 3};
+    tfeb::rotateByBase(R, p2, out);
+    check(near3(out, want, 1e-6f), "rotateByBase: 90-degree Z rotation rotates the direction");
+
+    // The flight-numbers case (dump eyebase_152153_f12744.txt): the bad
+    // frame's basis rows and the next frame's, and a synthetic B whose 3x3
+    // is next x bad^-1. Rotating each bad row by B must give that next
+    // row back -- the dump's own ground-truth fit: bad rows are e_k to
+    // within 4-decimal rounding, so v.bad^-1 = e_k and e_k.(bad^-1.next)
+    // is row k of next.
+    const float badRows[9] = {
+        +0.9998f, -0.0200f, -0.0029f,
+        +0.0201f, +0.9991f, +0.0364f,
+        +0.0022f, -0.0364f, +0.9993f,
+    };
+    const float nextRows[9] = {
+        -0.1856f, -0.0164f, -0.9825f,
+        +0.5977f, -0.7955f, -0.0996f,
+        -0.7800f, -0.6057f, +0.1575f,
+    };
+    // bad^-1 by cofactor (bad is orthonormal to within its 4-decimal
+    // rounding, but do the real inverse -- the case should not lean on
+    // near-identity).
+    auto inv3 = [](const float m[9], float out[9]) {
+        const float a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
+        const float det = a * (e * i - f * h) + d * (c * h - b * i) + g * (b * f - c * e);
+        out[0] = (e * i - f * h) / det; out[1] = (c * h - b * i) / det; out[2] = (b * f - c * e) / det;
+        out[3] = (f * g - d * i) / det; out[4] = (a * i - c * g) / det; out[5] = (c * d - a * f) / det;
+        out[6] = (d * h - e * g) / det; out[7] = (b * g - a * h) / det; out[8] = (a * e - b * d) / det;
+    };
+    float badInv[9], b3[9];
+    inv3(badRows, badInv);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            b3[r * 3 + c] = badInv[r * 3 + 0] * nextRows[0 * 3 + c] +
+                            badInv[r * 3 + 1] * nextRows[1 * 3 + c] +
+                            badInv[r * 3 + 2] * nextRows[2 * 3 + c];
+    float B[16] = {};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) B[r * 4 + c] = b3[r * 3 + c];
+    for (int k = 0; k < 3; ++k) {
+        tfeb::rotateByBase(B, &badRows[k * 3], out);
+        const float want3[3] = {nextRows[k * 3 + 0], nextRows[k * 3 + 1], nextRows[k * 3 + 2]};
+        check(near3(out, want3, 2e-3f),
+              "rotateByBase: the flight-numbers fit -- bad basis rows through next x bad^-1 give the next frame's basis");
+    }
+}
+
 void casePremul4x4() {
     const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     const float B[16] = {2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1};
@@ -1411,6 +1479,7 @@ int wmain(int argc, wchar_t** argv) {
     caseModeSwitchEdgeSingleFrameSkip();
     caseSceneGeometryFreshAndDecisionText();
     casePatchEyeOrigin();
+    caseRotateByBase();
     casePremul4x4();
     casePatchSceneChoiceFlightPoints();
     casePatchSceneChoiceBands();

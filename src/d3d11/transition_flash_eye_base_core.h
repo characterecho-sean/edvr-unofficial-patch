@@ -369,6 +369,16 @@ inline void patchEyeOrigin(const float B[16], const float P[3], float out[3]) no
     }
 }
 
+// CHANGE 16 (flight 151942): the direction-transform twin of patchEyeOrigin.
+// The pilot block's basis rows (camera-CB rows 277-279) transform with the
+// eye's own premultiply but carry NO translation -- a basis is a direction.
+// Same row-vector product through B's 3x3, without the +B[12+k].
+inline void rotateByBase(const float B[16], const float v[3], float out[3]) noexcept {
+    for (int k = 0; k < 3; ++k) {
+        out[k] = v[0] * B[k] + v[1] * B[4 + k] + v[2] * B[8 + k];
+    }
+}
+
 // The full 4x4 premultiply the ACTING build will need when it patches the
 // eye's matrix wholesale rather than only its origin -- same row convention
 // (rotation at [r*4+c], translation row at [12..14], last row (0,0,0,1)).
@@ -491,6 +501,11 @@ inline constexpr uint32_t kSceneCBSimBytes = 5376;
 inline constexpr int kSceneCBSimFloat4Rows = 5376 / 16;   // 336 float4 rows
 inline constexpr int kSceneCBSimOriginFloat = 1100;       // cb1[275] = floats [1100..1102]
 inline constexpr int kSceneCBSimBasisFloat = 1104;        // cb1[276..279] = floats [1104..1119]
+// CHANGE 16: the widened basis survey covers rows 272-285 (floats
+// [1088..1143]) -- the 151942 dump showed 276-279 are base-derived;
+// the neighbours answer whether anything else nearby is.
+inline constexpr int kSceneCBSimSurveyFloat = 1088;
+inline constexpr int kSceneCBSimSurveyFloats = 56;   // 14 float4 rows
 
 // A 4x4 group is a view-matrix candidate when its 3x3 (storage [r*4+c]) is
 // orthonormal: unit-length, mutually perpendicular columns. The test is
