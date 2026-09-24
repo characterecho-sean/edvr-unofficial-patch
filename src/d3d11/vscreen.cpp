@@ -75,7 +75,6 @@
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"
 #include "object_classification_probe.h"
-#include "static_surface.h"
 #include "engine_velocity.h"
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "intro_panel.h"
@@ -110,18 +109,10 @@ namespace {
 
 // nullptr invalidates every cached input (command-list execution); otherwise
 // only writes to a source instance, bone or camera buffer invalidate them.
-//
-// Reached from every Unmap, Copy and Update on the owner context, so the
-// callee below whose own first test is published state is asked inline
-// first (/O2, no /GL: it was a cross-TU call per write). The test is the
-// callee's own, word for word, so the calls skipped are exactly the ones that
-// would return having done nothing:
-//   staticSurfaceResourceWritten (static_surface.cpp) returns at
-//   `!enabled.load()` before anything else.
+// Reached from every Unmap, Copy and Update on the owner context.
 static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
     if(!resource && objectClassificationProbe.active())objectClassificationProbe.unknownWrites();
     weaponMotionResourceWritten(resource);
-    if(static_surface_detail::enabled.load())staticSurfaceResourceWritten(resource,first,end);
     uiDepthMotionResourceWritten(resource,first,end);
     // Engine-record velocity: a write to an open eye-frame's pool or scene
     // constants drops that eye-frame's engine data (engine_velocity.h).
@@ -4621,19 +4612,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         const bool separate=t_colourOriginal && self==g_state->ownerCtx &&
                             uiSeparationLive() && uiSeparationBegin(self);
         const int64_t r0 = clock.on ? qpcNow() : 0;
-        // staticSurfaceLive() (static_surface.h) is staticSurfaceBegin's own
-        // decline -- it re-tests `!enabled || failed` under its lock before
-        // anything observable -- read inline, so a draw on a session with the
-        // feature off or failed skips the call and its stack cookie.
-        const bool staticOwner=t_colourOriginal && !separate && self==g_state->ownerCtx &&
-            staticSurfaceLive() &&
-            staticSurfaceBegin(self,perInstance,instances,startIndex,baseVertex,
-                               startInstance,bindingShaderHash(BindSlot::Vs));
-        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate || staticOwner);
+        const OriginalDrawProbeTicket sample = originalDrawNativeBegin(self, separate);
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
         originalDrawNativeEnd(self, sample);
-        if(staticOwner)staticSurfaceEnd(self);
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs)))
@@ -5480,7 +5462,6 @@ void vScreenFrameBoundary() {
         uiLayerFrameBoundary(g_state->ownerCtx);
         screenMotionFrameBoundary(g_state->ownerCtx);
         celestialMotionFrameBoundary(g_state->ownerCtx);
-        staticSurfaceFrameBoundary(g_state->ownerCtx);
         engineVelocityFrameBoundary(g_state->ownerCtx);
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
@@ -6834,7 +6815,6 @@ void shutdownVScreenFixes() {
     screenMotionShutdown();
     nightVisionShutdown();
     celestialMotionShutdown();
-    staticSurfaceShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();

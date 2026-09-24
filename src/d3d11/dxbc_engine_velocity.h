@@ -27,14 +27,14 @@
 // Unsupported containers, signatures, declarations or control flow decline
 // with a reason and produce no bytecode.
 
-#include "dxbc_static_surface.h"
+#include "dxbc_container.h"
 
 #include <algorithm>
 
 namespace edvr {
 
 // The render-target slot the patched pixel shaders export to. The game's
-// G-buffer uses 0..3; static_surface's owner export is 7.
+// G-buffer uses 0..3 (7 was the retired static owner's export).
 constexpr uint32_t kEngineVelocityTarget = 6;
 // The slot bits kept before the odd encoding (2 * slot + 1 stays below 2^24,
 // where float is still exact).
@@ -53,14 +53,14 @@ struct EngineVelocityInputs {
 
 namespace dxbc_engine_velocity_detail {
 
-using dxbc_static_surface_detail::Chunk;
-using dxbc_static_surface_detail::SignatureElement;
-using dxbc_static_surface_detail::equalName;
-using dxbc_static_surface_detail::instructionLength;
-using dxbc_static_surface_detail::makeContainer;
-using dxbc_static_surface_detail::makeSignature;
-using dxbc_static_surface_detail::parseContainer;
-using dxbc_static_surface_detail::parseSignature;
+using dxbc_container::Chunk;
+using dxbc_container::SignatureElement;
+using dxbc_container::equalName;
+using dxbc_container::instructionLength;
+using dxbc_container::makeContainer;
+using dxbc_container::makeSignature;
+using dxbc_container::parseContainer;
+using dxbc_container::parseSignature;
 
 constexpr uint32_t kTagIsgn = 0x4e475349u, kTagOsgn = 0x4e47534fu;
 constexpr uint32_t kTagShex = 0x58454853u, kTagShdr = 0x52444853u;
@@ -430,8 +430,8 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                 bool target = false;
                 uint32_t targetSystemValue = 0;
                 for (const auto& e : elements) {
-                    if (dxbc_static_surface_detail::startsWithName(e.name, "SV_DEPTH") ||
-                        dxbc_static_surface_detail::startsWithName(e.name, "SV_COVERAGE"))
+                    if (dxbc_container::startsWithName(e.name, "SV_DEPTH") ||
+                        dxbc_container::startsWithName(e.name, "SV_COVERAGE"))
                         throw std::runtime_error("depth or coverage output");
                     if (equalName(e.name, "SV_TARGET")) {
                         target = true;
