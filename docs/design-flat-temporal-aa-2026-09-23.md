@@ -4,17 +4,15 @@
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. Main `28ee5f73` is merged into this branch as requested
-  (section 19). Epic flight `ad8b586a` confirms 102,864 of 102,865 private
+  (section 19). Epic flight `25a634b2` confirms 112,589 of 112,590 private
   preparations over 900 frames, including both lighting compute shaders
-  (section 25). One missing full write refused safely; a queued cold snapshot
-  became stale. No backend failures or outcome overflow occurred. All observed
-  scene draws had a recipe or explicit unchanged classification, but the
-  previously missing shader pair was absent and its bytecode remains missing.
-  Raw camera comparisons include two unmatched local-transform families;
-  section 26 corrects the interpretation: camera equality is not required for
-  homogeneous jitter, and VR already identifies these solar/smoke shaders. A
-  bounded capture checks their flat target/depth bindings. Earlier evidence
-  remains in sections 10-25. Live jitter is zero.
+  (section 27). All four focused solar/smoke samples have actual HDR/depth
+  bindings matching the modeled selected scene. Their projection rows are
+  current; missing material CB slices are not needed for homogeneous jitter. No
+  backend failures or unknown scene draws occurred during the audit. One
+  compute preparation lacked a full write; a cold snapshot became stale.
+  Section 26 rejects scene-camera equality as a jitter precondition. The
+  missing shader pair remains unobserved. Live jitter is zero.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -33,12 +31,14 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Next work:** reuse VR's shader knowledge and shared motion/backend math; do
   not require local matrices to match the scene camera. Finish flat target,
-  inverse/lighting and failure integration at the D3D11 boundary. The next Epic
-  build adds two bounded samples per solar/smoke pair for actual depth/target
-  bindings, alongside the existing F10 audit. DLSS at 0.75x SS, F10 once and
-  turn/fly for 20-30 seconds. Latest reviewed flight is `ad8b586a`; use the new
-  installed SHA for the next `tools/edvr_log.py --expect-build` check. No
-  headset is needed for flat; VR still needs regression testing.
+  inverse/lighting and failure integration at the D3D11 boundary. The focused
+  solar/smoke binding question is answered for this scene; do not repeat the
+  same flight to fill untouched material constants or camera-equality labels.
+  Next is a coherent live-phase and recovery implementation, with offline
+  checks before another game build. Latest reviewed and installed build is
+  `25a634b2`; use it with `tools/edvr_log.py --expect-build` until another
+  build is installed. No headset is needed for flat; VR still needs regression
+  tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -1454,3 +1454,77 @@ local-transform regression, flat CPU/WARP rigs, config contract and both
 installer payloads. The live flight build is stamped from the committed source
 before installation. No EDHM/ReShade chaining or INI setting changes are part
 of this diagnostic.
+
+## 27. Focused binding flight, 2026-09-24
+
+Verified Epic `edvr_gfx_20260924_161644.log` with `tools/edvr_log.py
+--expect-build 25a634b2`: version `v0.17.0-561-g25a634b2`, build `6AB57975`,
+linked 19:26:45 UTC. DLSS created successfully at 16:17:16.701, quality preset
+K, 1920x1080 input to 2560x1440 output. This is mono D3D11; headset/runtime are
+N/A. The user reported the run without additional visual feedback. Raster and
+backend jitter remained zero; this is not an AA-quality qualification.
+
+Both exact pairs were sampled in frames 35018 and 35108. Every sample used one
+full 1920x1080 viewport, mip zero, single-sample, single-slice textures. The
+actual HDR resource `0000023317EE1BE0` (format 26) and DSV resource
+`0000023317EE10E0` (typeless 19, view 20) match the modeled selected HDR and
+depth in all four copy-handoff records. The named camera reference was current,
+with no uncertain-prefix or foreign-context flag. Actual PS t0 was the same
+separate R32 depth resource `0000023317EE1660` (typeless 39, view 41) for both
+pairs. Its different identity from the hardware DSV is expected for the
+separate linear-depth representation; it is not a target mismatch by itself.
+Handoff comparison is explicitly against the model, while original draw
+bindings were obtained through actual D3D11 getters.
+
+Later captures in this same log, frames 35466 and 35917, identify the R32
+writer to `0000023317EE1660` reading `0000023317EE10E0` through PS t0. Its
+exact VS/PS pair is the previously established conversion pass: the VS passes
+through, and the PS emits view Z from depth using cb2[0].z/(depth+cb2[0].w),
+capped at 1e17 (section 20). This connects the sampled texture identities to
+the existing conversion contract. The writer was not captured in frames
+35018/35108 themselves, so the within-frame lineage is an inference from stable
+resources and the known pass, not a new direct observation.
+
+The VS b0[4..11] slices were current complete shadows in every sample, as were
+the sampled scene/local b1 values. Only solar PS b2[2..7] and smoke VS
+b2[0..1]/PS b2[0..2] lacked shadows. Consequently the broad diagnostic reports
+zero complete captures, but all four target captures and handoff links exist.
+Those missing material/local-scale slices are left untouched by the existing b0
+projection recipe. Homogeneous clip jitter applies after the shader's local
+vertex scale, independent of its value; missing those optional bytes does not
+invalidate the available projection patch. Do not add readback or request
+another flight merely to turn the broad completion counter green.
+
+The 900-frame preparation interval finished at 16:18:53.668:
+
+- 350,263 draws and 20,265 dispatches; 112,590 candidates, 112,589 prepared,
+  one `missing-full-write` refusal from CS `5998146D464F5C0E`.
+- Lighting CS preparations: 953 for `5998146D464F5C0E`, 954 for
+  `EB0245DE0BB23BB6`. One cold snapshot queued and became stale; no cold
+  completion, timeout, failure or pending copy remained.
+- 60 outcome tuples, no overflow, zero unknown scene draws and 2,700
+  bytecode-unchanged draws. The missing 5EAFFC/DD371 pair again had no retained
+  bytecode and was not observed; broader coverage remains unqualified.
+- Resolve/spatial/backend preflight ready, zero spatial fallbacks. Raw camera
+  comparisons partition 112,589 prepared observations into 52,880 canonical,
+  36,851 basis-match, 1,800 unmatched, 12,600 unavailable and 8,458
+  unsupported. Section 26's local-matrix interpretation still applies to these
+  labels.
+
+The final renderer count is 2,767 accepted calls, two resets and 2,765 history
+continuations, with zero backend failures, camera cuts, frame gaps,
+invalid-previous-camera or format-change resets. The longest continuation is
+2,735 and the longest treated adapter streak is 2,736. Refusals did not
+increase through the steady interval; earlier reports include 622 conflicting
+HDR/camera refusals and no-known-tone-pass refusals, with 46 further
+no-known-tone-pass refusals at the end. Screen/menu state during those
+intervals is not inferred from the log.
+
+Ruled out: these sampled local projection draws belonging to a different HDR or
+hardware depth target, because actual resources match the selected scene in
+both sampled frames. Ruled out: a missing projection shadow explaining the
+partial-capture label, because the missing slices are the untouched b2
+material/scale data, not b0[4..7]. These results close the focused binding
+question for this scene. Remaining work is live phase scheduling/binding,
+coherent inverse/lighting inputs and recovery on earlier handoff/source
+refusal. No rendering code or Epic files changed during this review.
