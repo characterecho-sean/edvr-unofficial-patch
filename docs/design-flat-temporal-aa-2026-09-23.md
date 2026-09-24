@@ -26,6 +26,9 @@
   the actual `--target`, `--expect-build HEAD` and
   `--grep "flat (temporal|discover)"`. No headset is needed for discovery;
   VR still needs regression testing.
+- **Test target (Sean):** use the Epic installation for all in-game tests.
+  Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
+  Preserve its existing INI; F10 is the flat default when dump_draws is absent.
 - **Compatibility decision:** the prototype accepts an absent profile
   descriptor as legacy VR so manual installations keep working. An existing
   invalid descriptor disables fixes, preserving forwarding/chaining. New

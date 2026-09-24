@@ -612,6 +612,14 @@ def _validate_v2_receipt(r):
     keys = [e["key"] for e in files]
     if len(keys) != len(set(keys)) or not required.issubset(keys) or set(keys) - targets.keys():
         raise ValueError("incomplete or duplicate EDVR v2 components")
+    if r["kind"] == FLAT_KIND:
+        sources = {"graphics": paths["graphics"],
+                   "dlss": os.path.join(root, "build", "nvngx_dlss.dll"),
+                   "ini": _ini_source(root, "flat"), "profile": "generated"}
+        for e in files:
+            expected = sources[e["key"]]
+            if e.get("source") != (os.path.abspath(expected) if expected != "generated" else expected):
+                raise ValueError("unsafe flat source: " + e["key"])
     if r["kind"] == FLAT_KIND and _flat_vr_leftovers(target):
         raise ValueError("VR components remain in flat installation")
     protected = {os.path.normcase(os.path.realpath(path)) for path in targets.values()}
@@ -913,6 +921,11 @@ def _flat_paths(root, target):
             "game": os.path.join(target, GAME_EXE)}
 
 
+def _ini_source(root, profile):
+    return os.path.join(root, "edvr.ini") if profile == "vr" else \
+        os.path.join(root, "build", "edvr-flat.ini")
+
+
 def _flat_vr_leftovers(target):
     """Recognized EDVR VR state needs the GUI's original-file recovery."""
     xr = os.path.join(target, "Openvr", "win64")
@@ -941,6 +954,9 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
               if not os.path.isfile(p[k])]
     if include_dlss and not os.path.isfile(os.path.join(root, "build", "nvngx_dlss.dll")):
         errors.append("missing optional DLSS source %s" % os.path.join(root, "build", "nvngx_dlss.dll"))
+    ini_source = _ini_source(root, profile)
+    if include_ini and not os.path.isfile(ini_source):
+        errors.append("missing %s INI source %s" % (profile, ini_source))
     if not os.path.isfile(p["game"]):
         errors.append("missing target executable %s" % p["game"])
     if errors:
@@ -998,7 +1014,6 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
             if not os.path.isfile(dst) or sha256(dst) != sha256(dlss):
                 print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
         if include_ini:
-            ini_source = os.path.join(root, "edvr.ini")
             ini_target = os.path.join(target, "edvr.ini")
             if (not os.path.isfile(ini_target) or not os.path.isfile(ini_source) or
                     open(ini_target, "rb").read() != open(ini_source, "rb").read()):
@@ -1034,9 +1049,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
     if include_ini:
-        src = os.path.join(root, "edvr.ini"); dst = os.path.join(target, "edvr.ini")
-        if not os.path.isfile(src):
-            raise SystemExit("[edvr] native preflight failed:\n       missing INI source %s" % src)
+        src = ini_source; dst = os.path.join(target, "edvr.ini")
         entries.append({"key": "ini", "source": os.path.abspath(src), "target": os.path.abspath(dst),
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
@@ -1125,7 +1138,7 @@ def main(argv=None):
                     help="also install build/nvngx_dlss.dll")
     ap.add_argument("--ini", action="store_true",
                     help="also overwrite the target's edvr.ini with the "
-                         "repository's -- this discards tuned settings")
+                         "selected profile's template -- this discards tuned settings")
     ap.add_argument("--all", action="store_true",
                     help="selected profile plus available DLSS (never ini)")
     ap.add_argument("--native-openxr", action="store_true",
@@ -1402,6 +1415,7 @@ def self_test():
         os.makedirs(fxr)
         Path(froot, "build", "d3d11.dll").write_bytes(b"FLAT-GRAPHICS")
         Path(froot, "build", "nvngx_dlss.dll").write_bytes(b"FLAT-DLSS")
+        Path(froot, "edvr.ini").write_bytes(b"[fix]\ntemporal_aa=dlss\n")
         Path(fgame, GAME_EXE).write_bytes(b"GAME")
         Path(fgame, "edvr.ini").write_bytes(b"[user]\nkeep=1\n")
         Path(fxr, "openvr_api.dll").write_bytes(b"STOCK-OPENVR")
@@ -1447,6 +1461,42 @@ def self_test():
             assert xr_snapshot() == before_xr, "flat restore changed Openvr"
             assert not Path(fgame, "d3d11.dll").exists()
             assert not descriptor_path.exists()
+            # --ini must require the generated flat template, never copy the
+            # full VR INI in the repository root, and restore the user's INI.
+            ini_args = args + ["--ini", "--tag", "flatini"]
+            before = snapshot()
+            try:
+                main(ini_args + ["--dry-run"])
+                raise AssertionError("flat --ini accepted a missing flat template")
+            except SystemExit: pass
+            assert snapshot() == before, "missing flat template dry run wrote files"
+            flat_template = Path(froot, "build", "edvr-flat.ini")
+            flat_template.write_bytes(b"[fix]\r\ntemporal_aa = off\r\n")
+            assert main(ini_args + ["--dry-run"]) == 0
+            assert snapshot() == before, "flat --ini dry run wrote files"
+            assert main(ini_args) == 0
+            assert Path(fgame, "edvr.ini").read_bytes() == flat_template.read_bytes()
+            ini_receipt = next(Path(fgame).glob("edvr_flat_receipt.json.pre-flatini-*.bak"))
+            ini_entry = next(e for e in verify_native_receipt(str(ini_receipt), fgame)["files"]
+                             if e["key"] == "ini")
+            assert ini_entry["source"] == str(flat_template)
+            assert Path(ini_entry["backup"]).read_bytes() == b"[user]\nkeep=1\n"
+            receipt_bytes = ini_receipt.read_bytes()
+            changed_receipt = json.loads(receipt_bytes)
+            next(e for e in changed_receipt["files"] if e["key"] == "ini")["source"] = str(Path(froot, "edvr.ini"))
+            ini_receipt.write_text(json.dumps(changed_receipt), encoding="utf-8")
+            try:
+                verify_native_receipt(str(ini_receipt), fgame)
+                raise AssertionError("flat receipt accepted full VR INI source")
+            except ValueError: pass
+            ini_receipt.write_bytes(receipt_bytes)
+            assert main(ini_args + ["--verify-only"]) == 0
+            Path(fgame, "edvr.ini").write_bytes(b"[fix]\ntemporal_aa=dlss\n")
+            assert main(ini_args + ["--verify-only"]) == 1
+            Path(fgame, "edvr.ini").write_bytes(flat_template.read_bytes())
+            assert restore_native(str(ini_receipt)) == 0
+            assert Path(fgame, "edvr.ini").read_bytes() == b"[user]\nkeep=1\n"
+            assert xr_snapshot() == before_xr, "flat --ini changed Openvr"
             Path(fgame, "d3d11.dll").write_bytes(b"FOREIGN-GRAPHICS")
             before = snapshot()
             try:

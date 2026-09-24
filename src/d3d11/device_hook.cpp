@@ -1767,7 +1767,10 @@ State& ensureState() {
         // and the field session bought nothing. A diagnostic that can be
         // dead must say what it is watching, in the log it exists to write.
         {
-            const std::string b = Config::get().getString("hotkey.dump_draws", "");
+            // A retained older INI may not contain this key. Flat discovery
+            // still needs a re-arm key without overwriting that user's file.
+            const std::string b = Config::get().getString("hotkey.dump_draws",
+                runtimeFlatProfile() ? "F10" : "");
             g_state->censusKey.setBinding(b.c_str());
             if (g_state->censusKey.key() != 0) {
                 Log::get().note(
