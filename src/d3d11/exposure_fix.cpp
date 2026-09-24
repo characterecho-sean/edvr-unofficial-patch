@@ -931,7 +931,7 @@ bool isExposureDispatch() {
 void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
                                                ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch();
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch(self, 0, 0, 0, args, off);
         g_state->realDispatchIndirect(self, args, off);
         return;
     }
@@ -949,7 +949,7 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDispatch];
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch();
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch(self, x, y, z);
         g_state->realDispatch(self, x, y, z);
         return;
     }

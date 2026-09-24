@@ -3,6 +3,7 @@
 #include "../../src/d3d11/engine_velocity_families.h"
 #include "flat_shader_capture_tests.h"
 #include "flat_projection_math_tests.h"
+#include "flat_compute_tests.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -657,6 +658,7 @@ int main(int argc, char** argv) {
     testDetailBudget();
     failures += flatShaderCaptureTests();
     failures += flatProjectionMathTests();
+    failures += flatComputeTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

@@ -15,7 +15,9 @@
   passes all 83 build jobs. Epic replay captured all 13 missing shaders and two
   selected projection samples without dropped observations (section 12).
   Verified projection helpers and captured-fixture tests pass the full build;
-  they are not yet wired into runtime treatment.
+  they are not yet wired into runtime treatment. A focused compute/light-grid
+  probe now passes targeted compilation, pure policy tests, WARP readback tests
+  and the full 83-job build with the 254-key config contract.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -23,22 +25,22 @@
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
-- **Open:** flat camera/projection ownership, scene/depth identity, resolve
-  boundary, UI ordering, render-scale ownership, and mod hook ordering need a
-  focused mono frame contract. The corrected capture sees 1280x720 and 960x540
-  scene-target families, the shared 5376-byte VS b1, and a later
-  full-resolution panel draw. Registers 270..275 now match the existing
-  source-camera encoding on supported shader pairs. Passive resource selection
-  works on both captured frames; jitter/inverse consistency, runtime resource
-  ownership and backend integration remain.
+- **Open:** clustered-light grid and compute-resource ownership, sun-glare
+  depth ownership, runtime buffer overrides, temporal backend integration and
+  mod effect ordering. Captured mono frames establish scene/depth identity,
+  camera encoding, tone/copy handoff and later panel ordering at 1280x720 and
+  960x540. Projection algebra is verified offline; rendered consistency and
+  safe failure after jitter still need qualification.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next session:** finish light-grid producer/consumer qualification and
-  runtime integration; do not repeat the established frame captures. Later
-  qualify treatment, on-foot scenes and each mod arrangement. Use
-  `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
-  `--grep "flat (temporal|discover)"`. No headset is needed for discovery;
+- **Next flight:** Epic, flat cockpit at 0.75x SS; press F10 once after the
+  scene settles, look around for 20 seconds, then exit. The focused probe
+  attempts two frames five seconds apart, with selected-camera, light-grid,
+  compute bindings and sun-glare depth/scale evidence. Then finish runtime
+  integration and qualify treatment, on-foot scenes and each mod arrangement.
+  Use `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
+  `--grep "flat (temporal|discover|compute)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
@@ -169,12 +171,13 @@ desktop destination and shared backend sizing/floor queries. Flat owns any
 residual output scaling. Never silently stack Elite's spatial reconstruction or
 reinterpret HMD Quality as a desktop control.
 
-Sean's proposed flat control point is Elite's existing supersampling value,
-`SSAAMultiplier`. It is not hooked in the capture build. First compare 1.0 and
-a lower setting at the same desktop resolution: record scene/depth/UI extents
-and the final spatial upscale. If that controls scene resolution independently,
-reuse it and replace the spatial upscale with temporal reconstruction. Avoid an
-extra target-resizing layer or redundant resampling just to share VR code.
+The flat render-scale control is Elite's existing supersampling value,
+`SSAAMultiplier`. Epic captures at 1.0 and 0.75 confirm scene/depth dimensions
+of 1280x720 and 960x540 respectively, with the desktop output remaining
+1280x720. The capture build observes this setting's effect without writing it.
+Runtime integration will consume those actual dimensions and replace the
+qualified spatial handoff with temporal reconstruction. No extra
+target-resizing layer is needed for the measured route.
 
 Keep cockpit holograms/world screens inside reconstruction. Generalize
 `ui_layer` only for proved final 2D overlays, at output size without jitter,
@@ -648,3 +651,43 @@ lighting variants also reconstruct rays from CS b0[10..12]. Their resource
 association with the current game's grid must be established before choosing
 between correcting the grid or its lookup. Do not nudge unrelated constants or
 treat a saved shader as proof of an active dispatch.
+
+The next focused probe samples actual dispatch bindings during two manually
+armed candidate frames. Read back the consumed structured bounds immediately
+before their dispatch using queued staging copies, an event query and later
+nonblocking polls. This replaces the proposed persistent CPU resource cache: it
+measures the actual GPU input without keeping a 32 MiB mirror or tracking every
+resource creation. No jitter or AA treatment is enabled by the probe. Sparse
+samples are twelve 32-byte records per bounds view, covering four XY corners at
+the first, middle and last depth slice. Validate integer grid dimensions, view
+ranges and byte arithmetic before submitting copies. Retain the originating
+frame, dispatch, constant-buffer snapshot and view range until completion; a
+later mono selection cannot certify an earlier capture.
+
+The bounded association capture also records the eight audited compute hashes,
+their SRV/UAV links, independent pixel-stage grid constants, and stock
+sun-glare vertex-stage depth/viewport inputs. Missing bindings, unavailable
+readback, timeouts, capacity limits and frames without a selected scene must
+produce explicit results. Polling must continue after the diagnostic window
+ends, without waiting for the GPU or releasing driver resources from
+loader-lock teardown. Runtime admission still requires the numerical grid/basis
+comparison and rendered qualification after this evidence is collected.
+
+The implemented probe reserves eight dispatch records per audited hash, four
+graphics records per pixel-cluster/vertex-flare role and two bounds versions
+per bounds consumer. Missing CPU constants get one full-buffer fallback per
+hash/graphics role per sample; the queue holds at most twenty CB jobs and eight
+bounds jobs across both samples. Sun-glare capture includes b1 rows 281 and 332
+plus VS t0. CPU shadows check the exact 4512/5328-byte boundaries. All capture
+commands bypass the game's observation counters, and the inactive capture guard
+returns before its internal TLS check.
+
+Targeted compilation and the integrated flat rig pass. The actual WARP readback
+harness verifies snapshot-before-mutation, sparse packing, complete CB
+fallback, immutable tokens, internal guards, fixed capacity, cancellation,
+timeouts, counter regression and owner handoff. Review corrected starvation
+between shader families and a bounds/CB completion-order dependency. The full
+build passes in `build/flat-compute-capture-build-final.log`: 83 jobs, the
+254-key contract and both installer payload checks. Earlier launcher attempts
+stopped at batch argument handling and a Windows PATH-casing issue; the final
+run uses the established normalized-environment absolute-path launcher.

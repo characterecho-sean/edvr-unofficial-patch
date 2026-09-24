@@ -1855,7 +1855,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
         return DrawVerdict::kNone;
     }
-    if (flatTemporalCapturing()) flatTemporalDraw(count, instances);
+    if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
     s->curveThisDraw = false;
@@ -3249,6 +3249,7 @@ __declspec(noinline) bool mapBufferDesc(ID3D11Resource* res, UINT* byteWidth,
 HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
+    if (g_flatComputeInternal) return g_state->realMap(self, res, sub, type, flags, mapped);
     // Necessary, not sufficient, for gpuFrameCommand to do anything but
     // return (gpu_frame_timing.h): the ctx-matches-the-owner's-context test
     // still runs for real inside it, foreign-thread poisoning included.
@@ -3431,6 +3432,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
 
 void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub) {
+    if (g_flatComputeInternal) { g_state->realUnmap(self, res, sub); return; }
     // See hookedMap: necessary, not sufficient, for gpuFrameCommand to do
     // anything but return.
     if (gpuFrameCommandMightAct()) gpuFrameCommand(self);
@@ -4131,6 +4133,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
+    if (g_flatComputeInternal) { g_state->realCopyResource(self, dst, src); return; }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
@@ -4178,6 +4181,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
 // q= sequence is the finding.
 void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
                                    ID3D11Asynchronous* async) {
+    if (g_flatComputeInternal) { g_state->realBegin(self, async); return; }
     gpuFrameCommand(self);
     if (gpuFrameInternal()) { g_state->realBegin(self, async); return; }
     if (drawCensusArmed()) {
@@ -4190,6 +4194,7 @@ void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
 
 void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
                                  ID3D11Asynchronous* async) {
+    if (g_flatComputeInternal) { g_state->realEnd(self, async); return; }
     gpuFrameCommand(self);
     if (gpuFrameInternal()) { g_state->realEnd(self, async); return; }
     if (drawCensusArmed()) {
@@ -4204,6 +4209,7 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
 
 HRESULT STDMETHODCALLTYPE hookedGetData(ID3D11DeviceContext* self,ID3D11Asynchronous* query,
                                         void* data,UINT bytes,UINT flags) {
+    if (g_flatComputeInternal) return g_state->realGetData(self, query, data, bytes, flags);
     // Forward exactly once with the original buffer and flags. The diagnostic
     // observes completion; it never tries to make an unfinished query complete.
     if(foreignContext(self))return g_state->realGetData(self,query,data,bytes,flags);
@@ -4215,7 +4221,7 @@ HRESULT STDMETHODCALLTYPE hookedGetData(ID3D11DeviceContext* self,ID3D11Asynchro
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(0, 0);
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         g_state->realDrawIndexedInstancedIndirect(self, args, off);
         return;
     }
@@ -4244,7 +4250,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(0, 0);
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         g_state->realDrawInstancedIndirect(self, args, off);
         return;
     }
@@ -4288,6 +4294,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
+    if (g_flatComputeInternal) { g_state->realCopySubresourceRegion(self,dst,dstSub,dstX,dstY,dstZ,src,srcSub,box); return; }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::CopyRegion, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
@@ -4512,7 +4519,7 @@ struct DrawClock {
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDraw];
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(count, 1);
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
         g_state->realDraw(self, count, start);
         return;
     }
@@ -4542,7 +4549,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(0, 0);
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         g_state->realDrawAuto(self);
         return;
     }
@@ -4561,7 +4568,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDrawIndexed];
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(count, 1);
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         return;
     }
@@ -4595,7 +4602,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                            UINT startInstance) {
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing())
-            flatTemporalDraw(perInstance, instances);
+            flatTemporalDraw(self, perInstance, instances);
         g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
         return;
     }
@@ -4643,7 +4650,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT startInstance) {
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing())
-            flatTemporalDraw(perInstance, instances);
+            flatTemporalDraw(self, perInstance, instances);
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
         return;

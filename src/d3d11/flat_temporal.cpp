@@ -1,6 +1,8 @@
 #include "flat_temporal.h"
 #include "flat_temporal_model.h"
 #include "flat_mono_frame.h"
+#include "flat_compute_capture.h"
+#include "flat_compute_model.h"
 
 #include <algorithm>
 #include <cmath>
@@ -79,6 +81,10 @@ struct Cb {
     uint64_t cameraHash = 0;
     bool cameraValid = false;
     uint32_t b0Hash = 0, b2Hash = 0;
+    unsigned char viewportRow[16] = {};
+    bool viewportValid = false;
+    unsigned char targetSizeRow[16] = {};
+    bool targetSizeValid = false;
 };
 struct DepthClear {
     void* dsv = nullptr;
@@ -202,7 +208,7 @@ Cb* cbOf(void* res, uint32_t width) {
     cb.resource = res; cb.width = width; cb.mapped = nullptr;
     cb.copied = cb.writes = cb.draws = cb.writeSeq = cb.drawSeq = 0;
     cb.writeEpoch = cb.drawEpoch = cb.vsHash = 0;
-    cb.cameraValid = false; cb.cameraHash = 0;
+    cb.cameraValid = false; cb.cameraHash = 0; cb.viewportValid = cb.targetSizeValid = false;
     cb.b0Hash = cb.b2Hash = 0;
     return &cb;
 }
@@ -222,6 +228,7 @@ void invalidateCb(void* res) {
         cb->writeEpoch = 0;
         cb->mapped = nullptr;
         cb->cameraValid = false; cb->cameraHash = 0;
+        cb->viewportValid = cb->targetSizeValid = false;
         cb->b0Hash = cb->b2Hash = 0;
     }
 }
@@ -472,6 +479,13 @@ void report(uint64_t frame, const char* phase) {
                     g.depthClearOverflow,
                     g.backbuffer, g.backW, g.backH, g.backFmt);
     const FlatMonoFrame mono = printMonoInput(frame);
+    if (flatComputeManual()) {
+        printContracts(frame, false);
+        printProjections(frame, mono, false);
+        Log::get().note("flat discover detail-policy frame=%llu decision=focused-compute-probe; legacy projection/target/edge payloads suppressed, two candidate-frame attempts have their own bounded report",
+            static_cast<unsigned long long>(frame));
+        return;
+    }
     const auto admission = flatTakeDetailSample(g.projectionManual, frame,
         g.contractCount + g.handoffContractCount, mono.selected(),
         g.projectionDetailsRemaining, g.detailRefusalReported);
@@ -606,6 +620,7 @@ void flatTemporalArm() {
     flatTemporalStart(device);
     g.projectionDetailsRemaining = 2;
     g.projectionManual = true;
+    flatComputeArm(device, g.presents);
     Log::get().note("flat temporal: dump_draws started a fresh bounded desktop discovery window");
 }
 
@@ -617,6 +632,8 @@ void flatTemporalStop() {
 }
 
 void flatTemporalBeforePresent(IDXGISwapChain* swap, uint64_t frame, UINT flags) {
+    if (flatComputeReadbackPending() && !flatComputeCandidate() && detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire) == GetCurrentThreadId())
+        flatComputePoll(frame);
     if (g_waitingForPresent.exchange(false, std::memory_order_acq_rel)) {
         const DWORD thread = GetCurrentThreadId();
         detail::g_flatTemporalOwnerThread.store(thread, std::memory_order_release);
@@ -667,6 +684,11 @@ void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags) {
     if (outputDraws) ++g.framesToOutput;
     const bool deadline = flatCaptureExpired(g.startedMs, now, g.usefulFrames,
                                              kCaptureMs, kMaxUsefulFrames);
+    if (flatComputeCandidate()) {
+        FlatMonoFrame mono{};
+        if (result == S_OK && !(flags & DXGI_PRESENT_TEST)) mono = printMonoInput(frame);
+        flatComputeFinish(frame, mono);
+    }
     if (g.presents == 1 || now >= g.nextReportMs || deadline) {
         report(frame, deadline ? "final" : "sample");
         g.nextReportMs = now + kReportMs;
@@ -676,6 +698,7 @@ void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags) {
         Log::get().note("flat temporal: discovery complete; treatment stayed inactive: no flat scene/projection/depth/output certificate or verified jitter fallback");
     }
     clearFrame();
+    if (!deadline && result == S_OK && !(flags & DXGI_PRESENT_TEST)) flatComputeBoundary(frame, g.epoch);
 }
 
 void flatTemporalBind(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv) {
@@ -722,7 +745,7 @@ void flatTemporalClearBindings() {
     }
 }
 
-void flatTemporalDraw(uint32_t count, uint32_t instances) {
+void flatTemporalDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances) {
     if (!flatTemporalCapturing()) return;
     ++g.serial;
     if (!g.current) {
@@ -748,6 +771,8 @@ void flatTemporalDraw(uint32_t count, uint32_t instances) {
     }
     const uint32_t targetIndex = static_cast<uint32_t>(t - g.targets);
     const uint64_t vsHash = bindingShaderHash(BindSlot::Vs);
+    if (!g.forwardingPresent && flatComputeCandidate())
+        flatComputeDraw(ctx, g.epoch, g.serial, vsHash, bindingShaderHash(BindSlot::Ps), t->depth, t->color);
     for (uint32_t slot = 0; slot < 2; ++slot) {
         const BindSlot bindSlot = slot ? BindSlot::VsCb1 : BindSlot::VsCb0;
         void* cbPtr = bindingGet(bindSlot);
@@ -852,9 +877,10 @@ void flatTemporalTransfer(ID3D11Resource* dst, ID3D11Resource* src, char kind) {
     invalidateCb(dst);  // a destination CB no longer has known CPU-write bytes
     edge(src, dst, kind);
 }
-void flatTemporalDispatch() {
+void flatTemporalDispatch(ID3D11DeviceContext* ctx, UINT x, UINT y, UINT z, ID3D11Buffer* args, UINT offset) {
     if (!flatTemporalCapturing()) return;
     ++g.serial; ++g.totalDispatches;
+    if (!g.forwardingPresent && flatComputeCandidate()) flatComputeDispatch(ctx, g.epoch, g.serial, x, y, z, args, offset);
 }
 void flatTemporalExecuteList(bool foreign) {
     if (!flatTemporalCapturing()) return;
@@ -883,6 +909,7 @@ void flatTemporalMap(ID3D11Resource* res, UINT sub, D3D11_MAP type, void* data) 
     if (Cb* cb = cbOf(res, width)) {
         cb->copied = 0; cb->writeEpoch = 0;
         cb->cameraValid = false; cb->cameraHash = 0;
+        cb->viewportValid = cb->targetSizeValid = false;
         cb->b0Hash = cb->b2Hash = 0;
         cb->mapped = data;
     }
@@ -896,6 +923,8 @@ void flatTemporalUnmap(ID3D11Resource* res) {
         std::memcpy(cb.bytes, cb.mapped, cb.copied);
         projectionHashes(cb);
         cb.cameraValid = flatCaptureCameraRows(cb.camera, cb.mapped, cb.width);
+        cb.viewportValid = flatComputeCopyRow(cb.viewportRow, cb.mapped, cb.width, 281);
+        cb.targetSizeValid = flatComputeCopyRow(cb.targetSizeRow, cb.mapped, cb.width, 332);
         cb.cameraHash = cb.cameraValid ? flatCameraHash(cb.camera) : 0;
         cb.mapped = nullptr; cb.writeSeq = ++g.serial; ++cb.writes;
         cb.writeEpoch = g.epoch;
@@ -911,6 +940,8 @@ void flatTemporalUpdate(ID3D11Resource* dst, const void* data, const D3D11_BOX* 
         std::memcpy(cb->bytes, data, cb->copied);
         projectionHashes(*cb);
         cb->cameraValid = flatCaptureCameraRows(cb->camera, data, width);
+        cb->viewportValid = flatComputeCopyRow(cb->viewportRow, data, width, 281);
+        cb->targetSizeValid = flatComputeCopyRow(cb->targetSizeRow, data, width, 332);
         cb->cameraHash = cb->cameraValid ? flatCameraHash(cb->camera) : 0;
         cb->mapped = nullptr;
         cb->writeSeq = ++g.serial; ++cb->writes;
@@ -918,4 +949,18 @@ void flatTemporalUpdate(ID3D11Resource* dst, const void* data, const D3D11_BOX* 
     }
 }
 
+bool flatTemporalCopyConstants(ID3D11Buffer* buffer, uint32_t offset, uint32_t bytes,
+                              void* out, uint32_t& width, uint64_t& epoch, uint32_t& sequence) {
+    const Cb* cb = findCb(buffer);
+    if (!cb || !out || cb->writeEpoch != g.epoch || cb->writeSeq > g.serial) return false;
+    width = cb->width; epoch = cb->writeEpoch; sequence = cb->writeSeq;
+    if (offset == 281u*16u && bytes == 16 && cb->viewportValid) {
+        std::memcpy(out, cb->viewportRow, 16); return true;
+    }
+    if (offset == 332u*16u && bytes == 16 && cb->targetSizeValid) {
+        std::memcpy(out, cb->targetSizeRow, 16); return true;
+    }
+    if (offset > cb->copied || bytes > cb->copied - offset) return false;
+    std::memcpy(out, cb->bytes + offset, bytes); return true;
+}
 }  // namespace edvr

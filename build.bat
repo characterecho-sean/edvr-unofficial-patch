@@ -425,7 +425,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
     "src\d3d11\native_menu.cpp" ^
-    "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" ^
+    "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_fss.cpp" ^
