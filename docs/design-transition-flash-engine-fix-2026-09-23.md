@@ -32,8 +32,15 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
-- **OFFERED-BASE fix + writer-gate instrument BUILT and INSTALLED, NOT
-  FLOWN (2026-09-24, 3b5736d7 + aecf9800, on main).**
+- **FLOWN 091726: high wakes fixed, low wakes not.**
+  - The skip is the controller not running for the camera that frame.
+  - A low wake is a supercruise MODE switch (the controller idle for the
+    whole of supercruise, base identity). Its flash is the camera and the
+    objects switching modes on different frames, which the held or offered
+    base cannot align.
+  - The Steam ini is restored; Sean's own `temporal_aa = off` from mid-flight
+    is kept.
+- **OFFERED-BASE build (3b5736d7 + aecf9800, on main), as installed:**
   - A DR1 EXECUTE breakpoint on the writer `0x2874B20` records the matrix it
     was offered (R8) for our ship. DR0 hits inside the writer's extent mean
     it wrote.
@@ -352,6 +359,36 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
   0x6BF929 / 0x594C3E / 0x2869073`.
 
+## Flight 091726 (2026-09-24 09:17, Steam copy, build aecf9800)
+
+Offered-base fix, trap OFF, `alternate`; the build matched.
+
+- **Sean's report:** "low wakes entry/exit still flash, but high wakes
+  don't".
+- **The controller does not run on the event frame.** Every event frame
+  shows `controller_calls=0 writer_entered=0 writer_wrote=0`, so the name
+  gate is not it. No offered matrix was ever fresh, and every acted event
+  used the held base. The skip is the controller's job not running for this
+  camera that frame (round 7's candidate 3 or 5).
+- **A low-wake entry is a MODE switch, not a skip.** At event #2 (5597) the
+  controller stopped running altogether. The mailbox stayed at identity for
+  5,041 consecutive consumes (frames 5597-10637, about a minute: the time
+  in supercruise). So in supercruise identity is the base the engine means
+  to use: the eye is the head pose relative to a camera-centred frame. The
+  low-wake flash is the camera and the objects switching modes on different
+  frames, at entry and at exit.
+  - Holding the world base for up to 2 frames at the entry (acted at 5597
+    and 5598) still flashed.
+  - The exit refills the mailbox (the controller resumes), so there is no
+    un-refilled frame to act on at all.
+- **High wakes:** no flash reported. The one-frame skip there is fixed by
+  the held base, as in 073114.
+- **`ship+0x130`'s translation is (0,0,0) in every frame**, world frames
+  included. It is not the ship's placement in the render frame, and nothing
+  can be rebuilt from it.
+- **During the flight** (09:23) the Steam ini's `temporal_aa` went from
+  `dlss` to `off`. That was not EDVR's flight edit; it was left as found.
+
 ## Static round 7: the writer and its gates (dumps `analysis\decomp\flash\r7\`)
 
 - **The writer is `FUN_142874b20`** (true entry `0x2874B20`, 239 bytes,
@@ -547,6 +584,14 @@ through `pdata_functions.csv`.
 Each was ruled out on 2026-09-23 from existing flight data and static
 analysis, or from flight 184826 or 195435 where marked:
 
+- **Ruled out (091726): the writer's name gate as the skip, and the
+  offered-and-refused matrix as the low-wake answer.** On every event frame
+  the controller made no call at all (`controller_calls=0`), so no matrix
+  was ever offered.
+- **Ruled out (091726): a low-wake flash as a one-frame skip.** The
+  controller stops for the whole of supercruise (5,041 frames of identity),
+  and the exit has no un-refilled frame. It is a camera/object mode-switch
+  mismatch.
 - **Ruled out (073114): one fixed substitute for every transition.** The
   held base fixed both hyperspace exits (Sean: "hyperspace worked") but not
   the low wake. The objects change frame on different frames by
