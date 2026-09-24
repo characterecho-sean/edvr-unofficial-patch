@@ -126,6 +126,67 @@ void cancellationAndJoin() {
   check(service.stop(),"restart clean shutdown");
 }
 
+// native_runtime_host.h's frame_end_overlap queues finishPendingFrameEnd via
+// submit() from inside the second Submit's own owner callback, and relies on
+// the FIFO to run it before the next WaitGetPoses/Submit invoke ever starts
+// its own owner body. Confirm that ordering here, at the OwnerService level:
+// a submit() issued from inside a running callback must be seen by a LATER
+// caller's invoke(), issued only once that running callback has returned.
+void submitFromInsideCallbackOrdering() {
+  OwnerService service;check(service.start(),"submit-ordering setup");
+  std::mutex orderMutex;std::vector<int> order;
+  std::atomic<bool> submitAccepted{false},submitRan{false};
+  const bool invokeOk=service.invoke([&]{
+    {std::lock_guard<std::mutex> lock(orderMutex);order.push_back(1);}
+    submitAccepted=service.submit([&]{
+      {std::lock_guard<std::mutex> lock(orderMutex);order.push_back(2);}
+      submitRan=true;
+    });
+  });
+  check(invokeOk&&submitAccepted,"submit-ordering: the invoke and the submit queued from inside it are both accepted");
+  bool laterOk=false;
+  std::thread later([&]{laterOk=service.invoke([&]{std::lock_guard<std::mutex> lock(orderMutex);order.push_back(3);});});
+  later.join();
+  check(laterOk&&submitRan,"submit-ordering: the later invoke and the inner submit both ran");
+  check(order.size()==3&&order[0]==1&&order[1]==2&&order[2]==3,
+    "submit-ordering: a submit() queued from inside a running callback runs before a later invoke()");
+  check(service.stop(),"submit-ordering: teardown");
+}
+
+// The host's inline-finish path (native_runtime_host.h's close(), reading
+// pendingFrameEndFinish): stop() cancels a submit() still sitting queued, so
+// a caller that cannot get its deferred work run through the queue must
+// instead notice it never ran and do it inline from stop()'s own finalizer,
+// which runs on the owner after cancellation. Reproduced here with a plain
+// bool flag standing in for pendingFrameEndFinish.
+void submitCancelledByStopRunsInline() {
+  OwnerService service;check(service.start(),"stop-cancels-submit setup");
+  Gate hold;bool blockedResult=false;
+  std::thread blocker([&]{blockedResult=service.invoke([&]{hold.hold();});});
+  check(hold.await(),"stop-cancels-submit: owner blocked for a deterministic queue");
+  std::atomic<bool> pending{true},ran{false},completionSawCancelled{false};
+  const bool queued=service.submit(
+    [&]{ran=true;pending=false;},
+    [&](bool success){if(!success)completionSawCancelled=true;});
+  check(queued&&service.pending()==1,"stop-cancels-submit: submit queued behind the blocked callback");
+  std::atomic<bool> ranInline{false};
+  bool stopResult=false;
+  std::thread stopper([&]{stopResult=service.stop([&]{
+    if(pending.load()){ranInline=true;pending=false;}
+  });});
+  check(until([&]{return service.pending()==0||!service.running();}),
+    "stop-cancels-submit: stop() admits and cancels the still-queued submit");
+  // Only now release the blocked callback: had this come first, the owner
+  // could have popped and run the submit before stop() got a chance to
+  // cancel it, and the test would no longer be exercising cancellation.
+  hold.release();blocker.join();stopper.join();
+  check(blockedResult&&!hold.expired,"stop-cancels-submit: the blocked callback itself still completes normally");
+  check(!ran,"stop-cancels-submit: the cancelled submit callback never runs");
+  check(completionSawCancelled,"stop-cancels-submit: its completion reports cancellation, not success");
+  check(stopResult&&ranInline.load()&&!pending.load(),
+    "stop-cancels-submit: the finalizer notices the flag still set and does the deferred work in its place");
+}
+
 void selfStopAndFailures() {
   OwnerService service;check(service.start(),"owner stop setup");
   bool ownerStop=true,finalOwner=false;unsigned finalizers=0;
@@ -147,5 +208,6 @@ int main(int argc,char** argv) {
   if(std::strcmp(argv[1],"--dry-run")==0){std::puts("openxr_owner_test: dry-run (no threads, runtime or writes)");return 0;}
   if(std::strcmp(argv[1],"--self-test")!=0)return 2;
   Watchdog watchdog;basicAndIdle();cancellationAndJoin();selfStopAndFailures();
+  submitFromInsideCallbackOrdering();submitCancelledByStopRunsInline();
   std::printf("openxr_owner_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

@@ -292,11 +292,16 @@ internal static class SelfTests
         "boundary=host_wait_return_to_next_host_wait_return,admitted=3,valid=2,first=1,last=2," +
         "elapsed_ms=30000,valid_cycle_sum_ms=18.000,caller_thread=7,generation=1,feature_epoch=4\n" +
         "2026-09-22 14:23:50.668 UTC pid=4242 tid=7 native_frame_cycle_phase,window=30,name=cycle," +
-        "mean=9.0000,p50=9.0000,p95=9.0000,units=wall_ms,nested=0\n" +
+        "mean=9.0000,p50=9.0000,p95=9.0000,p99=9.5000,max=10.0000,units=wall_ms,nested=0\n" +
         "2026-09-22 14:23:50.668 UTC pid=4242 tid=7 native_frame_cycle_phase,window=30," +
-        "name=game_before_first_submit,mean=2.0100,p50=2.0000,p95=2.0000,units=wall_ms,nested=0\n" +
+        "name=game_before_first_submit,mean=2.0100,p50=2.0000,p95=2.0000,p99=2.4000,max=2.5000,units=wall_ms,nested=0\n" +
         "2026-09-22 14:23:50.668 UTC pid=4242 tid=7 native_frame_cycle_phase,window=30," +
-        "name=second_submit_owner_body,mean=3.0000,p50=3.0000,p95=3.0000,units=wall_ms,nested=1\n" +
+        "name=second_submit_owner_body,mean=3.0000,p50=3.0000,p95=3.0000,p99=3.4000,max=3.5000,units=wall_ms,nested=1\n" +
+        // Pre-Stage-A format, no p99/max fields at all: the parser must stay
+        // tolerant of an older DLL's log and read the rest of the line fine,
+        // with the two new fields defaulting to 0 rather than failing the line.
+        "2026-09-22 14:23:50.668 UTC pid=4242 tid=7 native_frame_cycle_phase,window=30," +
+        "name=next_wait_roundtrip,mean=0.5000,p50=0.5000,p95=0.5000,units=wall_ms,nested=0\n" +
         "2026-09-22 14:23:50.668 UTC pid=9999 tid=7 native_frame_cycle_window,window=44,admitted=1,valid=1," +
         "first=99,last=99\n";
 
@@ -318,6 +323,12 @@ internal static class SelfTests
             Near(window.Phases["game_before_first_submit"].Mean, 2.01, "second phase mean");
             Check(window.Phases["second_submit_owner_body"].Nested, "nested phase flagged");
             Check(window.Phases["cycle"].Units == "wall_ms", "phase units");
+            Near(window.Phases["cycle"].P99, 9.5, "phase p99");
+            Near(window.Phases["cycle"].Max, 10.0, "phase max");
+            Near(window.Phases["game_before_first_submit"].P99, 2.4, "second phase p99");
+            Near(window.Phases["game_before_first_submit"].Max, 2.5, "second phase max");
+            Check(window.Phases["next_wait_roundtrip"].P99 == 0 && window.Phases["next_wait_roundtrip"].Max == 0,
+                  "a pre-Stage-A phase line with no p99/max parses the rest and defaults both to 0");
             Check(window.EmittedUtc == new DateTime(2026, 9, 22, 14, 23, 50, 668, DateTimeKind.Utc),
                   "window emission timestamp");
             Check(RuntimeLog.PrimaryPhases.Length == 8, "the seven phases and the residual");

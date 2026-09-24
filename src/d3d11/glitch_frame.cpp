@@ -1790,10 +1790,38 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     }
     if (!finite3(pos)) return;
 
+    // Snapshot row 275 BEFORE the patch tap below: the act rewrites the
+    // buffer, and every reader from here down -- H3, the validation
+    // candidates, frameFarPos and the whole jump chain -- wants the value
+    // the game wrote, not the corrected one (review of the acting
+    // build, findings 2 and 3; finding 2's
+    // frameFarPos is the legacy verdict path, which must agree with the
+    // scene-judged one when the trap is on).
+    const float posOrig[3] = {pos[0], pos[1], pos[2]};
+
+    // advanced.transition_flash_eye_base (CHANGE 14/15): the patch sim --
+    // and, on a patched event's act frame, the render patch itself -- sees
+    // this same pre-Unmap fill. ORDER MATTERS, twice over. The tap runs
+    // AFTER the sceneWrites update above, so the detector's per-fill record
+    // of row 275 (w.pos, which its scene verdict reads back through
+    // s->sceneDrawPos) always holds the ORIGINAL bad values even when the
+    // patch rewrites the buffer here. And posOrig was just snapshotted, so
+    // nothing below reads back the correction. The frame is s->frameNo --
+    // the PRE-advance counter (the boundary that closes this frame records
+    // it one higher); the module compensates. The geometry argument is now
+    // superseded by the latch's own per-fill evidence query
+    // (glitchFrameScenePoolEvidence); the sim's boundary-time read of it
+    // stays for the referee comparison.
+    const bool sceneGeomFresh = s->scenePoolFrame == s->frameNo;
+    transitionFlashEyeBaseNoteSceneCB(s->frameNo, data, bytes,
+                                      sceneGeomFresh ? s->sceneGeometry : GlitchSceneGeometry{},
+                                      sceneGeomFresh);
+
     // H3 (design doc): the same scene-camera read the detector above uses,
     // reported so it can be compared against the engine fix's own last
     // pushed pose -- the link the whole recompute chain assumes is real.
-    transitionFlashPreventNoteH3(s->frameNo, pos);
+    // posOrig, not pos: an acted fill has rewritten row 275 above.
+    transitionFlashPreventNoteH3(s->frameNo, posOrig);
 
     s->sawBuffer = true;
 
@@ -1809,19 +1837,19 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         } else {
             if (c->res != resource) {
                 c->res = resource;
-                for (uint32_t a = 0; a < 3; ++a) c->last[a] = pos[a];
-            } else if (pos[0] != c->last[0] || pos[1] != c->last[1] ||
-                       pos[2] != c->last[2]) {
+                for (uint32_t a = 0; a < 3; ++a) c->last[a] = posOrig[a];
+            } else if (posOrig[0] != c->last[0] || posOrig[1] != c->last[1] ||
+                       posOrig[2] != c->last[2]) {
                 ++c->moved;
-                for (uint32_t a = 0; a < 3; ++a) c->last[a] = pos[a];
+                for (uint32_t a = 0; a < 3; ++a) c->last[a] = posOrig[a];
             }
             ++c->seen;
-            const float mm = pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2];
+            const float mm = posOrig[0] * posOrig[0] + posOrig[1] * posOrig[1] + posOrig[2] * posOrig[2];
             if (mm > c->maxMag2) c->maxMag2 = mm;
         }
     }
 
-    const float m2 = pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2];
+    const float m2 = posOrig[0] * posOrig[0] + posOrig[1] * posOrig[1] + posOrig[2] * posOrig[2];
 
     // A head-space camera is not a reading. See kWorldCameraFloor2.
     //
@@ -1834,7 +1862,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 
     if (m2 <= s->frameFarMag2) return;
     s->frameFarMag2 = m2;
-    for (uint32_t a = 0; a < 3; ++a) s->frameFarPos[a] = pos[a];
+    for (uint32_t a = 0; a < 3; ++a) s->frameFarPos[a] = posOrig[a];
 
     // LEARNED HERE, above every gate below it, and that placement is the point.
     //
@@ -1844,7 +1872,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // time a swinging camera produces a mark the sphere is usually certified
     // already, and the mark never happens.
     const float radius = sqrtf(m2);
-    observeShell(pos, radius);
+    observeShell(posOrig, radius);
 
     // Everything above is observation. Everything below can withhold a frame,
     // so a fix that has stood down -- or was never switched on -- stops here.
@@ -1886,7 +1914,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     float resid = 0.0f, speed = 0.0f;
     for (uint32_t a = 0; a < 3; ++a) {
         const float pred = s->camPrev[a] + (s->camPrev[a] - s->camPrev2[a]);
-        const float e = pos[a] - pred;
+        const float e = posOrig[a] - pred;
         resid += e * e;
         const float v = s->camPrev[a] - s->camPrev2[a];
         speed += v * v;
@@ -1962,7 +1990,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // has one direction and can never certify a sphere -- the separation memory
     // takes it. Today's swinging camera has a different jump size every time --
     // the shell takes it.
-    s->parkSuppressedThisFrame = jumped && positionIsCertifiedPark(pos, radius);
+    s->parkSuppressedThisFrame = jumped && positionIsCertifiedPark(posOrig, radius);
     s->radiusSuppressedThisFrame =
         !s->parkSuppressedThisFrame && jumped && radiusIsCertifiedShell(radius);
     // Rule B consults last: the certified invariants carry evidence gathered
@@ -1972,7 +2000,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     s->driftSuppressedThisFrame =
         !s->parkSuppressedThisFrame && !s->radiusSuppressedThisFrame && jumped &&
         !(s->separationMode >= 2 && residualIsKnownSeparation(resid)) &&
-        residualIsDriftContinuation(resid, pos);
+        residualIsDriftContinuation(resid, posOrig);
     s->suppressedThisFrame = s->parkSuppressedThisFrame ||
                              s->radiusSuppressedThisFrame ||
                              s->driftSuppressedThisFrame ||
@@ -2145,11 +2173,21 @@ bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     return false;
 }
 namespace {
-void recordScenePosition(RingEntry& e,const State* s){
+// CHANGE 9 (2026-09-24, task "the object side and the camera side of each
+// frame on one line"): recordScenePosition's own fold, handed back so the
+// three call sites can pass it straight to transitionFlashEyeBaseNoteScene-
+// Camera without recomputing the same frame-arithmetic gates a second time.
+struct SceneGeometryTap {
+    bool fresh;
+    GlitchSceneDecision decision;
+};
+
+SceneGeometryTap recordScenePosition(RingEntry& e,const State* s){
     // Boundary advances frameNo before recording the frame just completed.
     e.sceneValid=s->sceneDrawFrame+1==s->frameNo;
     for(unsigned a=0;a<3;++a)e.scenePos[a]=s->sceneDrawPos[a];
-    e.geometry=s->scenePoolFrame+1==s->frameNo?s->sceneGeometry:GlitchSceneGeometry{};
+    const bool geometryFresh=s->scenePoolFrame+1==s->frameNo;
+    e.geometry=geometryFresh?s->sceneGeometry:GlitchSceneGeometry{};
     // advanced.eye_origin_trace: eyeBufferWritten uses the SAME test as
     // sceneValid above, on purpose (see the field comment on RingEntry).
     e.eyeBufferWritten=s->sceneDrawFrame+1==s->frameNo;
@@ -2157,6 +2195,14 @@ void recordScenePosition(RingEntry& e,const State* s){
     const bool freshTrace=s->eyeTraceFrame+1==s->frameNo;
     e.eyeTraceWrites=freshTrace?s->eyeTraceWritesThisFrame:0;
     e.eyeTraceMask=freshTrace?s->eyeTraceMaskThisFrame:0;
+    // CHANGE 9: the detector's decision for the SAME just-completed frame --
+    // sceneDecisionFrame only advances when glitchSceneDecision returned
+    // non-Unknown (the compare-and-decide site below), so a frame whose pool
+    // matched too few points to decide reads back Unknown here, not a stale
+    // older verdict.
+    const GlitchSceneDecision decision=
+        s->sceneDecisionFrame+1==s->frameNo?s->sceneDecision:GlitchSceneDecision::Unknown;
+    return {geometryFresh, decision};
 }
 
 // appendLine's own copy for this instrument (transition_flash_prevent.cpp
@@ -2377,6 +2423,30 @@ void glitchFrameInvalidatePool(const void* resource){
     State* s=g_state;if(!s)return;
     for(auto& p:s->scenePools)if(!resource || p.resource==resource)p.write.valid=false;
 }
+// advanced.transition_flash_eye_base's per-bad-frame latch query -- see the
+// header's own comment for the contract. A copy of the frame's pool upload
+// goes into compare with the fill's row 275 as the camera; the store itself
+// (p.write/p.prev/p.older) is never advanced or mutated here.
+bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchSceneGeometry* out,
+                                  glitch_scene_detail::Sample snapshot[3]) {
+    State* s = g_state;
+    if (!s || !s->observing || !camera || !out) return false;
+    for (const auto& p : s->scenePools) {
+        if (!p.write.valid || p.write.frame != frame) continue;
+        glitch_scene_detail::Sample copy = p.write;
+        copy.camera[0] = camera[0];
+        copy.camera[1] = camera[1];
+        copy.camera[2] = camera[2];
+        *out = glitch_scene_detail::compare(copy, p.prev, p.older);
+        if (snapshot) {
+            snapshot[0] = copy;
+            snapshot[1] = p.prev;
+            snapshot[2] = p.older;
+        }
+        return true;
+    }
+    return false;
+}
 void glitchFrameNoteScenePool(const void* resource,uint32_t bytes){
     State* s=g_state;
     if(!s || !s->observing || !resource || !bytes || bytes%glitch_scene_detail::kPoolStride ||
@@ -2480,11 +2550,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 e.verdict==kVerdictSceneReset);
             transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-            recordScenePosition(e,s);
+            const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
             // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
             // tap, independent of advanced.eye_origin_trace -- the value
-            // recordScenePosition just folded into e.scenePos/e.sceneValid.
-            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
+            // recordScenePosition just folded into e.scenePos/e.sceneValid/
+            // e.geometry, plus this frame's own geometry freshness and
+            // detector decision (CHANGE 9).
+            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+                e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
             // advanced.eye_origin_readers: read-and-reset (see the
             // function's own comment), so this must run exactly once per
             // real frame -- true here, since this block and its siblings
@@ -2608,11 +2681,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 e.verdict==kVerdictSceneReset);
             transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-            recordScenePosition(e,s);
+            const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
             // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
             // tap, independent of advanced.eye_origin_trace -- the value
-            // recordScenePosition just folded into e.scenePos/e.sceneValid.
-            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
+            // recordScenePosition just folded into e.scenePos/e.sceneValid/
+            // e.geometry, plus this frame's own geometry freshness and
+            // detector decision (CHANGE 9).
+            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+                e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
             // advanced.eye_origin_readers: read-and-reset (see the
             // function's own comment), so this must run exactly once per
             // real frame -- true here, since this block and its siblings
@@ -2968,11 +3044,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.verdict==kVerdictSceneReset);
         transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-        recordScenePosition(e,s);
+        const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
         // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame tap,
         // independent of advanced.eye_origin_trace -- the value
-        // recordScenePosition just folded into e.scenePos/e.sceneValid.
-        transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid);
+        // recordScenePosition just folded into e.scenePos/e.sceneValid/
+        // e.geometry, plus this frame's own geometry freshness and detector
+        // decision (CHANGE 9).
+        transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
+            e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
         // advanced.eye_origin_readers: read-and-reset: see
         // poseReaderWatchFrameSnapshot's own comment, and the identical
         // tap at glitchFrameBoundary's other two (mutually exclusive)

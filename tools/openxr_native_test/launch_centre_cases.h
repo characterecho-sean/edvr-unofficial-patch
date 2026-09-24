@@ -12,6 +12,10 @@ struct Fake {
   XrSpaceLocationFlags flags=tracked;
   unsigned creates=0,destroys=0,locates=0,converts=0;
   bool ready=false,argumentsValid=true;
+  // Every existing case leaves this false, matching wait()'s old hardcoded
+  // XR_FALSE exactly; frame_end_overlap_cases.h is the one that needs a
+  // wait that actually admits pixels.
+  bool shouldRender=false;
   XrTime sampleTime=0,verifyTime=0;
   XrSpace lastDestroyed=XR_NULL_HANDLE;
 };
@@ -35,7 +39,7 @@ inline XrResult XRAPI_PTR poll(XrInstance,XrEventDataBuffer* out) {
 inline XrResult XRAPI_PTR beginSession(XrSession,const XrSessionBeginInfo*){return XR_SUCCESS;}
 inline XrResult XRAPI_PTR endSession(XrSession){return XR_SUCCESS;}
 inline XrResult XRAPI_PTR wait(XrSession,const XrFrameWaitInfo*,XrFrameState* out) {
-  out->predictedDisplayTime=200;out->predictedDisplayPeriod=10;out->shouldRender=XR_FALSE;return XR_SUCCESS;
+  out->predictedDisplayTime=200;out->predictedDisplayPeriod=10;out->shouldRender=active->shouldRender?XR_TRUE:XR_FALSE;return XR_SUCCESS;
 }
 inline XrResult XRAPI_PTR beginFrame(XrSession,const XrFrameBeginInfo*){return XR_SUCCESS;}
 inline XrResult XRAPI_PTR endFrame(XrSession,const XrFrameEndInfo*){return XR_SUCCESS;}
@@ -68,6 +72,20 @@ inline XrResult XRAPI_PTR locate(XrSpace target,XrSpace base,XrTime time,XrSpace
       float(r[0][2]*d[0]+r[1][2]*d[1]+r[2][2]*d[2])};
   }
   if(out->next)static_cast<XrSpaceVelocity*>(out->next)->velocityFlags=0;
+  return XR_SUCCESS;
+}
+// No existing case needs a per-frame stereo view locate (centreAtStartup and
+// the treatment fixtures never reach waitPoses's owner body); frame_end_
+// overlap_cases.h does, for locateGeometry's own xrLocateViews requirement.
+inline XrResult XRAPI_PTR locateViews(XrSession,const XrViewLocateInfo*,XrViewState* state,
+    uint32_t capacity,uint32_t* count,XrView* views) {
+  *count=2;
+  if(capacity<2)return XR_SUCCESS;
+  state->viewStateFlags=XR_VIEW_STATE_POSITION_VALID_BIT|XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+  for(unsigned eye=0;eye<2;++eye) {
+    views[eye]={XR_TYPE_VIEW};views[eye].pose=active->head;
+    views[eye].pose.position.x+=eye?.032f:-.032f;views[eye].fov={-.7f,.7f,.7f,-.7f};
+  }
   return XR_SUCCESS;
 }
 struct Fixture {

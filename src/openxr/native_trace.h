@@ -86,4 +86,15 @@ inline void nativeTracePrintf(const char* format, ...) {
   NativeTrace::get().write(message);
 }
 inline void nativeTracePuts(const char* message) { nativeTracePrintf("%s\n", message); }
+// THREAD_PRIORITY_HIGHEST already outranks the game's normal-priority job
+// threads; no MMCSS (avrt.lib) is needed since both the owner and the
+// FramePacer thread spend nearly all their time blocked, not running.
+inline void raiseCurrentThreadPriority(const char* thread) noexcept {
+  const HANDLE self = GetCurrentThread();
+  const int before = GetThreadPriority(self);
+  const BOOL ok = SetThreadPriority(self, THREAD_PRIORITY_HIGHEST);
+  const int after = GetThreadPriority(self);
+  nativeTracePrintf("native_thread_priority,thread=%s,tid=%lu,before=%d,after=%d,ok=%u\n",
+      thread, (unsigned long)GetCurrentThreadId(), before, after, unsigned(ok != FALSE));
+}
 } // namespace edvr::openxr

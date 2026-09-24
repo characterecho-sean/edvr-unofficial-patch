@@ -56,12 +56,21 @@ extern bool g_uiDepthOn;
 extern bool g_uiDepthStoodDown;
 extern bool g_uiDepthPlanetPending;
 extern bool g_uiDepthPlanetSolarPending;
+// advanced.temporal_aa_hologram_depth: the generic contribution-based
+// coverage below, independent of g_uiDepthOn's own per-family shaders.
+extern bool g_holoDepthOn;
 }  // namespace detail
 inline bool uiDepthWantsDraws() {
     return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown;
 }
 inline bool uiDepthPlanetPending() {
     return detail::g_uiDepthPlanetPending || detail::g_uiDepthPlanetSolarPending;
+}
+// The hologram/icon depth pass's own draw-path bool, read inline for the
+// same reason uiDepthWantsDraws() is (ui_depth.h's header comment): a
+// cross-TU call at every eye draw versus one already-loaded flag.
+inline bool uiDepthHologramWantsDraws() {
+    return detail::g_holoDepthOn && uiDepthWantsDraws();
 }
 
 // Every draw that did NOT land in an eye texture: learn the target as a UI
@@ -93,6 +102,45 @@ bool uiDepthIsExcluded(uint64_t vsHash);
 // bound that is the scene pair's. True means the draw should write its
 // coverage depth; the caller reissues it after the original draw.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
+
+// The generic, contribution-based hologram/icon depth pass: a family-
+// agnostic alternative to uiDepthOnEyeDraw's per-family coverage shaders,
+// for the holo panel/ship hologram and the radar's icon families (none of
+// which has one). Classifies beside uiDepthOnEyeDraw at the same call
+// site; true means the two reissues below apply after the game's own draw.
+bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx);
+// Pass (a): the game's own draw again, RTV0 rebound to a per-eye scratch
+// target whose blend mirrors the game's own RT0 blend (so RGB accumulates
+// what the game's blend equation actually adds), VS/PS/inputs unchanged,
+// depth-tested (never written) against a per-eye/frame cockpit-radius
+// scratch -- never the game's own depth, so a draw with depth off or no
+// depth view bound is still covered. Same Begin/draw/End contract as
+// uiDepthReissueBegin below.
+bool uiDepthHologramContributionBegin(ID3D11DeviceContext* ctx);
+void uiDepthHologramContributionEnd(ID3D11DeviceContext* ctx);
+// Pass (b): the same draw once more, null pixel shader, into a scratch
+// depth target of its own (cleared to the cockpit radius, GREATER, write
+// on) -- the element's nearest raster depth over its whole geometry that
+// is nearer than the radius, independent of the coverage floor.
+bool uiDepthHologramElementDepthBegin(ID3D11DeviceContext* ctx);
+void uiDepthHologramElementDepthEnd(ID3D11DeviceContext* ctx);
+// Once per eye per frame, before the temporal pass reads the private
+// scene-depth copy (uiDepthTemporalDepth): stamps each scratch pair's
+// nearest depth into that copy wherever the pixel is visibly lit -- on
+// display (display, the eye's own finished, tonemapped image, or null),
+// falling back to the accumulated light's own space if display is null or
+// the wrong size -- and, when the game's own render target turned out to
+// be viewable (tracked by uiDepthHologramContributionBegin, never display:
+// a different resource at a different dynamic range), is a real share of
+// it. False (and counted, by reason, for the periodic census) when
+// nothing was listed this eye/frame, the private copy is unavailable, or
+// the resolve's own shaders/state never built.
+bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* scene,
+                            uint32_t w, uint32_t h, ID3D11ShaderResourceView* display);
+// Borrowed view of this eye's raw contribution target (RGBA16F), for the
+// eye dump (temporal_pass.cpp's HoloContribution input). Null off, before
+// this frame's first listed draw for this eye, or after a size change.
+bool uiDepthHologramContribution(uint32_t w, uint32_t h, int eye, ID3D11ShaderResourceView** srv);
 
 // At the scanner's screen composite, which the chrome tracker
 // (vscreen.cpp, beginPanelOverride) recognises before uiDepthOnEyeDraw

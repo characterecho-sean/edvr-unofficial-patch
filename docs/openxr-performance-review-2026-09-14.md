@@ -1,5 +1,31 @@
 # Native OpenXR performance review — September 14, 2026
 
+## Status
+
+*Added 2026-09-24. Restates the journal below; update it whenever this doc
+changes.*
+
+- **State:** on main and FLOWN 2026-09-24 (entries below): the long-cycle
+  breakdown, p99/max, late frames, producer-copy GPU timing, thread
+  priority, and Meta metrics work. `frame_end_overlap` first broke the
+  Application-render GPU timing; with the timing retired before Submit
+  returns it FLEW CLEAN (flight 124504, Pimax OpenXR: invalid 5, Elite's
+  second-Submit park p50 0.16-0.18 ms) and now DEFAULTS ON.
+- **Open:** the overlap is flown on Pimax OpenXR and SteamVR OpenXR; the
+  Quest runtimes are unflown with it. The depth layer is set aside
+  (Sean, 2026-09-24). No controlled comparison with the old OpenVR path
+  exists; one now needs a v0.16.2 build.
+- **Closed:** sections 5 and 6 below (the private and producer copies): the
+  producer copy measured 0.039 ms p50 per eye at 4100x3962, under the
+  0.1 ms bar.
+- **Ruled out:** at the end of each 2026-09-24 entry.
+- **Next flight:** any flight on a Quest runtime with the default build:
+  check the Application-render GPU invalid count stays near zero and
+  `native_frame_end_overlap_summary` reads failures=0.
+- **Environment:** the numbers in the entry are Pimax Crystal Super, 90 Hz,
+  separate device: Pimax OpenXR at 2600x2514, SteamVR OpenXR (`aapvr`) at
+  4100x4050 and 2665x2087.
+
 The first implementation wave is tracked in the [submission optimization
 notes](openxr-submit-performance-2026-09-14.md). The review below retains its
 original source baseline.
@@ -447,3 +473,194 @@ normal exit plus stopped-Present teardown. Repeat on the Windows-selected
 SteamVR OpenXR/Pimax path and the available Meta/VDXR Quest paths. Preserve
 image quality, startup orientation and exit correctness before accepting any
 timing improvement.
+
+## 2026-09-24: issue #38 and the five gaps
+
+Issue #38 (Bigscreen Beyond 2e on SteamVR, RTX 5090) reported random
+frame-time jumps in 0.17.0 against a steady 0.16.2 and blamed OpenXR. The
+logs could not test it: every Pimax-on-SteamVR-OpenXR flight is 4 minutes or
+shorter, the legacy and native logs share no frame-time distribution, and a
+native LONG FRAME line printed no breakdown.
+
+Measured from existing logs, no flight:
+
+- The owner handoff (round trip minus owner body, `native_frame_cycle_phase`)
+  costs 10-60 us at p50 and p95.
+- Elite's thread sits in the second Submit (`second_submit_render_park`, p50)
+  for 0.59 ms on Pimax OpenXR at 2600x2514, 0.76 ms on SteamVR at 4100x4050
+  and 1.26 ms on SteamVR GPU-bound: consumer copy, compose and the runtime's
+  xrEndFrame.
+- SteamVR's xrEndFrame (`native_submit_phases`, p50) is 0.12 ms at 2665x2087
+  and 0.46-0.96 ms at 4100x4050; Pimax OpenXR's is 0.23-0.46 ms.
+- EDVR-device GPU (consumer copy plus compose) is 0.05-0.07 ms median over 66
+  flights. The producer copy on Elite's device was not timed.
+- Every flight runs `graphics_ownership,mode=separate`. Nothing in `src` set
+  a thread priority.
+
+Built on main, not flown:
+
+- `f12a5a3f`: `native_long_cycle`, one line per cycle longer than twice the
+  predicted period, with that cycle's phases and the timing sequence the
+  d3d11 LONG FRAME line now also prints ("runtime sequence"). p99/max on the
+  phase lines; `late_frames` per window and session; XR_EXT_performance_
+  settings and XR_META_performance_metrics when the runtime lists them.
+- `e5be5c2b`: `frame_end_overlap` and `frame_thread_priority`, both on by
+  default. With the overlap, the second Submit returns once Elite's texture
+  is free, and the owner finishes the pair from a job queued ahead of the
+  next WaitGetPoses. Turbo pacing and the borrowed device stay synchronous.
+- `57119f42`: `native_producer_gpu`, the producer copy's GPU time on Elite's
+  device, every 30 s.
+
+Both switches live in `Openvr\win64\edvr_openxr.ini`, which is all or
+nothing: a file that sets them must restate the packaged defaults.
+
+    [openxr]
+    version=1
+    loader=<game>\Openvr\win64\openxr_loader.dll
+    graphics=<game>\d3d11.dll
+    runtime=system
+    separate_device=1
+    frame_end_overlap=off
+    frame_thread_priority=normal
+
+Why the copies exist: the write into the runtime's swapchain image is
+inherent to OpenVR over OpenXR (SteamVR's own Submit copied too). The
+cross-device copy buys the separate XR device the shutdown work needed
+([shared device](openxr-shared-device-2026-09-13.md)). The private copy gives
+compose a typeless view and returns the keyed mutex at once.
+
+What the flight reads (the `edvr_openxr` log):
+
+- `native_frame_end_overlap,enabled=1` at startup, and its `_summary` at
+  close with `failures=0`.
+- `second_submit_render_park` p50 should fall to the producer part, about
+  0.2 ms. `frame_end_owner_body` carries what moved; `next_wait_queue_delay`
+  near zero means the wait did not simply move to the next WaitGetPoses.
+- `native_thread_priority,thread=owner,...,after=2` (the pacer line appears
+  only on foot).
+- `native_producer_gpu,window=` copy p50: above about 0.1 ms per eye reopens
+  sections 5 and 6. A few `pending_dropped` are spans still in flight when a
+  window closed.
+- `native_long_cycle` and `late_frames`: the per-frame breakdown issue #38
+  needs.
+
+Ruled out:
+
+- ruled out: SteamVR's OpenXR runtime collapsing to about 50 fps two minutes
+  in (Frontier `aapvr` flights 20260922_093752 and 20260922_125854), because
+  at the drop the game's own GPU render went from 1.2 to 15-19 ms and Game
+  Map writes from about 15k to 800k per 5 s: the settlement loading in,
+  GPU-bound.
+- ruled out: recent main having more long frames than 0.17.0, because the
+  LONG FRAME count is capped at one per 5 s and the main flights were 3-4
+  minutes, mostly load-in; with load-in and streaming removed, neither flight
+  long enough to test kept a clean long frame.
+- ruled out: Vulkan, DXVK or Khronos loader cost (issue #38), because the
+  runtime enables only XR_KHR_D3D11_enable and uses the loader once, at
+  startup.
+- ruled out: the owner rendezvous as a cost, because it measures 10-60 us.
+
+## 2026-09-24: flights 103456 and 104337
+
+Frontier install, build `74255330`, Pimax Crystal Super on SteamVR OpenXR
+(`aapvr`), 4100x3962 out, DLSS quality (2665x2575 in), HMD Quality 0.65.
+Sean reported DLSS broken, no GPU frame time, and the loading-screen
+hologram fix not working. The second flight, with Elite's Supersampling
+back at 1.0, restored DLSS and the hologram; the GPU frame time stayed
+broken.
+
+- The overlap works as a performance change: `second_submit_render_park`
+  p50 0.17-0.24 ms (0.76 ms before at 4100x4050), `next_wait_queue_delay`
+  p50 0.006 ms, so the wait did not move to the next WaitGetPoses.
+- It breaks GPU timing. Elite's thread resumes the producer and reopens an
+  application segment right after the second Submit (native_runtime_host.h,
+  the caller path); in the synchronous path the owner had already published
+  and retired the frame, so both were no-ops. With the finish queued, they
+  land on a live sequence and the Application-render GPU ring rejects the
+  frame's segments: `old sequence`, valid 8725 invalid 43706 (104337),
+  against invalid 2-3 on the older builds; the Monitor benchmark reads
+  `cpu --/--/-- valid 0`. The overlap now defaults off.
+- `frame_end_owner_body` reads 0 at p50: the queued job usually runs before
+  Elite's thread records its second eye, which the stats require.
+- `native_producer_gpu` copy p50 0.039 ms, p99 0.34-1.7 ms in steady windows
+  (the first window, loading in, 1.15 ms). Under the 0.1 ms bar: sections 5
+  and 6 are closed.
+- SteamVR's OpenXR runtime offers XR_META_performance_metrics
+  (`/perfmetrics_meta/app/gpu_frametime`, 3.8-6.1 ms by window) and not
+  XR_EXT_performance_settings.
+- `late_frames` 600 and `native_long_cycle` 50 in the 103456 session.
+
+Ruled out:
+
+- ruled out: this build breaking DLSS or the hologram fix, because Elite's
+  Supersampling (`SSAAMultiplier`) was below 1 in flight 103456: the world
+  was drawn into 1998x1931, 75% of the 2665x2575 eye texture ("busiest render
+  target" line), so DLSS got an upscaled image and the hologram draw never
+  matched; with Supersampling 1.0 (104337) both work on the same build.
+- ruled out: the producer-copy queries as the GPU timing fault, because the
+  rejected samples read `old sequence`, never `disjoint`.
+
+## 2026-09-24: overlap timing fix implemented, not yet flown
+
+Branch `claude/openxr-perf-gaps`. Addresses this doc's Open item above.
+
+- submitEye's deferred branch now publishes the frame's CPU record and
+  retires timingFrameActive/timingApplicationOpen/timingApplicationSequence/
+  timingGpuBegun itself, before Submit returns to Elite -- the same state
+  the synchronous path already leaves by then (publishSubmitTimingCpu). Only
+  what finishPair() actually produces (device GPU spans, the consumer/
+  endFrame/wait/pacer submitSample fields, the final timingSequence/
+  timingFrameMask clear) stays in the queued job (publishSubmitTimingDevice,
+  called from the new finishPendingFrameEndBody, shared with close()'s
+  inline fallback). publishSubmitTimingIfComplete, the synchronous path, is
+  untouched. composeMs, the one CPU-record field finishPair() itself
+  produces, is a frame stale under the overlap: the deferred publish carries
+  the previous overlapped pair's measured value (lastOverlappedComposeMs).
+- frameEndOwnerBegin/End (frame_cycle_stats.h) moved off current_.eyes==2:
+  the queued job usually finishes before the caller's own second-eye
+  submitCallerEnd lands, so the bracket is now a pending value tracked
+  outside current_, consumed by finishCurrent() into whichever cycle is
+  closing.
+- New tests: openxr_native_test's frame_end_overlap_cases.h drives a real
+  deferred pair through submitEye's own caller/owner split with a fake
+  EdvrNativeTimingTable, asserting publishCpu runs before the caller's
+  post-Submit producerResume/applicationSegment(seq,true) and that those
+  then find it retired, not reopened; openxr_frame_test's
+  frameEndOwnerBodyRaceTest reproduces the eye-count race directly.
+  build.bat green (297 + 4811 checks, both new tests passing).
+- Still defaults off (`frame_end_overlap`): this closes the two symptoms
+  above, not a decision to ship it on. Needs the flight this doc's Next
+  flight line already names.
+
+## 2026-09-24: flight 124504, the overlap flown clean
+
+Frontier install, build `58b6c085`, Pimax Crystal Super on Pimax OpenXR,
+`frame_end_overlap=on` added to the installed edvr_openxr.ini. Sean: GPU
+frame times work again.
+
+- `native_frame_end_overlap_summary`: overlapped 25545, synchronous 0,
+  failures 0.
+- Application-render GPU: valid 25304, invalid 5 (43706 invalid before the
+  fix); the Monitor benchmark reads cpu p50/p95/p99 3.32/4.13/4.36 ms.
+- `second_submit_render_park` p50 0.16-0.18 ms, p99 0.35-1.12;
+  `frame_end_owner_body` p50 0.29-0.32 ms, now recorded;
+  `next_wait_queue_delay` p50 0.005-0.006 ms, p99 at most 0.06: the moved
+  work did not come back as a wait.
+
+The overlap now defaults on.
+
+## 2026-09-24: flight 125717, the overlap on SteamVR OpenXR
+
+Same build and switch, Pimax Crystal Super on SteamVR OpenXR (`aapvr`).
+
+- Overlapped 9937, synchronous 0, failures 0. Application-render GPU valid
+  9625, invalid 4.
+- `second_submit_render_park` p50 0.16-0.19 ms, p99 0.37-0.44 (0.76 ms p50
+  before on SteamVR at 4100x4050).
+- `frame_end_owner_body` p50 0.62-0.70 ms, p95 0.9-3.4, p99 1.1-7.8: this
+  is mostly SteamVR's own xrEndFrame, and before the overlap all of it sat
+  on Elite's render thread inside the second Submit. Now it finishes before
+  Elite's next WaitGetPoses (`next_wait_queue_delay` p99 0.011-0.030 ms).
+- For issue #38 (random CPU frame-time jumps on SteamVR in 0.17.0): that
+  xrEndFrame tail on Elite's thread is a plausible contributor, and this
+  build takes it off. Not proven as the reporter's cause.

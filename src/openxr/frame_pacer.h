@@ -1,8 +1,10 @@
 #pragma once
+#include <windows.h>
 #include <openxr/openxr.h>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include "native_trace.h"
 
 namespace edvr::openxr {
 // One xrWaitFrame at a time on its own thread, so the owner can hand the game
@@ -17,6 +19,9 @@ class FramePacer final {
   ~FramePacer() { stop(); }
   FramePacer(const FramePacer&) = delete;
   FramePacer& operator=(const FramePacer&) = delete;
+  // edvr_openxr.ini frame_thread_priority: set by the owner before the first
+  // kick() so a freshly spawned worker thread picks it up at the top of run().
+  bool priorityHigh = true;
   // Owner. Stops a live worker first; nothing may be pending.
   void bind(PFN_xrWaitFrame wait, XrSession session) { stop(); wait_ = wait; session_ = session; }
   bool bound() const { return wait_ && session_; }
@@ -52,6 +57,7 @@ class FramePacer final {
   }
  private:
   void run() {
+    if (priorityHigh) raiseCurrentThreadPriority("pacer");
     std::unique_lock<std::mutex> lock(mutex_);
     for (;;) {
       cv_.wait(lock, [this] { return quit_ || (pending_ && !done_); });

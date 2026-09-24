@@ -157,7 +157,7 @@ vr::EVRCompositorError EyeCapture::captureShared(
     vr::EVREye eye, const vr::Texture_t* texture,
     const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags,
     bool copyPixels, GpuWorkObserver* observer, bool deferConsumer,
-    TransferWallTimes* times) {
+    TransferWallTimes* times, ProducerGpuTiming* producerTiming) {
   if (!sharedInitialized_ || sharedOwner_ != std::this_thread::get_id() ||
       !sharedProducer_ || !sharedConsumer_ || !sharedExecutor_)
     return vr::VRCompositorError_InvalidTexture;
@@ -205,7 +205,7 @@ vr::EVRCompositorError EyeCapture::captureShared(
       eyes_[index].pending = false;
     }
     if (deferConsumer) {
-      if (transfer->enqueue(source.Get(), 100, times) != S_OK)
+      if (transfer->enqueue(source.Get(), 100, times, producerTiming) != S_OK)
         return vr::VRCompositorError_InvalidTexture;
       eyes_[index].bounds = b;
       eyes_[index].colorSpace = texture->eColorSpace;
@@ -232,8 +232,8 @@ vr::EVRCompositorError EyeCapture::capture(vr::EVREye eye, const vr::Texture_t* 
                                             const vr::VRTextureBounds_t* bounds,
                                             vr::EVRSubmitFlags flags, bool copyPixels,
                                             GpuWorkObserver* observer, bool deferConsumer,
-                                            TransferWallTimes* times) {
-  if (sharedInitialized_) return captureShared(eye, texture, bounds, flags, copyPixels, observer, deferConsumer, times);
+                                            TransferWallTimes* times, ProducerGpuTiming* producerTiming) {
+  if (sharedInitialized_) return captureShared(eye, texture, bounds, flags, copyPixels, observer, deferConsumer, times, producerTiming);
   if (deferConsumer) return vr::VRCompositorError_InvalidTexture;
   if (!initialized_ || !device_ || !context_) return vr::VRCompositorError_InvalidTexture;
   if (!validEye(eye) || !texture || !texture->handle || flags != vr::Submit_Default ||

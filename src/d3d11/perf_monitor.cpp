@@ -462,12 +462,22 @@ void dropLine(const Frame& f, float budgetMs) {
         char reference[80];
         if (budgetMs > 0.0f) snprintf(reference, sizeof(reference), "runtime predicted period %.1f ms", double(budgetMs));
         else snprintf(reference, sizeof(reference), "runtime predicted period unavailable");
+        // The runtime's timing sequence and the game's work in its latest
+        // cycle, from the EdvrNativeTimingFrame this half already receives:
+        // "runtime sequence N" matches the OpenXR half's native_long_cycle
+        // sequence=N, to within a frame.
+        const NativeTimingSnapshot timing = nativeTimingSnapshot();
+        char callerWork[48];
+        if (timing.cpu.callerWorkValid) snprintf(callerWork, sizeof(callerWork), "%.2f ms", double(timing.cpu.callerWorkMs));
+        else snprintf(callerWork, sizeof(callerWork), "unavailable");
         Log::get().note(
             "monitor: LONG FRAME -- %.1f ms between Presents (%s), no "
             "WaitGetPoses, CPU busy, compositor, reprojection, or door samples; "
-            "game creations: %u textures, %u buffers, %u shaders (%.1f MB); EDVR events: %s.%s",
+            "game creations: %u textures, %u buffers, %u shaders (%.1f MB); EDVR events: %s.%s "
+            "runtime sequence %llu, game work %s.",
             static_cast<double>(f.presentMs), reference,
-            f.createTextures, f.createBuffers, f.createShaders, static_cast<double>(f.createMb), ev, stamp);
+            f.createTextures, f.createBuffers, f.createShaders, static_cast<double>(f.createMb), ev, stamp,
+            static_cast<unsigned long long>(timing.cpu.sequence), callerWork);
         return;
     }
     Log::get().note(

@@ -3,6 +3,7 @@
 #include "../openvr/compat/openvr_v0_9_20.h"
 #include "frame_pacer.h"
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include "submission_measurement.h"
 
@@ -105,9 +106,15 @@ class FrameBoundary final {
     if (ownerThread() && session_.frameOpen() && !accepted_[0] && !accepted_[1])
       geometryReady_ = ready;
   }
-  vr::EVRCompositorError submit(vr::EVREye eye, const vr::Texture_t* texture,
-      const vr::VRTextureBounds_t* bounds = nullptr,
-      vr::EVRSubmitFlags flags = vr::Submit_Default) {
+  // Captures one eye and marks it accepted; never calls finish(). pairReady
+  // is true once both eyes are in, at which point the caller may complete the
+  // pair with finishPair() -- synchronously, right away, or deferred past
+  // this call's return (native_runtime_host.h's frame_end_overlap). Keeping
+  // the split here means FrameBoundary itself stays synchronous and
+  // engine-agnostic; only the caller decides whether to defer.
+  vr::EVRCompositorError publish(vr::EVREye eye, const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags, bool& pairReady) {
+    pairReady = false;
     if (!ownerThread()) return vr::VRCompositorError_InvalidTexture;
     if (eye != vr::Eye_Left && eye != vr::Eye_Right)
       return vr::VRCompositorError_IndexOutOfRange;
@@ -120,8 +127,19 @@ class FrameBoundary final {
     const auto captured = sink_.capture(eye, texture, bounds, flags, pixels);
     if (captured != vr::VRCompositorError_None) return captured;
     accepted_[index] = true;
-    if (!accepted_[0] || !accepted_[1]) return vr::VRCompositorError_None;
-    return finish(false)==XR_SUCCESS ? vr::VRCompositorError_None : vr::VRCompositorError_InvalidTexture;
+    pairReady = accepted_[0] && accepted_[1];
+    return vr::VRCompositorError_None;
+  }
+  // Today's finish(false) made public: the consumer copy, compose and
+  // xrEndFrame for a pair publish() has already marked complete.
+  XrResult finishPair() { return finish(false); }
+  vr::EVRCompositorError submit(vr::EVREye eye, const vr::Texture_t* texture,
+      const vr::VRTextureBounds_t* bounds = nullptr,
+      vr::EVRSubmitFlags flags = vr::Submit_Default) {
+    bool pairReady = false;
+    const auto captured = publish(eye, texture, bounds, flags, pairReady);
+    if (captured != vr::VRCompositorError_None || !pairReady) return captured;
+    return finishPair()==XR_SUCCESS ? vr::VRCompositorError_None : vr::VRCompositorError_InvalidTexture;
   }
 
   // Owner-only loading frame. It must have its own wait/begin and cannot
@@ -141,6 +159,16 @@ class FrameBoundary final {
   // the same two acceptable codes everywhere it is called from.
   void noteReal(XrResult waited, XrTime predictedTime, XrDuration period) {
     if ((waited == XR_SUCCESS || waited == XR_SESSION_LOSS_PENDING) && predictedTime > 0) {
+      // Late frames: how many display periods this prediction skipped past
+      // the previous real one, rounded to the nearest period and floored at
+      // zero so sub-period jitter never counts as a miss and a clock rollback
+      // never counts as a negative one. It divides by this wait's period, so
+      // a runtime that halves the rate is not counted as missing every frame.
+      if (lastReal_ > 0 && period > 0) {
+        long long missed = std::llround(double(predictedTime - lastReal_) / double(period)) - 1;
+        if (missed < 0) missed = 0;
+        lateFramesTotal_ += uint64_t(missed); lateFramesWindow_ += uint64_t(missed);
+      }
       lastReal_ = predictedTime; lastPeriod_ = period; lastRealAt_ = Clock::now();
     }
   }
@@ -339,6 +367,14 @@ class FrameBoundary final {
   uint64_t kicks() const { return kicks_; }
   uint64_t drainedFrames() const { return drainedFrames_; }
   uint64_t drainedWaits() const { return drainedWaits_; }
+  // lateFrames() is the session total (native_pacing_summary);
+  // takeLateFramesWindow() reads and clears the count since the last call,
+  // for one native_frame_cycle_window line. lastPeriodNs() is the last REAL
+  // predicted period noteReal saw (0 before any real wait), the period
+  // native_long_cycle compares a completed cycle against.
+  uint64_t lateFrames() const { return lateFramesTotal_; }
+  uint64_t takeLateFramesWindow() { const auto v = lateFramesWindow_; lateFramesWindow_ = 0; return v; }
+  XrDuration lastPeriodNs() const { return lastPeriod_; }
 
  private:
   SessionState& session_;
@@ -360,5 +396,6 @@ class FrameBoundary final {
   double waitBlockMs_ = 0, pacerBlockMs_ = 0;
   uint64_t deferredFrames_ = 0, synthesized_ = 0, readyAtWait_ = 0, kicks_ = 0;
   uint64_t drainedFrames_ = 0, drainedWaits_ = 0;
+  uint64_t lateFramesTotal_ = 0, lateFramesWindow_ = 0;
 };
 } // namespace edvr::openxr

@@ -10,6 +10,9 @@ enum class LocalConfigResult { Absent, Ready, Invalid };
 struct LocalConfig {
   std::wstring loader, graphics, runtime;
   bool separateDevice=false;
+  // Both optional; absent means the default (high priority, overlap on).
+  bool frameThreadPriorityHigh=true;
+  bool frameEndOverlap=true;
 };
 
 inline bool localConfigUsesSystemRuntime(const std::wstring& value) noexcept {
@@ -46,6 +49,7 @@ inline LocalConfigResult readLocalConfig(const std::wstring& path,LocalConfig& o
   std::wstring text(static_cast<size_t>(needed),L'\0');
   if(needed&&!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,bytes.data(),static_cast<int>(bytes.size()),text.data(),needed))return LocalConfigResult::Invalid;
   bool section=false,version=false,loader=false,graphics=false,runtime=false,separate=false;
+  bool priority=false,overlap=false; // optional keys: absence is not failure
   size_t pos=0;
   while(pos<=text.size()) {
     const size_t end=text.find_first_of(L"\r\n",pos);std::wstring line=text.substr(pos,end==std::wstring::npos?text.size()-pos:end-pos);
@@ -64,6 +68,14 @@ inline LocalConfigResult readLocalConfig(const std::wstring& path,LocalConfig& o
     else if(key==L"graphics"){seen=&graphics;target=&candidate.graphics;}
     else if(key==L"runtime"){seen=&runtime;target=&candidate.runtime;}
     else if(key==L"separate_device"){if(separate||value!=L"1")return LocalConfigResult::Invalid;separate=true;candidate.separateDevice=true;continue;}
+    else if(key==L"frame_thread_priority"){
+      if(priority||(value!=L"high"&&value!=L"normal"))return LocalConfigResult::Invalid;
+      priority=true;candidate.frameThreadPriorityHigh=value==L"high";continue;
+    }
+    else if(key==L"frame_end_overlap"){
+      if(overlap||(value!=L"on"&&value!=L"off"))return LocalConfigResult::Invalid;
+      overlap=true;candidate.frameEndOverlap=value==L"on";continue;
+    }
     else return LocalConfigResult::Invalid;
     if(*seen||((key!=L"runtime"||!localConfigUsesSystemRuntime(value))&&!localConfigAbsolute(value)))return LocalConfigResult::Invalid;*seen=true;*target=std::move(value);
   }

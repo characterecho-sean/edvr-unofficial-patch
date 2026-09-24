@@ -58,7 +58,9 @@ PoseReaderTableEntry poseReaderWatchTableEntry(uint32_t) { return PoseReaderTabl
 // transition_flash_eye_base reads as permanently off here, its per-frame
 // columns as empty/zero.
 void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t, bool) {}
-void transitionFlashEyeBaseNoteSceneCamera(uint32_t, const float*, bool) {}
+void transitionFlashEyeBaseNoteSceneCamera(uint32_t, const float*, bool, const GlitchSceneGeometry&, bool,
+                                            GlitchSceneDecision) {}
+void transitionFlashEyeBaseNoteSceneCB(uint32_t, const void*, size_t, const GlitchSceneGeometry&, bool) {}
 EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot() { return EyeBaseFrameSnapshot{}; }
 }  // namespace edvr
 
