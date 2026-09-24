@@ -59,7 +59,10 @@ inline bool flatJitterForwardColumns(float (&rows)[4][4], const FlatProjectionJi
     return true;
 }
 
-// Scene b0[4..7] / b2[10..13]: each row is dotted with the input position.
+// b0[4..7] / b2[10..13]: each row is dotted with the input position.
+// This is a homogeneous clip-space shift, valid after local/model transforms
+// too. Equality with the main camera matrix is not a precondition. Callers
+// still establish target ownership and a common phase for depth consumers.
 inline bool flatJitterForwardDp4(float (&rows)[4][4], const FlatProjectionJitter& jitter) {
     using namespace flat_projection_detail;
     if (!finite(jitter) || !finite(rows)) return false;

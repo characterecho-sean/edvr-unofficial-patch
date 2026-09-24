@@ -10,10 +10,11 @@
   became stale. No backend failures or outcome overflow occurred. All observed
   scene draws had a recipe or explicit unchanged classification, but the
   previously missing shader pair was absent and its bytecode remains missing.
-  Reference results include 1,800 unmatched draws across two families, 12,600
-  unavailable and 6,419 unsupported comparisons. These are preparation and
-  numeric evidence, not frame authorization. Earlier evidence remains in
-  sections 10-24. Live jitter is zero.
+  Raw camera comparisons include two unmatched local-transform families;
+  section 26 corrects the interpretation: camera equality is not required for
+  homogeneous jitter, and VR already identifies these solar/smoke shaders. A
+  bounded capture checks their flat target/depth bindings. Earlier evidence
+  remains in sections 10-25. Live jitter is zero.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -30,13 +31,13 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next work:** use the existing bytecode and captures to distinguish local
-  projection coordinates from a different scene camera in the two unmatched
-  families; do not relax numeric thresholds. Close actual target/inverse and
-  lighting-grid ownership plus earlier handoff-refusal recovery before live
-  jitter. No repeat flight of the same build is needed for those decisions.
-  Latest reviewed and installed build is `ad8b586a`; check that SHA with
-  `tools/edvr_log.py --expect-build` until another build is installed. No
+- **Next work:** reuse VR's shader knowledge and shared motion/backend math; do
+  not require local matrices to match the scene camera. Finish flat target,
+  inverse/lighting and failure integration at the D3D11 boundary. The next Epic
+  build adds two bounded samples per solar/smoke pair for actual depth/target
+  bindings, alongside the existing F10 audit. DLSS at 0.75x SS, F10 once and
+  turn/fly for 20-30 seconds. Latest reviewed flight is `ad8b586a`; use the new
+  installed SHA for the next `tools/edvr_log.py --expect-build` check. No
   headset is needed for flat; VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
@@ -1400,3 +1401,56 @@ local coordinates from a different projection. This flight therefore calls for
 a focused contract/capture change, not a threshold adjustment or another run of
 the unchanged build. No rendering code or installed files were changed during
 this review.
+
+## 26. Reuse VR contracts; inspect flat bindings, 2026-09-24
+
+Sean correctly challenged repeating VR's solved motion/jitter work. Section
+25's raw camera mismatch is not a prerequisite for homogeneous projection
+jitter. Adding jx times clip W to clip X (and jy times W to Y) shifts a local
+or model-composed projection just as it shifts the scene projection. The
+existing `flatJitterForwardDp4` already does this; its recipe admission did not
+require camera equality. The diagnostic must not become that extra gate. An
+offline regression composes rotation, nonuniform scale and translation with the
+captured camera, exercises both branches of the smoke vertex scale, and checks
+raster/depth UV displacement plus unchanged clip Z/W and the shader's
+post-projection depth bias. This extends the existing algebra tests; it does
+not invent another motion estimator or jitter convention.
+
+The exact solar pair is already named in `planet_motion.h`; the other pair is
+the thruster-smoke path in `ui_depth.cpp`. Its internal corona-motion naming
+must not be confused with the user's star-corona report: the star glare path in
+section 18 is `94D5C556DFD6D705/912477AEF6958379`. No causal link between the
+two unmatched comparisons and the reported smear has been established. VR's
+solar visibility/motion and smoke coverage are prior implementation knowledge
+to reuse, not shader behaviour to rediscover by flying again.
+
+The genuine architectural difference is injection and scheduling. Native VR
+computes a phase in `native_temporal.cpp` and supplies a shifted frustum
+through `openvr_system.cpp`'s projection APIs. Elite then derives its related
+matrices from that projection. Flat does not call that VR boundary, so it needs
+D3D11 constant-buffer substitution and matching inverse/lighting handling.
+Engine rigid-record motion HLSL and DLSS/FSR backend entry points are already
+shared. `flat_mono_resolve.cpp` is a separate mono renderer, not the entire VR
+`temporal_pass.cpp`; this retains the performance-first boundary requested for
+the feature. Flat scene/handoff selection and recovery after an early refusal
+still need integration before a live nonzero phase is enabled.
+
+The focused F10 diagnostic samples only the two exact solar/smoke pairs before
+their original draw. Each pair gets at most two attempts in distinct frames,
+separated by at least 90 frames, during the existing 900-frame window. Actual
+shader getters verify the nominated pair. Current full CPU shadows supply
+range-aware shader constants; missing/unbound/range-invalid slices are logged
+as such. Raw named-camera words and actual PS t0 depth, output/depth views and
+viewport are recorded together. A completion report includes zero attempts if
+the pair never ran. This is flat target/depth evidence, not a camera-equality
+test or a live-jitter authorization. No new GPU staging copy or wait is added,
+and the diagnostic does not bind private plans or change backend phase.
+
+The later copy observer correlates each sampled frame with the modeled HDR
+selection and depth. It labels that model separately from the actual draw
+bindings; the existing actual-copy validation still follows. Full source build
+`build/flat-local-binding-capture.log` passed all gates, including the focused
+local-transform regression, flat CPU/WARP rigs, config contract and both
+installer payloads. The live flight build is stamped from the committed source
+before installation. No EDHM/ReShade chaining or INI setting changes are part
+of this diagnostic.

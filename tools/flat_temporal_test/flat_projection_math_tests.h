@@ -127,6 +127,33 @@ inline int flatProjectionMathTests() {
                   near((a[1]/a[3] - b[1]/b[3])*size[1]/2, offset[1], .002), "dp4 world positions move requested pixels");
         }
         check(!std::memcmp(changedForward[2], forward[2], 8*sizeof(float)), "dp4 depth/W rows unchanged");
+        // Solar surface and smoke use local coordinates. Compose a translated,
+        // rotated and nonuniformly scaled model with the captured camera; its
+        // coefficients deliberately cannot equal the scene camera. The actual
+        // shader contract is screen displacement and preserved clip z/w, not
+        // camera equality. Check both branches of the smoke VS vertex scaling
+        // and its post-projection +15.01 z adjustment with the same fixture.
+        const double model[4][4]={{0,-2,0,31},{.5,0,0,-17},{0,0,3,9},{0,0,0,1}};
+        float local[4][4]{}, shifted[4][4];
+        for(size_t r=0;r<4;++r)for(size_t c=0;c<4;++c) {
+            double value=0;for(size_t k=0;k<4;++k)value+=forward[r][k]*model[k][c];
+            local[r][c]=static_cast<float>(value);
+        }
+        std::memcpy(shifted,local,sizeof(local));
+        check(flatJitterForwardDp4(shifted,jitter),"local projection admitted without scene-matrix equality");
+        for(double v : {.25,.75})for(const auto& point:points) {
+            const double radius=4,inner=.3,outer=.7;
+            const double scale=radius-radius*(v>.5?outer:inner)*(2*v-1);
+            double vertex[4]={point[0]*scale,point[1]*scale,point[2]*scale,1};
+            double a[4],b[4];dp4(local,vertex,a);dp4(shifted,vertex,b);
+            // Both real PS shaders form depth UV from interpolated clip xy/w.
+            const double u0=.5+.5*a[0]/a[3],v0=.5-.5*a[1]/a[3];
+            const double u1=.5+.5*b[0]/b[3],v1=.5-.5*b[1]/b[3];
+            check(near((u1-u0)*size[0],offset[0],.002) &&
+                  near((v1-v0)*size[1],offset[1],.002),"local depth UV follows raster jitter");
+            check(a[3]==b[3] && a[2]==b[2] &&
+                  (a[2]+15.01)/a[3]==(b[2]+15.01)/b[3],"local and smoke biased depth remain unchanged");
+        }
         float changedScene[4][4], changedRays[3][4];
         std::memcpy(changedScene, scene, sizeof(scene)); std::memcpy(changedRays, rays, sizeof(rays));
         check(flatJitterForwardColumns(changedScene, jitter) && flatJitterInverseUvRay(changedRays, jitter), "paired forward/deferred admitted");

@@ -70,6 +70,13 @@ struct State {
     };
     AuditOutcome projectionOutcomes[256]{}; uint32_t projectionOutcomesUsed = 0;
     uint64_t projectionOutcomeOverflow = 0;
+    struct LocalProjectionSample {
+        uint64_t firstFrame = 0, frames[2]{};
+        const void* color[2]{}, *depth[2]{};
+        bool closed[2]{};
+        uint32_t attempts = 0, complete = 0;
+    };
+    LocalProjectionSample localSamples[2]{};
     FlatMonoResolvePreflight plannedResolve{};
     FlatMonoResolvePreflightResult resolvePreflight{};
     bool haveResolvePlan = false;
@@ -148,6 +155,141 @@ void reportProjection(State& s, const char* event) {
     Log::get().note("flat projection cold buffers: queued=%llu completed=%llu stale=%llu failed=%llu pending=%llu timeouts=%llu; asynchronous full snapshots, unchanged-write tokens required",
         (unsigned long long)status.coldQueued,(unsigned long long)status.coldCompleted,(unsigned long long)status.coldStale,
         (unsigned long long)status.coldFailed,(unsigned long long)status.coldPending,(unsigned long long)status.coldTimeouts);
+    for(uint32_t i=0;i<2;++i) Log::get().note(
+        "flat local projection capture: event=%s pair=%u attempts=%u complete-captures=%u handoff-links=%u first-frame=%llu; at most two distinct frames, exact F10 pair only",
+        event,i,s.localSamples[i].attempts,s.localSamples[i].complete,
+        (s.localSamples[i].closed[0]?1u:0u)+(s.localSamples[i].closed[1]?1u:0u),
+        (unsigned long long)s.localSamples[i].firstFrame);
+}
+struct LocalRows { bool pixel; UINT slot, row, count; const char* name; };
+// These are the rows the four captured DXBC shaders actually consume for clip,
+// local transforms, depth comparison and material scale. Shader-visible row n
+// maps to backing byte (firstConstant+n)*16 when a CB range is bound.
+constexpr LocalRows kLocalRowsA[] = {
+    {false,0,4,8,"vs-b0-local-clip"},
+    {true,1,90,1,"ps-b1-exposure"}, {true,1,123,1,"ps-b1-direction"},
+    {true,1,126,1,"ps-b1-depth-scale"}, {true,1,210,1,"ps-b1-viewport-scale"},
+    {true,2,2,6,"ps-b2-local-ray-and-scale"}
+};
+constexpr LocalRows kLocalRowsB[] = {
+    {false,0,4,8,"vs-b0-local-clip"},
+    {false,1,125,1,"vs-b1-local-origin"}, {false,1,275,1,"vs-b1-scene-origin"},
+    {false,1,277,3,"vs-b1-camera-axes"}, {false,2,0,2,"vs-b2-local-scale"},
+    {true,1,90,1,"ps-b1-exposure"}, {true,1,126,1,"ps-b1-depth-scale"},
+    {true,1,210,1,"ps-b1-viewport-scale"}, {true,2,0,3,"ps-b2-material-scale"}
+};
+void hexWords(const unsigned char* bytes, uint32_t count, char* text, size_t capacity) {
+    size_t used=0;
+    for(uint32_t i=0;i<count && used<capacity;++i) {
+        uint32_t word=0;std::memcpy(&word,bytes+i*4,4);
+        const int n=std::snprintf(text+used,capacity-used,"%s%08X",i?",":"",word);
+        if(n<=0 || static_cast<size_t>(n)>=capacity-used)break;
+        used+=static_cast<size_t>(n);
+    }
+}
+void captureLocalProjection(State& s, uint64_t vs, uint64_t ps) {
+    const uint32_t pair=vs==0x4D516EF05C68FFA5ull && ps==0x147E748F4CD3AE9Aull ? 0u :
+        vs==0x5E417E9DF2E7F9E6ull && ps==0xBD801F2FB02522EBull ? 1u : 2u;
+    if(pair==2 || !s.projection || !s.projectionContext || !s.projectionFrames)return;
+    auto& sample=s.localSamples[pair];
+    if(sample.attempts==2 || (sample.attempts && s.prefix.frame-sample.firstFrame<90))return;
+    if(!sample.attempts)sample.firstFrame=s.prefix.frame;
+    ++sample.attempts;
+    FlatComputeInternalScope internal;
+    Ptr<ID3D11VertexShader> actualVs;Ptr<ID3D11PixelShader> actualPs;
+    s.context->VSGetShader(&actualVs,nullptr,nullptr);s.context->PSGetShader(&actualPs,nullptr,nullptr);
+    if(lookupShaderHash(actualVs.Get())!=vs || lookupShaderHash(actualPs.Get())!=ps) {
+        Log::get().note("flat local projection sample: pair=%u attempt=%u frame=%llu result=actual-shader-mismatch",
+            pair,sample.attempts,(unsigned long long)s.prefix.frame);return;
+    }
+    const auto* rows=pair ? kLocalRowsB : kLocalRowsA;
+    const size_t rowsCount=pair ? sizeof(kLocalRowsB)/sizeof(kLocalRowsB[0]) : sizeof(kLocalRowsA)/sizeof(kLocalRowsA[0]);
+    uint32_t missing=0;
+    const bool foreign=foreignWork.load(std::memory_order_acquire);
+    const bool currentReference=s.namedDepth && s.namedConstants && !s.prefix.uncertain && !foreign;
+    Log::get().note("flat local projection sample: pair=%u attempt=%u frame=%llu seq=%u VS=%016llX PS=%016llX named-depth=%p named-b1=%p current-reference=%u uncertain=%u foreign=%u",
+        pair,sample.attempts,(unsigned long long)s.prefix.frame,s.prefix.sequence,
+        (unsigned long long)vs,(unsigned long long)ps,s.namedDepth,s.namedConstants,
+        currentReference?1u:0u,s.prefix.uncertain?1u:0u,foreign?1u:0u);
+    char cameraHex[24*9+1]{};hexWords(s.namedCamera,24,cameraHex,sizeof(cameraHex));
+    Log::get().note("flat local projection camera: pair=%u attempt=%u source-b1=%p rows270-275=%s; current only when named-depth and named-b1 are nonnull and frame is certain",
+        pair,sample.attempts,s.namedConstants,cameraHex);
+    for(size_t i=0;i<rowsCount;++i) {
+        const auto& r=rows[i];Ptr<ID3D11Buffer> buffer;UINT first=0,constantCount=0;
+        if(r.pixel)s.projectionContext->PSGetConstantBuffers1(r.slot,1,&buffer,&first,&constantCount);
+        else s.projectionContext->VSGetConstantBuffers1(r.slot,1,&buffer,&first,&constantCount);
+        unsigned char raw[8*16]{};char hex[8*4*9+1]{};
+        const bool inRange=buffer && r.row<=constantCount && r.count<=constantCount-r.row &&
+            first<=UINT32_MAX/16u-r.row-r.count;
+        const bool copied=inRange && s.projection->copyConstants(buffer.Get(),(first+r.row)*16u,r.count*16u,raw);
+        if(copied)hexWords(raw,r.count*4,hex,sizeof(hex));else ++missing;
+        Log::get().note("flat local projection rows: pair=%u attempt=%u %s slot=%u shader-row=%u count=%u buffer=%p first=%u bound-count=%u backing-byte=%u result=%s words=%s",
+            pair,sample.attempts,r.name,r.slot,r.row,r.count,buffer.Get(),first,constantCount,
+            inRange?(first+r.row)*16u:0u,!buffer?"unbound":!inRange?"range-invalid":copied?"current-full-shadow":"missing-full-shadow",
+            copied?hex:"unavailable");
+    }
+    Ptr<ID3D11RenderTargetView> rtv;Ptr<ID3D11DepthStencilView> dsv;
+    Ptr<ID3D11ShaderResourceView> depthSrv;
+    // Both exact pixel shaders write only o0; RT slot 0 is the relevant HDR
+    // output. t0 is their depth-comparison input.
+    s.context->OMGetRenderTargets(1,&rtv,&dsv);s.context->PSGetShaderResources(0,1,&depthSrv);
+    Ptr<ID3D11Resource> rtResource,dsResource,depthResource;
+    if(rtv)rtv->GetResource(&rtResource);if(dsv)dsv->GetResource(&dsResource);
+    if(depthSrv)depthSrv->GetResource(&depthResource);
+    D3D11_RENDER_TARGET_VIEW_DESC rtView{};D3D11_DEPTH_STENCIL_VIEW_DESC dsView{};
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvView{};
+    if(rtv)rtv->GetDesc(&rtView);if(dsv)dsv->GetDesc(&dsView);
+    if(depthSrv)depthSrv->GetDesc(&srvView);
+    Ptr<ID3D11Texture2D> rtTexture,dsTexture,depthTexture;
+    if(rtResource)rtResource.As(&rtTexture);if(dsResource)dsResource.As(&dsTexture);
+    if(depthResource)depthResource.As(&depthTexture);
+    D3D11_TEXTURE2D_DESC rtDesc{},dsDesc{},depthDesc{};
+    if(rtTexture)rtTexture->GetDesc(&rtDesc);if(dsTexture)dsTexture->GetDesc(&dsDesc);
+    if(depthTexture)depthTexture->GetDesc(&depthDesc);
+    const uint32_t attemptIndex=sample.attempts-1;
+    sample.frames[attemptIndex]=s.prefix.frame;
+    sample.color[attemptIndex]=rtResource.Get();sample.depth[attemptIndex]=dsResource.Get();
+    uint32_t targetIndex=UINT32_MAX,targetDraws=0,targetFirst=0,targetLast=0,targetTones=0;
+    const void* targetDepth=nullptr;
+    for(uint32_t i=0;i<s.prefix.targetsUsed;++i)if(s.prefix.targets[i].resource==rtResource.Get()) {
+        targetIndex=i;const auto& target=s.prefix.targets[i];
+        targetDraws=target.writes.draws;targetFirst=target.writes.first;
+        targetLast=target.writes.last;targetTones=target.tones;
+        targetDepth=target.writes.key.depth;break;
+    }
+    const UINT rtMip=rtView.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D?rtView.Texture2D.MipSlice:
+        rtView.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2DARRAY?rtView.Texture2DArray.MipSlice:0u;
+    const UINT dsMip=dsView.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2D?dsView.Texture2D.MipSlice:
+        dsView.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2DARRAY?dsView.Texture2DArray.MipSlice:0u;
+    const UINT srvMip=srvView.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D?srvView.Texture2D.MostDetailedMip:
+        srvView.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2DARRAY?srvView.Texture2DArray.MostDetailedMip:0u;
+    const UINT rtArray=rtView.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2DARRAY?rtView.Texture2DArray.FirstArraySlice:0u;
+    const UINT dsArray=dsView.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2DARRAY?dsView.Texture2DArray.FirstArraySlice:0u;
+    const UINT srvArray=srvView.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2DARRAY?srvView.Texture2DArray.FirstArraySlice:0u;
+    UINT viewportCount=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    s.context->RSGetViewports(&viewportCount,viewports);
+    const D3D11_VIEWPORT vp=viewportCount?viewports[0]:D3D11_VIEWPORT{};
+    Log::get().note("flat local projection targets: pair=%u attempt=%u rtv=%p rt=%p view-fmt=%u dim=%u mip=%u slice=%u tex=%ux%u fmt=%u mips=%u array=%u samples=%u dsv=%p ds=%p view-fmt=%u dim=%u mip=%u slice=%u tex=%ux%u fmt=%u mips=%u array=%u samples=%u ps-t0=%p depth=%p view-fmt=%u dim=%u mip=%u slice=%u tex=%ux%u fmt=%u mips=%u array=%u samples=%u depth-is-named=%u",
+        pair,sample.attempts,rtv.Get(),rtResource.Get(),(uint32_t)rtView.Format,(uint32_t)rtView.ViewDimension,
+        rtMip,rtArray,
+        rtDesc.Width,rtDesc.Height,(uint32_t)rtDesc.Format,rtDesc.MipLevels,rtDesc.ArraySize,rtDesc.SampleDesc.Count,
+        dsv.Get(),dsResource.Get(),(uint32_t)dsView.Format,(uint32_t)dsView.ViewDimension,
+        dsMip,dsArray,
+        dsDesc.Width,dsDesc.Height,(uint32_t)dsDesc.Format,dsDesc.MipLevels,dsDesc.ArraySize,dsDesc.SampleDesc.Count,
+        depthSrv.Get(),depthResource.Get(),(uint32_t)srvView.Format,(uint32_t)srvView.ViewDimension,
+        srvMip,srvArray,
+        depthDesc.Width,depthDesc.Height,(uint32_t)depthDesc.Format,depthDesc.MipLevels,depthDesc.ArraySize,
+        depthDesc.SampleDesc.Count,depthResource.Get()==s.namedDepth?1u:0u);
+    Log::get().note("flat local projection viewport: pair=%u attempt=%u count=%u first=%.9g,%.9g,%.9g,%.9g,%.9g,%.9g missing-shadow-slices=%u result=%s",
+        pair,sample.attempts,viewportCount,vp.TopLeftX,vp.TopLeftY,vp.Width,vp.Height,vp.MinDepth,vp.MaxDepth,
+        missing,missing?"partial-shadow":"complete-shadow-slices");
+    const bool targetValid=rtv && dsv && depthSrv && rtTexture && dsTexture && depthTexture;
+    Log::get().note("flat local projection relation: pair=%u attempt=%u frame=%llu prefix-target=%u prefix-draws=%u first=%u last=%u tones=%u target-depth=%p actual-rt=%p actual-dsv-depth=%p ps-t0-depth=%p named-depth=%p target-valid=%u shadow-valid=%u result=%s; final HDR selection is reported at handoff for this frame",
+        pair,sample.attempts,(unsigned long long)s.prefix.frame,targetIndex,targetDraws,targetFirst,targetLast,targetTones,
+        targetDepth,rtResource.Get(),dsResource.Get(),depthResource.Get(),s.namedDepth,
+        targetValid?1u:0u,missing?0u:1u,targetValid && !missing?"complete-capture":"partial-capture");
+    if(targetValid && !missing)++sample.complete;
 }
 void recordProjectionReference(State& s, State::AuditOutcome& outcome,
                                const FlatProjectionRecipes& recipes, bool depthAssociated) {
@@ -360,6 +502,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.projectionUnchanged=0;
             s.projectionDetailsUsed=0;
             s.projectionOutcomesUsed=0;s.projectionOutcomeOverflow=0;
+            s.localSamples[0]={};s.localSamples[1]={};
             s.resolvePreflightRetryMs=0;
             s.resolvePreflight=s.haveResolvePlan ? flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve) : FlatMonoResolvePreflightResult{};
             if(s.haveResolvePlan)s.resolvePreflightRetryMs=GetTickCount64();
@@ -527,6 +670,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if(s.projection) {
         ++s.projectionDraws;
         if(sceneExtent && k.color!=s.prefix.output && (k.format==23 || k.format==26 || k.format==60)) {
+            captureLocalProjection(s,k.vs,k.ps);
             const auto recipes=flatProjectionDrawRecipes(k.vs,k.ps);
             if(recipes.count)qualifyProjection(s,recipes,k.width,k.height,k.vs,k.ps,0,
                 s.namedDepth && k.depth==s.namedDepth);
@@ -549,6 +693,27 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     if (!copy) return;
     s.reason = flatMonoReasonName(selected.reason);
+    // Close only the two sampled prefix frames against their actual copy
+    // handoff. A pointer here is an identity within this frame, never retained
+    // or dereferenced after the frame ends.
+    if(s.projection && s.projectionFrames)for(uint32_t pair=0;pair<2;++pair) {
+        auto& sample=s.localSamples[pair];
+        for(uint32_t i=0;i<sample.attempts;++i)if(!sample.closed[i] && sample.frames[i]==s.prefix.frame) {
+            sample.closed[i]=true;
+            const void* toneInput=nullptr,*candidateHdr=nullptr;
+            if(k.srvResource[0])for(uint32_t t=0;t<s.prefix.targetsUsed;++t)
+                if(s.prefix.targets[t].resource==k.srvResource[0]) {
+                    toneInput=s.prefix.targets[t].resource;
+                    candidateHdr=s.prefix.targets[t].tone.key.srvResource[1];break;
+                }
+            Log::get().note("flat local projection handoff-model: pair=%u attempt=%u frame=%llu copy-seq=%u reason=%s sampled-rt=%p sampled-dsv-depth=%p tone-output=%p candidate-hdr=%p model-selected-hdr=%p model-selected-depth=%p rt-is-candidate=%u rt-is-selected=%u depth-is-selected=%u; actual copy handoff validation follows this observer decision",
+                pair,i+1,(unsigned long long)s.prefix.frame,s.prefix.sequence,s.reason,
+                sample.color[i],sample.depth[i],toneInput,candidateHdr,selected.hdr,selected.depth,
+                sample.color[i] && sample.color[i]==candidateHdr?1u:0u,
+                sample.color[i] && sample.color[i]==selected.hdr?1u:0u,
+                sample.depth[i] && sample.depth[i]==selected.depth?1u:0u);
+        }
+    }
     if (!selected.selected()) {
         if (selected.reason == FlatMonoReason::ConflictingHdr) reportConflict(s);
         refuse(s); return;
