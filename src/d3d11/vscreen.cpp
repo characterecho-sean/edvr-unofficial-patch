@@ -65,6 +65,7 @@
 #include "panel_upscale.h"
 #include "wake_pulse.h"
 #include "hud_grain.h"
+#include "scheduler_stack_probe.h"  // schedulerStackProbeShutdown
 #include "ui_depth.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
@@ -6478,9 +6479,25 @@ void shutdownVScreenFixes() {
     introUpscaleShutdown();
     introSkipShutdown();
     temporalPassShutdown();
+    // The scheduler stack probe (advanced.scheduler_probe) is configured only
+    // from temporalPassConfigure, so it stands down after the temporal pass.
+    // reset() clears active_ -- the Present and job-entry feeds check it --
+    // and detaches its scheduler-hook observer. A second call finds it
+    // inactive and detached and does nothing.
+    schedulerStackProbeShutdown();
     depthProbeShutdown();
     sharpenPassShutdown();
     g_state->hook.uninstall();
+    // After the hooks come off. These four are reached only through the draw
+    // thunks (their WantsDraws/OnEyeDraw and verdict Begin/End), the two
+    // configure paths and panel_upscale's frame-end counter; no other module
+    // and no shutdown above calls them. So past uninstall nothing can use
+    // them again. Each releases and nulls what it holds, so a second call
+    // finds nothing to release.
+    targetSharpShutdown();
+    hudSpriteShutdown();
+    panelUpscaleShutdown();
+    hudGrainShutdown();
 }
 
 }  // namespace edvr
