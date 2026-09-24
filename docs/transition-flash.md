@@ -3,14 +3,17 @@
 ## Status
 
 - **State (2026-09-23):** the shipped fix is still the trap below: detect the
-  bad frame, resubmit the previous one. An in-engine fix is DESIGNED, not
-  built or flown: `docs\design-transition-flash-engine-fix-2026-09-23.md`.
-  Read that doc's Status block first.
+  bad frame, resubmit the previous one. An in-engine fix was built and flown
+  the same day (flight 184826). The flight REFUTED the engine chain it hooked;
+  that chain attaches system-scale objects, not the eye. See
+  `docs\design-transition-flash-engine-fix-2026-09-23.md`; read its Status
+  block first.
 - **What the bad frame is:** the eye origin `cb1[275]` collapses to the head
-  pose alone, so the ship/seat transform is missing for one frame. Statically
-  traced to Elite's camera compose reading a parent node's world block the
-  world pass has not written yet.
-- **Next flight:** the design's Phase 1 anatomy instrument.
+  pose alone while the objects stay in a frame that is not seat-centred. The
+  ship/seat transform is missing for one frame. The code that composes it is
+  not found yet.
+- **Next:** re-anchor on the render side, with a call stack where the game
+  writes the eye origin's constant buffer.
 - **Open:** issue #34 (second and later jumps) was closed on timing and never
   re-measured; false replacements in smooth forward flight.
 - **Ruled out:** listed at the end of the design doc.
