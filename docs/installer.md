@@ -92,6 +92,10 @@ clears `advanced.real_dll` rather than leaving it naming a file that is not
 there. That question is asked on every run, including one that does not touch
 `d3d11.dll` at all.
 
+Repair is for when another mod's installer overwrites EDVR's files. A common
+case is EDHM's uninstaller running `del d3d11.dll`, which after an EDVR install
+deletes *ours*. Repair puts both back, side by side.
+
 **Native `openvr_api.dll` and the preserved original**, in `Openvr\win64`:
 
 | current | `openvr_api_orig.dll` | What happens |
@@ -105,7 +109,9 @@ there. That question is asked on every run, including one that does not touch
 | unreadable destination | any | installation is refused before writing |
 
 The native package does not require or select OpenComposite. The Windows Active
-OpenXR Runtime is selected by the bundled Khronos loader.
+OpenXR Runtime is selected by the bundled Khronos loader, which the installer
+places beside the native runtime. It does not search for or load a SteamVR or
+vendor loader.
 
 ## Keeping your settings
 
@@ -128,6 +134,9 @@ output is the new file, line for line, with your values written back into it:
 | the setting no longer exists | carried to the end of its section, with a note |
 | a key that was never ours | carried verbatim |
 | the installer must set it (chaining) | forced, and reported as the installer's doing |
+
+Afterwards it tells you which settings kept your value and which took the new
+default.
 
 Indentation, the shipped spelling of the key, the spacing around `=` and any
 inline comment all survive a rewrite, so a diff against the shipped file stays
@@ -222,13 +231,13 @@ halves of EDVR that read them. A `ui:` line outside `[fix]` is a build error,
 so the rule cannot drift by accident.
 
 **Every row says when it takes effect.** Most settings are live — EDVR re-reads
-`edvr.ini` about once a second — and the four that are not are marked *restart
-the game*: `share_exposure`, `transition_flash`, and the two `vscreen_res_*`
-sizes. That fact is not a fourth list either: it comes from what the comment
-block in `edvr.ini` already says ("Live." or the sentence naming a restart),
-and a setting whose prose says neither fails the build. Somebody who changes a
-setting and sees nothing happen otherwise has no way to tell a fix that needs a
-restart from one that is not working.
+`edvr.ini` about once a second — and those that are not are marked *restart the
+game*: at present `share_exposure`, `transition_flash`, `openxr_resolution`,
+and the two `vscreen_res_*` sizes. That fact is not a fourth list either: it
+comes from what the comment block in `edvr.ini` already says ("Live." or the
+sentence naming a restart), and a setting whose prose says neither fails the
+build. Somebody who changes a setting and sees nothing happen otherwise has no
+way to tell a fix that needs a restart from one that is not working.
 
 **A setting that is live in `edvr.ini` must have one of those lines, or the
 build fails.** Uncommenting a key is what promoting a fix to shipped-on looks
@@ -297,7 +306,8 @@ line.
 - **`asInvoker`.** A Steam library on another drive needs no elevation;
   demanding it every time trains people to click through a UAC prompt they did
   not need. When a folder does need it, the installer says so and relaunches
-  itself already confirmed.
+  itself already confirmed. It asks for administrator rights only if the game
+  is under `Program Files`, and only when it reaches that step.
 - **The game must be closed**, and it says which it is rather than failing on a
   locked file halfway through. *This* game: the running `EliteDangerous64.exe`
   is asked where it was launched from, and only a copy running out of the
