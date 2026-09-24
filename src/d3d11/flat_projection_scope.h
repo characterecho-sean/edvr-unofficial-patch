@@ -15,7 +15,7 @@ struct FlatProjectionPreparedState {
     uint64_t revision = 0;
     bool ready = false;
 };
-struct FlatProjectionBinding {
+struct FlatPrivateProjectionBinding {
     FlatProjectionStage stage = FlatProjectionStage::Vertex;
     UINT slot = 0;
     ID3D11Buffer* original = nullptr;
@@ -42,7 +42,7 @@ public:
         return prepareSnapshot(view, requests, count, jitter, phase);
     }
     void invalidate() { ready_ = false; if (prepared_) prepared_->ready = false; }
-    FlatProjectionBinding binding(FlatProjectionStage, UINT slot, UINT first = 0, UINT count = 4096) const;
+    FlatPrivateProjectionBinding binding(FlatProjectionStage, UINT slot, UINT first = 0, UINT count = 4096) const;
     uint64_t uploads() const { return uploads_; }
 private:
     bool prepareSnapshot(const FlatProjectionShadowView&, const FlatProjectionPatchRequest*,
@@ -65,7 +65,7 @@ private:
 class FlatProjectionBindingPlan {
 public:
     static constexpr size_t kCapacity = 8;
-    bool initialize(ID3D11DeviceContext1*, const FlatProjectionBinding*, size_t);
+    bool initialize(ID3D11DeviceContext1*, const FlatPrivateProjectionBinding*, size_t);
     // After successful uploads into the same resources, refresh only the tokens.
     // Failed preparation or a destroyed private-buffer owner rejects old plans.
     bool refreshPrepared();

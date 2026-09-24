@@ -1,6 +1,7 @@
 #include "flat_runtime.h"
 #include "flat_runtime_model.h"
 #include "flat_mono_resolve.h"
+#include "flat_projection_recipes.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "../common/config.h"
@@ -12,11 +13,13 @@
 #include <cstdio>
 #include <map>
 #include <string>
+#include <memory>
 
 namespace edvr {
 std::atomic<bool> g_flatRuntimeLive{false};
 namespace {
 std::atomic<bool> foreignWork{false};
+std::atomic<bool> projectionAuditRequested{false};
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
 struct Camera {
     Ptr<ID3D11Buffer> buffer; uint32_t width = 0; uint64_t frame = 0;
@@ -49,10 +52,124 @@ struct State {
     uint32_t conflictDetails[static_cast<uint32_t>(FlatRuntimeConflict::Count)]{};
     uint64_t lastConflictDetailMs[static_cast<uint32_t>(FlatRuntimeConflict::Count)]{};
     const char* reason = "warming-current-frame";
+    std::unique_ptr<FlatProjectionRuntime> projection;
+    Ptr<ID3D11DeviceContext1> projectionContext;
+    uint32_t projectionFrames = 0;
+    uint64_t projectionDraws = 0, projectionDispatches = 0, projectionCandidates = 0;
+    uint64_t projectionReady = 0, projectionMissing = 0, projectionUnowned = 0, projectionUnknown = 0;
+    struct AuditDetail { uint64_t vs = 0, ps = 0, cs = 0; uint32_t reason = 0; };
+    AuditDetail projectionDetails[32]{}; uint32_t projectionDetailsUsed = 0;
+    struct AuditOutcome { uint64_t vs = 0, ps = 0, cs = 0, observations = 0; uint32_t reason = 0; };
+    AuditOutcome projectionOutcomes[256]{}; uint32_t projectionOutcomesUsed = 0;
+    uint64_t projectionOutcomeOverflow = 0;
+    FlatMonoResolvePreflight plannedResolve{};
+    FlatMonoResolvePreflightResult resolvePreflight{};
+    bool haveResolvePlan = false;
+    uint64_t resolvePreflightRetryMs = 0;
+    uint64_t spatialFallbacks = 0, spatialFallbackFailures = 0;
 };
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
 bool owner() { return state().thread == GetCurrentThreadId(); }
+bool sameResolvePlan(const FlatMonoResolvePreflight& a,const FlatMonoResolvePreflight& b) {
+    return a.renderWidth==b.renderWidth && a.renderHeight==b.renderHeight && a.outputWidth==b.outputWidth &&
+        a.outputHeight==b.outputHeight && a.mode==b.mode && a.colorViewFormat==b.colorViewFormat &&
+        a.depthViewFormat==b.depthViewFormat && a.colorViewIsTexture2D==b.colorViewIsTexture2D &&
+        a.depthViewIsTexture2D==b.depthViewIsTexture2D && a.colorMostDetailedMip==b.colorMostDetailedMip &&
+        a.depthMostDetailedMip==b.depthMostDetailedMip && a.colorViewMipLevels==b.colorViewMipLevels &&
+        a.depthViewMipLevels==b.depthViewMipLevels && a.colorResourceMipLevels==b.colorResourceMipLevels &&
+        a.colorArraySize==b.colorArraySize && a.colorSampleCount==b.colorSampleCount &&
+        a.depthResourceMipLevels==b.depthResourceMipLevels &&
+        a.depthArraySize==b.depthArraySize && a.depthSampleCount==b.depthSampleCount;
+}
+void projectionDetail(State& s, uint64_t vs, uint64_t ps, uint64_t cs, uint32_t reason, const char* text) {
+    bool foundOutcome=false;
+    for (uint32_t i=0;i<s.projectionOutcomesUsed;++i) {
+        auto& outcome=s.projectionOutcomes[i];
+        if (outcome.vs==vs && outcome.ps==ps && outcome.cs==cs && outcome.reason==reason) {
+            ++outcome.observations; foundOutcome=true; break;
+        }
+    }
+    if (!foundOutcome) {
+        if (s.projectionOutcomesUsed<256) {
+            auto& outcome=s.projectionOutcomes[s.projectionOutcomesUsed++];
+            outcome={vs,ps,cs,1,reason};
+        } else ++s.projectionOutcomeOverflow;
+    }
+    for (uint32_t i=0;i<s.projectionDetailsUsed;++i) {
+        const auto& d=s.projectionDetails[i];
+        if (d.vs==vs && d.ps==ps && d.cs==cs && d.reason==reason) return;
+    }
+    if (s.projectionDetailsUsed==32) return;
+    s.projectionDetails[s.projectionDetailsUsed++]={vs,ps,cs,reason};
+    Log::get().note("flat projection candidate: VS=%016llX PS=%016llX CS=%016llX reason=%s code=%u; preparation-only, raster-phase=0",
+        static_cast<unsigned long long>(vs),static_cast<unsigned long long>(ps),static_cast<unsigned long long>(cs),text,reason);
+}
+void reportProjection(State& s, const char* event) {
+    if (!s.projection) return;
+    const auto status=s.projection->status();
+    Log::get().note("flat projection readiness: event=%s draws=%llu dispatches=%llu candidates=%llu prepared=%llu refused=%llu depth-unassociated=%llu unknown-scene-draws=%llu full-writes=%llu initial-writes=%llu invalidations=%llu frames-left=%u raster-phase=0 raster-authorized=0 resolve-ready=%u fallback-ready=%u backend-available=%u backend-feature-deferred=%u preflight=%s spatial-fallbacks=%llu spatial-fallback-failures=%llu",
+        event,(unsigned long long)s.projectionDraws,(unsigned long long)s.projectionDispatches,(unsigned long long)s.projectionCandidates,
+        (unsigned long long)s.projectionReady,(unsigned long long)s.projectionMissing,(unsigned long long)s.projectionUnowned,
+        (unsigned long long)s.projectionUnknown,(unsigned long long)status.fullWrites,(unsigned long long)status.initialWrites,
+        (unsigned long long)status.invalidations,s.projectionFrames,s.resolvePreflight.rendererReady?1u:0u,
+        s.resolvePreflight.spatialFallbackReady?1u:0u,s.resolvePreflight.backendAvailable?1u:0u,
+        s.resolvePreflight.backendFeatureCreationDeferred?1u:0u,s.resolvePreflight.reason,
+        (unsigned long long)s.spatialFallbacks,(unsigned long long)s.spatialFallbackFailures);
+    Log::get().note("flat projection outcome totals: distinct=%u overflow-observations=%llu; result=prepared is reason-code 0, failures retain their code, 101=unknown-recipe",
+        s.projectionOutcomesUsed,(unsigned long long)s.projectionOutcomeOverflow);
+    static const char* outcomeNames[]={"prepared","wrong-thread","no-context1","capacity","unknown-buffer","missing-full-write","unsupported-range","binding-mismatch","invalid-recipe","private-failure","plan-failure"};
+    for(uint32_t i=0;i<s.projectionOutcomesUsed;++i) {
+        const auto& outcome=s.projectionOutcomes[i];
+        const char* label=outcome.reason<11?outcomeNames[outcome.reason]:
+            outcome.reason==100?"actual-shader-mismatch":outcome.reason==101?"unknown-scene-projection-recipe":
+            outcome.reason==102?"invalid-render-extent":"other-refusal";
+        Log::get().note("flat projection outcome: event=%s VS=%016llX PS=%016llX CS=%016llX result=%s code=%u count=%llu",
+            event,(unsigned long long)outcome.vs,(unsigned long long)outcome.ps,(unsigned long long)outcome.cs,
+            label,outcome.reason,(unsigned long long)outcome.observations);
+    }
+    static const char* reasons[]={"none","wrong-thread","no-context1","capacity","unknown-buffer","missing-full-write","unsupported-range","binding-mismatch","invalid-recipe","private-failure","plan-failure"};
+    for (uint32_t i=1;i<11;++i) if(status.refusals[i])
+        Log::get().note("flat projection refusal: reason=%s cumulative=%llu",reasons[i],(unsigned long long)status.refusals[i]);
+    Log::get().note("flat projection cold buffers: queued=%llu completed=%llu stale=%llu failed=%llu pending=%llu timeouts=%llu; asynchronous full snapshots, unchanged-write tokens required",
+        (unsigned long long)status.coldQueued,(unsigned long long)status.coldCompleted,(unsigned long long)status.coldStale,
+        (unsigned long long)status.coldFailed,(unsigned long long)status.coldPending,(unsigned long long)status.coldTimeouts);
+}
+void qualifyProjection(State& s, FlatProjectionRecipes recipes, uint32_t width, uint32_t height,
+                       uint64_t vs, uint64_t ps, uint64_t cs, bool owned) {
+    if (!s.projection || !s.projectionFrames || !recipes.count) return;
+    ++s.projectionCandidates;
+    if (!owned) ++s.projectionUnowned;
+    FlatComputeInternalScope internal;
+    // Recipe hashes come from the observer; verify actual shaders before
+    // trusting them in a modded context. No bindings are changed by this audit.
+    Ptr<ID3D11VertexShader> actualVs; Ptr<ID3D11PixelShader> actualPs; Ptr<ID3D11ComputeShader> actualCs;
+    bool shadersMatch = false;
+    if (cs) { s.context->CSGetShader(&actualCs,nullptr,nullptr); shadersMatch=lookupShaderHash(actualCs.Get())==cs; }
+    else { s.context->VSGetShader(&actualVs,nullptr,nullptr); s.context->PSGetShader(&actualPs,nullptr,nullptr);
+        shadersMatch=lookupShaderHash(actualVs.Get())==vs && lookupShaderHash(actualPs.Get())==ps; }
+    if (!shadersMatch) { ++s.projectionMissing; projectionDetail(s,vs,ps,cs,100,"actual-shader-mismatch"); return; }
+    Ptr<ID3D11Buffer> buffers[3];
+    for(uint32_t i=0;i<recipes.count;++i) {
+        auto& request=recipes.requests[i];
+        switch(request.stage) {
+        case FlatProjectionStage::Vertex: s.projectionContext->VSGetConstantBuffers1(request.slot,1,&buffers[i],&request.firstConstant,&request.constantCount); break;
+        case FlatProjectionStage::Pixel: s.projectionContext->PSGetConstantBuffers1(request.slot,1,&buffers[i],&request.firstConstant,&request.constantCount); break;
+        case FlatProjectionStage::Compute: s.projectionContext->CSGetConstantBuffers1(request.slot,1,&buffers[i],&request.firstConstant,&request.constantCount); break;
+        }
+        request.original=buffers[i].Get();
+    }
+    FlatProjectionJitter proposed{};
+    // Exercise the actual nonzero private preparation while game raster and
+    // backend phases stay zero. Prepared plans are deliberately NOT bound.
+    if(!flatProjectionJitter(.25f,-.25f,width,height,proposed)) {
+        ++s.projectionMissing;projectionDetail(s,vs,ps,cs,102,"invalid-render-extent");return;
+    }
+    const bool ready=s.projection->preflight(recipes.requests,recipes.count,proposed,1) &&
+        s.projection->prepare(recipes.requests,recipes.count,proposed,1)!=nullptr;
+    if(ready) { ++s.projectionReady; projectionDetail(s,vs,ps,cs,0,"prepared"); }
+    else { ++s.projectionMissing; projectionDetail(s,vs,ps,cs,static_cast<uint32_t>(s.projection->status().last),"private-preparation-refused"); }
+}
 void reset() { auto& s = state(); s.havePrevious = false; FlatComputeInternalScope guard; flatMonoResolveInvalidateHistory(); }
 void refuse(State& s) {
     ++s.refused; ++s.refusedWindow[s.reason]; s.streak = 0; reset();
@@ -140,6 +257,8 @@ bool depthView(ID3D11Texture2D* depth) {
 void flatRuntimeResize() {
     g_flatRuntimeLive.store(false, std::memory_order_release);
     auto& s = state(); FlatComputeInternalScope guard; flatMonoResolveReset();
+    if (s.projection) { reportProjection(s,"resize-or-stop"); s.projection.reset(); s.projectionContext.Reset(); s.projectionFrames=0; }
+    s.haveResolvePlan=false; s.resolvePreflight={}; s.resolvePreflightRetryMs=0;
     s.havePrevious = false; s.previousColor.Reset(); s.output.Reset(); s.sceneDepth.Reset(); s.depthView.Reset();
     for (auto& v : s.views) v = View{};
     for (auto& r : s.colors) r.Reset(); for (auto& r : s.depths) r.Reset();
@@ -148,6 +267,10 @@ void flatRuntimeResize() {
     s.prefix = FlatRuntimePrefix{}; s.context.Reset(); s.device.Reset(); s.thread = 0; s.viewportCount = 0;
 }
 void flatRuntimeBeforePresent() { g_flatRuntimeLive.store(false, std::memory_order_release); }
+void flatRuntimeArmProjectionAudit() { if(runtimeFlatProfile()) projectionAuditRequested.store(true,std::memory_order_release); }
+void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
+    if(owner() && state().projection) state().projection->observeCreateBuffer(buffer,initialData);
+}
 void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {
     if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;
     auto& s = state(); if (s.thread && !owner()) return;
@@ -155,6 +278,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const auto mode = Config::get().requestedTemporalMode();
     const bool enabled = temporalModeEnabled(mode);
     if (mode != s.mode) {
+        s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
         s.mode = mode; reset(); engineVelocityConfigure(enabled);
         s.engine = _stricmp(mode.c_str(), "fsr") == 0 ? FlatMonoResolveMode::Fsr :
             _stricmp(mode.c_str(), "dlss") == 0 ? FlatMonoResolveMode::Dlss :
@@ -169,6 +293,33 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (s.device && actualDevice.Get() != s.device.Get()) { flatRuntimeResize(); s.thread = GetCurrentThreadId(); }
     if (!s.device) { swap->GetDevice(IID_PPV_ARGS(&s.device)); if (s.device) s.device->GetImmediateContext(&s.context); }
     if (!s.device || !s.context) return;
+    if(s.projection)s.projection->pollColdReadbacks();
+    if(s.projectionFrames && --s.projectionFrames==0) {
+        reportProjection(s,"complete");s.projection.reset();s.projectionContext.Reset();
+    }
+    if(projectionAuditRequested.exchange(false,std::memory_order_acq_rel)) {
+        if(s.projection)reportProjection(s,"rearmed");
+        s.projection.reset(new(std::nothrow) FlatProjectionRuntime);
+        s.projectionContext.Reset();s.context.As(&s.projectionContext);
+        if(s.projection && s.projectionContext && s.projection->initialize(s.context.Get())) {
+            s.projection->enableColdReadback(true);
+            s.projectionFrames=900;s.projectionDraws=s.projectionDispatches=s.projectionCandidates=0;
+            s.projectionReady=s.projectionMissing=s.projectionUnowned=s.projectionUnknown=0;
+            s.projectionDetailsUsed=0;
+            s.projectionOutcomesUsed=0;s.projectionOutcomeOverflow=0;
+            s.resolvePreflightRetryMs=0;
+            s.resolvePreflight=s.haveResolvePlan ? flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve) : FlatMonoResolvePreflightResult{};
+            if(s.haveResolvePlan)s.resolvePreflightRetryMs=GetTickCount64();
+            Log::get().note("flat projection: armed 900-frame preparation audit; proposed private phase=(0.25,-0.25), actual raster/backend phase=(0,0); no private plans will be bound");
+        } else {s.projection.reset();s.projectionContext.Reset();s.projectionFrames=0;
+            Log::get().note("flat projection: arm refused (allocation/context1/runtime unavailable), raster-phase=0");}
+    }
+    const uint64_t preflightNow=GetTickCount64();
+    if(s.projection && s.haveResolvePlan && !s.resolvePreflight.readyForRasterJitter() &&
+       (!s.resolvePreflightRetryMs || preflightNow-s.resolvePreflightRetryMs>=1000)) {
+        s.resolvePreflight=flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve);
+        s.resolvePreflightRetryMs=preflightNow;
+    }
     if (!s.treated || hr != S_OK) reset();
     Ptr<ID3D11Texture2D> output; if (FAILED(swap->GetBuffer(0, IID_PPV_ARGS(&output)))) return;
     if (s.output.Get() != output.Get()) reset(); s.output = output;
@@ -182,6 +333,10 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     for (uint32_t i = 0; i < s.cameraCount; ++i) { s.cameras[i].valid = false; s.cameras[i].mapped = nullptr; }
     const auto now = GetTickCount64();
     if (now - s.lastReport >= 5000) {
+        if(s.projection)reportProjection(s,"progress");
+        if(s.spatialFallbacks || s.spatialFallbackFailures)
+            Log::get().note("flat runtime spatial fallback cumulative: recovered=%llu failed=%llu history=invalid-on-recovery",
+                (unsigned long long)s.spatialFallbacks,(unsigned long long)s.spatialFallbackFailures);
         Log::get().note("flat runtime: treated=%llu refused=%llu last=%s render-source=game-SS jitter=0 accepted-reset-5s=%llu accepted-history-5s=%llu treated-streak=%llu longest-treated-streak=%llu",
             static_cast<unsigned long long>(s.accepted), static_cast<unsigned long long>(s.refused), s.reason,
             static_cast<unsigned long long>(s.acceptedResetWindow), static_cast<unsigned long long>(s.acceptedHistoryWindow),
@@ -217,7 +372,7 @@ void flatRuntimeConstantBuffers(UINT start, UINT count, ID3D11Buffer* const* buf
     if (owner() && start <= 1 && 1-start < count && buffers && buffers[1-start]) camera(buffers[1-start], true);
 }
 void flatRuntimeClearBindings() { if (owner()) { state().viewportCount = 0; for (auto& u : state().uavs) u.Reset(); } }
-void flatRuntimeUnknown() { if (owner()) { state().prefix.uncertain = true; state().viewportCount = 0; for (auto& c : state().cameras) c.valid = false; for (auto& u : state().uavs) u.Reset(); } }
+void flatRuntimeUnknown() { if (owner()) { state().prefix.uncertain = true; state().viewportCount = 0; for (auto& c : state().cameras) c.valid = false; for (auto& u : state().uavs) u.Reset(); if(state().projection)state().projection->invalidateAll(); } }
 void flatRuntimeUavs(UINT start, UINT count, ID3D11UnorderedAccessView* const* views) {
     if (!owner()) return;
     for (UINT i = 0; i < count && start + i < 8; ++i) {
@@ -228,6 +383,20 @@ void flatRuntimeUavs(UINT start, UINT count, ID3D11UnorderedAccessView* const* v
 }
 void flatRuntimeDispatch(ID3D11DeviceContext* ctx) {
     auto& s = state(); if (!owner() || ctx != s.context.Get()) { foreignWork.store(true, std::memory_order_release); return; }
+    if(s.projection) {
+        ++s.projectionDispatches;
+        const auto cs=bindingShaderHash(BindSlot::Cs);
+        if(cs==0x5998146D464F5C0Eull || cs==0xEB0245DE0BB23BB6ull) {
+            FlatComputeInternalScope internal;
+            Ptr<ID3D11ShaderResourceView> depth,material;ctx->CSGetShaderResources(3,1,&depth);ctx->CSGetShaderResources(4,1,&material);
+            Ptr<ID3D11Resource> depthResource,materialResource;Ptr<ID3D11Texture2D> texture;
+            if(depth)depth->GetResource(&depthResource);if(material)material->GetResource(&materialResource);
+            if(depthResource)depthResource.As(&texture);
+            D3D11_TEXTURE2D_DESC desc{};if(texture)texture->GetDesc(&desc);
+            const bool owned=s.namedDepth && materialResource.Get()==s.namedDepth;
+            qualifyProjection(s,flatProjectionDispatchRecipes(cs,desc.Width,desc.Height),desc.Width,desc.Height,0,0,cs,owned);
+        }
+    }
     for (const auto& u : s.uavs) if (u) {
         for (uint32_t i = 0; i < s.prefix.targetsUsed; ++i) {
             auto& target = s.prefix.targets[i];
@@ -241,17 +410,21 @@ void flatRuntimeDispatch(ID3D11DeviceContext* ctx) {
 void flatRuntimeWritten(ID3D11Resource* res) {
     if (!owner()) return; flatRuntimeWritten(state().prefix, res);
     if (auto* c = camera(res, false)) c->valid = false;
+    if(state().projection)state().projection->invalidate(res);
 }
 void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
     if (!owner() || type == D3D11_MAP_READ) return;
     flatRuntimeWritten(res); if (auto* c = camera(res, false)) c->mapped = bytes;
+    if(state().projection)state().projection->observeMap(res,type,bytes);
 }
 void flatRuntimeUnmap(ID3D11Resource* res) {
-    if (!owner()) return; if (auto* c = camera(res, false)) { if (c->mapped) capture(*c, c->mapped); c->mapped = nullptr; }
+    if (!owner()) return; if(state().projection)state().projection->observeUnmap(res);
+    if (auto* c = camera(res, false)) { if (c->mapped) capture(*c, c->mapped); c->mapped = nullptr; }
 }
 void flatRuntimeUpdate(ID3D11Resource* res, const void* bytes, const D3D11_BOX* box) {
     if (!owner()) return; flatRuntimeWritten(res);
     if (auto* c = camera(res, false)) { if (!box || (box->left == 0 && box->right == c->width)) capture(*c, bytes); }
+    if(state().projection)state().projection->observeUpdate(res,bytes,box);
 }
 
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances) {
@@ -283,12 +456,24 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         s.depths[oldTargets] = static_cast<ID3D11Resource*>(ds.resource);
     }
     const bool sceneExtent = flatContractKind(false, k.color, k.depth, k.width, k.height, k.format, s.prefix.width, s.prefix.height, false) == kFlatContractScreen;
-    if (d.supported && k.camera && k.depth && sceneExtent && (k.format == 23 || k.format == 26) && flat_mono_detail::fullViewport(k, k.width, k.height)) {
+    const bool sourceCandidate=d.supported && k.camera && k.depth && sceneExtent &&
+        (k.format==23 || k.format==26) && flat_mono_detail::fullViewport(k,k.width,k.height);
+    if(sourceCandidate && !s.namedDepth) {
         FlatComputeInternalScope guard;
-        if (!s.namedDepth) {
-            s.namedDepth = k.depth; s.namedConstants = k.b1; std::memcpy(s.namedCamera, d.camera, sizeof(d.camera));
-            engineVelocityNoteSource(static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)), static_cast<ID3D11Buffer*>(const_cast<void*>(k.b1)));
+        s.namedDepth=k.depth;s.namedConstants=k.b1;std::memcpy(s.namedCamera,d.camera,sizeof(d.camera));
+        engineVelocityNoteSource(static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),static_cast<ID3D11Buffer*>(const_cast<void*>(k.b1)));
+    }
+    if(s.projection) {
+        ++s.projectionDraws;
+        if(sceneExtent && k.color!=s.prefix.output && (k.format==23 || k.format==26 || k.format==60)) {
+            const auto recipes=flatProjectionDrawRecipes(k.vs,k.ps);
+            if(recipes.count)qualifyProjection(s,recipes,k.width,k.height,k.vs,k.ps,0,
+                s.namedDepth && k.depth==s.namedDepth);
+            else if(k.depth) {++s.projectionUnknown;projectionDetail(s,k.vs,k.ps,0,101,"unknown-scene-projection-recipe");}
         }
+    }
+    if (sourceCandidate) {
+        FlatComputeInternalScope guard;
         if (s.namedDepth == k.depth && s.namedConstants == k.b1 && std::memcmp(s.namedCamera, d.camera, sizeof(d.camera)) == 0) {
             ctx->OMGetRenderTargets(8, targets, &depth); producer = true; engineVelocityBeforeDraw(ctx, false);
         }
@@ -317,6 +502,31 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         !depthView(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)))) { s.reason = "actual-handoff-or-depth-view-refused"; refuse(s); return; }
     FlatMonoResolveFrame f{}; f.color = original; f.depth = s.depthView.Get(); f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
+    // Metadata is frozen from the qualified handoff for a future frame's
+    // preflight. It cannot authorize jitter in this already rendered frame.
+    Ptr<ID3D11Texture2D> colorTexture;
+    if(s.projection && SUCCEEDED(actualColor.As(&colorTexture))) {
+        D3D11_TEXTURE2D_DESC colorDesc{},depthDesc{};D3D11_SHADER_RESOURCE_VIEW_DESC colorView{},depthViewDesc{};
+        colorTexture->GetDesc(&colorDesc);s.sceneDepth->GetDesc(&depthDesc);
+        original->GetDesc(&colorView);s.depthView->GetDesc(&depthViewDesc);
+        FlatMonoResolvePreflight plan{};
+        plan.renderWidth=f.renderWidth;plan.renderHeight=f.renderHeight;plan.outputWidth=f.outputWidth;plan.outputHeight=f.outputHeight;
+        plan.mode=f.mode;plan.colorViewFormat=colorView.Format;plan.depthViewFormat=depthViewDesc.Format;
+        plan.colorViewIsTexture2D=colorView.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D;
+        plan.depthViewIsTexture2D=depthViewDesc.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D;
+        if(plan.colorViewIsTexture2D) {
+            plan.colorMostDetailedMip=colorView.Texture2D.MostDetailedMip;plan.colorViewMipLevels=colorView.Texture2D.MipLevels;
+        }
+        if(plan.depthViewIsTexture2D) {
+            plan.depthMostDetailedMip=depthViewDesc.Texture2D.MostDetailedMip;plan.depthViewMipLevels=depthViewDesc.Texture2D.MipLevels;
+        }
+        plan.colorResourceMipLevels=colorDesc.MipLevels;plan.colorArraySize=colorDesc.ArraySize;plan.colorSampleCount=colorDesc.SampleDesc.Count;
+        plan.depthResourceMipLevels=depthDesc.MipLevels;plan.depthArraySize=depthDesc.ArraySize;plan.depthSampleCount=depthDesc.SampleDesc.Count;
+        if(!s.haveResolvePlan || !sameResolvePlan(plan,s.plannedResolve)) {
+            s.resolvePreflight={};s.resolvePreflightRetryMs=0;
+        }
+        s.plannedResolve=plan;s.haveResolvePlan=true;
+    }
     std::memcpy(f.camera, selected.camera, sizeof(f.camera));
     const bool resetMissing = !s.havePrevious;
     const bool resetGap = s.havePrevious && s.previous.frame + 1 != selected.frame;
@@ -331,7 +541,23 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (!engineVelocitySourceViews(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)), &f.engine)) { s.reason = "engine-source-not-ready"; refuse(s); return; }
     Ptr<ID3D11ShaderResourceView> engineSlots, enginePool, outputView; Ptr<ID3D11Buffer> nowCb, prevCb;
     engineSlots.Attach(f.engine.slots); enginePool.Attach(f.engine.pool); nowCb.Attach(f.engine.sceneNow); prevCb.Attach(f.engine.scenePrev);
-    if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) { refuse(s); return; }
+    if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
+        const char* temporalReason=s.reason;
+        const char* fallbackReason=nullptr;
+        // The SDK may clobber context state before returning failure. The
+        // resolver and spatial path each isolate/restore that state. Never
+        // count spatial recovery as a temporal evaluation/history success.
+        if(flatMonoResolveSpatialFallback(s.device.Get(),ctx,f,&outputView,&fallbackReason)) {
+            refuse(s);++s.spatialFallbacks;
+            ID3D11ShaderResourceView* fallback=outputView.Get();ctx->PSSetShaderResources(0,1,&fallback);replaced=true;s.treated=true;
+            s.reason="spatial-fallback";
+            if(s.spatialFallbacks<=4)Log::get().note("flat runtime fallback: temporal=%s output=spatial history=invalid raster-phase=(%.4g,%.4g)",temporalReason,f.jitterX,f.jitterY);
+        } else {
+            refuse(s);++s.spatialFallbackFailures;
+            if(s.spatialFallbackFailures<=4)Log::get().note("flat runtime fallback refused: temporal=%s spatial=%s raster-phase=(%.4g,%.4g)",temporalReason,fallbackReason?fallbackReason:"unknown",f.jitterX,f.jitterY);
+        }
+        return;
+    }
     s.reason = "treated-zero-jitter";
     ID3D11ShaderResourceView* replacement = outputView.Get(); ctx->PSSetShaderResources(0, 1, &replacement); replaced = true;
     s.previous = selected; s.previousColor = actualColor; s.havePrevious = s.treated = true; s.lastMs = now; ++s.accepted;

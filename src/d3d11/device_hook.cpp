@@ -1000,6 +1000,11 @@ HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
         if (FAILED(hr)) {
             noteDeviceCreateFailure(Slot, hr, first, second, FirstIsResource);
         } else if constexpr (Slot == kDevCreateBuffer) {
+            const auto* desc=static_cast<const D3D11_BUFFER_DESC*>(first);
+            if(out && *out && desc && desc->BindFlags==D3D11_BIND_CONSTANT_BUFFER && flatRuntimeActive()) {
+                const auto* initial=static_cast<const D3D11_SUBRESOURCE_DATA*>(second);
+                flatRuntimeCreateBuffer(static_cast<ID3D11Buffer*>(*out),initial?initial->pSysMem:nullptr);
+            }
             if (first) {
                 g_createBuffers.fetch_add(1, std::memory_order_relaxed);
                 g_createBufferBytes.fetch_add(static_cast<const D3D11_BUFFER_DESC*>(first)->ByteWidth,

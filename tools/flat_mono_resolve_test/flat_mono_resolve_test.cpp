@@ -77,6 +77,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned,ID3D11Texture2D*,ID3D11Texture
 }
 } // namespace edvr
 #include "flat_projection_scope_tests.h"
+#include "flat_projection_runtime_tests.h"
 int main(int argc,char** argv) {
     if(argc!=2 || (std::strcmp(argv[1],"--self-test") && std::strcmp(argv[1],"--dry-run"))){std::puts("usage: flat_mono_resolve_test --self-test|--dry-run");return 2;}
     if(!std::strcmp(argv[1],"--dry-run")){std::puts("Would exercise mono resolve WARP shaders, backend inputs and state restoration; writes no files.");return 0;}
@@ -88,6 +89,7 @@ int main(int argc,char** argv) {
     check(SUCCEEDED(hr),"WARP device");if(FAILED(hr))return 1;
     ComPtr<ID3D11InfoQueue> messages;device.As(&messages);
     projectionScopeTests(device.Get(), context.Get());
+    projectionRuntimeTests(device.Get(), context.Get());
     const UINT w=16,h=16;std::vector<uint32_t> red(w*h,0xff0000ff);std::vector<float> z(w*h,.01f),slots(w*h*2);
     for(size_t i=0;i<slots.size();i+=2){slots[i]=-1;slots[i+1]=.01f;}
     auto color=texture(device.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM,D3D11_BIND_SHADER_RESOURCE,red.data(),w*4);
@@ -118,6 +120,23 @@ int main(int argc,char** argv) {
     edvr::FlatMonoResolveFrame f{};f.color=colorView.Get();f.depth=depthView.Get();f.renderWidth=w;f.renderHeight=h;
     f.outputWidth=f.outputHeight=32;f.deltaMs=16;camera(f.camera);camera(f.previousCamera);
     f.engine={slotView.Get(),poolView.Get(),now.Get(),old.Get()};f.mode=edvr::FlatMonoResolveMode::Dlss;f.frame=1;
+    edvr::FlatMonoResolvePreflight planned{};planned.renderWidth=w;planned.renderHeight=h;
+    planned.outputWidth=f.outputWidth;planned.outputHeight=f.outputHeight;planned.mode=f.mode;
+    planned.colorViewFormat=DXGI_FORMAT_R8G8B8A8_UNORM;planned.depthViewFormat=DXGI_FORMAT_R32_FLOAT;
+    const auto beforeInvalidPreflight=edvr::flatMonoResolveStats();
+    auto invalidPreflight=planned;invalidPreflight.outputWidth=0;
+    auto preflight=edvr::flatMonoResolvePreflight(device.Get(),context.Get(),invalidPreflight);
+    check(preflight.status==edvr::FlatMonoResolvePreflightStatus::InvalidMetadata &&
+          !preflight.readyForRasterJitter() && backendCalls==0 &&
+          edvr::flatMonoResolveStats().initializations==beforeInvalidPreflight.initializations &&
+          edvr::flatMonoResolveStats().allocations==beforeInvalidPreflight.allocations,
+          "bad extent preflight refuses before renderer allocation or backend work");
+    preflight=edvr::flatMonoResolvePreflight(device.Get(),context.Get(),planned);
+    check(preflight.readyForRasterJitter() && preflight.spatialFallbackReady &&
+          preflight.backendAvailable && preflight.backendFeatureCreationDeferred &&
+          preflight.reason && !std::strcmp(preflight.reason,"ready-backend-feature-creation-deferred") &&
+          backendCalls==0,"valid metadata preallocates spatial output without evaluating a backend feature");
+    const auto preflightAllocations=edvr::flatMonoResolveStats().allocations;
     auto run=[&](bool wanted){bindOriginal();ComPtr<ID3D11ShaderResourceView> out;const char* reason=nullptr;
         bool ok=edvr::flatMonoResolve(device.Get(),context.Get(),f,out.GetAddressOf(),&reason);
         if(ok!=wanted)std::printf("info: resolver reason %s\n",reason?reason:"none");
@@ -170,8 +189,9 @@ int main(int argc,char** argv) {
     backendFail=true;++f.frame;run(false);backendFail=false;
     bindOriginal();ComPtr<ID3D11ShaderResourceView> recovered;const char* fallbackReason=nullptr;
     check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,recovered.GetAddressOf(),&fallbackReason) &&
-          recovered && restored() && pixel(recovered.Get())==0xff0000ff,
-          "preallocated spatial fallback restores state and displays current jittered frame after SDK refusal");
+          recovered && restored() && pixel(recovered.Get())==0xff0000ff &&
+          edvr::flatMonoResolveStats().allocations==preflightAllocations,
+          "preflighted spatial fallback restores state and displays current jittered frame after SDK refusal without allocation");
     ++f.frame;run(true);check(backendReset,"backend failure and fallback invalidate history");
     stats=edvr::flatMonoResolveStats();check(stats.backendFailures==1 && stats.currentContinueRun==0,
         "backend failure and following accepted reset are visible in cumulative statistics");

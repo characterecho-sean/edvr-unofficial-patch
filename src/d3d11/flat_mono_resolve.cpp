@@ -71,6 +71,55 @@ bool jitterValid(const FlatMonoResolveFrame& f) {
         std::abs(f.jitterX)<=.5f && std::abs(f.jitterY)<=.5f &&
         std::abs(f.previousJitterX)<=.5f && std::abs(f.previousJitterY)<=.5f;
 }
+bool resolveModeValid(FlatMonoResolveMode mode) {
+    return mode==FlatMonoResolveMode::Taa || mode==FlatMonoResolveMode::Dlaa ||
+        mode==FlatMonoResolveMode::Dlss || mode==FlatMonoResolveMode::Fsr;
+}
+bool preflightMetadataValid(const FlatMonoResolvePreflight& f,const char** reason) {
+    if(!f.renderWidth || !f.renderHeight || !f.outputWidth || !f.outputHeight ||
+       f.renderWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+       f.renderHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+       f.outputWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+       f.outputHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+        if(reason)*reason="flat-preflight-invalid-extent";
+        return false;
+    }
+    if(!resolveModeValid(f.mode)) {
+        if(reason)*reason="flat-preflight-invalid-mode";
+        return false;
+    }
+    if(f.mode==FlatMonoResolveMode::Dlaa &&
+       (f.renderWidth!=f.outputWidth || f.renderHeight!=f.outputHeight)) {
+        if(reason)*reason="flat-preflight-dlaa-requires-native-render-size";
+        return false;
+    }
+    if(f.mode!=FlatMonoResolveMode::Taa &&
+       (f.renderWidth>f.outputWidth || f.renderHeight>f.outputHeight)) {
+        if(reason)*reason="flat-preflight-trained-resolve-cannot-downsample";
+        return false;
+    }
+    const bool colorFormat=f.colorViewFormat==DXGI_FORMAT_R8G8B8A8_UNORM ||
+        f.colorViewFormat==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    const bool depthFormat=f.depthViewFormat==DXGI_FORMAT_R32_FLOAT ||
+        f.depthViewFormat==DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS ||
+        f.depthViewFormat==DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
+        f.depthViewFormat==DXGI_FORMAT_R16_UNORM;
+    if(!colorFormat || !depthFormat) {
+        if(reason)*reason="flat-preflight-unsupported-source-format";
+        return false;
+    }
+    const bool colorViewRange=f.colorViewMipLevels==1 || f.colorViewMipLevels==UINT32_MAX;
+    const bool depthViewRange=f.depthViewMipLevels==1 || f.depthViewMipLevels==UINT32_MAX;
+    if(!f.colorViewIsTexture2D || !f.depthViewIsTexture2D ||
+       f.colorMostDetailedMip!=0 || f.depthMostDetailedMip!=0 ||
+       !colorViewRange || !depthViewRange || f.colorResourceMipLevels!=1 ||
+       f.depthResourceMipLevels!=1 || f.colorArraySize!=1 || f.depthArraySize!=1 ||
+       f.colorSampleCount!=1 || f.depthSampleCount!=1) {
+        if(reason)*reason="flat-preflight-source-layout-unsupported";
+        return false;
+    }
+    return true;
+}
 bool image(ID3D11Device* device,uint32_t width,uint32_t height,DXGI_FORMAT format,Image& out,bool writable=true) {
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width=width;desc.Height=height;desc.MipLevels=desc.ArraySize=1;desc.Format=format;
@@ -155,6 +204,61 @@ bool inputTexture(ID3D11ShaderResourceView* view,uint32_t width,uint32_t height,
 } // namespace
 
 FlatMonoResolveStats flatMonoResolveStats() { return stats; }
+FlatMonoResolvePreflightResult flatMonoResolvePreflight(ID3D11Device* device,
+    ID3D11DeviceContext* context,const FlatMonoResolvePreflight& planned) {
+    FlatMonoResolvePreflightResult result{};
+    const char* why=nullptr;
+    if(!preflightMetadataValid(planned,&why)) {
+        result.status=FlatMonoResolvePreflightStatus::InvalidMetadata;
+        result.reason=why;
+        return result;
+    }
+    if(!device || !context) {
+        result.status=FlatMonoResolvePreflightStatus::RendererUnavailable;
+        result.reason="flat-preflight-missing-device-or-context";
+        return result;
+    }
+    if(!initialize(device,context,&why)) {
+        result.status=FlatMonoResolvePreflightStatus::RendererUnavailable;
+        result.reason=why?why:"flat-preflight-renderer-initialize-failed";
+        return result;
+    }
+    result.rendererReady=true;
+    FlatMonoResolveFrame frame{};
+    frame.renderWidth=planned.renderWidth;frame.renderHeight=planned.renderHeight;
+    frame.outputWidth=planned.outputWidth;frame.outputHeight=planned.outputHeight;
+    frame.mode=planned.mode;
+    if(!resources(frame,&why)) {
+        result.status=FlatMonoResolvePreflightStatus::FallbackUnavailable;
+        result.reason=why?why:"flat-preflight-resource-allocation-failed";
+        return result;
+    }
+    result.spatialFallbackReady=g.spatial && g.constants && g.sampler &&
+        g.output[1].texture && g.output[1].srv && g.output[1].uav &&
+        g.width==planned.renderWidth && g.height==planned.renderHeight &&
+        g.outWidth==planned.outputWidth && g.outHeight==planned.outputHeight &&
+        g.mode==planned.mode;
+    if(!result.spatialFallbackReady) {
+        result.status=FlatMonoResolvePreflightStatus::FallbackUnavailable;
+        result.reason="flat-preflight-spatial-output-not-ready";
+        return result;
+    }
+    result.backendFeatureCreationDeferred=planned.mode!=FlatMonoResolveMode::Taa;
+    if(planned.mode==FlatMonoResolveMode::Dlaa || planned.mode==FlatMonoResolveMode::Dlss)
+        result.backendAvailable=dlaaAvailable(device,&why);
+    else if(planned.mode==FlatMonoResolveMode::Fsr)
+        result.backendAvailable=fsr3Available(device,&why);
+    else result.backendAvailable=true;
+    if(!result.backendAvailable) {
+        result.status=FlatMonoResolvePreflightStatus::BackendUnavailable;
+        result.reason=why?why:"flat-preflight-backend-unavailable";
+        return result;
+    }
+    result.status=FlatMonoResolvePreflightStatus::Ready;
+    result.reason=result.backendFeatureCreationDeferred?
+        "ready-backend-feature-creation-deferred":"ready";
+    return result;
+}
 void flatMonoResolveReset() { ++stats.fullResets;stats.currentContinueRun=0;g=State{}; }
 void flatMonoResolveInvalidateHistory() { ++stats.invalidations;stats.currentContinueRun=0;g.history=false; }
 

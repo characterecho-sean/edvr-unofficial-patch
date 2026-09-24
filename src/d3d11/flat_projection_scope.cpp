@@ -83,14 +83,14 @@ bool FlatProjectionPrivateBuffer::prepareSnapshot(const FlatProjectionShadowView
     return true;
 }
 
-FlatProjectionBinding FlatProjectionPrivateBuffer::binding(FlatProjectionStage stage,
+FlatPrivateProjectionBinding FlatProjectionPrivateBuffer::binding(FlatProjectionStage stage,
     UINT slot, UINT first, UINT count) const {
     return {stage, slot, original_.Get(), ready_ ? replacement_.Get() : nullptr, first, count,
         prepared_, prepared_ ? prepared_->revision : 0};
 }
 
 bool FlatProjectionBindingPlan::initialize(ID3D11DeviceContext1* context,
-    const FlatProjectionBinding* bindings, size_t count) {
+    const FlatPrivateProjectionBinding* bindings, size_t count) {
     count_ = 0; context_.Reset();
     for (auto& saved : saved_) saved = Saved{};
     if (!context || !bindings || !count || count > kCapacity ||

@@ -46,7 +46,7 @@ void projectionScopeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     ctx->VSSetConstantBuffers1(1,1,&buffer,&first,&count);
     ctx->PSSetConstantBuffers1(2,1,&buffer,&first,&count);
     ctx->CSSetConstantBuffers1(0,1,&buffer,&first,&count);
-    FlatProjectionBinding bindings[]={privateBuffer.binding(FlatProjectionStage::Vertex,1,first,count),
+    FlatPrivateProjectionBinding bindings[]={privateBuffer.binding(FlatProjectionStage::Vertex,1,first,count),
         privateBuffer.binding(FlatProjectionStage::Pixel,2,first,count),
         privateBuffer.binding(FlatProjectionStage::Compute,0,first,count)};
     FlatProjectionBindingPlan plan;

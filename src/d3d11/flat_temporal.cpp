@@ -3,6 +3,7 @@
 #include "flat_mono_frame.h"
 #include "flat_compute_capture.h"
 #include "flat_compute_model.h"
+#include "flat_runtime.h"
 
 #include <algorithm>
 #include <cmath>
@@ -621,6 +622,7 @@ void flatTemporalArm() {
     g.projectionDetailsRemaining = 2;
     g.projectionManual = true;
     flatComputeArm(device, g.presents);
+    flatRuntimeArmProjectionAudit();
     Log::get().note("flat temporal: dump_draws started a fresh bounded desktop discovery window");
 }
 

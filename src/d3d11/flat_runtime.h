@@ -18,6 +18,8 @@ void flatRuntimeUnmap(ID3D11Resource*);
 void flatRuntimeUpdate(ID3D11Resource*, const void*, const D3D11_BOX*);
 void flatRuntimeWritten(ID3D11Resource*);
 void flatRuntimeUnknown();
+void flatRuntimeArmProjectionAudit();
+void flatRuntimeCreateBuffer(ID3D11Buffer*, const void* initialData);
 void flatRuntimeClearBindings();
 struct FlatRuntimeDrawScope {
     ID3D11DeviceContext* ctx = nullptr;

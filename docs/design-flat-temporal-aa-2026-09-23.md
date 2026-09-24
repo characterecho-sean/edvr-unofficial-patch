@@ -12,8 +12,9 @@
   not see the star-corona smear this time; it is not reproduced, not proved
   fixed. Earlier scene admission, lighting-grid and projection evidence is in
   sections 10-18. Private buffer snapshots, uploads and scoped VS/PS/CS
-  bindings are implemented for offline qualification (section 21). Live
-  projection jitter remains disabled.
+  bindings pass offline qualification (section 21). F10 now measures full
+  buffer/range preparation and resolver readiness without binding private
+  buffers (section 22). Live projection jitter remains disabled.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -30,14 +31,16 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** no repeat of the completed zero-jitter capture is needed.
-  Wire exact shader/owner admission and full write/range observation into the
-  tested private binding layer, then preflight and handoff fallback before
-  requesting rendered-jitter qualification; the view-Z producer is now known.
-  Keep jitter disabled until those requirements are met. Use
-  `tools/edvr_log.py` with the actual `--target`, `--expect-build 10cb20f0` and
-  `--grep "flat (runtime|temporal|discover|compute)"`. No headset is needed for discovery;
-  VR still needs regression testing.
+- **Next flight:** Epic, DLSS at 0.75x game SS, F10 once in flight and turn
+  near the star for 20-30 seconds. This measures the new 900-frame
+  private-buffer readiness audit, including static CB snapshots and resolver
+  preflight. Check `flat projection` summaries/refusals, cold-readback outcomes
+  and existing shader captures together. Preparation success does not authorize
+  jitter: camera/material/HDR coverage and earlier handoff-refusal recovery
+  remain open. Use `tools/edvr_log.py` with the actual `--target`, the
+  installed build
+  SHA in `--expect-build`, and `--grep "flat (projection|runtime|temporal|compute)"`.
+  No headset is needed; VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -1077,3 +1080,66 @@ Final source validation: `build/flat-private-bindings-final.log` passes all 79
 parallel jobs and three quiet jobs, the 255-key config contract and both
 installer payload checks. The final run includes the prepared-token lifetime
 tests and signed-zero lighting test; earlier passes preceded those additions.
+
+## 22. Runtime preparation and resolver recovery, 2026-09-24
+
+F10 arms a 900-frame owner-thread preparation audit. It uses the captured exact
+shader recipes, verifies actual VS/PS/CS bindings and D3D11.1 constant ranges,
+and prepares private buffers at a proposed pixel phase of (0.25, -0.25). It
+never binds those plans: game rasterization and temporal backend inputs remain
+at zero phase. Normal operation outside the audit does not maintain the new 4
+MiB full-buffer bank or query candidate descriptors. Existing camera and
+engine-motion snapshots are taken from the original bytes before preparation.
+
+The runtime observes initial data, full UpdateSubresource writes and mapped
+writes before Unmap. Partial writes, copies and unknown work invalidate shadow
+provenance. It retains bounded source identities, caches at most 32 plans and
+rejects unsupported ranges. Lighting preparation checks the actual integer
+extent/grid metadata and 120-pixel tile contract. The R32 view-Z conversion has
+no projection recipe; the measured glare and embedded HUD recipes remain
+separate consumers. The private binding record is named
+`FlatPrivateProjectionBinding` to avoid the existing diagnostic model's type.
+
+Static CBs created before F10 can be missing from the CPU observer, as the
+previous flight demonstrated. An opt-in cold path admits only an explicitly
+requested CB, copies its full contents to staging and ends an event query.
+There are at most eight pending copies and 16 attempts per arm. Owner Present
+polls without Flush or blocking Map; a changed lifetime/write token discards
+the result. A 120-poll timeout bounds retained work. This is diagnostic
+preparation, not a production per-frame GPU readback requirement.
+
+The qualified copy handoff records actual texture and SRV metadata for the next
+frame's resolver preflight. Preflight rejects invalid extents, modes, formats,
+mip/range layouts and sample counts before allocating. It prepares
+renderer/spatial-output resources and checks backend availability. A
+size-specific DLSS/FSR feature still requires live textures and can fail later;
+the log exposes that deferred step. A late temporal resolve failure now tries
+the tested spatial resolve, restores the copy binding after the draw and
+invalidates temporal history. Spatial recovery never counts as temporal
+success. Earlier source/handoff refusals still need a complete recovery policy
+before live jitter can be enabled.
+
+Readiness logs distinguish preparation failures, unknown scene draws, depth
+association, cold-copy outcomes and resolver/fallback/backend availability.
+Per-shader outcome counts retain successful preparation and each refusal code
+in a bounded 256-entry table, with explicit overflow observation counts. This
+avoids mistaking an aggregate success count for coverage of a particular
+consumer. Unsuccessful resolver preflight retries at most once per second for
+unchanged metadata; a changed plan is checked immediately. Depth association
+alone does not prove camera ownership or complete HDR and material coverage.
+Every summary explicitly reports `raster-authorized=0`. The next Epic flight
+must establish which candidate buffers can be prepared from observed writes or
+stable cold snapshots, which recipes/ranges refuse, and which scene consumers
+remain unknown. Existing F10 shader captures and these new counters provide
+those discriminating signatures in one flight.
+
+Focused CPU/WARP tests cover recipe selection, actual private-buffer contents,
+stale/ranged bindings, cold-path opt-in, stable completion and
+intervening-write discard. Resolver tests exercise metadata-only preflight and
+a backend failure that uses its preallocated spatial output without further
+texture allocation.
+
+Final source validation: `build/flat-readiness-final.log` passes all 79 pooled
+jobs and three quiet jobs, both flat test rigs, the 255-key config contract and
+both installer payload checks. This includes per-shader outcome reporting,
+preflight retry cadence and filtering non-CBs from the creation observer.

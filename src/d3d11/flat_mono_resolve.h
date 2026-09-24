@@ -1,5 +1,6 @@
 #pragma once
 #include "engine_velocity.h"
+#include <dxgiformat.h>
 #include <cstdint>
 
 struct ID3D11Device;
@@ -23,6 +24,38 @@ struct FlatMonoResolveFrame {
     bool reset = true;
     FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
 };
+// Planned input metadata available before the game's next raster phase. This
+// intentionally carries no frame resources: preflight can allocate the
+// renderer/output and check SDK availability without trying to create a
+// size-specific feature from incomplete or stale inputs.
+struct FlatMonoResolvePreflight {
+    uint32_t renderWidth = 0, renderHeight = 0, outputWidth = 0, outputHeight = 0;
+    FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
+    DXGI_FORMAT colorViewFormat = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT depthViewFormat = DXGI_FORMAT_UNKNOWN;
+    bool colorViewIsTexture2D = true, depthViewIsTexture2D = true;
+    uint32_t colorMostDetailedMip = 0, depthMostDetailedMip = 0;
+    uint32_t colorViewMipLevels = 1, depthViewMipLevels = 1;
+    uint32_t colorResourceMipLevels = 1, colorArraySize = 1, colorSampleCount = 1;
+    uint32_t depthResourceMipLevels = 1, depthArraySize = 1, depthSampleCount = 1;
+};
+enum class FlatMonoResolvePreflightStatus : uint8_t {
+    Ready, InvalidMetadata, RendererUnavailable, FallbackUnavailable, BackendUnavailable
+};
+struct FlatMonoResolvePreflightResult {
+    FlatMonoResolvePreflightStatus status = FlatMonoResolvePreflightStatus::InvalidMetadata;
+    bool rendererReady = false;
+    bool spatialFallbackReady = false;
+    bool backendAvailable = false;
+    // DLSS/DLAA/FSR feature creation still needs the validated live textures
+    // and therefore remains a possible late failure after this preflight.
+    bool backendFeatureCreationDeferred = false;
+    const char* reason = "flat-preflight-not-run";
+    bool readyForRasterJitter() const {
+        return status == FlatMonoResolvePreflightStatus::Ready && rendererReady &&
+               spatialFallbackReady && backendAvailable;
+    }
+};
 // Owner-thread cumulative diagnostics. A full renderer reset preserves these
 // counts so a session summary can expose repeated state or texture rebuilds.
 struct FlatMonoResolveStats {
@@ -36,6 +69,13 @@ struct FlatMonoResolveStats {
     uint64_t currentContinueRun = 0, longestContinueRun = 0;
 };
 FlatMonoResolveStats flatMonoResolveStats();
+// Owner thread, before rasterization. Validates planned dimensions/mode/source
+// metadata, allocates renderer resources including the spatial fallback output,
+// then checks external backend availability. A Ready result proves fallback
+// output allocation, not size-specific NGX/FSR feature creation or frame input
+// provenance. Invalid metadata causes no backend or renderer allocation call.
+FlatMonoResolvePreflightResult flatMonoResolvePreflight(
+    ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolvePreflight&);
 // Owner immediate context only. Inputs borrowed for this call; successful output
 // is AddRef'd and output-sized. The caller suppresses hook observations throughout
 // this call. D3D11.1 context-state isolation is required and restored on every exit.
