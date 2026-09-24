@@ -32,6 +32,21 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
+- **Reader hunt BUILT and INSTALLED, NOT FLOWN.**
+  - `advanced.eye_origin_readers = off|on`: b9a73fcb, on main via
+    0d99246b.
+  - Part A is a hardware read-watchpoint on the head pose EDVR's runtime
+    returns. It arms only on a stable, non-stack address and self-disarms
+    after 30 s or 5000 hits. It records the game code that reads the pose,
+    with unwound stacks. The runtime logs its `WaitGetPoses` stacks to
+    `edvr_openxr_*.log`.
+  - Part B is read-only hooks on the positioner Tick (`0x107C760`) and
+    swap-sync (`0x1090420`).
+  - Dumps fire only on scene-judged eye resets or positioner swaps.
+  - The Steam copy runs b9a73fcb with the trap on and one marked
+    `eye_origin_readers = on` line; remove it after the flight.
+  - The merge with main moved frame_flag to v35: both branches had taken
+    v34 for different layouts.
 - **Before that flight:** the render-side anchor was built and installed.
   - `advanced.eye_origin_trace = off|on`: e8b37bb7, on main via 337a1893.
     It captures the game's call stack at every write of the 5376-byte camera
