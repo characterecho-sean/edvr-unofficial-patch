@@ -149,6 +149,8 @@ inline void engineVelocityResourceWritten(const ID3D11Resource* resource) {
 void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept;
 // The owner thread's frame boundary (vscreen): rotation, the periodic lines.
 void engineVelocityFrameBoundary(ID3D11DeviceContext*);
+// Flat draw bracket: restore substituted shaders/blend; caller restores MRTs.
+void engineVelocityAfterFlatDraw(ID3D11DeviceContext*);
 
 // The temporal pass's inputs for one eye this frame, AddRef'd: the slot
 // target (MRT6, the scene depth's size), the pool snapshot the eye's draws

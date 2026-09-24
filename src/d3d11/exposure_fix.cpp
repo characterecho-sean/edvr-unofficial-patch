@@ -20,6 +20,7 @@
 #include "ui_separation.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
+#include "flat_runtime.h"
 #include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
 #include "../common/runtime_profile.h"
 #include "gpu_frame_timing.h"
@@ -851,6 +852,7 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 
 void STDMETHODCALLTYPE hookedCSSetShader(ID3D11DeviceContext* self, void* shader,
                                          ID3D11ClassInstance* const* inst, UINT n) {
+    if (g_flatComputeInternal) { g_state->realCSSetShader(self, shader, inst, n); return; }
     ++g_state->thunkHits[kHitCsShader];
     if (foreignContext(self)) {
         g_state->realCSSetShader(self, shader, inst, n);
@@ -863,6 +865,7 @@ void STDMETHODCALLTYPE hookedCSSetShader(ID3D11DeviceContext* self, void* shader
 void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UINT n,
                                        ID3D11UnorderedAccessView* const* uavs,
                                        const UINT* counts) {
+    if (g_flatComputeInternal) { g_state->realCSSetUAVs(self, start, n, uavs, counts); return; }
     ++g_state->thunkHits[kHitCsUavs];
     if (foreignContext(self)) {
         g_state->realCSSetUAVs(self, start, n, uavs, counts);
@@ -878,6 +881,7 @@ void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UI
                        uavs[i]);
         }
     }
+    if (flatRuntimeActive()) flatRuntimeUavs(start, n, uavs);
     g_state->realCSSetUAVs(self, start, n, uavs, counts);
 }
 
@@ -931,6 +935,7 @@ bool isExposureDispatch() {
 void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
                                                ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
+        if (flatRuntimeActive()) flatRuntimeDispatch(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch(self, 0, 0, 0, args, off);
         g_state->realDispatchIndirect(self, args, off);
         return;
@@ -948,6 +953,7 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
     if (runtimeFlatProfile()) {
+        if (flatRuntimeActive()) flatRuntimeDispatch(self);
         ++g_state->thunkHits[kHitDispatch];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch(self, x, y, z);
         g_state->realDispatch(self, x, y, z);

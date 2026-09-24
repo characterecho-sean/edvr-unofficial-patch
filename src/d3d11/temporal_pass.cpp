@@ -1,5 +1,6 @@
 #include "temporal_pass.h"
 #include "temporal_history.h"
+#include "../common/runtime_profile.h"
 #include "draw_census.h"
 
 #include <algorithm>  // std::sort, the price report's median/p95
@@ -6122,7 +6123,8 @@ void temporalPassConfigure(Config& cfg) {
     // pool families' own draws recording slot and depth, and the compose
     // taking the record's exact motion there. It arms and disarms with the
     // mode, live; a hook that cannot install stands it down whole, logged.
-    const bool engineMotionOn = detail::g_temporalPassWantedFssChrome;
+    const bool engineMotionOn = runtimeFlatProfile()
+        ? temporalModeEnabled(cfg.requestedTemporalMode()) : detail::g_temporalPassWantedFssChrome;
     celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.terrain_motion", true));
     // The emit holds the shared eval hooks itself; the emit's census is
     // diagnostic-only (applyEngineMotionDiagnostics, below the debug mode's

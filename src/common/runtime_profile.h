@@ -91,9 +91,9 @@ inline const char* runtimeProfileName() {
     }
 }
 
-// This first flat build measures the frame contract without modifying pixels.
-// Desired temporal settings remain stored, but cannot activate the stereo
-// pipeline or unrelated fixes. requestedTemporalMode() reports intent only.
+// Flat owns a separate mono adapter. Generic setting reads cannot activate the
+// stereo pipeline or unrelated fixes; the mono adapter explicitly reads the
+// desired mode through requestedTemporalMode().
 inline bool runtimeProfileAllowsKey(const char* key) {
     if (runtimeVrProfile()) return true;
     if (!key) return false;

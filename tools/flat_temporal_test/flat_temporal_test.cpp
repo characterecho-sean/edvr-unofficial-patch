@@ -1,9 +1,13 @@
+#include <memory>
+#include <algorithm>
 #include "../../src/d3d11/flat_temporal_model.h"
 #include "../../src/d3d11/flat_mono_frame.h"
+#include "../../src/d3d11/flat_runtime_model.h"
 #include "../../src/d3d11/engine_velocity_families.h"
 #include "flat_shader_capture_tests.h"
 #include "flat_projection_math_tests.h"
 #include "flat_compute_tests.h"
+#include "flat_lighting_tests.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -641,6 +645,60 @@ void testMonoFrameSelection() {
 }
 } // namespace
 
+void flatRuntimePrefixTests() {
+    using namespace edvr;
+    check(flatRuntimeDepthReadFormat(19) == 21 && flatRuntimeDepthReadFormat(39) == 41 && flatRuntimeDepthReadFormat(44) == 46 && !flatRuntimeDepthReadFormat(45), "captured format19 depth maps to depth-only float view; typed incompatible formats refuse");
+    for (uint32_t width : {960u, 1280u}) {
+        MonoFixture fixture(width);
+        auto prefix = std::make_unique<FlatRuntimePrefix>();
+        prefix->frame = fixture.input.frame; prefix->output = fixture.input.output;
+        prefix->width = 1280; prefix->height = 720; prefix->format = 28;
+        struct Event { const FlatContractRecord* r; uint32_t q; } events[200]{};
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < fixture.input.worldCount; ++i) {
+            const auto& r = fixture.world[i];
+            for (uint32_t n = 0; n < r.draws; ++n) events[count++] = {&r, r.first + (r.last-r.first)*n/(r.draws>1?r.draws-1:1)};
+        }
+        events[count++] = {&fixture.handoff[0], fixture.handoff[0].first};
+        events[count++] = {&fixture.handoff[1], fixture.handoff[1].first};
+        std::sort(events, events + count, [](const Event& a, const Event& b) { return a.q < b.q; });
+        FlatMonoFrame selected{};
+        FlatRuntimeDraw copy{};
+        std::unique_ptr<FlatRuntimePrefix> beforeCopy;
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& r = *events[i].r; FlatRuntimeDraw d{}; d.key = r.key;
+            std::memcpy(d.camera, r.camera, sizeof(d.camera));
+            d.key.writeEpoch = prefix->frame; d.key.writeSeq = prefix->sequence + 1;
+            d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
+            d.instances = r.firstInstances;
+            if (i + 1 == count) beforeCopy = std::make_unique<FlatRuntimePrefix>(*prefix);
+            selected = flatRuntimeObserve(*prefix, d); copy = d;
+        }
+        check(selected.selected() && selected.renderWidth == width, "online captured prefix admits actual native/scaled chain including missing HDR cameras and zero-depth viewport draws");
+        check(!flatRuntimeObserve(*prefix, copy).selected(), "second output copy in same prefix is rejected");
+        auto refusal = [&](auto change, const char* message) {
+            auto p = std::make_unique<FlatRuntimePrefix>(*beforeCopy); auto d = copy;
+            change(*p, d); check(!flatRuntimeObserve(*p, d).selected(), message);
+        };
+        refusal([](auto& p, auto&) { p.uncertain = true; }, "unknown/foreign/truncated work denies online resolve");
+        refusal([](auto&, auto& d) { d.key.viewport[0] = 1; }, "actual copy viewport must cover full backbuffer");
+        refusal([](auto&, auto& d) { --d.key.writeEpoch; }, "previous-frame camera cannot name current copy");
+        refusal([](auto& p, auto& d) { d.key.writeSeq = p.sequence + 100; }, "camera write after draw is rejected");
+        refusal([](auto&, auto& d) { d.key.srvResource[0] = MonoFixture::token(0xDEAD); }, "output copy cannot use unrelated tone resource");
+        refusal([](auto& p, auto&) { p.sourcesUsed = 0; }, "no supported current-frame source denies treatment");
+        refusal([](auto& p, auto&) { auto r = p.sources[0]; r.key.depth = MonoFixture::token(0xBAD0); p.sources[p.sourcesUsed++] = r; }, "another same-camera scene depth is ambiguous");
+        refusal([](auto& p, auto&) { p.sources[0].key.camera = nullptr; }, "overwritten scene depth invalidates source provenance");
+        refusal([](auto& p, auto&) { for (uint32_t i=0;i<p.targetsUsed;++i) if (p.targets[i].tones) ++p.targets[i].tones; }, "multiple tone draws refuse online handoff");
+        refusal([](auto& p, auto&) { flatRuntimeWritten(p, MonoFixture::token(0x2600)); }, "unknown HDR transfer after tone denies lineage");
+        auto unchanged = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        flatRuntimeWritten(*unchanged, MonoFixture::token(0xDEAD));
+        check(flatRuntimeObserve(*unchanged, copy).selected(), "unrelated resource writes do not invalidate established lineage");
+
+        prefix->copies = 0; flatRuntimeWritten(*prefix, selected.color);
+        check(!flatRuntimeObserve(*prefix, copy).selected(), "write after tone invalidates current handoff");
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) {
         std::puts("usage: flat_temporal_test --self-test");
@@ -659,6 +717,8 @@ int main(int argc, char** argv) {
     failures += flatShaderCaptureTests();
     failures += flatProjectionMathTests();
     failures += flatComputeTests();
+    failures += flatLightingTests();
+    flatRuntimePrefixTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

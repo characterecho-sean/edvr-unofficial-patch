@@ -16,7 +16,7 @@
 #include <windows.h>
 
 #include <d3d11_4.h>   // ID3D11Multithread, for the protection probe
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <intrin.h>    // _ReturnAddress: EDVR's own creates, told from the game's
 
 // This module's own image (the linker's symbol), for addressInEdvr.
@@ -62,6 +62,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
+#include "flat_runtime.h"
 #include "flat_temporal.h"   // flat profile discovery at owned Present
 #include "flat_shader_capture.h"
 #include "perf_monitor.h"
@@ -116,6 +117,7 @@ constexpr size_t kDevCreateDsv           = 10;
 constexpr size_t kDevCreateSlots         = 11;
 
 constexpr size_t kSwapPresent            = 8;
+constexpr size_t kSwapResizeBuffers = 13, kSwapResizeBuffers1 = 39;
 constexpr size_t kFactoryCreateSwapChain = 10;
 constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
 
@@ -135,6 +137,8 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSamplerState)(
 typedef HRESULT(STDMETHODCALLTYPE* PFN_DevCreate)(ID3D11Device*, const void*,
                                                   const void*, void**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers1)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChain)(IDXGIFactory*, IUnknown*,
                                                         DXGI_SWAP_CHAIN_DESC*,
                                                         IDXGISwapChain**);
@@ -212,6 +216,8 @@ struct State {
     std::atomic<bool> shaderDumpDirMade{false};
     std::atomic<uint32_t> flatShaderCaptureAttempted{0};
     PFN_Present      realPresent = nullptr;
+    PFN_ResizeBuffers realResizeBuffers = nullptr;
+    PFN_ResizeBuffers1 realResizeBuffers1 = nullptr;
     PFN_CreateSwapChain        realCreateSwapChain = nullptr;
     PFN_CreateSwapChainForHwnd realCreateSwapChainForHwnd = nullptr;
 
@@ -1021,6 +1027,15 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
     return hr;
 }
 
+HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
+    if (self == g_state->swapChain) flatRuntimeResize();
+    return g_state->realResizeBuffers(self, count, width, height, format, flags);
+}
+HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
+    if (static_cast<IDXGISwapChain*>(self) == g_state->swapChain) flatRuntimeResize();
+    return g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
+}
+
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
     const uint64_t traceBegan = self == g_state->swapChain ? edvrNativeTraceNowUs() : 0;
@@ -1042,11 +1057,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // thread's own busy time.
     if (runtimeFlatProfile())
         flatTemporalBeforePresent(self, g_state->frameCounter, flags);
+    if (runtimeFlatProfile()) flatRuntimeBeforePresent();
     const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
     const int64_t presentT1 = qpcNow();
     if (runtimeFlatProfile())
         flatTemporalAfterPresent(g_state->frameCounter, hr, flags);
+    if (runtimeFlatProfile()) flatRuntimePresent(self, g_state->frameCounter, hr, flags);
     if (qpcFrequency() > 0) {
         perfMonitorNotePresentWait(static_cast<double>(presentT1 - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
@@ -2716,6 +2733,19 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
     }
     s.swapChainHook.replace(kSwapPresent, &hookedPresent,
                             reinterpret_cast<void**>(&s.realPresent));
+    if (runtimeFlatProfile()) {
+        const bool resize = s.swapChainHook.replace(kSwapResizeBuffers, &hookedFlatResizeBuffers,
+            reinterpret_cast<void**>(&s.realResizeBuffers));
+        IDXGISwapChain3* third = nullptr;
+        bool resize1 = false;
+        if (SUCCEEDED(swapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&third)))) {
+            if (static_cast<IDXGISwapChain*>(third) == swapChain && s.swapChainHook.executablePrefix() > kSwapResizeBuffers1)
+                resize1 = s.swapChainHook.replace(kSwapResizeBuffers1, &hookedFlatResizeBuffers1, reinterpret_cast<void**>(&s.realResizeBuffers1));
+            third->Release();
+        }
+        Log::get().note("flat runtime resize hooks: ResizeBuffers=%u ResizeBuffers1=%u; release owned backbuffer references before forwarding", resize?1u:0u, resize1?1u:0u);
+        if (!resize) { s.swapChainHook.uninstall(); return; }
+    }
     if (!s.swapChainHook.commit()) {
         s.swapChainHook.uninstall();
         return;

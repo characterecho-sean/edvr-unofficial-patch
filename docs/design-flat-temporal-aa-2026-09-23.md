@@ -3,21 +3,14 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. First milestone is a capture-only flat installer,
-  runtime scope enforcement and bounded desktop probes. Corrected capture
-  passed all 83 build jobs and the 254-key config contract. Epic replay on
-  2026-09-24 confirms scaled target families and draw-time b1 evidence. The
-  focused camera/handoff replay now contains known motion-family draws and the
-  measured tone/copy/UI chain. Passive mono selection now replays all 70 world
-  and three handoff records at both sizes; the selector build also passes all
-  83 jobs and the 254-key contract. See section 10. Flat temporal
-  reconstruction/jitter are NOT enabled. The focused shader/projection capture
-  passes all 83 build jobs. Epic replay captured all 13 missing shaders and two
-  selected projection samples without dropped observations (section 12).
-  Verified projection helpers and captured-fixture tests pass the full build;
-  they are not yet wired into runtime treatment. A focused compute/light-grid
-  probe now passes targeted compilation, pure policy tests, WARP readback tests
-  and the full 83-job build with the 254-key config contract.
+  before qualification. The distinct flat installer, runtime scope enforcement
+  and capture probes pass all 83 existing build jobs and the 254-key config
+  contract. Epic captures establish current-frame scene/depth/camera ownership
+  and the tone/copy/UI handoff at native and 0.75x SS (sections 10 and 12).
+  Epic 88a04caa closes the measured lighting-grid/consumer contract with zero
+  capture drops (section 13). Functional zero-jitter mono reconstruction now
+  passes all 84 build jobs and the 254-key config contract (section 14).
+  Projection jitter remains disabled; functional Epic qualification is next.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -25,22 +18,21 @@
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
-- **Open:** clustered-light grid and compute-resource ownership, sun-glare
-  depth ownership, runtime buffer overrides, temporal backend integration and
-  mod effect ordering. Captured mono frames establish scene/depth identity,
-  camera encoding, tone/copy handoff and later panel ordering at 1280x720 and
-  960x540. Projection algebra is verified offline; rendered consistency and
-  safe failure after jitter still need qualification.
+- **Open:** projection jitter, in-game backend qualification, rendered
+  inverse/depth consistency and mod effect ordering. Captured mono frames
+  establish scene/depth identity, camera encoding, tone/copy handoff and later
+  panel ordering at 1280x720 and 960x540. Projection algebra is verified
+  offline; rendered consistency and safe failure after jitter still need
+  qualification.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** Epic, flat cockpit at 0.75x SS; press F10 once after the
-  scene settles, look around for 20 seconds, then exit. The focused probe
-  attempts two frames five seconds apart, with selected-camera, light-grid,
-  compute bindings and sun-glare depth/scale evidence. Then finish runtime
-  integration and qualify treatment, on-foot scenes and each mod arrangement.
-  Use `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
-  `--grep "flat (temporal|discover|compute)"`. No headset is needed for discovery;
+- **Next flight:** after building and verifying the functional mono route, Epic
+  flat DLSS at 0.75x SS (Sean's choice), initially with zero jitter. Qualify
+  actual treatment, depth/motion, output scaling and original-frame fallback
+  before enabling jitter; do not repeat the completed grid inventory. Use
+  `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
+  `--grep "flat (runtime|temporal|discover|compute)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
@@ -691,3 +683,78 @@ build passes in `build/flat-compute-capture-build-final.log`: 83 jobs, the
 254-key contract and both installer payload checks. Earlier launcher attempts
 stopped at batch argument handling and a Windows PATH-casing issue; the final
 run uses the established normalized-environment absolute-path launcher.
+
+## 13. Epic light-grid qualification, 2026-09-24
+
+`edvr_gfx_20260924_072618.log` matches 88a04caa, version v0.17.0-495-g88a04caa,
+build 6AB52425. The 172 KiB log contains selected frames 66884 and 67330,
+960x540 input and 1280x720 output. Each captures six audited dispatches, one
+clustered pixel draw and one sun-glare draw. All capacity and identity drops
+are zero; four sparse readbacks complete successfully. All twelve 480-byte
+compute CB payload hashes match current-frame CPU writes.
+
+Both samples establish the same chain: 593EA u0 feeds 074CB t0; 074CB u0 is
+76BFC u0, F7CED t0, lighting t0 and PS 4E4FF t0. F7CED's worklist outputs match
+lighting t2, and its argument buffer drives the two indirect lighting
+dispatches at offsets 0 and 12. The active lighting variants are 599814 and
+EB0245; both write the selected HDR. Their R32 t3 depth is also sun-glare VS
+t0; their stencil t4 view references the selected scene depth. Sun-glare
+b1[281] is the full viewport, and b1[332] contains the measured 960x540 size
+and reciprocals. Bytecode establishes positive view-Z interpretation of the R32
+texture. Its specific producer and behavior under changed projection remain
+unmeasured; consumer association alone is not producer proof.
+
+The coarse grid is 1x1x32 and the fine grid 8x5x32, with 120-pixel tiles.
+Captured bounds remain bit-identical across camera rotation. Their eight
+frustum corners reconstruct from the captured view-space rays over padded
+960x600 to maximum relative error 1.53e-7. Ruled out: clamping the final tile
+to 540 pixels, because that contradicts the GPU bounds by 1160.53 at the far
+slice. Exact raw bounds now form regression fixtures in the flat test rig.
+
+No cluster lookup rewrite is needed for the existing eight Halton phases: at
+raster centres p=n+0.5, p-j remains within the same pixel, and hence the same
+120-pixel tile. The 8x8 work groups divide that tile exactly. A tested
+1/16-pixel float32 margin restricts admitted offsets to +/-7/16, includes every
+existing phase and preserves tile indices through the largest D3D11 texture
+dimensions. The existing bounds/worklists can therefore remain unchanged under
+this contract, while CS inverse rays receive the verified correction. This is
+not permission for larger jitter, multisampling or a different grid layout.
+Rewriting pixel lookup alone would not repair their worklist/culling coverage.
+
+The next implementation uses a lean mono adapter and explicit camera/depth/
+engine-motion inputs to shared backend wrappers. It replaces PS0 only around
+the qualified original output-copy draw, then restores game state; later UI
+remains outside temporal history. First qualification uses zero jitter, with
+original-copy forwarding and history invalidation on any refusal. This tests
+real reconstruction plumbing without claiming completed jittered AA.
+
+## 14. Functional mono resolve, 2026-09-24
+
+The mono adapter follows current-frame writes and the qualified tone/copy
+prefix, retains resource identities, and reads the measured camera rows from
+CPU uploads. It names the engine-motion source during supported scene draws. At
+the original output copy it checks actual bindings once, then resolves the
+selected colour/depth with shared engine-record arithmetic and DLSS/FSR
+wrappers. Game SS supplies the input extent; the swapchain supplies output
+extent. The flat profile continues suppressing the stereo pipeline.
+
+The first functional build supplies zero jitter. A refused frame uses the
+original game copy and invalidates history. D3D11.1 context-state isolation and
+hook-observation suppression preserve game bindings. Only the qualified copy's
+PS0 is replaced; later UI draws stay outside temporal history. Resize hooks
+release held backbuffer references before forwarding. EDHM/ReShade chaining and
+installation layout are unchanged; their rendered compatibility still requires
+game qualification.
+
+Shaders compile during the build. The new WARP rig exercises camera and exact
+engine motion, depth, reset, rejected-history composition, TAA scaling, sRGB
+view/byte preservation, backend refusal and complete state restoration. It
+caught and fixed an HLSL logical expression overwriting an exact engine result
+through an out parameter; explicit branching now preserves that result. FSR's
+shared wrapper gains an optional infinite-depth context flag, defaulting off
+for existing VR callers. Its rig covers finite/infinite context transitions.
+
+Sean selected DLSS at 0.75x SS for the first functional Epic flight. This is a
+plumbing qualification, not yet the final jittered AA quality test. DLSS uses
+the existing default preset K. Other temporal modes and VR regression remain to
+be qualified in game.

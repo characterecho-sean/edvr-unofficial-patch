@@ -499,7 +499,7 @@ void paintWindow(HWND window) {
 
     const std::wstring subtitle = fromUtf8(payloadInfo().version) +
         (payloadInfo().profile == "flat"
-             ? L"  \x00b7  flat capture-only build; temporal AA not yet enabled"
+             ? L"  \x00b7  experimental flat temporal build; zero-jitter testing"
              : L"  \x00b7  unofficial patch for Elite Dangerous in VR");
     RECT sub{dp(kMargin), dp(52), dp(kClientWidth - kMargin), dp(70)};
     ui::drawText(dc, subtitle, sub, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);

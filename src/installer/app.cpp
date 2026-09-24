@@ -165,7 +165,7 @@ std::string statusReport(const Survey& s, const PayloadInfo& payload) {
         }
     }
     if (!payload.version.empty()) out += "\r\nThis installer carries EDVR " + payload.version + ".\r\n";
-    if (payload.profile == "flat") out += "Flat capture-only build; temporal AA is not yet enabled in this build. Press F10 in the cockpit for a bounded capture.\r\n";
+    if (payload.profile == "flat") out += "Experimental flat temporal build: zero-jitter testing. Game supersampling controls render scale. Press F10 for a bounded diagnostic capture.\r\n";
     if (s.gameRunningHere) {
         out += "\r\n!  Elite Dangerous is running. Close it before installing anything.\r\n";
     } else if (s.gameRunningElsewhere) {

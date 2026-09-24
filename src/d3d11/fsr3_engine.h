@@ -35,8 +35,9 @@ bool fsr3Available(ID3D11Device* dev, const char** why);
 // outH out) would need, so that call finds it made. createMs is the
 // create's duration (zero when it already stood). False, with why, on the
 // first refusal. Render thread only, like the rest.
+// infiniteDepth is part of the context key; the default preserves the VR path.
 bool fsr3Warm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, uint32_t outW,
-              uint32_t outH, double* createMs, const char** why);
+              uint32_t outH, double* createMs, const char** why, bool infiniteDepth = false);
 
 // One eye, one frame: colour, depth and motion vectors in the same formats
 // and sizes dlaaEvaluate takes (dlaa.h), a reactive mask (may be null: off
@@ -64,11 +65,13 @@ bool fsr3Warm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, uint32_t outW,
 // anything is registered: a texture missing a flag is a plain false with a
 // why naming the texture and the flag, not a throw to be caught -- the
 // catch stays as the backstop for a failure nobody foresaw.
+// infiniteDepth selects AMD's explicit infinite reversed-depth projection. nearZ
+// remains the measured finite near plane; farZ is ignored in that mode.
 bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* mv, ID3D11Texture2D* reactive,
                   ID3D11Texture2D* out, uint32_t w, uint32_t h, uint32_t outW,
                   uint32_t outH, float jx, float jy, bool reset, float frameMs,
-                  float nearZ, float farZ, float fovY, const char** why);
+                  float nearZ, float farZ, float fovY, const char** why, bool infiniteDepth = false);
 
 // Releases FSR's per-eye contexts (g_ctx[2], design doc 3.2) without the
 // full port shutdown below -- for a size or engine change mid-session, the

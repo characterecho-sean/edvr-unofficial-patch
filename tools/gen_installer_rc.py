@@ -332,7 +332,8 @@ def main(argv=None):
     os.makedirs(args.out, exist_ok=True)
     if args.profile == 'flat' and not args.ini:
         with open(ini, 'wb') as f:
-            f.write(b'# Flat capture-only qualification profile. Temporal AA is not yet enabled in this build.\r\n'
+            f.write(b'# Experimental flat temporal profile: zero-jitter qualification.\r\n'
+                    b'# temporal_aa: off, taa, dlaa (native SS), dlss, fsr. Game SS controls render scale.\r\n'
                     b'# Press F10 in the cockpit to collect one bounded flat scene capture.\r\n'
                     b'[fix]\r\ntemporal_aa = off\r\n\r\n'
                     b'[hotkey]\r\ndump_draws = F10\r\n\r\n'
@@ -343,7 +344,9 @@ def main(argv=None):
             f.write(b'EDVR flat temporal AA qualification build\r\n\r\n'
                     b'Run edvr-flat-installer.exe. This edition installs d3d11.dll, edvr.ini,\r\n'
                     b'and edvr_profile.ini beside EliteDangerous64.exe. No VR runtime is installed.\r\n'
-                    b'This is capture-only; temporal AA is not yet enabled in this build.\r\n'
+                    b'Experimental zero-jitter testing; jittered AA quality is not yet qualified.\r\n'
+                    b'Set [fix] temporal_aa to taa, dlaa, dlss or fsr in edvr.ini (default off).\r\n'
+                    b'Game supersampling controls render scale; DLAA requires native SS.\r\n'
                     b'Press F10 in the cockpit to collect one bounded flat scene capture.\r\n'
                     b'Use --convert-profile for an explicit VR/flat edition switch.\r\n')
     icon_path = os.path.join(args.out, 'edvr_installer.ico')
@@ -379,7 +382,7 @@ def main(argv=None):
     version = args.version
     lines += [''] + versioninfo_lines(
         version,
-        file_description='EDVR flat capture-only qualification installer' if args.profile == 'flat' else 'EDVR installer',
+        file_description='EDVR flat temporal qualification installer' if args.profile == 'flat' else 'EDVR installer',
         internal_name='edvr-flat-installer' if args.profile == 'flat' else 'edvr-installer',
         original_filename='edvr-flat-installer.exe' if args.profile == 'flat' else 'edvr-installer.exe',
         file_type='0x1L',

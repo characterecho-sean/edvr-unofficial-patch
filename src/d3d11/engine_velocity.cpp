@@ -1295,6 +1295,12 @@ void engineVelocityRememberPs(ID3D11PixelShader* shader, uint64_t hash, const vo
     g_ps.emplace(shader, std::move(info));
 }
 
+void engineVelocityAfterFlatDraw(ID3D11DeviceContext* ctx) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    restore(ctx);
+    cache = DrawCache{};
+}
+
 namespace engine_velocity_detail {
 void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!ctx) return;

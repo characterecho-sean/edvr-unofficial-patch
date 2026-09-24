@@ -1,6 +1,8 @@
 #include "fsr3_engine.h"
 
 #include <cstring>
+#include <cmath>
+#include <cfloat>
 #include <vector>
 
 #include <windows.h>
@@ -155,6 +157,7 @@ struct EyeCtx {
     // review of 2026-09-16, F8). Sean's documented A/B habit for the temporal
     // work is to flip exactly this key mid-session.
     bool diagnostics = false;
+    bool infiniteDepth = false;
     // The create-failure latch (the same review, F5). A create that fails --
     // or, worse, one that throws out of AMD's port halfway -- used to be
     // retried on EVERY treated frame: ~90 half-creates a second, each one
@@ -167,6 +170,7 @@ struct EyeCtx {
     bool     failed = false;
     uint32_t failW = 0, failH = 0, failOutW = 0, failOutH = 0;
     bool     failDiagnostics = false;
+    bool     failInfiniteDepth = false;
     char     failWhy[256] = {};
 };
 // One per eye, keyed on (w, h, outW, outH) exactly as dlaa.cpp's
@@ -365,11 +369,12 @@ void releaseEyeSurfaces(EyeCtx& e) {
 // in the log even when the seam's own once-per-session refusal line has
 // already been spent on something else.
 void latchCreateFailure(EyeCtx& e, unsigned eye, uint32_t w, uint32_t h, uint32_t outW,
-                        uint32_t outH, bool diagnostics, const char* reason) {
+                        uint32_t outH, bool diagnostics, bool infiniteDepth, const char* reason) {
     e = EyeCtx{};
     e.failed = true;
     e.failW = w; e.failH = h; e.failOutW = outW; e.failOutH = outH;
     e.failDiagnostics = diagnostics;
+    e.failInfiniteDepth = infiniteDepth;
     snprintf(e.failWhy, sizeof(e.failWhy), "%s", reason ? reason : "no reason given");
     Log::get().note("fsr3: eye %u is stood down at %ux%u -> %ux%u for the rest of this session (a "
                     "different size, or a switch away and back, tries again): %s",
@@ -416,7 +421,7 @@ bool g_fovFallbackNoted = false;
 // what the warm-up makes on the loading screen is exactly what the first
 // evaluation would have made (mirrors dlaa.cpp's ensureFeature).
 bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH,
-                   const char** why, double* createMs) {
+                   const char** why, double* createMs, bool infiniteDepth) {
     if (createMs) *createMs = 0.0;
     if (eye > 1) {
         if (why) *why = "eye must be 0 or 1";
@@ -435,13 +440,13 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
 
     EyeCtx& e = g_ctx[eye];
     if (e.valid && e.w == w && e.h == h && e.outW == outW && e.outH == outH &&
-        e.diagnostics == diagnostics) {
+        e.diagnostics == diagnostics && e.infiniteDepth == infiniteDepth) {
         return true;
     }
     // This key already failed: refuse with the stored reason, silently and
     // without touching AMD's port again (F5). Another key re-arms it.
     if (e.failed && e.failW == w && e.failH == h && e.failOutW == outW && e.failOutH == outH &&
-        e.failDiagnostics == diagnostics) {
+        e.failDiagnostics == diagnostics && e.failInfiniteDepth == infiniteDepth) {
         if (why) *why = e.failWhy;
         return false;
     }
@@ -458,6 +463,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
             eye,
             (e.w != w || e.h != h || e.outW != outW || e.outH != outH)
                 ? "the sizes moved"
+                : e.infiniteDepth != infiniteDepth ? "the depth projection changed"
                 : "advanced.temporal_aa_diagnostics was flipped",
             e.w, e.h, e.outW, e.outH, e.diagnostics ? "on" : "off", w, h, outW, outH,
             diagnostics ? "on" : "off");
@@ -470,6 +476,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
 
     FfxFsr3UpscalerContextDescription desc{};
     desc.flags = FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED;
+    if (infiniteDepth) desc.flags |= FFX_FSR3UPSCALER_ENABLE_DEPTH_INFINITE;
     if (diagnostics) desc.flags |= FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING;
     desc.maxRenderSize = FfxDimensions2D{w, h};
     desc.maxUpscaleSize = FfxDimensions2D{outW, outH};
@@ -517,7 +524,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         // fsr3Available). Bounded because the failure is latched below and
         // never retried at this key; released only by fsr3Shutdown, which
         // drops the whole backend and its scratch.
-        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, g_reason);
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, g_reason);
         if (why) *why = e.failWhy;
         return false;
     }
@@ -529,7 +536,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         // A clean FfxErrorCode: the port unwound its own create, so there is
         // nothing here to destroy. Latched all the same -- a create costs
         // tens of milliseconds and this one runs on every treated frame.
-        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, g_reason);
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, g_reason);
         if (why) *why = e.failWhy;
         return false;
     }
@@ -551,7 +558,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
                  sr != FFX_OK ? "the port would not describe them" : "this device would not "
                                                                      "create one of them");
         g_reason = g_reasonBuf;
-        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, g_reason);
+        latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, g_reason);
         if (why) *why = e.failWhy;
         return false;
     }
@@ -576,7 +583,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
                      "port needs to register it",
                      s.name, eye, missing);
             g_reason = g_reasonBuf;
-            latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, g_reason);
+            latchCreateFailure(e, eye, w, h, outW, outH, diagnostics, infiniteDepth, g_reason);
             if (why) *why = e.failWhy;
             return false;
         }
@@ -585,6 +592,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
     e.valid = true;
     e.w = w; e.h = h; e.outW = outW; e.outH = outH;
     e.diagnostics = diagnostics;
+    e.infiniteDepth = infiniteDepth;
 
     // The figure is the three surfaces' own bytes (textureBytes), computed,
     // never a measured delta: see bytesPerPixel's comment for the flights
@@ -712,9 +720,9 @@ bool fsr3Available(ID3D11Device* dev, const char** why) {
 }
 
 bool fsr3Warm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, uint32_t outW,
-              uint32_t outH, double* createMs, const char** why) {
+              uint32_t outH, double* createMs, const char** why, bool infiniteDepth) {
 #if !EDVR_HAVE_FSR3
-    (void)ctx; (void)w; (void)h; (void)outW; (void)outH;
+    (void)ctx; (void)w; (void)h; (void)outW; (void)outH; (void)infiniteDepth;
     if (createMs) *createMs = 0.0;
     // Quiet: dlaaWarm's own stub (dlaa.cpp:527-534) does not log either,
     // and warmTrainedOnce (temporal_pass.cpp) calls this at most once a
@@ -734,8 +742,8 @@ bool fsr3Warm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, uint32_t outW,
     if (dev) dev->Release();
     if (!ok) return false;
     double ms0 = 0.0, ms1 = 0.0;
-    if (!ensureContext(0, w, h, outW, outH, why, &ms0)) return false;
-    if (!ensureContext(1, w, h, outW, outH, why, &ms1)) return false;
+    if (!ensureContext(0, w, h, outW, outH, why, &ms0, infiniteDepth)) return false;
+    if (!ensureContext(1, w, h, outW, outH, why, &ms1, infiniteDepth)) return false;
     if (createMs) *createMs = ms0 + ms1;
     return true;
 #endif
@@ -745,11 +753,11 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
                   ID3D11Texture2D* depth, ID3D11Texture2D* mv, ID3D11Texture2D* reactive,
                   ID3D11Texture2D* out, uint32_t w, uint32_t h, uint32_t outW,
                   uint32_t outH, float jx, float jy, bool reset, float frameMs,
-                  float nearZ, float farZ, float fovY, const char** why) {
+                  float nearZ, float farZ, float fovY, const char** why, bool infiniteDepth) {
 #if !EDVR_HAVE_FSR3
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)mv; (void)reactive; (void)out;
     (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset; (void)frameMs;
-    (void)nearZ; (void)farZ; (void)fovY;
+    (void)nearZ; (void)farZ; (void)fovY; (void)infiniteDepth;
     if (why) *why = "this build was made without AMD's upscaler (EDVR_HAVE_FSR3)";
     return false;
 #else
@@ -792,7 +800,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
     }
     // The context: found made (by the warm-up or a previous frame) or made
     // here, through the one block the warm-up shares (ensureContext).
-    if (!ensureContext(eye, w, h, outW, outH, why, nullptr)) return false;
+    if (!ensureContext(eye, w, h, outW, outH, why, nullptr, infiniteDepth)) return false;
     EyeCtx& e = g_ctx[eye];
 
     // FSR's cameraNear/cameraFar, under DEPTH_INVERTED: the port's own
@@ -808,6 +816,13 @@ bool fsr3Evaluate(ID3D11DeviceContext* ctx, unsigned eye, ID3D11Texture2D* colou
     // upscaler actually computes. nearZ/farZ are 0 when no depth has been
     // probed yet (temporal_pass.h); the documented defaults stand in.
     float n = nearZ, f = farZ;
+    if (infiniteDepth) {
+        if (!(n > 0.0f) || !std::isfinite(n)) {
+            if (why) *why = "infinite depth requires a finite positive near plane";
+            return false;
+        }
+        f = FLT_MAX; // AMD requires cameraNear=FLT_MAX for infinite reversed depth.
+    }
     if (n <= 0.0f || f <= 0.0f) {
         n = kFsrDefaultNearZ;
         f = kFsrDefaultFarZ;
