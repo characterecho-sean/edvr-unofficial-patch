@@ -56,7 +56,6 @@ uint32_t g_vb0Bytes = 0;
 int  g_countdown = -1;    // frames until readback (counted at ordinal 0)
 bool g_capturing = false; // this frame's draws are being windowed
 bool g_published = false;
-LONG g_lastRedo = 0;      // the servo's request counter, consumed
 uint32_t g_retry = 0;     // capture frames rejected for missing quads
 bool g_failNoted = false;
 uint32_t g_derives = 0;
@@ -216,16 +215,7 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
         releaseAll();
         return;
     }
-    if (g_published) {
-        // The servo asked for a fresh derivation against its nudged pose.
-        const LONG redo = fssPanelRectRedoValue();
-        if (redo != g_lastRedo) {
-            g_lastRedo = redo;
-            g_published = false;
-        } else {
-            return;
-        }
-    }
+    if (g_published) return;
 
     guardedBudget(g_budget, [&] {
         ID3D11Device* dev = nullptr;

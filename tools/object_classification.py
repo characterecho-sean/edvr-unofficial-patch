@@ -5,6 +5,12 @@ The input is ``classification_<stamp>.json``.  Its named binary sibling is
 read without modification.  Visible ownership is reported only for a valid
 MeshCoverage record whose stored depth exactly equals SceneZ and whose exact-
 frame Mesh bytes agree with the draw-generation ID and t33 snapshots.
+
+Captures written since 2026-09-23 are ``edvr_object_classification_v3``:
+EDVR's draw/mesh capture retired, so they carry the executable identity,
+``summary.binary_ok`` and the record-writer section only, and load with every
+draw/mesh section empty (status ``draw_capture_retired``). v1 and v2 captures
+read exactly as before.
 """
 
 import argparse
@@ -21,6 +27,7 @@ import tempfile
 
 SCHEMA_V1 = "edvr_object_classification_v1"
 SCHEMA_V2 = "edvr_object_classification_v2"
+SCHEMA_V3 = "edvr_object_classification_v3"
 SCHEMA = SCHEMA_V1
 MESH_STRIDE = 240
 POOL_STRIDE = 336
@@ -1252,10 +1259,82 @@ def _validate_draws(root, resources, snapshots, selected_frame):
     return draws
 
 
+def _capture_binary(path, binary_name, total_packed_bytes, binary_ok):
+    binary_path = path.with_name(binary_name)
+    try:
+        if binary_path.exists():
+            if binary_path.stat().st_size > MAX_BINARY_BYTES:
+                raise CaptureError("binary exceeds reader safety bound")
+            binary = binary_path.read_bytes()
+        else:
+            binary = None
+    except OSError as exc:
+        raise CaptureError("%s: %s" % (binary_path, exc)) from exc
+    if total_packed_bytes:
+        if binary is None:
+            raise CaptureError("available blob payload is missing")
+        if len(binary) != total_packed_bytes:
+            raise CaptureError("binary length does not match packed available blobs")
+    elif binary is not None and len(binary):
+        raise CaptureError("binary has bytes but no available blob spans")
+    elif binary is None and binary_ok:
+        raise CaptureError("successful capture is missing its declared binary")
+    return binary_path, binary
+
+
+V3_RETIRED_SECTIONS = ("selection", "limits", "resources", "stacks", "events", "snapshots",
+                       "draws", "blobs", "source_owner", "cpu_blobs")
+
+
+def _load_capture_v3(path, root):
+    """A capture from after the draw/mesh half retired (2026-09-23).
+
+    It holds the executable identity, summary.binary_ok and the record-writer
+    section. It comes back in load_capture's shape with every draw/mesh
+    section empty, so analyse() treats it like any capture without a sealed
+    frame. A v3 file that carries a retired section is refused rather than
+    half-read.
+    """
+    binary_name = _string(root.get("binary"), "binary", 255)
+    if not binary_name or Path(binary_name).name != binary_name:
+        raise CaptureError("binary must be a leaf filename")
+    executable = _dict(root.get("executable"), "executable")
+    _u32(executable.get("pe_timestamp"), "executable.pe_timestamp")
+    _u32(executable.get("image_size"), "executable.image_size")
+    summary = _dict(root.get("summary"), "summary")
+    binary_ok = _boolean(summary.get("binary_ok"), "summary.binary_ok")
+    for retired in V3_RETIRED_SECTIONS:
+        if retired in root:
+            raise CaptureError("v3 capture carries the retired %s section" % retired)
+    (record_writers, writer_uploads, writer_records, writer_ownerships,
+     writer_ancestor_traces, total_packed_bytes) = _validate_record_writers(
+        root, executable, [], [], 0, binary_ok)
+    binary_path, binary = _capture_binary(path, binary_name, total_packed_bytes, binary_ok)
+    _validate_record_ownership_contents(binary or b"", record_writers,
+                                        writer_records, writer_ownerships)
+    selection = {"discovery_mesh_frame": 0, "selected_mesh_frame": 0, "scene_frame": 0,
+                 "has_discovery": False, "has_selection": False, "sealed": False,
+                 "missed_window": False}
+    return {
+        "path": path, "binary_path": binary_path, "binary": binary or b"", "root": root,
+        "selection": selection,
+        "summary": {"status": "draw_capture_retired", "binary_ok": binary_ok,
+                    "cpu_provenance_available": True, "foreign_writes": 0},
+        "resources": [], "stacks": [], "events": [], "event_by_version": {},
+        "snapshots": [], "draws": [], "blobs": [],
+        "source_owner": None, "source_owner_attempts": [], "cpu_blobs": [],
+        "record_writers": record_writers, "writer_uploads": writer_uploads,
+        "writer_records": writer_records, "writer_ownerships": writer_ownerships,
+        "writer_ancestor_traces": writer_ancestor_traces,
+    }
+
+
 def load_capture(path):
     path = Path(path)
     root = _read_json(path)
     schema = root.get("schema")
+    if schema == SCHEMA_V3:
+        return _load_capture_v3(path, root)
     if schema not in {SCHEMA_V1, SCHEMA_V2}:
         raise CaptureError("unsupported object-classification schema")
     binary_name = _string(root.get("binary"), "binary", 255)
@@ -1347,25 +1426,7 @@ def load_capture(path):
     expected_status = "sealed" if sealed else ("selection_window_missed" if selection["missed_window"] else ("stage_missing" if has_selection else "no_selected_frame"))
     if status != expected_status:
         raise CaptureError("summary.status disagrees with selection")
-    binary_path = path.with_name(binary_name)
-    try:
-        if binary_path.exists():
-            if binary_path.stat().st_size > MAX_BINARY_BYTES:
-                raise CaptureError("binary exceeds reader safety bound")
-            binary = binary_path.read_bytes()
-        else:
-            binary = None
-    except OSError as exc:
-        raise CaptureError("%s: %s" % (binary_path, exc)) from exc
-    if total_packed_bytes:
-        if binary is None:
-            raise CaptureError("available blob payload is missing")
-        if len(binary) != total_packed_bytes:
-            raise CaptureError("binary length does not match packed available blobs")
-    elif binary is not None and len(binary):
-        raise CaptureError("binary has bytes but no available blob spans")
-    elif binary is None and summary["binary_ok"]:
-        raise CaptureError("successful capture is missing its declared binary")
+    binary_path, binary = _capture_binary(path, binary_name, total_packed_bytes, summary["binary_ok"])
     if schema == SCHEMA_V2:
         _validate_cpu_blob_contents(binary or b"", source_owner_attempts, cpu_blobs)
         _validate_record_ownership_contents(binary or b"", record_writers,
@@ -2899,6 +2960,41 @@ def self_test():
             inactive_v2_report = analyse(load_capture(path), include_records=True)
             assert inactive_v2_report["kinematic_ownership"]["visible_record_outcomes"] == {
                 "unavailable": 2}
+
+            # v3 (2026-09-23): the same writer section and nothing of the
+            # retired draw/mesh capture. It loads, reports why no record is
+            # owned, and refuses a file that still carries a retired section.
+            v3 = {"schema": SCHEMA_V3, "binary": inactive_v2["binary"],
+                  "executable": copy.deepcopy(inactive_v2["executable"]),
+                  "summary": {"binary_ok": True},
+                  "record_writers": copy.deepcopy(inactive_v2["record_writers"])}
+            v3["record_writers"]["uploads"] = []
+            path = _write_fixture(temp, v3, b"")
+            v3_report = analyse(load_capture(path), include_records=True)
+            assert v3_report["status"] == "draw_capture_retired"
+            assert v3_report["record_writers"]["capture_status"] == top_status
+            assert v3_report["missing"] == [{"scope": "capture", "reason": "draw_capture_retired"}]
+            assert v3_report["records"] == []
+            for retired in ("draws", "source_owner"):
+                stale = copy.deepcopy(v3)
+                stale[retired] = copy.deepcopy(inactive_v2[retired])
+                path = _write_fixture(temp, stale, b"")
+                try:
+                    load_capture(path)
+                except CaptureError:
+                    pass
+                else:
+                    raise AssertionError("v3 capture carrying %s accepted" % retired)
+            uploaded = copy.deepcopy(v3)
+            uploaded["record_writers"]["uploads"] = copy.deepcopy(
+                inactive_v2["record_writers"]["uploads"])
+            path = _write_fixture(temp, uploaded, b"")
+            try:
+                load_capture(path)
+            except CaptureError:
+                pass
+            else:
+                raise AssertionError("v3 capture with an upload join accepted")
 
         def rejected_writer(mutator):
             value = copy.deepcopy(writer_root)

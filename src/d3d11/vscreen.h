@@ -99,11 +99,11 @@ inline bool eyeShapedAtScale(uint32_t w, uint32_t h, uint32_t eyeW, uint32_t eye
 // runtime published, or the size this rig turned out to render an eye at?
 //
 // The second half is why this exists as a shared answer instead of three
-// copies of `== eyeW && == eyeH`. holo_fix and witchstar_fix identify their
-// draw by an eye-sized DEPTH buffer, and on a rig with a render scale that
-// buffer is the scaled size, so both fixes silently matched nothing.
+// copies of `== eyeW && == eyeH`. holo_fix identifies its draw by an
+// eye-sized DEPTH buffer, and on a rig with a render scale that buffer is the
+// scaled size, so the fix silently matched nothing.
 // Answers false when nothing has been published and nothing measured, which
-// is the same "disable yourself" answer those two already acted on.
+// is the same "disable yourself" answer it already acted on.
 bool vScreenIsEyeSized(uint32_t w, uint32_t h);
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the

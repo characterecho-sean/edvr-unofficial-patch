@@ -328,28 +328,16 @@ int      g_cullEye = -1;
 uint32_t g_settingsGen = 1;    // bumped on any change; images refill at their next use
 bool     g_configured = false;
 
-// The eye-tracked centre (frame_flag.h: the openvr half's gaze source).
-// The rings are refilled when the gaze has moved past a dead band from the
-// centre they were last built on; a gaze published as lost, or silent for
-// a second, returns the centre to straight ahead.
-bool     g_gazeValid = false;
-float    g_gazeTx = 0.0f, g_gazeTy = 0.0f;
-uint32_t g_gazeStamp = 0;
-uint32_t g_gazeAge = 0;
-bool     g_maskCentreValid = false;
-float    g_maskTx = 0.0f, g_maskTy = 0.0f;
-float    g_builtTx = 0.0f, g_builtTy = 0.0f;   // the centre the last mask was actually built on
+// The eye-tracked centre retired 2026-09-23 (frame_flag v34): its gaze came
+// from the legacy openvr half, and nothing has published one since that
+// proxy was deleted. experimental.foveation_centre still reads -- "ahead"
+// or "eyes" sets advanced.foveation_distance's default -- and the rings
+// sit where that distance puts them.
 uint32_t g_maskLines = 0;       // the geometry lines a session prints, capped
 uint64_t g_maskRefills = 0;    // refills done at the frame boundary
-uint32_t g_gazeRefills = 0;
-uint32_t g_gazeLosses = 0;      // frames the source published "lost", blinks included
 uint32_t g_wantedFrames = 0;    // frames wanted but never armed
 uint64_t g_wantedSince = 0;     // tick of the first such frame
 bool     g_wantedNoted = false;
-uint64_t g_gazeFramesFollowed = 0;
-bool     g_gazeNotedOn = false;
-bool     g_gazeNotedLost = false;
-constexpr float kGazeDeadBand = 0.026f;   // tangent, about 1.5 degrees
 
 const char* modeName(Mode m) {
     switch (m) {
@@ -955,12 +943,6 @@ void centreOf(int eye, float* cx, float* cy) {
         *cx = -ox / g_distance;
         *cy = -oy / g_distance;
     }
-    // The eye-tracked centre, when the source publishes one: the gaze's
-    // head-frame tangents, on top of whatever shift the distance asked for.
-    if (g_followEyes && g_gazeValid && g_maskCentreValid) {
-        *cx += g_maskTx;
-        *cy += g_maskTy;
-    }
 }
 
 // A tile's rate is the finest its NEAREST point to the centre needs: a tile
@@ -971,8 +953,6 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
     if (!frustumOf(m.eye, m.w, m.h, &l, &r, &top, &bot)) return false;
     float cx, cy;
     centreOf(m.eye, &cx, &cy);
-    g_builtTx = cx;
-    g_builtTy = cy;
     // The geometry this mask is built on, said outright for the first few:
     // which eye, the frustum the tangents gave, where the rings' centre
     // landed in that frustum, and what that is as NDC. The left eye's
@@ -1421,32 +1401,11 @@ void arm(ID3D11DeviceContext* ctx) {
 }
 
 const char* centreText() {
-    // 200 was too small for the built-on centre this line now carries, and
-    // snprintf would have dropped exactly the field the fix added, at the
-    // end -- the same way the census once dropped its own evidence.
-    static char text[320];
-    if (!g_followEyes) {
-        snprintf(text, sizeof(text), "straight ahead (experimental.foveation_centre = ahead)");
-    } else if (g_gazeValid) {
-        // The gaze AND the centre the masks were actually built on. They
-        // differ whenever something between the two drops the gaze, which
-        // is exactly the fault that hid behind this line reading only the
-        // first of them.
-        snprintf(text, sizeof(text),
-                 "following the eyes -- %llu frames so far, %u refills for gaze motion past the "
-                 "%.1f-degree dead band, %u frames the gaze was published lost (blinks included); "
-                 "the gaze is at tangents (%+.3f, %+.3f) and the masks were last built on "
-                 "(%+.3f, %+.3f)",
-                 static_cast<unsigned long long>(g_gazeFramesFollowed), g_gazeRefills,
-                 atanf(kGazeDeadBand) * 57.2957795f, g_gazeLosses, g_gazeTx, g_gazeTy, g_builtTx,
-                 g_builtTy);
-    } else {
-        snprintf(text, sizeof(text),
-                 "straight ahead -- no gaze published%s (%llu frames followed so far, %u refills)",
-                 g_gazeStamp ? " right now" : " yet", static_cast<unsigned long long>(g_gazeFramesFollowed),
-                 g_gazeRefills);
-    }
-    return text;
+    // With no gaze reaching EDVR the centre is straight ahead either way;
+    // the key's value still decides the distance default, so it is named.
+    return g_followEyes
+        ? "straight ahead (experimental.foveation_centre = eyes, but no gaze source reaches EDVR)"
+        : "straight ahead (experimental.foveation_centre = ahead)";
 }
 
 const char* gpuBusyText() {
@@ -1805,72 +1764,12 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
         if (detail::g_foveationBound || detail::g_foveationBoundUnknown) applyView(ctx, nullptr);
         ++g_framesArmed;
         if (g_framesArmed % 90 == 0) gpuBusySample();
-        // Every mask the settings or the gaze have moved on from, rewritten
-        // here where no draw of this frame or the next has begun.
+        // Every mask the settings have moved on from, rewritten here where
+        // no draw of this frame or the next has begun.
         for (Mask& m : g_masks) {
             if (m.used && m.gen != g_settingsGen) {
                 if (fillMask(ctx, m)) ++g_maskRefills;
             }
-        }
-        if (g_followEyes) {
-            float tx = 0.0f, ty = 0.0f;
-            uint32_t stamp = 0;
-            const bool present = gazeCentre(&tx, &ty, &stamp);
-            if (stamp != g_gazeStamp) {
-                g_gazeStamp = stamp;
-                if (present) {
-                    g_gazeTx = tx;
-                    g_gazeTy = ty;
-                    g_gazeAge = 0;
-                    if (!g_gazeValid) {
-                        g_gazeValid = true;
-                        ++g_settingsGen;
-                        g_gazeNotedLost = false;
-                        if (!g_gazeNotedOn) {
-                            g_gazeNotedOn = true;
-                            Log::get().note("foveation: the centre follows the eyes from here -- the gaze "
-                                            "source is publishing (experimental.foveation_centre = eyes).");
-                        }
-                    }
-                } else {
-                    // A gaze published as LOST is usually a blink: the read
-                    // declines, or its length leaves the band, for a few
-                    // frames. Falling back on the first of them snapped the
-                    // rings to straight ahead and back, with two refills,
-                    // every time the commander blinked (the pre-ship review
-                    // of 2026-09-06), so a loss now has to persist as long
-                    // as a silence does before the centre moves.
-                    ++g_gazeAge;
-                    ++g_gazeLosses;
-                }
-            } else {
-                ++g_gazeAge;
-            }
-            if (g_gazeValid && g_gazeAge > 90) {
-                g_gazeValid = false;
-                g_maskCentreValid = false;
-                ++g_settingsGen;
-                if (!g_gazeNotedLost) {
-                    g_gazeNotedLost = true;
-                    Log::get().note("foveation: the gaze is lost or silent -- the centre is straight ahead "
-                                    "until it returns. Said once per loss.");
-                }
-            }
-            if (g_gazeValid) {
-                ++g_gazeFramesFollowed;
-                const float dx = g_gazeTx - g_maskTx, dy = g_gazeTy - g_maskTy;
-                if (!g_maskCentreValid || dx * dx + dy * dy > kGazeDeadBand * kGazeDeadBand) {
-                    g_maskTx = g_gazeTx;
-                    g_maskTy = g_gazeTy;
-                    g_maskCentreValid = true;
-                    ++g_settingsGen;
-                    ++g_gazeRefills;
-                }
-            }
-        } else if (g_gazeValid) {
-            g_gazeValid = false;
-            g_maskCentreValid = false;
-            ++g_settingsGen;
         }
         if (g_switchesFrame > g_switchesMax) g_switchesMax = g_switchesFrame;
         g_targetsSum[0] += g_targetsFrame[0];

@@ -25,7 +25,6 @@ namespace detail {
 bool  g_panelCurveStoodDown = false;
 float g_panelCurveCurvature = 0.0f;
 int   g_panelCurveSegments = kDefaultSegments;
-float g_panelCurveZTest = 0.0f;
 }  // namespace detail
 
 namespace {
@@ -63,23 +62,11 @@ constexpr uint32_t kMaxBytes = 4096;
 
 int      g_sign = 1;              // +1 or -1: which way z goes. See below.
 
-// A flat displacement added to every vertex's z. The probe for one question
-// and nothing else: DOES the vertex z reach the output at all?
-//
-// The first 64-column flight bent nothing. The strip was real -- 130
-// vertices, 384 indices, the bend in their positions -- and the screen came
-// back flat and narrowed by exactly the arc-length factor the x displacement
-// predicts, with no depth whatever. That is the design's unknown 2 failing,
-// and it has two very different causes: the transform could be dropping z, or
-// the shader could never have been reading it. The captured quad cannot tell
-// them apart, because a third float that is 0.0 in all four vertices is what
-// an unused field looks like as much as a flat one.
-//
-// So: set this to a constant, leave curvature at 0, and watch. If the panel
-// moves in depth, z reaches the output and the bend's failure is about
-// magnitude or sign. If NOTHING changes, the shader is not reading z and no
-// geometry substitution can ever curve this screen -- which is worth knowing
-// before another line is written toward it.
+// The first 64-column flight bent nothing: the strip was real, and the
+// screen came back flat and narrowed by exactly the arc-length factor the x
+// displacement predicts, with no depth whatever. A flat z probe (a constant
+// added to every vertex's z; retired 2026-09-23 once it had answered) showed
+// z does reach the output, so the failure was magnitude, not the shader.
 
 // THE GAIN, and why the bend needs one at all.
 //
@@ -168,7 +155,6 @@ uint32_t      g_indexCount = 0;
 float         g_builtCurvature = -1.0f;
 int           g_builtSegments = -1;
 int           g_builtSign = 0;
-float         g_builtZTest = 0.0f;
 float         g_builtGain = -1.0f;
 
 uint64_t g_substitutions = 0;
@@ -468,11 +454,8 @@ bool build(ID3D11DeviceContext* ctx) {
         // what makes segments = 1 come out byte-identical to its quad. The
         // capture measured v = 1 at y = -1 and v = 0 at y = +1, so V falls as
         // Y rises; the other convention renders the screen upside down.
-        // The probe rides along, flat across every vertex, so it displaces
-        // the whole screen rather than shaping it.
-        const float z = bz + detail::g_panelCurveZTest;
-        vb[i] = Vertex{bx, -1.0f, z, u, 1.0f};
-        vb[(n + 1) + i] = Vertex{bx, 1.0f, z, u, 0.0f};
+        vb[i] = Vertex{bx, -1.0f, bz, u, 1.0f};
+        vb[(n + 1) + i] = Vertex{bx, 1.0f, bz, u, 0.0f};
     }
 
     // The game's own index pattern, per quad, so the winding is right by
@@ -525,15 +508,13 @@ bool build(ID3D11DeviceContext* ctx) {
     g_builtCurvature = detail::g_panelCurveCurvature;
     g_builtSegments = detail::g_panelCurveSegments;
     g_builtSign = g_sign;
-    g_builtZTest = detail::g_panelCurveZTest;
     g_builtGain = activeGain();
     Log::get().note(
         "panel curvature: built a %d-column strip -- %u vertices, %u indices -- at "
-        "curvature %.3f, depth sign %+d, z probe %+.3f. At curvature 0, 1 column "
-        "and no probe this is the game's own quad to the byte, which is what makes "
-        "a difference on screen there a fault in the substitution rather than in "
-        "the geometry.",
-        detail::g_panelCurveSegments, verts, idxs, detail::g_panelCurveCurvature, g_sign, detail::g_panelCurveZTest);
+        "curvature %.3f, depth sign %+d. At curvature 0 and 1 column this is the "
+        "game's own quad to the byte, which is what makes a difference on screen "
+        "there a fault in the substitution rather than in the geometry.",
+        detail::g_panelCurveSegments, verts, idxs, detail::g_panelCurveCurvature, g_sign);
     return true;
 }
 
@@ -563,20 +544,6 @@ void panelCurveConfigure(Config& cfg) {
     g_sign = cfg.getIntInRange("advanced.panel_curvature_sign", 1, -1, 1) < 0 ? -1 : 1;
     g_zGainCfg = cfg.getFloat("advanced.panel_curvature_z_gain", 0.0f);
     if (g_zGainCfg < 0.0f || g_zGainCfg > 10000.0f) g_zGainCfg = 0.0f;
-    const float wasZ = detail::g_panelCurveZTest;
-    detail::g_panelCurveZTest = 0.0f;   // retired probe: z reaches the screen, measured and documented
-    if (detail::g_panelCurveZTest < -2.0f || detail::g_panelCurveZTest > 2.0f) detail::g_panelCurveZTest = 0.0f;
-    if (detail::g_panelCurveZTest != wasZ && detail::g_panelCurveZTest != 0.0f) {
-        Log::get().note(
-            "panel curvature: Z PROBE at %+.3f -- every vertex of the strip is "
-            "displaced flat by that much in the panel's local z, which shapes "
-            "nothing and only moves it. If the screen moves in depth, the vertex z "
-            "reaches the output and the bend's problem is magnitude or sign. If "
-            "nothing changes at all, the shader is not reading z and no geometry "
-            "substitution can curve this screen. Leave curvature at 0 while "
-            "reading this.",
-            detail::g_panelCurveZTest);
-    }
 
     // A strip of N columns has N-1 INTERIOR vertex columns, and the whole
     // bend lives in those: the two edges receive the SAME z whatever the
@@ -624,7 +591,7 @@ bool panelCurveSubstitute(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw) {
         if (!learnSize(ctx)) return;
         if (!g_vb || !g_ib || g_builtCurvature != detail::g_panelCurveCurvature ||
             g_builtSegments != detail::g_panelCurveSegments || g_builtSign != g_sign ||
-            g_builtZTest != detail::g_panelCurveZTest || g_builtGain != activeGain()) {
+            g_builtGain != activeGain()) {
             if (!build(ctx)) return;
         }
 
@@ -649,7 +616,7 @@ bool panelCurveSubstitute(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw) {
         // again and substitute again, without end.
         draw(ctx, g_indexCount, 1, 0, 0, 0);
         const float shape[4]={kPi*g_builtCurvature,float(g_builtSegments),
-            kTowardViewer*float(g_builtSign)*g_builtGain,g_builtZTest};
+            kTowardViewer*float(g_builtSign)*g_builtGain,0.0f};
         screenMotionDraw(ctx,draw,g_indexCount,1,0,0,0,shape);
 
         restoreSaved(ctx);

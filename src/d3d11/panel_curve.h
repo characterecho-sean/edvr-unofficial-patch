@@ -80,7 +80,6 @@ constexpr int kDefaultSegments = 64;
 extern bool  g_panelCurveStoodDown;
 extern float g_panelCurveCurvature;
 extern int   g_panelCurveSegments;
-extern float g_panelCurveZTest;
 }  // namespace detail
 // __forceinline, not inline: beginPanelOverride is large enough that MSVC's
 // inliner declined this one and called an out-of-line copy per eye draw
@@ -93,8 +92,7 @@ __forceinline bool panelCurveWants() {
     // deliberate identity test, which has to substitute in order to prove
     // anything -- so it counts as wanting.
     return detail::g_panelCurveCurvature > 0.0f ||
-           detail::g_panelCurveSegments != detail::kDefaultSegments ||
-           detail::g_panelCurveZTest != 0.0f;
+           detail::g_panelCurveSegments != detail::kDefaultSegments;
 }
 
 // Replace one recognised composite draw with the bent strip: save the input

@@ -390,6 +390,52 @@ int wmain(int argc, wchar_t** argv) {
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");
 
+    // frame_flag's layout check (v34). Last, because a refusal it provokes
+    // is meant to outlast it. This process holds one half, so the roll-call
+    // has one signature and there is nothing to name...
+    check(edvr::kFrameFlagVersion == 35, "frame_flag layout is v35");
+    check(edvr::frameFlagPeerMismatch() == 0, "one half alone is no mismatch");
+    {
+        wchar_t name[64];
+        swprintf_s(name, L"Local\\edvr_frame_flag_rollcall_%lu", GetCurrentProcessId());
+        HANDLE h = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name);
+        check(h != nullptr, "the roll-call is signed at the channel's first use");
+        auto* roll = h ? static_cast<volatile LONG*>(
+                             MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 3 * sizeof(LONG)))
+                       : nullptr;
+        check(roll && roll[0] == 34 && roll[1] == 0 && roll[2] == 1,
+              "one signature, v34 first, nobody else");
+        if (roll) {
+            // ...a half on another layout signing second is named at once,
+            // and the channel refuses: a mark reads back as absent...
+            edvr::clearGlitchFrame();
+            InterlockedExchange(&roll[1], 35);
+            check(edvr::frameFlagPeerMismatch() == 35, "a v35 half signing second is named");
+            edvr::markGlitchFrame();
+            check(!edvr::glitchFrameMarked(), "the refused channel reads as absent");
+            InterlockedExchange(&roll[1], 0);
+            check(edvr::frameFlagPeerMismatch() == 0, "the roll-call refusal follows the roll-call");
+            edvr::markGlitchFrame();
+            check(edvr::glitchFrameMarked(), "and the channel carries again without it");
+            edvr::clearGlitchFrame();
+            UnmapViewOfFile(const_cast<LONG*>(roll));
+        }
+        if (h) CloseHandle(h);
+    }
+    {
+        // ...and a half built before the roll-call (v33, which never signs)
+        // is found by its block's name, and refused for good.
+        wchar_t name[64];
+        swprintf_s(name, L"Local\\edvr_glitch_frame_v33_%lu", GetCurrentProcessId());
+        HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, name);
+        check(h != nullptr, "a v33 block in the process");
+        check(edvr::frameFlagPeerMismatch() == 33, "an unsigned v33 half is named");
+        edvr::markGlitchFrame();
+        check(!edvr::glitchFrameMarked(), "and the channel stays refused");
+        if (h) CloseHandle(h);
+        check(edvr::frameFlagPeerMismatch() == 33, "a found v33 half is latched");
+    }
+
     std::printf("native_frame_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

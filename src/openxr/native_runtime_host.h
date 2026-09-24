@@ -778,6 +778,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // reason centreAtStartup's own caller restarts its loop instead of
     // continuing past one. Sacrificing this one frame's pose update is the
     // same outcome every other early return below already takes.
+    // frame_flag's layout check (frame_flag.h): the first frame the d3d11
+    // half is seen on another layout, said once. The channel is refused by
+    // then, which is what the recentre poll below reads.
+    {
+      static bool frameFlagMismatchTraced=false;
+      if(!frameFlagMismatchTraced) {
+        if(const uint32_t theirs=frameFlagPeerMismatch()) {
+          frameFlagMismatchTraced=true;
+          nativeTracePrintf("frame_flag_mismatch,ours=%u,theirs=%u,channel=refused,reason=d3d11 half from another EDVR build\n",
+            kFrameFlagVersion,theirs);
+        }
+      }
+    }
     if(introRecentreRequested()) {
       if(applyIntroRecentre())clearIntroRecentreRequest();
       return vr::VRCompositorError_InvalidTexture;

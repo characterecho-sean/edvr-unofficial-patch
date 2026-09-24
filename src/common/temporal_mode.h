@@ -35,8 +35,8 @@ inline TemporalEngine temporalEngineFor(const std::string& mode) {
 
 // True for every mode that hands the frame to an external, trained engine
 // (NVIDIA's or AMD's) rather than the pass's own history -- the test every
-// "a trained engine wants X" reader in src\ shares, so fsr reaches UI depth,
-// UI separation and the rest the same way dlss and dlaa do.
+// "a trained engine wants X" reader in src\ shares, so fsr reaches UI depth
+// and the rest the same way dlss and dlaa do.
 inline bool temporalExternalEngine(const std::string& mode) {
     return temporalEngineFor(mode) != TemporalEngine::Own;
 }
