@@ -25,7 +25,7 @@ class SubmissionStats final {
     uint32_t outputWidth[2]{}, outputHeight[2]{}, treatments[2]{};
     uint32_t deferred=0;
   };
-  struct Distribution { double p50 = 0, p95 = 0, p99 = 0; };
+  struct Distribution { double p50 = 0, p95 = 0, p99 = 0, max = 0; };
   // In-progress windows are not truncated by the timer. Interrupted sequences
   // restart warmup; elapsed time alone never constitutes a valid sample.
   bool advance(uint64_t nowMs) {
@@ -77,7 +77,7 @@ class SubmissionStats final {
     const auto percentile = [&](unsigned percent) {
       return count_ ? values[(count_ * percent + 99) / 100 - 1] : 0;
     };
-    return {percentile(50), percentile(95), percentile(99)};
+    return {percentile(50), percentile(95), percentile(99), count_ ? values[count_ - 1] : 0};
   }
  private:
   std::array<Sample, capacity> samples_{};

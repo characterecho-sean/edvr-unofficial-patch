@@ -107,6 +107,15 @@ struct Api {
   PFN_xrGetSystemProperties systemProperties=nullptr;
   PFN_xrGetDisplayRefreshRateFB displayRefreshRate=nullptr;
   PFN_xrGetVisibilityMaskKHR visibilityMask=nullptr;
+  // Both optional: XR_EXT_performance_settings (CPU/GPU performance level
+  // plus its event) and XR_META_performance_metrics (named counter paths).
+  // pathToString is core 1.0, loaded only alongside the META extension since
+  // counter paths are its one user here.
+  PFN_xrPerfSettingsSetPerformanceLevelEXT perfSettingsLevel=nullptr;
+  PFN_xrEnumeratePerformanceMetricsCounterPathsMETA perfMetricsEnumeratePaths=nullptr;
+  PFN_xrSetPerformanceMetricsStateMETA perfMetricsSetState=nullptr;
+  PFN_xrQueryPerformanceMetricsCounterMETA perfMetricsQueryCounter=nullptr;
+  PFN_xrPathToString pathToString=nullptr;
   PFN_xrConvertWin32PerformanceCounterToTimeKHR convertTime=nullptr;
   PFN_xrEnumerateViewConfigurations configurations=nullptr;
   PFN_xrEnumerateViewConfigurationViews viewSizes=nullptr;
@@ -211,6 +220,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   FrameCycleStats frameCycles;
   std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false},postSubmitFirstNoted{false};
   std::atomic<uint64_t> frameCycleWaitToken{0},frameCycleSubmitToken{0},frameCycleSequence{0};
+  // native_long_cycle: count is every completed cycle past the threshold,
+  // logged or not; logged is how many printed, capped at 4/s (rateSecond/
+  // rateWindow, a GetTickCount64()/1000 bucket) and 400 a session.
+  // native_long_cycle_summary reports both at session close.
+  uint64_t longCycleCount=0,longCycleLogged=0,longCycleRateSecond=0;unsigned longCycleRateWindow=0;
   TransferWallTimes transferWall;
   uint64_t submitCallbacksBegin=0;
   std::atomic<bool> submitRouteNoted[2]{};
@@ -296,6 +310,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool visibilityMaskExtension=false,visibilityMaskDirty=false;
   uint64_t visibilityRevision=0;
   unsigned visibilityRefreshes=0;
+  // XR_EXT_performance_settings and XR_META_performance_metrics, both
+  // optional. perfMetricsReady is true
+  // only once xrSetPerformanceMetricsStateMETA(enabled=1) itself succeeded;
+  // perfMetricsExtension alone just means the runtime listed it.
+  bool perfSettingsExtension=false,perfMetricsExtension=false,perfMetricsReady=false;
+  uint64_t perfSettingsEvents=0;
+  std::vector<XrPath> perfMetricsPaths;
   void refreshHiddenMasks(const char* reason) {
     if(GetCurrentThreadId()!=ownerThread||!session||!geometryGeneration||!read().connected)return;
     visibilityMaskDirty=false;
@@ -350,6 +371,87 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // OpenComposite's compatibility default. Never infer physical refresh from
     // predictedDisplayPeriod: application cadence can differ from panel rate.
     publishDisplayFrequency(measured?hz:90.0f,!measured,reason,r);
+  }
+  // XR_EXT_performance_settings: sustained-high CPU and GPU levels, asked
+  // for at the session's first start. A restarted session
+  // (prepareSessionRestart) is not asked again and runs at the runtime's
+  // default level.
+  void applyPerformanceSettings() {
+    if(!perfSettingsExtension||!api.perfSettingsLevel) {
+      nativeTracePrintf("native_perf_settings,extension=absent,cpu=n/a,gpu=n/a\n");
+      return;
+    }
+    const XrResult cpu=api.perfSettingsLevel(session,XR_PERF_SETTINGS_DOMAIN_CPU_EXT,XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+    const XrResult gpu=api.perfSettingsLevel(session,XR_PERF_SETTINGS_DOMAIN_GPU_EXT,XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+    nativeTracePrintf("native_perf_settings,extension=enabled,cpu=%d,gpu=%d\n",int(cpu),int(gpu));
+  }
+  // Best-effort XrPath -> text via the core xrPathToString. Empty when the
+  // function never loaded or the runtime rejects the path.
+  std::string perfMetricsPathText(XrPath path) const {
+    if(!api.pathToString)return {};
+    char text[256]{};uint32_t count=0;
+    if(XR_FAILED(api.pathToString(instance,path,sizeof(text),&count,text)))return {};
+    return std::string(text);
+  }
+  // XR_META_performance_metrics: enables the state and enumerates the
+  // runtime's counter paths once, at session start; reportPerformanceMetrics
+  // queries them at every frame-cycle window.
+  void enablePerformanceMetrics() {
+    perfMetricsReady=false;perfMetricsPaths.clear();
+    if(!perfMetricsExtension||!api.perfMetricsSetState||!api.perfMetricsEnumeratePaths||
+       !api.perfMetricsQueryCounter||!api.pathToString) {
+      nativeTracePrintf("native_perf_metrics,extension=absent\n");
+      return;
+    }
+    XrPerformanceMetricsStateMETA state{XR_TYPE_PERFORMANCE_METRICS_STATE_META,nullptr,XR_TRUE};
+    const XrResult set=api.perfMetricsSetState(session,&state);
+    if(XR_FAILED(set)) {
+      nativeTracePrintf("native_perf_metrics,extension=enabled,set_state=%d,ready=0\n",int(set));
+      return;
+    }
+    perfMetricsReady=true;
+    uint32_t count=0;
+    api.perfMetricsEnumeratePaths(instance,0,&count,nullptr);
+    if(count) {
+      perfMetricsPaths.assign(count,XrPath(XR_NULL_PATH));
+      api.perfMetricsEnumeratePaths(instance,count,&count,perfMetricsPaths.data());
+      perfMetricsPaths.resize(count);
+    }
+    char list[1024]{};size_t used=0;
+    for(size_t i=0;i<perfMetricsPaths.size();++i) {
+      const auto text=perfMetricsPathText(perfMetricsPaths[i]);
+      if(used>=sizeof(list))break;
+      const int n=std::snprintf(list+used,sizeof(list)-used,"%s%s",i?"|":"",text.c_str());
+      if(n>0)used+=(std::min)(size_t(n),sizeof(list)-used);
+    }
+    nativeTracePrintf("native_perf_metrics_paths,count=%u,paths=%s\n",unsigned(perfMetricsPaths.size()),list);
+  }
+  // Called from reportFrameCycles() at every frame-cycle window; silent
+  // (native_perf_metrics,extension=absent already said its one word) unless
+  // enablePerformanceMetrics() actually got the state enabled.
+  void reportPerformanceMetrics(uint64_t window) {
+    if(!perfMetricsReady||perfMetricsPaths.empty())return;
+    char list[1024]{};size_t used=0;
+    for(const auto path:perfMetricsPaths) {
+      XrPerformanceMetricsCounterMETA counter{XR_TYPE_PERFORMANCE_METRICS_COUNTER_META};
+      if(XR_FAILED(api.perfMetricsQueryCounter(session,path,&counter)))continue;
+      double value=std::numeric_limits<double>::quiet_NaN();
+      if(counter.counterFlags&XR_PERFORMANCE_METRICS_COUNTER_FLOAT_VALUE_VALID_BIT_META)value=double(counter.floatValue);
+      else if(counter.counterFlags&XR_PERFORMANCE_METRICS_COUNTER_UINT_VALUE_VALID_BIT_META)value=double(counter.uintValue);
+      const auto text=perfMetricsPathText(path);
+      if(used>=sizeof(list))break;
+      const int n=std::snprintf(list+used,sizeof(list)-used,",%s=%.6g",text.c_str(),value);
+      if(n>0)used+=(std::min)(size_t(n),sizeof(list)-used);
+    }
+    nativeTracePrintf("native_perf_metrics,window=%llu%s\n",(unsigned long long)window,list);
+  }
+  // XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT, rate-limited the way pose_failure
+  // and native_menu failures are in this file: the first 8 logged, every one
+  // counted for native_pacing_summary.
+  void notePerfSettingsEvent(const XrEventDataPerfSettingsEXT& event) {
+    if(perfSettingsEvents++<8)
+      nativeTracePrintf("native_perf_settings_event,domain=%d,sub_domain=%d,from=%d,to=%d\n",
+        int(event.domain),int(event.subDomain),int(event.fromLevel),int(event.toLevel));
   }
   bool separateGraphics()const{return startupOptions.separateDevice;}
   bool captureRenderSettings() {
@@ -507,6 +609,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         r=state.startIfReady();if(r!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
         refreshDisplayFrequency("session_started");
         refreshHiddenMasks("session_started");
+        applyPerformanceSettings();
+        enablePerformanceMetrics();
       }
       if(!state.running()){operation=RuntimeGate::Lease{};Sleep(10);continue;}
       operation=RuntimeGate::Lease{};
@@ -666,6 +770,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
       if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
     }
+    if(buffer.type==XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT && host.perfSettingsExtension) {
+      const auto& event=*reinterpret_cast<const XrEventDataPerfSettingsEXT*>(&buffer);
+      host.notePerfSettingsEvent(event);
+    }
   }
   static double elapsedMs(const LARGE_INTEGER& begin,const LARGE_INTEGER& end) {
     LARGE_INTEGER frequency{}; if(!QueryPerformanceFrequency(&frequency)||!frequency.QuadPart)return std::numeric_limits<double>::quiet_NaN();
@@ -759,6 +867,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         if(completed.postValid)event.flags|=EdvrNativeCpuPostValid;
         if(completed.singlePresent)event.flags|=EdvrNativeCpuSinglePresent;
         NativeCpuTrace::get().emitFrame(event);
+        noteLongCycle(completed);
       }
       frameCycleSequence.store(dispatched&&result==vr::VRCompositorError_None?out.sequence:0,std::memory_order_release);
       reportFrameCycles();
@@ -1468,19 +1577,50 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   static uint64_t frameCycleUs() noexcept {
     return edvrNativeTraceNowUs();
   }
+  // One line per completed cycle longer than twice the runtime's last real
+  // predicted period: the outlier a 30-second window's mean/p95 hides. The
+  // phases are this one cycle's, not a window's. sequence is the timing
+  // ABI's counter (set from timing.waitBegin()), the number the d3d11 LONG
+  // FRAME line prints as "runtime sequence", so the two lines match to
+  // within a frame; 0 when the cycle's sample was not admitted. The frame's
+  // own submit stages (xr_end_frame, wait_frame, producer/consumer) are left
+  // out: submitSample is one reused buffer that a withheld frame never
+  // refills, so a stale zero there would read as a free frame.
+  void noteLongCycle(const FrameCycleStats::Completed& c) {
+    const auto periodNs=boundary.lastPeriodNs();
+    if(periodNs<=0)return; // no real period observed yet to compare against
+    const double periodMs=double(periodNs)/1000000.0;
+    if(c.cycleMs<=2.0*periodMs)return;
+    ++longCycleCount;
+    const auto second=GetTickCount64()/1000;
+    if(second!=longCycleRateSecond){longCycleRateSecond=second;longCycleRateWindow=0;}
+    if(longCycleRateWindow>=4||longCycleLogged>=400)return;
+    ++longCycleRateWindow;++longCycleLogged;
+    nativeTracePrintf("native_long_cycle,sequence=%llu,cycle_ms=%.4f,period_ms=%.4f,"
+      "game_before_first_submit=%.4f,first_submit_roundtrip=%.4f,first_submit_owner_body=%.4f,"
+      "between_eye_calls=%.4f,second_submit_roundtrip=%.4f,second_submit_owner_body=%.4f,"
+      "first_submit_render_park=%.4f,second_submit_render_park=%.4f,"
+      "post_second_submit_to_next_wait=%.4f,next_wait_roundtrip=%.4f,next_wait_owner_body=%.4f,units=wall_ms\n",
+      (unsigned long long)submitSample.sequence,c.cycleMs,periodMs,
+      c.beforeFirstMs,c.firstSubmitMs,c.submitOwnerMs[0],
+      c.betweenEyesMs,c.secondSubmitMs,c.submitOwnerMs[1],
+      c.renderParkMs[0],c.renderParkMs[1],
+      c.afterSecondMs,c.nextWaitMs,c.waitOwnerMs);
+  }
   void reportFrameCycles() {
     if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
     FrameCycleStats::Report r{};if(!frameCycles.takeReport(r))return;
     const auto& c=r.cycle;const double validSum=c.mean*double(r.valid);
-    nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu\n",
+    nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu,late_frames=%llu\n",
       (unsigned long long)r.window,(unsigned long long)r.admitted,r.valid,(unsigned long long)r.firstSequence,(unsigned long long)r.lastSequence,(unsigned long long)r.elapsedMs,validSum,
       r.elapsedMs?double(r.admitted)*1000.0/double(r.elapsedMs):0.0,r.elapsedMs?double(r.valid)*1000.0/double(r.elapsedMs):0.0,r.callerThread,r.waitThread,unsigned(r.threadConsistent),
       r.shape.width[0],r.shape.height[0],r.shape.width[1],r.shape.height[1],r.shape.outputWidth[0],r.shape.outputHeight[0],r.shape.outputWidth[1],r.shape.outputHeight[1],r.shape.pacing,r.shape.shouldRender,r.shape.sceneReady,
       (unsigned long long)r.shape.generation,(unsigned long long)r.shape.featureEpoch,
-      (unsigned long long)r.missing[FrameCycleStats::BadClock],(unsigned long long)r.missing[FrameCycleStats::Reentrant],(unsigned long long)r.missing[FrameCycleStats::WrongThread],(unsigned long long)r.missing[FrameCycleStats::BadSequence],(unsigned long long)r.missing[FrameCycleStats::PartialStereo],(unsigned long long)r.missing[FrameCycleStats::DuplicateEye],(unsigned long long)r.missing[FrameCycleStats::DirectOwner],(unsigned long long)r.missing[FrameCycleStats::ShapeChange],(unsigned long long)r.missing[FrameCycleStats::Overflow]);
-    const auto phase=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,units=wall_ms,nested=0\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95);};
+      (unsigned long long)r.missing[FrameCycleStats::BadClock],(unsigned long long)r.missing[FrameCycleStats::Reentrant],(unsigned long long)r.missing[FrameCycleStats::WrongThread],(unsigned long long)r.missing[FrameCycleStats::BadSequence],(unsigned long long)r.missing[FrameCycleStats::PartialStereo],(unsigned long long)r.missing[FrameCycleStats::DuplicateEye],(unsigned long long)r.missing[FrameCycleStats::DirectOwner],(unsigned long long)r.missing[FrameCycleStats::ShapeChange],(unsigned long long)r.missing[FrameCycleStats::Overflow],
+      (unsigned long long)boundary.takeLateFramesWindow());
+    const auto phase=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,p99=%.4f,max=%.4f,units=wall_ms,nested=0\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95,d.p99,d.max);};
     phase("cycle",r.cycle);phase("game_before_first_submit",r.beforeFirst);phase("first_submit_roundtrip",r.firstSubmit);phase("between_eye_calls",r.betweenEyes);phase("second_submit_roundtrip",r.secondSubmit);phase("post_second_submit_to_next_wait",r.afterSecond);phase("next_wait_roundtrip",r.nextWait);phase("per_frame_residual",r.residual);
-    const auto nested=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,units=wall_ms,nested=1\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95);};
+    const auto nested=[&](const char* name,const FrameCycleStats::Dist& d){nativeTracePrintf("native_frame_cycle_phase,window=%llu,name=%s,mean=%.4f,p50=%.4f,p95=%.4f,p99=%.4f,max=%.4f,units=wall_ms,nested=1\n",(unsigned long long)r.window,name,d.mean,d.p50,d.p95,d.p99,d.max);};
     nested("next_wait_owner_body",r.waitOwner);nested("first_submit_owner_body",r.submitOwner[0]);nested("second_submit_owner_body",r.submitOwner[1]);nested("first_submit_render_park",r.renderPark[0]);nested("second_submit_render_park",r.renderPark[1]);
     if(r.postValid&&!postSubmitFirstNoted.exchange(true))
       nativeTracePrintf("native_post_submit,first_complete=1,window=%llu,sequence=%llu\n",
@@ -1497,8 +1637,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       nativeTracePrintf("native_post_submit_unavailable,window=%llu,reason=%s,count=%llu\n",
         (unsigned long long)r.window,postReasons[i],(unsigned long long)r.postUnavailable[i]);
     const auto postPhase=[&](const char* name,const FrameCycleStats::Dist& d,unsigned samples,unsigned isNested,const char* units="wall_ms"){
-      nativeTracePrintf("native_post_submit_phase,window=%llu,name=%s,valid=%u,mean=%.4f,p50=%.4f,p95=%.4f,units=%s,nested=%u\n",
-        (unsigned long long)r.window,name,samples,d.mean,d.p50,d.p95,units,isNested);
+      nativeTracePrintf("native_post_submit_phase,window=%llu,name=%s,valid=%u,mean=%.4f,p50=%.4f,p95=%.4f,p99=%.4f,max=%.4f,units=%s,nested=%u\n",
+        (unsigned long long)r.window,name,samples,d.mean,d.p50,d.p95,d.p99,d.max,units,isNested);
     };
     postPhase("paired_gap",r.postGap,r.postValid,0);
     postPhase("raw_dxgi_present",r.rawPresent,r.postValid,0);
@@ -1512,6 +1652,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     postPhase("after_single_present",r.afterPresent,r.singlePresentValid,1);
     postPhase("post_present_handoff",r.handoffNested,r.handoffValid,1);
     postPhase("handoff_count",r.handoffCount,r.handoffValid,1,"calls");
+    reportPerformanceMetrics(r.window);
   }
   void reportSubmitStats() {
     const auto wall=submitStats.distribution(&SubmissionStats::Sample::submitMs);
@@ -1529,7 +1670,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto phase=[&](const char* name,double SubmissionStats::Sample::*field){
       const auto d=submitStats.distribution(field);
       if(used>=sizeof(phases))return;
-      const int n=std::snprintf(phases+used,sizeof(phases)-used,",%s=%.4f/%.4f/%.4f",name,d.p50,d.p95,d.p99);
+      const int n=std::snprintf(phases+used,sizeof(phases)-used,",%s=%.4f/%.4f/%.4f/%.4f",name,d.p50,d.p95,d.p99,d.max);
       if(n>0)used+=(std::min)(size_t(n),sizeof(phases)-used);
     };
     phase("producer_dispatch",&SubmissionStats::Sample::producerDispatchMs);
@@ -1545,7 +1686,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     phase("xr_end_frame",&SubmissionStats::Sample::endFrameMs);
     phase("wait_frame",&SubmissionStats::Sample::waitFrameMs);
     phase("pacer_block",&SubmissionStats::Sample::pacerBlockMs);
-    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,cull_stage=%u,cull_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99,units=wall_ms,nested=1,gpu=0\n",
+    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,cull_stage=%u,cull_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0\n",
       (unsigned long long)submitStats.window(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
       last.outputWidth[0],last.outputHeight[0],last.outputWidth[1],last.outputHeight[1],last.treatments[0],last.treatments[1],
       (unsigned long long)last.featureEpoch,unsigned(cullGuard.stage()),cullGuard.factorWidth(),cullGuard.factorHeight(),
@@ -1815,10 +1956,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(tracing)nativeTracePrintf("native_features_summary,offset_frames=%llu,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,cull_stage=%u\n",
       (unsigned long long)offsetFrames,(unsigned long long)featureChanges,(unsigned long long)fssHealedEyes[0],(unsigned long long)fssHealedEyes[1],
       (unsigned long long)fssDeferredEyes,(unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(cullGuard.stage()));
-    if(tracing)nativeTracePrintf("native_pacing_summary,changes=%llu,deferred=%llu,synthesized=%llu,ready_at_wait=%llu,kicks=%llu,drained_frames=%llu,drained_waits=%llu\n",
+    if(tracing)nativeTracePrintf("native_pacing_summary,changes=%llu,deferred=%llu,synthesized=%llu,ready_at_wait=%llu,kicks=%llu,drained_frames=%llu,drained_waits=%llu,late_frames=%llu,perf_settings_events=%llu\n",
       (unsigned long long)pacingChanges,(unsigned long long)boundary.deferredFrames(),(unsigned long long)boundary.synthesized(),
       (unsigned long long)boundary.readyAtWait(),(unsigned long long)boundary.kicks(),(unsigned long long)boundary.drainedFrames(),
-      (unsigned long long)boundary.drainedWaits());
+      (unsigned long long)boundary.drainedWaits(),(unsigned long long)boundary.lateFrames(),(unsigned long long)perfSettingsEvents);
+    if(tracing)nativeTracePrintf("native_long_cycle_summary,count=%llu,logged=%llu,threshold=2x_period\n",
+      (unsigned long long)longCycleCount,(unsigned long long)longCycleLogged);
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",
@@ -1918,11 +2061,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     displayRefreshExtension=false;
     api.displayRefreshRate=nullptr;
     visibilityMaskExtension=false;api.visibilityMask=nullptr;
+    perfSettingsExtension=false;api.perfSettingsLevel=nullptr;
+    perfMetricsExtension=false;api.perfMetricsEnumeratePaths=nullptr;api.perfMetricsSetState=nullptr;
+    api.perfMetricsQueryCounter=nullptr;api.pathToString=nullptr;
     for(const auto& e:extensions) {
       d3d|=std::strncmp(e.extensionName,XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
       timeConversion|=std::strncmp(e.extensionName,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
       displayRefreshExtension|=std::strncmp(e.extensionName,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
       visibilityMaskExtension|=std::strncmp(e.extensionName,XR_KHR_VISIBILITY_MASK_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      perfSettingsExtension|=std::strncmp(e.extensionName,XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
+      perfMetricsExtension|=std::strncmp(e.extensionName,XR_META_PERFORMANCE_METRICS_EXTENSION_NAME,XR_MAX_EXTENSION_NAME_SIZE)==0;
     }
     if(!d3d) return result("XR_KHR_D3D11_enable",XR_ERROR_EXTENSION_NOT_PRESENT);
     if(!timeConversion)return result("XR_KHR_win32_convert_performance_counter_time",XR_ERROR_EXTENSION_NOT_PRESENT);
@@ -1932,10 +2080,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // that names a .vrappconfig file, so no colon.
     std::strcpy(ci.applicationInfo.applicationName,"Elite Dangerous (EDVR)");
     std::strcpy(ci.applicationInfo.engineName,"EDVR");ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
-    const char* enabled[4]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME};
+    const char* enabled[6]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME};
     unsigned enabledCount=2;
     if(displayRefreshExtension)enabled[enabledCount++]=XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
     if(visibilityMaskExtension)enabled[enabledCount++]=XR_KHR_VISIBILITY_MASK_EXTENSION_NAME;
+    if(perfSettingsExtension)enabled[enabledCount++]=XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
+    if(perfMetricsExtension)enabled[enabledCount++]=XR_META_PERFORMANCE_METRICS_EXTENSION_NAME;
     ci.enabledExtensionCount=enabledCount;ci.enabledExtensionNames=enabled;
     const XrResult created=api.createInstance(&ci,&instance);
     identity.end();
@@ -1948,6 +2098,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(displayRefreshExtension&&!load(api,instance,"xrGetDisplayRefreshRateFB",api.displayRefreshRate))
       api.displayRefreshRate=nullptr;
     if(visibilityMaskExtension&&!load(api,instance,"xrGetVisibilityMaskKHR",api.visibilityMask))api.visibilityMask=nullptr;
+    if(perfSettingsExtension&&!load(api,instance,"xrPerfSettingsSetPerformanceLevelEXT",api.perfSettingsLevel))
+      api.perfSettingsLevel=nullptr;
+    if(perfMetricsExtension) {
+      if(!load(api,instance,"xrEnumeratePerformanceMetricsCounterPathsMETA",api.perfMetricsEnumeratePaths))
+        api.perfMetricsEnumeratePaths=nullptr;
+      if(!load(api,instance,"xrSetPerformanceMetricsStateMETA",api.perfMetricsSetState))api.perfMetricsSetState=nullptr;
+      if(!load(api,instance,"xrQueryPerformanceMetricsCounterMETA",api.perfMetricsQueryCounter))
+        api.perfMetricsQueryCounter=nullptr;
+      if(!load(api,instance,"xrPathToString",api.pathToString))api.pathToString=nullptr;
+    }
 #define LOAD(name,field) if(!load(api,instance,name,api.field)) return false
     LOAD("xrDestroyInstance",destroyInstance); LOAD("xrGetInstanceProperties",instanceProperties);
     LOAD("xrGetSystem",getSystem); LOAD("xrEnumerateViewConfigurations",configurations);

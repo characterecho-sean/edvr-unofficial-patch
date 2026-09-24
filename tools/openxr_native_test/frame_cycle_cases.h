@@ -28,6 +28,10 @@ template<class Check> void runFrameCycleCases(Check check) {
   check(report.residual.mean==0.0&&report.cycle.mean>0,"frame-cycle paired partition closes");
   check(report.cycle.mean==15.0&&report.beforeFirst.mean==1.5&&report.firstSubmit.mean==0.5&&
     report.secondSubmit.mean==0.5&&report.nextWait.mean==0.5,"frame-cycle known exclusive phases");
+  // Both admitted cycles (100, 101) run this fixture's identical timing
+  // deltas, so their cycle time is exactly 15.0 twice over: p99 and max
+  // equal mean/p50/p95 here, not a coincidence to generalize from.
+  check(report.cycle.p99==15.0&&report.cycle.max==15.0,"frame-cycle p99 and max reach the Dist a two-sample window produces");
   check(report.waitOwner.mean==0.2&&report.submitOwner[0].mean==0.2&&report.renderPark[1].mean==0.25,
     "frame-cycle nested owner and render spans");
   check(report.shape.generation==7&&report.shape.featureEpoch==3,"frame-cycle coherent scope reported");
@@ -84,6 +88,22 @@ template<class Check> void runFrameCycleCases(Check check) {
     completed.callerThread==4&&completed.nextWaitThread==4&&completed.sceneReady==1&&
     completed.postValid&&completed.singlePresent&&completed.postUnavailable==FrameCycleStats::PostAvailable,
     "completed event exposes admitted same-cycle bounds");
+  // native_long_cycle: the same completed event also
+  // carries this ONE cycle's own phase partition, not a window Dist. Derived
+  // by hand from the fixture above: wait 1030, before-first submit at 1100
+  // (0.07 ms), first submit returns 1130 (0.03 ms round trip, 0.01 ms owner
+  // body), second submit opens 1200 (0.07 ms between), returns 1230 (0.03 ms
+  // round trip, 0.01 ms owner body), next wait enters 1500 (0.27 ms after
+  // the second submit) and returns 1530 (0.03 ms round trip, 0.01 ms owner
+  // body) -- cycle 1530-1030 = 0.5 ms, the same six parts reportFrameCycles
+  // prints as native_frame_cycle_phase summing exactly (residual 0).
+  check(std::fabs(completed.cycleMs-0.5)<1e-9&&std::fabs(completed.beforeFirstMs-0.07)<1e-9&&
+    std::fabs(completed.firstSubmitMs-0.03)<1e-9&&std::fabs(completed.betweenEyesMs-0.07)<1e-9&&
+    std::fabs(completed.secondSubmitMs-0.03)<1e-9&&std::fabs(completed.afterSecondMs-0.27)<1e-9&&
+    std::fabs(completed.nextWaitMs-0.03)<1e-9&&std::fabs(completed.waitOwnerMs-0.01)<1e-9&&
+    std::fabs(completed.submitOwnerMs[0]-0.01)<1e-9&&std::fabs(completed.submitOwnerMs[1]-0.01)<1e-9&&
+    std::fabs(completed.renderParkMs[0]-0.01)<1e-9&&std::fabs(completed.renderParkMs[1]-0.01)<1e-9,
+    "completed event carries this one cycle's own phase partition");
   check(!exact.takeCompleted(completed),"completed event extraction is one-shot");
   auto missingRequest=exact.postRequest();check(missingRequest.sequence==2&&missingRequest.beginUs==1730,"post accounting request advances with accepted cycle");
   closeStart(exact,3,2500,31002,nullptr);

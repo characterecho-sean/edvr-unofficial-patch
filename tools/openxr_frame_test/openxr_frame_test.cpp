@@ -199,6 +199,69 @@ void frameBoundaryTest() {
     sink.finishedResult==XR_ERROR_RUNTIME_FAILURE,"failed endFrame reports failure to shadow commit policy");
 }
 
+// FrameBoundary::noteReal's late-frame counter
+// (lateFrames/takeLateFramesWindow, native_pacing_summary/native_frame_
+// cycle_window). No submit()/eyes needed: waitAndBegin()'s own clear() closes
+// whatever frame is open, so a bare run of waits is enough to drive noteReal.
+void latePacingSteadyTest() {
+  Fake fake; fake.step = fake.period = 11;
+  SessionState session; check(start(session, fake), "late-pacing steady: session starts");
+  Sink sink(fake); FrameBoundary boundary(session, sink);
+  check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing steady: first wait");
+  check(boundary.lateFrames() == 0, "late-pacing steady: nothing to compare against yet");
+  for (unsigned i = 0; i < 5; ++i) check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing steady: wait");
+  check(boundary.lateFrames() == 0, "late-pacing steady: a period-exact cadence counts no late frames");
+  check(boundary.takeLateFramesWindow() == 0, "late-pacing steady: the window count is also zero");
+  session.abandonAfterOwnerDestruction();
+}
+
+void latePacingSkippedPeriodTest() {
+  Fake fake; fake.step = fake.period = 11;
+  SessionState session; check(start(session, fake), "late-pacing skip: session starts");
+  Sink sink(fake); FrameBoundary boundary(session, sink);
+  for (unsigned i = 0; i < 4; ++i) check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing skip: steady wait");
+  check(boundary.lateFrames() == 0, "late-pacing skip: steady so far");
+  // Fake::wait() hands out the PREVIOUS call's displayTime and advances it by
+  // the CURRENT step only afterward, so step set now enlarges the gap the
+  // NEXT wait, not this one, returns -- one whole period silently dropped.
+  fake.step = fake.period * 2;
+  check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing skip: the wait whose own return still looks steady");
+  check(boundary.lateFrames() == 0, "late-pacing skip: the jump has not been observed yet");
+  fake.step = fake.period;
+  check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing skip: the wait that sees the two-period jump");
+  check(boundary.lateFrames() == 1, "late-pacing skip: exactly one period missed is counted once");
+  check(boundary.takeLateFramesWindow() == 1, "late-pacing skip: the window count reads the one miss");
+  check(boundary.takeLateFramesWindow() == 0, "late-pacing skip: and clears after being read");
+  check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing skip: back to steady");
+  check(boundary.lateFrames() == 1, "late-pacing skip: resuming steady cadence adds no further misses");
+  session.abandonAfterOwnerDestruction();
+}
+
+void latePacingPeriodChangeTest() {
+  Fake fake; fake.step = fake.period = 11;
+  SessionState session; check(start(session, fake), "late-pacing period change: session starts");
+  Sink sink(fake); FrameBoundary boundary(session, sink);
+  for (unsigned i = 0; i < 3; ++i) check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing period change: steady wait");
+  check(boundary.lateFrames() == 0, "late-pacing period change: steady so far");
+  // The display's refresh rate is about to rise (period 11 -> 20). Priming
+  // step a wait early cancels Fake::wait()'s own one-call lag, so the wait
+  // that first REPORTS the new period is also the one whose gap already
+  // matches it -- the way a real runtime's synchronized time/period pair
+  // would look, not an artifact of the old cadence still playing out.
+  fake.step = 20;
+  check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing period change: last wait at the old period");
+  check(boundary.lateFrames() == 0, "late-pacing period change: still clean before the period label changes");
+  fake.period = 20;
+  check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing period change: first wait reporting the new period");
+  // Discriminates against a stale-lastPeriod_ bug: dividing this same 20-tick
+  // gap by the OLD period (11) instead of this call's own period (20) would
+  // round to 1 missed frame instead of 0.
+  check(boundary.lateFrames() == 0, "late-pacing period change: a rate change alone, gap matching it, is not a miss");
+  check(boundary.waitAndBegin() == XR_SUCCESS, "late-pacing period change: steady at the new rate");
+  check(boundary.lateFrames() == 0, "late-pacing period change: steady at the new rate stays clean");
+  session.abandonAfterOwnerDestruction();
+}
+
 void blockedRuntimeIntegrationTest() {
   Fake fake; SessionState session;
   check(session.reset(fake.dispatch(), reinterpret_cast<XrInstance>(1), reinterpret_cast<XrSession>(2), XR_ENVIRONMENT_BLEND_MODE_OPAQUE) == XR_SUCCESS,
@@ -653,6 +716,7 @@ void turboPacingTest() {
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) { std::puts("Would test injected OpenXR frame boundary; no runtime or files."); return 0; }
   if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();turboPacingTest();
+  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); latePacingSteadyTest(); latePacingSkippedPeriodTest(); latePacingPeriodChangeTest();
+  blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();turboPacingTest();
   std::printf("openxr_frame_test: %u checks, %u failures\n", checks.load(), failures.load()); return failures.load() ? 1 : 0;
 }

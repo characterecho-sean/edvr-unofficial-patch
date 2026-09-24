@@ -30,7 +30,7 @@ class FrameCycleStats final {
     uint32_t eyeOrder[2]{},callerThread=0,waitThread=0;
     uint8_t postUnavailable=0;bool postValid=false,singlePresent=false,handoffValid=false;
   };
-  struct Dist { double mean=0,p50=0,p95=0; };
+  struct Dist { double mean=0,p50=0,p95=0,p99=0,max=0; };
   enum PostUnavailable : uint8_t { PostAvailable, ProviderMissing, BadProviderVersion,
     BadProviderSize, BadProviderGeneration, NotYetObservable, LostPresentHistory,
     PartialPresent, WrongPresentThread, FailedPresent, TestPresent, MalformedPresent,
@@ -48,6 +48,10 @@ class FrameCycleStats final {
       presentBeginUs=0,presentEndUs=0;
     uint32_t callerThread=0,nextWaitThread=0,sceneReady=0;
     uint8_t postUnavailable=ProviderMissing;bool postValid=false,singlePresent=false;
+    // This one cycle's own phase partition in wall ms, for native_long_cycle:
+    // a single sample, not the window's Dist.
+    double cycleMs=0,beforeFirstMs=0,firstSubmitMs=0,betweenEyesMs=0,secondSubmitMs=0,
+      afterSecondMs=0,nextWaitMs=0,waitOwnerMs=0,submitOwnerMs[2]{},renderParkMs[2]{};
   };
   struct Report {
     uint64_t window=0,firstSequence=0,lastSequence=0,elapsedMs=0,admitted=0;
@@ -230,6 +234,11 @@ class FrameCycleStats final {
     completed_.postUnavailable=current_.postUnavailable;completed_.postValid=current_.postValid;
     completed_.singlePresent=current_.singlePresent;
     if(current_.postValid&&current_.singlePresent){completed_.presentBeginUs=current_.presentBegin;completed_.presentEndUs=current_.presentEnd;}
+    completed_.cycleMs=s.cycle;completed_.beforeFirstMs=s.beforeFirst;completed_.firstSubmitMs=s.firstSubmit;
+    completed_.betweenEyesMs=s.betweenEyes;completed_.secondSubmitMs=s.secondSubmit;completed_.afterSecondMs=s.afterSecond;
+    completed_.nextWaitMs=s.nextWait;completed_.waitOwnerMs=s.waitOwner;
+    completed_.submitOwnerMs[0]=s.submitOwner[0];completed_.submitOwnerMs[1]=s.submitOwner[1];
+    completed_.renderParkMs[0]=s.renderPark[0];completed_.renderParkMs[1]=s.renderPark[1];
     completedReady_=true;
   }
   bool admit(const Sample&s,const Shape& shape,uint64_t nowMs){
@@ -242,15 +251,15 @@ class FrameCycleStats final {
     else if(nowMs-windowStartMs_>=30000){makeReport(lastAttemptedSequence_,nowMs);windowStartMs_=nowMs;shape_=shape;windowStart_=sequence;}
     ++attempted_;lastAttemptedSequence_=sequence;
   }
-  Dist dist(double Sample::*field)const{std::array<double,capacity>v{};double total=0;for(unsigned i=0;i<count_;++i){v[i]=(*samples_)[i].*field;total+=v[i];}std::sort(v.begin(),v.begin()+count_);auto p=[&](unsigned x){return count_?v[(count_*x+99)/100-1]:0;};return{count_?total/count_:0,p(50),p(95)};}
-  template<class Include> Dist filteredDist(double Sample::*field,Include include)const{std::array<double,capacity>v{};double total=0;unsigned n=0;for(unsigned i=0;i<count_;++i)if(include((*samples_)[i])){v[n]=(*samples_)[i].*field;total+=v[n++];}std::sort(v.begin(),v.begin()+n);auto p=[&](unsigned x){return n?v[(n*x+99)/100-1]:0;};return{n?total/n:0,p(50),p(95)};}
+  Dist dist(double Sample::*field)const{std::array<double,capacity>v{};double total=0;for(unsigned i=0;i<count_;++i){v[i]=(*samples_)[i].*field;total+=v[i];}std::sort(v.begin(),v.begin()+count_);auto p=[&](unsigned x){return count_?v[(count_*x+99)/100-1]:0;};return{count_?total/count_:0,p(50),p(95),p(99),count_?v[count_-1]:0};}
+  template<class Include> Dist filteredDist(double Sample::*field,Include include)const{std::array<double,capacity>v{};double total=0;unsigned n=0;for(unsigned i=0;i<count_;++i)if(include((*samples_)[i])){v[n]=(*samples_)[i].*field;total+=v[n++];}std::sort(v.begin(),v.begin()+n);auto p=[&](unsigned x){return n?v[(n*x+99)/100-1]:0;};return{n?total/n:0,p(50),p(95),p(99),n?v[n-1]:0};}
   void makeReport(uint64_t last,uint64_t nowMs){report_={};report_.window=++window_;report_.firstSequence=count_?(*samples_)[0].sequence:windowStart_;report_.lastSequence=last;report_.elapsedMs=nowMs>=windowStartMs_?nowMs-windowStartMs_:0;report_.admitted=attempted_;report_.valid=count_;report_.shape=shape_;report_.missing=missing_;report_.callerThread=observedSubmitThread_;report_.waitThread=observedWaitThread_;report_.threadConsistent=!observedThreadMismatch_;
     report_.cycle=dist(&Sample::cycle);report_.beforeFirst=dist(&Sample::beforeFirst);report_.firstSubmit=dist(&Sample::firstSubmit);report_.betweenEyes=dist(&Sample::betweenEyes);report_.secondSubmit=dist(&Sample::secondSubmit);report_.afterSecond=dist(&Sample::afterSecond);report_.nextWait=dist(&Sample::nextWait);report_.residual=dist(&Sample::residual);report_.waitOwner=dist(&Sample::waitOwner);for(unsigned i=0;i<2;++i){std::array<double,capacity>v{};for(unsigned j=0;j<count_;++j)v[j]=(*samples_)[j].submitOwner[i];report_.submitOwner[i]=manual(v);for(unsigned j=0;j<count_;++j)v[j]=(*samples_)[j].renderPark[i];report_.renderPark[i]=manual(v);}for(unsigned j=0;j<count_;++j)if((*samples_)[j].callerThread!=observedSubmitThread_||(*samples_)[j].waitThread!=observedWaitThread_)report_.threadConsistent=false;
     for(unsigned i=0;i<count_;++i){const auto&s=(*samples_)[i];if(s.postValid){++report_.postValid;if(!report_.firstPostSequence)report_.firstPostSequence=s.sequence;if(s.presentCount==0)++report_.zeroPresentValid;else if(s.singlePresent)++report_.singlePresentValid;else ++report_.multiplePresentValid;report_.syncNonzeroPresent+=uint64_t(s.syncNonzeroPresent);}else if(s.postUnavailable<PostUnavailableCount)++report_.postUnavailable[s.postUnavailable];if(s.handoffValid)++report_.handoffValid;}
     auto post=[](const Sample&s){return s.postValid;};auto single=[](const Sample&s){return s.postValid&&s.singlePresent;};auto handoff=[](const Sample&s){return s.handoffValid;};
     report_.presentCount=filteredDist(&Sample::presentCount,post);report_.rawPresent=filteredDist(&Sample::rawPresent,post);report_.edvrBeforePresent=filteredDist(&Sample::edvrBeforePresent,post);report_.edvrAfterPresent=filteredDist(&Sample::edvrAfterPresent,post);report_.edvrPresent=filteredDist(&Sample::edvrPresent,post);report_.trailingCallback=filteredDist(&Sample::trailingCallback,post);report_.outsidePresent=filteredDist(&Sample::outsidePresent,post);report_.postResidual=filteredDist(&Sample::postResidual,post);report_.postGap=filteredDist(&Sample::afterSecond,post);report_.beforePresent=filteredDist(&Sample::beforePresent,single);report_.afterPresent=filteredDist(&Sample::afterPresent,single);report_.handoffCount=filteredDist(&Sample::handoffCount,handoff);report_.handoffNested=filteredDist(&Sample::handoffNested,handoff);
     report_.handoffMissing=handoffMissing_;report_.handoffInvalid=handoffInvalid_;report_.handoffOverflow=handoffOverflow_;ready_=true;count_=0;attempted_=0;missing_={};windowStart_=windowStartMs_=lastAttemptedSequence_=0;observedWaitThread_=observedSubmitThread_=0;observedThreadMismatch_=false;handoffMissing_=handoffInvalid_=handoffOverflow_=0;}
-  Dist manual(std::array<double,capacity>&v)const{double t=0;for(unsigned i=0;i<count_;++i)t+=v[i];std::sort(v.begin(),v.begin()+count_);auto p=[&](unsigned x){return count_?v[(count_*x+99)/100-1]:0;};return{count_?t/count_:0,p(50),p(95)};}
+  Dist manual(std::array<double,capacity>&v)const{double t=0;for(unsigned i=0;i<count_;++i)t+=v[i];std::sort(v.begin(),v.begin()+count_);auto p=[&](unsigned x){return count_?v[(count_*x+99)/100-1]:0;};return{count_?t/count_:0,p(50),p(95),p(99),count_?v[count_-1]:0};}
   mutable std::mutex m_;bool enabled_=false,everComplete_=false,ready_=false,completedReady_=false;Wait wait_{};Current current_{};Completed completed_{};
   double callerWorkMs_=0;bool callerWorkMeasured_=false;uint64_t callerWorkFor_=0;
   std::unique_ptr<std::array<Sample,capacity>> samples_;std::array<uint64_t,MissingCount> missing_{};unsigned count_=0;uint64_t attempted_=0,window_=0,windowStart_=0,windowStartMs_=0,lastAttemptedSequence_=0,nextToken_=0;uint64_t handoffMissing_=0,handoffInvalid_=0,handoffOverflow_=0;Shape shape_{};uint32_t firstThread_=0,waitThread_=0,observedWaitThread_=0,observedSubmitThread_=0;bool observedThreadMismatch_=false;Report report_{};
