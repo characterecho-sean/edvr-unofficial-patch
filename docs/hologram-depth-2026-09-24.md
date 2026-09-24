@@ -2,18 +2,21 @@
 
 ## Status
 
-- **State:** first build ON MAIN (986ebaad) FLOWN ONCE (20260924_155636,
-  dump eye_155832, rolling): the inner quarters still blurred, two defects
-  found (below). Round 3 BUILT on `claude/openxr-perf-gaps`, green
-  (`hologram_depth_test`: 1270 checks), NOT FLOWN:
-  - the share test now reads the game's own RT0 resource back (a per-eye
-    cached SRV, in that RTV's own view format), never the tonemapped
-    `inSrv` -- comparing the two was the defect 986ebaad flew with;
-  - the floor now reads the displayed (tonemapped) pixel, falling back to
-    the contribution's own space only without one;
-  - the target hologram and the five radar-contact families are built in
-    (eleven built-in families total; `holoBuildFamilyList` is the pure,
-    rig-tested builder).
+- **State:** round 3 (bbaf99f4) FLOWN OK 2026-09-24 16:30. Sean: "That
+  fixed the holograms and the radar." It was the third build:
+  - 986ebaad blurred, for the two defects below;
+  - round 3 reads the share from the game's own RT0 in its view format,
+    puts the floor on the displayed pixel, and lists eleven families.
+
+  Round 4 BUILT, NOT FLOWN: a world-marker class for the target reticle's
+  3D triangles (`71DD8B8B09060A81`, its own built-in list, not radius-
+  clipped -- `ContributionBegin` picks a DepthEnable-FALSE state for it;
+  `holoScratchPrepare`'s element-depth clear moved to 0 so its depth
+  survives at any range; the resolve's radius check is now `d>0`), and an
+  eye-run census of the UI content tracker for the ghosting digits
+  (flight 20260924_163011, below) -- `UiContent::lastDecision` plus a
+  capped per-draw log and one frame summary, gated on
+  `objectProbeLedgerActive()`'s rising edge (ui_depth.cpp, ui_content.h).
   `advanced.temporal_aa_hologram_depth` (default on), with
   `advanced.temporal_aa_hologram_families`, `_floor` and `_share`. It runs
   inside `fix.temporal_aa`'s interface depth (`ui_depth.cpp`) and needs it on.
@@ -35,7 +38,11 @@
   `B932058F26B76691`, `94D5C556DFD6D705` (named by their position in the
   draw ledger, right after the two stalks in each eye's cockpit section --
   which one paints the visible bars is still open). The canopy
-  `8C091FFD08644E02` is refused even if listed.
+  `8C091FFD08644E02` is refused even if listed. A separate, second
+  built-in list holds one WORLD MARKER, not radius-clipped: the target
+  reticle's 3D triangles `71DD8B8B09060A81` (round 4). Extras from
+  `advanced.temporal_aa_hologram_families` always join the cockpit list,
+  never this one.
 - **Mechanism:** each listed draw is issued twice more after the game's.
   The first pass adds the element's own blended light into a scratch
   target. It counts only fragments nearer than the cockpit radius
@@ -82,13 +89,17 @@
   3. Fly a key-off leg for the GPU time.
 
   Read these log lines:
-  - the `hologram depth:` configure line;
+  - the `hologram depth:` configure line, now "N cockpit families, M world
+    markers" (round 4: M should read 1);
   - the first-listed-draw line (the blend space, and now target view
     yes/no -- no should not happen for the HDR scene target itself);
   - the 30 s census: listed draws per frame, stamped pixels p50, share
     test skipped (no target view) and floor on contribution (no display
     view) should both read at or near 0 -- either climbing back up means
-    round 3's own fix is not reaching its inputs.
+    round 3's own fix is not reaching its inputs;
+  - round 4: the target reticle's triangles should now show nonzero Z and
+    HoloCoverage at any range in the eye dump; the `UI content census:`
+    lines on the run's first frame, for the ghosting-digits question.
 
   In the dumps, read the new `HoloContribution` input against `C00` and
   `Z` at the icon, the holograms and the marker corners.
@@ -143,6 +154,40 @@ cockpit 0.26 px.
 - **Listed elements:** the share-space defect above refused them.
 - The first-listed-draw line gave the target as format 26 (HDR). The
   hologram section is the last group of draws into each eye's HDR target.
+
+## Flight 20260924_163011 (bbaf99f4, round 3, Frontier, FSR)
+
+Sean: "That fixed the holograms and the radar." The census stamped a
+median of 34k-63k pixels per eye-frame, and both fallback counters read
+0. Two further reports came with dumps eye_163401 and eye_163405
+(supercruise, MACLEOD MARKET targeted) and eye_163515 (normal space,
+ship BOKESY at 1.65 km):
+
+- **The target reticle's 3D triangles go indistinct with speed.** They
+  have no coverage at all: Z 0, UI 0, HoloCoverage 0, Bias 0. They carry
+  the sky's MV (+0.59,-0.89), while the ship they bracket moves at
+  (+0.14,+0.27): parallax at 1.6 km in normal space.
+  - In the ledger (frame 27528), vs `71DD8B8B09060A81` draws 72
+    vertices, right after the canopy and only with a ship targeted.
+    That is three triangular prisms of 24 vertices each. Believed, by
+    shape, to be the triangles.
+  - Fix BUILT (round 4): a world-marker class, not clipped to the
+    cockpit radius, so the triangles get their own depth at the target.
+    Not yet flown.
+- **Changing distance digits ghost.** In normal space, "1.65km BOKESY"
+  is already stamped at the target's depth (1646 m) by the holo family
+  coverage, and moves with the ship's MV. In supercruise the reticle and
+  text are stamped at ~34,000 km with MV equal to the sky's. So the
+  motion is right; the upscaler blends the previous frame's digits in.
+  - UiEdits reads 0 on the digits, and Bias is 125 (half reactive).
+  - The UI content tracker is thrashing: 1,545 evictions and 281k
+    declines against 39k comparisons by 16:35.
+  - Not yet known whether the text's source is a glyph atlas (declined
+    by design) or an evicted surface. A per-draw census at the eye run's
+    first frame is BUILT (round 4): `UiContent::lastDecision` names why
+    (nine decline reasons, hit, reset, updated), with the entry's age and
+    evictions this call; capped at 64 lines, one summary line after.
+    Not yet flown -- the next dump settles which reason the digits give.
 
 ## Decisions, 2026-09-24
 

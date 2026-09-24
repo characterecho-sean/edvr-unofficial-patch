@@ -28,6 +28,10 @@ ComPtr<ID3DBlob> compile(const char*, const char*);
 namespace edvr {
 ID3D11Texture2D* testScene = nullptr;
 std::string g_lastLog;
+// ui_depth.cpp's UI content census reads this (objectProbeLedgerActive,
+// object_probe.h) to gate its per-draw logging; this rig never arms an
+// eye run, so it stays false -- object_probe.cpp itself is not linked in.
+namespace detail { bool g_objectProbeOn = false; bool g_objectProbeLedgerOn = false; }
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log() = default;
 // Unlike tools\ui_depth_test's no-op stub, this one FORMATS the message:
@@ -398,9 +402,14 @@ int main() {
         for (float v : privateDepth()) check(std::fabs(v - 0.3f) < 1e-6f, "nothing listed: depth untouched");
     }
 
-    // Beyond radius: bright, but at 50 m against a 10 m radius -- both
-    // per-draw passes clear/test against radiusDepth, so this contributes
-    // nothing at all, at either pass.
+    // Beyond radius: bright, but at 50 m against a 10 m radius -- the
+    // contribution pass still clears/tests against radiusDepth, so this
+    // element never contributes; its element depth DOES now write (the
+    // scratch clears to 0, not radiusDepth, since a world marker below
+    // needs exactly that), but with contribution E=0 the floor test's own
+    // e-fallback (display is null in every case on this page) still
+    // discards it at the resolve -- unchanged from before the clear
+    // value moved, confirmed by this same check still passing.
     {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
@@ -409,6 +418,38 @@ int main() {
         listedReissue();
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (beyond radius)");
         for (float v : privateDepth()) check(v == 0.0f, "beyond radius: leaves the sky's depth");
+    }
+
+    // World marker: the identical 50 m draw, but classified as a world
+    // marker (g_holoIsWorldMarker, set directly here exactly as g_holoEye
+    // is elsewhere on this page -- the classifier itself is untestable
+    // under the aborting binding shadow). ContributionBegin now picks the
+    // DepthEnable-FALSE state, so this element DOES contribute, and its
+    // own depth (50 m) is what the resolve stamps.
+    {
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        const float rgba[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+        g_holoIsWorldMarker = true;
+        originalDraw(kNear50m, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
+        g_holoDrawVs = kHoloWorldMarkerReticle;
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (world marker)");
+        for (float v : privateDepth())
+            check(std::fabs(v - kNear50m) < 1e-5f, "world marker: beyond radius, covered with its own depth");
+
+        // The same draw, but back to a cockpit family: DepthEnable TRUE
+        // against the radius scratch again, so it is excluded exactly as
+        // the plain "beyond radius" case above.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        g_holoIsWorldMarker = false;
+        originalDraw(kNear50m, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
+        g_holoDrawVs = kHoloIconCore;
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (same draw, cockpit family)");
+        for (float v : privateDepth())
+            check(v == 0.0f, "world marker: the same draw classified as cockpit is not covered");
     }
 
     // Behind nearer scene: a listed element at 5 m, but the REAL scene
@@ -523,9 +564,12 @@ int main() {
 
     // Sun corona: a bright listed quad beyond the radius, plus a listed
     // quad with zero light inside it, over the same pixels in the same
-    // eye/frame -- the far quad fails BOTH per-draw passes' own radius
-    // test (never reaching the scratch at all), so it cannot lend the
-    // near, dark quad its brightness.
+    // eye/frame. The far quad still fails the CONTRIBUTION pass's radius
+    // test (E stays 0), so it cannot lend the near, dark quad its
+    // brightness; its element depth now writes (the scratch clears to 0),
+    // but the near quad's own element depth (5 m, nearer) overwrites it
+    // regardless of which cleared first -- the resolved depth, and the
+    // floor test's e-fallback result, are unchanged either way.
     {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
@@ -595,7 +639,9 @@ int main() {
     // The family builder covers the eleven built-ins (the holo panel, the
     // icon core, the corona, its two stalks, the target sphere and the
     // five contact markers) and refuses the canopy, however it is named,
-    // and says so once.
+    // and says so once. The world-marker list is separate, fixed, and
+    // reported by its own function -- holoWorldMarkerList takes no spec,
+    // so advanced.temporal_aa_hologram_families cannot add to it.
     {
         uint64_t fam[kMaxHashes];
         const uint32_t famCount = holoBuildFamilyList("8C091FFD08644E02", fam, kMaxHashes);
@@ -605,6 +651,14 @@ int main() {
               "family builder: the contact markers are built in");
         check(!inList(fam, famCount, kHoloCanopy), "family builder: the canopy is refused");
         check(g_lastLog.find("canopy") != std::string::npos, "family builder: the refusal is logged");
+
+        uint64_t world[kMaxHashes];
+        const uint32_t worldCount = holoWorldMarkerList(world, kMaxHashes);
+        check(worldCount == 1, "family builder: one world marker");
+        check(inList(world, worldCount, kHoloWorldMarkerReticle),
+              "family builder: the target reticle is the world marker");
+        check(!inList(fam, famCount, kHoloWorldMarkerReticle),
+              "family builder: the world marker is not one of the cockpit families");
     }
 
     // The periodic census prints while the key is on, once the window's
@@ -638,9 +692,9 @@ int main() {
     ctx->ClearState(); uiDepthShutdown();
     check(gpuTimingShutdown(ctx.Get()), "explicit shared timer shutdown before WARP release");
     std::printf("PASS: %d checks; the generic hologram/icon depth pass mirrors the game's own blend "
-                "(including alpha), gates by the cockpit radius before accumulation, reads its floor "
-                "off the displayed image and its share off the game's own HDR target (never each "
-                "other), restores every piece of state it touches, and the family builder and "
-                "periodic census behave.\n", checks);
+                "(including alpha), gates cockpit families by the cockpit radius before accumulation "
+                "while a world marker contributes at any range, reads its floor off the displayed "
+                "image and its share off the game's own HDR target (never each other), restores every "
+                "piece of state it touches, and the family builder and periodic census behave.\n", checks);
     return 0;
 }

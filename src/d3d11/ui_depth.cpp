@@ -25,6 +25,7 @@
 #include "binding_shadow.h"
 #include "depth_probe.h"    // depthProbeIsSceneDepth, ...Format: where the pass reads
 #include "exposure_fix.h"   // lookupShaderHash
+#include "object_probe.h"   // objectProbeLedgerActive: the UI content census's eye-run signal
 #include "shader_swap.h"    // shaderSwapCompilePs: the alpha-aware depth shaders
 #include "temporal_pass.h"  // temporalPassPlanes: the scene's encoding
 #include "vscreen.h"        // vScreenSetRenderTargetsRaw: the rebind past the shadow
@@ -82,6 +83,13 @@ constexpr uint64_t kHoloContactB     = 0x9B34C331902DC1EDull;
 constexpr uint64_t kHoloContactC     = 0x9611A454527F7FEBull;
 constexpr uint64_t kHoloContactD     = 0xB932058F26B76691ull;
 constexpr uint64_t kHoloContactE     = 0x94D5C556DFD6D705ull;
+// The target reticle's three 3D triangles (72 non-indexed vertices, three
+// prisms -- pool\draws_163515.bin, frame 27528, right after the canopy):
+// a WORLD MARKER, not a cockpit family. It tracks the targeted ship, which
+// can be kilometres out, so it is never radius-clipped like the families
+// above -- eye dump eye_163515: sky MV (+0.59,-0.89) against the bracketed
+// ship's (+0.14,+0.27) at 1.65 km, going indistinct with speed.
+constexpr uint64_t kHoloWorldMarkerReticle = 0x71DD8B8B09060A81ull;
 // The two interface composites drawn through the interface projection: the
 // menu's and the loader's panel (vs A888D51024D9798E, ps 9107E72CB016CC02)
 // and the loader's curved screen (vs 4EF6DDB075A927FA, ps 85565E9261812E2F).
@@ -733,6 +741,48 @@ Mask     g_mask[2];
 Mask     g_edits[2];
 UiContent g_uiContent;
 bool g_contentNoted=false;
+// UI CONTENT CENSUS: one log line per surfaceComposite draw that calls
+// g_uiContent.prepare, but only across the eye run's first frame, capped
+// at 64 lines, plus one summary line once that frame closes. Gated on
+// objectProbeLedgerActive() -- the eye-run-armed signal pixel_probe and
+// object_probe's own ledger already key off (both armed from
+// temporal_pass.cpp's beginEyeRun) -- which stays true for the whole
+// multi-frame capture, so a rising edge here is what narrows it to the
+// FIRST frame: g_uiContentCensusOn flips true at the frame boundary where
+// the ledger is seen newly active (arming the frame about to start) and
+// false at the next boundary (closing it, after printing the summary).
+bool     g_uiContentCensusOn = false;
+bool     g_uiContentCensusLedgerWasOn = false;
+uint32_t g_uiContentCensusLines = 0;
+uint32_t g_uiContentCensusHits = 0, g_uiContentCensusResets = 0, g_uiContentCensusUpdated = 0,
+         g_uiContentCensusDeclined = 0, g_uiContentCensusEvicted = 0;
+const char* uiContentDecisionWord(UiContent::Decision d) {
+    using D = UiContent::Decision;
+    switch (d) {
+        case D::kHit: return "hit";
+        case D::kReset: return "reset";
+        case D::kUpdated: return "updated";
+        default: return "declined";
+    }
+}
+const char* uiContentReason(UiContent::Decision d, uint32_t age) {
+    using D = UiContent::Decision;
+    switch (d) {
+        case D::kDeclinedNoSurface: return "no surface";
+        case D::kDeclinedNotTexture2D: return "not Texture2D";
+        case D::kDeclinedFormat: return "format";
+        case D::kDeclinedNoRenderTarget: return "no RENDER_TARGET bind";
+        case D::kDeclinedViewShape: return "array/MSAA/mips/view";
+        case D::kDeclinedBudget: return "over budget";
+        case D::kDeclinedNoFreeEntry: return "no free entry";
+        case D::kDeclinedCreateFailed: return "creation failed";
+        case D::kDeclinedShaderFailed: return "shader failed";
+        case D::kHit: return "same frame";
+        case D::kReset: return age == 0 ? "new entry" : "frame gap";
+        case D::kUpdated: return "compared";
+    }
+    return "?";
+}
 bool     g_maskFailedNoted = false;
 bool     g_maskSizeNoted = false;
 // THE SMOKE'S OWN DEPTH TARGET (the review of 2026-09-10 on the trail's
@@ -1273,6 +1323,13 @@ constexpr uint64_t kHoloFamiliesBuiltIn[10] = {kHoloIconCore, kHoloCoronaFamily,
                                                kHoloIconStalkA, kHoloIconStalkB,
                                                kHoloTargetSphere, kHoloContactA, kHoloContactB,
                                                kHoloContactC, kHoloContactD, kHoloContactE};
+// WORLD MARKERS: a second, separate built-in list for draws that must be
+// covered wherever they are, not just inside the cockpit radius (the
+// families above are all short-range panel/icon geometry; a world marker
+// tracks something that can be kilometres out). Fixed, never extended by
+// advanced.temporal_aa_hologram_families -- see holoWorldMarkerList below.
+constexpr uint64_t kHoloWorldMarkers[1] = {kHoloWorldMarkerReticle};
+constexpr uint32_t kHoloWorldMarkerCount = static_cast<uint32_t>(sizeof(kHoloWorldMarkers) / sizeof(kHoloWorldMarkers[0]));
 // The canopy sits in front of the whole sky; covering it would smear the
 // stars behind it. Refused even if named in advanced.
 // temporal_aa_hologram_families (holoBuildFamilyList, below parseHashes).
@@ -1288,6 +1345,7 @@ FaultBudget g_holoBudget("uiDepthHolo", 5);
 int      g_holoEye = -1;
 uint32_t g_holoW = 0, g_holoH = 0;
 uint64_t g_holoDrawVs = 0;
+bool     g_holoIsWorldMarker = false;   // matched kHoloWorldMarkers, not the cockpit list
 
 // Three scratch targets per eye: the game's own light, mirrored through
 // its own blend (contribution); the nearest raster depth across every
@@ -1313,7 +1371,6 @@ struct HoloScratch {
     uint32_t                   w = 0, h = 0;
     uint32_t                   preparedFrame = ~0u;          // g_frame at the last prepare
     uint32_t                   declinedProjectionFrame = ~0u; // counted once per eye-frame
-    float                      radiusDepth = 0.0f;    // reversed-Z device value AT the cockpit radius
     bool                       linearBlend = false;    // the game's own RTV0 view was sRGB (fallback floor only)
     // The game's own RT0 resource, tracked so the SHARE test can read it
     // back in its own space -- never the tonemapped display image, which
@@ -1348,14 +1405,19 @@ UINT                       g_holoSavedPsClassCount = 0;
 ID3D11BlendState*         g_holoContribBlendToFree = nullptr;  // an uncached blend past the cache's size
 bool                       g_holoContribOn = false, g_holoElementOn = false;
 
-// The contribution pass's fixed depth-test state: GREATER against the
-// RADIUS scratch (cleared to this eye/frame's radiusDepth), write ZERO.
-// Never the draw's own state, and never the game's live depth, so a draw
-// with depth off, or with no depth view bound, gets exactly this test.
+// The contribution pass's fixed depth-test state for a COCKPIT family:
+// GREATER against the RADIUS scratch (cleared to this eye/frame's
+// radiusDepth), write ZERO. Never the draw's own state, and never the
+// game's live depth, so a draw with depth off, or with no depth view
+// bound, gets exactly this test.
 ID3D11DepthStencilState* g_holoContribDss = nullptr;
+// The same pass for a WORLD MARKER: DepthEnable FALSE, so every fragment
+// contributes regardless of range -- a marker can track something
+// kilometres out, well past the radius scratch's own clear value.
+ID3D11DepthStencilState* g_holoWorldMarkerDss = nullptr;
 // GREATER, write ALL: the element-depth pass's own accumulation (nearer
-// of every listed draw's geometry this eye/frame, starting from
-// radiusDepth) and the resolve's write into the private copy (nearer of
+// of every listed draw's geometry this eye/frame, starting from 0, the
+// reversed-Z far) and the resolve's write into the private copy (nearer of
 // the element and whatever is already there) share this test.
 ID3D11DepthStencilState* g_holoElementDss = nullptr;
 ID3D11RasterizerState*   g_holoResolveRs = nullptr;
@@ -1374,7 +1436,10 @@ ID3D11VertexShader* g_holoResolveVs = nullptr;
 ID3D11PixelShader*  g_holoResolvePs = nullptr;
 bool                g_holoResolveTried = false;
 ID3D11Buffer*       g_holoResolveCbBuf = nullptr;
-struct HoloResolveCb { float floorValue, radiusDepth, share; uint32_t flags; };
+// A D3D11 constant buffer's ByteWidth must be a multiple of 16; dropping
+// radiusDepth took this struct to 12 bytes, so an explicit pad keeps it
+// at the 16 CreateBuffer (and UpdateSubresource's implicit size) needs.
+struct HoloResolveCb { float floorValue, share; uint32_t flags; uint32_t _pad0; };
 
 // The periodic census (holoDepthWindowTick): a 30 s wall-clock window,
 // unlike the neighbouring 20 s frame-counted one (kTotalsFrames) --
@@ -1505,10 +1570,15 @@ HoloScratch* holoScratchFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint3
 // The cockpit-radius admission test, shared by both per-draw passes: runs
 // once at the first listed draw of the eye each frame, from whichever of
 // the two Begins gets there first. radiusDepth is the reversed-Z device
-// value AT the cockpit radius; clearing the element-depth scratch AND the
-// radius scratch to exactly that value means a plain GREATER test decides
-// "nearer than the radius" at both passes, with no metres conversion
-// anywhere past this point (including the resolve).
+// value AT the cockpit radius; the radius scratch clears to it, so a plain
+// GREATER test against that scratch decides "nearer than the radius" for
+// the cockpit families' contribution pass, with no metres conversion past
+// this point. The element-depth scratch clears to 0 (reversed-Z far)
+// instead: a world marker's own depth, at any range, must survive here,
+// and a cockpit family's far fragment surviving too is harmless -- its
+// contribution is still radius-gated above, so it stays at E=0 and the
+// resolve's floor/share tests reject it regardless (docs\hologram-depth-
+// 2026-09-24.md, the world-marker entry).
 bool holoScratchPrepare(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
     HoloScratch* sp = holoScratchFor(ctx, eye, w, h);
     if (!sp) return false;
@@ -1524,10 +1594,9 @@ bool holoScratchPrepare(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t 
     }
     const FLOAT zero[4]{};
     vScreenClearRenderTargetViewRaw(ctx, s.contribRtv, zero);
-    ctx->ClearDepthStencilView(s.depthDsv, D3D11_CLEAR_DEPTH, radiusDepth, 0);
+    ctx->ClearDepthStencilView(s.depthDsv, D3D11_CLEAR_DEPTH, 0.0f, 0);
     ctx->ClearDepthStencilView(s.radiusDsv, D3D11_CLEAR_DEPTH, radiusDepth, 0);
     s.preparedFrame = g_frame;
-    s.radiusDepth = radiusDepth;
     return true;
 }
 
@@ -1545,6 +1614,21 @@ ID3D11DepthStencilState* holoContribDss(ID3D11DeviceContext* ctx) {
     dev->Release();
     if (FAILED(hr)) g_holoContribDss = nullptr;
     return g_holoContribDss;
+}
+
+ID3D11DepthStencilState* holoWorldMarkerDss(ID3D11DeviceContext* ctx) {
+    if (g_holoWorldMarkerDss) return g_holoWorldMarkerDss;
+    D3D11_DEPTH_STENCIL_DESC d{};
+    d.DepthEnable = FALSE;
+    d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    d.StencilEnable = FALSE;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    const HRESULT hr = dev->CreateDepthStencilState(&d, &g_holoWorldMarkerDss);
+    dev->Release();
+    if (FAILED(hr)) g_holoWorldMarkerDss = nullptr;
+    return g_holoWorldMarkerDss;
 }
 
 ID3D11DepthStencilState* holoElementDepthState(ID3D11DeviceContext* ctx) {
@@ -1669,17 +1753,22 @@ constexpr char kHoloResolveVsHlsl[] =
 // display image); each absence is handled on its own, never disqualifying
 // the other test. Without a display image the floor falls back to the
 // contribution's own space (linearBlend: the TARGET's view was sRGB).
+// ElementDepth clears to 0 (reversed-Z far), so d>0 alone only rejects a
+// pixel nothing listed drew into -- a world marker's own depth survives
+// it at any range, and so, harmlessly, does a cockpit family's far
+// fragment (the sun's corona): its contribution stayed radius-gated at
+// E=0, so the floor/share tests below reject it regardless.
 constexpr char kHoloResolvePsHlsl[] =
     "Texture2D<float4> Contribution : register(t0);\n"
     "Texture2D<float> ElementDepth : register(t1);\n"
     "Texture2D<float4> Target : register(t2);\n"
     "Texture2D<float4> Display : register(t3);\n"
-    "cbuffer HoloResolveCB : register(b0) { float floorValue; float radiusDepth; float share; uint flags; };\n"
+    "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; };\n"
     "float3 srgbEncode(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055; }\n"
     "void main(float4 pos : SV_POSITION, out float depth : SV_Depth) {\n"
     "    int3 p = int3(int2(pos.xy), 0);\n"
     "    float d = ElementDepth.Load(p);\n"
-    "    if (!(d > radiusDepth)) discard;\n"
+    "    if (!(d > 0.0)) discard;\n"
     "    float3 e = max(Contribution.Load(p).rgb, 0.0);\n"
     "    bool linearBlend = (flags & 1u) != 0;\n"
     "    bool haveTarget = (flags & 2u) != 0;\n"
@@ -1833,6 +1922,7 @@ void holoDepthShutdownImpl() {
     }
     for (auto& e : g_holoContribBlendCache) { if (e.state) { e.state->Release(); e.state = nullptr; } }
     if (g_holoContribDss) { g_holoContribDss->Release(); g_holoContribDss = nullptr; }
+    if (g_holoWorldMarkerDss) { g_holoWorldMarkerDss->Release(); g_holoWorldMarkerDss = nullptr; }
     if (g_holoElementDss) { g_holoElementDss->Release(); g_holoElementDss = nullptr; }
     if (g_holoResolveRs) { g_holoResolveRs->Release(); g_holoResolveRs = nullptr; }
     if (g_holoResolveVs) { g_holoResolveVs->Release(); g_holoResolveVs = nullptr; }
@@ -2016,11 +2106,27 @@ uint32_t holoBuildFamilyList(const std::string& extraSpec, uint64_t* out, uint32
     return count;
 }
 
+// The world-marker list (kHoloWorldMarkers, above): fixed, no Config, no
+// advanced.temporal_aa_hologram_families extras -- a world marker's whole
+// point is that it is not one of the (radius-clipped) cockpit families,
+// so folding user-added extras into it would let a mistaken hash skip the
+// radius test entirely. Pure, like holoBuildFamilyList, so the rig can
+// drive it directly.
+uint32_t holoWorldMarkerList(uint64_t* out, uint32_t cap) {
+    uint32_t count = 0;
+    for (uint64_t marker : kHoloWorldMarkers) {
+        if (count < cap) out[count++] = marker;
+    }
+    return count;
+}
+
 void holoDepthConfigure(Config& cfg) {
     const bool on = cfg.getBool("advanced.temporal_aa_hologram_depth", true);
     uint64_t fam[kMaxHashes];
     const uint32_t famCount = holoBuildFamilyList(
         cfg.getString("advanced.temporal_aa_hologram_families", ""), fam, kMaxHashes);
+    uint64_t world[kMaxHashes];
+    const uint32_t worldCount = holoWorldMarkerList(world, kMaxHashes);
     float floor = cfg.getFloat("advanced.temporal_aa_hologram_floor", 0.05f);
     if (!std::isfinite(floor) || floor < 0.0f) floor = 0.0f;
     if (floor > 1.0f) floor = 1.0f;
@@ -2036,9 +2142,10 @@ void holoDepthConfigure(Config& cfg) {
     g_holoFloor = floor;
     g_holoShare = share;
     if (changed) {
-        Log::get().note("hologram depth: %s -- %u famil%s, floor %.3f (display brightness), "
-                        "share %.2f, cockpit radius %.0f m.",
+        Log::get().note("hologram depth: %s -- %u cockpit famil%s, %u world marker%s, "
+                        "floor %.3f (display brightness), share %.2f, cockpit radius %.0f m.",
                         on ? "on" : "off", famCount, famCount == 1 ? "y" : "ies",
+                        worldCount, worldCount == 1 ? "" : "s",
                         static_cast<double>(floor), static_cast<double>(share),
                         static_cast<double>(g_cockpitMetres));
     }
@@ -2942,6 +3049,39 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
             // A declined source must bind null at t14 too; never sample a
             // game's unrelated binding as UI edit evidence.
             changes=g_uiContent.prepare(ctx,source.Get(),g_frame,(g_frame&15u)==0u);
+            if (g_uiContentCensusOn) {
+                switch (g_uiContent.lastDecision) {
+                    case UiContent::Decision::kHit: ++g_uiContentCensusHits; break;
+                    case UiContent::Decision::kReset: ++g_uiContentCensusResets; break;
+                    case UiContent::Decision::kUpdated: ++g_uiContentCensusUpdated; break;
+                    default: ++g_uiContentCensusDeclined; break;
+                }
+                g_uiContentCensusEvicted += g_uiContent.lastEvicted;
+                if (g_uiContentCensusLines < 64) {
+                    ++g_uiContentCensusLines;
+                    uint32_t sw = 0, sh = 0, sfmt = 0, sbind = 0;
+                    if (source) {
+                        D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+                        source->GetDesc(&svd);
+                        sfmt = static_cast<uint32_t>(svd.Format);
+                        Microsoft::WRL::ComPtr<ID3D11Resource> sres;
+                        source->GetResource(&sres);
+                        Microsoft::WRL::ComPtr<ID3D11Texture2D> stex;
+                        if (sres && SUCCEEDED(sres.As(&stex))) {
+                            D3D11_TEXTURE2D_DESC srcTd{};
+                            stex->GetDesc(&srcTd);
+                            sw = srcTd.Width; sh = srcTd.Height; sbind = srcTd.BindFlags;
+                        }
+                    }
+                    Log::get().note("UI content census: frame %u eye %d vs %016llX ps %016llX source %ux%u "
+                                    "fmt %u bind 0x%X -> %s (%s), entry age %u frames, evicted %u this call.",
+                                    g_frame, g_drawEye, static_cast<unsigned long long>(boundVsHash(ctx)),
+                                    static_cast<unsigned long long>(boundPsHash(ctx)), sw, sh, sfmt, sbind,
+                                    uiContentDecisionWord(g_uiContent.lastDecision),
+                                    uiContentReason(g_uiContent.lastDecision, g_uiContent.lastAge),
+                                    g_uiContent.lastAge, g_uiContent.lastEvicted);
+                }
+            }
             if(changes) edits=maskFor(ctx,g_drawEye,g_rebindW,g_rebindH,g_edits);
             if(!edits)changes=nullptr;
             if(edits && !g_contentNoted) {
@@ -3111,9 +3251,13 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
     g_holoEye = -1;
     if (!detail::g_holoDepthOn) return false;
     // Cheapest first: the vertex-shader hash alone rejects nearly every
-    // draw, before the two binding-shadow reads below.
+    // draw, before the two binding-shadow reads below. Either list
+    // qualifies; which one is recorded in g_holoIsWorldMarker, for
+    // ContributionBegin's DSS choice below.
     const uint64_t h = boundVsHash(ctx);
-    if (!h || !inList(g_holoFamilies, g_holoFamilyCount, h) || uiDepthIsExcluded(h)) return false;
+    if (!h || uiDepthIsExcluded(h)) return false;
+    const bool worldMarker = inList(kHoloWorldMarkers, kHoloWorldMarkerCount, h);
+    if (!worldMarker && !inList(g_holoFamilies, g_holoFamilyCount, h)) return false;
     // A bound depth-stencil must still be the scene's. None bound is
     // accepted: the icon core and the corona draw with depth off, and
     // neither pass below reads the game's depth.
@@ -3128,6 +3272,7 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
     g_holoW = rt.a;
     g_holoH = rt.b;
     g_holoDrawVs = h;
+    g_holoIsWorldMarker = worldMarker;
     ++g_holoWindowListed;
     return true;
 }
@@ -3135,16 +3280,18 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
 // Pass (a): the game's own draw again, RTV0 rebound to a scratch
 // contribution target whose blend mirrors the game's own (holoContribBlendFor)
 // -- VS/PS/inputs untouched, so RGB accumulates exactly the light the
-// game's own blend equation would have added. Depth-tests against the
-// RADIUS scratch (never the game's own depth, and never writes): every
-// listed draw is admitted or excluded by the SAME cockpit-radius test,
-// independent of whether this particular draw bound any depth at all.
+// game's own blend equation would have added. A cockpit family depth-tests
+// against the RADIUS scratch (never the game's own depth, and never
+// writes): every listed draw is admitted or excluded by the SAME
+// cockpit-radius test, independent of whether this particular draw bound
+// any depth at all. A world marker gets DepthEnable FALSE instead
+// (holoWorldMarkerDss): it contributes regardless of range.
 bool uiDepthHologramContributionBegin(ID3D11DeviceContext* ctx) {
     g_holoContribOn = false;
     if (g_holoEye < 0) return false;
     if (!holoScratchPrepare(ctx, g_holoEye, g_holoW, g_holoH)) return false;
     HoloScratch& s = g_holoScratch[g_holoEye];
-    ID3D11DepthStencilState* dss = holoContribDss(ctx);
+    ID3D11DepthStencilState* dss = g_holoIsWorldMarker ? holoWorldMarkerDss(ctx) : holoContribDss(ctx);
     if (!dss) return false;
     ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);
     ctx->OMGetBlendState(&g_holoSavedBlend, g_holoSavedBlendFactor, &g_holoSavedSampleMask);
@@ -3247,10 +3394,13 @@ void uiDepthHologramContributionEnd(ID3D11DeviceContext* ctx) {
 }
 
 // Pass (b): the same draw once more, null pixel shader, into a scratch
-// depth target of its own (cleared to this eye/frame's radiusDepth), depth
-// func GREATER, write on -- the NEAREST raster depth of the family's
-// geometry nearer than the cockpit radius, over its whole footprint,
-// independent of alpha or the coverage floor (tested only at the resolve).
+// depth target of its own (cleared to 0, reversed-Z far), depth func
+// GREATER, write on -- the NEAREST raster depth of the family's geometry
+// over its whole footprint, independent of alpha or the coverage floor
+// (tested only at the resolve). The same test for both lists: a cockpit
+// family's own radius gating lives in the contribution pass above, not
+// here, so a far cockpit fragment can still write an element depth --
+// harmless, per holoScratchPrepare's own comment.
 bool uiDepthHologramElementDepthBegin(ID3D11DeviceContext* ctx) {
     g_holoElementOn = false;
     if (g_holoEye < 0) return false;
@@ -3370,7 +3520,7 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
     if (!haveDisplay) ++g_holoWindowFloorFallback;
     const uint32_t flags = (s.linearBlend ? 1u : 0u) | (haveTarget ? 2u : 0u) |
                            (haveDisplay ? 4u : 0u) | (displaySrgb ? 8u : 0u);
-    const HoloResolveCb data{g_holoFloor, s.radiusDepth, g_holoShare, flags};
+    const HoloResolveCb data{g_holoFloor, g_holoShare, flags};
     vScreenUpdateSubresourceRaw(ctx, cb, 0, nullptr, &data, 0, 0);
     const bool ran = guardedBudget(g_holoBudget, [&] {
         ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);
@@ -3664,6 +3814,27 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     for (SmokeDepth& s : g_smokeDepth) s.written = false;
     if (!detail::g_uiDepthOn) return;
     holoDepthWindowTick(ctx);
+    // UI content census: close the frame this armed (the summary), then
+    // decide whether the frame about to start is the eye run's first --
+    // objectProbeLedgerActive() newly true since the last check, a rising
+    // edge that fires exactly once per run regardless of how many frames
+    // the ledger itself stays armed for.
+    if (g_uiContentCensusOn) {
+        Log::get().note("UI content census: frame %u summary -- hit %u, reset %u, updated %u, "
+                        "declined %u, evicted %u; %u bytes allocated, %u entries in use.",
+                        g_frame, g_uiContentCensusHits, g_uiContentCensusResets,
+                        g_uiContentCensusUpdated, g_uiContentCensusDeclined, g_uiContentCensusEvicted,
+                        g_uiContent.allocated, g_uiContent.inUse());
+        g_uiContentCensusOn = false;
+    }
+    const bool ledgerActive = objectProbeLedgerActive();
+    if (ledgerActive && !g_uiContentCensusLedgerWasOn) {
+        g_uiContentCensusOn = true;
+        g_uiContentCensusLines = 0;
+        g_uiContentCensusHits = g_uiContentCensusResets = g_uiContentCensusUpdated =
+            g_uiContentCensusDeclined = g_uiContentCensusEvicted = 0;
+    }
+    g_uiContentCensusLedgerWasOn = ledgerActive;
     ++g_wFrames;
     if (!g_announced && g_wWrote > 0) {
         g_announced = true;
@@ -3719,6 +3890,8 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
 void uiDepthShutdown() {
     holoDepthShutdownImpl();
     g_uiContent.reset();g_contentNoted=false;
+    g_uiContentCensusOn=g_uiContentCensusLedgerWasOn=false;g_uiContentCensusLines=0;
+    g_uiContentCensusHits=g_uiContentCensusResets=g_uiContentCensusUpdated=g_uiContentCensusDeclined=g_uiContentCensusEvicted=0;
     if(g_savedEdits){g_savedEdits->Release();g_savedEdits=nullptr;}g_editsBound=false;
     for(auto& sample:g_stellarGpu) sample.reset();
     g_stellarCpuActive=-1;
