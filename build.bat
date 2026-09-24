@@ -11,13 +11,16 @@ REM
 REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
 REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
 REM
-REM  Usage:  build.bat [--clean] [--jobs N]
+REM  Usage:  build.bat [--clean] [--jobs N] [--dll-only]
 REM
 REM  Once the DLLs are built, the test rigs run concurrently, --jobs at a time
 REM  (default: one per logical core), through tools\run_jobs.py. Each rig is a
 REM  :rig_<label> subroutine at the end of this file; the runner starts it as
 REM  "build.bat --rig <label>", a child that inherits this build's environment
 REM  and runs that one subroutine. --rig is the runner's, not for hand use.
+REM  --dll-only is the post-commit promotion path: it requires the receipt from
+REM  a matching green full build, rebuilds the production DLLs, and skips rigs
+REM  and the self-contained installer.
 REM ===========================================================================
 
 set "ROOT=%~dp0"
@@ -34,6 +37,7 @@ set "EDVR_RIG="
 if "%~1"=="" goto args_done
 if /I "%~1"=="--clean" goto arg_clean
 if /I "%~1"=="--jobs" goto arg_jobs
+if /I "%~1"=="--dll-only" goto arg_dll_only
 if /I "%~1"=="--rig" goto arg_rig
 echo [edvr] unknown argument: %~1
 exit /b 1
@@ -46,12 +50,20 @@ set "EDVR_JOBS=%~2"
 shift
 shift
 goto parse_args
+:arg_dll_only
+set "EDVR_DLL_ONLY=1"
+shift
+goto parse_args
 :arg_rig
 set "EDVR_RIG=%~2"
 shift
 shift
 goto parse_args
 :args_done
+if defined EDVR_DLL_ONLY if defined DO_CLEAN (
+    echo [edvr] ERROR: --dll-only cannot be combined with --clean
+    exit /b 1
+)
 if defined EDVR_RIG goto run_rig
 
 if defined DO_CLEAN (
@@ -122,6 +134,7 @@ python tools\fetch_openxr_loader.py --self-test || exit /b 1
 python tools\gen_installer_rc.py --self-test || exit /b 1
 python tools\package_native.py --self-test || exit /b 1
 python tools\build_diff.py --self-test || exit /b 1
+python tools\build_receipt.py --self-test || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM
@@ -297,11 +310,9 @@ REM was deleted, its .obj stayed, and the link failed on three symbols it
 REM still referenced -- the lucky case. Had those symbols still existed, the
 REM removed feature would have linked straight back into the DLL with no
 REM line anywhere saying so. Clearing the directory first costs nothing and
-REM makes the object set exactly the source list.
-if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
-del /q "%OBJ%\d3d11\*.obj" 2>nul
-ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
-if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
+REM makes the object set exactly the source list. The cleanup happens after
+REM DLL-only promotion has verified its receipt, so a rejected promotion does
+REM not disturb the previous build.
 
 REM NVIDIA's DLSS SDK. EDVR_NGX_SDK names a copy explicitly; else the
 REM checkout's own third_party\ngx; else the machine's copy under
@@ -413,6 +424,31 @@ if defined FFX (
         echo [edvr] ==================================================================
     )
 )
+
+if defined EDVR_DLL_ONLY (
+    echo [edvr] === DLL-only promotion ===
+    python tools\build_receipt.py --verify "%BUILD%\full_build_receipt.json" ^
+        --root "%ROOT%" --require-clean ^
+        --context "cl=%CL%" ^
+        --context "profile_symbols=%EDVR_PROFILE_SYMBOLS%" ^
+        --context "cpu_compile=%EDVR_CPU_COMPILE%" ^
+        --context "cpu_link=%EDVR_CPU_LINK%" ^
+        --context "ngx_request=%EDVR_NGX_SDK%" ^
+        --context "ngx=%NGX%" ^
+        --context "ffx_request=%EDVR_FFX_DX11%" ^
+        --context "ffx=%FFX%" ^
+        --context "fsr_none=%FSR_NONE%" || (
+            echo [edvr] ERROR: DLL-only promotion is not allowed without the
+            echo        matching green full build receipt.
+            exit /b 1
+        )
+)
+
+if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
+del /q "%OBJ%\d3d11\*.obj" 2>nul
+ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
+if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
+
 cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
@@ -565,6 +601,8 @@ set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
 set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
     shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
 
+if defined EDVR_DLL_ONLY goto dll_only_finish
+
 echo.
 echo [edvr] === test rigs ===
 REM Every :rig_<label> subroutine at the end of this file, run by
@@ -633,6 +671,17 @@ if exist "%BUILD%\nvngx_dlss.dll" (
 )
 echo.
 python tools\package_native.py --check-installer || exit /b 1
+python tools\build_receipt.py --write "%BUILD%\full_build_receipt.json" ^
+    --root "%ROOT%" ^
+    --context "cl=%CL%" ^
+    --context "profile_symbols=%EDVR_PROFILE_SYMBOLS%" ^
+    --context "cpu_compile=%EDVR_CPU_COMPILE%" ^
+    --context "cpu_link=%EDVR_CPU_LINK%" ^
+    --context "ngx_request=%EDVR_NGX_SDK%" ^
+    --context "ngx=%NGX%" ^
+    --context "ffx_request=%EDVR_FFX_DX11%" ^
+    --context "ffx=%FFX%" ^
+    --context "fsr_none=%FSR_NONE%" || exit /b 1
 echo [edvr] Native OpenXR build and all gates passed.
 echo [edvr] Install both native DLLs and the bundled loader for a test flight:
 echo        python tools\install_edvr.py --target frontier --dry-run
@@ -644,6 +693,18 @@ echo [edvr] The self-contained build\edvr-installer.exe installs the same pair,
 echo        preserves graphics-mod chaining, and supports repair and uninstall.
 echo [edvr] After the flight:
 echo        python tools\edvr_log.py --target frontier --expect-build HEAD
+exit /b 0
+
+REM ===========================================================================
+:dll_only_finish
+echo.
+echo [edvr] === DLL-only promotion outputs ===
+copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
+python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" || exit /b 1
+python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" || exit /b 1
+echo [edvr] DLL-only build passed: production DLLs and loader are ready to install.
+echo [edvr] Test rigs and the self-contained installer were skipped; use a full build
+echo        before distributing an installer or accepting new source changes.
 exit /b 0
 
 REM ===========================================================================
