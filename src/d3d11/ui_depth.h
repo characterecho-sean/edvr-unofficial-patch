@@ -126,13 +126,17 @@ bool uiDepthHologramElementDepthBegin(ID3D11DeviceContext* ctx);
 void uiDepthHologramElementDepthEnd(ID3D11DeviceContext* ctx);
 // Once per eye per frame, before the temporal pass reads the private
 // scene-depth copy (uiDepthTemporalDepth): stamps each scratch pair's
-// nearest depth into that copy wherever its light clears the floor and,
-// when colour (the eye's own finished image, or null) is at exactly this
-// size, is a real share of it. False (and counted, by reason, for the
-// periodic census) when nothing was listed this eye/frame, the private
-// copy is unavailable, or the resolve's own shaders/state never built.
+// nearest depth into that copy wherever the pixel is visibly lit -- on
+// display (display, the eye's own finished, tonemapped image, or null),
+// falling back to the accumulated light's own space if display is null or
+// the wrong size -- and, when the game's own render target turned out to
+// be viewable (tracked by uiDepthHologramContributionBegin, never display:
+// a different resource at a different dynamic range), is a real share of
+// it. False (and counted, by reason, for the periodic census) when
+// nothing was listed this eye/frame, the private copy is unavailable, or
+// the resolve's own shaders/state never built.
 bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* scene,
-                            uint32_t w, uint32_t h, ID3D11ShaderResourceView* colour);
+                            uint32_t w, uint32_t h, ID3D11ShaderResourceView* display);
 // Borrowed view of this eye's raw contribution target (RGBA16F), for the
 // eye dump (temporal_pass.cpp's HoloContribution input). Null off, before
 // this frame's first listed draw for this eye, or after a size change.

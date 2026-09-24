@@ -3481,8 +3481,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (scene) {
             // The hologram/icon depth resolve (ui_depth.h) writes into the
             // private scene-depth copy, so it runs before
-            // uiDepthTemporalDepth hands that copy to the pass. inSrv is this
-            // eye's finished colour, for the resolve's share test.
+            // uiDepthTemporalDepth hands that copy to the pass. inSrv is
+            // this eye's finished, tonemapped colour, for the resolve's
+            // FLOOR test only -- its share test reads the game's own HDR
+            // render target back separately (never this).
             uiDepthHologramResolve(ctx, eye, scene, sd.Width, sd.Height, inSrv);
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
             celestialMotionViews(ctx, scene, terrainSrvs);
