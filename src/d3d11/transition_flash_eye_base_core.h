@@ -14,24 +14,28 @@
 // render-frame switch it is not refilled in time, so the copy IS the reset
 // value and the eye composes against the head pose alone -- the flash.
 //
-// The candidate written back is the mailbox's OWN last known-refilled value
-// (flight 062910: the never-reset ship+0x130 block agreed with a refilled
-// mailbox 0 times in 11,084 calls, so it is not a fit stand-in -- see "Ruled
-// out (062910)" in the design doc). transition_flash_eye_base.cpp caches M
-// every time it sees a refilled mode!=1 call; heldBaseRefusal below is the
-// guard an un-refilled call's cached candidate must clear before anything
-// writes it back.
+// Round 6's fix idea was a consume-time write: cache the mailbox's OWN last
+// known-refilled value (flight 062910: the never-reset ship+0x130 block
+// agreed with a refilled mailbox 0 times in 11,084 calls, so it is not a fit
+// stand-in -- see "Ruled out (062910)" in the design doc) and write it back
+// into the mailbox on an un-refilled call. That idea is SUPERSEDED as of
+// CHANGE 15 (2026-09-24): flight 134813's skip 22726 proved a consume-time
+// write cannot serve scene-new transitions (the base the scene wants is not
+// in any consume-indexed record), and flight 125237 proved the render-time
+// patch with the live mailbox. What remains from round 6 is the WATCH
+// machinery (this header's reset-value compare, the writer watch) and the
+// held base as one of the render patch's candidate bases.
 //
 // off | watch | on | alternate is the same four-way shape as advanced.
 // transition_flash_prevent, so this reuses tfp::Mode/parseMode/Treatment/
-// alternateTreatmentFor/modeAllowsActing/EventTracker/sessionCapReached/
-// isNewActedFrame/ringFrameInWindow/foldDumpTrigger/frameInDumpWindow
-// directly rather than re-deriving them -- see this header's own tests for
-// what is NOT shared (the reset-mailbox bit compare and the M/F validation
-// arithmetic both use different thresholds and a different index set than
-// transition_flash_prevent_core.h's comparePose/classify/isValidated, which
-// compare a cached DOUBLE pose against a from-root recompute; the mailbox and
-// its stand-in are FLOATS read straight out of game memory).
+// alternateTreatmentFor/modeAllowsActing/EventTracker/ringFrameInWindow/
+// foldDumpTrigger/frameInDumpWindow directly rather than re-deriving them --
+// see this header's own tests for what is NOT shared (the reset-mailbox bit
+// compare and the M/F validation arithmetic both use different thresholds
+// and a different index set than transition_flash_prevent_core.h's
+// comparePose/classify/isValidated, which compare a cached DOUBLE pose
+// against a from-root recompute; the mailbox and its stand-in are FLOATS
+// read straight out of game memory).
 #include "transition_flash_prevent_core.h"
 
 #include <cmath>
@@ -139,59 +143,14 @@ inline bool allFinite16(const float v[16]) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// CHANGE 1 (task of 2026-09-24, "the substitute becomes the held base"):
-// ship+0x130 (F) is no longer the candidate written into the mailbox -- flight
-// 062910 measured it agreeing with a refilled mailbox 0 times in 11,084 calls
-// (see "Ruled out (062910)" in the design doc). The candidate is now the
-// mailbox's OWN last known-refilled value, cached by transition_flash_eye_
-// base.cpp on every mode!=1 call whose mailbox was not the reset value. Every
-// guard below is ANDed together in the priority this enum's order states, so
-// a test can flip each one alone (the rest held at the acting baseline) and
-// see it -- and only it -- refuse. F-vs-M agreement (EyeBaseValidation above)
-// no longer participates: it stays only for transition_flash_eye_base.cpp's
-// periodic report line, which costs nothing extra to keep computing.
-enum class HeldBaseRefusal {
-    None,            // every guard passed; the caller may act
-    WatchSlot,       // this event's latched treatment is Watch, not Act
-    Stale,           // no cache yet, or cached more than kHeldBaseMaxAgeFrames earlier
-    PointerChanged,  // the cached ship pointer differs from this call's ship
-    NotFinite,       // a cached lane is not finite
-    Reset,           // the cached M is itself the reset value
-    Cap,             // the session act cap is reached
-};
-
-inline const char* heldBaseRefusalText(HeldBaseRefusal r) noexcept {
-    switch (r) {
-    case HeldBaseRefusal::None:           return "none";
-    case HeldBaseRefusal::WatchSlot:      return "watch slot";
-    case HeldBaseRefusal::Stale:          return "stale";
-    case HeldBaseRefusal::PointerChanged: return "pointer changed";
-    case HeldBaseRefusal::NotFinite:      return "not finite";
-    case HeldBaseRefusal::Reset:          return "reset";
-    case HeldBaseRefusal::Cap:            return "cap";
-    }
-    return "?";
-}
-
-// Cached no more than this many frames earlier still counts as fresh (task:
-// "current frame minus cached frame <= 2").
-inline constexpr uint32_t kHeldBaseMaxAgeFrames = 2;
-
-inline HeldBaseRefusal heldBaseRefusal(tfp::Treatment treatment, bool haveHeldBase, uint32_t currentFrame,
-                                       uint32_t heldFrame, uint64_t currentShip, uint64_t heldShip,
-                                       const float heldM[16], bool sessionCapReached) noexcept {
-    if (treatment != tfp::Treatment::Act) return HeldBaseRefusal::WatchSlot;
-    if (!haveHeldBase) return HeldBaseRefusal::Stale;
-    const uint32_t age = currentFrame >= heldFrame ? currentFrame - heldFrame : 0xFFFFFFFFu;
-    if (age > kHeldBaseMaxAgeFrames) return HeldBaseRefusal::Stale;
-    if (currentShip != heldShip) return HeldBaseRefusal::PointerChanged;
-    if (!allFinite16(heldM)) return HeldBaseRefusal::NotFinite;
-    if (isResetMailbox(heldM)) return HeldBaseRefusal::Reset;
-    if (sessionCapReached) return HeldBaseRefusal::Cap;
-    return HeldBaseRefusal::None;
-}
-
-inline bool heldBaseMayAct(HeldBaseRefusal r) noexcept { return r == HeldBaseRefusal::None; }
+// CHANGE 1 (task of 2026-09-24, "the substitute becomes the held base"), as
+// SUPERSEDED by CHANGE 15: the held base survives as the render-time patch's
+// scene-old/unclear base (choosePatchBase below), but the guard chain that
+// gated writing it into the mailbox at consume time (HeldBaseRefusal and
+// friends) is gone with that write. What remains of CHANGE 1: the held-base
+// cache itself, in transition_flash_eye_base.cpp, and the M/F agreement
+// counter (EyeBaseValidation above), which stays only for the periodic
+// report line.
 
 // ---------------------------------------------------------------------------
 // CHANGE 2 ("the writer watch gate is self-contained"): the consumer's own
@@ -297,36 +256,18 @@ inline bool dr6HasSlot1Hit(uint32_t dr6) noexcept { return (dr6 & kDr6B1Bit) != 
 // better substitute than the held base for an un-refilled consume, because
 // it is the frame's own value rather than up to two frames old.
 //
-// "Fresh": stamped this frame or the frame before -- deliberately tighter
-// than the held base's own 2-frame cap (kHeldBaseMaxAgeFrames above),
-// because an offered matrix only exists at all when the writer ran moments
-// before the consume judging it.
-inline constexpr uint32_t kOfferedMaxAgeFrames = 1;
+// ("Fresh" once gated the offered matrix's use as a consume-time
+// substitute; CHANGE 15 removed that use with the write it gated.)
+// (kOfferedMaxAgeFrames / offeredIsFresh / offeredSubstituteUsable lived
+// here until CHANGE 15, 2026-09-24, superseded them with the consume-time
+// write they gated: the offered matrix survives as instrumentation -- the
+// DR1 capture, the per-frame dump row, the event log line all still show it
+// -- but the render-time patch chooses its base with choosePatchBase below,
+// never from the offered matrix.)
 
-inline bool offeredIsFresh(uint32_t currentFrame, uint32_t offeredFrame) noexcept {
-    const uint32_t age = currentFrame >= offeredFrame ? currentFrame - offeredFrame : 0xFFFFFFFFu;
-    return age <= kOfferedMaxAgeFrames;
-}
 
-// All five conditions the design doc's substitute policy lists, ANDed in
-// order so a test can flip each alone: entered for our ship, not written
-// since the previous consume (the name gate is what refused it -- if it HAD
-// written, this call would not be unrefilled in the first place), an
-// offered matrix actually captured, fresh, finite, and not itself the reset
-// value. The session act cap is NOT one of these -- it gates both
-// substitutes alike, applied once at the call site rather than duplicated in
-// here (see transition_flash_eye_base.cpp's own mayActOffered).
-inline bool offeredSubstituteUsable(bool writerEnteredForShip, bool writerWroteSincePriorConsume,
-                                     bool haveOffered, uint32_t currentFrame, uint32_t offeredFrame,
-                                     const float offeredM[16]) noexcept {
-    if (!writerEnteredForShip) return false;
-    if (writerWroteSincePriorConsume) return false;
-    if (!haveOffered) return false;
-    if (!offeredIsFresh(currentFrame, offeredFrame)) return false;
-    if (!allFinite16(offeredM)) return false;
-    if (isResetMailbox(offeredM)) return false;
-    return true;
-}
+// (The substitute policy's five-condition gate, offeredSubstituteUsable,
+// lived here until CHANGE 15 removed it with the consume-time write.)
 
 // ---------------------------------------------------------------------------
 // CHANGE 7 (2026-09-24, static round 7's per-frame classification): which of
@@ -473,13 +414,27 @@ inline const char* sceneChoiceText(SceneChoice c) noexcept {
 // Unclear, not guessed. `geometryFresh` false (the pool was not sampled this
 // frame) is Unclear regardless of the numbers: a zeroed default geometry
 // would otherwise read as a scene-old 0.
+//
+// The detector's own evidence floor (review of the acting build,
+// finding 1b, the rule glitch_scene.h:23-25's
+// glitchSceneDecision already applies): fewer than 32 matched or predicted
+// points, or a non-finite step, is NO evidence -- Unclear. Without the
+// floor, a fresh 0/0 geometry (pool bound but not uploaded this frame, or
+// the four-read cap) divides 0 by the camera floor and reads as scene-old,
+// choosing held on exactly the scene-new frames held is kilometres wrong
+// on. The floor is what lets a fresh-but-empty geometry mean "no evidence"
+// instead of "the objects did not move".
+inline constexpr uint32_t kSceneChoiceMinMatched = 32;
 inline constexpr float kSceneChoiceCamFloor = 1e-6f;
 inline constexpr float kSceneNewRatioMin = 0.5f;
 inline constexpr float kSceneNewRatioMax = 2.0f;
 inline constexpr float kSceneOldRatioMax = 0.25f;
 
-inline SceneChoice patchSceneChoice(float camStep, float poolStep, bool geometryFresh) noexcept {
+inline SceneChoice patchSceneChoice(uint32_t matched, uint32_t predicted, float camStep, float poolStep,
+                                    bool geometryFresh) noexcept {
     if (!geometryFresh) return SceneChoice::Unclear;
+    if (matched < kSceneChoiceMinMatched || predicted < kSceneChoiceMinMatched) return SceneChoice::Unclear;
+    if (!std::isfinite(camStep) || !std::isfinite(poolStep)) return SceneChoice::Unclear;
     const float denom = camStep > kSceneChoiceCamFloor ? camStep : kSceneChoiceCamFloor;
     const float ratio = poolStep / denom;
     if (ratio >= kSceneNewRatioMin && ratio <= kSceneNewRatioMax) return SceneChoice::New;
@@ -515,6 +470,200 @@ inline bool mailboxPlausible(const float m[16]) noexcept {
     if (!allFinite16(m)) return false;
     const float t2 = m[12] * m[12] + m[13] * m[13] + m[14] * m[14];
     return t2 < 1e7f * 1e7f;
+}
+
+// ---------------------------------------------------------------------------
+// CHANGE 14 (2026-09-24, flight 125237's follow-on): the buffer-row locator's
+// pure logic. Flight 125237 proved the live mailbox is the right base
+// source; the ACTING patch must apply premul4x4(liveM, badEye) to the eye-
+// derived ROWS of the 5376-byte scene CB (cb1 row 275 = the eye origin),
+// and the bad frame's eye is wrong in ROTATION too (the base's 3x3 is
+// ~1.3-1.7 rad off identity), so the current-view matrix's rows must be
+// corrected with it: view' = V_bad x liveM^-1 (corrected eye = liveM x P,
+// so view = (liveM x P)^-1 = P^-1 x liveM^-1 = V_bad x liveM^-1). These
+// functions locate the view rows structurally and compute that correction;
+// the module logs what they WOULD write, passively.
+
+// The scene CB's own constants (glitch_frame.cpp's camera_buffer_bytes/
+// camera_buffer_offset defaults -- the detector's own tap already gates on
+// them before this module is ever called).
+inline constexpr uint32_t kSceneCBSimBytes = 5376;
+inline constexpr int kSceneCBSimFloat4Rows = 5376 / 16;   // 336 float4 rows
+inline constexpr int kSceneCBSimOriginFloat = 1100;       // cb1[275] = floats [1100..1102]
+inline constexpr int kSceneCBSimBasisFloat = 1104;        // cb1[276..279] = floats [1104..1119]
+
+// A 4x4 group is a view-matrix candidate when its 3x3 (storage [r*4+c]) is
+// orthonormal: unit-length, mutually perpendicular columns. The test is
+// convention-agnostic (a transpose is orthonormal iff the original is), so
+// it holds however the game stores the view.
+inline bool isOrtho3x3(const float m[16], float tol) noexcept {
+    for (int c = 0; c < 3; ++c) {
+        const float n = m[c] * m[c] + m[4 + c] * m[4 + c] + m[8 + c] * m[8 + c];
+        if (n < (1.0f - tol) * (1.0f - tol) || n > (1.0f + tol) * (1.0f + tol)) return false;
+    }
+    for (int a = 0; a < 3; ++a) {
+        for (int b = a + 1; b < 3; ++b) {
+            const float d = m[a] * m[b] + m[4 + a] * m[4 + b] + m[8 + a] * m[8 + b];
+            if (d < -tol || d > tol) return false;
+        }
+    }
+    return true;
+}
+
+// |t + origin.R| for a candidate group: the row-vector eye origin through
+// the 3x3, negated, against the translation row. ZERO when the group IS
+// this frame's view (v_view = v_world.R + t maps the eye origin to 0).
+// A previous frame's view is orthonormal too -- but its translation belongs
+// to the previous frame's eye, which at a transition is metres to
+// kilometres away, so this is what rejects it.
+inline float viewOriginMatch(const float m[16], const float origin[3]) noexcept {
+    float d2 = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        const float e = m[12 + k] + origin[0] * m[k] + origin[1] * m[4 + k] + origin[2] * m[8 + k];
+        d2 += e * e;
+    }
+    return std::sqrt(d2);
+}
+
+inline constexpr int kSceneCBFindMaxCandidates = 8;
+
+struct SceneCBViewFind {
+    int startRow = -1;         // float4 row of the winning group; -1 = none
+    float originMatch = 0.0f;  // its |t + origin.R| (0 when none)
+    int orthoGroups = 0;       // ALL orthonormal groups seen (may exceed stored)
+    int originRejected = 0;    // orthonormal groups failing the origin test
+    int candidateCount = 0;    // stored start rows (capped at kSceneCBFindMaxCandidates)
+    int candidateRows[kSceneCBFindMaxCandidates] = {};
+};
+
+// Scan float4 rows [0, float4Rows-4] for the group whose 3x3 is orthonormal
+// within orthoTol AND whose translation matches `origin` within originTol;
+// the winner is the closest match. NaN origins never match (every
+// comparison is false), so a garbage fill reads as "none", not a false hit.
+inline SceneCBViewFind locateSceneCBView(const float* cb, int float4Rows, const float origin[3],
+                                         float orthoTol, float originTol) noexcept {
+    SceneCBViewFind out;
+    for (int r = 0; r + 4 <= float4Rows; ++r) {
+        const float* m = cb + r * 4;
+        if (!isOrtho3x3(m, orthoTol)) continue;
+        ++out.orthoGroups;
+        if (out.candidateCount < kSceneCBFindMaxCandidates) out.candidateRows[out.candidateCount++] = r;
+        const float match = viewOriginMatch(m, origin);
+        if (match <= originTol && (out.startRow < 0 || match < out.originMatch)) {
+            out.startRow = r;
+            out.originMatch = match;
+        } else {
+            ++out.originRejected;
+        }
+    }
+    return out;
+}
+
+// The general 3x3+translation inverse, row convention (translation row at
+// [12..14], last row (0,0,0,1)). Exact for orthonormal 3x3s (the common
+// case: view matrices and the live base are rotations); the cofactor form
+// tolerates a little scale. No pivoting -- a near-singular 3x3 is the
+// caller's plausibility gate's business, not this function's.
+inline void affineInverse4x4(const float m[16], float out[16]) noexcept {
+    const float a = m[0], b = m[1], c = m[2];
+    const float d = m[4], e = m[5], f = m[6];
+    const float g = m[8], h = m[9], i = m[10];
+    const float invDet = 1.0f / (a * (e * i - f * h) + d * (c * h - b * i) + g * (b * f - c * e));
+    float r[16];
+    r[0] = (e * i - f * h) * invDet;
+    r[1] = (c * h - b * i) * invDet;
+    r[2] = (b * f - c * e) * invDet;
+    r[3] = 0.0f;
+    r[4] = (f * g - d * i) * invDet;
+    r[5] = (a * i - c * g) * invDet;
+    r[6] = (c * d - a * f) * invDet;
+    r[7] = 0.0f;
+    r[8] = (d * h - e * g) * invDet;
+    r[9] = (b * g - a * h) * invDet;
+    r[10] = (a * e - b * d) * invDet;
+    r[11] = 0.0f;
+    // Row convention: v.M = v.R + t, so M^-1 = [R^-1, -t.R^-1] -- the
+    // translation through the inverse 3x3, NEGATED.
+    r[12] = -(m[12] * r[0] + m[13] * r[4] + m[14] * r[8]);
+    r[13] = -(m[12] * r[1] + m[13] * r[5] + m[14] * r[9]);
+    r[14] = -(m[12] * r[2] + m[13] * r[6] + m[14] * r[10]);
+    r[15] = 1.0f;
+    std::memcpy(out, r, sizeof(r));
+}
+
+// The acting build's postmultiply naming for the one 4x4 multiply: the
+// view correction is V_bad x liveM^-1, i.e. the stored view POSTmultiplied
+// by the inverse base. Same operation as premul4x4 (first argument is the
+// left factor either way); the name exists so the acting call site reads
+// the way the math is described.
+inline void postmul4x4(const float a[16], const float b[16], float out[16]) noexcept {
+    premul4x4(a, b, out);
+}
+
+// ---------------------------------------------------------------------------
+// CHANGE 15 (2026-09-24, "the acting render-time patch"): the pure logic the
+// act path runs per fill.
+
+// Which base the patch premultiplies with, chosen by the detector's own
+// pool-vs-camera selector -- the rule flight 134813 measured on 16 events
+// across three flights, and whose necessity skip 22726 proved (scene-old
+// hyperspace entry: the objects had NOT switched while the mailbox already
+// held the tunnel base -- a selector-less live patch would have flashed
+// 1614 m there). The writer's scene graph and the rendered object pool can
+// switch a frame apart; the patch agrees with the POOL.
+//   scene-new   -> the LIVE mailbox base (NoPatch when the probe gave
+//                  nothing usable -- never guess);
+//   scene-old   -> the HELD base, NEVER the live one (22726);
+//   unclear     -> NoPatch -- NOT held (review of the acting build,
+//                  finding 1, fix step 4: held
+//                  is proven only for scene-old; on a scene-new frame it is
+//                  kilometres wrong, far worse than the 13.5 m head-only
+//                  eye it replaces).
+enum class PatchBaseChoice : uint8_t { UseLive, UseHeld, NoPatch };
+
+inline const char* patchBaseChoiceText(PatchBaseChoice c) noexcept {
+    switch (c) {
+    case PatchBaseChoice::UseLive: return "live";
+    case PatchBaseChoice::UseHeld: return "held";
+    case PatchBaseChoice::NoPatch: return "none";
+    }
+    return "?";
+}
+
+inline PatchBaseChoice choosePatchBase(SceneChoice scene, bool haveLive, bool haveHeld) noexcept {
+    switch (scene) {
+    case SceneChoice::New:     return haveLive ? PatchBaseChoice::UseLive : PatchBaseChoice::NoPatch;
+    case SceneChoice::Old:     return haveHeld ? PatchBaseChoice::UseHeld : PatchBaseChoice::NoPatch;
+    case SceneChoice::Unclear: return PatchBaseChoice::NoPatch;   // missing evidence patches NOTHING
+    }
+    return PatchBaseChoice::NoPatch;
+}
+
+// The VP-defense shape test. A group X found near the located view is the
+// composed view-projection only if V_bad^-1 x X comes out PROJ-LIKE: the
+// strict D3D perspective shape, row convention, v' = v.M:
+//   [ sx  0  0  0 ]      zero lanes:    [1],[2],[3],[4],[6],[7],[8],[9],
+//   [ 0 sy  0  0 ]                       [12],[13],[15]
+//   [ 0  0 sz  w ]      [11] ~= +/-1    (the perspective-divide lane)
+//   [ 0  0 tz  0 ]      [0],[5] same sign, sane magnitude; [10],[14] live.
+// STRICT on purpose: a false VP identification must never write, so the
+// zero lanes are absolute (1e-3), the perspective lane is within 1% of
+// exactly +/-1, and any second candidate makes the whole check ambiguous
+// (the caller writes the view group only and logs it).
+inline bool projLike4x4(const float m[16]) noexcept {
+    const float zeroTol = 1e-3f;
+    const int zeroLanes[10] = {1, 2, 3, 4, 6, 7, 8, 9, 12, 13};
+    for (int lane : zeroLanes) {
+        if (std::fabs(m[lane]) > zeroTol) return false;
+    }
+    if (std::fabs(m[15]) > zeroTol) return false;
+    if (std::fabs(std::fabs(m[11]) - 1.0f) > 0.01f) return false;
+    if (m[0] * m[5] <= 0.0f) return false;                 // same sign, both live
+    if (std::fabs(m[0]) < 0.01f || std::fabs(m[0]) > 100.0f) return false;
+    if (std::fabs(m[5]) < 0.01f || std::fabs(m[5]) > 100.0f) return false;
+    if (std::fabs(m[10]) < 1e-6f || std::fabs(m[10]) > 1e6f) return false;
+    if (std::fabs(m[14]) < 1e-6f || std::fabs(m[14]) > 1e8f) return false;
+    return true;
 }
 
 }  // namespace tfeb

@@ -1,6 +1,7 @@
 #include "transition_flash_eye_base.h"
 #include "transition_flash_eye_base_core.h"
 #include "transition_flash_prevent_core.h"
+#include "glitch_frame.h"   // glitchFrameScenePoolEvidence: the latch's pool query
 #include "pose_reader_watch_core.h"
 #include "../common/code_hook.h"
 #include "../common/config.h"
@@ -72,7 +73,6 @@ constexpr uintptr_t kWriterRva = 0x2874B20u;
 constexpr uint8_t kWriterBytes[16] = {
     0x48, 0x85, 0xD2, 0x0F, 0x84, 0xE5, 0x00, 0x00, 0x00, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48};
 
-constexpr uint32_t kSessionActCap = 60;
 constexpr uint32_t kDumpWindowFrames = 60;
 constexpr uint32_t kMaxDumpsPerSession = 12;
 constexpr uint32_t kMaxShipPointerChangeLines = 16;
@@ -108,13 +108,6 @@ __declspec(noinline) bool sehReadU64(uintptr_t address, uint64_t& out) noexcept 
 }
 __declspec(noinline) bool sehReadBlock64(uintptr_t address, float out[16]) noexcept {
     __try { std::memcpy(out, reinterpret_cast<const void*>(address), 16 * sizeof(float)); return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-// The act path's own write: F's 16 floats into the mailbox, before the
-// original runs. A fault here just means the write did not happen -- acted
-// stays false, nothing else is disturbed.
-__declspec(noinline) bool sehWriteBlock64(uintptr_t address, const float in[16]) noexcept {
-    __try { std::memcpy(reinterpret_cast<void*>(address), in, 16 * sizeof(float)); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 __declspec(noinline) bool sehCheckBytes(uintptr_t address, const uint8_t* expected, size_t n) noexcept {
@@ -291,15 +284,12 @@ std::atomic<uint64_t> g_sequence{0};    // bumped once per consumer call; writer
 std::mutex g_guardMutex;
 tfeb::EyeBaseValidation g_validation;
 tfp::EventTracker g_eventTracker;
-uint32_t g_lastActedFrame = 0;
-bool g_hasActedFrame = false;
 
 // Session counters. Monotonic; the periodic line and the shutdown summary
 // both read a snapshot rather than resetting anything.
 std::atomic<uint64_t> g_totalCalls{0};
 std::atomic<uint64_t> g_totalUnrefilled{0};
 std::atomic<uint64_t> g_eventsWatched{0}, g_eventsActed{0};
-std::atomic<uint64_t> g_actedFrames{0};
 std::atomic<uint64_t> g_shipPointerChangesTotal{0};
 std::atomic<uint32_t> g_shipPointerChangeLinesLogged{0};
 // CHANGE 9: the mode-switch ENTRY/EXIT log lines' own session cap counter,
@@ -370,12 +360,117 @@ struct PatchSimPending {
     // ship-change races between arm and tap. 0 = unknown at arm time, probe
     // disabled.
     uint64_t ship = 0;
+    // CHANGE 15: whether this EVENT is one the render-time patch acts on
+    // (on: every event; alternate: the latch's Act events; watch: never) --
+    // decided at arm time from the existing event/treatment machinery and
+    // carried here for the per-fill act gate.
+    bool eventPatched = false;
+    // CHANGE 14: the locator's cross-frame state -- the most recent covered
+    // fill whose row 275 looked head-only (the bad frame's signature)
+    // produced this corrected origin/view-translation; the NEXT covered
+    // frame's fills residual against it (the engine's own correct frame).
+    float prevCorrOrigin[3] = {NAN, NAN, NAN};
+    float prevCorrViewT[3] = {NAN, NAN, NAN};
+    bool havePrevCorr = false;
 };
 std::mutex g_patchSimMutex;
 PatchSimPending g_patchSim;
 std::atomic<uint64_t> g_patchSimFired{0};      // sim frames logged (session)
 std::atomic<uint64_t> g_patchSimReplaced{0};   // pending sims an entry edge replaced
 std::atomic<uint64_t> g_patchSimExpired{0};    // windows that passed with no covered scene frame
+// CHANGE 14: cheap mirrors of the pending state for the per-fill CB tap's
+// early-out (60+ fills a frame must not take the mutex when nothing is
+// armed). Written only under g_patchSimMutex, at arm and at retire/expire.
+std::atomic<bool> g_patchSimPending{false};
+std::atomic<uint32_t> g_patchSimPendingSkip{0};
+
+// CHANGE 14: the buffer-row locator's per-tap-frame accumulation, consumed
+// by the boundary sim block (which logs it one line per covered frame).
+// Guarded by g_patchSimMutex. `tapFrame` is the PRE-advance counter the
+// fills carried (s->frameNo at Unmap): the boundary that closes that frame
+// records it one higher, so the consumption key is tapFrame+1.
+struct PatchSimCBFillDetail {
+    float row275[3] = {NAN, NAN, NAN};
+    int32_t viewRow = -1;         // the located current view's float4 row
+    float originMatch = NAN;      // its |t + origin.R|
+    uint8_t liveState = 0;        // PatchSimLiveState at this fill
+    // CHANGE 15 review-fix (finding 5): rows 276-279 (floats [1104..1119])
+    // around the act's write -- per-object-motion.md:1606-1608 reads 275-279
+    // as the pilot's position AND basis; if the basis rows are base-derived
+    // they need the same correction, and these two snapshots per acted fill
+    // are the evidence.
+    float basisBefore[16] = {};
+    float basisAfter[16] = {};
+};
+constexpr uint32_t kCBAccumRow275Max = 64;    // fills' row 275 kept for the boundary's P-match
+constexpr uint32_t kCBAccumDetailMax = 4;     // per-fill dump detail lines
+struct PatchSimCBAccum {
+    uint32_t tapFrame = 0xFFFFFFFFu;
+    uint32_t fillsSeen = 0;
+    uint32_t stored = 0;                       // row275 entries actually stored (<= kCBAccumRow275Max)
+    float row275[kCBAccumRow275Max][3] = {};   // first kCBAccumRow275Max fills' eye origins
+    uint32_t detailCount = 0;
+    PatchSimCBFillDetail detail[kCBAccumDetailMax] = {};
+    // The LAST analyzed fill's results (analysis needs a usable live base):
+    bool analyzed = false;
+    uint8_t lastLiveState = 0;                 // PatchSimLiveState of the most recent fill
+    tfeb::SceneCBViewFind find = {};
+    float correctedOrigin[3] = {NAN, NAN, NAN};
+    float correctedViewT[3] = {NAN, NAN, NAN};
+    bool haveCorrection = false;
+    // The cross-frame residual vs the previous covered frame's correction:
+    bool crossDone = false;
+    float crossOrigin = NAN;
+    float crossView = NAN;
+    // CHANGE 15 (review-fixed): the act's per-frame counters (patched
+    // events' act frames only). vpStatus: 0 not-found, 1 patched, 2
+    // ambiguous. baseUsed/actChoice are written ONCE, from the latch, at
+    // the frame's first head-only fill -- finding 1c: per-fill values hid
+    // the mixed frame, so the frame-level report is the latch's decision,
+    // never the last fill's.
+    uint32_t fillsPatched = 0;
+    uint32_t fillsSkippedNoMatch = 0;
+    uint32_t fillsSkippedNoView = 0;
+    uint32_t fillsSkippedNoPatch = 0;
+    uint32_t fillsPoolLate = 0;
+    uint8_t baseUsed = 0;
+    uint8_t vpStatus = 0;
+    uint8_t actChoice = 2;
+    // The all-or-nothing latch: decided ONCE at the frame's first head-only
+    // fill and used by every later head-only fill of the frame, so one frame
+    // can never be drawn from two cameras (review finding 1). latchBase:
+    // 0 NoPatch, 1 live, 2 held; latchReason: 0 none, 1 poolLate (no pool
+    // evidence at the first fill), 2 thin (evidence but Unclear), 3 noView
+    // (base chosen but the first fill's fresh locate found no view);
+    // latchB is B's 4x4, copied at the decision.
+    bool latchDecided = false;
+    bool latchPoolEarly = false;      // the pool's own upload was present at the decision
+    uint8_t latchBase = 0;
+    uint8_t latchReason = 0;
+    uint8_t latchChoice = 2;          // the SceneChoice the decision saw
+    float latchB[16] = {};
+    // Finding 1c's number: head-only fills of the act frame AFTER the first
+    // whose per-fill re-evaluation (with the evidence present AT THAT FILL)
+    // would have chosen a different base than the latch. Non-zero means the
+    // frame would have been mixed under per-fill decisions -- the defect,
+    // counted.
+    uint32_t wouldDiffer = 0;
+    // Finding 5's next-frame comparison: the first covered fill of the NEXT
+    // tap frame records the engine's own rows 276-279 here.
+    bool basisNextValid = false;
+    float basisNext[16] = {};
+};
+PatchSimCBAccum g_cbAccum;
+
+// CHANGE 14: the locator's tolerances. The view's t = -R.origin holds to
+// float rounding (~1e-4) for the CURRENT view; a previous frame's view is
+// metres to kilometres off at a transition, and |row275| under a metre is
+// the head-only signature of the bad frame (the same 1 m head volume
+// glitch_scene.h's CameraReset test uses).
+constexpr float kCBViewOrthoTol = 0.01f;
+constexpr float kCBViewOriginTol = 0.5f;
+constexpr float kCBMatchedPTol = 0.5f;
+constexpr float kCBHeadOnlyRadius2 = 1.0f;   // |row275|^2 under this = head-only
 
 // CHANGE 13: the tap-time live-mailbox probe's outcome, printed as the
 // line's live= token and stored in the dump's sim row. Unavailable covers
@@ -390,7 +485,16 @@ const char* patchSimLiveStateText(uint8_t s) noexcept {
     return s == LiveOk ? "ok" : s == LiveReset ? "RESET" : "n/a";
 }
 
-void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint64_t ship) noexcept {
+// The frame-level latch token (review finding 1c): the FIRST head-only
+// fill's decision, reported for the whole frame.
+const char* latchText(uint8_t base, uint8_t reason) noexcept {
+    if (base == 1) return "live";
+    if (base == 2) return "held";
+    return reason == 1 ? "noPatch:poolLate" : reason == 2 ? "noPatch:thin" : "noPatch:noView";
+}
+
+void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint64_t ship,
+                 bool eventPatched) noexcept {
     uint32_t replacedSkip = 0;
     bool replaced = false;
     {
@@ -402,6 +506,14 @@ void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint6
         g_patchSim.haveHeld = haveHeldBase;
         if (haveHeldBase) std::memcpy(g_patchSim.heldM, heldM, sizeof(g_patchSim.heldM));
         g_patchSim.ship = ship;
+        g_patchSim.eventPatched = eventPatched;
+        // CHANGE 14: a fresh sim starts a fresh cross-frame chain and a
+        // fresh CB accumulation; the mirrors publish the armed state for
+        // the per-fill tap's lock-free early-out.
+        g_patchSim.havePrevCorr = false;
+        g_cbAccum = PatchSimCBAccum{};
+        g_patchSimPending.store(true, std::memory_order_release);
+        g_patchSimPendingSkip.store(frame, std::memory_order_release);
     }
     if (replaced) {
         g_patchSimReplaced.fetch_add(1, std::memory_order_relaxed);
@@ -618,6 +730,37 @@ struct EyeBaseFrameRecord {
     float patchSimLive[3] = {NAN, NAN, NAN};
     float patchSimLiveT[3] = {NAN, NAN, NAN};
     uint8_t patchSimLiveState = 0;
+    // CHANGE 14: the buffer-row locator's boundary-consumed outcome for this
+    // frame (NAN/-1 defaults = no CB tap landed on it).
+    uint32_t patchSimCBFills = 0;
+    uint32_t patchSimCBMatched = 0;
+    int32_t patchSimCBTapFrame = -1;
+    int32_t patchSimCBViewRow = -1;
+    float patchSimCBCorrO[3] = {NAN, NAN, NAN};
+    float patchSimCBCrossO = NAN;
+    float patchSimCBCrossV = NAN;
+    uint8_t patchSimCBLiveState = 0;
+    // CHANGE 15: the act's per-frame outcome (zeroed defaults = no act fill
+    // ran on this frame).
+    uint32_t patchSimCBPatched = 0;
+    uint32_t patchSimCBSkipNoMatch = 0;
+    uint32_t patchSimCBSkipNoView = 0;
+    uint32_t patchSimCBSkipNoPatch = 0;
+    uint8_t patchSimCBBaseUsed = 0;      // 0 none, 1 live, 2 held (the latch's)
+    uint8_t patchSimCBVP = 0;            // 0 not-found, 1 patched, 2 ambiguous
+    uint8_t patchSimCBActChoice = 2;     // the SceneChoice the latch saw
+    // CHANGE 15 review-fixes: the latch itself (base/reason/choice/poolEarly),
+    // the would-differ count, and finding 5's next-frame basis rows.
+    uint32_t patchSimCBPoolLate = 0;
+    uint8_t patchSimCBLatchBase = 0;
+    uint8_t patchSimCBLatchReason = 0;
+    uint8_t patchSimCBLatchChoice = 2;
+    bool patchSimCBPoolEarly = false;
+    uint32_t patchSimCBWouldDiffer = 0;
+    bool patchSimCBBasisNextValid = false;
+    float patchSimCBBasisNext[16] = {};
+    uint32_t patchSimCBDetailCount = 0;
+    PatchSimCBFillDetail patchSimCBDetail[kCBAccumDetailMax] = {};
     float patchSimCamStep = 0.0f;
     float patchSimPoolStep = 0.0f;
     uint8_t patchSimChoice = 0;   // tfeb::SceneChoice (held as uint8_t; 0 = Old)
@@ -626,7 +769,12 @@ struct EyeBaseFrameRecord {
     bool patchSimHaveNew = false;
 };
 
-static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 1ull * 1024 * 1024,
+// CHANGE 14 raised the bound 1 MiB -> 2 MiB for the locator's outcome; the
+// review fixes raise it 2 -> 4 MiB for finding 5's per-fill rows-276-279
+// before/after snapshots (4 x 32 floats) plus the latch fields. 4096 x the
+// record is ~3.9 MiB -- still bounded here rather than silently growing, and
+// the biggest single allocation this module makes.
+static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 4ull * 1024 * 1024,
              "transition flash eye base: the frame ring must stay small");
 
 std::atomic<EyeBaseFrameRecord*> g_frameRing{nullptr};
@@ -695,7 +843,11 @@ struct WriterTableEntry {
 WriterTableEntry writerTableEntry(uint32_t index) noexcept;
 
 const char* treatmentText(uint8_t t) noexcept {
-    return t == 2 ? "ACTED" : t == 1 ? "watched" : "none";
+    // 2 "ACTED" was the consume-time write, removed by CHANGE 15 -- kept in
+    // the text table so old dumps still print. 3 "patched" marks a call of
+    // an EVENT the render-time patch acts on (the per-call ring carries it
+    // from consume time; the patch itself happens at the fills).
+    return t == 3 ? "patched" : t == 2 ? "ACTED" : t == 1 ? "watched" : "none";
 }
 
 void performDump(const PendingDump& due) noexcept {
@@ -850,6 +1002,84 @@ void performDump(const PendingDump& due) noexcept {
                 tfeb::sceneChoiceText(static_cast<tfeb::SceneChoice>(r.patchSimChoice)),
                 static_cast<tfeb::SceneChoice>(r.patchSimChoice) == tfeb::SceneChoice::New ? "new" : "held",
                 r.patchSimRefilledAge, patchSimLiveStateText(r.patchSimLiveState));
+            // CHANGE 14: the buffer-row locator's boundary-consumed outcome,
+            // then the per-fill detail (the "patch-sim-cb" prefix keeps the
+            // offline parser's row regex from ever matching these lines).
+            if (r.patchSimCBFills) {
+                char crossOText[24], crossVText[24];
+                if (std::isnan(r.patchSimCBCrossO)) std::snprintf(crossOText, sizeof(crossOText), "n/a");
+                else std::snprintf(crossOText, sizeof(crossOText), "%.3f", r.patchSimCBCrossO);
+                if (std::isnan(r.patchSimCBCrossV)) std::snprintf(crossVText, sizeof(crossVText), "n/a");
+                else std::snprintf(crossVText, sizeof(crossVText), "%.3f", r.patchSimCBCrossV);
+                // CHANGE 15: the act tail and the treat=patched marker --
+                // "patched" only when fills were actually written, so an
+                // event whose fills all skipped still reads as a sim.
+                const bool framePatched = r.patchSimCBPatched > 0;
+                appendLine(simText,
+                    "  patch-sim-cb f%u summary: fills=%u match275=%u tapf=%d view=%d "
+                    "corrO=(%+.3f %+.3f %+.3f) crossO=%s crossV=%s live=%s treat=%s "
+                    "patched=%u skipNM=%u skipNV=%u skipNP=%u poolLate=%u base=%s choice=%s vp=%s "
+                    "latch=%s poolEarly=%s wouldDiffer=%u",
+                    r.frame, r.patchSimCBFills, r.patchSimCBMatched, r.patchSimCBTapFrame,
+                    r.patchSimCBViewRow,
+                    r.patchSimCBCorrO[0], r.patchSimCBCorrO[1], r.patchSimCBCorrO[2],
+                    crossOText, crossVText,
+                    patchSimLiveStateText(r.patchSimCBLiveState),
+                    framePatched ? "patched" : "sim",
+                    r.patchSimCBPatched, r.patchSimCBSkipNoMatch, r.patchSimCBSkipNoView,
+                    r.patchSimCBSkipNoPatch, r.patchSimCBPoolLate,
+                    tfeb::patchBaseChoiceText(static_cast<tfeb::PatchBaseChoice>(r.patchSimCBBaseUsed)),
+                    tfeb::sceneChoiceText(static_cast<tfeb::SceneChoice>(r.patchSimCBActChoice)),
+                    r.patchSimCBVP == 1 ? "patched" : r.patchSimCBVP == 2 ? "ambiguous" : "not-found",
+                    latchText(r.patchSimCBLatchBase, r.patchSimCBLatchReason),
+                    r.patchSimCBPoolEarly ? "yes" : "no",
+                    r.patchSimCBWouldDiffer);
+                for (uint32_t i = 0; i < r.patchSimCBDetailCount && i < kCBAccumDetailMax; ++i) {
+                    const PatchSimCBFillDetail& d = r.patchSimCBDetail[i];
+                    appendLine(simText,
+                        "  patch-sim-cb f%u fill%u: row275=(%+.3f %+.3f %+.3f) view=%d "
+                        "originMatch=%s%.4f live=%s",
+                        r.frame, i, d.row275[0], d.row275[1], d.row275[2], d.viewRow,
+                        d.viewRow < 0 ? "n/a " : "", d.originMatch,
+                        patchSimLiveStateText(d.liveState));
+                    // Finding 5: rows 276-279 around the act's write, and the
+                    // next frame's own rows for comparison. Printed in
+                    // float4 rows.
+                    if (d.basisBefore[0] != 0.0f || d.basisAfter[0] != 0.0f) {
+                        appendLine(simText,
+                            "  patch-sim-cb f%u fill%u basis276-279 before: (%+.4f %+.4f %+.4f %+.4f) "
+                            "(%+.4f %+.4f %+.4f %+.4f) (%+.4f %+.4f %+.4f %+.4f) "
+                            "(%+.4f %+.4f %+.4f %+.4f)",
+                            r.frame, i,
+                            d.basisBefore[0], d.basisBefore[1], d.basisBefore[2], d.basisBefore[3],
+                            d.basisBefore[4], d.basisBefore[5], d.basisBefore[6], d.basisBefore[7],
+                            d.basisBefore[8], d.basisBefore[9], d.basisBefore[10], d.basisBefore[11],
+                            d.basisBefore[12], d.basisBefore[13], d.basisBefore[14], d.basisBefore[15]);
+                        appendLine(simText,
+                            "  patch-sim-cb f%u fill%u basis276-279 after:  (%+.4f %+.4f %+.4f %+.4f) "
+                            "(%+.4f %+.4f %+.4f %+.4f) (%+.4f %+.4f %+.4f %+.4f) "
+                            "(%+.4f %+.4f %+.4f %+.4f)",
+                            r.frame, i,
+                            d.basisAfter[0], d.basisAfter[1], d.basisAfter[2], d.basisAfter[3],
+                            d.basisAfter[4], d.basisAfter[5], d.basisAfter[6], d.basisAfter[7],
+                            d.basisAfter[8], d.basisAfter[9], d.basisAfter[10], d.basisAfter[11],
+                            d.basisAfter[12], d.basisAfter[13], d.basisAfter[14], d.basisAfter[15]);
+                    }
+                }
+                if (r.patchSimCBBasisNextValid) {
+                    appendLine(simText,
+                        "  patch-sim-cb f%u basis276-279 next-frame: (%+.4f %+.4f %+.4f %+.4f) "
+                        "(%+.4f %+.4f %+.4f %+.4f) (%+.4f %+.4f %+.4f %+.4f) "
+                        "(%+.4f %+.4f %+.4f %+.4f)",
+                        r.frame,
+                        r.patchSimCBBasisNext[0], r.patchSimCBBasisNext[1], r.patchSimCBBasisNext[2],
+                        r.patchSimCBBasisNext[3], r.patchSimCBBasisNext[4], r.patchSimCBBasisNext[5],
+                        r.patchSimCBBasisNext[6], r.patchSimCBBasisNext[7], r.patchSimCBBasisNext[8],
+                        r.patchSimCBBasisNext[9], r.patchSimCBBasisNext[10], r.patchSimCBBasisNext[11],
+                        r.patchSimCBBasisNext[12], r.patchSimCBBasisNext[13], r.patchSimCBBasisNext[14],
+                        r.patchSimCBBasisNext[15]);
+                }
+            }
         }
     }
     appendLine(text, "per-frame rows done, %u entries", framePrinted);
@@ -1537,9 +1767,9 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     }
 
     // The held base as it now stands. For an un-refilled call the cache
-    // above was untouched this call, so this is exactly the candidate the
-    // act guard judges; for a refilled call it is simply M again, read back
-    // only for the ring entry below.
+    // above was untouched this call, so this is exactly the render patch's
+    // "held" candidate (the scene-old/unclear base); for a refilled call it
+    // is simply M again, read back only for the ring entry below.
     float heldM[16] = {};
     uint32_t heldFrame = 0;
     uint64_t heldShip = 0;
@@ -1553,19 +1783,6 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     }
     const int32_t heldAgeFrames =
         haveHeldBase ? (frame >= heldFrame ? static_cast<int32_t>(frame - heldFrame) : 0) : -1;
-
-    // CHANGE 12: arm the render-time patch sim on a mode==2 ENTRY edge. The
-    // entry classification ran in the un-refilled CAS loop above; heldM here
-    // is exactly the candidate the act guard judged (this un-refilled call
-    // left the cache untouched), which is the sim's "held" candidate. The
-    // condition implies haveM: `unrefilled` is only ever set under haveM,
-    // and ENTRY requires mode!=1. Runs in every non-off mode -- watch, on
-    // and alternate alike -- and never writes game memory. CHANGE 13: the
-    // ship local (0 when the +0x50 read faulted) rides along for the tap's
-    // live-mailbox probe.
-    if (unrefilled && gameMode == 2 && modeSwitchEdge == tfeb::ModeSwitchEdge::Entry) {
-        armPatchSim(frame, heldM, haveHeldBase, ship);
-    }
 
     if (haveM && unrefilled) {
         g_totalUnrefilled.fetch_add(1, std::memory_order_relaxed);
@@ -1586,6 +1803,10 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
             isNewEvent = note.isNewEvent;
             eventNumber = note.eventNumber;
             if (isNewEvent) {
+                // CHANGE 15: Act now means "the render-time patch acts on
+                // this event's bad frame" -- the consume-time write this
+                // latch used to gate is gone. on: every event; alternate:
+                // the existing alternation (first event unpatched).
                 treatment = tfp::modeAllowsActing(fixMode, eventNumber) ? tfp::Treatment::Act
                                                                         : tfp::Treatment::Watch;
                 g_eventTracker.latch(treatment);
@@ -1595,73 +1816,39 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
                 treatment = g_eventTracker.treatment();
             }
         }
+        // The per-call treatment the rings report: 1 watched, 3 patched (the
+        // render-time patch's event marker; see treatmentText's own note).
+        treatmentOutcome = treatment == tfp::Treatment::Act ? 3 : 1;
+
+        // CHANGE 12/15: arm the render-time patch machinery on a mode==2
+        // ENTRY edge -- the entry classification ran in the un-refilled CAS
+        // loop above, and heldM here is exactly the last refilled mailbox
+        // (this un-refilled call left the cache untouched), the sim's and
+        // the act's "held" candidate. The event latch above has just run, so
+        // the arm carries whether this event is one the mode patches.
+        // Arming itself never writes anything; in watch mode nothing ever
+        // does. CHANGE 13: the ship local (0 when the +0x50 read faulted)
+        // rides along for the tap's live-mailbox probe.
+        if (gameMode == 2 && modeSwitchEdge == tfeb::ModeSwitchEdge::Entry) {
+            armPatchSim(frame, heldM, haveHeldBase, ship, treatment == tfp::Treatment::Act);
+        }
 
         // CHANGE 7: the offered matrix -- what the writer was about to copy
-        // in (param_3, captured by the DR1 handler at its entry), computed
-        // unconditionally for every unrefilled call, watched or acted, the
-        // same "show the candidate regardless of treatment" rule the held
-        // base already follows below.
+        // in (param_3, captured by the DR1 handler at its entry). Since
+        // CHANGE 15 it is RECORD ONLY: the consume-time write it used to
+        // prefer is superseded, and the render patch never takes the offered
+        // matrix (choosePatchBase's own rule, flight 134813's skip 22726).
+        // Read for every unrefilled call, watched or patched, the same
+        // "show the candidate regardless of treatment" rule the held base
+        // already follows below.
         float offeredM[16] = {};
         uint32_t offeredFrame = 0;
         uint64_t offeredSeq = 0;
         const bool haveOffered = readOffered(offeredM, offeredFrame, offeredSeq);
         const int32_t offeredAgeFrames =
             haveOffered ? (frame >= offeredFrame ? static_cast<int32_t>(frame - offeredFrame) : -1) : -1;
-        const bool offeredUsable = tfeb::offeredSubstituteUsable(
-            writerEnteredSinceLast, writerWroteSinceLast, haveOffered, frame, offeredFrame, offeredM);
-
-        const uint64_t actedFrames = g_actedFrames.load(std::memory_order_relaxed);
-        const bool capReached = tfp::sessionCapReached(actedFrames, kSessionActCap);
-        const tfeb::HeldBaseRefusal heldRefusal = tfeb::heldBaseRefusal(
-            treatment, haveHeldBase, frame, heldFrame, ship, heldShip, heldM, capReached);
-        const bool mayActHeld = tfeb::heldBaseMayAct(heldRefusal);
-        // The session act cap bounds both substitutes alike -- applied here
-        // rather than inside offeredSubstituteUsable (its own five
-        // conditions are exactly what the design doc's substitute policy
-        // lists; the cap is CHANGE 1's own orthogonal safety valve).
-        const bool mayActOffered = treatment == tfp::Treatment::Act && !capReached && offeredUsable;
-
-        bool acted = false;
-        const char* substituteUsed = "none";
-        int32_t substituteAgeFrames = -1;
-        const float* chosenM = nullptr;
-        if (mayActOffered) {
-            chosenM = offeredM;
-            substituteUsed = "offered";
-            substituteAgeFrames = offeredAgeFrames;
-        } else if (mayActHeld) {
-            chosenM = heldM;
-            substituteUsed = "held";
-            substituteAgeFrames = heldAgeFrames;
-        }
-
-        if (chosenM) {
-            // Write the chosen substitute into the mailbox BEFORE the
-            // original runs, exactly where F used to be written -- so the
-            // engine snapshots it as the base and resets as usual.
-            acted = sehWriteBlock64(ship + 0x3330, chosenM);
-            if (acted) {
-                std::lock_guard<std::mutex> lock(g_guardMutex);
-                if (tfp::isNewActedFrame(frame, g_lastActedFrame, g_hasActedFrame)) {
-                    g_actedFrames.fetch_add(1, std::memory_order_relaxed);
-                    g_lastActedFrame = frame;
-                    g_hasActedFrame = true;
-                }
-            }
-        }
-        treatmentOutcome = acted ? 2 : 1;
 
         if (isNewEvent) {
-            // heldRefusal can be None here with acted==false only if the SEH
-            // write itself faulted -- every guard passed but the store did
-            // not happen. Named off heldRefusal even when it was the offered
-            // matrix that was tried and faulted: the two substitutes write
-            // through the same sehWriteBlock64 call, so a fault there is a
-            // fault either way, and heldRefusal's own chain already covers
-            // "watch slot"/"cap" for both.
-            const char* reason = acted ? substituteUsed
-                                : heldRefusal != tfeb::HeldBaseRefusal::None ? tfeb::heldBaseRefusalText(heldRefusal)
-                                                                              : "write faulted";
             char heldText[64];
             if (haveHeldBase) {
                 std::snprintf(heldText, sizeof(heldText), "(%+.3f %+.3f %+.3f) age=%d",
@@ -1671,28 +1858,24 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
             }
             char offeredText[96];
             if (haveOffered) {
-                std::snprintf(offeredText, sizeof(offeredText), "(%+.3f %+.3f %+.3f) age=%d%s",
-                              offeredM[12], offeredM[13], offeredM[14], offeredAgeFrames,
-                              offeredUsable ? "" : " (refused)");
+                std::snprintf(offeredText, sizeof(offeredText), "(%+.3f %+.3f %+.3f) age=%d",
+                              offeredM[12], offeredM[13], offeredM[14], offeredAgeFrames);
             } else {
                 std::snprintf(offeredText, sizeof(offeredText), "none captured");
-            }
-            char substText[96];
-            if (chosenM) {
-                std::snprintf(substText, sizeof(substText), "%s (%+.3f %+.3f %+.3f) age=%d",
-                              substituteUsed, chosenM[12], chosenM[13], chosenM[14], substituteAgeFrames);
-            } else {
-                std::snprintf(substText, sizeof(substText), "none");
             }
             const uint32_t controllerCallsNow = g_controllerCallsThisFrame.load(std::memory_order_relaxed);
             const uint32_t writerEnteredNow = g_writerEnteredThisFrame.load(std::memory_order_relaxed);
             const uint32_t writerWroteNow = g_writerWroteThisFrame.load(std::memory_order_relaxed);
             Log::get().note(
-                "transition flash eye base: event #%u frame %u %s -- %s (mode=%s). "
-                "substitute=%s. held=%s. offered=%s. M=(%+.3f %+.3f %+.3f) F=(%+.3f %+.3f %+.3f). "
+                "transition flash eye base: event #%u frame %u %s (mode=%s). "
+                "render patch %s this event's bad frame. held=%s. offered=%s (record only). "
+                "M=(%+.3f %+.3f %+.3f) F=(%+.3f %+.3f %+.3f). "
                 "this frame: controller_calls=%u writer_entered=%u writer_wrote=%u.",
-                eventNumber, frame, acted ? "ACTED" : "WATCHED", reason, modeName(fixMode),
-                substText, heldText, offeredText,
+                eventNumber, frame,
+                treatment == tfp::Treatment::Act ? "PATCHED EVENT" : "UNPATCHED EVENT",
+                modeName(fixMode),
+                treatment == tfp::Treatment::Act ? "will act on" : "will not act on",
+                heldText, offeredText,
                 m[12], m[13], m[14], haveF ? f[12] : NAN, haveF ? f[13] : NAN, haveF ? f[14] : NAN,
                 controllerCallsNow, writerEnteredNow, writerWroteNow);
         }
@@ -1775,11 +1958,11 @@ void doInstall(tfp::Mode mode) noexcept {
     Log::get().note(
         "transition flash eye base: armed, mode=%s. identity: build match (timestamp %u, image "
         "%u bytes) -- OK. consumer 0x28431D0: %s. controller 0x10730A0: %s. writer 0x2874B20 "
-        "(DR1 target) bytes: %s. Ring %u entries, session act cap %u frames.",
+        "(DR1 target) bytes: %s. Ring %u entries.",
         modeName(mode), kExpectedTimestamp, kExpectedImageSize,
         consumerOk ? "installed" : g_consumerEntry.failReason,
         controllerOk ? "installed" : g_controllerEntry.failReason,
-        writerBytesOk ? "verified" : "MISMATCH -- DR1 will not arm", kEyeBaseRingCapacity, kSessionActCap);
+        writerBytesOk ? "verified" : "MISMATCH -- DR1 will not arm", kEyeBaseRingCapacity);
 }
 
 // --- Periodic (~20s) reporting, only when something moved -----------------
@@ -2007,10 +2190,102 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                     const bool haveHeld = g_patchSim.haveHeld;
                     if (haveHeld) tfeb::patchEyeOrigin(g_patchSim.heldM, P, patchHeld);
                     if (haveNew) tfeb::patchEyeOrigin(newM, P, patchNew);
-                    const tfeb::SceneChoice choice =
-                        tfeb::patchSceneChoice(geometry.cameraStep, geometry.poolStep, geometryFresh);
+                    // The boundary-time choice -- the referee value the
+                    // review says the flight compares against the latch
+                    // (the act no longer reads these; its evidence is the
+                    // per-fill pool query).
+                    const tfeb::SceneChoice choice = tfeb::patchSceneChoice(
+                        geometry.matched, geometry.predicted, geometry.cameraStep, geometry.poolStep,
+                        geometryFresh);
                     const int32_t refilledAge =
                         haveNew ? (frame >= newFrame ? static_cast<int32_t>(frame - newFrame) : -1) : -1;
+                    // CHANGE 14: consume the buffer-row locator's
+                    // accumulation for this frame. The fills of the frame
+                    // the boundary just closed carried the PRE-advance
+                    // counter (tapFrame == this frame - 1); accept the
+                    // no-skew case too and prefer the -1. Invalidating the
+                    // slot afterwards keeps the next frame's fills from
+                    // appending to an already-logged accumulation.
+                    uint32_t cbFills = 0, cbMatched = 0;
+                    int32_t cbTapFrame = -1, cbViewRow = -1;
+                    float cbCorrO[3] = {NAN, NAN, NAN};
+                    float cbCrossO = NAN, cbCrossV = NAN;
+                    uint8_t cbLive = 0;
+                    uint32_t cbPatched = 0, cbSkipNM = 0, cbSkipNV = 0, cbSkipNP = 0;
+                    uint32_t cbPoolLate = 0, cbWouldDiffer = 0;
+                    uint8_t cbBase = 0, cbVP = 0, cbActChoice = 2;
+                    uint8_t cbLatchBase = 0, cbLatchReason = 0;
+                    bool cbPoolEarly = false;
+                    if ((g_cbAccum.tapFrame + 1 == frame || g_cbAccum.tapFrame == frame) &&
+                        g_cbAccum.fillsSeen) {
+                        PatchSimCBAccum& a = g_cbAccum;
+                        cbFills = a.fillsSeen;
+                        cbTapFrame = static_cast<int32_t>(a.tapFrame);
+                        cbLive = a.lastLiveState;
+                        for (uint32_t i = 0; i < a.stored; ++i) {
+                            const float dx = a.row275[i][0] - P[0];
+                            const float dy = a.row275[i][1] - P[1];
+                            const float dz = a.row275[i][2] - P[2];
+                            if (dx * dx + dy * dy + dz * dz <= kCBMatchedPTol * kCBMatchedPTol) ++cbMatched;
+                        }
+                        if (a.analyzed) {
+                            cbViewRow = a.find.startRow;
+                            cbCorrO[0] = a.correctedOrigin[0];
+                            cbCorrO[1] = a.correctedOrigin[1];
+                            cbCorrO[2] = a.correctedOrigin[2];
+                        }
+                        if (a.crossDone) {
+                            cbCrossO = a.crossOrigin;
+                            cbCrossV = a.crossView;
+                        }
+                        cbPatched = a.fillsPatched;
+                        cbSkipNM = a.fillsSkippedNoMatch;
+                        cbSkipNV = a.fillsSkippedNoView;
+                        cbSkipNP = a.fillsSkippedNoPatch;
+                        cbBase = a.baseUsed;
+                        cbVP = a.vpStatus;
+                        cbActChoice = a.actChoice;
+                        cbPoolLate = a.fillsPoolLate;
+                        cbLatchBase = a.latchBase;
+                        cbLatchReason = a.latchReason;
+                        cbPoolEarly = a.latchPoolEarly;
+                        cbWouldDiffer = a.wouldDiffer;
+                        r.patchSimCBPoolLate = a.fillsPoolLate;
+                        r.patchSimCBLatchBase = a.latchBase;
+                        r.patchSimCBLatchReason = a.latchReason;
+                        r.patchSimCBPoolEarly = a.latchPoolEarly;
+                        r.patchSimCBLatchChoice = a.latchChoice;
+                        r.patchSimCBWouldDiffer = a.wouldDiffer;
+                        r.patchSimCBBasisNextValid = a.basisNextValid;
+                        if (a.basisNextValid) std::memcpy(r.patchSimCBBasisNext, a.basisNext, sizeof(r.patchSimCBBasisNext));
+                        r.patchSimCBFills = cbFills;
+                        r.patchSimCBMatched = cbMatched;
+                        r.patchSimCBTapFrame = cbTapFrame;
+                        r.patchSimCBViewRow = cbViewRow;
+                        r.patchSimCBCorrO[0] = cbCorrO[0];
+                        r.patchSimCBCorrO[1] = cbCorrO[1];
+                        r.patchSimCBCorrO[2] = cbCorrO[2];
+                        r.patchSimCBCrossO = cbCrossO;
+                        r.patchSimCBCrossV = cbCrossV;
+                        r.patchSimCBLiveState = cbLive;
+                        r.patchSimCBPatched = a.fillsPatched;
+                        r.patchSimCBSkipNoMatch = a.fillsSkippedNoMatch;
+                        r.patchSimCBSkipNoView = a.fillsSkippedNoView;
+                        r.patchSimCBSkipNoPatch = a.fillsSkippedNoPatch;
+                        r.patchSimCBBaseUsed = a.baseUsed;
+                        r.patchSimCBVP = a.vpStatus;
+                        r.patchSimCBActChoice = a.actChoice;
+                        r.patchSimCBDetailCount = a.detailCount;
+                        for (uint32_t i = 0; i < a.detailCount && i < kCBAccumDetailMax; ++i) {
+                            r.patchSimCBDetail[i] = a.detail[i];
+                        }
+                        a.tapFrame = 0xFFFFFFFFu;   // consumed
+                    }
+                    char cbCrossOText[24], cbCrossVText[24];
+                    if (std::isnan(cbCrossO)) std::snprintf(cbCrossOText, sizeof(cbCrossOText), "n/a");
+                    else std::snprintf(cbCrossOText, sizeof(cbCrossOText), "%.3f", cbCrossO);
+                    if (std::isnan(cbCrossV)) std::snprintf(cbCrossVText, sizeof(cbCrossVText), "n/a");
+                    else std::snprintf(cbCrossVText, sizeof(cbCrossVText), "%.3f", cbCrossV);
                     g_patchSimFired.fetch_add(1, std::memory_order_relaxed);
                     // One line per covered render frame (at most three per
                     // event), never per consume -- per-consume spam filled
@@ -2021,20 +2296,40 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                     // proven-safe side). live= answers the flight question:
                     // ok (a usable live base sat in the mailbox at the tap),
                     // RESET (the tap landed inside the consumer's reset
-                    // window), or n/a.
+                    // window), or n/a. The cb=[...] cluster is the buffer-
+                    // row locator's outcome for this frame: fills seen
+                    // pre-Unmap, how many carried this P at row 275, the
+                    // located current view's float4 row, the correction the
+                    // acting build would write, and the cross-frame residual
+                    // against the previous covered frame's correction (the
+                    // engine's own correct frame).
                     Log::get().note(
                         "transition flash eye base: patch sim frame %u (skip %u): P=(%+.3f %+.3f %+.3f) "
                         "held->(%s%+.3f %+.3f %+.3f) new->(%s%+.3f %+.3f %+.3f) "
                         "live->(%s%+.3f %+.3f %+.3f) cam=%.3f pool=%.3f "
-                        "choice=%s->%s (refilled age=%d, live=%s)",
+                        "choice=%s->%s (refilled age=%d, live=%s) cb=[fills=%u match275=%u tapf=%d "
+                        "view=%d corrO=(%+.3f %+.3f %+.3f) crossO=%s crossV=%s live=%s "
+                        "act=[patched=%u skipNM=%u skipNV=%u skipNP=%u base=%s choice=%s vp=%s "
+                        "latch=%s poolEarly=%s wouldDiffer=%u]]",
                         frame, g_patchSim.skipFrame, P[0], P[1], P[2],
                         haveHeld ? "" : "n/a ", patchHeld[0], patchHeld[1], patchHeld[2],
                         haveNew ? "" : "n/a ", patchNew[0], patchNew[1], patchNew[2],
                         liveState == LiveOk ? "" : "n/a ", patchLive[0], patchLive[1], patchLive[2],
                         geometry.cameraStep, geometry.poolStep,
                         tfeb::sceneChoiceText(choice),
-                        choice == tfeb::SceneChoice::New ? "new" : "held",
-                        refilledAge, patchSimLiveStateText(liveState));
+                        choice == tfeb::SceneChoice::New ? "new"
+                            : choice == tfeb::SceneChoice::Old ? "held" : "none",
+                        refilledAge, patchSimLiveStateText(liveState),
+                        cbFills, cbMatched, cbTapFrame, cbViewRow,
+                        cbCorrO[0], cbCorrO[1], cbCorrO[2],
+                        cbCrossOText, cbCrossVText, patchSimLiveStateText(cbLive),
+                        cbPatched, cbSkipNM, cbSkipNV, cbSkipNP,
+                        tfeb::patchBaseChoiceText(static_cast<tfeb::PatchBaseChoice>(cbBase)),
+                        tfeb::sceneChoiceText(static_cast<tfeb::SceneChoice>(cbActChoice)),
+                        cbVP == 1 ? "patched" : cbVP == 2 ? "ambiguous" : "not-found",
+                        latchText(cbLatchBase, cbLatchReason),
+                        cbPoolEarly ? "yes" : "no",
+                        cbWouldDiffer);
                     r.patchSim = true;
                     r.patchSimSkipFrame = g_patchSim.skipFrame;
                     r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];
@@ -2049,11 +2344,6 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         // value the plausibility gate refused.
                         r.patchSimLiveT[0] = liveM[12]; r.patchSimLiveT[1] = liveM[13]; r.patchSimLiveT[2] = liveM[14];
                     }
-                    r.patchSim = true;
-                    r.patchSimSkipFrame = g_patchSim.skipFrame;
-                    r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];
-                    r.patchSimHeld[0] = patchHeld[0]; r.patchSimHeld[1] = patchHeld[1]; r.patchSimHeld[2] = patchHeld[2];
-                    r.patchSimNew[0] = patchNew[0]; r.patchSimNew[1] = patchNew[1]; r.patchSimNew[2] = patchNew[2];
                     r.patchSimCamStep = geometry.cameraStep;
                     r.patchSimPoolStep = geometry.poolStep;
                     r.patchSimChoice = static_cast<uint8_t>(choice);
@@ -2065,6 +2355,7 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         // here so the next frame's expiry branch does not
                         // count a completed run as expired.
                         g_patchSim.active = false;
+                        g_patchSimPending.store(false, std::memory_order_release);
                     }
                 }
             } else if (frame - g_patchSim.skipFrame > tfeb::kPatchSimWindowFrames) {
@@ -2072,11 +2363,303 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                 // covered frame with an invalid scene= neither logs nor
                 // clears -- the next covered frame may still be valid).
                 g_patchSim.active = false;
+                g_patchSimPending.store(false, std::memory_order_release);
                 g_patchSimExpired.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
     pushFrameRing(r);
+}
+
+// CHANGE 14/15: the buffer-row locator's fill tap -- glitchFrameObserve's
+// pre-Unmap read of the 5376-byte scene CB (one call per fill, ~60 a frame
+// on the nominated camera buffer). Everything gates on the module's own
+// pending-sim state so the idle cost is one atomic load per fill. In watch
+// (and on unpatched events) the analysis still writes nothing; on a patched
+// event's act frame (CHANGE 15) it WRITES the correction into this same
+// mapped buffer -- the game's own writable Map pointer, pre-Unmap -- for
+// the fills that carry the bad eye. The geometry arguments are the
+// detector's own per-frame pool measurement (fresh only when the pool was
+// sampled this counter frame), the selector's inputs.
+void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_t sizeBytes,
+                                       const GlitchSceneGeometry& geometry, bool geometryFresh) {
+    if (!g_armed.load(std::memory_order_relaxed)) return;
+    if (static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) == tfp::Mode::Off) return;
+    if (sizeBytes != tfeb::kSceneCBSimBytes) return;
+    if (!g_patchSimPending.load(std::memory_order_acquire)) return;
+    const uint32_t skip = g_patchSimPendingSkip.load(std::memory_order_acquire);
+    // The fills of boundary frame F carried s->frameNo == F-1 (glitchFrame-
+    // Boundary advances the counter before it records the frame it closes;
+    // the sim's own frame argument is that advanced number), so the tap
+    // frame's +1 must land in the window: tap frames are N..N+2 for the
+    // covered boundary frames N+1..N+3.
+    if (!tfeb::patchSimWindowCovers(frame + 1, skip)) return;
+
+    const float* cb = static_cast<const float*>(mapped);
+    std::lock_guard<std::mutex> lock(g_patchSimMutex);
+    if (!g_patchSim.active || !tfeb::patchSimWindowCovers(frame + 1, g_patchSim.skipFrame)) return;
+
+    PatchSimCBAccum& a = g_cbAccum;
+    if (a.tapFrame != frame) {
+        // First fill of a new covered tap-frame: the previous slot was
+        // consumed by its boundary (or held an unconsumed non-covered
+        // frame -- either way it is disposable; the cross-frame chain lives
+        // in g_patchSim, not here).
+        a = PatchSimCBAccum{};
+        a.tapFrame = frame;
+    }
+    ++a.fillsSeen;
+    const float* originRow = cb + tfeb::kSceneCBSimOriginFloat;
+    const float origin[3] = {originRow[0], originRow[1], originRow[2]};
+    if (a.stored < kCBAccumRow275Max) {
+        a.row275[a.stored][0] = origin[0];
+        a.row275[a.stored][1] = origin[1];
+        a.row275[a.stored][2] = origin[2];
+        ++a.stored;
+    }
+    PatchSimCBFillDetail d;
+    d.row275[0] = origin[0]; d.row275[1] = origin[1]; d.row275[2] = origin[2];
+
+    // The head-only signature, computed once for the chain below AND the
+    // act gate: |row 275| under a metre (the same head volume
+    // glitch_scene.h's CameraReset test uses).
+    const float o2 = origin[0] * origin[0] + origin[1] * origin[1] + origin[2] * origin[2];
+
+    // CHANGE 13's path, per fill: the locator is only meaningful while the
+    // live base is usable -- on this fill, at this moment.
+    float liveM[16] = {};
+    uint8_t liveState = LiveUnavailable;
+    if (g_patchSim.ship != 0 &&
+        sehReadBlock64(static_cast<uintptr_t>(g_patchSim.ship) + 0x3330, liveM)) {
+        if (tfeb::isResetMailbox(liveM)) {
+            liveState = LiveReset;
+        } else if (tfeb::mailboxPlausible(liveM)) {
+            liveState = LiveOk;
+        }
+    }
+    a.lastLiveState = liveState;
+    d.liveState = liveState;
+
+    if (liveState == LiveOk) {
+        // Locate THIS frame's current view structurally: orthonormal 3x3
+        // plus a translation locked to this fill's row-275 origin (the
+        // previous frame's view is orthonormal too, but its translation
+        // belongs to the previous frame's eye -- rejected by the origin
+        // test).
+        a.find = tfeb::locateSceneCBView(cb, tfeb::kSceneCBSimFloat4Rows, origin,
+                                         kCBViewOrthoTol, kCBViewOriginTol);
+        a.analyzed = true;
+        d.viewRow = a.find.startRow;
+        d.originMatch = a.find.startRow >= 0 ? a.find.originMatch : NAN;
+        // The correction the acting build would write: the premultiplied
+        // origin, and the stored view POSTmultiplied by liveM^-1 (corrected
+        // eye = liveM x P, so view' = P^-1 x liveM^-1 = V_bad x liveM^-1).
+        tfeb::patchEyeOrigin(liveM, origin, a.correctedOrigin);
+        if (a.find.startRow >= 0) {
+            float vBad[16], liveInv[16], vCorr[16];
+            std::memcpy(vBad, cb + a.find.startRow * 4, sizeof(vBad));
+            tfeb::affineInverse4x4(liveM, liveInv);
+            tfeb::postmul4x4(vBad, liveInv, vCorr);
+            a.correctedViewT[0] = vCorr[12];
+            a.correctedViewT[1] = vCorr[13];
+            a.correctedViewT[2] = vCorr[14];
+        } else {
+            a.correctedViewT[0] = NAN; a.correctedViewT[1] = NAN; a.correctedViewT[2] = NAN;
+        }
+        a.haveCorrection = true;
+        // Cross-frame validation: the PREVIOUS covered head-only fill's
+        // correction against THIS fill's actual rows. On the bad frame
+        // itself the chain is empty (nothing to compare against); the
+        // residual appears on the next covered frame -- the engine's own
+        // correct frame.
+        if (g_patchSim.havePrevCorr) {
+            const float dox = g_patchSim.prevCorrOrigin[0] - origin[0];
+            const float doy = g_patchSim.prevCorrOrigin[1] - origin[1];
+            const float doz = g_patchSim.prevCorrOrigin[2] - origin[2];
+            a.crossOrigin = std::sqrt(dox * dox + doy * doy + doz * doz);
+            if (a.find.startRow >= 0) {
+                const float* actualT = cb + a.find.startRow * 4 + 12;
+                const float dvx = g_patchSim.prevCorrViewT[0] - actualT[0];
+                const float dvy = g_patchSim.prevCorrViewT[1] - actualT[1];
+                const float dvz = g_patchSim.prevCorrViewT[2] - actualT[2];
+                a.crossView = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
+            } else {
+                a.crossView = NAN;
+            }
+            a.crossDone = true;
+        }
+        // Chain forward -- but only from a head-only row 275: the
+        // premultiply expects P in head space, and on the control fills
+        // (N+1/N+3's ordinary eye) the "correction" is not meaningful.
+        if (o2 < kCBHeadOnlyRadius2) {
+            g_patchSim.prevCorrOrigin[0] = a.correctedOrigin[0];
+            g_patchSim.prevCorrOrigin[1] = a.correctedOrigin[1];
+            g_patchSim.prevCorrOrigin[2] = a.correctedOrigin[2];
+            g_patchSim.prevCorrViewT[0] = a.correctedViewT[0];
+            g_patchSim.prevCorrViewT[1] = a.correctedViewT[1];
+            g_patchSim.prevCorrViewT[2] = a.correctedViewT[2];
+            g_patchSim.havePrevCorr = true;
+        }
+    } else {
+        a.analyzed = false;
+    }
+
+    // CHANGE 15 (review-fixed): THE ACT. Only on a patched event, only on
+    // the bad render's own tap frame (skip+1 -- the measured skew rule, 6/6
+    // on flight 134813), only on fills whose row 275 is head-only. The
+    // frame's base is chosen ONCE, at its FIRST head-only fill, and latched
+    // for every fill of the frame -- the review's finding 1: evidence read
+    // per fill arrives mid-frame (the pool's geometry only exists after the
+    // first eye draw), and per-fill decisions would draw one frame from two
+    // cameras kilometres apart. All-or-nothing: a latched NoPatch means NO
+    // fill of the frame is patched, even if evidence arrives later.
+    //
+    // The decision's evidence is the pool's OWN upload for this counter
+    // frame when it is already in the store (glitchFrameScenePoolEvidence:
+    // the detector's own compare on a copy, camera = this fill's row 275 --
+    // the same value sceneDrawPos will get at the draw). No upload yet ->
+    // latch NoPatch:poolLate and count it -- the review's ordering
+    // measurement, answered per frame by the log.
+    //
+    // The writes land in this same mapped buffer -- the game's own writable
+    // Map pointer at the pre-Unmap tap, so no SEH -- and the detector's own
+    // record of this fill (sceneWrites, above in glitchFrameObserve) has
+    // already taken the ORIGINAL values, so its verdict still referees the
+    // bad frame.
+    if (g_patchSim.eventPatched && frame == g_patchSim.skipFrame + 1) {
+        if (o2 >= kCBHeadOnlyRadius2) {
+            // A fill of the bad frame whose row 275 is NOT the bad eye (the
+            // 4-25% "other views" the locator flight measured): leave it.
+            ++a.fillsSkippedNoMatch;
+        } else {
+            if (!a.latchDecided) {
+                // The FIRST head-only fill of the frame: decide and latch.
+                a.latchDecided = true;
+                GlitchSceneGeometry ev = {};
+                a.latchPoolEarly = glitchFrameScenePoolEvidence(frame, origin, &ev);
+                const tfeb::SceneChoice choice = tfeb::patchSceneChoice(
+                    ev.matched, ev.predicted, ev.cameraStep, ev.poolStep, a.latchPoolEarly);
+                const tfeb::PatchBaseChoice base =
+                    tfeb::choosePatchBase(choice, liveState == LiveOk, g_patchSim.haveHeld);
+                a.latchChoice = static_cast<uint8_t>(choice);
+                a.latchBase = base == tfeb::PatchBaseChoice::UseLive ? 1
+                            : base == tfeb::PatchBaseChoice::UseHeld ? 2 : 0;
+                a.baseUsed = a.latchBase;          // frame-level report: the
+                a.actChoice = a.latchChoice;       // latch, never a later fill
+                if (!a.latchPoolEarly) {
+                    a.latchReason = 1;             // NoPatch:poolLate
+                } else if (base == tfeb::PatchBaseChoice::NoPatch) {
+                    a.latchReason = 2;             // NoPatch:thin
+                } else {
+                    // A base was chosen: the frame is only patched if THIS
+                    // fill can also locate the current view (the row moves
+                    // per pass; the locate itself stays per-fill).
+                    const tfeb::SceneCBViewFind firstFind = tfeb::locateSceneCBView(
+                        cb, tfeb::kSceneCBSimFloat4Rows, origin, kCBViewOrthoTol, kCBViewOriginTol);
+                    if (firstFind.startRow < 0) {
+                        a.latchBase = 0;
+                        a.baseUsed = 0;
+                        a.latchReason = 3;         // NoPatch:noView
+                    } else {
+                        const float* B = a.latchBase == 1 ? liveM : g_patchSim.heldM;
+                        std::memcpy(a.latchB, B, sizeof(a.latchB));
+                    }
+                }
+            } else {
+                // A LATER head-only fill: finding 1c's would-differ count.
+                // Re-evaluate with the evidence present AT THIS FILL; when
+                // there is none, there is no per-fill choice to compare.
+                GlitchSceneGeometry evNow = {};
+                if (glitchFrameScenePoolEvidence(frame, origin, &evNow)) {
+                    const tfeb::SceneChoice choiceNow = tfeb::patchSceneChoice(
+                        evNow.matched, evNow.predicted, evNow.cameraStep, evNow.poolStep, true);
+                    const tfeb::PatchBaseChoice baseNow =
+                        tfeb::choosePatchBase(choiceNow, liveState == LiveOk, g_patchSim.haveHeld);
+                    const uint8_t baseNowCode = baseNow == tfeb::PatchBaseChoice::UseLive ? 1
+                                              : baseNow == tfeb::PatchBaseChoice::UseHeld ? 2 : 0;
+                    if (baseNowCode != a.latchBase) ++a.wouldDiffer;
+                }
+            }
+
+            if (a.latchBase == 0) {
+                // All-or-nothing: the latch says this frame patches nothing.
+                if (a.latchReason == 1) ++a.fillsPoolLate;
+                else if (a.latchReason == 2) ++a.fillsSkippedNoPatch;
+                else ++a.fillsSkippedNoView;
+            } else {
+                // The current view is located FRESH for this fill (never a
+                // stale carry -- the row moves per pass).
+                const tfeb::SceneCBViewFind find = tfeb::locateSceneCBView(
+                    cb, tfeb::kSceneCBSimFloat4Rows, origin, kCBViewOrthoTol, kCBViewOriginTol);
+                if (find.startRow < 0) {
+                    // Never half-patch: an origin without its view leaves
+                    // the rotation wrong.
+                    ++a.fillsSkippedNoView;
+                } else {
+                    // Finding 5: rows 276-279 (the pilot basis question)
+                    // BEFORE anything is written.
+                    std::memcpy(d.basisBefore, cb + tfeb::kSceneCBSimBasisFloat, sizeof(d.basisBefore));
+                    // ALL corrections are computed into locals first,
+                    // reading only ORIGINAL buffer rows; the VP scan skips
+                    // every window overlapping the located view group or
+                    // row 275 (finding 6 -- no mixed corrected/original
+                    // window is ever read or written).
+                    const float* B = a.latchB;
+                    float originPatched[3];
+                    tfeb::patchEyeOrigin(B, origin, originPatched);
+                    float vBad[16], bInv[16], vCorr[16];
+                    std::memcpy(vBad, cb + find.startRow * 4, sizeof(vBad));
+                    tfeb::affineInverse4x4(B, bInv);
+                    tfeb::postmul4x4(vBad, bInv, vCorr);
+                    float vBadInv[16];
+                    tfeb::affineInverse4x4(vBad, vBadInv);
+                    int vpRow = -1;
+                    int vpCandidates = 0;
+                    float vpP[16] = {};
+                    const int viewLo = find.startRow - 3, viewHi = find.startRow + 3;
+                    for (int r = 0; r + 4 <= tfeb::kSceneCBSimFloat4Rows; ++r) {
+                        if (r >= viewLo && r <= viewHi) continue;   // overlaps the view group
+                        if (r >= 272 && r <= 275) continue;         // overlaps row 275 (floats 1100..1103)
+                        float p[16];
+                        tfeb::premul4x4(vBadInv, cb + r * 4, p);
+                        if (tfeb::projLike4x4(p)) {
+                            ++vpCandidates;
+                            if (vpCandidates == 1) {
+                                vpRow = r;
+                                std::memcpy(vpP, p, sizeof(vpP));
+                            }
+                        }
+                    }
+                    // One write pass: origin, view, and -- only on exactly
+                    // one VP candidate -- the recomposed VP.
+                    float* writable = const_cast<float*>(cb);
+                    writable[tfeb::kSceneCBSimOriginFloat + 0] = originPatched[0];
+                    writable[tfeb::kSceneCBSimOriginFloat + 1] = originPatched[1];
+                    writable[tfeb::kSceneCBSimOriginFloat + 2] = originPatched[2];
+                    std::memcpy(writable + find.startRow * 4, vCorr, sizeof(vCorr));
+                    if (vpCandidates == 1) {
+                        float xNew[16];
+                        tfeb::premul4x4(vCorr, vpP, xNew);
+                        std::memcpy(writable + vpRow * 4, xNew, sizeof(xNew));
+                        a.vpStatus = 1;
+                    } else {
+                        a.vpStatus = vpCandidates == 0 ? 0 : 2;
+                    }
+                    std::memcpy(d.basisAfter, cb + tfeb::kSceneCBSimBasisFloat, sizeof(d.basisAfter));
+                    ++a.fillsPatched;
+                }
+            }
+        }
+    } else if (frame == g_patchSim.skipFrame + 2 && !a.basisNextValid &&
+               tfeb::patchSimWindowCovers(frame + 1, g_patchSim.skipFrame)) {
+        // Finding 5's next-frame comparison slot: the first covered fill of
+        // the frame AFTER the act frame records the engine's own rows
+        // 276-279, for the dump to compare against the acted frame's
+        // before/after. One record per frame is enough.
+        a.basisNextValid = true;
+        std::memcpy(a.basisNext, cb + tfeb::kSceneCBSimBasisFloat, sizeof(a.basisNext));
+    }
+    if (a.detailCount < kCBAccumDetailMax) a.detail[a.detailCount++] = d;
 }
 
 EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot() {
