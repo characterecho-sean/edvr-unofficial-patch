@@ -4,16 +4,16 @@
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. Main `28ee5f73` is merged into this branch as requested
-  (section 19). Epic flight `f1ea02fe` confirms all 47,107 recognized draw
-  preparations succeeded over 900 frames, with no outcome overflow or backend
-  failures (section 23). Resolver and fallback preflight pass. Its compute
-  preparation audit was blind: CS uses a pointer-only binding shadow; the
-  separate capture proves both lighting shaders ran. An audit-local hash lookup
-  corrects this. The 33 additional projection pairs now have exact recipes;
-  three unchanged passes are distinguished from the missing-bytecode pair. The
-  F10 audit also compares raw forward constants against the selected scene
-  camera (section 24). Earlier depth conversion, camera and binding evidence
-  remains in sections 10-22. Live jitter is zero.
+  (section 19). Epic flight `ad8b586a` confirms 102,864 of 102,865 private
+  preparations over 900 frames, including both lighting compute shaders
+  (section 25). One missing full write refused safely; a queued cold snapshot
+  became stale. No backend failures or outcome overflow occurred. All observed
+  scene draws had a recipe or explicit unchanged classification, but the
+  previously missing shader pair was absent and its bytecode remains missing.
+  Reference results include 1,800 unmatched draws across two families, 12,600
+  unavailable and 6,419 unsupported comparisons. These are preparation and
+  numeric evidence, not frame authorization. Earlier evidence remains in
+  sections 10-24. Live jitter is zero.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -30,14 +30,14 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** the clean expanded-recipe build on Epic, DLSS at 0.75x SS;
-  F10 once in the cockpit and turn near the star for 20-30 seconds. Check all
-  additional recipes, both lighting CS outcomes, reference classifications and
-  the two requested missing shader files together. Use the installed build SHA
-  with `tools/edvr_log.py --expect-build`; the latest reviewed flight is still
-  `f1ea02fe`. Numeric matches do not establish full target/material coverage or
-  authorize jitter. Earlier handoff-refusal recovery remains open. No headset
-  is needed for flat; VR still needs regression testing.
+- **Next work:** use the existing bytecode and captures to distinguish local
+  projection coordinates from a different scene camera in the two unmatched
+  families; do not relax numeric thresholds. Close actual target/inverse and
+  lighting-grid ownership plus earlier handoff-refusal recovery before live
+  jitter. No repeat flight of the same build is needed for those decisions.
+  Latest reviewed and installed build is `ad8b586a`; check that SHA with
+  `tools/edvr_log.py --expect-build` until another build is installed. No
+  headset is needed for flat; VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -1296,3 +1296,107 @@ both installer payload checks. This includes the rank regression fix. An
 earlier retry stopped in the existing sleep/order-based `run_jobs` self-test;
 it passed in isolation and in this final full run without changes to the
 scheduler.
+
+## 25. Expanded preparation flight, 2026-09-24
+
+Reviewed Epic `edvr_gfx_20260924_130742.log` with `tools/edvr_log.py
+--expect-build ad8b586a`: version `v0.17.0-559-gad8b586a`, build `6AB56497`,
+linked 17:57:43 UTC. This is the installed expanded-recipe build. The user
+reported running it; no visual quality or corona-smear result was supplied.
+Environment: mono D3D11, RTX 5090, DLSS quality preset K, 1920x1080 input to
+2560x1440 output (game SS 0.75 per axis). Driver and DLSS runtime versions are
+not recorded by this build. Headset/runtime are N/A. The feature creation at
+13:08:19.556 establishes that DLSS engaged; it does not qualify antialiasing
+with raster jitter still zero.
+
+The F10 audit completed 900 frames at 13:09:35.844: 337,048 draws, 19,795
+dispatches, 102,865 candidates, 102,864 prepared and one refused. There were 57
+outcome tuples with no overflow, 2,700 explicitly unchanged draws and zero
+unknown scene draws in this interval. Actual shader/CB checks and private
+preparation passed for the prepared candidates. Plans remained unbound.
+Resolve, fallback and backend preflight were ready; backend feature creation is
+intentionally deferred in that separate preflight result.
+
+Both lighting compute shaders are now observed by the preparation audit:
+`5998146D464F5C0E` prepared 959 times and refused once with
+`missing-full-write`; `EB0245DE0BB23BB6` prepared 960 times. The cold path
+queued one snapshot and rejected it as stale, with zero completions, failures,
+pending copies or timeouts. This demonstrates the mutation guard, not a
+successful cold-readback admission. It does not justify skipping full-write
+provenance or relaxing that guard. No spatial fallback ran in this flight.
+
+The 54 prepared tuples partition into the following primary-recipe reference
+observations (sum 102,864):
+
+| Classification | Observations | Meaning |
+| --- | ---: | --- |
+| canonical | 48,109 | Same current scene b1 identity and camera bytes |
+| basis-match | 33,936 | Exact spatial/depth relation; translation separate |
+| unmatched | 1,800 | Two finite supported families differ from reference |
+| unavailable | 12,600 | Current comparison prerequisites not established |
+| unsupported | 6,419 | Local/inverse/lighting relation not implemented |
+
+The two unmatched pairs each occurred 900 times:
+`4D516EF05C68FFA5/147E748F4CD3AE9A` has maximum spatial/depth error 0.391068339
+and translation residual 715292421; `5E417E9DF2E7F9E6/BD801F2FB02522EB` has
+3.46919596 and 546229445. These are not evidence of a rendering defect by
+themselves: local transforms can change the relationship. They refute admitting
+every prepared dp4 matrix as the selected scene camera without further proof.
+
+Among exact basis matches, `CFCA8FFC6B058630`, `88DCF1164C640EC3`,
+`81216C77F90DEDD6` and `2CECEC3065EF0D4A` reach translation residual
+2438.38834; the other observed matching families reach 0.000470820162. Do not
+turn either magnitude into an empirical ownership threshold. The unavailable
+rows are `0EE43D81E394E70C` (900) and `BFE51414CC3024B4/DB79AE788E049DFD`
+(11,700); the aggregate label does not distinguish every missing prerequisite.
+There are 12,720 depth-unassociated candidates overall, which is a separate
+population from unavailable supported comparisons. Actual DSV/HDR association
+and complete inverse/lighting alignment remain outside this diagnostic's proof.
+
+The requests for `5EAFFCD01B97D0C4` and `DD371C57C9093BB8` both report missing
+creation bytecode at 13:09:25.846. Neither appears among completed audit
+outcomes. Zero unknown draws in this flight therefore does not close the
+missing pair from the previous flight, nor establish general scene coverage.
+
+The final renderer report records 3,768 accepted calls: three history resets
+and 3,765 continuations, one camera cut, zero backend failures and no
+frame-gap, invalid-previous-camera or format-change resets. Its longest
+continuation run is 2,089. The adapter's longest treated streak is 3,734, with
+no added refusals through the steady interval from 13:09:23 to 13:10:03.
+Earlier reports include 604 conflicting-HDR/camera refusals and many
+no-known-tone-pass refusals; 327 additional no-known-tone-pass refusals appear
+at the end. The log alone does not identify the user's screen during those
+intervals. Safe recovery after early refusal remains required before jitter can
+be enabled.
+
+Ruled out: the corrected compute audit still being blind, because both exact
+lighting hashes now have preparation outcomes. Ruled out: private recipe
+preparation alone proving scene-camera equivalence, because 1,800 supported
+comparisons are unmatched and substantial unavailable/unsupported populations
+remain. Missing-shader closure and successful cold-snapshot admission remain
+untested rather than passed. No repeat flight is needed to read the existing
+shader evidence; the next change must address the remaining contracts before
+another combined test is requested.
+
+Offline bytecode review narrows that next contract. Both unmatched VS families
+consume b0[4..7] for SV_Position. `4D516...` also exports clip xyw to its PS,
+which uses it for depth UV and discard (`build/flat-audit-current` exact-hash
+VS/PS disassemblies). `5E417...` scales its vertex using cb2, exports clip xyw
+from b0[4,5,7], adjusts output clip z by +15.01, and its PS likewise samples
+depth and discards (`build/flat-audit` exact-hash disassemblies). Neither is
+safe to exclude merely because its raw matrix differs from the named scene
+camera. Existing `build/flat-projection-flight/b0ownership.txt` shows a
+different rotated/translated relation for `5E417...` across two earlier frames;
+it does not establish a stable world-model transform. The earlier
+`conclusion.md` establishes a camera-relative relation for CFCA and selected
+inverse paths only, not every newly observed family.
+
+The next bounded diagnostic should collect both pairs' b0[4..7], relevant
+local/model and scene-camera constants, and actual PS depth-SRV/DSV/HDR target
+identities together in a selected frame. Factor the projection using the
+bytecode's real vertex scaling and coordinate convention, then verify clip UV
+and depth reconstruction together. Residual maxima alone cannot distinguish
+local coordinates from a different projection. This flight therefore calls for
+a focused contract/capture change, not a threshold adjustment or another run of
+the unchanged build. No rendering code or installed files were changed during
+this review.
