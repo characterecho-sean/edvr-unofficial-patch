@@ -22,12 +22,22 @@ static chain: see "Flight 184826".*
   - The recompute `0x3CEE650` disagreed with the cached block on 12,906 of
     12,906 calls.
   - The guards held: the fix never validated and never acted.
-- **Next:** re-anchor on the render side. Capture the game's call stack where
-  it writes the 5376-byte VS b1 buffer (the eye origin's real source), and
-  record the eye camera's `cb1[275]` per frame explicitly. Drop the compose,
-  decode, push and latch hooks, and bound all per-event logging. A short
-  session gives the anchor; a jump adds the bad frame's path. Then static
-  analysis from the fill function.
+- **Next:** the render-side anchor is BUILT and INSTALLED, NOT FLOWN.
+  - `advanced.eye_origin_trace = off|on`: e8b37bb7, on main via 337a1893.
+    It captures the game's call stack at every write of the 5376-byte camera
+    buffer, dedupes the stacks, and marks which write the eye draw used.
+  - Around every detector verdict it dumps ±60 frames to
+    `edvr_logs\flash\eyetrace_*.txt` on its own; nothing per frame reaches
+    the gfx log.
+  - The Steam copy runs e8b37bb7 with the trap ON and one marked
+    `[advanced] eye_origin_trace = on` line; remove it after the flight.
+  - Blind spot: writes by `UpdateSubresource` or on a deferred context never
+    reach the detector, so "eye buffer not written this frame" is itself a
+    finding.
+  - After the flight: `edvr_log.py --target steam --expect-build e8b37bb7`,
+    then static analysis from the eye origin's write stack.
+  - The old `transition_flash_prevent` hooks stay inert until Sean says to
+    remove them.
 - **Instrument defects (fix before any re-fly):**
   - Per-push stack lines, logged for as long as the event lasted (it never
     ended), filled the gfx log to its cap at 18:50:40 (f~13459). The rest of
