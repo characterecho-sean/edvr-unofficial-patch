@@ -7,7 +7,8 @@ current timing and overlay qualification is linked separately.*
 
 - **2026-09-23:** the Performance page's `UI quality` row (`fix.ui_quality`)
   is one row for the cockpit panels' size and the UI layer; the one-day
-  `HUD quality` row is gone (see the journal's dated entries).
+  `HUD quality` row is gone (see the journal's dated entries). Its choices
+  read off / 100% / 125% (the file's `off | 100 | 125`).
 - **Current change:** The smaller single-line overlay fits its displayed text and keeps its font size across
   OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
   desktop gates passed; headset checks remain in the
@@ -691,8 +692,8 @@ they were there (flown 2026-09-07).
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
    `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
    `render_sharpness`, `foveation`, `foveation_centre`, `settlement_detail`,
-   `ui_quality` (labelled **UI quality**, default off: the cockpit panels'
-   size and the UI layer, one row), and `render_scale`
+   `ui_quality` (labelled **UI quality**, off / 100% / 125%, default off:
+   the interface panels' size and the UI layer, one row), and `render_scale`
    when its branch lands. Costs where they are measured:
    the temporal pass's own timing, NVIDIA's pass per eye, the sharpen's
    timestamp pair, the pixel fraction under scale. UI/smoke depth and

@@ -68,13 +68,33 @@ bool near1(double a, double b, double eps = 1e-4) { return std::fabs(a - b) <= e
 // ------------------------------------------------------------ arithmetic
 
 void testKey() {
+    // off | 100 | 125: percent of HMD Quality 1.0, the target 1.0 / 1.25 inside.
     bool ok = false;
-    check(uiQualityParse("off", &ok) == 0.0f && ok, "off is off");
-    check(uiQualityParse("1.0", &ok) == 1.0f && ok, "1.0 is 1.0");
-    check(uiQualityParse("1.25", &ok) == 1.25f && ok, "1.25 is 1.25");
-    check(uiQualityParse("1.00", &ok) == 0.0f && !ok, "1.00 is not 1.0 (exact text)");
-    check(uiQualityParse("on", &ok) == 0.0f && !ok, "on is refused as off");
+    const char* alias = "unset";
+    check(uiQualityParse("off", &ok, &alias) == 0.0f && ok && !alias, "off is off");
+    check(uiQualityParse("100", &ok, &alias) == 1.0f && ok && !alias, "100 is a target of 1.0");
+    check(uiQualityParse("125", &ok, &alias) == 1.25f && ok && !alias, "125 is a target of 1.25");
+    // The first spellings, read for one release, each naming its new one.
+    check(uiQualityParse("1.0", &ok, &alias) == 1.0f && ok && alias && std::strcmp(alias, "100") == 0,
+          "1.0 is read as 100, and says so");
+    check(uiQualityParse("1", &ok, &alias) == 1.0f && ok && alias && std::strcmp(alias, "100") == 0,
+          "1 is read as 100, and says so");
+    check(uiQualityParse("1.25", &ok, &alias) == 1.25f && ok && alias && std::strcmp(alias, "125") == 0,
+          "1.25 is read as 125, and says so");
+    check(uiQualityParse("125", &ok) == 1.25f && ok, "the alias out-parameter is optional");
+    // Anything else is off, and refused out loud.
+    const char* garbage[] = {"100%", "125%", "100.0", "1.00", "Off", "on", "150", "0", "", " 125"};
+    bool refused = true;
+    for (const char* g : garbage) {
+        alias = "unset";
+        refused = refused && uiQualityParse(g, &ok, &alias) == 0.0f && !ok && !alias;
+    }
+    check(refused, "100%, 125%, 100.0, 1.00, Off, on, 150, 0, empty and a leading space are refused as off");
     check(uiQualityParse(nullptr, &ok) == 0.0f && !ok, "no text is off");
+    // The log's and the menu's spelling.
+    check(std::strcmp(uiQualityLabel(1.0f), "100%") == 0 && std::strcmp(uiQualityLabel(1.25f), "125%") == 0 &&
+              std::strcmp(uiQualityLabel(0.0f), "off") == 0,
+          "the label: 100%, 125%, off");
 }
 
 void testSize() {
