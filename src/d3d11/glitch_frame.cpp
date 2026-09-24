@@ -1750,6 +1750,14 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // and this one was left behind when that was fixed.
     if (static_cast<uint64_t>(s->posOffset) * 4u + 12u > bytes) return;
 
+    // advanced.transition_flash_eye_base (CHANGE 14): the patch sim's
+    // buffer-row locator sees this same pre-Unmap fill. The module gates on
+    // its own pending-sim state (one atomic load per fill when nothing is
+    // armed), and the frame is s->frameNo -- the PRE-advance counter (the
+    // boundary that closes this frame records it one higher); the module
+    // compensates.
+    transitionFlashEyeBaseNoteSceneCB(s->frameNo, data, bytes);
+
     const float* pos = &static_cast<const float*>(data)[s->posOffset];
     // Non-finite values compare false in both directions, so a NaN here would
     // pass every threshold test silently rather than failing one.

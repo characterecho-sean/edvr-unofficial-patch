@@ -517,5 +517,132 @@ inline bool mailboxPlausible(const float m[16]) noexcept {
     return t2 < 1e7f * 1e7f;
 }
 
+// ---------------------------------------------------------------------------
+// CHANGE 14 (2026-09-24, flight 125237's follow-on): the buffer-row locator's
+// pure logic. Flight 125237 proved the live mailbox is the right base
+// source; the ACTING patch must apply premul4x4(liveM, badEye) to the eye-
+// derived ROWS of the 5376-byte scene CB (cb1 row 275 = the eye origin),
+// and the bad frame's eye is wrong in ROTATION too (the base's 3x3 is
+// ~1.3-1.7 rad off identity), so the current-view matrix's rows must be
+// corrected with it: view' = V_bad x liveM^-1 (corrected eye = liveM x P,
+// so view = (liveM x P)^-1 = P^-1 x liveM^-1 = V_bad x liveM^-1). These
+// functions locate the view rows structurally and compute that correction;
+// the module logs what they WOULD write, passively.
+
+// The scene CB's own constants (glitch_frame.cpp's camera_buffer_bytes/
+// camera_buffer_offset defaults -- the detector's own tap already gates on
+// them before this module is ever called).
+inline constexpr uint32_t kSceneCBSimBytes = 5376;
+inline constexpr int kSceneCBSimFloat4Rows = 5376 / 16;   // 336 float4 rows
+inline constexpr int kSceneCBSimOriginFloat = 1100;       // cb1[275] = floats [1100..1102]
+
+// A 4x4 group is a view-matrix candidate when its 3x3 (storage [r*4+c]) is
+// orthonormal: unit-length, mutually perpendicular columns. The test is
+// convention-agnostic (a transpose is orthonormal iff the original is), so
+// it holds however the game stores the view.
+inline bool isOrtho3x3(const float m[16], float tol) noexcept {
+    for (int c = 0; c < 3; ++c) {
+        const float n = m[c] * m[c] + m[4 + c] * m[4 + c] + m[8 + c] * m[8 + c];
+        if (n < (1.0f - tol) * (1.0f - tol) || n > (1.0f + tol) * (1.0f + tol)) return false;
+    }
+    for (int a = 0; a < 3; ++a) {
+        for (int b = a + 1; b < 3; ++b) {
+            const float d = m[a] * m[b] + m[4 + a] * m[4 + b] + m[8 + a] * m[8 + b];
+            if (d < -tol || d > tol) return false;
+        }
+    }
+    return true;
+}
+
+// |t + origin.R| for a candidate group: the row-vector eye origin through
+// the 3x3, negated, against the translation row. ZERO when the group IS
+// this frame's view (v_view = v_world.R + t maps the eye origin to 0).
+// A previous frame's view is orthonormal too -- but its translation belongs
+// to the previous frame's eye, which at a transition is metres to
+// kilometres away, so this is what rejects it.
+inline float viewOriginMatch(const float m[16], const float origin[3]) noexcept {
+    float d2 = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        const float e = m[12 + k] + origin[0] * m[k] + origin[1] * m[4 + k] + origin[2] * m[8 + k];
+        d2 += e * e;
+    }
+    return std::sqrt(d2);
+}
+
+inline constexpr int kSceneCBFindMaxCandidates = 8;
+
+struct SceneCBViewFind {
+    int startRow = -1;         // float4 row of the winning group; -1 = none
+    float originMatch = 0.0f;  // its |t + origin.R| (0 when none)
+    int orthoGroups = 0;       // ALL orthonormal groups seen (may exceed stored)
+    int originRejected = 0;    // orthonormal groups failing the origin test
+    int candidateCount = 0;    // stored start rows (capped at kSceneCBFindMaxCandidates)
+    int candidateRows[kSceneCBFindMaxCandidates] = {};
+};
+
+// Scan float4 rows [0, float4Rows-4] for the group whose 3x3 is orthonormal
+// within orthoTol AND whose translation matches `origin` within originTol;
+// the winner is the closest match. NaN origins never match (every
+// comparison is false), so a garbage fill reads as "none", not a false hit.
+inline SceneCBViewFind locateSceneCBView(const float* cb, int float4Rows, const float origin[3],
+                                         float orthoTol, float originTol) noexcept {
+    SceneCBViewFind out;
+    for (int r = 0; r + 4 <= float4Rows; ++r) {
+        const float* m = cb + r * 4;
+        if (!isOrtho3x3(m, orthoTol)) continue;
+        ++out.orthoGroups;
+        if (out.candidateCount < kSceneCBFindMaxCandidates) out.candidateRows[out.candidateCount++] = r;
+        const float match = viewOriginMatch(m, origin);
+        if (match <= originTol && (out.startRow < 0 || match < out.originMatch)) {
+            out.startRow = r;
+            out.originMatch = match;
+        } else {
+            ++out.originRejected;
+        }
+    }
+    return out;
+}
+
+// The general 3x3+translation inverse, row convention (translation row at
+// [12..14], last row (0,0,0,1)). Exact for orthonormal 3x3s (the common
+// case: view matrices and the live base are rotations); the cofactor form
+// tolerates a little scale. No pivoting -- a near-singular 3x3 is the
+// caller's plausibility gate's business, not this function's.
+inline void affineInverse4x4(const float m[16], float out[16]) noexcept {
+    const float a = m[0], b = m[1], c = m[2];
+    const float d = m[4], e = m[5], f = m[6];
+    const float g = m[8], h = m[9], i = m[10];
+    const float invDet = 1.0f / (a * (e * i - f * h) + d * (c * h - b * i) + g * (b * f - c * e));
+    float r[16];
+    r[0] = (e * i - f * h) * invDet;
+    r[1] = (c * h - b * i) * invDet;
+    r[2] = (b * f - c * e) * invDet;
+    r[3] = 0.0f;
+    r[4] = (f * g - d * i) * invDet;
+    r[5] = (a * i - c * g) * invDet;
+    r[6] = (c * d - a * f) * invDet;
+    r[7] = 0.0f;
+    r[8] = (d * h - e * g) * invDet;
+    r[9] = (b * g - a * h) * invDet;
+    r[10] = (a * e - b * d) * invDet;
+    r[11] = 0.0f;
+    // Row convention: v.M = v.R + t, so M^-1 = [R^-1, -t.R^-1] -- the
+    // translation through the inverse 3x3, NEGATED.
+    r[12] = -(m[12] * r[0] + m[13] * r[4] + m[14] * r[8]);
+    r[13] = -(m[12] * r[1] + m[13] * r[5] + m[14] * r[9]);
+    r[14] = -(m[12] * r[2] + m[13] * r[6] + m[14] * r[10]);
+    r[15] = 1.0f;
+    std::memcpy(out, r, sizeof(r));
+}
+
+// The acting build's postmultiply naming for the one 4x4 multiply: the
+// view correction is V_bad x liveM^-1, i.e. the stored view POSTmultiplied
+// by the inverse base. Same operation as premul4x4 (first argument is the
+// left factor either way); the name exists so the acting call site reads
+// the way the math is described.
+inline void postmul4x4(const float a[16], const float b[16], float out[16]) noexcept {
+    premul4x4(a, b, out);
+}
+
 }  // namespace tfeb
 }  // namespace edvr

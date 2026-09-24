@@ -370,12 +370,68 @@ struct PatchSimPending {
     // ship-change races between arm and tap. 0 = unknown at arm time, probe
     // disabled.
     uint64_t ship = 0;
+    // CHANGE 14: the locator's cross-frame state -- the most recent covered
+    // fill whose row 275 looked head-only (the bad frame's signature)
+    // produced this corrected origin/view-translation; the NEXT covered
+    // frame's fills residual against it (the engine's own correct frame).
+    float prevCorrOrigin[3] = {NAN, NAN, NAN};
+    float prevCorrViewT[3] = {NAN, NAN, NAN};
+    bool havePrevCorr = false;
 };
 std::mutex g_patchSimMutex;
 PatchSimPending g_patchSim;
 std::atomic<uint64_t> g_patchSimFired{0};      // sim frames logged (session)
 std::atomic<uint64_t> g_patchSimReplaced{0};   // pending sims an entry edge replaced
 std::atomic<uint64_t> g_patchSimExpired{0};    // windows that passed with no covered scene frame
+// CHANGE 14: cheap mirrors of the pending state for the per-fill CB tap's
+// early-out (60+ fills a frame must not take the mutex when nothing is
+// armed). Written only under g_patchSimMutex, at arm and at retire/expire.
+std::atomic<bool> g_patchSimPending{false};
+std::atomic<uint32_t> g_patchSimPendingSkip{0};
+
+// CHANGE 14: the buffer-row locator's per-tap-frame accumulation, consumed
+// by the boundary sim block (which logs it one line per covered frame).
+// Guarded by g_patchSimMutex. `tapFrame` is the PRE-advance counter the
+// fills carried (s->frameNo at Unmap): the boundary that closes that frame
+// records it one higher, so the consumption key is tapFrame+1.
+struct PatchSimCBFillDetail {
+    float row275[3] = {NAN, NAN, NAN};
+    int32_t viewRow = -1;         // the located current view's float4 row
+    float originMatch = NAN;      // its |t + origin.R|
+    uint8_t liveState = 0;        // PatchSimLiveState at this fill
+};
+constexpr uint32_t kCBAccumRow275Max = 64;    // fills' row 275 kept for the boundary's P-match
+constexpr uint32_t kCBAccumDetailMax = 4;     // per-fill dump detail lines
+struct PatchSimCBAccum {
+    uint32_t tapFrame = 0xFFFFFFFFu;
+    uint32_t fillsSeen = 0;
+    uint32_t stored = 0;                       // row275 entries actually stored (<= kCBAccumRow275Max)
+    float row275[kCBAccumRow275Max][3] = {};   // first kCBAccumRow275Max fills' eye origins
+    uint32_t detailCount = 0;
+    PatchSimCBFillDetail detail[kCBAccumDetailMax] = {};
+    // The LAST analyzed fill's results (analysis needs a usable live base):
+    bool analyzed = false;
+    uint8_t lastLiveState = 0;                 // PatchSimLiveState of the most recent fill
+    tfeb::SceneCBViewFind find = {};
+    float correctedOrigin[3] = {NAN, NAN, NAN};
+    float correctedViewT[3] = {NAN, NAN, NAN};
+    bool haveCorrection = false;
+    // The cross-frame residual vs the previous covered frame's correction:
+    bool crossDone = false;
+    float crossOrigin = NAN;
+    float crossView = NAN;
+};
+PatchSimCBAccum g_cbAccum;
+
+// CHANGE 14: the locator's tolerances. The view's t = -R.origin holds to
+// float rounding (~1e-4) for the CURRENT view; a previous frame's view is
+// metres to kilometres off at a transition, and |row275| under a metre is
+// the head-only signature of the bad frame (the same 1 m head volume
+// glitch_scene.h's CameraReset test uses).
+constexpr float kCBViewOrthoTol = 0.01f;
+constexpr float kCBViewOriginTol = 0.5f;
+constexpr float kCBMatchedPTol = 0.5f;
+constexpr float kCBHeadOnlyRadius2 = 1.0f;   // |row275|^2 under this = head-only
 
 // CHANGE 13: the tap-time live-mailbox probe's outcome, printed as the
 // line's live= token and stored in the dump's sim row. Unavailable covers
@@ -402,6 +458,13 @@ void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint6
         g_patchSim.haveHeld = haveHeldBase;
         if (haveHeldBase) std::memcpy(g_patchSim.heldM, heldM, sizeof(g_patchSim.heldM));
         g_patchSim.ship = ship;
+        // CHANGE 14: a fresh sim starts a fresh cross-frame chain and a
+        // fresh CB accumulation; the mirrors publish the armed state for
+        // the per-fill tap's lock-free early-out.
+        g_patchSim.havePrevCorr = false;
+        g_cbAccum = PatchSimCBAccum{};
+        g_patchSimPending.store(true, std::memory_order_release);
+        g_patchSimPendingSkip.store(frame, std::memory_order_release);
     }
     if (replaced) {
         g_patchSimReplaced.fetch_add(1, std::memory_order_relaxed);
@@ -618,6 +681,18 @@ struct EyeBaseFrameRecord {
     float patchSimLive[3] = {NAN, NAN, NAN};
     float patchSimLiveT[3] = {NAN, NAN, NAN};
     uint8_t patchSimLiveState = 0;
+    // CHANGE 14: the buffer-row locator's boundary-consumed outcome for this
+    // frame (NAN/-1 defaults = no CB tap landed on it).
+    uint32_t patchSimCBFills = 0;
+    uint32_t patchSimCBMatched = 0;
+    int32_t patchSimCBTapFrame = -1;
+    int32_t patchSimCBViewRow = -1;
+    float patchSimCBCorrO[3] = {NAN, NAN, NAN};
+    float patchSimCBCrossO = NAN;
+    float patchSimCBCrossV = NAN;
+    uint8_t patchSimCBLiveState = 0;
+    uint32_t patchSimCBDetailCount = 0;
+    PatchSimCBFillDetail patchSimCBDetail[kCBAccumDetailMax] = {};
     float patchSimCamStep = 0.0f;
     float patchSimPoolStep = 0.0f;
     uint8_t patchSimChoice = 0;   // tfeb::SceneChoice (held as uint8_t; 0 = Old)
@@ -626,7 +701,11 @@ struct EyeBaseFrameRecord {
     bool patchSimHaveNew = false;
 };
 
-static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 1ull * 1024 * 1024,
+// CHANGE 14 raised the bound 1 MiB -> 2 MiB: the record gained the locator's
+// boundary-consumed outcome plus four per-fill details (~90 bytes), and
+// 4096 x that is ~1.4 MiB -- still small next to the call ring's 6 MiB, and
+// still bounded here rather than silently growing.
+static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 2ull * 1024 * 1024,
              "transition flash eye base: the frame ring must stay small");
 
 std::atomic<EyeBaseFrameRecord*> g_frameRing{nullptr};
@@ -850,6 +929,33 @@ void performDump(const PendingDump& due) noexcept {
                 tfeb::sceneChoiceText(static_cast<tfeb::SceneChoice>(r.patchSimChoice)),
                 static_cast<tfeb::SceneChoice>(r.patchSimChoice) == tfeb::SceneChoice::New ? "new" : "held",
                 r.patchSimRefilledAge, patchSimLiveStateText(r.patchSimLiveState));
+            // CHANGE 14: the buffer-row locator's boundary-consumed outcome,
+            // then the per-fill detail (the "patch-sim-cb" prefix keeps the
+            // offline parser's row regex from ever matching these lines).
+            if (r.patchSimCBFills) {
+                char crossOText[24], crossVText[24];
+                if (std::isnan(r.patchSimCBCrossO)) std::snprintf(crossOText, sizeof(crossOText), "n/a");
+                else std::snprintf(crossOText, sizeof(crossOText), "%.3f", r.patchSimCBCrossO);
+                if (std::isnan(r.patchSimCBCrossV)) std::snprintf(crossVText, sizeof(crossVText), "n/a");
+                else std::snprintf(crossVText, sizeof(crossVText), "%.3f", r.patchSimCBCrossV);
+                appendLine(simText,
+                    "  patch-sim-cb f%u summary: fills=%u match275=%u tapf=%d view=%d "
+                    "corrO=(%+.3f %+.3f %+.3f) crossO=%s crossV=%s live=%s",
+                    r.frame, r.patchSimCBFills, r.patchSimCBMatched, r.patchSimCBTapFrame,
+                    r.patchSimCBViewRow,
+                    r.patchSimCBCorrO[0], r.patchSimCBCorrO[1], r.patchSimCBCorrO[2],
+                    crossOText, crossVText,
+                    patchSimLiveStateText(r.patchSimCBLiveState));
+                for (uint32_t i = 0; i < r.patchSimCBDetailCount && i < kCBAccumDetailMax; ++i) {
+                    const PatchSimCBFillDetail& d = r.patchSimCBDetail[i];
+                    appendLine(simText,
+                        "  patch-sim-cb f%u fill%u: row275=(%+.3f %+.3f %+.3f) view=%d "
+                        "originMatch=%s%.4f live=%s",
+                        r.frame, i, d.row275[0], d.row275[1], d.row275[2], d.viewRow,
+                        d.viewRow < 0 ? "n/a " : "", d.originMatch,
+                        patchSimLiveStateText(d.liveState));
+                }
+            }
         }
     }
     appendLine(text, "per-frame rows done, %u entries", framePrinted);
@@ -2011,6 +2117,61 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         tfeb::patchSceneChoice(geometry.cameraStep, geometry.poolStep, geometryFresh);
                     const int32_t refilledAge =
                         haveNew ? (frame >= newFrame ? static_cast<int32_t>(frame - newFrame) : -1) : -1;
+                    // CHANGE 14: consume the buffer-row locator's
+                    // accumulation for this frame. The fills of the frame
+                    // the boundary just closed carried the PRE-advance
+                    // counter (tapFrame == this frame - 1); accept the
+                    // no-skew case too and prefer the -1. Invalidating the
+                    // slot afterwards keeps the next frame's fills from
+                    // appending to an already-logged accumulation.
+                    uint32_t cbFills = 0, cbMatched = 0;
+                    int32_t cbTapFrame = -1, cbViewRow = -1;
+                    float cbCorrO[3] = {NAN, NAN, NAN};
+                    float cbCrossO = NAN, cbCrossV = NAN;
+                    uint8_t cbLive = 0;
+                    if ((g_cbAccum.tapFrame + 1 == frame || g_cbAccum.tapFrame == frame) &&
+                        g_cbAccum.fillsSeen) {
+                        PatchSimCBAccum& a = g_cbAccum;
+                        cbFills = a.fillsSeen;
+                        cbTapFrame = static_cast<int32_t>(a.tapFrame);
+                        cbLive = a.lastLiveState;
+                        for (uint32_t i = 0; i < a.stored; ++i) {
+                            const float dx = a.row275[i][0] - P[0];
+                            const float dy = a.row275[i][1] - P[1];
+                            const float dz = a.row275[i][2] - P[2];
+                            if (dx * dx + dy * dy + dz * dz <= kCBMatchedPTol * kCBMatchedPTol) ++cbMatched;
+                        }
+                        if (a.analyzed) {
+                            cbViewRow = a.find.startRow;
+                            cbCorrO[0] = a.correctedOrigin[0];
+                            cbCorrO[1] = a.correctedOrigin[1];
+                            cbCorrO[2] = a.correctedOrigin[2];
+                        }
+                        if (a.crossDone) {
+                            cbCrossO = a.crossOrigin;
+                            cbCrossV = a.crossView;
+                        }
+                        r.patchSimCBFills = cbFills;
+                        r.patchSimCBMatched = cbMatched;
+                        r.patchSimCBTapFrame = cbTapFrame;
+                        r.patchSimCBViewRow = cbViewRow;
+                        r.patchSimCBCorrO[0] = cbCorrO[0];
+                        r.patchSimCBCorrO[1] = cbCorrO[1];
+                        r.patchSimCBCorrO[2] = cbCorrO[2];
+                        r.patchSimCBCrossO = cbCrossO;
+                        r.patchSimCBCrossV = cbCrossV;
+                        r.patchSimCBLiveState = cbLive;
+                        r.patchSimCBDetailCount = a.detailCount;
+                        for (uint32_t i = 0; i < a.detailCount && i < kCBAccumDetailMax; ++i) {
+                            r.patchSimCBDetail[i] = a.detail[i];
+                        }
+                        a.tapFrame = 0xFFFFFFFFu;   // consumed
+                    }
+                    char cbCrossOText[24], cbCrossVText[24];
+                    if (std::isnan(cbCrossO)) std::snprintf(cbCrossOText, sizeof(cbCrossOText), "n/a");
+                    else std::snprintf(cbCrossOText, sizeof(cbCrossOText), "%.3f", cbCrossO);
+                    if (std::isnan(cbCrossV)) std::snprintf(cbCrossVText, sizeof(cbCrossVText), "n/a");
+                    else std::snprintf(cbCrossVText, sizeof(cbCrossVText), "%.3f", cbCrossV);
                     g_patchSimFired.fetch_add(1, std::memory_order_relaxed);
                     // One line per covered render frame (at most three per
                     // event), never per consume -- per-consume spam filled
@@ -2021,12 +2182,19 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                     // proven-safe side). live= answers the flight question:
                     // ok (a usable live base sat in the mailbox at the tap),
                     // RESET (the tap landed inside the consumer's reset
-                    // window), or n/a.
+                    // window), or n/a. The cb=[...] cluster is the buffer-
+                    // row locator's outcome for this frame: fills seen
+                    // pre-Unmap, how many carried this P at row 275, the
+                    // located current view's float4 row, the correction the
+                    // acting build would write, and the cross-frame residual
+                    // against the previous covered frame's correction (the
+                    // engine's own correct frame).
                     Log::get().note(
                         "transition flash eye base: patch sim frame %u (skip %u): P=(%+.3f %+.3f %+.3f) "
                         "held->(%s%+.3f %+.3f %+.3f) new->(%s%+.3f %+.3f %+.3f) "
                         "live->(%s%+.3f %+.3f %+.3f) cam=%.3f pool=%.3f "
-                        "choice=%s->%s (refilled age=%d, live=%s)",
+                        "choice=%s->%s (refilled age=%d, live=%s) cb=[fills=%u match275=%u tapf=%d "
+                        "view=%d corrO=(%+.3f %+.3f %+.3f) crossO=%s crossV=%s live=%s]",
                         frame, g_patchSim.skipFrame, P[0], P[1], P[2],
                         haveHeld ? "" : "n/a ", patchHeld[0], patchHeld[1], patchHeld[2],
                         haveNew ? "" : "n/a ", patchNew[0], patchNew[1], patchNew[2],
@@ -2034,7 +2202,10 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         geometry.cameraStep, geometry.poolStep,
                         tfeb::sceneChoiceText(choice),
                         choice == tfeb::SceneChoice::New ? "new" : "held",
-                        refilledAge, patchSimLiveStateText(liveState));
+                        refilledAge, patchSimLiveStateText(liveState),
+                        cbFills, cbMatched, cbTapFrame, cbViewRow,
+                        cbCorrO[0], cbCorrO[1], cbCorrO[2],
+                        cbCrossOText, cbCrossVText, patchSimLiveStateText(cbLive));
                     r.patchSim = true;
                     r.patchSimSkipFrame = g_patchSim.skipFrame;
                     r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];
@@ -2049,11 +2220,6 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         // value the plausibility gate refused.
                         r.patchSimLiveT[0] = liveM[12]; r.patchSimLiveT[1] = liveM[13]; r.patchSimLiveT[2] = liveM[14];
                     }
-                    r.patchSim = true;
-                    r.patchSimSkipFrame = g_patchSim.skipFrame;
-                    r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];
-                    r.patchSimHeld[0] = patchHeld[0]; r.patchSimHeld[1] = patchHeld[1]; r.patchSimHeld[2] = patchHeld[2];
-                    r.patchSimNew[0] = patchNew[0]; r.patchSimNew[1] = patchNew[1]; r.patchSimNew[2] = patchNew[2];
                     r.patchSimCamStep = geometry.cameraStep;
                     r.patchSimPoolStep = geometry.poolStep;
                     r.patchSimChoice = static_cast<uint8_t>(choice);
@@ -2065,6 +2231,7 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         // here so the next frame's expiry branch does not
                         // count a completed run as expired.
                         g_patchSim.active = false;
+                        g_patchSimPending.store(false, std::memory_order_release);
                     }
                 }
             } else if (frame - g_patchSim.skipFrame > tfeb::kPatchSimWindowFrames) {
@@ -2072,11 +2239,138 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                 // covered frame with an invalid scene= neither logs nor
                 // clears -- the next covered frame may still be valid).
                 g_patchSim.active = false;
+                g_patchSimPending.store(false, std::memory_order_release);
                 g_patchSimExpired.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
     pushFrameRing(r);
+}
+
+// CHANGE 14: the buffer-row locator's fill tap -- glitchFrameObserve's
+// pre-Unmap read of the 5376-byte scene CB (one call per fill, ~60 a frame
+// on the nominated camera buffer). Everything gates on the module's own
+// pending-sim state so the idle cost is one atomic load per fill; the
+// analysis itself runs only on the covered frames and writes nothing.
+void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_t sizeBytes) {
+    if (!g_armed.load(std::memory_order_relaxed)) return;
+    if (static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) == tfp::Mode::Off) return;
+    if (sizeBytes != tfeb::kSceneCBSimBytes) return;
+    if (!g_patchSimPending.load(std::memory_order_acquire)) return;
+    const uint32_t skip = g_patchSimPendingSkip.load(std::memory_order_acquire);
+    // The fills of boundary frame F carried s->frameNo == F-1 (glitchFrame-
+    // Boundary advances the counter before it records the frame it closes;
+    // the sim's own frame argument is that advanced number), so the tap
+    // frame's +1 must land in the window: tap frames are N..N+2 for the
+    // covered boundary frames N+1..N+3.
+    if (!tfeb::patchSimWindowCovers(frame + 1, skip)) return;
+
+    const float* cb = static_cast<const float*>(mapped);
+    std::lock_guard<std::mutex> lock(g_patchSimMutex);
+    if (!g_patchSim.active || !tfeb::patchSimWindowCovers(frame + 1, g_patchSim.skipFrame)) return;
+
+    PatchSimCBAccum& a = g_cbAccum;
+    if (a.tapFrame != frame) {
+        // First fill of a new covered tap-frame: the previous slot was
+        // consumed by its boundary (or held an unconsumed non-covered
+        // frame -- either way it is disposable; the cross-frame chain lives
+        // in g_patchSim, not here).
+        a = PatchSimCBAccum{};
+        a.tapFrame = frame;
+    }
+    ++a.fillsSeen;
+    const float* originRow = cb + tfeb::kSceneCBSimOriginFloat;
+    const float origin[3] = {originRow[0], originRow[1], originRow[2]};
+    if (a.stored < kCBAccumRow275Max) {
+        a.row275[a.stored][0] = origin[0];
+        a.row275[a.stored][1] = origin[1];
+        a.row275[a.stored][2] = origin[2];
+        ++a.stored;
+    }
+    PatchSimCBFillDetail d;
+    d.row275[0] = origin[0]; d.row275[1] = origin[1]; d.row275[2] = origin[2];
+
+    // CHANGE 13's path, per fill: the locator is only meaningful while the
+    // live base is usable -- on this fill, at this moment.
+    float liveM[16] = {};
+    uint8_t liveState = LiveUnavailable;
+    if (g_patchSim.ship != 0 &&
+        sehReadBlock64(static_cast<uintptr_t>(g_patchSim.ship) + 0x3330, liveM)) {
+        if (tfeb::isResetMailbox(liveM)) {
+            liveState = LiveReset;
+        } else if (tfeb::mailboxPlausible(liveM)) {
+            liveState = LiveOk;
+        }
+    }
+    a.lastLiveState = liveState;
+    d.liveState = liveState;
+
+    if (liveState == LiveOk) {
+        // Locate THIS frame's current view structurally: orthonormal 3x3
+        // plus a translation locked to this fill's row-275 origin (the
+        // previous frame's view is orthonormal too, but its translation
+        // belongs to the previous frame's eye -- rejected by the origin
+        // test).
+        a.find = tfeb::locateSceneCBView(cb, tfeb::kSceneCBSimFloat4Rows, origin,
+                                         kCBViewOrthoTol, kCBViewOriginTol);
+        a.analyzed = true;
+        d.viewRow = a.find.startRow;
+        d.originMatch = a.find.startRow >= 0 ? a.find.originMatch : NAN;
+        // The correction the acting build would write: the premultiplied
+        // origin, and the stored view POSTmultiplied by liveM^-1 (corrected
+        // eye = liveM x P, so view' = P^-1 x liveM^-1 = V_bad x liveM^-1).
+        tfeb::patchEyeOrigin(liveM, origin, a.correctedOrigin);
+        if (a.find.startRow >= 0) {
+            float vBad[16], liveInv[16], vCorr[16];
+            std::memcpy(vBad, cb + a.find.startRow * 4, sizeof(vBad));
+            tfeb::affineInverse4x4(liveM, liveInv);
+            tfeb::postmul4x4(vBad, liveInv, vCorr);
+            a.correctedViewT[0] = vCorr[12];
+            a.correctedViewT[1] = vCorr[13];
+            a.correctedViewT[2] = vCorr[14];
+        } else {
+            a.correctedViewT[0] = NAN; a.correctedViewT[1] = NAN; a.correctedViewT[2] = NAN;
+        }
+        a.haveCorrection = true;
+        // Cross-frame validation: the PREVIOUS covered head-only fill's
+        // correction against THIS fill's actual rows. On the bad frame
+        // itself the chain is empty (nothing to compare against); the
+        // residual appears on the next covered frame -- the engine's own
+        // correct frame.
+        if (g_patchSim.havePrevCorr) {
+            const float dox = g_patchSim.prevCorrOrigin[0] - origin[0];
+            const float doy = g_patchSim.prevCorrOrigin[1] - origin[1];
+            const float doz = g_patchSim.prevCorrOrigin[2] - origin[2];
+            a.crossOrigin = std::sqrt(dox * dox + doy * doy + doz * doz);
+            if (a.find.startRow >= 0) {
+                const float* actualT = cb + a.find.startRow * 4 + 12;
+                const float dvx = g_patchSim.prevCorrViewT[0] - actualT[0];
+                const float dvy = g_patchSim.prevCorrViewT[1] - actualT[1];
+                const float dvz = g_patchSim.prevCorrViewT[2] - actualT[2];
+                a.crossView = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
+            } else {
+                a.crossView = NAN;
+            }
+            a.crossDone = true;
+        }
+        // Chain forward -- but only from a head-only row 275 (|origin| < 1
+        // m, the same head volume glitch_scene.h's CameraReset test uses):
+        // the premultiply expects P in head space, and on the control fills
+        // (N+1/N+3's ordinary eye) the "correction" is not meaningful.
+        const float o2 = origin[0] * origin[0] + origin[1] * origin[1] + origin[2] * origin[2];
+        if (o2 < kCBHeadOnlyRadius2) {
+            g_patchSim.prevCorrOrigin[0] = a.correctedOrigin[0];
+            g_patchSim.prevCorrOrigin[1] = a.correctedOrigin[1];
+            g_patchSim.prevCorrOrigin[2] = a.correctedOrigin[2];
+            g_patchSim.prevCorrViewT[0] = a.correctedViewT[0];
+            g_patchSim.prevCorrViewT[1] = a.correctedViewT[1];
+            g_patchSim.prevCorrViewT[2] = a.correctedViewT[2];
+            g_patchSim.havePrevCorr = true;
+        }
+    } else {
+        a.analyzed = false;
+    }
+    if (a.detailCount < kCBAccumDetailMax) a.detail[a.detailCount++] = d;
 }
 
 EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot() {

@@ -49,7 +49,11 @@
 // render-frame window. CHANGE 13 (the live-mailbox tap) adds mailboxPlausible
 // -- the sanity gate a tap-time live read passes through -- checked against
 // the measured tunnel base, a measured 5 km rebase, and the over-range and
-// non-finite rejections.
+// non-finite rejections. CHANGE 14 (the buffer-row locator) adds the
+// structural view-matrix finder (locateSceneCBView over a synthetic buffer
+// with current/prev/unrelated orthonormal groups), the correction inverse
+// (affineInverse4x4 round-trips, scale and rotation cases), the postmultiply
+// naming (postmul4x4), and the orthonormality/match unit cells.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1210,6 +1214,137 @@ void caseLiveMailboxPlausible() {
     check(tfeb::mailboxPlausible(tfeb::kResetMailbox), "liveMailbox: the reset value is for isResetMailbox, not this gate");
 }
 
+// --- transition_flash_eye_base_core.h: CHANGE 14, the buffer-row locator --
+// (task 2026-09-24, "the buffer-row locator (watch-only)"): the structural
+// view-matrix finder and the correction math the acting build will write.
+
+bool near16(const float a[16], const float b[16], float eps) {
+    for (int i = 0; i < 16; ++i) if (std::fabs(a[i] - b[i]) > eps) return false;
+    return true;
+}
+
+void caseAffineInverse4x4() {
+    // Pure translation: the inverse negates t through the identity.
+    const float T[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1};
+    float inv[16];
+    tfeb::affineInverse4x4(T, inv);
+    check(inv[12] == -1 && inv[13] == -2 && inv[14] == -3,
+          "affineInverse: pure translation negates t");
+
+    // The premul tests' scale matrix (2,3,4) + t(1,2,3): the inverse scales
+    // by the reciprocals and t' = -t through R^-1 = (-1/2, -2/3, -3/4).
+    const float B[16] = {2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1};
+    tfeb::affineInverse4x4(B, inv);
+    check(inv[0] == 0.5f && inv[5] == 1.0f / 3.0f && inv[10] == 0.25f &&
+          std::fabs(inv[12] + 0.5f) < 1e-6f && std::fabs(inv[13] + 2.0f / 3.0f) < 1e-6f &&
+          std::fabs(inv[14] + 0.75f) < 1e-6f,
+          "affineInverse: scale+translation inverts to reciprocal scale and -t through R^-1");
+
+    // Round-trips: M x M^-1 = I and M^-1 x M = I, for the scale case and a
+    // rotation+translation case (the live-base shape).
+    float prod[16];
+    tfeb::affineInverse4x4(B, inv);
+    tfeb::premul4x4(B, inv, prod);
+    const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(near16(prod, I, 1e-5f), "affineInverse: B x B^-1 = I");
+    tfeb::premul4x4(inv, B, prod);
+    check(near16(prod, I, 1e-5f), "affineInverse: B^-1 x B = I");
+
+    const float R[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+    tfeb::affineInverse4x4(R, inv);
+    tfeb::premul4x4(R, inv, prod);
+    check(near16(prod, I, 1e-5f), "affineInverse: rotation+translation round-trips");
+    tfeb::premul4x4(inv, R, prod);
+    check(near16(prod, I, 1e-5f), "affineInverse: ...both ways");
+}
+
+void casePostmul4x4() {
+    // The one 4x4 multiply under the acting build's postmultiply naming:
+    // same result as premul on the hand-composed B*M case.
+    const float B[16] = {2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1};
+    const float M[16] = {0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+    float a[16], b[16];
+    tfeb::premul4x4(B, M, a);
+    tfeb::postmul4x4(B, M, b);
+    check(near16(a, b, 0.0f), "postmul4x4: the postmultiply naming reproduces the multiply");
+    // And the view-correction order V_bad x liveM^-1 is exactly what
+    // premul(V_bad, inverse(liveM)) writes.
+    const float live[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0.003f, 3.509f, 1613.249f, 1};
+    float li[16], viaPost[16], viaPremul[16];
+    tfeb::affineInverse4x4(live, li);
+    tfeb::postmul4x4(B, li, viaPost);
+    tfeb::premul4x4(B, li, viaPremul);
+    check(near16(viaPost, viaPremul, 0.0f), "postmul4x4: V_bad x liveM^-1 agrees with premul's form");
+}
+
+void caseIsOrtho3x3() {
+    const float R90[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(tfeb::isOrtho3x3(tfeb::kResetMailbox, 0.01f), "isOrtho3x3: identity is orthonormal");
+    check(tfeb::isOrtho3x3(R90, 0.01f), "isOrtho3x3: a 90-degree rotation is orthonormal");
+    const float S[16] = {2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(!tfeb::isOrtho3x3(S, 0.01f), "isOrtho3x3: a 2x scale is rejected");
+    const float Shear[16] = {1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(!tfeb::isOrtho3x3(Shear, 0.01f), "isOrtho3x3: a shear is rejected");
+}
+
+void caseViewOriginMatch() {
+    const float origin[3] = {1, 2, 3};
+    // Identity view: t = -origin matches to 0.
+    const float V[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, -2, -3, 1};
+    check(std::fabs(tfeb::viewOriginMatch(V, origin)) < 1e-6f, "viewOriginMatch: t = -origin reads as 0");
+    const float Voff[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -2, -3, 1};
+    check(std::fabs(tfeb::viewOriginMatch(Voff, origin) - 1.0f) < 1e-6f,
+          "viewOriginMatch: a 1 m translation error reads as 1");
+    const float nanOrigin[3] = {NAN, 0, 0};
+    check(std::isnan(tfeb::viewOriginMatch(V, nanOrigin)),
+          "viewOriginMatch: a NaN origin reads as NaN (never a false match)");
+}
+
+void caseLocateSceneCBView() {
+    // A synthetic scene CB: the CURRENT view planted at row 40, the PREVIOUS
+    // frame's view (orthonormal, but the old frame's eye -- 5 km away) at
+    // row 60, and an orthonormal group with an unrelated translation at row
+    // 200. The finder must pick row 40.
+    float cb[tfeb::kSceneCBSimFloat4Rows * 4] = {};
+    const float origin[3] = {-0.66f, 11.08f, -7.64f};
+
+    // Current view: 90-degree Z rotation, t = -origin.R (exactly this
+    // frame's eye, per the design doc's signature).
+    float cur[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    tfeb::patchEyeOrigin(cur, origin, &cur[12]);
+    cur[12] = -cur[12]; cur[13] = -cur[13]; cur[14] = -cur[14];
+    std::memcpy(cb + 40 * 4, cur, sizeof(cur));
+
+    // Previous view: a different rotation, t = -R.prevOrigin with the
+    // previous frame's eye 5 km away (a transition rebase).
+    const float prevOrigin[3] = {origin[0] + 5000.0f, origin[1], origin[2]};
+    float prev[16] = {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    tfeb::patchEyeOrigin(prev, prevOrigin, &prev[12]);
+    prev[12] = -prev[12]; prev[13] = -prev[13]; prev[14] = -prev[14];
+    std::memcpy(cb + 60 * 4, prev, sizeof(prev));
+
+    // Unrelated orthonormal group: identity rotation, far translation.
+    const float other[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 123, 456, 789, 1};
+    std::memcpy(cb + 200 * 4, other, sizeof(other));
+
+    const tfeb::SceneCBViewFind found = tfeb::locateSceneCBView(
+        cb, tfeb::kSceneCBSimFloat4Rows, origin, 0.01f, 0.5f);
+    check(found.startRow == 40, "locateSceneCBView: the current view wins over the previous one");
+    check(std::fabs(found.originMatch) < 1e-4f, "locateSceneCBView: the winner's origin match is ~0");
+    check(found.orthoGroups == 3 && found.originRejected == 2,
+          "locateSceneCBView: three orthonormal groups, two origin-rejected");
+    check(found.candidateCount == 3 && found.candidateRows[0] == 40 && found.candidateRows[1] == 60 &&
+          found.candidateRows[2] == 200, "locateSceneCBView: every candidate's row is recorded");
+
+    // A NaN origin (a garbage fill) finds nothing rather than something.
+    const float nanOrigin[3] = {NAN, 0, 0};
+    const tfeb::SceneCBViewFind nanFound = tfeb::locateSceneCBView(
+        cb, tfeb::kSceneCBSimFloat4Rows, nanOrigin, 0.01f, 0.5f);
+    check(nanFound.startRow < 0, "locateSceneCBView: a NaN origin matches no group");
+    check(nanFound.orthoGroups == 3 && nanFound.originRejected == 3,
+          "locateSceneCBView: NaN origin rejects every orthonormal group");
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1273,6 +1408,11 @@ int wmain(int argc, wchar_t** argv) {
     casePatchSceneChoiceBands();
     casePatchSimWindow();
     caseLiveMailboxPlausible();
+    caseAffineInverse4x4();
+    casePostmul4x4();
+    caseIsOrtho3x3();
+    caseViewOriginMatch();
+    caseLocateSceneCBView();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

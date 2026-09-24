@@ -60,6 +60,7 @@ PoseReaderTableEntry poseReaderWatchTableEntry(uint32_t) { return PoseReaderTabl
 void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t, bool) {}
 void transitionFlashEyeBaseNoteSceneCamera(uint32_t, const float*, bool, const GlitchSceneGeometry&, bool,
                                             GlitchSceneDecision) {}
+void transitionFlashEyeBaseNoteSceneCB(uint32_t, const void*, size_t) {}
 EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot() { return EyeBaseFrameSnapshot{}; }
 }  // namespace edvr
 

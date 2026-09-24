@@ -49,6 +49,7 @@
 #include "glitch_scene.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 namespace edvr {
@@ -107,6 +108,19 @@ void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVe
 void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid,
                                             const GlitchSceneGeometry& geometry, bool geometryFresh,
                                             GlitchSceneDecision decision);
+
+// CHANGE 14 (2026-09-24, the buffer-row locator's watch-only validation):
+// the scene-CB fill tap, beside NoteSceneCamera. glitch_frame.cpp's
+// glitchFrameObserve reads the 5376-byte camera buffer pre-Unmap (the
+// tee vscreen.cpp's hookedUnmap runs before forwarding); each such fill is
+// handed here with the detector's own frame attribution (s->frameNo at
+// Unmap time -- the PRE-advance counter, so a fill of the frame the
+// boundary records as F carries F-1; the module compensates). The module
+// runs the locator only while a patch sim is pending on the covered frame
+// (one atomic load per fill otherwise), still writes nothing, and folds
+// the per-fill outcome into the boundary's one line and the dump's
+// patch-sim section.
+void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_t sizeBytes);
 
 // This frame's consumer/writer activity, read once per ring-write site
 // (glitch_frame.cpp's RingEntry) -- poseReaderWatchFrameSnapshot's read-and-
