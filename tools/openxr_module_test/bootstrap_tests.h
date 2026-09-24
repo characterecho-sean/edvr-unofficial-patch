@@ -99,11 +99,11 @@ void runBootstrapTests(Check&& check) {
   }
   {
     // frame_thread_priority and frame_end_overlap are optional, unlike the
-    // five keys above: absent means the documented default (high, off), not
+    // five keys above: absent means the documented default (high, on), not
     // a parse failure. Reuses `valid`, which names neither key.
     LocalConfig config;check(writeLocalFixture(localPath,valid)&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&
-      config.frameThreadPriorityHigh&&!config.frameEndOverlap,
-      "frame_thread_priority/frame_end_overlap default to high/off when absent");
+      config.frameThreadPriorityHigh&&config.frameEndOverlap,
+      "frame_thread_priority/frame_end_overlap default to high/on when absent");
   }
   {
     const std::string overlapOn="[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\n"

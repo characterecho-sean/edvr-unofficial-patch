@@ -80,13 +80,14 @@ struct RuntimeOptions {
   // module references remain alive through owner shutdown and callback release.
   HMODULE graphicsProvider = nullptr;
   // edvr_openxr.ini frame_thread_priority=high|normal and frame_end_overlap=on|off.
-  // The overlap defaults OFF: its queued finish publishes and retires the
-  // frame's timing after Elite has resumed, so Elite's post-Submit
-  // producerResume/applicationSegment land on a live sequence and the
-  // Application-render GPU ring rejects the frame's segments as old
-  // sequences (flight 20260924_104337: valid 8725, invalid 43706).
+  // The overlap defaults on since its deferred pair retires the frame's
+  // timing before Submit returns (publishSubmitTimingCpu); before that it
+  // broke the Application-render GPU timing (flight 20260924_104337: valid
+  // 8725, invalid 43706). Flight 20260924_124504, Pimax OpenXR: invalid 5,
+  // second_submit_render_park p50 0.16-0.18 ms, next_wait_queue_delay
+  // p50 0.006 ms.
   bool frameThreadPriorityHigh=true;
-  bool frameEndOverlap=false;
+  bool frameEndOverlap=true;
 };
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
@@ -292,7 +293,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // job's own finishPair()-dependent half never publishes twice.
   // frameEnd*Count are the native_frame_end_overlap_summary tallies at
   // session close.
-  bool frameEndOverlapEnabled=false;
+  bool frameEndOverlapEnabled=true;
   bool pendingFrameEndFinish=false;
   vr::EVREye pendingFrameEndEye=vr::Eye_Left;
   uint64_t pendingFrameEndSequence=0;
