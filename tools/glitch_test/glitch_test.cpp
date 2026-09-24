@@ -32,6 +32,7 @@
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/timing.h"
+#include "../../src/d3d11/eye_origin_trace.h"
 #include "../../src/d3d11/glitch_frame.h"
 #include "../../src/d3d11/transition_flash_prevent.h"
 
@@ -1877,6 +1878,108 @@ int main(int argc, char** argv) {
         begin(1200,1200,45000,false);
         check("missing eye sample retains legacy behavior",glitchFrameMarked()==!disabled);end();
     }
+
+    // --- advanced.eye_origin_trace: pure logic (eye_origin_trace.h) -----
+    //
+    // No detector state touched here -- the whole point of putting the
+    // dedupe table, the mask and the dump-window math in their own header
+    // was to be able to drive them without the game (and without even the
+    // rest of this file's Buffer/frame() fixture).
+    {
+        using namespace edvr::eot;
+
+        StackTable t;
+        const uint64_t hashA = 111, hashB = 222;
+        const uint8_t idA1 = t.intern("0x1000/0x2000", hashA);
+        const uint8_t idA2 = t.intern("0x1000/0x2000", hashA);
+        check("dedupe: the same chain+hash reuses one id", idA1 == idA2 && t.used() == 1);
+        check("dedupe: a repeated intern counts the write", t.entry(idA1).count == 2);
+        const uint8_t idB = t.intern("0x3000/0x4000", hashB);
+        check("dedupe: a different chain gets a different id", idB != idA1 && t.used() == 2);
+
+        // A real FNV-1a-64 collision (same hash, different text) must not
+        // merge two different stacks' evidence under one id.
+        const uint8_t idC1 = t.intern("stack-C", 999);
+        const uint8_t idC2 = t.intern("stack-D", 999);
+        check("dedupe: a hash collision opens a new entry rather than merging",
+              idC1 != idC2 && t.entry(idC1).count == 1 && t.entry(idC2).count == 1);
+
+        // Overflow: fill the table to its cap with distinct chains, then
+        // ask for one more.
+        StackTable full;
+        char chain[32];
+        uint32_t overflowsSeen = 0;
+        for (uint32_t i = 0; i < kMaxStacks; ++i) {
+            snprintf(chain, sizeof(chain), "0x%u", i);
+            if (full.intern(chain, 1000 + i) == kStackOverflowId) ++overflowsSeen;
+        }
+        check("overflow: exactly kMaxStacks distinct chains all get real ids",
+              overflowsSeen == 0 && full.used() == kMaxStacks,
+              std::to_string(full.used()) + " used, " + std::to_string(overflowsSeen) + " overflowed early");
+        const uint8_t past = full.intern("one more, never seen before", 99999);
+        check("overflow: the (kMaxStacks+1)th distinct chain reports overflow",
+              past == kStackOverflowId && full.overflowed() == 1);
+        // A chain already in the table is still found after it is full --
+        // overflow means "cannot learn a NEW one", not "cannot look up".
+        const uint8_t again = full.intern("0x5", 1005);
+        check("overflow: a table at capacity still recognises a known chain",
+              again != kStackOverflowId && full.entry(again).count == 2);
+
+        // The eye-origin frame counter, separate from the write counter.
+        StackTable eyeT;
+        const uint8_t eid = eyeT.intern("eye-stack", 42);
+        eyeT.noteEyeOrigin(eid);
+        eyeT.noteEyeOrigin(eid);
+        check("eye-origin counter tracks matched-draw frames, not writes",
+              eyeT.entry(eid).count == 1 && eyeT.entry(eid).eyeFrames == 2);
+        eyeT.noteEyeOrigin(kStackNoneId);
+        eyeT.noteEyeOrigin(kStackOverflowId);
+        check("eye-origin counter ignores the none/overflow sentinels",
+              eyeT.entry(eid).eyeFrames == 2);
+
+        // The per-frame stack-id mask.
+        uint64_t mask = 0;
+        mask = addToMask(mask, 0);
+        mask = addToMask(mask, 63);
+        mask = addToMask(mask, 5);
+        check("mask: bits 0, 5 and 63 are set and nothing else",
+              mask == ((uint64_t(1) << 0) | (uint64_t(1) << 5) | (uint64_t(1) << 63)));
+        const uint64_t before = mask;
+        mask = addToMask(mask, 64);
+        mask = addToMask(mask, kStackNoneId);
+        mask = addToMask(mask, kStackOverflowId);
+        check("mask: an id past 63 (including the sentinels) cannot set a bit",
+              mask == before);
+
+        // Dump-window widening and selection.
+        PendingWindow w{};
+        check("window: inactive before any trigger", !w.active);
+        w = foldTrigger(w, 1000);
+        check("window: the first trigger opens [1000, 1060]",
+              w.active && w.lowFrame == 1000 && w.dueFrame == 1000 + kWindowFrames);
+        w = foldTrigger(w, 1010);
+        check("window: a later trigger inside the window widens dueFrame, not lowFrame",
+              w.lowFrame == 1000 && w.dueFrame == 1010 + kWindowFrames);
+        w = foldTrigger(w, 990);
+        check("window: an earlier trigger widens lowFrame",
+              w.lowFrame == 990 && w.dueFrame == 1010 + kWindowFrames);
+
+        check("selection: the frame just below the widened low edge is excluded",
+              !frameInWindow(990 - kWindowFrames - 1, w.lowFrame, w.dueFrame));
+        check("selection: the low edge itself is included",
+              frameInWindow(990 - kWindowFrames, w.lowFrame, w.dueFrame));
+        check("selection: dueFrame itself is included, one past it is not",
+              frameInWindow(w.dueFrame, w.lowFrame, w.dueFrame) &&
+              !frameInWindow(w.dueFrame + 1, w.lowFrame, w.dueFrame));
+
+        // Saturation: a trigger near frame 0 must not underflow the window
+        // test.
+        PendingWindow early = foldTrigger(PendingWindow{}, 10);
+        check("selection: a trigger near frame 0 saturates instead of underflowing",
+              frameInWindow(0, early.lowFrame, early.dueFrame) &&
+              !frameInWindow(0xFFFFFFFFu, early.lowFrame, early.dueFrame));
+    }
+
     clearGlitchFrame();
     shutdownGlitchFrameFix();
 

@@ -22,12 +22,32 @@ static chain: see "Flight 184826".*
   - The recompute `0x3CEE650` disagreed with the cached block on 12,906 of
     12,906 calls.
   - The guards held: the fix never validated and never acted.
-- **Next:** re-anchor on the render side. Capture the game's call stack where
-  it writes the 5376-byte VS b1 buffer (the eye origin's real source), and
-  record the eye camera's `cb1[275]` per frame explicitly. Drop the compose,
-  decode, push and latch hooks, and bound all per-event logging. A short
-  session gives the anchor; a jump adds the bad frame's path. Then static
-  analysis from the fill function.
+- **Anchor FOUND (flight 195435, 19:54).**
+  - On both captured bad frames the eye origin was written by the same code
+    path (stack #0) as every ordinary frame. The same function receives a
+    wrong value.
+  - What is missing is the cockpit EYE POINT: 13.5 m from the ship's
+    reference point for Sean's ship.
+  - It is missing on the first frame after a switch between a world frame
+    and a ship-centred frame, in both directions. See "Flight 195435".
+  - Static round 4 is working back from that stack. The Steam ini is
+    restored (identical to before the flight).
+- **Before that flight:** the render-side anchor was built and installed.
+  - `advanced.eye_origin_trace = off|on`: e8b37bb7, on main via 337a1893.
+    It captures the game's call stack at every write of the 5376-byte camera
+    buffer, dedupes the stacks, and marks which write the eye draw used.
+  - Around every detector verdict it dumps ±60 frames to
+    `edvr_logs\flash\eyetrace_*.txt` on its own; nothing per frame reaches
+    the gfx log.
+  - The Steam copy runs e8b37bb7 with the trap ON and one marked
+    `[advanced] eye_origin_trace = on` line; remove it after the flight.
+  - Blind spot: writes by `UpdateSubresource` or on a deferred context never
+    reach the detector, so "eye buffer not written this frame" is itself a
+    finding.
+  - After the flight: `edvr_log.py --target steam --expect-build e8b37bb7`,
+    then static analysis from the eye origin's write stack.
+  - The old `transition_flash_prevent` hooks stay inert until Sean says to
+    remove them.
 - **Instrument defects (fix before any re-fly):**
   - Per-push stack lines, logged for as long as the event lasted (it never
     ended), filled the gfx log to its cap at 18:50:40 (f~13459). The rest of
@@ -234,10 +254,64 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   (0, 0, +2.000), between head-offset values and km-scale ones: another
   transition placement, beside the high wake's (-0.02, +3.51, +1613.23).
 
+## Flight 195435 (2026-09-23 19:54, Steam copy, build e8b37bb7)
+
+`advanced.eye_origin_trace = on`, trap on. The build matched
+(`--expect-build e8b37bb7`). Sean flew the list in reverse.
+
+- **Coverage:** 18,582 frames traced, about 60 writes of the 5376-byte
+  buffer a frame, 36 distinct write stacks.
+- **Cost:** stack capture cost about 180 us a frame (diagnostic only).
+- **Dumps:** 12 automatic dumps (the cap). Ten came from the detector's usual
+  render-pass jumps (4,991, 16,256 and 153,410 units), which also used the
+  cap up by 19:58:33.
+- **f12604, world to ship-centred.** The eye origin goes from
+  (-1174, +3425, +1439) to (-0.02, -0.01, +0.02) on the bad frame, then
+  holds at (-5.97, +11.98, +2.02).
+- **f13072, ship-centred to world.** It goes from (-5.98, +11.97, +2.00) to
+  (-0.03, -0.01, +0.02) on the bad frame, then (-229.8, +663.0, +274.5),
+  moving hundreds of units a frame.
+- **One path.** Both bad frames were written with the eye buffer
+  `buf=written` and by stack #0, like every ordinary frame. So the capture's
+  blind spots (UpdateSubresource, deferred contexts) did not matter.
+- **What is missing is the eye point.** |(-5.97, +11.98, +2.02)| is 13.5 m,
+  the same size as the 13.505 m reset of the 2026-09-12 small-origin high
+  wake.
+- **Stack #0**, return addresses innermost first:
+  `0x523207 / 0x51B69A / 0x501A4F / 0x4F8C98 / 0x5D92FD` (the upload path,
+  common to all 36 stacks), then
+  `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
+  0x6BF929 / 0x594C3E / 0x2869073`.
+
+## Static rounds 4-5 (after 195435; leads, not proof)
+
+Dumps are in `analysis\decomp\flash\r4\` and `\r5\`. Ghidra holds phantom
+functions at earlier rounds' return addresses, so resolve true entries
+through `pdata_functions.csv`.
+
+- **The upload path.** The stack #0 frames `0x5015C4..` are the generic
+  `f3dxEffect::ConstantBuffer` commit. `0x4C82BE0` is the per-item submission
+  loop and `0x4C813A0` a dedup cache. It runs as a scheduled job. A stack
+  taken at Unmap names the commit, not the code that set the value.
+- **`gCameraPos`.** It and `gPreviousCameraPos` are resolved BY NAME, once
+  per effect instance, at `0x57B99E` (`FUN_1404fc6a0(effect,0,name,1)`,
+  handles cached in the effect object). The per-frame setter was NOT found.
+- **The positioner swap.** A per-frame Tick at `0x107C760` checks the
+  `+0x450` positioner against the `+0x2A0` cache. On a change it calls
+  `0x1090420`, which zeroes `+0x2A8/+0x2B0` and recomputes an offset block
+  only if `info[+0x61]`. The Tick re-seeds (`0x1093650`) only if
+  `info[+0x62]`. INFERENCE: a skipped re-seed on the swap frame. There is no
+  static tie to `gCameraPos`, and nothing yet shows this positioner is the
+  cockpit VR camera's.
+
 ## Ruled out
 
 Each was ruled out on 2026-09-23 from existing flight data and static
-analysis, or from flight 184826 where marked:
+analysis, or from flight 184826 or 195435 where marked:
+
+- **Ruled out (195435): a different code path writing the eye origin on the
+  bad frame.** Both reset frames (f12604, f13072) were written by stack #0,
+  like every ordinary frame.
 
 - **Ruled out (184826): the compose `0x23BC8A0` as the eye camera's
   compose.** It pushes about 5 system-scale targets a frame, ~1e8 m apart,
