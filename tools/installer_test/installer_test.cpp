@@ -149,6 +149,8 @@ static DllInfo fakeDll(DllKind kind, const std::wstring& path, const std::string
 static PayloadInfo testPayload(const std::string& iniText) {
     PayloadInfo p;
     p.version = "v9.9.9-test";
+    p.descriptorText = "[install]\r\nschema = 1\r\nprofile = vr\r\n";
+    p.descriptorSha = sha256Bytes(p.descriptorText.data(), p.descriptorText.size());
     p.haveD3d11 = true;
     p.d3d11Sha = "aaaa-new-d3d11";
     p.haveOpenvr = true;
@@ -611,6 +613,9 @@ static void testPlanner() {
         s.state.present = true;
         s.state.d3d11Installed = true;
         s.state.d3d11Sha = payload.d3d11Sha;
+        s.descriptorPresent = true;
+        s.descriptorSha = payload.descriptorSha;
+        s.state.descriptorSha = payload.descriptorSha;
         s.openxrLoader=fakeDll(DllKind::Foreign,joinPath(s.game.openvrDir,L"openxr_loader.dll"),payload.openxrLoaderSha);
         s.openxrLicense=fakeDll(DllKind::Foreign,joinPath(s.game.openvrDir,L"OPENXR-LOADER-LICENSE.txt"),payload.openxrLicenseSha);
         const auto first=planInstall(s,options,payload);
@@ -874,6 +879,8 @@ static void testNativePlanner() {
     const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
     Options o = testOptions();
     PayloadInfo p; p.version="native-test"; p.iniText="[fix]\r\nblack_void = 1\r\n";
+    p.descriptorText = "[install]\r\nschema = 1\r\nprofile = vr\r\n";
+    p.descriptorSha = sha256Bytes(p.descriptorText.data(), p.descriptorText.size());
     p.nativePairValid=true; p.haveD3d11=true; p.haveOpenvr=true; p.haveOpenxrLoader=true; p.d3d11Sha="graphics";
     p.openvrSha="runtime"; p.openxrLoaderSha="loader";
     p.haveOpenxrLicense=true; p.openxrLicenseSha="license";
@@ -903,6 +910,66 @@ static void testNativePlanner() {
     check(hasStep(out,Action::Rename,L"openvr_api_orig.dll",L"openvr_api.dll"),"uninstall restores the original runtime");
 }
 
+static void testFlatPlanner() {
+    printf("\nflat profile planner\n");
+    const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
+    PayloadInfo flat = testPayload("[fix]\r\ntemporal_aa = off\r\n[advanced]\r\nreal_dll =\r\n");
+    flat.profile = "flat";
+    flat.descriptorText = "[install]\r\nschema = 1\r\nprofile = flat\r\n";
+    flat.descriptorSha = sha256Bytes(flat.descriptorText.data(), flat.descriptorText.size());
+    flat.nativeGraphicsValid = true;
+    flat.haveOpenvr = false; flat.haveOpenxrLoader = false; flat.haveOpenxrLicense = false;
+    flat.nativePairValid = false;
+    Survey s = baseSurvey(dir);
+    s.haveOpenvrDir = false;
+    Options o = testOptions();
+    Plan fresh = planInstall(s, o, flat);
+    check(!fresh.blocked, "flat accepts graphics without the native runtime pair");
+    check(hasStep(fresh, Action::WritePayload, nullptr, L"d3d11.dll"), "flat installs graphics");
+    check(hasStep(fresh, Action::WritePayload, nullptr, L"edvr_profile.ini"), "flat installs its descriptor");
+    check(!hasStep(fresh, Action::WritePayload, nullptr, L"openvr_api.dll"), "flat omits the VR runtime");
+    bool makesOpenvr = false;
+    for (const Step& step : fresh.steps)
+        if (step.action == Action::MakeDir && leafOf(step.to) == L"win64") makesOpenvr = true;
+    check(!makesOpenvr, "fresh flat does not create Openvr\\win64");
+
+    Survey markerOnly = s;
+    markerOnly.descriptorPresent = true;
+    markerOnly.descriptorSha = flat.descriptorSha;
+    check(installedProfile(markerOnly) == "flat", "canonical flat marker identifies edition without GUI state");
+    PayloadInfo vr = testPayload("[fix]\r\ntemporal_aa = off\r\n");
+    check(planInstall(markerOnly, o, vr).blocked,
+          "VR installer cannot silently widen a descriptor-only flat install");
+    Options explicitVr = o; explicitVr.convertProfile = true;
+    Plan widened = planInstall(markerOnly, explicitVr, vr);
+    check(!widened.blocked && hasStep(widened, Action::WritePayload, nullptr, L"openvr_api.dll"),
+          "explicit descriptor-only flat to VR conversion installs the native runtime");
+    check(widened.nextState.profile == "vr", "conversion records the VR edition");
+    markerOnly.descriptorSha = "unrecognized-marker";
+    check(planInstall(markerOnly, explicitVr, vr).blocked,
+          "unknown descriptor is never treated as permission to install VR");
+
+    s.d3d11 = fakeDll(DllKind::D3d11Provider, joinPath(dir, L"d3d11.dll"), "edhm", L"3Dmigoto");
+    Plan chained = planInstall(s, o, flat);
+    check(!chained.blocked && hasStep(chained, Action::Rename, L"d3d11.dll", L"d3d11_edhm.dll"),
+          "flat uses the existing EDHM chain planner");
+
+    s = baseSurvey(dir);
+    s.state.present = true; s.state.profile = "vr";
+    s.state.openvrInstalled = true; s.state.openvrSha = "installed-vr";
+    s.state.openvrOrigSha = "game-vr";
+    s.openvrCurrent = fakeDll(DllKind::Edvr, joinPath(s.game.openvrDir, L"openvr_api.dll"), "installed-vr");
+    s.openvrOrig = fakeDll(DllKind::OpenVrRuntime, joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "game-vr");
+    check(planInstall(s, o, flat).blocked, "edition switch needs explicit conversion");
+    o.convertProfile = true;
+    Plan conversion = planInstall(s, o, flat);
+    check(!conversion.blocked, "owned VR to flat conversion plans");
+    check(hasStep(conversion, Action::Rename, L"openvr_api_orig.dll", L"openvr_api.dll"),
+          "conversion restores the game's original runtime");
+    s.openvrOrig = fakeDll(DllKind::Absent, joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "");
+    check(planInstall(s, o, flat).blocked, "missing original blocks VR to flat conversion");
+}
+
 // ---------------------------------------------------------------------------
 // apply, for real, in a scratch folder
 // ---------------------------------------------------------------------------
@@ -913,6 +980,7 @@ static PayloadProvider provider(bool failOpenvr) {
         static const char kOpenvr[] = "TEST-OPENVR-PAYLOAD";
         static const char kLoader[] = "TEST-OPENXR-LOADER";
         static const char kLicense[] = "Khronos OpenXR Loader license";
+        static const char kProfile[] = "[install]\r\nschema = 1\r\nprofile = vr\r\n";
         if (item == "d3d11") {
             *data = kD3d11;
             *size = sizeof(kD3d11) - 1;
@@ -925,6 +993,7 @@ static PayloadProvider provider(bool failOpenvr) {
         }
         if (item == "openxr_loader") { *data=kLoader; *size=sizeof(kLoader)-1; return true; }
         if (item == "openxr_license") { *data=kLicense; *size=sizeof(kLicense)-1; return true; }
+        if (item == "profile") { *data=kProfile; *size=sizeof(kProfile)-1; return true; }
         return false;
     };
 }
@@ -1619,6 +1688,7 @@ int wmain(int argc, wchar_t** argv) {
     testShippedIni(root);
     testPlanner();
     testNativePlanner();
+    testFlatPlanner();
     testApply(scratch);
     testMirror(scratch);
     testProbe(scratch);

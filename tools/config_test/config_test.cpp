@@ -28,6 +28,7 @@
 #include <string>
 
 #include "../../src/common/config.h"
+#include "../../src/common/runtime_profile.h"
 #include "../../src/common/log.h"
 
 using namespace edvr;
@@ -455,6 +456,43 @@ int main(int argc, char** argv) {
             }
         }
     }
+
+    // An old/full INI cannot widen a flat installation, even through numeric
+    // getters whose ordinary fallback or lower bound would turn a fix on.
+    const RuntimeProfile savedProfile = g_runtimeProfile;
+    const char* descriptor = "[install]\r\nschema = 1\r\nprofile = flat\r\n";
+    if (parseRuntimeProfile(descriptor) != RuntimeProfile::Flat ||
+        parseRuntimeProfile("[install]\nschema=1\nprofile=vr\n") != RuntimeProfile::Vr ||
+        parseRuntimeProfile("[install]\nschema=2\nprofile=flat\n") != RuntimeProfile::Invalid ||
+        parseRuntimeProfile("[install]\nschema=1\nprofile=flat\nprofile=vr\n") != RuntimeProfile::Invalid ||
+        parseRuntimeProfile("[install]\nprofile=flat\n") != RuntimeProfile::Invalid ||
+        parseRuntimeProfile(std::string(4097, 'x')) != RuntimeProfile::Invalid)
+        fail("profile descriptor", "invalid schema/duplicate/oversize admitted");
+    else ok("profile descriptor refuses ambiguous or unsupported scope");
+    Config::get().set("fix.temporal_aa", "dlss");
+    Config::get().set("fix.black_void", "on");
+    Config::get().set("fix.head_offset_forward", "12");
+    Config::get().set("advanced.real_dll", "d3d11_edhm.dll");
+    g_runtimeProfile = RuntimeProfile::Flat;
+    expectStr("fix.temporal_aa", "off", "flat discovery cannot activate stereo temporal AA");
+    if (Config::get().requestedTemporalMode() != "dlss") fail("flat request", "intent lost");
+    else ok("flat diagnostic retains requested temporal mode");
+    expectBool("fix.black_void", false, "flat profile suppresses restored unrelated fix");
+    expectInt("fix.head_offset_forward", 0, "flat profile suppresses numeric fix");
+    expectFloat("fix.head_offset_forward", 0.0f, "flat profile suppresses float fix");
+    if (Config::get().getIntInRange("fix.head_offset_forward", 12, 1, 100) != 0)
+        fail("flat bounded getter", "minimum reactivated disabled feature");
+    else ok("flat scope precedes bounded numeric defaults");
+    expectStr("advanced.real_dll", "d3d11_edhm.dll", "flat scope preserves mod chaining");
+    expectStr("hotkey.menu", "", "flat scope leaves game input alone");
+    Config::get().set("fix.black_void", "on");
+    expectBool("fix.black_void", false, "live setting change cannot widen scope");
+    g_runtimeProfile = RuntimeProfile::Invalid;
+    expectBool("advanced.d3d11_fixes", false, "bad descriptor disables graphics hooks");
+    expectStr("advanced.real_dll", "d3d11_edhm.dll", "bad descriptor preserves mod chaining");
+    g_runtimeProfile = RuntimeProfile::LegacyVr;
+    expectBool("fix.black_void", true, "legacy profile retains original behavior");
+    g_runtimeProfile = savedProfile;
 
     if (g_fails) {
         printf("CONFIG TEST FAILED (%d)\n", g_fails);

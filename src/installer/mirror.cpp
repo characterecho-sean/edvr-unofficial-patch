@@ -105,6 +105,8 @@ MirrorInfo readMirror(const std::wstring& mirrorDir) {
     info.hasIni = fileExists(iniPath);
     info.hasBaseIni = fileExists(joinPath(mirrorDir, kBaseIni));
     info.hasState = fileExists(joinPath(mirrorDir, kStateIni));
+    // The mirror preserves ownership metadata, not the active runtime scope.
+    // The selected artifact writes a fresh descriptor during repair.
 
     const std::wstring backupSub = joinPath(mirrorDir, kBackupSub);
     info.hasBackupPair =

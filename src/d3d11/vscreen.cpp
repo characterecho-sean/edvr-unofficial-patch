@@ -77,6 +77,8 @@
 #include "object_classification_probe.h"
 #include "engine_velocity.h"
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
+#include "flat_temporal.h"   // bounded, flat-profile-only scene discovery
+#include "../common/runtime_profile.h"
 #include "intro_panel.h"
 #include "intro_skip.h"
 #include "intro_upscale.h"
@@ -1851,6 +1853,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
         return DrawVerdict::kNone;
     }
+    if (flatTemporalCapturing()) flatTemporalDraw(count, instances);
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
     s->curveThisDraw = false;
@@ -2900,6 +2903,7 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
         s->realClearRtv(self, rtv, c);
         return;
     }
+    if (flatTemporalCapturing()) flatTemporalClearColor(rtv);
     if(rtv) {
         ID3D11Resource* destination=nullptr;rtv->GetResource(&destination);
         uiSeparationResourceWrite(destination);if(destination)destination->Release();
@@ -2991,6 +2995,7 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
     // bumps the generation either way.
     bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
     bindingSet(BindSlot::Dsv0, dsv);
+    if (flatTemporalCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
     g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
 }
 
@@ -3018,6 +3023,7 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
         }
         bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
         bindingSet(BindSlot::Dsv0, dsv);
+        if (flatTemporalCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
     }
     g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts);
 }
@@ -3159,6 +3165,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
                         kSlotClearState);
     }
     forgetBindings(s);
+    if (flatTemporalCapturing()) flatTemporalBind(nullptr, nullptr);
     foveationOnClearState();
     // ClearState changes bindings, not resource contents. Retain the
     // captured weapon vertices and attachment inputs across this call.
@@ -3184,6 +3191,8 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                         kSlotExecuteCommandList, restoreContextState ? 1 : 0);
     }
     const bool privateExecution = graphicsBridgeConsumePermit(self, list, restoreContextState);
+    if (flatTemporalCapturing() && !privateExecution)
+        flatTemporalExecuteList(false);
     if (!privateExecution) {
         originalDrawProbeExecuteCommandListNote(self);
         uiSeparationUnknownWrite();
@@ -3264,6 +3273,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     const bool mapData = mapOk && mapped->pData != nullptr;
     const bool mapSub0 = mapOk && sub == 0;
     const bool mapData0 = mapData && sub == 0;
+    if (mapData0 && flatTemporalCapturing())
+        flatTemporalMap(res, sub, type, mapped->pData);
     // The census CB watch's half of the tee: while a census runs, it needs
     // the mapped pointer of any buffer it is watching. One bool call when no
     // census runs, two pointer compares inside when one does.
@@ -3431,6 +3442,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
     if (drawCensusArmed()) drawCensusCbNoteUnmap(res);
+    if (flatTemporalCapturing()) flatTemporalUnmap(res);
     if (fssRevealWantsDraws()) fssRevealNoteUnmap(res);
     // Read before forwarding: after the real Unmap the memory is no longer ours
     // to look at.
@@ -4109,6 +4121,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                      "CopyResource");
     uiAtlasNoteWrite(dst, 2);
     if (!foreignContext(self)) {uiSeparationResourceWrite(dst);motionResourceWritten(dst);celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
+    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'R');
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -4139,6 +4152,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     // whether this is a re-clear of a target it already drew its ring
     // into this frame -- which would wipe the ring -- for its summary.
     if (!foreignContext(self)) {depthProbeNoteClear(dsv, depth);eyeMaskOnClear(dsv);if(uiLayerWatching())uiLayerNoteDepthClear(dsv);}
+    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearDepth(dsv, flags, depth);
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
 
@@ -4184,6 +4198,11 @@ HRESULT STDMETHODCALLTYPE hookedGetData(ID3D11DeviceContext* self,ID3D11Asynchro
 // and args= names the buffer. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    if (runtimeFlatProfile()) {
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(0, 0);
+        g_state->realDrawIndexedInstancedIndirect(self, args, off);
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedIndirect, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawIndexedInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawIndexedInstancedIndirect),
@@ -4208,6 +4227,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
+    if (runtimeFlatProfile()) {
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(0, 0);
+        g_state->realDrawInstancedIndirect(self, args, off);
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndirect, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawInstancedIndirect),
@@ -4265,6 +4289,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
         if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
     }
+    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'C');
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
@@ -4316,6 +4341,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (fssRevealWantsDraws() && !foreignContext(self)) {
         fssRevealNoteUpdate(dst, data);
     }
+    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalUpdate(dst, data, box);
     g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch,
                                    depthPitch);
     if(objectClassificationProbe.active()) {
@@ -4338,6 +4364,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
     if(!foreignContext(self)){uiSeparationResourceWrite(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
+    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'V');
     if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
@@ -4377,6 +4404,7 @@ bool viewportIs(const D3D11_VIEWPORT& v, uint32_t w, uint32_t h) {
 void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
                                             const D3D11_VIEWPORT* vps) {
     State* s = g_state;
+    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalViewport(n, vps);
     if (foreignContext(self) || n != 1 || !vps || !fssResActive()) {
         s->realRSSetViewports(self, n, vps);
         return;
@@ -4466,6 +4494,12 @@ struct DrawClock {
 };
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    if (runtimeFlatProfile()) {
+        ++g_state->thunkHits[kHitDraw];
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(count, 1);
+        g_state->realDraw(self, count, start);
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Draw, self, static_cast<int>(self->GetType()));
     DrawClock clock;
@@ -4491,6 +4525,11 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
+    if (runtimeFlatProfile()) {
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(0, 0);
+        g_state->realDrawAuto(self);
+        return;
+    }
     gpuFrameCommand(self);
     if(self==g_state->ownerCtx){uiSeparationUnknownWrite();engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
     const OriginalDrawMetadata metadata{
@@ -4504,6 +4543,12 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
+    if (runtimeFlatProfile()) {
+        ++g_state->thunkHits[kHitDrawIndexed];
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(count, 1);
+        g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexed, self, static_cast<int>(self->GetType()));
     DrawClock clock;
@@ -4532,6 +4577,12 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    if (runtimeFlatProfile()) {
+        if (self == g_state->ownerCtx && flatTemporalCapturing())
+            flatTemporalDraw(perInstance, instances);
+        g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawInstanced, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
@@ -4574,6 +4625,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    if (runtimeFlatProfile()) {
+        if (self == g_state->ownerCtx && flatTemporalCapturing())
+            flatTemporalDraw(perInstance, instances);
+        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                          baseVertex, startInstance);
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedInstanced, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
@@ -6845,5 +6903,3 @@ void shutdownVScreenFixes() {
 }
 
 }  // namespace edvr
-
-

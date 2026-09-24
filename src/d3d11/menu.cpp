@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
@@ -3279,6 +3280,11 @@ void menuAdoptGameBindings(bool enabled, const char* why) {
 
 void menuConfigure(Config& cfg) {
     State& s = g_s;
+    if (!runtimeVrProfile()) {
+        s.configured = false;
+        s.summon.setBinding("");
+        return;
+    }
     const std::string key = cfg.getString("hotkey.menu", "F8");
     const bool summonChanged = key != s.summonName || !s.configured;
     if (summonChanged) {

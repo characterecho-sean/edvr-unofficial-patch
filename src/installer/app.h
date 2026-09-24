@@ -24,6 +24,7 @@ struct AppArgs {
     bool         keepSettings = true;    // --replace-settings
     bool         removeSettings = false; // --remove-settings (uninstall)
     bool         dryRun = false;         // --dry-run
+    bool         convertProfile = false; // --convert-profile
     bool         autorun = false;        // set on the elevated relaunch: already confirmed
     bool         help = false;
     bool         badArg = false;

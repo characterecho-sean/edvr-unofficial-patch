@@ -425,7 +425,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
     "src\d3d11\native_menu.cpp" ^
-    "src\d3d11\native_temporal.cpp" ^
+    "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_fss.cpp" ^
@@ -915,6 +915,17 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /OUT:"%BUILD%\crash_context_test.exe" /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: crash_context_test build failed & exit /b 1 )
 "%BUILD%\crash_context_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_temporal_test
+echo [edvr] === flat_temporal_test.exe ===
+if not exist "%OBJ%\flattemporaltest" mkdir "%OBJ%\flattemporaltest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\flattemporaltest"\ ^
+    /Fe"%BUILD%\flat_temporal_test.exe" "tools\flat_temporal_test\flat_temporal_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat temporal test build failed & exit /b 1 )
+"%BUILD%\flat_temporal_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_config_test
@@ -1701,6 +1712,26 @@ REM sees. --help reads nothing and writes nothing.
     echo        side-by-side configuration problem, the manifest is the suspect.
     exit /b 1
 )
+exit /b 0
+
+:rig_flat_installer
+echo [edvr] === edvr-flat-installer.exe ===
+if not exist "%OBJ%\flatinstaller" mkdir "%OBJ%\flatinstaller"
+if not exist "%BUILD%\gen-flat" mkdir "%BUILD%\gen-flat"
+python "tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
+    --out "%BUILD%\gen-flat" --version "%EDVR_VER%" --profile flat
+if errorlevel 1 ( echo [edvr] ERROR: flat installer resource generation failed & exit /b 1 )
+rc.exe /nologo /fo "%OBJ%\flatinstaller\payload.res" "%BUILD%\gen-flat\payload.rc"
+if errorlevel 1 ( echo [edvr] ERROR: flat installer resources failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
+    /DEDVR_INSTALLER_FLAT=1 /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\flatinstaller"\ /Fe"%BUILD%\edvr-flat-installer.exe" ^
+    %INSTALLER_SRC% "%OBJ%\flatinstaller\payload.res" ^
+    /link /INCREMENTAL:NO /SUBSYSTEM:WINDOWS /MANIFEST:NO %INSTALLER_LIBS%
+if errorlevel 1 ( echo [edvr] ERROR: flat installer build failed & exit /b 1 )
+"%BUILD%\edvr-flat-installer.exe" --help >nul || exit /b 1
+python "tools\package_native.py" --check-installer --profile flat || exit /b 1
 exit /b 0
 
 :rig_installer_test

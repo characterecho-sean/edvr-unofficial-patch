@@ -29,6 +29,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 #include "../common/config.h"
 #include "../common/temporal_mode.h"
+#include "../common/runtime_profile.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
@@ -60,6 +61,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
+#include "flat_temporal.h"   // flat profile discovery at owned Present
 #include "perf_monitor.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -972,9 +974,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // The time blocked in the real Present is the monitor's, with the time
     // blocked in WaitGetPoses: the frame period less the two is the render
     // thread's own busy time.
+    if (runtimeFlatProfile())
+        flatTemporalBeforePresent(self, g_state->frameCounter, flags);
     const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
     const int64_t presentT1 = qpcNow();
+    if (runtimeFlatProfile())
+        flatTemporalAfterPresent(g_state->frameCounter, hr, flags);
     if (qpcFrequency() > 0) {
         perfMonitorNotePresentWait(static_cast<double>(presentT1 - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
@@ -1149,12 +1155,16 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // swallowed must say so, because the log it failed to write is the
         // place anyone would look for the reason.
         if (g_state->censusKey.pressed()) {
-            drawCensusRequest();
-            // Same key: the census says WHAT was drawn, the quad probe says
-            // WHERE. Two instruments on one press keeps the two answers on
-            // the same frame, which is the only way they can be compared.
-            quadProbeRequest();
-            perfMonitorNoteEvent(kEvCensus);
+            if (runtimeFlatProfile()) {
+                flatTemporalArm();
+            } else {
+                drawCensusRequest();
+                // Same key: the census says WHAT was drawn, the quad probe says
+                // WHERE. Two instruments on one press keeps the two answers on
+                // the same frame, which is the only way they can be compared.
+                quadProbeRequest();
+                perfMonitorNoteEvent(kEvCensus);
+            }
         }
         // The eye dump key: the next treated frame's two eyes to disk.
         if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
@@ -2540,6 +2550,7 @@ void hookDevice(ID3D11Device* device) {
             // order.
             installGlitchFrameFix();
             installVScreenFixes(device, ctxMode);
+            flatTemporalStart(device);
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared
@@ -2770,6 +2781,7 @@ DeviceCreates deviceCreatesTake() {
 }
 
 void shutdownDeviceHooks() {
+    flatTemporalStop();
     // FreeLibrary teardown can run under the loader lock on another thread.
     // Invalidate timing first, then let each owner release its queries without
     // issuing context commands. Normal process exit skips this entire path.
@@ -2819,4 +2831,3 @@ void shutdownDeviceHooks() {
 }
 
 }  // namespace edvr
-

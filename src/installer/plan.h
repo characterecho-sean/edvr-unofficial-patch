@@ -29,7 +29,11 @@ namespace edvr::installer {
 // build" without reading the payload itself.
 struct PayloadInfo {
     std::string version;
+    std::string profile = "vr"; // fixed by the artifact, never inferred from edvr.ini
+    std::string descriptorText;
+    std::string descriptorSha;
     bool        haveD3d11 = false;
+    bool        nativeGraphicsValid = false;
     std::string d3d11Sha;
     bool        haveOpenvr = false;
     std::string openvrSha;
@@ -61,6 +65,8 @@ struct Survey {
     DllInfo              openxrLicense; // Khronos notice
     std::vector<DllInfo> otherD3d11;  // d3d11_*.dll beside it: chain targets, ours or theirs
     bool                 iniPresent = false;
+    bool                 descriptorPresent = false;
+    std::string          descriptorSha;
     std::string iniText;      // the user's edvr.ini
     std::string baseIniText;  // the shipped ini of the installed version, if kept
 
@@ -91,6 +97,10 @@ struct Survey {
 
 Survey surveyTarget(const GameInstall& game);
 
+// The state record is optional; a canonical runtime descriptor still identifies
+// the installed edition after a developer install or lost installer record.
+std::string installedProfile(const Survey& survey);
+
 struct Options {
     // Which halves to install is not a choice. Both files are the patch: the
     // transition flash fix and Explorer Cam live in openvr_api.dll, and an
@@ -99,6 +109,7 @@ struct Options {
     // opted out of it. What this installer carries is what it installs.
     bool keepSettings = true;   // merge the existing edvr.ini rather than replace it
     bool repair = false;        // rewrite our files even when they look right
+    bool convertProfile = false; // explicit edition conversion
     bool removeSettings = false;  // uninstall: delete edvr.ini too
     std::wstring backupStamp;   // folder name under edvr_backup\; caller supplies the clock
     std::string  nowUtc;        // stamped into the install record

@@ -2,8 +2,15 @@
 
 ## Status
 
-- **State:** architecture proposal, 2026-09-23, based on source at `77d5be36`.
-  No rendering or installer implementation in this change.
+- **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
+  before qualification. First milestone is a capture-only flat installer,
+  runtime scope enforcement and bounded desktop probes. The full build's 83
+  jobs and config contract passed; the final committed build must also pass.
+  Flat temporal reconstruction/jitter are NOT enabled in this build.
+- **Priority (Sean):** performance over code sharing. Share math/backends where
+  cheap; keep separate frame scheduling/capture paths when that avoids copies,
+  synchronization or additional per-draw work. Defer broad core extraction
+  until flat capture establishes the necessary boundary.
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
@@ -13,9 +20,16 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next session:** one instrumented flat capture with AA initially off,
-  collecting all signatures in section 7. No headset session needed for
-  discovery; existing VR behavior still requires regression qualification.
+- **Next session:** install the flat artifact, launch Elite in 2D, enter a
+  cockpit and press F10 (`hotkey.dump_draws`) for a fresh bounded capture.
+  Repeat on foot and with each mod arrangement. Use `tools/edvr_log.py` with
+  the actual `--target`, `--expect-build HEAD` and
+  `--grep "flat (temporal|discover)"`. No headset is needed for discovery;
+  VR still needs regression testing.
+- **Compatibility decision:** the prototype accepts an absent profile
+  descriptor as legacy VR so manual installations keep working. An existing
+  invalid descriptor disables fixes, preserving forwarding/chaining. New
+  installers and developer verification require `edvr_profile.ini`.
 - **Environment:** initial qualification is Windows, Elite's D3D11 renderer,
   mono SDR output. Record game/patch builds, GPU/driver, display/render sizes,
   window mode, installed mods and backend DLL versions. Headset/runtime are N/A
@@ -137,6 +151,13 @@ final blit, UI ownership and existing spatial-upscale stages. Use the actual
 desktop destination and shared backend sizing/floor queries. Flat owns any
 residual output scaling. Never silently stack Elite's spatial reconstruction or
 reinterpret HMD Quality as a desktop control.
+
+Sean's proposed flat control point is Elite's existing supersampling value,
+`SSAAMultiplier`. It is not hooked in the capture build. First compare 1.0 and
+a lower setting at the same desktop resolution: record scene/depth/UI extents
+and the final spatial upscale. If that controls scene resolution independently,
+reuse it and replace the spatial upscale with temporal reconstruction. Avoid an
+extra target-resizing layer or redundant resampling just to share VR code.
 
 Keep cockpit holograms/world screens inside reconstruction. Generalize
 `ui_layer` only for proved final 2D overlays, at output size without jitter,

@@ -20,6 +20,8 @@
 #include "ui_separation.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
+#include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
+#include "../common/runtime_profile.h"
 #include "gpu_frame_timing.h"
 #include "fss_dump.h"     // the reconstruction bracket, round 30
                           // writers through THIS module's Dispatch hook,
@@ -928,6 +930,11 @@ bool isExposureDispatch() {
 // of the three ways that could be true.
 void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
                                                ID3D11Buffer* args, UINT off) {
+    if (runtimeFlatProfile()) {
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch();
+        g_state->realDispatchIndirect(self, args, off);
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DispatchIndirect, self, static_cast<int>(self->GetType()));
     State* s = g_state;
@@ -940,6 +947,12 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
 }
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
+    if (runtimeFlatProfile()) {
+        ++g_state->thunkHits[kHitDispatch];
+        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch();
+        g_state->realDispatch(self, x, y, z);
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Dispatch, self, static_cast<int>(self->GetType()));
     State* s = g_state;
@@ -1719,4 +1732,3 @@ void shutdownExposureFix() {
 }
 
 }  // namespace edvr
-

@@ -25,21 +25,29 @@ def _inside(path, base):
         return False
 
 
-def _files(root, no_dlss):
+def _files(root, no_dlss, profile="vr"):
     build = root / "build"
+    if profile not in ("vr", "flat"):
+        raise ValueError("unknown package profile")
+    installer = "edvr-flat-installer.exe" if profile == "flat" else "edvr-installer.exe"
     result = [(build / "edvr_openxr_graphics.dll", "d3d11.dll"),
-              (build / "edvr_openxr_runtime.dll", "openvr/openvr_api.dll"),
-              (build / "openxr_loader.dll", "openvr/openxr_loader.dll"),
-              (build / "OPENXR-LOADER-LICENSE.txt", "openvr/OPENXR-LOADER-LICENSE.txt"),
-              (build / "edvr-installer.exe", "edvr-installer.exe"),
-              (root / "release" / "README.txt", "README.txt"),
-              (root / "release" / "OPENVR.txt", "openvr/READ-ME-FIRST.txt")]
+              (build / installer, installer),
+              (build / ("edvr_profile_%s.ini" % profile), "edvr_profile.ini")]
+    if profile == "vr":
+        result += [(build / "edvr_openxr_runtime.dll", "openvr/openvr_api.dll"),
+                   (build / "openxr_loader.dll", "openvr/openxr_loader.dll"),
+                   (build / "OPENXR-LOADER-LICENSE.txt", "openvr/OPENXR-LOADER-LICENSE.txt"),
+                   (root / "release" / "README.txt", "README.txt"),
+                   (root / "release" / "OPENVR.txt", "openvr/READ-ME-FIRST.txt")]
+    else:
+        result.append((build / "edvr-flat-README.txt", "README.txt"))
     # Historical --no-dlss permits builds made without the SDK. It cannot
     # remove a runtime already embedded in the installer we distribute.
     if not no_dlss or (build / "nvngx_dlss.dll").is_file():
         result.append((build / "nvngx_dlss.dll", "nvngx_dlss.dll"))
         result.append((build / "NVIDIA-DLSS-LICENSE.txt", "NVIDIA-DLSS-LICENSE.txt"))
-    result.extend([(root / "edvr.ini", "edvr.ini"), (root / "LICENSE", "LICENSE.txt")])
+    result.extend([(build / "edvr-flat.ini" if profile == "flat" else root / "edvr.ini", "edvr.ini"),
+                   (root / "LICENSE", "LICENSE.txt")])
     result.append((root / "third_party" / "dxbc_hash" / "LICENSE.TXT", "DXBC-HASH-LICENSE.txt"))
     # AMD's FSR3 D3D11 port (MIT). Unlike NVIDIA's runtime it ships no DLL --
     # it is statically linked into d3d11.dll -- so its presence in a build is
@@ -93,14 +101,23 @@ def _embedded_resource(executable, resource_id, required=True):
         kernel.FreeLibrary(handle)
 
 
-def _validate_installer_resources(executable, files):
+def _validate_installer_resources(executable, files, profile="vr"):
     by_name = {name: source for source, name in files}
-    ids = {101: "d3d11.dll", 102: "openvr/openvr_api.dll", 103: "edvr.ini",
-           105: "openvr/openxr_loader.dll", 106: "openvr/OPENXR-LOADER-LICENSE.txt"}
+    ids = {101: "d3d11.dll", 103: "edvr.ini", 107: "edvr_profile.ini"}
+    if profile == "vr":
+        ids.update({102: "openvr/openvr_api.dll", 105: "openvr/openxr_loader.dll",
+                    106: "openvr/OPENXR-LOADER-LICENSE.txt"})
     for resource_id, name in ids.items():
         actual = _embedded_resource(executable, resource_id)
         if hashlib.sha256(actual).digest() != hashlib.sha256(by_name[name].read_bytes()).digest():
             raise ValueError("installer resource %d differs from %s" % (resource_id, name))
+    expected_descriptor = ("[install]\r\nschema = 1\r\nprofile = %s\r\n" % profile).encode("ascii")
+    if by_name["edvr_profile.ini"].read_bytes() != expected_descriptor:
+        raise ValueError("loose descriptor does not declare the packaged profile")
+    if profile == "flat":
+        for resource_id in (102, 105, 106):
+            if _embedded_resource(executable, resource_id, required=False) is not None:
+                raise ValueError("flat installer unexpectedly embeds VR resource %d" % resource_id)
     embedded_dlss = _embedded_resource(executable, 104, required=False)
     if "nvngx_dlss.dll" in by_name:
         if embedded_dlss != by_name["nvngx_dlss.dll"].read_bytes():
@@ -112,29 +129,32 @@ def _validate_installer_resources(executable, files):
         raise ValueError("installer embeds DLSS but its matching DLL and notice are missing from the package")
 
 
-def package(root, version, no_dlss=False, dry_run=False):
+def package(root, version, no_dlss=False, dry_run=False, profile="vr"):
     version = _version(version); root = root.resolve()
-    dist = root / "dist"; stage = dist / (".edvr-stage-" + version); final_stage = dist / ("edvr-" + version)
-    archive = dist / ("edvr-" + version + ".zip"); temporary_archive = dist / (".edvr-" + version + ".zip.tmp")
+    prefix = "edvr-flat" if profile == "flat" else "edvr"
+    dist = root / "dist"; stage = dist / ("." + prefix + "-stage-" + version); final_stage = dist / (prefix + "-" + version)
+    archive = dist / (prefix + "-" + version + ".zip"); temporary_archive = dist / ("." + prefix + "-" + version + ".zip.tmp")
     if not _inside(stage, dist) or not _inside(final_stage, dist) or not _inside(archive, dist):
         raise ValueError("resolved staging destination escapes repository dist")
-    files = _files(root, no_dlss)
+    files = _files(root, no_dlss, profile)
     missing = [str(src) for src, _ in files if not src.is_file()]
     if missing:
         raise ValueError("missing release payload:\n  " + "\n  ".join(missing))
     try:
         import openxr_pe
-        openxr_pe.native_exports(str(files[1][0]))
         openxr_pe.native_graphics_exports(str(files[0][0]))
+        if profile == "vr": openxr_pe.native_exports(str(root / "build" / "edvr_openxr_runtime.dll"))
     except (ImportError, OSError, ValueError) as exc:
         raise ValueError("native payload validation failed: %s" % exc)
     try:
-        from fetch_openxr_loader import verify
-        verify(str(root / "build"))
+        if profile == "vr":
+            from fetch_openxr_loader import verify
+            verify(str(root / "build"))
     except (ImportError, OSError, ValueError) as exc:
         raise ValueError("bundled OpenXR loader validation failed: %s" % exc)
-    _validate_installer_resources(root / "build" / "edvr-installer.exe", files)
-    print("[edvr] native package plan: %s" % archive)
+    installer = "edvr-flat-installer.exe" if profile == "flat" else "edvr-installer.exe"
+    _validate_installer_resources(root / "build" / installer, files, profile)
+    print("[edvr] %s package plan: %s" % (profile, archive))
     for _, name in files: print("       %s" % name)
     if dry_run:
         print("[edvr] dry run: wrote nothing."); return 0
@@ -152,7 +172,7 @@ def package(root, version, no_dlss=False, dry_run=False):
     except Exception:
         if temporary_archive.exists(): temporary_archive.unlink()
         raise
-    old_stage = dist / (".edvr-old-stage-" + version)
+    old_stage = dist / ("." + prefix + "-old-stage-" + version)
     if old_stage.exists(): shutil.rmtree(old_stage)
     if final_stage.exists(): final_stage.replace(old_stage)
     try:
@@ -163,7 +183,7 @@ def package(root, version, no_dlss=False, dry_run=False):
         if old_stage.exists(): old_stage.replace(final_stage)
         raise
     if old_stage.exists(): shutil.rmtree(old_stage)
-    shutil.copy2(final_stage / "edvr-installer.exe", dist / ("edvr-installer-" + version + ".exe"))
+    shutil.copy2(final_stage / installer, dist / (installer[:-4] + "-" + version + ".exe"))
     print("[edvr] wrote %s (%d bytes)" % (archive, archive.stat().st_size)); return 0
 
 
@@ -172,6 +192,8 @@ def self_test():
         root = Path(temp); (root / "build").mkdir(); (root / "release").mkdir()
         for source, _ in _files(root, True):
             source.parent.mkdir(parents=True, exist_ok=True); source.write_bytes(b"payload")
+        vr_descriptor = b"[install]\r\nschema = 1\r\nprofile = vr\r\n"
+        (root / "build" / "edvr_profile_vr.ini").write_bytes(vr_descriptor)
         (root / "build" / "OPENXR-LOADER-LICENSE.txt").write_bytes(b"notice")
         import openxr_pe
         old_native, old_graphics = openxr_pe.native_exports, openxr_pe.native_graphics_exports
@@ -180,7 +202,7 @@ def self_test():
         old_verify = fetch_openxr_loader.verify
         old_resource = globals()['_embedded_resource']
         resources = {101: b"payload", 102: b"payload", 103: b"payload",
-                     105: b"payload", 106: b"notice"}
+                     105: b"payload", 106: b"notice", 107: vr_descriptor}
         def fake_resource(executable, resource_id, required=True):
             if required and resource_id not in resources:
                 raise ValueError("missing fixture resource")
@@ -204,7 +226,7 @@ def self_test():
             assert (root / "dist" / "edvr-1.2.3.zip").read_bytes() == old_archive
             with zipfile.ZipFile(root / "dist" / "edvr-1.2.3.zip") as archive:
                 names = set(archive.namelist())
-                assert names == {"d3d11.dll", "openvr/openvr_api.dll", "openvr/openxr_loader.dll",
+                assert names == {"d3d11.dll", "edvr_profile.ini", "openvr/openvr_api.dll", "openvr/openxr_loader.dll",
                                  "openvr/OPENXR-LOADER-LICENSE.txt", "edvr-installer.exe",
                                  "README.txt", "openvr/READ-ME-FIRST.txt", "edvr.ini", "LICENSE.txt", "DXBC-HASH-LICENSE.txt"}
             (root / "build" / "edvr_openxr_runtime.dll").write_bytes(b"payload")
@@ -257,6 +279,25 @@ def self_test():
             assert package(root, "1.2.7", no_dlss=True) == 0
             with zipfile.ZipFile(root / "dist" / "edvr-1.2.7.zip") as archive:
                 assert "FIDELITYFX-SDK-DX11-LICENSE.txt" not in set(archive.namelist())
+
+            flat_descriptor = b"[install]\r\nschema = 1\r\nprofile = flat\r\n"
+            (root / "build" / "edvr_profile_flat.ini").write_bytes(flat_descriptor)
+            (root / "build" / "edvr-flat.ini").write_bytes(b"[fix]\r\ntemporal_aa = off\r\n")
+            (root / "build" / "edvr-flat-README.txt").write_bytes(b"Flat qualification build")
+            (root / "build" / "edvr-flat-installer.exe").write_bytes(b"installer")
+            resources.clear(); resources.update({101: b"payload", 103: b"[fix]\r\ntemporal_aa = off\r\n",
+                                                 104: dlss.read_bytes(), 107: flat_descriptor})
+            assert package(root, "1.2.8", no_dlss=True, profile="flat") == 0
+            with zipfile.ZipFile(root / "dist" / "edvr-flat-1.2.8.zip") as archive:
+                names = set(archive.namelist())
+                assert "openvr/openvr_api.dll" not in names and "edvr-flat-installer.exe" in names
+                assert archive.read("edvr_profile.ini") == flat_descriptor
+            resources[102] = b"wrong-edition-runtime"
+            try:
+                package(root, "1.2.9", no_dlss=True, profile="flat")
+                raise AssertionError("flat installer with embedded VR runtime accepted")
+            except ValueError:
+                pass
         finally:
             openxr_pe.native_exports, openxr_pe.native_graphics_exports = old_native, old_graphics
             fetch_openxr_loader.verify = old_verify
@@ -264,11 +305,11 @@ def self_test():
     print("package_native: self-test passed"); return 0
 
 
-def check_installer(root):
+def check_installer(root, profile="vr"):
     """Run after linking, so stale outputs cannot fail the early self-test."""
     root = root.resolve()
-    executable = root / "build" / "edvr-installer.exe"
-    _validate_installer_resources(executable, _files(root, True))
+    executable = root / "build" / ("edvr-flat-installer.exe" if profile == "flat" else "edvr-installer.exe")
+    _validate_installer_resources(executable, _files(root, True, profile), profile)
     if _embedded_resource(executable, 65535, required=False) is not None:
         raise ValueError("unexpected resource 65535 in the native installer")
     print("package_native: actual installer resources match the release files")
@@ -282,12 +323,13 @@ def main(argv=None):
                         help="allow a build without DLSS; retain the DLL and notice when embedded")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--profile", choices=("vr", "flat"), default="vr")
     parser.add_argument("--check-installer", action="store_true",
                         help="verify the built installer's actual resources without executing it")
     args = parser.parse_args(argv)
     if args.self_test: return self_test()
-    if args.check_installer: return check_installer(args.root)
-    return package(args.root, args.version, args.no_dlss, args.dry_run)
+    if args.check_installer: return check_installer(args.root, args.profile)
+    return package(args.root, args.version, args.no_dlss, args.dry_run, args.profile)
 
 
 if __name__ == "__main__":
