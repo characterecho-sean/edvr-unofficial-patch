@@ -363,6 +363,13 @@ struct PatchSimPending {
     uint32_t skipFrame = 0;   // N: the un-refilled ENTRY-edge consume's frame
     float heldM[16] = {};     // the held base copied at arm time
     bool haveHeld = false;    // a held base existed at arm time
+    // CHANGE 13: the ship pointer this skip happened on, stashed at arm
+    // time from the arming call's own read. The tap-time live-mailbox probe
+    // reads stashedShip+0x3330; stashing (rather than reading g_lastShip at
+    // the tap) pins the same ship object the skip was judged on, immune to
+    // ship-change races between arm and tap. 0 = unknown at arm time, probe
+    // disabled.
+    uint64_t ship = 0;
 };
 std::mutex g_patchSimMutex;
 PatchSimPending g_patchSim;
@@ -370,7 +377,20 @@ std::atomic<uint64_t> g_patchSimFired{0};      // sim frames logged (session)
 std::atomic<uint64_t> g_patchSimReplaced{0};   // pending sims an entry edge replaced
 std::atomic<uint64_t> g_patchSimExpired{0};    // windows that passed with no covered scene frame
 
-void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase) noexcept {
+// CHANGE 13: the tap-time live-mailbox probe's outcome, printed as the
+// line's live= token and stored in the dump's sim row. Unavailable covers
+// every non-usable case alike (null stashed ship, SEH read fault, failed
+// plausibility gate) -- the probe is a bonus, and one token is enough to
+// say it gave nothing; RESET is its own case because it is the answer to
+// the open question (does the tap land inside the consumer's reset
+// window?).
+enum PatchSimLiveState : uint8_t { LiveUnavailable = 0, LiveOk = 1, LiveReset = 2 };
+
+const char* patchSimLiveStateText(uint8_t s) noexcept {
+    return s == LiveOk ? "ok" : s == LiveReset ? "RESET" : "n/a";
+}
+
+void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint64_t ship) noexcept {
     uint32_t replacedSkip = 0;
     bool replaced = false;
     {
@@ -381,6 +401,7 @@ void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase) noexc
         g_patchSim.skipFrame = frame;
         g_patchSim.haveHeld = haveHeldBase;
         if (haveHeldBase) std::memcpy(g_patchSim.heldM, heldM, sizeof(g_patchSim.heldM));
+        g_patchSim.ship = ship;
     }
     if (replaced) {
         g_patchSimReplaced.fetch_add(1, std::memory_order_relaxed);
@@ -589,6 +610,14 @@ struct EyeBaseFrameRecord {
     float patchSimP[3] = {NAN, NAN, NAN};
     float patchSimHeld[3] = {NAN, NAN, NAN};
     float patchSimNew[3] = {NAN, NAN, NAN};
+    // CHANGE 13: the tap-time live-mailbox probe's outcome -- the patched
+    // origin when the live base was usable, the live mailbox's own raw
+    // translation when the read itself succeeded (RESET zeros included, so a
+    // reset-window tap still shows on the record), and the probe state as a
+    // PatchSimLiveState (0 = unavailable, 1 = ok, 2 = RESET).
+    float patchSimLive[3] = {NAN, NAN, NAN};
+    float patchSimLiveT[3] = {NAN, NAN, NAN};
+    uint8_t patchSimLiveState = 0;
     float patchSimCamStep = 0.0f;
     float patchSimPoolStep = 0.0f;
     uint8_t patchSimChoice = 0;   // tfeb::SceneChoice (held as uint8_t; 0 = Old)
@@ -809,14 +838,18 @@ void performDump(const PendingDump& due) noexcept {
             ++simPrinted;
             appendLine(simText,
                 "  patch-sim f%u (skip %u): P=(%+.3f %+.3f %+.3f) held->(%s%+.3f %+.3f %+.3f) "
-                "new->(%s%+.3f %+.3f %+.3f) cam=%.3f pool=%.3f choice=%s->%s (refilled age=%d)",
+                "new->(%s%+.3f %+.3f %+.3f) live->(%s%+.3f %+.3f %+.3f) liveT=(%+.3f %+.3f %+.3f) "
+                "cam=%.3f pool=%.3f choice=%s->%s (refilled age=%d, live=%s)",
                 r.frame, r.patchSimSkipFrame, r.patchSimP[0], r.patchSimP[1], r.patchSimP[2],
                 r.patchSimHaveHeld ? "" : "n/a ", r.patchSimHeld[0], r.patchSimHeld[1], r.patchSimHeld[2],
                 r.patchSimHaveNew ? "" : "n/a ", r.patchSimNew[0], r.patchSimNew[1], r.patchSimNew[2],
+                r.patchSimLiveState == LiveOk ? "" : "n/a ",
+                r.patchSimLive[0], r.patchSimLive[1], r.patchSimLive[2],
+                r.patchSimLiveT[0], r.patchSimLiveT[1], r.patchSimLiveT[2],
                 r.patchSimCamStep, r.patchSimPoolStep,
                 tfeb::sceneChoiceText(static_cast<tfeb::SceneChoice>(r.patchSimChoice)),
                 static_cast<tfeb::SceneChoice>(r.patchSimChoice) == tfeb::SceneChoice::New ? "new" : "held",
-                r.patchSimRefilledAge);
+                r.patchSimRefilledAge, patchSimLiveStateText(r.patchSimLiveState));
         }
     }
     appendLine(text, "per-frame rows done, %u entries", framePrinted);
@@ -1527,9 +1560,11 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     // left the cache untouched), which is the sim's "held" candidate. The
     // condition implies haveM: `unrefilled` is only ever set under haveM,
     // and ENTRY requires mode!=1. Runs in every non-off mode -- watch, on
-    // and alternate alike -- and never writes game memory.
+    // and alternate alike -- and never writes game memory. CHANGE 13: the
+    // ship local (0 when the +0x50 read faulted) rides along for the tap's
+    // live-mailbox probe.
     if (unrefilled && gameMode == 2 && modeSwitchEdge == tfeb::ModeSwitchEdge::Entry) {
-        armPatchSim(frame, heldM, haveHeldBase);
+        armPatchSim(frame, heldM, haveHeldBase, ship);
     }
 
     if (haveM && unrefilled) {
@@ -1909,8 +1944,9 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
     // the skip consume's frame N covers the render frames N+1..N+3 (the bad
     // render is N+2; one frame of consume/render skew slack either side),
     // and fires only on a covered frame whose scene position is valid. The
-    // work is a few memcpys and floats under two short-held mutexes, on a
-    // render-path thread -- no allocation, no game memory. The camera step
+    // work is a few memcpys, one SEH-guarded read-only probe of game memory
+    // (CHANGE 13 below), and floats under two short-held mutexes, on a
+    // render-path thread -- no allocation, nothing written. The camera step
     // is the geometry's OWN cameraStep: glitch_frame.cpp fills the pool
     // sample's camera with this same sceneDrawPos, so that field already is
     // |pos - previous frame's pos| and is only meaningful when the geometry
@@ -1924,13 +1960,43 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                     const float P[3] = {pos[0], pos[1], pos[2]};
                     float patchHeld[3] = {NAN, NAN, NAN};
                     float patchNew[3] = {NAN, NAN, NAN};
+                    float patchLive[3] = {NAN, NAN, NAN};
+                    float liveM[16] = {};
+                    uint8_t liveState = LiveUnavailable;
+                    // CHANGE 13: the tap-time probe of the LIVE mailbox.
+                    // Flight N+1 showed the consume-indexed NEW-base
+                    // candidate is structurally stale at the bad render (the
+                    // refill consume N+1 runs AFTER the bad render's tap),
+                    // but that same refill leaves the needed base sitting
+                    // live in ship+0x3330 during the tap's wall-clock window
+                    // -- so a read here sees it. The stashed ship pointer
+                    // (not g_lastShip) pins the object the skip happened on.
+                    // RESET (the bit-exact identity, i.e. the tap landed
+                    // inside the consumer's reset window) and any failed
+                    // gate mark the probe unusable; the read itself is
+                    // SEH-guarded and cannot escape the tap.
+                    bool liveReadOk = false;
+                    if (g_patchSim.ship != 0 &&
+                        sehReadBlock64(static_cast<uintptr_t>(g_patchSim.ship) + 0x3330, liveM)) {
+                        liveReadOk = true;
+                        if (tfeb::isResetMailbox(liveM)) {
+                            liveState = LiveReset;
+                        } else if (tfeb::mailboxPlausible(liveM)) {
+                            liveState = LiveOk;
+                            tfeb::patchEyeOrigin(liveM, P, patchLive);
+                        }
+                    }
                     float newM[16] = {};
                     uint32_t newFrame = 0;
                     bool haveNew = false;
                     {
-                        // g_heldBaseMutex also guards the CHANGE 11
-                        // last-refilled copy; consumerObserved never takes
-                        // g_patchSimMutex, so this order cannot deadlock.
+                        // The only lock nesting anywhere in this module is
+                        // this one, g_patchSimMutex -> g_heldBaseMutex (the
+                        // two are always taken in exactly this order, and
+                        // g_heldBaseMutex is never held while anything else
+                        // is acquired -- armPatchSim, the only other
+                        // g_patchSimMutex user, is always called with no
+                        // locks held), so this cannot deadlock.
                         std::lock_guard<std::mutex> heldLock(g_heldBaseMutex);
                         haveNew = g_haveLastRefilled;
                         if (haveNew) {
@@ -1949,20 +2015,40 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                     // One line per covered render frame (at most three per
                     // event), never per consume -- per-consume spam filled
                     // the log once before (CHANGE 9's own history). Both
-                    // candidates print regardless of the choice; the arrow
-                    // names which the acting build would write (Unclear
-                    // defaults to held, the proven-safe side).
+                    // record candidates and the live probe print regardless
+                    // of the choice; the arrow names which the acting build
+                    // would write (Unclear defaults to held, the
+                    // proven-safe side). live= answers the flight question:
+                    // ok (a usable live base sat in the mailbox at the tap),
+                    // RESET (the tap landed inside the consumer's reset
+                    // window), or n/a.
                     Log::get().note(
                         "transition flash eye base: patch sim frame %u (skip %u): P=(%+.3f %+.3f %+.3f) "
-                        "held->(%s%+.3f %+.3f %+.3f) new->(%s%+.3f %+.3f %+.3f) cam=%.3f pool=%.3f "
-                        "choice=%s->%s (refilled age=%d)",
+                        "held->(%s%+.3f %+.3f %+.3f) new->(%s%+.3f %+.3f %+.3f) "
+                        "live->(%s%+.3f %+.3f %+.3f) cam=%.3f pool=%.3f "
+                        "choice=%s->%s (refilled age=%d, live=%s)",
                         frame, g_patchSim.skipFrame, P[0], P[1], P[2],
                         haveHeld ? "" : "n/a ", patchHeld[0], patchHeld[1], patchHeld[2],
                         haveNew ? "" : "n/a ", patchNew[0], patchNew[1], patchNew[2],
+                        liveState == LiveOk ? "" : "n/a ", patchLive[0], patchLive[1], patchLive[2],
                         geometry.cameraStep, geometry.poolStep,
                         tfeb::sceneChoiceText(choice),
                         choice == tfeb::SceneChoice::New ? "new" : "held",
-                        refilledAge);
+                        refilledAge, patchSimLiveStateText(liveState));
+                    r.patchSim = true;
+                    r.patchSimSkipFrame = g_patchSim.skipFrame;
+                    r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];
+                    r.patchSimHeld[0] = patchHeld[0]; r.patchSimHeld[1] = patchHeld[1]; r.patchSimHeld[2] = patchHeld[2];
+                    r.patchSimNew[0] = patchNew[0]; r.patchSimNew[1] = patchNew[1]; r.patchSimNew[2] = patchNew[2];
+                    r.patchSimLive[0] = patchLive[0]; r.patchSimLive[1] = patchLive[1]; r.patchSimLive[2] = patchLive[2];
+                    r.patchSimLiveState = liveState;
+                    if (liveReadOk) {
+                        // The probe read SOMETHING: keep the raw translation
+                        // too, so the dump shows what the mailbox held at
+                        // the tap even when it was the RESET zeros or a
+                        // value the plausibility gate refused.
+                        r.patchSimLiveT[0] = liveM[12]; r.patchSimLiveT[1] = liveM[13]; r.patchSimLiveT[2] = liveM[14];
+                    }
                     r.patchSim = true;
                     r.patchSimSkipFrame = g_patchSim.skipFrame;
                     r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];

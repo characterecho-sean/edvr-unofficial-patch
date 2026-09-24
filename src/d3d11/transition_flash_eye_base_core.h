@@ -496,5 +496,26 @@ inline bool patchSimWindowCovers(uint32_t frame, uint32_t skipFrame) noexcept {
     return frame > skipFrame && frame - skipFrame <= kPatchSimWindowFrames;
 }
 
+// ---------------------------------------------------------------------------
+// CHANGE 13 (2026-09-24, flight N+1's finding): the sim's tap-time probe of
+// the LIVE mailbox. The flight showed the consume-indexed NEW-base candidate
+// is structurally stale at the bad render -- the refill consume N+1 runs
+// AFTER the bad render's tap (consume frames lag render taps by ~1 wall-
+// clock frame), so g_lastRefilledM can never hold the needed base there.
+// But that same refill leaves the value SITTING LIVE in ship+0x3330 during
+// the tap's wall-clock window (written by the writer from the same scene
+// graph the render draws), so a read-only SEH probe of the mailbox AT the
+// tap sees exactly the base the bad render needs. This is the sanity gate a
+// non-reset live value must clear: every lane finite and the translation
+// under 1e7 units (~10,000 km -- the measured rebases are 5 km, the f15513
+// tunnel base 1.6 km, so this rejects garbage without ever rejecting a
+// real base). The RESET value itself is screened out by the caller with
+// isResetMailbox above before this gate is even asked.
+inline bool mailboxPlausible(const float m[16]) noexcept {
+    if (!allFinite16(m)) return false;
+    const float t2 = m[12] * m[12] + m[13] * m[13] + m[14] * m[14];
+    return t2 < 1e7f * 1e7f;
+}
+
 }  // namespace tfeb
 }  // namespace edvr
