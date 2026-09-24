@@ -123,10 +123,8 @@ void recordWriterTests(){
     auto f=p.beginLookupRvaForTest(0x434D149,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(f,reinterpret_cast<uintptr_t>(entry.data()));
     check(p.recordsForTest().back().objectSnapshot.data.size()==0x1A0&&p.recordsForTest().back().lookupStatus=="complete","helper writer retains bounded input and completed entry");
     p.beginLookupRvaForTest(0x434E316,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.beginLookupRvaForTest(0x123456,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
-    const uint64_t uploadCutoff=p.sampleUploadCutoff();
     std::vector<uint8_t> lateStack(0x200);fillRecord(lateStack.data()+0x50,8);auto late=p.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(lateStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(late,reinterpret_cast<uintptr_t>(entry.data()));
-    p.noteUpload(3,4,5,uploadCutoff);const auto s=p.summary();check(s.observed==7&&s.stored==7&&s.completed==7&&s.declinedManagement==1&&s.declinedUnknown==1,"all five writer recipes accepted and management/unknown callers declined");
-    check(p.uploadsForTest().back().cutoff==12&&p.recordsForTest().back().completionSequence>p.uploadsForTest().back().cutoff,"Map-entry cutoff excludes a writer completed during source-owner traversal");
+    const auto s=p.summary();check(s.observed==7&&s.stored==7&&s.completed==7&&s.declinedManagement==1&&s.declinedUnknown==1,"all five writer recipes accepted and management/unknown callers declined");
     std::vector<uint8_t> pendingStack(0x200);fillRecord(pendingStack.data()+0x50,9);auto pending=p.beginLookupRvaForTest(0x369CE91,reinterpret_cast<uintptr_t>(pendingStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     p.finish();check(p.recordsForTest().back().lookupStatus=="pending"&&p.summary().completed+1==p.summary().stored,"finish preserves an explicit incomplete lookup");
     p.armForTest(78);p.completeLookup(pending,reinterpret_cast<uintptr_t>(entry.data()));check(p.summary().completionFailures==1&&p.summary().stored==0,"stale pending completion is rejected by epoch");p.finish();
@@ -209,6 +207,8 @@ void captureFixture(const wchar_t* directory){
           "v3 fixture publishes the record writer's linked ownership");
     check(text.find("\"draws\"")==std::string::npos&&text.find("\"source_owner\"")==std::string::npos&&text.find("\"resources\"")==std::string::npos,
           "v3 fixture carries no draw/mesh sections");
+    check(text.find("\"record_writers\":{\"version\":3,")!=std::string::npos&&text.find("\"uploads\"")==std::string::npos,
+          "the record-writer section is version 3, without the upload join");
     p.reset();
 }
 }
