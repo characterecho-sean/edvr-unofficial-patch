@@ -1053,38 +1053,26 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     Log::get().note("object probe: solar snapshots: %u draws, %u with draw-time b0/b1, %u with bounded geometry/layout; VS/PS retained for surface, corona and arcs. Constants throughout run; geometry first three watched frames. No solar rendering changes.",solarDraws,solarConstants,solarGeometry);
     _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\drawstate_%s.eyemesh.bin",dir.c_str(),g_ledgerStamp);
     const bool eyeMeshOk=g_eyeMeshSnapshot.write(ctx,path);
-    // Always emit a report, including a run with no nominated sources or no
-    // matching temporal stage. Silence must not mean successful association.
+    // Always emit the report, including a run whose probes saw nothing:
+    // silence must not read as success.
     objectClassificationProbe.finish();
-    const bool classificationOk=objectClassificationProbe.write(ctx,dir.c_str(),g_ledgerStamp);
-    const auto classification=objectClassificationProbe.summary();
-    Log::get().note("object classification: eye run %ls provenance report %s (classification_%ls.json/.bin); sealed %u, mesh/scene frame %u/%u, %u draws, %u resources, %u writes, %u snapshots, %u stacks; unobserved %u, unmatched %u, write/stack overflow %u/%u, foreign writes %llu. Missing data and limits are explicit in the report; no static filtering enabled.",
-                    g_ledgerStamp,classificationOk?"written":"WRITE FAILED",g_ledgerStamp,classification.sealed?1u:0u,
-                    classification.selectedFrame,classification.sceneFrame,classification.draws,classification.resources,
-                    classification.writes,classification.snapshots,classification.stackSamples,classification.unobservedSources,
-                    classification.unmatchedWrites,classification.writeOverflow,classification.stackOverflow,
-                    static_cast<unsigned long long>(classification.foreignWrites));
-    Log::get().note("object classification: CPU source-owner probe maps/attempts %u/%u, complete/partial %u/%u, resource matches %u; identity/opcode/unwind rejects %u/%u/%u, read faults/metadata changes %u/%u, descriptor overflow %llu, CPU byte declines %llu. Zero maps is distinct from a successful empty capture.",
-                    classification.sourceOwnerMaps,classification.sourceOwnerAttempts,
-                    classification.sourceOwnerComplete,classification.sourceOwnerPartial,
-                    classification.sourceOwnerResourceMatches,classification.sourceOwnerIdentityRejects,
-                    classification.sourceOwnerOpcodeRejects,classification.sourceOwnerUnwindFailures,
-                    classification.sourceOwnerReadFaults,classification.sourceOwnerMetadataChanges,
-                    static_cast<unsigned long long>(classification.sourceOwnerDescriptorOverflow),
-                    static_cast<unsigned long long>(classification.sourceOwnerCpuByteDeclines));
-    Log::get().note("object classification: CPU record-writer probe hook %s; observed/stored/completed %llu/%u/%u, retained %llu bytes; record overflow/byte declines/read/context/unwind/completion failures %llu/%llu/%llu/%llu/%llu/%llu; declined management/unknown callers %llu/%llu. Exact 336-byte producer records and opaque caller context are evidence only; inactive/refused hooks and incomplete lookups remain explicit and unavailable for upload joins.",
+    const bool classificationOk=objectClassificationProbe.write(dir.c_str(),g_ledgerStamp);
+    const auto writer=objectRecordWriterProbe.summary();
+    Log::get().note("object classification: eye run %ls report %s (classification_%ls.json/.bin, schema v3: the record-writer and kinematic eval probes' sections).",
+                    g_ledgerStamp,classificationOk?"written":"WRITE FAILED",g_ledgerStamp);
+    Log::get().note("object classification: CPU record-writer probe hook %s; observed/stored/completed %llu/%u/%u, retained %llu bytes; record overflow/byte declines/read/context/unwind/completion failures %llu/%llu/%llu/%llu/%llu/%llu; declined management/unknown callers %llu/%llu. Exact 336-byte producer records and opaque caller context are evidence only; inactive/refused hooks and incomplete lookups remain explicit.",
                     objectRecordWriterProbe.hookStatusText(),
-                    static_cast<unsigned long long>(classification.recordWriterObserved),
-                    classification.recordWriterStored,classification.recordWriterCompleted,
-                    static_cast<unsigned long long>(classification.recordWriterRetainedBytes),
-                    static_cast<unsigned long long>(classification.recordWriterOverflow),
-                    static_cast<unsigned long long>(classification.recordWriterByteBudgetDeclines),
-                    static_cast<unsigned long long>(classification.recordWriterReadFaults),
-                    static_cast<unsigned long long>(classification.recordWriterContextFailures),
-                    static_cast<unsigned long long>(classification.recordWriterUnwindFailures),
-                    static_cast<unsigned long long>(classification.recordWriterCompletionFailures),
-                    static_cast<unsigned long long>(classification.recordWriterDeclinedManagement),
-                    static_cast<unsigned long long>(classification.recordWriterDeclinedUnknown));
+                    static_cast<unsigned long long>(writer.observed),
+                    writer.stored,writer.completed,
+                    static_cast<unsigned long long>(writer.retainedBytes),
+                    static_cast<unsigned long long>(writer.recordOverflow),
+                    static_cast<unsigned long long>(writer.byteBudgetDeclines),
+                    static_cast<unsigned long long>(writer.readFaults),
+                    static_cast<unsigned long long>(writer.contextFailures),
+                    static_cast<unsigned long long>(writer.unwindFailures),
+                    static_cast<unsigned long long>(writer.completionFailures),
+                    static_cast<unsigned long long>(writer.declinedManagement),
+                    static_cast<unsigned long long>(writer.declinedUnknown));
     const auto ownership=objectRecordWriterProbe.ownershipSummary();
     Log::get().note("object classification: KinematicRig ownership attempted/linked/stored/reused %llu/%llu/%llu/%llu; unsupported/ancestor missing/unwind failed %llu/%llu/%llu; tuple read/mismatch %llu/%llu, registry read/mismatch %llu/%llu, record range/read %llu/%llu. These are capture-local associations, not static-object classifications.",
                     static_cast<unsigned long long>(ownership.attempted),

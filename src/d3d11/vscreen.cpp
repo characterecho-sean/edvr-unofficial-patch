@@ -70,7 +70,6 @@
 #include "ui_layer_math.h"
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"
-#include "object_classification_probe.h"
 #include "engine_velocity.h"
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "intro_panel.h"
@@ -105,7 +104,6 @@ namespace {
 // only writes to a source instance, bone or camera buffer invalidate them.
 // Reached from every Unmap, Copy and Update on the owner context.
 static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
-    if(!resource && objectClassificationProbe.active())objectClassificationProbe.unknownWrites();
     weaponMotionResourceWritten(resource);
     uiDepthMotionResourceWritten(resource,first,end);
     // Engine-record velocity: a write to an open eye-frame's pool or scene
@@ -3104,7 +3102,6 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ExecuteList, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (foreignContext(self)) {
-        if(objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         s->realExecuteCommandList(self, list, restoreContextState);
         return;
     }
@@ -3162,7 +3159,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     ++s->thunkHits[kHitMap];
     if (type != D3D11_MAP_READ) uiAtlasNoteWrite(res, 1);  // one load until an atlas is watched
     if (foreignContext(self)) {
-        if(type!=D3D11_MAP_READ && objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         return s->realMap(self, res, sub, type, flags, mapped);
     }
     // Timed, not touched: the wait inside the runtime's Map is the game's
@@ -3182,7 +3178,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     } else {
         hr = s->realMap(self, res, sub, type, flags, mapped);
     }
-    if(objectClassificationProbe.active())objectClassificationProbe.noteMap(self,res,sub,type,hr,mapped && mapped->pData);
     // THE MAP SUCCEEDED AND GAVE US SUBRESOURCE 0, asked once.
     //
     // Every tee below used to spell `SUCCEEDED(hr) && mapped && sub == 0`
@@ -3325,7 +3320,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     State* s = g_state;
     ++s->thunkHits[kHitUnmap];
     if (foreignContext(self)) {
-        if(objectClassificationProbe.active())objectClassificationProbe.foreignWrite();
         s->realUnmap(self, res, sub);
         return;
     }
@@ -3400,7 +3394,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->bbBytes = 0;
     }
     s->realUnmap(self, res, sub);
-    if(objectClassificationProbe.active())objectClassificationProbe.noteUnmap(self,res,sub);
 }
 
 // The quad-skip re-issue, lifted out of forwardWithVerdict and NOINLINE.
@@ -3862,10 +3855,6 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                        foreignContext(self));
     }
     g_state->realCopyResource(self, dst, src);
-    if(objectClassificationProbe.active()) {
-        if(foreignContext(self))objectClassificationProbe.foreignWrite();
-        else objectClassificationProbe.noteWrite(self,dst,4,src);
-    }
 }
 
 // The depth clear, record-only: the planet's terrain colour landing at all
@@ -3967,10 +3956,6 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
         drawCensusStructCount(dst, off, src, foreignContext(self));
     }
     g_state->realCopyStructureCount(self, dst, off, src);
-    if(objectClassificationProbe.active()) {
-        if(foreignContext(self))objectClassificationProbe.foreignWrite();
-        else objectClassificationProbe.noteWrite(self,dst,6,nullptr,0,off,uint64_t(off)+4);
-    }
 }
 
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
@@ -4000,11 +3985,6 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     }
     g_state->realCopySubresourceRegion(self, dst, dstSub, dstX, dstY, dstZ, src, srcSub,
                                        box);
-    if(objectClassificationProbe.active()) {
-        if(foreignContext(self))objectClassificationProbe.foreignWrite();
-        else objectClassificationProbe.noteWrite(self,dst,5,src,dstSub,dstX,
-            box && box->right>=box->left?uint64_t(dstX)+box->right-box->left:~uint64_t(0));
-    }
 }
 
 // The CPU-upload path, recorded as kind 'U' with the destination box and no
@@ -4044,10 +4024,6 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     }
     g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch,
                                    depthPitch);
-    if(objectClassificationProbe.active()) {
-        if(foreignContext(self))objectClassificationProbe.foreignWrite();
-        else objectClassificationProbe.noteWrite(self,dst,3,nullptr,dstSub,box?box->left:0,box?box->right:~uint64_t(0));
-    }
 }
 
 // The MSAA resolve, recorded as kind 'V'. The one call that turns a

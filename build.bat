@@ -1180,9 +1180,9 @@ exit /b 0
 :rig_object_classification
 echo [edvr] === object classification provenance regression ===
 if not exist "%OBJ%\classification" mkdir "%OBJ%\classification"
-ml64.exe /nologo /c /Fo"%OBJ%\classification\source_owner_unwind.obj" ^
-    "tools\object_classification_test\source_owner_unwind.asm"
-if errorlevel 1 ( echo [edvr] ERROR: source owner unwind fixture build failed & exit /b 1 )
+ml64.exe /nologo /c /Fo"%OBJ%\classification\unwind_stubs.obj" ^
+    "tools\object_classification_test\unwind_stubs.asm"
+if errorlevel 1 ( echo [edvr] ERROR: unwind fixture build failed & exit /b 1 )
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_RECORD_WRITER_TEST ^
     /Fo"%OBJ%\classification\\" /Fe"%OBJ%\classification\object_classification_test.exe" ^
@@ -1192,13 +1192,12 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\common\code_hook.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" "src\common\guard.cpp" ^
-    "%OBJ%\classification\source_owner_unwind.obj" ^
+    "%OBJ%\classification\unwind_stubs.obj" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: object classification test build failed & exit /b 1 )
 "%OBJ%\classification\object_classification_test.exe" "%OBJ%\classification" || exit /b 1
 python "tools\object_classification.py" --self-test || exit /b 1
-python "tools\object_classification.py" "%OBJ%\classification\classification_fixture.json" --verify-fixture || exit /b 1
-python "tools\object_classification.py" "%OBJ%\classification\classification_source_fixture.json" --verify-source-fixture || exit /b 1
+python "tools\object_classification.py" "%OBJ%\classification\classification_fixture.json" || exit /b 1
 exit /b 0
 
 :rig_eye_draw_snapshot

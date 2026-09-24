@@ -3411,3 +3411,10 @@ signature helpers that engine-record velocity's patcher shares moved to
 dxbc_container.h. `advanced.eye_run_trigger` read `manual` only once the
 motion trigger went; the key and its note are gone, and the eye-dump key
 starts the run at once, as it did under `manual`.
+
+2026-09-23, later: the object classification's draw/mesh half went too
+(noteDraw, stage(), the resource ledger they fed and the CPU source-owner
+probe), uncalled since the mesh records retired above; the eye run's
+classification capture is now schema v3 (executable identity, binary_ok,
+the record-writer and kinematic eval sections), and
+tools/object_classification.py reads v3 and the old v1/v2 captures alike.
