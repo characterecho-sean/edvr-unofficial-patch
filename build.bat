@@ -594,11 +594,15 @@ REM The --quiet rigs hold wall-clock intervals to tight bounds; they run alone,
 REM after the rest, with the whole machine. Only their test runs need that, so
 REM each is split (see the rig area below): its compiles run in the pool like
 REM any other rig's and only its runs wait their turn.
+REM openxr_module_test loads openxr_export_fixture.dll, which
+REM :rig_openxr_exports_test builds; --after holds the reader back until the
+REM writer has actually finished (see the rig rules below).
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%~f0" --times "%BUILD%\rig_times.json" ^
     --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,vtable_test ^
+    --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
 echo [edvr] === config contract ===
@@ -650,7 +654,16 @@ REM  environment: ROOT, BUILD, OBJ, GEN, CFLAGS, EDVR_VER, the
 REM  INSTALLER_* lists and the compiler on PATH. Rigs run in any order and at the
 REM  same time as one another, so a rig must not depend on another rig's
 REM  output, must not share an obj directory, and must not write a file
-REM  another rig reads. The DLLs a rig copies are the main flow's, above.
+REM  another rig reads -- unless that dependency is declared to run_jobs.py
+REM  with --after (see the invocation above), which holds the reader back
+REM  until the writer has actually finished, not merely started. This was an
+REM  unenforced rule once: openxr_module_test loaded openxr_export_fixture.dll
+REM  (built by :rig_openxr_exports_test) with no ordering between the two
+REM  rigs, and only ran clean because a stale fixture DLL from an earlier
+REM  build was normally still sitting in %BUILD%; a build whose mid-link
+REM  failure had deleted it surfaced the race. --after is now the one
+REM  sanctioned way to write a rig that reads another's output -- do not add
+REM  a second one without it. The DLLs a rig copies are the main flow's, above.
 REM
 REM  A rig named in --quiet (or --serial, see tools\run_jobs.py) is written
 REM  in two steps so that only its test runs are held back:
