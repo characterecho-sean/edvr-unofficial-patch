@@ -32,8 +32,13 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
-- **HELD-BASE fix BUILT and INSTALLED, NOT FLOWN (2026-09-24,
-  b0d3632a, on main via bfd16cce).**
+- **HELD-BASE fix FLOWN (073114): it fixes hyperspace exits and fails the
+  low wake.**
+  - The writer is found (`0x2874BC9` from `0x10734D8`). It SKIPS the
+    transition frame.
+  - Next is static round 7 on the writer: compute its base on demand.
+  - The Steam ini is restored.
+  - The build as installed then (b0d3632a, on main via bfd16cce):
   - The substitute is the mailbox's own last refilled value: at most 2
     frames old, same ship object, finite, not reset, 60-frame cap. It is
     written before the engine reads.
@@ -335,6 +340,46 @@ wrote two whole-ring dumps to `edvr_logs\flash\`. The evidence is in
   `0x4C8158F / 0x4C82D15 / 0x594ED5 / 0x58F2F4 / 0x58F9CF / 0x58AF82 /
   0x6BF929 / 0x594C3E / 0x2869073`.
 
+## Flight 073114 (2026-09-24 07:31, Steam copy, build b0d3632a)
+
+Held-base fix, trap OFF, `alternate`; the build matched.
+
+- **Sean's report:** "Hyperspace worked, the low wake didn't." The low wake
+  was the first transition (event #2, acted, held base (17.6, -38.8, -68.2)
+  m, age 1).
+- **The fix acted on #2, #4, #6 and #8.** #6 and #8 were the two hyperspace
+  exits. There the eye origin held the tunnel base for the switch frame,
+  (-3.43, -0.63, +3860.50) and (-0.95, +3.38, +3860.89), where the watched
+  control #3 showed head-only (-0.01, 0, 0). Then it went to the
+  ship-centred eye point (13.5 m).
+- **THE WRITER FOUND.** There is one: RIP `0x2874BC9`, called from camera
+  code `0x10734D8` in the `0x107xxxx` camera region. Its stack is
+  `0x10734D8 / 0x1067316 / 0x106F2F1 / 0x7EB63D / 0x106C9B9 / 0x1E8202 /
+  0x1ECA51 / 0x7EB63D / 0x1EB6AF / 0x7F3862 / ...`. This job differs from
+  the VR consumer's (`0x1E7906 / 0x1EE0F1`).
+- **The order of calls.** Per frame: the writer writes, then the consumer's
+  mode-1 peek, then its mode-2 read-and-reset. Both run on one thread
+  (t4532), and the mode histogram is exactly 50/50.
+- **THE REAL MECHANISM.** On the event frame the writer SKIPS the frame
+  entirely: no write between consumes (`wsince=no`, `writerHits=0`). Both
+  calls see the reset value. The next frame's write already carries the NEW
+  state: (-14.640, +6.774, +1.296) after 12591, the ship-centred
+  (-6.890, -10.898, +4.043) after the tunnel exit 16619.
+- **Why one substitute cannot serve.** The objects switch coordinate frames
+  at different moments by transition type. At a hyperspace exit they are
+  still in the old frame on the skipped frame, so the held base is right
+  (confirmed by eye). At the low wake they have already switched, so the
+  held base is wrong and only the value the writer would have written is
+  right.
+- **Next:** static round 7 on the writer (`0x2874BC9`'s function and
+  `0x10734D8`'s): what it computes into `ship+0x3330`, and why it skips
+  the transition frame. If its computation can run on demand at an
+  un-refilled consume, the camera gets the base for whichever frame the
+  engine is in.
+- **The dump for #2** was overwritten before it was serviced (the call
+  ring is 8192 entries, and the dump was written a minute later), so the low
+  wake's per-call detail is lost.
+
 ## Flight 062910 (2026-09-24 06:29, Steam copy, build 04db82fa)
 
 `advanced.transition_flash_eye_base = alternate`, trap OFF; the build
@@ -454,8 +499,16 @@ through `pdata_functions.csv`.
 Each was ruled out on 2026-09-23 from existing flight data and static
 analysis, or from flight 184826 or 195435 where marked:
 
+- **Ruled out (073114): one fixed substitute for every transition.** The
+  held base fixed both hyperspace exits (Sean: "hyperspace worked") but not
+  the low wake. The objects change frame on different frames by
+  transition type.
+- **Ruled out (073114): waiting for the writer inside the frame.** The
+  writer skips the transition frame entirely (no write between consumes),
+  so there is no late write to wait for.
 - **Ruled out (062910): `ship+0x130` as a stand-in for the eye-base
-  mailbox.** On refilled frames it agreed 0 times in 11,084 comparisons, and
+  mailbox.** (Dump 4 of 073114 shows why: it is the ship's placement
+  without the eye point, 13.5 m and a rotation away from the mailbox.) On refilled frames it agreed 0 times in 11,084 comparisons, and
   its translation is (0,0,0) on the flash frames too.
 - **Ruled out (045636): round 5's camera positioner (Tick `0x107C760`,
   swap-sync `0x1090420`) as the cockpit camera's.** Neither ran on any
