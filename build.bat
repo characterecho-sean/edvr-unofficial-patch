@@ -482,7 +482,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
-    "src\d3d11\static_surface.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
@@ -1071,25 +1070,6 @@ cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: UI separation controller test build failed & exit /b 1 )
 "%OBJ%\uicolourtest\controller_test.exe" || exit /b 1
-exit /b 0
-
-:rig_static_surface_test
-echo [edvr] === static surface ownership regression ===
-if not exist "%OBJ%\staticsurfacetest" mkdir "%OBJ%\staticsurfacetest"
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\staticsurfacetest\\" /Fe"%OBJ%\staticsurfacetest\static_surface_test.exe" ^
-    "tools\static_surface_test\static_surface_test.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: static surface shader test build failed & exit /b 1 )
-"%OBJ%\staticsurfacetest\static_surface_test.exe" || exit /b 1
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\staticsurfacetest\\" /Fe"%OBJ%\staticsurfacetest\controller_test.exe" ^
-    "tools\static_surface_test\controller_test.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: static surface controller test build failed & exit /b 1 )
-"%OBJ%\staticsurfacetest\controller_test.exe" || exit /b 1
 exit /b 0
 
 :rig_native_motion_rigs

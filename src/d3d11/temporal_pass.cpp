@@ -42,7 +42,6 @@
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
-#include "static_surface.h"
 #include "perf_monitor.h"
 #include "shader_swap.h"
 #include "gpu_timing.h"
@@ -1525,11 +1524,6 @@ bool     g_moversOn = false;       // experimental.temporal_aa_movers
 float    g_moversTol = 0.03f;      // advanced.temporal_aa_movers_tolerance, percent in the ini
 float    g_moversStrength = 1.0f;  // advanced.temporal_aa_movers_strength
 bool     g_moversNoted = false;    // the engage line, once
-// advanced.temporal_aa_static_surfaces: the static owner still marks its
-// surfaces and dumps them in an eye run; its consumer, the promotion that
-// kept them off the estimated station and ship paths, retired with those
-// paths on 2026-09-23 (docs/per-object-motion.md).
-bool     g_staticSurfacesOn = false;
 // This frame's rows are the view's own (its delta not carried), and the
 // frame of the last floating-origin jump (a camera move over 50 m in a
 // frame): the eye run's motion trace and the submission history carry both.
@@ -1928,7 +1922,6 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     }
     celestialMotionStageDump(ctx,textures[4]);
     uiDepthHoloStageDump(ctx,textures[4]);
-    staticSurfaceStageDump(ctx, textures[4], g_rowsFrame);
     if(textures[4]) {
         ID3D11ShaderResourceView* terrain[3]{}; celestialMotionViews(ctx,textures[4],terrain);
         for(int k=0;k<2;++k)if(terrain[k]) {
@@ -2027,7 +2020,6 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
     }
     celestialMotionWriteDump(ctx,dir.c_str(),g_eyeRunStamp);
     uiDepthHoloWriteDump(ctx,dir.c_str(),g_eyeRunStamp);
-    staticSurfaceWriteDump(ctx, dir.c_str(), g_eyeRunStamp);
 }
 
 bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D** slot, uint32_t* cwOut,
@@ -6158,22 +6150,6 @@ void temporalPassConfigure(Config& cfg) {
     // job-0 entry. Default off; Phase 1 build, the Phase-2 flight must show
     // census draw-count equality before this can default on.
     staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
-    const std::string staticFovea = cfg.getString("advanced.temporal_aa_fovea", "0");
-    g_staticSurfacesOn = detail::g_temporalPassWantedFssChrome && g_trainedWanted &&
-                         g_temporalEngine == edvr::TemporalEngine::Nvidia &&
-                         (staticFovea.empty() || _stricmp(staticFovea.c_str(), "0") == 0) &&
-                         cfg.getBool("advanced.temporal_aa_static_surfaces", false);
-    staticSurfaceConfigure(g_staticSurfacesOn);
-    if (g_staticSurfacesOn && engineMotionOn) {
-        static bool bothNoted = false;
-        if (!bothNoted) {
-            bothNoted = true;
-            Log::get().note("engine motion: advanced.temporal_aa_static_surfaces and engine-record velocity (part of "
-                            "fix.temporal_aa) both replace the pool families' pixel shaders; on a draw engine-record "
-                            "velocity has substituted, the static owner finds a shader it did not patch and declines "
-                            "(its 'shaders' decline count).");
-        }
-    }
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
     float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);
@@ -6187,15 +6163,6 @@ void temporalPassConfigure(Config& cfg) {
     g_shipMetres = ship;
     g_eyeRunTreated = cfg.getBool("advanced.eye_run_treated", false);
     g_eyeRunPaired = cfg.getBool("advanced.eye_run_paired", true);
-    // manual is the only trigger: motion armed a run for the estimated body
-    // path's next activation, and retired with that path on 2026-09-23.
-    const std::string eyeRunTrigger = cfg.getString("advanced.eye_run_trigger", "manual");
-    if (_stricmp(eyeRunTrigger.c_str(), "manual") != 0) {
-        Log::get().note(
-            "eye capture: advanced.eye_run_trigger = \"%s\" reads as manual (motion retired with the "
-            "estimated body path on 2026-09-23); the eye-dump key starts the run at once.",
-            eyeRunTrigger.c_str());
-    }
     g_diagnostics = cfg.getBool("advanced.temporal_aa_diagnostics", false);
     g_warmOn = cfg.getBool("advanced.temporal_aa_warm", true);   // g_warmState is NOT re-armed here
     const std::string dbg = cfg.getString("advanced.temporal_aa_debug", "off");
@@ -7198,7 +7165,6 @@ void temporalPassShutdown() {
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     dlaaShutdown();
     fsr3Shutdown();
-    staticSurfaceShutdown();
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
     if (g_csMvTrace) { g_csMvTrace->Release(); g_csMvTrace = nullptr; }

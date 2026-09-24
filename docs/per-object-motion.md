@@ -9,11 +9,13 @@ is history: the paths it builds were removed from the code that day.*
   ESTIMATED a per-object transform is gone from the code: tier 2's body
   path and its occupancy grid, the second body, the stepped parts, the
   moving ships, object_probe.cpp's rigid fit, the per-record mesh pairing
-  (mesh_motion), the rigid-owner promotion the static owner fed, and the
-  `movers` and `objects` debug views. Keys retired:
-  `advanced.temporal_aa_estimated_objects`, `advanced.mesh_motion`,
-  `advanced.temporal_aa_objects_reach`,
-  `advanced.temporal_aa_objects_ships_metres`. Superseded by engine-record
+  (mesh_motion), the rigid-owner promotion and the static owner that fed
+  it, the eye run's motion trigger, and the `movers` and `objects` debug
+  views. Keys retired: `advanced.temporal_aa_estimated_objects`,
+  `advanced.mesh_motion`, `advanced.temporal_aa_objects_reach`,
+  `advanced.temporal_aa_objects_ships_metres`, then the same day
+  `advanced.temporal_aa_static_surfaces` and `advanced.eye_run_trigger`
+  (the last two entries). Superseded by engine-record
   velocity (part of `fix.temporal_aa`):
   [kinematic-motion-injection-2026-09-19.md](kinematic-motion-injection-2026-09-19.md)
   -- the exact motion the game recorded, where these paths guessed it.
@@ -23,9 +25,8 @@ is history: the paths it builds were removed from the code that day.*
   the holo panel path, terrain motion, the screen motion map, the engine
   path, everything on foot, `advanced.object_probe`'s eye-run ledger (the
   pool recognition and the per-frame pool, instance, bone and draw-state
-  files for tools\eye_run_ledger.py), and the static owner
-  (`advanced.temporal_aa_static_surfaces`), which still marks and dumps
-  but has no consumer.
+  files for tools\eye_run_ledger.py), and the manual eye run
+  (hotkey.dump_eyes).
 - **Open:** nothing on this arc. The smoke-trail voids (cause undecided
   on 2026-09-10) were never an estimate's problem; they stay open for
   whichever arc next works on smoke.
@@ -48,8 +49,8 @@ is history: the paths it builds were removed from the code that day.*
   - Distant shimmer as a pure sampling limit (8th flight): retired by
     the 9th -- it was the reversed-Z depth decode.
 - **Next flight:** none on this doc.
-- **Detail:** "Retired, 2026-09-23" (the last section) says what went and
-  what stayed. The flight log (48 numbered flights) is inline under
+- **Detail:** "Retired, 2026-09-23" and "The two keys left over" (the last
+  two sections) say what went and what stayed. The flight log (48 numbered flights) is inline under
   "Phasing" item 3; twelve later reviews (2026-09-10/11) sit beside this
   doc as review-<topic>-<date>.md.
 
@@ -3396,3 +3397,17 @@ and retiring its key is Sean's call.
 ruled out: estimating per-object motion (rigid fits over pool pairs,
 records paired by content, grid membership), because the engine's own
 records give the exact motion (the kinematic doc).
+
+## The two keys left over, 2026-09-23
+
+Sean's decision on the retirement's loose ends: both keys go.
+`advanced.temporal_aa_static_surfaces` marked stationary surfaces with an
+owner target on eligible original draws for the rigid-owner promotion,
+which retired with the estimates; with nothing reading its output it went
+too -- static_surface.* (the owner target, its shader patcher and its eye-run
+StaticOwner dumps), the draw hook's static-owner arm, its shader and
+layout bookkeeping at creation, and its rig. The DXBC container and
+signature helpers that engine-record velocity's patcher shares moved to
+dxbc_container.h. `advanced.eye_run_trigger` read `manual` only once the
+motion trigger went; the key and its note are gone, and the eye-dump key
+starts the run at once, as it did under `manual`.
