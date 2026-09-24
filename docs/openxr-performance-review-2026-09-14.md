@@ -1,5 +1,29 @@
 # Native OpenXR performance review — September 14, 2026
 
+## Status
+
+*Added 2026-09-24. Restates the journal below; update it whenever this doc
+changes.*
+
+- **State:** built on main 2026-09-24, NOT FLOWN (entry "2026-09-24: issue
+  #38 and the five gaps"): a per-cycle long-frame breakdown, p99/max, late
+  frames and producer-copy GPU timing; the second Submit no longer holds
+  Elite through compose and xrEndFrame (`frame_end_overlap`); the XR owner
+  and pacer threads run at THREAD_PRIORITY_HIGHEST; performance settings and
+  Meta metrics are requested when a runtime offers them.
+- **Open:** sections 5 and 6 below (the private copy, the producer copy)
+  wait on `native_producer_gpu`: build either only if a copy costs more than
+  about 0.1 ms per eye. The depth layer is set aside (Sean, 2026-09-24). No
+  controlled comparison with the old OpenVR path exists; one now needs a
+  v0.16.2 build.
+- **Ruled out:** at the end of the 2026-09-24 entry.
+- **Next flight:** Frontier install, one session: 5+ minutes steady in a
+  ship, then a station. Pimax through SteamVR's OpenXR runtime if possible
+  (issue #38's configuration). Read the lines under "What the flight reads".
+- **Environment:** the numbers in the entry are Pimax Crystal Super, 90 Hz,
+  separate device: Pimax OpenXR at 2600x2514, SteamVR OpenXR (`aapvr`) at
+  4100x4050 and 2665x2087.
+
 The first implementation wave is tracked in the [submission optimization
 notes](openxr-submit-performance-2026-09-14.md). The review below retains its
 original source baseline.
@@ -447,3 +471,89 @@ normal exit plus stopped-Present teardown. Repeat on the Windows-selected
 SteamVR OpenXR/Pimax path and the available Meta/VDXR Quest paths. Preserve
 image quality, startup orientation and exit correctness before accepting any
 timing improvement.
+
+## 2026-09-24: issue #38 and the five gaps
+
+Issue #38 (Bigscreen Beyond 2e on SteamVR, RTX 5090) reported random
+frame-time jumps in 0.17.0 against a steady 0.16.2 and blamed OpenXR. The
+logs could not test it: every Pimax-on-SteamVR-OpenXR flight is 4 minutes or
+shorter, the legacy and native logs share no frame-time distribution, and a
+native LONG FRAME line printed no breakdown.
+
+Measured from existing logs, no flight:
+
+- The owner handoff (round trip minus owner body, `native_frame_cycle_phase`)
+  costs 10-60 us at p50 and p95.
+- Elite's thread sits in the second Submit (`second_submit_render_park`, p50)
+  for 0.59 ms on Pimax OpenXR at 2600x2514, 0.76 ms on SteamVR at 4100x4050
+  and 1.26 ms on SteamVR GPU-bound: consumer copy, compose and the runtime's
+  xrEndFrame.
+- SteamVR's xrEndFrame (`native_submit_phases`, p50) is 0.12 ms at 2665x2087
+  and 0.46-0.96 ms at 4100x4050; Pimax OpenXR's is 0.23-0.46 ms.
+- EDVR-device GPU (consumer copy plus compose) is 0.05-0.07 ms median over 66
+  flights. The producer copy on Elite's device was not timed.
+- Every flight runs `graphics_ownership,mode=separate`. Nothing in `src` set
+  a thread priority.
+
+Built on main, not flown:
+
+- `f12a5a3f`: `native_long_cycle`, one line per cycle longer than twice the
+  predicted period, with that cycle's phases and the timing sequence the
+  d3d11 LONG FRAME line now also prints ("runtime sequence"). p99/max on the
+  phase lines; `late_frames` per window and session; XR_EXT_performance_
+  settings and XR_META_performance_metrics when the runtime lists them.
+- `e5be5c2b`: `frame_end_overlap` and `frame_thread_priority`, both on by
+  default. With the overlap, the second Submit returns once Elite's texture
+  is free, and the owner finishes the pair from a job queued ahead of the
+  next WaitGetPoses. Turbo pacing and the borrowed device stay synchronous.
+- `57119f42`: `native_producer_gpu`, the producer copy's GPU time on Elite's
+  device, every 30 s.
+
+Both switches live in `Openvr\win64\edvr_openxr.ini`, which is all or
+nothing: a file that sets them must restate the packaged defaults.
+
+    [openxr]
+    version=1
+    loader=<game>\Openvr\win64\openxr_loader.dll
+    graphics=<game>\d3d11.dll
+    runtime=system
+    separate_device=1
+    frame_end_overlap=off
+    frame_thread_priority=normal
+
+Why the copies exist: the write into the runtime's swapchain image is
+inherent to OpenVR over OpenXR (SteamVR's own Submit copied too). The
+cross-device copy buys the separate XR device the shutdown work needed
+([shared device](openxr-shared-device-2026-09-13.md)). The private copy gives
+compose a typeless view and returns the keyed mutex at once.
+
+What the flight reads (the `edvr_openxr` log):
+
+- `native_frame_end_overlap,enabled=1` at startup, and its `_summary` at
+  close with `failures=0`.
+- `second_submit_render_park` p50 should fall to the producer part, about
+  0.2 ms. `frame_end_owner_body` carries what moved; `next_wait_queue_delay`
+  near zero means the wait did not simply move to the next WaitGetPoses.
+- `native_thread_priority,thread=owner,...,after=2` (the pacer line appears
+  only on foot).
+- `native_producer_gpu,window=` copy p50: above about 0.1 ms per eye reopens
+  sections 5 and 6. A few `pending_dropped` are spans still in flight when a
+  window closed.
+- `native_long_cycle` and `late_frames`: the per-frame breakdown issue #38
+  needs.
+
+Ruled out:
+
+- ruled out: SteamVR's OpenXR runtime collapsing to about 50 fps two minutes
+  in (Frontier `aapvr` flights 20260922_093752 and 20260922_125854), because
+  at the drop the game's own GPU render went from 1.2 to 15-19 ms and Game
+  Map writes from about 15k to 800k per 5 s: the settlement loading in,
+  GPU-bound.
+- ruled out: recent main having more long frames than 0.17.0, because the
+  LONG FRAME count is capped at one per 5 s and the main flights were 3-4
+  minutes, mostly load-in; with load-in and streaming removed, neither flight
+  long enough to test kept a clean long frame.
+- ruled out: Vulkan, DXVK or Khronos loader cost (issue #38), because the
+  runtime enables only XR_KHR_D3D11_enable and uses the loader once, at
+  startup.
+- ruled out: the owner rendezvous as a cost, because it measures 10-60 us.
