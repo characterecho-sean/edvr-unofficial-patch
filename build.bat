@@ -546,7 +546,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
-    "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
     "src\common\frame_flag.cpp" ^
@@ -741,7 +741,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_MENU_TEST /I"%GEN%" /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_menu\\" /Fe"%BUILD%\native_menu_test.exe" ^
     "tools\native_menu_test\native_menu_test.cpp" "src\d3d11\native_menu.cpp" ^
-    "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" ^
@@ -1304,6 +1304,18 @@ if errorlevel 1 ( echo [edvr] ERROR: D3D11 GPU span test build failed & exit /b 
 "%OBJ%\gpuspand3d11\gpu_span_d3d11_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_producer_gpu_timing_test
+if not exist "%OBJ%\producergputiming" mkdir "%OBJ%\producergputiming"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\producergputiming\\" /Fe"%OBJ%\producergputiming\producer_gpu_timing_test.exe" ^
+    "tools\producer_gpu_timing_test\producer_gpu_timing_test.cpp" ^
+    "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: producer GPU timing test build failed & exit /b 1 )
+"%OBJ%\producergputiming\producer_gpu_timing_test.exe" --dry-run || exit /b 1
+"%OBJ%\producergputiming\producer_gpu_timing_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_gpu_live_hook_test
 REM Real WARP query work through the same stacked LiveCopy mechanism used by
 REM exposure and vScreen. This is desk-only; no production GPU timer is enabled.
@@ -1384,7 +1396,7 @@ for %%T in (native stereo) do (
         /I"third_party\openxr\include" /Fo"%OBJ%\openxr_native_tests\\" ^
         /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
         "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
-        "src\openxr\shared_texture_transfer.cpp" ^
+        "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
         "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
@@ -1403,7 +1415,7 @@ if not exist "%OBJ%\openxr_capture_test" mkdir "%OBJ%\openxr_capture_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\openxr_capture_test\\" /Fe"%BUILD%\openxr_capture_test.exe" ^
     "tools\openxr_capture_test\openxr_capture_test.cpp" "src\openxr\eye_capture.cpp" ^
-    "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR capture test build failed & exit /b 1 )
 "%BUILD%\openxr_capture_test.exe" --dry-run || exit /b 1
@@ -1415,7 +1427,7 @@ if not exist "%OBJ%\openxr_skybox_test" mkdir "%OBJ%\openxr_skybox_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /Fo"%OBJ%\openxr_skybox_test\\" /Fe"%BUILD%\openxr_skybox_test.exe" ^
     "tools\openxr_skybox_test\openxr_skybox_test.cpp" "src\openxr\skybox_capture.cpp" ^
-    "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR skybox capture test build failed & exit /b 1 )
 "%BUILD%\openxr_skybox_test.exe" --dry-run || exit /b 1
@@ -1488,7 +1500,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_proxy_state_test\\" /Fe"%BUILD%\openxr_proxy_state_test.exe" ^
     "tools\openxr_proxy_state_test\openxr_proxy_state_test.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
-    "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR proxy state test build failed & exit /b 1 )
 "%BUILD%\openxr_proxy_state_test.exe" --dry-run || exit /b 1
@@ -1529,6 +1541,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\openxr_shared_texture_test\\" /Fe"%BUILD%\openxr_shared_texture_test.exe" ^
     "tools\openxr_shared_texture_test\openxr_shared_texture_test.cpp" ^
     "src\openxr\shared_texture_transfer.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
+    "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR shared texture test build failed & exit /b 1 )
 "%BUILD%\openxr_shared_texture_test.exe" --dry-run || exit /b 1

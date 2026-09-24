@@ -36,6 +36,7 @@
 #include "native_feature_pose.h"
 #include "native_timing_client.h"
 #include "device_gpu_timing.h"
+#include "producer_gpu_timing.h"
 #include "submission_stats.h"
 #include "frame_cycle_stats.h"
 #include "native_cpu_trace.h"
@@ -211,6 +212,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeTimingClient timing;
   DeviceGpuTiming deviceTiming;
   bool deviceTimingReady=false;
+  // Producer-side (Elite's own device) copy timing; separate from deviceTiming
+  // above, which times only the consumer copy on EDVR's own device. Lazily
+  // bound to the render thread the first time a capture() call below reaches
+  // it; see producer_gpu_timing.h.
+  ProducerGpuTiming producerTiming;
   uint64_t timingSequence=0;
   bool timingFrameActive=false;
   std::atomic<bool> timingApplicationOpen{false};
@@ -1638,9 +1644,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(separateGraphics()) {
         pollDeviceTiming();
         deferredR=captured.capture(deferredEye.eye,&deferredProcessed,&deferredTreatedBounds,deferredEye.flags,true,
-          nullptr,true,nullptr);
+          nullptr,true,nullptr,&producerTiming);
         r=captured.capture(eye,selected,region,flags,true,
-          nullptr,true,submitStats.full()?nullptr:&transferWall);
+          nullptr,true,submitStats.full()?nullptr:&transferWall,&producerTiming);
       } else if(!graphicsCalls.invoke([&]{
           deferredR=captured.capture(deferredEye.eye,&deferredProcessed,&deferredTreatedBounds,deferredEye.flags,true);
           r=captured.capture(eye,selected,region,flags,true);
@@ -1661,7 +1667,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(separateGraphics()) {
       pollDeviceTiming();
       r=captured.capture(eye,selected,region,flags,true,
-        nullptr,true,submitStats.full()?nullptr:&transferWall);
+        nullptr,true,submitStats.full()?nullptr:&transferWall,&producerTiming);
     }
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
     const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
@@ -2067,6 +2073,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(FAILED(menuClosed))return clean=false;
     timingInvalidate();
     deviceTiming.abandon();deviceTimingReady=false; // Release only, including partial frames.
+    producerTiming.shutdown(); // Same contract: release only, safe off the render thread.
     const auto timingClosed=timing.close();
     if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
     if(FAILED(temporal.close()))return clean=false;
@@ -2082,6 +2089,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(tracing)nativeTracePrintf("native_frame_end_overlap_summary,overlapped=%llu,synchronous=%llu,inline_at_close=%llu,failures=%llu\n",
       (unsigned long long)frameEndOverlapCount,(unsigned long long)frameEndSyncCount,
       (unsigned long long)frameEndInlineAtCloseCount,(unsigned long long)frameEndFailureCount);
+    if(tracing) { const auto producerGpu=producerTiming.summary();
+      nativeTracePrintf("native_producer_gpu_summary,windows=%llu,samples=%llu,disjoint_invalid=%llu\n",
+        (unsigned long long)producerGpu.windows,(unsigned long long)producerGpu.samples,(unsigned long long)producerGpu.disjointInvalid); }
     if(tracing)nativeTracePrintf("native_long_cycle_summary,count=%llu,logged=%llu,threshold=2x_period\n",
       (unsigned long long)longCycleCount,(unsigned long long)longCycleLogged);
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",

@@ -9,6 +9,7 @@ namespace edvr::openxr {
 
 class ImmediateExecutor;
 struct GpuWorkObserver;
+class ProducerGpuTiming;
 
 // Experimental CPU-owned handoff for copying one producer-device texture to a
 // private texture on a distinct consumer device. Construct this object on the
@@ -52,8 +53,11 @@ class SharedTextureTransfer final {
   // for the consumer. S_OK means EDVR owns the pending pixels; the caller may
   // immediately reuse its source. receive/shutdown complete this bounded slot
   // without another producer callback. A second enqueue returns E_PENDING.
+  // producerTiming, if given, brackets this call's producer CopyResource +
+  // Flush on the producer executor callback; see producer_gpu_timing.h.
   HRESULT enqueue(ID3D11Texture2D* source, DWORD timeoutMs = 100,
-                  TransferWallTimes* times = nullptr) noexcept;
+                  TransferWallTimes* times = nullptr,
+                  ProducerGpuTiming* producerTiming = nullptr) noexcept;
   // Retries a published consumer handoff. A producer key-0 timeout occurs
   // before publication and is returned by copy() for the caller to retry with
   // its next copy call.

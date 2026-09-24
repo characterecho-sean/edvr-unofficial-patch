@@ -7,7 +7,7 @@
 #include "submission_measurement.h"
 #include "../openvr/compat/openvr_v0_9_20.h"
 
-namespace edvr::openxr { class ImmediateExecutor; class SharedTextureTransfer; struct GpuWorkObserver; }
+namespace edvr::openxr { class ImmediateExecutor; class SharedTextureTransfer; struct GpuWorkObserver; class ProducerGpuTiming; }
 
 namespace edvr::openxr {
 
@@ -40,7 +40,8 @@ class EyeCapture final {
                                  bool copyPixels = true,
                                  GpuWorkObserver* observer = nullptr,
                                  bool deferConsumer = false,
-                                 TransferWallTimes* times = nullptr);
+                                 TransferWallTimes* times = nullptr,
+                                 ProducerGpuTiming* producerTiming = nullptr);
   // Deferred shared captures have no readable texture until this owner-only
   // operation succeeds. It never calls the producer. reset discards their
   // metadata; transfer retirement still drains any outstanding handoff.
@@ -67,7 +68,7 @@ class EyeCapture final {
                                        const vr::VRTextureBounds_t* bounds,
                                        vr::EVRSubmitFlags flags, bool copyPixels,
                                        GpuWorkObserver* observer, bool deferConsumer,
-                                       TransferWallTimes* times);
+                                       TransferWallTimes* times, ProducerGpuTiming* producerTiming);
   struct Eye {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> copy;
     mutable Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shaderViews[2];
