@@ -138,6 +138,8 @@ int main(int argc, char** argv) {
     expectStr("advanced.mesh_motion", "<unset>", "the retired mesh record pairing's key is absent");
     expectStr("advanced.temporal_aa_objects_reach", "<unset>", "the retired station path's reach is absent");
     expectStr("advanced.temporal_aa_objects_ships_metres", "<unset>", "the retired ship path's range is absent");
+    // The particle facing measurement (dead since 2026-08-23) retired 2026-09-23.
+    expectStr("advanced.particle_face_emitter", "<unset>", "the retired particle facing key is absent");
     expectBool("fix.share_exposure", true, "a key in the first [fix] reads");
     expectBool("fix.transition_flash", true, "...and another beside it");
     expectStr("hotkey.toggle_exposure", "SCROLLLOCK",

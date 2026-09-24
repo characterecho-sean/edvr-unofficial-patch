@@ -548,9 +548,6 @@ struct State {
     void*     partResource = nullptr;
     void*     partData = nullptr;
     uint32_t  partBytes = 0;
-    void*     part0Resource = nullptr;
-    void*     part0Data = nullptr;
-    uint32_t  part0Bytes = 0;
     SkipSpec  censusSkip[8] = {};
     uint32_t  censusSkipCount = 0;
     // The bisection form of the same probe: skip eye draws by their POSITION
@@ -3309,14 +3306,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         s->partBytes = 0;
         mapBufferDesc(res, &s->partBytes);
     }
-    // The emitter's constants for the same fix, so the billboards can be
-    // aimed at their own plume rather than along the view axis.
-    if (mapSub0 && res == particleTargetCb0()) {
-        s->part0Resource = res;
-        s->part0Data = mapped->pData;
-        s->part0Bytes = 0;
-        mapBufferDesc(res, &s->part0Bytes);
-    }
     // The world shader's true-camera feed: the scene CB vscreen
     // nominated at the last big eye draw, same discipline again.
     if (mapSub0 && res == sunglareSceneCbTarget()) {
@@ -3395,13 +3384,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->sceneCbResource = nullptr;
         s->sceneCbData = nullptr;
         s->sceneCbBytes = 0;
-    }
-    if (res == s->part0Resource && s->part0Data) {
-        guardedBudget(g_cameraBudget,
-                      [&] { particleCaptureCb0(s->part0Data, s->part0Bytes); });
-        s->part0Resource = nullptr;
-        s->part0Data = nullptr;
-        s->part0Bytes = 0;
     }
     if (res == s->partResource && s->partData) {
         guardedBudget(g_cameraBudget,
