@@ -6,8 +6,20 @@ flown.*
 
 ## Status
 
-- **State:** DESIGN. The bad frame is traced statically to a camera-compose
-  chain in Elite's own code. Not yet confirmed at runtime. Nothing built.
+- **State:** Phases 1 and 2 BUILT TOGETHER, NOT FLOWN (Sean chose one flight
+  for both). `advanced.transition_flash_prevent = off|watch|on|alternate`,
+  default off: 0290e101, with five review fixes in 980a0c84 (per-call parent
+  guard, H3 aggregated per frame, the cap counts frames, dumps widen instead
+  of dropping, a 65536-entry ring dumped to `edvr_logs\flash\`). On main via
+  31330089.
+- **Installed (2026-09-23 17:58):** build 980a0c84 in the STEAM copy only;
+  the Frontier copy keeps the engine-motion session's f05c84bf. The Steam
+  `edvr.ini` has `transition_flash = 0` (the trap off, so the A/B is visible)
+  and `[advanced] transition_flash_prevent = alternate` (events alternate
+  watched, acted, starting watched). Both lines are marked in the ini: after
+  the flight, put back `transition_flash = 1` and remove the prevent line.
+  Backup:
+  `scratchpad\steam-edvr.ini.pre-flash-flight.bak` (this session).
 - **Goal (Sean, 2026-09-23):** stop trapping the bad frame (detecting it, then
   resubmitting the previous one) and stop Elite rendering it at all, by fixing
   the order inside the game.
@@ -25,9 +37,15 @@ flown.*
   block with the engine's own from-root recompute (`0x3CEE650`). When they
   disagree, use the recompute. The frame renders from the right place and
   nothing is withheld.
-- **Next build:** Phase 1, the anatomy instrument: read-only hooks plus a
-  dry run of the fix's test, default off.
-- **Next flight:** Phase 1's, below.
+- **Next flight:** on the Steam copy, the Phase 1 list below. Note which
+  jumps flashed; press Pause within a couple of seconds of any flash that
+  shows (it dumps the whole ring). First read:
+  `python tools\edvr_log.py --target steam --expect-build 980a0c84`, then
+  the `transition flash prevent:` lines and `edvr_logs\flash\`.
+- **Pass:** the watched events show the detector's CameraReset and a
+  visible flash; the acted events show neither. The recompute agrees with
+  the cached block on ordinary frames (`validated=yes`). H3 frames land in
+  the `<1cm`/`<10cm` buckets.
 - **Environment:** game build 332841 (PE TimeDateStamp 1788384820, image
   104,894,464), the same exe in both installs. Independent of VR runtime,
   headset, eye size and DLSS: the code is Elite's camera, below all of them. It

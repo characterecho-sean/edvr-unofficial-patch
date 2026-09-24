@@ -33,6 +33,16 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/timing.h"
 #include "../../src/d3d11/glitch_frame.h"
+#include "../../src/d3d11/transition_flash_prevent.h"
+
+namespace edvr {
+// Linker stubs: this rig drives glitch_frame.cpp alone, the way it always
+// has, without the engine fix's own module (transition_flash_prevent.cpp,
+// which needs CodeHook and the game). The two taps glitch_frame.cpp calls
+// are no-ops here -- the header's declarations keep these signatures honest.
+void transitionFlashPreventNoteH3(uint32_t, const float*) {}
+void transitionFlashPreventNoteDetectorVerdict(uint32_t, uint8_t, bool) {}
+}  // namespace edvr
 
 using namespace edvr;
 
