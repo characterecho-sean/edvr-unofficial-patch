@@ -8,6 +8,9 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 
 ## Status
 
+- **Default OFF (2026-09-24, Sean):** the shipped and compiled default is now
+  `game` (the game's own detail, nothing observed or changed); `auto` and
+  `reduced` are opt-in. Everything below about `auto` still holds when chosen.
 - **State (2026-09-23):** `fix.settlement_detail` SHIPS as a fix, default
   `auto` (live in edvr.ini, F8 Performance page), k_max 6.0 (1..8), cockpit
   only (k = 1 on foot). Refinement 4b and the review's fixes (section 9 part

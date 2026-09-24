@@ -657,9 +657,9 @@ inline PartOutcome shadowPart(const PartInputs& in, float k) noexcept {
 }  // namespace lodgov
 
 // --- The runtime --------------------------------------------------------------
-// fix.settlement_detail: auto (the shipped default, also for an empty value:
-// the governed k; acts) | game (off: nothing observed or changed, the relays
-// keep their one load) | reduced (k_max in a settlement, 1 outside; acts).
+// fix.settlement_detail: game (the shipped default, also for an empty value:
+// off, nothing observed or changed, the relays keep their one load) | auto
+// (the governed k; acts) | reduced (k_max in a settlement, 1 outside; acts).
 // advanced.settlement_detail_max: k_max. advanced.settlement_detail_observe:
 // 1 = compute and log, never write. From the startup and reload sweeps.
 void lodGovernorConfigure(Config& cfg);
