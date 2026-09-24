@@ -9,10 +9,11 @@
   failures (section 23). Resolver and fallback preflight pass. Its compute
   preparation audit was blind: CS uses a pointer-only binding shadow; the
   separate capture proves both lighting shaders ran. An audit-local hash lookup
-  corrects this. Offline classification finds 33 additional projection pairs,
-  three unchanged passes and one missing-bytecode pair (section 23). Earlier
-  depth conversion, camera and binding evidence remains in sections 10-22. Live
-  jitter is zero.
+  corrects this. The 33 additional projection pairs now have exact recipes;
+  three unchanged passes are distinguished from the missing-bytecode pair. The
+  F10 audit also compares raw forward constants against the selected scene
+  camera (section 24). Earlier depth conversion, camera and binding evidence
+  remains in sections 10-22. Live jitter is zero.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -29,15 +30,14 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** qualify recipes/ownership for the 33 additional projection pairs;
-  the next capture also needs both lighting preparations and the missing
-  `5EAFFCD01B97D0C4 / DD371C57C9093BB8` bytecode. The corrected audit looks up
-  the CS pointer's registered hash and requests those two files once per arm.
-  Successful draw preparation does not establish lighting readiness or complete
-  camera/material/HDR coverage. Earlier handoff-refusal recovery also remains
-  open. Epic remains on `f1ea02fe`; use `--expect-build f1ea02fe` with
-  `tools/edvr_log.py`, even after subsequent code/documentation commits. No
-  headset is needed for flat; VR still needs regression testing.
+- **Next flight:** the clean expanded-recipe build on Epic, DLSS at 0.75x SS;
+  F10 once in the cockpit and turn near the star for 20-30 seconds. Check all
+  additional recipes, both lighting CS outcomes, reference classifications and
+  the two requested missing shader files together. Use the installed build SHA
+  with `tools/edvr_log.py --expect-build`; the latest reviewed flight is still
+  `f1ea02fe`. Numeric matches do not establish full target/material coverage or
+  authorize jitter. Earlier handoff-refusal recovery remains open. No headset
+  is needed for flat; VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -1223,3 +1223,76 @@ Validation: `build/flat-flight-audit-final.log` compiles the CS lookup and
 one-shot shader requests, and passes all 79 pooled plus three quiet jobs, both
 flat rigs, the 255-key config contract and installer payload checks. No new
 Epic installation or flight is claimed for these corrections.
+
+## 24. Expanded recipes and scene reference diagnostics, 2026-09-24
+
+The 33 projection-bearing VS/PS pairs identified in section 23 now have exact
+recipes. Their 30 distinct VS bytecodes confirm both first row and
+multiplication convention: 22 pairs use b1[270..273] scalar-weighted rows, five
+use b0[4..7] dp4 rows, three use b2[10..13] dp4 rows, and three use b2[6..9] or
+[7..10] scalar-weighted rows. Additional materials require the captured PS
+hash; this does not broaden engine-motion families or scene-source selection.
+Every new pair and adjacent PS rejection is tested. The missing-bytecode pair
+remains unknown, while the three inert pairs have a separate
+`bytecode-unchanged` outcome after checking actual shader bindings.
+
+The preparation audit adds a separate numeric comparison against the first
+named raw scene-camera snapshot of the current frame. A bounded owner-thread
+copy API reads only complete valid shadow data and leaves its destination
+untouched on invalidation, missing data or an out-of-range request. It exposes
+no retained pointer into the shadow bank. Tests cover invalidation, mapped
+transactions and completion as well as bounds. All new work is confined to the
+F10 interval; no private plan is bound and live jitter stays zero.
+
+Each prepared tuple reports one reference classification:
+
+- `canonical`: the same VS b1 resource and exact 96 camera bytes, with current
+  reference association and valid scene-camera encoding.
+- `basis-match`: a forward dp4 matrix has exactly the scene transpose's spatial
+  coefficients and depth/near row. Translation residual is measured separately
+  and never thresholded into an ownership claim.
+- `unmatched`: finite supported evidence does not meet the exact identity or
+  basis relation. An equal basis on a different b1 identity is not canonical.
+- `unavailable`: missing, stale, short, non-finite or degenerate evidence, or
+  no uncontested depth-associated scene reference yet in the frame.
+- `unsupported`: inverse/lighting or embedded local-matrix relationships not
+  implemented by this diagnostic. They are not silently counted as matches.
+
+The pure classifier uses captured matrices, with tests for changed pose,
+different resource identity, unequal near plane, a normalized-axis false
+positive and an embedded-HUD negative case. Forward translation residuals are
+reported in double precision without introducing an empirical acceptance
+tolerance. A matching basis with different translation deliberately remains
+only a basis match. Residual sample counts distinguish absent measurement from
+an observed zero. These counts are attached to the existing bounded per-tuple
+outcome table, with explicit overflow.
+
+The first full build caught a rank-check failure: cofactor cancellation left a
+tiny nonzero determinant for duplicated captured basis rows. The corrected
+validity check certifies nonzero rank only outside a derived double-precision
+rounding-error bound. This is arithmetic uncertainty, not a coefficient-match
+tolerance. Tests cover every duplicated/proportional row order, dependent
+nonproportional rows and tiny/large nonsingular bases with either determinant
+sign. Uncertain rank reports unavailable evidence.
+
+This checks the primary forward rows in a prepared constant buffer, not every
+consumer of that buffer. In particular, the deferred two-patch recipe retains
+the stored forward-matrix comparison although its VS consumes the inverse-ray
+rows. Actual shader and CB/range getters are verified before preparation; depth
+association still comes from the binding shadow. Therefore no numeric label
+proves actual DSV/HDR ownership, local-camera equivalence, complete inverse
+alignment or whole-frame closure. Do not enable raster jitter from these
+counters alone.
+
+The next combined capture also includes the corrected CS hash lookup and
+one-time requests for `5EAFFCD01B97D0C4` and `DD371C57C9093BB8`. It should
+distinguish remaining buffer/range failures, unmatched reference families,
+explicitly unsupported local/inverse relations and genuinely unknown shaders in
+one flight. EDHM/ReShade chaining and installer scope are unchanged.
+
+Final source validation: `build/flat-expanded-projection-retry.log` passes all
+79 pooled and three quiet jobs, both flat rigs, the 255-key config contract and
+both installer payload checks. This includes the rank regression fix. An
+earlier retry stopped in the existing sleep/order-based `run_jobs` self-test;
+it passed in isolation and in this final full run without changes to the
+scheduler.

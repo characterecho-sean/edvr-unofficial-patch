@@ -17,6 +17,12 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     check(!runtime.observeCreateBuffer(original.Get(),raw), "pre-init creation never mutates bank");
     check(runtime.initialize(base), "runtime owner initialized");
     check(runtime.observeCreateBuffer(original.Get(),raw), "full initial CB captured");
+    float copied[16]{};
+    check(runtime.copyConstants(original.Get(),0,sizeof(copied),copied) &&
+          std::memcmp(copied,raw,sizeof(copied))==0,"diagnostic copy uses full current raw shadow");
+    copied[0]=123;
+    check(!runtime.copyConstants(original.Get(),sizeof(raw)-16,sizeof(copied),copied) &&
+          copied[0]==123,"out-of-range diagnostic copy preserves destination");
     UINT first=0,count=4096;auto* bound=original.Get();
     ctx->VSSetConstantBuffers1(1,1,&bound,&first,&count);
     FlatProjectionRuntimeRequest request{};
@@ -41,6 +47,8 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
      ctx->VSGetConstantBuffers1(1,1,seen.GetAddressOf(),&f,&n);
      check(seen.Get()==original.Get() && f==0 && n==4096,"scope restores original binding");}
     runtime.invalidate(original.Get());
+    check(!runtime.copyConstants(original.Get(),0,sizeof(copied),copied) &&
+          copied[0]==123,"invalidated shadow cannot establish diagnostic camera identity");
     check(runtime.prepare(&request,1,phase,1)==nullptr &&
           runtime.status().last==FlatProjectionRuntimeRefusal::MissingFullWrite,
           "copy or unknown write invalidates private preparation");
@@ -95,9 +103,14 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         check(SUCCEEDED(hr),"mapped source CPU write");
         if(SUCCEEDED(hr)){
             runtime.observeMap(dynamic.Get(),D3D11_MAP_WRITE_DISCARD,mapped.pData);
+            check(!runtime.copyConstants(dynamic.Get(),0,sizeof(copied),copied),
+                  "mapped transaction cannot publish diagnostic bytes");
             std::memcpy(mapped.pData,raw,sizeof(raw));
             runtime.observeUnmap(dynamic.Get()); // before real Unmap
             ctx->Unmap(dynamic.Get(),0);
+            check(runtime.copyConstants(dynamic.Get(),0,sizeof(copied),copied) &&
+                  std::memcmp(copied,raw,sizeof(copied))==0,
+                  "completed full map publishes raw diagnostic bytes");
             FlatProjectionRuntimeRequest mappedReq=request;
             mappedReq.original=dynamic.Get();mappedReq.slot=2;
             auto* mappedBound=dynamic.Get();ctx->VSSetConstantBuffers1(2,1,&mappedBound,&first,&count);

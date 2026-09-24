@@ -47,6 +47,10 @@ public:
     void invalidate(ID3D11Resource* resource);
     void invalidateAll();
 
+    // Owner-thread diagnostic copy from a current complete shadow. Never
+    // exposes retained byte pointers; missing/stale/ranged data leaves out alone.
+    bool copyConstants(ID3D11Buffer*, uint32_t byteOffset, uint32_t byteCount, void* out);
+
     // Preflight is required before a nonzero raster phase. It may allocate D3D
     // private buffers and plans. Calls after a phase starts may only use an
     // identical preflighted recipe; prepare never allocates or queries descs.

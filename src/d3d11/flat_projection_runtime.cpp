@@ -294,6 +294,17 @@ void FlatProjectionRuntime::invalidateAll() {
     }
 }
 
+bool FlatProjectionRuntime::copyConstants(ID3D11Buffer* buffer, uint32_t offset,
+                                         uint32_t count, void* out) {
+    if (!owner() || !out || !count) return false;
+    Tracked* entry = find(buffer);
+    FlatProjectionShadowView view{};
+    if (!entry || !shadows_.lookup(buffer, entry->generation, view) ||
+        offset > view.width || count > view.width - offset) return false;
+    std::memcpy(out, view.bytes + offset, count);
+    return true;
+}
+
 bool FlatProjectionRuntime::sameRecipe(const CachedPlan& plan,
     const FlatProjectionRuntimeRequest* requests, uint32_t count,
     const FlatProjectionJitter& jitter, uint32_t phase) const {

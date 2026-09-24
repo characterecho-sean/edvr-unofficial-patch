@@ -14,6 +14,13 @@ struct FlatProjectionRecipes {
         request.patchCount = 1; request.patches[0] = {layout, row * 16, {}};
     }
 };
+// Verified inert pairs from the Epic f1ea02fe outcome census. This is an
+// explicit classification, not a projection patch or a jitter admission.
+inline bool flatProjectionDrawUnchanged(uint64_t vs, uint64_t ps) {
+    return (vs == 0xFC1193AFFC596F74ull && ps == 0x258B95AC99520C1Full) ||
+           (vs == 0xE8FDC0D92EEBA6D7ull && ps == 0x258B95AC99520C1Full) ||
+           (vs == 0x53211E8C072CD02Eull && ps == 0xB403F48CB35D9739ull);
+}
 inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps) {
     FlatProjectionRecipes result;
     using S = FlatProjectionStage; using L = FlatProjectionPatchLayout;
@@ -35,6 +42,48 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
         if (ps == 0x3AD8AABF289A1D8Eull) result.add(S::Vertex,2,L::ForwardColumns,7); break;
     case 0x9B34C331902DC1EDull:
         if (ps == 0x3B3433E4FEBBC37Bull) result.add(S::Vertex,2,L::ForwardColumns,8); break;
+    default: break;
+    }
+    // Additional exact companions observed in the Epic f1ea02fe flight.
+    // The VS bytecode confirms both the starting row and multiplication
+    // convention; no VS-only fallback admits an unobserved material.
+    if (result.count == 0) switch (vs) {
+    // b1[270..273]: scalar-weighted rows accumulated into clip position.
+    case 0xBFE51414CC3024B4ull: if (ps == 0xDB79AE788E049DFDull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xEB5234DB6ADB491Dull: if (ps == 0xB7D50283329322C3ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x7B0DC42D383F694Cull: if (ps == 0x0DF03E64DF9DBEF1ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xC53F124D7D591509ull: if (ps == 0x41DDAD26FE2034A7ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x87FCE198053AA4B9ull: if (ps == 0x50A516DA6DFE2A7Cull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xDE545DC8EE4FBB87ull: if (ps == 0x91F8937EDA723663ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x5DA53D8B0133341Eull:
+        if (ps == 0xE23C45251B7ECDFEull || ps == 0xBF0CE0DA543D491Full) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x4A0748B67A27F71Eull:
+        if (ps == 0x1E1E004BD5442A7Aull || ps == 0x4411D5EF62CDC66Aull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x39CC20727A27FD17ull: if (ps == 0xBFD75730622BB17Cull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x68DDDEF04D9894AFull: if (ps == 0x06332CA168B6DA63ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xF7A6E916F14A3B1Aull: if (ps == 0x06332CA168B6DA63ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xD95905C18B7FAD93ull: if (ps == 0x5BCB6B95BE7C0700ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xD1281DF454A153ADull: if (ps == 0x97DBC87FCAA429C4ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x025B4B9FF54622EDull: if (ps == 0xC5A5C7E8216CB9AFull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x6DB587D29F43A9A6ull: if (ps == 0xB2DE0A41A4C2B4F5ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x0B5981F2AEF7D80Aull: if (ps == 0xC5A5C7E8216CB9AFull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x8C091FFD08644E02ull: if (ps == 0x4E4FF61E8A08FC7Eull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x5559BD94B6852E83ull:
+        if (ps == 0xEA02FAC2BD6C643Cull || ps == 0xE95634B0F61D218Full) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x9F4BBCFCD3B68BC9ull: if (ps == 0x2BAE3742FEB916D9ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    // b0[4..7] and b2[10..13]: four dot products form clip xyzw.
+    case 0x5E417E9DF2E7F9E6ull: if (ps == 0xBD801F2FB02522EBull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x88DCF1164C640EC3ull: if (ps == 0x494506A63091DF8Cull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0xE904D334BC8B11EAull: if (ps == 0x095030F27D2C362Aull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0xB7790CBFC6554097ull: if (ps == 0x8DEF46452FA459F5ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x81216C77F90DEDD6ull: if (ps == 0xA2965EC2931A39C8ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x0357BBB2DEE43C1Full: if (ps == 0x81812EF97FB4A361ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0x8289669D93A18C1Dull: if (ps == 0xC6E6E419DA9F6FADull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0x963B52C73B4143ACull: if (ps == 0x50364C9D994141D5ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    // b2[6..9] and [7..10]: clip is a scalar-weighted row sum.
+    case 0xDF3503CD07F9B10Cull: if (ps == 0x8C08EB252B0F6095ull) result.add(S::Vertex,2,L::ForwardColumns,6); break;
+    case 0xB932058F26B76691ull: if (ps == 0x65861AC394D51526ull) result.add(S::Vertex,2,L::ForwardColumns,6); break;
+    case 0x9611A454527F7FEBull: if (ps == 0x1E1C49DC51C0E509ull) result.add(S::Vertex,2,L::ForwardColumns,7); break;
     default: break;
     }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);

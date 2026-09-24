@@ -8,6 +8,7 @@
 #include "flat_projection_math_tests.h"
 #include "flat_projection_bindings_tests.h"
 #include "flat_projection_recipe_tests.h"
+#include "flat_projection_ownership_tests.h"
 #include "flat_compute_tests.h"
 #include "flat_lighting_tests.h"
 
@@ -842,6 +843,7 @@ int main(int argc, char** argv) {
     failures += flatProjectionMathTests();
     failures += flatProjectionBindingsTests();
     failures += flatProjectionRecipeTests();
+    failures += flatProjectionOwnershipTests();
     failures += flatComputeTests();
     failures += flatLightingTests();
     flatRuntimePrefixTests();

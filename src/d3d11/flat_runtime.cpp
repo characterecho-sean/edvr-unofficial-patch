@@ -2,6 +2,7 @@
 #include "flat_runtime_model.h"
 #include "flat_mono_resolve.h"
 #include "flat_projection_recipes.h"
+#include "flat_projection_ownership.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
@@ -58,9 +59,15 @@ struct State {
     uint32_t projectionFrames = 0;
     uint64_t projectionDraws = 0, projectionDispatches = 0, projectionCandidates = 0;
     uint64_t projectionReady = 0, projectionMissing = 0, projectionUnowned = 0, projectionUnknown = 0;
+    uint64_t projectionUnchanged = 0;
     struct AuditDetail { uint64_t vs = 0, ps = 0, cs = 0; uint32_t reason = 0; };
     AuditDetail projectionDetails[32]{}; uint32_t projectionDetailsUsed = 0;
-    struct AuditOutcome { uint64_t vs = 0, ps = 0, cs = 0, observations = 0; uint32_t reason = 0; };
+    struct AuditOutcome {
+        uint64_t vs = 0, ps = 0, cs = 0, observations = 0; uint32_t reason = 0;
+        uint64_t canonical = 0, basisMatch = 0, unmatched = 0, unavailable = 0, unsupported = 0;
+        uint64_t residualSamples = 0;
+        double spatialDepthError = 0, translationResidual = 0;
+    };
     AuditOutcome projectionOutcomes[256]{}; uint32_t projectionOutcomesUsed = 0;
     uint64_t projectionOutcomeOverflow = 0;
     FlatMonoResolvePreflight plannedResolve{};
@@ -83,28 +90,29 @@ bool sameResolvePlan(const FlatMonoResolvePreflight& a,const FlatMonoResolvePref
         a.depthResourceMipLevels==b.depthResourceMipLevels &&
         a.depthArraySize==b.depthArraySize && a.depthSampleCount==b.depthSampleCount;
 }
-void projectionDetail(State& s, uint64_t vs, uint64_t ps, uint64_t cs, uint32_t reason, const char* text) {
-    bool foundOutcome=false;
+State::AuditOutcome* projectionDetail(State& s, uint64_t vs, uint64_t ps, uint64_t cs, uint32_t reason, const char* text) {
+    State::AuditOutcome* foundOutcome=nullptr;
     for (uint32_t i=0;i<s.projectionOutcomesUsed;++i) {
         auto& outcome=s.projectionOutcomes[i];
         if (outcome.vs==vs && outcome.ps==ps && outcome.cs==cs && outcome.reason==reason) {
-            ++outcome.observations; foundOutcome=true; break;
+            ++outcome.observations; foundOutcome=&outcome; break;
         }
     }
     if (!foundOutcome) {
         if (s.projectionOutcomesUsed<256) {
             auto& outcome=s.projectionOutcomes[s.projectionOutcomesUsed++];
-            outcome={vs,ps,cs,1,reason};
+            outcome={vs,ps,cs,1,reason};foundOutcome=&outcome;
         } else ++s.projectionOutcomeOverflow;
     }
     for (uint32_t i=0;i<s.projectionDetailsUsed;++i) {
         const auto& d=s.projectionDetails[i];
-        if (d.vs==vs && d.ps==ps && d.cs==cs && d.reason==reason) return;
+        if (d.vs==vs && d.ps==ps && d.cs==cs && d.reason==reason) return foundOutcome;
     }
-    if (s.projectionDetailsUsed==32) return;
+    if (s.projectionDetailsUsed==32) return foundOutcome;
     s.projectionDetails[s.projectionDetailsUsed++]={vs,ps,cs,reason};
     Log::get().note("flat projection candidate: VS=%016llX PS=%016llX CS=%016llX reason=%s code=%u; preparation-only, raster-phase=0",
         static_cast<unsigned long long>(vs),static_cast<unsigned long long>(ps),static_cast<unsigned long long>(cs),text,reason);
+    return foundOutcome;
 }
 void reportProjection(State& s, const char* event) {
     if (!s.projection) return;
@@ -117,17 +125,22 @@ void reportProjection(State& s, const char* event) {
         s.resolvePreflight.spatialFallbackReady?1u:0u,s.resolvePreflight.backendAvailable?1u:0u,
         s.resolvePreflight.backendFeatureCreationDeferred?1u:0u,s.resolvePreflight.reason,
         (unsigned long long)s.spatialFallbacks,(unsigned long long)s.spatialFallbackFailures);
-    Log::get().note("flat projection outcome totals: distinct=%u overflow-observations=%llu; result=prepared is reason-code 0, failures retain their code, 101=unknown-recipe",
-        s.projectionOutcomesUsed,(unsigned long long)s.projectionOutcomeOverflow);
+    Log::get().note("flat projection outcome totals: distinct=%u overflow-observations=%llu unchanged-draws=%llu; result=prepared is reason-code 0, failures retain their code, 101=unknown-recipe, 103=bytecode-unchanged",
+        s.projectionOutcomesUsed,(unsigned long long)s.projectionOutcomeOverflow,(unsigned long long)s.projectionUnchanged);
     static const char* outcomeNames[]={"prepared","wrong-thread","no-context1","capacity","unknown-buffer","missing-full-write","unsupported-range","binding-mismatch","invalid-recipe","private-failure","plan-failure"};
     for(uint32_t i=0;i<s.projectionOutcomesUsed;++i) {
         const auto& outcome=s.projectionOutcomes[i];
         const char* label=outcome.reason<11?outcomeNames[outcome.reason]:
             outcome.reason==100?"actual-shader-mismatch":outcome.reason==101?"unknown-scene-projection-recipe":
-            outcome.reason==102?"invalid-render-extent":"other-refusal";
+            outcome.reason==102?"invalid-render-extent":outcome.reason==103?"bytecode-unchanged":"other-refusal";
         Log::get().note("flat projection outcome: event=%s VS=%016llX PS=%016llX CS=%016llX result=%s code=%u count=%llu",
             event,(unsigned long long)outcome.vs,(unsigned long long)outcome.ps,(unsigned long long)outcome.cs,
             label,outcome.reason,(unsigned long long)outcome.observations);
+        if(outcome.reason==0)Log::get().note("flat projection reference: event=%s VS=%016llX PS=%016llX CS=%016llX canonical=%llu basis-match=%llu unmatched=%llu unavailable=%llu unsupported=%llu residual-samples=%llu max-spatial-depth-error=%.9g max-translation-residual=%.9g; primary-forward-recipe only, numeric relation is not frame authorization",
+            event,(unsigned long long)outcome.vs,(unsigned long long)outcome.ps,(unsigned long long)outcome.cs,
+            (unsigned long long)outcome.canonical,(unsigned long long)outcome.basisMatch,(unsigned long long)outcome.unmatched,
+            (unsigned long long)outcome.unavailable,(unsigned long long)outcome.unsupported,(unsigned long long)outcome.residualSamples,
+            outcome.spatialDepthError,outcome.translationResidual);
     }
     static const char* reasons[]={"none","wrong-thread","no-context1","capacity","unknown-buffer","missing-full-write","unsupported-range","binding-mismatch","invalid-recipe","private-failure","plan-failure"};
     for (uint32_t i=1;i<11;++i) if(status.refusals[i])
@@ -135,6 +148,41 @@ void reportProjection(State& s, const char* event) {
     Log::get().note("flat projection cold buffers: queued=%llu completed=%llu stale=%llu failed=%llu pending=%llu timeouts=%llu; asynchronous full snapshots, unchanged-write tokens required",
         (unsigned long long)status.coldQueued,(unsigned long long)status.coldCompleted,(unsigned long long)status.coldStale,
         (unsigned long long)status.coldFailed,(unsigned long long)status.coldPending,(unsigned long long)status.coldTimeouts);
+}
+void recordProjectionReference(State& s, State::AuditOutcome& outcome,
+                               const FlatProjectionRecipes& recipes, bool depthAssociated) {
+    // Compare only the primary forward recipe. Inverse/lighting reconstruction
+    // and embedded local cameras need their own contracts; never infer them.
+    const auto& request=recipes.requests[0];
+    const auto& patch=request.patches[0];
+    FlatProjectionOwnershipInput input{};
+    uint32_t bytes=0;
+    if(request.stage==FlatProjectionStage::Vertex && request.slot==1 &&
+       patch.byteOffset==270u*16u && patch.layout==FlatProjectionPatchLayout::ForwardColumns) {
+        input.layout=FlatProjectionOwnershipLayout::CanonicalVsB1;bytes=kFlatCameraBytes;
+    } else if(request.stage==FlatProjectionStage::Vertex && patch.layout==FlatProjectionPatchLayout::ForwardDp4) {
+        input.layout=FlatProjectionOwnershipLayout::ForwardDp4;bytes=64;
+    }
+    unsigned char raw[kFlatCameraBytes]{};
+    input.referenceBuffer=s.namedConstants;input.referenceCamera=s.namedCamera;
+    input.referenceBytes=sizeof(s.namedCamera);
+    input.currentReference=depthAssociated && s.namedDepth && s.namedConstants && !s.prefix.uncertain &&
+        !foreignWork.load(std::memory_order_acquire);
+    input.candidateBuffer=request.original;input.candidateRows=raw;input.candidateBytes=bytes;
+    input.currentCandidate=bytes && s.projection->copyConstants(request.original,patch.byteOffset,bytes,raw);
+    const auto result=flatClassifyProjectionOwnership(input);
+    switch(result.kind) {
+    case FlatProjectionOwnershipKind::CanonicalSceneCamera: ++outcome.canonical; break;
+    case FlatProjectionOwnershipKind::SceneBasisMatch: ++outcome.basisMatch; break;
+    case FlatProjectionOwnershipKind::Unmatched: ++outcome.unmatched; break;
+    case FlatProjectionOwnershipKind::Unavailable: ++outcome.unavailable; break;
+    case FlatProjectionOwnershipKind::Unsupported: ++outcome.unsupported; break;
+    }
+    if(result.residualsAvailable) {
+        ++outcome.residualSamples;
+        if(result.spatialDepthError>outcome.spatialDepthError)outcome.spatialDepthError=result.spatialDepthError;
+        if(result.translationResidual>outcome.translationResidual)outcome.translationResidual=result.translationResidual;
+    }
 }
 void qualifyProjection(State& s, FlatProjectionRecipes recipes, uint32_t width, uint32_t height,
                        uint64_t vs, uint64_t ps, uint64_t cs, bool owned) {
@@ -168,7 +216,10 @@ void qualifyProjection(State& s, FlatProjectionRecipes recipes, uint32_t width, 
     }
     const bool ready=s.projection->preflight(recipes.requests,recipes.count,proposed,1) &&
         s.projection->prepare(recipes.requests,recipes.count,proposed,1)!=nullptr;
-    if(ready) { ++s.projectionReady; projectionDetail(s,vs,ps,cs,0,"prepared"); }
+    if(ready) {
+        ++s.projectionReady;
+        if(auto* outcome=projectionDetail(s,vs,ps,cs,0,"prepared"))recordProjectionReference(s,*outcome,recipes,owned);
+    }
     else { ++s.projectionMissing; projectionDetail(s,vs,ps,cs,static_cast<uint32_t>(s.projection->status().last),"private-preparation-refused"); }
 }
 void reset() { auto& s = state(); s.havePrevious = false; FlatComputeInternalScope guard; flatMonoResolveInvalidateHistory(); }
@@ -306,6 +357,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.projection->enableColdReadback(true);
             s.projectionFrames=900;s.projectionDraws=s.projectionDispatches=s.projectionCandidates=0;
             s.projectionReady=s.projectionMissing=s.projectionUnowned=s.projectionUnknown=0;
+            s.projectionUnchanged=0;
             s.projectionDetailsUsed=0;
             s.projectionOutcomesUsed=0;s.projectionOutcomeOverflow=0;
             s.resolvePreflightRetryMs=0;
@@ -478,6 +530,14 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             const auto recipes=flatProjectionDrawRecipes(k.vs,k.ps);
             if(recipes.count)qualifyProjection(s,recipes,k.width,k.height,k.vs,k.ps,0,
                 s.namedDepth && k.depth==s.namedDepth);
+            else if(flatProjectionDrawUnchanged(k.vs,k.ps)) {
+                FlatComputeInternalScope guard;
+                Ptr<ID3D11VertexShader> actualVs;Ptr<ID3D11PixelShader> actualPs;
+                ctx->VSGetShader(&actualVs,nullptr,nullptr);ctx->PSGetShader(&actualPs,nullptr,nullptr);
+                if(lookupShaderHash(actualVs.Get())==k.vs && lookupShaderHash(actualPs.Get())==k.ps) {
+                    ++s.projectionUnchanged;projectionDetail(s,k.vs,k.ps,0,103,"bytecode-unchanged");
+                } else {++s.projectionUnknown;projectionDetail(s,k.vs,k.ps,0,100,"actual-shader-mismatch");}
+            }
             else if(k.depth) {++s.projectionUnknown;projectionDetail(s,k.vs,k.ps,0,101,"unknown-scene-projection-recipe");}
         }
     }
