@@ -113,10 +113,20 @@ minutes after a flight finally reproduced the effect being chased.
 
 ## Build and verify before commit
 
-- **Every C++ edit compiles before you report it as done.** Run
+- **Every C++ edit compiles before you report it as done.** Run the full
   `build.bat` by absolute path and read the tail of its output.
-- `build.bat` runs the Python self-tests and the config contract check.
-  Green means green; do not report success off a build you did not read.
+- The normal `build.bat` path is the validation build: it runs the Python
+  self-tests, compiles the production DLLs, runs the test rigs, builds and
+  checks the self-contained installer, and writes
+  `build\full_build_receipt.json` only after all gates pass. Green means
+  green; do not report success off a build you did not read.
+- After that full build, commit the same source tree. For the install-only
+  rebuild that gives the DLLs the clean commit's version, use
+  `build.bat --dll-only` by absolute path. It requires a clean working tree
+  and a matching full-build receipt, rebuilds and validates the production
+  DLLs, and skips the test rigs and self-contained installer. It is a
+  promotion step, never a substitute for validating changed source; if its
+  receipt check fails, run the full build again.
 - After editing, re-read the changed region for the things that have bitten
   here: declaration order, a duplicated census or log string, a shader
   entry-point name collision that would silently disable a new instrument.
@@ -183,5 +193,5 @@ minutes after a flight finally reproduced the effect being chased.
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
-| `build.bat` | builds everything, runs every gate |
+| `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
 | `package.bat <version>` | builds, tests, then packages a release |
