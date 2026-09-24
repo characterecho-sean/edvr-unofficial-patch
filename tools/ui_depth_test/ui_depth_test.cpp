@@ -58,6 +58,36 @@ void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, UINT n,
                                ID3D11RenderTargetView* const* rt, ID3D11DepthStencilView* ds) {
     ctx->OMSetRenderTargets(n, rt, ds);
 }
+// Pass-through: this rig drives the coverage passes directly, so the hook
+// these bypass in production (the draw census, eye-draw gate, foveation,
+// probe) never needs to see them here either.
+void vScreenDrawRaw(ID3D11DeviceContext* ctx, UINT vertexCount, UINT startVertex) {
+    ctx->Draw(vertexCount, startVertex);
+}
+void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs,
+                           ID3D11ClassInstance* const* classInstances, UINT numClassInstances) {
+    ctx->VSSetShader(vs, classInstances, numClassInstances);
+}
+void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps,
+                           ID3D11ClassInstance* const* classInstances, UINT numClassInstances) {
+    ctx->PSSetShader(ps, classInstances, numClassInstances);
+}
+void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state,
+                               const float blendFactor[4], UINT sampleMask) {
+    ctx->OMSetBlendState(state, blendFactor, sampleMask);
+}
+void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
+                                 UINT dstSubresource, const D3D11_BOX* dstBox,
+                                 const void* srcData, UINT srcRowPitch, UINT srcDepthPitch) {
+    ctx->UpdateSubresource(dstResource, dstSubresource, dstBox, srcData, srcRowPitch, srcDepthPitch);
+}
+void vScreenRSSetViewportsRaw(ID3D11DeviceContext* ctx, UINT n, const D3D11_VIEWPORT* vps) {
+    ctx->RSSetViewports(n, vps);
+}
+void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv,
+                                     const float colour[4]) {
+    ctx->ClearRenderTargetView(rtv, colour);
+}
 }
 
 using namespace edvr;

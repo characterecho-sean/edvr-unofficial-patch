@@ -1067,6 +1067,24 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
 )
 exit /b 0
 
+:rig_hologram_depth_test
+echo [edvr] === generic hologram/icon depth regression ===
+REM Same shape as :rig_ui_depth: WARP, the production coverage pass
+REM included directly, away from build\d3d11.dll.
+if not exist "%OBJ%\holodepthtest" mkdir "%OBJ%\holodepthtest"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\holodepthtest\\" /Fe"%OBJ%\holodepthtest\hologram_depth_test.exe" ^
+    "tools\hologram_depth_test\hologram_depth_test.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: hologram_depth_test build failed & exit /b 1 )
+"%OBJ%\holodepthtest\hologram_depth_test.exe" || (
+    echo [edvr] ERROR: generic hologram/icon depth regression
+    exit /b 1
+)
+exit /b 0
+
 :rig_native_motion_rigs
 echo [edvr] === native motion, fusion and night-vision rigs ===
 
