@@ -32,8 +32,19 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
-- **Eye-base FIX + writer watch BUILT and INSTALLED, NOT FLOWN
-  (2026-09-24).**
+- **HELD-BASE fix BUILT and INSTALLED, NOT FLOWN (2026-09-24,
+  b0d3632a, on main via bfd16cce).**
+  - The substitute is the mailbox's own last refilled value: at most 2
+    frames old, same ship object, finite, not reset, 60-frame cap. It is
+    written before the engine reads.
+  - The writer watch arms on 60 stable frames plus 300 consecutive refilled
+    calls, whatever the trap says.
+  - Every un-refilled call dumps to `edvr_logs\flash\eyebase_*.txt`, with the
+    per-frame eye origin and the writer hits.
+  - The Steam copy runs b0d3632a with the trap OFF and `alternate` (two
+    marked ini lines). Read with `--expect-build b0d3632a`.
+- **The previous build (04db82fa, flown 062910) used the refuted
+  `+0x130` stand-in.**
   - `advanced.transition_flash_eye_base = off|watch|on|alternate`:
     a375b0dc and 04db82fa, on main via 20fd26e9.
   - A CodeHook on the camera driver `0x28431D0` detects an un-refilled
