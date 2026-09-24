@@ -106,22 +106,28 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 // The generic, contribution-based hologram/icon depth pass: a family-
 // agnostic alternative to uiDepthOnEyeDraw's per-family coverage shaders,
 // for the holo panel/ship hologram and the radar's icon families (none of
-// which has one). Classifies beside uiDepthOnEyeDraw at the same call
-// site; true means the two reissues below apply after the game's own draw.
+// which has one), plus a separate WORLD MARKER list (the target reticle's
+// triangles) for draws that track something possibly far outside the
+// cockpit and so are never radius-clipped. Classifies beside
+// uiDepthOnEyeDraw at the same call site; true means the two reissues
+// below apply after the game's own draw.
 bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx);
 // Pass (a): the game's own draw again, RTV0 rebound to a per-eye scratch
 // target whose blend mirrors the game's own RT0 blend (so RGB accumulates
-// what the game's blend equation actually adds), VS/PS/inputs unchanged,
-// depth-tested (never written) against a per-eye/frame cockpit-radius
-// scratch -- never the game's own depth, so a draw with depth off or no
-// depth view bound is still covered. Same Begin/draw/End contract as
+// what the game's blend equation actually adds), VS/PS/inputs unchanged.
+// A cockpit family depth-tests (never writes) against a per-eye/frame
+// cockpit-radius scratch -- never the game's own depth, so a draw with
+// depth off or no depth view bound is still covered. A world marker
+// depth-tests against nothing (DepthEnable FALSE): every fragment
+// contributes, regardless of range. Same Begin/draw/End contract as
 // uiDepthReissueBegin below.
 bool uiDepthHologramContributionBegin(ID3D11DeviceContext* ctx);
 void uiDepthHologramContributionEnd(ID3D11DeviceContext* ctx);
 // Pass (b): the same draw once more, null pixel shader, into a scratch
-// depth target of its own (cleared to the cockpit radius, GREATER, write
-// on) -- the element's nearest raster depth over its whole geometry that
-// is nearer than the radius, independent of the coverage floor.
+// depth target of its own (cleared to 0, reversed-Z far, GREATER, write
+// on) -- the element's nearest raster depth over its whole geometry,
+// independent of the coverage floor. Shared by both lists: a cockpit
+// family's radius gating happens in the contribution pass above, not here.
 bool uiDepthHologramElementDepthBegin(ID3D11DeviceContext* ctx);
 void uiDepthHologramElementDepthEnd(ID3D11DeviceContext* ctx);
 // Once per eye per frame, before the temporal pass reads the private

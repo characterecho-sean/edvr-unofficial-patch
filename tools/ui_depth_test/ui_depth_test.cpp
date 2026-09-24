@@ -23,6 +23,10 @@ ID3D11Texture2D* testScene = nullptr;
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log() = default;
 void Log::note(const char*, ...) {}
+// ui_depth.cpp's UI content census reads this (objectProbeLedgerActive,
+// object_probe.h) to gate its per-draw logging; driven directly below,
+// the way g_holoDepthOn and the rest of detail:: already are on this page.
+namespace detail { bool g_objectProbeOn = false; bool g_objectProbeLedgerOn = false; }
 int64_t qpcNow() { LARGE_INTEGER t;QueryPerformanceCounter(&t);return t.QuadPart; }
 int64_t qpcFrequency() { LARGE_INTEGER t;QueryPerformanceFrequency(&t);return t.QuadPart; }
 int guardFilter(unsigned long, const char*) { return EXCEPTION_EXECUTE_HANDLER; }
@@ -687,14 +691,18 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             bytes[4*55]=128;bytes[4*55+3]=124;
             ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
             for(float a:valuesOf(tracker.prepare(ctx.Get(),v.Get(),100)))check(a==0,"new source starts with no fabricated edits");
+            check(tracker.lastDecision==UiContent::Decision::kReset&&tracker.lastAge==0,"census: a brand new entry is a reset at age 0");
             for(float a:valuesOf(tracker.prepare(ctx.Get(),v.Get(),101)))check(a==0,"identical source stays stable across frames and SRV decoding");
+            check(tracker.lastDecision==UiContent::Decision::kUpdated&&tracker.lastAge==1,"census: a consecutive frame is an update at age 1");
             // An alpha-only erasure and a newly visible dim stroke are real
             // edits; invisible RGB changes must not affect reconstruction.
             bytes[4*55+3]=0;bytes[4*58]=8;bytes[4*58+3]=1;bytes[4*59]=255;
             ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
             auto changed=valuesOf(tracker.prepare(ctx.Get(),v.Get(),102));
+            check(tracker.lastDecision==UiContent::Decision::kUpdated&&tracker.lastAge==1,"census: still updating one frame later");
             for(unsigned i=0;i<changed.size();++i)check(changed[i]==(i==55||i==58?1.f:0.f),"source edit footprint includes erased/dim strokes only");
             auto* same=tracker.prepare(ctx.Get(),v.Get(),102);
+            check(tracker.lastDecision==UiContent::Decision::kHit&&tracker.lastAge==0,"census: a repeated same-frame call is a hit");
             check(tracker.totals.updates==2 && tracker.totals.hits==1,"both eyes and repeated meshes compare once per frame");
             check(valuesOf(same)==changed,"second eye observes the same edit age");
             for(unsigned f=103;f<=134;++f)changed=valuesOf(tracker.prepare(ctx.Get(),v.Get(),f));
@@ -705,6 +713,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             check(outer.begin(dev.Get(),ctx.Get()),"outer interval surrounds production UI sample");
             auto* resetFrame=tracker.prepare(ctx.Get(),v.Get(),137,true);
             check(outer.end(ctx.Get()),"outer interval ends after UI sample");
+            check(tracker.lastDecision==UiContent::Decision::kReset&&tracker.lastAge==2,"census: a frame gap on an existing entry is a reset at its real age");
             for(float a:valuesOf(resetFrame))check(a==0,"skipped surface frame resets history");
             double outerMs=0;GpuTimerPoll outerStatus=GpuTimerPoll::Pending;
             const auto deadline=GetTickCount64()+1500;
@@ -738,14 +747,55 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         TestUiContent bounded;std::vector<ComPtr<ID3D11Texture2D>> textures;std::vector<ComPtr<ID3D11ShaderResourceView>> views;
         for(unsigned i=0;i<25;++i){textures.push_back(make(4,4));views.push_back(view(textures.back().Get()));
             check((bounded.prepare(ctx.Get(),views.back().Get(),1)!=nullptr)==(i<24),"cache count bounded without evicting active-frame surfaces");}
+        check(bounded.inUse()==24,"census: inUse counts exactly the filled table");
+        check(bounded.lastDecision==UiContent::Decision::kDeclinedNoFreeEntry&&bounded.lastEvicted==0,
+              "census: a full table with nothing evictable this frame declines with no eviction");
         check(bounded.prepare(ctx.Get(),views.back().Get(),2)!=nullptr && bounded.totals.evicted==1,"older cache entry can be evicted safely");
+        check(bounded.lastDecision==UiContent::Decision::kReset&&bounded.lastAge==0&&bounded.lastEvicted==1,
+              "census: the new entry that forced the eviction is a reset, one evicted this call");
         auto atlas=make(4,4,DXGI_FORMAT_R8G8B8A8_UNORM,D3D11_BIND_SHADER_RESOURCE);auto atlasV=view(atlas.Get());
         check(!bounded.prepare(ctx.Get(),atlasV.Get(),3),"static atlas is not copied each frame");
+        check(bounded.lastDecision==UiContent::Decision::kDeclinedNoRenderTarget,"census: a SHADER_RESOURCE-only surface declines as no-render-target");
         TestUiContent budget;auto big=make(4096,1536),big2=make(4096,1536);auto bigV=view(big.Get()),bigV2=view(big2.Get());
         check(budget.prepare(ctx.Get(),bigV.Get(),1)!=nullptr,"bounded large UI surface supported");
         check(budget.prepare(ctx.Get(),bigV2.Get(),1)==nullptr,"history byte cap enforced independently of entry count");
+        check(budget.lastDecision==UiContent::Decision::kDeclinedNoFreeEntry,
+              "census: over the byte cap while the only entry is still fresh this frame declines as no-free-entry, not budget");
         check(budget.allocated<=UiContent::kBudget,"allocated UI history fits budget");
         check(budget.prepare(ctx.Get(),bigV2.Get(),2)!=nullptr && budget.totals.evicted==1,"byte pressure evicts only an older frame");
+        check(budget.lastDecision==UiContent::Decision::kReset&&budget.lastEvicted==1,
+              "census: the surface that forced byte-pressure eviction is a reset, one evicted this call");
+        // The reason codes nothing above exercises: a null surface, an
+        // unsupported format, a non-Texture2D resource, an array view, and
+        // a single surface bigger than the whole budget on its own (as
+        // opposed to the no-free-entry cases above, where each surface fits
+        // alone but the table or the running total does not).
+        {
+            TestUiContent reasons;
+            check(reasons.prepare(ctx.Get(),nullptr,1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedNoSurface,
+                  "census: a null surface declines as no-surface");
+            auto badFormat=make(4,4,DXGI_FORMAT_R32_FLOAT);auto badFormatV=view(badFormat.Get());
+            check(reasons.prepare(ctx.Get(),badFormatV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedFormat,
+                  "census: an unsupported format declines as format");
+            D3D11_BUFFER_DESC bufDesc{};bufDesc.ByteWidth=256;bufDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            ComPtr<ID3D11Buffer> buf;hr(dev->CreateBuffer(&bufDesc,nullptr,&buf));
+            D3D11_SHADER_RESOURCE_VIEW_DESC bufSd{};bufSd.Format=DXGI_FORMAT_R32_FLOAT;
+            bufSd.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;bufSd.Buffer.NumElements=64;
+            ComPtr<ID3D11ShaderResourceView> bufV;hr(dev->CreateShaderResourceView(buf.Get(),&bufSd,&bufV));
+            check(reasons.prepare(ctx.Get(),bufV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedNotTexture2D,
+                  "census: a non-Texture2D resource declines as not-Texture2D");
+            D3D11_TEXTURE2D_DESC arrDesc{};arrDesc.Width=arrDesc.Height=4;arrDesc.MipLevels=1;arrDesc.ArraySize=2;arrDesc.SampleDesc.Count=1;
+            arrDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;arrDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
+            ComPtr<ID3D11Texture2D> arrTex;hr(dev->CreateTexture2D(&arrDesc,nullptr,&arrTex));
+            D3D11_SHADER_RESOURCE_VIEW_DESC arrSd{};arrSd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+            arrSd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;arrSd.Texture2DArray.MipLevels=1;arrSd.Texture2DArray.ArraySize=2;
+            ComPtr<ID3D11ShaderResourceView> arrV;hr(dev->CreateShaderResourceView(arrTex.Get(),&arrSd,&arrV));
+            check(reasons.prepare(ctx.Get(),arrV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedViewShape,
+                  "census: an array view declines as view-shape");
+            auto huge=make(3360,3360);auto hugeV=view(huge.Get());
+            check(reasons.prepare(ctx.Get(),hugeV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedBudget,
+                  "census: a single surface over the whole budget declines as budget");
+        }
         // End-to-end source -> existing coverage draw -> borrowed eye SRV.
         // t14 must be restored and erased glyphs must keep their edit mark
         // even though the current source alpha is zero.
@@ -767,6 +817,25 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             pixels.assign(4*4*4,0);ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);
         }
         ctx->ClearState();uiDepthFrameBoundary(ctx.Get());check(!uiDepthContentChanges(8,8,0),"projected edit mask clears after both eyes submit");g_trained=false;
+        // The census gate itself: g_uiContentCensusOn should latch true for
+        // exactly the frame after objectProbeLedgerActive() is first seen
+        // active, print its summary and drop again at the next boundary,
+        // and never re-arm while the same (possibly many-frame) run stays
+        // active -- the rising edge ui_depth.cpp's own comment describes.
+        detail::g_uiDepthOn=true;detail::g_uiDepthStoodDown=false;
+        detail::g_objectProbeLedgerOn=false;uiDepthFrameBoundary(ctx.Get());
+        check(!g_uiContentCensusOn,"census: idle while no eye run is armed");
+        detail::g_objectProbeLedgerOn=true;uiDepthFrameBoundary(ctx.Get());
+        check(g_uiContentCensusOn,"census: the frame after the ledger arms is armed for logging");
+        uiDepthFrameBoundary(ctx.Get());
+        check(!g_uiContentCensusOn,"census: a second frame of the same still-armed run is not re-armed");
+        uiDepthFrameBoundary(ctx.Get());
+        check(!g_uiContentCensusOn,"census: stays idle for the rest of a long run");
+        detail::g_objectProbeLedgerOn=false;uiDepthFrameBoundary(ctx.Get());
+        detail::g_objectProbeLedgerOn=true;uiDepthFrameBoundary(ctx.Get());
+        check(g_uiContentCensusOn,"census: a later, separate run re-arms exactly the same way");
+        detail::g_objectProbeLedgerOn=false;uiDepthFrameBoundary(ctx.Get());
+        check(!g_uiContentCensusOn&&!detail::g_objectProbeLedgerOn,"census: settles idle again with the run closed");
         // Scrolling sprite ticks must not retain depth or edit footprints
         // where their source has become transparent. Dim current strokes
         // still carry coverage, and visible changed pixels still reject

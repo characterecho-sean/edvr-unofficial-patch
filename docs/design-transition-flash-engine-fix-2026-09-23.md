@@ -6,6 +6,21 @@ static chain: see "Flight 184826".*
 
 ## Status
 
+- **The view write was corrupting: column-major groups, and the finder was
+  hitting prev-view (flight 160557).** The buffer's view groups store their
+  translation in the w lanes (flat [3],[7],[11]); viewOriginMatch read
+  [12..14] (zeros) and degenerated to |origin| on head-only frames, so the
+  located "view" was the PREVIOUS frame's view (its implied eye decodes to
+  the old base within 5 cm) and the row-major postmultiply wrote
+  non-orthonormal garbage (norms 55/206) -- the persisting flash. Origin
+  and the pilot block were exact throughout. Fix: w-lane translation read
+  (prev-view rejected), the view premultiplied by B^-1 (the eye corrects
+  as a row-vector POINT transform, patchEyeOrigin(B, P) = P.B, verified
+  flight after flight -- so the eye pose POSTmultiplies, E' = E x B, and
+  its inverse view PREmultiplies), a write-time orthonormality guard
+  (failure skips the view write, never corrupts), and origin+pilot patched
+  on every gated fill with the view group added only when cleanly located.
+
 - **The pilot block was the residual flash (flight 151942).** The patched
   exit fixed the world (origin+view exact to the next frame) but left rows
   276-279 (the pilot's position+basis) head-only: basis near-identity vs
@@ -227,6 +242,24 @@ showing one act per transition and none anywhere else.
   nothing waits. The eye copy stays with the runtime.
 - The branches `transition-flash-run-radius` (PR #16) and `flash-cap-one`
   (PR #18) were never merged, and this supersedes both.
+
+## Flight 160557 (2026-09-24 16:05, Steam copy, build c321631e)
+
+alternate, trap off; build matched. Supercruise entry/exit; "a similar
+flash" persists.
+- Skip 11028 = watched control (flashed by design). Skip 11731 (patched):
+  82 fills, live base, pilot block premultiplied; the origin exact to the
+  millimetre -- but the flash persisted.
+- **The view write was corrupting, not correcting**: the located group
+  stores its translation in the w lanes; the row-major postmultiply fed
+  them B^-1's translation row (~15.9) and wrote rows of norm 55/206. The
+  located group was the PREV-VIEW (implied eye (+6.119,-3.432,+11.511) =
+  the old base to 5 cm); viewOriginMatch read [12..14] (zeros in this
+  layout) and degenerated to |origin|, so every "located view" on every
+  flight was a head-only-frame spurious match (ordinary frames all read
+  view=-1).
+- Ruled out (160557): the view group as a row-major affine, and the
+  locator's origin test as a current-vs-prev discriminator in this layout.
 
 ## Flight 151942 (2026-09-24 15:19, Steam copy, build e5daea6b)
 

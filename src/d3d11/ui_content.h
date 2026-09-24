@@ -55,12 +55,29 @@ public:
     uint32_t allocated=0;
     GpuIntervals<32> gpu;
 
+    // Set by every prepare() call, for the eye run's per-draw census
+    // (ui_depth.cpp's surfaceComposite branch): why this call returned
+    // what it did, this entry's age in frames since its last touch (0 for
+    // a hit or a brand new entry), and how many entries THIS call evicted
+    // -- totals.evicted is the running session sum, this is just this
+    // call's share of it.
+    enum class Decision : unsigned char {
+        kDeclinedNoSurface, kDeclinedNotTexture2D, kDeclinedFormat, kDeclinedNoRenderTarget,
+        kDeclinedViewShape, kDeclinedBudget, kDeclinedNoFreeEntry, kDeclinedCreateFailed,
+        kDeclinedShaderFailed, kHit, kReset, kUpdated,
+    };
+    Decision lastDecision=Decision::kDeclinedNoSurface;
+    uint32_t lastAge=0, lastEvicted=0;
+    uint32_t inUse() const {uint32_t n=0;for(const auto& e:entries)if(e.source)++n;return n;}
+
     ID3D11ShaderResourceView* prepare(ID3D11DeviceContext* ctx,
                                      ID3D11ShaderResourceView* surface,uint32_t frame,bool sample=false) {
-        if(!ctx || !surface || failed) {++totals.declined;return nullptr;}
+        lastAge=0;lastEvicted=0;
+        if(!ctx || !surface) {lastDecision=Decision::kDeclinedNoSurface;++totals.declined;return nullptr;}
+        if(failed) {lastDecision=Decision::kDeclinedShaderFailed;++totals.declined;return nullptr;}
         Ptr<ID3D11Resource> resource;surface->GetResource(&resource);
         Ptr<ID3D11Texture2D> source;
-        if(FAILED(resource.As(&source))) {++totals.declined;return nullptr;}
+        if(FAILED(resource.As(&source))) {lastDecision=Decision::kDeclinedNotTexture2D;++totals.declined;return nullptr;}
         D3D11_TEXTURE2D_DESC td{};source->GetDesc(&td);
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{};surface->GetDesc(&sd);
         unsigned bpp=0;
@@ -72,42 +89,45 @@ public:
         }
         const uint64_t pixels=uint64_t(td.Width)*td.Height,bytes=pixels*(bpp+2);
         // Only GPU-rendered UI surfaces, never a static sprite/glyph atlas.
-        if(!bpp || !(td.BindFlags&D3D11_BIND_RENDER_TARGET) || td.ArraySize!=1 ||
-           td.SampleDesc.Count!=1 || sd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D ||
-           sd.Texture2D.MostDetailedMip!=0 || td.MipLevels!=1 || bytes>kBudget) {
-            ++totals.declined;return nullptr;
-        }
+        if(!bpp) {lastDecision=Decision::kDeclinedFormat;++totals.declined;return nullptr;}
+        if(!(td.BindFlags&D3D11_BIND_RENDER_TARGET)) {lastDecision=Decision::kDeclinedNoRenderTarget;++totals.declined;return nullptr;}
+        if(td.ArraySize!=1 || td.SampleDesc.Count!=1 || sd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D ||
+           sd.Texture2D.MostDetailedMip!=0 || td.MipLevels!=1) {lastDecision=Decision::kDeclinedViewShape;++totals.declined;return nullptr;}
+        if(bytes>kBudget) {lastDecision=Decision::kDeclinedBudget;++totals.declined;return nullptr;}
         Entry* found=nullptr;
         for(auto& e:entries) if(e.source.Get()==source.Get() && e.format==sd.Format) {found=&e;break;}
-        if(found && found->ready && found->frame==frame) {++totals.hits;return found->view[found->read].Get();}
+        if(found && found->ready && found->frame==frame) {lastDecision=Decision::kHit;++totals.hits;return found->view[found->read].Get();}
+        const bool isNew=!found;
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
         if(!shader) shader.Attach(shaderSwapCompileCs(ctx,kUiContentCs,sizeof(kUiContentCs)-1,"main","UI source edits",nullptr,"ui content"));
-        if(!shader) {failed=true;++totals.declined;return nullptr;}
+        if(!shader) {failed=true;lastDecision=Decision::kDeclinedShaderFailed;++totals.declined;return nullptr;}
         if(!found){
             while(!found){
                 if(allocated+bytes<=kBudget) for(auto& e:entries) if(!e.source) {found=&e;break;}
                 if(found)break;
                 Entry* oldest=nullptr;
                 for(auto& e:entries) if(e.source && e.frame!=frame && (!oldest || frame-e.frame>frame-oldest->frame))oldest=&e;
-                if(!oldest){++totals.declined;return nullptr;}
-                allocated-=oldest->bytes;*oldest={};++totals.evicted;
+                if(!oldest){lastDecision=Decision::kDeclinedNoFreeEntry;++totals.declined;return nullptr;}
+                allocated-=oldest->bytes;*oldest={};++totals.evicted;++lastEvicted;
             }
             Entry e;e.source=source;e.format=sd.Format;e.bytes=uint32_t(bytes);
             td.Usage=D3D11_USAGE_DEFAULT;td.CPUAccessFlags=td.MiscFlags=0;
             td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
             sd.Texture2D.MipLevels=1;
             if(FAILED(dev->CreateTexture2D(&td,nullptr,&e.before)) ||
-               FAILED(dev->CreateShaderResourceView(e.before.Get(),&sd,&e.beforeView))) {++totals.declined;return nullptr;}
+               FAILED(dev->CreateShaderResourceView(e.before.Get(),&sd,&e.beforeView))) {lastDecision=Decision::kDeclinedCreateFailed;++totals.declined;return nullptr;}
             td.Format=DXGI_FORMAT_R8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
             for(unsigned i=0;i<2;++i) if(FAILED(dev->CreateTexture2D(&td,nullptr,&e.age[i])) ||
                 FAILED(dev->CreateShaderResourceView(e.age[i].Get(),nullptr,&e.view[i])) ||
-                FAILED(dev->CreateUnorderedAccessView(e.age[i].Get(),nullptr,&e.out[i]))) {++totals.declined;return nullptr;}
+                FAILED(dev->CreateUnorderedAccessView(e.age[i].Get(),nullptr,&e.out[i]))) {lastDecision=Decision::kDeclinedCreateFailed;++totals.declined;return nullptr;}
             *found=std::move(e);allocated+=found->bytes;
         }
         auto& e=*found;
+        lastAge=isNew?0u:frame-e.frame;
         if(sample)gpu.begin(ctx);
         if(!e.ready || frame-e.frame!=1){
             const float zero[4]{};ctx->ClearUnorderedAccessViewFloat(e.out[e.read].Get(),zero);++totals.resets;
+            lastDecision=Decision::kReset;
         }else{
             Ptr<ID3D11ComputeShader> saved;ID3D11ClassInstance* classes[256]{};UINT nc=256;
             ID3D11ShaderResourceView* savedSrv[3]{};Ptr<ID3D11UnorderedAccessView> savedUav;
@@ -120,6 +140,7 @@ public:
             ctx->CSSetShaderResources(0,3,savedSrv);ctx->CSSetUnorderedAccessViews(0,1,savedUav.GetAddressOf(),nullptr);ctx->CSSetShader(saved.Get(),classes,nc);
             for(UINT i=0;i<nc;++i)classes[i]->Release();for(auto* p:savedSrv)if(p)p->Release();
             e.read=1-e.read;++totals.updates;
+            lastDecision=Decision::kUpdated;
         }
         // Preserve the version sampled by this frame's first composite,
         // before the game repaints it. Shared by both eyes and mesh draws.
@@ -134,6 +155,7 @@ public:
         gpu.reset();
         for(auto& e:entries) e={};
         shader.Reset(); failed=false; totals={}; allocated=0;
+        lastDecision=Decision::kDeclinedNoSurface; lastAge=0; lastEvicted=0;
     }
 };
 } // namespace edvr
