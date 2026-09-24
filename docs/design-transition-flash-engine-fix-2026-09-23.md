@@ -32,6 +32,18 @@ static chain: see "Flight 184826".*
     and a ship-centred frame, in both directions. See "Flight 195435".
   - Static round 4 is working back from that stack. The Steam ini is
     restored (identical to before the flight).
+- **LOW-WAKE MEASUREMENT BUILT and INSTALLED, NOT FLOWN (2026-09-24,
+  d28f9ada, on main).**
+  - The eye-base dumps now carry the detector's per-frame object geometry
+    (matched, cameraStep, poolStep, relativeMedian/P90, predictionP90, the
+    decision) beside the camera mailbox state.
+  - Dumps fire on mode-switch EDGES: the entry (first un-refilled), the exit
+    (first refilled after 30 or more un-refilled), and scene-judged resets.
+  - The Steam copy runs d28f9ada with the trap ON and
+    `transition_flash_eye_base = watch` (one marked ini line; nothing acts).
+  - The aim is the frame offset between the camera's and the objects' mode
+    switches at supercruise entry and exit.
+  - Read with `--expect-build d28f9ada`.
 - **FLOWN 091726: high wakes fixed, low wakes not.**
   - The skip is the controller not running for the camera that frame.
   - A low wake is a supercruise MODE switch (the controller idle for the
