@@ -151,7 +151,6 @@ DXGI_FORMAT seriesTypedOf(DXGI_FORMAT f) {
         default:                               return f;   // already typed
     }
 }
-uint32_t g_seriesCount[2] = {};
 uint32_t g_seriesTw = 0, g_seriesTh = 0;
 ID3D11ComputeShader*       g_seriesCs = nullptr;
 bool                       g_seriesTried = false;
@@ -168,7 +167,6 @@ void seriesRelease() {
         if (g_seriesCopy[e]) { g_seriesCopy[e]->Release(); g_seriesCopy[e] = nullptr; }
     }
     if (g_seriesCb) { g_seriesCb->Release(); g_seriesCb = nullptr; }
-    g_seriesCount[0] = g_seriesCount[1] = 0;
 }
 
 void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
@@ -340,8 +338,6 @@ void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
     if (savedUav) savedUav->Release();
     if (savedCb) savedCb->Release();
     srcSrv->Release();
-
-    ++g_seriesCount[eye];
 }
 
 void seriesWrite(ID3D11DeviceContext* ctx) {

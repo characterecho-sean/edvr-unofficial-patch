@@ -293,7 +293,6 @@ ID3D11Buffer*              g_staging[2] = {};   // 0 the direct view, 1 the copy
 bool                       g_stagingInFlight = false;
 bool                       g_stagingHas[2] = {};
 int                        g_stagingTarget = -1;
-uint32_t                   g_stagingCycle = 0, g_stagingCycles = 0;
 HRESULT                    g_stagingDirectHr = S_OK;
 ID3D11Texture2D*           g_copyTex = nullptr;
 uint32_t                   g_copyW = 0, g_copyH = 0;
@@ -474,17 +473,16 @@ double metresOf(float v) {
 
 struct GridStats {
     float mn = 1e30f, mx = -1e30f, centre = 0.0f;
-    int atClear = 0, bandFar = 0, bandKm = 0, bandHm = 0, bandM = 0, bandNear = 0;
+    int bandFar = 0, bandKm = 0, bandHm = 0, bandM = 0, bandNear = 0;
     float block[16] = {};   // the 4x4 map: each block's NEAREST sample (reversed-Z max)
 };
 
-GridStats gridStats(const float* v, float clear) {
+GridStats gridStats(const float* v) {
     GridStats g;
     for (int i = 0; i < 256; ++i) {
         const float d = v[i];
         if (d < g.mn) g.mn = d;
         if (d > g.mx) g.mx = d;
-        if (clear >= 0.0f && fabsf(d - clear) < 1e-7f) ++g.atClear;
         // Bands, for the reversed-Z reading: value = near / z.
         if (d <= 0.0f) ++g.bandFar;
         else if (d < 2.5e-6f) ++g.bandKm;     // beyond 10 km
@@ -1036,8 +1034,6 @@ void depthProbeSample(ID3D11DeviceContext* ctx, void* dsvPtr) {
             if (g_stagingHas[0] || g_stagingHas[1]) {
                 g_stagingInFlight = true;
                 g_stagingTarget = idx;
-                g_stagingCycle = t.unbindsThisFrame;
-                g_stagingCycles = t.unbindsLastFrame;
             }
         }
         if (tex) tex->Release();
@@ -1352,8 +1348,6 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                     if (g_stagingHas[1]) {
                         g_stagingInFlight = true;
                         g_stagingTarget = idx;
-                        g_stagingCycle = 0;
-                        g_stagingCycles = t.unbindsLastFrame;
                         g_stagingAtBoundary = true;
                         g_stagingDirectHr = S_OK;
                     }
@@ -1406,7 +1400,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                              s == 0 ? "direct view" : "copy");
                     continue;
                 }
-                const GridStats g = gridStats(vals[s], clear);
+                const GridStats g = gridStats(vals[s]);
                 if (s == 1 || !g_stagingHas[1]) {
                     t.sampleFar = g.bandFar;
                     t.sampleNear = g.bandM + g.bandNear;

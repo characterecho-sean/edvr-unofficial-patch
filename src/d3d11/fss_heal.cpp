@@ -181,7 +181,6 @@ uint32_t g_outW = 0, g_outH = 0;
 ID3D11Buffer* g_cb = nullptr;
 ID3D11Device* g_device = nullptr;
 DXGI_FORMAT g_outFormat = DXGI_FORMAT_UNKNOWN;
-uint64_t g_healed = 0;
 bool     g_engagedNoted = false;
 bool     g_failNoted = false;
 
@@ -371,7 +370,6 @@ void* healInner(void* leftTex, void* rightTex, float outerMag,
         if (savedUav) savedUav->Release();
         if (savedCb) savedCb->Release();
 
-        ++g_healed;
         if (!g_engagedNoted) {
             g_engagedNoted = true;
             Log::get().note(

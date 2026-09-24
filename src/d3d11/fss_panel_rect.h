@@ -32,8 +32,7 @@ namespace edvr {
 // The composite's DrawIndexedInstanced arguments, stashed by the thunk
 // before recognition runs -- the capture windows use the very draw's own
 // values. (Inherited from the retired survey probe.)
-void fssPanelRectDrawArgs(uint32_t startIndex, int32_t baseVertex,
-                          uint32_t startInstance);
+void fssPanelRectDrawArgs(int32_t baseVertex, uint32_t startInstance);
 uint32_t fssPanelRectStartInstance();
 int32_t fssPanelRectBaseVertex();
 

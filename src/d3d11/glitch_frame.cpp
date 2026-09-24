@@ -3,19 +3,6 @@
 #include "../common/timing.h"
 #include "vr_runtime.h"
 
-namespace edvr {
-// The arrival-mono fix's questions, registered by vscreen at install so
-// the standalone glitch test can link this file alone.
-namespace {
-int  (*g_fssMonoFramesProvider)() = nullptr;
-bool (*g_fssChromeRecentProvider)() = nullptr;
-}  // namespace
-void glitchFrameSetFssMonoProviders(int (*frames)(), bool (*chrome)()) {
-    g_fssMonoFramesProvider = frames;
-    g_fssChromeRecentProvider = chrome;
-}
-}  // namespace edvr
-
 #include <windows.h>
 
 #include <cmath>
@@ -24,7 +11,6 @@ void glitchFrameSetFssMonoProviders(int (*frames)(), bool (*chrome)()) {
 #include <string>
 
 #include "../common/config.h"
-#include "../common/frame_flag.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "transition_flash_prevent.h"

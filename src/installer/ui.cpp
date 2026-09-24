@@ -383,13 +383,6 @@ bool checkboxChecked(HWND box) {
     return owned && owned->checked;
 }
 
-void setCheckboxChecked(HWND box, bool checked) {
-    if (Owned* owned = find(box)) {
-        owned->checked = checked;
-        InvalidateRect(box, nullptr, TRUE);
-    }
-}
-
 void toggleCheckbox(HWND box) {
     if (Owned* owned = find(box)) {
         owned->checked = !owned->checked;

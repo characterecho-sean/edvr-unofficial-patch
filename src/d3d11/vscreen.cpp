@@ -477,7 +477,6 @@ struct State {
     uint32_t fssArrivalNotes = 0;
     uint32_t fssChromeSkipFrame = 0;
     uint32_t fssChromeSkipCount = 0;
-    uint64_t fssChromeSkipped = 0;
     bool     fssChromeSkipNoted = false;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
@@ -639,7 +638,6 @@ struct State {
     UINT      qsStartIndex = 0;
     INT       qsBaseVertex = 0;
     UINT      qsStartInstance = 0;
-    uint64_t  quadSkipHits = 0;
     uint32_t  censusSkipOffCount = 0;
     // Set per glare-train draw by beginPanelOverride, consumed by the
     // DrawInstanced thunk in the same call stack: the first:K clamp,
@@ -1833,7 +1831,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                         "skipped while the screen is up. Said once.",
                         mask);
                 }
-                ++s->fssChromeSkipped;
                 // A skip above the census calls is a draw the census never
                 // sees; the count says so on its end line.
                 if (drawCensusArmed()) drawCensusNoteUnseen('f');
@@ -3650,7 +3647,6 @@ __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
     const UINT total = s->qsIndexCount;
     const UINT cut0 = s->quadSkip.lo * 6;
     const UINT cut1 = (s->quadSkip.hi + 1) * 6;
-    ++s->quadSkipHits;
     // ORDER IS THE GAME'S. These are painter's-order rectangles: the
     // range is re-issued in its own place, not appended. Drawing the
     // survivors first and the clipped range last put quad 0 -- which the
@@ -4587,7 +4583,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
     if (g_state->fssTheaterOn || g_state->fssHealOn) {
-        fssPanelRectDrawArgs(startIndex, baseVertex, startInstance);
+        fssPanelRectDrawArgs(baseVertex, startInstance);
     }
     // The sub-draw probe re-issues this draw from the verdict path, which
     // never sees these arguments. Stashed only while armed.

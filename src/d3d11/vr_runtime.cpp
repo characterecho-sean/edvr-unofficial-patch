@@ -266,10 +266,6 @@ const char* vrRuntimeShortWhy() {
     return shortWhyOf(vrRuntime());
 }
 
-const char* vrRuntimeName() {
-    return nameOf(vrRuntime());
-}
-
 void vrRuntimeTick() {
     State& s = state();
     const uint64_t now = GetTickCount64();

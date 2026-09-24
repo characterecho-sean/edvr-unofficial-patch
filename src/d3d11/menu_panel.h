@@ -233,17 +233,6 @@ bool menuPanelStats(int* w, int* h, double* lastMs, float* gpuMs);
 // device, callable from a test.
 int menuPanelMeasureLine(const char* utf8, int emPx);
 
-// For the test: lay `c` out without rasterising. Returns the bitmap's
-// height; `footTop`/`footBottom` receive the footer box's edges in pixels
-// (-1 when no footer op was made); `rowEdges` receives up to `maxRows`
-// row rectangles as y0,y1 pairs, fractions of the height as menuPanelLineAt
-// reads them (-1 past the rows present); `footLines` receives the number
-// of single-line ops the footer was split into (one per '\n'-separated
-// line, so a second line is drawn as its own line and not appended to the
-// first).
-int menuPanelLayoutHeightForTest(const MenuContent& c, int* footTop, int* footBottom,
-                                 float* rowEdges, int maxRows, int* footLines = nullptr);
-
 void menuPanelShutdown();
 
 }  // namespace edvr

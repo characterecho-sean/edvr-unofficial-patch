@@ -182,7 +182,6 @@ struct State {
     QuerySlot doorQ[2][kQueryRing];
     int       doorOpen[2] = {-1, -1};   // the slot begun and not yet ended
     float     doorGpuMs[2] = {0.0f, 0.0f};
-    uint32_t  doorGpuSamples = 0;
 
     // The Present block noted by the swapchain hook, for the frame about
     // to be ringed.
@@ -415,10 +414,7 @@ void pollDoor(ID3D11DeviceContext* ctx, int eye) {
         double ms=0.0; const auto status=q.timer.poll(ctx,ms);
         if(status==GpuTimerPoll::Pending) continue;
         q.inUse = false;
-        if (status==GpuTimerPoll::Ready && ms >= 0.0 && ms < 100.0) {
-            s.doorGpuMs[eye] = static_cast<float>(ms);
-            ++s.doorGpuSamples;
-        }
+        if (status==GpuTimerPoll::Ready && ms >= 0.0 && ms < 100.0) s.doorGpuMs[eye] = static_cast<float>(ms);
     }
 }
 
@@ -901,10 +897,6 @@ void perfMonitorFrame(ID3D11Device* dev) {
             guardedBudget(g_budget, [&] { slowSample(dev); });
         }
     }
-}
-
-uint64_t perfMonitorBenchmarkDisturbanceEpoch() noexcept {
-    return g_s.nativeBenchmarkSettingsEpoch.load(std::memory_order_relaxed);
 }
 
 void perfMonitorNoteEvent(uint32_t bits, double ms) {

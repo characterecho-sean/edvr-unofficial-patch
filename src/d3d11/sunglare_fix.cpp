@@ -105,18 +105,6 @@ uint64_t             g_worldNoteMs = 0;
 float                g_worldEccMin = 1e9f;
 float                g_worldEccMax = -1e9f;
 
-// The true camera rows, captured from the SCENE camera constants the
-// transition-flash tee already observes -- because the glare system is
-// fed the game's internal head-look camera, which CLAMPS at 45 degrees
-// from ship-forward: past the clamp the glare CB simply does not know
-// where the star is, and no shader logic can recover information its
-// constants lack. The scene camera knows. Rows 4, 5 and 7 of the same
-// engine-standard layout, latest write wins (the frame interleaves per
-// eye, scene block before glare block, so the latest write is this
-// eye's).
-float                g_trueRows[16] = {};
-bool                 g_trueRowsValid = false;
-uint64_t             g_trueRowsMs = 0;
 // The true head-tracked camera POSE (3x4 rows from scene-block offset
 // 932), kept for the alignment telemetry -- the reading that finally
 // closed the case: the glare CB's rows follow the head COMPLETELY
@@ -126,7 +114,6 @@ uint64_t             g_trueRowsMs = 0;
 // position, and that is fixed per draw from the rows alone.
 float                g_trueView[12] = {};
 bool                 g_trueViewValid = false;
-uint64_t             g_trueViewMs = 0;
 float                g_camDist = 0.0f;   // |camera| in the glare frame,
                                          // from the per-draw solve. NOT
                                          // the sun distance: the field
@@ -270,8 +257,6 @@ void buildWorldShader(ID3D11DeviceContext* ctx, int variant) {
 }
 float    g_theta = 0;        // low-passed counter-rotation angle
 bool     g_thetaValid = false;
-uint64_t g_skipped = 0;
-uint64_t g_clamped = 0;
 
 // The steady actuator. The camera-block rows are the VIEW MATRIX --
 // position flows through them, so both CB replacement formulas displaced
@@ -622,10 +607,7 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
         return SunglareAction::kStock;
     }
     g_lastSeenMs = nowMs();
-    if (g_mode == Mode::kOff) {
-        ++g_skipped;
-        return SunglareAction::kSkip;
-    }
+    if (g_mode == Mode::kOff) return SunglareAction::kSkip;
     // Matched and not skipped -- kMatch tells the caller a train draw
     // is happening. The first:K clamp is retired: the game's element
     // list reorders with its head-look camera, so a positional prefix
@@ -700,7 +682,6 @@ void sunglareSceneRows(const void* data, uint32_t bytes) {
     if (!(l2 > 0.9f && l2 < 1.1f)) return;
     memcpy(g_trueView, f, sizeof(g_trueView));
     g_trueViewValid = true;
-    g_trueViewMs = nowMs();
     if (!g_camDumped) {
         g_camDumped = true;
         Log::get().note("true view matrix live (offset 932; |rows| %.3f "

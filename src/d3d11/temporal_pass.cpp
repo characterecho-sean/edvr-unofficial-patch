@@ -756,13 +756,11 @@ double    g_windowTotal[kWindowPairs];
 double    g_windowRegion[kRegionCount][kWindowPairs];
 double    g_windowPart[kPrepParts][kWindowPairs];   // prep's parts, per pair (PrepPart)
 
-// The most recently CLOSED window's per-region median/p95, for the F8
-// line's live figures; kept even while the next window is still filling.
+// The most recently CLOSED window's per-region median, for the F8 line's
+// live figures; kept even while the next window is still filling.
 double    g_lastWindowMedian[kRegionCount] = {};
-double    g_lastWindowP95[kRegionCount] = {};
-double    g_lastWindowOtherMedian = 0.0, g_lastWindowOtherP95 = 0.0;
+double    g_lastWindowOtherMedian = 0.0;
 uint32_t  g_lastWindowPairs = 0;
-Treatment g_lastWindowTreatment = Treatment::None;
 bool      g_lastWindowValid = false;
 // The four drop counters' sum for the window this closed (F5): unmeasured
 // pairs, lone eyes, no-slot frames and region-lease failures, latched at
@@ -953,14 +951,9 @@ void flushWindow(const char* reason) {
         }
     }
 
-    for (int ri = 0; ri < kRegionCount; ++ri) {
-        g_lastWindowMedian[ri] = regionMed[ri];
-        g_lastWindowP95[ri] = regionP95[ri];
-    }
+    for (int ri = 0; ri < kRegionCount; ++ri) g_lastWindowMedian[ri] = regionMed[ri];
     g_lastWindowOtherMedian = otherMed;
-    g_lastWindowOtherP95 = otherP95;
     g_lastWindowPairs = static_cast<uint32_t>(n);
-    g_lastWindowTreatment = g_windowKey.treatment;
     g_lastWindowValid = true;
     g_lastWindowDropped = g_droppedUnmeasured + g_droppedLone + g_droppedNoSlot + g_regionBeginFailed;
     // The one-shot log note above (g_regionBeginFailedNoted) stays latched
@@ -1464,7 +1457,6 @@ LONG     g_fssChromeStampSeen = 0;
 uint32_t g_fssChromeStampFrame = 0;
 bool     g_fssChromeStampKnown = false;
 bool     g_fssInterfaceNoted = false;
-uint32_t g_fssInterfaceFrames = 0;   // frames the scanner's interface took the head's path
 // (fssInterfaceLive, the per-frame question, sits below g_rowsFrame.)
 
 // The configure and warm state.
@@ -1539,7 +1531,6 @@ uint32_t g_originJumpFrame = ~0u;
 // once per press. Float formats are taken as linear and encoded sRGB for
 // the file; the 8- and 10-bit ones are written as they are.
 bool     g_eyeDumpArmed[2] = {false, false};
-uint32_t g_eyeDumps = 0;
 bool     g_eyeDumpDirMade = false;
 // THE EYE RUN (2026-09-09, the thirty-seventh flight): the dump key takes
 // four consecutive frames of the left eye, each copied to a staging
@@ -1827,7 +1818,6 @@ bool writeEyeBmp(ID3D11DeviceContext* ctx, ID3D11Texture2D* st, const D3D11_TEXT
     if (ok) ok = WriteFile(f, &ih, sizeof(ih), &wrote, nullptr) != 0;
     if (ok) ok = WriteFile(f, out.data(), bytes, &wrote, nullptr) != 0;
     CloseHandle(f);
-    ++g_eyeDumps;
     Log::get().note("temporal aa: eye %d dumped to %ls -- %ux%u, DXGI format %d, the treated frame as the "
                     "compositor receives it%s.",
                     eye, path, w, h, static_cast<int>(d.Format), ok ? "" : " (the write FAILED)");
@@ -3926,7 +3916,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // the path was engaged; the note below is the log's word, said once.
         const bool fssInterface = fssInterfaceLive();
         if (fssInterface) {
-            if (eye == 0) ++g_fssInterfaceFrames;
             if (!g_fssInterfaceNoted) {
                 g_fssInterfaceNoted = true;
                 Log::get().note(

@@ -36,7 +36,7 @@ inline TemporalEngine temporalEngineFor(const std::string& mode) {
 // True for every mode that hands the frame to an external, trained engine
 // (NVIDIA's or AMD's) rather than the pass's own history -- the test every
 // "a trained engine wants X" reader in src\ shares, so fsr reaches UI depth,
-// UI separation, deferred UI and the rest the same way dlss and dlaa do.
+// UI separation and the rest the same way dlss and dlaa do.
 inline bool temporalExternalEngine(const std::string& mode) {
     return temporalEngineFor(mode) != TemporalEngine::Own;
 }
@@ -45,16 +45,6 @@ inline bool temporalExternalEngine(const std::string& mode) {
 inline const char* temporalNvidiaLabel(float hmdQuality) {
     if (!std::isfinite(hmdQuality) || hmdQuality <= 0.0f) return "DLSS / DLAA";
     return hmdQuality >= 1.0f ? "DLAA" : "DLSS";
-}
-
-// The engine's own display name: "TAA" for the pass's own history, NVIDIA's
-// label (DLSS/DLAA, by hmdQuality) for dlss/dlaa, "FSR" for fsr.
-inline const char* temporalEngineLabel(const std::string& mode, float hmdQuality) {
-    switch (temporalEngineFor(mode)) {
-        case TemporalEngine::Nvidia: return temporalNvidiaLabel(hmdQuality);
-        case TemporalEngine::Amd:    return "FSR";
-        default:                     return "TAA";
-    }
 }
 
 }  // namespace edvr
