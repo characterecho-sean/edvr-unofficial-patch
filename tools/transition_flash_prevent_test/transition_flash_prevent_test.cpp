@@ -39,6 +39,14 @@
 // which turn "every un-refilled call dumps" (flight 091726: 5,041 of them in
 // one low wake) into ENTRY/EXIT edges, plus glitch_scene.h's own fresh/
 // decision print text for the per-frame dump row those edges feed.
+//
+// The same day's "render-time patch simulation (watch-only)" adds CHANGE 10's
+// cells: patchEyeOrigin (the eye composer's own multiply, checked against
+// the f13550 flight-100043 mailbox/scene numbers and a hand-computed
+// rotation), premul4x4 (the acting build's full premultiply, hand-composed
+// B*M and both identity sides), patchSceneChoice on the flight-derived
+// cam/pool points plus every band edge, and the pending sim's N+1..N+3
+// render-frame window.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1036,6 +1044,137 @@ void caseDr7ArmWriteModeSlot0() {
     check(prw::armSlot0Dr7(0) == prw::armSlot0Dr7(0, prw::kDr7RwReadWrite),
           "Dr7 arm: the default RW mode is still read-or-write");
 }
+// --- transition_flash_eye_base_core.h: CHANGE 10, the render-time patch ----
+// simulation's pure logic (task 2026-09-24, "render-time patch simulation
+// (watch-only)"): the eye composer's own multiply (patchEyeOrigin), the
+// acting build's full premultiply (premul4x4), and the scene-old/new
+// selector the flight-100043 and 2026-09-12 evidence defines
+// (patchSceneChoice), plus the pending sim's render-frame window.
+
+bool near3(const float a[3], const float b[3], float eps) {
+    return std::fabs(a[0] - b[0]) <= eps && std::fabs(a[1] - b[1]) <= eps &&
+           std::fabs(a[2] - b[2]) <= eps;
+}
+
+void casePatchEyeOrigin() {
+    const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+    float out[3];
+
+    // Identity base: composing the bad head-only eye against the identity is
+    // exactly the bad frame's own shape, so the patch reproduces P.
+    const float P[3] = {0.12f, -0.34f, 1.56f};
+    tfeb::patchEyeOrigin(I, P, out);
+    check(near3(out, P, 1e-6f), "patchEyeOrigin: identity base passes P through");
+
+    // Pure translation: out = P + t. The translation lanes are the f13550
+    // flight-100043 mailbox value itself.
+    const float T[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -0.660f, 11.066f, -7.725f, 0};
+    const float wantT[3] = {P[0] - 0.660f, P[1] + 11.066f, P[2] - 7.725f};
+    tfeb::patchEyeOrigin(T, P, out);
+    check(near3(out, wantT, 1e-5f), "patchEyeOrigin: pure translation adds t");
+
+    // The flight-100043 f13550 ordinary-frame numbers end to end: mailbox
+    // translation (-0.660, +11.066, -7.725), head offset (0, +0.014,
+    // +0.085) -- the rendered scene eye measured (-0.66, +11.08, -7.64).
+    const float head[3] = {0.0f, 0.014f, 0.085f};
+    const float wantScene[3] = {-0.660f, 11.080f, -7.640f};
+    tfeb::patchEyeOrigin(T, head, out);
+    check(near3(out, wantScene, 1e-3f), "patchEyeOrigin: the f13550 mailbox+head lands on the measured scene eye");
+
+    // A known rotation: 90 degrees about Z (row 0 (0,-1,0), row 1 (1,0,0))
+    // maps (1,2,3) to (2,-1,3).
+    const float R[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+    const float P2[3] = {1, 2, 3};
+    const float wantR[3] = {2, -1, 3};
+    tfeb::patchEyeOrigin(R, P2, out);
+    check(near3(out, wantR, 1e-6f), "patchEyeOrigin: 90-degree Z rotation rotates P");
+}
+
+void casePremul4x4() {
+    const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float B[16] = {2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1};
+    float out[16];
+
+    tfeb::premul4x4(B, I, out);
+    bool same = true;
+    for (int i = 0; i < 16; ++i) same = same && out[i] == B[i];
+    check(same, "premul4x4: B x I = B");
+
+    tfeb::premul4x4(I, B, out);
+    same = true;
+    for (int i = 0; i < 16; ++i) same = same && out[i] == B[i];
+    check(same, "premul4x4: I x B = B");
+
+    // Hand-composed: B scales (2,3,4) with t(1,2,3); M swaps x/y with
+    // t(5,6,7). B*M scales rows of M: row0 (0,2,0), row1 (3,0,0), row2
+    // (0,0,4); the translation is t(B) through M's 3x3 plus t(M):
+    // (1,2,3) -> (0*1+1*2+0*3, 1*1+0*2+0*3, 0*1+0*2+1*3) + (5,6,7)
+    // = (7,7,10); the last row stays (0,0,0,1).
+    const float M[16] = {0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+    tfeb::premul4x4(B, M, out);
+    check(out[0] == 0 && out[1] == 2 && out[2] == 0 && out[3] == 0 &&
+          out[4] == 3 && out[5] == 0 && out[6] == 0 && out[7] == 0 &&
+          out[8] == 0 && out[9] == 0 && out[10] == 4 && out[11] == 0 &&
+          out[12] == 7 && out[13] == 7 && out[14] == 10 && out[15] == 1,
+          "premul4x4: the hand-composed B*M (scale through swap plus translations) matches");
+}
+
+void casePatchSceneChoiceFlightPoints() {
+    using tfeb::SceneChoice;
+    // 2026-09-12 hyperspace exit: the pool is still in the old frame while
+    // the camera rebases -- pool 0.0 against a 1600-unit camera step.
+    check(tfeb::patchSceneChoice(1600.0f, 0.0f, true) == SceneChoice::Old,
+          "patchSceneChoice: hyperspace exit (cam 1600, pool 0) is scene-old");
+    // Flight 100043's scene-new resets: the pool stepped with the camera.
+    check(tfeb::patchSceneChoice(2925.8f, 2927.2f, true) == SceneChoice::New,
+          "patchSceneChoice: f13549 (2925.8/2927.2) is scene-new");
+    check(tfeb::patchSceneChoice(13.5f, 14.7f, true) == SceneChoice::New,
+          "patchSceneChoice: f13939 (13.5/14.7) is scene-new");
+    check(tfeb::patchSceneChoice(3594.2f, 3567.3f, true) == SceneChoice::New,
+          "patchSceneChoice: f22217 (3594.2/3567.3) is scene-new");
+    check(tfeb::patchSceneChoice(3860.4f, 3861.7f, true) == SceneChoice::New,
+          "patchSceneChoice: f23340 (3860.4/3861.7) is scene-new");
+}
+
+void casePatchSceneChoiceBands() {
+    using tfeb::SceneChoice;
+    // Band edges, fresh geometry: the new band is inclusive at both ends.
+    check(tfeb::patchSceneChoice(100.0f, 50.0f, true) == SceneChoice::New,
+          "patchSceneChoice: ratio exactly 0.5 is scene-new (inclusive)");
+    check(tfeb::patchSceneChoice(100.0f, 200.0f, true) == SceneChoice::New,
+          "patchSceneChoice: ratio exactly 2.0 is scene-new (inclusive)");
+    // The old band is exclusive: exactly 0.25 is neither band.
+    check(tfeb::patchSceneChoice(100.0f, 25.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice: ratio exactly 0.25 is the dead band, not scene-old");
+    // Inside the dead band, either side.
+    check(tfeb::patchSceneChoice(100.0f, 30.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice: ratio 0.3 above the old band is unclear");
+    check(tfeb::patchSceneChoice(100.0f, 250.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice: ratio 2.5 above the new band is unclear");
+    // Just inside the old band.
+    check(tfeb::patchSceneChoice(100.0f, 24.9f, true) == SceneChoice::Old,
+          "patchSceneChoice: ratio 0.249 is scene-old");
+    // Stale geometry is unclear whatever the numbers say -- a zeroed default
+    // geometry (cam 0, pool 0) would otherwise read as scene-old 0.
+    check(tfeb::patchSceneChoice(0.0f, 0.0f, false) == SceneChoice::Unclear,
+          "patchSceneChoice: not-fresh geometry is unclear even at ratio 0");
+    check(tfeb::patchSceneChoice(2925.8f, 2927.2f, false) == SceneChoice::Unclear,
+          "patchSceneChoice: not-fresh geometry is unclear even at a scene-new ratio");
+    // A zero camera step divides by the floor, not by zero.
+    check(tfeb::patchSceneChoice(0.0f, 0.0f, true) == SceneChoice::Old,
+          "patchSceneChoice: fresh zero-over-zero reads as scene-old 0 through the cam floor");
+}
+
+void casePatchSimWindow() {
+    // Armed at the skip frame N, the sim covers exactly N+1..N+3 (the bad
+    // render is N+2; one frame of skew slack either side).
+    check(!tfeb::patchSimWindowCovers(13547, 13547), "patchSimWindow: the skip frame itself is not covered");
+    check(tfeb::patchSimWindowCovers(13548, 13547), "patchSimWindow: N+1 is covered");
+    check(tfeb::patchSimWindowCovers(13549, 13547), "patchSimWindow: N+2 (the bad render) is covered");
+    check(tfeb::patchSimWindowCovers(13550, 13547), "patchSimWindow: N+3 is covered");
+    check(!tfeb::patchSimWindowCovers(13551, 13547), "patchSimWindow: N+4 is past the window");
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1093,6 +1232,11 @@ int wmain(int argc, wchar_t** argv) {
     caseModeSwitchEdgeExitAfterThirty();
     caseModeSwitchEdgeSingleFrameSkip();
     caseSceneGeometryFreshAndDecisionText();
+    casePatchEyeOrigin();
+    casePremul4x4();
+    casePatchSceneChoiceFlightPoints();
+    casePatchSceneChoiceBands();
+    casePatchSimWindow();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

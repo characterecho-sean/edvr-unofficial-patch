@@ -30,6 +30,16 @@
 //                unrefilled call, before the original runs.
 //     alternate  transition EVENTS alternate watched, acted, watched,
 //                acted... (the first is watched).
+//
+// CHANGE 12 (2026-09-24, the endgame's watch-only validation): in every
+// non-off mode the module ALSO runs a passive render-time patch simulation.
+// Armed on a mode==2 mode-switch ENTRY edge (the one-frame writer skip),
+// it computes -- for the render frames N+1..N+3, from the per-frame scene
+// tap below and the last refilled mailbox -- what the acting build would
+// premultiply into the bad frame's eye (transition_flash_eye_base_core.h's
+// patchEyeOrigin/patchSceneChoice), logs it once per covered frame, and
+// folds it into the dump's own patch-sim section. It never writes game
+// memory; on/alternate's act path is untouched.
 // See transition_flash_eye_base_core.h for the pure logic (the bit-exact
 // reset check, the M/F validation arithmetic, the act guards, the consumer's
 // own extent) -- it has no game or Windows dependency and is what
@@ -90,7 +100,10 @@ void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVe
 // classifies. `geometryFresh` is recordScenePosition's own freshness gate
 // (the pool was actually compared this frame), handed back explicitly
 // rather than inferred from an all-zero geometry, which a real coherent
-// frame can also measure.
+// frame can also measure. CHANGE 12: a pending render-time patch sim also
+// fires from here, on covered frames (see the .cpp) -- using this same pos
+// as P and the geometry's own cameraStep/poolStep as the scene-old/new
+// selector's inputs.
 void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid,
                                             const GlitchSceneGeometry& geometry, bool geometryFresh,
                                             GlitchSceneDecision decision);

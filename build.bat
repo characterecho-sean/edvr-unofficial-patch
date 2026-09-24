@@ -122,6 +122,7 @@ python tools\fetch_openxr_loader.py --self-test || exit /b 1
 python tools\gen_installer_rc.py --self-test || exit /b 1
 python tools\package_native.py --self-test || exit /b 1
 python tools\build_diff.py --self-test || exit /b 1
+python tools\flash_patch_residual.py --self-test || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM

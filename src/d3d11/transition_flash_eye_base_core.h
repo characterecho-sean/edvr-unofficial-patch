@@ -398,5 +398,103 @@ inline ModeSwitchEdge classifyModeSwitchEdge(int32_t gameMode, bool unrefilled,
     return consecutiveUnrefilledBeforeThisCall >= kModeSwitchExitRun ? ModeSwitchEdge::Exit : ModeSwitchEdge::None;
 }
 
+// ---------------------------------------------------------------------------
+// CHANGE 10 (2026-09-24, the endgame's watch-only validation, task "render-
+// time patch simulation"): the pure logic the simulation runs at render time.
+// Flight 100043 (design doc, "Flight 100043") settled the design the acting
+// build will implement: the bad render at R = N+2 (N = the un-refilled
+// consume's frame) shows the head pose alone because the eye composed
+// against the identity base; premultiplying that bad eye P by a chosen base
+// B -- patched = R(B).P + t(B) -- restores it. Which B is right depends on
+// whether the scene has already switched frames at R, and the detector's own
+// per-frame geometry decides that (patchSceneChoice below). Everything the
+// simulation does is passive: it logs what the acting build would write.
+
+// The eye composer's own multiply, verified two independent ways:
+//  - Data (flight 100043, f13550's ordinary frame): the mailbox translation
+//    (-0.660, +11.066, -7.725) plus the head offset through the base's 3x3
+//    lands at the rendered scene eye (-0.66, +11.08, -7.64) -- centimetres
+//    apart, the size of head-pose quantisation, not of a frame switch (which
+//    measures in metres to kilometres).
+//  - Static (analysis\decomp\flash\r6\decomp_283D4C0.txt, FUN_14283d4c0,
+//    called twice from the consumer FUN_1428431d0's own body): the decompile
+//    composes the eye as out[k] = hx*B[k] + hy*B[4+k] + hz*B[8+k] + B[12+k]
+//    -- a row-vector head position through the base B = param_2, translation
+//    at [12..14]. Exactly this function's shape; it confirms the formula
+//    rather than complicating it.
+inline void patchEyeOrigin(const float B[16], const float P[3], float out[3]) noexcept {
+    for (int k = 0; k < 3; ++k) {
+        out[k] = P[0] * B[k] + P[1] * B[4 + k] + P[2] * B[8 + k] + B[12 + k];
+    }
+}
+
+// The full 4x4 premultiply the ACTING build will need when it patches the
+// eye's matrix wholesale rather than only its origin -- same row convention
+// (rotation at [r*4+c], translation row at [12..14], last row (0,0,0,1)).
+// The simulation patches origins only; this sits beside patchEyeOrigin so
+// the acting build's arithmetic is gated by the same flight-proven test
+// cell. Writes through a local so out may alias B or M.
+inline void premul4x4(const float B[16], const float M[16], float out[16]) noexcept {
+    float r[16];
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) sum += B[row * 4 + k] * M[k * 4 + col];
+            r[row * 4 + col] = sum;
+        }
+    }
+    std::memcpy(out, r, sizeof(r));
+}
+
+// Which frame the scene is in at render time R -- flight 100043's measured
+// selector (right on 8 of 8 resets there, plus the 2026-09-12 hyperspace
+// data): this frame's object-pool step against the camera's own step.
+// Scene-new (low-wake drop-in: the pool rebased WITH the camera, pool ~=
+// cam) -- the NEW base is right. Scene-old (hyperspace exit: the pool still
+// in the old frame, pool << cam) -- the HELD base is right. The caller
+// defaults to held on Unclear: held is the proven-safe side (073114's high
+// wakes), and the simulation's log line prints both candidates regardless.
+enum class SceneChoice : uint8_t { Old, New, Unclear };
+
+inline const char* sceneChoiceText(SceneChoice c) noexcept {
+    switch (c) {
+    case SceneChoice::Old:     return "scene-old";
+    case SceneChoice::New:     return "scene-new";
+    case SceneChoice::Unclear: return "unclear";
+    }
+    return "?";
+}
+
+// The measured bands: flight 100043's scene-new resets all sat at ratio
+// 0.99-1.09 (2927.2/2925.8 at f13549, 14.7/13.5 at f13939, 3567.3/3594.2 at
+// f22217, 3861.7/3860.4 at f23340); the 2026-09-12 hyperspace exits sat at
+// 0.0/1600 = 0. [0.5, 2.0] new and < 0.25 old leave a dead band (0.25 <=
+// ratio < 0.5) no measured event has entered -- events land there read
+// Unclear, not guessed. `geometryFresh` false (the pool was not sampled this
+// frame) is Unclear regardless of the numbers: a zeroed default geometry
+// would otherwise read as a scene-old 0.
+inline constexpr float kSceneChoiceCamFloor = 1e-6f;
+inline constexpr float kSceneNewRatioMin = 0.5f;
+inline constexpr float kSceneNewRatioMax = 2.0f;
+inline constexpr float kSceneOldRatioMax = 0.25f;
+
+inline SceneChoice patchSceneChoice(float camStep, float poolStep, bool geometryFresh) noexcept {
+    if (!geometryFresh) return SceneChoice::Unclear;
+    const float denom = camStep > kSceneChoiceCamFloor ? camStep : kSceneChoiceCamFloor;
+    const float ratio = poolStep / denom;
+    if (ratio >= kSceneNewRatioMin && ratio <= kSceneNewRatioMax) return SceneChoice::New;
+    if (ratio < kSceneOldRatioMax) return SceneChoice::Old;
+    return SceneChoice::Unclear;
+}
+
+// A pending simulation armed at the entry-edge consume frame N covers the
+// render frames N+1..N+3: the bad render is at N+2, and one frame of slack
+// either side still gets logged when a consume/render skew shifts R.
+inline constexpr uint32_t kPatchSimWindowFrames = 3;
+
+inline bool patchSimWindowCovers(uint32_t frame, uint32_t skipFrame) noexcept {
+    return frame > skipFrame && frame - skipFrame <= kPatchSimWindowFrames;
+}
+
 }  // namespace tfeb
 }  // namespace edvr
