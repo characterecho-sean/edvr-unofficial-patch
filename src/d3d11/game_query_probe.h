@@ -18,13 +18,6 @@ class GameQueryProbe {
         bool pending=false, reported=false;
     } entries_[64];
     SRWLOCK lock_=SRWLOCK_INIT;
-    struct ActiveEntry {
-        ID3D11Asynchronous* query=nullptr; // Valid for the Begin/End interval.
-        uint64_t depth=0;
-        enum class Kind : uint8_t { Counting, Disjoint } kind=Kind::Counting;
-    } active_[64];
-    SRWLOCK activeLock_=SRWLOCK_INIT;
-    bool activeOverflow_=false;
     std::atomic<uint64_t> contended_{0};
     uint64_t calls_=0, ready_=0, pending_=0, failed_=0, overflow_=0, lastReport_=0;
     unsigned reports_=0, details_=0;
@@ -37,17 +30,6 @@ class GameQueryProbe {
         }();
         const auto address=reinterpret_cast<uintptr_t>(caller);
         return address>=base && address-base<size ? address-base : 0;
-    }
-    enum class QueryKind : uint8_t { None, Counting, Disjoint };
-    static QueryKind queryKind(ID3D11Asynchronous* asynchronous) noexcept {
-        if(!asynchronous)return QueryKind::None;
-        ID3D11Query* query=nullptr;
-        if(FAILED(asynchronous->QueryInterface(__uuidof(ID3D11Query),reinterpret_cast<void**>(&query))) || !query)
-            return QueryKind::Counting; // A counter or unknown asynchronous is unsafe to duplicate.
-        D3D11_QUERY_DESC desc{};query->GetDesc(&desc);query->Release();
-        if(desc.Query==D3D11_QUERY_EVENT || desc.Query==D3D11_QUERY_TIMESTAMP)return QueryKind::None;
-        if(desc.Query==D3D11_QUERY_TIMESTAMP_DISJOINT)return QueryKind::Disjoint;
-        return QueryKind::Counting;
     }
 public:
     template<class Forward>
@@ -99,50 +81,6 @@ public:
         if(!TryAcquireSRWLockExclusive(&lock_)) { ++contended_;return; }
         for(auto& e:entries_)if(e.query==query) { e.pending=false;break; }
         ReleaseSRWLockExclusive(&lock_);
-    }
-    // A duplicated draw inside one of these intervals would alter the game's
-    // occlusion, pipeline or stream-output result. Keep a fixed identity set;
-    // duplicate Begin remains blocked until matching End calls retire it.
-    // Table overflow is sticky because an unknown End cannot safely identify
-    // which unrecorded interval it closes.
-    void bracketBegin(ID3D11Asynchronous* query) noexcept {
-        const auto kind=queryKind(query);if(kind==QueryKind::None)return;
-        AcquireSRWLockExclusive(&activeLock_);
-        ActiveEntry* free=nullptr;
-        for(auto& entry:active_) {
-            if(entry.query==query) {
-                if(entry.depth!=~uint64_t(0))++entry.depth;else activeOverflow_=true;
-                ReleaseSRWLockExclusive(&activeLock_);return;
-            }
-            if(!entry.query && !free)free=&entry;
-        }
-        if(free)*free={query,1,kind==QueryKind::Disjoint?ActiveEntry::Kind::Disjoint:ActiveEntry::Kind::Counting};else activeOverflow_=true;
-        ReleaseSRWLockExclusive(&activeLock_);
-    }
-    void bracketEnd(ID3D11Asynchronous* query) noexcept {
-        if(queryKind(query)==QueryKind::None)return;
-        AcquireSRWLockExclusive(&activeLock_);
-        for(auto& entry:active_)if(entry.query==query) {
-            if(entry.depth>1)--entry.depth;else entry={};
-            ReleaseSRWLockExclusive(&activeLock_);return;
-        }
-        ReleaseSRWLockExclusive(&activeLock_);
-    }
-    bool countingActive() noexcept {
-        AcquireSRWLockShared(&activeLock_);
-        bool active=activeOverflow_!=0;
-        if(!active)for(const auto& entry:active_)if(entry.query&&entry.kind==ActiveEntry::Kind::Counting){active=true;break;}
-        ReleaseSRWLockShared(&activeLock_);return active;
-    }
-    struct Guard { bool counting=false,disjoint=false,overflow=false; };
-    Guard guard() noexcept {
-        AcquireSRWLockShared(&activeLock_);
-        Guard value{};value.overflow=activeOverflow_;
-        for(const auto& entry:active_)if(entry.query) {
-            if(entry.kind==ActiveEntry::Kind::Counting)value.counting=true;
-            else value.disjoint=true;
-        }
-        ReleaseSRWLockShared(&activeLock_);return value;
     }
     void noteEnd(ID3D11Asynchronous* query,const void* caller) noexcept {
         if(gameCaller(caller))ended(query);
