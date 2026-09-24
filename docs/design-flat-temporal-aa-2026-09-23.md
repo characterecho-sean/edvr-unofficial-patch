@@ -7,8 +7,11 @@
   runtime scope enforcement and bounded desktop probes. Corrected capture
   passed all 83 build jobs and the 254-key config contract. Epic replay on
   2026-09-24 confirms scaled target families and draw-time b1 evidence. The
-  focused camera/handoff probe also passes those gates and awaits replay; see
-  section 9. Flat temporal reconstruction/jitter are NOT enabled.
+  focused camera/handoff replay now contains known motion-family draws and the
+  measured tone/copy/UI chain. Passive mono selection now replays all 70 world
+  and three handoff records at both sizes; the selector build also passes all
+  83 jobs and the 254-key contract. See section 10. Flat temporal
+  reconstruction/jitter are NOT enabled.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -20,14 +23,16 @@
   boundary, UI ordering, render-scale ownership, and mod hook ordering need a
   focused mono frame contract. The corrected capture sees 1280x720 and 960x540
   scene-target families, the shared 5376-byte VS b1, and a later
-  full-resolution panel draw. Camera registers 270..275 and the exact
-  pixel-shader handoff are not yet captured; sections 8 and 9 record limits.
+  full-resolution panel draw. Registers 270..275 now match the existing
+  source-camera encoding on supported shader pairs. Passive resource selection
+  works on both captured frames; jitter/inverse consistency, runtime resource
+  ownership and backend integration remain.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next session:** qualify the focused camera/handoff probe, then enter the
-  Epic 2D cockpit and press F10 (`hotkey.dump_draws`) for a fresh bounded
-  capture. Repeat on foot and with each mod arrangement. Use
+- **Next session:** qualify the paired scene/deferred projection correction and
+  remaining consumers before jitter. Avoid another broad discovery flight.
+  Later qualify treatment, on-foot scenes and each mod arrangement. Use
   `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
   `--grep "flat (temporal|discover)"`. No headset is needed for discovery;
   VR still needs regression testing.
@@ -435,3 +440,115 @@ resource checks). Regressions cover the exact 4416-byte camera boundary,
 old/later writes, immutable buffer reuse, distinct cameras/shaders/sources/
 viewports, and handoff retention when world records fill. Runtime hook,
 invalidation, report and reset paths were traced before the next Epic run.
+
+## 10. Epic focused contract replay, 2026-09-24
+
+Both `edvr_gfx_20260924_053124.log` and `_053756.log` match 37062878,
+v0.17.0-491-g37062878/build 6AB50936. In the latter, frame 36865 at
+05:40:20.640 has 960x540 scene targets and 1280x720 output; frame 40611 at
+05:41:02.429 has 1280x720 scene/output. Both have 26 declared pool-family draws
+with same-frame camera rows, no world/handoff or large-CB drops. Small-buffer
+drops remain explicit (27 and 30 respectively).
+
+The measured camera has zero clip-Z coefficients in rows 270..272, row
+273=(0,0,0.0250000004,0), row 274 equal to the clip-W column, and finite camera
+position in row 275. This matches the existing mono source's infinite
+reversed-Z encoding (`screen_motion.h`). The same camera bytes reach the tone
+and output-copy records; the later panel uses different rows with near term
+0.10001. Preserve those distinct cameras.
+
+At 960x540, tone VS F9CFC798F21E9AEA / PS FEE777E92850B390 writes format 27 at
+q511, sourcing the format-26 colour through PS1. Copy VS 20F383BBAC05C031 / PS
+DED8796049C7BB4A samples that texture through PS0 into output at q515. Panel VS
+A888D51024D9798E / PS 015EF9349EC097E8 follows at q520. The 1280x720 sample has
+the same chain at q939/943/948. Known geometry uses a scene-sized format-19
+depth.
+
+Ruled out: all 26 declared-family draws being supported motion writes.
+EB5234DB6ADB491D/B7D50283329322C3 and DE545DC8EE4FBB87/91F8937EDA723663 occur
+but are outside the existing VS/PS support table; the latter is already a
+documented refusal. Reuse pair-level admission and preserve rejection, rather
+than broadening it.
+
+Build the mono input selector around the supported scene camera/depth and the
+observed format-26 -> tone -> output resource identities and order. Reject
+ambiguous cameras, unsupported pairs as naming sources, missing provenance,
+wrong extents/viewports, broken lineage and truncated evidence. This can be
+tested from captured values before another game run. Selection alone does not
+certify shader-read completeness, jitter/inverse consistency, GPU motion
+production, resize/history continuity or mod order.
+
+Complete-record replay, beyond the minimal fixtures, ruled out every HDR draw
+using viewport depth range 0..1: records 34..36 at both sizes have full XY
+viewports and MinDepth=MaxDepth=0. At frame 36865 they occur at q376/379/380;
+at frame 41961, q772/775/776. The latter two have the current camera and 6655
+and 19 instances. Permit these observed HDR ranges while keeping source, tone
+and output-copy viewport validation at 0..1. After that correction, all 70
+world and three handoff records select the expected mono inputs for frames
+36865 and 41961 (960x540 and 1280x720). Every camera-bearing record (64 per
+frame) reconstructed from the log's float text reproduces its exact 96-byte
+hash. Both select 21 supported pair draws and count five unsupported draws;
+late output starts at q520 and q946 respectively. The regression fixtures
+include the collapsed-depth HDR cases and keep tone/copy validation strict.
+
+`flat_mono_frame.h` is a passive report-time selector: it owns copied camera
+rows, treats resource pointers as frame-local identities, and creates no GPU
+resources or COM ownership. Every report prints a selected/refused verdict with
+a reason. The producer and tests share the unchanged shader-family table;
+metadata selection neither enables its patches nor certifies motion output.
+Full build `build/flat-mono-selector-final-build.log` passes all 83 jobs, the
+254-key config contract and both installer payload gates.
+
+The jitter audit establishes the forward transform: for rows 270..273, `row.x
++= (2*jitterX/width)*row.w` and `row.y += (-2*jitterY/height)*row.w`,
+preserving z/w and rows 274..275. Ruled out: changing only row 273, because its
+captured w is zero; projection w comes from rows 270..272.
+
+Offline bytecode from the saved Steam dump matches all four shader names under
+the repository's FNV implementation; game testing remains Epic-only. Pool VS
+EB5234DB6ADB491D instructions 103 and 136..141 use b1[275] and b1[270..273].
+Deferred VS 7E38A6AA1269C901 instructions 3..5 instead form the view ray from
+b2[14..16].xyw dotted with (u,v,1), without reading b1. PS 7CECABDE34FFBE9E
+normalizes this ray at instructions 37..39 and uses it for lighting at 48 and
+53..54; its b2[2..4] transforms normals, not projection. Tone VS
+F9CFC798F21E9AEA has no CB reads. The matching tone PS was not found.
+
+Ruled out: b1-only jitter preserving deferred lighting, because its view ray
+comes from separate b2 constants. For this deferred pair, also subtract
+`row.x*jitterX/width + row.y*jitterY/height` from b2[14..16].w, leaving its
+fullscreen position, sampling UV and normal basis unchanged. This evaluates the
+ray at UV minus jitter. The actual Epic b2 contents, UV mapping and camera
+relationship still need qualification, as do other scene consumers. These four
+shaders do not establish whole-frame coverage.
+
+The wider offline audit covers 71 selected-depth/tone records (117 draws), with
+86 exact-hash shader artifacts available and 13 missing (plus null PS). Two
+more matching artifacts occur only in the coalesced target summary. Ruled out:
+the b1 plus deferred-ray corrections covering the scene. Actual draws also
+project through b0[4..7] (0EE43D81E394E70C, CFCA and 2CECEC families) and
+b2[10..13] (0357BBB2DEE43C1F, 8289669D93A18C1D, 963B52C73B4143AC). Sky VS
+F8FA801F2CB1E27C uses inverse b2[11..14] at instructions 0..4 and emits the
+original fullscreen position at 8; its inverse needs the corresponding
+clip-offset correction. Radar families also use b2[6..9] and b2[7..10], so
+shared scene depth is insufficient to authorize jitter on every b2 matrix. PS
+7EAC71963E66C5FE in the target-summary pair reconstructs from SV_Position using
+b2[0..2,4] then b2[7..10]; its two draws lack individual contracts.
+
+Missing VS bytecode: 1F3AD1584D7FA3C8, 4D516EF05C68FFA5, 6041FD2D3D0164E1,
+8BD7C37ABCEE7E45, 94D5C556DFD6D705, BBAD1CA808E1E292. Missing PS bytecode:
+147E748F4CD3AE9A, 188A933094FB422A, 4E4FF61E8A08FC7E, 94676B1FD0DF150F,
+BA65C50BBA1ECCBB, E54F2A902E5631F6, FEE777E92850B390. Generated listings and
+coverage detail are in ignored `build/flat-audit/`. Next evidence is narrowly
+defined: these shader bytes, current b0/b2 matrices and camera ownership,
+world/UI classification, and relevant screen-coordinate/depth consumers. No
+broad discovery flight is needed to repeat established frame selection.
+
+Runtime integration needs complete persistent CB write tracking independent of
+bounded discovery, with substitutions limited to qualified scene consumers.
+Resources and backend readiness must be checked before jitter starts. A failed
+backend after rasterization needs a validated single-frame de-jitter output
+path at the tone/copy boundary, history reset and subsequent stand-down;
+restoring a binding alone cannot undo jitter already rendered into pixels. The
+next focused qualification must cover displacement/sign at both sizes,
+forward/inverse agreement, world coverage, unchanged late UI and injected
+backend failure. No additional general capture is needed for frame selection.

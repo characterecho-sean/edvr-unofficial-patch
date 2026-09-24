@@ -1,7 +1,10 @@
 #include "../../src/d3d11/flat_temporal_model.h"
+#include "../../src/d3d11/flat_mono_frame.h"
+#include "../../src/d3d11/engine_velocity_families.h"
 
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace {
 struct Pair {
@@ -283,6 +286,233 @@ void testAdmissionAndWindow() {
     check(!edvr::flatCaptureExpired(100, 200, 0, 1000, 10),
           "startup Present traffic with zero useful frames does not exhaust frame budget");
 }
+
+// Reconstructed metadata from Epic frames 36865 (960x540) and 41961
+// (1280x720). Resource tokens are local stand-ins; shader pairs, camera rows,
+// sequence ranges and the 21 supported / 5 unsupported draw split are captured.
+struct MonoFixture {
+    edvr::FlatContractRecord world[40]{}, handoff[8]{};
+    edvr::FlatMonoFrameInput input{};
+    float rows[6][4] = {
+        {.384289086f, -.446604401f, 0, .904584467f},
+        {-.540786624f, -1.65509605f, 0, -.0248376597f},
+        {.848400056f, -.852697492f, 0, -.42557025f},
+        {0, 0, .0250000004f, 0},
+        {.904584467f, -.0248376597f, -.42557025f, 0},
+        {-159.188187f, 1.31854951f, 72.945961f, 0}
+    };
+    static const void* token(uintptr_t n) { return reinterpret_cast<const void*>(n); }
+    static void setCamera(edvr::FlatContractRecord& r, const float (&camera)[6][4]) {
+        std::memcpy(r.camera, camera, sizeof(camera));
+        r.key.camera = r.camera;
+        r.key.cameraHash = edvr::flatCameraHash(r.camera);
+    }
+    void fill(edvr::FlatContractRecord& r, edvr::FlatContractKind kind,
+              uintptr_t color, uint32_t fmt, uint32_t first, uint32_t last,
+              uint32_t draws, uint64_t vs, uint64_t ps, uint32_t firstWrite,
+              uint32_t lastWrite, bool camera = true) {
+        r = edvr::FlatContractRecord{};
+        auto& k = r.key;
+        k.kind = kind; k.color = token(color); k.rtv = token(color + 1);
+        k.width = input.outputWidth == 1280 && input.frame == 41961 ? 1280 : 960;
+        k.height = k.width * 9 / 16; k.format = fmt;
+        k.depth = token(0xD000); k.dsv = token(0xD001);
+        k.depthWidth = k.width; k.depthHeight = k.height; k.depthFormat = 19;
+        k.viewportCount = 1; k.viewport[2] = static_cast<float>(k.width);
+        k.viewport[3] = static_cast<float>(k.height); k.viewport[5] = 1;
+        k.vs = vs; k.ps = ps; k.sequence = first;
+        r.draws = draws; r.first = first; r.last = last;
+        r.firstCount = r.lastCount = 3; r.firstInstances = r.lastInstances = 1;
+        if (camera) {
+            k.b1 = token(0xB100); setCamera(r, rows);
+            k.writeEpoch = r.firstWriteEpoch = r.lastWriteEpoch = input.epoch;
+            k.writeSeq = r.firstWriteSeq = firstWrite; r.lastWriteSeq = lastWrite;
+        }
+    }
+    explicit MonoFixture(uint32_t width = 960) {
+        using namespace edvr;
+        const bool full = width == 1280;
+        input.world = world; input.handoff = handoff;
+        input.worldCount = 21; input.handoffCount = 3;
+        input.frame = full ? 41961 : 36865; input.epoch = full ? 1802 : 451;
+        input.output = token(0xF000); input.outputWidth = 1280;
+        input.outputHeight = 720; input.outputFormat = 28;
+        input.supportedPair = engine_velocity_family::supportedPair;
+        input.droppedSmallCb = 27;  // observed; all required scene rows survived
+        if (full) {
+            rows[5][0] = -90.3799591f; rows[5][1] = -.570732951f; rows[5][2] = 40.5745583f;
+        }
+        fill(world[0], kFlatContractPool, 0x2300, 23, full ? 644 : 238, full ? 649 : 243, 6,
+            0xEB5234DB6ADB491Dull, 0x3434972DB5336AA4ull, full ? 643 : 237, full ? 643 : 237);
+        fill(world[1], kFlatContractPool, 0x2300, 23, full ? 670 : 264, full ? 670 : 264, 1,
+            0xDE545DC8EE4FBB87ull, 0xE46E3E4832B2FDB0ull, full ? 666 : 260, full ? 666 : 260);
+        fill(world[2], kFlatContractPool, 0x2300, 23, full ? 674 : 269, full ? 679 : 278, 3,
+            0x66DE2CADB1F4AE6Bull, 0x864F1F949851B8DEull, full ? 666 : 260, full ? 676 : 272);
+        fill(world[3], kFlatContractPool, 0x2300, 23, full ? 675 : 271, full ? 680 : 280, 3,
+            0x61AE8EB05FDC18DDull, 0xFC43E42710010343ull, full ? 666 : 260, full ? 676 : 272);
+        fill(world[4], kFlatContractPool, 0x2300, 23, full ? 681 : 281, full ? 681 : 281, 1,
+            0xAACFDCF2FB9AD809ull, 0xCF534B32F491561Aull, full ? 676 : 272, full ? 676 : 272);
+        fill(world[5], kFlatContractPool, 0x2300, 23, full ? 691 : 295, full ? 693 : 297, 2,
+            0x5B4D8E894EEDA8B4ull, 0x4375B72964F386CDull, full ? 689 : 293, full ? 692 : 296);
+        fill(world[6], kFlatContractPool, 0x2300, 23, full ? 706 : 310, full ? 710 : 314, 5,
+            0xBBE58E40FE88EC80ull, 0xDB3E8D20CF53FBC0ull, full ? 702 : 306, full ? 702 : 306);
+        fill(world[7], kFlatContractPool, 0x2300, 23, full ? 652 : 246, full ? 656 : 250, 4,
+            0xEB5234DB6ADB491Dull, 0xB7D50283329322C3ull, full ? 651 : 245, full ? 654 : 248);
+        fill(world[8], kFlatContractPool, 0x2300, 23, full ? 673 : 267, full ? 673 : 267, 1,
+            0xDE545DC8EE4FBB87ull, 0x91F8937EDA723663ull, full ? 666 : 260, full ? 666 : 260);
+        fill(world[9], kFlatContractScreen, 0x2600, 26, full ? 917 : 491, full ? 919 : 493, 3,
+            0x81216C77F90DEDD6ull, 0xA2965EC2931A39C8ull, full ? 916 : 490, full ? 916 : 490);
+        // Nine additional HDR records without scene constants remain allowed.
+        for (uint32_t i = 10; i < 19; ++i) {
+            const uint32_t q = (full ? 735u : 339u) + i - 10;
+            fill(world[i], kFlatContractScreen, 0x2600, 26, q, q, 1,
+                0x7E38A6AA1269C901ull, 0x7CECABDE34FFBE9Eull, 0, 0, false);
+            world[i].key.srvView[0] = token(0x2302); world[i].key.srvResource[0] = token(0x2300);
+        }
+        // Actual full-record replay exceptions: these three HDR draws have
+        // full XY coverage but a zero-width depth range, in both captures.
+        fill(world[14], kFlatContractScreen, 0x2600, 26, full ? 772 : 376, full ? 772 : 376, 1,
+            0xF8FA801F2CB1E27Cull, 0x84965D3C050FB01Bull, 0, 0, false);
+        fill(world[19], kFlatContractScreen, 0x2600, 26, full ? 775 : 379, full ? 775 : 379, 1,
+            0x68DDDEF04D9894AFull, 0x06332CA168B6DA63ull, full ? 774 : 378, full ? 774 : 378);
+        fill(world[20], kFlatContractScreen, 0x2600, 26, full ? 776 : 380, full ? 776 : 380, 1,
+            0xF7A6E916F14A3B1Aull, 0x06332CA168B6DA63ull, full ? 774 : 378, full ? 774 : 378);
+        world[14].key.viewport[5] = world[19].key.viewport[5] = world[20].key.viewport[5] = 0;
+        world[14].firstCount = world[14].lastCount = 6;
+        world[19].firstCount = world[19].lastCount = world[20].firstCount = world[20].lastCount = 12;
+        world[19].firstInstances = world[19].lastInstances = 6655;
+        world[20].firstInstances = world[20].lastInstances = 19;
+        fill(handoff[0], kFlatContractScreen, 0x2700, 27, full ? 937 : 511, full ? 937 : 511, 1,
+            flat_mono_detail::kToneVs, flat_mono_detail::kTonePs, full ? 916 : 490, full ? 916 : 490);
+        fill(handoff[1], kFlatContractOutput, 0xF000, 28, full ? 941 : 515, full ? 941 : 515, 1,
+            flat_mono_detail::kCopyVs, flat_mono_detail::kCopyPs, full ? 916 : 490, full ? 916 : 490);
+        for (uint32_t i = 0; i < 2; ++i) {
+            auto& k = handoff[i].key;
+            k.depth = k.dsv = nullptr; k.depthWidth = k.depthHeight = k.depthFormat = 0;
+        }
+        handoff[0].key.srvView[1] = token(0x2602); handoff[0].key.srvResource[1] = token(0x2600);
+        handoff[1].key.srvView[0] = token(0x2702); handoff[1].key.srvResource[0] = token(0x2700);
+        handoff[1].key.width = 1280; handoff[1].key.height = 720;
+        handoff[1].key.viewport[2] = 1280; handoff[1].key.viewport[3] = 720;
+        handoff[1].firstCount = handoff[1].lastCount = full ? 4 : 3;
+        fill(handoff[2], kFlatContractOutput, 0xF000, 28, full ? 946 : 520, full ? 946 : 520, 1,
+            0xA888D51024D9798Eull, 0x015EF9349EC097E8ull, full ? 943 : 517, full ? 943 : 517);
+        handoff[2].key.depth = token(0xDD00); handoff[2].key.dsv = token(0xDD01);
+        handoff[2].key.width = handoff[2].key.depthWidth = 1280;
+        handoff[2].key.height = handoff[2].key.depthHeight = 720;
+        handoff[2].key.viewport[2] = 1280; handoff[2].key.viewport[3] = 720;
+        const float panel[6][4] = {{1.07699156f, 0, 0, 0}, {0, 1.91465175f, 0, 0},
+            {0, 0, -.000100016594f, 1}, {0, 0, .10001f, 0}, {0, 0, 1, 0}, {0, 0, 0, 0}};
+        setCamera(handoff[2], panel);
+    }
+};
+
+void testMonoFrameSelection() {
+    using namespace edvr;
+    for (uint32_t width : {960u, 1280u}) {
+        MonoFixture f(width);
+        const FlatMonoFrame out = flatSelectMonoFrame(f.input);
+        check(out.selected() && out.renderWidth == width && out.renderHeight == width * 9 / 16 &&
+              out.outputWidth == 1280 && out.outputHeight == 720 && out.nearPlane == .025f,
+              "captured native and scaled mono inputs select correct render/output sizes and near");
+        check(out.color == MonoFixture::token(0x2700) && out.hdr == MonoFixture::token(0x2600) &&
+              out.depth == MonoFixture::token(0xD000) && out.sceneConstants == MonoFixture::token(0xB100),
+              "selector joins exact post-tone/HDR/depth/camera identities");
+        check(out.supportedDraws == 21 && out.unsupportedDraws == 5,
+              "actual producer table admits 21 supported pairs, not all 26 VS-family draws");
+        check(out.toneSequence == (width == 960 ? 511u : 937u) &&
+              out.copySequence == (width == 960 ? 515u : 941u) &&
+              out.firstLaterOutput == (width == 960 ? 520u : 946u),
+              "observed tone/copy/later-panel ordering is preserved");
+        f.handoff[0].camera[0] ^= 0xFF;
+        check(std::memcmp(out.camera, f.rows, sizeof(out.camera)) == 0,
+              "selected metadata owns camera rows independently of collector reuse");
+    }
+    auto reject = [](auto mutate, FlatMonoReason reason, const char* message) {
+        MonoFixture f;
+        mutate(f);
+        const auto out = flatSelectMonoFrame(f.input);
+        check(!out.selected() && out.reason == reason, message);
+    };
+    reject([](auto& f) { f.input.worldCount = f.input.handoffCount = 0; }, FlatMonoReason::NoOutputCopy,
+        "empty capture reports no copy instead of a selected empty frame");
+    reject([](auto& f) { f.handoff[1].key.srvResource[0] = MonoFixture::token(0xBAD); }, FlatMonoReason::NoTonePass,
+        "copy must read the exact observed tone target");
+    reject([](auto& f) { f.handoff[0].key.srvResource[1] = MonoFixture::token(0xBAD); }, FlatMonoReason::NoHdr,
+        "tone must read the exact observed HDR target at PS1");
+    reject([](auto& f) { f.handoff[0].first = f.handoff[0].last = 516; }, FlatMonoReason::WrongOrder,
+        "tone after output copy is refused");
+    reject([](auto& f) { f.world[9].last = 512; }, FlatMonoReason::WrongOrder,
+        "coalesced HDR write crossing tone boundary is refused");
+    reject([](auto& f) { f.handoff[1].draws = 2; f.handoff[1].last++; }, FlatMonoReason::AmbiguousOutputCopy,
+        "coalesced repeated output copy is not a unique pass");
+    reject([](auto& f) { f.handoff[3] = f.handoff[1]; f.input.handoffCount = 4; }, FlatMonoReason::AmbiguousOutputCopy,
+        "distinct output-copy records are ambiguous even when their sources agree");
+    reject([](auto& f) { f.handoff[0].draws = 2; f.handoff[0].last++; }, FlatMonoReason::AmbiguousTonePass,
+        "coalesced repeated tone pass is not unique");
+    reject([](auto& f) { f.handoff[1].key.viewport[0] = .25f; }, FlatMonoReason::InvalidOutputCopy,
+        "fractional output viewport offset is not fullscreen");
+    reject([](auto& f) { f.handoff[0].key.viewportCount = 2; }, FlatMonoReason::InvalidTonePass,
+        "unobserved second viewport prevents selection");
+    reject([](auto& f) { f.handoff[0].key.viewport[5] = 0; }, FlatMonoReason::InvalidTonePass,
+        "HDR zero-depth viewport exception cannot qualify tone pass");
+    reject([](auto& f) { f.handoff[1].key.viewport[5] = 0; }, FlatMonoReason::InvalidOutputCopy,
+        "HDR zero-depth viewport exception cannot qualify output copy");
+    reject([](auto& f) { f.world[0].key.viewport[4] = .25f; }, FlatMonoReason::InvalidSource,
+        "source depth viewport range must match measured contract");
+    reject([](auto& f) { f.handoff[0].firstWriteEpoch--; }, FlatMonoReason::MissingCamera,
+        "old-frame camera cannot name this handoff");
+    reject([](auto& f) { f.world[0].firstWriteSeq = f.world[0].first + 1; }, FlatMonoReason::InvalidSource,
+        "later write cannot supply an earlier source draw");
+    reject([](auto& f) { f.world[0].lastWriteSeq = f.world[0].last + 1; }, FlatMonoReason::InvalidSource,
+        "coalesced last draw also requires preceding write provenance");
+    reject([](auto& f) { f.rows[5][0] += 1; MonoFixture::setCamera(f.world[0], f.rows); }, FlatMonoReason::AmbiguousSource,
+        "supported source under a different camera cannot be silently ignored");
+    reject([](auto& f) { f.world[21] = f.world[0]; f.world[21].key.depth = MonoFixture::token(0xD900);
+        f.world[21].key.dsv = MonoFixture::token(0xD901); f.input.worldCount = 22; }, FlatMonoReason::AmbiguousSource,
+        "same screen camera naming another depth is ambiguous");
+    reject([](auto& f) { f.world[10].key.dsv = MonoFixture::token(0xBAD); }, FlatMonoReason::ConflictingHdr,
+        "HDR writes must bind the same scene DSV");
+    reject([](auto& f) { f.world[9].key.viewport[4] = .25f; }, FlatMonoReason::ConflictingHdr,
+        "unmeasured HDR depth-range variant remains refused");
+    reject([](auto& f) { f.rows[5][0] += 1; MonoFixture::setCamera(f.world[9], f.rows); }, FlatMonoReason::ConflictingHdr,
+        "known conflicting HDR camera is not equivalent to absent fullscreen constants");
+    reject([](auto& f) { for (uint32_t i : {9u, 19u, 20u}) {
+        f.world[i].key.camera = nullptr; f.world[i].key.cameraHash = 0; } }, FlatMonoReason::NoHdrCamera,
+        "HDR must contain at least one observed matching camera");
+    reject([](auto& f) { for (uint32_t i = 0; i < 7; ++i) f.world[i].key.ps = 0; }, FlatMonoReason::NoSupportedSource,
+        "VS families with unsupported PSs cannot name a motion source");
+    reject([](auto& f) { f.input.supportedPair = nullptr; }, FlatMonoReason::InvalidInput,
+        "missing production pair validator cannot select metadata");
+    reject([](auto& f) { f.input.unknownLists = 1; }, FlatMonoReason::ForeignWork,
+        "unknown command list makes input selection uncertain");
+    reject([](auto& f) { f.input.foreignCalls = 1; }, FlatMonoReason::ForeignWork,
+        "foreign-context observations make input selection uncertain");
+    for (uint32_t i = 0; i < 5; ++i) {
+        reject([i](auto& f) {
+            uint32_t* drops[] = {&f.input.droppedViews, &f.input.droppedTargets, &f.input.droppedWorld,
+                &f.input.droppedHandoff, &f.input.droppedLargeCb};
+            *drops[i] = 1;
+        }, FlatMonoReason::Truncated, "each relevant truncated observation bank refuses selection");
+    }
+    for (uint32_t bad = 0; bad < 5; ++bad) {
+        reject([bad](auto& f) {
+            if (bad == 0) f.rows[3][2] = 0;
+            if (bad == 1) f.rows[0][0] = std::numeric_limits<float>::quiet_NaN();
+            if (bad == 2) f.rows[0][2] = .001f;
+            if (bad == 3) for (uint32_t i = 0; i < 3; ++i) f.rows[i][0] = 0;
+            if (bad == 4) f.rows[4][0] += 1;
+            MonoFixture::setCamera(f.handoff[0], f.rows); MonoFixture::setCamera(f.handoff[1], f.rows);
+        }, FlatMonoReason::InvalidCamera, "invalid camera near/finite/clip/basis/axis shape refuses selection");
+    }
+    reject([](auto& f) { f.world[21] = f.world[9]; f.input.worldCount = 22;
+        f.world[21].key.color = MonoFixture::token(0x2700); f.world[21].first = f.world[21].last = 514;
+        f.world[21].draws = 1; }, FlatMonoReason::BrokenLineage,
+        "an intervening write to tone output breaks the observed handoff");
+    check(!engine_velocity_family::supportedPair(0xEB5234DB6ADB491Dull, 0xB7D50283329322C3ull) &&
+          !engine_velocity_family::supportedPair(0xDE545DC8EE4FBB87ull, 0x91F8937EDA723663ull),
+          "historically unsupported captured pairs remain outside unchanged producer table");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -297,6 +527,7 @@ int main(int argc, char** argv) {
     testContractKeysAndReuse();
     testContractAdmissionAndReservation();
     testAdmissionAndWindow();
+    testMonoFrameSelection();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

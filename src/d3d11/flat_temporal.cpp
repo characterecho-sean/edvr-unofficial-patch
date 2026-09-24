@@ -1,5 +1,6 @@
 #include "flat_temporal.h"
 #include "flat_temporal_model.h"
+#include "flat_mono_frame.h"
 
 #include <algorithm>
 #include <cmath>
@@ -317,6 +318,32 @@ void printContracts(uint64_t frame) {
     }
 }
 
+void printMonoInput(uint64_t frame) {
+    FlatMonoFrameInput input{};
+    input.world = g.contracts; input.worldCount = g.contractCount;
+    input.handoff = g.handoffContracts; input.handoffCount = g.handoffContractCount;
+    input.output = g.backbuffer; input.outputWidth = g.backW;
+    input.outputHeight = g.backH; input.outputFormat = g.backFmt;
+    input.frame = frame; input.epoch = g.epoch;
+    input.droppedViews = g.viewOverflow; input.droppedTargets = g.targetOverflow;
+    input.droppedWorld = g.contractOverflow; input.droppedHandoff = g.handoffContractOverflow;
+    input.droppedLargeCb = g.largeCbOverflow; input.droppedSmallCb = g.smallCbOverflow;
+    input.unknownLists = g.unknownLists;
+    input.foreignCalls = detail::g_flatTemporalForeignCalls.load(std::memory_order_relaxed);
+    input.supportedPair = engineVelocityPoolFamilyPair;
+    const FlatMonoFrame mono = flatSelectMonoFrame(input);
+    // Always print a verdict, even for an empty report or refused metadata.
+    // This is report-time selection only; it does not arm the motion producer.
+    Log::get().note("flat discover mono-input frame=%llu epoch=%llu selector-called=1 status=%s reason=%s color=%p hdr=%p depth=%p dsv=%p depth-fmt=%u VSb1=%p camera-hash=%016llX near=%.9g render=%ux%u output=%p %ux%u supported-pair-draws=%u unsupported-pair-draws=%u source-q=%u..%u hdr-q=%u..%u tone-q=%u copy-q=%u later-output-q=%u; observational candidate, identities frame-local, treatment=inactive certificate=0",
+        static_cast<unsigned long long>(mono.frame), static_cast<unsigned long long>(mono.epoch),
+        mono.selected() ? "selected" : "refused", flatMonoReasonName(mono.reason),
+        mono.color, mono.hdr, mono.depth, mono.dsv, mono.depthFormat, mono.sceneConstants,
+        static_cast<unsigned long long>(mono.cameraHash), mono.nearPlane,
+        mono.renderWidth, mono.renderHeight, mono.output, mono.outputWidth, mono.outputHeight,
+        mono.supportedDraws, mono.unsupportedDraws, mono.sourceFirst, mono.sourceLast,
+        mono.hdrFirst, mono.hdrLast, mono.toneSequence, mono.copySequence, mono.firstLaterOutput);
+}
+
 void report(uint64_t frame, const char* phase) {
     Log::get().note("flat discover %s frame=%llu profile=flat request=%s treatment=refused reason=uncertified-scene-projection-depth-boundary certificate=%u presents=%u useful-frames=%u test=%u failed=%u depth-frames=%u output-frames=%u draws=%u depth-draws=%u copies=%u dispatches=%u unknown-lists=%u foreign-thread-calls=%llu frame-dropped-observations(view,target,edge,output-edge,large-cb,small-cb,clear)=%u,%u,%u,%u,%u,%u,%u output=%p %ux%u fmt=%u",
                     phase, static_cast<unsigned long long>(frame),
@@ -361,6 +388,7 @@ void report(uint64_t frame, const char* phase) {
                     static_cast<unsigned long long>(frame), g.targetCount,
                     kTargets, g.targetOverflow, depthOnly, colorDepth, unresolved);
     printContracts(frame);
+    printMonoInput(frame);
     if (best) {
         Log::get().note("flat discover candidate frame=%llu color=%p depth=%p target=%ux%u viewport=%ux%u fmt=%u draws=%u depth-draws=%u q=%u..%u clears(color,depth)=%u,%u VSb0=%p VSb1=%p VS=%016llX; strongest admitted color+depth shape only, not scene certificate",
                         static_cast<unsigned long long>(frame), best->color, best->depth,

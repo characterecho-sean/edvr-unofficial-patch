@@ -21,6 +21,7 @@
 #include "gpu_timing.h"
 #include "dxbc_engine_velocity.h"
 #include "engine_velocity_emit.h"
+#include "engine_velocity_families.h"
 #include "engine_velocity_state.h"
 #include "kinematic_eval_hook.h"
 #include "kinematic_eval_probe.h"
@@ -63,34 +64,12 @@ std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 // vs_DE54's ps_91F8937EDA723663 and ps_A6070F9DD1CFB601, whose input register
 // the family's SV_Position sits at holds another semantic (the patcher's
 // refusal; engine_velocity_test's --corpus candidates print it).
-struct Family {
-    uint64_t vs;
-    const char* name;
-    uint64_t ps[4];
-};
-constexpr Family kFamilies[] = {
-    {0xEB5234DB6ADB491Dull, "vs_EB5234DB6ADB491D", {0xCB9F297EFF264251ull, 0x9ABF60B4B51F2C1Full, 0x3434972DB5336AA4ull, 0}},
-    {0x5B4D8E894EEDA8B4ull, "vs_5B4D8E894EEDA8B4", {0x4375B72964F386CDull, 0, 0, 0}},
-    {0xBBE58E40FE88EC80ull, "vs_BBE58E40FE88EC80", {0xDB3E8D20CF53FBC0ull, 0, 0, 0}},
-    {0xDE545DC8EE4FBB87ull, "vs_DE545DC8EE4FBB87", {0xE46E3E4832B2FDB0ull, 0xCB429E043DBB2506ull, 0, 0}},
-    {0xAACFDCF2FB9AD809ull, "vs_AACFDCF2FB9AD809", {0xCF534B32F491561Aull, 0, 0, 0}},
-    {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0, 0, 0}},
-    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0, 0}},
-    {0x436193B352A2897Eull, "vs_436193B352A2897E", {0x16940F576006BE65ull, 0, 0, 0}},
-    {0x889A5279E68F0672ull, "vs_889A5279E68F0672", {0xB46E52A1E0B2F39Cull, 0xEBA95E15B0A66102ull, 0, 0}},
-};
-constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
+using engine_velocity_family::Family;
+using engine_velocity_family::kFamilies;
+using engine_velocity_family::kFamilyCount;
+using engine_velocity_family::familyOfVs;
+using engine_velocity_family::keyedPs;
 static_assert(kFamilyCount <= kMaxFamilies, "familyDraws holds every family");
-
-int familyOfVs(uint64_t hash) {
-    for (int i = 0; i < kFamilyCount; ++i) if (kFamilies[i].vs == hash) return i;
-    return -1;
-}
-bool keyedPs(int family, uint64_t hash) {
-    if (family < 0 || !hash) return false;
-    for (uint64_t h : kFamilies[family].ps) if (h == hash) return true;
-    return false;
-}
 bool anyKeyedPs(uint64_t hash) {
     for (int i = 0; i < kFamilyCount; ++i) if (keyedPs(i, hash)) return true;
     return false;
@@ -1508,6 +1487,9 @@ bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
 }
 
 bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept { return familyOfVs(vsHash) >= 0; }
+bool engineVelocityPoolFamilyPair(uint64_t vsHash, uint64_t psHash) noexcept {
+    return engine_velocity_family::supportedPair(vsHash, psHash);
+}
 
 void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants,
                               EngineVelocitySourceSignal signal) {
