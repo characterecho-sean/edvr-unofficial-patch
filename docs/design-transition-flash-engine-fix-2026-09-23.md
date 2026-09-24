@@ -43,8 +43,13 @@ static chain: see "Flight 184826".*
   - Part B is read-only hooks on the positioner Tick (`0x107C760`) and
     swap-sync (`0x1090420`).
   - Dumps fire only on scene-judged eye resets or positioner swaps.
-  - The Steam copy runs b9a73fcb with the trap on and one marked
-    `eye_origin_readers = on` line; remove it after the flight.
+  - The Steam copy runs 014edc20 (b9a73fcb plus the v35 merge and a
+    flight gate) with the trap on and one marked `eye_origin_readers = on`
+    line; remove it after the flight.
+  - The flight gate: the watch arms only after the detector's camera
+    validation ("transition flash fix ACTIVE"), because the pose address
+    is stable from the VR menu on. Its bounds are 180 s and 100,000 hits.
+    Read the flight with `--expect-build 014edc20`.
   - The merge with main moved frame_flag to v35: both branches had taken
     v34 for different layouts.
 - **Before that flight:** the render-side anchor was built and installed.
