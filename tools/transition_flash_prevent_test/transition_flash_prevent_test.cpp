@@ -46,7 +46,10 @@
 // rotation), premul4x4 (the acting build's full premultiply, hand-composed
 // B*M and both identity sides), patchSceneChoice on the flight-derived
 // cam/pool points plus every band edge, and the pending sim's N+1..N+3
-// render-frame window.
+// render-frame window. CHANGE 13 (the live-mailbox tap) adds mailboxPlausible
+// -- the sanity gate a tap-time live read passes through -- checked against
+// the measured tunnel base, a measured 5 km rebase, and the over-range and
+// non-finite rejections.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1175,6 +1178,38 @@ void casePatchSimWindow() {
     check(!tfeb::patchSimWindowCovers(13551, 13547), "patchSimWindow: N+4 is past the window");
 }
 
+// --- transition_flash_eye_base_core.h: CHANGE 13, the tap-time LIVE-mailbox
+// probe's sanity gate (flight N+1's finding: the consume-indexed NEW-base
+// candidate is structurally stale at the bad render; the refill sits LIVE
+// in the mailbox during the tap instead).
+
+void caseLiveMailboxPlausible() {
+    const float good[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+                            0.003f, 3.509f, 1613.249f, 1};   // the f15513 tunnel base itself
+    check(tfeb::mailboxPlausible(good), "liveMailbox: the measured tunnel base passes");
+
+    const float fiveKm[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+                              -229.8f, 663.0f, 274.5f, 1};   // a measured 5 km rebase
+    check(tfeb::mailboxPlausible(fiveKm), "liveMailbox: a measured 5 km rebase passes");
+
+    float bad[16];
+    std::memcpy(bad, good, sizeof(bad));
+    bad[12] = 2e7f;   // 20,000 km -- past the 1e7 gate
+    check(!tfeb::mailboxPlausible(bad), "liveMailbox: a 2e7-unit translation is implausible");
+
+    std::memcpy(bad, good, sizeof(bad));
+    bad[7] = NAN;     // one non-finite lane anywhere
+    check(!tfeb::mailboxPlausible(bad), "liveMailbox: a NaN lane is implausible");
+
+    std::memcpy(bad, good, sizeof(bad));
+    bad[0] = INFINITY;
+    check(!tfeb::mailboxPlausible(bad), "liveMailbox: an Inf lane is implausible");
+
+    // The gate does not screen the RESET value -- the caller does that with
+    // isResetMailbox first; identity passes here by design.
+    check(tfeb::mailboxPlausible(tfeb::kResetMailbox), "liveMailbox: the reset value is for isResetMailbox, not this gate");
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1237,6 +1272,7 @@ int wmain(int argc, wchar_t** argv) {
     casePatchSceneChoiceFlightPoints();
     casePatchSceneChoiceBands();
     casePatchSimWindow();
+    caseLiveMailboxPlausible();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
