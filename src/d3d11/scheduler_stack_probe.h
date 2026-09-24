@@ -139,7 +139,7 @@ private:
 extern SchedulerStackProbe schedulerStackProbe;
 
 // Config-facing lifecycle, driven by the once-per-second
-// temporalPassConfigure re-poll (the kinematic_motion.cpp shape):
+// temporalPassConfigure re-poll:
 // configure(true) is idempotent while live; configure(false) stands down
 // and clears. On any hook refusal the probe logs once per distinct status
 // and stays inert -- the degrade philosophy the rest of the instruments

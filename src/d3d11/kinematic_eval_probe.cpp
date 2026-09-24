@@ -59,7 +59,7 @@ bool KinematicEvalProbe::arm(uint32_t meshFrame) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     // Executable validation lives INSIDE the attach, under the hook
     // installation mutex: validating unlocked here raced a concurrent
-    // tracker install that had patched the prologue but not yet published
+    // install that had patched the prologue but not yet published
     // ready, and the arm then rejected the supported executable
     // (2026-09-20 review finding 5).
     const char* result=attachKinematicEvalHooks(this);
@@ -112,7 +112,7 @@ void KinematicEvalProbe::notePresentFrame(uint32_t presentFrame) noexcept {
         // frame that just "ended" could not accept a single sample -- flushing
         // it fabricates an empty frame and forces min_frame_records to zero
         // even with a healthy feed (2026-09-20 review finding 7). Only real
-        // present-domain transitions close frames, as the tracker does.
+        // present-domain transitions close frames.
         clockSeeded_=true;
         frame_.store(presentFrame,std::memory_order_release);
     } else {

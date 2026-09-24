@@ -58,7 +58,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "exposure_fix.h"
 #include "menu.h"
 #include "kinematic_eval_probe.h"
-#include "kinematic_motion.h"
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
@@ -1051,9 +1050,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // not beside vScreenFrameBoundary below -- that site sits behind the
         // graphicsRuntimeDisabled early return and would skip those presents.
         kinematicEvalProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
-        // The kinematic tracker's clock, same call site for the same
-        // exactly-once-per-owned-present guarantee. One atomic load when off.
-        kinematicMotionNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
         // Engine-record velocity's clock (the emit table's frame stamps and
         // the per-eye snapshots), the same exactly-once-per-owned-present tick.
         engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));

@@ -48,8 +48,7 @@ static_assert(decltype(observer)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
 
 // The relay gate, distinct from observer: non-zero while ANY consumer wants
-// eval callbacks -- the probe while attached (eye-dump captures), the
-// kinematic tracker while engine motion's diagnostics want it, the emit
+// eval callbacks -- the probe while attached (eye-dump captures), the emit
 // bracket while fix.temporal_aa is on (no dump involved), the scheduler stack
 // probe while armed, or the static prop gate while fix.static_prop_updates is
 // on.
@@ -57,13 +56,10 @@ static_assert(decltype(observer)::is_always_lock_free,
 alignas(8) std::atomic<uintptr_t> evalGate{0};
 static_assert(decltype(evalGate)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
-std::atomic<bool> trackerWanted{false};
 // Engine-record velocity's own want on the hook set (the 2026-09-23
 // performance review, item 1): the emit bracket rides the direct-producer
-// relay, which gates on evalGate, so the emit holds the gate open itself and
-// the legacy tracker's observer can be diagnostic-only.
+// relay, which gates on evalGate, so the emit holds the gate open itself.
 std::atomic<bool> emitWanted{false};
-alignas(8) std::atomic<KinematicTrackerObserverFn> trackerObserver{nullptr};
 // Engine-record velocity's emit observer (direct producer 0's post-forward).
 alignas(8) std::atomic<EngineEmitObserverFn> emitObserver{nullptr};
 // The scheduler stack probe's want: its targets 0/1 are the job bodies
@@ -97,7 +93,7 @@ static_assert(decltype(setterGate)::is_always_lock_free,
 std::atomic<const char*> g_setterStatus{"not requested"};
 // FUN_1442B3FC0's relay gate: a cell of its own, not evalGate, so the
 // per-part patch (installed only for the gate probe and the governor) costs
-// the tracker and the other evalGate consumers nothing. Open only while the
+// the evalGate consumers nothing. Open only while the
 // probe or the governor is attached AND the patch is verified ours.
 alignas(8) std::atomic<uintptr_t> partGate{0};
 static_assert(decltype(partGate)::is_always_lock_free,
@@ -406,8 +402,6 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
     const uint32_t jobMask=t_jobMask;
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
     if(probe)probe->observe(descriptor,renderRecord,jobMask); // observe() gates on active()
-    const auto tracker=trackerObserver.load(std::memory_order_acquire);
-    if(tracker)tracker(descriptor,jobMask); // kinematicMotionObserve gates on its own flag
     const auto forward=reinterpret_cast<EvalFn>(g_evalEntry.forward.load(std::memory_order_acquire));
     const uintptr_t result=forward(descriptor,param2,renderRecord);
     // The cull gate probe reads the verdict the call just wrote (param2:
@@ -460,15 +454,15 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
     // (the L1 brackets-only remeasure, perf doc 2026-09-20 17:55): the
     // detailed observer's cost enters the measured region only while it is
     // actually capturing, which is exactly the with/without comparison L1
-    // wants. The probe global is process-lifetime, so the tracker-only path
-    // (fix.temporal_aa on, probe never attached) times too. jobs[] now
+    // wants. The probe global is process-lifetime, so a flight with the
+    // probe never attached (fix.temporal_aa on) times too. jobs[] now
     // accumulates per-session, not per capture window. Ownership capture
     // stays capture-gated: observe()/noteOwnership keep their active() gates.
     if(probe && probe->active())probe->noteOwnership(job,a);
     // Job 2's dirty-queue append counter, read at entry (exit read after
     // the body below). Outside the timed region: L1 measures the job body,
     // not this probe. Goes to the process-lifetime global, not the observer
-    // pointer, so tracker-only flights capture it too.
+    // pointer, so flights without an eye run capture it too.
     uint32_t queueEntry=0;
     const bool queueArmed=(job==2)&&readQueueCount(a,&queueEntry);
     // Capture boundary (2026-09-20 review finding 8): samples commit only to
@@ -743,7 +737,7 @@ bool ensureInstalled(uintptr_t base) noexcept {
     return true;
 }
 
-// The executable check for the tracker path: PE timestamp/image size of the
+// The executable check for the shared install: PE timestamp/image size of the
 // hash-verified build plus the evaluator's prologue (or our own patch
 // already there). Mirrors KinematicEvalProbe::validateExecutableLocked
 // without touching probe state -- this file's copy-culture is deliberate.
@@ -954,7 +948,7 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
         const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         if(!base)return "identity_mismatch";
         // Validation is part of the locked install operation: an unlocked
-        // pre-check raced a concurrent tracker install that had patched the
+        // pre-check raced a concurrent install that had patched the
         // prologue but not yet published ready, and rejected the supported
         // executable (2026-09-20 review finding 5).
         if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
@@ -970,12 +964,11 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
 
 // The gate is recomputed under the install mutex from BOTH consumer cells;
 // every attach/detach transition holds that mutex. An unlocked check-then-set
-// raced: probe detach reads trackerWanted=false, tracker attach publishes
-// wanted=true/gate=1, detach then writes gate=0 and the live tracker goes
-// deaf (2026-09-20 review finding 4).
+// raced: one consumer's detach read another's want as false, the other's
+// attach published gate=1, and the detach then wrote gate=0, leaving a live
+// consumer deaf (2026-09-20 review finding 4).
 void recomputeGateLocked() noexcept {
     const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
-                    trackerWanted.load(std::memory_order_acquire) ||
                     emitWanted.load(std::memory_order_acquire) ||
                     schedulerWanted.load(std::memory_order_acquire) ||
                     staticGateWanted.load(std::memory_order_acquire) ||
@@ -1002,10 +995,6 @@ void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
         observer.compare_exchange_strong(probe,nullptr,std::memory_order_acq_rel);
         recomputeGateLocked();
     } catch(...) {}
-}
-
-void kinematicEvalSetTrackerObserver(KinematicTrackerObserverFn fn) noexcept {
-    trackerObserver.store(fn,std::memory_order_release);
 }
 
 void kinematicEvalSetEmitObserver(EngineEmitObserverFn fn) noexcept {
@@ -1043,30 +1032,6 @@ void kinematicEvalEmitDetach() noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
         emitWanted.store(false,std::memory_order_release);
-        recomputeGateLocked();
-    } catch(...) {}
-}
-
-const char* kinematicEvalTrackerAttach() noexcept {
-    try {
-        std::lock_guard<std::mutex> lock(g_installMutex);
-        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-        if(!base)return "identity_mismatch";
-        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
-            return "identity_mismatch";
-        if(!ensureInstalled(base))return "install_failed";
-        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
-        trackerWanted.store(true,std::memory_order_release);
-        evalGate.store(1,std::memory_order_release);
-        builderGate.store(1,std::memory_order_release);   // evalGate open implies it
-        return "installed";
-    } catch(...) {return "install_failed";}
-}
-
-void kinematicEvalTrackerDetach() noexcept {
-    try {
-        std::lock_guard<std::mutex> lock(g_installMutex);
-        trackerWanted.store(false,std::memory_order_release);
         recomputeGateLocked();
     } catch(...) {}
 }

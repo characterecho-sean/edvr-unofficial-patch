@@ -10,8 +10,8 @@ namespace edvr {
 SchedulerStackProbe schedulerStackProbe;
 
 namespace {
-// The ~20 s totals cadence the other instruments keep (kinematic_motion's
-// kSummaryMs): frequent enough to bracket a short flight, rare enough that
+// The ~20 s totals cadence the other instruments keep: frequent enough to
+// bracket a short flight, rare enough that
 // four target lines per tick stay bounded.
 constexpr uint64_t kReportMs=20000;
 }
@@ -303,9 +303,8 @@ void SchedulerStackProbe::selfTestPopulateForJson() noexcept {
     }
 }
 
-// --- config-facing lifecycle (same configure/shutdown shape as
-// kinematic_motion.cpp, driven by the once-per-second temporalPassConfigure
-// re-poll) -------------------------------------------------------------
+// --- config-facing lifecycle (driven by the once-per-second
+// temporalPassConfigure re-poll) ---------------------------------------
 
 void schedulerStackProbeConfigure(bool on) {
     if(on==schedulerStackProbe.active())return; // 1 Hz re-poll idempotency

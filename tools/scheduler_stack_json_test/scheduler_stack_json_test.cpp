@@ -16,8 +16,8 @@
 namespace edvr {
 // Linker stubs for the hook-install paths (arm/finish/reset), which this
 // rig never calls; the pattern is set by kinematic_json_test. The Log stub
-// stands in for src\common\log.cpp (the kinematic_motion_test pattern --
-// the fixture must not write log files).
+// stands in for src\common\log.cpp (the fixture must not write log
+// files).
 const char* attachSchedulerStackHooks(SchedulerStackProbe*) noexcept { return "identity_mismatch"; }
 void detachSchedulerStackHooks(SchedulerStackProbe*) noexcept {}
 Log& Log::get() { static Log instance; return instance; }

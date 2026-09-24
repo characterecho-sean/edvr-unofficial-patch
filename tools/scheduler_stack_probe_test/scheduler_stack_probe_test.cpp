@@ -26,8 +26,8 @@
 
 namespace edvr {
 // Linker stubs: this rig never hooks anything (arm/finish/reset unused),
-// and the Log stub stands in for src\common\log.cpp (the
-// kinematic_motion_test pattern -- note() must not write files here).
+// and the Log stub stands in for src\common\log.cpp (note() must not
+// write files here).
 const char* attachSchedulerStackHooks(SchedulerStackProbe*) noexcept { return "installed"; }
 void detachSchedulerStackHooks(SchedulerStackProbe*) noexcept {}
 Log& Log::get() { static Log instance; return instance; }

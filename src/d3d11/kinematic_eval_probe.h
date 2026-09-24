@@ -187,8 +187,8 @@ public:
     // The job-2 bracket reads the physics dirty-queue append counter at job
     // entry and exit (descriptor +0x18 points at it; decomp_432B2A0,
     // param_1[3]). Counts only, per-session like jobs[] -- NOT cleared by
-    // clearLocked -- and never gated on active(): a tracker-only flight
-    // harvests the lifecycle too.
+    // clearLocked -- and never gated on active(): a flight without an eye
+    // run harvests the lifecycle too.
     void notePhysQueue(uint32_t entryCount,uint32_t exitCount) noexcept;
     // The job-2 node capture (lifecycle decoded on flight 193356, kinematic
     // arc 19:45 entry; sanctioned 2026-09-20 20:27): node pointers walked
@@ -207,7 +207,7 @@ public:
     // walk faulted or found no sane array, bit1 an exit read faulted (that
     // call's items dropped), bit2 the walk hit its bucket cap. Per-session,
     // never gated on active(), NOT cleared by clearLocked -- same
-    // discipline as notePhysQueue, so tracker-only flights harvest it.
+    // discipline as notePhysQueue, so flights without an eye run harvest it.
     static constexpr uint32_t kBucketFlagEntryWild=1u;
     static constexpr uint32_t kBucketFlagExitFault=2u;
     static constexpr uint32_t kBucketFlagOverflow=4u;

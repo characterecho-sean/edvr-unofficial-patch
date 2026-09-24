@@ -39,7 +39,6 @@
 #include "screen_motion.h"
 #include "weapon_motion.h"
 #include "celestial_motion.h"
-#include "kinematic_motion.h"
 #include "cs_stage_save.h"
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
@@ -6176,17 +6175,15 @@ void temporalPassDumpHistory(const char* trigger) {
     Log::get().note("--- end temporal submission history ---");
 }
 
-// Engine motion's diagnostics (the 2026-09-23 performance review, item 1): the
-// legacy kinematic tracker -- a mutex on every evaluation on the job threads,
-// a population scan at every Present on the caller thread -- and the emit's
-// census run only while something reads them: advanced.temporal_aa_diagnostics
-// or an eye run (from its arming to the first config poll
-// after it is written). Engine-record velocity holds its own hooks and needs
-// neither.
+// Engine motion's diagnostics (the 2026-09-23 performance review, item 1):
+// the emit's census runs only while something reads it --
+// advanced.temporal_aa_diagnostics or an eye run (from its arming to the
+// first config poll after it is written). Engine-record velocity holds its
+// own hooks and needs none of it. (The legacy kinematic tracker that also
+// ran here retired on 2026-09-23.)
 static void applyEngineMotionDiagnostics() {
     const bool on = detail::g_temporalPassWantedFssChrome &&
                     (g_diagnostics || g_eyeRunLeft > 0 || g_eyeRunReady);
-    kinematicMotionConfigure(on);
     engineVelocityDiagnostics(on);
 }
 
@@ -6234,16 +6231,16 @@ void temporalPassConfigure(Config& cfg) {
     // which is the point: a lever, not a setting to fly with.
     // Engine-record velocity (docs/kinematic-motion-injection-2026-09-19.md)
     // is part of fix.temporal_aa in every mode, with no key of its own (the
-    // separate key retired 2026-09-23): the kinematic tracker's hook set, the
+    // separate key retired 2026-09-23): the shared kinematic eval hook set, the
     // emit bracket writing each rig record's previous pose into the pool, the
     // pool families' own draws recording slot and depth, and the compose
     // taking the record's exact motion there. It arms and disarms with the
     // mode, live; a hook that cannot install stands it down whole, logged.
     const bool engineMotionOn = detail::g_temporalPassWantedFssChrome;
     celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.terrain_motion", true));
-    // The emit holds the shared eval hooks itself; the legacy tracker and the
-    // emit's census are diagnostic-only (applyEngineMotionDiagnostics, below
-    // the debug mode's read).
+    // The emit holds the shared eval hooks itself; the emit's census is
+    // diagnostic-only (applyEngineMotionDiagnostics, below the debug mode's
+    // read).
     engineVelocityConfigure(engineMotionOn);
     // The scheduler stack-capture probe (docs/engine-render-pipeline.md
     // stage 0): read-only return-address signatures at the four
@@ -7268,7 +7265,7 @@ static void beginEyeRun() {
                  static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
-    applyEngineMotionDiagnostics();   // the tracker and the census run for the run
+    applyEngineMotionDiagnostics();   // the census runs for the run
     g_eyeMotionTraceCount = 0;
     g_eyeInputsFrame=0;
     g_eyeRunUntreated=false;

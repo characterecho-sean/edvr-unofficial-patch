@@ -44,9 +44,8 @@ void schedulerStackNoteJobEntry(uint32_t target, uintptr_t entryRsp) noexcept;
 // invalidation trigger is THIS hook's reset target (FUN_1436a0f50); a
 // second patch is impossible (CodeHook refuses) and unnecessary. The
 // resetObserved callback invokes the registered observer before the
-// forward; the gate module registers it the way the kinematic tracker
-// registers its eval observer, so this file carries no link dependency on
-// the gate.
+// forward; the gate module registers it the way the emit registers its eval
+// observer, so this file carries no link dependency on the gate.
 using SchedulerResetObserverFn = void (*)(void) noexcept;
 void schedulerStackSetResetObserver(SchedulerResetObserverFn fn) noexcept;
 // Installs this file's own hook set (validating the executable) and holds

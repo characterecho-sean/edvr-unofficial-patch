@@ -24,7 +24,6 @@
 #include "engine_velocity_state.h"
 #include "kinematic_eval_hook.h"
 #include "kinematic_eval_probe.h"
-#include "kinematic_motion.h"
 #include "vscreen.h"
 #include "../common/log.h"
 #include "../common/timing.h"
@@ -254,12 +253,12 @@ std::atomic<uint64_t> g_emitSampled{0}, g_emitSampledTicks{0};
 const char* g_verifyWhy = nullptr;            // the build check's refusal, null = passed
 const char* g_hookWhy = "not checked yet";    // the emit hook's, null = installed
 std::atomic<bool> g_emitLive{false};          // both passed: the feature stands up
-// The emit's own want on the shared eval hooks (kinematicEvalEmitAttach):
-// the legacy tracker no longer holds them open for it (the 2026-09-23
-// performance review, item 1). Retried quietly at later configures.
+// The emit's own want on the shared eval hooks (kinematicEvalEmitAttach),
+// its own since the 2026-09-23 performance review, item 1. Retried quietly
+// at later configures.
 bool g_emitAttached = false;
 // Engine motion's diagnostics (engineVelocityDiagnostics): the emit's census
-// of one record in eight runs only while they are wanted, as the tracker does.
+// of one record in eight runs only while they are wanted.
 std::atomic<bool> g_diagnosticsWanted{false};
 
 // --- Draw-side and pixel counters (owner thread) -------------------------------
@@ -314,7 +313,6 @@ struct DrawStats {
     // frame (diagnostics or motion_source), [1] sampled (one frame in
     // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared).
     uint64_t panel[2][5] = {}, panelDraws[2] = {};
-    uint64_t trackerMovers = 0, trackerFrames = 0;
     uint64_t burstFrames = 0, burstGaps = 0;
     void clear() { *this = DrawStats{}; }
 };
@@ -1047,24 +1045,6 @@ void summaryLocked(uint64_t now) {
                     g_diagnosticsWanted.load(std::memory_order_relaxed)
                         ? "" : " (the census is off: it runs only with engine motion's diagnostics -- "
                                "advanced.temporal_aa_diagnostics or an eye run; these zeros are not counts)");
-    // The legacy tracker's price (the 2026-09-23 performance review, item 1):
-    // diagnostic-only now, measured whenever it runs.
-    {
-        const KinematicMotionCost c = kinematicMotionTakeCost();
-        const double f = double(std::max<uint64_t>(1, c.qpcFrequency));
-        const double waitUs = c.lockSamples ? double(c.lockWaitTicks) * 1e6 / f / double(c.lockSamples) : 0.0;
-        if (c.evaluations || c.presentScans)
-            Log::get().note("engine motion: tracker (diagnostic-only) cost: %llu evaluations (%.0f a frame), each taking "
-                            "its mutex: lock wait %.2f us sampled (1 in %u, %llu samples), ~%.3f ms/frame summed over the "
-                            "job threads; Present scan %.3f ms/frame on the caller thread (%llu ticks).",
-                            u(c.evaluations), double(c.evaluations) / frames, waitUs, kLockSampleEvery, u(c.lockSamples),
-                            waitUs * double(c.evaluations) / frames / 1000.0,
-                            double(c.presentTicks) * 1e3 / f / double(std::max<uint64_t>(1, c.presentScans)),
-                            u(c.presentScans));
-        else
-            Log::get().note("engine motion: tracker off (diagnostic-only: advanced.temporal_aa_diagnostics or an eye "
-                            "run turns it on): no evaluations observed, no Present scan.");
-    }
     uint64_t invalid = 0;
     for (uint64_t v : g_draw.invalid) invalid += v;
     std::string invalidText, refusedText;
@@ -1079,14 +1059,8 @@ void summaryLocked(uint64_t now) {
                     engineVelocityBindRefusalName(static_cast<EngineVelocityBindRefusal>(i)), u(g_draw.bindRefused[i]));
         refusedText += t;
     }
-    char trackerText[96];
-    if (g_draw.trackerFrames)
-        _snprintf_s(trackerText, _TRUNCATE, "against the tracker's %.1f moving records/frame",
-                    double(g_draw.trackerMovers) / double(g_draw.trackerFrames));
-    else
-        _snprintf_s(trackerText, _TRUNCATE, "(the tracker, diagnostic-only, was off)");
-    Log::get().note("engine motion: movers joined %.1f records/frame (moving rig records the emit wrote a previous pose for) "
-                    "%s; eye-frames %llu, with MRT6 bound %llu (prepared only for an eligible draw: %llu eye-frames "
+    Log::get().note("engine motion: movers joined %.1f records/frame (moving rig records the emit wrote a previous pose for); "
+                    "eye-frames %llu, with MRT6 bound %llu (prepared only for an eligible draw: %llu eye-frames "
                     "had a pool family draw, %llu a substitution; prepared for nothing %llu, under the old order %llu); "
                     "invalidated "
                     "%llu (%s); kept: scene constants re-mapped with rows 270..275 unchanged %llu, pool appended and "
@@ -1097,7 +1071,7 @@ void summaryLocked(uint64_t now) {
                     "constants %llu; draw hook slow half %llu calls, %.2f us each, ~%.3f ms/frame on the caller thread "
                     "(plus %llu lock-free looks); restores %llu; shader setters issued %llu, skipped %llu (ours still "
                     "bound).",
-                    double(g_emit.recordsMoving.load()) / frames, trackerText,
+                    double(g_emit.recordsMoving.load()) / frames,
                     u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(g_draw.eyeFramesSeen), u(g_draw.eyeFramesSubstituted),
                     u(g_draw.eyeFrames > g_draw.eyeFramesSubstituted ? g_draw.eyeFrames - g_draw.eyeFramesSubstituted : 0),
                     u(g_draw.eyeFramesSeen > g_draw.eyeFramesSubstituted ? g_draw.eyeFramesSeen - g_draw.eyeFramesSubstituted : 0),
@@ -1277,8 +1251,7 @@ void engineVelocityConfigure(bool on) {
     if (on == live.load(std::memory_order_acquire)) return;
     if (!on) { engineVelocityShutdown(); return; }
     // The emit bracket rides the shared eval hooks, held open by its own
-    // want (the legacy tracker is diagnostic-only); the bracket itself needs
-    // the lookup verified.
+    // want; the bracket itself needs the lookup verified.
     attachEmitLocked(false);
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     g_verifyWhy = verifyEngine(base);
@@ -1464,12 +1437,6 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
         g_sourceCamera = SourceCamera{};
     }
     refreshEmitStatus(false);
-    // The tracker's comparison count, only while its diagnostics run it (its
-    // stats take the tracker's mutex).
-    if (kinematicMotionActive()) {
-        const KinematicMotionStats k = kinematicMotionStats();
-        if (k.framesCounted) { g_draw.trackerMovers += k.moversLast; ++g_draw.trackerFrames; }
-    }
     // Gaps that land together in one frame are a clock or a scene event, not
     // visibility churn.
     const uint64_t gaps = g_emit.gaps.load(std::memory_order_relaxed);
