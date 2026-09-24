@@ -446,6 +446,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
     "src\d3d11\object_probe.cpp" ^
+    "src\d3d11\pixel_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
@@ -2177,4 +2178,27 @@ cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: ui layer seed test build failed & exit /b 1 )
 "%OBJ%\uilayerseed\seed_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_pixel_probe_test
+echo [edvr] === pixel_probe_test.exe ===
+REM Build gate for advanced.pixel_probe (src/d3d11/pixel_probe.*), the "who
+REM drew this pixel" instrument: a WARP device, a 256x256 eye-sized target
+REM and a scissor-clipped solid-colour draw drive the module directly, no
+REM vscreen.cpp and no hooks. Asserts a draw over a probe window is
+REM reported with the right point, count and hashes; a draw elsewhere, or
+REM one repainting the colour already there, is not; the first draw into
+REM the target is caught through the baseline; an unconfigured or unarmed
+REM probe logs nothing; slot exhaustion reports drops in the summary; and
+REM a malformed advanced.pixel_probe value is refused whole, not
+REM half-applied.
+if not exist "%OBJ%\pixelprobe" mkdir "%OBJ%\pixelprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\pixelprobe\\" /Fe"%OBJ%\pixelprobe\pixel_probe_test.exe" ^
+    "tools\pixel_probe_test\pixel_probe_test.cpp" "src\d3d11\pixel_probe.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: pixel probe test build failed & exit /b 1 )
+"%OBJ%\pixelprobe\pixel_probe_test.exe" --dry-run || exit /b 1
+"%OBJ%\pixelprobe\pixel_probe_test.exe" --self-test || exit /b 1
 exit /b 0

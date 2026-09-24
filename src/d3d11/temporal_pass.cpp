@@ -32,6 +32,7 @@
 #include "dlaa.h"
 #include "fsr3_engine.h"
 #include "object_probe.h"   // objectProbeArmLedger, objectProbeLedgerMark: the eye run's draw ledger
+#include "pixel_probe.h"    // pixelProbeArm: who drew this pixel, the same eye run
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "ui_resolve.h"
 #include "screen_motion.h"
@@ -7113,6 +7114,9 @@ static void beginEyeRun() {
     // ledger can be the following frame, and the capture manifest's frame
     // IDs keep that explicit.
     objectProbeArmLedger(g_eyeRunStamp);
+    // advanced.pixel_probe rides the same eye run, for the same reason: no
+    // second keypress, and its one frame is this run's first.
+    pixelProbeArm();
 }
 
 void temporalPassShutdown() {
