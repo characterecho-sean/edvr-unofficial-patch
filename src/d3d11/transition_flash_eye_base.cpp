@@ -394,13 +394,12 @@ struct PatchSimCBFillDetail {
     int32_t viewRow = -1;         // the located current view's float4 row
     float originMatch = NAN;      // its |t + origin.R|
     uint8_t liveState = 0;        // PatchSimLiveState at this fill
-    // CHANGE 15 review-fix (finding 5): rows 276-279 (floats [1104..1119])
-    // around the act's write -- per-object-motion.md:1606-1608 reads 275-279
-    // as the pilot's position AND basis; if the basis rows are base-derived
-    // they need the same correction, and these two snapshots per acted fill
-    // are the evidence.
-    float basisBefore[16] = {};
-    float basisAfter[16] = {};
+    // CHANGE 16: rows 272-285 (floats [1088..1143], 14 float4 rows) around
+    // the act's write -- the 151942 dump proved 276-279 (the pilot block)
+    // are base-derived; the widened survey answers whether anything else
+    // nearby is, and before/after shows exactly what the write changed.
+    float basisBefore[tfeb::kSceneCBSimSurveyFloats] = {};
+    float basisAfter[tfeb::kSceneCBSimSurveyFloats] = {};
 };
 constexpr uint32_t kCBAccumRow275Max = 64;    // fills' row 275 kept for the boundary's P-match
 constexpr uint32_t kCBAccumDetailMax = 4;     // per-fill dump detail lines
@@ -456,9 +455,18 @@ struct PatchSimCBAccum {
     // counted.
     uint32_t wouldDiffer = 0;
     // Finding 5's next-frame comparison: the first covered fill of the NEXT
-    // tap frame records the engine's own rows 276-279 here.
+    // tap frame records the engine's own rows 272-285 here.
     bool basisNextValid = false;
-    float basisNext[16] = {};
+    float basisNext[tfeb::kSceneCBSimSurveyFloats] = {};
+    // CHANGE 16: the LATCH-TIME pool history (finding: wouldDiffer re-
+    // evaluations compared the frame's upload against ITSELF after
+    // glitchFrameNoteScenePool advanced the store, poolStep ~= 0 -> scene-
+    // old -> held -- the 151942 dump's wouldDiffer=76 beside latch=live).
+    // The decision snapshots p.prev/p.older; later fills swap in whatever
+    // newer upload exists and compare against THIS, never the live store.
+    bool latchSnapshot = false;
+    glitch_scene_detail::Sample latchPrev = {};
+    glitch_scene_detail::Sample latchOlder = {};
 };
 PatchSimCBAccum g_cbAccum;
 
@@ -486,11 +494,21 @@ const char* patchSimLiveStateText(uint8_t s) noexcept {
 }
 
 // The frame-level latch token (review finding 1c): the FIRST head-only
-// fill's decision, reported for the whole frame.
+// fill's decision, reported for the whole frame. reason 0 with no base is
+// the unset case -- a frame whose fills never reached the decision (a
+// control frame or a watched event), not a NoPatch.
 const char* latchText(uint8_t base, uint8_t reason) noexcept {
     if (base == 1) return "live";
     if (base == 2) return "held";
+    if (reason == 0) return "sim";
     return reason == 1 ? "noPatch:poolLate" : reason == 2 ? "noPatch:thin" : "noPatch:noView";
+}
+
+// The frame-level base token: DERIVED FROM THE LATCH, never from a per-fill
+// or would-differ side. 151942's dump showed base=held beside latch=live --
+// the frame-level report must be incapable of disagreeing with itself.
+const char* latchedBaseText(uint8_t base) noexcept {
+    return base == 1 ? "live" : base == 2 ? "held" : "none";
 }
 
 void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint64_t ship,
@@ -746,7 +764,7 @@ struct EyeBaseFrameRecord {
     uint32_t patchSimCBSkipNoMatch = 0;
     uint32_t patchSimCBSkipNoView = 0;
     uint32_t patchSimCBSkipNoPatch = 0;
-    uint8_t patchSimCBBaseUsed = 0;      // 0 none, 1 live, 2 held (the latch's)
+    uint8_t patchSimCBBaseUsed = 0;      // RETIRED (CHANGE 16): the dump prints the latch's base directly; kept only so old readers of the struct do not shift
     uint8_t patchSimCBVP = 0;            // 0 not-found, 1 patched, 2 ambiguous
     uint8_t patchSimCBActChoice = 2;     // the SceneChoice the latch saw
     // CHANGE 15 review-fixes: the latch itself (base/reason/choice/poolEarly),
@@ -758,7 +776,7 @@ struct EyeBaseFrameRecord {
     bool patchSimCBPoolEarly = false;
     uint32_t patchSimCBWouldDiffer = 0;
     bool patchSimCBBasisNextValid = false;
-    float patchSimCBBasisNext[16] = {};
+    float patchSimCBBasisNext[tfeb::kSceneCBSimSurveyFloats] = {};
     uint32_t patchSimCBDetailCount = 0;
     PatchSimCBFillDetail patchSimCBDetail[kCBAccumDetailMax] = {};
     float patchSimCamStep = 0.0f;
@@ -769,12 +787,12 @@ struct EyeBaseFrameRecord {
     bool patchSimHaveNew = false;
 };
 
-// CHANGE 14 raised the bound 1 MiB -> 2 MiB for the locator's outcome; the
-// review fixes raise it 2 -> 4 MiB for finding 5's per-fill rows-276-279
-// before/after snapshots (4 x 32 floats) plus the latch fields. 4096 x the
-// record is ~3.9 MiB -- still bounded here rather than silently growing, and
-// the biggest single allocation this module makes.
-static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 4ull * 1024 * 1024,
+// 1 MiB -> 2 MiB (CHANGE 14, the locator's outcome) -> 4 MiB (the review
+// fixes' per-fill snapshots) -> 16 MiB (CHANGE 16's widened rows-272-285
+// survey: 4 x 112 floats per frame record). 4096 x the record is ~9.6 MiB --
+// still bounded here rather than silently growing, and the biggest single
+// allocation this module makes.
+static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 16ull * 1024 * 1024,
              "transition flash eye base: the frame ring must stay small");
 
 std::atomic<EyeBaseFrameRecord*> g_frameRing{nullptr};
@@ -1028,7 +1046,7 @@ void performDump(const PendingDump& due) noexcept {
                     framePatched ? "patched" : "sim",
                     r.patchSimCBPatched, r.patchSimCBSkipNoMatch, r.patchSimCBSkipNoView,
                     r.patchSimCBSkipNoPatch, r.patchSimCBPoolLate,
-                    tfeb::patchBaseChoiceText(static_cast<tfeb::PatchBaseChoice>(r.patchSimCBBaseUsed)),
+                    latchedBaseText(r.patchSimCBLatchBase),
                     tfeb::sceneChoiceText(static_cast<tfeb::SceneChoice>(r.patchSimCBActChoice)),
                     r.patchSimCBVP == 1 ? "patched" : r.patchSimCBVP == 2 ? "ambiguous" : "not-found",
                     latchText(r.patchSimCBLatchBase, r.patchSimCBLatchReason),
@@ -1042,42 +1060,38 @@ void performDump(const PendingDump& due) noexcept {
                         r.frame, i, d.row275[0], d.row275[1], d.row275[2], d.viewRow,
                         d.viewRow < 0 ? "n/a " : "", d.originMatch,
                         patchSimLiveStateText(d.liveState));
-                    // Finding 5: rows 276-279 around the act's write, and the
-                    // next frame's own rows for comparison. Printed in
-                    // float4 rows.
+                    // CHANGE 16: the rows 272-285 survey around the act's
+                    // write, and the next frame's own rows for comparison.
+                    // One line per side, 14 float4 rows each.
                     if (d.basisBefore[0] != 0.0f || d.basisAfter[0] != 0.0f) {
-                        appendLine(simText,
-                            "  patch-sim-cb f%u fill%u basis276-279 before: (%+.4f %+.4f %+.4f %+.4f) "
-                            "(%+.4f %+.4f %+.4f %+.4f) (%+.4f %+.4f %+.4f %+.4f) "
-                            "(%+.4f %+.4f %+.4f %+.4f)",
-                            r.frame, i,
-                            d.basisBefore[0], d.basisBefore[1], d.basisBefore[2], d.basisBefore[3],
-                            d.basisBefore[4], d.basisBefore[5], d.basisBefore[6], d.basisBefore[7],
-                            d.basisBefore[8], d.basisBefore[9], d.basisBefore[10], d.basisBefore[11],
-                            d.basisBefore[12], d.basisBefore[13], d.basisBefore[14], d.basisBefore[15]);
-                        appendLine(simText,
-                            "  patch-sim-cb f%u fill%u basis276-279 after:  (%+.4f %+.4f %+.4f %+.4f) "
-                            "(%+.4f %+.4f %+.4f %+.4f) (%+.4f %+.4f %+.4f %+.4f) "
-                            "(%+.4f %+.4f %+.4f %+.4f)",
-                            r.frame, i,
-                            d.basisAfter[0], d.basisAfter[1], d.basisAfter[2], d.basisAfter[3],
-                            d.basisAfter[4], d.basisAfter[5], d.basisAfter[6], d.basisAfter[7],
-                            d.basisAfter[8], d.basisAfter[9], d.basisAfter[10], d.basisAfter[11],
-                            d.basisAfter[12], d.basisAfter[13], d.basisAfter[14], d.basisAfter[15]);
+                        for (uint32_t side = 0; side < 2; ++side) {
+                            const float* rows = side == 0 ? d.basisBefore : d.basisAfter;
+                            std::string line;
+                            appendLine(line, "  patch-sim-cb f%u fill%u rows272-285 %s:",
+                                       r.frame, i, side == 0 ? "before" : "after ");
+                            line.resize(line.size() - 2);   // drop appendLine's CRLF; build on one line
+                            for (uint32_t g = 0; g < tfeb::kSceneCBSimSurveyFloats / 4; ++g) {
+                                char piece[64];
+                                std::snprintf(piece, sizeof(piece), " [%+.4f %+.4f %+.4f %+.4f]",
+                                              rows[g * 4 + 0], rows[g * 4 + 1], rows[g * 4 + 2], rows[g * 4 + 3]);
+                                line += piece;
+                            }
+                            appendLine(simText, "%s", line.c_str());
+                        }
                     }
                 }
                 if (r.patchSimCBBasisNextValid) {
-                    appendLine(simText,
-                        "  patch-sim-cb f%u basis276-279 next-frame: (%+.4f %+.4f %+.4f %+.4f) "
-                        "(%+.4f %+.4f %+.4f %+.4f) (%+.4f %+.4f %+.4f %+.4f) "
-                        "(%+.4f %+.4f %+.4f %+.4f)",
-                        r.frame,
-                        r.patchSimCBBasisNext[0], r.patchSimCBBasisNext[1], r.patchSimCBBasisNext[2],
-                        r.patchSimCBBasisNext[3], r.patchSimCBBasisNext[4], r.patchSimCBBasisNext[5],
-                        r.patchSimCBBasisNext[6], r.patchSimCBBasisNext[7], r.patchSimCBBasisNext[8],
-                        r.patchSimCBBasisNext[9], r.patchSimCBBasisNext[10], r.patchSimCBBasisNext[11],
-                        r.patchSimCBBasisNext[12], r.patchSimCBBasisNext[13], r.patchSimCBBasisNext[14],
-                        r.patchSimCBBasisNext[15]);
+                    std::string line;
+                    appendLine(line, "  patch-sim-cb f%u rows272-285 next-frame:", r.frame);
+                    line.resize(line.size() - 2);
+                    for (uint32_t g = 0; g < tfeb::kSceneCBSimSurveyFloats / 4; ++g) {
+                        char piece[64];
+                        std::snprintf(piece, sizeof(piece), " [%+.4f %+.4f %+.4f %+.4f]",
+                                      r.patchSimCBBasisNext[g * 4 + 0], r.patchSimCBBasisNext[g * 4 + 1],
+                                      r.patchSimCBBasisNext[g * 4 + 2], r.patchSimCBBasisNext[g * 4 + 3]);
+                        line += piece;
+                    }
+                    appendLine(simText, "%s", line.c_str());
                 }
             }
         }
@@ -2213,7 +2227,7 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                     uint8_t cbLive = 0;
                     uint32_t cbPatched = 0, cbSkipNM = 0, cbSkipNV = 0, cbSkipNP = 0;
                     uint32_t cbPoolLate = 0, cbWouldDiffer = 0;
-                    uint8_t cbBase = 0, cbVP = 0, cbActChoice = 2;
+                    uint8_t cbVP = 0, cbActChoice = 2;
                     uint8_t cbLatchBase = 0, cbLatchReason = 0;
                     bool cbPoolEarly = false;
                     if ((g_cbAccum.tapFrame + 1 == frame || g_cbAccum.tapFrame == frame) &&
@@ -2242,7 +2256,6 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         cbSkipNM = a.fillsSkippedNoMatch;
                         cbSkipNV = a.fillsSkippedNoView;
                         cbSkipNP = a.fillsSkippedNoPatch;
-                        cbBase = a.baseUsed;
                         cbVP = a.vpStatus;
                         cbActChoice = a.actChoice;
                         cbPoolLate = a.fillsPoolLate;
@@ -2272,7 +2285,6 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         r.patchSimCBSkipNoMatch = a.fillsSkippedNoMatch;
                         r.patchSimCBSkipNoView = a.fillsSkippedNoView;
                         r.patchSimCBSkipNoPatch = a.fillsSkippedNoPatch;
-                        r.patchSimCBBaseUsed = a.baseUsed;
                         r.patchSimCBVP = a.vpStatus;
                         r.patchSimCBActChoice = a.actChoice;
                         r.patchSimCBDetailCount = a.detailCount;
@@ -2324,7 +2336,7 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         cbCorrO[0], cbCorrO[1], cbCorrO[2],
                         cbCrossOText, cbCrossVText, patchSimLiveStateText(cbLive),
                         cbPatched, cbSkipNM, cbSkipNV, cbSkipNP,
-                        tfeb::patchBaseChoiceText(static_cast<tfeb::PatchBaseChoice>(cbBase)),
+                        latchedBaseText(cbLatchBase),
                         tfeb::sceneChoiceText(static_cast<tfeb::SceneChoice>(cbActChoice)),
                         cbVP == 1 ? "patched" : cbVP == 2 ? "ambiguous" : "not-found",
                         latchText(cbLatchBase, cbLatchReason),
@@ -2536,7 +2548,15 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
                 // The FIRST head-only fill of the frame: decide and latch.
                 a.latchDecided = true;
                 GlitchSceneGeometry ev = {};
-                a.latchPoolEarly = glitchFrameScenePoolEvidence(frame, origin, &ev);
+                glitch_scene_detail::Sample snapshot[3];
+                a.latchPoolEarly = glitchFrameScenePoolEvidence(frame, origin, &ev, snapshot);
+                if (a.latchPoolEarly) {
+                    // The latch-time history, for the would-differ re-
+                    // evaluations below.
+                    a.latchSnapshot = true;
+                    a.latchPrev = snapshot[1];
+                    a.latchOlder = snapshot[2];
+                }
                 const tfeb::SceneChoice choice = tfeb::patchSceneChoice(
                     ev.matched, ev.predicted, ev.cameraStep, ev.poolStep, a.latchPoolEarly);
                 const tfeb::PatchBaseChoice base =
@@ -2565,12 +2585,23 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
                         std::memcpy(a.latchB, B, sizeof(a.latchB));
                     }
                 }
-            } else {
-                // A LATER head-only fill: finding 1c's would-differ count.
-                // Re-evaluate with the evidence present AT THIS FILL; when
-                // there is none, there is no per-fill choice to compare.
-                GlitchSceneGeometry evNow = {};
-                if (glitchFrameScenePoolEvidence(frame, origin, &evNow)) {
+            } else if (a.latchSnapshot) {
+                // A LATER head-only fill: finding 1c's would-differ count,
+                // re-evaluated against the LATCH-TIME pool history. The
+                // live store is never read for this: glitchFrameNoteScenePool
+                // advances it (p.prev := p.write) after the detector's own
+                // compare, so a re-query there compares the frame's upload
+                // against ITSELF -- poolStep ~= 0, scene-old, held -- and
+                // counts noise (151942: wouldDiffer=76 beside latch=live).
+                // Here the newer upload that arrived by this fill (if any)
+                // is compared against the latched prev/older: a real
+                // evidence change, which is what the count is for. No
+                // latch-time snapshot (a poolLate latch) -> not counted,
+                // the same rule as no-evidence.
+                glitch_scene_detail::Sample newer[3];
+                GlitchSceneGeometry reEval = {};
+                if (glitchFrameScenePoolEvidence(frame, origin, &reEval, newer)) {
+                    const GlitchSceneGeometry evNow = glitch_scene_detail::compare(newer[0], a.latchPrev, a.latchOlder);
                     const tfeb::SceneChoice choiceNow = tfeb::patchSceneChoice(
                         evNow.matched, evNow.predicted, evNow.cameraStep, evNow.poolStep, true);
                     const tfeb::PatchBaseChoice baseNow =
@@ -2596,9 +2627,9 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
                     // the rotation wrong.
                     ++a.fillsSkippedNoView;
                 } else {
-                    // Finding 5: rows 276-279 (the pilot basis question)
-                    // BEFORE anything is written.
-                    std::memcpy(d.basisBefore, cb + tfeb::kSceneCBSimBasisFloat, sizeof(d.basisBefore));
+                    // Finding 5, widened by CHANGE 16: rows 272-285 BEFORE
+                    // anything is written.
+                    std::memcpy(d.basisBefore, cb + tfeb::kSceneCBSimSurveyFloat, sizeof(d.basisBefore));
                     // ALL corrections are computed into locals first,
                     // reading only ORIGINAL buffer rows; the VP scan skips
                     // every window overlapping the located view group or
@@ -2607,6 +2638,21 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
                     const float* B = a.latchB;
                     float originPatched[3];
                     tfeb::patchEyeOrigin(B, origin, originPatched);
+                    // CHANGE 16 (flight 151942): the pilot block. Rows
+                    // 276-279 of the camera CB are the pilot's position AND
+                    // basis (per-object-motion.md:1606-1608), composed with
+                    // the same missing base as the eye -- the dump showed
+                    // 276 == row 275 (head-only) and 277-279 near-identity
+                    // against the next frame's full rotation, and the
+                    // world-corrected frame still flashed until this rode
+                    // the same correction. 276 is position-like: the eye's
+                    // own premultiply. 277-279 are directions: the
+                    // translation-free rotateByBase twin.
+                    float pilot[16] = {};
+                    tfeb::patchEyeOrigin(B, cb + tfeb::kSceneCBSimBasisFloat + 0, &pilot[0]);
+                    tfeb::rotateByBase(B, cb + tfeb::kSceneCBSimBasisFloat + 4, &pilot[4]);
+                    tfeb::rotateByBase(B, cb + tfeb::kSceneCBSimBasisFloat + 8, &pilot[8]);
+                    tfeb::rotateByBase(B, cb + tfeb::kSceneCBSimBasisFloat + 12, &pilot[12]);
                     float vBad[16], bInv[16], vCorr[16];
                     std::memcpy(vBad, cb + find.startRow * 4, sizeof(vBad));
                     tfeb::affineInverse4x4(B, bInv);
@@ -2630,12 +2676,25 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
                             }
                         }
                     }
-                    // One write pass: origin, view, and -- only on exactly
-                    // one VP candidate -- the recomposed VP.
+                    // One write pass: origin, the pilot block, the view,
+                    // and -- only on exactly one VP candidate -- the
+                    // recomposed VP.
                     float* writable = const_cast<float*>(cb);
                     writable[tfeb::kSceneCBSimOriginFloat + 0] = originPatched[0];
                     writable[tfeb::kSceneCBSimOriginFloat + 1] = originPatched[1];
                     writable[tfeb::kSceneCBSimOriginFloat + 2] = originPatched[2];
+                    writable[tfeb::kSceneCBSimBasisFloat + 0] = pilot[0];
+                    writable[tfeb::kSceneCBSimBasisFloat + 1] = pilot[1];
+                    writable[tfeb::kSceneCBSimBasisFloat + 2] = pilot[2];
+                    writable[tfeb::kSceneCBSimBasisFloat + 4] = pilot[4];
+                    writable[tfeb::kSceneCBSimBasisFloat + 5] = pilot[5];
+                    writable[tfeb::kSceneCBSimBasisFloat + 6] = pilot[6];
+                    writable[tfeb::kSceneCBSimBasisFloat + 8] = pilot[8];
+                    writable[tfeb::kSceneCBSimBasisFloat + 9] = pilot[9];
+                    writable[tfeb::kSceneCBSimBasisFloat + 10] = pilot[10];
+                    writable[tfeb::kSceneCBSimBasisFloat + 12] = pilot[12];
+                    writable[tfeb::kSceneCBSimBasisFloat + 13] = pilot[13];
+                    writable[tfeb::kSceneCBSimBasisFloat + 14] = pilot[14];
                     std::memcpy(writable + find.startRow * 4, vCorr, sizeof(vCorr));
                     if (vpCandidates == 1) {
                         float xNew[16];
@@ -2645,7 +2704,7 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
                     } else {
                         a.vpStatus = vpCandidates == 0 ? 0 : 2;
                     }
-                    std::memcpy(d.basisAfter, cb + tfeb::kSceneCBSimBasisFloat, sizeof(d.basisAfter));
+                    std::memcpy(d.basisAfter, cb + tfeb::kSceneCBSimSurveyFloat, sizeof(d.basisAfter));
                     ++a.fillsPatched;
                 }
             }
@@ -2657,7 +2716,7 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
         // 276-279, for the dump to compare against the acted frame's
         // before/after. One record per frame is enough.
         a.basisNextValid = true;
-        std::memcpy(a.basisNext, cb + tfeb::kSceneCBSimBasisFloat, sizeof(a.basisNext));
+        std::memcpy(a.basisNext, cb + tfeb::kSceneCBSimSurveyFloat, sizeof(a.basisNext));
     }
     if (a.detailCount < kCBAccumDetailMax) a.detail[a.detailCount++] = d;
 }

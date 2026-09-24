@@ -6,23 +6,27 @@ static chain: see "Flight 184826".*
 
 ## Status
 
-- **Review finding FIXED (2026-09-24, build pending the flight): the
-  fill-time selector read evidence computed after the fills.** Review
-  (reviews\review-flash-render-time-patch-acting-2026-09-24.md) caught that
-  pool geometry only exists after the frame's first eye draw, so early
-  fills of a scene-new bad frame would have taken held (km wrong) and later
-  fills live -- one frame, two cameras. The boundary-time validation never
-  saw it. The patch now decides ONCE at the frame's first head-only fill
-  from the pool's own upload when present (compare on a copy, camera = row
-  275), latches base and B for every fill of the frame, and is
-  all-or-nothing: no evidence at the first fill -> no patch that frame
-  (poolLate counted per frame, the review's ordering measurement).
-  Unclear/thin evidence -> NoPatch (was held); the detector's
-  matched>=32/finite floor adopted. Also fixed: frameFarPos/H3 read the
-  patched buffer (pre-tap copies now), VP scan runs on original rows only,
-  rows 276-279 dumped before/after for the basis question. Flight checks
-  per acted event: one base all frame, boundary-line agreement,
-  fillsSkippedNoView=0, poolEarly=yes.
+- **The pilot block was the residual flash (flight 151942).** The patched
+  exit fixed the world (origin+view exact to the next frame) but left rows
+  276-279 (the pilot's position+basis) head-only: basis near-identity vs
+  the next frame's full rotation -- Sean's "different, faster but still
+  noticeable". Fix: premultiply rows 275-279 by B too (276 = origin,
+  277-279 = R(B) x basis) -- the eye's own premultiply; the dump's
+  next-frame rows are the ground truth and fit. The latch held
+  (poolEarly=yes, scene-new -> live); wouldDiffer's 76 was the metric's
+  store-advance artifact (re-evaluation compared the upload to itself),
+  now re-evaluated against the latch-time snapshot; `base=` reports the
+  latch. Controls 11598/14537 flashed by design (alternate).
+
+- **Review finding FIXED (2026-09-24): the fill-time selector read
+  evidence computed after the fills.** The patch now decides ONCE at the
+  frame's first head-only fill from the pool's own upload when present
+  (compare on a copy, camera = row 275), latches base and B for every
+  fill, and is all-or-nothing (no evidence -> no patch; poolLate counted
+  per frame). Unclear/thin -> NoPatch; the detector's matched>=32/finite
+  floor adopted. Also fixed: frameFarPos/H3 pre-tap copies, VP scan on
+  original rows only, and the wouldDiffer metric now re-evaluates against
+  the latch-time pool snapshot, never the advanced store.
 
 - **Locator VALIDATED; the selector is the decision (flight 134813, build
   7eb4a536).** Per-fill structural view location works (the row moves
@@ -223,6 +227,22 @@ showing one act per transition and none anywhere else.
   nothing waits. The eye copy stays with the runtime.
 - The branches `transition-flash-run-radius` (PR #16) and `flash-cap-one`
   (PR #18) were never merged, and this supersedes both.
+
+## Flight 151942 (2026-09-24 15:19, Steam copy, build e5daea6b)
+
+alternate, trap off; build matched. Supercruise entry, exit, entry; no
+hyperspace.
+- 11598 and 14537 (watched): the controls, flashed by design. 12744
+  (patched): 82 fills, live base, origin exact to the next frame -- but
+  the flash persisted, "different, faster".
+- **The miss: rows 276-279 (pilot position+basis) are base-derived and
+  were left head-only** (bad frame: basis near-identity; next frame: full
+  rotation). The world corrected; the pilot block did not.
+- wouldDiffer=76 and base=held were the metric's own artifact
+  (re-evaluation against the advanced store); the patch used live.
+- vp=not-found at every event.
+- Ruled out (151942): "origin + view is the whole correction" -- the
+  pilot block is base-derived too.
 
 ## Flight 134813 (2026-09-24 13:48, Steam copy, build 7eb4a536)
 
