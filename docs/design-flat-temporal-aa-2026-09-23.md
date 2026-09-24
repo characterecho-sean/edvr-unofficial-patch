@@ -12,7 +12,10 @@
   and three handoff records at both sizes; the selector build also passes all
   83 jobs and the 254-key contract. See section 10. Flat temporal
   reconstruction/jitter are NOT enabled. The focused shader/projection capture
-  passes all 83 build jobs and is ready for Epic qualification (section 11).
+  passes all 83 build jobs. Epic replay captured all 13 missing shaders and two
+  selected projection samples without dropped observations (section 12).
+  Verified projection helpers and captured-fixture tests pass the full build;
+  they are not yet wired into runtime treatment.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -31,12 +34,10 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next session:** one Epic flat session in the same cockpit at 0.75x SS;
-  press F10 once, gently move the camera for 20 seconds, then exit. Read the
-  focused shader/projection evidence (section 11) before enabling jitter. Avoid
-  another broad discovery flight. Later qualify treatment, on-foot scenes and
-  each mod arrangement. Use `tools/edvr_log.py` with the actual `--target`,
-  `--expect-build HEAD` and
+- **Next session:** finish light-grid producer/consumer qualification and
+  runtime integration; do not repeat the established frame captures. Later
+  qualify treatment, on-foot scenes and each mod arrangement. Use
+  `tools/edvr_log.py` with the actual `--target`, `--expect-build HEAD` and
   `--grep "flat (temporal|discover)"`. No headset is needed for discovery;
   VR still needs regression testing.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
@@ -587,3 +588,63 @@ exact-byte shader-file checks and both complete prior flight replays. Full
 contract and installer payload gates. The first full attempt stopped at the
 existing wall-clock-sensitive run_jobs self-test's start-order assertion; that
 check passed alone and in the full retry without changing its source.
+
+## 12. Focused Epic replay, 2026-09-24
+
+`edvr_gfx_20260924_063611.log` matches 9173f17f/build 6AB5182B and stays under
+889 KB. All 13 requested shader captures succeeded. F10 at 06:38:22.974 emits
+selected detail frames 71751 and 72201, both 960x540 scene to 1280x720 output,
+near 0.025, 21 supported and five unsupported motion-pair draws. All observer
+drop counters, unknown lists and foreign-thread counts are zero. The detail
+reports contain 125/124 relevant records and 31/34 unique projection payloads,
+with zero payload drops and two format-60 draws each. Exact byte counts, FNV32
+hashes and before-draw write provenance validate for all 134/140 referenced
+projection bindings. Missing material-buffer writes remain explicit; the
+capture cannot distinguish static initial data from writes outside the frame.
+
+The newly captured tone PS FEE777E92850B390 samples HDR t1 at unchanged UV and
+the colour LUT at t0; it has no depth/projection reconstruction. The second
+format-60 PS B403F48CB35D9739, found and hash-verified in the saved corpus, is
+just `ret`, so its bound b2 is inert. The actual inverse pass uses independent
+PS b2; binding equality between shader stages must not be assumed.
+
+Ruled out: jittering only SV_Position. VS 1F3AD1584D7FA3C8, 4D516EF05C68FFA5
+and 8BD7C37ABCEE7E45 also export clip xyw as ordinary varyings; their PSs
+derive depth-sampling UV from those varyings. Upstream matrix correction
+preserves both outputs. VS 6041FD2D3D0164E1 has the analogous b1 path. Further
+consumers needing explicit treatment are the projected sprite VS
+94D5C556DFD6D705 (depth tests and b1[281] remapping) and PS 4E4FF61E8A08FC7E's
+SV_Position-based light-cluster lookup. New shader listings are in ignored
+`build/flat-audit-current/`.
+
+Numerical replay establishes the common camera: deferred b2[10..13] spatial
+coefficients equal the b1 transpose exactly, with translation residual below
+1.17e-6. Deferred UV rays match the inverse camera within 1.56e-7; sky inverse
+times forward differs from identity by at most 1.11e-7; the format-60 screen
+inverse residual is below 8.11e-8. Sky/shadow coordinate-basis relations stay
+fixed across camera motion within 7.65e-8. Embedded HUD b2 matrices factor into
+the same world camera and a stable local transform (rotation difference below
+1.1e-7); blanket exclusion of that geometry would be wrong. The later A888
+output panel has a separate camera and near term 0.10001. Short-range buffers
+contain their complete actual contents; all observed major inverse owners have
+complete current-frame data. Generated numeric evidence is in ignored
+`build/flat-projection-flight/`.
+
+`flat_projection_math.h` implements pixel-jitter conversion and the five
+verified forward/inverse layouts without allocations or D3D dependencies.
+Updates reject non-finite inputs and overflow without partial writes. Geometric
+tests use independently captured forward and inverse matrices to check
+requested displacement, reconstruction, depth/W preservation, exact unchanged
+fields and zero-jitter identity. The actual fixtures are from frame 71751;
+tests at 1280x720 also exercise size algebra without claiming another live
+capture. Targeted compilation, independent fixture review and full
+`build/flat-projection-math-build.log` pass (83 jobs, 254-key contract). No
+runtime hooks or AA activation are changed by the math component.
+
+The light-cluster dependency remains separate. PS 4E4FF61E8A08FC7E uses
+floor(SV_Position.xy / integer tile width); b1[227/228] hold grid dimensions
+and log-depth parameters, not an additive XY origin. Four saved compute
+lighting variants also reconstruct rays from CS b0[10..12]. Their resource
+association with the current game's grid must be established before choosing
+between correcting the grid or its lookup. Do not nudge unrelated constants or
+treat a saved shader as proof of an active dispatch.
