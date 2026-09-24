@@ -19,12 +19,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include "../../src/d3d11/transition_flash_prevent_core.h"
 #include "../../src/d3d11/pose_reader_watch_core.h"
+#include "../../src/d3d11/transition_flash_eye_base_core.h"
 
 using namespace edvr::tfp;
 namespace prw = edvr::prw;
+namespace tfeb = edvr::tfeb;
 
 namespace {
 unsigned checks = 0, failures = 0;
@@ -525,6 +528,156 @@ void caseDumpVerdictTriggerNarrowsWhenReadersOn() {
     check(prw::dumpVerdictTrigger(true, /*withheldClass=*/false, /*sceneReset=*/true),
           "dumpTrigger: readers on -- scene-reset triggers even when the old broad test would not have");
 }
+
+// --- transition_flash_eye_base_core.h: the bit-exact reset-mailbox match --
+
+void eyeBaseIdentityMailbox(float m[16]) {
+    static constexpr float kIdentity[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    std::memcpy(m, kIdentity, sizeof(kIdentity));
+}
+
+float bitsToFloat(uint32_t bits) {
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+void caseResetMailboxBitExact() {
+    float m[16];
+    eyeBaseIdentityMailbox(m);
+    check(tfeb::isResetMailbox(m), "resetMailbox: the exact constant matches");
+
+    // -0.0f vs +0.0f: IEEE == calls these equal, but their bits differ
+    // (0x80000000 vs 0x00000000) -- a writer that stored -0.0 where the
+    // constant holds +0.0 has still WRITTEN, and this must see that.
+    eyeBaseIdentityMailbox(m);
+    m[3] = bitsToFloat(0x80000000u);  // a padding lane, -0.0 instead of +0.0
+    check(!tfeb::isResetMailbox(m), "resetMailbox: -0.0 where the constant holds +0.0 does not match");
+    check(bitsToFloat(0x80000000u) == 0.0f, "resetMailbox: precondition -- IEEE == would have called this a match");
+
+    // A NaN lane must not match either -- bit-different from any finite
+    // constant value regardless of which lane it lands in.
+    eyeBaseIdentityMailbox(m);
+    m[12] = bitsToFloat(0x7FC00000u);  // quiet NaN in the translation row
+    check(!tfeb::isResetMailbox(m), "resetMailbox: a NaN lane does not match");
+
+    // Not tolerances: one ULP off a real value must not match either.
+    eyeBaseIdentityMailbox(m);
+    m[0] = bitsToFloat(0x3F800001u);  // 1.0f plus one ULP
+    check(!tfeb::isResetMailbox(m), "resetMailbox: compares bits, not a tolerance");
+
+    eyeBaseIdentityMailbox(m);
+    check(tfeb::isResetMailbox(m), "resetMailbox: unchanged again after the mutating cases above");
+}
+
+// --- transition_flash_eye_base_core.h: the M/F agreement and validation ---
+
+void caseEyeBaseAgreementThresholds() {
+    float m[16], f[16];
+    eyeBaseIdentityMailbox(m);
+    eyeBaseIdentityMailbox(f);
+    check(tfeb::eyeBaseAgrees(tfeb::compareEyeBase(m, f)), "eyeBase agree: identical M and F agree");
+
+    eyeBaseIdentityMailbox(f);
+    f[13] += 0.005f;  // 5mm: under the 0.01 dt threshold
+    check(tfeb::eyeBaseAgrees(tfeb::compareEyeBase(m, f)), "eyeBase agree: 5mm translation delta still agrees");
+
+    eyeBaseIdentityMailbox(f);
+    f[13] += 0.02f;  // 2cm: over the 0.01 dt threshold
+    check(!tfeb::eyeBaseAgrees(tfeb::compareEyeBase(m, f)), "eyeBase agree: 2cm translation delta disagrees");
+
+    eyeBaseIdentityMailbox(f);
+    f[5] += 1e-3f;  // a rotation lane, over the 1e-4 dr threshold
+    check(!tfeb::eyeBaseAgrees(tfeb::compareEyeBase(m, f)), "eyeBase agree: a rotation-only delta can disagree alone");
+
+    // Padding lanes ([3],[7],[11],[15]) are never compared.
+    eyeBaseIdentityMailbox(f);
+    f[15] = 99.0f;
+    check(tfeb::eyeBaseAgrees(tfeb::compareEyeBase(m, f)), "eyeBase agree: padding lanes contribute nothing");
+}
+
+void caseEyeBaseValidationArithmetic() {
+    check(!tfeb::isEyeBaseValidated({0, 0}), "eyeBaseValidated: no data at all");
+    check(!tfeb::isEyeBaseValidated({119, 0}), "eyeBaseValidated: one short of 120 agreements");
+    check(tfeb::isEyeBaseValidated({120, 0}), "eyeBaseValidated: 120 agreements, no disagreements");
+    check(tfeb::isEyeBaseValidated({980, 19}), "eyeBaseValidated: 19/999 (~1.9%) passes");
+    check(!tfeb::isEyeBaseValidated({960, 40}), "eyeBaseValidated: exactly 1000 with 40 (4%) fails (over 2%)");
+    check(!tfeb::isEyeBaseValidated({196, 4}), "eyeBaseValidated: exactly 2% disagree does not pass (under 2%, not at)");
+    check(tfeb::isEyeBaseValidated({4901, 99}), "eyeBaseValidated: 99/5000 (1.98%) at scale passes");
+}
+
+// --- transition_flash_eye_base_core.h: the act guards, every one refuses --
+
+void caseEyeBaseActGuards() {
+    // Baseline: every guard satisfied -> acts.
+    check(tfeb::eyeBaseMayAct(Treatment::Act, true, false, true, false),
+          "eyeBaseMayAct: every guard satisfied acts");
+    // Each guard flipped alone refuses, with the rest held at the acting baseline.
+    check(!tfeb::eyeBaseMayAct(Treatment::Watch, true, false, true, false),
+          "eyeBaseMayAct: treatment watch alone refuses");
+    check(!tfeb::eyeBaseMayAct(Treatment::Act, false, false, true, false),
+          "eyeBaseMayAct: not validated alone refuses");
+    check(!tfeb::eyeBaseMayAct(Treatment::Act, true, true, true, false),
+          "eyeBaseMayAct: F itself the reset value alone refuses");
+    check(!tfeb::eyeBaseMayAct(Treatment::Act, true, false, false, false),
+          "eyeBaseMayAct: F not finite alone refuses");
+    check(!tfeb::eyeBaseMayAct(Treatment::Act, true, false, true, true),
+          "eyeBaseMayAct: session cap reached alone refuses");
+}
+
+void caseEyeBaseFiniteCheck() {
+    float f[16];
+    eyeBaseIdentityMailbox(f);
+    check(tfeb::allFinite16(f), "allFinite16: an ordinary mailbox is finite");
+    f[9] = bitsToFloat(0x7F800000u);  // +Inf
+    check(!tfeb::allFinite16(f), "allFinite16: a single +Inf lane fails it");
+    eyeBaseIdentityMailbox(f);
+    f[2] = bitsToFloat(0x7FC00000u);  // NaN
+    check(!tfeb::allFinite16(f), "allFinite16: a single NaN lane fails it");
+}
+
+// --- transition_flash_eye_base_core.h: the consumer's own extent ----------
+
+void caseConsumerExtentClassifier() {
+    check(!tfeb::rvaInsideConsumerExtent(tfeb::kConsumerExtentRva - 1),
+          "consumerExtent: one byte before the entry is outside");
+    check(tfeb::rvaInsideConsumerExtent(tfeb::kConsumerExtentRva),
+          "consumerExtent: the entry point itself is inside");
+    check(tfeb::rvaInsideConsumerExtent(tfeb::kConsumerExtentRva + tfeb::kConsumerExtentSize - 1),
+          "consumerExtent: the last byte of the body is inside");
+    check(!tfeb::rvaInsideConsumerExtent(tfeb::kConsumerExtentRva + tfeb::kConsumerExtentSize),
+          "consumerExtent: exactly at the end (one past the body) is outside");
+}
+
+// --- pose_reader_watch_core.h: the write-mode Dr7 slot-0 composition ------
+// (design doc round 6, part B: the writer watch wants RW0=01b where the
+// render-pose read watch above wants RW0=11b -- armSlot0Dr7's own new
+// parameter, exercised here in the mode the pose path never asks for.)
+
+void caseDr7ArmWriteModeSlot0() {
+    const uint32_t armed = prw::armSlot0Dr7(0, prw::kDr7RwWrite);
+    check((armed & prw::kDr7L0Bit) != 0, "Dr7 write-mode arm: L0 comes on");
+    check(((armed >> 16) & 0x3u) == prw::kDr7RwWrite, "Dr7 write-mode arm: RW0 reads back 01b, not 11b");
+    check(((armed >> 18) & 0x3u) == prw::kDr7Len4Bytes, "Dr7 write-mode arm: LEN0 is still 4 bytes");
+
+    // Slot 1 already armed (L1=bit2, RW1=bits20-21, LEN1=bits22-23) plus a
+    // reserved bit (bit10): every one of those must survive untouched, the
+    // same property caseDr7ArmLeavesOtherSlotsAlone asserts for the
+    // default read-or-write mode.
+    const uint32_t otherSlotBits = (1u << 2) | (0x3u << 20) | (0x3u << 22) | (1u << 10);
+    const uint32_t armedWithOthers = prw::armSlot0Dr7(otherSlotBits, prw::kDr7RwWrite);
+    check((armedWithOthers & ~prw::kDr7Slot0Mask) == otherSlotBits,
+          "Dr7 write-mode arm: every bit outside slot 0's mask survives untouched");
+    check(((armedWithOthers >> 16) & 0x3u) == prw::kDr7RwWrite,
+          "Dr7 write-mode arm: RW0 stays 01b even with other slots live");
+
+    // The default argument reproduces the pose path's own read-or-write
+    // shape exactly -- the "keep the pose path's behaviour identical" half
+    // of the refactor.
+    check(prw::armSlot0Dr7(0) == prw::armSlot0Dr7(0, prw::kDr7RwReadWrite),
+          "Dr7 arm: the default RW mode is still read-or-write");
+}
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -563,6 +716,13 @@ int wmain(int argc, wchar_t** argv) {
     caseReaderTableFindsExistingAndReportsNew();
     caseReaderTableCap();
     caseDumpVerdictTriggerNarrowsWhenReadersOn();
+    caseResetMailboxBitExact();
+    caseEyeBaseAgreementThresholds();
+    caseEyeBaseValidationArithmetic();
+    caseEyeBaseActGuards();
+    caseEyeBaseFiniteCheck();
+    caseConsumerExtentClassifier();
+    caseDr7ArmWriteModeSlot0();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

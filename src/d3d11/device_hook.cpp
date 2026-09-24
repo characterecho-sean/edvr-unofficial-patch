@@ -63,6 +63,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "glitch_frame.h"
 #include "transition_flash_prevent.h"
 #include "pose_reader_watch.h"
+#include "transition_flash_eye_base.h"
 #include "vscreen_res.h"
 #include "celestial_motion.h"
 
@@ -2818,6 +2819,7 @@ void shutdownDeviceHooks() {
     shutdownGlitchFrameFix();
     transitionFlashPreventShutdown();
     poseReaderWatchShutdown();
+    transitionFlashEyeBaseShutdown();
     shutdownVScreenFixes();
     shutdownExposureFix();
     // The swap-only or live-only probe's bare table, if that was what ran

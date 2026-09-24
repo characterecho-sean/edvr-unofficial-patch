@@ -328,10 +328,13 @@ ArmedThreadSet g_armedThreads;
 uint64_t g_watchAddress = 0;
 
 // DR0/Dr7 on one thread, by handle. `arm` true sets DR0=watchAddress and
-// arms slot 0; false clears just L0 (pose_reader_watch_core.h's
-// disarmSlot0Dr7). Suspend/GetContext/SetContext/Resume, exactly as the
-// design specifies for every thread that is not the caller.
-bool setThreadDr(DWORD tid, uint64_t watchAddress, bool arm) noexcept {
+// arms slot 0 in the given RW mode (pose_reader_watch_core.h's armSlot0Dr7,
+// round 6's own parameter -- this file always passes kDr7RwReadWrite, so
+// behaviour is unchanged; transition_flash_eye_base.cpp's own copy of this
+// function passes kDr7RwWrite instead); false clears just L0 (pose_reader_
+// watch_core.h's disarmSlot0Dr7). Suspend/GetContext/SetContext/Resume,
+// exactly as the design specifies for every thread that is not the caller.
+bool setThreadDr(DWORD tid, uint64_t watchAddress, uint32_t rwBits, bool arm) noexcept {
     HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
     if (!h) return false;
     bool ok = false;
@@ -341,7 +344,7 @@ bool setThreadDr(DWORD tid, uint64_t watchAddress, bool arm) noexcept {
         if (GetThreadContext(h, &ctx)) {
             const uint32_t lowDr7 = static_cast<uint32_t>(ctx.Dr7 & 0xFFFFFFFFull);
             const uint32_t highDr7 = static_cast<uint32_t>((ctx.Dr7 >> 32) & 0xFFFFFFFFull);
-            const uint32_t newLowDr7 = arm ? prw::armSlot0Dr7(lowDr7) : prw::disarmSlot0Dr7(lowDr7);
+            const uint32_t newLowDr7 = arm ? prw::armSlot0Dr7(lowDr7, rwBits) : prw::disarmSlot0Dr7(lowDr7);
             ctx.Dr7 = (static_cast<DWORD64>(highDr7) << 32) | newLowDr7;
             if (arm) ctx.Dr0 = static_cast<DWORD64>(watchAddress);
             ok = SetThreadContext(h, &ctx) != FALSE;
@@ -363,7 +366,7 @@ struct HelperDrArgs { DWORD targetTid; uint64_t watchAddress; bool arm; };
 // Not noexcept: LPTHREAD_START_ROUTINE has no exception specification.
 DWORD WINAPI helperDrThreadProc(LPVOID param) {
     std::unique_ptr<HelperDrArgs> args(static_cast<HelperDrArgs*>(param));
-    setThreadDr(args->targetTid, args->watchAddress, args->arm);
+    setThreadDr(args->targetTid, args->watchAddress, prw::kDr7RwReadWrite, args->arm);
     return 0;
 }
 
@@ -394,7 +397,7 @@ void sweepArmThreads() noexcept {
             if (g_armedThreads.contains(te.th32ThreadID)) continue;
             const bool ok = (te.th32ThreadID == selfTid)
                 ? setCurrentThreadDr(g_watchAddress, true)
-                : setThreadDr(te.th32ThreadID, g_watchAddress, true);
+                : setThreadDr(te.th32ThreadID, g_watchAddress, prw::kDr7RwReadWrite, true);
             if (ok) g_armedThreads.add(te.th32ThreadID);
         } while (Thread32Next(snap, &te));
     }
@@ -406,7 +409,7 @@ void disarmAllThreads() noexcept {
     for (uint32_t i = 0; i < g_armedThreads.count; ++i) {
         const DWORD tid = g_armedThreads.ids[i];
         if (tid == selfTid) setCurrentThreadDr(g_watchAddress, false);
-        else setThreadDr(tid, g_watchAddress, false);
+        else setThreadDr(tid, g_watchAddress, prw::kDr7RwReadWrite, false);
     }
     g_armedThreads.clear();
 }

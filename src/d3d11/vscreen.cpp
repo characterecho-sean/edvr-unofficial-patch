@@ -60,6 +60,7 @@
 #include "glitch_frame.h"
 #include "transition_flash_prevent.h"
 #include "pose_reader_watch.h"
+#include "transition_flash_eye_base.h"
 #include "holo_fix.h"
 #include "target_sharp.h"
 #include "hud_sprite.h"
@@ -4943,6 +4944,13 @@ void vScreenRefreshConfig() {
     // -- the hardware breakpoint itself arms and disarms on its own
     // schedule from poseReaderWatchFrameBoundary, not from here.
     poseReaderWatchConfigure(cfg);
+    // advanced.transition_flash_eye_base: the same design doc's "Static
+    // round 6" (the mailbox consumer, and its own writer watch). Off leaves
+    // this line as the only thing it does; a non-off value installs the
+    // consumer hook the first time this is reached, then only moves the
+    // live mode -- the writer watch arms/re-arms/disarms on its own
+    // schedule from transitionFlashEyeBaseFrameBoundary, not from here.
+    transitionFlashEyeBaseConfigure(cfg);
     // The settings menu: its own keys, then the reload's diff -- every row's
     // value, the restart snapshot, and a toast for what changed from outside.
     menuConfigure(cfg);
@@ -5969,6 +5977,14 @@ void vScreenFrameBoundary() {
     // one) and services one deferred ring dump if its due frame has
     // arrived. Never called from inside a game hook.
     transitionFlashPreventFrameBoundary(s->frameNo);
+    // Publishes the frame number the consumer hook reads (also, possibly, a
+    // scheduler job thread), runs the writer watch's own ship-pointer
+    // stability gate / arms, re-arms or sweeps it, and services one
+    // deferred dump. Deliberately AFTER glitchFrameBoundary, same reason as
+    // poseReaderWatchFrameBoundary below: that call already read this
+    // frame's eye-base snapshot (read-and-reset, transitionFlashEyeBase
+    // FrameSnapshot's own comment) for its own ring entry.
+    transitionFlashEyeBaseFrameBoundary(s->frameNo);
     // Publishes the frame number the positioner hooks read (also, possibly,
     // a scheduler job thread) and runs the 60-frame stability gate / arms
     // or sweeps the hardware breakpoint. Deliberately AFTER glitchFrameBoundary:
@@ -6114,6 +6130,9 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // advanced.eye_origin_readers: the same design doc's parts A2/B. See
     // the other call site's comment above.
     poseReaderWatchConfigure(cfg);
+    // advanced.transition_flash_eye_base: the same design doc's "Static
+    // round 6". See the other call site's comment above.
+    transitionFlashEyeBaseConfigure(cfg);
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;

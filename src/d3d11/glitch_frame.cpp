@@ -18,6 +18,7 @@
 #include "eye_origin_trace.h"
 #include "transition_flash_prevent.h"
 #include "pose_reader_watch.h"
+#include "transition_flash_eye_base.h"
 
 namespace edvr {
 
@@ -447,6 +448,19 @@ struct RingEntry {
     uint16_t positionerTickCalls;
     uint16_t positionerSwapSyncCalls;
     bool     positionerSwapDetected;
+
+    // advanced.transition_flash_eye_base (docs/design-transition-flash-
+    // engine-fix-2026-09-23.md, "Static round 6"). Zero/false for every
+    // frame while the key is off -- transition_flash_eye_base.h's
+    // EyeBaseFrameSnapshot, read once here the way poseReaderMask is above.
+    uint16_t eyeBaseCalls;            // consumer hook calls this frame
+    uint16_t eyeBaseUnrefilledCalls;  // of those, how many read the mailbox as the reset value
+    uint8_t  eyeBaseTreatment;        // this frame's last unrefilled call: 0 none, 1 watched, 2 acted
+    uint32_t eyeBaseWriterMask;       // bit N: writer-table id N hit this frame
+    bool     eyeBaseWriterSinceLastConsume;  // any writer hit since the previous consumer call
+    bool     eyeBaseShipChanged;      // the ship pointer differed from the previous consumer call's
+    float    eyeBaseM[3];             // last call this frame: the mailbox's translation
+    float    eyeBaseF[3];             // last call this frame: the stand-in's translation
 };
 
 // What ended up in RingEntry::verdict. Order is the order the detector tests
@@ -482,6 +496,13 @@ const char* ringVerdictName(uint8_t v) {
         case kVerdictSceneReset:  return "WITHHELD -- eye camera reset without matching object rebase";
         default:                  return "";
     }
+}
+
+// RingEntry::eyeBaseTreatment's three values (transition_flash_eye_base.h's
+// own 0/1/2 convention, kept as a raw byte there for the same reason verdict
+// is one here: private to that file's event logic).
+const char* eyeBaseTreatmentName(uint8_t t) {
+    return t == 2 ? "acted" : t == 1 ? "watched" : "none";
 }
 
 struct State {
@@ -2210,13 +2231,18 @@ void eyeOriginTracePerformDump(State* s,const eot::PendingWindow& window){
         else std::snprintf(stackText,sizeof(stackText),"#%u",e.eyeOriginStackId);
         eyeOriginTraceAppend(text,
             "f%-7u eye=%-3u verdict=%-40s pos=(%+.2f %+.2f %+.2f) scene=(%+.2f %+.2f %+.2f) "
-            "stack=%-8s buf=%-7s writes=%u mask=0x%016llX reader=0x%08X tick=%u swapsync=%u swap=%s",
+            "stack=%-8s buf=%-7s writes=%u mask=0x%016llX reader=0x%08X tick=%u swapsync=%u swap=%s "
+            "eyebase calls=%u unref=%u treat=%-7s wmask=0x%08X wsince=%s shipchg=%s "
+            "M=(%+.2f %+.2f %+.2f) F=(%+.2f %+.2f %+.2f)",
             e.frame,e.eyeDraws,ringVerdictName(e.verdict),
             e.pos[0],e.pos[1],e.pos[2],e.scenePos[0],e.scenePos[1],e.scenePos[2],
             stackText,e.eyeBufferWritten?"written":"no",
             e.eyeTraceWrites,(unsigned long long)e.eyeTraceMask,
             e.poseReaderMask,unsigned(e.positionerTickCalls),unsigned(e.positionerSwapSyncCalls),
-            e.positionerSwapDetected?"yes":"no");
+            e.positionerSwapDetected?"yes":"no",
+            unsigned(e.eyeBaseCalls),unsigned(e.eyeBaseUnrefilledCalls),eyeBaseTreatmentName(e.eyeBaseTreatment),
+            e.eyeBaseWriterMask,e.eyeBaseWriterSinceLastConsume?"yes":"no",e.eyeBaseShipChanged?"yes":"no",
+            e.eyeBaseM[0],e.eyeBaseM[1],e.eyeBaseM[2],e.eyeBaseF[0],e.eyeBaseF[1],e.eyeBaseF[2]);
     }
     eyeOriginTraceAppend(text,"eye-origin trace dump done, %u entries",printed);
 
@@ -2452,6 +2478,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
                 e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
                 e.verdict==kVerdictSceneReset);
+            transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
             // advanced.eye_origin_readers: read-and-reset (see the
@@ -2465,6 +2492,20 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 e.positionerTickCalls = pr.tickCalls;
                 e.positionerSwapSyncCalls = pr.swapSyncCalls;
                 e.positionerSwapDetected = pr.swapDetected;
+            }
+            // advanced.transition_flash_eye_base: read-and-reset, the same
+            // convention and the same "exactly once per real frame" note as
+            // the pose-reader tap just above.
+            {
+                const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
+                e.eyeBaseCalls = eb.calls;
+                e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
+                e.eyeBaseTreatment = eb.treatment;
+                e.eyeBaseWriterMask = eb.writerMask;
+                e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
+                e.eyeBaseShipChanged = eb.shipChanged;
+                e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
+                e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
             }
             ++s->ringHead;
         }
@@ -2561,6 +2602,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
                 e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
                 e.verdict==kVerdictSceneReset);
+            transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
             // advanced.eye_origin_readers: read-and-reset (see the
@@ -2574,6 +2616,19 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 e.positionerTickCalls = pr.tickCalls;
                 e.positionerSwapSyncCalls = pr.swapSyncCalls;
                 e.positionerSwapDetected = pr.swapDetected;
+            }
+            // advanced.transition_flash_eye_base: read-and-reset, the same
+            // convention as the pose-reader tap just above.
+            {
+                const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
+                e.eyeBaseCalls = eb.calls;
+                e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
+                e.eyeBaseTreatment = eb.treatment;
+                e.eyeBaseWriterMask = eb.writerMask;
+                e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
+                e.eyeBaseShipChanged = eb.shipChanged;
+                e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
+                e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
             }
             ++s->ringHead;
         }
@@ -2903,6 +2958,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
             e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
             e.verdict==kVerdictSceneReset);
+        transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
         recordScenePosition(e,s);
         // advanced.eye_origin_readers: read-and-reset: see
@@ -2915,6 +2971,19 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.positionerTickCalls = pr.tickCalls;
             e.positionerSwapSyncCalls = pr.swapSyncCalls;
             e.positionerSwapDetected = pr.swapDetected;
+        }
+        // advanced.transition_flash_eye_base: read-and-reset, the same
+        // convention as the pose-reader tap just above.
+        {
+            const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
+            e.eyeBaseCalls = eb.calls;
+            e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
+            e.eyeBaseTreatment = eb.treatment;
+            e.eyeBaseWriterMask = eb.writerMask;
+            e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
+            e.eyeBaseShipChanged = eb.shipChanged;
+            e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
+            e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
         }
         ++s->ringHead;
     }

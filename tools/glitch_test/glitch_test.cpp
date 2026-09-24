@@ -36,6 +36,7 @@
 #include "../../src/d3d11/glitch_frame.h"
 #include "../../src/d3d11/transition_flash_prevent.h"
 #include "../../src/d3d11/pose_reader_watch.h"
+#include "../../src/d3d11/transition_flash_eye_base.h"
 
 namespace edvr {
 // Linker stubs: this rig drives glitch_frame.cpp alone, the way it always
@@ -52,6 +53,12 @@ bool poseReaderTakeSwapTrigger(uint32_t*) { return false; }
 PoseReaderFrameSnapshot poseReaderWatchFrameSnapshot() { return PoseReaderFrameSnapshot{}; }
 uint32_t poseReaderWatchTableCount() { return 0; }
 PoseReaderTableEntry poseReaderWatchTableEntry(uint32_t) { return PoseReaderTableEntry{}; }
+// Same reason again, for transition_flash_eye_base.cpp (round 6's consumer
+// hook and writer watch, also needing CodeHook and the game): advanced.
+// transition_flash_eye_base reads as permanently off here, its per-frame
+// columns as empty/zero.
+void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t, bool) {}
+EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot() { return EyeBaseFrameSnapshot{}; }
 }  // namespace edvr
 
 using namespace edvr;
