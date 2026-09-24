@@ -245,5 +245,121 @@ inline bool rvaInsideConsumerExtent(uintptr_t rva) noexcept {
     return rva >= kConsumerExtentRva && rva < kConsumerExtentRva + kConsumerExtentSize;
 }
 
+// ---------------------------------------------------------------------------
+// CHANGE 5 (2026-09-24, static round 7: "the writer's own entry"). The
+// writer FUN_142874b20 (true entry, 239 bytes, chained pdata -- design doc
+// "Static round 7") is never CodeHooked: its first two instructions (TEST
+// RDX,RDX; JZ rel32) are a pattern CodeHook's decoder refuses. Instead
+// transition_flash_eye_base.cpp arms a DR1 EXECUTE breakpoint at its entry,
+// alongside DR0's existing write watch on the mailbox -- both slots share
+// one VEH, one all-thread arm/disarm sweep, one lifecycle.
+inline constexpr uintptr_t kWriterExtentRva = 0x2874B20u;
+inline constexpr uintptr_t kWriterExtentSize = 0xEFu;  // 239 bytes: [0x2874B20, 0x2874C0F)
+
+// A DR0 (write) hit whose RIP lands in here is the writer's own body
+// WRITING the mailbox -- its _stricmp name gate let it through. Distinct
+// from rvaInsideConsumerExtent above (the consumer's own reset write) and
+// from every other rva, which is some other, not-yet-identified writer.
+inline bool rvaInsideWriterExtent(uintptr_t rva) noexcept {
+    return rva >= kWriterExtentRva && rva < kWriterExtentRva + kWriterExtentSize;
+}
+
+// Dr7 slot 1, this module's own copy of the bit layout pose_reader_watch_
+// core.h's armSlot0Dr7/disarmSlot0Dr7 state for slot 0 (that header is left
+// untouched -- every Dr7 user here keeps its own copy; see this file's own
+// top-of-file comment and the relay machinery's for why). Bit 2 = L1 (local
+// enable, slot 1); bits 20-21 = RW1; bits 22-23 = LEN1. RW1=00/LEN1=00 is an
+// EXECUTE breakpoint -- x86 defines no read-only condition and no length for
+// one; the CPU traps on fetch of the single byte at Dr1 regardless of
+// LEN1's value, and 00/00 is the bit pattern the design doc states.
+constexpr uint32_t kDr7L1Bit = 1u << 2;
+constexpr uint32_t kDr7Slot1Mask = 0x00F00004u;  // bit2 | bits20-21 | bits22-23
+
+inline uint32_t armSlot1ExecuteDr7(uint32_t existing) noexcept {
+    return (existing & ~kDr7Slot1Mask) | kDr7L1Bit;
+}
+inline uint32_t disarmSlot1Dr7(uint32_t existing) noexcept {
+    return existing & ~kDr7L1Bit;
+}
+
+// Dr6 bit 1 (B1): slot 1's condition was detected. Sticky until cleared by
+// the handler, same convention as pose_reader_watch_core.h's kDr6B0Bit/
+// dr6HasSlot0Hit for slot 0.
+constexpr uint32_t kDr6B1Bit = 1u << 1;
+inline bool dr6HasSlot1Hit(uint32_t dr6) noexcept { return (dr6 & kDr6B1Bit) != 0; }
+
+// ---------------------------------------------------------------------------
+// CHANGE 6 (2026-09-24, static round 7's substitute policy): the offered
+// matrix -- what the writer was about to copy into the mailbox (param_3, the
+// DR1 handler's own capture), whether or not its name gate let it through.
+// When the gate refused it, this IS "the base the writer would have
+// written" (design doc, "What a flight can settle") and is a strictly
+// better substitute than the held base for an un-refilled consume, because
+// it is the frame's own value rather than up to two frames old.
+//
+// "Fresh": stamped this frame or the frame before -- deliberately tighter
+// than the held base's own 2-frame cap (kHeldBaseMaxAgeFrames above),
+// because an offered matrix only exists at all when the writer ran moments
+// before the consume judging it.
+inline constexpr uint32_t kOfferedMaxAgeFrames = 1;
+
+inline bool offeredIsFresh(uint32_t currentFrame, uint32_t offeredFrame) noexcept {
+    const uint32_t age = currentFrame >= offeredFrame ? currentFrame - offeredFrame : 0xFFFFFFFFu;
+    return age <= kOfferedMaxAgeFrames;
+}
+
+// All five conditions the design doc's substitute policy lists, ANDed in
+// order so a test can flip each alone: entered for our ship, not written
+// since the previous consume (the name gate is what refused it -- if it HAD
+// written, this call would not be unrefilled in the first place), an
+// offered matrix actually captured, fresh, finite, and not itself the reset
+// value. The session act cap is NOT one of these -- it gates both
+// substitutes alike, applied once at the call site rather than duplicated in
+// here (see transition_flash_eye_base.cpp's own mayActOffered).
+inline bool offeredSubstituteUsable(bool writerEnteredForShip, bool writerWroteSincePriorConsume,
+                                     bool haveOffered, uint32_t currentFrame, uint32_t offeredFrame,
+                                     const float offeredM[16]) noexcept {
+    if (!writerEnteredForShip) return false;
+    if (writerWroteSincePriorConsume) return false;
+    if (!haveOffered) return false;
+    if (!offeredIsFresh(currentFrame, offeredFrame)) return false;
+    if (!allFinite16(offeredM)) return false;
+    if (isResetMailbox(offeredM)) return false;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// CHANGE 7 (2026-09-24, static round 7's per-frame classification): which of
+// four states this frame's writer-watch counts describe -- the controller
+// counter (RVA 0x10730A0) and the writer's own DR1/DR0 counts together tell
+// apart the design doc's ranked skip candidates: (1) the controller's own
+// validity gate refusing for the whole frame; (2) the writer's name gate
+// refusing after being entered; anything else is the writer actually
+// writing.
+enum class FrameWriterClass : uint8_t {
+    ControllerNotCalled,               // the controller tick did not run at all this frame
+    ControllerCalledWriterNotEntered,  // ran, but skip candidate (1): its own vtable[0x80] gate
+    WriterEnteredNotWritten,           // entered, but skip candidate (2): the name gate refused
+    WriterWrote,                       // entered and wrote -- an ordinary, fully-refilled frame
+};
+
+inline FrameWriterClass classifyFrameWriter(uint32_t controllerCalls, uint32_t writerEntered,
+                                             uint32_t writerWrote) noexcept {
+    if (controllerCalls == 0) return FrameWriterClass::ControllerNotCalled;
+    if (writerEntered == 0) return FrameWriterClass::ControllerCalledWriterNotEntered;
+    if (writerWrote == 0) return FrameWriterClass::WriterEnteredNotWritten;
+    return FrameWriterClass::WriterWrote;
+}
+
+inline const char* frameWriterClassText(FrameWriterClass c) noexcept {
+    switch (c) {
+    case FrameWriterClass::ControllerNotCalled:              return "controller not called";
+    case FrameWriterClass::ControllerCalledWriterNotEntered: return "controller called, writer not entered";
+    case FrameWriterClass::WriterEnteredNotWritten:          return "writer entered, did not write";
+    case FrameWriterClass::WriterWrote:                      return "writer wrote";
+    }
+    return "?";
+}
+
 }  // namespace tfeb
 }  // namespace edvr

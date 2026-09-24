@@ -6,12 +6,21 @@
 // views, then (mode != 1) resets the mailbox to an identity constant. Some
 // writer has to refill it every frame; on the frame after a render-frame
 // switch it is not refilled in time, so the eye composes against the head
-// pose alone -- the flash. The candidate written back is the mailbox's OWN
-// last known-refilled value, cached every refilled call and guarded call by
-// call (age, ship pointer, finite, not itself the reset value, session cap)
+// pose alone -- the flash.
+//
+// Static round 7 (design doc, "Static round 7: the writer and its gates")
+// found that writer, FUN_142874b20, and its own name-gate skip. A DR1
+// EXECUTE breakpoint at its entry (alongside DR0's existing write watch, one
+// VEH, one lifecycle) captures what it was OFFERED whether or not the name
+// gate let it through; when the writer was entered for our ship and refused
+// by that gate, the offered matrix -- fresh, finite, not the reset value --
+// is "the base the writer would have written" and takes priority over the
+// held base. Otherwise the candidate is still the mailbox's OWN last
+// known-refilled value, cached every refilled call and guarded call by call
+// (age, ship pointer, finite, not itself the reset value, session cap)
 // before anything acts on it -- see transition_flash_eye_base_core.h's
-// heldBaseRefusal. ship+0x130 is still read and logged, for the record, but
-// no longer gates or supplies the write.
+// offeredSubstituteUsable and heldBaseRefusal. ship+0x130 is still read and
+// logged, for the record, but no longer gates or supplies the write.
 //
 //   advanced.transition_flash_eye_base = off | watch | on | alternate
 //     off        nothing installed. One log line.

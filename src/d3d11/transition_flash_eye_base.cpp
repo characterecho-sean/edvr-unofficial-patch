@@ -40,14 +40,49 @@ constexpr uintptr_t kConsumerRva = 0x28431D0u;
 constexpr uint8_t kConsumerBytes[16] = {
     0x40, 0x55, 0x53, 0x56, 0x48, 0x8D, 0xAC, 0x24, 0x50, 0xE8, 0xFF, 0xFF, 0xB8, 0xB0, 0x18, 0x00};
 
+// CHANGE 6 (static round 7): the camera controller tick, FUN_1410730a0. Read-
+// only counter hook -- it just names which frames the loop that calls the
+// writer even ran. First 16 bytes verified the same two ways as the
+// consumer's above: analysis\decomp\flash\r7\resolved_10730A0.txt's own
+// disassembly dump, and independently by walking analysis\
+// EliteDangerous64.exe's PE section table. `48 89 5C 24 10 48 89 74 24 18 55
+// 57 41 56 48 8D` is MOV [RSP+0x10],RBX; MOV [RSP+0x18],RSI; PUSH RBP; PUSH
+// RDI; PUSH R14; LEA RBP,[...] -- a clean, CodeHook-relocatable prologue
+// (unlike the writer below). Ghidra's own signature recovery gives it one
+// argument, FUN_1410730a0(longlong param_1) -- RCX only, no RDX/R8/R9 spill
+// in its prologue beyond saving the non-volatile RBX/RSI into the caller's
+// shadow space.
+constexpr uintptr_t kControllerRva = 0x10730A0u;
+constexpr uint8_t kControllerBytes[16] = {
+    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x55, 0x57, 0x41, 0x56, 0x48, 0x8D};
+
+// CHANGE 5 (static round 7): the writer, FUN_142874b20 (true entry; 239
+// bytes, chained pdata). Verified the same two ways, against analysis\
+// decomp\flash\r7\writer_true_2874B20.txt and the exe's own section table.
+// Never CodeHooked -- `48 85 D2 0F 84 E5 00 00 00` is TEST RDX,RDX; JZ
+// rel32, a pattern CodeHook's decoder refuses -- only ever addressed as a
+// DR1 EXECUTE breakpoint target, so these bytes gate ARMING it, the same
+// belt-and-suspenders role kConsumerBytes plays for its own CodeHook even
+// though checkIdentity has already matched the whole module. Signature
+// (Ghidra, writer_true_2874B20.txt): void FUN_142874b20(longlong param_1,
+// longlong *param_2, undefined8 *param_3) -- RCX/RDX/R8, all three still
+// exactly as the caller passed them at this, the function's very first
+// instruction.
+constexpr uintptr_t kWriterRva = 0x2874B20u;
+constexpr uint8_t kWriterBytes[16] = {
+    0x48, 0x85, 0xD2, 0x0F, 0x84, 0xE5, 0x00, 0x00, 0x00, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48};
+
 constexpr uint32_t kSessionActCap = 60;
 constexpr uint32_t kDumpWindowFrames = 60;
 constexpr uint32_t kMaxDumpsPerSession = 12;
 constexpr uint32_t kMaxShipPointerChangeLines = 16;
 constexpr uint32_t kMaxReArms = 8;
-constexpr uint64_t kBoundArmedMs = 180000;     // 180s, pose_reader_watch.cpp's own bound
-constexpr uint64_t kBoundGameHits = 100000;    // ditto
-constexpr uint64_t kRearmSweepMs = 2000;       // ~2s, ditto
+// CHANGE 8 (static round 7): raised from 180s/100,000 hits -- the previous
+// bound, sized for round 6's discovery phase. A longer flight with the
+// writer now identified wants more headroom before the watch self-disarms.
+constexpr uint64_t kBoundArmedMs = 300000;     // 300s
+constexpr uint64_t kBoundGameHits = 150000;
+constexpr uint64_t kRearmSweepMs = 2000;       // ~2s, pose_reader_watch.cpp's own bound
 
 const char* modeName(tfp::Mode m) noexcept {
     switch (m) {
@@ -228,6 +263,17 @@ __declspec(noinline) void __fastcall consumerObserved(uintptr_t cameraObj, int32
 HookEntry g_consumerEntry{"transition-flash-eye-base-consumer", kConsumerRva,
                           reinterpret_cast<void*>(&consumerObserved)};
 
+// CHANGE 6: the controller counter. Read-only -- passes param_1 through
+// unchanged and returns the original's own return value unchanged too
+// (Ghidra's decompile of the return path is ambiguous about whether any
+// caller reads it, unlike the consumer's -- safer to preserve it than to
+// assume void).
+using ControllerFn = uint64_t (__fastcall*)(uintptr_t);
+__declspec(noinline) uint64_t __fastcall controllerObserved(uintptr_t param1) noexcept;
+
+HookEntry g_controllerEntry{"transition-flash-eye-base-controller", kControllerRva,
+                            reinterpret_cast<void*>(&controllerObserved)};
+
 // --- Module state ------------------------------------------------------
 std::atomic<uint8_t> g_fixMode{uint8_t(tfp::Mode::Off)};
 std::atomic<bool> g_armed{false};       // install has been attempted (once)
@@ -314,11 +360,88 @@ bool g_haveLastCall = false;
 // consumer call.
 std::atomic<bool> g_writerHitSincePriorConsume{false};
 
+// CHANGE 5/7: the two round-7 "since previous consume" flags the substitute
+// policy reads, read-and-reset by consumerObserved the same way as
+// g_writerHitSincePriorConsume above. Entered: the DR1 handler saw the
+// writer's own entry with ship_w == our ship. Wrote: a DR0 hit landed inside
+// the writer's own body extent (tfeb::rvaInsideWriterExtent) -- its name
+// gate let the copy through.
+std::atomic<bool> g_writerEnteredSincePriorConsume{false};
+std::atomic<bool> g_writerWroteSincePriorConsume{false};
+
+// CHANGE 6/8: per-frame and session counters for the controller and the
+// writer's own DR1/DR0 activity -- read-and-reset into the frame ring by
+// transitionFlashEyeBaseNoteSceneCamera, peeked (not reset) by
+// consumerObserved's per-event log line, and (the totals) printed once per
+// dump. "ThisFrame" counters are not single-writer (two callers can consume
+// on one frame; the controller and writer can each fire more than once
+// too), so all six are atomics.
+std::atomic<uint32_t> g_controllerCallsThisFrame{0};
+std::atomic<uint64_t> g_controllerCallsTotal{0};
+std::atomic<uint32_t> g_writerEnteredThisFrame{0};
+std::atomic<uint64_t> g_writerEnteredTotal{0};
+std::atomic<uint32_t> g_writerWroteThisFrame{0};
+std::atomic<uint64_t> g_writerWroteTotal{0};
+
+// CHANGE 5: the offered-matrix tear-free slot. A seqlock: an odd sequence
+// means a publish is in progress; readOffered retries rather than blocking
+// -- nothing in a VEH may take a lock the excepted thread could already
+// hold, and nothing here allocates. Written only from writerWatchVeh (DR1);
+// read from consumerObserved and transitionFlashEyeBaseNoteSceneCamera, both
+// well outside the VEH.
+struct OfferedSlot {
+    std::atomic<uint32_t> seq{0};
+    float m[16] = {};
+    uint32_t frame = 0;
+    uint64_t sequence = 0;
+};
+OfferedSlot g_offeredSlot;
+
+// __declspec(noinline): kept small and out of the VEH's own inlined shape,
+// the same rule this file's SEH helpers state for themselves.
+__declspec(noinline) void publishOffered(const float m[16], uint32_t frame, uint64_t sequence) noexcept {
+    const uint32_t s = g_offeredSlot.seq.load(std::memory_order_relaxed);
+    g_offeredSlot.seq.store(s + 1, std::memory_order_release);
+    std::memcpy(g_offeredSlot.m, m, sizeof(g_offeredSlot.m));
+    g_offeredSlot.frame = frame;
+    g_offeredSlot.sequence = sequence;
+    g_offeredSlot.seq.store(s + 2, std::memory_order_release);
+}
+
+// Up to 4 attempts: a VEH-side publish in flight is a handful of stores, not
+// a stall, so a torn read here means "try again", not "give up". Returns
+// false when nothing has ever been published (seq still 0) or every attempt
+// raced a publish.
+__declspec(noinline) bool readOffered(float outM[16], uint32_t& outFrame, uint64_t& outSequence) noexcept {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const uint32_t s1 = g_offeredSlot.seq.load(std::memory_order_acquire);
+        if (s1 == 0) return false;
+        if (s1 & 1u) continue;
+        float m[16];
+        std::memcpy(m, g_offeredSlot.m, sizeof(m));
+        const uint32_t frame = g_offeredSlot.frame;
+        const uint64_t sequence = g_offeredSlot.sequence;
+        const uint32_t s2 = g_offeredSlot.seq.load(std::memory_order_acquire);
+        if (s1 == s2) {
+            std::memcpy(outM, m, sizeof(m));
+            outFrame = frame;
+            outSequence = sequence;
+            return true;
+        }
+    }
+    return false;
+}
+
 // --- The ring: one entry per consumer call, fixed capacity. A concurrent
 // dump can read a slot mid-write (this file's hot-path writer is not
 // serialised against the dump), the same accepted risk transition_flash_
 // prevent.cpp's own ring states for the same reason.
-constexpr uint32_t kEyeBaseRingCapacity = 8192;
+// CHANGE 8 (static round 7): 8192 -> 65536. Flight 073114's event #2 dump
+// was written a minute later than its trigger and its window had already
+// wrapped past 8192 entries of ordinary refilled-call traffic; 65536 (96
+// bytes/entry, ~6 MiB total -- see the static_assert below) gives far more
+// headroom against exactly that.
+constexpr uint32_t kEyeBaseRingCapacity = 65536;
 
 struct EyeBaseRingEntry {
     uint32_t frame = 0;
@@ -337,7 +460,7 @@ struct EyeBaseRingEntry {
     double dt = 0.0, dr = 0.0;   // only meaningful when a validation fold ran this call
 };
 
-static_assert(sizeof(EyeBaseRingEntry) * uint64_t(kEyeBaseRingCapacity) <= 4ull * 1024 * 1024,
+static_assert(sizeof(EyeBaseRingEntry) * uint64_t(kEyeBaseRingCapacity) <= 8ull * 1024 * 1024,
              "transition flash eye base: the ring must stay small");
 
 std::atomic<EyeBaseRingEntry*> g_ring{nullptr};
@@ -366,6 +489,16 @@ struct EyeBaseFrameRecord {
     uint32_t writerHits = 0;
     uint16_t calls = 0;
     uint16_t modeCounts[9] = {};
+    // CHANGE 8: static round 7's per-frame classification -- the controller's
+    // own call count, how many of those entries were the writer for OUR ship
+    // (DR1), how many of those actually wrote (DR0 inside the writer's own
+    // body), and the last offered matrix's translation THIS frame (NAN when
+    // nothing was offered this frame -- see transitionFlashEyeBaseNoteScene-
+    // Camera's own read).
+    uint32_t controllerCalls = 0;
+    uint32_t writerEntered = 0;
+    uint32_t writerWrote = 0;
+    float offeredTranslation[3] = {NAN, NAN, NAN};
 };
 
 static_assert(sizeof(EyeBaseFrameRecord) * uint64_t(kEyeBaseFrameRingCapacity) <= 1ull * 1024 * 1024,
@@ -481,6 +614,14 @@ void performDump(const PendingDump& due) noexcept {
     const uint64_t other = g_modeHistogram[8].load(std::memory_order_relaxed);
     if (other) appendLine(text, "  mode=other: %llu", (unsigned long long)other);
 
+    // CHANGE 6/8: static round 7's session totals -- whether the controller
+    // and the writer's own DR1/DR0 counters ever engaged at all this
+    // session, before wading into the per-call/per-frame rows below.
+    appendLine(text, "static round 7: controller_calls=%llu writer_entered=%llu writer_wrote=%llu (session totals)",
+              (unsigned long long)g_controllerCallsTotal.load(std::memory_order_relaxed),
+              (unsigned long long)g_writerEnteredTotal.load(std::memory_order_relaxed),
+              (unsigned long long)g_writerWroteTotal.load(std::memory_order_relaxed));
+
     EyeBaseRingEntry* const ring = g_ring.load(std::memory_order_acquire);
     const uint64_t head = g_ringHead.load(std::memory_order_relaxed);
     const uint64_t have = ring ? (head < kEyeBaseRingCapacity ? head : kEyeBaseRingCapacity) : 0;
@@ -533,9 +674,13 @@ void performDump(const PendingDump& due) noexcept {
         }
         if (modes.empty()) modes = "(none)";
         ++framePrinted;
-        appendLine(text, "  f%-7u calls=%-3u %-24s scene=%s(%+.2f %+.2f %+.2f) writerHits=%u",
-                  r.frame, r.calls, modes.c_str(), r.sceneValid ? "" : "STALE-",
-                  r.scenePos[0], r.scenePos[1], r.scenePos[2], r.writerHits);
+        appendLine(text,
+            "  f%-7u calls=%-3u %-24s scene=%s(%+.2f %+.2f %+.2f) writerHits=%u "
+            "controllerCalls=%u writerEntered=%u writerWrote=%u offered=(%+.3f %+.3f %+.3f)",
+            r.frame, r.calls, modes.c_str(), r.sceneValid ? "" : "STALE-",
+            r.scenePos[0], r.scenePos[1], r.scenePos[2], r.writerHits,
+            r.controllerCalls, r.writerEntered, r.writerWrote,
+            r.offeredTranslation[0], r.offeredTranslation[1], r.offeredTranslation[2]);
     }
     appendLine(text, "per-frame rows done, %u entries", framePrinted);
 
@@ -621,11 +766,29 @@ struct ArmedThreadSet {
 // the re-arm sweep, and disarm all run from there) -- no lock needed.
 ArmedThreadSet g_wwArmedThreads;
 uint64_t g_wwWatchAddress = 0;
+// CHANGE 5: the writer's own entry, base + kWriterRva -- constant for the
+// session once the module base is known, unlike g_wwWatchAddress above
+// (ship-relative, re-armed on a ship pointer change). Set once by
+// armWriterWatch. Read cross-thread by the helper thread the same way
+// g_wwWatchAddress already is (setCurrentThreadDr/helperDrThreadProc) --
+// this file's existing, accepted pattern for "set once before arming, never
+// mutated concurrently with an armed read".
+uint64_t g_wwWriterExecAddress = 0;
+// Whether DR1 participates at all this session -- false when the writer's
+// bytes did not verify at install (doInstall), in which case DR0's write
+// watch still arms exactly as round 6 flew it and DR1 is simply never
+// touched. Set once, before any arming; same cross-thread-read acceptance
+// as g_wwWriterExecAddress.
+bool g_wwArmSlot1 = false;
 
 // DR0/Dr7 on one thread, by handle. `arm` true sets DR0=watchAddress and
 // arms slot 0 in WRITE mode (prw::kDr7RwWrite); false clears just L0
 // (prw::disarmSlot0Dr7). Suspend/GetContext/SetContext/Resume, exactly as
-// pose_reader_watch.cpp's own setThreadDr, parameterized by rw mode.
+// pose_reader_watch.cpp's own setThreadDr, parameterized by rw mode. CHANGE
+// 5: when g_wwArmSlot1 is set, slot 1 (DR1, EXECUTE, the writer's entry)
+// arms and disarms in this exact same call, right alongside slot 0 -- the
+// task's own rule, "both arm and disarm together". Slot 0's own bits and
+// DR0 are untouched by this addition either way.
 bool setThreadDr(DWORD tid, uint64_t watchAddress, uint32_t rwBits, bool arm) noexcept {
     HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
     if (!h) return false;
@@ -636,9 +799,15 @@ bool setThreadDr(DWORD tid, uint64_t watchAddress, uint32_t rwBits, bool arm) no
         if (GetThreadContext(h, &ctx)) {
             const uint32_t lowDr7 = static_cast<uint32_t>(ctx.Dr7 & 0xFFFFFFFFull);
             const uint32_t highDr7 = static_cast<uint32_t>((ctx.Dr7 >> 32) & 0xFFFFFFFFull);
-            const uint32_t newLowDr7 = arm ? prw::armSlot0Dr7(lowDr7, rwBits) : prw::disarmSlot0Dr7(lowDr7);
+            uint32_t newLowDr7 = arm ? prw::armSlot0Dr7(lowDr7, rwBits) : prw::disarmSlot0Dr7(lowDr7);
+            if (g_wwArmSlot1) {
+                newLowDr7 = arm ? tfeb::armSlot1ExecuteDr7(newLowDr7) : tfeb::disarmSlot1Dr7(newLowDr7);
+            }
             ctx.Dr7 = (static_cast<DWORD64>(highDr7) << 32) | newLowDr7;
-            if (arm) ctx.Dr0 = static_cast<DWORD64>(watchAddress);
+            if (arm) {
+                ctx.Dr0 = static_cast<DWORD64>(watchAddress);
+                if (g_wwArmSlot1) ctx.Dr1 = static_cast<DWORD64>(g_wwWriterExecAddress);
+            }
             ok = SetThreadContext(h, &ctx) != FALSE;
         }
         ResumeThread(h);
@@ -790,6 +959,17 @@ void recordWriterHit(const CONTEXT& originalCtx, uint64_t hitAddress) noexcept {
         return;
     }
 
+    // CHANGE 5: a write inside the KNOWN writer's own body (static round 7)
+    // is the writer WRITING, not merely "some outside writer" -- tracked
+    // specifically, in ADDITION to (not instead of) the generic writer table
+    // below, which still names caller stacks for any writer this build has
+    // not keyed by address.
+    if (tfeb::rvaInsideWriterExtent(rva)) {
+        g_writerWroteThisFrame.fetch_add(1, std::memory_order_relaxed);
+        g_writerWroteTotal.fetch_add(1, std::memory_order_relaxed);
+        g_writerWroteSincePriorConsume.store(true, std::memory_order_relaxed);
+    }
+
     prw::ReaderKey key{};
     key.rip = rva;
     uint32_t rvas[prw::kMaxUnwindFrames] = {};
@@ -833,18 +1013,55 @@ LONG CALLBACK writerWatchVeh(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
     const uint32_t dr6 = static_cast<uint32_t>(ep->ContextRecord->Dr6 & 0xFFFFFFFFull);
-    if (!prw::dr6HasSlot0Hit(dr6)) return EXCEPTION_CONTINUE_SEARCH;
+    const bool slot0Hit = prw::dr6HasSlot0Hit(dr6);
+    const bool slot1Hit = tfeb::dr6HasSlot1Hit(dr6);
+    if (!slot0Hit && !slot1Hit) return EXCEPTION_CONTINUE_SEARCH;
     ep->ContextRecord->Dr6 = 0;  // sticky; clear before anything else, same rule pose_reader_watch.cpp states
+
     const uint64_t base = g_gameBase.load(std::memory_order_relaxed);
     const uint64_t size = g_gameSize.load(std::memory_order_relaxed);
     const auto addr = reinterpret_cast<uint64_t>(ep->ExceptionRecord->ExceptionAddress);
-    if (base && addr >= base && addr < base + size) {
+
+    if (slot0Hit && base && addr >= base && addr < base + size) {
         recordWriterHit(*ep->ContextRecord, addr);
     }
-    // A hit outside the game module (EDVR's own code touching the same
-    // watched bytes some other way) is not a writer being hunted; ignored,
-    // same as pose_reader_watch.cpp's g_edvrHitsIgnored path, just without a
-    // dedicated counter -- Part B's bounded-logging list has no line for it.
+    // A slot-0 hit outside the game module (EDVR's own code touching the
+    // same watched bytes some other way) is not a writer being hunted;
+    // ignored, same as pose_reader_watch.cpp's g_edvrHitsIgnored path, just
+    // without a dedicated counter -- Part B's bounded-logging list has no
+    // line for it.
+
+    if (slot1Hit) {
+        // CHANGE 5: the writer's own entry. An EXECUTE breakpoint is a
+        // FAULT, not a trap -- ExceptionAddress IS the writer's first
+        // instruction, and RCX/RDX/R8 still hold param_1/param_2/param_3
+        // exactly as the caller passed them; nothing has executed yet.
+        // SEH-guarded: this is game memory, read from inside a VEH, and a
+        // fault here must not crash the exception path itself.
+        g_writerEnteredThisFrame.fetch_add(1, std::memory_order_relaxed);
+        g_writerEnteredTotal.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t param1 = ep->ContextRecord->Rcx;
+        const uint64_t param3 = ep->ContextRecord->R8;
+        uint64_t shipW = 0;
+        if (sehReadU64(param1 + 0x38, shipW) && shipW != 0 &&
+            shipW == g_lastShip.load(std::memory_order_relaxed)) {
+            g_writerEnteredSincePriorConsume.store(true, std::memory_order_relaxed);
+            float offered[16];
+            if (sehReadBlock64(param3, offered)) {
+                publishOffered(offered, g_frame.load(std::memory_order_relaxed),
+                               g_sequence.load(std::memory_order_relaxed));
+            }
+        }
+        // RF (Resume Flag, bit 16 / 0x10000): without it, the CPU would
+        // re-trap on this same instruction the instant execution resumes --
+        // an execute breakpoint re-fires on its own address unless RF
+        // suppresses that one re-trigger. DR0 needs no such flag: a data
+        // (write) breakpoint is reported as a TRAP, after the faulting
+        // instruction has already retired, so simply resuming already lands
+        // on the next instruction -- exactly what the slot-0 path above has
+        // always done, untouched here.
+        ep->ContextRecord->EFlags |= 0x10000u;
+    }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -873,6 +1090,10 @@ prw::StabilityState g_wwStability;
 void armWriterWatch(uint64_t shipPointer, uint32_t stableFrames, uint32_t consecutiveRefilled) noexcept {
     g_wwArmedShip = shipPointer;
     g_wwWatchAddress = shipPointer + 0x3360;
+    // CHANGE 5: constant for the session (module base, not ship-relative) --
+    // recomputed on every (re)arm for simplicity; cheap, and always correct
+    // even across a ship-pointer re-arm.
+    g_wwWriterExecAddress = g_gameBase.load(std::memory_order_relaxed) + kWriterRva;
     installVeh();
     sweepArmThreads();
     g_wwHwArmed = true;
@@ -880,9 +1101,11 @@ void armWriterWatch(uint64_t shipPointer, uint32_t stableFrames, uint32_t consec
     g_wwLastRearmSweepMs = g_wwHwArmedAtMs;
     Log::get().note(
         "transition flash eye base: writer watch armed at 0x%llX (ship 0x%llX + 0x3360), %u thread(s); "
+        "DR1 %s at 0x%llX (writer entry); "
         "gate: ship pointer stable %u consecutive frame(s), %u consecutive refilled call(s).",
         (unsigned long long)g_wwWatchAddress, (unsigned long long)shipPointer, g_wwArmedThreads.count,
-        stableFrames, consecutiveRefilled);
+        g_wwArmSlot1 ? "armed" : "NOT armed (writer bytes did not verify)",
+        (unsigned long long)g_wwWriterExecAddress, stableFrames, consecutiveRefilled);
 }
 
 void disarmWriterWatch(const char* reason) noexcept {
@@ -988,6 +1211,24 @@ uint32_t takeFrameWriterMask() noexcept {
 }
 
 // =====================================================================
+// Part C: the controller counter (CHANGE 6). Read-only -- no substitute, no
+// write, no dump trigger; it exists only so a frame can be classified
+// (tfeb::classifyFrameWriter) instead of leaving "the writer never entered"
+// ambiguous between "the loop didn't run" and "it ran but skip candidate 1
+// fired".
+// =====================================================================
+
+uint64_t __fastcall controllerObserved(uintptr_t param1) noexcept {
+    const auto forward = reinterpret_cast<ControllerFn>(g_controllerEntry.forward.load(std::memory_order_acquire));
+    if (!forward) return 0;  // stood down at install; the relay is unreachable then
+    if (static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) != tfp::Mode::Off) {
+        g_controllerCallsTotal.fetch_add(1, std::memory_order_relaxed);
+        g_controllerCallsThisFrame.fetch_add(1, std::memory_order_relaxed);
+    }
+    return forward(param1);
+}
+
+// =====================================================================
 // Part A: the consumer hook.
 // =====================================================================
 
@@ -1005,6 +1246,10 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
 
     const bool writerSinceLast = g_writerHitSincePriorConsume.exchange(false, std::memory_order_acq_rel);
     g_writerSinceLastConsumeThisFrame.store(writerSinceLast, std::memory_order_relaxed);
+    // CHANGE 7: the substitute policy's own two "since previous consume"
+    // inputs -- see their declarations for what sets each.
+    const bool writerEnteredSinceLast = g_writerEnteredSincePriorConsume.exchange(false, std::memory_order_acq_rel);
+    const bool writerWroteSinceLast = g_writerWroteSincePriorConsume.exchange(false, std::memory_order_acq_rel);
 
     uint64_t ship = 0;
     const bool haveShip = sehReadU64(cameraObj + 0x50, ship);
@@ -1106,18 +1351,50 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
             }
         }
 
+        // CHANGE 7: the offered matrix -- what the writer was about to copy
+        // in (param_3, captured by the DR1 handler at its entry), computed
+        // unconditionally for every unrefilled call, watched or acted, the
+        // same "show the candidate regardless of treatment" rule the held
+        // base already follows below.
+        float offeredM[16] = {};
+        uint32_t offeredFrame = 0;
+        uint64_t offeredSeq = 0;
+        const bool haveOffered = readOffered(offeredM, offeredFrame, offeredSeq);
+        const int32_t offeredAgeFrames =
+            haveOffered ? (frame >= offeredFrame ? static_cast<int32_t>(frame - offeredFrame) : -1) : -1;
+        const bool offeredUsable = tfeb::offeredSubstituteUsable(
+            writerEnteredSinceLast, writerWroteSinceLast, haveOffered, frame, offeredFrame, offeredM);
+
         const uint64_t actedFrames = g_actedFrames.load(std::memory_order_relaxed);
         const bool capReached = tfp::sessionCapReached(actedFrames, kSessionActCap);
-        const tfeb::HeldBaseRefusal refusal = tfeb::heldBaseRefusal(
+        const tfeb::HeldBaseRefusal heldRefusal = tfeb::heldBaseRefusal(
             treatment, haveHeldBase, frame, heldFrame, ship, heldShip, heldM, capReached);
-        const bool mayAct = tfeb::heldBaseMayAct(refusal);
+        const bool mayActHeld = tfeb::heldBaseMayAct(heldRefusal);
+        // The session act cap bounds both substitutes alike -- applied here
+        // rather than inside offeredSubstituteUsable (its own five
+        // conditions are exactly what the design doc's substitute policy
+        // lists; the cap is CHANGE 1's own orthogonal safety valve).
+        const bool mayActOffered = treatment == tfp::Treatment::Act && !capReached && offeredUsable;
 
         bool acted = false;
-        if (mayAct) {
-            // Write the held base into the mailbox BEFORE the original runs,
-            // exactly where F used to be written -- so the engine snapshots
-            // it as the base and resets as usual.
-            acted = sehWriteBlock64(ship + 0x3330, heldM);
+        const char* substituteUsed = "none";
+        int32_t substituteAgeFrames = -1;
+        const float* chosenM = nullptr;
+        if (mayActOffered) {
+            chosenM = offeredM;
+            substituteUsed = "offered";
+            substituteAgeFrames = offeredAgeFrames;
+        } else if (mayActHeld) {
+            chosenM = heldM;
+            substituteUsed = "held";
+            substituteAgeFrames = heldAgeFrames;
+        }
+
+        if (chosenM) {
+            // Write the chosen substitute into the mailbox BEFORE the
+            // original runs, exactly where F used to be written -- so the
+            // engine snapshots it as the base and resets as usual.
+            acted = sehWriteBlock64(ship + 0x3330, chosenM);
             if (acted) {
                 std::lock_guard<std::mutex> lock(g_guardMutex);
                 if (tfp::isNewActedFrame(frame, g_lastActedFrame, g_hasActedFrame)) {
@@ -1130,12 +1407,16 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
         treatmentOutcome = acted ? 2 : 1;
 
         if (isNewEvent) {
-            // refusal can be None here with acted==false only if the SEH
+            // heldRefusal can be None here with acted==false only if the SEH
             // write itself faulted -- every guard passed but the store did
-            // not happen.
-            const char* reason = acted ? "acted"
-                                : refusal != tfeb::HeldBaseRefusal::None ? tfeb::heldBaseRefusalText(refusal)
-                                                                          : "write faulted";
+            // not happen. Named off heldRefusal even when it was the offered
+            // matrix that was tried and faulted: the two substitutes write
+            // through the same sehWriteBlock64 call, so a fault there is a
+            // fault either way, and heldRefusal's own chain already covers
+            // "watch slot"/"cap" for both.
+            const char* reason = acted ? substituteUsed
+                                : heldRefusal != tfeb::HeldBaseRefusal::None ? tfeb::heldBaseRefusalText(heldRefusal)
+                                                                              : "write faulted";
             char heldText[64];
             if (haveHeldBase) {
                 std::snprintf(heldText, sizeof(heldText), "(%+.3f %+.3f %+.3f) age=%d",
@@ -1143,11 +1424,32 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
             } else {
                 std::snprintf(heldText, sizeof(heldText), "none cached");
             }
+            char offeredText[96];
+            if (haveOffered) {
+                std::snprintf(offeredText, sizeof(offeredText), "(%+.3f %+.3f %+.3f) age=%d%s",
+                              offeredM[12], offeredM[13], offeredM[14], offeredAgeFrames,
+                              offeredUsable ? "" : " (refused)");
+            } else {
+                std::snprintf(offeredText, sizeof(offeredText), "none captured");
+            }
+            char substText[96];
+            if (chosenM) {
+                std::snprintf(substText, sizeof(substText), "%s (%+.3f %+.3f %+.3f) age=%d",
+                              substituteUsed, chosenM[12], chosenM[13], chosenM[14], substituteAgeFrames);
+            } else {
+                std::snprintf(substText, sizeof(substText), "none");
+            }
+            const uint32_t controllerCallsNow = g_controllerCallsThisFrame.load(std::memory_order_relaxed);
+            const uint32_t writerEnteredNow = g_writerEnteredThisFrame.load(std::memory_order_relaxed);
+            const uint32_t writerWroteNow = g_writerWroteThisFrame.load(std::memory_order_relaxed);
             Log::get().note(
                 "transition flash eye base: event #%u frame %u %s -- %s (mode=%s). "
-                "substitute=%s. M=(%+.3f %+.3f %+.3f) F=(%+.3f %+.3f %+.3f).",
-                eventNumber, frame, acted ? "ACTED" : "WATCHED", reason, modeName(fixMode), heldText,
-                m[12], m[13], m[14], haveF ? f[12] : NAN, haveF ? f[13] : NAN, haveF ? f[14] : NAN);
+                "substitute=%s. held=%s. offered=%s. M=(%+.3f %+.3f %+.3f) F=(%+.3f %+.3f %+.3f). "
+                "this frame: controller_calls=%u writer_entered=%u writer_wrote=%u.",
+                eventNumber, frame, acted ? "ACTED" : "WATCHED", reason, modeName(fixMode),
+                substText, heldText, offeredText,
+                m[12], m[13], m[14], haveF ? f[12] : NAN, haveF ? f[13] : NAN, haveF ? f[14] : NAN,
+                controllerCallsNow, writerEnteredNow, writerWroteNow);
         }
     } else if (haveM && haveF && gameMode != 1) {
         const tfeb::EyeBaseDelta d = tfeb::compareEyeBase(m, f);
@@ -1210,13 +1512,29 @@ void doInstall(tfp::Mode mode) noexcept {
     publishGameModule(base);
 
     const bool consumerOk = installOne(g_consumerEntry, base, kConsumerBytes);
+    // CHANGE 6: the controller counter -- read-only, shares g_relayGate with
+    // the consumer above (one master on/off switch for every hook this
+    // module installs).
+    const bool controllerOk = installOne(g_controllerEntry, base, kControllerBytes);
+    // CHANGE 5: the writer is never CodeHooked (see kWriterBytes' own
+    // comment), but its bytes are still verified before DR1 is ever allowed
+    // to arm at its address -- the same belt-and-suspenders role installOne's
+    // own sehCheckBytes plays for the consumer and controller even though
+    // checkIdentity above already matched the whole module. A mismatch here
+    // degrades gracefully: DR0's write watch (round 6, flight-proven) still
+    // arms on its own; only DR1 stays off for the session.
+    const bool writerBytesOk = sehCheckBytes(base + kWriterRva, kWriterBytes, sizeof(kWriterBytes));
+    g_wwArmSlot1 = writerBytesOk;
     g_armed.store(true, std::memory_order_release);
 
     Log::get().note(
         "transition flash eye base: armed, mode=%s. identity: build match (timestamp %u, image "
-        "%u bytes) -- OK. consumer 0x28431D0: %s. Ring %u entries, session act cap %u frames.",
+        "%u bytes) -- OK. consumer 0x28431D0: %s. controller 0x10730A0: %s. writer 0x2874B20 "
+        "(DR1 target) bytes: %s. Ring %u entries, session act cap %u frames.",
         modeName(mode), kExpectedTimestamp, kExpectedImageSize,
-        consumerOk ? "installed" : g_consumerEntry.failReason, kEyeBaseRingCapacity, kSessionActCap);
+        consumerOk ? "installed" : g_consumerEntry.failReason,
+        controllerOk ? "installed" : g_controllerEntry.failReason,
+        writerBytesOk ? "verified" : "MISMATCH -- DR1 will not arm", kEyeBaseRingCapacity, kSessionActCap);
 }
 
 // --- Periodic (~20s) reporting, only when something moved -----------------
@@ -1336,6 +1654,26 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
     r.sceneValid = valid;
     r.scenePos[0] = pos[0]; r.scenePos[1] = pos[1]; r.scenePos[2] = pos[2];
     r.writerHits = g_writerHitsThisFrame.exchange(0, std::memory_order_relaxed);
+    // CHANGE 6/8: the controller's own call count and the writer's DR1/DR0
+    // counts, read-and-reset the same way as writerHits above.
+    r.controllerCalls = g_controllerCallsThisFrame.exchange(0, std::memory_order_relaxed);
+    r.writerEntered = g_writerEnteredThisFrame.exchange(0, std::memory_order_relaxed);
+    r.writerWrote = g_writerWroteThisFrame.exchange(0, std::memory_order_relaxed);
+    // The offered matrix's translation THIS frame: a non-destructive peek
+    // (readOffered never resets the slot -- consumerObserved's own peeks and
+    // this one are both just readers), shown only when the slot's own stamp
+    // says it was captured on exactly this frame; left at the struct's NAN
+    // default otherwise.
+    {
+        float offeredM[16];
+        uint32_t offeredFrame = 0;
+        uint64_t offeredSeq = 0;
+        if (readOffered(offeredM, offeredFrame, offeredSeq) && offeredFrame == frame) {
+            r.offeredTranslation[0] = offeredM[12];
+            r.offeredTranslation[1] = offeredM[13];
+            r.offeredTranslation[2] = offeredM[14];
+        }
+    }
     uint16_t total = 0;
     for (uint32_t i = 0; i < 9; ++i) {
         const uint16_t c = g_modeCountsThisFrame[i].exchange(0, std::memory_order_relaxed);
