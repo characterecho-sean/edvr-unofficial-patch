@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "../../src/common/log.h"
+#include "../../src/common/runtime_profile.h"
 #include "../../src/common/timing.h"
 #include "../../src/d3d11/cs_stage_save.h"
 #include "../../src/d3d11/depth_probe.h"
@@ -1192,6 +1193,83 @@ inline void run(const Harness& h) {
     g.ordinaryFrame();
     g.frameWithViews(body, &e0, &e1);
     h.check(e0 && e1, "R6: and gives again");
+    // The real flat producer path, including slowPath's group copy and the
+    // FlatRuntimeDrawScope-style MRT restore after every draw.
+    {
+        edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+        const auto vb = g.compile(std::string(shader_tests::kVsCommon) + shader_tests::kVsB, "vs_5_0");
+        const auto pb = g.compile(shader_tests::kPsB, "ps_5_0");
+        ComPtr<ID3D11VertexShader> overlayVs;
+        ComPtr<ID3D11PixelShader> overlayPs;
+        h.check(SUCCEEDED(g.dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &overlayVs)) &&
+                SUCCEEDED(g.dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &overlayPs)),
+                "flat overlay lifecycle: original shaders created");
+        constexpr uint64_t overlayVsHash = 0xBBE58E40FE88EC80ull;
+        constexpr uint64_t overlayPsHash = 0xDB3E8D20CF53FBC0ull;
+        edvr::engineVelocityRememberVs(overlayVs.Get(), overlayVsHash, vb->GetBufferPointer(), vb->GetBufferSize(), false);
+        edvr::engineVelocityRememberPs(overlayPs.Get(), overlayPsHash, pb->GetBufferPointer(), pb->GetBufferSize(), false);
+        D3D11_DEPTH_STENCIL_DESC dd{};
+        dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        dd.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL;
+        ComPtr<ID3D11DepthStencilState> overlayDepth;
+        h.check(SUCCEEDED(g.dev->CreateDepthStencilState(&dd, &overlayDepth)), "flat overlay lifecycle: depth-write-off state");
+        D3D11_TEXTURE2D_DESC sd{};
+        sd.Width = sd.Height = sd.MipLevels = sd.ArraySize = sd.SampleDesc.Count = 1;
+        sd.Format = DXGI_FORMAT_R32G32_FLOAT; sd.Usage = D3D11_USAGE_DEFAULT; sd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> sentinelTexture;
+        ComPtr<ID3D11ShaderResourceView> sentinel;
+        h.check(SUCCEEDED(g.dev->CreateTexture2D(&sd, nullptr, &sentinelTexture)) &&
+                SUCCEEDED(g.dev->CreateShaderResourceView(sentinelTexture.Get(), nullptr, &sentinel)),
+                "flat overlay lifecycle: game t3 sentinel");
+        ID3D11ShaderResourceView* gameT3 = sentinel.Get();
+        g.ctx->PSSetShaderResources(3, 1, &gameT3);
+        g.shadow(BindSlot::PsSrv3, gameT3);
+        auto gameTargets = [&] {
+            ID3D11RenderTargetView* rt[4] = {
+                g.sourceRtv[0].Get(), g.sourceRtv[1].Get(), g.sourceRtv[2].Get(), g.sourceRtv[3].Get()};
+            g.ctx->OMSetRenderTargets(4, rt, g.sourceDsv.Get());
+        };
+        auto closeDraw = [&] { edvr::engineVelocityAfterFlatDraw(g.ctx); gameTargets(); };
+        auto underlay = [&] {
+            g.setVs(); g.setPs(g.ps.Get(), kPsHash);
+            g.ctx->OMSetDepthStencilState(g.depthState.Get(), 0);
+            g.sourceDraw(5);
+            h.check(edvr::engineVelocityDrawSubstituted(), "flat overlay lifecycle: underlay produced MRT6");
+            closeDraw();
+        };
+        auto overlay = [&] {
+            g.ctx->VSSetShader(overlayVs.Get(), nullptr, 0); g.shadow(BindSlot::Vs, overlayVs.Get(), overlayVsHash);
+            g.setPs(overlayPs.Get(), overlayPsHash);
+            g.ctx->OMSetDepthStencilState(overlayDepth.Get(), 5);
+            edvr::engineVelocityBeforeDraw(g.ctx, false);
+            h.check(edvr::engineVelocityDrawSubstituted(), "flat overlay lifecycle: overlay produced MRT6");
+            ComPtr<ID3D11ShaderResourceView> bound;
+            g.ctx->PSGetShaderResources(3, 1, &bound);
+            h.check(bound && bound.Get() != sentinel.Get(), "flat overlay lifecycle: guarded PS has private snapshot at t3");
+            g.ctx->DrawInstanced(4, 1, 0, 0);
+            closeDraw();
+            bound.Reset(); g.ctx->PSGetShaderResources(3, 1, &bound);
+            h.check(bound.Get() == sentinel.Get(), "flat overlay lifecycle: original game t3 restored");
+        };
+        const size_t overlayMark = g_log.size();
+        g.beginFrame(); g.writeScene(g.sceneA.Get(), g.rows[0]);
+        edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+        g.sourcePass(1, 5); closeDraw();
+        overlay(); overlay();
+        underlay(); overlay();
+        g.endFrame();
+        g.beginFrame(); g.writeScene(g.sceneA.Get(), g.rows[0]);
+        edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+        g.sourcePass(1, 5); closeDraw();
+        overlay();
+        g.endFrame(true);
+        const std::string summary = lastLine("engine motion: flat overlay guard:", overlayMark);
+        h.check(number(summary, "copies ") == 3 && number(summary, "guarded draws ") == 4,
+                "flat overlay lifecycle: one base copy per group, refreshed after other producer and next frame");
+        h.check(number(summary, "declined state ") == 0 && number(summary, "resource ") == 0 &&
+                number(summary, "shader ") == 0, "flat overlay lifecycle: no guarded path fallback");
+        edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
+    }
     const unsigned detachesBefore = lifecycle_fake::g_emitDetaches;
     edvr::engineVelocityShutdown();
     h.check(lifecycle_fake::g_emitDetaches == detachesBefore + 1, "P1: shutdown detaches the emit's want on the hook set");

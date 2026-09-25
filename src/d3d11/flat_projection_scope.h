@@ -25,6 +25,7 @@ struct FlatPrivateProjectionBinding {
     std::shared_ptr<const FlatProjectionPreparedState> prepared;
     uint64_t revision = 0;
 };
+class FlatProjectionRuntime;
 
 // Preflight allocates once. Prepare uploads only when source provenance, phase,
 // or patch requests change. Never prepare while this buffer is bound by a scope.
@@ -70,6 +71,13 @@ public:
     // Failed preparation or a destroyed private-buffer owner rejects old plans.
     bool refreshPrepared();
 private:
+    friend class FlatProjectionRuntime;
+    // Runtime-only live retarget: the caller has already established Context1
+    // offsetting support and created each replacement from its tracked source
+    // on this context's device. Revalidates bindings/tokens without queries or
+    // allocations; never call while a scope from this plan is active.
+    bool retargetPrepared(ID3D11DeviceContext1*, const FlatPrivateProjectionBinding*, size_t);
+    bool idle() const { return activeScopes_ == 0; }
     friend class FlatProjectionBindingScope;
     struct Saved {
         FlatProjectionStage stage{};
@@ -81,12 +89,15 @@ private:
     Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context_;
     Saved saved_[kCapacity]{};
     size_t count_ = 0;
+    mutable uint32_t activeScopes_ = 0;
 };
 
 // Build the plan at preflight; the hot scope performs only actual range/buffer
 // validation, binding and restoration. No feature/descriptor/device queries.
 class FlatProjectionBindingScope {
 public:
+    // The source plan must outlive this scope; the runtime owns cached plans
+    // for its entire lifetime and will not retarget an active scope's plan.
     explicit FlatProjectionBindingScope(const FlatProjectionBindingPlan&);
     ~FlatProjectionBindingScope();
     FlatProjectionBindingScope(const FlatProjectionBindingScope&) = delete;
@@ -94,6 +105,7 @@ public:
     bool active() const { return active_; }
 private:
     Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context_;
+    const FlatProjectionBindingPlan* plan_ = nullptr;
     FlatProjectionBindingPlan::Saved saved_[FlatProjectionBindingPlan::kCapacity]{};
     size_t count_ = 0;
     bool active_ = false;

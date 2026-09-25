@@ -237,6 +237,18 @@ inline void patchStaticChecks(const Harness& h, const Family& f, const std::vect
             target6 = true;
     }
     h.check(target6, "reflection shows SV_Target6.xy float");
+    if (std::strstr(f.name, "FACEINVARIANT.x + SV_Position")) {
+        std::vector<BYTE> guarded;
+        h.check(edvr::engineVelocityPatchPs(ps.data(), ps.size(), in, guarded, why, true), why.c_str());
+        const std::string g = disassemble(guarded);
+        h.check(g.find("dcl_resource_texture2d") != std::string::npos &&
+                g.find("t3") != std::string::npos && g.find("ld_indexable") != std::string::npos &&
+                g.find("movc o6.y") != std::string::npos,
+                "guarded overlay PS reads snapshot and chooses depth per pixel");
+        ComPtr<ID3D11PixelShader> warpGuarded;
+        h.check(SUCCEEDED(h.device->CreatePixelShader(guarded.data(), guarded.size(), nullptr, &warpGuarded)),
+                "WARP accepts guarded overlay PS");
+    }
     // Idempotence guard: patching the patched PS again must decline, not stack.
     std::vector<BYTE> twice;
     h.check(!edvr::engineVelocityPatchPs(patchedPs.data(), patchedPs.size(), in, twice, why), "a patched PS is not patched twice");

@@ -129,6 +129,39 @@ bool FlatProjectionBindingPlan::initialize(ID3D11DeviceContext1* context,
     return true;
 }
 
+bool FlatProjectionBindingPlan::retargetPrepared(ID3D11DeviceContext1* context,
+    const FlatPrivateProjectionBinding* bindings, size_t count) {
+    if (activeScopes_) return false;
+    count_ = 0; context_.Reset();
+    for (auto& saved : saved_) saved = Saved{};
+    if (!context || !bindings || !count || count > kCapacity) return false;
+    // The runtime's tracked private buffers proved same-device size and bind
+    // flags at creation. Keep all per-binding and token validation here; no
+    // GetDesc/GetDevice/CheckFeatureSupport is allowed on a live draw.
+    for (size_t i = 0; i < count; ++i) {
+        const auto& request = bindings[i];
+        if (!stageValid(request.stage) || request.slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT ||
+            !request.original || !request.replacement || request.original == request.replacement ||
+            request.firstConstant != 0 || request.constantCount == 0 || request.constantCount > 4096 ||
+            request.constantCount % 16 || !request.prepared || !request.prepared->ready ||
+            !request.revision || request.prepared->revision != request.revision ||
+            request.prepared->original != request.original || request.prepared->replacement != request.replacement)
+            return false;
+        for (size_t j = 0; j < i; ++j)
+            if (bindings[j].stage == request.stage && bindings[j].slot == request.slot) return false;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const auto& request = bindings[i];
+        auto& saved = saved_[i];
+        saved.original = request.original; saved.replacement = request.replacement;
+        saved.first = request.firstConstant; saved.count = request.constantCount;
+        saved.stage = request.stage; saved.slot = request.slot;
+        saved.prepared = request.prepared; saved.revision = request.revision;
+    }
+    context_ = context; count_ = count;
+    return true;
+}
+
 bool FlatProjectionBindingPlan::refreshPrepared() {
     if (!context_ || !count_) return false;
     for (size_t i = 0; i < count_; ++i) {
@@ -157,6 +190,8 @@ FlatProjectionBindingScope::FlatProjectionBindingScope(const FlatProjectionBindi
         set(context_.Get(), saved.stage, saved.slot, saved.replacement.Get(), saved.first, saved.count);
     }
     active_ = true;
+    plan_ = &plan;
+    ++plan.activeScopes_;
 }
 
 FlatProjectionBindingScope::~FlatProjectionBindingScope() {
@@ -166,5 +201,6 @@ FlatProjectionBindingScope::~FlatProjectionBindingScope() {
         const auto& saved = saved_[i];
         set(context_.Get(), saved.stage, saved.slot, saved.original.Get(), saved.first, saved.count);
     }
+    --plan_->activeScopes_;
 }
 } // namespace edvr

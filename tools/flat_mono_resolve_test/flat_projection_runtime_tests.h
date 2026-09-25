@@ -68,19 +68,17 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
           runtime.status().zeroPhaseReady==zeroBeforePhases+1,
           "64 live phases reuse one preflighted topology without plan exhaustion");
     FlatProjectionRuntimeRequest missingTopology=request;missingTopology.slot=2;
+    missingTopology.patchCount=2;
+    missingTopology.patches[1]={FlatProjectionPatchLayout::ForwardColumns,64,{}};
+    ctx->VSSetConstantBuffers1(2,1,&bound,&first,&count);
     const auto queuedBefore=runtime.status().coldQueued;
-    check(!runtime.preflight(&missingTopology,1,phase,1,false) &&
-          runtime.status().last==FlatProjectionRuntimeRefusal::PlanFailure &&
+    check(runtime.preflight(&missingTopology,1,phase,1,false) &&
+          runtime.prepare(&missingTopology,1,phase,1)!=nullptr &&
           runtime.status().coldQueued==queuedBefore,
-          "live preflight refuses unknown topology without allocation or cold readback");
-    {const auto failure=runtime.failure();
-     check(failure.valid && std::strcmp(failure.branch,"topology-first-seen-live")==0 &&
-           !failure.inPrepare && !failure.allowAllocation && !failure.topologyPlan &&
-           failure.requestIndex==0 && failure.slot==2 && failure.buffer==original.Get() &&
-           failure.tracked && failure.shadowPresent && failure.trackedWidth==sizeof(raw),
-           "first-seen topology failure names the request and ready shadow");}
+          "live first-seen two-patch topology uses existing private buffer without cold readback");
+    check(!runtime.failure().valid,"live first-seen success has no failure snapshot");
     check(runtime.preflight(&missingTopology,1,phase,1),
-          "warm preflight can allocate a fresh structural plan after live refusal");
+          "warm preflight can refresh a live structural plan");
     check(!runtime.failure().valid,"successful preflight clears previous failure snapshot");
     check(runtime.prepare(&request,1,phase,1)==nullptr &&
           runtime.status().last==FlatProjectionRuntimeRefusal::PlanFailure,
@@ -253,7 +251,72 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         check(runtime.status().coldStale==1 && runtime.status().coldPending==0 &&
               !runtime.preflight(&staleReq,1,zero,0) &&
               runtime.status().last==FlatProjectionRuntimeRefusal::MissingFullWrite,
-              "intervening write cannot publish stale GPU snapshot");
+               "intervening write cannot publish stale GPU snapshot");
+    }
+    // Reproduce the captured late VS b1 contract: a 5,376-byte source was
+    // already tracked and privately promoted, but its second ForwardColumns
+    // patch at byte 720 had not appeared during warm-up.
+    float lateRaw[1344]{};
+    for(unsigned baseOffset : {656u/4u,720u/4u})
+        for(unsigned diagonal : {0u,5u,10u,15u}) lateRaw[baseOffset+diagonal]=1.0f;
+    D3D11_BUFFER_DESC lateDesc=desc;lateDesc.ByteWidth=sizeof(lateRaw);
+    D3D11_SUBRESOURCE_DATA lateInit{};lateInit.pSysMem=lateRaw;
+    ComPtr<ID3D11Buffer> late, unready;
+    check(SUCCEEDED(device->CreateBuffer(&lateDesc,&lateInit,late.GetAddressOf())) &&
+          SUCCEEDED(device->CreateBuffer(&lateDesc,&lateInit,unready.GetAddressOf())),
+          "late topology source buffers created");
+    if(late && unready){
+        FlatProjectionRuntime tail;
+        check(tail.initialize(base) && tail.observeCreateBuffer(late.Get(),lateRaw),
+              "late topology source has complete tracked shadow");
+        auto* lateBound=late.Get();ctx->VSSetConstantBuffers1(1,1,&lateBound,&first,&count);
+        FlatProjectionRuntimeRequest warm=request;
+        warm.original=late.Get();warm.patches[0].byteOffset=656;
+        check(tail.preflight(&warm,1,phase,1) && tail.prepare(&warm,1,phase,1)!=nullptr,
+              "late source has a warm private buffer and capability-tested plan");
+        const auto* oldPlan=tail.prepare(&warm,1,phase,1);
+        FlatProjectionRuntimeRequest two=warm;
+        two.patchCount=2;two.patches[1]={FlatProjectionPatchLayout::ForwardColumns,720,{}};
+        const auto queued=tail.status().coldQueued;
+        const auto prepared=tail.status().prepared;
+        check(tail.preflight(&two,1,phase,2,false) && tail.prepare(&two,1,phase,2)!=nullptr &&
+              tail.status().coldQueued==queued && tail.status().prepared==prepared+1 &&
+              tail.status().livePlanRetargets==1,
+              "first-seen live two-patch topology reuses prepared source without cold work");
+        {FlatProjectionBindingScope staleScope(*oldPlan);
+         check(!staleScope.active(),"old plan token cannot bind after shared private buffer retarget");}
+        const auto* livePlan=tail.prepare(&two,1,phase,2);
+        if(livePlan){
+            FlatProjectionBindingScope active(*livePlan);
+            check(active.active(),"late live plan binds the existing private buffer");
+            FlatProjectionRuntimeRequest another=two;another.slot=2;
+            ctx->VSSetConstantBuffers1(2,1,&lateBound,&first,&count);
+            check(!tail.preflight(&another,1,phase,3,false) &&
+                  std::strcmp(tail.failure().branch,"topology-live-plan-in-use")==0,
+                  "live plan cannot retarget while its prior scope is active");
+        }
+        FlatProjectionRuntimeRequest unknown=two;unknown.original=unready.Get();
+        auto* unreadyBound=unready.Get();ctx->VSSetConstantBuffers1(1,1,&unreadyBound,&first,&count);
+        check(!tail.preflight(&unknown,1,phase,3,false) &&
+              std::strcmp(tail.failure().branch,"untracked-live-buffer")==0,
+              "untracked live source is still refused");
+        check(tail.observeCreateBuffer(unready.Get(),lateRaw) &&
+              !tail.preflight(&unknown,1,phase,3,false) &&
+              std::strcmp(tail.failure().branch,"private-first-seen-live")==0,
+              "complete shadow does not authorize live private-buffer creation");
+        tail.invalidate(unready.Get());
+        check(!tail.preflight(&unknown,1,phase,3,false) &&
+              std::strcmp(tail.failure().branch,"shadow-missing-full-write")==0,
+              "invalidated shadow is refused before live plan retarget");
+        ctx->VSSetConstantBuffers1(1,1,&lateBound,&first,&count);
+        check(tail.preflight(&two,1,phase,2,false),"ready live topology recovers after refusals");
+        UINT badFirst=16,badCount=16;
+        ctx->VSSetConstantBuffers1(1,1,&lateBound,&badFirst,&badCount);
+        check(tail.prepare(&two,1,phase,2)==nullptr &&
+              tail.status().last==FlatProjectionRuntimeRefusal::UnsupportedRange &&
+              std::strcmp(tail.failure().branch,"binding-mismatch")==0,
+              "live plan still checks actual Context1 range before binding");
+        ctx->VSSetConstantBuffers1(1,1,&lateBound,&first,&count);
     }
     runtime.reset();
 }

@@ -28,6 +28,7 @@ struct FlatProjectionRuntimeStatus {
     uint64_t refusals[11]{};
     uint64_t fullWrites = 0, invalidations = 0, initialWrites = 0;
     uint64_t preflights = 0, prepared = 0, zeroPhaseReady = 0;
+    uint64_t livePlanRetargets = 0;
     uint64_t coldQueued = 0, coldCompleted = 0, coldStale = 0;
     uint64_t coldFailed = 0, coldPending = 0, coldTimeouts = 0;
 };
@@ -75,9 +76,14 @@ public:
 
     // Preflight is required before a nonzero raster phase. Warm calls may
     // allocate private buffers and a structural binding plan. With allocation
-    // disabled, only an existing topology and private buffers may be retargeted
-    // to the current phase; no descriptors/devices are queried or cold reads queued.
+    // disabled, existing plans may be phase-retargeted; a first-seen topology
+    // may use one preallocated live plan only when prior warm initialization
+    // proved offsetting support and every source has a complete shadow and
+    // ready private buffer. No descriptors/devices are queried, buffers made,
+    // or cold reads queued on this path.
     // Prepare requires the exact most recently preflighted recipe and never allocates.
+    // Its returned plan is for the immediate draw/dispatch only; a later
+    // preflight may retarget the bounded live plan. Active scopes block retarget.
     bool preflight(const FlatProjectionRuntimeRequest* requests, uint32_t count,
                    const FlatProjectionJitter& jitter, uint32_t phase,
                    bool allowAllocation = true);
@@ -116,12 +122,14 @@ private:
     FlatProjectionShadowBank<kBuffers> shadows_;
     Tracked tracked_[kBuffers]{};
     CachedPlan plans_[kPlans]{};
+    CachedPlan livePlan_{}; // one allocation-free, retargetable late topology
     ColdReadback cold_[kColdPending]{};
     Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context_;
     DWORD owner_ = 0;
     uint64_t nextGeneration_ = 1;
     uint32_t coldAttempts_ = 0;
     bool coldEnabled_ = false;
+    bool planCapabilityReady_ = false;
     FlatProjectionRuntimeStatus status_{};
     FlatProjectionRuntimeFailure failure_{};
     struct FailureAttempt {

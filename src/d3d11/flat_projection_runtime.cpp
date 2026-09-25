@@ -152,6 +152,8 @@ void FlatProjectionRuntime::reset() {
         plan.plan.initialize(nullptr, nullptr, 0);
         plan.used = false; plan.count = 0;
     }
+    livePlan_.plan.retargetPrepared(nullptr, nullptr, 0);
+    livePlan_.used = false; livePlan_.count = 0;
     for (auto& entry : tracked_) {
         entry.privateBuffer.initialize(nullptr, nullptr, 0);
         entry.buffer.Reset(); entry.generation = 0; entry.width = 0;
@@ -160,7 +162,7 @@ void FlatProjectionRuntime::reset() {
         entry.mapBytes = nullptr;
     }
     shadows_.reset(); context_.Reset(); owner_ = 0; nextGeneration_ = 1;
-    coldEnabled_ = false; coldAttempts_ = 0;
+    coldEnabled_ = false; coldAttempts_ = 0; planCapabilityReady_ = false;
     status_ = {};
     failure_ = {}; attempt_ = {};
 }
@@ -392,6 +394,7 @@ FlatProjectionRuntime::CachedPlan* FlatProjectionRuntime::findPlan(
     const FlatProjectionRuntimeRequest* requests, uint32_t count,
     const FlatProjectionJitter& jitter, uint32_t phase) {
     for (auto& plan : plans_) if (sameRecipe(plan, requests, count, jitter, phase)) return &plan;
+    if (sameRecipe(livePlan_, requests, count, jitter, phase)) return &livePlan_;
     return nullptr;
 }
 bool FlatProjectionRuntime::sameTopology(const CachedPlan& plan,
@@ -404,6 +407,7 @@ bool FlatProjectionRuntime::sameTopology(const CachedPlan& plan,
 FlatProjectionRuntime::CachedPlan* FlatProjectionRuntime::findTopology(
     const FlatProjectionRuntimeRequest* requests, uint32_t count) {
     for (auto& plan : plans_) if (sameTopology(plan, requests, count)) return &plan;
+    if (sameTopology(livePlan_, requests, count)) return &livePlan_;
     return nullptr;
 }
 void FlatProjectionRuntime::invalidatePreparedPlans() {
@@ -442,8 +446,18 @@ bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* reques
     attempt_.exactPlan = cached != nullptr;
     if (!cached) cached = findTopology(requests, count);
     attempt_.topologyPlan = cached != nullptr;
+    bool liveRetarget = false;
     if (!cached) {
-        if (!allowAllocation) return refuseAt(FlatProjectionRuntimeRefusal::PlanFailure, "topology-first-seen-live", 0);
+        if (!allowAllocation) {
+            if (!planCapabilityReady_)
+                return refuseAt(FlatProjectionRuntimeRefusal::PlanFailure, "topology-first-seen-live-no-capability", 0);
+            if (!livePlan_.plan.idle())
+                return refuseAt(FlatProjectionRuntimeRefusal::PlanFailure, "topology-live-plan-in-use", 0);
+            cached = &livePlan_;
+            liveRetarget = true;
+        }
+    }
+    if (!cached) {
         for (auto& slot : plans_) if (!slot.used) { cached = &slot; break; }
         if (!cached) return refuseAt(FlatProjectionRuntimeRefusal::NoCapacity, "plan-capacity", 0);
     }
@@ -497,9 +511,13 @@ bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* reques
         bindings[i] = entry->privateBuffer.binding(r.stage, r.slot, r.firstConstant, r.constantCount);
         entry->promoted = true;
     }
-    if (!(cached->used ? cached->plan.refreshPrepared() :
+    if (liveRetarget) cached->used = false;
+    if (!(liveRetarget ? cached->plan.retargetPrepared(context_.Get(), bindings, count) :
+          cached->used ? cached->plan.refreshPrepared() :
                          cached->plan.initialize(context_.Get(), bindings, count)))
         return refuseAt(FlatProjectionRuntimeRefusal::PlanFailure, "plan-initialize-or-refresh");
+    if (!liveRetarget) planCapabilityReady_ = true;
+    else ++status_.livePlanRetargets;
     cached->used = true; cached->count = count; cached->phase = phase; cached->jitter = jitter;
     for (uint32_t i = 0; i < count; ++i) cached->requests[i] = requests[i];
     ++status_.preflights;

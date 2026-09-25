@@ -4,17 +4,19 @@
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. Main `b969a4e5` is included. Latest analyzed Epic build
-  is `aaa3d020`; section 50 records full validation and the build-argument
-  repair. Its new F10 qualifies live PS91 motion ownership: all 45 changed
-  pixels have exact-depth slots and valid joined history (section 51).
-  Remaining P7 rejection maps exactly to a depth-write-off BBE overlay. One
-  incomplete jitter frame reset history 1.7 seconds before F10; all saved
-  samples retain history. Visual qualification is pending Sean's feedback.
-  Sections 26-28 establish camera ownership/jitter; 34-37 cover F8 and menu
-  treatment; 40-43 establish cockpit projection and smoother DLSS edges; 45-48
-  diagnose missing ownership and its binding repair. The first loading crash
-  did not reproduce on retry; its cause remains unknown. Sections 49-50 qualify
-  rigid BFE shell motion and the PS91 register correction.
+  is `7b88349c`; section 53 records its menu/cockpit F10 evidence. One live
+  projection failure now has an exact cause: first-seen topology with complete
+  source shadow and an already prepared private buffer. Cockpit motion/depth
+  capture is complete; menu pool snapshots reach the per-family cap. Section 51
+  qualifies live PS91 motion ownership: all 45 changed pixels have exact-depth
+  slots and valid joined history. Same-code overlay depth overwrites now match
+  the sampled menu/cockpit rejection masks exactly. Guarded depth preservation
+  and ready-buffer live plan admission are implemented, pending full validation
+  and a flight. Sections 26-28 establish camera ownership/jitter; 34-37 cover
+  F8 and menu treatment; 40-43 establish cockpit projection and smoother DLSS
+  edges; 45-48 diagnose missing ownership and its binding repair. The first
+  loading crash did not reproduce on retry; its cause remains unknown. Sections
+  49-50 qualify rigid BFE shell motion and the PS91 register correction.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -29,12 +31,12 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** section 52 adds bounded before/after motion, scene-depth and
-  pool-record evidence for the overlay plus automatic exact jitter-failure
-  diagnostics. F10 in the menu and while moving in the cockpit should cover
-  both symptoms in one run. Preserve high-G motion and strict depth ownership;
-  do not repeat the qualified PS91/BFE hypotheses or change rendering before
-  attachment is proved. VR still needs regression tests.
+- **Next flight:** after full validation, F10 at the menu ship and during
+  cockpit movement. Check guarded overlay draws/copy counts, remaining exact
+  depth rejects, live plan retargets and reset events. Preserve high-G motion
+  and strict depth ownership; do not repeat the qualified PS91/BFE hypotheses.
+  The separate menu hangar-floor P1 defect remains open. VR still needs
+  regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -3142,3 +3144,86 @@ bit-identical color, MRT6 and depth, with no D3D debug-layer hazards. The
 projection rig also distinguishes first-seen live topology, missing full
 writes, cold-readback state and changed binding ranges, and clears stale
 failure metadata after successful preparation.
+
+## 53. Same-record overlay rejection and live topology refusal, 2026-09-25
+
+Epic `edvr_gfx_20260925_094244.log` verifies `7b88349c`, build `6AB6963A`,
+linked 15:41:46 UTC. Both captures use 2560x1440 render/output with DLAA on the
+RTX 5090; the installed DLSS runtime's file version is `310.9.1.0` (read
+locally). This is the flat D3D11 path; VR runtime/headset are not involved. The
+menu draw capture is `20260925_154332_580_13892_1`, frames 36837/36838: 404
+draws, 94 motion candidates, 78 pool-cap refusals. The cockpit capture is
+`20260925_154457_090_13892_2`, frames 44204/44205: 145 draws, eight motion
+candidates, zero auxiliary refusals. Its motion/depth evidence is complete
+despite partial color capture for unsupported formats.
+
+Frame 44204's left white panel P0 has exact-depth code 15 (record 7) after q42
+66DE/864F. Depth-write-off q78 BBE/DB3E changes exactly 26 color and slot
+pixels, retains code 15, and leaves native DSV unchanged. Those 26 previously
+exact-depth pixels become exactly the final rejected pixels. P7 has six more
+slot changes with the same signature, even though their native color bytes do
+not change. Both draws snapshot the same t33 resource and unchanged record 7
+(SHA256 `c1d91ed2c591bf3c48e6bbd3686506f7e9f8c62cfde10fdf24fabe063340f46a`).
+Frame 44205 repeats 29 changed pixels at P0, again with equal record hashes
+between underlay and overlay. No sampled BBE window changes the slot code.
+These samples prove same-record attachment locally; eight windows do not prove
+that every draw in this family has a matching depth-writing parent.
+
+The independent reset event is frame 42393 at 09:44:36.742: VS
+`1F17BF54DB6EE407`, PS `A75C1DB6562B8CA7`, branch `topology-first-seen-live`,
+after 79 jittered draws. Its VS b1 source is tracked, promoted, private-ready
+and has a complete shadow. The new recipe patches two forward matrices at byte
+offsets 656 and 720. A binding-plan cache miss, before the ready source is
+validated, refuses the frame; frame 42394 resets history. This is separate from
+the captured overlay rejection.
+
+- Ruled out: missing source writes or a pending cold readback caused frame
+  42393, because the failure snapshot has a complete shadow, ready private
+  buffer and no pending readback; the exact refusal is missing topology.
+- Ruled out: a different object record explains the sampled cockpit overlay
+  rejection, because pre/post codes and draw-time record bytes are identical.
+
+Implemented an allocation-free live binding-plan path only for already tracked,
+shadow-complete, private-ready sources, retaining exact phase, binding, range
+and prepared-token validation. A single preallocated plan is retargeted only
+after warm setup has proven D3D11.1 support; active scopes prevent retargeting.
+The WARP rig passes the captured two-patch recipe and negative shadow, private
+buffer, stale-token and binding-range cases. `flat projection live plans`
+reports successful retargets for the next flight. Any overlay correction must
+preserve strict depth ownership and reject cases without a matching substrate;
+do not add a tolerance or suppress all depth-write-off motion exports.
+
+The menu's P3 ship edge shows the same mechanism at q351 BBE/DB3E: 29 pixels in
+frame 36837 and 31 in 36838 change color and slot depth, keep the same odd
+owner code (191, record 95), and leave native DSV unchanged. The first frame's
+changed mask equals final stale-depth and rejection masks exactly. Slot depth
+exceeds DSV by 1.6006e-6 to 1.6504e-6. q351's pool snapshot is unavailable, so
+the capture cannot prove its record bytes. The 69 BBE draws q292-360 form one
+contiguous group. A separate 256-pixel P1 stale region already exists before
+these families; its preview lands on dark hangar floor beneath the ship's right
+wing, outside the white-panel correction's scope.
+
+Guarded overlay design: retain a separate snapshot of the depth-owning motion
+slots before this exact overlay group. A flat-only shader variant preserves
+snapshot depth only when its odd owner code equals the current fragment's code.
+Missing or different owners retain the normal exported depth and the consumer's
+strict rejection. Reuse the snapshot across depth-write-off overlays,
+refreshing it after another producer writes slots and on every new frame.
+Existing pool replacement and camera checks remain prerequisites. The observed
+menu needs one 29.5 MB logical copy at 2560x1440, rather than one copy for each
+of its 69 overlay draws; measure actual group/copy counts in the next flight.
+VR's producer behavior remains unchanged.
+
+The guarded shader WARP fixture passes 80 matching-owner pixels, 80
+different-owner pixels and 80 empty-substrate pixels at a nonzero viewport
+origin. Only matching owners select substrate depth; other cases retain
+fragment depth. The stock, normal motion-export and guarded shaders produce
+bit-identical MRT0-3 colors. A shader already using the borrowed t3 binding is
+refused. The actual production draw-hook WARP sequence also passes: two
+consecutive overlays reuse one copy, an intervening underlay forces a second,
+and the next frame forces a third. Four guarded draws have zero fallbacks; the
+original game t3 binding returns after each draw. The engine-motion rig passes
+1,114 checks. The real Epic DB3E guarded shader patches and creates on WARP;
+the optional whole-corpus run stops later on an unrelated missing shader dump
+and must not be described as passing. Full validation and flight qualification
+remain separate gates.

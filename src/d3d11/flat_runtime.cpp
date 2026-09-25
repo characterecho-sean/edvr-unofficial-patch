@@ -330,6 +330,8 @@ void reportProjection(State& s, const char* event) {
     Log::get().note("flat projection cold buffers: queued=%llu completed=%llu stale=%llu failed=%llu pending=%llu timeouts=%llu; asynchronous full snapshots, unchanged-write tokens required",
         (unsigned long long)status.coldQueued,(unsigned long long)status.coldCompleted,(unsigned long long)status.coldStale,
         (unsigned long long)status.coldFailed,(unsigned long long)status.coldPending,(unsigned long long)status.coldTimeouts);
+    Log::get().note("flat projection live plans: retargets=%llu; prepared sources only, no new private buffers or cold readbacks",
+        (unsigned long long)status.livePlanRetargets);
     for(uint32_t i=0;i<2;++i) Log::get().note(
         "flat local projection capture: event=%s pair=%u attempts=%u complete-captures=%u handoff-links=%u first-frame=%llu; at most two distinct frames, exact F10 pair only",
         event,i,s.localSamples[i].attempts,s.localSamples[i].complete,

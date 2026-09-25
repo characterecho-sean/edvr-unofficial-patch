@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "shader_tests.h"
+#include "overlay_depth_gpu_tests.h"
 #include "emit_tests.h"
 #include "math_tests.h"
 #include "consumer_tests.h"
@@ -49,6 +50,10 @@
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
 
 using Microsoft::WRL::ComPtr;
+
+// The linked draw half uses the same internal binding guard as production;
+// the rig does not link the flat readback module that normally defines it.
+namespace edvr { thread_local bool g_flatComputeInternal = false; }
 
 namespace {
 unsigned g_checks = 0;
@@ -113,6 +118,17 @@ bool onePair(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstr
     ok(vsMade, "real patched VS created on WARP");
     ok(psMade, "real patched PS created on WARP");
     if (!vsMade || !psMade) return false;
+    if (std::wcscmp(p.vs, L"vs_BBE58E40FE88EC80") == 0 &&
+        std::wcscmp(p.ps, L"ps_DB3E8D20CF53FBC0") == 0) {
+        std::vector<BYTE> guarded;
+        const bool patched = edvr::engineVelocityPatchPs(ps.data(), ps.size(), in, guarded, why, true);
+        ok(patched, why.c_str());
+        if (!patched) return false;
+        ComPtr<ID3D11PixelShader> guardObject;
+        const bool created = SUCCEEDED(device->CreatePixelShader(guarded.data(), guarded.size(), nullptr, &guardObject));
+        ok(created, "real DB3E guarded overlay shader created on WARP");
+        if (!created) return false;
+    }
     ComPtr<ID3D11ShaderReflection> reflect;
     const bool reflects = SUCCEEDED(D3DReflect(pps.data(), pps.size(), IID_PPV_ARGS(&reflect)));
     ok(reflects, "real patched PS reflects");
@@ -214,6 +230,7 @@ int wmain(int argc, wchar_t** argv) {
     check(!edvr::engineVelocityPoolFamilyPair(edgeVs, edgePs),
           "legacy VR also excludes the flat-only front-face pair");
     shader_tests::run({device.Get(), context.Get(), &check});
+    overlay_depth_gpu_tests::run(device.Get(), context.Get(), &check);
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});
     consumer_tests::run({device.Get(), context.Get(), &check});
