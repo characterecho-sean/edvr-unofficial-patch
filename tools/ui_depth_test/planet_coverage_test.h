@@ -14,8 +14,8 @@ void testPlanetCoverage(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
     auto solarVb=buffer(sizeof(solarVertices),D3D11_BIND_VERTEX_BUFFER,solarVertices),solarIb=buffer(sizeof(solarIndices),D3D11_BIND_INDEX_BUFFER,solarIndices);
     auto vsCode=compile(R"HLSL(
 cbuffer Model:register(b0){float4 m[8];}
-struct Out {float3 a:TEXCOORD0;float3 b:TEXCOORD1;float3 c:TEXCOORD2;float3 d:TEXCOORD3;
-float3 e:TEXCOORD4;nointerpolation uint id:TEXCOORD5;float3 n:TEXCOORD6;float3 t:TEXCOORD7;float4 p:SV_Position;};
+struct Out {float4 p:SV_Position;float3 a:TEXCOORD0;float3 b:TEXCOORD1;float3 c:TEXCOORD2;float3 d:TEXCOORD3;
+float3 e:TEXCOORD4;nointerpolation uint id:TEXCOORD5;float3 n:TEXCOORD6;float3 t:TEXCOORD7;};
 Out main(float3 p:POSITION){Out o=(Out)0;float4 v=float4(p,1);o.a=o.b=o.c=o.d=o.e=o.n=o.t=p;
 o.p=float4(dot(m[4],v),dot(m[5],v),dot(m[6],v),dot(m[7],v));return o;}
 )HLSL","vs_5_0");

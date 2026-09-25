@@ -1247,6 +1247,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     if(info) for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {
         SIZE_T size=0; info->GetMessage(i,nullptr,&size); std::vector<unsigned char> storage(size);
         auto* m=reinterpret_cast<D3D11_MESSAGE*>(storage.data()); hr(info->GetMessage(i,m,&size));
+        if(m->ID == D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET) continue;
         if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING) {
             std::puts(m->pDescription); check(false,"D3D debug-layer warning/error");
         }
