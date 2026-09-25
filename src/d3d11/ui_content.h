@@ -5,25 +5,53 @@
 #include <utility>
 #include "shader_swap.h"
 #include "gpu_interval.h"
+#include "vscreen.h"   // vScreenUpdateSubresourceRaw: the digest pass's constants, past the hook
 
 namespace edvr {
-// Compare the UI before projection. Screen-space colour differences confuse
-// actual edits with head movement, jitter and the scene behind a translucent
-// panel. Exact comparison is safe here: both views decode identical formats.
+// Compare the UI before projection, per 4x4-texel block rather than a
+// full-resolution copy. Screen-space colour differences confuse actual
+// edits with head movement, jitter and the scene behind a translucent
+// panel; comparing before projection avoids that. A block's content is an
+// FNV-1a-style hash over every premultiplied component of its (in-bounds)
+// texels; the hash changing from the stored digest is the edit signal,
+// at 6 bytes a block against a full second copy of the surface. A copy of
+// the 5895x5158 panel that carries the target's distance (fix.ui_quality
+// 1.25) needs 182 MB, more than the whole 64 MiB budget; its blocks need
+// 11 MB.
 constexpr char kUiContentCs[] = R"HLSL(
-Texture2D<float4> Current:register(t0), Before:register(t1);
-Texture2D<float> Age:register(t2);
-RWTexture2D<float> Next:register(u0);
+Texture2D<float4> Current:register(t0);
+Texture2D<float> AgeIn:register(t1);
+RWTexture2D<uint> Digest:register(u0);
+RWTexture2D<float> Next:register(u1);
+cbuffer C:register(b0){uint seed;uint srcW;uint srcH;uint pad0;}
 [numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){
-    uint w,h;Next.GetDimensions(w,h);if(any(id.xy>=uint2(w,h)))return;
-    float4 a=Current.Load(int3(id.xy,0)),b=Before.Load(int3(id.xy,0));
-    a.rgb*=a.a;b.rgb*=b.a; // RGB behind zero alpha is not visible content.
-    Next[id.xy]=any(a!=b)?1:max(Age.Load(int3(id.xy,0))-1.0/32.0,0);
+    uint bw,bh;Digest.GetDimensions(bw,bh);if(any(id.xy>=uint2(bw,bh)))return;
+    uint h=2166136261u;
+    [unroll]for(uint y=0;y<4;++y)[unroll]for(uint x=0;x<4;++x){
+        uint2 texel=id.xy*4+uint2(x,y);
+        if(texel.x>=srcW||texel.y>=srcH)continue; // block may overhang the surface
+        float4 c=Current.Load(int3(texel,0));
+        c.rgb*=c.a; // RGB behind zero alpha is not visible content.
+        h=(h^asuint(c.r))*16777619u;h=(h^asuint(c.g))*16777619u;
+        h=(h^asuint(c.b))*16777619u;h=(h^asuint(c.a))*16777619u;
+    }
+    // Seed still hashes the real block -- a literal 0 is not a safe "no
+    // prior content" sentinel, since nothing rules out a real block
+    // hashing to 0 too, and doing so would read as changed on the very
+    // next (comparing) frame even when nothing actually did. Seed differs
+    // from a compare only in what it reports, never in what it stores.
+    if(seed){Digest[id.xy]=h;Next[id.xy]=0;return;}
+    uint prev=Digest[id.xy]; // in-place RW: this thread owns only this block
+    Next[id.xy]=(h!=prev)?1.0:max(AgeIn.Load(int3(id.xy,0))-1.0/32.0,0.0);
+    Digest[id.xy]=h;
 }
 )HLSL";
 
 // Used by the existing coverage draw with exactly the game's surface UVs.
-// Max over the sample footprint retains erased, low-alpha and subpixel edits.
+// UiEdits is block resolution (one texel per 4x4 source block), so the
+// 2x2-tap max below covers an 8x8 source-texel neighbourhood; the grid
+// comes from GetDimensions. Max over the footprint keeps erased, low-alpha
+// and subpixel edits.
 #define EDVR_UI_CHANGE_INPUT R"HLSL(
 Texture2D<float> UiEdits:register(t14);
 float uiEdit(float2 uv){
@@ -38,9 +66,9 @@ float uiEdit(float2 uv){
 class UiContent {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
     struct Entry {
-        Ptr<ID3D11Texture2D> source, before, age[2];
-        Ptr<ID3D11ShaderResourceView> beforeView, view[2];
-        Ptr<ID3D11UnorderedAccessView> out[2];
+        Ptr<ID3D11Texture2D> source, digest, age[2];
+        Ptr<ID3D11UnorderedAccessView> digestUav, out[2];
+        Ptr<ID3D11ShaderResourceView> view[2];
         DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
         uint32_t frame=0, bytes=0;
         unsigned read=0;
@@ -48,9 +76,18 @@ class UiContent {
     };
     Entry entries[24];
     Ptr<ID3D11ComputeShader> shader;
+    Ptr<ID3D11Buffer> cb;
     bool failed=false;
 public:
     static constexpr uint32_t kBudget=64*1024*1024;
+    static constexpr uint32_t kBlock=4;
+    // blocks*(digest 4 bytes + two R8 age ping-pong bytes) -- a pure
+    // function of the surface's own size, so the rig can check a real
+    // panel's footprint (5895x5158) without a device at all.
+    static uint64_t bytesFor(uint32_t w,uint32_t h) {
+        const uint64_t bw=(w+kBlock-1)/kBlock,bh=(h+kBlock-1)/kBlock;
+        return bw*bh*(4+1+1);
+    }
     struct Totals {uint32_t updates=0, hits=0, declined=0, evicted=0, resets=0;} totals;
     uint32_t allocated=0;
     GpuIntervals<32> gpu;
@@ -87,7 +124,9 @@ public:
         case DXGI_FORMAT_R16G16B16A16_FLOAT:bpp=8;break;
         default:break;
         }
-        const uint64_t pixels=uint64_t(td.Width)*td.Height,bytes=pixels*(bpp+2);
+        const uint32_t srcW=td.Width,srcH=td.Height;
+        const uint32_t blocksW=(srcW+kBlock-1)/kBlock,blocksH=(srcH+kBlock-1)/kBlock;
+        const uint64_t bytes=bytesFor(srcW,srcH);
         // Only GPU-rendered UI surfaces, never a static sprite/glyph atlas.
         if(!bpp) {lastDecision=Decision::kDeclinedFormat;++totals.declined;return nullptr;}
         if(!(td.BindFlags&D3D11_BIND_RENDER_TARGET)) {lastDecision=Decision::kDeclinedNoRenderTarget;++totals.declined;return nullptr;}
@@ -100,7 +139,11 @@ public:
         const bool isNew=!found;
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
         if(!shader) shader.Attach(shaderSwapCompileCs(ctx,kUiContentCs,sizeof(kUiContentCs)-1,"main","UI source edits",nullptr,"ui content"));
-        if(!shader) {failed=true;lastDecision=Decision::kDeclinedShaderFailed;++totals.declined;return nullptr;}
+        if(shader && !cb) {
+            D3D11_BUFFER_DESC bd{};bd.ByteWidth=16;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            dev->CreateBuffer(&bd,nullptr,&cb);
+        }
+        if(!shader || !cb) {failed=true;lastDecision=Decision::kDeclinedShaderFailed;++totals.declined;return nullptr;}
         if(!found){
             while(!found){
                 if(allocated+bytes<=kBudget) for(auto& e:entries) if(!e.source) {found=&e;break;}
@@ -111,40 +154,50 @@ public:
                 allocated-=oldest->bytes;*oldest={};++totals.evicted;++lastEvicted;
             }
             Entry e;e.source=source;e.format=sd.Format;e.bytes=uint32_t(bytes);
-            td.Usage=D3D11_USAGE_DEFAULT;td.CPUAccessFlags=td.MiscFlags=0;
-            td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-            sd.Texture2D.MipLevels=1;
-            if(FAILED(dev->CreateTexture2D(&td,nullptr,&e.before)) ||
-               FAILED(dev->CreateShaderResourceView(e.before.Get(),&sd,&e.beforeView))) {lastDecision=Decision::kDeclinedCreateFailed;++totals.declined;return nullptr;}
-            td.Format=DXGI_FORMAT_R8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
-            for(unsigned i=0;i<2;++i) if(FAILED(dev->CreateTexture2D(&td,nullptr,&e.age[i])) ||
+            D3D11_TEXTURE2D_DESC dtd{};dtd.Width=blocksW;dtd.Height=blocksH;dtd.MipLevels=dtd.ArraySize=1;dtd.SampleDesc.Count=1;
+            dtd.Usage=D3D11_USAGE_DEFAULT;dtd.Format=DXGI_FORMAT_R32_UINT;dtd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+            if(FAILED(dev->CreateTexture2D(&dtd,nullptr,&e.digest)) ||
+               FAILED(dev->CreateUnorderedAccessView(e.digest.Get(),nullptr,&e.digestUav))) {lastDecision=Decision::kDeclinedCreateFailed;++totals.declined;return nullptr;}
+            dtd.Format=DXGI_FORMAT_R8_UNORM;dtd.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+            for(unsigned i=0;i<2;++i) if(FAILED(dev->CreateTexture2D(&dtd,nullptr,&e.age[i])) ||
                 FAILED(dev->CreateShaderResourceView(e.age[i].Get(),nullptr,&e.view[i])) ||
                 FAILED(dev->CreateUnorderedAccessView(e.age[i].Get(),nullptr,&e.out[i]))) {lastDecision=Decision::kDeclinedCreateFailed;++totals.declined;return nullptr;}
             *found=std::move(e);allocated+=found->bytes;
         }
         auto& e=*found;
         lastAge=isNew?0u:frame-e.frame;
+        const bool doReset=!e.ready || frame-e.frame!=1;
         if(sample)gpu.begin(ctx);
-        if(!e.ready || frame-e.frame!=1){
-            const float zero[4]{};ctx->ClearUnorderedAccessViewFloat(e.out[e.read].Get(),zero);++totals.resets;
-            lastDecision=Decision::kReset;
-        }else{
+        {
             Ptr<ID3D11ComputeShader> saved;ID3D11ClassInstance* classes[256]{};UINT nc=256;
-            ID3D11ShaderResourceView* savedSrv[3]{};Ptr<ID3D11UnorderedAccessView> savedUav;
-            ctx->CSGetShader(&saved,classes,&nc);ctx->CSGetShaderResources(0,3,savedSrv);ctx->CSGetUnorderedAccessViews(0,1,&savedUav);
-            ID3D11ShaderResourceView* in[3]={surface,e.beforeView.Get(),e.view[e.read].Get()};
-            ctx->CSSetShader(shader.Get(),nullptr,0);ctx->CSSetShaderResources(0,3,in);
-            ctx->CSSetUnorderedAccessViews(0,1,e.out[1-e.read].GetAddressOf(),nullptr);ctx->Dispatch((td.Width+7)/8,(td.Height+7)/8,1);
-            ID3D11UnorderedAccessView* zeroUav=nullptr;ID3D11ShaderResourceView* zeroSrv[3]{};
-            ctx->CSSetUnorderedAccessViews(0,1,&zeroUav,nullptr);ctx->CSSetShaderResources(0,3,zeroSrv);
-            ctx->CSSetShaderResources(0,3,savedSrv);ctx->CSSetUnorderedAccessViews(0,1,savedUav.GetAddressOf(),nullptr);ctx->CSSetShader(saved.Get(),classes,nc);
-            for(UINT i=0;i<nc;++i)classes[i]->Release();for(auto* p:savedSrv)if(p)p->Release();
-            e.read=1-e.read;++totals.updates;
-            lastDecision=Decision::kUpdated;
+            ID3D11ShaderResourceView* savedSrv[2]{};
+            ID3D11UnorderedAccessView* savedUav[2]{};
+            Ptr<ID3D11Buffer> savedCb;
+            ctx->CSGetShader(&saved,classes,&nc);
+            ctx->CSGetShaderResources(0,2,savedSrv);
+            ctx->CSGetUnorderedAccessViews(0,2,savedUav);
+            ctx->CSGetConstantBuffers(0,1,&savedCb);
+            struct CsCb{uint32_t seed,srcW,srcH,pad0;};
+            const CsCb cbData{doReset?1u:0u,srcW,srcH,0u};
+            vScreenUpdateSubresourceRaw(ctx,cb.Get(),0,nullptr,&cbData,0,0);
+            ID3D11ShaderResourceView* in[2]={surface,e.view[e.read].Get()};
+            ID3D11UnorderedAccessView* outUav[2]={e.digestUav.Get(),e.out[1-e.read].Get()};
+            ctx->CSSetShader(shader.Get(),nullptr,0);
+            ctx->CSSetShaderResources(0,2,in);
+            ctx->CSSetUnorderedAccessViews(0,2,outUav,nullptr);
+            ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());
+            ctx->Dispatch((blocksW+7)/8,(blocksH+7)/8,1);
+            ID3D11UnorderedAccessView* zeroUav[2]{};ID3D11ShaderResourceView* zeroSrv[2]{};ID3D11Buffer* zeroCb=nullptr;
+            ctx->CSSetUnorderedAccessViews(0,2,zeroUav,nullptr);ctx->CSSetShaderResources(0,2,zeroSrv);ctx->CSSetConstantBuffers(0,1,&zeroCb);
+            ctx->CSSetShaderResources(0,2,savedSrv);ctx->CSSetUnorderedAccessViews(0,2,savedUav,nullptr);
+            ctx->CSSetConstantBuffers(0,1,savedCb.GetAddressOf());ctx->CSSetShader(saved.Get(),classes,nc);
+            for(UINT i=0;i<nc;++i)classes[i]->Release();
+            for(auto* p:savedSrv)if(p)p->Release();
+            for(auto* p:savedUav)if(p)p->Release();
         }
-        // Preserve the version sampled by this frame's first composite,
-        // before the game repaints it. Shared by both eyes and mesh draws.
-        ctx->CopySubresourceRegion(e.before.Get(),0,0,0,0,source.Get(),0,nullptr);
+        e.read=1-e.read; // the just-written slot (seeded or compared) is now current
+        if(doReset){++totals.resets;lastDecision=Decision::kReset;}
+        else{++totals.updates;lastDecision=Decision::kUpdated;}
         if(sample)gpu.end(ctx);
         e.frame=frame;e.ready=true;return e.view[e.read].Get();
     }
@@ -154,7 +207,7 @@ public:
     void reset() noexcept {
         gpu.reset();
         for(auto& e:entries) e={};
-        shader.Reset(); failed=false; totals={}; allocated=0;
+        shader.Reset(); cb.Reset(); failed=false; totals={}; allocated=0;
         lastDecision=Decision::kDeclinedNoSurface; lastAge=0; lastEvicted=0;
     }
 };

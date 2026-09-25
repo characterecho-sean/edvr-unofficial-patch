@@ -8,15 +8,17 @@
   - round 3 reads the share from the game's own RT0 in its view format,
     puts the floor on the displayed pixel, and lists eleven families.
 
-  Round 4 BUILT, NOT FLOWN: a world-marker class for the target reticle's
-  3D triangles (`71DD8B8B09060A81`, its own built-in list, not radius-
-  clipped -- `ContributionBegin` picks a DepthEnable-FALSE state for it;
-  `holoScratchPrepare`'s element-depth clear moved to 0 so its depth
-  survives at any range; the resolve's radius check is now `d>0`), and an
-  eye-run census of the UI content tracker for the ghosting digits
-  (flight 20260924_163011, below) -- `UiContent::lastDecision` plus a
-  capped per-draw log and one frame summary, gated on
-  `objectProbeLedgerActive()`'s rising edge (ui_depth.cpp, ui_content.h).
+  Round 4 (36b94518) FLOWN 17:51, triangles and digits unchanged. It
+  added a world-marker class for the reticle's triangles and a census of
+  the UI content tracker; both found their causes (flight
+  20260924_175113, below).
+
+  Round 5 BUILT, NOT FLOWN:
+  - UiContent compares 4x4 blocks by hash, not full copies, so the
+    5895x5158 panel carrying the target's digits fits the budget;
+  - world markers get a viewport depth override;
+  - an occlusion census tells whether the triangles' depth comes from
+    the viewport or the vertex shader.
   `advanced.temporal_aa_hologram_depth` (default on), with
   `advanced.temporal_aa_hologram_families`, `_floor` and `_share`. It runs
   inside `fix.temporal_aa`'s interface depth (`ui_depth.cpp`) and needs it on.
@@ -188,6 +190,34 @@ ship BOKESY at 1.65 km):
     (nine decline reasons, hit, reset, updated), with the entry's age and
     evictions this call; capped at 64 lines, one summary line after.
     Not yet flown -- the next dump settles which reason the digits give.
+
+## Flight 20260924_175113 (36b94518, round 4, Frontier, FSR)
+
+Sean: "still looks the same moving towards a target". Eye dump
+eye_175314: a friendly ship, MALTE TITZE, at 1.99 km.
+
+- **Triangles:** the world marker `71DD8B8B09060A81` is confirmed as
+  the triangles, with HoloContribution > 0 on 100% of their pixels. Yet
+  0% were stamped, with Z sky and the sky's MV. Every resolve test
+  should pass there except "element depth > 0", so their raster depth
+  is 0: drawn at infinity.
+  - The diamond bracket and the text beside them are stamped at ~1971 m
+    by the holo family, with MV (+0.57,+0.26); the ship reads
+    (+0.40,+0.25) at 2138 m.
+  - Two mechanisms remain: a viewport with MinDepth = MaxDepth = 0, or
+    a vertex shader writing z = 0. Round 5 overrides the first and
+    counts samples to tell them apart.
+- **Digits:** the census (frame 12561) found the target's name and
+  distance text composited by vs `E508648660A352B2` from a 5895x5158
+  RGBA8 surface (fix.ui_quality 1.25: the engine sizing panels x2.5).
+  - At 6 bytes a texel that is 182 MB, so it was "declined (over
+    budget)" every frame.
+  - Two cockpit panels (2620x1637 and 2814x2302) filled 64.6 MB of the
+    64 MiB, so the other two panels (1310x1962 and 3930x844) were
+    declined with "no free entry".
+- ruled out: the tracker thrashing through evictions as the digits'
+  cause, because the census showed 0 evictions in the frame. The
+  surface is declined before any entry is considered.
 
 ## Decisions, 2026-09-24
 

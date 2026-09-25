@@ -661,6 +661,65 @@ int main() {
               "family builder: the world marker is not one of the cockpit families");
     }
 
+    // World markers, true depth: a broken game viewport (MinDepth ==
+    // MaxDepth == 0, mechanism i, flight 20260924_175113's own reading on
+    // the target reticle) is overridden for the element-depth pass alone,
+    // and the marker's real depth recovers; a VS that writes z=0 itself
+    // (mechanism ii) is not fixed by that override -- not covered, and its
+    // occlusion query reads zero samples, the signature the census reports
+    // as "element-depth samples p50 0".
+    {
+        g_holoWorldMarkerNoted = false;   // force a fresh one-time diagnostic line
+        g_holoWindowMarkerDraws = 0;
+        g_holoMarkerSampleCount = 0;
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        const float rgba[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+        const D3D11_VIEWPORT brokenVp{0, 0, 8, 8, 0, 0};   // mechanism (i): MinDepth == MaxDepth == 0
+        ctx->RSSetViewports(1, &brokenVp);
+        g_holoIsWorldMarker = true;
+        g_holoDrawVs = kHoloWorldMarkerReticle;
+        originalDraw(kNear50m, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
+              "resolve runs (world marker, broken viewport)");
+        for (float v : privateDepth())
+            check(std::fabs(v - kNear50m) < 1e-5f,
+                  "world marker: a MinDepth==MaxDepth==0 game viewport is overridden and the real depth recovers");
+        check(g_lastLog.find("first world-marker draw") != std::string::npos,
+              "world marker: the one-time diagnostic line fires");
+        check(g_lastLog.find("depth 0.000..0.000") != std::string::npos,
+              "world marker: the diagnostic names the broken viewport it saw");
+        for (int tries = 0; tries < 50 && g_holoMarkerSampleCount == 0; ++tries) {
+            holoPollQueries(ctx.Get());
+            if (!g_holoMarkerSampleCount) Sleep(1);
+        }
+        check(g_holoMarkerSampleCount > 0 && g_holoMarkerSamples[g_holoMarkerSampleCount - 1] > 0,
+              "world marker: the element-depth occlusion query sees the recovered geometry");
+        ctx->RSSetViewports(1, &vp8);   // restore for every test after this one
+
+        // Mechanism (ii): the VS itself outputs z=0 (this rig's toy VS
+        // takes z as a direct per-draw input, kToyVsHlsl), a normal
+        // viewport in place throughout. The override cannot fix this.
+        g_holoMarkerSampleCount = 0;
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        g_holoIsWorldMarker = true;
+        g_holoDrawVs = kHoloWorldMarkerReticle;
+        originalDraw(0.0f, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
+              "resolve runs (world marker, VS z=0)");
+        for (float v : privateDepth()) check(v == 0.0f, "world marker: a VS that writes z=0 itself is not stamped");
+        for (int tries = 0; tries < 50 && g_holoMarkerSampleCount == 0; ++tries) {
+            holoPollQueries(ctx.Get());
+            if (!g_holoMarkerSampleCount) Sleep(1);
+        }
+        check(g_holoMarkerSampleCount > 0 && g_holoMarkerSamples[g_holoMarkerSampleCount - 1] == 0,
+              "world marker: z=0 in the VS reads zero element-depth samples even with the viewport override in place");
+        g_holoIsWorldMarker = false;
+    }
+
     // The periodic census prints while the key is on, once the window's
     // 30 s (wall clock) elapses -- forced by backdating the window's
     // start rather than waiting -- and prints nothing while it is off
@@ -672,6 +731,8 @@ int main() {
         g_holoWindowDeclinedNotCleared = g_holoWindowDeclinedNoPrivate = 0;
         g_holoWindowDeclinedNoProjection = g_holoWindowDeclinedFault = 0;
         g_holoPixelSampleCount = 0;
+        g_holoWindowMarkerDraws = 0;
+        g_holoMarkerSampleCount = 0;
         g_lastLog.clear();
         holoDepthWindowTick(ctx.Get());
         check(g_lastLog.find("hologram depth:") != std::string::npos, "census: the line printed");
@@ -679,6 +740,9 @@ int main() {
         check(g_lastLog.find("share test skipped 0 (no target view)") != std::string::npos, "census: zero skipped-share printed");
         check(g_lastLog.find("floor on contribution 0 (no display view)") != std::string::npos, "census: zero floor-fallback printed");
         check(g_lastLog.find("declined 0 ") != std::string::npos, "census: zero declined printed");
+        check(g_lastLog.find("world markers 0.00 draws/frame") != std::string::npos, "census: zero world-marker draws printed");
+        check(g_lastLog.find("element-depth samples p50 0 (occlusion, 0 sampled)") != std::string::npos,
+              "census: zero world-marker samples printed");
         check(g_holoWindowStartMs != 0, "census: the window reset after printing");
     }
 

@@ -1387,8 +1387,16 @@ struct HoloScratch {
     ID3D11Query*                occlusion[kHoloQueryRing] = {};
     bool                        occlusionPending[kHoloQueryRing] = {};
     uint32_t                    occlusionNext = 0;
+    // A separate ring for the world-marker element-depth diagnostic below
+    // (holoDepthWindowTick's "element-depth samples p50"): a resolved
+    // sample count of 0 with the viewport override in place means the VS
+    // itself writes z=0, independent of the game's own viewport.
+    ID3D11Query*                markerOcclusion[kHoloQueryRing] = {};
+    bool                        markerOcclusionPending[kHoloQueryRing] = {};
+    uint32_t                    markerOcclusionNext = 0;
 };
 HoloScratch g_holoScratch[2];
+constexpr UINT kHoloMaxViewports = 16;
 
 // Saved OM/PS state around the two per-draw reissues. Sequential and
 // non-overlapping (Contribution fully ends before ElementDepth begins),
@@ -1404,6 +1412,13 @@ ID3D11ClassInstance*      g_holoSavedPsClasses[256]{};
 UINT                       g_holoSavedPsClassCount = 0;
 ID3D11BlendState*         g_holoContribBlendToFree = nullptr;  // an uncached blend past the cache's size
 bool                       g_holoContribOn = false, g_holoElementOn = false;
+// World-marker-only additions to the element-depth pass: the game's own
+// viewports, saved so a MinDepth=MaxDepth=0 draw can be overridden to
+// 0..1 and put back afterward, and the occlusion query begun around it.
+D3D11_VIEWPORT            g_holoSavedViewports[kHoloMaxViewports]{};
+UINT                       g_holoSavedViewportCount = 0;
+ID3D11Query*              g_holoElementQuery = nullptr;
+bool                       g_holoWorldMarkerNoted = false;
 
 // The contribution pass's fixed depth-test state for a COCKPIT family:
 // GREATER against the RADIUS scratch (cleared to this eye/frame's
@@ -1461,6 +1476,12 @@ uint32_t g_holoWindowDeclinedNotCleared = 0, g_holoWindowDeclinedNoPrivate = 0,
 constexpr uint32_t kHoloPixelSamples = 512;
 uint64_t g_holoPixelSamples[kHoloPixelSamples];
 uint32_t g_holoPixelSampleCount = 0;
+// World markers: draws/frame and the element-depth pass's own occlusion
+// samples (holoDepthWindowTick) -- 0 there, with the viewport override in
+// place, is the VS-writes-z=0 signature (mechanism ii).
+uint32_t g_holoWindowMarkerDraws = 0;
+uint64_t g_holoMarkerSamples[kHoloPixelSamples];
+uint32_t g_holoMarkerSampleCount = 0;
 bool     g_holoScratchFailedNoted = false, g_holoFirstDrawNoted = false, g_holoCanopyRefusedNoted = false;
 
 bool holoIsSrgbFormat(DXGI_FORMAT fmt) {
@@ -1851,6 +1872,30 @@ ID3D11Query* holoAcquireQuery(ID3D11DeviceContext* ctx, HoloScratch& s) {
 void holoQueryBegan(HoloScratch& s, ID3D11Query* q) {
     for (uint32_t i = 0; i < kHoloQueryRing; ++i) if (s.occlusion[i] == q) s.occlusionPending[i] = true;
 }
+// The same ring shape, kept separate from the pair above: a world
+// marker's element-depth pass, not the resolve, and its own sample array.
+ID3D11Query* holoAcquireMarkerQuery(ID3D11DeviceContext* ctx, HoloScratch& s) {
+    for (uint32_t i = 0; i < kHoloQueryRing; ++i) {
+        const uint32_t idx = (s.markerOcclusionNext + i) % kHoloQueryRing;
+        if (s.markerOcclusionPending[idx]) continue;
+        if (!s.markerOcclusion[idx]) {
+            D3D11_QUERY_DESC qd{};
+            qd.Query = D3D11_QUERY_OCCLUSION;
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            if (!dev) return nullptr;
+            const HRESULT hr = dev->CreateQuery(&qd, &s.markerOcclusion[idx]);
+            dev->Release();
+            if (FAILED(hr)) { s.markerOcclusion[idx] = nullptr; continue; }
+        }
+        s.markerOcclusionNext = (idx + 1) % kHoloQueryRing;
+        return s.markerOcclusion[idx];
+    }
+    return nullptr;
+}
+void holoMarkerQueryBegan(HoloScratch& s, ID3D11Query* q) {
+    for (uint32_t i = 0; i < kHoloQueryRing; ++i) if (s.markerOcclusion[i] == q) s.markerOcclusionPending[i] = true;
+}
 // Poll every pending query, DONOTFLUSH: a ready one feeds the census's
 // pixel-count samples, a not-ready one is left for a later frame's poll.
 void holoPollQueries(ID3D11DeviceContext* ctx) {
@@ -1864,6 +1909,16 @@ void holoPollQueries(ID3D11DeviceContext* ctx) {
             s.occlusionPending[i] = false;
             if (hr == S_OK && g_holoPixelSampleCount < kHoloPixelSamples)
                 g_holoPixelSamples[g_holoPixelSampleCount++] = pixels;
+        }
+        for (uint32_t i = 0; i < kHoloQueryRing; ++i) {
+            if (!s.markerOcclusionPending[i] || !s.markerOcclusion[i]) continue;
+            UINT64 samples = 0;
+            const HRESULT hr = ctx->GetData(s.markerOcclusion[i], &samples, sizeof(samples),
+                                            D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if (hr == S_FALSE) continue;
+            s.markerOcclusionPending[i] = false;
+            if (hr == S_OK && g_holoMarkerSampleCount < kHoloPixelSamples)
+                g_holoMarkerSamples[g_holoMarkerSampleCount++] = samples;
         }
     }
 }
@@ -1887,22 +1942,34 @@ void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
     const uint64_t p50 = n ? sorted[n / 2] : 0;
     const uint32_t declined = g_holoWindowDeclinedNotCleared + g_holoWindowDeclinedNoPrivate +
                               g_holoWindowDeclinedNoProjection + g_holoWindowDeclinedFault;
+    uint64_t markerSorted[kHoloPixelSamples];
+    const uint32_t markerN = g_holoMarkerSampleCount < kHoloPixelSamples ? g_holoMarkerSampleCount : kHoloPixelSamples;
+    memcpy(markerSorted, g_holoMarkerSamples, markerN * sizeof(uint64_t));
+    std::sort(markerSorted, markerSorted + markerN);
+    const uint64_t markerP50 = markerN ? markerSorted[markerN / 2] : 0;
+    // One combined note, not two: the rig (and anything else reading the
+    // last logged line) expects a single "hologram depth:" note per tick.
     Log::get().note("hologram depth: %.0f s, %u frames, listed draws %.2f/frame, resolved "
                     "eye-frames %u, stamped pixels/eye-frame p50 %llu (occlusion, %u sampled), "
                     "share test skipped %u (no target view), floor on contribution %u (no display "
                     "view), declined %u (%u nothing listed, %u no private copy, %u no projection, "
-                    "%u fault).",
+                    "%u fault); world markers %.2f draws/frame, element-depth samples p50 %llu "
+                    "(occlusion, %u sampled).",
                     seconds, g_holoWindowFrames, static_cast<double>(g_holoWindowListed) / frames,
                     g_holoWindowResolved, static_cast<unsigned long long>(p50), n,
                     g_holoWindowNoTarget, g_holoWindowFloorFallback, declined,
                     g_holoWindowDeclinedNotCleared, g_holoWindowDeclinedNoPrivate,
-                    g_holoWindowDeclinedNoProjection, g_holoWindowDeclinedFault);
+                    g_holoWindowDeclinedNoProjection, g_holoWindowDeclinedFault,
+                    static_cast<double>(g_holoWindowMarkerDraws) / frames,
+                    static_cast<unsigned long long>(markerP50), markerN);
     g_holoWindowStartMs = now;
     g_holoWindowFrames = g_holoWindowListed = g_holoWindowResolved = 0;
     g_holoWindowNoTarget = g_holoWindowFloorFallback = 0;
     g_holoWindowDeclinedNotCleared = g_holoWindowDeclinedNoPrivate = 0;
     g_holoWindowDeclinedNoProjection = g_holoWindowDeclinedFault = 0;
     g_holoPixelSampleCount = 0;
+    g_holoWindowMarkerDraws = 0;
+    g_holoMarkerSampleCount = 0;
 }
 
 void holoDepthShutdownImpl() {
@@ -1918,8 +1985,14 @@ void holoDepthShutdownImpl() {
         if (s.targetSrv) s.targetSrv->Release();
         if (s.targetRes) s.targetRes->Release();
         for (auto* q : s.occlusion) if (q) q->Release();
+        for (auto* q : s.markerOcclusion) if (q) q->Release();
         s = HoloScratch();
     }
+    if (g_holoElementQuery) { g_holoElementQuery = nullptr; }   // owned by a HoloScratch ring, just released above
+    g_holoSavedViewportCount = 0;
+    g_holoWorldMarkerNoted = false;
+    g_holoWindowMarkerDraws = 0;
+    g_holoMarkerSampleCount = 0;
     for (auto& e : g_holoContribBlendCache) { if (e.state) { e.state->Release(); e.state = nullptr; } }
     if (g_holoContribDss) { g_holoContribDss->Release(); g_holoContribDss = nullptr; }
     if (g_holoWorldMarkerDss) { g_holoWorldMarkerDss->Release(); g_holoWorldMarkerDss = nullptr; }
@@ -3073,10 +3146,13 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
                             sw = srcTd.Width; sh = srcTd.Height; sbind = srcTd.BindFlags;
                         }
                     }
+                    const uint32_t blocksW = (sw + UiContent::kBlock - 1) / UiContent::kBlock;
+                    const uint32_t blocksH = (sh + UiContent::kBlock - 1) / UiContent::kBlock;
                     Log::get().note("UI content census: frame %u eye %d vs %016llX ps %016llX source %ux%u "
-                                    "fmt %u bind 0x%X -> %s (%s), entry age %u frames, evicted %u this call.",
+                                    "fmt %u bind 0x%X blocks %ux%u -> %s (%s), entry age %u frames, evicted %u this call.",
                                     g_frame, g_drawEye, static_cast<unsigned long long>(boundVsHash(ctx)),
                                     static_cast<unsigned long long>(boundPsHash(ctx)), sw, sh, sfmt, sbind,
+                                    blocksW, blocksH,
                                     uiContentDecisionWord(g_uiContent.lastDecision),
                                     uiContentReason(g_uiContent.lastDecision, g_uiContent.lastAge),
                                     g_uiContent.lastAge, g_uiContent.lastEvicted);
@@ -3274,6 +3350,7 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
     g_holoDrawVs = h;
     g_holoIsWorldMarker = worldMarker;
     ++g_holoWindowListed;
+    if (worldMarker) ++g_holoWindowMarkerDraws;
     return true;
 }
 
@@ -3403,6 +3480,8 @@ void uiDepthHologramContributionEnd(ID3D11DeviceContext* ctx) {
 // harmless, per holoScratchPrepare's own comment.
 bool uiDepthHologramElementDepthBegin(ID3D11DeviceContext* ctx) {
     g_holoElementOn = false;
+    g_holoSavedViewportCount = 0;
+    g_holoElementQuery = nullptr;
     if (g_holoEye < 0) return false;
     if (!holoScratchPrepare(ctx, g_holoEye, g_holoW, g_holoH)) return false;
     HoloScratch& s = g_holoScratch[g_holoEye];
@@ -3412,19 +3491,73 @@ bool uiDepthHologramElementDepthBegin(ID3D11DeviceContext* ctx) {
     g_holoSavedPsClassCount = 256;
     ctx->PSGetShader(&g_holoSavedPs, g_holoSavedPsClasses, &g_holoSavedPsClassCount);
     ctx->OMGetDepthStencilState(&g_holoSavedDss, &g_holoSavedRef);
+    if (g_holoIsWorldMarker) {
+        // A world marker's raster depth read as 0 (sky) on every pixel its
+        // contribution covers 100% of (flight 20260924_175113, eye_175314)
+        // -- either the game's own viewport for this draw has MinDepth ==
+        // MaxDepth == 0 (mechanism i, recovered by the override below), or
+        // its VS writes z=0 regardless of viewport (mechanism ii, where
+        // this override is a no-op: the occlusion query beneath tells
+        // which one it was).
+        g_holoSavedViewportCount = kHoloMaxViewports;
+        ctx->RSGetViewports(&g_holoSavedViewportCount, g_holoSavedViewports);
+        if (!g_holoWorldMarkerNoted) {
+            g_holoWorldMarkerNoted = true;
+            D3D11_DEPTH_STENCIL_DESC dssDesc{};
+            if (g_holoSavedDss) g_holoSavedDss->GetDesc(&dssDesc);
+            Microsoft::WRL::ComPtr<ID3D11RasterizerState> rs;
+            ctx->RSGetState(&rs);
+            D3D11_RASTERIZER_DESC rsDesc{};
+            if (rs) rs->GetDesc(&rsDesc);
+            Microsoft::WRL::ComPtr<ID3D11BlendState> blend;
+            FLOAT blendFactor[4]{};
+            UINT sampleMask = 0;
+            ctx->OMGetBlendState(&blend, blendFactor, &sampleMask);
+            D3D11_BLEND_DESC blendDesc{};
+            if (blend) blend->GetDesc(&blendDesc);
+            Log::get().note("hologram depth: first world-marker draw -- vs %016llX, game viewport 0 "
+                            "depth %.3f..%.3f, DSS enable %d func %u write %u, RS DepthClipEnable %d "
+                            "bias %d, blend enable %d src %u dest %u.",
+                            static_cast<unsigned long long>(g_holoDrawVs),
+                            static_cast<double>(g_holoSavedViewportCount ? g_holoSavedViewports[0].MinDepth : -1.0f),
+                            static_cast<double>(g_holoSavedViewportCount ? g_holoSavedViewports[0].MaxDepth : -1.0f),
+                            dssDesc.DepthEnable, static_cast<unsigned>(dssDesc.DepthFunc),
+                            static_cast<unsigned>(dssDesc.DepthWriteMask), rsDesc.DepthClipEnable, rsDesc.DepthBias,
+                            blendDesc.RenderTarget[0].BlendEnable, static_cast<unsigned>(blendDesc.RenderTarget[0].SrcBlend),
+                            static_cast<unsigned>(blendDesc.RenderTarget[0].DestBlend));
+        }
+        D3D11_VIEWPORT overridden[kHoloMaxViewports];
+        for (UINT i = 0; i < g_holoSavedViewportCount; ++i) {
+            overridden[i] = g_holoSavedViewports[i];
+            overridden[i].MinDepth = 0.0f;
+            overridden[i].MaxDepth = 1.0f;
+        }
+        vScreenRSSetViewportsRaw(ctx, g_holoSavedViewportCount, overridden);
+    }
     vScreenSetRenderTargetsRaw(ctx, 0, nullptr, s.depthDsv);
     vScreenPSSetShaderRaw(ctx, nullptr, nullptr, 0);
     ctx->OMSetDepthStencilState(dss, 0);
+    if (g_holoIsWorldMarker) {
+        g_holoElementQuery = holoAcquireMarkerQuery(ctx, s);
+        if (g_holoElementQuery) ctx->Begin(g_holoElementQuery);
+    }
     g_holoElementOn = true;
     return true;
 }
 void uiDepthHologramElementDepthEnd(ID3D11DeviceContext* ctx) {
     if (!g_holoElementOn) return;
     g_holoElementOn = false;
+    if (g_holoElementQuery) {
+        ctx->End(g_holoElementQuery);
+        holoMarkerQueryBegan(g_holoScratch[g_holoEye], g_holoElementQuery);
+        g_holoElementQuery = nullptr;
+    }
     guardedBudget(g_holoBudget, [&] {
         vScreenPSSetShaderRaw(ctx, g_holoSavedPs, g_holoSavedPsClasses, g_holoSavedPsClassCount);
         ctx->OMSetDepthStencilState(g_holoSavedDss, g_holoSavedRef);
+        if (g_holoSavedViewportCount) vScreenRSSetViewportsRaw(ctx, g_holoSavedViewportCount, g_holoSavedViewports);
     });
+    g_holoSavedViewportCount = 0;
     for (UINT i = 0; i < g_holoSavedPsClassCount; ++i) if (g_holoSavedPsClasses[i]) g_holoSavedPsClasses[i]->Release();
     g_holoSavedPsClassCount = 0;
     if (g_holoSavedPs) { g_holoSavedPs->Release(); g_holoSavedPs = nullptr; }
@@ -3848,7 +3981,7 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
         if(g_trained) Log::get().note("UI content totals: compared=%u reused=%u declined=%u reset=%u evicted=%u history=%.2f MiB (session totals; zero comparisons means inactive).",
             edits.updates,edits.hits,edits.declined,edits.resets,edits.evicted,double(g_uiContent.allocated)/(1024*1024));
         const auto& editGpu=g_uiContent.gpu.totals;
-        if(g_trained)Log::get().note("UI content GPU: completed=%u skipped=%u invalid=%u, %.3f us/source update (includes history copy; sampled every 16th frame, no wait or flush; separate from EDVR-at-door GPU).",
+        if(g_trained)Log::get().note("UI content GPU: completed=%u skipped=%u invalid=%u, %.3f us/source update (one thread per 4x4 block; sampled every 16th frame, no wait or flush; separate from EDVR-at-door GPU).",
             editGpu.samples,editGpu.skipped,editGpu.invalid,editGpu.samples?editGpu.ms*1000/editGpu.samples:0.0);
         for(int i=0;i<2;++i) {
             const auto& s=g_stellarCpu[i];
