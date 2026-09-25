@@ -933,14 +933,17 @@ and `menu.text_degrees` controls its angular text size. See the
 It is shown while the
 menu is CLOSED and pinned to the head, the toolkit's overlay, because that
 is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`
-and `fps_overlay_pitch` put it where you can stop seeing it (default 16
-degrees below the look). The lock has no lag: the door builds its anchor
-from each frame's own pose (`setMenuHeadLock` on the channel) rather than
-from a value published a frame earlier. Its price is the panel's: one
-region copy plus a composite over the readout's own pixel box per eye per
-frame, timed by a timestamp pair and printed in the graphics log after 240
-frames (`menu panel: measured ... ms per eye`), so the number is measured
-and not believed.
+and `fps_overlay_pitch` put it where you can stop seeing it (default 20
+degrees above the look). `menu.fps_overlay_lock` keeps the readout visible
+while the F8 menu is open, drawing it at the top of the menu panel so you
+can watch FPS while changing settings for A/B tests; it is off by default,
+so the readout clears while the menu is open as before. The lock has no lag:
+the door builds its anchor from each frame's own pose (`setMenuHeadLock` on
+the channel) rather than from a value published a frame earlier. Its price
+is the panel's: one region copy plus a composite over the readout's own
+pixel box per eye per frame, timed by a timestamp pair and printed in the
+graphics log after 240 frames (`menu panel: measured ... ms per eye`), so
+the number is measured and not believed.
 
 With `menu.developer = on`, three more pages and two changes everywhere:
 the ini's dotted key name appears under each label, and each row's hint
