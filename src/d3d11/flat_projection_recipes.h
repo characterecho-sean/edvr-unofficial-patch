@@ -269,6 +269,19 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x76ED1E4F8C72C26Eull: if (ps == 0x7ECF7C83FD5AD373ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     default: break;
     }
+    // Epic 20260925_122208 on-foot hangar/concourse (d0898e1b flight). A/B
+    // are decal shaders: their PS divides the exported view-position varying
+    // for a depth-texture UV, so the VS projection and the depth pass must
+    // stay aligned. C is skinned (t38 bone loop) and writes the HDR target;
+    // projection is the last step on the world position. D's VS is the
+    // multi-UV hull family with a new companion; its PS samples by vertex UV.
+    if (result.count == 0) switch (vs) {
+    case 0x0A298DE7DF833A46ull: if (ps == 0x6FD4C38BA927C8C7ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xD8FCE3CEA16B9B51ull: if (ps == 0x06AA136E4D58CBA2ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xBA16062A2EB66F1Full: if (ps == 0x33758387B70944A1ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x66DE2CADB1F4AE6Bull: if (ps == 0xBBDE4E71FB78528Aull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    default: break;
+    }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);
     return result;
 }

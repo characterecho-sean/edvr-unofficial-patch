@@ -4,10 +4,12 @@
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. Main `411751ec` is included. Latest analyzed Epic build
-  is `ad7607c6`; section 55 records 31 unrecognized station/on-foot shader
-  pairs and a separate on-foot HDR camera conflict. Section 56 maps all 30
-  projected pairs, classifies the one screen composite unchanged, and adds the
-  bounded on-foot camera probe; the merged tree passed full validation.
+  is `d0898e1b`; section 57 records the on-foot refusal cascade (the
+  laser-rifle weapon pass's second camera vetoed every on-foot frame), its
+  scoped admission, and exact recipes for the four residual unknown pairs.
+  Section 56 maps all 30 section-55 projected pairs, classifies the one screen
+  composite unchanged, and adds the bounded on-foot camera probe; the merged
+  tree passed full validation.
   Section 54's five mappings passed full validation and are installed; Sean
   reports good ship/station visuals. Section 53 records the preceding
   menu/cockpit F10 evidence. One live projection failure now has an exact
@@ -38,14 +40,15 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** fly the Epic install through the station interior and on foot with
-  F10. The section-55 pairs now have exact recipes, so unknown-pair refusals
-  should end there; the camera probe must capture the on-foot 88DCF conflict
-  evidence before any admission change. Existing evidence does not justify
-  ignoring the alternate projection. Preserve high-G motion and strict depth
-  ownership; do not repeat qualified PS91/BFE or stale-resize hypotheses. The
-  separate menu hangar-floor P1 defect remains open. VR still needs regression
-  tests.
+- **Next:** fly the Epic install on foot in the hangar and concourse. The
+  section-57 admission should end the hdr-camera-changed refusal cascade;
+  confirm treated streaks resume on foot, watch the weapon itself for local
+  rejection crawl, and check the concourse for any new unknown-pair captures.
+  Existing evidence does not justify ignoring the alternate projection.
+  Preserve high-G motion and strict depth ownership; do not repeat qualified
+  PS91/BFE or stale-resize hypotheses. The separate menu hangar-floor P1
+  defect remains open. VR still needs regression tests; the concourse NPC
+  observation on `d9f86b09` belongs to the main/openxr-perf-gaps line.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -3462,3 +3465,66 @@ the AFFEF regression in the flat rigs. Next Epic flight: dock, walk the
 station interior and go on foot with F10; the formerly unknown pairs should
 prepare instead of resetting history, and the probe should report captured
 evidence for the 88DCF conflict frames.
+
+## 57. On-foot weapon camera qualified; residual pairs mapped (2026-09-25)
+
+Verified Epic `edvr_gfx_20260925_122208.log` against installed `d0898e1b`,
+build `6AB6B35F`. Sean reported continued aliasing/shimmer on foot in the
+hangar and concourse after section 56. The log confirms the mechanism: treated
+2,926 versus 14,644 refused, and on-foot windows refuse 247-337 copies per
+five seconds with `conflicting-hdr-target-or-camera` /
+`hdr-camera-changed`; every refused copy invalidates history, so on-foot
+frames never accumulate. The earlier station/ship intervals kept their long
+treated streaks (1,996) and backend failures stayed zero.
+
+The camera probe captured both attempts in each of two F10 arms
+(`result=captured`, complete=2, missing=0). The conflicting draw is exactly
+`88DCF1164C640EC3/494506A63091DF8C`, about one draw per frame, writing the
+selected HDR target and named depth at the full 3840x2160 viewport with depth
+range 0..1, depth-write on, GREATER_EQUAL. `eye_draw_snapshot.h` has listed
+that VS with the laser-rifle family since 2026-09-17: this is the
+first-person weapon pass.
+
+Its projection is a real second camera, not stale bytes: same camera position
+(row 275 identical) and same clip-W column (row 274 identical) as the named
+scene camera, with XY scale about 1.23x tighter and near 0.0675 versus 0.025.
+Its VS b0[4..7] is the transpose of its own b1[270..273] current values --
+self-consistent in both layouts. The runtime's refusal was correct under its
+contract; the frame-level cost is what made the whole on-foot image shimmer.
+
+Change: in `flat_runtime_model.h` the exact weapon pair neither sets nor
+vetoes the scene camera. Everything else about HDR ownership stays strict,
+and the weapon keeps its existing b0[4..7] ForwardDp4 recipe so it renders at
+the frame's phase under its own projection. At resolve, its pixels fail
+strict depth ownership against the scene camera and fall back to current
+colour: no history smear on the weapon, at the price of possible local crawl
+on the weapon itself under fast movement. That trade is the qualification
+target for the next flight; a weapon reactive mask or second-domain history
+remains available if it shows.
+
+The same flight captured bytecode for the four remaining unknown pairs (six
+stages saved, zero failures). Offline classification
+(`build/flat-audit-station/`, ignored): `0A298DE7DF833A46/6FD4C38BA927C8C7`
+and `D8FCE3CEA16B9B51/06AA136E4D58CBA2` are decal passes projecting through
+cb1[270..273] columns; their PS derives the depth-texture UV from the
+exported view-position varying, so VS and depth-pass projections must stay
+aligned. `BA16062A2EB66F1F/33758387B70944A1` writes the HDR target and is
+skinned (t38 bone loop); projection is the last step on the world position,
+cb0[4..7] dp4. `66DE2CADB1F4AE6B/BBDE4E71FB78528A` is the multi-UV hull VS
+(dual rigid/skinned path) with a new PS companion, cb1[270..273]. All four
+have exact recipes and census tests. These recipes do not establish motion
+coverage; the skinned HDR draw's motion source is still the open question
+shared with the VR concourse NPC observation below.
+
+Regression coverage: the flat rig replays a changed-camera HDR draw that must
+still refuse as `hdr-camera-changed`, and the same draw as the weapon pair
+must now select. The recipe census covers exact companions, cross-identity
+rejection and the absent-PS case.
+
+Separate observation, recorded for routing: Sean saw aliasing on concourse
+NPCs in VR on `d9f86b09` (`claude/openxr-perf-gaps`), not on this branch's
+build. NPCs are skinned world meshes; VR motion covers rigid engine records
+and the view weapon's skinned vertices, while world skinned content falls
+under the reactive policy. Whether that observation is a longstanding
+reactive-coverage gap or a regression belongs to the main/openxr-perf-gaps
+line; this branch's own VR regression gate remains open regardless.

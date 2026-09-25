@@ -736,7 +736,7 @@ void flatRuntimePrefixTests() {
         std::sort(events, events + count, [](const Event& a, const Event& b) { return a.q < b.q; });
         FlatMonoFrame selected{};
         FlatRuntimeDraw copy{};
-        std::unique_ptr<FlatRuntimePrefix> beforeCopy;
+        std::unique_ptr<FlatRuntimePrefix> beforeCopy, beforeTone;
         for (uint32_t i = 0; i < count; ++i) {
             const auto& r = *events[i].r; FlatRuntimeDraw d{}; d.key = r.key;
             std::memcpy(d.camera, r.camera, sizeof(d.camera));
@@ -744,6 +744,7 @@ void flatRuntimePrefixTests() {
             d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
             d.instances = r.firstInstances;
             if (i + 1 == count) beforeCopy = std::make_unique<FlatRuntimePrefix>(*prefix);
+            if (events[i].r == &fixture.handoff[0]) beforeTone = std::make_unique<FlatRuntimePrefix>(*prefix);
             selected = flatRuntimeObserve(*prefix, d); copy = d;
         }
         check(selected.selected() && selected.renderWidth == width &&
@@ -817,6 +818,24 @@ void flatRuntimePrefixTests() {
               cameraWitness->selectedConflict.reference.b1 == fixture.world[19].key.b1 &&
               cameraWitness->selectedConflict.current.b1 == changed.key.b1,
               "changed HDR camera records HDR-to-HDR witness without naming tone");
+
+        auto weaponWitness = std::make_unique<FlatRuntimePrefix>(*beforeTone);
+        FlatRuntimeDraw weapon{}; weapon.key = fixture.world[19].key;
+        std::memcpy(weapon.camera, fixture.world[19].camera, sizeof(weapon.camera));
+        weapon.camera[20] ^= 1; weapon.key.cameraHash = flatCameraHash(weapon.camera);
+        weapon.key.writeEpoch = weaponWitness->frame;
+        weapon.key.writeSeq = weaponWitness->sequence + 1;
+        weapon.key.vs = 0x88DCF1164C640EC3ull; weapon.key.ps = 0x494506A63091DF8Cull;
+        flatRuntimeObserve(*weaponWitness, weapon);
+        FlatRuntimeDraw toneAfter{}; toneAfter.key = fixture.handoff[0].key;
+        std::memcpy(toneAfter.camera, fixture.handoff[0].camera, sizeof(toneAfter.camera));
+        toneAfter.key.writeEpoch = weaponWitness->frame;
+        toneAfter.key.writeSeq = weaponWitness->sequence + 1;
+        toneAfter.instances = fixture.handoff[0].firstInstances;
+        flatRuntimeObserve(*weaponWitness, toneAfter);
+        check(flatRuntimeObserve(*weaponWitness, copy).selected() &&
+              weaponWitness->selectedConflict.cause == FlatRuntimeConflict::None,
+              "the qualified second-camera weapon pass neither vetoes nor owns the scene camera");
 
         auto noisy = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
         auto* unrelated = flatRuntimeTarget(*noisy, MonoFixture::token(0xDEAD));

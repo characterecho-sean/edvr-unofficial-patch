@@ -347,6 +347,32 @@ inline int flatProjectionRecipeTests() {
     expect(flatProjectionDrawUnchanged(0x53211E8C072CD02Eull,0xB403F48CB35D9739ull) &&
         !flatProjectionDrawUnchanged(0xB018D143700AB803ull,0xB403F48CB35D9739ull),
         "shared constant-output PS does not make a skinned projected VS inert");
+    // Epic 20260925_122208 on-foot hangar/concourse: exact captured pairs,
+    // including the skinned HDR draw and the multi-UV hull VS's new companion.
+    const ObservedPair epicOnFoot[] = {
+        {0x0A298DE7DF833A46ull,0x6FD4C38BA927C8C7ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xD8FCE3CEA16B9B51ull,0x06AA136E4D58CBA2ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xBA16062A2EB66F1Full,0x33758387B70944A1ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x66DE2CADB1F4AE6Bull,0xBBDE4E71FB78528Aull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+    };
+    for (size_t i=0;i<sizeof(epicOnFoot)/sizeof(epicOnFoot[0]);++i) {
+        const auto& pair=epicOnFoot[i];
+        const auto recipe=flatProjectionDrawRecipes(pair.vs,pair.ps);
+        expect(recipe.count==1 && recipe.requests[0].stage==FlatProjectionStage::Vertex &&
+            recipe.requests[0].slot==pair.slot && recipe.requests[0].patchCount==1 &&
+            recipe.requests[0].patches[0].layout==pair.layout &&
+            recipe.requests[0].patches[0].byteOffset==pair.row*16,
+            "on-foot exact pair patches only the measured vertex matrix span");
+        expect(flatProjectionDrawRecipes(pair.vs,pair.ps^1ull).count==0 &&
+            flatProjectionDrawRecipes(pair.vs^1ull,pair.ps).count==0 &&
+            flatProjectionDrawRecipes(pair.vs,0).count==0,
+            "on-foot projection requires both captured shader identities");
+        expect(!flatProjectionDrawUnchanged(pair.vs,pair.ps),
+            "on-foot projected geometry cannot bypass jitter");
+        for (size_t j=0;j<i;++j)
+            expect(pair.vs!=epicOnFoot[j].vs || pair.ps!=epicOnFoot[j].ps,
+                "on-foot census has no duplicate exact pairs");
+    }
     const auto screenRay=flatProjectionDrawRecipes(0x4AEC439CEC7FFDCEull,0x87EF79B19297B8C4ull);
     expect(screenRay.count==1 && screenRay.requests[0].stage==FlatProjectionStage::Vertex &&
         screenRay.requests[0].slot==1 && screenRay.requests[0].patchCount==1 &&

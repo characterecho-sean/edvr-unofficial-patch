@@ -307,13 +307,22 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         if (t->writes.draws && (t->writes.key.depth != k.depth || t->writes.key.dsv != k.dsv))
             flatRuntimeBad(*t, FlatRuntimeConflict::DepthMismatch, q, t->writes, current);
         if (k.camera) {
-            if (t->hdrCamera && !sameCamera(t->tone, current))
+            // Epic 20260925_122208: the first-person weapon pass (laser rifle
+            // family) draws into the scene HDR/depth with its own qualified
+            // second projection -- same position and orientation, narrower
+            // FOV, near 0.0675 versus 0.025; its b0[4..7] transposes its own
+            // b1[270..273]. It neither sets nor vetoes the scene camera; its
+            // pixels fail strict depth ownership at resolve and fall back to
+            // current colour.
+            const bool secondCamera =
+                k.vs == 0x88DCF1164C640EC3ull && k.ps == 0x494506A63091DF8Cull;
+            if (t->hdrCamera && !sameCamera(t->tone, current) && !secondCamera)
                 flatRuntimeBad(*t, FlatRuntimeConflict::CameraChange, q, t->tone, current);
             if (!cameraCurrent(current, p.frame))
                 flatRuntimeBad(*t, FlatRuntimeConflict::CameraProvenance, q, t->tone, current);
             // Keep the first known camera draw separate from earlier HDR writes
             // without b1. Assigning its later write to those draws invents provenance.
-            if (!t->hdrCamera) { t->tone = current; t->hdrCamera = true; }
+            if (!t->hdrCamera && !secondCamera) { t->tone = current; t->hdrCamera = true; }
         }
     }
     if (t->writes.draws && t->writes.key.format == 26 &&

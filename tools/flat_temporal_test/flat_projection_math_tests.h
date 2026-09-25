@@ -201,9 +201,9 @@ inline int flatProjectionMathTests() {
             for(size_t i=0;i<3;++i) {
                 const double original=xy.first*volumeRay[0][i]+xy.second*volumeRay[1][i]+
                     volumeRay[2][i]+volumeRay[3][i];
-                const double shifted=(xy.first+jitter.ndcX)*shiftedVolume[0][i]+
+                const double displaced=(xy.first+jitter.ndcX)*shiftedVolume[0][i]+
                     (xy.second+jitter.ndcY)*shiftedVolume[1][i]+shiftedVolume[2][i]+shiftedVolume[3][i];
-                check(near(original,shifted),"volume displaced sample preserves two-offset ray");
+                check(near(original,displaced),"volume displaced sample preserves two-offset ray");
             }
         check(!std::memcmp(volumeRay,shiftedVolume,12*sizeof(float)) &&
               volumeRay[3][3]==shiftedVolume[3][3],"volume basis, third row and unused w remain unchanged");
