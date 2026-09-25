@@ -294,8 +294,11 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int tileGap = cap / 4;
     const int tilesH = tileRows > 0 ? tileRows * (tileH + tileGap) + cap / 2 : 0;
     const int hintHUsed = c.hint[0] ? hintH : 0;
-    const int H = pad + tabH + tilesH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) + graphH +
-                  hintHUsed + footH + pad;
+    // A locked FPS readout sits above the tabs so it stays visible while
+    // the menu is scrolled or a tooltip is up.
+    const int overlayH = (c.toast || !c.overlayLine[0]) ? 0 : cap * 16 / 10;
+    const int H = pad + overlayH + tabH + tilesH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) +
+                  graphH + hintHUsed + footH + pad;
     *outH = H;
 
     // Background.
@@ -307,6 +310,17 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         ops.push_back(o);
     }
     int y = pad;
+    if (overlayH > 0) {
+        Op o;
+        o.text = true;
+        o.str = widen(c.overlayLine);
+        o.rect = {pad, y, cardW - pad, y + overlayH};
+        o.align = DT_LEFT | DT_VCENTER;
+        o.font = Font::Hint;
+        o.rgb = kToastText;
+        ops.push_back(o);
+        y += overlayH;
+    }
     if (!c.toast) {
         // The tab bar: the window of names the model chose, with an arrow
         // at whichever end has pages beyond it, so the strip never ends
