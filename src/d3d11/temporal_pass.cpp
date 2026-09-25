@@ -46,6 +46,7 @@
 #include "perf_monitor.h"
 #include "shader_swap.h"
 #include "gpu_timing.h"
+#include "gpu_census.h"   // issue #38: the per-feature GPU cost census
 #include "temporal_shader_bytecode.h"
 
 namespace edvr {
@@ -3489,9 +3490,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // this eye's finished, tonemapped colour, for the resolve's
             // FLOOR test only -- its share test reads the game's own HDR
             // render target back separately (never this).
+            gpuCensusBegin(ctx, GpuCensusSection::DoorHologramResolve);
             uiDepthHologramResolve(ctx, eye, scene, sd.Width, sd.Height, inSrv);
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
             celestialMotionViews(ctx, scene, terrainSrvs);
+            gpuCensusEnd(ctx, GpuCensusSection::DoorHologramResolve);
             uiDepthHoloMotion(eye,scene,holoSrvs);
             engineViewsGiven = engineVelocityViews(ctx, eye, scene, &engineViews);
             engineHeldSrv[0].Attach(engineViews.slots);
@@ -4833,9 +4836,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, engineBound ? 3 : 1, cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
+                    gpuCensusBegin(ctx, GpuCensusSection::DoorMotionPrep);
                     beginPart(qs, PrepPart::Mv, dev, ctx);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                     endPart(qs, PrepPart::Mv, ctx);
+                    gpuCensusEnd(ctx, GpuCensusSection::DoorMotionPrep);
                     if (engineBound) {
                         ctx->CSSetConstantBuffers(1, 2, savedCbM);
                         for (auto* b : savedCbM) if (b) b->Release();
@@ -4918,7 +4923,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         // starts afresh after.
                         usedDlaa = true;
                         e.dlHaveHistory = false;
-                    } else if ((beginRegion(qs, Region::Full, dev, ctx),
+                    } else if ((gpuCensusBegin(ctx, GpuCensusSection::DoorUpscaler),
+                                beginRegion(qs, Region::Full, dev, ctx),
                                 amdEngine
                                     ? edvr::fsr3Evaluate(ctx, static_cast<unsigned>(eye),
                                                         e.dlColour,
@@ -4930,6 +4936,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                   biasMask, w, h,
                                                   oW, oH, jxNow, jyNow, resetHist, frameMs, &why))) {
                         endRegion(qs, Region::Full, ctx);
+                        gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                         usedDlaa = true;
                         e.dlHaveHistory = true;
                         if (amdEngine) {
@@ -5012,6 +5019,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         }
                     } else {
                         endRegion(qs, Region::Full, ctx);
+                        gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                         e.dlHaveHistory = false;
                         if (!engineFailNoted) {
                             engineFailNoted = true;
@@ -5060,7 +5068,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // old `else` branch used to run, so the copy-through below
                     // is unchanged. (Main's corona hold, b1's second float and
                     // its once-only note, lives inside the helper.)
-                    if (usedDlaa && !applyUiResolve(e.dlOutSrv, true)) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                    if (usedDlaa) {
+                        gpuCensusBegin(ctx, GpuCensusSection::DoorUiResolve);
+                        const bool uiResolvedHere = applyUiResolve(e.dlOutSrv, true);
+                        gpuCensusEnd(ctx, GpuCensusSection::DoorUiResolve);
+                        if (!uiResolvedHere) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                    }
                     // luma probe stage 1, dlss_out: e.dlSubmit already holds it
                     // here on every usedDlaa path, UI-resolved or copied
                     // straight from e.dlOut above.
@@ -5329,9 +5342,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetUnorderedAccessViews(0, 8, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, engineOwn ? 3 : 1, cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
+                    gpuCensusBegin(ctx, GpuCensusSection::DoorMotionPrep);
                     beginPart(qs, PrepPart::Mv, dev, ctx);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                     endPart(qs, PrepPart::Mv, ctx);
+                    gpuCensusEnd(ctx, GpuCensusSection::DoorMotionPrep);
                     if (engineOwn) {
                         ctx->CSSetConstantBuffers(1, 2, savedCbM);
                         for (auto* b : savedCbM) if (b) b->Release();
@@ -5414,12 +5429,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             const float sy = static_cast<float>(rh) / static_cast<float>(h);
                             const bool resetP = (flags & 1u) != 0 || !e.prHaveHistory;
                             // "periphery": the steady periphery's own NGX role.
+                            gpuCensusBegin(ctx, GpuCensusSection::DoorUpscaler);
                             beginRegion(qs, Region::Periphery, dev, ctx);
                             periphOk = dlaaEvaluatePeriphery(
                                 ctx, eye, reduce ? e.prColour : e.dlColour,
                                 reduce ? e.prDepth : e.dlDepth, reduce ? e.prMv : e.dlMv, e.prOut,
                                 rw, rh, jxNow * sx, jyNow * sy, resetP, frameMs, &whyF);
                             endRegion(qs, Region::Periphery, ctx);
+                            gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                             if (!periphOk) standDown(whyF);
                         }
                     }
@@ -5433,11 +5450,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         // reads e.dlMvLead, and e.dlMv is untouched either way.
                         ID3D11Texture2D* cropMv = e.dlMvLead ? e.dlMvLead : e.dlMv;
                         // "centre": the fovea crop's own NGX role.
-                        if ((beginRegion(qs, Region::Centre, dev, ctx),
+                        if ((gpuCensusBegin(ctx, GpuCensusSection::DoorUpscaler),
+                             beginRegion(qs, Region::Centre, dev, ctx),
                              dlssEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, cropMv, e.dlOut, w, h,
                                               foW, foH, fcx, fcy, fcw, fch, focx, focy, focw, foch,
                                               jxNow, jyNow, resetHist, frameMs, &whyF))) {
                             endRegion(qs, Region::Centre, ctx);
+                            gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                             foveaEvalOk = true;   // e.foveaHaveHistory is set from this at frame end
                             // The head lead's carry: the base NVIDIA's crop
                             // history now belongs to, the size it ran at, and
@@ -5454,6 +5473,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             }
                         } else {
                             endRegion(qs, Region::Centre, ctx);
+                            gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                             standDown(whyF);
                         }
                     }
@@ -5675,7 +5695,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // compose already blended NVIDIA's crop into the composite,
                 // so the resolve reads the FINISHED frame here, not the bare
                 // crop.
-                if (applyUiResolve(e.foveaOutSrv, false)) {
+                gpuCensusBegin(ctx, GpuCensusSection::DoorUiResolve);
+                const bool foveaUiResolved = applyUiResolve(e.foveaOutSrv, false);
+                gpuCensusEnd(ctx, GpuCensusSection::DoorUiResolve);
+                if (foveaUiResolved) {
                     foveaSubmit = e.dlSubmit;
                     foveaUiTreatment = "the UI resolve (from the current raster alone: the UI history stays the periphery's)";
                 } else {
@@ -7212,12 +7235,31 @@ extern "C" __declspec(dllexport) void* edvrTemporalAa(
     unsigned outW, unsigned outH, unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow || edvr::deviceHookRecoveryDisabled()) return nullptr;
     void* out = nullptr;
+    // The door census's whole-pass span (gpu_census.h): timed at this outer
+    // boundary, not inside temporalInner -- that function has many early
+    // returns, and an outer Begin/End closes correctly no matter which one
+    // it takes. ctx is derived the same way temporalInner derives its own
+    // (2281's idiom: get the device, get its context, release the device
+    // immediately, keep the context for the call).
+    ID3D11DeviceContext* censusCtx = nullptr;
+    ID3D11Texture2D* censusTex = nullptr;
+    static_cast<IUnknown*>(srcTex)->QueryInterface(__uuidof(ID3D11Texture2D),
+                                                    reinterpret_cast<void**>(&censusTex));
+    if (censusTex) {
+        ID3D11Device* censusDev = nullptr;
+        censusTex->GetDevice(&censusDev);
+        if (censusDev) { censusDev->GetImmediateContext(&censusCtx); censusDev->Release(); }
+        censusTex->Release();
+    }
+    edvr::gpuCensusBegin(censusCtx, edvr::GpuCensusSection::DoorTemporalWhole);
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev, jxNow,
                                   jyNow, deltaHead, headTrans, headTransSwapped,
                                   nearZ, farZ, headDeg, motion, blend,
                                   clampSigma, outW, outH, flags);
     });
+    edvr::gpuCensusEnd(censusCtx, edvr::GpuCensusSection::DoorTemporalWhole);
+    if (censusCtx) censusCtx->Release();
     return out;
 }
 

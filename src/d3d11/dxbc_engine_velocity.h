@@ -22,7 +22,9 @@
 // its vertex shader gains one output, EDVRPOOLSLOT = v0.x, after its last
 // register, and its pixel shader reads that instead. Nothing else in either
 // program changes: the position math, the depth bias and the G-buffer
-// exports stay byte-for-byte.
+// exports stay byte-for-byte. SV_Position is rasterizer-generated for a PS;
+// its input register need not equal the VS output register. A PS can use that
+// numeric register for SV_IsFrontFace, so the patch chooses a free PS input.
 //
 // Unsupported containers, signatures, declarations or control flow decline
 // with a reason and produce no bytecode.
@@ -40,14 +42,14 @@ constexpr uint32_t kEngineVelocityTarget = 6;
 // where float is still exact).
 constexpr uint32_t kEngineVelocitySlotMask = 0x007fffffu;
 // The semantic the patched UV-only vertex shader exports and its patched
-// pixel shader reads. D3D11 links stages by semantic and register, so both
-// sides must spell it the same.
+// pixel shader reads. This user-defined varying preserves its matching
+// semantic and component/register layout on both sides.
 constexpr char kEngineVelocitySlotSemantic[] = "EDVRPOOLSLOT";
 
 struct EngineVelocityInputs {
     uint32_t identityRegister = ~0u;   // PS input register carrying the slot
     uint32_t identityComponent = ~0u;  // ...and its component
-    uint32_t positionRegister = ~0u;   // SV_POSITION: VS output register == PS input register
+    uint32_t positionRegister = ~0u;   // VS SV_POSITION output; PS may use a different free input register
     bool slotFromVsPatch = false;      // the VS must be patched to export EDVRPOOLSLOT there
 };
 
@@ -379,6 +381,30 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
     }
     try {
         auto chunks = parseContainer(data, bytes, kPs50);
+        EngineVelocityInputs psInputs = inputs;
+        bool usedInput[32]{};
+        uint32_t declaredPosition = ~0u;
+        for (const auto& chunk : chunks) if (chunk.tag == kTagIsgn) {
+            for (const auto& e : parseSignature(chunk.bytes)) {
+                if (e.registerIndex >= 32) throw std::runtime_error("input register out of range");
+                usedInput[e.registerIndex] = true;
+                if (e.systemValue == 1 || equalName(e.name, "SV_POSITION")) {
+                    if (declaredPosition != ~0u || e.componentType != 3)
+                        throw std::runtime_error("ambiguous position input");
+                    declaredPosition = e.registerIndex;
+                }
+            }
+        }
+        if (declaredPosition != ~0u) psInputs.positionRegister = declaredPosition;
+        else if (usedInput[psInputs.positionRegister]) {
+            uint32_t freeRegister = 0;
+            while (freeRegister < 32 &&
+                   (usedInput[freeRegister] || freeRegister == psInputs.identityRegister)) ++freeRegister;
+            if (freeRegister == 32) throw std::runtime_error("no free position input register");
+            psInputs.positionRegister = freeRegister;
+        }
+        if (psInputs.positionRegister == psInputs.identityRegister)
+            throw std::runtime_error("position and identity input overlap");
         bool isgn = false, osgn = false, program = false;
         for (auto& chunk : chunks) {
             if (chunk.tag == kTagIsgn) {
@@ -387,22 +413,22 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                 auto elements = parseSignature(chunk.bytes);
                 bool identity = false, position = false;
                 for (auto& e : elements) {
-                    if (e.registerIndex == inputs.identityRegister) {
-                        if (inputs.slotFromVsPatch) throw std::runtime_error("slot input register occupied");
-                        if (e.componentType == 1 && (e.masks & (1u << inputs.identityComponent))) identity = true;
+                    if (e.registerIndex == psInputs.identityRegister) {
+                        if (psInputs.slotFromVsPatch) throw std::runtime_error("slot input register occupied");
+                        if (e.componentType == 1 && (e.masks & (1u << psInputs.identityComponent))) identity = true;
                     }
-                    if (e.registerIndex == inputs.positionRegister) {
+                    if (e.registerIndex == psInputs.positionRegister) {
                         if (!(e.systemValue == 1 || equalName(e.name, "SV_POSITION")) || e.componentType != 3)
                             throw std::runtime_error("position input register holds another semantic");
                         e.masks |= 4u | 0x0400u;   // z present and used
                         position = true;
                     }
                 }
-                if (inputs.slotFromVsPatch) {
+                if (psInputs.slotFromVsPatch) {
                     SignatureElement slot;
                     slot.name = kEngineVelocitySlotSemantic;
                     slot.componentType = 1;
-                    slot.registerIndex = inputs.identityRegister;
+                    slot.registerIndex = psInputs.identityRegister;
                     slot.masks = 0x0101u;                    // x, used
                     elements.push_back(std::move(slot));
                 } else if (!identity) {
@@ -413,7 +439,7 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                     p.name = "SV_Position";
                     p.systemValue = 1;
                     p.componentType = 3;
-                    p.registerIndex = inputs.positionRegister;
+                    p.registerIndex = psInputs.positionRegister;
                     p.masks = 0x040Fu;
                     elements.push_back(std::move(p));
                 }
@@ -452,7 +478,7 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
             } else if (isProgram(chunk.tag)) {
                 if (program) throw std::runtime_error("duplicate program");
                 program = true;
-                chunk.bytes = patchPsProgram(chunk.bytes, inputs);
+                chunk.bytes = patchPsProgram(chunk.bytes, psInputs);
             }
         }
         if (!isgn || !osgn || !program) throw std::runtime_error("missing pixel shader chunks");

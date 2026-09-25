@@ -61,10 +61,10 @@ std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 // instances a frame, 143416) with its only pixel shader ps_16940F576006BE65;
 // vs_889A5279E68F0672 with ps_B46E52A1E0B2F39C (the station) and
 // ps_EBA95E15B0A66102 -- each pair through the corpus identity harness
-// (40,960 texels, 0 mismatches; MRT6 8192 checked, 0 bad). Not keyable:
-// vs_DE54's ps_91F8937EDA723663 and ps_A6070F9DD1CFB601, whose input register
-// the family's SV_Position sits at holds another semantic (the patcher's
-// refusal; engine_velocity_test's --corpus candidates print it).
+// (40,960 texels, 0 mismatches; MRT6 8192 checked, 0 bad). DE54/91F8 is now
+// flat-only: its SV_IsFrontFace occupies the register formerly assumed for
+// PS position. A separate rasterizer input passes the actual VS draw gate.
+// DE54/A607 remains unqualified and unkeyed.
 using engine_velocity_family::Family;
 using engine_velocity_family::kFamilies;
 using engine_velocity_family::kFamilyCount;
@@ -73,7 +73,7 @@ using engine_velocity_family::keyedPs;
 static_assert(kFamilyCount <= kMaxFamilies, "familyDraws holds every family");
 bool anyKeyedPs(uint64_t hash) {
     for (int i = 0; i < kFamilyCount; ++i)
-        if ((!kFamilies[i].flatOnly || runtimeFlatProfile()) && keyedPs(i, hash)) return true;
+        if ((!kFamilies[i].flatOnly || runtimeFlatProfile()) && keyedPs(i, hash, runtimeFlatProfile())) return true;
     return false;
 }
 
@@ -865,7 +865,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     // vertex patch where the family needs one. Nothing -- slot target, clear,
     // snapshot, MRT6 -- is prepared for a draw that cannot export ownership;
     // a declined draw puts the game's state back, as before.
-    if (!keyedPs(f, psHash)) {
+    if (!keyedPs(f, psHash, runtimeFlatProfile())) {
         if (!anyKeyedPs(psHash)) { ++fam.unkeyedPsDraws; fam.unkeyedPsHash = psHash; }
         restore(ctx);
         return;
@@ -1506,7 +1506,7 @@ bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept {
     return familyForProfile(vsHash, runtimeFlatProfile()) >= 0;
 }
 bool engineVelocityPoolFamilyPair(uint64_t vsHash, uint64_t psHash) noexcept {
-    return keyedPs(familyForProfile(vsHash, runtimeFlatProfile()), psHash);
+    return keyedPs(familyForProfile(vsHash, runtimeFlatProfile()), psHash, runtimeFlatProfile());
 }
 
 void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants,

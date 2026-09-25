@@ -14,6 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import struct
 import sys
 import tempfile
 
@@ -85,6 +86,12 @@ def check_nonoverlap(ranges, size, name):
         raise CaptureError(f"{name}: unreferenced packed bytes")
 
 
+def producer_center(normalized, extent):
+    """Match the producer's float32 literal and float32 u * extent."""
+    f32 = lambda value: struct.unpack("<f", struct.pack("<f", value))[0]
+    return min(int(f32(f32(normalized) * extent)), extent - 1)
+
+
 def load_frame(path):
     match = FRAME.fullmatch(path.name)
     if not match:
@@ -140,7 +147,7 @@ def load_frame(path):
                 raise CaptureError(f"point {index}.{key} must lie in [0,1]")
         integer(point.get("x"), f"point {index}.x", 0, width - 1)
         integer(point.get("y"), f"point {index}.y", 0, height - 1)
-        if point["x"] != min(int(point["u"] * width), width - 1) or point["y"] != min(int(point["v"] * height), height - 1):
+        if point["x"] != producer_center(point["u"], width) or point["y"] != producer_center(point["v"], height):
             raise CaptureError(f"point {index} center disagrees with normalized coordinate")
     draws = manifest.get("draws")
     if not isinstance(draws, list) or len(draws) != recorded:
@@ -446,6 +453,27 @@ def self_test():
         change = report["frames"][0]["changes"]["rt0/point0"][0]
         assert change["changed_pixels"] == 1 and change["changed_bytes"] == 4
         assert change["max_byte_delta"] == 7
+        assert producer_center(.70, 1440) == 1008
+        manifest["render_width"], manifest["render_height"] = 2560, 1440
+        manifest["points"] = [{"u": .08, "v": .70, "x": 204, "y": 1008}]
+        draw["rt"][0]["width"], draw["rt"][0]["height"] = 2560, 1440
+        for copy in draw["copies"]:
+            copy["x0"], copy["y0"] = 196, 1000
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        assert run(root)["frames"][0]["render_size"] == [2560, 1440]
+        manifest["points"][0]["y"] = 1007
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        try:
+            run(root)
+            raise AssertionError("malformed 2560x1440 point accepted")
+        except CaptureError:
+            pass
+        manifest["render_width"], manifest["render_height"] = 32, 32
+        manifest["points"] = [{"u": .5, "v": .5, "x": 16, "y": 16}]
+        draw["rt"][0]["width"], draw["rt"][0]["height"] = 32, 32
+        for copy in draw["copies"]:
+            copy["x0"], copy["y0"] = 8, 8
+        path.write_text(json.dumps(manifest), encoding="utf-8")
         out = root / "new" / "summary.json"
         run(root, out, dry_run=True)
         assert not out.exists() and not out.parent.exists()

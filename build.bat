@@ -21,6 +21,13 @@ REM  and runs that one subroutine. --rig is the runner's, not for hand use.
 REM  --dll-only is the post-commit promotion path: it requires the receipt from
 REM  a matching green full build, rebuilds the production DLLs, and skips rigs
 REM  and the self-contained installer.
+REM
+REM  Only one top-level build runs at a time on this machine (tools\
+REM  build_lock.py): a second invocation is refused immediately with a
+REM  message saying to wait, rather than contending with the first one for
+REM  the same CPU cores -- the documented cause of the vtable_test timing
+REM  gate's flakes under load. --rig children run concurrently by design
+REM  under the parent's own lock and are unaffected.
 REM ===========================================================================
 
 set "ROOT=%~dp0"
@@ -66,6 +73,25 @@ if defined EDVR_DLL_ONLY if defined DO_CLEAN (
 )
 if defined EDVR_RIG goto run_rig
 
+where python.exe >nul 2>&1
+if errorlevel 1 ( echo [edvr] ERROR: python is required to generate export thunks. & exit /b 1 )
+
+REM ===========================================================================
+REM  One build at a time (see header). A second top-level invocation re-enters
+REM  itself once, guarded by EDVR_BUILD_GUARDED, so the lock releases exactly
+REM  once however the guarded run below finishes -- every existing "exit /b"
+REM  in this file already does the right thing without any further changes.
+REM ===========================================================================
+if not defined EDVR_BUILD_GUARDED (
+    python "%ROOT%\tools\build_lock.py" --acquire --note "%~nx0 %*"
+    if errorlevel 1 exit /b 1
+    set "EDVR_BUILD_GUARDED=1"
+    call "%~f0" %*
+    set "EDVR_BUILD_RC=!errorlevel!"
+    python "%ROOT%\tools\build_lock.py" --release
+    exit /b !EDVR_BUILD_RC!
+)
+
 if defined DO_CLEAN (
     echo [edvr] cleaning
     if exist "%BUILD%" rmdir /s /q "%BUILD%"
@@ -74,8 +100,6 @@ if defined DO_CLEAN (
 where cl.exe >nul 2>&1
 if errorlevel 1 call :find_vs
 if errorlevel 1 exit /b 1
-where python.exe >nul 2>&1
-if errorlevel 1 ( echo [edvr] ERROR: python is required to generate export thunks. & exit /b 1 )
 goto toolchain_ok
 
 :find_vs
@@ -135,6 +159,7 @@ python tools\gen_installer_rc.py --self-test || exit /b 1
 python tools\package_native.py --self-test || exit /b 1
 python tools\build_diff.py --self-test || exit /b 1
 python tools\build_receipt.py --self-test || exit /b 1
+python tools\build_lock.py --self-test || exit /b 1
 python tools\flash_patch_residual.py --self-test || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
@@ -471,6 +496,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\d3d11\gpu_census.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
@@ -642,7 +668,7 @@ set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%~f0" --times "%BUILD%\rig_times.json" ^
-    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,vtable_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
@@ -1458,6 +1484,26 @@ if "%EDVR_RIG_STEP%"=="build" exit /b 0
 :gpu_timing_test_run
 "%OBJ%\gputiming\gpu_timing_test.exe" --dry-run || exit /b 1
 "%OBJ%\gputiming\gpu_timing_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_gpu_census_test
+REM Issue #38's per-feature GPU cost census. Same shape as
+REM :rig_hologram_depth_test: WARP, the production module included
+REM directly, away from build\d3d11.dll -- here for its estimator math,
+REM its rotation/K-cap accounting and its 30 s line's format, none of
+REM which gpu_census.h exposes on purpose. gpu_timing/gpu_frame_timing/
+REM gpu_span_d3d11 are real, linked sources, so the WARP round trip is a
+REM real disjoint timestamp pair, not a fake.
+if not exist "%OBJ%\gpucensus" mkdir "%OBJ%\gpucensus"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gpucensus\\" ^
+    /Fe"%OBJ%\gpucensus\gpu_census_test.exe" "tools\gpu_census_test\gpu_census_test.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: GPU census test build failed & exit /b 1 )
+"%OBJ%\gpucensus\gpu_census_test.exe" --dry-run || exit /b 1
+"%OBJ%\gpucensus\gpu_census_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_openvr_abi_test

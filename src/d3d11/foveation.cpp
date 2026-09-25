@@ -21,6 +21,7 @@
 #include "binding_shadow.h"
 #include "shader_swap.h"
 #include "temporal_pass.h"
+#include "gpu_census.h"        // issue #38: the per-feature GPU cost census
 
 namespace edvr {
 
@@ -1098,6 +1099,7 @@ void clearStrip(ID3D11DeviceContext* ctx, void* rtv, int eye, uint32_t w, uint32
             return;
         }
         const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        GpuCensusScope census(ctx, GpuCensusSection::FrameFoveation);
         ctx1->ClearView(static_cast<ID3D11RenderTargetView*>(rtv), black, &rect, 1);
         ctx1->Release();
     });

@@ -6,6 +6,7 @@
 #include "../../src/openxr/immediate_executor.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/runtime_profile.h"
+#include "../../src/d3d11/gpu_census.h"
 #include <openxr/openxr.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -31,6 +32,11 @@ void perfMonitorNoteEvent(unsigned, double) {}
 // The production definition lives in flat_compute_readback.cpp, which this
 // focused WARP rig does not link.
 thread_local bool g_flatComputeInternal = false;
+// The GPU census (issue #38) is cross-cutting; this rig is about the menu
+// panel's own effect, not the census's rotation, so it is stubbed like
+// perfMonitorNoteEvent above.
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
+void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 }
 
 static bool readPixels(ID3D11Device* d, ID3D11DeviceContext* c,

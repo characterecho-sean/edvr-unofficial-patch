@@ -426,7 +426,8 @@ void testAdmissionAndWindow() {
 
 // Reconstructed metadata from Epic frames 36865 (960x540) and 41961
 // (1280x720). Resource tokens are local stand-ins; shader pairs, camera rows,
-// sequence ranges and the 21 supported / 5 unsupported draw split are captured.
+// sequence ranges and the 22 supported / 4 unsupported draw split are captured
+// under the current flat-only admission of DE54/PS91.
 struct MonoFixture {
     edvr::FlatContractRecord world[40]{}, handoff[8]{};
     edvr::FlatMonoFrameInput input{};
@@ -466,6 +467,7 @@ struct MonoFixture {
             std::memcpy(&rows[d.row][d.column], &d.hdr, sizeof(d.hdr));
         }
         for (uint32_t i = 0; i < 7; ++i) setCamera(world[i], rows);
+        setCamera(world[8], rows);  // PS91 now names a supported source too.
         for (uint32_t i : {9u, 19u, 20u}) setCamera(world[i], rows);
         setCamera(handoff[0], toneRows); setCamera(handoff[1], toneRows);
     }
@@ -580,8 +582,8 @@ void testMonoFrameSelection() {
         check(out.color == MonoFixture::token(0x2700) && out.hdr == MonoFixture::token(0x2600) &&
               out.depth == MonoFixture::token(0xD000) && out.sceneConstants == MonoFixture::token(0xB100),
               "selector joins exact post-tone/HDR/depth/camera identities");
-        check(out.supportedDraws == 21 && out.unsupportedDraws == 5,
-              "actual producer table admits 21 supported pairs, not all 26 VS-family draws");
+        check(out.supportedDraws == 22 && out.unsupportedDraws == 4,
+              "producer admits the qualified front-face draw while four leg draws remain unsupported");
         check(out.toneSequence == (width == 960 ? 511u : 937u) &&
               out.copySequence == (width == 960 ? 515u : 941u) &&
               out.firstLaterOutput == (width == 960 ? 520u : 946u),
@@ -675,7 +677,10 @@ void testMonoFrameSelection() {
     reject([](auto& f) { for (uint32_t i : {9u, 19u, 20u}) {
         f.world[i].key.camera = nullptr; f.world[i].key.cameraHash = 0; } }, FlatMonoReason::NoHdrCamera,
         "HDR must contain at least one observed matching camera");
-    reject([](auto& f) { for (uint32_t i = 0; i < 7; ++i) f.world[i].key.ps = 0; }, FlatMonoReason::NoSupportedSource,
+    reject([](auto& f) {
+        for (uint32_t i = 0; i < 7; ++i) f.world[i].key.ps = 0;
+        f.world[8].key.ps = 0xA6070F9DD1CFB601ull;  // Captured DE54 PS still unqualified.
+    }, FlatMonoReason::NoSupportedSource,
         "VS families with unsupported PSs cannot name a motion source");
     reject([](auto& f) { f.input.supportedPair = nullptr; }, FlatMonoReason::InvalidInput,
         "missing production pair validator cannot select metadata");
@@ -705,8 +710,9 @@ void testMonoFrameSelection() {
         f.world[21].draws = 1; }, FlatMonoReason::BrokenLineage,
         "an intervening write to tone output breaks the observed handoff");
     check(!engine_velocity_family::supportedPair(0xEB5234DB6ADB491Dull, 0xB7D50283329322C3ull) &&
-          !engine_velocity_family::supportedPair(0xDE545DC8EE4FBB87ull, 0x91F8937EDA723663ull),
-          "historically unsupported captured pairs remain outside unchanged producer table");
+          !engine_velocity_family::supportedPair(0xDE545DC8EE4FBB87ull, 0xA6070F9DD1CFB601ull) &&
+          engine_velocity_family::supportedPair(0xDE545DC8EE4FBB87ull, 0x91F8937EDA723663ull),
+          "flat metadata admits PS91 but keeps unqualified captured pairs excluded");
 }
 } // namespace
 

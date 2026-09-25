@@ -43,6 +43,7 @@
 #include "consumer_tests.h"
 #include "panel_tests.h"
 #include "corpus_identity.h"
+#include "actual_vs_link_test.h"
 #include "lifecycle_tests.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
@@ -123,10 +124,16 @@ bool onePair(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstr
     std::snprintf(name, sizeof(name), "%ls + %ls", p.vs, p.ps);
     const corpus_identity::Result r = corpus_identity::compare(device, context, ps, pps, in, ok, name);
     ok(r.driven, "real corpus pair driven for the o0..o3 identity check (not skipped)");
-    return r.driven;
+    const bool actual = std::wcscmp(p.vs, L"vs_DE545DC8EE4FBB87") != 0 ||
+                        std::wcscmp(p.ps, L"ps_91F8937EDA723663") != 0 ||
+                        actual_vs_link_test::run(device, context, vs, ps, pps, ok);
+    return r.driven && actual;
 }
 void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& root) {
     const Pair pairs[] = {
+        // Captured flat edge shell: its front-face input occupies VS position's
+        // numeric register. Exercise the actual VS linkage and both windings.
+        {L"vs_DE545DC8EE4FBB87", L"ps_91F8937EDA723663", false},
         // Epic flat cockpit shell: exactly this pair, with the same G-buffer
         // and depth outputs and an additional record slot at MRT6.
         {L"vs_BFE51414CC3024B4", L"ps_DB79AE788E049DFD", false},
@@ -147,11 +154,10 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
     // Candidates: pairs seen drawing stock that are not keyed. Each is tried
     // and its first failure printed, never failing the run -- a pair joins the
     // keyed list above (and kFamilies) only once it passes here whole.
-    // Flight 6 (153446): vs_DE54's last two stock pixel shaders, which the
-    // patcher refuses (the family's SV_Position input register holds another
-    // semantic in them).
+    // Flight 6 (153446): another DE54 stock pixel shader. It is not keyed
+    // while its live owner/coverage is assessed.
     const Pair candidates[] = {
-        {L"vs_DE545DC8EE4FBB87", L"ps_91F8937EDA723663", false}, {L"vs_DE545DC8EE4FBB87", L"ps_A6070F9DD1CFB601", false},
+        {L"vs_DE545DC8EE4FBB87", L"ps_A6070F9DD1CFB601", false},
     };
     for (const auto& p : candidates) {
         g_softWhy.clear();
@@ -164,18 +170,20 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
 int wmain(int argc, wchar_t** argv) {
     bool selfTest = false;
     std::wstring corpusRoot;
+    std::wstring realLinkRoot;
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
         if (a == L"--self-test" || a == L"--dry-run") selfTest = true;
         else if (a == L"--verbose") lifecycle_tests::g_verbose = true;
         else if (a == L"--corpus" && i + 1 < argc) corpusRoot = argv[++i];
+        else if (a == L"--real-link" && i + 1 < argc) realLinkRoot = argv[++i];
         else {
-            std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir>]\n");
+            std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir>] [--real-link <edvr_logs dir>]\n");
             return 2;
         }
     }
-    if (!selfTest && corpusRoot.empty()) {
-        std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir>]\n");
+    if (!selfTest && corpusRoot.empty() && realLinkRoot.empty()) {
+        std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir>] [--real-link <edvr_logs dir>]\n");
         return 2;
     }
     ComPtr<ID3D11Device> device;
@@ -186,22 +194,39 @@ int wmain(int argc, wchar_t** argv) {
     check(level >= D3D_FEATURE_LEVEL_11_0, "feature level 11");
     constexpr uint64_t shellVs = 0xBFE51414CC3024B4ull;
     constexpr uint64_t shellPs = 0xDB79AE788E049DFDull;
+    constexpr uint64_t edgeVs = 0xDE545DC8EE4FBB87ull;
+    constexpr uint64_t edgePs = 0x91F8937EDA723663ull;
     edvr::g_runtimeProfile = edvr::RuntimeProfile::Vr;
+    check(!edvr::engineVelocityPoolFamilyPair(edgeVs, edgePs) &&
+          edvr::engineVelocityPoolFamilyPair(edgeVs, 0xE46E3E4832B2FDB0ull),
+          "front-face pair stays excluded from VR while existing DE54 pair remains eligible");
     check(!edvr::engineVelocityPoolFamilyVs(shellVs) &&
           !edvr::engineVelocityPoolFamilyPair(shellVs, shellPs), "cockpit shell is excluded from VR motion producer");
     edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    check(edvr::engineVelocityPoolFamilyPair(edgeVs, edgePs) &&
+          !edvr::engineVelocityPoolFamilyPair(edgeVs, 0xA6070F9DD1CFB601ull),
+          "flat admits only the draw-qualified front-face pair");
     check(edvr::engineVelocityPoolFamilyVs(shellVs) &&
           edvr::engineVelocityPoolFamilyPair(shellVs, shellPs), "exact cockpit shell pair is eligible in flat");
     check(!edvr::engineVelocityPoolFamilyPair(shellVs, 0xCB9F297EFF264251ull),
           "cockpit shell does not admit another pixel shader");
     edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
+    check(!edvr::engineVelocityPoolFamilyPair(edgeVs, edgePs),
+          "legacy VR also excludes the flat-only front-face pair");
     shader_tests::run({device.Get(), context.Get(), &check});
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});
     consumer_tests::run({device.Get(), context.Get(), &check});
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
+    if (!realLinkRoot.empty()) {
+        const Pair edge{L"vs_DE545DC8EE4FBB87", L"ps_91F8937EDA723663", false};
+        check(onePair(device.Get(), context.Get(), realLinkRoot, edge, &check),
+              "captured DE54/PS91 real VS link and G-buffer equivalence");
+    }
     if (!corpusRoot.empty()) corpus(device.Get(), context.Get(), corpusRoot);
-    std::printf("engine_velocity_test: %u checks passed%s.\n", g_checks, corpusRoot.empty() ? "" : " including the real shader corpus");
+    std::printf("engine_velocity_test: %u checks passed%s%s.\n", g_checks,
+                corpusRoot.empty() ? "" : " including the real shader corpus",
+                realLinkRoot.empty() ? "" : " including the captured real VS link");
     return 0;
 }

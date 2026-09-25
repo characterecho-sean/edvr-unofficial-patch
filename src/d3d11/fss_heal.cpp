@@ -8,6 +8,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "shader_swap.h"
+#include "gpu_census.h"   // issue #38: the per-feature GPU cost census
 
 namespace edvr {
 namespace {
@@ -353,7 +354,9 @@ void* healInner(void* leftTex, void* rightTex, float outerMag,
         ctx->CSSetShaderResources(0, 2, ins);
         ctx->CSSetUnorderedAccessViews(0, 1, &g_outUav, &keep);
         ctx->CSSetConstantBuffers(0, 1, &g_cb);
+        gpuCensusBegin(ctx, GpuCensusSection::DoorFssHeal);
         ctx->Dispatch((g_outW + 15) / 16, (g_outH + 15) / 16, 1);
+        gpuCensusEnd(ctx, GpuCensusSection::DoorFssHeal);
 
         ID3D11ShaderResourceView* nullSrv[2] = {};
         ID3D11UnorderedAccessView* nullUav = nullptr;

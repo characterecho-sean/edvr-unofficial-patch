@@ -28,6 +28,7 @@
 #include "perf_monitor.h"   // the upload is an event for the drop attribution
 #include "shader_swap.h"
 #include "gpu_timing.h"
+#include "gpu_census.h"   // issue #38: the per-feature GPU cost census
 
 namespace edvr {
 namespace {
@@ -1444,8 +1445,10 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             ctx->CSSetSamplers(0, 1, &g_samp);
             ctx->CSSetShaderResources(0, 2, setSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &e.outUav, nullptr);
+            gpuCensusBegin(ctx, GpuCensusSection::DoorMenu);
             ctx->Dispatch((static_cast<UINT>(box[2] - box[0]) + 7) / 8,
                           (static_cast<UINT>(box[3] - box[1]) + 7) / 8, 1);
+            gpuCensusEnd(ctx, GpuCensusSection::DoorMenu);
             if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
 
             ctx->CSSetShaderResources(0, 2, nullSrv);
