@@ -9,17 +9,16 @@
   viewport correction and exact bytecode-backed projection recipes. Automatic
   bounded unknown capture remains active after the timed F10 audit ends.
   Sections 26-28 document camera ownership and jitter; sections 34-37 cover F8
-  and successful menu treatment. Menu surface shimmer remains unqualified at
-  pixel level (section 39); frame counters alone do not establish
-  reconstruction quality. Installed/tested binary `b494e087` holds cockpit
-  history for 3,310 consecutive frames with live jitter, zero unknown pairs and
-  zero backend failures (section 43). Sean confirms clearly smoother cockpit
-  edges with DLSS, with some edge shimmer as lighting changes. Epic `a2625ca0`
-  captures four matched samples (section 45): bright exterior hull pixels are
-  not rejected, but receive roughly +/-130 px horizontal and -50 px vertical
-  motion per frame while the visible hull stays nearly fixed. Trace motion
-  ownership before changing reconstruction. The camera's high-G displacement
-  must be preserved; menu ship shimmer also remains open.
+  and successful menu treatment; pixel evidence follows in sections 45-46. Sean
+  confirms smoother cockpit edges with stable history (section 43), but edge
+  shimmer remains. Epic `a2625ca0` captures four matched samples (section 45):
+  bright exterior hull pixels are not rejected, but receive roughly +/-130 px
+  horizontal and -50 px vertical motion per frame while the visible hull stays
+  nearly fixed. Trace motion ownership before changing reconstruction. Epic
+  `3261e6e2` now proves the sampled flight hull takes camera fallback with
+  cleared slots; menu canopy and wing mostly reject stale slots (section 46).
+  Preserve high-G camera displacement. Identify the actual ship draws before
+  changing motion.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -41,11 +40,12 @@
   constants or camera-equality labels. The main merge passed full validation
   and promotion. Cockpit history now stays active and visible smoothing is
   confirmed (section 43). Flight pixel evidence identifies incorrect exterior
-  hull motion, not finish rejection. Determine whether those pixels take the
-  camera fallback or an incorrect engine transform. Capture menu attribution
-  too; do not assume its shimmer has the same cause or force ship vectors zero.
-  The passive selector still refuses the menu copy; its diagnostic verdict is
-  not the live runtime verdict. No headset is needed; VR still needs regression
+  hull motion, not finish rejection. Camera fallback is confirmed in flight;
+  menu stale-slot rejection is separately confirmed. Capture passive before/
+  after draw windows and raw constants to identify the missing ship transform,
+  including draws before source naming. Do not force ship vectors zero. The
+  passive selector still refuses the menu copy; its diagnostic verdict is not
+  the live runtime verdict. No headset is needed; VR still needs regression
   tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
@@ -2572,3 +2572,87 @@ still reads all four original flight samples unchanged. Its math tests cover
 object/camera translation together, relative camera displacement and object
 rotation. Full combined validation is recorded in
 `build/flat-motion-source-validation.log`.
+
+## 46. Exact motion attribution: missing flight hull and stale menu slots
+
+2026-09-25: Epic log `edvr_gfx_20260925_064529.log` matches `3261e6e2`, version
+`v0.18.0-rc.1-45-g3261e6e2`, build `6AB66C62`. Both manual captures complete
+all four samples, ten resources per sample, no failures, and complete engine
+inputs. Both use preset K, 1920x1080 input to 2560x1440 output (0.75 SS),
+active jitter and continuing history. No headset/runtime is involved. The log
+identifies an NVIDIA GeForce RTX 5090; the installed `nvngx_dlss.dll`
+file/product version is `310,9,1,0`. Driver version is not recorded by this
+log.
+
+Flight session `20260925_124734_750_23404_2`, frames 32260/32275/32290/32305:
+the left hull region x75..224/y730..779 and right x1670..1819/y880..929 are
+each exactly 7,500 camera-fallback pixels in every frame. Their slots contain
+the clear sentinel `(-1,0)`. The offline camera reprojection matches every
+emitted vector within 0.28 pixels and reports zero rejection disagreements.
+First-frame median vectors are (+341.25,-92.44) and (-314,-138.4) pixels per
+frame. The camera origin changes by about (-1.17,+1.67,+0.80) metres that
+frame. These visible ownship surfaces receive world-camera translation without
+object cancellation. This rules out incorrect joined-record arithmetic as the
+source of their motion: no record was selected. The camera-relative motion
+needed for high-G sway still has to come from the actual ship draw transform.
+
+The first flight frame has 2,058,708 cleared slot pixels and 14,892 with code
+111. All code-111 pixels fail the depth match: absolute differences range
+8.29e-7..2.41e-4, median 1.83e-5, beyond D24 quantization. Their slot depth is
+usually nearer than final depth. A depth-tested draw with depth writes off can
+produce exactly this pattern; the existing engine WARP test covers it. Do not
+conclude from this sign alone that another draw later covered those pixels.
+
+Main-menu session `20260925_124610_101_23404_1`, frames
+24903/24918/24933/24948, is visually confirmed as the ship in the hangar. About
+55.3% of input pixels reject history in each frame. White upper hull at
+(840,330,240,120) is entirely camera fallback; its first-frame median motion is
+only (-0.0096,-0.0115) pixels because the camera is nearly stationary. The
+sampled canopy is 18,884/18,900 stale-depth pixels; the outer wing is
+42,810/43,200. Rejected regions emit zero motion and use current-frame colour
+in the finish pass, explaining their weak response when AA is switched.
+
+In menu frame 24903 one static joined record, slot 60/code 121, covers
+1,231,140 pixels in the slot texture, of which 1,147,219 fail final depth. The
+median signed final-depth minus slot-depth difference is +0.000314, consistent
+with nearer visible geometry replacing a farther slotted surface. The
+subsequent samples show the same pattern with slots 56/56/57. This is not proof
+of which shader draws the ship. Offline replay matches motion and rejection,
+with zero rejection disagreements; D24 rounding explains none of the stale
+pixels exactly.
+
+- Ruled out: engine joined-record math causes the sampled flight hull vectors,
+  because all 60,000 inspected hull pixels select the cleared-slot camera path.
+- Ruled out: D24 rounding explains these stale regions, because measured depth
+  differences are much larger and quantizing the slot depth does not match.
+- Ruled out: the menu and flight have one uniform rejection problem, because
+  the flight white hull is accepted while the menu canopy/wing mostly reject.
+
+The named source requires the same scene-depth resource at the final handoff;
+this excludes an unrelated slot/depth pointer but cannot prove every visible
+surface wrote that depth or had an engine slot. Naming starts at the first
+supported pool draw, which may follow nonpool ship draws. The next diagnostic
+therefore records bounded native MRT0..3 windows before and after each
+scene-sized draw, raw VS b0/b1/b2 snapshots and actual render/IA state across
+two consecutive frames. It starts from the previous qualified render extent,
+includes earlier and other-depth draws, and reports partial coverage
+explicitly. It does not change shader code, blend state or motion. No
+speculative motion correction or depth-match tolerance is justified by this
+run.
+
+The F10 implementation saves `flat_draw_pixels/<session>/frame_N.json` with
+packed native pixel and constant-buffer blobs. It samples eight normalized
+points, 16x16 pixels each, on MRT0..3 before and after up to 512 draws per
+frame. Two consecutive qualified frames are requested; unsupported formats,
+missing inputs, interrupted runs and resource limits are explicit. Shader
+bytecode is retained through the existing flat shader cache. These passive
+copies do not change shader code or render state. Reads are asynchronous and
+bounded; no capture work runs outside an armed diagnostic.
+
+`tools/flat_draw_pixels.py` reports the chronological byte changes per sampled
+window, actual draw arguments/state and raw constant-buffer availability. A
+changed window proves that a draw affected those samples, not that it owns all
+final visible pixels. Ordinals and resource pointers alone do not prove
+cross-frame object identity. Dry-run writes nothing. The build checks the
+tool's malformed/partial-data tests and its compatibility with the WARP
+producer fixture. Full validation: `build/flat-draw-owner-validation.log`.

@@ -4060,7 +4060,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
-        FlatRuntimeDrawScope flatDraw(self, 0);
+        FlatRuntimeDrawScope flatDraw(self, 0, 'Z');
         g_state->realDrawIndexedInstancedIndirect(self, args, off);
         return;
     }
@@ -4086,7 +4086,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
-        FlatRuntimeDrawScope flatDraw(self, 0);
+        FlatRuntimeDrawScope flatDraw(self, 0, 'Y');
         g_state->realDrawInstancedIndirect(self, args, off);
         return;
     }
@@ -4344,7 +4344,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         // Capture original game bindings before the temporal scope substitutes
         // the engine-motion PS/MRT or the output-copy SRV.
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
-        FlatRuntimeDrawScope flatDraw(self, 1);
+        FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         g_state->realDraw(self, count, start);
         return;
     }
@@ -4372,7 +4372,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
-        FlatRuntimeDrawScope flatDraw(self, 0);
+        FlatRuntimeDrawScope flatDraw(self, 0, 'A');
         g_state->realDrawAuto(self);
         return;
     }
@@ -4385,7 +4385,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
-        FlatRuntimeDrawScope flatDraw(self, 1);
+        FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         return;
     }
@@ -4417,7 +4417,8 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
-        FlatRuntimeDrawScope flatDraw(self, instances);
+        FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
+                                      static_cast<int32_t>(startVertex), startInstance);
         g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
         return;
     }
@@ -4461,7 +4462,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
-        FlatRuntimeDrawScope flatDraw(self, instances);
+        FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
+                                      baseVertex, startInstance);
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
         return;

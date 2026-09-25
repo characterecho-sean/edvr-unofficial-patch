@@ -4,6 +4,7 @@
 #include "flat_projection_recipes.h"
 #include "flat_projection_ownership.h"
 #include "flat_live_phase.h"
+#include "flat_draw_capture.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
@@ -37,6 +38,7 @@ struct View {
     Ptr<IUnknown> held;
 };
 struct State {
+    FlatDrawCapture drawCapture;
     DWORD thread = 0; Ptr<ID3D11Device> device; Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11Texture2D> output, sceneDepth; Ptr<ID3D11ShaderResourceView> depthView;
     FlatRuntimePrefix prefix{}; Camera cameras[64]{}; uint32_t cameraCount = 0;
@@ -817,7 +819,7 @@ bool depthView(ID3D11Texture2D* depth) {
 void flatRuntimeResize() {
     g_flatRuntimeLive.store(false, std::memory_order_release);
     nativeScale.store(false, std::memory_order_release);
-    auto& s = state(); FlatComputeInternalScope guard; flatMonoResolveReset();
+    auto& s = state(); FlatComputeInternalScope guard; s.drawCapture.cancel("resize-or-stop"); flatMonoResolveReset();
     finishPhaseCensusFrame(s);
     if(s.phaseCensusFrames || s.phaseFailuresUsed || s.phaseOverflowCalls)
         reportPhaseCensus(s,"resize-or-stop");
@@ -876,6 +878,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (s.device && actualDevice.Get() != s.device.Get()) { flatRuntimeResize(); s.thread = GetCurrentThreadId(); }
     if (!s.device) { swap->GetDevice(IID_PPV_ARGS(&s.device)); if (s.device) s.device->GetImmediateContext(&s.context); }
     if (!s.device || !s.context) return;
+    s.drawCapture.present(s.context.Get(),frame);
     flatMonoResolvePollPixels(s.context.Get(),frame);
     if(s.phase.applied)++s.jitteredFrames;
     s.phase.finish(s.temporalAccepted && hr==S_OK,s.frameCoverage && !s.prefix.uncertain && !foreignWork.load(std::memory_order_acquire));
@@ -895,6 +898,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     if(projectionAuditRequested.exchange(false,std::memory_order_acq_rel)) {
         flatMonoResolveArmPixels(frame);
+        s.drawCapture.arm(frame);
         if(s.projectionFrames)reportProjection(s,"rearmed");
         else if(s.unknownProjectionPairsUsed || s.unknownProjectionCaptureOverflow)
             reportUnknownProjection(s,"manual-rearm");
@@ -973,6 +977,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
     s.namedDepth = s.namedConstants = nullptr; s.treated = false;
+    s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
     foreignWork.store(false, std::memory_order_release);
     // Retain bounded CB identities across frames: unchanged bindings are legal.
     for (uint32_t i = 0; i < s.cameraCount; ++i) { s.cameras[i].valid = false; s.cameras[i].mapped = nullptr; }
@@ -1093,7 +1098,9 @@ void flatRuntimeUpdate(ID3D11Resource* res, const void* bytes, const D3D11_BOX* 
     if(state().projection)state().projection->observeUpdate(res,bytes,box);
 }
 
-FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances) {
+FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
+                                           char kind, uint32_t count, uint32_t start,
+                                           int32_t base, uint32_t startInstance) {
     if (!flatRuntimeActive()) return;
     auto& s = state(); if (!owner() || context != s.context.Get()) { foreignWork.store(true, std::memory_order_release); return; }
     ctx = context; FlatRuntimeDraw d{}; auto& k = d.key;
@@ -1111,6 +1118,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     k.kind = flatContractKind(d.supported, k.color, k.depth, k.width, k.height, k.format, s.prefix.width, s.prefix.height, k.color == s.prefix.output);
     const bool tone = k.vs == flat_mono_detail::kToneVs && k.ps == flat_mono_detail::kTonePs;
     const bool copy = k.vs == flat_mono_detail::kCopyVs && k.ps == flat_mono_detail::kCopyPs && k.color == s.prefix.output;
+    if(!copy && s.drawCapture.active()) {
+        FlatComputeInternalScope guard;
+        drawCaptureStarted=s.drawCapture.before(ctx,instances,kind,count,start,base,startInstance,
+            k.vs,k.ps,bindingGet(BindSlot::Vs),bindingGet(BindSlot::Ps));
+    }
     if (tone || copy) for (uint32_t slot = 0; slot < 2; ++slot) {
         const auto bind = static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot);
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
@@ -1311,6 +1323,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     s.reason = nonzeroPhase(s)?"treated-jittered":"treated-zero-jitter";
     ID3D11ShaderResourceView* replacement = outputView.Get(); ctx->PSSetShaderResources(0, 1, &replacement); replaced = true;
     s.previous = selected; s.previousColor = actualColor; s.havePrevious = s.treated = true; s.temporalAccepted=true;s.lastMs = now; ++s.accepted;
+    s.drawCapture.qualify(s.prefix.frame,selected.depth,selected.hdr,selected.renderWidth,selected.renderHeight);
     s.resetMissingWindow += resetMissing; s.resetGapWindow += resetGap; s.resetDepthWindow += resetDepth;
     s.resetColorWindow += resetColor; s.resetExtentWindow += resetExtent;
     if (f.reset) { ++s.acceptedResetWindow; s.streak = 1; }
@@ -1355,6 +1368,7 @@ bool FlatRuntimeDrawScope::recover(const char* temporalReason) {
 }
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if (!ctx) return; FlatComputeInternalScope guard;
+    if(drawCaptureStarted)state().drawCapture.after(ctx);
     projection.reset();
     if (producer) { engineVelocityAfterFlatDraw(ctx); ctx->OMSetRenderTargets(8, targets, depth); }
     if (replaced) ctx->PSSetShaderResources(0, 1, &original);

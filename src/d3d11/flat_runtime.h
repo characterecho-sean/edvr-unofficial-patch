@@ -34,8 +34,11 @@ struct FlatRuntimeDrawScope {
     ID3D11DepthStencilView* depth = nullptr;
     ID3D11ShaderResourceView* original = nullptr;
     bool producer = false, replaced = false;
+    bool drawCaptureStarted = false;
     std::optional<FlatProjectionBindingScope> projection;
-    FlatRuntimeDrawScope(ID3D11DeviceContext*, uint32_t instances);
+    FlatRuntimeDrawScope(ID3D11DeviceContext*, uint32_t instances,
+                         char kind='?', uint32_t count=0, uint32_t start=0,
+                         int32_t base=0, uint32_t startInstance=0);
     ~FlatRuntimeDrawScope();
     bool recover(const char* reason);
 };

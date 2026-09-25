@@ -1015,6 +1015,7 @@ if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit 
 "%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
 "%BUILD%\flat_mono_resolve_test.exe" --self-test || exit /b 1
 python "tools\flat_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
+python "tools\flat_draw_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 exit /b 0
 
 :rig_config_test
@@ -2007,6 +2008,10 @@ python "tools\flat_pixels_engine.py" --self-test || (
 )
 python "tools\flat_pixels.py" --self-test || (
     echo [edvr] ERROR: the flat pixel analyzer failed its own test
+    exit /b 1
+)
+python "tools\flat_draw_pixels.py" --self-test || (
+    echo [edvr] ERROR: the flat draw pixel analyzer failed its own test
     exit /b 1
 )
 
