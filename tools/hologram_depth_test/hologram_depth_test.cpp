@@ -378,6 +378,9 @@ int main() {
     };
     constexpr float kNear5m = 0.005f;    // 0.025 / 5
     constexpr float kNear50m = 0.0005f;  // 0.025 / 50, beyond the 10 m radius
+    // A world marker hash never in g_holoMarkerDepthShaders, for the
+    // fallback cases -- any value but kHoloWorldMarkerReticle's own.
+    constexpr uint64_t kHoloUnlistedMarker = 0x1111111111111111ull;
 
     // T1/T2: a listed quad at cockpit depth (5 m, inside the radius) over
     // far scene depth (0 = reversed-Z far, "the sky") -- SRC_ALPHA/ONE,
@@ -469,14 +472,16 @@ int main() {
     // is elsewhere on this page -- the classifier itself is untestable
     // under the aborting binding shadow). ContributionBegin now picks the
     // DepthEnable-FALSE state, so this element DOES contribute, and its
-    // own depth (50 m) is what the resolve stamps.
+    // own depth (50 m) is what the resolve stamps. kHoloUnlistedMarker,
+    // not the reticle's own hash: this rig's toyVs has no TEXCOORD6/7, so
+    // it cannot link against the reticle's own matched PS (round 8).
     {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
         const float rgba[4] = {0.5f, 0.5f, 0.5f, 1.0f};
         g_holoIsWorldMarker = true;
         originalDraw(kNear50m, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
-        g_holoDrawVs = kHoloWorldMarkerReticle;
+        g_holoDrawVs = kHoloUnlistedMarker;
         listedReissue();
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (world marker)");
         for (float v : privateDepth())
@@ -731,7 +736,7 @@ int main() {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
         g_holoIsWorldMarker = true;
-        g_holoDrawVs = kHoloWorldMarkerReticle;
+        g_holoDrawVs = kHoloUnlistedMarker;   // toyVs has no TEXCOORD6/7 (round 8)
         originalDraw(kNear50m, glyph, gap, blendSrcAlphaOne.Get(), false, kBlack, true);
         listedReissue();
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (glyph/gap, beyond radius, world marker)");
@@ -922,13 +927,16 @@ int main() {
               "family builder: the world marker is not one of the cockpit families");
     }
 
-    // World markers, true depth: a broken game viewport (MinDepth ==
-    // MaxDepth == 0, mechanism i, flight 20260924_175113's own reading on
-    // the target reticle) is overridden for the element-depth pass alone,
-    // and the marker's real depth recovers; a VS that writes z=0 itself
-    // (mechanism ii) is not fixed by that override -- not covered, and its
-    // occlusion query reads zero samples, the signature the census reports
-    // as "element-depth samples p50 0".
+    // World markers, unlisted: kHoloUnlistedMarker never appears in
+    // g_holoMarkerDepthShaders (round 8), so both cases below still take
+    // the null PS, exactly as every world marker did before that table
+    // existed. A broken game viewport (MinDepth == MaxDepth == 0,
+    // mechanism i, flight 20260924_175113's own reading on the target
+    // reticle) is overridden for the element-depth pass alone, and the
+    // marker's real depth recovers from its own raster Z; a VS that
+    // writes z=0 itself (mechanism ii) is not fixed by that override --
+    // not covered, and its occlusion query reads zero samples, the
+    // signature the census reports as "element-depth samples p50 0".
     {
         g_holoWorldMarkerNoted = false;   // force a fresh one-time diagnostic line
         g_holoWindowMarkerDraws = 0;
@@ -939,7 +947,7 @@ int main() {
         const D3D11_VIEWPORT brokenVp{0, 0, 8, 8, 0, 0};   // mechanism (i): MinDepth == MaxDepth == 0
         ctx->RSSetViewports(1, &brokenVp);
         g_holoIsWorldMarker = true;
-        g_holoDrawVs = kHoloWorldMarkerReticle;
+        g_holoDrawVs = kHoloUnlistedMarker;
         originalDraw(kNear50m, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
         listedReissue();
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
@@ -961,12 +969,14 @@ int main() {
 
         // Mechanism (ii): the VS itself outputs z=0 (this rig's toy VS
         // takes z as a direct per-draw input, kToyVsHlsl), a normal
-        // viewport in place throughout. The override cannot fix this.
+        // viewport in place throughout. The override cannot fix this, and
+        // this hash has no matched PS either (the next test below covers
+        // the one hash that now does).
         g_holoMarkerSampleCount = 0;
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
         g_holoIsWorldMarker = true;
-        g_holoDrawVs = kHoloWorldMarkerReticle;
+        g_holoDrawVs = kHoloUnlistedMarker;
         originalDraw(0.0f, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
         listedReissue();
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
@@ -978,6 +988,71 @@ int main() {
         }
         check(g_holoMarkerSampleCount > 0 && g_holoMarkerSamples[g_holoMarkerSampleCount - 1] == 0,
               "world marker: z=0 in the VS reads zero element-depth samples even with the viewport override in place");
+        g_holoIsWorldMarker = false;
+    }
+
+    // World marker, true depth (round 8): the reticle's own VS
+    // (vs_71DD8B8B09060A81) forces z=0 but carries the real view
+    // distance in clip W. A toy VS with that exact output signature
+    // (TEXCOORD6 float4, TEXCOORD7 float3, SV_Position), z=0, clip W=50,
+    // exercises the matched PS end to end: it links against that
+    // signature, reads D3D11's own SV_Position.w in the pixel shader
+    // (proving it is the raw clip W, not 1/W -- the formula below only
+    // holds one of those two ways), and must stamp temporalPassDepthAt(50).
+    {
+        // x,y are pre-multiplied by clipW so the rasterizer's perspective
+        // divide (by w = clipW, not the usual 1) cancels back out to a
+        // full-screen triangle instead of shrinking toward the centre --
+        // unlike kToyVsHlsl above, this VS deliberately varies w.
+        auto markerVsCode = compile(
+            "cbuffer C : register(b0) { float clipW; float3 pad; };\n"
+            "void main(uint id : SV_VertexID, out float4 tc6 : TEXCOORD6,\n"
+            "          out float3 tc7 : TEXCOORD7, out float4 pos : SV_Position) {\n"
+            "    float2 uv = float2((id << 1) & 2, id & 2);\n"
+            "    tc6 = float4(0, 0, 0, 0); tc7 = float3(0, 0, 0);\n"
+            "    pos = float4((uv * 2.0 - 1.0) * clipW, 0.0, clipW);\n"
+            "}\n", "vs_5_0");
+        auto markerPsCode = compile(
+            "struct In { float4 tc6 : TEXCOORD6; float3 tc7 : TEXCOORD7; float4 pos : SV_Position; };\n"
+            "float4 main(In i) : SV_Target { return float4(0.5, 0.5, 0.5, 1.0); }\n", "ps_5_0");
+        ComPtr<ID3D11VertexShader> markerVs; ComPtr<ID3D11PixelShader> markerPs;
+        hr(dev->CreateVertexShader(markerVsCode->GetBufferPointer(), markerVsCode->GetBufferSize(), nullptr, &markerVs));
+        hr(dev->CreatePixelShader(markerPsCode->GetBufferPointer(), markerPsCode->GetBufferSize(), nullptr, &markerPs));
+        D3D11_BUFFER_DESC mbd{}; mbd.ByteWidth = 16; mbd.Usage = D3D11_USAGE_DEFAULT; mbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> markerCbuf; hr(dev->CreateBuffer(&mbd, nullptr, &markerCbuf));
+
+        g_holoMarkerSampleCount = 0;
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        const float clipW[4] = {50.0f, 0, 0, 0};
+        ctx->UpdateSubresource(markerCbuf.Get(), 0, nullptr, clipW, 0, 0);
+        ctx->VSSetShader(markerVs.Get(), nullptr, 0);
+        ctx->PSSetShader(markerPs.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, markerCbuf.GetAddressOf());
+        ctx->OMSetRenderTargets(1, toyRtvUnorm.GetAddressOf(), nullptr);
+        ctx->OMSetBlendState(blendSrcAlphaOne.Get(), nullptr, 0xFFFFFFFFu);
+        ctx->ClearRenderTargetView(toyRtvUnorm.Get(), kBlack);
+        ctx->Draw(3, 0);
+        g_holoEye = 0; g_holoW = 8; g_holoH = 8;
+        g_holoIsWorldMarker = true;
+        g_holoDrawVs = kHoloWorldMarkerReticle;
+        listedReissue();
+        ctx->VSSetShader(toyVs.Get(), nullptr, 0);   // restore for every test after this one
+        ctx->PSSetShader(toyPs.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, cbuf.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, cbuf.GetAddressOf());
+
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
+              "resolve runs (world marker, true depth)");
+        for (float v : privateDepth())
+            check(std::fabs(v - kNear50m) < 1e-5f,
+                  "world marker: the listed reticle's own PS recovers its real depth from clip W");
+        for (int tries = 0; tries < 50 && g_holoMarkerSampleCount == 0; ++tries) {
+            holoPollQueries(ctx.Get());
+            if (!g_holoMarkerSampleCount) Sleep(1);
+        }
+        check(g_holoMarkerSampleCount > 0 && g_holoMarkerSamples[g_holoMarkerSampleCount - 1] > 0,
+              "world marker: the matched PS's occlusion query sees the recovered geometry");
         g_holoIsWorldMarker = false;
     }
 
