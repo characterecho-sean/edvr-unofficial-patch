@@ -701,7 +701,8 @@ whichever end has more. Developer mode adds four pages and the strip ran
 off the edge -- the pages past it could not be seen, and nothing said
 they were there (flown 2026-09-07).
 
-1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
+1. **Performance.** The rows tagged `menu performance` in `edvr.ini`, in
+   the ini's own order:
    `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
    `render_sharpness`, `foveation`, `settlement_detail`,
    `ui_quality` (labelled **UI quality**, off / 100% / 125%, default off:
@@ -710,6 +711,11 @@ they were there (flown 2026-09-07).
    the temporal pass's own timing, NVIDIA's pass per eye, the sharpen's
    timestamp pair, the pixel fraction under scale. UI/smoke depth and
    station motion follow the AA mode automatically.
+   **DLSS preset** sits right under **Anti-aliasing** and stays on the page
+   under every mode; it dims and stops responding to Left/Right or Enter
+   whenever `temporal_aa` is not `dlss` or `dlaa` (the only two modes that
+   read it), rather than dropping out of the row list, which had read as
+   the setting vanishing on a mode change.
    At the BOTTOM of the page, a **Developer mode** switch (`menu.developer`,
    its `ui:` line tagged `menu performance`), so the extra pages can be
    turned on from inside the headset; flipping it rebuilds the pages, and

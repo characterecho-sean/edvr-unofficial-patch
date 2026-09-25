@@ -65,6 +65,11 @@ struct MenuLine {
     uint8_t style;
     uint8_t badge;
     uint8_t toggle;   // 0 none; 1 off, 2 on: a switch is drawn in place of `right`
+    // Dims the label and value even on the highlighted row, where kMenuDim
+    // alone would not (its style has no highlight box). A row currently
+    // irrelevant to the mode in force -- the DLSS preset outside DLSS/DLAA
+    // -- rather than one hidden and reappearing on a mode change.
+    bool    dim = false;
 };
 
 // THE TOOLTIP'S STRIP, as fractions of the menu card's width: the gap

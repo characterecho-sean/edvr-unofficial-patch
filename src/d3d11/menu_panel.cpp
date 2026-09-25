@@ -431,11 +431,11 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         left.rect = {pad, y, split, y + rowPitch};
         left.align = DT_LEFT;
         left.font = l.style == kMenuHeading ? Font::Small : l.style == kMenuNote ? Font::Hint : Font::Row;
-        left.rgb = l.style == kMenuHeading ? kHeading
-                   : l.style == kMenuDim   ? kDimText
-                   : l.style == kMenuNote  ? kHint
-                   : c.toast               ? kToastText
-                                           : kLabel;
+        left.rgb = l.style == kMenuHeading        ? kHeading
+                   : l.style == kMenuDim || l.dim ? kDimText
+                   : l.style == kMenuNote         ? kHint
+                   : c.toast                      ? kToastText
+                                                   : kLabel;
         if (l.style == kMenuHeading) left.rect.left = pad / 2;
         if (c.toast) left.rect.right = cardW - pad;
         ops.push_back(left);
@@ -488,10 +488,10 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             right.rect = {split, y, cardW - pad, y + rowPitch};
             right.align = l.style == kMenuInfo ? DT_LEFT : DT_RIGHT;
             right.font = Font::Row;
-            right.rgb = l.style == kMenuInfo ? kLabel
-                        : l.style == kMenuDim ? kDimText
-                        : l.badge == kBadgePending ? kBadge
-                                                   : kValue;
+            right.rgb = l.style == kMenuInfo               ? kLabel
+                        : l.style == kMenuDim || l.dim      ? kDimText
+                        : l.badge == kBadgePending          ? kBadge
+                                                             : kValue;
             if (l.style == kMenuRowEdit) right.rect.right -= cap / 3;
             if (l.toggle) right.rect.right -= switchW + cap / 2;
             ops.push_back(right);
