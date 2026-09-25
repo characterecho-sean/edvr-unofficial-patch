@@ -272,6 +272,69 @@ int main(int argc,char** argv) {
     auto pixels=consume(); check(pixels[3]==0,"unmarked pixel cannot take hologram motion"); check(pixels[10*4+3]==0,"later foreground depth rejects stale holo coverage");
     check(pixels[27*4+3]==1 && std::fabs(pixels[27*4]+.08f)<1e-5 && std::fabs(pixels[27*4+2]-1)<1e-5,"DLSS consumer removes raster jitter and preserves prior physical depth");
     parameters[4]=.25f; pixels=consume(); check(pixels[27*4+3]==1 && std::fabs(pixels[27*4]+.08f)<1e-5,"native output grid gives the same physical motion");
+    // Region-relative UM: uiCovered() must read UM at q-region.xy, the
+    // convention holoPixel's kind 5/2/4 branches already use inline (see
+    // uiCovered's own comment, 2026-09-25). UM is per-eye/region-sized,
+    // made from RTV0 at ui_depth's own UI-draw time, but a nonzero
+    // region.xy -- true for the packed eye of Elite's double-wide Submit
+    // on every ordinary frame -- means the naive absolute q lands outside
+    // UM's own bounds, and Load silently reads that back as 0/"uncovered"
+    // regardless of the mask's real content. The consumer above cannot
+    // catch this: it hardcodes region=0 and hand-stubs uiCovered, so ANY
+    // convention agrees with ANY other there. This reuses the valid
+    // record and uniform scene/coverage depth already proven at pixel
+    // (3,3) above, through a second consumer built the same way but with
+    // the real uiCovered and a settable, nonzero region.
+    {
+        auto uiBegin=source.find("bool uiCovered("); check(uiBegin!=std::string::npos,"uiCovered found");
+        std::string regionHlsl=
+            "Texture2D<float2> HC:register(t12);"
+            "struct HoloRecord{uint4 key[8];float4 clip[3];float4 map[3];float4 meta;};"
+            "StructuredBuffer<HoloRecord> HR:register(t13);"
+            "Texture2D<float> Z:register(t0);"
+            "Texture2D<float> UM:register(t4);"
+            "RWTexture2D<float4> Out:register(u0);"
+            "cbuffer P:register(b0){float4 holoJitter;float4 probe;int4 region;}"
+            "static const int2 size=int2(8,8);"
+            "static const float4 knobs=float4(0,1,.025,0);"
+            "float zSceneAt(int2 q){return Z.Load(int3(q,0));}\n";
+        regionHlsl+=source.substr(uiBegin,end+3-uiBegin);
+        regionHlsl+="[numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){float2 pp;float zp;bool ok=holoPixel(id.xy,probe.xy,pp,zp);Out[id.xy]=float4(pp-id.xy,zp,ok?1:0);}";
+        auto regionCode=compile(regionHlsl.c_str(),"cs_5_0"); ComPtr<ID3D11ComputeShader> regionConsumer;
+        hr(dev->CreateComputeShader(regionCode->GetBufferPointer(),regionCode->GetBufferSize(),nullptr,&regionConsumer));
+
+        D3D11_TEXTURE2D_DESC umd{}; umd.Width=umd.Height=8; umd.MipLevels=umd.ArraySize=umd.SampleDesc.Count=1;
+        umd.Format=DXGI_FORMAT_R8_UNORM; umd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> um; ComPtr<ID3D11ShaderResourceView> umSrv;
+        hr(dev->CreateTexture2D(&umd,nullptr,&um)); hr(dev->CreateShaderResourceView(um.Get(),nullptr,&umSrv));
+
+        // holoJitter.z=1 (treated frame), probe.z=1 (coverage bound) and
+        // probe.w=16 (holo bit) match the original stub's {0,0,1,16};
+        // region={3,2,11,10} offsets pixel (3,3) the way a packed eye's
+        // real Submit region sits inside S -- nonzero, unlike the
+        // consumer above (region hardcoded to 0 there).
+        struct RegionParams { float holoJitter[4]; float probe[4]; int region[4]; };
+        RegionParams regionParameters{{0,0,1,0},{0,0,1,16},{3,2,11,10}};
+        auto regionParams=buffer(sizeof(RegionParams),D3D11_BIND_CONSTANT_BUFFER);
+        ctx->UpdateSubresource(regionParams.Get(),0,nullptr,&regionParameters,0,0);
+
+        auto dispatchRegion=[&](int markedX,int markedY) {
+            unsigned char umBytes[64]{}; umBytes[markedY*8+markedX]=1;
+            ctx->UpdateSubresource(um.Get(),0,nullptr,umBytes,8,0);
+            ctx->CSSetShader(regionConsumer.Get(),nullptr,0);
+            ctx->CSSetConstantBuffers(0,1,regionParams.GetAddressOf());
+            ID3D11ShaderResourceView* regionSrvs[5]={surface.Get(),nullptr,nullptr,nullptr,umSrv.Get()};
+            ctx->CSSetShaderResources(0,5,regionSrvs); ctx->CSSetShaderResources(12,2,views);
+            ctx->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr); ctx->Dispatch(1,1,1);
+            ctx->CopyResource(staging.Get(),output.Get()); D3D11_MAPPED_SUBRESOURCE map{}; hr(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&map));
+            std::vector<float> px(256); for(int y=0;y<8;++y) std::memcpy(px.data()+y*32,static_cast<char*>(map.pData)+y*map.RowPitch,128);
+            ctx->Unmap(staging.Get(),0); ctx->ClearState(); return px;
+        };
+        auto regionPixels=dispatchRegion(3,3);   // UM marked only at the region-relative texel
+        check(regionPixels[27*4+3]==1,"uiCovered() accepts a record marked at UM's own region-relative pixel, region.xy != 0");
+        regionPixels=dispatchRegion(6,5);        // UM marked only at the pre-fix absolute texel instead
+        check(regionPixels[27*4+3]==0,"uiCovered() ignores a mark left at the pre-fix absolute pixel, region.xy != 0");
+    }
     parameters[2]=0; pixels=consume(); check(pixels[27*4+3]==0,"skipped temporal frame declines unmatched jitter history");
     // The sprite is a plane at local Y=0, viewed at Z=15 (beyond the
     // cockpit split) and later at planetary distance. Nearer scenery is

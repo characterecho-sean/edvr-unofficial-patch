@@ -380,7 +380,15 @@ float adaptiveUiReactive(int2 q, float2 previous) {
 }
 bool uiCovered(int2 q) {
     if (probe.z == 0.0) return false;
-    uint v = uint(UM.Load(int3(q, 0)) * 255.0 + 0.5);
+    // UM is region-sized (this eye's own W x H, made from RTV0 at UI-draw
+    // time); every caller here passes q in S's absolute space (region.xy +
+    // local), so it must be undone here, the same as holoPixel's kind 5/2/4
+    // branches do inline. Investigated 2026-09-25: region.xy is nonzero for
+    // the second eye of Elite's double-wide Submit on every ordinary frame
+    // (src/common/supersample_math.h), not just under a DLSS crop, so this
+    // was reading UM out of its bounds (Load returns 0 out of range) and
+    // uiCovered() reported "not covered" unconditionally on that eye.
+    uint v = uint(UM.Load(int3(q - region.xy, 0)) * 255.0 + 0.5);
     return (v & 1u) != 0u;
 }
 // Follow the actual nearby panel transform, including pool quantization
