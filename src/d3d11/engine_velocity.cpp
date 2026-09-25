@@ -176,6 +176,7 @@ struct Eye {
     UINT sceneBytes = 0;
     uint32_t frame = ~0u;                // the present frame this eye's data belongs to
     uint32_t rtvGen = 0, dsvGen = 0;     // the pass binding MRT6 was added to
+    bool bindingStale = false;           // an internal flat restore removed MRT6 without a game generation
     // The snapshot's sources, held (an equal pointer is then the same object),
     // and what they held: the view's element range, the watch epochs, the rows.
     Ptr<ID3D11ShaderResourceView> poolView;
@@ -879,7 +880,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (sourcePass && !sourceCameraHolds(ctx, f, frame)) { restore(ctx); return; }
     const bool newFrame = e.frame != frame;
     Ptr<ID3D11Texture2D> depthTex;
-    if (newFrame || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
+    if (newFrame || e.bindingStale || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
         Ptr<ID3D11Resource> depthRes;
         dsv->GetResource(&depthRes);
         if (!depthRes || FAILED(depthRes.As(&depthTex))) { restore(ctx); return; }
@@ -892,6 +893,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         e.frame = frame;
         e.bound = e.boundCounted = e.written = e.invalid = e.consumed = false;
         e.rtvGen = e.dsvGen = 0;
+        e.bindingStale = false;
         const float cleared[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
         const int clearTimer = beginCapture(ctx, kCaptureClear);
         ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
@@ -901,13 +903,14 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         endCapture(ctx, snapTimer);
     }
     if (e.invalid) { restore(ctx); return; }
-    if (e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
+    if (e.bindingStale || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
         // Another pass binding of the same eye-frame must draw into the same
         // depth the slot target was made for.
         if (!newFrame && depthTex.Get() != e.depth.Get()) { invalidate(e, kDepthChanged); restore(ctx); return; }
         e.rtvGen = cache.rtv;
         e.dsvGen = cache.dsv;
         e.bound = bindTarget(ctx, e, dsv);
+        e.bindingStale = false;
         if (e.bound && !e.boundCounted) {
             e.boundCounted = true;
             ++g_draw.eyeFramesBound;
@@ -1298,6 +1301,10 @@ void engineVelocityRememberPs(ID3D11PixelShader* shader, uint64_t hash, const vo
 void engineVelocityAfterFlatDraw(ID3D11DeviceContext* ctx) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     restore(ctx);
+    // FlatRuntimeDrawScope next restores the game's MRTs under an internal
+    // guard, so the binding shadow's generations do not change. The source
+    // eye must reattach MRT6 on the next eligible draw of this same pass.
+    g_eyes[kEngineVelocitySourceEye].bindingStale = true;
     cache = DrawCache{};
 }
 

@@ -637,6 +637,17 @@ inline void run(const Harness& h) {
             "C: the movers line reads without a tracker comparison");
     h.check(logged("(the census is off: it runs only with engine motion's diagnostics", mark),
             "P1: the emit's census is off without diagnostics, and says its zeros are not counts");
+
+    // Read the actual bound MRT6 resource, independent of the view flavor.
+    const auto mrt6 = [&] {
+        ID3D11RenderTargetView* rt[8] = {};
+        h.context->OMGetRenderTargets(8, rt, nullptr);
+        ComPtr<ID3D11Resource> result;
+        if (rt[edvr::kEngineVelocityTarget]) rt[edvr::kEngineVelocityTarget]->GetResource(&result);
+        for (auto* r : rt) if (r) r->Release();
+        return result;
+    };
+
     mark = g_log.size();
     edvr::engineVelocityDiagnostics(true);
     g.ordinaryFrame(true);
@@ -864,6 +875,47 @@ inline void run(const Harness& h) {
     h.check(number(line, "screen views asked ") >= 2 && number(line, "given ") >= 1, "S1: and the screen's views asked and given");
     h.check(number(lastLine(joined, mark), "eye-frames ") >= 2 && number(lastLine(joined, mark), "with MRT6 bound ") >= 2,
             "S1: the movers line's eye-frames include the source's, bound");
+    // Flat capture brackets source draws too. The source is not an eye RTV:
+    // screen_motion names its depth, and engineVelocityBeforeDraw sees
+    // rtv0Eye=false. Restore only the game's four MRTs between two draws of
+    // this same pass, just as FlatRuntimeDrawScope does after each draw.
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+    g.sourcePass(1, 5);
+    edvr::EngineVelocityViews sourceFlatViews{};
+    h.check(g.sourceViews(&sourceFlatViews), "flat source bracket: first draw has source slot target");
+    ComPtr<ID3D11Resource> sourceSlotResource;
+    sourceFlatViews.slots->GetResource(&sourceSlotResource);
+    h.check(mrt6().Get() == sourceSlotResource.Get(), "flat source bracket: first draw bound MRT6");
+    UINT sourceSlotWidth = 0, sourceDepthWidth = 0;
+    const auto sourceBefore = readTexture(h, sourceSlotResource.Get(), 2, &sourceSlotWidth);
+    edvr::engineVelocityAfterFlatDraw(h.context);
+    ID3D11RenderTargetView* sourceOriginals[4] = {
+        g.sourceRtv[0].Get(), g.sourceRtv[1].Get(), g.sourceRtv[2].Get(), g.sourceRtv[3].Get()};
+    h.context->OMSetRenderTargets(4, sourceOriginals, g.sourceDsv.Get());
+    h.check(!mrt6(), "flat source bracket: scope restore removed MRT6 without changing game generations");
+    g.sourceDraw(9);
+    h.check(mrt6().Get() == sourceSlotResource.Get(), "flat source bracket: second same-pass draw rebound MRT6");
+    const auto sourceAfter = readTexture(h, sourceSlotResource.Get(), 2, &sourceSlotWidth);
+    const auto sourceDepth = readTexture(h, g.sourceDepth.Get(), 2, &sourceDepthWidth);
+    unsigned firstFive = 0, secondNine = 0;
+    bool firstPreserved = true;
+    for (size_t i = 0; i < sourceBefore.size() / 2; ++i) {
+        uint32_t beforeSlot = 0, afterSlot = 0;
+        const int beforeKind = shader_tests::decodeSlot(sourceBefore[i * 2], sourceBefore[i * 2 + 1], sourceDepth[i * 2], &beforeSlot);
+        const int afterKind = shader_tests::decodeSlot(sourceAfter[i * 2], sourceAfter[i * 2 + 1], sourceDepth[i * 2], &afterSlot);
+        if (beforeKind == 1 && beforeSlot == 5) {
+            ++firstFive;
+            if (afterKind != 1 || afterSlot != 5 ||
+                std::memcmp(&sourceBefore[i * 2], &sourceAfter[i * 2], 2 * sizeof(float)) != 0) firstPreserved = false;
+        }
+        if (afterKind == 1 && afterSlot == 9) ++secondNine;
+    }
+    h.check(firstFive > 0 && firstPreserved, "flat source bracket: first draw's slot pixels survived the next draw");
+    h.check(secondNine > 0, "flat source bracket: second draw wrote distinct slot pixels");
+    release(sourceFlatViews);
+    g.endFrame();
     // The source re-made at another size: the slot target follows it.
     mark = g_log.size();
     g.makeSource(56, 20);

@@ -19,8 +19,10 @@
   cleared slots; menu canopy and wing mostly reject stale slots (section 46).
   Preserve high-G camera displacement. `2dc6aabf` identifies supported menu
   ship draws without usable slots; its run then crashed during cockpit loading.
-  Dump analysis identifies a game allocator failure but not its cause; next
-  load the same build directly into the cockpit without menu F10 (section 47).
+  Dump analysis identifies a game allocator failure but not its cause. The
+  unchanged build loaded the cockpit and captured F10 successfully on retry.
+  The production-code GPU rig now reproduces and fixes a stale flat
+  motion-target binding; flight qualification remains pending (section 48).
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -35,11 +37,10 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next work:** check cockpit loading on unchanged `2dc6aabf` without menu
-  F10. Then trace the supported ship draws' actual motion-slot output and pool
-  state, reusing VR's shader knowledge and shared motion/backend math. Current
-  pre-substitution captures cannot prove per-draw MRT6 writes. Do not force
-  vectors zero or repeat the resolved scene-camera naming checks. The passive
+- **Next work:** validate/build the flat MRT6 rebinding fix, then qualify menu
+  and cockpit pixels. The known non-pool cockpit shell remains separate from
+  this keyed geometry fix. Preserve history and high-G camera movement; do not
+  force vectors zero or repeat resolved scene-camera naming checks. The passive
   selector's verdict is distinct from the live runtime verdict. No headset is
   needed; VR still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
@@ -2723,3 +2724,74 @@ menu F10 capture as a necessary trigger; success would not prove capture
 causality. If cockpit loading succeeds, take the intended flight F10 only after
 the cockpit has stabilized. No speculative allocator or motion fix is justified
 by this dump.
+
+## 48. Successful cockpit retry and motion-target lifetime, 2026-09-25
+
+Sean loaded directly into the cockpit on unchanged Epic `2dc6aabf`, then
+pressed F10 successfully. Log `edvr_gfx_20260925_074058.log` verifies build
+`6AB67508`. Standard session `20260925_134252_260_35872_1` completed four
+ten-resource samples (frames 33211, 33226, 33241, 33256), zero failures. Draw
+session `20260925_134252_262_35872_1` saved frames 33211 and 33212, 124 draws
+each. This successful retry does not establish the earlier crash's cause or
+rule out an intermittent capture/overlay interaction.
+
+Sean noted Epic's injected overlay. The earlier crash dump confirms
+`EOSOVH-Win64-Shipping.dll` and `EOSSDK-Win64-Shipping.dll` were loaded.
+Neither appears in the proven faulting call chain. Overlay presence is
+established; overlay responsibility is not. No overlay settings were changed.
+
+The static binding trace exposes a concrete hypothesis for the missing or stale
+slots. `FlatRuntimeDrawScope` restores the game's original output targets after
+every producer draw, under `FlatComputeInternalScope`, which deliberately
+bypasses game binding-generation tracking. However,
+`engineVelocityAfterFlatDraw` restores shaders/blend and clears `DrawCache`
+without invalidating the source eye's remembered MRT6 binding. On another draw
+with unchanged game output bindings, `slowPath` can see matching
+`Eye::rtvGen/dsvGen` and skip `bindTarget`, although MRT6 was removed by the
+previous flat scope. This predicts first-draw slots with absent/stale slots on
+later geometry, without a shader-family or camera-math failure.
+
+Discriminator: use the existing production-code WARP rig to draw twice with the
+flat scope's restore sequence and unchanged binding generations. Inspect actual
+MRT6 and its pixels on the second draw; establish failure before a fix. A
+correction must invalidate only the flat binding lifetime, retain first-draw
+slot pixels and frame snapshots, and leave VR's binding reuse intact. No extra
+flight is needed to test this API-state sequence.
+
+The cockpit draw capture corroborates this failure. At frame 33211, right wing
+window 7 is changed in all 256 pixels of MRT0/1/2 by keyed q42
+(`66DE2CADB1F4AE6B` / `864F1F949851B8DE`), but all final slots remain -1; the
+center takes approximately (-303, -104) pixels of camera motion. After an
+output-target switch at q54, keyed q55 changes 17 pixels in window 1; the final
+code-123 slot mask matches those 17 pixels exactly, although later depth
+disagreement rejects them. This is consistent with a first draw after target
+rebinding writing slots and later same-pass geometry not writing.
+
+A separate remaining surface is q6/q11, VS `BFE51414CC3024B4` / PS
+`DB79AE788E049DFD`: the known non-pool cockpit shell. Its projection recipe
+already uses VS b1 row 270, but it does not export engine-pool ownership in VR
+or flat. q6 changes all 256 pixels in windows 1 and 4, with cleared final
+slots. Fixing MRT6 reattachment alone cannot give this family object motion.
+Its scene camera matches the selected camera, and the captured b2 buffers are
+unchanged material/config data; an object transform is not established.
+Preserve this distinction when evaluating the next flight.
+
+The draw capture's partial flag comprises 96 unsupported windows per frame:
+q61-62 RT0 native format 60 (32 copies), q63-66 RT1 native format 53 (64
+copies). There is no draw overflow; the ship windows above are available.
+
+The exact flat source-path regression fails against the unchanged production
+source at `second same-pass draw rebound MRT6` (`build/flat-mrt6-red.log`). The
+correction adds an explicit source-eye binding-stale flag when
+`engineVelocityAfterFlatDraw` is called. The next eligible draw validates depth
+and reattaches MRT6 even if game output-binding generations are equal. It
+preserves slot contents and snapshots and does not invalidate VR eye bindings.
+No new capture or per-draw diagnostic is needed.
+
+The same production-code WARP suite then passes 1,022 checks
+(`build/flat-mrt6-green.log`), including real MRT6 resource identity, first
+draw slot-5 pixels preserved byte-for-byte and second draw slot-9 pixels
+written. The regression uses `engineVelocityNoteSource` and
+`engineVelocityBeforeDraw(..., false)`, with a raw output restore between draws
+and unchanged game binding generations. Full validation is recorded in
+`build/flat-mrt6-validation.log`; visual improvement still needs qualification.
