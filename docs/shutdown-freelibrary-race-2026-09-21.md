@@ -422,10 +422,13 @@ analysis above and worth its own look before trusting the fix.
   one-line removal plus one diagnostic line, but it's shutdown-path code
   in a header included from the OpenXR runtime module, and a typo here
   costs a flight to notice.
-- Automated tests in `tools\openxr_native_test\native_device_test.cpp`:
-  verifies `edvr::systemD3D11CreateDevice()` function pointer resolution,
-  `isSystemD3D11Pinned()` flag assertions, and `separate.reset()` idempotence
-  under both WARP self-test and live hardware adapter runs.
+- Automated regression tests in `tools\openxr_native_test\native_device_test.cpp`:
+  explicitly tests `isSystemD3D11Pinned()` and `systemD3D11CreateDevice()`
+  (verifying `systemD3D11CreateDevice()` returns a valid function pointer,
+  `isSystemD3D11Pinned()` evaluates to true, and `separate.reset()` logs
+  `pinned=1` without disturbing the process-wide pinned state), ensuring
+  automated regression prevention across test suites under both `--self-test`
+  and `--hardware`.
 - A repro flight from this reporter (or anyone reproducing today) with the
   fix installed, confirming the crash is gone AND the new diagnostic line
   fired, read with `edvr_log.py --expect-build` against the exact commit
