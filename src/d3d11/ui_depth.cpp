@@ -1395,6 +1395,23 @@ struct HoloScratch {
     ID3D11Query*                markerOcclusion[kHoloQueryRing] = {};
     bool                        markerOcclusionPending[kHoloQueryRing] = {};
     uint32_t                    markerOcclusionNext = 0;
+    // The near-light map (round 7): 1/8-resolution R8_UNORM, 1 in any
+    // block containing a pixel the bright branch would stamp. Filled by
+    // its own compute pass just before the resolve's draw; read there to
+    // narrow dark-pixel coverage to a block's own light plus its 8
+    // neighbours, instead of anywhere in cockpit range (the sky-behind-
+    // an-oversized-footprint regression of 2026-09-25).
+    ID3D11Texture2D*           nearLightTex = nullptr;
+    ID3D11UnorderedAccessView* nearLightUav = nullptr;
+    ID3D11ShaderResourceView*  nearLightSrv = nullptr;
+    // A staging ring for the "near-light blocks" census (holoDepthWindowTick):
+    // copied from nearLightTex right after each dispatch, polled DONOTWAIT
+    // like the occlusion queries above, never stalling. Optional -- a
+    // failure here only silences that one census line, never the map
+    // itself.
+    ID3D11Texture2D*           nearLightStage[kHoloQueryRing] = {};
+    bool                       nearLightStagePending[kHoloQueryRing] = {};
+    uint32_t                   nearLightStageNext = 0;
 };
 HoloScratch g_holoScratch[2];
 constexpr UINT kHoloMaxViewports = 16;
@@ -1452,6 +1469,11 @@ ID3D11VertexShader* g_holoResolveVs = nullptr;
 ID3D11PixelShader*  g_holoResolvePs = nullptr;
 bool                g_holoResolveTried = false;
 ID3D11Buffer*       g_holoResolveCbBuf = nullptr;
+// The near-light map's own compute shader, built once, and shared with
+// the resolve's constant buffer (holoResolveCb): both read the same
+// floorValue/share/flags/radiusDepth.
+ID3D11ComputeShader* g_holoNearLightCs = nullptr;
+bool                 g_holoNearLightTried = false;
 // radiusDepth feeds the resolve's cockpitRange (the dark-pixel test). The
 // struct stays 16 bytes, the multiple a D3D11 constant buffer's ByteWidth
 // must be.
@@ -1483,6 +1505,11 @@ uint32_t g_holoPixelSampleCount = 0;
 uint32_t g_holoWindowMarkerDraws = 0;
 uint64_t g_holoMarkerSamples[kHoloPixelSamples];
 uint32_t g_holoMarkerSampleCount = 0;
+// Near-light blocks set per eye-frame (holoDepthWindowTick's mean) -- the
+// near-light map's own census, independent of the resolve's stamped-pixel
+// one above.
+uint64_t g_holoNearLightSamples[kHoloPixelSamples];
+uint32_t g_holoNearLightSampleCount = 0;
 bool     g_holoScratchFailedNoted = false, g_holoFirstDrawNoted = false, g_holoCanopyRefusedNoted = false;
 
 bool holoIsSrgbFormat(DXGI_FORMAT fmt) {
@@ -1505,7 +1532,7 @@ bool holoIsSrgbFormat(DXGI_FORMAT fmt) {
 HoloScratch* holoScratchFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
     if (eye < 0 || eye > 1 || !w || !h) return nullptr;
     HoloScratch& s = g_holoScratch[eye];
-    if (s.contribTex && s.depthTex && s.radiusTex && s.w == w && s.h == h) return &s;
+    if (s.contribTex && s.depthTex && s.radiusTex && s.nearLightTex && s.w == w && s.h == h) return &s;
     if (s.contribSrv) s.contribSrv->Release();
     if (s.contribRtv) s.contribRtv->Release();
     if (s.contribTex) s.contribTex->Release();
@@ -1516,6 +1543,10 @@ HoloScratch* holoScratchFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint3
     if (s.radiusTex) s.radiusTex->Release();
     if (s.targetSrv) s.targetSrv->Release();
     if (s.targetRes) s.targetRes->Release();
+    if (s.nearLightSrv) s.nearLightSrv->Release();
+    if (s.nearLightUav) s.nearLightUav->Release();
+    if (s.nearLightTex) s.nearLightTex->Release();
+    for (uint32_t i = 0; i < kHoloQueryRing; ++i) if (s.nearLightStage[i]) s.nearLightStage[i]->Release();
     for (uint32_t i = 0; i < kHoloQueryRing; ++i) if (s.occlusion[i]) s.occlusion[i]->Release();
     s = HoloScratch();
     ID3D11Device* dev = nullptr;
@@ -1565,8 +1596,29 @@ HoloScratch* holoScratchFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint3
         vd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
         hr = dev->CreateDepthStencilView(s.radiusTex, &vd, &s.radiusDsv);
     }
+    // The near-light map: 1/8 resolution, ceil(w/8) x ceil(h/8), R8_UNORM.
+    // UAV for its own compute pass, SRV for the resolve's read.
+    D3D11_TEXTURE2D_DESC nd{};
+    nd.Width = (w + 7) / 8; nd.Height = (h + 7) / 8; nd.MipLevels = nd.ArraySize = 1;
+    nd.Format = DXGI_FORMAT_R8_UNORM;
+    nd.SampleDesc.Count = 1;
+    nd.Usage = D3D11_USAGE_DEFAULT;
+    nd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+    if (SUCCEEDED(hr)) hr = dev->CreateTexture2D(&nd, nullptr, &s.nearLightTex);
+    if (SUCCEEDED(hr)) hr = dev->CreateUnorderedAccessView(s.nearLightTex, nullptr, &s.nearLightUav);
+    if (SUCCEEDED(hr)) hr = dev->CreateShaderResourceView(s.nearLightTex, nullptr, &s.nearLightSrv);
+    // The census staging ring: never fatal to the map itself, so its own
+    // HRESULT never joins the chain above.
+    D3D11_TEXTURE2D_DESC nsd{};
+    nsd.Width = nd.Width; nsd.Height = nd.Height; nsd.MipLevels = nsd.ArraySize = 1;
+    nsd.Format = DXGI_FORMAT_R8_UNORM;
+    nsd.SampleDesc.Count = 1;
+    nsd.Usage = D3D11_USAGE_STAGING;
+    nsd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    for (uint32_t i = 0; i < kHoloQueryRing; ++i) dev->CreateTexture2D(&nsd, nullptr, &s.nearLightStage[i]);
     dev->Release();
-    if (FAILED(hr) || !s.contribRtv || !s.contribSrv || !s.depthDsv || !s.depthSrv || !s.radiusDsv) {
+    if (FAILED(hr) || !s.contribRtv || !s.contribSrv || !s.depthDsv || !s.depthSrv || !s.radiusDsv ||
+        !s.nearLightUav || !s.nearLightSrv) {
         if (s.contribSrv) s.contribSrv->Release();
         if (s.contribRtv) s.contribRtv->Release();
         if (s.contribTex) s.contribTex->Release();
@@ -1575,6 +1627,10 @@ HoloScratch* holoScratchFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint3
         if (s.depthTex) s.depthTex->Release();
         if (s.radiusDsv) s.radiusDsv->Release();
         if (s.radiusTex) s.radiusTex->Release();
+        if (s.nearLightSrv) s.nearLightSrv->Release();
+        if (s.nearLightUav) s.nearLightUav->Release();
+        if (s.nearLightTex) s.nearLightTex->Release();
+        for (uint32_t i = 0; i < kHoloQueryRing; ++i) if (s.nearLightStage[i]) s.nearLightStage[i]->Release();
         s = HoloScratch();
         if (!g_holoScratchFailedNoted) {
             g_holoScratchFailedNoted = true;
@@ -1783,26 +1839,33 @@ constexpr char kHoloResolveVsHlsl[] =
 // it at any range, and so does a cockpit family's far fragment (the sun's
 // corona), harmlessly: cockpitRange (radiusDepth, below) is false for it.
 //
-// A dark pixel (the displayed colour never clears the floor) inside a
-// cockpit-range element's own footprint still takes its depth, skipping
-// the share test: it is the gap between glyphs on a panel, or between
-// rows of text, and giving it the sky's depth instead of its own panel's
-// is what made rolling text blur (flight 20260924_175113/20260925_050051
-// -- the gaps carry the sky's motion, glyphs the panel's, and a natural
-// near-zero-world-motion frame in the same dump read crisp because the
-// two motions briefly matched). Far dark fragments are excluded by
-// cockpitRange, not the floor, so the corona still cannot claim dark
-// pixels (the bracket-history regression of 2026-09-09 this guards
-// against). A dark pixel skips the share test only when cockpitRange
-// admits it; a bright one still needs the share it always did, so a
-// bright background showing through a translucent gap (a star, a lit
-// station behind a panel) is still excluded on its own light, not the
-// element's.
+// A dark pixel (the displayed colour never clears the floor) NEAR a
+// cockpit-range element's own light -- its own block of the near-light
+// map (below), or one of that block's 8 neighbours -- still takes its
+// depth, skipping the share test: it is the gap between glyphs on a
+// panel, or between rows of text, and giving it the sky's depth instead
+// of its own panel's is what made rolling text blur (flight
+// 20260924_175113/20260925_050051 -- the gaps carry the sky's motion,
+// glyphs the panel's, and a natural near-zero-world-motion frame in the
+// same dump read crisp because the two motions briefly matched). Round 6
+// covered a dark pixel anywhere in cockpitRange, with no distance limit;
+// a HUD element's null-PS element-depth footprint reaches well past what
+// it actually draws, so that covered open sky too, which swims under
+// head translation while the HUD's own light does not (flight
+// 20260925_080452) -- the near-light map (below) is what narrows this
+// back to the gaps between glyphs. Far dark fragments are still excluded
+// by cockpitRange before the near-light test ever runs, so the corona
+// still cannot claim dark pixels (the bracket-history regression of
+// 2026-09-09 this guards against). A bright pixel still needs the share
+// test it always did, unaffected by any of this, so a bright background
+// showing through a translucent gap (a star, a lit station behind a
+// panel) is still excluded on its own light, not the element's.
 constexpr char kHoloResolvePsHlsl[] =
     "Texture2D<float4> Contribution : register(t0);\n"
     "Texture2D<float> ElementDepth : register(t1);\n"
     "Texture2D<float4> Target : register(t2);\n"
     "Texture2D<float4> Display : register(t3);\n"
+    "Texture2D<float> NearLight : register(t4);\n"
     "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth; };\n"
     "float3 srgbEncode(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055; }\n"
     "void main(float4 pos : SV_POSITION, out float depth : SV_Depth) {\n"
@@ -1823,14 +1886,73 @@ constexpr char kHoloResolvePsHlsl[] =
     "    }\n"
     "    bool dark = max(max(dDisplay.r, dDisplay.g), dDisplay.b) <= floorValue;\n"
     "    bool cockpitRange = d > radiusDepth;\n"
-    "    if (dark && !cockpitRange) discard;\n"
-    "    if (!dark && haveTarget) {\n"
+    "    if (dark) {\n"
+    "        if (!cockpitRange) discard;\n"
+    "        uint nw, nh; NearLight.GetDimensions(nw, nh);\n"
+    "        int2 block = int2(pos.xy) / 8;\n"
+    "        bool near = false;\n"
+    "        [unroll] for (int by = -1; by <= 1; ++by)\n"
+    "        [unroll] for (int bx = -1; bx <= 1; ++bx) {\n"
+    "            int2 nb = clamp(block + int2(bx, by), int2(0, 0), int2(nw, nh) - 1);\n"
+    "            if (NearLight.Load(int3(nb, 0)) > 0.5) near = true;\n"
+    "        }\n"
+    "        if (!near) discard;\n"
+    "    } else if (haveTarget) {\n"
     "        float3 f = max(Target.Load(p).rgb, 0.0);\n"
     "        float lumaE = dot(e, float3(0.299, 0.587, 0.114));\n"
     "        float lumaF = dot(f, float3(0.299, 0.587, 0.114));\n"
     "        if (lumaE < share * lumaF) discard;\n"
     "    }\n"
     "    depth = d;\n"
+    "}\n";
+
+// Fills the near-light map the resolve above reads: one thread per 8x8
+// block, scanning its own pixels for the SAME "light" test the resolve's
+// bright branch uses (cockpitRange, the floor, and share when a target
+// is bound) -- the exact bright-vs-dark logic duplicated here since HLSL
+// gives no way to share it between two separately compiled shaders.
+// Short-circuits on the first light pixel found; most blocks are either
+// entirely dark or find one quickly.
+constexpr char kHoloNearLightCsHlsl[] =
+    "Texture2D<float4> Contribution : register(t0);\n"
+    "Texture2D<float> ElementDepth : register(t1);\n"
+    "Texture2D<float4> Target : register(t2);\n"
+    "Texture2D<float4> Display : register(t3);\n"
+    "RWTexture2D<float> NearLight : register(u0);\n"
+    "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth; }\n"
+    "float3 srgbEncode(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055; }\n"
+    "[numthreads(8,8,1)] void main(uint3 id : SV_DispatchThreadID) {\n"
+    "    uint bw, bh; NearLight.GetDimensions(bw, bh);\n"
+    "    if (any(id.xy >= uint2(bw, bh))) return;\n"
+    "    bool linearBlend = (flags & 1u) != 0;\n"
+    "    bool haveTarget = (flags & 2u) != 0;\n"
+    "    bool haveDisplay = (flags & 4u) != 0;\n"
+    "    bool displaySrgb = (flags & 8u) != 0;\n"
+    "    bool light = false;\n"
+    "    [loop] for (uint y = 0; y < 8 && !light; ++y) {\n"
+    "    [loop] for (uint x = 0; x < 8 && !light; ++x) {\n"
+    "        int3 p = int3(int2(id.xy * 8 + uint2(x, y)), 0);\n"
+    "        float d = ElementDepth.Load(p);\n"
+    "        if (!(d > radiusDepth)) continue;\n"
+    "        float3 e = max(Contribution.Load(p).rgb, 0.0);\n"
+    "        float3 dDisplay;\n"
+    "        if (haveDisplay) {\n"
+    "            float3 disp = Display.Load(p).rgb;\n"
+    "            dDisplay = displaySrgb ? srgbEncode(disp) : saturate(disp);\n"
+    "        } else {\n"
+    "            dDisplay = linearBlend ? srgbEncode(e) : saturate(e);\n"
+    "        }\n"
+    "        if (max(max(dDisplay.r, dDisplay.g), dDisplay.b) <= floorValue) continue;\n"
+    "        if (haveTarget) {\n"
+    "            float3 f = max(Target.Load(p).rgb, 0.0);\n"
+    "            float lumaE = dot(e, float3(0.299, 0.587, 0.114));\n"
+    "            float lumaF = dot(f, float3(0.299, 0.587, 0.114));\n"
+    "            if (lumaE < share * lumaF) continue;\n"
+    "        }\n"
+    "        light = true;\n"
+    "    }\n"
+    "    }\n"
+    "    NearLight[id.xy] = light ? 1.0 : 0.0;\n"
     "}\n";
 
 bool holoResolveShaders(ID3D11DeviceContext* ctx, ID3D11VertexShader** vsOut,
@@ -1851,6 +1973,20 @@ bool holoResolveShaders(ID3D11DeviceContext* ctx, ID3D11VertexShader** vsOut,
     *vsOut = g_holoResolveVs;
     *psOut = g_holoResolvePs;
     return g_holoResolveVs && g_holoResolvePs;
+}
+
+ID3D11ComputeShader* holoNearLightShader(ID3D11DeviceContext* ctx) {
+    if (!g_holoNearLightTried) {
+        g_holoNearLightTried = true;
+        g_holoNearLightCs = shaderSwapCompileCs(ctx, kHoloNearLightCsHlsl, sizeof(kHoloNearLightCsHlsl) - 1,
+                                                "main", "ui_depth_holo_near_light_cs", nullptr,
+                                                "hologram depth");
+        if (!g_holoNearLightCs) {
+            Log::get().note("hologram depth: the near-light shader could not be built; every dark "
+                            "pixel in cockpit range declines rather than covering unbounded sky.");
+        }
+    }
+    return g_holoNearLightCs;
 }
 
 ID3D11Buffer* holoResolveCb(ID3D11DeviceContext* ctx) {
@@ -1944,12 +2080,50 @@ void holoPollQueries(ID3D11DeviceContext* ctx) {
     }
 }
 
+// A free ring slot to copy the near-light map into, or null when every
+// slot still awaits a previous frame's poll -- same shape as
+// holoAcquireQuery, for a texture instead of a query.
+ID3D11Texture2D* holoAcquireNearLightStage(HoloScratch& s) {
+    for (uint32_t i = 0; i < kHoloQueryRing; ++i) {
+        const uint32_t idx = (s.nearLightStageNext + i) % kHoloQueryRing;
+        if (s.nearLightStagePending[idx] || !s.nearLightStage[idx]) continue;
+        s.nearLightStageNext = (idx + 1) % kHoloQueryRing;
+        return s.nearLightStage[idx];
+    }
+    return nullptr;
+}
+// Counts the "1" texels of a just-copied near-light slot, Map DONOTWAIT:
+// a slot the GPU is still writing is left for a later frame's poll, the
+// same non-stalling shape as the occlusion queries above.
+void holoPollNearLightCounts(ID3D11DeviceContext* ctx) {
+    for (auto& s : g_holoScratch) {
+        for (uint32_t i = 0; i < kHoloQueryRing; ++i) {
+            if (!s.nearLightStagePending[i] || !s.nearLightStage[i]) continue;
+            D3D11_MAPPED_SUBRESOURCE map{};
+            const HRESULT hr = ctx->Map(s.nearLightStage[i], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &map);
+            if (hr == DXGI_ERROR_WAS_STILL_DRAWING) continue;
+            s.nearLightStagePending[i] = false;
+            if (FAILED(hr)) continue;
+            D3D11_TEXTURE2D_DESC td{};
+            s.nearLightStage[i]->GetDesc(&td);
+            uint64_t count = 0;
+            for (UINT y = 0; y < td.Height; ++y) {
+                const auto* row = static_cast<const unsigned char*>(map.pData) + y * map.RowPitch;
+                for (UINT x = 0; x < td.Width; ++x) count += row[x] != 0;
+            }
+            ctx->Unmap(s.nearLightStage[i], 0);
+            if (g_holoNearLightSampleCount < kHoloPixelSamples)
+                g_holoNearLightSamples[g_holoNearLightSampleCount++] = count;
+        }
+    }
+}
+
 // Once per 30 s window (uiDepthFrameBoundary): see the state block's
 // comment above for why this differs from the neighbouring 20 s line, and
 // why it is silent while the key is off.
 void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
     if (!detail::g_holoDepthOn) return;
-    if (ctx) holoPollQueries(ctx);
+    if (ctx) { holoPollQueries(ctx); holoPollNearLightCounts(ctx); }
     ++g_holoWindowFrames;
     const uint64_t now = GetTickCount64();
     if (g_holoWindowStartMs == 0) g_holoWindowStartMs = now;
@@ -1968,6 +2142,10 @@ void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
     memcpy(markerSorted, g_holoMarkerSamples, markerN * sizeof(uint64_t));
     std::sort(markerSorted, markerSorted + markerN);
     const uint64_t markerP50 = markerN ? markerSorted[markerN / 2] : 0;
+    uint64_t nearLightTotal = 0;
+    for (uint32_t i = 0; i < g_holoNearLightSampleCount; ++i) nearLightTotal += g_holoNearLightSamples[i];
+    const double nearLightMean = g_holoNearLightSampleCount
+        ? static_cast<double>(nearLightTotal) / g_holoNearLightSampleCount : 0.0;
     // One combined note, not two: the rig (and anything else reading the
     // last logged line) expects a single "hologram depth:" note per tick.
     Log::get().note("hologram depth: %.0f s, %u frames, listed draws %.2f/frame, resolved "
@@ -1975,14 +2153,15 @@ void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
                     "share test skipped %u (no target view), floor on contribution %u (no display "
                     "view), declined %u (%u nothing listed, %u no private copy, %u no projection, "
                     "%u fault); world markers %.2f draws/frame, element-depth samples p50 %llu "
-                    "(occlusion, %u sampled).",
+                    "(occlusion, %u sampled); near-light blocks/eye-frame mean %.1f (%u sampled).",
                     seconds, g_holoWindowFrames, static_cast<double>(g_holoWindowListed) / frames,
                     g_holoWindowResolved, static_cast<unsigned long long>(p50), n,
                     g_holoWindowNoTarget, g_holoWindowFloorFallback, declined,
                     g_holoWindowDeclinedNotCleared, g_holoWindowDeclinedNoPrivate,
                     g_holoWindowDeclinedNoProjection, g_holoWindowDeclinedFault,
                     static_cast<double>(g_holoWindowMarkerDraws) / frames,
-                    static_cast<unsigned long long>(markerP50), markerN);
+                    static_cast<unsigned long long>(markerP50), markerN,
+                    nearLightMean, g_holoNearLightSampleCount);
     g_holoWindowStartMs = now;
     g_holoWindowFrames = g_holoWindowListed = g_holoWindowResolved = 0;
     g_holoWindowNoTarget = g_holoWindowFloorFallback = 0;
@@ -1991,6 +2170,7 @@ void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
     g_holoPixelSampleCount = 0;
     g_holoWindowMarkerDraws = 0;
     g_holoMarkerSampleCount = 0;
+    g_holoNearLightSampleCount = 0;
 }
 
 void holoDepthShutdownImpl() {
@@ -2005,6 +2185,10 @@ void holoDepthShutdownImpl() {
         if (s.radiusTex) s.radiusTex->Release();
         if (s.targetSrv) s.targetSrv->Release();
         if (s.targetRes) s.targetRes->Release();
+        if (s.nearLightSrv) s.nearLightSrv->Release();
+        if (s.nearLightUav) s.nearLightUav->Release();
+        if (s.nearLightTex) s.nearLightTex->Release();
+        for (auto* t : s.nearLightStage) if (t) t->Release();
         for (auto* q : s.occlusion) if (q) q->Release();
         for (auto* q : s.markerOcclusion) if (q) q->Release();
         s = HoloScratch();
@@ -2014,6 +2198,7 @@ void holoDepthShutdownImpl() {
     g_holoWorldMarkerNoted = false;
     g_holoWindowMarkerDraws = 0;
     g_holoMarkerSampleCount = 0;
+    g_holoNearLightSampleCount = 0;
     for (auto& e : g_holoContribBlendCache) { if (e.state) { e.state->Release(); e.state = nullptr; } }
     if (g_holoContribDss) { g_holoContribDss->Release(); g_holoContribDss = nullptr; }
     if (g_holoWorldMarkerDss) { g_holoWorldMarkerDss->Release(); g_holoWorldMarkerDss = nullptr; }
@@ -2022,6 +2207,8 @@ void holoDepthShutdownImpl() {
     if (g_holoResolveVs) { g_holoResolveVs->Release(); g_holoResolveVs = nullptr; }
     if (g_holoResolvePs) { g_holoResolvePs->Release(); g_holoResolvePs = nullptr; }
     g_holoResolveTried = false;
+    if (g_holoNearLightCs) { g_holoNearLightCs->Release(); g_holoNearLightCs = nullptr; }
+    g_holoNearLightTried = false;
     if (g_holoResolveCbBuf) { g_holoResolveCbBuf->Release(); g_holoResolveCbBuf = nullptr; }
     g_holoScratchFailedNoted = g_holoFirstDrawNoted = false;
     g_holoWindowStartMs = 0;
@@ -3676,6 +3863,62 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
                            (haveDisplay ? 4u : 0u) | (displaySrgb ? 8u : 0u);
     const HoloResolveCb data{g_holoFloor, g_holoShare, flags, s.radiusDepth};
     vScreenUpdateSubresourceRaw(ctx, cb, 0, nullptr, &data, 0, 0);
+    // The near-light map, filled once per eye before the resolve's own
+    // draw below (round 7), from the same four inputs and the same CB:
+    // narrows dark-pixel coverage there to a block's own light or one of
+    // its 8 neighbours, instead of anywhere in cockpit range. A shader
+    // that never compiled clears the map to 0 instead of dispatching --
+    // no light anywhere, so every dark pixel discards, same as before
+    // round 6 -- rather than fail the whole resolve over it.
+    {
+        ID3D11ComputeShader* nearLightCs = holoNearLightShader(ctx);
+        guardedBudget(g_holoBudget, [&] {
+            if (!nearLightCs) {
+                const FLOAT zero[4]{};
+                ctx->ClearUnorderedAccessViewFloat(s.nearLightUav, zero);
+                return;
+            }
+            Microsoft::WRL::ComPtr<ID3D11ComputeShader> savedCs;
+            ID3D11ClassInstance* savedCsClasses[256]{}; UINT savedCsClassCount = 256;
+            ctx->CSGetShader(&savedCs, savedCsClasses, &savedCsClassCount);
+            ID3D11ShaderResourceView* savedSrv[4]{};
+            ctx->CSGetShaderResources(0, 4, savedSrv);
+            ID3D11UnorderedAccessView* savedUav[1]{};
+            ctx->CSGetUnorderedAccessViews(0, 1, savedUav);
+            Microsoft::WRL::ComPtr<ID3D11Buffer> savedCsCb;
+            ctx->CSGetConstantBuffers(0, 1, &savedCsCb);
+
+            ID3D11ShaderResourceView* in[4] = {s.contribSrv, s.depthSrv, haveTarget ? s.targetSrv : nullptr,
+                                               haveDisplay ? display : nullptr};
+            ctx->CSSetShader(nearLightCs, nullptr, 0);
+            ctx->CSSetShaderResources(0, 4, in);
+            ctx->CSSetUnorderedAccessViews(0, 1, &s.nearLightUav, nullptr);
+            ctx->CSSetConstantBuffers(0, 1, &cb);
+            const uint32_t blocksW = (w + 7) / 8, blocksH = (h + 7) / 8;
+            ctx->Dispatch((blocksW + 7) / 8, (blocksH + 7) / 8, 1);
+
+            ID3D11UnorderedAccessView* zeroUav = nullptr;
+            ID3D11ShaderResourceView* zeroSrv[4]{};
+            ctx->CSSetUnorderedAccessViews(0, 1, &zeroUav, nullptr);
+            ctx->CSSetShaderResources(0, 4, zeroSrv);
+            ctx->CSSetShaderResources(0, 4, savedSrv);
+            ctx->CSSetUnorderedAccessViews(0, 1, savedUav, nullptr);
+            ctx->CSSetConstantBuffers(0, 1, savedCsCb.GetAddressOf());
+            ctx->CSSetShader(savedCs.Get(), savedCsClasses, savedCsClassCount);
+            for (UINT i = 0; i < savedCsClassCount; ++i) if (savedCsClasses[i]) savedCsClasses[i]->Release();
+            for (auto* p : savedSrv) if (p) p->Release();
+            for (auto* p : savedUav) if (p) p->Release();
+
+            // The census copy (a readback and a CPU scan of the map) samples
+            // every 16th frame, like the other GPU diagnostics here.
+            ID3D11Texture2D* stage = (g_frame & 15u) == 0 ? holoAcquireNearLightStage(s) : nullptr;
+            if (stage) {
+                ctx->CopyResource(stage, s.nearLightTex);
+                for (uint32_t i = 0; i < kHoloQueryRing; ++i)
+                    if (s.nearLightStage[i] == stage) s.nearLightStagePending[i] = true;
+            }
+        });
+    }
     const bool ran = guardedBudget(g_holoBudget, [&] {
         ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);
         Microsoft::WRL::ComPtr<ID3D11VertexShader> savedVs;
@@ -3703,11 +3946,12 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         ctx->RSGetState(&savedRs);
         D3D11_VIEWPORT savedVps[16]; UINT savedVpCount = 16;
         ctx->RSGetViewports(&savedVpCount, savedVps);
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> savedSrv0, savedSrv1, savedSrv2, savedSrv3;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> savedSrv0, savedSrv1, savedSrv2, savedSrv3, savedSrv4;
         ctx->PSGetShaderResources(0, 1, &savedSrv0);
         ctx->PSGetShaderResources(1, 1, &savedSrv1);
         ctx->PSGetShaderResources(2, 1, &savedSrv2);
         ctx->PSGetShaderResources(3, 1, &savedSrv3);
+        ctx->PSGetShaderResources(4, 1, &savedSrv4);
         Microsoft::WRL::ComPtr<ID3D11Buffer> savedCb0;
         ctx->PSGetConstantBuffers(0, 1, &savedCb0);
 
@@ -3727,9 +3971,9 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         vScreenVSSetShaderRaw(ctx, vs, nullptr, 0);
         vScreenPSSetShaderRaw(ctx, ps, nullptr, 0);
         ctx->OMSetDepthStencilState(dss, 0);
-        ID3D11ShaderResourceView* srvs[4] = {s.contribSrv, s.depthSrv, haveTarget ? s.targetSrv : nullptr,
-                                             haveDisplay ? display : nullptr};
-        ctx->PSSetShaderResources(0, 4, srvs);
+        ID3D11ShaderResourceView* srvs[5] = {s.contribSrv, s.depthSrv, haveTarget ? s.targetSrv : nullptr,
+                                             haveDisplay ? display : nullptr, s.nearLightSrv};
+        ctx->PSSetShaderResources(0, 5, srvs);
         ctx->PSSetConstantBuffers(0, 1, &cb);
 
         ID3D11Query* q = holoAcquireQuery(ctx, s);
@@ -3737,8 +3981,8 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         vScreenDrawRaw(ctx, 3, 0);
         if (q) { ctx->End(q); holoQueryBegan(s, q); }
 
-        ID3D11ShaderResourceView* nullSrvs[4]{};
-        ctx->PSSetShaderResources(0, 4, nullSrvs);
+        ID3D11ShaderResourceView* nullSrvs[5]{};
+        ctx->PSSetShaderResources(0, 5, nullSrvs);
         vScreenVSSetShaderRaw(ctx, savedVs.Get(), savedVsClasses, savedVsClassCount);
         vScreenPSSetShaderRaw(ctx, savedPs.Get(), savedPsClasses, savedPsClassCount);
         ctx->GSSetShader(savedGs.Get(), savedGsClasses, savedGsClassCount);
@@ -3758,6 +4002,7 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         ctx->PSSetShaderResources(1, 1, savedSrv1.GetAddressOf());
         ctx->PSSetShaderResources(2, 1, savedSrv2.GetAddressOf());
         ctx->PSSetShaderResources(3, 1, savedSrv3.GetAddressOf());
+        ctx->PSSetShaderResources(4, 1, savedSrv4.GetAddressOf());
         ctx->PSSetConstantBuffers(0, 1, savedCb0.GetAddressOf());
         restoreOm(ctx);
     });

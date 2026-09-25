@@ -25,6 +25,22 @@
   the floor, so this does not reopen the 2026-09-09 bracket regression;
   a bright pixel still needs the share test it always did.
 
+  Round 7 BUILT, NOT FLOWN: round 6 regressed (flight 20260925_080452,
+  dump eye_080707) -- a sky patch outside the weapons panel's visible
+  frame, inside its oversized null-PS footprint, got stamped too, so its
+  own parallax made the HUD swim with head translation (0.7-3.6 mm/frame,
+  ~2 px/mm at 0.6 m); a steady roll has no head translation, so it stayed
+  sharp. Narrowed: a dark pixel now takes the element's depth only near
+  the element's own light, not anywhere in its footprint. A per-eye
+  near-light map (1/8 res, one compute-shader thread per 8x8 block,
+  R8_UNORM) marks a block only when one of its own pixels is genuinely
+  light -- display over the floor, cockpit range, and the share test when
+  a target view is bound. The resolve now covers a dark, cockpit-range
+  pixel only when its own block or one of its 8 neighbours is set,
+  roughly the 8-16 px around real glyph light (flight 20260925_050051:
+  sky MV 5-13 px/frame during rolls) but not an open quad 40 px away. The
+  bright branch, far-element exclusion and world markers are unchanged.
+
   Next (separate from this fix): read the triangles' VS bytecode, then
   write depth from its clip w (flight 20260924_185058, below).
   `advanced.temporal_aa_hologram_depth` (default on), with
@@ -284,6 +300,29 @@ through the canopy.
   frames of wrong world motion during a roll. That belongs to
   temporal_pass.cpp's registration (after a rejected frame, prev should
   stay the last accepted rows).
+
+## Flight 20260925_080452 (e52089de: round 6 + camera fix + GPU census)
+
+Sean: HUD elements "swim with head movement but under constant ship roll
+they look sharp". Setting `temporal_aa_hologram_depth = off` FIXES it (live
+toggle, same flight).
+
+Eye dump eye_080707:
+- The weapons panel's glyphs and gaps are all stamped at 0.60 m (round 6
+  works for the text).
+- A sky patch OUTSIDE the panel's visible frame is 35% stamped at 0.57 m.
+  The panel's null-PS footprint (its quad) reaches far past what it draws.
+- The head translates 0.7-3.6 mm per frame, about 2 px of parallax per mm
+  at 0.6 m. Stamped sky takes that parallax while its stars stay still.
+
+Separately, a head flick of 4.5 deg/frame outran the camera-row chooser's
+3-deg window (rowsOk 0 at crops 1 and 4). That belongs to the camera-rows
+arc.
+
+- ruled out: round 6's dark rule over the element's WHOLE footprint,
+  because it makes the region around the HUD swim with head translation.
+  Round 7 limits dark stamping to pixels within about 8-16 px of the
+  element's own visible light, via a 1/8-resolution near-light map.
 
 ## Decisions, 2026-09-24
 

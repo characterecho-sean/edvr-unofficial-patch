@@ -704,3 +704,28 @@ every 30 s:
 - **Rig:** `tools\gpu_census_test`.
 - **Next:** any flight on this build gives EDVR's share of the frame. A
   SteamVR flight in the Basic Flight tutorial matches the reporter's scene.
+
+**First census, flight 20260925_080452** (e52089de; Pimax OpenXR, DLSS
+2037x1969 -> 4074x3938 per eye, 90 Hz, RTX 5090). Four 30 s windows in
+flight:
+
+- EDVR ~4.6-6.7 ms/frame.
+- Door 4.0-5.2 ms:
+  - upscaler 3.1-4.1 ms, both eyes;
+  - UI resolve 0.30-0.82 ms;
+  - motion prep 0.13-0.35 ms;
+  - UI layer composite up to 0.42 ms;
+  - hologram resolve and celestial up to 0.09 ms.
+- In-frame up to 2.6 ms in the busier windows:
+  - engine velocity 0.3-1.45 ms, at 524-707 calls/frame;
+  - UI depth coverage 0.75-1.14 ms, at 39-68 calls/frame;
+  - hologram passes 0.33-0.40 ms;
+  - screen motion about 0.1 ms.
+- Application render p50 5.6-8.7 ms/frame, so the game is roughly
+  1-2.7 ms.
+
+On this rig EDVR's own work is about two thirds of the frame's GPU time on
+the game's device, and the upscaler is the largest item. The #38 gap,
+0.16.2 at 60% against rc.1 at 95%, is therefore far more likely to be
+EDVR's features than the runtime. The next step is the reporter's census
+line.
