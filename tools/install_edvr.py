@@ -83,8 +83,14 @@ def native_paths(root, target):
     }
 
 
-def strict_game_running():
-    """Return (known, running); native staging fails closed on probe errors."""
+def strict_game_running(target=None):
+    """Return (known, running); native staging fails closed on probe errors.
+
+    With a target directory, only an EliteDangerous64.exe running from that
+    directory counts: another install's game cannot hold this install's files
+    open. A running game process whose image path cannot be resolved keeps
+    the conservative refusal.
+    """
     try:
         out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
                              capture_output=True, text=True, timeout=20,
@@ -98,7 +104,7 @@ def strict_game_running():
     rows = list(csv.reader((out.stdout or "").splitlines()))
     if not rows:
         return False, False
-    running = False
+    pids = []
     for row in rows:
         if len(row) != 5 or not row[0].strip() or not row[3].isdigit():
             return False, False
@@ -109,8 +115,50 @@ def strict_game_running():
         if pid < 0:
             return False, False
         if row[0].strip().lower() == GAME_EXE.lower():
-            running = True
-    return True, running
+            pids.append(pid)
+    if target is None:
+        return True, bool(pids)
+    return game_running_in(target, [_process_image_path(pid) for pid in pids])
+
+
+def _process_image_path(pid):
+    """Executable path of a process, or None when it cannot be queried."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32.dll")
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return None
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buffer))
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer,
+                                                   ctypes.byref(size)):
+            return None
+        return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def game_running_in(target, images):
+    """(known, running) for a target directory and resolved game image paths.
+
+    images holds one entry per running EliteDangerous64.exe process: its
+    executable path, or None when that path could not be queried. A proven
+    match wins over an unresolved process; otherwise an unresolved process
+    keeps the conservative refusal.
+    """
+    expected = os.path.normcase(os.path.realpath(os.path.join(target, GAME_EXE)))
+    unresolved = False
+    for image in images:
+        if image is None:
+            unresolved = True
+            continue
+        if os.path.normcase(os.path.realpath(image)) == expected:
+            return True, True
+    if unresolved:
+        return False, False
+    return True, False
 
 
 def _hash_or_missing(path):
@@ -256,7 +304,7 @@ def native_install(root, target, receipt_path, tag, dry_run=False):
                      "graphics": sha256(paths["graphics_target"])}
     installed_hashes = {"native": sha256(paths["native_source"]),
                         "graphics": sha256(paths["graphics_source"])}
-    known, running = strict_game_running()
+    known, running = strict_game_running(target)
     if not dry_run and (not known or running):
         if not known:
             print("[edvr] ERROR: could not prove that %s is stopped; native "
@@ -502,7 +550,7 @@ def restore_native(receipt_path, dry_run=False):
             print("[edvr] native restore plan (DRY RUN): %s" % target)
             print("[edvr] dry run: wrote nothing.")
             return 0
-        known, running = strict_game_running()
+        known, running = strict_game_running(target)
         if not known:
             print("[edvr] ERROR: could not prove that %s is stopped; restore "
                   "fails closed." % GAME_EXE)
@@ -654,7 +702,7 @@ def restore_native_v2(receipt_path, dry_run=False):
         if dry_run:
             print("[edvr] native package restore plan; dry run wrote nothing")
             return 0
-        known, running = strict_game_running()
+        known, running = strict_game_running(receipt["target"])
         if not known or running:
             raise ValueError("native restore requires a proven stopped game")
         snapshots, changed = [], []
@@ -865,7 +913,7 @@ def _native_direct_plan(root, target, loader, runtime):
 
 def native_direct(root, target, loader, runtime, dry_run=False):
     paths, config, lib = _native_direct_plan(root, target, loader, runtime)
-    known, running = strict_game_running()
+    known, running = strict_game_running(target)
     if not known or running:
         if not dry_run: print("[edvr] ERROR: direct native route requires a proven stopped game")
         elif not known: print("[edvr] direct native dry run: process state unavailable")
@@ -1028,7 +1076,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                 raise ValueError("existing d3d11.dll is a graphics mod")
         except (OSError, ValueError) as exc:
             raise SystemExit("[edvr] Use edvr-installer.exe to preserve and chain the existing d3d11.dll: %s" % exc)
-    known, running = strict_game_running()
+    known, running = strict_game_running(target)
     if not dry_run and (not known or running):
         print("[edvr] ERROR: native staging requires a proven stopped game")
         return 1
@@ -1251,6 +1299,35 @@ def main(argv=None):
 def self_test():
     ok = True
 
+    # The path-aware game probe: only a game running from the install target
+    # blocks staging; an unresolvable image path fails closed.
+    probe_tmp = tempfile.mkdtemp(prefix="edvr_probe_test_")
+    try:
+        probe_game = os.path.join(probe_tmp, "game")
+        os.makedirs(probe_game)
+        for images, want in (
+                ([], (True, False)),
+                ([None], (False, False)),
+                ([os.path.join(probe_tmp, "other", GAME_EXE)], (True, False)),
+                ([os.path.join(probe_game, GAME_EXE)], (True, True)),
+                ([os.path.join(probe_tmp, "other", GAME_EXE),
+                  os.path.join(probe_game, GAME_EXE)], (True, True)),
+                ([None, os.path.join(probe_game, GAME_EXE)], (True, True)),
+                ([os.path.join(probe_game, GAME_EXE), None], (True, True)),
+                ([os.path.join(probe_tmp, "other", GAME_EXE), None],
+                 (False, False))):
+            got = game_running_in(probe_game, images)
+            if got != want:
+                print("path-aware probe mismatch: %r gave %r, want %r" %
+                      (images, got, want))
+                ok = False
+        if game_running_in(probe_game,
+                           [os.path.join(probe_game, ".", GAME_EXE.lower())]) != (True, True):
+            print("path-aware probe lost a case/separator variant")
+            ok = False
+    finally:
+        shutil.rmtree(probe_tmp, ignore_errors=True)
+
     # VR remains the default and must work on a fresh stock directory
     # (there is no original OpenVR DLL to rename).
     standard_tmp = tempfile.mkdtemp(prefix="edvr_standard_test_")
@@ -1274,7 +1351,7 @@ def self_test():
         old_standard_probe = globals()["strict_game_running"]
         _standard_pe.validate_native_pair = lambda *args: None
         globals()["validate_elite_game"] = lambda path: None
-        globals()["strict_game_running"] = lambda: (True, False)
+        globals()["strict_game_running"] = lambda *a: (True, False)
         try:
             before = sorted((os.path.relpath(os.path.join(b, n), sgame), open(os.path.join(b, n), "rb").read())
                             for b, _, ns in os.walk(sgame) for n in ns)
@@ -1422,7 +1499,7 @@ def self_test():
         old_profile_validate = globals()["validate_elite_game"]
         old_probe = globals()["strict_game_running"]
         globals()["validate_elite_game"] = lambda path: None
-        globals()["strict_game_running"] = lambda: (True, False)
+        globals()["strict_game_running"] = lambda *a: (True, False)
         try:
             snapshot = lambda: sorted((str(p.relative_to(fgame)), p.read_bytes())
                                       for p in Path(fgame).rglob("*") if p.is_file())
@@ -1536,7 +1613,7 @@ def self_test():
         def fake_validate(game,native,graphics): calls[0]+=1
         _pe.validate_native_pair=fake_validate
         globals()["validate_elite_game"] = lambda game: None
-        globals()["strict_game_running"]=lambda:(True,False)
+        globals()["strict_game_running"]=lambda *a:(True,False)
         before_ini=open(os.path.join(dgame,"edvr.ini"),"rb").read(); before_orig=open(os.path.join(dgame,"Openvr","win64","openvr_api_orig.dll"),"rb").read()
         if native_direct(droot,dgame,loader,manifest,False)!=0 or calls[0]!=1: ok=False
         paths=native_paths(droot,dgame)
@@ -1595,12 +1672,12 @@ def self_test():
         globals()["validate_elite_game"] = saved_direct_profile
         if main(["--root",droot,"--target",dgame,"--native-openxr","--dll","--no-backup","--native-loader",loader,"--dry-run"])!=0: ok=False
         if direct_snapshot()!=before: ok=False
-        globals()["strict_game_running"]=lambda:(False,False)
+        globals()["strict_game_running"]=lambda *a:(False,False)
         if native_direct(droot,dgame,loader,os.path.join(direct_tmp,"runtime.json"),True)!=0: ok=False
         after=direct_snapshot()
         if before!=after: ok=False
         for state in ((True,True), (False,False)):
-            globals()["strict_game_running"]=lambda:state
+            globals()["strict_game_running"]=lambda *a:state
             if native_direct(droot,dgame,loader,manifest,False)==0: ok=False
             if direct_snapshot()!=before: ok=False
         if open(os.path.join(dgame,"edvr.ini"),"rb").read()!=before_ini or open(os.path.join(dgame,"Openvr","win64","openvr_api_orig.dll"),"rb").read()!=before_orig: ok=False
@@ -1672,7 +1749,7 @@ def self_test():
         old_profile_validate = globals()["validate_elite_game"]
         _native_pe.validate_native_pair = lambda game, native, graphics: None
         globals()["validate_elite_game"] = lambda game: None
-        globals()["strict_game_running"] = lambda: (True, False)
+        globals()["strict_game_running"] = lambda *a: (True, False)
         try:
             if main(["--root", root, "--target", game, "--native-openxr",
                      "--dll", "--dry-run"]) != 0:
@@ -1745,7 +1822,7 @@ def self_test():
             # A process probe error is a hard refusal and leaves both files
             # untouched, even though ordinary installs retain their legacy
             # fail-open probe for compatibility.
-            globals()["strict_game_running"] = lambda: (False, False)
+            globals()["strict_game_running"] = lambda *a: (False, False)
             if main(["--root", root, "--target", game, "--native-openxr",
                      "--dll", "--native-receipt", receipt_path]) == 0:
                 print("native install accepted an unknown process state")
@@ -1757,7 +1834,7 @@ def self_test():
 
             # A failed second copy rolls both destinations back and removes
             # the transaction's newly-created backup.
-            globals()["strict_game_running"] = lambda: (True, False)
+            globals()["strict_game_running"] = lambda *a: (True, False)
             real_copy2 = shutil.copy2
             def fail_native_source(src, dst, *copy_args, **copy_kwargs):
                 if os.path.basename(src) == "edvr_openxr_runtime.dll":
