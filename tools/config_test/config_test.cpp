@@ -29,6 +29,7 @@
 
 #include "../../src/common/config.h"
 #include "../../src/common/runtime_profile.h"
+#include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
 
 using namespace edvr;
@@ -514,11 +515,28 @@ int main(int argc, char** argv) {
         fail("flat bounded getter", "minimum reactivated disabled feature");
     else ok("flat scope precedes bounded numeric defaults");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "flat scope preserves mod chaining");
-    expectStr("hotkey.menu", "", "flat scope leaves game input alone");
+    Config::get().set("hotkey.menu", "F8");
+    expectStr("hotkey.menu", "F8", "flat scope permits the temporal menu hotkey");
+    Config::get().set("fix.temporal_aa_model", "m");
+    expectStr("fix.temporal_aa_model", "m", "flat scope permits the DLSS model");
+    expectStr("hotkey.toggle_exposure", "", "flat menu exception leaves unrelated hotkeys suppressed");
+    const struct { const char* name; unsigned full, fovea; bool known; } presets[] = {
+        {"auto",0,0,true},{"default",0,0,true},{"j",10,10,true},
+        {"K",11,11,true},{"l",12,12,true},{"m",13,13,true},
+        {"quality",11,11,true},{"steady",11,12,true},{"responsive",10,10,true},
+        {"removed-preset",11,11,false}
+    };
+    for (const auto& p : presets) {
+        const auto actual=temporalPresetFor(p.name);
+        if (actual.full!=p.full || actual.fovea!=p.fovea || actual.known!=p.known)
+            fail("shared temporal preset mapping",p.name);
+    }
     Config::get().set("fix.black_void", "on");
     expectBool("fix.black_void", false, "live setting change cannot widen scope");
     g_runtimeProfile = RuntimeProfile::Invalid;
     expectBool("advanced.d3d11_fixes", false, "bad descriptor disables graphics hooks");
+    expectStr("hotkey.menu", "", "invalid profile cannot open temporal menu");
+    expectStr("fix.temporal_aa_model", "off", "invalid profile cannot select a DLSS model");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "bad descriptor preserves mod chaining");
     if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
         ok("invalid profile suppresses flat jitter");

@@ -15,6 +15,24 @@ inline bool temporalModeEnabled(const std::string& mode) {
            _stricmp(mode.c_str(), "fsr") == 0;
 }
 
+struct TemporalPresetSelection {
+    unsigned full = 11, fovea = 11;
+    bool known = true;
+};
+// Shared model names; feature creation still applies the backend's DLAA guard.
+inline TemporalPresetSelection temporalPresetFor(const std::string& model) {
+    if (_stricmp(model.c_str(), "k") == 0 || _stricmp(model.c_str(), "quality") == 0)
+        return {11, 11, true};
+    if (_stricmp(model.c_str(), "steady") == 0) return {11, 12, true};
+    if (_stricmp(model.c_str(), "auto") == 0 || _stricmp(model.c_str(), "default") == 0)
+        return {0, 0, true};
+    if (_stricmp(model.c_str(), "j") == 0 || _stricmp(model.c_str(), "responsive") == 0)
+        return {10, 10, true};
+    if (_stricmp(model.c_str(), "l") == 0) return {12, 12, true};
+    if (_stricmp(model.c_str(), "m") == 0) return {13, 13, true};
+    return {11, 11, model.empty()};
+}
+
 inline constexpr float kTemporalShipMetres = 10.0f;
 
 // Which history the temporal pass hands the frame to. Own is the pass's own

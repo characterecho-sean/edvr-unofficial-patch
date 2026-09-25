@@ -7,19 +7,19 @@
   Section 27's solar/smoke bindings establish the earlier star scene, and
   section 26 rejects scene-camera equality as a jitter precondition. Section 28
   implements experimental live jitter with scoped projection bindings and
-  warm-up/recovery policy. Latest flight `6e9bde74` accepted 1,135 HDR image
-  continuations but no jitter (section 31). The remaining input refusal names
-  exact screen-space PS `FCFAD73924BF45B9` with no b1 camera; its newly
-  captured bytecode does not consume b1. The camera requirement needs a narrow
-  correction for that verified pair. Section 32 implements the actual-binding
-  guard and separates geometry camera provenance from camera-independent image
-  writes. All 20 captured shader pairs are classified: 19 projection recipes
-  and one unchanged image pass. Full build, 79 test jobs and all gates pass. A
-  clean-stamped build will be installed on Epic for the next qualification.
-  Earlier flight `ce715126` confirms the key fix and captures the HDR copy's
-  real image connection (section 30). Every input write is checked before HDR
-  continuation. Two older shader pairs still lack creation bytes; F10 captures
-  newly observed unknown pairs without a hand-maintained list.
+  warm-up/recovery policy. Latest verified flight `5c78c34d` has zero unknown
+  projection pairs in flight and 6,767 accepted HDR continuations, but no
+  applied jitter or continued history (section 33). Invalid jitter-phase
+  history drives all resets; adapter depth/color/frame-gap counters are zero.
+  The first-12 refusal limit hid the flight's reasons. Bounded per-reason
+  summaries now preserve them without weakening the gate. Main-menu depthless
+  HDR and four unknown projection pairs are separate findings. Section 34 adds
+  the requested flat onscreen AA/preset menu using shared settings and raster
+  code. The full build and 98 menu GPU checks pass. Earlier flight `ce715126`
+  confirms the key fix and captures the HDR copy's real image connection
+  (section 30). Every input write is checked before HDR continuation. Two older
+  shader pairs still lack creation bytes; F10 captures newly observed unknown
+  pairs without a hand-maintained list.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -40,9 +40,9 @@
   knowledge and shared motion/backend math without requiring local matrices to
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. Next Epic run: F10 on the main-menu ship
-  view for 20-30 seconds, then F10 in flight for 20-30 seconds; inspect applied
-  jitter, continued history, HDR input witnesses and unknown pairs together.
+  constants or camera-equality labels. Next Epic run: exercise F8 AA mode and
+  DLSS preset switching, then capture the menu ship and flight separately with
+  F10. Inspect phase-failure reasons, applied jitter and continued history.
   Missing recipes still reject jitter warm-up; do not claim visual
   qualification from preparation counts. No headset is needed; VR still needs
   regression tests.
@@ -1887,3 +1887,79 @@ changes stay on `codex/flat-temporal-aa`. After committing, rebuild for a clean
 identity and install/verify the flat profile on Epic with settings preserved.
 Next run captures the menu ship and flight separately with F10; the acceptance
 evidence is applied jitter and sustained temporal history.
+
+## 33. Menu and flight verification of 5c78c34d, 2026-09-24
+
+Epic `edvr_gfx_20260924_185533.log` matches `v0.17.0-567-g5c78c34d`, build
+`6AB5C146`. Main-menu F10 at 18:56:24 captured four unknown pairs and 9,000
+unknown draws; no exact HDR copy or ready resolve was observed. The runtime's
+menu conflict was a depthless 2560x1440 format-26 draw with VS
+`DEF19B035D5EDEDC` / PS `DED8796049C7BB4A`.
+
+Flight F10 at 18:57:38 captured 962,537 candidates, 959,687 prepared, zero
+preparation refusals and zero unknown scene pairs. Backend and spatial fallback
+were ready; exact copy provenance completed 2/2 captures. HDR image
+continuation reached 6,767 accepted / 1,763 refused. Still, applied jitter
+frames/draws/dispatches stayed zero, phase stayed warming and all 6,583 treated
+frames reset history. There were no continued frames.
+
+Ruled out: unseen flight projection shaders explain this run's warm-up failure,
+because the second F10 audit has zero unknown pairs. Ruled out: alternating
+runtime refusal or depth/color swaps caused the sustained flight resets,
+because refusals remain 8,994 throughout 18:57:29-18:58:39 and all adapter
+reset causes are zero. The explicit invalid-phase-history reset is responsible.
+The 66,254 phase failures are not classified after the global first-12 detail
+cap, which was exhausted in the menu. Add a bounded reason census before
+changing qualification policy. Passive discovery conflicts do not establish
+failures in the continuously treated live runtime.
+
+## 34. Flat onscreen AA controls, 2026-09-24
+
+Sean requested live Off/TAA/DLSS/FSR3 selection and the DLSS model preset. Use
+F8, with Up/Down for rows, Left/Right for values and Escape/F8 to close. Reuse
+the existing menu's asynchronous INI writer and GDI raster; restrict flat
+content to temporal settings and composite on the owned swapchain before
+Present. Menu drawing stays after scene AA so its text never enters temporal
+history. Closed-menu frames must perform no menu texture copies or dispatches.
+
+Keep the generic stereo `fix.temporal_aa` read suppressed in the flat profile;
+the menu reads the same explicit requested mode as the mono adapter. Narrowly
+allow `hotkey.menu` and `fix.temporal_aa_model`, retaining every unrelated
+feature restriction. Preset names share the existing VR mapping (Auto/J/K/L/M
+and legacy aliases), while flat applies changes together with history reset and
+resolve preflight invalidation at its Present boundary. No runtime model switch
+may happen in the middle of a frame. Selecting a setting is a request, not
+evidence that the current scene has qualified temporal treatment.
+
+All four new menu shader pairs have complete captured contracts. Add exact
+recipes: `61AE8EB05FDC18DD/4504BC268E109C31` uses VS b1 columns 270-273;
+`0357BBB2DEE43C1F/222188632125D14B` uses VS b2 dp4 rows 10-13;
+`4EF6DDB075A927FA/098C0764D28FC42C` and `95D01BA609BF7500/F10792B40AE3ED42` use
+VS b0 dp4 rows 4-7. Their pixel shaders need no additional inverse correction.
+The second pair derives its view ray from interpolated VS output transformed by
+b2 rows 2-4, which follows the jittered geometry; the PS samples scene depth at
+that same raster pixel. These recipes do not address the separate depthless
+menu HDR refusal.
+
+The phase-failure census holds at most 32 reasons, with explicit overflow.
+Every five seconds it reports calls, distinct frames and frames that were
+ultimately treated, plus first/last frame per reason. A zero-failure summary
+distinguishes successful collection from an instrument that never ran. Frame
+accounting finishes before the next frame clears its prefix; resize/stop
+flushes the remaining window. No allocation or routine log write occurs at the
+per-draw failure site.
+
+Validation: `build/flat-menu-validation-3.log` passes the full build, all 79
+jobs, three quiet runs, config contract and installer-resource gates. The menu
+WARP suite passes 98 checks, including hidden/visible pixels, unchanged pixels
+outside the panel, graphics-state restoration, no retained backbuffer
+reference, resize and a replacement device. An earlier run caught the flat
+identity matrix using an interleaved 3x4 layout instead of the compositor's
+packed 3x3 plus translation; that was fixed without weakening the tests. The
+settings parser covers profile restrictions and the shared preset names.
+
+The flat package documents F8 and the two settings. Its default mode remains
+off. Commit and rebuild with a clean identity, then install/verify Epic with
+the live INI preserved. In-game keyboard navigation and mode/preset switches
+still need the user's next run; EDHM/ReShade effect ordering remains part of
+the broader flat qualification. No merge to main.

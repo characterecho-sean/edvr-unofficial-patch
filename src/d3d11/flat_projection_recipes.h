@@ -176,6 +176,19 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x4AEC439CEC7FFDCEull: if (ps == 0x87EF79B19297B8C4ull) result.add(S::Vertex,1,L::InverseScreenRay,144); break;
     default: break;
     }
+    // Epic 5c78c34d menu capture: complete VS/PS creation blobs. Each PS
+    // companion was checked for an additional projection consumer. The
+    // clustered material reads CB1[277..279] only for orientation, the
+    // deferred lighting PS reconstructs from interpolated rays and depth,
+    // the depth/alpha PS samples UV, and the reflective material reads
+    // CB1[287..289] only for cube-map direction.
+    if (result.count == 0) switch (vs) {
+    case 0x61AE8EB05FDC18DDull: if (ps == 0x4504BC268E109C31ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x0357BBB2DEE43C1Full: if (ps == 0x222188632125D14Bull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0x4EF6DDB075A927FAull: if (ps == 0x098C0764D28FC42Cull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x95D01BA609BF7500ull: if (ps == 0xF10792B40AE3ED42ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    default: break;
+    }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);
     return result;
 }

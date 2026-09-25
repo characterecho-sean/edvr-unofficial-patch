@@ -1056,11 +1056,11 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
 }
 
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
-    if (self == g_state->swapChain) flatRuntimeResize();
+    if (self == g_state->swapChain) { menuFlatResize(); flatRuntimeResize(); }
     return g_state->realResizeBuffers(self, count, width, height, format, flags);
 }
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
-    if (static_cast<IDXGISwapChain*>(self) == g_state->swapChain) flatRuntimeResize();
+    if (static_cast<IDXGISwapChain*>(self) == g_state->swapChain) { menuFlatResize(); flatRuntimeResize(); }
     return g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
 }
 
@@ -1086,6 +1086,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (runtimeFlatProfile())
         flatTemporalBeforePresent(self, g_state->frameCounter, flags);
     if (runtimeFlatProfile()) flatRuntimeBeforePresent();
+    if (runtimeFlatProfile()) menuFlatBeforePresent(self, flags);
     const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
     const int64_t presentT1 = qpcNow();

@@ -1,9 +1,12 @@
 #include "menu_panel.h"
+#include "flat_compute_readback.h"
 #include "graphics_runtime.h"
+#include "../common/runtime_profile.h"
 
 #include <windows.h>
 
 #include <d3d11.h>
+#include <d3d11_1.h>
 
 #include <atomic>
 #include <algorithm>
@@ -987,6 +990,7 @@ EyeState g_eye[2];
 
 ID3D11Texture2D*          g_panelTex = nullptr;
 ID3D11ShaderResourceView* g_panelSrv = nullptr;
+ID3D11Device*             g_panelDevice = nullptr; // borrowed while g_panelTex holds its device
 int                       g_panelW = 0, g_panelH = 0;
 std::atomic<float>        g_panelAspect{0.0f};
 std::atomic<float>        g_panelWidthDeg{0.0f};
@@ -995,6 +999,8 @@ ID3D11ComputeShader* g_cs = nullptr;
 bool                 g_csTried = false;
 ID3D11Buffer*        g_cb = nullptr;
 ID3D11SamplerState*  g_samp = nullptr;
+ID3D11Device* g_flatDevice = nullptr;
+ID3DDeviceContextState* g_flatIsolated = nullptr;
 
 std::mutex   g_geomMutex;
 MenuGeometry g_geom;
@@ -1186,7 +1192,8 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI
     return true;
 }
 
-void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf) {
+void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf,
+                     bool flat = false) {
     MenuGeometry g;
     {
         std::lock_guard<std::mutex> lock(g_geomMutex);
@@ -1271,7 +1278,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
     ID3D11ShaderResourceView* inSrv = nullptr;
     bool viaCopy = false;
     if (ok) {
-        if (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
+        if (!flat && (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE)) {
             if (e.srcRes != static_cast<void*>(src) || !e.srcSrv) {
                 if (e.srcSrv) { e.srcSrv->Release(); e.srcSrv = nullptr; }
                 D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
@@ -1329,7 +1336,13 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         // left eye, right edge of the right); the vertical pair as measured,
         // or derived symmetric from the region's shape when unpublished.
         Params p{};
-        menuPanelFrustum(eye, regionW, regionH, p.tans);
+        if (flat) {
+            p.tans[0] = p.tans[1] = 1.0f;
+            p.tans[2] = p.tans[3] = static_cast<float>(regionH) /
+                                         static_cast<float>(regionW ? regionW : 1);
+        } else {
+            menuPanelFrustum(eye, regionW, regionH, p.tans);
+        }
         // Where the panel lands in this eye. Outside it entirely: forward
         // the frame untouched, nothing copied, nothing dispatched. Behind
         // the eye (a look away from a world-anchored panel): the whole
@@ -1338,6 +1351,11 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         // Read the aspect ONCE: a raster landing between two reads would
         // give the culling box and the shader different panels for a frame.
         const float aspect = g_panelAspect.load();
+        if (flat && aspect > 0.0f) {
+            const float fitHeight = 0.85f * static_cast<float>(regionH) /
+                                    static_cast<float>(regionW ? regionW : 1) / aspect;
+            g.halfW = (std::min)(g.halfW, fitHeight);
+        }
         const float halfH = g.halfW * aspect;
         if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, g.shift, regionW, regionH, flipV, g_nativeFrustum && flipU,
                      box) &&
@@ -1435,7 +1453,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
 
             result = e.outTex;
             ++g_draws;
-            bumpMenuDrawn();
+            if (!flat) bumpMenuDrawn();
             if (!g_firstNoted) {
                 g_firstNoted = true;
                 Log::get().note(
@@ -1493,6 +1511,114 @@ void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bound
     return out;
 }
 
+bool menuPanelCompositeFlat(IDXGISwapChain* swap) {
+    if (!swap || graphicsRuntimeDisabled()) return false;
+    MenuGeometry g;
+    { std::lock_guard<std::mutex> lock(g_geomMutex); g = g_geom; }
+    if (!(g.alpha > 0.0f) || !g_panelSrv) return false;
+    ID3D11Texture2D* back = nullptr;
+    if (FAILED(swap->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                               reinterpret_cast<void**>(&back))) || !back) return false;
+    bool copied = false;
+    guardedBudget(g_budget, [&] { copied = menuPanelCompositeFlatTexture(back); });
+    back->Release();
+    return copied;
+}
+
+bool menuPanelCompositeFlatTexture(ID3D11Texture2D* back) {
+    if (!back || graphicsRuntimeDisabled()) return false;
+    MenuGeometry g;
+    { std::lock_guard<std::mutex> lock(g_geomMutex); g = g_geom; }
+    if (!(g.alpha > 0.0f) || !g_panelSrv) return false;
+    FlatComputeInternalScope internal;
+    ID3D11Device* dev = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    ID3D11DeviceContext1* context1 = nullptr;
+    ID3D11Device1* device1 = nullptr;
+    back->GetDevice(&dev);
+    if (g_panelDevice && g_panelDevice != dev) {
+        menuPanelFlatResize();
+        if (dev) dev->Release();
+        return false;
+    }
+    if (dev) dev->GetImmediateContext(&context);
+    if (dev) dev->QueryInterface(__uuidof(ID3D11Device1),
+                                 reinterpret_cast<void**>(&device1));
+    if (context) context->QueryInterface(__uuidof(ID3D11DeviceContext1),
+                                        reinterpret_cast<void**>(&context1));
+    if (g_flatDevice != dev) {
+        if (g_flatIsolated) { g_flatIsolated->Release(); g_flatIsolated = nullptr; }
+        if (g_flatDevice) { g_flatDevice->Release(); g_flatDevice = nullptr; }
+    }
+    if (dev && device1 && context1 && !g_flatIsolated) {
+        D3D_FEATURE_LEVEL level = dev->GetFeatureLevel(), selected{};
+        const UINT flags = (dev->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED)
+            ? D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED : 0;
+        if (level >= D3D_FEATURE_LEVEL_11_0 &&
+            SUCCEEDED(device1->CreateDeviceContextState(flags, &level, 1,
+                D3D11_SDK_VERSION, __uuidof(ID3D11Device), &selected, &g_flatIsolated))) {
+            g_flatDevice = dev;
+            g_flatDevice->AddRef();
+        }
+    }
+    if (!g_flatIsolated || !context1) {
+        if (context1) context1->Release();
+        if (device1) device1->Release();
+        if (context) context->Release();
+        if (dev) dev->Release();
+        return false;
+    }
+    struct Isolate {
+        ID3D11DeviceContext1* context;
+        ID3DDeviceContextState* previous = nullptr;
+        explicit Isolate(ID3D11DeviceContext1* c) : context(c) {
+            context->SwapDeviceContextState(g_flatIsolated, &previous);
+            context->ClearState();
+        }
+        ~Isolate() {
+            context->ClearState();
+            context->SwapDeviceContextState(previous, nullptr);
+            if (previous) previous->Release();
+        }
+    };
+    bool copied = false;
+    {
+        Isolate isolate(context1);
+        // compositeInner expects a packed 3x3 rotation followed by XYZ origin.
+        const float identity[12] = {1,0,0, 0,1,0, 0,0,1, 0,0,0};
+        ID3D11Texture2D* out = static_cast<ID3D11Texture2D*>(
+            compositeInner(back, 0, nullptr, identity, true));
+        if (out && context) {
+            context->CopyResource(back, out);
+            copied = true;
+        }
+    }
+    if (copied) bumpMenuDrawn();
+    context1->Release();
+    device1->Release();
+    context->Release();
+    dev->Release();
+    return copied;
+}
+
+void menuPanelFlatResize() {
+    releaseEye(g_eye[0]);
+    if (g_panelSrv) { g_panelSrv->Release(); g_panelSrv = nullptr; }
+    if (g_panelTex) { g_panelTex->Release(); g_panelTex = nullptr; }
+    g_panelDevice = nullptr;
+    g_panelW = g_panelH = 0;
+    g_panelAspect.store(0.0f);
+    if (g_cs) { g_cs->Release(); g_cs = nullptr; }
+    if (g_flatIsolated) { g_flatIsolated->Release(); g_flatIsolated = nullptr; }
+    if (g_flatDevice) { g_flatDevice->Release(); g_flatDevice = nullptr; }
+    g_csTried = false;
+    if (g_cb) { g_cb->Release(); g_cb = nullptr; }
+    if (g_samp) { g_samp->Release(); g_samp = nullptr; }
+    releaseQueries();
+}
+
+bool menuPanelFlatRasterReady() { return g_panelSrv != nullptr; }
+
 bool menuPanelHit(const float org[3], const float dir[3], float dist, float curve, float halfW,
                   float halfH, float shift, float* su, float* sv) {
     float u = -1.0f, v = -1.0f;
@@ -1549,6 +1675,8 @@ bool menuPanelWorkerReadyForTest() {
 
 void menuPanelTick(ID3D11Device* dev) {
     if (!dev) return;
+    if (runtimeFlatProfile() && g_panelDevice && g_panelDevice != dev)
+        menuPanelFlatResize();
     Raster r;
     bool have = false;
     {
@@ -1574,6 +1702,7 @@ void menuPanelTick(ID3D11Device* dev) {
             }
             g_panelW = r.w;
             g_panelH = r.h;
+            g_panelDevice = dev;
         }
         ID3D11DeviceContext* ctx = nullptr;
         dev->GetImmediateContext(&ctx);
@@ -1728,9 +1857,12 @@ void menuPanelShutdown() {
     releaseQueries();
     if (g_panelSrv) { g_panelSrv->Release(); g_panelSrv = nullptr; }
     if (g_panelTex) { g_panelTex->Release(); g_panelTex = nullptr; }
+    g_panelDevice = nullptr;
     if (g_samp) { g_samp->Release(); g_samp = nullptr; }
     if (g_cb) { g_cb->Release(); g_cb = nullptr; }
     if (g_cs) { g_cs->Release(); g_cs = nullptr; }
+    if (g_flatIsolated) { g_flatIsolated->Release(); g_flatIsolated = nullptr; }
+    if (g_flatDevice) { g_flatDevice->Release(); g_flatDevice = nullptr; }
     g_panelW = g_panelH = 0;
     g_panelAspect.store(0.0f);
     g_panelWidthDeg.store(0.0f);

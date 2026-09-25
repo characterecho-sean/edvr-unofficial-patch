@@ -332,11 +332,12 @@ def main(argv=None):
     os.makedirs(args.out, exist_ok=True)
     if args.profile == 'flat' and not args.ini:
         with open(ini, 'wb') as f:
-            f.write(b'# Experimental flat temporal profile: zero-jitter qualification.\r\n'
-                    b'# temporal_aa: off, taa, dlaa (native SS), dlss, fsr. Game SS controls render scale.\r\n'
+            f.write(b'# Experimental flat temporal profile: visual qualification in progress.\r\n'
+                    b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 and DLSS model presets.\r\n'
+                    b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr. Game SS controls render scale.\r\n'
                     b'# Press F10 in the cockpit to collect one bounded flat scene capture.\r\n'
-                    b'[fix]\r\ntemporal_aa = off\r\n\r\n'
-                    b'[hotkey]\r\ndump_draws = F10\r\n\r\n'
+                    b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\n\r\n'
+                    b'[hotkey]\r\nmenu = F8\r\ndump_draws = F10\r\n\r\n'
                     b'[log]\r\nenabled = 1\r\n\r\n'
                     b'[advanced]\r\nreal_dll =\r\n')
     if args.profile == 'flat':
@@ -344,8 +345,11 @@ def main(argv=None):
             f.write(b'EDVR flat temporal AA qualification build\r\n\r\n'
                     b'Run edvr-flat-installer.exe. This edition installs d3d11.dll, edvr.ini,\r\n'
                     b'and edvr_profile.ini beside EliteDangerous64.exe. No VR runtime is installed.\r\n'
-                    b'Experimental zero-jitter testing; jittered AA quality is not yet qualified.\r\n'
-                    b'Set [fix] temporal_aa to taa, dlaa, dlss or fsr in edvr.ini (default off).\r\n'
+                    b'Experimental temporal AA; visual quality is not yet qualified.\r\n'
+                    b'Press F8 for the AA menu. Up/Down selects a row; Left/Right changes it.\r\n'
+                    b'Choose Off, TAA, DLSS or FSR3 and the DLSS model preset; settings save live.\r\n'
+                    b'Press F8 or Escape to close. Game keys are private while the menu is drawn.\r\n'
+                    b'[fix] temporal_aa also accepts off, on (TAA), dlaa, dlss or fsr (default off).\r\n'
                     b'Game supersampling controls render scale; DLAA requires native SS.\r\n'
                     b'Press F10 in the cockpit to collect one bounded flat scene capture.\r\n'
                     b'Use --convert-profile for an explicit VR/flat edition switch.\r\n')
@@ -439,7 +443,9 @@ def self_test():
             assert '%d RCDATA ' % IDR_LOADER_NOTICE not in rc_text
             assert '%d RCDATA ' % IDR_PROFILE in rc_text
             with open(os.path.join(build, 'edvr-flat.ini'), 'rb') as stream:
-                assert b'temporal_aa = off' in stream.read()
+                flat_ini = stream.read()
+                assert b'temporal_aa = off' in flat_ini
+                assert b'temporal_aa_model = k' in flat_ini and b'menu = F8' in flat_ini
             with open(os.path.join(build, 'edvr_profile_flat.ini'), 'rb') as stream:
                 assert stream.read() == b'[install]\r\nschema = 1\r\nprofile = flat\r\n'
         finally:

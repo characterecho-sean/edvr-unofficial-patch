@@ -7,6 +7,7 @@
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
+#include "dlaa.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
@@ -45,6 +46,7 @@ struct State {
     unsigned char namedCamera[kFlatCameraBytes]{};
     FlatMonoFrame previous{}; bool havePrevious = false, treated = false;
     std::string mode; FlatMonoResolveMode engine = FlatMonoResolveMode::Taa;
+    unsigned preset = ~0u, foveaPreset = ~0u;
     uint64_t lastMs = 0, lastReport = 0, accepted = 0, refused = 0;
     uint64_t acceptedResetWindow = 0, acceptedHistoryWindow = 0;
     uint64_t resetMissingWindow = 0, resetGapWindow = 0, resetDepthWindow = 0;
@@ -98,6 +100,15 @@ struct State {
     uint32_t phaseWidth = 0, phaseHeight = 0;
     uint64_t jitteredFrames = 0, jitterDraws = 0, jitterDispatches = 0, jitterRefusals = 0;
     const char* jitterReason = "warming";
+    struct PhaseFailure {
+        char reason[64]{};
+        uint64_t calls=0, frames=0, treatedFrames=0, acceptedFrames=0;
+        uint64_t firstFrame=0, lastFrame=0;
+    } phaseFailures[32]{};
+    uint32_t phaseFailuresUsed=0;
+    uint64_t phaseOverflowCalls=0, phaseOverflowFrames=0, phaseOverflowLastFrame=0;
+    uint64_t phaseCensusFrames=0, phaseCensusFailedFrames=0, phaseCensusTreatedFailedFrames=0;
+    bool phaseCensusPending=false, phaseCensusFailed=false;
 };
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
@@ -106,8 +117,56 @@ bool nonzeroPhase(const State& s) { return s.phase.currentX!=0 || s.phase.curren
 void failPhase(State& s,const char* reason) {
     s.frameCoverage=false;if(!s.jitterWanted)return;
     s.phase.fail();s.jitterReason=reason;++s.jitterRefusals;
+    if(s.phaseCensusPending) {
+        s.phaseCensusFailed=true;
+        uint32_t index=0;
+        for(;index<s.phaseFailuresUsed;++index)
+            if(std::strcmp(s.phaseFailures[index].reason,reason)==0)break;
+        if(index==s.phaseFailuresUsed && index<32) {
+            auto& entry=s.phaseFailures[s.phaseFailuresUsed++];
+            std::strncpy(entry.reason,reason,sizeof(entry.reason)-1);
+        }
+        if(index<32) {
+            auto& entry=s.phaseFailures[index];
+            if(!entry.frames)entry.firstFrame=s.prefix.frame;
+            if(entry.lastFrame!=s.prefix.frame) {++entry.frames;entry.lastFrame=s.prefix.frame;}
+            ++entry.calls;
+        } else {
+            ++s.phaseOverflowCalls;
+            if(s.phaseOverflowLastFrame!=s.prefix.frame) {++s.phaseOverflowFrames;s.phaseOverflowLastFrame=s.prefix.frame;}
+        }
+    }
     if(s.jitterRefusals<=12)Log::get().note("flat jitter refusal: frame=%llu reason=%s applied=%u phase=(%.5g,%.5g); temporal history will be rejected",
         (unsigned long long)s.prefix.frame,reason,s.phase.applied,s.phase.currentX,s.phase.currentY);
+}
+void finishPhaseCensusFrame(State& s) {
+    if(!s.phaseCensusPending)return;
+    s.phaseCensusPending=false;
+    ++s.phaseCensusFrames;
+    if(!s.phaseCensusFailed)return;
+    ++s.phaseCensusFailedFrames;
+    if(s.treated)++s.phaseCensusTreatedFailedFrames;
+    for(uint32_t i=0;i<s.phaseFailuresUsed;++i)if(s.phaseFailures[i].lastFrame==s.prefix.frame) {
+        s.phaseFailures[i].treatedFrames+=s.treated?1u:0u;
+        s.phaseFailures[i].acceptedFrames+=s.temporalAccepted?1u:0u;
+    }
+    s.phaseCensusFailed=false;
+}
+void reportPhaseCensus(State& s,const char* event) {
+    Log::get().note("flat jitter failure census: event=%s frames=%llu failed-frames=%llu treated-failed-frames=%llu reasons=%u overflow-calls=%llu overflow-frames=%llu; zero failed-frames means no phase refusal in this window",
+        event,(unsigned long long)s.phaseCensusFrames,(unsigned long long)s.phaseCensusFailedFrames,
+        (unsigned long long)s.phaseCensusTreatedFailedFrames,s.phaseFailuresUsed,
+        (unsigned long long)s.phaseOverflowCalls,(unsigned long long)s.phaseOverflowFrames);
+    for(uint32_t i=0;i<s.phaseFailuresUsed;++i) {
+        const auto& entry=s.phaseFailures[i];
+        Log::get().note("flat jitter failure reason: event=%s reason=%s calls=%llu frames=%llu treated-frames=%llu accepted-frames=%llu first-frame=%llu last-frame=%llu",
+            event,entry.reason,(unsigned long long)entry.calls,(unsigned long long)entry.frames,
+            (unsigned long long)entry.treatedFrames,(unsigned long long)entry.acceptedFrames,
+            (unsigned long long)entry.firstFrame,(unsigned long long)entry.lastFrame);
+    }
+    for(auto& entry:s.phaseFailures)entry=State::PhaseFailure{};
+    s.phaseFailuresUsed=0;s.phaseOverflowCalls=s.phaseOverflowFrames=s.phaseOverflowLastFrame=0;
+    s.phaseCensusFrames=s.phaseCensusFailedFrames=s.phaseCensusTreatedFailedFrames=0;
 }
 bool sameResolvePlan(const FlatMonoResolvePreflight& a,const FlatMonoResolvePreflight& b) {
     return a.renderWidth==b.renderWidth && a.renderHeight==b.renderHeight && a.outputWidth==b.outputWidth &&
@@ -651,6 +710,9 @@ bool depthView(ID3D11Texture2D* depth) {
 void flatRuntimeResize() {
     g_flatRuntimeLive.store(false, std::memory_order_release);
     auto& s = state(); FlatComputeInternalScope guard; flatMonoResolveReset();
+    finishPhaseCensusFrame(s);
+    if(s.phaseCensusFrames || s.phaseFailuresUsed || s.phaseOverflowCalls)
+        reportPhaseCensus(s,"resize-or-stop");
     if (s.projection) { reportProjection(s,"resize-or-stop"); s.projection.reset(); s.projectionContext.Reset(); s.projectionFrames=0; }
     s.haveResolvePlan=false; s.resolvePreflight={}; s.resolvePreflightRetryMs=0;
     s.phase.resetHistory();s.phaseDepth.Reset();s.phaseHdr.Reset();s.temporalAccepted=false;
@@ -671,8 +733,23 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;
     auto& s = state(); if (s.thread && !owner()) return;
     s.thread = GetCurrentThreadId();
+    // Account for the completed frame before mode/resize changes or the next
+    // prefix clears its identity. A resize flush sees no pending frame twice.
+    finishPhaseCensusFrame(s);
     const auto mode = Config::get().requestedTemporalMode();
     const bool enabled = temporalModeEnabled(mode);
+    const auto model = Config::get().getString("fix.temporal_aa_model", "k");
+    const auto preset = temporalPresetFor(model);
+    if (s.preset != preset.full || s.foveaPreset != preset.fovea) {
+        s.preset = preset.full; s.foveaPreset = preset.fovea;
+        dlaaSetPreset(preset.full, preset.fovea);
+        if (temporalEngineFor(mode) == TemporalEngine::Nvidia) {
+            s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
+            reset();s.phase.resetHistory();
+        }
+        Log::get().note("flat runtime: DLSS model=%s preset=%u; applied at frame boundary%s",
+            model.c_str(),preset.full,preset.known?"":" (unknown model; using K)");
+    }
     if (mode != s.mode) {
         s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
         s.mode = mode; reset(); engineVelocityConfigure(enabled);
@@ -773,6 +850,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if(!wanted && !s.projectionFrames) {s.projection.reset();s.projectionContext.Reset();}
     for (auto& r : s.colors) r.Reset(); for (auto& r : s.depths) r.Reset();
     s.prefix = FlatRuntimePrefix{}; s.prefix.frame = frame + 1;
+    s.phaseCensusPending=s.jitterWanted;
+    s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
     s.namedDepth = s.namedConstants = nullptr; s.treated = false;
     foreignWork.store(false, std::memory_order_release);
@@ -780,6 +859,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     for (uint32_t i = 0; i < s.cameraCount; ++i) { s.cameras[i].valid = false; s.cameras[i].mapped = nullptr; }
     const auto now = GetTickCount64();
     if (now - s.lastReport >= 5000) {
+        reportPhaseCensus(s,"5s");
         if(s.projectionFrames)reportProjection(s,"progress");
         Log::get().note("flat HDR image continuation: accepted=%llu refused=%llu; source writes require current matching scene provenance",
             (unsigned long long)s.hdrCopiesAccepted,(unsigned long long)s.hdrCopiesRefused);
