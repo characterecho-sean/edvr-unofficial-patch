@@ -183,7 +183,12 @@ def package(root, version, no_dlss=False, dry_run=False, profile="vr"):
         if old_stage.exists(): old_stage.replace(final_stage)
         raise
     if old_stage.exists(): shutil.rmtree(old_stage)
-    shutil.copy2(final_stage / installer, dist / (installer[:-4] + "-" + version + ".exe"))
+    installer_archive = dist / (installer[:-4] + "-" + version + ".zip")
+    temporary_installer_archive = dist / ("." + installer[:-4] + "-" + version + ".zip.tmp")
+    if temporary_installer_archive.exists(): temporary_installer_archive.unlink()
+    with zipfile.ZipFile(temporary_installer_archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+        output.write(final_stage / installer, installer)
+    os.replace(temporary_installer_archive, installer_archive)
     print("[edvr] wrote %s (%d bytes)" % (archive, archive.stat().st_size)); return 0
 
 
@@ -216,6 +221,10 @@ def self_test():
             try: package(root, "../escape", dry_run=True); raise AssertionError("bad version accepted")
             except ValueError: pass
             assert package(root, "1.2.3", no_dlss=True) == 0
+            with zipfile.ZipFile(root / "dist" / "edvr-installer-1.2.3.zip") as installer_archive:
+                assert set(installer_archive.namelist()) == {"edvr-installer.exe"}
+                assert installer_archive.read("edvr-installer.exe") == b"payload"
+            assert not (root / "dist" / "edvr-installer-1.2.3.exe").exists()
             old_archive = (root / "dist" / "edvr-1.2.3.zip").read_bytes()
             (root / "build" / "edvr_openxr_runtime.dll").unlink()
             try:
@@ -292,6 +301,9 @@ def self_test():
                 names = set(archive.namelist())
                 assert "openvr/openvr_api.dll" not in names and "edvr-flat-installer.exe" in names
                 assert archive.read("edvr_profile.ini") == flat_descriptor
+            with zipfile.ZipFile(root / "dist" / "edvr-flat-installer-1.2.8.zip") as installer_archive:
+                assert set(installer_archive.namelist()) == {"edvr-flat-installer.exe"}
+                assert installer_archive.read("edvr-flat-installer.exe") == b"installer"
             resources[102] = b"wrong-edition-runtime"
             try:
                 package(root, "1.2.9", no_dlss=True, profile="flat")

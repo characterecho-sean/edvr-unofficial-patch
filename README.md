@@ -49,8 +49,9 @@ Then launch Elite as you normally would.
 
 ## Install
 
-**Run `edvr-installer.exe`** from the release. It is a single file, with
-nothing to extract or put in the right folder, and it carries the native
+**Download `edvr-installer-<version>.zip` from the release, unzip it, and run
+`edvr-installer.exe`.** It is a single file once unzipped, with nothing else
+to extract or put in the right folder, and it carries the native
 graphics/runtime pair, the bundled OpenXR loader and its notice, `edvr.ini`,
 and the optional DLSS runtime. It finds the game and keeps your settings and
 other mods working. Before it changes anything, it shows you exactly what it is
