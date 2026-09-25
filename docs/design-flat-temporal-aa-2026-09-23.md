@@ -2,14 +2,14 @@
 
 ## Status
 
-- **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `411751ec` is included. Latest analyzed Epic build
-  is `d0898e1b`; section 57 records the on-foot refusal cascade (the
-  laser-rifle weapon pass's second camera vetoed every on-foot frame), its
-  scoped admission, and exact recipes for the four residual unknown pairs.
-  Section 56 maps all 30 section-55 projected pairs, classifies the one screen
-  composite unchanged, and adds the bounded on-foot camera probe; the merged
-  tree passed full validation.
+- **State:** merged to main at `dacb7a56` (2026-09-25, includes main
+  `a4cdb045`) after Sean's go-ahead; the caveats below remain the open
+  qualification record. Latest analyzed Epic build is `d0898e1b`; section 57
+  records the on-foot refusal cascade (the laser-rifle weapon pass's second
+  camera vetoed every on-foot frame), its scoped admission, and exact recipes
+  for the four residual unknown pairs. Section 56 maps all 30 section-55
+  projected pairs, classifies the one screen composite unchanged, and adds the
+  bounded on-foot camera probe; the merged tree passed full validation.
   Section 54's five mappings passed full validation and are installed; Sean
   reports good ship/station visuals. Section 53 records the preceding
   menu/cockpit F10 evidence. One live projection failure now has an exact
@@ -3528,3 +3528,11 @@ and the view weapon's skinned vertices, while world skinned content falls
 under the reactive policy. Whether that observation is a longstanding
 reactive-coverage gap or a regression belongs to the main/openxr-perf-gaps
 line; this branch's own VR regression gate remains open regardless.
+
+Merged to main at `dacb7a56` on 2026-09-25 with main `a4cdb045` included
+(clean ort merge; hologram-depth resolve and native-device retention changes).
+The merged tree's first full build flaked once in `scheduler_stack_probe_test`
+("the exemplar kept the real depth"), a rig the merge does not touch; the rig
+passed standalone three times and in the full retry, so it is recorded here as
+a load-sensitive flake alongside the run_jobs and vtable history rather than
+chased further.
