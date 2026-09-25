@@ -2,6 +2,7 @@
 #include "vscreen.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
+#include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "../common/d3d11_gpu_command_slots.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
@@ -2340,6 +2341,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // once per eye per frame, so the cheap "already drawn" check runs before
     // anything else even when the feature is off.
     if (eyeMaskWantsDraws()) {
+        GpuCensusScope census(self, GpuCensusSection::FrameEyeMask);
         eyeMaskOnEyeDraw(self, bindingGet(BindSlot::Dsv0));
     }
     // The interface's depth (ui_depth.h): a composite of a learned surface,
@@ -3711,6 +3713,7 @@ bool uiLayerVerdictForwards(DrawVerdict v) {
 // game's own buffer for the draws after it that test it.
 void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT instances,
                          const DrawArgs& args) {
+    GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
     if (uiLayerMultiplyBegin(self)) {
         pureDrawReissue(self, kind, count, instances, args);
         uiLayerEnd(self);
@@ -3867,6 +3870,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // decline latch, so it would last the session (the pre-release review
     // of 2026-09-07). splashDimBegin below has had this shape all along.
     if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {
+        GpuCensusScope census(self, GpuCensusSection::FrameUiDepthCoverage);
         if (uiDepthReissueBegin(self)) pureDrawReissue(self,kind,count,instances,args);
         uiDepthReissueEnd(self);
     }
@@ -3877,6 +3881,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // uiDepthWantsReissue() answers for that reissue alone; holoOn is this
     // pass's own classification.
     if (!layered && uiDepthScope.holoOn) {
+        GpuCensusScope census(self, GpuCensusSection::FrameHologramPasses);
         if (uiDepthHologramContributionBegin(self)) pureDrawReissue(self,kind,count,instances,args);
         uiDepthHologramContributionEnd(self);
         if (uiDepthHologramElementDepthBegin(self)) pureDrawReissue(self,kind,count,instances,args);
@@ -3887,10 +3892,12 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // when neither is set skips only the clearing of two false bools
     // (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
     if(owner && uiDepthPlanetPending() && uiDepthPlanetBegin(self)) {
+        GpuCensusScope census(self, GpuCensusSection::FramePlanet);
         pureDrawReissue(self,kind,count,instances,args);uiDepthPlanetEnd(self);
     }
     if (!terrainOriginal && owner && celestialMotionLive() &&
         celestialMotionBegin(self, bindingShaderHash(BindSlot::Vs))) {
+        GpuCensusScope census(self, GpuCensusSection::FrameTerrain);
         draw();
         celestialMotionEnd(self);
     }
@@ -4005,7 +4012,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     }
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
         pixelProbeBefore(g_state, self);
     }
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
@@ -4025,7 +4032,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     }
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
         pixelProbeBefore(g_state, self);
     }
     g_state->realDrawInstancedIndirect(self, args, off);
@@ -4263,7 +4270,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     DrawArgs args;
     args.base = static_cast<int32_t>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'D', count, 1, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -4276,7 +4283,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     gpuFrameCommand(self);
-    if(self==g_state->ownerCtx)engineVelocityBeforeDraw(self,g_state->rtv0Eye);
+    if(self==g_state->ownerCtx){GpuCensusScope census(self,GpuCensusSection::FrameEngineVelocity);engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
     g_state->realDrawAuto(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
@@ -4292,7 +4299,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.start = startIndex;
     args.base = baseVertex;
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'I', count, 1, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -4317,7 +4324,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.base = static_cast<int32_t>(startVertex);
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     // The draw's instance window, for the glare telemetry: the trains
     // share one record buffer at different offsets, and which train a
@@ -4372,7 +4379,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // compares; the pool families' substituted shaders and MRT6 are bound
     // only when the game has rebound something since the last look. After the
     // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -4380,9 +4387,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                           baseVertex, startInstance);
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
-            weaponMotionWants(bindingShaderHash(BindSlot::Vs)))
+            weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {
+            GpuCensusScope census(self, GpuCensusSection::FrameWeaponMotion);
             weaponMotionDraw(self, g_state->realDrawIndexedInstanced, perInstance, instances,
                              startIndex, baseVertex, startInstance);
+        }
         if (clock.on) clock.realCall(r0);
         if(self==g_state->ownerCtx) {
             // ORDERED BY COST, not by narrative. The common case here is an
@@ -4430,6 +4439,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             // (ui_layer.h): its pixels are not in the pass's input, and the
             // bound target and viewport are the layer's.
             if (screenMotionLive() && !uiLayerRedirecting()) {
+                GpuCensusScope census(self, GpuCensusSection::FrameScreenMotion);
                 screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
                 screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             }
@@ -5234,6 +5244,10 @@ void vScreenFrameBoundary() {
         temporalPassTick(g_state->ownerCtx);
         temporalPassFrameBoundary();
         depthProbeFrameBoundary(g_state->ownerCtx);
+        // Issue #38's per-feature GPU cost census (gpu_census.h): polls every
+        // section's timer, rotates which one is actively timed next frame,
+        // and every 30 s logs one summary line. Always on, no ini key.
+        gpuCensusFrame(g_state->ownerCtx);
         // Told to the openvr half whether or not any intro fix is on: the
         // cull guard holds its lie until a scene exists, and that must
         // depend on the GAME reaching one, not on EDVR being configured
@@ -6588,6 +6602,7 @@ void shutdownVScreenFixes() {
     eyeSplitShutdown();
     foveationShutdown();
     eyeMaskShutdown();
+    gpuCensusShutdown();
     resolveProbeShutdown();
     resolveBindShutdown();
     stencilProbeShutdown();

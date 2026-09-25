@@ -18,6 +18,7 @@
 #include "../common/timing.h"
 #include "shader_swap.h"
 #include "gpu_timing.h"
+#include "gpu_census.h"   // issue #38: the per-feature GPU cost census
 
 // AMD's own FSR, CPU side: FsrRcasCon packs the strength into the constants
 // the shader reads. intro_upscale.cpp's arrangement, warnings and all --
@@ -589,6 +590,7 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
             ctx->CSSetConstantBuffers(0, 1, &cb);
             ctx->CSSetShaderResources(0, 1, &inSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &e.outUav, nullptr);
+            GpuCensusScope census(ctx, GpuCensusSection::DoorSharpen);
             ctx->Dispatch((regionW + 7) / 8, (regionH + 7) / 8, 1);
         }
 
