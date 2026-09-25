@@ -14,6 +14,7 @@
 #include "flat_compute_tests.h"
 #include "flat_lighting_tests.h"
 #include "flat_live_phase_tests.h"
+#include "flat_pixel_capture_tests.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -1093,6 +1094,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     failures += flatProjectionViewportTests();
+    failures += flatPixelCaptureTests();
     testAssociationAndBounds();
     testFrozenEvidence();
     testOutputEdgeReservation();

@@ -1371,6 +1371,7 @@ struct HoloScratch {
     uint32_t                   w = 0, h = 0;
     uint32_t                   preparedFrame = ~0u;          // g_frame at the last prepare
     uint32_t                   declinedProjectionFrame = ~0u; // counted once per eye-frame
+    float                      radiusDepth = 0.0f;    // reversed-Z device value AT the cockpit radius, this eye/frame
     bool                       linearBlend = false;    // the game's own RTV0 view was sRGB (fallback floor only)
     // The game's own RT0 resource, tracked so the SHARE test can read it
     // back in its own space -- never the tonemapped display image, which
@@ -1451,10 +1452,10 @@ ID3D11VertexShader* g_holoResolveVs = nullptr;
 ID3D11PixelShader*  g_holoResolvePs = nullptr;
 bool                g_holoResolveTried = false;
 ID3D11Buffer*       g_holoResolveCbBuf = nullptr;
-// A D3D11 constant buffer's ByteWidth must be a multiple of 16; dropping
-// radiusDepth took this struct to 12 bytes, so an explicit pad keeps it
-// at the 16 CreateBuffer (and UpdateSubresource's implicit size) needs.
-struct HoloResolveCb { float floorValue, share; uint32_t flags; uint32_t _pad0; };
+// radiusDepth feeds the resolve's cockpitRange (the dark-pixel test). The
+// struct stays 16 bytes, the multiple a D3D11 constant buffer's ByteWidth
+// must be.
+struct HoloResolveCb { float floorValue, share; uint32_t flags; float radiusDepth; };
 
 // The periodic census (holoDepthWindowTick): a 30 s wall-clock window,
 // unlike the neighbouring 20 s frame-counted one (kTotalsFrames) --
@@ -1597,9 +1598,11 @@ HoloScratch* holoScratchFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint3
 // this point. The element-depth scratch clears to 0 (reversed-Z far)
 // instead: a world marker's own depth, at any range, must survive here,
 // and a cockpit family's far fragment surviving too is harmless -- its
-// contribution is still radius-gated above, so it stays at E=0 and the
-// resolve's floor/share tests reject it regardless (docs\hologram-depth-
-// 2026-09-24.md, the world-marker entry).
+// contribution is still radius-gated above, so it stays at E=0 -- a bright
+// far fragment fails the resolve's floor/share regardless, and a dark one
+// fails its cockpitRange test (below): both reject it (docs\hologram-
+// depth-2026-09-24.md, the world-marker entry). radiusDepth is kept on
+// the scratch too, for that same cockpitRange test at the resolve.
 bool holoScratchPrepare(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
     HoloScratch* sp = holoScratchFor(ctx, eye, w, h);
     if (!sp) return false;
@@ -1618,6 +1621,7 @@ bool holoScratchPrepare(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t 
     ctx->ClearDepthStencilView(s.depthDsv, D3D11_CLEAR_DEPTH, 0.0f, 0);
     ctx->ClearDepthStencilView(s.radiusDsv, D3D11_CLEAR_DEPTH, radiusDepth, 0);
     s.preparedFrame = g_frame;
+    s.radiusDepth = radiusDepth;
     return true;
 }
 
@@ -1776,15 +1780,30 @@ constexpr char kHoloResolveVsHlsl[] =
 // contribution's own space (linearBlend: the TARGET's view was sRGB).
 // ElementDepth clears to 0 (reversed-Z far), so d>0 alone only rejects a
 // pixel nothing listed drew into -- a world marker's own depth survives
-// it at any range, and so, harmlessly, does a cockpit family's far
-// fragment (the sun's corona): its contribution stayed radius-gated at
-// E=0, so the floor/share tests below reject it regardless.
+// it at any range, and so does a cockpit family's far fragment (the sun's
+// corona), harmlessly: cockpitRange (radiusDepth, below) is false for it.
+//
+// A dark pixel (the displayed colour never clears the floor) inside a
+// cockpit-range element's own footprint still takes its depth, skipping
+// the share test: it is the gap between glyphs on a panel, or between
+// rows of text, and giving it the sky's depth instead of its own panel's
+// is what made rolling text blur (flight 20260924_175113/20260925_050051
+// -- the gaps carry the sky's motion, glyphs the panel's, and a natural
+// near-zero-world-motion frame in the same dump read crisp because the
+// two motions briefly matched). Far dark fragments are excluded by
+// cockpitRange, not the floor, so the corona still cannot claim dark
+// pixels (the bracket-history regression of 2026-09-09 this guards
+// against). A dark pixel skips the share test only when cockpitRange
+// admits it; a bright one still needs the share it always did, so a
+// bright background showing through a translucent gap (a star, a lit
+// station behind a panel) is still excluded on its own light, not the
+// element's.
 constexpr char kHoloResolvePsHlsl[] =
     "Texture2D<float4> Contribution : register(t0);\n"
     "Texture2D<float> ElementDepth : register(t1);\n"
     "Texture2D<float4> Target : register(t2);\n"
     "Texture2D<float4> Display : register(t3);\n"
-    "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; };\n"
+    "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth; };\n"
     "float3 srgbEncode(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055; }\n"
     "void main(float4 pos : SV_POSITION, out float depth : SV_Depth) {\n"
     "    int3 p = int3(int2(pos.xy), 0);\n"
@@ -1802,8 +1821,10 @@ constexpr char kHoloResolvePsHlsl[] =
     "    } else {\n"
     "        dDisplay = linearBlend ? srgbEncode(e) : saturate(e);\n"
     "    }\n"
-    "    if (max(max(dDisplay.r, dDisplay.g), dDisplay.b) <= floorValue) discard;\n"
-    "    if (haveTarget) {\n"
+    "    bool dark = max(max(dDisplay.r, dDisplay.g), dDisplay.b) <= floorValue;\n"
+    "    bool cockpitRange = d > radiusDepth;\n"
+    "    if (dark && !cockpitRange) discard;\n"
+    "    if (!dark && haveTarget) {\n"
     "        float3 f = max(Target.Load(p).rgb, 0.0);\n"
     "        float lumaE = dot(e, float3(0.299, 0.587, 0.114));\n"
     "        float lumaF = dot(f, float3(0.299, 0.587, 0.114));\n"
@@ -3653,7 +3674,7 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
     if (!haveDisplay) ++g_holoWindowFloorFallback;
     const uint32_t flags = (s.linearBlend ? 1u : 0u) | (haveTarget ? 2u : 0u) |
                            (haveDisplay ? 4u : 0u) | (displaySrgb ? 8u : 0u);
-    const HoloResolveCb data{g_holoFloor, g_holoShare, flags};
+    const HoloResolveCb data{g_holoFloor, g_holoShare, flags, s.radiusDepth};
     vScreenUpdateSubresourceRaw(ctx, cb, 0, nullptr, &data, 0, 0);
     const bool ran = guardedBudget(g_holoBudget, [&] {
         ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);

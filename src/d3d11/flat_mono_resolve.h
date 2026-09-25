@@ -23,6 +23,7 @@ struct FlatMonoResolveFrame {
     float deltaMs = 0;
     bool reset = true;
     FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
+    uint32_t configuredDlssPreset = 0; // diagnostic attribution only
 };
 // Planned input metadata available before the game's next raster phase. This
 // intentionally carries no frame resources: preflight can allocate the
@@ -93,6 +94,10 @@ bool flatMonoResolveSpatialFallback(ID3D11Device*, ID3D11DeviceContext*, const F
                                     ID3D11ShaderResourceView** output, const char** reason);
 // Owner thread: release renderer resources/history. Does not shut down shared SDKs.
 void flatMonoResolveReset();
+// Manual F10 diagnostic; owner-thread poll also runs when rendering is refused.
+// Independent from history: arm/poll never change renderer state or parameters.
+void flatMonoResolveArmPixels(uint64_t frame);
+void flatMonoResolvePollPixels(ID3D11DeviceContext*,uint64_t frame);
 // Owner thread: a refused/missing frame breaks only history, preserving resources.
 void flatMonoResolveInvalidateHistory();
 } // namespace edvr

@@ -3,7 +3,8 @@
 ## Status
 
 *Restates the journal below; not new evidence -- update it whenever
-this doc changes. Last updated 2026-09-23 for the served floor.*
+this doc changes. Last updated 2026-09-25 for the camera rows after a
+drop.*
 
 - **State:** TAA/DLSS carries UI/smoke depth and station motion by
   default ("Current defaults", 2026-09-10). Feature A (the supersample
@@ -19,6 +20,10 @@ this doc changes. Last updated 2026-09-23 for the served floor.*
   the input, the runtime upsampling the rest) instead of DLSS standing
   aside -- BUILT, NOT FLOWN ("The served floor", at the end).
 - **Open:**
+  - The world path's rows after a drop: a parked camera's zero was
+    accepted as the view's delta and carried (eye run 050423). The gate
+    now refuses it. BUILT 2026-09-25, NOT FLOWN; its own doc is
+    camera-rows-carry-2026-09-25.md.
   - The served floor: 0.5 FLOWN 16:27 (f05c84bf), not exercised (exactly
     on the floor: 2037x1969 -> 4074x3938 at 50%, standard scaling); 0.45
     still owed; signature in "The served floor".

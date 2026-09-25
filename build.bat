@@ -1014,6 +1014,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit /b 1 )
 "%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
 "%BUILD%\flat_mono_resolve_test.exe" --self-test || exit /b 1
+python "tools\flat_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 exit /b 0
 
 :rig_config_test
@@ -1119,8 +1120,11 @@ echo [edvr] === temporal_test.exe ===
 REM The temporal pass's arithmetic (src\common\temporal_math.h): the jitter
 REM sequence and the SIGN of its tangent shift, the pixel-to-direction
 REM mapping on a real headset's lopsided frustum, the rotation deltas from
-REM the runtime's pose and the game's view rows, and the reprojection walked
-REM by hand against a known head turn. Header-only, links nothing from src\.
+REM the runtime's pose and the game's view rows, the reprojection walked
+REM by hand against a known head turn, and the world path's camera gate
+REM replaying eye run 050423's parked camera (a zero from rows a drop left
+REM behind must be carried over, never accepted). Header-only, links nothing
+REM from src\.
 if not exist "%OBJ%\taatest" mkdir "%OBJ%\taatest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\taatest"\ ^
@@ -1993,6 +1997,12 @@ REM cost a fix built on tiles that had landed on the Milky Way band. It
 REM fails HERE, not in the next report somebody trusts.
 python "tools\diff_eye_split.py" --self-test || (
     echo [edvr] ERROR: the eye-split diff tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === flat pixel capture analyzer self-test ===
+python "tools\flat_pixels.py" --self-test || (
+    echo [edvr] ERROR: the flat pixel analyzer failed its own test
     exit /b 1
 )
 

@@ -7,10 +7,14 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include "flat_pixel_capture.h"
 
 namespace edvr {
 namespace {
 using Microsoft::WRL::ComPtr;
+// Like renderer state, explicit owner-thread cleanup only: never release live
+// driver resources from static destruction under the DLL loader lock.
+FlatPixelCapture& pixels=*new FlatPixelCapture;
 struct Image {
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> srv;
@@ -259,7 +263,14 @@ FlatMonoResolvePreflightResult flatMonoResolvePreflight(ID3D11Device* device,
         "ready-backend-feature-creation-deferred":"ready";
     return result;
 }
-void flatMonoResolveReset() { ++stats.fullResets;stats.currentContinueRun=0;g=State{}; }
+void flatMonoResolveReset() { pixels.cancel();++stats.fullResets;stats.currentContinueRun=0;g=State{}; }
+void flatMonoResolveArmPixels(uint64_t frame) {
+    try { pixels.arm(frame); } catch(...) { pixels.cancel(); }
+}
+void flatMonoResolvePollPixels(ID3D11DeviceContext* context,uint64_t frame) {
+    if(!pixels.active())return;
+    try { pixels.poll(context,frame); } catch(...) { pixels.cancel(); }
+}
 void flatMonoResolveInvalidateHistory() { ++stats.invalidations;stats.currentContinueRun=0;g.history=false; }
 
 bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,
@@ -346,6 +357,11 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         ID3D11SamplerState* sampler=g.sampler.Get();context->CSSetSamplers(0,1,&sampler);
         ID3D11UnorderedAccessView* out=g.output[1].uav.Get();context->CSSetUnorderedAccessViews(4,1,&out,nullptr);
         context->CSSetShader(g.finish.Get(),nullptr,0);context->Dispatch((f.outputWidth+7)/8,(f.outputHeight+7)/8,1);
+    }
+    if(pixels.active() && (f.mode==FlatMonoResolveMode::Dlss || f.mode==FlatMonoResolveMode::Dlaa)) {
+        ID3D11Texture2D* textures[]={g.color.texture.Get(),g.depth[0].texture.Get(),g.motion.texture.Get(),
+            g.rejection.texture.Get(),g.output[0].texture.Get(),g.output[1].texture.Get()};
+        try { pixels.capture(device,context,f,reset,textures); } catch(...) { pixels.cancel(); }
     }
     g.history=true;g.lastFrame=f.frame;g.current=index^1;g.inputFormat=colorDesc.Format;
     if(reset) {

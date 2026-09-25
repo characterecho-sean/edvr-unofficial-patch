@@ -338,6 +338,21 @@ bool isHeadsetRow(const MenuRowDef& d) {
     return d.headset && !isOpenxrRenderScaleRow(d);
 }
 
+// fix.temporal_aa_model (the DLSS preset row): NVIDIA's reconstruction
+// model, which only DLSS and DLAA read (temporal_mode.h). It stays on the
+// Performance page under every mode -- rather than dropping out of the list
+// on a mode change, which read as the setting vanishing -- and dims and
+// stops responding to input instead.
+bool isDlssPresetRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0;
+}
+
+bool dlssPresetDisabled() {
+    if (runtimeFlatProfile()) return !flatDlssSelected();
+    return temporalEngineFor(Config::get().getString("fix.temporal_aa", "off")) !=
+           TemporalEngine::Nvidia;
+}
+
 // The on-foot panel's width: "auto", or a width in pixels -- never a list, so
 // this is not a headset row despite living beside one in the ini. The height
 // is not a setting any more; it is derived from whichever width applies.
@@ -1319,16 +1334,6 @@ void addSettingRows(Page& p, MenuTier tier, const char* page, bool grouped) {
         const MenuRowDef& d = kMenuRows[i];
         if (d.tier != tier) continue;
         if (page && _stricmp(d.page, page) != 0) continue;
-        // fix.temporal_aa_model is NVIDIA's preset row; fsr ignores it
-        // (design doc 3.1), so it stays off the list while fsr is selected.
-        // The row reappears the next time the pages rebuild (developer
-        // switch toggle, or the menu reopening) after a mode change, the
-        // same timing the developer-tier pages themselves already use.
-        if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0 &&
-            temporalEngineFor(Config::get().getString("fix.temporal_aa", "off")) ==
-                TemporalEngine::Amd) {
-            continue;
-        }
         if (grouped && d.group[0] && (!lastGroup || strcmp(lastGroup, d.group) != 0)) {
             Entry h;
             h.kind = EntryKind::Heading;
@@ -1938,6 +1943,7 @@ void buildContent(MenuContent& c) {
             const Entry& e = p.entries[i];
             MenuLine& l = c.lines[c.lineCount++];
             l.badge = kBadgeNone;
+            l.dim = false;
             if (e.kind == EntryKind::Heading) {
                 strncpy(l.left, e.text, sizeof(l.left) - 1);
                 l.style = kMenuHeading;
@@ -1955,8 +1961,11 @@ void buildContent(MenuContent& c) {
             const MenuRowDef& d = kMenuRows[e.def];
             const RowState& r = g_rows[e.def];
             const bool editingThis = (s.editEntry == i);
+            const bool dlssRow = isDlssPresetRow(d);
+            const bool dim = dlssRow && dlssPresetDisabled();
+            l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
-            if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0) {
+            if (dlssRow) {
                 const std::string mode = runtimeFlatProfile() ? Config::get().requestedTemporalMode()
                                                               : Config::get().getString("fix.temporal_aa", "off");
                 snprintf(l.left, sizeof(l.left), "%s preset", _stricmp(mode.c_str(), "dlaa") == 0 ? "DLAA" : nvidiaLabel());
@@ -1965,9 +1974,6 @@ void buildContent(MenuContent& c) {
                 strcmp(d.key, "temporal_aa") == 0) {
                 strncpy(l.left, "Anti-aliasing", sizeof(l.left) - 1);
             }
-            const bool flatPresetInactive = runtimeFlatProfile() &&
-                strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0 &&
-                !flatDlssSelected();
             const bool openxrScaleRow = isOpenxrRenderScaleRow(d);
             const bool headsetRow = isHeadsetRow(d);
             // The worn headset's entry, resolved once for every site of this
@@ -2017,9 +2023,11 @@ void buildContent(MenuContent& c) {
                     l.right[sizeof(l.right) - 1] = 0;
                 }
             }
-            l.style = flatPresetInactive ? kMenuDim :
-                      editingThis ? kMenuRowEdit : (hi ? kMenuRowHi : kMenuRow);
-            if (hi && flatPresetInactive)
+            l.style = editingThis ? kMenuRowEdit
+                      : hi        ? kMenuRowHi
+                      : dim       ? kMenuDim
+                                  : kMenuRow;
+            if (hi && dim && runtimeFlatProfile())
                 snprintf(c.hint, sizeof(c.hint), "Choose DLSS to change its model preset.");
             if (hi && openxrScaleRow) {
                 snprintf(c.hint, sizeof(c.hint), "%s", openxrResolutionHint(res).c_str());
@@ -2127,6 +2135,8 @@ void buildContent(MenuContent& c) {
                         body += std::string("\nPress R again to remove this headset's entry (back to ") +
                                 back + ").";
                     }
+                } else if (dim) {
+                    body += "\nInactive: only DLSS and DLAA read this preset.";
                 } else if (s.resetArmedEntry == i) {
                     body += "\nPress R again to reset it to the shipped value.";
                 } else if (aliasesLive) {
@@ -2427,10 +2437,12 @@ void drainWrites() {
 
 void stepRow(int defIndex, int dir, int mult) {
     const MenuRowDef& d = kMenuRows[defIndex];
-    if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
-        strcmp(d.key, "temporal_aa_model") == 0 &&
-        !flatDlssSelected()) return;
     const std::string& cur = g_rows[defIndex].value;
+    if (isDlssPresetRow(d) && dlssPresetDisabled()) {
+        g_s.lastWrite = "DLSS preset is inactive: select DLSS or DLAA above first.";
+        g_s.contentDirty = true;
+        return;
+    }
     if (isOpenxrRenderScaleRow(d)) {
         // A width for the worn headset, stepped by 100 px on the grid of
         // round hundreds (steppedResolution); the generated row is Text,

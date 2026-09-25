@@ -873,6 +873,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (s.device && actualDevice.Get() != s.device.Get()) { flatRuntimeResize(); s.thread = GetCurrentThreadId(); }
     if (!s.device) { swap->GetDevice(IID_PPV_ARGS(&s.device)); if (s.device) s.device->GetImmediateContext(&s.context); }
     if (!s.device || !s.context) return;
+    flatMonoResolvePollPixels(s.context.Get(),frame);
     if(s.phase.applied)++s.jitteredFrames;
     s.phase.finish(s.temporalAccepted && hr==S_OK,s.frameCoverage && !s.prefix.uncertain && !foreignWork.load(std::memory_order_acquire));
     const bool wanted=_stricmp(Config::get().getString("experimental.temporal_aa_jitter","on").c_str(),"off")!=0;
@@ -890,6 +891,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         reportProjection(s,"complete");
     }
     if(projectionAuditRequested.exchange(false,std::memory_order_acq_rel)) {
+        flatMonoResolveArmPixels(frame);
         if(s.projectionFrames)reportProjection(s,"rearmed");
         else if(s.unknownProjectionPairsUsed || s.unknownProjectionCaptureOverflow)
             reportUnknownProjection(s,"manual-rearm");
@@ -1235,6 +1237,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     FlatMonoResolveFrame f{}; f.color = original; f.depth = s.depthView.Get(); f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
+    f.configuredDlssPreset=s.preset;
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.
     Ptr<ID3D11Texture2D> colorTexture;

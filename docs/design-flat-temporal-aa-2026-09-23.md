@@ -3,22 +3,21 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `c9cab91e` is included as requested (section 37).
-  Epic `0846a1f7` verifies the HDR viewport correction: all three passes
-  prepare in 900/900 cockpit audit frames, all 136,260 viewport checks match
-  and live jitter/history continue (section 40). Later, frame 36424 introduces
-  one unknown draw per frame and continuous resets. Its identity was lost
-  because the 900-frame audit ended 4.433 seconds earlier. Automatic bounded
-  capture in `85bf7652` saves all six shader blobs for three pairs, including
-  the later decal draw 0C4E76889907B963/A90825082F36756E (section 41). This run
-  reaches 3,279 continued-history frames before the later refusal. Sections
-  26-28 document camera ownership and jitter; sections 34-37 cover F8 and
-  successful menu treatment. Menu surface shimmer remains unqualified at pixel
-  level (section 39); frame counters alone do not establish reconstruction
-  quality. Latest `85d590e0` cockpit Off/DLSS A/B has no effective temporal
-  accumulation: one captured pair, 2D8263CC54D55398/89B662E266E5D73E, draws six
-  times per frame and resets history continuously (section 42). Its saved
-  bytecode proves the existing b0 ForwardDp4 recipe, including depth UVs.
+  before qualification. Main `d87f40b2` is merged before the next validation
+  build as requested; the preset-menu conflict preserves flat selection and
+  main's dimmed preset text (section 44). Sections 40-42 establish the cockpit
+  HDR viewport correction and exact bytecode-backed projection recipes.
+  Automatic bounded unknown capture remains active after the timed F10 audit
+  ends. Sections 26-28 document camera ownership and jitter; sections 34-37
+  cover F8 and successful menu treatment. Menu surface shimmer remains
+  unqualified at pixel level (section 39); frame counters alone do not
+  establish reconstruction quality. Installed/tested binary `b494e087` holds
+  cockpit history for 3,310 consecutive frames with live jitter, zero unknown
+  pairs and zero backend failures (section 43). Sean confirms clearly smoother
+  cockpit edges with DLSS, with some edge shimmer as lighting changes.
+  Remaining pixel-level rejection/reconstruction behavior is unmeasured. A
+  bounded F10 pixel capture records matched textures to distinguish those
+  causes (section 44).
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -40,13 +39,13 @@
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
   constants or camera-equality labels. The main merge passed full validation
-  and promotion. The cockpit HDR viewport correction is verified; use bounded
-  first-occurrence bytecode evidence to qualify the captured pairs (sections
-  41-42). Do not judge cockpit reconstruction quality while jitter is zero and
-  history resets every frame. Menu surface shimmer needs output/motion and
-  rejection-mask evidence; that capture proves sustained treatment. The passive
-  selector still refuses the menu copy; its diagnostic verdict is not the live
-  runtime verdict. No headset is needed; VR still needs regression tests.
+  and promotion. Cockpit history now stays active and visible smoothing is
+  confirmed (section 43). Remaining lighting-dependent edge shimmer and menu
+  surface shimmer need output/motion and rejection-mask evidence before any
+  rendering change. Validate the bounded pixel capture before another Epic run.
+  The passive selector still refuses the menu copy; its diagnostic verdict is
+  not the live runtime verdict. No headset is needed; VR still needs regression
+  tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -2357,3 +2356,115 @@ Next Epic run keeps SS 0.75 and DLSS K in the same cockpit view. Confirm
 sustained history during the A/B before judging edge quality. Automatic capture
 continues to retain any further unknown shader; no timed F10 is required for
 that evidence.
+
+## 43. Sustained cockpit accumulation verified, 2026-09-25
+
+Epic `edvr_gfx_20260925_055040.log` matches installed binary `b494e087`, build
+`6AB65FCC`. DLSS initializes at 05:51:22.506 with 1920x1080 input and 2560x1440
+output, Quality preset K. The session has no recorded mode switches. Sean
+confirms the cockpit edges are clearly smoother with DLSS, but reports some
+edge shimmer as the light changes.
+
+After scene entry around 05:52:50.951, cockpit jitter is live and history
+valid. Every five-second interval through 05:53:25.954 has 448-450 history
+continuations and zero resets. The final summary reaches 3,310 consecutive
+history continuations, about 37 seconds, with zero backend failures. Automatic
+unknown capture reports zero distinct pairs throughout; the old six-draw
+projected-effect refusal is absent. Whole-session totals are 4,153 renderer
+calls, 4,150 continuations and three resets, including the earlier menu and
+scene-entry history starts.
+
+There are isolated earlier preparation/no-raster refusals outside the steady
+cockpit interval. At frame 42002, the tone pass disappears and one spatial
+recovery is logged before the scene no longer qualifies. Those transitions do
+not indicate ongoing cockpit resets.
+
+Ruled out: the captured projected effect still continuously blocks temporal AA
+in this run, because no unknown pairs are observed and live cockpit history
+continues for 3,310 frames. The counters establish runtime continuity; Sean's
+feedback establishes visible smoothing. Neither establishes complete
+pixel-level motion correctness or coverage of unseen scenes/shader families.
+
+Keep the installed `b494e087` binary. Remaining lighting-dependent shimmer
+needs matched current colour, motion, rejection mask, raw DLSS output and final
+composite evidence to distinguish reconstruction from replacement of rejected
+pixels. Do not change the existing rejection safeguard without that evidence.
+
+## 44. Lighting-dependent edge shimmer: discriminating capture, 2026-09-25
+
+The verified history continuity and visible smoothing in section 43 remove
+continuous frame resets as an explanation for this run's remaining shimmer. Two
+pixel-level hypotheses remain open:
+
+- Final-composite rejection restores untreated edge pixels. The finish shader
+  maps output pixel centers through the current raster jitter, takes the
+  maximum rejection over the four neighboring input pixels and substitutes
+  bilinear current color wherever any rejects. Evidence: raw DLSS is smoother
+  than the final image at pixels selected by that exact mask.
+- Shimmer is already present in raw reconstruction. Evidence: the same edge
+  changes in raw and final DLSS output where the rejection footprint is zero.
+  Motion alignment, changing highlights and subpixel coverage then need
+  examination; a healthy whole-frame history counter cannot establish them.
+
+Lighting is not an input to the prep rejection decision. That decision uses
+engine record/depth ownership, camera reprojection and validity/bounds checks.
+Changing light may reveal an existing rejected edge without changing its
+classification. The existing LDR DLSS input uses unit exposure/pre-exposure and
+render-pixel motion; this audit provides no evidence to change those settings
+or weaken the safeguard that prevents invalid-history smearing.
+
+The diagnostic copies matched current color, prepared depth, motion, rejection,
+raw DLSS and final composite textures already present after the finish
+dispatch. Manual F10 arms four samples separated by at least 15 frames, with
+one pending staging set, a 384 MiB total cap and explicit expiry/error
+reporting. Readback must be nonblocking; it must not reset temporal history or
+alter rendered output. Each complete sample carries frame, jitter, dimensions,
+mode/reset and native texture layout metadata. An offline tool reconstructs the
+exact output-space rejection footprint and compares raw/final images.
+
+Before flight: verify copy/readback and row layout on the D3D test device,
+inactive/expiry/rearm behavior, offline mask mapping including fractional
+jitter and clamping, manifest integrity and dry-run non-mutation. Full build
+and clean-commit promotion remain required. The next capture must report
+complete samples or explicit failure; absence of files is not a successful
+diagnostic. Captured samples can distinguish the two paths but do not measure
+all temporal stability or prove the underlying motion correct.
+
+Sean requested another main merge before this build. Merge `origin/main`
+`d87f40b2` into the feature branch, including its camera-row carry correction,
+hologram depth work, preset row visibility and quiet JSON self-tests. The sole
+conflict is in `menu.cpp`: retain flat requested-mode labels and flat row
+selection when deciding preset availability, while adopting main's separate dim
+flag so highlighted inactive preset text stays dim. The compact flat panel
+remains. Full validation covers the combined tree; this is not a merge of the
+feature branch into main.
+
+Use F10 while DLSS is active and the shimmering edge is visible, then leave the
+scene running for a few seconds. The pixel burst ends after four samples (or an
+explicit cap/timeout); the existing draw audit can keep running. No rendering
+setting is changed. A normal run without F10 does no pixel capture. Output is
+beneath the configured log directory's `flat_pixels` folder. Keep the session
+directory named by `flat pixels: armed/completed` and run:
+
+```text
+python tools/flat_pixels.py <session-directory>
+python tools/flat_pixels.py <session-directory> --output <preview-directory> --dry-run
+python tools/flat_pixels.py <session-directory> --output <preview-directory>
+```
+
+The first command only reports statistics. PNGs include current color, raw
+DLSS, final composite, an output-space rejection overlay and amplified
+raw/final differences. Preview alpha is forced opaque; native RGBA remains
+untouched. Depth and motion are retained in their native formats for follow-up
+analysis. The analyzer uses NumPy and validates manifests/lengths before
+reading. Producer/parser agreement is checked with actual D3D readback in the
+existing mono resolve test rig, in addition to the offline self-tests.
+
+Targeted validation passed in `build/flat-pixel-targeted.log`: capture policy
+and WARP resolve, including exact packed rows for all six textures, atomic
+manifest publication, rearm/expiry/cancel and the D3D debug-message check. The
+analyzer verified the actual producer's 17x3 fixture: 51 rejected pixels, 51
+raw/final differences, maximum byte difference 254 and mean 65.5. The build
+gate follows a fresh `current_fixture.txt` written only after the producer
+passes, so old session directories cannot substitute for a new capture. Full
+combined validation is recorded in `build/flat-pixel-main-validation.log`.
