@@ -283,6 +283,166 @@ inline bool temporalRowsAreRotation(const float m34[12]) {
     return fabsf(d01) < 0.05f && fabsf(d02) < 0.05f && fabsf(d12) < 0.05f;
 }
 
+// The world path's delta from two frames of the game's view rows, which
+// are the FULL view -- the headset's pose is in them -- stored view->world.
+// For rows [R | c] (c the eye's place in the world) a point P now was, last
+// frame, at W P + tv, W = R_p^T R_n, tv = R_p^T (c_n - c_p); camMove is
+// c_n - c_p, the eye's move in the world. The game's view space runs z
+// forward (DirectX), the runtime's eye space z back. A rotation read in
+// the one and applied in the other has its pitch and yaw reversed and its
+// roll kept, which is exactly what the regression measured: over a dozen
+// intervals in space the rows turned -1 times the head about x and y and
+// +1 about z (k = -2, -2, 0; 2026-09-04), and the far plane, on this delta
+// alone, moved the wrong way by the head's whole turn -- the sky's smear,
+// and the station's under a head turn, both gone with the world path off.
+// Conjugating by the z flip carries the delta into the eye's frame; the
+// translation term takes the same flip (a reflection, not a half turn: the
+// still-ship regression on the third line says which).
+inline void temporalWorldFromRows(const float prev[12], const float now[12],
+                                  float W[9], float tv[3], float camMove[3]) {
+    float rp[9], rn[9], rpT[9];
+    temporalRot3Of34(prev, rp);
+    temporalRot3Of34(now, rn);
+    temporalTranspose3(rp, rpT);
+    temporalMul3(rpT, rn, W);
+    const float dc[3] = {now[3] - prev[3], now[7] - prev[7], now[11] - prev[11]};
+    temporalApply3(rpT, dc, tv);
+    for (int i = 0; i < 3; ++i) camMove[i] = dc[i];
+    W[2] = -W[2];
+    W[5] = -W[5];
+    W[6] = -W[6];
+    W[7] = -W[7];
+    tv[2] = -tv[2];
+}
+
+// The world path's gate on that delta, per frame (the plausibility test of
+// src/d3d11/temporal_pass.cpp, here so tools/temporal_test can walk it).
+// The rows' delta is the head's plus the ship's turn, and no ship turns 270
+// degrees a second: a delta beyond 3 degrees from the head's is another
+// camera's rows or a stale latch, and the last accepted delta is carried in
+// its place (a far better guess than the head alone, which smeared the
+// world on every dropped frame). A jump over 50 m is the floating origin
+// moving: only the translation is dropped, and dropped BEFORE the last-good
+// store, so a jump never becomes the translation a later drop carries --
+// stored first, a jump of hundreds of metres to tens of kilometres was
+// carried into the next dropped frame and moved every pixel with a depth on
+// the world path by it for one frame (the review of 2026-09-04, F3). A
+// carried figure over 50 m is reported so the invariant has a witness on
+// the line.
+//
+// A drop leaves the frame's rows of unknown origin -- another camera's, or
+// the view's own after a real jump -- and the next frame's delta is
+// measured FROM them. Eye run 050423 (2026-09-25, build c9cab91e, the ship
+// rolling about a degree and a half a frame): the chooser resynchronised
+// onto an auxiliary pass parked 148 degrees from the view (dropped, carried),
+// took that pass's identical write again the next frame as the continuous
+// one, and the delta -- zero, which under a still head sits within 3
+// degrees of the head's -- was ACCEPTED as the view's and stored as the last
+// good; the frame after, back on the view and 148 degrees from the parked
+// rows, carried the zero. Two frames of the world standing still under a
+// roll, wherever the transition-flash tracker saw a parked camera
+// (docs/camera-rows-carry-2026-09-25.md). So the standing of the rows a
+// frame measures from is kept: rows a drop left behind are not the view's
+// own, and a delta from them that does not turn AT ALL -- the same
+// orientation to the last bit, which the view does not hold from one frame
+// to the next while the headset is tracked -- is a parked or world-fixed
+// camera's: refused, the last good carried, the rows still suspect. A
+// delta that turns and passes the 3 degrees restores them (the view resuming
+// after a hitch or a resync), so a recovery costs no frame. Measuring from
+// the last ACCEPTED rows instead was weighed and declined: after a real
+// jump every later frame measures across it from a stale anchor, and none
+// is accepted again.
+struct TemporalCameraGate {
+    float lastGoodC[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the last accepted delta
+    float lastGoodTv[3] = {};                            // ...and its translation term
+    bool  lastGoodValid = false;
+    bool  refOwn = false;     // the rows this frame measures from (last frame's) are the view's own
+    bool  measured = false;   // this frame's delta was measured, by either eye...
+    bool  refused = false;    // ...and refused by one...
+    bool  parked = false;     // ...as a parked camera's
+    // Consecutive frames refused as a parked camera's, to the last boundary:
+    // a stay carries one delta for its whole length, and nothing else ends
+    // a stay on a pass that writes the bound block (the head-follow score
+    // trusts that block), so its length is reported.
+    uint32_t parkedRun = 0;
+};
+
+enum class TemporalCameraVerdict : uint8_t {
+    Own,       // the view's own delta: used, and kept as the last good
+    Another,   // over 3 degrees from the head's: another camera's rows, or a stale latch
+    Parked,    // measured from rows a drop left behind, and not turned at all
+};
+
+struct TemporalCameraStep {
+    TemporalCameraVerdict verdict = TemporalCameraVerdict::Own;
+    bool jump = false;          // the floating origin moved: the translation was dropped
+    bool carried = false;       // the last accepted delta stands in for this one
+    bool carriedJump = false;   // ...with a translation over 50 m: zero by construction
+    bool valid = true;          // a delta is in hand, the view's own or carried
+};
+
+// Rows with the same orientation to the last bit: a camera that did not turn.
+inline bool temporalRowsSameTurn(const float a[12], const float b[12]) {
+    for (int r = 0; r < 3; ++r) {
+        if (memcmp(a + r * 4, b + r * 4, sizeof(float) * 3) != 0) return false;
+    }
+    return true;
+}
+
+// One eye's verdict on this frame's delta: W and tv from
+// temporalWorldFromRows(prev, now), move the length of its camMove, diffDeg
+// the delta's angle from the eye's head delta (0 without one). W and tv come
+// back as the delta to use: the rows' own, or the last good carried. Both
+// eyes judge a frame against the same standing; it moves on once a frame, in
+// temporalCameraGateAdvance.
+inline TemporalCameraStep temporalCameraGateStep(TemporalCameraGate& g, const float prev[12],
+                                                 const float now[12], double move,
+                                                 float diffDeg, float W[9], float tv[3]) {
+    TemporalCameraStep s;
+    s.jump = move >= 50.0;
+    if (s.jump) {
+        for (int i = 0; i < 3; ++i) tv[i] = 0.0f;
+    }
+    if (diffDeg > 3.0f) {
+        s.verdict = TemporalCameraVerdict::Another;
+    } else if (!g.refOwn && temporalRowsSameTurn(prev, now)) {
+        s.verdict = TemporalCameraVerdict::Parked;
+        g.parked = true;
+    }
+    g.measured = true;
+    if (s.verdict != TemporalCameraVerdict::Own) {
+        g.refused = true;
+        if (g.lastGoodValid) {
+            memcpy(W, g.lastGoodC, sizeof(g.lastGoodC));
+            memcpy(tv, g.lastGoodTv, sizeof(g.lastGoodTv));
+            s.carried = true;
+            const double carried = std::sqrt(static_cast<double>(tv[0]) * tv[0] +
+                                             static_cast<double>(tv[1]) * tv[1] +
+                                             static_cast<double>(tv[2]) * tv[2]);
+            s.carriedJump = carried >= 50.0;
+        } else {
+            s.valid = false;
+        }
+    } else {
+        memcpy(g.lastGoodC, W, sizeof(g.lastGoodC));
+        if (!s.jump) memcpy(g.lastGoodTv, tv, sizeof(g.lastGoodTv));
+        g.lastGoodValid = true;
+    }
+    return s;
+}
+
+// The frame boundary: the rows just chosen become the next frame's
+// reference (rowsKept), the view's own when a delta to them was measured
+// and no eye refused it. Rows no delta reached -- the first after a frame
+// with no write -- are not known to be the view's.
+inline void temporalCameraGateAdvance(TemporalCameraGate& g, bool rowsKept) {
+    g.refOwn = rowsKept && g.measured && !g.refused;
+    g.parkedRun = g.parked ? g.parkedRun + 1 : 0;
+    g.measured = false;
+    g.refused = false;
+    g.parked = false;
+}
+
 // The whole reprojection for one pixel, as the shader does it: the pixel's
 // direction through this frame's frustum, rotated into last frame's view,
 // projected through last frame's frustum. False when it lands behind the
