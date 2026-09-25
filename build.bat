@@ -83,10 +83,11 @@ REM  once however the guarded run below finishes -- every existing "exit /b"
 REM  in this file already does the right thing without any further changes.
 REM ===========================================================================
 if not defined EDVR_BUILD_GUARDED (
-    python "%ROOT%\tools\build_lock.py" --acquire --note "%~nx0 %*"
+    REM SHIFT in parse_args changes %%0; ROOT retains the original script path.
+    python "%ROOT%\tools\build_lock.py" --acquire --note "build.bat %*"
     if errorlevel 1 exit /b 1
     set "EDVR_BUILD_GUARDED=1"
-    call "%~f0" %*
+    call "%ROOT%\build.bat" %*
     set "EDVR_BUILD_RC=!errorlevel!"
     python "%ROOT%\tools\build_lock.py" --release
     exit /b !EDVR_BUILD_RC!
@@ -667,7 +668,7 @@ REM writer has actually finished (see the rig rules below).
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
-python tools\run_jobs.py --script "%~f0" --times "%BUILD%\rig_times.json" ^
+python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
     --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1

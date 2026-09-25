@@ -3025,6 +3025,15 @@ Retain production camera-ambiguity rejection and all expected refusal reasons.
 The captured source split is now 22 supported draws and four unsupported leg
 draws under the current table.
 
+The combined full build passed and was committed as `24500664`. Its clean
+`--dll-only` promotion exposed an imported build-guard bug: argument parsing
+uses SHIFT, so the later `%~f0` expands to `--dll-only` rather than the script.
+The guard and test-runner invocation now use the absolute `%ROOT%\build.bat`
+path retained before parsing; `--jobs 8` exposed the second affected call. This
+repair requires another full build and clean promotion; no unvalidated DLL is
+installed. The independent lock-acquisition race is not changed in this
+rendering task; only one top-level build is run at a time.
+
 Next Epic capture: move across the same thin white-panel seam. Look for PS91
 substitutions and matching depth/ownership at the seam formerly covered by q35;
 verify joined previous pose and uninterrupted backend history. The
