@@ -301,10 +301,35 @@ const char* motionName(int motion) {
     return motion == 3 ? "head with depth" : motion == 1 ? "head" : "none";
 }
 
-// Per-eye owned resources. Release-before-recreate on any size or format
+struct RigidDrawRows {
+    const void* resource = nullptr;
+    float rows[12] = {};
+    float proj[2] = {};
+    uint64_t vsHash = 0;
+    uint32_t frame = 0, seq = 0, writesAtDraw = 0, observedWritesAtDraw = 0;
+    uint32_t observedEvictionsAtDraw = 0;
+    bool seen = false, observed = false, valid = false;
+};
+
+struct FoveaLeadState {
+    float    px[2] = {0.0f, 0.0f};   // the smoothed lead, render pixels (one-pole, 0.25)
+    int32_t  base[2] = {0, 0};       // the base the crop last RAN at, render pixels
+    uint32_t cropW = 0, cropH = 0;   // ...and the crop size it ran at
+    bool     valid = false;          // base/cropW/H describe a frame the crop really ran
+    bool     ready = false;          // ...and the offset vectors' texture existed on it
+    // The price window's counters (flushWindow prints and clears them).
+    float    peakPx = 0.0f;          // the largest slide applied this window
+    float    peakDeg = 0.0f;
+    double   sumDeg = 0.0;
+    uint32_t frames = 0;             // frames the lead was computed on
+    uint32_t held = 0;               // ...of those, frames the frame's edge held it short
+    uint32_t moved = 0;              // ...and frames whose vectors were offset
+};
+
+// Per-view owned resources. Release-before-recreate on any size or format
 // change; a change of size is also a reset of the history, which cannot
 // mean anything across a resize.
-struct EyeState {
+struct TemporalViewState {
     ID3D11Texture2D* uiHistory[2] = {};
     ID3D11ShaderResourceView* uiHistorySrv[2] = {};
     ID3D11UnorderedAccessView* uiHistoryUav[2] = {};
@@ -435,18 +460,21 @@ struct EyeState {
     uint32_t    w = 0, h = 0;
     DXGI_FORMAT outFmt = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT histFmt = DXGI_FORMAT_UNKNOWN;
-};
-EyeState g_eye[2];
 
-void releaseSrc(EyeState& e) {
+    RigidDrawRows rigidDraw;
+    RigidDrawRows prevRigidDraw;
+    FoveaLeadState foveaLead;
+};
+
+void releaseSrc(TemporalViewState& e) {
     if (e.srcSrv) { e.srcSrv->Release(); e.srcSrv = nullptr; }
     e.srcRes = nullptr;
 }
-void releaseDepth(EyeState& e) {
+void releaseDepth(TemporalViewState& e) {
     if (e.depthSrv) { e.depthSrv->Release(); e.depthSrv = nullptr; }
     e.depthRes = nullptr;
 }
-void releasePeriph(EyeState& e) {
+void releasePeriph(TemporalViewState& e) {
     if (e.prColourUav) { e.prColourUav->Release(); e.prColourUav = nullptr; }
     if (e.prColour) { e.prColour->Release(); e.prColour = nullptr; }
     if (e.prDepthUav) { e.prDepthUav->Release(); e.prDepthUav = nullptr; }
@@ -460,7 +488,7 @@ void releasePeriph(EyeState& e) {
     e.prReduced = false;
     e.prHaveHistory = false;
 }
-void releaseDl(EyeState& e) {
+void releaseDl(TemporalViewState& e) {
     releasePeriph(e);   // the periphery's sizes follow the render's
     if (e.zPrevUav) { e.zPrevUav->Release(); e.zPrevUav = nullptr; }
     if (e.zPrevSrv) { e.zPrevSrv->Release(); e.zPrevSrv = nullptr; }
@@ -493,13 +521,13 @@ void releaseDl(EyeState& e) {
     e.dlHaveHistory = false;
     e.dlLastQpc = 0;
 }
-void releaseCopy(EyeState& e) {
+void releaseCopy(TemporalViewState& e) {
     if (e.copySrv) { e.copySrv->Release(); e.copySrv = nullptr; }
     if (e.copyTex) { e.copyTex->Release(); e.copyTex = nullptr; }
     e.copyW = e.copyH = 0;
     e.copyFmt = DXGI_FORMAT_UNKNOWN;
 }
-void releaseNative(EyeState& e) {
+void releaseNative(TemporalViewState& e) {
     for (int i = 0; i < 2; ++i) {
         if (e.histUav[i]) { e.histUav[i]->Release(); e.histUav[i] = nullptr; }
         if (e.histSrv[i]) { e.histSrv[i]->Release(); e.histSrv[i] = nullptr; }
@@ -511,7 +539,7 @@ void releaseNative(EyeState& e) {
     e.haveHistory = false;
     e.histRead = 0;
 }
-void releaseOwned(EyeState& e) {
+void releaseOwned(TemporalViewState& e) {
     releaseNative(e);
     if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
     if (e.foveaOutSrv) { e.foveaOutSrv->Release(); e.foveaOutSrv = nullptr; }
@@ -524,7 +552,7 @@ void releaseOwned(EyeState& e) {
     e.haveHistory = false;
     e.histRead = 0;
 }
-void releaseUiHistory(EyeState& e) {
+void releaseUiHistory(TemporalViewState& e) {
     for (int k=0;k<2;++k) {
         if (e.uiHistorySrv[k]) { e.uiHistorySrv[k]->Release(); e.uiHistorySrv[k]=nullptr; }
         if (e.uiHistoryUav[k]) { e.uiHistoryUav[k]->Release(); e.uiHistoryUav[k]=nullptr; }
@@ -532,7 +560,7 @@ void releaseUiHistory(EyeState& e) {
     }
     e.uiHistoryValid=false; e.uiHistoryRead=0; e.uiHistoryW=e.uiHistoryH=0;
 }
-void releaseEye(EyeState& e) {
+void releaseEye(TemporalViewState& e) {
     releaseUiHistory(e);
     releaseSrc(e);
     releaseDepth(e);
@@ -540,6 +568,34 @@ void releaseEye(EyeState& e) {
     releaseCopy(e);
     releaseOwned(e);
 }
+
+enum class TemporalAdapterMode { Uninitialized, VR, Flat };
+struct TemporalSession {
+    static constexpr uint32_t kMaxViews = 2;
+    TemporalAdapterMode mode = TemporalAdapterMode::VR;
+    uint32_t viewCount = 2;
+    TemporalViewState views[kMaxViews];
+    TemporalViewState* getViewState(uint32_t index) {
+        if (index >= viewCount) return nullptr;
+        return &views[index];
+    }
+    const TemporalViewState* getViewState(uint32_t index) const {
+        if (index >= viewCount) return nullptr;
+        return &views[index];
+    }
+    TemporalViewState* getViewState(int index) {
+        if (index < 0 || static_cast<uint32_t>(index) >= viewCount) return nullptr;
+        return &views[index];
+    }
+    const TemporalViewState* getViewState(int index) const {
+        if (index < 0 || static_cast<uint32_t>(index) >= viewCount) return nullptr;
+        return &views[index];
+    }
+    void release() {
+        for (uint32_t i = 0; i < kMaxViews; ++i) releaseEye(views[i]);
+    }
+};
+TemporalSession g_session;
 
 // One slot per treated call: the GPU price by timestamp query, and the
 // pass's own count of rejected and clipped pixels copied out to a staging
@@ -781,29 +837,16 @@ uint32_t  g_lastWindowDropped = 0;
 // this -- prints the window's lead line and resets its counters.
 float g_foveaLeadFrames = 0.0f;   // the key: 0 = off, clamped to 0..12
 bool  g_foveaLeadNoted = false;   // the "the head lead is on" line, once per config load
-struct FoveaLeadState {
-    float    px[2] = {0.0f, 0.0f};   // the smoothed lead, render pixels (one-pole, 0.25)
-    int32_t  base[2] = {0, 0};       // the base the crop last RAN at, render pixels
-    uint32_t cropW = 0, cropH = 0;   // ...and the crop size it ran at
-    bool     valid = false;          // base/cropW/H describe a frame the crop really ran
-    bool     ready = false;          // ...and the offset vectors' texture existed on it
-    // The price window's counters (flushWindow prints and clears them).
-    float    peakPx = 0.0f;          // the largest slide applied this window
-    float    peakDeg = 0.0f;
-    double   sumDeg = 0.0;
-    uint32_t frames = 0;             // frames the lead was computed on
-    uint32_t held = 0;               // ...of those, frames the frame's edge held it short
-    uint32_t moved = 0;              // ...and frames whose vectors were offset
-};
-FoveaLeadState g_foveaLead[2];
+
 // Forgotten whenever the crop is not running: a re-engagement starts from
 // the unshifted base with no delta, because a base kept across a gap would
 // slide the rectangle against a frame NVIDIA's history never saw. The
 // window's counters survive -- they belong to the price report, not to one
 // engagement.
 void foveaLeadForget(int eye) {
-    if (eye < 0 || eye > 1) return;
-    FoveaLeadState& st = g_foveaLead[eye];
+    TemporalViewState* v = g_session.getViewState(eye);
+    if (!v) return;
+    FoveaLeadState& st = v->foveaLead;
     st.px[0] = st.px[1] = 0.0f;
     st.base[0] = st.base[1] = 0;
     st.cropW = st.cropH = 0;
@@ -934,8 +977,8 @@ void flushWindow(const char* reason) {
     // so by its treatment. The counters reset either way, so a window's
     // figures are never another window's.
     if (g_foveaLeadFrames > 0.0f) {
-        for (int eyeIdx = 0; eyeIdx < 2; ++eyeIdx) {
-            FoveaLeadState& st = g_foveaLead[eyeIdx];
+        for (uint32_t eyeIdx = 0; eyeIdx < g_session.viewCount; ++eyeIdx) {
+            FoveaLeadState& st = g_session.views[eyeIdx].foveaLead;
             if (st.frames > 0) {
                 const double mean = st.sumDeg / static_cast<double>(st.frames);
                 Log::get().note(
@@ -1894,7 +1937,7 @@ struct TemporalHistoryScope {
 };
 
 // Preserve the actual first-frame inputs before the next eye overwrites them.
-void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceView* scene,
+void stageEyeInputs(ID3D11DeviceContext* ctx,TemporalViewState& e,ID3D11ShaderResourceView* scene,
                     ID3D11Texture2D* ui,float uiBound,float uiFlags) {
     if(g_eyeRunLeft<=0 || g_eyeRunTaken!=0 || g_eyeInputs[0])return;
     ID3D11Texture2D* textures[kEyeInputs]={e.dlMv,e.dlDepth,ui,e.dlMask};
@@ -2143,7 +2186,7 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
     FILE* f = nullptr;
     if (_wfopen_s(&f, manifest, L"wb") || !f) {
         Log::get().note("eye capture: could not write decision manifest %ls.", manifest);
-        for (EyeState& e : g_eye) {
+        for (TemporalViewState& e : g_session.views) {
             if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav=nullptr; }
             if (e.dlDecision) { e.dlDecision->Release(); e.dlDecision=nullptr; }
         }
@@ -2181,7 +2224,7 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
     const bool ok = clean && closed == 0;
     Log::get().note("eye capture: per-frame DLSS decision manifest %ls: %s.", manifest,
                     ok ? "written" : "write failed");
-    for (EyeState& e : g_eye) {
+    for (TemporalViewState& e : g_session.views) {
         if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav=nullptr; }
         if (e.dlDecision) { e.dlDecision->Release(); e.dlDecision=nullptr; }
     }
@@ -2365,7 +2408,7 @@ void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
 // the station's distance in depth and inside its grid, and they do not
 // turn with it (the body path's fourth flight, 2026-09-08: "artifacts
 // particularly with the 3d targeting UI", the text "smearing").
-bool ensureUiMaskSrv(ID3D11Device* dev, EyeState& e, ID3D11Texture2D* mask) {
+bool ensureUiMaskSrv(ID3D11Device* dev, TemporalViewState& e, ID3D11Texture2D* mask) {
     if (!dev || !mask) return false;
     if (e.uiMaskRes == static_cast<void*>(mask) && e.uiMaskSrv) return true;
     if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
@@ -2450,15 +2493,6 @@ struct RowsChoiceCapture {
     uint32_t candidates = 0, boundCandidates = 0;
     uint32_t continuousCandidates = 0, twinCandidates = 0;
 };
-struct RigidDrawRows {
-    const void* resource = nullptr;
-    float rows[12] = {};
-    float proj[2] = {};
-    uint64_t vsHash = 0;
-    uint32_t frame = 0, seq = 0, writesAtDraw = 0, observedWritesAtDraw = 0;
-    uint32_t observedEvictionsAtDraw = 0;
-    bool seen = false, observed = false, valid = false;
-};
 struct ObservedRowsWrite {
     const void* resource = nullptr;
     float rows[12] = {};
@@ -2511,8 +2545,6 @@ bool     g_prevValid = false;
 uint32_t g_camPairs = 0;
 bool     g_camNoted = false;
 RowsChoiceCapture g_rowsChoice;
-RigidDrawRows g_rigidDraw[2];
-RigidDrawRows g_prevRigidDraw[2];
 
 ObservedRowsWrite* observedRowsSlot(const void* resource) {
     int freeSlot = -1, oldest = 0;
@@ -2771,7 +2803,7 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt,
     return true;
 }
 
-bool ensureDecisionTexture(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+bool ensureDecisionTexture(ID3D11Device* dev, TemporalViewState& e, uint32_t w, uint32_t h) {
     if (e.dlDecision) {
         D3D11_TEXTURE2D_DESC d{}; e.dlDecision->GetDesc(&d);
         if (d.Width == w && d.Height == h && d.Format == DXGI_FORMAT_R32G32B32A32_FLOAT &&
@@ -2815,7 +2847,7 @@ bool maskFormatOk(ID3D11Device* dev) {
 // another size goes with it; the trained block rebuilds its own, and its
 // test sees the missing output). A failure leaves e.zPrev null, which is
 // how the pass knows to keep the mask off; the mask texture is optional.
-bool ensureUiHistory(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+bool ensureUiHistory(ID3D11Device* dev, TemporalViewState& e, uint32_t w, uint32_t h) {
     if (e.uiHistoryW != w || e.uiHistoryH != h) releaseUiHistory(e);
     if (e.uiHistory[0] && e.uiHistory[1]) return true;
     for (int k=0;k<2;++k) {
@@ -2831,12 +2863,12 @@ bool ensureUiHistory(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
                     w,h,static_cast<double>(w)*h*8.0/1048576.0);
     return true;
 }
-bool ensureBiasMask(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+bool ensureBiasMask(ID3D11Device* dev, TemporalViewState& e, uint32_t w, uint32_t h) {
     if (e.dlMask) return true;
     return maskFormatOk(dev) && makeTex(dev,w,h,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R8_UNORM,
         D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,&e.dlMask,nullptr,&e.dlMaskUav);
 }
-bool ensureMoverPair(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h, bool withMask=true) {
+bool ensureMoverPair(ID3D11Device* dev, TemporalViewState& e, uint32_t w, uint32_t h, bool withMask=true) {
     if (!e.dlDepth || e.dlW != w || e.dlH != h) {
         releaseDl(e);
         if (!makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
@@ -2908,7 +2940,7 @@ bool     g_depthHeld = false;      // the last treat had the depth in hand
 uint32_t g_depthLostCount = 0;
 
 // Only native TAA (including a refused NVIDIA evaluation) needs this storage.
-bool ensureNative(ID3D11Device* dev, EyeState& e, DXGI_FORMAT viewFmt) {
+bool ensureNative(ID3D11Device* dev, TemporalViewState& e, DXGI_FORMAT viewFmt) {
     if (e.outTex && e.hist[0] && e.hist[1]) return true;
     releaseNative(e);
     bool made = makeTex(dev, e.w, e.h, e.outFmt, viewFmt,
@@ -3343,14 +3375,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (!ok) failOnce("the statistics buffer could not be created");
     }
 
-    EyeState* eptr = ok ? &g_eye[eye] : nullptr;
+    TemporalViewState* eptr = ok ? g_session.getViewState(eye) : nullptr;
 
     // The input view: over the source when it allows one, else the region
     // copied out (the theater's copy-through, the resolve's too).
     ID3D11ShaderResourceView* inSrv = nullptr;
     bool viaCopy = false;
     if (ok) {
-        EyeState& e = *eptr;
+        TemporalViewState& e = *eptr;
         if (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
             if (e.srcRes != static_cast<void*>(src) || !e.srcSrv) {
                 releaseSrc(e);
@@ -3397,7 +3429,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     if (ok && nearZ > 0.0f && farZ > nearZ) {
         g_lastNear = nearZ;
         g_lastFar = farZ;
-        EyeState& e = *eptr;
+        TemporalViewState& e = *eptr;
         ID3D11Texture2D* dtex = nullptr;
         if (depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex) && dtex) {
             if (e.depthRes != static_cast<void*>(dtex) || !e.depthSrv) {
@@ -3506,7 +3538,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
     // Input identity is independent of native fallback resource allocation.
     if (ok) {
-        EyeState& e = *eptr;
+        TemporalViewState& e = *eptr;
         if (e.w != w || e.h != h || e.outFmt != sd.Format || e.histFmt != g_histFmt) {
             trace.events |= 2u;
             releaseOwned(e);
@@ -3518,7 +3550,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     bool uiEvidenceWritten = false;
     bool uiResolveWritten = false;
     if (ok) {
-        EyeState& e = *eptr;
+        TemporalViewState& e = *eptr;
         if(e.screenHistory!=(screenSrv!=nullptr)) {
             trace.events |= 4u;
             e.haveHistory=e.dlHaveHistory=e.zPrevValid=false;
@@ -3960,7 +3992,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             memcpy(trace.selectedRows, g_rowsChoice.selectedRows, sizeof(trace.selectedRows));
             memcpy(trace.selectedProj, g_rowsChoice.selectedProj, sizeof(trace.selectedProj));
         }
-        const RigidDrawRows& draw = g_rigidDraw[eye];
+        TemporalViewState* eyeView = g_session.getViewState(eye);
+        static const RigidDrawRows s_emptyDraw{};
+        const RigidDrawRows& draw = eyeView ? eyeView->rigidDraw : s_emptyDraw;
         if (draw.seen && draw.frame == g_rowsFrame) {
             trace.cameraDrawFlags |= kDrawSeen;
             trace.drawSeq = draw.seq;
@@ -3975,7 +4009,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 memcpy(trace.drawRows, draw.rows, sizeof(trace.drawRows));
                 memcpy(trace.drawProj, draw.proj, sizeof(trace.drawProj));
             }
-            const RigidDrawRows& before = g_prevRigidDraw[eye];
+            const RigidDrawRows& before = eyeView ? eyeView->prevRigidDraw : s_emptyDraw;
             if (draw.valid && before.valid && before.frame + 1 == draw.frame) {
                 trace.cameraDrawFlags |= kDrawPreviousValid;
                 float drawRotation[9];
@@ -4250,8 +4284,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // (foveaLeadBase says why the extents may not), and the
                     // slide is handed to the motion pass so the history that IS
                     // there stays registered.
-                    if (g_foveaLeadFrames > 0.0f && eye >= 0 && eye < 2) {
-                        FoveaLeadState& st = g_foveaLead[eye];
+                    TemporalViewState* eyeView = g_session.getViewState(eye);
+                    if (g_foveaLeadFrames > 0.0f && eyeView) {
+                        FoveaLeadState& st = eyeView->foveaLead;
                         float mvx = 0.0f, mvy = 0.0f;
                         // Which rows a FAR pixel at the centre would take THIS
                         // frame, so MV_centre is the vector the shader actually
@@ -5357,9 +5392,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // this frame: counted here, at the dispatch that wrote
                     // them, not where the slide was decided -- a frame that
                     // never dispatched must not be counted as offset.
-                    if (leadBound && (p.lead[0] != 0.0f || p.lead[1] != 0.0f) &&
-                        eye >= 0 && eye < 2) {
-                        ++g_foveaLead[eye].moved;
+                    if (leadBound && (p.lead[0] != 0.0f || p.lead[1] != 0.0f)) {
+                        TemporalViewState* eyeView = g_session.getViewState(eye);
+                        if (eyeView) {
+                            ++eyeView->foveaLead.moved;
+                        }
                     }
                     // ...and the field goes back to zero, so the own resolve's
                     // own setParams below cannot ship a stale slide.
@@ -5461,8 +5498,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             // history now belongs to, the size it ran at, and
                             // whether the offset vectors were there to make the
                             // next frame's slide deliverable.
-                            if (eye >= 0 && eye < 2) {
-                                FoveaLeadState& st = g_foveaLead[eye];
+                            TemporalViewState* eyeView = g_session.getViewState(eye);
+                            if (eyeView) {
+                                FoveaLeadState& st = eyeView->foveaLead;
                                 st.base[0] = static_cast<int32_t>(fcx);
                                 st.base[1] = static_cast<int32_t>(fcy);
                                 st.cropW = fcw;
@@ -6052,9 +6090,9 @@ void temporalPassConfigure(Config& cfg) {
         g_rowsObservedWrites = 0;
         g_rowsObservedEvictions = 0;
         g_rowsChoice = RowsChoiceCapture{};
-        for (int eye = 0; eye < 2; ++eye) {
-            g_rigidDraw[eye] = RigidDrawRows{};
-            g_prevRigidDraw[eye] = RigidDrawRows{};
+        for (uint32_t eye = 0; eye < g_session.viewCount; ++eye) {
+            g_session.views[eye].rigidDraw = RigidDrawRows{};
+            g_session.views[eye].prevRigidDraw = RigidDrawRows{};
         }
         g_boundLatchSeq = 0;
         g_boundLatchValid = false;
@@ -6648,12 +6686,16 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx) {
 }
 
 bool temporalPassWantsRigidDraw(int eye) {
-    if (!detail::g_temporalPassWantedFssChrome || eye < 0 || eye > 1) return false;
-    return !g_rigidDraw[eye].seen || g_rigidDraw[eye].frame != g_rowsFrame;
+    if (!detail::g_temporalPassWantedFssChrome) return false;
+    TemporalViewState* v = g_session.getViewState(eye);
+    if (!v) return false;
+    return !v->rigidDraw.seen || v->rigidDraw.frame != g_rowsFrame;
 }
 
 void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexShaderHash) {
     if (!temporalPassWantsRigidDraw(eye)) return;
+    TemporalViewState* v = g_session.getViewState(eye);
+    if (!v) return;
     RigidDrawRows sample{};
     sample.seen = true;
     sample.frame = g_rowsFrame;
@@ -6672,28 +6714,29 @@ void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexSha
             memcpy(sample.proj, observed->proj, sizeof(sample.proj));
         }
     }
-    g_rigidDraw[eye] = sample;
+    v->rigidDraw = sample;
 }
 
 void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
                           const float* eyeOffset) {
-    if (eye < 0 || eye > 1) return;
-    EyeState& e = g_eye[eye];
-    e.headNoted = false;
+    TemporalViewState* e = g_session.getViewState(eye);
+    if (!e) return;
+    e->headNoted = false;
     if (!prevPose || !nowPose || !eyeOffset) return;
-    memcpy(e.headPrev, prevPose, sizeof(e.headPrev));
-    memcpy(e.headNow, nowPose, sizeof(e.headNow));
-    memcpy(e.eyeOff, eyeOffset, sizeof(e.eyeOff));
-    e.headNoted = true;
+    memcpy(e->headPrev, prevPose, sizeof(e->headPrev));
+    memcpy(e->headNow, nowPose, sizeof(e->headNow));
+    memcpy(e->eyeOff, eyeOffset, sizeof(e->eyeOff));
+    e->headNoted = true;
 }
 
 void temporalPassFrameBoundary() {
     if (!detail::g_temporalPassWantedFssChrome) return;
-    for (int eye = 0; eye < 2; ++eye) {
-        if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
-            g_prevRigidDraw[eye] = g_rigidDraw[eye];
+    for (uint32_t eye = 0; eye < g_session.viewCount; ++eye) {
+        TemporalViewState& v = g_session.views[eye];
+        if (v.rigidDraw.seen && v.rigidDraw.frame == g_rowsFrame) {
+            v.prevRigidDraw = v.rigidDraw;
         } else {
-            g_prevRigidDraw[eye] = RigidDrawRows{};
+            v.prevRigidDraw = RigidDrawRows{};
         }
     }
     ++g_rowsFrame;
@@ -7158,7 +7201,7 @@ void temporalPassShutdown() {
         Log::get().note("temporal aa: %u eye-submits treated this session.",
                         g_treats);
     }
-    for (EyeState& e : g_eye) releaseEye(e);
+    g_session.release();
     for (Slot& q : g_slots) releaseSlot(q);
     for(auto& overview:g_eyeRunStaging)if(overview){overview->Release();overview=nullptr;}
     for (int k = 0; k < kEyeRun; ++k) {
@@ -7188,10 +7231,11 @@ void temporalPassShutdown() {
 }
 
 bool temporalPassEyeOffset(int eye, float out[3]) {
-    if (eye < 0 || eye > 1 || !out) return false;
-    const EyeState& e = g_eye[eye];
-    if (e.eyeOff[0] == 0.0f && e.eyeOff[1] == 0.0f && e.eyeOff[2] == 0.0f) return false;
-    memcpy(out, e.eyeOff, sizeof(e.eyeOff));
+    if (!out) return false;
+    const TemporalViewState* e = g_session.getViewState(eye);
+    if (!e) return false;
+    if (e->eyeOff[0] == 0.0f && e->eyeOff[1] == 0.0f && e->eyeOff[2] == 0.0f) return false;
+    memcpy(out, e->eyeOff, sizeof(e->eyeOff));
     return true;
 }
 
