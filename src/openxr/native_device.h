@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include "../common/system_d3d11.h"
+#include "native_trace.h"
 
 namespace edvr::openxr {
 class NativeDevice {
@@ -93,8 +94,16 @@ class NativeDevice {
   // obtained ("mapped", "loaded" or "none") and the path it actually has.
   const char* separateModuleRoute()const{return separateRoute_;}
   const std::string& separateModulePath()const{return separateModule_;}
-  void reset(){context_.Reset();device_.Reset();feature_=D3D_FEATURE_LEVEL_1_0_CORE;
-    if(systemModule_){FreeLibrary(systemModule_);systemModule_=nullptr;}}
+  void reset() {
+    context_.Reset();
+    device_.Reset();
+    feature_ = D3D_FEATURE_LEVEL_1_0_CORE;
+    if (systemModule_) {
+      nativeTracePrintf("device_module_reset,pinned=%u,path=%s\n",
+          unsigned(edvr::isSystemD3D11Pinned()), separateModule_.c_str());
+      systemModule_ = nullptr;
+    }
+  }
   ID3D11Device* device()const{return device_.Get();}
   ID3D11DeviceContext* context()const{return context_.Get();}
   D3D_FEATURE_LEVEL featureLevel()const{return feature_;}

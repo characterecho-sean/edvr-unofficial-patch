@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <d3d11.h>
 
+#include <atomic>
 #include <string>
 
 namespace edvr {
@@ -73,6 +74,14 @@ inline SystemD3D11 openSystemD3D11() {
     return out;
 }
 
+// Records whether systemD3D11CreateDevice() holds a permanent reference to
+// System32's d3d11.dll.
+inline std::atomic<bool> g_systemD3D11Pinned{false};
+
+inline bool isSystemD3D11Pinned() {
+    return g_systemD3D11Pinned.load(std::memory_order_relaxed);
+}
+
 // D3D11CreateDevice from System32's d3d11.dll, which stays mapped for the life
 // of the process. Null when the module cannot be had; a caller that gets null
 // reports it the way it reports any other failed device.
@@ -80,6 +89,7 @@ inline PFN_D3D11_CREATE_DEVICE systemD3D11CreateDevice() {
     static const PFN_D3D11_CREATE_DEVICE create = [] {
         const SystemD3D11 system = openSystemD3D11();
         if (!system.module) return PFN_D3D11_CREATE_DEVICE(nullptr);
+        g_systemD3D11Pinned.store(true, std::memory_order_relaxed);
         return reinterpret_cast<PFN_D3D11_CREATE_DEVICE>(GetProcAddress(system.module, "D3D11CreateDevice"));
     }();
     return create;
