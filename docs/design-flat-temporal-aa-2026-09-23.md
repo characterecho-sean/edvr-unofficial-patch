@@ -4,9 +4,10 @@
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. Main `b969a4e5` is included. Latest analyzed Epic build
-  is `22fe85d2`; section 54 records recovery after resize and the later shader
-  coverage failure. Sean reports no menu shimmer and apparently none on the
-  hull. Section 53 records the preceding menu/cockpit F10 evidence. One live
+  is `ad7607c6`; section 55 records 31 unrecognized station/on-foot shader
+  pairs and a separate on-foot HDR camera conflict. Section 54's five mappings
+  passed full validation and are installed. Sean reports good ship/station
+  visuals. Section 53 records the preceding menu/cockpit F10 evidence. One live
   projection failure now has an exact cause: first-seen topology with complete
   source shadow and an already prepared private buffer. Cockpit motion/depth
   capture is complete; menu pool snapshots reach the per-family cap. Section 51
@@ -27,19 +28,18 @@
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
-- **Open:** five newly captured projection pairs, backend/scene coverage,
+- **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
   corona-smear regression and mod effect ordering. Scene/depth identity, camera
   encoding and handoff have flight evidence; correct motion for every rendered
   surface and VR regression remain unqualified.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** full validation and flight test of five exact-pair mappings from
-  saved bytecode; focused recipe/math/viewport rig passes. Restarting directly
-  in 4K reproduced the same cockpit failure, ruling out stale resize state.
-  Resolution recovery itself worked; do not modify its lifecycle without new
-  evidence. Preserve high-G motion and strict depth ownership; do not repeat
-  the qualified PS91/BFE hypotheses. The separate menu hangar-floor P1 defect
+- **Next:** use the saved shader inventory for exact projection mappings;
+  investigate the on-foot camera conflict separately before admitting those
+  frames. Existing evidence does not justify ignoring the alternate projection.
+  Preserve high-G motion and strict depth ownership; do not repeat qualified
+  PS91/BFE or stale-resize hypotheses. The separate menu hangar-floor P1 defect
   remains open. VR still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
@@ -3296,3 +3296,109 @@ The focused collector policy rig compiles and passes all existing math and
 viewport checks plus the five exact-pair mappings and rejected companion
 identities. The new inverse-sky pair also passes the existing owned-HDR 0..0
 viewport contract. Full build and flight validation remain separate gates.
+
+## 55. Station, hangar and concourse coverage audit (2026-09-25)
+
+Verified Epic `edvr_gfx_20260925_103859.log` against installed `ad7607c6`,
+build `6AB6A2CD`. The prior five mappings passed full validation and clean DLL
+promotion before installation. Sean reports good ship/station visuals and
+requests a coverage audit of docking, hangar and concourse F10s. This audit
+does not change the installed rendering code.
+
+There are 31 distinct unrecognized VS/PS pairs (29 distinct VS hashes), with no
+unknown compute projection observed. One depth-only draw has no PS; this is
+distinct from a bytecode capture failure. Unknown pairs first appear at
+10:41:02, then more station/interior pairs at 10:43:06 onward. Coverage is not
+continuously broken: a clean jittered interval lasts from approximately
+10:42:05 to 10:43:06, reaching a treated streak of 5,551 frames. Once the later
+pairs appear, repeated unknown-recipe failures force zero jitter and per-frame
+history resets. Backend-failure remains zero throughout.
+
+| F10 arm (local time) | Saved final images | Draw evidence |
+| --- | --- | --- |
+| 10:41:23, frame 63034 | Frame 63035 complete; 4K byte cap stops at one sample | 436/434 draws retained; motion auxiliary evidence partial |
+| 10:43:21, frame 73528 | Frame 73529 complete; 4K byte cap stops at one sample | 512 of 1525/1524 draws retained; motion auxiliary evidence absent |
+| 10:44:47, frame 81054 | None; arm expires after 900 unqualified frames | No qualified frame |
+| 10:45:16, frame 82553 | None before log ends; no completion or expiry recorded | No qualified frame through the last recorded retry |
+
+The first two samples have complete final motion/depth resources, but their
+per-draw capture limits prevent claiming complete draw-level coverage. The
+later F10s still collect shader/projection diagnostics even though the image
+capture never qualifies. All reported samples are native 3840x2160.
+
+A separate persistent refusal starts at 10:44:03.245, frame 77125:
+`hdr-camera-changed`. The reference draw is `68DDDEF04D9894AF/06332CA168B6DA63`
+with viewport depth range 0..0; the next conflicting draw is
+`88DCF1164C640EC3/494506A63091DF8C` with range 0..1. Both write the same HDR
+target and use the same DSV and b1 buffer identity, but b1 is rewritten between
+draws. Rows 270..272 change XY scale, and 273.z changes from 0.025 to 0.0675.
+The treated count freezes at 17,821 through the end of the log as
+`conflicting-hdr-target-or-camera` refuses the handoff. Adding projection
+recipes alone cannot resolve this separate issue.
+
+Ruled out: the later missing F10 images proving capture hotkey failure; the
+arms and automatic shader saves are recorded, while every candidate frame is
+refused by the HDR camera contract. Do not bypass this contract merely because
+the render target and depth pointers match.
+
+Bytecode classification: 30 projected pairs use existing layouts; one screen
+composite is unchanged. No additional PS projection matrix was identified.
+These classifications do not establish object-motion coverage or authorize
+mixed-camera draws. Exact inventory (instruction numbers are D3DDisassemble):
+
+| VS | PS | Recipe | VS instruction proof |
+|---|---|---|---|
+| EB5234DB6ADB491D | DC603C35BBE74B31 | ForwardColumns VS b1 row270 (byte4320) | 136..141 |
+| 637C27B86091BD60 | 48D45E37C62839E9 | ForwardColumns VS b1 row270 (byte4320) | 120..125 |
+| C171BD0C4B585221 | 6855D1919FC5E0C0 | ForwardColumns VS b1 row270 (byte4320) | 120..125 |
+| 436193B352A2897E | 51EE1F922FD220B0 | ForwardColumns VS b1 row270 (byte4320) | 136..141 |
+| 4D24A7A6C2D12733 | B70DF49F678E806F | ForwardColumns VS b1 row270 (byte4320) | 209..214 |
+| DE545DC8EE4FBB87 | A6070F9DD1CFB601 | ForwardColumns VS b1 row270 (byte4320) | 119..124 |
+| 98397963AAEC45D3 | 8717694A527EC745 | ForwardColumns VS b1 row270 (byte4320) | 119..124 |
+| D005EBB14A22EA0E | 302226F2D8C0938A | ForwardDp4 VS b0 row4 (byte64) | 81..86 |
+| D005EBB14A22EA0E | E92C14AA3E51C743 | ForwardDp4 VS b0 row4 (byte64) | 81..86 |
+| E308565BF97FDE0B | 0544F1CC95FD1F12 | ForwardColumns VS b1 row270 (byte4320) | 208..213 |
+| 5B0068AF5630F96B | A5E2331517988BD8 | ForwardColumns VS b1 row270 (byte4320) | 104..109 |
+| 24DE25E496342EB8 | 1A53D2791C12CE92 | ForwardDp4 VS b2 row10 (byte160) | 63..69 |
+| 1C5062229AA40CE4 | 2519C9050946D545 | ForwardColumns VS b1 row270 (byte4320) | 19..27 |
+| ABF539A8C5CCC1B7 | 3F71C89CA34DF25B | ForwardColumns VS b1 row270 (byte4320) | 96..101 |
+| 2B3F53DDA00256E2 | B2DE0A41A4C2B4F5 | ForwardColumns VS b1 row270 (byte4320) | 138..143 |
+| 38470D38E07CBDEB | 0A80DFD89B15A05B | ForwardDp4 VS b0 row4 (byte64) | 77..82 |
+| 6D8886012A4C6785 | 6F3252AB8579C1E3 | ForwardDp4 VS b0 row4 (byte64) | 75..81 |
+| B018D143700AB803 | B403F48CB35D9739 | ForwardDp4 VS b0 row4 (byte64) | 75..78 |
+| 899165B9EE284E74 | 26EA0826BD6824E6 | ForwardColumns VS b1 row270 (byte4320) | 167..172 |
+| B121A79E457669E8 | 777BF099CBAA7C50 | ForwardDp4 VS b2 row10 (byte160) | 70..76 |
+| A7339D1F8A5AC0D0 | D3891373E13BAD40 | ForwardDp4 VS b2 row10 (byte160) | 62..65 |
+| C2208C162D010083 | 0000000000000000 | ForwardColumns VS b1 row270 (byte4320) | 85..90 |
+| 44C290CC444D1EBE | 3154942271AD5810 | ForwardColumns VS b1 row270 (byte4320) | 4..12 |
+| 44C290CC444D1EBE | FD32C5433BD4C015 | ForwardColumns VS b1 row270 (byte4320) | 4..12 |
+| EB686C4180DFC6A6 | B11CD77D729C2AEE | ForwardColumns VS b1 row270 (byte4320) | 4..12 |
+| 0B71713BCDE4B6C0 | FA7411BF7E4C4088 | ForwardColumns VS b1 row270 (byte4320) | 36..41 |
+| B553BB479B7C0B97 | 68ABCB9FEF6CA66C | Unchanged | 11..21 |
+| AFFEF0187F1EBC9F | 41152F82C6E8BE1F | InverseScreenRay VS b2 row41 (byte656) | 3..10 |
+| A1B7CFCD0BE7493E | 992DE24C01E04A27 | ForwardDp4 VS b2 row10 (byte160) | 62..65 |
+| 889A5279E68F0672 | F70549D991FF0E9B | ForwardColumns VS b1 row270 (byte4320) | 135..140 |
+| 76ED1E4F8C72C26E | 7ECF7C83FD5AD373 | ForwardDp4 VS b0 row4 (byte64) | 78..83 |
+
+B018/B403 is projected geometry even though B403 also accompanies an inert VS.
+AFFEF reconstructs a ray from CB2[41..44], so its fullscreen shape is not proof
+that it is unchanged. The four b2 forward cases pass view-position varyings
+used by PS depth reconstruction; keep the existing forward math. The B553
+screen composite has no camera/depth reconstruction and must not receive a
+geometry projection patch.
+
+The on-foot 88DCF shader does not consume changed b1[270..274]; its only b1
+read is [275].xyz, and its actual projection is b0[4..7]. However, the existing
+reference comparison reports 900 unmatched samples in the hangar and 247 on the
+concourse, with spatial/depth differences up to 0.3931. Ignoring the b1
+conflict without understanding b0 would risk using scene motion for a genuinely
+different projection. Existing raw matrix probes target other shader pairs, and
+no qualified on-foot pixel capture is available.
+
+Next diagnostic: during F10, before frame refusal, capture the conflicting
+draw's b0[4..7], b1[270..275], named scene camera, reference HDR camera, actual
+CB binding ranges/write provenance and depth/stencil state. Compare b0 with
+both camera bases to distinguish an incidental bound camera from a real
+alternate projection. Keep rendering safeguards unchanged until this is
+established. The current audit changes documentation only; shader blobs,
+disassemblies and game captures remain local.
