@@ -4,16 +4,19 @@
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. Main `b969a4e5` is included. Latest analyzed Epic build
-  is `7b88349c`; section 53 records its menu/cockpit F10 evidence. One live
+  is `22fe85d2`; section 54 records recovery after resize and the later shader
+  coverage failure. Sean reports no menu shimmer and apparently none on the
+  hull. Section 53 records the preceding menu/cockpit F10 evidence. One live
   projection failure now has an exact cause: first-seen topology with complete
   source shadow and an already prepared private buffer. Cockpit motion/depth
   capture is complete; menu pool snapshots reach the per-family cap. Section 51
   qualifies live PS91 motion ownership: all 45 changed pixels have exact-depth
   slots and valid joined history. Same-code overlay depth overwrites now match
   the sampled menu/cockpit rejection masks exactly. Guarded depth preservation
-  and ready-buffer live plan admission are implemented, pending full validation
-  and a flight. Sections 26-28 establish camera ownership/jitter; 34-37 cover
-  F8 and menu treatment; 40-43 establish cockpit projection and smoother DLSS
+  and ready-buffer live plan admission passed full validation and the next
+  flight; overlay guards have zero declines and one live plan retarget
+  succeeded. Sections 26-28 establish camera ownership/jitter; 34-37 cover F8
+  and menu treatment; 40-43 establish cockpit projection and smoother DLSS
   edges; 45-48 diagnose missing ownership and its binding repair. The first
   loading crash did not reproduce on retry; its cause remains unknown. Sections
   49-50 qualify rigid BFE shell motion and the PS91 register correction.
@@ -24,19 +27,20 @@
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
-- **Open:** object-relative flat motion, menu ship shimmer, backend/scene
-  coverage, corona-smear regression and mod effect ordering. Scene/depth
-  identity, camera encoding and handoff have flight evidence; correct motion
-  for every rendered surface and VR regression remain unqualified.
+- **Open:** five newly captured projection pairs, backend/scene coverage,
+  corona-smear regression and mod effect ordering. Scene/depth identity, camera
+  encoding and handoff have flight evidence; correct motion for every rendered
+  surface and VR regression remain unqualified.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** after full validation, F10 at the menu ship and during
-  cockpit movement. Check guarded overlay draws/copy counts, remaining exact
-  depth rejects, live plan retargets and reset events. Preserve high-G motion
-  and strict depth ownership; do not repeat the qualified PS91/BFE hypotheses.
-  The separate menu hangar-floor P1 defect remains open. VR still needs
-  regression tests.
+- **Next:** full validation and flight test of five exact-pair mappings from
+  saved bytecode; focused recipe/math/viewport rig passes. Restarting directly
+  in 4K reproduced the same cockpit failure, ruling out stale resize state.
+  Resolution recovery itself worked; do not modify its lifecycle without new
+  evidence. Preserve high-G motion and strict depth ownership; do not repeat
+  the qualified PS91/BFE hypotheses. The separate menu hangar-floor P1 defect
+  remains open. VR still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -3227,3 +3231,68 @@ original game t3 binding returns after each draw. The engine-motion rig passes
 the optional whole-corpus run stops later on an unrelated missing shader dump
 and must not be described as passing. Full validation and flight qualification
 remain separate gates.
+
+## 54. Resolution transition and new projection pairs (2026-09-25)
+
+Verified Epic `edvr_gfx_20260925_101944.log` against `22fe85d2`, build
+`6AB69EDB`. Full validation, clean DLL promotion, feature-branch push and Epic
+installation passed before this run. The INI hash remained unchanged. Sean
+reports no shimmer in the menu and apparently none on the hull. Both F10s saved
+three complete final samples without failures: menu
+`20260925_162038_975_14456_1` and cockpit `20260925_162151_205_14456_2`. The
+overlay summaries have zero state/resource/shader declines, including 4K; menu
+has 69 guarded draws per copy. The live-plan correction exercised one
+successful retarget.
+
+The 2560x1440 to 3840x2160 transition occurs at 10:23:10.872. At 10:23:25.952,
+temporal rendering is healthy: 449/449 frames continue history, zero failed
+frames or resets, history-valid=1 and continue-run=1022.
+
+Ruled out: resize permanently losing the DLSS backend, because 4K jitter and
+history recover and continue before the later failure; backend-failure remains
+zero throughout. Sean changed only fullscreen and resolution, not other
+graphics settings. The log does not establish why these permutations appeared.
+
+At 10:23:27.295, frame 41511, three unknown projection pairs use the exact
+named/phase scene depth, a 3840x2160 viewport and normal depth range. They fail
+coverage after 45 draws were jittered, force spatial fallback for that frame,
+then prevent history accumulation on every subsequent frame:
+
+| Draw | VS | PS |
+| --- | --- | --- |
+| q385 | `71DD9863DCFC0986` | `43E5E6EB67AC751B` |
+| q445 | `3530A6FD15EDE145` | `13B224F056C39D85` |
+| q447 | `9FFA5D5E79F04873` | `8134D09E3462E904` |
+
+At 10:24:05.698, `19F70CE80DA3242B/C8FBD8A982C0729C` adds another unknown pair
+at 4K. At 10:24:26.349, `A52ECB960783BB35/84965D3C050FB01B` appears at a
+2880x1620 render viewport with depth range 0..0. All bytecode is locally
+available under Epic `edvr_logs/shaders`; these are classification failures,
+not evidence of missing projection-source buffers or a failed DLSS evaluate.
+
+Actual bytecode classifies all five using existing layouts. VS 71DD, 3530 and
+19F7 form clip position by scalar-weighted CB1[270..273] columns; their CB0
+local transforms remain untouched. VS 9FFA uses four dot products from
+CB0[4..7]. VS A52E has the same CB2[11..14] inverse clip-ray calculation as the
+qualified F8FA sky variant and the same PS companion; only its exposure output
+differs. Surface/cloud pixel companions use pixel-grid noise and lighting
+transforms, with no additional projection matrix to patch. Add exact pair
+mappings with the existing ownership checks and layout math. No broad
+unknown-shader admission or resize workaround is justified.
+
+Restart confirmation: `edvr_gfx_20260925_102718.log` is also verified against
+`22fe85d2`. The menu continues history normally (437/437 frames, zero resets at
+10:27:59). The cockpit repeats four of the same unknown pairs (19F7, 71DD, 9FFA
+and 3530); A52E is absent in this run. Every cockpit reporting window has zero
+jitter and resets each treated frame, with backend-failure=0. Ruled out: stale
+resources retained across ResizeBuffers, because a fresh process reproduces the
+same unknown-pair coverage failures. F10 `20260925_162909_333_27076_1` saves
+two complete final samples without failures. Render dimensions are 2880x1620
+into 3840x2160 output, so this restarted run uses 0.75x DLSS rather than
+native-scale DLAA. The user reports changing only display mode and resolution;
+do not infer an additional manual SS change.
+
+The focused collector policy rig compiles and passes all existing math and
+viewport checks plus the five exact-pair mappings and rejected companion
+identities. The new inverse-sky pair also passes the existing owned-HDR 0..0
+viewport contract. Full build and flight validation remain separate gates.

@@ -261,6 +261,29 @@ inline int flatProjectionRecipeTests() {
         expect(flatProjectionDrawRecipes(pair[0],pair[1]^1ull).count==0,
             "Epic 6e9b companion identity required");
     }
+    // Epic 22fe85d2: all five unknown pairs seen after display changes.
+    // Only the measured vertex span changes; no pixel binding is requested.
+    const ObservedPair epic22fe[] = {
+        {0x71DD9863DCFC0986ull,0x43E5E6EB67AC751Bull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x3530A6FD15EDE145ull,0x13B224F056C39D85ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x19F70CE80DA3242Bull,0xC8FBD8A982C0729Cull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x9FFA5D5E79F04873ull,0x8134D09E3462E904ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xA52ECB960783BB35ull,0x84965D3C050FB01Bull,2,FlatProjectionPatchLayout::InverseClip,11},
+    };
+    for (const auto& pair : epic22fe) {
+        const auto recipe=flatProjectionDrawRecipes(pair.vs,pair.ps);
+        expect(recipe.count==1 && recipe.requests[0].stage==FlatProjectionStage::Vertex &&
+            recipe.requests[0].slot==pair.slot && recipe.requests[0].patchCount==1 &&
+            recipe.requests[0].patches[0].layout==pair.layout &&
+            recipe.requests[0].patches[0].byteOffset==pair.row*16,
+            "Epic 22fe measured scene or sky projection span");
+        expect(flatProjectionDrawRecipes(pair.vs,pair.ps^1ull).count==0 &&
+            flatProjectionDrawRecipes(pair.vs,0).count==0 &&
+            flatProjectionDrawRecipes(pair.vs^1ull,pair.ps).count==0,
+            "Epic 22fe projection requires both captured shader identities");
+        expect(!flatProjectionDrawUnchanged(pair.vs,pair.ps),
+            "Epic 22fe projection consumer cannot bypass jitter as unchanged");
+    }
     const auto screenRay=flatProjectionDrawRecipes(0x4AEC439CEC7FFDCEull,0x87EF79B19297B8C4ull);
     expect(screenRay.count==1 && screenRay.requests[0].stage==FlatProjectionStage::Vertex &&
         screenRay.requests[0].slot==1 && screenRay.requests[0].patchCount==1 &&

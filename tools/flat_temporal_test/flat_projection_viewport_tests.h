@@ -25,7 +25,9 @@ inline int flatProjectionViewportTests() {
     const uint64_t pairs[][2]={
         {0xF8FA801F2CB1E27Cull,0x84965D3C050FB01Bull},
         {0x68DDDEF04D9894AFull,0x06332CA168B6DA63ull},
-        {0xF7A6E916F14A3B1Aull,0x06332CA168B6DA63ull}
+        {0xF7A6E916F14A3B1Aull,0x06332CA168B6DA63ull},
+        // Epic 22fe85d2: same owned HDR depth clamp after display change.
+        {0xA52ECB960783BB35ull,0x84965D3C050FB01Bull}
     };
     for(const auto& pair:pairs) {
         hdr.vs=pair[0];hdr.ps=pair[1];

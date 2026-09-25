@@ -209,6 +209,20 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     // projection matrix of its own.
     if (result.count == 0 && vs == 0x2D8263CC54D55398ull && ps == 0x89B662E266E5D73Eull)
         result.add(S::Vertex,0,L::ForwardDp4,4);
+    // Epic 22fe85d2: three scene VS variants transform local CB0[9..11]
+    // position through CB1[270..273] into SV_Position. The fourth VS
+    // instead dots CB0[4..7]. Their PS companions use screen XY only for
+    // pixel-grid noise; lighting-direction matrices remain unchanged.
+    // A52E's inverse CB2[11..14] ray is identical to F8FA's instructions 0..4;
+    // only its exposure varying differs, and the PS companion is the same.
+    if (result.count == 0) switch (vs) {
+    case 0x71DD9863DCFC0986ull: if (ps == 0x43E5E6EB67AC751Bull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x3530A6FD15EDE145ull: if (ps == 0x13B224F056C39D85ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x19F70CE80DA3242Bull: if (ps == 0xC8FBD8A982C0729Cull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x9FFA5D5E79F04873ull: if (ps == 0x8134D09E3462E904ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0xA52ECB960783BB35ull: if (ps == 0x84965D3C050FB01Bull) result.add(S::Vertex,2,L::InverseClip,11); break;
+    default: break;
+    }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);
     return result;
 }
