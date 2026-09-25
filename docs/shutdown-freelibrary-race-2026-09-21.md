@@ -17,14 +17,16 @@ but `native_runtime_host.h:1798`'s `graphics` field is declared
 `## Design` for the corrected mechanism, a real, not-yet-confirmed puzzle
 in it (`systemD3D11CreateDevice()` appears to already leak a permanent
 reference to the same module this code frees), and the proposed fix.
-Built 2026-09-25, not flown: `NativeDevice::reset()` in `src\openxr\native_device.h`
-now sets `systemModule_ = nullptr` without calling `FreeLibrary()`, accompanied by
-a diagnostic logging `device_module_reset,pinned=%u` to check whether the static
-reference in `systemD3D11CreateDevice()` pinned the module for process lifetime.
-Automated regression tests in `tools/openxr_native_test/native_device_test.cpp` explicitly
-test `isSystemD3D11Pinned()` and `systemD3D11CreateDevice()`, ensuring automated
-regression prevention across test suites. The investigation stays open until a repro
-flight shows the crash gone and the new log line fired.
+Built 2026-09-25 (PR #40), not flown: `NativeDevice::reset()` in
+`src\openxr\native_device.h` now sets `systemModule_ = nullptr` without
+calling `FreeLibrary()`, and logs `device_module_reset,pinned=%u`: whether
+the static reference in `systemD3D11CreateDevice()` was taken in the same
+DLL. `pinned=1` in a crash flight refutes the unmap hypothesis (the removed
+`FreeLibrary` could not have been the last release); `pinned=0` leaves the
+crash/no-crash result as the evidence. `native_device_test` checks the flag
+and that `reset()` leaves it set; nothing tests the log line itself. The
+investigation stays open until a repro flight shows the crash gone and the
+new log line fired.
 
 Hypothesis, as corrected in `## Design`: `host_graphics_reset`
 (`src\openxr\native_runtime_host.h:1797-1798`) calls `NativeDevice::reset()`
@@ -342,8 +344,10 @@ late call left to land in the unmapped module.
 
 Started 2026-09-22, prompted by the user asking to design a real fix. Built
 2026-09-25: `NativeDevice::reset()` in `src\openxr\native_device.h` retains
-`systemModule_` without `FreeLibrary()`, accompanied by the diagnostic probe
-logging `device_module_reset,pinned=...` from `isSystemD3D11Pinned()`. Not yet flown in a repro environment.
+`systemModule_` without `FreeLibrary()` and logs
+`device_module_reset,pinned=...` from `isSystemD3D11Pinned()`. The
+diagnostic below was replaced: its `UNCHANGED_REFCOUNT` re-probe always
+succeeds once `systemModule_` keeps its own reference. Not yet flown.
 
 ### What changed from the original write-up
 
@@ -422,13 +426,10 @@ analysis above and worth its own look before trusting the fix.
   one-line removal plus one diagnostic line, but it's shutdown-path code
   in a header included from the OpenXR runtime module, and a typo here
   costs a flight to notice.
-- Automated regression tests in `tools\openxr_native_test\native_device_test.cpp`:
-  explicitly tests `isSystemD3D11Pinned()` and `systemD3D11CreateDevice()`
-  (verifying `systemD3D11CreateDevice()` returns a valid function pointer,
-  `isSystemD3D11Pinned()` evaluates to true, and `separate.reset()` logs
-  `pinned=1` without disturbing the process-wide pinned state), ensuring
-  automated regression prevention across test suites under both `--self-test`
-  and `--hardware`.
+- Rig coverage in `tools\openxr_native_test\native_device_test.cpp`, under
+  both `--self-test` and `--hardware`: `systemD3D11CreateDevice()` returns
+  a function, `isSystemD3D11Pinned()` is then true, and `reset()` leaves it
+  true. The `pinned=` log line itself is not checked by any rig.
 - A repro flight from this reporter (or anyone reproducing today) with the
   fix installed, confirming the crash is gone AND the new diagnostic line
   fired, read with `edvr_log.py --expect-build` against the exact commit
