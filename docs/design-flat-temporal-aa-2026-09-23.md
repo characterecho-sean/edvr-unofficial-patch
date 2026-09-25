@@ -3,18 +3,18 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `b969a4e5` is included. Installed Epic build is
-  `aaa3d020`; section 50 records full validation and the build-argument repair.
-  Its new F10 qualifies live PS91 motion ownership: all 45 changed pixels have
-  exact-depth slots and valid joined history (section 51). Remaining P7
-  rejection maps exactly to a depth-write-off BBE overlay. One incomplete
-  jitter frame reset history 1.7 seconds before F10; all saved samples retain
-  history. Visual qualification is pending Sean's feedback. Sections 26-28
-  establish camera ownership/jitter; 34-37 cover F8 and menu treatment; 40-43
-  establish cockpit projection and smoother DLSS edges; 45-48 diagnose missing
-  ownership and its binding repair. The first loading crash did not reproduce
-  on retry; its cause remains unknown. Sections 49-50 qualify rigid BFE shell
-  motion and the PS91 register correction.
+  before qualification. Main `b969a4e5` is included. Latest analyzed Epic build
+  is `aaa3d020`; section 50 records full validation and the build-argument
+  repair. Its new F10 qualifies live PS91 motion ownership: all 45 changed
+  pixels have exact-depth slots and valid joined history (section 51).
+  Remaining P7 rejection maps exactly to a depth-write-off BBE overlay. One
+  incomplete jitter frame reset history 1.7 seconds before F10; all saved
+  samples retain history. Visual qualification is pending Sean's feedback.
+  Sections 26-28 establish camera ownership/jitter; 34-37 cover F8 and menu
+  treatment; 40-43 establish cockpit projection and smoother DLSS edges; 45-48
+  diagnose missing ownership and its binding repair. The first loading crash
+  did not reproduce on retry; its cause remains unknown. Sections 49-50 qualify
+  rigid BFE shell motion and the PS91 register correction.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -29,11 +29,12 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next work:** solve depth-write-off overlay ownership using the existing
-  captures; do not repeat the now-qualified PS91 or BFE hypotheses. The cold
-  buffer/preparation reset needs exact failing buffer context before a fix.
-  Preserve high-G camera movement and strict depth ownership. No headset is
-  needed for flat; VR still needs regression tests.
+- **Next flight:** section 52 adds bounded before/after motion, scene-depth and
+  pool-record evidence for the overlay plus automatic exact jitter-failure
+  diagnostics. F10 in the menu and while moving in the cockpit should cover
+  both symptoms in one run. Preserve high-G motion and strict depth ownership;
+  do not repeat the qualified PS91/BFE hypotheses or change rendering before
+  attachment is proved. VR still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -3073,3 +3074,71 @@ Camera-cut and backend-failure counters remain zero.
 
 Sean's visual assessment was requested separately. Installed build remains
 `aaa3d020`; a documentation-only follow-up does not change the game DLL.
+
+## 52. Joint overlay and jitter-failure diagnostics, 2026-09-25
+
+Sean authorized the next diagnostic build. The existing draw capture has native
+MRT0-3 and constant buffers, but no motion slot immediately before and after a
+draw. Shared VB/IB addresses do not prove attachment: current q42 and q62 have
+different instance starts. Retaining the underlying slot without proving record
+identity could assign another object's motion to the overlay.
+
+Extend the F10-only capture to record actual MRT6 slot/depth and matching DSV
+windows around the sampled draw. The original capture still sees game shader
+identities and unmodified constants. A second pre-draw hook runs after the
+engine producer successfully substitutes the shaders and attaches MRT6; the
+post-draw sample runs before projection, shaders and targets are restored. An
+existing game RTV6, refused substitution or unsupported resource remains
+explicitly unavailable rather than being mistaken for engine ownership.
+
+For the exact underlying 66DE/864F and overlay BBE/DB3E pairs, capture bounded
+t33 contents and SRV range/stride as well. Matching before/after pixel codes
+and unchanged relevant record bytes distinguish an attached surface detail from
+a reused pool slot. Copies are asynchronous, capped and restricted to the two
+F10 draw frames. Normal rendering does not acquire these snapshots. Each pool
+snapshot is limited to 4 MiB, eight per family and 16 per frame, within the
+shared 256 MiB capture cap. The analyzed menu pool has 2048 records of 336
+bytes each (688128 bytes). Auxiliary capture status is separate from the
+existing color chronology; unavailable motion evidence stays explicit.
+
+The latest captured frames each contain three underlay draws (q40/42/44) and
+five overlay draws (q59-63), so the family cap includes the relevant q42/q62
+pair. At 2560x1440, the observed formats and pool size imply roughly 212 MiB
+for both frames, including depth mirrors, packed windows and constant buffers.
+
+Depth-stencil region copies have an API restriction: only whole subresources
+may be copied directly. Use a reusable full-size mirror without depth binding,
+then copy its probe windows into the packed staging resources. Charge mirror
+memory to the existing cap. This avoids depending on an invalid partial-depth
+copy even if a particular driver accepts it. See the [D3D11 copy
+contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-copysubresourceregion).
+The live resource uses `R32G8X24_TYPELESS`, eight bytes per pixel, with a
+`D32_FLOAT_S8X24_UINT` view. Compare its first float's exact bits to slot
+depth; do not assume that the source resource is four-byte `R32_TYPELESS`.
+
+Projection preflight/prepare failures now retain failure-only metadata: exact
+return branch, shader/request context, buffer identity/range/generation,
+complete-shadow availability, mutation serial, map/cold-readback/private-buffer
+state and cached plan/topology availability. The runtime logs this before
+failing the phase, independently of F10. Limit to one event per frame, 32
+events after jittered draws and eight before any draw; resets do not replenish
+these process-wide budgets. Successful preparation clears stale diagnostics.
+This distinguishes new topology, missing writes and binding changes without
+loosening any admission rule or forcing history retention.
+
+Validation must cover actual before/after motion and depth with a
+depth-write-off overlay, unchanged game outputs, parser compatibility with old
+captures, byte caps and dry-run no-write behavior. Projection tests must name
+the exact failing branch and clear its context on subsequent success. Run the
+full build, commit the same source, promote the clean DLLs, then install and
+verify Epic while preserving the INI. This build gathers evidence; it does not
+claim to eliminate the remaining overlay shimmer yet.
+
+The native-format WARP fixture passes: the underlay writes slot `(7, 0.5)` and
+DSV `0.5`; the depth-write-off overlay retains code `7`, exports slot depth
+`0.25`, and leaves DSV `0.5`. Both draw-time pool snapshots contain the same
+four 336-byte records. Capture versus a no-capture replay produces
+bit-identical color, MRT6 and depth, with no D3D debug-layer hazards. The
+projection rig also distinguishes first-seen live topology, missing full
+writes, cold-readback state and changed binding ranges, and clears stale
+failure metadata after successful preparation.

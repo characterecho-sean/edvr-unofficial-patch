@@ -31,6 +31,28 @@ struct FlatProjectionRuntimeStatus {
     uint64_t coldQueued = 0, coldCompleted = 0, coldStale = 0;
     uint64_t coldFailed = 0, coldPending = 0, coldTimeouts = 0;
 };
+// Failure-only owner-thread metadata. No retained CPU shadow bytes or COM
+// references; a successful preparation clears the previous failure.
+struct FlatProjectionRuntimeFailure {
+    bool valid = false;
+    const char* branch = nullptr; // stable literal naming the exact return site
+    FlatProjectionRuntimeRefusal reason = FlatProjectionRuntimeRefusal::None;
+    bool inPrepare = false, allowAllocation = false;
+    bool exactPlan = false, topologyPlan = false;
+    uint32_t phase = 0, requestIndex = ~0u, patchIndex = ~0u;
+    FlatProjectionStage stage = FlatProjectionStage::Vertex;
+    uint32_t slot = 0, firstConstant = 0, constantCount = 0;
+    const void* buffer = nullptr;
+    const void* actualBuffer = nullptr;
+    uint32_t actualFirst = 0, actualCount = 0;
+    uint64_t trackedGeneration = 0, mutationSerial = 0;
+    uint32_t trackedWidth = 0;
+    bool tracked = false, mapped = false, pending = false, promoted = false, privateReady = false;
+    bool shadowPresent = false;
+    uint64_t shadowWriteGeneration = 0, shadowBankEpoch = 0;
+    uint32_t patchCount = 0, patchOffset = 0;
+    FlatProjectionPatchLayout patchLayout = FlatProjectionPatchLayout::ForwardColumns;
+};
 
 class FlatProjectionRuntime {
 public:
@@ -63,6 +85,7 @@ public:
                                              uint32_t count, const FlatProjectionJitter& jitter,
                                              uint32_t phase);
     FlatProjectionRuntimeStatus status() const { return status_; }
+    FlatProjectionRuntimeFailure failure() const { return failure_; }
 private:
     static constexpr uint32_t kBuffers = 64, kPlans = 32;
     static constexpr uint32_t kColdPending = 8, kColdAttempts = 16, kColdMaxAge = 120;
@@ -100,9 +123,21 @@ private:
     uint32_t coldAttempts_ = 0;
     bool coldEnabled_ = false;
     FlatProjectionRuntimeStatus status_{};
+    FlatProjectionRuntimeFailure failure_{};
+    struct FailureAttempt {
+        bool active = false, inPrepare = false, allowAllocation = false;
+        bool exactPlan = false, topologyPlan = false;
+        const FlatProjectionRuntimeRequest* requests = nullptr;
+        uint32_t count = 0, phase = 0, requestIndex = ~0u, patchIndex = ~0u;
+        const char* branch = nullptr;
+        const void* actualBuffer = nullptr;
+        uint32_t actualFirst = 0, actualCount = 0;
+    } attempt_{};
 
     bool owner() const;
     bool refuse(FlatProjectionRuntimeRefusal reason);
+    void beginFailureAttempt(const FlatProjectionRuntimeRequest*, uint32_t, uint32_t, bool, bool);
+    bool refuseAt(FlatProjectionRuntimeRefusal, const char*, uint32_t = ~0u, uint32_t = ~0u);
     Tracked* find(ID3D11Resource* resource);
     Tracked* track(ID3D11Resource* resource);
     void discard(Tracked& entry);

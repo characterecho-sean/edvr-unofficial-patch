@@ -12,6 +12,7 @@ Usage: python tools/flat_draw_pixels.py CAPTURE_DIR [--output SUMMARY.json] [--d
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import struct
@@ -31,7 +32,7 @@ FIXTURE = re.compile(r"flat_draw_pixels/[0-9]{8}_[0-9]{6}_[0-9]{3}_[0-9]+_[0-9]+
 STATES = {"complete", "partial", "failed"}
 # Native resource formats accepted by the bounded GPU copy. Values are
 # DXGI_FORMAT numeric IDs; view formats can differ for typeless resources.
-NATIVE_BPP = {9: 8, 10: 8, 11: 8, 15: 8, 16: 8,
+NATIVE_BPP = {9: 8, 10: 8, 11: 8, 15: 8, 16: 8, 19: 8,
               23: 4, 24: 4, 26: 4, 27: 4, 28: 4, 29: 4,
               39: 4, 41: 4, 87: 4, 90: 4, 91: 4}
 
@@ -104,8 +105,9 @@ def load_frame(path):
         raise CaptureError(f"cannot read {path}: {exc}") from exc
     if not isinstance(manifest, dict):
         raise CaptureError(f"{path}: manifest must be an object")
-    if manifest.get("schema") != 1 or type(manifest.get("schema")) is not int:
+    if type(manifest.get("schema")) is not int or manifest["schema"] not in (1, 2):
         raise CaptureError(f"{path}: unsupported schema")
+    schema = manifest["schema"]
     frame = integer(manifest.get("frame"), "frame")
     if int(match.group(1)) != frame:
         raise CaptureError(f"{path}: filename and frame disagree")
@@ -118,6 +120,12 @@ def load_frame(path):
     if type(qualified) is not bool or type(identity_match) is not bool:
         raise CaptureError("qualified and identity_match must be booleans")
     refusals = integer(manifest.get("refusals"), "refusals", 0, 1_000_000)
+    motion_refusals = integer(manifest.get("motion_refusals"), "motion_refusals", 0, 1_000_000) if schema == 2 else 0
+    motion_draws = integer(manifest.get("motion_draws"), "motion_draws", 0, MAX_DRAWS) if schema == 2 else 0
+    motion_complete = manifest.get("motion_complete", False) if schema == 2 else False
+    if type(motion_complete) is not bool or (motion_complete and
+       (not motion_draws or motion_refusals or not qualified or not identity_match)):
+        raise CaptureError("invalid motion completeness fields")
     width = integer(manifest.get("render_width"), "render_width", WINDOW, 16384)
     height = integer(manifest.get("render_height"), "render_height", WINDOW, 16384)
     for key in ("prior_depth", "selected_depth", "selected_hdr"):
@@ -162,14 +170,22 @@ def load_frame(path):
         raise CaptureError("unsafe or incorrect packed blob filenames")
     pixel_data = read_blob(pixels_path) if pixels_path.exists() else b""
     cb_data = read_blob(cb_path) if cb_path.exists() else b""
+    pool_path = path.with_name(f"frame_{frame}_pool.bin")
+    if schema == 2 and manifest.get("pool_file") != pool_path.name:
+        raise CaptureError("unsafe or incorrect pool blob filename")
+    pool_data = read_blob(pool_path) if schema == 2 and pool_path.exists() else b""
     if (integer(manifest.get("pixels_bytes"), "pixels_bytes", 0, MAX_BLOB) != len(pixel_data) or
             integer(manifest.get("cb_bytes"), "cb_bytes", 0, MAX_BLOB) != len(cb_data)):
         raise CaptureError("packed blob byte count disagrees with manifest")
-    pixel_ranges, cb_ranges = [], []
+    if schema == 2 and integer(manifest.get("pool_bytes"), "pool_bytes", 0, MAX_BLOB) != len(pool_data):
+        raise CaptureError("pool blob byte count disagrees with manifest")
+    pixel_ranges, cb_ranges, pool_ranges = [], [], []
     previous_q = -1
     changes = {}
     unknown = {}
+    motion_windows = []
     cb_info = {}
+    candidate_count = 0
     for index, draw in enumerate(draws):
         if not isinstance(draw, dict):
             raise CaptureError(f"draw {index} must be an object")
@@ -223,6 +239,81 @@ def load_frame(path):
                     raise CaptureError("valid rt must be the selected nonnull render size")
             if (tw, th) == (width, height) and int(target["resource"], 16) != 0:
                 matching_rt_indices.add(slot)
+        motion = draw.get("motion") if schema == 2 else None
+        aux = {}
+        pool_payload = None
+        pool_summary = {"status": "not-captured"}
+        if schema == 2:
+            if not isinstance(motion, dict) or type(motion.get("expected")) is not bool or type(motion.get("candidate")) is not bool:
+                raise CaptureError("schema2 draw.motion requires candidate and expected booleans")
+            if motion["candidate"]:
+                candidate_count += 1
+            if motion["expected"] and not motion["candidate"]:
+                raise CaptureError("expected motion requires a source candidate")
+            motion_status = short_text(motion.get("status"), "motion.status")
+            if motion_status not in ("not-requested", "producer-declined", "unavailable", "captured",
+                                     "depth-mirror-unavailable", "view-or-mirror-changed"):
+                raise CaptureError("invalid motion status")
+            if ((motion_status == "not-requested") != (not motion["expected"] and not motion["candidate"]) or
+                    (motion_status == "producer-declined") != (motion["candidate"] and not motion["expected"])):
+                raise CaptureError("motion expectation/status mismatch")
+            hex_token(motion.get("pool_resource"), "motion.pool_resource")
+            hex_token(motion.get("pool_view"), "motion.pool_view")
+            for target_id, name in ((6, "slot"), (7, "depth")):
+                target = motion.get(name)
+                if not isinstance(target, dict):
+                    raise CaptureError(f"motion.{name} must be an object")
+                hex_token(target.get("resource"), f"motion.{name}.resource")
+                hex_token(target.get("view"), f"motion.{name}.view")
+                fmt = integer(target.get("format"), f"motion.{name}.format", 0, 200)
+                vf = integer(target.get("view_format"), f"motion.{name}.view_format", 0, 200)
+                tw = integer(target.get("width"), f"motion.{name}.width", 0, 16384)
+                th = integer(target.get("height"), f"motion.{name}.height", 0, 16384)
+                if type(target.get("valid")) is not bool:
+                    raise CaptureError(f"motion.{name}.valid must be boolean")
+                if target["valid"]:
+                    if not motion["expected"] or (tw, th) != (width, height) or int(target["resource"], 16) == 0:
+                        raise CaptureError("valid motion target lacks expected nonnull extent")
+                    allowed = (fmt in (15, 16) and vf == 16) if name == "slot" else (
+                        (fmt, vf) in ((19, 20), (39, 40)))
+                    if not allowed:
+                        raise CaptureError("motion target has wrong native/view format")
+                    matching_rt_indices.add(target_id)
+                aux[target_id] = target
+            if motion_status == "captured" and not (aux[6]["valid"] and aux[7]["valid"]):
+                raise CaptureError("captured motion needs valid slot and depth")
+            if motion["candidate"] and not (aux[6]["valid"] and aux[7]["valid"]):
+                for point in range(len(points)):
+                    unknown[f"motion/point{point}"] = unknown.get(f"motion/point{point}", 0) + 1
+            pool = motion.get("pool")
+            if not isinstance(pool, dict):
+                raise CaptureError("motion.pool must be an object")
+            pool_status = short_text(pool.get("status"), "pool.status")
+            if pool_status not in ("not-requested", "ok", "unavailable", "timeout", "gpu_error", "skipped"):
+                raise CaptureError("invalid pool status")
+            short_text(pool.get("reason", ""), "pool.reason")
+            pool_resource = hex_token(pool.get("resource"), "pool.resource")
+            pool_view = hex_token(pool.get("view"), "pool.view")
+            pool_width = integer(pool.get("byte_width"), "pool.byte_width", 0, 2**32 - 1)
+            stride = integer(pool.get("stride"), "pool.stride", 0, 2**32 - 1)
+            first = integer(pool.get("first_element"), "pool.first_element", 0, 2**32 - 1)
+            elements = integer(pool.get("num_elements"), "pool.num_elements", 0, 2**32 - 1)
+            if pool_status == "ok":
+                if not motion["expected"] or not pool_width or pool_width > 4 * 1024 * 1024 or stride != 336 or not elements or (
+                        first + elements) * stride > pool_width or pool_resource != motion["pool_resource"] or (
+                        pool_view != motion["pool_view"]):
+                    raise CaptureError("ok pool snapshot lacks matching bound SRV range")
+                offset = integer(pool.get("offset"), "pool.offset", 0, len(pool_data))
+                length = integer(pool.get("length"), "pool.length", 0, pool_width)
+                if length != pool_width:
+                    raise CaptureError("ok pool snapshot must contain full buffer")
+                pool_payload = blob_slice(pool_data, offset, length, "pool")
+                pool_ranges.append((offset, length))
+            elif motion_complete and pool_status != "not-requested":
+                raise CaptureError("motion-complete frame has unavailable requested pool snapshot")
+            pool_summary = {"status": pool_status, "resource": pool_resource, "view": pool_view,
+                            "stride": stride, "first_element": first, "num_elements": elements,
+                            "bytes": pool_width, "reason": pool.get("reason", "")}
         for key in ("dsv",):
             hex_token(draw.get(key), f"draw {index}.{key}")
         for key in ("depth_state", "raster", "viewport", "ia"):
@@ -268,20 +359,22 @@ def load_frame(path):
                 raise CaptureError("unknown cb status")
         cb_info[q] = summaries
         copies = draw.get("copies")
-        if not isinstance(copies, list) or len(copies) > len(points) * 4 * 2:
+        if not isinstance(copies, list) or len(copies) > len(points) * (6 if schema == 2 else 4) * 2:
             raise CaptureError(f"draw {index}.copies has invalid count")
         pairs = {}
         for copy in copies:
             if not isinstance(copy, dict):
                 raise CaptureError("copy entry must be an object")
-            target = integer(copy.get("rt_index"), "copy.rt_index", 0, 3)
+            target = integer(copy.get("rt_index"), "copy.rt_index", 0, 7 if schema == 2 else 3)
+            if target not in (0, 1, 2, 3, 6, 7):
+                raise CaptureError("copy names unsupported target")
             point = integer(copy.get("point"), "copy.point", 0, len(points)-1)
             phase = copy.get("phase")
             if phase not in ("before", "after"):
                 raise CaptureError("copy.phase must be before or after")
             key = (target, point)
             if target not in matching_rt_indices:
-                raise CaptureError("copy names a render target outside the selected extent")
+                raise CaptureError("copy names a target outside the selected extent")
             if phase in pairs.setdefault(key, {}):
                 raise CaptureError("duplicate copy phase")
             copy_status = short_text(copy.get("status"), "copy.status")
@@ -289,7 +382,8 @@ def load_frame(path):
             fmt = integer(copy.get("format"), "copy.format", 0, 200)
             bpp = integer(copy.get("bpp"), "copy.bpp", 0, 16)
             if copy_status == "ok":
-                source_format = next(r["format"] for r in rt if r["index"] == target)
+                source_format = (aux[target]["format"] if target in aux else
+                                 next(r["format"] for r in rt if r["index"] == target))
                 if fmt != source_format or NATIVE_BPP.get(fmt) != bpp:
                     raise CaptureError("ok copy has unsupported or mismatched native format/bpp")
                 x0 = integer(copy.get("x0"), "copy.x0", 0, width - WINDOW)
@@ -310,7 +404,7 @@ def load_frame(path):
         expected_pairs = {(slot, point) for slot in matching_rt_indices for point in range(len(points))}
         for target, point in sorted(expected_pairs):
             samples = pairs.get((target, point), {})
-            name = f"rt{target}/point{point}"
+            name = f"{('slot' if target == 6 else 'depth') if target in (6, 7) else 'rt' + str(target)}/point{point}"
             if "before" not in samples or "after" not in samples or any(v is None for v in samples.values()):
                 unknown[name] = unknown.get(name, 0) + 1
                 continue
@@ -330,27 +424,101 @@ def load_frame(path):
                    "changed_pixels": changed_pixels,
                    "changed_bytes": sum(a != b for a, b in zip(before, after)),
                    "max_byte_delta": max(abs(a-b) for a, b in zip(before, after)),
-                   "rt_resource": next(r["resource"] for r in rt if r["index"] == target),
+                   "rt_resource": (aux[target]["resource"] if target in aux else
+                                   next(r["resource"] for r in rt if r["index"] == target)),
                    "dsv": draw["dsv"], "depth_resource": depth_resource,
                    "depth_format": draw["depth_format"],
                    "depth_view_format": draw["depth_view_format"],
                    "depth_state": draw["depth_state"],
                    "viewport": draw["viewport"], "ia": draw["ia"],
-                   "shader_bytes": shader_bytes, "cb": summaries}
+                   "shader_bytes": shader_bytes, "cb": summaries,
+                   "pool": pool_summary}
             changes.setdefault(name, []).append(row)
+        if schema == 2 and motion["expected"]:
+            for point in range(len(points)):
+                slot_pair = pairs.get((6, point), {})
+                depth_pair = pairs.get((7, point), {})
+                if any(phase not in slot_pair or slot_pair[phase] is None or
+                       phase not in depth_pair or depth_pair[phase] is None
+                       for phase in ("before", "after")):
+                    continue
+                sb, _, _, sx, sy = slot_pair["before"]
+                sa, _, _, ax, ay = slot_pair["after"]
+                db, _, _, dx, dy = depth_pair["before"]
+                da, _, _, ex, ey = depth_pair["after"]
+                if (sx, sy) != (ax, ay) or (sx, sy) != (dx, dy) or (sx, sy) != (ex, ey):
+                    raise CaptureError("motion slot/depth windows do not align")
+                depth_bpp = NATIVE_BPP[aux[7]["format"]]
+                before_codes, after_codes = {}, {}
+                before_exact = after_exact = slot_changed = depth_changed = 0
+                after_depth_deltas = []
+                seen_records = set()
+                for pixel in range(WINDOW * WINDOW):
+                    soff = pixel * 8
+                    doff = pixel * depth_bpp
+                    cb = struct.unpack_from("<f", sb, soff)[0]
+                    ca = struct.unpack_from("<f", sa, soff)[0]
+                    for code, counts in ((cb, before_codes), (ca, after_codes)):
+                        key = str(int(code)) if math.isfinite(code) and code >= 1 and code.is_integer() else "invalid"
+                        counts[key] = counts.get(key, 0) + 1
+                        if key != "invalid" and int(code) & 1:
+                            seen_records.add(int(code) >> 1)
+                    before_exact += sb[soff+4:soff+8] == db[doff:doff+4]
+                    after_exact += sa[soff+4:soff+8] == da[doff:doff+4]
+                    slot_changed += sb[soff:soff+8] != sa[soff:soff+8]
+                    depth_changed += db[doff:doff+depth_bpp] != da[doff:doff+depth_bpp]
+                    if sa[soff+4:soff+8] != da[doff:doff+4]:
+                        after_depth_deltas.append(struct.unpack_from("<f", da, doff)[0] -
+                                                  struct.unpack_from("<f", sa, soff+4)[0])
+                record_hashes = {}
+                unresolved_records = []
+                if pool_payload is not None:
+                    for record in sorted(seen_records):
+                        if record >= elements:
+                            unresolved_records.append(record)
+                            continue
+                        start_byte = (first + record) * stride
+                        record_hashes[str(record)] = hashlib.sha256(
+                            pool_payload[start_byte:start_byte+stride]).hexdigest()
+                motion_windows.append({"q": q, "point": point, "xy": [sx, sy],
+                                       "vs": vs, "ps": ps, "slot_resource": aux[6]["resource"],
+                                       "depth_resource": aux[7]["resource"],
+                                       "pool_resource": motion["pool_resource"],
+                                       "before_codes": before_codes, "after_codes": after_codes,
+                                       "before_exact_depth": before_exact,
+                                       "after_exact_depth": after_exact,
+                                       "slot_changed_pixels": slot_changed,
+                                       "dsv_changed_pixels": depth_changed,
+                                       "after_dsv_minus_slot_range": ([min(after_depth_deltas), max(after_depth_deltas)]
+                                                                       if after_depth_deltas else None),
+                                       "pool_record_sha256": record_hashes,
+                                       "pool_record_out_of_range": unresolved_records,
+                                       "pool_snapshot_status": pool_summary["status"]})
         if status == "complete":
-            if set(pairs) != expected_pairs or any(set(phases) != {"before", "after"} for phases in pairs.values()):
-                raise CaptureError("complete frame omits an eligible RT/point before-after pair")
+            color_expected = {key for key in expected_pairs if key[0] < 4}
+            if not color_expected.issubset(pairs) or any(set(pairs[key]) != {"before", "after"}
+                                                         for key in color_expected):
+                raise CaptureError("complete frame omits an eligible color RT/point pair")
     check_nonoverlap(pixel_ranges, len(pixel_data), "pixels")
     check_nonoverlap(cb_ranges, len(cb_data), "cb")
-    if status == "complete" and unknown:
-        raise CaptureError("complete frame has unpaired or unavailable window copies")
+    if schema == 2:
+        check_nonoverlap(pool_ranges, len(pool_data), "pool")
+    if status == "complete" and any(key.startswith("rt") for key in unknown):
+        raise CaptureError("complete frame has unpaired or unavailable color copies")
+    if schema == 2:
+        if candidate_count != motion_draws:
+            raise CaptureError("motion_draws disagrees with candidate draws")
+        if motion_complete and (any(key.startswith(("slot/", "depth/", "motion/")) for key in unknown) or
+                                any(d["motion"]["candidate"] and (d["motion"]["status"] != "captured" or
+                                    d["motion"]["pool"]["status"] != "ok") for d in draws)):
+            raise CaptureError("motion_complete claimed with missing slot/depth or pool")
     return {"frame": frame, "status": status, "reason": reason,
             "qualified": qualified, "identity_match": identity_match,
-            "refusals": refusals,
+            "refusals": refusals, "motion_draws": motion_draws,
+            "motion_refusals": motion_refusals, "motion_complete": motion_complete,
             "render_size": [width, height], "points": points,
             "draws_seen": seen, "draws_recorded": recorded, "overflow": overflow,
-            "changes": changes, "unknown_pairs": unknown,
+            "changes": changes, "motion_windows": motion_windows, "unknown_pairs": unknown,
             "interpretation": "Changes are native render-target bytes before and after a draw; final visible owner and cross-frame draw identity are not inferred."}
 
 
@@ -373,19 +541,22 @@ def run(capture_dir, output=None, dry_run=False):
 
 
 def verify_fixture(root):
-    """Read the current WARP writer fixture, never an older matching glob."""
-    pointer = root / "flat_draw_current_fixture.txt"
-    try:
-        if pointer.stat().st_size > 512:
-            raise CaptureError("fixture pointer exceeds 512 bytes")
-        relative = pointer.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError) as exc:
-        raise CaptureError(f"current fixture pointer unavailable: {exc}") from exc
-    if not FIXTURE.fullmatch(relative):
-        raise CaptureError("unsafe or malformed fixture pointer")
-    directory = root.joinpath(*relative.split("/"))
-    if directory.resolve().parent.parent != root.resolve():
-        raise CaptureError("fixture pointer resolves outside capture root")
+    """Read both fresh WARP writer fixtures, never an older matching glob."""
+    def pointed_directory(name):
+        pointer = root / name
+        try:
+            if pointer.stat().st_size > 512:
+                raise CaptureError("fixture pointer exceeds 512 bytes")
+            relative = pointer.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            raise CaptureError(f"current fixture pointer unavailable: {exc}") from exc
+        if not FIXTURE.fullmatch(relative):
+            raise CaptureError("unsafe or malformed fixture pointer")
+        directory = root.joinpath(*relative.split("/"))
+        if directory.resolve().parent.parent != root.resolve():
+            raise CaptureError("fixture pointer resolves outside capture root")
+        return directory
+    directory = pointed_directory("flat_draw_current_fixture.txt")
     report = run(directory)
     frames = report["frames"]
     if [f["frame"] for f in frames] != [101, 102] or not report["consecutive"]:
@@ -410,9 +581,42 @@ def verify_fixture(root):
         if actual != expected:
             raise CaptureError(f"fixture native changed-pixel counts differ: {actual}")
         changed_counts.append({key: pixels for key, (pixels, _) in expected_changes.items()})
+    motion_directory = pointed_directory("flat_draw_motion_current_fixture.txt")
+    motion_report = run(motion_directory)
+    motion_frames = motion_report["frames"]
+    if [f["frame"] for f in motion_frames] != [501, 502] or not motion_report["consecutive"]:
+        raise CaptureError("motion fixture lacks two consecutive WARP frames")
+    motion_counts = []
+    for frame in motion_frames:
+        if frame["status"] != "complete" or not frame["motion_complete"] or frame["motion_draws"] != 2:
+            raise CaptureError("motion fixture lacks complete underlay/decal captures")
+        rows = {row["q"]: row for row in frame["motion_windows"] if row["point"] == 0}
+        if set(rows) != {1, 2}:
+            raise CaptureError("motion fixture lacks point0 underlay/decal chronology")
+        underlay, decal = rows[1], rows[2]
+        if (underlay["before_codes"] != {"invalid": 256} or
+                underlay["after_codes"] != {"7": 256} or
+                underlay["after_exact_depth"] != 256 or
+                underlay["slot_changed_pixels"] != 256 or
+                underlay["dsv_changed_pixels"] != 256 or
+                decal["before_codes"] != {"7": 256} or
+                decal["after_codes"] != {"7": 256} or
+                decal["before_exact_depth"] != 256 or
+                decal["after_exact_depth"] != 0 or
+                decal["slot_changed_pixels"] != 256 or
+                decal["dsv_changed_pixels"] != 0):
+            raise CaptureError("motion fixture slot/depth transitions differ from GPU expectation")
+        first_hash = underlay["pool_record_sha256"].get("3")
+        if (not first_hash or first_hash != decal["pool_record_sha256"].get("3") or
+                underlay["pool_resource"] != decal["pool_resource"]):
+            raise CaptureError("motion fixture does not prove the same unchanged t33 record")
+        motion_counts.append({"underlay_slot_changed": underlay["slot_changed_pixels"],
+                              "decal_slot_changed": decal["slot_changed_pixels"],
+                              "decal_dsv_changed": decal["dsv_changed_pixels"]})
     return {"fixture_verified": True, "frames": [101, 102],
             "changed_window_counts": changed_counts,
-            "source": str(directory)}
+            "motion_frames": [501, 502], "motion_counts": motion_counts,
+            "source": str(directory), "motion_source": str(motion_directory)}
 
 
 def self_test():
@@ -535,6 +739,70 @@ def self_test():
         try:
             run(root / "missing")
             raise AssertionError("missing capture path accepted")
+        except CaptureError:
+            pass
+        # Schema 2: a depth-write-off overlay replaces the slot's projected
+        # depth and leaves the DSV unchanged. The raw record stays identifiable.
+        second = root / "motion"
+        second.mkdir()
+        pool_bytes = bytes((i * 13 + 7) % 256 for i in range(4 * 336))
+        (second / "frame_9_pool.bin").write_bytes(pool_bytes)
+        (second / "frame_9_cb.bin").write_bytes(cb)
+        slot_before = struct.pack("<ff", 7.0, .5) * (WINDOW * WINDOW)
+        slot_after = struct.pack("<ff", 7.0, .25) * (WINDOW * WINDOW)
+        depth_native = struct.pack("<fI", .5, 0) * (WINDOW * WINDOW)
+        packed = pixels + slot_before + depth_native + slot_after + depth_native
+        (second / "frame_9_pixels.bin").write_bytes(packed)
+        newer_draw = json.loads(json.dumps(draw))
+        newer_draw["q"] = 1
+        newer_draw["motion"] = {
+            "candidate": True, "expected": True, "status": "captured",
+            "pool_resource": "0xE", "pool_view": "0xF",
+            "slot": {"resource": "0xA1", "view": "0xA2", "format": 16,
+                     "view_format": 16, "width": 32, "height": 32, "valid": True},
+            "depth": {"resource": "0x1", "view": "0xB", "format": 19,
+                      "view_format": 20, "width": 32, "height": 32, "valid": True},
+            "pool": {"status": "ok", "reason": "", "resource": "0xE", "view": "0xF",
+                     "byte_width": len(pool_bytes), "stride": 336,
+                     "first_element": 0, "num_elements": 4,
+                     "offset": 0, "length": len(pool_bytes)}}
+        for target, phase, offset, fmt in ((6, "before", 2048, 16), (7, "before", 4096, 19),
+                                           (6, "after", 6144, 16), (7, "after", 8192, 19)):
+            newer_draw["copies"].append({"rt_index": target, "point": 0, "phase": phase,
+                                          "status": "ok", "format": fmt, "bpp": 8,
+                                          "x0": 8, "y0": 8, "offset": offset, "length": 2048})
+        newer = {"schema": 2, "status": "complete", "reason": "qualified", "frame": 9,
+                 "qualified": True, "identity_match": True, "refusals": 0,
+                 "motion_draws": 1, "motion_refusals": 0, "motion_complete": True,
+                 "render_width": 32, "render_height": 32,
+                 "prior_depth": "1", "selected_depth": "1", "selected_hdr": "2",
+                 "draw_cap": 512, "draws_seen": 1, "draws_recorded": 1, "overflow": 0,
+                 "pixels_file": "frame_9_pixels.bin", "pixels_bytes": len(packed),
+                 "cb_file": "frame_9_cb.bin", "cb_bytes": len(cb),
+                 "pool_file": "frame_9_pool.bin", "pool_bytes": len(pool_bytes),
+                 "points": [{"u": .5, "v": .5, "x": 16, "y": 16}], "draws": [newer_draw]}
+        second_path = second / "frame_9.json"
+        second_path.write_text(json.dumps(newer), encoding="utf-8")
+        motion_frame = load_frame(second_path)
+        row = motion_frame["motion_windows"][0]
+        assert motion_frame["motion_complete"] and row["before_exact_depth"] == 256
+        assert row["after_exact_depth"] == 0 and row["slot_changed_pixels"] == 256
+        assert row["dsv_changed_pixels"] == 0 and row["before_codes"] == {"7": 256}
+        expected_hash = hashlib.sha256(pool_bytes[3*336:4*336]).hexdigest()
+        assert row["pool_record_sha256"] == {"3": expected_hash}
+        newer_draw["motion"]["pool"]["offset"] = len(pool_bytes) - 1
+        second_path.write_text(json.dumps(newer), encoding="utf-8")
+        try:
+            load_frame(second_path)
+            raise AssertionError("out-of-bounds raw pool snapshot accepted")
+        except CaptureError:
+            pass
+        newer_draw["motion"]["pool"]["offset"] = 0
+        newer_draw["motion"]["depth"]["format"] = 39
+        second_path.write_text(json.dumps(newer), encoding="utf-8")
+        try:
+            load_frame(second_path)
+            raise AssertionError("mismatched native depth layout accepted")
         except CaptureError:
             pass
     print("flat_draw_pixels self-test passed")

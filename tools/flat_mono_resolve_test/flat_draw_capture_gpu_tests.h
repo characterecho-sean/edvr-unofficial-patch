@@ -5,6 +5,7 @@
 #include <iterator>
 #include <array>
 #include <string>
+#include <vector>
 
 namespace edvr { inline bool captureFlatProbeShader(char,uint64_t){return true;} }
 #include "../../src/d3d11/flat_draw_capture.h"
@@ -124,6 +125,165 @@ inline int flatDrawCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* con
             capBody.find("\"draws_recorded\":512")!=std::string::npos&&
             capBody.find("\"overflow\":1")!=std::string::npos,"cap reports partial and exact omitted draw");
         capped.cancel("test-end");
+    }
+    // Use the game's native depth/slot formats in a second fixture. Each frame
+    // records an opaque underlay followed by a nearer, depth-write-off decal.
+    // The decal changes color and MRT6 while the depth mirror must remain at
+    // the underlay's value. The original frame_101/102 fixture stays intact.
+    D3D11_TEXTURE2D_DESC nativeDepthDesc{};nativeDepthDesc.Width=W;nativeDepthDesc.Height=H;
+    nativeDepthDesc.MipLevels=nativeDepthDesc.ArraySize=nativeDepthDesc.SampleDesc.Count=1;
+    nativeDepthDesc.Format=DXGI_FORMAT_R32G8X24_TYPELESS;
+    nativeDepthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
+    D3D11_DEPTH_STENCIL_VIEW_DESC nativeDsvDesc{};nativeDsvDesc.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    nativeDsvDesc.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
+    ComPtr<ID3D11Texture2D> nativeDepth;ComPtr<ID3D11DepthStencilView> nativeDsv;
+    ck(SUCCEEDED(device->CreateTexture2D(&nativeDepthDesc,nullptr,&nativeDepth))&&
+       SUCCEEDED(device->CreateDepthStencilView(nativeDepth.Get(),&nativeDsvDesc,&nativeDsv)),
+       "native depth target created");
+    D3D11_TEXTURE2D_DESC slotDesc{};slotDesc.Width=W;slotDesc.Height=H;
+    slotDesc.MipLevels=slotDesc.ArraySize=slotDesc.SampleDesc.Count=1;
+    slotDesc.Format=DXGI_FORMAT_R32G32_FLOAT;slotDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> slot;ComPtr<ID3D11RenderTargetView> slotView;
+    ck(SUCCEEDED(device->CreateTexture2D(&slotDesc,nullptr,&slot))&&
+       SUCCEEDED(device->CreateRenderTargetView(slot.Get(),nullptr,&slotView)),"MRT6 slot target created");
+    std::array<uint8_t,336*4> poolBytes{};
+    for(size_t i=0;i<poolBytes.size();++i)poolBytes[i]=uint8_t((i*13+17)&255);
+    D3D11_BUFFER_DESC poolDesc{};poolDesc.ByteWidth=UINT(poolBytes.size());
+    poolDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;poolDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    poolDesc.StructureByteStride=336;
+    D3D11_SUBRESOURCE_DATA poolData{};poolData.pSysMem=poolBytes.data();
+    ComPtr<ID3D11Buffer> pool;ComPtr<ID3D11ShaderResourceView> poolView;
+    D3D11_SHADER_RESOURCE_VIEW_DESC poolViewDesc{};poolViewDesc.Format=DXGI_FORMAT_UNKNOWN;
+    poolViewDesc.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;poolViewDesc.Buffer.FirstElement=0;
+    poolViewDesc.Buffer.NumElements=4;
+    ck(SUCCEEDED(device->CreateBuffer(&poolDesc,&poolData,&pool))&&
+       SUCCEEDED(device->CreateShaderResourceView(pool.Get(),&poolViewDesc,&poolView)),
+       "336-byte structured t33 pool created");
+    const char* underlayVsText="float4 main(uint id:SV_VertexID):SV_Position { float2 p[3]={float2(-1,-1),float2(0,-1),float2(-1,1)}; return float4(p[id],0.5,1); }";
+    const char* decalVsText="float4 main(uint id:SV_VertexID):SV_Position { float2 p[3]={float2(-1,-1),float2(0,-1),float2(-1,1)}; return float4(p[id],0.25,1); }";
+    const char* underlayPsText="struct Out { float4 color:SV_Target0; float2 slot:SV_Target6; }; Out main(){ Out o; o.color=float4(0,1,0,1); o.slot=float2(7,0.5); return o; }";
+    const char* decalPsText="struct Out { float4 color:SV_Target0; float2 slot:SV_Target6; }; Out main(){ Out o; o.color=float4(0,0,1,1); o.slot=float2(7,0.25); return o; }";
+    ComPtr<ID3DBlob> underlayVsCode,decalVsCode,underlayPsCode,decalPsCode;
+    ComPtr<ID3D11VertexShader> underlayVs,decalVs;
+    ComPtr<ID3D11PixelShader> underlayPs,decalPs;
+    ck(SUCCEEDED(D3DCompile(underlayVsText,std::strlen(underlayVsText),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&underlayVsCode,&error))&&
+       SUCCEEDED(D3DCompile(decalVsText,std::strlen(decalVsText),nullptr,nullptr,nullptr,"main","vs_5_0",0,0,&decalVsCode,&error))&&
+       SUCCEEDED(D3DCompile(underlayPsText,std::strlen(underlayPsText),nullptr,nullptr,nullptr,"main","ps_5_0",0,0,&underlayPsCode,&error))&&
+       SUCCEEDED(D3DCompile(decalPsText,std::strlen(decalPsText),nullptr,nullptr,nullptr,"main","ps_5_0",0,0,&decalPsCode,&error)),
+       "native motion shaders compiled");
+    if(underlayVsCode&&decalVsCode&&underlayPsCode&&decalPsCode){
+        ck(SUCCEEDED(device->CreateVertexShader(underlayVsCode->GetBufferPointer(),underlayVsCode->GetBufferSize(),nullptr,&underlayVs))&&
+           SUCCEEDED(device->CreateVertexShader(decalVsCode->GetBufferPointer(),decalVsCode->GetBufferSize(),nullptr,&decalVs))&&
+           SUCCEEDED(device->CreatePixelShader(underlayPsCode->GetBufferPointer(),underlayPsCode->GetBufferSize(),nullptr,&underlayPs))&&
+           SUCCEEDED(device->CreatePixelShader(decalPsCode->GetBufferPointer(),decalPsCode->GetBufferSize(),nullptr,&decalPs)),
+           "native motion shaders created");
+    }
+    if(nativeDepth&&nativeDsv&&slot&&slotView&&pool&&poolView&&underlayVs&&decalVs&&underlayPs&&decalPs){
+        D3D11_DEPTH_STENCIL_DESC decalDepthDesc=depthStateDesc;
+        decalDepthDesc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
+        ComPtr<ID3D11DepthStencilState> decalDepth;
+        ck(SUCCEEDED(device->CreateDepthStencilState(&decalDepthDesc,&decalDepth)),"decal depth-write-off state created");
+        if(decalDepth){
+            edvr::FlatDrawCapture motion;motion.arm(500);const auto motionDir=fs::path(motion.directory());
+            context->ClearState();context->RSSetState(rasterState.Get());context->RSSetViewports(1,&vp);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+            context->VSSetConstantBuffers(0,3,cbs);
+            ID3D11ShaderResourceView* t33=poolView.Get();context->VSSetShaderResources(33,1,&t33);
+            ID3D11RenderTargetView* scene[7]{};scene[0]=rtv.Get();scene[6]=slotView.Get();
+            const float sentinel[4]={-1,0,0,0};
+            for(uint64_t frame=501;frame<=502;++frame){
+                context->ClearRenderTargetView(rtv.Get(),red);
+                context->ClearRenderTargetView(slotView.Get(),sentinel);
+                context->ClearDepthStencilView(nativeDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
+                motion.begin(frame,nativeDepth.Get(),W,H);
+                for(unsigned draw=0;draw<2;++draw){
+                    const bool decal=draw!=0;
+                    context->OMSetRenderTargets(1,&target,nativeDsv.Get());
+                    context->OMSetDepthStencilState(decal?decalDepth.Get():depthState.Get(),0);
+                    context->VSSetShader(decal?decalVs.Get():underlayVs.Get(),nullptr,0);
+                    context->PSSetShader(decal?decalPs.Get():underlayPs.Get(),nullptr,0);
+                    ck(motion.before(context,1,'D',3,0,0,0,
+                        decal?0xBBE58E40FE88EC80ull:0x66DE2CADB1F4AE6Bull,
+                        decal?0xDB3E8D20CF53FBC0ull:0x864F1F949851B8DEull,
+                        decal?decalVs.Get():underlayVs.Get(),decal?decalPs.Get():underlayPs.Get()),
+                        "native motion draw recorded before substitution");
+                    context->OMSetRenderTargets(7,scene,nativeDsv.Get());
+                    motion.motionBefore(context,true,true);
+                    context->Draw(3,0);motion.after(context);
+                    ID3D11RenderTargetView* bound[7]{};ComPtr<ID3D11DepthStencilView> boundDepth;
+                    context->OMGetRenderTargets(7,bound,&boundDepth);
+                    ck(bound[0]==rtv.Get()&&bound[6]==slotView.Get()&&boundDepth.Get()==nativeDsv.Get(),
+                       "motion capture preserves color, MRT6, and depth bindings");
+                    for(auto* view:bound)if(view)view->Release();
+                }
+                motion.qualify(frame,nativeDepth.Get(),color.Get(),W,H);motion.present(context,frame);
+            }
+            context->Flush();
+            for(unsigned attempt=0;attempt<120&&(!fs::exists(motionDir/L"frame_501.json")||!fs::exists(motionDir/L"frame_502.json"));++attempt){
+                motion.present(context,503+attempt);Sleep(1);
+            }
+            ck(fs::exists(motionDir/L"frame_501.json")&&fs::exists(motionDir/L"frame_502.json"),
+               "two native motion manifests written");
+            for(uint64_t frame=501;frame<=502;++frame){
+                const auto stem=std::string("frame_")+std::to_string(frame);
+                std::ifstream js(motionDir/(stem+".json"),std::ios::binary);
+                const std::string body((std::istreambuf_iterator<char>(js)),std::istreambuf_iterator<char>());
+                ck(body.find("\"status\":\"complete\"")!=std::string::npos&&
+                   body.find("\"draws_recorded\":2")!=std::string::npos&&
+                   body.find("\"motion_draws\":2")!=std::string::npos&&
+                   body.find("\"motion_complete\":true")!=std::string::npos&&
+                   body.find("\"depth\":{\"resource\"")!=std::string::npos&&
+                   body.find("\"format\":19,\"view_format\":20")!=std::string::npos,
+                   "native depth and motion snapshots completed without refusals");
+                std::ifstream pools(motionDir/(stem+"_pool.bin"),std::ios::binary);
+                const std::string poolRaw((std::istreambuf_iterator<char>(pools)),std::istreambuf_iterator<char>());
+                ck(poolRaw.size()==2*poolBytes.size()&&
+                   std::memcmp(poolRaw.data(),poolBytes.data(),poolBytes.size())==0&&
+                   std::memcmp(poolRaw.data()+poolBytes.size(),poolBytes.data(),poolBytes.size())==0,
+                   "both draw-time t33 snapshots preserve all 336-byte records");
+            }
+            const auto readSurface=[&](ID3D11Texture2D* source,UINT pixelBytes,std::vector<uint8_t>& out){
+                D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
+                desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=desc.MiscFlags=0;
+                desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                ComPtr<ID3D11Texture2D> staging;
+                if(FAILED(device->CreateTexture2D(&desc,nullptr,&staging)))return false;
+                context->CopyResource(staging.Get(),source);
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                if(FAILED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped)))return false;
+                out.resize(size_t(desc.Width)*desc.Height*pixelBytes);
+                for(UINT y=0;y<desc.Height;++y)
+                    std::memcpy(out.data()+size_t(y)*desc.Width*pixelBytes,
+                                static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch,
+                                size_t(desc.Width)*pixelBytes);
+                context->Unmap(staging.Get(),0);return true;
+            };
+            std::vector<uint8_t> capturedColor,capturedSlot,capturedDepth;
+            ck(readSurface(color.Get(),4,capturedColor)&&readSurface(slot.Get(),8,capturedSlot)&&
+               readSurface(nativeDepth.Get(),8,capturedDepth),"captured native outputs read back");
+            context->ClearRenderTargetView(rtv.Get(),red);
+            context->ClearRenderTargetView(slotView.Get(),sentinel);
+            context->ClearDepthStencilView(nativeDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
+            context->OMSetRenderTargets(7,scene,nativeDsv.Get());
+            for(unsigned draw=0;draw<2;++draw){
+                const bool decal=draw!=0;
+                context->OMSetDepthStencilState(decal?decalDepth.Get():depthState.Get(),0);
+                context->VSSetShader(decal?decalVs.Get():underlayVs.Get(),nullptr,0);
+                context->PSSetShader(decal?decalPs.Get():underlayPs.Get(),nullptr,0);
+                context->Draw(3,0);
+            }
+            std::vector<uint8_t> referenceColor,referenceSlot,referenceDepth;
+            ck(readSurface(color.Get(),4,referenceColor)&&readSurface(slot.Get(),8,referenceSlot)&&
+               readSurface(nativeDepth.Get(),8,referenceDepth),"no-capture reference outputs read back");
+            ck(!capturedColor.empty()&&capturedColor==referenceColor&&capturedSlot==referenceSlot&&
+               capturedDepth==referenceDepth,"capture leaves color, MRT6, and native depth bit-identical to reference");
+            if(!bad){std::ofstream file(fixtureRoot/L"flat_draw_motion_current_fixture.txt",std::ios::binary);
+                file<<fs::relative(motionDir,fixtureRoot).generic_u8string()<<"\n";
+                ck(file.good(),"native motion fixture pointer written");
+                std::printf("flat draw motion fixture: %ls\n",motionDir.c_str());}
+            motion.cancel("test-end");
+        }
     }
     if(!bad){std::ofstream file(pointer,std::ios::binary);file<<fs::relative(dir,fixtureRoot).generic_u8string()<<"\n";
         ck(file.good(),"fixture pointer written");std::printf("flat draw fixture: %ls\n",dir.c_str());}

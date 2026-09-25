@@ -73,11 +73,21 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
           runtime.status().last==FlatProjectionRuntimeRefusal::PlanFailure &&
           runtime.status().coldQueued==queuedBefore,
           "live preflight refuses unknown topology without allocation or cold readback");
+    {const auto failure=runtime.failure();
+     check(failure.valid && std::strcmp(failure.branch,"topology-first-seen-live")==0 &&
+           !failure.inPrepare && !failure.allowAllocation && !failure.topologyPlan &&
+           failure.requestIndex==0 && failure.slot==2 && failure.buffer==original.Get() &&
+           failure.tracked && failure.shadowPresent && failure.trackedWidth==sizeof(raw),
+           "first-seen topology failure names the request and ready shadow");}
     check(runtime.preflight(&missingTopology,1,phase,1),
           "warm preflight can allocate a fresh structural plan after live refusal");
+    check(!runtime.failure().valid,"successful preflight clears previous failure snapshot");
     check(runtime.prepare(&request,1,phase,1)==nullptr &&
           runtime.status().last==FlatProjectionRuntimeRefusal::PlanFailure,
           "prepare requires a newly preflighted phase after topology retarget");
+    check(runtime.failure().valid && runtime.failure().inPrepare &&
+          std::strcmp(runtime.failure().branch,"prepare-no-exact-plan")==0,
+          "prepare failure distinguishes phase-plan timing from absent source bytes");
     {FlatProjectionBindingScope stale(*plan);
      check(!stale.active(),"failed prepare invalidates old plan token");}
     check(runtime.preflight(&request,1,phase,1,false) &&
@@ -90,6 +100,13 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
           runtime.status().last==FlatProjectionRuntimeRefusal::MissingFullWrite &&
           runtime.status().coldQueued==queuedAfterInvalidation,
           "live preflight does not queue a cold readback for missing source bytes");
+    {const auto failure=runtime.failure();
+     check(failure.valid && std::strcmp(failure.branch,"shadow-missing-full-write")==0 &&
+           failure.requestIndex==0 && failure.stage==FlatProjectionStage::Vertex &&
+           failure.slot==1 && failure.firstConstant==0 && failure.constantCount==4096 &&
+           failure.trackedGeneration!=0 && !failure.shadowPresent && !failure.pending &&
+           failure.patchCount==1 && !failure.inPrepare,
+           "missing full write snapshot identifies exact tracked source and cold state");}
     runtime.enableColdReadback(false);
     check(!runtime.copyConstants(original.Get(),0,sizeof(copied),copied) &&
           copied[0]==123,"invalidated shadow cannot establish diagnostic camera identity");
@@ -100,11 +117,17 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     runtime.observeUpdate(original.Get(),raw,nullptr);
     check(runtime.preflight(&request,1,phase,1,false) && runtime.prepare(&request,1,phase,1)!=nullptr,
           "late full update restores provenance in no-allocation mode");
+    check(!runtime.failure().valid,"successful prepare clears stale missing-write snapshot");
     UINT rangedFirst=16,rangedCount=16;
     ctx->VSSetConstantBuffers1(1,1,&bound,&rangedFirst,&rangedCount);
     check(runtime.prepare(&request,1,phase,1)==nullptr &&
           runtime.status().last==FlatProjectionRuntimeRefusal::UnsupportedRange,
           "unqualified Context1 range is detected by getter and refused");
+    {const auto failure=runtime.failure();
+     check(failure.valid && std::strcmp(failure.branch,"binding-mismatch")==0 &&
+           failure.actualBuffer==original.Get() && failure.actualFirst==16 &&
+           failure.actualCount==16 && failure.shadowPresent,
+           "binding refusal captures observed range without losing source shadow state");}
     ctx->VSSetConstantBuffers1(1,1,&bound,&first,&count);
     runtime.invalidateAll();
     check(runtime.prepare(&request,1,phase,1)==nullptr,"unknown command list invalidates all shadows");
@@ -202,6 +225,11 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         check(!runtime.preflight(&coldReq,1,zero,0) &&
               runtime.status().coldQueued==1 && runtime.status().coldPending==1,
               "exact admitted missing buffer queues one bounded readback");
+        {const auto failure=runtime.failure();
+         check(failure.valid && failure.tracked && failure.pending && !failure.shadowPresent &&
+               !failure.promoted && failure.buffer==cold.Get() && failure.trackedWidth==sizeof(raw) &&
+               std::strcmp(failure.branch,"shadow-missing-full-write")==0,
+               "cold missing write reports pending readback before first promotion");}
         ctx->Flush(); // test-only progress; production queue/poll never flushes
         for(unsigned i=0;i<120 && !runtime.status().coldCompleted;++i){
             runtime.pollColdReadbacks();Sleep(1);
@@ -210,6 +238,7 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
               runtime.preflight(&coldReq,1,zero,0) &&
               runtime.prepare(&coldReq,1,zero,0)==nullptr,
               "stable cold CB publishes complete shadow for later preparation");
+        check(!runtime.failure().valid,"successful cold preparation clears pending failure context");
         FlatProjectionRuntimeRequest staleReq=request;
         staleReq.original=stale.Get();staleReq.slot=4;
         auto* staleBound=stale.Get();ctx->VSSetConstantBuffers1(4,1,&staleBound,&first,&count);

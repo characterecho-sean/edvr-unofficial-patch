@@ -74,7 +74,67 @@ bool FlatProjectionRuntime::owner() const {
 bool FlatProjectionRuntime::refuse(FlatProjectionRuntimeRefusal reason) {
     status_.last = reason;
     ++status_.refusals[static_cast<uint32_t>(reason)];
+    if (attempt_.active) {
+        failure_ = {};
+        failure_.valid = true;
+        failure_.reason = reason;
+        failure_.branch = attempt_.branch ? attempt_.branch : "unspecified";
+        failure_.inPrepare = attempt_.inPrepare;
+        failure_.allowAllocation = attempt_.allowAllocation;
+        failure_.exactPlan = attempt_.exactPlan;
+        failure_.topologyPlan = attempt_.topologyPlan;
+        failure_.phase = attempt_.phase;
+        failure_.requestIndex = attempt_.requestIndex;
+        failure_.patchIndex = attempt_.patchIndex;
+        failure_.actualBuffer = attempt_.actualBuffer;
+        failure_.actualFirst = attempt_.actualFirst;
+        failure_.actualCount = attempt_.actualCount;
+        if (owner() && attempt_.requests && attempt_.requestIndex < attempt_.count &&
+            attempt_.requestIndex < FlatProjectionBindingPlan::kCapacity) {
+            const auto& r = attempt_.requests[attempt_.requestIndex];
+            failure_.stage = r.stage; failure_.slot = r.slot; failure_.buffer = r.original;
+            failure_.firstConstant = r.firstConstant; failure_.constantCount = r.constantCount;
+            failure_.patchCount = r.patchCount;
+            if (attempt_.patchIndex < r.patchCount && attempt_.patchIndex < 8) {
+                failure_.patchLayout = r.patches[attempt_.patchIndex].layout;
+                failure_.patchOffset = r.patches[attempt_.patchIndex].byteOffset;
+            }
+            if (Tracked* entry = find(r.original)) {
+                failure_.tracked = true;
+                failure_.trackedGeneration = entry->generation;
+                failure_.trackedWidth = entry->width;
+                failure_.mutationSerial = entry->mutationSerial;
+                failure_.mapped = entry->mapped; failure_.pending = entry->pending;
+                failure_.promoted = entry->promoted; failure_.privateReady = entry->privateReady;
+                FlatProjectionShadowView view{};
+                failure_.shadowPresent = shadows_.lookup(r.original, entry->generation, view);
+                if (failure_.shadowPresent) {
+                    failure_.shadowWriteGeneration = view.writeGeneration;
+                    failure_.shadowBankEpoch = view.bankEpoch;
+                }
+            }
+        }
+        attempt_.active = false;
+    }
     return false;
+}
+void FlatProjectionRuntime::beginFailureAttempt(const FlatProjectionRuntimeRequest* requests,
+    uint32_t count, uint32_t phase, bool inPrepare, bool allowAllocation) {
+    failure_.valid = false;
+    attempt_.active = true;
+    attempt_.requests = requests; attempt_.count = count; attempt_.phase = phase;
+    attempt_.inPrepare = inPrepare; attempt_.allowAllocation = allowAllocation;
+    attempt_.exactPlan = attempt_.topologyPlan = false;
+    attempt_.requestIndex = attempt_.patchIndex = ~0u;
+    attempt_.branch = nullptr; attempt_.actualBuffer = nullptr;
+    attempt_.actualFirst = attempt_.actualCount = 0;
+}
+bool FlatProjectionRuntime::refuseAt(FlatProjectionRuntimeRefusal reason,
+    const char* branch, uint32_t requestIndex, uint32_t patchIndex) {
+    attempt_.branch = branch;
+    attempt_.requestIndex = requestIndex;
+    attempt_.patchIndex = patchIndex;
+    return refuse(reason);
 }
 bool FlatProjectionRuntime::initialize(ID3D11DeviceContext* context) {
     if (context_ && !owner()) return refuse(FlatProjectionRuntimeRefusal::WrongThread);
@@ -102,6 +162,7 @@ void FlatProjectionRuntime::reset() {
     shadows_.reset(); context_.Reset(); owner_ = 0; nextGeneration_ = 1;
     coldEnabled_ = false; coldAttempts_ = 0;
     status_ = {};
+    failure_ = {}; attempt_ = {};
 }
 void FlatProjectionRuntime::enableColdReadback(bool enabled) {
     if (!owner()) return;
@@ -355,28 +416,36 @@ bool FlatProjectionRuntime::actualBindings(const FlatProjectionRuntimeRequest* r
     FlatComputeInternalScope internal;
     for (uint32_t i = 0; i < count; ++i) {
         const auto& r = requests[i];
-        if (r.firstConstant != 0) return refuse(FlatProjectionRuntimeRefusal::UnsupportedRange);
+        if (r.firstConstant != 0) return refuseAt(FlatProjectionRuntimeRefusal::UnsupportedRange, "binding-request-range", i);
         ID3D11Buffer* actual = nullptr; UINT first = 0, constants = 0;
         get(context_.Get(), r.stage, r.slot, &actual, &first, &constants);
         const bool match = actual == r.original && first == r.firstConstant &&
-                           constants == r.constantCount;
+                            constants == r.constantCount;
+        if (!match) {
+            attempt_.actualBuffer = actual;
+            attempt_.actualFirst = first; attempt_.actualCount = constants;
+        }
         if (actual) actual->Release();
-        if (!match) return refuse(first != 0 ? FlatProjectionRuntimeRefusal::UnsupportedRange :
-                                              FlatProjectionRuntimeRefusal::BindingMismatch);
+        if (!match) return refuseAt(first != 0 ? FlatProjectionRuntimeRefusal::UnsupportedRange :
+                                                FlatProjectionRuntimeRefusal::BindingMismatch,
+                                    "binding-mismatch", i);
     }
     return true;
 }
 bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* requests,
     uint32_t count, const FlatProjectionJitter& jitter, uint32_t phase, bool allowAllocation) {
-    if (!owner()) return refuse(FlatProjectionRuntimeRefusal::WrongThread);
+    beginFailureAttempt(requests, count, phase, false, allowAllocation);
+    if (!owner()) return refuseAt(FlatProjectionRuntimeRefusal::WrongThread, "preflight-owner");
     if (!requests || !count || count > FlatProjectionBindingPlan::kCapacity ||
-        !flat_projection_detail::finite(jitter)) return refuse(FlatProjectionRuntimeRefusal::InvalidRecipe);
+        !flat_projection_detail::finite(jitter)) return refuseAt(FlatProjectionRuntimeRefusal::InvalidRecipe, "preflight-shape");
     CachedPlan* cached = findPlan(requests, count, jitter, phase);
+    attempt_.exactPlan = cached != nullptr;
     if (!cached) cached = findTopology(requests, count);
+    attempt_.topologyPlan = cached != nullptr;
     if (!cached) {
-        if (!allowAllocation) return refuse(FlatProjectionRuntimeRefusal::PlanFailure);
+        if (!allowAllocation) return refuseAt(FlatProjectionRuntimeRefusal::PlanFailure, "topology-first-seen-live", 0);
         for (auto& slot : plans_) if (!slot.used) { cached = &slot; break; }
-        if (!cached) return refuse(FlatProjectionRuntimeRefusal::NoCapacity);
+        if (!cached) return refuseAt(FlatProjectionRuntimeRefusal::NoCapacity, "plan-capacity", 0);
     }
     FlatPrivateProjectionBinding bindings[FlatProjectionBindingPlan::kCapacity]{};
     for (uint32_t i = 0; i < count; ++i) {
@@ -386,66 +455,77 @@ bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* reques
             r.constantCount % 16 || !r.patchCount || r.patchCount > 8 ||
             (r.stage != FlatProjectionStage::Vertex && r.stage != FlatProjectionStage::Pixel &&
              r.stage != FlatProjectionStage::Compute))
-            return refuse(r.firstConstant ? FlatProjectionRuntimeRefusal::UnsupportedRange :
-                                            FlatProjectionRuntimeRefusal::InvalidRecipe);
+            return refuseAt(r.firstConstant ? FlatProjectionRuntimeRefusal::UnsupportedRange :
+                                             FlatProjectionRuntimeRefusal::InvalidRecipe,
+                            "request-invalid", i);
         for (uint32_t p = 0; p < r.patchCount; ++p) {
             const auto& patch = r.patches[p];
             const uint32_t span = patch.layout == FlatProjectionPatchLayout::InverseUvRay ||
                                   patch.layout == FlatProjectionPatchLayout::LightingUvRay ? 48u : 64u;
             if (uint64_t(patch.byteOffset) + span > uint64_t(r.constantCount) * 16u)
-                return refuse(FlatProjectionRuntimeRefusal::UnsupportedRange);
+                return refuseAt(FlatProjectionRuntimeRefusal::UnsupportedRange, "patch-range", i, p);
         }
         for (uint32_t j = 0; j < i; ++j)
             if (r.stage == requests[j].stage && r.slot == requests[j].slot)
-                return refuse(FlatProjectionRuntimeRefusal::InvalidRecipe);
+                return refuseAt(FlatProjectionRuntimeRefusal::InvalidRecipe, "duplicate-binding", i);
         // A static CB created before this opt-in interval has no write hook
         // history. Register only this explicitly admitted identity, once; a
         // cold GPU snapshot may then establish its full current contents.
         Tracked* entry = find(r.original);
-        if (!entry && allowAllocation) entry = track(r.original);
-        if (!entry) return refuse(FlatProjectionRuntimeRefusal::UnknownBuffer);
+        if (!entry && allowAllocation) {
+            attempt_.branch = "buffer-track-capacity";
+            attempt_.requestIndex = i;
+            entry = track(r.original);
+            if (!entry && failure_.valid) return false;
+        }
+        if (!entry) return refuseAt(FlatProjectionRuntimeRefusal::UnknownBuffer, "untracked-live-buffer", i);
         FlatProjectionShadowView view{};
         if (!shadows_.lookup(r.original, entry->generation, view)) {
             if (allowAllocation) queueCold(*entry);
-            return refuse(FlatProjectionRuntimeRefusal::MissingFullWrite);
+            return refuseAt(FlatProjectionRuntimeRefusal::MissingFullWrite, "shadow-missing-full-write", i);
         }
         if (!lightingMatchesShadow(r, view))
-            return refuse(FlatProjectionRuntimeRefusal::InvalidRecipe);
+            return refuseAt(FlatProjectionRuntimeRefusal::InvalidRecipe, "lighting-shadow-mismatch", i);
         if (!entry->privateReady) {
-            if (!allowAllocation) return refuse(FlatProjectionRuntimeRefusal::PrivateFailure);
+            if (!allowAllocation) return refuseAt(FlatProjectionRuntimeRefusal::PrivateFailure, "private-first-seen-live", i);
             if (!entry->privateBuffer.initialize(context_.Get(), entry->buffer.Get(), entry->generation))
-                return refuse(FlatProjectionRuntimeRefusal::PrivateFailure);
+                return refuseAt(FlatProjectionRuntimeRefusal::PrivateFailure, "private-create", i);
             entry->privateReady = true;
         }
         if (!entry->privateBuffer.prepare(shadows_, r.patches, r.patchCount, jitter, phase))
-            return refuse(FlatProjectionRuntimeRefusal::InvalidRecipe);
+            return refuseAt(FlatProjectionRuntimeRefusal::InvalidRecipe, "private-patch-preparation", i);
         bindings[i] = entry->privateBuffer.binding(r.stage, r.slot, r.firstConstant, r.constantCount);
         entry->promoted = true;
     }
     if (!(cached->used ? cached->plan.refreshPrepared() :
                          cached->plan.initialize(context_.Get(), bindings, count)))
-        return refuse(FlatProjectionRuntimeRefusal::PlanFailure);
+        return refuseAt(FlatProjectionRuntimeRefusal::PlanFailure, "plan-initialize-or-refresh");
     cached->used = true; cached->count = count; cached->phase = phase; cached->jitter = jitter;
     for (uint32_t i = 0; i < count; ++i) cached->requests[i] = requests[i];
     ++status_.preflights;
+    attempt_.active = false;
     return true;
 }
 const FlatProjectionBindingPlan* FlatProjectionRuntime::prepare(
     const FlatProjectionRuntimeRequest* requests, uint32_t count,
     const FlatProjectionJitter& jitter, uint32_t phase) {
-    if (!owner()) { refuse(FlatProjectionRuntimeRefusal::WrongThread); return nullptr; }
+    beginFailureAttempt(requests, count, phase, true, false);
+    if (!owner()) { refuseAt(FlatProjectionRuntimeRefusal::WrongThread, "prepare-owner"); return nullptr; }
     if (!requests || !count || count > FlatProjectionBindingPlan::kCapacity) {
         invalidatePreparedPlans();
-        refuse(FlatProjectionRuntimeRefusal::InvalidRecipe); return nullptr;
+        refuseAt(FlatProjectionRuntimeRefusal::InvalidRecipe, "prepare-shape"); return nullptr;
     }
     CachedPlan* cached = findPlan(requests, count, jitter, phase);
+    attempt_.exactPlan = cached != nullptr;
+    // An exact plan already proves topology; scan only on the failure path.
+    attempt_.topologyPlan = cached != nullptr || findTopology(requests, count) != nullptr;
     if (!cached) {
         invalidatePreparedPlans();
-        refuse(FlatProjectionRuntimeRefusal::PlanFailure); return nullptr;
+        refuseAt(FlatProjectionRuntimeRefusal::PlanFailure, "prepare-no-exact-plan", 0); return nullptr;
     }
-    auto fail = [&](FlatProjectionRuntimeRefusal reason) -> const FlatProjectionBindingPlan* {
+    auto fail = [&](FlatProjectionRuntimeRefusal reason, const char* branch, uint32_t index = ~0u) -> const FlatProjectionBindingPlan* {
         invalidatePreparedPlans();
-        refuse(reason);
+        refuseAt(reason, branch, index);
         return nullptr;
     };
     if (!actualBindings(requests, count)) {
@@ -455,22 +535,23 @@ const FlatProjectionBindingPlan* FlatProjectionRuntime::prepare(
     for (uint32_t i = 0; i < count; ++i) {
         const auto& r = requests[i];
         Tracked* entry = find(r.original);
-        if (!entry) return fail(FlatProjectionRuntimeRefusal::UnknownBuffer);
+        if (!entry) return fail(FlatProjectionRuntimeRefusal::UnknownBuffer, "prepare-untracked-buffer", i);
         FlatProjectionShadowView view{};
         if (!shadows_.lookup(r.original, entry->generation, view)) {
-            return fail(FlatProjectionRuntimeRefusal::MissingFullWrite);
+            return fail(FlatProjectionRuntimeRefusal::MissingFullWrite, "prepare-shadow-missing-full-write", i);
         }
         if (!lightingMatchesShadow(r, view)) {
-            return fail(FlatProjectionRuntimeRefusal::InvalidRecipe);
+            return fail(FlatProjectionRuntimeRefusal::InvalidRecipe, "prepare-lighting-shadow-mismatch", i);
         }
         if (!entry->privateBuffer.prepare(shadows_, r.patches, r.patchCount, jitter, phase)) {
-            return fail(FlatProjectionRuntimeRefusal::PrivateFailure);
+            return fail(FlatProjectionRuntimeRefusal::PrivateFailure, "prepare-private-patch", i);
         }
     }
     if (!cached->plan.refreshPrepared()) {
-        return fail(FlatProjectionRuntimeRefusal::PlanFailure);
+        return fail(FlatProjectionRuntimeRefusal::PlanFailure, "prepare-plan-refresh");
     }
     ++status_.prepared;
+    attempt_.active = false;
     if (zero(jitter)) { ++status_.zeroPhaseReady; return nullptr; }
     return &cached->plan;
 }

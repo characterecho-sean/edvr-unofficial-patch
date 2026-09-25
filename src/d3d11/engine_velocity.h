@@ -151,6 +151,11 @@ void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept;
 void engineVelocityFrameBoundary(ID3D11DeviceContext*);
 // Flat draw bracket: restore substituted shaders/blend; caller restores MRTs.
 void engineVelocityAfterFlatDraw(ID3D11DeviceContext*);
+// Owner-thread diagnostic, sampled after BeforeDraw and before restoring the
+// draw bracket. A source candidate alone does not prove substitution succeeded.
+inline bool engineVelocityDrawSubstituted() noexcept {
+    return engine_velocity_detail::cache.family >= 0;
+}
 
 // The temporal pass's inputs for one eye this frame, AddRef'd: the slot
 // target (MRT6, the scene depth's size), the pool snapshot the eye's draws

@@ -123,6 +123,42 @@ struct State {
 State& state() { static State* p = new State; return *p; }
 bool owner() { return state().thread == GetCurrentThreadId(); }
 bool nonzeroPhase(const State& s) { return s.phase.currentX!=0 || s.phase.currentY!=0; }
+void reportProjectionFailure(const State& s, const FlatProjectionRecipes& recipes,
+    uint64_t vs, uint64_t ps, uint64_t cs) {
+    if(!s.projection || !s.jitterWanted || !nonzeroPhase(s))return;
+    // Failure-only, independent of F10. Startup cannot consume the live-draw
+    // budget, and resource resets cannot restart either process-wide budget.
+    static uint32_t appliedEvents=0, earlyEvents=0;
+    static uint64_t lastFrame=~uint64_t{0};
+    uint32_t& events=s.phase.applied?appliedEvents:earlyEvents;
+    const uint32_t limit=s.phase.applied?32u:8u;
+    if(events>=limit || lastFrame==s.prefix.frame)return;
+    const auto f=s.projection->failure();
+    if(!f.valid)return;
+    lastFrame=s.prefix.frame;++events;
+    Log::get().note("flat projection failure event: frame=%llu VS=%016llX PS=%016llX CS=%016llX branch=%s code=%u call=%s applied=%u phase=%u jitter=(%.7g,%.7g) allocation=%u exact-plan=%u topology-plan=%u request=%u patch=%u event=%u/%u",
+        (unsigned long long)s.prefix.frame,(unsigned long long)vs,(unsigned long long)ps,(unsigned long long)cs,
+        f.branch?f.branch:"unavailable",static_cast<unsigned>(f.reason),f.inPrepare?"prepare":"preflight",
+        s.phase.applied,f.phase,s.phase.currentX,s.phase.currentY,f.allowAllocation?1u:0u,
+        f.exactPlan?1u:0u,f.topologyPlan?1u:0u,f.requestIndex,f.patchIndex,events,limit);
+    Log::get().note("flat projection failure buffer: frame=%llu stage=%u slot=%u resource=%p first=%u count=%u tracked=%u generation=%llu bytes=%u mutation=%llu mapped=%u cold-pending=%u promoted=%u private-ready=%u shadow=%u shadow-write=%llu shadow-epoch=%llu actual-resource=%p actual-first=%u actual-count=%u",
+        (unsigned long long)s.prefix.frame,static_cast<unsigned>(f.stage),f.slot,f.buffer,f.firstConstant,f.constantCount,
+        f.tracked?1u:0u,(unsigned long long)f.trackedGeneration,f.trackedWidth,(unsigned long long)f.mutationSerial,
+        f.mapped?1u:0u,f.pending?1u:0u,f.promoted?1u:0u,f.privateReady?1u:0u,f.shadowPresent?1u:0u,
+        (unsigned long long)f.shadowWriteGeneration,(unsigned long long)f.shadowBankEpoch,
+        f.actualBuffer,f.actualFirst,f.actualCount);
+    // A missing plan can involve more than one CB. Retain all requested
+    // bindings and offsets so the first request is not mistaken for the cause.
+    for(uint32_t i=0;i<recipes.count;++i) {
+        const auto& r=recipes.requests[i];
+        for(uint32_t p=0;p<r.patchCount;++p) {
+            const auto& patch=r.patches[p];
+            Log::get().note("flat projection failure request: frame=%llu request=%u stage=%u slot=%u resource=%p first=%u count=%u patch=%u/%u layout=%u byte-offset=%u",
+                (unsigned long long)s.prefix.frame,i,static_cast<unsigned>(r.stage),r.slot,r.original,
+                r.firstConstant,r.constantCount,p,r.patchCount,static_cast<unsigned>(patch.layout),patch.byteOffset);
+        }
+    }
+}
 void failPhase(State& s,const char* reason) {
     s.frameCoverage=false;if(!s.jitterWanted)return;
     s.phase.fail();s.jitterReason=reason;++s.jitterRefusals;
@@ -729,6 +765,7 @@ const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecip
         }
         return plan;
     }
+    reportProjectionFailure(s,recipes,vs,ps,cs);
     if(audit) { ++s.projectionMissing;projectionDetail(s,vs,ps,cs,static_cast<uint32_t>(s.projection->status().last),"private-preparation-refused"); }
     failPhase(s,"projection-preparation-refused");return nullptr;
 }
@@ -1195,6 +1232,13 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if (s.namedDepth == k.depth && s.namedConstants == k.b1 && std::memcmp(s.namedCamera, d.camera, sizeof(d.camera)) == 0) {
             ctx->OMGetRenderTargets(8, targets, &depth); producer = true; engineVelocityBeforeDraw(ctx, false);
         }
+    }
+    // The earlier capture preserves original game CBs and shader identities.
+    // Motion is sampled only after the producer has attached its actual MRT6,
+    // and the destructor takes the matching sample before restoring the draw.
+    if(drawCaptureStarted) {
+        FlatComputeInternalScope guard;
+        s.drawCapture.motionBefore(ctx,producer && !targets[6] && engineVelocityDrawSubstituted(),sourceCandidate);
     }
     // Engine motion observes unmodified game constants above. Only the actual
     // raster draw sees private projection rows; restore before leaving scope.
