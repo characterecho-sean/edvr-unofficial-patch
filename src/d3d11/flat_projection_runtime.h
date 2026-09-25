@@ -55,6 +55,11 @@ struct FlatProjectionRuntimeFailure {
     FlatProjectionPatchLayout patchLayout = FlatProjectionPatchLayout::ForwardColumns;
 };
 
+struct FlatProjectionShadowMetadata {
+    bool tracked = false, mapped = false, pending = false, shadowPresent = false;
+    uint32_t width = 0;
+    uint64_t generation = 0, mutationSerial = 0, writeGeneration = 0, bankEpoch = 0;
+};
 class FlatProjectionRuntime {
 public:
     // initialize adopts the current thread as owner. Earlier or foreign
@@ -73,6 +78,8 @@ public:
     // Owner-thread diagnostic copy from a current complete shadow. Never
     // exposes retained byte pointers; missing/stale/ranged data leaves out alone.
     bool copyConstants(ID3D11Buffer*, uint32_t byteOffset, uint32_t byteCount, void* out);
+    // Read-only owner-thread metadata; does not track, allocate or queue a readback.
+    FlatProjectionShadowMetadata constantsMetadata(ID3D11Buffer*);
 
     // Preflight is required before a nonzero raster phase. Warm calls may
     // allocate private buffers and a structural binding plan. With allocation

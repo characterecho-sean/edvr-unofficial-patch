@@ -25,7 +25,11 @@ inline bool flatProjectionDrawUnchanged(uint64_t vs, uint64_t ps) {
            (vs == 0xCFA91824129ECBBCull && ps == 0xFCFAD73924BF45B9ull) ||
            // Epic 85bf7652: VS maps packed UV directly to clip space without
            // a CB; PS filters texture neighbors with no projection consumer.
-           (vs == 0x525D47E3D5E2EFF4ull && ps == 0xF0BAE053476F8730ull);
+           (vs == 0x525D47E3D5E2EFF4ull && ps == 0xF0BAE053476F8730ull) ||
+           // Epic ad7607c6: fullscreen color/effect composition. VS derives
+           // clip coordinates from vertex ID; PS samples/distorts screen
+           // color without scene-depth reconstruction or a camera matrix.
+           (vs == 0xB553BB479B7C0B97ull && ps == 0x68ABCB9FEF6CA66Cull);
 }
 inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps) {
     FlatProjectionRecipes result;
@@ -221,6 +225,48 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x19F70CE80DA3242Bull: if (ps == 0xC8FBD8A982C0729Cull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
     case 0x9FFA5D5E79F04873ull: if (ps == 0x8134D09E3462E904ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     case 0xA52ECB960783BB35ull: if (ps == 0x84965D3C050FB01Bull) result.add(S::Vertex,2,L::InverseClip,11); break;
+    default: break;
+    }
+    // Epic ad7607c6 station/hangar/concourse: exact captured companions.
+    // Forward VS matrices feed SV_Position; lighting PS variants use world
+    // varyings and screen tile indices, with no additional projection matrix.
+    // Deferred b2[10..13] volumes carry view position in a perspective varying
+    // for the PS depth reconstruction, so only their forward matrix changes.
+    // These recipes do not establish target/camera ownership or motion coverage.
+    if (result.count == 0) switch (vs) {
+    case 0xEB5234DB6ADB491Dull: if (ps == 0xDC603C35BBE74B31ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x637C27B86091BD60ull: if (ps == 0x48D45E37C62839E9ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xC171BD0C4B585221ull: if (ps == 0x6855D1919FC5E0C0ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x436193B352A2897Eull: if (ps == 0x51EE1F922FD220B0ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x4D24A7A6C2D12733ull: if (ps == 0xB70DF49F678E806Full) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xDE545DC8EE4FBB87ull: if (ps == 0xA6070F9DD1CFB601ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x98397963AAEC45D3ull: if (ps == 0x8717694A527EC745ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xD005EBB14A22EA0Eull:
+        if (ps == 0x302226F2D8C0938Aull || ps == 0xE92C14AA3E51C743ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0xE308565BF97FDE0Bull: if (ps == 0x0544F1CC95FD1F12ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x5B0068AF5630F96Bull: if (ps == 0xA5E2331517988BD8ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x24DE25E496342EB8ull: if (ps == 0x1A53D2791C12CE92ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0x1C5062229AA40CE4ull: if (ps == 0x2519C9050946D545ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xABF539A8C5CCC1B7ull: if (ps == 0x3F71C89CA34DF25Bull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x2B3F53DDA00256E2ull: if (ps == 0xB2DE0A41A4C2B4F5ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x38470D38E07CBDEBull: if (ps == 0x0A80DFD89B15A05Bull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x6D8886012A4C6785ull: if (ps == 0x6F3252AB8579C1E3ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    // B403 is also used by an inert VS; this skinned VS still projects.
+    case 0xB018D143700AB803ull: if (ps == 0xB403F48CB35D9739ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    case 0x899165B9EE284E74ull: if (ps == 0x26EA0826BD6824E6ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xB121A79E457669E8ull: if (ps == 0x777BF099CBAA7C50ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0xA7339D1F8A5AC0D0ull: if (ps == 0xD3891373E13BAD40ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0xC2208C162D010083ull: if (ps == 0) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x44C290CC444D1EBEull:
+        if (ps == 0x3154942271AD5810ull || ps == 0xFD32C5433BD4C015ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xEB686C4180DFC6A6ull: if (ps == 0xB11CD77D729C2AEEull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x0B71713BCDE4B6C0ull: if (ps == 0xFA7411BF7E4C4088ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    // Fullscreen geometry, but its ray is x*row41 + y*row42 + row43 +
+    // row44 before view rotation. Compensate row44.xyz; preserve unused W.
+    case 0xAFFEF0187F1EBC9Full: if (ps == 0x41152F82C6E8BE1Full) result.add(S::Vertex,2,L::InverseScreenRay,41); break;
+    case 0xA1B7CFCD0BE7493Eull: if (ps == 0x992DE24C01E04A27ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0x889A5279E68F0672ull: if (ps == 0xF70549D991FF0E9Bull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x76ED1E4F8C72C26Eull: if (ps == 0x7ECF7C83FD5AD373ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     default: break;
     }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);

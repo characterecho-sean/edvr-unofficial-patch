@@ -3,6 +3,7 @@
 #include "flat_mono_resolve.h"
 #include "flat_projection_recipes.h"
 #include "flat_projection_ownership.h"
+#include "flat_camera_probe.h"
 #include "flat_live_phase.h"
 #include "flat_draw_capture.h"
 #include "binding_shadow.h"
@@ -86,6 +87,7 @@ struct State {
         uint32_t attempts = 0, complete = 0;
     };
     LocalProjectionSample localSamples[2]{};
+    FlatCameraProbe cameraProbe{};
     struct CopyProvenanceSample {
         uint64_t firstFrame = 0, frames[2]{};
         uint32_t attempts = 0, completed = 0, missingSource = 0, missingDestination = 0;
@@ -338,6 +340,11 @@ void reportProjection(State& s, const char* event) {
         (s.localSamples[i].closed[0]?1u:0u)+(s.localSamples[i].closed[1]?1u:0u),
         (unsigned long long)s.localSamples[i].firstFrame);
     const auto& copy=s.copyProvenance;
+    const auto& cameraProbe=s.cameraProbe;
+    Log::get().note("flat camera probe: event=%s observed=%llu conflicts=%llu attempts=%u complete=%u missing=%u actual-mismatch=%u first-frame=%llu last-frame=%llu result=%s; F10 only, two distinct conflict frames, CPU shadows only, no camera admission",
+        event,(unsigned long long)cameraProbe.observed,(unsigned long long)cameraProbe.conflicts,
+        cameraProbe.attempts,cameraProbe.complete,cameraProbe.missing,cameraProbe.actualMismatch,
+        (unsigned long long)cameraProbe.firstFrame,(unsigned long long)cameraProbe.lastFrame,cameraProbe.result());
     reportUnknownProjection(s,event);
     Log::get().note("flat copy provenance capture: event=%s attempts=%u completed=%u missing-source-record=%u missing-destination-record=%u actual-shader-mismatch=%u rearmed-before-complete=%u first-frame=%llu result=%s; two distinct frames per F10 arm separated by at least 90 frames",
         event,copy.attempts,copy.completed,copy.missingSource,copy.missingDestination,
@@ -564,6 +571,73 @@ void hexWords(const unsigned char* bytes, uint32_t count, char* text, size_t cap
         if(n<=0 || static_cast<size_t>(n)>=capacity-used)break;
         used+=static_cast<size_t>(n);
     }
+}
+uint32_t captureCameraConflict(State& s, const FlatRuntimeDraw& draw) {
+    // Run on the original game draw, before the observer records/refuses it and
+    // before any private jitter or motion bindings. No per-draw work outside F10.
+    const auto& k=draw.key;
+    if(!s.projectionFrames || k.vs!=0x88DCF1164C640EC3ull || k.ps!=0x494506A63091DF8Cull)return 0;
+    const FlatRuntimeTarget* target=nullptr;
+    for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+        if(s.prefix.targets[i].resource==k.color){target=&s.prefix.targets[i];break;}
+    const bool conflict=k.format==26 && k.camera && target && target->hdrCamera &&
+        std::memcmp(target->tone.camera,draw.camera,kFlatCameraBytes)!=0;
+    if(!s.cameraProbe.begin(true,k.vs,k.ps,s.prefix.frame,conflict))return 0;
+    const uint32_t attempt=s.cameraProbe.attempts;
+    FlatComputeInternalScope internal;
+    Ptr<ID3D11VertexShader> actualVs;Ptr<ID3D11PixelShader> actualPs;
+    s.context->VSGetShader(&actualVs,nullptr,nullptr);s.context->PSGetShader(&actualPs,nullptr,nullptr);
+    const uint64_t actualVh=lookupShaderHash(actualVs.Get()),actualPh=lookupShaderHash(actualPs.Get());
+    const bool actualMatches=actualVh==k.vs && actualPh==k.ps;
+    const auto& reference=target->tone;
+    Log::get().note("flat camera probe draw: attempt=%u frame=%llu next-seq=%u actual-VS=%016llX actual-PS=%016llX actual-match=%u hdr=%p rtv=%p depth=%p dsv=%p named-depth=%p named-b1=%p reference-q=%u reference-VS=%016llX reference-PS=%016llX reference-b1=%p reference-epoch=%llu reference-write=%u current-b1=%p current-epoch=%llu current-write=%u prior-bad=%s viewport-count=%u viewport=(%.9g,%.9g,%.9g,%.9g,%.9g,%.9g)",
+        attempt,(unsigned long long)s.prefix.frame,s.prefix.sequence+1,(unsigned long long)actualVh,(unsigned long long)actualPh,actualMatches?1u:0u,
+        k.color,k.rtv,k.depth,k.dsv,s.namedDepth,s.namedConstants,reference.first,
+        (unsigned long long)reference.key.vs,(unsigned long long)reference.key.ps,reference.key.b1,
+        (unsigned long long)reference.key.writeEpoch,reference.key.writeSeq,k.b1,(unsigned long long)k.writeEpoch,k.writeSeq,
+        flatRuntimeConflictName(target->firstBad.cause),k.viewportCount,k.viewport[0],k.viewport[1],k.viewport[2],k.viewport[3],k.viewport[4],k.viewport[5]);
+    // These are frozen copies from their owning draws, never a late reread of
+    // the reference's live CB (which may now contain the conflicting camera).
+    const bool namedPresent=s.namedDepth && s.namedConstants;
+    const unsigned char* cameras[]={reference.camera,draw.camera,s.namedCamera};
+    const char* names[]={"reference-HDR-frozen","current-draw-frozen","named-scene-frozen"};
+    for(uint32_t i=0;i<3;++i){
+        char hex[24*9+1]{};const bool present=i!=2 || namedPresent;
+        if(present)hexWords(cameras[i],24,hex,sizeof(hex));
+        Log::get().note("flat camera probe camera: attempt=%u role=%s result=%s rows270-275=%s",
+            attempt,names[i],present?"present":"unavailable",present?hex:"unavailable");
+    }
+    bool complete=actualMatches && namedPresent && s.projection && s.projectionContext;
+    const UINT slots[]={0,1},rows[]={4,270},counts[]={4,6};
+    for(uint32_t i=0;i<2;++i){
+        Ptr<ID3D11Buffer> buffer;UINT first=0,count=0;
+        if(s.projectionContext)s.projectionContext->VSGetConstantBuffers1(slots[i],1,&buffer,&first,&count);
+        const bool inRange=buffer && rows[i]<=count && counts[i]<=count-rows[i] && first<=UINT32_MAX/16u-rows[i]-counts[i];
+        FlatProjectionShadowMetadata metadata{};
+        if(s.projection)metadata=s.projection->constantsMetadata(buffer.Get());
+        unsigned char raw[kFlatCameraBytes]{};char hex[24*9+1]{};
+        const bool copied=inRange && s.projection && s.projection->copyConstants(buffer.Get(),(first+rows[i])*16u,counts[i]*16u,raw);
+        if(copied)hexWords(raw,counts[i]*4,hex,sizeof(hex));else complete=false;
+        Log::get().note("flat camera probe rows: attempt=%u VS-b%u row=%u rows=%u buffer=%p first=%u bound-count=%u backing-byte=%u tracked=%u width=%u generation=%llu mutation=%llu mapped=%u pending=%u shadow=%u shadow-write=%llu shadow-epoch=%llu result=%s words=%s",
+            attempt,slots[i],rows[i],counts[i],buffer.Get(),first,count,inRange?(first+rows[i])*16u:0u,
+            metadata.tracked?1u:0u,metadata.width,(unsigned long long)metadata.generation,(unsigned long long)metadata.mutationSerial,
+            metadata.mapped?1u:0u,metadata.pending?1u:0u,metadata.shadowPresent?1u:0u,
+            (unsigned long long)metadata.writeGeneration,(unsigned long long)metadata.bankEpoch,
+            !s.projectionContext?"no-context1":!buffer?"unbound":!inRange?"range-invalid":copied?"current-full-shadow":"missing-full-shadow",copied?hex:"unavailable");
+    }
+    Ptr<ID3D11DepthStencilState> depthState;UINT stencilRef=0;
+    s.context->OMGetDepthStencilState(&depthState,&stencilRef);
+    D3D11_DEPTH_STENCIL_DESC desc{};
+    if(depthState)depthState->GetDesc(&desc);
+    else {desc.DepthEnable=TRUE;desc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;desc.DepthFunc=D3D11_COMPARISON_LESS;
+        desc.StencilReadMask=D3D11_DEFAULT_STENCIL_READ_MASK;desc.StencilWriteMask=D3D11_DEFAULT_STENCIL_WRITE_MASK;
+        desc.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};desc.BackFace=desc.FrontFace;}
+    Log::get().note("flat camera probe depth-state: attempt=%u state=%p default=%u depth-enable=%u depth-write=%u depth-func=%u stencil-enable=%u stencil-ref=%u read-mask=%u write-mask=%u front=(%u,%u,%u,%u) back=(%u,%u,%u,%u) result=%s",
+        attempt,depthState.Get(),depthState?0u:1u,desc.DepthEnable?1u:0u,desc.DepthWriteMask,desc.DepthFunc,desc.StencilEnable?1u:0u,stencilRef,
+        desc.StencilReadMask,desc.StencilWriteMask,desc.FrontFace.StencilFailOp,desc.FrontFace.StencilDepthFailOp,desc.FrontFace.StencilPassOp,desc.FrontFace.StencilFunc,
+        desc.BackFace.StencilFailOp,desc.BackFace.StencilDepthFailOp,desc.BackFace.StencilPassOp,desc.BackFace.StencilFunc,complete?"complete":"partial");
+    s.cameraProbe.finish(complete,actualMatches);
+    return attempt;
 }
 void captureLocalProjection(State& s, uint64_t vs, uint64_t ps) {
     const uint32_t pair=vs==0x4D516EF05C68FFA5ull && ps==0x147E748F4CD3AE9Aull ? 0u :
@@ -957,6 +1031,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.projectionDetailsUsed=0;
             s.projectionOutcomesUsed=0;s.projectionOutcomeOverflow=0;
             s.localSamples[0]={};s.localSamples[1]={};
+            s.cameraProbe={};
             s.copyProvenance={};s.copyProvenance.rearmedBeforeComplete=interrupted;
             s.unknownProjectionPairsUsed=0;s.unknownProjectionCaptureOverflow=0;
             s.unknownProjectionAutomatic=s.unknownProjectionAudit=0;
@@ -1174,7 +1249,15 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     const auto oldTargets = s.prefix.targetsUsed;
     const uint32_t oldImageAccepted=s.prefix.imageCopiesAccepted,oldImageRefused=s.prefix.imageCopiesRefused;
     const uint32_t oldMenuAccepted=s.prefix.menuCopiesAccepted,oldMenuRefused=s.prefix.menuCopiesRefused;
+    const uint32_t cameraProbeAttempt=captureCameraConflict(s,d);
     const auto selected = flatRuntimeObserve(s.prefix, d);
+    if(cameraProbeAttempt)for(uint32_t i=0;i<s.prefix.targetsUsed;++i)if(s.prefix.targets[i].resource==k.color){
+        const auto& witness=s.prefix.targets[i].firstBad;
+        Log::get().note("flat camera probe observer: attempt=%u frame=%llu draw-seq=%u first-bad=%s first-bad-seq=%u caused-first-camera-conflict=%u",
+            cameraProbeAttempt,(unsigned long long)s.prefix.frame,s.prefix.sequence,flatRuntimeConflictName(witness.cause),witness.sequence,
+            witness.cause==FlatRuntimeConflict::CameraChange && witness.sequence==s.prefix.sequence?1u:0u);
+        break;
+    }
     s.hdrCopiesAccepted+=s.prefix.imageCopiesAccepted-oldImageAccepted;
     s.hdrCopiesRefused+=s.prefix.imageCopiesRefused-oldImageRefused;
     s.menuCopiesAccepted+=s.prefix.menuCopiesAccepted-oldMenuAccepted;

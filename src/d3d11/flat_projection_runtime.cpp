@@ -382,6 +382,21 @@ bool FlatProjectionRuntime::copyConstants(ID3D11Buffer* buffer, uint32_t offset,
     std::memcpy(out, view.bytes + offset, count);
     return true;
 }
+FlatProjectionShadowMetadata FlatProjectionRuntime::constantsMetadata(ID3D11Buffer* buffer) {
+    FlatProjectionShadowMetadata result{};
+    if (!owner()) return result;
+    const Tracked* entry = find(buffer);
+    if (!entry) return result;
+    result.tracked = true; result.mapped = entry->mapped; result.pending = entry->pending;
+    result.width = entry->width; result.generation = entry->generation;
+    result.mutationSerial = entry->mutationSerial;
+    FlatProjectionShadowView view{};
+    result.shadowPresent = shadows_.lookup(buffer, entry->generation, view);
+    if (result.shadowPresent) {
+        result.writeGeneration = view.writeGeneration; result.bankEpoch = view.bankEpoch;
+    }
+    return result;
+}
 
 bool FlatProjectionRuntime::sameRecipe(const CachedPlan& plan,
     const FlatProjectionRuntimeRequest* requests, uint32_t count,

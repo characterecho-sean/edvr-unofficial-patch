@@ -76,7 +76,7 @@ inline int flatProjectionRecipeTests() {
         expect(!flatProjectionDrawUnchanged(pair[0],pair[1]^1ull),"inert classification requires exact PS");
     }
     // Complete ce715126 unknown-pair census. F512's missing PS arrived in
-    // the 6e9bde74 capture below; the other two remain without full blobs.
+    // the 6e9bde74 capture below, and 4361's PS in ad7607c6; CC2B remains unknown.
     const ObservedPair latest[] = {
         {0x84F6596FAF22CCFAull,0,1,FlatProjectionPatchLayout::ForwardColumns,270},
         {0xDE545DC8EE4FBB87ull,0x03B17F89B31C4788ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
@@ -222,7 +222,6 @@ inline int flatProjectionRecipeTests() {
             "either conditional clip branch shifts xy and preserves zw");
     }
     const uint64_t unresolved[][2] = {
-        {0x436193B352A2897Eull,0x51EE1F922FD220B0ull}, // PS blob unavailable
         {0xCC2BA2E2A927CBD3ull,0x8A7FB2DB7A33279Eull}, // both blobs unavailable
     };
     for (const auto& pair : unresolved)
@@ -284,6 +283,70 @@ inline int flatProjectionRecipeTests() {
         expect(!flatProjectionDrawUnchanged(pair.vs,pair.ps),
             "Epic 22fe projection consumer cannot bypass jitter as unchanged");
     }
+    // Epic ad7607c6: complete station/hangar/concourse unknown-pair census.
+    // The unchanged screen composite is tested separately from these 30.
+    const ObservedPair epicStation[] = {
+        {0xEB5234DB6ADB491Dull,0xDC603C35BBE74B31ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x637C27B86091BD60ull,0x48D45E37C62839E9ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xC171BD0C4B585221ull,0x6855D1919FC5E0C0ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x436193B352A2897Eull,0x51EE1F922FD220B0ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x4D24A7A6C2D12733ull,0xB70DF49F678E806Full,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xDE545DC8EE4FBB87ull,0xA6070F9DD1CFB601ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x98397963AAEC45D3ull,0x8717694A527EC745ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xD005EBB14A22EA0Eull,0x302226F2D8C0938Aull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xD005EBB14A22EA0Eull,0xE92C14AA3E51C743ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xE308565BF97FDE0Bull,0x0544F1CC95FD1F12ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x5B0068AF5630F96Bull,0xA5E2331517988BD8ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x24DE25E496342EB8ull,0x1A53D2791C12CE92ull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+        {0x1C5062229AA40CE4ull,0x2519C9050946D545ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xABF539A8C5CCC1B7ull,0x3F71C89CA34DF25Bull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x2B3F53DDA00256E2ull,0xB2DE0A41A4C2B4F5ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x38470D38E07CBDEBull,0x0A80DFD89B15A05Bull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x6D8886012A4C6785ull,0x6F3252AB8579C1E3ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0xB018D143700AB803ull,0xB403F48CB35D9739ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        {0x899165B9EE284E74ull,0x26EA0826BD6824E6ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xB121A79E457669E8ull,0x777BF099CBAA7C50ull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+        {0xA7339D1F8A5AC0D0ull,0xD3891373E13BAD40ull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+        {0xC2208C162D010083ull,0x0000000000000000ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x44C290CC444D1EBEull,0x3154942271AD5810ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x44C290CC444D1EBEull,0xFD32C5433BD4C015ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xEB686C4180DFC6A6ull,0xB11CD77D729C2AEEull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x0B71713BCDE4B6C0ull,0xFA7411BF7E4C4088ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xAFFEF0187F1EBC9Full,0x41152F82C6E8BE1Full,2,FlatProjectionPatchLayout::InverseScreenRay,41},
+        {0xA1B7CFCD0BE7493Eull,0x992DE24C01E04A27ull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+        {0x889A5279E68F0672ull,0xF70549D991FF0E9Bull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x76ED1E4F8C72C26Eull,0x7ECF7C83FD5AD373ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+    };
+    expect(sizeof(epicStation)/sizeof(epicStation[0])==30,
+        "station projection census complete");
+    for (size_t i=0;i<sizeof(epicStation)/sizeof(epicStation[0]);++i) {
+        const auto& pair=epicStation[i];
+        const auto recipe=flatProjectionDrawRecipes(pair.vs,pair.ps);
+        expect(recipe.count==1 && recipe.requests[0].stage==FlatProjectionStage::Vertex &&
+            recipe.requests[0].slot==pair.slot && recipe.requests[0].patchCount==1 &&
+            recipe.requests[0].patches[0].layout==pair.layout &&
+            recipe.requests[0].patches[0].byteOffset==pair.row*16,
+            "station exact pair patches only the measured vertex matrix span");
+        expect(flatProjectionDrawRecipes(pair.vs,pair.ps^1ull).count==0 &&
+            flatProjectionDrawRecipes(pair.vs^1ull,pair.ps).count==0,
+            "station projection requires both captured shader identities");
+        if (pair.ps)
+            expect(flatProjectionDrawRecipes(pair.vs,0).count==0,
+                "station material recipe does not admit an absent companion");
+        expect(!flatProjectionDrawUnchanged(pair.vs,pair.ps),
+            "station projected geometry or fullscreen ray cannot bypass jitter");
+        for (size_t j=0;j<i;++j)
+            expect(pair.vs!=epicStation[j].vs || pair.ps!=epicStation[j].ps,
+                "station census has no duplicate exact pairs");
+    }
+    expect(flatProjectionDrawUnchanged(0xB553BB479B7C0B97ull,0x68ABCB9FEF6CA66Cull) &&
+        flatProjectionDrawRecipes(0xB553BB479B7C0B97ull,0x68ABCB9FEF6CA66Cull).count==0 &&
+        !flatProjectionDrawUnchanged(0xB553BB479B7C0B97ull,0x68ABCB9FEF6CA66Dull) &&
+        !flatProjectionDrawUnchanged(0xB553BB479B7C0B96ull,0x68ABCB9FEF6CA66Cull),
+        "station screen composite is unchanged only for its exact pair");
+    expect(flatProjectionDrawUnchanged(0x53211E8C072CD02Eull,0xB403F48CB35D9739ull) &&
+        !flatProjectionDrawUnchanged(0xB018D143700AB803ull,0xB403F48CB35D9739ull),
+        "shared constant-output PS does not make a skinned projected VS inert");
     const auto screenRay=flatProjectionDrawRecipes(0x4AEC439CEC7FFDCEull,0x87EF79B19297B8C4ull);
     expect(screenRay.count==1 && screenRay.requests[0].stage==FlatProjectionStage::Vertex &&
         screenRay.requests[0].slot==1 && screenRay.requests[0].patchCount==1 &&

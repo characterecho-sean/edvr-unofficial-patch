@@ -190,6 +190,23 @@ inline int flatProjectionMathTests() {
         check(!std::memcmp(changedInverse, skyInverse, 12*sizeof(float)), "sky inverse basis rows preserved");
         check(!std::memcmp(changedScreen, screenInverse, 12*sizeof(float)) &&
               !std::memcmp(&changedScreen[3][3], &screenInverse[3][3], sizeof(float)), "screen inverse depth/basis/w bits preserved");
+        // AFFEF's captured instructions add BOTH CB2[43].xyz and [44].xyz
+        // before the view-orientation transform. A nonzero third row must
+        // survive; shifting the fourth row still reconstructs the same ray.
+        float volumeRay[4][4]={{1.7f,.2f,-.1f,8},{-.3f,2.1f,.4f,9},
+                              {.7f,-.9f,1.3f,10},{.1f,.6f,-.2f,11}};
+        float shiftedVolume[4][4];std::memcpy(shiftedVolume,volumeRay,sizeof(volumeRay));
+        check(flatJitterInverseScreenRay(shiftedVolume,jitter),"volume inverse ray admitted");
+        for(const auto& xy:{std::pair<double,double>{-.8,.6},{.25,-.75},{0,0}})
+            for(size_t i=0;i<3;++i) {
+                const double original=xy.first*volumeRay[0][i]+xy.second*volumeRay[1][i]+
+                    volumeRay[2][i]+volumeRay[3][i];
+                const double shifted=(xy.first+jitter.ndcX)*shiftedVolume[0][i]+
+                    (xy.second+jitter.ndcY)*shiftedVolume[1][i]+shiftedVolume[2][i]+shiftedVolume[3][i];
+                check(near(original,shifted),"volume displaced sample preserves two-offset ray");
+            }
+        check(!std::memcmp(volumeRay,shiftedVolume,12*sizeof(float)) &&
+              volumeRay[3][3]==shiftedVolume[3][3],"volume basis, third row and unused w remain unchanged");
     }
     check(rejectionTests(scene, flatJitterForwardColumns), "columns atomic rejection / zero identity");
     check(rejectionTests(forward, flatJitterForwardDp4), "dp4 atomic rejection / zero identity");
