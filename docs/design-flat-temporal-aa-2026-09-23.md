@@ -3,24 +3,27 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `b969a4e5` is included. Latest analyzed Epic build
+  before qualification. Main `411751ec` is included. Latest analyzed Epic build
   is `ad7607c6`; section 55 records 31 unrecognized station/on-foot shader
-  pairs and a separate on-foot HDR camera conflict. Section 54's five mappings
-  passed full validation and are installed. Sean reports good ship/station
-  visuals. Section 53 records the preceding menu/cockpit F10 evidence. One live
-  projection failure now has an exact cause: first-seen topology with complete
-  source shadow and an already prepared private buffer. Cockpit motion/depth
-  capture is complete; menu pool snapshots reach the per-family cap. Section 51
-  qualifies live PS91 motion ownership: all 45 changed pixels have exact-depth
-  slots and valid joined history. Same-code overlay depth overwrites now match
-  the sampled menu/cockpit rejection masks exactly. Guarded depth preservation
-  and ready-buffer live plan admission passed full validation and the next
-  flight; overlay guards have zero declines and one live plan retarget
-  succeeded. Sections 26-28 establish camera ownership/jitter; 34-37 cover F8
-  and menu treatment; 40-43 establish cockpit projection and smoother DLSS
-  edges; 45-48 diagnose missing ownership and its binding repair. The first
-  loading crash did not reproduce on retry; its cause remains unknown. Sections
-  49-50 qualify rigid BFE shell motion and the PS91 register correction.
+  pairs and a separate on-foot HDR camera conflict. Section 56 maps all 30
+  projected pairs, classifies the one screen composite unchanged, and adds the
+  bounded on-foot camera probe; the merged tree passed full validation.
+  Section 54's five mappings passed full validation and are installed; Sean
+  reports good ship/station visuals. Section 53 records the preceding
+  menu/cockpit F10 evidence. One live projection failure now has an exact
+  cause: first-seen topology with complete source shadow and an already
+  prepared private buffer. Cockpit motion/depth capture is complete; menu pool
+  snapshots reach the per-family cap. Section 51 qualifies live PS91 motion
+  ownership: all 45 changed pixels have exact-depth slots and valid joined
+  history. Same-code overlay depth overwrites now match the sampled
+  menu/cockpit rejection masks exactly. Guarded depth preservation and
+  ready-buffer live plan admission passed full validation and the next flight;
+  overlay guards have zero declines and one live plan retarget succeeded.
+  Sections 26-28 establish camera ownership/jitter; 34-37 cover F8 and menu
+  treatment; 40-43 establish cockpit projection and smoother DLSS edges; 45-48
+  diagnose missing ownership and its binding repair. The first loading crash
+  did not reproduce on retry; its cause remains unknown. Sections 49-50 qualify
+  rigid BFE shell motion and the PS91 register correction.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -35,12 +38,14 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** use the saved shader inventory for exact projection mappings;
-  investigate the on-foot camera conflict separately before admitting those
-  frames. Existing evidence does not justify ignoring the alternate projection.
-  Preserve high-G motion and strict depth ownership; do not repeat qualified
-  PS91/BFE or stale-resize hypotheses. The separate menu hangar-floor P1 defect
-  remains open. VR still needs regression tests.
+- **Next:** fly the Epic install through the station interior and on foot with
+  F10. The section-55 pairs now have exact recipes, so unknown-pair refusals
+  should end there; the camera probe must capture the on-foot 88DCF conflict
+  evidence before any admission change. Existing evidence does not justify
+  ignoring the alternate projection. Preserve high-G motion and strict depth
+  ownership; do not repeat qualified PS91/BFE or stale-resize hypotheses. The
+  separate menu hangar-floor P1 defect remains open. VR still needs regression
+  tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -3410,3 +3415,50 @@ both camera bases to distinguish an incidental bound camera from a real
 alternate projection. Keep rendering safeguards unchanged until this is
 established. The current audit changes documentation only; shader blobs,
 disassemblies and game captures remain local.
+
+## 56. Station/concourse recipes and on-foot camera probe (2026-09-25)
+
+Main `411751ec` merged cleanly (hologram reticle depth, GPU census timing and
+the rig debug-layer fixes; no conflicts). The section-55 inventory is now
+classified in `flat_projection_recipes.h`: 19 pairs patch VS b1[270..273]
+ForwardColumns, six patch VS b0[4..7] ForwardDp4, four patch VS b2[10..13]
+ForwardDp4, and AFFEF/4115 patches VS b2[41..44] InverseScreenRay. B553/68AB
+is bytecode-unchanged screen composition. The depth-only C220 pair keys on a
+null PS. B018/B403 keeps its b0 projection recipe while 5321/B403 stays inert:
+the shared constant-output PS does not classify the skinned VS. Every pair
+carries exact-companion and cross-identity rejection tests.
+
+The InverseScreenRay math gains a regression with a nonzero third row: AFFEF's
+captured instructions add both CB2[43].xyz and CB2[44].xyz before the
+view-orientation transform, and compensation still touches only the fourth
+row. The displaced-sample identity holds for the two-offset ray.
+
+The on-foot conflict diagnostic from section 55 is implemented as
+`flat_camera_probe.h` plus `captureCameraConflict`. During the F10 audit only,
+an exact 88DCF1164C640EC3/494506A63091DF8C draw whose frozen camera differs
+from the selected target's tone reference (the `hdr-camera-changed` condition)
+is sampled before observation and refusal. The record verifies actual VS/PS
+binding, prints the reference-HDR, current-draw and named-scene frozen camera
+rows side by side, reads the current VS b0[4..7] and b1[270..275] shadow
+slices through the D3D11.1 range getters with full provenance metadata
+(tracked/width/generation/mutation/mapped/pending/shadow write and epoch), and
+dumps the depth-stencil state. A post-observation line names the target's
+first-bad witness and whether this draw caused it. The new
+`constantsMetadata` accessor is read-only: it tracks nothing, allocates
+nothing and queues no readback.
+
+The budget is two attempts in distinct increasing frames per F10 arm. The
+summary's result word distinguishes exact-pair-never-observed,
+observed-without-HDR-camera-conflict, actual-shader-mismatch,
+partial-missing-evidence, captured and conflict-without-capture, so an
+inactive probe cannot read as success. CPU shadows only: no GPU readback, no
+plan binding, no camera admission and no rendering change. The
+`hdr-camera-changed` refusal stays in force until this evidence lands.
+
+Full build `build/flat-station-camera-probe-build.log` passes: 82 pooled jobs
+plus four quiet jobs, the 260-key config contract and both installer payload
+checks, including the 30-pair station census, exact-companion rejection and
+the AFFEF regression in the flat rigs. Next Epic flight: dock, walk the
+station interior and go on foot with F10; the formerly unknown pairs should
+prepare instead of resetting history, and the probe should report captured
+evidence for the 88DCF conflict frames.
