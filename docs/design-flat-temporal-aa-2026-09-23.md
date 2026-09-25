@@ -3,30 +3,18 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `b969a4e5` is merged into the working tree at
-  Sean's request; section 50 records the combined validation gates. The menu
-  test conflict preserves flat support and main's GPU census stubs. Sections
-  40-42 establish the cockpit HDR viewport correction and exact bytecode-backed
-  projection recipes. Automatic bounded unknown capture remains active after
-  the timed F10 audit ends. Sections 26-28 document camera ownership and
-  jitter; sections 34-37 cover F8 and successful menu treatment; pixel evidence
-  follows in sections 45-46. Sean confirms smoother cockpit edges with stable
-  history (section 43), but edge shimmer remains. Epic `a2625ca0` captures four
-  matched samples (section 45): bright exterior hull pixels are not rejected,
-  but receive roughly +/-130 px horizontal and -50 px vertical motion per frame
-  while the visible hull stays nearly fixed. Trace motion ownership before
-  changing reconstruction. Epic `3261e6e2` now proves the sampled flight hull
-  takes camera fallback with cleared slots; menu canopy and wing mostly reject
-  stale slots (section 46). Preserve high-G camera displacement. `2dc6aabf`
-  identifies supported menu ship draws without usable slots; its run then
-  crashed during cockpit loading. Dump analysis identifies a game allocator
-  failure but not its cause. The unchanged build loaded the cockpit and
-  captured F10 successfully on retry. `65db2993` fixes the flat motion-target
-  binding; Sean reports much better cockpit A/B. Menu shimmer and local
-  white-panel history loss remain. The Captured DXBC disproves the old
-  "non-pool" shell classification (section 49). `4325252c` qualifies its rigid
-  joined motion in stationary and moving captures; remaining moving-edge
-  rejection is separate (section 50).
+  before qualification. Main `b969a4e5` is included. Installed Epic build is
+  `aaa3d020`; section 50 records full validation and the build-argument repair.
+  Its new F10 qualifies live PS91 motion ownership: all 45 changed pixels have
+  exact-depth slots and valid joined history (section 51). Remaining P7
+  rejection maps exactly to a depth-write-off BBE overlay. One incomplete
+  jitter frame reset history 1.7 seconds before F10; all saved samples retain
+  history. Visual qualification is pending Sean's feedback. Sections 26-28
+  establish camera ownership/jitter; 34-37 cover F8 and menu treatment; 40-43
+  establish cockpit projection and smoother DLSS edges; 45-48 diagnose missing
+  ownership and its binding repair. The first loading crash did not reproduce
+  on retry; its cause remains unknown. Sections 49-50 qualify rigid BFE shell
+  motion and the PS91 register correction.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -41,12 +29,11 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next flight:** qualify flat-only PS91 motion after its position-input
-  correction passed the actual captured DE54/PS91 WARP draw test. Its nearer
-  geometry accounts for all 45 rejected pixels in the moving seam sample. Menu
-  depth-write-off overlays remain separate. Preserve high-G camera movement; do
-  not force vectors zero. No headset is needed; VR still needs regression
-  tests.
+- **Next work:** solve depth-write-off overlay ownership using the existing
+  captures; do not repeat the now-qualified PS91 or BFE hypotheses. The cold
+  buffer/preparation reset needs exact failing buffer context before a fix.
+  Preserve high-G camera movement and strict depth ownership. No headset is
+  needed for flat; VR still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -3039,3 +3026,50 @@ substitutions and matching depth/ownership at the seam formerly covered by q35;
 verify joined previous pose and uninterrupted backend history. The
 depth-write-off BBE menu/outer-panel issue and five unresolved P7 pixels remain
 separate. Do not promise all ship-edge shimmer is resolved by this change.
+
+## 51. PS91 ownership qualified in the next Epic capture, 2026-09-25
+
+Epic `edvr_gfx_20260925_090601.log` verifies installed `aaa3d020`, version
+`v0.18.0-rc.1-56-gaaa3d020`, build `6AB68DA7`, linked 15:05:11 UTC. Render and
+output remain 2560x1440. Pixel session `20260925_150817_933_36344_1` contains
+frames 32964/32979/32994: three complete samples, zero failures, then the byte
+cap. Draw session `20260925_150817_934_36344_1` contains frames 32964/32965,
+124 draws each; partial copies are explicit rather than assumed missing draws.
+
+At point 1 (x=2321..2336, y=1201..1216), q35 DE54/91F8 changes 45 pixels in
+frame 32964. Those exact 45 pixels now carry code 117 (record 58), all with
+bit-identical slot/scene depth and zero rejection. The other 211 pixels carry
+code 7 with exact depth. Across all three samples, P1 has 256/256 valid joined
+pixels and zero rejection. The second draw frame's q35 changes 42 pixels. The
+producer reports PS91 success at 09:08:17.944. This proves live ownership for
+the formerly unpatched geometry, beyond the offline WARP gate.
+
+The camera view differs from the previous capture: q35 now touches P1 rather
+than P4. Do not present the samples as a spatially matched before/after image.
+P4 is all 256 joined BFE pixels with no rejection in each saved frame. P7
+retains 25/27/26 rejected pixels; in the first frame all 25 exactly match the
+changed-pixel mask of q62 BBE/DB3E. That draw has depth writes disabled; final
+scene depth minus stored slot depth is -0.0003177 to -0.0003011. It is the
+previously identified overlay ownership issue, separate from PS91.
+
+P1 and P4 have zero final-image repair pixels in all samples. P7's predicted
+2x2 finish masks cover 45/46/44 pixels, exactly matching the raw-to-final
+changes, with none outside the masks. The remaining local history loss is
+therefore measured independently of the successful PS91 repair.
+
+All three saved samples retain backend history. There is one real earlier
+interruption: frame 32810 at 09:08:16.194 refuses projection preparation after
+80 jittered draws, uses spatial fallback, then frame 32811 resets history. The
+first F10 arms at 09:08:17.933. Cumulative diagnostics include one missing full
+write and one plan failure; a cold buffer was queued, then went stale. The
+failure occurred before the timed per-draw audit, so the log does not name the
+failing shader/buffer. Do not turn these counters into a guessed fix.
+Camera-cut and backend-failure counters remain zero.
+
+- Ruled out: PS91 remains unpatched in this run, because its exact changed
+  pixels now carry valid record 58 ownership and joined history.
+- Ruled out: a global reset caused the saved P7 rejection, because all saved
+  samples retain history and its first-frame rejects match the overlay mask.
+
+Sean's visual assessment was requested separately. Installed build remains
+`aaa3d020`; a documentation-only follow-up does not change the game DLL.
