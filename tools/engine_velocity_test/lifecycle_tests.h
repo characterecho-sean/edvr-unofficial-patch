@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "../../src/common/log.h"
+#include "../../src/common/runtime_profile.h"
 #include "../../src/common/timing.h"
 #include "../../src/d3d11/cs_stage_save.h"
 #include "../../src/d3d11/depth_probe.h"
@@ -643,6 +644,17 @@ inline void run(const Harness& h) {
             "C: the movers line reads without a tracker comparison");
     h.check(logged("(the census is off: it runs only with engine motion's diagnostics", mark),
             "P1: the emit's census is off without diagnostics, and says its zeros are not counts");
+
+    // Read the actual bound MRT6 resource, independent of the view flavor.
+    const auto mrt6 = [&] {
+        ID3D11RenderTargetView* rt[8] = {};
+        h.context->OMGetRenderTargets(8, rt, nullptr);
+        ComPtr<ID3D11Resource> result;
+        if (rt[edvr::kEngineVelocityTarget]) rt[edvr::kEngineVelocityTarget]->GetResource(&result);
+        for (auto* r : rt) if (r) r->Release();
+        return result;
+    };
+
     mark = g_log.size();
     edvr::engineVelocityDiagnostics(true);
     g.ordinaryFrame(true);
@@ -870,6 +882,47 @@ inline void run(const Harness& h) {
     h.check(number(line, "screen views asked ") >= 2 && number(line, "given ") >= 1, "S1: and the screen's views asked and given");
     h.check(number(lastLine(joined, mark), "eye-frames ") >= 2 && number(lastLine(joined, mark), "with MRT6 bound ") >= 2,
             "S1: the movers line's eye-frames include the source's, bound");
+    // Flat capture brackets source draws too. The source is not an eye RTV:
+    // screen_motion names its depth, and engineVelocityBeforeDraw sees
+    // rtv0Eye=false. Restore only the game's four MRTs between two draws of
+    // this same pass, just as FlatRuntimeDrawScope does after each draw.
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+    g.sourcePass(1, 5);
+    edvr::EngineVelocityViews sourceFlatViews{};
+    h.check(g.sourceViews(&sourceFlatViews), "flat source bracket: first draw has source slot target");
+    ComPtr<ID3D11Resource> sourceSlotResource;
+    sourceFlatViews.slots->GetResource(&sourceSlotResource);
+    h.check(mrt6().Get() == sourceSlotResource.Get(), "flat source bracket: first draw bound MRT6");
+    UINT sourceSlotWidth = 0, sourceDepthWidth = 0;
+    const auto sourceBefore = readTexture(h, sourceSlotResource.Get(), 2, &sourceSlotWidth);
+    edvr::engineVelocityAfterFlatDraw(h.context);
+    ID3D11RenderTargetView* sourceOriginals[4] = {
+        g.sourceRtv[0].Get(), g.sourceRtv[1].Get(), g.sourceRtv[2].Get(), g.sourceRtv[3].Get()};
+    h.context->OMSetRenderTargets(4, sourceOriginals, g.sourceDsv.Get());
+    h.check(!mrt6(), "flat source bracket: scope restore removed MRT6 without changing game generations");
+    g.sourceDraw(9);
+    h.check(mrt6().Get() == sourceSlotResource.Get(), "flat source bracket: second same-pass draw rebound MRT6");
+    const auto sourceAfter = readTexture(h, sourceSlotResource.Get(), 2, &sourceSlotWidth);
+    const auto sourceDepth = readTexture(h, g.sourceDepth.Get(), 2, &sourceDepthWidth);
+    unsigned firstFive = 0, secondNine = 0;
+    bool firstPreserved = true;
+    for (size_t i = 0; i < sourceBefore.size() / 2; ++i) {
+        uint32_t beforeSlot = 0, afterSlot = 0;
+        const int beforeKind = shader_tests::decodeSlot(sourceBefore[i * 2], sourceBefore[i * 2 + 1], sourceDepth[i * 2], &beforeSlot);
+        const int afterKind = shader_tests::decodeSlot(sourceAfter[i * 2], sourceAfter[i * 2 + 1], sourceDepth[i * 2], &afterSlot);
+        if (beforeKind == 1 && beforeSlot == 5) {
+            ++firstFive;
+            if (afterKind != 1 || afterSlot != 5 ||
+                std::memcmp(&sourceBefore[i * 2], &sourceAfter[i * 2], 2 * sizeof(float)) != 0) firstPreserved = false;
+        }
+        if (afterKind == 1 && afterSlot == 9) ++secondNine;
+    }
+    h.check(firstFive > 0 && firstPreserved, "flat source bracket: first draw's slot pixels survived the next draw");
+    h.check(secondNine > 0, "flat source bracket: second draw wrote distinct slot pixels");
+    release(sourceFlatViews);
+    g.endFrame();
     // The source re-made at another size: the slot target follows it.
     mark = g_log.size();
     g.makeSource(56, 20);
@@ -1146,6 +1199,83 @@ inline void run(const Harness& h) {
     g.ordinaryFrame();
     g.frameWithViews(body, &e0, &e1);
     h.check(e0 && e1, "R6: and gives again");
+    // The real flat producer path, including slowPath's group copy and the
+    // FlatRuntimeDrawScope-style MRT restore after every draw.
+    {
+        edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+        const auto vb = g.compile(std::string(shader_tests::kVsCommon) + shader_tests::kVsB, "vs_5_0");
+        const auto pb = g.compile(shader_tests::kPsB, "ps_5_0");
+        ComPtr<ID3D11VertexShader> overlayVs;
+        ComPtr<ID3D11PixelShader> overlayPs;
+        h.check(SUCCEEDED(g.dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &overlayVs)) &&
+                SUCCEEDED(g.dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &overlayPs)),
+                "flat overlay lifecycle: original shaders created");
+        constexpr uint64_t overlayVsHash = 0xBBE58E40FE88EC80ull;
+        constexpr uint64_t overlayPsHash = 0xDB3E8D20CF53FBC0ull;
+        edvr::engineVelocityRememberVs(overlayVs.Get(), overlayVsHash, vb->GetBufferPointer(), vb->GetBufferSize(), false);
+        edvr::engineVelocityRememberPs(overlayPs.Get(), overlayPsHash, pb->GetBufferPointer(), pb->GetBufferSize(), false);
+        D3D11_DEPTH_STENCIL_DESC dd{};
+        dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        dd.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL;
+        ComPtr<ID3D11DepthStencilState> overlayDepth;
+        h.check(SUCCEEDED(g.dev->CreateDepthStencilState(&dd, &overlayDepth)), "flat overlay lifecycle: depth-write-off state");
+        D3D11_TEXTURE2D_DESC sd{};
+        sd.Width = sd.Height = sd.MipLevels = sd.ArraySize = sd.SampleDesc.Count = 1;
+        sd.Format = DXGI_FORMAT_R32G32_FLOAT; sd.Usage = D3D11_USAGE_DEFAULT; sd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> sentinelTexture;
+        ComPtr<ID3D11ShaderResourceView> sentinel;
+        h.check(SUCCEEDED(g.dev->CreateTexture2D(&sd, nullptr, &sentinelTexture)) &&
+                SUCCEEDED(g.dev->CreateShaderResourceView(sentinelTexture.Get(), nullptr, &sentinel)),
+                "flat overlay lifecycle: game t3 sentinel");
+        ID3D11ShaderResourceView* gameT3 = sentinel.Get();
+        g.ctx->PSSetShaderResources(3, 1, &gameT3);
+        g.shadow(BindSlot::PsSrv3, gameT3);
+        auto gameTargets = [&] {
+            ID3D11RenderTargetView* rt[4] = {
+                g.sourceRtv[0].Get(), g.sourceRtv[1].Get(), g.sourceRtv[2].Get(), g.sourceRtv[3].Get()};
+            g.ctx->OMSetRenderTargets(4, rt, g.sourceDsv.Get());
+        };
+        auto closeDraw = [&] { edvr::engineVelocityAfterFlatDraw(g.ctx); gameTargets(); };
+        auto underlay = [&] {
+            g.setVs(); g.setPs(g.ps.Get(), kPsHash);
+            g.ctx->OMSetDepthStencilState(g.depthState.Get(), 0);
+            g.sourceDraw(5);
+            h.check(edvr::engineVelocityDrawSubstituted(), "flat overlay lifecycle: underlay produced MRT6");
+            closeDraw();
+        };
+        auto overlay = [&] {
+            g.ctx->VSSetShader(overlayVs.Get(), nullptr, 0); g.shadow(BindSlot::Vs, overlayVs.Get(), overlayVsHash);
+            g.setPs(overlayPs.Get(), overlayPsHash);
+            g.ctx->OMSetDepthStencilState(overlayDepth.Get(), 5);
+            edvr::engineVelocityBeforeDraw(g.ctx, false);
+            h.check(edvr::engineVelocityDrawSubstituted(), "flat overlay lifecycle: overlay produced MRT6");
+            ComPtr<ID3D11ShaderResourceView> bound;
+            g.ctx->PSGetShaderResources(3, 1, &bound);
+            h.check(bound && bound.Get() != sentinel.Get(), "flat overlay lifecycle: guarded PS has private snapshot at t3");
+            g.ctx->DrawInstanced(4, 1, 0, 0);
+            closeDraw();
+            bound.Reset(); g.ctx->PSGetShaderResources(3, 1, &bound);
+            h.check(bound.Get() == sentinel.Get(), "flat overlay lifecycle: original game t3 restored");
+        };
+        const size_t overlayMark = g_log.size();
+        g.beginFrame(); g.writeScene(g.sceneA.Get(), g.rows[0]);
+        edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+        g.sourcePass(1, 5); closeDraw();
+        overlay(); overlay();
+        underlay(); overlay();
+        g.endFrame();
+        g.beginFrame(); g.writeScene(g.sceneA.Get(), g.rows[0]);
+        edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+        g.sourcePass(1, 5); closeDraw();
+        overlay();
+        g.endFrame(true);
+        const std::string summary = lastLine("engine motion: flat overlay guard:", overlayMark);
+        h.check(number(summary, "copies ") == 3 && number(summary, "guarded draws ") == 4,
+                "flat overlay lifecycle: one base copy per group, refreshed after other producer and next frame");
+        h.check(number(summary, "declined state ") == 0 && number(summary, "resource ") == 0 &&
+                number(summary, "shader ") == 0, "flat overlay lifecycle: no guarded path fallback");
+        edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
+    }
     const unsigned detachesBefore = lifecycle_fake::g_emitDetaches;
     edvr::engineVelocityShutdown();
     h.check(lifecycle_fake::g_emitDetaches == detachesBefore + 1, "P1: shutdown detaches the emit's want on the hook set");

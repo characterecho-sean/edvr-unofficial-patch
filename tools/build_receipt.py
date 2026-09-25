@@ -5,6 +5,10 @@ an uncommitted change.  After that change is committed, the DLL-only
 promotion build uses this receipt to prove that the compiled inputs are the
 same while allowing the git commit metadata, and therefore EDVR's displayed
 version, to change.
+
+Documentation under docs/ is not a compiled input: the receipt's only
+consumer is the DLL-only promotion, which compiles no doc content, so a
+doc-only change must not force another full build.
 """
 
 import argparse
@@ -19,17 +23,17 @@ from datetime import datetime, timezone
 
 SCHEMA = 1
 EXCLUDED_ROOTS = {".git", ".claude", ".codex", ".vs", "build", "build - Copy",
-                  "dist", "analysis", "edvr_logs"}
+                  "dist", "analysis", "edvr_logs", "docs"}
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache"}
 
 
 def input_files(root):
     """Return every workspace file that can be a build input.
 
-    Generated build products and local VCS/tooling state are outside the
-    source identity.  Everything else is included, including ignored SDK
-    files staged inside the checkout, so an input added outside git cannot
-    silently evade the receipt.
+    Generated build products, documentation and local VCS/tooling state are
+    outside the source identity.  Everything else is included, including
+    ignored SDK files staged inside the checkout, so an input added outside
+    git cannot silently evade the receipt.
     """
     root = Path(root).resolve()
     files = []
@@ -175,16 +179,19 @@ def self_test():
         root = Path(temporary)
         (root / "build").mkdir()
         (root / "dist").mkdir()
+        (root / "docs").mkdir()
         (root / "tools" / "__pycache__").mkdir(parents=True)
         (root / "source.txt").write_text("one", encoding="utf-8")
         (root / "build" / "ignored.txt").write_text("one", encoding="utf-8")
         (root / "dist" / "ignored.txt").write_text("one", encoding="utf-8")
+        (root / "docs" / "notes.md").write_text("one", encoding="utf-8")
         (root / "tools" / "__pycache__" / "ignored.pyc").write_bytes(b"one")
         first = input_fingerprint(root)
         (root / "build" / "ignored.txt").write_text("two", encoding="utf-8")
+        (root / "docs" / "notes.md").write_text("two", encoding="utf-8")
         (root / "tools" / "__pycache__" / "ignored.pyc").write_bytes(b"two")
         if input_fingerprint(root) != first:
-            raise AssertionError("build outputs affect the input fingerprint")
+            raise AssertionError("build outputs or docs affect the input fingerprint")
         (root / "source.txt").write_text("two", encoding="utf-8")
         if input_fingerprint(root) == first:
             raise AssertionError("source changes do not affect the input fingerprint")

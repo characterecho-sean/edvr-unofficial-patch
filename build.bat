@@ -83,10 +83,11 @@ REM  once however the guarded run below finishes -- every existing "exit /b"
 REM  in this file already does the right thing without any further changes.
 REM ===========================================================================
 if not defined EDVR_BUILD_GUARDED (
-    python "%ROOT%\tools\build_lock.py" --acquire --note "%~nx0 %*"
+    REM SHIFT in parse_args changes %%0; ROOT retains the original script path.
+    python "%ROOT%\tools\build_lock.py" --acquire --note "build.bat %*"
     if errorlevel 1 exit /b 1
     set "EDVR_BUILD_GUARDED=1"
-    call "%~f0" %*
+    call "%ROOT%\build.bat" %*
     set "EDVR_BUILD_RC=!errorlevel!"
     python "%ROOT%\tools\build_lock.py" --release
     exit /b !EDVR_BUILD_RC!
@@ -487,7 +488,8 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
     "src\d3d11\native_menu.cpp" ^
-    "src\d3d11\native_temporal.cpp" ^
+    "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
+    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_fss.cpp" ^
@@ -666,7 +668,7 @@ REM writer has actually finished (see the rig rules below).
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
-python tools\run_jobs.py --script "%~f0" --times "%BUILD%\rig_times.json" ^
+python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
     --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
@@ -1016,6 +1018,31 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /OUT:"%BUILD%\crash_context_test.exe" /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: crash_context_test build failed & exit /b 1 )
 "%BUILD%\crash_context_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_temporal_test
+echo [edvr] === flat_temporal_test.exe ===
+if not exist "%OBJ%\flattemporaltest" mkdir "%OBJ%\flattemporaltest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\flattemporaltest"\ ^
+    /Fe"%BUILD%\flat_temporal_test.exe" "tools\flat_temporal_test\flat_temporal_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat temporal test build failed & exit /b 1 )
+"%BUILD%\flat_temporal_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_mono_resolve_test
+echo [edvr] === flat_mono_resolve_test.exe ===
+if not exist "%OBJ%\flat_mono_resolve_test" mkdir "%OBJ%\flat_mono_resolve_test"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\flat_mono_resolve_test\\" ^
+    /Fe"%BUILD%\flat_mono_resolve_test.exe" "tools\flat_mono_resolve_test\flat_mono_resolve_test.cpp" ^
+    "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit /b 1 )
+"%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
+"%BUILD%\flat_mono_resolve_test.exe" --self-test || exit /b 1
+python "tools\flat_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
+python "tools\flat_draw_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 exit /b 0
 
 :rig_config_test
@@ -1823,6 +1850,26 @@ REM sees. --help reads nothing and writes nothing.
 )
 exit /b 0
 
+:rig_flat_installer
+echo [edvr] === edvr-flat-installer.exe ===
+if not exist "%OBJ%\flatinstaller" mkdir "%OBJ%\flatinstaller"
+if not exist "%BUILD%\gen-flat" mkdir "%BUILD%\gen-flat"
+python "tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
+    --out "%BUILD%\gen-flat" --version "%EDVR_VER%" --profile flat
+if errorlevel 1 ( echo [edvr] ERROR: flat installer resource generation failed & exit /b 1 )
+rc.exe /nologo /fo "%OBJ%\flatinstaller\payload.res" "%BUILD%\gen-flat\payload.rc"
+if errorlevel 1 ( echo [edvr] ERROR: flat installer resources failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
+    /DEDVR_INSTALLER_FLAT=1 /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\flatinstaller"\ /Fe"%BUILD%\edvr-flat-installer.exe" ^
+    %INSTALLER_SRC% "%OBJ%\flatinstaller\payload.res" ^
+    /link /INCREMENTAL:NO /SUBSYSTEM:WINDOWS /MANIFEST:NO %INSTALLER_LIBS%
+if errorlevel 1 ( echo [edvr] ERROR: flat installer build failed & exit /b 1 )
+"%BUILD%\edvr-flat-installer.exe" --help >nul || exit /b 1
+python "tools\package_native.py" --check-installer --profile flat || exit /b 1
+exit /b 0
+
 :rig_installer_test
 echo [edvr] === installer_test.exe ===
 REM The planner over folders that are hard to arrange on a real machine: EDHM
@@ -1998,6 +2045,20 @@ REM cost a fix built on tiles that had landed on the Milky Way band. It
 REM fails HERE, not in the next report somebody trusts.
 python "tools\diff_eye_split.py" --self-test || (
     echo [edvr] ERROR: the eye-split diff tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === flat pixel capture analyzer self-test ===
+python "tools\flat_pixels_engine.py" --self-test || (
+    echo [edvr] ERROR: the flat pixel engine replay failed its own test
+    exit /b 1
+)
+python "tools\flat_pixels.py" --self-test || (
+    echo [edvr] ERROR: the flat pixel analyzer failed its own test
+    exit /b 1
+)
+python "tools\flat_draw_pixels.py" --self-test || (
+    echo [edvr] ERROR: the flat draw pixel analyzer failed its own test
     exit /b 1
 )
 

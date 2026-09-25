@@ -22,7 +22,9 @@
 // its vertex shader gains one output, EDVRPOOLSLOT = v0.x, after its last
 // register, and its pixel shader reads that instead. Nothing else in either
 // program changes: the position math, the depth bias and the G-buffer
-// exports stay byte-for-byte.
+// exports stay byte-for-byte. SV_Position is rasterizer-generated for a PS;
+// its input register need not equal the VS output register. A PS can use that
+// numeric register for SV_IsFrontFace, so the patch chooses a free PS input.
 //
 // Unsupported containers, signatures, declarations or control flow decline
 // with a reason and produce no bytecode.
@@ -36,18 +38,20 @@ namespace edvr {
 // The render-target slot the patched pixel shaders export to. The game's
 // G-buffer uses 0..3 (7 was the retired static owner's export).
 constexpr uint32_t kEngineVelocityTarget = 6;
+// The guarded flat decal variant alone reads a private copy of MRT6 here.
+constexpr uint32_t kEngineVelocityOverlaySnapshotSlot = 3;
 // The slot bits kept before the odd encoding (2 * slot + 1 stays below 2^24,
 // where float is still exact).
 constexpr uint32_t kEngineVelocitySlotMask = 0x007fffffu;
 // The semantic the patched UV-only vertex shader exports and its patched
-// pixel shader reads. D3D11 links stages by semantic and register, so both
-// sides must spell it the same.
+// pixel shader reads. This user-defined varying preserves its matching
+// semantic and component/register layout on both sides.
 constexpr char kEngineVelocitySlotSemantic[] = "EDVRPOOLSLOT";
 
 struct EngineVelocityInputs {
     uint32_t identityRegister = ~0u;   // PS input register carrying the slot
     uint32_t identityComponent = ~0u;  // ...and its component
-    uint32_t positionRegister = ~0u;   // SV_POSITION: VS output register == PS input register
+    uint32_t positionRegister = ~0u;   // VS SV_POSITION output; PS may use a different free input register
     bool slotFromVsPatch = false;      // the VS must be patched to export EDVRPOOLSLOT there
 };
 
@@ -175,7 +179,8 @@ inline std::vector<BYTE> patchVsProgram(const std::vector<BYTE>& bytes, uint32_t
 // cleared target (-1), an untouched one and any sum or blend of two writes is
 // never an odd whole number, so arithmetic that reached MRT6 is declined by
 // the compose instead of naming another record (the 2026-09-23 review, item 4).
-inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const EngineVelocityInputs& in) {
+inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const EngineVelocityInputs& in,
+                                        bool guardOverlayDepth = false) {
     auto t = programWords(bytes);
     size_t firstOutput = 0, tempAt = 0, firstExecutable = 0;
     uint32_t tempCount = 0, returns = 0;
@@ -184,6 +189,14 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
         const uint32_t opcode = t[at] & 0x7ffu;
         const uint32_t length = instructionLength(t, at);
         declineUnsupported(opcode);
+        // The admitted SM5 shader has direct t0..t2 references. Refuse any
+        // existing direct t3 operand or declaration rather than rebinding a
+        // game resource that this exact shader could read.
+        if (guardOverlayDepth) {
+            for (size_t i = at + 1; i + 1 < at + length; ++i)
+                if (operandType(t[i]) == 7 && t[i + 1] == kEngineVelocityOverlaySnapshotSlot)
+                    throw std::runtime_error("overlay snapshot t3 occupied");
+        }
         const bool declaration = (opcode >= 88 && opcode <= 106) || opcode == 143 ||
                                  (opcode >= 147 && opcode <= 163) || opcode == 53;
         if (!firstExecutable && !declaration) firstExecutable = at;
@@ -202,7 +215,7 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
             if (reg == in.positionRegister) {
                 if (opcode != kOpDclInputPsSiv) throw std::runtime_error("position register not SV_Position");
                 positionDeclared = true;
-                t[at + 1] |= 0x40u;   // make position.z live
+                t[at + 1] |= guardOverlayDepth ? 0x70u : 0x40u; // guarded read also needs xy
             }
         }
         if (opcode == kOpDclTemps) {
@@ -220,7 +233,8 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
 
     const uint32_t temp = tempCount;   // the new temp's index
     const uint32_t identitySelect = 0x0010100Au | (in.identityComponent << 4); // v<id>.<c>
-    const uint32_t posDecl[] = {0x04002064u, 0x00101042u, in.positionRegister, 1u}; // dcl_input_ps_siv linear noperspective v.z, position
+    const uint32_t posDecl[] = {0x04002064u, guardOverlayDepth ? 0x00101072u : 0x00101042u,
+                                in.positionRegister, 1u}; // dcl_input_ps_siv linear noperspective v.xyz, position
     const uint32_t slotDecl[] = {0x03000862u, 0x00101012u, in.identityRegister};    // dcl_input_ps constant v.x
     const uint32_t outDecl[] = {0x03000065u, 0x00102032u, kEngineVelocityTarget};   // dcl_output o6.xy
     const uint32_t tail[] = {
@@ -228,6 +242,23 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
         0x09000023u, 0x00100012u, temp, 0x0010000Au, temp, 0x00004001u, 2u, 0x00004001u, 1u,
         0x05000056u, 0x00102012u, kEngineVelocityTarget, 0x0010000Au, temp,
         0x05000036u, 0x00102022u, kEngineVelocityTarget, 0x0010102Au, in.positionRegister,
+    };
+    // This block is the exact token form of SM5 ftoi/ld_indexable/eq/movc,
+    // checked against D3DCompile and WARP by engine_velocity_test. The guard
+    // chooses the substrate depth only for the same odd pool-record code.
+    const uint32_t overlayResource[] = {0x04001858u, 0x00107000u, kEngineVelocityOverlaySnapshotSlot, 0x00005555u};
+    const uint32_t guardedTail[] = {
+        0x07000001u, 0x00100012u, temp, identitySelect, in.identityRegister, 0x00004001u, kEngineVelocitySlotMask,
+        0x09000023u, 0x00100012u, temp, 0x0010000Au, temp, 0x00004001u, 2u, 0x00004001u, 1u,
+        0x05000056u, 0x00100012u, temp, 0x0010000Au, temp,
+        0x05000036u, 0x00102012u, kEngineVelocityTarget, 0x0010000Au, temp,
+        0x0500001Bu, 0x00100032u, temp + 1, 0x00101046u, in.positionRegister,
+        0x08000036u, 0x001000C2u, temp + 1, 0x00004002u, 0u, 0u, 0u, 0u,
+        0x8900002Du, 0x800000C2u, 0x00155543u, 0x00100032u, temp + 1,
+        0x00100E46u, temp + 1, 0x00107E46u, kEngineVelocityOverlaySnapshotSlot,
+        0x07000018u, 0x00100042u, temp + 1, 0x0010000Au, temp, 0x0010000Au, temp + 1,
+        0x09000037u, 0x00102022u, kEngineVelocityTarget, 0x0010002Au, temp + 1,
+        0x0010001Au, temp + 1, 0x0010102Au, in.positionRegister,
     };
     std::vector<uint32_t> out;
     out.reserve(t.size() + 64);
@@ -238,6 +269,7 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
         const uint32_t opcode = t[at] & 0x7ffu;
         const uint32_t length = instructionLength(t, at);
         if (at == firstOutput) {
+            if (guardOverlayDepth) out.insert(out.end(), std::begin(overlayResource), std::end(overlayResource));
             if (!positionDeclared) out.insert(out.end(), posDecl, posDecl + 4);
             if (in.slotFromVsPatch) out.insert(out.end(), slotDecl, slotDecl + 3);
         }
@@ -245,15 +277,18 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
             out.insert(out.end(), outDecl, outDecl + 3);
             outputDeclared = true;
             out.push_back(t[at]);
-            out.push_back(tempCount + 1);
+            out.push_back(tempCount + (guardOverlayDepth ? 2u : 1u));
         } else {
             if (!tempAt && at == firstExecutable) {
                 out.insert(out.end(), outDecl, outDecl + 3);
                 out.push_back(0x02000068u);
-                out.push_back(1u);
+                out.push_back(guardOverlayDepth ? 2u : 1u);
                 outputDeclared = true;
             }
-            if (opcode == kOpRet) out.insert(out.end(), std::begin(tail), std::end(tail));
+            if (opcode == kOpRet) {
+                if (guardOverlayDepth) out.insert(out.end(), std::begin(guardedTail), std::end(guardedTail));
+                else out.insert(out.end(), std::begin(tail), std::end(tail));
+            }
             out.insert(out.end(), t.begin() + at, t.begin() + at + length);
         }
         at += length;
@@ -368,7 +403,7 @@ inline bool engineVelocityPatchVs(const void* data, size_t bytes, const EngineVe
 }
 
 inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVelocityInputs& inputs,
-                                  std::vector<BYTE>& output, std::string& reason) {
+                                  std::vector<BYTE>& output, std::string& reason, bool guardOverlayDepth = false) {
     using namespace dxbc_engine_velocity_detail;
     output.clear();
     reason.clear();
@@ -379,6 +414,30 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
     }
     try {
         auto chunks = parseContainer(data, bytes, kPs50);
+        EngineVelocityInputs psInputs = inputs;
+        bool usedInput[32]{};
+        uint32_t declaredPosition = ~0u;
+        for (const auto& chunk : chunks) if (chunk.tag == kTagIsgn) {
+            for (const auto& e : parseSignature(chunk.bytes)) {
+                if (e.registerIndex >= 32) throw std::runtime_error("input register out of range");
+                usedInput[e.registerIndex] = true;
+                if (e.systemValue == 1 || equalName(e.name, "SV_POSITION")) {
+                    if (declaredPosition != ~0u || e.componentType != 3)
+                        throw std::runtime_error("ambiguous position input");
+                    declaredPosition = e.registerIndex;
+                }
+            }
+        }
+        if (declaredPosition != ~0u) psInputs.positionRegister = declaredPosition;
+        else if (usedInput[psInputs.positionRegister]) {
+            uint32_t freeRegister = 0;
+            while (freeRegister < 32 &&
+                   (usedInput[freeRegister] || freeRegister == psInputs.identityRegister)) ++freeRegister;
+            if (freeRegister == 32) throw std::runtime_error("no free position input register");
+            psInputs.positionRegister = freeRegister;
+        }
+        if (psInputs.positionRegister == psInputs.identityRegister)
+            throw std::runtime_error("position and identity input overlap");
         bool isgn = false, osgn = false, program = false;
         for (auto& chunk : chunks) {
             if (chunk.tag == kTagIsgn) {
@@ -387,22 +446,22 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                 auto elements = parseSignature(chunk.bytes);
                 bool identity = false, position = false;
                 for (auto& e : elements) {
-                    if (e.registerIndex == inputs.identityRegister) {
-                        if (inputs.slotFromVsPatch) throw std::runtime_error("slot input register occupied");
-                        if (e.componentType == 1 && (e.masks & (1u << inputs.identityComponent))) identity = true;
+                    if (e.registerIndex == psInputs.identityRegister) {
+                        if (psInputs.slotFromVsPatch) throw std::runtime_error("slot input register occupied");
+                        if (e.componentType == 1 && (e.masks & (1u << psInputs.identityComponent))) identity = true;
                     }
-                    if (e.registerIndex == inputs.positionRegister) {
+                    if (e.registerIndex == psInputs.positionRegister) {
                         if (!(e.systemValue == 1 || equalName(e.name, "SV_POSITION")) || e.componentType != 3)
                             throw std::runtime_error("position input register holds another semantic");
-                        e.masks |= 4u | 0x0400u;   // z present and used
+                        e.masks |= guardOverlayDepth ? (7u | 0x0700u) : (4u | 0x0400u);
                         position = true;
                     }
                 }
-                if (inputs.slotFromVsPatch) {
+                if (psInputs.slotFromVsPatch) {
                     SignatureElement slot;
                     slot.name = kEngineVelocitySlotSemantic;
                     slot.componentType = 1;
-                    slot.registerIndex = inputs.identityRegister;
+                    slot.registerIndex = psInputs.identityRegister;
                     slot.masks = 0x0101u;                    // x, used
                     elements.push_back(std::move(slot));
                 } else if (!identity) {
@@ -413,8 +472,8 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                     p.name = "SV_Position";
                     p.systemValue = 1;
                     p.componentType = 3;
-                    p.registerIndex = inputs.positionRegister;
-                    p.masks = 0x040Fu;
+                    p.registerIndex = psInputs.positionRegister;
+                    p.masks = guardOverlayDepth ? 0x070Fu : 0x040Fu;
                     elements.push_back(std::move(p));
                 }
                 sortByRegister(elements);
@@ -452,7 +511,7 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
             } else if (isProgram(chunk.tag)) {
                 if (program) throw std::runtime_error("duplicate program");
                 program = true;
-                chunk.bytes = patchPsProgram(chunk.bytes, inputs);
+                chunk.bytes = patchPsProgram(chunk.bytes, psInputs, guardOverlayDepth);
             }
         }
         if (!isgn || !osgn || !program) throw std::runtime_error("missing pixel shader chunks");

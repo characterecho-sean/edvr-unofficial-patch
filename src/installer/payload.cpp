@@ -33,6 +33,7 @@ int idFor(const std::string& item) {
     if (item == "ngx") return IDR_EDVR_NGX;
     if (item == "openxr_loader") return IDR_EDVR_OPENXR_LOADER;
     if (item == "openxr_license") return IDR_EDVR_OPENXR_LICENSE;
+    if (item == "profile") return IDR_EDVR_PROFILE;
     return 0;
 }
 
@@ -48,6 +49,9 @@ const PayloadInfo& payloadInfo() {
     static PayloadInfo info = [] {
         PayloadInfo p;
         p.version = EDVR_VERSION_STRING;
+#ifdef EDVR_INSTALLER_FLAT
+        p.profile = "flat";
+#endif
 
         const void* data = nullptr;
         size_t size = 0;
@@ -65,6 +69,7 @@ const PayloadInfo& payloadInfo() {
         }
         const bool graphicsPresent = payloadItem("native_graphics", &data, &size);
         const bool graphics = graphicsPresent && validateNativePayloadBytes(data, size, NativeImageKind::Graphics);
+        p.nativeGraphicsValid = graphics;
         const bool runtimePresent = payloadItem("native_runtime", &data, &size);
         const bool runtime = runtimePresent && validateNativePayloadBytes(data, size, NativeImageKind::Runtime);
         const bool loaderPresent = payloadItem("openxr_loader", &data, &size);
@@ -75,6 +80,10 @@ const PayloadInfo& payloadInfo() {
         if (license) { p.haveOpenxrLicense = true; p.openxrLicenseSha = sha256Bytes(data, size); }
         if (payloadItem("ini", &data, &size)) {
             p.iniText.assign(static_cast<const char*>(data), size);
+        }
+        if (payloadItem("profile", &data, &size)) {
+            p.descriptorText.assign(static_cast<const char*>(data), size);
+            p.descriptorSha = sha256Bytes(data, size);
         }
         return p;
     }();

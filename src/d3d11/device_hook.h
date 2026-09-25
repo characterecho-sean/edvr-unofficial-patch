@@ -9,6 +9,7 @@
 
 #include <d3d11.h>
 #include <dxgi.h>
+#include <cstdint>
 
 #include "../common/vtable_hook.h"  // HookMode
 
@@ -63,6 +64,9 @@ void* systemD3D11Module();
 void logContextTableVariants(void** table, size_t span, const char* who);
 
 void hookDevice(ID3D11Device* device);
+// Manually armed flat producer probe only. Saves exact creation bytes by hash;
+// false is explicitly missing evidence, never permission to infer a shader.
+bool captureFlatProbeShader(char stage, uint64_t hash);
 // Sticky for the process, including later devices and submit-side passes.
 // True for either sentinel recovery or advanced.d3d11_fixes=0.
 bool deviceHookRecoveryDisabled();

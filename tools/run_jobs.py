@@ -130,7 +130,7 @@ STALE_EXE_DIR = re.compile(r"^.+[-_]\d+[-_]\d+$")
 # happened to match STALE_EXE_DIR -- belt-and-suspenders alongside the shape
 # check and the directories-only, top-level-only rule in stale_exe_dirs.
 PROTECTED_EXE_DIR_ENTRIES = {
-    "d3d11.dll", "openvr_api.dll", "edvr-installer.exe", "gen", "obj",
+    "d3d11.dll", "openvr_api.dll", "edvr-installer.exe", "edvr-flat-installer.exe", "gen", "gen-flat", "obj",
     "edvr_logs",
 }
 

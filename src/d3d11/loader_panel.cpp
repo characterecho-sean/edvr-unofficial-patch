@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "../common/intro_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -286,7 +287,8 @@ void recordNone(const char* why) {
 
 void loaderPanelConfigure(Config& cfg) {
     const bool was = detail::g_loaderPanelOn;
-    detail::g_loaderPanelOn = loadingDimParse(cfg.getString("fix.loading_dim", "screen")).withhold;
+    detail::g_loaderPanelOn = loadingDimParse(runtimeVrProfile() ?
+        cfg.getString("fix.loading_dim", "screen") : "stock").withhold;
     if (was != detail::g_loaderPanelOn) {
         if (!detail::g_loaderPanelOn) {
             dropPending();

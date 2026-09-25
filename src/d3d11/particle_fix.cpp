@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include <string>
@@ -651,7 +652,8 @@ void particleConfigure(Config& cfg) {
     // The witchspace starfield switch. "on" is the game's own behaviour and
     // the default; "off" empties the jump tunnel, which a player asked for
     // after 0.12.3 did it by accident.
-    const std::string ws = cfg.getString("fix.witchspace_stars", "on");
+    const std::string ws = runtimeVrProfile() ?
+        cfg.getString("fix.witchspace_stars", "on") : "on";
     const bool wasHidden = g_hideWitchspaceStars;
     if (ws == "off") {
         g_hideWitchspaceStars = true;
@@ -675,7 +677,8 @@ void particleConfigure(Config& cfg) {
     }
 
     const Mode wasMode = detail::g_particleMode;
-    const std::string m = cfg.getString("fix.particle_billboard", "steady");
+    const std::string m = runtimeVrProfile() ?
+        cfg.getString("fix.particle_billboard", "steady") : "stock";
     if (m == "steady") {
         detail::g_particleMode = Mode::kSteady;
     } else {

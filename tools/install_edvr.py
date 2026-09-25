@@ -5,6 +5,7 @@
     python tools/install_edvr.py --target steam
     python tools/install_edvr.py --target frontier --openvr --tag stepped
     python tools/install_edvr.py --target steam --verify-only
+    python tools/install_edvr.py --target steam --profile flat --dry-run
     python tools/install_edvr.py --target frontier --native-openxr --dll \
         --native-receipt C:\\temp\\edvr-native.json
     python tools/install_edvr.py --restore-native C:\\temp\\edvr-native.json
@@ -61,6 +62,12 @@ GAME_EXE = "EliteDangerous64.exe"
 NATIVE_RECEIPT_VERSION = 1
 NATIVE_KIND = "edvr-native-openxr"
 LEGACY_GRAPHICS_SOURCE = "build/d3d11.dll"
+FLAT_KIND = "edvr-flat"
+PROFILE_FILE = "edvr_profile.ini"
+
+
+def profile_bytes(profile):
+    return ("[install]\r\nschema = 1\r\nprofile = %s\r\n" % profile).encode("utf-8")
 
 
 def native_paths(root, target):
@@ -76,8 +83,14 @@ def native_paths(root, target):
     }
 
 
-def strict_game_running():
-    """Return (known, running); native staging fails closed on probe errors."""
+def strict_game_running(target=None):
+    """Return (known, running); native staging fails closed on probe errors.
+
+    With a target directory, only an EliteDangerous64.exe running from that
+    directory counts: another install's game cannot hold this install's files
+    open. A running game process whose image path cannot be resolved keeps
+    the conservative refusal.
+    """
     try:
         out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
                              capture_output=True, text=True, timeout=20,
@@ -91,7 +104,7 @@ def strict_game_running():
     rows = list(csv.reader((out.stdout or "").splitlines()))
     if not rows:
         return False, False
-    running = False
+    pids = []
     for row in rows:
         if len(row) != 5 or not row[0].strip() or not row[3].isdigit():
             return False, False
@@ -102,8 +115,50 @@ def strict_game_running():
         if pid < 0:
             return False, False
         if row[0].strip().lower() == GAME_EXE.lower():
-            running = True
-    return True, running
+            pids.append(pid)
+    if target is None:
+        return True, bool(pids)
+    return game_running_in(target, [_process_image_path(pid) for pid in pids])
+
+
+def _process_image_path(pid):
+    """Executable path of a process, or None when it cannot be queried."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32.dll")
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return None
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buffer))
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer,
+                                                   ctypes.byref(size)):
+            return None
+        return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def game_running_in(target, images):
+    """(known, running) for a target directory and resolved game image paths.
+
+    images holds one entry per running EliteDangerous64.exe process: its
+    executable path, or None when that path could not be queried. A proven
+    match wins over an unresolved process; otherwise an unresolved process
+    keeps the conservative refusal.
+    """
+    expected = os.path.normcase(os.path.realpath(os.path.join(target, GAME_EXE)))
+    unresolved = False
+    for image in images:
+        if image is None:
+            unresolved = True
+            continue
+        if os.path.normcase(os.path.realpath(image)) == expected:
+            return True, True
+    if unresolved:
+        return False, False
+    return True, False
 
 
 def _hash_or_missing(path):
@@ -162,7 +217,7 @@ def _native_preflight(root, target, receipt_path):
 
 
 def validate_elite_game(path):
-    """Validate the executable profile before a native pair can be staged."""
+    """Validate the qualified executable before staging either profile."""
     try:
         from elite_oculus import validate_elite_oculus
     except ImportError as exc:
@@ -249,7 +304,7 @@ def native_install(root, target, receipt_path, tag, dry_run=False):
                      "graphics": sha256(paths["graphics_target"])}
     installed_hashes = {"native": sha256(paths["native_source"]),
                         "graphics": sha256(paths["graphics_source"])}
-    known, running = strict_game_running()
+    known, running = strict_game_running(target)
     if not dry_run and (not known or running):
         if not known:
             print("[edvr] ERROR: could not prove that %s is stopped; native "
@@ -369,7 +424,7 @@ def _load_native_receipt(path):
         raise ValueError("receipt path must be absolute")
     with open(path, "r", encoding="utf-8") as f:
         r = json.load(f)
-    if isinstance(r, dict) and r.get("version") == 2 and r.get("kind") == NATIVE_KIND:
+    if isinstance(r, dict) and r.get("version") == 2 and r.get("kind") in (NATIVE_KIND, FLAT_KIND):
         return _validate_v2_receipt(r)
     if not isinstance(r, dict) or r.get("version") != NATIVE_RECEIPT_VERSION or \
        r.get("kind") != NATIVE_KIND:
@@ -495,7 +550,7 @@ def restore_native(receipt_path, dry_run=False):
             print("[edvr] native restore plan (DRY RUN): %s" % target)
             print("[edvr] dry run: wrote nothing.")
             return 0
-        known, running = strict_game_running()
+        known, running = strict_game_running(target)
         if not known:
             print("[edvr] ERROR: could not prove that %s is stopped; restore "
                   "fails closed." % GAME_EXE)
@@ -590,19 +645,31 @@ def restore_native(receipt_path, dry_run=False):
 
 
 def _validate_v2_receipt(r):
-    if not isinstance(r, dict) or r.get("version") != 2 or r.get("kind") != NATIVE_KIND or r.get("state") != "installed":
-        raise ValueError("receipt is not an installed native v2 package")
+    if not isinstance(r, dict) or r.get("version") != 2 or r.get("kind") not in (NATIVE_KIND, FLAT_KIND) or r.get("state") != "installed":
+        raise ValueError("receipt is not an installed EDVR v2 package")
     target, root, files = r.get("target"), r.get("root"), r.get("files")
     if not isinstance(target, str) or not os.path.isabs(target) or not os.path.isdir(target) or not isinstance(root, str) or not os.path.isabs(root):
         raise ValueError("bad native v2 target/root")
     if not isinstance(files, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in files):
         raise ValueError("bad native v2 files")
-    paths = _standard_native_paths(root, target)
-    targets = {key: paths[key + "_target"] for key in ("runtime", "graphics", "loader", "notice")}
-    targets.update(config=paths["config"], ini=os.path.join(target, "edvr.ini"), dlss=os.path.join(target, "nvngx_dlss.dll"))
+    paths = _standard_native_paths(root, target) if r["kind"] == NATIVE_KIND else _flat_paths(root, target)
+    required = {"runtime", "graphics", "loader", "notice", "config"} if r["kind"] == NATIVE_KIND else {"graphics", "profile"}
+    targets = {key: paths[key + "_target"] for key in ("runtime", "graphics", "loader", "notice") if key + "_target" in paths}
+    if r["kind"] == NATIVE_KIND: targets["config"] = paths["config"]
+    targets.update(profile=os.path.join(target, PROFILE_FILE), ini=os.path.join(target, "edvr.ini"), dlss=os.path.join(target, "nvngx_dlss.dll"))
     keys = [e["key"] for e in files]
-    if len(keys) != len(set(keys)) or not {"runtime", "graphics", "loader", "notice", "config"}.issubset(keys) or set(keys) - targets.keys():
-        raise ValueError("incomplete or duplicate native v2 components")
+    if len(keys) != len(set(keys)) or not required.issubset(keys) or set(keys) - targets.keys():
+        raise ValueError("incomplete or duplicate EDVR v2 components")
+    if r["kind"] == FLAT_KIND:
+        sources = {"graphics": paths["graphics"],
+                   "dlss": os.path.join(root, "build", "nvngx_dlss.dll"),
+                   "ini": _ini_source(root, "flat"), "profile": "generated"}
+        for e in files:
+            expected = sources[e["key"]]
+            if e.get("source") != (os.path.abspath(expected) if expected != "generated" else expected):
+                raise ValueError("unsafe flat source: " + e["key"])
+    if r["kind"] == FLAT_KIND and _flat_vr_leftovers(target):
+        raise ValueError("VR components remain in flat installation")
     protected = {os.path.normcase(os.path.realpath(path)) for path in targets.values()}
     backups = set()
     for e in files:
@@ -635,7 +702,7 @@ def restore_native_v2(receipt_path, dry_run=False):
         if dry_run:
             print("[edvr] native package restore plan; dry run wrote nothing")
             return 0
-        known, running = strict_game_running()
+        known, running = strict_game_running(receipt["target"])
         if not known or running:
             raise ValueError("native restore requires a proven stopped game")
         snapshots, changed = [], []
@@ -846,7 +913,7 @@ def _native_direct_plan(root, target, loader, runtime):
 
 def native_direct(root, target, loader, runtime, dry_run=False):
     paths, config, lib = _native_direct_plan(root, target, loader, runtime)
-    known, running = strict_game_running()
+    known, running = strict_game_running(target)
     if not known or running:
         if not dry_run: print("[edvr] ERROR: direct native route requires a proven stopped game")
         elif not known: print("[edvr] direct native dry run: process state unavailable")
@@ -896,6 +963,27 @@ def _standard_native_paths(root, target):
             "game": os.path.join(target, GAME_EXE)}
 
 
+def _flat_paths(root, target):
+    return {"graphics": os.path.join(root, "build", "d3d11.dll"),
+            "graphics_target": os.path.join(target, "d3d11.dll"),
+            "game": os.path.join(target, GAME_EXE)}
+
+
+def _ini_source(root, profile):
+    return os.path.join(root, "edvr.ini") if profile == "vr" else \
+        os.path.join(root, "build", "edvr-flat.ini")
+
+
+def _flat_vr_leftovers(target):
+    """Recognized EDVR VR state needs the GUI's original-file recovery."""
+    xr = os.path.join(target, "Openvr", "win64")
+    candidates = (os.path.join(xr, "edvr_openxr.ini"),
+                  os.path.join(xr, "openvr_api_orig.dll"),
+                  os.path.join(xr, "openxr_loader.dll"),
+                  os.path.join(target, "edvr_native_receipt.json"))
+    return [path for path in candidates if os.path.exists(path)]
+
+
 def _equivalent_startup_config(actual, expected):
     """Accept the same startup config with LF or CRLF line endings only."""
     if actual == expected:
@@ -905,71 +993,98 @@ def _equivalent_startup_config(actual, expected):
 
 
 def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
-                            include_dlss=False, include_ini=False):
-    """Stage the complete native pair, bundled loader, and local config."""
-    p = _standard_native_paths(root, target)
-    errors = ["missing native source %s" % p[k] for k in ("runtime", "graphics", "loader", "notice")
+                            include_dlss=False, include_ini=False, profile="vr"):
+    """Stage a profile's graphics payload and optional native components."""
+    native = profile == "vr"
+    p = _standard_native_paths(root, target) if native else _flat_paths(root, target)
+    payload = ("runtime", "graphics", "loader", "notice") if native else ("graphics",)
+    errors = ["missing %s source %s" % ("native" if native else "flat", p[k]) for k in payload
               if not os.path.isfile(p[k])]
     if include_dlss and not os.path.isfile(os.path.join(root, "build", "nvngx_dlss.dll")):
         errors.append("missing optional DLSS source %s" % os.path.join(root, "build", "nvngx_dlss.dll"))
+    ini_source = _ini_source(root, profile)
+    if include_ini and not os.path.isfile(ini_source):
+        errors.append("missing %s INI source %s" % (profile, ini_source))
     if not os.path.isfile(p["game"]):
         errors.append("missing target executable %s" % p["game"])
     if errors:
-        raise SystemExit("[edvr] native preflight failed:\n       " + "\n       ".join(errors))
-    try:
-        import fetch_openxr_loader
-        fetch_openxr_loader.verify(os.path.join(root, "build"))
-    except (ImportError, OSError, ValueError) as exc:
-        raise SystemExit("[edvr] pinned OpenXR loader verification failed: %s" % exc)
-    try:
-        import openxr_pe
-        openxr_pe.validate_native_pair(p["game"], p["runtime"], p["graphics"])
-        if validate_elite_game(p["game"]) is False:
-            raise ValueError("Elite executable profile is not supported")
-    except (ImportError, OSError, ValueError) as exc:
-        raise SystemExit("[edvr] native preflight failed:\n       %s" % exc)
-    config_bytes = ("[openxr]\nversion=1\nloader=%s\ngraphics=%s\n"
-                    "runtime=system\nseparate_device=1\n" %
-                    (os.path.abspath(p["loader_target"]),
-                     os.path.abspath(p["graphics_target"]))).encode("utf-8")
+        raise SystemExit("[edvr] %s preflight failed:\n       %s" %
+                         (profile, "\n       ".join(errors)))
+    if native:
+        try:
+            import fetch_openxr_loader
+            fetch_openxr_loader.verify(os.path.join(root, "build"))
+        except (ImportError, OSError, ValueError) as exc:
+            raise SystemExit("[edvr] pinned OpenXR loader verification failed: %s" % exc)
+        try:
+            import openxr_pe
+            openxr_pe.validate_native_pair(p["game"], p["runtime"], p["graphics"])
+            if validate_elite_game(p["game"]) is False:
+                raise ValueError("Elite executable profile is not supported")
+        except (ImportError, OSError, ValueError) as exc:
+            raise SystemExit("[edvr] native preflight failed:\n       %s" % exc)
+    else:
+        try:
+            if validate_elite_game(p["game"]) is False:
+                raise ValueError("Elite executable profile is not supported")
+        except (ImportError, OSError, ValueError) as exc:
+            raise SystemExit("[edvr] flat preflight failed:\n       %s" % exc)
+    config_bytes = (("[openxr]\nversion=1\nloader=%s\ngraphics=%s\n"
+                     "runtime=system\nseparate_device=1\n" %
+                     (os.path.abspath(p["loader_target"]),
+                      os.path.abspath(p["graphics_target"]))).encode("utf-8") if native else None)
+    descriptor = os.path.join(target, PROFILE_FILE)
+    descriptor_bytes = profile_bytes(profile)
+    if not verify_only and not native:
+        leftovers = _flat_vr_leftovers(target)
+        if os.path.isfile(descriptor) and Path(descriptor).read_bytes() != descriptor_bytes:
+            leftovers.append(descriptor)
+        if leftovers:
+            raise SystemExit("[edvr] flat preflight refused existing VR or unknown profile state; "
+                             "use edvr-installer.exe to convert and restore originals:\n       " +
+                             "\n       ".join(leftovers))
     if verify_only:
         ok = True
-        for key in ("runtime", "graphics", "loader", "notice"):
+        for key in payload:
             dst = p[key + "_target"]
             if not os.path.isfile(dst) or sha256(dst) != sha256(p[key]):
-                print("[edvr] native verify mismatch: %s" % dst); ok = False
-        if (not os.path.isfile(p["config"]) or
+                print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
+        if native and (not os.path.isfile(p["config"]) or
                 not _equivalent_startup_config(open(p["config"], "rb").read(), config_bytes)):
             print("[edvr] native verify mismatch: %s" % p["config"]); ok = False
+        if not os.path.isfile(descriptor) or Path(descriptor).read_bytes() != descriptor_bytes:
+            print("[edvr] %s verify mismatch: %s" % (profile, descriptor)); ok = False
+        if not native and _flat_vr_leftovers(target):
+            print("[edvr] flat verify mismatch: VR components remain"); ok = False
         if include_dlss:
             dlss = os.path.join(root, "build", "nvngx_dlss.dll")
             dst = os.path.join(target, "nvngx_dlss.dll")
             if not os.path.isfile(dst) or sha256(dst) != sha256(dlss):
-                print("[edvr] native verify mismatch: %s" % dst); ok = False
+                print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
         if include_ini:
-            ini_source = os.path.join(root, "edvr.ini")
             ini_target = os.path.join(target, "edvr.ini")
             if (not os.path.isfile(ini_target) or not os.path.isfile(ini_source) or
                     open(ini_target, "rb").read() != open(ini_source, "rb").read()):
-                print("[edvr] native verify mismatch: %s" % ini_target); ok = False
-        if ok: print("[edvr] native pair, loader, and config verified")
+                print("[edvr] %s verify mismatch: %s" % (profile, ini_target)); ok = False
+        if ok: print("[edvr] %s payload and profile verified" % profile)
         return 0 if ok else 1
     if os.path.isfile(p["graphics_target"]):
         try:
+            import openxr_pe
             names, _ = openxr_pe._exports(openxr_pe.Image(Path(p["graphics_target"]).read_bytes()))
             if not any(name.startswith("edvr") for name in names.values()):
                 raise ValueError("existing d3d11.dll is a graphics mod")
         except (OSError, ValueError) as exc:
             raise SystemExit("[edvr] Use edvr-installer.exe to preserve and chain the existing d3d11.dll: %s" % exc)
-    known, running = strict_game_running()
+    known, running = strict_game_running(target)
     if not dry_run and (not known or running):
         print("[edvr] ERROR: native staging requires a proven stopped game")
         return 1
     stamp = datetime.datetime.now()
-    receipt = os.path.join(target, "edvr_native_receipt.json")
+    receipt = os.path.join(target, "edvr_native_receipt.json" if native else "edvr_flat_receipt.json")
     if os.path.exists(receipt): receipt = _native_backup_name(receipt, tag, stamp)
     entries = []
-    for key in ("runtime", "graphics", "loader", "notice"):
+    for key in payload:
         dst = p[key + "_target"]
         entries.append({"key": key, "source": os.path.abspath(p[key]), "target": os.path.abspath(dst),
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
@@ -982,28 +1097,31 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
     if include_ini:
-        src = os.path.join(root, "edvr.ini"); dst = os.path.join(target, "edvr.ini")
-        if not os.path.isfile(src):
-            raise SystemExit("[edvr] native preflight failed:\n       missing INI source %s" % src)
+        src = ini_source; dst = os.path.join(target, "edvr.ini")
         entries.append({"key": "ini", "source": os.path.abspath(src), "target": os.path.abspath(dst),
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
-    entries.append({"key": "config", "source": "generated", "target": os.path.abspath(p["config"]),
-                    "backup": _native_backup_name(p["config"], tag, stamp) if os.path.isfile(p["config"]) else None,
-                    "before_sha256": sha256(p["config"]) if os.path.isfile(p["config"]) else None,
-                    "installed_sha256": hashlib.sha256(config_bytes).hexdigest().upper()})
-    print("[edvr] native plan%s: %s" % (" (DRY RUN -- nothing will be written)" if dry_run else "", target))
+    if native:
+        entries.append({"key": "config", "source": "generated", "target": os.path.abspath(p["config"]),
+                        "backup": _native_backup_name(p["config"], tag, stamp) if os.path.isfile(p["config"]) else None,
+                        "before_sha256": sha256(p["config"]) if os.path.isfile(p["config"]) else None,
+                        "installed_sha256": hashlib.sha256(config_bytes).hexdigest().upper()})
+    entries.append({"key": "profile", "source": "generated", "target": os.path.abspath(descriptor),
+                    "backup": _native_backup_name(descriptor, tag, stamp) if os.path.isfile(descriptor) else None,
+                    "before_sha256": sha256(descriptor) if os.path.isfile(descriptor) else None,
+                    "installed_sha256": hashlib.sha256(descriptor_bytes).hexdigest().upper()})
+    print("[edvr] %s plan%s: %s" % (profile, " (DRY RUN -- nothing will be written)" if dry_run else "", target))
     for e in entries: print("       %-7s %s" % (e["key"], e["target"]))
     print("       receipt  %s" % receipt)
     if dry_run:
         print("[edvr] dry run: wrote nothing."); return 0
-    journal = {"version": 2, "kind": NATIVE_KIND, "target": os.path.abspath(target),
+    journal = {"version": 2, "kind": NATIVE_KIND if native else FLAT_KIND, "target": os.path.abspath(target),
                "root": os.path.abspath(root), "state": "staging", "files": entries}
     made, changed = [], []
     receipt_owned = False
     try:
-        os.makedirs(os.path.dirname(p["config"]), exist_ok=True)
+        if native: os.makedirs(os.path.dirname(p["config"]), exist_ok=True)
         _write_new_receipt(receipt, journal)
         receipt_owned = True
         for e in entries:
@@ -1015,6 +1133,8 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
             changed.append(e)
             if e["key"] == "config":
                 with open(e["target"], "wb") as stream: stream.write(config_bytes)
+            elif e["key"] == "profile":
+                with open(e["target"], "wb") as stream: stream.write(descriptor_bytes)
             else: shutil.copy2(e["source"], e["target"])
             if sha256(e["target"]) != e["installed_sha256"]: raise ValueError("installed hash verification failed: %s" % e["key"])
         journal["state"] = "installed"; _replace_receipt(receipt, journal)
@@ -1043,7 +1163,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
             try: _replace_receipt(receipt, journal)
             except (OSError, IOError, ValueError): pass
         return 1
-    print("[edvr] native package installed and verified; receipt: %s" % receipt)
+    print("[edvr] %s package installed and verified; receipt: %s" % (profile, receipt))
     return 0
 
 
@@ -1052,6 +1172,8 @@ def main(argv=None):
         description="Install a built EDVR into a game directory, verified.")
     ap.add_argument("--target", default="steam",
                     help="steam, frontier, or a path to the game directory")
+    ap.add_argument("--profile", choices=("vr", "flat"), default="vr",
+                    help="install profile (default: vr)")
     ap.add_argument("--root", default=None,
                     help="the tree to install FROM; defaults to this "
                          "script's own repository, which is what you want "
@@ -1064,9 +1186,9 @@ def main(argv=None):
                     help="also install build/nvngx_dlss.dll")
     ap.add_argument("--ini", action="store_true",
                     help="also overwrite the target's edvr.ini with the "
-                         "repository's -- this discards tuned settings")
+                         "selected profile's template -- this discards tuned settings")
     ap.add_argument("--all", action="store_true",
-                    help="native package plus available DLSS (never ini)")
+                    help="selected profile plus available DLSS (never ini)")
     ap.add_argument("--native-openxr", action="store_true",
                      help="stage the experimental native OpenXR DLL and its "
                          "paired native graphics DLL as d3d11.dll (requires --dll, plus a receipt "
@@ -1076,7 +1198,7 @@ def main(argv=None):
     ap.add_argument("--native-loader", default=None)
     ap.add_argument("--native-runtime", default=None)
     ap.add_argument("--restore-native", default=None, metavar="RECEIPT",
-                    help="restore both files recorded by a native receipt")
+                    help="restore files recorded by a native or flat receipt")
     ap.add_argument("--tag", default=None,
                     help="word for the backup name; defaults to the short "
                          "git hash of this tree")
@@ -1101,7 +1223,7 @@ def main(argv=None):
     if args.restore_native:
         if any((args.native_openxr, args.native_receipt, args.dll, args.openvr,
                 args.dlss, args.ini, args.all, args.verify_only, args.force,
-                args.no_backup, args.tag)):
+                args.no_backup, args.tag)) or args.profile != "vr":
             ap.error("--restore-native cannot be combined with install options")
         if not os.path.isabs(args.restore_native):
             ap.error("--restore-native requires an absolute receipt path")
@@ -1112,6 +1234,8 @@ def main(argv=None):
     if args.native_receipt and not os.path.isabs(args.native_receipt):
         ap.error("--native-receipt must be an absolute new path")
     if args.native_openxr:
+        if args.profile != "vr":
+            ap.error("--native-openxr requires --profile vr")
         if not args.dll:
             ap.error("--native-openxr requires --dll; it stages the paired "
                      "graphics DLL as part of the native package")
@@ -1162,19 +1286,50 @@ def main(argv=None):
     dlss_source = os.path.join(root, "build", "nvngx_dlss.dll")
     if args.force or args.no_backup:
         ap.error("normal native installation requires a stopped game and transactional backups")
+    if args.profile == "flat" and (args.dll or args.openvr):
+        ap.error("--profile flat cannot be combined with --dll or --openvr")
     if args.dlss and not os.path.isfile(dlss_source):
         ap.error("--dlss requested but build/nvngx_dlss.dll is missing")
     return standard_native_install(root, target, tag, args.dry_run,
                                    args.verify_only,
                                    include_dlss=(args.dlss or (args.all and os.path.isfile(dlss_source))),
-                                   include_ini=args.ini)
+                                   include_ini=args.ini, profile=args.profile)
 
 
 def self_test():
     ok = True
 
-    # Normal CLI installs are native-only and must work on a fresh stock
-    # directory (there is no original OpenVR DLL to rename).
+    # The path-aware game probe: only a game running from the install target
+    # blocks staging; an unresolvable image path fails closed.
+    probe_tmp = tempfile.mkdtemp(prefix="edvr_probe_test_")
+    try:
+        probe_game = os.path.join(probe_tmp, "game")
+        os.makedirs(probe_game)
+        for images, want in (
+                ([], (True, False)),
+                ([None], (False, False)),
+                ([os.path.join(probe_tmp, "other", GAME_EXE)], (True, False)),
+                ([os.path.join(probe_game, GAME_EXE)], (True, True)),
+                ([os.path.join(probe_tmp, "other", GAME_EXE),
+                  os.path.join(probe_game, GAME_EXE)], (True, True)),
+                ([None, os.path.join(probe_game, GAME_EXE)], (True, True)),
+                ([os.path.join(probe_game, GAME_EXE), None], (True, True)),
+                ([os.path.join(probe_tmp, "other", GAME_EXE), None],
+                 (False, False))):
+            got = game_running_in(probe_game, images)
+            if got != want:
+                print("path-aware probe mismatch: %r gave %r, want %r" %
+                      (images, got, want))
+                ok = False
+        if game_running_in(probe_game,
+                           [os.path.join(probe_game, ".", GAME_EXE.lower())]) != (True, True):
+            print("path-aware probe lost a case/separator variant")
+            ok = False
+    finally:
+        shutil.rmtree(probe_tmp, ignore_errors=True)
+
+    # VR remains the default and must work on a fresh stock directory
+    # (there is no original OpenVR DLL to rename).
     standard_tmp = tempfile.mkdtemp(prefix="edvr_standard_test_")
     try:
         sroot = os.path.join(standard_tmp, "repo"); sgame = os.path.join(standard_tmp, "game")
@@ -1196,7 +1351,7 @@ def self_test():
         old_standard_probe = globals()["strict_game_running"]
         _standard_pe.validate_native_pair = lambda *args: None
         globals()["validate_elite_game"] = lambda path: None
-        globals()["strict_game_running"] = lambda: (True, False)
+        globals()["strict_game_running"] = lambda *a: (True, False)
         try:
             before = sorted((os.path.relpath(os.path.join(b, n), sgame), open(os.path.join(b, n), "rb").read())
                             for b, _, ns in os.walk(sgame) for n in ns)
@@ -1205,6 +1360,7 @@ def self_test():
                            for b, _, ns in os.walk(sgame) for n in ns)
             if before != after: print("standard dry run wrote files"); ok = False
             if main(["--root", sroot, "--target", sgame, "--all"]) != 0: ok = False
+            assert Path(sgame, PROFILE_FILE).read_bytes() == profile_bytes("vr")
             sp = _standard_native_paths(sroot, sgame)
             if any(sha256(sp[k + "_target"]) != sha256(sp[k]) for k in ("runtime", "graphics", "loader", "notice")):
                 print("standard native payload mismatch"); ok = False
@@ -1325,6 +1481,114 @@ def self_test():
     finally:
         shutil.rmtree(standard_tmp, ignore_errors=True)
 
+    # Flat staging needs only the graphics build and must leave the game's
+    # stock OpenVR directory byte-for-byte untouched.
+    flat_tmp = tempfile.mkdtemp(prefix="edvr_flat_test_")
+    try:
+        froot = os.path.join(flat_tmp, "repo")
+        fgame = os.path.join(flat_tmp, "game")
+        fxr = os.path.join(fgame, "Openvr", "win64")
+        os.makedirs(os.path.join(froot, "build"))
+        os.makedirs(fxr)
+        Path(froot, "build", "d3d11.dll").write_bytes(b"FLAT-GRAPHICS")
+        Path(froot, "build", "nvngx_dlss.dll").write_bytes(b"FLAT-DLSS")
+        Path(froot, "edvr.ini").write_bytes(b"[fix]\ntemporal_aa=dlss\n")
+        Path(fgame, GAME_EXE).write_bytes(b"GAME")
+        Path(fgame, "edvr.ini").write_bytes(b"[user]\nkeep=1\n")
+        Path(fxr, "openvr_api.dll").write_bytes(b"STOCK-OPENVR")
+        old_profile_validate = globals()["validate_elite_game"]
+        old_probe = globals()["strict_game_running"]
+        globals()["validate_elite_game"] = lambda path: None
+        globals()["strict_game_running"] = lambda *a: (True, False)
+        try:
+            snapshot = lambda: sorted((str(p.relative_to(fgame)), p.read_bytes())
+                                      for p in Path(fgame).rglob("*") if p.is_file())
+            xr_snapshot = lambda: sorted((str(p.relative_to(fxr)), p.read_bytes())
+                                         for p in Path(fxr).rglob("*") if p.is_file())
+            before = snapshot()
+            before_xr = xr_snapshot()
+            args = ["--root", froot, "--target", fgame, "--profile", "flat", "--all"]
+            assert main(args + ["--dry-run"]) == 0
+            assert snapshot() == before, "flat dry run wrote files"
+            assert main(args) == 0
+            assert xr_snapshot() == before_xr, "flat install changed Openvr"
+            assert Path(fgame, "d3d11.dll").read_bytes() == b"FLAT-GRAPHICS"
+            assert Path(fgame, "nvngx_dlss.dll").read_bytes() == b"FLAT-DLSS"
+            assert Path(fgame, "edvr.ini").read_bytes() == b"[user]\nkeep=1\n"
+            descriptor_path = Path(fgame, PROFILE_FILE)
+            assert descriptor_path.read_bytes() == profile_bytes("flat")
+            receipt_path = Path(fgame, "edvr_flat_receipt.json")
+            assert verify_native_receipt(str(receipt_path), fgame)["kind"] == FLAT_KIND
+            assert main(args + ["--verify-only"]) == 0
+            descriptor_path.write_bytes(profile_bytes("vr"))
+            assert main(args + ["--verify-only"]) == 1
+            descriptor_path.write_bytes(profile_bytes("flat"))
+            leftover = Path(fxr, "edvr_openxr.ini")
+            leftover.write_bytes(b"VR-LEFTOVER")
+            before = snapshot()
+            try:
+                main(args + ["--dry-run"])
+                raise AssertionError("flat dry run accepted VR leftovers")
+            except SystemExit: pass
+            assert snapshot() == before, "refused flat dry run wrote files"
+            assert main(args + ["--verify-only"]) == 1
+            leftover.unlink()
+            assert main(args + ["--verify-only"]) == 0
+            assert restore_native(str(receipt_path)) == 0
+            assert xr_snapshot() == before_xr, "flat restore changed Openvr"
+            assert not Path(fgame, "d3d11.dll").exists()
+            assert not descriptor_path.exists()
+            # --ini must require the generated flat template, never copy the
+            # full VR INI in the repository root, and restore the user's INI.
+            ini_args = args + ["--ini", "--tag", "flatini"]
+            before = snapshot()
+            try:
+                main(ini_args + ["--dry-run"])
+                raise AssertionError("flat --ini accepted a missing flat template")
+            except SystemExit: pass
+            assert snapshot() == before, "missing flat template dry run wrote files"
+            flat_template = Path(froot, "build", "edvr-flat.ini")
+            flat_template.write_bytes(b"[fix]\r\ntemporal_aa = off\r\n")
+            assert main(ini_args + ["--dry-run"]) == 0
+            assert snapshot() == before, "flat --ini dry run wrote files"
+            assert main(ini_args) == 0
+            assert Path(fgame, "edvr.ini").read_bytes() == flat_template.read_bytes()
+            ini_receipt = next(Path(fgame).glob("edvr_flat_receipt.json.pre-flatini-*.bak"))
+            ini_entry = next(e for e in verify_native_receipt(str(ini_receipt), fgame)["files"]
+                             if e["key"] == "ini")
+            assert ini_entry["source"] == str(flat_template)
+            assert Path(ini_entry["backup"]).read_bytes() == b"[user]\nkeep=1\n"
+            receipt_bytes = ini_receipt.read_bytes()
+            changed_receipt = json.loads(receipt_bytes)
+            next(e for e in changed_receipt["files"] if e["key"] == "ini")["source"] = str(Path(froot, "edvr.ini"))
+            ini_receipt.write_text(json.dumps(changed_receipt), encoding="utf-8")
+            try:
+                verify_native_receipt(str(ini_receipt), fgame)
+                raise AssertionError("flat receipt accepted full VR INI source")
+            except ValueError: pass
+            ini_receipt.write_bytes(receipt_bytes)
+            assert main(ini_args + ["--verify-only"]) == 0
+            Path(fgame, "edvr.ini").write_bytes(b"[fix]\ntemporal_aa=dlss\n")
+            assert main(ini_args + ["--verify-only"]) == 1
+            Path(fgame, "edvr.ini").write_bytes(flat_template.read_bytes())
+            assert restore_native(str(ini_receipt)) == 0
+            assert Path(fgame, "edvr.ini").read_bytes() == b"[user]\nkeep=1\n"
+            assert xr_snapshot() == before_xr, "flat --ini changed Openvr"
+            Path(fgame, "d3d11.dll").write_bytes(b"FOREIGN-GRAPHICS")
+            before = snapshot()
+            try:
+                main(args + ["--dry-run"])
+                raise AssertionError("flat dry run accepted foreign graphics")
+            except SystemExit: pass
+            assert snapshot() == before, "foreign DLL refusal wrote files"
+        finally:
+            globals()["validate_elite_game"] = old_profile_validate
+            globals()["strict_game_running"] = old_probe
+    except (OSError, IOError, ValueError, SystemExit, AssertionError) as exc:
+        print("flat self-test failed: %s" % exc); ok = False
+    finally:
+        shutil.rmtree(flat_tmp, ignore_errors=True)
+
     # Direct native route: use a complete temporary pair and replace the
     # contract validator/process probe so this remains a CPU-only test.
     direct_tmp = tempfile.mkdtemp(prefix="edvr_direct_test_")
@@ -1349,7 +1613,7 @@ def self_test():
         def fake_validate(game,native,graphics): calls[0]+=1
         _pe.validate_native_pair=fake_validate
         globals()["validate_elite_game"] = lambda game: None
-        globals()["strict_game_running"]=lambda:(True,False)
+        globals()["strict_game_running"]=lambda *a:(True,False)
         before_ini=open(os.path.join(dgame,"edvr.ini"),"rb").read(); before_orig=open(os.path.join(dgame,"Openvr","win64","openvr_api_orig.dll"),"rb").read()
         if native_direct(droot,dgame,loader,manifest,False)!=0 or calls[0]!=1: ok=False
         paths=native_paths(droot,dgame)
@@ -1408,12 +1672,12 @@ def self_test():
         globals()["validate_elite_game"] = saved_direct_profile
         if main(["--root",droot,"--target",dgame,"--native-openxr","--dll","--no-backup","--native-loader",loader,"--dry-run"])!=0: ok=False
         if direct_snapshot()!=before: ok=False
-        globals()["strict_game_running"]=lambda:(False,False)
+        globals()["strict_game_running"]=lambda *a:(False,False)
         if native_direct(droot,dgame,loader,os.path.join(direct_tmp,"runtime.json"),True)!=0: ok=False
         after=direct_snapshot()
         if before!=after: ok=False
         for state in ((True,True), (False,False)):
-            globals()["strict_game_running"]=lambda:state
+            globals()["strict_game_running"]=lambda *a:state
             if native_direct(droot,dgame,loader,manifest,False)==0: ok=False
             if direct_snapshot()!=before: ok=False
         if open(os.path.join(dgame,"edvr.ini"),"rb").read()!=before_ini or open(os.path.join(dgame,"Openvr","win64","openvr_api_orig.dll"),"rb").read()!=before_orig: ok=False
@@ -1485,7 +1749,7 @@ def self_test():
         old_profile_validate = globals()["validate_elite_game"]
         _native_pe.validate_native_pair = lambda game, native, graphics: None
         globals()["validate_elite_game"] = lambda game: None
-        globals()["strict_game_running"] = lambda: (True, False)
+        globals()["strict_game_running"] = lambda *a: (True, False)
         try:
             if main(["--root", root, "--target", game, "--native-openxr",
                      "--dll", "--dry-run"]) != 0:
@@ -1558,7 +1822,7 @@ def self_test():
             # A process probe error is a hard refusal and leaves both files
             # untouched, even though ordinary installs retain their legacy
             # fail-open probe for compatibility.
-            globals()["strict_game_running"] = lambda: (False, False)
+            globals()["strict_game_running"] = lambda *a: (False, False)
             if main(["--root", root, "--target", game, "--native-openxr",
                      "--dll", "--native-receipt", receipt_path]) == 0:
                 print("native install accepted an unknown process state")
@@ -1570,7 +1834,7 @@ def self_test():
 
             # A failed second copy rolls both destinations back and removes
             # the transaction's newly-created backup.
-            globals()["strict_game_running"] = lambda: (True, False)
+            globals()["strict_game_running"] = lambda *a: (True, False)
             real_copy2 = shutil.copy2
             def fail_native_source(src, dst, *copy_args, **copy_kwargs):
                 if os.path.basename(src) == "edvr_openxr_runtime.dll":

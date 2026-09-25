@@ -21,6 +21,7 @@ namespace edvr::installer {
 #define IDR_EDVR_NGX 104   // NVIDIA's DLSS runtime, nvngx_dlss.dll, when the build had the SDK
 #define IDR_EDVR_OPENXR_LOADER 105
 #define IDR_EDVR_OPENXR_LICENSE 106
+#define IDR_EDVR_PROFILE 107
 
 // Native names: native_graphics, native_runtime and openxr_loader.
 bool payloadItem(const std::string& item, const void** data, size_t* size);

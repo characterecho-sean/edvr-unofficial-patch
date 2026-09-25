@@ -22,11 +22,14 @@
 #include "gpu_timing.h"
 #include "dxbc_engine_velocity.h"
 #include "engine_velocity_emit.h"
+#include "engine_velocity_families.h"
 #include "engine_velocity_state.h"
+#include "flat_compute_readback.h"
 #include "kinematic_eval_hook.h"
 #include "kinematic_eval_probe.h"
 #include "vscreen.h"
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 #include "../common/timing.h"
 
 namespace edvr {
@@ -60,40 +63,19 @@ std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 // instances a frame, 143416) with its only pixel shader ps_16940F576006BE65;
 // vs_889A5279E68F0672 with ps_B46E52A1E0B2F39C (the station) and
 // ps_EBA95E15B0A66102 -- each pair through the corpus identity harness
-// (40,960 texels, 0 mismatches; MRT6 8192 checked, 0 bad). Not keyable:
-// vs_DE54's ps_91F8937EDA723663 and ps_A6070F9DD1CFB601, whose input register
-// the family's SV_Position sits at holds another semantic (the patcher's
-// refusal; engine_velocity_test's --corpus candidates print it).
-struct Family {
-    uint64_t vs;
-    const char* name;
-    uint64_t ps[4];
-};
-constexpr Family kFamilies[] = {
-    {0xEB5234DB6ADB491Dull, "vs_EB5234DB6ADB491D", {0xCB9F297EFF264251ull, 0x9ABF60B4B51F2C1Full, 0x3434972DB5336AA4ull, 0}},
-    {0x5B4D8E894EEDA8B4ull, "vs_5B4D8E894EEDA8B4", {0x4375B72964F386CDull, 0, 0, 0}},
-    {0xBBE58E40FE88EC80ull, "vs_BBE58E40FE88EC80", {0xDB3E8D20CF53FBC0ull, 0, 0, 0}},
-    {0xDE545DC8EE4FBB87ull, "vs_DE545DC8EE4FBB87", {0xE46E3E4832B2FDB0ull, 0xCB429E043DBB2506ull, 0, 0}},
-    {0xAACFDCF2FB9AD809ull, "vs_AACFDCF2FB9AD809", {0xCF534B32F491561Aull, 0, 0, 0}},
-    {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0, 0, 0}},
-    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0, 0}},
-    {0x436193B352A2897Eull, "vs_436193B352A2897E", {0x16940F576006BE65ull, 0, 0, 0}},
-    {0x889A5279E68F0672ull, "vs_889A5279E68F0672", {0xB46E52A1E0B2F39Cull, 0xEBA95E15B0A66102ull, 0, 0}},
-};
-constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
+// (40,960 texels, 0 mismatches; MRT6 8192 checked, 0 bad). DE54/91F8 is now
+// flat-only: its SV_IsFrontFace occupies the register formerly assumed for
+// PS position. A separate rasterizer input passes the actual VS draw gate.
+// DE54/A607 remains unqualified and unkeyed.
+using engine_velocity_family::Family;
+using engine_velocity_family::kFamilies;
+using engine_velocity_family::kFamilyCount;
+using engine_velocity_family::familyForProfile;
+using engine_velocity_family::keyedPs;
 static_assert(kFamilyCount <= kMaxFamilies, "familyDraws holds every family");
-
-int familyOfVs(uint64_t hash) {
-    for (int i = 0; i < kFamilyCount; ++i) if (kFamilies[i].vs == hash) return i;
-    return -1;
-}
-bool keyedPs(int family, uint64_t hash) {
-    if (family < 0 || !hash) return false;
-    for (uint64_t h : kFamilies[family].ps) if (h == hash) return true;
-    return false;
-}
 bool anyKeyedPs(uint64_t hash) {
-    for (int i = 0; i < kFamilyCount; ++i) if (keyedPs(i, hash)) return true;
+    for (int i = 0; i < kFamilyCount; ++i)
+        if ((!kFamilies[i].flatOnly || runtimeFlatProfile()) && keyedPs(i, hash, runtimeFlatProfile())) return true;
     return false;
 }
 
@@ -121,6 +103,7 @@ struct FamilyState {
     std::string reason;                            // why it stood down (empty = live)
     std::unordered_map<ID3D11VertexShader*, Ptr<ID3D11VertexShader>> patchedVs;
     std::unordered_map<ID3D11PixelShader*, Ptr<ID3D11PixelShader>> patchedPs;
+    std::unordered_map<ID3D11PixelShader*, Ptr<ID3D11PixelShader>> guardedPs;
     std::unordered_map<ID3D11PixelShader*, std::string> psFailed;
     uint64_t binds = 0;                            // substitutions made (this window)
     uint64_t unkeyedPsDraws = 0;                   // bind events with a pixel shader outside the keyed set
@@ -134,6 +117,9 @@ struct Bound {
     ID3D11PixelShader* originalPs = nullptr;
     ID3D11PixelShader* patchedPs = nullptr;
     uint32_t psGen = 0;
+    Ptr<ID3D11ShaderResourceView> gameSrv3;
+    Ptr<ID3D11ShaderResourceView> guardSrv3;
+    uint32_t srv3Gen = 0;
     ID3D11VertexShader* originalVs = nullptr;
     ID3D11VertexShader* patchedVs = nullptr;
     uint32_t vsGen = 0;
@@ -189,6 +175,9 @@ struct Eye {
     Ptr<ID3D11Texture2D> slots;
     Ptr<ID3D11RenderTargetView> slotsRtv;
     Ptr<ID3D11ShaderResourceView> slotsSrv;
+    Ptr<ID3D11Texture2D> overlayBase;
+    Ptr<ID3D11ShaderResourceView> overlayBaseSrv;
+    bool overlayGroup = false;
     unsigned width = 0, height = 0;
     Ptr<ID3D11Buffer> pool;              // the snapshot copies
     Ptr<ID3D11ShaderResourceView> poolSrv;
@@ -198,6 +187,7 @@ struct Eye {
     UINT sceneBytes = 0;
     uint32_t frame = ~0u;                // the present frame this eye's data belongs to
     uint32_t rtvGen = 0, dsvGen = 0;     // the pass binding MRT6 was added to
+    bool bindingStale = false;           // an internal flat restore removed MRT6 without a game generation
     // The snapshot's sources, held (an equal pointer is then the same object),
     // and what they held: the view's element range, the watch epochs, the rows.
     Ptr<ID3D11ShaderResourceView> poolView;
@@ -280,6 +270,8 @@ struct DrawStats {
     // the largest pool (records) and view (elements) seen this window.
     uint64_t poolSnapshots = 0, poolSnapshotBytes = 0, poolRefreshBytes = 0, sceneSnapshots = 0, sceneSnapshotBytes = 0;
     uint64_t poolCapacity = 0, poolExposed = 0;
+    uint64_t overlayCopies = 0, overlayBytes = 0, overlayGuardedDraws = 0;
+    uint64_t overlayDeclinedState = 0, overlayDeclinedCreate = 0, overlayDeclinedShader = 0;
     const char* blendRefusedWhy = nullptr;
     uint64_t viewsAsked = 0, viewsGiven = 0;
     // Why a view request was refused, first failing test: the emit side stood
@@ -516,6 +508,74 @@ ID3D11PixelShader* patchedPsFor(ID3D11DeviceContext* ctx, int f, ID3D11PixelShad
     return patched.Get();
 }
 
+ID3D11PixelShader* guardedOverlayPsFor(ID3D11DeviceContext* ctx, int f, ID3D11PixelShader* ps) {
+    FamilyState& s = g_families[f];
+    const auto found = s.guardedPs.find(ps);
+    if (found != s.guardedPs.end()) return found->second.Get();
+    Ptr<ID3D11PixelShader> patched;
+    const auto info = g_ps.find(ps);
+    if (info != g_ps.end() && !info->second.linked) {
+        std::vector<BYTE> out;
+        std::string why;
+        if (engineVelocityPatchPs(info->second.bytes.data(), info->second.bytes.size(), s.inputs, out, why, true)) {
+            Ptr<ID3D11Device> dev;
+            ctx->GetDevice(&dev);
+            t_creating = true;
+            const HRESULT hr = dev->CreatePixelShader(out.data(), out.size(), nullptr, &patched);
+            t_creating = false;
+            if (FAILED(hr)) patched.Reset();
+        }
+    }
+    s.guardedPs.emplace(ps, patched);
+    return patched.Get();
+}
+
+bool overlayDepthState(ID3D11DeviceContext* ctx) {
+    Ptr<ID3D11DepthStencilState> state;
+    UINT reference = 0;
+    ctx->OMGetDepthStencilState(&state, &reference);
+    if (!state) return false;
+    D3D11_DEPTH_STENCIL_DESC d{};
+    state->GetDesc(&d);
+    // Stencil testing/writes retain the game's state. MRT6 receives only the
+    // fragments that passed it, while depth remains unchanged.
+    return d.DepthEnable && d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ZERO &&
+           d.DepthFunc == D3D11_COMPARISON_GREATER_EQUAL;
+}
+
+bool snapshotOverlayBase(ID3D11DeviceContext* ctx, Eye& e) {
+    if (!e.slots || !e.slotsRtv || !e.width || !e.height) return false;
+    if (!e.overlayBase) {
+        D3D11_TEXTURE2D_DESC d{};
+        e.slots->GetDesc(&d);
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        d.CPUAccessFlags = 0;
+        d.MiscFlags = 0;
+        Ptr<ID3D11Device> dev;
+        ctx->GetDevice(&dev);
+        if (FAILED(dev->CreateTexture2D(&d, nullptr, &e.overlayBase)) ||
+            FAILED(dev->CreateShaderResourceView(e.overlayBase.Get(), nullptr, &e.overlayBaseSrv))) {
+            e.overlayBase.Reset(); e.overlayBaseSrv.Reset();
+            return false;
+        }
+    }
+    // FlatRuntimeDrawScope restored the game's MRTs after the prior draw. Do
+    // not copy a texture still bound for output or while the private SRV is
+    // live. A later bindTarget reattaches MRT6 for this draw.
+    ID3D11RenderTargetView* rt[8] = {};
+    ctx->OMGetRenderTargets(8, rt, nullptr);
+    std::array<Ptr<ID3D11RenderTargetView>, 8> held;
+    for (unsigned i = 0; i < 8; ++i) held[i].Attach(rt[i]);
+    for (auto* view : rt) if (view == e.slotsRtv.Get()) return false;
+    Ptr<ID3D11ShaderResourceView> boundSrv;
+    ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &boundSrv);
+    if (boundSrv.Get() == e.overlayBaseSrv.Get()) return false;
+    ctx->CopyResource(e.overlayBase.Get(), e.slots.Get());
+    ++g_draw.overlayCopies;
+    g_draw.overlayBytes += uint64_t(e.width) * e.height * 8u;
+    return true;
+}
+
 // The derived blend state for the game's current one (null = the default).
 ID3D11BlendState* derivedBlendFor(ID3D11DeviceContext* ctx, ID3D11BlendState* game, const char** refused) {
     for (const auto& b : g_blends)
@@ -534,6 +594,16 @@ ID3D11BlendState* derivedBlendFor(ID3D11DeviceContext* ctx, ID3D11BlendState* ga
 // Put the game's own state back where EDVR's is still bound (the game has not
 // rebound since: the generation says so).
 void restore(ID3D11DeviceContext* ctx) {
+    if (g_bound.guardSrv3 && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
+        Ptr<ID3D11ShaderResourceView> actual;
+        ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
+        if (actual.Get() == g_bound.guardSrv3.Get()) {
+            ID3D11ShaderResourceView* game = g_bound.gameSrv3.Get();
+            FlatComputeInternalScope internal;
+            ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &game);
+            ++g_draw.restores;
+        }
+    }
     if (g_bound.patchedPs && bindingGeneration(BindSlot::Ps) == g_bound.psGen) {
         vScreenPSSetShaderRaw(ctx, g_bound.originalPs, nullptr, 0);
         ++g_draw.restores;
@@ -587,6 +657,7 @@ bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* dep
     const void* wasDepth = e.depth.Get();
     const unsigned wasW = e.width, wasH = e.height;
     e.slots.Reset(); e.slotsRtv.Reset(); e.slotsSrv.Reset();
+    e.overlayBase.Reset(); e.overlayBaseSrv.Reset(); e.overlayGroup = false;
     e.depth = depth; e.width = dd.Width; e.height = dd.Height;
     D3D11_TEXTURE2D_DESC d{};
     d.Width = dd.Width; d.Height = dd.Height; d.MipLevels = 1; d.ArraySize = 1; d.SampleDesc.Count = 1;
@@ -872,7 +943,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     const uint64_t psHash = bindingShaderHash(BindSlot::Ps);
     int eye = -1, target = -1;
     const bool eyePass = rtv0Eye && dsv && depthProbeCurrentSceneEyeOf(dsv, &eye, &target) && (eye == 0 || eye == 1);
-    const int f = familyOfVs(vsHash);
+    const int f = familyForProfile(vsHash, runtimeFlatProfile());
     // On foot no pool draw targets an eye: the source pass is a pool family
     // draw into the depth screen_motion named this frame or the last two.
     bool sourcePass = false;
@@ -882,6 +953,12 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         sourcePass = depthRes.Get() == static_cast<ID3D11Resource*>(g_sourceDepth.Get());
         if (sourcePass) eye = kEngineVelocitySourceEye;
     }
+    const bool overlayPair = sourcePass && runtimeFlatProfile() &&
+        vsHash == 0xBBE58E40FE88EC80ull && psHash == 0xDB3E8D20CF53FBC0ull;
+    // A different pool producer can change MRT6's substrate. Other scene
+    // draws cannot write our private target; their depth writes remain guarded
+    // by the consumer's exact DSV comparison.
+    if (sourcePass && !overlayPair) g_eyes[kEngineVelocitySourceEye].overlayGroup = false;
     auto vsInfo = vs ? g_vs.find(vs) : g_vs.end();
     if (!g_emitLive.load(std::memory_order_acquire) || !(eyePass || sourcePass) || f < 0 || vsInfo == g_vs.end() ||
         vsInfo->second.family != f) { restore(ctx); return; }
@@ -897,7 +974,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     // vertex patch where the family needs one. Nothing -- slot target, clear,
     // snapshot, MRT6 -- is prepared for a draw that cannot export ownership;
     // a declined draw puts the game's state back, as before.
-    if (!keyedPs(f, psHash)) {
+    if (!keyedPs(f, psHash, runtimeFlatProfile())) {
         if (!anyKeyedPs(psHash)) { ++fam.unkeyedPsDraws; fam.unkeyedPsHash = psHash; }
         restore(ctx);
         return;
@@ -914,7 +991,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (sourcePass && !sourceCameraHolds(ctx, f, frame)) { restore(ctx); return; }
     const bool newFrame = e.frame != frame;
     Ptr<ID3D11Texture2D> depthTex;
-    if (newFrame || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
+    if (newFrame || e.bindingStale || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
         Ptr<ID3D11Resource> depthRes;
         dsv->GetResource(&depthRes);
         if (!depthRes || FAILED(depthRes.As(&depthTex))) { restore(ctx); return; }
@@ -926,7 +1003,9 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         if (sourcePass) ++g_draw.sourceFrames;
         e.frame = frame;
         e.bound = e.boundCounted = e.written = e.invalid = e.consumed = false;
+        e.overlayGroup = false;
         e.rtvGen = e.dsvGen = 0;
+        e.bindingStale = false;
         const float cleared[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
         const int clearTimer = beginCapture(ctx, kCaptureClear);
         {
@@ -941,26 +1020,47 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         endCapture(ctx, snapTimer);
     }
     if (e.invalid) { restore(ctx); return; }
-    if (e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
+    // Verify the pool/scene source before copying the substrate. A replaced
+    // t33 record makes the whole eye-frame invalid, including its overlay.
+    if (!newFrame) {
+        checkSources(ctx, e, eye);
+        if (e.invalid) { e.overlayGroup = false; restore(ctx); return; }
+    }
+    bool guardOverlay = false;
+    if (overlayPair) {
+        if (!overlayDepthState(ctx)) {
+            e.overlayGroup = false;
+            ++g_draw.overlayDeclinedState;
+        } else {
+            ID3D11PixelShader* guarded = guardedOverlayPsFor(ctx, f, ps);
+            if (!guarded) {
+                e.overlayGroup = false;
+                ++g_draw.overlayDeclinedShader;
+            } else if ((e.overlayGroup && e.overlayBaseSrv) || snapshotOverlayBase(ctx, e)) {
+                e.overlayGroup = true;
+                usePs = guarded;
+                guardOverlay = true;
+            } else {
+                e.overlayGroup = false;
+                ++g_draw.overlayDeclinedCreate;
+            }
+        }
+    }
+    if (e.bindingStale || e.rtvGen != cache.rtv || e.dsvGen != cache.dsv) {
         // Another pass binding of the same eye-frame must draw into the same
         // depth the slot target was made for.
         if (!newFrame && depthTex.Get() != e.depth.Get()) { invalidate(e, kDepthChanged); restore(ctx); return; }
         e.rtvGen = cache.rtv;
         e.dsvGen = cache.dsv;
         e.bound = bindTarget(ctx, e, dsv);
+        e.bindingStale = false;
         if (e.bound && !e.boundCounted) {
             e.boundCounted = true;
             ++g_draw.eyeFramesBound;
             if (sourcePass) ++g_draw.sourceFramesBound;
         }
     }
-    if (!e.bound) { restore(ctx); return; }
-    // A draw that will write MRT6 after the eye-frame's first must read what
-    // the snapshot holds (the first one's sources ARE the snapshot).
-    if (!newFrame) {
-        checkSources(ctx, e, eye);
-        if (e.invalid) { restore(ctx); return; }
-    }
+    if (!e.bound) { e.overlayGroup = false; restore(ctx); return; }
     // The blend state MRT6 must not inherit: the derived one, unless it is
     // still bound (the game has not set another since).
     if (!(g_bound.derivedBlend && bindingGeneration(BindSlot::Blend) == g_bound.blendGen)) {
@@ -990,13 +1090,42 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     // -- a cb1 re-map, a pool append, a blend change -- finds ours bound when
     // the game has set nothing in that stage since (same original, same
     // binding generation). Source checks and the blend stay independent.
-    const bool psInstalled = g_bound.patchedPs == usePs && g_bound.originalPs == ps &&
+    bool psInstalled = g_bound.patchedPs == usePs && g_bound.originalPs == ps &&
                              bindingGeneration(BindSlot::Ps) == g_bound.psGen;
     const bool vsInstalled = g_bound.patchedVs == useVs && g_bound.originalVs == vs &&
                              bindingGeneration(BindSlot::Vs) == g_bound.vsGen;
     if (useVs != vs) {
         if (vsInstalled) ++g_draw.settersSkipped;
         else { vScreenVSSetShaderRaw(ctx, useVs, nullptr, 0); ++g_draw.settersIssued; }
+    }
+    if (guardOverlay) {
+        Ptr<ID3D11ShaderResourceView> gameSrv;
+        ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &gameSrv);
+        ID3D11ShaderResourceView* privateSrv = e.overlayBaseSrv.Get();
+        {
+            FlatComputeInternalScope internal;
+            ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &privateSrv);
+        }
+        Ptr<ID3D11ShaderResourceView> actual;
+        ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
+        if (actual.Get() != privateSrv) {
+            e.overlayGroup = false;
+            ++g_draw.overlayDeclinedCreate;
+            ID3D11ShaderResourceView* original = gameSrv.Get();
+            {
+                FlatComputeInternalScope internal;
+                ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &original);
+            }
+            usePs = patchedPsFor(ctx, f, ps);
+            psInstalled = false;
+        } else {
+            g_bound.gameSrv3 = gameSrv;
+            g_bound.guardSrv3 = e.overlayBaseSrv;
+            g_bound.srv3Gen = bindingGeneration(BindSlot::PsSrv3);
+            if (++g_draw.overlayGuardedDraws == 1)
+                Log::get().note("engine motion: flat overlay guard active at frame %u: exact BBE/DB3E, %ux%u base, "
+                                "private PS t3, original depth/stencil state retained.", frame, e.width, e.height);
+        }
     }
     if (psInstalled) ++g_draw.settersSkipped;
     else { vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0); ++g_draw.settersIssued; }
@@ -1193,6 +1322,12 @@ void summaryLocked(uint64_t now) {
                         u(g_draw.sourceNamingsUnseen), u(g_draw.sourceHeld), u(declinedAll),
                         u(g_draw.sourceDeclineFrames), declined.c_str(), other, pixels);
     }
+    if (g_draw.overlayCopies || g_draw.overlayGuardedDraws || g_draw.overlayDeclinedState ||
+        g_draw.overlayDeclinedCreate || g_draw.overlayDeclinedShader)
+        Log::get().note("engine motion: flat overlay guard: copies %llu (%.1f MB), guarded draws %llu, "
+                        "declined state %llu, resource %llu, shader %llu.",
+                        u(g_draw.overlayCopies), double(g_draw.overlayBytes) / 1e6, u(g_draw.overlayGuardedDraws),
+                        u(g_draw.overlayDeclinedState), u(g_draw.overlayDeclinedCreate), u(g_draw.overlayDeclinedShader));
     for (int f = 0; f < kFamilyCount; ++f) {
         FamilyState& s = g_families[f];
         std::string patched, failed;
@@ -1229,7 +1364,7 @@ void clearLocked() {
     for (auto& w : watch) w.store(nullptr);
     for (auto& w : g_watchInfo) w = WatchInfo{};
     for (auto& s : g_families) {
-        s.patchedVs.clear(); s.patchedPs.clear(); s.psFailed.clear();
+        s.patchedVs.clear(); s.patchedPs.clear(); s.guardedPs.clear(); s.psFailed.clear();
         s.derived = s.valid = false; s.reason.clear(); s.binds = 0; s.unkeyedPsDraws = 0;
     }
     for (auto& d : familyDraws) d = 0;
@@ -1310,7 +1445,7 @@ void engineVelocityShutdown() {
 
 void engineVelocityRememberVs(ID3D11VertexShader* shader, uint64_t hash, const void* bytecode, size_t bytes, bool linked) {
     if (t_creating || !shader || !bytecode || !bytes || bytes > 1024u * 1024u) return;
-    const int f = familyOfVs(hash);
+    const int f = familyForProfile(hash, runtimeFlatProfile());
     if (f < 0) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     // One entry per shader OBJECT: the game may create a keyed hash many times.
@@ -1335,6 +1470,16 @@ void engineVelocityRememberPs(ID3D11PixelShader* shader, uint64_t hash, const vo
     g_ps.emplace(shader, std::move(info));
 }
 
+void engineVelocityAfterFlatDraw(ID3D11DeviceContext* ctx) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    restore(ctx);
+    // FlatRuntimeDrawScope next restores the game's MRTs under an internal
+    // guard, so the binding shadow's generations do not change. The source
+    // eye must reattach MRT6 on the next eligible draw of this same pass.
+    g_eyes[kEngineVelocitySourceEye].bindingStale = true;
+    cache = DrawCache{};
+}
+
 namespace engine_velocity_detail {
 void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!ctx) return;
@@ -1349,7 +1494,8 @@ void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     cache.eye = rtv0Eye;
     // The common case -- not a pool family's vertex shader, nothing of ours
     // bound -- costs no lock (terrain, the interface, every other pass).
-    if (!g_anyBound.load(std::memory_order_acquire) && familyOfVs(bindingShaderHash(BindSlot::Vs)) < 0) {
+    if (!g_anyBound.load(std::memory_order_acquire) &&
+        familyForProfile(bindingShaderHash(BindSlot::Vs), runtimeFlatProfile()) < 0) {
         cache.family = -1;
         ++g_draw.quickPaths;
         return;
@@ -1419,6 +1565,17 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     // Leave nothing of EDVR's bound across the frame: the binding shadow's
     // once-a-frame generation bump would otherwise hide whether it still is.
     if (ctx && (g_bound.patchedPs || g_bound.patchedVs || g_bound.derivedBlend)) {
+        if (g_bound.guardSrv3) {
+            Ptr<ID3D11ShaderResourceView> actual;
+            ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
+            if (actual.Get() == g_bound.guardSrv3.Get() &&
+                bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
+                ID3D11ShaderResourceView* game = g_bound.gameSrv3.Get();
+                FlatComputeInternalScope internal;
+                ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &game);
+                ++g_draw.restores;
+            }
+        }
         Ptr<ID3D11PixelShader> ps;
         ctx->PSGetShader(&ps, nullptr, nullptr);
         if (g_bound.patchedPs && ps.Get() == g_bound.patchedPs) { vScreenPSSetShaderRaw(ctx, g_bound.originalPs, nullptr, 0); ++g_draw.restores; }
@@ -1526,7 +1683,12 @@ bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
     return any || out->untimed || out->invalid;
 }
 
-bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept { return familyOfVs(vsHash) >= 0; }
+bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept {
+    return familyForProfile(vsHash, runtimeFlatProfile()) >= 0;
+}
+bool engineVelocityPoolFamilyPair(uint64_t vsHash, uint64_t psHash) noexcept {
+    return keyedPs(familyForProfile(vsHash, runtimeFlatProfile()), psHash, runtimeFlatProfile());
+}
 
 void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneConstants,
                               EngineVelocitySourceSignal signal) {

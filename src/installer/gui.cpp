@@ -497,8 +497,10 @@ void paintWindow(HWND window) {
     RECT title{dp(kMargin), dp(18), dp(400), dp(50)};
     ui::drawText(dc, L"EDVR", title, f.title, t.text, DT_LEFT | DT_SINGLELINE);
 
-    const std::wstring subtitle =
-        fromUtf8(payloadInfo().version) + L"  \x00b7  unofficial patch for Elite Dangerous in VR";
+    const std::wstring subtitle = fromUtf8(payloadInfo().version) +
+        (payloadInfo().profile == "flat"
+             ? L"  \x00b7  experimental flat temporal build; zero-jitter testing"
+             : L"  \x00b7  unofficial patch for Elite Dangerous in VR");
     RECT sub{dp(kMargin), dp(52), dp(kClientWidth - kMargin), dp(70)};
     ui::drawText(dc, subtitle, sub, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -708,6 +710,15 @@ void runAction(AppArgs::Act action) {
     }
 
     const PayloadInfo& payload = payloadInfo();
+    const std::string existingProfile = installedProfile(g.survey);
+    if (canMirror && !existingProfile.empty() && existingProfile != payload.profile) {
+        const std::wstring prompt = L"This folder has the " + fromUtf8(existingProfile) +
+            L" edition. Convert explicitly to " + fromUtf8(payload.profile) +
+            L"? The plan will show the files being changed, and conversion stops if the original VR library cannot be proved.";
+        if (MessageBoxW(g.window, prompt.c_str(), L"EDVR edition conversion",
+                        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+        args.convertProfile = true;
+    }
     const Options options = optionsFor(args, action == AppArgs::Act::Repair);
     const Plan plan = action == AppArgs::Act::Uninstall
                           ? planUninstall(g.survey, options)
@@ -786,7 +797,7 @@ void runAction(AppArgs::Act action) {
     } else {
         text += "\r\n" + result.error + "\r\n";
         if (result.rolledBack) {
-            text += "Everything this run had changed was put back, so the folder is as it was.\r\n";
+            text += "Installed files and metadata were restored; recovery backups were kept.\r\n";
         }
     }
     setReport(text);

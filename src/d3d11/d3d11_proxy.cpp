@@ -18,6 +18,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "../common/d3d11_device_identity.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
@@ -276,6 +277,10 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().open(cfg.logDir(), L"gfx");
     edvr::Log::get().note("edvr d3d11 proxy attached; module dir %S",
                           g_moduleDir->c_str());
+    edvr::Log::get().note("installation profile: %s; %s", edvr::runtimeProfileName(),
+        edvr::runtimeFlatProfile() ? "experimental mono temporal adapter; qualified projection jitter; stereo and unrelated fixes suppressed" :
+        edvr::runtimeFeaturesAllowed() ? "VR configuration retained" :
+        "invalid edvr_profile.ini; fixes disabled, proxy chaining retained; repair the installation");
     edvr::oculusRouteReport();
 
     const std::string build = edvr::gameBuildVersion();

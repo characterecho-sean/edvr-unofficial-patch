@@ -7,6 +7,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "../common/intro_mode.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
@@ -184,7 +185,8 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
 
 void scrimConfigure(Config& cfg) {
     const bool was = detail::g_scrimOn;
-    const std::string m = cfg.getString("fix.loading_dim", "screen");
+    const std::string m = runtimeVrProfile() ?
+        cfg.getString("fix.loading_dim", "screen") : "stock";
     const LoadingDimMode dm = loadingDimParse(m);
     if (!dm.recognised) {
         Log::get().note("loading_dim \"%s\" is not screen or stock; running "

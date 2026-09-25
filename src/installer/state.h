@@ -23,6 +23,9 @@ struct InstallState {
 
     std::string  edvrVersion;   // the EDVR build installed
     std::string  installedUtc;  // when, ISO-8601 Z
+    std::string  profile = "vr"; // absent in legacy records means VR
+    std::string  descriptorSha;
+    std::string  components; // installed component inventory, comma separated
 
     // Which Openvr folder was used, RELATIVE to the game folder (Openvr\win64
     // or Openvr). Relative because the reader trims a value at whitespace

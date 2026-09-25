@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "log.h"
+#include "runtime_profile.h"
 
 namespace edvr {
 
@@ -94,6 +95,7 @@ std::wstring defaultLogDirectory() {
 }  // namespace
 
 void Config::init(const std::wstring& moduleDir) {
+    runtimeProfileInitialize(moduleDir, executableDirectory());
     if (!m_impl) m_impl = new Impl();
 
     const std::wstring candidates[] = {
@@ -371,6 +373,8 @@ bool Config::reloadIfChanged() {
 }
 
 std::string Config::getString(const char* key, const char* def) const {
+    if (!runtimeProfileAllowsKey(key))
+        return key && std::strncmp(key, "hotkey.", 7) == 0 ? "" : "off";
     if (!m_impl) return def ? def : "";
     // The audit's findings wait here for the log: the first parse runs before
     // Log::open, and the first config read after it opens is soon enough.
@@ -380,7 +384,14 @@ std::string Config::getString(const char* key, const char* def) const {
     return std::string(def ? def : "");
 }
 
+std::string Config::requestedTemporalMode() const {
+    if (!m_impl) return "off";
+    const auto it = m_impl->values.find("fix.temporal_aa");
+    return it == m_impl->values.end() ? "off" : it->second;
+}
+
 bool Config::getBool(const char* key, bool def) const {
+    if (!runtimeProfileAllowsKey(key)) return false;
     std::string v = getString(key, "");
     if (v.empty()) return def;
     for (char& c : v) {
@@ -431,6 +442,7 @@ static bool wholeValueParsed(const char* s, const char* end) {
 }
 
 int Config::getInt(const char* key, int def) const {
+    if (!runtimeProfileAllowsKey(key)) return 0;
     const std::string v = getString(key, "");
     if (v.empty()) return def;
     const char* s = v.c_str();
@@ -446,6 +458,7 @@ int Config::getInt(const char* key, int def) const {
 }
 
 float Config::getFloat(const char* key, float def) const {
+    if (!runtimeProfileAllowsKey(key)) return 0.0f;
     const std::string v = getString(key, "");
     if (v.empty()) return def;
     // A value that does not parse reads 0.0 silently, and 0.0 is a legitimate
@@ -476,6 +489,7 @@ float Config::getFloat(const char* key, float def) const {
 // offset clamps: a refused value silently becomes a default that is nothing
 // like what was asked for, where a clamped one is the nearest thing that works.
 int Config::getIntInRange(const char* key, int def, int lo, int hi) const {
+    if (!runtimeProfileAllowsKey(key)) return 0;
     const std::string v = getString(key, "");
     if (v.empty()) return def;
     const char* s = v.c_str();

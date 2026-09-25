@@ -193,6 +193,13 @@ bool SettingsModel::load(const std::wstring& gameDir) {
 void SettingsModel::refreshRows() {
     m_rows.clear();
     for (const SettingDef& def : settingDefs()) {
+#ifdef EDVR_INSTALLER_FLAT
+        const std::string key = def.key;
+        const std::string section = def.section;
+        if (!(section == "advanced" && key == "real_dll") &&
+            !(section == "hotkey" && key == "dump_draws") &&
+            !(section == "log" && key == "enabled")) continue;
+#endif
         SettingRow row;
         row.def = &def;
         row.choices = splitChoices(def.choices);

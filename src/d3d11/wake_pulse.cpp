@@ -10,6 +10,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "binding_shadow.h"
 #include "../common/log.h"
 
@@ -310,7 +311,8 @@ bool ringDecide(ID3D11DeviceContext* ctx, float* loOut, float* hiOut) {
 
 void wakePulseConfigure(Config& cfg) {
     const bool was = detail::g_wakePulseOff;
-    const std::string m = cfg.getString("fix.wake_pulse", "off");
+    const std::string m = runtimeVrProfile() ?
+        cfg.getString("fix.wake_pulse", "off") : "stock";
     if (m == "stock") {
         detail::g_wakePulseOff = false;
     } else if (m == "off") {

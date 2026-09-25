@@ -1,5 +1,6 @@
 #include "temporal_pass.h"
 #include "temporal_history.h"
+#include "../common/runtime_profile.h"
 #include "draw_census.h"
 
 #include <algorithm>  // std::sort, the price report's median/p95
@@ -6088,7 +6089,8 @@ void temporalPassConfigure(Config& cfg) {
     // pool families' own draws recording slot and depth, and the compose
     // taking the record's exact motion there. It arms and disarms with the
     // mode, live; a hook that cannot install stands it down whole, logged.
-    const bool engineMotionOn = detail::g_temporalPassWantedFssChrome;
+    const bool engineMotionOn = runtimeFlatProfile()
+        ? temporalModeEnabled(cfg.requestedTemporalMode()) : detail::g_temporalPassWantedFssChrome;
     celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.terrain_motion", true));
     // The emit holds the shared eval hooks itself; the emit's census is
     // diagnostic-only (applyEngineMotionDiagnostics, below the debug mode's
@@ -6257,13 +6259,7 @@ void temporalPassConfigure(Config& cfg) {
     // (L and M are never applied under DLAA: five times the price). Live: a
     // change recreates the features.
     const std::string model = cfg.getString("fix.temporal_aa_model", "k");
-    unsigned preset = 11, presetFov = 11;
-    if (_stricmp(model.c_str(), "quality") == 0 || _stricmp(model.c_str(), "k") == 0) { preset = 11; presetFov = 11; }
-    else if (_stricmp(model.c_str(), "steady") == 0) { preset = 11; presetFov = 12; }
-    else if (_stricmp(model.c_str(), "auto") == 0 || _stricmp(model.c_str(), "default") == 0) { preset = 0; presetFov = 0; }
-    else if (_stricmp(model.c_str(), "responsive") == 0 || _stricmp(model.c_str(), "j") == 0) { preset = 10; presetFov = 10; }
-    else if (_stricmp(model.c_str(), "l") == 0) { preset = 12; presetFov = 12; }
-    else if (_stricmp(model.c_str(), "m") == 0) { preset = 13; presetFov = 13; }
+    const auto preset = temporalPresetFor(model);
     // The letters stop here, and deliberately. NVSDK_NGX_DLSS_Hint_Render_
     // Preset (nvsdk_ngx_defs.h, DLSS SDK 310.4) has no A, B, C or D at all
     // -- they were removed, with the header saying to use J or K instead --
@@ -6271,7 +6267,7 @@ void temporalPassConfigure(Config& cfg) {
     // asked for. E and F are deprecated; this UI exposes J, K, L and M.
     // A tidier-looking letter range would offer four presets that no
     // longer exist.
-    else if (!model.empty()) {
+    if (!preset.known) {
         // Never silently fall through to the default: this branch has
         // been bitten four times by a setting whose effective state was
         // not printed.
@@ -6284,7 +6280,9 @@ void temporalPassConfigure(Config& cfg) {
                 model.c_str());
         }
     }
-    dlaaSetPreset(preset, presetFov);
+    // Flat owns model changes at its Present boundary, together with history
+    // reset and preflight. A reload must not change its feature mid-frame.
+    if (!runtimeFlatProfile()) dlaaSetPreset(preset.full, preset.fovea);
     // A config reload re-arms the fovea after a failure stood it down (F3):
     // the user may have changed the width, or the transient may be gone.
     g_foveaFailed = false;

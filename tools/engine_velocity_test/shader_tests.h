@@ -116,6 +116,25 @@ PsOut main(PsIn i) {
     return o;
 }
 )HLSL";
+// A PS can use the VS position's register for a rasterizer-generated input.
+// The patch must add its own SV_Position in a free PS register, preserving the
+// original front-face value and all four colour outputs.
+constexpr char kPsFrontFace[] = R"HLSL(
+struct PsIn {
+    nointerpolation uint id : __USER_VERTEX_FACEINVARIANT;
+    float3 n : __USER_VERTEX_M_LIGHTINGNORMAL;
+    float3 t : __USER_VERTEX_M_LIGHTINGTANGENT;
+    float2 uv : __USER_VERTEX_M_TEXCOORD;
+    bool front : SV_IsFrontFace;
+};
+struct PsOut { float4 a : SV_Target0; float4 b : SV_Target1; float4 c : SV_Target2; float4 d : SV_Target3; };
+PsOut main(PsIn i) {
+    PsOut o;
+    o.a = float4(i.n, i.front ? 1 : 0); o.b = float4(i.t, i.id & 1);
+    o.c = float4(i.uv, 0, 1); o.d = 0;
+    return o;
+}
+)HLSL";
 
 constexpr char kVsC[] = R"HLSL(
 struct VsOut { float2 uv : __USER_VERTEX_M_TEXCOORD; float4 p : SV_POSITION; };
@@ -218,6 +237,18 @@ inline void patchStaticChecks(const Harness& h, const Family& f, const std::vect
             target6 = true;
     }
     h.check(target6, "reflection shows SV_Target6.xy float");
+    if (std::strstr(f.name, "FACEINVARIANT.x + SV_Position")) {
+        std::vector<BYTE> guarded;
+        h.check(edvr::engineVelocityPatchPs(ps.data(), ps.size(), in, guarded, why, true), why.c_str());
+        const std::string g = disassemble(guarded);
+        h.check(g.find("dcl_resource_texture2d") != std::string::npos &&
+                g.find("t3") != std::string::npos && g.find("ld_indexable") != std::string::npos &&
+                g.find("movc o6.y") != std::string::npos,
+                "guarded overlay PS reads snapshot and chooses depth per pixel");
+        ComPtr<ID3D11PixelShader> warpGuarded;
+        h.check(SUCCEEDED(h.device->CreatePixelShader(guarded.data(), guarded.size(), nullptr, &warpGuarded)),
+                "WARP accepts guarded overlay PS");
+    }
     // Idempotence guard: patching the patched PS again must decline, not stack.
     std::vector<BYTE> twice;
     h.check(!edvr::engineVelocityPatchPs(patchedPs.data(), patchedPs.size(), in, twice, why), "a patched PS is not patched twice");
@@ -712,6 +743,7 @@ inline void run(const Harness& h) {
         {"A (DATAID.y, like vs_EB52/ps_CB9F)", kVsA, kPsA, 0, 1, 4, false},
         {"B (FACEINVARIANT.x + SV_Position, like vs_BBE5/ps_DB3E)", kVsB, kPsB, 0, 0, 4, false},
         {"C (UV-only, like vs_5B4D/ps_4375)", kVsC, kPsC, 2, 0, 1, true},
+        {"D (front face at VS position register, like vs_DE54/ps_91F8)", kVsB, kPsFrontFace, 0, 0, 4, false},
     };
     for (const auto& f : families) {
         const auto vsBlob = compile(h, std::string(kVsCommon) + f.vs, "vs_5_0");
@@ -723,6 +755,13 @@ inline void run(const Harness& h) {
         edvr::EngineVelocityInputs in;
         std::vector<BYTE> patchedVs, patchedPs;
         patchStaticChecks(h, f, vs, ps, in, patchedVs, patchedPs);
+        if (&f == &families[3]) {
+            const std::string text = disassemble(patchedPs);
+            h.check(text.find("v4.x, is_front_face") != std::string::npos &&
+                    text.find("v5.z, position") != std::string::npos &&
+                    text.find("mov o6.y, v5.z") != std::string::npos,
+                    "front-face stays at v4 while MRT6 depth reads new SV_Position v5");
+        }
         drawChecks(h, f, vs, ps, patchedVs, patchedPs);
         // Family A is the shape the flight substituted (vs_EB52 -> ps_3434).
         if (&f == &families[0]) blendChecks(h, vs, ps, patchedPs);

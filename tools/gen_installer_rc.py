@@ -35,6 +35,7 @@ IDR_INI = 103
 IDR_NGX = 104   # NVIDIA's DLSS runtime, when the build had the SDK
 IDR_LOADER = 105
 IDR_LOADER_NOTICE = 106
+IDR_PROFILE = 107
 RT_MANIFEST = 24
 
 
@@ -263,6 +264,8 @@ def main(argv=None):
     ap.add_argument('--build')
     ap.add_argument('--out')
     ap.add_argument('--version', default='unknown')
+    ap.add_argument('--profile', choices=('vr', 'flat'), default='vr')
+    ap.add_argument('--ini', help='profile-specific shipped INI (default: root edvr.ini)')
     ap.add_argument('--version-rc', choices=('graphics', 'runtime'),
                     help='write a standalone VERSIONINFO .rc for this DLL instead of '
                          'the installer payload')
@@ -282,13 +285,17 @@ def main(argv=None):
     runtime = os.path.join(args.build, 'edvr_openxr_runtime.dll')
     loader = os.path.join(args.build, 'openxr_loader.dll')
     notice = os.path.join(args.build, 'OPENXR-LOADER-LICENSE.txt')
-    ini = os.path.join(args.root, 'edvr.ini')
+    ini = args.ini or (os.path.join(args.build, 'edvr-flat.ini') if args.profile == 'flat'
+                       else os.path.join(args.root, 'edvr.ini'))
     ngx = os.path.join(args.build, 'nvngx_dlss.dll')
     manifest = os.path.join(args.root, 'src', 'installer', 'installer.manifest')
 
-    required = (("native graphics", d3d11), ("native runtime", runtime),
-                ("OpenXR loader", loader), ("OpenXR loader notice", notice),
-                ("INI", ini))
+    required = [("native graphics", d3d11)]
+    if args.profile != 'flat' or args.ini:
+        required.append(("INI", ini))
+    if args.profile == 'vr':
+        required += [("native runtime", runtime), ("OpenXR loader", loader),
+                     ("OpenXR loader notice", notice)]
     missing = [(label, path) for label, path in required if not os.path.isfile(path)]
     if missing:
         for label, path in missing:
@@ -297,9 +304,10 @@ def main(argv=None):
     try:
         import openxr_pe
         openxr_pe.native_graphics_exports(d3d11)
-        openxr_pe.native_exports(runtime)
-        from fetch_openxr_loader import verify
-        verify(args.build)
+        if args.profile == 'vr':
+            openxr_pe.native_exports(runtime)
+            from fetch_openxr_loader import verify
+            verify(args.build)
     except (ImportError, OSError, ValueError) as exc:
         print('gen_installer_rc: ERROR: native payload validation failed: %s' % exc)
         return 1
@@ -319,12 +327,38 @@ def main(argv=None):
         return 1
 
     if args.dry_run:
-        print('gen_installer_rc: dry run; validated native resources and wrote nothing')
+        print('gen_installer_rc: dry run; validated %s resources and wrote nothing' % args.profile)
         return 0
     os.makedirs(args.out, exist_ok=True)
+    if args.profile == 'flat' and not args.ini:
+        with open(ini, 'wb') as f:
+            f.write(b'# Experimental flat temporal profile: visual qualification in progress.\r\n'
+                    b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 and DLSS model presets.\r\n'
+                    b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr. Game SS controls render scale.\r\n'
+                    b'# Press F10 in the cockpit to collect one bounded flat scene capture.\r\n'
+                    b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\n\r\n'
+                    b'[hotkey]\r\nmenu = F8\r\ndump_draws = F10\r\n\r\n'
+                    b'[log]\r\nenabled = 1\r\n\r\n'
+                    b'[advanced]\r\nreal_dll =\r\n')
+    if args.profile == 'flat':
+        with open(os.path.join(args.build, 'edvr-flat-README.txt'), 'wb') as f:
+            f.write(b'EDVR flat temporal AA qualification build\r\n\r\n'
+                    b'Run edvr-flat-installer.exe. This edition installs d3d11.dll, edvr.ini,\r\n'
+                    b'and edvr_profile.ini beside EliteDangerous64.exe. No VR runtime is installed.\r\n'
+                    b'Experimental temporal AA; visual quality is not yet qualified.\r\n'
+                    b'Press F8 for the AA menu. Up/Down selects a row; Left/Right changes it.\r\n'
+                    b'Choose Off, TAA, DLSS or FSR3 and the DLSS model preset; settings save live.\r\n'
+                    b'Press F8 or Escape to close. Game keys are private while the menu is drawn.\r\n'
+                    b'[fix] temporal_aa also accepts off, on (TAA), dlaa, dlss or fsr (default off).\r\n'
+                    b'Game supersampling controls render scale; DLAA requires native SS.\r\n'
+                    b'Press F10 in the cockpit to collect one bounded flat scene capture.\r\n'
+                    b'Use --convert-profile for an explicit VR/flat edition switch.\r\n')
     icon_path = os.path.join(args.out, 'edvr_installer.ico')
     with open(icon_path, 'wb') as f:
         f.write(ico_bytes())
+    descriptor_path = os.path.join(args.build, 'edvr_profile_%s.ini' % args.profile)
+    with open(descriptor_path, 'wb') as f:
+        f.write(('[install]\r\nschema = 1\r\nprofile = %s\r\n' % args.profile).encode('ascii'))
 
     lines = [
         '// Generated by tools/gen_installer_rc.py. Do not edit; do not commit.',
@@ -333,25 +367,28 @@ def main(argv=None):
         '1 ICON "%s"' % rc_path(icon_path),
         '',
         '%d RCDATA "%s"' % (IDR_NATIVE_GRAPHICS, rc_path(d3d11)),
-        '%d RCDATA "%s"' % (IDR_NATIVE_RUNTIME, rc_path(runtime)),
         '%d RCDATA "%s"' % (IDR_INI, rc_path(ini)),
-        '%d RCDATA "%s"' % (IDR_LOADER, rc_path(loader)),
-        '%d RCDATA "%s"' % (IDR_LOADER_NOTICE, rc_path(notice)),
+        '%d RCDATA "%s"' % (IDR_PROFILE, rc_path(descriptor_path)),
     ]
-    carried = 'native graphics/runtime pair, OpenXR loader, loader notice and edvr.ini'
+    carried = 'graphics, edvr.ini and %s profile descriptor' % args.profile
+    if args.profile == 'vr':
+        lines += ['%d RCDATA "%s"' % (IDR_NATIVE_RUNTIME, rc_path(runtime)),
+                  '%d RCDATA "%s"' % (IDR_LOADER, rc_path(loader)),
+                  '%d RCDATA "%s"' % (IDR_LOADER_NOTICE, rc_path(notice))]
+        carried += ', native OpenXR runtime, loader and notice'
     if os.path.exists(ngx):
         lines.append('%d RCDATA "%s"' % (IDR_NGX, rc_path(ngx)))
         carried += ", and NVIDIA's DLSS runtime (nvngx_dlss.dll)"
     else:
         lines.append('// no nvngx_dlss.dll in the build (no DLSS SDK): this installer ships without')
-        lines.append("// NVIDIA's optional anti-aliasing runtime; native OpenXR remains complete.")
+        lines.append("// NVIDIA's optional anti-aliasing runtime.")
 
     version = args.version
     lines += [''] + versioninfo_lines(
         version,
-        file_description='EDVR installer',
-        internal_name='edvr-installer',
-        original_filename='edvr-installer.exe',
+        file_description='EDVR flat temporal qualification installer' if args.profile == 'flat' else 'EDVR installer',
+        internal_name='edvr-flat-installer' if args.profile == 'flat' else 'edvr-installer',
+        original_filename='edvr-flat-installer.exe' if args.profile == 'flat' else 'edvr-installer.exe',
         file_type='0x1L',
         comments='Carries %s' % carried) + ['']
 
@@ -394,6 +431,23 @@ def self_test():
             os.remove(os.path.join(build, 'edvr_openxr_runtime.dll'))
             assert main(['--root', root, '--build', build, '--out', out,
                          '--version', '1.2.3']) == 1 and not os.path.exists(out)
+            assert main(['--root', root, '--build', build, '--out', out,
+                         '--version', '1.2.3', '--profile', 'flat', '--dry-run']) == 0
+            assert not os.path.exists(out) and not os.path.exists(os.path.join(build, 'edvr-flat.ini'))
+            assert main(['--root', root, '--build', build, '--out', out,
+                         '--version', '1.2.3', '--profile', 'flat']) == 0
+            with open(os.path.join(out, 'payload.rc'), encoding='utf-8') as stream:
+                rc_text = stream.read()
+            assert '%d RCDATA ' % IDR_NATIVE_RUNTIME not in rc_text
+            assert '%d RCDATA ' % IDR_LOADER not in rc_text
+            assert '%d RCDATA ' % IDR_LOADER_NOTICE not in rc_text
+            assert '%d RCDATA ' % IDR_PROFILE in rc_text
+            with open(os.path.join(build, 'edvr-flat.ini'), 'rb') as stream:
+                flat_ini = stream.read()
+                assert b'temporal_aa = off' in flat_ini
+                assert b'temporal_aa_model = k' in flat_ini and b'menu = F8' in flat_ini
+            with open(os.path.join(build, 'edvr_profile_flat.ini'), 'rb') as stream:
+                assert stream.read() == b'[install]\r\nschema = 1\r\nprofile = flat\r\n'
         finally:
             openxr_pe.native_graphics_exports, openxr_pe.native_exports = old_g, old_r
             fetch_openxr_loader.verify = old_v

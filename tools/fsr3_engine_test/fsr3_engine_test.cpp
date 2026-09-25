@@ -1364,6 +1364,18 @@ void testWarmAndRelease(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (!ok && whyEval) std::printf("info: (i) the warmed-key dispatch refused: %s\n", whyEval);
             double after = -1.0;
             stillWarm = edvr::fsr3Warm(ctx, w, h, oW, oH, &after, &why) && after == 0.0;
+            double infiniteMs = -1.0;
+            check(edvr::fsr3Warm(ctx, w, h, oW, oH, &infiniteMs, &why, true) && infiniteMs > 0,
+                  "(i) infinite reversed depth creates a distinct context key");
+            check(edvr::fsr3Evaluate(ctx, 0, colour, depth, mv, nullptr, out, w, h, oW, oH,
+                  0, 0, true, 11.1f, .025f, 0, kFovY, &whyEval, true),
+                  "(i) explicit infinite depth dispatch accepts the actual near plane");
+            infiniteMs = -1.0;
+            check(edvr::fsr3Warm(ctx, w, h, oW, oH, &infiniteMs, &why, true) && infiniteMs == 0,
+                  "(i) infinite depth dispatch reuses its warm context");
+            double finiteMs = -1.0;
+            check(edvr::fsr3Warm(ctx, w, h, oW, oH, &finiteMs, &why) && finiteMs > 0,
+                  "(i) default finite VR depth recreates its original context key");
         }
         check(ok, "(i) a dispatch at the warmed key succeeded");
         check(stillWarm, "(i) and it found the warm-up's own context, creating nothing");

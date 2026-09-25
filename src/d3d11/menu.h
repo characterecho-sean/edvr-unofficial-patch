@@ -32,6 +32,7 @@
 #include <cstdint>
 
 struct ID3D11Device;
+struct IDXGISwapChain;
 
 namespace edvr {
 
@@ -51,6 +52,11 @@ void menuAdoptGameBindings(bool enabled, const char* why);
 // Once per frame, from the frame boundary. dev may be null before the game
 // has a device; nothing is drawn or uploaded until it has one.
 void menuTick(ID3D11Device* dev);
+
+// The flat panel is composited onto the owned desktop swapchain immediately
+// before Present. The model/raster still advances from menuTick after Present.
+void menuFlatBeforePresent(IDXGISwapChain* swap, unsigned flags);
+void menuFlatResize();
 
 // The reload poll re-read edvr.ini: refresh every row's value, diff the
 // restart snapshot, and toast what changed from outside the menu.

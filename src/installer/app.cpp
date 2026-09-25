@@ -36,17 +36,21 @@ std::string bullets(const char* title, const std::vector<std::string>& items) {
 }  // namespace
 
 std::string usageText() {
-    return "EDVR installer\r\n"
+    const bool flat = payloadInfo().profile == "flat";
+    const char* exe = flat ? "edvr-flat-installer.exe" : "edvr-installer.exe";
+    std::string out = flat ? "EDVR flat capture qualification installer\r\n" : "EDVR VR installer\r\n";
+    out +=
            "\r\n"
-           "  edvr-installer.exe                        open the window\r\n"
-           "  edvr-installer.exe --install [--dir D]    install or update\r\n"
-           "  edvr-installer.exe --repair  [--dir D]    put a clobbered install back together\r\n"
-           "  edvr-installer.exe --uninstall [--dir D]  remove EDVR, restoring what it replaced\r\n"
-           "  edvr-installer.exe --collect-logs         zip the latest logs onto the Desktop\r\n"
+           "  " + std::string(exe) + "                        open the window\r\n"
+           "  " + std::string(exe) + " --install [--dir D]    install or update\r\n"
+           "  " + std::string(exe) + " --repair  [--dir D]    repair this edition\r\n"
+           "  " + std::string(exe) + " --uninstall [--dir D]  remove EDVR, restoring what it replaced\r\n"
+           "  " + std::string(exe) + " --collect-logs         zip the latest logs onto the Desktop\r\n"
            "\r\n"
            "  --dir <path>         the folder holding EliteDangerous64.exe. Without it, the\r\n"
            "                       installer finds your installs itself and uses the only one.\r\n"
            "  --dry-run            say what would happen; touch nothing.\r\n"
+           "  --convert-profile    explicitly convert the installed VR/flat edition.\r\n"
            "  --replace-settings   overwrite edvr.ini instead of keeping your values.\r\n"
            "  --remove-settings    with --uninstall, delete edvr.ini too.\r\n"
            "  --help               this.\r\n"
@@ -55,6 +59,7 @@ std::string usageText() {
            "  %LOCALAPPDATA%\\EDVR, so a game update that wipes the folder cannot take it too.\r\n"
            "  --install restores from it automatically when the folder has no edvr.ini of its\r\n"
            "  own, unless --replace-settings says you want fresh defaults instead.\r\n";
+    return out;
 }
 
 AppArgs parseArgs(int argc, wchar_t** argv) {
@@ -84,6 +89,8 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             a.dir = arg.substr(6);
         else if (arg == L"--dry-run")
             a.dryRun = true;
+        else if (arg == L"--convert-profile")
+            a.convertProfile = true;
         else if (arg == L"--replace-settings")
             a.keepSettings = false;
         else if (arg == L"--remove-settings")
@@ -105,6 +112,7 @@ Options optionsFor(const AppArgs& args, bool repair) {
     o.keepSettings = args.keepSettings;
     o.removeSettings = args.removeSettings;
     o.repair = repair;
+    o.convertProfile = args.convertProfile;
     o.backupStamp = timestampName();
     o.nowUtc = utcNow();
     return o;
@@ -116,6 +124,9 @@ std::string statusReport(const Survey& s, const PayloadInfo& payload) {
     out += "Found by: " + toUtf8(s.game.source);
     if (!s.game.product.empty()) out += "   (" + toUtf8(s.game.product) + ")";
     out += "\r\n\r\n";
+    const std::string detected = installedProfile(s);
+    out += "Installed edition: " + (detected.empty() ? std::string("none") : detected) +
+           "   Installer edition: " + payload.profile + "\r\n";
 
     out += "d3d11.dll         " + toUtf8(describeDll(s.d3d11)) + "\r\n";
     if (s.haveOpenvrDir) {
@@ -154,6 +165,7 @@ std::string statusReport(const Survey& s, const PayloadInfo& payload) {
         }
     }
     if (!payload.version.empty()) out += "\r\nThis installer carries EDVR " + payload.version + ".\r\n";
+    if (payload.profile == "flat") out += "Experimental flat temporal build: zero-jitter testing. Game supersampling controls render scale. Press F10 for a bounded diagnostic capture.\r\n";
     if (s.gameRunningHere) {
         out += "\r\n!  Elite Dangerous is running. Close it before installing anything.\r\n";
     } else if (s.gameRunningElsewhere) {
@@ -211,6 +223,7 @@ bool relaunchElevated(const AppArgs& args) {
     if (!args.keepSettings) cmd += L"--replace-settings ";
     if (args.removeSettings) cmd += L"--remove-settings ";
     if (args.dryRun) cmd += L"--dry-run ";
+    if (args.convertProfile) cmd += L"--convert-profile ";
     cmd += L"--autorun";
 
     SHELLEXECUTEINFOW info{};
@@ -330,7 +343,7 @@ int runConsole(const AppArgs& args) {
     if (!result.ok) {
         writeOut("\r\n" + result.error + "\r\n");
         if (result.rolledBack) {
-            writeOut("Everything this run had changed was put back.\r\n");
+            writeOut("Installed files and metadata were restored; recovery backups were kept.\r\n");
         }
         return 1;
     }

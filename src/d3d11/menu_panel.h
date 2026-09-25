@@ -31,6 +31,7 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
+struct IDXGISwapChain;
 
 namespace edvr {
 
@@ -204,6 +205,13 @@ bool menuPanelWorkerReadyForTest();
 
 // Once per frame: upload a finished raster, create the texture as needed.
 void menuPanelTick(ID3D11Device* dev);
+
+// Desktop profile: blend the live raster onto the owned backbuffer. Does
+// nothing when hidden; no backbuffer reference survives the call.
+bool menuPanelCompositeFlat(IDXGISwapChain* swap);
+bool menuPanelCompositeFlatTexture(ID3D11Texture2D* back);
+bool menuPanelFlatRasterReady();
+void menuPanelFlatResize();
 
 void menuPanelSetGeometry(const MenuGeometry& g);
 

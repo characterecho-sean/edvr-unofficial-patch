@@ -7,6 +7,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "../common/intro_mode.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
@@ -90,7 +91,8 @@ bool ensureBuilt(ID3D11DeviceContext* ctx) {
 
 void splashDimConfigure(Config& cfg) {
     const bool was = g_on;
-    g_on = loadingDimParse(cfg.getString("fix.loading_dim", "screen")).splashDim;
+    g_on = loadingDimParse(runtimeVrProfile() ?
+        cfg.getString("fix.loading_dim", "screen") : "stock").splashDim;
     if (was != g_on) {
         Log::get().note(
             "splash dim: %s. While the loader's dialogs are up (and their "

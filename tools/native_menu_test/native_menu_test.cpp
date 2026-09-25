@@ -5,6 +5,7 @@
 #include "../../src/openxr/eye_capture.h"
 #include "../../src/openxr/immediate_executor.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/gpu_census.h"
 #include <openxr/openxr.h>
 #include <d3d11.h>
@@ -26,11 +27,14 @@ class InlineExecutor final : public edvr::openxr::ImmediateExecutor {
  public: bool invoke(std::function<void()> callback) override { callback(); return true; }
 };
 
-namespace edvr { void perfMonitorNoteEvent(unsigned, double) {} }
+namespace edvr {
+void perfMonitorNoteEvent(unsigned, double) {}
+// The production definition lives in flat_compute_readback.cpp, which this
+// focused WARP rig does not link.
+thread_local bool g_flatComputeInternal = false;
 // The GPU census (issue #38) is cross-cutting; this rig is about the menu
 // panel's own effect, not the census's rotation, so it is stubbed like
 // perfMonitorNoteEvent above.
-namespace edvr {
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 }
@@ -62,6 +66,24 @@ static bool makeSource(ID3D11Device* d, ID3D11DeviceContext* c,
     if (FAILED(d->CreateTexture2D(&desc, nullptr, &out))) return false;
     std::vector<UINT> pixels(size_t(width) * height, color);
     c->UpdateSubresource(out.Get(), 0, nullptr, pixels.data(), width * 4, 0); return true;
+}
+
+static bool makeBackbuffer(ID3D11Device* d, ID3D11DeviceContext* c,
+                           ComPtr<ID3D11Texture2D>& out, UINT color,
+                           UINT width = 256, UINT height = 256) {
+    D3D11_TEXTURE2D_DESC desc{}; desc.Width = width; desc.Height = height;
+    desc.ArraySize = desc.MipLevels = 1; desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(d->CreateTexture2D(&desc, nullptr, &out))) return false;
+    std::vector<UINT> pixels(size_t(width) * height, color);
+    c->UpdateSubresource(out.Get(), 0, nullptr, pixels.data(), width * 4, 0);
+    return true;
+}
+
+static ULONG refCount(ID3D11Texture2D* texture) {
+    texture->AddRef();
+    return texture->Release();
 }
 
 // Read the actual composite bounds, rather than asserting only the input
@@ -275,5 +297,136 @@ int wmain(int argc, wchar_t** argv) {
     check(consumerLeft == expectedLeft && consumerRight == expectedRight, "shared pixels exact");
     check(capture.shutdownShared() == S_OK, "shared capture shutdown"); capture.shutdown();
     check(client.close() == S_OK, "client close");
+
+    // Exercise the desktop Present compositor against a backbuffer-shaped
+    // render target. With no SRV bind it must take the source-copy path.
+    {
+        edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+        constexpr UINT background = 0xff203040u;
+        ComPtr<ID3D11Texture2D> back;
+        check(makeBackbuffer(device.Get(), context.Get(), back, background),
+              "flat backbuffer render target");
+        if (back) {
+            std::vector<UINT> before, after;
+            check(readPixels(device.Get(), context.Get(), back.Get(), before),
+                  "flat baseline readback");
+            edvr::MenuGeometry hidden = geometry;
+            hidden.alpha = 0.f;
+            edvr::menuPanelSetGeometry(hidden);
+            const uint32_t hiddenHeartbeat = edvr::menuDrawnValue();
+            check(!edvr::menuPanelCompositeFlatTexture(back.Get()) &&
+                  edvr::menuDrawnValue() == hiddenHeartbeat,
+                  "flat hidden menu skips draw and heartbeat");
+            check(readPixels(device.Get(), context.Get(), back.Get(), after) &&
+                  after == before, "flat hidden menu preserves pixels");
+
+            edvr::menuPanelSetGeometry(geometry);
+            ComPtr<ID3D11RenderTargetView> sentinelRtv;
+            check(SUCCEEDED(device->CreateRenderTargetView(back.Get(), nullptr, &sentinelRtv)),
+                  "flat sentinel render target view");
+            ID3D11RenderTargetView* boundRtv = sentinelRtv.Get();
+            context->OMSetRenderTargets(1, &boundRtv, nullptr);
+            D3D11_VIEWPORT viewport{13.f, 17.f, 111.f, 93.f, 0.25f, 0.75f};
+            context->RSSetViewports(1, &viewport);
+            context->CSSetShaderResources(0, 1, &boundSrv);
+            context->CSSetUnorderedAccessViews(0, 1, &boundUav, nullptr);
+            const ULONG refsBefore = refCount(back.Get());
+            const uint32_t drawnBefore = edvr::menuDrawnValue();
+            check(edvr::menuPanelCompositeFlatTexture(back.Get()), "flat visible composite");
+            check(refCount(back.Get()) == refsBefore,
+                  "flat composite retains no backbuffer reference");
+            check(edvr::menuDrawnValue() == drawnBefore + 1,
+                  "flat visible composite advances heartbeat once");
+            ID3D11ShaderResourceView* flatSrv = nullptr;
+            ID3D11UnorderedAccessView* flatUav = nullptr;
+            ID3D11RenderTargetView* flatRtv = nullptr;
+            UINT viewportCount = 1;
+            D3D11_VIEWPORT flatViewport{};
+            context->CSGetShaderResources(0, 1, &flatSrv);
+            context->CSGetUnorderedAccessViews(0, 1, &flatUav);
+            context->OMGetRenderTargets(1, &flatRtv, nullptr);
+            context->RSGetViewports(&viewportCount, &flatViewport);
+            check(flatSrv == boundSrv && flatUav == boundUav &&
+                  flatRtv == boundRtv && viewportCount == 1 &&
+                  std::memcmp(&flatViewport, &viewport, sizeof(viewport)) == 0,
+                  "flat composite restores compute, OM and viewport state");
+            if (flatSrv) flatSrv->Release();
+            if (flatUav) flatUav->Release();
+            if (flatRtv) flatRtv->Release();
+            ID3D11RenderTargetView* noRtv = nullptr;
+            ID3D11ShaderResourceView* noSrv = nullptr;
+            ID3D11UnorderedAccessView* noUav = nullptr;
+            context->OMSetRenderTargets(0, &noRtv, nullptr);
+            context->CSSetShaderResources(0, 1, &noSrv);
+            context->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+            sentinelRtv.Reset();
+            check(readPixels(device.Get(), context.Get(), back.Get(), after),
+                  "flat composite readback");
+            if (after.size() == before.size()) {
+                size_t changed = 0;
+                for (size_t i = 0; i < after.size(); ++i) changed += after[i] != before[i];
+                check(changed > 0 && changed < after.size(),
+                      "flat panel visible with outside pixels preserved");
+            } else check(false, "flat readback dimensions");
+
+            edvr::menuPanelFlatResize();
+            check(!edvr::menuPanelFlatRasterReady() &&
+                  !edvr::menuPanelCompositeFlatTexture(back.Get()),
+                  "flat resize retires old raster and composite");
+            edvr::menuPanelSubmit(content);
+            bool fresh = false;
+            for (unsigned ms = 0; ms < 3000 && !fresh; ms += 5) {
+                fresh = edvr::menuPanelWorkerReadyForTest();
+                if (!fresh) Sleep(5);
+            }
+            check(fresh, "flat resize fresh raster worker ready");
+            edvr::menuPanelTick(device.Get());
+            check(edvr::menuPanelFlatRasterReady(), "flat resize fresh raster uploaded");
+            ComPtr<ID3D11Texture2D> resizedBack;
+            check(makeBackbuffer(device.Get(), context.Get(), resizedBack,
+                                 background, 320, 240), "flat resized backbuffer");
+            if (resizedBack) {
+                std::vector<UINT> resizedPixels;
+                check(edvr::menuPanelCompositeFlatTexture(resizedBack.Get()) &&
+                      readPixels(device.Get(), context.Get(), resizedBack.Get(), resizedPixels),
+                      "flat resized backbuffer composes");
+                float visibleBounds[4]{};
+                check(changedBounds(resizedPixels, 320, 240, background, visibleBounds),
+                      "flat resize draws bounded panel pixels");
+                check(visibleBounds[0] >= 0.01f && visibleBounds[0] < 0.05f &&
+                      visibleBounds[1] >= 0.01f && visibleBounds[1] < 0.05f &&
+                      visibleBounds[2] < 0.55f && visibleBounds[3] < 0.55f,
+                      "flat panel stays small and anchored near the upper-left corner");
+            }
+            // A replacement graphics device must build its own raster and
+            // context state; no resource from the first device may be reused.
+            edvr::menuPanelFlatResize();
+            edvr::menuPanelSubmit(content);
+            bool foreignReady = false;
+            for (unsigned ms = 0; ms < 3000 && !foreignReady; ms += 5) {
+                foreignReady = edvr::menuPanelWorkerReadyForTest();
+                if (!foreignReady) Sleep(5);
+            }
+            check(foreignReady, "flat replacement device raster worker ready");
+            if (foreignReady && foreign) {
+                edvr::menuPanelTick(foreign.Get());
+                ComPtr<ID3D11Texture2D> foreignBack;
+                check(makeBackbuffer(foreign.Get(), foreignContext.Get(),
+                                     foreignBack, background),
+                      "flat replacement device backbuffer");
+                std::vector<UINT> foreignPixels;
+                float foreignBounds[4]{};
+                check(foreignBack &&
+                      edvr::menuPanelCompositeFlatTexture(foreignBack.Get()) &&
+                      readPixels(foreign.Get(), foreignContext.Get(),
+                                 foreignBack.Get(), foreignPixels) &&
+                      changedBounds(foreignPixels, 256, 256, background,
+                                    foreignBounds),
+                      "flat replacement device composites fresh raster");
+            }
+        }
+        edvr::menuPanelFlatResize();
+        edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
+    }
     edvr::menuPanelShutdown(); std::printf("native_menu_test: %u checks, %u failures\n", checks, fails); return fails ? 1 : 0;
 }

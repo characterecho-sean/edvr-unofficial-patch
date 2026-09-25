@@ -28,6 +28,8 @@
 #include <string>
 
 #include "../../src/common/config.h"
+#include "../../src/common/runtime_profile.h"
+#include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
 
 using namespace edvr;
@@ -460,6 +462,96 @@ int main(int argc, char** argv) {
             }
         }
     }
+
+    // An old/full INI cannot widen a flat installation, even through numeric
+    // getters whose ordinary fallback or lower bound would turn a fix on.
+    const RuntimeProfile savedProfile = g_runtimeProfile;
+    const char* descriptor = "[install]\r\nschema = 1\r\nprofile = flat\r\n";
+    if (parseRuntimeProfile(descriptor) != RuntimeProfile::Flat ||
+        parseRuntimeProfile("[install]\nschema=1\nprofile=vr\n") != RuntimeProfile::Vr ||
+        parseRuntimeProfile("[install]\nschema=2\nprofile=flat\n") != RuntimeProfile::Invalid ||
+        parseRuntimeProfile("[install]\nschema=1\nprofile=flat\nprofile=vr\n") != RuntimeProfile::Invalid ||
+        parseRuntimeProfile("[install]\nprofile=flat\n") != RuntimeProfile::Invalid ||
+        parseRuntimeProfile(std::string(4097, 'x')) != RuntimeProfile::Invalid)
+        fail("profile descriptor", "invalid schema/duplicate/oversize admitted");
+    else ok("profile descriptor refuses ambiguous or unsupported scope");
+    g_runtimeProfile = RuntimeProfile::Flat;
+    // The flat adapter reads this through getString with an on default. A
+    // refused key turns that default into off, so exercise the actual getter.
+    if (argc >= 3) {
+        const std::wstring scratch = widen(argv[2]);
+        if (!writeIni(scratch, "[fix]\r\nblack_void = on\r\n"))
+            fail("flat jitter scratch ini", "could not write it");
+        else {
+            Config::get().init(scratch);
+            g_runtimeProfile = RuntimeProfile::Flat;
+            if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "on")
+                ok("flat jitter uses on default when absent");
+            else fail("flat jitter default", "missing key was not on");
+        }
+    }
+    Config::get().set("experimental.temporal_aa_jitter", "on");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
+        ok("flat jitter reads explicit on");
+    else fail("flat jitter enabled", "explicit on was suppressed");
+    Config::get().set("experimental.temporal_aa_jitter", "off");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
+        ok("flat jitter preserves explicit off");
+    else fail("flat jitter override", "explicit off was not read");
+    Config::get().set("fix.temporal_aa", "dlss");
+    Config::get().set("fix.black_void", "on");
+    Config::get().set("fix.head_offset_forward", "12");
+    Config::get().set("experimental.night_vision_realistic", "on");
+    Config::get().set("advanced.real_dll", "d3d11_edhm.dll");
+    expectStr("fix.temporal_aa", "off", "flat discovery cannot activate stereo temporal AA");
+    if (Config::get().requestedTemporalMode() != "dlss") fail("flat request", "intent lost");
+    else ok("flat diagnostic retains requested temporal mode");
+    expectBool("fix.black_void", false, "flat profile suppresses restored unrelated fix");
+    expectBool("experimental.night_vision_realistic", false,
+               "flat jitter exception leaves unrelated experimental settings suppressed");
+    expectInt("fix.head_offset_forward", 0, "flat profile suppresses numeric fix");
+    expectFloat("fix.head_offset_forward", 0.0f, "flat profile suppresses float fix");
+    if (Config::get().getIntInRange("fix.head_offset_forward", 12, 1, 100) != 0)
+        fail("flat bounded getter", "minimum reactivated disabled feature");
+    else ok("flat scope precedes bounded numeric defaults");
+    expectStr("advanced.real_dll", "d3d11_edhm.dll", "flat scope preserves mod chaining");
+    Config::get().set("hotkey.menu", "F8");
+    expectStr("hotkey.menu", "F8", "flat scope permits the temporal menu hotkey");
+    Config::get().set("fix.temporal_aa_model", "m");
+    expectStr("fix.temporal_aa_model", "m", "flat scope permits the DLSS model");
+    expectStr("hotkey.toggle_exposure", "", "flat menu exception leaves unrelated hotkeys suppressed");
+    const struct { const char* name; unsigned full, fovea; bool known; } presets[] = {
+        {"auto",0,0,true},{"default",0,0,true},{"j",10,10,true},
+        {"K",11,11,true},{"l",12,12,true},{"m",13,13,true},
+        {"quality",11,11,true},{"steady",11,12,true},{"responsive",10,10,true},
+        {"removed-preset",11,11,false}
+    };
+    for (const auto& p : presets) {
+        const auto actual=temporalPresetFor(p.name);
+        if (actual.full!=p.full || actual.fovea!=p.fovea || actual.known!=p.known)
+            fail("shared temporal preset mapping",p.name);
+    }
+    Config::get().set("fix.black_void", "on");
+    expectBool("fix.black_void", false, "live setting change cannot widen scope");
+    g_runtimeProfile = RuntimeProfile::Invalid;
+    expectBool("advanced.d3d11_fixes", false, "bad descriptor disables graphics hooks");
+    expectStr("hotkey.menu", "", "invalid profile cannot open temporal menu");
+    expectStr("fix.temporal_aa_model", "off", "invalid profile cannot select a DLSS model");
+    expectStr("advanced.real_dll", "d3d11_edhm.dll", "bad descriptor preserves mod chaining");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
+        ok("invalid profile suppresses flat jitter");
+    else fail("invalid profile jitter", "flat key widened invalid scope");
+    g_runtimeProfile = RuntimeProfile::LegacyVr;
+    expectBool("fix.black_void", true, "legacy profile retains original behavior");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
+        ok("legacy profile retains explicit jitter setting");
+    else fail("legacy profile jitter", "flat exception changed VR read");
+    g_runtimeProfile = RuntimeProfile::Vr;
+    Config::get().set("experimental.temporal_aa_jitter", "on");
+    if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
+        ok("VR profile reads explicit jitter setting");
+    else fail("VR profile jitter", "flat exception changed VR scope");
+    g_runtimeProfile = savedProfile;
 
     if (g_fails) {
         printf("CONFIG TEST FAILED (%d)\n", g_fails);

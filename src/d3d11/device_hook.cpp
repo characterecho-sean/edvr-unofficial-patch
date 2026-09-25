@@ -15,7 +15,7 @@
 #include <windows.h>
 
 #include <d3d11_4.h>   // ID3D11Multithread, for the protection probe
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <intrin.h>    // _ReturnAddress: EDVR's own creates, told from the game's
 
 // This module's own image (the linker's symbol), for addressInEdvr.
@@ -25,9 +25,14 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "render_boundary.h"
 
 #include <atomic>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <vector>
 
 #include "../common/config.h"
 #include "../common/temporal_mode.h"
+#include "../common/runtime_profile.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
@@ -58,6 +63,9 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
+#include "flat_runtime.h"
+#include "flat_temporal.h"   // flat profile discovery at owned Present
+#include "flat_shader_capture.h"
 #include "perf_monitor.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -112,6 +120,7 @@ constexpr size_t kDevCreateDsv           = 10;
 constexpr size_t kDevCreateSlots         = 11;
 
 constexpr size_t kSwapPresent            = 8;
+constexpr size_t kSwapResizeBuffers = 13, kSwapResizeBuffers1 = 39;
 constexpr size_t kFactoryCreateSwapChain = 10;
 constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
 
@@ -131,6 +140,8 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSamplerState)(
 typedef HRESULT(STDMETHODCALLTYPE* PFN_DevCreate)(ID3D11Device*, const void*,
                                                   const void*, void**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers1)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChain)(IDXGIFactory*, IUnknown*,
                                                         DXGI_SWAP_CHAIN_DESC*,
                                                         IDXGISwapChain**);
@@ -205,8 +216,17 @@ struct State {
     // disassemble. Diagnostic; costs file writes on the streaming threads.
     bool         shaderDump = false;
     std::wstring shaderDumpDir;
-    bool         shaderDumpDirMade = false;
+    std::atomic<bool> shaderDumpDirMade{false};
+    std::atomic<uint32_t> flatShaderCaptureAttempted{0};
+    // Experimental flat producer probe: shader creation precedes the manual
+    // capture. Keep bounded bytes, then write only the measured writer hashes.
+    std::mutex flatProbeShaderMutex;
+    std::map<std::pair<char, uint64_t>, std::vector<uint8_t>> flatProbeShaders;
+    size_t flatProbeShaderBytes = 0;
+    uint32_t flatProbeShaderDrops = 0;
     PFN_Present      realPresent = nullptr;
+    PFN_ResizeBuffers realResizeBuffers = nullptr;
+    PFN_ResizeBuffers1 realResizeBuffers1 = nullptr;
     PFN_CreateSwapChain        realCreateSwapChain = nullptr;
     PFN_CreateSwapChainForHwnd realCreateSwapChainForHwnd = nullptr;
 
@@ -509,23 +529,97 @@ FaultBudget g_frameBudget("deviceHook.frameBoundary", 8);
 // the game's asset-streaming threads while armed; CreateDirectory once,
 // CreateFile per blob, and a blob that already exists is skipped so a
 // session's repeated creates cost one write each.
-void dumpShaderBlob(const wchar_t* prefix, uint64_t hash, const void* bytecode,
-                    SIZE_T len) {
+struct ShaderDumpResult {
+    bool success = false;
+    bool existed = false;
+    DWORD bytes = 0;
+    DWORD error = ERROR_SUCCESS;
+};
+ShaderDumpResult dumpShaderBlob(const wchar_t* prefix, uint64_t hash, const void* bytecode,
+                               SIZE_T len, bool verifyExisting = false) {
+    ShaderDumpResult result;
+    if (!bytecode || !len || len > MAXDWORD) { result.error = ERROR_INVALID_PARAMETER; return result; }
     State* s = g_state;
-    if (!s->shaderDumpDirMade) {
-        s->shaderDumpDirMade = true;
-        CreateDirectoryW(s->shaderDumpDir.c_str(), nullptr);
+    if (!s->shaderDumpDirMade.load(std::memory_order_acquire)) {
+        if (!CreateDirectoryW(s->shaderDumpDir.c_str(), nullptr)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_ALREADY_EXISTS) { result.error = error; return result; }
+        }
+        s->shaderDumpDirMade.store(true, std::memory_order_release);
     }
     wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\%s_%016llX.dxbc",
-                 s->shaderDumpDir.c_str(), prefix,
-                 static_cast<unsigned long long>(hash));
+    if (_snwprintf_s(path, _TRUNCATE, L"%s\\%s_%016llX.dxbc",
+                    s->shaderDumpDir.c_str(), prefix,
+                    static_cast<unsigned long long>(hash)) < 0) {
+        result.error = ERROR_FILENAME_EXCED_RANGE;
+        return result;
+    }
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return;   // exists already, or unwritable
+    if (h == INVALID_HANDLE_VALUE) {
+        result.error = GetLastError();
+        if (result.error != ERROR_FILE_EXISTS && result.error != ERROR_ALREADY_EXISTS) return result;
+        result.existed = true;
+        if (!verifyExisting) { result.success = true; result.error = ERROR_SUCCESS; return result; }
+        // A pre-existing partial/corrupt dump is not successful evidence.
+        h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) { result.error = GetLastError(); return result; }
+        LARGE_INTEGER size{};
+        bool ok = GetFileSizeEx(h, &size) != FALSE;
+        result.error = ok ? ERROR_INVALID_DATA : GetLastError();
+        ok = ok && size.QuadPart == static_cast<LONGLONG>(len);
+        const BYTE* expected = static_cast<const BYTE*>(bytecode);
+        BYTE chunk[4096];
+        while (ok && result.bytes < len) {
+            const DWORD want = static_cast<DWORD>((len - result.bytes) < sizeof(chunk) ?
+                                                 len - result.bytes : sizeof(chunk));
+            DWORD got = 0;
+            if (!ReadFile(h, chunk, want, &got, nullptr)) { result.error = GetLastError(); ok = false; }
+            else if (got != want || std::memcmp(chunk, expected + result.bytes, want) != 0) ok = false;
+            else result.bytes += got;
+        }
+        CloseHandle(h);
+        result.success = ok;
+        if (ok) result.error = ERROR_SUCCESS;
+        return result;
+    }
     DWORD written = 0;
-    WriteFile(h, bytecode, static_cast<DWORD>(len), &written, nullptr);
-    CloseHandle(h);
+    const BOOL wrote = WriteFile(h, bytecode, static_cast<DWORD>(len), &written, nullptr);
+    result.error = wrote ? (written == len ? ERROR_SUCCESS : ERROR_WRITE_FAULT) : GetLastError();
+    const BOOL closed = CloseHandle(h);
+    if (!closed && result.error == ERROR_SUCCESS) result.error = GetLastError();
+    result.bytes = written;
+    result.success = result.error == ERROR_SUCCESS;
+    if (!result.success) DeleteFileW(path); // only the new file this call created
+    return result;
+}
+
+void captureFlatShader(char stage, uint64_t hash, const void* bytecode, SIZE_T len) {
+    // hash is the repository fnv1a64 of these exact creation bytes, computed
+    // upstream. One atomic admission per stage/hash per device, across streams.
+    const uint32_t bit = flatShaderCaptureBit(runtimeFlatProfile(), stage, hash);
+    if (!bit || (g_state->flatShaderCaptureAttempted.fetch_or(bit, std::memory_order_relaxed) & bit)) return;
+    Log::get().note("flat shader capture: attempted stage=%cs hash=%016llX bytes=%llu",
+                    stage, static_cast<unsigned long long>(hash), static_cast<unsigned long long>(len));
+    const auto result = dumpShaderBlob(stage == 'v' ? L"vs" : L"ps", hash, bytecode, len, true);
+    Log::get().note("flat shader capture: %s stage=%cs hash=%016llX bytes=%llu saved-bytes=%u existing=%u error=%u",
+                    result.success ? "succeeded" : "failed", stage, static_cast<unsigned long long>(hash),
+                    static_cast<unsigned long long>(len), unsigned(result.bytes), unsigned(result.existed),
+                    unsigned(result.error));
+}
+void rememberFlatProbeShader(char stage, uint64_t hash, const void* bytecode, SIZE_T len) {
+    if (!runtimeFlatProfile() || !bytecode || !len) return;
+    auto& s = *g_state;
+    std::lock_guard<std::mutex> lock(s.flatProbeShaderMutex);
+    const auto key = std::make_pair(stage, hash);
+    if (s.flatProbeShaders.find(key) != s.flatProbeShaders.end()) return;
+    if (!flatProbeShaderFits(s.flatProbeShaders.size(), s.flatProbeShaderBytes, len)) {
+        ++s.flatProbeShaderDrops; return;
+    }
+    const auto* begin = static_cast<const uint8_t*>(bytecode);
+    s.flatProbeShaders.emplace(key, std::vector<uint8_t>(begin, begin + len));
+    s.flatProbeShaderBytes += len;
 }
 
 // The game's own creations, counted for the monitor's long-frame line
@@ -593,6 +687,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
+        captureFlatShader('v', hash, bytecode, len);
+        rememberFlatProbeShader('v', hash, bytecode, len);
         registerShaderHash(*out, hash);
         // ...and its INPUT SIGNATURE, which is a different question from its
         // identity: whether the panel composite's shader reads the z of the
@@ -621,6 +717,8 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
+        captureFlatShader('p', hash, bytecode, len);
+        rememberFlatProbeShader('p', hash, bytecode, len);
         registerShaderHash(*out, hash);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
@@ -902,6 +1000,11 @@ HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
         if (FAILED(hr)) {
             noteDeviceCreateFailure(Slot, hr, first, second, FirstIsResource);
         } else if constexpr (Slot == kDevCreateBuffer) {
+            const auto* desc=static_cast<const D3D11_BUFFER_DESC*>(first);
+            if(out && *out && desc && desc->BindFlags==D3D11_BIND_CONSTANT_BUFFER && flatRuntimeActive()) {
+                const auto* initial=static_cast<const D3D11_SUBRESOURCE_DATA*>(second);
+                flatRuntimeCreateBuffer(static_cast<ID3D11Buffer*>(*out),initial?initial->pSysMem:nullptr);
+            }
             if (first) {
                 g_createBuffers.fetch_add(1, std::memory_order_relaxed);
                 g_createBufferBytes.fetch_add(static_cast<const D3D11_BUFFER_DESC*>(first)->ByteWidth,
@@ -934,6 +1037,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
         // COMPUTE shaders dump too (2026-09-07), and they had to start.
+        rememberFlatProbeShader('c', hash, bytecode, len);
         //
         // This hook has registered their hashes since it was written, so a
         // census could NAME a dispatch -- and the dump wrote only vs_ and
@@ -949,6 +1053,15 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
         if (g_state->shaderDump) dumpShaderBlob(L"cs", hash, bytecode, len);
     });
     return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
+    if (self == g_state->swapChain) { menuFlatResize(); flatRuntimeResize(); }
+    return g_state->realResizeBuffers(self, count, width, height, format, flags);
+}
+HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
+    if (static_cast<IDXGISwapChain*>(self) == g_state->swapChain) { menuFlatResize(); flatRuntimeResize(); }
+    return g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
 }
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
@@ -970,9 +1083,16 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // The time blocked in the real Present is the monitor's, with the time
     // blocked in WaitGetPoses: the frame period less the two is the render
     // thread's own busy time.
+    if (runtimeFlatProfile())
+        flatTemporalBeforePresent(self, g_state->frameCounter, flags);
+    if (runtimeFlatProfile()) flatRuntimeBeforePresent();
+    if (runtimeFlatProfile()) menuFlatBeforePresent(self, flags);
     const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
     const int64_t presentT1 = qpcNow();
+    if (runtimeFlatProfile())
+        flatTemporalAfterPresent(g_state->frameCounter, hr, flags);
+    if (runtimeFlatProfile()) flatRuntimePresent(self, g_state->frameCounter, hr, flags);
     if (qpcFrequency() > 0) {
         perfMonitorNotePresentWait(static_cast<double>(presentT1 - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
@@ -1147,12 +1267,16 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // swallowed must say so, because the log it failed to write is the
         // place anyone would look for the reason.
         if (g_state->censusKey.pressed()) {
-            drawCensusRequest();
-            // Same key: the census says WHAT was drawn, the quad probe says
-            // WHERE. Two instruments on one press keeps the two answers on
-            // the same frame, which is the only way they can be compared.
-            quadProbeRequest();
-            perfMonitorNoteEvent(kEvCensus);
+            if (runtimeFlatProfile()) {
+                flatTemporalArm();
+            } else {
+                drawCensusRequest();
+                // Same key: the census says WHAT was drawn, the quad probe says
+                // WHERE. Two instruments on one press keeps the two answers on
+                // the same frame, which is the only way they can be compared.
+                quadProbeRequest();
+                perfMonitorNoteEvent(kEvCensus);
+            }
         }
         // The eye dump key: the next treated frame's two eyes to disk.
         if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
@@ -1775,7 +1899,10 @@ State& ensureState() {
         // and the field session bought nothing. A diagnostic that can be
         // dead must say what it is watching, in the log it exists to write.
         {
-            const std::string b = Config::get().getString("hotkey.dump_draws", "");
+            // A retained older INI may not contain this key. Flat discovery
+            // still needs a re-arm key without overwriting that user's file.
+            const std::string b = Config::get().getString("hotkey.dump_draws",
+                runtimeFlatProfile() ? "F10" : "");
             g_state->censusKey.setBinding(b.c_str());
             if (g_state->censusKey.key() != 0) {
                 Log::get().note(
@@ -1958,6 +2085,29 @@ State& ensureState() {
 }
 
 }  // namespace
+
+bool captureFlatProbeShader(char stage, uint64_t hash) {
+    if (!g_state || !runtimeFlatProfile() || !hash ||
+        (stage != 'v' && stage != 'p' && stage != 'c')) return false;
+    auto& s = *g_state;
+    std::lock_guard<std::mutex> lock(s.flatProbeShaderMutex);
+    const auto found = s.flatProbeShaders.find(std::make_pair(stage, hash));
+    if (found == s.flatProbeShaders.end()) {
+        Log::get().note("flat producer shader: missing stage=%cs hash=%016llX retained=%llu bytes=%llu drops=%u",
+            stage, static_cast<unsigned long long>(hash),
+            static_cast<unsigned long long>(s.flatProbeShaders.size()),
+            static_cast<unsigned long long>(s.flatProbeShaderBytes), s.flatProbeShaderDrops);
+        return false;
+    }
+    const auto& bytes = found->second;
+    const auto result = dumpShaderBlob(stage == 'v' ? L"vs" : stage == 'p' ? L"ps" : L"cs",
+        hash, bytes.data(), bytes.size(), true);
+    Log::get().note("flat producer shader: %s stage=%cs hash=%016llX bytes=%llu saved-bytes=%u existing=%u error=%u cache-drops=%u",
+        result.success ? "succeeded" : "failed", stage, static_cast<unsigned long long>(hash),
+        static_cast<unsigned long long>(bytes.size()), unsigned(result.bytes), unsigned(result.existed),
+        unsigned(result.error), s.flatProbeShaderDrops);
+    return result.success;
+}
 
 // The two entries the investigation turns on, named at install. See the header
 // for what they are and why the departure point matters as much as the
@@ -2311,6 +2461,8 @@ void hookDevice(ID3D11Device* device) {
 
     s.shaderDump = sentinelCfg.getBool("advanced.glare_shader_dump", false);
     s.shaderDumpDir = sentinelCfg.logDir() + L"\\shaders";
+    if (runtimeFlatProfile())
+        Log::get().note("flat shader capture: armed targets=13 stages=VS,PS directory=%ls; watching successful creations, one attempt per exact stage/hash per device; absent attempted lines mean no capture attempt", s.shaderDumpDir.c_str());
     if (s.shaderDump) {
         Log::get().note("shader dump ARMED: every vertex and pixel shader "
                         "the game creates is written to edvr_logs\\shaders "
@@ -2556,6 +2708,7 @@ void hookDevice(ID3D11Device* device) {
             // order.
             installGlitchFrameFix();
             installVScreenFixes(device, ctxMode);
+            flatTemporalStart(device);
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared
@@ -2650,6 +2803,19 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
     }
     s.swapChainHook.replace(kSwapPresent, &hookedPresent,
                             reinterpret_cast<void**>(&s.realPresent));
+    if (runtimeFlatProfile()) {
+        const bool resize = s.swapChainHook.replace(kSwapResizeBuffers, &hookedFlatResizeBuffers,
+            reinterpret_cast<void**>(&s.realResizeBuffers));
+        IDXGISwapChain3* third = nullptr;
+        bool resize1 = false;
+        if (SUCCEEDED(swapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&third)))) {
+            if (static_cast<IDXGISwapChain*>(third) == swapChain && s.swapChainHook.executablePrefix() > kSwapResizeBuffers1)
+                resize1 = s.swapChainHook.replace(kSwapResizeBuffers1, &hookedFlatResizeBuffers1, reinterpret_cast<void**>(&s.realResizeBuffers1));
+            third->Release();
+        }
+        Log::get().note("flat runtime resize hooks: ResizeBuffers=%u ResizeBuffers1=%u; release owned backbuffer references before forwarding", resize?1u:0u, resize1?1u:0u);
+        if (!resize) { s.swapChainHook.uninstall(); return; }
+    }
     if (!s.swapChainHook.commit()) {
         s.swapChainHook.uninstall();
         return;
@@ -2786,6 +2952,7 @@ DeviceCreates deviceCreatesTake() {
 }
 
 void shutdownDeviceHooks() {
+    flatTemporalStop();
     // FreeLibrary teardown can run under the loader lock on another thread.
     // Invalidate timing first, then let each owner release its queries without
     // issuing context commands. Normal process exit skips this entire path.
@@ -2837,4 +3004,3 @@ void shutdownDeviceHooks() {
 }
 
 }  // namespace edvr
-

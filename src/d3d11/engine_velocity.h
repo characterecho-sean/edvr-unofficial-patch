@@ -149,6 +149,13 @@ inline void engineVelocityResourceWritten(const ID3D11Resource* resource) {
 void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept;
 // The owner thread's frame boundary (vscreen): rotation, the periodic lines.
 void engineVelocityFrameBoundary(ID3D11DeviceContext*);
+// Flat draw bracket: restore substituted shaders/blend; caller restores MRTs.
+void engineVelocityAfterFlatDraw(ID3D11DeviceContext*);
+// Owner-thread diagnostic, sampled after BeforeDraw and before restoring the
+// draw bracket. A source candidate alone does not prove substitution succeeded.
+inline bool engineVelocityDrawSubstituted() noexcept {
+    return engine_velocity_detail::cache.family >= 0;
+}
 
 // The temporal pass's inputs for one eye this frame, AddRef'd: the slot
 // target (MRT6, the scene depth's size), the pool snapshot the eye's draws
@@ -209,6 +216,9 @@ void engineVelocityNoteSource(ID3D11Texture2D* sourceDepth, ID3D11Buffer* sceneC
 // Is this vertex shader one of the pool families (the naming without
 // terrain counts their draws)? Pure: the family table, no state.
 bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept;
+// Pure declaration lookup only; does not configure or run the producer and
+// does not assert that the runtime shader patch or motion views are ready.
+bool engineVelocityPoolFamilyPair(uint64_t vsHash, uint64_t psHash) noexcept;
 bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews* out);
 // The screen shader's panel counts without diagnostics: one present frame in
 // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared (a grid on

@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include "../../src/d3d11/temporal_shader_source.h"
+#include "../../src/d3d11/flat_mono_shader_source.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -64,6 +65,7 @@ struct Variant {
     const char* entry;
     const D3D_SHADER_MACRO* macros;
     std::vector<unsigned char> bytes;
+    bool flat = false;
 };
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
@@ -96,7 +98,7 @@ static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = f
 // source edit changes the key, so stale bytecode cannot survive one, and
 // --clean removes the header outright. Bump the tag when render() changes.
 // (/2, 2026-09-23: the header also carries kEngineMotionCoreHlsl.)
-static const char kKeyTag[] = "edvr-temporal-shader-key/2";
+static const char kKeyTag[] = "edvr-temporal-shader-key/3";
 static const char kProfile[] = "cs_5_0";
 static const char kKeyPrefix[] = "// key: ";
 
@@ -122,6 +124,7 @@ static std::string sourceKey(const char* source, const std::vector<Variant>& var
         key.add(v.symbol);
         key.add(v.sourceName);
         key.add(v.entry);
+        key.add(v.flat ? "flat" : "stereo");
         for (const D3D_SHADER_MACRO* m = v.macros; m && m->Name; ++m) {
             key.add(m->Name);
             key.add(m->Definition);
@@ -255,16 +258,22 @@ static int generate(const Options& o) {
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
         {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},
         {"kTemporalAaBytecode", "temporal_aa_cs", "main", diagnostic, {}},
-        {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}}
+        {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}},
+        {"kFlatMonoPrepBytecode", "flat_mono_prep_cs", "prep", nullptr, {}, true},
+        {"kFlatMonoTaaBytecode", "flat_mono_taa_cs", "taa", nullptr, {}, true},
+        {"kFlatMonoFinishBytecode", "flat_mono_finish_cs", "finish", nullptr, {}, true},
+        {"kFlatMonoSpatialBytecode", "flat_mono_spatial_cs", "spatial", nullptr, {}, true}
     };
     const std::string core = extractCore(edvr::kTemporalCsHlsl);   // throws on a broken core before any work
-    const std::string key = sourceKey(edvr::kTemporalCsHlsl, variants, compilerPath());
+    const std::string flat = core + edvr::kFlatMonoShaderSource;
+    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat;
+    const std::string key = sourceKey(allSources.c_str(), variants, compilerPath());
     if (outputCurrent(o.output, key)) {
         std::printf("temporal shaders: unchanged (key %s), reusing %ls\n", key.c_str(), o.output.c_str());
         return 0;
     }
     Compiler compiler;
-    for (auto& v : variants) if (!compile(compiler.fn, edvr::kTemporalCsHlsl, v)) return 4;
+    for (auto& v : variants) if (!compile(compiler.fn, v.flat ? flat.c_str() : edvr::kTemporalCsHlsl, v)) return 4;
     if (!writeAtomic(o.output, render(variants, key, core))) {
         std::fprintf(stderr, "cannot atomically write generated shader header\n");
         return 5;
@@ -328,6 +337,11 @@ static void selfTest() {
           throwsOn("// ENGINE_MOTION_CORE_BEGIN\nTexture2D t : register(t0);\n// ENGINE_MOTION_CORE_END"),
           "a missing, reordered or doubled marker, or a resource inside, fails the build");
     const std::string production = extractCore(edvr::kTemporalCsHlsl);
+    const std::string flat = production + edvr::kFlatMonoShaderSource;
+    for (const char* entry : {"prep", "taa", "finish", "spatial"}) {
+        Variant mono{"kFlatSelfTest", "flat_mono_self_test", entry, nullptr, {}, true};
+        check(compile(compiler.fn, flat.c_str(), mono), "production flat mono shader compilation");
+    }
     check(production.find("bool engineReprojectRows(") != std::string::npos &&
           production.find("uint engineRecordKind(") != std::string::npos, "the production core carries the shared arithmetic");
     std::string longCore;

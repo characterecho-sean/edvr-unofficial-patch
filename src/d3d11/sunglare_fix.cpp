@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/timing.h"
@@ -347,7 +348,8 @@ bool sunglareIsGlareTrain(char kind, uint32_t count, uint32_t instances) {
 
 void sunglareConfigure(Config& cfg) {
     const Mode was = g_mode;
-    const std::string v = cfg.getString("fix.sun_glare", "vivid");
+    const std::string v = runtimeVrProfile() ?
+        cfg.getString("fix.sun_glare", "vivid") : "stock";
     bool legacy = false;
     if (v == "stock") {
         g_mode = Mode::kStock;
