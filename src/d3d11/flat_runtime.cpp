@@ -22,6 +22,7 @@
 namespace edvr {
 std::atomic<bool> g_flatRuntimeLive{false};
 namespace {
+std::atomic<bool> nativeScale{false};
 std::atomic<bool> foreignWork{false};
 std::atomic<bool> projectionAuditRequested{false};
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
@@ -815,6 +816,7 @@ bool depthView(ID3D11Texture2D* depth) {
 
 void flatRuntimeResize() {
     g_flatRuntimeLive.store(false, std::memory_order_release);
+    nativeScale.store(false, std::memory_order_release);
     auto& s = state(); FlatComputeInternalScope guard; flatMonoResolveReset();
     finishPhaseCensusFrame(s);
     if(s.phaseCensusFrames || s.phaseFailuresUsed || s.phaseOverflowCalls)
@@ -831,6 +833,7 @@ void flatRuntimeResize() {
     s.prefix = FlatRuntimePrefix{}; s.context.Reset(); s.device.Reset(); s.thread = 0; s.viewportCount = 0;
 }
 void flatRuntimeBeforePresent() { g_flatRuntimeLive.store(false, std::memory_order_release); }
+bool flatRuntimeNativeScale() { return nativeScale.load(std::memory_order_acquire); }
 void flatRuntimeArmProjectionAudit() { if(runtimeFlatProfile()) projectionAuditRequested.store(true,std::memory_order_release); }
 void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
     if(owner() && state().projection) state().projection->observeCreateBuffer(buffer,initialData);
@@ -947,6 +950,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     if (!s.treated || hr != S_OK) reset();
     Ptr<ID3D11Texture2D> output; if (FAILED(swap->GetBuffer(0, IID_PPV_ARGS(&output)))) return;
+    // Swapchain image rotation does not change render scale. Resize/device
+    // teardown clears the published extent; each qualified handoff updates it.
     if (s.output.Get() != output.Get()) reset(); s.output = output;
     D3D11_TEXTURE2D_DESC d{}; output->GetDesc(&d);
     const bool compatible=s.havePrevious && s.temporalAccepted && s.previous.frame==frame &&
@@ -1237,6 +1242,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     FlatMonoResolveFrame f{}; f.color = original; f.depth = s.depthView.Get(); f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
+    nativeScale.store(f.renderWidth >= f.outputWidth && f.renderHeight >= f.outputHeight,
+                      std::memory_order_release);
     f.configuredDlssPreset=s.preset;
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.

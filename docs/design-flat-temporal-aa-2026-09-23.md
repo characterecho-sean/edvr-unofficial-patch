@@ -3,21 +3,23 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `d87f40b2` is merged before the next validation
-  build as requested; the preset-menu conflict preserves flat selection and
-  main's dimmed preset text (section 44). Sections 40-42 establish the cockpit
-  HDR viewport correction and exact bytecode-backed projection recipes.
-  Automatic bounded unknown capture remains active after the timed F10 audit
-  ends. Sections 26-28 document camera ownership and jitter; sections 34-37
-  cover F8 and successful menu treatment. Menu surface shimmer remains
-  unqualified at pixel level (section 39); frame counters alone do not
-  establish reconstruction quality. Installed/tested binary `b494e087` holds
-  cockpit history for 3,310 consecutive frames with live jitter, zero unknown
-  pairs and zero backend failures (section 43). Sean confirms clearly smoother
-  cockpit edges with DLSS, with some edge shimmer as lighting changes.
-  Remaining pixel-level rejection/reconstruction behavior is unmeasured. A
-  bounded F10 pixel capture records matched textures to distinguish those
-  causes (section 44).
+  before qualification. Main `d87f40b2` is included in validated `a2625ca0` as
+  requested; the preset-menu conflict preserves flat selection and main's
+  dimmed preset text (section 44). Sections 40-42 establish the cockpit HDR
+  viewport correction and exact bytecode-backed projection recipes. Automatic
+  bounded unknown capture remains active after the timed F10 audit ends.
+  Sections 26-28 document camera ownership and jitter; sections 34-37 cover F8
+  and successful menu treatment. Menu surface shimmer remains unqualified at
+  pixel level (section 39); frame counters alone do not establish
+  reconstruction quality. Installed/tested binary `b494e087` holds cockpit
+  history for 3,310 consecutive frames with live jitter, zero unknown pairs and
+  zero backend failures (section 43). Sean confirms clearly smoother cockpit
+  edges with DLSS, with some edge shimmer as lighting changes. Epic `a2625ca0`
+  captures four matched samples (section 45): bright exterior hull pixels are
+  not rejected, but receive roughly +/-130 px horizontal and -50 px vertical
+  motion per frame while the visible hull stays nearly fixed. Trace motion
+  ownership before changing reconstruction. The camera's high-G displacement
+  must be preserved; menu ship shimmer also remains open.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -25,12 +27,10 @@
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
-- **Open:** reported star-corona smearing during camera turns, projection
-  jitter, in-game backend qualification, rendered inverse/depth consistency and
-  mod effect ordering. Captured mono frames establish scene/depth identity,
-  camera encoding, tone/copy handoff and later panel ordering at 1280x720 and
-  960x540. Projection algebra is verified offline; rendered consistency and
-  safe failure after jitter still need qualification.
+- **Open:** object-relative flat motion, menu ship shimmer, backend/scene
+  coverage, corona-smear regression and mod effect ordering. Scene/depth
+  identity, camera encoding and handoff have flight evidence; correct motion
+  for every rendered surface and VR regression remain unqualified.
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
@@ -40,9 +40,10 @@
   for this scene; do not repeat the same flight to fill untouched material
   constants or camera-equality labels. The main merge passed full validation
   and promotion. Cockpit history now stays active and visible smoothing is
-  confirmed (section 43). Remaining lighting-dependent edge shimmer and menu
-  surface shimmer need output/motion and rejection-mask evidence before any
-  rendering change. Validate the bounded pixel capture before another Epic run.
+  confirmed (section 43). Flight pixel evidence identifies incorrect exterior
+  hull motion, not finish rejection. Determine whether those pixels take the
+  camera fallback or an incorrect engine transform. Capture menu attribution
+  too; do not assume its shimmer has the same cause or force ship vectors zero.
   The passive selector still refuses the menu copy; its diagnostic verdict is
   not the live runtime verdict. No headset is needed; VR still needs regression
   tests.
@@ -2468,3 +2469,106 @@ raw/final differences, maximum byte difference 254 and mean 65.5. The build
 gate follows a fresh `current_fixture.txt` written only after the producer
 passes, so old session directories cannot substitute for a new capture. Full
 combined validation is recorded in `build/flat-pixel-main-validation.log`.
+
+## 45. Exterior hull vectors contradict the image, 2026-09-25
+
+Epic `edvr_gfx_20260925_061613.log` matches `a2625ca0`, build `6AB66598`. F10
+at 06:18:04.028 completes frames 35876, 35891, 35906 and 35921 without capture
+failures, totaling 225,792,000 bytes. Session directory:
+`edvr_logs/flat_pixels/20260925_121804_028_21896_1`. All samples are DLSS K,
+1920x1080 to 2560x1440, with live jitter and reset=false. Runtime history
+continues across the capture; there are no unknown pairs or backend failures.
+
+Sean identifies the edge lines of the ship outside the cockpit, rather than the
+HUD, as the main remaining shimmer. The input rejection rate is 0.615-0.635%;
+the reconstructed output footprint is 0.940-0.959%. All bright pixels (RGB
+channels at least 180) have zero rejection in all four samples. The white
+exterior hull regions match raw DLSS through the finish pass.
+
+Ruled out: the final rejection replacement causes the captured white hull seam
+shimmer, because those bright hull pixels are not rejected and raw/final output
+agrees there. The safeguard still changes some darker console/radar pixels and
+must not be disabled on this evidence.
+
+The offline mask labels 15/42/64/0 raw/final differences as accepted. Every one
+is exactly on a horizontal footprint rounding boundary and is covered by
+advancing qx one texel. This is consistent with CPU/GPU arithmetic rounding,
+not evidence of widespread unmasked overwrites. Keep this analysis limitation
+distinct from the large hull-vector defect.
+
+At input ROI x75..269/y790..839, the left hull's median motion is
+(+134.875,-47.969) pixels in frame 35876 and (+146.75,-52.156) in frame 35921.
+The right hull at x1660..1799/y810..869 gives (-128.5,-49.313) and
+(-139.75,-53.625). Both regions have zero rejection. The distant central scene
+is around (+0.36,-0.05) pixels. All stored motion/depth values are finite.
+
+The hull's visible silhouette does not support those large per-frame vectors:
+left edge positions at six columns are y745,747,746,745 across the four
+samples; sampled right edges likewise move only 1-2 pixels across 45 frames.
+The vector field contracts toward the image center, consistent with applying
+forward camera translation to the player's ship without canceling the ship's
+translation. HUD speed is 62 and a roughly 0.67 m/frame translation would be
+consistent with that speed at about 90 Hz. This is a hypothesis about the
+source, not proof of which engine-record branch produced the vectors.
+
+The matched capture has no engine-slot/record attribution. Shared DLSS uses
+low-resolution, unjittered, reversed-depth motion with unit scale; subpixel
+jitter cannot explain the magnitude. Do not compensate with sharpening, longer
+jitter sequences, preset changes or SS1/DLAA before fixing ownership.
+
+Sean notes the camera moves within the cockpit during high-G maneuvers and that
+the menu ship also shimmers. Correct motion must compose object motion with the
+actual current/previous camera, preserving this relative camera movement.
+Neither zeroing hull vectors nor copying VR's headset delta can represent that
+flat camera. VR's existing near-ship/world split explains why its camera
+fallback differs; use the shared engine reprojection where its ownership is
+established. Do not generalize this flight defect to the menu without a matched
+menu capture.
+
+Frame-level engine availability is insufficient: source views are given
+1128/1128 times in this capture, but only keyed draw pairs write the slot
+target. Projection qualification includes additional pairs that do not emit
+slots. Flat `engineBefore` can therefore select camera reprojection for an
+unowned pixel, an unmarked record or an unchanged record whose engine math
+cannot be reconstructed; a joined record can also produce the observed vectors.
+Save the slot target, pool records, source scene buffers and flat
+current/previous camera rows together to distinguish these cases before a fix.
+
+The next F10 capture extends the existing bounded readback rather than adding a
+rendering workaround. It must attribute accepted hull vectors to their source
+and retain raw rows for offline camera/object reprojection. Validate high-G
+relative camera movement in the math tests. Capture the main-menu ship with the
+same diagnostic, because flight evidence does not determine the menu's motion
+path.
+
+Sean also requested automatic flat menu naming: the saved `dlss` choice reads
+DLAA when both qualified render dimensions meet or exceed the output, and DLSS
+below native scale. Apply the same display name to the preset row and refresh
+an open panel when the qualified scale changes. Do not change the saved mode,
+cycling order or backend settings. Swapchain image rotation alone does not
+invalidate the last observed scale; resize/device teardown does.
+
+Schema 2 retains the six original textures and adds the engine slot texture,
+pool and current/previous scene buffers when present, their view offsets and
+counts, and both flat camera snapshots. Resource presence is explicit; the 384
+MiB cap covers all bytes. Readback still occurs only after F10, without a new
+rendering pass or motion correction. The analyzer remains compatible with the
+first capture format and adds `--roi X Y WIDTH HEIGHT` in input pixels. Its
+engine replay reports sampled branch counts, records used, rejection
+disagreements and emitted-versus-replayed motion error. Large regions use a
+bounded regular sample grid; those counts are not whole-region totals.
+
+The replay follows the shared rigid-record math, including relative camera
+movement. Numerical comparison uses an explicit diagnostic tolerance rather
+than claiming bit-exact GPU arithmetic. Prepared depth cannot recover an
+original nonfinite/out-of-range depth that the shader sanitized, so ambiguous
+rejection cases remain labeled rather than inferred away.
+
+Targeted capture compilation and WARP validation pass in
+`build/flat-pixel-engine-targeted.log`. The real producer fixture verifies all
+extra bytes, a nonzero pool-view offset, source mutation after the queued copy
+and absent engine resources. The updated analyzer verifies that fixture and
+still reads all four original flight samples unchanged. Its math tests cover
+object/camera translation together, relative camera displacement and object
+rotation. Full combined validation is recorded in
+`build/flat-motion-source-validation.log`.

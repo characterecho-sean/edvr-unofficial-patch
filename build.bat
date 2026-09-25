@@ -2001,6 +2001,10 @@ python "tools\diff_eye_split.py" --self-test || (
 )
 
 echo [edvr] === flat pixel capture analyzer self-test ===
+python "tools\flat_pixels_engine.py" --self-test || (
+    echo [edvr] ERROR: the flat pixel engine replay failed its own test
+    exit /b 1
+)
 python "tools\flat_pixels.py" --self-test || (
     echo [edvr] ERROR: the flat pixel analyzer failed its own test
     exit /b 1

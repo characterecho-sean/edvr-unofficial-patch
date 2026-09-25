@@ -8,6 +8,8 @@
 namespace edvr {
 extern std::atomic<bool> g_flatRuntimeLive;
 inline bool flatRuntimeActive() { return g_flatRuntimeLive.load(std::memory_order_relaxed) && !g_flatComputeInternal; }
+// Last qualified flat scene extent, published for the menu on any thread.
+bool flatRuntimeNativeScale();
 void flatRuntimePresent(IDXGISwapChain*, uint64_t frame, HRESULT, UINT flags);
 void flatRuntimeBeforePresent();
 void flatRuntimeResize();

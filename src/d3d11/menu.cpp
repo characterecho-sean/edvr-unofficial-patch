@@ -28,6 +28,7 @@
 #include "../common/temporal_mode.h"
 #include "device_hook.h"
 #include "elite_binds.h"
+#include "flat_runtime.h"
 #include "input_gate.h"
 #include "menu_keys.h"
 #include "menu_panel.h"
@@ -169,6 +170,7 @@ struct State {
     bool  open = false;
     bool  flatEscapeDown = false;
     bool  flatKeysReadyShown = false;
+    bool  flatNativeScaleShown = false;
     float alpha = 0.0f;
     uint64_t openedMs = 0;
     uint64_t lastInputMs = 0;
@@ -986,7 +988,7 @@ struct ChoiceItem {
 };
 
 const char* nvidiaLabel() {
-    if (runtimeFlatProfile()) return "DLSS";
+    if (runtimeFlatProfile()) return flatRuntimeNativeScale() ? "DLAA" : "DLSS";
     float quality = 0.0f;
     deviceHookHmdQuality(&quality);
     return temporalNvidiaLabel(quality);
@@ -1017,7 +1019,7 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
                 strcmp(d.key, "temporal_aa") == 0) {
                 if (c.value == "off") c.label = "Off";
                 else if (c.value == "on") c.label = "TAA";
-                else if (c.value == "dlss") c.label = "DLSS";
+                else if (c.value == "dlss") c.label = nvidiaLabel();
                 else if (c.value == "fsr") c.label = "FSR3";
             }
             out.push_back(c);
@@ -3270,6 +3272,7 @@ void openMenu(uint64_t now) {
         s.lastDrawn = menuDrawnValue();
         s.lastDrawnMs = 0;
         s.flatEscapeDown = rawKeyDown(VK_ESCAPE);
+        s.flatNativeScaleShown = flatRuntimeNativeScale();
         s.alpha = 1.0f;
         s.tooltipUp = false;
         s.contentDirty = true;
@@ -3687,6 +3690,11 @@ void menuTick(ID3D11Device* dev) {
             const bool keysReady = drawnFresh && inputGateHoldsGameKeyboard();
             if (keysReady != s.flatKeysReadyShown) {
                 s.flatKeysReadyShown = keysReady;
+                s.contentDirty = true;
+            }
+            const bool nativeScale = flatRuntimeNativeScale();
+            if (nativeScale != s.flatNativeScaleShown) {
+                s.flatNativeScaleShown = nativeScale;
                 s.contentDirty = true;
             }
             if (keysReady) handleKeys(now);

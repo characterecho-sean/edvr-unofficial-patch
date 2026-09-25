@@ -33,6 +33,9 @@ TEXTURES = {
     "raw": (28, 4, "output"),         # DLSS R8G8B8A8_UNORM
     "final": (27, 4, "output"),       # R8G8B8A8_TYPELESS, RGBA8 bytes
 }
+SLOTS = (16, 8, "render")          # DXGI_FORMAT_R32G32_FLOAT
+MAX_POOL_BYTES = 64 * 1024 * 1024
+MAX_SCENE_BYTES = 64 * 1024
 
 
 class CaptureError(ValueError):
@@ -56,6 +59,18 @@ def _number_pair(value, label):
     return [float(value[0]), float(value[1])]
 
 
+def _camera_rows(value, label):
+    if not isinstance(value, list) or len(value) != 6:
+        raise CaptureError(f"{label} must contain six float4 rows")
+    rows = []
+    for i, row in enumerate(value):
+        if not isinstance(row, list) or len(row) != 4 or any(
+                type(x) not in (float, int) or not math.isfinite(x) for x in row):
+            raise CaptureError(f"{label}[{i}] must contain four finite numbers")
+        rows.append([float(x) for x in row])
+    return rows
+
+
 def _manifest_paths(capture_dir):
     if not capture_dir.is_dir():
         raise CaptureError(f"capture directory does not exist: {capture_dir}")
@@ -77,7 +92,8 @@ def load_manifest(path):
         raise CaptureError(f"cannot read {path}: {exc}") from exc
     if not isinstance(manifest, dict):
         raise CaptureError(f"{path}: manifest must be a JSON object")
-    if manifest.get("version") != 1 or type(manifest.get("version")) is not int:
+    version = manifest.get("version")
+    if type(version) is not int or version not in (1, 2):
         raise CaptureError(f"{path}: unsupported manifest version")
     frame = _integer(manifest.get("frame_id"), "frame_id", 0, 2**64 - 1)
     if path.name != f"frame_{frame}.json":
@@ -100,17 +116,17 @@ def load_manifest(path):
     ow = _integer(manifest.get("output_width"), "output_width", 1, MAX_DIMENSION)
     oh = _integer(manifest.get("output_height"), "output_height", 1, MAX_DIMENSION)
     records = manifest.get("textures")
-    if not isinstance(records, list) or len(records) != len(TEXTURES):
-        raise CaptureError(f"{path}: expected six texture records")
+    if not isinstance(records, list) or len(records) not in ((6,) if version == 1 else (6, 7)):
+        raise CaptureError(f"{path}: expected six textures and optional slots")
     found = {}
     total_size = 0
     for record in records:
         if not isinstance(record, dict):
             raise CaptureError(f"{path}: texture record must be an object")
         name = record.get("name")
-        if not isinstance(name, str) or name not in TEXTURES or name in found:
+        if not isinstance(name, str) or name not in ({**TEXTURES, "slots": SLOTS} if version == 2 else TEXTURES) or name in found:
             raise CaptureError(f"{path}: unknown or duplicate texture name {name!r}")
-        fmt, bpp, grid = TEXTURES[name]
+        fmt, bpp, grid = SLOTS if name == "slots" else TEXTURES[name]
         width, height = (rw, rh) if grid == "render" else (ow, oh)
         filename = record.get("filename")
         if not isinstance(filename, str) or not re.fullmatch(r"frame_\d+_[a-z]+\.bin", filename):
@@ -122,6 +138,13 @@ def load_manifest(path):
                               ("byte_size", width * height * bpp)):
             if type(record.get(key)) is not int or record[key] != expected:
                 raise CaptureError(f"{path}: {name}.{key} must equal {expected}")
+        if name == "slots":
+            for key, expected in (("srv_format", 16), ("srv_dimension", 4),
+                                  ("most_detailed_mip", 0)):
+                if record.get(key) != expected:
+                    raise CaptureError(f"{path}: slots.{key} must equal {expected}")
+            if record.get("mip_levels") not in (1, 2**32 - 1):
+                raise CaptureError(f"{path}: slots.mip_levels must describe the single source mip")
         texture_path = path.parent / filename
         # A capture may be supplied by another machine. Never follow a path
         # outside its manifest directory, including through a symlink.
@@ -135,9 +158,60 @@ def load_manifest(path):
         if total_size > MAX_CAPTURE_BYTES:
             raise CaptureError(f"{path}: capture exceeds {MAX_CAPTURE_BYTES} bytes")
     if set(found) != set(TEXTURES):
-        raise CaptureError(f"{path}: missing texture record")
+        if set(found) != set(TEXTURES) | ({"slots"} if "slots" in found else set()):
+            raise CaptureError(f"{path}: missing texture record")
+    buffers = {}
+    engine = None
+    camera = previous_camera = None
+    if version == 2:
+        camera = _camera_rows(manifest.get("camera"), "camera")
+        previous_camera = (None if manifest.get("previous_camera") is None else
+                           _camera_rows(manifest["previous_camera"], "previous_camera"))
+        if previous_camera is None and not manifest["reset"]:
+            raise CaptureError(f"{path}: previous camera absent without reset")
+        engine = manifest.get("engine")
+        if not isinstance(engine, dict) or type(engine.get("complete")) is not bool:
+            raise CaptureError(f"{path}: invalid engine availability")
+        names = ("slots", "pool", "scene_now", "scene_previous")
+        if any(type(engine.get(f"{n}_present")) is not bool for n in names):
+            raise CaptureError(f"{path}: invalid engine presence flags")
+        status = "complete" if engine["complete"] else "absent-or-partial"
+        if engine.get("status") != status or engine["complete"] != all(
+                engine[f"{n}_present"] for n in names):
+            raise CaptureError(f"{path}: inconsistent engine status")
+        buffer_records = manifest.get("buffers", [])
+        if not isinstance(buffer_records, list) or len(buffer_records) > 3:
+            raise CaptureError(f"{path}: invalid buffer records")
+        for record in buffer_records:
+            if not isinstance(record, dict):
+                raise CaptureError(f"{path}: invalid buffer record")
+            name = record.get("name")
+            if name not in names[1:] or name in buffers:
+                raise CaptureError(f"{path}: unknown or duplicate buffer {name!r}")
+            filename = f"frame_{frame}_{name}.bin"
+            if record.get("filename") != filename:
+                raise CaptureError(f"{path}: unsafe buffer filename")
+            size = _integer(record.get("byte_size"), f"{name}.byte_size", 1,
+                            MAX_POOL_BYTES if name == "pool" else MAX_SCENE_BYTES)
+            stride = _integer(record.get("stride"), f"{name}.stride", 0, 4096)
+            _integer(record.get("misc_flags"), f"{name}.misc_flags", 0, 2**32 - 1)
+            if name == "pool":
+                first = _integer(record.get("first_element"), "pool.first_element", 0, 2**32 - 1)
+                count = _integer(record.get("num_elements"), "pool.num_elements", 1, 2**32 - 1)
+                if (stride == 0 or size % stride or (first + count) * stride > size or
+                        record.get("srv_format") != 0 or record.get("srv_dimension") != 1):
+                    raise CaptureError(f"{path}: unsupported pool view/layout")
+            elif stride != 0 or size < 276 * 16 or size % 16:
+                raise CaptureError(f"{path}: invalid {name} constant buffer layout")
+            buffer_path = path.parent / filename
+            if buffer_path.resolve().parent != path.parent.resolve() or not buffer_path.is_file() or buffer_path.stat().st_size != size:
+                raise CaptureError(f"{path}: missing or unsafe buffer {filename}")
+            buffers[name] = (buffer_path, record)
+            total_size += size
+        if total_size > MAX_CAPTURE_BYTES or any(engine[f"{n}_present"] != (n in (found if n == "slots" else buffers)) for n in names):
+            raise CaptureError(f"{path}: engine resource presence differs from manifest")
     return {
-        "path": path, "frame_id": frame, "jitter": jitter,
+        "path": path, "version": version, "frame_id": frame, "jitter": jitter,
         "previous_jitter": previous_jitter, "reset": manifest["reset"],
         "mode": manifest["mode"],
         "binary_version": manifest.get("binary_version"),
@@ -145,7 +219,8 @@ def load_manifest(path):
         "configured_dlss_preset": preset,
         "render_width": rw, "render_height": rh,
         "output_width": ow, "output_height": oh, "textures": found,
-        "total_bytes": total_size,
+        "total_bytes": total_size, "buffers": buffers, "engine": engine,
+        "camera": camera, "previous_camera": previous_camera,
     }
 
 
@@ -184,7 +259,7 @@ def _mask_row(rejection, geometry, y):
             (rejection[y1, x0] != 0) | (rejection[y1, x1] != 0))
 
 
-def analyze(meta):
+def analyze(meta, rois=None):
     if np is None:
         raise CaptureError("NumPy is required for capture analysis")
     rejection = _open_texture(meta, "rejection")
@@ -212,7 +287,7 @@ def analyze(meta):
         group["mean_channel_difference"] = count / (group["pixels"] * 4) if group["pixels"] else None
     rejected = groups["rejected"]["pixels"]
     total = meta["output_width"] * meta["output_height"]
-    return {
+    result = {
         "manifest": str(meta["path"]), "frame_id": meta["frame_id"],
         "mode": meta["mode"], "reset": meta["reset"],
         "binary_version": meta["binary_version"],
@@ -228,6 +303,14 @@ def analyze(meta):
         "difference_channels": "RGBA8, absolute byte difference",
         "rejected": groups["rejected"], "accepted": groups["accepted"],
     }
+    if meta["version"] == 2:
+        from flat_pixels_engine import analyze as analyze_engine
+        requested = rois if rois else [("full", (0, 0, meta["render_width"], meta["render_height"]))]
+        try:
+            result["engine_analysis"] = analyze_engine(meta, requested)
+        except ValueError as exc:
+            raise CaptureError(str(exc)) from exc
+    return result
 
 
 def _png_chunk(handle, kind, payload):
@@ -300,11 +383,11 @@ def write_previews(meta, directory):
     write_png(directory / "raw_final_diff_x8.png", width, meta["output_height"], difference_rows())
 
 
-def run(capture_dir, output=None, dry_run=False):
+def run(capture_dir, output=None, dry_run=False, rois=None):
     if np is None:
         raise CaptureError("NumPy is required; use the bundled Codex Python or install NumPy")
     manifests = [load_manifest(p) for p in _manifest_paths(capture_dir)]
-    results = [analyze(m) for m in manifests]
+    results = [analyze(m, rois) for m in manifests]
     summary = {"frames": results, "preview_scale": "absolute RGBA difference x8; alpha difference copied into RGB"}
     if output is not None:
         summary["output"] = str(output)
@@ -370,6 +453,28 @@ def verify_fixture(capture_dir):
     expected_depth = np.asarray([.01, .02, .03], dtype=np.float32)[:, None]
     if not np.allclose(depth, expected_depth, rtol=0, atol=1e-7):
         raise CaptureError("fixture depth values differ from the WARP pattern")
+    if meta["version"] == 2:
+        from flat_pixels_engine import record_kind
+        if not meta["engine"]["complete"]:
+            raise CaptureError("fixture engine inputs are incomplete")
+        slots = np.fromfile(meta["textures"]["slots"], dtype="<f4").reshape((3, 17, 2))
+        expected_codes = np.asarray([-1 if i % 4 == 0 else 2 * (i % 4) - 1
+                                     for i in range(17)], dtype=np.float32)
+        if (not np.all(slots[:, :, 0] == expected_codes) or
+                not np.allclose(slots[:, :, 1], expected_depth, rtol=0, atol=1e-7)):
+            raise CaptureError("fixture slot bytes differ from the WARP pattern")
+        pool_path, view = meta["buffers"]["pool"]
+        pool = np.fromfile(pool_path, dtype="<u4").reshape((-1, 21, 4))
+        if (view["first_element"] != 1 or view["num_elements"] != 3 or
+                int(pool[0, 0, 0]) != 0x12345678 or
+                [record_kind(pool[i]) for i in (1, 2, 3)] !=
+                ["unmarked", "joined", "masked"]):
+            raise CaptureError("fixture pool view offset or marker bytes differ")
+        for name, rows in (("scene_now", meta["camera"]),
+                           ("scene_previous", meta["previous_camera"])):
+            scene = np.fromfile(meta["buffers"][name][0], dtype="<f4").reshape((-1, 4))
+            if not np.array_equal(scene[270:276], np.asarray(rows, dtype=np.float32)):
+                raise CaptureError(f"fixture {name} camera rows differ")
     result = analyze(meta)
     if (result["output_rejection_pixels"] != 51 or
             result["output_rejection_percent"] != 100 or
@@ -385,6 +490,8 @@ def verify_fixture(capture_dir):
 def self_test():
     if np is None:
         raise CaptureError("NumPy is required for --self-test")
+    from flat_pixels_engine import self_test as engine_self_test
+    engine_self_test()
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         session = root / "session"
@@ -509,6 +616,84 @@ def self_test():
         assert all(scanlines[y * (1 + ow * 4) + 1 + x * 4 + 3] == 255
                    for y in range(oh) for x in range(ow))
         assert before == {p.name: p.read_bytes() for p in session.iterdir()}
+        # Version 2 can describe a partial engine snapshot. The prep shader
+        # then falls back to the camera term; missing inputs need no dummy files.
+        v2_session = root / "v2_session"
+        v2_session.mkdir()
+        for name, content in contents.items():
+            (v2_session / f"frame_7_{name}.bin").write_bytes(content)
+        v2 = dict(manifest)
+        v2["version"] = 2
+        v2["camera"] = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1],
+                        [0, 0, .025, 0], [0, 0, 1, 0], [1, 0, 0, 0]]
+        v2["previous_camera"] = v2["camera"]
+        v2["engine"] = {"complete": False, "status": "absent-or-partial",
+                        "slots_present": False, "pool_present": False,
+                        "scene_now_present": False, "scene_previous_present": False}
+        v2["buffers"] = []
+        v2_path = v2_session / "frame_7.json"
+        v2_path.write_text(json.dumps(v2), encoding="utf-8")
+        v2_meta = load_manifest(v2_path)
+        assert v2_meta["version"] == 2
+        diagnostics = analyze(v2_meta, [("sample", (0, 0, rw, rh))])["engine_analysis"]
+        assert diagnostics["engine_complete"] is False
+        assert diagnostics["rois"][0]["sampled_pixels"] == rw * rh
+        assert not any(p.suffix == ".png" for p in v2_session.iterdir())
+        v2_bad = json.loads(json.dumps(v2))
+        v2_bad["engine"]["complete"] = True
+        v2_path.write_text(json.dumps(v2_bad), encoding="utf-8")
+        try:
+            load_manifest(v2_path)
+            raise AssertionError("inconsistent engine availability accepted")
+        except CaptureError:
+            pass
+        # A tiny complete capture exercises actual branch selection, view
+        # offset, stale depth, malformed slot, and masked record handling.
+        from flat_pixels_engine import marker_hash, record_kind
+        complete = json.loads(json.dumps(v2))
+        complete["reset"] = False
+        complete["engine"] = {"complete": True, "status": "complete",
+                              "slots_present": True, "pool_present": True,
+                              "scene_now_present": True, "scene_previous_present": True}
+        (v2_session / "frame_7_depth.bin").write_bytes(np.full((rh, rw), .5, dtype="<f4").tobytes())
+        slots = np.asarray([[[1, .5], [3, .5], [5, .5]],
+                            [[2, .5], [3, .4], [-1, .5]]], dtype="<f4")
+        (v2_session / "frame_7_slots.bin").write_bytes(slots.tobytes())
+        complete["textures"].append({"name": "slots", "filename": "frame_7_slots.bin",
+                                     "dxgi_format": 16, "width": rw, "height": rh,
+                                     "row_stride": rw * 8, "byte_size": rw * rh * 8,
+                                     "srv_format": 16, "srv_dimension": 4,
+                                     "most_detailed_mip": 0, "mip_levels": 1})
+        pool = np.zeros((4, 21, 4), dtype="<u4")
+        fbits = np.asarray(1, dtype="<f4").view("<u4").item()
+        pool[0, 0, 0] = 0x12345678
+        for index in (2, 3):
+            pool[index, 0, 1] = pool[index, 19, 1] = fbits
+            pool[index, 0, 2:4] = pool[index, 19, 2:4] = [0x7FFF7FFF, 0xFFFE7FFF]
+            pool[index, 18, 0] = (0x7FC0ED01 if index == 2 else 0x7FC0ED02) ^ marker_hash(pool[index])
+        assert [record_kind(pool[i]) for i in (1, 2, 3)] == ["unmarked", "joined", "masked"]
+        (v2_session / "frame_7_pool.bin").write_bytes(pool.tobytes())
+        scene = np.zeros((276, 4), dtype="<f4")
+        scene[270:276] = np.asarray(complete["camera"], dtype="<f4")
+        for name in ("scene_now", "scene_previous"):
+            (v2_session / f"frame_7_{name}.bin").write_bytes(scene.tobytes())
+        complete["buffers"] = [
+            {"name": "pool", "filename": "frame_7_pool.bin", "byte_size": pool.nbytes,
+             "stride": 336, "misc_flags": 64, "srv_format": 0, "srv_dimension": 1,
+             "first_element": 1, "num_elements": 3},
+            *({"name": n, "filename": f"frame_7_{n}.bin", "byte_size": scene.nbytes,
+               "stride": 0, "misc_flags": 0} for n in ("scene_now", "scene_previous"))]
+        v2_path.write_text(json.dumps(complete), encoding="utf-8")
+        complete_meta = load_manifest(v2_path)
+        branches = analyze(complete_meta, [("whole", (0, 0, rw, rh))])["engine_analysis"]["rois"][0]["branch_counts"]
+        assert branches["engine_joined"] == 1 and branches["camera_unmarked_record"] == 1
+        assert branches["rejected_masked_record"] == 1 and branches["rejected_corrupt_code"] == 1
+        assert branches["rejected_stale_or_depth"] == 1 and branches["camera_no_slot"] == 1
+        complete["buffers"][0]["stride"] = 168
+        v2_path.write_text(json.dumps(complete), encoding="utf-8")
+        stride_meta = load_manifest(v2_path)
+        stride_branches = analyze(stride_meta, [("one", (1, 0, 1, 1))])["engine_analysis"]["rois"][0]["branch_counts"]
+        assert stride_branches["rejected_pool_stride"] == 1
         del rejection, geometry, meta
         # A small copy of the WARP writer's known pixels checks the fixture
         # verifier itself. The full build checks bytes emitted by the real GPU.
@@ -562,6 +747,8 @@ def main(argv=None):
     parser.add_argument("capture_dir", nargs="?", type=Path)
     parser.add_argument("--output", type=Path, help="write PNG previews and summary to this directory")
     parser.add_argument("--dry-run", action="store_true", help="analyze and show intended output without writing")
+    parser.add_argument("--roi", action="append", nargs=4, metavar=("X", "Y", "W", "H"), type=int,
+                        help="repeatable ROI in render/input pixels; default samples the full frame")
     parser.add_argument("--verify-fixture", action="store_true", help="verify the real WARP writer fixture")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
@@ -576,7 +763,13 @@ def main(argv=None):
                 parser.error("--verify-fixture does not take --output")
             print(json.dumps(verify_fixture(args.capture_dir), indent=2))
             return 0
-        print(json.dumps(run(args.capture_dir, args.output, args.dry_run), indent=2))
+        rois = []
+        for index, values in enumerate(args.roi or []):
+            x, y, width, height = values
+            if min(x, y) < 0 or min(width, height) < 1:
+                raise CaptureError("ROI coordinates must be nonnegative and dimensions positive")
+            rois.append((f"roi_{index + 1}", (x, y, width, height)))
+        print(json.dumps(run(args.capture_dir, args.output, args.dry_run, rois), indent=2))
         return 0
     except (CaptureError, OSError) as exc:
         print(f"flat_pixels: {exc}", file=sys.stderr)
