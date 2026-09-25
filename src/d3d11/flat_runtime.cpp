@@ -91,6 +91,8 @@ struct State {
     struct UnknownProjectionPair { uint64_t vs=0,ps=0; } unknownProjectionPairs[64]{};
     uint32_t unknownProjectionPairsUsed=0;
     uint64_t unknownProjectionCaptureOverflow=0;
+    uint32_t unknownProjectionAutomatic=0,unknownProjectionAudit=0;
+    uint32_t unknownProjectionBytesSaved=0,unknownProjectionBytesFailed=0,unknownProjectionStagesAbsent=0;
     uint64_t hdrCopiesAccepted=0,hdrCopiesRefused=0;
     uint64_t menuCopiesAccepted=0,menuCopiesRefused=0;
     FlatMonoResolvePreflight plannedResolve{};
@@ -240,6 +242,12 @@ void recordProjectionViewportFailure(State& s, uint64_t vs, uint64_t ps, uint64_
         actualViewport.TopLeftX,actualViewport.TopLeftY,actualViewport.Width,actualViewport.Height,actualViewport.MinDepth,actualViewport.MaxDepth,
         rtv.Get(),color.Get(),dsv.Get(),depth.Get(),s.namedDepth,s.phaseDepth.Get());
 }
+void reportUnknownProjection(State& s,const char* event) {
+    Log::get().note("flat unknown projection capture: event=%s distinct-pairs=%u automatic-pairs=%u audit-pairs=%u overflow-observations=%llu bytecode-stages-saved=%u bytecode-stages-failed=%u absent-stages=%u; bounded to 64 pairs since process start or manual F10 rearm, capture remains active after audit completion; stage failures include missing creation bytes",
+        event,s.unknownProjectionPairsUsed,s.unknownProjectionAutomatic,s.unknownProjectionAudit,
+        (unsigned long long)s.unknownProjectionCaptureOverflow,s.unknownProjectionBytesSaved,
+        s.unknownProjectionBytesFailed,s.unknownProjectionStagesAbsent);
+}
 void reportProjection(State& s, const char* event) {
     if (!s.projection) return;
     const auto status=s.projection->status();
@@ -289,8 +297,7 @@ void reportProjection(State& s, const char* event) {
         (s.localSamples[i].closed[0]?1u:0u)+(s.localSamples[i].closed[1]?1u:0u),
         (unsigned long long)s.localSamples[i].firstFrame);
     const auto& copy=s.copyProvenance;
-    Log::get().note("flat unknown projection capture: event=%s distinct-pairs=%u overflow-observations=%llu; creation bytes requested once per observed pair per F10 arm",
-        event,s.unknownProjectionPairsUsed,(unsigned long long)s.unknownProjectionCaptureOverflow);
+    reportUnknownProjection(s,event);
     Log::get().note("flat copy provenance capture: event=%s attempts=%u completed=%u missing-source-record=%u missing-destination-record=%u actual-shader-mismatch=%u rearmed-before-complete=%u first-frame=%llu result=%s; two distinct frames per F10 arm separated by at least 90 frames",
         event,copy.attempts,copy.completed,copy.missingSource,copy.missingDestination,
         copy.actualMismatch,copy.rearmedBeforeComplete,(unsigned long long)copy.firstFrame,
@@ -362,16 +369,32 @@ bool verifyCameraIndependentImageSource(ID3D11DeviceContext* ctx,const FlatRunti
         std::memcmp(&viewport,k.viewport,sizeof(viewport))==0 &&
         flat_mono_detail::fullViewport(k,k.width,k.height);
 }
-void captureUnknownProjection(State& s,uint64_t vs,uint64_t ps) {
-    if(!s.projectionFrames)return;
+void captureUnknownProjection(State& s,const FlatContractObservation& k) {
+    // Unknown draws can first appear after the bounded F10 audit expires.
+    // Retain this budget across audit completion, resize and mode changes;
+    // only an explicit F10 rearm permits another capture of a known pair.
+    const auto vs=k.vs,ps=k.ps;
     for(uint32_t i=0;i<s.unknownProjectionPairsUsed;++i)
         if(s.unknownProjectionPairs[i].vs==vs && s.unknownProjectionPairs[i].ps==ps)return;
-    if(s.unknownProjectionPairsUsed==64) {++s.unknownProjectionCaptureOverflow;return;}
+    if(s.unknownProjectionPairsUsed==64) {
+        if(!s.unknownProjectionCaptureOverflow)
+            Log::get().note("flat unknown projection capture: event=capacity-reached frame=%llu capacity=64; later unretained pairs counted without bytecode requests until manual F10 rearm",
+                (unsigned long long)s.prefix.frame);
+        ++s.unknownProjectionCaptureOverflow;return;
+    }
     s.unknownProjectionPairs[s.unknownProjectionPairsUsed++]={vs,ps};
-    Log::get().note("flat unknown projection capture: frame=%llu VS=%016llX PS=%016llX; requesting exact creation bytes",
-        (unsigned long long)s.prefix.frame,(unsigned long long)vs,(unsigned long long)ps);
-    if(vs)captureFlatProbeShader('v',vs);
-    if(ps)captureFlatProbeShader('p',ps);
+    if(s.projectionFrames)++s.unknownProjectionAudit;else ++s.unknownProjectionAutomatic;
+    Log::get().note("flat unknown projection capture: frame=%llu q=%u VS=%016llX PS=%016llX trigger=%s color=%p rtv=%p fmt=%u size=%ux%u depth=%p dsv=%p named-depth=%p phase-depth=%p viewport-count=%u viewport=(%.9g,%.9g,%.9g,%.9g,%.9g,%.9g); observed bindings, requesting exact creation bytes once",
+        (unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)vs,(unsigned long long)ps,
+        s.projectionFrames?"F10-audit":"automatic",k.color,k.rtv,k.format,k.width,k.height,
+        k.depth,k.dsv,s.namedDepth,s.phaseDepth.Get(),k.viewportCount,
+        k.viewport[0],k.viewport[1],k.viewport[2],k.viewport[3],k.viewport[4],k.viewport[5]);
+    const auto captureStage=[&](char stage,uint64_t hash) {
+        if(!hash) {++s.unknownProjectionStagesAbsent;return;}
+        if(captureFlatProbeShader(stage,hash))++s.unknownProjectionBytesSaved;
+        else ++s.unknownProjectionBytesFailed;
+    };
+    captureStage('v',vs);captureStage('p',ps);
 }
 // The exact copy shader consumes only t0 and UV. Its unused b1 binding is not
 // a camera observation. The prefix separately verifies all input writes.
@@ -868,6 +891,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     if(projectionAuditRequested.exchange(false,std::memory_order_acq_rel)) {
         if(s.projectionFrames)reportProjection(s,"rearmed");
+        else if(s.unknownProjectionPairsUsed || s.unknownProjectionCaptureOverflow)
+            reportUnknownProjection(s,"manual-rearm");
         if(!s.projection) {
             s.projection.reset(new(std::nothrow) FlatProjectionRuntime);
             s.context.As(&s.projectionContext);
@@ -886,6 +911,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.localSamples[0]={};s.localSamples[1]={};
             s.copyProvenance={};s.copyProvenance.rearmedBeforeComplete=interrupted;
             s.unknownProjectionPairsUsed=0;s.unknownProjectionCaptureOverflow=0;
+            s.unknownProjectionAutomatic=s.unknownProjectionAudit=0;
+            s.unknownProjectionBytesSaved=s.unknownProjectionBytesFailed=s.unknownProjectionStagesAbsent=0;
             s.resolvePreflightRetryMs=0;
             s.resolvePreflight=s.haveResolvePlan ? flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve) : FlatMonoResolvePreflightResult{};
             if(s.haveResolvePlan)s.resolvePreflightRetryMs=GetTickCount64();
@@ -946,6 +973,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (now - s.lastReport >= 5000) {
         reportPhaseCensus(s,"5s");
         if(s.projectionFrames)reportProjection(s,"progress");
+        else reportUnknownProjection(s,"5s");
         Log::get().note("flat HDR image continuation: accepted=%llu refused=%llu; source writes require current matching scene provenance",
             (unsigned long long)s.hdrCopiesAccepted,(unsigned long long)s.hdrCopiesRefused);
         Log::get().note("flat menu HDR copy: accepted=%llu refused=%llu; source requires current scene/depth/camera provenance",
@@ -1137,7 +1165,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 } else {if(s.projectionFrames) {++s.projectionUnknown;projectionDetail(s,k.vs,k.ps,0,100,"actual-shader-mismatch");}failPhase(s,"unchanged-shader-mismatch");}
             }
             else if(k.depth && (k.depth==s.namedDepth || k.depth==s.phaseDepth.Get())) {
-                captureUnknownProjection(s,k.vs,k.ps);
+                captureUnknownProjection(s,k);
                 if(s.projectionFrames) {++s.projectionUnknown;projectionDetail(s,k.vs,k.ps,0,101,"unknown-scene-projection-recipe");}
                 failPhase(s,"unknown-scene-projection-recipe");
             }

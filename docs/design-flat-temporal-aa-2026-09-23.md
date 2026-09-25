@@ -4,26 +4,16 @@
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
   before qualification. Main `c9cab91e` is included as requested (section 37).
-  Section 27's solar/smoke bindings establish the earlier star scene, and
-  section 26 rejects scene-camera equality as a jitter precondition. Section 28
-  implements experimental live jitter with scoped projection bindings and
-  warm-up/recovery policy. Latest verified flight `5c78c34d` has zero unknown
-  projection pairs in flight and 6,767 accepted HDR continuations, but no
-  applied jitter or continued history (section 33). Invalid jitter-phase
-  history drives all resets; adapter depth/color/frame-gap counters are zero.
-  The first-12 refusal limit hid the flight's reasons. Bounded per-reason
-  summaries now preserve them without weakening the gate. Section 34 adds flat
-  onscreen AA/preset controls. Verified Epic `cada07f0` now treats 5,745 menu
-  frames with live jitter, 5,714 history continuations and zero backend
-  failures (section 37). Its menu HDR copy has 5,760 acceptances and zero
-  refusals. Sean sees only a slight shimmer improvement, concentrated on ship
-  surface details. Per-pixel motion and output coverage remain unmeasured; the
-  healthy runtime counters do not establish visual quality. Two older shader
-  pairs still lack creation bytes; the current menu audit has no unknown pairs.
-  Epic cockpit capture `f6c59ba6` proves all three viewport failures are known
-  HDR passes at full extent with depth range 0..0 (section 39). They reset
-  history every frame. Align their projection qualification with HDR admission;
-  keep source selection strict. Menu success does not qualify the cockpit.
+  Epic `0846a1f7` verifies the HDR viewport correction: all three passes
+  prepare in 900/900 cockpit audit frames, all 136,260 viewport checks match
+  and live jitter/history continue (section 40). Later, frame 36424 introduces
+  one unknown draw per frame and continuous resets. Its identity was lost
+  because the 900-frame audit ended 4.433 seconds earlier. Capture first-seen
+  unknown pairs outside the audit window, bounded and deduplicated, before
+  changing shader admission. Sections 26-28 document camera ownership and
+  jitter; sections 34-37 cover F8 and successful menu treatment. Menu surface
+  shimmer remains unqualified at pixel level (section 39); frame counters alone
+  do not establish reconstruction quality.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -45,8 +35,9 @@
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
   constants or camera-equality labels. The main merge passed full validation
-  and promotion. Qualify the evidenced cockpit HDR viewport correction in
-  section 39. Menu surface shimmer separately needs matched output/motion and
+  and promotion. The cockpit HDR viewport correction is verified; use bounded
+  first-occurrence evidence to identify the later unknown draw (section 40).
+  Menu surface shimmer separately needs matched output/motion and
   rejection-mask evidence; that capture proves sustained treatment. The passive
   selector still refuses the menu copy; its diagnostic verdict is not the live
   runtime verdict. No headset is needed; VR still needs regression tests.
@@ -2231,3 +2222,41 @@ same cockpit F10 capture. Verify the three passes prepare, viewport mismatch
 counts stay zero, jitter becomes live and history continues. Watch camera turns
 near the star for the previously reported corona smear. Further menu quality
 investigation is separate from this confirmed cockpit blocker.
+
+## 40. Cockpit viewport fix verified; capture timing gap, 2026-09-25
+
+Epic `edvr_gfx_20260925_050806.log` matches `0846a1f7`, build `6AB655A8`. The
+05:10:03.479 F10 audit completes at 05:10:13.505: all 136,260 viewport checks
+match, 138,060 projection candidates prepare, zero are refused, 186 are
+depth-unassociated and zero unknown shader pairs are observed. Each of the
+three formerly rejected HDR shader pairs prepares in all 900 frames. Live
+jitter and history continuation persist through 05:10:17.204; the longest
+uninterrupted history run reaches 1,757 frames. Backend failures remain zero.
+
+At 05:10:17.938, frame 36424, a new unknown projection draw invalidates the
+jittered frame, which is recovered spatially. Subsequent frames reset history
+with zero jitter: exactly one unknown-recipe failure per treated frame. This
+persists while passive selection still finds the same scene HDR/depth/camera
+buffer resources at 1920x1080, with 2560x1440 output. The scene exit is later,
+around 05:10:48.502, so this is not just an exit-transition artifact.
+
+Ruled out: the depth-clamped HDR viewport still blocks cockpit accumulation,
+because all three passes prepare and every audited viewport matches, with
+sustained live jitter and history. The later refusal has a different reason.
+
+The diagnostic had a timing gap: `captureUnknownProjection` returned whenever
+the 900-frame audit was inactive. At about 90 fps, the detailed audit lasted 10
+seconds despite asking Sean to remain for 30 seconds. This unknown arrived
+4.433 seconds after the audit ended. Later passive payloads were suppressed by
+the focused compute probe, and there are no DC/DCO census lines. No exact VS/PS
+identity or creation bytes for this failure can be recovered from the log or
+on-disk shader cache. One creation-cache drop is reported; availability of
+unidentified shader bytes must not be assumed.
+
+Next diagnostic: collect bounded, deduplicated first-seen unknown projection
+pairs even outside the manual audit, request retained exact bytecode once, and
+identify automatic versus F10 evidence explicitly. Keep shader admission and
+history refusal unchanged. This avoids depending on F10 timing to find a new
+material. Next Epic run keeps DLSS K and SS 0.75, and includes the view or
+motion that exposed the later failure. Visual quality and the menu rejection
+mask remain separate open questions.
