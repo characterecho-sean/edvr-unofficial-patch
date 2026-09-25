@@ -110,6 +110,9 @@ constexpr int kMenuMaxGraphs = 2;
 // Everything the panel shows, as text. The model builds one of these on
 // every change; the raster lays it out.
 struct MenuContent {
+    // A one-line FPS readout drawn at the top of the menu card when the user
+    // has locked the overlay to the menu, so both are visible for A/B testing.
+    char     overlayLine[120];
     // The tabs the strip shows: a window of the pages that fits the panel,
     // `activeTab` indexing THIS array. An arrow at either end says there
     // are pages that way.

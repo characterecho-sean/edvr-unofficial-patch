@@ -241,6 +241,7 @@ struct State {
     // down: re-anchored to the head every frame, re-rasterised twice a
     // second.
     bool     overlay = false;
+    bool     overlayLock = false;
     float    overlayYaw = 0.0f;
     float    overlayPitch = -16.0f;
     bool     overlayUp = false;
@@ -1855,6 +1856,15 @@ void buildContent(MenuContent& c) {
     memset(&c, 0, sizeof(c));
     c.popupLine = -1;
     sizeContent(c, s.widthDeg, s.textDeg, tooltipsOn());
+
+    // If the FPS overlay is locked to the menu, show the same readout at the
+    // top of the menu panel so both are visible for A/B testing.
+    if (s.overlay && s.overlayLock) {
+        char line[120];
+        perfMonitorOverlayLine(line, sizeof(line));
+        strncpy(c.overlayLine, line, sizeof(c.overlayLine) - 1);
+        c.overlayLine[sizeof(c.overlayLine) - 1] = 0;
+    }
 
     // The tab strip: a window of pages that fits the panel, always
     // including the current one, with an arrow at whichever end has more.
@@ -3506,14 +3516,22 @@ void menuConfigure(Config& cfg) {
     s.toasts = cfg.getBool("menu.toasts", true);
     {
         const bool ov = cfg.getBool("menu.fps_overlay", false);
+        const bool ovLock = cfg.getBool("menu.fps_overlay_lock", false);
         float yaw = cfg.getFloat("menu.fps_overlay_yaw", 0.0f);
         float pitch = cfg.getFloat("menu.fps_overlay_pitch", 20.0f);
         if (!(yaw >= -60.0f) || yaw > 60.0f) yaw = 0.0f;
         if (!(pitch >= -45.0f) || pitch > 45.0f) pitch = 20.0f;
         if (s.configured && ov != s.overlay) {
             Log::get().note("menu: the frame-rate overlay is %s.", ov ? "on" : "off");
+            if (s.open && (ovLock || s.overlayLock)) s.contentDirty = true;
+        }
+        if (s.configured && ovLock != s.overlayLock) {
+            Log::get().note("menu: the frame-rate overlay is %s while the menu is open.",
+                            ovLock ? "locked on" : "no longer locked");
+            if (s.open && ov) s.contentDirty = true;
         }
         s.overlay = ov;
+        s.overlayLock = ovLock;
         s.overlayYaw = yaw;
         s.overlayPitch = pitch;
     }
@@ -3935,6 +3953,12 @@ void menuTick(ID3D11Device* dev) {
             Page& p = s.pages[s.page];
             if (p.status && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
                 s.statusRefreshMs = stampMs();
+                s.contentDirty = true;
+            }
+            // The locked FPS readout refreshes at the same cadence as the
+            // head-locked overlay: twice a second, cheaply.
+            if (s.open && s.overlay && s.overlayLock && dueMs(s.overlayTextMs, 500)) {
+                s.overlayTextMs = stampMs();
                 s.contentDirty = true;
             }
             if (s.contentDirty) {
