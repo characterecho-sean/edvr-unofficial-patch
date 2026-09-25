@@ -1359,6 +1359,12 @@ bool     g_holoIsWorldMarker = false;   // matched kHoloWorldMarkers, not the co
 // without ever blocking on the GPU (never awaited: polled with
 // DONOTFLUSH, a later frame's poll picks up a query still pending).
 constexpr uint32_t kHoloQueryRing = 3;
+// A dark pixel the near-light test covers lands here, not at the
+// element's own depth: 1% inside the cockpit radius, still on the
+// temporal pass's HEAD path (temporal_pass.cpp splits head from world at
+// g_shipMetres, the same advanced.temporal_aa_ship_metres key and value
+// as g_cockpitMetres here), with rounding to spare.
+constexpr float kHoloFillerFraction = 0.99f;
 struct HoloScratch {
     ID3D11Texture2D*           contribTex = nullptr;
     ID3D11RenderTargetView*    contribRtv = nullptr;
@@ -1372,6 +1378,7 @@ struct HoloScratch {
     uint32_t                   preparedFrame = ~0u;          // g_frame at the last prepare
     uint32_t                   declinedProjectionFrame = ~0u; // counted once per eye-frame
     float                      radiusDepth = 0.0f;    // reversed-Z device value AT the cockpit radius, this eye/frame
+    float                      fillerDepth = 0.0f;    // AT kHoloFillerFraction of the cockpit radius, this eye/frame
     bool                       linearBlend = false;    // the game's own RTV0 view was sRGB (fallback floor only)
     // The game's own RT0 resource, tracked so the SHARE test can read it
     // back in its own space -- never the tonemapped display image, which
@@ -1479,10 +1486,12 @@ ID3D11Buffer*       g_holoResolveCbBuf = nullptr;
 // floorValue/share/flags/radiusDepth.
 ID3D11ComputeShader* g_holoNearLightCs = nullptr;
 bool                 g_holoNearLightTried = false;
-// radiusDepth feeds the resolve's cockpitRange (the dark-pixel test). The
-// struct stays 16 bytes, the multiple a D3D11 constant buffer's ByteWidth
-// must be.
-struct HoloResolveCb { float floorValue, share; uint32_t flags; float radiusDepth; };
+// radiusDepth feeds the resolve's cockpitRange (the dark-pixel test);
+// fillerDepth is what a covered dark pixel writes instead of the
+// element's own depth. The struct stays a multiple of 16
+// bytes, what a D3D11 constant buffer's ByteWidth must be.
+struct HoloResolveCb { float floorValue, share; uint32_t flags; float radiusDepth; float fillerDepth, pad0, pad1, pad2; };
+static_assert(sizeof(HoloResolveCb) == 32, "HoloResolveCb must match its HLSL cbuffer's own 32 bytes");
 // A matched world marker's projection pair (uiDepthHologramElementDepthBegin),
 // in its own 16-byte buffer, separate from the resolve's.
 struct HoloMarkerDepthCb { float projA, projB, pad0, pad1; };
@@ -1683,12 +1692,14 @@ bool holoScratchPrepare(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t 
         }
         return false;
     }
+    const float fillerDepth = temporalPassDepthAt(g_cockpitMetres * kHoloFillerFraction);
     const FLOAT zero[4]{};
     vScreenClearRenderTargetViewRaw(ctx, s.contribRtv, zero);
     ctx->ClearDepthStencilView(s.depthDsv, D3D11_CLEAR_DEPTH, 0.0f, 0);
     ctx->ClearDepthStencilView(s.radiusDsv, D3D11_CLEAR_DEPTH, radiusDepth, 0);
     s.preparedFrame = g_frame;
     s.radiusDepth = radiusDepth;
+    s.fillerDepth = fillerDepth;
     return true;
 }
 
@@ -1850,34 +1861,42 @@ constexpr char kHoloResolveVsHlsl[] =
 // it at any range, and so does a cockpit family's far fragment (the sun's
 // corona), harmlessly: cockpitRange (radiusDepth, below) is false for it.
 //
-// A dark pixel (the displayed colour never clears the floor) NEAR a
+// A dark pixel (the displayed colour never clears the floor) near a
 // cockpit-range element's own light -- its own block of the near-light
-// map (below), or one of that block's 8 neighbours -- still takes its
+// map (below), or one of that block's 8 neighbours -- takes a FILLER
 // depth, skipping the share test: it is the gap between glyphs on a
 // panel, or between rows of text, and giving it the sky's depth instead
-// of its own panel's is what made rolling text blur (flight
+// of a near one is what makes rolling text blur (flight
 // 20260924_175113/20260925_050051 -- the gaps carry the sky's motion,
 // glyphs the panel's, and a natural near-zero-world-motion frame in the
-// same dump read crisp because the two motions briefly matched). Round 6
-// covered a dark pixel anywhere in cockpitRange, with no distance limit;
-// a HUD element's null-PS element-depth footprint reaches well past what
-// it actually draws, so that covered open sky too, which swims under
-// head translation while the HUD's own light does not (flight
-// 20260925_080452) -- the near-light map (below) is what narrows this
-// back to the gaps between glyphs. Far dark fragments are still excluded
-// by cockpitRange before the near-light test ever runs, so the corona
-// still cannot claim dark pixels (the bracket-history regression of
-// 2026-09-09 this guards against). A bright pixel still needs the share
-// test it always did, unaffected by any of this, so a bright background
-// showing through a translucent gap (a star, a lit station behind a
-// panel) is still excluded on its own light, not the element's.
+// same dump reads crisp because the two motions briefly matched). Under
+// roll the filler keeps the gap moving with the cockpit, not the sky,
+// while sitting just inside the cockpit radius -- behind the element's
+// own depth -- so DLSS still finds a real depth edge at the glyphs
+// themselves. Writing the element's own depth into the gap instead (a
+// hangar's station text, dumps 115012 pass-on/115037 pass-off) put the
+// whole gap a median 1 mm nearer than the letters, on depth-path motion
+// 0.17 px/frame off the letters' exact record motion, and DLSS resolved
+// gap and glyph as one flat slab that doubled and bolded the strokes. Far dark fragments are
+// still excluded by cockpitRange before the near-light test ever runs,
+// so the corona still cannot claim dark pixels (the bracket-history
+// regression of 2026-09-09 this guards against). GREATER
+// (holoElementDepthState) leaves a nearer real scene surface alone --
+// that hangar's gaps keep the console at 3.9 m, as they read pass-off --
+// so the filler only lands where the private copy already holds
+// something farther: sky, or far world. A bright
+// pixel still needs the share test it always did, unaffected by any of
+// this, so a bright background showing through a translucent gap (a
+// star, a lit station behind a panel) is still excluded on its own
+// light, not the element's.
 constexpr char kHoloResolvePsHlsl[] =
     "Texture2D<float4> Contribution : register(t0);\n"
     "Texture2D<float> ElementDepth : register(t1);\n"
     "Texture2D<float4> Target : register(t2);\n"
     "Texture2D<float4> Display : register(t3);\n"
     "Texture2D<float> NearLight : register(t4);\n"
-    "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth; };\n"
+    "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth;\n"
+    "                                       float fillerDepth; float pad0; float pad1; float pad2; };\n"
     "float3 srgbEncode(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055; }\n"
     "void main(float4 pos : SV_POSITION, out float depth : SV_Depth) {\n"
     "    int3 p = int3(int2(pos.xy), 0);\n"
@@ -1908,13 +1927,16 @@ constexpr char kHoloResolvePsHlsl[] =
     "            if (NearLight.Load(int3(nb, 0)) > 0.5) near = true;\n"
     "        }\n"
     "        if (!near) discard;\n"
-    "    } else if (haveTarget) {\n"
-    "        float3 f = max(Target.Load(p).rgb, 0.0);\n"
-    "        float lumaE = dot(e, float3(0.299, 0.587, 0.114));\n"
-    "        float lumaF = dot(f, float3(0.299, 0.587, 0.114));\n"
-    "        if (lumaE < share * lumaF) discard;\n"
+    "        depth = fillerDepth;\n"
+    "    } else {\n"
+    "        if (haveTarget) {\n"
+    "            float3 f = max(Target.Load(p).rgb, 0.0);\n"
+    "            float lumaE = dot(e, float3(0.299, 0.587, 0.114));\n"
+    "            float lumaF = dot(f, float3(0.299, 0.587, 0.114));\n"
+    "            if (lumaE < share * lumaF) discard;\n"
+    "        }\n"
+    "        depth = d;\n"
     "    }\n"
-    "    depth = d;\n"
     "}\n";
 
 // Fills the near-light map the resolve above reads: one group per 8x8
@@ -1934,7 +1956,8 @@ constexpr char kHoloNearLightCsHlsl[] =
     "Texture2D<float4> Target : register(t2);\n"
     "Texture2D<float4> Display : register(t3);\n"
     "RWTexture2D<float> NearLight : register(u0);\n"
-    "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth; }\n"
+    "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth;\n"
+    "                                       float fillerDepth; float pad0; float pad1; float pad2; }\n"
     "float3 srgbEncode(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055; }\n"
     "groupshared uint lightAny;\n"
     "[numthreads(8,8,1)] void main(uint3 id : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {\n"
@@ -3964,7 +3987,7 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
     if (!haveDisplay) ++g_holoWindowFloorFallback;
     const uint32_t flags = (s.linearBlend ? 1u : 0u) | (haveTarget ? 2u : 0u) |
                            (haveDisplay ? 4u : 0u) | (displaySrgb ? 8u : 0u);
-    const HoloResolveCb data{g_holoFloor, g_holoShare, flags, s.radiusDepth};
+    const HoloResolveCb data{g_holoFloor, g_holoShare, flags, s.radiusDepth, s.fillerDepth, 0.0f, 0.0f, 0.0f};
     vScreenUpdateSubresourceRaw(ctx, cb, 0, nullptr, &data, 0, 0);
     // The near-light map, filled once per eye before the resolve's own
     // draw below (round 7), from the same four inputs and the same CB:

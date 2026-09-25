@@ -4,17 +4,22 @@
 
 - **State (2026-09-25):** the holograms, the radar, the distance digits
   and the weapons-panel text are FIXED and flown (`## Round history`
-  below). Round 8 BUILT, NOT FLOWN:
+  below). Round 8 (411751ec) is flown in the hangar only, so the
+  triangles are untested:
   - the target reticle's triangles (vs `71DD8B8B09060A81` writes z = 0
     but keeps a real w) take depth = a + b / w from an EDVR pixel shader
     matched to that VS's output signature (the rig proved on WARP that a
     D3D11 pixel shader's SV_Position.w is that clip w, not 1/w);
   - the near-light pass runs one thread per pixel; one thread scanning
     each 8x8 block serially cost ~0.3 ms/frame in round 7.
+
+  Round 9 IN PROGRESS: the HUD smear's cause is FOUND (eye dumps
+  115012/115037). Rounds 6 and 7's dark rule stamps the gaps around text
+  at the element's own depth, flattening glyph-shaped depth into a slab
+  whose motion is slightly off. A dark gap now takes a filler depth just
+  inside the cockpit radius. The existing GREATER test leaves any scene
+  surface nearer than that alone.
 - **Open:**
-  - The HUD smears under ship and head motion (flight 20260925_103225).
-    Round 7 behaves as designed in that dump, but its camera rows were
-    rejected on 10 of 16 crops. Unassigned until the on/off A/B below.
   - Which of the five radar-contact families paints the bars (listed
     from the draw ledger, not individually confirmed).
   - Target markers on a target inside 10 m: the holo material draws them
@@ -29,18 +34,20 @@
   its nearest depth. Once per eye, before the temporal pass reads the
   private AA depth copy, a resolve stamps that depth where the displayed
   pixel clears the floor and the element supplies at least `share` of
-  the game's own HDR light there. A dark pixel within the cockpit radius
-  takes it only where its own near-light block or a neighbour holds the
-  element's light. The lists: `## Families` below.
+  the game's own HDR light there. A dark pixel of a cockpit element is
+  covered only where its own near-light block or a neighbour holds the
+  element's light, and from round 9 at a filler depth just inside the
+  radius, not the element's. The lists: `## Families` below.
 - **Ruled out:** `## Ruled out` below, plus the `ruled out:` lines in the
   flight entries.
 - **Next flight** (Frontier, Pimax OpenXR, the log's build line naming
-  round 8):
-  1. A target locked, flying toward it and turning: the reticle's
-     triangles should stay sharp. An eye dump if they do not.
-  2. The HUD-smear manoeuvre with `advanced.temporal_aa_hologram_depth`
-     on, then off (live). If the smear stays with it off, it belongs to
-     the camera path or the upscaler, not this arc.
+  round 9):
+  1. Docked in the hangar, the same head motion with the pass on: the
+     station text should be as crisp as with it off. An eye dump.
+  2. In space, rolling with the weapons panel over sky: the text must
+     stay crisp (round 6's gain must survive the filler). An eye dump.
+  3. A target locked, flying toward it and turning: the reticle's
+     triangles should stay sharp.
 
   Read these log lines:
   - the 30 s census's `world markers N draws/frame, element-depth
@@ -365,6 +372,117 @@ motion") and eye_103612 (the triangles on a targeted ship).
   GPU. The near-light pass took "hologram resolve+celestial" from ~0.04
   to 0.32 ms/frame (one thread per block, serial); round 8 makes it one
   thread per pixel.
+
+## Flight 20260925_112335 (411751ec: round 8), docked in a hangar
+
+- Right build (v0.18.0-rc.1-20-g411751ec). Only the hangar was flown, so
+  round 8's triangles are untested (no target).
+- EDVR's depth probe lost the scene depth around 11:25:30 and found it
+  again at 11:26:08 ("the scene's depth is in hand"). The hologram
+  resolve never ran in between: that window's census shows 0 resolved
+  and 0 declined. From 11:26:08 the passes ran (GPU census: hologram
+  passes 21.5 calls/frame, resolve 1.85/frame) until Sean turned
+  `advanced.temporal_aa_hologram_depth` off at 11:26:31.
+- Sean: docked, head moving, the HUD smears with the pass on, and
+  turning it off fixes it. The smear belongs to this pass.
+- ruled out: the camera rows (or the eye dump's own hitch) as the cause
+  of the HUD smear, because it follows the pass's live key with the ship
+  docked and only the head moving.
+- The DLSS reset Sean saw: two fresh history starts (one per eye)
+  between 11:25:55 and 11:26:15. That is the moment the depth returned
+  and the game camera flipped (11:26:02-04, 11:26:08). The log names no
+  cause.
+- Cost: "hologram resolve+celestial" read 0.177 ms/frame at 1.85
+  calls/frame over the hangar window. Round 7 read ~0.32 in flight, a
+  different scene, so this is not yet a clean comparison.
+- Open hypotheses for the smear:
+  - (a) see-through: a panel is translucent, so the lit hangar seen
+    through it takes the panel's motion (0.6 m parallax) instead of its
+    own (~20 m). Over black sky nothing behind it can smear;
+  - (b) the stamped foreground depth reaches the upscaler's depth input
+    or EDVR's occlusion rejection, which drops history along the panel's
+    edges as the head moves.
+
+  The discriminating evidence is a hangar dump pair, on then off, with
+  the head translating.
+- Code (read-only trace, 2026-09-25):
+  - The temporal shader merges its depths, `max(Z, ZS, ZUI)`
+    (`temporal_shader_source.h:275`); ZUI is the private copy the
+    stamps land in. That merged depth drives `mv()`, and so the ship
+    split at 10 m and the engine-record ownership test (a record whose
+    depth does not match bit for bit is refused as stale). It is also
+    written out as the upscaler's depth input (`ZC`, line 1053).
+  - `backgroundHistoryHidden` (lines 521-541) compares last frame's
+    merged depth around the reprojected position with this frame's. When
+    something was nearer before, it writes an out-of-range motion
+    vector, a history reset for that pixel. Both sides include the
+    stamps, so a see-through layer moving over the background resets the
+    pixels its edges uncover, by construction.
+- Existing dumps confirm (b) happens. A reset shows in the MV input as
+  the sentinel. Counting the 6 px band just outside stamped pixels
+  (Z nearer than SceneZ) against pixels beyond 24 px of any stamp:
+
+  | dump | band reset/frame | far reset/frame |
+  |---|---|---|
+  | 103612 (r7) | 1.07% by holo, 1.56% by dark stamps | 0.003% |
+  | 103555 (r7) | 3.26% by holo, 12.74% by dark stamps | 1.64% |
+  | 080707 (r6) | 0.82% / 0.65% | 0.004% |
+  | 050423 (r5) | 5.42% by holo | 0.96% |
+  | 185339 (r5) | 0.04% by holo | 0.03% |
+
+  The far rates in 103555 and 050423 are the camera-row trouble those
+  dumps also caught. "Dark stamps" are stamped pixels with no hologram
+  contribution: rounds 6 and 7's dark rule, plus a few UI stamps.
+  Whether (a) or (b) is what Sean sees in the hangar waits on that
+  dump pair.
+
+## Eye dumps 115012 (on) / 115037 (off), docked, head moving
+
+Same session and build (411751ec), flight 20260925_114704: the pass on
+for eye_115012, then off at 11:50:31 for eye_115037. The station
+information text beside the station hologram ("MACLEOD MARKET ...") is
+the smear.
+
+- The output is doubled and bolded with the pass on, even though the
+  head was nearly still in that frame (0.23 deg/frame). With the pass
+  off it is crisp at 0.67 deg/frame and an MV median of 11.8 px/frame.
+  DLSS's own output (`DlssBeforeUi`) already shows it, and the game's
+  input frame does not.
+- On the letters themselves nothing differs between the two dumps. Both
+  are 100% UI-stamped at 1.60 m (the UI depth pass, not this one), with
+  the same UI and bias masks, 0 resets, and exact panel motion (a
+  `holoPixel` record claim).
+- What differs is the dark gaps around the letters. 75% are stamped with
+  the pass on, against 11% (UI stamps) with it off. All of them are the
+  DARK branch: display <= floor, median 7/255, none from the bright
+  branch. They sit at the element's depth, a median 1 mm NEARER than the
+  letters. They take motion from the depth path, 0.17 px/frame off from
+  the letters' exact record motion (the UI stamps in the off-dump match
+  the letters to 0.00 px). With the pass off, the gaps are the console
+  at 3.9 m behind the text.
+- Depth DLSS receives: with the pass on, a flat, blocky slab where the
+  letters no longer show, with frame-to-frame changes at its 8 px block
+  edges. With the pass off, letter-shaped depth: glyphs at 1.6 m against
+  the console at 3.9 m.
+- ruled out: history resets as the hangar text smear, because the text
+  box holds 0 resets in eye_115012.
+- ruled out: the background showing through the panel (a) as the hangar
+  text smear, because the letters themselves double while their depth,
+  motion and masks match the off-dump.
+- Cause: rounds 6 and 7's dark rule. It writes the element's own depth
+  into the gaps, which erases the depth edge DLSS uses to keep a
+  letter's history apart from its surroundings. Those gaps then carry a
+  motion that differs slightly from the letters' exact one, and DLSS
+  bleeds it into the strokes. In the off-dump the gaps' motion differs
+  more (0.5 px/frame, parallax to 3.9 m), but a 2.3 m depth edge keeps
+  the text crisp.
+- Round 9 (below, Status): a dark gap takes a filler depth just inside
+  the cockpit radius instead of the element's own. Under roll it still
+  moves with the cockpit, not the sky, which was round 6's purpose, and
+  it stays behind the element, so a depth edge remains. The resolve's
+  existing GREATER test leaves any scene surface nearer than the filler
+  alone, such as the console at 3.9 m. There the gap keeps the depth and
+  motion it had with the pass off.
 
 ## Decisions, 2026-09-24
 

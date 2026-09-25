@@ -378,6 +378,10 @@ int main() {
     };
     constexpr float kNear5m = 0.005f;    // 0.025 / 5
     constexpr float kNear50m = 0.0005f;  // 0.025 / 50, beyond the 10 m radius
+    // Not constexpr: reads g_cockpitMetres, set just above. The live call
+    // (not a hand-computed literal) is what a covered dark pixel writes
+    // now instead of its element's own depth (round 9).
+    const float kFillerDepth = temporalPassDepthAt(g_cockpitMetres * kHoloFillerFraction);
     // A world marker hash never in g_holoMarkerDepthShaders, for the
     // fallback cases -- any value but kHoloWorldMarkerReticle's own.
     constexpr uint64_t kHoloUnlistedMarker = 0x1111111111111111ull;
@@ -385,10 +389,8 @@ int main() {
     // T1/T2: a listed quad at cockpit depth (5 m, inside the radius) over
     // far scene depth (0 = reversed-Z far, "the sky") -- SRC_ALPHA/ONE,
     // alpha 1: bright left half (0.5) clears the 0.05 floor, dim right
-    // (0.02) does not -- round 6 changed T2 to cover it (dark but
-    // cockpit-range); round 7 keeps that outcome here specifically
-    // because the bright left half is real light in the very same
-    // (only, 8x8) near-light block T2's dark pixel is in.
+    // (0.02) does not, but is near-light covered (real light in the very
+    // same, only, 8x8 block) so it takes the filler depth, not T1's own.
     {
         const float left[4] = {0.5f, 0.5f, 0.5f, 1.0f}, right[4] = {0.02f, 0.02f, 0.02f, 1.0f};
         originalDraw(kNear5m, left, right, blendSrcAlphaOne.Get(), false, kBlack, true);
@@ -396,7 +398,7 @@ int main() {
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (T1/T2)");
         auto values = privateDepth();
         check(std::fabs(values[1] - kNear5m) < 1e-5f, "T1: bright half above the floor gets the element depth");
-        check(std::fabs(values[6] - kNear5m) < 1e-5f, "T2: dark fringe near the bright half's light still gets it too");
+        check(std::fabs(values[6] - kFillerDepth) < 1e-5f, "T2: dark fringe near the bright half's light gets the filler depth");
     }
 
     // Alpha regression: (1,1,1, a=0.01) under SRC_ALPHA/ONE contributes
@@ -700,12 +702,12 @@ int main() {
         g_holoFloor = savedFloor;
     }
 
-    // Dark-pixel cockpit-range coverage (round 6): a panel with a bright
-    // "glyph" half and a literal black "gap" half, within the cockpit
-    // radius -- both take the panel's own depth now, where the gap used
-    // to leave the sky's. (T2 above uses a near-black 0.02 fringe instead,
-    // for the floor threshold itself; this is the literal glyph/gap
-    // scenario flight 20260924_175113/20260925_050051 named.)
+    // Dark-pixel cockpit-range coverage: a panel with a bright "glyph"
+    // half and a literal black "gap" half, within the cockpit radius --
+    // the glyph keeps the panel's own depth, the gap the filler, where it
+    // used to leave the sky's. (T2 above uses a near-black 0.02 fringe
+    // instead, for the floor threshold itself; this is the literal
+    // glyph/gap scenario flight 20260924_175113/20260925_050051 named.)
     {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
@@ -713,8 +715,13 @@ int main() {
         originalDraw(kNear5m, glyph, gap, blendSrcAlphaOne.Get(), false, kBlack, true);
         listedReissue();
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (glyph/gap, cockpit range)");
-        for (float v : privateDepth())
-            check(std::fabs(v - kNear5m) < 1e-5f, "glyph/gap: both the bright glyph and the black gap are covered within the cockpit radius");
+        auto values = privateDepth();
+        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
+            const float expected = x < 4 ? kNear5m : kFillerDepth;
+            check(std::fabs(values[y * 8 + x] - expected) < 1e-5f,
+                  x < 4 ? "glyph/gap: the bright glyph keeps the panel's own depth within the cockpit radius"
+                        : "glyph/gap: the black gap near it takes the filler depth within the cockpit radius");
+        }
     }
 
     // The same panel beyond the radius: the glyph is not covered (its
@@ -750,10 +757,10 @@ int main() {
     // pixel already in the scene, in the gap half -- the star itself
     // must still fail the share test (its brightness is not this
     // element's own light), while the genuinely dark gap pixels around
-    // it, near the glyph's real light in the same near-light block, are
-    // covered. Round 7: the element needs its own real light SOMEWHERE
-    // for near-light to cover anything at all (a uniformly dark quad, as
-    // this was through round 6, no longer qualifies -- see the alpha
+    // it, near the glyph's real light in the same near-light block, take
+    // the filler depth (the glyph itself keeps the element's own). The
+    // element needs its own real light SOMEWHERE for near-light to cover
+    // anything at all (a uniformly dark quad does not -- see the alpha
     // regression, HDR and sRGB cases above), so the glyph half is what
     // still makes this test meaningful.
     {
@@ -798,21 +805,23 @@ int main() {
         auto values = privateDepth();
         for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
             const bool starPixel = (x == 6 && y == 3);
-            check(std::fabs(values[y * 8 + x] - (starPixel ? 0.0f : kNear5m)) < 1e-5f,
-                  starPixel ? "star: the bright background pixel itself is not covered"
-                            : "star: the glyph and the dark gap pixels near it are covered");
+            const float expected = starPixel ? 0.0f : (x < 4 ? kNear5m : kFillerDepth);
+            const char* label = starPixel ? "star: the bright background pixel itself is not covered"
+                               : x < 4    ? "star: the glyph keeps the element's own depth"
+                                          : "star: the dark gap pixels near the glyph take the filler depth";
+            check(std::fabs(values[y * 8 + x] - expected) < 1e-5f, label);
         }
     }
 
     // The near-light radius, and the round-6 regression it fixes: a wide
     // (48x8, six blocks) panel lit only in its first 4 px (block 0). A
     // dark pixel 12 px from that light (x=15, block 1, block 0's
-    // neighbour) is covered; one 30 px away (x=33, block 4) is not; one
-    // 40 px away (x=43, block 5) is not either -- open sky well outside
-    // the light's own block or its neighbours, the flight 20260925_080452
-    // regression (a sky patch outside the weapons panel's visible frame,
-    // inside its oversized null-PS footprint, stamped by round 6's
-    // unbounded dark-pixel rule).
+    // neighbour) takes the filler depth; one 30 px away (x=33, block 4)
+    // does not, nor one 40 px away (x=43, block 5) -- open sky well
+    // outside the light's own block or its neighbours, the flight
+    // 20260925_080452 regression (a sky patch outside the weapons
+    // panel's visible frame, inside its oversized null-PS footprint,
+    // stamped by round 6's unbounded dark-pixel rule).
     //
     // Every earlier resolve above also queued a near-light census copy,
     // and nothing has polled the ring yet (production polls it every
@@ -884,7 +893,7 @@ int main() {
         check(uiDepthTemporalDepth(kWideW, kWideH, 0, wideScene.Get(), &wideSrv), "near-light radius: private depth published");
         ComPtr<ID3D11Resource> wideRes; wideSrv->GetResource(&wideRes);
         auto wideValues = readDepth(dev.Get(), ctx.Get(), wideRes.Get());
-        check(std::fabs(wideValues[15] - kNear5m) < 1e-5f, "near-light radius: 12 px from light, in its block's neighbour, is covered");
+        check(std::fabs(wideValues[15] - kFillerDepth) < 1e-5f, "near-light radius: 12 px from light, in its block's neighbour, takes the filler depth");
         check(wideValues[33] == 0.0f, "near-light radius: 30 px from light, two blocks further, is not covered");
         check(wideValues[43] == 0.0f, "near-light radius: 40 px from light is not covered -- the round-6 regression case");
         // The near-light census, live, right after the dispatch above:
@@ -900,6 +909,60 @@ int main() {
         if (g_holoNearLightSampleCount) check(g_holoNearLightSamples[0] == 1, "near-light census: exactly 1 of 6 blocks was set");
         ctx->RSSetViewports(1, &vp8);   // restore for every test after this one
         g_holoEye = 0; g_holoW = 8; g_holoH = 8;
+    }
+
+    // The filler depth for a covered dark pixel. GREATER
+    // (holoElementDepthState) means it only lands where the private copy
+    // already holds something farther than the filler (~9.9 m here) --
+    // sky, or a real surface beyond it -- never overwriting a nearer real
+    // scene surface, exactly the pass-off behaviour over a hangar console
+    // 3.9 m behind a HUD panel's gaps (flight dumps 115012/115037).
+    {
+        // (a) A real scene surface behind the element but nearer than the
+        // filler (8 m behind a 5 m element, as the hangar's console at
+        // 3.9 m sat behind its 1.6 m text) keeps its own depth in the
+        // gaps, while the glyph half takes the element's own 5 m. The OLD
+        // rule (the gap writes the element's own depth) FAILS here: 5 m
+        // is nearer than 8 m, so GREATER would have let it through.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        const float scene8m = temporalPassDepthAt(8.0f);
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, scene8m, 0);
+        const float glyph[4] = {0.6f, 0.6f, 0.6f, 1.0f}, gap[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        originalDraw(kNear5m, glyph, gap, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
+              "resolve runs (filler, nearer scene)");
+        {
+            auto values = privateDepth();
+            for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
+                const bool glyphHalf = x < 4;
+                check(std::fabs(values[y * 8 + x] - (glyphHalf ? kNear5m : scene8m)) < 1e-5f,
+                      glyphHalf ? "(a) the glyph in front of an 8 m scene surface takes the element's own depth"
+                                : "(a) a dark gap over a nearer 8 m scene surface keeps the scene's depth");
+            }
+        }
+
+        // (b) and (c): the same element over sky (cleared 0, farther than
+        // both the filler and the element's own 5 m -- 30 m would do
+        // equally). Under the OLD rule (dark pixels write d, the element's
+        // own depth) this gap would read kNear5m (0.005), not the filler
+        // (~0.0025) -- (b) also FAILS if the PS still writes d for a
+        // covered dark pixel.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        originalDraw(kNear5m, glyph, gap, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
+              "resolve runs (filler, over sky)");
+        {
+            auto values = privateDepth();
+            for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
+                const bool glyphHalf = x < 4;
+                check(std::fabs(values[y * 8 + x] - (glyphHalf ? kNear5m : kFillerDepth)) < 1e-5f,
+                      glyphHalf ? "(c) a bright pixel in the same setup still takes the element's own depth"
+                                : "(b) a dark gap over sky, farther than the filler, takes the filler depth");
+            }
+        }
     }
 
     // The family builder covers the eleven built-ins (the holo panel, the
