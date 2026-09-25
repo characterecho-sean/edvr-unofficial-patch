@@ -57,6 +57,13 @@ jitter in a race normally looks like; it reads more like a fixed cadence
 (the overlay's or EDHM's own redraw or poll timer) than a coincidence, and
 might narrow which side owns the next call into the freed module.
 
+2026-09-25: external PR #40 builds the `## Design` fix; changes requested,
+not merged. Two findings from its review, both under `## Not ruled out`:
+the refcount question very likely answers itself against the hypothesis
+(the fix would then be inert for this crash), and the Design's diagnostic
+cannot discriminate as written. A freed overlay hook trampoline is recorded
+there as an alternative cause.
+
 Next flight, if this is picked up: raise `log.max_mb` first so the gfx-side
 log survives to the close (the first flight's didn't; the second did).
 Reproduce once with EDHM's chain target switched to the system `d3d11.dll`
@@ -264,6 +271,28 @@ late call left to land in the unmapped module.
   permanent reference to the same module (see the complication above). Not
   resolved by reading the code; `## Design` proposes a fix that does not
   depend on the answer, plus a diagnostic that would settle it.
+  2026-09-25, PR #40 review: the code points hard at "not the last
+  release". `native_runtime_host.h:2405` calls `systemD3D11CreateDevice()`
+  on every startup, in the same DLL as `NativeDevice`, and its static takes
+  a reference through `openSystemD3D11()` that is never released. If that
+  call succeeds, `FreeLibrary(systemModule_)` cannot drop the module to
+  zero, and removing it cannot change the crash. The Design's diagnostic
+  does not settle this: with the `FreeLibrary` gone, `systemModule_` still
+  holds its own reference when the probe runs, so an
+  `UNCHANGED_REFCOUNT` lookup always finds the module. The discriminating
+  log line is whether that static reference was taken (`pinned=1` refutes
+  the unmap hypothesis from the log alone).
+- A freed hook trampoline instead of an unmapped module. The fault address
+  resolves to "no module", which is also what an overlay's hook trampoline
+  looks like: executable memory allocated outside any DLL. If the Steam
+  overlay unhooks at shutdown and frees its trampolines while a render
+  thread is still calling through one, the stack and the "no module" frame
+  would look the same, and disabling the overlay would stop it, as the
+  third result did. Untested. The separating fact is where the fault
+  address falls: inside System32 `d3d11.dll`'s image range (base plus
+  `SizeOfImage`, which would need logging at startup if it is not already)
+  means the module was unmapped; outside it means something else was
+  freed, such as a trampoline.
 - Whether `stereo.drain()` (`host_owned_graphics_drain`, the stage
   immediately before `host_graphics_reset`) was meant to rule out exactly
   this and has a gap, or only ever covered EDVR's own in-flight XR frame,
