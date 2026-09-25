@@ -7,13 +7,19 @@
   Section 27's solar/smoke bindings establish the earlier star scene, and
   section 26 rejects scene-camera equality as a jitter precondition. Section 28
   implements experimental live jitter with scoped projection bindings and
-  warm-up/recovery policy. Flight `ce715126` confirms the key fix and captures
-  the HDR copy's real image connection (section 30). It treated 809 frames, all
-  reset, with no applied jitter. Both input samples have prior writes naming
-  the HDR scene depth. The implementation now checks every such input write
-  before continuing HDR lineage and adds 29 of this flight's 32 unknown shader
-  pairs. Three pairs and the image-input PS need missing creation bytes; F10
-  now captures newly observed unknown pairs without a hand-maintained list.
+  warm-up/recovery policy. Latest flight `6e9bde74` accepted 1,135 HDR image
+  continuations but no jitter (section 31). The remaining input refusal names
+  exact screen-space PS `FCFAD73924BF45B9` with no b1 camera; its newly
+  captured bytecode does not consume b1. The camera requirement needs a narrow
+  correction for that verified pair. Twenty automatically captured unknown
+  pairs await recipe review. No code changes or new build followed this flight.
+  Earlier flight `ce715126` confirms the key fix and captures the HDR copy's
+  real image connection (section 30). It treated 809 frames, all reset, with no
+  applied jitter. Both input samples have prior writes naming the HDR scene
+  depth. The implementation now checks every such input write before continuing
+  HDR lineage and adds 29 of this flight's 32 unknown shader pairs. Three pairs
+  and the image-input PS need missing creation bytes; F10 now captures newly
+  observed unknown pairs without a hand-maintained list.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -1782,3 +1788,59 @@ recipe tests. Review corrected the prior-conflict fixture expectation and kept
 the original destination witness when input validation also fails. In-game
 continuation and nonzero jitter remain to be verified on the next Epic run;
 missing shader bytes are still an explicit qualification limit.
+
+## 31. Continuation flight and camera-independent input, 2026-09-24
+
+Epic `edvr_gfx_20260924_181446.log` matches `6e9bde74`, version
+`v0.17.0-565-g6e9bde74`, build `6AB5B955`, linked 23:59:17 UTC. Final reported
+totals: 1,135 accepted / 2,391 refused HDR continuations; 6,487 treated frames,
+all reset with longest streak 1; 10,643 refused copies. Jitter is enabled and
+wanted but applied frames/draws/dispatches remain zero. The last jitter-refusal
+total is 291,478.
+
+F10's 900-frame audit reports 621,282 candidates, 618,456 preparations, zero
+preparation refusals, 126 depth-unassociated observations and 96,617 unknown
+draws. Automatic capture saw 20 distinct pairs with no overflow. Use the
+complete-event outcome lines in this exact log for the next recipe inventory;
+do not reuse only the previous flight's list.
+
+The first image-source refusal at frame 37808 names VS `CFA91824129ECBBC` / PS
+`FCFAD73924BF45B9`, format 9, correct scene depth/DSV and full viewport, but
+b1=null and no camera. Both targeted samples, frames 37899 and 37989, show that
+same single input write with no b1. Their HDR destination is otherwise valid.
+The current model wrongly requires a camera even for this camera-independent
+image pass.
+
+Newly captured Epic `edvr_logs/shaders/ps_FCFAD73924BF45B9.dxbc` was
+disassembled with `tools/dxbc_disasm.py`. Its only constant buffer is b2[7]; it
+uses UV coordinates, textures t0/t1/t2, gather/filter operations and a discard.
+It reads no b1 or inverse projection. Its exact VS passes position and UV
+without any constant buffer. A b1 camera requirement therefore tests an unused
+binding, which explains intermittent acceptance when that binding was left over
+from earlier draws.
+
+Next implementation: add an actual-shader-verified, exact-pair exception to the
+format-9 source camera requirement. Keep depth/DSV, format, extent, viewport,
+current-frame write tracking and explicit-write invalidation. Geometry source
+writes still require current matching camera data; track their reference
+separately so a camera-independent first write neither invents a camera nor
+masks later geometry disagreement. Test absent and arbitrary unused b1, mixed
+image/geometry write order, stale/changed geometry camera, and unchanged
+depth/viewport rejection. Mark the exact screen pass projection-inert only
+after confirming both hashes; review the other 19 captured pairs from bytecode
+before adding recipes.
+
+Ruled out: HDR continuation never executes, because its accepted counter
+reached 1,135. Ruled out: this input shader requires a b1 camera, because its
+exact bytecode declares only b2 and its VS declares no CB. This does not
+justify removing camera checks from other input shaders.
+
+Work stopped before source edits: both delegated tasks hit the account usage
+limit. The working tree was clean before recording this entry; the installed
+build remains `6e9bde74`. No new flight is needed before the offline work
+above.
+
+Sean also asks when the main-menu 3D ship view will stop aliasing. Treat it as
+an explicit acceptance scene: verify selected scene, applied jitter and
+continued temporal history there. Do not promise menu AA from flight-only
+evidence or from backend initialization.
