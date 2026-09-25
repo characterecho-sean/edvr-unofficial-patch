@@ -8,12 +8,14 @@
   prepare in 900/900 cockpit audit frames, all 136,260 viewport checks match
   and live jitter/history continue (section 40). Later, frame 36424 introduces
   one unknown draw per frame and continuous resets. Its identity was lost
-  because the 900-frame audit ended 4.433 seconds earlier. Capture first-seen
-  unknown pairs outside the audit window, bounded and deduplicated, before
-  changing shader admission. Sections 26-28 document camera ownership and
-  jitter; sections 34-37 cover F8 and successful menu treatment. Menu surface
-  shimmer remains unqualified at pixel level (section 39); frame counters alone
-  do not establish reconstruction quality.
+  because the 900-frame audit ended 4.433 seconds earlier. Automatic bounded
+  capture in `85bf7652` saves all six shader blobs for three pairs, including
+  the later decal draw 0C4E76889907B963/A90825082F36756E (section 41). This run
+  reaches 3,279 continued-history frames before the later refusal. Sections
+  26-28 document camera ownership and jitter; sections 34-37 cover F8 and
+  successful menu treatment. Menu surface shimmer remains unqualified at pixel
+  level (section 39); frame counters alone do not establish reconstruction
+  quality.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -36,8 +38,8 @@
   for this scene; do not repeat the same flight to fill untouched material
   constants or camera-equality labels. The main merge passed full validation
   and promotion. The cockpit HDR viewport correction is verified; use bounded
-  first-occurrence evidence to identify the later unknown draw (section 40).
-  Menu surface shimmer separately needs matched output/motion and
+  first-occurrence bytecode evidence to qualify the captured pairs (section
+  41). Menu surface shimmer separately needs matched output/motion and
   rejection-mask evidence; that capture proves sustained treatment. The passive
   selector still refuses the menu copy; its diagnostic verdict is not the live
   runtime verdict. No headset is needed; VR still needs regression tests.
@@ -2260,3 +2262,56 @@ history refusal unchanged. This avoids depending on F10 timing to find a new
 material. Next Epic run keeps DLSS K and SS 0.75, and includes the view or
 motion that exposed the later failure. Visual quality and the menu rejection
 mask remain separate open questions.
+
+## 41. Automatic capture identifies decal projection, 2026-09-25
+
+Epic `edvr_gfx_20260925_052051.log` matches `85bf7652`, build `6AB65852`.
+Automatic evidence capture retains three unknown VS/PS pairs, saves all six
+bytecode stages and reports no failures, absent stages or capture overflow. One
+creation-cache drop is unrelated to these successfully retained blobs.
+
+At 05:21:48.932, frame 26972, captures identify
+989E043933A369AB/CE844D87026C684C at q4 on format 23 and
+525D47E3D5E2EFF4/F0BAE053476F8730 at q11 on format 26. These occur in an
+interval with no accepted tone pass and no temporal treatment. Keep their
+failure counts separate from the subsequently treated cockpit scene.
+
+The cockpit runs with live jitter and continued history from 05:22:36 onward,
+apart from one preparation refusal at 05:22:37.651 recovered spatially. It
+reaches 3,279 consecutive history continuations, about 36 seconds at 90 fps,
+with zero backend failures. At 05:23:14.158, frame 34466 q265, the new pair is
+0C4E76889907B963/A90825082F36756E, on format 23 at 1920x1080 with the named and
+phase scene depth and full 0..1 viewport. Its VS and PS blobs are 2,364 and
+6,844 bytes. The first jittered frame recovers spatially; 68 subsequent treated
+frames reset history before the scene has no accepted tone pass. This run does
+not establish that the unidentified draw in `0846a1f7` was the same shader;
+that earlier identity was never captured.
+
+Ruled out: first-occurrence evidence still depends on F10 timing, because all
+three pairs and all six shader blobs were captured automatically without a
+manual audit. The remaining refusal now has exact bytecode to inspect offline.
+
+Disassembly of all six captured blobs establishes three existing recipes:
+
+- 0C4E76889907B963/A90825082F36756E is decal scene geometry. VS instructions
+  37-43 form clip position from CB1[270..273]; 44 copies clip XYW to the
+  pixel-stage screen-coordinate varying and 45 writes SV_Position. The PS
+  divides that varying to sample scene depth and reconstructs from the
+  world-relative ray. Its CB1[277..279] uses are view direction/normal
+  rotation, not an inverse projection. Vertex b1 ForwardColumns at row 270
+  moves both raster position and depth-sampling coordinates coherently.
+- 989E043933A369AB/CE844D87026C684C uses VS instructions 110-113 to write
+  SV_Position from CB0[4..7] by dp4. The PS uses material UV and orientation
+  rows, with no separate projection consumer. Reuse Vertex b0 ForwardDp4 at row
+  4.
+- 525D47E3D5E2EFF4/F0BAE053476F8730 is a texture-neighborhood filter. Its VS
+  has no constant buffer and maps UV to clip position; the PS samples the
+  texture footprint with position-to-UV scale and material/exposure constants.
+  Classify this exact pair as unchanged, without inventing projection rows.
+
+All additions require the captured PS companion. No scene-source or engine
+motion family is added. Regression checks cover both projection recipes,
+unobserved companion rejection, the unchanged pair and decal screen-UV/raster
+jitter agreement. Next Epic run keeps DLSS K and SS 0.75 and repeats the same
+cockpit activity; automatic evidence remains available for any further unknown
+pair. Menu pixel rejection is still unmeasured and is not changed here.

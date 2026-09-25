@@ -22,7 +22,10 @@ inline bool flatProjectionDrawUnchanged(uint64_t vs, uint64_t ps) {
            (vs == 0x53211E8C072CD02Eull && ps == 0xB403F48CB35D9739ull) ||
            // Epic 6e9bde74: VS passes v0 straight to SV_Position; PS has
            // only CB2[7] UV/filter constants and t0/t1/t2 samples.
-           (vs == 0xCFA91824129ECBBCull && ps == 0xFCFAD73924BF45B9ull);
+           (vs == 0xCFA91824129ECBBCull && ps == 0xFCFAD73924BF45B9ull) ||
+           // Epic 85bf7652: VS maps packed UV directly to clip space without
+           // a CB; PS filters texture neighbors with no projection consumer.
+           (vs == 0x525D47E3D5E2EFF4ull && ps == 0xF0BAE053476F8730ull);
 }
 inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps) {
     FlatProjectionRecipes result;
@@ -187,6 +190,17 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x0357BBB2DEE43C1Full: if (ps == 0x222188632125D14Bull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
     case 0x4EF6DDB075A927FAull: if (ps == 0x098C0764D28FC42Cull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     case 0x95D01BA609BF7500ull: if (ps == 0xF10792B40AE3ED42ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    default: break;
+    }
+    // Epic 85bf7652 automatic capture: the decal VS writes the same
+    // CB1[270..273] column sum to SV_Position and the clip-XYW varying
+    // used by its PS to sample depth. The PS reconstructs from interpolated
+    // world position and view-axis CB1[279], not an inverse projection.
+    // The skinned material VS instead writes four CB0[4..7] dot products;
+    // its PS consumes only material UVs and orientation CB1[277..279].
+    if (result.count == 0) switch (vs) {
+    case 0x0C4E76889907B963ull: if (ps == 0xA90825082F36756Eull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x989E043933A369ABull: if (ps == 0xCE844D87026C684Cull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     default: break;
     }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);

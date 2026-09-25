@@ -68,6 +68,7 @@ inline int flatProjectionRecipeTests() {
         {0xE8FDC0D92EEBA6D7ull,0x258B95AC99520C1Full},
         {0x53211E8C072CD02Eull,0xB403F48CB35D9739ull},
         {0xCFA91824129ECBBCull,0xFCFAD73924BF45B9ull},
+        {0x525D47E3D5E2EFF4ull,0xF0BAE053476F8730ull},
     };
     for (const auto& pair : unchanged) {
         expect(flatProjectionDrawUnchanged(pair[0],pair[1]) &&
@@ -110,8 +111,11 @@ inline int flatProjectionRecipeTests() {
         {0x0357BBB2DEE43C1Full,0x222188632125D14Bull,2,FlatProjectionPatchLayout::ForwardDp4,10},
         {0x4EF6DDB075A927FAull,0x098C0764D28FC42Cull,0,FlatProjectionPatchLayout::ForwardDp4,4},
         {0x95D01BA609BF7500ull,0xF10792B40AE3ED42ull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        // Complete automatic capture from Epic 85bf7652.
+        {0x0C4E76889907B963ull,0xA90825082F36756Eull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x989E043933A369ABull,0xCE844D87026C684Cull,0,FlatProjectionPatchLayout::ForwardDp4,4},
     };
-    expect(sizeof(latest)/sizeof(latest[0])==32,"latest supported ordinary pair census size");
+    expect(sizeof(latest)/sizeof(latest[0])==34,"latest supported ordinary pair census size");
     FlatProjectionJitter jitter{};
     expect(flatProjectionJitter(.375f,-.25f,1280,720,jitter),"recipe pixel offset constructed");
     for (const auto& pair : latest) {
@@ -138,6 +142,26 @@ inline int flatProjectionRecipeTests() {
                 rows[2][3]==4 && rows[3][3]==1,"dp4 clip shift preserves depth and W");
         }
     }
+    // Decal VS 0C4E instructions 37..45 emit both raster clip XYZW and
+    // clip XYW for PS A908 instructions 0..2. Exercise perspective W != 1:
+    // both must move by the same pixel offset, without moving clip Z/W.
+    float decalRows[4][4]={{2,0,0,.25f},{0,3,0,-.5f},{0,0,1,1},{.5f,-.25f,.125f,2}};
+    const float decalPoint[4]={.2f,-.3f,4,1};
+    float decalOld[4]{}, decalNew[4]{};
+    for (int col=0;col<4;++col)
+        for (int row=0;row<4;++row) decalOld[col]+=decalPoint[row]*decalRows[row][col];
+    expect(flatJitterForwardColumns(decalRows,jitter),"decal shared clip matrix patched");
+    for (int col=0;col<4;++col)
+        for (int row=0;row<4;++row) decalNew[col]+=decalPoint[row]*decalRows[row][col];
+    const float decalOldUV[2]={.5f*decalOld[0]/decalOld[3]+.5f,-.5f*decalOld[1]/decalOld[3]+.5f};
+    const float decalVarying[3]={decalNew[0],decalNew[1],decalNew[3]};
+    const float decalDepthUV[2]={.5f*decalVarying[0]/decalVarying[2]+.5f,-.5f*decalVarying[1]/decalVarying[2]+.5f};
+    expect(std::abs(decalDepthUV[0]-decalOldUV[0]-jitter.uvX)<.000001f &&
+        std::abs(decalDepthUV[1]-decalOldUV[1]-jitter.uvY)<.000001f &&
+        std::abs(decalNew[0]/decalNew[3]-decalOld[0]/decalOld[3]-jitter.ndcX)<.000001f &&
+        std::abs(decalNew[1]/decalNew[3]-decalOld[1]/decalOld[3]-jitter.ndcY)<.000001f &&
+        decalNew[2]==decalOld[2] && decalNew[3]==decalOld[3],
+        "decal raster and depth lookup receive identical perspective jitter");
     const auto oldCab=flatProjectionDrawRecipes(0x98397963AAEC45D3ull,0xCAB49794BB439D03ull);
     expect(oldCab.count==1 && oldCab.requests[0].slot==1 && oldCab.requests[0].patchCount==1 &&
         oldCab.requests[0].patches[0].layout==FlatProjectionPatchLayout::ForwardColumns &&
