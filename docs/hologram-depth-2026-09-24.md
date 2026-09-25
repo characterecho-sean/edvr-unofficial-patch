@@ -13,12 +13,20 @@
   the UI content tracker; both found their causes (flight
   20260924_175113, below).
 
-  Round 5 BUILT, NOT FLOWN:
-  - UiContent compares 4x4 blocks by hash, not full copies, so the
-    5895x5158 panel carrying the target's digits fits the budget;
-  - world markers get a viewport depth override;
-  - an occlusion census tells whether the triangles' depth comes from
-    the viewport or the vertex shader.
+  Round 5 (c9cab91e) FLOWN 18:50:
+  - FIXED the ghosting digits (UiContent compares 4x4 blocks by hash);
+  - proved the triangles' vertex shader writes z = 0.
+
+  Round 6 BUILT, NOT FLOWN: the weapons-panel blur (flight
+  20260925_050051, below) -- a dark pixel inside a listed element's own
+  footprint, within the cockpit radius, now takes that element's depth
+  instead of discarding on the floor, so gaps between glyphs and rows
+  move with the panel. Far elements keep discarding on cockpitRange, not
+  the floor, so this does not reopen the 2026-09-09 bracket regression;
+  a bright pixel still needs the share test it always did.
+
+  Next (separate from this fix): read the triangles' VS bytecode, then
+  write depth from its clip w (flight 20260924_185058, below).
   `advanced.temporal_aa_hologram_depth` (default on), with
   `advanced.temporal_aa_hologram_families`, `_floor` and `_share`. It runs
   inside `fix.temporal_aa`'s interface depth (`ui_depth.cpp`) and needs it on.
@@ -218,6 +226,64 @@ eye_175314: a friendly ship, MALTE TITZE, at 1.99 km.
 - ruled out: the tracker thrashing through evictions as the digits'
   cause, because the census showed 0 evictions in the frame. The
   surface is declined before any entry is considered.
+
+## Flight 20260924_185058 (c9cab91e, round 5, Frontier, FSR)
+
+- **Digits FIXED.** Sean: "That fixed the numbers!" The block-digest
+  tracker now covers the 5895x5158 panel.
+- **Triangles unchanged**; eye dump eye_185339 shows a Condor at
+  1.21 km. Round 5's diagnostics settle the mechanism:
+  - The first-world-marker line: game viewport depth 0.000..1.000, DSS
+    enable 0, RS DepthClipEnable 1, blend SRC_ALPHA/ONE.
+  - The census: world markers 0.89 draws/frame, element-depth samples
+    p50 0 over 512 passes, with the viewport override in place.
+  - So the triangles' vertex shader writes z = 0 itself.
+  - ruled out: a viewport with MinDepth = MaxDepth = 0 as the cause,
+    because the game's viewport reads 0..1.
+- **Next:** the triangles' VS bytecode. `advanced.glare_shader_dump`
+  was set on disk after launch, so the next launch captures it.
+  - If clip w carries the view distance, a pixel shader matched to that
+    VS's output signature can write the true depth from SV_Position.w.
+  - Elite's VS outputs put SV_POSITION after the user outputs (o3 in
+    vs_F8D8A92E96419901), so a generic SV_Position-only PS would not
+    link.
+  - `scratchpad radar\disasm.py` wraps D3DDisassemble for reading it.
+
+## Flight 20260925_050051 (c9cab91e = tag v0.18.0-rc.1, Frontier, FSR)
+
+Sean: the left-side weapons text "can sometimes go a little blurry"
+when rolling. Eye dump eye_050423, rolling ~1.6 deg/frame. The weapons
+panel ("SECONDARY A", three MULTI-CANNON rows) is holo family, over sky
+through the canopy.
+
+- **Stamping:**
+  - glyphs 100% stamped at 0.6 m, |MV| 0.39;
+  - AA edges 98% stamped;
+  - the dark gaps between glyphs and rows (display < 13/255) only 8%,
+    carrying the sky's motion (|MV| p50 5.0 px).
+- **Sharpness:** across the 16 crops the output text keeps 0.60-0.65 of
+  its input edge strength (99th-percentile gradient), except crops 2-3
+  at 0.70-0.73.
+- **Natural experiment:** crops 2-4 are a camera-registration glitch.
+  - Rows from the "parked" auxiliary camera the transition-flash
+    tracker logs were rejected at 19996 and 19998 (rowsOk 0).
+  - 19997's prev and now were both that camera: a zero delta, accepted.
+  - 19998 then carried that zero.
+  - For those frames the world, the gaps included, moved ~zero like the
+    glyphs, and the text was crisp.
+  - So sky-motion gaps pull glyph history across the motion edge and
+    soften the text; gaps moving with the panel keep it crisp.
+- **Fix, round 6 (BUILT, NOT FLOWN):** dark pixels inside a cockpit-range
+  element's own footprint take its depth. Far elements (the corona,
+  markers at a target) never claim dark pixels; bright pixels keep the
+  share test.
+- **Separate finding, not this arc:** the session's census reads "the
+  camera's delta was dropped on 120 eye-frames as another camera's",
+  about one event every 3.5 s. When a rejected frame is followed by an
+  aux-to-aux zero delta, that zero is accepted and then carried: two
+  frames of wrong world motion during a roll. That belongs to
+  temporal_pass.cpp's registration (after a rejected frame, prev should
+  stay the last accepted rows).
 
 ## Decisions, 2026-09-24
 

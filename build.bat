@@ -1095,8 +1095,11 @@ echo [edvr] === temporal_test.exe ===
 REM The temporal pass's arithmetic (src\common\temporal_math.h): the jitter
 REM sequence and the SIGN of its tangent shift, the pixel-to-direction
 REM mapping on a real headset's lopsided frustum, the rotation deltas from
-REM the runtime's pose and the game's view rows, and the reprojection walked
-REM by hand against a known head turn. Header-only, links nothing from src\.
+REM the runtime's pose and the game's view rows, the reprojection walked
+REM by hand against a known head turn, and the world path's camera gate
+REM replaying eye run 050423's parked camera (a zero from rows a drop left
+REM behind must be carried over, never accepted). Header-only, links nothing
+REM from src\.
 if not exist "%OBJ%\taatest" mkdir "%OBJ%\taatest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\taatest"\ ^
