@@ -5,6 +5,7 @@
 #include "../../src/openxr/eye_capture.h"
 #include "../../src/openxr/immediate_executor.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/gpu_census.h"
 #include <openxr/openxr.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -26,6 +27,13 @@ class InlineExecutor final : public edvr::openxr::ImmediateExecutor {
 };
 
 namespace edvr { void perfMonitorNoteEvent(unsigned, double) {} }
+// The GPU census (issue #38) is cross-cutting; this rig is about the menu
+// panel's own effect, not the census's rotation, so it is stubbed like
+// perfMonitorNoteEvent above.
+namespace edvr {
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
+void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
+}
 
 static bool readPixels(ID3D11Device* d, ID3D11DeviceContext* c,
                        ID3D11Texture2D* src, std::vector<UINT>& out) {

@@ -11,8 +11,10 @@ changes.*
   Application-render GPU timing; with the timing retired before Submit
   returns it FLEW CLEAN (flight 124504, Pimax OpenXR: invalid 5, Elite's
   second-Submit park p50 0.16-0.18 ms) and now DEFAULTS ON.
-- **Open:** the overlap is flown on Pimax OpenXR and SteamVR OpenXR; the
-  Quest runtimes are unflown with it. The depth layer is set aside
+- **Open:** issue #38's rc.1 report, 90-99% GPU against 0.16.2's 60-62%. The
+  EDVR GPU census (2026-09-25 entry) is built to split EDVR's cost from the
+  game's, and is not yet flown. Separately, the overlap is flown on Pimax
+  OpenXR and SteamVR OpenXR; the Quest runtimes are unflown with it. The depth layer is set aside
   (Sean, 2026-09-24). No controlled comparison with the old OpenVR path
   exists; one now needs a v0.16.2 build.
 - **Closed:** sections 5 and 6 below (the private and producer copies): the
@@ -664,3 +666,41 @@ Same build and switch, Pimax Crystal Super on SteamVR OpenXR (`aapvr`).
 - For issue #38 (random CPU frame-time jumps on SteamVR in 0.17.0): that
   xrEndFrame tail on Elite's thread is a plausible contributor, and this
   build takes it off. Not proven as the reporter's cause.
+
+## 2026-09-25: issue #38 on rc.1, and the EDVR GPU census
+
+The reporter tested v0.18.0-rc.1 (comment 5830530459). Frame time is "more
+stable than 0.17.0", but GPU utilization reads 90-99% against 0.16.2's
+60-62%. Setup: the "Basic Flight" tutorial, SteamVR 3560x3560 per eye at
+75 Hz, HMD quality 0.75, DLSS preset L, an RTX 5090. No logs.
+
+That comparison spans the runtime switch AND every GPU feature EDVR added
+between 0.16.2 and rc.1: the motion paths, UI depth and its content
+tracking, and the hologram depth pass. Sean's own rig reads a native
+benchmark gpu p50 of about 10 ms at 90 Hz on the same GPU class. The only
+runtime-side costs measured are small: the producer copy, 0.039 ms p50 per
+eye, and the compose.
+
+To split EDVR from the game, `src\d3d11\gpu_census.*` now logs one line
+every 30 s:
+
+    EDVR GPU census: 30 s, N frames; EDVR ~T ms/frame = door D (...) +
+    in-frame F (...); application render p50 R ms/frame (game ~G); ...
+
+- **Sections:** each of 19 wraps a call site. The door sections are the
+  whole temporal pass, the upscaler, motion prep, the hologram resolve with
+  the celestial views, the UI resolve, sharpen, menu, the UI layer
+  composite and FSS heal. The in-frame sections are the hologram passes,
+  UI depth coverage, planet, terrain, screen, weapon and engine motion, the
+  UI layer reissues, eye mask and foveation.
+- **Sampling:** one section is timed per frame, round-robin, because only
+  about 31 timer spans fit per frame. It times at most 4 calls at the door
+  and 8 per draw, strided across the frame from a rotating offset, since
+  per-draw costs vary. Its cost is the mean ms per timed call times calls
+  per frame.
+- **R:** the Application-render GPU median over the window, covering the
+  game plus EDVR on the game's device. The XR device's transfer and compose
+  are outside it; `native_producer_gpu` reports the transfer.
+- **Rig:** `tools\gpu_census_test`.
+- **Next:** any flight on this build gives EDVR's share of the frame. A
+  SteamVR flight in the Basic Flight tutorial matches the reporter's scene.

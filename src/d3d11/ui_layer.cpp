@@ -22,6 +22,7 @@
 #include "device_hook.h"   // deviceHookHmdQuality, for the configure line
 #include "foveation.h"     // whether a shading-rate image is bound for the eye
 #include "gpu_timing.h"
+#include "gpu_census.h"    // issue #38: the per-feature GPU cost census
 #include "graphics_runtime.h"
 #include "journal_watch.h" // the on-foot gate's reading: Status.json's Flags2 bit 0, GuiFocus
 #include "shader_swap.h"
@@ -1481,6 +1482,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     ctx->CSGetConstantBuffers(0, 1, &savedCb);
 
     const int qs = routeBegin(ctx.Get(), UiRouteStage::kComposite, static_cast<int>(eye), e.seq);
+    gpuCensusBegin(ctx.Get(), GpuCensusSection::DoorUiLayerComposite);
     if (viaCopy) {
         D3D11_BOX box{region[0], region[1], 0, region[2], region[3], 1};
         ctx->CopySubresourceRegion(e.copy.Get(), 0, 0, 0, 0, frame, 0, &box);
@@ -1497,6 +1499,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
     ctx->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
     routeEnd(ctx.Get(), qs);
+    gpuCensusEnd(ctx.Get(), GpuCensusSection::DoorUiLayerComposite);
 
     ctx->CSSetShaderResources(0, 3, nullSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
