@@ -58,6 +58,7 @@
 #include "../../src/d3d11/cs_stage_save.h"
 #include "../../src/d3d11/depth_probe.h"
 #include "../../src/d3d11/engine_velocity.h"
+#include "../../src/d3d11/gpu_census.h"
 #include "../../src/d3d11/kinematic_eval_hook.h"
 #include "../../src/d3d11/vscreen.h"
 
@@ -117,6 +118,11 @@ void Log::note(const char* fmt, ...) {
 }
 int64_t qpcNow() { LARGE_INTEGER t{}; QueryPerformanceCounter(&t); return t.QuadPart; }
 int64_t qpcFrequency() { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }
+// The GPU census (issue #38) is cross-cutting; this rig is about the draw
+// half's own state machine, not the census's rotation or its calibration
+// (tools/gpu_census_test covers those), so it is stubbed out.
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
+void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 }  // namespace edvr
 
 namespace lifecycle_tests {

@@ -49,12 +49,20 @@ struct SectionState {
     // otherwise have to attach and recover asynchronously, 3-4 frames later,
     // ourselves.
     GpuIntervals<8> sampler;
+    // The calibration pair: one empty begin/end, taken once per turn
+    // alongside sampler's first timed call (gpuCensusBegin), from the same
+    // place in the frame. A separate instance so a completed null sample is
+    // never confused with a real one.
+    GpuIntervals<8> nullSampler;
     uint64_t occurrences = 0;        // every call this window, timed or not
     uint32_t skippedThisWindow = 0;  // timer begins that failed on the section's turn (not the K cap)
-    // sampler.totals never resets itself; these are its value at the start
-    // of the current window, so the window's contribution is a delta.
+    // sampler.totals/nullSampler.totals never reset themselves; these are
+    // their value at the start of the current window, so the window's
+    // contribution is a delta.
     double baseMs = 0.0;
     unsigned baseSamples = 0, baseInvalid = 0;
+    double nullBaseMs = 0.0;
+    unsigned nullBaseSamples = 0;
     uint32_t turns = 0;              // turns taken, for the sampling offset
 };
 SectionState g_section[kSections];
@@ -66,6 +74,9 @@ SectionState g_section[kSections];
 // turn so every position in the draw order is sampled over a window.
 int g_activeSection = 0;
 unsigned g_activeCalls = 0, g_activeTimed = 0, g_activeStride = 1, g_activeOffset = 0;
+// Whether this turn's null pair has already been taken (gpuCensusBegin):
+// once per turn, at the first timed call, never per occurrence.
+bool g_activeNullDone = false;
 
 uint64_t g_windowStartMs = 0;
 uint64_t g_windowFrames = 0;
@@ -89,6 +100,15 @@ struct Snapshot {
     double perFrame = 0.0;
 };
 
+// A section's corrected ms per call. The null mean is the timer pair's own
+// overhead, measured empty; it can only ever inflate a real sample, never
+// deflate it, so a null mean at or above the timed mean means the true cost
+// is below what this window's timer can resolve, and reads as 0 rather than
+// negative.
+double correctedMsPerCall(double timedMeanMs, double nullMeanMs) noexcept {
+    return std::max(0.0, timedMeanMs - nullMeanMs);
+}
+
 Snapshot snapshotOf(const SectionState& st, uint64_t frames) noexcept {
     Snapshot s;
     s.occurred = st.occurrences > 0;
@@ -97,8 +117,12 @@ Snapshot snapshotOf(const SectionState& st, uint64_t frames) noexcept {
     const double windowMs = t.ms - st.baseMs;
     const unsigned windowSamples = t.samples >= st.baseSamples ? t.samples - st.baseSamples : 0;
     const double msPerOccurrence = windowSamples ? windowMs / static_cast<double>(windowSamples) : 0.0;
+    const auto& nt = st.nullSampler.totals;
+    const double nullWindowMs = nt.ms - st.nullBaseMs;
+    const unsigned nullWindowSamples = nt.samples >= st.nullBaseSamples ? nt.samples - st.nullBaseSamples : 0;
+    const double nullMsPerOccurrence = nullWindowSamples ? nullWindowMs / static_cast<double>(nullWindowSamples) : 0.0;
     s.perFrame = frames ? static_cast<double>(st.occurrences) / static_cast<double>(frames) : 0.0;
-    s.msPerFrame = msPerOccurrence * s.perFrame;
+    s.msPerFrame = correctedMsPerCall(msPerOccurrence, nullMsPerOccurrence) * s.perFrame;
     return s;
 }
 
@@ -154,14 +178,44 @@ void logAndResetWindow(uint64_t now) {
         spansSkipped += t.invalid >= st.baseInvalid ? t.invalid - st.baseInvalid : 0;
     }
 
+    // The timer floor: every section's null pairs this window, pooled (not
+    // per-section then averaged, so a section that took few turns does not
+    // weigh the same as one that ran the whole window) into one mean --
+    // GpuIntervals keeps running sums, not individual samples, so a mean is
+    // what the data actually supports; a median would need its own sample
+    // buffer for no real gain, since these pairs are already close together.
+    double nullMsTotal = 0.0;
+    uint64_t nullSamplesTotal = 0;
+    for (const auto& st : g_section) {
+        const auto& nt = st.nullSampler.totals;
+        nullMsTotal += nt.ms - st.nullBaseMs;
+        nullSamplesTotal += nt.samples >= st.nullBaseSamples ? nt.samples - st.nullBaseSamples : 0;
+    }
+    char floorBuf[32];
+    if (nullSamplesTotal) {
+        std::snprintf(floorBuf, sizeof(floorBuf), "%.1f us/pair",
+                      (nullMsTotal / static_cast<double>(nullSamplesTotal)) * 1000.0);
+    } else {
+        std::snprintf(floorBuf, sizeof(floorBuf), "-");
+    }
+
     // R covers the game's rendering, EDVR's in-frame work and the door on the
     // game's device (not the XR device's transfer and compose), so the game's
     // own share is roughly R minus EDVR's total: a median less a mean, hence ~.
-    char rBuf[64];
+    // That share stays raw, negative included, when EDVR's corrected total
+    // still exceeds R: negative is the witness that something still
+    // overcounts, not a fault to hide, so the line says so instead.
+    char rBuf[128];
     if (g_p50Count) {
         std::sort(g_p50Samples, g_p50Samples + g_p50Count);
         const double r = g_p50Samples[g_p50Count / 2];
-        std::snprintf(rBuf, sizeof(rBuf), "%.3f ms/frame (game ~%.3f)", r, r - (doorTotal + frameTotal));
+        const double edvrTotal = doorTotal + frameTotal;
+        if (edvrTotal > r) {
+            std::snprintf(rBuf, sizeof(rBuf), "%.3f ms/frame (game ~%.3f) (census over the frame total)",
+                          r, r - edvrTotal);
+        } else {
+            std::snprintf(rBuf, sizeof(rBuf), "%.3f ms/frame (game ~%.3f)", r, r - edvrTotal);
+        }
     } else {
         std::snprintf(rBuf, sizeof(rBuf), "-");
     }
@@ -169,15 +223,17 @@ void logAndResetWindow(uint64_t now) {
     Log::get().note(
         "EDVR GPU census: %.0f s, %llu frames; EDVR ~%.3f ms/frame = door %.3f "
         "(%s) + in-frame %.3f (%s); application render p50 %s; "
-        "spans timed %llu, failed %llu.",
+        "timer floor %s; spans timed %llu, failed %llu.",
         seconds, static_cast<unsigned long long>(frames), doorTotal + frameTotal, doorTotal,
-        doorItems.c_str(), frameTotal, frameItems.c_str(), rBuf,
+        doorItems.c_str(), frameTotal, frameItems.c_str(), rBuf, floorBuf,
         static_cast<unsigned long long>(spansTimed), static_cast<unsigned long long>(spansSkipped));
 
     for (auto& st : g_section) {
         st.baseMs = st.sampler.totals.ms;
         st.baseSamples = st.sampler.totals.samples;
         st.baseInvalid = st.sampler.totals.invalid;
+        st.nullBaseMs = st.nullSampler.totals.ms;
+        st.nullBaseSamples = st.nullSampler.totals.samples;
         st.occurrences = 0;
         st.skippedThisWindow = 0;
     }
@@ -197,6 +253,16 @@ bool gpuCensusBegin(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept
     if (call < g_activeOffset || (call - g_activeOffset) % g_activeStride != 0) return false;
     if (g_activeTimed >= occurrenceCapFor(section)) return false;   // K reached: counted, not timed
     ++g_activeTimed;
+    if (!g_activeNullDone) {
+        // The turn's first timed call also times one empty pair, immediately
+        // before the real one, nothing between: the timer's own overhead,
+        // from the same place in the frame as the sample it calibrates
+        // (logAndResetWindow's "timer floor", snapshotOf's correction). Begin
+        // and End are safe unconditionally either way (gpu_census.h).
+        g_activeNullDone = true;
+        st.nullSampler.begin(ctx);
+        st.nullSampler.end(ctx);
+    }
     if (!st.sampler.begin(ctx)) {
         ++st.skippedThisWindow;
         return false;
@@ -213,7 +279,7 @@ void gpuCensusEnd(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept {
 }
 
 void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
-    for (auto& st : g_section) st.sampler.poll(ctx);
+    for (auto& st : g_section) { st.sampler.poll(ctx); st.nullSampler.poll(ctx); }
 
     ++g_windowFrames;
 
@@ -226,6 +292,7 @@ void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
     g_activeOffset = g_activeStride > 1 ? next.turns % g_activeStride : 0u;
     ++next.turns;
     g_activeCalls = g_activeTimed = 0;
+    g_activeNullDone = false;
     const uint64_t now = GetTickCount64();
     if (g_windowStartMs == 0) g_windowStartMs = now;
 
@@ -244,7 +311,7 @@ void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
 }
 
 void gpuCensusShutdown() noexcept {
-    for (auto& st : g_section) st.sampler.reset();
+    for (auto& st : g_section) { st.sampler.reset(); st.nullSampler.reset(); }
 }
 
 } // namespace edvr

@@ -13,7 +13,9 @@ changes.*
   second-Submit park p50 0.16-0.18 ms) and now DEFAULTS ON.
 - **Open:** issue #38's rc.1 report, 90-99% GPU against 0.16.2's 60-62%. The
   EDVR GPU census (2026-09-25 entry) is built to split EDVR's cost from the
-  game's, and is not yet flown. Separately, the overlap is flown on Pimax
+  game's; its first flight caught the census itself overcounting engine
+  velocity and screen motion (2026-09-25 entry below), fixed the same day
+  but not yet flown. Separately, the overlap is flown on Pimax
   OpenXR and SteamVR OpenXR; the Quest runtimes are unflown with it. The depth layer is set aside
   (Sean, 2026-09-24). No controlled comparison with the old OpenVR path
   exists; one now needs a v0.16.2 build.
@@ -729,3 +731,53 @@ the game's device, and the upscaler is the largest item. The #38 gap,
 0.16.2 at 60% against rc.1 at 95%, is therefore far more likely to be
 EDVR's features than the runtime. The next step is the reporter's census
 line.
+
+## 2026-09-25: the census's own per-draw overcount, and the fix
+
+Flight 20260925_081429 (same rig) read EDVR ~8.0 ms/frame against an
+application-render p50 of 7.08 ms -- "game ~-0.961", negative. Engine
+velocity read 3.282 ms at 306 calls/frame in one window, then 0.171 ms at
+552 calls/frame in the next: more calls, an order of magnitude less cost,
+the signature of a timer measuring itself rather than the work.
+
+**Cause:** `FrameEngineVelocity` and `FrameScreenMotion` wrapped the CALL
+SITE (`engineVelocityBeforeDraw`; `screenMotionUiDraw`/`screenMotionDraw`),
+not the GPU work inside it. Both mostly return without issuing anything --
+engine velocity's inline fast path skips its slow path unless something was
+rebound since the last draw; screen motion returns above g.sourceFrame!=
+g.frame and several shader/target checks. Timing the call site mostly timed
+the begin/end pair's own pipeline-drain cost, hundreds of times a frame.
+
+**Fix** (this branch, `claude/openxr-perf-gaps`):
+- The wraps moved to where GPU work actually issues:
+  `src\d3d11\engine_velocity.cpp`'s eye-frame clear (`slowPath`), pool+scene
+  snapshot copy (`snapshot`) and append refresh copy (`checkSources`);
+  `src\d3d11\screen_motion.cpp`'s UI mask clear+reissue
+  (`screenMotionUiDraw`), the eye's buffer/size copies, clear and
+  projection draw (`screenMotionDraw`), and the frame-boundary panel-count
+  readback (`flushPanelCounts`, found beyond the two named functions by the
+  same file-wide sweep). The old wraps at `vscreen.cpp`'s seven
+  `engineVelocityBeforeDraw` call sites and its one screen-motion site are
+  gone; the calls themselves stay.
+- Calibration: on a section's turn, its first timed call also times one
+  empty begin/end pair (a second `GpuIntervals` per section, `nullSampler`)
+  immediately before the real one. The line's ms/frame is now `max(0, timed
+  mean - null mean) * occurrences/frame` (`gpu_census.cpp`'s
+  `correctedMsPerCall`), so a genuinely tiny operation reads near 0 instead
+  of the pair's own overhead.
+- The line adds `timer floor X us/pair` (the pooled null mean across every
+  section this window) and appends `(census over the frame total)` when
+  EDVR's corrected total still exceeds R -- the game's share stays raw and
+  negative either way, the point being to show it, not hide it.
+- `tools\gpu_census_test` (62 checks, up from 49): the calibration math as
+  a pure function, a real WARP round trip of the null pair, and the line's
+  new fields. `tools\engine_velocity_test` (`lifecycle_tests.h`) and
+  `tools\screen_motion_test` got `gpuCensusBegin`/`End` stubs, since both
+  now call them directly and neither links `gpu_census.cpp`.
+
+**Not yet flown.** Next flight: re-run the reporter's SteamVR Basic Flight
+scene, or Sean's own rig, on this build. Engine velocity's and screen
+motion's ms/frame should stop swinging opposite their calls/frame, and
+"game ~..." should stop reading negative on a steady scene. If EDVR's
+corrected total is still large, that is now believable rather than an
+artifact of the timer.

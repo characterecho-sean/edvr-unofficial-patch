@@ -3,6 +3,7 @@
 // header for declarations rather than the inline production ones.
 #define EDVR_BINDING_SHADOW_EXTERNAL 1
 #include "../../src/d3d11/screen_motion.cpp"
+#include "../../src/d3d11/gpu_census.h"
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
 #include <DirectXPackedVector.h>
@@ -62,6 +63,12 @@ void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* c,UINT n,ID3D11RenderTarget
 // fix.ui_quality (ui_layer.h): true while the UI layer has the draw; its
 // inline reader is the production one.
 namespace detail{bool g_uiLayerRedirecting=false;}
+// The GPU census (issue #38) is cross-cutting; this rig is about screen
+// motion's own effect, not the census's rotation or its calibration
+// (tools/gpu_census_test covers those), so it is stubbed like the other
+// cross-cutting hooks above.
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
+void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 }
 using namespace edvr;
 void __stdcall draw(ID3D11DeviceContext* c,unsigned,unsigned,unsigned,int,unsigned){c->Draw(3,0);}

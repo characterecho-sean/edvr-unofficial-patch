@@ -9,12 +9,20 @@ namespace edvr {
 // (issue #38): one line every 30 s. Each section wraps a CALL SITE, so any
 // timer inside it closes first, and counts every occurrence. Only one
 // section is timed per frame, round-robin, and at most K occurrences of it
-// (2 at the door, 8 per draw), because the shared disjoint clock fits
+// (4 at the door, 8 per draw), because the shared disjoint clock fits
 // about 31 spans a frame across the whole DLL (gpu_disjoint_clock.h).
 // ms/frame = mean timed ms per occurrence x occurrences per frame.
 // temporal_pass.cpp's price report times some of the same door work on its
 // own event-driven windows; this census reads neither it nor the per-pass
 // timers, so every figure comes from this window's live calls.
+//
+// A call site must be where GPU work is actually issued, not merely where a
+// feature's entry point is invoked: most calls into engine velocity or
+// screen motion return without submitting anything, and a timestamp pair
+// around a no-op mostly measures its own pipeline-drain cost. To correct for
+// that, a section's turn also times one empty begin/end pair (nothing
+// between) at its first timed call, in a second sampler; ms/frame above
+// subtracts that pair's own mean cost from the real one's, floored at zero.
 enum class GpuCensusSection : uint8_t {
     // Door: once or twice a frame, at Submit. K = 2 (both eyes) while active.
     DoorTemporalWhole = 0,    // the whole temporalInner call, both eyes (edvrTemporalAa)
@@ -31,9 +39,15 @@ enum class GpuCensusSection : uint8_t {
     FrameUiDepthCoverage,     // the UI-depth family reissue (UiContent::prepare, stellar coverage nest inside)
     FramePlanet,              // the planet/solar terrain reissue
     FrameTerrain,             // the terrain/celestial motion reissue
-    FrameScreenMotion,        // the screen-motion reissues
+    FrameScreenMotion,        // screen_motion.cpp's own GPU work: the UI mask clear+reissue,
+                              // the eye's buffer/size copies, clear and projection draw, the
+                              // panel-count readback -- not screenMotionUiDraw/screenMotionDraw's
+                              // call sites, most of which return without issuing anything
     FrameWeaponMotion,        // the weapon motion-vector reissue
-    FrameEngineVelocity,      // engineVelocityBeforeDraw, at each of its seven call sites
+    FrameEngineVelocity,      // engine_velocity.cpp's own GPU work: the eye-frame clear, the
+                              // pool+scene snapshot copy and the append refresh copy -- not
+                              // engineVelocityBeforeDraw's call sites, which mostly return
+                              // without reaching the slow path at all
     FrameUiLayerReissues,     // the UI layer's multiply/write-back reissues
     FrameEyeMask,             // fix.eye_mask's own draw
     FrameFoveation,           // the foveated shading-rate mask's culled-strip clear
