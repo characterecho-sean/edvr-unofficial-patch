@@ -8,7 +8,9 @@
 #include <d3d11sdklayers.h>
 #include <wrl/client.h>
 #include <cstdio>
+#include <cstdarg>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <cmath>
 #include "../../src/common/config.h"
@@ -17,6 +19,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 int failures=0,backendCalls=0;
 bool backendFail=false,backendReset=false,infiniteSeen=false;
+std::vector<std::string> resetEvents;
 float expectedJx=0,expectedJy=0;
 float observedMotion=0,observedMotionY=0,observedDepth=0;unsigned observedReject=0;
 void check(bool ok,const char* text){if(!ok){std::printf("FAIL: %s\n",text);++failures;}}
@@ -71,7 +74,13 @@ Config& Config::get() {
     return *config;
 }
 Log& Log::get() {static auto* log=new Log;return *log;}
-void Log::note(const char*,...) {}
+void Log::note(const char* fmt,...) {
+    constexpr char prefix[]="flat resolve reset event:";
+    if(std::strncmp(fmt,prefix,sizeof(prefix)-1)!=0)return;
+    char line[1024]{};
+    va_list args;va_start(args,fmt);std::vsnprintf(line,sizeof(line),fmt,args);va_end(args);
+    resetEvents.emplace_back(line);
+}
 bool ensureDirectory(const std::wstring& path) {return CreateDirectoryW(path.c_str(),nullptr) || GetLastError()==ERROR_ALREADY_EXISTS;}
 thread_local bool g_flatComputeInternal = false;
 bool dlaaAvailable(ID3D11Device*,const char**){return true;}
@@ -164,6 +173,11 @@ int main(int argc,char** argv) {
     check(stats.calls==1 && stats.initializations==1 && stats.allocations==1 && stats.acceptedResets==1 &&
           stats.acceptedContinues==0 && stats.lostHistory==1 && stats.currentContinueRun==0,
           "first frame reports one state build, one texture allocation and one accepted reset");
+    check(resetEvents.size()==1 && resetEvents.back().find("frame=1 mode=dlss")!=std::string::npos &&
+          resetEvents.back().find("requested=1 lost=1")!=std::string::npos &&
+          resetEvents.back().find("camera-cut=0")!=std::string::npos &&
+          resetEvents.back().find("delta-ms=16")!=std::string::npos,
+          "successful backend reset logs frame, mode, reasons and elapsed time");
     f.reset=false;f.frame=2;f.camera[5][0]=.3125f;
     auto second=run(true);check(!backendReset && std::abs(observedMotion-1)<.001 && observedDepth==.01f,
         "camera translation gives positive one-render-pixel current-to-previous motion and unchanged raw depth");
@@ -171,6 +185,7 @@ int main(int argc,char** argv) {
     check(stats.initializations==1 && stats.allocations==1 && stats.acceptedContinues==1 &&
           stats.currentContinueRun==1 && stats.longestContinueRun==1 && stats.contextPointerMismatches==0,
           "continuous frame reuses state and textures without a reset");
+    check(resetEvents.size()==1,"continuous backend frame emits no reset event");
     check(pixel(second.Get())==0xff00ff00,"valid pixel uses trained output");
     check(pixel(second.Get(),31,16)==0xff0000ff,"offscreen reprojection displays current spatial color");
     f.jitterX=expectedJx=.25f;f.jitterY=expectedJy=-.375f;
@@ -244,6 +259,11 @@ int main(int argc,char** argv) {
     check(backendReset && stats.frameGaps>=1 && stats.currentContinueRun==0,"frame gap produces a counted reset");
     ++f.frame;f.camera[5][0]=51;run(true);stats=edvr::flatMonoResolveStats();
     check(backendReset && stats.cameraCuts==1,"camera cut produces a counted reset");
+    check(!resetEvents.empty() && resetEvents.back().find("camera-cut=1")!=std::string::npos &&
+          resetEvents.back().find("requested=0")!=std::string::npos &&
+          resetEvents.back().find("now=(51,0,0) previous=(0,0,0) origin-delta=(51,0,0)")!=std::string::npos &&
+          resetEvents.back().find("max-matrix-delta=0")!=std::string::npos,
+          "accepted camera cut logs raw origins and separates it from a view-matrix change");
     f.camera[0][0]=0;run(false);check(backendCalls==callsBefore+3,"singular camera declines before backend");
     f.camera[0][0]=1;
     std::vector<uint32_t> step(w*h,0xff000000);
@@ -277,6 +297,18 @@ int main(int argc,char** argv) {
     phaseHistory=run(true);
     check((pixel(phaseHistory.Get(),17,16)&255)>200,
           "TAA compares expected depth at the previous frame's raster phase and retains aligned history");
+    // Event output is bounded across the session, with a separate camera-cut
+    // allowance even after requested resets exhaust the ordinary budget.
+    for(unsigned i=0;i<40;++i){f.reset=true;++f.frame;run(true);}
+    unsigned ordinaryLogs=0,cameraLogs=0;
+    for(const auto& event:resetEvents)
+        if(event.find("camera-cut=1")!=std::string::npos)++cameraLogs;else ++ordinaryLogs;
+    check(ordinaryLogs==32 && cameraLogs==1,"ordinary reset events stop at their 32-line session cap");
+    f.reset=false;++f.frame;f.camera[5][0]=51;run(true);
+    unsigned cameraLogsAfter=0;
+    for(const auto& event:resetEvents)if(event.find("camera-cut=1")!=std::string::npos)++cameraLogsAfter;
+    check(ordinaryLogs==32 && cameraLogsAfter==2 && resetEvents.size()==34,
+          "camera cut still logs after ordinary reset event cap is exhausted");
     f.jitterX=std::nanf("");
     bindOriginal();ComPtr<ID3D11ShaderResourceView> badJitter;
     check(!edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,badJitter.GetAddressOf(),&fallbackReason) &&

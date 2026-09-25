@@ -44,6 +44,7 @@
 #include "panel_tests.h"
 #include "corpus_identity.h"
 #include "lifecycle_tests.h"
+#include "../../src/common/runtime_profile.h"
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
 
 using Microsoft::WRL::ComPtr;
@@ -126,6 +127,9 @@ bool onePair(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstr
 }
 void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstring& root) {
     const Pair pairs[] = {
+        // Epic flat cockpit shell: exactly this pair, with the same G-buffer
+        // and depth outputs and an additional record slot at MRT6.
+        {L"vs_BFE51414CC3024B4", L"ps_DB79AE788E049DFD", false},
         {L"vs_EB5234DB6ADB491D", L"ps_CB9F297EFF264251", false}, {L"vs_EB5234DB6ADB491D", L"ps_9ABF60B4B51F2C1F", false},
         {L"vs_EB5234DB6ADB491D", L"ps_3434972DB5336AA4", false}, {L"vs_5B4D8E894EEDA8B4", L"ps_4375B72964F386CD", true},
         {L"vs_BBE58E40FE88EC80", L"ps_DB3E8D20CF53FBC0", false}, {L"vs_DE545DC8EE4FBB87", L"ps_E46E3E4832B2FDB0", false},
@@ -180,6 +184,17 @@ int wmain(int argc, wchar_t** argv) {
     check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device,
                                       &level, &context)), "D3D11CreateDevice WARP");
     check(level >= D3D_FEATURE_LEVEL_11_0, "feature level 11");
+    constexpr uint64_t shellVs = 0xBFE51414CC3024B4ull;
+    constexpr uint64_t shellPs = 0xDB79AE788E049DFDull;
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Vr;
+    check(!edvr::engineVelocityPoolFamilyVs(shellVs) &&
+          !edvr::engineVelocityPoolFamilyPair(shellVs, shellPs), "cockpit shell is excluded from VR motion producer");
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    check(edvr::engineVelocityPoolFamilyVs(shellVs) &&
+          edvr::engineVelocityPoolFamilyPair(shellVs, shellPs), "exact cockpit shell pair is eligible in flat");
+    check(!edvr::engineVelocityPoolFamilyPair(shellVs, 0xCB9F297EFF264251ull),
+          "cockpit shell does not admit another pixel shader");
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
     shader_tests::run({device.Get(), context.Get(), &check});
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});

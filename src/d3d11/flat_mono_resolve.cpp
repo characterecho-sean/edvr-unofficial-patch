@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include "../common/log.h"
 #include "flat_pixel_capture.h"
 
 namespace edvr {
@@ -39,6 +40,11 @@ struct State {
 // destructor during DLL detach would run under the loader lock.
 State& g=*new State;
 FlatMonoResolveStats& stats=*new FlatMonoResolveStats;
+// Session budgets survive flatMonoResolveReset: repeated backend/resource
+// resets must not restart diagnostic output. Keep camera cuts independently
+// visible even if ordinary requested resets use their budget first.
+uint32_t resetEventsLogged=0, cameraCutEventsLogged=0;
+constexpr uint32_t kResetEventLogCap=32;
 struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4]; };
 static_assert(sizeof(Constants)==240, "HLSL cbuffer layout");
 struct Isolate {
@@ -372,6 +378,31 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         if(invalidPreviousCamera)++stats.invalidPreviousCameras;
         if(formatChange && !lostHistory)++stats.formatChanges;
         if(cameraCut)++stats.cameraCuts;
+        uint32_t& logged=cameraCut?cameraCutEventsLogged:resetEventsLogged;
+        if(logged<kResetEventLogCap) {
+            ++logged;
+            float maxMatrixDelta=0;
+            for(unsigned row=0;row<5;++row)for(unsigned col=0;col<4;++col) {
+                const float delta=std::abs(f.camera[row][col]-f.previousCamera[row][col]);
+                if(delta>maxMatrixDelta)maxMatrixDelta=delta;
+            }
+            const char* modeName=f.mode==FlatMonoResolveMode::Taa?"taa":
+                f.mode==FlatMonoResolveMode::Dlaa?"dlaa":f.mode==FlatMonoResolveMode::Dlss?"dlss":"fsr";
+            Log::get().note("flat resolve reset event: frame=%llu mode=%s render=%ux%u output=%ux%u "
+                "requested=%u lost=%u gap=%u invalid-prev-camera=%u format=%u camera-cut=%u "
+                "delta-ms=%.9g now=(%.9g,%.9g,%.9g) previous=(%.9g,%.9g,%.9g) "
+                "origin-delta=(%.9g,%.9g,%.9g) max-matrix-delta=%.9g "
+                "jitter-now=(%.9g,%.9g) jitter-previous=(%.9g,%.9g) event=%u/%u",
+                static_cast<unsigned long long>(f.frame),modeName,f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,
+                requestedReset?1u:0u,lostHistory?1u:0u,frameGap?1u:0u,invalidPreviousCamera?1u:0u,
+                formatChange?1u:0u,cameraCut?1u:0u,f.deltaMs,
+                f.camera[5][0],f.camera[5][1],f.camera[5][2],
+                f.previousCamera[5][0],f.previousCamera[5][1],f.previousCamera[5][2],
+                f.camera[5][0]-f.previousCamera[5][0],
+                f.camera[5][1]-f.previousCamera[5][1],
+                f.camera[5][2]-f.previousCamera[5][2],maxMatrixDelta,
+                f.jitterX,f.jitterY,f.previousJitterX,f.previousJitterY,logged,kResetEventLogCap);
+        }
     } else {
         ++stats.acceptedContinues;
         if(++stats.currentContinueRun>stats.longestContinueRun)stats.longestContinueRun=stats.currentContinueRun;

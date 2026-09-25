@@ -21,8 +21,10 @@
   ship draws without usable slots; its run then crashed during cockpit loading.
   Dump analysis identifies a game allocator failure but not its cause. The
   unchanged build loaded the cockpit and captured F10 successfully on retry.
-  The production-code GPU rig now reproduces and fixes a stale flat
-  motion-target binding; flight qualification remains pending (section 48).
+  `65db2993` fixes the flat motion-target binding; Sean reports much better
+  cockpit A/B. Menu shimmer and local white-panel history loss remain. The
+  latter maps to the unlisted shell shader's camera fallback. Captured DXBC
+  disproves the old "non-pool" classification (section 49).
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -37,12 +39,12 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next work:** validate/build the flat MRT6 rebinding fix, then qualify menu
-  and cockpit pixels. The known non-pool cockpit shell remains separate from
-  this keyed geometry fix. Preserve history and high-G camera movement; do not
-  force vectors zero or repeat resolved scene-camera naming checks. The passive
-  selector's verdict is distinct from the live runtime verdict. No headset is
-  needed; VR still needs regression tests.
+- **Next work:** qualify the shell through the existing pool-motion path; its
+  white panel still gets hundreds of pixels of world-camera motion while
+  adjacent keyed wing motion is correct. Menu ownership is now mostly valid;
+  depth-write-off overlays explain sampled remaining edge rejection. Preserve
+  high-G camera movement; do not force vectors zero. No headset is needed; VR
+  still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -2795,3 +2797,116 @@ written. The regression uses `engineVelocityNoteSource` and
 `engineVelocityBeforeDraw(..., false)`, with a raw output restore between draws
 and unchanged game binding generations. Full validation is recorded in
 `build/flat-mrt6-validation.log`; visual improvement still needs qualification.
+
+## 49. Binding fix qualified; local shell history loss remains, 2026-09-25
+
+Epic `edvr_gfx_20260925_075739.log` verifies `65db2993`, build `6AB67D7F`,
+version `v0.18.0-rc.1-48-g65db2993`. Sean reports cockpit Off/DLSS A/B is much
+better. The menu still consistently shimmers (screenshots 07:58:34 and
+07:58:41). A sporadic apparent history reset mainly affects the white panels
+and exterior edge lines, rather than the whole 3D scene (screenshot 08:00:36).
+
+Menu session `20260925_135824_887_4516_1`, frames 26933/26948/26963/26978, has
+no reset in any sample. Motion-slot ownership is decisively restored: frame
+26933 roof P2, left wing P5, canopy roof P6 and right wing P7 each have 256/256
+exact-depth slots; canopy P3 has 230/256 and edge P4 245/256. The previous menu
+run had entirely empty P2/P5 and stale P3/P4/P6/P7. Across the four new
+samples, P5/P6/P7 remain exact on all pixels; P2 ranges 240-256, P3 229-231 and
+P4 242-245. Global rejection falls from about 55.3% to 24.3%, now concentrated
+in other surfaces and localized edge/overlay disagreements. Accepted ship
+motion is small, approximately 0.02-0.05 pixels per frame. Remaining menu
+shimmer is not explained by the former missing-target bug.
+
+Cockpit session `20260925_140022_707_4516_2`, frames 37317/37332/37347/37362,
+also records final backend `reset:false` throughout. White panel P1 (1747,907)
+has cleared slots on all 256 pixels in all four samples, rejection zero, and
+camera-fallback median motion approximately (-336,-156), (-314,-146),
+(-337,-157), (-334,-156) pixels. Draws q5/q6/q9, VS `BFE51414CC3024B4` / PS
+`DB79AE788E049DFD`, change 7+198+51 pixels in that window. This is the known
+non-pool cockpit shell, not a new engine-pool family. In contrast, adjacent
+wing P7 is changed by keyed q42 `66DE2CADB1F4AE6B` / `864F1F949851B8DE`: all
+256 pixels have slot code 11, 255-256 exact depth, 0-1 rejected pixels and
+motion approximately zero. The local shell's erroneous motion is consistent
+with losing smoothing while the supported wing retains it. P4 is sky/edge above
+the wing in this capture; do not mislabel its fallback motion as another white
+panel measurement.
+
+Two genuine camera-cut resets are counted in the flight. The second occurs
+between 08:00:20.201 and 08:00:25.205 but not in the four saved F10 frames.
+From 08:00:30 through 08:00:40 the reset counters remain unchanged; no full
+reset is logged around the third screenshot's time. The F8 mode cycle at
+08:00:11-13 accounts for separate expected invalidation/reinitialization. The
+resolver's independent camera-cut heuristic compares each raw camera position
+component against a fixed 50-unit step; aggregate counters omit the exact frame
+and input delta. Current evidence cannot distinguish an earlier true camera
+jump, ordinary travel during a long frame, or coordinate rebasing. Do not relax
+the guard without the event's actual inputs.
+
+- Ruled out: the new cockpit panel samples show global DLSS resets, because all
+  four manifests store the final internal reset decision as false.
+- Ruled out: the remaining sampled menu roof/wing shimmer is simply absent MRT6
+  ownership, because the same windows now have exact-depth slots.
+- Confirmed: the sampled white cockpit shell still uses world-camera motion
+  while adjacent keyed geometry receives near-zero object motion.
+
+Captured bytecode corrects the historical classification: BFE is a pool shader.
+It reads structured t33 with stride 336, indexed by `INSTANCEANDMODELDATAINDEX`
+v0.x, loads root scale/quaternion and translation at offsets 0/16, subtracts
+cb1[275] and projects with cb1[270..273]. It exports the index in
+`__USER_MATERIALMODULATION_DATAID` o0.y; DB79 consumes the matching v0.xyz
+signature and writes MRT0..3. Existing input derivation and pixel-shader
+patching accept the pair. The local WARP corpus checks 40,960 original
+G-buffer/depth texels with zero differences and 8,192 MRT6 texels with zero
+errors. No proprietary shader bytes are committed.
+
+This is a missing exact pair declaration, not evidence for a new motion
+approximation. The normal producer/consumer pool identity and previous-pose
+marker checks still apply. BFE can optionally read a 48-byte t38 bone palette
+before applying the root pose. Root motion alone does not establish previous
+bone deformation; the next capture must distinguish joined, masked and
+camera-fallback records for this actual shell. New eligibility must remain
+flat-only while VR is unqualified.
+
+- Ruled out: BFE is intrinsically non-pool, because its captured structured t33
+  load, record layout and exported index match the existing pool path.
+
+Menu evidence also establishes real jitter: the P3 diagonal ownership edge
+moves approximately +0.688/-0.375/+0.563 pixels between the four samples,
+versus jitter projected onto that edge of +0.583/-0.410/+0.736 pixels. The sign
+and magnitude agree within small scene motion and raster quantization. Do not
+revive a missing-jitter hypothesis for this edge.
+
+Its 26 rejected pixels are exactly the color-change mask of q309, VS
+`BBE58E40FE88EC80` / PS `DB3E8D20CF53FBC0`, with depth writes disabled,
+GREATER_EQUAL testing and zero rasterizer bias. Stored slot depth is nearer
+than unchanged DSV depth by about 1.61e-6 in reversed Z. This is a biased
+overlay writing ownership without updating scene depth, not numerical noise. P4
+has ten of eleven rejects matching q269/q309 of the same family/state; the last
+pixel's depth difference suggests q269 but color bytes do not prove that
+pixel's writer. Do not relax depth equality to conceal this disagreement.
+
+Implemented: declare only BFE/DB79 as a flat-only family. Runtime family
+eligibility covers shader remembering, draw preparation and source admission,
+so VR's prior first-draw/snapshot behavior stays unchanged. Shared input
+derivation, slot patching, pose reconstruction and high-G camera terms are used
+without a special motion approximation. The targeted engine WARP suite passes
+1,025 checks, including actual runtime-profile eligibility calls. The real BFE
+pair's corpus checks pass; the entire optional Epic corpus run cannot pass
+because the dump lacks an unrelated station shader. Do not call that whole
+corpus green.
+
+Also implemented: bounded successful-reset events record exact frame, mode, all
+reset causes, elapsed milliseconds, current/previous camera origins, origin
+delta, largest matrix delta and jitter. Separate 32-event budgets for ordinary
+resets and camera cuts survive renderer reinitialization. The resolver rig
+checks event contents, continuation silence and both budgets; history decisions
+are unchanged. Full build log: `build/flat-shell-motion-validation.log`.
+
+Next Epic flight: compare the same white cockpit panel and take F10 during
+normal camera/ship movement. Verify new BFE substitution, stable source views,
+valid matched slots, record kind/previous pose and corrected panel motion; do
+not assume skinning history is available. Inspect precise reset events if the
+symptom recurs. Menu overlay ownership remains unresolved: preserving
+underlying slots or inventing an unbiased depth cannot establish decal motion
+unless attachment/record identity is proved. No depth tolerance or overlay
+policy was changed in this build.
