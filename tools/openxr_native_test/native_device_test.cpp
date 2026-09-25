@@ -43,6 +43,8 @@ int hardwareTest() {
   DXGI_ADAPTER_DESC actual{};ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> actualAdapter;
   check(initial.As(&dxgi)==S_OK&&dxgi->GetAdapter(&actualAdapter)==S_OK&&actualAdapter->GetDesc(&actual)==S_OK,"initial hardware identity");
   const char* expectedRoute=expectedSeparateRoute();
+  check(edvr::systemD3D11CreateDevice()!=nullptr,"systemD3D11CreateDevice returns valid function pointer");
+  check(edvr::isSystemD3D11Pinned(),"isSystemD3D11Pinned evaluates to true once systemD3D11CreateDevice invoked");
   NativeDevice separate;check(separate.initializeSeparate(actual.AdapterLuid,level)==S_OK,"separate hardware device initialization");
   check(!std::strcmp(separate.separateModuleRoute(),expectedRoute)&&!_stricmp(separate.separateModulePath().c_str(),systemD3D11Path().c_str()),
         "separate hardware device came from the mapped System32 d3d11.dll");
@@ -60,6 +62,7 @@ int hardwareTest() {
   LUID missing{0xffffffffu,-1};NativeDevice missingDevice;
   check(missingDevice.initializeSeparate(missing,level)!=S_OK&&!missingDevice.device()&&!missingDevice.context(),"missing adapter LUID leaves empty ownership");
   separate.reset();separate.reset();check(!separate.device()&&!separate.context(),"separate reset is idempotent");
+  check(edvr::isSystemD3D11Pinned(),"separate reset does not disturb process-wide pinned state");
   std::printf("native_device_hardware_test: %u checks, %u failures adapter=%ls luid=%08lx:%08lx\n",checks,fails,
       description.Description,static_cast<unsigned long>(actual.AdapterLuid.HighPart),static_cast<unsigned long>(actual.AdapterLuid.LowPart));
   return fails?1:0;
@@ -92,6 +95,13 @@ int wmain(int argc,wchar_t** argv) {
         supplied.device()==device.Get()&&supplied.context()==context.Get(),"existing device and immediate context retained exactly");
       check(FAILED(supplied.initializeExisting(device.Get(),foreign,level))&&!supplied.device()&&!supplied.context(),"existing mismatched device rejected without replacement");
       check(FAILED(supplied.initializeExisting(nullptr,desc.AdapterLuid,level))&&!supplied.device(),"null existing device rejected");
+      NativeDevice separate;
+      check(separate.initializeSeparate(desc.AdapterLuid,level)==S_OK,"separate WARP device initialization");
+      check(edvr::systemD3D11CreateDevice()!=nullptr,"systemD3D11CreateDevice returns valid function pointer");
+      check(edvr::isSystemD3D11Pinned(),"isSystemD3D11Pinned evaluates to true once systemD3D11CreateDevice invoked");
+      separate.reset();
+      check(!separate.device()&&!separate.context(),"separate reset clears device and context");
+      check(edvr::isSystemD3D11Pinned(),"separate reset does not disturb process-wide pinned state");
     }
   }
   check(FAILED(NativeDevice::validate(nullptr,LUID{},D3D_FEATURE_LEVEL_10_0)),"null device rejected");

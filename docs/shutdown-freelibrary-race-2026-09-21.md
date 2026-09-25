@@ -16,8 +16,15 @@ but `native_runtime_host.h:1798`'s `graphics` field is declared
 `NativeGraphicsClient` is unrelated to this arc; do not cite it again. See
 `## Design` for the corrected mechanism, a real, not-yet-confirmed puzzle
 in it (`systemD3D11CreateDevice()` appears to already leak a permanent
-reference to the same module this code frees), and the proposed fix. No
-code has been changed yet.
+reference to the same module this code frees), and the proposed fix.
+Built 2026-09-25, not flown: `NativeDevice::reset()` in `src\openxr\native_device.h`
+now sets `systemModule_ = nullptr` without calling `FreeLibrary()`, accompanied by
+a diagnostic logging `device_module_reset,pinned=%u` to check whether the static
+reference in `systemD3D11CreateDevice()` pinned the module for process lifetime.
+Automated regression tests in `tools/openxr_native_test/native_device_test.cpp` explicitly
+test `isSystemD3D11Pinned()` and `systemD3D11CreateDevice()`, ensuring automated
+regression prevention across test suites. The investigation stays open until a repro
+flight shows the crash gone and the new log line fired.
 
 Hypothesis, as corrected in `## Design`: `host_graphics_reset`
 (`src\openxr\native_runtime_host.h:1797-1798`) calls `NativeDevice::reset()`
@@ -333,9 +340,10 @@ late call left to land in the unmapped module.
 
 ## Design
 
-Started 2026-09-22, prompted by the user asking to design a real fix. This
-section is design only -- nothing below has been built, and no C++ has
-changed.
+Started 2026-09-22, prompted by the user asking to design a real fix. Built
+2026-09-25: `NativeDevice::reset()` in `src\openxr\native_device.h` retains
+`systemModule_` without `FreeLibrary()`, accompanied by the diagnostic probe
+logging `device_module_reset,pinned=...` from `isSystemD3D11Pinned()`. Not yet flown in a repro environment.
 
 ### What changed from the original write-up
 
@@ -414,6 +422,10 @@ analysis above and worth its own look before trusting the fix.
   one-line removal plus one diagnostic line, but it's shutdown-path code
   in a header included from the OpenXR runtime module, and a typo here
   costs a flight to notice.
+- Automated tests in `tools\openxr_native_test\native_device_test.cpp`:
+  verifies `edvr::systemD3D11CreateDevice()` function pointer resolution,
+  `isSystemD3D11Pinned()` flag assertions, and `separate.reset()` idempotence
+  under both WARP self-test and live hardware adapter runs.
 - A repro flight from this reporter (or anyone reproducing today) with the
   fix installed, confirming the crash is gone AND the new diagnostic line
   fired, read with `edvr_log.py --expect-build` against the exact commit
