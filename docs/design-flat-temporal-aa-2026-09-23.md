@@ -17,8 +17,10 @@
   nearly fixed. Trace motion ownership before changing reconstruction. Epic
   `3261e6e2` now proves the sampled flight hull takes camera fallback with
   cleared slots; menu canopy and wing mostly reject stale slots (section 46).
-  Preserve high-G camera displacement. Identify the actual ship draws before
-  changing motion.
+  Preserve high-G camera displacement. `2dc6aabf` identifies supported menu
+  ship draws without usable slots; its run then crashed during cockpit loading.
+  Dump analysis identifies a game allocator failure but not its cause; next
+  load the same build directly into the cockpit without menu F10 (section 47).
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -33,20 +35,13 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next work:** qualify the live flat integration, reusing VR's shader
-  knowledge and shared motion/backend math without requiring local matrices to
-  match the scene camera. The focused solar/smoke binding question is answered
-  for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. The main merge passed full validation
-  and promotion. Cockpit history now stays active and visible smoothing is
-  confirmed (section 43). Flight pixel evidence identifies incorrect exterior
-  hull motion, not finish rejection. Camera fallback is confirmed in flight;
-  menu stale-slot rejection is separately confirmed. Capture passive before/
-  after draw windows and raw constants to identify the missing ship transform,
-  including draws before source naming. Do not force ship vectors zero. The
-  passive selector still refuses the menu copy; its diagnostic verdict is not
-  the live runtime verdict. No headset is needed; VR still needs regression
-  tests.
+- **Next work:** check cockpit loading on unchanged `2dc6aabf` without menu
+  F10. Then trace the supported ship draws' actual motion-slot output and pool
+  state, reusing VR's shader knowledge and shared motion/backend math. Current
+  pre-substitution captures cannot prove per-draw MRT6 writes. Do not force
+  vectors zero or repeat the resolved scene-camera naming checks. The passive
+  selector's verdict is distinct from the live runtime verdict. No headset is
+  needed; VR still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -2656,3 +2651,75 @@ final visible pixels. Ordinals and resource pointers alone do not prove
 cross-frame object identity. Dry-run writes nothing. The build checks the
 tool's malformed/partial-data tests and its compatibility with the WARP
 producer fixture. Full validation: `build/flat-draw-owner-validation.log`.
+
+## 47. Menu draw evidence and cockpit-loading crash, 2026-09-25
+
+Epic log `edvr_gfx_20260925_072306.log` matches installed `2dc6aabf`, version
+`v0.18.0-rc.1-46-g2dc6aabf`, build `6AB67508`. Sean captured the menu with F10,
+then the game crashed while loading into the cockpit. Investigate the crash
+before requesting another flight or changing motion math. Sean confirms this is
+the first occurrence of this cockpit-loading crash.
+
+F10 armed at 07:23:45.473. Draw capture session `20260925_132345_473_24612_1`
+saved frames 26431 and 26432, 353 draws each, by 07:23:45.699. Each reports
+partial coverage because four late draws (q322-325) use unsupported native
+format 53 on RT1: 64 refused windows per frame. The relevant scene MRT0/1/2
+windows are available. Standard flat pixel capture saved all ten resources in
+four samples, completing at 07:23:46.244. The draw queue and its resource
+references were retired before loading.
+
+Upper-roof window 2 changes in q153, VS `66DE2CADB1F4AE6B` / PS
+`864F1F949851B8DE`, on all 256 pixels. Left-wing window 5 changes in q142, VS
+`DE545DC8EE4FBB87` / PS `E46E3E4832B2FDB0` (201 pixels), then q153 (256
+pixels). Both are existing engine-motion families. These sampled hull windows
+nevertheless have cleared final slots; the other sampled ship windows contain
+stale slot code 79. The menu's camera motion is small here, so this capture
+does not establish the high-G flight transform.
+
+The first declared engine-family draw is q2. Draws q142/q153 have the same
+1920x1080 viewport, native RT0 format 23, scene DSV/depth resource, VS b1
+resource and exact 96 camera bytes at rows 270-275 as q2 and the matched
+flat-pixel camera. Their b2 buffers are unchanged material-like data across the
+two frames, not an identified object transform. Captured bindings precede
+EDVR's shader/MRT substitution; they do not prove these calls wrote MRT6.
+
+- Ruled out: these menu hull draws require a new shader-family inventory,
+  because both pairs are already declared engine-motion families.
+- Ruled out: different captured depth, viewport or scene-camera rows exclude
+  q142/q153 from naming, because all match the earlier q2 source candidate.
+
+Windows recorded exception `c0000005` at `EliteDangerous64.exe+0x540598` for
+PID 24612. The retained local dump is
+`%LOCALAPPDATA%\CrashDumps\EliteDangerous64.exe.24612.dmp` (106,441,397 bytes).
+The faulting instruction, `mov [r8+0x10],rdx`, writes to address `0x10` because
+r8 is null. Surrounding instructions unlink a linked-list entry; the entry's
+link at offset 0x18 is zero. This identifies the failure site, not who
+invalidated the entry. A game-module fault alone does not exonerate EDVR or
+establish a game-only bug.
+
+PE exception-table unwind confirms 13 game frames, ending at the kernel32
+thread entry. Callers `+0x55b528`, `+0x54c88f` and `+0x5c2902` dispatch a
+16-byte small allocation from colon-delimited string processing. Higher game
+frames are `+0x48e32bd`, `+0x48ea951`, `+0x48ece94`, `+0x48ec499`,
+`+0x48d7d3f`, `+0x48d6f25`, `+0x5c42f1`, `+0x54f176`, `+0x55cba6`. There is no
+EDVR or graphics module on this active call chain. The selective dump omits the
+damaged node's memory, so its prior writer cannot be recovered from this dump.
+Matching game/proxy binaries are preserved locally under
+`build/crash_24612_artifacts`; the dump is also retained under `build`. This
+build has no PDB/CodeView record, so no matching proxy PDB was available.
+
+The last log at 07:24:46 has no backend failure, context change, allocation
+reset or full temporal reset. New draw-capture work finished roughly a minute
+earlier. Its inactive path does not retain captured GPU resources. The source
+audit found balanced COM ownership and bounded atlas/constant-buffer reads;
+this does not rule out earlier corruption or a timing effect. Older WER events
+at game offset `0x4d78c51` are a different signature and must not be treated as
+evidence for this loading crash. Dumps and captured game data stay local; only
+the investigation conclusions are publishable.
+
+Next check: keep Epic `2dc6aabf` and its settings unchanged, restart and load
+directly into the cockpit without F10 at the menu. A repeat would rule out a
+menu F10 capture as a necessary trigger; success would not prove capture
+causality. If cockpit loading succeeds, take the intended flight F10 only after
+the cockpit has stabilized. No speculative allocator or motion fix is justified
+by this dump.
