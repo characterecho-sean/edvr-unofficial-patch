@@ -12,14 +12,16 @@
   applied jitter or continued history (section 33). Invalid jitter-phase
   history drives all resets; adapter depth/color/frame-gap counters are zero.
   The first-12 refusal limit hid the flight's reasons. Bounded per-reason
-  summaries now preserve them without weakening the gate. Main-menu depthless
-  HDR and four unknown projection pairs are separate findings. Section 34 adds
-  the requested flat onscreen AA/preset menu using shared settings and raster
-  code. The full build and 98 menu GPU checks pass. Earlier flight `ce715126`
-  confirms the key fix and captures the HDR copy's real image connection
-  (section 30). Every input write is checked before HDR continuation. Two older
-  shader pairs still lack creation bytes; F10 captures newly observed unknown
-  pairs without a hand-maintained list.
+  summaries now preserve them without weakening the gate. Section 34 adds flat
+  onscreen AA/preset controls; verified Epic `bd30cbdc` confirms mode and
+  preset changes reach the runtime, but the menu receives zero AA frames
+  (section 35). Its first HDR write is a depthless screen copy; the actual
+  source and preceding writer remain unproved. A bounded passive copy probe now
+  shares the two compute sample frames; full build gates pass. Earlier flight
+  `ce715126` confirms the key fix and captures the HDR copy's real image
+  connection (section 30). Every input write is checked before HDR
+  continuation. Two older shader pairs still lack creation bytes; F10 captures
+  newly observed unknown pairs without a hand-maintained list.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -40,9 +42,9 @@
   knowledge and shared motion/backend math without requiring local matrices to
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. Next Epic run: exercise F8 AA mode and
-  DLSS preset switching, then capture the menu ship and flight separately with
-  F10. Inspect phase-failure reasons, applied jitter and continued history.
+  constants or camera-equality labels. Next work: capture actual menu-copy
+  source identity and preceding graphics/compute writers even with AA off.
+  Establish its scene/depth connection before changing runtime admission.
   Missing recipes still reject jitter warm-up; do not claim visual
   qualification from preparation counts. No headset is needed; VR still needs
   regression tests.
@@ -1963,3 +1965,58 @@ off. Commit and rebuild with a clean identity, then install/verify Epic with
 the live INI preserved. In-game keyboard navigation and mode/preset switches
 still need the user's next run; EDHM/ReShade effect ordering remains part of
 the broader flat qualification. No merge to main.
+
+## 35. Menu mode cycling without treatment, 2026-09-24
+
+Epic `edvr_gfx_20260924_192550.log` matches `v0.17.0-568-gbd30cbdc`, build
+`6AB5CCC3`. Sean sees no visual change while cycling AA modes in the menu.
+Saved settings and runtime transitions confirm Off, TAA, DLSS, FSR3 and DLSS
+preset changes arrive. Renderer calls, allocations, treated frames, applied
+jitter and continued history all stay zero. This run cannot qualify any
+backend: scene selection refuses before backend execution.
+
+Ruled out: mode changes were ignored, because each saved setting has a matching
+runtime transition. Ruled out: a backend execution failure explains this menu
+run, because no backend was called. The first format-26 HDR write has VS
+`DEF19B035D5EDEDC` / PS `DED8796049C7BB4A`, with no depth resource or DSV at
+3840x2160 and later 2880x1620; refusal is `missing-depth-or-dsv`, followed by
+`conflicting-hdr-target-or-camera`. Its bound b1 is current but unused: the
+captured VS passes position/UV unchanged and the PS only samples t0/s0. Bound
+camera data therefore cannot justify inheriting scene depth.
+
+F10 reached the collector at 19:27:53.845. AA had been switched off at
+19:27:50.489, so the live projection audit returned before consuming its arm
+request. Passive discovery and both focused compute samples did run. Their
+scene association is refused, and the focused-report policy suppresses the
+retained contract/source details. Missing projection captures do not mean the
+hotkey failed. Neither this log nor the preceding menu capture establishes the
+copy's actual PS t0 resource or its last same-frame writer.
+
+The next instrument must distinguish an earlier depth-bearing graphics source,
+a compute-produced source and incomplete writer evidence in one capture. Record
+actual copy bindings and bounded source lineage independently of AA selection,
+including missing/overflow outcomes. Do not relax the depth gate or reuse an
+arbitrary bound camera on the strength of shader identity alone.
+
+The new passive probe samples only the two F10 focused-compute candidate
+frames, up to four exact menu-copy draws each. It records actual shader, PS t0,
+RTV0, DSV and viewport getters, resource/view layouts and preceding retained
+graphics/transfer observations at the copy sequence. Its report runs at that
+candidate's Present regardless of scene selection, before frame data is
+cleared; it does not depend on the separate five-second passive-report timer.
+This permits same-frame comparison against existing compute UAV/source records
+while AA is off. Zero-copy, overflow and incomplete writer evidence remain
+explicit. Bound-but-unused camera data is still not a scene contract.
+
+No AA admission or rendering behavior changes in this diagnostic build. Next
+Epic test: select DLSS with F8, close the panel, press F10 at the menu ship and
+remain there for 30 seconds. No flight is needed to capture this blocker.
+
+Validation: the final full absolute-path build passes all 79 pooled jobs, three
+quiet runs, Python self-tests, config contract and installer resource gates
+(`build/flat-menu-copy-validation-final.log`). Review verified getter reference
+release, reset between the two samples and reporting before frame clear even
+without a selected scene. The summary explicitly labels its shadow shader
+filter; actual getter hashes must still match before drawing conclusions.
+Rebuild after committing for a clean identity, then install/verify Epic with
+the current live INI preserved. Keep this work on the feature branch.

@@ -16,6 +16,7 @@
 #include "../common/runtime_profile.h"
 #include "binding_shadow.h"
 #include "engine_velocity.h"
+#include "exposure_fix.h"
 
 namespace edvr {
 namespace detail {
@@ -40,6 +41,9 @@ constexpr uint32_t kSmallCbs = 128;
 constexpr uint32_t kCbs = kLargeCbs + kSmallCbs;
 constexpr uint32_t kContracts = 224;
 constexpr uint32_t kHandoffContracts = 32;  // reserved; 256 total records
+constexpr uint32_t kMenuCopies = 4;
+constexpr uint64_t kMenuCopyVs = 0xDEF19B035D5EDEDCull;
+constexpr uint64_t kMenuCopyPs = 0xDED8796049C7BB4Aull;
 constexpr uint32_t kCbBytes = kFlatCbExemplarBytes;
 constexpr uint64_t kCaptureMs = 120000;
 constexpr uint32_t kMaxUsefulFrames = 12000;
@@ -92,6 +96,34 @@ struct DepthClear {
     uint32_t count = 0, flags = 0, seq = 0;
     float value = 0.0f;
 };
+struct MenuCopyView {
+    void* view = nullptr;
+    void* resource = nullptr;
+    uint32_t w = 0, h = 0, fmt = 0, samples = 0, arrays = 0;
+    uint32_t viewFmt = 0, viewDimension = 0, mip = 0, arraySlice = 0;
+};
+struct MenuCopy {
+    uint32_t sequence = 0;
+    uint64_t actualVs = 0, actualPs = 0;
+    uint32_t viewportCount = 0;
+    float viewport[6] = {};
+    MenuCopyView source, destination, depth;
+    uint32_t contractMatches = 0, targetMatches = 0, transferMatches = 0;
+    uint32_t contractFirst = 0, contractLast = 0, contractDraws = 0;
+    uint64_t contractVs = 0, contractPs = 0, cameraHash = 0;
+    uint64_t cameraWriteEpoch = 0;
+    uint32_t cameraWriteSeq = 0;
+    void* contractDepth = nullptr;
+    void* contractDsv = nullptr;
+    uint32_t contractDepthW = 0, contractDepthH = 0, contractDepthFmt = 0;
+    uint32_t targetFirst = 0, targetLast = 0, targetDraws = 0;
+    uint64_t targetVs = 0, targetPs = 0;
+    void* targetDepth = nullptr;
+    void* targetDsv = nullptr;
+    uint32_t targetDepthW = 0, targetDepthH = 0, targetDepthFmt = 0;
+    uint32_t transferFirst = 0, transferLast = 0;
+    char transferKind = 0;
+};
 struct State {
     ID3D11Device* device = nullptr;  // identity only
     uint64_t startedMs = 0, nextReportMs = 0;
@@ -126,6 +158,8 @@ struct State {
     uint32_t projectionDetailsRemaining = 0;
     bool projectionManual = false;
     bool detailRefusalReported = false;
+    uint32_t menuCopyReportsLeft = 0, menuCopyCount = 0, menuCopyOverflow = 0;
+    MenuCopy menuCopies[kMenuCopies] = {};
     FlatContractRecord contracts[kContracts] = {};
     uint32_t contractCount = 0, contractOverflow = 0;
     FlatContractRecord handoffContracts[kHandoffContracts] = {};
@@ -186,6 +220,199 @@ Target* targetOf(void* rtv, void* dsv) {
         t.depthW = v->w; t.depthH = v->h; t.depthFmt = v->fmt;
     }
     return slot;
+}
+
+MenuCopyView menuCopyView(ID3D11View* view) {
+    MenuCopyView result{};
+    if (!view) return result;
+    result.view = view;
+    ID3D11Resource* resource = nullptr;
+    view->GetResource(&resource);
+    if (!resource) return result;
+    result.resource = resource;
+    ID3D11Texture2D* texture = nullptr;
+    if (SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D),
+        reinterpret_cast<void**>(&texture))) && texture) {
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        result.w = desc.Width; result.h = desc.Height;
+        result.fmt = static_cast<uint32_t>(desc.Format);
+        result.samples = desc.SampleDesc.Count;
+        result.arrays = desc.ArraySize;
+        texture->Release();
+    }
+    resource->Release();
+    return result;
+}
+
+void captureMenuCopy(ID3D11DeviceContext* ctx) {
+    if (!g.projectionManual || !g.menuCopyReportsLeft ||
+        !flatComputeCandidate() || !ctx) return;
+    if (bindingShaderHash(BindSlot::Vs) != kMenuCopyVs ||
+        bindingShaderHash(BindSlot::Ps) != kMenuCopyPs) return;
+    if (g.menuCopyCount == kMenuCopies) { ++g.menuCopyOverflow; return; }
+
+    MenuCopy& copy = g.menuCopies[g.menuCopyCount++];
+    copy = MenuCopy{};
+    copy.sequence = g.serial;
+    ID3D11ShaderResourceView* source = nullptr;
+    ID3D11RenderTargetView* output = nullptr;
+    ID3D11DepthStencilView* depth = nullptr;
+    ctx->PSGetShaderResources(0, 1, &source);
+    ctx->OMGetRenderTargets(1, &output, &depth);
+    ID3D11VertexShader* actualVs = nullptr;
+    ID3D11PixelShader* actualPs = nullptr;
+    ctx->VSGetShader(&actualVs, nullptr, nullptr);
+    ctx->PSGetShader(&actualPs, nullptr, nullptr);
+    copy.actualVs = lookupShaderHash(actualVs);
+    copy.actualPs = lookupShaderHash(actualPs);
+    if (actualVs) actualVs->Release();
+    if (actualPs) actualPs->Release();
+    D3D11_VIEWPORT viewport{};
+    UINT viewportCount = 1;
+    ctx->RSGetViewports(&viewportCount, &viewport);
+    copy.viewportCount = viewportCount;
+    if (viewportCount) {
+        copy.viewport[0] = viewport.TopLeftX; copy.viewport[1] = viewport.TopLeftY;
+        copy.viewport[2] = viewport.Width; copy.viewport[3] = viewport.Height;
+        copy.viewport[4] = viewport.MinDepth; copy.viewport[5] = viewport.MaxDepth;
+    }
+    copy.source = menuCopyView(source);
+    copy.destination = menuCopyView(output);
+    copy.depth = menuCopyView(depth);
+    if (source) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+        source->GetDesc(&desc);
+        copy.source.viewFmt = static_cast<uint32_t>(desc.Format);
+        copy.source.viewDimension = static_cast<uint32_t>(desc.ViewDimension);
+        if (desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D)
+            copy.source.mip = desc.Texture2D.MostDetailedMip;
+        else if (desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {
+            copy.source.mip = desc.Texture2DArray.MostDetailedMip;
+            copy.source.arraySlice = desc.Texture2DArray.FirstArraySlice;
+        }
+    }
+    if (output) {
+        D3D11_RENDER_TARGET_VIEW_DESC desc{};
+        output->GetDesc(&desc);
+        copy.destination.viewFmt = static_cast<uint32_t>(desc.Format);
+        copy.destination.viewDimension = static_cast<uint32_t>(desc.ViewDimension);
+        if (desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D)
+            copy.destination.mip = desc.Texture2D.MipSlice;
+        else if (desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DARRAY) {
+            copy.destination.mip = desc.Texture2DArray.MipSlice;
+            copy.destination.arraySlice = desc.Texture2DArray.FirstArraySlice;
+        }
+    }
+    if (depth) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
+        depth->GetDesc(&desc);
+        copy.depth.viewFmt = static_cast<uint32_t>(desc.Format);
+        copy.depth.viewDimension = static_cast<uint32_t>(desc.ViewDimension);
+        if (desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2D)
+            copy.depth.mip = desc.Texture2D.MipSlice;
+        else if (desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DARRAY) {
+            copy.depth.mip = desc.Texture2DArray.MipSlice;
+            copy.depth.arraySlice = desc.Texture2DArray.FirstArraySlice;
+        }
+    }
+    if (source) source->Release();
+    if (output) output->Release();
+    if (depth) depth->Release();
+
+    // Record prior observed graphics work at the draw, while its sequence and
+    // resource identities still describe this exact Present interval. These
+    // collections do not observe arbitrary compute or unhooked GPU writes.
+    for (uint32_t i = 0; i < g.contractCount + g.handoffContractCount; ++i) {
+        const FlatContractRecord& r = i < g.contractCount ?
+            g.contracts[i] : g.handoffContracts[i - g.contractCount];
+        if (!copy.source.resource || r.key.color != copy.source.resource ||
+            r.first >= copy.sequence) continue;
+        ++copy.contractMatches;
+        if (r.last <= copy.contractLast) continue;
+        copy.contractFirst = r.first; copy.contractLast = r.last;
+        copy.contractDraws = r.draws;
+        copy.contractVs = r.key.vs; copy.contractPs = r.key.ps;
+        copy.contractDepth = const_cast<void*>(r.key.depth);
+        copy.contractDsv = const_cast<void*>(r.key.dsv);
+        copy.contractDepthW = r.key.depthWidth;
+        copy.contractDepthH = r.key.depthHeight;
+        copy.contractDepthFmt = r.key.depthFormat;
+        copy.cameraHash = r.key.cameraHash;
+        copy.cameraWriteEpoch = r.firstWriteEpoch;
+        copy.cameraWriteSeq = r.firstWriteSeq;
+    }
+    for (uint32_t i = 0; i < g.targetCount; ++i) {
+        const Target& t = g.targets[i];
+        if (!copy.source.resource || t.color != copy.source.resource ||
+            !t.draws || t.first >= copy.sequence) continue;
+        ++copy.targetMatches;
+        if (t.last <= copy.targetLast) continue;
+        copy.targetFirst = t.first; copy.targetLast = t.last;
+        copy.targetDraws = t.draws;
+        copy.targetVs = t.vsHash; copy.targetPs = t.psHash;
+        copy.targetDepth = t.depth; copy.targetDsv = t.dsv;
+        copy.targetDepthW = t.depthW; copy.targetDepthH = t.depthH;
+        copy.targetDepthFmt = t.depthFmt;
+    }
+    for (uint32_t i = 0; i < g.edgeCount; ++i) {
+        const Edge& e = g.edges[i];
+        if (!copy.source.resource || e.dst != copy.source.resource ||
+            (e.kind != 'R' && e.kind != 'C' && e.kind != 'V') ||
+            e.first >= copy.sequence) continue;
+        ++copy.transferMatches;
+        if (e.last <= copy.transferLast) continue;
+        copy.transferFirst = e.first; copy.transferLast = e.last;
+        copy.transferKind = e.kind;
+    }
+}
+
+void printMenuCopies(uint64_t frame) {
+    if (!g.projectionManual || !g.menuCopyReportsLeft) return;
+    --g.menuCopyReportsLeft;
+    Log::get().note("flat menu-copy probe frame=%llu epoch=%llu shadow-pair-filter=DEF19B035D5EDEDC/DED8796049C7BB4A retained=%u capacity=%u overflow=%u reports-left=%u status=%s; actual shader/PS t0/OM RTV0/DSV getters reported separately; only two focused compute candidate frames are sampled, absent writer is not proof of no writer",
+        static_cast<unsigned long long>(frame), static_cast<unsigned long long>(g.epoch), g.menuCopyCount, kMenuCopies,
+        g.menuCopyOverflow, g.menuCopyReportsLeft,
+        g.menuCopyCount ? "shadow-pair-observed" : "no-exact-shadow-pair-observed-in-candidate-frame");
+    for (uint32_t i = 0; i < g.menuCopyCount; ++i) {
+        const MenuCopy& c = g.menuCopies[i];
+        Log::get().note("flat menu-copy draw frame=%llu epoch=%llu index=%u q=%u actual-VS=%016llX actual-PS=%016llX viewport-count-at-most-1=%u viewport=%.9g,%.9g,%.9g,%.9g,%.9g,%.9g; shader identities from getters, identities are frame-local, null getters are observed nulls",
+            static_cast<unsigned long long>(frame), static_cast<unsigned long long>(g.epoch), i,
+            c.sequence, static_cast<unsigned long long>(c.actualVs),
+            static_cast<unsigned long long>(c.actualPs), c.viewportCount,
+            c.viewport[0], c.viewport[1], c.viewport[2], c.viewport[3],
+            c.viewport[4], c.viewport[5]);
+        Log::get().note("flat menu-copy source frame=%llu index=%u PS0(view,resource,size,resource-fmt,view-fmt,dimension,mip,array-slice,samples,array-size)=%p,%p,%ux%u,%u,%u,%u,%u,%u,%u,%u RTV0=%p,%p,%ux%u,%u,%u,%u,%u,%u,%u,%u DSV=%p,%p,%ux%u,%u,%u,%u,%u,%u,%u,%u; non-Texture2D or unresolved resource has zero size, view dimension identifies unsupported layouts",
+            static_cast<unsigned long long>(frame), i,
+            c.source.view, c.source.resource, c.source.w, c.source.h, c.source.fmt,
+            c.source.viewFmt, c.source.viewDimension, c.source.mip,
+            c.source.arraySlice, c.source.samples, c.source.arrays,
+            c.destination.view, c.destination.resource, c.destination.w,
+            c.destination.h, c.destination.fmt, c.destination.viewFmt,
+            c.destination.viewDimension, c.destination.mip,
+            c.destination.arraySlice, c.destination.samples, c.destination.arrays,
+            c.depth.view, c.depth.resource, c.depth.w, c.depth.h, c.depth.fmt,
+            c.depth.viewFmt, c.depth.viewDimension, c.depth.mip,
+            c.depth.arraySlice, c.depth.samples, c.depth.arrays);
+        Log::get().note("flat menu-copy prior-graphics frame=%llu index=%u source=%p contract-matches=%u retained-latest(q,draws,VS,PS,depth,DSV,depth-size,fmt,camera-hash,camera-write-epoch,q)=%u..%u,%u,%016llX,%016llX,%p,%p,%ux%u,%u,%016llX,%llu,%u target-matches=%u latest-target(q,draws,first-VS,first-PS,depth,DSV,depth-size,fmt)=%u..%u,%u,%016llX,%016llX,%p,%p,%ux%u,%u transfers=%u latest-transfer(kind,q)=%c,%u..%u; aggregate target first shader is not necessarily its last writer, compute writes and unhooked work require separate evidence",
+            static_cast<unsigned long long>(frame), i, c.source.resource,
+            c.contractMatches, c.contractFirst, c.contractLast, c.contractDraws,
+            static_cast<unsigned long long>(c.contractVs),
+            static_cast<unsigned long long>(c.contractPs),
+            c.contractDepth, c.contractDsv, c.contractDepthW, c.contractDepthH,
+            c.contractDepthFmt, static_cast<unsigned long long>(c.cameraHash),
+            static_cast<unsigned long long>(c.cameraWriteEpoch), c.cameraWriteSeq,
+            c.targetMatches, c.targetFirst, c.targetLast, c.targetDraws,
+            static_cast<unsigned long long>(c.targetVs),
+            static_cast<unsigned long long>(c.targetPs),
+            c.targetDepth, c.targetDsv, c.targetDepthW, c.targetDepthH,
+            c.targetDepthFmt, c.transferMatches, c.transferKind ? c.transferKind : '-',
+            c.transferFirst, c.transferLast);
+        Log::get().note("flat menu-copy compute-check frame=%llu index=%u source=%p copy-q=%u; compare same-frame flat compute CS-UAV/graphics writer resource and q < copy-q; this passive record cannot certify compute writes; coverage-drops(view,target,contract,handoff,edge,unknown-lists)=%u,%u,%u,%u,%u,%u",
+            static_cast<unsigned long long>(frame), i, c.source.resource,
+            c.sequence, g.viewOverflow, g.targetOverflow, g.contractOverflow,
+            g.handoffContractOverflow, g.edgeOverflow, g.unknownLists);
+    }
 }
 
 void edge(void* src, void* dst, char kind) {
@@ -585,6 +812,7 @@ void clearFrame() {
     // Entries are replaced on admission; no payload clearing/copying per draw.
     g.contractCount = g.contractOverflow = g.poolCameraDraws = 0;
     g.handoffContractCount = g.handoffContractOverflow = 0;
+    g.menuCopyCount = g.menuCopyOverflow = 0;
     std::memset(g.contractDraws, 0, sizeof(g.contractDraws));
     std::memset(g.contractCamera, 0, sizeof(g.contractCamera));
     g.depthClearCount = 0;
@@ -620,6 +848,7 @@ void flatTemporalArm() {
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
     flatTemporalStart(device);
     g.projectionDetailsRemaining = 2;
+    g.menuCopyReportsLeft = 2;
     g.projectionManual = true;
     flatComputeArm(device, g.presents);
     flatRuntimeArmProjectionAudit();
@@ -690,6 +919,7 @@ void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags) {
         FlatMonoFrame mono{};
         if (result == S_OK && !(flags & DXGI_PRESENT_TEST)) mono = printMonoInput(frame);
         flatComputeFinish(frame, mono);
+        printMenuCopies(frame);
     }
     if (g.presents == 1 || now >= g.nextReportMs || deadline) {
         report(frame, deadline ? "final" : "sample");
@@ -752,6 +982,7 @@ void flatTemporalDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
     if (!flatTemporalCapturing()) return;
     ++g.serial;
     if (!g.forwardingPresent && flatComputeCandidate()) flatComputeProbeDraw(ctx,g.epoch,g.serial);
+    if (!g.forwardingPresent) captureMenuCopy(ctx);
     if (!g.current) {
         // The shadow includes explicit null binds. Never replace a null bind
         // with an older non-null collector value.
