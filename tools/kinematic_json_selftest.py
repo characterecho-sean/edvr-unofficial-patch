@@ -20,7 +20,8 @@ EXE = ROOT / 'build' / 'kinematic_json_test.exe'
 def self_test():
     if not EXE.exists():
         raise AssertionError(f'{EXE} is missing; build.bat compiles it before this gate runs')
-    r = subprocess.run([str(EXE), '--self-test'], capture_output=True, text=True)
+    r = subprocess.run([str(EXE), '--self-test'], capture_output=True, text=True,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if r.returncode != 0:
         raise AssertionError(f'kinematic_json_test --self-test failed:\n{r.stderr}')
     ke = json.loads(r.stdout)['kinematicEval']
