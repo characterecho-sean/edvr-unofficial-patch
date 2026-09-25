@@ -20,9 +20,10 @@
   surface details. Per-pixel motion and output coverage remain unmeasured; the
   healthy runtime counters do not establish visual quality. Two older shader
   pairs still lack creation bytes; the current menu audit has no unknown pairs.
-  Epic cockpit capture `c38f6946` has three viewport qualification failures per
-  frame, zero jitter and continuous history resets (section 38). Menu success
-  does not qualify the cockpit. A bounded viewport witness is the next build.
+  Epic cockpit capture `f6c59ba6` proves all three viewport failures are known
+  HDR passes at full extent with depth range 0..0 (section 39). They reset
+  history every frame. Align their projection qualification with HDR admission;
+  keep source selection strict. Menu success does not qualify the cockpit.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -44,12 +45,11 @@
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
   constants or camera-equality labels. The main merge passed full validation
-  and promotion. Capture the cockpit viewport failure witnesses described in
-  section 38 before changing qualification. Menu surface shimmer separately
-  needs matched output/motion evidence; that capture proves sustained
-  treatment. The passive selector still refuses the menu copy; its diagnostic
-  verdict is not the live runtime verdict. No headset is needed; VR still needs
-  regression tests.
+  and promotion. Qualify the evidenced cockpit HDR viewport correction in
+  section 39. Menu surface shimmer separately needs matched output/motion and
+  rejection-mask evidence; that capture proves sustained treatment. The passive
+  selector still refuses the menu copy; its diagnostic verdict is not the live
+  runtime verdict. No headset is needed; VR still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -2177,3 +2177,57 @@ Next Epic run: select DLSS in the same cockpit scene, press F10, and remain
 there for 30 seconds. Confirm the installed build first. Use the witness to
 distinguish depth-range, extent/origin and count failures in this one capture;
 do not request separate flights for these hypotheses.
+
+## 39. Confirmed cockpit HDR depth range and menu quality, 2026-09-25
+
+Epic `edvr_gfx_20260925_045229.log` matches `f6c59ba6`, build `6AB5E2B9`.
+Environment: flat D3D11, RTX 5090, DLSS Quality preset K, 1920x1080 input to
+2560x1440 output (game SS 0.75 per axis). Headset/runtime are N/A. Driver and
+DLSS runtime versions are not reported by this build.
+
+Cockpit F10 started at 04:56:14.579 and completed at 04:56:24.632. Frame 44833
+records q365 F8FA801F2CB1E27C/84965D3C050FB01B, q367
+68DDDEF04D9894AF/06332CA168B6DA63 and q368 F7A6E916F14A3B1A/06332CA168B6DA63.
+All three witnesses report one viewport, (0,0,1920,1080,0,0), with the actual
+DSV resource matching both named and phase depth. Each pair has 900 full-XY
+depth-clamped failures and zero other failures. Aggregate: 123,958 viewport
+checks, 121,258 matched, 2,700 failed; three witnesses, no suppression or
+unrecorded outcomes. The projection audit has 125,878 candidates, 123,058
+prepared, 2,700 refused, 120 depth-unassociated and zero unknown pairs. Live
+phase stays zero and every treated frame resets.
+
+Ruled out: wrong viewport count, XY extent or origin explains this cockpit
+capture, because every rejection is exactly one full-size viewport with depth
+clamped to zero. The suspected three HDR pairs are now identified directly, not
+inferred from matching aggregate counts. Their projection recipes already
+exist. This requires correcting viewport qualification, not adding shaders or
+reworking motion reconstruction. HDR admission already supports depth 0..0;
+motion-source selection must retain its 0..1 requirement.
+
+The correction reuses the selector's HDR viewport predicate for known,
+actual-shader-verified projection recipes on format-26 non-output targets with
+an RTV and matching, owned scene depth/DSV dimensions. Other target roles
+retain the full 0..1 viewport predicate; compute is unchanged. The raster
+viewport is still queried from the actual context, and all existing shader,
+constant-buffer, extent and phase checks remain. No new shader allowlist is
+introduced. Scalar viewport overloads avoid copying a full draw observation.
+
+Menu screenshots at 04:54:07 (DLSS K) and 04:54:27 (Off) show remaining hard
+edges around the ship canopy and surface detail; the crops differ in framing.
+At 04:54:04, 09 and 14, each five-second DLSS interval has 450 history
+continuations, zero resets and live jitter. The mode switches off at 04:54:14.
+Thus menu frame-level continuity is established, but per-pixel DLSS
+contribution is not. `flat_mono_shader_source.h` finish substitutes bilinear
+current colour when any pixel of the 2x2 input footprint has rejected motion.
+This safeguard could explain untreated edges; it is not yet proven at the
+pictured pixels. Preserve the safeguard until matched colour, motion,
+rejection, pre-finish DLSS and final-output evidence identifies the cause. SS
+1.0 with DLSS already selects native DLAA; it is an optional quality comparison
+with about 78 percent more input pixels than SS 0.75, not a fix for a possible
+integration defect.
+
+Next Epic run after the viewport correction: keep SS 0.75 and DLSS K for the
+same cockpit F10 capture. Verify the three passes prepare, viewport mismatch
+counts stay zero, jitter becomes live and history continues. Watch camera turns
+near the star for the previously reported corona smear. Further menu quality
+investigation is separate from this confirmed cockpit blocker.

@@ -225,7 +225,7 @@ void recordProjectionViewportFailure(State& s, uint64_t vs, uint64_t ps, uint64_
     ++s.projectionViewportWitnesses;
     // Fetch the maximum capacity for the diagnostic so count and viewport0
     // remain an unambiguous witness even for a multiple-viewport rejection.
-    // The live qualification query and predicate below stay unchanged.
+    // This diagnostic query does not replace the live qualification query.
     D3D11_VIEWPORT actualViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
     UINT actualCount=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     s.context->RSGetViewports(&actualCount,actualViewports);
@@ -641,7 +641,7 @@ void recordProjectionReference(State& s, State::AuditOutcome& outcome,
     }
 }
 const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecipes recipes, uint32_t width, uint32_t height,
-                       uint64_t vs, uint64_t ps, uint64_t cs, bool owned) {
+                       uint64_t vs, uint64_t ps, uint64_t cs, bool owned, bool sceneHdr = false) {
     if (!s.projection || !recipes.count) return nullptr;
     const bool audit=s.projectionFrames!=0;
     if(audit) { ++s.projectionCandidates;if(!owned)++s.projectionUnowned; }
@@ -666,8 +666,9 @@ const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecip
     if(!cs) {
         UINT count=1;D3D11_VIEWPORT viewport{};s.context->RSGetViewports(&count,&viewport);
         if(audit)++s.projectionViewportChecks;
-        if(count!=1 || viewport.TopLeftX!=0 || viewport.TopLeftY!=0 || viewport.Width!=float(width) ||
-           viewport.Height!=float(height) || viewport.MinDepth!=0 || viewport.MaxDepth!=1) {
+        const float actualViewport[]={viewport.TopLeftX,viewport.TopLeftY,viewport.Width,
+                                      viewport.Height,viewport.MinDepth,viewport.MaxDepth};
+        if(!flatRuntimeProjectionViewport(count,actualViewport,width,height,sceneHdr)) {
             if(audit)recordProjectionViewportFailure(s,vs,ps,cs,width,height,count,viewport);
             failPhase(s,"projection-viewport-mismatch");return nullptr;
         }
@@ -1124,7 +1125,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 const bool owned=depthResource && (depthResource.Get()==s.namedDepth || depthResource.Get()==s.phaseDepth.Get());
                 if(!owned && k.color==s.phaseHdr.Get())failPhase(s,"scene-projection-depth-unassociated");
                 if(nonzeroPhase(s) && owned && s.phaseDepth && depthResource.Get()!=s.phaseDepth.Get())failPhase(s,"scene-depth-changed");
-                projectionPlan=qualifyProjection(s,recipes,k.width,k.height,k.vs,k.ps,0,owned);
+                const bool sceneHdr=flatRuntimeProjectionHdr(k,s.prefix.output,owned?depthResource.Get():nullptr);
+                projectionPlan=qualifyProjection(s,recipes,k.width,k.height,k.vs,k.ps,0,owned,sceneHdr);
             }
             else if(flatProjectionDrawUnchanged(k.vs,k.ps)) {
                 FlatComputeInternalScope guard;

@@ -91,19 +91,28 @@ inline bool ordered(const FlatContractRecord& r) {
 inline bool oneDraw(const FlatContractRecord& r) {
     return r.draws == 1 && ordered(r) && r.firstInstances == 1 && r.lastInstances == 1;
 }
+inline bool fullViewportExtent(uint32_t count, const float* viewport, uint32_t w, uint32_t h) {
+    return w && h && count == 1 &&
+        viewport[0] == 0 && viewport[1] == 0 &&
+        viewport[2] == static_cast<float>(w) && viewport[3] == static_cast<float>(h);
+}
 inline bool fullViewportExtent(const FlatContractObservation& k, uint32_t w, uint32_t h) {
-    return w && h && k.viewportCount == 1 &&
-        k.viewport[0] == 0 && k.viewport[1] == 0 &&
-        k.viewport[2] == static_cast<float>(w) && k.viewport[3] == static_cast<float>(h);
+    return fullViewportExtent(k.viewportCount, k.viewport, w, h);
+}
+inline bool fullViewport(uint32_t count, const float* viewport, uint32_t w, uint32_t h) {
+    return fullViewportExtent(count, viewport, w, h) && viewport[4] == 0 && viewport[5] == 1;
 }
 inline bool fullViewport(const FlatContractObservation& k, uint32_t w, uint32_t h) {
-    return fullViewportExtent(k, w, h) && k.viewport[4] == 0 && k.viewport[5] == 1;
+    return fullViewport(k.viewportCount, k.viewport, w, h);
 }
-inline bool hdrViewport(const FlatContractObservation& k, uint32_t w, uint32_t h) {
+inline bool hdrViewport(uint32_t count, const float* viewport, uint32_t w, uint32_t h) {
     // Complete Epic frames 36865/41961 contain three HDR writes at full XY
     // extent with depth clamped to zero. They do not name the motion source.
-    return fullViewportExtent(k, w, h) && k.viewport[4] == 0 &&
-        (k.viewport[5] == 0 || k.viewport[5] == 1);
+    return fullViewportExtent(count, viewport, w, h) && viewport[4] == 0 &&
+        (viewport[5] == 0 || viewport[5] == 1);
+}
+inline bool hdrViewport(const FlatContractObservation& k, uint32_t w, uint32_t h) {
+    return hdrViewport(k.viewportCount, k.viewport, w, h);
 }
 inline bool cameraCurrent(const FlatContractRecord& r, uint64_t epoch) {
     return ordered(r) && r.key.b1 && r.key.camera &&

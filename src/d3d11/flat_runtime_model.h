@@ -5,6 +5,20 @@ namespace edvr {
 inline uint32_t flatRuntimeDepthReadFormat(uint32_t format) {
     return format == 19 ? 21u : format == 39 ? 41u : format == 44 ? 46u : 0u;
 }
+// Known, actual-shader-verified projection recipes may use the selector's HDR
+// viewport contract only on a scene HDR target with its owned scene depth.
+// This does not admit depth-clamped draws as motion sources or image intermediates.
+inline bool flatRuntimeProjectionHdr(const FlatContractObservation& k, const void* output,
+                                     const void* ownedDepth) {
+    return k.format == 26 && k.color && k.color != output && k.rtv &&
+        ownedDepth && k.depth == ownedDepth && k.dsv && k.width && k.height &&
+        k.depthWidth == k.width && k.depthHeight == k.height;
+}
+inline bool flatRuntimeProjectionViewport(uint32_t count, const float* viewport,
+                                          uint32_t width, uint32_t height, bool sceneHdr) {
+    return sceneHdr ? flat_mono_detail::hdrViewport(count, viewport, width, height)
+                    : flat_mono_detail::fullViewport(count, viewport, width, height);
+}
 // Online prefix contract. No resource ownership and no previous-frame admission.
 struct FlatRuntimeDraw {
     FlatContractObservation key{};
