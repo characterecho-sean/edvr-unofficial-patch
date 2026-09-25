@@ -123,6 +123,14 @@ and backend code. Mono gets its own view identity. Keep stereo continuity,
 foveation and eye diagnostics behind VR capabilities. Retain bounded storage
 with an explicit active-view count.
 
+> **Deferred, 2026-09-25.** The live copy of this doc is on
+> `codex/flat-temporal-aa`. Sean's priority there is performance over code
+> sharing: broad core extraction waits until flat capture establishes the
+> boundary, and flat got its own mono resolve (that branch's section 26)
+> that never touches `temporal_pass.cpp`'s per-eye state. Do not extract
+> per-view state from `g_eye[2]` as a standalone change (this paragraph,
+> delivery step 2 in section 7); external PR #41 did, and is on hold.
+
 The shared frame contract must name:
 
 | Group | Required information |

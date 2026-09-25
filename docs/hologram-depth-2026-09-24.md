@@ -2,117 +2,141 @@
 
 ## Status
 
-- **State:** round 3 (bbaf99f4) FLOWN OK 2026-09-24 16:30. Sean: "That
-  fixed the holograms and the radar." It was the third build:
-  - 986ebaad blurred, for the two defects below;
-  - round 3 reads the share from the game's own RT0 in its view format,
-    puts the floor on the displayed pixel, and lists eleven families.
+- **State (2026-09-25):** the holograms, the radar, the distance digits
+  and the weapons-panel text are FIXED and flown (`## Round history`
+  below). Round 8 BUILT, NOT FLOWN:
+  - the target reticle's triangles (vs `71DD8B8B09060A81` writes z = 0
+    but keeps a real w) take depth = a + b / w from an EDVR pixel shader
+    matched to that VS's output signature (the rig proved on WARP that a
+    D3D11 pixel shader's SV_Position.w is that clip w, not 1/w);
+  - the near-light pass runs one thread per pixel; one thread scanning
+    each 8x8 block serially cost ~0.3 ms/frame in round 7.
+- **Open:**
+  - The HUD smears under ship and head motion (flight 20260925_103225).
+    Round 7 behaves as designed in that dump, but its camera rows were
+    rejected on 10 of 16 crops. Unassigned until the on/off A/B below.
+  - Which of the five radar-contact families paints the bars (listed
+    from the draw ledger, not individually confirmed).
+  - Target markers on a target inside 10 m: the holo material draws them
+    at the target, so the cockpit radius stops excluding them there.
+- **Keys:** `advanced.temporal_aa_hologram_depth` (default on), with
+  `advanced.temporal_aa_hologram_families`, `_floor` and `_share`, all
+  live. The pass runs inside `fix.temporal_aa`'s interface depth
+  (`ui_depth.cpp`) and needs it on.
+- **Mechanism:** each listed draw is issued twice more after the game's:
+  first its blended light into a contribution scratch (a cockpit family
+  only where nearer than `advanced.temporal_aa_ship_metres`, 10 m), then
+  its nearest depth. Once per eye, before the temporal pass reads the
+  private AA depth copy, a resolve stamps that depth where the displayed
+  pixel clears the floor and the element supplies at least `share` of
+  the game's own HDR light there. A dark pixel within the cockpit radius
+  takes it only where its own near-light block or a neighbour holds the
+  element's light. The lists: `## Families` below.
+- **Ruled out:** `## Ruled out` below, plus the `ruled out:` lines in the
+  flight entries.
+- **Next flight** (Frontier, Pimax OpenXR, the log's build line naming
+  round 8):
+  1. A target locked, flying toward it and turning: the reticle's
+     triangles should stay sharp. An eye dump if they do not.
+  2. The HUD-smear manoeuvre with `advanced.temporal_aa_hologram_depth`
+     on, then off (live). If the smear stays with it off, it belongs to
+     the camera path or the upscaler, not this arc.
 
-  Round 4 (36b94518) FLOWN 17:51, triangles and digits unchanged. It
+  Read these log lines:
+  - the 30 s census's `world markers N draws/frame, element-depth
+    samples p50`: above 0 with a target locked (it read 0 through round
+    7; 0 now means the matched PS never drew);
+  - no `hologram depth: shader compile failed` line;
+  - `EDVR GPU census`: "hologram resolve+celestial" well under round 7's
+    ~0.32 ms/frame.
+
+## The defect
+
+Cockpit holograms and the supercruise radar's star icon write no depth.
+Where the sky is behind them, their pixels take the sky's depth and
+motion while they move with the cockpit, and FSR's history lands about a
+pixel a frame off (worst under FSR, Sean 2026-09-24). Over the cockpit
+they inherit cockpit motion and stay sharp.
+
+## Round history
+
+- Round 1, the first draft, never flew: review found it alpha-blind,
+  among other defects (`## Ruled out`).
+- Round 2 (986ebaad) FLOWN 2026-09-24 15:56, still blurred: the target
+  sphere and the radar contacts were unlisted, and the share test
+  compared HDR light against the tonemapped image.
+- Round 3 (bbaf99f4) FLOWN OK 16:30 (Sean: "That fixed the holograms and
+  the radar"): the share reads the game's own RT0 in its view format,
+  the floor sits on the displayed pixel, and eleven families are listed.
+- Round 4 (36b94518) FLOWN 17:51, triangles and digits unchanged. It
   added a world-marker class for the reticle's triangles and a census of
   the UI content tracker; both found their causes (flight
   20260924_175113, below).
+- Round 5 (c9cab91e) FLOWN 18:50: FIXED the ghosting digits (UiContent
+  compares 4x4 blocks by hash) and proved the triangles' vertex shader
+  writes z = 0.
+- Round 6 (5165a76f) FLOWN 2026-09-25 08:04. For the weapons-panel blur
+  (flight 20260925_050051, below), a dark pixel inside a listed element's
+  own footprint, within the cockpit radius, took that element's depth,
+  so the gaps between glyphs moved with the panel. It REGRESSED (flight
+  20260925_080452, dump eye_080707): sky outside the panel's visible
+  frame, inside its oversized null-PS footprint, was stamped too, and its
+  parallax made the HUD swim with head translation (0.7-3.6 mm/frame,
+  ~2 px/mm at 0.6 m). A steady roll has no head translation, so it
+  stayed sharp.
+- Round 7 (a5edd2da) FLOWN 10:32 (flight 20260925_103225, below): a dark
+  pixel takes the element's depth only near the element's own light,
+  through a per-eye near-light map (1/8 res, R8_UNORM, a compute pass
+  marking a block when one of its own pixels passes the bright branch's
+  test). The resolve covers a dark pixel only when its own block or one
+  of its 8 neighbours is set: roughly the 8-16 px around glyph light (sky
+  MV 5-13 px/frame during rolls), not an open quad 40 px away. In the
+  dump the sky beside the weapons panel is 5% stamped (35% in round 6).
+- Round 8 BUILT, NOT FLOWN (Status).
 
-  Round 5 (c9cab91e) FLOWN 18:50:
-  - FIXED the ghosting digits (UiContent compares 4x4 blocks by hash);
-  - proved the triangles' vertex shader writes z = 0.
+## Families
 
-  Round 6 BUILT, NOT FLOWN: the weapons-panel blur (flight
-  20260925_050051, below) -- a dark pixel inside a listed element's own
-  footprint, within the cockpit radius, now takes that element's depth
-  instead of discarding on the floor, so gaps between glyphs and rows
-  move with the panel. Far elements keep discarding on cockpitRange, not
-  the floor, so this does not reopen the 2026-09-09 bracket regression;
-  a bright pixel still needs the share test it always did.
+Eleven cockpit families are built in: holo panels `81216C77F90DEDD6`
+(also the ship/shield hologram, ps `A2965EC2931A39C8`); the icon core
+`F8D8A92E96419901` (ps `16196F69ADE35E77`); the corona family
+`D1281DF454A153AD` (ps `97DBC87FCAA429C4`: the icon's glow AND the real
+sun's corona); the stalks `DF3503CD07F9B10C` (caught by the pixel probe
+at the radar, frame 8548) and `5453D19B6D362364` (drawn next to it in
+the ledger's radar section); the target hologram sphere
+`5559BD94B6852E83` (two premultiplied quads, ps
+`EA02FAC2BD6C643C`/`E95634B0F61D218F`, named by the pixel probe, flight
+20260924_155636); the five radar-contact families `A2C2D5510BF1926D`,
+`9B34C331902DC1ED`, `9611A454527F7FEB`, `B932058F26B76691`,
+`94D5C556DFD6D705` (named by their position in the draw ledger, right
+after the two stalks in each eye's cockpit section -- which one paints
+the visible bars is still open). The canopy `8C091FFD08644E02` is
+refused even if listed.
 
-  Next (separate from this fix): read the triangles' VS bytecode, then
-  write depth from its clip w (flight 20260924_185058, below).
-  `advanced.temporal_aa_hologram_depth` (default on), with
-  `advanced.temporal_aa_hologram_families`, `_floor` and `_share`. It runs
-  inside `fix.temporal_aa`'s interface depth (`ui_depth.cpp`) and needs it on.
-- **The defect:** cockpit holograms and the supercruise radar's star icon
-  write no depth. Where the sky is behind them, their pixels take the
-  sky's depth and motion while they move with the cockpit, and FSR's
-  history lands about a pixel a frame off (worst under FSR, Sean
-  2026-09-24). Over the cockpit they inherit cockpit motion and stay sharp.
-- **Families (eleven built in):** holo panels `81216C77F90DEDD6` (also the
-  ship/shield hologram, ps `A2965EC2931A39C8`); the icon core
-  `F8D8A92E96419901` (ps `16196F69ADE35E77`); the corona family
-  `D1281DF454A153AD` (ps `97DBC87FCAA429C4`: the icon's glow AND the real
-  sun's corona); the stalks `DF3503CD07F9B10C` (caught by the pixel probe
-  at the radar, frame 8548) and `5453D19B6D362364` (drawn next to it in
-  the ledger's radar section); the target hologram sphere `5559BD94B6852E83` (two premultiplied
-  quads, ps `EA02FAC2BD6C643C`/`E95634B0F61D218F`, named by the pixel
-  probe, flight 20260924_155636); the five radar-contact families
-  `A2C2D5510BF1926D`, `9B34C331902DC1ED`, `9611A454527F7FEB`,
-  `B932058F26B76691`, `94D5C556DFD6D705` (named by their position in the
-  draw ledger, right after the two stalks in each eye's cockpit section --
-  which one paints the visible bars is still open). The canopy
-  `8C091FFD08644E02` is refused even if listed. A separate, second
-  built-in list holds one WORLD MARKER, not radius-clipped: the target
-  reticle's 3D triangles `71DD8B8B09060A81` (round 4). Extras from
-  `advanced.temporal_aa_hologram_families` always join the cockpit list,
-  never this one.
-- **Mechanism:** each listed draw is issued twice more after the game's.
-  The first pass adds the element's own blended light into a scratch
-  target. It counts only fragments nearer than the cockpit radius
-  (`advanced.temporal_aa_ship_metres`, 10 m), clipped by a depth target
-  cleared at that radius. The second pass writes the element's nearest
-  depth. Once per eye, before the temporal pass reads the private AA depth
-  copy, a resolve stamps that depth wherever two things hold:
-  - the pixel as displayed clears the floor on its brightest channel;
-  - the element supplies at least `share` of that pixel's light in the
-    game's own HDR target.
-- **Open:** which of the five radar-contact families paints the bars
-  (all five are listed, taken from the ledger's cockpit section, not
-  individually confirmed by the pixel probe). The GPU cost of two extra
-  passes per listed draw is unmeasured. Round 3 itself is unflown --
-  20260924_155636 is evidence for the defect it fixes, not for the fix.
-- **Risks the first flight must look at:**
-  - target markers on a target inside 10 m (the holo material draws the
-    markers at the target; beyond the radius they are clipped);
-  - glow over a bright outside scene, which the share test is there for;
-  - the extra GPU time.
-- **Ruled out (do not re-propose):**
-  - `advanced.ui_replay` (removed 48ad7689) would not have fixed it: it
-    logged captured=0 on every flown rig and took only draws already marked UI.
-  - Reactive bias or sharpening: the motion is wrong, fix the motion.
-  - kHoloPanel's alpha-floor coverage for the ship hologram: its strokes
-    never reach alpha 0.5 (0 of 782 over-sky pixels covered, eye_135907).
-  - Listing the icon in `advanced.ui_depth_families`: every direct family
-    needs a coverage shader, else "no supported coverage shader".
-  - A contribution read as the raw shader output's luma under a MAX blend
-    (the first draft, never flown): it ignores the blend's alpha, so a
-    constant-tint glow with an alpha falloff would stamp its whole quad --
-    the "small blurry quads under each bracket" of 2026-09-09 again.
-  - The share test against the submitted (tonemapped) image, as flown in
-    986ebaad: the holograms draw into the HDR scene target
-    (R11G11B10_FLOAT) before tonemapping, so the contribution is about
-    3.6x smaller than the displayed pixel. The test passed 2% of the
-    over-sky pixels that cleared the floor (eye_155832).
-- **Next flight:**
-  1. Supercruise under FSR, rolling the ship, with the star icon above
-     the radar disc, the contact bars, and the ship and target holograms
-     over sky. Take an eye dump while rolling.
-  2. Near a station with a target locked, with a hologram over the
-     station. Take a second dump.
-  3. Fly a key-off leg for the GPU time.
+A separate, second built-in list holds one WORLD MARKER, not
+radius-clipped: the target reticle's 3D triangles `71DD8B8B09060A81`
+(round 4), whose depth comes from its own matched pixel shader (round
+8). Extras from `advanced.temporal_aa_hologram_families` always join the
+cockpit list, never this one.
 
-  Read these log lines:
-  - the `hologram depth:` configure line, now "N cockpit families, M world
-    markers" (round 4: M should read 1);
-  - the first-listed-draw line (the blend space, and now target view
-    yes/no -- no should not happen for the HDR scene target itself);
-  - the 30 s census: listed draws per frame, stamped pixels p50, share
-    test skipped (no target view) and floor on contribution (no display
-    view) should both read at or near 0 -- either climbing back up means
-    round 3's own fix is not reaching its inputs;
-  - round 4: the target reticle's triangles should now show nonzero Z and
-    HoloCoverage at any range in the eye dump; the `UI content census:`
-    lines on the run's first frame, for the ghosting-digits question.
+## Ruled out (do not re-propose)
 
-  In the dumps, read the new `HoloContribution` input against `C00` and
-  `Z` at the icon, the holograms and the marker corners.
+- `advanced.ui_replay` (removed 48ad7689) would not have fixed it: it
+  logged captured=0 on every flown rig and took only draws already
+  marked UI.
+- Reactive bias or sharpening: the motion is wrong, fix the motion.
+- kHoloPanel's alpha-floor coverage for the ship hologram: its strokes
+  never reach alpha 0.5 (0 of 782 over-sky pixels covered, eye_135907).
+- Listing the icon in `advanced.ui_depth_families`: every direct family
+  needs a coverage shader, else "no supported coverage shader".
+- A contribution read as the raw shader output's luma under a MAX blend
+  (the first draft, never flown): it ignores the blend's alpha, so a
+  constant-tint glow with an alpha falloff would stamp its whole quad --
+  the "small blurry quads under each bracket" of 2026-09-09 again.
+- The share test against the submitted (tonemapped) image, as flown in
+  986ebaad: the holograms draw into the HDR scene target
+  (R11G11B10_FLOAT) before tonemapping, so the contribution is about
+  3.6x smaller than the displayed pixel. The test passed 2% of the
+  over-sky pixels that cleared the floor (eye_155832).
 
 ## Evidence, 2026-09-24
 
@@ -284,6 +308,63 @@ through the canopy.
   frames of wrong world motion during a roll. That belongs to
   temporal_pass.cpp's registration (after a rejected frame, prev should
   stay the last accepted rows).
+
+## Flight 20260925_080452 (e52089de: round 6 + camera fix + GPU census)
+
+Sean: HUD elements "swim with head movement but under constant ship roll
+they look sharp". Setting `temporal_aa_hologram_depth = off` FIXES it (live
+toggle, same flight).
+
+Eye dump eye_080707:
+- The weapons panel's glyphs and gaps are all stamped at 0.60 m (round 6
+  works for the text).
+- A sky patch OUTSIDE the panel's visible frame is 35% stamped at 0.57 m.
+  The panel's null-PS footprint (its quad) reaches far past what it draws.
+- The head translates 0.7-3.6 mm per frame, about 2 px of parallax per mm
+  at 0.6 m. Stamped sky takes that parallax while its stars stay still.
+
+Separately, a head flick of 4.5 deg/frame outran the camera-row chooser's
+3-deg window (rowsOk 0 at crops 1 and 4). That belongs to the camera-rows
+arc.
+
+- ruled out: round 6's dark rule over the element's WHOLE footprint,
+  because it makes the region around the HUD swim with head translation.
+  Round 7 limits dark stamping to pixels within about 8-16 px of the
+  element's own visible light, via a 1/8-resolution near-light map.
+
+## Flight 20260925_103225 (290c76e4: round 7 + census fix)
+
+Two eye dumps: eye_103555 (the HUD "smearing/blurring under ship/head
+motion") and eye_103612 (the triangles on a targeted ship).
+`glare_shader_dump` was on at launch.
+
+- **Triangles' vertex shader captured** (`vs_71DD8B8B09060A81.dxbc`, 640
+  bytes).
+  - Output signature: TEXCOORD6 at o0, TEXCOORD7 at o1, SV_POSITION at o2.
+  - `mov o2.z, l(0)` forces depth to 0, while x, y and w come from cb0
+    rows 4, 5 and 7: a real perspective projection whose w is the view
+    distance.
+  - Round 8 writes the triangles' depth as near/w from a pixel shader
+    matched to that signature.
+- **HUD dump (eye_103555):**
+  - Round 7 behaves as designed: the sky beside the weapons panel is 5%
+    stamped (35% in round 6), the glyphs 100% at 0.59 m with cockpit
+    motion, and the gaps near the glyphs are stamped.
+  - The camera rows are rejected on 10 of the 16 crops, alternating
+    ~6 deg and ~0 deg frame to frame (two cameras); crops 6-7 accepted
+    2.60 deg and 0.00 deg against a head turn of ~0.2 deg. So for those
+    frames the world path's motion is wrong.
+  - The session drop count (128 eye-frames) is in line with earlier
+    flights (120 and 46), and the camera-rows doc notes the eye run's
+    own hitch perturbs registration. So the burst may be the dump's own
+    doing.
+  - Next: the same live A/B. If the smear persists with the pass off, it
+    belongs to the camera path or the upscaler, not this arc.
+- **Census:** the per-draw figures are now sensible (engine velocity 0.034
+  ms at 3.7 calls/frame), and the timer floor reads 0.0 us/pair on this
+  GPU. The near-light pass took "hologram resolve+celestial" from ~0.04
+  to 0.32 ms/frame (one thread per block, serial); round 8 makes it one
+  thread per pixel.
 
 ## Decisions, 2026-09-24
 

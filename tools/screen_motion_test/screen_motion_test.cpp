@@ -3,6 +3,7 @@
 // header for declarations rather than the inline production ones.
 #define EDVR_BINDING_SHADOW_EXTERNAL 1
 #include "../../src/d3d11/screen_motion.cpp"
+#include "../../src/d3d11/gpu_census.h"
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
 #include <DirectXPackedVector.h>
@@ -62,6 +63,12 @@ void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* c,UINT n,ID3D11RenderTarget
 // fix.ui_quality (ui_layer.h): true while the UI layer has the draw; its
 // inline reader is the production one.
 namespace detail{bool g_uiLayerRedirecting=false;}
+// The GPU census (issue #38) is cross-cutting; this rig is about screen
+// motion's own effect, not the census's rotation or its calibration
+// (tools/gpu_census_test covers those), so it is stubbed like the other
+// cross-cutting hooks above.
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
+void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 }
 using namespace edvr;
 void __stdcall draw(ID3D11DeviceContext* c,unsigned,unsigned,unsigned,int,unsigned){c->Draw(3,0);}
@@ -136,7 +143,7 @@ int main(int argc,char** argv){
     // blend contracts, source identity and per-frame mask lifetime.
     {
         screenMotionFrameBoundary(ctx.Get());source[275][0]+=.1f;sourceDraw();
-        auto uc=compile("float4 main(float4 p:SV_Position):SV_Target{if(p.x>48)discard;return float4(0,1,0,p.x<16?0:p.x<32?.25:1);}","ps_5_0");
+        auto uc=compile("float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 p:SV_Position):SV_Target{if(p.x>48)discard;return float4(0,1,0,p.x<16?0:p.x<32?.25:1);}","ps_5_0");
         ComPtr<ID3D11PixelShader> up;hr(dev->CreatePixelShader(uc->GetBufferPointer(),uc->GetBufferSize(),nullptr,&up));
         D3D11_BLEND_DESC ub{};auto& r=ub.RenderTarget[0];r.BlendEnable=TRUE;r.SrcBlend=D3D11_BLEND_SRC_ALPHA;r.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOp=D3D11_BLEND_OP_ADD;
         r.SrcBlendAlpha=D3D11_BLEND_ONE;r.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOpAlpha=D3D11_BLEND_OP_ADD;r.RenderTargetWriteMask=7;

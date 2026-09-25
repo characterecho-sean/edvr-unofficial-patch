@@ -67,7 +67,7 @@ struct Rig {
         if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,testDriver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
         // The grid is disabled in these fixtures, so the unused TEXCOORD
         // can come from the same position without changing the reference.
-        auto vsCode=compile("struct O{float4 p:SV_Position;float2 t:TEXCOORD4;};O main(uint id:SV_VertexID){O o;o.p=float4(id==2?3:-1,id==1?3:-1,0,1);o.t=o.p.xy;return o;}","main","vs_5_0");
+        auto vsCode=compile("struct O{float2 t:TEXCOORD4;float4 p:SV_Position;};O main(uint id:SV_VertexID){O o;o.p=float4(id==2?3:-1,id==1?3:-1,0,1);o.t=o.p.xy;return o;}","main","vs_5_0");
         ComPtr<ID3D11VertexShader> vs;hr(dev->CreateVertexShader(vsCode->GetBufferPointer(),vsCode->GetBufferSize(),nullptr,&vs));ctx->VSSetShader(vs.Get(),nullptr,0);
         const D3D_SHADER_MACRO macros[]={{"EDVR_NIGHT_STOCK","1"},{nullptr,nullptr}};auto code=compile(kNightVisionPs,"main","ps_5_0",macros);
         hr(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&stock));ctx->PSSetShader(stock.Get(),nullptr,0);

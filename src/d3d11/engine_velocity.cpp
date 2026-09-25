@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "depth_probe.h"
+#include "gpu_census.h"
 #include "gpu_timing.h"
 #include "dxbc_engine_velocity.h"
 #include "engine_velocity_emit.h"
@@ -749,8 +750,14 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
         }
         e.sceneBytes = sd.ByteWidth;
     }
-    ctx->CopyResource(e.pool.Get(), poolBuf.Get());
-    ctx->CopyResource(e.scene[slot].Get(), scene.Get());
+    {
+        // The census (issue #38): both copies as one span -- they always run
+        // together, back to back, so one timer pair covers the real work
+        // instead of paying two pairs' worth of overhead for it.
+        GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
+        ctx->CopyResource(e.pool.Get(), poolBuf.Get());
+        ctx->CopyResource(e.scene[slot].Get(), scene.Get());
+    }
     // What the snapshots copy (the performance review, item 4: measured
     // before any storage change): the whole pool buffer, whatever the view
     // exposes, and the scene constants.
@@ -813,7 +820,14 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     if (wp.replaceEpoch != e.poolReplaceEpoch) { invalidate(e, kPoolRewritten); return; }
     if (wp.appendEpoch != e.poolAppendEpoch) {
         const int refreshTimer = beginCapture(ctx, kCaptureRefresh);
-        ctx->CopyResource(e.pool.Get(), e.poolBuffer.Get());
+        {
+            // The census (issue #38): nested inside the existing capture
+            // timer above, which is fine -- gpu_census.h -- and counted as
+            // its own occurrence since it is a separate call site from
+            // snapshot()'s pair.
+            GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
+            ctx->CopyResource(e.pool.Get(), e.poolBuffer.Get());
+        }
         endCapture(ctx, refreshTimer);
         e.poolAppendEpoch = wp.appendEpoch;
         ++g_draw.poolRefreshed;
@@ -994,7 +1008,12 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         e.bindingStale = false;
         const float cleared[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
         const int clearTimer = beginCapture(ctx, kCaptureClear);
-        ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+        {
+            // The census (issue #38): the eye-frame's clear, its own span --
+            // a separate call site from the snapshot below, not merged with it.
+            GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
+            ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+        }
         endCapture(ctx, clearTimer);
         const int snapTimer = beginCapture(ctx, kCaptureSnapshot);
         snapshot(ctx, e, eye, frame);

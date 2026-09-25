@@ -7,6 +7,7 @@
 #include <string>
 #include "binding_shadow.h"
 #include "engine_velocity.h"
+#include "gpu_census.h"
 #include "gpu_interval.h"
 #include "shader_swap.h"
 #include "temporal_shader_bytecode.h"   // kEngineMotionCoreHlsl (tools/temporal_shader_build)
@@ -295,7 +296,14 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
         g.depth=tex;g.sourceFrame=~0u;
     }
     unsigned next=1-g.sourceWrite;
-    if(!copyCb(ctx,dev.Get(),1,g.camera[next],276*16))return;
+    bool copiedSource=false;
+    {
+        // The census (issue #38): where the copy actually happens, not the
+        // call into screenMotionSource, most of which returns before this.
+        GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+        copiedSource=copyCb(ctx,dev.Get(),1,g.camera[next],276*16);
+    }
+    if(!copiedSource)return;
     g.sourcePrevious=g.sourceFrame;g.sourceFrame=g.frame;g.sourceWrite=next;
     if(terrain)g.terrainFrame=g.frame;
     else if(!g.screenDepthNoted){g.screenDepthNoted=true;Log::get().note("screen motion: no terrain or scene draw names the on-foot source here (a hangar): it is named by its own depth -- the %ux%u depth that took the most pool family draws last frame (%u), at its first pool family draw this frame that is not a first-person weapon or tool shader; that draw's camera is the source camera.",w,h,g.screenDepthDraws);}
@@ -352,7 +360,14 @@ void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned 
     }
     if(g.uiFrame!=g.frame) {
         const bool timed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.uiClear.begin(ctx,16,g_gpu.scope,g.frame);
-        const float one[4]={1,1,1,1};ctx->ClearRenderTargetView(g.uiRtv.Get(),one);
+        const float one[4]={1,1,1,1};
+        {
+            // The census (issue #38): this clear is once per frame, not once
+            // per call here -- most calls return above, at g.sourceFrame!=g.frame
+            // or the shader/target/blend/stencil checks below.
+            GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+            ctx->ClearRenderTargetView(g.uiRtv.Get(),one);
+        }
         if(timed)g_gpu.uiClear.timer.end(ctx);
         g.uiTarget=res;g.uiFrame=g.frame;g.uiDraws=0;
     }
@@ -360,7 +375,10 @@ void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned 
     ID3D11RenderTargetView* saved[8]{};Ptr<ID3D11DepthStencilView> savedDepth;ctx->OMGetRenderTargets(8,saved,&savedDepth);
     vScreenSetRenderTargetsRaw(ctx,1,g.uiRtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.uiBlend.Get(),nullptr,mask);ctx->OMSetDepthStencilState(g.uiDs.Get(),0);
     const bool timed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.uiDraw.begin(ctx,64,g_gpu.scope,g.frame);
-    draw(ctx,count,instances,start,base,startInstance);
+    {
+        GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+        draw(ctx,count,instances,start,base,startInstance);
+    }
     if(timed)g_gpu.uiDraw.timer.end(ctx);
     ++g.uiDraws;
     vScreenSetRenderTargetsRaw(ctx,8,saved,savedDepth.Get());ctx->OMSetBlendState(blend.Get(),factors,mask);ctx->OMSetDepthStencilState(ds.Get(),ref);
@@ -389,13 +407,28 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
     if(!prepare(ctx,dev.Get(),e,td.Width,td.Height)){detail::g_screenMotionFailed=true;Log::get().note("screen motion: resource creation failed; original temporal inputs retained.");return;}
     unsigned next=1-e.write;
-    if(!copyCb(ctx,dev.Get(),0,e.model[next],12*16) || !copyCb(ctx,dev.Get(),1,e.camera[next],274*16))return;
+    bool copiedEye=false;
+    {
+        // The census (issue #38): both copies as one span, as engine_velocity.cpp's
+        // matching pool+scene snapshot does -- they always run together.
+        GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+        copiedEye=copyCb(ctx,dev.Get(),0,e.model[next],12*16) && copyCb(ctx,dev.Get(),1,e.camera[next],274*16);
+    }
+    if(!copiedEye)return;
     Ptr<ID3D11Buffer> vb;UINT stride=0,offset=0;ctx->IAGetVertexBuffers(1,1,&vb,&stride,&offset);if(!vb || stride<8)return;
     D3D11_BUFFER_DESC vd{};vb->GetDesc(&vd);uint64_t at=uint64_t(offset)+uint64_t(startInstance)*stride;if(at+8>vd.ByteWidth)return;
-    D3D11_BOX box{UINT(at),0,0,UINT(at+8),1,1};ctx->CopySubresourceRegion(e.sizes[next].Get(),0,0,0,0,vb.Get(),0,&box);
+    D3D11_BOX box{UINT(at),0,0,UINT(at+8),1,1};
+    {
+        GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+        ctx->CopySubresourceRegion(e.sizes[next].Get(),0,0,0,0,vb.Get(),0,&box);
+    }
     bool consecutive=e.frame+1==g.frame && g.sourcePrevious+1==g.frame && e.model[e.write] && e.camera[e.write] && g.camera[1-g.sourceWrite];
     const bool clearTimed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.eyeClear.begin(ctx,16,g_gpu.scope,g.frame);
-    const float zero[4]{};ctx->ClearRenderTargetView(e.rtv.Get(),zero);
+    const float zero[4]{};
+    {
+        GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+        ctx->ClearRenderTargetView(e.rtv.Get(),zero);
+    }
     if(clearTimed)g_gpu.eyeClear.timer.end(ctx);
     e.written=false;
     if(consecutive) {
@@ -415,7 +448,10 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
                             (g.countFrame!=g.frame || g.countStride==countGrid) && prepareCounts(dev.Get());
         float data[12]={e.shape[0],e.shape[1],e.shape[2],e.shape[3],float(e.width),float(e.height),ui?1.0f:0.0f,weapon?1.0f:0.0f,
                         engine?1.0f:0.0f,engine && g_paintKinds?1.0f:0.0f,counting?float(countGrid):0.0f,0.0f};
-        ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
+        {
+            GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+            ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
+        }
         ID3D11RenderTargetView* savedRt[8]{};Ptr<ID3D11DepthStencilView> savedDepth;ctx->OMGetRenderTargets(8,savedRt,&savedDepth);
         Ptr<ID3D11BlendState> savedBlend;FLOAT factors[4];UINT mask;ctx->OMGetBlendState(&savedBlend,factors,&mask);
         Ptr<ID3D11DepthStencilState> savedDs;UINT stencil;ctx->OMGetDepthStencilState(&savedDs,&stencil);
@@ -433,11 +469,23 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         // hook leaves the shadow alone for exactly that call.
         constexpr UINT kKeepTargets=0xFFFFFFFFu;
         if(counting) {
-            if(g.countFrame!=g.frame){const UINT zeros[4]{};ctx->ClearUnorderedAccessViewUint(g.countsUav.Get(),zeros);g.countFrame=g.frame;g.countDraws=0;g.countStride=countGrid;}
+            if(g.countFrame!=g.frame){
+                const UINT zeros[4]{};
+                {
+                    // The census (issue #38): once per frame, the first counted
+                    // draw only -- not every draw into the shared UAV.
+                    GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+                    ctx->ClearUnorderedAccessViewUint(g.countsUav.Get(),zeros);
+                }
+                g.countFrame=g.frame;g.countDraws=0;g.countStride=countGrid;
+            }
             ctx->OMSetRenderTargetsAndUnorderedAccessViews(kKeepTargets,nullptr,nullptr,1,1,g.countsUav.GetAddressOf(),nullptr);
         }
         const bool projectionTimed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.projection.begin(ctx,16,g_gpu.scope,g.frame);
-        draw(ctx,count,instances,start,base,startInstance);
+        {
+            GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+            draw(ctx,count,instances,start,base,startInstance);
+        }
         if(projectionTimed)g_gpu.projection.timer.end(ctx);
         if(counting) {
             ID3D11UnorderedAccessView* none=nullptr;
@@ -470,7 +518,12 @@ static void flushPanelCounts(ID3D11DeviceContext* ctx) {
     if(g.countFrame==g.frame && g.countDraws) {
         const unsigned w=g.countsWrite;
         if(!g.countsPending[w]) {
-            ctx->CopyResource(g.countsStaging[w].Get(),g.counts.Get());
+            {
+                // The census (issue #38): the frame-boundary readback copy,
+                // at most once a frame.
+                GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
+                ctx->CopyResource(g.countsStaging[w].Get(),g.counts.Get());
+            }
             g.countsDraws[w]=g.countDraws;g.countsStride[w]=g.countStride;g.countsPending[w]=true;g.countsWrite=(w+1)%4;
         }
     }

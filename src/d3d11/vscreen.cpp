@@ -4080,7 +4080,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     }
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-        { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
+        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         pixelProbeBefore(g_state, self);
     }
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
@@ -4106,7 +4106,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     }
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-        { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
+        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         pixelProbeBefore(g_state, self);
     }
     g_state->realDrawInstancedIndirect(self, args, off);
@@ -4365,7 +4365,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     DrawArgs args;
     args.base = static_cast<int32_t>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'D', count, 1, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -4384,7 +4384,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         return;
     }
     gpuFrameCommand(self);
-    if(self==g_state->ownerCtx){GpuCensusScope census(self,GpuCensusSection::FrameEngineVelocity);engineVelocityBeforeDraw(self,g_state->rtv0Eye);}
+    if(self==g_state->ownerCtx)engineVelocityBeforeDraw(self,g_state->rtv0Eye);
     g_state->realDrawAuto(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
@@ -4407,7 +4407,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.start = startIndex;
     args.base = baseVertex;
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'I', count, 1, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -4440,7 +4440,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.base = static_cast<int32_t>(startVertex);
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     // The draw's instance window, for the glare telemetry: the trains
     // share one record buffer at different offsets, and which train a
@@ -4504,7 +4504,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // compares; the pool families' substituted shaders and MRT6 are bound
     // only when the game has rebound something since the last look. After the
     // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) { GpuCensusScope census(self, GpuCensusSection::FrameEngineVelocity); engineVelocityBeforeDraw(self, g_state->rtv0Eye); }
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -4564,7 +4564,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             // (ui_layer.h): its pixels are not in the pass's input, and the
             // bound target and viewport are the layer's.
             if (screenMotionLive() && !uiLayerRedirecting()) {
-                GpuCensusScope census(self, GpuCensusSection::FrameScreenMotion);
+                // The census (issue #38) times screen_motion.cpp's own GPU
+                // work now, not this call site: most calls into either
+                // function return above, at screenMotionLive()'s own flags
+                // or g.sourceFrame!=g.frame, before issuing anything.
                 screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
                 screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             }

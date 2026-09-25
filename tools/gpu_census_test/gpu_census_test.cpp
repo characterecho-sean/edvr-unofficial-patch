@@ -1,7 +1,9 @@
 // Issue #38's per-feature GPU cost census (gpu_census.h/.cpp): the
-// estimator math, the rotation and its K cap, a real GpuTimer round trip
-// on WARP, and the 30 s line's format -- including "-" for a section that
-// never occurred.
+// estimator math, the calibration math (a section's own empty-pair
+// overhead, subtracted from its timed mean), the rotation and its K cap, a
+// real GpuTimer round trip on WARP including the calibration pair, and the
+// 30 s line's format -- including "-" for a section that never occurred
+// and for a window with no null samples.
 //
 // Whitebox, tools\ui_depth_test's and hologram_depth_test's own
 // convention: the production .cpp is included directly so this rig can
@@ -120,6 +122,18 @@ void estimatorMathCases() {
     }
 }
 
+// ---- 1b: the calibration math, as a pure function -----------------------
+void calibrationMathCases() {
+    check(std::fabs(correctedMsPerCall(0.010, 0.008) - 0.002) < 1e-9,
+          "calibration: corrected ms/call = timed mean - null mean");
+    check(correctedMsPerCall(0.010, 0.020) == 0.0,
+          "calibration: a null mean above the timed mean clamps to 0, not negative");
+    check(correctedMsPerCall(0.010, 0.010) == 0.0,
+          "calibration: a null mean equal to the timed mean also clamps to 0");
+    check(correctedMsPerCall(0.010, 0.0) == 0.010,
+          "calibration: no null samples yet (mean 0) leaves the timed mean uncorrected");
+}
+
 // ---- 2/3: rotation (one active section, the K cap) and a real WARP round trip
 void rotationAndRealTimerCase(Device& d) {
     check(gpuTimingBind(d.dev.Get(), d.ctx.Get()), "bind canonical WARP timer owner");
@@ -137,6 +151,7 @@ void rotationAndRealTimerCase(Device& d) {
     g_activeCalls = g_activeTimed = 0;
     g_activeStride = 1;
     g_activeOffset = 0;
+    g_activeNullDone = false;
     auto& st = g_section[static_cast<size_t>(GpuCensusSection::DoorSharpen)];
 
     // Exactly one section is active: a call for any other section declines
@@ -157,6 +172,9 @@ void rotationAndRealTimerCase(Device& d) {
     }
     check(g_activeTimed == 4, "rotation: four occurrences consumed the door cap");
     check(st.occurrences == 4, "rotation: every occurrence counted");
+    // Calibration: the turn's first timed call (i == 0 above) also armed the
+    // null pair -- once, not once per occurrence.
+    check(g_activeNullDone, "calibration: the turn's first timed call armed the null pair");
 
     // A fifth, same frame: the K cap declines it before the sampler is
     // ever touched -- no lease spent, no change to the timer's own totals.
@@ -206,15 +224,23 @@ void rotationAndRealTimerCase(Device& d) {
     // clear and its timestamps to WARP to execute, and gpu_interval.h's
     // four-poll gate is a COUNT, not a clock, so a tight loop would spin
     // it without ever giving WARP real wall-clock time either way.
+    // Both the real sampler (four standalone records, i == 0..3 above) and
+    // the null sampler (one more, from i == 0's calibration pair) are
+    // outside a native frame span here, so each took a whole disjoint-clock
+    // record: five of the eight, comfortably within budget without draining
+    // anything first (gpu_disjoint_clock.h).
     d.ctx->Flush();
     const uint64_t deadline = GetTickCount64() + 1500;
-    while (st.sampler.totals.samples == 0 && GetTickCount64() < deadline) {
+    while ((st.sampler.totals.samples == 0 || st.nullSampler.totals.samples == 0) && GetTickCount64() < deadline) {
         gpuCensusFrame(d.ctx.Get());
-        if (st.sampler.totals.samples == 0) Sleep(1);
+        if (st.sampler.totals.samples == 0 || st.nullSampler.totals.samples == 0) Sleep(1);
     }
     check(st.sampler.totals.samples > 0,
           "WARP round trip: a real Begin/Clear/End pair produced a completed sample within the poll margin");
     check(st.sampler.totals.invalid == 0, "WARP round trip: no invalid/disjoint result on a clean WARP run");
+    check(st.nullSampler.totals.samples == 1,
+          "calibration: exactly one null pair completed -- the turn's first timed call only, not all four");
+    check(st.nullSampler.totals.invalid == 0, "calibration: no invalid/disjoint result on the null pair either");
 
     gpuCensusShutdown();
     check(gpuTimingShutdown(d.ctx.Get()), "explicit owner shutdown");
@@ -247,6 +273,8 @@ void logFormatCase() {
     check(g_lastLog.find("planet -") != std::string::npos, "log line: an absent in-frame section prints '-'");
     check(g_lastLog.find("application render p50 -;") != std::string::npos,
           "log line: no Application-render samples this window also prints '-'");
+    check(g_lastLog.find("timer floor -;") != std::string::npos,
+          "log line: no null samples this window also prints '-' for the timer floor");
     check(g_lastLog.find("failed 0.") != std::string::npos, "log line: failed spans are reported by name");
     check(g_lastLog.find("door 0.200") != std::string::npos,
           "log line: door total folds in the sharpen leaf (one of the five top-level door passes)");
@@ -269,10 +297,37 @@ void logFormatCase() {
     logAndResetWindow(start + 30000);
     check(g_lastLog.find("application render p50 11.000 ms/frame (game ~10.800)") != std::string::npos,
           "log line: application render reports its median and the game's share (median less EDVR)");
+    check(g_lastLog.find("(census over the frame total)") == std::string::npos,
+          "log line: the over-total note is absent when EDVR's corrected total does not exceed R");
+
+    // The timer floor and the over-total note: a section with both real and
+    // null samples (corrected ms/frame = (4.0/2 - 0.4/2) * (20/200) = 0.18),
+    // and R below that corrected total so the game's share goes negative.
+    for (auto& s : g_section) s = SectionState{};
+    g_windowFrames = 200;
+    g_windowStartMs = start;
+    sharpen.occurrences = 20;
+    sharpen.sampler.totals.ms = 4.0;
+    sharpen.sampler.totals.samples = 2;
+    sharpen.nullSampler.totals.ms = 0.4;
+    sharpen.nullSampler.totals.samples = 2;   // 0.2 ms/pair -> 200 us/pair pooled floor
+    g_p50Samples[0] = 0.1;
+    g_p50Count = 1;
+    g_lastLog.clear();
+    logAndResetWindow(start + 30000);
+    check(g_lastLog.find("sharpen 0.180 (0.10/frame)") != std::string::npos,
+          "log line: a section's ms/frame is corrected by its own null mean before reaching the line");
+    check(g_lastLog.find("timer floor 200.0 us/pair") != std::string::npos,
+          "log line: the timer floor is the pooled null mean across sections, in us/pair");
+    check(g_lastLog.find("(game ~-0.080)") != std::string::npos,
+          "log line: the game's share stays raw and negative when EDVR's corrected total exceeds R");
+    check(g_lastLog.find("(census over the frame total)") != std::string::npos,
+          "log line: EDVR's corrected total over R is flagged, not hidden");
 }
 
 void run() {
     estimatorMathCases();
+    calibrationMathCases();
     logFormatCase();
     Runtime runtime;
     Device device(runtime);
