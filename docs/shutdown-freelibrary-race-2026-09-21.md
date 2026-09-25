@@ -16,8 +16,17 @@ but `native_runtime_host.h:1798`'s `graphics` field is declared
 `NativeGraphicsClient` is unrelated to this arc; do not cite it again. See
 `## Design` for the corrected mechanism, a real, not-yet-confirmed puzzle
 in it (`systemD3D11CreateDevice()` appears to already leak a permanent
-reference to the same module this code frees), and the proposed fix. No
-code has been changed yet.
+reference to the same module this code frees), and the proposed fix.
+Built 2026-09-25 (PR #40), not flown: `NativeDevice::reset()` in
+`src\openxr\native_device.h` now sets `systemModule_ = nullptr` without
+calling `FreeLibrary()`, and logs `device_module_reset,pinned=%u`: whether
+the static reference in `systemD3D11CreateDevice()` was taken in the same
+DLL. `pinned=1` in a crash flight refutes the unmap hypothesis (the removed
+`FreeLibrary` could not have been the last release); `pinned=0` leaves the
+crash/no-crash result as the evidence. `native_device_test` checks the flag
+and that `reset()` leaves it set; nothing tests the log line itself. The
+investigation stays open until a repro flight shows the crash gone and the
+new log line fired.
 
 Hypothesis, as corrected in `## Design`: `host_graphics_reset`
 (`src\openxr\native_runtime_host.h:1797-1798`) calls `NativeDevice::reset()`
@@ -333,9 +342,12 @@ late call left to land in the unmapped module.
 
 ## Design
 
-Started 2026-09-22, prompted by the user asking to design a real fix. This
-section is design only -- nothing below has been built, and no C++ has
-changed.
+Started 2026-09-22, prompted by the user asking to design a real fix. Built
+2026-09-25: `NativeDevice::reset()` in `src\openxr\native_device.h` retains
+`systemModule_` without `FreeLibrary()` and logs
+`device_module_reset,pinned=...` from `isSystemD3D11Pinned()`. The
+diagnostic below was replaced: its `UNCHANGED_REFCOUNT` re-probe always
+succeeds once `systemModule_` keeps its own reference. Not yet flown.
 
 ### What changed from the original write-up
 
@@ -414,6 +426,10 @@ analysis above and worth its own look before trusting the fix.
   one-line removal plus one diagnostic line, but it's shutdown-path code
   in a header included from the OpenXR runtime module, and a typo here
   costs a flight to notice.
+- Rig coverage in `tools\openxr_native_test\native_device_test.cpp`, under
+  both `--self-test` and `--hardware`: `systemD3D11CreateDevice()` returns
+  a function, `isSystemD3D11Pinned()` is then true, and `reset()` leaves it
+  true. The `pinned=` log line itself is not checked by any rig.
 - A repro flight from this reporter (or anyone reproducing today) with the
   fix installed, confirming the crash is gone AND the new diagnostic line
   fired, read with `edvr_log.py --expect-build` against the exact commit

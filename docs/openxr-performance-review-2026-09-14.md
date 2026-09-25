@@ -18,7 +18,10 @@ changes.*
   but not yet flown. Separately, the overlap is flown on Pimax
   OpenXR and SteamVR OpenXR; the Quest runtimes are unflown with it. The depth layer is set aside
   (Sean, 2026-09-24). No controlled comparison with the old OpenVR path
-  exists; one now needs a v0.16.2 build.
+  exists; one now needs a v0.16.2 build. A second report (jntracks,
+  2026-09-25 entry) has 0.6.0 in the 90s and 0.18 in the 80s with
+  temporal AA off, at the same 2604x2644 per eye; the runtime path is
+  the only structural difference, and it is unmeasured.
 - **Closed:** sections 5 and 6 below (the private and producer copies): the
   producer copy measured 0.039 ms p50 per eye at 4100x3962, under the
   0.1 ms bar.
@@ -781,3 +784,32 @@ motion's ms/frame should stop swinging opposite their calls/frame, and
 "game ~..." should stop reading negative on a steady scene. If EDVR's
 corrected total is still large, that is now believable rather than an
 artifact of the timer.
+
+## 2026-09-25: jntracks, 0.6.0 against 0.17 and 0.18 without temporal AA
+
+A second user (jntracks, via Sean) reads the 90s in fps on EDVR 0.6.0
+(d3d11.dll only, Elite on SteamVR's own OpenVR) and the 80s on 0.18, with
+temporal AA off. The logs hold two 0.6.0 sessions (no version line, "edvr
+d3d11 proxy attached"), two v0.17.0 and one v0.18.0-rc.1 (c9cab91e). The
+three newer ones run SteamVR OpenXR (`steamvr-openxr-cv`, 90 Hz).
+
+- Per-eye render size is the same everywhere: 2604x2644 at scale 1.0 in
+  the OpenXR logs. The only eye-sized draw the 0.6.0 logs sample is
+  2604x2644.
+- Temporal AA is off at rest: `native temporal totals: treated=0` in
+  123542 and 142551. In 122910 it was switched on for about 28 s of
+  testing. Sharpening, eye mask, cull, fov trim and settlement detail
+  are off, and the UI panel is smaller than 0.6.0's (2880x1620 against
+  3200x1800).
+- The one structural difference is the runtime path: EDVR's OpenXR
+  runtime onto SteamVR's OpenXR, against Elite on SteamVR's OpenVR. A
+  steady 0.17 window reads `native timing CPU: ... submits 1.409 ms ...
+  transfer 0.370 compose 0.321 ms`.
+- These logs cannot measure the gap. 0.6.0 writes no timing lines at
+  all, and the newer sessions' heavy stretches were in different places
+  (rc.1's on foot in a settlement, Application-render GPU 9.9-12.8 ms).
+- ruled out: resolution, because every session renders 2604x2644 per
+  eye; EDVR's GPU features, because all of them are off at rest.
+- Next evidence: the same place on both builds, with SteamVR's own
+  frame timing (GPU and CPU per frame) for each, and main's census line
+  on the new build.
