@@ -20,6 +20,9 @@
   surface details. Per-pixel motion and output coverage remain unmeasured; the
   healthy runtime counters do not establish visual quality. Two older shader
   pairs still lack creation bytes; the current menu audit has no unknown pairs.
+  Epic cockpit capture `c38f6946` has three viewport qualification failures per
+  frame, zero jitter and continuous history resets (section 38). Menu success
+  does not qualify the cockpit. A bounded viewport witness is the next build.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -40,12 +43,13 @@
   knowledge and shared motion/backend math without requiring local matrices to
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. Validate the merge from main, then use
-  matched ship-surface output/motion evidence to investigate remaining shimmer.
-  Do not revisit menu admission or blanket history resets: this capture proves
-  sustained treatment. The passive selector still refuses the menu copy; its
-  diagnostic verdict is not the live runtime verdict. No headset is needed; VR
-  still needs regression tests.
+  constants or camera-equality labels. The main merge passed full validation
+  and promotion. Capture the cockpit viewport failure witnesses described in
+  section 38 before changing qualification. Menu surface shimmer separately
+  needs matched output/motion evidence; that capture proves sustained
+  treatment. The passive selector still refuses the menu copy; its diagnostic
+  verdict is not the live runtime verdict. No headset is needed; VR still needs
+  regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -2126,3 +2130,50 @@ The merge's required validation is a full absolute-path build. Main adds a
 receipt-guarded `build.bat --dll-only` promotion step after that validation and
 commit, so the installed DLLs can carry the clean commit without rerunning
 unchanged test rigs. Epic settings must remain unchanged.
+
+## 38. Cockpit viewport rejection witness, 2026-09-24
+
+Epic `edvr_gfx_20260924_203853.log` matches `c38f6946`, build `6AB5DE09`. The
+merged build passed full validation and receipt-guarded promotion before
+installation. The cockpit scene renders at 1920x1080 with 2560x1440 output;
+this is flat D3D11 with DLSS selected, so headset and VR runtime are N/A.
+
+F10 at 20:44:36.845 completed its 900-frame audit at 20:44:46.906. It records
+140,137 candidates, 137,269 prepared and 168 depth-unassociated candidates. The
+remaining 2,700 are exactly three viewport failures per frame. Five-second
+phase summaries independently report 1,350 viewport failures in 450 frames,
+zero jitter, no history continuation and a reset on every treated frame. There
+are no unknown shader pairs during this audit. Unknown-recipe failures after
+20:45:02 are outside the captured interval.
+
+Ruled out: missing projection recipes explain this captured cockpit failure,
+because the bounded audit reports zero unknown pairs and identifies viewport
+qualification as the phase failure. Backend execution alone does not qualify
+temporal AA when history resets every frame.
+
+Leading hypothesis: the three full-extent HDR passes with depth range 0..0 seen
+in older Epic captures are rejected by projection qualification's 0..1
+requirement. Their VS/PS pairs were F8FA801F2CB1E27C/84965D3C050FB01B,
+68DDDEF04D9894AF/06332CA168B6DA63 and F7A6E916F14A3B1A/06332CA168B6DA63. The
+scene selector already allows this HDR depth range. However, the current
+capture does not identify the rejected shaders or actual viewports, so the
+matching count is not sufficient evidence to change the rendering rule.
+
+VR comparison: `OpenVRSystem::GetProjectionMatrix` and `GetProjectionRaw` apply
+the runtime's tangent shift before returning projection values to Elite. Flat
+has no corresponding runtime query, so its scoped D3D11 constant-buffer patches
+need draw qualification. The shared jitter sequence, motion math and temporal
+backends are retained; this mismatch is in the additional flat draw
+qualification, not evidence that the VR reconstruction needs rediscovery.
+
+Other possibilities are a viewport extent/origin mismatch or a viewport count
+other than one. The diagnostic must record shader identity, actual viewport
+count and all six fields, expected extent and resource identities at the
+rejection. Per-pair totals and separate witness/overflow counters must survive
+the ordinary detail-log budget, reset on F10, and report even when no viewport
+checks fail. Keep the existing rejection rule and history policy unchanged.
+
+Next Epic run: select DLSS in the same cockpit scene, press F10, and remain
+there for 30 seconds. Confirm the installed build first. Use the witness to
+distinguish depth-range, extent/origin and count failures in this one capture;
+do not request separate flights for these hypotheses.

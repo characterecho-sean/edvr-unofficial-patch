@@ -63,6 +63,8 @@ struct State {
     uint64_t projectionDraws = 0, projectionDispatches = 0, projectionCandidates = 0;
     uint64_t projectionReady = 0, projectionMissing = 0, projectionUnowned = 0, projectionUnknown = 0;
     uint64_t projectionUnchanged = 0;
+    uint64_t projectionViewportChecks = 0, projectionViewportMismatches = 0;
+    uint64_t projectionViewportWitnesses = 0, projectionViewportSuppressed = 0, projectionViewportUnrecorded = 0;
     struct AuditDetail { uint64_t vs = 0, ps = 0, cs = 0; uint32_t reason = 0; };
     AuditDetail projectionDetails[32]{}; uint32_t projectionDetailsUsed = 0;
     struct AuditOutcome {
@@ -70,6 +72,7 @@ struct State {
         uint64_t canonical = 0, basisMatch = 0, unmatched = 0, unavailable = 0, unsupported = 0;
         uint64_t residualSamples = 0;
         double spatialDepthError = 0, translationResidual = 0;
+        uint64_t viewportDepthClamped = 0, viewportOther = 0;
     };
     AuditOutcome projectionOutcomes[256]{}; uint32_t projectionOutcomesUsed = 0;
     uint64_t projectionOutcomeOverflow = 0;
@@ -204,6 +207,39 @@ State::AuditOutcome* projectionDetail(State& s, uint64_t vs, uint64_t ps, uint64
         static_cast<unsigned long long>(vs),static_cast<unsigned long long>(ps),static_cast<unsigned long long>(cs),text,reason);
     return foundOutcome;
 }
+void recordProjectionViewportFailure(State& s, uint64_t vs, uint64_t ps, uint64_t cs,
+                                     uint32_t width, uint32_t height, UINT count,
+                                     const D3D11_VIEWPORT& viewport) {
+    ++s.projectionMissing;++s.projectionViewportMismatches;
+    auto* outcome=projectionDetail(s,vs,ps,cs,104,"projection-viewport-mismatch");
+    if(!outcome) {++s.projectionViewportUnrecorded;return;}
+    const bool depthClamped=count==1 && viewport.TopLeftX==0 && viewport.TopLeftY==0 &&
+        viewport.Width==float(width) && viewport.Height==float(height) &&
+        viewport.MinDepth==0 && viewport.MaxDepth==0;
+    auto& observations=depthClamped?outcome->viewportDepthClamped:outcome->viewportOther;
+    // The first witness of each class belongs to the 256-entry outcome table,
+    // independently of the 32 generic candidate-detail lines. Later sightings
+    // remain counted, including other failures of the same shader pair.
+    if(++observations!=1)return;
+    if(s.projectionViewportWitnesses==32) {++s.projectionViewportSuppressed;return;}
+    ++s.projectionViewportWitnesses;
+    // Fetch the maximum capacity for the diagnostic so count and viewport0
+    // remain an unambiguous witness even for a multiple-viewport rejection.
+    // The live qualification query and predicate below stay unchanged.
+    D3D11_VIEWPORT actualViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT actualCount=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    s.context->RSGetViewports(&actualCount,actualViewports);
+    const auto& actualViewport=actualViewports[0];
+    Ptr<ID3D11RenderTargetView> rtv;Ptr<ID3D11DepthStencilView> dsv;
+    Ptr<ID3D11Resource> color,depth;
+    s.context->OMGetRenderTargets(1,&rtv,&dsv);
+    if(rtv)rtv->GetResource(&color);if(dsv)dsv->GetResource(&depth);
+    Log::get().note("flat projection viewport witness: frame=%llu q=%u VS=%016llX PS=%016llX CS=%016llX class=%s expected=%ux%u gate-count=%u count=%u viewport0=(%.9g,%.9g,%.9g,%.9g,%.9g,%.9g) RT0=%p color=%p DSV=%p depth=%p named-depth=%p phase-depth=%p; actual state, first witness per pair and class, viewport0 valid only when count>0",
+        (unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)vs,(unsigned long long)ps,(unsigned long long)cs,
+        depthClamped?"full-xy-depth-clamped":"other",width,height,count,actualCount,
+        actualViewport.TopLeftX,actualViewport.TopLeftY,actualViewport.Width,actualViewport.Height,actualViewport.MinDepth,actualViewport.MaxDepth,
+        rtv.Get(),color.Get(),dsv.Get(),depth.Get(),s.namedDepth,s.phaseDepth.Get());
+}
 void reportProjection(State& s, const char* event) {
     if (!s.projection) return;
     const auto status=s.projection->status();
@@ -215,17 +251,26 @@ void reportProjection(State& s, const char* event) {
         s.resolvePreflight.spatialFallbackReady?1u:0u,s.resolvePreflight.backendAvailable?1u:0u,
         s.resolvePreflight.backendFeatureCreationDeferred?1u:0u,s.resolvePreflight.reason,
         (unsigned long long)s.spatialFallbacks,(unsigned long long)s.spatialFallbackFailures);
-    Log::get().note("flat projection outcome totals: distinct=%u overflow-observations=%llu unchanged-draws=%llu; result=prepared is reason-code 0, failures retain their code, 101=unknown-recipe, 103=bytecode-unchanged",
+    Log::get().note("flat projection viewport audit: event=%s checked=%llu matched=%llu mismatched=%llu witnesses=%llu suppressed-witnesses=%llu unrecorded=%llu; checked=0 means viewport gate was not reached, diagnostic does not change qualification",
+        event,(unsigned long long)s.projectionViewportChecks,
+        (unsigned long long)(s.projectionViewportChecks-s.projectionViewportMismatches),
+        (unsigned long long)s.projectionViewportMismatches,(unsigned long long)s.projectionViewportWitnesses,(unsigned long long)s.projectionViewportSuppressed,
+        (unsigned long long)s.projectionViewportUnrecorded);
+    Log::get().note("flat projection outcome totals: distinct=%u overflow-observations=%llu unchanged-draws=%llu; result=prepared is reason-code 0, failures retain their code, 101=unknown-recipe, 103=bytecode-unchanged, 104=projection-viewport-mismatch",
         s.projectionOutcomesUsed,(unsigned long long)s.projectionOutcomeOverflow,(unsigned long long)s.projectionUnchanged);
     static const char* outcomeNames[]={"prepared","wrong-thread","no-context1","capacity","unknown-buffer","missing-full-write","unsupported-range","binding-mismatch","invalid-recipe","private-failure","plan-failure"};
     for(uint32_t i=0;i<s.projectionOutcomesUsed;++i) {
         const auto& outcome=s.projectionOutcomes[i];
         const char* label=outcome.reason<11?outcomeNames[outcome.reason]:
             outcome.reason==100?"actual-shader-mismatch":outcome.reason==101?"unknown-scene-projection-recipe":
-            outcome.reason==102?"invalid-render-extent":outcome.reason==103?"bytecode-unchanged":"other-refusal";
+            outcome.reason==102?"invalid-render-extent":outcome.reason==103?"bytecode-unchanged":
+            outcome.reason==104?"projection-viewport-mismatch":"other-refusal";
         Log::get().note("flat projection outcome: event=%s VS=%016llX PS=%016llX CS=%016llX result=%s code=%u count=%llu",
             event,(unsigned long long)outcome.vs,(unsigned long long)outcome.ps,(unsigned long long)outcome.cs,
             label,outcome.reason,(unsigned long long)outcome.observations);
+        if(outcome.reason==104)Log::get().note("flat projection viewport outcome: event=%s VS=%016llX PS=%016llX CS=%016llX full-xy-depth-clamped=%llu other=%llu",
+            event,(unsigned long long)outcome.vs,(unsigned long long)outcome.ps,(unsigned long long)outcome.cs,
+            (unsigned long long)outcome.viewportDepthClamped,(unsigned long long)outcome.viewportOther);
         if(outcome.reason==0)Log::get().note("flat projection reference: event=%s VS=%016llX PS=%016llX CS=%016llX canonical=%llu basis-match=%llu unmatched=%llu unavailable=%llu unsupported=%llu residual-samples=%llu max-spatial-depth-error=%.9g max-translation-residual=%.9g; primary-forward-recipe only, numeric relation is not frame authorization",
             event,(unsigned long long)outcome.vs,(unsigned long long)outcome.ps,(unsigned long long)outcome.cs,
             (unsigned long long)outcome.canonical,(unsigned long long)outcome.basisMatch,(unsigned long long)outcome.unmatched,
@@ -620,8 +665,10 @@ const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecip
     }
     if(!cs) {
         UINT count=1;D3D11_VIEWPORT viewport{};s.context->RSGetViewports(&count,&viewport);
+        if(audit)++s.projectionViewportChecks;
         if(count!=1 || viewport.TopLeftX!=0 || viewport.TopLeftY!=0 || viewport.Width!=float(width) ||
            viewport.Height!=float(height) || viewport.MinDepth!=0 || viewport.MaxDepth!=1) {
+            if(audit)recordProjectionViewportFailure(s,vs,ps,cs,width,height,count,viewport);
             failPhase(s,"projection-viewport-mismatch");return nullptr;
         }
     }
@@ -831,6 +878,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.projectionFrames=900;s.projectionDraws=s.projectionDispatches=s.projectionCandidates=0;
             s.projectionReady=s.projectionMissing=s.projectionUnowned=s.projectionUnknown=0;
             s.projectionUnchanged=0;
+            s.projectionViewportChecks=s.projectionViewportMismatches=0;
+            s.projectionViewportWitnesses=s.projectionViewportSuppressed=s.projectionViewportUnrecorded=0;
             s.projectionDetailsUsed=0;
             s.projectionOutcomesUsed=0;s.projectionOutcomeOverflow=0;
             s.localSamples[0]={};s.localSamples[1]={};
