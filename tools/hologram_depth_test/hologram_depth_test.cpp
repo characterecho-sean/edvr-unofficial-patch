@@ -17,6 +17,7 @@
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
 #include <wrl/client.h>
+#include <DirectXPackedVector.h>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -151,6 +152,27 @@ std::vector<float> readDepth(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11
     for (UINT y = 0; y < td.Height; ++y) for (UINT x = 0; x < td.Width; ++x) {
         const auto* p = static_cast<const unsigned char*>(map.pData) + y * map.RowPitch + x * 4;
         values[y * td.Width + x] = *reinterpret_cast<const float*>(p);
+    }
+    ctx->Unmap(stage.Get(), 0);
+    return values;
+}
+
+// The contribution scratch's R channel, RGBA16F -- for the one check that
+// needs the raw accumulated light rather than what the resolve did with
+// it (the alpha-regression case, where round 6's dark-pixel rule made
+// coverage alone stop distinguishing a correct low contribution from a
+// regressed one).
+std::vector<float> readContribR(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resource* res) {
+    ComPtr<ID3D11Texture2D> tex; hr(res->QueryInterface(IID_PPV_ARGS(&tex)));
+    D3D11_TEXTURE2D_DESC td{}; tex->GetDesc(&td);
+    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> stage; hr(dev->CreateTexture2D(&td, nullptr, &stage));
+    ctx->CopyResource(stage.Get(), tex.Get());
+    D3D11_MAPPED_SUBRESOURCE map{}; hr(ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &map));
+    std::vector<float> values(td.Width * td.Height);
+    for (UINT y = 0; y < td.Height; ++y) for (UINT x = 0; x < td.Width; ++x) {
+        const auto* p = static_cast<const unsigned char*>(map.pData) + y * map.RowPitch + x * 8;
+        values[y * td.Width + x] = DirectX::PackedVector::XMConvertHalfToFloat(*reinterpret_cast<const uint16_t*>(p));
     }
     ctx->Unmap(stage.Get(), 0);
     return values;
@@ -354,7 +376,9 @@ int main() {
     // T1/T2: a listed quad at cockpit depth (5 m, inside the radius) over
     // far scene depth (0 = reversed-Z far, "the sky") -- SRC_ALPHA/ONE,
     // alpha 1: bright left half (0.5) clears the 0.05 floor, dim right
-    // (0.02) does not.
+    // (0.02) does not -- round 6 changed T2: dark, but inside a cockpit-
+    // range element's own footprint, so it now takes the element's depth
+    // too (the dark-pixel rule below), where it used to leave the sky's.
     {
         const float left[4] = {0.5f, 0.5f, 0.5f, 1.0f}, right[4] = {0.02f, 0.02f, 0.02f, 1.0f};
         originalDraw(kNear5m, left, right, blendSrcAlphaOne.Get(), false, kBlack, true);
@@ -362,19 +386,28 @@ int main() {
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (T1/T2)");
         auto values = privateDepth();
         check(std::fabs(values[1] - kNear5m) < 1e-5f, "T1: bright half above the floor gets the element depth");
-        check(values[6] == 0.0f, "T2: dim fringe below the floor leaves the sky's depth");
+        check(std::fabs(values[6] - kNear5m) < 1e-5f, "T2: dark fringe inside the cockpit-range footprint now gets it too");
     }
 
     // Alpha regression: (1,1,1, a=0.01) under SRC_ALPHA/ONE contributes
     // 0.01*1 = 0.01, below the floor -- the bug the formula max(luma,
     // a*luma) missed (it is just luma, alpha never actually applied).
+    // Round 6: dark-but-cockpit-range now covers regardless of exactly how
+    // dark, so coverage alone no longer distinguishes 0.01 from a
+    // regressed 1.0 here; read the raw contribution instead, which still
+    // does.
     {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         const float rgba[4] = {1.0f, 1.0f, 1.0f, 0.01f};
         originalDraw(kNear5m, rgba, rgba, blendSrcAlphaOne.Get(), false, kBlack, true);
         listedReissue();
+        ID3D11ShaderResourceView* contribSrv = nullptr;
+        check(uiDepthHologramContribution(8, 8, 0, &contribSrv), "alpha regression: raw contribution view published");
+        ComPtr<ID3D11Resource> contribRes; contribSrv->GetResource(&contribRes);
+        for (float v : readContribR(dev.Get(), ctx.Get(), contribRes.Get()))
+            check(std::fabs(v - 0.01f) < 1e-3f, "alpha regression: contribution is alpha-weighted (0.01), not luma-only (1.0)");
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (alpha regression)");
-        for (float v : privateDepth()) check(v == 0.0f, "alpha regression: near-zero alpha is not covered");
+        for (float v : privateDepth()) check(std::fabs(v - kNear5m) < 1e-5f, "alpha regression: dark, cockpit-range, now covered");
     }
 
     // Premultiplied: ONE/INV_SRC_ALPHA, (0.3,0.3,0.3,0.3) over black --
@@ -407,9 +440,10 @@ int main() {
     // element never contributes; its element depth DOES now write (the
     // scratch clears to 0, not radiusDepth, since a world marker below
     // needs exactly that), but with contribution E=0 the floor test's own
-    // e-fallback (display is null in every case on this page) still
-    // discards it at the resolve -- unchanged from before the clear
-    // value moved, confirmed by this same check still passing.
+    // e-fallback (display is null in every case on this page) reads dark,
+    // and cockpitRange is false at 50 m against the radius, so the resolve
+    // discards it there now (round 6) rather than on the floor alone --
+    // same outcome, confirmed by this same check still passing.
     {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
@@ -530,15 +564,20 @@ int main() {
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, display9.Get()), "resolve runs (HDR, share)");
         for (float v : privateDepth()) check(v == 0.0f, "HDR: +0.1 over 0.8 is not enough of the finished HDR pixel");
 
-        // Over black, display 0.02, floor 0.05: not covered, because the
-        // floor now reads the DISPLAY, not the (otherwise ample) HDR light.
+        // Over black, display 0.02, floor 0.05: the floor reads the
+        // DISPLAY, not the (otherwise ample) HDR light -- dark by that
+        // measure. Round 6: dark inside this element's own footprint,
+        // within the cockpit radius, now takes its depth anyway (an
+        // exposure-dimmed pixel is exactly the "gap" case, just from
+        // tonemapping instead of a text gap).
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         const float bright[4] = {0.5f, 0.5f, 0.5f, 1.0f};
         drawIntoRtv(hdrRtv.Get(), kNear5m, bright, bright, blendSrcAlphaOne.Get(), kBlack, true);
         listedReissue();
         auto display02 = makeDisplay(0.02f);
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, display02.Get()), "resolve runs (HDR, floor on display)");
-        for (float v : privateDepth()) check(v == 0.0f, "HDR: a dim display pixel is not covered despite ample HDR light");
+        for (float v : privateDepth())
+            check(std::fabs(v - kNear5m) < 1e-5f, "HDR: a dim display pixel inside the cockpit-range footprint is covered anyway");
 
         // A target with no SHADER_RESOURCE bind: the share test is skipped
         // outright (the no-target counter moves), the floor on the display
@@ -565,11 +604,17 @@ int main() {
     // Sun corona: a bright listed quad beyond the radius, plus a listed
     // quad with zero light inside it, over the same pixels in the same
     // eye/frame. The far quad still fails the CONTRIBUTION pass's radius
-    // test (E stays 0), so it cannot lend the near, dark quad its
-    // brightness; its element depth now writes (the scratch clears to 0),
-    // but the near quad's own element depth (5 m, nearer) overwrites it
-    // regardless of which cleared first -- the resolved depth, and the
-    // floor test's e-fallback result, are unchanged either way.
+    // test (E stays 0 throughout: its own brightness never reaches these
+    // pixels, on its own -- see "beyond radius" above, where nothing
+    // nearer overlaps it and it stays uncovered). Its element depth does
+    // write (the scratch clears to 0), but the near quad's own element
+    // depth (5 m, nearer) overwrites it: the resolved geometry at these
+    // pixels is the NEAR quad's own, not the corona's. Round 6: that near
+    // quad is genuinely dark and inside the cockpit radius -- exactly the
+    // gap case -- so it now takes its own (5 m) depth, never the corona's
+    // 50 m. This is the near quad's own dark pixel, not the corona
+    // reaching anything; a corona with nothing nearer overlapping it is
+    // still excluded ("beyond radius" above).
     {
         g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
         ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
@@ -580,7 +625,8 @@ int main() {
         originalDraw(kNear5m, dark, dark, blendSrcAlphaOne.Get(), false, nullptr, false);
         listedReissue();
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (sun corona)");
-        for (float v : privateDepth()) check(v == 0.0f, "sun corona: the far quad's light never reaches the near quad's pixels");
+        for (float v : privateDepth())
+            check(std::fabs(v - kNear5m) < 1e-5f, "sun corona: the near quad's own dark pixel takes its own depth, never the corona's");
     }
 
     // State: CULL_BACK and a 1x1 viewport bound before the resolve --
@@ -616,7 +662,8 @@ int main() {
     // never auto-encodes -- holds it raw, i.e. linear), reads as display
     // brightness ~0.15 once encoded for the floor test: above a 0.1
     // floor. The identical value through a plain view is already
-    // "display" as stored, 0.02: below it.
+    // "display" as stored, 0.02: below it, dark -- and, round 6, inside
+    // this cockpit-range element's own footprint, so it is covered anyway.
     {
         const float savedFloor = g_holoFloor;
         g_holoFloor = 0.1f;
@@ -632,8 +679,104 @@ int main() {
         originalDraw(kNear5m, rgba, rgba, blendSrcAlphaOne.Get(), false /*plain view*/, kBlack, true);
         listedReissue();
         check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (plain view)");
-        for (float v : privateDepth()) check(v == 0.0f, "sRGB: the same 0.02 through a plain view is not covered");
+        for (float v : privateDepth())
+            check(std::fabs(v - kNear5m) < 1e-5f, "sRGB: the same 0.02 through a plain view is dark, cockpit-range, and covered");
         g_holoFloor = savedFloor;
+    }
+
+    // Dark-pixel cockpit-range coverage (round 6): a panel with a bright
+    // "glyph" half and a literal black "gap" half, within the cockpit
+    // radius -- both take the panel's own depth now, where the gap used
+    // to leave the sky's. (T2 above uses a near-black 0.02 fringe instead,
+    // for the floor threshold itself; this is the literal glyph/gap
+    // scenario flight 20260924_175113/20260925_050051 named.)
+    {
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        const float glyph[4] = {0.6f, 0.6f, 0.6f, 1.0f}, gap[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        originalDraw(kNear5m, glyph, gap, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (glyph/gap, cockpit range)");
+        for (float v : privateDepth())
+            check(std::fabs(v - kNear5m) < 1e-5f, "glyph/gap: both the bright glyph and the black gap are covered within the cockpit radius");
+    }
+
+    // The same panel beyond the radius: the glyph is not covered (its
+    // contribution is radius-gated to E=0, as in "beyond radius" above),
+    // and now neither is the gap (cockpitRange is false at 50 m). A world
+    // marker at the same range is unaffected: its glyph half still covers
+    // (contribution is unconditional for a world marker), its gap half
+    // still does not -- "far elements... never claim dark pixels" applies
+    // to a world marker exactly as it does to a cockpit family.
+    {
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        const float glyph[4] = {0.6f, 0.6f, 0.6f, 1.0f}, gap[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        originalDraw(kNear50m, glyph, gap, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (glyph/gap, beyond radius, cockpit family)");
+        for (float v : privateDepth()) check(v == 0.0f, "glyph/gap beyond radius: neither half is covered for a cockpit family");
+
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        g_holoIsWorldMarker = true;
+        g_holoDrawVs = kHoloWorldMarkerReticle;
+        originalDraw(kNear50m, glyph, gap, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "resolve runs (glyph/gap, beyond radius, world marker)");
+        auto values = privateDepth();
+        check(std::fabs(values[1] - kNear50m) < 1e-5f, "glyph/gap beyond radius, world marker: the bright glyph half still covers");
+        check(values[6] == 0.0f, "glyph/gap beyond radius, world marker: the gap half still does not");
+        g_holoIsWorldMarker = false;
+    }
+
+    // Star: a dark cockpit footprint (near-zero contribution everywhere)
+    // with one bright background pixel already in the scene, showing
+    // through -- the star itself must still fail the share test (its
+    // brightness is not this element's own light), while the genuinely
+    // dark pixels around it, now within the cockpit radius, are covered.
+    {
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        const float dark[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        drawIntoRtv(hdrRtv.Get(), kNear5m, dark, dark, blendSrcAlphaOne.Get(), kBlack, true);
+        listedReissue();
+        // A one-pixel "star" already in the scene, unrelated to this
+        // element's own blend: written directly into the HDR target
+        // through a 1x1 viewport at (3,3), never through the contribution
+        // pass, so Contribution stays 0 there just like everywhere else.
+        {
+            const float star[4] = {0.9f, 0.9f, 0.9f, 1.0f};
+            const float data[12] = {star[0], star[1], star[2], star[3], star[0], star[1], star[2], star[3], 0, 0, 0, 0};
+            ctx->UpdateSubresource(cbuf.Get(), 0, nullptr, data, 0, 0);
+            ctx->OMSetRenderTargets(1, hdrRtv.GetAddressOf(), nullptr);
+            ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+            ctx->VSSetShader(toyVs.Get(), nullptr, 0);
+            ctx->PSSetShader(toyPs.Get(), nullptr, 0);
+            const D3D11_VIEWPORT starVp{3, 3, 1, 1, 0, 1};
+            ctx->RSSetViewports(1, &starVp);
+            ctx->Draw(3, 0);
+            ctx->RSSetViewports(1, &vp8);
+        }
+        // The display mirrors the star: bright at (3,3), well under the
+        // 0.05 floor everywhere else.
+        std::vector<unsigned char> starDisplay(8 * 8 * 4, 2);
+        for (unsigned c = 0; c < 4; ++c) starDisplay[4 * (3 * 8 + 3) + c] = 230;
+        D3D11_TEXTURE2D_DESC dd{};
+        dd.Width = dd.Height = 8; dd.MipLevels = dd.ArraySize = 1;
+        dd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; dd.SampleDesc.Count = 1;
+        dd.BindFlags = D3D11_BIND_SHADER_RESOURCE; dd.Usage = D3D11_USAGE_DEFAULT;
+        const D3D11_SUBRESOURCE_DATA sub{starDisplay.data(), 8 * 4, 0};
+        ComPtr<ID3D11Texture2D> starTex; hr(dev->CreateTexture2D(&dd, &sub, &starTex));
+        ComPtr<ID3D11ShaderResourceView> starSrv; hr(dev->CreateShaderResourceView(starTex.Get(), nullptr, &starSrv));
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, starSrv.Get()), "resolve runs (star)");
+        auto values = privateDepth();
+        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
+            const bool starPixel = (x == 3 && y == 3);
+            check(std::fabs(values[y * 8 + x] - (starPixel ? 0.0f : kNear5m)) < 1e-5f,
+                  starPixel ? "star: the bright background pixel itself is not covered"
+                            : "star: the dark pixels around it are covered");
+        }
     }
 
     // The family builder covers the eleven built-ins (the holo panel, the
