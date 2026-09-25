@@ -194,6 +194,35 @@ void reportProjection(State& s, const char* event) {
 // This HDR copy is distinct from the final-output copy admitted by the resolver.
 constexpr uint64_t kHdrCopyVs=0xCFA91824129ECBBCull;
 constexpr uint64_t kHdrCopyPs=0xDFCBA0EC70B03C9Bull;
+constexpr uint64_t kImageFilterPs=0xFCFAD73924BF45B9ull;
+bool verifyCameraIndependentImageSource(ID3D11DeviceContext* ctx,const FlatRuntimeDraw& draw) {
+    const auto& k=draw.key;
+    if(k.format!=9 || k.vs!=kHdrCopyVs || k.ps!=kImageFilterPs)return false;
+    FlatComputeInternalScope guard;
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
+    ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+    ctx->OMGetRenderTargets(1,&rt,&ds);
+    if(lookupShaderHash(vs.Get())!=kHdrCopyVs || lookupShaderHash(ps.Get())!=kImageFilterPs ||
+       !rt || !ds || rt.Get()!=k.rtv || ds.Get()!=k.dsv)return false;
+    Ptr<ID3D11Resource> color,depth;rt->GetResource(&color);ds->GetResource(&depth);
+    if(color.Get()!=k.color || depth.Get()!=k.depth)return false;
+    Ptr<ID3D11Texture2D> colorTexture,depthTexture;
+    color.As(&colorTexture);depth.As(&depthTexture);
+    if(!colorTexture || !depthTexture)return false;
+    D3D11_TEXTURE2D_DESC c{},d{};colorTexture->GetDesc(&c);depthTexture->GetDesc(&d);
+    D3D11_RENDER_TARGET_VIEW_DESC r{};rt->GetDesc(&r);
+    D3D11_DEPTH_STENCIL_VIEW_DESC z{};ds->GetDesc(&z);
+    UINT count=1;D3D11_VIEWPORT viewport{};ctx->RSGetViewports(&count,&viewport);
+    return c.Format==DXGI_FORMAT_R16G16B16A16_TYPELESS && r.Format==DXGI_FORMAT_R16G16B16A16_FLOAT &&
+        r.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D && r.Texture2D.MipSlice==0 &&
+        z.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2D && z.Texture2D.MipSlice==0 &&
+        c.ArraySize==1 && d.ArraySize==1 && c.SampleDesc.Count==1 && d.SampleDesc.Count==1 &&
+        c.Width==k.width && c.Height==k.height && d.Width==k.width && d.Height==k.height &&
+        d.Format==k.depthFormat && count==1 && k.viewportCount==1 &&
+        std::memcmp(&viewport,k.viewport,sizeof(viewport))==0 &&
+        flat_mono_detail::fullViewport(k,k.width,k.height);
+}
 void captureUnknownProjection(State& s,uint64_t vs,uint64_t ps) {
     if(!s.projectionFrames)return;
     for(uint32_t i=0;i<s.unknownProjectionPairsUsed;++i)
@@ -885,6 +914,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     if (foreignWork.load(std::memory_order_acquire)) s.prefix.uncertain = true;
     d.hdrCopyVerified=verifyHdrCopy(ctx,d);
+    d.imageSourceCameraIndependentVerified=verifyCameraIndependentImageSource(ctx,d);
     captureCopyProvenance(s,ctx,d);
     const auto oldTargets = s.prefix.targetsUsed;
     const uint32_t oldImageAccepted=s.prefix.imageCopiesAccepted,oldImageRefused=s.prefix.imageCopiesRefused;

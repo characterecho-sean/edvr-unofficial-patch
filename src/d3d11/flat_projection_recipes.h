@@ -19,7 +19,10 @@ struct FlatProjectionRecipes {
 inline bool flatProjectionDrawUnchanged(uint64_t vs, uint64_t ps) {
     return (vs == 0xFC1193AFFC596F74ull && ps == 0x258B95AC99520C1Full) ||
            (vs == 0xE8FDC0D92EEBA6D7ull && ps == 0x258B95AC99520C1Full) ||
-           (vs == 0x53211E8C072CD02Eull && ps == 0xB403F48CB35D9739ull);
+           (vs == 0x53211E8C072CD02Eull && ps == 0xB403F48CB35D9739ull) ||
+           // Epic 6e9bde74: VS passes v0 straight to SV_Position; PS has
+           // only CB2[7] UV/filter constants and t0/t1/t2 samples.
+           (vs == 0xCFA91824129ECBBCull && ps == 0xFCFAD73924BF45B9ull);
 }
 inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps) {
     FlatProjectionRecipes result;
@@ -141,6 +144,36 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x24214E7C45496BE0ull: if (ps == 0x0C8FCDB6A3BECCE6ull) result.add(S::Vertex,2,L::ForwardColumns,8); break;
     case 0xA1B7CFCD0BE7493Eull: if (ps == 0x2DB678B6B558B604ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
     case 0xCE24A73943632F55ull: if (ps == 0x1F64463B15189104ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    default: break;
+    }
+    // Epic 6e9bde74 F10 capture. The first 18 VS blobs below form SV_Position from a
+    // scalar-weighted sum of CB1[270..273]. Their exact PS companions do not
+    // read those projection rows or a patchable inverse projection. Several
+    // read CB1[277..279] for view direction; those rows are not clip matrices.
+    if (result.count == 0) switch (vs) {
+    case 0xF516BF0201303B87ull: if (ps == 0xB40B0462256E31C2ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x318693134643131Aull: if (ps == 0x4EBA794D13603735ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xD99AFDC250D19A3Full: if (ps == 0xE86271E464CCDC1Dull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x114AF608F86D9ED8ull: if (ps == 0xA17504A2627767F2ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x01DA82F8D0EA0C99ull: if (ps == 0x2C3ADCD2FCD47298ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x6D2158CFE759A3BEull: if (ps == 0xBD59C4EF0DA3B1E2ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xA4A19FAF8D08E1D6ull: if (ps == 0xBE3EA29C554ABFF3ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x33A5025C48FC8259ull: if (ps == 0x6B8C26FAC5558C6Cull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xA8E4D93B8B294505ull: if (ps == 0x75D12D8561BA8525ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xA6A39338C06E03A1ull: if (ps == 0xED91F94EC94FA5C2ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x617C6E44A034E0C2ull: if (ps == 0x627FEC646836683Full) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xB43A856E285815E3ull: if (ps == 0x702C3974A260DE14ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xF512712C40D93C12ull: if (ps == 0xD0B9213C1F248335ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x359BF8FF5CFAA4C3ull: if (ps == 0x92FF8499ED345759ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xEFE42AC6142C1815ull: if (ps == 0x29D8624FD690277Full) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x01A029C7DBD48554ull: if (ps == 0x130FC0A72CE36CDBull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xA1CE8A95F0D23260ull: if (ps == 0xC6CD9AEBDEA803EEull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x2684F02B9B0BB0DEull: if (ps == 0x2376A8D9AA874372ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    // Screen quad o3 is copied from input XY. The PS samples scene depth at
+    // that coordinate and reconstructs a ray from VS o2. CB1[144,145] are
+    // the screen basis and [147].xyz is the adjustable ray origin; row 146
+    // and all W components remain intact under InverseScreenRay.
+    case 0x4AEC439CEC7FFDCEull: if (ps == 0x87EF79B19297B8C4ull) result.add(S::Vertex,1,L::InverseScreenRay,144); break;
     default: break;
     }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);

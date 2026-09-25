@@ -67,14 +67,15 @@ inline int flatProjectionRecipeTests() {
         {0xFC1193AFFC596F74ull,0x258B95AC99520C1Full},
         {0xE8FDC0D92EEBA6D7ull,0x258B95AC99520C1Full},
         {0x53211E8C072CD02Eull,0xB403F48CB35D9739ull},
+        {0xCFA91824129ECBBCull,0xFCFAD73924BF45B9ull},
     };
     for (const auto& pair : unchanged) {
         expect(flatProjectionDrawUnchanged(pair[0],pair[1]) &&
             flatProjectionDrawRecipes(pair[0],pair[1]).count==0,"inert Epic pair explicitly unchanged");
         expect(!flatProjectionDrawUnchanged(pair[0],pair[1]^1ull),"inert classification requires exact PS");
     }
-    // Complete ce715126 unknown-pair census. The three exclusions below have
-    // no proven complete clip/PS contract in the captured creation blobs.
+    // Complete ce715126 unknown-pair census. F512's missing PS arrived in
+    // the 6e9bde74 capture below; the other two remain without full blobs.
     const ObservedPair latest[] = {
         {0x84F6596FAF22CCFAull,0,1,FlatProjectionPatchLayout::ForwardColumns,270},
         {0xDE545DC8EE4FBB87ull,0x03B17F89B31C4788ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
@@ -173,12 +174,65 @@ inline int flatProjectionRecipeTests() {
     }
     const uint64_t unresolved[][2] = {
         {0x436193B352A2897Eull,0x51EE1F922FD220B0ull}, // PS blob unavailable
-        {0xF512712C40D93C12ull,0xD0B9213C1F248335ull}, // PS blob unavailable
         {0xCC2BA2E2A927CBD3ull,0x8A7FB2DB7A33279Eull}, // both blobs unavailable
     };
     for (const auto& pair : unresolved)
         expect(flatProjectionDrawRecipes(pair[0],pair[1]).count==0 &&
             !flatProjectionDrawUnchanged(pair[0],pair[1]),"unproven latest pair stays unknown");
+    // Epic 6e9bde74: all captured VS blobs below feed SV_Position through
+    // CB1[270..273], and their exact PS blobs have no projection/inverse span.
+    const uint64_t epic6e9b[][2] = {
+        {0xF516BF0201303B87ull,0xB40B0462256E31C2ull},
+        {0x318693134643131Aull,0x4EBA794D13603735ull},
+        {0xD99AFDC250D19A3Full,0xE86271E464CCDC1Dull},
+        {0x114AF608F86D9ED8ull,0xA17504A2627767F2ull},
+        {0x01DA82F8D0EA0C99ull,0x2C3ADCD2FCD47298ull},
+        {0x6D2158CFE759A3BEull,0xBD59C4EF0DA3B1E2ull},
+        {0xA4A19FAF8D08E1D6ull,0xBE3EA29C554ABFF3ull},
+        {0x33A5025C48FC8259ull,0x6B8C26FAC5558C6Cull},
+        {0xA8E4D93B8B294505ull,0x75D12D8561BA8525ull},
+        {0xA6A39338C06E03A1ull,0xED91F94EC94FA5C2ull},
+        {0x617C6E44A034E0C2ull,0x627FEC646836683Full},
+        {0xB43A856E285815E3ull,0x702C3974A260DE14ull},
+        {0xF512712C40D93C12ull,0xD0B9213C1F248335ull},
+        {0x359BF8FF5CFAA4C3ull,0x92FF8499ED345759ull},
+        {0xEFE42AC6142C1815ull,0x29D8624FD690277Full},
+        {0x01A029C7DBD48554ull,0x130FC0A72CE36CDBull},
+        {0xA1CE8A95F0D23260ull,0xC6CD9AEBDEA803EEull},
+        {0x2684F02B9B0BB0DEull,0x2376A8D9AA874372ull},
+    };
+    expect(sizeof(epic6e9b)/sizeof(epic6e9b[0])==18,"Epic 6e9b projection pair count");
+    for (const auto& pair : epic6e9b) {
+        const auto recipe=flatProjectionDrawRecipes(pair[0],pair[1]);
+        expect(recipe.count==1 && recipe.requests[0].stage==FlatProjectionStage::Vertex &&
+            recipe.requests[0].slot==1 && recipe.requests[0].patchCount==1 &&
+            recipe.requests[0].patches[0].layout==FlatProjectionPatchLayout::ForwardColumns &&
+            recipe.requests[0].patches[0].byteOffset==270*16,
+            "Epic 6e9b exact pair patches measured SV_Position columns");
+        expect(flatProjectionDrawRecipes(pair[0],pair[1]^1ull).count==0,
+            "Epic 6e9b companion identity required");
+    }
+    const auto screenRay=flatProjectionDrawRecipes(0x4AEC439CEC7FFDCEull,0x87EF79B19297B8C4ull);
+    expect(screenRay.count==1 && screenRay.requests[0].stage==FlatProjectionStage::Vertex &&
+        screenRay.requests[0].slot==1 && screenRay.requests[0].patchCount==1 &&
+        screenRay.requests[0].patches[0].layout==FlatProjectionPatchLayout::InverseScreenRay &&
+        screenRay.requests[0].patches[0].byteOffset==144*16 &&
+        flatProjectionDrawRecipes(0x4AEC439CEC7FFDCEull,0x87EF79B19297B8C5ull).count==0,
+        "Epic screen depth ray uses exact VS CB1[144..147]");
+    float screenRows[4][4]={{2,3,4,5},{6,7,8,9},{10,11,12,13},{14,15,16,17}};
+    float oldRay[3], shiftedRay[3];
+    const float ndcX=.25f, ndcY=-.5f;
+    for (int i=0;i<3;++i) oldRay[i]=ndcX*screenRows[0][i]+ndcY*screenRows[1][i]+screenRows[2][i]+screenRows[3][i];
+    expect(flatJitterInverseScreenRay(screenRows,jitter),"Epic screen ray origin patched");
+    bool rayInvariant=true;
+    for (int i=0;i<3;++i) {
+        shiftedRay[i]=(ndcX+jitter.ndcX)*screenRows[0][i]+(ndcY+jitter.ndcY)*screenRows[1][i]+screenRows[2][i]+screenRows[3][i];
+        rayInvariant &= std::abs(shiftedRay[i]-oldRay[i])<.00001f;
+    }
+    expect(rayInvariant && screenRows[2][0]==10 && screenRows[2][1]==11 &&
+        screenRows[2][2]==12 && screenRows[3][3]==17 &&
+        screenRows[0][3]==5 && screenRows[1][3]==9,
+        "Epic depth reconstruction ray follows screen jitter; depth and W preserved");
     expect(flatProjectionDispatchRecipes(0x823CC578F5510B24ull,1920,1080).count==0,"offline-only lighting variant is not live-associated");
     const auto lighting=flatProjectionDispatchRecipes(0x5998146D464F5C0Eull,1920,1080);
     expect(lighting.count==1 && lighting.requests[0].stage==FlatProjectionStage::Compute &&

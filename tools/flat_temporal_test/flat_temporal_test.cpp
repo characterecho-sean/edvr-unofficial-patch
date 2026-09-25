@@ -830,27 +830,46 @@ void flatRuntimeImageCopyTests() {
     using namespace edvr;
     enum Scenario { Valid, SourceDepth, SourceCamera, SourceViewport, MissingSource,
                     SourceExplicitWrite, SourceStale, Unverified, WrongPair,
-                    Alias, PriorHdrBad, PriorAndSourceBad, CopyCameraUnused };
+                    Alias, PriorHdrBad, PriorAndSourceBad, CopyCameraUnused,
+                    AllInertAbsent, AllInertArbitrary, MixedInertFirst,
+                    MixedGeometryFirst, InertUnverified, InertWrongPair,
+                    InertDepth, InertViewport, MixedStaleGeometry,
+                    MixedChangedGeometry, InertExplicitWrite };
     auto replay = [](Scenario scenario) {
         MonoFixture fixture;
         FlatContractRecord source[2]{}, imageCopy{};
         for (uint32_t i = 0; i < 2; ++i)
             fixture.fill(source[i], kFlatContractScreen, 0x2900, 9, 485 + i, 485 + i,
                          1, 0x10203040ull, 0x50607080ull, 484 + i, 484 + i);
+        const bool firstInert = scenario == AllInertAbsent || scenario == AllInertArbitrary ||
+            scenario == MixedInertFirst || scenario == InertUnverified ||
+            scenario == InertWrongPair || scenario == InertDepth ||
+            scenario == InertViewport || scenario == InertExplicitWrite || scenario == MixedStaleGeometry ||
+            scenario == MixedChangedGeometry;
+        const bool secondInert = scenario == AllInertAbsent || scenario == AllInertArbitrary ||
+            scenario == MixedGeometryFirst;
+        for (uint32_t i = 0; i < 2; ++i) if ((i == 0 && firstInert) || (i == 1 && secondInert)) {
+            source[i].key.vs = 0xCFA91824129ECBBCull;
+            source[i].key.ps = 0xFCFAD73924BF45B9ull;
+            source[i].key.camera = nullptr;
+            source[i].key.cameraHash = 0;
+            if (scenario == AllInertAbsent) source[i].key.b1 = nullptr;
+        }
+        if (scenario == InertWrongPair) ++source[0].key.ps;
         fixture.fill(imageCopy, kFlatContractScreen, 0x2600, 26, 494, 494, 1,
                      0xCFA91824129ECBBCull, 0xDFCBA0EC70B03C9Bull, 0, 0, false);
         imageCopy.key.depth = imageCopy.key.dsv = nullptr;
         imageCopy.key.depthWidth = imageCopy.key.depthHeight = imageCopy.key.depthFormat = 0;
         imageCopy.key.srvResource[0] = MonoFixture::token(0x2900);
         imageCopy.key.srvView[0] = MonoFixture::token(0x2902);
-        if (scenario == SourceDepth || scenario == PriorAndSourceBad)
+        if (scenario == SourceDepth || scenario == PriorAndSourceBad || scenario == InertDepth)
             source[1].key.dsv = MonoFixture::token(0xDEAD);
-        if (scenario == SourceCamera) {
+        if (scenario == SourceCamera || scenario == MixedChangedGeometry) {
             float changed[6][4]; std::memcpy(changed, fixture.rows, sizeof(changed));
             changed[5][0] += 1;
             MonoFixture::setCamera(source[1], changed);
         }
-        if (scenario == SourceViewport) source[1].key.viewport[0] = 1;
+        if (scenario == SourceViewport || scenario == InertViewport) source[1].key.viewport[0] = 1;
         if (scenario == WrongPair) ++imageCopy.key.ps;
         if (scenario == Alias) imageCopy.key.srvResource[0] = imageCopy.key.color;
         if (scenario == PriorHdrBad || scenario == PriorAndSourceBad)
@@ -876,7 +895,17 @@ void flatRuntimeImageCopyTests() {
             FlatRuntimeDraw d{}; d.key = r.key;
             std::memcpy(d.camera, r.camera, sizeof(d.camera));
             d.key.writeEpoch = prefix->frame; d.key.writeSeq = prefix->sequence + 1;
-            if (scenario == SourceStale && events[i].r == &source[1]) --d.key.writeEpoch;
+            if ((scenario == SourceStale || scenario == MixedStaleGeometry) && events[i].r == &source[1]) --d.key.writeEpoch;
+            if (events[i].r == &source[0] || events[i].r == &source[1]) {
+                const bool inert = events[i].r == &source[0] ? firstInert : secondInert;
+                d.imageSourceCameraIndependentVerified = inert && scenario != InertUnverified;
+                if (inert && (scenario == AllInertArbitrary || scenario == MixedGeometryFirst)) {
+                    d.key.b1 = MonoFixture::token(0xBAAD + i);
+                    d.key.camera = d.camera;
+                    d.key.cameraHash = 0xBAD;
+                    d.key.writeEpoch = 0;
+                }
+            }
             if (scenario == CopyCameraUnused && events[i].r == &imageCopy) {
                 d.key.b1 = MonoFixture::token(0xBAAD);
                 d.key.camera = d.camera; d.key.cameraHash = 0xBAD;
@@ -885,7 +914,7 @@ void flatRuntimeImageCopyTests() {
             d.hdrCopyVerified = events[i].r == &imageCopy && scenario != Unverified;
             d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
             d.instances = r.firstInstances;
-            if (scenario == SourceExplicitWrite && events[i].r == &imageCopy)
+            if ((scenario == SourceExplicitWrite || scenario == InertExplicitWrite) && events[i].r == &imageCopy)
                 flatRuntimeWritten(*prefix, MonoFixture::token(0x2900));
             selected = flatRuntimeObserve(*prefix, d);
         }
@@ -896,6 +925,20 @@ void flatRuntimeImageCopyTests() {
         check(result.second.selected() && result.first->imageCopiesAccepted == 1 &&
               result.first->imageCopiesRefused == 0 && result.second.hdr == MonoFixture::token(0x2600),
               "verified image copy continues prior HDR lineage despite unused copy VS camera");
+    }
+    for (Scenario s : {AllInertAbsent, AllInertArbitrary, MixedInertFirst, MixedGeometryFirst}) {
+        auto result = replay(s);
+        check(result.second.selected() && result.first->imageCopiesAccepted == 1 &&
+              result.first->imageCopiesRefused == 0,
+              "verified inert image writes qualify with absent/arbitrary b1 in either order");
+    }
+    for (Scenario s : {InertUnverified, InertWrongPair, InertDepth, InertViewport, InertExplicitWrite,
+                       MixedStaleGeometry, MixedChangedGeometry}) {
+        auto result = replay(s);
+        check(!result.second.selected() && result.first->imageCopiesAccepted == 0 &&
+              result.first->imageCopiesRefused == 1 &&
+              result.first->selectedConflict.cause == FlatRuntimeConflict::ImageCopySource,
+              "inert exception keeps verification, shader, view, depth and geometry camera gates");
     }
     for (Scenario s : {SourceDepth, SourceCamera, SourceViewport, MissingSource,
                        SourceExplicitWrite, SourceStale, Unverified, Alias}) {

@@ -11,15 +11,15 @@
   continuations but no jitter (section 31). The remaining input refusal names
   exact screen-space PS `FCFAD73924BF45B9` with no b1 camera; its newly
   captured bytecode does not consume b1. The camera requirement needs a narrow
-  correction for that verified pair. Twenty automatically captured unknown
-  pairs await recipe review. No code changes or new build followed this flight.
+  correction for that verified pair. Section 32 implements the actual-binding
+  guard and separates geometry camera provenance from camera-independent image
+  writes. All 20 captured shader pairs are classified: 19 projection recipes
+  and one unchanged image pass. Full build, 79 test jobs and all gates pass. A
+  clean-stamped build will be installed on Epic for the next qualification.
   Earlier flight `ce715126` confirms the key fix and captures the HDR copy's
-  real image connection (section 30). It treated 809 frames, all reset, with no
-  applied jitter. Both input samples have prior writes naming the HDR scene
-  depth. The implementation now checks every such input write before continuing
-  HDR lineage and adds 29 of this flight's 32 unknown shader pairs. Three pairs
-  and the image-input PS need missing creation bytes; F10 now captures newly
-  observed unknown pairs without a hand-maintained list.
+  real image connection (section 30). Every input write is checked before HDR
+  continuation. Two older shader pairs still lack creation bytes; F10 captures
+  newly observed unknown pairs without a hand-maintained list.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -40,9 +40,9 @@
   knowledge and shared motion/backend math without requiring local matrices to
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. Next Epic run: same scene, F10 once,
-  20-30 seconds; inspect HDR continuation accepted/refused counts, offending
-  input-write witness, and automatic unknown-pair shader captures together.
+  constants or camera-equality labels. Next Epic run: F10 on the main-menu ship
+  view for 20-30 seconds, then F10 in flight for 20-30 seconds; inspect applied
+  jitter, continued history, HDR input witnesses and unknown pairs together.
   Missing recipes still reject jitter warm-up; do not claim visual
   qualification from preparation counts. No headset is needed; VR still needs
   regression tests.
@@ -1844,3 +1844,46 @@ Sean also asks when the main-menu 3D ship view will stop aliasing. Treat it as
 an explicit acceptance scene: verify selected scene, applied jitter and
 continued temporal history there. Do not promise menu AA from flight-only
 evidence or from backend initialization.
+
+## 32. Camera-independent image writes, 2026-09-24
+
+Work resumed from section 31 without another flight. The exact format-9
+`CFA91824129ECBBC` / `FCFAD73924BF45B9` pass may omit camera provenance only
+after the bridge verifies actual shader hashes, RTV/DSV identities, texture
+dimensions/formats, mip 0 views, single sample/array and full actual viewport.
+The model independently checks the exact pair and verified flag. Its unused b1
+may be absent or contain unrelated values.
+
+Format-9 geometry writes still require current camera data. The first such
+camera is retained separately from the first image write, reusing the target's
+existing record storage to avoid adding another large per-target record.
+Subsequent geometry cameras must match it, and HDR continuation compares it
+with the destination's established camera. An all-image input relies on its
+current-frame writes and matching scene depth/DSV; it does not invent a camera.
+Depth, extent, viewport and explicit-write invalidation remain in force.
+
+Regression cases cover all-image input with absent/arbitrary b1, both mixed
+write orders, stale/changed geometry cameras and unverified/wrong pairs. A
+shader's bound but unused camera is not a reason to reject its image write.
+Main-menu qualification remains explicit: verify applied jitter and continued
+history there, not only in flight.
+
+All 20 unknown pairs (96,617 draws) from the verified `6e9bde74` F10 capture
+were inspected together. Eighteen use VS b1 forward columns 270-273, with no
+additional projection consumer in their exact PS companions. The image pass
+above is explicitly unchanged. The remaining `4AEC439CEC7FFDCE` /
+`87EF79B19297B8C4` pair reconstructs a scene-depth ray from VS b1 rows 144-147.
+It uses the existing inverse-screen-ray correction: subtract the jitter-scaled
+rows 144/145 from row 147.xyz, preserving row 146 and every w component. The
+regression verifies the same ray at the shifted screen coordinate. These are
+additional measured shader bindings for existing jitter math. Two older
+uncaptured pairs remain unknown; this flight introduced none left unclassified.
+Runtime handling of an unseen pair still fails warm-up safely.
+
+Validation: full absolute-path `build.bat` completed successfully, including
+all 79 jobs, three quiet runs, Python self-tests, flat temporal tests, config
+contract and installer resource checks (`build/flat-image-camera-fix.log`). The
+changes stay on `codex/flat-temporal-aa`. After committing, rebuild for a clean
+identity and install/verify the flat profile on Epic with settings preserved.
+Next run captures the menu ship and flight separately with F10; the acceptance
+evidence is applied jitter and sustained temporal history.
