@@ -2,6 +2,7 @@
 
 #include "immediate_executor.h"
 #include "gpu_work_observer.h"
+#include "producer_gpu_timing.h"
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -249,7 +250,7 @@ struct SharedTextureTransfer::Impl final {
   }
 
   HRESULT producerCopy(ID3D11Texture2D* source, DWORD timeoutMs,
-                       TransferWallTimes* times) noexcept {
+                       TransferWallTimes* times, ProducerGpuTiming* producerTiming) noexcept {
     if (!source || !hasResources()) return E_INVALIDARG;
     HRESULT mutexResult = E_FAIL;
     bool callbackRan = false;
@@ -261,9 +262,14 @@ struct SharedTextureTransfer::Impl final {
         { SubmissionWallScope measured(times?&times->producerAcquire:nullptr);
           mutexResult = producerMutex->AcquireSync(0, timeoutMs); }
         if (mutexResult != S_OK) { callbackCompleted = true; return; }
+        if (producerTiming) {
+          producerTiming->poll(GetTickCount64());
+          producerTiming->beginCopy(producer.Get(), producerContext.Get());
+        }
         producerContext->CopyResource(sharedProducer.Get(), source);
         { SubmissionWallScope measured(times?&times->producerFlush:nullptr);
           producerContext->Flush(); }
+        if (producerTiming) producerTiming->endCopy();
         const HRESULT deviceResult = producer->GetDeviceRemovedReason();
         const HRESULT releaseResult = producerMutex->ReleaseSync(1);
         mutexResult = deviceResult == S_OK ? releaseResult : deviceResult;
@@ -426,7 +432,8 @@ HRESULT SharedTextureTransfer::copy(ID3D11Texture2D* source,
 }
 
 HRESULT SharedTextureTransfer::enqueue(ID3D11Texture2D* source, DWORD timeoutMs,
-                                       TransferWallTimes* times) noexcept {
+                                       TransferWallTimes* times,
+                                       ProducerGpuTiming* producerTiming) noexcept {
   if (!impl_ || !impl_->onOwner()) return E_ACCESSDENIED;
   if (timeoutMs == INFINITE) return E_INVALIDARG;
   if (!impl_->initialized || impl_->faulted) return E_FAIL;
@@ -443,7 +450,7 @@ HRESULT SharedTextureTransfer::enqueue(ID3D11Texture2D* source, DWORD timeoutMs,
     if (!sameDevice(sourceDevice.Get(), impl_->producer.Get())) return E_INVALIDARG;
     const HRESULT resources = impl_->createResources(sourceDescription, choice, timeoutMs);
     if (resources != S_OK) return resources;
-    return impl_->producerCopy(source, timeoutMs, times);
+    return impl_->producerCopy(source, timeoutMs, times, producerTiming);
   } catch (...) {
     impl_->faulted = true;
     return E_FAIL;

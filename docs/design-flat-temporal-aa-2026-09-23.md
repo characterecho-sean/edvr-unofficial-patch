@@ -3,7 +3,7 @@
 ## Status
 
 - **State:** implementation on `codex/flat-temporal-aa`; do not merge to main
-  before qualification. Main `28ee5f73` is merged as requested (section 19).
+  before qualification. Main `c9cab91e` is included as requested (section 37).
   Section 27's solar/smoke bindings establish the earlier star scene, and
   section 26 rejects scene-camera equality as a jitter precondition. Section 28
   implements experimental live jitter with scoped projection bindings and
@@ -13,15 +13,13 @@
   history drives all resets; adapter depth/color/frame-gap counters are zero.
   The first-12 refusal limit hid the flight's reasons. Bounded per-reason
   summaries now preserve them without weakening the gate. Section 34 adds flat
-  onscreen AA/preset controls. Verified Epic `1aa62d94` still receives zero
-  menu AA frames, but its two copy probes establish a depth-bearing HDR source
-  feeding the depthless menu copy (section 36). The copy can inherit only a
-  source that passes the existing runtime depth/camera checks; the log does not
-  prove that source already qualifies. Earlier flight `ce715126` confirms the
-  key fix and captures the HDR copy's real image connection (section 30). Every
-  input write is checked before HDR continuation. Two older shader pairs still
-  lack creation bytes; F10 captures newly observed unknown pairs without a
-  hand-maintained list.
+  onscreen AA/preset controls. Verified Epic `cada07f0` now treats 5,745 menu
+  frames with live jitter, 5,714 history continuations and zero backend
+  failures (section 37). Its menu HDR copy has 5,760 acceptances and zero
+  refusals. Sean sees only a slight shimmer improvement, concentrated on ship
+  surface details. Per-pixel motion and output coverage remain unmeasured; the
+  healthy runtime counters do not establish visual quality. Two older shader
+  pairs still lack creation bytes; the current menu audit has no unknown pairs.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -42,12 +40,12 @@
   knowledge and shared motion/backend math without requiring local matrices to
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. The strict menu HDR transfer and compact
-  upper-left F8 panel pass the full build and GPU checks. Next Epic run checks
-  transfer/refusal counters, backend treatment, jitter and history together.
-  The panel is one quarter of its former area. Missing recipes still reject
-  jitter warm-up; do not claim visual qualification from preparation counts. No
-  headset is needed; VR still needs regression tests.
+  constants or camera-equality labels. Validate the merge from main, then use
+  matched ship-surface output/motion evidence to investigate remaining shimmer.
+  Do not revisit menu admission or blanket history resets: this capture proves
+  sustained treatment. The passive selector still refuses the menu copy; its
+  diagnostic verdict is not the live runtime verdict. No headset is needed; VR
+  still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -2088,3 +2086,43 @@ unchanged. Next run checks the compact F8 panel and captures 30 seconds at the
 menu ship with DLSS selected and F10; confirm menu transfer counters, actual
 treatment, projection phase and continued history rather than assume visual
 qualification.
+
+## 37. Live menu AA verification and main merge, 2026-09-24
+
+Epic `edvr_gfx_20260924_202704.log` matches `v0.17.0-570-gcada07f0`, build
+`6AB5DB54`. Sean reports a slight shimmer difference while cycling AA and
+identifies the remaining shimmer on ship surface details. This is the first
+verified menu run with sustained treatment: 5,745 renderer calls, 5,714
+accepted history continuations, 31 resets and zero backend failures. The
+longest uninterrupted continuation is 1,826 frames. Menu HDR transfers total
+5,760 accepted and zero refused. Render size is 2880x1620 with 3840x2160
+output.
+
+DLSS initialized and evaluated, and the later FSR switch initialized its
+backend at the same dimensions. Off, TAA, DLSS and FSR changes reached the
+runtime. DLSS J/L/M/Auto/K preset changes applied at frame boundaries and reset
+history as intended. The final stable DLSS interval has live jitter and zero
+phase failures. The brief engine-source refusal coincides with switching off,
+not sustained scene rejection.
+
+F10 at 20:27:46 captured 900 projection-audit frames: 316,084 candidates were
+prepared with zero refusals and no unknown shader pairs. Passive discovery's
+separate selector still reports a conflicting HDR target because it does not
+implement the live copy transfer. Do not confuse that diagnostic with live
+runtime failure. The log explicitly lacks per-pixel motion counts; engine
+record-join counts alone cannot establish a motion or coverage defect.
+
+Ruled out: menu AA never engages or continuously resets its history in this
+run, because live jitter, backend evaluation and sustained history are all
+observed. Remaining surface shimmer needs matched image and pixel/motion
+evidence before changing reconstruction, sharpening or thresholds.
+
+At Sean's request, fetched and merged main `c9cab91e` into
+`codex/flat-temporal-aa`, keeping the feature branch separate. Git merged
+`build.bat`, `temporal_pass.cpp` and `vscreen.cpp` automatically with no
+conflicts. Review retains flat production sources, rigs, installer/profile,
+menu and mod-chain paths; main's new eye rendering work stays on its VR path.
+The merge's required validation is a full absolute-path build. Main adds a
+receipt-guarded `build.bat --dll-only` promotion step after that validation and
+commit, so the installed DLLs can carry the clean commit without rerunning
+unchanged test rigs. Epic settings must remain unchanged.

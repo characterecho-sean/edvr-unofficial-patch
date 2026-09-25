@@ -24,21 +24,40 @@
 //
 //   advanced.transition_flash_eye_base = off | watch | on | alternate
 //     off        nothing installed. One log line.
-//     watch      the consumer hook and the writer watch run and compare;
-//                nothing the game sees is ever changed.
-//     on         writes the validated stand-in into the mailbox on an
-//                unrefilled call, before the original runs.
-//     alternate  transition EVENTS alternate watched, acted, watched,
-//                acted... (the first is watched).
+//     watch      fully passive: the consumer hook, the writer watch and the
+//                render-time patch SIMULATION run -- what a patch would
+//                write, logged per covered frame. Nothing the game renders
+//                is ever changed.
+//     on         the render-time patch ACTS: at every mode==2 mode-switch
+//                ENTRY event, on the bad render's own camera-CB fills
+//                (pre-Unmap), the selector-chosen base is premultiplied
+//                into row 275 and the structurally-located current-view
+//                matrix (and a cleanly-identified VP group): scene-new ->
+//                the LIVE mailbox, scene-old/unclear -> the HELD base.
+//     alternate  transition EVENTS alternate unpatched/patched (the first
+//                is unpatched), the verification-flight shape.
+//
+// CHANGE 15 (2026-09-24, flight 134813's conclusion): on/alternate now mean
+// the render-time patch. The consume-time mailbox write this key originally
+// described -- the +0x130 stand-in, then the held base through
+// sehWriteBlock64 -- is SUPERSEDED and REMOVED: flight 134813's skip 22726
+// proved it cannot serve scene-new transitions (the base the scene wants is
+// in no consume-indexed record), and flights 125237/134813 proved the
+// render-time patch with the live mailbox and the pool/camera selector.
+// watch's simulation is unchanged and still runs in every non-off mode --
+// on acted frames it doubles as the post-patch telemetry (corrO/crossV
+// against the engine's own next frame).
 // See transition_flash_eye_base_core.h for the pure logic (the bit-exact
-// reset check, the M/F validation arithmetic, the act guards, the consumer's
-// own extent) -- it has no game or Windows dependency and is what
-// tools\transition_flash_prevent_test drives. Deliberately a separate module
-// from transition_flash_prevent.cpp/pose_reader_watch.cpp: neither of those
-// is touched by this file (both are left exactly as they were).
+// reset check, the M/F validation arithmetic, the base selector, the view
+// locator and the correction math) -- it has no game or Windows dependency
+// and is what tools\transition_flash_prevent_test drives. Deliberately a
+// separate module from transition_flash_prevent.cpp/pose_reader_watch.cpp:
+// neither of those is touched by this file (both are left exactly as they
+// were).
 #include "glitch_scene.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 namespace edvr {
@@ -90,10 +109,27 @@ void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVe
 // classifies. `geometryFresh` is recordScenePosition's own freshness gate
 // (the pool was actually compared this frame), handed back explicitly
 // rather than inferred from an all-zero geometry, which a real coherent
-// frame can also measure.
+// frame can also measure. CHANGE 12: a pending render-time patch sim also
+// fires from here, on covered frames (see the .cpp) -- using this same pos
+// as P and the geometry's own cameraStep/poolStep as the scene-old/new
+// selector's inputs.
 void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid,
                                             const GlitchSceneGeometry& geometry, bool geometryFresh,
                                             GlitchSceneDecision decision);
+
+// CHANGE 14/15 (2026-09-24): the scene-CB fill tap, beside NoteSceneCamera.
+// glitch_frame.cpp's glitchFrameObserve reads the 5376-byte camera buffer
+// pre-Unmap (the tee vscreen.cpp's hookedUnmap runs before forwarding) and
+// calls this AFTER its own sceneWrites update, so the detector's per-fill
+// record of row 275 -- the value its scene verdict referees with -- is
+// always the ORIGINAL; on a patched event's act frame (CHANGE 15) this
+// function then WRITES the correction into the same mapped buffer for the
+// fills that carry the bad eye. Each fill is handed with the detector's own
+// frame attribution (s->frameNo at Unmap time -- the PRE-advance counter, so
+// a fill of the frame the boundary records as F carries F-1; the module
+// compensates) and its per-frame pool measurement, the selector's inputs.
+void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_t sizeBytes,
+                                       const GlitchSceneGeometry& geometry, bool geometryFresh);
 
 // This frame's consumer/writer activity, read once per ring-write site
 // (glitch_frame.cpp's RingEntry) -- poseReaderWatchFrameSnapshot's read-and-

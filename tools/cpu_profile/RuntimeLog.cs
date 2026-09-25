@@ -5,7 +5,7 @@ using System.Globalization;
 // the marker stream and once from the runtime's own arithmetic, with the
 // difference visible instead of assumed.
 
-internal sealed record LogPhase(string Name, double Mean, double P50, double P95, string Units, bool Nested);
+internal sealed record LogPhase(string Name, double Mean, double P50, double P95, double P99, double Max, string Units, bool Nested);
 
 internal sealed class LogWindow
 {
@@ -97,7 +97,8 @@ internal static class RuntimeLog
                 var name = fields.GetValueOrDefault("name", "");
                 if (name.Length == 0) { result.UnparsedLines++; continue; }
                 window.Phases[name] = new LogPhase(name, Double(fields, "mean"), Double(fields, "p50"),
-                    Double(fields, "p95"), fields.GetValueOrDefault("units", ""),
+                    Double(fields, "p95"), Double(fields, "p99"), Double(fields, "max"),
+                    fields.GetValueOrDefault("units", ""),
                     fields.GetValueOrDefault("nested", "0") == "1");
             }
         }

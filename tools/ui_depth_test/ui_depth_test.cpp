@@ -23,6 +23,10 @@ ID3D11Texture2D* testScene = nullptr;
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log() = default;
 void Log::note(const char*, ...) {}
+// ui_depth.cpp's UI content census reads this (objectProbeLedgerActive,
+// object_probe.h) to gate its per-draw logging; driven directly below,
+// the way g_holoDepthOn and the rest of detail:: already are on this page.
+namespace detail { bool g_objectProbeOn = false; bool g_objectProbeLedgerOn = false; }
 int64_t qpcNow() { LARGE_INTEGER t;QueryPerformanceCounter(&t);return t.QuadPart; }
 int64_t qpcFrequency() { LARGE_INTEGER t;QueryPerformanceFrequency(&t);return t.QuadPart; }
 int guardFilter(unsigned long, const char*) { return EXCEPTION_EXECUTE_HANDLER; }
@@ -57,6 +61,36 @@ bool depthProbeSceneDepthFormat(uint32_t, uint32_t, int, ID3D11Texture2D** tex, 
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, UINT n,
                                ID3D11RenderTargetView* const* rt, ID3D11DepthStencilView* ds) {
     ctx->OMSetRenderTargets(n, rt, ds);
+}
+// Pass-through: this rig drives the coverage passes directly, so the hook
+// these bypass in production (the draw census, eye-draw gate, foveation,
+// probe) never needs to see them here either.
+void vScreenDrawRaw(ID3D11DeviceContext* ctx, UINT vertexCount, UINT startVertex) {
+    ctx->Draw(vertexCount, startVertex);
+}
+void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs,
+                           ID3D11ClassInstance* const* classInstances, UINT numClassInstances) {
+    ctx->VSSetShader(vs, classInstances, numClassInstances);
+}
+void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps,
+                           ID3D11ClassInstance* const* classInstances, UINT numClassInstances) {
+    ctx->PSSetShader(ps, classInstances, numClassInstances);
+}
+void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state,
+                               const float blendFactor[4], UINT sampleMask) {
+    ctx->OMSetBlendState(state, blendFactor, sampleMask);
+}
+void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
+                                 UINT dstSubresource, const D3D11_BOX* dstBox,
+                                 const void* srcData, UINT srcRowPitch, UINT srcDepthPitch) {
+    ctx->UpdateSubresource(dstResource, dstSubresource, dstBox, srcData, srcRowPitch, srcDepthPitch);
+}
+void vScreenRSSetViewportsRaw(ID3D11DeviceContext* ctx, UINT n, const D3D11_VIEWPORT* vps) {
+    ctx->RSSetViewports(n, vps);
+}
+void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv,
+                                     const float colour[4]) {
+    ctx->ClearRenderTargetView(rtv, colour);
 }
 }
 
@@ -657,24 +691,34 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             bytes[4*55]=128;bytes[4*55+3]=124;
             ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
             for(float a:valuesOf(tracker.prepare(ctx.Get(),v.Get(),100)))check(a==0,"new source starts with no fabricated edits");
+            check(tracker.lastDecision==UiContent::Decision::kReset&&tracker.lastAge==0,"census: a brand new entry is a reset at age 0");
             for(float a:valuesOf(tracker.prepare(ctx.Get(),v.Get(),101)))check(a==0,"identical source stays stable across frames and SRV decoding");
+            check(tracker.lastDecision==UiContent::Decision::kUpdated&&tracker.lastAge==1,"census: a consecutive frame is an update at age 1");
             // An alpha-only erasure and a newly visible dim stroke are real
-            // edits; invisible RGB changes must not affect reconstruction.
-            bytes[4*55+3]=0;bytes[4*58]=8;bytes[4*58+3]=1;bytes[4*59]=255;
+            // edits. 13x9 at 4x4 blocks is a 4x3 grid (12 blocks); texel 55
+            // (row 4, col 3) is block 4, texel 58 (row 4, col 6) is block 5
+            // -- the only two the digest should mark changed. (Invisible-
+            // RGB-behind-zero-alpha and isolation to a single block are
+            // covered on their own below, at block-aligned coordinates.)
+            bytes[4*55+3]=0;bytes[4*58]=8;bytes[4*58+3]=1;
             ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
             auto changed=valuesOf(tracker.prepare(ctx.Get(),v.Get(),102));
-            for(unsigned i=0;i<changed.size();++i)check(changed[i]==(i==55||i==58?1.f:0.f),"source edit footprint includes erased/dim strokes only");
+            check(tracker.lastDecision==UiContent::Decision::kUpdated&&tracker.lastAge==1,"census: still updating one frame later");
+            check(changed.size()==12,"13x9 at 4x4 blocks is a 4x3 grid");
+            for(unsigned i=0;i<changed.size();++i)check(changed[i]==(i==4||i==5?1.f:0.f),"source edit footprint includes erased/dim strokes' blocks only");
             auto* same=tracker.prepare(ctx.Get(),v.Get(),102);
+            check(tracker.lastDecision==UiContent::Decision::kHit&&tracker.lastAge==0,"census: a repeated same-frame call is a hit");
             check(tracker.totals.updates==2 && tracker.totals.hits==1,"both eyes and repeated meshes compare once per frame");
             check(valuesOf(same)==changed,"second eye observes the same edit age");
             for(unsigned f=103;f<=134;++f)changed=valuesOf(tracker.prepare(ctx.Get(),v.Get(),f));
             for(float a:changed)check(a==0,"unchanged edits expire after 32 frames");
             bytes[4*55+3]=123;ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);
-            check(valuesOf(tracker.prepare(ctx.Get(),v.Get(),135))[55]==1,"later change rearms edit history");
+            check(valuesOf(tracker.prepare(ctx.Get(),v.Get(),135))[4]==1,"later change rearms edit history");
             GpuTimer outer;
             check(outer.begin(dev.Get(),ctx.Get()),"outer interval surrounds production UI sample");
             auto* resetFrame=tracker.prepare(ctx.Get(),v.Get(),137,true);
             check(outer.end(ctx.Get()),"outer interval ends after UI sample");
+            check(tracker.lastDecision==UiContent::Decision::kReset&&tracker.lastAge==2,"census: a frame gap on an existing entry is a reset at its real age");
             for(float a:valuesOf(resetFrame))check(a==0,"skipped surface frame resets history");
             double outerMs=0;GpuTimerPoll outerStatus=GpuTimerPoll::Pending;
             const auto deadline=GetTickCount64()+1500;
@@ -690,6 +734,44 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             outer.reset(ctx.Get());
             tracker.retire(258);check(tracker.allocated==0,"idle source releases retained textures");
         }
+        // Block granularity, isolated at an 8x8 surface (exactly a 2x2
+        // block grid): a changed texel marks only its own block, an
+        // unchanged frame decays that block by exactly 1/32, an
+        // alpha-to-zero erasure is itself a detected change, and a reseed
+        // (a frame gap, not just an unchanged frame) wipes a block that had
+        // a real, recent, nonzero age back to nothing.
+        {
+            TestUiContent blocks;auto bt=make(8,8);auto bv=view(bt.Get());
+            std::vector<unsigned char> px(8*8*4,0);
+            ctx->UpdateSubresource(bt.Get(),0,nullptr,px.data(),8*4,0);
+            auto changed=valuesOf(blocks.prepare(ctx.Get(),bv.Get(),1));
+            check(changed.size()==4,"8x8 at 4x4 blocks is a 2x2 grid");
+            for(float a:changed)check(a==0,"seed: a brand new entry marks nothing");
+            // Texel (5,5) is block (1,1) -- row-major index 1*2+1=3.
+            px[4*(5*8+5)]=200;px[4*(5*8+5)+3]=255;
+            ctx->UpdateSubresource(bt.Get(),0,nullptr,px.data(),8*4,0);
+            changed=valuesOf(blocks.prepare(ctx.Get(),bv.Get(),2));
+            for(unsigned i=0;i<4;++i)check(changed[i]==(i==3?1.f:0.f),"one changed texel marks exactly its own 4x4 block, and no other");
+            changed=valuesOf(blocks.prepare(ctx.Get(),bv.Get(),3));
+            // age is R8_UNORM -- 256 levels, so the decayed value quantizes
+            // to the nearest 1/255 rather than landing on 1-1/32 exactly.
+            check(std::fabs(changed[3]-(1.0f-1.0f/32.0f))<1.0f/255.0f,"an unchanged frame decays its block's age by about 1/32");
+            for(unsigned i=0;i<4;++i)if(i!=3)check(changed[i]==0,"blocks nothing ever touched stay at 0");
+            px[4*(5*8+5)+3]=0; // erase: alpha to 0 is itself a content change
+            ctx->UpdateSubresource(bt.Get(),0,nullptr,px.data(),8*4,0);
+            changed=valuesOf(blocks.prepare(ctx.Get(),bv.Get(),4));
+            check(changed[3]==1,"an alpha-to-zero erasure is detected like any other change");
+            changed=valuesOf(blocks.prepare(ctx.Get(),bv.Get(),6)); // gap of 2: reseed, not compare
+            for(float a:changed)check(a==0,"a seed -- a frame gap, here -- marks nothing, even a block with a real recent age");
+        }
+        // Budget arithmetic as a pure function: the 5895x5158 R8G8B8A8
+        // panel behind issue 2026-09-24's ghosting digits (fix.ui_quality
+        // 1.25 at HMD Quality 0.5) was 182 MB and permanently over budget
+        // under the old per-texel formula; block digests fit it in about
+        // 11 MB. No device or texture needed -- this is pure arithmetic on
+        // the same bytesFor() prepare() itself calls.
+        check(UiContent::bytesFor(5895,5158)<=UiContent::kBudget,"block budget: the 5895x5158 ghosting-digits panel now fits");
+        check(UiContent::bytesFor(20000,20000)>UiContent::kBudget,"block budget: a large enough surface still declines");
         // Preserve the game's compute bindings, including a live UAV.
         auto t=make(13,9);auto v=view(t.Get());std::vector<unsigned char> bytes(13*9*4,127);
         ctx->UpdateSubresource(t.Get(),0,nullptr,bytes.data(),13*4,0);TestUiContent tracker;
@@ -708,14 +790,53 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         TestUiContent bounded;std::vector<ComPtr<ID3D11Texture2D>> textures;std::vector<ComPtr<ID3D11ShaderResourceView>> views;
         for(unsigned i=0;i<25;++i){textures.push_back(make(4,4));views.push_back(view(textures.back().Get()));
             check((bounded.prepare(ctx.Get(),views.back().Get(),1)!=nullptr)==(i<24),"cache count bounded without evicting active-frame surfaces");}
+        check(bounded.inUse()==24,"census: inUse counts exactly the filled table");
+        check(bounded.lastDecision==UiContent::Decision::kDeclinedNoFreeEntry&&bounded.lastEvicted==0,
+              "census: a full table with nothing evictable this frame declines with no eviction");
         check(bounded.prepare(ctx.Get(),views.back().Get(),2)!=nullptr && bounded.totals.evicted==1,"older cache entry can be evicted safely");
+        check(bounded.lastDecision==UiContent::Decision::kReset&&bounded.lastAge==0&&bounded.lastEvicted==1,
+              "census: the new entry that forced the eviction is a reset, one evicted this call");
         auto atlas=make(4,4,DXGI_FORMAT_R8G8B8A8_UNORM,D3D11_BIND_SHADER_RESOURCE);auto atlasV=view(atlas.Get());
         check(!bounded.prepare(ctx.Get(),atlasV.Get(),3),"static atlas is not copied each frame");
-        TestUiContent budget;auto big=make(4096,1536),big2=make(4096,1536);auto bigV=view(big.Get()),bigV2=view(big2.Get());
-        check(budget.prepare(ctx.Get(),bigV.Get(),1)!=nullptr,"bounded large UI surface supported");
-        check(budget.prepare(ctx.Get(),bigV2.Get(),1)==nullptr,"history byte cap enforced independently of entry count");
+        check(bounded.lastDecision==UiContent::Decision::kDeclinedNoRenderTarget,"census: a SHADER_RESOURCE-only surface declines as no-render-target");
+        // A 4096x1536 surface, big enough to matter under the old
+        // per-texel budget, is under a megabyte of blocks now -- real
+        // multi-entry byte pressure would need surfaces in the tens of
+        // millions of texels each (the pure-function block above), so
+        // there is no live-texture "byte cap before entry cap" case left
+        // at a size this rig can allocate; UiContent::bytesFor's own
+        // threshold arithmetic is what covers it.
+        auto big=make(4096,1536);auto bigV=view(big.Get());
+        TestUiContent budget;check(budget.prepare(ctx.Get(),bigV.Get(),1)!=nullptr,"bounded large UI surface supported");
         check(budget.allocated<=UiContent::kBudget,"allocated UI history fits budget");
-        check(budget.prepare(ctx.Get(),bigV2.Get(),2)!=nullptr && budget.totals.evicted==1,"byte pressure evicts only an older frame");
+        // The reason codes nothing above exercises: a null surface, an
+        // unsupported format, a non-Texture2D resource, and an array view
+        // (a single surface bigger than the whole budget is the pure
+        // bytesFor() function above -- see its own comment for why not a
+        // live texture).
+        {
+            TestUiContent reasons;
+            check(reasons.prepare(ctx.Get(),nullptr,1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedNoSurface,
+                  "census: a null surface declines as no-surface");
+            auto badFormat=make(4,4,DXGI_FORMAT_R32_FLOAT);auto badFormatV=view(badFormat.Get());
+            check(reasons.prepare(ctx.Get(),badFormatV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedFormat,
+                  "census: an unsupported format declines as format");
+            D3D11_BUFFER_DESC bufDesc{};bufDesc.ByteWidth=256;bufDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            ComPtr<ID3D11Buffer> buf;hr(dev->CreateBuffer(&bufDesc,nullptr,&buf));
+            D3D11_SHADER_RESOURCE_VIEW_DESC bufSd{};bufSd.Format=DXGI_FORMAT_R32_FLOAT;
+            bufSd.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;bufSd.Buffer.NumElements=64;
+            ComPtr<ID3D11ShaderResourceView> bufV;hr(dev->CreateShaderResourceView(buf.Get(),&bufSd,&bufV));
+            check(reasons.prepare(ctx.Get(),bufV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedNotTexture2D,
+                  "census: a non-Texture2D resource declines as not-Texture2D");
+            D3D11_TEXTURE2D_DESC arrDesc{};arrDesc.Width=arrDesc.Height=4;arrDesc.MipLevels=1;arrDesc.ArraySize=2;arrDesc.SampleDesc.Count=1;
+            arrDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;arrDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
+            ComPtr<ID3D11Texture2D> arrTex;hr(dev->CreateTexture2D(&arrDesc,nullptr,&arrTex));
+            D3D11_SHADER_RESOURCE_VIEW_DESC arrSd{};arrSd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+            arrSd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2DARRAY;arrSd.Texture2DArray.MipLevels=1;arrSd.Texture2DArray.ArraySize=2;
+            ComPtr<ID3D11ShaderResourceView> arrV;hr(dev->CreateShaderResourceView(arrTex.Get(),&arrSd,&arrV));
+            check(reasons.prepare(ctx.Get(),arrV.Get(),1)==nullptr&&reasons.lastDecision==UiContent::Decision::kDeclinedViewShape,
+                  "census: an array view declines as view-shape");
+        }
         // End-to-end source -> existing coverage draw -> borrowed eye SRV.
         // t14 must be restored and erased glyphs must keep their edit mark
         // even though the current source alpha is zero.
@@ -737,6 +858,25 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             pixels.assign(4*4*4,0);ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);
         }
         ctx->ClearState();uiDepthFrameBoundary(ctx.Get());check(!uiDepthContentChanges(8,8,0),"projected edit mask clears after both eyes submit");g_trained=false;
+        // The census gate itself: g_uiContentCensusOn should latch true for
+        // exactly the frame after objectProbeLedgerActive() is first seen
+        // active, print its summary and drop again at the next boundary,
+        // and never re-arm while the same (possibly many-frame) run stays
+        // active -- the rising edge ui_depth.cpp's own comment describes.
+        detail::g_uiDepthOn=true;detail::g_uiDepthStoodDown=false;
+        detail::g_objectProbeLedgerOn=false;uiDepthFrameBoundary(ctx.Get());
+        check(!g_uiContentCensusOn,"census: idle while no eye run is armed");
+        detail::g_objectProbeLedgerOn=true;uiDepthFrameBoundary(ctx.Get());
+        check(g_uiContentCensusOn,"census: the frame after the ledger arms is armed for logging");
+        uiDepthFrameBoundary(ctx.Get());
+        check(!g_uiContentCensusOn,"census: a second frame of the same still-armed run is not re-armed");
+        uiDepthFrameBoundary(ctx.Get());
+        check(!g_uiContentCensusOn,"census: stays idle for the rest of a long run");
+        detail::g_objectProbeLedgerOn=false;uiDepthFrameBoundary(ctx.Get());
+        detail::g_objectProbeLedgerOn=true;uiDepthFrameBoundary(ctx.Get());
+        check(g_uiContentCensusOn,"census: a later, separate run re-arms exactly the same way");
+        detail::g_objectProbeLedgerOn=false;uiDepthFrameBoundary(ctx.Get());
+        check(!g_uiContentCensusOn&&!detail::g_objectProbeLedgerOn,"census: settles idle again with the run closed");
         // Scrolling sprite ticks must not retain depth or edit footprints
         // where their source has become transparent. Dim current strokes
         // still carry coverage, and visible changed pixels still reject

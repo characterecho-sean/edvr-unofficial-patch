@@ -11,13 +11,16 @@ REM
 REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
 REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
 REM
-REM  Usage:  build.bat [--clean] [--jobs N]
+REM  Usage:  build.bat [--clean] [--jobs N] [--dll-only]
 REM
 REM  Once the DLLs are built, the test rigs run concurrently, --jobs at a time
 REM  (default: one per logical core), through tools\run_jobs.py. Each rig is a
 REM  :rig_<label> subroutine at the end of this file; the runner starts it as
 REM  "build.bat --rig <label>", a child that inherits this build's environment
 REM  and runs that one subroutine. --rig is the runner's, not for hand use.
+REM  --dll-only is the post-commit promotion path: it requires the receipt from
+REM  a matching green full build, rebuilds the production DLLs, and skips rigs
+REM  and the self-contained installer.
 REM ===========================================================================
 
 set "ROOT=%~dp0"
@@ -34,6 +37,7 @@ set "EDVR_RIG="
 if "%~1"=="" goto args_done
 if /I "%~1"=="--clean" goto arg_clean
 if /I "%~1"=="--jobs" goto arg_jobs
+if /I "%~1"=="--dll-only" goto arg_dll_only
 if /I "%~1"=="--rig" goto arg_rig
 echo [edvr] unknown argument: %~1
 exit /b 1
@@ -46,12 +50,20 @@ set "EDVR_JOBS=%~2"
 shift
 shift
 goto parse_args
+:arg_dll_only
+set "EDVR_DLL_ONLY=1"
+shift
+goto parse_args
 :arg_rig
 set "EDVR_RIG=%~2"
 shift
 shift
 goto parse_args
 :args_done
+if defined EDVR_DLL_ONLY if defined DO_CLEAN (
+    echo [edvr] ERROR: --dll-only cannot be combined with --clean
+    exit /b 1
+)
 if defined EDVR_RIG goto run_rig
 
 if defined DO_CLEAN (
@@ -122,6 +134,8 @@ python tools\fetch_openxr_loader.py --self-test || exit /b 1
 python tools\gen_installer_rc.py --self-test || exit /b 1
 python tools\package_native.py --self-test || exit /b 1
 python tools\build_diff.py --self-test || exit /b 1
+python tools\build_receipt.py --self-test || exit /b 1
+python tools\flash_patch_residual.py --self-test || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM
@@ -297,11 +311,9 @@ REM was deleted, its .obj stayed, and the link failed on three symbols it
 REM still referenced -- the lucky case. Had those symbols still existed, the
 REM removed feature would have linked straight back into the DLL with no
 REM line anywhere saying so. Clearing the directory first costs nothing and
-REM makes the object set exactly the source list.
-if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
-del /q "%OBJ%\d3d11\*.obj" 2>nul
-ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
-if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
+REM makes the object set exactly the source list. The cleanup happens after
+REM DLL-only promotion has verified its receipt, so a rejected promotion does
+REM not disturb the previous build.
 
 REM NVIDIA's DLSS SDK. EDVR_NGX_SDK names a copy explicitly; else the
 REM checkout's own third_party\ngx; else the machine's copy under
@@ -413,6 +425,31 @@ if defined FFX (
         echo [edvr] ==================================================================
     )
 )
+
+if defined EDVR_DLL_ONLY (
+    echo [edvr] === DLL-only promotion ===
+    python tools\build_receipt.py --verify "%BUILD%\full_build_receipt.json" ^
+        --root "%ROOT%" --require-clean ^
+        --context "cl=%CL%" ^
+        --context "profile_symbols=%EDVR_PROFILE_SYMBOLS%" ^
+        --context "cpu_compile=%EDVR_CPU_COMPILE%" ^
+        --context "cpu_link=%EDVR_CPU_LINK%" ^
+        --context "ngx_request=%EDVR_NGX_SDK%" ^
+        --context "ngx=%NGX%" ^
+        --context "ffx_request=%EDVR_FFX_DX11%" ^
+        --context "ffx=%FFX%" ^
+        --context "fsr_none=%FSR_NONE%" || (
+            echo [edvr] ERROR: DLL-only promotion is not allowed without the
+            echo        matching green full build receipt.
+            exit /b 1
+        )
+)
+
+if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
+del /q "%OBJ%\d3d11\*.obj" 2>nul
+ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
+if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
+
 cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
@@ -446,6 +483,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
     "src\d3d11\object_probe.cpp" ^
+    "src\d3d11\pixel_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
@@ -547,7 +585,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
-    "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
     "src\common\frame_flag.cpp" ^
@@ -565,6 +603,8 @@ set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
     "src\installer\payload.cpp"
 set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
     shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
+
+if defined EDVR_DLL_ONLY goto dll_only_finish
 
 echo.
 echo [edvr] === test rigs ===
@@ -634,6 +674,17 @@ if exist "%BUILD%\nvngx_dlss.dll" (
 )
 echo.
 python tools\package_native.py --check-installer || exit /b 1
+python tools\build_receipt.py --write "%BUILD%\full_build_receipt.json" ^
+    --root "%ROOT%" ^
+    --context "cl=%CL%" ^
+    --context "profile_symbols=%EDVR_PROFILE_SYMBOLS%" ^
+    --context "cpu_compile=%EDVR_CPU_COMPILE%" ^
+    --context "cpu_link=%EDVR_CPU_LINK%" ^
+    --context "ngx_request=%EDVR_NGX_SDK%" ^
+    --context "ngx=%NGX%" ^
+    --context "ffx_request=%EDVR_FFX_DX11%" ^
+    --context "ffx=%FFX%" ^
+    --context "fsr_none=%FSR_NONE%" || exit /b 1
 echo [edvr] Native OpenXR build and all gates passed.
 echo [edvr] Install both native DLLs and the bundled loader for a test flight:
 echo        python tools\install_edvr.py --target frontier --dry-run
@@ -645,6 +696,18 @@ echo [edvr] The self-contained build\edvr-installer.exe installs the same pair,
 echo        preserves graphics-mod chaining, and supports repair and uninstall.
 echo [edvr] After the flight:
 echo        python tools\edvr_log.py --target frontier --expect-build HEAD
+exit /b 0
+
+REM ===========================================================================
+:dll_only_finish
+echo.
+echo [edvr] === DLL-only promotion outputs ===
+copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
+python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" || exit /b 1
+python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" || exit /b 1
+echo [edvr] DLL-only build passed: production DLLs and loader are ready to install.
+echo [edvr] Test rigs and the self-contained installer were skipped; use a full build
+echo        before distributing an installer or accepting new source changes.
 exit /b 0
 
 REM ===========================================================================
@@ -742,7 +805,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_MENU_TEST /I"%GEN%" /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_menu\\" /Fe"%BUILD%\native_menu_test.exe" ^
     "tools\native_menu_test\native_menu_test.cpp" "src\d3d11\native_menu.cpp" ^
-    "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" ^
@@ -1089,6 +1152,24 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
 )
 exit /b 0
 
+:rig_hologram_depth_test
+echo [edvr] === generic hologram/icon depth regression ===
+REM Same shape as :rig_ui_depth: WARP, the production coverage pass
+REM included directly, away from build\d3d11.dll.
+if not exist "%OBJ%\holodepthtest" mkdir "%OBJ%\holodepthtest"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\holodepthtest\\" /Fe"%OBJ%\holodepthtest\hologram_depth_test.exe" ^
+    "tools\hologram_depth_test\hologram_depth_test.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: hologram_depth_test build failed & exit /b 1 )
+"%OBJ%\holodepthtest\hologram_depth_test.exe" || (
+    echo [edvr] ERROR: generic hologram/icon depth regression
+    exit /b 1
+)
+exit /b 0
+
 :rig_native_motion_rigs
 echo [edvr] === native motion, fusion and night-vision rigs ===
 
@@ -1328,6 +1409,18 @@ if errorlevel 1 ( echo [edvr] ERROR: D3D11 GPU span test build failed & exit /b 
 "%OBJ%\gpuspand3d11\gpu_span_d3d11_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_producer_gpu_timing_test
+if not exist "%OBJ%\producergputiming" mkdir "%OBJ%\producergputiming"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\producergputiming\\" /Fe"%OBJ%\producergputiming\producer_gpu_timing_test.exe" ^
+    "tools\producer_gpu_timing_test\producer_gpu_timing_test.cpp" ^
+    "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: producer GPU timing test build failed & exit /b 1 )
+"%OBJ%\producergputiming\producer_gpu_timing_test.exe" --dry-run || exit /b 1
+"%OBJ%\producergputiming\producer_gpu_timing_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_gpu_live_hook_test
 REM Real WARP query work through the same stacked LiveCopy mechanism used by
 REM exposure and vScreen. This is desk-only; no production GPU timer is enabled.
@@ -1408,7 +1501,7 @@ for %%T in (native stereo) do (
         /I"third_party\openxr\include" /Fo"%OBJ%\openxr_native_tests\\" ^
         /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
         "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
-        "src\openxr\shared_texture_transfer.cpp" ^
+        "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
         "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
@@ -1427,7 +1520,7 @@ if not exist "%OBJ%\openxr_capture_test" mkdir "%OBJ%\openxr_capture_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\openxr_capture_test\\" /Fe"%BUILD%\openxr_capture_test.exe" ^
     "tools\openxr_capture_test\openxr_capture_test.cpp" "src\openxr\eye_capture.cpp" ^
-    "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR capture test build failed & exit /b 1 )
 "%BUILD%\openxr_capture_test.exe" --dry-run || exit /b 1
@@ -1439,7 +1532,7 @@ if not exist "%OBJ%\openxr_skybox_test" mkdir "%OBJ%\openxr_skybox_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /Fo"%OBJ%\openxr_skybox_test\\" /Fe"%BUILD%\openxr_skybox_test.exe" ^
     "tools\openxr_skybox_test\openxr_skybox_test.cpp" "src\openxr\skybox_capture.cpp" ^
-    "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR skybox capture test build failed & exit /b 1 )
 "%BUILD%\openxr_skybox_test.exe" --dry-run || exit /b 1
@@ -1512,7 +1605,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_proxy_state_test\\" /Fe"%BUILD%\openxr_proxy_state_test.exe" ^
     "tools\openxr_proxy_state_test\openxr_proxy_state_test.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
-    "src\openxr\shared_texture_transfer.cpp" ^
+    "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR proxy state test build failed & exit /b 1 )
 "%BUILD%\openxr_proxy_state_test.exe" --dry-run || exit /b 1
@@ -1553,6 +1646,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\openxr_shared_texture_test\\" /Fe"%BUILD%\openxr_shared_texture_test.exe" ^
     "tools\openxr_shared_texture_test\openxr_shared_texture_test.cpp" ^
     "src\openxr\shared_texture_transfer.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
+    "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR shared texture test build failed & exit /b 1 )
 "%BUILD%\openxr_shared_texture_test.exe" --dry-run || exit /b 1
@@ -2207,4 +2301,27 @@ cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: ui layer seed test build failed & exit /b 1 )
 "%OBJ%\uilayerseed\seed_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_pixel_probe_test
+echo [edvr] === pixel_probe_test.exe ===
+REM Build gate for advanced.pixel_probe (src/d3d11/pixel_probe.*), the "who
+REM drew this pixel" instrument: a WARP device, a 256x256 eye-sized target
+REM and a scissor-clipped solid-colour draw drive the module directly, no
+REM vscreen.cpp and no hooks. Asserts a draw over a probe window is
+REM reported with the right point, count and hashes; a draw elsewhere, or
+REM one repainting the colour already there, is not; the first draw into
+REM the target is caught through the baseline; an unconfigured or unarmed
+REM probe logs nothing; slot exhaustion reports drops in the summary; and
+REM a malformed advanced.pixel_probe value is refused whole, not
+REM half-applied.
+if not exist "%OBJ%\pixelprobe" mkdir "%OBJ%\pixelprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\pixelprobe\\" /Fe"%OBJ%\pixelprobe\pixel_probe_test.exe" ^
+    "tools\pixel_probe_test\pixel_probe_test.cpp" "src\d3d11\pixel_probe.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: pixel probe test build failed & exit /b 1 )
+"%OBJ%\pixelprobe\pixel_probe_test.exe" --dry-run || exit /b 1
+"%OBJ%\pixelprobe\pixel_probe_test.exe" --self-test || exit /b 1
 exit /b 0

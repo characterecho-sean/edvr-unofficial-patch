@@ -20,9 +20,12 @@
 // The 2026-09-24 revision of transition_flash_eye_base_core.h (flight
 // 062910: the F stand-in never matched a refilled mailbox) adds three more
 // cells here: CHANGE 1's held-base guard (every refusal reason, flipped one
-// at a time), CHANGE 2's consecutive-refilled counter that gates the writer
-// watch alongside the existing stability gate, and CHANGE 3's dump-trigger
-// predicate, which takes no eye-trace flag at all.
+// at a time -- REMOVED by CHANGE 15 with the consume-time write it gated;
+// the held base itself lives on as the render patch's scene-old base, and
+// its guard's cell became caseChoosePatchBase), CHANGE 2's consecutive-
+// refilled counter that gates the writer watch alongside the existing
+// stability gate, and CHANGE 3's dump-trigger predicate, which takes no
+// eye-trace flag at all.
 //
 // The same day's static round 7 (the writer FUN_142874b20 and its caller,
 // the controller FUN_1410730a0 -- design doc "Static round 7: the writer and
@@ -30,7 +33,10 @@
 // (armed/disarmed, leaving slot 0 untouched either way) and the writer's own
 // body-extent classifier; CHANGE 6's offeredSubstituteUsable, the policy that
 // prefers the writer's OFFERED matrix over the held base when it was entered
-// for our ship, refused by its name gate, and still fresh; and CHANGE 7's
+// for our ship, refused by its name gate, and still fresh (REMOVED by
+// CHANGE 15 with the consume-time write it gated; the offered matrix itself
+// is record-only instrumentation now, and its cell became caseProjLike4x4);
+// and CHANGE 7's
 // per-frame classifier, which tells apart "the controller didn't run" from
 // "it ran but the writer wasn't entered" from "entered but didn't write".
 //
@@ -39,6 +45,21 @@
 // which turn "every un-refilled call dumps" (flight 091726: 5,041 of them in
 // one low wake) into ENTRY/EXIT edges, plus glitch_scene.h's own fresh/
 // decision print text for the per-frame dump row those edges feed.
+//
+// The same day's "render-time patch simulation (watch-only)" adds CHANGE 10's
+// cells: patchEyeOrigin (the eye composer's own multiply, checked against
+// the f13550 flight-100043 mailbox/scene numbers and a hand-computed
+// rotation), premul4x4 (the acting build's full premultiply, hand-composed
+// B*M and both identity sides), patchSceneChoice on the flight-derived
+// cam/pool points plus every band edge, and the pending sim's N+1..N+3
+// render-frame window. CHANGE 13 (the live-mailbox tap) adds mailboxPlausible
+// -- the sanity gate a tap-time live read passes through -- checked against
+// the measured tunnel base, a measured 5 km rebase, and the over-range and
+// non-finite rejections. CHANGE 14 (the buffer-row locator) adds the
+// structural view-matrix finder (locateSceneCBView over a synthetic buffer
+// with current/prev/unrelated orthonormal groups), the correction inverse
+// (affineInverse4x4 round-trips, scale and rotation cases), the postmultiply
+// naming (postmul4x4), and the orthonormality/match unit cells.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -635,76 +656,98 @@ void caseEyeBaseValidationArithmetic() {
 // (task of 2026-09-24: F is retired as the candidate; the mailbox's own last
 // known-refilled value, cached and aged in frames, is judged instead).
 
-void caseHeldBaseGuardRefusals() {
-    float goodM[16];
-    eyeBaseIdentityMailbox(goodM);
-    goodM[12] = 100.0f;  // a real translation, not the reset value
+// --- transition_flash_eye_base_core.h: CHANGE 15, the acting patch's base --
+// selector (task 2026-09-24, "the acting render-time patch"). The guard chain
+// that used to live here (caseHeldBaseGuardRefusals) gated the consume-time
+// mailbox write, superseded with that write; the held base it guarded is now
+// simply one of the render patch's candidate bases.
 
-    // Baseline: every guard satisfied -> acts. currentFrame=100, cached at
-    // frame 98 (age 2, the boundary itself -- see the "exactly 2" case
-    // below), same ship, finite, not the reset value, cap not reached.
-    check(tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: every guard satisfied acts");
+void caseChoosePatchBase() {
+    using tfeb::PatchBaseChoice;
+    using tfeb::SceneChoice;
+    // The flight-measured rule (134813, 16 events / 3 flights), the full
+    // 3 x 2 x 2 table:
+    //   scene         haveLive haveHeld -> choice
+    //   new           yes      *        -> UseLive
+    //   new           no       *        -> NoPatch
+    //   old           *        yes      -> UseHeld
+    //   old           *        no       -> NoPatch
+    //   unclear       *        yes      -> UseHeld
+    //   unclear       *        no       -> NoPatch
+    check(tfeb::choosePatchBase(SceneChoice::New, true, true) == PatchBaseChoice::UseLive,
+          "choosePatchBase: scene-new uses the live base");
+    check(tfeb::choosePatchBase(SceneChoice::New, true, false) == PatchBaseChoice::UseLive,
+          "choosePatchBase: scene-new uses the live base even with no held cache");
+    check(tfeb::choosePatchBase(SceneChoice::New, false, true) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: scene-new without a usable live base patches nothing (never guesses)");
+    check(tfeb::choosePatchBase(SceneChoice::New, false, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: scene-new with neither base patches nothing");
+    check(tfeb::choosePatchBase(SceneChoice::Old, true, true) == PatchBaseChoice::UseHeld,
+          "choosePatchBase: scene-old uses the held base");
+    check(tfeb::choosePatchBase(SceneChoice::Old, true, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: scene-old without a held base patches nothing");
+    check(tfeb::choosePatchBase(SceneChoice::Old, false, true) == PatchBaseChoice::UseHeld,
+          "choosePatchBase: scene-old NEVER falls back to the live base (skip 22726: 1614 m wrong)");
+    check(tfeb::choosePatchBase(SceneChoice::Old, false, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: scene-old with neither base patches nothing");
+    // Unclear is NoPatch, NOT held -- the review's step-4 argument: held is
+    // proven only for scene-old; on a scene-new frame it is kilometres
+    // wrong, far worse than the 13.5 m head-only eye it replaces. Missing
+    // evidence patches NOTHING.
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, true, true) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: unclear patches nothing even with both bases");
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, false, true) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: unclear never takes the held base");
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, true, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: unclear without a held base patches nothing");
+    check(tfeb::choosePatchBase(SceneChoice::Unclear, false, false) == PatchBaseChoice::NoPatch,
+          "choosePatchBase: unclear with neither base patches nothing");
+    check(std::strcmp(tfeb::patchBaseChoiceText(PatchBaseChoice::UseLive), "live") == 0 &&
+          std::strcmp(tfeb::patchBaseChoiceText(PatchBaseChoice::UseHeld), "held") == 0 &&
+          std::strcmp(tfeb::patchBaseChoiceText(PatchBaseChoice::NoPatch), "none") == 0,
+          "choosePatchBase: the choice prints as live/held/none");
+}
 
-    // Each guard flipped alone refuses, with the rest held at the acting
-    // baseline -- and names itself with the right HeldBaseRefusal.
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Watch, true, 100, 98, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: watch slot alone refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Watch, true, 100, 98, 0x1000, 0x1000, goodM, false) ==
-              tfeb::HeldBaseRefusal::WatchSlot,
-          "heldBaseRefusal: watch slot names itself");
+// --- transition_flash_eye_base_core.h: CHANGE 15, the VP-defense shape -----
 
-    // Stale at 3 frames (age = 100 - 97 = 3, over kHeldBaseMaxAgeFrames=2).
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 97, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: stale at 3 frames refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 97, 0x1000, 0x1000, goodM, false) ==
-              tfeb::HeldBaseRefusal::Stale,
-          "heldBaseRefusal: stale at 3 frames names itself");
-    // Exactly 2 frames old is still fresh (<=, not <).
-    check(tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: exactly 2 frames old still acts");
-    // No cache at all (haveHeldBase=false) refuses as stale too, regardless
-    // of the frame numbers passed.
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, false, 100, 98, 0x1000, 0x1000, goodM, false)),
-          "heldBaseRefusal: no cache at all refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, false, 100, 98, 0x1000, 0x1000, goodM, false) ==
-              tfeb::HeldBaseRefusal::Stale,
-          "heldBaseRefusal: no cache at all names itself stale");
+void caseProjLike4x4() {
+    // A canonical D3D perspective projection, row convention:
+    //   [ sx 0  0  0 ]
+    //   [ 0  sy 0  0 ]
+    //   [ 0  0  sz 1 ]
+    //   [ 0  0  tz 0 ]
+    float proj[16] = {1.2f, 0, 0, 0, 0, 2.0f, 0, 0, 0, 0, -1.001f, 1.0f, 0, 0, 0.1f, 0};
+    check(tfeb::projLike4x4(proj), "projLike: a canonical perspective projection passes");
+    // The -w convention (left-handed / flipped) also passes: [11] = -1.
+    proj[11] = -1.0f;
+    check(tfeb::projLike4x4(proj), "projLike: the -1 perspective-divide convention passes");
+    proj[11] = 1.0f;
 
-    // Pointer changed: the cached ship differs from this call's ship.
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x2000, goodM, false)),
-          "heldBaseRefusal: pointer changed refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x2000, goodM, false) ==
-              tfeb::HeldBaseRefusal::PointerChanged,
-          "heldBaseRefusal: pointer changed names itself");
-
-    // Non-finite: a single +Inf lane in the CACHED M.
-    float infM[16];
-    eyeBaseIdentityMailbox(infM);
-    infM[9] = bitsToFloat(0x7F800000u);  // +Inf
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, infM, false)),
-          "heldBaseRefusal: non-finite cache refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, infM, false) ==
-              tfeb::HeldBaseRefusal::NotFinite,
-          "heldBaseRefusal: non-finite cache names itself");
-
-    // Reset value: the cache itself is the identity/reset mailbox -- caching
-    // logic should never store this (only refilled calls are cached), but
-    // the guard still refuses it if it somehow got in.
-    float resetM[16];
-    eyeBaseIdentityMailbox(resetM);
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, resetM, false)),
-          "heldBaseRefusal: the cache itself being the reset value refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, resetM, false) ==
-              tfeb::HeldBaseRefusal::Reset,
-          "heldBaseRefusal: reset value names itself");
-
-    // Session cap reached.
-    check(!tfeb::heldBaseMayAct(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, true)),
-          "heldBaseRefusal: session cap reached refuses");
-    check(tfeb::heldBaseRefusal(Treatment::Act, true, 100, 98, 0x1000, 0x1000, goodM, true) ==
-              tfeb::HeldBaseRefusal::Cap,
-          "heldBaseRefusal: cap names itself");
+    // Any nonzero zero-lane rejects (a view matrix's dense 3x3 is the main
+    // false candidate): each lane alone.
+    for (int lane : {1, 2, 3, 4, 6, 7, 8, 9, 12, 13, 15}) {
+        float bad[16];
+        std::memcpy(bad, proj, sizeof(bad));
+        bad[lane] = 0.01f;
+        check(!tfeb::projLike4x4(bad), "projLike: one dirty zero-lane rejects");
+    }
+    // [11] off +/-1 by more than 1%: orthographic shape, rejected.
+    float ortho[16];
+    std::memcpy(ortho, proj, sizeof(ortho));
+    ortho[11] = 0.0f;
+    check(!tfeb::projLike4x4(ortho), "projLike: an orthographic shape (no perspective lane) rejects");
+    // Opposite signs or dead diagonals on [0]/[5].
+    float signBad[16];
+    std::memcpy(signBad, proj, sizeof(signBad));
+    signBad[5] = -2.0f;
+    check(!tfeb::projLike4x4(signBad), "projLike: opposite signs on the x/y gains reject");
+    float deadBad[16];
+    std::memcpy(deadBad, proj, sizeof(deadBad));
+    deadBad[0] = 0.0f;
+    check(!tfeb::projLike4x4(deadBad), "projLike: a dead [0] rejects");
+    // A view matrix (orthonormal 3x3 + translation) is not proj-like.
+    const float view[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, -1, -2, -3, 1};
+    check(!tfeb::projLike4x4(view), "projLike: a view matrix rejects");
 }
 
 // --- transition_flash_eye_base_core.h: CHANGE 2, the writer-watch gate's --
@@ -857,53 +900,6 @@ void caseDr6Slot1Hit() {
 // --- transition_flash_eye_base_core.h: CHANGE 6, the substitute policy ----
 // (offered vs. held).
 
-void caseOfferedSubstituteUsable() {
-    float goodOffered[16];
-    eyeBaseIdentityMailbox(goodOffered);
-    goodOffered[12] = 55.0f;  // a real translation, not the reset value
-
-    // Baseline: entered, did not write since, an offer captured this frame,
-    // finite, not reset -> usable.
-    check(tfeb::offeredSubstituteUsable(true, false, true, 100, 100, goodOffered),
-          "offeredSubstituteUsable: entered, refused, fresh this frame -> offered");
-    // Fresh also covers "the frame before".
-    check(tfeb::offeredSubstituteUsable(true, false, true, 100, 99, goodOffered),
-          "offeredSubstituteUsable: fresh from the previous frame -> offered");
-    // Two frames old is stale (kOfferedMaxAgeFrames=1, tighter than the held
-    // base's own 2-frame cap).
-    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 98, goodOffered),
-          "offeredSubstituteUsable: two frames old is stale -> refused");
-
-    // Not entered at all (skip candidate 1: the controller's own gate) ->
-    // held, regardless of anything else being otherwise usable.
-    check(!tfeb::offeredSubstituteUsable(false, false, true, 100, 100, goodOffered),
-          "offeredSubstituteUsable: the writer was not entered -> held");
-
-    // Entered AND wrote: the name gate did NOT refuse it, so this call would
-    // not even be unrefilled -- still must not be treated as offered-usable
-    // if asked.
-    check(!tfeb::offeredSubstituteUsable(true, true, true, 100, 100, goodOffered),
-          "offeredSubstituteUsable: the writer wrote since the previous consume -> held");
-
-    // No offer ever captured.
-    check(!tfeb::offeredSubstituteUsable(true, false, false, 100, 100, goodOffered),
-          "offeredSubstituteUsable: nothing captured -> held");
-
-    // Stale, non-finite, and reset-value offers each refuse alone, with
-    // every other guard held at the acting baseline.
-    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 50, goodOffered),
-          "offeredSubstituteUsable: a far-stale offer -> held");
-    float infOffered[16];
-    eyeBaseIdentityMailbox(infOffered);
-    infOffered[9] = bitsToFloat(0x7F800000u);  // +Inf
-    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 100, infOffered),
-          "offeredSubstituteUsable: a non-finite offer -> held");
-    float resetOffered[16];
-    eyeBaseIdentityMailbox(resetOffered);
-    check(!tfeb::offeredSubstituteUsable(true, false, true, 100, 100, resetOffered),
-          "offeredSubstituteUsable: the offer itself is the reset value -> held");
-}
-
 // --- transition_flash_eye_base_core.h: CHANGE 7, per-frame classification -
 
 void caseClassifyFrameWriter() {
@@ -1036,6 +1032,507 @@ void caseDr7ArmWriteModeSlot0() {
     check(prw::armSlot0Dr7(0) == prw::armSlot0Dr7(0, prw::kDr7RwReadWrite),
           "Dr7 arm: the default RW mode is still read-or-write");
 }
+// --- transition_flash_eye_base_core.h: CHANGE 10, the render-time patch ----
+// simulation's pure logic (task 2026-09-24, "render-time patch simulation
+// (watch-only)"): the eye composer's own multiply (patchEyeOrigin), the
+// acting build's full premultiply (premul4x4), and the scene-old/new
+// selector the flight-100043 and 2026-09-12 evidence defines
+// (patchSceneChoice), plus the pending sim's render-frame window.
+
+bool near3(const float a[3], const float b[3], float eps) {
+    return std::fabs(a[0] - b[0]) <= eps && std::fabs(a[1] - b[1]) <= eps &&
+           std::fabs(a[2] - b[2]) <= eps;
+}
+
+void casePatchEyeOrigin() {
+    const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+    float out[3];
+
+    // Identity base: composing the bad head-only eye against the identity is
+    // exactly the bad frame's own shape, so the patch reproduces P.
+    const float P[3] = {0.12f, -0.34f, 1.56f};
+    tfeb::patchEyeOrigin(I, P, out);
+    check(near3(out, P, 1e-6f), "patchEyeOrigin: identity base passes P through");
+
+    // Pure translation: out = P + t. The translation lanes are the f13550
+    // flight-100043 mailbox value itself.
+    const float T[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -0.660f, 11.066f, -7.725f, 0};
+    const float wantT[3] = {P[0] - 0.660f, P[1] + 11.066f, P[2] - 7.725f};
+    tfeb::patchEyeOrigin(T, P, out);
+    check(near3(out, wantT, 1e-5f), "patchEyeOrigin: pure translation adds t");
+
+    // The flight-100043 f13550 ordinary-frame numbers end to end: mailbox
+    // translation (-0.660, +11.066, -7.725), head offset (0, +0.014,
+    // +0.085) -- the rendered scene eye measured (-0.66, +11.08, -7.64).
+    const float head[3] = {0.0f, 0.014f, 0.085f};
+    const float wantScene[3] = {-0.660f, 11.080f, -7.640f};
+    tfeb::patchEyeOrigin(T, head, out);
+    check(near3(out, wantScene, 1e-3f), "patchEyeOrigin: the f13550 mailbox+head lands on the measured scene eye");
+
+    // A known rotation: 90 degrees about Z (row 0 (0,-1,0), row 1 (1,0,0))
+    // maps (1,2,3) to (2,-1,3).
+    const float R[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+    const float P2[3] = {1, 2, 3};
+    const float wantR[3] = {2, -1, 3};
+    tfeb::patchEyeOrigin(R, P2, out);
+    check(near3(out, wantR, 1e-6f), "patchEyeOrigin: 90-degree Z rotation rotates P");
+}
+
+void caseRotateByBase() {
+    const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+    float out[3];
+
+    // Identity: a direction passes through unchanged (and, unlike
+    // patchEyeOrigin, gains NO translation).
+    const float v[3] = {0.3f, -0.8f, 0.5f};
+    tfeb::rotateByBase(I, v, out);
+    check(near3(out, v, 1e-6f), "rotateByBase: identity passes directions through");
+
+    // A pure-translation base leaves directions untouched (this is the
+    // whole point of the translation-free twin).
+    const float T[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -0.660f, 11.066f, -7.725f, 0};
+    tfeb::rotateByBase(T, v, out);
+    check(near3(out, v, 1e-6f), "rotateByBase: a translation-only base leaves directions alone");
+
+    // 90-degree Z rotation, same mapping as patchEyeOrigin's rotation case:
+    // (1,2,3) -> (2,-1,3).
+    const float R[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+    const float p2[3] = {1, 2, 3};
+    const float want[3] = {2, -1, 3};
+    tfeb::rotateByBase(R, p2, out);
+    check(near3(out, want, 1e-6f), "rotateByBase: 90-degree Z rotation rotates the direction");
+
+    // The flight-numbers case (dump eyebase_152153_f12744.txt): the bad
+    // frame's basis rows and the next frame's, and a synthetic B whose 3x3
+    // is next x bad^-1. Rotating each bad row by B must give that next
+    // row back -- the dump's own ground-truth fit: bad rows are e_k to
+    // within 4-decimal rounding, so v.bad^-1 = e_k and e_k.(bad^-1.next)
+    // is row k of next.
+    const float badRows[9] = {
+        +0.9998f, -0.0200f, -0.0029f,
+        +0.0201f, +0.9991f, +0.0364f,
+        +0.0022f, -0.0364f, +0.9993f,
+    };
+    const float nextRows[9] = {
+        -0.1856f, -0.0164f, -0.9825f,
+        +0.5977f, -0.7955f, -0.0996f,
+        -0.7800f, -0.6057f, +0.1575f,
+    };
+    // bad^-1 by cofactor (bad is orthonormal to within its 4-decimal
+    // rounding, but do the real inverse -- the case should not lean on
+    // near-identity).
+    auto inv3 = [](const float m[9], float out[9]) {
+        const float a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
+        const float det = a * (e * i - f * h) + d * (c * h - b * i) + g * (b * f - c * e);
+        out[0] = (e * i - f * h) / det; out[1] = (c * h - b * i) / det; out[2] = (b * f - c * e) / det;
+        out[3] = (f * g - d * i) / det; out[4] = (a * i - c * g) / det; out[5] = (c * d - a * f) / det;
+        out[6] = (d * h - e * g) / det; out[7] = (b * g - a * h) / det; out[8] = (a * e - b * d) / det;
+    };
+    float badInv[9], b3[9];
+    inv3(badRows, badInv);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            b3[r * 3 + c] = badInv[r * 3 + 0] * nextRows[0 * 3 + c] +
+                            badInv[r * 3 + 1] * nextRows[1 * 3 + c] +
+                            badInv[r * 3 + 2] * nextRows[2 * 3 + c];
+    float B[16] = {};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) B[r * 4 + c] = b3[r * 3 + c];
+    for (int k = 0; k < 3; ++k) {
+        tfeb::rotateByBase(B, &badRows[k * 3], out);
+        const float want3[3] = {nextRows[k * 3 + 0], nextRows[k * 3 + 1], nextRows[k * 3 + 2]};
+        check(near3(out, want3, 2e-3f),
+              "rotateByBase: the flight-numbers fit -- bad basis rows through next x bad^-1 give the next frame's basis");
+    }
+}
+
+void casePremul4x4() {
+    const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float B[16] = {2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1};
+    float out[16];
+
+    tfeb::premul4x4(B, I, out);
+    bool same = true;
+    for (int i = 0; i < 16; ++i) same = same && out[i] == B[i];
+    check(same, "premul4x4: B x I = B");
+
+    tfeb::premul4x4(I, B, out);
+    same = true;
+    for (int i = 0; i < 16; ++i) same = same && out[i] == B[i];
+    check(same, "premul4x4: I x B = B");
+
+    // Hand-composed: B scales (2,3,4) with t(1,2,3); M swaps x/y with
+    // t(5,6,7). B*M scales rows of M: row0 (0,2,0), row1 (3,0,0), row2
+    // (0,0,4); the translation is t(B) through M's 3x3 plus t(M):
+    // (1,2,3) -> (0*1+1*2+0*3, 1*1+0*2+0*3, 0*1+0*2+1*3) + (5,6,7)
+    // = (7,7,10); the last row stays (0,0,0,1).
+    const float M[16] = {0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+    tfeb::premul4x4(B, M, out);
+    check(out[0] == 0 && out[1] == 2 && out[2] == 0 && out[3] == 0 &&
+          out[4] == 3 && out[5] == 0 && out[6] == 0 && out[7] == 0 &&
+          out[8] == 0 && out[9] == 0 && out[10] == 4 && out[11] == 0 &&
+          out[12] == 7 && out[13] == 7 && out[14] == 10 && out[15] == 1,
+          "premul4x4: the hand-composed B*M (scale through swap plus translations) matches");
+}
+
+void casePatchSceneChoiceFlightPoints() {
+    using tfeb::SceneChoice;
+    constexpr uint32_t M = 128, P = 128;   // a full pool sample, above the floor
+    // 2026-09-12 hyperspace exit: the pool is still in the old frame while
+    // the camera rebases -- pool 0.0 against a 1600-unit camera step.
+    check(tfeb::patchSceneChoice(M, P, 1600.0f, 0.0f, true) == SceneChoice::Old,
+          "patchSceneChoice: hyperspace exit (cam 1600, pool 0) is scene-old");
+    // Flight 100043's scene-new resets: the pool stepped with the camera.
+    check(tfeb::patchSceneChoice(M, P, 2925.8f, 2927.2f, true) == SceneChoice::New,
+          "patchSceneChoice: f13549 (2925.8/2927.2) is scene-new");
+    check(tfeb::patchSceneChoice(57, 87, 13.5f, 14.7f, true) == SceneChoice::New,
+          "patchSceneChoice: f13939 (13.5/14.7, matched 57) is scene-new");
+    check(tfeb::patchSceneChoice(M, P, 3594.2f, 3567.3f, true) == SceneChoice::New,
+          "patchSceneChoice: f22217 (3594.2/3567.3) is scene-new");
+    check(tfeb::patchSceneChoice(M, P, 3860.4f, 3861.7f, true) == SceneChoice::New,
+          "patchSceneChoice: f23340 (3860.4/3861.7) is scene-new");
+}
+
+void casePatchSceneChoiceBands() {
+    using tfeb::SceneChoice;
+    constexpr uint32_t M = 128, P = 128;
+    // Band edges, fresh geometry, full evidence: the new band is inclusive at
+    // both ends.
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 50.0f, true) == SceneChoice::New,
+          "patchSceneChoice: ratio exactly 0.5 is scene-new (inclusive)");
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 200.0f, true) == SceneChoice::New,
+          "patchSceneChoice: ratio exactly 2.0 is scene-new (inclusive)");
+    // The old band is exclusive: exactly 0.25 is neither band.
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 25.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice: ratio exactly 0.25 is the dead band, not scene-old");
+    // Inside the dead band, either side.
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 30.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice: ratio 0.3 above the old band is unclear");
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 250.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice: ratio 2.5 above the new band is unclear");
+    // Just inside the old band.
+    check(tfeb::patchSceneChoice(M, P, 100.0f, 24.9f, true) == SceneChoice::Old,
+          "patchSceneChoice: ratio 0.249 is scene-old");
+    // Stale geometry is unclear whatever the numbers say -- a zeroed default
+    // geometry (cam 0, pool 0) would otherwise read as scene-old 0.
+    check(tfeb::patchSceneChoice(0, 0, 0.0f, 0.0f, false) == SceneChoice::Unclear,
+          "patchSceneChoice: not-fresh geometry is unclear even at ratio 0");
+    check(tfeb::patchSceneChoice(M, P, 2925.8f, 2927.2f, false) == SceneChoice::Unclear,
+          "patchSceneChoice: not-fresh geometry is unclear even at a scene-new ratio");
+}
+
+void casePatchSceneChoiceEvidenceFloor() {
+    using tfeb::SceneChoice;
+    // The review's finding 1b: the detector's own floor (glitch_scene.h:23-
+    // 25's rule). Fresh 0/0 is NO EVIDENCE, not scene-old -- a pool bound
+    // but not uploaded this frame divides 0 by the camera floor without the
+    // floor and would pick held on exactly the scene-new frames held is
+    // kilometres wrong on.
+    check(tfeb::patchSceneChoice(0, 0, 0.0f, 0.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: fresh 0/0 (no upload) is unclear, not scene-old");
+    check(tfeb::patchSceneChoice(0, 0, 2925.8f, 2927.2f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: 0/0 points is unclear whatever the steps say");
+    // One short of the floor on either count.
+    check(tfeb::patchSceneChoice(31, 128, 1600.0f, 0.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: matched 31 is unclear even at a scene-old ratio");
+    check(tfeb::patchSceneChoice(128, 31, 1600.0f, 0.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: predicted 31 is unclear even at a scene-old ratio");
+    check(tfeb::patchSceneChoice(32, 32, 1600.0f, 0.0f, true) == SceneChoice::Old,
+          "patchSceneChoice floor: exactly 32/32 still reads the ratio");
+    // A non-finite step is no evidence either way.
+    check(tfeb::patchSceneChoice(128, 128, NAN, 0.0f, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: a NaN camera step is unclear");
+    check(tfeb::patchSceneChoice(128, 128, 1600.0f, NAN, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: a NaN pool step is unclear");
+    check(tfeb::patchSceneChoice(128, 128, 2925.8f, INFINITY, true) == SceneChoice::Unclear,
+          "patchSceneChoice floor: an infinite pool step is unclear");
+}
+
+void casePatchSimWindow() {
+    // Armed at the skip frame N, the sim covers exactly N+1..N+3 (the bad
+    // render is N+2; one frame of skew slack either side).
+    check(!tfeb::patchSimWindowCovers(13547, 13547), "patchSimWindow: the skip frame itself is not covered");
+    check(tfeb::patchSimWindowCovers(13548, 13547), "patchSimWindow: N+1 is covered");
+    check(tfeb::patchSimWindowCovers(13549, 13547), "patchSimWindow: N+2 (the bad render) is covered");
+    check(tfeb::patchSimWindowCovers(13550, 13547), "patchSimWindow: N+3 is covered");
+    check(!tfeb::patchSimWindowCovers(13551, 13547), "patchSimWindow: N+4 is past the window");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 13, the tap-time LIVE-mailbox
+// probe's sanity gate (flight N+1's finding: the consume-indexed NEW-base
+// candidate is structurally stale at the bad render; the refill sits LIVE
+// in the mailbox during the tap instead).
+
+void caseLiveMailboxPlausible() {
+    const float good[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+                            0.003f, 3.509f, 1613.249f, 1};   // the f15513 tunnel base itself
+    check(tfeb::mailboxPlausible(good), "liveMailbox: the measured tunnel base passes");
+
+    const float fiveKm[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+                              -229.8f, 663.0f, 274.5f, 1};   // a measured 5 km rebase
+    check(tfeb::mailboxPlausible(fiveKm), "liveMailbox: a measured 5 km rebase passes");
+
+    float bad[16];
+    std::memcpy(bad, good, sizeof(bad));
+    bad[12] = 2e7f;   // 20,000 km -- past the 1e7 gate
+    check(!tfeb::mailboxPlausible(bad), "liveMailbox: a 2e7-unit translation is implausible");
+
+    std::memcpy(bad, good, sizeof(bad));
+    bad[7] = NAN;     // one non-finite lane anywhere
+    check(!tfeb::mailboxPlausible(bad), "liveMailbox: a NaN lane is implausible");
+
+    std::memcpy(bad, good, sizeof(bad));
+    bad[0] = INFINITY;
+    check(!tfeb::mailboxPlausible(bad), "liveMailbox: an Inf lane is implausible");
+
+    // The gate does not screen the RESET value -- the caller does that with
+    // isResetMailbox first; identity passes here by design.
+    check(tfeb::mailboxPlausible(tfeb::kResetMailbox), "liveMailbox: the reset value is for isResetMailbox, not this gate");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 14, the buffer-row locator --
+// (task 2026-09-24, "the buffer-row locator (watch-only)"): the structural
+// view-matrix finder and the correction math the acting build will write.
+
+bool near16(const float a[16], const float b[16], float eps) {
+    for (int i = 0; i < 16; ++i) if (std::fabs(a[i] - b[i]) > eps) return false;
+    return true;
+}
+
+void caseAffineInverse4x4() {
+    // Pure translation: the inverse negates t through the identity.
+    const float T[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 2, 3, 1};
+    float inv[16];
+    tfeb::affineInverse4x4(T, inv);
+    check(inv[12] == -1 && inv[13] == -2 && inv[14] == -3,
+          "affineInverse: pure translation negates t");
+
+    // The premul tests' scale matrix (2,3,4) + t(1,2,3): the inverse scales
+    // by the reciprocals and t' = -t through R^-1 = (-1/2, -2/3, -3/4).
+    const float B[16] = {2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1};
+    tfeb::affineInverse4x4(B, inv);
+    check(inv[0] == 0.5f && inv[5] == 1.0f / 3.0f && inv[10] == 0.25f &&
+          std::fabs(inv[12] + 0.5f) < 1e-6f && std::fabs(inv[13] + 2.0f / 3.0f) < 1e-6f &&
+          std::fabs(inv[14] + 0.75f) < 1e-6f,
+          "affineInverse: scale+translation inverts to reciprocal scale and -t through R^-1");
+
+    // Round-trips: M x M^-1 = I and M^-1 x M = I, for the scale case and a
+    // rotation+translation case (the live-base shape).
+    float prod[16];
+    tfeb::affineInverse4x4(B, inv);
+    tfeb::premul4x4(B, inv, prod);
+    const float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(near16(prod, I, 1e-5f), "affineInverse: B x B^-1 = I");
+    tfeb::premul4x4(inv, B, prod);
+    check(near16(prod, I, 1e-5f), "affineInverse: B^-1 x B = I");
+
+    const float R[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+    tfeb::affineInverse4x4(R, inv);
+    tfeb::premul4x4(R, inv, prod);
+    check(near16(prod, I, 1e-5f), "affineInverse: rotation+translation round-trips");
+    tfeb::premul4x4(inv, R, prod);
+    check(near16(prod, I, 1e-5f), "affineInverse: ...both ways");
+}
+
+void casePostmul4x4() {
+    // The one 4x4 multiply under the acting build's postmultiply naming:
+    // same result as premul on the hand-composed B*M case.
+    const float B[16] = {2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 1, 2, 3, 1};
+    const float M[16] = {0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+    float a[16], b[16];
+    tfeb::premul4x4(B, M, a);
+    tfeb::postmul4x4(B, M, b);
+    check(near16(a, b, 0.0f), "postmul4x4: the postmultiply naming reproduces the multiply");
+    // And the view-correction order V_bad x liveM^-1 is exactly what
+    // premul(V_bad, inverse(liveM)) writes.
+    const float live[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0.003f, 3.509f, 1613.249f, 1};
+    float li[16], viaPost[16], viaPremul[16];
+    tfeb::affineInverse4x4(live, li);
+    tfeb::postmul4x4(B, li, viaPost);
+    tfeb::premul4x4(B, li, viaPremul);
+    check(near16(viaPost, viaPremul, 0.0f), "postmul4x4: V_bad x liveM^-1 agrees with premul's form");
+}
+
+void caseIsOrtho3x3() {
+    const float R90[16] = {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(tfeb::isOrtho3x3(tfeb::kResetMailbox, 0.01f), "isOrtho3x3: identity is orthonormal");
+    check(tfeb::isOrtho3x3(R90, 0.01f), "isOrtho3x3: a 90-degree rotation is orthonormal");
+    const float S[16] = {2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(!tfeb::isOrtho3x3(S, 0.01f), "isOrtho3x3: a 2x scale is rejected");
+    const float Shear[16] = {1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    check(!tfeb::isOrtho3x3(Shear, 0.01f), "isOrtho3x3: a shear is rejected");
+}
+
+void caseViewOriginMatch() {
+    const float origin[3] = {1, 2, 3};
+    // CHANGE 17: float3x4 storage -- the translation lives in the w lanes:
+    // rows (I | -origin). A zero match when the group IS this frame's view.
+    const float V[16] = {1, 0, 0, -1, 0, 1, 0, -2, 0, 0, 1, -3, 0, 0, 0, 0};
+    check(std::fabs(tfeb::viewOriginMatch(V, origin)) < 1e-6f, "viewOriginMatch: t = -origin reads as 0");
+    const float Voff[16] = {1, 0, 0, 0, 0, 1, 0, -2, 0, 0, 1, -3, 0, 0, 0, 0};
+    check(std::fabs(tfeb::viewOriginMatch(Voff, origin) - 1.0f) < 1e-6f,
+          "viewOriginMatch: a 1 m w-lane translation error reads as 1");
+    const float nanOrigin[3] = {NAN, 0, 0};
+    check(std::isnan(tfeb::viewOriginMatch(V, nanOrigin)),
+          "viewOriginMatch: a NaN origin reads as NaN (never a false match)");
+    // CHANGE 17 regression note: with the old m[12+k] read these w-lane
+    // groups all read translation ZERO, so the match degenerated to
+    // |origin.R| = |origin| -- on a head-only frame within any tolerance,
+    // which is exactly flight 160557's originMatch=0.0556 == |origin|.
+}
+
+void caseLocateSceneCBView() {
+    // CHANGE 17: the TRUE buffer layout, verified against dump
+    // eyebase_160745_f11731.txt -- view groups are float3x4: THREE float4
+    // rows, translation in the per-row w lanes. The old 4-row window with
+    // an m[12+k] translation read degenerated: on a head-only frame the
+    // match was exactly |origin|, so the finder accepted ANY orthonormal
+    // group (dump: originMatch=0.0556 == |(+0.051,-0.016,+0.016)|), and
+    // every ordinary frame read view=-1 (|origin| = 21 m > tol).
+    float cb[tfeb::kSceneCBSimFloat4Rows * 4] = {};
+    const float origin[3] = {-0.66f, 11.08f, -7.64f};
+
+    // The CURRENT view at row 40: a real rotation (15 deg Z then 10 deg X),
+    // w-lane translation t = -(origin.R).
+    float cur[16] = {};
+    {
+        const float cz = 0.9659258f, sz = 0.2588190f;
+        const float cx = 0.9848078f, sx = 0.1736482f;
+        const float rz[16] = {cz, sz, 0, 0, -sz, cz, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const float rx[16] = {1, 0, 0, 0, 0, cx, sx, 0, 0, -sx, cx, 0, 0, 0, 0, 1};
+        float rzrx[16];
+        tfeb::premul4x4(rz, rx, rzrx);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) cur[r * 4 + c] = rzrx[r * 4 + c];
+        float t[3];
+        tfeb::patchEyeOrigin(cur, origin, t);
+        cur[3] = -t[0]; cur[7] = -t[1]; cur[11] = -t[2];
+    }
+    std::memcpy(cb + 40 * 4, cur, 12 * sizeof(float));   // 3 rows only
+
+    // The PREVIOUS frame's view at row 60: a different rotation, w-lane
+    // translation from the previous frame's eye 5 km away (a transition
+    // rebase) -- the 160557 located group was exactly this.
+    const float prevOrigin[3] = {origin[0] + 5000.0f, origin[1], origin[2]};
+    float prev[16] = {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    {
+        float t[3];
+        tfeb::patchEyeOrigin(prev, prevOrigin, t);
+        prev[3] = -t[0]; prev[7] = -t[1]; prev[11] = -t[2];
+    }
+    std::memcpy(cb + 60 * 4, prev, 12 * sizeof(float));
+
+    // An unrelated orthonormal group at row 200: identity rotation, far
+    // translation.
+    const float other[16] = {1, 0, 0, 123, 0, 1, 0, 456, 0, 0, 1, 789, 0, 0, 0, 0};
+    std::memcpy(cb + 200 * 4, other, 12 * sizeof(float));
+
+    const tfeb::SceneCBViewFind found = tfeb::locateSceneCBView(
+        cb, tfeb::kSceneCBSimFloat4Rows, origin, 0.01f, 0.5f);
+    check(found.startRow == 40, "locateSceneCBView: the current view wins over the previous one");
+    check(std::fabs(found.originMatch) < 1e-3f, "locateSceneCBView: the winner's origin match is ~0");
+    check(found.orthoGroups == 3 && found.originRejected == 2,
+          "locateSceneCBView: three orthonormal groups, two origin-rejected");
+    check(found.candidateCount == 3 && found.candidateRows[0] == 40 && found.candidateRows[1] == 60 &&
+          found.candidateRows[2] == 200, "locateSceneCBView: every candidate's row is recorded");
+    // The candidates carry their implied eyes: the current decodes to this
+    // frame's origin, the prev to the old eye (the dump's candidate line
+    // prints exactly these).
+    check(near3(found.candidateEye[0], origin, 1e-3f),
+          "locateSceneCBView: the current candidate's implied eye is this frame's origin");
+    check(near3(found.candidateEye[1], prevOrigin, 1e-2f),
+          "locateSceneCBView: the prev candidate's implied eye is the previous frame's eye");
+
+    // A NaN origin (a garbage fill) finds nothing rather than something.
+    const float nanOrigin[3] = {NAN, 0, 0};
+    const tfeb::SceneCBViewFind nanFound = tfeb::locateSceneCBView(
+        cb, tfeb::kSceneCBSimFloat4Rows, nanOrigin, 0.01f, 0.5f);
+    check(nanFound.startRow < 0, "locateSceneCBView: a NaN origin matches no group");
+    check(nanFound.orthoGroups == 3 && nanFound.originRejected == 3,
+          "locateSceneCBView: NaN origin rejects every orthonormal group");
+}
+
+// --- transition_flash_eye_base_core.h: CHANGE 17, the view correction -----
+
+void caseCorrectViewColumnMajor() {
+    // A non-degenerate case (a degenerate one is what hid 160557): real
+    // rotation AND translation for the eye and for the base.
+    float eyeM[16] = {};
+    {
+        const float cz = 0.9396926f, sz = 0.3420201f;   // 20 degrees
+        const float cx = 0.9659258f, sx = 0.2588190f;   // 15 degrees
+        const float rz[16] = {cz, sz, 0, 0, -sz, cz, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const float rx[16] = {1, 0, 0, 0, 0, cx, sx, 0, 0, -sx, cx, 0, 0, 0, 0, 1};
+        tfeb::premul4x4(rz, rx, eyeM);
+        eyeM[12] = 12.3f; eyeM[13] = -45.6f; eyeM[14] = 789.0f;
+    }
+    float view[16];
+    tfeb::affineInverse4x4(eyeM, view);          // V = E^-1
+    // Store as the buffer keeps it: 3 rows, translation in the w lanes.
+    float stored[16] = {};
+    for (int r = 0; r < 3; ++r) {
+        stored[r * 4 + 0] = view[r * 4 + 0];
+        stored[r * 4 + 1] = view[r * 4 + 1];
+        stored[r * 4 + 2] = view[r * 4 + 2];
+        stored[r * 4 + 3] = view[12 + r];
+    }
+    // The base: a different rotation and a real translation.
+    float B[16] = {};
+    {
+        const float cy = 0.9848078f, sy = 0.1736482f;
+        const float ry[16] = {cy, 0, -sy, 0, 0, 1, 0, 0, sy, 0, cy, 0, 0, 0, 0, 1};
+        const float rz[16] = {0.9961947f, 0.0871557f, 0, 0, -0.0871557f, 0.9961947f, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        tfeb::premul4x4(ry, rz, B);
+        B[12] = 1.7f; B[13] = -2.9f; B[14] = 3.4f;
+    }
+
+    float out12[16];
+    check(tfeb::correctViewColumnMajor(B, stored, out12, 0.01f),
+          "correctViewColumnMajor: a rotation+translation case passes the guard");
+    check(tfeb::isOrtho3x3(out12, 0.01f), "correctViewColumnMajor: the output 3x3 is orthonormal");
+    // End-to-end invariant: the corrected view's implied eye is the
+    // premultiplied eye -- eye' = patchEyeOrigin(B, eye).
+    const float eyePos[3] = {eyeM[12], eyeM[13], eyeM[14]};
+    float eyeExpected[3];
+    tfeb::patchEyeOrigin(B, eyePos, eyeExpected);
+    float eyeDecoded[3];
+    tfeb::viewImpliedEye(out12, eyeDecoded);
+    check(near3(eyeDecoded, eyeExpected, 1e-2f),
+          "correctViewColumnMajor: the corrected view's implied eye is B x eye");
+    // ...equivalently the corrected eye maps to the view origin:
+    // |t' + eye' . R(V')| = 0 -- which is viewOriginMatch itself on the
+    // float3x4 output (the w-lane read is under test here too).
+    check(std::fabs(tfeb::viewOriginMatch(out12, eyeExpected)) < 1e-2f,
+          "correctViewColumnMajor: t' = -(eye' . R(V')) -- the corrected eye maps to the view origin");
+
+    // The review's suggested transpose-premultiply form, evaluated on the
+    // same data: under the verified float3x4 layout its 3x3 is
+    // R(B^-1)^T x R, not R x R(B^-1), and its implied eye lands far from
+    // B x eye -- the evidence for rebuilding the 4x4 and postmultiplying
+    // instead.
+    {
+        float bInv[16], bInvT[16], v4[16] = {}, wrong[16];
+        tfeb::affineInverse4x4(B, bInv);
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) bInvT[r * 4 + c] = bInv[c * 4 + r];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 4; ++c) v4[r * 4 + c] = stored[r * 4 + c];
+        tfeb::premul4x4(bInvT, v4, wrong);
+        float eyeWrong[3];
+        tfeb::viewImpliedEye(wrong, eyeWrong);
+        check(!near3(eyeWrong, eyeExpected, 0.5f),
+              "correctViewColumnMajor: the transpose-premultiply form fails the end-to-end invariant (why this rebuilds and postmultiplies)");
+    }
+
+    // The guard refuses to write garbage: a 2x scale on the base's first
+    // column makes the product non-orthonormal.
+    float scaleB[16];
+    std::memcpy(scaleB, B, sizeof(scaleB));
+    scaleB[0] *= 2.0f;
+    check(!tfeb::correctViewColumnMajor(scaleB, stored, out12, 0.01f),
+          "correctViewColumnMajor: a non-orthonormal result refuses to write");
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1077,7 +1574,7 @@ int wmain(int argc, wchar_t** argv) {
     caseResetMailboxBitExact();
     caseEyeBaseAgreementThresholds();
     caseEyeBaseValidationArithmetic();
-    caseHeldBaseGuardRefusals();
+    caseChoosePatchBase();
     caseWriterWatchGateConsecutiveRefilled();
     caseEyeBaseDumpTriggerIndependentOfEyeTrace();
     caseEyeBaseFiniteCheck();
@@ -1086,13 +1583,27 @@ int wmain(int argc, wchar_t** argv) {
     caseWriterExtentClassifier();
     caseDr7ArmSlot1ExecuteLeavesSlot0Alone();
     caseDr6Slot1Hit();
-    caseOfferedSubstituteUsable();
+    caseProjLike4x4();
     caseClassifyFrameWriter();
     caseModeSwitchEdgeEntryFiresOnce();
     caseModeSwitchEdgeNoneInsideRun();
     caseModeSwitchEdgeExitAfterThirty();
     caseModeSwitchEdgeSingleFrameSkip();
     caseSceneGeometryFreshAndDecisionText();
+    casePatchEyeOrigin();
+    caseRotateByBase();
+    casePremul4x4();
+    casePatchSceneChoiceFlightPoints();
+    casePatchSceneChoiceBands();
+    casePatchSceneChoiceEvidenceFloor();
+    casePatchSimWindow();
+    caseLiveMailboxPlausible();
+    caseAffineInverse4x4();
+    casePostmul4x4();
+    caseIsOrtho3x3();
+    caseViewOriginMatch();
+    caseLocateSceneCBView();
+    caseCorrectViewColumnMajor();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

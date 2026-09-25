@@ -20,6 +20,9 @@
   gated on `fix.temporal_aa` alone): SHIPPED**; its depth re-issue and
   reactive mask still serve every UI draw the layer does not take, and skip
   the ones it does.
+- **Cockpit holograms and icons over the sky** (the radar's star icon, the
+  ship and target holograms): a generic depth pass inside B0, BUILT
+  2026-09-24, not flown -- [hologram-depth-2026-09-24.md](hologram-depth-2026-09-24.md).
 - The gates: G1, G2, G3, G6, G8, G10 answered from censuses (2026-09-06,
   below); G9 is `fix.ui_quality`'s surfaces flight (ui-layer-2026-09-23.md;
   `fix.hud_quality` and its note were folded into that key and that note).

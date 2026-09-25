@@ -120,6 +120,8 @@ no extra file. With Elite's HMD Quality below 1.0 the game renders smaller and
 DLSS brings it back to size, which is what saves frame time; FSR works at the
 same sizes. At 1.0 or above DLSS runs at your full render size, which is DLAA.
 
+**Important** Do *not* change the Supersample Quality (leave at 1.0).
+
 Pick DLSS or FSR in the Anti-aliasing row on the in-headset menu's Performance
 page, or set `fix.temporal_aa = dlss` or `fsr`. It is off by default and takes
 effect at the next frame; set Elite's own anti-aliasing to Off or SMAA with it
