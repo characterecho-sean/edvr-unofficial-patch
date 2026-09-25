@@ -203,6 +203,12 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x989E043933A369ABull: if (ps == 0xCE844D87026C684Cull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     default: break;
     }
+    // Epic 85d590e0: projected effect. VS CB0[4..7] feeds both
+    // SV_Position and clip XYW used by the PS depth-occlusion sample.
+    // The PS compares sampled depth against that unchanged W; it has no
+    // projection matrix of its own.
+    if (result.count == 0 && vs == 0x2D8263CC54D55398ull && ps == 0x89B662E266E5D73Eull)
+        result.add(S::Vertex,0,L::ForwardDp4,4);
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);
     return result;
 }

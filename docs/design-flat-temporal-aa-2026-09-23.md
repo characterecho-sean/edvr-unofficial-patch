@@ -15,7 +15,10 @@
   26-28 document camera ownership and jitter; sections 34-37 cover F8 and
   successful menu treatment. Menu surface shimmer remains unqualified at pixel
   level (section 39); frame counters alone do not establish reconstruction
-  quality.
+  quality. Latest `85d590e0` cockpit Off/DLSS A/B has no effective temporal
+  accumulation: one captured pair, 2D8263CC54D55398/89B662E266E5D73E, draws six
+  times per frame and resets history continuously (section 42). Its saved
+  bytecode proves the existing b0 ForwardDp4 recipe, including depth UVs.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -38,8 +41,9 @@
   for this scene; do not repeat the same flight to fill untouched material
   constants or camera-equality labels. The main merge passed full validation
   and promotion. The cockpit HDR viewport correction is verified; use bounded
-  first-occurrence bytecode evidence to qualify the captured pairs (section
-  41). Menu surface shimmer separately needs matched output/motion and
+  first-occurrence bytecode evidence to qualify the captured pairs (sections
+  41-42). Do not judge cockpit reconstruction quality while jitter is zero and
+  history resets every frame. Menu surface shimmer needs output/motion and
   rejection-mask evidence; that capture proves sustained treatment. The passive
   selector still refuses the menu copy; its diagnostic verdict is not the live
   runtime verdict. No headset is needed; VR still needs regression tests.
@@ -2315,3 +2319,41 @@ unobserved companion rejection, the unchanged pair and decal screen-UV/raster
 jitter agreement. Next Epic run keeps DLSS K and SS 0.75 and repeats the same
 cockpit activity; automatic evidence remains available for any further unknown
 pair. Menu pixel rejection is still unmeasured and is not changed here.
+
+## 42. Cockpit A/B blocked by a projected effect, 2026-09-25
+
+Sean reports no visible cockpit geometry aliasing difference between Off and
+DLSS. Epic `edvr_gfx_20260925_053405.log` matches `85d590e0`, build `6AB65BC4`.
+At 05:36:09.063, frame 31376 q574, automatic capture saves
+2D8263CC54D55398/89B662E266E5D73E on format-26 HDR, 1920x1080, with owned scene
+depth and full 0..1 viewport. Both blobs are 1,120 bytes and their repository
+FNV hashes match the recorded identities. This is the only newly unknown pair,
+but it executes six times per frame: 2,700 failures per 450 frames. The prior
+three additions do not reappear as unknown pairs.
+
+The A/B switches DLSS to TAA/Off at 05:37:30.489/30.708 and back through TAA at
+05:37:33.864 to DLSS at 05:37:35.686. Before and after those changes, jitter is
+zero, history is invalid and each treated frame resets. For example,
+05:37:38.875 reports 448 resets and zero history continuations, followed by 450
+resets and zero continuations at 05:37:43.875. Backend failures stay zero. The
+selected menu mode therefore does not establish effective temporal AA.
+
+Ruled out: the reported cockpit A/B proves DLSS reconstruction cannot improve
+the edges, because temporal history was continuously reset during that A/B.
+This is another observed qualification blocker; menu per-pixel rejection
+remains a separate unconfirmed hypothesis.
+
+Full bytecode inspection proves the existing Vertex b0 ForwardDp4 row-4 recipe.
+VS instructions 3-5 compute clip XYW from CB0[4], [5] and [7], then 6-7 copy
+the same values to the PS varying and SV_Position. Instruction 20 uses CB0[6]
+for Z. The PS divides that varying at 0-2, samples depth at 3, and compares
+against unchanged clip W at 4-6. Remaining instructions 7-26 use view-position
+length, fade, colour and exposure, with no inverse projection. The effect needs
+coherent raster/depth-UV jitter and must not be classified unchanged. Add only
+the exact captured pair to the existing recipe, preserving local rows 9-11,
+clip Z/W and all scene admission checks.
+
+Next Epic run keeps SS 0.75 and DLSS K in the same cockpit view. Confirm
+sustained history during the A/B before judging edge quality. Automatic capture
+continues to retain any further unknown shader; no timed F10 is required for
+that evidence.

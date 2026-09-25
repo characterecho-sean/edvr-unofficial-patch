@@ -114,8 +114,10 @@ inline int flatProjectionRecipeTests() {
         // Complete automatic capture from Epic 85bf7652.
         {0x0C4E76889907B963ull,0xA90825082F36756Eull,1,FlatProjectionPatchLayout::ForwardColumns,270},
         {0x989E043933A369ABull,0xCE844D87026C684Cull,0,FlatProjectionPatchLayout::ForwardDp4,4},
+        // Projected effect from the subsequent Epic 85d590e0 run.
+        {0x2D8263CC54D55398ull,0x89B662E266E5D73Eull,0,FlatProjectionPatchLayout::ForwardDp4,4},
     };
-    expect(sizeof(latest)/sizeof(latest[0])==34,"latest supported ordinary pair census size");
+    expect(sizeof(latest)/sizeof(latest[0])==35,"latest supported ordinary pair census size");
     FlatProjectionJitter jitter{};
     expect(flatProjectionJitter(.375f,-.25f,1280,720,jitter),"recipe pixel offset constructed");
     for (const auto& pair : latest) {
@@ -162,6 +164,24 @@ inline int flatProjectionRecipeTests() {
         std::abs(decalNew[1]/decalNew[3]-decalOld[1]/decalOld[3]-jitter.ndcY)<.000001f &&
         decalNew[2]==decalOld[2] && decalNew[3]==decalOld[3],
         "decal raster and depth lookup receive identical perspective jitter");
+    // Projected effect 2D82 emits CB0 dot-product clip XYW to both raster
+    // and PS89B6's depth sampler. Its depth comparison uses W, not Z.
+    float effectRows[4][4]={{2,0,0,.5f},{0,3,0,-.25f},{0,0,1,.125f},{.25f,-.5f,1,2}};
+    float effectOld[4]{}, effectNew[4]{};
+    for (int row=0;row<4;++row)
+        for (int col=0;col<4;++col) effectOld[row]+=effectRows[row][col]*decalPoint[col];
+    expect(flatJitterForwardDp4(effectRows,jitter),"projected effect clip matrix patched");
+    for (int row=0;row<4;++row)
+        for (int col=0;col<4;++col) effectNew[row]+=effectRows[row][col]*decalPoint[col];
+    // Mirror PS instructions 0..2, including the separate Y flip.
+    const float effectOldUV[2]={.5f*effectOld[0]/effectOld[3]+.5f,1-(.5f*effectOld[1]/effectOld[3]+.5f)};
+    const float effectDepthUV[2]={.5f*effectNew[0]/effectNew[3]+.5f,1-(.5f*effectNew[1]/effectNew[3]+.5f)};
+    expect(std::abs(effectDepthUV[0]-effectOldUV[0]-jitter.uvX)<.000001f &&
+        std::abs(effectDepthUV[1]-effectOldUV[1]-jitter.uvY)<.000001f &&
+        std::abs(effectNew[0]/effectNew[3]-effectOld[0]/effectOld[3]-jitter.ndcX)<.000001f &&
+        std::abs(effectNew[1]/effectNew[3]-effectOld[1]/effectOld[3]-jitter.ndcY)<.000001f &&
+        effectNew[2]==effectOld[2] && effectNew[3]==effectOld[3],
+        "projected effect raster/depth UV align and depth-occlusion W stays invariant");
     const auto oldCab=flatProjectionDrawRecipes(0x98397963AAEC45D3ull,0xCAB49794BB439D03ull);
     expect(oldCab.count==1 && oldCab.requests[0].slot==1 && oldCab.requests[0].patchCount==1 &&
         oldCab.requests[0].patches[0].layout==FlatProjectionPatchLayout::ForwardColumns &&
