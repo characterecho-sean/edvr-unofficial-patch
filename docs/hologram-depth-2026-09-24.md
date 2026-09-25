@@ -13,12 +13,18 @@
   - the near-light pass runs one thread per pixel; one thread scanning
     each 8x8 block serially cost ~0.3 ms/frame in round 7.
 
-  Round 9 IN PROGRESS: the HUD smear's cause is FOUND (eye dumps
-  115012/115037). Rounds 6 and 7's dark rule stamps the gaps around text
-  at the element's own depth, flattening glyph-shaped depth into a slab
-  whose motion is slightly off. A dark gap now takes a filler depth just
-  inside the cockpit radius. The existing GREATER test leaves any scene
-  surface nearer than that alone.
+  Round 9 (d9f86b09) is flown in the hangar (dump 123118) and fixed the
+  station text. Rounds 6 and 7's dark rule had stamped the gaps around
+  the letters at the element's own depth (dumps 115012/115037). A dark
+  gap now takes a filler depth just inside the cockpit radius, and
+  GREATER leaves any nearer scene surface alone.
+
+  Round 10 BUILT, NOT FLOWN: the HEATSINK label still doubled. The
+  resolve had overwritten its UI-covered letters with another listed
+  draw's nearer footprint depth, breaking their exact record motion.
+  Now the resolve never writes a UI-covered pixel. The UI depth pass
+  owns those pixels, and their record-depth match was 100% with the
+  pass off.
 - **Open:**
   - Which of the five radar-contact families paints the bars (listed
     from the draw ledger, not individually confirmed).
@@ -41,9 +47,11 @@
 - **Ruled out:** `## Ruled out` below, plus the `ruled out:` lines in the
   flight entries.
 - **Next flight** (Frontier, Pimax OpenXR, the log's build line naming
-  round 9):
+  round 10):
   1. Docked in the hangar, the same head motion with the pass on: the
-     station text should be as crisp as with it off. An eye dump.
+     HEATSINK label and the station text should be as crisp as with it
+     off. An eye dump: its `Z` should equal its `HoloCoverage` depth on
+     ~100% of UI-covered pixels with a record, as in pass-off 115037.
   2. In space, rolling with the weapons panel over sky: the text must
      stay crisp (round 6's gain must survive the filler). An eye dump.
   3. A target locked, flying toward it and turning: the reticle's
@@ -483,6 +491,37 @@ the smear.
   existing GREATER test leaves any scene surface nearer than the filler
   alone, such as the console at 3.9 m. There the gap keeps the depth and
   motion it had with the pass off.
+
+## Eye dump 123118 (d9f86b09: round 9), docked, pass on
+
+Flight 20260925_122802, pass switched on at 12:31:03 and the dump taken
+at 12:31:18. Round 9 works on the station text: the crop's dark stamps
+fell from 70,780 px to 3,904, because the console gaps keep their own
+depth. Sean: the HEATSINK label still smears, and the dump shows its
+letters and "1/3" doubled. They were doubled in round 8's pass-on dump
+too, and crisp in the pass-off dump 115037.
+
+- The label's letters are UI-covered and carry holo record 1, at a
+  coverage depth of 1.52 m. With the pass off, the merged depth matches
+  that on 97% of them, so `holoPixel` gives them the label's exact
+  motion.
+- With the pass on, in rounds 8 and 9 alike, the resolve overwrites
+  them with 0.59 m. That is the element-depth pass's NEAREST listed
+  footprint (a nearer panel's transparent quad, most likely), not the
+  label's. The match falls to 0% (r8) and 7% (r9), so the letters fall
+  back to depth-path motion at the wrong depth, and head translation
+  doubles them.
+- Frame-wide, the pass-off dump holds 147,616 UI-covered pixels with a
+  holo record, 100% at the record's depth. With the pass on, 2.0% (r8)
+  and 4.1% (r9) of them are overwritten nearer. Holo records exist only
+  on UI-covered pixels (0 elsewhere).
+- Cause: the element depth is the nearest listed draw's depth,
+  transparent parts included, so where footprints overlap it can belong
+  to an element that supplies none of the light. On UI-covered pixels
+  that overrides a depth the UI pass had exactly right.
+- Round 10: the resolve never writes a UI-covered pixel. Those pixels
+  belong to the UI depth pass and their records. The near-light map
+  still counts their light, so gaps between UI letters keep the filler.
 
 ## Decisions, 2026-09-24
 

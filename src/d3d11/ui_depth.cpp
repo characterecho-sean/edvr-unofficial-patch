@@ -1861,6 +1861,20 @@ constexpr char kHoloResolveVsHlsl[] =
 // it at any range, and so does a cockpit family's far fragment (the sun's
 // corona), harmlessly: cockpitRange (radiusDepth, below) is false for it.
 //
+// A UI-covered pixel (the interface's own reactive mask, UiMask below,
+// bit 0) discards before any other test. The UI depth pass has already
+// stamped it with its own element's exact depth, and a holo record
+// there (when one exists) gives exact record motion -- this pass's own
+// element-depth footprint is only the NEAREST listed draw at that
+// pixel, however transparent, which can belong to a different element
+// supplying none of the light there. A hangar's HEATSINK label,
+// UI-covered with a holo record: 97% record-depth matched with the
+// pass off, 0-7% with it on and overwriting the letters at another
+// listed draw's depth (dumps 115037 pass-off, 115012 round 8, 123118
+// round 9). Frame-wide, the same dumps: every UI-covered pixel with a
+// holo record sits at the record's own depth with the pass off (100%),
+// against 95.9% with it on.
+//
 // A dark pixel (the displayed colour never clears the floor) near a
 // cockpit-range element's own light -- its own block of the near-light
 // map (below), or one of that block's 8 neighbours -- takes a FILLER
@@ -1895,11 +1909,16 @@ constexpr char kHoloResolvePsHlsl[] =
     "Texture2D<float4> Target : register(t2);\n"
     "Texture2D<float4> Display : register(t3);\n"
     "Texture2D<float> NearLight : register(t4);\n"
+    "Texture2D<float> UiMask : register(t5);\n"
     "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth;\n"
     "                                       float fillerDepth; float pad0; float pad1; float pad2; };\n"
     "float3 srgbEncode(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055; }\n"
     "void main(float4 pos : SV_POSITION, out float depth : SV_Depth) {\n"
     "    int3 p = int3(int2(pos.xy), 0);\n"
+    "    if ((flags & 16u) != 0u) {\n"
+    "        uint mv = uint(UiMask.Load(p) * 255.0 + 0.5);\n"
+    "        if ((mv & 1u) != 0u) discard;\n"
+    "    }\n"
     "    float d = ElementDepth.Load(p);\n"
     "    if (!(d > 0.0)) discard;\n"
     "    float3 e = max(Contribution.Load(p).rgb, 0.0);\n"
@@ -3985,8 +4004,19 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         }
     }
     if (!haveDisplay) ++g_holoWindowFloorFallback;
+    // The interface's own reactive mask (ui_depth.h's g_mask, the eye
+    // dump's "UI"), full eye size like this pass's own w/h -- the size
+    // check below is the same one uiDepthCoverageMask's every other
+    // caller relies on, so a mismatch (or the mask not yet marked this
+    // frame) declines rather than reading misaligned or stale coverage.
+    // Marked during the frame, read here at submits, cleared only at the
+    // NEXT frame's boundary (uiDepthFrameBoundary): nothing later this
+    // frame still writes it.
+    ID3D11Texture2D* maskTex = nullptr;
+    const bool haveMask = uiDepthCoverageMask(w, h, eye, &maskTex) && g_mask[eye].srv;
     const uint32_t flags = (s.linearBlend ? 1u : 0u) | (haveTarget ? 2u : 0u) |
-                           (haveDisplay ? 4u : 0u) | (displaySrgb ? 8u : 0u);
+                           (haveDisplay ? 4u : 0u) | (displaySrgb ? 8u : 0u) |
+                           (haveMask ? 16u : 0u);
     const HoloResolveCb data{g_holoFloor, g_holoShare, flags, s.radiusDepth, s.fillerDepth, 0.0f, 0.0f, 0.0f};
     vScreenUpdateSubresourceRaw(ctx, cb, 0, nullptr, &data, 0, 0);
     // The near-light map, filled once per eye before the resolve's own
@@ -4073,12 +4103,13 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         ctx->RSGetState(&savedRs);
         D3D11_VIEWPORT savedVps[16]; UINT savedVpCount = 16;
         ctx->RSGetViewports(&savedVpCount, savedVps);
-        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> savedSrv0, savedSrv1, savedSrv2, savedSrv3, savedSrv4;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> savedSrv0, savedSrv1, savedSrv2, savedSrv3, savedSrv4, savedSrv5;
         ctx->PSGetShaderResources(0, 1, &savedSrv0);
         ctx->PSGetShaderResources(1, 1, &savedSrv1);
         ctx->PSGetShaderResources(2, 1, &savedSrv2);
         ctx->PSGetShaderResources(3, 1, &savedSrv3);
         ctx->PSGetShaderResources(4, 1, &savedSrv4);
+        ctx->PSGetShaderResources(5, 1, &savedSrv5);
         Microsoft::WRL::ComPtr<ID3D11Buffer> savedCb0;
         ctx->PSGetConstantBuffers(0, 1, &savedCb0);
 
@@ -4098,9 +4129,10 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         vScreenVSSetShaderRaw(ctx, vs, nullptr, 0);
         vScreenPSSetShaderRaw(ctx, ps, nullptr, 0);
         ctx->OMSetDepthStencilState(dss, 0);
-        ID3D11ShaderResourceView* srvs[5] = {s.contribSrv, s.depthSrv, haveTarget ? s.targetSrv : nullptr,
-                                             haveDisplay ? display : nullptr, s.nearLightSrv};
-        ctx->PSSetShaderResources(0, 5, srvs);
+        ID3D11ShaderResourceView* srvs[6] = {s.contribSrv, s.depthSrv, haveTarget ? s.targetSrv : nullptr,
+                                             haveDisplay ? display : nullptr, s.nearLightSrv,
+                                             haveMask ? g_mask[eye].srv : nullptr};
+        ctx->PSSetShaderResources(0, 6, srvs);
         ctx->PSSetConstantBuffers(0, 1, &cb);
 
         ID3D11Query* q = holoAcquireQuery(ctx, s);
@@ -4108,8 +4140,8 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         vScreenDrawRaw(ctx, 3, 0);
         if (q) { ctx->End(q); holoQueryBegan(s, q); }
 
-        ID3D11ShaderResourceView* nullSrvs[5]{};
-        ctx->PSSetShaderResources(0, 5, nullSrvs);
+        ID3D11ShaderResourceView* nullSrvs[6]{};
+        ctx->PSSetShaderResources(0, 6, nullSrvs);
         vScreenVSSetShaderRaw(ctx, savedVs.Get(), savedVsClasses, savedVsClassCount);
         vScreenPSSetShaderRaw(ctx, savedPs.Get(), savedPsClasses, savedPsClassCount);
         ctx->GSSetShader(savedGs.Get(), savedGsClasses, savedGsClassCount);
@@ -4130,6 +4162,7 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
         ctx->PSSetShaderResources(2, 1, savedSrv2.GetAddressOf());
         ctx->PSSetShaderResources(3, 1, savedSrv3.GetAddressOf());
         ctx->PSSetShaderResources(4, 1, savedSrv4.GetAddressOf());
+        ctx->PSSetShaderResources(5, 1, savedSrv5.GetAddressOf());
         ctx->PSSetConstantBuffers(0, 1, savedCb0.GetAddressOf());
         restoreOm(ctx);
     });

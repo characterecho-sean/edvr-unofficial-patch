@@ -965,6 +965,96 @@ int main() {
         }
     }
 
+    // Round 10: a UI-covered pixel discards before any other test,
+    // keeping whatever the private copy already held (its own exact
+    // depth from the UI depth pass) instead of this pass's own
+    // footprint -- the nearest listed draw, however transparent, which
+    // can supply none of the pixel's actual light. (a) A bright,
+    // UI-covered element at a nearer 0.6 m over a scene pre-seeded to a
+    // farther-looking 1.5 m stamp: GREATER alone would accept the
+    // element's write (0.6 m genuinely is nearer than 1.5 m), so only
+    // the mask discard keeps the stamp's own depth -- the FAILING case
+    // if the skip is removed. (b) The same draw with the mask bit
+    // clear takes the element's own depth, as before this round. (c) A
+    // dark gap next to UI-covered light still takes the filler: the
+    // near-light CS does not test UI coverage, so the glyph's own
+    // light still marks its block regardless of the glyph's own
+    // discard.
+    {
+        // A mask for these tests, built directly into g_mask rather
+        // than through maskFor (tied to the reissue system's own
+        // g_rebindW/H): this rig only needs g_mask[0] populated with a
+        // known pattern at the standard 8x8 size. Content is rewritten
+        // per sub-test below.
+        D3D11_TEXTURE2D_DESC md{};
+        md.Width = 8; md.Height = 8; md.MipLevels = md.ArraySize = 1;
+        md.Format = DXGI_FORMAT_R8_UNORM; md.SampleDesc.Count = 1;
+        md.Usage = D3D11_USAGE_DEFAULT; md.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        std::vector<unsigned char> maskBits(8 * 8, 1);
+        const D3D11_SUBRESOURCE_DATA msub{maskBits.data(), 8, 0};
+        ComPtr<ID3D11Texture2D> maskTex; hr(dev->CreateTexture2D(&md, &msub, &maskTex));
+        ComPtr<ID3D11ShaderResourceView> maskSrv; hr(dev->CreateShaderResourceView(maskTex.Get(), nullptr, &maskSrv));
+        g_mask[0].tex = maskTex.Get();
+        g_mask[0].srv = maskSrv.Get();
+        g_mask[0].w = 8; g_mask[0].h = 8;
+        g_mask[0].marked = true;
+
+        const float uiStamp = temporalPassDepthAt(1.5f);
+        const float elementDepth = temporalPassDepthAt(0.6f);
+        const float bright[4] = {0.6f, 0.6f, 0.6f, 1.0f};
+
+        // (a) Mask set everywhere: the nearer element never overwrites
+        // the farther-looking stamp already in the private copy.
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, uiStamp, 0);
+        originalDraw(elementDepth, bright, bright, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
+              "resolve runs (UI-covered mask)");
+        for (float v : privateDepth())
+            check(std::fabs(v - uiStamp) < 1e-5f,
+                  "(a) UI-covered: keeps the UI stamp's own depth, not the nearer element's");
+
+        // (b) The identical draw, mask bit cleared everywhere: back to
+        // today's behaviour, the element's own (nearer) depth wins.
+        for (auto& b : maskBits) b = 0;
+        ctx->UpdateSubresource(maskTex.Get(), 0, nullptr, maskBits.data(), 8, 0);
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, uiStamp, 0);
+        originalDraw(elementDepth, bright, bright, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
+              "resolve runs (mask bit clear)");
+        for (float v : privateDepth())
+            check(std::fabs(v - elementDepth) < 1e-5f,
+                  "(b) no mask bit: the element's own depth wins, as before this round");
+
+        // (c) glyph (x<4, bright) is UI-covered; gap (x>=4, dark) is
+        // not. The scene is sky (farther than everything here), so the
+        // filler write can land. The glyph's own discard must not stop
+        // its light from covering the gap in the near-light map.
+        for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 4; ++x) maskBits[y * 8 + x] = 1;
+        ctx->UpdateSubresource(maskTex.Get(), 0, nullptr, maskBits.data(), 8, 0);
+        g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+        ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+        const float dark[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        originalDraw(kNear5m, bright, dark, blendSrcAlphaOne.Get(), false, kBlack, true);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr),
+              "resolve runs (UI-covered glyph, gap not covered)");
+        {
+            auto values = privateDepth();
+            for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
+                const float expected = x < 4 ? 0.0f : kFillerDepth;
+                check(std::fabs(values[y * 8 + x] - expected) < 1e-5f,
+                      x < 4 ? "(c) the UI-covered glyph itself keeps the sky it was pre-seeded with"
+                            : "(c) the gap next to UI-covered light still takes the filler");
+            }
+        }
+
+        g_mask[0] = Mask{};   // these raw pointers must not outlive the ComPtrs above
+    }
+
     // The family builder covers the eleven built-ins (the holo panel, the
     // icon core, the corona, its two stalks, the target sphere and the
     // five contact markers) and refuses the canopy, however it is named,
