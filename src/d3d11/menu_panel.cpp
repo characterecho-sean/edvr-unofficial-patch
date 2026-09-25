@@ -1351,10 +1351,20 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         // Read the aspect ONCE: a raster landing between two reads would
         // give the culling box and the shader different panels for a frame.
         const float aspect = g_panelAspect.load();
+        float flatPose[12]{};
         if (flat && aspect > 0.0f) {
             const float fitHeight = 0.85f * static_cast<float>(regionH) /
                                     static_cast<float>(regionW ? regionW : 1) / aspect;
-            g.halfW = (std::min)(g.halfW, fitHeight);
+            // The old desktop card was centred and could occupy 85% of the
+            // screen height. Halve both of its screen dimensions, then pin
+            // its upper-left edge two percent in from the output edges.
+            // This is evaluated against the swapchain, not Elite's SS size.
+            g.halfW = 0.5f * (std::min)(g.halfW, fitHeight);
+            constexpr float margin = 0.02f;
+            g.shift = g.dist * (-1.0f + 2.0f * margin) + g.halfW;
+            flatPose[0] = flatPose[4] = flatPose[8] = 1.0f;
+            flatPose[10] = g.halfW * aspect - g.dist * (1.0f - 2.0f * margin) * p.tans[2];
+            xf = flatPose;
         }
         const float halfH = g.halfW * aspect;
         if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, g.shift, regionW, regionH, flipV, g_nativeFrustum && flipU,

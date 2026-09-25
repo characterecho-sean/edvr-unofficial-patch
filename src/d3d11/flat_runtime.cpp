@@ -89,6 +89,7 @@ struct State {
     uint32_t unknownProjectionPairsUsed=0;
     uint64_t unknownProjectionCaptureOverflow=0;
     uint64_t hdrCopiesAccepted=0,hdrCopiesRefused=0;
+    uint64_t menuCopiesAccepted=0,menuCopiesRefused=0;
     FlatMonoResolvePreflight plannedResolve{};
     FlatMonoResolvePreflightResult resolvePreflight{};
     bool haveResolvePlan = false;
@@ -254,6 +255,40 @@ void reportProjection(State& s, const char* event) {
 constexpr uint64_t kHdrCopyVs=0xCFA91824129ECBBCull;
 constexpr uint64_t kHdrCopyPs=0xDFCBA0EC70B03C9Bull;
 constexpr uint64_t kImageFilterPs=0xFCFAD73924BF45B9ull;
+constexpr uint64_t kMenuCopyVs=0xDEF19B035D5EDEDCull;
+constexpr uint64_t kMenuCopyPs=0xDED8796049C7BB4Aull;
+bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
+    auto& k=draw.key;
+    if(k.vs!=kMenuCopyVs || k.ps!=kMenuCopyPs || k.format!=26)return false;
+    FlatComputeInternalScope guard;
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
+    Ptr<ID3D11ShaderResourceView> input;
+    ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+    ctx->OMGetRenderTargets(1,&rt,&ds);ctx->PSGetShaderResources(0,1,&input);
+    if(lookupShaderHash(vs.Get())!=kMenuCopyVs || lookupShaderHash(ps.Get())!=kMenuCopyPs ||
+       !rt || rt.Get()!=k.rtv || ds || !input)return false;
+    Ptr<ID3D11Resource> source,destination;input->GetResource(&source);rt->GetResource(&destination);
+    if(!source || source.Get()==destination.Get() || destination.Get()!=k.color)return false;
+    Ptr<ID3D11Texture2D> sourceTexture,destinationTexture;
+    source.As(&sourceTexture);destination.As(&destinationTexture);
+    if(!sourceTexture || !destinationTexture)return false;
+    D3D11_TEXTURE2D_DESC in{},out{};sourceTexture->GetDesc(&in);destinationTexture->GetDesc(&out);
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv{};input->GetDesc(&srv);
+    D3D11_RENDER_TARGET_VIEW_DESC rtv{};rt->GetDesc(&rtv);
+    UINT count=1;D3D11_VIEWPORT viewport{};ctx->RSGetViewports(&count,&viewport);
+    if(in.Format!=DXGI_FORMAT_R11G11B10_FLOAT || out.Format!=DXGI_FORMAT_R11G11B10_FLOAT ||
+       srv.Format!=DXGI_FORMAT_R11G11B10_FLOAT || rtv.Format!=DXGI_FORMAT_R11G11B10_FLOAT ||
+       srv.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || srv.Texture2D.MostDetailedMip!=0 ||
+       srv.Texture2D.MipLevels!=1 || rtv.ViewDimension!=D3D11_RTV_DIMENSION_TEXTURE2D ||
+       rtv.Texture2D.MipSlice!=0 || in.MipLevels!=1 || out.MipLevels!=1 ||
+       in.ArraySize!=1 || out.ArraySize!=1 || in.SampleDesc.Count!=1 || out.SampleDesc.Count!=1 ||
+       in.Width!=k.width || in.Height!=k.height || out.Width!=k.width || out.Height!=k.height ||
+       count!=1 || k.viewportCount!=1 || std::memcmp(&viewport,k.viewport,sizeof(viewport))!=0 ||
+       !flat_mono_detail::fullViewport(k,k.width,k.height))return false;
+    k.srvView[0]=input.Get();k.srvResource[0]=source.Get();
+    return true;
+}
 bool verifyCameraIndependentImageSource(ID3D11DeviceContext* ctx,const FlatRuntimeDraw& draw) {
     const auto& k=draw.key;
     if(k.format!=9 || k.vs!=kHdrCopyVs || k.ps!=kImageFilterPs)return false;
@@ -863,6 +898,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         if(s.projectionFrames)reportProjection(s,"progress");
         Log::get().note("flat HDR image continuation: accepted=%llu refused=%llu; source writes require current matching scene provenance",
             (unsigned long long)s.hdrCopiesAccepted,(unsigned long long)s.hdrCopiesRefused);
+        Log::get().note("flat menu HDR copy: accepted=%llu refused=%llu; source requires current scene/depth/camera provenance",
+            (unsigned long long)s.menuCopiesAccepted,(unsigned long long)s.menuCopiesRefused);
         Log::get().note("flat jitter: enabled=%u wanted=%u phase=(%.5g,%.5g) previous=(%.5g,%.5g) warm=%u frames=%llu draws=%llu dispatches=%llu refusals=%llu state=%s history-valid=%u",
             enabled?1u:0u,s.jitterWanted?1u:0u,
             s.phase.currentX,s.phase.currentY,s.phase.previousX,s.phase.previousY,s.phase.warmFrames,
@@ -940,6 +977,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
         }
     }
     for (const auto& u : s.uavs) if (u) {
+        flatRuntimeComputeWritten(s.prefix,u.Get());
         for (uint32_t i = 0; i < s.prefix.targetsUsed; ++i) {
             auto& target = s.prefix.targets[i];
             // Lighting legitimately writes HDR before tone. Any GPU write
@@ -994,16 +1032,25 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     if (foreignWork.load(std::memory_order_acquire)) s.prefix.uncertain = true;
     d.hdrCopyVerified=verifyHdrCopy(ctx,d);
+    d.menuHdrCopyVerified=verifyMenuHdrCopy(ctx,d);
     d.imageSourceCameraIndependentVerified=verifyCameraIndependentImageSource(ctx,d);
     captureCopyProvenance(s,ctx,d);
     const auto oldTargets = s.prefix.targetsUsed;
     const uint32_t oldImageAccepted=s.prefix.imageCopiesAccepted,oldImageRefused=s.prefix.imageCopiesRefused;
+    const uint32_t oldMenuAccepted=s.prefix.menuCopiesAccepted,oldMenuRefused=s.prefix.menuCopiesRefused;
     const auto selected = flatRuntimeObserve(s.prefix, d);
     s.hdrCopiesAccepted+=s.prefix.imageCopiesAccepted-oldImageAccepted;
     s.hdrCopiesRefused+=s.prefix.imageCopiesRefused-oldImageRefused;
+    s.menuCopiesAccepted+=s.prefix.menuCopiesAccepted-oldMenuAccepted;
+    s.menuCopiesRefused+=s.prefix.menuCopiesRefused-oldMenuRefused;
     if (s.prefix.targetsUsed > oldTargets) {
         s.colors[oldTargets] = static_cast<ID3D11Resource*>(rt.resource);
         s.depths[oldTargets] = static_cast<ID3D11Resource*>(ds.resource);
+        if(s.prefix.menuCopiesAccepted>oldMenuAccepted)
+            for(uint32_t i=0;i<oldTargets;++i)
+                if(s.prefix.targets[i].resource==k.srvResource[0]) {
+                    s.depths[oldTargets]=s.depths[i];break;
+                }
     }
     // FP16 image intermediates use the same scene-size predicate; their
     // producer admission remains separate from the format-23/26 motion source.

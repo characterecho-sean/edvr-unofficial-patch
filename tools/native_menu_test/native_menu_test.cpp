@@ -387,6 +387,10 @@ int wmain(int argc, wchar_t** argv) {
                 float visibleBounds[4]{};
                 check(changedBounds(resizedPixels, 320, 240, background, visibleBounds),
                       "flat resize draws bounded panel pixels");
+                check(visibleBounds[0] >= 0.01f && visibleBounds[0] < 0.05f &&
+                      visibleBounds[1] >= 0.01f && visibleBounds[1] < 0.05f &&
+                      visibleBounds[2] < 0.55f && visibleBounds[3] < 0.55f,
+                      "flat panel stays small and anchored near the upper-left corner");
             }
             // A replacement graphics device must build its own raster and
             // context state; no resource from the first device may be reused.

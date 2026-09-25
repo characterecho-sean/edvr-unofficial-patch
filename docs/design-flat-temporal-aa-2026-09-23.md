@@ -13,15 +13,15 @@
   history drives all resets; adapter depth/color/frame-gap counters are zero.
   The first-12 refusal limit hid the flight's reasons. Bounded per-reason
   summaries now preserve them without weakening the gate. Section 34 adds flat
-  onscreen AA/preset controls; verified Epic `bd30cbdc` confirms mode and
-  preset changes reach the runtime, but the menu receives zero AA frames
-  (section 35). Its first HDR write is a depthless screen copy; the actual
-  source and preceding writer remain unproved. A bounded passive copy probe now
-  shares the two compute sample frames; full build gates pass. Earlier flight
-  `ce715126` confirms the key fix and captures the HDR copy's real image
-  connection (section 30). Every input write is checked before HDR
-  continuation. Two older shader pairs still lack creation bytes; F10 captures
-  newly observed unknown pairs without a hand-maintained list.
+  onscreen AA/preset controls. Verified Epic `1aa62d94` still receives zero
+  menu AA frames, but its two copy probes establish a depth-bearing HDR source
+  feeding the depthless menu copy (section 36). The copy can inherit only a
+  source that passes the existing runtime depth/camera checks; the log does not
+  prove that source already qualifies. Earlier flight `ce715126` confirms the
+  key fix and captures the HDR copy's real image connection (section 30). Every
+  input write is checked before HDR continuation. Two older shader pairs still
+  lack creation bytes; F10 captures newly observed unknown pairs without a
+  hand-maintained list.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -42,12 +42,12 @@
   knowledge and shared motion/backend math without requiring local matrices to
   match the scene camera. The focused solar/smoke binding question is answered
   for this scene; do not repeat the same flight to fill untouched material
-  constants or camera-equality labels. Next work: capture actual menu-copy
-  source identity and preceding graphics/compute writers even with AA off.
-  Establish its scene/depth connection before changing runtime admission.
-  Missing recipes still reject jitter warm-up; do not claim visual
-  qualification from preparation counts. No headset is needed; VR still needs
-  regression tests.
+  constants or camera-equality labels. The strict menu HDR transfer and compact
+  upper-left F8 panel pass the full build and GPU checks. Next Epic run checks
+  transfer/refusal counters, backend treatment, jitter and history together.
+  The panel is one quarter of its former area. Missing recipes still reject
+  jitter warm-up; do not claim visual qualification from preparation counts. No
+  headset is needed; VR still needs regression tests.
 - **Test target (Sean):** use the Epic installation for all in-game tests.
   Odyssey is under `C:\Program Files\Epic Games\EliteDangerous\Products`.
   Preserve its existing INI; F10 is the flat default when dump_draws is absent.
@@ -2020,3 +2020,71 @@ without a selected scene. The summary explicitly labels its shadow shader
 filter; actual getter hashes must still match before drawing conclusions.
 Rebuild after committing for a clean identity, then install/verify Epic with
 the current live INI preserved. Keep this work on the feature branch.
+
+## 36. Menu HDR source connection and compact controls, 2026-09-24
+
+Epic `edvr_gfx_20260924_200952.log` matches `v0.17.0-569-g1aa62d94`, build
+`6AB5D225`. The menu remains untreated. Both new probe frames, 34536 and 34980,
+verify actual VS `DEF19B035D5EDEDC` / PS `DED8796049C7BB4A` and a full
+2880x1620 viewport. PS t0 is resource `26A3E8C20`, copied to `28BCA1020` with
+no DSV. Both are format 26, typed 2D views at mip zero, single sample/array.
+
+The source has 30/31 preceding graphics draws, q672..811/823, with depth
+`26A3E8120`, DSV `2360071E0`, format 19 and the same extent. The final graphics
+pair is `94D5C556DFD6D705` / `912477AEF6958379`, with a same-frame camera write
+at q805/817. Copy q815/827 follows it. In the same sampled frames, lighting CS
+`5998146D464F5C0E` and `EB0245DE0BB23BB6` write that source as UAV0 at q686/690
+while SRV4 names the same scene depth. The existing runtime permits HDR
+lighting writes before tone mapping. All reported passive coverage-drop
+counters are zero. Resource suffixes here are meaningful only within each
+sample; the repeated addresses are not cross-frame proof.
+
+Ruled out: the menu copy has no observed scene/depth connection, because both
+actual-binding samples identify its earlier depth-bearing HDR source. Still
+unproved: the source satisfies every runtime camera and write-consistency
+check. The passive aggregate does not expose its `hdrBad`/`hdrCamera` state.
+The implementation must require those checks and preserve their first refusal
+witness, rather than presume that a matching texture already qualifies.
+
+The narrow transfer contract verifies the exact shaders, actual source and
+destination views, extent and viewport, then carries a valid current-frame
+source's depth and camera through its first copy into a new HDR destination.
+The copy's unused b1 is never the scene camera. Unsupported copies, stale or
+conflicting sources and prior destination writes continue to refuse. Existing
+source selection, projection qualification and history gates remain in force.
+
+Sean also requested a smaller F8 menu at the upper left. Interpret one quarter
+of its size as half the displayed width and height, with a small corner margin;
+the flat layout changes independently of VR menu placement.
+
+Implementation keeps the destination write at the actual copy sequence and
+retains the source camera's original write epoch/sequence. It pins the
+inherited depth resource through Present. A rejected first copy is still
+recorded as a write, ensuring the final selector reports its conflict instead
+of losing the diagnostic as an absent HDR target. Source refusals preserve
+their original witness; an earlier destination refusal takes precedence.
+Separate five-second menu-copy counters distinguish transfer acceptance from
+temporal treatment.
+
+Later compute writes invalidate inherited destinations even before tone
+mapping. Existing source lighting before the copy remains allowed. The extra
+lookup is skipped until a menu copy has been accepted in that frame. Regression
+cases exercise this ordering, source camera/depth/layout validity, unused copy
+camera bindings, missing or unverified inputs, prior destination writes and
+failure-witness propagation.
+
+The compact panel halves the previous width and height after its height cap,
+with a two-percent margin from each upper-left edge. Placement uses swapchain
+dimensions, independently of the game's SS setting. The existing WARP suite
+checks visible pixels near that corner, alongside hidden-menu, graphics-state,
+resize and device replacement checks. VR geometry remains unchanged.
+
+Validation: full absolute-path `build.bat` passes all 79 pooled jobs, three
+quiet runs, Python self-tests, config contract and installer resource gates
+(`build/flat-menu-lineage-validation.log`). The flat temporal policy tests
+pass, and the menu GPU suite passes 99 checks. Rebuild with the committed
+identity, then install/verify the flat package on Epic with the live INI
+unchanged. Next run checks the compact F8 panel and captures 30 seconds at the
+menu ship with DLSS selected and F10; confirm menu transfer counters, actual
+treatment, projection phase and continued history rather than assume visual
+qualification.
