@@ -249,6 +249,12 @@ struct State {
     uint64_t overlayTextMs = 0;
     std::string overlayText;
     float    overlayTextDeg = 0.0f;
+    // The menu-embedded copy's own refresh clock (menu.fps_overlay_lock).
+    // Kept apart from overlayTextMs: the floating readout's own block runs
+    // first each tick and, on its own cadence, resets that field to "now"
+    // before this one's check ever sees it due -- a shared field starved
+    // the embedded copy's refresh outright (found 2026-09-25).
+    uint64_t menuOverlayTextMs = 0;
 
     // Restart bookkeeping.
     bool snapshotTaken = false;
@@ -3957,8 +3963,8 @@ void menuTick(ID3D11Device* dev) {
             }
             // The locked FPS readout refreshes at the same cadence as the
             // head-locked overlay: twice a second, cheaply.
-            if (s.open && s.overlay && s.overlayLock && dueMs(s.overlayTextMs, 500)) {
-                s.overlayTextMs = stampMs();
+            if (s.open && s.overlay && s.overlayLock && dueMs(s.menuOverlayTextMs, 500)) {
+                s.menuOverlayTextMs = stampMs();
                 s.contentDirty = true;
             }
             if (s.contentDirty) {
