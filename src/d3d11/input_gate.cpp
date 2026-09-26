@@ -358,7 +358,9 @@ SHORT WINAPI hookGetAsyncKeyState(int vk) {
             }
         }
     }
-    return g_user.origAsync(vk);
+    SHORT result = 0;
+    guarded("inputGate/origAsyncKeyState", [&] { result = g_user.origAsync(vk); });
+    return result;
 }
 
 SHORT WINAPI hookGetKeyState(int vk) {
@@ -378,11 +380,16 @@ SHORT WINAPI hookGetKeyState(int vk) {
             }
         }
     }
-    return g_user.origKeyState(vk);
+    SHORT result = 0;
+    guarded("inputGate/origKeyState", [&] { result = g_user.origKeyState(vk); });
+    return result;
 }
 
 BOOL WINAPI hookGetKeyboardState(PBYTE state) {
-    const BOOL r = g_user.origKeyboardState(state);
+    BOOL r = FALSE;
+    if (!guarded("inputGate/origKeyboardState", [&] { r = g_user.origKeyboardState(state); })) {
+        return FALSE;
+    }
     g_user.keyboardStateCalls.fetch_add(1, std::memory_order_relaxed);
     if (!r || !state || g_user.retired2) return r;
     guardedBudget(g_budgetUser, [&] {
@@ -422,7 +429,11 @@ bool isKeyboardMessage(UINT m) {
 }
 
 BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove) {
-    const BOOL r = g_user.origPeek(msg, hwnd, lo, hi, remove);
+    BOOL r = FALSE;
+    if (!guarded("inputGate/origPeekMessageA",
+                 [&] { r = g_user.origPeek(msg, hwnd, lo, hi, remove); })) {
+        return FALSE;
+    }
     if (!r || !msg || g_user.retired3) return r;
     guardedBudget(g_budgetPump, [&] {
         const UINT m = msg->message;
@@ -862,13 +873,18 @@ void inputGateInstall() {
 void inputGateSetPrivate(bool priv) {
     const int want = (priv && g_privateWanted) ? 1 : 0;
     if (g_private.load() != want) {
-        if (!want) captureReleaseTail(&GetAsyncKeyState);
-        else g_releaseTail.store(false);
+        if (!want) {
+            guarded("inputGate/captureReleaseTail",
+                    [&] { captureReleaseTail(&GetAsyncKeyState); });
+        } else {
+            g_releaseTail.store(false);
+        }
         g_private.store(want);
     } else if (!want) {
         // The menu's fault path still calls SetPrivate(false) each frame,
         // even when its normal tick has retired. Never strand held keys there.
-        refreshReleaseTail(&GetAsyncKeyState);
+        guarded("inputGate/refreshReleaseTail-setPrivate",
+                [&] { refreshReleaseTail(&GetAsyncKeyState); });
     }
 }
 
@@ -889,7 +905,7 @@ bool inputGateGameKeyboardSeen() {
 
 void inputGateTick() {
     if (!g_installTried) return;
-    refreshReleaseTail(&GetAsyncKeyState);
+    guarded("inputGate/refreshReleaseTail-tick", [&] { refreshReleaseTail(&GetAsyncKeyState); });
     static bool gameReachedNoted = false;
     if (!gameReachedNoted && g_gameKeyboardCalls.load() != 0) {
         gameReachedNoted = true;
