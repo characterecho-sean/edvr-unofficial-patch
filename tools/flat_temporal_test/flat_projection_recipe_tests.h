@@ -404,6 +404,33 @@ inline int flatProjectionRecipeTests() {
         flatProjectionDrawRecipes(0x525D47E3D5E2EFF4ull,0x0D617929FED842F0ull).count==0 &&
         !flatProjectionDrawUnchanged(0x525D47E3D5E2EFF4ull,0x0D617929FED842F1ull),
         "EDHM screen variant is unchanged only for its exact pair");
+    // Epic 20260926_054653, all graphics settings maxed: stock heavy lighting
+    // variants (no mod-patched bytes), classified from captured bytecode in
+    // build/flat-audit-menu.
+    const ObservedPair epicMaxed[] = {
+        {0xF512712C40D93C12ull,0xAFED1D4B087E18A9ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xEB787F983BC1F5A3ull,0x3B0B38CD96F53BC1ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x24DE25E496342EB8ull,0x3D8442D2FC1DCADDull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+        {0x0357BBB2DEE43C1Full,0x70E6FCA6CF692D2Aull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+    };
+    for (size_t i=0;i<sizeof(epicMaxed)/sizeof(epicMaxed[0]);++i) {
+        const auto& pair=epicMaxed[i];
+        const auto recipe=flatProjectionDrawRecipes(pair.vs,pair.ps);
+        expect(recipe.count==1 && recipe.requests[0].stage==FlatProjectionStage::Vertex &&
+            recipe.requests[0].slot==pair.slot && recipe.requests[0].patchCount==1 &&
+            recipe.requests[0].patches[0].layout==pair.layout &&
+            recipe.requests[0].patches[0].byteOffset==pair.row*16,
+            "maxed-settings exact pair patches only the measured vertex matrix span");
+        expect(flatProjectionDrawRecipes(pair.vs,pair.ps^1ull).count==0 &&
+            flatProjectionDrawRecipes(pair.vs^1ull,pair.ps).count==0 &&
+            flatProjectionDrawRecipes(pair.vs,0).count==0,
+            "maxed-settings projection requires both captured shader identities");
+        expect(!flatProjectionDrawUnchanged(pair.vs,pair.ps),
+            "maxed-settings projected lighting cannot bypass jitter");
+        for (size_t j=0;j<i;++j)
+            expect(pair.vs!=epicMaxed[j].vs || pair.ps!=epicMaxed[j].ps,
+                "maxed-settings census has no duplicate exact pairs");
+    }
     const auto screenRay=flatProjectionDrawRecipes(0x4AEC439CEC7FFDCEull,0x87EF79B19297B8C4ull);
     expect(screenRay.count==1 && screenRay.requests[0].stage==FlatProjectionStage::Vertex &&
         screenRay.requests[0].slot==1 && screenRay.requests[0].patchCount==1 &&

@@ -3640,3 +3640,36 @@ creation-bytecode cache already retains the bytes), which is a design change
 needing its own qualification. The disengage also remains silent in game:
 the only user-visible signal is AA looking off, and the evidence lives only
 in the log's jitter-refusal and reset-event lines.
+
+## 60. Maxed-settings capture: four stock lighting variants (2026-09-26)
+
+Sean ran the all-settings-maxed capture on Epic (`edvr_gfx_20260926_054653.log`,
+build `6AB73CBB` = rc.2-5-g58974c5a, EDHM chained). The session first shows
+flat AA working with EDHM at his previous settings: `treated-jittered` at
+05:48:04 with accepted-history ~257/5s and a 71 streak. After the settings
+were maxed, four unknown pairs appeared in one burst at 05:48:41 and the
+section-58 storm resumed. None of the four PS blobs declares EDHM's t120
+table: these are STOCK variants minted by the settings tiers, not mod
+patches -- the first direct capture of the settings-variant mechanism a
+user report (20260926_121716 bundle, unreciped glare `3D05E7CF11AC9BEE` and
+deferred-UI blend `F512712C40D93C12/4A71EB0D34E9F2EF`, no mod chain)
+pointed at.
+
+Bytecode classification (build/flat-audit-menu): all four pairs are clean.
+AFED (F512 companion, 2513 instructions) is clustered forward lighting for
+glass; 3B0B (EB78 companion, 2081) is gobo/projector-quad forward lighting
+whose projective divides are LIGHT-space cookie projections (cb1[165..172]),
+not camera rows; 3D84 (24DE companion) and 70E6 (0357 companion) are
+deferred light passes using the same integer pixel-grid depth reads and
+view-ray/`cb2[2..4]` reconstruction the table already accepts for their
+stock companions. vPos appears only as integer tile/pixel-grid lookups. No
+DoF/bokeh gather kernels materialized in this batch; blur/DoF passes remain
+unqualified and are the expected source of the next settings-tier captures.
+
+Change: exact recipes for the four pairs -- F512/AFED and EB78/3B0B as
+CB1[270..273] ForwardColumns, 24DE/3D84 and 0357/70E6 as CB2[10..13]
+ForwardDp4 -- with census coverage in the flat rig. The settings-maxed
+flight with this build should now hold treated streaks where 05:48:41
+stormed. The bundle user's two pairs still want his blobs
+(`vs_3D05E7CF11AC9BEE`, `ps_4A71EB0D34E9F2EF`) from his machine, or the
+generic classifier, to cover.

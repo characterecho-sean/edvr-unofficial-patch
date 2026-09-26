@@ -301,6 +301,21 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x0357BBB2DEE43C1Full: if (ps == 0xBE02244365AD810Cull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
     default: break;
     }
+    // Epic 20260926_054653, all graphics settings maxed (blur/DoF/bloom
+    // tiers), stock shaders, no mod-patched bytes. Bytecode review
+    // (build/flat-audit-menu): clustered-glass and gobo forward lighting and
+    // deferred light passes; vPos appears only as integer cluster-tile or
+    // pixel-grid reads; depth arrives via the pixel grid or a view-ray
+    // varying formed from CB2[2..4], never the patched rows. 3B0B's
+    // projective divides are LIGHT-space gobo projections (cb1[165..172]),
+    // not camera rows.
+    if (result.count == 0) switch (vs) {
+    case 0xF512712C40D93C12ull: if (ps == 0xAFED1D4B087E18A9ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xEB787F983BC1F5A3ull: if (ps == 0x3B0B38CD96F53BC1ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x24DE25E496342EB8ull: if (ps == 0x3D8442D2FC1DCADDull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    case 0x0357BBB2DEE43C1Full: if (ps == 0x70E6FCA6CF692D2Aull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
+    default: break;
+    }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);
     return result;
 }
