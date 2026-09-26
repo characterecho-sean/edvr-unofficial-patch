@@ -2937,3 +2937,24 @@ floor on a distant dense structure at the 2648x2559 input, constant across frame
 a verified motion chain, not a motion bug. Open: the ~0.15-0.2 px engine-path bias
 (possibly genuine coriolis rotation delivered by fresh records; below the visible
 threshold) and a one-frame record-refresh lag after a 5 px move.
+
+### 2026-09-26 -- The 0.17.0 A/B: the residual is reconstruction damping, not a regression
+
+Sean's cross-version check (Steam install, v0.17.0 release build, the estimated-motion
+era): the station read "much cleaner" there. Measured on eye run 052451 (same Pimax
+Crystal Super, 2600x2514 -> 4000x3867, preset K, same DLSS runtime 310.7.0.0 on both
+installs): 0.17.0 retains ~0.59-0.63 of clean-resample edge energy on the hull versus
+the fixed build's 0.47-0.55 -- a ~1.3x energy gap, with 0.17.0's raw input also ~8%
+sharper at the same moment (a more face-on station; content luck, not code). 0.17.0's
+hull MV field is camera-only plus ~0.1 px, single population: the estimation era added
+nothing there, which is why it never smeared. Every logged DLSS-facing setting matches
+between the builds (preset K, -0.62 mip bias, exposure fix, jitter handoff).
+
+Conclusion: the arc's defect was the stale-record phantom MV, and it is fixed. What
+remains against both taa=off and 0.17.0 is intrinsic DLSS temporal damping on this
+content at this scale -- uniform, motion-independent, with no current-pipeline defect
+convicted by either dump. If the gap is ever worth closing on evidence, the decisive
+probe is an offline replay of one captured C/Z/MV bundle through the current DLSS stage
+versus 0.17.0's, same scene moment; that is instrumentation, not a motion fix. Do not
+re-propose estimation: it measured wrong when it measured at all, and its calm look here
+is exactly "camera term plus nothing".
