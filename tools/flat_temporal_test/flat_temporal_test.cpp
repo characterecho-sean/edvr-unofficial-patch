@@ -621,6 +621,19 @@ void testMonoFrameSelection() {
         MonoFixture::setCamera(f.handoff[0], invalid);
         MonoFixture::setCamera(f.handoff[1], invalid);
     }, "malformed fullscreen camera bytes are irrelevant to texture-only passes");
+    {   // Epic 20260926_073622, all settings maxed: the DoF-composite tone
+        // variant is the same tone VS with a different PS, and it binds the
+        // HDR at PS0 (its PS1 is the quarter-res DoF blur). The chain's role
+        // and ordering checks are unchanged.
+        MonoFixture f;
+        f.handoff[0].key.ps = flat_mono_detail::kToneDofCompositePs;
+        f.handoff[0].key.srvView[0] = f.handoff[0].key.srvView[1];
+        f.handoff[0].key.srvResource[0] = f.handoff[0].key.srvResource[1];
+        const auto out = flatSelectMonoFrame(f.input);
+        check(out.selected() && out.hdr == MonoFixture::token(0x2600) &&
+              out.toneSequence == 511u,
+            "DoF-composite tone variant selects with its HDR lineage at PS0");
+    }
     for (uint32_t width : {960u, 1280u}) {
         MonoFixture f(width); f.applyEpic63521CameraWords();
         const auto out = flatSelectMonoFrame(f.input);
