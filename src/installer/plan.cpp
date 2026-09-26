@@ -109,7 +109,8 @@ std::string installedProfile(const Survey& s) {
 Survey surveyTarget(const GameInstall& game) {
     Survey s;
     s.game = game;
-    s.eliteProfileValid = qualifiedEliteExecutable(joinPath(game.dir, L"EliteDangerous64.exe"));
+    s.eliteKind = classifyEliteExecutable(joinPath(game.dir, L"EliteDangerous64.exe"),
+                                          &s.eliteFileVersion);
     if (s.game.openvrDir.empty()) s.game.openvrDir = findOpenvrDir(game.dir);
     if (s.game.openvrDir.empty()) s.game.openvrDir = joinPath(game.dir, L"Openvr\\win64");
 
@@ -242,10 +243,30 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             }
         }
     }
-    if (!s.eliteProfileValid) {
-        plan.blocked=true;
-        plan.problems.push_back("This Elite executable is not supported by this OpenXR build. Install an EDVR build supporting this game revision.");
-        return plan;
+    switch (s.eliteKind) {
+        case EliteExeKind::OdysseyQualified:
+            break;
+        case EliteExeKind::Legacy:
+            plan.blocked = true;
+            plan.problems.push_back(
+                "This is Elite Dangerous (Horizons), not Elite Dangerous: Odyssey. "
+                "EDVR supports Odyssey only; no EDVR build supports this game.");
+            return plan;
+        case EliteExeKind::Unreadable:
+            plan.blocked = true;
+            plan.problems.push_back(
+                "EliteDangerous64.exe could not be read. Verify the game files in the launcher, then try again.");
+            return plan;
+        default: {
+            plan.blocked = true;
+            std::string msg = "This Elite Dangerous: Odyssey revision";
+            if (!s.eliteFileVersion.empty())
+                msg += " (version " + toUtf8(s.eliteFileVersion) + ")";
+            msg += " is not one this EDVR build is qualified for. "
+                   "Install an EDVR build qualified for this game revision.";
+            plan.problems.push_back(msg);
+            return plan;
+        }
     }
     for (const DllInfo* item : {&s.d3d11,&s.openvrCurrent,&s.openxrLoader,&s.nativeConfig,&s.openxrLicense}) {
         if (flat && item != &s.d3d11 && !conversion) continue;

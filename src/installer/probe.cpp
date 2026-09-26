@@ -359,10 +359,28 @@ DllInfo probeDll(const std::wstring& path) {
     return info;
 }
 
-bool qualifiedEliteExecutable(const std::wstring& path) {
-    // Pinned profile digest from tools/elite_oculus.py. Hashing is read-only
-    // and avoids executing an untrusted game image during installation.
-    return sha256File(path) == "e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988";
+// Pinned profile digest from tools/elite_oculus.py. Hashing is read-only
+// and avoids executing an untrusted game image during installation.
+static const char kQualifiedEliteSha256[] =
+    "e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988";
+
+EliteExeKind classifyEliteExecutable(const std::wstring& path, std::wstring* fileVersion) {
+    const std::string sha = sha256File(path);
+    if (sha.empty()) return EliteExeKind::Unreadable;
+    if (sha == kQualifiedEliteSha256) return EliteExeKind::OdysseyQualified;
+    const std::wstring product = versionString(path, L"ProductName");
+    const std::wstring description = versionString(path, L"FileDescription");
+    if (fileVersion) *fileVersion = versionString(path, L"FileVersion");
+    // Legacy vs Odyssey is the version resource talking: the pre-Odyssey
+    // executable names itself "Elite:Dangerous", Odyssey's names itself
+    // "Elite Dangerous: Odyssey". An exe that names itself Elite but not
+    // Odyssey is the Horizons build; anything else stays unknown.
+    const bool saysElite =
+        containsNoCase(product, L"elite") || containsNoCase(description, L"elite");
+    const bool saysOdyssey =
+        containsNoCase(product, L"odyssey") || containsNoCase(description, L"odyssey");
+    if (saysElite && !saysOdyssey) return EliteExeKind::Legacy;
+    return EliteExeKind::OdysseyUnknown;
 }
 
 bool validateNativePayloadBytes(const void* data, size_t size, NativeImageKind kind) {

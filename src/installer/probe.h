@@ -58,7 +58,25 @@ DllInfo probeDll(const std::wstring& path);
 
 // Read-only package and executable qualification. These never load or execute
 // the inspected image.
-bool qualifiedEliteExecutable(const std::wstring& path);
+
+// Which Elite Dangerous the folder's executable is. Only OdysseyQualified may
+// be installed against: the runtime hooks are written for one pinned revision.
+// The other cases exist so the refusal can say which case the user is in
+// instead of one message for all of them.
+enum class EliteExeKind {
+    Unreadable,       // cannot be hashed: missing, locked, or not a file
+    Legacy,           // version strings name pre-Odyssey Elite Dangerous (Horizons)
+    OdysseyUnknown,   // Odyssey, or unidentifiable, but not the pinned revision
+    OdysseyQualified, // the pinned revision this build is qualified for
+};
+
+// Classify EliteDangerous64.exe and report its FileVersion string when it has
+// one. The legacy discriminator is the version resource: Frontier's
+// pre-Odyssey executable names itself "Elite:Dangerous" ("Elite:Dangerous
+// Executable"); Odyssey's names itself "Elite Dangerous: Odyssey" ("Elite
+// Dangerous: Odyssey Executable"). This tells cases apart for the message; it
+// never qualifies an executable.
+EliteExeKind classifyEliteExecutable(const std::wstring& path, std::wstring* fileVersion);
 enum class NativeImageKind { Graphics, Runtime, Loader };
 bool validateNativePayloadBytes(const void* data, size_t size, NativeImageKind kind);
 

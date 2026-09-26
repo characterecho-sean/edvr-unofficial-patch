@@ -172,7 +172,7 @@ static Survey baseSurvey(const std::wstring& gameDir) {
     s.game.product = L"elite-dangerous-odyssey-64";
     s.game.odyssey = true;
     s.haveOpenvrDir = true;
-    s.eliteProfileValid = true;
+    s.eliteKind = EliteExeKind::OdysseyQualified;
     s.gameRunningHere = false;
     s.d3d11 = fakeDll(DllKind::Absent, joinPath(gameDir, L"d3d11.dll"), "");
     s.openvrCurrent =
@@ -840,6 +840,31 @@ static void testPlanner() {
         check(plan.blocked && plan.steps.empty(), "a partial package cannot change any files");
     }
 
+    {   // The elite gate, per case: the message names the game the folder
+        // really holds, and only the pinned Odyssey revision gets through.
+        Survey s = baseSurvey(dir);
+        s.eliteKind = EliteExeKind::Legacy;
+        Plan plan = planInstall(s, options, payload);
+        check(plan.blocked && plan.steps.empty(), "legacy Elite Dangerous is refused");
+        check(notesMention(plan, "Elite Dangerous (Horizons)"), "and named as Horizons, not Odyssey");
+        check(notesMention(plan, "no EDVR build supports this game"),
+              "with no pointer at some other build");
+
+        s.eliteKind = EliteExeKind::OdysseyUnknown;
+        s.eliteFileVersion = L"999999";
+        plan = planInstall(s, options, payload);
+        check(plan.blocked && plan.steps.empty(), "an unknown Odyssey revision is refused");
+        check(notesMention(plan, "not one this EDVR build is qualified for"),
+              "and the refusal says what is wrong");
+        check(notesMention(plan, "999999"), "and names the revision the game reports");
+
+        s.eliteKind = EliteExeKind::Unreadable;
+        plan = planInstall(s, options, payload);
+        check(plan.blocked && plan.steps.empty(), "an unreadable executable is refused");
+        check(notesMention(plan, "could not be read"),
+              "and the refusal says the executable could not be read");
+    }
+
     {   // Uninstall, with a chained mod and the original runtime in place.
         Survey s = baseSurvey(dir);
         s.d3d11 = fakeDll(DllKind::Edvr, joinPath(dir, L"d3d11.dll"), payload.d3d11Sha);
@@ -885,7 +910,7 @@ static void testNativePlanner() {
     p.openvrSha="runtime"; p.openxrLoaderSha="loader";
     p.haveOpenxrLicense=true; p.openxrLicenseSha="license";
     Survey s=baseSurvey(dir); s.openxrLoader=fakeDll(DllKind::Absent,joinPath(s.game.openvrDir,L"openxr_loader.dll"),"");
-    s.eliteProfileValid=true;
+    s.eliteKind=EliteExeKind::OdysseyQualified;
     Plan fresh=planInstall(s,o,p);
     check(!fresh.blocked,"complete native payload plans");
     check(hasStep(fresh,Action::WritePayload,nullptr,L"d3d11.dll"),"native graphics is installed beside Elite");
@@ -1171,7 +1196,7 @@ static void testApply(const std::wstring& scratch) {
         newer.iniText = newerIni;
 
         Survey again = surveyTarget(s.game);
-        again.eliteProfileValid=true;
+        again.eliteKind=EliteExeKind::OdysseyQualified;
         again.d3d11.kind=DllKind::Edvr;
         again.openvrCurrent.kind=DllKind::Edvr;
         again.openvrOrig.kind=DllKind::OpenVrRuntime;

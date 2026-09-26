@@ -92,7 +92,10 @@ struct Survey {
     std::vector<std::wstring> openvrOrigInBackups;
 
     InstallState state;
-    bool eliteProfileValid = false;
+    // Which Elite Dangerous the folder's executable is; the gate refuses
+    // everything but OdysseyQualified and says why per case.
+    EliteExeKind eliteKind = EliteExeKind::Unreadable;
+    std::wstring eliteFileVersion;  // as the exe's version resource reports it
 };
 
 Survey surveyTarget(const GameInstall& game);

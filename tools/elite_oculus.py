@@ -283,7 +283,176 @@ def validate_elite_oculus(path):
         _fail(str(exc))
 
 
-def _fixture():
+def version_strings(path):
+    """Best-effort version-resource strings for an executable.
+
+    Returns whichever of ProductName, FileDescription and FileVersion it can
+    read, and {} when the file cannot be read or carries no usable resource.
+    This tells the user WHICH Elite Dangerous they pointed at; it never
+    qualifies an executable -- the gate is the pinned digest above.
+    """
+    try:
+        data = Path(path).read_bytes()
+        image = Image(data)
+        rva, size = image.directory(2)  # the resource table
+        if not rva:
+            return {}
+        base, _avail = image.mapping(rva, size)
+        found = _version_resource(image, base, size)
+        if not found:
+            return {}
+        off, rsize = found
+        strings = _version_block_strings(data, off, rsize)
+        return {k: strings[k] for k in ("ProductName", "FileDescription", "FileVersion")
+                if k in strings}
+    except (OSError, PEError):
+        return {}
+
+
+def _u16(data, off):
+    return int.from_bytes(data[off:off + 2], "little")
+
+
+def _u32(data, off):
+    return int.from_bytes(data[off:off + 4], "little")
+
+
+def _version_resource(image, base, size):
+    """Locate the RT_VERSION data entry inside the resource table."""
+    data = image.data
+    limit = base + size
+
+    def entries(off):
+        if off < base or off + 16 > limit:
+            return []
+        count = _u16(data, off + 12) + _u16(data, off + 14)
+        if count > 64 or off + 16 + count * 8 > limit:
+            return []
+        return [(_u32(data, off + 16 + i * 8), _u32(data, off + 16 + i * 8 + 4))
+                for i in range(count)]
+
+    for name, target in entries(base):
+        if name != 16 or not (target & 0x80000000):  # RT_VERSION, a directory
+            continue
+        for _name, t2 in entries(base + (target & 0x7fffffff)):
+            if not (t2 & 0x80000000):
+                continue
+            for _lang, t3 in entries(base + (t2 & 0x7fffffff)):
+                if t3 & 0x80000000:
+                    continue
+                entry = base + t3
+                if entry + 16 > limit:
+                    return None
+                rva = _u32(data, entry)
+                rsize = _u32(data, entry + 4)
+                if not rva or not rsize:
+                    return None
+                try:
+                    off, _avail = image.mapping(rva, rsize)
+                except PEError:
+                    return None
+                return off, rsize
+    return None
+
+
+def _version_blocks(data, start, end):
+    """Iterate the blocks of a version-info tree within [start, end).
+
+    Yields (key, type, value_text, children_start, block_end); value_text is
+    None for binary blocks.
+    """
+    off = start
+    while off + 6 <= end:
+        length = _u16(data, off)
+        if length < 8 or off + length > end:
+            break
+        block_end = off + length
+        value_length = _u16(data, off + 2)
+        btype = _u16(data, off + 4)
+        key_end = off + 6
+        while key_end + 1 < block_end and _u16(data, key_end) != 0:
+            key_end += 2
+        key = data[off + 6:key_end].decode("utf-16-le", errors="replace")
+        pos = (key_end + 2 + 3) & ~3
+        value_size = value_length * 2 if btype == 1 else value_length
+        value = None
+        if btype == 1 and value_length and pos + value_size <= block_end:
+            value = data[pos:pos + value_size].decode("utf-16-le", errors="replace")
+        children = (pos + value_size + 3) & ~3
+        yield key, btype, value, children, block_end
+        # wLength excludes the padding that aligns the NEXT block to 4 bytes
+        # (the game and notepad both write values whose block ends mid-word).
+        off = (block_end + 3) & ~3
+
+
+def _version_block_strings(data, off, size):
+    """Every StringTable entry of a VS_VERSIONINFO block, first table wins."""
+    found = {}
+    end = off + size
+    for key, _t, _v, children, block_end in _version_blocks(data, off, end):
+        # Resource compilers disagree on the top-level key: "VS_VERSIONINFO"
+        # is the documented name, the game ships "VS_VERSION_INFO".
+        if key not in ("VS_VERSIONINFO", "VS_VERSION_INFO"):
+            continue
+        for fi_key, _ft, _fv, fi_children, fi_end in _version_blocks(data, children, block_end):
+            if fi_key != "StringFileInfo":
+                continue
+            for _tk, _tt, _tv, t_children, t_end in _version_blocks(data, fi_children, fi_end):
+                for skey, _st, svalue, _sc, _se in _version_blocks(data, t_children, t_end):
+                    if svalue is not None and skey not in found:
+                        found[skey] = svalue.rstrip("\0")
+    return found
+
+
+def _vs_block(key, value=b"", btype=0, children=b""):
+    """One VS_VERSIONINFO-format block: length, type, key, value, children.
+
+    Like the real files, the value is not padded inside wLength; the padding
+    that aligns the next block is written between blocks, not counted.
+    """
+    keyb = key.encode("utf-16-le") + b"\0\0"
+    head = struct.pack("<HHH", 0,
+                       len(value) // 2 if btype == 1 else len(value),
+                       btype) + keyb
+    head += b"\0" * (-len(head) % 4)
+    body = value
+    if children:
+        body += b"\0" * (-len(body) % 4)
+    block = head + body + children
+    return struct.pack("<H", len(block)) + block[2:]
+
+
+def _vs_version_info(strings):
+    """A VS_VERSIONINFO block carrying one StringTable of `strings`."""
+    entries = b""
+    for name, text in strings.items():
+        block = _vs_block(name, text.encode("utf-16-le") + b"\0\0", btype=1)
+        entries += block + b"\0" * (-len(block) % 4)
+    table = _vs_block("040904b0", b"", btype=1, children=entries)
+    sfi = _vs_block("StringFileInfo", b"", btype=1, children=table)
+    return _vs_block("VS_VERSIONINFO", bytes(52), btype=0, children=sfi)
+
+
+def _resource_dir(entries):
+    out = struct.pack("<IIHHHH", 0, 0, 0, 0, 0, len(entries))
+    for name, target in entries:
+        out += struct.pack("<II", name, target)
+    return out
+
+
+def _resource_table(vs_rva, vs_size):
+    """Resource tables pointing at one RT_VERSION blob: type 16, name 1, lang 1033."""
+    root = _resource_dir([(16, 0x80000000 | 0x20)])
+    name = _resource_dir([(1, 0x80000000 | 0x40)])
+    lang = _resource_dir([(1033, 0x60)])
+    data_entry = struct.pack("<IIII", vs_rva, vs_size, 0, 0)
+    return (root.ljust(0x20, b"\0") + name.ljust(0x20, b"\0") +
+            lang.ljust(0x20, b"\0") + data_entry)
+
+
+def _fixture(product_name="Elite Dangerous: Odyssey",
+             file_description="Elite Dangerous: Odyssey Executable",
+             file_version="332841"):
     """Small synthetic PE with the qualified proof points for parser tests."""
     # The real IAT RVA is high in the image.  Keep the fixture sparse in
     # meaning while giving the bounded parser the same address relationships.
@@ -348,6 +517,17 @@ def _fixture():
     # SDK LoadLibraryW IAT call, followed by its exact return continuation.
     blob(LOADER_CALL_RVA, b"\xff\x15" + struct.pack("<i", LOAD_LIBRARY_IAT_RVA - (LOADER_CALL_RVA + 6)))
     blob(LOADER_RETURN_RVA, bytes.fromhex("488bcb488bf0"))
+    # A version resource, so the code that reads ProductName and friends has a
+    # fixture with the same shape as the real executables. The strings default
+    # to Odyssey's; the legacy build's are "Elite:Dangerous" and friends.
+    vs = _vs_version_info({"ProductName": product_name,
+                           "FileDescription": file_description,
+                           "FileVersion": file_version})
+    resource = _resource_table(0x5000, len(vs))
+    blob(0x4000, resource)
+    blob(0x5000, vs)
+    put(dirs + 16, 0x4000)
+    put(dirs + 20, len(resource))
     return bytes(data)
 
 
@@ -413,6 +593,18 @@ def self_test():
             check("not a known executable revision" in str(exc))
         else:
             check(False)
+        strings = version_strings(unknown)
+        check(strings.get("ProductName") == "Elite Dangerous: Odyssey")
+        check(strings.get("FileDescription") == "Elite Dangerous: Odyssey Executable")
+        check(strings.get("FileVersion") == "332841")
+        legacy = Path(td) / "legacy.exe"
+        legacy.write_bytes(_fixture(product_name="Elite:Dangerous",
+                                    file_description="Elite:Dangerous Executable",
+                                    file_version="269978"))
+        strings = version_strings(legacy)
+        check(strings.get("ProductName") == "Elite:Dangerous")
+        check("odyssey" not in strings.get("ProductName", "").lower())
+        check(version_strings(Path(td) / "absent.exe") == {})
     print("elite_oculus: %d checks, 0 failures" % checks)
     return 0
 

@@ -208,8 +208,7 @@ def _native_preflight(root, target, receipt_path):
         import openxr_pe
         openxr_pe.validate_native_pair(game, p["native_source"],
                                        p["graphics_source"])
-        if validate_elite_game(game) is False:
-            raise ValueError("Elite executable profile is not supported")
+        validate_elite_game(game)
     except (OSError, ValueError) as exc:
         raise SystemExit("[edvr] native preflight failed:\n"
                          "       %s" % exc)
@@ -217,12 +216,37 @@ def _native_preflight(root, target, receipt_path):
 
 
 def validate_elite_game(path):
-    """Validate the qualified executable before staging either profile."""
+    """Validate the qualified executable before staging either profile.
+
+    On rejection, say which case this is in the same words the installer's
+    own gate uses: Horizons is told no EDVR build supports it, and only an
+    Odyssey revision is pointed at another build.
+    """
     try:
-        from elite_oculus import validate_elite_oculus
+        from elite_oculus import validate_elite_oculus, version_strings
     except ImportError as exc:
         raise ValueError("Elite executable profile validator unavailable: %s" % exc)
-    return validate_elite_oculus(path)
+    try:
+        return validate_elite_oculus(path)
+    except ValueError:
+        pass
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError:
+        raise ValueError("EliteDangerous64.exe could not be read. "
+                         "Verify the game files in the launcher, then try again.")
+    strings = version_strings(path)
+    named = " ".join(strings.get(k, "")
+                     for k in ("ProductName", "FileDescription")).lower()
+    if "elite" in named and "odyssey" not in named:
+        raise ValueError("This is Elite Dangerous (Horizons), not Elite Dangerous: Odyssey. "
+                         "EDVR supports Odyssey only; no EDVR build supports this game.")
+    version = strings.get("FileVersion")
+    which = " (version %s)" % version if version else ""
+    raise ValueError("This Elite Dangerous: Odyssey revision%s is not one this EDVR "
+                     "build is qualified for. Install an EDVR build qualified for "
+                     "this game revision." % which)
 
 
 def _native_receipt(root, target, paths, backups, before_hashes,
@@ -906,8 +930,7 @@ def _native_direct_plan(root, target, loader, runtime):
     # The game's import contract is independent of runtime selection.
     from openxr_pe import validate_native_pair
     validate_native_pair(game, paths["native_source"], paths["graphics_source"])
-    if validate_elite_game(game) is False:
-        raise ValueError("Elite executable profile is not supported")
+    validate_elite_game(game)
     config = "[openxr]\nversion=1\nloader=%s\ngraphics=%s\nruntime=%s\nseparate_device=1\n" % (loader, paths["graphics_target"], runtime)
     return paths, config.encode("utf-8"), lib
 
@@ -1019,14 +1042,12 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         try:
             import openxr_pe
             openxr_pe.validate_native_pair(p["game"], p["runtime"], p["graphics"])
-            if validate_elite_game(p["game"]) is False:
-                raise ValueError("Elite executable profile is not supported")
+            validate_elite_game(p["game"])
         except (ImportError, OSError, ValueError) as exc:
             raise SystemExit("[edvr] native preflight failed:\n       %s" % exc)
     else:
         try:
-            if validate_elite_game(p["game"]) is False:
-                raise ValueError("Elite executable profile is not supported")
+            validate_elite_game(p["game"])
         except (ImportError, OSError, ValueError) as exc:
             raise SystemExit("[edvr] flat preflight failed:\n       %s" % exc)
     config_bytes = (("[openxr]\nversion=1\nloader=%s\ngraphics=%s\n"
@@ -2105,6 +2126,45 @@ def self_test():
             if globals()["validate_elite_game"] is not old_profile_validate:
                 print("Elite profile validator was not restored")
                 ok = False
+        # The elite gate's refusal names the case: Horizons is told no EDVR build
+        # supports it; an unknown Odyssey revision is told what it reports and
+        # which kind of build to get.
+        import elite_oculus as _elite_gate
+        odyssey_exe = os.path.join(tmp, "gate-odyssey.exe")
+        with open(odyssey_exe, "wb") as f:
+            f.write(_elite_gate._fixture())
+        try:
+            validate_elite_game(odyssey_exe)
+            print("unqualified Odyssey fixture passed the elite gate")
+            ok = False
+        except ValueError as exc:
+            if "not one this EDVR build is qualified for" not in str(exc) or \
+               "332841" not in str(exc):
+                print("unknown Odyssey revision got the wrong message: %s" % exc)
+                ok = False
+        legacy_exe = os.path.join(tmp, "gate-legacy.exe")
+        with open(legacy_exe, "wb") as f:
+            f.write(_elite_gate._fixture(product_name="Elite:Dangerous",
+                                         file_description="Elite:Dangerous Executable",
+                                         file_version="269978"))
+        try:
+            validate_elite_game(legacy_exe)
+            print("legacy fixture passed the elite gate")
+            ok = False
+        except ValueError as exc:
+            if "Elite Dangerous (Horizons)" not in str(exc) or \
+               "no EDVR build supports this game" not in str(exc):
+                print("legacy Horizons got the wrong message: %s" % exc)
+                ok = False
+        try:
+            validate_elite_game(os.path.join(tmp, "gate-absent.exe"))
+            print("absent executable passed the elite gate")
+            ok = False
+        except ValueError as exc:
+            if "could not be read" not in str(exc):
+                print("absent executable got the wrong message: %s" % exc)
+                ok = False
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
