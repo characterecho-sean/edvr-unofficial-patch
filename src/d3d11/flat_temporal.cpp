@@ -604,8 +604,10 @@ FlatMonoFrame printMonoInput(uint64_t frame) {
     // retained records and their creation bytecode a bounded number of times
     // per session, so a post chain the settings changed (new tone variant, or
     // extra passes between tone and copy) names itself in the log and on disk.
+    // Only spend a dump once handoff records exist: startup refuses with empty
+    // tables, and the budget burned there once hid the broken chain itself.
     static uint32_t chainRefusalDumps = 0;
-    if (!mono.selected() && chainRefusalDumps < 2 &&
+    if (!mono.selected() && g.handoffContractCount && chainRefusalDumps < 2 &&
         (mono.reason == FlatMonoReason::NoTonePass || mono.reason == FlatMonoReason::AmbiguousTonePass ||
          mono.reason == FlatMonoReason::InvalidTonePass || mono.reason == FlatMonoReason::NoOutputCopy ||
          mono.reason == FlatMonoReason::AmbiguousOutputCopy || mono.reason == FlatMonoReason::InvalidOutputCopy ||
