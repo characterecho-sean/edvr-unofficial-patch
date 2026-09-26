@@ -15,6 +15,7 @@
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "binding_shadow.h"
+#include "device_hook.h"
 #include "engine_velocity.h"
 #include "exposure_fix.h"
 
@@ -598,6 +599,24 @@ FlatMonoFrame printMonoInput(uint64_t frame) {
         mono.renderWidth, mono.renderHeight, mono.output, mono.outputWidth, mono.outputHeight,
         mono.supportedDraws, mono.unsupportedDraws, mono.sourceFirst, mono.sourceLast,
         mono.hdrFirst, mono.hdrLast, mono.toneSequence, mono.copySequence, mono.firstLaterOutput);
+    // A handoff-chain refusal never opens the detail-report gate, because that
+    // gate needs a selected frame -- the exact state this diagnoses. Dump the
+    // retained records and their creation bytecode a bounded number of times
+    // per session, so a post chain the settings changed (new tone variant, or
+    // extra passes between tone and copy) names itself in the log and on disk.
+    static uint32_t chainRefusalDumps = 0;
+    if (!mono.selected() && chainRefusalDumps < 2 &&
+        (mono.reason == FlatMonoReason::NoTonePass || mono.reason == FlatMonoReason::AmbiguousTonePass ||
+         mono.reason == FlatMonoReason::InvalidTonePass || mono.reason == FlatMonoReason::NoOutputCopy ||
+         mono.reason == FlatMonoReason::AmbiguousOutputCopy || mono.reason == FlatMonoReason::InvalidOutputCopy ||
+         mono.reason == FlatMonoReason::BrokenLineage || mono.reason == FlatMonoReason::WrongOrder)) {
+        ++chainRefusalDumps;
+        printContracts(frame, true);
+        for (uint32_t i = 0; i < g.handoffContractCount; ++i) {
+            captureFlatProbeShader('v', g.handoffContracts[i].key.vs);
+            captureFlatProbeShader('p', g.handoffContracts[i].key.ps);
+        }
+    }
     return mono;
 }
 
