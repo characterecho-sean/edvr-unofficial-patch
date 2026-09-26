@@ -25,7 +25,9 @@
   treatment; 40-43 establish cockpit projection and smoother DLSS edges; 45-48
   diagnose missing ownership and its binding repair. The first loading crash
   did not reproduce on retry; its cause remains unknown. Sections 49-50 qualify
-  rigid BFE shell motion and the PS91 register correction.
+  rigid BFE shell motion and the PS91 register correction. Section 58 records
+  the rc.2 on-foot reset storm: unreciped scene pairs poison temporal history
+  every frame; the live `fix.temporal_aa` change is ruled out as the cause.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -43,7 +45,9 @@
 - **Next:** fly the Epic install on foot in the hangar and concourse. The
   section-57 admission should end the hdr-camera-changed refusal cascade;
   confirm treated streaks resume on foot, watch the weapon itself for local
-  rejection crawl, and check the concourse for any new unknown-pair captures.
+  rejection crawl. New unknown-pair captures arrived with the rc.2 on-foot
+  sessions (section 58); build their recipes from the saved bytecode offline,
+  no capture flight needed.
   Existing evidence does not justify ignoring the alternate projection.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The separate menu hangar-floor P1
@@ -3536,3 +3540,60 @@ The merged tree's first full build flaked once in `scheduler_stack_probe_test`
 passed standalone three times and in the full retry, so it is recorded here as
 a load-sensitive flake alongside the run_jobs and vtable history rather than
 chased further.
+
+## 58. Reset-storm symptom is scene content, not the live mode change (2026-09-25)
+
+Sean reported that changing `fix.temporal_aa` from the F8 menu made flat
+temporal AA disengage until restart. Verified Epic `edvr_gfx_20260925_193443.log`
+with `tools/edvr_log.py --expect-build HEAD`: `v0.18.0-rc.2`, build `6AB6DC53`.
+Menu writes ran 19:35:00-19:35:55 from the main menu (plus further toggles to
+19:36:38); the scene came up at 19:35:15 (frame 32172). From that frame to
+session end, every treated frame was a full reset: `accepted-history-5s=0`,
+`longest-treated-streak=1`, per-frame `requested=1` in the resolve reset
+events, and the phase census reports 361/438 frames failed in the first storm
+window (reasons: `unknown-scene-projection-recipe`,
+`projection-preparation-refused`). The adapter's own reset counters
+(no-previous/frame-gap/depth/color/extent) stayed near zero, so the resets
+came from the jitter-validity term at `flat_runtime.cpp:1423`
+(`s.jitterWanted && (s.phase.failed || !s.phase.previousAcceptedValid)`):
+each unreciped scene draw calls `failPhase`, so no frame ever finishes clean,
+so history is never offered to the next frame. A temporal backend reset every
+frame displays current-frame-only output -- visually identical to AA off.
+
+Ruled out: the live mode/model change as the cause. (a) The 14:18 session on
+`84733e9c` changed off->on->dlss live on foot and was `treated-jittered` with
+`accepted-history-5s`~450 within five seconds. (b) The 10:38 session on
+`ad7607c6` stormed before, during and after its live changes
+(dlss->fsr->off->on->dlss, model k->j->l->m) and recovered mid-session at
+10:42:05 when the unreciped content left view, with no restart; the same storm
+recurred at 10:43:29 when it returned. (c) `84733e9c..ac2e0b29` changes only
+menu.cpp's FPS-readout clock and release packaging -- no temporal-path code.
+(d) The 19:34 session was itself a fresh launch and stormed from the first
+scene frame, so "restart fixes it" is not supported: restart only changes what
+is on screen. Every menu write was applied at the next frame boundary
+(`mode=`/`DLSS model=` lines track each change); the live-apply path is
+healthy.
+
+The storm is content-driven. New unknown pairs, automatically captured with
+exact creation bytecode saved under `edvr_logs\shaders` (six stages, zero
+failures, verified present on disk):
+
+| Pair (VS/PS) | Target |
+| --- | --- |
+| `AACFDCF2FB9AD809` / `CAD1F585EDDC5641` | fmt 23, 3840x2160 |
+| `0357BBB2DEE43C1F` / `BE02244365AD810C` | fmt 26, 3840x2160 |
+| `361CD4B7FF213A01` / `CDDFE2157F5654B8` | fmt 23, 3840x2160 |
+| `525D47E3D5E2EFF4` / `0D617929FED842F0` (17:36 session) | fmt 26 |
+| `EB5234DB6ADB491D` / `63B1524A9F805A4C` (17:36 session) | fmt 23 |
+
+These are not the section-57 four (those have recipes since `dacb7a56`).
+`361CD4B7FF213A01` already has a recipe with PS `FA7411BF7E4C4088`; the game
+pairs the same VS with a new PS here. `AACFDCF2FB9AD809` is the known
+engine-motion family VS and `0357BBB2DEE43C1F` the documented b2[10..13]
+projection family, so recipe development can follow the section-24/57 process
+offline without another capture flight.
+
+Adjacent gaps noticed, recorded for routing, not folded in: the disengage is
+silent in game -- the only signal is the log's jitter-refusal and reset-event
+lines -- and a single permanently on-screen unreciped pair poisons history for
+the whole session regardless of how few pixels it touches.
