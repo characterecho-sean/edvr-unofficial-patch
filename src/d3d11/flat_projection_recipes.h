@@ -26,6 +26,10 @@ inline bool flatProjectionDrawUnchanged(uint64_t vs, uint64_t ps) {
            // Epic 85bf7652: VS maps packed UV directly to clip space without
            // a CB; PS filters texture neighbors with no projection consumer.
            (vs == 0x525D47E3D5E2EFF4ull && ps == 0xF0BAE053476F8730ull) ||
+           // Epic 20260925_173622, EDHM chain: the same inert packed-UV clip
+           // VS; the mod-patched PS variant filters screen colour and samples
+           // a vPos-scaled mask. No projection consumer on either side.
+           (vs == 0x525D47E3D5E2EFF4ull && ps == 0x0D617929FED842F0ull) ||
            // Epic ad7607c6: fullscreen color/effect composition. VS derives
            // clip coordinates from vertex ID; PS samples/distorts screen
            // color without scene-depth reconstruction or a camera matrix.
@@ -280,6 +284,21 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0xD8FCE3CEA16B9B51ull: if (ps == 0x06AA136E4D58CBA2ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
     case 0xBA16062A2EB66F1Full: if (ps == 0x33758387B70944A1ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     case 0x66DE2CADB1F4AE6Bull: if (ps == 0xBBDE4E71FB78528Aull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    default: break;
+    }
+    // Epic 20260925_173622/193443 main-menu hangar under the EDHM chain
+    // (d3d11_edhm.dll): mod-patched PS variants of already-mapped VS
+    // families. Bytecode review (build/flat-audit-menu): each new PS is
+    // colour-only -- CB1[277..279] orientation dp3s, texcoord UVs, or integer
+    // pixel-grid reads; none consumes a projection matrix or derives a depth
+    // UV from a clip varying. BE02's PS rebuilds position from a view-space
+    // varying formed from CB2[2..4], not the patched CB2[10..13]. The EDHM
+    // delta adds its t120 lookup table and scalar config reads only.
+    if (result.count == 0) switch (vs) {
+    case 0xAACFDCF2FB9AD809ull: if (ps == 0xCAD1F585EDDC5641ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0xEB5234DB6ADB491Dull: if (ps == 0x63B1524A9F805A4Cull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x361CD4B7FF213A01ull: if (ps == 0xCDDFE2157F5654B8ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    case 0x0357BBB2DEE43C1Full: if (ps == 0xBE02244365AD810Cull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
     default: break;
     }
     if (ps == 0x7EAC71963E66C5FEull) result.add(S::Pixel,2,L::InverseScreenRay,1);

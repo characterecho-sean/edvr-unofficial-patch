@@ -373,6 +373,37 @@ inline int flatProjectionRecipeTests() {
             expect(pair.vs!=epicOnFoot[j].vs || pair.ps!=epicOnFoot[j].ps,
                 "on-foot census has no duplicate exact pairs");
     }
+    // Epic 20260925_173622/193443 main-menu hangar under the EDHM chain
+    // (d3d11_edhm.dll): mod-patched PS variants of already-mapped VS
+    // families, classified from captured bytecode in build/flat-audit-menu.
+    const ObservedPair epicEdhm[] = {
+        {0xAACFDCF2FB9AD809ull,0xCAD1F585EDDC5641ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0xEB5234DB6ADB491Dull,0x63B1524A9F805A4Cull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x361CD4B7FF213A01ull,0xCDDFE2157F5654B8ull,1,FlatProjectionPatchLayout::ForwardColumns,270},
+        {0x0357BBB2DEE43C1Full,0xBE02244365AD810Cull,2,FlatProjectionPatchLayout::ForwardDp4,10},
+    };
+    for (size_t i=0;i<sizeof(epicEdhm)/sizeof(epicEdhm[0]);++i) {
+        const auto& pair=epicEdhm[i];
+        const auto recipe=flatProjectionDrawRecipes(pair.vs,pair.ps);
+        expect(recipe.count==1 && recipe.requests[0].stage==FlatProjectionStage::Vertex &&
+            recipe.requests[0].slot==pair.slot && recipe.requests[0].patchCount==1 &&
+            recipe.requests[0].patches[0].layout==pair.layout &&
+            recipe.requests[0].patches[0].byteOffset==pair.row*16,
+            "EDHM-variant exact pair patches only the measured vertex matrix span");
+        expect(flatProjectionDrawRecipes(pair.vs,pair.ps^1ull).count==0 &&
+            flatProjectionDrawRecipes(pair.vs^1ull,pair.ps).count==0 &&
+            flatProjectionDrawRecipes(pair.vs,0).count==0,
+            "EDHM-variant projection requires both captured shader identities");
+        expect(!flatProjectionDrawUnchanged(pair.vs,pair.ps),
+            "EDHM-variant projected geometry cannot bypass jitter");
+        for (size_t j=0;j<i;++j)
+            expect(pair.vs!=epicEdhm[j].vs || pair.ps!=epicEdhm[j].ps,
+                "EDHM census has no duplicate exact pairs");
+    }
+    expect(flatProjectionDrawUnchanged(0x525D47E3D5E2EFF4ull,0x0D617929FED842F0ull) &&
+        flatProjectionDrawRecipes(0x525D47E3D5E2EFF4ull,0x0D617929FED842F0ull).count==0 &&
+        !flatProjectionDrawUnchanged(0x525D47E3D5E2EFF4ull,0x0D617929FED842F1ull),
+        "EDHM screen variant is unchanged only for its exact pair");
     const auto screenRay=flatProjectionDrawRecipes(0x4AEC439CEC7FFDCEull,0x87EF79B19297B8C4ull);
     expect(screenRay.count==1 && screenRay.requests[0].stage==FlatProjectionStage::Vertex &&
         screenRay.requests[0].slot==1 && screenRay.requests[0].patchCount==1 &&

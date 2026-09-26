@@ -28,6 +28,9 @@
   rigid BFE shell motion and the PS91 register correction. Section 58 records
   the rc.2 on-foot reset storm: unreciped scene pairs poison temporal history
   every frame; the live `fix.temporal_aa` change is ruled out as the cause.
+  Section 59 pins those pairs to EDHM's patched pixel shaders (the 21:08
+  no-EDHM control accumulates normally at the same main menu) and adds their
+  exact recipes; mod-patched shader populations remain an open coverage class.
 - **Priority (Sean):** performance over code sharing. Share math/backends where
   cheap; keep separate frame scheduling/capture paths when that avoids copies,
   synchronization or additional per-draw work. Defer broad core extraction
@@ -45,9 +48,8 @@
 - **Next:** fly the Epic install on foot in the hangar and concourse. The
   section-57 admission should end the hdr-camera-changed refusal cascade;
   confirm treated streaks resume on foot, watch the weapon itself for local
-  rejection crawl. New unknown-pair captures arrived with the rc.2 on-foot
-  sessions (section 58); build their recipes from the saved bytecode offline,
-  no capture flight needed.
+  rejection crawl. Section 59's EDHM recipes want one main-menu flight with
+  EDHM chained: confirm zero unknown-pair captures and resuming streaks.
   Existing evidence does not justify ignoring the alternate projection.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The separate menu hangar-floor P1
@@ -3597,3 +3599,44 @@ Adjacent gaps noticed, recorded for routing, not folded in: the disengage is
 silent in game -- the only signal is the log's jitter-refusal and reset-event
 lines -- and a single permanently on-screen unreciped pair poisons history for
 the whole session regardless of how few pixels it touches.
+
+## 59. Main-menu reset storm is EDHM's patched pixel shaders (2026-09-25)
+
+Sean's toggle flight pins the section-58 storm's variable: EDHM. Both broken
+rc.2 sessions (17:36, 19:34) chain `d3d11_edhm.dll` (41 exports); the 21:08
+no-EDHM control session at the same main menu has zero unknown-pair captures
+and accumulates normally (`treated-jittered`, accepted-history-5s ~430,
+growing streaks). EDHM patches pixel shaders, which changes their exact
+creation hashes: all five section-58 pairs are known VS hashes paired with
+unseen PS hashes. Pairs 1-3 declare EDHM's `t120` 1D lookup table (absent
+from every stock companion); the 361C companion diff against stock
+`ps_FA7411BF7E4C4088` shows the mod's ~29-line colour block and register
+renumbering beside the original code.
+
+Classification of the captured bytecode (listings in ignored
+`build/flat-audit-menu/`): none of the five new PS blobs consumes a
+projection. CAD1 (pair 1) and 63B1 (pair 5) read only the CB1[277..279]
+orientation rows; CDDF (pair 3) uses texcoord UVs and scalar config reads;
+BE02 (pair 2) reads vPos only as an integer pixel-grid lookup and rebuilds
+position from a view-space varying formed from CB2[2..4], not the patched
+CB2[10..13]. Pair 4's VS remains inert (no constant buffer at all) and its
+new PS filters screen colour with a vPos-scaled mask, so that pair joins the
+explicit unchanged list beside its stock companion F0BA.
+
+Change: exact recipes for the four projected pairs -- AACF/CAD1, EB52/63B1
+and 361C/CDDF as CB1[270..273] ForwardColumns, 0357/BE02 as CB2[10..13]
+ForwardDp4 -- plus the inert 525D/0D61 classification, with census coverage
+in the flat rig (exact-pair admission, wrong-PS/wrong-VS/absent-PS refusal,
+unchanged-list exactness). Hashes are stable per EDHM configuration, so this
+unblocks Sean's current EDHM setup; an EDHM settings change can mint new PS
+hashes and re-trigger the storm, which the log's unknown-pair capture will
+continue to report.
+
+Open, recorded for routing and deliberately not folded into this change:
+exact-hash recipes cannot keep pace with mod-patched shader populations --
+Sean reports the same failure class from ReShade users. The systemic answer
+is a runtime PS-safety classification at the unknown-pair path (the
+creation-bytecode cache already retains the bytes), which is a design change
+needing its own qualification. The disengage also remains silent in game:
+the only user-visible signal is AA looking off, and the evidence lives only
+in the log's jitter-refusal and reset-event lines.
