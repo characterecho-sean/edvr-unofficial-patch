@@ -24,7 +24,7 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format for main, and for mv's debug views the trained runtime's OUTPUT texture, which is LARGER under DLSS -- paintDebug, not O[id.xy]
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 the mover mask's pixels; 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-54 the engine path's pixel kinds (mv only, gCount 48-52)
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 the mover mask's pixels; 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-55 the engine path's pixel kinds (mv only, gCount 48-53)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
 Texture2D<float> ZP : register(t3);      // last frame's ZC; movers.x or holoJitter.w validates it
@@ -58,9 +58,20 @@ R"HLSL(
 //   data[19] = base (304), scale (308), the PREVIOUS packed quaternion (312-319)
 // The marker is self-checking: byte 288 is uninitialised in every producer
 // (no store in any of them), so a constant would false-match stack garbage.
-// It is the tag XOR a hash of the record's own two pose blocks, the same
-// hash engine_velocity_emit.h writes. The pose decode and turn() are the
-// pool vertex shaders' own (1/32767, not 2/65535).
+// It is the tag XOR a hash of the record's own two pose blocks AND the
+// present-frame clock of its emission (the frame stamp): the pose pair is
+// written only on frames the record appends items, so a record the engine
+// culled this frame keeps its last pair -- with a constant hash the compose
+// would replay that stale delta every frame (the coriolis phantom MV of
+// 2026-09-25; the emit folds g_frame in, engine_velocity_emit.h, and the
+// compose's per-eye EngineNow carries the same stamp at EN[276].x). A joined
+// marker certifies only at its own frame; at a later frame the compose's
+// engineStaleStampKind finds it inside a 64-frame window and declines it to
+// the camera term (kind 6), while a masked marker keeps no history as it
+// always did. An old-scheme marker (a mid-session DLL swap, the hash without
+// the stamp) matches nothing and reads as the camera term (graceful). The
+// pose decode and turn() are the pool vertex shaders' own (1/32767, not
+// 2/65535).
 //
 // The CORE between the two inner markers declares no resource: the on-foot
 // screen shader (screen_motion.h, kScreenMotionPs) is compiled with this same
@@ -74,19 +85,50 @@ float4 engineQuat(uint2 packed) {
 float3 engineTurn(float4 q, float3 v) {
     return (2.0 * q.w * q.w - 1.0) * v + 2.0 * dot(q.xyz, v) * q.xyz + 2.0 * q.w * cross(q.xyz, v);
 }
-uint engineMarkerHash(EnginePoolRecord r) {
+// The marker's stamp-free hash: the two pose blocks alone (the first ten
+// words of the marker hash; the stale-stamp search below seeds from it).
+uint engineKindHash(EnginePoolRecord r) {
     uint words[10] = {r.data[1].x, r.data[1].y, r.data[1].z, r.data[0].z, r.data[0].w,
                       r.data[18].y, r.data[18].z, r.data[18].w, r.data[19].z, r.data[19].w};
     uint h = 0x811C9DC5u;
     [unroll] for (uint i = 0; i < 10; ++i) { h = (h ^ words[i]) * 0x01000193u; h ^= h >> 13; }
     return h;
 }
-// 1 joined (EDVR wrote the record's previous pose), 2 masked (a rig record
-// EDVR could not follow), 3 neither (not a rig record: the camera term).
-uint engineRecordKind(EnginePoolRecord r) {
-    const uint h = engineMarkerHash(r);
+// engineKindHash plus the frame stamp (the emit's present-frame clock, the
+// last FNV word): what a marker must match the frame it is read.
+// engine_velocity_emit.h writes the same hash into the marker.
+uint engineMarkerHash(EnginePoolRecord r, uint token) {
+    uint h = engineKindHash(r);
+    h = (h ^ token) * 0x01000193u; h ^= h >> 13;
+    return h;
+}
+// The kinds at THIS frame's token: 1 joined (EDVR wrote the record's previous
+// pose this frame), 2 masked (a rig record EDVR could not follow this frame),
+// 3 neither -- a stale marker (an older frame's stamp) or not a rig record;
+// engineStaleStampKind tells those apart.
+uint engineRecordKind(EnginePoolRecord r, uint token) {
+    const uint h = engineMarkerHash(r, token);
     if (r.data[18].x == (0x7FC0ED01u ^ h)) return 1u;
     if (r.data[18].x == (0x7FC0ED02u ^ h)) return 2u;
+    return 3u;
+}
+// A marker that did not match this frame's token may still be a rig record
+// stamped within the last 64 frames (the emit table and census horizon): the
+// cull case, where the record kept an older frame's pose pair. One FNV round
+// per frame of age, seeded from the stamp-free hash -- paid only by pixels
+// whose fresh check failed. 6 STALE STAMP: a joined marker from an older
+// frame -- its pose pair replays a phantom delta, so the camera term stands
+// (2026-09-25, the coriolis station hull); 2: an older masked marker keeps no
+// history, as masked always did; 3: not a rig record (or older than the
+// window -- still the camera term). A garbage marker false-matches a frame in
+// the window with probability ~64 * 2^-32.
+uint engineStaleStampKind(EnginePoolRecord r, uint token) {
+    const uint h = engineKindHash(r);
+    [loop] for (uint age = 1; age <= 64; ++age) {
+        uint hs = (h ^ (token - age)) * 0x01000193u; hs ^= hs >> 13;
+        if (r.data[18].x == (0x7FC0ED01u ^ hs)) return 6u;
+        if (r.data[18].x == (0x7FC0ED02u ^ hs)) return 2u;
+    }
     return 3u;
 }
 // Did the record's pose change between the two blocks (scale, quaternion,
@@ -140,7 +182,10 @@ bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
 // ENGINE_MOTION_CORE_END
 Texture2D<float2> ES : register(t21);
 StructuredBuffer<EnginePoolRecord> EP : register(t22);
-cbuffer EngineNow : register(b1) { float4 EN[276]; };
+// EN[276].x carries the frame stamp (the present-frame clock at this eye's
+// snapshot, as uint bits): a joined marker folds it in, so a record whose
+// last emission was an earlier frame declines to the camera term.
+cbuffer EngineNow : register(b1) { float4 EN[277]; };
 cbuffer EngineBefore : register(b2) { float4 EB[276]; };
 // The eye path: this eye's own scene constants, this frame's and last.
 bool engineReproject(EnginePoolRecord r, float2 ndc, float zr, out float4 before) {
@@ -457,7 +502,10 @@ R"HLSL(
 //   4 STALE: the slot's depth is not the scene's (a later draw covers it);
 //   5 CORRUPT: the depth is the scene's but the slot code is not an odd whole
 //     number -- arithmetic (a blend, a sum) reached MRT6; declined, never
-//     read as another record (the 2026-09-23 review, item 4).
+//     read as another record (the 2026-09-23 review, item 4);
+//   6 STALE STAMP: a joined marker whose frame stamp is not this frame --
+//     the record's pose pair is an older frame's and replays a phantom delta;
+//     declined to the camera term (2026-09-25, the coriolis station hull).
 // The arithmetic is the ENGINE_MOTION_HLSL block near the top (the rig cuts
 // out and runs that same text). The ownership test is exact: the slot's
 // recorded depth must be the scene depth bit for bit. The rows carry the
@@ -486,8 +534,16 @@ uint enginePixelZ(float2 p, float2 offset, bool haveZ, float knownZ, out float2 
     const uint slot = code >> 1u;
     if (slot >= count) return 0u;
     const EnginePoolRecord r = EP[slot];
-    const uint kind = engineRecordKind(r);
-    if (kind != 1u) return kind;
+    const uint token = asuint(EN[276].x);
+    const uint kind = engineRecordKind(r, token);
+    if (kind == 2u) return 2u;
+    if (kind != 1u) return engineStaleStampKind(r, token);
+    // Freshness: a joined marker certifies only at the frame it was written
+    // (the emit folded the present-frame clock in). True by construction at
+    // kind 1; kept explicit so the decline below names its condition. A
+    // mismatch is a stale pose pair -- replaying it would replay that delta
+    // forever -- and declines to the camera term, counted separately (kind 6).
+    if (r.data[18].x != (0x7FC0ED01u ^ engineMarkerHash(r, token))) return 6u;
     uint w, h;
     ES.GetDimensions(w, h);
     const float2 dims = float2(w, h);
@@ -712,11 +768,11 @@ uint clipSize(float3 hc, float3 hy) {
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 #if EDVR_TEMPORAL_DIAGNOSTICS
-// 0..47 are Stats' own slots; mv's 48..52 are engine-record motion's pixel
+// 0..47 are Stats' own slots; mv's 48..53 are engine-record motion's pixel
 // counts (joined, masked, a pool record that is not a rig record, stale
-// slot, corrupt slot code), flushed to Stats 50..54 (48/49 were the
-// stepped-part path's, retired 2026-09-23).
-groupshared uint gCount[53];
+// slot, corrupt slot code, stale stamp), flushed to Stats 50..55 (48/49 were
+// the stepped-part path's, retired 2026-09-23).
+groupshared uint gCount[54];
 #endif
 // A debug view's pixel, painted into the OUTPUT rather than at this
 // thread's own index.
@@ -771,7 +827,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     }
     GroupMemoryBarrierWithGroupSync();
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 53) gCount[gi] = 0;
+    if (gi < 54) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
 #endif
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
@@ -1040,7 +1096,9 @@ R"HLSL(
             // surface that is not a rig record (the camera term), yellow for a
             // slot whose recorded depth is not the pixel's (stale: a later
             // draw changed it), magenta for a slot code arithmetic reached
-            // (declined); the frame dimmed elsewhere (the camera term). On
+            // (declined), orange for a joined marker stamped with an older
+            // frame (its pose pair is stale: the camera term); the frame
+            // dimmed elsewhere (the camera term). On
             // foot the same colours come through the panel: the screen map's
             // validity carries 16 + the SOURCE-space kind under this view
             // (screen_motion.h), and an eye pixel showing the 2D screen is
@@ -1056,6 +1114,7 @@ R"HLSL(
             else if (k6 == 3u) o6 = float3(0.0, 0.3, 1.0);
             else if (k6 == 4u) o6 = float3(1.0, 1.0, 0.0);
             else if (k6 == 5u) o6 = float3(1.0, 0.0, 1.0);
+            else if (k6 == 6u) o6 = float3(1.0, 0.5, 0.0);
             paintDebug(id.xy, size, o6);
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
@@ -1072,10 +1131,10 @@ R"HLSL(
     // -- used to pay forty global atomics onto forty contended addresses
     // regardless. At the Crystal Super's size that is 290,512 groups an
     // eye, so 11.6 million atomic adds an eye and 23 million a frame, for
-    // a set of numbers that only a log line reads. 48..52 are engine-record
-    // motion's, at Stats 50..54.
+    // a set of numbers that only a log line reads. 48..53 are engine-record
+    // motion's, at Stats 50..55.
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 53 && gCount[gi] != 0) InterlockedAdd(Stats[gi < 48u ? gi : gi + 2u], gCount[gi]);
+    if (gi < 54 && gCount[gi] != 0) InterlockedAdd(Stats[gi < 48u ? gi : gi + 2u], gCount[gi]);
 #endif
 }
 )HLSL"
@@ -1381,7 +1440,7 @@ R"HLSL(
             }
             o = ek6 == 1u ? float3(0.0, 1.0, 0.0) : ek6 == 2u ? float3(1.0, 0.0, 0.0)
               : ek6 == 3u ? float3(0.0, 0.3, 1.0) : ek6 == 4u ? float3(1.0, 1.0, 0.0)
-              : ek6 == 5u ? float3(1.0, 0.0, 1.0) : cur.rgb * 0.25;
+              : ek6 == 5u ? float3(1.0, 0.0, 1.0) : ek6 == 6u ? float3(1.0, 0.5, 0.0) : cur.rgb * 0.25;
         }
         O[id.xy] = float4(o, cur.a);
     }

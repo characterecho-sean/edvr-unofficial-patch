@@ -122,7 +122,11 @@ int main(int argc,char** argv) {
     bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_SHADER_RESOURCE;bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     D3D11_SUBRESOURCE_DATA initial{};initial.pSysMem=record;ComPtr<ID3D11Buffer> pool;
     check(SUCCEEDED(device->CreateBuffer(&bd,&initial,pool.GetAddressOf())),"pool buffer");auto poolView=view(device.Get(),pool.Get());
-    float scene[276][4]{};float cam[6][4];camera(cam);std::memcpy(scene+270,cam,sizeof(cam));
+    // The freshness stamp the prep shader's EN[276].x reads (the emit's
+    // present-frame clock in production): the fixture's markers fold it in.
+    constexpr uint32_t kFixtureStamp = 77;
+    float scene[277][4]{};float cam[6][4];camera(cam);std::memcpy(scene+270,cam,sizeof(cam));
+    {const uint32_t stamp=kFixtureStamp;std::memcpy(&scene[276][0],&stamp,4);}
     bd={};bd.ByteWidth=sizeof(scene);bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     initial.pSysMem=scene;ComPtr<ID3D11Buffer> now,old;
     check(SUCCEEDED(device->CreateBuffer(&bd,&initial,now.GetAddressOf())) &&
@@ -200,7 +204,7 @@ int main(int argc,char** argv) {
     record[73]=bits(-.3125f);record[74]=bits(0);record[75]=bits(2.5f);
     edvr::engine_velocity_emit::Pose np{{record[4],record[5],record[6],record[2],record[3]}};
     edvr::engine_velocity_emit::Pose pp{{record[73],record[74],record[75],record[78],record[79]}};
-    record[72]=0x7FC0ED01u^edvr::engine_velocity_emit::markerHash(np,pp);
+    record[72]=0x7FC0ED01u^edvr::engine_velocity_emit::markerHash(np,pp,kFixtureStamp);
     context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
     slots[(8*w+8)*2]=1;context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
     ++f.frame;run(true);
@@ -210,7 +214,7 @@ int main(int argc,char** argv) {
     for(unsigned kind=0;kind<3;++kind){
         if(kind==0)slots[(8*w+8)*2]=2; // corrupt even code
         if(kind==1){slots[(8*w+8)*2]=1;slots[(8*w+8)*2+1]=.02f;} // stale depth
-        if(kind==2){slots[(8*w+8)*2+1]=.01f;record[72]=0x7FC0ED02u^edvr::engine_velocity_emit::markerHash(np,pp);context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);}
+        if(kind==2){slots[(8*w+8)*2+1]=.01f;record[72]=0x7FC0ED02u^edvr::engine_velocity_emit::markerHash(np,pp,kFixtureStamp);context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);}
         context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);++f.frame;
         auto rejected=run(true);check(observedReject==255 && pixel(rejected.Get())==0xff0000ff,"corrupt/stale/masked pixel displays current color");
     }

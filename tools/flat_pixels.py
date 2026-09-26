@@ -465,9 +465,11 @@ def verify_fixture(capture_dir):
             raise CaptureError("fixture slot bytes differ from the WARP pattern")
         pool_path, view = meta["buffers"]["pool"]
         pool = np.fromfile(pool_path, dtype="<u4").reshape((-1, 21, 4))
+        scene_now = np.fromfile(meta["buffers"]["scene_now"][0], dtype="<f4").reshape((-1, 4))
+        token = np.float32(scene_now[276, 0]).view(np.uint32)
         if (view["first_element"] != 1 or view["num_elements"] != 3 or
                 int(pool[0, 0, 0]) != 0x12345678 or
-                [record_kind(pool[i]) for i in (1, 2, 3)] !=
+                [record_kind(pool[i], token) for i in (1, 2, 3)] !=
                 ["unmarked", "joined", "masked"]):
             raise CaptureError("fixture pool view offset or marker bytes differ")
         for name, rows in (("scene_now", meta["camera"]),
@@ -649,7 +651,7 @@ def self_test():
             pass
         # A tiny complete capture exercises actual branch selection, view
         # offset, stale depth, malformed slot, and masked record handling.
-        from flat_pixels_engine import marker_hash, record_kind
+        from flat_pixels_engine import marker_hash_stamped, record_kind
         complete = json.loads(json.dumps(v2))
         complete["reset"] = False
         complete["engine"] = {"complete": True, "status": "complete",
@@ -664,17 +666,21 @@ def self_test():
                                      "row_stride": rw * 8, "byte_size": rw * rh * 8,
                                      "srv_format": 16, "srv_dimension": 4,
                                      "most_detailed_mip": 0, "mip_levels": 1})
+        # The freshness stamp the prep shader's EN[276].x carries: the markers
+        # fold it in and certify only at that frame.
+        stamp = 77
         pool = np.zeros((4, 21, 4), dtype="<u4")
         fbits = np.asarray(1, dtype="<f4").view("<u4").item()
         pool[0, 0, 0] = 0x12345678
         for index in (2, 3):
             pool[index, 0, 1] = pool[index, 19, 1] = fbits
             pool[index, 0, 2:4] = pool[index, 19, 2:4] = [0x7FFF7FFF, 0xFFFE7FFF]
-            pool[index, 18, 0] = (0x7FC0ED01 if index == 2 else 0x7FC0ED02) ^ marker_hash(pool[index])
-        assert [record_kind(pool[i]) for i in (1, 2, 3)] == ["unmarked", "joined", "masked"]
+            pool[index, 18, 0] = (0x7FC0ED01 if index == 2 else 0x7FC0ED02) ^ marker_hash_stamped(pool[index], stamp)
+        assert [record_kind(pool[i], stamp) for i in (1, 2, 3)] == ["unmarked", "joined", "masked"]
         (v2_session / "frame_7_pool.bin").write_bytes(pool.tobytes())
-        scene = np.zeros((276, 4), dtype="<f4")
+        scene = np.zeros((277, 4), dtype="<f4")
         scene[270:276] = np.asarray(complete["camera"], dtype="<f4")
+        scene[276, 0] = np.uint32(stamp).view("<f4")
         for name in ("scene_now", "scene_previous"):
             (v2_session / f"frame_7_{name}.bin").write_bytes(scene.tobytes())
         complete["buffers"] = [

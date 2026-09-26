@@ -150,6 +150,11 @@ constexpr size_t kBlendCap = 64;
 // source scene): the writes seen since the slot was assigned, and for the
 // scene constants the registers 270..275 the last Unmap left.
 constexpr unsigned kRowsFirst = 270, kRowsBytes = 6 * 16;
+// The freshness stamp (2026-09-25): the engine-motion shaders read
+// EN[276].x (SEN[276].x on foot) as the present-frame clock the emit folded
+// into each marker, uint bits. Our scene-constants copies are sized to hold
+// it even where the game's own buffer stops at row 275.
+constexpr unsigned kStampFloat4 = 276, kStampBytes = (kStampFloat4 + 1) * 16;
 struct WatchInfo {
     const ID3D11Resource* resource = nullptr;
     void* mapped = nullptr;
@@ -185,6 +190,7 @@ struct Eye {
     Ptr<ID3D11Buffer> scene[2];          // the game's cb1, by present-frame parity
     uint32_t sceneFrame[2] = {~0u, ~0u};
     UINT sceneBytes = 0;
+    Ptr<ID3D11Buffer> stampCell;         // 16 bytes: the frame stamp's carrier into scene[slot]
     uint32_t frame = ~0u;                // the present frame this eye's data belongs to
     uint32_t rtvGen = 0, dsvGen = 0;     // the pass binding MRT6 was added to
     bool bindingStale = false;           // an internal flat restore removed MRT6 without a game generation
@@ -282,7 +288,8 @@ struct DrawStats {
              refusedPrevious = 0;
     uint64_t restores = 0;
     uint64_t frames = 0;
-    uint64_t pixelsJoined = 0, pixelsMasked = 0, pixelsCamera = 0, pixelsStale = 0, pixelsCorrupt = 0, pixelReads = 0;
+    uint64_t pixelsJoined = 0, pixelsMasked = 0, pixelsCamera = 0, pixelsStale = 0, pixelsCorrupt = 0, pixelsStamped = 0,
+             pixelReads = 0;
     // The on-foot source: its eye-frames (also counted in eyeFrames above),
     // the screen shader's view requests and refusals, and its panel pixels.
     uint64_t sourceFrames = 0, sourceFramesBound = 0;
@@ -304,8 +311,9 @@ struct DrawStats {
     uint64_t sourceInvalid[kInvalidCount] = {};
     // The screen shader's per-kind eye-pixel counts: [0] every pixel of every
     // frame (diagnostics or motion_source), [1] sampled (one frame in
-    // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared).
-    uint64_t panel[2][5] = {}, panelDraws[2] = {};
+    // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared). The
+    // kinds are the compose's six (stale stamp last; see enginePixelZ).
+    uint64_t panel[2][6] = {}, panelDraws[2] = {};
     uint64_t burstFrames = 0, burstGaps = 0;
     void clear() { *this = DrawStats{}; }
 };
@@ -741,7 +749,8 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
         for (auto& b : e.scene) b.Reset();
         e.sceneFrame[0] = e.sceneFrame[1] = ~0u;
         D3D11_BUFFER_DESC d{};
-        d.ByteWidth = sd.ByteWidth; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        d.ByteWidth = std::max<UINT>(sd.ByteWidth, kStampBytes); d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         for (auto& b : e.scene) if (FAILED(dev->CreateBuffer(&d, nullptr, &b))) {
             for (auto& c : e.scene) c.Reset();
             e.sceneBytes = 0; ++g_draw.createFailed;
@@ -756,7 +765,28 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
         // instead of paying two pairs' worth of overhead for it.
         GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
         ctx->CopyResource(e.pool.Get(), poolBuf.Get());
-        ctx->CopyResource(e.scene[slot].Get(), scene.Get());
+        // The copy by region, not resource: our buffer can be a float4
+        // larger than the game's (the stamp), which CopyResource would
+        // reject. The stamp is this eye-frame's present-frame clock -- the
+        // same g_frame the emit folded into the markers this window -- so a
+        // joined record the engine did not re-evaluate this frame declines
+        // to the camera term instead of replaying its stale delta. A boxed
+        // UpdateSubresource on a buffer is dropped (WARP no-ops it), so the
+        // stamp rides a 16-byte cell: a whole-subresource update, then a
+        // boxed copy into the scene constants' shadow.
+        ctx->CopySubresourceRegion(e.scene[slot].Get(), 0, 0, 0, 0, scene.Get(), 0, nullptr);
+        if (!e.stampCell) {
+            D3D11_BUFFER_DESC cd{};
+            cd.ByteWidth = 16; cd.Usage = D3D11_USAGE_DEFAULT;
+            if (FAILED(dev->CreateBuffer(&cd, nullptr, &e.stampCell))) {
+                ++g_draw.createFailed;
+                invalidate(e, kCreate);
+                return false;
+            }
+        }
+        ctx->UpdateSubresource(e.stampCell.Get(), 0, nullptr, &frame, 16, 0);
+        const D3D11_BOX stampBox{0, 0, 0, 16, 1, 1};
+        ctx->CopySubresourceRegion(e.scene[slot].Get(), 0, kStampFloat4 * 16u, 0, 0, e.stampCell.Get(), 0, &stampBox);
     }
     // What the snapshots copy (the performance review, item 4: measured
     // before any storage change): the whole pool buffer, whatever the view
@@ -1248,10 +1278,12 @@ void summaryLocked(uint64_t now) {
         Log::get().note("engine motion: pixels per eye-frame on the trained path: engine-joined %.0f (a rig record's "
                         "certified exact motion, moving or still -- not a mover count), masked %.0f "
                         "(no history), pool surface not a rig record %.0f (camera term), stale slot %.0f (the slot's "
-                        "recorded depth is not the pixel's), corrupt slot code %.0f (declined; must be 0); %llu readbacks.",
+                        "recorded depth is not the pixel's), corrupt slot code %.0f (declined; must be 0), stale stamp %.0f "
+                        "(a joined marker from an older frame: the camera term); %llu readbacks.",
                         double(g_draw.pixelsJoined) / double(g_draw.pixelReads), double(g_draw.pixelsMasked) / double(g_draw.pixelReads),
                         double(g_draw.pixelsCamera) / double(g_draw.pixelReads), double(g_draw.pixelsStale) / double(g_draw.pixelReads),
-                        double(g_draw.pixelsCorrupt) / double(g_draw.pixelReads), u(g_draw.pixelReads));
+                        double(g_draw.pixelsCorrupt) / double(g_draw.pixelReads), double(g_draw.pixelsStamped) / double(g_draw.pixelReads),
+                        u(g_draw.pixelReads));
     else
         Log::get().note("engine motion: pixels: not counted this window -- the counts come from the instrumented DLSS/FSR "
                         "motion shader only (advanced.temporal_aa_diagnostics = 1, or a debug view) with the engine inputs "
@@ -1287,7 +1319,7 @@ void summaryLocked(uint64_t now) {
         // The panel's kinds: every pixel (diagnostics, motion_source) when
         // counted, else the sampled count, else nothing.
         const int mode = g_draw.panelDraws[0] ? 0 : g_draw.panelDraws[1] ? 1 : -1;
-        char pixels[640];
+        char pixels[720];
         if (mode >= 0) {
             const double draws = double(g_draw.panelDraws[mode]);
             const uint64_t* p = g_draw.panel[mode];
@@ -1298,10 +1330,10 @@ void summaryLocked(uint64_t now) {
                             kPanelSampleStride, kPanelSampleStride);
             _snprintf_s(pixels, _TRUNCATE, "panel pixels per %s eye draw: engine-joined %.0f (a rig record's certified "
                         "exact motion, carried through the panel), masked %.0f (no history), pool surface not a rig "
-                        "record %.0f (camera term), stale slot %.0f, corrupt slot code %.0f (declined; must be 0) over "
-                        "%llu counted eye draws%s", mode ? "sampled" : "counted", double(p[0]) / draws,
-                        double(p[1]) / draws, double(p[2]) / draws, double(p[3]) / draws, double(p[4]) / draws,
-                        u(g_draw.panelDraws[mode]), sampleNote);
+                        "record %.0f (camera term), stale slot %.0f, corrupt slot code %.0f (declined; must be 0), "
+                        "stale stamp %.0f over %llu counted eye draws%s", mode ? "sampled" : "counted",
+                        double(p[0]) / draws, double(p[1]) / draws, double(p[2]) / draws, double(p[3]) / draws,
+                        double(p[4]) / draws, double(p[5]) / draws, u(g_draw.panelDraws[mode]), sampleNote);
         } else {
             _snprintf_s(pixels, _TRUNCATE, "panel pixels: none counted this window (sampled one frame in %u while the "
                         "source's views are given; every pixel with advanced.temporal_aa_diagnostics = 1 or the "
@@ -1733,16 +1765,17 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
 }
 
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
-                                   uint32_t eyeDraws, uint32_t pixelStride) {
+                                   uint32_t stamped, uint32_t eyeDraws, uint32_t pixelStride) {
     if (!live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const int mode = pixelStride > 1u ? 1 : 0;
-    const uint32_t k[5] = {joined, masked, camera, stale, corrupt};
-    for (int i = 0; i < 5; ++i) g_draw.panel[mode][i] += k[i];
+    const uint32_t k[6] = {joined, masked, camera, stale, corrupt, stamped};
+    for (int i = 0; i < 6; ++i) g_draw.panel[mode][i] += k[i];
     g_draw.panelDraws[mode] += eyeDraws;
 }
 
-void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt) {
+void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
+                              uint32_t stamped) {
     if (!live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     g_draw.pixelsJoined += joined;
@@ -1750,6 +1783,7 @@ void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera,
     g_draw.pixelsCamera += camera;
     g_draw.pixelsStale += stale;
     g_draw.pixelsCorrupt += corrupt;
+    g_draw.pixelsStamped += stamped;
     ++g_draw.pixelReads;
 }
 

@@ -57,18 +57,21 @@ inline int flatPixelCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
         SUCCEEDED(device->CreateShaderResourceView(slotTexture.Get(),nullptr,&slotView)),"engine slot source created");
     uint32_t pool[4][84]{};pool[0][0]=0x12345678u;
     namespace emit=edvr::engine_velocity_emit;
+    // The freshness stamp the prep shader's EN[276].x reads.
+    constexpr uint32_t kCaptureStamp = 77;
     emit::Pose pose{};pose.w[3]=0x7fff7fffu;pose.w[4]=0xfffe7fffu;
     for(unsigned i=2;i<4;++i) {
         pool[i][1]=pool[i][77]=0x3f800000u;
         pool[i][2]=pool[i][78]=pose.w[3];pool[i][3]=pool[i][79]=pose.w[4];
-        pool[i][72]=(i==2?emit::kJoined:emit::kMasked)^emit::markerHash(pose,pose);
+        pool[i][72]=(i==2?emit::kJoined:emit::kMasked)^emit::markerHash(pose,pose,kCaptureStamp);
     }
-    float sceneNow[276][4]{},scenePrevious[276][4]{};
+    float sceneNow[277][4]{},scenePrevious[277][4]{};
     frame.camera[0][0]=frame.camera[1][1]=frame.camera[2][3]=frame.camera[4][2]=1;
     frame.camera[3][2]=.025f;frame.camera[5][0]=1.25f;
     std::memcpy(frame.previousCamera,frame.camera,sizeof(frame.camera));frame.previousCamera[5][0]=1;
     std::memcpy(sceneNow+270,frame.camera,sizeof(frame.camera));
     std::memcpy(scenePrevious+270,frame.previousCamera,sizeof(frame.previousCamera));
+    {const uint32_t stamp=kCaptureStamp;std::memcpy(&sceneNow[276][0],&stamp,4);std::memcpy(&scenePrevious[276][0],&stamp,4);}
     auto makeBuffer=[&](const void* data,UINT bytes,bool structured) {
         D3D11_BUFFER_DESC d{};d.ByteWidth=bytes;d.BindFlags=structured?D3D11_BIND_SHADER_RESOURCE:D3D11_BIND_CONSTANT_BUFFER;
         d.MiscFlags=structured?D3D11_RESOURCE_MISC_BUFFER_STRUCTURED:0;d.StructureByteStride=structured?336:0;

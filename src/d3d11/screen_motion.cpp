@@ -92,7 +92,7 @@ constexpr unsigned kUnnamedNoteFrames=90;    // screen frames with no naming bef
 // the motion_source view) and hand them to the view (motion_source). Outside
 // State: State resets must not forget a setting until the next config poll.
 bool g_countKinds=false,g_paintKinds=false;
-constexpr unsigned kPanelKinds=5;   // joined, masked, not a rig record, stale, corrupt
+constexpr unsigned kPanelKinds=6;   // joined, masked, not a rig record, stale, corrupt, stale stamp
 
 constexpr uint64_t kGpuWindowFrames=1800;
 constexpr unsigned kGpuDrainFrames=120;
@@ -533,7 +533,7 @@ static void flushPanelCounts(ID3D11DeviceContext* ctx) {
         D3D11_MAPPED_SUBRESOURCE m{};
         if(ctx->Map(g.countsStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m)!=S_OK)break;
         uint32_t c[kPanelKinds]{};std::memcpy(c,m.pData,sizeof(c));ctx->Unmap(g.countsStaging[i].Get(),0);
-        engineVelocityNotePanelPixels(c[0],c[1],c[2],c[3],c[4],g.countsDraws[i],g.countsStride[i]);
+        engineVelocityNotePanelPixels(c[0],c[1],c[2],c[3],c[4],c[5],g.countsDraws[i],g.countsStride[i]);
         g.countsPending[i]=false;
     }
 }

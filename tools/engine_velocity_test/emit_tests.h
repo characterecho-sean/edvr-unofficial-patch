@@ -129,11 +129,35 @@ inline ev::Pose blockPrev(const std::array<uint8_t, 0x150>& r) {
     ev::Pose p; std::memcpy(&p.w[0], r.data() + ev::kItemPrevPos, 12); std::memcpy(&p.w[3], r.data() + ev::kItemPrevQuat, 8); return p;
 }
 inline uint32_t marker(const std::array<uint8_t, 0x150>& r) { uint32_t m; std::memcpy(&m, r.data() + ev::kItemMarker, 4); return m; }
-// The compose's reading of a record: 1 joined, 2 masked, 3 neither.
-inline uint32_t kindOf(const std::array<uint8_t, 0x150>& r) {
-    const uint32_t h = ev::markerHash(blockNow(r), blockPrev(r));
+// The marker hash's stamp-free seed, mirrored (the HLSL engineKindHash):
+// the two pose blocks alone.
+inline uint32_t kindHash(const ev::Pose& now, const ev::Pose& prev) {
+    uint32_t h = 0x811C9DC5u;
+    auto mix = [&](uint32_t v) { h = (h ^ v) * 0x01000193u; h ^= h >> 13; };
+    for (uint32_t v : now.w) mix(v);
+    for (uint32_t v : prev.w) mix(v);
+    return h;
+}
+// The compose's fresh kind reading, mirrored: the marker must match one of
+// the tags under the 11-word hash with the COMPOSE frame's token (the
+// freshness stamp the emit folded in). 1 joined, 2 masked, 3 neither.
+inline uint32_t kindOf(const std::array<uint8_t, 0x150>& r, uint32_t frame) {
+    const uint32_t h = ev::markerHash(blockNow(r), blockPrev(r), frame);
     if (marker(r) == (ev::kJoined ^ h)) return 1;
     if (marker(r) == (ev::kMasked ^ h)) return 2;
+    return 3;
+}
+// The decline path's second half, mirrored (the HLSL engineStaleStampKind):
+// a marker stamped within the last 64 frames still names its kind -- a
+// joined one is a stale pose pair (kind 6 at the compose frame), a masked
+// one keeps no history. 3: not a rig record, or older than the window.
+inline uint32_t staleKindOf(const std::array<uint8_t, 0x150>& r, uint32_t frame) {
+    const uint32_t h = kindHash(blockNow(r), blockPrev(r));
+    for (uint32_t age = 1; age <= 64; ++age) {
+        uint32_t hs = (h ^ (frame - age)) * 0x01000193u; hs ^= hs >> 13;
+        if (marker(r) == (ev::kJoined ^ hs)) return 6;
+        if (marker(r) == (ev::kMasked ^ hs)) return 2;
+    }
     return 3;
 }
 
@@ -170,7 +194,8 @@ inline void run(const Harness& h) {
     h.check(pool.size() == 2, "the producer appended two LOD records");
     for (auto& r : pool) {
         h.check(blockPrev(r) == p1 && blockNow(r) == p1, "first seen: both blocks the current pose");
-        h.check(kindOf(r) == 2, "first seen is MASKED, not joined with a zero motion (review item 1)");
+        h.check(kindOf(r, 100) == 2, "first seen is MASKED, not joined with a zero motion (review item 1)");
+        h.check(staleKindOf(r, 101) == 2, "a masked marker is still masked a frame later (the stamp folded in, found by the age window)");
     }
     h.check(s.firstSeen == 1 && s.itemsMasked == 2 && s.itemsJoined == 0, "first-seen counters");
 
@@ -179,21 +204,27 @@ inline void run(const Harness& h) {
     f->setPose(p2, 0xAAAA);
     emitOnce(*f, *table, s, 101, 1);
     pool = f->copier();
-    h.check(pool.size() == 1 && blockNow(pool[0]) == p2 && blockPrev(pool[0]) == p1 && kindOf(pool[0]) == 1,
+    h.check(pool.size() == 1 && blockNow(pool[0]) == p2 && blockPrev(pool[0]) == p1 && kindOf(pool[0], 101) == 1,
             "the frame after first sight joins: previous block holds frame 100's pose");
     h.check(s.itemsMoving == 1 && s.recordsMoving == 1, "moving counters");
+    // The freshness stamp (2026-09-25): the marker certifies at its own frame
+    // and declines at any other -- the cull case, where the record keeps this
+    // pair and marker for frames it is not re-evaluated, replays no phantom.
+    h.check(kindOf(pool[0], 100) == 3 && kindOf(pool[0], 102) == 3, "the same record does not certify at any other frame");
+    h.check(staleKindOf(pool[0], 102) == 6, "at F+1 without a re-emit the compose finds it stale (kind 6) and keeps the camera term");
 
     // Frame 101 again, same pose (another emission in one frame): the same previous.
     emitOnce(*f, *table, s, 101, 1);
     pool = f->copier();
-    h.check(pool.size() == 2 && blockPrev(pool[1]) == p1 && kindOf(pool[1]) == 1, "a repeat in the frame reuses the frame's previous pose");
+    h.check(pool.size() == 2 && blockPrev(pool[1]) == p1 && kindOf(pool[1], 101) == 1, "a repeat in the frame reuses the frame's previous pose");
+    
     h.check(s.repeats == 1, "repeat counted");
 
     // Frame 101, a DIFFERENT pose under the same tick: ambiguous -> masked.
     f->setPose(p3, 0xAAAA);
     emitOnce(*f, *table, s, 101, 1);
     pool = f->copier();
-    h.check(pool.size() == 3 && blockPrev(pool[2]) == p3 && kindOf(pool[2]) == 2,
+    h.check(pool.size() == 3 && blockPrev(pool[2]) == p3 && kindOf(pool[2], 101) == 2,
             "a pose change within one frame masks the record, never invents a previous");
     h.check(s.sameFrameChanges == 1, "same-frame change counted");
 
@@ -201,26 +232,26 @@ inline void run(const Harness& h) {
     // certified, so there is NO object velocity: masked, re-baselined (review
     // item 2's regression: no p3-to-p2 vector).
     pool = {frameOf(*f, *table, s, 102, p3, 0xAAAA)};
-    h.check(kindOf(pool[0]) == 2 && blockPrev(pool[0]) == p3, "after a same-tick change the next frame is masked, no false velocity");
+    h.check(kindOf(pool[0], 102) == 2 && blockPrev(pool[0]) == p3, "after a same-tick change the next frame is masked, no false velocity");
     h.check(s.uncertifiedHistory == 1, "uncertified history counted");
     // Frame 103: joined again from the clean frame-102 baseline -- still, zero motion.
     const uint64_t movingBefore = s.itemsMoving;
     pool = {frameOf(*f, *table, s, 103, p3, 0xAAAA)};
-    h.check(kindOf(pool[0]) == 1 && blockPrev(pool[0]) == p3 && s.itemsMoving == movingBefore,
+    h.check(kindOf(pool[0], 103) == 1 && blockPrev(pool[0]) == p3 && s.itemsMoving == movingBefore,
             "the frame after the re-baseline joins with zero motion");
 
     // Frame 106: a gap of three frames -> masked; 107 joins from it.
     pool = {frameOf(*f, *table, s, 106, p1, 0xAAAA)};
-    h.check(kindOf(pool[0]) == 2 && blockPrev(pool[0]) == p1 && s.gaps == 1 && s.gapAge[1] == 1,
+    h.check(kindOf(pool[0], 106) == 2 && blockPrev(pool[0]) == p1 && s.gaps == 1 && s.gapAge[1] == 1,
             "a gap masks (counted, age 3 in the 3-4 bucket)");
     pool = {frameOf(*f, *table, s, 107, p2, 0xAAAA)};
-    h.check(kindOf(pool[0]) == 1 && blockPrev(pool[0]) == p1, "the frame after a gap joins");
+    h.check(kindOf(pool[0], 107) == 1 && blockPrev(pool[0]) == p1, "the frame after a gap joins");
 
     // Frame 108: the pointer reused by another object (node changed) -> masked; 109 joins.
     pool = {frameOf(*f, *table, s, 108, p3, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 2 && s.identityResets == 1, "a reused record pointer masks");
+    h.check(kindOf(pool[0], 108) == 2 && s.identityResets == 1, "a reused record pointer masks");
     pool = {frameOf(*f, *table, s, 109, p2, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 1 && blockPrev(pool[0]) == p3, "the frame after a reuse joins");
+    h.check(kindOf(pool[0], 109) == 1 && blockPrev(pool[0]) == p3, "the frame after a reuse joins");
 
     // Seven then two into one list: the call's records span two nodes.
     f->reset();
@@ -229,13 +260,13 @@ inline void run(const Harness& h) {
     emitOnce(*f, *table, s, 110, 2);   // tail had 7: one goes in it, one in a new node
     pool = f->copier();
     h.check(pool.size() == 9 && f->nodes.size() == 2, "nine records over two nodes");
-    for (auto& r : pool) h.check(blockPrev(r) == p2 && kindOf(r) == 1, "every record of both calls, across the node boundary, got frame 109's pose");
+    for (auto& r : pool) h.check(blockPrev(r) == p2 && kindOf(r, 110) == 1, "every record of both calls, across the node boundary, got frame 109's pose");
 
     // The review's provenance repro, across the following frames: A in 111,
     // then pose B with its appended item disagreeing (X) in 112, then C in 113.
     // 113 must NOT join with previous B; 114 joins from C.
     pool = {frameOf(*f, *table, s, 111, p1, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 1, "A joined");
+    h.check(kindOf(pool[0], 111) == 1, "A joined");
     {
         f->reset();
         f->setPose(p2, 0xBBBB);
@@ -254,9 +285,9 @@ inline void run(const Harness& h) {
                 "a disagreeing record is counted and not written");
     }
     pool = {frameOf(*f, *table, s, 113, p3, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 2 && blockPrev(pool[0]) == p3, "the frame after a failed call is masked, never joined with its pose (review item 2)");
+    h.check(kindOf(pool[0], 113) == 2 && blockPrev(pool[0]) == p3, "the frame after a failed call is masked, never joined with its pose (review item 2)");
     pool = {frameOf(*f, *table, s, 114, p4, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 1 && blockPrev(pool[0]) == p3, "the clean frame after joins");
+    h.check(kindOf(pool[0], 114) == 1 && blockPrev(pool[0]) == p3, "the clean frame after joins");
 
     // A MIXED call: two items, the second disagreeing. The valid one is written
     // masked, the failed one not at all, and the next frame is masked too.
@@ -272,27 +303,27 @@ inline void run(const Harness& h) {
         std::memcpy(&garbageMarker, reinterpret_cast<const void*>(second + ev::kItemMarker), 4);
         ev::observe(f->rec(), f->own(), before, Fake::get<int32_t>(f->own() + ev::kOwnerCount), 115, &fakeLookup, *table, s);
         pool = f->copier();
-        h.check(kindOf(pool[0]) == 2 && blockPrev(pool[0]) == p1, "a mixed call writes its valid item masked");
+        h.check(kindOf(pool[0], 115) == 2 && blockPrev(pool[0]) == p1, "a mixed call writes its valid item masked");
         uint32_t after = 0;
         std::memcpy(&after, reinterpret_cast<const void*>(second + ev::kItemMarker), 4);
         h.check(after == garbageMarker, "a mixed call leaves its failed item unwritten");
     }
     pool = {frameOf(*f, *table, s, 116, p2, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 2, "the frame after a mixed call is masked");
+    h.check(kindOf(pool[0], 116) == 2, "the frame after a mixed call is masked");
     pool = {frameOf(*f, *table, s, 117, p3, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 1 && blockPrev(pool[0]) == p2, "then joins");
+    h.check(kindOf(pool[0], 117) == 1 && blockPrev(pool[0]) == p2, "then joins");
 
     // A located-nowhere call in a joined frame taints it: the next frame masks.
     pool = {frameOf(*f, *table, s, 118, p4, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 1, "joined before the locate failure");
+    h.check(kindOf(pool[0], 118) == 1, "joined before the locate failure");
     g_lookupRefuses = true;
     emitOnce(*f, *table, s, 118, 1);
     g_lookupRefuses = false;
     h.check(s.locateFailures == 1 && s.taints >= 1, "a refused lookup is a locate failure and taints the frame");
     pool = {frameOf(*f, *table, s, 119, p4, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 2, "the frame after a tainted one is masked");
+    h.check(kindOf(pool[0], 119) == 2, "the frame after a tainted one is masked");
     pool = {frameOf(*f, *table, s, 120, p1, 0xBBBB)};
-    h.check(kindOf(pool[0]) == 1 && blockPrev(pool[0]) == p4, "then joins");
+    h.check(kindOf(pool[0], 120) == 1 && blockPrev(pool[0]) == p4, "then joins");
 
     // A rig record that cannot be read: counted, nothing written, no crash.
     const uint64_t faultsBefore = s.readFaults;
@@ -363,8 +394,10 @@ inline void run(const Harness& h) {
         g_fake = f.get();
     }
 
-    // The hash is order-sensitive over both blocks (a swapped pair must not validate).
-    h.check(ev::markerHash(p1, p2) != ev::markerHash(p2, p1), "marker hash distinguishes current from previous");
+    // The hash is order-sensitive over both blocks and the frame stamp (a
+    // swapped pair or another frame's token must not validate).
+    h.check(ev::markerHash(p1, p2, 100) != ev::markerHash(p2, p1, 100), "marker hash distinguishes current from previous");
+    h.check(ev::markerHash(p1, p2, 100) != ev::markerHash(p1, p2, 101), "marker hash distinguishes the frame stamp");
     g_fake = nullptr;
     std::printf("  emit: %llu calls, joined %llu, masked %llu, disagreements %llu, unproven %llu (the gates' own fixtures)\n",
                 (unsigned long long)s.calls.load(), (unsigned long long)s.itemsJoined.load(),

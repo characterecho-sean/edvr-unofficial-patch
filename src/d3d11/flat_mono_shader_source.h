@@ -9,7 +9,7 @@ cbuffer Mono : register(b0) {
     uint4 flags; // reset, complete engine views, TAA, reserved
     float4 jitter; // current xy, previous zw; actual raster phase in render pixels
 };
-cbuffer EngineNow : register(b1) { float4 EN[276]; };
+cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
 cbuffer EngineBefore : register(b2) { float4 EB[276]; };
 Texture2D<float4> Color : register(t0);
 Texture2D<float> SceneDepth : register(t1);
@@ -52,9 +52,13 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before) {
     uint slot=code>>1;
     if(slot>=count || stride!=336)return 2;
     EnginePoolRecord r=Pool[slot];
-    uint kind=engineRecordKind(r);
+    uint kind=engineRecordKind(r,asuint(EN[276].x));
     if(kind==2)return 2;
-    if(kind!=1)return 0;
+    if(kind==3)kind=engineStaleStampKind(r,asuint(EN[276].x));
+    if(kind==2)return 2;   // an older masked marker keeps no history, as masked always did
+    if(kind!=1)return 0;   // not a rig record, or an older joined marker: the camera term
+    // Freshness: a joined marker certifies only at the frame it was written.
+    if(r.data[18].x!=(0x7FC0ED01u^engineMarkerHash(r,asuint(EN[276].x))))return 0;
     if(!engineReprojectRows(r,uv*float2(2,-2)+float2(-1,1),depth,
         EN[270],EN[271],EN[272],EN[273],EN[275].xyz,
         EB[270],EB[271],EB[272],EB[273],EB[275].xyz,before))

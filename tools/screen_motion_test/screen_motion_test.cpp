@@ -41,7 +41,7 @@ unsigned testSourceNotes=0;ID3D11Buffer* testSourceScene=nullptr;
 EngineVelocitySourceSignal testSourceSignal=EngineVelocitySourceSignal::Terrain;
 void engineVelocityNoteSource(ID3D11Texture2D*,ID3D11Buffer* scene,EngineVelocitySourceSignal signal){++testSourceNotes;testSourceScene=scene;testSourceSignal=signal;}
 bool engineVelocitySourceViews(ID3D11Texture2D*,EngineVelocityViews* out){if(out)*out=EngineVelocityViews{};return false;}
-void engineVelocityNotePanelPixels(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t){}
+void engineVelocityNotePanelPixels(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t){}
 // The hangar cases: vs_EB52 stands for a pool family, vs_AACF for a pool
 // family that is also a first-person weapon or tool shader.
 constexpr uint64_t testPoolVs=0xEB5234DB6ADB491Dull,testWeaponVs=0xAACFDCF2FB9AD809ull;

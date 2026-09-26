@@ -56,14 +56,17 @@ inline Q decode(const uint16_t l[4]) {   // exactly as the VS: float(lane) * (1/
     return {double(float(l[0]) * s - 1.0f), double(float(l[1]) * s - 1.0f), double(float(l[2]) * s - 1.0f), double(float(l[3]) * s - 1.0f)};
 }
 
-// A camera: clip rows 270..273 and origin 275 as the game fills cb1.
+// A camera: clip rows 270..273 and origin 275 as the game fills cb1. The
+// array holds a 277th float4: the freshness stamp the compose's EN[276].x
+// reads (the present-frame clock at the emission, as uint bits).
+inline constexpr uint32_t kStampFrame = 4242;   // the rigs' token; the emit's g_frame in production
 struct Camera {
     double rot[3][3];   // view = rot * (world - origin) + t
     V3 t;               // t.z must be 0: the game's rows have 273.w == 0
     V3 origin;
     double fx, fy, nearZ, jx, jy;
-    std::array<float, 276 * 4> rows() const {
-        std::array<float, 276 * 4> cb{};
+    std::array<float, 277 * 4> rows(uint32_t token = kStampFrame) const {
+        std::array<float, 277 * 4> cb{};
         auto clipLin = [&](V3 v, float* out) {   // linear part: x, y, (z=0), w
             const double w = -v.z;
             out[0] = float(fx * v.x + jx * w);
@@ -77,11 +80,13 @@ struct Camera {
         cb[275 * 4 + 0] = float(origin.x);
         cb[275 * 4 + 1] = float(origin.y);
         cb[275 * 4 + 2] = float(origin.z);
+        uint32_t stamp = token;
+        std::memcpy(&cb[276 * 4], &stamp, 4);
         return cb;
     }
     // Project a camera-relative point (world - origin) through the FLOAT rows,
     // in double, as the GPU would multiply them.
-    static void clip(const std::array<float, 276 * 4>& cb, V3 rel, double out[4]) {
+    static void clip(const std::array<float, 277 * 4>& cb, V3 rel, double out[4]) {
         for (int k = 0; k < 4; ++k)
             out[k] = rel.x * cb[270 * 4 + k] + rel.y * cb[271 * 4 + k] + rel.z * cb[272 * 4 + k] + cb[273 * 4 + k];
     }
@@ -112,7 +117,9 @@ struct Record {
         else { b.w[0] = w[73]; b.w[1] = w[74]; b.w[2] = w[75]; b.w[3] = w[78]; b.w[4] = w[79]; }
         return b;
     }
-    void mark(uint32_t tag) { w[72] = tag ^ ev::markerHash(block(false), block(true)); }
+    // The marker folds the frame stamp in (the emit's present-frame clock):
+    // mark() takes the token EN[276].x must carry for the join to certify.
+    void mark(uint32_t tag, uint32_t token) { w[72] = tag ^ ev::markerHash(block(false), block(true), token); }
 };
 static_assert(sizeof(Record) == 336, "t33 stride");
 
@@ -144,7 +151,10 @@ RWStructuredBuffer<float4> Out : register(u0);
     if (id.x >= n) return;
     Case c = Cases[id.x];
     EnginePoolRecord r = EP[c.slot];
-    uint kind = engineRecordKind(r);
+    // The production kind decision, as enginePixelZ makes it: fresh kind at
+    // this frame's token (EN[276].x), then the stale-stamp window.
+    uint kind = engineRecordKind(r, asuint(EN[276].x));
+    if (kind == 3u) kind = engineStaleStampKind(r, asuint(EN[276].x));
     float4 before;
     bool ok = engineReproject(r, c.ndc, c.zr, before);
     Out[id.x] = ok ? float4(before.xy / before.w, before.w, float(kind)) : float4(-99, -99, -1, float(kind));
@@ -162,7 +172,7 @@ RWStructuredBuffer<float4> Out : register(u0);
     const Camera before = camera(10.6, {1200.4, 29.9, -800.7}, -0.0002, 0.0005);
     const auto nowRows = now.rows(), beforeRows = before.rows();
 
-    std::vector<Record> pool(8);
+    std::vector<Record> pool(9);
     std::vector<Case> cases;
     std::vector<Expect> expect;
     const uint16_t ident[4] = {32767, 32767, 32767, 65534};
@@ -189,7 +199,7 @@ RWStructuredBuffer<float4> Out : register(u0);
 
     // 0: a still record, joined: the camera term.
     const V3 still{1210.0, 28.0, -840.0};
-    pool[0].pose(still, ident, 1.0f, false); pool[0].pose(still, ident, 1.0f, true); pool[0].mark(ev::kJoined);
+    pool[0].pose(still, ident, 1.0f, false); pool[0].pose(still, ident, 1.0f, true); pool[0].mark(ev::kJoined, kStampFrame);
     for (V3 v : {V3{0, 0, 0}, V3{3, 1, -2}, V3{-5, 2, 4}})
         addPoint(0, still, ident, 1.0f, still, ident, 1.0f, v, 1, "still record: exactly the camera term");
 
@@ -198,12 +208,12 @@ RWStructuredBuffer<float4> Out : register(u0);
     qlanes(axisAngle({0.2, 1.0, 0.1}, 37.0), qShip);
     qlanes(axisAngle({0.2, 1.0, 0.1}, 36.2), qShipPrev);
     const V3 ship{1650.0, 60.0, -1300.0}, shipPrev{1649.6, 61.8, -1299.4};
-    pool[1].pose(ship, qShip, 1.0f, false); pool[1].pose(shipPrev, qShipPrev, 1.0f, true); pool[1].mark(ev::kJoined);
+    pool[1].pose(ship, qShip, 1.0f, false); pool[1].pose(shipPrev, qShipPrev, 1.0f, true); pool[1].mark(ev::kJoined, kStampFrame);
     for (V3 v : {V3{0, 0, 0}, V3{12, 3, -30}, V3{-15, -2, 22}, V3{40, 5, 1}})
         addPoint(1, ship, qShip, 1.0f, shipPrev, qShipPrev, 1.0f, v, 1, "landing-ship mover");
 
     // 2: a scaled part.
-    pool[2].pose(ship, qShip, 1.3f, false); pool[2].pose(shipPrev, qShipPrev, 1.3f, true); pool[2].mark(ev::kJoined);
+    pool[2].pose(ship, qShip, 1.3f, false); pool[2].pose(shipPrev, qShipPrev, 1.3f, true); pool[2].mark(ev::kJoined, kStampFrame);
     addPoint(2, ship, qShip, 1.3f, shipPrev, qShipPrev, 1.3f, {6, -1, 9}, 1, "scaled part");
 
     // 3: a quantised 90-degree turn (non-unit q after 16-bit lanes), turning 2 degrees.
@@ -211,22 +221,29 @@ RWStructuredBuffer<float4> Out : register(u0);
     qlanes(axisAngle({0, 0, 1}, 90.0), q90);
     qlanes(axisAngle({0, 0, 1}, 88.0), q88);
     const V3 turret{1215.0, 31.0, -830.0};
-    pool[3].pose(turret, q90, 1.0f, false); pool[3].pose(turret, q88, 1.0f, true); pool[3].mark(ev::kJoined);
+    pool[3].pose(turret, q90, 1.0f, false); pool[3].pose(turret, q88, 1.0f, true); pool[3].mark(ev::kJoined, kStampFrame);
     for (V3 v : {V3{4, 0, 0}, V3{0, 2.5, -1}})
         addPoint(3, turret, q90, 1.0f, turret, q88, 1.0f, v, 1, "quantised turret turn");
 
     // 4: masked; 5: garbage at 288; 6: a joined tag over the wrong hash.
-    pool[4] = pool[1]; pool[4].mark(ev::kMasked);
+    pool[4] = pool[1]; pool[4].mark(ev::kMasked, kStampFrame);
     pool[5] = pool[1]; pool[5].w[72] = 0x7FC0ED01u;
-    pool[6] = pool[1]; pool[6].w[72] = ev::kJoined ^ ev::markerHash(pool[1].block(true), pool[1].block(false));
+    pool[6] = pool[1]; pool[6].w[72] = ev::kJoined ^ ev::markerHash(pool[1].block(true), pool[1].block(false), kStampFrame);
     addPoint(4, ship, qShip, 1.0f, shipPrev, qShipPrev, 1.0f, {1, 1, 1}, 2, "masked marker");
     addPoint(5, ship, qShip, 1.0f, shipPrev, qShipPrev, 1.0f, {1, 1, 1}, 3, "bare tag (stack garbage shape) is not a join");
     addPoint(6, ship, qShip, 1.0f, shipPrev, qShipPrev, 1.0f, {1, 1, 1}, 3, "swapped-block hash is not a join");
 
     // 7: last frame the point was behind the camera.
     const V3 behindNow{1210.0, 30.0, -805.0}, behindPrev{1150.0, 30.0, -760.0};
-    pool[7].pose(behindNow, ident, 1.0f, false); pool[7].pose(behindPrev, ident, 1.0f, true); pool[7].mark(ev::kJoined);
+    pool[7].pose(behindNow, ident, 1.0f, false); pool[7].pose(behindPrev, ident, 1.0f, true); pool[7].mark(ev::kJoined, kStampFrame);
     addPoint(7, behindNow, ident, 1.0f, behindPrev, ident, 1.0f, {0, 0, 0}, 1, "behind last frame's camera: no history");
+
+    // 8: the moving joined record of case 1, but its marker folds an older
+    // frame's stamp (the cull case): kind 6 at this frame, the camera term,
+    // never reprojected by the stale pair.
+    pool[8] = pool[1];
+    pool[8].mark(ev::kJoined, kStampFrame - 1);
+    addPoint(8, ship, qShip, 1.0f, shipPrev, qShipPrev, 1.0f, {1, 1, 1}, 6, "an older frame's stamp: stale, the camera term");
 
     // The GPU run.
     auto structured = [&](const void* data, UINT stride, UINT count, ID3D11Buffer** buffer, ID3D11ShaderResourceView** srv) {
@@ -241,7 +258,7 @@ RWStructuredBuffer<float4> Out : register(u0);
     ComPtr<ID3D11ShaderResourceView> poolSrv, caseSrv;
     structured(pool.data(), sizeof(Record), UINT(pool.size()), &poolBuffer, &poolSrv);
     structured(cases.data(), sizeof(Case), UINT(cases.size()), &caseBuffer, &caseSrv);
-    auto constants = [&](const std::array<float, 276 * 4>& rows, ID3D11Buffer** out) {
+    auto constants = [&](const std::array<float, 277 * 4>& rows, ID3D11Buffer** out) {
         D3D11_BUFFER_DESC d{};
         d.ByteWidth = UINT(rows.size() * 4); d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         D3D11_SUBRESOURCE_DATA init{rows.data(), 0, 0};

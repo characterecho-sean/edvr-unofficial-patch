@@ -14,6 +14,7 @@
 //      against a CPU double reference, and not the camera term;
 //   B  a masked record: no history (0, 0, z, 2);
 //   C  an UNMOVED joined record: the camera term, through the record;
+//   H  a JOINED record stamped with an OLDER frame: the camera term (kind 6);
 //   N  a pool record with a garbage marker (not a rig record): camera term;
 //   S  a stale slot (its depth is not the source's): camera term;
 //   X  a corrupt (even) code: camera term, never read as another record;
@@ -84,7 +85,7 @@ inline void texelNdc(int x, int y, double& nx, double& ny) {
     ny = 1.0 - (y + 0.5) / kDim * 2.0;
 }
 // A relative (camera-origin) point through rows -> source UV.
-inline bool toUv(const std::array<float, 276 * 4>& rows, V3 rel, double& u, double& v) {
+inline bool toUv(const std::array<float, 277 * 4>& rows, V3 rel, double& u, double& v) {
     double c[4];
     Camera::clip(rows, rel, c);
     if (!(c[3] > 0.0)) return false;
@@ -122,7 +123,7 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     const auto rowsNow = camNow.rows(), rowsPrev = camPrev.rows();
     const float zr = float(0.025 / kZView);
     struct Px { int x, y; };
-    const Px pxA{3, 3}, pxB{3, 8}, pxC{8, 3}, pxN{8, 8}, pxS{12, 3}, pxX{12, 8}, pxZ{12, 12};
+    const Px pxA{3, 3}, pxB{3, 8}, pxC{8, 3}, pxN{8, 8}, pxS{12, 3}, pxX{12, 8}, pxZ{12, 12}, pxH{3, 12};
     auto surface = [&](Px p) {   // the camera-relative point under a texel (the origin is 0: absolute too)
         double nx, ny;
         texelNdc(p.x, p.y, nx, ny);
@@ -140,20 +141,24 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     const V3 pAPrev = roundF(consumer_tests::add(pANow, {-0.6, 0.1, 0.2}));
     pool[0].pose(pANow, ident, 1.0f, false);
     pool[0].pose(pAPrev, yaw12, 1.0f, true);
-    pool[0].mark(ev::kJoined);
+    pool[0].mark(ev::kJoined, math_tests::kStampFrame);
     // B: masked (its pose is irrelevant).
     pool[1].pose(pANow, ident, 1.0f, false);
     pool[1].pose(pAPrev, ident, 1.0f, true);
-    pool[1].mark(ev::kMasked);
+    pool[1].mark(ev::kMasked, math_tests::kStampFrame);
     // C: joined, unmoved (both blocks equal): the camera term, through the record.
     const V3 pC = roundF(surface(pxC));
     pool[2].pose(pC, ident, 1.0f, false);
     pool[2].pose(pC, ident, 1.0f, true);
-    pool[2].mark(ev::kJoined);
+    pool[2].mark(ev::kJoined, math_tests::kStampFrame);
     // N: a valid pose with a garbage marker: not a rig record.
     pool[3].pose(pANow, ident, 1.0f, false);
     pool[3].pose(pAPrev, ident, 1.0f, true);
     pool[3].w[72] = 0xDEADBEEFu;
+    // H: the moving joined record of case A, but its marker folds an older
+    // frame's stamp: the cull case declines to the camera term (kind 6).
+    pool[4] = pool[0];
+    pool[4].mark(ev::kJoined, math_tests::kStampFrame - 1);
 
     // --- resources ------------------------------------------------------------
     auto texture = [&](DXGI_FORMAT fmt, UINT bind, const void* init, UINT pitch, ComPtr<ID3D11Texture2D>& t) {
@@ -177,6 +182,7 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     setSlot(pxB, 3.0f, zr);          // 2*1+1
     setSlot(pxC, 5.0f, zr);          // 2*2+1
     setSlot(pxN, 7.0f, zr);          // 2*3+1
+    setSlot(pxH, 9.0f, zr);          // 2*4+1: joined, but stamped with an older frame
     setSlot(pxS, 1.0f, zr * 1.5f);   // a valid code whose depth is not the source's
     setSlot(pxX, 6.0f, zr);          // even: corrupt
     ComPtr<ID3D11Texture2D> depthTex, slotTex, target;
@@ -209,12 +215,13 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
                 "panel: screen size");
     }
     // The camera-term rows (b2/b3) and the engine rows (b7/b8) are the same
-    // cameras here, as they are in the game's single-camera source pass.
+    // cameras here, as they are in the game's single-camera source pass. The
+    // arrays carry a 277th float4: the freshness stamp at SEN[276].x.
     ComPtr<ID3D11Buffer> srcCb, oldCb, modelCb, eyeCb, settingsCb, senCb, sebCb;
-    cbuffer(rowsNow.data(), 276 * 16, srcCb);
-    cbuffer(rowsPrev.data(), 276 * 16, oldCb);
-    cbuffer(rowsNow.data(), 276 * 16, senCb);
-    cbuffer(rowsPrev.data(), 276 * 16, sebCb);
+    cbuffer(rowsNow.data(), 277 * 16, srcCb);
+    cbuffer(rowsPrev.data(), 277 * 16, oldCb);
+    cbuffer(rowsNow.data(), 277 * 16, senCb);
+    cbuffer(rowsPrev.data(), 277 * 16, sebCb);
     std::vector<float> model(12 * 4, 0.0f), eye(274 * 4, 0.0f);
     model[9 * 4 + 0] = 1.0f; model[10 * 4 + 1] = 1.0f; model[11 * 4 + 2] = 1.0f;
     eye[270 * 4 + 0] = 1.0f; eye[271 * 4 + 1] = 1.0f; eye[273 * 4 + 3] = 1.0f;
@@ -226,10 +233,10 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     ComPtr<ID3D11UnorderedAccessView> countsUav;
     {
         D3D11_BUFFER_DESC d{};
-        d.ByteWidth = 5 * 4; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        d.ByteWidth = 6 * 4; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
         d.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; d.StructureByteStride = 4;
         D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
-        ud.Format = DXGI_FORMAT_UNKNOWN; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER; ud.Buffer.NumElements = 5;
+        ud.Format = DXGI_FORMAT_UNKNOWN; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER; ud.Buffer.NumElements = 6;
         D3D11_BUFFER_DESC s = d;
         s.Usage = D3D11_USAGE_STAGING; s.BindFlags = 0; s.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         h.check(SUCCEEDED(dev->CreateBuffer(&d, nullptr, &counts)) && SUCCEEDED(dev->CreateUnorderedAccessView(counts.Get(), &ud, &countsUav)) &&
@@ -278,9 +285,9 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     auto readCounts = [&]() {
         ctx->CopyResource(countsStaging.Get(), counts.Get());
         D3D11_MAPPED_SUBRESOURCE m{};
-        std::array<uint32_t, 5> c{};
+        std::array<uint32_t, 6> c{};
         h.check(SUCCEEDED(ctx->Map(countsStaging.Get(), 0, D3D11_MAP_READ, 0, &m)), "panel: map counts");
-        std::memcpy(c.data(), m.pData, sizeof(uint32_t) * 5);
+        std::memcpy(c.data(), m.pData, sizeof(uint32_t) * 6);
         ctx->Unmap(countsStaging.Get(), 0);
         return c;
     };
@@ -316,13 +323,14 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
 
     // Engine off: every texel is today's camera term; nothing is counted.
     bool allCamera = true;
-    for (const Px p : {pxA, pxB, pxC, pxN, pxS, pxX, pxZ}) {
+    for (const Px p : {pxA, pxB, pxC, pxN, pxS, pxX, pxZ, pxH}) {
         double ex, ey;
         cameraTerm(p, ex, ey);
         allCamera = allCamera && at(off, p)[3] == 1.0f && within(at(off, p), ex, ey, 1e-3);
     }
     h.check(allCamera, "panel, engine off: every texel is the camera term (today's shader)");
-    h.check(offCounts[0] + offCounts[1] + offCounts[2] + offCounts[3] + offCounts[4] == 0, "panel, engine off: nothing counted");
+    h.check(offCounts[0] + offCounts[1] + offCounts[2] + offCounts[3] + offCounts[4] + offCounts[5] == 0,
+            "panel, engine off: nothing counted");
 
     // A: the record's exact previous UV (translated and turned).
     {
@@ -350,27 +358,30 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
         h.check(got[0] == 0.0f && got[1] == 0.0f && got[3] == 2.0f && got[2] == zr,
                 "panel B: a masked rig record keeps no history (0, 0, z, 2)");
     }
-    // C, N, S, X, Z: the camera term (C through the record, the rest declined).
+    // C, H, N, S, X, Z: the camera term (C through the record, the rest declined).
     {
         bool ok = true;
-        for (const Px p : {pxC, pxN, pxS, pxX, pxZ}) {
+        for (const Px p : {pxC, pxH, pxN, pxS, pxX, pxZ}) {
             double ex, ey;
             cameraTerm(p, ex, ey);
             ok = ok && at(on, p)[3] == 1.0f && within(at(on, p), ex, ey, 1e-3);
         }
-        h.check(ok, "panel C/N/S/X/Z: an unmoved record, a non-rig record, a stale slot, a corrupt code and no slot all keep "
-                    "the camera term");
+        h.check(ok, "panel C/H/N/S/X/Z: an unmoved record, an older-frame-stamped record, a non-rig record, a stale "
+                    "slot, a corrupt code and no slot all keep the camera term");
         h.check(at(on, pxX)[0] == at(off, pxX)[0] && at(on, pxX)[1] == at(off, pxX)[1],
                 "panel X: a corrupt code is declined, never read as another record");
     }
-    // The counts: joined A and C, masked B, not a rig record N, stale S, corrupt X.
-    h.check(onCounts[0] == 2 && onCounts[1] == 1 && onCounts[2] == 1 && onCounts[3] == 1 && onCounts[4] == 1,
-            "panel: the eye-pixel counts per kind (joined 2, masked 1, not a rig record 1, stale 1, corrupt 1)");
+    // The counts: joined A and C, masked B, not a rig record N, stale S, corrupt X,
+    // stale stamp H.
+    h.check(onCounts[0] == 2 && onCounts[1] == 1 && onCounts[2] == 1 && onCounts[3] == 1 && onCounts[4] == 1 &&
+            onCounts[5] == 1,
+            "panel: the eye-pixel counts per kind (joined 2, masked 1, not a rig record 1, stale 1, corrupt 1, "
+            "stale stamp 1)");
     // Sampled (engine.z = kPanelSampleStride, 4): only eye pixels with both
-    // coordinates on the 4 x 4 grid count -- N (8,8) and X (12,8); A, B, C and
-    // S lie off it and Z has no slot -- and the motion itself is unchanged.
+    // coordinates on the 4 x 4 grid count -- N (8,8) and X (12,8); A, B, C, H
+    // and S lie off it and Z has no slot -- and the motion itself is unchanged.
     h.check(sampledCounts[0] == 0 && sampledCounts[1] == 0 && sampledCounts[2] == 1 && sampledCounts[3] == 0 &&
-            sampledCounts[4] == 1,
+            sampledCounts[4] == 1 && sampledCounts[5] == 0,
             "panel: sampled counting counts only the eye pixels on its grid (not a rig record 1 at N, corrupt 1 at X)");
     {
         bool same = true;
@@ -380,7 +391,7 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     // The motion_source view's encoding: 16 + the source kind; no slot keeps 1.
     h.check(at(painted, pxA)[3] == 17.0f && at(painted, pxB)[3] == 18.0f && at(painted, pxC)[3] == 17.0f &&
             at(painted, pxN)[3] == 19.0f && at(painted, pxS)[3] == 20.0f && at(painted, pxX)[3] == 21.0f &&
-            at(painted, pxZ)[3] == 1.0f,
+            at(painted, pxH)[3] == 22.0f && at(painted, pxZ)[3] == 1.0f,
             "panel: under the motion_source view the validity carries 16 + the source kind (no slot: unchanged)");
     std::printf("  panel: production screen shader on WARP -- joined exact (worst %.2e px), masked no-history, "
                 "declined kinds on the camera term, counts and the view's encoding as specified\n", worst);

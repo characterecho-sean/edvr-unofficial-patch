@@ -56,14 +56,16 @@ inline double dot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 inline V3 cross(V3 a, V3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 
 // A camera: clip rows 270..273 and origin 275, exactly as the game fills
-// cb1/cb2 (math_tests.h's Camera, verbatim).
+// cb1/cb2 (math_tests.h's Camera, verbatim). The array holds a 277th float4:
+// the freshness stamp the compose's EN[276].x reads (math_tests'
+// kStampFrame, uint bits).
 struct Camera {
     double rot[3][3];
     V3 t;
     V3 origin;
     double fx, fy, nearZ, jx, jy;
-    std::array<float, 276 * 4> rows() const {
-        std::array<float, 276 * 4> cb{};
+    std::array<float, 277 * 4> rows(uint32_t token = math_tests::kStampFrame) const {
+        std::array<float, 277 * 4> cb{};
         auto clipLin = [&](V3 v, float* out) {
             const double w = -v.z;
             out[0] = float(fx * v.x + jx * w);
@@ -77,12 +79,14 @@ struct Camera {
         cb[275 * 4 + 0] = float(origin.x);
         cb[275 * 4 + 1] = float(origin.y);
         cb[275 * 4 + 2] = float(origin.z);
+        uint32_t stamp = token;
+        std::memcpy(&cb[276 * 4], &stamp, 4);
         return cb;
     }
     // Project a camera-relative point (world - origin) through the FLOAT
     // rows, in double, as the GPU would multiply them (engineReproject's
     // forward half).
-    static void clip(const std::array<float, 276 * 4>& cb, V3 rel, double out[4]) {
+    static void clip(const std::array<float, 277 * 4>& cb, V3 rel, double out[4]) {
         for (int k = 0; k < 4; ++k)
             out[k] = rel.x * cb[270 * 4 + k] + rel.y * cb[271 * 4 + k] + rel.z * cb[272 * 4 + k] + cb[273 * 4 + k];
     }
@@ -104,7 +108,7 @@ inline Camera camera(double yawDeg, V3 origin, double jx, double jy) {
 // (temporal_shader_source.h, ENGINE_MOTION_HLSL block), transcribed in
 // double. Used only to PLACE a record exactly under a chosen pixel;
 // engineReproject itself, on the GPU, only ever runs forward (pose -> clip).
-inline V3 solveRel(const std::array<float, 276 * 4>& rows, double ndcX, double ndcY, double zView) {
+inline V3 solveRel(const std::array<float, 277 * 4>& rows, double ndcX, double ndcY, double zView) {
     const V3 a{rows[270 * 4 + 0], rows[271 * 4 + 0], rows[272 * 4 + 0]};
     const V3 b{rows[270 * 4 + 1], rows[271 * 4 + 1], rows[272 * 4 + 1]};
     const V3 c{rows[270 * 4 + 3], rows[271 * 4 + 3], rows[272 * 4 + 3]};
@@ -140,7 +144,9 @@ struct Record {
         else { b.w[0] = w[73]; b.w[1] = w[74]; b.w[2] = w[75]; b.w[3] = w[78]; b.w[4] = w[79]; }
         return b;
     }
-    void mark(uint32_t tag) { w[72] = tag ^ ev::markerHash(block(false), block(true)); }
+    // The marker folds the frame stamp in: mark() takes the token EN[276].x
+    // must carry for the join to certify.
+    void mark(uint32_t tag, uint32_t token) { w[72] = tag ^ ev::markerHash(block(false), block(true), token); }
 };
 static_assert(sizeof(Record) == 336, "t33 stride");
 
@@ -263,9 +269,11 @@ inline void run(const Harness& h) {
     // EngineBefore (b2), so an unmoved record's camera term (case c) is an
     // exact round-trip -- projecting a reconstructed point back through the
     // SAME rows it came from -- matching the zero-motion baseline above by
-    // construction, not by coincidence.
+    // construction, not by coincidence. The rows carry the freshness stamp
+    // at float4 276 (math_tests' kStampFrame): every joined record below is
+    // marked with the same token, except the stale-stamp case.
     const Camera engineCam = camera(0.0, {0.0, 0.0, 0.0}, 0.0, 0.0);
-    const std::array<float, 276 * 4> camRows = engineCam.rows();
+    const std::array<float, 277 * 4> camRows = engineCam.rows(math_tests::kStampFrame);
     ComPtr<ID3D11Buffer> enebCb;
     { D3D11_BUFFER_DESC d{}; d.ByteWidth = UINT(camRows.size() * 4); d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       D3D11_SUBRESOURCE_DATA init{camRows.data(), 0, 0};
@@ -277,13 +285,15 @@ inline void run(const Harness& h) {
     // The pool: slot 0 a moving JOINED record (case a), 1 MASKED (b, pose
     // reused from a -- irrelevant, since a masked kind never reaches the
     // reprojection math), 2 an unmoved JOINED record (c), 3 a record with a
-    // garbage marker: a valid pose, not a rig record (kind 3). 4..7 unused.
+    // garbage marker: a valid pose, not a rig record (kind 3), 4 a JOINED
+    // record stamped with an OLDER frame (h): the stale-stamp decline. 5..7
+    // unused.
     std::vector<Record> pool(8);
     const uint16_t* ident = identLanes();
 
     const Px pxA{2, 2}, pxB{2, 6}, pxC{2, 10};
     const Px pxD1{6, 2}, pxD2{6, 6}, pxD3{6, 10};
-    const Px pxE{10, 2}, pxF{10, 6}, pxG{10, 10}, pxNotRig{13, 13};
+    const Px pxE{10, 2}, pxF{10, 6}, pxG{10, 10}, pxNotRig{13, 13}, pxStamp{13, 2};
 
     double ndcAx, ndcAy;
     pixelToNdc(pxA.x, pxA.y, kDim, ndcAx, ndcAy);
@@ -292,22 +302,28 @@ inline void run(const Harness& h) {
     const V3 posAPrev = sub(posANow, deltaA);
     pool[0].pose(posANow, ident, 1.0f, false);
     pool[0].pose(posAPrev, ident, 1.0f, true);
-    pool[0].mark(ev::kJoined);
+    pool[0].mark(ev::kJoined, math_tests::kStampFrame);
 
     pool[1].pose(posANow, ident, 1.0f, false);
     pool[1].pose(posAPrev, ident, 1.0f, true);
-    pool[1].mark(ev::kMasked);
+    pool[1].mark(ev::kMasked, math_tests::kStampFrame);
 
     double ndcCx, ndcCy;
     pixelToNdc(pxC.x, pxC.y, kDim, ndcCx, ndcCy);
     const V3 posC = solveRel(camRows, ndcCx, ndcCy, zViewEff);
     pool[2].pose(posC, ident, 1.0f, false);
     pool[2].pose(posC, ident, 1.0f, true);   // second block == first: engineRecordMoved() is false
-    pool[2].mark(ev::kJoined);
+    pool[2].mark(ev::kJoined, math_tests::kStampFrame);
 
     pool[3].pose(posANow, ident, 1.0f, false);
     pool[3].pose(posAPrev, ident, 1.0f, true);
     pool[3].w[72] = 0xDEADBEEFu;   // NOT tag ^ markerHash(...): declines as "not a rig record" (kind 3)
+
+    // 4: the moving joined record of case (a), but its marker folds an older
+    // frame's stamp -- the cull case: the record was not re-evaluated this
+    // frame, and replaying its stale pose pair would phantom-drift the hull.
+    pool[4] = pool[0];
+    pool[4].mark(ev::kJoined, math_tests::kStampFrame - 1);
 
     // ES (t21): x = 2*slot+1 (the patched pool draw's slot code), y = the
     // depth that draw wrote, raw bits. Z (t2): the scene's own depth.
@@ -330,6 +346,7 @@ inline void run(const Harness& h) {
     setEs(pxF, -1.0f, 0.0f);           // cleared (explicit, though it is also this tile's default)
     setEs(pxG, 199.0f, kZBg);          // 2*99+1: slot 99 >= the pool's 8 records
     setEs(pxNotRig, 7.0f, kZBg);       // 2*3+1: a real, in-range slot with a garbage marker
+    setEs(pxStamp, 9.0f, kZBg);        // 2*4+1: joined, but stamped with an older frame
 
     // -------------------------- resources --------------------------
     auto structuredSrv = [&](const void* src, UINT stride, UINT count, ID3D11ShaderResourceView** srv) {
@@ -490,28 +507,30 @@ inline void run(const Harness& h) {
     expectBaseline(pxF, "cleared ES (-1, 0): declines exactly like the no-engine baseline");
     expectBaseline(pxG, "slot >= the pool's record count: declines exactly like the no-engine baseline");
     expectBaseline(pxNotRig, "a pool record that is not a rig record (garbage marker): declines exactly like the no-engine baseline");
+    expectBaseline(pxStamp, "STALE STAMP (a joined marker from an older frame): declines to the camera term exactly like the no-engine baseline");
 
     // -------------------------- plain vs EDVR_TEMPORAL_DIAGNOSTICS-1: must agree --------------------------
-    for (Px p : {pxA, pxB, pxC, pxD1, pxD2, pxD3, pxE, pxF, pxG, pxNotRig}) {
+    for (Px p : {pxA, pxB, pxC, pxD1, pxD2, pxD3, pxE, pxF, pxG, pxNotRig, pxStamp}) {
         const auto pv = mvAt(plainArmed.first, p);
         const auto dv = mvAt(armedMv, p);
         h.check(pv.first == dv.first && pv.second == dv.second, "the plain and EDVR_TEMPORAL_DIAGNOSTICS-1 compiles of mv agree on MV at every constructed pixel");
     }
 
-    // -------------------------- Stats[50..54]: the diagnostics compile's own counters --------------------------
+    // -------------------------- Stats[50..55]: the diagnostics compile's own counters --------------------------
     // 50 joined (a, c), 51 masked (b), 52 not-a-rig-record (notRig), 53
-    // stale (e), 54 corrupt (d1 even, d2 fractional). d3's code 0 fails the
-    // ES.x >= 1 gate before the corrupt check runs (kind 0), and kind 0 --
-    // like d3, f and g -- is never tallied by mv's own diagnostics (only
-    // engineKind != 0 increments a counter), so none of those three add to
-    // any of the five buckets checked here.
+    // stale (e), 54 corrupt (d1 even, d2 fractional), 55 stale stamp (h).
+    // d3's code 0 fails the ES.x >= 1 gate before the corrupt check runs
+    // (kind 0), and kind 0 -- like d3, f and g -- is never tallied by mv's
+    // own diagnostics (only engineKind != 0 increments a counter), so none
+    // of those three add to any of the six buckets checked here.
     h.check(stats[50] == 2, "Stats[50] (JOINED pixels) == 2 (a, c)");
     h.check(stats[51] == 1, "Stats[51] (MASKED pixels) == 1 (b)");
     h.check(stats[52] == 1, "Stats[52] (pool records that are not rig records) == 1 (notRig)");
     h.check(stats[53] == 1, "Stats[53] (STALE pixels) == 1 (e)");
     h.check(stats[54] == 2, "Stats[54] (CORRUPT pixels) == 2 (d1, d2)");
+    h.check(stats[55] == 1, "Stats[55] (STALE-STAMP pixels) == 1 (h: a joined marker from an older frame)");
 
-    std::printf("  consumer: %d pixels: joined 2 (worst error %.2e px), masked 1 (sentinel + MK=1), declined 7, counters match\n",
+    std::printf("  consumer: %d pixels: joined 2 (worst error %.2e px), masked 1 (sentinel + MK=1), declined 8, counters match\n",
                 kDim * kDim, worstErr);
 }
 

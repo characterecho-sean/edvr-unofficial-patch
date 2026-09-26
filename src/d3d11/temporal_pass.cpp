@@ -591,7 +591,7 @@ struct Slot {
     bool          timeDone = false;
     bool          timing = false;
     bool          statsDone = false;
-    bool          engineStats = false;   // Stats 50..54 hold engine-record velocity's counts
+    bool          engineStats = false;   // Stats 50..55 hold engine-record velocity's counts
     uint64_t      pixels = 0;
     // The instrument's bookkeeping for this call: which candidates had a
     // delta (their pixel totals), the head's turn, whether history ran.
@@ -644,7 +644,7 @@ struct Slot {
     bool          totalValid = false;
 };
 constexpr int kSlots = 16;
-constexpr int kStatCount = 56;   // 0-28 and 30-38 used; 29 and 39-49 free since the estimated body, ship and stepped-part paths retired (2026-09-23), the rest keeping their numbers; 50-54 engine-record velocity's pixel counts; a 224-byte buffer
+constexpr int kStatCount = 56;   // 0-28 and 30-38 used; 29 and 39-49 free since the estimated body, ship and stepped-part paths retired (2026-09-23), the rest keeping their numbers; 50-55 engine-record velocity's pixel counts (the sixth, 55, the stale-stamp decline of 2026-09-25); a 224-byte buffer
 Slot g_slots[kSlots];
 
 // Bumped on every temporalPassConfigure call (both its call sites in
@@ -1200,7 +1200,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                                         D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
             if (SUCCEEDED(hr) && m.pData) {
                 const uint32_t* v = static_cast<const uint32_t*>(m.pData);
-                if (q.engineStats) engineVelocityNotePixels(v[50], v[51], v[52], v[53], v[54]);
+                if (q.engineStats) engineVelocityNotePixels(v[50], v[51], v[52], v[53], v[54], v[55]);
                 g_rejected += v[0];
                 g_clipped += v[1];
                 g_pixelsSeen += q.pixels;
@@ -4049,7 +4049,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             "instrumented one runs instead (its registration counters stay on).");
         }
         const bool statsWritten = diagnostics || ((flags & 2u) == 0 && !leanOwn) || foveaConfigured();
-        // Engine-record velocity's pixel counts (Stats 50..53) come from the
+        // Engine-record velocity's pixel counts (Stats 50..55) come from the
         // trained path's instrumented mv entry alone, through its own counter
         // array -- no barrier or counter is added to the lean variant.
         bool engineCounted = false;   // the instrumented mv ran with the engine inputs bound

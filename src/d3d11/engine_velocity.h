@@ -183,9 +183,11 @@ struct EngineVelocityCaptureGpu {
 };
 bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out);
 // One eye's compose pixel counts, read back by the temporal pass (Stats
-// 50..54): engine-joined, masked, pool-but-not-a-rig-record, stale slot,
-// corrupt slot code.
-void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt);
+// 50..55): engine-joined, masked, pool-but-not-a-rig-record, stale slot,
+// corrupt slot code, stale stamp (a joined marker from an older frame: the
+// camera term).
+void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
+                              uint32_t stamped);
 // On foot (docs/kinematic-motion-injection-2026-09-19.md, 2026-09-23 "On
 // foot"): the world is drawn into a flat SOURCE image that the 2D screen
 // shows in each eye, and no pool draw targets an eye. screen_motion names the
@@ -225,6 +227,6 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
 // the eye pixel), raw; pixelStride 1 = every pixel (diagnostics, motion_source).
 constexpr uint32_t kPanelSampleFrames = 300, kPanelSampleStride = 4;
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
-                                   uint32_t eyeDraws, uint32_t pixelStride);
+                                   uint32_t stamped, uint32_t eyeDraws, uint32_t pixelStride);
 
 }  // namespace edvr

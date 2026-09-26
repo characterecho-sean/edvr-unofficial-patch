@@ -24,8 +24,12 @@
 // current pose against the rig record bit for bit (the disagreement gate)
 // before any history is committed, and writes the record's PREVIOUS engine
 // pose into its second block with a self-checking marker at +0x120:
-// tag ^ markerHash(both blocks), the same hash the compose's
-// ENGINE_MOTION_HLSL block (temporal_shader_source.h) recomputes on the GPU.
+// tag ^ markerHash(both blocks, the present-frame clock), the same hash the
+// compose's ENGINE_MOTION_HLSL block (temporal_shader_source.h) recomputes on
+// the GPU. The frame stamp is the freshness half of the fix of 2026-09-25
+// (docs/kinematic-motion-injection-2026-09-19.md): a record the engine does
+// not re-evaluate keeps its last pair and marker, and without the stamp the
+// compose replays that stale delta indefinitely.
 //
 // HISTORY RULES (the 2026-09-23 review, reviews\engine-motion-review-2026-
 // 09-23.md, items 1 and 2). Missing motion is not evidence of a stationary
@@ -85,13 +89,16 @@ struct Pose {
     bool operator!=(const Pose& o) const { return !(*this == o); }
 };
 
-// The ENGINE_MOTION_HLSL block's engineMarkerHash, word for word: the current block
-// (position, quaternion) then the previous block (position, quaternion).
-inline uint32_t markerHash(const Pose& now, const Pose& prev) {
+// The ENGINE_MOTION_HLSL block's engineMarkerHash, word for word: the current
+// block (position, quaternion), then the previous block (position, quaternion),
+// then the frame stamp (the present-frame clock at the emission; the compose
+// declines a joined marker whose stamp is not the frame it is composing).
+inline uint32_t markerHash(const Pose& now, const Pose& prev, uint32_t frame) {
     uint32_t h = 0x811C9DC5u;
     auto mix = [&](uint32_t v) { h = (h ^ v) * 0x01000193u; h ^= h >> 13; };
     for (uint32_t v : now.w) mix(v);
     for (uint32_t v : prev.w) mix(v);
+    mix(frame);
     return h;
 }
 
@@ -444,7 +451,7 @@ inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t a
     for (int32_t j = 0; j < k; ++j) {
         if (!itemOk[j]) continue;   // never write into an item that did not validate
         const Pose& written = joined ? prev : pose;   // masked: the engine's own same-frame copy
-        const uint32_t marker = (joined ? kJoined : kMasked) ^ markerHash(pose, written);
+        const uint32_t marker = (joined ? kJoined : kMasked) ^ markerHash(pose, written, frame);
         if (!write(items[j] + kItemPrevPos, &written.w[0], 12) || !write(items[j] + kItemPrevQuat, &written.w[3], 8) ||
             !write(items[j] + kItemMarker, &marker, 4)) {
             bump(s.writeFaults);

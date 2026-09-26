@@ -81,12 +81,13 @@ cbuffer SourceBefore:register(b3){float4 old[276];}
 cbuffer ScreenBefore:register(b4){float4 model[12];}
 cbuffer EyeBefore:register(b5){float4 eye[274];}
 cbuffer Settings:register(b6){float4 shape;float4 extent;float4 engine;}
-cbuffer EngineSourceNow:register(b7){float4 SEN[276];}
+cbuffer EngineSourceNow:register(b7){float4 SEN[277];}   // SEN[276].x: the frame stamp, as EN's
 cbuffer EngineSourceBefore:register(b8){float4 SEB[276];}
 RWStructuredBuffer<uint> PanelCounts:register(u1);
 // enginePixel's kinds for the source texel q: 0 no engine data, 1 joined
 // (prev = the surface's previous source UV), 2 masked, 3 not a rig record,
-// 4 stale slot, 5 corrupt slot code -- the same tests in the same order.
+// 4 stale slot, 5 corrupt slot code, 6 stale stamp (a joined marker from an
+// older frame: the camera term) -- the same tests in the same order.
 uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
     prev=uv;
     if(engine.x==0)return 0u;
@@ -101,8 +102,14 @@ uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
     const uint slot=code>>1u;
     if(slot>=count)return 0u;
     const EnginePoolRecord r=SourcePool[slot];
-    const uint kind=engineRecordKind(r);
+    const uint token=asuint(SEN[276].x);
+    uint kind=engineRecordKind(r,token);
+    if(kind==3u)kind=engineStaleStampKind(r,token);   // 6 stale stamp, 2 an older masked marker, 3 neither
     if(kind!=1u)return kind;
+    // Freshness: a joined marker certifies only at the frame it was written;
+    // an older frame's pose pair would replay a phantom delta. The camera
+    // term stands, counted separately (kind 6).
+    if(r.data[18].x!=(0x7FC0ED01u^engineMarkerHash(r,token)))return 6u;
     float4 before;
     if(!engineReprojectRows(r,uv*float2(2,-2)+float2(-1,1),z,SEN[270],SEN[271],SEN[272],SEN[273],SEN[275].xyz,
                             SEB[270],SEB[271],SEB[272],SEB[273],SEB[275].xyz,before))

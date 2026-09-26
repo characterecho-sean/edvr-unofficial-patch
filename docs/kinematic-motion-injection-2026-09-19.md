@@ -33,6 +33,13 @@
   clean (764/764 then 5398/5398 given, 0 invalidated); Sean judged both good.
   TEARDOWN (last entry): the per-object estimates (per-object-motion.md) and the legacy
   kinematic tracker retired 2026-09-23; the emit's census still counts the undrawn movers.
+  PHANTOM MV CONVICTED AND FIXED (2026-09-25 entry): a culled record kept its last pose
+  pair and marker, and the compose replayed that stale delta every frame (~0.2 px/frame
+  parked at a coriolis station, 3 px after a head move). The present-frame clock now
+  folds into the marker hash (11th FNV word, both tags); the eye-frame snapshot's scene
+  copies carry the same g_frame at EN[276].x, and a joined marker certifies only at its
+  own frame -- an older one declines to the camera term as kind 6 "stale stamp"
+  (64-frame window, Stats 55). BUILT, GATED, NOT FLOWN.
 - **Open:** walkers (vs_F516BF0201303B87, not a pool family; w=2 on the panel) wait on
   phase 2's previous bone palette -- a walking NPC still blurs after the on-foot fix;
   which camera the walk's other draws use (the new line's rows and distance say); a
@@ -54,8 +61,10 @@
   depth pre-pass/bias as the stale cockpit (the re-fly entry); green cockpit panels as
   a mover bug, and engine-path CPU cost as the frame-time cause (09:38 entry); the
   station's joined motion wrong at range (The station entry).
-- **Next:** the controlled diagnostics 1 vs 0 comparison, and a walker near a drone
-  with the motion_source view.
+- **Next:** FLY the stamp build at the coriolis station, parked and through head moves:
+  stale-stamp nonzero near the station, engine-joined down by roughly that population,
+  the hull crisp. Then the controlled diagnostics 1 vs 0 comparison, and a walker near a
+  drone with the motion_source view.
 
 ## Premise
 
@@ -2841,3 +2850,63 @@ The movers line now reads "engine motion: movers joined N records/frame (moving 
 records the emit wrote a previous pose for); eye-frames ...", without "against the
 tracker's N moving records/frame" or "(the tracker, diagnostic-only, was off)". The
 "engine motion: tracker (diagnostic-only) cost" and "tracker off" lines are gone.
+
+### 2026-09-25 -- The phantom MV, convicted and fixed: the frame stamp
+
+Eye run 191906's dump (parked at a coriolis station): ~29k engine-path pixels a frame on
+the station hull carried ~0.2 px/frame of STEADY phantom drift, and after a head move
+missed up to 3 px, while 87k hull pixels on the camera path were exact. The emit census
+corroborated a freshness gap, not a motion error: history gaps by age 9-64: 71, over 64:
+59 in 30 s.
+
+**The conviction.** The emit writes a record's previous-pose blocks and marker ONLY on
+frames the record appends items (k==0 returns before any write). A record the engine
+culled or did not evaluate this frame keeps its last pose pair AND its last marker; the
+compose's marker self-check (a constant-free hash of the two pose blocks) still certified
+the stale pair, and the compose replayed that delta every frame -- a constant phantom MV
+for as long as the pool item kept being drawn. Movers that emit every frame never went
+stale, which is why only parked-station behaviour showed it.
+
+**The fix (kimi/coriolis-station-blur).** The present-frame clock folds into the marker
+hash as an eleventh FNV word, both tags (engine_velocity_emit.h's markerHash and the
+write site; engine_velocity_emit.h is the CPU mirror the rigs compile). The compose
+recomputes it with the same token read from EN[276].x: the eye-frame snapshot's scene-
+constants copies are sized a float4 larger than the game's cb1 and stamped, at snapshot
+time, with exactly the g_frame the emit used that window (engine_velocity.cpp snapshot();
+the buffer is EDVR's own GPU copy, so the game's cb1 is untouched). Both eyes of one
+scene frame and every eye submit inside a game frame agree: the snapshot, the emits and
+the compose all sit inside one owned-Present window.
+
+A joined marker now certifies only at its own frame. At a later frame the compose's new
+engineStaleStampKind finds a rig marker stamped within the last 64 frames (one FNV round
+per frame of age, seeded from the stamp-free hash) and declines it: kind 6 STALE STAMP,
+the camera term, counted separately (Stats 55, gCount 53; the trained-path line gains
+"stale stamp %.0f (a joined marker from an older frame: the camera term)" and the panel
+line its sixth kind). An older MASKED marker inside the window still reads masked (no
+history, as masked always did); older than the window, or an old-scheme marker from a
+mid-session DLL swap, matches nothing and reads as the camera term (graceful). The
+on-foot screen path (SEN[276].x) and the flat mono prep (EN[276].x) thread the same
+token; the emit/compose hash pair is mirrored in flat_pixels_engine.py.
+
+The stale-stamp window is the one sound way to count the decline separately: a 32-bit
+marker that is tag ^ hash(blocks, stamp) is information-theoretically indistinguishable
+from garbage at any other frame, and word 28 (bytes 28-31) -- the only other unread word
+-- is a live packed material word the engine writes and its instance-index emitters read.
+The spec's "kind 1, then verify the stamp" is kept verbatim; it is true by construction
+at kind 1, and the window is what makes kind 6 reachable.
+
+**Rigs.** engine_velocity_test: emit_tests gains the stamp cases (certifies at F,
+declines at F+-1, the F+1 decline found as kind 6, masked folds the stamp and stays
+masked a frame later); math_tests adds a stale-stamped record (kind 6, never
+reprojected) and runs the production kind decision; consumer_tests adds a stale-stamp
+pixel (declines exactly like the no-engine baseline, Stats[55] == 1); panel_tests adds
+the on-foot case (camera term, count 1, motion_source carries 22). lifecycle_tests reads
+the copies back: NOW stamped with the present frame, BEFORE with last frame's.
+flat_mono_resolve_test and flat_pixels*.py fold the stamp through the flat path.
+
+**What a flight shows.** Parked at the coriolis station: "stale stamp" nonzero near the
+station (the ~29k phantom population, minus the over-64 window), engine-joined dropping
+by roughly that population, camera-term rising by it, the station hull crisp through
+head moves; masked unchanged; corrupt still 0. If the stamp plumbing broke (the copies
+unstamped), everything engine would decline at age 1 -- engine-joined collapses to near
+zero in one window, unmistakable.

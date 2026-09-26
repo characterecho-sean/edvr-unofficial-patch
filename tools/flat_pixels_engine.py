@@ -22,14 +22,52 @@ def marker_hash(r):
     return h
 
 
-def record_kind(r):
-    h = marker_hash(r)
+def record_kind(r, token):
+    # The fresh kind at the compose frame's token: the marker folds the
+    # emission frame in (the last FNV word), so it certifies only there.
+    # 1 joined, 2 masked, 3 neither (a stale marker or not a rig record;
+    # stale_stamp_kind tells those apart).
+    h = marker_hash_stamped(r, token)
     marker = int(r[18, 0])
     if marker == (0x7FC0ED01 ^ h):
         return "joined"
     if marker == (0x7FC0ED02 ^ h):
         return "masked"
     return "unmarked"
+
+
+def stale_stamp_kind(r, token):
+    # The decline path's second half: a marker stamped within the last 64
+    # frames (the emit table and census horizon) still names its kind. 6:
+    # a joined marker from an older frame -- a stale pose pair, the camera
+    # term; 2: an older masked marker keeps no history; 3: not a rig record
+    # (or older than the window -- still the camera term).
+    h = int(marker_hash(r))
+    token = int(token)
+    for age in range(1, 65):
+        hs = ((h ^ ((token - age) & 0xffffffff)) * 0x01000193) & 0xffffffff
+        hs ^= hs >> 13
+        if int(r[18, 0]) == (0x7FC0ED01 ^ hs):
+            return 6
+        if int(r[18, 0]) == (0x7FC0ED02 ^ hs):
+            return 2
+    return 3
+
+
+def marker_hash_stamped(r, token):
+    # marker_hash plus the frame stamp (the emit's present-frame clock, the
+    # last FNV word); what a joined marker must match the frame it is read.
+    h = marker_hash(r)
+    h = ((h ^ int(token)) * 0x01000193) & 0xffffffff
+    h ^= h >> 13
+    return h
+
+
+def stamp_fresh(r, token_bits):
+    # EN[276].x carries the frame stamp as uint bits; a joined marker whose
+    # stamp is not this frame holds an older frame's pose pair (the record
+    # was culled, not re-evaluated) and the camera term stands.
+    return int(r[18, 0]) == (0x7FC0ED01 ^ marker_hash_stamped(r, token_bits))
 
 
 def moved(r):
@@ -166,11 +204,20 @@ def analyze(meta, rois):
                         else:
                             slots_used.add(slot)
                             record = pool[first + slot]
-                            kind = record_kind(record)
+                            token = np.float32(scene_now[276, 0]).view(np.uint32)
+                            kind = record_kind(record, token)
                             if kind == "masked":
                                 branch = "rejected_masked_record"
                             elif kind == "unmarked":
-                                branch = "camera_unmarked_record"
+                                stale = stale_stamp_kind(record, token)
+                                if stale == 6:
+                                    branch = "camera_stale_stamp"
+                                elif stale == 2:
+                                    branch = "rejected_masked_record"
+                                else:
+                                    branch = "camera_unmarked_record"
+                            elif not stamp_fresh(record, token):
+                                branch = "camera_stale_stamp"
                             else:
                                 before = engine_before(record, scene_now, scene_old, raw_uv, z)
                                 if before is None:
@@ -211,45 +258,62 @@ def analyze(meta, rois):
 
 def self_test():
     fbits = lambda x: np.asarray(x, dtype=np.float32).view(np.uint32)
-    rows = np.zeros((276, 4), dtype=np.float32)
+    # The freshness stamp the compose's EN[276].x carries (the emit's
+    # present-frame clock in production).
+    stamp = 4242
+    rows = np.zeros((277, 4), dtype=np.float32)
     rows[270, 0] = 1
     rows[271, 1] = -1
     rows[272, 3] = 1
     rows[273, 2] = 1
+    rows[276, 0] = np.uint32(stamp).view(np.float32)
     old = rows.copy()
     r = np.zeros((21, 4), dtype=np.uint32)
     r[0, 1] = r[19, 1] = fbits(1)
     identity = (65534 << 16) | 32767
     r[0, 2:4] = r[19, 2:4] = [32767 | (32767 << 16), identity]
     r[1, :3] = r[18, 1:4] = fbits([0, 0, 2])
-    r[18, 0] = 0x7FC0ED01 ^ marker_hash(r)
-    assert record_kind(r) == "joined" and not moved(r)
+    r[18, 0] = 0x7FC0ED01 ^ marker_hash_stamped(r, stamp)
+    assert record_kind(r, stamp) == "joined" and not moved(r)
     uv = np.asarray([.5, .5], dtype=np.float32)
     before = engine_before(r, rows, old, uv, np.float32(.5))
     assert np.linalg.norm(motion_from_before(before, uv, 100, 100)) < .01
     # The object and camera shift together: the object stays put on screen.
     rows[275, 0] = 1
     r[1, 0] = fbits(1)
-    r[18, 0] = 0x7FC0ED01 ^ marker_hash(r)
-    assert moved(r) and record_kind(r) == "joined"
+    r[18, 0] = 0x7FC0ED01 ^ marker_hash_stamped(r, stamp)
+    assert moved(r) and record_kind(r, stamp) == "joined"
     before = engine_before(r, rows, old, uv, np.float32(.5))
     assert np.linalg.norm(motion_from_before(before, uv, 100, 100)) < .01
     # A camera shift relative to a fixed object must retain its vector.
     r[1, 0] = fbits(0)
-    r[18, 0] = 0x7FC0ED01 ^ marker_hash(r)
+    r[18, 0] = 0x7FC0ED01 ^ marker_hash_stamped(r, stamp)
     before = engine_before(r, rows, old, uv, np.float32(.5))
     assert np.linalg.norm(motion_from_before(before, uv, 100, 100)) > 1
 
-
-    r[18, 0] = 0x7FC0ED02 ^ marker_hash(r)
-    assert record_kind(r) == "masked"
+    r[18, 0] = 0x7FC0ED02 ^ marker_hash_stamped(r, stamp)
+    assert record_kind(r, stamp) == "masked"
     r[18, 0] ^= 1
-    assert record_kind(r) == "unmarked"
+    assert record_kind(r, stamp) == "unmarked"
+    # The freshness stamp (2026-09-25): the marker folds the emission frame
+    # in; it certifies at that frame and declines at any other, and the
+    # stale-stamp window finds an older joined marker as kind 6 while an
+    # older masked marker keeps no history.
+    r[18, 0] = 0x7FC0ED01 ^ marker_hash_stamped(r, stamp)
+    assert record_kind(r, stamp) == "joined" and stamp_fresh(r, stamp)
+    assert record_kind(r, stamp + 1) == "unmarked"
+    assert stale_stamp_kind(r, stamp + 1) == 6
+    assert stale_stamp_kind(r, stamp + 64) == 6
+    assert stale_stamp_kind(r, stamp + 65) == 3
+    assert marker_hash_stamped(r, stamp) != marker_hash_stamped(r, stamp + 1)
+    r[18, 0] = 0x7FC0ED02 ^ marker_hash_stamped(r, stamp)
+    assert record_kind(r, stamp) == "masked" and not stamp_fresh(r, stamp)
+    assert stale_stamp_kind(r, stamp + 1) == 2
     # A menu-like rotation carries the surface to a different old pixel.
     rows[275, 0] = 0
     turn_half = round((math.sqrt(.5) + 1) * 32767)
     r[0, 3] = turn_half | (turn_half << 16)
-    r[18, 0] = 0x7FC0ED01 ^ marker_hash(r)
+    r[18, 0] = 0x7FC0ED01 ^ marker_hash_stamped(r, stamp)
     before = engine_before(r, rows, old, np.asarray([.6, .5], dtype=np.float32), np.float32(.5))
     assert np.linalg.norm(motion_from_before(before, np.asarray([.6, .5], dtype=np.float32), 100, 100)) > 1
     camera_now = np.asarray([rows[270], rows[271], rows[272], rows[273],

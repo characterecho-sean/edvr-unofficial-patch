@@ -1008,6 +1008,16 @@ inline void run(const Harness& h) {
                         "S2: the source's scene constants now are the world's rows 270..275, exactly");
                 h.check(before.size() >= 276 * 4 && std::memcmp(&before[270 * 4], &wantBefore[270 * 4], 24 * 4) == 0,
                         "S2: and last frame's are the world's rows of last frame");
+                // The freshness stamp end to end: float4 276 of the NOW copy
+                // carries the present-frame clock the snapshot took (g_frame,
+                // the same clock the emit folds into its markers); the
+                // previous frame's copy carries last frame's.
+                uint32_t stampNow = 0, stampBefore = 0;
+                h.check(now.size() >= 277 * 4 && before.size() >= 277 * 4, "S2: the copies hold the stamp's float4");
+                std::memcpy(&stampNow, &now[276 * 4], 4);
+                std::memcpy(&stampBefore, &before[276 * 4], 4);
+                h.check(stampNow == g.frame && stampBefore == g.frame - 1,
+                        "S2: the NOW copy is stamped with this present frame, the BEFORE copy with last frame's");
                 ComPtr<ID3D11Resource> slotsRes;
                 v.slots->GetResource(&slotsRes);
                 UINT w = 0, wd = 0;
