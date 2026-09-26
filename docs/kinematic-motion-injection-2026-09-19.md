@@ -39,7 +39,19 @@
   folds into the marker hash (11th FNV word, both tags); the eye-frame snapshot's scene
   copies carry the same g_frame at EN[276].x, and a joined marker certifies only at its
   own frame -- an older one declines to the camera term as kind 6 "stale stamp"
-  (64-frame window, Stats 55). BUILT, GATED, NOT FLOWN.
+  (64-frame window, Stats 55). FLOWN 2026-09-26 (2b285732, eye runs 045802 and
+  045845, parked 10 km out): the phantom drift is gone (the engine median tracks the
+  camera term within 0.1-0.3 px every frame, including a 5 px head move; the constant
+  parked drift is absent), the hull's treated edge-energy retention roughly doubled
+  (0.23 -> 0.47-0.55, cockpit ~1.0), and the stale-stamp counter read 0 because the
+  phantom population was not present at this range (the 045845 hull was 100% camera
+  term -- nothing stale to decline). The residual Sean reports (a little soft vs
+  taa=off) is the reconstruction floor on a distant dense structure at 2648x2559
+  input, not motion: constant frame-to-frame with a verified motion chain. Watch
+  items: a ~0.15-0.2 px engine-path bias (possibly genuine coriolis rotation via
+  fresh records; below the visible threshold), a one-frame record-refresh lag after
+  a 5 px move, and the pool snapshot is not part of an eye dump, so stamp freshness
+  was inferred from the census rather than read directly.
 - **Open:** walkers (vs_F516BF0201303B87, not a pool family; w=2 on the panel) wait on
   phase 2's previous bone palette -- a walking NPC still blurs after the on-foot fix;
   which camera the walk's other draws use (the new line's rows and distance say); a
@@ -2910,3 +2922,18 @@ by roughly that population, camera-term rising by it, the station hull crisp thr
 head moves; masked unchanged; corrupt still 0. If the stamp plumbing broke (the copies
 unstamped), everything engine would decline at age 1 -- engine-joined collapses to near
 zero in one window, unmistakable.
+
+**Flown (2026-09-26, 2b285732, eye runs 045802/045845, parked 10 km out).** The phantom
+is gone: the engine-path median tracks the camera term within 0.1-0.3 px every frame,
+including a 5 px head move; the constant parked drift of 191906 is absent. Hull
+edge-energy retention doubled to 0.47-0.55 (cockpit ~1.0 lossless). "stale stamp" read
+0 with corrupt 0 and masked 0: the phantom population did not exist at this range to
+decline (045845's hull was 100% camera term), so the counter's zero is the healthy
+reading, not a counter bug. Note the prediction above said the counter would engage --
+at 10 km the station's records either emit fresh or never join, and the fix's value on
+this flight is the regression protection plus the 045802 decay behaviour. Sean: "not as
+blurry, still a little soft compared to taa=off" -- the residual is the reconstruction
+floor on a distant dense structure at the 2648x2559 input, constant across frames with
+a verified motion chain, not a motion bug. Open: the ~0.15-0.2 px engine-path bias
+(possibly genuine coriolis rotation delivered by fresh records; below the visible
+threshold) and a one-frame record-refresh lag after a 5 px move.
