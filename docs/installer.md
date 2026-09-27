@@ -272,7 +272,10 @@ compression library or shelling out to PowerShell: logs are small, every tool
 opens a stored zip, and the installer stays one file with nothing behind it. It
 is the one action that stays available while the game is running, which is
 exactly when somebody wants it. `--collect-logs` does the same from the command
-line.
+line. Planned enhancements (including bundling flat `shaders/` diagnostic
+dumps, post-crash alert banners, and active process guards) are documented in
+[diagnostic-reporting-automation-2026-09-26.md](diagnostic-reporting-automation-2026-09-26.md).
+
 
 ## Doing it safely
 

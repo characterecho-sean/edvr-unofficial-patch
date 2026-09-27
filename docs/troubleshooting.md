@@ -1,14 +1,92 @@
 # When something is wrong
 
-Six faults with a known cause and a known answer. Anything else wants
-[an issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose)
-with the logs attached: run `edvr-installer.exe` and press **Save logs**, which
-puts the right session's files into one zip on your Desktop.
+Known faults with known answers for both Flat screen and VR users, plus how to
+collect automated diagnostic data for anything new.
 
-**If the fixes that need `openvr_api.dll` do nothing at all**, read
-[Headsets and VR runtimes](../README.md#headsets-and-vr-runtimes) first. On
-Elite's native Oculus back end that half of the patch is never loaded, and no
-install can change that — the log now says so in a `vr runtime:` line.
+If your issue is not listed below, open [an
+issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose)
+or ask on Discord with your logs attached: run the installer and click **Save
+logs**, which gathers the relevant session's logs, breadcrumbs, and settings
+into one zip on your Desktop.
+
+For planned installer telemetry features and diagnostic roadmap, see
+[diagnostic-reporting-automation-2026-09-26.md](diagnostic-reporting-automation-2026-09-26.md).
+
+---
+
+## Quick Start: Collecting Diagnostic Data (One-Click)
+
+Whether you fly in VR or play in Flat mode, never hunt manually through game
+subdirectories for log files. The installer bundles everything automatically:
+
+1. **Close Elite Dangerous completely.** If the game crashed or froze, verify
+   in Task Manager (`Ctrl+Shift+Esc`) that `EliteDangerous64.exe` is not hung
+   in the background.
+2. **Open the installer:**
+   - **Flat screen players:** Run `edvr-flat-installer.exe`.
+   - **VR players:** Run `edvr-installer.exe`.
+3. **Click "Save logs"** on the bottom bar of the installer window.
+4. A zip file is written directly to your Desktop:
+   `edvr-logs-YYYYMMDD_HHMMSS.zip`.
+5. Attach that zip file to your GitHub issue or Discord post.
+
+The bundle automatically includes the latest graphics and OpenXR logs,
+`edvr_breadcrumbs.txt`, `edvr_FATAL.txt`, `edvr.ini`, `edvr_install_state.ini`,
+`GraphicsConfiguration.xml`, and your local graphics display profiles from
+`%LOCALAPPDATA%`.
+
+---
+
+## Flat Screen Troubleshooting
+
+### Flat mode: Shimmer, intense jitter, or edge crawl (Reset Storms)
+
+In flat projection mode with temporal anti-aliasing (TAA/DLSS), EDVR matches
+every scene draw call against registered vertex/pixel shader recipes to compute
+motion vectors and jitter cancellation.
+
+- **Symptom:** Panning the camera or moving in cockpit/on-foot causes intense
+  flicker, geometric buzzing, or trailing ghost smears.
+- **Why it happens:** When an unrecognized shader pair executes (such as a rare
+  lighting pass or custom mod draw), the runtime cannot safely predict camera
+  continuity. To prevent reprojection artifacts, it discards temporal history.
+  If this repeats every frame, a "reset storm" occurs.
+- **How to capture diagnostic data:**
+  1. Go to the in-game scene where the flicker occurs.
+  2. Press **`F10`** on your keyboard while looking directly at the artifact.
+  3. `F10` arms a bounded 900-frame diagnostic audit: it captures the unknown
+     vertex, pixel, and compute shader bytecode, records camera probes, and
+     dumps the unrecognized hash pairs to `edvr_gfx_*.log`.
+  4. Exit the game, run `edvr-flat-installer.exe`, and click **Save logs**.
+
+### Flat mode: EDHM side-menu haze or blurry angled panels
+
+- **Symptom:** Angled cockpit holographic menus (Navigation on the left,
+  System/Status on the right) develop a blurry, glowing haze or smear during
+  camera rotation when EDHM (Elite Dangerous HUD Mod) is chained.
+- **Why it happens:** EDHM overrides UI pixel shaders to recolor HUD elements.
+  The modified shader hashes no longer match the stock signatures in
+  `flat_projection_recipes.h`. Sub-pixel jitter is not cancelled for these
+  draws, causing TAA to smear them across frames.
+- **Verification:**
+  - Verify chaining in `edvr.ini`:
+    ```ini
+    [chain]
+    d3d11 = EDHM_x64.dll
+    ```
+  - While looking at the hazy panel, press `F10` to log the exact replacement
+    hashes for inclusion in the recipe dictionary.
+
+---
+
+## VR Troubleshooting
+
+### Checking your active VR runtime
+
+**If the fixes that need `openvr_api.dll` do nothing at all**, read [Headsets
+and VR runtimes](../README.md#headsets-and-vr-runtimes) first. On Elite's
+native Oculus back end that half of the patch is never loaded, and no install
+can change that — the log says so in a `vr runtime:` line.
 
 To see which runtime you are on, look in `edvr_logs\` next to the game after a
 session:
@@ -19,184 +97,109 @@ session:
 | Unsupported profile error | This game revision needs an updated EDVR profile. |
 | No native startup log | Native startup was not confirmed; attach whatever logs there are. |
 
-## If the game dies a second or two after launch
+### If the game dies a second or two after launch
 
-**As of this version this fixes itself: update, and it should just work with no
-`edvr.ini` change.** The launch crash
-([#20](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/20)
-and
-[#21](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/21))
-happened on rigs where Windows' `d3d11.dll` re-lays the render context's
-dispatch table every frame. EDVR took a *frozen* copy of that table, the copy
-fell out of step, and the GPU hung about a second and a half in. `auto` now
-gives those rigs a *live* table that follows the runtime call by call, so the
-default no longer crashes.
+**As of current versions this fixes itself: update, and it should work with no
+`edvr.ini` change.** The launch crash (#20 and #21) happened on rigs where
+Windows' `d3d11.dll` re-lays the render context's dispatch table every frame.
+EDVR took a *frozen* copy of that table, the copy fell out of step, and the GPU
+hung about a second and a half in. `auto` gives those rigs a *live* table that
+follows the runtime call by call.
 
 If `edvr_breadcrumbs.txt` ends at `arming d3d11 hooks`, the Direct3D half got
 its hooks in and the game died shortly after. EDVR's crash sentinel then turns
-those hooks off for the **next** launch by itself, so before this fix the usual
-pattern was crash, play, crash, play. If a rig still dies that way after
-updating, try these three settings under `[advanced]` in `edvr.ini`, in this
-order:
+those hooks off for the **next** launch by itself, leading to an alternating
+pattern of crash, play, crash, play. If a rig still dies that way after
+updating, try these settings under `[advanced]` in `edvr.ini`, in this order:
 
 ```ini
 [advanced]
 context_hook_mode = shared
 ```
 
-changes how EDVR attaches to the game's render context. By default, `auto`
-checks whose code implements the context and picks for you: a *live* private
-copy of the dispatch table (described under `live` below) when the methods are
-Windows' own, and the shared table when another mod wraps them. The log line
-says which it chose. `shared` forces the shared table. It is the most
-conservative mode and composes with a wrapper such as ReShade. If anything
-pushes EDVR out of a slot, the log says so by name.
+`shared` forces the shared table. It is the most conservative mode and composes
+cleanly with external wrappers such as ReShade.
 
 ```ini
 [advanced]
 context_hook_mode = live
 ```
 
-is what `auto` already gives a rig whose render context is Windows' own, so
-most machines run it without any setting. Set it by hand only to return to it
-after trying `shared`. It gives the context a dispatch table of EDVR's own, so
-nothing else in the process can write the table the game dispatches through,
-and each entry reads the game's own entry at the moment of the call. Windows'
-`d3d11.dll` re-lays the context's table while the game runs, sometimes onto a
-different internal implementation, and a copy taken at startup does not follow
-it: that frozen copy is the `private` mode, and it is what issues #20/#21 hung
-on. The cost is two extra jumps per Direct3D call, too small to have shown up
-in any frame time measured. The risk is that a mod wrapping Direct3D objects
-(ReShade as `dxgi.dll`) does not expect its object to be re-pointed, which is
-why `auto` gives those rigs `shared`. If `shared` keeps the game alive but the
-log then says EDVR's hooks keep being pushed out of the table, `live` is the
-mode that cannot be bypassed and never goes out of date. Each `live` hook
-forwards through a small executable stub page that EDVR generates (mapped
-`PAGE_EXECUTE_READ`: executable, but never also writable) to reach the
-runtime's current method for that slot. An antivirus heuristic may weigh that
-generated code, and a process that force-enables Control Flow Guard could
-refuse a call through one.
+`live` gives the context an EDVR-owned dispatch table that forwards through
+small executable stub pages. Try this if `shared` keeps getting overwritten by
+third-party hooks.
 
 ```ini
 [advanced]
 d3d11_fixes = 0
 ```
 
-turns the Direct3D fixes off for good. Nothing is hooked on the device or on
-its render context, so the black void, the panel fixes, the shader replacements
-and the anti-aliasing passes are all inert. The `openvr_api.dll` half keeps
-working, and so do the swapchain and DXGI hooks that carry the frame boundary
-it runs on, so EDVR is still active with this setting. A crash that survives it
-is worth reporting, because it is then in one of those hooks or in the VR half.
+Turns Direct3D hooks off completely while leaving the VR swapchain and OpenXR
+runtime active. A crash that survives this setting is isolated to the VR half
+or DXGI boundary.
 
-Please report which of the three you needed, with the log from each, so the
-workaround can be turned into a fix.
-
-If you are willing to run one more session purely for the diagnosis, add
+If you are willing to run one diagnostic flight, add:
 
 ```ini
 [advanced]
 vtable_flip_timeline = 1
 ```
 
-to whichever of the three you ended up on. It logs every change to the game's
-Direct3D function table (what changed, from what to what, at which frame, and
-which instruction did it) and writes the first few to `edvr_breadcrumbs.txt`,
-which survives a crash that eats the log. That file shows whether the table
-changed *before* the crash or *after* it, which none of the reports so far can
-settle. Every line that carries a frame number now counts frames the same way,
-including the monitor's "LONG FRAME" line, so you can read the order straight
-off the file.
+This logs every change to the Direct3D dispatch table directly into
+`edvr_breadcrumbs.txt`. Remember to remove or set it back to `0` afterwards.
 
-On `context_hook_mode = shared` the table changes every frame anyway, since
-each change is Windows' own `d3d11.dll` writing its entry back over EDVR's
-hook, so the per-change lines stop after the first few thousand and only the
-running tally continues. That is expected. EDVR's own writes never appear in
-the list, because it unlocks the memory before writing and so raises nothing
-for the watch to see. The watch makes every write to the memory the table lives
-on take an exception, which costs a few milliseconds a frame. It prints what it
-cost and switches itself off if that ever gets serious, though never in the
-first ten seconds, which is where the crash is. It is meant for one session:
-set it back to 0 afterwards.
+### VR failed to start after an EDVR update
 
-## VR failed to start after an EDVR update
+EDVR consists of two DLLs that must match: `d3d11.dll` and `openvr_api.dll`. A
+mismatched install (one file updated, one old) intentionally aborts startup,
+causing Elite to report `VRInitError_Init_Internal`.
 
-EDVR is two files that must come from the same build: the graphics half
-(`d3d11.dll`) and the VR half (`openvr_api.dll`). They agree on the size of a
-message the VR half sends at startup, and a half-updated install (one file new,
-the other old) fails that check on purpose so that neither runs at a size it
-did not ask for. Elite then reports `VRInitError_Init_Internal`, and the native
-log (`edvr_logs\edvr_openxr_*.log`) carries
-`result,native_render_settings_query,-1` with no `openxr_render_size` lines
-after it. That `-1` tells you one side is stale but not which.
+**Fix:** Run `edvr-installer.exe` and click **Repair**. It writes both halves
+from the single bundled payload. If building from source, run:
 
-Run `edvr-installer.exe` and press **Repair**. It writes both halves from the
-one package it carries, so they cannot disagree. If you build from source, run
-`python tools\install_edvr.py --target <store> --verify-only` (with `steam`,
-`frontier`, or the path to the game directory) before every flight of a fresh
-build. It compares each installed file's hash with the build and prints `native
-verify mismatch:` with the path of the one that differs.
+```powershell
+python tools\install_edvr.py --target steam --verify-only
+```
 
-## The game crashes on launch, on 0.7.1 or earlier
+### Everything except the exposure fix stopped working
 
-Update to 0.7.2. Before it, EDVR intercepted Direct3D calls by copying an
-object's method table and pointing *the object itself* at the copy — which
-quietly re-pointed objects ReShade owns and dispatches through, and the game
-crashed while EDVR was installing
-([#6](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/6)).
-It presented as intermittent because EDVR's crash sentinel disables the
-Direct3D fixes on the launch after a crash, so it alternated. EDVR now swaps
-the individual method pointers where they already live and never touches the
-object.
+Look in `edvr_gfx_*.log` for the periodic `vScreen totals:` line. If **`largest
+eye-draw count`** is `0` and stays `0`, cockpit UI fixes, panel distance, and
+Explorer Cam switch off.
 
-## Everything except the exposure fix stopped working
+This happens if your per-eye resolution is below 2048 on both axes (e.g. Quest
+3 at lower render scales) or if your custom resolution matches the on-foot
+panel dimension (`vscreen_res_width = 3840`).
 
-Look in `edvr_gfx_*.log` for the periodic `vScreen totals:` line. If
-**`largest eye-draw count`** is `0` and stays `0` while you are actually
-flying or on foot, that one number is the whole fault: the black void, the
-panel distance, the transition flash fix and Explorer Cam all read it, and a
-zero switches all four off at once. The exposure fix does not read it, which
-is why it keeps working and makes the rest look individually broken.
+**Workaround:** Set `vscreen_res_width = 2880` or `1920` in `edvr.ini`.
 
-EDVR decides which render targets are your eye textures. Before 0.7.3 it
-guessed by size — 2048×2048 or larger, minus anything exactly the size of the
-on-foot panel. Two things defeated that guess, both silently:
+### VR never starts on 0.17.0-rc.1 with EDHM chained
 
-- **A panel raised to exactly your eye-texture size.** The panel exclusion
-  then removed the eyes along with the panel. This is the one to suspect if
-  you set `vscreen_res_width` to `3840` (the height follows it at 16:9).
-- **Eye textures under 2048 on an axis**, which never qualified at all. This
-  is most headsets: a Quest 3 through SteamVR renders about 1832×1920 or
-  1728×1824 per eye at ordinary settings, and only clears 2048 on both axes
-  near or above its native panel resolution.
+Fixed in versions after rc.1: EDHM's 3Dmigoto previously intercepted
+`LoadLibraryExW` for `d3d11.dll` and recursively served the game root copy.
+EDVR now takes the copy of Windows' `d3d11.dll` already in memory by its full
+path.
 
-From 0.7.3, `openvr_api.dll` reads the size of the texture the game actually
-submits and tells the graphics side, so it matches your real eye textures
-instead of guessing, and says so in both logs. If the count is still stuck at
-0, EDVR now prints a line naming every target size it did see — please attach
-it to an issue. As an immediate workaround on any version, set
-`vscreen_res_width` to `2880` (short enough that nothing collides) or back to
-`1920` to turn the resolution fix off.
+---
 
-## An earlier version crashed alongside EDHM
+## Automated Log Inspection & Triage (For Developers & Pilots)
 
-The first attempt loaded the other mod during `DllMain`, where Windows holds the
-loader lock; loading a DLL that isn't already in memory runs *its* startup code
-under that lock, which Windows doesn't support. It now loads the other mod on
-the first graphics call instead. Tested with a stand-in proxy that does work in
-its own `DllMain` — the exact thing that used to crash — plus the three ways it
-can go wrong: a missing name, a non-proxy file, and a setting pointed at EDVR
-itself. All three fall back to the system DLL and say so.
+Developers and technical pilots can inspect logs using repository tools in
+`tools\`:
 
-## VR never starts on 0.17.0-rc.1 with EDHM chained
+```powershell
+# Verify installed DLL integrity against current source build
+python tools\install_edvr.py --target steam --verify-only
 
-The game runs flat, and `edvr_openxr_*.log` stops at
-`error,D3D11Device,80070005` a few lines after the `size,0,...` and
-`size,1,...` lines, then `module_startup,...,result=124`. EDHM's 3Dmigoto
-hooks `LoadLibraryExW` and answers a request for Windows' own `d3d11.dll`
-with the copy in the game directory, which on an EDVR install is EDVR itself.
-The OpenXR half refused that module, as it should, and never created its
-device. Fixed in the build after rc.1: the OpenXR half now takes the copy of
-Windows' `d3d11.dll` that is already in memory, by its full path, and the log
-names the module it got in a `device_module,route=...,path=...` line. Until
-you have that build, run 0.16.2 with EDHM, or rc.1 without it.
+# Check whether a log matches the current git HEAD commit
+python tools\edvr_log.py --target steam --expect-build HEAD --version
+
+# Filter log for errors, crashes, and sentinel trip lines
+python tools\edvr_log.py --target steam --grep "fatal|error|sentinel|refused|reset"
+
+# View the last 50 lines of the latest graphics log
+python tools\edvr_log.py --target steam --tag gfx --tail 50
+
+# Audit eye-texture draw call tallies (census verification)
+python tools\edvr_log.py --target steam --tally vh
+```
