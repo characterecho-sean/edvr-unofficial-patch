@@ -688,8 +688,12 @@ def _validate_v2_receipt(r):
                    dlss=os.path.join(target, "nvngx_dlss.dll"))
     for e in files:
         if isinstance(e, dict) and isinstance(e.get("key"), str) and e["key"].startswith("plugin_"):
-            fname = e["key"][7:]
-            targets[e["key"]] = os.path.join(target, "plugins", fname)
+            target_p = e.get("target")
+            if target_p:
+                targets[e["key"]] = target_p
+            else:
+                fname = e["key"][7:]
+                targets[e["key"]] = os.path.join(target, "plugins", fname)
     keys = [e["key"] for e in files]
     if len(keys) != len(set(keys)) or not required.issubset(keys) or set(keys) - targets.keys():
         raise ValueError("incomplete or duplicate EDVR v2 components")
@@ -1104,12 +1108,14 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                 print("[edvr] %s verify mismatch: %s" % (profile, ini_target)); ok = False
         plugins_src_dir = os.path.join(root, "build", "plugins")
         if os.path.isdir(plugins_src_dir):
-            for fname in os.listdir(plugins_src_dir):
-                if fname.lower().endswith(".dll"):
-                    src_p = os.path.join(plugins_src_dir, fname)
-                    dst_p = os.path.join(target, "plugins", fname)
-                    if not os.path.isfile(dst_p) or sha256(dst_p) != sha256(src_p):
-                        print("[edvr] %s verify mismatch: %s" % (profile, dst_p)); ok = False
+            for dirpath, dirnames, filenames in os.walk(plugins_src_dir):
+                for fname in filenames:
+                    if fname.lower().endswith(".dll"):
+                        src_p = os.path.join(dirpath, fname)
+                        rel_p = os.path.relpath(src_p, plugins_src_dir)
+                        dst_p = os.path.join(target, "plugins", rel_p)
+                        if not os.path.isfile(dst_p) or sha256(dst_p) != sha256(src_p):
+                            print("[edvr] %s verify mismatch: %s" % (profile, dst_p)); ok = False
         if ok: print("[edvr] %s payload and profile verified" % profile)
         return 0 if ok else 1
     if os.path.isfile(p["graphics_target"]):
@@ -1148,14 +1154,17 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                         "installed_sha256": sha256(src)})
     plugins_src_dir = os.path.join(root, "build", "plugins")
     if os.path.isdir(plugins_src_dir):
-        for fname in os.listdir(plugins_src_dir):
-            if fname.lower().endswith(".dll"):
-                src_p = os.path.join(plugins_src_dir, fname)
-                dst_p = os.path.join(target, "plugins", fname)
-                entries.append({"key": "plugin_" + fname, "source": os.path.abspath(src_p), "target": os.path.abspath(dst_p),
-                                "backup": _native_backup_name(dst_p, tag, stamp) if os.path.isfile(dst_p) else None,
-                                "before_sha256": sha256(dst_p) if os.path.isfile(dst_p) else None,
-                                "installed_sha256": sha256(src_p)})
+        for dirpath, dirnames, filenames in os.walk(plugins_src_dir):
+            for fname in filenames:
+                if fname.lower().endswith(".dll"):
+                    src_p = os.path.join(dirpath, fname)
+                    rel_p = os.path.relpath(src_p, plugins_src_dir)
+                    dst_p = os.path.join(target, "plugins", rel_p)
+                    key_name = "plugin_" + rel_p.replace("\\", "_").replace("/", "_")
+                    entries.append({"key": key_name, "source": os.path.abspath(src_p), "target": os.path.abspath(dst_p),
+                                    "backup": _native_backup_name(dst_p, tag, stamp) if os.path.isfile(dst_p) else None,
+                                    "before_sha256": sha256(dst_p) if os.path.isfile(dst_p) else None,
+                                    "installed_sha256": sha256(src_p)})
     if native:
         entries.append({"key": "config", "source": "generated", "target": os.path.abspath(p["config"]),
                         "backup": _native_backup_name(p["config"], tag, stamp) if os.path.isfile(p["config"]) else None,
@@ -1187,6 +1196,9 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     try:
         if native: os.makedirs(os.path.dirname(p["config"]), exist_ok=True)
         if os.path.isdir(plugins_src_dir): os.makedirs(os.path.join(target, "plugins"), exist_ok=True)
+        for e in entries:
+            if e["key"].startswith("plugin_"):
+                os.makedirs(os.path.dirname(e["target"]), exist_ok=True)
         _write_new_receipt(receipt, journal)
         receipt_owned = True
         for e in entries:

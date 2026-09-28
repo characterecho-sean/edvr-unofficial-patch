@@ -17,63 +17,110 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
     if (m_initialized) return true;
     m_initialized = true;
 
-    std::vector<std::wstring> searchDirs = {
+    std::vector<std::wstring> baseDirs = {
         rootDir + L"\\plugins",
         rootDir + L"\\edvr_plugins"
     };
 
-    for (const auto& dir : searchDirs) {
-        std::wstring pattern = dir + L"\\*.dll";
-        WIN32_FIND_DATAW findData{};
-        HANDLE hFind = FindFirstFileW(pattern.c_str(), &findData);
-        if (hFind == INVALID_HANDLE_VALUE) continue;
+    auto tryLoadPlugin = [this](const std::wstring& dllPath, const std::wstring& displayName) {
+        HMODULE hMod = LoadLibraryW(dllPath.c_str());
+        if (!hMod) {
+            Log::get().note("plugin_manager: failed to load %ls (err=%lu)\n", dllPath.c_str(), GetLastError());
+            return;
+        }
 
-        do {
-            if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                std::wstring dllPath = dir + L"\\" + findData.cFileName;
-                HMODULE hMod = LoadLibraryW(dllPath.c_str());
-                if (!hMod) {
-                    Log::get().note("plugin_manager: failed to load %ls (err=%lu)\n", dllPath.c_str(), GetLastError());
-                    continue;
-                }
+        auto regFunc = reinterpret_cast<EdvrPluginRegisterFunc>(GetProcAddress(hMod, "EdvrPluginRegister"));
+        if (!regFunc) {
+            FreeLibrary(hMod);
+            return; // Not an EDVR plugin DLL
+        }
 
-                auto regFunc = reinterpret_cast<EdvrPluginRegisterFunc>(GetProcAddress(hMod, "EdvrPluginRegister"));
-                if (!regFunc) {
-                    FreeLibrary(hMod);
-                    continue; // Not an EDVR plugin DLL
-                }
+        LoadedPlugin plugin{};
+        plugin.modulePath = dllPath;
+        plugin.moduleHandle = hMod;
+        plugin.callbacks.structSize = sizeof(EdvrPluginCallbacks);
 
-                LoadedPlugin plugin{};
-                plugin.modulePath = dllPath;
-                plugin.moduleHandle = hMod;
-                plugin.callbacks.structSize = sizeof(EdvrPluginCallbacks);
+        int regResult = regFunc(EDVR_PLUGIN_API_VERSION, &plugin.callbacks);
+        if (regResult != 0) {
+            Log::get().note("plugin_manager: plugin %ls rejected API version %u (result=%d)\n",
+                            displayName.c_str(), EDVR_PLUGIN_API_VERSION, regResult);
+            FreeLibrary(hMod);
+            return;
+        }
 
-                int regResult = regFunc(EDVR_PLUGIN_API_VERSION, &plugin.callbacks);
-                if (regResult != 0) {
-                    Log::get().note("plugin_manager: plugin %ls rejected API version %u (result=%d)\n",
-                                    findData.cFileName, EDVR_PLUGIN_API_VERSION, regResult);
-                    FreeLibrary(hMod);
-                    continue;
-                }
+        if (plugin.callbacks.onInitialize) {
+            int initResult = plugin.callbacks.onInitialize(nullptr);
+            if (initResult != 0) {
+                Log::get().note("plugin_manager: plugin %ls onInitialize failed (code=%d)\n",
+                                displayName.c_str(), initResult);
+                FreeLibrary(hMod);
+                return;
+            }
+        }
 
-                if (plugin.callbacks.onInitialize) {
-                    int initResult = plugin.callbacks.onInitialize(nullptr);
-                    if (initResult != 0) {
-                        Log::get().note("plugin_manager: plugin %ls onInitialize failed (code=%d)\n",
-                                        findData.cFileName, initResult);
-                        FreeLibrary(hMod);
-                        continue;
+        const char* name = plugin.callbacks.pluginName ? plugin.callbacks.pluginName : "Unnamed Plugin";
+        const char* ver = plugin.callbacks.pluginVersion ? plugin.callbacks.pluginVersion : "1.0";
+        Log::get().note("plugin_manager: loaded plugin [%s v%s] from %ls\n", name, ver, dllPath.c_str());
+        m_plugins.push_back(std::move(plugin));
+    };
+
+    for (const auto& baseDir : baseDirs) {
+        // 1. Scan subdirectories: <baseDir>/<plugin_name>/plugin.dll (and <baseDir>/<plugin_name>/*.dll)
+        std::wstring dirPattern = baseDir + L"\\*";
+        WIN32_FIND_DATAW subFind{};
+        HANDLE hSub = FindFirstFileW(dirPattern.c_str(), &subFind);
+        if (hSub != INVALID_HANDLE_VALUE) {
+            do {
+                if ((subFind.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    wcscmp(subFind.cFileName, L".") != 0 &&
+                    wcscmp(subFind.cFileName, L"..") != 0) {
+                    
+                    std::wstring subDir = baseDir + L"\\" + subFind.cFileName;
+                    std::wstring pluginDll = subDir + L"\\plugin.dll";
+                    if (GetFileAttributesW(pluginDll.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                        tryLoadPlugin(pluginDll, std::wstring(subFind.cFileName) + L"\\plugin.dll");
+                    } else {
+                        // Scan for any .dll in subfolder
+                        std::wstring subDllPattern = subDir + L"\\*.dll";
+                        WIN32_FIND_DATAW dllFind{};
+                        HANDLE hDll = FindFirstFileW(subDllPattern.c_str(), &dllFind);
+                        if (hDll != INVALID_HANDLE_VALUE) {
+                            do {
+                                if (!(dllFind.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                                    tryLoadPlugin(subDir + L"\\" + dllFind.cFileName,
+                                                  std::wstring(subFind.cFileName) + L"\\" + dllFind.cFileName);
+                                }
+                            } while (FindNextFileW(hDll, &dllFind));
+                            FindClose(hDll);
+                        }
                     }
                 }
+            } while (FindNextFileW(hSub, &subFind));
+            FindClose(hSub);
+        }
 
-                const char* name = plugin.callbacks.pluginName ? plugin.callbacks.pluginName : "Unnamed Plugin";
-                const char* ver = plugin.callbacks.pluginVersion ? plugin.callbacks.pluginVersion : "1.0";
-                Log::get().note("plugin_manager: loaded plugin [%s v%s] from %ls\n", name, ver, findData.cFileName);
-                m_plugins.push_back(std::move(plugin));
-            }
-        } while (FindNextFileW(hFind, &findData));
-
-        FindClose(hFind);
+        // 2. Flat fallback: <baseDir>/*.dll
+        std::wstring flatPattern = baseDir + L"\\*.dll";
+        WIN32_FIND_DATAW flatFind{};
+        HANDLE hFlat = FindFirstFileW(flatPattern.c_str(), &flatFind);
+        if (hFlat != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(flatFind.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    std::wstring dllPath = baseDir + L"\\" + flatFind.cFileName;
+                    bool alreadyLoaded = false;
+                    for (const auto& p : m_plugins) {
+                        if (_wcsicmp(p.modulePath.c_str(), dllPath.c_str()) == 0) {
+                            alreadyLoaded = true;
+                            break;
+                        }
+                    }
+                    if (!alreadyLoaded) {
+                        tryLoadPlugin(dllPath, flatFind.cFileName);
+                    }
+                }
+            } while (FindNextFileW(hFlat, &flatFind));
+            FindClose(hFlat);
+        }
     }
 
     Log::get().note("plugin_manager: initialized, %zu active plugin(s)\n", m_plugins.size());
