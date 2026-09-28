@@ -313,6 +313,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDlaaCounts ^
     --extra-export edvrMenuPanel ^
     --extra-export edvrAcquireNativeMenu ^
+    --extra-export edvrRegisterPluginSetting ^
     --extra-export edvrAcquireNativeTemporal ^
     --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeFrame ^

@@ -42,6 +42,10 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
 
         int regResult = regFunc(EDVR_PLUGIN_API_VERSION, &plugin.callbacks);
         if (regResult != 0) {
+            // Fallback for version 1 plugins
+            regResult = regFunc(1, &plugin.callbacks);
+        }
+        if (regResult != 0) {
             Log::get().note("plugin_manager: plugin %ls rejected API version %u (result=%d)\n",
                             displayName.c_str(), EDVR_PLUGIN_API_VERSION, regResult);
             FreeLibrary(hMod);
@@ -49,7 +53,23 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
         }
 
         if (plugin.callbacks.onInitialize) {
-            int initResult = plugin.callbacks.onInitialize(nullptr);
+            EdvrHostServices hostServices{};
+            hostServices.structSize = sizeof(EdvrHostServices);
+            hostServices.registerSetting = [](const EdvrPluginSettingDef* setting) -> int {
+                typedef int (WINAPI *PFN_edvrRegisterPluginSetting)(const EdvrPluginSettingDef*);
+                HMODULE hD3D11 = GetModuleHandleW(L"d3d11.dll");
+                if (hD3D11) {
+                    auto reg = reinterpret_cast<PFN_edvrRegisterPluginSetting>(
+                        GetProcAddress(hD3D11, "edvrRegisterPluginSetting"));
+                    if (reg) return reg(setting);
+                }
+                return -1;
+            };
+            hostServices.logNote = [](const char* msg) {
+                if (msg) Log::get().note("%s", msg);
+            };
+
+            int initResult = plugin.callbacks.onInitialize(&hostServices);
             if (initResult != 0) {
                 Log::get().note("plugin_manager: plugin %ls onInitialize failed (code=%d)\n",
                                 displayName.c_str(), initResult);
