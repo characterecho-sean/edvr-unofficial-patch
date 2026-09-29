@@ -30,6 +30,7 @@
 #include "elite_binds.h"
 #include "flat_runtime.h"
 #include "input_gate.h"
+#include "../plugins/plugin_manager.h"
 #include "menu_keys.h"
 #include "menu_panel.h"
 #include "native_menu.h"
@@ -3929,6 +3930,8 @@ void menuTick(ID3D11Device* dev) {
             g.alpha = s.open ? 1.0f : 0.0f;
             menuPanelSetGeometry(g);
             inputGateTick();
+            inputGateSetPluginBlock(
+                edvr::plugins::PluginManager::instance().onFilterInput(0, nullptr));
             if (dev) menuPanelTick(dev);
         });
         if (!g_budget.shouldRun()) inputGateSetPrivate(false);
@@ -4188,11 +4191,14 @@ void menuTick(ID3D11Device* dev) {
         setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
         setMenuVisible(g.alpha);
         inputGateTick();
+        inputGateSetPluginBlock(
+            edvr::plugins::PluginManager::instance().onFilterInput(0, nullptr));
         if (dev) menuPanelTick(dev);
     });
     if (!g_budget.shouldRun()) {
         // A faulting tick must not leave the keyboard taken.
         inputGateSetPrivate(false);
+        inputGateSetPluginBlock(false);
         setMenuVisible(0.0f);
     }
 }

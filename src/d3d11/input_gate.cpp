@@ -58,6 +58,10 @@ typedef BOOL(WINAPI* PFN_PeekMessageA)(LPMSG, HWND, UINT, UINT, UINT);
 // reads the old value for one call more is one more call of the state the
 // player was already in.
 std::atomic<int> g_private{0};
+// Set by the plugin system when a plugin (e.g. MFD) has focus and wants to
+// suppress keyboard input from reaching the game. Independent of g_private
+// so plugin focus does not interfere with the menu's own gate policy.
+std::atomic<bool> g_pluginBlock{false};
 
 // The summon key, packed so a live rebind cannot tear it: bits 0-7 the
 // virtual key, 8-15 the DirectInput scan code, 16-18 the modifier bits,
@@ -345,6 +349,7 @@ SHORT WINAPI hookGetAsyncKeyState(int vk) {
     g_user.asyncCalls.fetch_add(1, std::memory_order_relaxed);
     if (!g_user.retired2) {
         if (g_private.load(std::memory_order_relaxed)) return 0;
+        if (g_pluginBlock.load(std::memory_order_relaxed)) return 0;
         if (releaseTailVk(vk)) return 0;
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
@@ -367,6 +372,7 @@ SHORT WINAPI hookGetKeyState(int vk) {
     g_user.keyStateCalls.fetch_add(1, std::memory_order_relaxed);
     if (!g_user.retired2) {
         if (g_private.load(std::memory_order_relaxed)) return 0;
+        if (g_pluginBlock.load(std::memory_order_relaxed)) return 0;
         if (releaseTailVk(vk)) return 0;
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
@@ -394,6 +400,10 @@ BOOL WINAPI hookGetKeyboardState(PBYTE state) {
     if (!r || !state || g_user.retired2) return r;
     guardedBudget(g_budgetUser, [&] {
         if (g_private.load(std::memory_order_relaxed)) {
+            memset(state, 0, 256);
+            return;
+        }
+        if (g_pluginBlock.load(std::memory_order_relaxed)) {
             memset(state, 0, 256);
             return;
         }
@@ -444,6 +454,11 @@ BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove
         if (!isKeyboardMessage(m)) return;
         g_user.peekKeyMessages.fetch_add(1, std::memory_order_relaxed);
         if (g_private.load(std::memory_order_relaxed)) {
+            msg->message = WM_NULL;
+            g_user.nulled.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (g_pluginBlock.load(std::memory_order_relaxed)) {
             msg->message = WM_NULL;
             g_user.nulled.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -889,6 +904,13 @@ void inputGateSetPrivate(bool priv) {
 }
 
 bool inputGatePrivate() { return g_private.load() != 0; }
+
+// Called by the plugin manager each frame with the aggregated result of
+// onFilterInput. No release-tail ceremony needed: plugins clear the flag
+// each frame, so there is no held-key stranding problem.
+void inputGateSetPluginBlock(bool block) {
+    g_pluginBlock.store(block, std::memory_order_relaxed);
+}
 
 bool inputGateHoldsGameKeyboard() {
     if (g_private.load() == 0) return false;
