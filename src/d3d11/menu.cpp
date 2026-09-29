@@ -1356,10 +1356,10 @@ void stopWriter() {
 // Pages
 
 static std::vector<PluginSettingRow> g_pluginSettings;
-static std::mutex g_pluginSettingsMutex;
+static std::recursive_mutex g_pluginSettingsMutex;
 
 void buildPluginsPage(Page& p) {
-    std::lock_guard<std::mutex> lock(g_pluginSettingsMutex);
+    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
     if (g_pluginSettings.empty()) {
         Entry h;
         h.kind = EntryKind::Heading;
@@ -1375,9 +1375,10 @@ void buildPluginsPage(Page& p) {
     }
 
     for (const auto& kv : groups) {
+        if (kv.second.empty()) continue;
         Entry h;
         h.kind = EntryKind::Heading;
-        h.text = kv.first.c_str();
+        h.text = g_pluginSettings[kv.second[0]].header.c_str();
         p.entries.push_back(h);
 
         for (int idx : kv.second) {
@@ -2036,7 +2037,7 @@ void buildContent(MenuContent& c) {
                 continue;
             }
             if (e.kind == EntryKind::PluginSetting) {
-                std::lock_guard<std::mutex> lock(g_pluginSettingsMutex);
+                std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
                 if (e.pluginSetting >= 0 && e.pluginSetting < static_cast<int>(g_pluginSettings.size())) {
                     const auto& ps = g_pluginSettings[e.pluginSetting];
                     strncpy(l.left, ps.label.c_str(), sizeof(l.left) - 1);
@@ -2619,7 +2620,7 @@ void cancelEdit();
 void commitEdit();
 
 void stepPluginSetting(int psIdx, int dir) {
-    std::lock_guard<std::mutex> lock(g_pluginSettingsMutex);
+    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
     if (psIdx < 0 || psIdx >= static_cast<int>(g_pluginSettings.size())) return;
     auto& ps = g_pluginSettings[psIdx];
     int64_t val = ps.getter ? ps.getter(ps.key.c_str(), ps.userData) : ps.cachedValue;
@@ -3711,7 +3712,7 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
 
 extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting) {
     if (!setting || setting->structSize < sizeof(EdvrPluginSettingDef)) return -1;
-    std::lock_guard<std::mutex> lock(g_pluginSettingsMutex);
+    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
 
     std::string headerStr = (setting->header && setting->header[0]) ? setting->header : "Plugins";
     std::string keyStr = setting->key ? setting->key : "";
