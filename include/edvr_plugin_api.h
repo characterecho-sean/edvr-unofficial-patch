@@ -64,11 +64,19 @@ typedef enum EdvrPluginSettingType {
     EDVR_PLUGIN_SETTING_ACTION = 4    // Action button ("run")
 } EdvrPluginSettingType;
 
+#ifndef EDVR_API
+#if defined(_WIN32)
+#define EDVR_API __stdcall
+#else
+#define EDVR_API
+#endif
+#endif
+
 // Callback to read the current setting value from the plugin
-typedef int64_t (*EdvrPluginSettingGetter)(const char* settingKey, void* userData);
+typedef int64_t (EDVR_API *EdvrPluginSettingGetter)(const char* settingKey, void* userData);
 
 // Callback to update setting value when changed in F8 Menu
-typedef void (*EdvrPluginSettingSetter)(const char* settingKey, int64_t value, void* userData);
+typedef void (EDVR_API *EdvrPluginSettingSetter)(const char* settingKey, int64_t value, void* userData);
 
 // Definition of a setting registered under the F8 Menu "Plugins" tab
 typedef struct EdvrPluginSettingDef {
@@ -92,8 +100,8 @@ typedef struct EdvrPluginSettingDef {
 // Host services provided to plugins during initialization
 typedef struct EdvrHostServices {
     uint32_t structSize;
-    int (*registerSetting)(const EdvrPluginSettingDef* setting);
-    void (*logNote)(const char* message);
+    int (EDVR_API *registerSetting)(const EdvrPluginSettingDef* setting);
+    void (EDVR_API *logNote)(const char* message);
 } EdvrHostServices;
 
 // Plugin lifecycle and hook callbacks table
@@ -102,16 +110,16 @@ typedef struct EdvrPluginCallbacks {
     const char* pluginName;
     const char* pluginVersion;
 
-    int (*onInitialize)(const EdvrHostServices* host);
-    void (*onShutdown)(void);
-    void (*onUpdate)(const EdvrPosef* headPose, float dtSeconds);
-    void (*onRenderEye)(const EdvrEyeRenderContext* eyeCtx);
-    void (*onFilterInput)(EdvrInputContext* inputCtx);
+    int (EDVR_API *onInitialize)(const EdvrHostServices* host);
+    void (EDVR_API *onShutdown)(void);
+    void (EDVR_API *onUpdate)(const EdvrPosef* headPose, float dtSeconds);
+    void (EDVR_API *onRenderEye)(const EdvrEyeRenderContext* eyeCtx);
+    void (EDVR_API *onFilterInput)(EdvrInputContext* inputCtx);
 } EdvrPluginCallbacks;
 
 // Exported entry point every EDVR addon must provide
 // Export name: "EdvrPluginRegister"
-typedef int (*EdvrPluginRegisterFunc)(uint32_t hostApiVersion, EdvrPluginCallbacks* outCallbacks);
+typedef int (EDVR_API *EdvrPluginRegisterFunc)(uint32_t hostApiVersion, EdvrPluginCallbacks* outCallbacks);
 
 #ifdef __cplusplus
 }

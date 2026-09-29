@@ -2,6 +2,25 @@
 #include "../common/log.h"
 #include <algorithm>
 
+namespace {
+
+static int EDVR_API hostRegisterSetting(const EdvrPluginSettingDef* setting) {
+    typedef int (WINAPI *PFN_edvrRegisterPluginSetting)(const EdvrPluginSettingDef*);
+    HMODULE hD3D11 = GetModuleHandleW(L"d3d11.dll");
+    if (hD3D11) {
+        auto reg = reinterpret_cast<PFN_edvrRegisterPluginSetting>(
+            GetProcAddress(hD3D11, "edvrRegisterPluginSetting"));
+        if (reg) return reg(setting);
+    }
+    return -1;
+}
+
+static void EDVR_API hostLogNote(const char* msg) {
+    if (msg) edvr::Log::get().note("%s", msg);
+}
+
+} // namespace
+
 namespace edvr::plugins {
 
 PluginManager& PluginManager::instance() {
@@ -55,19 +74,8 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
         if (plugin.callbacks.onInitialize) {
             EdvrHostServices hostServices{};
             hostServices.structSize = sizeof(EdvrHostServices);
-            hostServices.registerSetting = [](const EdvrPluginSettingDef* setting) -> int {
-                typedef int (WINAPI *PFN_edvrRegisterPluginSetting)(const EdvrPluginSettingDef*);
-                HMODULE hD3D11 = GetModuleHandleW(L"d3d11.dll");
-                if (hD3D11) {
-                    auto reg = reinterpret_cast<PFN_edvrRegisterPluginSetting>(
-                        GetProcAddress(hD3D11, "edvrRegisterPluginSetting"));
-                    if (reg) return reg(setting);
-                }
-                return -1;
-            };
-            hostServices.logNote = [](const char* msg) {
-                if (msg) Log::get().note("%s", msg);
-            };
+            hostServices.registerSetting = hostRegisterSetting;
+            hostServices.logNote = hostLogNote;
 
             int initResult = plugin.callbacks.onInitialize(&hostServices);
             if (initResult != 0) {
