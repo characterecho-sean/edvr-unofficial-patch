@@ -343,8 +343,9 @@ def main(argv=None):
     if args.profile == 'flat':
         with open(os.path.join(args.build, 'edvr-flat-README.txt'), 'wb') as f:
             f.write(b'EDVR flat temporal AA qualification build\r\n\r\n'
-                    b'Run edvr-flat-installer.exe. This edition installs d3d11.dll, edvr.ini,\r\n'
+                    b'Run edvr-flat-installer.exe. This edition installs d3d11.dll, edvr-flat.ini,\r\n'
                     b'and edvr_profile.ini beside EliteDangerous64.exe. No VR runtime is installed.\r\n'
+                    b'Its settings live in edvr-flat.ini, never in the VR profile\'s edvr.ini.\r\n'
                     b'Experimental temporal AA; visual quality is not yet qualified.\r\n'
                     b'Press F8 for the AA menu. Up/Down selects a row; Left/Right changes it.\r\n'
                     b'Choose Off, TAA, DLSS or FSR3 and the DLSS model preset; settings save live.\r\n'
@@ -370,7 +371,10 @@ def main(argv=None):
         '%d RCDATA "%s"' % (IDR_INI, rc_path(ini)),
         '%d RCDATA "%s"' % (IDR_PROFILE, rc_path(descriptor_path)),
     ]
-    carried = 'graphics, edvr.ini and %s profile descriptor' % args.profile
+    # The flat edition's settings are its own file (config.cpp reads edvr-flat.ini
+    # first), and this line is what a build log says the installer carries.
+    ini_name = 'edvr-flat.ini' if args.profile == 'flat' else 'edvr.ini'
+    carried = 'graphics, %s and %s profile descriptor' % (ini_name, args.profile)
     if args.profile == 'vr':
         lines += ['%d RCDATA "%s"' % (IDR_NATIVE_RUNTIME, rc_path(runtime)),
                   '%d RCDATA "%s"' % (IDR_LOADER, rc_path(loader)),
@@ -448,6 +452,14 @@ def self_test():
                 assert b'temporal_aa_model = k' in flat_ini and b'menu = F8' in flat_ini
             with open(os.path.join(build, 'edvr_profile_flat.ini'), 'rb') as stream:
                 assert stream.read() == b'[install]\r\nschema = 1\r\nprofile = flat\r\n'
+            # The flat edition's settings are edvr-flat.ini: what its README and the
+            # build's own summary say it carries must not send anybody to edvr.ini.
+            with open(os.path.join(build, 'edvr-flat-README.txt'), 'rb') as stream:
+                readme = stream.read()
+            assert b'installs d3d11.dll, edvr-flat.ini,' in readme, readme
+            assert b'installs d3d11.dll, edvr.ini' not in readme
+            with open(os.path.join(out, 'payload.rc'), encoding='utf-8') as stream:
+                assert 'graphics, edvr-flat.ini and flat profile descriptor' in stream.read()
         finally:
             openxr_pe.native_graphics_exports, openxr_pe.native_exports = old_g, old_r
             fetch_openxr_loader.verify = old_v

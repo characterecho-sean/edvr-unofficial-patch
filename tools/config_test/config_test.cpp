@@ -19,18 +19,36 @@
 // were real bugs, and the BOM case files every setting in the file under the
 // wrong section while the file still looks fine.
 //
+// Four more (2026-09-29) are about threads, the log and the file's sharing, and
+// read the real log file back rather than counting calls:
+//
+//   - a reader thread hammering the getters while the main thread rewrites the
+//     ini and reloads it, so a lock that is missing, or held only around the
+//     lookup and not the copy, shows as a wrong value or a crash;
+//   - a malformed value is said once per key per successful parse, however
+//     often it is read -- it was said on every read, 90 to 180 lines a second
+//     for a key read each frame;
+//   - getFloat takes the whole value and only a finite one;
+//   - a reload leaves edvr.ini open to being replaced, renamed or deleted (the
+//     read shares DELETE): the menu saves by renaming a temp file over it with
+//     POSIX semantics, and a read that did not share DELETE held that off while
+//     the reload had the file open.
+//
 // Usage: config_test.exe <dir containing edvr.ini> [scratch dir]
 #include <windows.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
 #include <string>
+#include <thread>
 
 #include "../../src/common/config.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
+#include "config_contract_gen.h"   // build\gen: the tables the DLLs register, from the real edvr.ini
 
 using namespace edvr;
 
@@ -88,9 +106,10 @@ static std::wstring widen(const char* p) {
 
 // A scratch ini written from a literal, for the cases the real file cannot
 // contain without being wrong.
-static bool writeIni(const std::wstring& dir, const char* body) {
+static bool writeIni(const std::wstring& dir, const char* body,
+                     const wchar_t* leaf = L"edvr.ini") {
     CreateDirectoryW(dir.c_str(), nullptr);
-    const std::wstring path = dir + L"\\edvr.ini";
+    const std::wstring path = dir + L"\\" + leaf;
     HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
@@ -98,6 +117,498 @@ static bool writeIni(const std::wstring& dir, const char* body) {
     WriteFile(f, body, static_cast<DWORD>(strlen(body)), &written, nullptr);
     CloseHandle(f);
     return true;
+}
+
+// The text of a file under the repo root, or empty: for the checks that hold
+// the shipped ini and the code that reads it to one answer.
+static std::string readRepoFile(const std::wstring& root, const wchar_t* relative) {
+    std::string out;
+    HANDLE f = CreateFileW((root + L"\\" + relative).c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return out;
+    char buf[8192];
+    DWORD got = 0;
+    while (ReadFile(f, buf, sizeof(buf), &got, nullptr) && got > 0) out.append(buf, got);
+    CloseHandle(f);
+    return out;
+}
+
+// The literal a getString call falls back to for `key`: its second argument.
+// "<no such read>" when the call is not in the source, so a rename fails loudly.
+static std::string codeFallbackOf(const std::string& source, const char* key) {
+    const std::string needle = std::string("getString(\"") + key + "\", \"";
+    const size_t at = source.find(needle);
+    if (at == std::string::npos) return "<no such read>";
+    const size_t begin = at + needle.size();
+    const size_t end = source.find('"', begin);
+    return end == std::string::npos ? "<unterminated>" : source.substr(begin, end - begin);
+}
+
+// writeIni, then a last-write time no earlier write has carried.
+//
+// reloadIfChanged() decides by comparing last-write times, and two writes inside
+// one clock tick -- 15 ms unless something has raised the timer rate -- carry the
+// same one. A loop that rewrites the file and reloads would then skip most of
+// its reloads without saying so, and a test of what a reload does to a reader
+// would be testing almost nothing. Each call stamps a time one second on from
+// the last, so every reload that follows is a parse.
+static bool rewriteIni(const std::wstring& dir, const std::string& body,
+                       const wchar_t* leaf = L"edvr.ini") {
+    if (!writeIni(dir, body.c_str(), leaf)) return false;
+    static ULONGLONG stamp = 0;
+    if (!stamp) {
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        stamp = (static_cast<ULONGLONG>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    }
+    stamp += 10000000ull;  // 100 ns ticks: one second
+    FILETIME ft;
+    ft.dwLowDateTime = static_cast<DWORD>(stamp & 0xFFFFFFFFull);
+    ft.dwHighDateTime = static_cast<DWORD>(stamp >> 32);
+    HANDLE f = CreateFileW((dir + L"\\" + leaf).c_str(), FILE_WRITE_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    const BOOL stamped = SetFileTime(f, nullptr, nullptr, &ft);
+    CloseHandle(f);
+    return stamped != FALSE;
+}
+
+// Every edvr_<tag>_*.log in `dir`, gone: so "the newest" below is provably THIS
+// run's, and the scratch directory does not grow with every build.
+static void deleteLogs(const std::wstring& dir, const wchar_t* tag) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((dir + L"\\edvr_" + tag + L"_*.log").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+// The newest edvr_<tag>_*.log in `dir`, whole; empty if there is none. Close the
+// log first: it is written by a flusher thread and only close() drains it.
+static std::string readNewestLog(const std::wstring& dir, const wchar_t* tag) {
+    std::string body;
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((dir + L"\\edvr_" + tag + L"_*.log").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return body;
+    std::wstring newest = fd.cFileName;
+    while (FindNextFileW(h, &fd)) newest = fd.cFileName;
+    FindClose(h);
+    HANDLE f = CreateFileW((dir + L"\\" + newest).c_str(), GENERIC_READ, FILE_SHARE_READ,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return body;
+    char chunk[65536];
+    DWORD got = 0;
+    while (ReadFile(f, chunk, sizeof(chunk), &got, nullptr) && got) body.append(chunk, got);
+    CloseHandle(f);
+    return body;
+}
+
+static int countOf(const std::string& haystack, const char* needle) {
+    int n = 0;
+    for (size_t at = haystack.find(needle); at != std::string::npos;
+         at = haystack.find(needle, at + 1)) {
+        ++n;
+    }
+    return n;
+}
+
+// --- getFloat: the whole value, and a finite one (2026-09-29) --------------
+//
+// strtof stops at the first character it cannot use and accepts "nan" and
+// "inf". getFloat asked only that SOMETHING parsed, so "1.5x" read as 1.5 and
+// "2,75" as 2 -- the truncation getInt was cured of -- and a NaN walked past
+// every range test a caller wrote, because it compares false against all of
+// them. A refused value is the caller's default, which is what expectFloat's
+// -999999 sentinel stands for.
+static void floatCases(const std::wstring& scratch) {
+    static const char kIni[] =
+        "[flt]\r\n"
+        "nan = nan\r\n"
+        "inf = inf\r\n"
+        "neginf = -inf\r\n"
+        "overflow = 1e999\r\n"      // strtof answers infinity, not an error
+        "junk = 1.5x\r\n"
+        "comma = 2,75\r\n"          // the comma locale the comment on getFloat names
+        "good = 1.5\r\n"
+        "neg = -0.25\r\n"
+        "whole = 2\r\n"
+        "exponent = 1e-3\r\n";
+    if (!writeIni(scratch, kIni)) {
+        fail("float scratch ini", "could not write it");
+        return;
+    }
+    Config::get().init(scratch);
+    expectFloat("flt.nan", -999999.0f, "getFloat refuses nan");
+    expectFloat("flt.inf", -999999.0f, "...and inf");
+    expectFloat("flt.neginf", -999999.0f, "...and -inf");
+    expectFloat("flt.overflow", -999999.0f, "...and a value too big for a float");
+    expectFloat("flt.junk", -999999.0f, "...and a number with a letter after it");
+    expectFloat("flt.comma", -999999.0f, "...and a decimal written with a comma");
+    expectFloat("flt.good", 1.5f, "getFloat still reads a plain decimal");
+    expectFloat("flt.neg", -0.25f, "...a negative one");
+    expectFloat("flt.whole", 2.0f, "...a whole number");
+    expectFloat("flt.exponent", 0.001f, "...and an exponent");
+}
+
+// --- a malformed value is said once per parse, however often it is read -----
+//
+// The getters noted it on EVERY read. A key read each frame wrote the same line
+// 90 to 180 times a second until log.max_mb, and then the flight logged
+// nothing. The property is read off the real log file, because a counter would
+// only prove that a counter was incremented.
+//
+// The same session covers the config audit's queue, whose flush now takes an
+// atomic flag and a lock instead of reading a vector: findings raised before
+// the log opens are written when it does, exactly once, and a reload that
+// finds the same lines does not write them again.
+//
+// Three parses, one log:
+//   1. malformed values, log CLOSED for the first hundred reads, then open.
+//      Nothing can be written while it is closed, and that must not use up the
+//      key's one note -- most keys are first read before Log::open.
+//   2. the same values again, rewritten: a new parse, so one more note.
+//   3. valid values: nothing to say.
+// So each malformed key appears twice in the file, not 0, 1 or 200.
+static void noteCases(const std::wstring& scratch) {
+    static const char* kKnown[] = {"experimental.zeta", "once.flag", "once.count",
+                                   "once.scale", "once.range", "once.rangebad"};
+    static const char* kMoved[][3] = {{"fix.zeta", "experimental.zeta", ""}};
+    const std::string first =
+        "[once]\r\n"
+        "flag = maybe\r\n"          // getBool
+        "count = 4w\r\n"            // getInt
+        "scale = 1,5\r\n"           // getFloat
+        "range = 999\r\n"           // getIntInRange, past the top
+        "rangebad = twelve\r\n"     // getIntInRange, not a number
+        "[fix]\r\n"
+        "zeta = 7\r\n"              // a moved key: the audit says so
+        "mystery2 = 9\r\n";         // a key nothing reads: the audit says so
+    const std::string second = first + "# written again, same values\r\n";
+    const std::string valid =
+        "[once]\r\n"
+        "flag = yes\r\n"
+        "count = 4\r\n"
+        "scale = 1.5\r\n"
+        "range = 7\r\n"
+        "rangebad = 8\r\n";
+
+    Config& cfg = Config::get();
+    // Reads every key 100 times and counts the answers that are not the ones a
+    // caller must get: the default for a malformed value, the clamp for an
+    // out-of-range one. Saying less must not change what is returned.
+    auto readRound = [&cfg](bool valid_) {
+        int wrong = 0;
+        for (int i = 0; i < 100; ++i) {
+            // A default that is NOT the answer, so a value read as absent shows.
+            if (cfg.getBool("once.flag", !valid_) != true) ++wrong;
+            if (cfg.getInt("once.count", 5) != (valid_ ? 4 : 5)) ++wrong;
+            if (cfg.getFloat("once.scale", 0.5f) != (valid_ ? 1.5f : 0.5f)) ++wrong;
+            if (cfg.getIntInRange("once.range", 5, 1, 10) != (valid_ ? 7 : 10)) ++wrong;
+            if (cfg.getIntInRange("once.rangebad", 5, 1, 10) != (valid_ ? 8 : 5)) ++wrong;
+        }
+        return wrong;
+    };
+
+    Log::get().close();                 // whatever an earlier case left open
+    deleteLogs(scratch, L"noteonce");
+    cfg.setAuditTables(kKnown, 6, kMoved, 1);
+    auto finish = [&]() {
+        Log::get().close();
+        cfg.setAuditTables(nullptr, 0, nullptr, 0);
+    };
+
+    if (!rewriteIni(scratch, first)) {
+        fail("note cases", "could not write the scratch ini");
+        finish();
+        return;
+    }
+    cfg.init(scratch);                  // parse 1: the audit's findings queue
+    int wrong = readRound(false);       // log closed: nothing to write, nothing spent
+    if (!Log::get().open(scratch, L"noteonce")) {
+        fail("note cases", "the log would not open in the scratch dir");
+        finish();
+        return;
+    }
+    wrong += readRound(false);          // parse 1, log open
+    if (!rewriteIni(scratch, second) || !cfg.reloadIfChanged()) {
+        fail("note cases", "the second write did not reload");
+        finish();
+        return;
+    }
+    wrong += readRound(false);          // parse 2
+    if (!rewriteIni(scratch, valid) || !cfg.reloadIfChanged()) {
+        fail("note cases", "the third write did not reload");
+        finish();
+        return;
+    }
+    wrong += readRound(true);           // parse 3: valid, so silent
+    finish();
+
+    if (wrong) {
+        fail("note cases", std::to_string(wrong) + " reads returned something other than "
+                           "the default, the clamp or the value");
+    } else {
+        ok("saying a malformed value once changes nothing a getter returns");
+    }
+
+    const std::string body = readNewestLog(scratch, L"noteonce");
+    if (body.empty()) {
+        fail("note cases", "could not read the log back");
+        return;
+    }
+    static const struct { const char* needle; int want; const char* what; } kNeeds[] = {
+        {"once.flag = \"maybe\"", 2,
+         "a malformed yes/no is noted once per parse, not once per read"},
+        {"once.count = \"4w\"", 2, "...a malformed integer"},
+        {"once.scale = \"1,5\"", 2, "...a malformed float"},
+        {"once.range = 999 is outside", 2, "...an out-of-range bounded integer"},
+        {"once.rangebad = \"twelve\"", 2, "...a malformed bounded integer"},
+        {"fix.zeta has moved to experimental.zeta", 1,
+         "an audit finding raised before the log opened is written once, and not "
+         "again by a reload"},
+        {"does not read: fix.mystery2", 1, "...and so is the audit's dead-line note"},
+    };
+    for (const auto& n : kNeeds) {
+        const int got = countOf(body, n.needle);
+        if (got == n.want) ok(n.what);
+        else fail(n.what, std::string("\"") + n.needle + "\" appears " +
+                              std::to_string(got) + " times in the log, wanted " +
+                              std::to_string(n.want));
+    }
+}
+
+// --- reads that race a reload (2026-09-29) ----------------------------------
+//
+// parse() swaps a freshly parsed map in and frees the old one. The render
+// thread does that whenever the ini's write time moves -- an in-VR menu write
+// does it -- while the OpenXR owner thread's deferred frame end reads
+// advanced.app_gpu_timing on its own. With no lock a read that straddled the
+// swap walked nodes that were being freed. And getString called the audit's
+// flush, which mutated a shared vector from whichever thread happened to read.
+//
+// The reader hammers four keys and a fifth that is never present; the main
+// thread alternates the file between two contents and reloads each time. Every
+// key has one of two legal values (the bool has one: both contents spell it
+// false, and the reader's default is true, so an absent key reads as true).
+// Anything else -- a default where a value should be, a torn string, an access
+// violation -- is the failure. The outcome for a correct build is
+// deterministic: the reader either only ever sees a whole map, or it does not.
+struct RaceReader {
+    std::atomic<bool> stop{false};
+    std::atomic<long> reads{0};
+    // Written by the reader thread alone; the main thread reads them after join().
+    long        bad = 0;
+    std::string firstBad;
+};
+
+static void raceReaderMain(RaceReader* r) {
+    Config& c = Config::get();
+    long n = 0;
+    auto flag = [r](const std::string& what) {
+        if (++r->bad == 1) r->firstBad = what;
+    };
+    while (!r->stop.load(std::memory_order_relaxed)) {
+        if (c.getBool("race.flag", true)) flag("race.flag read true: the key vanished");
+        const int count = c.getInt("race.count", -1);
+        if (count != 7 && count != 9) flag("race.count = " + std::to_string(count));
+        const float scale = c.getFloat("race.scale", -1.0f);
+        if (scale != 1.5f && scale != 2.5f) flag("race.scale = " + std::to_string(scale));
+        const std::string name = c.getString("race.name", "<none>");
+        if (name != "alpha" && name != "bravo") flag("race.name = \"" + name + "\"");
+        if (c.getInt("race.absent", -1) != -1) flag("race.absent found a value");
+        r->reads.store(++n, std::memory_order_relaxed);
+    }
+}
+
+static void raceCase(const std::wstring& scratch) {
+    const auto content = [](const char* flag, int count, const char* scale, const char* name) {
+        std::string s = "[race]\r\n";
+        s += std::string("flag = ") + flag + "\r\n";
+        s += "count = " + std::to_string(count) + "\r\n";
+        s += std::string("scale = ") + scale + "\r\n";
+        s += std::string("name = ") + name + "\r\n";
+        // A deeper tree takes longer to walk and to free, which is what widens
+        // the window that the lock has to close.
+        for (int i = 0; i < 64; ++i) s += "pad" + std::to_string(i) + " = " + name + "\r\n";
+        return s;
+    };
+    const std::string a = content("off", 7, "1.5", "alpha");
+    const std::string b = content("no", 9, "2.5", "bravo");
+
+    if (!rewriteIni(scratch, a)) {
+        fail("config race", "could not write the scratch ini");
+        return;
+    }
+    Config::get().init(scratch);
+
+    RaceReader reader;
+    std::thread thread(raceReaderMain, &reader);
+
+    // Do not start reloading until the reader is demonstrably running: a thread
+    // that has not been scheduled yet would make the loop below a test of nothing.
+    const ULONGLONG t0 = GetTickCount64();
+    while (reader.reads.load() < 1000 && GetTickCount64() - t0 < 5000) Sleep(1);
+    const bool started = reader.reads.load() >= 1000;
+
+    int  reloads = 0;
+    int  unparsed = 0;
+    bool writeFailed = false;
+    if (started) {
+        const ULONGLONG t1 = GetTickCount64();
+        while (reloads < 300 && GetTickCount64() - t1 < 1500) {
+            if (!rewriteIni(scratch, (reloads & 1) ? a : b)) {
+                writeFailed = true;
+                break;
+            }
+            if (!Config::get().reloadIfChanged()) ++unparsed;
+            ++reloads;
+        }
+    }
+    reader.stop.store(true);
+    thread.join();
+
+    if (!started) {
+        fail("config race", "the reader thread did not get going within 5 s");
+    } else if (writeFailed) {
+        fail("config race", "could not rewrite the scratch ini");
+    } else if (reloads < 20) {
+        fail("config race", "only " + std::to_string(reloads) + " reloads ran in 1.5 s; "
+                            "too few to say anything about a race");
+    } else if (unparsed) {
+        fail("config race", std::to_string(unparsed) + " of " + std::to_string(reloads) +
+                            " reloads found the file unchanged, so they never parsed");
+    } else if (reader.bad) {
+        fail("config race", std::to_string(reader.bad) + " bad reads; the first: " +
+                            reader.firstBad);
+    } else {
+        ok("reads racing reloads only ever see one whole map or the other");
+    }
+    printf("  info  %ld reads raced %d reloads\n", reader.reads.load(), reloads);
+}
+
+// --- a reload leaves the file open to being replaced (2026-09-29) --------------
+//
+// Config's read of edvr.ini opened it with FILE_SHARE_READ | FILE_SHARE_WRITE --
+// no FILE_SHARE_DELETE -- so for as long as a reload held the file (tens of
+// microseconds) nothing could delete it, rename it or replace it with POSIX
+// rename semantics, and the in-headset menu, which saves by renaming a temp file
+// over edvr.ini and asks for a reload straight after, could meet that hold on its
+// very next save.
+//
+// What this proves is the share mode; the replace itself is installer_test's
+// (its atomic-write cases replace a file under a reader that opens it this way).
+// iniedit's replace is a POSIX-semantics rename, which goes through under a
+// handle that shares DELETE and is refused under one that does not; the classic
+// MoveFileExW it falls back to is refused while ANY handle to the target is open.
+// The share mode is the half of that which lives here.
+//
+// The read cannot be paused from outside, so a second thread does to it what a
+// rename would: it opens the file for DELETE, with every share mode, over and
+// over, and counts the refusals that happen wholly inside a reload. It runs only
+// inside a reload, because a probe that ran while the test itself rewrote the
+// file would collide with the test: `busy` is the handshake that makes that so,
+// since a probe thread can be descheduled between opening the file and closing
+// it, and the test must not rewrite the file until that probe is finished.
+// A correct parse() is never refused. One without FILE_SHARE_DELETE is refused
+// whenever a probe lands while it holds the handle, which is hundreds of probes
+// over the run; the threshold below is for a scanner that happens to hold the
+// freshly written file for a moment, not for the bug.
+struct ProbeState {
+    std::atomic<bool> stop{false};
+    std::atomic<bool> inReload{false};
+    std::atomic<bool> busy{false};  // a probe is between its open and its close
+    std::atomic<long> inside{0};    // probes that ran wholly inside a reload
+    std::atomic<long> refused{0};   // ...and were refused with a sharing violation
+    std::atomic<long> other{0};     // ...and failed some other way
+};
+
+static void probeMain(const std::wstring* path, ProbeState* st) {
+    while (!st->stop.load()) {
+        // busy first, then the flag: either this probe sees the reload over and
+        // does nothing, or the test, after ending the reload, sees busy and waits.
+        st->busy.store(true);
+        if (!st->inReload.load()) {
+            st->busy.store(false);
+            SwitchToThread();
+            continue;
+        }
+        HANDLE h = CreateFileW(path->c_str(), DELETE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const DWORD code = h == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        const bool wholly = st->inReload.load();  // false: the reload ended mid-probe
+        st->busy.store(false);
+        if (!wholly) continue;
+        st->inside.fetch_add(1);
+        if (code == ERROR_SHARING_VIOLATION) st->refused.fetch_add(1);
+        else if (code != ERROR_SUCCESS) st->other.fetch_add(1);
+    }
+}
+
+static void shareDeleteCase(const std::wstring& scratch) {
+    const std::string one = "[share]\r\nk = 1\r\n";
+    const std::string two = "[share]\r\nk = 2\r\n";
+    if (!rewriteIni(scratch, one)) {
+        fail("config share delete", "could not write the scratch ini");
+        return;
+    }
+    Config::get().init(scratch);
+    const std::wstring path = scratch + L"\\edvr.ini";
+
+    ProbeState st;
+    std::thread probe(probeMain, &path, &st);
+
+    // At least 300 reloads, and on until the probe has landed 300 times inside
+    // them: a probe thread that is starved by a busy machine (the rigs run in a
+    // pool) gets the time it needs rather than failing the run for want of it.
+    // The cap is what ends a probe that never runs.
+    int  reloads = 0;
+    int  unparsed = 0;
+    bool writeFailed = false;
+    const ULONGLONG t0 = GetTickCount64();
+    for (int i = 0; i < 20000; ++i) {
+        if (i >= 300 && st.inside.load() >= 300) break;
+        if (i >= 300 && GetTickCount64() - t0 > 8000) break;
+        if (!rewriteIni(scratch, (i & 1) ? one : two)) {
+            writeFailed = true;
+            break;
+        }
+        st.inReload.store(true);
+        const bool parsed = Config::get().reloadIfChanged();
+        st.inReload.store(false);
+        while (st.busy.load()) SwitchToThread();  // a probe in flight finishes before the file is rewritten
+        if (!parsed) ++unparsed;
+        ++reloads;
+    }
+    st.stop.store(true);
+    probe.join();
+
+    const long inside = st.inside.load();
+    const long refused = st.refused.load();
+    if (writeFailed) {
+        fail("config share delete", "could not rewrite the scratch ini");
+    } else if (unparsed) {
+        fail("config share delete", std::to_string(unparsed) + " of " + std::to_string(reloads) +
+                                        " reloads found the file unchanged, so they never read it");
+    } else if (inside < 100) {
+        fail("config share delete", "the probe made only " + std::to_string(inside) +
+                                        " attempts inside " + std::to_string(reloads) +
+                                        " reloads; too few to say anything");
+    } else if (refused > 10) {
+        fail("config share delete",
+             std::to_string(refused) + " of " + std::to_string(inside) +
+                 " attempts to open the ini for delete were refused while a reload had it open: "
+                 "Config's read does not share DELETE");
+    } else {
+        ok("a reload leaves edvr.ini open to being replaced (FILE_SHARE_DELETE)");
+    }
+    printf("  info  %ld probes inside %d reloads, %ld refused, %ld failed another way\n", inside,
+           reloads, refused, st.other.load());
 }
 
 int main(int argc, char** argv) {
@@ -142,8 +653,9 @@ int main(int argc, char** argv) {
     expectStr("advanced.temporal_aa_objects_ships_metres", "<unset>", "the retired ship path's range is absent");
     // The particle facing measurement (dead since 2026-08-23) retired 2026-09-23.
     expectStr("advanced.particle_face_emitter", "<unset>", "the retired particle facing key is absent");
-    // The foveation's eye-tracked centre went with its gaze source (2026-09-23);
-    // its key retired 2026-09-24, and advanced.foveation_distance defaults to 0.
+    // The foveation's eye-tracked centre went with its gaze source (2026-09-23)
+    // and its key retired 2026-09-24; the whole shading-rate feature, keys
+    // and all, was removed 2026-09-29.
     expectStr("experimental.foveation_centre", "<unset>", "the retired foveation centre key is absent");
     expectBool("fix.share_exposure", true, "a key in the first [fix] reads");
     expectBool("fix.transition_flash", true, "...and another beside it");
@@ -179,12 +691,45 @@ int main(int argc, char** argv) {
     // post-tonemap UI drawn into a per-eye layer after the upscale. Values
     // off | 100 | 125 (percent of HMD Quality 1.0; ui_layer_math.h parses
     // them, and the first spellings 1.0 / 1.25, for one release). Ships live
-    // in [fix], default off (the interface is drawn as today).
+    // in [fix]; the default is 100 since 2026-09-29 (the interface as at HMD
+    // Quality 1.0), off before that.
     // fix.hud_quality, the surfaces' own key for one day, is gone: absorbed.
-    expectStr("fix.ui_quality", "off",
-              "ui quality ships live in [fix] and defaults off");
+    expectStr("fix.ui_quality", "100",
+              "ui quality ships live in [fix] and defaults to 100");
     expectStr("fix.hud_quality", "<unset>",
               "...and the separate HUD key it absorbed is gone");
+    // A file with no such line -- a hand-copied DLL over an old ini, a deleted
+    // line -- gets the code's fallback, and that has to be the shipped default or
+    // those installs run something the file never said. The read is in
+    // ui_layer.cpp; the rig takes the literal from the call itself.
+    {
+        const std::string shippedUiQuality = Config::get().getString("fix.ui_quality", "<unset>");
+        const std::string uiLayerSource = readRepoFile(dir, L"src\\d3d11\\ui_layer.cpp");
+        if (uiLayerSource.empty()) {
+            fail("ui_layer.cpp is readable from the repo root", "could not read it");
+        } else {
+            const std::string fallback = codeFallbackOf(uiLayerSource, "fix.ui_quality");
+            if (fallback == shippedUiQuality) {
+                ok("the code's fallback for fix.ui_quality is the shipped default");
+            } else {
+                fail("the code's fallback for fix.ui_quality is the shipped default",
+                     "ui_layer.cpp falls back to \"" + fallback + "\", the ini ships \"" +
+                         shippedUiQuality + "\"");
+            }
+            // CONTROL: the same source with the fallback put back to off.
+            std::string reverted = uiLayerSource;
+            const std::string from = "getString(\"fix.ui_quality\", \"" + fallback + "\")";
+            const size_t at = reverted.find(from);
+            if (at != std::string::npos) reverted.replace(at, from.size(), "getString(\"fix.ui_quality\", \"off\")");
+            if (at != std::string::npos && codeFallbackOf(reverted, "fix.ui_quality") != shippedUiQuality) {
+                ok("control: a fallback put back to off is caught");
+            } else {
+                fail("control: a fallback put back to off is caught",
+                     at == std::string::npos ? "the call was not found to alter"
+                                             : "the reverted source still matched the ini");
+            }
+        }
+    }
 
     // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
     // This is the claim that a repeated section header is not a parse error
@@ -312,6 +857,134 @@ int main(int argc, char** argv) {
                       "a real old-line choice still follows the move");
         }
         Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+
+        // --- the demoted field-of-view trims, over the SHIPPED tables --------
+        //
+        // 2026-09-29: fix.fov_trim_vertical / _outer / _nasal moved to
+        // [experimental] (edvr.ini: `# moved-from: fix.fov_trim_*`). Somebody who
+        // set them has them under [fix] in an old-layout edvr.ini, and the DLLs
+        // meet that file whenever they are copied in by hand. The fixture tables
+        // above prove the mechanics; these are the tables the DLLs register --
+        // config_contract_gen.h, generated from the real edvr.ini -- so what is
+        // proven is that the keys which actually moved read through, and that it
+        // is the shipped annotation that carries them.
+        {
+            using contractgen::kKnownKeys;
+            using contractgen::kMovedKeys;
+            constexpr size_t kKnownCount = sizeof(kKnownKeys) / sizeof(kKnownKeys[0]);
+            constexpr size_t kMovedCount = sizeof(kMovedKeys) / sizeof(kMovedKeys[0]);
+            constexpr const char* kTrimList = "pimax-openxr/pimax-crystal-super:10, "
+                                              "virtualdesktopxr/meta-quest-3:5";
+            static const char kOldTrims[] =
+                "[fix]\r\n"
+                "fov_trim_vertical = pimax-openxr/pimax-crystal-super:10, "
+                "virtualdesktopxr/meta-quest-3:5\r\n"
+                "fov_trim_outer = oculus/meta-quest-3:7\r\n"
+                "fov_trim_nasal = pimax-openxr/pimax-crystal-super:5\r\n";
+
+            // The tables carry the three moves, each old [fix] name to its new
+            // [experimental] one, and nothing is left documented under the old.
+            int trimMoves = 0;
+            static const char* filtered[kMovedCount][3];
+            size_t filteredCount = 0;
+            for (size_t i = 0; i < kMovedCount; ++i) {
+                const std::string oldKey = kMovedKeys[i][0], newKey = kMovedKeys[i][1];
+                const bool trim = newKey.rfind("experimental.fov_trim_", 0) == 0;
+                if (trim && oldKey == "fix.fov_trim_" + newKey.substr(strlen("experimental.fov_trim_"))) {
+                    ++trimMoves;
+                } else {
+                    for (int c = 0; c < 3; ++c) filtered[filteredCount][c] = kMovedKeys[i][c];
+                    ++filteredCount;
+                }
+            }
+            if (trimMoves == 3) ok("the shipped moved-from map carries fix.fov_trim_* to experimental.fov_trim_*");
+            else fail("the shipped moved-from map carries the three trims",
+                      std::to_string(trimMoves) + " of 3 moves found in edvr.ini's annotations");
+            int retiredStillKnown = 0;
+            for (size_t i = 0; i < kKnownCount; ++i) {
+                if (strncmp(kKnownKeys[i], "fix.fov_trim_", 13) == 0) ++retiredStillKnown;
+            }
+            if (retiredStillKnown == 0) ok("no fix.fov_trim_* key is still read or documented");
+            else fail("no fix.fov_trim_* key is still read or documented",
+                      std::to_string(retiredStillKnown) + " of them are");
+
+            Config::get().setAuditTables(kKnownKeys, kKnownCount, kMovedKeys, kMovedCount);
+            if (!writeIni(scratch, kOldTrims)) {
+                fail("old-layout fov trim ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                expectStr("experimental.fov_trim_vertical", kTrimList,
+                          "an old-layout fov_trim_vertical is read as experimental.fov_trim_vertical");
+                expectStr("experimental.fov_trim_outer", "oculus/meta-quest-3:7",
+                          "an old-layout fov_trim_outer is read as experimental.fov_trim_outer");
+                expectStr("experimental.fov_trim_nasal", "pimax-openxr/pimax-crystal-super:5",
+                          "an old-layout fov_trim_nasal is read as experimental.fov_trim_nasal");
+
+                // Live: an edit to the OLD line under a running game reaches
+                // the new name on the next reload, because the read-through is
+                // resolved at every parse.
+                if (!rewriteIni(scratch, "[fix]\r\nfov_trim_outer = oculus/meta-quest-3:9\r\n") ||
+                    !Config::get().reloadIfChanged()) {
+                    fail("old-layout fov trim reload", "the edit did not reload");
+                } else {
+                    expectStr("experimental.fov_trim_outer", "oculus/meta-quest-3:9",
+                              "an edit to the old line is live: the next reload reads it");
+                    expectStr("experimental.fov_trim_vertical", "<unset>",
+                              "...and a trim no longer in the file is gone, not remembered");
+                }
+                // The shipped default, empty, in an old-layout file: no trim.
+                if (!rewriteIni(scratch, "[fix]\r\nfov_trim_vertical =\r\n") ||
+                    !Config::get().reloadIfChanged()) {
+                    fail("old-layout empty fov trim reload", "the edit did not reload");
+                } else {
+                    expectStr("experimental.fov_trim_vertical", "",
+                              "an old-layout line left empty reads as no trim");
+                }
+                // Both spellings in one file: the new name wins.
+                if (!rewriteIni(scratch,
+                                "[fix]\r\nfov_trim_outer = oculus/meta-quest-3:9\r\n"
+                                "[experimental]\r\nfov_trim_outer = oculus/meta-quest-3:2\r\n") ||
+                    !Config::get().reloadIfChanged()) {
+                    fail("both-layout fov trim reload", "the edit did not reload");
+                } else {
+                    expectStr("experimental.fov_trim_outer", "oculus/meta-quest-3:2",
+                              "when both spellings are set, experimental.fov_trim_outer wins");
+                }
+                // A new-layout file: read directly, and nothing under the old name.
+                if (!rewriteIni(scratch, "[experimental]\r\nfov_trim_vertical = oculus:3\r\n") ||
+                    !Config::get().reloadIfChanged()) {
+                    fail("new-layout fov trim reload", "the edit did not reload");
+                } else {
+                    expectStr("experimental.fov_trim_vertical", "oculus:3",
+                              "a new-layout fov_trim_vertical is read as it stands");
+                    expectStr("fix.fov_trim_vertical", "<unset>",
+                              "...and the retired name reads nothing");
+                }
+            }
+
+            // CONTROL: the same old-layout file, over the same tables minus the
+            // three moves (what edvr.ini without its annotations would generate).
+            // The values are stranded under [fix] and the new names read nothing,
+            // which is exactly what the assertions above would report if the
+            // annotations were lost.
+            Config::get().setAuditTables(kKnownKeys, kKnownCount,
+                                         reinterpret_cast<const char* const(*)[3]>(filtered),
+                                         filteredCount);
+            if (!writeIni(scratch, kOldTrims)) {
+                fail("control fov trim ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                expectStr("experimental.fov_trim_vertical", "<unset>",
+                          "control: without the annotation an old-layout fov_trim_vertical is NOT read as the new name");
+                expectStr("experimental.fov_trim_outer", "<unset>",
+                          "control: ...nor fov_trim_outer");
+                expectStr("experimental.fov_trim_nasal", "<unset>",
+                          "control: ...nor fov_trim_nasal");
+                expectStr("fix.fov_trim_outer", "oculus/meta-quest-3:7",
+                          "control: the value sits under the old name, where nothing reads it");
+            }
+            Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+        }
 
         // --- the log directory, and the environment's say over it ----------
         //
@@ -463,6 +1136,18 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- floats, notes and threads (2026-09-29) ----------------------------
+    //
+    // Before the profile cases below: those switch g_runtimeProfile to flat and
+    // invalid, under which these scratch keys would read as suppressed.
+    if (argc >= 3) {
+        const std::wstring scratch = widen(argv[2]);
+        floatCases(scratch);
+        noteCases(scratch);
+        raceCase(scratch);
+        shareDeleteCase(scratch);
+    }
+
     // An old/full INI cannot widen a flat installation, even through numeric
     // getters whose ordinary fallback or lower bound would turn a fix on.
     const RuntimeProfile savedProfile = g_runtimeProfile;
@@ -519,6 +1204,11 @@ int main(int argc, char** argv) {
     expectStr("hotkey.menu", "F8", "flat scope permits the temporal menu hotkey");
     Config::get().set("fix.temporal_aa_model", "m");
     expectStr("fix.temporal_aa_model", "m", "flat scope permits the DLSS model");
+    // The flat panel's Sharpening row and the flat sharpening both read this key
+    // through the generic getter. Unlisted, it would read 0 here whatever the file
+    // says: no error, no log line, a row that does nothing.
+    Config::get().set("fix.render_sharpness", "0.3");
+    expectFloat("fix.render_sharpness", 0.3f, "flat scope permits the sharpening setting");
     expectStr("hotkey.toggle_exposure", "", "flat menu exception leaves unrelated hotkeys suppressed");
     const struct { const char* name; unsigned full, fovea; bool known; } presets[] = {
         {"auto",0,0,true},{"default",0,0,true},{"j",10,10,true},
@@ -537,6 +1227,7 @@ int main(int argc, char** argv) {
     expectBool("advanced.d3d11_fixes", false, "bad descriptor disables graphics hooks");
     expectStr("hotkey.menu", "", "invalid profile cannot open temporal menu");
     expectStr("fix.temporal_aa_model", "off", "invalid profile cannot select a DLSS model");
+    expectFloat("fix.render_sharpness", 0.0f, "invalid profile cannot sharpen");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "bad descriptor preserves mod chaining");
     if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
         ok("invalid profile suppresses flat jitter");
@@ -551,6 +1242,37 @@ int main(int argc, char** argv) {
     if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
         ok("VR profile reads explicit jitter setting");
     else fail("VR profile jitter", "flat exception changed VR scope");
+    expectFloat("fix.render_sharpness", 0.3f, "VR profile still reads the sharpening setting");
+
+    // The flat panel writes the Sharpening row into edvr-flat.ini and asks for a
+    // reload; the flat sharpening reads the key every frame. Live means that file,
+    // read first (config.cpp), moves the value on the next reload -- not the
+    // edvr.ini beside it, which a flat install falls back to and a VR one owns.
+    if (argc >= 3) {
+        const std::wstring flatDir = widen(argv[2]) + L"_flatsharp";
+        g_runtimeProfile = RuntimeProfile::Flat;
+        const wchar_t* flatLeaf = L"edvr-flat.ini";
+        // The descriptor beside the inis is what makes init() pick the flat file:
+        // without it the profile reads as the legacy VR one and edvr.ini wins.
+        if (!writeIni(flatDir, descriptor, L"edvr_profile.ini") ||
+            !rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0.9\r\n") ||
+            !rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0.4\r\n", flatLeaf)) {
+            fail("flat sharpening reload", "could not write the scratch inis");
+        } else {
+            Config::get().init(flatDir);
+            if (!runtimeFlatProfile()) fail("flat sharpening reload", "the descriptor did not select flat");
+            expectFloat("fix.render_sharpness", 0.4f,
+                        "the flat file is read first: its 0.4, not edvr.ini's 0.9");
+            if (!rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0\r\n", flatLeaf) ||
+                !Config::get().reloadIfChanged())
+                fail("flat sharpening reload", "a panel write of 0 did not reload");
+            else expectFloat("fix.render_sharpness", 0.0f, "a panel write of 0 is live");
+            if (!rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0.65\r\n", flatLeaf) ||
+                !Config::get().reloadIfChanged())
+                fail("flat sharpening reload", "a panel write of 0.65 did not reload");
+            else expectFloat("fix.render_sharpness", 0.65f, "a panel write of 0.65 is live");
+        }
+    }
     g_runtimeProfile = savedProfile;
 
     if (g_fails) {

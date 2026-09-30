@@ -2,11 +2,67 @@
 
 ## Status
 
+Summary; the bullets it condenses are verbatim under "Status detail".
+
+- **Where the arc stands (journal tail, 2026-09-21 07:45 entry):** flight
+  073348 read; L2 decision GO: suppression = clear-bits + force-rebuild via
+  the engine's own batch clear (FUN_14434DB60); build mechanics offline
+  next, continued in engine-render-performance-2026-09-19.md (07:45 entry).
 - Correction (2026-09-23, design-settlement-lod-bias section 9): FUN_1401EA920
   is not a load-only path (journal 2026-09-20 20:25): it rebuilds the views
   while parked -- the view count changed on 2 of 6 consecutive-frame
   transitions and the eye cameras moved on all 6 -- so a cleared +0x570 bit
   lasts until the next frame's rebuild, not a reload.
+- **Ownership / KinematicRig** (decoded statically 2026-09-19; detail
+  below): the predicate class the 09-19 text left open is traced to content
+  data (+0x560/+0x558 copied at ctx build; 20:25 entry). Owner == rig
+  REFUTED in flight (043344, 05:05 entry: one shared global owner); rig ->
+  collection via *(rig+0x348) CLOSED (054002, 05:45 entry). Tracker clock =
+  EDVR's present frame index (mesh == present-2, flown 094158 and 103339);
+  the mesh-frame counter is REFUTED as the clock (083323, 08:50 entry).
+  +0xB0..+0x130 is a world TRANSFORM, bounds a SPHERE (13:30/13:45 entries).
+  Rotating-in-place class: 292 records translate <0.1 m yet rotate 0.8-1.6
+  deg/present, so static labels must cover rotation.
+- **Open:** exclude proven-static objects before expensive EDVR motion work
+  while retaining camera/world motion. Classification must be cheaper than
+  the work removed and detect new movement without stale labels. The
+  separate coarse body-on-buildings and 16:48:57 camera-pulse problems
+  remain unresolved. Stage B (coverage mask, compose veto, movers-view cyan)
+  was REMOVED 2026-09-23, superseded by the engine-record path's exact
+  per-pixel ownership; its 09-20 Open text is kept below.
+- **Build (all Frontier):** v0.17.0-119-g6899d0ff-dirty (d3d11 CFDEFA79),
+  nine 2026-09-20 review fixes on stage A, flight-proven by 125207; flight
+  check `--expect-build v0.17.0-119-g6899d0ff-dirty`. Stage B: 6b90d0b
+  (sha256 81d5d27f434b2458, unflown), then 5fb4f62 (sha256 d6d5ef39ceb2a0ca;
+  mask diagnostic-only); flight 152934 held all three fixes, cyan check
+  DEAD. INIs unchanged; the tracker runs whenever fix.temporal_aa is on
+  (its own key retired 2026-09-23; the 12:46 flight had it under
+  [advanced] -- dark, not evidence). Full bullet below.
+- Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
+  DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
+  timings are not directly comparable. Installed DLSS Windows file/product
+  version is 310,7,0,0. This is landed cockpit; station rotation/on-foot still
+  need separate validation. No draw suppression is active.
+- **Measured (2026-09-18 landed capture; numbers below):** W7 CPU/GPU
+  medians 18.394/22.090 ms; ownership gate ~4.06 ms/frame (sampled); mesh
+  hook 1.241 ms/frame; 76% zero-sample draws, ~23000/19000 original calls a
+  frame; 501/512 records statically posed. Cost envelopes, not savings.
+- **Ruled out (entries named):** owner == rig (05:05); mesh-frame counter as
+  clock (08:50); the dirty-queue route to mover/static truth, a family
+  mismatch (21:05); +0x570 as load-only (20:25, correction above); the
+  guarded blend cache (2026-09-18 "rejected before flight"); typed fusion
+  and the earlier batching / cache / screen-motion hypotheses (09-17/18).
+- **Next:** old plan (owner-to-collection provenance at 431AFE0, worker
+  descriptor context, stack-end / repeated-RIP handling) superseded: the
+  rig-link hook closed it (05:45 entry), kept below. Live next step: L2
+  build mechanics in engine-render-performance-2026-09-19.md.
+
+## Status detail (moved out of Status 2026-09-29)
+
+Moved verbatim from the Status block (its first bullet, the 2026-09-23
+correction, and the Environment bullet stay in Status). The old Next bullet
+is the last one and is SUPERSEDED, see Status.
+
 - Reversing (2026-09-19): KinematicRig pipeline decoded statically (Ghidra
   headless, exe hash-verified), no flight spent. State machine rig+0x380
   (4 = render-ready); dependency tokens +0x188/+0x1A0/+0x1B8 with -1 =
@@ -96,11 +152,6 @@
   ~2.6k statics published clean; the cyan check is DEAD -- stage B (the
   coverage mask, the veto, the movers view's cyan) was removed 2026-09-23,
   superseded by the engine-record path's exact per-pixel ownership.
-- Environment: latest capture is Quest 3 / VirtualDesktopXR / RTX 5090 / 90 Hz,
-  DLSS K, input 1996x2121 and output 3072x3264 per eye. Earlier 2481x2121 input
-  timings are not directly comparable. Installed DLSS Windows file/product
-  version is 310,7,0,0. This is landed cockpit; station rotation/on-foot still
-  need separate validation. No draw suppression is active.
 - Timing: earlier W7 has CPU/GPU medians 18.394/22.090 ms, separately measured
   elapsed spans. Its 30-second sample ends before eye_190309 begins; capture
   changes the scope during drain. The 19:03:24 ownership window has 18,751,925

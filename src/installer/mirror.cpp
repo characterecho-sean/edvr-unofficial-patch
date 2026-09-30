@@ -5,7 +5,9 @@
 
 #include <cstdio>
 #include <cwctype>
+#include <string>
 
+#include "../common/iniedit.h"
 #include "state.h"
 
 namespace edvr::installer {
@@ -58,15 +60,41 @@ bool ensureDirTree(const std::wstring& path) {
     return GetLastError() == ERROR_ALREADY_EXISTS && dirExists(path);
 }
 
-// Clears read-only on the destination first: every file this copies, either
-// direction, can legitimately be one Windows marked read-only (a launcher's
-// file verification does this to files it considers its own), and CopyFileW
-// simply fails against that rather than replacing it.
-bool copyOver(const std::wstring& from, const std::wstring& to) {
-    const DWORD attrs = GetFileAttributesW(to.c_str());
+// Every file this writes, either direction, can legitimately be one Windows
+// marked read-only (a launcher's file verification does this to files it
+// considers its own), and a replace simply fails against that.
+void clearReadOnly(const std::wstring& path) {
+    const DWORD attrs = GetFileAttributesW(path.c_str());
     if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
-        SetFileAttributesW(to.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
-    return CopyFileW(from.c_str(), to.c_str(), FALSE) != 0;
+        SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+}
+
+// The largest file copied: the d3d11.dll and openvr_api.dll of the backup pair
+// are megabytes, and a file that is not is not one this mirror has any business
+// holding.
+const size_t kCopyLimit = 256u << 20;
+
+// A file copied whole, and put in place with one replace: what was at `to` is
+// either still there or entirely replaced. This was CopyFileW in place, and a
+// failure part-way -- a full disk, a scanner taking the handle -- left the
+// mirror's only copy of somebody's settings truncated.
+bool copyOver(const std::wstring& from, const std::wstring& to) {
+    clearReadOnly(to);
+    std::string bytes;
+    if (!readFileBytes(from, &bytes, kCopyLimit)) return false;
+    return writeFileAtomic(to, bytes);
+}
+
+// One ini into the mirror as its newest generation (see iniedit.h). A
+// `checkpoint` -- an installer run -- keeps the copy it replaces as .1, and .1
+// as .2; anything else is a change made a moment ago and replaces the newest in
+// place.
+bool mirrorIni(const std::wstring& from, const std::wstring& mirrorDir, const wchar_t* name,
+               bool checkpoint) {
+    std::string bytes;
+    if (!readFileBytes(from, &bytes) || bytes.empty()) return false;
+    for (int g = 0; g < kMirrorGenerations; ++g) clearReadOnly(generationPath(mirrorDir, name, g));
+    return writeGenerations(mirrorDir, name, bytes, checkpoint);
 }
 
 // UTC, formatted the same way state.cpp's utcNow() is -- one clock, one
@@ -102,9 +130,13 @@ MirrorInfo readMirror(const std::wstring& mirrorDir) {
     info.dir = mirrorDir;
     if (mirrorDir.empty()) return info;
 
-    const std::wstring iniPath = joinPath(mirrorDir, kIni);
-    info.hasIni = fileExists(iniPath);
-    info.hasFlatIni = fileExists(joinPath(mirrorDir, kFlatIni));
+    // The newest generation of each ini that is there and not empty (iniedit.h):
+    // a crash between two writes, or a copy an older build left half-written,
+    // must not hide the settings behind it.
+    const std::wstring iniPath = newestGeneration(mirrorDir, kIni);
+    const std::wstring flatIniPath = newestGeneration(mirrorDir, kFlatIni);
+    info.hasIni = !iniPath.empty();
+    info.hasFlatIni = !flatIniPath.empty();
     info.hasBaseIni = fileExists(joinPath(mirrorDir, kBaseIni));
     info.hasState = fileExists(joinPath(mirrorDir, kStateIni));
     // The mirror preserves ownership metadata, not the active runtime scope.
@@ -114,8 +146,22 @@ MirrorInfo readMirror(const std::wstring& mirrorDir) {
     info.hasBackupPair =
         fileExists(joinPath(backupSub, kD3d11)) || fileExists(joinPath(backupSub, kOpenvr));
 
-    if (info.hasIni) info.savedUtc = fileSavedUtc(iniPath);
+    // When the settings were mirrored: the later of the two files' copies (the
+    // format sorts as text), so a flat-only mirror says when ITS file was saved.
+    const std::string iniWhen = info.hasIni ? fileSavedUtc(iniPath) : std::string();
+    const std::string flatWhen = info.hasFlatIni ? fileSavedUtc(flatIniPath) : std::string();
+    info.savedUtc = flatWhen > iniWhen ? flatWhen : iniWhen;
     return info;
+}
+
+bool MirrorInfo::holdsSettings() const { return hasIni || hasFlatIni; }
+
+bool MirrorInfo::holdsSettingsFor(const std::string& profile) const {
+    return profile == "flat" ? (hasFlatIni || hasIni) : hasIni;
+}
+
+bool offerRestore(bool folderHasSettings, const MirrorInfo& mirror, const std::string& profile) {
+    return !folderHasSettings && mirror.holdsSettingsFor(profile);
 }
 
 MirrorResult updateMirror(const std::wstring& gameDir, const std::wstring& backupDir,
@@ -124,14 +170,18 @@ MirrorResult updateMirror(const std::wstring& gameDir, const std::wstring& backu
     if (mirrorDir.empty() || !ensureDirTree(mirrorDir)) return result;
     result.ok = true;
 
+    // An install or repair is the checkpoint the generations exist for: the
+    // copy this replaces is kept. Without that, a game folder wiped by an update
+    // and then installed fresh -- because the restore failed or was declined --
+    // overwrote the only saved copy with the defaults it had just written.
     const std::wstring iniPath = joinPath(gameDir, kIni);
-    if (fileExists(iniPath) && copyOver(iniPath, joinPath(mirrorDir, kIni)))
+    if (fileExists(iniPath) && mirrorIni(iniPath, mirrorDir, kIni, true))
         result.saved.push_back("edvr.ini");
 
     // The flat profile's own settings file, mirrored whenever a flat install
     // left one; a VR-only folder simply has nothing to copy.
     const std::wstring flatIniPath = joinPath(gameDir, kFlatIni);
-    if (fileExists(flatIniPath) && copyOver(flatIniPath, joinPath(mirrorDir, kFlatIni)))
+    if (fileExists(flatIniPath) && mirrorIni(flatIniPath, mirrorDir, kFlatIni, true))
         result.saved.push_back("edvr-flat.ini");
 
     const std::wstring basePath = baseIniPath(gameDir);
@@ -170,14 +220,17 @@ MirrorResult updateMirrorIni(const std::wstring& gameDir, const std::wstring& mi
     MirrorResult result;
     if (mirrorDir.empty() || !ensureDirTree(mirrorDir)) return result;
 
+    // A setting changed a moment ago, not a checkpoint: the newest copy is
+    // replaced in place and the older generations an install kept stay put. A
+    // generation per toggle would push the copy worth keeping out in three.
     const std::wstring iniPath = joinPath(gameDir, kIni);
-    if (fileExists(iniPath) && copyOver(iniPath, joinPath(mirrorDir, kIni))) {
+    if (fileExists(iniPath) && mirrorIni(iniPath, mirrorDir, kIni, false)) {
         result.ok = true;
         result.saved.push_back("edvr.ini");
     }
 
     const std::wstring flatIniPath = joinPath(gameDir, kFlatIni);
-    if (fileExists(flatIniPath) && copyOver(flatIniPath, joinPath(mirrorDir, kFlatIni))) {
+    if (fileExists(flatIniPath) && mirrorIni(flatIniPath, mirrorDir, kFlatIni, false)) {
         result.ok = true;
         result.saved.push_back("edvr-flat.ini");
     }
@@ -186,16 +239,42 @@ MirrorResult updateMirrorIni(const std::wstring& gameDir, const std::wstring& mi
 
 bool restoreFromMirror(const std::wstring& gameDir, const MirrorInfo& info,
                        std::vector<std::string>* notes) {
-    if (!info.hasIni) return false;
+    if (!info.holdsSettings()) return false;
     auto note = [&](const std::string& s) {
         if (notes) notes->push_back(s);
     };
 
-    if (!copyOver(joinPath(info.dir, kIni), joinPath(gameDir, kIni))) return false;
-    note("Restored edvr.ini from the copy kept outside the game folder.");
-
-    if (info.hasFlatIni && copyOver(joinPath(info.dir, kFlatIni), joinPath(gameDir, kFlatIni)))
-        note("Restored edvr-flat.ini too, so the flat profile keeps its own settings.");
+    // Every settings file the mirror holds, each from the newest generation there
+    // is: the one readMirror judged worth offering. Either is enough on its own
+    // (a flat install mirrors edvr-flat.ini alone), and neither's failure is
+    // hidden behind the other's success: the flat profile's file lost while the
+    // shared edvr.ini came back is a restore that did not happen, and it says so.
+    bool restoredAll = true;
+    bool restoredAny = false;
+    struct Settings {
+        const wchar_t* leaf;
+        bool           held;
+        const char*    what;
+    };
+    const Settings settings[] = {
+        {kIni, info.hasIni, "edvr.ini"},
+        {kFlatIni, info.hasFlatIni, "edvr-flat.ini (the flat profile's own settings)"},
+    };
+    for (const Settings& one : settings) {
+        if (!one.held) continue;
+        const std::wstring source = newestGeneration(info.dir, one.leaf);
+        if (source.empty() || !copyOver(source, joinPath(gameDir, one.leaf))) {
+            note(std::string("Could not restore ") + one.what +
+                 " from the copy kept outside the game folder.");
+            restoredAll = false;
+            continue;
+        }
+        restoredAny = true;
+        note(std::string("Restored ") + one.what + " from the copy kept outside the game folder.");
+    }
+    // Nothing of the settings came back: the rest of the mirror is not worth
+    // putting into a folder that could not take its settings.
+    if (!restoredAny) return false;
 
     if (info.hasBaseIni || info.hasState) {
         if (ensureDirTree(stateDirPath(gameDir))) {
@@ -227,7 +306,7 @@ bool restoreFromMirror(const std::wstring& gameDir, const MirrorInfo& info,
             }
         }
     }
-    return true;
+    return restoredAll;
 }
 
 }  // namespace edvr::installer

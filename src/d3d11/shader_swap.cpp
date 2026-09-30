@@ -194,6 +194,42 @@ void compileInnerCs(ID3D11DeviceContext* ctx, const char* hlsl,
 
 }  // namespace
 
+ID3D11VertexShader* shaderSwapCreateVs(ID3D11DeviceContext* ctx,
+                                      const void* bytecode, size_t bytecodeLen,
+                                      const char* name, const char* who) {
+    if (!ctx || !bytecode || !bytecodeLen) return nullptr;
+    ID3D11VertexShader* out = nullptr;
+    const int64_t t0 = qpcNow();
+    HRESULT hr = E_FAIL;
+    // Keep published COM pointers outside SEH: a driver can fault after
+    // writing an output, and /EHsc does not unwind its interrupted lambda.
+    ID3D11Device* dev = nullptr;
+    bool ran = guardedBudget(g_createBudget, [&] {
+        ctx->GetDevice(&dev);
+        if (dev) hr = dev->CreateVertexShader(bytecode, bytecodeLen, nullptr, &out);
+    });
+    if (dev) {
+        ID3D11Device* release = dev;
+        dev = nullptr;
+        // Never retry a Release that faulted: it may already have destroyed
+        // the object. Reject the shader even if creation published S_OK.
+        if (!guarded("shaderSwap.create.device.release", [&] { release->Release(); })) ran = false;
+    }
+    if ((!ran || FAILED(hr)) && out) {
+        auto* release = out;
+        out = nullptr;
+        guarded("shaderSwap.create.shader.release", [&] { release->Release(); });
+    }
+    const int64_t frequency = qpcFrequency();
+    const double ms = frequency > 0
+        ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(frequency)
+        : 0.0;
+    Log::get().note("%s: precompiled vertex shader %s %s (0x%08X, %.3f ms).",
+                    who, name, out ? "created" : (!ran ? "creation faulted/refused; standing down" : "creation FAILED; standing down"),
+                    static_cast<unsigned>(hr), ms);
+    return out;
+}
+
 ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,
                                       const void* bytecode, size_t bytecodeLen,
                                       const char* name, const char* who) {
@@ -201,24 +237,67 @@ ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,
     ID3D11ComputeShader* out = nullptr;
     const int64_t t0 = qpcNow();
     HRESULT hr = E_FAIL;
-    guardedBudget(g_createBudget, [&] {
-        ID3D11Device* dev = nullptr;
+    // Keep published COM pointers outside SEH: a driver can fault after
+    // writing an output, and /EHsc does not unwind its interrupted lambda.
+    ID3D11Device* dev = nullptr;
+    bool ran = guardedBudget(g_createBudget, [&] {
         ctx->GetDevice(&dev);
-        if (dev) {
-            hr = dev->CreateComputeShader(bytecode, bytecodeLen, nullptr, &out);
-            dev->Release();
-        }
+        if (dev) hr = dev->CreateComputeShader(bytecode, bytecodeLen, nullptr, &out);
     });
-    if (FAILED(hr) && out) {
-        out->Release();
+    if (dev) {
+        ID3D11Device* release = dev;
+        dev = nullptr;
+        // Never retry a Release that faulted: it may already have destroyed
+        // the object. Reject the shader even if creation published S_OK.
+        if (!guarded("shaderSwap.create.device.release", [&] { release->Release(); })) ran = false;
+    }
+    if ((!ran || FAILED(hr)) && out) {
+        auto* release = out;
         out = nullptr;
+        guarded("shaderSwap.create.shader.release", [&] { release->Release(); });
     }
     const int64_t frequency = qpcFrequency();
     const double ms = frequency > 0
         ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(frequency)
         : 0.0;
     Log::get().note("%s: precompiled compute shader %s %s (0x%08X, %.3f ms).",
-                    who, name, out ? "created" : "creation FAILED; standing down",
+                    who, name, out ? "created" : (!ran ? "creation faulted/refused; standing down" : "creation FAILED; standing down"),
+                    static_cast<unsigned>(hr), ms);
+    return out;
+}
+
+ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,
+                                    const void* bytecode, size_t bytecodeLen,
+                                    const char* name, const char* who) {
+    if (!ctx || !bytecode || !bytecodeLen) return nullptr;
+    ID3D11PixelShader* out = nullptr;
+    const int64_t t0 = qpcNow();
+    HRESULT hr = E_FAIL;
+    // Keep published COM pointers outside SEH: a driver can fault after
+    // writing an output, and /EHsc does not unwind its interrupted lambda.
+    ID3D11Device* dev = nullptr;
+    bool ran = guardedBudget(g_createBudget, [&] {
+        ctx->GetDevice(&dev);
+        if (dev) hr = dev->CreatePixelShader(bytecode, bytecodeLen, nullptr, &out);
+    });
+    if (dev) {
+        ID3D11Device* release = dev;
+        dev = nullptr;
+        // Never retry a Release that faulted: it may already have destroyed
+        // the object. Reject the shader even if creation published S_OK.
+        if (!guarded("shaderSwap.create.device.release", [&] { release->Release(); })) ran = false;
+    }
+    if ((!ran || FAILED(hr)) && out) {
+        auto* release = out;
+        out = nullptr;
+        guarded("shaderSwap.create.shader.release", [&] { release->Release(); });
+    }
+    const int64_t frequency = qpcFrequency();
+    const double ms = frequency > 0
+        ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(frequency)
+        : 0.0;
+    Log::get().note("%s: precompiled pixel shader %s %s (0x%08X, %.3f ms).",
+                    who, name, out ? "created" : (!ran ? "creation faulted/refused; standing down" : "creation FAILED; standing down"),
                     static_cast<unsigned>(hr), ms);
     return out;
 }

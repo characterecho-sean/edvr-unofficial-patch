@@ -23,6 +23,11 @@ ComPtr<ID3DBlob> compile(const char* s,const char* entry,const char* profile,con
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
+    if(FAILED(dev->CreateComputeShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
+}
+
 float testBrightness=2.0f;
 bool testOn=true,testPulse=true,testFail=false;uint64_t testVs=0xFCF7BD2896751D96ull,testPs=0xF786D34B5E118D5Eull;
 Config& Config::get(){static Config c;return c;}
@@ -33,10 +38,9 @@ bool Config::getBool(const char* key,bool def)const{
 float Config::getFloat(const char* key,float def)const{check(!strcmp(key,"experimental.night_vision_brightness")&&def==8.0f,"experimental brightness key and default");return testBrightness;}
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 uint64_t bindingShaderHash(BindSlot s){return s==BindSlot::Vs?testVs:testPs;}
-ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,const char* s,size_t,const char* entry,const char*,const SwapMacro* macros,const char*){
-    std::vector<D3D_SHADER_MACRO> defines;if(macros)for(auto* m=macros;m->name;++m)defines.push_back({m->name,m->value});defines.push_back({nullptr,nullptr});
-    if(testFail)return nullptr;auto code=compile(s,entry,"ps_5_0",defines.data());ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* p=nullptr;
-    hr(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&p));return p;
+ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytecode,size_t size,const char*,const char*){
+    if(testFail)return nullptr;ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* p=nullptr;
+    hr(dev->CreatePixelShader(bytecode,size,nullptr,&p));return p;
 }
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* c,UINT n,ID3D11RenderTargetView*const* r,ID3D11DepthStencilView* d){c->OMSetRenderTargets(n,r,d);}
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,const char* s,size_t,const char* entry,const char*,const SwapMacro*,const char*){
@@ -173,7 +177,7 @@ void test(bool realistic){
     testOn=false;testPulse=false;nightVisionConfigure(Config::get());check(!nightVisionMatches('X',240,1),"both live settings Off bypass replacement");fixed=r.draw(true);
     check(fixed==stock,"live Off draws original pixels");
     testOn=realistic;testPulse=true;nightVisionConfigure(Config::get());check(nightVisionMatches('X',240,1),"live On reengages");
-    nightVisionShutdown();testFail=true;fixed=r.draw(true);check(fixed==stock&&!nightVisionMatches('X',240,1),"compile failure draws stock and stands down");testFail=false;
+    nightVisionShutdown();testFail=true;fixed=r.draw(true);check(fixed==stock&&!nightVisionMatches('X',240,1),"precompiled shader creation failure draws stock and stands down");testFail=false;
     r.clean();
 }
 void geometryTest(){

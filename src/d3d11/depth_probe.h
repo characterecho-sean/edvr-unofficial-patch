@@ -23,10 +23,9 @@
 // buffer is what the two paths, the last-unbind rule and the desk
 // self-test below now decide.
 //
-// Runs only while fix.temporal_aa or fix.eye_mask is on (it exists for the
-// temporal pass; eye_mask reuses its clear-value census rather than keeping
-// a second one), costs one pointer compare per eye draw and per render-
-// target change, and one tiny dispatch every few seconds; dereferences a
+// Runs only while fix.temporal_aa or advanced.eye_depth_capture is on (it
+// exists for the temporal pass), costs one pointer compare per eye draw and
+// per render-target change, and one tiny dispatch every few seconds; dereferences a
 // view only inside the call the game made with it; stands down for the
 // session on any repeated fault. Nothing it does reaches the picture.
 #pragma once
@@ -59,8 +58,8 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
                         bool rtvNull);
 
 // Is the probe watching? depthProbeNoteDraw's own first test, published so
-// the draw path can skip the call: the probe is armed only by fix.temporal_aa,
-// fix.eye_mask or advanced.eye_depth_capture, and with all three off the note
+// the draw path can skip the call: the probe is armed only by fix.temporal_aa
+// or advanced.eye_depth_capture, and with both off the note
 // was a cross-TU call per draw (this build has no /GL) that returned at once --
 // 49 innermost samples of the flown 2026-09-22 window, all on its prologue and
 // epilogue.
@@ -105,14 +104,6 @@ void depthProbeSample(ID3D11DeviceContext* ctx, void* dsv);
 // draw target to, which says which way its depth runs.
 void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth);
 
-// The clear value on record for THIS EXACT view, and whether it reads as
-// reversed-Z (< 0.5) -- for fix.eye_mask, which must write the near value
-// into the game's own depth convention and must never guess it. False when
-// nothing is on record: the probe is off (fix.temporal_aa and fix.eye_mask
-// both off), this view has never been cleared while watched, or it is not a
-// target the probe tracks. A caller that gets false must not draw.
-bool depthProbeClearValueFor(ID3D11DepthStencilView* dsv, float* outClearValue, bool* outReversed);
-
 // Once per frame: the per-frame bookkeeping, the readback poll, the lines.
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);
 
@@ -122,7 +113,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);
 // fix.ui_quality's world-screen gate, which asks it of the 2D screen's size
 // -- on foot the world's hundreds or thousands, a menu's UI 3 or 4 (ui_layer_
 // math.h). 0 when no target of that size is known; false while the probe is
-// not watching (fix.temporal_aa, fix.eye_mask and eye_depth_capture off).
+// not watching (fix.temporal_aa and eye_depth_capture off).
 // The render thread only, where the counts are kept.
 bool depthProbeDrawsAtSize(uint32_t w, uint32_t h, uint32_t* draws);
 
@@ -159,7 +150,7 @@ bool depthProbeSceneDepthFormat(uint32_t w, uint32_t h, int eye,
 bool depthProbeSceneTextureEye(uint32_t w, uint32_t h, const void* resource,
                                int* outEye);
 
-// For fix.eye_mask: which eye (if either) THIS EXACT depth-stencil view
+// Which eye (if either) THIS EXACT depth-stencil view
 // is, among the scene pair depthProbeSceneDepth picks, using the same
 // first-bind ordering (one shared helper, so the two can never disagree).
 // *outTargetIndex is set whenever the probe has ever seen this view at
@@ -178,13 +169,6 @@ bool depthProbeSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* outTarg
 // not one of the two current picks (including when no pair has formed yet).
 bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye,
                                  int* outTargetIndex);
-
-// Whether target index (from depthProbeSceneEyeOf's outTargetIndex) shares
-// the scene pick's width/height -- a double-buffered twin the game
-// alternates with the chosen pair -- for the eye mask summary's "not the
-// scene's pick" tally. False with no scene pick yet or an out-of-range
-// index.
-bool depthProbeTargetIsSceneSized(int targetIndex);
 
 // How many draws the scene pair's lesser target took last frame: the
 // temporal pass's test of a REAL scene (hundreds in the cockpit and in

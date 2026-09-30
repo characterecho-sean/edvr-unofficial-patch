@@ -153,7 +153,14 @@ void caseFnvGolden() {
 void caseNoteEntryAggregates() {
     SchedulerStackProbe p;
     seed(p);
-    uint64_t image[8]{};
+    // Zeroed across the whole scan window, not just the slots used. noteEntry
+    // reads until kMaxGaps misses in a row, and an 8-slot image left fewer
+    // than kMaxGaps zeros after its last hit, so the scan ran past the array
+    // into whatever the stack held there. An in-range leftover (the capture
+    // cases above fill their images with in-range values) made the depth 3:
+    // a pooled build failed "the exemplar kept the real depth" once in a run
+    // where ten standalone runs of the same binary passed (2026-09-29).
+    uint64_t image[SchedulerStackProbe::kScanSlots]{};
     image[0] = kLo + 0x100;
     image[1] = 0x99;
     image[2] = kLo + 0x200;
@@ -186,7 +193,9 @@ void caseNoteEntryAggregates() {
 void caseNoteEntryOverflow() {
     SchedulerStackProbe p;
     seed(p);
-    uint64_t image[8]{};
+    // The whole scan window, zeroed, for the reason caseNoteEntryAggregates
+    // gives: one hit then seven zeros is fewer than kMaxGaps.
+    uint64_t image[SchedulerStackProbe::kScanSlots]{};
     const uintptr_t rsp = reinterpret_cast<uintptr_t>(&image[0]);
     for (uint32_t i = 0; i < SchedulerStackProbe::kSigCap + 6; ++i) {
         image[0] = kLo + 0x100 + i * 0x40; // distinct caller per signature

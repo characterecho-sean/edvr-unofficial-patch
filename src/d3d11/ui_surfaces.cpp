@@ -60,6 +60,12 @@ VOID CALLBACK hmdRefresh(PTP_CALLBACK_INSTANCE, PVOID) {
     g_hmdBusy.store(false, std::memory_order_release);
 }
 
+// Fire and forget: nothing waits for the callback, and the pool runs it from this
+// DLL's code, queued or running at any moment. It is safe against an unload
+// because the graphics DLL is pinned at the first device creation, well before
+// the first frame boundary can get here (module_pin.h, RC4 review F1);
+// tools/journal_unload_test shows the pin holding a blocked pool callback of
+// exactly this shape across a FreeLibrary.
 void hmdRefreshOffThread() {
     bool idle = false;
     if (!g_hmdBusy.compare_exchange_strong(idle, true)) return;  // one in flight

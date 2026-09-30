@@ -462,9 +462,13 @@ public:
         f.identity=(selectedDepth==f.priorDepth&&w==f.width&&h==f.height);
         f.reason=f.identity?"qualified":"prior-depth-or-extent-mismatch";
     }
-    void present(ID3D11DeviceContext* ctx,uint64_t completedFrame) {
+    // `live` false: the completed frame reset, or ran at phase (0,0). Its constants are ones no live
+    // frame has (the camera rows carry no phase), so it is not a sample: the two frames right after an
+    // F10 arm were exactly those, and the capture recorded only unjittered draws (2026-09-29).
+    void present(ID3D11DeviceContext* ctx,uint64_t completedFrame,bool live=true) {
         if(current_&&current_->number==completedFrame) {
-            if(current_->qualified&&current_->identity){++accepted_;pending_.push_back(std::move(current_));}
+            if(!live&&current_->qualified)current_->reason="reset-or-zero-phase";
+            if(current_->qualified&&current_->identity&&live){++accepted_;pending_.push_back(std::move(current_));}
             else {++unqualified_;if(accepted_){current_->reason="second-frame-unqualified";finish(*current_,true);armed_=false;}
                 else {allocated_-=current_->bytesAllocated;
                     if(unqualified_<=4||unqualified_%90==0)Log::get().note("flat draw pixels: unqualified frame=%llu reason=%s draws=%u attempts=%u; retrying while armed",

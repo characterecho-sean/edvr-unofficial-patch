@@ -22,10 +22,10 @@
 namespace edvr {
 namespace {
 
-// --- Identity: build 332841, transition_flash_prevent.cpp's own pair. Kept
-// as this file's own copy rather than a shared constant -- the copy-culture
-// rule that file states for its own identity check, so neither is touched by
-// a change in the other.
+// --- Identity: build 332841, the same pair pose_reader_watch.cpp keys on (and
+// the transition_flash_prevent.cpp removed 2026-09-29 did). Kept as this
+// file's own copy rather than a shared constant -- the copy-culture rule -- so
+// neither is touched by a change in the other.
 constexpr uint32_t kExpectedTimestamp = 1788384820u;
 constexpr uint32_t kExpectedImageSize = 104894464u;
 
@@ -100,8 +100,8 @@ const char* modeName(tfp::Mode m) noexcept {
 // --- SEH-guarded reads/writes. Each is its own small function, mixing
 // __try with this file's other locals (mutexes, std::string) being what
 // CodeHook's own doc calls out as refused by the compiler --
-// transition_flash_prevent.cpp's sehReadU64 and pose_reader_watch.cpp's
-// sehReadBlock16 are the precedent, kept to one access each.
+// pose_reader_watch.cpp's sehReadBlock16 is the precedent, kept to one access
+// each.
 __declspec(noinline) bool sehReadU64(uintptr_t address, uint64_t& out) noexcept {
     __try { out = *reinterpret_cast<const uint64_t*>(address); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
@@ -114,9 +114,9 @@ __declspec(noinline) bool sehCheckBytes(uintptr_t address, const uint8_t* expect
     __try { return std::memcmp(reinterpret_cast<const void*>(address), expected, n) == 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-// PE TimeDateStamp + SizeOfImage, read the same way transition_flash_
-// prevent.cpp's / pose_reader_watch.cpp's checkIdentity does (base+0x3C ->
-// e_lfanew, +8 TimeDateStamp, +0x50 SizeOfImage).
+// PE TimeDateStamp + SizeOfImage, read the same way pose_reader_watch.cpp's
+// checkIdentity does (base+0x3C -> e_lfanew, +8 TimeDateStamp, +0x50
+// SizeOfImage).
 __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexcept {
     __try {
         uint32_t peOff = 0;
@@ -136,10 +136,11 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
     }
 }
 
-// --- Relay machinery, mirrored from transition_flash_prevent.cpp (itself
-// mirrored from object_record_writer_hook.cpp / kinematic_eval_hook.cpp /
-// pose_reader_watch.cpp). Kept as a copy rather than a shared unit so none of
-// the flight-proven files are touched; if one changes, change all five.
+// --- Relay machinery, mirrored from pose_reader_watch.cpp (itself mirrored
+// from object_record_writer_hook.cpp / kinematic_eval_hook.cpp, by way of the
+// transition_flash_prevent.cpp removed 2026-09-29, git 68bddaaa^). Kept as a
+// copy rather than a shared unit so none of the flight-proven files are
+// touched; if one changes, look at the others (grep kRelayBytes).
 // Needed because the target is in the GAME's module and this DLL loads more
 // than two gigabytes away -- a plain five-byte E9 patch cannot reach a
 // replacement here directly.
@@ -213,8 +214,8 @@ bool prepareRelay(void* trampoline, void* context) noexcept {
 
 // Held open unconditionally once installation starts: the off/watch/on/
 // alternate distinction is made inside the observed callback itself (one
-// atomic load), matching transition_flash_prevent.cpp's g_relayGate
-// discipline -- there is exactly one consumer of this one hook.
+// atomic load), the same g_relayGate discipline pose_reader_watch.cpp uses --
+// there is exactly one consumer of this one hook.
 std::atomic<uintptr_t> g_relayGate{0};
 
 bool installOne(HookEntry& entry, uintptr_t base, const uint8_t* expectedBytes) noexcept {
@@ -279,8 +280,7 @@ std::atomic<uint32_t> g_frame{0};
 std::atomic<uint64_t> g_sequence{0};    // bumped once per consumer call; writer-table entries stamp it
 
 // Validation / event state, shared under one mutex -- every unrefilled or
-// validation-fold call touches at least the first two together, the same
-// rule transition_flash_prevent.cpp's g_guardMutex states for its own set.
+// validation-fold call touches at least the first two together.
 std::mutex g_guardMutex;
 tfeb::EyeBaseValidation g_validation;
 tfp::EventTracker g_eventTracker;
@@ -588,8 +588,7 @@ std::atomic<uint32_t> g_ebConsecutiveUnrefilled{0};
 // not necessarily the render thread); read and cleared only from
 // transitionFlashEyeBaseFrameSnapshot, called once per real frame from
 // glitch_frame.cpp ahead of transitionFlashEyeBaseFrameBoundary in
-// vscreen.cpp's own call order -- transition_flash_prevent.cpp's H3Accum is
-// the same finalise-then-reset shape.
+// vscreen.cpp's own call order.
 std::atomic<uint16_t> g_callsThisFrame{0};
 std::atomic<uint16_t> g_unrefilledThisFrame{0};
 std::atomic<uint8_t> g_treatmentThisFrame{0};
@@ -679,8 +678,9 @@ __declspec(noinline) bool readOffered(float outM[16], uint32_t& outFrame, uint64
 
 // --- The ring: one entry per consumer call, fixed capacity. A concurrent
 // dump can read a slot mid-write (this file's hot-path writer is not
-// serialised against the dump), the same accepted risk transition_flash_
-// prevent.cpp's own ring states for the same reason.
+// serialised against the dump): an accepted risk for a diagnostic ring, the
+// same call the removed transition_flash_prevent.cpp made for its own (git
+// 68bddaaa^).
 // CHANGE 8 (static round 7): 8192 -> 65536. Flight 073114's event #2 dump
 // was written a minute later than its trigger and its window had already
 // wrapped past 8192 entries of ordinary refilled-call traffic; 65536 (96
@@ -834,10 +834,10 @@ void pushFrameRing(const EyeBaseFrameRecord& r) noexcept {
 }
 
 // --- Dumps: one pending slot, serviced from the frame boundary (never from
-// inside the game hook). Mirrors transition_flash_prevent.cpp's PendingDump/
-// requestDump/performDump/serviceDump shape -- its own copy, its own file
-// family (edvr_logs\flash\eyebase_HHMMSS_fN.txt), and its own ±60-frame
-// window and 12-dump cap, both wider/narrower than that file's own 30/16.
+// inside the game hook). The PendingDump/requestDump/performDump/serviceDump
+// shape of the transition_flash_prevent.cpp removed 2026-09-29 (git 68bddaaa^)
+// -- its own copy, its own file family (edvr_logs\flash\eyebase_HHMMSS_fN.txt),
+// and its own ±60-frame window and 12-dump cap (that file's were 30 and 16).
 struct PendingDump {
     tfp::PendingDumpWindow window;
     static constexpr uint32_t kMaxReasons = 4;

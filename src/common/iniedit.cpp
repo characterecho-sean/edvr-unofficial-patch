@@ -1,8 +1,14 @@
 #include "iniedit.h"
 
+#include <windows.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <cstddef>
+#include <cstring>
 #include <set>
+#include <vector>
 
 namespace edvr {
 namespace {
@@ -664,6 +670,430 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
     IniDoc result;
     result.lines = out;
     return result.text();
+}
+
+// ---------------------------------------------------------------------------
+// Writing a file back, whole. What each of these promises is in iniedit.h.
+
+namespace {
+
+void setError(std::wstring* error, const std::wstring& text) {
+    if (error) *error = text;
+}
+
+std::wstring withCode(const wchar_t* what, DWORD code) {
+    return std::wstring(what) + L" (Windows error " + std::to_wstring(code) + L")";
+}
+
+// A replace that failed for a reason that passes in milliseconds; see
+// AtomicWriteOptions.
+bool passesInMilliseconds(DWORD code) {
+    return code == ERROR_SHARING_VIOLATION || code == ERROR_ACCESS_DENIED ||
+           code == ERROR_LOCK_VIOLATION;
+}
+
+bool pathExists(const std::wstring& path) {
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Beside the target, so the replace is a rename inside one volume; named for the
+// process and the thread, so two writers -- the menu inside the game and the
+// settings window in the installer, or two threads of one of them -- never
+// share a temp file. A temp file that outlives a crash is one per writer, and
+// only if the process died in the few milliseconds between the write and the
+// replace.
+std::wstring tempNameFor(const std::wstring& path) {
+    return path + L".edvr-tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+           std::to_wstring(GetCurrentThreadId());
+}
+
+// The bytes, complete and flushed, in a file of their own. Nothing that already
+// exists is touched, and on failure the file is gone again.
+bool stageFile(const std::wstring& path, const std::string& bytes, std::wstring* temp,
+               std::wstring* error) {
+    *temp = tempNameFor(path);
+    HANDLE f = CreateFileW(temp->c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        const DWORD code = GetLastError();
+        setError(error, withCode(L"the temporary file could not be created beside it", code));
+        return false;
+    }
+
+    const wchar_t* failed = nullptr;
+    DWORD code = 0;
+    for (size_t done = 0; done < bytes.size();) {
+        const size_t left = bytes.size() - done;
+        const DWORD chunk = static_cast<DWORD>(left > (1u << 20) ? (1u << 20) : left);
+        DWORD wrote = 0;
+        if (!WriteFile(f, bytes.data() + done, chunk, &wrote, nullptr) || wrote == 0) {
+            code = GetLastError();
+            if (code == ERROR_SUCCESS) code = ERROR_WRITE_FAULT;  // a short write is a failure
+            failed = L"the temporary file could not be written";
+            break;
+        }
+        done += wrote;
+    }
+    // Flushed before the replace, not after: the replace is what makes these
+    // bytes THE file, and a power cut between the two must find either the old
+    // file or a complete new one, not a new name over data still in the cache.
+    if (!failed && !FlushFileBuffers(f)) {
+        code = GetLastError();
+        failed = L"the temporary file could not be flushed to disk";
+    }
+    CloseHandle(f);
+    if (failed) {
+        DeleteFileW(temp->c_str());
+        setError(error, withCode(failed, code));
+        return false;
+    }
+    return true;
+}
+
+// --- the POSIX-semantics replace ---------------------------------------------
+//
+// Nothing here comes from winbase.h. It gives FILE_RENAME_INFO's flags member and
+// the FILE_RENAME_FLAG_* values only under SDK-version tests -- spelled with a
+// macro, _WIN32_WINNT_WIN10_RS1, that the 10.0.26100.0 headers never define, so
+// they read as true today by accident -- and FileRenameInfoEx only under
+// NTDDI_VERSION. The layout and the values are the operating system's own and do
+// not move, so they are written out here, and no SDK setting can take them away.
+
+// FILE_RENAME_INFO as FileRenameInfoEx reads it: a DWORD of flags comes first.
+struct RenameInfoEx {
+    DWORD  flags;
+    HANDLE rootDirectory;   // null: fileName is a full path
+    DWORD  fileNameLength;  // in bytes, not counting a terminator
+    WCHAR  fileName[1];
+};
+const DWORD kRenameReplaceIfExists = 0x00000001;  // FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+const DWORD kRenamePosixSemantics = 0x00000002;   // FILE_RENAME_FLAG_POSIX_SEMANTICS
+// FILE_INFO_BY_HANDLE_CLASS::FileRenameInfoEx, counting from FileBasicInfo = 0
+// (minwinbase.h, Windows SDK 10.0.26100.0).
+const int kFileRenameInfoEx = 22;
+#if defined(NTDDI_WIN10_RS1) && (NTDDI_VERSION >= NTDDI_WIN10_RS1)
+// Where the SDK does name it (the same condition it declares it under), it has to
+// agree with the number above.
+static_assert(FileRenameInfoEx == 22, "FileRenameInfoEx is not the class number iniedit passes");
+#endif
+
+// What this process has learned about POSIX-semantics renames. A refusal as
+// unsupported is kept for good: the operating system does not change under a
+// running game, and a volume that cannot do it once will not the next time. The
+// attempt counts and the hooks are the rig's (iniedit.h, replaceHooksForTest).
+std::atomic<bool>        g_posixRefused{false};
+std::atomic<int>         g_posixAttempts{0};
+std::atomic<int>         g_classicAttempts{0};
+std::atomic<ReplaceHook> g_posixHook{nullptr};
+std::atomic<ReplaceHook> g_classicHook{nullptr};
+
+// The operating system or the volume saying it does not do this, as against this
+// one rename having been refused. An OS from before 1607 does not know the
+// information class at all (ERROR_INVALID_PARAMETER); FAT, exFAT and some network
+// shares answer not-supported or invalid-function.
+bool refusedAsUnsupported(DWORD code) {
+    return code == ERROR_INVALID_PARAMETER || code == ERROR_NOT_SUPPORTED ||
+           code == ERROR_INVALID_FUNCTION || code == ERROR_CALL_NOT_IMPLEMENTED ||
+           code == ERROR_INVALID_LEVEL;
+}
+
+bool isReadOnly(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0;
+}
+
+// The absolute form of `path`, or `path` itself when Windows will not give one.
+std::wstring fullPathOf(const std::wstring& path) {
+    const DWORD need = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if (need == 0) return path;
+    std::wstring out(need, L'\0');
+    const DWORD got = GetFullPathNameW(path.c_str(), need, &out[0], nullptr);
+    if (got == 0 || got >= need) return path;
+    out.resize(got);
+    return out;
+}
+
+enum class Posix {
+    Done,         // the file is in place
+    Unsupported,  // this operating system or volume does not do it
+    Transient,    // refused for a reason that passes; the caller tries again
+    Other,        // failed some other way; the classic rename decides this attempt
+};
+
+// A POSIX-semantics rename's Windows error (0: it worked), read as the writer
+// needs it.
+Posix classifyPosix(DWORD code) {
+    if (code == ERROR_SUCCESS) return Posix::Done;
+    if (refusedAsUnsupported(code)) return Posix::Unsupported;
+    return passesInMilliseconds(code) ? Posix::Transient : Posix::Other;
+}
+
+// One POSIX-semantics rename of `from` over `to`. `code` is the Windows error of
+// a failure.
+Posix posixReplace(const std::wstring& from, const std::wstring& to, DWORD* code) {
+    g_posixAttempts.fetch_add(1);
+    if (ReplaceHook hook = g_posixHook.load()) {
+        *code = hook(from.c_str(), to.c_str());
+        return classifyPosix(*code);
+    }
+
+    // What is asked of the operating system, built before the temp file is opened
+    // so that nothing between the open and the close can throw. A full path, not
+    // whatever the caller passed: with no root directory the name is not relative
+    // to anything useful. The buffer is zeroed, so the name ends in a terminator
+    // as well as a length.
+    const std::wstring name = fullPathOf(to);
+    const size_t nameBytes = name.size() * sizeof(wchar_t);
+    std::vector<unsigned char> buffer(sizeof(RenameInfoEx) + nameBytes, 0);
+    RenameInfoEx* info = reinterpret_cast<RenameInfoEx*>(buffer.data());
+    info->flags = kRenameReplaceIfExists | kRenamePosixSemantics;
+    info->rootDirectory = nullptr;
+    info->fileNameLength = static_cast<DWORD>(nameBytes);
+    memcpy(buffer.data() + offsetof(RenameInfoEx, fileName), name.data(), nameBytes);
+
+    // DELETE is the access a rename needs. The share modes leave everybody else
+    // free to have the temp file open as well: an antivirus scanning it, most of
+    // all, and its being in the way is a wait, not a failure. WRITE_THROUGH is
+    // what the classic path's MOVEFILE_WRITE_THROUGH asks for: the data was
+    // flushed before (stageFile), this asks that the rename be written through
+    // too. OPEN_REPARSE_POINT so that, as with MoveFileExW, it is the named entry
+    // that moves and not whatever it might point at.
+    HANDLE h = CreateFileW(from.c_str(), DELETE | SYNCHRONIZE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH |
+                               FILE_FLAG_OPEN_REPARSE_POINT,
+                           nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        *code = GetLastError();
+        return passesInMilliseconds(*code) ? Posix::Transient : Posix::Other;
+    }
+
+    // The last error is cleared first, and a failure that left none is read as
+    // "not implemented", because a Wine that refuses a class it does not know has
+    // not always set one (LLVM's rename guards against the same thing).
+    SetLastError(ERROR_SUCCESS);
+    const BOOL renamed = SetFileInformationByHandle(
+        h, static_cast<FILE_INFO_BY_HANDLE_CLASS>(kFileRenameInfoEx), buffer.data(),
+        static_cast<DWORD>(buffer.size()));
+    *code = renamed ? ERROR_SUCCESS : GetLastError();  // before CloseHandle can change it
+    if (!renamed && *code == ERROR_SUCCESS) *code = ERROR_CALL_NOT_IMPLEMENTED;
+    CloseHandle(h);
+    return classifyPosix(*code);
+}
+
+// One attempt at putting `from` in place of `to`.
+bool replaceOnce(const std::wstring& from, const std::wstring& to, DWORD* code) {
+    // A read-only target goes straight to the classic rename, which refuses it
+    // with ERROR_ACCESS_DENIED as it always has. Whether a POSIX-semantics rename
+    // honours the attribute is not something to find out on somebody's settings.
+    if (!g_posixRefused.load() && !isReadOnly(to)) {
+        switch (posixReplace(from, to, code)) {
+            case Posix::Done:
+                return true;
+            case Posix::Transient:
+                // Held by something that will let go. *code says so, and the
+                // caller tries again -- through this same call.
+                return false;
+            case Posix::Unsupported:
+                // This operating system or volume does not do it, and asking
+                // again on every write would only repeat the answer.
+                g_posixRefused.store(true);
+                break;
+            case Posix::Other:
+                // Not understood. The classic rename decides this attempt, and
+                // the next attempt asks again.
+                break;
+        }
+    }
+    g_classicAttempts.fetch_add(1);
+    if (ReplaceHook hook = g_classicHook.load()) {
+        *code = hook(from.c_str(), to.c_str());
+        return *code == ERROR_SUCCESS;
+    }
+    if (MoveFileExW(from.c_str(), to.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return true;
+    }
+    *code = GetLastError();
+    return false;
+}
+
+// replaceOnce, tried again while the failure is one that passes. `tries` (may be
+// null) gets the number of attempts made.
+bool replaceFile(const std::wstring& from, const std::wstring& to,
+                 const AtomicWriteOptions& options, int* tries, DWORD* code) {
+    for (int attempt = 1;; ++attempt) {
+        if (tries) *tries = attempt;
+        if (replaceOnce(from, to, code)) return true;
+        if (attempt > options.retries || !passesInMilliseconds(*code)) return false;
+        Sleep(options.backoffMs);
+    }
+}
+
+std::wstring replaceFailure(DWORD code, int tries) {
+    std::wstring what = L"it could not be replaced";
+    if (tries > 1) what += L" after " + std::to_wstring(tries) + L" tries";
+    if (passesInMilliseconds(code)) what += L" -- read-only, or held open by another program?";
+    return withCode(what.c_str(), code);
+}
+
+}  // namespace
+
+bool writeFileAtomic(const std::wstring& path, const std::string& bytes, std::wstring* error,
+                     const AtomicWriteOptions& options, int* tries) {
+    if (tries) *tries = 0;
+    std::wstring temp;
+    if (!stageFile(path, bytes, &temp, error)) return false;
+
+    DWORD code = 0;
+    int made = 0;
+    const bool replaced = replaceFile(temp, path, options, &made, &code);
+    if (tries) *tries = made;
+    if (replaced) return true;
+    DeleteFileW(temp.c_str());
+    setError(error, replaceFailure(code, made));
+    return false;
+}
+
+bool replaceFileAtomic(const std::wstring& from, const std::wstring& to,
+                       const AtomicWriteOptions& options, int* tries, unsigned long* code) {
+    DWORD last = ERROR_SUCCESS;
+    int made = 0;
+    const bool replaced = replaceFile(from, to, options, &made, &last);
+    if (tries) *tries = made;
+    if (code) *code = replaced ? ERROR_SUCCESS : last;
+    return replaced;
+}
+
+void replaceHooksForTest(ReplaceHook posix, ReplaceHook classic) {
+    g_posixHook.store(posix);
+    g_classicHook.store(classic);
+    g_posixRefused.store(false);
+    g_posixAttempts.store(0);
+    g_classicAttempts.store(0);
+}
+
+int posixReplaceAttempts() { return g_posixAttempts.load(); }
+
+int classicReplaceAttempts() { return g_classicAttempts.load(); }
+
+bool posixReplaceRefused() { return g_posixRefused.load(); }
+
+bool readFileBytes(const std::wstring& path, std::string* bytes, size_t limit) {
+    bytes->clear();
+    // FILE_SHARE_DELETE: reading a file must not stop somebody replacing,
+    // renaming or deleting it. (A POSIX-semantics replace goes through under a
+    // reader that shares DELETE and a classic one does not; either way this handle
+    // is closed again below, so the hold lasts as long as the read.)
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(f, &size) || size.QuadPart < 0 ||
+        static_cast<unsigned long long>(size.QuadPart) > limit) {
+        CloseHandle(f);
+        return false;
+    }
+    bytes->resize(static_cast<size_t>(size.QuadPart));
+    size_t done = 0;
+    while (done < bytes->size()) {
+        const size_t left = bytes->size() - done;
+        const DWORD chunk = static_cast<DWORD>(left > (1u << 20) ? (1u << 20) : left);
+        DWORD got = 0;
+        if (!ReadFile(f, &(*bytes)[done], chunk, &got, nullptr) || got == 0) break;
+        done += got;
+    }
+    CloseHandle(f);
+    // A short read is a failure, not a shorter file: config.cpp refuses one for
+    // the same reason, and a truncated copy kept as a backup is worse than none.
+    if (done != bytes->size()) {
+        bytes->clear();
+        return false;
+    }
+    return true;
+}
+
+std::wstring generationPath(const std::wstring& dir, const std::wstring& name, int generation) {
+    std::wstring out = dir;
+    if (!out.empty() && out.back() != L'\\' && out.back() != L'/') out += L'\\';
+    out += name;
+    if (generation > 0) out += L"." + std::to_wstring(generation);
+    return out;
+}
+
+std::wstring newestGeneration(const std::wstring& dir, const std::wstring& name) {
+    for (int g = 0; g < kMirrorGenerations; ++g) {
+        const std::wstring path = generationPath(dir, name, g);
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) continue;
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (data.nFileSizeHigh == 0 && data.nFileSizeLow == 0) continue;
+        return path;
+    }
+    return std::wstring();
+}
+
+bool writeGenerations(const std::wstring& dir, const std::wstring& name,
+                      const std::string& bytes, bool rotate, std::wstring* error) {
+    const std::wstring newest = generationPath(dir, name, 0);
+
+    std::string old;
+    const bool haveOld = readFileBytes(newest, &old);
+    if (haveOld && old == bytes) return true;  // nothing new to keep; nothing ages
+
+    // Nothing worth keeping (no newest copy, an empty one, or one that cannot be
+    // read), or a change that is not a checkpoint: the newest is replaced in
+    // place and no older generation is touched.
+    if (!rotate || !haveOld || old.empty()) return writeFileAtomic(newest, bytes, error);
+
+    // The new copy lands first, beside the others and not yet in their way. A
+    // write that fails here has moved nothing.
+    std::wstring staged;
+    if (!stageFile(newest, bytes, &staged, error)) return false;
+
+    const AtomicWriteOptions options{};
+    DWORD code = 0;
+
+    // Generation 1 already holds the copy being replaced: an earlier attempt at
+    // this same write got that far and failed on its last step (the newest was
+    // read-only, or held). Moving it up again would push a real older copy out
+    // for a duplicate, and each retry would push out another.
+    std::string behind;
+    const bool alreadyKept =
+        readFileBytes(generationPath(dir, name, 1), &behind) && behind == old;
+
+    if (!alreadyKept) {
+        for (int g = kMirrorGenerations - 1; g >= 2; --g) {
+            const std::wstring from = generationPath(dir, name, g - 1);
+            if (!pathExists(from)) continue;
+            if (!replaceFile(from, generationPath(dir, name, g), options, nullptr, &code)) {
+                DeleteFileW(staged.c_str());
+                setError(error, withCode(L"an older copy could not be moved up", code));
+                return false;
+            }
+        }
+
+        // The copy being replaced becomes generation 1. Written from the bytes
+        // just read rather than renamed, so the newest never goes missing: a
+        // crash at any point leaves <name> in place, and a restore that reads it
+        // finds a whole file.
+        std::wstring why;
+        if (!writeFileAtomic(generationPath(dir, name, 1), old, &why)) {
+            DeleteFileW(staged.c_str());
+            setError(error, L"the copy being replaced could not be kept: " + why);
+            return false;
+        }
+    }
+
+    int made = 0;
+    if (!replaceFile(staged, newest, options, &made, &code)) {
+        DeleteFileW(staged.c_str());
+        setError(error, replaceFailure(code, made));
+        return false;
+    }
+    return true;
 }
 
 }  // namespace edvr

@@ -1,3 +1,5 @@
+#include "temporal_shader_bytecode.h"
+#include "fixed_shader_source.h"
 #include "celestial_motion.h"
 #include "binding_shadow.h"
 #include "depth_probe.h"
@@ -36,85 +38,8 @@ constexpr unsigned kRecordBytes = 17 * 16;
 // its mutable constant-buffer address, or its current position. Retained
 // texture views prevent pointer reuse while a history record refers to them.
 // A missing/ambiguous key (including a LOD change) declines for that frame.
-constexpr char kBuildHlsl[] = R"HLSL(
-struct Record { uint4 key[12]; float4 q; float4 t; float4 r[3]; };
-// Per-draw snapshot, 26 float4's per record. In is a typed Buffer, not a
-// StructuredBuffer (see createRecords for why), so there is no struct to
-// declare here -- just the layout: model = In[index*26+0 .. +7] (8),
-// scene = In[index*26+8 .. +11] (4), patch = In[index*26+12 .. +25] (14).
-cbuffer Batch : register(b0) { uint4 batch; }
-StructuredBuffer<Record> Previous : register(t0);
-Buffer<float4> In : register(t1);
-Buffer<uint4> Keys : register(t2);
-RWStructuredBuffer<Record> Current : register(u0);
-float3 rotate(float4 q, float3 v) { return v + 2 * cross(q.xyz, cross(q.xyz,v) + q.w*v); }
-float4 multiply(float4 a, float4 b) {
-    return float4(a.w*b.xyz + b.w*a.xyz + cross(a.xyz,b.xyz), a.w*b.w-dot(a.xyz,b.xyz));
-}
-// A local-space eye can contain dozens of patches. Serial comparison of
-// every 192-byte key stalls one GPU lane for milliseconds across the eye.
-// Search independent predecessors in parallel, retaining exact full keys
-// and the unique-match rule (including duplicates in different lanes).
-groupshared uint matchCounts[64],matchIndices[64];
-[numthreads(64,1,1)] void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex) {
-    const uint index = batch.x + gid.x; const uint base = index*26;
-    Record n = (Record)0;
-    n.key[0] = asuint(In[base+12]);
-    [unroll] for (uint k=0;k<5;++k) n.key[k+1] = asuint(In[base+15+k]);
-    [unroll] for (uint k=0;k<4;++k) n.key[k+6] = asuint(In[base+22+k]);
-    n.key[10] = Keys[index*2]; n.key[11] = Keys[index*2+1];
-    n.q = normalize(In[base+20]); n.t = float4(In[base+13].xyz,0);
-    // Confirm this shader's local-to-clip chain still reduces to view-space
-    // perspective: scene[270..273] * model[9..11] == model[4..7].
-    bool valid = all(isfinite(n.q)) && all(isfinite(n.t)) &&
-        abs(dot(In[base+20],In[base+20])-1) < 0.002 && In[base+2].w > 0 &&
-        abs(In[base+3].z-1) < 0.0001 && abs(In[base+2].z) < 0.0001;
-    [unroll] for (uint c=0;c<4;++c) {
-        float4 col = In[base+8]*In[base+5][c] + In[base+9]*In[base+6][c] +
-                     In[base+10]*In[base+7][c] + (c==3 ? In[base+11] : 0);
-        float4 expected = float4(In[base+0][c],In[base+1][c],In[base+2][c],In[base+3][c]);
-        valid = valid && all(abs(col-expected) < 0.0002);
-    }
-    uint found=0, match=0;
-    [loop] for (uint i=lane;i<batch.y;i+=64) {
-        bool same=true;
-        [unroll] for (uint k=0;k<12;++k) same = same && all(n.key[k]==Previous[i].key[k]);
-        if (same) { ++found; match=i; }
-    }
-    matchCounts[lane]=found;matchIndices[lane]=match;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint step=32;step;step>>=1) {
-        if (lane<step) {
-            matchCounts[lane]+=matchCounts[lane+step];
-            matchIndices[lane]=max(matchIndices[lane],matchIndices[lane+step]);
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (lane!=0) return;
-    found=matchCounts[0];match=matchIndices[0];
-    if (valid && found==1) {
-        Record p=Previous[match];
-        float4 dq=normalize(multiply(p.q,float4(-n.q.xyz,n.q.w)));
-        float3 a=rotate(dq,float3(1,0,0)), b=rotate(dq,float3(0,1,0)), c=rotate(dq,float3(0,0,1));
-        float3 t=p.t.xyz-rotate(dq,n.t.xyz);
-        n.r[0]=float4(a.x,b.x,c.x,t.x);
-        n.r[1]=float4(a.y,b.y,c.y,t.y);
-        n.r[2]=float4(a.z,b.z,c.z,t.z);
-        n.t.w=all(isfinite(t)) && all(isfinite(dq)) && abs(dot(p.q,p.q)-1)<0.002 ? 1 : 0;
-    }
-    // Invalid current geometry must not become a valid predecessor.
-    if (!valid) n.q=0;
-    Current[index]=n;
-}
-)HLSL";
-constexpr char kIndexHlsl[] = R"HLSL(
-cbuffer Draw : register(b13) { uint4 info; uint4 texKey[2]; }
-uint main(float4 p:SV_Position):SV_Target { return info.x+1; }
-struct Coverage { uint index:SV_Target0; float depth:SV_Target1; };
-Coverage original(float4 p:SV_Position) {
-    Coverage o; o.index=info.x+1; o.depth=p.z; return o;
-}
-)HLSL";
+
+
 
 struct Records {
     ComPtr<ID3D11Buffer> buffer;
@@ -286,9 +211,9 @@ bool createPrivateDepth(ID3D11Device* dev,Eye& e) {
 }
 bool ensure(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
     if (g_build && g_index && g_indexOriginal && g_draw && g_batch && g_blend && g_depth) return true;
-    g_build.Attach(shaderSwapCompileCs(ctx,kBuildHlsl,sizeof(kBuildHlsl)-1,"main","terrain motion",nullptr,"terrain motion"));
-    g_index.Attach(shaderSwapCompilePs(ctx,kIndexHlsl,sizeof(kIndexHlsl)-1,"main","terrain coverage",nullptr,"terrain motion"));
-    g_indexOriginal.Attach(shaderSwapCompilePs(ctx,kIndexHlsl,sizeof(kIndexHlsl)-1,"original","terrain original coverage",nullptr,"terrain motion"));
+    g_build.Attach(shaderSwapCreateCs(ctx,kCelestialBuildBytecode,sizeof(kCelestialBuildBytecode),"terrain motion","terrain motion"));
+    g_index.Attach(shaderSwapCreatePs(ctx,kCelestialIndexBytecode,sizeof(kCelestialIndexBytecode),"terrain coverage","terrain motion"));
+    g_indexOriginal.Attach(shaderSwapCreatePs(ctx,kCelestialOriginalBytecode,sizeof(kCelestialOriginalBytecode),"terrain original coverage","terrain motion"));
     D3D11_BUFFER_DESC bd{}; bd.ByteWidth=48; bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     D3D11_BUFFER_DESC bbd{}; bbd.ByteWidth=16; bbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     D3D11_BLEND_DESC blend{}; blend.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED;

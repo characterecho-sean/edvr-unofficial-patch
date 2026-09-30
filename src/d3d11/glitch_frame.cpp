@@ -16,7 +16,6 @@
 #include "../common/game_call_probe.h"
 #include "../common/log.h"
 #include "eye_origin_trace.h"
-#include "transition_flash_prevent.h"
 #include "pose_reader_watch.h"
 #include "transition_flash_eye_base.h"
 
@@ -1817,12 +1816,6 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
                                       sceneGeomFresh ? s->sceneGeometry : GlitchSceneGeometry{},
                                       sceneGeomFresh);
 
-    // H3 (design doc): the same scene-camera read the detector above uses,
-    // reported so it can be compared against the engine fix's own last
-    // pushed pose -- the link the whole recompute chain assumes is real.
-    // posOrig, not pos: an acted fill has rewritten row 275 above.
-    transitionFlashPreventNoteH3(s->frameNo, posOrig);
-
     s->sawBuffer = true;
 
     // Record which buffer this was, while validation is still deciding.
@@ -2205,7 +2198,7 @@ SceneGeometryTap recordScenePosition(RingEntry& e,const State* s){
     return {geometryFresh, decision};
 }
 
-// appendLine's own copy for this instrument (transition_flash_prevent.cpp
+// appendLine's own copy for this instrument (transition_flash_eye_base.cpp
 // has one too, for its own dump; see AGENTS.md on copy-culture). Appends
 // one printf-style line plus \r\n to a std::string dump buffer.
 void eyeOriginTraceAppend(std::string& out,const char* fmt,...){
@@ -2221,7 +2214,7 @@ void eyeOriginTraceAppend(std::string& out,const char* fmt,...){
 // One automatic dump file: edvr_logs\flash\eyetrace_HHMMSS_fN.txt, the
 // unique-stack table first (point 4 of the design: this file is read
 // stack-first), then every ring frame inside the folded trigger window.
-// Mirrors transition_flash_prevent.cpp's performDump in shape (same log
+// Mirrors transition_flash_eye_base.cpp's performDump in shape (same log
 // directory accessor, same CreateDirectoryW/CreateFileW pattern) but is
 // this file's own function: that module stays untouched.
 void eyeOriginTracePerformDump(State* s,const eot::PendingWindow& window){
@@ -2365,12 +2358,12 @@ void eyeOriginTraceReport(State* s){
 
 // Called from all three of glitchFrameBoundary's verdict sites (the
 // fix-off path, the disabled-for-session path, and the normal path) with
-// the same withheldClass test transition_flash_prevent.cpp's own tap uses
-// at each -- so one flight needs no key presses -- plus sceneResetVerdict,
-// the narrower test advanced.eye_origin_readers wants (pose_reader_watch_
-// core.h's dumpVerdictTrigger; see the design doc's part C). Off is the
-// only real gate; once on, this runs every boundary call so a pending
-// dump becomes due even on a frame with no new trigger.
+// the same withheldClass test at each -- so one flight needs no key presses
+// -- plus sceneResetVerdict, the narrower test advanced.eye_origin_readers
+// wants (pose_reader_watch_core.h's dumpVerdictTrigger; see the design
+// doc's part C). Off is the only real gate; once on, this runs every
+// boundary call so a pending dump becomes due even on a frame with no new
+// trigger.
 void eyeOriginTraceBoundary(State* s,uint32_t frame,bool withheldClass,bool sceneResetVerdict){
     if(!s->eyeOriginTraceOn)return;
     const bool readersOn=poseReaderWatchOn();
@@ -2541,13 +2534,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.eyeDraws = eyeDraws;
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
-            // Reported even here, fix.transition_flash = 0: the old
-            // magnitude-based verdict (glitchFrameObserve, gated only on
-            // observing) still runs, so a "would have withheld" is still a
-            // dump trigger for the engine fix's own instrument.
-            transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
-                e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
-                e.verdict==kVerdictSceneReset);
             transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
@@ -2676,9 +2662,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.eyeDraws = eyeDraws;
             e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
-            transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
-                e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
-                e.verdict==kVerdictSceneReset);
             transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
@@ -3039,9 +3022,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         e.eyeDraws = eyeDraws;
         e.guard = s->guardPacked;
         e.verdict = s->verdictThisFrame;
-        transitionFlashPreventNoteDetectorVerdict(e.frame, e.verdict,
-            e.verdict==kVerdictWithheld || e.verdict==kVerdictWithheldSepWould ||
-            e.verdict==kVerdictSceneReset);
         transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
         const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);

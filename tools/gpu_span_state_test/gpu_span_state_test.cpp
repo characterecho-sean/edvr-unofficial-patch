@@ -368,9 +368,61 @@ static void applicationSegments() {
               "incomplete application frame stays invalid after GPU completion");
     }
 }
+// The raw GPU clock at the ends of an Application-render span (the frame gap's inputs, src\d3d11\gpu_frame_gap.h):
+// the first producer run's begin marker and the last segment's end marker, whatever the segment count, with the
+// clock's frequency; nothing at all when the span did not validate, and for the legacy span.
+static void applicationTicks() {
+    for (unsigned segments = 3; segments <= 4; ++segments) {
+        Fixture f;
+        f.driver.tick = 5000;
+        check(f.state.beginApplicationFrame(1, 9, 0, owner) == R::Valid, "ticks: the frame begins");
+        for (unsigned part = 0; part < segments; ++part) {
+            if (part) check(f.state.resumeApplicationSegment(part * 2, owner) == R::Valid, "ticks: a segment resumes");
+            check(f.state.endApplicationSegment(part * 2 + 1, owner) == R::Valid, "ticks: a segment ends");
+        }
+        check(f.state.finishApplicationFrame(20, owner) == R::Valid, "ticks: the frame finishes");
+        const GpuSpanRawSample raw = f.driver.slots[0].raw;   // before the poll retires the slot
+        f.driver.pending = false;
+        check(f.state.poll(21, owner, f.results) == 1 && f.results[0].reason == R::Valid &&
+              f.results[0].source == GpuSpanSource::ApplicationRender, "ticks: the span validates");
+        const GpuSpanResult& r = f.results[0];
+        check(r.firstTick == raw.ticks[0] && r.firstTick == 5000, "ticks: firstTick is the first producer run's begin marker");
+        check(r.lastTick == raw.ticks[2 * segments - 1] && r.lastTick > raw.ticks[2 * segments - 2],
+              "ticks: lastTick is the last segment's end marker (index 5 of three segments, 7 of four)");
+        check(r.frequency == 1000, "ticks: the clock's frequency rides with the pair");
+    }
+    // A span that does not validate carries no ticks and no frequency: it can never make a gap.
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        Fixture f;
+        f.driver.tick = 1000;
+        check(f.state.beginApplicationFrame(1, 1, 0, owner) == R::Valid &&
+              f.state.endApplicationSegment(1, owner) == R::Valid &&
+              f.state.resumeApplicationSegment(2, owner) == R::Valid &&
+              f.state.endApplicationSegment(3, owner) == R::Valid &&
+              f.state.resumeApplicationSegment(4, owner) == R::Valid &&
+              f.state.endApplicationSegment(5, owner) == R::Valid &&
+              f.state.finishApplicationFrame(6, owner) == R::Valid, "ticks: the invalid-span fixture closes");
+        if (kind == 0) f.driver.corrupt = Driver::Corrupt::Disjoint;
+        if (kind == 1) f.driver.corrupt = Driver::Corrupt::Frequency;
+        if (kind == 2) f.driver.slots[0].raw.ticks[3] = f.driver.slots[0].raw.ticks[2] - 1;   // a backwards segment
+        f.driver.pending = false;
+        check(f.state.poll(7, owner, f.results) == 1 && f.results[0].reason != R::Valid &&
+              f.results[0].firstTick == 0 && f.results[0].lastTick == 0 && f.results[0].frequency == 0,
+              "ticks: a disjoint, zero-frequency or reversed span reports no ticks and no frequency");
+    }
+    // The legacy render-to-submit span has no such pair.
+    Fixture f;
+    f.pair(1);
+    f.driver.pending = false;
+    check(f.state.poll(30, owner, f.results) == 1 && f.results[0].reason == R::Valid &&
+          f.results[0].source == GpuSpanSource::RenderToSubmit &&
+          f.results[0].firstTick == 0 && f.results[0].lastTick == 0 && f.results[0].frequency == 0,
+          "ticks: the legacy span reports no tick pair");
+}
 int main(int argc, char** argv) {
     check(argc == 2 && std::strcmp(argv[1], "--self-test") == 0, "expected --self-test");
     validAndReuse(); pairing(); failures(); finalBoundary(); pressureAndOwner(); applicationSegments();
+    applicationTicks();
     std::printf("PASS: %u GPU span CPU policy and command-driven fake-driver checks (no GPU measurement).\n", checks);
     return 0;
 }

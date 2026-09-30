@@ -2,12 +2,46 @@
 
 #include <windows.h>
 
+#include "../common/iniedit.h"
 #include "probe.h"
 
+#include <atomic>
 #include <cstdio>
 
 namespace edvr::installer {
 namespace {
+
+// How long a replace waits out a file that something else has open.
+//
+// A real-time scanner, the search indexer and a backup tool all open a file that
+// has just been read or written, for a few milliseconds, and the classic rename
+// is refused with "access denied" for as long as ANY handle to its target is open.
+// The engine used to give up at the first refusal, so a run that had done
+// everything right was rolled back over a hold that was gone a moment later, and
+// told the person it could not finish (the rig lost the first replace of the pair
+// that way, a few runs in a hundred, under a stand-in for such a scanner). The
+// replace is now iniedit's (replaceFileAtomic: POSIX-semantics first, which goes
+// through under a reader that shares DELETE at once, the classic rename where that
+// is not supported, tried again while the refusal is one that passes), and this is
+// how patient it is: two seconds, which is long for a scan and short for a person
+// waiting at a window. The writer's own default, which the in-game menu uses, is a
+// twentieth of that: it is inside somebody's game, and the installer is not.
+constexpr int      kReplaceRetries = 40;
+constexpr unsigned kReplaceBackoffMs = 50;
+std::atomic<int>      g_replaceRetries{kReplaceRetries};
+std::atomic<unsigned> g_replaceBackoffMs{kReplaceBackoffMs};
+
+// `from` in place of `to`, waiting out a hold. `err` gets the Windows error of the
+// refusal that ended the wait.
+bool replaceOver(const std::wstring& from, const std::wstring& to, DWORD* err) {
+    AtomicWriteOptions patience;
+    patience.retries = g_replaceRetries.load();
+    patience.backoffMs = g_replaceBackoffMs.load();
+    unsigned long code = 0;
+    if (replaceFileAtomic(from, to, patience, nullptr, &code)) return true;
+    *err = code;
+    return false;
+}
 
 struct Undo {
     enum class Kind { RemoveDir, DeleteFile, MoveBack, RestoreFile } kind;
@@ -75,8 +109,7 @@ bool writeWholeFile(const std::wstring& path, const void* data, size_t size, DWO
     FlushFileBuffers(f);
     CloseHandle(f);
 
-    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        *err = GetLastError();
+    if (!replaceOver(temp, path, err)) {
         DeleteFileW(temp.c_str());
         return false;
     }
@@ -133,6 +166,11 @@ bool snapshotFile(const std::wstring& source, const std::wstring& backupDir,
 }
 
 }  // namespace
+
+void replacePatienceForTest(int retries, unsigned backoffMs) {
+    g_replaceRetries.store(retries < 0 ? kReplaceRetries : retries);
+    g_replaceBackoffMs.store(retries < 0 ? kReplaceBackoffMs : backoffMs);
+}
 
 bool canWriteInto(const std::wstring& dir) {
     if (dir.empty()) return false;
@@ -242,8 +280,8 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 if (!protectTarget(step.to)) { fail(step.to, err); break; }
                 const auto before=sha256File(step.from);
                 if(before.empty()) {fail(step.from,ERROR_CRC);break;}
-                if (!MoveFileExW(step.from.c_str(), step.to.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-                    fail(step.from, GetLastError());
+                if (!replaceOver(step.from, step.to, &err)) {
+                    fail(step.from, err);
                 } else {
                     undo.push_back({Undo::Kind::MoveBack, step.to, step.from, before});
                     result.done.push_back("renamed " + toUtf8(leafOf(step.from)) + " -> " +

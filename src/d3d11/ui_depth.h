@@ -28,9 +28,10 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.ui_depth (on | off), fix.temporal_aa (the gate),
-// advanced.ui_depth_families, advanced.ui_depth_exclude and
-// advanced.ui_depth_test. Install and reload; all live.
+// Reads fix.temporal_aa (the gate: the interface depth has no key of its own,
+// fix.ui_depth having been retired into it) and the nine advanced.ui_depth_*
+// keys (families, exclude, menus, variants, alpha, reactive, planes, eyes,
+// test). Install and reload; all live.
 void uiDepthConfigure(Config& cfg);
 
 // True while the key is on, the pass is on and nothing stood down: the
@@ -91,6 +92,15 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 //     -1 for a third target of one shape, or a full table.
 int uiDepthSampledSurfaceSlot();
 int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt);
+// The read-only form, for observers (the HUD layer census): a query that
+// REGISTERS changes the table the deciding paths then read. On 2026-09-27
+// the crisp-HUD tonemap admission's per-frame lookup of the tonemap's LDR
+// output took the table's two same-shape slots ahead of the main menu's
+// own composite target, and the menus read "no eye" ever after (the ui
+// quality menu regression). A target the table has not seen gets -1 here;
+// the layer's decide keeps the registering form, exactly as the pass's own
+// classifier would register at the same draw.
+int uiDepthEyeOfTargetReadOnly(const void* res);
 // ...and a third: is this vertex shader on the interface pass's exclude list
 // (the null-output mesh B018D143700AB803 that samples a stale surface
 // binding, plus advanced.ui_depth_exclude)? A draw this pass will never treat

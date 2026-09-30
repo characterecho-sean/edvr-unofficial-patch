@@ -17,9 +17,12 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <tlhelp32.h>
 
 #include <atomic>
+#include <cstdio>
 #include <string>
+#include <vector>
 
 namespace edvr {
 
@@ -93,6 +96,56 @@ inline PFN_D3D11_CREATE_DEVICE systemD3D11CreateDevice() {
         return reinterpret_cast<PFN_D3D11_CREATE_DEVICE>(GetProcAddress(system.module, "D3D11CreateDevice"));
     }();
     return create;
+}
+
+// The full path of every d3d11.dll mapped into this process, in load order:
+// empty when none is. Two entries mean a second module of the name -- EDVR's
+// proxy beside the exe -- is in the process as well as Windows' own.
+inline std::vector<std::wstring> mappedD3D11Paths() {
+    std::vector<std::wstring> paths;
+    HANDLE snapshot = INVALID_HANDLE_VALUE;
+    // A snapshot taken while another thread loads a module fails with
+    // ERROR_BAD_LENGTH; asking again is the documented answer.
+    for (int attempt = 0; attempt < 8 && snapshot == INVALID_HANDLE_VALUE; ++attempt) {
+        snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+        if (snapshot == INVALID_HANDLE_VALUE && GetLastError() != ERROR_BAD_LENGTH) break;
+    }
+    if (snapshot == INVALID_HANDLE_VALUE) return paths;
+    MODULEENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    for (BOOL more = Module32FirstW(snapshot, &entry); more; more = Module32NextW(snapshot, &entry)) {
+        if (_wcsicmp(entry.szModule, L"d3d11.dll") == 0) paths.emplace_back(entry.szExePath);
+    }
+    CloseHandle(snapshot);
+    return paths;
+}
+
+// For a rig that means to run on Windows' own d3d11 (every rig that only needs
+// a WARP device): logs which d3d11.dll the process is running on, and says
+// whether that is System32's and nothing else. A rig whose exe sits in build\
+// and imports D3D11CreateDevice binds build\d3d11.dll instead and runs under
+// EDVR's hooks unnoticed; a rig that checks this fails instead.
+inline bool reportSystemD3D11Only(const char* rig) {
+    const std::wstring system = systemD3D11Path();
+    const std::vector<std::wstring> mapped = mappedD3D11Paths();
+    bool only = !system.empty() && !mapped.empty();
+    for (const std::wstring& path : mapped) {
+        std::printf("[%s] d3d11.dll mapped from %ls\n", rig, path.c_str());
+        if (_wcsicmp(path.c_str(), system.c_str()) != 0) only = false;
+    }
+    if (mapped.empty()) std::printf("[%s] no d3d11.dll is mapped\n", rig);
+    return only;
+}
+
+// For a rig that loads EDVR's proxy on purpose, by path, to test it: call this
+// before that load. True when no d3d11.dll is mapped yet -- the exe imports
+// none, since an import is bound before main runs -- so the proxy the rig
+// loads is the only one and arrives when the rig says.
+inline bool reportNoD3D11Mapped(const char* rig) {
+    const std::vector<std::wstring> mapped = mappedD3D11Paths();
+    for (const std::wstring& path : mapped) std::printf("[%s] d3d11.dll mapped at startup from %ls\n", rig, path.c_str());
+    if (mapped.empty()) std::printf("[%s] no d3d11.dll mapped before the rig loads one\n", rig);
+    return mapped.empty();
 }
 
 }  // namespace edvr

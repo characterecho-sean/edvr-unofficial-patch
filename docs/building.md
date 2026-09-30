@@ -24,6 +24,11 @@ headset:
 build\smoke.exe build\d3d11.dll
 ```
 
+A full build leaves your desktop alone, so you can keep typing in another
+window while it runs. The runner holds every test exe to that and fails the
+build if one shows a window or takes the keyboard focus; see
+`docs\build-focus-steal-2026-09-29.md`.
+
 The optional DLSS mode, and an installer that carries NVIDIA's runtime, need
 the DLSS SDK on the machine. Its licence keeps it out of this repository, and
 it is not in the graphics driver either. This command

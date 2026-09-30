@@ -21,12 +21,8 @@ flown once, refined, shipped as the default). Capture: eye run 165433
   back aboard the k from before (07:15: 3.90). Since, NOT FLOWN: a step's
   benefit judged only on a stable scene, on the parts tested and passed and
   the caller work; the ceiling's outcome against the k = 1 baseline of the
-  same view, both ends printed. Flights: 03:30 (b55e06b, s 1.5) k 1 -> 2.70
-  in 80 s, ~50 -> 71-75 fps; 04:23 a third of the frames took two slots at a
-  mean at the period, no step; 05:05 (reduced) two slots a cycle at k 6 (the
-  half-rate trap); 05:53 (close range) ~4 of 4,800 parts dropped at k 6;
-  06:53 re-boarding re-ramped from 1 and flickered. Review:
-  reviews/lod-governor-review-2026-09-23.md (main checkout, gitignored).
+  same view, both ends printed. Flight list and review pointer: see Status
+  detail below.
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
   part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
   +0x550 = 1/fy (0.000834297 here), B = +0x560 = 0 for the eyes; (2) the
@@ -41,18 +37,8 @@ flown once, refined, shipped as the default). Capture: eye run 165433
   (reader run 012514), so the slider saturates at 1.5. +0x550/+0x560 are
   the camera projection's pixel size; the screen-size term has no s.
 - **Elasticity** (exact join; ms = share x 6.3 post-cut / x 8.5 pre-cut):
-
-| k | screen size x k (exact): draws A+B, share, ms post/pre | LOD distance x k (the slider's form): bounds |
-|---|---|---|
-| 1.25 | 0, 0% | 16..4,075 (0.1..22.3%) |
-| 1.5 | 4, 0.02% | 16..4,409 |
-| 2 | 6, 0.03%, 0.00 | 16..5,234 (0.1..28.7%) |
-| 3 | 40, 0.22%, 0.01/0.02 | 18..6,675 |
-| 4 | 74, 0.41%, 0.03/0.03 | 18..7,743 |
-| 6 | 243, 1.33%, 0.08/0.11 | 18..9,827 |
-| 8 | 613, 3.36%, 0.21/0.29 | 18..11,493 (0.1..62.9%) |
-| 10.46 (0.25 deg cap) | 1,089, 5.96%, 0.38/0.51 | 82..13,033 |
-
+  the per-k table (screen size x k, and LOD distance x k bounds) is under
+  Status detail below.
 - **LOD distance, EXACT** (the v3 tables, reader run 012514, keyed by s x
   k; section 8): 1.875 -> 318 draws, 1.9%; 2.25 -> 1,123, 6.7%; 3.0 ->
   3,222, 19.2% (1.21 ms); 4.5 -> 5,634, 33.5% (2.11 ms); 6.0 -> 33.7%. It
@@ -69,6 +55,28 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 - **Next:** fly the shipped default parked at Cranfield with the in-game
   detail slider at its default, then close to the buildings; disembark and
   board once.
+
+## Status detail (moved out of Status 2026-09-29)
+
+**Flights and review** (from the State bullet): Flights: 03:30 (b55e06b,
+s 1.5) k 1 -> 2.70 in 80 s, ~50 -> 71-75 fps; 04:23 a third of the frames
+took two slots at a mean at the period, no step; 05:05 (reduced) two slots
+a cycle at k 6 (the half-rate trap); 05:53 (close range) ~4 of 4,800 parts
+dropped at k 6; 06:53 re-boarding re-ramped from 1 and flickered. Review:
+reviews/lod-governor-review-2026-09-23.md (main checkout, gitignored).
+
+**Elasticity** (exact join; ms = share x 6.3 post-cut / x 8.5 pre-cut):
+
+| k | screen size x k (exact): draws A+B, share, ms post/pre | LOD distance x k (the slider's form): bounds |
+|---|---|---|
+| 1.25 | 0, 0% | 16..4,075 (0.1..22.3%) |
+| 1.5 | 4, 0.02% | 16..4,409 |
+| 2 | 6, 0.03%, 0.00 | 16..5,234 (0.1..28.7%) |
+| 3 | 40, 0.22%, 0.01/0.02 | 18..6,675 |
+| 4 | 74, 0.41%, 0.03/0.03 | 18..7,743 |
+| 6 | 243, 1.33%, 0.08/0.11 | 18..9,827 |
+| 8 | 613, 3.36%, 0.21/0.29 | 18..11,493 (0.1..62.9%) |
+| 10.46 (0.25 deg cap) | 1,089, 5.96%, 0.38/0.51 | 82..13,033 |
 
 ## 1. The test and what the decompile leaves undefined
 

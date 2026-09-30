@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"
 #include "weapon_motion.h"
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -107,9 +108,9 @@ bool family(uint64_t hash){
 }
 bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev){
     if(g.rtv)return true;
-    g.vs.Attach(shaderSwapCompileVs(ctx,kWeaponMotionVs,sizeof(kWeaponMotionVs)-1,"main","weapon motion",nullptr,"weapon motion"));
-    g.ps.Attach(shaderSwapCompilePs(ctx,kWeaponMotionPs,sizeof(kWeaponMotionPs)-1,"main","weapon motion",nullptr,"weapon motion"));
-    g.identify.Attach(shaderSwapCompileCs(ctx,kWeaponIdentityCs,sizeof(kWeaponIdentityCs)-1,"main","weapon identity",nullptr,"weapon motion"));
+    g.vs.Attach(shaderSwapCreateVs(ctx,kWeaponMotionVsBytecode,sizeof(kWeaponMotionVsBytecode),"weapon motion","weapon motion"));
+    g.ps.Attach(shaderSwapCreatePs(ctx,kWeaponMotionPsBytecode,sizeof(kWeaponMotionPsBytecode),"weapon motion","weapon motion"));
+    g.identify.Attach(shaderSwapCreateCs(ctx,kWeaponIdentityBytecode,sizeof(kWeaponIdentityBytecode),"weapon identity","weapon motion"));
     if(!g.vs || !g.ps || !g.identify)return false;
     D3D11_BUFFER_DESC id{};id.ByteWidth=16;id.BindFlags=D3D11_BIND_SHADER_RESOURCE;
     D3D11_SHADER_RESOURCE_VIEW_DESC view{};view.Format=DXGI_FORMAT_R32_UINT;view.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;view.Buffer.NumElements=4;

@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"
 #include "menu_panel.h"
 #include "flat_compute_readback.h"
 #include "graphics_runtime.h"
@@ -900,80 +901,7 @@ void workerMain() {
 // ---------------------------------------------------------------------------
 // The GPU side
 
-constexpr char kCompositeCs[] = R"HLSL(
-Texture2D<float4> S : register(t0);
-Texture2D<float4> P : register(t1);
-SamplerState L : register(s0);
-RWTexture2D<float4> O : register(u0);
-cbuffer C : register(b0) {
-    int4   region;     // the pixels of S this eye owns (x1, y1 exclusive)
-    int2   outSize;
-    int    flipV;      // the submit's rows run bottom-up
-    int    linearOut;  // the frame is linear light: linearise the panel
-    int4   box;        // the output pixels this dispatch covers (x1, y1 exclusive)
-    float4 tans;       // left, right, top, bottom tangent magnitudes
-    float4 m0;         // current-head -> anchor rotation rows; .w = origin
-    float4 m1;
-    float4 m2;
-    float4 geom;       // dist, curve, halfW, halfH
-    float4 misc;       // alpha
-};
-float3 toLinear(float3 c) {
-    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-}
-[numthreads(8, 8, 1)]
-void main(uint3 tid : SV_DispatchThreadID) {
-    uint2 id = uint2(box.x + tid.x, box.y + tid.y);
-    if (id.x >= (uint)box.z || id.y >= (uint)box.w) return;
-    float4 src = S.Load(int3(region.x + id.x, region.y + id.y, 0));
-    float u = (id.x + 0.5) / outSize.x;
-    float v = (id.y + 0.5) / outSize.y;
-    if (misc.z > 0.5) u = 1.0 - u;
-    if (flipV) v = 1.0 - v;
-    float tx = lerp(-tans.x, tans.y, u);
-    float ty = lerp(tans.z, -tans.w, v);
-    float3 dv = float3(tx, ty, -1.0);
-    float3 df = float3(dot(m0.xyz, dv), dot(m1.xyz, dv), dot(m2.xyz, dv));
-    float3 org = float3(m0.w, m1.w, m2.w);
-    float dist = geom.x, curve = geom.y, halfW = geom.z, halfH = geom.w;
-    float su = -1.0, sv = -1.0;
-    if (curve > 0.005) {
-        float R = dist / curve;
-        float zc = R - dist;
-        float a = df.x * df.x + df.z * df.z;
-        float b = 2.0 * (org.x * df.x + (org.z - zc) * df.z);
-        float c = org.x * org.x + (org.z - zc) * (org.z - zc) - R * R;
-        float disc = b * b - 4.0 * a * c;
-        if (disc > 0 && a > 1e-8) {
-            float t = (-b + sqrt(disc)) / (2.0 * a);
-            if (t > 0) {
-                float3 hit = org + t * df;
-                float th = atan2(hit.x, zc - hit.z);
-                su = (th * R - misc.y + halfW) / (2.0 * halfW);
-                sv = (hit.y + halfH) / (2.0 * halfH);
-            }
-        }
-    } else if (df.z < -1e-4) {
-        float t = (-dist - org.z) / df.z;
-        if (t > 0) {
-            float3 hit = org + t * df;
-            su = (hit.x - misc.y + halfW) / (2.0 * halfW);
-            sv = (hit.y + halfH) / (2.0 * halfH);
-        }
-    }
-    float4 outc = src;
-    if (su >= 0 && su <= 1 && sv >= 0 && sv <= 1) {
-        float4 p = P.SampleLevel(L, float2(su, 1.0 - sv), 0);
-        if (linearOut) {
-            float pa = max(p.a, 1e-4);
-            p.rgb = toLinear(p.rgb / pa) * pa;
-        }
-        float a = p.a * misc.x;
-        outc = float4(src.rgb * (1.0 - a) + p.rgb * misc.x, src.a);
-    }
-    O[id.xy] = outc;
-}
-)HLSL";
+
 
 struct Params {
     int32_t region[4];
@@ -1263,8 +1191,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
     }
     if (ok && !g_cs && !g_csTried) {
         g_csTried = true;
-        g_cs = shaderSwapCompileCs(ctx, kCompositeCs, sizeof(kCompositeCs) - 1, "main",
-                                   "menu_panel_cs", nullptr, "menu panel");
+        g_cs = shaderSwapCreateCs(ctx, kMenuCompositeBytecode, sizeof(kMenuCompositeBytecode), "menu_panel_cs", "menu panel");
     }
     ok = ok && g_cs != nullptr;
     if (ok && !g_cb) {
@@ -1862,13 +1789,3 @@ void menuPanelShutdown() {
 }
 
 }  // namespace edvr
-
-extern "C" __declspec(dllexport) void* edvrMenuPanel(void* srcTex, int eye, const float* bounds,
-                                                     const float* xf) {
-    if (edvr::graphicsRuntimeDisabled() || !srcTex || !xf || eye < 0 || eye > 1) return nullptr;
-    void* out = nullptr;
-    edvr::guardedBudget(edvr::g_budget, [&] {
-        out = edvr::compositeInner(srcTex, eye, bounds, xf);
-    });
-    return out;
-}

@@ -21,27 +21,11 @@
     asymmetry (m02/m12) preserved. This is the renderer's path (the game
     extracts the four tangent elements and builds its own projection —
     canted-projection.md, the fold experiment).
-- **Ruled out (pointers, do not re-propose):**
-  - The cached-frustum model (H3: culler derives its frustum at eye-target
-    build and keeps it until the next rebuild) — refuted 2026-09-23:
-    switching to `matrix` (raw channel honest) mid-session brought the
-    squares back with **no** target rebuild in between.
-  - The union model (culler keys on the wider of the two channels;
-    widening either suffices) — refuted by the same observation.
-  - The matrix-channel model (H2) — refuted: `matrix` mode lied wide on
-    the matrix and the squares showed regardless.
-  - The 2026-09-09 legacy-probe `raw`-inert reading — superseded; see the
-    2026-09-23 entry (instrument artifact, marked inference).
-  - The `AstroSurfaceRenderManager::Cull` chain (`FUN_1412772b0` ->
-    `FUN_143d097b0` -> `FUN_14444b4a0` -> `FUN_1444d0200`) is a **mono
-    horizon-cone LOD culler**, not the view-frustum culler: its 48-plane
-    table is built once at construction from planet geometry
-    (`FUN_144497d30`), its fov scalar feeds only the LOD screen-size gate
-    (`tan(fov/2)` at subobj+0x8E0, written by `FUN_14448e0b0`), and the
-    per-object worker `FUN_14444d6c0` is LOD-band selection, not a frustum
-    window test. Decompiles in `analysis\decomp\cull_round3*.txt`. Also
-    ruled out: `EnableFrustum0Override` / `CullingBias` are shadow-cascade
-    config (`FUN_1428555A0`), unrelated to terrain tile culling.
+- **Ruled out (pointers, do not re-propose):** H3 cached-frustum, the
+  union model, H2 matrix-channel, the 2026-09-09 `raw`-inert reading, the
+  `AstroSurfaceRenderManager::Cull` chain and the shadow-cascade config
+  keys; each with its evidence is under "Status detail" below (the first
+  four are refuted by the 2026-09-23 entry at the bottom).
 - **Established:** the game loads `openvr\win64\openvr_api.dll`
   dynamically (RVA 0x4E4870), holds `IVRSystem_012` in global
   VA 0x145F1A860, and reaches it only via the wrapper. LibOVR impl
@@ -71,6 +55,33 @@ black squares where ground should be. Report a *symmetrized* frustum to the
 game — while showing the player exactly what was shown before — and the
 missing tiles come back. Report the truth again and they vanish again. The
 culler follows the report, not the optics.
+
+---
+
+## Status detail (moved out of Status 2026-09-29)
+
+**Ruled out** (moved verbatim from the Status block; do not re-propose):
+
+- The cached-frustum model (H3: culler derives its frustum at eye-target
+  build and keeps it until the next rebuild) — refuted 2026-09-23:
+  switching to `matrix` (raw channel honest) mid-session brought the
+  squares back with **no** target rebuild in between.
+- The union model (culler keys on the wider of the two channels;
+  widening either suffices) — refuted by the same observation.
+- The matrix-channel model (H2) — refuted: `matrix` mode lied wide on
+  the matrix and the squares showed regardless.
+- The 2026-09-09 legacy-probe `raw`-inert reading — superseded; see the
+  2026-09-23 entry (instrument artifact, marked inference).
+- The `AstroSurfaceRenderManager::Cull` chain (`FUN_1412772b0` ->
+  `FUN_143d097b0` -> `FUN_14444b4a0` -> `FUN_1444d0200`) is a **mono
+  horizon-cone LOD culler**, not the view-frustum culler: its 48-plane
+  table is built once at construction from planet geometry
+  (`FUN_144497d30`), its fov scalar feeds only the LOD screen-size gate
+  (`tan(fov/2)` at subobj+0x8E0, written by `FUN_14448e0b0`), and the
+  per-object worker `FUN_14444d6c0` is LOD-band selection, not a frustum
+  window test. Decompiles in `analysis\decomp\cull_round3*.txt`. Also
+  ruled out: `EnableFrustum0Override` / `CullingBias` are shadow-cascade
+  config (`FUN_1428555A0`), unrelated to terrain tile culling.
 
 ---
 

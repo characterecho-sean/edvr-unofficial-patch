@@ -18,7 +18,6 @@
 //   VRAM                             IDXGIAdapter3::QueryVideoMemoryInfo,
 //                                    once a second
 //   GPU load and temperature         NvAPI, once a second, NVIDIA only --
-//                                    the same library the foveation loads,
 //                                    two entry points; elsewhere "n/a"
 //   EDVR's own passes                the temporal, DLSS and sharpen totals
 //                                    those passes already keep
@@ -94,10 +93,10 @@ void perfMonitorNativeTimingLine(char* buf, size_t bufLen);
 // DROP ATTRIBUTION (docs/settings-menu.md, "diagnosing drops caused by the
 // mod"). Every frame's ring entry carries what EDVR did in it -- the events
 // below, ORed in from wherever they happen -- and what EDVR's own work
-// cost: the frame boundary's CPU time, the draw hooks' CPU time on sampled
-// frames, and the door's GPU time from a timestamp pair. A long frame is
-// then a row with EDVR's part of it written down, and a rate-limited log
-// line carries the same evidence into a field report.
+// cost: the frame boundary's CPU time and the draw hooks' CPU time on
+// sampled frames. A long frame is then a row with EDVR's part of it written
+// down, and a rate-limited log line carries the same evidence into a field
+// report.
 enum PerfEvent : uint32_t {
     kEvReload   = 1u << 0,   // edvr.ini re-read and every module reconfigured
     kEvIniWrite = 1u << 1,   // the menu wrote edvr.ini (the I/O is off-thread; the reload follows)
@@ -163,13 +162,3 @@ void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks);
 void perfMonitorShutdown();
 
 }  // namespace edvr
-
-extern "C" {
-// The door's GPU bracket, called by the openvr half around every pass it
-// runs at the door for one eye (frame_timing.h): a timestamp pair on the
-// game's immediate context, never awaited, polled on later calls. `tex`
-// is any ID3D11Texture2D* on the game's device. The measured time per
-// frame (both eyes) is the Monitor page's "EDVR at the door" GPU figure.
-__declspec(dllexport) void edvrDoorGpuBegin(void* tex, int eye);
-__declspec(dllexport) void edvrDoorGpuEnd(void* tex, int eye);
-}

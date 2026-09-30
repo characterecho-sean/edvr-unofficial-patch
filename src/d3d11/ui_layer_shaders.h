@@ -1,3 +1,4 @@
+#include "fixed_shader_source.h"
 // fix.ui_quality's GPU half that the rig must run exactly as the DLL does:
 // the composite's HLSL and the blend-state translation between D3D11's
 // descriptions and ui_layer_math.h's UiBlendRt. Header-only; the DLL
@@ -109,51 +110,7 @@ constexpr float kUiLayerMultClear[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 // is the `advanced.temporal_aa_debug = ui_layer` view: the layer over black,
 // with a dark blue wash where it covers or tints anything, so a translucent
 // backing that is nearly black still shows as covered.
-constexpr char kUiLayerCompositeHlsl[] = R"HLSL(
-Texture2D<float4> Frame : register(t0);
-Texture2D<float4> Layer : register(t1);
-Texture2D<float4> Mult : register(t2);
-RWTexture2D<float4> Out : register(u0);
-cbuffer P : register(b0) {
-    int4   region;     // the frame's region in Frame: x0, y0, x1, y1 (exclusive)
-    float4 uv;         // the layer's rectangle for that region: u0, v0, u1, v1
-    float2 layerSize;  // the layer, texels
-    uint2  outSize;    // the region's size, which is the output's
-    uint   mode;       // 0 the composite, 1 the ui_layer debug view
-    uint   useMult;    // 1: a multiply drew into M this frame
-    uint2  pad;
-};
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= outSize.x || id.y >= outSize.y) return;
-    int2 p = region.xy + int2(id.xy);
-    float4 f = Frame.Load(int3(p, 0));
-    float2 span = (uv.zw - uv.xy) * layerSize / float2(outSize);
-    float2 x0 = uv.xy * layerSize + float2(id.xy) * span;
-    float2 x1 = x0 + span;
-    int2 k0 = max(int2(floor(x0)), int2(0, 0));
-    int2 k1 = min(int2(ceil(x1)) - 1, int2(layerSize) - 1);
-    float4 acc = float4(0, 0, 0, 0);
-    float3 accM = float3(0, 0, 0);
-    float wsum = 0;
-    [loop] for (int j = k0.y; j <= min(k1.y, k0.y + 3); ++j) {
-        float wy = min(x1.y, (float)j + 1.0) - max(x0.y, (float)j);
-        if (wy <= 0) continue;
-        [loop] for (int i = k0.x; i <= min(k1.x, k0.x + 3); ++i) {
-            float wx = min(x1.x, (float)i + 1.0) - max(x0.x, (float)i);
-            if (wx <= 0) continue;
-            acc += Layer.Load(int3(i, j, 0)) * (wx * wy);
-            if (useMult != 0) accM += Mult.Load(int3(i, j, 0)).rgb * (wx * wy);
-            wsum += wx * wy;
-        }
-    }
-    float4 l = wsum > 0 ? acc / wsum : float4(0, 0, 0, 1);
-    float3 m = (useMult != 0 && wsum > 0) ? accM / wsum : float3(1, 1, 1);
-    float3 c = mode == 1 ? l.rgb + float3(0.0, 0.08, 0.25) * (1.0 - l.a * dot(m, 1.0 / 3.0))
-                         : l.rgb + f.rgb * l.a * m;
-    Out[id.xy] = float4(saturate(c), f.a);
-}
-)HLSL";
+
 
 // The cbuffer above, laid out to match: four 16-byte rows.
 struct UiLayerCompositeParams {
@@ -191,5 +148,15 @@ inline DXGI_FORMAT uiLayerFrameView(DXGI_FORMAT f) {
 inline bool uiLayerLdrView(DXGI_FORMAT view) {
     return view == DXGI_FORMAT_R8G8B8A8_UNORM || view == DXGI_FORMAT_B8G8R8A8_UNORM;
 }
+
+// the crisp-HUD half's of fix.ui_quality coverage pass (ui_layer.cpp's tonemap re-issue): the HDR
+// HUD layer's alpha -- transmittance, the layer's own convention -- written
+// into the 8-bit layer's alpha, replacing it, with the colour channels
+// masked off (the re-issued tonemap draw just wrote them). One full-screen
+// triangle; the two layers are the same size by construction (the caller
+// declines when they are not), so the sample is the pixel itself.
+
+
+
 
 }  // namespace edvr

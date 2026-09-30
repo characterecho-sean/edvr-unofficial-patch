@@ -10,6 +10,16 @@ extern std::atomic<bool> g_flatRuntimeLive;
 inline bool flatRuntimeActive() { return g_flatRuntimeLive.load(std::memory_order_relaxed) && !g_flatComputeInternal; }
 // Last qualified flat scene extent, published for the menu on any thread.
 bool flatRuntimeNativeScale();
+// The upstream camera injector's read points into the phase machine: the
+// current phase in render pixels and the validated resolve plan's render
+// extent (w/h); applied is the machine's own applied count this frame.
+void flatRuntimePhaseState(float* x, float* y, uint32_t* w, uint32_t* h, uint32_t* applied);
+// The camera injector applied the phase at the source: fold it into the
+// phase machine exactly as a scope application would.
+void flatRuntimeNoteCameraApplied();
+// Whether a legacy projection plan exists for the current frame (the
+// ownership policy's legacyEligible input).
+bool flatRuntimeLegacyPlanExists();
 void flatRuntimePresent(IDXGISwapChain*, uint64_t frame, HRESULT, UINT flags);
 void flatRuntimeBeforePresent();
 void flatRuntimeResize();

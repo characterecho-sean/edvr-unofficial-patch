@@ -1,6 +1,7 @@
 #include "kinematic_eval_hook.h"
 #include "kinematic_eval_probe.h"
 #include "engine_velocity_emit.h"
+#include "engine_motion_cpu.h"   // the CPU instrument: EDVR's own work in every relay below is clocked per call
 #include "../common/code_hook.h"
 #include <windows.h>
 #include <intrin.h>
@@ -424,23 +425,38 @@ thread_local uint32_t t_jobMask=0;
 thread_local uint32_t t_builderRow=kGateProbeNoRow;
 thread_local engine_velocity_emit::PrimaryIdentity t_primaryIdentity;
 
+// The two evaluator relays are pass-throughs unless a diagnostic is attached
+// (two loads and a call), cheaper than one clock read, so every call is COUNTED
+// and only the probe branches, which have real work, are clocked
+// (engine_motion_cpu.h, Part kEval; the count bounds the cost).
 __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uintptr_t param2,
                                                        uintptr_t renderRecord) noexcept {
+    emcpu::count(emcpu::kEval);
     const uint32_t jobMask=t_jobMask;
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
-    if(probe)probe->observe(descriptor,renderRecord,jobMask); // observe() gates on active()
+    if(probe) {
+        emcpu::Scope clocked(emcpu::kEval,false);
+        probe->observe(descriptor,renderRecord,jobMask); // observe() gates on active()
+    }
     const auto forward=reinterpret_cast<EvalFn>(g_evalEntry.forward.load(std::memory_order_acquire));
     const uintptr_t result=forward(descriptor,param2,renderRecord);
     // The cull gate probe reads the verdict the call just wrote (param2:
     // u32 LOD index, u8 passed); renderRecord is the VIEW (design doc §9).
     const auto gateProbe=gateProbeGate.load(std::memory_order_acquire);
-    if(gateProbe)gateProbe(descriptor,param2,renderRecord);
+    if(gateProbe) {
+        emcpu::Scope clocked(emcpu::kEval,false);
+        gateProbe(descriptor,param2,renderRecord);
+    }
     return result;
 }
 
 __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t rig,uintptr_t poseCtx) noexcept {
+    emcpu::count(emcpu::kEval);
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
-    if(probe)probe->noteRigLink(rig,poseCtx); // noteRigLink() gates on active()
+    if(probe) {
+        emcpu::Scope clocked(emcpu::kEval,false);
+        probe->noteRigLink(rig,poseCtx); // noteRigLink() gates on active()
+    }
     const auto forward=reinterpret_cast<RigEvalFn>(g_rigEvalEntry.forward.load(std::memory_order_acquire));
     return forward(rig,poseCtx);
 }
@@ -449,6 +465,9 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
                              uintptr_t c,uintptr_t d) noexcept {
     const auto forward=reinterpret_cast<JobFn>(g_jobEntries[job].forward.load(std::memory_order_acquire));
     if(!forward)return 0; // this job stood down at install; the relay is unreachable then
+    // EDVR's own work in this bracket, per call (engine_motion_cpu.h): everything
+    // below except the job body itself, which the pause around the forward leaves out.
+    emcpu::Scope engineMotion(emcpu::kJobs);
     // The scheduler stack probe's targets 0/1 ARE these job bodies (their
     // RVAs already carry this hook's patch), so their capture rides here,
     // before the timed region and before the forward -- the pre-forward
@@ -499,9 +518,17 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
     // read never serializes a torn snapshot. No drain: the finishing thread
     // may itself be inside an observed job, so draining could self-deadlock.
     const uint64_t gen=kinematicEvalProbe.jobGeneration();
+    // The bracket takes its own two clock readings (the job statistics below
+    // need them on every call) and hands the same two to the instrument, so a
+    // sampled frame adds only the instrument's enter and its leave here, and a
+    // frame it does not clock adds nothing (engine_motion_cpu.h: pauseAt and
+    // resumeAt read no clock). The timed region is unchanged.
     const int64_t start=qpcNow();
+    engineMotion.pauseAt(start);
     const uintptr_t result=forward(a,b,c,d);
-    const int64_t elapsed=qpcNow()-start;
+    const int64_t stop=qpcNow();
+    engineMotion.resumeAt(stop);
+    const int64_t elapsed=stop-start;
     if(queueArmed) {
         // Exit read after the timing stops: the measured region stays the
         // job body alone. A torn/missing exit read drops the pair.
@@ -592,6 +619,10 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
                                                               uintptr_t e,uintptr_t f) noexcept {
     const auto forward=reinterpret_cast<BucketFn>(g_bucketEntry.forward.load(std::memory_order_acquire));
     if(!forward)return 0; // stood down at install; the relay is unreachable then
+    // EDVR's own work in this bracket (engine_motion_cpu.h): a POD token, since
+    // the function has __try; paused around the builder, left at each return.
+    emcpu::Token engineMotion;
+    emcpu::enter(engineMotion,emcpu::kBuilder);
     // The settlement LOD governor (shadow only) reads the record's own LOD
     // test results as the traversal left them -- rec+0x208/+0x210, before
     // the builder runs -- and counts the call: one call, one engine record.
@@ -617,9 +648,11 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
     uint32_t flags=0;
     const uint32_t n=census?collectBuckets(a,snaps,kBucketWalkCap,&flags):0;
     uintptr_t result=0;
+    emcpu::pause(engineMotion);
     __try { result=forward(a,b,c,d,e,f); }
     __finally { t_builderRow=outerRow; t_primaryIdentity=outerIdentity; }
-    if(!census)return result;
+    emcpu::resume(engineMotion);
+    if(!census){emcpu::leave(engineMotion);return result;}
     if(n) {
         uint64_t items=0;
         uint32_t neg=0;
@@ -639,6 +672,7 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
     } else {
         kinematicEvalProbe.noteBucketBuild(0,0,0,flags);
     }
+    emcpu::leave(engineMotion);
     return result;
 }
 
@@ -649,6 +683,8 @@ __declspec(noinline) uintptr_t __fastcall primaryBuildObserved(uintptr_t model,u
     uintptr_t position,uintptr_t quaternion,uintptr_t mask,uintptr_t tail) noexcept {
     const auto forward=reinterpret_cast<BucketFn>(g_primaryEntry.forward.load(std::memory_order_acquire));
     if(!forward)return 0;
+    emcpu::Token engineMotion;   // EDVR's own work only (engine_motion_cpu.h); a POD token, the function has __try
+    emcpu::enter(engineMotion,emcpu::kRigid);
     g_primaryCalls.fetch_add(1,std::memory_order_relaxed);
     const auto identity=t_primaryIdentity;
     const auto observe=primaryEmitObserver.load(std::memory_order_acquire);
@@ -660,8 +696,10 @@ __declspec(noinline) uintptr_t __fastcall primaryBuildObserved(uintptr_t model,u
         engine_velocity_emit::read(owner+engine_velocity_emit::kOwnerCount,&before,sizeof(before));
     uintptr_t result=0;
     bool returned=false;
+    emcpu::pause(engineMotion);
     __try { result=forward(model,lod,position,quaternion,mask,tail); returned=true; }
     __finally {
+        emcpu::resume(engineMotion);
         const bool complete=returned && counted &&
             engine_velocity_emit::read(owner+engine_velocity_emit::kOwnerCount,&after,sizeof(after));
         // Every append invalidates its prior address claim, including native
@@ -670,6 +708,7 @@ __declspec(noinline) uintptr_t __fastcall primaryBuildObserved(uintptr_t model,u
         if(observe)observe(eligible?identity:engine_velocity_emit::PrimaryIdentity{},owner,model+0x40,position,quaternion,
                            complete?before:0,complete?after:0);
         if(!complete || !eligible)g_primaryUnowned.fetch_add(1,std::memory_order_relaxed);
+        emcpu::leave(engineMotion);
     }
     return result;
 }
@@ -680,6 +719,8 @@ __declspec(noinline) uintptr_t __fastcall primaryBuildObserved(uintptr_t model,u
 __declspec(noinline) void __fastcall poolCopyObserved(uintptr_t task) noexcept {
     const auto forward=reinterpret_cast<void(__fastcall*)(uintptr_t)>(g_poolCopyEntry.forward.load(std::memory_order_acquire));
     if(!forward)return;
+    emcpu::Token engineMotion;   // EDVR's own work only (engine_motion_cpu.h); a POD token, the function has __try
+    emcpu::enter(engineMotion,emcpu::kCopier);
     const auto observe=poolCopyObserver.load(std::memory_order_acquire);
     namespace ev=engine_velocity_emit;
     uintptr_t holder=0,buffer=0,descriptor=0,mapped=0;
@@ -688,27 +729,29 @@ __declspec(noinline) void __fastcall poolCopyObserved(uintptr_t task) noexcept {
        ev::read(buffer+0x180,&mapped,8) && mapped && ev::read(buffer+0x100,&descriptor,8) && descriptor &&
        ev::read(descriptor+0x10,&stride,4) && stride==336 && ev::read(task+0xC0,&offset,8);
     bool returned=false;
+    emcpu::pause(engineMotion);
     __try {forward(task);returned=true;}
-    __finally {if(observe && (!returned || !metadata))observe(mapped,stride,0,0,UINT32_MAX);}
-    if(!observe || !metadata)return;
+    __finally {emcpu::resume(engineMotion);if(observe && (!returned || !metadata))observe(mapped,stride,0,0,UINT32_MAX);}
+    if(!observe || !metadata){emcpu::leave(engineMotion);return;}
     for(unsigned group=0;group<8;++group) {
         uint64_t count=0;uintptr_t entries=0;
         const uintptr_t list=group==0?task+8:task+0x20+uintptr_t(group-1)*0x18;
         const uint32_t entryStride=group==0?0x48u:0x50u;
         if(!ev::read(list,&count,8) || !ev::read(list+8,&entries,8) || count>65536 ||
            (count && (!entries || entries>UINTPTR_MAX-count*entryStride))) {
-            observe(mapped,stride,0,0,UINT32_MAX);return;
+            observe(mapped,stride,0,0,UINT32_MAX);emcpu::leave(engineMotion);return;
         }
         for(uint64_t i=0;i<count;++i) {
             const uintptr_t entry=entries+i*entryStride;
             uintptr_t source=0;uint32_t slot=0,records=0;
             if(!ev::read(entry+8,&source,8) || !ev::read(entry+0x38,&slot,4) ||
                !ev::read(entry+0x3C,&records,4) || offset>UINT64_MAX-slot) {
-                observe(mapped,stride,0,0,UINT32_MAX);return;
+                observe(mapped,stride,0,0,UINT32_MAX);emcpu::leave(engineMotion);return;
             }
             observe(mapped,stride,source,offset+slot,records);
         }
     }
+    emcpu::leave(engineMotion);
 }
 
 // Exact list relocation boundary. The plan stages claims before freed source
@@ -716,12 +759,15 @@ __declspec(noinline) void __fastcall poolCopyObserved(uintptr_t task) noexcept {
 __declspec(noinline) void __fastcall poolMergeObserved(uintptr_t destination,uintptr_t source) noexcept {
     const auto forward=reinterpret_cast<void(__fastcall*)(uintptr_t,uintptr_t)>(g_poolMergeEntry.forward.load(std::memory_order_acquire));
     if(!forward)return;
+    emcpu::Token engineMotion;   // EDVR's own work only (engine_motion_cpu.h); a POD token, the function has __try
+    emcpu::enter(engineMotion,emcpu::kMerge);
     const auto begin=mergeBeginObserver.load(std::memory_order_acquire);
     const auto end=mergeEndObserver.load(std::memory_order_acquire);
     void* plan=begin && end?begin(destination,source):nullptr;
     bool completed=false;
+    emcpu::pause(engineMotion);
     __try {forward(destination,source);completed=true;}
-    __finally {if(begin && end)end(plan,completed);}
+    __finally {emcpu::resume(engineMotion);if(begin && end)end(plan,completed);emcpu::leave(engineMotion);}
 }
 // Typed 336-byte dictionary clear frees nodes outside the merge/copy path.
 // Revoke exact source addresses before allocator recycling; preserve claims
@@ -730,7 +776,10 @@ __declspec(noinline) void __fastcall poolClearObserved(uintptr_t dictionary,uint
     const auto forward=reinterpret_cast<void(__fastcall*)(uintptr_t,uintptr_t)>(g_poolClearEntry.forward.load(std::memory_order_acquire));
     if(!forward)return;
     const auto observe=clearObserver.load(std::memory_order_acquire);
-    if(observe)observe(dictionary);
+    if(observe) {
+        emcpu::Scope engineMotion(emcpu::kClear);   // the observer only; the clear itself is the game's
+        observe(dictionary);
+    }
     forward(dictionary,allocatorOwner);
 }
 
@@ -747,7 +796,10 @@ __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t items,uintp
                                                            uintptr_t view) noexcept {
     const auto forward=reinterpret_cast<EvalFn>(g_partEntry.forward.load(std::memory_order_acquire));
     if(!forward)return 0; // stood down at install; the relay is unreachable then
+    emcpu::Scope engineMotion(emcpu::kBuilder);   // EDVR's own work only (engine_motion_cpu.h)
+    engineMotion.pause();
     const uintptr_t result=forward(items,out,view);
+    engineMotion.resume();
     const auto part=gateProbePart.load(std::memory_order_acquire);
     const auto governor=governorPart.load(std::memory_order_acquire);
     if(part||governor) {
@@ -769,7 +821,10 @@ __declspec(noinline) uintptr_t __fastcall setterObserved(uintptr_t a,uintptr_t b
                                                          uintptr_t e,uintptr_t f,uintptr_t g) noexcept {
     const auto forward=reinterpret_cast<SetterFn>(g_setterEntry.forward.load(std::memory_order_acquire));
     if(!forward)return 0; // stood down at install; the relay is unreachable then
+    emcpu::Scope engineMotion(emcpu::kBuilder);   // EDVR's own work only (engine_motion_cpu.h)
+    engineMotion.pause();
     const uintptr_t result=forward(a,b,c,d,e,f,g);
+    engineMotion.resume();
     const auto governor=governorSetter.load(std::memory_order_acquire);
     if(governor)governor(a);
     return result;
@@ -785,12 +840,20 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
     const auto forward=reinterpret_cast<DirectBuildFn>(
         g_directEntries[producer].forward.load(std::memory_order_acquire));
     if(!forward)return 0; // stood down at install; the relay is unreachable then
+    // EDVR's own work around the forward, every call (engine_motion_cpu.h):
+    // producer 0 is the emit hook (its census reads and the emit observer),
+    // producer 1 the second direct producer (the census reads only). A POD
+    // token, the function has __try.
+    emcpu::Token engineMotion;
+    emcpu::enter(engineMotion,producer==0?emcpu::kEmit:emcpu::kBuilder);
     int32_t start=0;
     bool fault=false;
     __try {
         std::memcpy(&start,reinterpret_cast<const void*>(b+0x2A4),4);
     } __except(EXCEPTION_EXECUTE_HANDLER) {fault=true;}
+    emcpu::pause(engineMotion);
     const uintptr_t result=forward(a,b,c,d);
+    emcpu::resume(engineMotion);
     uint64_t items=0;
     uint32_t neg=0;
     int32_t end=0;
@@ -809,6 +872,7 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
         const auto emit=emitObserver.load(std::memory_order_acquire);
         if(emit)emit(a,b,start,end);
     }
+    emcpu::leave(engineMotion);
     return result;
 }
 

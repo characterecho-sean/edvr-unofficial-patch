@@ -51,9 +51,8 @@
 // reset check, the M/F validation arithmetic, the base selector, the view
 // locator and the correction math) -- it has no game or Windows dependency
 // and is what tools\transition_flash_prevent_test drives. Deliberately a
-// separate module from transition_flash_prevent.cpp/pose_reader_watch.cpp:
-// neither of those is touched by this file (both are left exactly as they
-// were).
+// separate module from pose_reader_watch.cpp (and, until it was removed
+// 2026-09-29, transition_flash_prevent.cpp): this file touches none of them.
 #include "glitch_scene.h"
 
 #include <cmath>
@@ -65,16 +64,15 @@ namespace edvr {
 class Config;
 
 // Read on every config reload (vscreen.cpp, both call sites, beside
-// transitionFlashPreventConfigure/poseReaderWatchConfigure). Off: one log
-// line, nothing installed. The first call that sees a non-off value installs
-// the consumer hook (build- and prologue-keyed; stands down on its own on a
-// mismatch and says why) and arms; later calls only move the live mode --
-// hot among watch/on/alternate, matching transition_flash_prevent's own
-// reload discipline. The writer watch arms and disarms on its own schedule
-// from transitionFlashEyeBaseFrameBoundary, not from here.
+// poseReaderWatchConfigure). Off: one log line, nothing installed. The first
+// call that sees a non-off value installs the consumer hook (build- and
+// prologue-keyed; stands down on its own on a mismatch and says why) and
+// arms; later calls only move the live mode -- hot among watch/on/alternate.
+// The writer watch arms and disarms on its own schedule from
+// transitionFlashEyeBaseFrameBoundary, not from here.
 void transitionFlashEyeBaseConfigure(Config& cfg);
 
-// Once a frame, from vscreen.cpp beside transitionFlashPreventFrameBoundary/
+// Once a frame, from vscreen.cpp beside glitchFrameBoundary/
 // poseReaderWatchFrameBoundary. Publishes the frame number the consumer hook
 // reads (it can run on a scheduler job thread, not necessarily this one),
 // runs the writer watch's ship-pointer stability gate and arms/re-arms/
@@ -148,8 +146,8 @@ struct EyeBaseFrameSnapshot {
 };
 EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot();
 
-// Final session summary. Mirrors transitionFlashPreventShutdown's and
-// poseReaderWatchShutdown's call site (device_hook.cpp).
+// Final session summary. Mirrors poseReaderWatchShutdown's call site
+// (device_hook.cpp).
 void transitionFlashEyeBaseShutdown();
 
 }  // namespace edvr

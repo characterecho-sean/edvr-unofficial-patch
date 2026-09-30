@@ -1,3 +1,5 @@
+#include "temporal_shader_bytecode.h"
+#include "fixed_shader_source.h"
 #pragma once
 #include "holo_motion.h"
 #include "vscreen.h"
@@ -12,10 +14,7 @@ constexpr uint64_t kSolarSurfaceVs=0x4D516EF05C68FFA5ull,kSolarSurfacePs=0x147E7
 // depth therefore inherits that visibility without resampling its t0.
 // Later cockpit/UI depth still wins in the temporal consumer. No distance
 // cutoff or readback is involved. The caller verifies the exact VS/PS pair.
-constexpr char kPlanetCoverageHlsl[]=R"HLSL(
-cbuffer Motion:register(b12){uint4 info;}
-float2 main(float4 p:SV_Position):SV_Target{return float2(info.x+1,p.z);}
-)HLSL";
+
 class PlanetCoverage {
     template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
     Ptr<ID3D11PixelShader> shader;
@@ -49,7 +48,7 @@ public:
         D3D11_BLEND_DESC bd{};if(blend)blend->GetDesc(&bd);if(bd.RenderTarget[0].BlendEnable && !solar)return false;
         if(!shader) {
             Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
-            shader.Attach(shaderSwapCompilePs(ctx,kPlanetCoverageHlsl,sizeof(kPlanetCoverageHlsl)-1,"main","planet coverage",nullptr,"planet motion"));
+            shader.Attach(shaderSwapCreatePs(ctx,kPlanetCoverageBytecode,sizeof(kPlanetCoverageBytecode),"planet coverage","planet motion"));
             D3D11_DEPTH_STENCIL_DESC d{};d.DepthEnable=TRUE;d.DepthFunc=D3D11_COMPARISON_EQUAL;
             D3D11_BLEND_DESC b{};b.RenderTarget[0].RenderTargetWriteMask=3;
             if(!shader || FAILED(dev->CreateDepthStencilState(&d,&equal)) || FAILED(dev->CreateBlendState(&b,&write))){shader.Reset();equal.Reset();write.Reset();return false;}

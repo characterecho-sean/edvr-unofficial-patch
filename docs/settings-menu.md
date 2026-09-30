@@ -2,25 +2,26 @@
 
 ## Status
 
-*Updated 2026-09-15. Historical findings summarize the journal below; the
-current timing and overlay qualification is linked separately.*
+*Updated 2026-09-29 (previously 2026-09-15). Historical findings summarize
+the journal below; the current timing and overlay qualification is linked separately. Dated notes
+and the ruled-out list: "Status detail", straight after this block.*
 
-- **2026-09-24:** the Performance page's Foveation centre row is gone
-  with its key (`experimental.foveation_centre`, retired).
-- **2026-09-23, later:** the Monitor page drops the rows the compositor's
-  frame timing filled -- DROPPED, BY CAUSE and REPROJECTED always, APP GPU
-  and GPU TIME off the native path -- instead of showing "--" for good:
-  that timing crossed from the legacy openvr half, and frame_flag v34
-  retired the channel nothing had written since the proxy went. The drop
-  log line and the last-drop line speak of long frames only.
-- **2026-09-23:** the Performance page's `UI quality` row (`fix.ui_quality`)
-  is one row for the cockpit panels' size and the UI layer; the one-day
-  `HUD quality` row is gone (see the journal's dated entries). Its choices
-  read off / 100% / 125% (the file's `off | 100 | 125`).
-- **Current change:** The smaller single-line overlay fits its displayed text and keeps its font size across
-  OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
-  desktop gates passed; headset checks remain in the
-  [combined test guide](native-render-benchmark-2026-09-15.md).
+- **Current code state (2026-09-29; dated notes in Status detail):**
+  - Retired 2026-09-29: the door GPU bracket (`edvrDoorGpuBegin`/`End`, the
+    per-eye query ring, the Monitor's "EDVR's GPU time at the door" tile;
+    e3109af4) and the `edvrMenuPanel` export with `edvrEyeCaptureArm` and
+    `edvrFssTheater` (6ecbd241). Their design text below is history.
+  - Performance page: one `UI quality` row (`fix.ui_quality`, off / 100% /
+    125%; default 100) drives the cockpit panels' size and the UI layer;
+    BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
+    `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
+    (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only
+    since 2026-09-29). `fix.settlement_detail` has a row (game, auto, reduced).
+  - Monitor page drops the rows the compositor's frame timing filled
+    instead of showing "--" (frame_flag v34).
+  - Single-line overlay: fits its text, keeps its font size across OpenXR
+    resolutions, shows application GPU/CPU timings. Full desktop gates
+    passed; headset checks: [combined test guide](native-render-benchmark-2026-09-15.md).
 - **State:** Supersedes and extends Feature 4 of performance.md
   (2026-09-05), which now points here. Written 2026-09-07 on branch
   `claude/ingame-settings-menu-78317d` off main `5e2d545`; claims are
@@ -42,6 +43,76 @@ current timing and overlay qualification is linked separately.*
   - Phase 0 gates with no dated measurement here: G4 (GDI cost and
     legibility), G6 (`aim = both` tuning), G11 (focus/Alt-Tab), G14 (the
     leak audit).
+- **Ruled out:** four entries (shared-DirectInput-vtable door, `menu.aim =
+  both` default, `Compositor_FrameTiming` at the modern offsets, the
+  climbing "with EDVR" drop count): "Ruled out" in Status detail.
+- **Environment:** The DirectInput8Create fix is stated
+  runtime-independent ("applies to both SteamVR and OpenComposite"); the
+  first flight (2026-09-07) was a Pimax Crystal Super under SteamVR;
+  later entries (2026-09-08 on) say "the Steam copy" or "Sean's rig"
+  without restating the headset. The shared-vtable door held on the
+  install tested first but not the Steam copy, where Steam's overlay may
+  hand out private per-device tables.
+- **Detail:** "The keyboard gate" for the three doors and fail-open
+  rules; "Navigation and interaction" for the DirectInput finding, the
+  footer fix, "Your Elite keys (2026-09-11)" and the Tab-follows-page-pair
+  fix; "What it shows" for the Monitor page's `Compositor_FrameTiming`
+  finding; "Phase 0 -- what must be measured before code depends on it"
+  for gates G1-G14; "Open questions for Sean"; "Phasing" for phases A/B/C.
+
+## Status detail (moved out of Status 2026-09-29)
+
+Moved verbatim out of the Status block (dated change notes, then the
+ruled-out list); the summary above points here.
+
+### Dated change notes
+
+- **2026-09-29:** the `UI quality` row's shipped value is `100` (it shipped
+  `off`), and the value read when the ini has no line is `100` too, so the
+  row's `R` (reset to the shipped value) writes `100`. A new install, and an
+  update whose file never touched the key, get the interface panels at HMD
+  Quality 1.0's size and, with `fix.temporal_aa` on, the UI layer; a file that
+  set the key keeps its value (docs/ui-layer-2026-09-23.md, journal
+  2026-09-29, says what the merge does and does not distinguish).
+- **2026-09-29:** the Performance page's three `Trim view` rows are gone.
+  `fix.fov_trim_vertical`, `_outer` and `_nasal` are now the ini-only
+  `experimental.fov_trim_vertical`, `_outer` and `_nasal` (each `# dev:
+  hidden`, so not even a developer-tier row), with the same per-headset lists,
+  ranges and live behaviour; an old `[fix]` line still reads through, and the
+  installer's merge moves it (eye-mask-2026-09-16.md, journal 2026-09-29).
+  The generic per-headset row (`isHeadsetRow` and everything only it used)
+  left menu.cpp with them; the `OpenXR res.` row keeps the per-headset
+  machinery it shares (`applyHeadsetChange`, `wornEntryRemovable`,
+  `savedForText`). `tools/gen_settings_schema.py` refuses to emit a row for
+  the three (OFF_MENU).
+- **State: the door GPU bracket retired 2026-09-29 (code removed, e3109af4).**
+  `edvrDoorGpuBegin` and `edvrDoorGpuEnd` (nothing called them once the legacy
+  openvr half went), the per-eye query ring behind them and the Monitor's
+  "EDVR's GPU time at the door" tile are gone. The paragraph on it below is
+  history.
+- **State: `edvrMenuPanel` retired 2026-09-29 (code removed, 6ecbd241).** The
+  export, and `edvrEyeCaptureArm` and `edvrFssTheater` with it, had no caller
+  once the legacy openvr half was deleted. The design text on the export and on
+  the door lambda below is history.
+- **2026-09-24:** the Performance page's Foveation centre row is gone
+  with its key (`experimental.foveation_centre`, retired).
+- **2026-09-23, later:** the Monitor page drops the rows the compositor's
+  frame timing filled -- DROPPED, BY CAUSE and REPROJECTED always, APP GPU
+  and GPU TIME off the native path -- instead of showing "--" for good:
+  that timing crossed from the legacy openvr half, and frame_flag v34
+  retired the channel nothing had written since the proxy went. The drop
+  log line and the last-drop line speak of long frames only.
+- **2026-09-23:** the Performance page's `UI quality` row (`fix.ui_quality`)
+  is one row for the cockpit panels' size and the UI layer; the one-day
+  `HUD quality` row is gone (see the journal's dated entries). Its choices
+  read off / 100% / 125% (the file's `off | 100 | 125`).
+- **Current change:** The smaller single-line overlay fits its displayed text and keeps its font size across
+  OpenXR resolutions and shows application GPU/CPU elapsed timings. Full
+  desktop gates passed; headset checks remain in the
+  [combined test guide](native-render-benchmark-2026-09-15.md).
+
+### Ruled out
+
 - **Ruled out:**
   - The shared-DirectInput-vtable door, on the Steam install: the menu
     reported "keys private" while Tab still reached the ship
@@ -57,19 +128,9 @@ current timing and overlay qualification is linked separately.*
   - The climbing "with EDVR" drop count on the second flight (2026-09-07):
     a ring-buffer bug (record written to the wrong entry), not real
     menu-caused drops.
-- **Environment:** The DirectInput8Create fix is stated
-  runtime-independent ("applies to both SteamVR and OpenComposite"); the
-  first flight (2026-09-07) was a Pimax Crystal Super under SteamVR;
-  later entries (2026-09-08 on) say "the Steam copy" or "Sean's rig"
-  without restating the headset. The shared-vtable door held on the
-  install tested first but not the Steam copy, where Steam's overlay may
-  hand out private per-device tables.
-- **Detail:** "The keyboard gate" for the three doors and fail-open
-  rules; "Navigation and interaction" for the DirectInput finding, the
-  footer fix, "Your Elite keys (2026-09-11)" and the Tab-follows-page-pair
-  fix; "What it shows" for the Monitor page's `Compositor_FrameTiming`
-  finding; "Phase 0 -- what must be measured before code depends on it"
-  for gates G1-G14; "Open questions for Sean"; "Phasing" for phases A/B/C.
+
+### Dated change notes, continued
+
 - **2026-09-23:** `fix.settlement_detail` added to the Performance page's
   row list below, alongside its promotion to a first-class fix (README,
   docs/fixes.md). The `# ui:` annotation that generates its row for the
@@ -102,6 +163,8 @@ current timing and overlay qualification is linked separately.*
   developer tier no longer has the row, and the cockpit HUD stays in the
   picture the upscaler reconstructs.
 
+## The ask
+
 *A design document, written before the code. It supersedes and extends
 Feature 4 of [performance.md](performance.md) (2026-09-05), which stays as
 the origin and now points here. Claims about EDVR cite the source; claims
@@ -111,8 +174,6 @@ a gate below that turns it into a measurement before code may depend on
 it); what can only be settled with a headset on is collected under Phase 0.
 Written 2026-09-07 on branch `claude/ingame-settings-menu-78317d` off main
 `5e2d545`.*
-
-## The ask
 
 Sean, 2026-09-07: an in-game menu that lets players switch settings
 quickly, "similar to what's in OpenXR Toolkit", fleshed out from the
@@ -705,7 +766,7 @@ they were there (flown 2026-09-07).
    the ini's own order:
    `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
    `render_sharpness`, `foveation`, `settlement_detail`,
-   `ui_quality` (labelled **UI quality**, off / 100% / 125%, default off:
+   `ui_quality` (labelled **UI quality**, off / 100% / 125%, default 100:
    the interface panels' size and the UI layer, one row), and `render_scale`
    when its branch lands. Costs where they are measured:
    the temporal pass's own timing, NVIDIA's pass per eye, the sharpen's
@@ -968,6 +1029,19 @@ gains the "live" or "restart" word the generator derived.
    and what it saves does not move the frame rate on Elite -- and kept
    both its label and its four presets. A key may carry a `ui:` line or a
    `dev:` line, never both.
+   **Bounds are numbers.** The menu runs a row's bounds through `atof`, so
+   a bound that is a C++ name reads as 0 and one press of Up writes 0. Where
+   the code bounds a read with constants
+   (`getIntInRange("advanced.panel_curvature_segments", kDefaultSegments,
+   kMinSegments, kMaxSegments)`), the key's annotation states the numbers:
+   `# dev: range 1..256`, or `range 1..256` on its `ui:` line. The code's
+   own bounds still win where they are numbers. The generator fails the
+   build, naming the key and the ini line, for a bound that is not a
+   number, a `range` that is not two numbers, a documented default (or
+   `recommended`) outside its bounds, a dotted key that appears twice, and a
+   comment line that starts `# key = ...` (a commented-out setting is
+   written `#key = value`; a sentence that begins that way became a row of
+   its own and cut the paragraph above it off from the real key).
    Instruments that write files or scan memory are still one toggle away,
    which is why the tier exists and is off by default.
 6. **Instruments.** Action rows for the things that today need a hotkey
@@ -1095,9 +1169,27 @@ changes because the file did.
   comment untouched.
 - **Re-read before write**, the installer's 2026-08-28 lesson: the file on
   disk is the source, never a cached copy.
-- **Atomic write**: temp file beside the ini, then `MoveFileExW` with
-  replace-and-write-through, so `config.cpp`'s size check never meets half
-  a save and an editor holding the file mid-save cannot lose the write.
+- **Atomic write**: `iniedit`'s `writeFileAtomic` (the installer's settings
+  window uses the same one): a temp file beside the ini, flushed, then renamed
+  over it, so `config.cpp`'s size check never meets half a save. The classic
+  rename (`MoveFileExW` with replace-and-write-through) is refused with access
+  denied while ANY handle to the ini is open, one that shares
+  `FILE_SHARE_DELETE` included (measured on Windows 11 build 26200 with cmd's
+  `move /Y`), and the reload the menu asks for after a write holds the ini for
+  microseconds. So the rename is done with POSIX semantics first
+  (`SetFileInformationByHandle`, `FileRenameInfoEx`, replace-if-exists and
+  POSIX-semantics flags; Windows 10 1607+ on NTFS): the ini's name moves to the
+  new file at once and a reader that shares `FILE_SHARE_DELETE` -- which
+  `config.cpp`'s read now does -- goes on reading the old one, so the write
+  lands on the first attempt. Where the OS or the volume refuses that as
+  unsupported the writer falls back to `MoveFileExW` in the same attempt and
+  remembers the refusal for the process. Either way an attempt refused for a
+  reason that passes (a sharing violation, access denied, a lock violation --
+  a reader that does not share `FILE_SHARE_DELETE`, a scanner on the temp file)
+  is tried again, five times, 20 ms apart. A read-only ini goes straight to
+  the classic rename, is left alone, and the failure says so. The installer's
+  apply engine uses the replace half on its own (`replaceFileAtomic`), waiting
+  up to two seconds instead: see `installer.md`.
 - **Apply now**: `Config::get().reloadIfChanged()` is called immediately
   after the write, so the change lands on this frame instead of the next
   poll, and through the same configure path a hand edit takes -- no module
@@ -1108,7 +1200,16 @@ changes because the file did.
   (`%LOCALAPPDATA%\EDVR\<leaf>-<store>\`), so a game update that wipes the
   folder cannot lose an evening's tuning; `mirrorDirFor`'s naming rule
   moves to common with `iniedit` so the DLL and the installer cannot
-  disagree about the folder.
+  disagree about the folder. The copy goes through the atomic writer and
+  replaces the newest generation in place. The mirror keeps three
+  (`edvr.ini`, `edvr.ini.1`, `edvr.ini.2`, in `iniedit`'s `writeGenerations`):
+  an install or repair rotates them, so settings that stood before an install
+  wrote defaults over them (a declined or failed restore, then a fresh
+  install) are still there as `.1`; a menu or settings-window change does not
+  rotate, since three tweaks would push them out. The restore reads the newest
+  generation that is not empty. The file is named for the ini actually
+  written, so the flat profile's `edvr-flat.ini` no longer lands over the
+  mirror's `edvr.ini`.
 - **Log line per change**: `menu: fix.render_sharpness 0.0 -> 0.3 (written;
   live)` or `(written; takes effect at the next launch)`.
 

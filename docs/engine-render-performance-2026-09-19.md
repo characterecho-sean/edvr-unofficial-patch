@@ -2007,7 +2007,8 @@ per draw because PsSrv0's generation moves every draw - a cache-policy
 change that needs a flight; the shader-hash registry lock (hashOf, ~25
 per-draw sites) can be cached against the VS binding generation as
 ui_depth.cpp:932 and vscreen.cpp:2834 already do, but target_sharp and
-panel_upscale read the VS off the context deliberately, so it is not a
+panel_upscale (deleted 2026-09-29, 0467e706) read the VS off the context
+deliberately, so it is not a
 blind substitution; gpuFrameCommand + Controller::owns (158) is the
 default-on app GPU timing's foreign-thread check (GetCurrentThreadId
 per hooked command), a correctness check left alone.

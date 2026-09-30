@@ -58,15 +58,13 @@ class D3D11Stereo final {
   // ownedImmediateScene is an explicit promise of exclusive owner-thread
   // access to a separate XR device. It cannot accompany a provider/executor.
   // Only the steady-state captured-eye draw bypasses deferred command lists;
-  // borrowed-context and diagnostic state preservation remains unchanged.
+  // borrowed-context state preservation remains unchanged.
   // An explicit provider requires the paired private-submission capability.
   // Omission is for a standalone diagnostic device only. Neither mode grants
   // ownership of a game's context or permits background game-device access.
   // A supplied executor outlives this renderer's shutdown and synchronously
   // runs immediate-context work at the host's exclusive render boundary.
   // XR calls and private deferred recording stay on the renderer owner.
-  XrResult render(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
-  XrResult drawEye(unsigned eye, const XrView&, ID3D11Texture2D*& out);
   // placement, when given, points at one entry per eye. Absent, or the whole
   // image, is the path this renderer has always taken.
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
@@ -87,7 +85,7 @@ class D3D11Stereo final {
   int64_t format() const { return format_; }
   // Wall time the last initialize spent creating the two swapchains (format
   // enumeration through the image views) and building the runtime shaders
-  // (the three D3DCompile pairs and their shader objects). Measured with
+  // (the two D3DCompile pairs and their shader objects). Measured with
   // std::chrono::steady_clock around each stretch, for the host's startup
   // trace; 0 when initialize has not run or the clock was unavailable.
   double initSwapchainMs() const { return initSwapchainMs_; }
@@ -98,15 +96,13 @@ class D3D11Stereo final {
     XrSwapchain swapchain = XR_NULL_HANDLE;
     std::vector<ID3D11Texture2D*> images;
     std::vector<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>> rtvs;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> diagnosticTexture;
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> diagnosticRtv;
     uint32_t width = 0, height = 0;
   } eyes_[2];
   XrCompositionLayerProjectionView layerViews_[2]{};
   StereoDispatch dispatch_{};
   XrSession session_ = XR_NULL_HANDLE;
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
-  // The deferred context records diagnostic and borrowed-device passes.
+  // The deferred context records the borrowed-device passes.
   // Captured scenes can draw directly only on an explicitly owned context;
   // other paths execute command lists and preserve caller state. Both modes
   // require serialized context access.
@@ -118,11 +114,6 @@ class D3D11Stereo final {
   DWORD sceneOwnerThread_ = 0;
   Microsoft::WRL::ComPtr<ID3D11Query> completion_;
   bool gpuPending_ = false;
-  Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader_;
-  Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader_;
-  Microsoft::WRL::ComPtr<ID3D11InputLayout> layout_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> vertices_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> constants_;
   Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizer_;
   Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> blitVertexShader_;

@@ -76,7 +76,11 @@ inline void buildProjection(Cam& c) {
     bool bVar5 = false;
     if (kind != 0) {
         if (kind == 1) {
-            // Ortho (camera_cache_helpers.txt:296-310).
+            // Ortho (camera_cache_helpers.txt:296-310). The branch ends with
+            // goto LAB_1404f35c7 (:310): it skips the trigonometric block
+            // entirely. Falling through would overwrite the ortho matrix with
+            // the perspective one (the C2-work review's probe caught exactly
+            // that here).
             fVar18 = c.F(0x268);
             *projSlot(c, 0) = c.F(0x264);
             *projSlot(c, 1) = 0.0f; *projSlot(c, 2) = 0.0f; *projSlot(c, 3) = 0.0f;
@@ -87,6 +91,7 @@ inline void buildProjection(Cam& c) {
             *projSlot(c, 10) = fVar20;
             *projSlot(c, 15) = fVar18;
             *projSlot(c, 14) = fVar18 - fVar20 * fVar19;
+            goto oblique;
         } else if (kind != 3) {
             if (kind == 4) {
                 // Custom matrix copy with per-row w adjustments (:313-340).
@@ -200,8 +205,10 @@ oblique:
         fVar19o = fVar19o - fVar22o;
         const float fVar21o = fVar20o + fVar18o * c.F(0x290);
         fVar20o = fVar20o + fVar18o * c.F(0x280);
-        const float fVar18b = fVar22o + fVar19o * c.F(0x294);
-        fVar22o = fVar22o + fVar19o * c.F(0x28C);
+        // Decompile :474-475: fVar18 uses +0x284, fVar22 uses +0x294 -- not
+        // +0x294/+0x28C (the C2-work review's counterexample caught the swap).
+        const float fVar18b = fVar22o + fVar19o * c.F(0x284);
+        fVar22o = fVar22o + fVar19o * c.F(0x294);
         *projSlot(c, 0) = *projSlot(c, 0) / (c.F(0x290) - c.F(0x280));
         *projSlot(c, 5) = *projSlot(c, 5) / (c.F(0x294) - c.F(0x284));
         *projSlot(c, 8) = (fVar20o + fVar21o) / (fVar20o - fVar21o);
@@ -269,6 +276,78 @@ inline void snapshotRay(Cam& c) {
     camF(c, kCamRayOrigin + 4) = c.F(0x34);
     camF(c, kCamRayOrigin + 8) = c.F(0x38);
     camF(c, kCamRayOrigin + 12) = 0.0f;
+}
+
+// ---------------------------------------------------------------------------
+// The 3x4 view inverse, as FUN_1405e9ed0's output is consumed
+// (camera_ray_consumer.txt:142-158). SUBSTITUTION, named like the trig one:
+// the helper computes a general inverse; the view rows the rig (and the
+// game) produce are orthonormal, where the exact inverse is [R^T | -R^T t]
+// with the bottom row (0,0,0,1). A non-orthonormal input here would need the
+// real helper -- and would be a finding of its own.
+// ---------------------------------------------------------------------------
+inline void inverseView34(const float v[12], float inv[16]) {
+    inv[0] = v[0]; inv[1] = v[4]; inv[2] = v[8];  inv[3] = 0.0f;
+    inv[4] = v[1]; inv[5] = v[5]; inv[6] = v[9];  inv[7] = 0.0f;
+    inv[8] = v[2]; inv[9] = v[6]; inv[10] = v[10]; inv[11] = 0.0f;
+    inv[12] = -(inv[0] * v[12] + inv[4] * v[13] + inv[8] * v[14]);
+    inv[13] = -(inv[1] * v[12] + inv[5] * v[13] + inv[9] * v[14]);
+    inv[14] = -(inv[2] * v[12] + inv[6] * v[13] + inv[10] * v[14]);
+    inv[15] = 1.0f;
+}
+
+// ---------------------------------------------------------------------------
+// Ray CB composer: FUN_1405964c0 (camera_ray_consumer.txt:96-188), with the
+// constant blocks resolved: the 1450c8090..0xbc block is the identity 4x4, so
+// the four pre-vectors are the snapshot rows and the origin delta as a point:
+//   V0..V2 = snapshot rows (basis), V3 = delta x basis + (0,0,0,1)
+// and the CB is the 4x4 product [V0..V3] x inverseView(current view rows),
+// read back as 12 floats (3x4) + the w column (:172-175).
+// origin = camera+0x50, snapOrigin = camera+0x8B0, viewRows = helper+0x170,
+// basis = camera+0x870.
+// ---------------------------------------------------------------------------
+inline void composeRayCb(const float origin[3], const float snapOrigin[3],
+                         const float viewRows[12], const float basis[12], float out[16]) {
+    const float dx = origin[0] - snapOrigin[0];
+    const float dy = origin[1] - snapOrigin[1];
+    const float dz = origin[2] - snapOrigin[2];
+    float v[16];
+    v[0] = basis[0];  v[1] = basis[1];  v[2] = basis[2];  v[3] = basis[3];
+    v[4] = basis[4];  v[5] = basis[5];  v[6] = basis[6];  v[7] = basis[7];
+    v[8] = basis[8];  v[9] = basis[9];  v[10] = basis[10]; v[11] = basis[11];
+    v[12] = dz * basis[8] + dy * basis[4] + dx * basis[0];
+    v[13] = dz * basis[9] + dy * basis[5] + dx * basis[1];
+    v[14] = dz * basis[10] + dy * basis[6] + dx * basis[2];
+    v[15] = 1.0f + dz * basis[11] + dy * basis[7] + dx * basis[3];
+    float inv[16];
+    inverseView34(viewRows, inv);
+    for (int r = 0; r < 4; ++r)
+        for (int k = 0; k < 4; ++k)
+            out[r * 4 + k] = v[r * 4 + 0] * inv[0 * 4 + k] + v[r * 4 + 1] * inv[1 * 4 + k] +
+                             v[r * 4 + 2] * inv[2 * 4 + k] + v[r * 4 + 3] * inv[3 * 4 + k];
+}
+
+// ---------------------------------------------------------------------------
+// Depth-parameter CB row: the refresh's slots +0x60/+0x68 upload
+// (camera_producer.txt:277-294). far = camera+0x258, near = camera+0x254,
+// viewport pair camera+0x2A0/+0x2A4, counters camera+0x2B0/+0x2B4.
+// row0 = {1/(far-near), 1/far - 1/near, 1/near, near}; row1 the viewport
+// pair and the two counters. For the infinite-far path (proj[10] == 0,
+// proj[14] == near) the shaders' z is 1/(d*row0[2]) == near/d, which the W2
+// consumption check exercises; the finite-far constants are transcribed but
+// not consumed here.
+// ---------------------------------------------------------------------------
+inline void composeDepthCb(const Cam& c, float row0[4], float row1[4]) {
+    const float farZ = camF(c, kCamFar), nearZ = camF(c, kCamNear);
+    const float fVar28 = 1.0f / (farZ * nearZ);
+    row0[0] = 1.0f / (farZ - nearZ);
+    row0[1] = (nearZ - farZ) * fVar28;
+    row0[2] = farZ * fVar28;
+    row0[3] = nearZ;
+    row1[0] = camF(c, kCamViewportW);
+    row1[1] = camF(c, kCamViewportH);
+    row1[2] = camF(c, 0x2B0);
+    row1[3] = camF(c, 0x2B4);
 }
 
 // A plausible perspective camera (z-forward DirectX view space, reversed-Z

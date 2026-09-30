@@ -457,7 +457,7 @@ void ledgerLearn(ID3D11DeviceContext* ctx) {
         ctx->VSGetShaderResources(38, 1, &srv);
         if (srv) {
             ResourceInfo info;
-            if (bindingResolve(srv, &info) && info.isBuffer && info.b == 48) {
+            if (bindingResolveProbe(srv, &info) && info.isBuffer && info.b == 48) {
                 ID3D11Resource* res = nullptr;
                 srv->GetResource(&res);
                 if (res) {
@@ -538,7 +538,7 @@ void auxCapture(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t 
     ctx->VSGetShaderResources(0, 1, &srv);
     if (srv) {
         ResourceInfo info;
-        if (bindingResolve(srv, &info) && info.isBuffer) {
+        if (bindingResolveProbe(srv, &info) && info.isBuffer) {
             ID3D11Resource* res = nullptr;
             srv->GetResource(&res);
             if (res) {
@@ -1281,7 +1281,7 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
     });
     if (!got || !srv) return;
     ResourceInfo info;
-    if (bindingResolve(srv, &info) && info.isBuffer && info.b == kRecordBytes &&
+    if (bindingResolveProbe(srv, &info) && info.isBuffer && info.b == kRecordBytes &&
         info.a >= kRecordBytes) {
         ID3D11Resource* res = nullptr;
         srv->GetResource(&res);

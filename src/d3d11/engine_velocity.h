@@ -81,6 +81,12 @@ bool engineVelocityActive() noexcept;
 // diagnostics or an eye run): the emit's census runs only
 // then (the 2026-09-23 performance review).
 void engineVelocityDiagnostics(bool on);
+// The flat census of unkeyed pairs (engine_velocity_unkeyed.h): writes the 5 s
+// window's line into `out` and starts the next window. The line is written even
+// when the window held nothing or the feature is off (live=0): its absence in a
+// log means the flat 5 s block never ran, not that nothing was unkeyed. Returns
+// the length written (snprintf's convention).
+int engineVelocityFormatUnkeyed(char* out, size_t size);
 
 // Shader creation (device_hook): the keyed pool families' bytecode is kept
 // whether or not the feature is on (ten small shaders), so enabling it live
@@ -184,7 +190,14 @@ inline void engineVelocityResourceWritten(const ID3D11Resource* resource) {
     if(watchesResource(resource))noteResourceWrite(resource);
 }
 
+// A buffer the game created (device_hook, every successful CreateBuffer). Only
+// while the feature is live: a registered pool is held by reference for the
+// private-copy cache, so with the feature off -- the default -- nothing is
+// registered and no game buffer is kept alive. A pool created before the
+// feature went live is nominated from the t33 binding itself at the first
+// snapshot (engine_velocity.cpp, "existing buffer on mid-session activation").
 inline void engineVelocityBufferCreated(ID3D11Buffer* buffer,const D3D11_BUFFER_DESC* desc) {
+    if(!engine_velocity_detail::live.load(std::memory_order_relaxed))return;
     if(buffer && desc)
         engine_velocity_detail::notePrimaryBufferCreated(buffer,*desc);
 }

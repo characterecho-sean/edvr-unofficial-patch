@@ -1,5 +1,13 @@
 # The eye split: both eyes, every stage, one frame
 
+## Status
+
+- **State: retired 2026-09-29 (code removed, d38272de).** `advanced.eye_split`,
+  eye_split.cpp and `tools/diff_eye_split.py` are deleted, with the resolve
+  probe and the stencil probe: the black-planet hunt they served is solved
+  (scanner-body.md). This page records how the instrument worked; the code is
+  at `d38272de^`.
+
 An instrument, not a fix. It exists because a planetary body renders as a
 featureless black disc in the right eye and correctly in the left, and eight
 rounds of the draw census could not find a difference between the two eyes

@@ -7,6 +7,30 @@ namespace copy=edvr::engine_velocity_primary_copy;
 namespace emit=edvr::engine_velocity_emit;
 using Microsoft::WRL::ComPtr;
 using Record=std::array<uint32_t,84>;
+// Forward the real device factory and count/inject failure only for the
+// private pool under test. The production apply() path remains intact.
+struct UavCreationSpy {
+    using CreateFn=HRESULT (STDMETHODCALLTYPE*)(ID3D11Device*,ID3D11Resource*,const D3D11_UNORDERED_ACCESS_VIEW_DESC*,ID3D11UnorderedAccessView**);
+    inline static UavCreationSpy* active=nullptr;
+    ID3D11Device* device;void** original;void* slots[43];
+    unsigned calls=0;bool failNext=false;
+    static HRESULT STDMETHODCALLTYPE create(ID3D11Device* d,ID3D11Resource* resource,const D3D11_UNORDERED_ACCESS_VIEW_DESC* desc,ID3D11UnorderedAccessView** out) {
+        ++active->calls;
+        if(active->failNext){active->failNext=false;if(out)*out=nullptr;return E_OUTOFMEMORY;}
+        return reinterpret_cast<CreateFn>(active->original[8])(d,resource,desc,out);
+    }
+    void setTable(void** table) {
+        DWORD old=0,ignored=0;
+        if(!VirtualProtect(device,sizeof(void*),PAGE_READWRITE,&old))std::abort();
+        *reinterpret_cast<void***>(device)=table;
+        if(!VirtualProtect(device,sizeof(void*),old,&ignored))std::abort();
+    }
+    explicit UavCreationSpy(ID3D11Device* d):device(d),original(*reinterpret_cast<void***>(d)) {
+        if(active)std::abort();std::memcpy(slots,original,sizeof(slots));slots[8]=reinterpret_cast<void*>(&create);
+        active=this;setTable(slots);
+    }
+    ~UavCreationSpy(){setTable(original);active=nullptr;}
+};
 inline Record record(float x) {
     Record r{};r.fill(0x12345678u);r[0]=0;r[1]=r[77]=0x3F800000u;
     r[2]=r[78]=0x7FFF7FFFu;r[3]=r[79]=0xFFFE7FFFu;r[72]=0;
@@ -31,8 +55,95 @@ struct Dictionary {
         if(node)node->links(anchor(),1);
     }
 };
+inline void runObservers(ID3D11Device* device,void (*check)(bool,const char*)) {
+    constexpr uint32_t frame=42;constexpr unsigned repeats=256;
+    Node node;Dictionary dictionary;dictionary.set(&node);node.item(0)=record(80);
+    uintptr_t destination[2]={reinterpret_cast<uintptr_t>(destination),reinterpret_cast<uintptr_t>(destination)};
+    copy::reset();rig_allocations::start();
+    for(unsigned i=0;i<repeats;++i)copy::invalidateDictionaryImpl<false>(dictionary.ptr());
+    const auto clearBefore=rig_allocations::stop();const auto clearOld=copy::stats();
+    copy::reset();rig_allocations::start();
+    for(unsigned i=0;i<repeats;++i)copy::invalidateDictionary(dictionary.ptr());
+    const auto clearAfter=rig_allocations::stop();const auto clearNew=copy::stats();
+    check(clearBefore>0 && clearAfter==0 && clearOld.clearNodes==repeats && clearNew.clearNodes==0 &&
+          clearNew.clearCalls==repeats && clearNew.clearNoClaims==repeats,
+          "primary observer: no-claim clear bypass avoids measured heap allocations and native traversal");
+    copy::reset();rig_allocations::start();
+    for(unsigned i=0;i<repeats;++i)copy::endMergeOpaque(copy::beginMergeOpaque(reinterpret_cast<uintptr_t>(destination),dictionary.anchor(),frame),true);
+    const auto mergeBefore=rig_allocations::stop();const auto mergeOld=copy::stats();
+    copy::reset();rig_allocations::start();
+    for(unsigned i=0;i<repeats;++i)copy::endMergeOpaque(copy::beginMergeOpaque(reinterpret_cast<uintptr_t>(destination),dictionary.anchor(),frame),true);
+    const auto mergeAfter=rig_allocations::stop();const auto mergeNew=copy::stats();
+    check(mergeBefore>0 && mergeAfter==mergeBefore && mergeOld.mergeNodes==repeats && mergeNew.mergeNodes==repeats &&
+          mergeNew.mergeCalls==repeats && mergeNew.mergeWithoutClaims==repeats && mergeNew.mergePlans==repeats,
+          "primary observer: empty native merge plan allocation/traversal remains unchanged for unwind safety");
+    std::printf("primary observer no-claim production work / %u calls: clear allocations %llu -> %llu, nodes %llu -> %llu; merge allocations %llu -> %llu, nodes %llu -> %llu\n",
+                repeats,static_cast<unsigned long long>(clearBefore),static_cast<unsigned long long>(clearAfter),
+                static_cast<unsigned long long>(clearOld.clearNodes),static_cast<unsigned long long>(clearNew.clearNodes),
+                static_cast<unsigned long long>(mergeBefore),static_cast<unsigned long long>(mergeAfter),
+                static_cast<unsigned long long>(mergeOld.mergeNodes),static_cast<unsigned long long>(mergeNew.mergeNodes));
+    D3D11_BUFFER_DESC d{};d.ByteWidth=672;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    ComPtr<ID3D11Buffer> buffer;check(SUCCEEDED(device->CreateBuffer(&d,nullptr,&buffer)),"primary observer: retained pool fixture");
+    auto exercise=[&](bool bypass){
+        copy::reset();const auto epoch=copy::g_emissionEpoch;
+        Node source;Dictionary dict;dict.set(&source);source.item(0)=record(80);Record other=record(90),mapped[2]={source.item(0),other};
+        auto clear=[&](){if(bypass)copy::invalidateDictionary(dict.ptr());else copy::invalidateDictionaryImpl<false>(dict.ptr());};
+        uintptr_t dst[2]={reinterpret_cast<uintptr_t>(dst),reinterpret_cast<uintptr_t>(dst)};
+        auto begin=[&](){return copy::beginMergeOpaque(reinterpret_cast<uintptr_t>(dst),dict.anchor(),frame);};
+        clear();check(claim(source.item(0),frame) && claim(other,frame),"primary observer: fresh and unmapped unrelated claims after empty clear");clear();
+        check(!copy::g_emissions.count(reinterpret_cast<uintptr_t>(&source.item(0))) && copy::g_emissions.count(reinterpret_cast<uintptr_t>(&other)),"primary observer: owned clear preserves unrelated unmapped source");
+        copy::beginMap(buffer.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,1,frame);
+        copy::copier(reinterpret_cast<uintptr_t>(mapped),336,reinterpret_cast<uintptr_t>(&source.item(0)),0,1,frame);copy::endMap(buffer.Get(),1);
+        check(copy::patches(buffer.Get(),frame).empty(),"primary observer: freed same-address identical bytes cannot inherit a certificate");
+        claim(source.item(0),frame);copy::beginMap(buffer.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,2,frame);
+        copy::copier(reinterpret_cast<uintptr_t>(mapped),336,reinterpret_cast<uintptr_t>(&source.item(0)),0,1,frame);copy::endMap(buffer.Get(),2);clear();
+        check(copy::patches(buffer.Get(),frame).size()==1,"primary observer: native clear preserves independent copied GPU certificate");
+        copy::invalidateEmission(reinterpret_cast<uintptr_t>(&other));claim(source.item(0),frame);
+        void* pending=begin();check(pending && copy::g_emissions.empty() && copy::stats().activePlans==1,"primary observer: detached claim blocks no-owner shortcut");
+        const auto skips=copy::stats().clearNoClaims;clear();check(copy::stats().clearNoClaims==skips,"primary observer: active plan clear performs native ownership walk");copy::endMergeOpaque(pending,true);
+        check(copy::g_emissions.empty() && copy::stats().activePlans==0,"primary observer: clear revokes detached plan before end");
+        // Snapshot semantics: a plan opened with no claims cannot pick up a
+        // later emission. Native merge/clear may reenter between begin/end.
+        void* emptyPlan=begin();check(emptyPlan!=nullptr,"primary observer: empty merge retains its native relay plan token");
+        claim(source.item(0),frame);check(copy::stats().activeClaims==1,"primary observer: emission may arrive inside native merge");
+        void* nested=begin();check(nested!=nullptr,"primary observer: reentrant merge sees late claim and cannot bypass");
+        clear();copy::endMergeOpaque(nested,true);copy::endMergeOpaque(emptyPlan,true);
+        check(copy::g_emissions.empty() && copy::stats().activePlans==0,"primary observer: nested clear/end cannot resurrect late claims");
+        // Also cover late arrival without a nested clear: original empty
+        // plan has no transfers and must preserve the newly arrived claim.
+        emptyPlan=begin();claim(source.item(0),frame);copy::endMergeOpaque(emptyPlan,true);
+        check(copy::g_emissions.count(reinterpret_cast<uintptr_t>(&source.item(0)))==1,"primary observer: late claim survives empty-plan end unchanged");
+        copy::invalidateEmission(reinterpret_cast<uintptr_t>(&source.item(0)));
+        emptyPlan=begin();claim(source.item(0),frame);const auto beforeUnwind=copy::g_emissionEpoch;copy::endMergeOpaque(emptyPlan,false);
+        check(copy::g_emissions.empty() && copy::g_emissionEpoch!=beforeUnwind,"primary observer: unsuccessful empty-plan unwind revokes late claims");
+        emptyPlan=begin();claim(source.item(0),frame);clear();claim(other,frame);
+        const auto clearedEpoch=copy::g_emissionEpoch;copy::endMergeOpaque(emptyPlan,false);
+        check(copy::g_emissions.count(reinterpret_cast<uintptr_t>(&other))==1 && copy::g_emissionEpoch==clearedEpoch,
+              "primary observer: clear-invalidated empty-plan unwind preserves unrelated later owners");
+        copy::invalidateEmission(reinterpret_cast<uintptr_t>(&other));emptyPlan=begin();claim(other,frame+1);
+        const auto futureEpoch=copy::g_emissionEpoch;copy::endMergeOpaque(emptyPlan,false);
+        check(copy::g_emissions.count(reinterpret_cast<uintptr_t>(&other))==1 && copy::g_emissionEpoch==futureEpoch,
+              "primary observer: stale empty-plan unwind preserves owners registered in a newer epoch");
+        copy::invalidateEmission(reinterpret_cast<uintptr_t>(&other));
+        claim(source.item(0),frame+1);
+        const auto retained=copy::patches(buffer.Get(),frame);
+        check(retained.size()==1 && copy::patches(buffer.Get(),frame+1).empty(),"primary observer: retained output freshness remains frame-specific");
+        const auto& current=copy::g_emissions.at(reinterpret_cast<uintptr_t>(&source.item(0)));
+        std::vector<uint32_t> result={uint32_t(copy::g_emissions.size()),copy::g_emissionFrame,copy::g_overflowFrame,uint32_t(copy::g_emissionEpoch-epoch),current.patch.marker};
+        result.insert(result.end(),current.patch.native.begin(),current.patch.native.end());result.insert(result.end(),current.patch.previous.w,current.patch.previous.w+5);
+        result.insert(result.end(),retained[0].native.begin(),retained[0].native.end());result.push_back(retained[0].marker);result.push_back(retained[0].slot);
+        copy::reset();return result;
+    };
+    const auto before=exercise(false),after=exercise(true);
+    check(before==after,"primary observer: original/bypassed ownership, generation and exact output certificate bytes match");
+    // Skip means uninspected, never a synthetic successful native validation.
+    copy::reset();const auto epoch=copy::g_emissionEpoch;copy::invalidateDictionary(0);
+    check(copy::stats().clearCalls==1 && copy::stats().clearNoClaims==1 && copy::stats().clearFailed==0 && copy::g_emissionEpoch==epoch,
+          "primary observer: no-owner malformed dictionary is explicitly skipped without changing future epoch");
+    copy::reset();
+}
 inline void run(ID3D11Device* device,ID3D11DeviceContext* ctx,void (*check)(bool,const char*)) {
-    copy::reset();const uint32_t frame=42;
+    copy::reset();copy::OutputCache output;const uint32_t frame=42;
     Record src[2]={record(10),record(20)},mapped[2]={src[0],src[1]};
     D3D11_BUFFER_DESC d{};d.ByteWidth=sizeof(src);d.StructureByteStride=336;
     d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
@@ -52,7 +163,12 @@ inline void run(ID3D11Device* device,ID3D11DeviceContext* ctx,void (*check)(bool
     check(copy::patches(native.Get(),frame).empty(),"primary copy: active mapped GPU source never scattered");
     copy::endMap(native.Get(),1);check(copy::patches(native.Get(),frame).size()==2,"primary copy: authoritative source/destination copy joins both slots");
     ctx->CopyResource(privatePool.Get(),native.Get());
-    check(copy::apply(ctx,privatePool.Get(),native.Get(),frame),"primary copy: one batch scatter on private clone");
+    {
+        UavCreationSpy spy(device);
+        for(unsigned i=0;i<4;++i){ctx->CopyResource(privatePool.Get(),native.Get());check(copy::apply(ctx,privatePool.Get(),native.Get(),frame,output),"primary copy: repeated scatter on same private clone");}
+        std::printf("  primary copy UAV factory: %u creates for 4 same-pool scatters\n",spy.calls);
+        check(spy.calls==1,"primary copy cache: four repeated scatters create one UAV");
+    }
     auto read=[&](ID3D11Buffer* buffer){
         D3D11_BUFFER_DESC bd{};buffer->GetDesc(&bd);bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=0;bd.MiscFlags=0;bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Buffer> staging;device->CreateBuffer(&bd,nullptr,&staging);ctx->CopyResource(staging.Get(),buffer);
@@ -61,19 +177,104 @@ inline void run(ID3D11Device* device,ID3D11DeviceContext* ctx,void (*check)(bool
     const auto patched=read(privatePool.Get()),unchanged=read(native.Get());
     check(unchanged[0]==src[0] && unchanged[1]==src[1],"primary copy: native GPU bytes remain bit-identical");
     for(unsigned n=0;n<2;++n){auto expected=src[n];const auto p=previous(src[n]);expected[72]=emit::kJoined^emit::markerHash(copy::current(src[n].data()),p,frame);expected[73]=p.w[0];expected[74]=p.w[1];expected[75]=p.w[2];expected[78]=p.w[3];expected[79]=p.w[4];check(patched[n]==expected,"primary copy: only private marker and previous pose bytes change");}
+    // Separate eye owners must reuse both views while alternating. A shared
+    // last-pool cache would recreate on every switch and fail this count.
+    ComPtr<ID3D11Buffer> rightPool;check(SUCCEEDED(device->CreateBuffer(&d,&initial,&rightPool)),"primary cache: second eye pool");
+    copy::OutputCache rightOutput;output={};
+    {
+        UavCreationSpy spy(device);
+        for(unsigned i=0;i<4;++i) {
+            ctx->CopyResource(privatePool.Get(),native.Get());ctx->CopyResource(rightPool.Get(),native.Get());
+            check(copy::apply(ctx,privatePool.Get(),native.Get(),frame,output),"primary cache: left eye scatter");
+            check(copy::apply(ctx,rightPool.Get(),native.Get(),frame,rightOutput),"primary cache: right eye scatter");
+        }
+        check(spy.calls==2,"primary cache: eight alternating eye scatters create two UAVs");
+        std::printf("  primary copy alternating UAV factory: %u creates for 8 stereo scatters\n",spy.calls);
+    }
+    check(read(privatePool.Get())==patched && read(rightPool.Get())==patched,"primary cache: both eye row outputs exact");
+    {
+        UavCreationSpy spy(device);
+        check(copy::apply(ctx,rightPool.Get(),native.Get(),frame,output),"primary cache: replacement allocation scatters");
+        check(spy.calls==1 && output.pool.Get()==rightPool.Get(),"primary cache: replacement cannot inherit old pool view");
+        ComPtr<ID3D11Resource> resource;output.view->GetResource(&resource);
+        check(resource.Get()==rightPool.Get(),"primary cache: cached UAV owns replacement pool identity");
+    }
+    check(read(rightPool.Get())==patched,"primary cache: replacement row output exact");
+    // A failed factory call cannot leave the previous allocation's view in
+    // the cache or silently treat zero work as success. Retry creates it.
+    {
+        UavCreationSpy spy(device);spy.failNext=true;
+        check(!copy::apply(ctx,privatePool.Get(),native.Get(),frame,output) &&
+              copy::stats().lastScatterFailure==copy::ScatterFailure::View,"primary cache: factory failure remains counted refusal");
+        check(!output.view && !output.pool && !output.device,"primary cache: failed replacement leaves no stale view identity");
+        check(copy::apply(ctx,privatePool.Get(),native.Get(),frame,output),"primary cache: factory failure retries successfully");
+        check(spy.calls==2,"primary cache: failure plus retry each call factory once");
+    }
+    check(read(privatePool.Get())==patched,"primary cache: retry row output exact");
+    // Descriptor failures still decline before UAV use, even with a warm
+    // cache. Cache reuse must not bypass the existing safety checks.
+    ComPtr<ID3D11Buffer> noUav;D3D11_BUFFER_DESC invalid=d;invalid.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    check(SUCCEEDED(device->CreateBuffer(&invalid,&initial,&noUav)),"primary cache: invalid descriptor fixture");
+    {
+        UavCreationSpy spy(device);
+        check(!copy::apply(ctx,noUav.Get(),native.Get(),frame,output) &&
+              copy::stats().lastScatterFailure==copy::ScatterFailure::Descriptor,"primary cache: invalid pool descriptor still refused");
+        check(spy.calls==0,"primary cache: descriptor failure creates nothing");
+    }
+    check(read(noUav.Get())==std::array<Record,2>{src[0],src[1]},"primary cache: invalid pool remains unchanged");
+    {
+        output={};check(!output.view && !output.pool && !output.device,"primary cache: owner reset releases all cached references");
+        UavCreationSpy spy(device);
+        check(copy::apply(ctx,privatePool.Get(),native.Get(),frame,output),"primary cache: owner reset recreates view");
+        check(spy.calls==1,"primary cache: reset does not reuse old view");
+    }
+    // Use another real WARP device. Reuse across devices must build that
+    // device's resources. Inject the foreign-pool factory refusal rather
+    // than ask WARP to use an invalid cross-device resource (which removes
+    // the device); the command observer proves the old view is not reused.
+    {
+        ComPtr<ID3D11Device> otherDevice;ComPtr<ID3D11DeviceContext> otherCtx;D3D_FEATURE_LEVEL level;
+        check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
+              &otherDevice,&level,&otherCtx)),"primary cache: second WARP device");
+        ComPtr<ID3D11Buffer> otherNative,otherPrivate;D3D11_BUFFER_DESC nd=d;nd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        check(SUCCEEDED(otherDevice->CreateBuffer(&nd,&initial,&otherNative)) &&
+              SUCCEEDED(otherDevice->CreateBuffer(&d,&initial,&otherPrivate)),"primary cache: second device pools");
+        check(claim(src[0],frame) && claim(src[1],frame),"primary cache: second device row claims");
+        check(copy::beginMap(otherNative.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,1,frame),"primary cache: second device lease");
+        forward(src,0,2);copy::endMap(otherNative.Get(),1);
+        {
+            UavCreationSpy spy(otherDevice.Get());
+            check(copy::apply(otherCtx.Get(),otherPrivate.Get(),otherNative.Get(),frame,output),"primary cache: device replacement scatters");
+            check(spy.calls==1 && output.device.Get()==otherDevice.Get() && output.pool.Get()==otherPrivate.Get(),
+                  "primary cache: replacement device owns cache identity");
+        }
+        {
+            UavCreationSpy spy(device);spy.failNext=true;
+            check(!copy::apply(ctx,otherPrivate.Get(),otherNative.Get(),frame,output) &&
+                  copy::stats().lastScatterFailure==copy::ScatterFailure::View,"primary cache: device-change factory refusal counted");
+            check(spy.calls==1 && !output.view,"primary cache: foreign context clears old cache and attempts validated factory");
+        }
+        D3D11_BUFFER_DESC stage=d;stage.Usage=D3D11_USAGE_STAGING;stage.BindFlags=stage.MiscFlags=stage.StructureByteStride=0;stage.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Buffer> staging;check(SUCCEEDED(otherDevice->CreateBuffer(&stage,nullptr,&staging)),"primary cache: other device readback");
+        otherCtx->CopyResource(staging.Get(),otherPrivate.Get());D3D11_MAPPED_SUBRESOURCE m{};
+        check(SUCCEEDED(otherCtx->Map(staging.Get(),0,D3D11_MAP_READ,0,&m)),"primary cache: other device read Map");
+        check(std::memcmp(m.pData,patched.data(),sizeof(src))==0,"primary cache: device replacement and refusal preserve exact rows");
+        otherCtx->Unmap(staging.Get(),0);copy::forget(otherNative.Get());
+    }
+    check(copy::apply(ctx,privatePool.Get(),native.Get(),frame,output),"primary cache: original device cache restored for subsequent tests");
     // GPU guard sees the post-CopyResource bytes, not the earlier CPU lease.
     auto mismatched=src[0];mismatched[30]^=1;Record guarded[2]={mismatched,src[1]};
     ctx->UpdateSubresource(privatePool.Get(),0,nullptr,guarded,0,0);
-    check(copy::apply(ctx,privatePool.Get(),native.Get(),frame),"primary copy: guarded batch dispatched");
+    check(copy::apply(ctx,privatePool.Get(),native.Get(),frame,output),"primary copy: guarded batch dispatched");
     check(read(privatePool.Get())[0]==mismatched,"primary copy: GPU full-record guard rejects late material overwrite");
     ComPtr<ID3D11ShaderResourceView> cloneSrv;device->CreateShaderResourceView(privatePool.Get(),nullptr,&cloneSrv);
     ctx->PSSetShaderResources(7,1,cloneSrv.GetAddressOf());
-    check(!copy::apply(ctx,privatePool.Get(),native.Get(),frame) && copy::stats().lastScatterFailure==copy::ScatterFailure::Bound,
+    check(!copy::apply(ctx,privatePool.Get(),native.Get(),frame,output) && copy::stats().lastScatterFailure==copy::ScatterFailure::Bound,
           "primary copy: active clone SRV refuses UAV scatter with counted failure");
     ID3D11ShaderResourceView* nullSrv=nullptr;ctx->PSSetShaderResources(7,1,&nullSrv);
     ComPtr<ID3D11UnorderedAccessView> cloneUav;device->CreateUnorderedAccessView(privatePool.Get(),nullptr,&cloneUav);
     ctx->OMSetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,1,cloneUav.GetAddressOf(),nullptr);
-    check(!copy::apply(ctx,privatePool.Get(),native.Get(),frame),"primary copy: OM UAV alias refuses scatter");
+    check(!copy::apply(ctx,privatePool.Get(),native.Get(),frame,output),"primary copy: OM UAV alias refuses scatter");
     ID3D11UnorderedAccessView* nullUav=nullptr;ctx->OMSetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,1,&nullUav,nullptr);
     ComPtr<ID3D11Buffer> other,oldCount;device->CreateBuffer(&d,&initial,&other);
     ComPtr<ID3D11ShaderResourceView> oldSrv;device->CreateShaderResourceView(native.Get(),nullptr,&oldSrv);
@@ -81,7 +282,7 @@ inline void run(ID3D11Device* device,ID3D11DeviceContext* ctx,void (*check)(bool
     D3D11_BUFFER_DESC cb{};cb.ByteWidth=16;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;device->CreateBuffer(&cb,nullptr,&oldCount);
     ctx->CSSetShader(copy::g_gpu.shader.Get(),nullptr,0);ctx->CSSetShaderResources(0,1,oldSrv.GetAddressOf());
     ctx->CSSetUnorderedAccessViews(0,1,oldUav.GetAddressOf(),nullptr);ctx->CSSetConstantBuffers(0,1,oldCount.GetAddressOf());
-    check(copy::apply(ctx,privatePool.Get(),native.Get(),frame),"primary copy: scatter with prior compute bindings");
+    check(copy::apply(ctx,privatePool.Get(),native.Get(),frame,output),"primary copy: scatter with prior compute bindings");
     ComPtr<ID3D11ComputeShader> restoredShader;ComPtr<ID3D11ShaderResourceView> restoredSrv;
     ComPtr<ID3D11UnorderedAccessView> restoredUav;ComPtr<ID3D11Buffer> restoredCount;
     ctx->CSGetShader(&restoredShader,nullptr,nullptr);ctx->CSGetShaderResources(0,1,&restoredSrv);
@@ -92,7 +293,7 @@ inline void run(ID3D11Device* device,ID3D11DeviceContext* ctx,void (*check)(bool
     ID3D11Buffer* nullBuffer=nullptr;ctx->CSSetConstantBuffers(0,1,&nullBuffer);
     check(begin(2,D3D11_MAP_WRITE_NO_OVERWRITE),"primary copy: append lease opens");forward(src,0,1);copy::endMap(native.Get(),2);
     check(copy::patches(native.Get(),frame).size()==1,"primary copy: consumed source cannot recertify overwritten slot; disjoint append retained");
-    ctx->CopyResource(privatePool.Get(),native.Get());copy::apply(ctx,privatePool.Get(),native.Get(),frame);
+    ctx->CopyResource(privatePool.Get(),native.Get());copy::apply(ctx,privatePool.Get(),native.Get(),frame,output);
     check(read(privatePool.Get())[0]==src[0] && read(privatePool.Get())[1]==patched[1],
           "primary copy: partial dispatch uses current row count; cached extra rows cannot repatch revoked slots");
     check(begin(3),"primary copy: discard resets all certificates");copy::endMap(native.Get(),3);
@@ -179,6 +380,6 @@ inline void run(ID3D11Device* device,ID3D11DeviceContext* ctx,void (*check)(bool
     copy::reset();std::vector<Record> many(copy::kMaxEmissions+1,record(300));
     for(auto& r:many)claim(r,frame);
     check(copy::g_emissions.empty() && copy::stats().overflows==1 && !claim(src[0],frame),"primary copy: capacity overflow poisons all same-frame claims");
-    copy::forget(native.Get());copy::reset();
+    copy::forget(native.Get());copy::reset();runObservers(device,check);
 }
 }

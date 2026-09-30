@@ -1,8 +1,10 @@
+#include "temporal_shader_bytecode.h"
 #include "sharpen_pass.h"
 #include "../common/native_sharpen.h"
 #include "graphics_runtime.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -14,7 +16,9 @@
 #include "../common/frame_flag.h"   // glitchConsumerPresent: is a compositor hook alive
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/runtime_profile.h"   // runtimeFlatProfile: what a "pass" is counted in
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: the eye's pixels
+#include "../common/temporal_mode.h"      // temporalModeEnabled: why the flat pass may never run
 #include "../common/timing.h"
 #include "shader_swap.h"
 #include "gpu_timing.h"
@@ -32,7 +36,7 @@
 #pragma warning(pop)
 
 // The same two files as GPU text, generated at build time.
-#include "fsr_hlsl_gen.h"
+// Fixed shader bytecode is generated during the build. //
 
 namespace edvr {
 namespace {
@@ -47,33 +51,11 @@ namespace {
 // reason. Everything the sharpening itself does is theirs. Not desk-
 // compiled by tools/compile_variants.py (it needs the chunks joined
 // first); the smoke harness compiles and runs it on a real device.
-const char kSharpenMain[] =
-    "Texture2D<float4> Src : register(t0);\n"
-    "RWTexture2D<float4> Dst : register(u0);\n"
-    "cbuffer P : register(b0) { uint4 con; int4 region; int2 outSize; int2 pad0; };\n"
-    "AF4 FsrRcasLoadF(ASU2 p) {\n"
-    "    int2 q = clamp(int2(p), region.xy, region.zw - 1);\n"
-    "    return Src.Load(int3(q, 0));\n"
-    "}\n"
-    "void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}\n"
-    "[numthreads(8,8,1)]\n"
-    "void main(uint3 id : SV_DispatchThreadID) {\n"
-    "    if (id.x >= (uint)outSize.x || id.y >= (uint)outSize.y) return;\n"
-    "    int2 ip = int2(id.xy) + region.xy;\n"
-    "    AF3 c;\n"
-    "    FsrRcasF(c.r, c.g, c.b, AU2(ip), con);\n"
-    "    Dst[id.xy] = float4(c, Src.Load(int3(ip, 0)).a);\n"
-    "}\n";
 
-const char kGpuPrologue[] =
-    "#define A_GPU 1\n"
-    "#define A_HLSL 1\n";
 
-std::string joinChunks(const char* const* chunks) {
-    std::string out;
-    for (const char* const* c = chunks; *c; ++c) out += *c;
-    return out;
-}
+
+
+
 
 // The cbuffer above, laid out to match: 48 bytes, three 16-byte rows.
 struct PassParams {
@@ -93,6 +75,13 @@ float stopsOf(float strength) {
     if (strength < 0.0f) strength = 0.0f;
     return 2.0f * (1.0f - strength);
 }
+
+// What one pass is counted in. VR sharpens each eye it submits; the flat
+// profile sharpens one frame a call (flat_sharpen.h), and its log says frames,
+// because "per eye" there would read as a stereo pair that does not exist.
+bool flatPass() { return runtimeFlatProfile(); }
+const char* perUnit() { return flatPass() ? "frame" : "eye"; }
+const char* unitsSharpened() { return flatPass() ? "frames" : "eye-submits"; }
 
 // The format allowlist, shared with the temporal pass (temporal_pass.cpp)
 // -- typeless and UNORM families read and written through the family's
@@ -216,11 +205,11 @@ void maybeLogTiming() {
     if (g_timeLogged || g_timeCount < 120) return;
     g_timeLogged = true;
     Log::get().note(
-        "render sharpening: measured %.2f ms per eye on average (max %.2f) "
+        "render sharpening: measured %.2f ms per %s on average (max %.2f) "
         "at %ux%u -- one dispatch of AMD's RCAS at strength %.2f (%.2f "
         "stops; render_sharpness moves it, live).",
-        g_timeSum / static_cast<double>(g_timeCount), g_timeMax, g_lastW,
-        g_lastH, static_cast<double>(g_lastStrength),
+        g_timeSum / static_cast<double>(g_timeCount), perUnit(), g_timeMax,
+        g_lastW, g_lastH, static_cast<double>(g_lastStrength),
         static_cast<double>(stopsOf(g_lastStrength)));
 }
 
@@ -269,6 +258,7 @@ bool     g_fmtUnknownNoted = false;
 bool     g_fmtChecked[kFormatCount] = {};
 bool     g_fmtSupported[kFormatCount] = {};
 bool     g_fmtUnsupportedNoted[kFormatCount] = {};
+uint32_t g_fmtAsks = 0;   // CheckFormatSupport calls: a new device is asked again (sharpenPassHeldForTest)
 bool     g_firstNoted = false;
 uint32_t g_treats = 0;
 
@@ -286,13 +276,94 @@ void failOnce(const char* what) {
     Log::get().note("render sharpening: %s; the pass stands down.", what);
 }
 
+// THE DEVICE. Everything the pass makes -- the shader, the parameter buffer, both
+// eyes' views and textures, the price ring -- belongs to one D3D11 device, and D3D11
+// refuses to mix devices: a view over a texture another device made fails (the flat
+// wrapper's failed with 0x887A0005 and stood the flat sharpening down for the
+// session), and a shader, buffer or UAV from one device bound on another's context is
+// no better. The game can recreate its device in a running process, and the state
+// above used to be kept until sharpenPassShutdown() whatever device the next frame
+// came from (review RC4, F5; a two-device WARP probe reproduced it).
+//
+// g_owner is the device the state was made on, held with a reference so its address
+// cannot be recycled under the comparison (everything above holds one implicitly,
+// through its own references, so this pins nothing that was not already pinned). A
+// frame from another device, in sharpenInner, releases all of it and starts over.
+// Owner-thread state, like the rest of this file.
+ID3D11Device* g_owner = nullptr;
+uint32_t      g_deviceChanges = 0;
+constexpr uint32_t kMaxDeviceChangeNotes = 4;   // two devices trading frames must not fill a log
+bool          g_deviceResetOff = false;         // rigs only: sharpenPassDeviceResetOffForTest
+
+// Everything above that belongs to a device: the shader and the latch that says it was
+// tried (a compile that failed on the old device says nothing about the new one), the
+// parameter buffer, both eyes' views and textures, the price ring, what was learned about
+// the device's formats, and the reason for a stand-down (the old device's). Not the counters,
+// the timing sums or the once-per-session notes: those are the session's.
+void releaseDeviceState() {
+    for (EyeState& e : g_eye) releaseEye(e);
+    for (QuerySlot& q : g_qring) releaseQuerySlot(q);
+    if (g_cb) { g_cb->Release(); g_cb = nullptr; }
+    if (g_cs) { g_cs->Release(); g_cs = nullptr; }
+    g_csTried = false;
+    for (int i = 0; i < kFormatCount; ++i) {
+        g_fmtChecked[i] = false;
+        g_fmtSupported[i] = false;
+        g_fmtUnsupportedNoted[i] = false;
+    }
+    g_failNoted = false;
+}
+
+// The device a frame's source lives on. The first call adopts it; a different one is a
+// device change: release the old device's state, say so, adopt the new. Off in a rig that
+// asks for the pass as it was before this existed (sharpenPassDeviceResetOffForTest).
+void adoptDevice(ID3D11Device* dev) {
+    if (g_deviceResetOff || !dev || g_owner == dev) return;
+    if (g_owner) {
+        ++g_deviceChanges;
+        if (g_deviceChanges <= kMaxDeviceChangeNotes) {
+            Log::get().note(
+                "render sharpening: the D3D device changed (change %u); the shader, "
+                "the parameter buffer, both eyes' textures and views and the price "
+                "ring made on the old one are released and made again on the new "
+                "one.%s",
+                g_deviceChanges,
+                g_deviceChanges == kMaxDeviceChangeNotes ? " Further changes are not said." : "");
+        }
+        releaseDeviceState();
+        g_owner->Release();
+    }
+    g_owner = dev;
+    dev->AddRef();
+}
+
+// Whether the tick may warm the shader on this context's device: the device the pass works
+// on, or any device while the pass has none yet (which it then adopts, so the warm compile is
+// the first frame's compile and not a wasted one). Never the reverse: a tick on another device
+// does not move the pass -- only a frame does -- or two devices alternating would release and
+// remake the eyes' textures every frame; that tick simply leaves the compile to the first frame.
+bool tickMayWarm(ID3D11DeviceContext* ctx) {
+    if (g_deviceResetOff) return true;
+    ID3D11Device* dev = nullptr;
+    if (!guarded("sharpenPass.tick.device", [&] { ctx->GetDevice(&dev); }) || !dev) {
+        if (dev) dev->Release();
+        return false;
+    }
+    bool may = false;
+    if (!g_owner) {
+        g_owner = dev;
+        dev->AddRef();
+        may = true;
+    } else {
+        may = g_owner == dev;
+    }
+    dev->Release();
+    return may;
+}
+
 ID3D11ComputeShader* compileShader(ID3D11DeviceContext* ctx) {
-    const std::string hlsl = std::string(kGpuPrologue) + joinChunks(kFfxAChunks) +
-                             "#define FSR_RCAS_F 1\n" +
-                             joinChunks(kFfxFsr1Chunks) + kSharpenMain;
-    return shaderSwapCompileCs(ctx, hlsl.c_str(), hlsl.size(), "main",
-                               "render_sharpen_cs", nullptr,
-                               "render sharpening");
+
+    return shaderSwapCreateCs(ctx, kSharpenBytecode, sizeof(kSharpenBytecode), "render_sharpen_cs", "render sharpening");
 }
 
 bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt,
@@ -428,6 +499,10 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
         ok = dev != nullptr && ctx != nullptr;
     }
 
+    // Before anything below looks at what the pass already holds: a frame from another
+    // device than the one it was made on finds none of it (adoptDevice).
+    if (ok) adoptDevice(dev);
+
     if (ok) pollTimingRing(ctx);
 
     // A typed UAV store on the family's plain format is what the dispatch
@@ -435,6 +510,7 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
     // once.
     if (ok && !g_fmtChecked[fmtIndex]) {
         g_fmtChecked[fmtIndex] = true;
+        ++g_fmtAsks;
         UINT support = 0;
         g_fmtSupported[fmtIndex] =
             SUCCEEDED(dev->CheckFormatSupport(viewFmt, &support)) &&
@@ -622,16 +698,20 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
                 Log::get().note(
                     "render sharpening: first sharpened frame -- AMD's RCAS at "
                     "strength %.2f (%.2f stops) over a %ux%u %s (DXGI_FORMAT "
-                    "%d) frame, read and written through %s views%s, the last "
-                    "pass before the frame leaves. render_sharpness moves the "
-                    "strength, live.",
+                    "%d) frame, read and written through %s views%s, %s. "
+                    "render_sharpness moves the strength, live.",
                     static_cast<double>(strength),
                     static_cast<double>(stopsOf(strength)), regionW, regionH,
                     formatName(sd.Format), static_cast<int>(sd.Format),
                     formatName(viewFmt),
                     viaCopy ? " (copied out first: the source refuses a "
                               "shader view)"
-                            : "");
+                            : "",
+                    flatPass()
+                        ? "on the temporal resolve's output, before the game's "
+                          "own output copy -- the interface is drawn after it "
+                          "and is not sharpened"
+                        : "the last pass before the frame leaves");
             }
         } else {
             failOnce("the parameter buffer could not be written");
@@ -657,29 +737,64 @@ void sharpenPassConfigure(Config& cfg) {
 void sharpenPassTick(ID3D11DeviceContext* ctx) {
     if (!g_wanted || !ctx) return;
     if (g_firstTickMs == 0) g_firstTickMs = stampMs();
-    if (!g_cs && !g_csTried) {
+    if (!g_cs && !g_csTried && tickMayWarm(ctx)) {
         g_csTried = true;
         g_cs = compileShader(ctx);
         if (g_cs && !g_warmNoted) {
             g_warmNoted = true;
             Log::get().note(
                 "render sharpening: shader warmed at session start -- the "
-                "first sharpened eye pays no compile.");
+                "first sharpened %s pays no compile.",
+                perUnit());
         }
     }
-    // The other half's absence, said from this side (the resolve's note,
-    // for the same reason).
-    if (!g_noHookNoted && !glitchConsumerPresent() && !nativeSharpenActive() &&
-        elapsedMs(g_firstTickMs, kNoHookNoteMs)) {
-        g_noHookNoted = true;
-        Log::get().note(
-            "render sharpening: fix.render_sharpness is %.2f, but no "
-            "compositor hook has announced itself after %llu s. The pass "
-            "runs inside the openvr_api.dll half's Submit hook -- install "
-            "that file, or restart the game with the setting on so the hook "
-            "installs for it. Nothing is sharpened until then.",
-            static_cast<double>(g_strength),
-            static_cast<unsigned long long>(kNoHookNoteMs / 1000));
+    if (g_noHookNoted || !elapsedMs(g_firstTickMs, kNoHookNoteMs)) return;
+    // The flat profile has no compositor hook to wait for: the pass runs from
+    // the flat runtime, on a frame it has resolved, so what it can be waiting
+    // on is a frame -- and it is said only if none has come (g_treats).
+    // Otherwise the other half's absence, said from this side (the resolve's
+    // note, for the same reason).
+    const bool say = flatPass()
+        ? g_treats == 0
+        : !glitchConsumerPresent() && !nativeSharpenActive();
+    if (!say) return;
+    g_noHookNoted = true;
+    char text[640];
+    sharpenPassNeverRanText(text, sizeof(text), flatPass(),
+                            temporalModeEnabled(Config::get().requestedTemporalMode()),
+                            g_strength);
+    Log::get().note("%s", text);
+}
+
+void sharpenPassNeverRanText(char* out, size_t cap, bool flat, bool antiAliasingOn,
+                             float strength) {
+    const unsigned long long seconds = kNoHookNoteMs / 1000;
+    if (!out || !cap) return;
+    if (!flat) {
+        snprintf(out, cap,
+                 "render sharpening: fix.render_sharpness is %.2f, but no "
+                 "compositor hook has announced itself after %llu s. The pass "
+                 "runs inside the openvr_api.dll half's Submit hook -- install "
+                 "that file, or restart the game with the setting on so the hook "
+                 "installs for it. Nothing is sharpened until then.",
+                 static_cast<double>(strength), seconds);
+    } else if (!antiAliasingOn) {
+        snprintf(out, cap,
+                 "render sharpening: fix.render_sharpness is %.2f, but no frame "
+                 "has been sharpened after %llu s: anti-aliasing is off "
+                 "(fix.temporal_aa), and in the flat profile the sharpening runs "
+                 "on the temporal pass's output. Turn on TAA, DLSS or FSR and it "
+                 "applies at once.",
+                 static_cast<double>(strength), seconds);
+    } else {
+        snprintf(out, cap,
+                 "render sharpening: fix.render_sharpness is %.2f, but no frame "
+                 "has been sharpened after %llu s, with anti-aliasing on. The "
+                 "flat runtime has handed the sharpening no resolved frame -- "
+                 "read its 'flat runtime:' lines for why it refuses or falls "
+                 "back, and note that a frame it falls back on is left as it "
+                 "is.",
+                 static_cast<double>(strength), seconds);
     }
 }
 
@@ -691,23 +806,69 @@ bool sharpenPassTotals(uint32_t* treated, double* avgMs, double* maxMs) {
     return true;
 }
 
+void sharpenPassNoteTotals() {
+    static uint32_t lastTreats = 0;
+    uint32_t treated = 0;
+    double avgMs = 0.0, maxMs = 0.0;
+    if (!sharpenPassTotals(&treated, &avgMs, &maxMs) || treated == lastTreats) return;
+    lastTreats = treated;
+    Log::get().note(
+        "render sharpening totals: %u %s sharpened this session, %.2f ms per "
+        "%s on average (max %.2f).",
+        treated, unitsSharpened(), avgMs, perUnit(), maxMs);
+}
+
 void sharpenPassShutdown() {
     if (g_treats > 0) {
         Log::get().note(
-            "render sharpening: %u eye-submits sharpened this session%s.",
-            g_treats, g_timeCount ? "" : " (no timing sample completed)");
+            "render sharpening: %u %s sharpened this session%s.",
+            g_treats, unitsSharpened(),
+            g_timeCount ? "" : " (no timing sample completed)");
         if (g_timeCount) {
             Log::get().note(
-                "render sharpening: measured %.2f ms per eye on average (max "
+                "render sharpening: measured %.2f ms per %s on average (max "
                 "%.2f) over %u timed passes.",
-                g_timeSum / static_cast<double>(g_timeCount), g_timeMax,
-                g_timeCount);
+                g_timeSum / static_cast<double>(g_timeCount), perUnit(),
+                g_timeMax, g_timeCount);
         }
     }
-    for (EyeState& e : g_eye) releaseEye(e);
-    for (QuerySlot& q : g_qring) releaseQuerySlot(q);
-    if (g_cb) { g_cb->Release(); g_cb = nullptr; }
-    if (g_cs) { g_cs->Release(); g_cs = nullptr; }
+    releaseDeviceState();
+    if (g_owner) { g_owner->Release(); g_owner = nullptr; }
+}
+
+void sharpenPassDeviceResetOffForTest(bool off) {
+    g_deviceResetOff = off;
+    releaseDeviceState();
+    if (g_owner) { g_owner->Release(); g_owner = nullptr; }
+    g_deviceChanges = 0;
+}
+
+namespace {
+// The device a child was made on, as an identity to compare and nothing more: the pass holds the
+// device (g_owner) for as long as it holds the child, so the pointer is good for the call.
+ID3D11Device* deviceOfChild(ID3D11DeviceChild* child) {
+    if (!child) return nullptr;
+    ID3D11Device* dev = nullptr;
+    child->GetDevice(&dev);
+    if (dev) dev->Release();
+    return dev;
+}
+}  // namespace
+
+void sharpenPassHeldForTest(SharpenPassHeld* out) {
+    if (!out) return;
+    *out = SharpenPassHeld{};
+    out->owner = g_owner;
+    out->shader = deviceOfChild(g_cs);
+    out->buffer = deviceOfChild(g_cb);
+    for (int i = 0; i < 2; ++i) {
+        out->eyeOut[i] = deviceOfChild(g_eye[i].outTex);
+        out->eyeSrcView[i] = deviceOfChild(g_eye[i].srcSrv);
+        out->eyeCopy[i] = deviceOfChild(g_eye[i].copyTex);
+    }
+    out->shaderTried = g_csTried;
+    out->formatSupportAsks = g_fmtAsks;
+    for (const QuerySlot& q : g_qring) out->queriesInFlight += q.inUse ? 1 : 0;
 }
 
 }  // namespace edvr

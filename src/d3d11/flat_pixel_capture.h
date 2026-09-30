@@ -83,8 +83,9 @@ public:
         if(!ensureDirectory(Config::get().logDir()) || !ensureDirectory(root) || !ensureDirectory(directory_)) {
             stop("failed-directory");return;
         }
-        Log::get().note("flat pixels: armed frame=%llu samples=4 spacing=15 byte-cap=%llu timeout-frames=900 timeout-ms=30000 directory=%ls; native matched DLSS/DLAA textures, no rendering changes",
-            static_cast<unsigned long long>(frame),static_cast<unsigned long long>(FlatPixelCapturePolicy::maxBytes),directory_.c_str());
+        Log::get().note("flat pixels: armed frame=%llu samples=4 first=next-live-frame second=+%u then spacing=%u byte-cap=%llu timeout-frames=900 timeout-ms=30000 directory=%ls; native matched DLSS/DLAA textures, no rendering changes; a reset frame is never a sample",
+            static_cast<unsigned long long>(frame),FlatPixelCapturePolicy::secondSpacing,FlatPixelCapturePolicy::laterSpacing,
+            static_cast<unsigned long long>(FlatPixelCapturePolicy::maxBytes),directory_.c_str());
     }
     void poll(ID3D11DeviceContext* context,uint64_t frame) {
         if(!policy_.active)return;
@@ -126,10 +127,15 @@ public:
         if(!packed) {fail("pack-failed");return;}
         bool ok=true;
         for(unsigned i=0;i<used_ && ok;++i)ok=write(directory_+L"\\"+wide(items_[i].filename),payload[i].data(),payload[i].size());
-        char header[1024]{};
-        std::snprintf(header,sizeof(header),"{\n\"version\":2,\"frame_id\":%llu,\"mode\":\"%s\",\"configured_dlss_preset\":%u,\"reset\":%s,\"jitter\":[%.9g,%.9g],\"previous_jitter\":[%.9g,%.9g],\"render_width\":%u,\"render_height\":%u,\"output_width\":%u,\"output_height\":%u,\"binary_version\":\"%s\",\"binary_compiled\":\"%s %s\",\"textures\":[\n",
+        char header[1280]{};
+        // rows_jitter: the raster phase the camera ROWS carry (2026-09-29; nonzero only under the
+        // upstream camera injector), so a replay removes it as the shader does instead of guessing.
+        // static_scene: the frame took the 3D main menu's stale-slot policy (FlatMonoResolveFrame::staticScene).
+        std::snprintf(header,sizeof(header),"{\n\"version\":2,\"frame_id\":%llu,\"mode\":\"%s\",\"configured_dlss_preset\":%u,\"reset\":%s,\"jitter\":[%.9g,%.9g],\"previous_jitter\":[%.9g,%.9g],\"rows_jitter\":[%.9g,%.9g],\"previous_rows_jitter\":[%.9g,%.9g],\"static_scene\":%s,\"render_width\":%u,\"render_height\":%u,\"output_width\":%u,\"output_height\":%u,\"binary_version\":\"%s\",\"binary_compiled\":\"%s %s\",\"textures\":[\n",
             static_cast<unsigned long long>(frame_.frame),frame_.mode==FlatMonoResolveMode::Dlaa?"dlaa":"dlss",frame_.configuredDlssPreset,frame_.reset?"true":"false",
             frame_.jitterX,frame_.jitterY,frame_.previousJitterX,frame_.previousJitterY,
+            frame_.rowsJitterX,frame_.rowsJitterY,frame_.previousRowsJitterX,frame_.previousRowsJitterY,
+            frame_.staticScene?"true":"false",
             frame_.renderWidth,frame_.renderHeight,frame_.outputWidth,frame_.outputHeight,EDVR_VERSION_STRING,__DATE__,__TIME__);
         std::string manifest=header;
         for(unsigned i=0;i<used_;++i) {
@@ -167,7 +173,9 @@ public:
         if(policy_.copied>=FlatPixelCapturePolicy::maxSamples)stop("complete");
     }
     void capture(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& frame,bool reset,ID3D11Texture2D* const* textures) {
-        if(!policy_.due(frame.frame))return;
+        // A reset frame is not a sample (2026-09-29): the frame two after an F10 arm was one, at
+        // phase (0,0) with no history, and said nothing about the running image.
+        if(!policy_.due(frame.frame,!reset))return;
         const uint64_t now=GetTickCount64();
         if(policy_.expired(frame.frame,now)) {stop("expired-arm");return;}
         uint64_t bytes=0;
@@ -220,7 +228,7 @@ public:
         if(frame.engine.sceneNow && !addBuffer("scene_now",frame.engine.sceneNow)) {stop("failed-scene-now");return;}
         if(frame.engine.scenePrev && !addBuffer("scene_previous",frame.engine.scenePrev)) {stop("failed-scene-previous");return;}
         if(!policy_.fits(bytes)) {stop("byte-cap");return;}
-        if(!policy_.reserve(frame.frame,now,bytes))return;
+        if(!policy_.reserve(frame.frame,now,bytes,!reset))return;
         for(unsigned i=0;i<used_;++i) {
             auto& item=items_[i];HRESULT hr;
             if(item.isBuffer) {

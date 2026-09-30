@@ -5,6 +5,61 @@
 *Rewritten 2026-09-23 at the retirement (the last entry below). The journal
 is history: the paths it builds were removed from the code that day.*
 
+- **State: two cited probes retired 2026-09-29 (code removed, d38272de).**
+  stencil_probe.cpp and resolve_probe.h, cited below as evidence, are deleted
+  with `advanced.stencil_probe` and `advanced.resolve_probe`; the code is at
+  `d38272de^`.
+- **State: the v1 and v2 readers retired 2026-09-29 (code removed, e9dc9ae8).**
+  `tools/object_classification.py` reads schema v3 only, the only one the DLL
+  has written since 2026-09-23. The journal line below that says it reads all
+  three describes the tool as it was.
+- **State:** RETIRED 2026-09-23 (Sean's teardown). Every path that
+  ESTIMATED a per-object transform is gone from the code (tier 2's body path
+  and occupancy grid, the second body, the stepped parts, the moving ships,
+  the rigid fit, mesh_motion, the rigid-owner promotion and static owner, the
+  eye run's motion trigger, the `movers` and `objects` views); six keys
+  retired. Superseded by engine-record velocity (part of `fix.temporal_aa`):
+  [kinematic-motion-injection-2026-09-19.md](kinematic-motion-injection-2026-09-19.md).
+  The full list and the key names are in Status detail below.
+- **What stayed:** tier 1's mover mask (`experimental.temporal_aa_movers`,
+  default off, now without a view; its share prints on the registration
+  line), the world/ship depth split (`advanced.temporal_aa_ship_metres`),
+  the holo panel path, terrain motion, the screen motion map, the engine
+  path, everything on foot, `advanced.object_probe`'s eye-run ledger (the
+  pool recognition and the per-frame pool, instance, bone and draw-state
+  files for tools\eye_run_ledger.py), and the manual eye run
+  (hotkey.dump_eyes).
+- **Open:** nothing on this arc. The smoke-trail voids (cause undecided
+  on 2026-09-10) were never an estimate's problem; they stay open for
+  whichever arc next works on smoke.
+- **Ruled out (do not re-propose):** eight items, the full text and their
+  dated journal entries in Status detail below: estimating per-object motion
+  at all (2026-09-23); tier 1's mask moving geometry (2026-09-08); a
+  draw-shape memo for per-draw identity (2026-09-07/08); the pool slot as
+  identity (2026-09-08); a 3x3 SAD camera/body match (2026-09-08); "the hub
+  turns with the ring" (16:22 flight); the "stepped parts" per-record
+  multiple (37th flight); distant shimmer as a pure sampling limit (8th
+  flight, retired by the 9th).
+- **Next flight:** none on this doc.
+- **Detail:** "Retired, 2026-09-23" and "The two keys left over" (the last
+  two sections) say what went and what stayed. The flight log (48 numbered flights) is inline under
+  "Phasing" item 3; twelve later reviews (2026-09-10/11) sit beside this
+  doc as review-<topic>-<date>.md.
+
+*A design document, written before the code, as a companion to
+[anti-aliasing.md](anti-aliasing.md) (feature B, the temporal pass) and to
+the two reviews of 2026-09-04
+([review-motion-vectors-2026-09-04.md](review-motion-vectors-2026-09-04.md),
+[review-temporal-far-warp-darkness-2026-09-04.md](review-temporal-far-warp-darkness-2026-09-04.md)).
+Claims about EDVR cite the source; claims about the game are labelled
+measured (this repo's censuses, flight logs and disassemblies), read (taken
+from a captured shader's bytecode, which is a fact about one shader and a
+belief about its siblings), or believed; claims about runtimes and SDKs are
+labelled vendor-stated or believed; what can only be settled in a live
+session is collected under Phase 0. Nothing here is implemented.*
+
+## Status detail (moved out of Status 2026-09-29)
+
 - **State:** RETIRED 2026-09-23 (Sean's teardown). Every path here that
   ESTIMATED a per-object transform is gone from the code: tier 2's body
   path and its occupancy grid, the second body, the stepped parts, the
@@ -19,17 +74,6 @@ is history: the paths it builds were removed from the code that day.*
   velocity (part of `fix.temporal_aa`):
   [kinematic-motion-injection-2026-09-19.md](kinematic-motion-injection-2026-09-19.md)
   -- the exact motion the game recorded, where these paths guessed it.
-- **What stayed:** tier 1's mover mask (`experimental.temporal_aa_movers`,
-  default off, now without a view; its share prints on the registration
-  line), the world/ship depth split (`advanced.temporal_aa_ship_metres`),
-  the holo panel path, terrain motion, the screen motion map, the engine
-  path, everything on foot, `advanced.object_probe`'s eye-run ledger (the
-  pool recognition and the per-frame pool, instance, bone and draw-state
-  files for tools\eye_run_ledger.py), and the manual eye run
-  (hotkey.dump_eyes).
-- **Open:** nothing on this arc. The smoke-trail voids (cause undecided
-  on 2026-09-10) were never an estimate's problem; they stay open for
-  whichever arc next works on smoke.
 - **Ruled out (do not re-propose):**
   - Estimating per-object motion at all -- rigid fits over pool pairs,
     records paired by content, grid membership: retired 2026-09-23,
@@ -48,23 +92,6 @@ is history: the paths it builds were removed from the code that day.*
     flight), records show no net turn; the spin is in a hidden bone.
   - Distant shimmer as a pure sampling limit (8th flight): retired by
     the 9th -- it was the reversed-Z depth decode.
-- **Next flight:** none on this doc.
-- **Detail:** "Retired, 2026-09-23" and "The two keys left over" (the last
-  two sections) say what went and what stayed. The flight log (48 numbered flights) is inline under
-  "Phasing" item 3; twelve later reviews (2026-09-10/11) sit beside this
-  doc as review-<topic>-<date>.md.
-
-*A design document, written before the code, as a companion to
-[anti-aliasing.md](anti-aliasing.md) (feature B, the temporal pass) and to
-the two reviews of 2026-09-04
-([review-motion-vectors-2026-09-04.md](review-motion-vectors-2026-09-04.md),
-[review-temporal-far-warp-darkness-2026-09-04.md](review-temporal-far-warp-darkness-2026-09-04.md)).
-Claims about EDVR cite the source; claims about the game are labelled
-measured (this repo's censuses, flight logs and disassemblies), read (taken
-from a captured shader's bytecode, which is a fact about one shader and a
-belief about its siblings), or believed; claims about runtimes and SDKs are
-labelled vendor-stated or believed; what can only be settled in a live
-session is collected under Phase 0. Nothing here is implemented.*
 
 ## The ask
 

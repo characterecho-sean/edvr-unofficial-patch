@@ -1,5 +1,12 @@
 # Eye tracking on the Pimax: what the driver sends, and how EDVR gets a gaze from it
 
+## Status
+
+- **State: foveated shading retired 2026-09-29 (code removed, 184eee7f).** It
+  was the feature this gaze was built for, and `experimental.foveation_centre`
+  was retired 2026-09-24. The driver findings below stand; the sections on
+  wiring the gaze into the rings are history.
+
 *An investigation and a plan, written 2026-09-05 after the four gaze-probe
 flights of that morning (branch `claude/foveation-gaze-probe-2ff1267`,
 `src/openvr/gaze_probe.cpp`, Phase 0 item 15 of

@@ -15,8 +15,16 @@ inline bool writeFile(const std::wstring& path, const char* text) {
   const bool ok=WriteFile(h,text,size,&n,nullptr)!=FALSE&&n==size;CloseHandle(h);return ok;
 }
 
+// `place`, when given, stands in for the renames the write makes (iniedit.h,
+// replaceHooksForTest) and is the same stand-in for both: this case is about what
+// the result says once the pair HAS been replaced and a later step fails, so it
+// must not depend on the real renames getting through. A scanner that had d3d11.dll
+// open at the instant of the first replace made the classic rename refuse it and
+// the run stopped there with nothing replaced -- `overwrote` false, correctly --
+// and the check failed about 1 run in 100 under a stand-in for one. That the engine
+// waits such a refusal out is installer_test's (testApplyPatience).
 template<class Check>
-void run(Check check,const std::wstring& root) {
+void run(Check check,const std::wstring& root,ReplaceHook place=nullptr) {
   CreateDirectoryW(root.c_str(),nullptr);
   const auto d3d11=root+L"\\d3d11.dll", runtime=root+L"\\openvr_api.dll", ini=root+L"\\edvr.ini";
   const auto blocker=root+L"\\blocked", backup=root+L"\\edvr_backup";
@@ -37,9 +45,12 @@ void run(Check check,const std::wstring& root) {
     if(item=="openvr"){*data=runtime;*size=sizeof(runtime)-1;return true;}
     return false;
   };
+  if(place)replaceHooksForTest(place,place);
   const ApplyResult result=applyPlan(plan,payload);
+  if(place)replaceHooksForTest(nullptr,nullptr);
   check(!result.ok,"native pair write failure is reported");
   check(result.rolledBack,"native pair write failure rolls back");
+  check(result.done.size()==3,"the pair and the config were written before the failure");
   check(result.overwrote,"rollback reports that existing pair files were overwritten");
   check(readTextFile(d3d11)=="OLD-GRAPHICS","graphics bytes restored after later failure");
   check(readTextFile(runtime)=="OLD-RUNTIME","runtime bytes restored after later failure");

@@ -23,6 +23,7 @@
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/module_pin.h"
 #include "../common/native_startup.h"
 #include "../common/proxy.h"
 #include "device_hook.h"
@@ -277,6 +278,17 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().open(cfg.logDir(), L"gfx");
     edvr::Log::get().note("edvr d3d11 proxy attached; module dir %S",
                           g_moduleDir->c_str());
+    // THIS DLL IS PINNED HERE, once, before anything can start that outlives a
+    // call: the journal worker starts at the first Present tick and fix.ui_quality's
+    // HMD Quality refresh (a thread-pool callback) at the first frame boundary,
+    // and both run this DLL's code on a thread nobody waits for. A FreeLibrary
+    // unload would unmap the image under a pool callback (RC4 review F1; the
+    // worker is held by the CRT's own thread start, but the pin does not lean on
+    // that). Not in DllMain, and after the log opens so the line it writes can be
+    // read: see src/common/module_pin.h. Every path to a device, so to a Present
+    // tick and a frame boundary, comes through the two creation exports that call
+    // this.
+    edvr::pinGraphicsModuleOnce(reinterpret_cast<const void*>(&initOnceCallback));
     edvr::Log::get().note("installation profile: %s; %s", edvr::runtimeProfileName(),
         edvr::runtimeFlatProfile() ? "experimental mono temporal adapter; qualified projection jitter; stereo and unrelated fixes suppressed" :
         edvr::runtimeFeaturesAllowed() ? "VR configuration retained" :
@@ -635,6 +647,13 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
                 edvr::deviceHookNoteCleanExit();
                 edvr::Log::get().detachDuringProcessExit();
             } else {
+                // A FreeLibrary unload. In the game this branch cannot be
+                // reached: Elite's exe imports d3d11.dll statically, so the
+                // load count never gets to zero, and the first device creation
+                // pins this module besides (initOnceCallback, module_pin.h). It
+                // stays for a host that loads the DLL and lets go of it before
+                // that -- a tool, a rig -- where nothing detached is running yet
+                // and this is the right teardown.
                 edvr::breadcrumb("gfx: FreeLibrary unload");
                 shutdown();
             }

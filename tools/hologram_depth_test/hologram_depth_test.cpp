@@ -27,6 +27,15 @@
 using Microsoft::WRL::ComPtr;
 ComPtr<ID3DBlob> compile(const char*, const char*);
 namespace edvr {
+ID3D11VertexShader* shaderSwapCreateVs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11VertexShader* shader=nullptr;
+    if(FAILED(dev->CreateVertexShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
+}
+ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* shader=nullptr;
+    if(FAILED(dev->CreatePixelShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
+}
+
 ID3D11Texture2D* testScene = nullptr;
 std::string g_lastLog;
 // ui_depth.cpp's UI content census reads this (objectProbeLedgerActive,
@@ -79,6 +88,11 @@ ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx, const char* sou
     ID3D11PixelShader* shader = nullptr;
     if (FAILED(dev->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &shader))) std::abort();
     return shader;
+}
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx, const void* bytecode, size_t size,
+    const char*, const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
+    if(FAILED(dev->CreateComputeShader(bytecode,size,nullptr,&shader)))std::abort();return shader;
 }
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx, const char* source, size_t,
     const char*, const char*, const SwapMacro*, const char*) {
@@ -133,6 +147,67 @@ void check(bool ok, const char* label) {
     if (!ok) { std::printf("FAIL: %s\n", label); std::exit(1); }
 }
 void hr(HRESULT result) { check(SUCCEEDED(result), "D3D operation"); }
+
+// Observe production commands on the real WARP context, forwarding every
+// call unchanged. Pixel readback helpers run outside this scope, so READ
+// Maps and staging copies here belong to the production census alone.
+struct CensusCommandSpy {
+    using QueryFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*);
+    using GetDataFn = HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*, void*, UINT, UINT);
+    using MapFn = HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
+    using CopyFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+    using DrawFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT);
+    using DispatchFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT);
+    static CensusCommandSpy* active;
+    ID3D11DeviceContext* ctx;
+    void** original;
+    void* slots[128];
+    unsigned begins = 0, ends = 0, polls = 0, readMaps = 0, stagingCopies = 0, draws = 0, dispatches = 0;
+    static void begin(ID3D11DeviceContext* c, ID3D11Asynchronous* q) {
+        ++active->begins; reinterpret_cast<QueryFn>(active->original[27])(c, q);
+    }
+    static void end(ID3D11DeviceContext* c, ID3D11Asynchronous* q) {
+        ++active->ends; reinterpret_cast<QueryFn>(active->original[28])(c, q);
+    }
+    static HRESULT getData(ID3D11DeviceContext* c, ID3D11Asynchronous* q, void* data, UINT size, UINT flags) {
+        ++active->polls; return reinterpret_cast<GetDataFn>(active->original[29])(c, q, data, size, flags);
+    }
+    static HRESULT map(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, D3D11_MAP kind, UINT flags, D3D11_MAPPED_SUBRESOURCE* out) {
+        if (kind == D3D11_MAP_READ) ++active->readMaps;
+        return reinterpret_cast<MapFn>(active->original[14])(c, r, sub, kind, flags, out);
+    }
+    static void copy(ID3D11DeviceContext* c, ID3D11Resource* dst, ID3D11Resource* src) {
+        D3D11_RESOURCE_DIMENSION kind; dst->GetType(&kind);
+        if (kind == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D11_TEXTURE2D_DESC td{}; static_cast<ID3D11Texture2D*>(dst)->GetDesc(&td);
+            if (td.Usage == D3D11_USAGE_STAGING) ++active->stagingCopies;
+        }
+        reinterpret_cast<CopyFn>(active->original[47])(c, dst, src);
+    }
+    static void draw(ID3D11DeviceContext* c, UINT n, UINT first) {
+        ++active->draws; reinterpret_cast<DrawFn>(active->original[13])(c, n, first);
+    }
+    static void dispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z) {
+        ++active->dispatches; reinterpret_cast<DispatchFn>(active->original[41])(c, x, y, z);
+    }
+    void setTable(void** table) {
+        DWORD old = 0, ignored = 0;
+        check(VirtualProtect(ctx, sizeof(void*), PAGE_READWRITE, &old) != 0, "census spy: context vptr writable");
+        *reinterpret_cast<void***>(ctx) = table;
+        check(VirtualProtect(ctx, sizeof(void*), old, &ignored) != 0, "census spy: context protection restored");
+    }
+    explicit CensusCommandSpy(ID3D11DeviceContext* c) : ctx(c), original(*reinterpret_cast<void***>(c)) {
+        check(active == nullptr, "census spy: one owner");
+        std::memcpy(slots, original, sizeof(slots));
+        slots[27] = reinterpret_cast<void*>(&begin); slots[28] = reinterpret_cast<void*>(&end);
+        slots[29] = reinterpret_cast<void*>(&getData); slots[14] = reinterpret_cast<void*>(&map);
+        slots[47] = reinterpret_cast<void*>(&copy); slots[13] = reinterpret_cast<void*>(&draw);
+        slots[41] = reinterpret_cast<void*>(&dispatch);
+        active = this; setTable(slots);
+    }
+    ~CensusCommandSpy() { setTable(original); active = nullptr; }
+};
+CensusCommandSpy* CensusCommandSpy::active = nullptr;
 ComPtr<ID3DBlob> compile(const char* hlsl, const char* profile) {
     ComPtr<ID3DBlob> blob, errors;
     HRESULT result = D3DCompile(hlsl, std::strlen(hlsl), nullptr, nullptr, nullptr,
@@ -385,6 +460,112 @@ int main() {
     // A world marker hash never in g_holoMarkerDepthShaders, for the
     // fallback cases -- any value but kHoloWorldMarkerReticle's own.
     constexpr uint64_t kHoloUnlistedMarker = 0x1111111111111111ull;
+
+    // The census must not change the rendered depth, and disabling it must
+    // remove diagnostic commands rather than merely stop printing results.
+    // Run on a sampled frame with both a world-marker and resolve query.
+    {
+        const float left[4] = {0.5f, 0.5f, 0.5f, 1.0f}, right[4] = {0.02f, 0.02f, 0.02f, 1.0f};
+        std::vector<float> depths[2];
+        for (unsigned pass = 0; pass < 2; ++pass) {
+            holoDiagnosticsConfigure(pass != 0);
+            frame = (frame | 15u) + 1u; g_frame = frame;
+            ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+            originalDraw(kNear5m, left, right, blendSrcAlphaOne.Get(), false, kBlack, false);
+            g_holoIsWorldMarker = true; g_holoDrawVs = kHoloUnlistedMarker;
+            {
+                CensusCommandSpy spy(ctx.Get());
+                listedReissue();
+                check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "census policy: production resolve runs");
+                holoPollQueries(ctx.Get()); holoPollNearLightCounts(ctx.Get());
+                check(spy.draws == 3 && spy.dispatches == 1, "census policy: both reissues and near-light/resolve run");
+                if (pass == 0) {
+                    check(spy.begins == 0 && spy.ends == 0 && spy.polls == 0, "census off: no query issue or poll");
+                    check(spy.stagingCopies == 0 && spy.readMaps == 0, "census off: no staging copy or read Map");
+                    for (auto* t : g_holoScratch[0].nearLightStage) check(t == nullptr, "census off: no staging allocation");
+                } else {
+                    check(spy.begins == 2 && spy.ends == 2 && spy.polls > 0, "census on: marker and resolve queries issued/polled");
+                    check(spy.stagingCopies == 1 && spy.readMaps > 0, "census on: sampled map copy and nonwaiting read attempted");
+                }
+            }
+            depths[pass] = privateDepth();
+        }
+        check(depths[0] == depths[1], "census policy: every production output depth agrees on/off");
+        check(std::fabs(depths[0][1] - kNear5m) < 1e-5f && std::fabs(depths[0][6] - kFillerDepth) < 1e-5f,
+              "census policy: bright depth and dark filler remain correct");
+
+        // A scratch resize drops every query ring, the marker's included (it
+        // used to release only the resolve's and leak the marker queries).
+        // The census-on pass above left a marker query in the ring; hold one
+        // reference of my own across the resize and read what is left.
+        {
+            ID3D11Query* marker = nullptr;
+            for (auto* q : g_holoScratch[0].markerOcclusion) if (q) { marker = q; break; }
+            check(marker != nullptr, "resize: the census-on pass left a marker query to watch");
+            if (marker) {
+                marker->AddRef();
+                HoloScratch* resized = holoScratchFor(ctx.Get(), 0, 9, 9);
+                check(resized != nullptr && resized->w == 9, "resize: the scratch is remade at the new size");
+                const ULONG mine = (marker->AddRef(), marker->Release());
+                check(mine == 1, "resize: the marker query ring's reference is released, not leaked");
+                marker->Release();
+                check(holoScratchFor(ctx.Get(), 0, 8, 8) != nullptr, "resize: back to the test's size");
+            }
+        }
+
+        // Fill the census quota: the render path still runs, but no new
+        // query or copy may be issued to throw its result away.
+        g_holoPixelSampleCount = g_holoMarkerSampleCount = g_holoNearLightSampleCount = kHoloPixelSamples;
+        frame = (frame | 15u) + 1u; g_frame = frame;
+        originalDraw(kNear5m, left, right, blendSrcAlphaOne.Get(), false, kBlack, false);
+        g_holoIsWorldMarker = true;
+        {
+            CensusCommandSpy spy(ctx.Get());
+            listedReissue();
+            check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "census quota: production resolve runs");
+            check(spy.begins == 0 && spy.ends == 0 && spy.stagingCopies == 0, "census quota: no discarded query/copy work");
+            check(spy.draws == 3 && spy.dispatches == 1, "census quota: output work retained");
+        }
+        // Leave commands explicitly pending before the live transition;
+        // turning off must abandon them instead of polling stale samples.
+        g_holoPixelSampleCount = g_holoMarkerSampleCount = g_holoNearLightSampleCount = 0;
+        frame = (frame | 15u) + 1u; g_frame = frame;
+        originalDraw(kNear5m, left, right, blendSrcAlphaOne.Get(), false, kBlack, false);
+        listedReissue();
+        check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "census live toggle: queued resolve");
+        bool pending = false;
+        for (unsigned i = 0; i < kHoloQueryRing; ++i)
+            pending = pending || g_holoScratch[0].occlusionPending[i] || g_holoScratch[0].nearLightStagePending[i];
+        check(pending, "census live toggle: actual commands pending before off");
+        holoDiagnosticsConfigure(false);
+        check(g_holoPixelSampleCount == 0 && g_holoMarkerSampleCount == 0 && g_holoNearLightSampleCount == 0,
+              "census live off: prior samples cleared");
+        for (const auto& s : g_holoScratch) for (unsigned i = 0; i < kHoloQueryRing; ++i)
+            check(!s.occlusion[i] && !s.markerOcclusion[i] && !s.nearLightStage[i] &&
+                  !s.occlusionPending[i] && !s.markerOcclusionPending[i] && !s.nearLightStagePending[i],
+                  "census live off: resources and pending slots released");
+        {
+            frame = (frame | 15u) + 1u; g_frame = frame;
+            originalDraw(kNear5m, left, right, blendSrcAlphaOne.Get(), false, kBlack, false);
+            CensusCommandSpy spy(ctx.Get());
+            listedReissue();
+            check(uiDepthHologramResolve(ctx.Get(), 0, sceneTex.Get(), 8, 8, nullptr), "census live off: resolve continues");
+            holoPollQueries(ctx.Get()); holoPollNearLightCounts(ctx.Get());
+            g_holoWindowStartMs = GetTickCount64() - 30001;
+            holoDepthWindowTick(ctx.Get());
+            check(spy.begins == 0 && spy.ends == 0 && spy.polls == 0 && spy.readMaps == 0 && spy.stagingCopies == 0,
+                  "census live off: no new commands or stale pending polling");
+        }
+        check(privateDepth() == depths[0], "census live off: output depth still equivalent");
+        check(g_lastLog.find("GPU pixel census off") != std::string::npos &&
+              g_lastLog.find("pixel counts unavailable") != std::string::npos &&
+              g_lastLog.find("stamped pixels") == std::string::npos, "census off: heartbeat labels unavailable pixel counts");
+        g_holoIsWorldMarker = false;
+        // Existing numerical/census tests deliberately collect diagnostics.
+        holoDiagnosticsConfigure(true);
+        check(g_holoPixelSampleCount == 0 && g_holoMarkerSampleCount == 0 && g_holoNearLightSampleCount == 0,
+              "census live on: starts with fresh samples");
+    }
 
     // T1/T2: a listed quad at cockpit depth (5 m, inside the radius) over
     // far scene depth (0 = reversed-Z far, "the sky") -- SRC_ALPHA/ONE,

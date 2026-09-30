@@ -27,6 +27,12 @@ that only ever appears inside one is reload-only by definition.
 
 It runs in BOTH repos' builds, over their own copies, because the failure was
 that the two copies differed.
+
+`--self-test` runs the check over C++ fixtures in the temp folder: the reader
+called on both paths, only on reload (the shipped bug), never on reload, never
+at all, the early-return guard form, a declaration that is not a call, and a
+file that moved. A scanner that drifts from the shape it reads fails in the
+build, not in the ten minutes after a flight reproduced the effect.
 """
 import os
 import re
@@ -161,5 +167,111 @@ def main():
     return 0
 
 
+def self_test():
+    """The check over fixtures laid out in the temp folder. Each one is a
+    shape the real file's call sites could take; the check must pass exactly
+    the ones with a call on the install path AND a call on the reload path."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+
+    global ROOT, READERS
+    saved = (ROOT, READERS)
+    base = tempfile.mkdtemp(prefix='edvr-install-reads-')
+    failures = []
+
+    def run(name, text):
+        """The check's verdict on one file (None = the file is absent)."""
+        global ROOT, READERS
+        root = os.path.join(base, name)
+        os.makedirs(os.path.join(root, 'src'))
+        if text is not None:
+            with open(os.path.join(root, 'src', 'hook.cpp'), 'w', encoding='utf-8') as f:
+                f.write(text)
+        ROOT, READERS = root, [('readThing', os.path.join('src', 'hook.cpp'))]
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            code = main()
+        return code, said.getvalue()
+
+    def expect(name, code, said, want_code, *needles):
+        if code != want_code:
+            failures.append('%s: exit %d, expected %d\n%s' % (name, code, want_code, said))
+            return
+        for needle in needles:
+            if needle not in said:
+                failures.append('%s: expected %r in\n%s' % (name, needle, said))
+
+    definition = 'void readThing(const Config& cfg) { g_thing = cfg.getInt("fix.thing", 1); }\n'
+
+    try:
+        # Called where the hook is installed, and again from the reload block:
+        # the only shape that is both live-tunable and applied at startup.
+        code, said = run('both', definition +
+                         'void install() { readThing(cfg); }\n'
+                         'void poll() {\n'
+                         '    if (cfg.reloadIfChanged()) {\n'
+                         '        readThing(cfg);\n'
+                         '    }\n'
+                         '}\n')
+        expect('both', code, said, 0, 'readThing()', '2 call(s), 1 on the install path (line 2)',
+               'INSTALL READ CHECK PASSED')
+
+        # The shipped bug: the only call is inside the reload block, which
+        # returns early unless the ini's write time moved.
+        code, said = run('reload-only', definition +
+                         'void poll() {\n'
+                         '    if (cfg.reloadIfChanged()) {\n'
+                         '        readThing(cfg);\n'
+                         '    }\n'
+                         '}\n')
+        expect('reload-only', code, said, 1, 'is called only from the config-reload path',
+               '(line(s) 4, all inside reloadIfChanged)', 'INSTALL READ CHECK FAILED (1)')
+
+        # The other half the docstring claims: deleting the reload call is
+        # startup-only, and the ini advertises the settings as live.
+        code, said = run('install-only', definition + 'void install() { readThing(cfg); }\n')
+        expect('install-only', code, said, 1, 'is never called from the config-reload path')
+
+        # A definition and a declaration are not calls.
+        code, said = run('never-called', definition + 'void readThing(Config& cfg);\n')
+        expect('never-called', code, said, 1, 'readThing() is never called in ')
+
+        # The early-return form guards the rest of its function: that call is
+        # reload-only, and the install path's own call is what saves it.
+        guarded = (definition +
+                   'void poll() {\n'
+                   '    if (!cfg.reloadIfChanged()) return;\n'
+                   '    readThing(cfg);\n'
+                   '}\n')
+        code, said = run('guarded-only', guarded)
+        expect('guarded-only', code, said, 1, 'is called only from the config-reload path')
+        code, said = run('guarded-and-install', guarded + 'void install() { readThing(cfg); }\n')
+        expect('guarded-and-install', code, said, 0, '2 call(s), 1 on the install path (line 6)')
+
+        # A call with no argument, and one in a nested block on the install
+        # path, are calls; a longer name that merely ends in the reader's is not.
+        code, said = run('other-callers', definition +
+                         'void install() { if (x) { readThing(); } }\n'
+                         'void poll() { if (cfg.reloadIfChanged()) { prereadThing(cfg); } }\n')
+        expect('other-callers', code, said, 1, 'is never called from the config-reload path')
+
+        # The file moved: say so, do not pass.
+        code, said = run('moved', None)
+        expect('moved', code, said, 1, 'src' + os.sep + 'hook.cpp does not exist')
+    finally:
+        ROOT, READERS = saved
+        shutil.rmtree(base, ignore_errors=True)
+
+    if failures:
+        print('check_install_reads: self-test FAILED')
+        for f in failures:
+            print('  ' + f.replace('\n', '\n    '))
+        return 1
+    print('check_install_reads: self-test OK')
+    return 0
+
+
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(self_test() if '--self-test' in sys.argv[1:] else main())

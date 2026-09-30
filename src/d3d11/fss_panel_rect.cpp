@@ -626,7 +626,7 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
             g_failNoted = true;
             Log::get().note(
                 "fss panel rect: the capture frame did not decode to a "
-                "plausible screen family; the theater keeps its centred "
+                "plausible screen family; the screen keeps its centred "
                 "band and no draw is skipped. Said once.");
         }
     });

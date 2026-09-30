@@ -44,7 +44,9 @@ struct PayloadInfo {
     std::string openxrLoaderSha;
     bool        haveOpenxrLicense = false;
     std::string openxrLicenseSha;
-    std::string iniText;  // the shipped default edvr.ini
+    // The shipped default settings of this edition: edvr.ini's text for VR,
+    // edvr-flat.ini's for flat (state.h: settingsLeafFor names the file it becomes).
+    std::string iniText;
 };
 
 // The folder as it is right now.
@@ -58,6 +60,11 @@ struct Survey {
     // executable's name alone stopped the folder nobody was in.
     bool gameRunningHere = false;       // from this folder: nothing here can be written
     bool gameRunningElsewhere = false;  // from another install: this folder is free
+    // The process list could not be read, so whether the game is running is not
+    // known. Refused like gameRunningHere -- a check that failed is not a check
+    // that passed -- but with its own words, since closing the game will not
+    // fix it.
+    bool gameRunStateUnknown = false;
 
     DllInfo              d3d11;       // <game>\d3d11.dll
     DllInfo              openxrLoader; // <game>\Openvr\win64\openxr_loader.dll
@@ -67,8 +74,16 @@ struct Survey {
     bool                 iniPresent = false;
     bool                 descriptorPresent = false;
     std::string          descriptorSha;
-    std::string iniText;      // the user's edvr.ini
-    std::string baseIniText;  // the shipped ini of the installed version, if kept
+    // <game>\edvr.ini: the VR profile's settings, and -- only until edvr-flat.ini
+    // exists -- what the flat runtime reads as well.
+    std::string iniText;
+    // <game>\edvr-flat.ini: the flat profile's own settings. Two files, so a flat
+    // operation and a VR one never touch each other's tuning.
+    bool        flatIniPresent = false;
+    std::string flatIniText;
+    // The shipped settings of the installed edition's version, if kept. One file
+    // for both editions: it belongs to whichever the record says is installed.
+    std::string baseIniText;
 
     // NVIDIA's DLSS runtime beside the game, and whether this machine has a
     // card for it: an NVIDIA adapter by DXGI's vendor id. A machine with an
@@ -104,16 +119,21 @@ Survey surveyTarget(const GameInstall& game);
 // the installed edition after a developer install or lost installer record.
 std::string installedProfile(const Survey& survey);
 
+// Whether the folder holds a settings file `profile` would read: its own, or, for
+// flat, the shared edvr.ini that the flat runtime falls back to until it has one
+// of its own. What "this folder has lost its settings" is asked in terms of.
+bool hasSettingsFor(const Survey& survey, const std::string& profile);
+
 struct Options {
     // Which halves to install is not a choice. Both files are the patch: the
     // transition flash fix and Explorer Cam live in openvr_api.dll, and an
     // install with only one of them is a support thread waiting to happen --
     // the log says a fix stood down, and the person reading it has no idea they
     // opted out of it. What this installer carries is what it installs.
-    bool keepSettings = true;   // merge the existing edvr.ini rather than replace it
+    bool keepSettings = true;   // merge the edition's settings file rather than replace it
     bool repair = false;        // rewrite our files even when they look right
     bool convertProfile = false; // explicit edition conversion
-    bool removeSettings = false;  // uninstall: delete edvr.ini too
+    bool removeSettings = false;  // uninstall: delete the installed edition's settings file too
     std::wstring backupStamp;   // folder name under edvr_backup\; caller supplies the clock
     std::string  nowUtc;        // stamped into the install record
 };
@@ -159,6 +179,9 @@ struct Plan {
     MergeReport              merge;
     InstallState             nextState;
     std::wstring             backupDir;
+    // The settings file this plan works on ("edvr.ini" or "edvr-flat.ini"), for
+    // the report to name; empty when the plan touches none.
+    std::string              settingsFile;
 };
 
 Plan planInstall(const Survey& survey, const Options& options, const PayloadInfo& payload);

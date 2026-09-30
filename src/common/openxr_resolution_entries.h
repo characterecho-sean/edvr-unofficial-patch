@@ -14,7 +14,9 @@
 //
 // Each key names the range its own values live in: a render width in
 // 1..16384 for fix.openxr_resolution, degrees in 0..30 for the field-of-view
-// trims. A bare number on its own (180, 3283, 5, or the older 1.8) names no
+// trims (experimental.fov_trim_*: read here, and set in edvr.ini by hand -- the
+// menu writes only the resolution list). A bare number on its own (180, 3283,
+// 5, or the older 1.8) names no
 // headset and is a malformed token, which the graphics log names once. The
 // Resolution* names below are the width-ranged wrappers, so every call site
 // that predates the second user reads exactly as it did.

@@ -98,6 +98,8 @@ XrResult XRAPI_PTR release(XrSwapchain chain,const XrSwapchainImageReleaseInfo* 
 StereoDispatch dispatch(){return {formats,create,destroy,images,acquire,wait,release};}
 struct Fixture {
   Fake runtime;D3D11Stereo renderer;XrViewConfigurationView sizes[2]{};XrView views[2]{};
+  // A valid captured pair for tests of the swapchain lifecycle (renderPair).
+  EyeCapture pair;ComPtr<ID3D11Texture2D> pairSource;bool pairReady=false;
   Fixture(bool hardware=false){
     fake=&runtime;D3D_FEATURE_LEVEL level{};
     check(SUCCEEDED(createDevice(hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,0,&runtime.device,&level,&runtime.context)),"fixture device");
@@ -118,24 +120,6 @@ struct Fixture {
   }
 };
 unsigned encode(double linear){return unsigned(std::lround((linear<=.0031308?12.92*linear:1.055*std::pow(linear,1/2.4)-.055)*255));}
-void checkPixel(uint32_t pixel){
-  // Independent ray/triangle barycentrics at sample (64.5,59.5) in a 128px view.
-  const double b=.28125,g=.3854166666666667,r=1-b-g;
-  const unsigned expected[]={encode(r),encode(g),encode(b),255};
-  for(unsigned i=0;i<4;++i)check(std::abs(int((pixel>>(i*8))&255)-int(expected[i]))<=2,"independent RGB triangle sample");
-}
-void checkRayPixel(uint32_t pixel,unsigned x,unsigned y,double headX,double yaw,
-                   double left=-1,double right=1,double up=1,double down=-1){
-  // Trace an independent camera ray to world plane z=-2, then compute
-  // triangle barycentrics. This catches inverse-pose and asymmetry signs.
-  const double tx=left+(x+.5)/size*(right-left),ty=up-(y+.5)/size*(up-down);
-  const double t=2/(std::sin(yaw)*tx+std::cos(yaw));
-  const double wx=headX+t*(std::cos(yaw)*tx-std::sin(yaw)),wy=t*ty;
-  const double b=wy/.5,g=(wx/.3+1-b)/2,r=1-b-g;
-  check(r>0&&g>0&&b>0,"oracle ray intersects diagnostic triangle");
-  const unsigned expected[]={encode(r),encode(g),encode(b),255};
-  for(unsigned i=0;i<4;++i)check(std::abs(int((pixel>>(i*8))&255)-int(expected[i]))<=3,"independent transformed ray color");
-}
 
 ComPtr<ID3D11Texture2D> pattern(Fixture& f,bool bgra) {
   D3D11_TEXTURE2D_DESC d{};d.Width=d.Height=4;d.MipLevels=d.ArraySize=1;
@@ -154,6 +138,18 @@ ComPtr<ID3D11Texture2D> pattern(Fixture& f,bool bgra) {
 void pixelNear(uint32_t actual,uint32_t expected,const char* name) {
   bool match=true;for(unsigned c=0;c<4;++c)match=match&&std::abs(int((actual>>(8*c))&255)-int((expected>>(8*c))&255))<=2;
   check(match,name);
+}
+// The renderer draws no scene of its own: the lifecycle tests drive it with a
+// valid captured pair instead.
+XrResult renderPair(Fixture& f,XrCompositionLayerProjection& layer) {
+  if(!f.pairReady) {
+    check(SUCCEEDED(f.pair.initialize(f.runtime.device.Get())),"pair capture owner");
+    f.pairSource=pattern(f,false);
+    const vr::Texture_t t{f.pairSource.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+    check(f.pair.capture(vr::Eye_Left,&t)==vr::VRCompositorError_None&&f.pair.capture(vr::Eye_Right,&t)==vr::VRCompositorError_None,"pair capture");
+    f.pairReady=true;
+  }
+  return f.renderer.renderCaptured(f.views,space,f.pair,layer);
 }
 void capturedSelfTest(bool owned=false) {
   for(bool unorm:{false,true})for(bool bgra:{false,true}) {
@@ -213,30 +209,6 @@ void capturedSelfTest(bool owned=false) {
       std::thread foreign([&]{wrong=f.renderer.renderCaptured(f.views,space,capture,layer);});foreign.join();
       check(wrong==XR_ERROR_CALL_ORDER_INVALID&&f.runtime.trace.empty(),"owned scene rejects foreign thread before touching context/runtime");
     }
-  }
-  for(bool unorm:{false,true}) {
-    Fixture f;f.runtime.unorm=unorm;check(f.init(owned)==XR_SUCCESS,"offscreen fixture");
-    f.views[0].pose.position.x=.2f;f.views[1].pose.orientation={0,float(std::sin(.1)),0,float(std::cos(.1))};
-    XrCompositionLayerProjection layer{};check(f.renderer.render(f.views,space,layer)==XR_SUCCESS,"direct reference scene");
-    uint32_t reference[2]={f.pixel(0,0,58,59),f.pixel(1,0,77,59)};
-    EyeCapture capture;check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"offscreen capture owner");
-    for(unsigned eye=0;eye<2;++eye) {
-      ID3D11Texture2D* source=nullptr;const auto trace=f.runtime.trace;
-      check(f.renderer.drawEye(eye,f.views[eye],source)==XR_SUCCESS&&source&&f.runtime.trace==trace,"offscreen draw has no XR calls");
-      vr::Texture_t t{source,vr::API_DirectX,vr::ColorSpace_Gamma};
-      check(capture.capture(vr::EVREye(eye),&t)==vr::VRCompositorError_None,"offscreen eye copied");
-    }
-    check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_SUCCESS,"offscreen pair composed");
-    pixelNear(f.pixel(0,1,58,59),reference[0],"offscreen translated view matches direct scene");
-    pixelNear(f.pixel(1,1,77,59),reference[1],"offscreen rotated view matches direct scene");
-    for(auto& v:f.views){v.pose.position.x=0;v.pose.orientation={0,0,0,1};v.fov={float(std::atan(-.8)),float(std::atan(1.2)),float(std::atan(1.0)),float(std::atan(-.7))};}
-    for(unsigned eye=0;eye<2;++eye) {
-      ID3D11Texture2D* source=nullptr;check(f.renderer.drawEye(eye,f.views[eye],source)==XR_SUCCESS,"asymmetric offscreen draw");
-      vr::Texture_t t{source,vr::API_DirectX,vr::ColorSpace_Gamma};
-      check(capture.capture(vr::EVREye(eye),&t)==vr::VRCompositorError_None,"asymmetric capture");
-    }
-    check(f.renderer.renderCaptured(f.views,space,capture,layer)==XR_SUCCESS,"asymmetric captured pair");
-    checkRayPixel(f.pixel(0,0,51,67),51,67,0,0,-.8,1.2,1,-.7);
   }
   for(const char* point:{"A0","W0","R0","A1","W1","R1"})for(XrResult error:{XR_ERROR_RUNTIME_FAILURE,XR_SESSION_LOSS_PENDING,XR_TIMEOUT_EXPIRED}) {
     if(error==XR_TIMEOUT_EXPIRED&&point[0]!='W')continue;
@@ -525,14 +497,6 @@ void desktopStateSelfTest() {
     if(failures)return;
     verify(f,s,"sentinel setup actually bound");
     XrCompositionLayerProjection layer{};
-    check(f.renderer.render(f.views,space,layer)==XR_SUCCESS,"state direct render");
-    verify(f,s,"direct render preserves immediate state");
-    f.runtime.context->SetPredication(nullptr,FALSE);
-    checkPixel(f.pixel(0,0,64,59));
-    f.runtime.context->SetPredication(s.predicate.Get(),TRUE);
-    ID3D11Texture2D* output=nullptr;
-    check(f.renderer.drawEye(0,f.views[0],output)==XR_SUCCESS&&output,"state drawEye");
-    verify(f,s,"drawEye preserves immediate state");
     check(f.renderer.renderCaptured(f.views,space,captured,layer)==XR_SUCCESS,"state captured render");
     verify(f,s,"captured render preserves immediate state");
     check(f.renderer.renderSkybox(f.views,space,sky,layer)==XR_SUCCESS,"state skybox render");
@@ -542,7 +506,7 @@ void desktopStateSelfTest() {
   }
   // Every renderer path must preserve state even when a pair fails after the
   // first eye was executed. Separate fixtures keep uncertain images retired.
-  for(unsigned path=0;path<3;++path) {
+  for(unsigned path=0;path<2;++path) {
     for(const char* point:{"A0","W0","R0","A1","W1","R1","timeout0","timeout1","invalid"}) {
       Fixture f;check(f.init()==XR_SUCCESS,"failure state fixture init");
       EyeCapture captured;
@@ -568,8 +532,7 @@ void desktopStateSelfTest() {
       f.runtime.trace.clear();
       XrCompositionLayerProjection layer{};
       auto render=[&] {
-        if(path==0)return f.renderer.render(f.views,space,layer);
-        if(path==1)return f.renderer.renderCaptured(f.views,space,captured,layer);
+        if(path==0)return f.renderer.renderCaptured(f.views,space,captured,layer);
         return f.renderer.renderSkybox(f.views,space,sky,layer);
       };
       check(render()==expected,"state failure result");
@@ -637,39 +600,16 @@ int selfTest(){
     Fixture f;f.runtime.unorm=unorm;f.runtime.grow=true;check(f.init()==XR_SUCCESS,"initialize actual swapchains/RTVs/shaders");
     check(f.runtime.formatCalls==3,"growing format count retry");XrCompositionLayerProjection layer{};
     for(unsigned image=0;image<2;++image){
-      f.runtime.trace.clear();check(f.renderer.render(f.views,space,layer)==XR_SUCCESS,"stereo render");
+      f.runtime.trace.clear();check(renderPair(f,layer)==XR_SUCCESS,"stereo render");
       check(f.runtime.trace==std::vector<std::string>({"A0","W0","R0","A1","W1","R1"}),"exact stereo image order");
       check(layer.space==space&&layer.viewCount==2&&layer.views,"projection layer contract");
       for(unsigned eye=0;eye<2;++eye){
         check(std::memcmp(&layer.views[eye].pose,&f.views[eye].pose,sizeof(XrPosef))==0&&std::memcmp(&layer.views[eye].fov,&f.views[eye].fov,sizeof(XrFovf))==0,"exact submitted pose/FOV");
         check(layer.views[eye].subImage.imageRect.extent.width==size&&layer.views[eye].subImage.imageArrayIndex==0,"full image metadata");
-        checkPixel(f.pixel(eye,image,64,59));check(f.pixel(eye,image,0,0)==0xff000000,"defined opaque background");
       }
       if(image==0)check(f.pixel(0,1,0,0)==0xffff00ff,"unacquired image untouched");
     }
-    f.views[0].pose.position.x=.2f;f.views[1].pose.orientation={0,float(std::sin(.1)),0,float(std::cos(.1))};
-    check(f.renderer.render(f.views,space,layer)==XR_SUCCESS,"translated and rotated view");
-    check(f.pixel(0,0,64,59)==0xff000000,"translation moves triangle from central ray");
-    check(f.pixel(1,0,64,59)==0xff000000,"yaw moves triangle from central ray");
-    checkRayPixel(f.pixel(0,0,58,59),58,59,.2,0);
-    checkRayPixel(f.pixel(1,0,77,59),77,59,0,.2);
-    for(auto& v:f.views){v.pose.position.x=0;v.pose.orientation={0,0,0,1};v.fov={float(std::atan(-.8)),float(std::atan(1.2)),float(std::atan(1.0)),float(std::atan(-.7))};}
-    check(f.renderer.render(f.views,space,layer)==XR_SUCCESS,"asymmetric native FOV render");
-    checkRayPixel(f.pixel(0,1,51,67),51,67,0,0,-.8,1.2,1,-.7);
     check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==2,"all swapchains destroyed");
-  }
-  for(const char* point:{"A0","W0","R0","A1","W1","R1"})for(XrResult error:{XR_ERROR_RUNTIME_FAILURE,XR_SESSION_LOSS_PENDING}){
-    Fixture f;check(f.init()==XR_SUCCESS,"failure fixture init");f.runtime.failure=point;f.runtime.error=error;f.runtime.trace.clear();
-    XrCompositionLayerProjection layer{};check(f.renderer.render(f.views,space,layer)==error,"exact runtime result retained");
-    check(layer.viewCount==0&&!layer.views,"failed pair has no layer");
-    const auto trace=f.runtime.trace;check(!trace.empty()&&trace.back()==point,"no calls after uncertain failure");
-    check(f.renderer.render(f.views,space,layer)==error&&f.runtime.trace==trace,"failed renderer blocks retry");
-  }
-  for(const char* point:{"W0","W1"}){
-    Fixture f;check(f.init()==XR_SUCCESS,"timeout fixture init");f.runtime.failure=point;f.runtime.error=XR_TIMEOUT_EXPIRED;f.runtime.trace.clear();
-    XrCompositionLayerProjection layer{};check(f.renderer.render(f.views,space,layer)==XR_TIMEOUT_EXPIRED,"timeout positive preserved");
-    check(f.runtime.trace.back()==point,"timeout never releases unwaited image");
-    check(f.pixel(point[1]-'0',0,0,0)==0xffff00ff,"timeout image not drawn");
   }
   for(unsigned variant=0;variant<7;++variant){
     Fixture f;

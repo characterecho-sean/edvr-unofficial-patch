@@ -27,6 +27,11 @@
 - **Cockpit holograms and icons over the sky** (the radar's star icon, the
   ship and target holograms): a generic depth pass inside B0, BUILT
   2026-09-24, not flown -- [hologram-depth-2026-09-24.md](hologram-depth-2026-09-24.md).
+- **The HUD experiments `experimental.holo_panels` (`panel_upscale.cpp`),
+  `hud_icons` (`hud_sprite.h`) and `hud_grain` (`hud_grain.cpp`) retired
+  2026-09-29 (code removed, 0467e706).** The "Resample the surface"
+  fallback, A7's composition notes and the file cites below refer to deleted
+  code, which is at `0467e706^`; the layer took their place.
 - The gates: G1, G2, G3, G6, G8, G10 answered from censuses (2026-09-06,
   below); G9 is `fix.ui_quality`'s surfaces flight (ui-layer-2026-09-23.md;
   `fix.hud_quality` and its note were folded into that key and that note).
@@ -924,7 +929,8 @@ in this plan: the fallback if inflation cannot reach the letters.
 **Resample the surface (Sean's CAS).** `experimental.holo_panels = sharp`
 (`panel_upscale.cpp`) does exactly this for one panel: AMD's EASU then RCAS
 over the interface surface into an EDVR texture, bound into slot 2 for the
-matched draws. Generalising it to every learned surface is a small change.
+matched draws (deleted 2026-09-29 in 0467e706; the code is at `0467e706^`).
+Generalising it to every learned surface is a small change.
 But it is a spatial upscale of a two-thirds rasterisation: it cleans edges
 and adds no detail (the file's own header: "No resampler invents detail"),
 it costs a full resample per surface per frame (19.5 Mpx of EASU for one
@@ -996,7 +1002,8 @@ composites the frame in flight and stops redirecting at the next boundary.
   final size is the resolve's output and the map handles it.
 - **`fix.render_sharpness`.** Before the composite by construction.
 - **`experimental.holo_panels = sharp`.** Composes; redundant once
-  `crisp_ui_surfaces = match` inflates the same surface.
+  `crisp_ui_surfaces = match` inflates the same surface. (Deleted 2026-09-29,
+  0467e706.)
 - **The foveation branch** (`claude/foveation-gaze-probe-2ff1267`,
   unmerged). Independent: the composite is the last step, after the
   fovea/periphery join.

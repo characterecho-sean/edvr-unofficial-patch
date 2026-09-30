@@ -39,7 +39,8 @@ struct MenuRowDef {
     // A per-headset list (`# ui: ... | headset`): the value is
     // `runtime/system:value` entries, of which the row shows and edits only
     // the worn headset's, and `lo`/`hi` bound one entry's value rather than
-    // the whole string. fix.openxr_resolution and the field-of-view trims.
+    // the whole string. fix.openxr_resolution. (The field-of-view trims were
+    // the other such rows until 2026-09-29; they are ini-only now.)
     bool        headset;
     int         applies;   // 0 not documented, 1 live, 2 needs a game restart
     MenuTier    tier;

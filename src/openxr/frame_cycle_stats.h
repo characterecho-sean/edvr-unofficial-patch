@@ -49,7 +49,7 @@ class FrameCycleStats final {
     unsigned(TestPresent)==unsigned(EdvrCpuTestPresent)&&unsigned(MalformedPresent)==unsigned(EdvrCpuMalformedPresent),"native CPU post status ABI");
   struct PostRequest {uint64_t sequence=0,beginUs=0;uint32_t thread=0;};
   struct Completed {
-    uint64_t sequence=0,generation=0,featureEpoch=0,waitReturnUs=0,
+    uint64_t sequence=0,producerSequence=0,generation=0,featureEpoch=0,waitReturnUs=0,
       secondSubmitReturnUs=0,nextWaitEntryUs=0,nextWaitReturnUs=0,
       presentBeginUs=0,presentEndUs=0;
     uint32_t callerThread=0,nextWaitThread=0,sceneReady=0;
@@ -58,6 +58,17 @@ class FrameCycleStats final {
     // a single sample, not the window's Dist.
     double cycleMs=0,beforeFirstMs=0,firstSubmitMs=0,betweenEyesMs=0,secondSubmitMs=0,
       afterSecondMs=0,nextWaitMs=0,waitOwnerMs=0,submitOwnerMs[2]{},renderParkMs[2]{};
+    // afterSecondMs (post_second_submit_to_next_wait) cut at Elite's Present, from
+    // the graphics half's Present trace (native_present_trace.h): the game's time
+    // before the hook, the hook (EDVR's work plus the driver's Present), and the
+    // game's time after it. presentSplit is true only for a cycle that held
+    // exactly one valid Present; otherwise the parts stay 0, and presentCount
+    // (0 also when the trace was rejected) with postUnavailable say why.
+    // prePresentMs+presentHookMs+postPresentMs == afterSecondMs, and the four hook
+    // parts sum to presentHookMs: the graphics half's marks are the trace's five.
+    bool presentSplit=false;uint32_t presentCount=0;
+    double prePresentMs=0,presentHookMs=0,hookBeforeRealMs=0,hookRealMs=0,
+      hookAfterRealMs=0,hookCallbackMs=0,postPresentMs=0;
   };
   struct Report {
     uint64_t window=0,firstSequence=0,lastSequence=0,elapsedMs=0,admitted=0;
@@ -105,13 +116,16 @@ class FrameCycleStats final {
     if(!pendingFrameEndOwnerBegin_||tick<pendingFrameEndOwnerBegin_)return;
     pendingFrameEndOwnerMs_=double(tick-pendingFrameEndOwnerBegin_)*0.001;pendingFrameEndOwnerBegin_=0;
   }
-  void waitCallerEnd(uint64_t token,uint64_t sequence,uint64_t tick,uint64_t nowMs,uint32_t thread,const Shape& shape,bool ok) noexcept {
+  void waitCallerEnd(uint64_t token,uint64_t sequence,uint64_t tick,uint64_t nowMs,uint32_t thread,const Shape& shape,bool ok,uint64_t producerSequence=0) noexcept {
     std::lock_guard<std::mutex> l(m_);completedReady_=false;callerWorkFor_=0;callerWorkMeasured_=false;
     if(!ok||!token||wait_.token!=token||!wait_.open||!ordered(wait_.begin,wait_.ownerBegin,wait_.ownerEnd,tick)||thread!=wait_.thread){advanceWindow(nowMs,shape,sequence);bad(!ok?PartialStereo:BadClock);if(wait_.token==token)wait_={};return;}
     if(current_.active&& !sameShape(current_.shape,shape)){++missing_[ShapeChange];if(windowStartMs_)makeReport(lastAttemptedSequence_,nowMs);current_={};}
     else if(current_.active) finishCurrent(tick,nowMs,thread);
     advanceWindow(nowMs,shape,sequence);
     current_={};current_.active=true;current_.sequence=sequence;current_.waitReturn=tick;
+    // Capture the producer identity when this cycle opens. finishCurrent()
+    // closes it on the NEXT wait; that next wait's token belongs elsewhere.
+    current_.producerSequence=shape.sceneReady&&shape.shouldRender?producerSequence:0;
     current_.waitRound=tick-wait_.begin;current_.waitOwner=wait_.ownerEnd-wait_.ownerBegin;
     current_.callerThread=thread;current_.waitThread=thread;current_.shape=shape;current_.atMs=nowMs;wait_={};
     // The cycle this wait return just closed hands its caller work to the
@@ -174,7 +188,7 @@ class FrameCycleStats final {
   static constexpr unsigned handoffCapacity=16;
   struct Handoff {uint64_t begin=0,end=0;};
   struct Wait {bool open=false;uint64_t token=0,begin=0,ownerBegin=0,ownerEnd=0;uint32_t thread=0;};
-  struct Current {bool active=false,submitOpen=false;uint64_t sequence=0,waitReturn=0,waitRound=0,waitOwner=0,
+  struct Current {bool active=false,submitOpen=false;uint64_t sequence=0,producerSequence=0,waitReturn=0,waitRound=0,waitOwner=0,
     beforeFirst=0,between=0,afterSecond=0,submitToken=0,submitBegin=0,ownerBegin=0,ownerEnd=0,submitReturn[2]{},submitRound[2]{},owner[2]{},atMs=0;
     bool afterSecondReady=false;
     double park[2]{},presentCount=0,rawPresent=0,edvrBeforePresent=0,edvrAfterPresent=0,edvrPresent=0,trailingCallback=0,outsidePresent=0,postResidual=0,beforePresent=0,afterPresent=0,syncNonzeroPresent=0;
@@ -258,6 +272,7 @@ class FrameCycleStats final {
     callerWorkMeasured_=std::isfinite(callerWorkMs_)&&callerWorkMs_>=0;
     if(!admit(s,current_.shape,nowMs))return;
     completed_={};completed_.sequence=current_.sequence;completed_.generation=current_.shape.generation;
+    completed_.producerSequence=current_.producerSequence;
     completed_.featureEpoch=current_.shape.featureEpoch;completed_.waitReturnUs=current_.waitReturn;
     completed_.secondSubmitReturnUs=current_.submitReturn[1];completed_.nextWaitEntryUs=wait_.begin;
     completed_.nextWaitReturnUs=nextWaitReturn;completed_.callerThread=current_.callerThread;
@@ -270,6 +285,13 @@ class FrameCycleStats final {
     completed_.nextWaitMs=s.nextWait;completed_.waitOwnerMs=s.waitOwner;
     completed_.submitOwnerMs[0]=s.submitOwner[0];completed_.submitOwnerMs[1]=s.submitOwner[1];
     completed_.renderParkMs[0]=s.renderPark[0];completed_.renderParkMs[1]=s.renderPark[1];
+    completed_.presentCount=current_.postValid?uint32_t(s.presentCount):0;
+    if(current_.postValid&&current_.singlePresent) {
+      completed_.presentSplit=true;completed_.prePresentMs=s.beforePresent;completed_.postPresentMs=s.afterPresent;
+      completed_.presentHookMs=double(current_.presentEnd-current_.presentBegin)*toMs;
+      completed_.hookBeforeRealMs=s.edvrBeforePresent;completed_.hookRealMs=s.rawPresent;
+      completed_.hookAfterRealMs=s.edvrAfterPresent;completed_.hookCallbackMs=s.trailingCallback;
+    }
     completedReady_=true;
   }
   bool admit(const Sample&s,const Shape& shape,uint64_t nowMs){

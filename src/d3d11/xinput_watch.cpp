@@ -7,6 +7,7 @@
 #include <Xinput.h>
 
 #include "../common/log.h"
+#include "../common/periodic_work.h"
 #include "../common/timing.h"
 
 namespace edvr {
@@ -22,6 +23,13 @@ bool g_loadFailedNoted = false;
 // documented as expensive, and four of them per frame would be a tax on
 // everyone who owns no pad.
 constexpr uint64_t kProbeMs = 3000;
+
+// Phase-0 timing (src/common/periodic_work.h): what one probing tick spends
+// asking empty slots whether a pad has appeared. One sample per tick, not per
+// slot -- every empty slot's clock starts on the same first frame, so they all
+// come due together, and what a frame pays is their SUM. The context is how
+// many slots that tick probed.
+PeriodicWork g_workProbe{"xinput_probe", "slots"};
 
 struct Slot {
     bool         connected = false;
@@ -149,13 +157,24 @@ bool xinputTranslate(const char* eliteKey, XinputBinding* out) {
 
 void xinputWatchTick() {
     if (!ensureLoaded()) return;
+    int64_t probeTicks = 0;    // clock ticks spent in XInputGetState on empty slots
+    uint32_t probedSlots = 0;  // and how many of them there were this tick
     for (DWORD i = 0; i < 4; ++i) {
         Slot& s = g_slot[i];
         if (!s.connected && !dueMs(s.probeMs, kProbeMs)) continue;
-        if (!s.connected) s.probeMs = stampMs();
+        // Decided before the call: a probe that finds a pad flips `connected`
+        // below, and it was still a probe of an empty slot.
+        const bool probingEmpty = !s.connected;
+        if (probingEmpty) s.probeMs = stampMs();
         s.prev = s.cur;
         XINPUT_STATE st = {};
-        if (g_getState(i, &st) == ERROR_SUCCESS) {
+        const int64_t probeStart = probingEmpty ? qpcNow() : 0;
+        const DWORD state = g_getState(i, &st);
+        if (probingEmpty) {
+            probeTicks += qpcNow() - probeStart;
+            ++probedSlots;
+        }
+        if (state == ERROR_SUCCESS) {
             s.cur = st;
             if (!s.connected) {
                 s.connected = true;
@@ -174,6 +193,10 @@ void xinputWatchTick() {
             s.cur = XINPUT_STATE{};
         }
     }
+    // Only a tick that probed is a run. The ticks between probes (about 270 of
+    // them at 90 Hz) poll connected pads, or nothing at all, and are not the
+    // periodic work being priced here.
+    if (probedSlots != 0) g_workProbe.recordDuration(probeTicks, probedSlots);
 }
 
 bool xinputPressed(const XinputBinding& b) {

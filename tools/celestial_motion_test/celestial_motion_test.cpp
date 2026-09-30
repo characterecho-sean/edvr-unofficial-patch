@@ -31,6 +31,15 @@ ComPtr<ID3DBlob> compile(const char* hlsl,const char* profile,const char* entry=
     hr(result); return code;
 }
 namespace edvr {
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
+    if(FAILED(dev->CreateComputeShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
+}
+ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* shader=nullptr;
+    if(FAILED(dev->CreatePixelShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
+}
+
 ID3D11Texture2D* testScene=nullptr;
 ID3D11DepthStencilView* testDepth=nullptr;
 int testEye=0;

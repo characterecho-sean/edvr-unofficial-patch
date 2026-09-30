@@ -48,6 +48,14 @@ struct GpuSpanResult {
     double outerMs = 0, leftMs = 0, rightMs = 0;
     GpuSpanReason reason = GpuSpanReason::Incomplete;
     GpuSpanSource source = GpuSpanSource::RenderToSubmit;
+    // Application-render results that validated only: the raw GPU clock at the
+    // first producer run's begin (ticks[0]) and the last segment's end, and the
+    // clock's frequency. Two frames' results share a clock, so the gap between
+    // one frame's lastTick and the next frame's firstTick is the time the game
+    // device's timeline spent OUTSIDE EDVR's spans between them (gpu_frame_gap.h
+    // says what that is and is not). Zero when the result did not validate, and
+    // for the legacy render-to-submit span, which has no such pair.
+    uint64_t firstTick = 0, lastTick = 0, frequency = 0;
 };
 
 class GpuSpanState final {
@@ -360,8 +368,16 @@ public:
             result.ageMs = elapsed;
             if (s.application) {
                 result.source = GpuSpanSource::ApplicationRender;
-                if (reason == GpuSpanReason::Valid)
+                if (reason == GpuSpanReason::Valid) {
                     reason = validateApplication(s, raw, result.outerMs);
+                    if (reason == GpuSpanReason::Valid) {
+                        // validateApplication has checked segmentCount (3 or 4)
+                        // and that every segment and every handoff is in order.
+                        result.firstTick = raw.ticks[0];
+                        result.lastTick = raw.ticks[2 * s.segmentCount - 1];
+                        result.frequency = raw.frequency;
+                    }
+                }
             } else if (reason == GpuSpanReason::Valid) {
                 const double scale = 1000.0 / static_cast<double>(raw.frequency);
                 const auto& t = raw.ticks;

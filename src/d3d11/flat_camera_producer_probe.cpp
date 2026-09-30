@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 
 #include "../common/code_hook.h"
 #include "../common/config.h"
@@ -151,6 +152,30 @@ bool setThreadDr(DWORD tid, uint64_t watchAddress, bool arm) noexcept {
     return ok;
 }
 
+// The uploading thread and the frame thread are the SAME thread here (the
+// uploads ride the render thread, and processWatches runs on its boundary):
+// suspending it from itself is an instant deadlock, which is exactly what
+// the 16:32 crash was. For the self case a short-lived helper does the
+// suspend/arm/resume from outside, pose_reader_watch's own pattern.
+struct HelperDrArgs { DWORD tid; uint64_t address; bool arm; };
+
+DWORD WINAPI helperDrProc(LPVOID param) {
+    std::unique_ptr<HelperDrArgs> args(static_cast<HelperDrArgs*>(param));
+    setThreadDr(args->tid, args->address, args->arm);
+    return 0;
+}
+
+bool setThreadDrSafe(DWORD tid, uint64_t address, bool arm) noexcept {
+    if (tid != GetCurrentThreadId()) return setThreadDr(tid, address, arm);
+    auto* args = new (std::nothrow) HelperDrArgs{tid, address, arm};
+    if (!args) return false;
+    HANDLE h = CreateThread(nullptr, 0, &helperDrProc, args, 0, nullptr);
+    if (!h) { delete args; return false; }
+    WaitForSingleObject(h, 2000);
+    CloseHandle(h);
+    return true;
+}
+
 void freeWatch(Watch& w) {
     w.generation.fetch_add(1, std::memory_order_acq_rel);
     w.armed.store(false, std::memory_order_release);
@@ -268,7 +293,7 @@ void processWatches() {
         if (w.armRequested.load(std::memory_order_acquire) &&
             !w.armed.load(std::memory_order_acquire)) {
             const uintptr_t address = w.address.load(std::memory_order_acquire);
-            if (setThreadDr(tid, address, true)) {
+            if (setThreadDrSafe(tid, address, true)) {
                 w.armedAtMs.store(now, std::memory_order_release);
                 w.armed.store(true, std::memory_order_release);
                 Log::get().note("flat camera producer: camera-row write watch armed at %p on thread %lu (frame=%llu)",
@@ -290,7 +315,7 @@ void processWatches() {
                             "(30 s armed without a full budget; %u hit(s) recorded)",
                             static_cast<unsigned long>(tid), w.hits.load(std::memory_order_acquire));
         }
-        if (w.stale.load(std::memory_order_acquire) && setThreadDr(tid, 0, false)) {
+        if (w.stale.load(std::memory_order_acquire) && setThreadDrSafe(tid, 0, false)) {
             Log::get().note("flat camera producer: camera-row write watch on thread %lu cleared from outside",
                             static_cast<unsigned long>(tid));
             freeWatch(w);
@@ -332,7 +357,7 @@ void standDown(const char* why) {
             continue;
         }
         w.stale.store(true, std::memory_order_release);
-        if (setThreadDr(w.tid.load(std::memory_order_acquire), 0, false)) freeWatch(w);
+        if (setThreadDrSafe(w.tid.load(std::memory_order_acquire), 0, false)) freeWatch(w);
     }
     if (g_probe.installed.load(std::memory_order_acquire) && (gateWas || tracked) && !g_holdNoted) {
         g_holdNoted = true;
@@ -348,7 +373,7 @@ void standDown(const char* why) {
 void flatCameraProducerProbeFrame(uint64_t frame) {
     g_frame.store(frame, std::memory_order_release);
     if (!runtimeFlatProfile()) { standDown("the flat profile is off"); return; }
-    const bool wanted = _stricmp(Config::get().getString("advanced.flat_camera_producer_probe", "off").c_str(), "off") != 0;
+    const bool wanted = Config::get().getBool("advanced.flat_camera_producer_probe", false); // "0" and "false" are off; this arms game-code patching
     if (!wanted) { standDown("advanced.flat_camera_producer_probe is off"); return; }
     if (g_probe.installed.load(std::memory_order_acquire)) { processWatches(); return; }
     if (g_probe.relay) return; // a failed install is final for the session

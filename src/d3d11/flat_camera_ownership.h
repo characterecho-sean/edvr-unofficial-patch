@@ -58,12 +58,35 @@ struct FlatCameraOwnershipDecision {
     bool preserveCameraInputs = false;  // original inputs kept for motion reconstruction
 };
 
-// Cross-frame ownership state, per view-group.
+// Cross-frame ownership state, per view-group. Two identities are kept
+// strictly separate (the C2-work review's R3): the owner of the most recent
+// CLEANLY CLOSED frame (history identity) and the work selected/applied in
+// the CURRENT frame (which a mid-frame re-selection must not mix with).
 struct FlatCameraOwnershipState {
-    FlatCameraOwner outstanding = FlatCameraOwner::None; // owner with in-flight work
-    bool outstandingApplied = false;  // that owner's mutation already reached a draw
+    FlatCameraOwner lastOwner = FlatCameraOwner::None;
+    FlatCameraOwner current = FlatCameraOwner::None;
+    bool appliedThisFrame = false;
     bool historyValid = false;
 };
+
+// The frame boundary. Last frame's work is RETIRED here: a completed frame
+// never blocks a later switch (the review's "closed legacy work blocks
+// upstream indefinitely" defect came from missing exactly this transition).
+inline void flatCameraOwnerBegin(FlatCameraOwnershipState& s) {
+    s.current = FlatCameraOwner::None;
+    s.appliedThisFrame = false;
+}
+
+// A mutation reached a draw this frame (flat_live_phase.h:49-52's
+// noteApplied discipline). The application is also the adoption: the
+// frame's owner becomes the decision's, and a later re-selection in the
+// same frame must not change owner once this is set -- the mixed-phase
+// guard.
+inline void flatCameraOwnerNoteApplied(FlatCameraOwnershipState& s,
+                                       const FlatCameraOwnershipDecision& d) {
+    if (d.owner != FlatCameraOwner::None) s.current = d.owner;
+    s.appliedThisFrame = true;
+}
 
 // The selection, called once per group per frame BEFORE any mutation (the
 // consumption boundary the C2 plan's A6 split names). Pure: no allocation,
@@ -87,12 +110,21 @@ inline FlatCameraOwnershipDecision flatCameraOwnerSelect(
     }
 
     // An explicitly named unproven domain: upstream never owns, by name;
-    // the legacy route may still own if its own selector is eligible.
+    // the legacy route may still own if its own selector is eligible and no
+    // upstream work already applied this frame.
     if (in.upstreamUnsupported) {
-        if (in.legacyEligible && s.outstanding != FlatCameraOwner::Upstream) {
+        if (in.legacyEligible && !(s.current == FlatCameraOwner::Upstream && s.appliedThisFrame)) {
             d.owner = FlatCameraOwner::Legacy;
             d.outcome = FlatCameraOutcome::Treated;
             d.reason = "legacy-eligible-upstream-unsupported";
+            // The same history-identity switch the other two Legacy/Upstream
+            // branches make: the fallback hysteresis reaches Legacy through here,
+            // and the frames before it were Upstream's. One-shot by construction:
+            // the first clean close under Legacy moves lastOwner and ends it.
+            if (s.lastOwner == FlatCameraOwner::Upstream) {
+                d.historyReset = true;
+                d.preserveCameraInputs = true;
+            }
         } else {
             d.outcome = FlatCameraOutcome::Unsupported;
             d.reason = "upstream-unsupported-projection-kind";
@@ -100,47 +132,54 @@ inline FlatCameraOwnershipDecision flatCameraOwnerSelect(
         return d;
     }
 
-    // Certified upstream lineage: the migration prefers it whenever the
-    // legacy route is also present, and legacy observation cannot veto it
-    // (the C2-plan review's R5: an unknown or color-only shader variant
-    // must not park a certified lineage in observation).
     if (in.upstreamCertified) {
-        // An ownership switch waits for outstanding work: if the legacy
-        // route already applied a mutation this frame, the frame keeps the
-        // old owner for coherence -- switching mid-frame would mix phases.
-        if (s.outstanding == FlatCameraOwner::Legacy && s.outstandingApplied) {
+        // Mid-frame mix guard: legacy work already applied this frame keeps
+        // the frame's owner; switching now would mix phases.
+        if (s.current == FlatCameraOwner::Legacy && s.appliedThisFrame) {
             d.owner = FlatCameraOwner::Legacy;
             d.outcome = FlatCameraOutcome::Treated;
-            d.reason = "switch-deferred-outstanding-legacy";
+            d.reason = "switch-deferred-applied-legacy";
             return d;
         }
         d.owner = FlatCameraOwner::Upstream;
         d.outcome = FlatCameraOutcome::Treated;
         d.reason = in.legacyEligible ? "upstream-certified-legacy-suppressed"
                                      : "upstream-certified-legacy-not-eligible";
-        if (in.legacyEligible) {
-            // Both the draw and the dispatch mutation paths are suppressed
-            // (flat_runtime.cpp:1820-1823 and its compute siblings).
-            d.legacyGraphicsSuppressed = true;
-            d.legacyComputeSuppressed = true;
-        }
-        if (s.outstanding == FlatCameraOwner::Legacy) {
-            // A clean switch (no outstanding legacy work): history resets,
-            // and the original camera inputs are preserved so motion
-            // reconstruction still has an unjittered reference.
+        // Suppression follows the SELECTED OWNER for every mutation in this
+        // group, independently of overall legacy eligibility: an unqualified
+        // group can still contain individually qualified graphics/compute
+        // draws, and under upstream ownership none of them may mutate
+        // (the review's contract correction).
+        d.legacyGraphicsSuppressed = true;
+        d.legacyComputeSuppressed = true;
+        if (s.lastOwner == FlatCameraOwner::Legacy) {
+            // A switch of history identity: history resets, and the original
+            // camera inputs are preserved so motion reconstruction still has
+            // an unjittered reference.
             d.historyReset = true;
             d.preserveCameraInputs = true;
         }
         return d;
     }
 
-    // No certified lineage: the legacy route owns when its selector is
-    // eligible; otherwise the frame observes (with bounded progress
-    // required of a stable supported scene).
     if (in.legacyEligible) {
+        // The reverse guard, symmetric: upstream work already applied this
+        // frame keeps the frame's owner.
+        if (s.current == FlatCameraOwner::Upstream && s.appliedThisFrame) {
+            d.owner = FlatCameraOwner::Upstream;
+            d.outcome = FlatCameraOutcome::Treated;
+            d.reason = "switch-deferred-applied-upstream";
+            d.legacyGraphicsSuppressed = true;
+            d.legacyComputeSuppressed = true;
+            return d;
+        }
         d.owner = FlatCameraOwner::Legacy;
         d.outcome = FlatCameraOutcome::Treated;
         d.reason = "legacy-eligible-no-upstream";
+        if (s.lastOwner == FlatCameraOwner::Upstream) {
+            d.historyReset = true;
+            d.preserveCameraInputs = true;
+        }
         return d;
     }
     d.outcome = FlatCameraOutcome::Observing;
@@ -149,20 +188,19 @@ inline FlatCameraOwnershipDecision flatCameraOwnerSelect(
     return d;
 }
 
-// The frame close for one group: fold the decision into the cross-frame
-// state. Applied is recorded only after a mutation actually reached a draw
-// (the same noteApplied discipline as flat_live_phase.h:49-52).
+// The frame close for one group. A failed closure ALWAYS invalidates
+// history (FlatLivePhase::finish's rejection semantics); a clean closure
+// moves the frame's owner into the history identity.
 inline void flatCameraOwnerClose(FlatCameraOwnershipState& s,
                                  const FlatCameraOwnershipDecision& d, bool applied,
                                  bool cleanClosure) {
-    if (d.historyReset) s.historyValid = false;
-    if (d.owner != FlatCameraOwner::None) {
-        s.outstanding = d.owner;
-        s.outstandingApplied = applied;
-        if (cleanClosure) s.historyValid = true;
+    if (d.owner != FlatCameraOwner::None) s.current = d.owner;
+    s.appliedThisFrame = s.appliedThisFrame || applied;
+    if (cleanClosure) {
+        if (d.owner != FlatCameraOwner::None) s.lastOwner = d.owner;
+        s.historyValid = true;
     } else {
-        s.outstanding = FlatCameraOwner::None;
-        s.outstandingApplied = false;
+        s.historyValid = false;
     }
 }
 

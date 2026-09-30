@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"
 #include "particle_fix.h"
 
 #include <windows.h>
@@ -17,8 +18,8 @@
 #include "../common/timing.h"
 #include "binding_shadow.h"   // bindingShaderHash: the bound vertex shader's hash, set with the shader
 #include "exposure_fix.h"   // lookupShaderHash
-#include "flare_vs.h"
-#include "particle_vs.h"
+// flare_vs.h is compiled by the build shader generator.
+// particle_vs.h is compiled by the build shader generator.
 #include "shader_swap.h"
 
 namespace edvr {
@@ -100,16 +101,16 @@ constexpr uint64_t kWitchspaceStarsVs = 0x9AEC596A2B036EA6ull;
 bool& g_hideWitchspaceStars = detail::g_particleHideStars;
 struct BillboardVariant {
     uint64_t    hash;
-    const char* hlsl;
-    size_t      hlslLen;
+    const void* bytecode;
+    size_t      bytecodeLen;
     const char* name;      // names the compile in the log
 };
 
 constexpr int kVariantCount = 2;
 const BillboardVariant kVariants[kVariantCount] = {
-    {kPlumeVs, kParticleWorldVS, sizeof(kParticleWorldVS) - 1,
+    {kPlumeVs, kParticleWorldBytecode, sizeof(kParticleWorldBytecode),
      "particle_vs"},
-    {kFlareVs, kFlareWorldVS, sizeof(kFlareWorldVS) - 1,
+    {kFlareVs, kFlareWorldBytecode, sizeof(kFlareWorldBytecode),
      "flare_vs"},
 };
 // The draw path's inline prefilter (particleOnDrawMayMatch, particle_fix.h)
@@ -551,8 +552,8 @@ void particleBegin(ID3D11DeviceContext* ctx) {
         if (!g_vsTried[variant]) {
             g_vsTried[variant] = true;
             const BillboardVariant& d = kVariants[variant];
-            g_ourVs[variant] = shaderSwapCompileVs(
-                ctx, d.hlsl, d.hlslLen, "main", d.name, nullptr,
+            g_ourVs[variant] = shaderSwapCreateVs(
+                ctx, d.bytecode, d.bytecodeLen, d.name,
                 "particle billboard");
             if (g_ourVs[variant]) {
                 Log::get().note(

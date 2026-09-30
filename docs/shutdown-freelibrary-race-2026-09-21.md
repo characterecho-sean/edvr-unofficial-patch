@@ -2,6 +2,54 @@
 
 ## Status
 
+- **State (2026-09-25): fix BUILT, NOT FLOWN.** Opened 2026-09-21 from a
+  supporter's log bundle: a crash after closing the game, on a thread that
+  lands in unmapped ("no module") memory 31 ms, to the millisecond in both
+  logged flights, after the OpenXR shutdown reports clean. PR #40 made
+  `NativeDevice::reset()` (`src\openxr\native_device.h`) set
+  `systemModule_ = nullptr` without `FreeLibrary()` and log
+  `device_module_reset,pinned=%u` (whether the static reference in
+  `systemD3D11CreateDevice()` was taken in the same DLL). Git shows it
+  merged to main (1945b1f5, docs follow-up 0942253a); the text in Status
+  detail below still says "not merged" (its 09-25 review moment).
+  `native_device_test` checks the flag; nothing tests the log line.
+- **Hypothesis (as corrected in `## Design`):** `host_graphics_reset`
+  (`native_runtime_host.h:1797-1798`) calls `NativeDevice::reset()`
+  (`native_device.h:96-97`), which `FreeLibrary`s System32's genuine
+  `d3d11.dll` (from `openSystemD3D11()`, not EDVR's proxy) on the OpenXR
+  shutdown thread while another thread is still executing through it (chain
+  `d3d11.dll -> d3d11_edhm.dll -> gameoverlayrenderer64.dll -> d3d11.dll`;
+  crash `rcx` matches the game's real immediate context). The freeing class
+  is `NativeDevice`, never `NativeGraphicsClient` (a first-write citation
+  error, corrected 2026-09-21). `pinned=1` in a crash flight refutes the
+  unmap hypothesis; `pinned=0` leaves crash/no-crash as the evidence.
+- **Evidence so far:** second bundle: identical crash on VirtualDesktopXR
+  (Quest 3), so SteamVR is not a factor; Steam's desktop overlay turned off
+  for Elite with EDHM left in place **stopped the crash** (reported
+  directly, no log bundle).
+- **Open (`## Not ruled out`):** whether `FreeLibrary(systemModule_)` is the
+  release that reaches zero references (PR #40 review: very likely not, the
+  startup `systemD3D11CreateDevice()` static leaks a reference); a freed
+  overlay hook trampoline instead of an unmapped module (fault address in
+  or out of `d3d11.dll`'s image range); whether `stereo.drain()` has a gap;
+  whether EDHM is needed beside the overlay; which "d3d11.dll" frames are
+  System32's versus EDVR's proxy. The fixed 31 ms gap (a cadence, not
+  jitter?) may narrow which side owns the next call.
+- **Ruled out:** see `## Ruled out` (four items: EDVR's own shutdown
+  throwing, the overlay as bystander, a stale build, SteamVR as runtime).
+- **Next flight:** raise `log.max_mb` first so the gfx-side log survives to
+  the close. Repro once with EDHM's chain target switched to the system
+  `d3d11.dll`, and once with the Steam overlay disabled for Elite (Steam
+  library > Elite Dangerous > Properties > General). The investigation
+  stays open until a flight shows the crash gone and `pinned=` logged.
+- **Environment:** build v0.17.0 in both logged flights (`edvr_log.py
+  --expect-build v0.17.0` matched); "separate device" mode (the default for
+  every normal install); flight 2 on VirtualDesktopXR / Meta Quest 3.
+- **Detail:** the original Status narrative, verbatim, is under Status
+  detail below; the flights follow.
+
+## Status detail (moved out of Status 2026-09-29)
+
 Opened 2026-09-21, from a supporter's log bundle. Updated same day three
 times more: a second bundle ruled out SteamVR-the-runtime (identical crash
 on VirtualDesktopXR); the user then turned the Steam client's desktop

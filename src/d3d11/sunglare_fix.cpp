@@ -1,3 +1,5 @@
+#include "shader_swap.h"
+#include "temporal_shader_bytecode.h"
 #include "sunglare_fix.h"
 
 #include <windows.h>
@@ -16,7 +18,7 @@
 #include "billboard_fix.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"  // exposureDampingActive
-#include "sunglare_vs.h"
+// sunglare_vs.h is compiled by the build shader generator.
 
 namespace edvr {
 
@@ -57,8 +59,8 @@ Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
 uint64_t g_lastSeenMs = 0;   // when the train last drew
 
-// The shader swap. Compiled once per session through d3dcompiler_47
-// (present on every Windows 10/11); any failure logs once and stands
+// The shader swap. Bytecode is compiled by the build; any creation
+// failure logs once and stands
 // the swap down for the session -- the game then draws stock, which is
 // the house's failure posture everywhere.
 // fix.sun_glare_world selects a compiled VARIANT, so in-shader
@@ -144,87 +146,40 @@ ID3D11Buffer*        g_trueCb = nullptr;      // owned; bound at b2
 ID3D11Buffer*        g_savedCb2 = nullptr;    // the game's, across a draw
 bool                 g_cb2Engaged = false;
 
-// The FULL eleven-parameter signature. The first field build declared
-// ten -- no ppErrorMsgs -- so D3DCompile wrote its error-blob pointer
-// through whatever garbage sat in the eleventh slot, and the game
-// crashed at the first matched draw. The project's first crash, bought
-// by an FFI signature nobody proof-read. The HLSL itself desk-compiles
-// clean; the game is never again the compiler's first audience.
-typedef HRESULT(WINAPI* PFN_D3DCompile)(const void*, SIZE_T, const char*,
-                                        const void*, void*, const char*,
-                                        const char*, UINT, UINT, void**,
-                                        void**);
-
-// ID3DBlob vtable through raw COM: 0-2 IUnknown, 3 GetBufferPointer,
-// 4 GetBufferSize.
-void* blobPtr(void* blob) {
-    typedef void*(STDMETHODCALLTYPE * Fn)(void*);
-    return reinterpret_cast<Fn>((*reinterpret_cast<void***>(blob))[3])(blob);
-}
-SIZE_T blobSize(void* blob) {
-    typedef SIZE_T(STDMETHODCALLTYPE * Fn)(void*);
-    return reinterpret_cast<Fn>((*reinterpret_cast<void***>(blob))[4])(blob);
-}
-void blobRelease(void* blob) {
-    typedef ULONG(STDMETHODCALLTYPE * Fn)(void*);
-    reinterpret_cast<Fn>((*reinterpret_cast<void***>(blob))[2])(blob);
-}
-
 FaultBudget g_worldBudget("sunglareWorld", 3);
 
-struct ShaderMacro { const char* name; const char* def; };
 
-void buildWorldShaderInner(ID3D11DeviceContext* ctx, int variant) {
-    HMODULE mod = LoadLibraryW(L"d3dcompiler_47.dll");
-    if (!mod) {
-        Log::get().note("sun glare world: d3dcompiler_47.dll not found; "
-                        "the swap stands down and the game draws stock.");
-        return;
+void buildWorldShaderInner(ID3D11DeviceContext* ctx, int variant,
+                           ID3D11Device*& device, ID3D11VertexShader*& created,
+                           HRESULT& result) {
+    const void* bytes = kSunglareDefaultBytecode;
+    size_t size = sizeof(kSunglareDefaultBytecode);
+    if (variant == 2) { bytes = kSunglareNoGateBytecode; size = sizeof(kSunglareNoGateBytecode); }
+    if (variant == 3) { bytes = kSunglareAllWorldBytecode; size = sizeof(kSunglareAllWorldBytecode); }
+    if (variant == 4) { bytes = kSunglareAllFlatBytecode; size = sizeof(kSunglareAllFlatBytecode); }
+    ctx->GetDevice(&device);
+    if (device) {
+        result = device->CreateVertexShader(bytes, size, nullptr, &created);
+        ID3D11Device* released = device;
+        device = nullptr;
+        released->Release();
     }
-    PFN_D3DCompile compile = reinterpret_cast<PFN_D3DCompile>(
-        GetProcAddress(mod, "D3DCompile"));
-    if (!compile) return;
-    ShaderMacro macros[3] = {};
-    int m = 0;
-    if (variant == 2) macros[m++] = {"NOGATE", "1"};
-    if (variant == 3) macros[m++] = {"ALLWORLD", "1"};
-    if (variant == 4) macros[m++] = {"ALLFLAT", "1"};
-    void* blob = nullptr;
-    void* errors = nullptr;
-    const HRESULT hr = compile(kSunglareWorldVS, sizeof(kSunglareWorldVS) - 1,
-                               "sunglare_world_vs",
-                               m ? macros : nullptr, nullptr, "main",
-                               "vs_5_0", 0, 0, &blob, &errors);
-    if (errors) {
-        if (FAILED(hr)) {
-            Log::get().note("sun glare world: compile errors: %.300s",
-                            static_cast<const char*>(blobPtr(errors)));
-        }
-        blobRelease(errors);
-    }
-    if (FAILED(hr) || !blob) {
-        Log::get().note("sun glare world: shader compile failed (0x%08X); "
-                        "the swap stands down and the game draws stock.",
-                        static_cast<unsigned>(hr));
-        return;
-    }
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (dev) {
-        dev->CreateVertexShader(blobPtr(blob), blobSize(blob), nullptr,
-                                &g_worldVs[variant - 1]);
-        dev->Release();
-    }
-    blobRelease(blob);
-    Log::get().note("sun glare world: variant %d %s.", variant,
-                    g_worldVs[variant - 1] ? "COMPILED"
-                                           : "creation FAILED; stock");
 }
 
 void buildWorldShader(ID3D11DeviceContext* ctx, int variant) {
     g_worldTried[variant - 1] = true;
-    guardedBudget(g_worldBudget,
-                  [&] { buildWorldShaderInner(ctx, variant); });
+    ID3D11Device* device = nullptr;
+    ID3D11VertexShader* created = nullptr;
+    HRESULT result = E_FAIL;
+    const bool ran = guardedBudget(g_worldBudget,
+                  [&] { buildWorldShaderInner(ctx, variant, device, created, result); });
+    if (device) guarded("sunglareWorld release", [&] { device->Release(); });
+    if (!ran || FAILED(result)) {
+        if (created) guarded("sunglareWorld shader release", [&] { created->Release(); });
+    } else g_worldVs[variant - 1] = created;
+    Log::get().note("sun glare world: variant %d %s.", variant,
+                    g_worldVs[variant - 1] ? "CREATED"
+                                           : "creation FAILED; stock");
 }
 
 // The instance-stream discovery dump. Blocking Map straight after the

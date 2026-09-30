@@ -21,6 +21,52 @@ otherwise.
   "least mapped" same day: existing census + EDVRDRW1 captures answered
   emission order, stereo sharing, and the motion write point (see stage 5).
 * **Open, highest value first:** (1) the caller thread's draw-submission
+  cost; the full measurement journal is in Status detail below (verbatim).
+  Summary: the VALID Phase A of 2026-09-22 (engine arc, "Phase A, valid:
+  KILL" entry; build 2d8fbda) measured the parked cockpit at 45 fps with the
+  caller thread at 15.1 ms per 22.2 ms cycle, 11 ms before first submit
+  being draw submission, 3.94 ms of it innermost in EDVR's own d3d11.dll.
+  That 3.94 ms is NAMED and CUT (engine arc, per-draw, parked-4, parked-5
+  and leg C entries): EDVR's pre-submit leaf time 3.94 -> 3.25 -> 1.69 ->
+  1.19 ms; caller thread now 11.9 ms, GPU ~9.2, 50-52 fps. Stage 1's
+  LODDistanceScale at 0.001 is not a draw-count lever (parked draws stay
+  18.9k). The re-scoped cull FAILS B' (design doc §8-§12; run 165433, §12:
+  the part site FUN_1442B3FC0 is PROVEN, but qualified closed solids remove
+  ZERO draws and even ideal occluders reach only 1.2-1.6 ms post-cut); the
+  arc is closed unless a quads-on-panel-faces + terrain representation
+  within a 30-60k triangle budget is measured offline. The eye depth
+  capture's constants block is fixed (file version 2: registers 256-335,
+  camera at 270-275). Read the GPU side next to any CPU saving (addendum 2:
+  8-15 ms app GPU at 0.7559 scale). The approach onset is a RAMP with
+  distance (R1 4.0 -> 12.7 ms from 5.3 km to landing, r = 0.97); the
+  settlement's collection admission (reset-repopulate) is untested;
+  (2) depth-capture constants keying fix; (3) per-record identity/change
+  signal (stage 2 — motion arc); (4) scheduler payload-vtable closure
+  (stage 0); (5) ring-buffer command consumers.
+
+* **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
+  as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
+  decision). Bucket suppression — five independent grounds,
+  engine-render-performance-2026-09-19.md. Merge-key or bucket-key control —
+  the key is an incidental Wwise counter. The 82% bucket attribution and
+  40-frame cadence — no evidence route exists. Exe-embedded render shaders:
+  the exe embeds exactly ONE shader, Frontier FGDK's clear_indirect_buffer
+  compute utility (.rdata RVA 0x4E27600–0x4E2B200, full sweep 2026-09-21) —
+  census families cannot be named from the exe (only armed snapshots), and
+  build_diff cannot do shader-recompile detection from the exe (that would
+  need the game's external shader assets, not the binary). Draw-dedup
+  culling: the v2 ledger proves the 8.08x submission duplication is
+  architecture (eyes x parts/LODs x materials), with only ~213/frame
+  (~0.3%) fully identical — no dedup lever exists.
+* **Next (no flight):** compare the staged VS b0/b1/b2 constants across the
+  two eye passes in existing EDVRDRW1 captures (stereo culling share; where
+  truth becomes final per eye). **Next (one flight, user's to spend):** the
+  settlement settings A/B (stage 1 lever) with armed census plus an
+  EyeDrawSnapshot pass A to name the unknown hashes.
+
+## Status detail (moved out of Status 2026-09-29)
+
+* **Open, highest value first:** (1) the caller thread's draw-submission
   cost. The VALID Phase A of 2026-09-22 (engine arc, "Phase A, valid:
   KILL" entry; two clean file-mode legs on build 2d8fbda, analyzer
   reconciled to the runtime log within 0.001 ms) measured the parked
@@ -90,25 +136,6 @@ otherwise.
   keying fix; (3) per-record identity/change signal (stage 2 — motion
   arc); (4) scheduler payload-vtable closure (stage 0); (5) ring-buffer
   command consumers.
-* **Ruled out (do not re-propose):** boundary-side draw-call motion estimation
-  as a class — kinematic-motion-injection-2026-09-19.md (2026-09-19
-  decision). Bucket suppression — five independent grounds,
-  engine-render-performance-2026-09-19.md. Merge-key or bucket-key control —
-  the key is an incidental Wwise counter. The 82% bucket attribution and
-  40-frame cadence — no evidence route exists. Exe-embedded render shaders:
-  the exe embeds exactly ONE shader, Frontier FGDK's clear_indirect_buffer
-  compute utility (.rdata RVA 0x4E27600–0x4E2B200, full sweep 2026-09-21) —
-  census families cannot be named from the exe (only armed snapshots), and
-  build_diff cannot do shader-recompile detection from the exe (that would
-  need the game's external shader assets, not the binary). Draw-dedup
-  culling: the v2 ledger proves the 8.08x submission duplication is
-  architecture (eyes x parts/LODs x materials), with only ~213/frame
-  (~0.3%) fully identical — no dedup lever exists.
-* **Next (no flight):** compare the staged VS b0/b1/b2 constants across the
-  two eye passes in existing EDVRDRW1 captures (stereo culling share; where
-  truth becomes final per eye). **Next (one flight, user's to spend):** the
-  settlement settings A/B (stage 1 lever) with armed census plus an
-  EyeDrawSnapshot pass A to name the unknown hashes.
 
 ## Stage 0 — Frame scheduler
 

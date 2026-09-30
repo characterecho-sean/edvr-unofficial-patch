@@ -10,8 +10,32 @@ internal static class SelfTests
 {
     private static int _checks;
 
+    private static void GpuProviderCoverage()
+    {
+        var coverage = new GpuCoverage();
+        Check((string)coverage.Report(0)["status"]! == "providers_absent", "missing GPU events are not success");
+        coverage.Observe(Collector.EdvrProvider, 10, 10);
+        Check(((string[])coverage.Report(0)["absentProviders"]!).Length == 3, "CPU markers do not establish GPU coverage");
+        coverage.Observe(GpuCoverage.DxgKrnl, 0, 10);
+        coverage.Observe(GpuCoverage.DxgKrnl, 10, 10);
+        coverage.Observe(GpuCoverage.Direct3D11, 20, 10);
+        coverage.Observe(GpuCoverage.Dxgi, 10, 10);
+        var report = coverage.Report(0);
+        var counts = (Dictionary<string, object?>[])report["providerEvents"]!;
+        Check((long)counts[0]["systemWide"]! == 2 && (long)counts[0]["targetPid"]! == 1,
+            "GPU coverage retains system-wide events without guessing kernel context PID");
+        Check((long)counts[1]["systemWide"]! == 1 && (long)counts[1]["targetPid"]! == 0,
+            "foreign GPU processes remain visible");
+        Check((string)report["status"]! == "providers_observed_no_reported_loss", "all providers observed");
+        Check(!(bool)report["gpuBusyTimeAnalyzed"]!, "coverage is never busy time");
+        Check((string)coverage.Report(1)["status"]! == "events_lost", "lost ETW events qualify GPU observations");
+        Check(new Collected().GpuCoverage is null, "CPU-only collection does not add a GPU report");
+    }
+
     public static void Run()
     {
+        GpuProviderCoverage();
+        GpuCompletionMarkers();
         SchedulerStateMapping();
         StateDurationWalk();
         RunningWalk();
@@ -39,6 +63,146 @@ internal static class SelfTests
     {
         _checks++;
         if (!condition) throw new Exception($"self-test failed: {name}");
+    }
+
+    private static void GpuCompletionMarkers()
+    {
+        static byte[] Payload(ulong sequence, double ms = 9.7)
+        {
+            var b = new byte[56];
+            BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(0), 30000);
+            BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(8), 300000);
+            BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(16), sequence);
+            BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(24), 22);
+            BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(32), 12);
+            BinaryPrimitives.WriteInt64LittleEndian(b.AsSpan(40), BitConverter.DoubleToInt64Bits(ms));
+            BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(48), 1);
+            BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(52), 1);
+            BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(54), 56);
+            return b;
+        }
+        static Collected Data()
+        {
+            var d = new Collected();
+            d.Clocks.Add(new ClockMarker(30000, 300000, 10000000, 0, 300001));
+            d.Frames.Add(Frame(0, 1) with { GpuSequence = 100001, SchemaVersion = 2 });
+            d.Frames.Add(Frame(10000, 2) with { GpuSequence = 100002, SchemaVersion = 2 });
+            return d;
+        }
+        static List<FrameCycle> Cycles(Collected d) => d.Frames.Select(f => new FrameCycle { Marker = f }).ToList();
+        var data = Data();
+        var cycles = Cycles(data);
+        GpuMarkers.Join(data, cycles);
+        Check((string)cycles[0].ApplicationGpu["status"]! == "markers_unavailable", "missing GPU events are unavailable even with explicit CPU mappings");
+        GpuMarkers.Parse(1, Payload(100002, 10.2), 300001, data);
+        GpuMarkers.Parse(1, Payload(100001, 9.1), 300002, data); // delayed and reversed order
+        GpuMarkers.Join(data, cycles);
+        Near((double)cycles[0].ApplicationGpu["ms"]!, 9.1, "exact GPU sequence join despite delayed publication");
+        Near((double)cycles[1].ApplicationGpu["ms"]!, 10.2, "out-of-order GPU sequence join");
+        Check((ulong)cycles[0].ApplicationGpu["publicationQpc"]! == 300000 &&
+            (string)cycles[0].ApplicationGpu["timestampMeaning"]! == GpuMarkers.TimestampMeaning,
+            "publication clock is labeled separately from GPU execution");
+        foreach (var bad in new[] { new byte[55], new byte[57], Payload(1) })
+        {
+            var d = Data(); if (bad.Length == 56) bad[52] = 2;
+            GpuMarkers.Parse(1, bad, 1, d);
+            Check(d.GpuMarkerSchemaErrors == 1 && d.GpuCompletions.Count == 0, "GPU bad payload/version refused");
+        }
+        foreach (var version in new[] { 0, 2 })
+        {
+            var d = Data(); GpuMarkers.Parse(version, Payload(1), 1, d);
+            Check(d.GpuMarkerSchemaErrors == 1, "GPU unknown ETW descriptor version refused");
+        }
+        foreach (var size in new ushort[] { 0, 55, 57 })
+        {
+            var d = Data(); var b = Payload(1);
+            BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(54), size);
+            GpuMarkers.Parse(1, b, 1, d);
+            Check(d.GpuMarkerSchemaErrors == 1, "GPU embedded payload size refused");
+        }
+        var valid = data.GpuCompletions[1];
+        foreach (var (marker, expected) in new[] {
+            (valid with { Source = 2 }, "unknown_source"),
+            (valid with { Reason = 14 }, "unknown_reason"),
+            (valid with { PublicationQpc = 0 }, "zero_identity_or_timestamp"),
+            (valid with { OuterMs = double.NaN }, "bad_duration"),
+            (valid with { OuterMs = double.PositiveInfinity }, "bad_duration"),
+            (valid with { OuterMs = -1 }, "bad_duration"),
+            (valid with { SourceFrame = 0 }, "zero_source_frame"),
+            (valid with { AgeMs = 2001 }, "stale_valid_result") })
+        {
+            var d = Data(); d.GpuCompletions.Add(marker); var c = Cycles(d);
+            GpuMarkers.Join(d, c);
+            Check((string)c[0].ApplicationGpu["status"]! == expected && c[0].ApplicationGpu["ms"] is null,
+                "invalid GPU witness cannot supply plausible duration: " + expected);
+        }
+        var zero = Data(); zero.GpuCompletions.Add(valid with { Sequence = 0 }); var zeroCycles = Cycles(zero);
+        var zeroCoverage = GpuMarkers.Join(zero, zeroCycles);
+        Check((int)zeroCoverage["invalidMarkers"]! == 1 && zeroCycles[0].ApplicationGpu["ms"] is null,
+            "zero GPU sequence is invalid and cannot join a nonzero CPU sequence");
+        for (ushort reason = 1; reason <= 13; ++reason)
+        {
+            var d = Data(); d.GpuCompletions.Add(valid with { Reason = reason }); var c = Cycles(d);
+            GpuMarkers.Join(d, c);
+            Check((string)c[0].ApplicationGpu["status"]! == "gpu_result_unavailable" && !(bool)c[0].ApplicationGpu["valid"]!,
+                "all unavailable GPU reasons remain unavailable");
+        }
+        foreach (var status in new[] { "render_to_submit_only", "duplicate_gpu_sequence", "ambiguous_cpu_sequence",
+            "gpu_marker_schema_errors", "trace_events_lost", "publication_clock_mismatch", "publication_clock_unavailable" })
+        {
+            var d = Data(); d.GpuCompletions.Add(valid);
+            if (status == "render_to_submit_only") d.GpuCompletions[0] = valid with { Source = 0 };
+            if (status == "duplicate_gpu_sequence") d.GpuCompletions.Add(valid with { Reason = 5 });
+            if (status == "ambiguous_cpu_sequence") d.Frames.Add(d.Frames[0] with { Generation = 2 });
+            if (status == "gpu_marker_schema_errors") d.GpuMarkerSchemaErrors = 1;
+            if (status == "trace_events_lost") d.EventsLost = 1;
+            if (status == "publication_clock_mismatch") d.GpuCompletions[0] = valid with { PublicationQpc = 123 };
+            if (status == "publication_clock_unavailable") d.Clocks.Clear();
+            var c = Cycles(d); GpuMarkers.Join(d, c);
+            Check((string)c[0].ApplicationGpu["status"]! == status && c[0].ApplicationGpu["ms"] is null,
+                "GPU conservative join: " + status);
+        }
+        var missing = Data(); missing.GpuCompletions.Add(valid); var missingCycles = Cycles(missing);
+        GpuMarkers.Join(missing, missingCycles);
+        Check((string)missingCycles[1].ApplicationGpu["status"]! == "missing_sequence", "missing GPU sequence never borrows neighboring duration");
+        var same = Data(); same.Frames.Add(same.Frames[0]); same.GpuCompletions.Add(valid);
+        var sameCycles = Cycles(same); GpuMarkers.Join(same, sameCycles);
+        Check((string)sameCycles[0].ApplicationGpu["status"]! == "ambiguous_cpu_sequence", "duplicate CPU witness rejected even in same generation");
+        var legacy = Data(); legacy.Frames[0] = Frame(0, 100001); legacy.GpuCompletions.Add(valid);
+        var legacyCycles = Cycles(legacy); GpuMarkers.Join(legacy, legacyCycles);
+        Check((string)legacyCycles[0].ApplicationGpu["status"]! == "cpu_mapping_unavailable_v1" &&
+            legacyCycles[0].ApplicationGpu["ms"] is null, "V1 numerical equality never implies GPU identity");
+        var skipped = Data(); skipped.Frames[0] = skipped.Frames[0] with { GpuSequence = 0 };
+        skipped.GpuCompletions.Add(valid); var skippedCycles = Cycles(skipped); GpuMarkers.Join(skipped, skippedCycles);
+        Check((string)skippedCycles[0].ApplicationGpu["status"]! == "cpu_producer_unavailable",
+            "loading/failed-wait cycle has no inferred producer mapping");
+        var divergent = Data(); divergent.GpuCompletions.Add(valid with { Sequence = 1, OuterMs = 99 });
+        divergent.GpuCompletions.Add(valid); var divergentCycles = Cycles(divergent); GpuMarkers.Join(divergent, divergentCycles);
+        Near((double)divergentCycles[0].ApplicationGpu["ms"]!, 9.1, "XR numeric collision does not override actual producer mapping");
+        Check((ulong)divergentCycles[0].ApplicationGpu["producerSequence"]! == 100001,
+            "mapping uses completed old cycle token, not next frame token 100002");
+        var restarted = Data(); restarted.Frames[1] = restarted.Frames[1] with {
+            Sequence = 1, Generation = 2, GpuSequence = 100002 };
+        restarted.GpuCompletions.Add(valid); restarted.GpuCompletions.Add(valid with { Sequence = 100002, OuterMs = 10.2 });
+        var restartedCycles = Cycles(restarted); GpuMarkers.Join(restarted, restartedCycles);
+        Check(restartedCycles.All(c => (bool)c.ApplicationGpu["valid"]!),
+            "distinct producer mappings survive XR counter reuse across generations");
+        foreach (var version in new[] { 1, 2 })
+        {
+            var bytes = new byte[version == 1 ? 96 : 104];
+            BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(8), 17);
+            if (version == 2) BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(96), 500);
+            var parsed = new Collected(); Markers.ParseFrame(version, bytes, parsed);
+            Check(parsed.Frames.Count == 1 && parsed.Frames[0].Sequence == 17 &&
+                parsed.Frames[0].GpuSequence == (version == 2 ? 500ul : 0ul) &&
+                parsed.Frames[0].SchemaVersion == version, "CPU frame schema preserves XR and explicit producer domains");
+        }
+        foreach (var (version, size) in new[] { (1, 104), (2, 96), (2, 103), (2, 105), (3, 104) })
+        {
+            var parsed = new Collected(); Markers.ParseFrame(version, new byte[size], parsed);
+            Check(parsed.Frames.Count == 0 && parsed.MalformedMarkers + parsed.UnsupportedMarkers == 1,
+                "CPU V2 malformed/version mismatch refuses mapping");
+        }
     }
 
     private static void Near(double actual, double expected, string name, double tolerance = 0.0001)
@@ -769,6 +933,10 @@ internal static class SelfTests
             var bare = Program.ParseOptions(["--input", etl, "--pid", "7", "--output",
                                              Path.Combine(root, "r.json")]);
             Check(bare.Symbols is null, "no symbols directory beside the trace means symbols stay off");
+            Check(!bare.GpuCoverage, "CPU-only command does not count GPU providers");
+            var gpu = Program.ParseOptions(["--input", etl, "--pid", "7", "--output",
+                                            Path.Combine(root, "g.json"), "--gpu-coverage"]);
+            Check(gpu.GpuCoverage && gpu.Pid == bare.Pid, "optional GPU coverage preserves CPU PID filtering");
             Directory.CreateDirectory(Path.Combine(root, "symbols"));
             var defaulted = Program.ParseOptions(["--input", etl, "--pid", "7", "--output",
                                                   Path.Combine(root, "r.json")]);
@@ -851,6 +1019,14 @@ internal static class SelfTests
         try
         {
             var report = Report.Build(input, Pid, data, framesPath, null);
+            Check(!report.ContainsKey("gpuProviderCoverage"), "CPU-only report shape is unchanged");
+            data.GpuCoverage = new GpuCoverage();
+            data.GpuCoverage.Observe(GpuCoverage.DxgKrnl, 0, Pid);
+            var withGpu = Report.Build(input, Pid, data, framesPath, null);
+            Check(withGpu.Remove("gpuProviderCoverage"), "GPU coverage is a separate report section");
+            Check(JsonSerializer.Serialize(report) == JsonSerializer.Serialize(withGpu),
+                "adding GPU provider events leaves every CPU report field unchanged");
+            data.GpuCoverage = null;
             // The keys tools/cpu_profile.py's smoke check reads must keep their
             // meaning: the legacy per-frame window is still [presentEnd, nextWaitEntry).
             foreach (var key in new[] { "schemaVersion", "coverageComplete", "analyzedFrameCount", "frames",

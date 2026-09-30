@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"
 // fix.ui_quality -- the UI layer half. ui_layer.h says what it is and why;
 // ui_layer_math.h holds its arithmetic and ui_layer_shaders.h its composite,
 // both shared with tools/ui_quality_test; ui_panel_scale.* is the other half
@@ -14,13 +15,19 @@
 #include "ui_layer.h"
 
 #include "ui_layer_math.h"
+#include "ui_holo_remap.h"
+#include "ui_layer_draw_timing.h"
 #include "ui_layer_shaders.h"
+#include "ui_layer_coverage.h"
 #include "ui_layer_seed.h"  // the Seeder: the game's depth-stencil at the layer's size
+#include "ui_layer_seed_census.h"
+#include "ui_layer_seed_timing.h"
+#include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
+#include "tonemap_admit.h"  // the tonemap draw's structural admission, shared with the census
 
 #include "binding_shadow.h"
 #include "depth_probe.h"   // depthProbeDrawsAtSize: the world-screen gate's own count
 #include "device_hook.h"   // deviceHookHmdQuality, for the configure line
-#include "foveation.h"     // whether a shading-rate image is bound for the eye
 #include "gpu_timing.h"
 #include "gpu_census.h"    // issue #38: the per-feature GPU cost census
 #include "graphics_runtime.h"
@@ -34,6 +41,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/periodic_work.h"
 #include "../common/temporal_mode.h"
 
 #include <windows.h>
@@ -42,6 +50,7 @@
 #include <wrl/client.h>
 
 #include <cmath>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -53,7 +62,11 @@ namespace edvr {
 namespace detail {
 bool g_uiLayerLive = false;
 bool g_uiLayerWatching = false;
+bool g_uiSeedDiagnostics = false;
 bool g_uiLayerRedirecting = false;
+bool g_uiLayerIssueBlocked = false;
+bool g_uiLayerCrispOn = false;      // the HDR HUD take/re-issue armed this frame (with the layer)
+bool g_uiLayerCrispPending = false; // a tonemap draw was admitted; its re-issue follows its draw
 }  // namespace detail
 
 namespace {
@@ -63,8 +76,16 @@ using Ptr = Microsoft::WRL::ComPtr<T>;
 
 constexpr uint64_t kTotalsMs = 30000;
 constexpr uint32_t kWatchPerFrame = 64;
-constexpr uint32_t kMaxFamilyLines = 48;
+// First-seen lines are one per (family, decision, vs, ps): Phase 3's eight
+// take hologram hashes share the one kHoloGeneric row, so each needs its
+// own entry here (48 barely covered the named families and their refusals).
+constexpr uint32_t kMaxFamilyLines = 80;
 constexpr uint32_t kMaxAfterLines = 16;
+// The crisp-HUD missing-consumer deadline (review R1): this many consecutive
+// content-frames with no tonemap publication stands the HDR path down. The
+// tonemap runs every frame when the path works, so a streak this long says
+// the consumer is not coming; ~a third of a second at 90 Hz.
+constexpr uint32_t kCrispHdrMissFrames = 30;
 
 // ------------------------------------------------------------ configuration
 
@@ -73,18 +94,52 @@ bool g_temporal = false;   // a temporal mode is on (the layer's door exists)
 bool g_debugView = false;  // advanced.temporal_aa_debug = ui_layer
 bool g_jitterAsShipped = true;  // advanced.temporal_aa_jitter_sign/lag at their defaults
 bool g_stoodDown = false;
+bool g_crispStoodDown = false;  // the HDR HUD path alone (a failure of its own); the LDR take stays
 std::string g_keyText = "?";
 bool g_keyNoted = false;
 bool g_aliasNoted = false;  // the old spelling's note, once a session
 
+// The layer's size target is fix.ui_quality's value; the HDR HUD layer and
+// the 8-bit layer it tonemaps into share a size by construction (the HDR
+// path arms with the layer -- the crisp-HUD take is fix.ui_quality's, not
+// a key of its own).
+float layerTarget() {
+    return g_target > 0.0f ? g_target : 1.0f;
+}
+
 void refreshLive() {
     detail::g_uiLayerLive = g_target > 0.0f && g_temporal && g_jitterAsShipped && !g_stoodDown;
+    detail::g_uiLayerCrispOn = detail::g_uiLayerLive && !g_crispStoodDown;
+}
+
+// The HDR HUD path fails alone: the cockpit HUD families (the holo panels,
+// the flight HUD, the target sprite, the holograms) stay in the game's
+// frame exactly as stock (their kHdrTarget refusal), and the LDR take is
+// untouched.
+void crispStandDown(const char* why) {
+    if (g_crispStoodDown) return;
+    g_crispStoodDown = true;
+    refreshLive();
+    Log::get().note(
+        "ui quality: the HDR HUD path stands down for the rest of the session -- %s. The "
+        "cockpit's holo panels, flight HUD, target sprite and holograms are drawn as they always "
+        "were (the rest of the layer is unaffected). Turning fix.ui_quality off and on re-arms it.",
+        why ? why : "a refusal");
 }
 
 void standDown(const char* why) {
     if (g_stoodDown) return;
     g_stoodDown = true;
     refreshLive();
+    if (detail::g_uiLayerIssueBlocked) {
+        Log::get().note("ui quality: layer stood down -- %s. Original hologram shader/b13 state remains "
+                        "untrusted after two restoration attempts; the game's draws and replay on the owner "
+                        "context are suppressed for the rest of this frame, and the frame boundary then puts "
+                        "back whichever of the two is still EDVR's (the saved original references are retained "
+                        "until then) and lifts the suppression. The layer itself stays stood down for the "
+                        "session.", why ? why : "a restoration fault");
+        return;
+    }
     Log::get().note(
         "ui quality: the layer stands down for the rest of the session -- %s. The UI goes into "
         "the game's frame as before (and gets the UI depth and reactive mask again); the "
@@ -94,7 +149,24 @@ void standDown(const char* why) {
 
 // ------------------------------------------------------------------ per eye
 
+// A layer's own depth-stencil target, seeded from the game's own (the
+// Seeder) at the layer's size with the jitter cancelled, at the first tested
+// draw of the frame (and again whenever the game writes its own buffer, or a
+// later draw reads bits not seeded). The 8-bit layer has one; the crisp-HUD half's of fix.ui_quality
+// HDR HUD layer has its own at its own size.
+struct LayerDs {
+    Ptr<ID3D11Texture2D> tex;
+    Ptr<ID3D11DepthStencilView> dsv;
+    uint32_t w = 0, h = 0;
+    DXGI_FORMAT viewFmt = DXGI_FORMAT_UNKNOWN;
+    uint64_t seq = 0;              // seeded for this frame (0: not, or stale)
+    const void* source = nullptr;  // the game's depth texture it was seeded from
+    uint8_t seededMask = 0;        // stencil bits seeded
+    bool seededDepth = false;
+};
+
 struct Eye {
+    UiCoverageCommandCache coverage;
     // The layer: R8G8B8A8_UNORM, cleared to (0, 0, 0, 1) at the first draw
     // of each frame -- premultiplied colour and transmittance.
     Ptr<ID3D11Texture2D> tex;
@@ -115,23 +187,38 @@ struct Eye {
     uint32_t mW = 0, mH = 0;
     uint64_t mSeq = 0;
 
-    // The layer's depth-stencil target, for UI that TESTS depth or stencil:
-    // the game's own, resampled to the layer's size with the jitter
-    // cancelled, at the first such draw of the frame (and again whenever the
-    // game writes its own buffer, or a later draw reads bits not seeded).
-    Ptr<ID3D11Texture2D> dsTex;
-    Ptr<ID3D11DepthStencilView> dsv;
-    uint32_t dsW = 0, dsH = 0;
-    DXGI_FORMAT dsViewFmt = DXGI_FORMAT_UNKNOWN;
-    uint64_t dsSeq = 0;          // seeded for this frame (0: not, or stale)
-    const void* dsSource = nullptr;  // the game's depth texture it was seeded from
-    uint8_t dsSeededMask = 0;    // stencil bits seeded
-    bool dsSeededDepth = false;
-    // The copy of the game's depth-stencil the seed reads.
+    // The 8-bit layer's depth-stencil target, for UI that TESTS depth or
+    // stencil.
+    LayerDs ds;
+    // The copy of the game's depth-stencil the seed reads (shared by both
+    // layers' seeds: it is the game's size, not the layer's).
     Ptr<ID3D11Texture2D> dsCopy;
     Ptr<ID3D11ShaderResourceView> dsCopyDepth, dsCopyStencil;
     uint32_t dsCopyW = 0, dsCopyH = 0;
     DXGI_FORMAT dsCopyFmt = DXGI_FORMAT_UNKNOWN;
+
+    // the crisp-HUD half's of fix.ui_quality HDR HUD layer: R16G16B16A16_FLOAT at the 8-bit layer's
+    // size (the door's output x the same target), holding the cockpit HUD
+    // families' (holo panels, flight HUD, target sprite, holograms)
+    // premultiplied radiance and transmittance in the layer's own
+    // alpha convention, cleared at the first taken HUD draw of each
+    // eye-frame. The game's tonemap draw, re-issued over the 8-bit layer
+    // with this as its HDR source, tonemaps the HUD into the 8-bit layer's
+    // colour; this layer's alpha then replaces the 8-bit layer's (the
+    // coverage pass), and the door composite shows it as any other UI.
+    Ptr<ID3D11Texture2D> hdrTex;
+    Ptr<ID3D11RenderTargetView> hdrRtv;
+    Ptr<ID3D11ShaderResourceView> hdrSrv;
+    uint32_t hdrW = 0, hdrH = 0;
+    uint64_t hdrSeq = 0;            // the frame whose HUD draws it holds
+    uint32_t hdrDraws = 0;
+    const void* hdrTarget = nullptr;  // the HDR target those draws left (identity)
+    LayerDs hdrDs;                    // its own depth-stencil, seeded the same way
+    uint64_t hdrToneSeq = 0;          // the frame the tonemap re-issue ran for
+    // Consecutive content-frames no tonemap re-issue published (review R1's
+    // frame deadline): counted beside hdrLost at the per-frame clear, reset
+    // where a publication lands. The stand-down is at kCrispHdrMissFrames.
+    uint32_t hdrMissStreak = 0;
 
     // The door.
     UiLayerDoorState door;
@@ -180,14 +267,21 @@ struct Draw {
     bool decided = false, active = false;
     bool saved = false;    // the game's state is held below: restore it on any exit
     bool counted = false;  // this decision's draw is counted (a fallback re-issue is not)
+    bool hdr = false;      // the crisp-HUD half of fix.ui_quality: the draw goes to the HDR HUD layer, not the 8-bit one
     int eye = -1;
     UiLayerFamily family = UiLayerFamily::kNone;
+    uint64_t holoPsHash = 0;
+    ID3D11PixelShader* holoOriginal = nullptr; // borrowed from the game's binding
+    ID3D11PixelShader* holoPatched = nullptr;  // borrowed from the bounded cache
+    ID3D11ShaderResourceView* holoDepthCheck = nullptr; // saved query ref, including a partial SEH getter
+    bool holoRestoreOk = true; // failed restore must never replay a patched PS at stock coordinates
     uint64_t seq = 0;
     const void* targetRes = nullptr;
     uint32_t targetW = 0, targetH = 0;
     float jx = 0.0f, jy = 0.0f;  // this frame's jitter, in the target's pixels
     UiBlendShape shape = UiBlendShape::kRefused;  // as decided
     UiDsEffect ds;               // what it does with the game's depth-stencil
+    bool rawDepthWritePotential = false; // before the original DSV's read-only mask
     uint8_t stencilRead = 0;     // its stencil read mask, for the seed
     // Saved at Begin, put back at End.
     ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
@@ -207,10 +301,17 @@ struct Draw {
     bool wbActive = false;
     // The route's timers open across the game's own issue (the price, below):
     // a multiply's second issue, and a write-back's re-issue. -1: none.
-    int routeSlot = -1;
+    UiDrawRouteScope drawRoute;
     int wbRouteSlot = -1;
 };
 Draw g_draw;
+ui_holo_remap::Cache g_holoCache;
+ui_holo_remap::Binding g_holoBinding;
+uint64_t g_holoEligible = 0, g_holoPrepared = 0, g_holoTaken = 0, g_holoRefused = 0;
+bool g_holoPrepareNoted[2]{}, g_holoTakeNoted[2]{}, g_holoRefusalNoted[2]{};
+std::atomic<uint64_t> g_holoCaptureCalls{0}, g_holoCaptured{0};
+std::atomic<bool> g_holoCaptureNoted[2]{}, g_holoCaptureRefusalNoted[2]{};
+static_assert(ui_holo_remap::kVs == kHoloTargetSphere, "hologram classifier identity");
 uint64_t g_lastRedirectSeq = 0;
 bool g_familyEngaged[static_cast<size_t>(UiLayerFamily::kCount)] = {};
 uint32_t g_watchBudget = kWatchPerFrame;
@@ -232,6 +333,50 @@ uint32_t g_blendCount = 0;
 std::unique_ptr<edvr_layer_seed::Seeder> g_seeder;
 Ptr<ID3D11DeviceContext> g_deferred;
 bool g_seederTried = false;
+// Conservative across both eyes and LDR/HDR caches. A redirected depth
+// writer may also change another cache's game source through raw write-back.
+UiLayerPrivateDepthGuard g_privateDepthGuard;
+
+// ------------------------------------------------- the crisp-HUD half's of fix.ui_quality declines
+
+// Why a tonemap re-issue did not run for an admitted tonemap draw (or an HDR
+// take was never possible). Each is counted on the crisp window line and
+// NAMED once a session (first-seen per reason and shader pair below); the
+// game's own draw is always untouched.
+enum class CrispToneDecline : uint8_t {
+    kNoHdrSlot = 0,  // the eye's own full-shape tonemap read no eye's HDR HUD source while its content was outstanding
+    kNoContent,      // the eye's HDR layer holds nothing this frame (no HUD draws taken)
+    kLayerBusy,      // the 8-bit layer already holds this frame's content (ordering guard)
+    kSecondTonemap,  // this eye was already re-tonemapped this frame (never double-tonemap)
+    kSizeMismatch,   // the HDR and 8-bit layers differ in size (the sample must be 1:1)
+    kStateDrift,     // the bindings at the re-issue are not the admitted draw's
+    kUav,            // a pixel-shader UAV is bound (the re-issue would write it twice)
+    kLayerFailed,    // the 8-bit or HDR layer could not be created
+    kCount
+};
+
+const char* crispToneDeclineName(CrispToneDecline d) {
+    switch (d) {
+        case CrispToneDecline::kNoHdrSlot:
+            return "no PS slot of the admitted draw reads an eye's HDR HUD source (a settings-tier "
+                   "or EDHM variant the identity read cannot place)";
+        case CrispToneDecline::kNoContent: return "the eye's HDR layer holds nothing this frame";
+        case CrispToneDecline::kLayerBusy:
+            return "the 8-bit layer already holds this frame's UI (the menus draw after the "
+                   "tonemap -- this should not happen)";
+        case CrispToneDecline::kSecondTonemap:
+            return "this eye was already re-tonemapped this frame (the layer is never "
+                   "double-tonemapped)";
+        case CrispToneDecline::kSizeMismatch:
+            return "the HDR and 8-bit layers differ in size (the coverage sample must be 1:1)";
+        case CrispToneDecline::kStateDrift:
+            return "the bindings at the re-issue are not the admitted draw's";
+        case CrispToneDecline::kUav:
+            return "a pixel-shader UAV is bound (the re-issue would write it twice)";
+        case CrispToneDecline::kLayerFailed: return "the 8-bit or HDR layer could not be created";
+        default: return "?";
+    }
+}
 
 // --------------------------------------------------------------- counters
 
@@ -249,6 +394,15 @@ struct Window {
     // issue (decide-time, via decided[kAfterUi][...], plus begin-time below).
     uint64_t afterTaken = 0, afterPostPass = 0, afterRefused = 0, afterDeclined = 0;
     uint64_t eyeMatched = 0, eyeSwapped = 0, eyeUntold = 0, seedStale = 0;
+    uint64_t depthOnlySeedPreservedWriters = 0;
+    uint64_t privateDepthPotentialBegins = 0;
+    // the crisp-HUD half of fix.ui_quality: HUD draws taken into the HDR layer, tonemap re-issues,
+    // coverage passes, HDR layers whose content never reached a tonemap, and
+    // the re-issue's declines by reason (each also named once a session).
+    uint64_t hdrRedirected = 0, hdrReissued = 0, hdrCoveragePasses = 0, hdrLost = 0;
+    uint64_t hdrDrawTimingEligible = 0, hdrDrawTimingDisabled = 0, hdrDrawTimingIssued = 0;
+    uint64_t hdrDrawTimingAborted = 0;
+    uint64_t hdrDeclined[static_cast<size_t>(CrispToneDecline::kCount)] = {};
     // The world-screen gate: frames read, 2D screen draws that asked, and the
     // frames each signal held the screen in the picture.
     uint64_t gateReads = 0, screenAsked = 0;
@@ -311,26 +465,80 @@ struct RouteSlot {
     UiRouteStage stage = UiRouteStage::kClear;
     int eye = 0;
     uint64_t seq = 0;
+    UiRouteCoverageFlags coverage;
 };
-constexpr uint32_t kRouteRing = 64;
+constexpr uint32_t kRouteRing = 512;  // live timer slots; one interval each. 64 covered the
+                                      // pre-crisp route (~8/eye-frame); the crisp take adds a
+                                      // seed and a write-back per HUD draw-group (tens a frame
+                                      // at 0.5-quality), and a full ring silently drops whole
+                                      // eye-frames' timings (routeBegin's -1, "no free timer")
+                                      // -- the phase-3 review saw 60,895 of them with the
+                                      // tonemap/coverage timings absent. 512 covers >200
+                                      // intervals a frame with margin.
 RouteSlot g_route[kRouteRing];
 uint32_t g_routeHead = 0, g_routeTail = 0;  // monotonic; a slot is index % kRouteRing
 uint64_t g_routeLatestSeq = 0;              // the newest frame a stage began in
 constexpr size_t kStages = static_cast<size_t>(UiRouteStage::kCount);
 constexpr size_t kRouteTotal = kStages;     // the stats slot of the whole route's sum
+constexpr size_t kRouteWithMoved = kStages + 1;
+bool g_hdrDrawTimingOn = false;  // advanced.temporal_aa_diagnostics, read at configure only
+UiSeedCensus g_seedCensus;
+UiHdrSeedGpuProbe g_hdrSeedGpu;
+UiHdrSeedGpuProbe::Token g_hdrSeedActive = 0; // explicit outer-guard recovery for SEH
 UiRouteSum g_stageSum[kStages][2];
-UiRouteSum g_routeSum[2];
-// One window's per-eye-frame sums, by stage and for the route.
+UiRouteFrameTotals g_routeTotals[2];
+UiRouteCoverage g_routeCoverage;
+uint32_t g_routeCombinedArmedPending = 0;
+uint32_t g_routeHdrMovedPending = 0;
+// One window's per-eye-frame sums, by stage and for the route. Reservoir-
+// sampled (routeSample): the percentiles stay unbiased over the whole 30 s
+// window at ANY interval rate -- the old first-N cap silently kept only the
+// window's first seconds once the rate outgrew it (the phase-3 review
+// measured 60,895 intervals with no free timer and absent tonemap/coverage
+// timings at 125%).
 constexpr uint32_t kRouteSamples = 8192;    // 30 s of both eyes at 136 Hz
 struct RouteStats {
     float v[kRouteSamples];
     uint32_t n = 0;
+    uint64_t seen = 0;     // reservoir R: replace slot j with probability k/seen
+    uint32_t rng = 0x9E3779B9u;  // a per-stat LCG; deterministic is fine for stats
 };
-RouteStats g_routeStats[kStages + 1];
+RouteStats g_routeStats[kStages + 2];
 
 void routeSample(size_t stat, double ms) {
     RouteStats& r = g_routeStats[stat];
-    if (r.n < kRouteSamples) r.v[r.n++] = static_cast<float>(ms);
+    ++r.seen;
+    if (r.n < kRouteSamples) {
+        r.v[r.n++] = static_cast<float>(ms);
+        return;
+    }
+    r.rng = r.rng * 1664525u + 1013904223u;
+    const uint64_t j = (static_cast<uint64_t>(r.rng) * r.seen) >> 32;  // uniform in [0, seen)
+    if (j < kRouteSamples) r.v[j] = static_cast<float>(ms);
+}
+
+// Apply a loss to queued flags once per stage/eye-frame. Future intervals
+// consult the same ledger. HDR loss leaves the machinery total intact.
+void routeApplyCoverage(int eye, uint64_t seq) {
+    for (uint32_t i = g_routeTail; i != g_routeHead; ++i) {
+        RouteSlot& s = g_route[i % kRouteRing];
+        if (s.eye != eye || s.seq != seq) continue;
+        const bool combined = s.coverage.combined;
+        g_routeCoverage.apply(s.stage, eye, seq, s.coverage);
+        if (combined && !s.coverage.combined) --g_routeCombinedArmedPending;
+    }
+}
+
+void routeMovedMissing(int eye, uint64_t seq) {
+    // A disabled draw is absent from both moved-only and combined coverage,
+    // including an on/off toggle within one source sequence. Machinery stays
+    // valid. Steady diagnostics-off frames need no scan of the pending ring.
+    constexpr UiRouteStage stage = UiRouteStage::kHdrMovedDraw;
+    uiRouteLost(g_stageSum[static_cast<size_t>(stage)][eye], seq);
+    g_routeTotals[eye].lost(stage, seq);
+    if (g_routeCoverage.missing(stage, eye, seq) &&
+        (g_routeCombinedArmedPending || g_routeHdrMovedPending))
+        routeApplyCoverage(eye, seq);
 }
 
 // Opens a timer for one stage of one eye-frame; -1 when none could be had
@@ -350,13 +558,17 @@ int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t s
     if (!ok) {
         ++g_win.routeUntimed[si];
         uiRouteLost(g_stageSum[si][eye], seq);
-        uiRouteLost(g_routeSum[eye], seq);
+        g_routeTotals[eye].lost(stage, seq);
+        if (g_routeCoverage.missing(stage, eye, seq)) routeApplyCoverage(eye, seq);
         return -1;
     }
     s.inUse = true;
     s.stage = stage;
     s.eye = eye;
     s.seq = seq;
+    s.coverage = g_routeCoverage.begin(stage, eye, seq, g_hdrDrawTimingOn);
+    if (s.coverage.combined) ++g_routeCombinedArmedPending;
+    if (stage == UiRouteStage::kHdrMovedDraw) ++g_routeHdrMovedPending;
     if (seq > g_routeLatestSeq) g_routeLatestSeq = seq;
     const int idx = static_cast<int>(g_routeHead % kRouteRing);
     ++g_routeHead;
@@ -366,6 +578,13 @@ int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t s
 void routeEnd(ID3D11DeviceContext* ctx, int idx) {
     if (idx < 0 || idx >= static_cast<int>(kRouteRing) || !ctx) return;
     g_route[idx].timer.end(ctx);  // a failed end reads back as not measured
+}
+
+void routeAbort(ID3D11DeviceContext* ctx, int idx) {
+    if (idx < 0 || idx >= static_cast<int>(kRouteRing) || !ctx) return;
+    // Keep the FIFO entry: routePoll consumes it as Invalid and spoils its
+    // stage/combined eye-frame. Reset cancels its lease on the owner context.
+    g_route[idx].timer.reset(ctx);
 }
 
 // The ready samples, oldest first, into their sums; then every sum no
@@ -383,9 +602,17 @@ void routePoll(ID3D11DeviceContext* ctx) {
         const size_t si = static_cast<size_t>(s.stage);
         if (!valid) ++g_win.routeInvalid[si];
         if (uiRouteLate(g_stageSum[si][s.eye], s.seq)) ++g_win.routeLate[si];
-        if (uiRouteAdd(g_stageSum[si][s.eye], s.seq, ms, valid, &closed)) routeSample(si, closed);
-        if (uiRouteAdd(g_routeSum[s.eye], s.seq, ms, valid, &closed)) routeSample(kRouteTotal, closed);
+        if (uiRouteAdd(g_stageSum[si][s.eye], s.seq, ms, valid && s.coverage.stage, &closed))
+            routeSample(si, closed);
+        double combined = 0.0;
+        const unsigned totals = g_routeTotals[s.eye].add(s.stage, s.seq, ms, valid,
+                                                       s.coverage.combined, closed, combined,
+                                                       s.coverage.machinery);
+        if (totals & 1) routeSample(kRouteTotal, closed);
+        if (totals & 2) routeSample(kRouteWithMoved, combined);
         s.inUse = false;
+        if (s.coverage.combined) --g_routeCombinedArmedPending;
+        if (s.stage == UiRouteStage::kHdrMovedDraw) --g_routeHdrMovedPending;
         ++g_routeTail;
     }
     uint64_t before[2] = {g_routeLatestSeq, g_routeLatestSeq};
@@ -397,7 +624,10 @@ void routePoll(ID3D11DeviceContext* ctx) {
         for (size_t si = 0; si < kStages; ++si) {
             if (uiRouteClose(g_stageSum[si][e], before[e], &closed)) routeSample(si, closed);
         }
-        if (uiRouteClose(g_routeSum[e], before[e], &closed)) routeSample(kRouteTotal, closed);
+        double combined = 0.0;
+        const unsigned totals = g_routeTotals[e].close(before[e], closed, combined);
+        if (totals & 1) routeSample(kRouteTotal, closed);
+        if (totals & 2) routeSample(kRouteWithMoved, combined);
     }
 }
 
@@ -409,7 +639,7 @@ void appendPrice(std::string& s, size_t stat) {
         return;
     }
     const double p95 = uiLayerPercentile(r.v, r.n, 0.95);  // sorts; the median reads the same order
-    const double med = uiLayerPercentile(r.v, r.n, 0.5);
+    const double med = uiLayerSortedPercentile(r.v, r.n, 0.5);
     char buf[64];
     _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%.3f/%.3f (%u)", med, p95, r.n);
     s += buf;
@@ -417,6 +647,12 @@ void appendPrice(std::string& s, size_t stat) {
 
 uint64_t g_winStartMs = 0;
 uint64_t g_sessionRedirected = 0;
+// Phase-0 timing (src/common/periodic_work.h) of the 30 s totals and price
+// lines, built on Elite's thread at the frame boundary: appendPrice sorts up
+// to kRouteSamples floats for each of the price stats. Context: the samples
+// held then (what the sorts had to order). One run per window that logs, so
+// nothing is written while fix.ui_quality is off and nothing was redirected.
+PeriodicWork g_workTotals{"ui_layer_totals", "samples"};
 
 // First-seen lines, deduplicated.
 struct FamilySeen {
@@ -432,29 +668,6 @@ struct AfterSeen {
 AfterSeen g_afterSeen[kMaxAfterLines];
 uint32_t g_afterSeenCount = 0;
 bool g_engageNoted = false, g_compositeNoted = false;
-
-const char* viewName(DXGI_FORMAT f) {
-    switch (f) {
-        case DXGI_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
-        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return "R8G8B8A8_UNORM_SRGB";
-        case DXGI_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
-        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return "B8G8R8A8_UNORM_SRGB";
-        case DXGI_FORMAT_R11G11B10_FLOAT: return "R11G11B10_FLOAT";
-        case DXGI_FORMAT_R10G10B10A2_UNORM: return "R10G10B10A2_UNORM";
-        case DXGI_FORMAT_R16G16B16A16_FLOAT: return "R16G16B16A16_FLOAT";
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS: return "R8G8B8A8_TYPELESS";
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS: return "B8G8R8A8_TYPELESS";
-        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: return "D32_FLOAT_S8X24_UINT";
-        case DXGI_FORMAT_D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
-        case DXGI_FORMAT_D32_FLOAT: return "D32_FLOAT";
-        case DXGI_FORMAT_D16_UNORM: return "D16_UNORM";
-        case DXGI_FORMAT_R32G8X24_TYPELESS: return "R32G8X24_TYPELESS";
-        case DXGI_FORMAT_R24G8_TYPELESS: return "R24G8_TYPELESS";
-        case DXGI_FORMAT_R32_TYPELESS: return "R32_TYPELESS";
-        case DXGI_FORMAT_R16_TYPELESS: return "R16_TYPELESS";
-        default: return "another format";
-    }
-}
 
 bool structuralDecision(UiLayerDecision d) {
     // The transient ones -- not armed yet, late this frame -- are counted on
@@ -482,32 +695,16 @@ void noteFamily(UiLayerFamily f, UiLayerDecision d, const char* detail) {
                     detail ? detail : "");
 }
 
-// The census's own notation for a blend (bl=enable src,dst,op/srcA,dstA,opA
-// and the write mask) and a depth-stencil state, for those lines.
-void describeBlend(const UiBlendRt& b, char* out, size_t n) {
-    _snprintf_s(out, n, _TRUNCATE, "bl=%u%u,%u,%u/%u,%u,%u bm=%X", b.enable ? 1u : 0u, b.src, b.dst,
-                b.op, b.srcA, b.dstA, b.opA, b.mask);
-}
-void describeDs(const UiDsState& s, UINT ref, DXGI_FORMAT viewFmt, char* out, size_t n) {
-    _snprintf_s(out, n, _TRUNCATE,
-                "depth %u func %u write %u; stencil %u ref %u read %02X write %02X front "
-                "func %u ops %u,%u,%u back func %u ops %u,%u,%u; %s%s%s",
-                s.depthEnable ? 1u : 0u, s.depthFunc, s.depthWriteAll ? 1u : 0u,
-                s.stencilEnable ? 1u : 0u, ref, s.readMask, s.writeMask, s.front.func, s.front.fail,
-                s.front.depthFail, s.front.pass, s.back.func, s.back.fail, s.back.depthFail,
-                s.back.pass, viewName(viewFmt), s.readOnlyDepth ? " read-only depth" : "",
-                s.readOnlyStencil ? " read-only stencil" : "");
-}
-
 // ------------------------------------------------------------ the layer
 
-bool makeTarget(ID3D11Device* dev, uint32_t w, uint32_t h, Ptr<ID3D11Texture2D>* tex,
-                Ptr<ID3D11RenderTargetView>* rtv, Ptr<ID3D11ShaderResourceView>* srv) {
+bool makeTarget(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT format,
+                Ptr<ID3D11Texture2D>* tex, Ptr<ID3D11RenderTargetView>* rtv,
+                Ptr<ID3D11ShaderResourceView>* srv) {
     D3D11_TEXTURE2D_DESC d{};
     d.Width = w;
     d.Height = h;
     d.MipLevels = d.ArraySize = 1;
-    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.Format = format;
     d.SampleDesc.Count = 1;
     d.Usage = D3D11_USAGE_DEFAULT;
     d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -524,11 +721,14 @@ bool makeTarget(ID3D11Device* dev, uint32_t w, uint32_t h, Ptr<ID3D11Texture2D>*
 
 bool ensureLayer(ID3D11Device* dev, Eye& e, uint32_t w, uint32_t h, int eye) {
     if (e.tex && e.w == w && e.h == h) return true;
+    e.coverage.reset();
     const bool resized = e.tex != nullptr;
     e.w = e.h = 0;
     e.seq = 0;
     e.draws = 0;
-    if (!dev || !w || !h || !makeTarget(dev, w, h, &e.tex, &e.rtv, &e.srv)) return false;
+    if (!dev || !w || !h ||
+        !makeTarget(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &e.tex, &e.rtv, &e.srv))
+        return false;
     e.w = w;
     e.h = h;
     Log::get().note("ui quality: layer: %s eye's layer %s at %ux%u (R8G8B8A8_UNORM, %.1f MB).",
@@ -539,7 +739,7 @@ bool ensureLayer(ID3D11Device* dev, Eye& e, uint32_t w, uint32_t h, int eye) {
 
 bool ensureLayerFor(ID3D11DeviceContext* ctx, int eye) {
     Eye& e = g_eye[eye];
-    const UiLayerSize s = uiLayerSize(e.door.fullW, e.door.fullH, g_target);
+    const UiLayerSize s = uiLayerSize(e.door.fullW, e.door.fullH, layerTarget());
     if (!s.w || !s.h) return false;
     if (e.tex && e.w == s.w && e.h == s.h) {
         e.basisW = e.door.fullW;
@@ -554,6 +754,39 @@ bool ensureLayerFor(ID3D11DeviceContext* ctx, int eye) {
     return true;
 }
 
+// the crisp-HUD half's of fix.ui_quality HDR HUD layer, at the 8-bit layer's size: R16G16B16A16_FLOAT
+// (8 bytes a pixel -- the memory line says what that costs).
+bool ensureHdrLayerFor(ID3D11DeviceContext* ctx, int eye) {
+    Eye& e = g_eye[eye];
+    const UiLayerSize s = uiLayerSize(e.door.fullW, e.door.fullH, layerTarget());
+    if (!s.w || !s.h) return false;
+    if (e.hdrTex && e.hdrW == s.w && e.hdrH == s.h) return true;
+    e.coverage.reset();
+    const bool resized = e.hdrTex != nullptr;
+    e.hdrW = e.hdrH = 0;
+    e.hdrSeq = 0;
+    e.hdrDraws = 0;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!dev ||
+        !makeTarget(dev.Get(), s.w, s.h, DXGI_FORMAT_R16G16B16A16_FLOAT, &e.hdrTex, &e.hdrRtv,
+                    &e.hdrSrv)) {
+        e.hdrTex.Reset();
+        e.hdrRtv.Reset();
+        e.hdrSrv.Reset();
+        return false;
+    }
+    e.hdrW = s.w;
+    e.hdrH = s.h;
+    Log::get().note(
+        "crisp hud: layer: %s eye's HDR HUD layer %s at %ux%u (R16G16B16A16_FLOAT, %.1f MB) -- "
+        "the cockpit's holo panels, flight HUD, target sprite and holograms are drawn into it "
+        "and tonemapped over the finished eye.",
+        eye == 0 ? "left" : "right", resized ? "re-created" : "created", s.w, s.h,
+        uiLayerMB(uiLayerBytes(s.w, s.h, 8)));
+    return true;
+}
+
 // The per-channel transmittance, at the layer's size, made at the first
 // multiply the eye sees.
 bool ensureMult(ID3D11DeviceContext* ctx, Eye& e, int eye) {
@@ -562,13 +795,26 @@ bool ensureMult(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     ctx->GetDevice(&dev);
     e.mW = e.mH = 0;
     e.mSeq = 0;
-    if (!dev || !e.w || !makeTarget(dev.Get(), e.w, e.h, &e.mTex, &e.mRtv, &e.mSrv)) return false;
+    if (!dev || !e.w ||
+        !makeTarget(dev.Get(), e.w, e.h, DXGI_FORMAT_R8G8B8A8_UNORM, &e.mTex, &e.mRtv, &e.mSrv))
+        return false;
     e.mW = e.w;
     e.mH = e.h;
     Log::get().note("ui quality: layer: %s eye's multiply transmittance created at %ux%u (%.1f MB) "
                     "-- a draw that tints the frame by its colour went into the layer.",
                     eye == 0 ? "left" : "right", e.w, e.h, uiLayerMB(uiLayerBytes(e.w, e.h)));
     return true;
+}
+
+void releaseLayerDs(LayerDs& l) {
+    l.tex.Reset();
+    l.dsv.Reset();
+    l.w = l.h = 0;
+    l.viewFmt = DXGI_FORMAT_UNKNOWN;
+    l.seq = 0;
+    l.source = nullptr;
+    l.seededMask = 0;
+    l.seededDepth = false;
 }
 
 // Every layer, transmittance, depth target and composite output released
@@ -578,7 +824,9 @@ bool ensureMult(ID3D11DeviceContext* ctx, Eye& e, int eye) {
 bool releaseLayers() {
     bool any = false;
     for (Eye& e : g_eye) {
-        any = any || e.tex || e.mTex || e.dsTex || e.dsCopy || e.out || e.copy || e.frameSrv;
+        any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.out || e.copy || e.frameSrv ||
+              e.hdrTex || e.hdrDs.tex;
+        e.coverage.reset();
         e.tex.Reset();
         e.rtv.Reset();
         e.srv.Reset();
@@ -590,12 +838,17 @@ bool releaseLayers() {
         e.mSrv.Reset();
         e.mW = e.mH = 0;
         e.mSeq = 0;
-        e.dsTex.Reset();
-        e.dsv.Reset();
-        e.dsW = e.dsH = 0;
-        e.dsViewFmt = DXGI_FORMAT_UNKNOWN;
-        e.dsSeq = 0;
-        e.dsSource = nullptr;
+        releaseLayerDs(e.ds);
+        e.hdrTex.Reset();
+        e.hdrRtv.Reset();
+        e.hdrSrv.Reset();
+        e.hdrW = e.hdrH = 0;
+        e.hdrSeq = 0;
+        e.hdrDraws = 0;
+        e.hdrTarget = nullptr;
+        releaseLayerDs(e.hdrDs);
+        e.hdrToneSeq = 0;
+        e.hdrMissStreak = 0;
         e.dsCopy.Reset();
         e.dsCopyDepth.Reset();
         e.dsCopyStencil.Reset();
@@ -631,52 +884,17 @@ ID3D11BlendState* cachedBlend(ID3D11DeviceContext* ctx, const UiBlendRt& conv) {
     return g_blends[g_blendCount++].state.Get();
 }
 
-// The shape of a bound blend state, alpha-to-coverage and logic ops refused.
-UiBlendShape shapeOf(ID3D11BlendState* bs, UiBlendRt* rtOut) {
-    UiBlendRt rt;  // null state: D3D11's default -- blending off, all written
-    if (bs) {
-        D3D11_BLEND_DESC d{};
-        bs->GetDesc(&d);
-        rt = uiLayerBlendRtFrom(d.RenderTarget[0]);
-        if (rtOut) *rtOut = rt;
-        if (d.AlphaToCoverageEnable) return UiBlendShape::kRefused;
-        Ptr<ID3D11BlendState1> bs1;
-        if (SUCCEEDED(bs->QueryInterface(__uuidof(ID3D11BlendState1),
-                                         reinterpret_cast<void**>(bs1.GetAddressOf()))) &&
-            bs1) {
-            D3D11_BLEND_DESC1 d1{};
-            bs1->GetDesc1(&d1);
-            if (d1.RenderTarget[0].LogicOpEnable) return UiBlendShape::kRefused;
-        }
-    } else if (rtOut) {
-        *rtOut = rt;
-    }
-    return uiLayerBlendShape(rt);
-}
-
-// The depth-stencil state bound now, as UiDsState, with its reference.
-UiDsState dsStateOf(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, UINT* refOut,
-                    DXGI_FORMAT* viewFmtOut) {
-    Ptr<ID3D11DepthStencilState> dss;
-    UINT ref = 0;
-    ctx->OMGetDepthStencilState(&dss, &ref);
-    D3D11_DEPTH_STENCIL_DESC d{};
-    if (dss) dss->GetDesc(&d);
-    UINT flags = 0;
-    DXGI_FORMAT viewFmt = DXGI_FORMAT_UNKNOWN;
-    if (dsv) {
-        D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
-        dsv->GetDesc(&vd);
-        flags = vd.Flags;
-        viewFmt = vd.Format;
-    }
-    if (refOut) *refOut = ref;
-    if (viewFmtOut) *viewFmtOut = viewFmt;
-    UiDsState s = uiLayerDsStateFrom(dss ? &d : nullptr, flags);
+// The layer's own read of the bound depth-stencil state: dsStateOf itself
+// is shared with the HUD layer census now (draw_state_describe.h), but the
+// once-a-session note about a stencil test against a stencil-less view
+// speaks of the layer's copy, so it stays the layer's.
+UiDsState dsStateOfNoted(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, UINT* refOut,
+                         DXGI_FORMAT* viewFmtOut) {
+    DXGI_FORMAT localFmt = DXGI_FORMAT_UNKNOWN;
+    UiDsState s = dsStateOf(ctx, dsv, refOut, viewFmtOut ? viewFmtOut : &localFmt);
+    const DXGI_FORMAT viewFmt = viewFmtOut ? *viewFmtOut : localFmt;
     // Decided here, once per draw: a stencil test against a view with no
     // stencil plane is no test at all (review P3-6), said once.
-    s.stencilPlane = viewFmt == DXGI_FORMAT_D32_FLOAT_S8X24_UINT ||
-                     viewFmt == DXGI_FORMAT_D24_UNORM_S8_UINT;
     static bool stencillessNoted = false;
     if (dsv && s.stencilEnable && !s.stencilPlane && !stencillessNoted) {
         stencillessNoted = true;
@@ -783,12 +1001,19 @@ bool dsReproducible(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, uint3
     return true;
 }
 
+// The bytes one pixel of a depth-stencil target takes in the formats the game uses: what the creation line and
+// the GPU census (which says which size its seed figure was measured at) report the target's memory from.
+uint32_t dsBytesPerPixel(DXGI_FORMAT f) { return f == DXGI_FORMAT_D32_FLOAT_S8X24_UINT ? 8u : 4u; }
+
 // The layer's depth-stencil target, seeded from the game's own at the
 // layer's size with this frame's jitter cancelled: the Seeder maps a layer
 // pixel p to the game pixel floor(p * game / layer + jitter), which is the
-// redirected viewport's own map inverted.
-bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11DepthStencilView* gameDsv,
-                    uint8_t stencilMask, bool needDepth) {
+// redirected viewport's own map inverted. `l` is the layer's own target
+// (the 8-bit layer's ds, or the HDR HUD layer's hdrDs) at outW x outH; the
+// copy of the game's buffer the seed reads is the eye's, shared.
+bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint32_t outW,
+                    uint32_t outH, ID3D11DepthStencilView* gameDsv, uint8_t stencilMask,
+                    bool needDepth, UiRouteStage stage, const char* who, const UiSeedPlan& seedPlan) {
     if (!gameDsv || !g_seeder || !g_deferred) return false;
     Ptr<ID3D11Resource> res;
     gameDsv->GetResource(&res);
@@ -841,14 +1066,14 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11DepthStenci
         e.dsCopyFmt = tf;
     }
     // The layer's own target, at the layer's size, in the game's format.
-    if (!e.dsTex || e.dsW != e.w || e.dsH != e.h || e.dsViewFmt != vd.Format) {
-        e.dsTex.Reset();
-        e.dsv.Reset();
-        e.dsW = e.dsH = 0;
-        e.dsSeq = 0;
+    if (!l.tex || l.w != outW || l.h != outH || l.viewFmt != vd.Format) {
+        l.tex.Reset();
+        l.dsv.Reset();
+        l.w = l.h = 0;
+        l.seq = 0;
         D3D11_TEXTURE2D_DESC ld{};
-        ld.Width = e.w;
-        ld.Height = e.h;
+        ld.Width = outW;
+        ld.Height = outH;
         ld.MipLevels = ld.ArraySize = 1;
         ld.Format = tf;
         ld.SampleDesc.Count = 1;
@@ -857,32 +1082,63 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11DepthStenci
         D3D11_DEPTH_STENCIL_VIEW_DESC lv{};
         lv.Format = vd.Format;
         lv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-        if (FAILED(dev->CreateTexture2D(&ld, nullptr, &e.dsTex)) ||
-            FAILED(dev->CreateDepthStencilView(e.dsTex.Get(), &lv, &e.dsv))) {
-            e.dsTex.Reset();
-            e.dsv.Reset();
+        if (FAILED(dev->CreateTexture2D(&ld, nullptr, &l.tex)) ||
+            FAILED(dev->CreateDepthStencilView(l.tex.Get(), &lv, &l.dsv))) {
+            l.tex.Reset();
+            l.dsv.Reset();
             return false;
         }
-        e.dsW = e.w;
-        e.dsH = e.h;
-        e.dsViewFmt = vd.Format;
-        const uint32_t bpp = vd.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT ? 8u : 4u;
+        l.w = outW;
+        l.h = outH;
+        l.viewFmt = vd.Format;
+        const uint32_t bpp = dsBytesPerPixel(vd.Format);
         Log::get().note("ui quality: layer: %s eye's depth-stencil target created at %ux%u (%s, "
-                        "%.1f MB; with the copy of the game's it reads, %.1f MB) -- a UI draw "
-                        "tests the game's depth or stencil.",
-                        eye == 0 ? "left" : "right", e.w, e.h, viewName(vd.Format),
-                        uiLayerMB(uiLayerBytes(e.w, e.h, bpp)),
-                        uiLayerMB(uiLayerBytes(e.w, e.h, bpp) +
-                                  uiLayerBytes(td.Width, td.Height, bpp)));
+                        "%.1f MB; with the copy of the game's it reads, %.1f MB) -- %s tests "
+                        "the game's depth or stencil.",
+                        eye == 0 ? "left" : "right", outW, outH, viewName(vd.Format),
+                        uiLayerMB(uiLayerBytes(outW, outH, bpp)),
+                        uiLayerMB(uiLayerBytes(outW, outH, bpp) +
+                                  uiLayerBytes(td.Width, td.Height, bpp)),
+                        who);
     }
+    // The GPU census's section for the HDR HUD layer's seed (issue #38): every seed counted, a few timed on the
+    // section's turn, the target's size noted. The 8-bit layer's seed is counted nowhere, so the section holds one
+    // layer's seeds and the line's figure is that layer's. RAII, so the failed-recording exit below closes it too.
+    // Wrap it around the route interval, not inside it: the census times the call site, the route times its own.
+    GpuCensusSeedScope census(ctx, stage == UiRouteStage::kHdrSeed,
+                              {outW, outH, dsBytesPerPixel(vd.Format), td.Width, td.Height, viewName(vd.Format)});
     // The seed's price (review P3-4): the copy and the Seeder's passes, one
     // interval of this eye-frame's route.
-    const int timer = routeBegin(ctx, UiRouteStage::kSeed, eye, g_draw.seq);
+    const int timer = routeBegin(ctx, stage, eye, g_draw.seq);
+    UiHdrSeedTimingMeta seedMeta;
+    if (stage == UiRouteStage::kHdrSeed && g_hdrDrawTimingOn) {
+        seedMeta.seq = g_draw.seq; seedMeta.eye = eye; seedMeta.reason = seedPlan.reason;
+        seedMeta.sourceW = td.Width; seedMeta.sourceH = td.Height;
+        seedMeta.width = outW; seedMeta.height = outH;
+        seedMeta.stencilMask = stencilMask; seedMeta.needsDepth = needDepth;
+        seedMeta.passes = seedPlan.passes;
+    }
+    const auto seedToken = stage == UiRouteStage::kHdrSeed
+        ? g_hdrSeedGpu.beginCopy(dev.Get(), ctx, g_hdrDrawTimingOn, seedMeta) : 0;
+    if (seedToken) g_hdrSeedActive = seedToken;
+    // Observation must not change replay, including a failed timing begin.
+    struct SeedProbeScope {
+        ID3D11DeviceContext* ctx;
+        UiHdrSeedGpuProbe::Token token;
+        ~SeedProbeScope() {
+            if (token) {
+                g_hdrSeedGpu.cancel(ctx, token, UiHdrSeedGpuProbe::Cancel::ExecutionFailed);
+                g_hdrSeedActive = 0;
+            }
+        }
+    } seedProbe{ctx, seedToken};
     vScreenCopyResourceRaw(ctx, e.dsCopy.Get(), tex.Get());
+    if (seedToken) g_hdrSeedGpu.endCopy(ctx, seedToken);
     bool recorded = false;
     try {
-        g_seeder->seed(g_deferred.Get(), e.dsCopyDepth.Get(), e.dsCopyStencil.Get(), e.dsv.Get(),
-                       td.Width, td.Height, e.w, e.h, g_draw.jx, g_draw.jy, stencilMask, needDepth);
+        g_seeder->seed(g_deferred.Get(), e.dsCopyDepth.Get(), e.dsCopyStencil.Get(), l.dsv.Get(),
+                       td.Width, td.Height, outW, outH, g_draw.jx, g_draw.jy, stencilMask,
+                       needDepth);
         recorded = true;
     } catch (const std::exception&) {
         recorded = false;
@@ -890,20 +1146,27 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11DepthStenci
     Ptr<ID3D11CommandList> list;
     const HRESULT fin = g_deferred->FinishCommandList(FALSE, &list);
     if (!recorded || FAILED(fin) || !list) {
+        if (seedToken) g_hdrSeedGpu.cancel(ctx, seedToken, UiHdrSeedGpuProbe::Cancel::RecordingFailed);
+        seedProbe.token = 0;
+        if (seedToken) g_hdrSeedActive = 0;
         routeEnd(ctx, timer);
         return false;
     }
+    if (seedToken) g_hdrSeedGpu.beginWork(ctx, seedToken);
     vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    if (seedToken) g_hdrSeedGpu.endWork(ctx, seedToken);
+    seedProbe.token = 0;
+    if (seedToken) g_hdrSeedActive = 0;
     routeEnd(ctx, timer);
     // What the seed wrote: with SV_StencilRef, one pass copies the depth and
     // all eight stencil bits whenever it draws at all; without it, the depth
     // when asked and one pass per asked bit (the rest cleared to 0).
     const bool hasStencil = e.dsCopyStencil != nullptr;
     const bool full = hasStencil && g_seeder->usesSpecifiedStencilRef() && (needDepth || stencilMask);
-    e.dsSeq = g_draw.seq;
-    e.dsSource = tex.Get();
-    e.dsSeededMask = full ? 0xFF : (hasStencil ? stencilMask : 0);
-    e.dsSeededDepth = needDepth || full;
+    l.seq = g_draw.seq;
+    l.source = tex.Get();
+    l.seededMask = full ? 0xFF : (hasStencil ? stencilMask : 0);
+    l.seededDepth = needDepth || full;
     ++g_win.seeds;
     return true;
 }
@@ -917,6 +1180,12 @@ const void* dsvResource(ID3D11DepthStencilView* dsv) {
 }
 
 void releaseSaved() {
+    // Keep original shader/CB references after an unrecoverable setter fault.
+    // The owner draw gate stays up, and the references with it, even when the
+    // per-draw state is reset: the frame boundary's settle needs both
+    // (settleIssueFence, below).
+    if (!g_holoBinding.needsRestore()) g_holoBinding.clear();
+    ui_holo_remap::release(g_draw.holoDepthCheck);
     for (auto*& r : g_draw.rtv) {
         if (r) r->Release();
         r = nullptr;
@@ -937,6 +1206,16 @@ UINT boundCount(ID3D11RenderTargetView* const* rtvs) {
 }
 
 void restore(ID3D11DeviceContext* ctx) {
+    // Restore the private shader/CB first, with independent guarded setters:
+    // an OM/RS restoration fault must not leave the game's PS replaced.
+    const auto holoRestore = g_holoBinding.finish(ctx, vScreenPSSetShaderRaw);
+    g_draw.holoRestoreOk = holoRestore.restored;
+    // Raises the fence: the game's owner-context draws are dropped until the
+    // frame boundary settles the binding (settleIssueFence).
+    if (!holoRestore.restored) detail::g_uiLayerIssueBlocked = true;
+    if (holoRestore.retried)
+        standDown(holoRestore.restored ? "a hologram shader/b13 restoration fault recovered on the bounded retry"
+                                     : "hologram shader/b13 restoration failed; original state untrusted, owner draw issues suppressed until the frame boundary puts it back");
     vScreenSetRenderTargetsRaw(ctx, boundCount(g_draw.rtv), g_draw.rtv, g_draw.dsv);
     vScreenRSSetViewportsRaw(ctx, g_draw.vpCount, g_draw.vp);
     if (g_draw.scissorSet) ctx->RSSetScissorRects(g_draw.scCount, g_draw.sc);
@@ -1068,11 +1347,18 @@ void sizeChangeTick() {
 }
 
 // One issue of a decided draw into the layer (which = 0) or into the
-// multiply transmittance (which = 1).
+// multiply transmittance (which = 1). the crisp-HUD half of fix.ui_quality: a decided draw with
+// g_draw.hdr goes into the eye's HDR HUD layer instead -- same map, jitter
+// cancel, seeded depth machinery, write-back; the HDR layer's own seq tracks
+// its per-eye-frame clear.
 bool beginInner(ID3D11DeviceContext* ctx, int which) {
     Eye& e = g_eye[g_draw.eye];
-    ID3D11RenderTargetView* target = which ? e.mRtv.Get() : e.rtv.Get();
+    ID3D11RenderTargetView* target =
+        which ? e.mRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get());
     if (!target) return false;
+    LayerDs& lds = g_draw.hdr ? e.hdrDs : e.ds;
+    const uint32_t layerW = g_draw.hdr ? e.hdrW : e.w;
+    const uint32_t layerH = g_draw.hdr ? e.hdrH : e.h;
     // The blend at the moment of issue: a verdict's own Begin runs between
     // the decision and here, and the shape must still be the decided one.
     ID3D11BlendState* bs = nullptr;
@@ -1092,7 +1378,9 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     }
     // A new frame for this eye's layer: clear it, and count a layer the door
     // never composited (the frame took a path without a door, or a withhold).
-    if (which == 0 && e.seq != g_draw.seq) {
+    // The HDR layer's equivalent: content no tonemap re-issue ever read (the
+    // frame took a path without one).
+    if (which == 0 && !g_draw.hdr && e.seq != g_draw.seq) {
         if (e.seq && e.draws && e.compositedSeq != e.seq) ++g_win.lostLayers;
         const int timer = routeBegin(ctx, UiRouteStage::kClear, g_draw.eye, g_draw.seq);
         vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
@@ -1100,6 +1388,34 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         e.seq = g_draw.seq;
         e.draws = 0;
         e.target = g_draw.targetRes;
+        ++g_win.clears;
+    }
+    if (which == 0 && g_draw.hdr && e.hdrSeq != g_draw.seq) {
+        if (e.hdrSeq && e.hdrDraws && e.hdrToneSeq != e.hdrSeq) {
+            ++g_win.hdrLost;
+            // The missing-consumer deadline (review R1): a content-frame no
+            // tonemap re-issue published -- the already-published case does
+            // NOT count (hdrToneSeq == hdrSeq). The tonemap runs every frame
+            // when the path works; a streak of kCrispHdrMissFrames says the
+            // consumer is not coming, so stand down to stock rather than
+            // lose the HUD every frame. The streak resets where a
+            // publication lands (uiLayerCrispToneEnd). This draw still
+            // completes into the layer; the NEXT HUD draw is stock.
+            if (++e.hdrMissStreak >= kCrispHdrMissFrames) {
+                char why[200];
+                _snprintf_s(why, _TRUNCATE,
+                            "the HUD layer's content reached no tonemap for %u consecutive frames "
+                            "(the cockpit HUD was taken but never came back)",
+                            kCrispHdrMissFrames);
+                crispStandDown(why);
+            }
+        }
+        const int timer = routeBegin(ctx, UiRouteStage::kHdrClear, g_draw.eye, g_draw.seq);
+        vScreenClearRenderTargetViewRaw(ctx, e.hdrRtv.Get(), kUiLayerClear);
+        routeEnd(ctx, timer);
+        e.hdrSeq = g_draw.seq;
+        e.hdrDraws = 0;
+        e.hdrTarget = g_draw.targetRes;
         ++g_win.clears;
     }
     if (which == 1 && e.mSeq != g_draw.seq) {
@@ -1131,6 +1447,27 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // Everything the game had is held: from here on any exit, a fault's
     // included, puts it back (uiLayerBegin).
     g_draw.saved = true;
+    ui_holo_remap::Params holoParams{};
+    if (g_draw.holoPsHash) {
+        const auto& v = g_draw.vp[0];
+        ctx->PSGetShaderResources(1, 1, &g_draw.holoDepthCheck);
+        const bool valid = g_draw.vpCount == 1 && std::isfinite(v.TopLeftX) &&
+            std::isfinite(v.TopLeftY) && std::isfinite(v.Width) && std::isfinite(v.Height) &&
+            v.Width > 0 && v.Height > 0 &&
+            ui_holo_remap::params(g_draw.targetW, g_draw.targetH, layerW, layerH,
+                                  g_draw.jx, g_draw.jy, holoParams) &&
+            ui_holo_remap::depthSource(g_draw.holoDepthCheck, g_draw.targetW, g_draw.targetH);
+        if (!valid) {
+            ++g_holoRefused; ++g_win.refusedAtIssue;
+            const int slot = ui_holo_remap::index(g_draw.holoPsHash);
+            if (!g_holoRefusalNoted[slot]) {
+                Log::get().note("crisp holo remap: refused PS %016llX -- unsupported t1 depth, viewport, or map; stock complete draw retained.",
+                    static_cast<unsigned long long>(g_draw.holoPsHash));
+                g_holoRefusalNoted[slot] = true;
+            }
+            releaseSaved(); return false;
+        }
+    }
     // The layer's depth-stencil target: for a draw that tests, seeded from
     // the game's own first (or again, when stale or short of the bits this
     // draw reads); for a draw that only writes, bound once seeded this frame
@@ -1140,19 +1477,34 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // Seeded this frame, from this buffer, AND at the layer's size: a layer
     // re-made mid-frame leaves a depth target of the old size, which D3D11
     // would refuse to bind beside it (review P3-5).
-    const bool seededNow = e.dsv && e.dsW == e.w && e.dsH == e.h && e.dsSeq == g_draw.seq &&
-                           e.dsSource && e.dsSource == gameDs;
+    const bool seededNow = lds.dsv && lds.w == layerW && lds.h == layerH &&
+                           lds.seq == g_draw.seq && lds.source && lds.source == gameDs;
     const bool needsDs = g_draw.ds.tests() || (g_draw.ds.writes() && seededNow);
     if (needsDs) {
         const bool stale = !seededNow;
         const uint8_t wantMask = g_draw.ds.stencilTest ? g_draw.stencilRead : 0;
-        const bool shortBits = (wantMask & ~e.dsSeededMask) != 0;
-        const bool shortDepth = g_draw.ds.depthTest && !e.dsSeededDepth;
+        const bool shortBits = (wantMask & ~lds.seededMask) != 0;
+        const bool shortDepth = g_draw.ds.depthTest && !lds.seededDepth;
         if (g_draw.ds.tests() && (stale || shortBits || shortDepth)) {
             const uint8_t mask =
-                static_cast<uint8_t>(wantMask | (stale ? 0 : e.dsSeededMask));
-            const bool depth = g_draw.ds.depthTest || (!stale && e.dsSeededDepth);
-            if (!seedLayerDepth(ctx, e, g_draw.eye, g_draw.dsv, mask, depth)) {
+                static_cast<uint8_t>(wantMask | (stale ? 0 : lds.seededMask));
+            const bool depth = g_draw.ds.depthTest || (!stale && lds.seededDepth);
+            UiSeedPlan seedPlan;
+            if (g_seedCensus.enabled) {
+                D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
+                g_draw.dsv->GetDesc(&vd);
+                DXGI_FORMAT tf, df, sf;
+                const bool stencil = dsFormats(vd.Format, &tf, &df, &sf) && sf != DXGI_FORMAT_UNKNOWN;
+                seedPlan = g_seedCensus.plan(g_draw.eye, g_draw.hdr, g_draw.seq, gameDs,
+                    layerW, layerH, stale, shortDepth, shortBits, mask, depth,
+                    g_seeder && g_seeder->usesSpecifiedStencilRef(), stencil);
+            }
+            const bool seeded = seedLayerDepth(ctx, e, lds, g_draw.eye, layerW, layerH, g_draw.dsv, mask, depth,
+                                g_draw.hdr ? UiRouteStage::kHdrSeed : UiRouteStage::kSeed,
+                                g_draw.hdr ? "a cockpit HUD draw" : "a UI draw", seedPlan);
+            if (g_seedCensus.enabled) g_seedCensus.seed(g_draw.eye, g_draw.hdr, g_draw.seq,
+                gameDs, layerW, layerH, seedPlan, seeded);
+            if (!seeded) {
                 ++g_win.seedFailures;
                 releaseSaved();
                 ++g_win.refusedAtIssue;
@@ -1160,14 +1512,25 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                 return false;
             }
         }
-        layerDsv = e.dsv.Get();
+        layerDsv = lds.dsv.Get();
         if (g_draw.ds.tests() && !g_draw.counted) ++g_win.dsTested;
     }
     // The map (the game's eye target onto the layer) and the jitter cancel.
     const UiLayerMap m = uiLayerMapFromRegion(0.0f, 0.0f, static_cast<float>(g_draw.targetW),
-                                              static_cast<float>(g_draw.targetH), e.w, e.h);
+                                              static_cast<float>(g_draw.targetH), layerW, layerH);
     float cx = 0.0f, cy = 0.0f;
     uiLayerJitterCancel(g_draw.jx, g_draw.jy, m, &cx, &cy);
+    if (g_draw.holoPsHash && !g_holoBinding.begin(ctx, g_draw.holoPatched, g_holoCache.constants(),
+            holoParams, vScreenPSSetShaderRaw, g_draw.holoOriginal)) {
+        ++g_holoRefused; ++g_win.refusedAtIssue;
+        const int slot = ui_holo_remap::index(g_draw.holoPsHash);
+        if (!g_holoRefusalNoted[slot]) {
+            Log::get().note("crisp holo remap: refused PS %016llX at bind (original shader changed or dynamic classes); stock complete draw retained.",
+                static_cast<unsigned long long>(g_draw.holoPsHash));
+            g_holoRefusalNoted[slot] = true;
+        }
+        releaseSaved(); return false;
+    }
     D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
     for (UINT i = 0; i < g_draw.vpCount; ++i) {
         const D3D11_VIEWPORT& g = g_draw.vp[i];
@@ -1190,28 +1553,46 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             r.t = g_draw.sc[i].top;
             r.r = g_draw.sc[i].right;
             r.b = g_draw.sc[i].bottom;
-            const UiRect o = uiLayerMapScissor(m, r, cx, cy, e.w, e.h);
+            const UiRect o = uiLayerMapScissor(m, r, cx, cy, layerW, layerH);
             sc[i] = {o.l, o.t, o.r, o.b};
         }
         ctx->RSSetScissorRects(g_draw.scCount, sc);
     }
     ctx->OMSetBlendState(layerBlend, factor, sampleMask);
     vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
+    // An original read-only view can mask its effect, while this private view
+    // is writable. Preserve the raw state's potential without another query.
+    g_privateDepthGuard.note(g_draw.seq, g_draw.rawDepthWritePotential);
+    if (g_draw.rawDepthWritePotential && !g_draw.counted) ++g_win.privateDepthPotentialBegins;
     g_draw.active = true;
     // A multiply's second issue -- the game's draw again, into the
-    // transmittance -- is the layer's own work: timed to uiLayerEnd. (The
-    // first issue is the game's UI, only moved, and is not.)
-    if (which == 1) g_draw.routeSlot = routeBegin(ctx, UiRouteStage::kMultiply, g_draw.eye, g_draw.seq);
+    // transmittance -- is the layer's own work: timed to uiLayerEnd. The
+    // first HDR issue is moved game rendering, separately timed only when
+    // diagnostics are armed. Both scopes close before state restoration.
+    const UiDrawRouteStart timing = g_draw.drawRoute.begin(
+        true, g_draw.hdr, which, g_hdrDrawTimingOn, g_draw.eye, g_draw.seq,
+        [&](UiRouteStage stage, int eye, uint64_t seq) { return routeBegin(ctx, stage, eye, seq); },
+        [&](int eye, uint64_t seq) { routeMovedMissing(eye, seq); });
+    if (g_draw.hdr && which == 0) {
+        ++g_win.hdrDrawTimingEligible;
+        if (timing == UiDrawRouteStart::Disabled) ++g_win.hdrDrawTimingDisabled;
+        if (timing == UiDrawRouteStart::Opened) ++g_win.hdrDrawTimingIssued;
+    }
 
     // Counted once per draw: the curved screen's fall-through re-issues the
     // same draw after a failed substitution, and a multiply's second draw is
     // the same draw too.
     if (!g_draw.counted) {
         g_draw.counted = true;
-        ++e.draws;
+        if (g_draw.hdr) {
+            ++e.hdrDraws;
+            ++g_win.hdrRedirected;
+        } else {
+            ++e.draws;
+        }
         ++g_win.redirected;
         ++g_sessionRedirected;
-        noteTaken(g_draw.family, g_draw.eye, e.w, e.h);
+        noteTaken(g_draw.family, g_draw.eye, layerW, layerH);
         if (g_draw.family == UiLayerFamily::kAfterUi) ++g_win.afterTaken;
         g_win.viewportRemaps += g_draw.vpCount;
         if (g_draw.scissorSet) g_win.scissorRemaps += g_draw.scCount;
@@ -1241,13 +1622,24 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (!g_engageNoted && which == 0) {
         g_engageNoted = true;
         Log::get().note(
-            "ui quality: layer: engaged -- the %s went into the %s eye's layer (%ux%u) from a "
+            "ui quality: layer: engaged -- the %s went into the %s eye's %slayer (%ux%u) from a "
             "%ux%u %s target: viewport scale %.4f x %.4f, jitter cancel (%.3f, %.3f) layer "
             "pixels, blend %s with transmittance in alpha.",
-            uiLayerFamilyName(g_draw.family), g_draw.eye == 0 ? "left" : "right", e.w, e.h,
+            uiLayerFamilyName(g_draw.family), g_draw.eye == 0 ? "left" : "right",
+            g_draw.hdr ? "HDR HUD " : "", layerW, layerH,
             g_draw.targetW, g_draw.targetH, viewName(g_tc.view), static_cast<double>(m.ax),
             static_cast<double>(m.ay), static_cast<double>(cx), static_cast<double>(cy),
             uiBlendShapeName(shape));
+    }
+    if (g_draw.holoPsHash) {
+        ++g_holoTaken; const int slot = ui_holo_remap::index(g_draw.holoPsHash);
+        if (!g_holoTakeNoted[slot]) {
+            Log::get().note("crisp holo remap: admitted VS %016llX PS %016llX eye %d input %ux%u layer %ux%u inverse (%g,%g) bias (%g,%g); original t1/materials/alpha, seeded stencil and stock write-back retained.",
+                static_cast<unsigned long long>(ui_holo_remap::kVs), static_cast<unsigned long long>(g_draw.holoPsHash),
+                g_draw.eye, g_draw.targetW, g_draw.targetH, layerW, layerH,
+                double(holoParams.x), double(holoParams.y), double(holoParams.bx), double(holoParams.by));
+            g_holoTakeNoted[slot] = true;
+        }
     }
     return true;
 }
@@ -1257,9 +1649,26 @@ bool beginGuarded(ID3D11DeviceContext* ctx, int which) {
     bool ok = false;
     const bool ran = guardedBudget(g_drawBudget, [&] { ok = beginInner(ctx, which); });
     if (!ran || !ok) {
-        // A timer opened for this issue closes with it (the issue is not made).
-        routeEnd(ctx, g_draw.routeSlot);
-        g_draw.routeSlot = -1;
+        // /EHsc does not promise local destructor unwinding for the SEH
+        // fault caught by guardedBudget. Explicitly retire its diagnostic pair.
+        if (!ran) {
+            // A fault inside beginCopy may precede its returned token. Reset
+            // every timer, including a partially initialized empty slot.
+            const bool reset = guarded("uiLayer.seedProbe.reset", [&] {
+                if (!g_hdrSeedGpu.reset(ctx)) g_hdrSeedGpu.reset();
+            });
+            if (!reset) g_hdrSeedGpu.reset();
+            g_hdrSeedActive = 0;
+        } else if (g_hdrSeedActive) {
+            const bool cancelled = guarded("uiLayer.seedProbe.abort", [&] {
+                g_hdrSeedGpu.cancel(ctx, g_hdrSeedActive, UiHdrSeedGpuProbe::Cancel::ExecutionFailed);
+            });
+            if (!cancelled) g_hdrSeedGpu.reset(); // release-only if the context itself faulted
+            g_hdrSeedActive = 0;
+        }
+        // A timer opened for this issue is discarded: the draw did not issue.
+        if (g_draw.hdr && which == 0 && g_draw.drawRoute.slot >= 0) ++g_win.hdrDrawTimingAborted;
+        g_draw.drawRoute.cancel([&](int slot) { routeAbort(ctx, slot); });
     }
     if (!ran) {
         // Whatever was changed before the fault, put the game's state back.
@@ -1284,8 +1693,7 @@ bool g_fmtChecked[2] = {}, g_fmtOk[2] = {};
 void compileOnce(ID3D11DeviceContext* ctx) {
     if (g_cs || g_csTried || !ctx) return;
     g_csTried = true;
-    g_cs = shaderSwapCompileCs(ctx, kUiLayerCompositeHlsl, sizeof(kUiLayerCompositeHlsl) - 1,
-                               "main", "ui_layer_composite_cs", nullptr, "ui quality: layer");
+    g_cs = shaderSwapCreateCs(ctx,kUiLayerCompositeBytecode,sizeof(kUiLayerCompositeBytecode),"ui_layer_composite_cs","ui quality: layer");
 }
 
 bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI_FORMAT viewFmt,
@@ -1370,6 +1778,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         return nullptr;
     }
     routePoll(ctx.Get());
+    g_hdrSeedGpu.poll(ctx.Get());
     compileOnce(ctx.Get());
     if (!g_cs) {
         *why = "the composite shader did not compile";
@@ -1784,7 +2193,13 @@ void logMemory() {
             appendResource(one, "multiply transmittance", e.mW, e.mH, DXGI_FORMAT_R8G8B8A8_UNORM,
                            &total);
         }
-        if (e.dsTex) appendResource(one, "depth-stencil", e.dsW, e.dsH, e.dsViewFmt, &total);
+        if (e.ds.tex) appendResource(one, "depth-stencil", e.ds.w, e.ds.h, e.ds.viewFmt, &total);
+        if (e.hdrTex)
+            appendResource(one, "HDR HUD layer", e.hdrW, e.hdrH, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                           &total);
+        if (e.hdrDs.tex)
+            appendResource(one, "HDR HUD depth-stencil", e.hdrDs.w, e.hdrDs.h, e.hdrDs.viewFmt,
+                           &total);
         if (e.dsCopy) {
             appendResource(one, "its copy of the game's depth-stencil", e.dsCopyW, e.dsCopyH,
                            e.dsCopyFmt, &total);
@@ -1797,6 +2212,13 @@ void logMemory() {
 }
 
 void logTotals(double seconds) {
+    Log::get().note("crisp holo remap: cumulative capture_calls %llu captured %llu eligible %llu prepared %llu admitted %llu refused %llu; two exact PS only, zero admitted means no successful route, no extra scene-depth copy.",
+        static_cast<unsigned long long>(g_holoCaptureCalls.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(g_holoCaptured.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(g_holoEligible), static_cast<unsigned long long>(g_holoPrepared),
+        static_cast<unsigned long long>(g_holoTaken), static_cast<unsigned long long>(g_holoRefused));
+    g_seedCensus.report([](const char* line) { Log::get().note("%s", line); });
+    g_hdrSeedGpu.report(g_hdrDrawTimingOn, [](const char* line) { Log::get().note("%s", line); });
     const double frames = g_win.frames ? static_cast<double>(g_win.frames) : 1.0;
     std::string taken, left;
     for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
@@ -1824,13 +2246,15 @@ void logTotals(double seconds) {
     // layer did anything in.
     std::string price;
     for (size_t si = 0; si < kStages; ++si) {
+        if (si == static_cast<size_t>(UiRouteStage::kHdrMovedDraw)) continue;
         appendf(price, "%s%s ", si ? ", " : "", uiRouteStageName(static_cast<UiRouteStage>(si)));
         appendPrice(price, si);
     }
-    price += "; the route ";
+    price += "; machinery route ";
     appendPrice(price, kRouteTotal);
     uint64_t untimed = 0, invalid = 0, lateSamples = 0;
     for (size_t si = 0; si < kStages; ++si) {
+        if (si == static_cast<size_t>(UiRouteStage::kHdrMovedDraw)) continue;
         untimed += g_win.routeUntimed[si];
         invalid += g_win.routeInvalid[si];
         lateSamples += g_win.routeLate[si];
@@ -1842,6 +2266,13 @@ void logTotals(double seconds) {
                 static_cast<unsigned long long>(lateSamples));
     }
     const Eye& l = g_eye[0];
+    Log::get().note(
+        "ui quality: layer seed preservation: %llu stencil-only game writers kept an unmodified "
+        "depth-only seed; matched layer/eye events, not avoided-seed count; %llu first-issue attempts "
+        "with raw depth-enabled/write-ALL state activated a conservative whole-frame guard "
+        "across both eyes/layers (potential writes, including no private DSV or original read-only view).",
+        static_cast<unsigned long long>(g_win.depthOnlySeedPreservedWriters),
+        static_cast<unsigned long long>(g_win.privateDepthPotentialBegins));
     Log::get().note(
         "ui quality: layer: %.0f s, %llu frames, %ux%u per eye + composite output %ux%u; %.2f draws "
         "a frame redirected (%s), %.2f multiplies, %.2f depth/stencil write-backs, %.2f tested "
@@ -1862,7 +2293,51 @@ void logTotals(double seconds) {
         static_cast<unsigned long long>(g_win.composites),
         static_cast<unsigned long long>(g_win.overGameImage),
         static_cast<unsigned long long>(g_win.debugComposites), price.c_str());
+    std::string moved, combined;
+    const size_t movedStage = static_cast<size_t>(UiRouteStage::kHdrMovedDraw);
+    appendPrice(moved, movedStage);
+    appendPrice(combined, kRouteWithMoved);
+    Log::get().note(
+        "ui quality: HDR draw price: diagnostics_current=%u eligible=%llu disabled=%llu issued=%llu "
+        "aborted=%llu unavailable=%llu invalid=%llu late=%llu; GPU ms per eye-frame median/p95 (eye-frames): "
+        "moved_rendering=%s machinery_plus_moved=%s; moved rendering is game shading at the "
+        "layer size, not net overhead; combined samples require every interval armed and valid, "
+        "unarmed eye-frames are excluded; retained samples may predate a config toggle. "
+        "Stage medians are not additive.",
+        g_hdrDrawTimingOn ? 1u : 0u,
+        static_cast<unsigned long long>(g_win.hdrDrawTimingEligible),
+        static_cast<unsigned long long>(g_win.hdrDrawTimingDisabled),
+        static_cast<unsigned long long>(g_win.hdrDrawTimingIssued),
+        static_cast<unsigned long long>(g_win.hdrDrawTimingAborted),
+        static_cast<unsigned long long>(g_win.routeUntimed[movedStage]),
+        static_cast<unsigned long long>(g_win.routeInvalid[movedStage]),
+        static_cast<unsigned long long>(g_win.routeLate[movedStage]), moved.c_str(), combined.c_str());
     logMemory();
+    if (detail::g_uiLayerCrispOn) {
+        // The HDR HUD half's line: the take (the cockpit HUD
+        // families, holograms included), the re-issues and
+        // coverage passes, what never reached a tonemap, and the declines by
+        // reason (each decline is also named once a session where it
+        // happened). The taken/left/refused per family WITH the reason is the
+        // decided table on the lines around this one.
+        std::string declines;
+        for (size_t d = 0; d < static_cast<size_t>(CrispToneDecline::kCount); ++d) {
+            const uint64_t n = g_win.hdrDeclined[d];
+            if (!n) continue;
+            appendf(declines, "%s%llu %s", declines.empty() ? "" : "; ",
+                    static_cast<unsigned long long>(n),
+                    crispToneDeclineName(static_cast<CrispToneDecline>(d)));
+        }
+        Log::get().note(
+            "crisp hud: %.2f HUD draws a frame taken into the HDR layer, %.2f tonemap "
+            "re-issues and %.2f coverage passes a frame; %llu HDR layers' content never reached "
+            "a tonemap; re-issue declines: %s.",
+            static_cast<double>(g_win.hdrRedirected) / frames,
+            static_cast<double>(g_win.hdrReissued) / frames,
+            static_cast<double>(g_win.hdrCoveragePasses) / frames,
+            static_cast<unsigned long long>(g_win.hdrLost),
+            declines.empty() ? "none" : declines.c_str());
+    }
     Log::get().note("ui quality: left in the game's frame: %s.",
                     left.empty() ? "nothing classified" : left.c_str());
     // The family census: what the family rule made of the two composites'
@@ -1922,10 +2397,38 @@ void logTotals(double seconds) {
 
 }  // namespace
 
+void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
+                           const void* bytes, size_t count, bool linked) {
+    const int slot = ui_holo_remap::index(hash);
+    if (slot < 0) return;
+    g_holoCaptureCalls.fetch_add(1, std::memory_order_relaxed);
+    bool ok = false;
+    const bool ran = guarded("ui.holo.remember", [&] { ok = g_holoCache.remember(shader, hash, bytes, count, linked); });
+    if (ran && ok) {
+        g_holoCaptured.fetch_add(1, std::memory_order_relaxed);
+        if (!g_holoCaptureNoted[slot].exchange(true, std::memory_order_relaxed))
+            Log::get().note("crisp holo remap: captured verified PS %016llX %zu bytes, exact SV_Position ftoi/t1 load and free shader b13; not yet admitted.",
+                static_cast<unsigned long long>(hash), count);
+    } else if (!g_holoCaptureRefusalNoted[slot].exchange(true, std::memory_order_relaxed)) {
+        Log::get().note("crisp holo remap: PS %016llX capture refused (bytes/linkage/private identity unavailable); original shader untouched.",
+            static_cast<unsigned long long>(hash));
+    }
+}
+
+// The crisp take's whole dependency set, established no later than the first
+// HUD take (review R2) -- defined beside the coverage machinery, below.
+bool crispTakeReady(ID3D11DeviceContext* ctx, int eye);
+
 // --------------------------------------------------------------- the API
 
 void uiLayerConfigure(Config& cfg) {
-    const std::string text = cfg.getString("fix.ui_quality", "off");
+    g_hdrDrawTimingOn = cfg.getBool("advanced.temporal_aa_diagnostics", false);
+    detail::g_uiSeedDiagnostics = g_hdrDrawTimingOn;
+    g_seedCensus.configure(g_hdrDrawTimingOn);
+    // The fallback, for an ini with no such line (a hand-copied DLL over an old
+    // file, a deleted line), is the shipped default: 100 since 2026-09-29. A line
+    // that is present and not off/100/125 is refused below and reads as off.
+    const std::string text = cfg.getString("fix.ui_quality", "100");
     bool recognized = true;
     const char* newSpelling = nullptr;
     const float target = uiQualityParse(text.c_str(), &recognized, &newSpelling);
@@ -1948,8 +2451,12 @@ void uiLayerConfigure(Config& cfg) {
     const bool changed = !g_keyNoted || text != g_keyText || target != g_target ||
                          temporal != g_temporal || debugView != g_debugView ||
                          jitterAsShipped != g_jitterAsShipped;
-    // A live change of the key re-arms a stood-down layer: the player asked.
-    if (g_keyNoted && (text != g_keyText || target != g_target)) g_stoodDown = false;
+    // A live change of the key re-arms a stood-down layer, either half of it
+    // (the LDR take's or the HDR HUD path's): the player asked.
+    if (g_keyNoted && (text != g_keyText || target != g_target)) {
+        g_stoodDown = false;
+        g_crispStoodDown = false;
+    }
     g_keyText = text;
     g_target = target;
     g_temporal = temporal;
@@ -1991,9 +2498,14 @@ void uiLayerConfigure(Config& cfg) {
               "except the 2D screen while it shows the world -- on foot, or a 3D map -- where it "
               "stays in the picture for the temporal pass (the game's Status.json says on foot, a "
               "second or so late; the screen's own depth, busy with the world, says so within "
-              "two frames); the cockpit's holo panels, flight HUD and target sprite are drawn before "
-              "the tonemap and stay in the picture, steadied by the UI depth and the reactive "
-              "mask. Draws the layer takes get no UI depth and no reactive mask.");
+              "two frames); the cockpit's holo panels, the flight HUD, the target sprite and the "
+              "holograms (the radar's icons and contacts -- the glass canopy stays) are drawn "
+              "into a per-eye HDR layer at the "
+              "same size and tonemapped over the finished eye by the game's own tonemap draw "
+              "re-issued with the layer as its HDR source (their bloom halo goes with the "
+              "upscaled frame; the \"crisp hud\" lines report it). Draws the layer takes get no "
+              "UI depth and no "
+              "reactive mask.");
     if (debugView && temporal) {
         Log::get().note("ui quality: advanced.temporal_aa_debug = ui_layer -- the layer is shown "
                         "over black.");
@@ -2029,6 +2541,9 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                    bool substituted, int knownEye) {
     g_draw.decided = false;
     g_draw.counted = false;
+    g_draw.hdr = false;
+    g_draw.holoPsHash = 0; g_draw.holoOriginal = nullptr; g_draw.holoPatched = nullptr;
+    g_draw.holoRestoreOk = true;
     g_draw.ds = UiDsEffect{};
     g_draw.stencilRead = 0;
     g_draw.shape = UiBlendShape::kRefused;
@@ -2044,13 +2559,19 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     const int kind = uiLayerTargetKind();
     f.eyeTarget = kind != 0;
     f.ldrView = kind == 2;
-    // A shading-rate image bound for the eye (or possibly bound) would shade
-    // the layer -- a different size -- through the eye's tiles.
-    f.vrs = detail::g_foveationBound != nullptr || detail::g_foveationBoundUnknown;
+    // The HDR HUD take (Phases 1-3: the cockpit HUD families -- the holo
+    // panels, the flight HUD, the target sprite, and the crisp take's eight
+    // hologram families as kHoloGeneric): a draw of one into the lit HDR pre-tonemap
+    // eye target goes to the eye's HDR HUD layer instead of the kHdrTarget
+    // refusal. The take arms with the layer (fix.ui_quality), and every
+    // other refusal applies to it exactly as to the LDR take.
+    f.crispHdr = detail::g_uiLayerCrispOn && f.eyeTarget && !f.ldrView &&
+                 (family == UiLayerFamily::kHolo || family == UiLayerFamily::kFlightHud ||
+                  family == UiLayerFamily::kSprite || family == UiLayerFamily::kHoloGeneric);
     uint64_t seq = 0;
     float jx = 0.0f, jy = 0.0f;
     uint32_t sw = 0, sh = 0;
-    if (f.eyeTarget && f.ldrView) {
+    if (f.eyeTarget && (f.ldrView || f.crispHdr)) {
         // A caller that already knows the eye (uiLayerNoteOther, for an
         // after-UI write into the exact resource this frame's UI left)
         // passes it directly: uiDepthEyeOfTarget's own table lookup would
@@ -2066,6 +2587,13 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             f.targetMatchesEye = !sw || !sh || (sw == g_tc.info.a && sh == g_tc.info.b);
             f.late = uiLayerLateFor(g_eye[f.eye].door, seq);
             f.armed = uiLayerArmed(g_eye[f.eye].door, seq);
+            // The crisp take's publication deadline (review crisp-hud-phase3-
+            // 2026-09-28, the missing ship/target mesh holograms): the game's
+            // tonemap ordering varies frame to frame, and content taken after
+            // the eye's re-issue ran can never publish -- the layer clears next
+            // frame and the counters count the draw, not its pixels. Refuse it
+            // to stock instead; the 30 s line names these frames.
+            f.lateTone = f.crispHdr && g_eye[f.eye].hdrToneSeq == seq;
         }
     }
     // The cheap facts first; the state reads only when none of them refused.
@@ -2091,7 +2619,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         f.mrt = boundCount(rtvs) > 1 || anyUav;
         UINT ref = 0;
         DXGI_FORMAT dsFmt = DXGI_FORMAT_UNKNOWN;
-        dsState = dsStateOf(ctx, dsv, &ref, &dsFmt);
+        dsState = dsStateOfNoted(ctx, dsv, &ref, &dsFmt);
         f.ds = uiLayerDsEffect(dsState, dsv != nullptr);
         char dsWhy[160] = "";
         if (f.ds.tests()) {
@@ -2108,11 +2636,49 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         // depth or stencil WRITE would then land twice in the layer's copy.
         const bool multiplyWrites = f.blend == UiBlendShape::kMultiply && f.ds.writes();
         if (multiplyWrites) f.blend = UiBlendShape::kRefused;
+        // Review R5: the HDR half has no transmittance route, so the pure
+        // gate refuses a crisp multiply; the detail line names it below.
+        const bool hdrMultiply = f.crispHdr && f.blend == UiBlendShape::kMultiply;
         d = uiLayerDecide(f);
         if (d == UiLayerDecision::kRedirect) {
-            f.layerReady = ensureLayerFor(ctx, f.eye) &&
-                           (f.blend != UiBlendShape::kMultiply || ensureMult(ctx, g_eye[f.eye], f.eye));
+            // The crisp take establishes its WHOLE dependency set here, no
+            // later than the first take (review R2): a failure refuses the
+            // take as kLayerFailed -- the draw stays stock -- and
+            // crispTakeReady has already stood the path down with the
+            // reason. Never take-then-drop.
+            f.layerReady =
+                f.crispHdr
+                    ? crispTakeReady(ctx, f.eye)
+                    : ensureLayerFor(ctx, f.eye) &&
+                          (f.blend != UiBlendShape::kMultiply || ensureMult(ctx, g_eye[f.eye], f.eye));
             d = uiLayerDecide(f);
+        }
+        if (d == UiLayerDecision::kRedirect && f.crispHdr &&
+            bindingShaderHash(BindSlot::Vs) == ui_holo_remap::kVs) {
+            const uint64_t ps = bindingShaderHash(BindSlot::Ps);
+            ++g_holoEligible;
+            ID3D11PixelShader* original = static_cast<ID3D11PixelShader*>(bindingGet(BindSlot::Ps));
+            ID3D11PixelShader* prepared = nullptr;
+            const bool ran = guarded("ui.holo.prepare", [&] { prepared = g_holoCache.prepare(ctx, original, ps); });
+            if (!ran || !prepared) {
+                ++g_holoRefused; d = UiLayerDecision::kLayerFailed;
+                _snprintf_s(detail, _TRUNCATE, "hologram PS bytecode/device preparation unavailable; stock complete draw retained");
+                const int slot = ui_holo_remap::index(ps);
+                if (slot >= 0 && !g_holoRefusalNoted[slot]) {
+                    Log::get().note("crisp holo remap: prepare refused PS %016llX before admission (verified bytecode, original identity, device or allocation unavailable); stock complete draw retained.",
+                        static_cast<unsigned long long>(ps));
+                    g_holoRefusalNoted[slot] = true;
+                }
+            } else {
+                ++g_holoPrepared; g_draw.holoPsHash = ps;
+                g_draw.holoOriginal = original; g_draw.holoPatched = prepared;
+                const int slot = ui_holo_remap::index(ps);
+                if (!g_holoPrepareNoted[slot]) {
+                    Log::get().note("crisp holo remap: prepared PS %016llX from verified original DXBC before admission; private b13 float4, no runtime HLSL.",
+                        static_cast<unsigned long long>(ps));
+                    g_holoPrepareNoted[slot] = true;
+                }
+            }
         }
         // What decided it, in the census's own numbers, for the first line.
         char bl[64], ds[256];
@@ -2120,7 +2686,9 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         describeDs(dsState, ref, dsFmt, ds, sizeof(ds));
         if (d == UiLayerDecision::kBlendRefused) {
             _snprintf_s(detail, _TRUNCATE, "%s%s", bl,
-                        multiplyWrites ? " (a multiply that writes depth or stencil)" : "");
+                        multiplyWrites ? " (a multiply that writes depth or stencil)"
+                        : hdrMultiply  ? " (a multiply has no transmittance route into the HDR layer)"
+                                       : "");
         } else if (d == UiLayerDecision::kDepthStencilTest ||
                    d == UiLayerDecision::kSubstitutedWrite) {
             _snprintf_s(detail, _TRUNCATE, "%s%s%s", ds, *dsWhy ? "; " : "", dsWhy);
@@ -2145,6 +2713,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.decided = true;
     g_draw.eye = f.eye;
     g_draw.family = family;
+    g_draw.hdr = f.crispHdr;
     g_draw.seq = seq;
     g_draw.targetRes = g_tc.info.resource;
     g_draw.targetW = g_tc.info.a;
@@ -2152,6 +2721,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.shape = f.blend;
     g_draw.ds = f.ds;
     g_draw.stencilRead = dsState.readMask;
+    g_draw.rawDepthWritePotential = dsState.depthEnable && dsState.depthWriteAll;
     // The pass computed the jitter against the eye's submitted region, which
     // is the target (targetMatchesEye above).
     g_draw.jx = jx;
@@ -2179,8 +2749,7 @@ bool uiLayerBegin(ID3D11DeviceContext* ctx) { return beginGuarded(ctx, 0); }
 
 void uiLayerEnd(ID3D11DeviceContext* ctx) {
     if (!g_draw.active) return;
-    routeEnd(ctx, g_draw.routeSlot);  // a multiply's second issue, drawn
-    g_draw.routeSlot = -1;
+    g_draw.drawRoute.end([&](int slot) { routeEnd(ctx, slot); });
     if (!guarded("uiLayer.end", [&] { restore(ctx); })) {
         standDown("a fault while putting the game's state back after a draw");
     }
@@ -2195,12 +2764,14 @@ bool uiLayerMultiplyBegin(ID3D11DeviceContext* ctx) {
 }
 
 bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx) {
+    if (!g_draw.holoRestoreOk) return false;
     if (!g_draw.decided || !g_draw.counted || !g_draw.ds.writes() || g_draw.active || !ctx)
         return false;
     bool ok = false;
     guarded("uiLayer.writeBack", [&] {
         ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.wbRtv, &g_draw.wbDsv);
         if (!g_draw.wbDsv) return;
+        g_privateDepthGuard.noteReplay(g_draw.seq, g_lastRedirectSeq, g_draw.rawDepthWritePotential);
         // The game's own depth target and state, no colour target: the draw's
         // depth or stencil write lands in the game's buffer exactly as it
         // always did, and its colour lands nowhere (it is in the layer).
@@ -2239,8 +2810,578 @@ void uiLayerWriteBackEnd(ID3D11DeviceContext* ctx) {
     g_draw.wbActive = false;
 }
 
+// ------------------------------------- the crisp-HUD half of fix.ui_quality: the tonemap re-issue
+//
+// Phases 1-3 of docs/cockpit-hud-layer-design-2026-09-27.md. The cockpit's
+// HDR HUD families (the holo panels, the flight HUD, the target sprite, the
+// holograms) are
+// taken into the eye's HDR HUD layer by the draw path above
+// (g_draw.hdr); they reach the eye HERE, at the game's own tonemap draw --
+// the last reader of the lit HDR target, recognised by tonemap_admit.h's
+// structural admission shared with the HUD layer census. Right AFTER the
+// game's own issue, the admitted draw is issued once more, into the eye's
+// 8-bit layer, with the HDR source slot (the admitted ps's table entry)
+// bound to the HDR layer's SRV: the layer's premultiplied radiance is
+// tonemapped by the game's own shader, with the game's own exposure (VS t0,
+// when the variant binds one -- the EDHM swap does not), LUT (PS t0),
+// constants (b2), samplers, input layout and VB0, all still bound from the
+// game's draw and never touched. Then one EDVR pass (the coverage pass)
+// writes the HDR layer's alpha -- the HUD's transmittance, the layer's own
+// convention -- into the 8-bit layer's alpha. The 8-bit layer then holds the
+// tonemapped HUD exactly as any other taken UI, the post-tonemap menus land
+// on top in game order, and the door's composite shows both unchanged.
+//
+// Only what must differ is bound: the render target (the 8-bit layer, no
+// depth view), the blend (disabled, RGB write mask -- the alpha comes from
+// the coverage pass), the viewport and scissor (the full layer rect; the two
+// layers share a size by construction, so the source sample is 1:1), and the
+// HDR source slot. Everything changed goes through the vScreen*Raw entry
+// points and is put back at End, so the binding shadow keeps describing the
+// game's state, and the game's own draw is always untouched.
+//
+// Guards (each counted, each named once a session, never fatal): the
+// ordering guards -- the 8-bit layer must be empty this frame (menus draw
+// after the tonemap) and an eye is re-tonemapped once a frame (a second
+// admitted draw is counted and left) -- the admitted ps must name its HDR
+// slot and have a 2D source bound there, the two layers must share a size,
+// the bindings at the re-issue must be the admitted draw's own, no PS UAV
+// may be bound, and both layers must exist. A failure of EDVR's own
+// machinery (the coverage shaders, the deferred context) stands the crisp-HUD half of fix.ui_quality
+// down alone; the LDR take is unaffected, and the cockpit HUD families go
+// back to stock (their kHdrTarget refusal).
+
+// The admitted draw, from its admission in vscreen's eye-draw branch until
+// the re-issue right after its own issue. One at a time, render thread only;
+// a stale one (its draw was swallowed) is overwritten by the next admission
+// and never fires.
+struct CrispTonePending {
+    bool pending = false;
+    int eye = -1;
+    uint64_t seq = 0;
+    int hdrSlot = -1;
+    const void* rtvRes = nullptr;  // the admitted draw's output (the RGBA8 eye)
+    const void* hdrRes = nullptr;  // the admitted draw's own HDR source (identity)
+    uint64_t vs = 0, ps = 0;
+};
+CrispTonePending g_crispPending;
+
+// What Begin saved and End puts back (ComPtrs like the census's GdSave: the
+// guarded blocks only ever Attach into them).
+struct CrispToneSave {
+    Ptr<ID3D11RenderTargetView> rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+    Ptr<ID3D11DepthStencilView> dsv;
+    Ptr<ID3D11BlendState> blend;
+    FLOAT factor[4] = {};
+    UINT sampleMask = 0xFFFFFFFFu;
+    D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    UINT vpCount = 0;
+    D3D11_RECT sc[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    UINT scCount = 0;
+    bool scissorSet = false;
+    Ptr<ID3D11ShaderResourceView> gameHdrSrv;  // the game's own HDR source at the slot
+    int routeSlot = -1;
+    int eye = -1;
+    uint64_t seq = 0;
+    int hdrSlot = -1;
+    const void* rtvRes = nullptr;
+    uint64_t vs = 0, ps = 0;
+    bool active = false;
+};
+CrispToneSave g_crispSave;
+FaultBudget g_crispToneBudget("uiLayer.crispTone", 4);
+
+// The coverage pass's own machinery: two shaders (ui_layer_shaders.h) and a
+// deferred context, both warmed at the frame boundary (the sharpen's reason:
+// no first-use D3DCompile mid-frame).
+ID3D11VertexShader* g_covVs = nullptr;
+ID3D11PixelShader* g_covPs = nullptr;
+bool g_covTried = false;
+Ptr<ID3D11DeviceContext> g_crispDeferred;
+bool g_crispDeferredTried = false;
+
+void compileCoverageOnce(ID3D11DeviceContext* ctx) {
+    if ((g_covVs && g_covPs) || g_covTried || !ctx) return;
+    g_covTried = true;
+    g_covVs = shaderSwapCreateVs(ctx,kUiLayerCoverageVsBytecode,sizeof(kUiLayerCoverageVsBytecode),"ui_layer_coverage_vs","crisp hud");
+    g_covPs = shaderSwapCreatePs(ctx,kUiLayerCoveragePsBytecode,sizeof(kUiLayerCoveragePsBytecode),"ui_layer_coverage_ps","crisp hud");
+    if (!g_covVs || !g_covPs) {
+        if (g_covVs) g_covVs->Release();
+        if (g_covPs) g_covPs->Release();
+        g_covVs = nullptr;
+        g_covPs = nullptr;
+    }
+}
+
+// The coverage pass's deferred context, created once a session (the one
+// attempt is g_crispDeferredTried). Warmed through crispTakeReady at the
+// first HUD take; the pass itself keeps its own late-failure handling.
+bool crispCoverageContextReady(ID3D11DeviceContext* ctx) {
+    if (g_crispDeferred) return true;
+    if (g_crispDeferredTried || !ctx) return false;
+    g_crispDeferredTried = true;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    return dev && SUCCEEDED(dev->CreateDeferredContext(0, &g_crispDeferred)) && g_crispDeferred;
+}
+
+// The whole dependency set a taken HUD draw needs at the tonemap,
+// established no later than the FIRST HUD take of it (review R2): the eye's
+// HDR layer, its 8-bit layer, the RGB-only blend the re-issue draws with,
+// and the coverage pass's shaders and deferred context. The HDR take used to
+// ensure only the FP16 layer before redirecting; the rest were first ensured
+// at the tonemap, after the HUD draws had left stock, and a failure there
+// dropped the already-taken HUD every frame. A failure here REFUSES the take
+// (the draw runs stock, the decide's kLayerFailed names it on the 30 s line)
+// and stands the path down with the reason: never take-then-drop.
+bool crispTakeReady(ID3D11DeviceContext* ctx, int eye) {
+    if (!ensureHdrLayerFor(ctx, eye)) {
+        crispStandDown("the HDR HUD layer could not be created");
+        return false;
+    }
+    if (!ensureLayerFor(ctx, eye)) {
+        crispStandDown("the eye's 8-bit layer (the tonemap re-issue's target) could not be created");
+        return false;
+    }
+    UiBlendRt rgbOnly;  // the re-issue's blend: disabled, the colour channels alone written
+    rgbOnly.enable = false;
+    rgbOnly.mask = uiblend::kWriteRgb;
+    if (!cachedBlend(ctx, rgbOnly)) {
+        crispStandDown("the tonemap re-issue's blend state could not be created");
+        return false;
+    }
+    compileCoverageOnce(ctx);
+    if (!g_covVs || !g_covPs) {
+        crispStandDown("the coverage pass's shaders could not be compiled");
+        return false;
+    }
+    if (!crispCoverageContextReady(ctx)) {
+        crispStandDown("no deferred context for the coverage pass");
+        return false;
+    }
+    return true;
+}
+
+// First-seen lines, deduplicated per (reason, vs, ps) -- and, with reason
+// kCount, the first re-issue per variant.
+struct CrispToneSeen {
+    uint8_t reason;
+    uint64_t vs, ps;
+};
+constexpr uint32_t kMaxCrispToneLines = 24;
+CrispToneSeen g_crispToneSeen[kMaxCrispToneLines];
+uint32_t g_crispToneSeenCount = 0;
+
+bool crispToneSeenBefore(uint8_t reason, uint64_t vs, uint64_t ps) {
+    for (uint32_t i = 0; i < g_crispToneSeenCount; ++i) {
+        const CrispToneSeen& s = g_crispToneSeen[i];
+        if (s.reason == reason && s.vs == vs && s.ps == ps) return true;
+    }
+    if (g_crispToneSeenCount >= kMaxCrispToneLines) return true;  // table full: quiet
+    g_crispToneSeen[g_crispToneSeenCount++] = {reason, vs, ps};
+    return false;
+}
+
+void crispToneDecline(CrispToneDecline d, uint64_t vs, uint64_t ps) {
+    ++g_win.hdrDeclined[static_cast<size_t>(d)];
+    if (crispToneSeenBefore(static_cast<uint8_t>(d), vs, ps)) return;
+    Log::get().note("crisp hud: tonemap re-issue declined (vs %016llX ps %016llX): %s. The game's "
+                    "own draw ran untouched.",
+                    static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps),
+                    crispToneDeclineName(d));
+}
+
+const char* crispToneVariantName(uint64_t vs, uint64_t ps) {
+    return (vs == kToneVsMeasured && ps == kTonePsMeasured) ? "the measured pair"
+           : (vs == kToneVsEdhm && ps == kTonePsMeasured)   ? "the EDHM swap"
+                                                            : "a named-by-structure variant";
+}
+
+// The coverage pass: the HDR layer's alpha into the 8-bit layer's alpha
+// (replace, colour masked off), a full-screen triangle on EDVR's own deferred
+// context -- the depth-stencil seed's pattern: recorded off the hooked
+// immediate context, executed with the context state restored.
+bool crispCoveragePass(ID3D11DeviceContext* ctx, Eye& e, int eye, uint64_t seq) {
+    if (!g_covVs || !g_covPs) compileCoverageOnce(ctx);
+    if (!g_covVs || !g_covPs) return false;
+    if (!g_crispDeferred) {
+        // crispTakeReady has run at the first HUD take since R2, so a
+        // failure here was almost always said there already; say it once
+        // when it is genuinely first seen.
+        const bool triedBefore = g_crispDeferredTried;
+        if (!crispCoverageContextReady(ctx)) {
+            if (triedBefore) return false;
+            Log::get().note("crisp hud: no deferred context for the coverage pass; the crisp-HUD half of fix.ui_quality "
+                            "stands down (the cockpit HUD is drawn as it always was).");
+            crispStandDown("no deferred context for the coverage pass");
+            return false;
+        }
+    }
+    UiBlendRt alphaOnly;  // blending off, the alpha channel alone written
+    alphaOnly.enable = false;
+    alphaOnly.mask = uiblend::kWriteAlpha;
+    ID3D11BlendState* blend = cachedBlend(ctx, alphaOnly);
+    if (!blend) return false;
+    const int timer = routeBegin(ctx, UiRouteStage::kHdrCoverage, eye, seq);
+    bool ok = false;
+    try {
+        const UiCoverageBindings bindings{e.hdrSrv.Get(), e.rtv.Get(), g_covVs, g_covPs,
+                                          blend, e.w, e.h};
+        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, vScreenExecuteCommandListRaw);
+    } catch (const std::exception&) {
+        e.coverage.reset();
+        ok = false;
+    }
+    if (ok) routeEnd(ctx, timer);
+    else routeAbort(ctx, timer);
+    return ok;
+}
+
+// vscreen's eye-draw branch, owner context, while the crisp-HUD half of fix.ui_quality is live: is
+// this draw the game's tonemap, admitted for the re-issue? The 3-vertex
+// prefilter is register-cheap; the structural admission's state reads run
+// for the handful of full-screen triangles a frame that pass it. True =
+// admitted: the caller skips its after-UI read check for this draw (it READS
+// the HDR target the HUD families were taken from -- that is the point of the
+// re-issue, not a post pass to name) and brackets its issue with
+// uiLayerCrispToneBegin/End.
+bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                             uint32_t startInstance) {
+    g_crispPending = CrispTonePending{};
+    detail::g_uiLayerCrispPending = false;
+    if (!detail::g_uiLayerCrispOn || !ctx) return false;
+    if ((kind != 'D' && kind != 'N') || count != 3 || instances != 1 || startInstance != 0)
+        return false;
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    const uint64_t ps = bindingShaderHash(BindSlot::Ps);
+    ToneAdmit ta;
+    bool shaped = false;
+    guarded("uiLayer.crispAdmit", [&] { shaped = tonemapAdmitStructure(ctx, ps, ta); });
+    if (!shaped) return false;
+    // The HDR source, by IDENTITY, not by table: the PS slot whose 2D view
+    // reads an eye's HDR target this frame (the HUD take recorded which).
+    // A table of PS hashes cannot cover the settings tiers -- the 2026-09-28
+    // flight at HMD Quality 0.50 flew ps D0A16B9E55BF22CC, the table said
+    // kNoHdrSlot, and the taken panels never came back. The identity read
+    // covers every variant. It also never touches ui_depth's eye table --
+    // registering the tonemap's output there crowded the main menu's
+    // composite out of it, the 2026-09-27 regression.
+    int eye = -1, hdrSlot = -1;
+    const void* hdrRes = nullptr;
+    uint64_t seq = 0;
+    float jx = 0.0f, jy = 0.0f;
+    uint32_t jw = 0, jh = 0;
+    // The frame's sequence (the per-eye jitter is not read here).
+    if (!nativeTemporalDrawJitter(0, &seq, &jx, &jy, &jw, &jh)) return false;
+    bool content = false;
+    for (UINT s = 0; s < 4 && eye < 0; ++s) {
+        Ptr<ID3D11ShaderResourceView> srv;
+        ctx->PSGetShaderResources(s, 1, &srv);
+        if (!srv) continue;
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        srv->GetDesc(&vd);
+        if (vd.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) continue;  // the LUT is 3D, never this
+        Ptr<ID3D11Resource> r;
+        srv->GetResource(&r);
+        if (!r) continue;
+        for (int cand = 0; cand < 2; ++cand) {
+            const Eye& c = g_eye[cand];
+            const bool fresh = c.hdrSeq == seq && c.hdrDraws && c.hdrSrv;
+            // Outstanding = fresh and NOT yet published: already-consumed
+            // content (hdrToneSeq == hdrSeq) must not arm the failed-consumer
+            // fallback below (review R1's second half).
+            if (fresh && c.hdrToneSeq != c.hdrSeq) content = true;
+            if (eye >= 0 || !fresh || r.Get() != c.hdrTarget) continue;
+            eye = cand;
+            hdrSlot = static_cast<int>(s);
+            hdrRes = r.Get();
+        }
+    }
+    if (eye < 0) {
+        // Outstanding HUD content this frame, but this draw reads no eye's
+        // HUD source. Only the eye's OWN tonemap failing to read it is a
+        // failed consumer (review R1): the draw must BE the tonemap -- the
+        // full SRV shape, or the EDHM swap's known exposure-less one
+        // (tonemapAdmitFull) -- and its output must be the eye whose content
+        // is outstanding (the census measures hundreds-thousands of
+        // tonemap-SHAPED draws a window that are not it: SMAA and the post
+        // passes after it, skipped silently here, as before this branch
+        // existed). A consumer that never comes at all is the frame
+        // deadline's (beginInner's HDR clear). The eye read is the eye
+        // table's READ-ONLY lookup: the registering form crowded the main
+        // menu's composite out of it (the 2026-09-27 regression).
+        if (content && tonemapAdmitFull(ta, vs)) {
+            int outEye = -1;
+            if (ta.rtvRes) {
+                ResourceInfo ri;
+                if (bindingResolveResource(ta.rtvRes, &ri) && ri.isTexture2D)
+                    outEye = uiDepthEyeOfTargetReadOnly(ri.resource);
+            }
+            bool failedConsumer = false;
+            if (outEye >= 0 && outEye < 2) {
+                const Eye& c = g_eye[outEye];
+                failedConsumer =
+                    c.hdrSeq == seq && c.hdrDraws && c.hdrSrv && c.hdrToneSeq != c.hdrSeq;
+            }
+            if (failedConsumer) {
+                // Named once, counted -- and the crisp path stands down to
+                // stock rather than lose the HUD for the session.
+                crispToneDecline(CrispToneDecline::kNoHdrSlot, vs, ps);
+                crispStandDown("no PS slot of the tonemap reads an eye's HUD source");
+            }
+        }
+        return false;
+    }
+    Eye& e = g_eye[eye];
+    // The ordering guards.
+    if (e.seq == seq && e.draws) {
+        crispToneDecline(CrispToneDecline::kLayerBusy, vs, ps);
+        return false;
+    }
+    if (e.hdrToneSeq == seq) {
+        crispToneDecline(CrispToneDecline::kSecondTonemap, vs, ps);
+        return false;
+    }
+    g_crispPending.pending = true;
+    g_crispPending.eye = eye;
+    g_crispPending.seq = seq;
+    g_crispPending.hdrSlot = hdrSlot;
+    g_crispPending.rtvRes = ta.rtvRes;
+    g_crispPending.hdrRes = hdrRes;
+    g_crispPending.vs = vs;
+    g_crispPending.ps = ps;
+    detail::g_uiLayerCrispPending = true;
+    return true;
+}
+
+// After the admitted draw's own issue (vscreen's forwardWithVerdict, around
+// its pureDrawReissue): re-issue it once, tonemapping the HDR layer into the
+// 8-bit layer's colour. False -- state untouched, the draw long since run
+// stock -- on any decline.
+bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
+    detail::g_uiLayerCrispPending = false;
+    if (!g_crispPending.pending || !ctx) return false;
+    const CrispTonePending p = g_crispPending;
+    g_crispPending = CrispTonePending{};
+    Eye& e = g_eye[p.eye];
+    bool ok = false;
+    const bool ran = guardedBudget(g_crispToneBudget, [&] {
+        // The bindings must still be the admitted draw's own: nothing ran
+        // between its admission and here but its verdict's Begin (kNone for
+        // the tonemap) and the draw itself, which changes no state.
+        void* rtv = bindingGet(BindSlot::Rtv0);
+        ResourceInfo ri;
+        bool drift = !rtv || !bindingResolve(rtv, &ri) || ri.resource != p.rtvRes;
+        if (!drift) {
+            void* srv = bindingGet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) +
+                                                         static_cast<uint32_t>(p.hdrSlot)));
+            ResourceInfo si;
+            drift = !srv || !bindingResolve(srv, &si) || si.resource != p.hdrRes;
+        }
+        if (drift) {
+            crispToneDecline(CrispToneDecline::kStateDrift, p.vs, p.ps);
+            return;
+        }
+        // The guards again, at the moment of issue (a frame boundary cannot
+        // have intervened; a nested EDVR pass could have).
+        if (e.hdrSeq != p.seq || !e.hdrDraws || !e.hdrSrv || !e.hdrRtv) {
+            crispToneDecline(CrispToneDecline::kNoContent, p.vs, p.ps);
+            return;
+        }
+        if (e.hdrToneSeq == p.seq) {
+            crispToneDecline(CrispToneDecline::kSecondTonemap, p.vs, p.ps);
+            return;
+        }
+        if (e.seq == p.seq && e.draws) {
+            crispToneDecline(CrispToneDecline::kLayerBusy, p.vs, p.ps);
+            return;
+        }
+        // The 8-bit layer, at the HDR layer's size by construction.
+        if (!ensureLayerFor(ctx, p.eye) || !e.rtv) {
+            crispToneDecline(CrispToneDecline::kLayerFailed, p.vs, p.ps);
+            return;
+        }
+        if (e.w != e.hdrW || e.h != e.hdrH) {
+            crispToneDecline(CrispToneDecline::kSizeMismatch, p.vs, p.ps);
+            return;
+        }
+        // The blend for the re-issue, before anything is bound: disabled,
+        // the colour channels alone written (alpha is the coverage pass's).
+        UiBlendRt rgbOnly;
+        rgbOnly.enable = false;
+        rgbOnly.mask = uiblend::kWriteRgb;
+        ID3D11BlendState* rgbBlend = cachedBlend(ctx, rgbOnly);
+        if (!rgbBlend) {
+            crispToneDecline(CrispToneDecline::kLayerFailed, p.vs, p.ps);
+            return;
+        }
+        // Save. A PS UAV bound at the re-issue would be written twice (the
+        // game's draw already wrote it): decline instead.
+        ID3D11RenderTargetView* rawRtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+        ID3D11DepthStencilView* rawDsv = nullptr;
+        ID3D11UnorderedAccessView* uavs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {};
+        ctx->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                                                       rawRtvs, &rawDsv, 0,
+                                                       D3D11_PS_CS_UAV_REGISTER_COUNT, uavs);
+        bool anyUav = false;
+        for (auto* u : uavs) {
+            if (u) {
+                anyUav = true;
+                u->Release();
+            }
+        }
+        for (uint32_t i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+            g_crispSave.rtvs[i].Attach(rawRtvs[i]);
+        g_crispSave.dsv.Attach(rawDsv);
+        if (anyUav) {
+            crispToneDecline(CrispToneDecline::kUav, p.vs, p.ps);
+            for (auto& r : g_crispSave.rtvs) r.Reset();
+            g_crispSave.dsv.Reset();
+            return;
+        }
+        ctx->OMGetBlendState(&g_crispSave.blend, g_crispSave.factor, &g_crispSave.sampleMask);
+        g_crispSave.vpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        ctx->RSGetViewports(&g_crispSave.vpCount, g_crispSave.vp);
+        g_crispSave.scissorSet = false;
+        g_crispSave.scCount = 0;
+        {
+            Ptr<ID3D11RasterizerState> rs;
+            ctx->RSGetState(&rs);
+            D3D11_RASTERIZER_DESC rd{};
+            if (rs) rs->GetDesc(&rd);
+            if (rs && rd.ScissorEnable) {
+                g_crispSave.scCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                ctx->RSGetScissorRects(&g_crispSave.scCount, g_crispSave.sc);
+                g_crispSave.scissorSet = g_crispSave.scCount > 0;
+            }
+        }
+        Ptr<ID3D11ShaderResourceView> gameHdr;
+        ctx->PSGetShaderResources(static_cast<UINT>(p.hdrSlot), 1, &gameHdr);
+        g_crispSave.gameHdrSrv = gameHdr;
+        // Bind: the 8-bit layer, no depth view; the disabled RGB blend; the
+        // full-layer viewport (and scissor rect, if the game's rasterizer
+        // tests one); the HDR layer at the admitted draw's HDR slot.
+        ID3D11RenderTargetView* target = e.rtv.Get();
+        vScreenSetRenderTargetsRaw(ctx, 1, &target, nullptr);
+        vScreenOMSetBlendStateRaw(ctx, rgbBlend, g_crispSave.factor, g_crispSave.sampleMask);
+        D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(e.w), static_cast<float>(e.h), 0.0f,
+                          1.0f};
+        vScreenRSSetViewportsRaw(ctx, 1, &vp);
+        if (g_crispSave.scissorSet) {
+            D3D11_RECT r{0, 0, static_cast<LONG>(e.w), static_cast<LONG>(e.h)};
+            ctx->RSSetScissorRects(1, &r);
+        }
+        ID3D11ShaderResourceView* hdrSrv = e.hdrSrv.Get();
+        vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(p.hdrSlot), 1, &hdrSrv);
+        g_crispSave.eye = p.eye;
+        g_crispSave.seq = p.seq;
+        g_crispSave.hdrSlot = p.hdrSlot;
+        g_crispSave.rtvRes = p.rtvRes;
+        g_crispSave.vs = p.vs;
+        g_crispSave.ps = p.ps;
+        g_crispSave.routeSlot = routeBegin(ctx, UiRouteStage::kHdrTonemap, p.eye, p.seq);
+        g_crispSave.active = true;
+        ok = true;
+    });
+    if (!ran) {
+        // A fault mid-bind: put back whatever was saved, and stand the HDR
+        // path down -- the game's own draw already ran, so the frame is whole.
+        if (g_crispSave.active || g_crispSave.rtvs[0]) {
+            guarded("uiLayer.crispToneRestore", [&] {
+                ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+                for (uint32_t i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+                    rtvs[i] = g_crispSave.rtvs[i].Get();
+                UINT n = 0;
+                for (uint32_t i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+                    if (rtvs[i]) n = i + 1;
+                vScreenSetRenderTargetsRaw(ctx, n, rtvs, g_crispSave.dsv.Get());
+                vScreenOMSetBlendStateRaw(ctx, g_crispSave.blend.Get(), g_crispSave.factor,
+                                          g_crispSave.sampleMask);
+                vScreenRSSetViewportsRaw(ctx, g_crispSave.vpCount, g_crispSave.vp);
+                if (g_crispSave.scissorSet) ctx->RSSetScissorRects(g_crispSave.scCount, g_crispSave.sc);
+                if (g_crispSave.hdrSlot >= 0) {
+                    ID3D11ShaderResourceView* gameHdr = g_crispSave.gameHdrSrv.Get();
+                    vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(g_crispSave.hdrSlot),
+                                                   1, &gameHdr);
+                }
+            });
+        }
+        g_crispSave = CrispToneSave{};
+        crispStandDown("a fault while binding the tonemap re-issue");
+        return false;
+    }
+    return ok;
+}
+
+void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
+    if (!g_crispSave.active) return;
+    const int eye = g_crispSave.eye;
+    const uint64_t seq = g_crispSave.seq;
+    const int hdrSlot = g_crispSave.hdrSlot;
+    const void* rtvRes = g_crispSave.rtvRes;
+    const uint64_t vs = g_crispSave.vs, ps = g_crispSave.ps;
+    routeEnd(ctx, g_crispSave.routeSlot);
+    g_crispSave.routeSlot = -1;
+    // Everything the game had, put back through the raw entry points.
+    if (!guarded("uiLayer.crispToneEnd", [&] {
+            ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+            UINT n = 0;
+            for (uint32_t i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+                rtvs[i] = g_crispSave.rtvs[i].Get();
+                if (rtvs[i]) n = i + 1;
+            }
+            vScreenSetRenderTargetsRaw(ctx, n, rtvs, g_crispSave.dsv.Get());
+            vScreenOMSetBlendStateRaw(ctx, g_crispSave.blend.Get(), g_crispSave.factor,
+                                      g_crispSave.sampleMask);
+            vScreenRSSetViewportsRaw(ctx, g_crispSave.vpCount, g_crispSave.vp);
+            if (g_crispSave.scissorSet) ctx->RSSetScissorRects(g_crispSave.scCount, g_crispSave.sc);
+            ID3D11ShaderResourceView* gameHdr = g_crispSave.gameHdrSrv.Get();
+            vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(hdrSlot), 1, &gameHdr);
+        })) {
+        crispStandDown("a fault while putting the game's state back after the tonemap re-issue");
+    }
+    g_crispSave = CrispToneSave{};
+    // The coverage pass: without it the layer's alpha is stale, so a failure
+    // clears the layer (the HUD misses the frame; the picture stays whole).
+    Eye& e = g_eye[eye];
+    bool covered = false;
+    const bool ranCover = guarded("uiLayer.crispCoverage", [&] {
+        covered = crispCoveragePass(ctx, e, eye, seq);
+    });
+    if (ranCover && covered) {
+        ++g_win.hdrCoveragePasses;
+    } else {
+        vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
+        if (!g_crispStoodDown) {
+            Log::get().note("crisp hud: the coverage pass failed; the HUD misses this frame, and "
+                            "the crisp-HUD half of fix.ui_quality stands down (the cockpit HUD is drawn as it always "
+                            "was).");
+            crispStandDown("the coverage pass failed");
+        }
+        return;
+    }
+    // The 8-bit layer now holds this frame's tonemapped HUD: the door's
+    // composite shows it, and the post-tonemap menus land on top in game
+    // order (their draws see e.seq already current, so no clear).
+    e.seq = seq;
+    e.draws = 1;
+    e.target = rtvRes;  // the RGBA8 eye the game's tonemap wrote: the eye check's identity
+    e.hdrToneSeq = seq;
+    e.hdrMissStreak = 0;  // a publication landed: the R1 deadline's streak resets
+    g_lastRedirectSeq = seq;
+    detail::g_uiLayerWatching = true;
+    ++g_win.hdrReissued;
+    if (!crispToneSeenBefore(static_cast<uint8_t>(CrispToneDecline::kCount), vs, ps)) {
+        Log::get().note("crisp hud: tonemap re-issue engaged (%s, vs %016llX ps %016llX) -- the %s "
+                        "eye's HDR HUD layer (%ux%u) is tonemapped into its 8-bit layer at ps t%d, "
+                        "once an eye a frame, with the game's own exposure and LUT.",
+                        crispToneVariantName(vs, ps), static_cast<unsigned long long>(vs),
+                        static_cast<unsigned long long>(ps), eye == 0 ? "left" : "right", e.hdrW,
+                        e.hdrH, hdrSlot);
+    }
+}
+
 bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForwards, bool substituted,
-                      bool excluded, bool panelSized) {
+                      bool excluded, bool panelSized, uint32_t instances, uint32_t verdict, char drawKind) {
     if (!ctx) return false;
     const void* taken[2] = {nullptr, nullptr};
     for (int e = 0; e < 2; ++e) {
@@ -2248,15 +3389,40 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
     }
     // A game draw that writes the depth target a seed copied, after the seed:
     // the layer's copy is stale, and the next tested draw seeds again.
-    for (Eye& e : g_eye) {
-        if (e.dsSeq != g_lastRedirectSeq || !e.dsSource) continue;
-        void* dsvView = bindingGet(BindSlot::Dsv0);
-        ResourceInfo info;
-        if (!dsvView || !bindingResolve(dsvView, &info) || info.resource != e.dsSource) continue;
-        ID3D11DepthStencilView* dsv = static_cast<ID3D11DepthStencilView*>(dsvView);
-        if (uiLayerDsEffect(dsStateOf(ctx, dsv, nullptr, nullptr), true).writes()) {
-            e.dsSeq = 0;
-            ++g_win.seedStale;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        Eye& e = g_eye[eye];
+        for (LayerDs* l : {&e.ds, &e.hdrDs}) {
+            const bool hdr = l == &e.hdrDs;
+            const bool freshCandidate = l->seq == g_lastRedirectSeq && l->source;
+            const bool diagnosticCandidate = g_seedCensus.enabled &&
+                g_seedCensus.tracks[eye][hdr ? 1 : 0].known;
+            if (!freshCandidate && !diagnosticCandidate) continue;
+            void* dsvView = bindingGet(BindSlot::Dsv0);
+            ResourceInfo info;
+            if (!dsvView || !bindingResolve(dsvView, &info))
+                continue;
+            const bool matchingFresh = freshCandidate && info.resource == l->source;
+            const bool matchingDiagnostic = g_seedCensus.matches(eye, hdr, info.resource);
+            if (!matchingFresh && !matchingDiagnostic) continue;
+            ID3D11DepthStencilView* dsv = static_cast<ID3D11DepthStencilView*>(dsvView);
+            UINT ref = 0;
+            DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+            const UiDsState ds = dsStateOfNoted(ctx, dsv,
+                matchingDiagnostic ? &ref : nullptr, matchingDiagnostic ? &fmt : nullptr);
+            const UiDsEffect writer = uiLayerDsEffect(ds, true);
+            const bool invalidated = matchingFresh && uiLayerSeedWriterInvalidates(writer,
+                l->seededMask, l->seededDepth, g_privateDepthGuard.active(g_lastRedirectSeq));
+            if (matchingFresh && writer.writes() && !invalidated) ++g_win.depthOnlySeedPreservedWriters;
+            if (matchingDiagnostic) {
+                const UiSeedKey key = uiSeedDrawKey(ds, count, instances, verdict,
+                    bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), ref,
+                    static_cast<uint32_t>(fmt), drawKind);
+                g_seedCensus.event(eye, hdr, g_lastRedirectSeq, key, invalidated);
+            }
+            if (invalidated) {
+                l->seq = 0;
+                ++g_win.seedStale;
+            }
         }
     }
     if (!taken[0] && !taken[1]) return false;
@@ -2361,17 +3527,36 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
     return took;
 }
 
-void uiLayerNoteDepthClear(void* dsv) {
+void uiLayerSeedDrawOutcome(bool forwarded, bool substituted, bool redirected, bool known) {
+    if (g_seedCensus.enabled) g_seedCensus.finishDraw(forwarded, substituted, redirected, known);
+}
+
+void uiLayerNoteDepthClear(void* dsv, uint32_t flags, float depth, uint8_t stencil) {
     if (!dsv) return;
     bool any = false;
-    for (const Eye& e : g_eye) any = any || (e.dsSeq && e.dsSource);
-    if (!any) return;
+    for (const Eye& e : g_eye)
+        any = any || (e.ds.seq && e.ds.source) || (e.hdrDs.seq && e.hdrDs.source);
+    if (!any && !g_seedCensus.enabled) return;
     ResourceInfo info;
     if (!bindingResolve(dsv, &info) || !info.resource) return;
-    for (Eye& e : g_eye) {
-        if (e.dsSeq && e.dsSource == info.resource) {
-            e.dsSeq = 0;
-            ++g_win.seedStale;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        Eye& e = g_eye[eye];
+        for (LayerDs* l : {&e.ds, &e.hdrDs}) {
+            const bool hdr = l == &e.hdrDs;
+            const bool invalidated = l->seq && l->source == info.resource;
+            if (g_seedCensus.matches(eye, hdr, info.resource)) {
+                D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
+                static_cast<ID3D11DepthStencilView*>(dsv)->GetDesc(&vd);
+                DXGI_FORMAT tf, df, sf;
+                const bool hasStencil = dsFormats(vd.Format, &tf, &df, &sf) && sf != DXGI_FORMAT_UNKNOWN;
+                g_seedCensus.event(eye, hdr, g_lastRedirectSeq,
+                    uiSeedClearKey(flags, depth, stencil, vd.Flags, uint32_t(vd.Format), hasStencil),
+                    invalidated);
+            }
+            if (invalidated) {
+                l->seq = 0;
+                ++g_win.seedStale;
+            }
         }
     }
 }
@@ -2403,12 +3588,13 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source) {
         source->GetDesc(&d);
         if (d.Width != e.door.fullW || d.Height != e.door.fullH) {
             if (e.door.fullW && e.door.fullH) openSizeChange(e.door.fullW, e.door.fullH, d.Width, d.Height);
-            if (g_target > 0.0f) {
-                const UiLayerSize s = uiLayerSize(d.Width, d.Height, g_target);
+            if (detail::g_uiLayerLive) {
+                const UiLayerSize s = uiLayerSize(d.Width, d.Height, layerTarget());
                 Log::get().note(
                     "ui quality: layer: the %s eye's door hands on %ux%u; its layer is %ux%u at %s "
                     "(%.1f MB).",
-                    eye == 0 ? "left" : "right", d.Width, d.Height, s.w, s.h, uiQualityLabel(g_target),
+                    eye == 0 ? "left" : "right", d.Width, d.Height, s.w, s.h,
+                    uiQualityLabel(layerTarget()),
                     uiLayerMB(uiLayerBytes(s.w, s.h)));
             }
             e.door.fullW = d.Width;
@@ -2436,6 +3622,7 @@ void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4]) {
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
+    g_seedCensus.door(eye, sequence);
     Eye& e = g_eye[eye];
     if (!e.srv || !e.rtv || e.compositedSeq == sequence) return nullptr;
     const bool hasUi = e.seq == sequence && e.draws;
@@ -2510,12 +3697,53 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     return result;
 }
 
+namespace {
+// The fence a failed hologram restore raises (detail::g_uiLayerIssueBlocked,
+// set in restore()) holds for the rest of the frame it failed in and is
+// settled HERE, at the next frame boundary, on the owner context: whichever
+// of the hologram PS and b13 is still EDVR's is put back (only where the slot
+// still holds EDVR's own object), the fence lifts and the game's draws
+// resume. The layer itself stays stood down for the session. If eight
+// boundaries in a row cannot do it the fence lifts anyway
+// (ui_holo_remap.h settleAtBoundary): a frozen headset is worse than one
+// draw on a wrong hologram pixel shader. The rule lives in the header so the
+// ui_holo_test rig covers it; this only logs and flips the flag.
+unsigned g_holoSettleFailed = 0;
+void settleIssueFence(ID3D11DeviceContext* ctx) {
+    if (!detail::g_uiLayerIssueBlocked) return;
+    const unsigned failedBefore = g_holoSettleFailed;
+    switch (ui_holo_remap::settleAtBoundary(g_holoBinding, ctx, vScreenPSSetShaderRaw, g_holoSettleFailed)) {
+    case ui_holo_remap::Settle::kHold:
+        return;
+    case ui_holo_remap::Settle::kSettled:
+        Log::get().note("ui quality: the hologram shader/b13 the layer could not put back was restored at the "
+                        "frame boundary (after %u failed boundaries) -- game draws resume; the layer stays "
+                        "stood down (turning fix.ui_quality off and on re-arms it).", failedBefore);
+        break;
+    case ui_holo_remap::Settle::kFailOpen:
+        Log::get().note("ui quality: the hologram shader/b13 could NOT be put back in %u frame boundaries -- "
+                        "the game's draws resume anyway, on possibly wrong hologram pixel shader / b13 state "
+                        "until the game rebinds them; a restart clears it. The saved originals stay held, so "
+                        "the hologram take stays refused. The layer stays stood down.",
+                        ui_holo_remap::kSettleBoundaries);
+        break;
+    }
+    detail::g_uiLayerIssueBlocked = false;
+}
+}  // namespace
+
 void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
+    settleIssueFence(ctx);
     detail::g_uiLayerWatching = false;
     g_watchBudget = kWatchPerFrame;
+    // A tonemap admission whose draw never issued (swallowed) does not
+    // survive the frame.
+    g_crispPending = CrispTonePending{};
+    detail::g_uiLayerCrispPending = false;
     ++g_win.frames;
     // The route's timers read back (the door reads them too).
     routePoll(ctx);
+    g_hdrSeedGpu.poll(ctx);
     // The next frame's answer to "is the 2D screen the world?".
     onFootGateTick();
     // A door size change's watch: the dropped line, two seconds on.
@@ -2534,6 +3762,8 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
             ctx->GetDevice(&dev);
             ensureSeeder(dev.Get());
         }
+        // the crisp-HUD half's of fix.ui_quality coverage shaders, the same.
+        if (detail::g_uiLayerCrispOn) compileCoverageOnce(ctx);
     }
     // Not live -- off, no pass, the jitter switches set, stood down: this
     // frame's doors have run, so nothing still needs the layers. Let the
@@ -2547,26 +3777,62 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_winStartMs) g_winStartMs = now;
     if (now - g_winStartMs < kTotalsMs) return;
     const bool anything = g_win.redirected || g_win.composites || g_win.compositeRefused;
-    if (g_target > 0.0f || anything) logTotals(static_cast<double>(now - g_winStartMs) / 1000.0);
+    if (g_target > 0.0f || anything) {
+        uint64_t samples = 0;  // what logTotals is about to sort
+        for (const RouteStats& r : g_routeStats) samples += r.n;
+        PeriodicWorkScope timing(g_workTotals, samples);
+        logTotals(static_cast<double>(now - g_winStartMs) / 1000.0);
+    }
     g_win = Window{};
-    for (RouteStats& r : g_routeStats) r.n = 0;
+    g_seedCensus.nextWindow();
+    for (RouteStats& r : g_routeStats) {
+        r.n = 0;
+        r.seen = 0;  // the reservoir restarts with the window
+    }
     g_winStartMs = now;
 }
 
 void uiLayerShutdown() {
+    g_holoBinding.clear(); g_holoCache.reset();
+    detail::g_uiLayerIssueBlocked = false;
+    g_holoSettleFailed = 0;
+    g_privateDepthGuard.reset();
+    g_hdrSeedGpu.reset(); // release-only shutdown; the owner/device may already be gone
+    g_hdrSeedActive = 0;
+    g_seedCensus = UiSeedCensus{};
+    detail::g_uiSeedDiagnostics = false;
     if (g_draw.active) releaseSaved();
     g_draw = Draw{};
+    g_crispPending = CrispTonePending{};
+    g_crispSave = CrispToneSave{};
+    detail::g_uiLayerCrispPending = false;
     releaseLayers();
     for (RouteSlot& s : g_route) {
         s.timer.reset();
         s.inUse = false;
     }
     g_routeHead = g_routeTail = 0;
+    for (auto& totals : g_routeTotals) totals = UiRouteFrameTotals{};
+    g_routeCoverage = UiRouteCoverage{};
+    g_routeCombinedArmedPending = 0;
+    g_routeHdrMovedPending = 0;
     for (uint32_t i = 0; i < g_blendCount; ++i) g_blends[i] = BlendEntry{};
     g_blendCount = 0;
     g_seeder.reset();
     g_deferred.Reset();
     g_seederTried = false;
+    g_crispDeferred.Reset();
+    g_crispDeferredTried = false;
+    if (g_covVs) {
+        g_covVs->Release();
+        g_covVs = nullptr;
+    }
+    if (g_covPs) {
+        g_covPs->Release();
+        g_covPs = nullptr;
+    }
+    g_covTried = false;
+    g_crispToneSeenCount = 0;
     if (g_cb) {
         g_cb->Release();
         g_cb = nullptr;

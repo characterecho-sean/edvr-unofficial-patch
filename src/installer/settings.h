@@ -86,32 +86,41 @@ struct SettingRow {
 // Every setting, in the order the ini defines them, grouped by section.
 const std::vector<SettingDef>& settingDefs();
 
-// The settings of one install, read from its edvr.ini and written back to it.
+// The settings of one install, read from the settings file of an edition and
+// written back to it.
 class SettingsModel {
 public:
-    // Reads <gameDir>\edvr.ini. Absent is not an error: every setting then
-    // reads at its shipped value, and the first change writes the file.
-    bool load(const std::wstring& gameDir);
+    // Reads the edition's settings file in <gameDir>: edvr.ini for "vr",
+    // edvr-flat.ini for "flat" (state.h, settingsLeafFor). Absent is not an
+    // error: every setting then reads at its shipped value, and the first change
+    // writes the file. The flat runtime reads edvr.ini while it has no
+    // edvr-flat.ini, so until then that is what a flat model shows -- and the
+    // first change starts edvr-flat.ini from it, leaving edvr.ini as it is.
+    bool load(const std::wstring& gameDir, const std::string& profile = "vr");
 
     bool loaded() const { return m_loaded; }
     const std::wstring& gameDir() const { return m_gameDir; }
     const std::wstring& iniPath() const { return m_iniPath; }
     const std::vector<SettingRow>& rows() const { return m_rows; }
 
-    // Writes the value into edvr.ini, keeping the file's layout, comments and
-    // every other value exactly as they were. The game re-reads the file within
-    // about a second, so this IS the apply step.
+    // Writes the value into the settings file, keeping the file's layout,
+    // comments and every other value exactly as they were. The game re-reads the
+    // file within about a second, so this IS the apply step.
     bool set(size_t index, const std::string& value);
 
     const std::string& lastError() const { return m_error; }
 
 private:
     void refreshRows();
+    // The text the runtime reads now: the edition's own file, or, for flat with
+    // none yet, the shared edvr.ini. `*fromShared` says which.
+    std::string currentText(bool* fromShared) const;
 
     bool                   m_loaded = false;
     bool                   m_backedUp = false;  // one copy per session, before the first change
     std::wstring           m_gameDir;
-    std::wstring           m_iniPath;
+    std::wstring           m_iniPath;     // the edition's own file: where every write goes
+    std::wstring           m_sharedPath;  // flat only: the edvr.ini it falls back to; else empty
     std::string            m_text;   // the file as it stands
     std::vector<SettingRow> m_rows;
     std::string            m_error;

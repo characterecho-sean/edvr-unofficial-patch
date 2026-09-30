@@ -13,18 +13,51 @@
 // folder cannot be found or the reads keep failing, this says so once and
 // stays off -- every consumer keeps its heuristic fallback, so a missing
 // journal returns EDVR to exactly yesterday's behaviour.
+//
+// THE FILE WORK IS NOT ON ELITE'S RENDER THREAD. One worker thread does all of
+// it -- the Status.json read, the journal open and tail, and the directory walk
+// -- and journalWatchTick() only moves results across. It used to do the work
+// itself, from the frame boundary, and the phase-0 timing of 2026-09-29
+// (Frontier, v0.18.0-rc.3-94-g8fee57c2, src/common/periodic_work.h) priced it:
+// the re-glob took 2.6 to 4.3 ms on every one of 97 runs against 1,992 journal
+// files, and a single Status.json read took 39.2 ms at 07:08:22.789, which is
+// the 46-50 ms frame at that instant. A file call has no upper bound and a
+// frame has no room for one.
+//
+// WHAT CROSSES, AND HOW. The worker builds up one value (Published, in the
+// .cpp) as it reads and hands whole copies over through a mutex that only the
+// worker ever waits on: the tick try-locks it, takes the newest copy if there is
+// one, and moves on if the worker happens to be inside the few nanoseconds of a
+// publish. The other way, a consumer's request for low-latency Status reads
+// (journalWatchSetEagerStatus) is an atomic and a wake-up. Every accessor below
+// answers from the copy the tick last took, so the whole set of answers changes
+// together at the frame boundary, as it always did -- a consumer reading two of
+// them in one frame cannot see one from before a Status sample and one from
+// after it.
+//
+// WHAT THAT COSTS THE CONSUMERS: a change is seen when the worker has read it
+// (the same 500 ms, or 100 ms eager, cadence as before, kept by the worker's own
+// clock rather than by frame counts) AND the next frame boundary has come.
+// That is at most one frame later than the old tick, and the worker's own timer
+// adds up to one 15.6 ms system tick.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace edvr {
 
 // Reads d3d11.journal_watch and d3d11.journal_dir, resolves the folder, and
-// says in the log what will be watched. Call once at install.
+// says in the log what will be watched. Call once at install. Starts no thread:
+// the first journalWatchTick() does, from the Present thread and never from a
+// loader path.
 void journalWatchConfigure();
 
-// Poll the tail. Call once per frame; it does file work twice a second
-// and nothing at all when disabled or failed.
+// Hand the worker's latest results to the accessors below. Call once per frame
+// from the Present thread. It never touches the filesystem and never waits: a
+// few atomic loads per frame when nothing has arrived, a try-lock and a struct
+// copy when something has, and nothing at all when disabled, failed or shut
+// down. The first call starts the worker.
 void journalWatchTick();
 
 // Is the journal being read at all? False when disabled by config, the folder
@@ -33,8 +66,10 @@ void journalWatchTick();
 bool journalWatchActive();
 
 // Reread Status.json every 100 ms instead of the journal's ~500 ms while
-// true. The FSS theater's mode gate asks for this: its authority signal
-// should not lag the player by half a second more than it must.
+// true. The FSS mode latch asks for this: its authority signal
+// should not lag the player by half a second more than it must. Callable from
+// any thread and cheap when the value has not changed; a change wakes the
+// worker so the new cadence starts at once rather than at its next wake-up.
 void journalWatchSetEagerStatus(bool eager);
 
 // Status.json's GuiFocus is 9: the player is in the Full System Scanner
@@ -99,6 +134,27 @@ uint32_t journalStatusSamples();
 // at a star).
 bool journalInJumpTunnel();
 
+// Tell the worker to stop, and return. It does not wait for it: shutdown can
+// run under the loader lock (FreeLibrary), where waiting on a thread's exit
+// deadlocks, because that thread's exit needs the lock the caller holds. The
+// worker finishes the file call it is in, closes its own handle and leaves; it
+// writes nothing to the log on the way out. What the accessors last said stays
+// what they say, and a later tick starts nothing. Like the menu's writer and the
+// panel raster worker, the state it uses is never freed, so a worker still
+// finishing after this returns has no data to fault on.
+//
+// Its CODE is a separate matter, and nothing here keeps it mapped. Two things
+// do. The worker is a std::thread, and the static UCRT's _beginthreadex holds a
+// reference on the module of its thread routine and ends the thread through
+// FreeLibraryAndExitThread (ucrt\startup\thread.cpp), so a FreeLibrary during a
+// file call leaves the image mapped and the unload completes on the worker's own
+// thread once it has stopped. And the graphics DLL is pinned
+// (src/common/module_pin.h) at the first device creation, long before the first
+// tick starts the worker, which does not lean on the CRT. The RC4 review (F1)
+// took the detached worker to have neither; tools/journal_unload_test loads this
+// code in a DLL, blocks the worker inside a file call, calls FreeLibrary, and
+// shows both. A host that runs the worker without the pin owns nothing but the
+// CRT's reference.
 void journalWatchShutdown();
 
 // WHICH JOURNAL IS THIS SESSION'S, as a pure decision over times alone.
@@ -151,5 +207,29 @@ struct JournalPick {
 };
 JournalPick journalPickNewest(const uint64_t* creation, const uint64_t* write,
                               size_t count, uint64_t notBefore);
+
+// RIG SEAMS. tools\gate_test drives the worker through these; the product
+// never calls them, and at their defaults they change nothing.
+//
+// Called on the worker's thread immediately before each piece of file work, with
+// the piece's name: "status" (the Status.json read), "reglob" (the directory
+// walk), "open" (the journal open) or "tail" (the tail read). All but "open"
+// sit inside the phase-0 timing scopes, so a hook that sleeps makes that
+// operation slow, as a slow disk would. A rig blocks in it to hold the worker
+// mid-I/O while it runs the Present-thread tick, and records the calling thread
+// to show that the tick is never the one doing the work.
+using JournalWorkHook = void (*)(const char* site);
+void journalWatchTestSetWorkHook(JournalWorkHook hook);
+
+// Every cadence (the 500 ms poll, the 100 ms eager Status read, the 4 s
+// re-glob) scaled to this many percent. 100 is the shipped cadence. A rig runs
+// fast to reach the eight consecutive faults in a fraction of a second, and slow
+// to prove a stop or an eager request wakes a worker that would otherwise sleep
+// for seconds.
+void journalWatchTestSetCadencePercent(uint32_t percent);
+
+// Has a worker been started and not yet left? False before the first tick,
+// after the worker retires or is stopped, and once it has closed its handle.
+bool journalWatchTestWorkerRunning();
 
 }  // namespace edvr

@@ -60,6 +60,7 @@ internal sealed class ThreadBusy
 internal sealed class FrameCycle
 {
     public FrameMarker Marker = null!;
+    public Dictionary<string, object?> ApplicationGpu = GpuMarkers.Unavailable("markers_unavailable");
     public ulong WaitReturnUs, FirstSubmitEntryUs, FirstSubmitReturnUs, SecondSubmitEntryUs;
     public ulong SecondSubmitReturnUs, PresentBeginUs, PresentEndUs, NextWaitEntryUs, NextWaitReturnUs;
     public DateTime WaitReturnUtc;

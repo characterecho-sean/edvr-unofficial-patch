@@ -151,7 +151,8 @@ Settings readConfig() {
   // runtime's size, an upscale when the game renders smaller. "dlaa" stays
   // pinned to 1:1 on purpose (menu.cpp's "DLAA, even below HMD Quality 1").
   s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0;
-  s.jitter=_stricmp(c.getString("experimental.temporal_aa_jitter","on").c_str(),"off")!=0;
+  // getBool, as the flat profile reads it (flat_runtime.cpp): 0/false/no/off all mean off in both.
+  s.jitter=c.getBool("experimental.temporal_aa_jitter",true);
   s.blend=c.getFloat("experimental.temporal_aa_blend",.90f); if(!std::isfinite(s.blend))s.blend=.90f;
   s.clamp=c.getFloat("experimental.temporal_aa_clamp",1.f); if(!std::isfinite(s.clamp))s.clamp=1.f;
   s.blend=(std::max)(.5f,(std::min)(.95f,s.blend)); s.clamp=(std::max)(.5f,(std::min)(3.f,s.clamp));

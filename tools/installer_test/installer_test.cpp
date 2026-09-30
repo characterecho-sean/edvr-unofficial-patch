@@ -18,12 +18,16 @@
 //
 // Usage: installer_test.exe <repo root> <scratch dir>
 #include <windows.h>
+#include <tlhelp32.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cwctype>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "../../src/common/iniedit.h"
 #include "../../src/installer/apply.h"
 #include "../../src/installer/plan.h"
 #include "../../src/installer/probe.h"
@@ -68,8 +72,24 @@ static void expectEq(const std::string& got, const std::string& want, const char
 static std::string readAll(const std::wstring& path) { return readTextFile(path); }
 
 static bool writeAll(const std::wstring& path, const std::string& text) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Somebody else having the file open for a moment is a sharing violation here,
+    // or an access denial where they had just deleted it: the real-time scanner and
+    // the search indexer look at every file that was just written, and a helper
+    // that gave up on the first one left the OLD bytes in the file for the case
+    // that followed to trip over ("the original is exactly as it was -- got ''",
+    // three runs in twenty under a stand-in scanner). Tried again for up to two
+    // seconds; any other failure -- no such folder, a read-only file -- is final.
+    HANDLE f = INVALID_HANDLE_VALUE;
+    for (int i = 0; i < 400; ++i) {
+        f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) break;
+        const DWORD error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED &&
+            error != ERROR_LOCK_VIOLATION)
+            break;
+        Sleep(5);
+    }
     if (f == INVALID_HANDLE_VALUE) return false;
     DWORD written = 0;
     const BOOL good = WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
@@ -455,6 +475,12 @@ static void testShippedIni(const std::wstring& root) {
         "fss_eye_heal = 1\r\n"        // the pre-0.11 pair, both of which
         "fss_reveal_sync = on\r\n"    // now merge into ONE new key
         "fss_eye_glue = stock\r\n"   // a key that never existed: carried, not eaten
+        // The field-of-view trims (2026-09-29) were [fix] keys with menu rows
+        // and are ini-only [experimental] keys now: a per-headset list tuned
+        // for one headset and one for another, and one left as shipped (empty).
+        "fov_trim_vertical = pimax-openxr/pimax-crystal-super:10, virtualdesktopxr/meta-quest-3:5\r\n"
+        "fov_trim_outer = oculus/meta-quest-3:7\r\n"
+        "fov_trim_nasal =\r\n"
         "[advanced]\r\n"
         "cull_guard_percent = 20.0\r\n";
     MergeReport moveRep;
@@ -473,6 +499,169 @@ static void testShippedIni(const std::wstring& root) {
           "a key this version never shipped is carried, with its note");
     check(moveRep.followed.size() >= 4,
           "the report says the values followed their settings");
+
+    // The trims, against the same real file: the tuned lists arrive whole under
+    // [experimental] (commas, slashes, colons and all), the one left empty
+    // stays empty there, and nothing is left under [fix] to shadow them.
+    const std::string tunedTrims =
+        "pimax-openxr/pimax-crystal-super:10, virtualdesktopxr/meta-quest-3:5";
+    expectEq(iniValue(migrated, "experimental.fov_trim_vertical", "<absent>"), tunedTrims,
+             "a tuned per-headset trim list follows the section move whole");
+    expectEq(iniValue(migrated, "experimental.fov_trim_outer", "<absent>"),
+             "oculus/meta-quest-3:7", "and so does a single entry");
+    expectEq(iniValue(migrated, "experimental.fov_trim_nasal", "<absent>"), "",
+             "a trim left as shipped (empty) stays empty under its new name");
+    for (const char* key : {"fix.fov_trim_vertical", "fix.fov_trim_outer", "fix.fov_trim_nasal"}) {
+        expectEq(iniValue(migrated, key, "<absent>"), "<absent>",
+                 (std::string("nothing is left under ") + key + " for the reader to shadow").c_str());
+    }
+
+    // CONTROL: the same merge over the shipped file with its three moved-from
+    // annotations taken out (what a careless edit of the block would leave). The
+    // tuned list is NOT under [experimental]; it is carried under [fix], with a
+    // note, where nothing reads it -- which is what the assertions above would
+    // report if the annotations were lost.
+    std::string unannotated = shipped;
+    for (const char* key : {"vertical", "outer", "nasal"}) {
+        const std::string line = std::string("# moved-from: fix.fov_trim_") + key;
+        const size_t at = unannotated.find(line);
+        if (at != std::string::npos) unannotated.replace(at, line.size(), "# (annotation removed)");
+    }
+    check(unannotated != shipped && unannotated.find("moved-from: fix.fov_trim_") == std::string::npos,
+          "the control's ini really lost its three annotations");
+    MergeReport strandedRep;
+    const std::string stranded = mergeIni(unannotated, oldLayout, nullptr, {}, &strandedRep);
+    check(iniValue(stranded, "experimental.fov_trim_vertical", "<absent>") != tunedTrims,
+          "control: without the annotation the tuned trim list does NOT arrive under [experimental]");
+    expectEq(iniValue(stranded, "fix.fov_trim_vertical", "<absent>"), tunedTrims,
+             "control: it is carried under the old name instead, where nothing reads it");
+
+    // 2026-09-29: the flat camera path became always-on and its two switches,
+    // fix.temporal_aa_camera and fix.temporal_aa_camera_trace, were removed. A
+    // rig that flew the experiment has both lines, one or both "on". Neither may
+    // be adopted (the shipped file no longer documents either, so nothing reads
+    // them), neither may be eaten (a line somebody put there is how a support
+    // thread starts), and neither may disturb the settings around them. The
+    // base is the shipped file plus the two blocks the previous version carried
+    // right after temporal_aa_model.
+    check(shipped.find("temporal_aa_camera") == std::string::npos,
+          "the shipped ini documents neither retired camera-path switch");
+    // The checkout's line endings are whatever git gave it (LF here, CRLF on a
+    // machine with autocrlf), so the fixture takes them from the file.
+    const std::string eol = shipped.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const std::string anchor = "temporal_aa_model = k" + eol;
+    const size_t at = shipped.find(anchor);
+    check(at != std::string::npos, "the shipped ini still has the line the fixture anchors on");
+    if (at != std::string::npos) {
+        const size_t after = at + anchor.size();
+        const std::string previous = shipped.substr(0, after) + eol +
+            "# ui: Camera-path jitter (experimental) | choices off, on | live | menu performance" + eol +
+            "temporal_aa_camera = off" + eol + eol +
+            "# ui: Camera-path jitter trace logging (experimental) | choices off, on | live | menu performance" + eol +
+            "temporal_aa_camera_trace = off" + eol +
+            shipped.substr(after);
+        std::string flown = previous;
+        flown.replace(flown.find("temporal_aa_camera = off"), strlen("temporal_aa_camera = off"),
+                      "temporal_aa_camera = on");
+        flown.replace(flown.find("temporal_aa_camera_trace = off"),
+                      strlen("temporal_aa_camera_trace = off"), "temporal_aa_camera_trace = on");
+        const size_t modelAt = flown.find("temporal_aa_model = k");
+        flown.replace(modelAt, strlen("temporal_aa_model = k"), "temporal_aa_model = l");
+
+        MergeReport camRep;
+        const std::string camMerged = mergeIni(shipped, flown, &previous, {}, &camRep);
+        expectEq(iniValue(camMerged, "fix.temporal_aa_model"), "l",
+                 "the setting next to the retired pair keeps its tuned value");
+        expectEq(iniValue(camMerged, "fix.temporal_aa_camera"), "on",
+                 "a retired camera-path switch is carried with its value, not eaten");
+        expectEq(iniValue(camMerged, "fix.temporal_aa_camera_trace"), "on",
+                 "...and so is the trace switch");
+        check(camRep.retired.size() == 2 && camRep.carried.empty(),
+              "both are reported as retired settings, neither as an unknown key");
+        check(camMerged.find("temporal_aa_camera = on") != std::string::npos &&
+                  camMerged.find("# carried over from your edvr.ini; this version no longer uses it") !=
+                      std::string::npos,
+              "each carried line says this version no longer uses it");
+        check(camMerged.find("# ui: Camera-path jitter") == std::string::npos,
+              "the retired settings' menu rows are not resurrected");
+
+        // Hand-installed, no base copy: the same two lines are still carried and
+        // still inert, only the note differs (the merge cannot know they once
+        // shipped).
+        MergeReport bareRep;
+        const std::string bare = mergeIni(shipped, flown, nullptr, {}, &bareRep);
+        expectEq(iniValue(bare, "fix.temporal_aa_camera"), "on",
+                 "with no base copy a retired switch is still carried");
+        check(bareRep.carried.size() == 2,
+              "and reported as a key this version never shipped");
+
+        // The merge is idempotent on the carried lines: merging again with the
+        // result as the user's file must not duplicate them.
+        MergeReport again;
+        const std::string twice = mergeIni(shipped, camMerged, &shipped, {}, &again);
+        size_t seen = 0, from = 0;
+        while ((from = twice.find("temporal_aa_camera = on", from)) != std::string::npos) {
+            ++seen;
+            from += 1;
+        }
+        check(seen == 1, "a second merge does not duplicate a carried line",
+              std::to_string(seen) + " copies");
+    }
+}
+
+// A shipped default that CHANGED, against the real edvr.ini: fix.ui_quality went
+// from off to 100 on 2026-09-29. What an existing install does with it is a
+// property of the merge, not of this key, and it is pinned here so a change of that
+// behaviour is a decision. The previous version's file is the shipped one with the
+// old default written back.
+static void testChangedDefault(const std::wstring& root) {
+    printf("\na shipped default that changed (fix.ui_quality: off -> 100), against the real edvr.ini\n");
+    const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
+    if (shipped.empty()) {
+        fail("read the repository's edvr.ini", "not found next to the repo root");
+        return;
+    }
+    expectEq(iniValue(shipped, "fix.ui_quality", "<absent>"), "100", "the shipped default is 100");
+    std::string previous = shipped;
+    const size_t at = previous.find("\nui_quality = 100");
+    check(at != std::string::npos, "the shipped ini has the line this case reverts");
+    if (at == std::string::npos) return;
+    previous.replace(at, strlen("\nui_quality = 100"), "\nui_quality = off");
+    expectEq(iniValue(previous, "fix.ui_quality", "<absent>"), "off", "the previous version's file ships off");
+
+    // An install that never touched it, with the base copy the installer keeps: the
+    // new default is adopted, and the report says so. Somebody who typed `off` on
+    // purpose is the same bytes and gets the same answer: the merge cannot tell.
+    MergeReport untouched;
+    const std::string adopted = mergeIni(shipped, previous, &previous, {}, &untouched);
+    expectEq(iniValue(adopted, "fix.ui_quality", "<absent>"), "100",
+             "an install that never touched it (base copy kept) is moved to the new default");
+    bool reported = false;
+    for (const std::string& line : untouched.adopted) reported |= line.find("fix.ui_quality = 100") == 0;
+    check(reported, "and the report says the default moved");
+
+    // With no base copy (a hand-installed rig): compared against the NEW defaults, so
+    // the old default reads as a choice and is kept. The merge over-preserves.
+    MergeReport handInstalled;
+    const std::string kept = mergeIni(shipped, previous, nullptr, {}, &handInstalled);
+    expectEq(iniValue(kept, "fix.ui_quality", "<absent>"), "off",
+             "with no base copy the same file keeps its off");
+    check(handInstalled.twoWay, "and the report says it compared against the new defaults");
+
+    // A value they chose is theirs either way.
+    std::string chose125 = previous;
+    chose125.replace(chose125.find("\nui_quality = off"), strlen("\nui_quality = off"), "\nui_quality = 125");
+    MergeReport chosen;
+    expectEq(iniValue(mergeIni(shipped, chose125, &previous, {}, &chosen), "fix.ui_quality", "<absent>"),
+             "125", "a value somebody chose (125) survives");
+
+    // A line they deleted stays deleted (commented out): the runtime then uses the
+    // code's fallback, which is the shipped default (tools/config_test checks it).
+    std::string deleted = previous;
+    deleted.replace(deleted.find("\nui_quality = off"), strlen("\nui_quality = off"), "\n#ui_quality = off");
+    MergeReport removed;
+    expectEq(iniValue(mergeIni(shipped, deleted, &previous, {}, &removed), "fix.ui_quality", "<absent>"),
+             "<absent>", "a line they commented out stays commented out");
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +1001,28 @@ static void testPlanner() {
         check(planUninstall(s, options).blocked, "and nothing is taken back out either");
     }
 
+    {   // The process list could not be read. That is not "the game is stopped":
+        // it used to be, and the installer went on into a folder the game may
+        // have had open. Refused, in words of its own -- closing the game does
+        // not cure a check that could not run.
+        Survey s = baseSurvey(dir);
+        s.gameRunStateUnknown = true;
+        const Plan plan = planInstall(s, options, payload);
+        check(plan.blocked && plan.steps.empty(),
+              "nothing is planned when it cannot be told whether the game is running");
+        check(notesMention(plan, "Could not tell whether Elite Dangerous is running"),
+              "and the report says the check failed, not that the game is running");
+        check(!notesMention(plan, "Elite Dangerous is running. Close it first"),
+              "which is a different message from the one for a game that is");
+        const Plan out = planUninstall(s, options);
+        check(out.blocked && out.steps.empty(), "and nothing is taken back out either");
+        check(notesMention(out, "Could not tell whether Elite Dangerous is running"),
+              "with the same words on the way out");
+        Options repair = options;
+        repair.repair = true;
+        check(planInstall(s, repair, payload).blocked, "a repair is refused the same way");
+    }
+
     {   // The game is running out of the OTHER install. A machine with two of
         // them is somebody's actual setup, and a refusal that went by the
         // executable's name alone stopped the folder nobody was playing from.
@@ -996,6 +1207,431 @@ static void testFlatPlanner() {
 }
 
 // ---------------------------------------------------------------------------
+// the flat edition's own settings file (edvr-flat.ini)
+//
+// The flat runtime reads edvr-flat.ini first and falls back to edvr.ini only
+// while there is none (config.cpp). The installer used to merge into and edit
+// edvr.ini for a flat install: it reported success while the game went on
+// reading the old flat file, and where there was no flat file it changed the VR
+// profile's tuning. Every case here holds one rule: an operation of an edition
+// changes the file THAT edition's runtime reads, and the other edition's file
+// is left byte for byte as it was.
+// ---------------------------------------------------------------------------
+
+// What each shipped edition's defaults look like, in miniature, and the two files
+// a folder can hold: the VR profile's edvr.ini and the flat profile's own, chosen
+// to differ from each other in every way a wrong-file merge could show.
+static const char* kFlatTemplate =
+    "# EDVR flat settings.\r\n"
+    "\r\n"
+    "[fix]\r\n"
+    "temporal_aa = off\r\n"
+    "temporal_aa_model = k\r\n"
+    "\r\n"
+    "[advanced]\r\n"
+    "real_dll =\r\n";
+
+// The same file a version later: one default moved and one setting arrived.
+static const char* kFlatTemplateNewer =
+    "# EDVR flat settings.\r\n"
+    "\r\n"
+    "[fix]\r\n"
+    "temporal_aa = off\r\n"
+    "temporal_aa_model = l\r\n"
+    "render_sharpness = 0\r\n"
+    "\r\n"
+    "[advanced]\r\n"
+    "real_dll =\r\n";
+
+// The VR profile's edvr.ini -- or, in a folder from before the profiles had files
+// of their own, the one file both read. It carries a section and a value that no
+// flat file above has.
+static const char* kSharedIni =
+    "[fix]\r\n"
+    "temporal_aa = dlaa\r\n"
+    "temporal_aa_model = k\r\n"
+    "black_void = 0\r\n"
+    "\r\n"
+    "[hotkey]\r\n"
+    "menu = F5\r\n"
+    "\r\n"
+    "[advanced]\r\n"
+    "real_dll =\r\n";
+
+// The flat profile's own edvr-flat.ini, tuned differently.
+static const char* kFlatOwnIni =
+    "# EDVR flat settings.\r\n"
+    "\r\n"
+    "[fix]\r\n"
+    "temporal_aa = fsr\r\n"
+    "temporal_aa_model = k\r\n"
+    "\r\n"
+    "[advanced]\r\n"
+    "real_dll =\r\n";
+
+static const char kFlatGraphicsBytes[] = "TEST-FLAT-D3D11-PAYLOAD";
+
+static PayloadInfo flatPayloadFor(const std::string& iniText) {
+    PayloadInfo p = testPayload(iniText);
+    p.profile = "flat";
+    p.descriptorText = "[install]\r\nschema = 1\r\nprofile = flat\r\n";
+    p.descriptorSha = sha256Bytes(p.descriptorText.data(), p.descriptorText.size());
+    p.nativeGraphicsValid = true;
+    p.haveOpenvr = false;
+    p.haveOpenxrLoader = false;
+    p.haveOpenxrLicense = false;
+    p.nativePairValid = false;
+    p.d3d11Sha = sha256Bytes(kFlatGraphicsBytes, sizeof(kFlatGraphicsBytes) - 1);
+    return p;
+}
+
+// The payload the flat installer carries, for an apply on real files.
+static PayloadProvider flatProvider() {
+    return [](const std::string& item, const void** data, size_t* size) {
+        static const char kProfile[] = "[install]\r\nschema = 1\r\nprofile = flat\r\n";
+        if (item == "d3d11") {
+            *data = kFlatGraphicsBytes;
+            *size = sizeof(kFlatGraphicsBytes) - 1;
+            return true;
+        }
+        if (item == "profile") {
+            *data = kProfile;
+            *size = sizeof(kProfile) - 1;
+            return true;
+        }
+        return false;
+    };
+}
+
+// The live file `leaf` in `dir` named by any step -- read, replaced, moved,
+// removed. A backup's copy under edvr_backup\ is a different path and does not
+// count: what is asked is whether the plan reaches the file the game reads.
+static bool touchesLive(const Plan& plan, const std::wstring& dir, const wchar_t* leaf) {
+    const std::wstring live = joinPath(dir, leaf);
+    for (const Step& step : plan.steps) {
+        if (_wcsicmp(step.from.c_str(), live.c_str()) == 0 ||
+            _wcsicmp(step.to.c_str(), live.c_str()) == 0)
+            return true;
+    }
+    return false;
+}
+
+// The text a plan would write to the live file `leaf`.
+static std::string plannedText(const Plan& plan, const wchar_t* leaf) {
+    for (const Step& step : plan.steps) {
+        if (step.action == Action::WriteText && _wcsicmp(leafOf(step.to).c_str(), leaf) == 0)
+            return step.text;
+    }
+    return std::string();
+}
+
+// A flat edition installed here already, a version ago: its d3d11.dll, its
+// descriptor, its record, and the shipped defaults it was installed with as the
+// base of the next merge.
+static Survey installedFlatSurvey(const std::wstring& dir, const PayloadInfo& installedWith) {
+    Survey s = baseSurvey(dir);
+    s.haveOpenvrDir = false;
+    s.d3d11 = fakeDll(DllKind::Edvr, joinPath(dir, L"d3d11.dll"), "an-older-flat-d3d11");
+    s.descriptorPresent = true;
+    s.descriptorSha = installedWith.descriptorSha;
+    s.state.present = true;
+    s.state.profile = "flat";
+    s.state.descriptorSha = installedWith.descriptorSha;
+    s.state.d3d11Installed = true;
+    s.state.d3d11Sha = "an-older-flat-d3d11";
+    s.baseIniText = installedWith.iniText;
+    return s;
+}
+
+static void testFlatSettingsPlanner() {
+    printf("\nthe flat edition's settings file: planning\n");
+    const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
+    const PayloadInfo flatOld = flatPayloadFor(kFlatTemplate);
+    const PayloadInfo flatNew = flatPayloadFor(kFlatTemplateNewer);
+    const Options options = testOptions();
+
+    {   // The legacy shared-INI install: a flat install from before edvr-flat.ini
+        // existed has only edvr.ini. The flat runtime has been reading it, so its
+        // settings carry over into a file of the flat edition's own -- and edvr.ini
+        // itself is not touched by anything the plan does.
+        Survey s = installedFlatSurvey(dir, flatOld);
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        const Plan plan = planInstall(s, options, flatNew);
+        check(!plan.blocked, "a flat update over a legacy shared edvr.ini plans");
+        expectEq(plan.settingsFile, "edvr-flat.ini", "and says the file it works on is edvr-flat.ini");
+        check(hasStep(plan, Action::WriteText, nullptr, L"edvr-flat.ini"),
+              "it writes the flat edition's own edvr-flat.ini");
+        check(!touchesLive(plan, dir, L"edvr.ini"),
+              "and nothing in the plan reads, backs up, replaces or removes edvr.ini");
+        const std::string seeded = plannedText(plan, L"edvr-flat.ini");
+        expectEq(iniValue(seeded, "fix.temporal_aa"), "dlaa",
+                 "the setting the flat runtime was reading carries over");
+        expectEq(iniValue(seeded, "fix.render_sharpness"), "0",
+                 "and the setting that arrived in this version is adopted beside it");
+        check(!hasStep(plan, Action::Backup, L"edvr-flat.ini", nullptr),
+              "a file that is new has nothing to back up");
+        check(notesMention(plan, "Creating edvr-flat.ini from your edvr.ini"),
+              "the report says where the new file came from");
+        check(plan.nextState.iniSha == sha256Bytes(seeded.data(), seeded.size()),
+              "the record names the hash of the flat file it writes");
+        check(!plan.nothingToDo, "and a run that has only the seeding to do is not 'nothing to do'");
+    }
+
+    {   // The same, asked for fresh defaults: the shared file is not read into the
+        // new one, and is still not touched.
+        Survey s = installedFlatSurvey(dir, flatOld);
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        Options fresh = options;
+        fresh.keepSettings = false;
+        const Plan plan = planInstall(s, fresh, flatNew);
+        const std::string written = plannedText(plan, L"edvr-flat.ini");
+        expectEq(iniValue(written, "fix.temporal_aa"), "off",
+                 "--replace-settings gives the flat file the shipped defaults, not edvr.ini's");
+        check(!touchesLive(plan, dir, L"edvr.ini"), "and still leaves edvr.ini alone");
+        check(notesMention(plan, "every setting at its default"), "and says so");
+    }
+
+    {   // Two deliberately different files. The flat update merges the FLAT one
+        // and the VR profile's tuning is not read into it, let alone written.
+        Survey s = installedFlatSurvey(dir, flatOld);
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        s.flatIniPresent = true;
+        s.flatIniText = kFlatOwnIni;
+        const Plan plan = planInstall(s, options, flatNew);
+        check(!plan.blocked, "a flat update over two different files plans");
+        const std::string merged = plannedText(plan, L"edvr-flat.ini");
+        expectEq(iniValue(merged, "fix.temporal_aa"), "fsr", "the flat file's own setting is kept");
+        expectEq(iniValue(merged, "fix.temporal_aa_model"), "l",
+                 "a default the flat file had not changed moves with the new version");
+        expectEq(iniValue(merged, "fix.render_sharpness"), "0", "and the new setting arrives");
+        expectEq(iniValue(merged, "hotkey.menu", "<absent>"), "<absent>",
+                 "nothing of the VR profile's tuning is merged into it");
+        expectEq(iniValue(merged, "fix.black_void", "<absent>"), "<absent>",
+                 "not a single one of its values");
+        check(hasStep(plan, Action::Backup, L"edvr-flat.ini", L"edvr-flat.ini"),
+              "the flat file is backed up before it is changed");
+        check(!touchesLive(plan, dir, L"edvr.ini"), "and edvr.ini is not in the plan at all");
+    }
+
+    {   // Asked for fresh defaults with two files: the flat one is replaced, after
+        // a backup of it, and only that one.
+        Survey s = installedFlatSurvey(dir, flatOld);
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        s.flatIniPresent = true;
+        s.flatIniText = kFlatOwnIni;
+        Options fresh = options;
+        fresh.keepSettings = false;
+        const Plan plan = planInstall(s, fresh, flatNew);
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "fix.temporal_aa"), "off",
+                 "the flat file is replaced by the shipped defaults");
+        check(hasStep(plan, Action::Backup, L"edvr-flat.ini", L"edvr-flat.ini"),
+              "after a copy of it goes to the backup folder");
+        check(!touchesLive(plan, dir, L"edvr.ini"), "and edvr.ini is not touched");
+    }
+
+    {   // Nothing installed and no settings at all: the defaults go to the flat
+        // file, and edvr.ini is not created.
+        Survey s = baseSurvey(dir);
+        s.haveOpenvrDir = false;
+        const Plan plan = planInstall(s, options, flatOld);
+        check(hasStep(plan, Action::WriteText, nullptr, L"edvr-flat.ini"),
+              "a fresh flat install writes edvr-flat.ini");
+        check(!touchesLive(plan, dir, L"edvr.ini"), "and does not create edvr.ini");
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "fix.temporal_aa_model"), "k",
+                 "with the shipped defaults in it");
+    }
+
+    {   // A flat file that already says what it should: left alone, and said once.
+        Survey s = installedFlatSurvey(dir, flatOld);
+        s.d3d11.sha256 = flatOld.d3d11Sha;
+        s.state.d3d11Sha = flatOld.d3d11Sha;
+        s.flatIniPresent = true;
+        s.flatIniText = kFlatTemplate;
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        const Plan plan = planInstall(s, options, flatOld);
+        check(plan.nothingToDo, "an up-to-date flat install has nothing to do");
+        check(!hasStep(plan, Action::WriteText, nullptr, L"edvr-flat.ini"),
+              "it does not rewrite edvr-flat.ini");
+        check(notesMention(plan, "edvr-flat.ini already says what it should"),
+              "and names the file that needed nothing");
+    }
+
+    {   // A graphics mod in the d3d11.dll slot: the chain decision forces
+        // advanced.real_dll into the file the flat runtime reads. In edvr.ini it
+        // would change nothing the flat edition does.
+        Survey s = baseSurvey(dir);
+        s.haveOpenvrDir = false;
+        s.d3d11 = fakeDll(DllKind::D3d11Provider, joinPath(dir, L"d3d11.dll"), "edhm", L"3Dmigoto");
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        const Plan plan = planInstall(s, options, flatOld);
+        check(hasStep(plan, Action::Rename, L"d3d11.dll", L"d3d11_edhm.dll"),
+              "a flat install chains to the mod already in the slot");
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "advanced.real_dll"),
+                 "d3d11_edhm.dll", "and the chain target is in the file the flat runtime reads");
+        check(!touchesLive(plan, dir, L"edvr.ini"), "not in edvr.ini, which is left alone");
+    }
+
+    {   // The mirror image: the VR edition works on edvr.ini and leaves the flat
+        // profile's file exactly as it is.
+        const PayloadInfo vr = testPayload(kNextIni);
+        Survey s = baseSurvey(dir);
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        s.flatIniPresent = true;
+        s.flatIniText = kFlatOwnIni;
+        const Plan plan = planInstall(s, options, vr);
+        check(!plan.blocked, "a VR install beside a flat profile's file plans");
+        expectEq(plan.settingsFile, "edvr.ini", "and says its file is edvr.ini");
+        check(hasStep(plan, Action::WriteText, nullptr, L"edvr.ini"), "it writes edvr.ini");
+        check(!touchesLive(plan, dir, L"edvr-flat.ini"),
+              "and the flat profile's edvr-flat.ini is not in the plan at all");
+    }
+
+    {   // A base is the defaults of the file the record's edition wrote. Merging
+        // into the OTHER edition's own file it is no base at all: here the record
+        // says flat while the VR file has black_void = 0, which the flat defaults
+        // in the base happen to say too. Read as a base, that would call the
+        // person's choice untouched and hand back the VR default of 1.
+        const PayloadInfo vr = testPayload("[fix]\r\nblack_void = 1\r\n");
+        Survey s = baseSurvey(dir);
+        s.state.present = true;
+        s.state.profile = "flat";
+        s.baseIniText = "[fix]\r\nblack_void = 0\r\n";
+        s.iniPresent = true;
+        s.iniText = "[fix]\r\nblack_void = 0\r\n";
+        Options convert = options;
+        convert.convertProfile = true;
+        const Plan plan = planInstall(s, convert, vr);
+        check(!plan.blocked, "a flat to VR conversion plans");
+        // Kept means the plan either leaves the file alone or writes it with the
+        // person's value; what it must not do is write the VR default over it.
+        const std::string written = plannedText(plan, L"edvr.ini");
+        expectEq(iniValue(written.empty() ? s.iniText : written, "fix.black_void"), "0",
+                 "the VR file's value is kept, not read against the flat edition's defaults");
+        check(plan.merge.twoWay, "the merge says it had no base to go on");
+    }
+
+    {   // ...but the shared file a flat install seeds from IS described by the base
+        // whichever edition the record names: it is the one file every edition
+        // before this wrote. Here the record says VR, the base holds the VR
+        // defaults, and the person's one real choice (black_void) is the only
+        // thing that carries over from it.
+        const PayloadInfo flat = flatPayloadFor("[fix]\r\nblack_void = 5\r\ntemporal_aa = off\r\n");
+        Survey s = baseSurvey(dir);
+        s.state.present = true;
+        s.state.profile = "vr";
+        s.baseIniText = "[fix]\r\nblack_void = 1\r\ntemporal_aa = dlaa\r\n";
+        s.iniPresent = true;
+        s.iniText = "[fix]\r\nblack_void = 0\r\ntemporal_aa = dlaa\r\n";   // black_void is theirs; temporal_aa the VR default
+        Options convert = options;
+        convert.convertProfile = true;
+        s.state.openvrInstalled = true;
+        s.state.openvrSha = "installed-vr";
+        s.state.openvrOrigSha = "game-vr";
+        s.openvrCurrent = fakeDll(DllKind::Edvr, joinPath(s.game.openvrDir, L"openvr_api.dll"), "installed-vr");
+        s.openvrOrig = fakeDll(DllKind::OpenVrRuntime, joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "game-vr");
+        const Plan plan = planInstall(s, convert, flat);
+        check(!plan.blocked, "a VR to flat conversion over a shared edvr.ini plans",
+              plan.problems.empty() ? std::string() : plan.problems.front());
+        const std::string seeded = plannedText(plan, L"edvr-flat.ini");
+        expectEq(iniValue(seeded, "fix.black_void"), "0", "what the person chose in edvr.ini carries into edvr-flat.ini");
+        expectEq(iniValue(seeded, "fix.temporal_aa"), "off",
+                 "and what they never chose is the flat edition's default, not the VR one");
+        check(!touchesLive(plan, dir, L"edvr.ini"), "with edvr.ini itself untouched");
+    }
+
+    // ---- uninstall: each edition removes its own file and no other ----
+    auto installedFlat = [&](bool sharedToo, bool flatToo) {
+        Survey s = baseSurvey(dir);
+        s.haveOpenvrDir = false;
+        s.d3d11 = fakeDll(DllKind::Edvr, joinPath(dir, L"d3d11.dll"), flatOld.d3d11Sha);
+        s.descriptorPresent = true;
+        s.descriptorSha = flatOld.descriptorSha;
+        s.state.present = true;
+        s.state.profile = "flat";
+        s.state.descriptorSha = flatOld.descriptorSha;
+        s.iniPresent = sharedToo;
+        s.iniText = sharedToo ? kSharedIni : "";
+        s.flatIniPresent = flatToo;
+        s.flatIniText = flatToo ? kFlatOwnIni : "";
+        return s;
+    };
+    Options withSettings = options;
+    withSettings.removeSettings = true;
+
+    {
+        const Survey s = installedFlat(true, true);
+        const Plan kept = planUninstall(s, options);
+        check(!hasStep(kept, Action::Delete, L"edvr-flat.ini", nullptr) &&
+                  !hasStep(kept, Action::Delete, L"edvr.ini", nullptr),
+              "a flat uninstall removes neither settings file by default");
+        check(notesMention(kept, "Leaving edvr-flat.ini in place"), "and names the flat one it left");
+
+        const Plan removed = planUninstall(s, withSettings);
+        check(hasStep(removed, Action::Delete, L"edvr-flat.ini", nullptr),
+              "asked to remove settings, a flat uninstall removes edvr-flat.ini");
+        check(hasStep(removed, Action::Backup, L"edvr-flat.ini", L"edvr-flat.ini"),
+              "after a copy of it goes to the backup folder");
+        check(!touchesLive(removed, dir, L"edvr.ini"),
+              "and never touches the VR profile's edvr.ini");
+    }
+
+    {   // A flat install that never got a file of its own was reading the shared
+        // edvr.ini, which the VR profile uses too: not the flat edition's to remove.
+        const Survey s = installedFlat(true, false);
+        const Plan plan = planUninstall(s, withSettings);
+        check(!hasStep(plan, Action::Delete, L"edvr.ini", nullptr),
+              "a legacy flat install's shared edvr.ini is not removed with it");
+        check(notesMention(plan, "edvr.ini was left in place"), "and the report says why");
+        check(hasStep(plan, Action::Delete, L"d3d11.dll", nullptr), "the rest of the uninstall still happens");
+    }
+
+    {   // The VR edition's uninstall removes edvr.ini and leaves the flat file.
+        Survey s = baseSurvey(dir);
+        s.d3d11 = fakeDll(DllKind::Edvr, joinPath(dir, L"d3d11.dll"), "vr-graphics");
+        s.openvrCurrent = fakeDll(DllKind::Edvr, joinPath(s.game.openvrDir, L"openvr_api.dll"), "vr-runtime");
+        s.openvrOrig = fakeDll(DllKind::OpenVrRuntime, joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "game-vr");
+        s.state.present = true;
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        s.flatIniPresent = true;
+        s.flatIniText = kFlatOwnIni;
+        const Plan plan = planUninstall(s, withSettings);
+        check(hasStep(plan, Action::Delete, L"edvr.ini", nullptr),
+              "a VR uninstall asked to remove settings removes edvr.ini");
+        check(!touchesLive(plan, dir, L"edvr-flat.ini"),
+              "and never touches the flat profile's edvr-flat.ini");
+    }
+
+    {   // Without a record of the chain, a flat uninstall finds the mod it moved
+        // aside by reading the file the flat runtime reads.
+        Survey s = installedFlat(true, true);
+        s.iniText = kSharedIni;   // real_dll is empty here
+        s.flatIniText = "[advanced]\r\nreal_dll = d3d11_edhm.dll\r\n";
+        s.otherD3d11.push_back(fakeDll(DllKind::D3d11Provider, joinPath(dir, L"d3d11_edhm.dll"),
+                                       "edhm-sha", L"3Dmigoto"));
+        const Plan plan = planUninstall(s, options);
+        check(hasStep(plan, Action::Rename, L"d3d11_edhm.dll", L"d3d11.dll"),
+              "the mod the flat file names is put back under its own name");
+        Survey vr = baseSurvey(dir);
+        vr.d3d11 = fakeDll(DllKind::Edvr, joinPath(dir, L"d3d11.dll"), "vr-graphics");
+        vr.iniPresent = true;
+        vr.iniText = "[advanced]\r\nreal_dll = d3d11_edhm.dll\r\n";
+        vr.flatIniPresent = true;
+        vr.flatIniText = kFlatOwnIni;   // real_dll empty in the flat file
+        vr.otherD3d11.push_back(s.otherD3d11.front());
+        check(hasStep(planUninstall(vr, options), Action::Rename, L"d3d11_edhm.dll", L"d3d11.dll"),
+              "a VR uninstall reads edvr.ini for it, whatever the flat file says");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // apply, for real, in a scratch folder
 // ---------------------------------------------------------------------------
 
@@ -1043,6 +1679,19 @@ static void layOutScratchGame(const std::wstring& gameDir) {
     writeAll(joinPath(gameDir, L"EliteDangerous64.exe"), "not really the game");
     writeAll(joinPath(gameDir, L"Openvr\\win64\\openvr_api.dll"), "THE-GAMES-OWN-RUNTIME");
 }
+
+// Whether the run got as far as writing a file: a step that completed is the run's
+// own account of it, and `overwrote` is what that account must agree with.
+static bool wroteAFile(const ApplyResult& result) {
+    for (const std::string& line : result.done)
+        if (line.rfind("wrote ", 0) == 0) return true;
+    return false;
+}
+
+// The rig's stand-ins for the renames are defined with the writer's cases, further
+// down (see "stand-ins for the renames"); the case here that needs them is earlier.
+static unsigned long placeFile(const wchar_t* from, const wchar_t* to);
+static void realRenames();
 
 static void testApply(const std::wstring& scratch) {
     printf("\napplying a plan\n");
@@ -1141,10 +1790,24 @@ static void testApply(const std::wstring& scratch) {
         Options second = options;
         second.backupStamp = L"20260827-121500";
         second.repair = true;   // force the writes even though little changed
+
+        // This case is about what the result says once a file HAS been replaced,
+        // so it needs the run to get that far and to fail at the record and not
+        // before. The replaces are therefore stood in for by renames that a
+        // scanner cannot refuse (placeFile waits one out): with the real ones, a
+        // real-time scanner that had d3d11.dll open at the instant of the first
+        // replace made the classic rename fail with "access denied", the run
+        // stopped there with nothing replaced -- `overwrote` false, correctly --
+        // and this check failed 2 runs in 80. That the engine waits such a refusal
+        // out is testApplyPatience's, scripted and on the real files; this case
+        // must not depend on it.
+        replaceHooksForTest(placeFile, placeFile);
         const ApplyResult result = applyPlan(planInstall(again, second, newer), provider(false));
+        realRenames();
         check(!result.ok, "a run that cannot finish fails");
         check(fileExists(joinPath(gameDir, L"edvr_backup\\20260827-121500\\d3d11.dll")),
               "the backups it took are still there afterwards");
+        check(wroteAFile(result), "having replaced files before it did", result.error);
         check(result.overwrote, "and it admits a file had already been replaced");
     }
 
@@ -1203,11 +1866,13 @@ static void testApply(const std::wstring& scratch) {
         again.openxrLoader.kind=DllKind::Foreign;
         // The build machine may well have Elite running -- it did the day this
         // was written. It cannot be running from this scratch folder, so the
-        // survey reads it as somebody else's and plans anyway; both flags are
-        // cleared regardless, because this case is about the ini merge over a
-        // folder a previous run really wrote and nothing else.
+        // survey reads it as somebody else's and plans anyway; all three flags
+        // are cleared regardless (the third is a process list Windows would not
+        // give), because this case is about the ini merge over a folder a
+        // previous run really wrote and nothing else.
         again.gameRunningHere = false;
         again.gameRunningElsewhere = false;
+        again.gameRunStateUnknown = false;
         Options second = options;
         second.backupStamp = L"20260827-120200";
         const Plan plan = planInstall(again, second, newer);
@@ -1361,6 +2026,1785 @@ static void testMirror(const std::wstring& scratch) {
 }
 
 // ---------------------------------------------------------------------------
+// the one writer of a live file (iniedit.h: writeFileAtomic)
+// ---------------------------------------------------------------------------
+
+// The files in `dir`, by leaf name, sorted and comma-joined: what a write left
+// beside its target.
+static std::string listing(const std::wstring& dir) {
+    std::vector<std::string> names;
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(joinPath(dir, L"*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            names.push_back(toUtf8(fd.cFileName));
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    std::sort(names.begin(), names.end());
+    std::string out;
+    for (const std::string& n : names) {
+        if (!out.empty()) out += ", ";
+        out += n;
+    }
+    return out;
+}
+
+// `path` held open by a handle of this test's own, as a reader would. With
+// `shareDelete` it is how Config's read opens edvr.ini now: the POSIX-semantics
+// replace goes through under it (the classic one is refused while ANY handle is
+// open, share mode or not -- measured on Windows 11 build 26200). Without, it is
+// how that read used to open it, and how an editor holding a file mid-save does:
+// both kinds of rename are refused for as long as it is open.
+static HANDLE holdOpen(const std::wstring& path, bool shareDelete) {
+    const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | (shareDelete ? FILE_SHARE_DELETE : 0);
+    return CreateFileW(path.c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+
+// What the file behind an open handle says, from its start: the file the reader
+// opened, whatever has been done to its name since.
+static std::string readThrough(HANDLE h) {
+    std::string out;
+    LARGE_INTEGER zero{};
+    if (h == INVALID_HANDLE_VALUE || !SetFilePointerEx(h, zero, nullptr, FILE_BEGIN)) return out;
+    char buffer[256];
+    DWORD got = 0;
+    while (ReadFile(h, buffer, sizeof(buffer), &got, nullptr) && got) out.append(buffer, got);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// stand-ins for the renames (iniedit.h, replaceHooksForTest)
+//
+// A rig that counts renames must not let the real file system into the count.
+// The real-time scanner and the search indexer have every file that was just
+// written open for a few milliseconds, and the classic rename is refused with a
+// real "access denied" for as long as ANY handle to its target is open: the
+// writer tries again, as it should, and an exact total of two comes out as three.
+// That failed a full build once (2026-09-29), and it reproduces on demand with a
+// process that opens the rig's files and lets go (17 runs in 20). So the cases
+// that count script the answers, and the cases that use the real renames assert
+// what holds however many times a scanner made the writer try.
+
+// What a stand-in does when it is to put the file in place: the real move, tried
+// again until nothing else has the file open, so that a scanner looking at it in
+// the middle of a case costs a few milliseconds and not a count.
+static unsigned long placeFile(const wchar_t* from, const wchar_t* to) {
+    DWORD last = ERROR_SUCCESS;
+    for (int i = 0; i < 400; ++i) {   // two seconds at the most
+        if (MoveFileExW(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            return ERROR_SUCCESS;
+        last = GetLastError();
+        Sleep(5);
+    }
+    return last;
+}
+
+// A stand-in that answers from a script: each call takes the next reply -- 0 puts
+// the file in place, anything else is the Windows error it refuses with -- and
+// once the script is spent every call puts the file in place.
+struct Replies {
+    std::vector<unsigned long> script;
+    size_t                     next = 0;
+};
+static Replies g_posixReplies;
+static Replies g_classicReplies;
+
+static unsigned long reply(Replies& r, const wchar_t* from, const wchar_t* to) {
+    const unsigned long code = r.next < r.script.size() ? r.script[r.next++] : 0;
+    return code != 0 ? code : placeFile(from, to);
+}
+static unsigned long posixReply(const wchar_t* from, const wchar_t* to) {
+    return reply(g_posixReplies, from, to);
+}
+static unsigned long classicReply(const wchar_t* from, const wchar_t* to) {
+    return reply(g_classicReplies, from, to);
+}
+
+// Installs the two scripts, and clears whatever an earlier case left in the counts
+// or in a remembered refusal.
+static void script(const std::vector<unsigned long>& posix,
+                   const std::vector<unsigned long>& classic) {
+    g_posixReplies = Replies();
+    g_posixReplies.script = posix;
+    g_classicReplies = Replies();
+    g_classicReplies.script = classic;
+    replaceHooksForTest(posixReply, classicReply);
+}
+
+// The stand-ins off and the counts cleared: the real renames.
+static void realRenames() { replaceHooksForTest(nullptr, nullptr); }
+
+// `code`, `n` times: a rename that stays refused.
+static std::vector<unsigned long> repeated(unsigned long code, size_t n) {
+    return std::vector<unsigned long>(n, code);
+}
+
+// Two stand-ins for the real-file-system cases that need one of the two renames
+// to answer in a fixed way and the other to be real.
+static unsigned long posixUnsupported(const wchar_t*, const wchar_t*) {
+    return ERROR_INVALID_PARAMETER;
+}
+// A busy answer on every other call: a case where each replace meets one.
+static int g_calls = 0;
+static unsigned long posixEveryOtherBusy(const wchar_t* from, const wchar_t* to) {
+    return (++g_calls % 2) ? ERROR_SHARING_VIOLATION : placeFile(from, to);
+}
+
+// One write, with the numbers a scripted case is asked about. The backoff is a
+// millisecond: nothing scripted waits on a real reader.
+struct Wrote {
+    bool         ok = false;
+    int          tries = -1;
+    std::wstring why;
+};
+static Wrote writeWith(const std::wstring& target, const std::string& bytes, int retries = 5) {
+    AtomicWriteOptions options;
+    options.retries = retries;
+    options.backoffMs = 1;
+    Wrote w;
+    w.ok = writeFileAtomic(target, bytes, &w.why, options, &w.tries);
+    return w;
+}
+
+static std::string counts(int tries) {
+    return std::to_string(tries) + " tries, " + std::to_string(posixReplaceAttempts()) +
+           " POSIX calls, " + std::to_string(classicReplaceAttempts()) + " classic calls, " +
+           (posixReplaceRefused() ? "refusal remembered" : "no refusal remembered");
+}
+
+// The write's tries and the counts since the scripts went in, against what the
+// case says they must be. One line, so a failing case prints all four numbers.
+static void expectCounts(const char* what, const Wrote& w, int tries, int posix, int classic,
+                         bool refused) {
+    const bool good = w.tries == tries && posixReplaceAttempts() == posix &&
+                      classicReplaceAttempts() == classic && posixReplaceRefused() == refused;
+    check(good, what,
+          "got " + counts(w.tries) + "; wanted " + std::to_string(tries) + " tries, " +
+              std::to_string(posix) + " POSIX calls, " + std::to_string(classic) +
+              " classic calls, " + (refused ? "refusal remembered" : "no refusal remembered"));
+}
+
+static void testAtomicWrite(const std::wstring& scratch) {
+    printf("\nwriting a live file whole\n");
+
+    const std::wstring dir = joinPath(scratch, L"atomic");
+    removeTree(dir);
+    makeTree(dir);
+    const std::wstring target = joinPath(dir, L"edvr.ini");
+    realRenames();   // no stand-in, nothing remembered, nothing counted
+
+    // What follows uses the REAL renames, and so asserts what holds however many
+    // times a scanner made the writer try: the outcome, the temp file's absence,
+    // and that every attempt asked the POSIX-semantics rename first. The exact
+    // attempt counts of the retry logic are testReplaceScripts', scripted.
+
+    {   // The plain cases: the bytes given, none of the old ones, nothing left over.
+        std::wstring why;
+        int tries = -1;
+        check(writeFileAtomic(target, "first\r\n", &why, AtomicWriteOptions(), &tries),
+              "a new file is written", toUtf8(why));
+        expectEq(readAll(target), "first\r\n", "with exactly the bytes given");
+        check(tries >= 1, "by a replace that was actually made", std::to_string(tries) + " tries");
+        expectEq(listing(dir), "edvr.ini", "and nothing else is left beside it");
+
+        check(writeFileAtomic(target, "second, and longer than the first\r\n", &why),
+              "an existing file is replaced", toUtf8(why));
+        expectEq(readAll(target), "second, and longer than the first\r\n",
+                 "with the new bytes");
+        check(writeFileAtomic(target, "3\r\n", &why), "a shorter file replaces a longer one",
+              toUtf8(why));
+        expectEq(readAll(target), "3\r\n", "and leaves no tail of the longer one");
+
+        std::string bytes(2500000, 'x');   // past the one-megabyte write chunk
+        for (size_t i = 0; i < bytes.size(); i += 4093) bytes[i] = static_cast<char>('a' + i % 26);
+        check(writeFileAtomic(target, bytes, &why), "a file of several megabytes is written",
+              toUtf8(why));
+        check(readAll(target) == bytes, "and reads back byte for byte");
+
+        check(writeFileAtomic(target, std::string(), &why), "an empty file can be written",
+              toUtf8(why));
+        std::string got = "not empty";
+        check(readFileBytes(target, &got) && got.empty(), "and reads back as empty");
+        expectEq(listing(dir), "edvr.ini", "with nothing left beside it after all of that");
+    }
+
+    {   // A reader that holds the target open and does NOT share DELETE refuses
+        // the replace -- either kind of rename -- for as long as it holds on. The
+        // writer tries again as it was told to, gives up, and leaves both the
+        // original and the folder as it found them. The reader never lets go, so
+        // every attempt fails and the count of them is fixed: no scanner can
+        // change it.
+        writeAll(target, "original\r\n");
+        HANDLE reader = holdOpen(target, false);
+        check(reader != INVALID_HANDLE_VALUE, "a reader not sharing DELETE can hold the target open");
+        AtomicWriteOptions quick;
+        quick.retries = 3;
+        quick.backoffMs = 1;
+        std::wstring why;
+        int tries = 0;
+        realRenames();
+        const bool wrote = writeFileAtomic(target, "never lands\r\n", &why, quick, &tries);
+        printf("  info  reader not sharing DELETE: wrote=%d after %d tries; the message: %s\n",
+               wrote ? 1 : 0, tries, toUtf8(why).c_str());
+        check(!wrote, "a replace that reader refuses fails when the retries are spent");
+        check(tries == 4, "the first try and the three it was allowed were spent",
+              std::to_string(tries) + " tries");
+        check(!why.empty(), "and the failure says why", "no message");
+        expectEq(readAll(target), "original\r\n", "the original is exactly as it was");
+        expectEq(listing(dir), "edvr.ini", "and no temporary file is left");
+        check(posixReplaceAttempts() == tries, "every attempt asked the POSIX-semantics rename, once",
+              std::to_string(posixReplaceAttempts()) + " calls in " + std::to_string(tries) + " tries");
+        check(!posixReplaceRefused(),
+              "the refusal was of this rename, not of POSIX-semantics renames: nothing is remembered");
+        if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+        check(writeFileAtomic(target, "lands now\r\n", &why),
+              "once the reader lets go, the same write goes through", toUtf8(why));
+        expectEq(readAll(target), "lands now\r\n", "with the new bytes");
+    }
+
+    {   // A reader that holds the target open and DOES share DELETE -- which is how
+        // Config's read opens edvr.ini -- is replaced under by the POSIX-semantics
+        // rename, and goes on reading the file it opened. (The classic rename is
+        // refused here: measured with cmd's move /Y on Windows 11 build 26200,
+        // which is why this rename exists.)
+        //
+        // The reader never lets go, so a write that lands has landed under it,
+        // and no number of retries could have done that for a rename the reader
+        // refuses. How many attempts it took is therefore not what this asserts (a
+        // scanner that has the temp file or the target open for a moment costs
+        // one, and did fail a build); that every attempt asked the POSIX-semantics
+        // rename, and that none needed the classic one, is.
+        writeAll(target, "held open\r\n");
+        HANDLE reader = holdOpen(target, true);
+        check(reader != INVALID_HANDLE_VALUE, "a reader sharing DELETE can hold the target open");
+        AtomicWriteOptions patient;
+        patient.retries = 100;   // half a second, for a scanner; the reader itself costs none
+        patient.backoffMs = 5;
+        std::wstring why;
+        int tries = 0;
+        realRenames();
+        const bool wrote =
+            writeFileAtomic(target, "replaced under the reader\r\n", &why, patient, &tries);
+        printf("  info  reader sharing DELETE: wrote=%d after %d tries; POSIX calls %d, classic %d; "
+               "the message: %s\n",
+               wrote ? 1 : 0, tries, posixReplaceAttempts(), classicReplaceAttempts(),
+               toUtf8(why).c_str());
+        check(wrote, "the replace succeeds while a reader that shares DELETE holds the file",
+              toUtf8(why));
+        check(posixReplaceAttempts() == tries, "every attempt asked the POSIX-semantics rename, once",
+              std::to_string(posixReplaceAttempts()) + " calls in " + std::to_string(tries) + " tries");
+        check(classicReplaceAttempts() == 0,
+              "and none fell back to the classic rename, which cannot replace under this reader",
+              std::to_string(classicReplaceAttempts()) + " classic calls");
+        check(!posixReplaceRefused(),
+              "which this volume took: nothing was remembered as unsupported");
+        expectEq(readAll(target), "replaced under the reader\r\n", "and the path holds the new bytes");
+        expectEq(readThrough(reader), "held open\r\n", "while the reader still sees the file it opened");
+        if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+        expectEq(listing(dir), "edvr.ini", "with nothing left beside it");
+    }
+
+    {   // The default policy is the one that was asked for: five tries after the
+        // first, and it is what a caller who says nothing gets.
+        const AtomicWriteOptions defaults{};
+        check(defaults.retries == 5 && defaults.backoffMs == 20,
+              "the default is five retries, twenty milliseconds apart");
+    }
+
+    {   // A read-only target is somebody's decision, not a transient: it is
+        // refused, the retries are spent on it (access denied is one of the
+        // codes that can pass), and nothing changes. It never reaches the
+        // POSIX-semantics rename: the classic one is what has been measured to
+        // refuse it, and the attribute is not something to test that one on.
+        // Every attempt is refused whatever a scanner does, so the counts are
+        // fixed.
+        writeAll(target, "protected\r\n");
+        SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_READONLY);
+        AtomicWriteOptions quick;
+        quick.retries = 2;
+        quick.backoffMs = 1;
+        std::wstring why;
+        int tries = 0;
+        realRenames();
+        const bool wrote = writeFileAtomic(target, "overwritten\r\n", &why, quick, &tries);
+        check(!wrote, "a read-only file is not replaced");
+        check(tries == 3, "the retries were spent on it", std::to_string(tries) + " tries");
+        check(posixReplaceAttempts() == 0,
+              "without the POSIX-semantics rename having been asked to",
+              std::to_string(posixReplaceAttempts()) + " calls");
+        check(classicReplaceAttempts() == tries, "every attempt going straight to the classic one",
+              std::to_string(classicReplaceAttempts()) + " calls in " + std::to_string(tries) + " tries");
+        expectEq(readAll(target), "protected\r\n", "the file is untouched");
+        expectEq(listing(dir), "edvr.ini", "and no temporary file is left");
+        SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL);
+    }
+
+    {   // A reader that does not share DELETE and lets go while the retries are
+        // running: the write lands. This is what the retry is for.
+        writeAll(target, "before\r\n");
+        HANDLE reader = holdOpen(target, false);
+        std::thread letGo([reader] {
+            Sleep(60);
+            if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+        });
+        AtomicWriteOptions patient;
+        patient.retries = 200;   // up to a second: this is not about the default policy
+        patient.backoffMs = 5;
+        std::wstring why;
+        int tries = 0;
+        realRenames();
+        const bool wrote = writeFileAtomic(target, "after\r\n", &why, patient, &tries);
+        letGo.join();
+        check(wrote, "a reader that lets go while the retries run does not fail the write",
+              toUtf8(why));
+        expectEq(readAll(target), "after\r\n", "and the write landed");
+        check(posixReplaceAttempts() == tries, "every attempt asking the POSIX-semantics rename, once",
+              std::to_string(posixReplaceAttempts()) + " calls in " + std::to_string(tries) + " tries");
+        expectEq(listing(dir), "edvr.ini", "with nothing left beside it");
+        printf("  info  it landed on try %d\n", tries);
+    }
+
+    {   // Where the POSIX-semantics rename is refused as unsupported the classic
+        // rename does the replace, for real. Only that rename's own answer is
+        // stood in for (the refusal); the replace itself is the operating
+        // system's.
+        writeAll(target, "before the fallback\r\n");
+        AtomicWriteOptions patient;
+        patient.retries = 100;
+        patient.backoffMs = 5;
+        std::wstring why;
+        int tries = 0;
+        replaceHooksForTest(posixUnsupported, nullptr);
+        check(writeFileAtomic(target, "by the classic rename\r\n", &why, patient, &tries),
+              "a write whose POSIX-semantics rename is refused as unsupported still lands",
+              toUtf8(why));
+        expectEq(readAll(target), "by the classic rename\r\n", "with the new bytes");
+        check(posixReplaceAttempts() == 1 && posixReplaceRefused(),
+              "the POSIX-semantics rename was asked once, and the refusal is remembered",
+              counts(tries));
+        check(classicReplaceAttempts() == tries, "every attempt being the classic rename's",
+              counts(tries));
+
+        int again = 0;
+        check(writeFileAtomic(target, "and again\r\n", &why, patient, &again),
+              "the next write lands too", toUtf8(why));
+        expectEq(readAll(target), "and again\r\n", "with its bytes");
+        check(posixReplaceAttempts() == 1,
+              "without the POSIX-semantics rename being asked again: a refusal is not retried on every write",
+              std::to_string(posixReplaceAttempts()) + " calls");
+        check(classicReplaceAttempts() == tries + again, "the classic one having done both",
+              counts(again));
+
+        // The classic rename is what runs now, so a reader that shares DELETE
+        // holds it off, as it always did. Where an operating system has taught
+        // MoveFileExW POSIX semantics that is not so, and either answer is fine;
+        // what matters is that the POSIX-semantics call is not made.
+        HANDLE reader = holdOpen(target, true);
+        AtomicWriteOptions quick;
+        quick.retries = 3;
+        quick.backoffMs = 1;
+        int heldTries = 0;
+        const bool wrote = writeFileAtomic(target, "under the reader\r\n", &why, quick, &heldTries);
+        printf("  info  classic rename under a reader sharing DELETE: wrote=%d after %d tries\n",
+               wrote ? 1 : 0, heldTries);
+        if (!wrote) {
+            check(heldTries == 4, "the classic rename spent the first try and the three it was allowed",
+                  std::to_string(heldTries) + " tries");
+            expectEq(readAll(target), "and again\r\n", "and left the file as it was");
+        }
+        check(posixReplaceAttempts() == 1, "and the POSIX-semantics rename was still not asked for");
+        if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+        expectEq(listing(dir), "edvr.ini", "with no temporary file left");
+        realRenames();
+    }
+
+    {   // A folder that is not there is not a folder to create, and not a failure
+        // to retry: it fails without reaching the replace.
+        const std::wstring missing = joinPath(joinPath(dir, L"no-such-folder"), L"edvr.ini");
+        std::wstring why;
+        int tries = -1;
+        check(!writeFileAtomic(missing, "x", &why, AtomicWriteOptions(), &tries),
+              "a target in a folder that is not there fails");
+        check(tries == 0, "before it reaches the replace", std::to_string(tries) + " tries");
+        check(!why.empty(), "and says why", "no message");
+        check(!dirExists(joinPath(dir, L"no-such-folder")), "and does not make the folder");
+    }
+    realRenames();
+}
+
+// ---------------------------------------------------------------------------
+// the retry logic, scripted
+//
+// Every case here stands in for BOTH renames (replaceHooksForTest), so the real
+// file system is in none of the counts. Each states exactly what the writer must
+// do -- how many tries, how many times each rename is asked, whether a refusal is
+// remembered -- and each is a case a mutation of the writer must break: retrying
+// on any error, skipping the POSIX-semantics rename, not asking it again on a
+// retry, remembering what it should not, forgetting what it should not.
+
+static void testReplaceScripts(const std::wstring& scratch) {
+    printf("\nthe writer's retries, scripted\n");
+
+    const std::wstring dir = joinPath(scratch, L"scripted");
+    removeTree(dir);
+    makeTree(dir);
+    const std::wstring target = joinPath(dir, L"edvr.ini");
+    const unsigned long kBadPath = ERROR_BAD_PATHNAME;   // an answer nobody recognises
+
+    {   // A clean write asks the POSIX-semantics rename once and never the classic one.
+        script({}, {});
+        writeAll(target, "before\r\n");
+        const Wrote w = writeWith(target, "clean\r\n");
+        check(w.ok, "a clean write lands", toUtf8(w.why));
+        expectCounts("and asked the POSIX-semantics rename once and the classic one never", w, 1, 1,
+                     0, false);
+        expectEq(readAll(target), "clean\r\n", "with the new bytes");
+        expectEq(listing(dir), "edvr.ini", "and no temporary file is left");
+    }
+
+    // Every answer that means "this OS or volume does not do POSIX-semantics
+    // renames": the classic rename does that attempt, the refusal is remembered,
+    // and the next write does not ask again.
+    for (const unsigned long code : {ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
+                                     ERROR_INVALID_FUNCTION, ERROR_CALL_NOT_IMPLEMENTED,
+                                     ERROR_INVALID_LEVEL}) {
+        const std::string which = "error " + std::to_string(code) + ": ";
+        script({code}, {});
+        writeAll(target, "before\r\n");
+        const Wrote first = writeWith(target, "by the classic rename\r\n");
+        check(first.ok, (which + "the write lands").c_str(), toUtf8(first.why));
+        expectCounts((which + "refused as unsupported: the classic rename does that attempt, "
+                              "and the refusal is remembered").c_str(),
+                     first, 1, 1, 1, true);
+        expectEq(readAll(target), "by the classic rename\r\n", "with the new bytes");
+        const Wrote second = writeWith(target, "and again\r\n");
+        check(second.ok, "the next write lands", toUtf8(second.why));
+        expectCounts((which + "and the next write does not ask the POSIX-semantics rename again")
+                         .c_str(),
+                     second, 1, 1, 2, true);
+    }
+
+    {   // Refused as unsupported, and then the classic rename is busy once: the
+        // retry goes straight to the classic rename.
+        script({ERROR_INVALID_PARAMETER}, {ERROR_ACCESS_DENIED});
+        writeAll(target, "before\r\n");
+        const Wrote w = writeWith(target, "after one busy answer\r\n");
+        check(w.ok, "a write whose classic rename is busy once lands", toUtf8(w.why));
+        expectCounts("on the second try, without asking the POSIX-semantics rename again", w, 2, 1, 2,
+                     true);
+        expectEq(readAll(target), "after one busy answer\r\n", "with the new bytes");
+    }
+
+    // The documented transient answers, from the POSIX-semantics rename: exactly
+    // one retry, through that same rename, and never the classic one.
+    for (const unsigned long code :
+         {ERROR_SHARING_VIOLATION, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION}) {
+        const std::string which = "error " + std::to_string(code) + ": ";
+        script({code}, {});
+        writeAll(target, "before\r\n");
+        const Wrote w = writeWith(target, "after one busy answer\r\n");
+        check(w.ok, (which + "a busy answer does not fail the write").c_str(), toUtf8(w.why));
+        expectCounts((which + "exactly one retry, through the POSIX-semantics rename, and no "
+                              "classic rename at all").c_str(),
+                     w, 2, 2, 0, false);
+        expectEq(readAll(target), "after one busy answer\r\n", "with the new bytes");
+        expectEq(listing(dir), "edvr.ini", "and no temporary file is left");
+    }
+
+    {   // An answer the writer does not recognise: the classic rename decides that
+        // attempt, and the next write asks again -- it is not a refusal.
+        script({kBadPath, kBadPath}, {});
+        writeAll(target, "before\r\n");
+        const Wrote first = writeWith(target, "by the classic rename\r\n");
+        check(first.ok, "a failure the writer does not recognise still lets the write land",
+              toUtf8(first.why));
+        expectCounts("in one attempt, and not remembered as a refusal", first, 1, 1, 1, false);
+        const Wrote second = writeWith(target, "and again\r\n");
+        check(second.ok, "the next write lands", toUtf8(second.why));
+        expectCounts("having asked the POSIX-semantics rename each time", second, 1, 2, 2, false);
+        expectEq(readAll(target), "and again\r\n", "with the new bytes");
+    }
+
+    {   // The same answer, and the classic rename busy once: the retry asks the
+        // POSIX-semantics rename AGAIN, because nothing was remembered.
+        script({kBadPath, kBadPath}, {ERROR_ACCESS_DENIED});
+        writeAll(target, "before\r\n");
+        const Wrote w = writeWith(target, "after one busy answer\r\n");
+        check(w.ok, "an unrecognised answer and a busy classic rename still land", toUtf8(w.why));
+        expectCounts("the retry asking the POSIX-semantics rename again", w, 2, 2, 2, false);
+        expectEq(readAll(target), "after one busy answer\r\n", "with the new bytes");
+    }
+
+    // Only the documented transient answers are retried. Every other answer from
+    // the classic rename -- there being nothing to replace, no such folder, a full
+    // disk, a file mapped into a process -- fails the write on the spot.
+    for (const unsigned long code : {ERROR_SHARING_VIOLATION, ERROR_ACCESS_DENIED,
+                                     ERROR_LOCK_VIOLATION}) {
+        const std::string which = "classic error " + std::to_string(code) + ": ";
+        script({ERROR_INVALID_PARAMETER}, {code});
+        writeAll(target, "before\r\n");
+        const Wrote w = writeWith(target, "after one busy answer\r\n");
+        check(w.ok, (which + "a transient answer is retried and the write lands").c_str(),
+              toUtf8(w.why));
+        expectCounts((which + "exactly one retry").c_str(), w, 2, 1, 2, true);
+    }
+    for (const unsigned long code : {ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_DISK_FULL,
+                                     ERROR_USER_MAPPED_FILE, ERROR_INVALID_PARAMETER,
+                                     ERROR_NOT_SUPPORTED}) {
+        const std::string which = "classic error " + std::to_string(code) + ": ";
+        script({ERROR_INVALID_PARAMETER}, {code});
+        writeAll(target, "before\r\n");
+        const Wrote w = writeWith(target, "never lands\r\n");
+        check(!w.ok, (which + "an answer that does not pass fails the write").c_str());
+        expectCounts((which + "at once: one try, no retry").c_str(), w, 1, 1, 1, true);
+        check(!w.why.empty(), "and says why", "no message");
+        expectEq(readAll(target), "before\r\n", "the original is exactly as it was");
+        expectEq(listing(dir), "edvr.ini", "and no temporary file is left");
+    }
+
+    {   // The POSIX-semantics rename refused for a reason that passes, every time:
+        // the retries are spent on it, and the classic rename is never asked.
+        script(repeated(ERROR_SHARING_VIOLATION, 4), {});
+        writeAll(target, "before\r\n");
+        const Wrote w = writeWith(target, "never lands\r\n", 3);
+        check(!w.ok, "a POSIX-semantics rename that stays busy fails the write");
+        expectCounts("after the first try and the three it was allowed, never asking the classic "
+                     "rename", w, 4, 4, 0, false);
+        expectEq(readAll(target), "before\r\n", "the original is exactly as it was");
+        expectEq(listing(dir), "edvr.ini", "and no temporary file is left");
+    }
+
+    {   // The classic rename refused for a reason that passes, every time.
+        script({ERROR_INVALID_PARAMETER}, repeated(ERROR_ACCESS_DENIED, 4));
+        writeAll(target, "before\r\n");
+        const Wrote w = writeWith(target, "never lands\r\n", 3);
+        check(!w.ok, "a classic rename that stays busy fails the write");
+        expectCounts("after the first try and the three it was allowed, the POSIX-semantics rename "
+                     "asked only once", w, 4, 1, 4, true);
+        expectEq(readAll(target), "before\r\n", "the original is exactly as it was");
+        expectEq(listing(dir), "edvr.ini", "and no temporary file is left");
+    }
+
+    {   // A read-only target never reaches the POSIX-semantics rename, whatever it
+        // would have said.
+        script({}, repeated(ERROR_ACCESS_DENIED, 3));
+        writeAll(target, "protected\r\n");
+        SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_READONLY);
+        const Wrote w = writeWith(target, "overwritten\r\n", 2);
+        check(!w.ok, "a read-only file is not replaced");
+        expectCounts("every attempt going straight to the classic rename", w, 3, 0, 3, false);
+        expectEq(readAll(target), "protected\r\n", "the file is untouched");
+        SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL);
+    }
+
+    {   // The replace on its own, for a caller that staged its file (the apply
+        // engine): it renames and nothing else, reports what the writer reports --
+        // the tries, and the Windows error of the last refusal -- and on failure
+        // leaves the staged file where it was for its owner to delete.
+        const std::wstring staged = joinPath(dir, L"staged.tmp");
+        AtomicWriteOptions quick;
+        quick.retries = 3;
+        quick.backoffMs = 1;
+        int tries = -1;
+        unsigned long code = 99;
+
+        writeAll(target, "before\r\n");
+        writeAll(staged, "staged\r\n");
+        script({ERROR_ACCESS_DENIED}, {});
+        check(replaceFileAtomic(staged, target, quick, &tries, &code),
+              "a staged file is put in place over the target after one busy answer");
+        check(tries == 2 && code == ERROR_SUCCESS, "having made two tries, and reporting no error",
+              std::to_string(tries) + " tries, error " + std::to_string(code));
+        expectCounts("asking the POSIX-semantics rename twice and the classic one never",
+                     Wrote{true, tries, {}}, 2, 2, 0, false);
+        expectEq(readAll(target), "staged\r\n", "the target holds the staged bytes");
+        check(!fileExists(staged), "and the staged file is gone: it was renamed, not copied");
+
+        writeAll(target, "before\r\n");
+        writeAll(staged, "staged\r\n");
+        script(repeated(ERROR_SHARING_VIOLATION, 4), {});
+        tries = -1;
+        code = ERROR_SUCCESS;
+        check(!replaceFileAtomic(staged, target, quick, &tries, &code),
+              "a target that stays busy is not replaced");
+        check(tries == 4 && code == ERROR_SHARING_VIOLATION,
+              "after the first try and the three it was allowed, reporting the last error",
+              std::to_string(tries) + " tries, error " + std::to_string(code));
+        expectEq(readAll(target), "before\r\n", "the target is exactly as it was");
+        expectEq(readAll(staged), "staged\r\n", "and the staged file is where it was");
+
+        script({ERROR_INVALID_PARAMETER}, {ERROR_FILE_NOT_FOUND});
+        tries = -1;
+        code = ERROR_SUCCESS;
+        check(!replaceFileAtomic(staged, target, quick, &tries, &code),
+              "an answer that is not a hold fails at once");
+        check(tries == 1 && code == ERROR_FILE_NOT_FOUND,
+              "in one try, reporting the classic rename's error",
+              std::to_string(tries) + " tries, error " + std::to_string(code));
+
+        script({}, {});
+        check(replaceFileAtomic(staged, target, quick), "the tries and the error are optional");
+        expectEq(readAll(target), "staged\r\n", "and the file still lands");
+        expectEq(listing(dir), "edvr.ini", "with nothing left beside it");
+    }
+
+    {   // A rotation of the mirror's generations under retries: every replace it
+        // makes meets one busy answer first, and the generations are still right.
+        // Nine replaces -- 1 for the first copy, 2 for the second, 3 for each of
+        // the third and the fourth -- each asked twice.
+        const std::wstring gdir = joinPath(scratch, L"scripted-generations");
+        removeTree(gdir);
+        makeTree(gdir);
+        const std::wstring name = L"edvr.ini";
+        std::wstring why;
+        g_calls = 0;
+        replaceHooksForTest(posixEveryOtherBusy, nullptr);
+        check(writeGenerations(gdir, name, "A\r\n", true, &why), "a first copy is written",
+              toUtf8(why));
+        check(writeGenerations(gdir, name, "B\r\n", true, &why), "a second copy rotates in",
+              toUtf8(why));
+        check(writeGenerations(gdir, name, "C\r\n", true, &why), "a third copy rotates in",
+              toUtf8(why));
+        check(writeGenerations(gdir, name, "D\r\n", true, &why), "a fourth copy rotates in",
+              toUtf8(why));
+        check(posixReplaceAttempts() == 18 && classicReplaceAttempts() == 0,
+              "each of the nine replaces asked the POSIX-semantics rename twice, the classic one never",
+              std::to_string(posixReplaceAttempts()) + " POSIX calls, " +
+                  std::to_string(classicReplaceAttempts()) + " classic calls");
+        expectEq(readAll(generationPath(gdir, name, 0)), "D\r\n", "the newest is the fourth");
+        expectEq(readAll(generationPath(gdir, name, 1)), "C\r\n", ".1 is the third");
+        expectEq(readAll(generationPath(gdir, name, 2)), "B\r\n", ".2 is the second");
+        check(!fileExists(generationPath(gdir, name, 3)), "and the first is dropped");
+        expectEq(listing(gdir), "edvr.ini, edvr.ini.1, edvr.ini.2", "with no temporary file left");
+    }
+    realRenames();
+}
+
+// ---------------------------------------------------------------------------
+// the apply engine's replaces (apply.h: replacePatienceForTest)
+//
+// The engine writes a DLL by staging it beside the target and replacing the
+// target, and it moves the game's runtime aside with a rename over whatever is at
+// the new name. Both are iniedit's replace, so a file that something else has open
+// for a moment is waited out and does not fail the run. The classic rename is
+// refused with "access denied" while ANY handle to its target is open, and the
+// engine used to give up on the first refusal, roll the run back and report that
+// it could not finish: under a stand-in for a real-time scanner it lost the first
+// replace of the pair in 2 runs in 80 (2026-09-29), and a person's antivirus
+// holds a file it has just looked at in the same way.
+//
+// The scripted cases stand in for BOTH renames, so the real file system is in none
+// of their counts, and each is one that a mutation of the engine must break:
+// replacing by the classic rename, not waiting, waiting on an answer that is not a
+// hold, reporting the wrong file, forgetting a file that was replaced. The two at
+// the end use the real renames on the real files and assert what holds however
+// often a scanner made the engine try.
+
+// The plan a repair makes of the pair: the graphics DLL and the runtime, each
+// written over the one that is there.
+static Plan pairPlan(const std::wstring& dir) {
+    Plan plan;
+    plan.backupDir = joinPath(dir, L"edvr_backup");
+    Step graphics;
+    graphics.action = Action::WritePayload;
+    graphics.item = "d3d11";
+    graphics.to = joinPath(dir, L"d3d11.dll");
+    plan.steps.push_back(graphics);
+    Step runtime;
+    runtime.action = Action::WritePayload;
+    runtime.item = "openvr";
+    runtime.to = joinPath(dir, L"openvr_api.dll");
+    plan.steps.push_back(runtime);
+    return plan;
+}
+
+// An install's first move: the game's runtime renamed aside, and, with `thenOurs`,
+// ours written where it was.
+static Plan asidePlan(const std::wstring& dir, bool thenOurs) {
+    Plan plan;
+    plan.backupDir = joinPath(dir, L"edvr_backup");
+    Step aside;
+    aside.action = Action::Rename;
+    aside.from = joinPath(dir, L"openvr_api.dll");
+    aside.to = joinPath(dir, L"openvr_api_orig.dll");
+    aside.required = true;
+    plan.steps.push_back(aside);
+    if (thenOurs) {
+        Step ours;
+        ours.action = Action::WritePayload;
+        ours.item = "openvr";
+        ours.to = joinPath(dir, L"openvr_api.dll");
+        plan.steps.push_back(ours);
+    }
+    return plan;
+}
+
+// An uninstall's move: the game's runtime renamed back over ours, which is a file
+// that is there.
+static Plan restorePlan(const std::wstring& dir) {
+    Plan plan;
+    plan.backupDir = joinPath(dir, L"edvr_backup");
+    Step back;
+    back.action = Action::Rename;
+    back.from = joinPath(dir, L"openvr_api_orig.dll");
+    back.to = joinPath(dir, L"openvr_api.dll");
+    back.required = true;
+    plan.steps.push_back(back);
+    return plan;
+}
+
+// The pair an install would replace; `withOrig` adds the game's own runtime under
+// the name it is kept by, as it stands when there is something to put back.
+static void layOutPair(const std::wstring& dir, bool withOrig = false) {
+    removeTree(dir);
+    makeTree(dir);
+    writeAll(joinPath(dir, L"d3d11.dll"), "OLD-GRAPHICS");
+    writeAll(joinPath(dir, L"openvr_api.dll"), "OLD-RUNTIME");
+    if (withOrig) writeAll(joinPath(dir, L"openvr_api_orig.dll"), "THE-GAMES-OWN-RUNTIME");
+}
+
+// How often each rename was asked since the scripts went in, against what the case
+// says. One line, so a failing case prints all three numbers.
+static void expectAttempts(const std::string& what, int posix, int classic, bool refused) {
+    const auto shown = [](int p, int c, bool r) {
+        return std::to_string(p) + " POSIX calls, " + std::to_string(c) + " classic calls, " +
+               (r ? "refusal remembered" : "no refusal remembered");
+    };
+    check(posixReplaceAttempts() == posix && classicReplaceAttempts() == classic &&
+              posixReplaceRefused() == refused,
+          what.c_str(),
+          "got " + shown(posixReplaceAttempts(), classicReplaceAttempts(), posixReplaceRefused()) +
+              "; wanted " + shown(posix, classic, refused));
+}
+
+static bool mentions(const std::string& text, const char* needle) {
+    return text.find(needle) != std::string::npos;
+}
+
+// The operating system's words for `code`, which is what the engine's failure says
+// when it says why. Asked of the same API in the same way, so that a language other
+// than English changes both sides of the comparison and not the answer.
+static std::string windowsText(unsigned long code) {
+    char* message = nullptr;
+    const DWORD n = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), reinterpret_cast<char*>(&message),
+        0, nullptr);
+    std::string out;
+    if (n && message) out.assign(message, n);
+    if (message) LocalFree(message);
+    while (!out.empty() && (out.back() == '\r' || out.back() == '\n' || out.back() == ' '))
+        out.pop_back();
+    return out;
+}
+
+static void testApplyPatience(const std::wstring& scratch) {
+    printf("\nthe apply engine's replaces\n");
+
+    const std::wstring dir = joinPath(scratch, L"apply-patience");
+    const std::wstring d3d11 = joinPath(dir, L"d3d11.dll");
+    const std::wstring runtime = joinPath(dir, L"openvr_api.dll");
+    const std::wstring orig = joinPath(dir, L"openvr_api_orig.dll");
+    const std::string newGraphics = "TEST-D3D11-PAYLOAD";
+    const std::string newRuntime = "TEST-OPENVR-PAYLOAD";
+    const std::string pairListing = "d3d11.dll, openvr_api.dll";
+
+    // A refusal that is never lifted must not cost the rig two seconds a case:
+    // three tries after the first, a millisecond apart. (The product's own numbers
+    // are what the two real-file cases at the end run with.)
+    replacePatienceForTest(3, 1);
+
+    {   // Nothing in the way: each of the two writes asks the POSIX-semantics rename
+        // once, and the classic one is never asked.
+        layOutPair(dir);
+        script({}, {});
+        const ApplyResult r = applyPlan(pairPlan(dir), provider(false));
+        check(r.ok, "a pair that nothing holds is replaced", r.error);
+        expectEq(readAll(d3d11), newGraphics, "with the new graphics DLL");
+        expectEq(readAll(runtime), newRuntime, "and the new runtime");
+        expectAttempts("each write asked the POSIX-semantics rename once and the classic one never",
+                       2, 0, false);
+        expectEq(listing(dir), pairListing, "and no staged file is left beside them");
+    }
+
+    // The answers that mean "held for a moment", on the first replace: it is asked
+    // again, through the same rename, and the run lands. "Access denied" is the
+    // one the real rename gives under a scanner.
+    for (const unsigned long code :
+         {ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION}) {
+        const std::string which = "error " + std::to_string(code) + ": ";
+        layOutPair(dir);
+        script({code}, {});
+        const ApplyResult r = applyPlan(pairPlan(dir), provider(false));
+        check(r.ok, (which + "a file that is busy once does not fail the run").c_str(), r.error);
+        expectAttempts(which + "one retry of the first replace, through the POSIX-semantics "
+                               "rename, and no classic rename at all",
+                       3, 0, false);
+        expectEq(readAll(d3d11), newGraphics, "the new graphics DLL is in place");
+        expectEq(readAll(runtime), newRuntime, "and so is the new runtime");
+        expectEq(listing(dir), pairListing, "with no staged file left");
+    }
+
+    {   // Where the volume does not do POSIX-semantics renames the classic rename
+        // does them, and its busy answers are waited out in the same way.
+        layOutPair(dir);
+        script({ERROR_INVALID_PARAMETER}, {ERROR_ACCESS_DENIED});
+        const ApplyResult r = applyPlan(pairPlan(dir), provider(false));
+        check(r.ok, "without POSIX-semantics renames a busy classic rename is waited out", r.error);
+        expectAttempts("the POSIX-semantics rename asked once and remembered as unsupported; the "
+                       "classic one refused once, then twice more for the two writes",
+                       1, 3, true);
+        expectEq(readAll(d3d11), newGraphics, "the new graphics DLL is in place");
+        expectEq(readAll(runtime), newRuntime, "and so is the new runtime");
+    }
+
+    {   // The first file held for good: three tries after the first are all the rig
+        // allows. The run fails, names the file, is rolled back, never gets to the
+        // second, and does not claim a file was replaced -- because none was.
+        layOutPair(dir);
+        script(repeated(ERROR_ACCESS_DENIED, 8), {});
+        const ApplyResult r = applyPlan(pairPlan(dir), provider(false));
+        check(!r.ok, "a file that stays held fails the run");
+        check(r.rolledBack, "which is rolled back", r.error);
+        check(!r.overwrote, "and does not claim that a file had been replaced: none had");
+        check(mentions(r.error, "d3d11.dll"), "the failure names the file", r.error);
+        check(mentions(r.error, windowsText(ERROR_ACCESS_DENIED).c_str()),
+              "and says what the operating system said", r.error);
+        expectAttempts("the first try and the three it was allowed, and the second file never reached",
+                       4, 0, false);
+        expectEq(readAll(d3d11), "OLD-GRAPHICS", "the graphics DLL is exactly as it was");
+        expectEq(readAll(runtime), "OLD-RUNTIME", "and so is the runtime");
+        expectEq(listing(dir), pairListing, "with no staged file left");
+    }
+
+    {   // An answer that is not a hold -- the disk is full -- fails the run at once:
+        // waiting on it would only be slow.
+        layOutPair(dir);
+        script({ERROR_DISK_FULL}, {ERROR_DISK_FULL});
+        const ApplyResult r = applyPlan(pairPlan(dir), provider(false));
+        check(!r.ok, "a replace refused for a reason that does not pass fails the run");
+        check(r.rolledBack, "which is rolled back", r.error);
+        check(!r.overwrote, "and does not claim that a file had been replaced");
+        check(mentions(r.error, windowsText(ERROR_DISK_FULL).c_str()),
+              "saying what the operating system said", r.error);
+        expectAttempts("after one try of each rename, without waiting", 1, 1, false);
+        expectEq(readAll(d3d11), "OLD-GRAPHICS", "the graphics DLL is exactly as it was");
+        expectEq(listing(dir), pairListing, "with no staged file left");
+    }
+
+    {   // The second file held for good, after the first was replaced: the first is
+        // put back, and the result says a file had already been replaced.
+        layOutPair(dir);
+        script({0, ERROR_SHARING_VIOLATION, ERROR_SHARING_VIOLATION, ERROR_SHARING_VIOLATION,
+                ERROR_SHARING_VIOLATION},
+               {});
+        const ApplyResult r = applyPlan(pairPlan(dir), provider(false));
+        check(!r.ok, "a second file that stays held fails the run");
+        check(r.rolledBack, "which is rolled back", r.error);
+        check(r.overwrote, "and admits that the first file had already been replaced");
+        check(wroteAFile(r), "which the steps it completed agree with");
+        check(mentions(r.error, "openvr_api.dll"), "the failure names the second file", r.error);
+        check(mentions(r.error, windowsText(ERROR_SHARING_VIOLATION).c_str()),
+              "and says what the operating system said", r.error);
+        expectAttempts("one try for the first file, and the first and the three allowed for the second",
+                       5, 0, false);
+        expectEq(readAll(d3d11), "OLD-GRAPHICS", "the graphics DLL is back to what it was");
+        expectEq(readAll(runtime), "OLD-RUNTIME", "and the runtime never left");
+        expectEq(listing(dir), pairListing, "with no staged file left");
+    }
+
+    {   // The rename that moves the game's runtime aside waits in the same way.
+        layOutPair(dir);
+        script({ERROR_ACCESS_DENIED}, {});
+        const ApplyResult r = applyPlan(asidePlan(dir, true), provider(false));
+        check(r.ok, "a rename that is busy once does not fail the run", r.error);
+        expectAttempts("one retry of the rename, and one try for the write after it", 3, 0, false);
+        expectEq(readAll(orig), "OLD-RUNTIME", "the game's runtime is under its new name");
+        expectEq(readAll(runtime), newRuntime, "and ours is in its place");
+        expectEq(listing(dir), "d3d11.dll, openvr_api.dll, openvr_api_orig.dll",
+                 "with no staged file left");
+    }
+
+    {   // The same rename refused for good, and nothing after it: nothing moved, and
+        // nothing is claimed.
+        layOutPair(dir);
+        script(repeated(ERROR_SHARING_VIOLATION, 8), {});
+        const ApplyResult r = applyPlan(asidePlan(dir, false), provider(false));
+        check(!r.ok, "a rename that stays refused fails the run");
+        check(r.rolledBack, "which is rolled back", r.error);
+        check(!r.overwrote, "and does not claim that a file had been replaced");
+        check(mentions(r.error, "openvr_api.dll"), "the failure names the file it could not move",
+              r.error);
+        check(mentions(r.error, windowsText(ERROR_SHARING_VIOLATION).c_str()),
+              "and says what the operating system said", r.error);
+        expectAttempts("the first try and the three it was allowed", 4, 0, false);
+        expectEq(readAll(runtime), "OLD-RUNTIME", "the game's runtime is where it was");
+        check(!fileExists(orig), "with nothing under the new name");
+    }
+
+    {   // An uninstall's rename puts the game's runtime back over ours, which is a
+        // file that is there: a replace, and it waits in the same way.
+        layOutPair(dir, true);
+        script({ERROR_ACCESS_DENIED}, {});
+        const ApplyResult r = applyPlan(restorePlan(dir), provider(false));
+        check(r.ok, "a rename over an existing file that is busy once does not fail the run",
+              r.error);
+        expectAttempts("one retry, through the POSIX-semantics rename", 2, 0, false);
+        expectEq(readAll(runtime), "THE-GAMES-OWN-RUNTIME", "the game's runtime is back");
+        check(!fileExists(orig), "and is no longer under the other name");
+    }
+
+    // The product's own patience from here on, for the real files.
+    replacePatienceForTest(-1, 0);
+
+    {   // A reader that shares DELETE has the graphics DLL open for the whole run,
+        // as a real-time scanner or the indexer does. The classic rename is refused
+        // for as long as it holds on (measured: Windows 11 build 26200), so the
+        // engine used to fail here at once; the POSIX-semantics rename goes through
+        // under it, and the reader goes on seeing the file it opened. The reader
+        // never lets go, so this asserts the outcome and not how often the engine
+        // tried.
+        layOutPair(dir);
+        realRenames();
+        HANDLE reader = holdOpen(d3d11, true);
+        check(reader != INVALID_HANDLE_VALUE, "a reader sharing DELETE can hold the graphics DLL open");
+        const ApplyResult r = applyPlan(pairPlan(dir), provider(false));
+        check(r.ok, "the pair is replaced under a reader that shares DELETE", r.error);
+        expectEq(readAll(d3d11), newGraphics, "the path holds the new graphics DLL");
+        expectEq(readThrough(reader), "OLD-GRAPHICS", "while the reader still sees the file it opened");
+        expectEq(readAll(runtime), newRuntime, "and the runtime is replaced");
+        check(!posixReplaceRefused(), "which this volume took: nothing was remembered as unsupported");
+        if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+        expectEq(listing(dir), pairListing, "with no staged file left");
+    }
+
+    {   // The same hold on the other kind of replace: the uninstall's rename of the
+        // game's runtime back over ours, while a reader that shares DELETE has ours
+        // open.
+        layOutPair(dir, true);
+        realRenames();
+        HANDLE reader = holdOpen(runtime, true);
+        check(reader != INVALID_HANDLE_VALUE, "a reader sharing DELETE can hold our runtime open");
+        const ApplyResult r = applyPlan(restorePlan(dir), provider(false));
+        check(r.ok, "the game's runtime is renamed back over ours under such a reader", r.error);
+        expectEq(readAll(runtime), "THE-GAMES-OWN-RUNTIME", "the path holds the game's runtime");
+        expectEq(readThrough(reader), "OLD-RUNTIME", "while the reader still sees the file it opened");
+        check(!fileExists(orig), "and it is no longer under the other name");
+        if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+    }
+
+    {   // A reader that does NOT share DELETE refuses both kinds of rename until it
+        // lets go, and here it lets go while the engine is waiting: the run lands.
+        // That is what the wait is for. The reader is released once the engine has
+        // asked a second time, so the case waits on the engine and not on a clock
+        // (the bound is only so that an engine that never asks again fails this
+        // case and does not hang it), and the engine runs with the product's own
+        // patience.
+        layOutPair(dir);
+        realRenames();
+        HANDLE reader = holdOpen(d3d11, false);
+        check(reader != INVALID_HANDLE_VALUE, "a reader not sharing DELETE can hold the graphics DLL open");
+        std::thread letGo([reader] {
+            for (int i = 0; i < 3000 && posixReplaceAttempts() < 2; ++i) Sleep(1);
+            Sleep(20);
+            if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+        });
+        const ApplyResult r = applyPlan(pairPlan(dir), provider(false));
+        letGo.join();
+        check(r.ok, "a reader that lets go while the engine waits does not fail the run", r.error);
+        check(posixReplaceAttempts() >= 3,
+              "after the first replace was refused at least once, and the second one asked",
+              std::to_string(posixReplaceAttempts()) + " calls");
+        expectEq(readAll(d3d11), newGraphics, "the graphics DLL is replaced");
+        expectEq(readAll(runtime), newRuntime, "and so is the runtime");
+        expectEq(listing(dir), pairListing, "with no staged file left");
+    }
+
+    replacePatienceForTest(-1, 0);
+    realRenames();
+}
+
+// ---------------------------------------------------------------------------
+// the mirror's generations
+// ---------------------------------------------------------------------------
+
+static void testGenerations(const std::wstring& scratch) {
+    printf("\nthe mirror's generations\n");
+
+    const std::wstring dir = joinPath(scratch, L"generations");
+    removeTree(dir);
+    makeTree(dir);
+    const std::wstring name = L"edvr.ini";
+    auto gen = [&](int g) { return readAll(generationPath(dir, name, g)); };
+    auto leafOfNewest = [&]() { return toUtf8(leafOf(newestGeneration(dir, name))); };
+    std::wstring why;
+
+    check(writeGenerations(dir, name, "A\r\n", true, &why), "a first copy is written", toUtf8(why));
+    expectEq(gen(0), "A\r\n", "as the newest");
+    check(!fileExists(generationPath(dir, name, 1)), "with nothing behind it yet");
+
+    check(writeGenerations(dir, name, "B\r\n", true, &why), "a second copy rotates in",
+          toUtf8(why));
+    expectEq(gen(0), "B\r\n", "the newest is the second");
+    expectEq(gen(1), "A\r\n", "and the first is kept as .1");
+
+    check(writeGenerations(dir, name, "C\r\n", true, &why), "a third copy rotates in",
+          toUtf8(why));
+    expectEq(gen(0), "C\r\n", "the newest is the third");
+    expectEq(gen(1), "B\r\n", "the second moved to .1");
+    expectEq(gen(2), "A\r\n", "and the first to .2");
+
+    check(writeGenerations(dir, name, "D\r\n", true, &why), "a fourth copy rotates in",
+          toUtf8(why));
+    expectEq(gen(0), "D\r\n", "the newest is the fourth");
+    expectEq(gen(1), "C\r\n", "the third is .1");
+    expectEq(gen(2), "B\r\n", "the second is .2");
+    check(!fileExists(generationPath(dir, name, 3)),
+          "and there is no .3: three generations, the oldest dropped");
+    expectEq(listing(dir), "edvr.ini, edvr.ini.1, edvr.ini.2",
+             "nothing else is in the folder, no temporary file among it");
+
+    // An install that changed nothing must not age the history out.
+    check(writeGenerations(dir, name, "D\r\n", true, &why), "the same copy again succeeds",
+          toUtf8(why));
+    expectEq(gen(1), "C\r\n", "and pushes nothing down");
+    expectEq(gen(2), "B\r\n", "so the oldest is still there");
+
+    // A change made a moment ago replaces the newest and leaves the history.
+    check(writeGenerations(dir, name, "E\r\n", false, &why), "a change replaces the newest in place",
+          toUtf8(why));
+    expectEq(gen(0), "E\r\n", "the newest is the change");
+    expectEq(gen(1), "C\r\n", "and .1 is what it was");
+    expectEq(gen(2), "B\r\n", "and .2");
+    check(writeGenerations(dir, name, "F\r\n", false, &why), "and another",
+          toUtf8(why));
+    check(gen(0) == "F\r\n" && gen(1) == "C\r\n" && gen(2) == "B\r\n",
+          "still one newest copy and the same two behind it: a generation per tweak would lose them");
+
+    // Which generation a restore reads.
+    expectEq(leafOfNewest(), "edvr.ini", "the newest generation is the newest copy");
+    DeleteFileW(generationPath(dir, name, 0).c_str());
+    expectEq(leafOfNewest(), "edvr.ini.1",
+             "with the newest gone -- a crash between two writes -- the one behind it is read");
+    writeAll(generationPath(dir, name, 0), "");
+    expectEq(leafOfNewest(), "edvr.ini.1", "an empty newest is passed over too");
+    DeleteFileW(generationPath(dir, name, 1).c_str());
+    expectEq(leafOfNewest(), "edvr.ini.2", "and so is a missing .1");
+    DeleteFileW(generationPath(dir, name, 2).c_str());
+    check(newestGeneration(dir, name).empty(), "with nothing but an empty file there is nothing to read");
+    check(generationPath(dir, name, 0) == joinPath(dir, name) &&
+              generationPath(dir, name, 2) == joinPath(dir, name) + L".2",
+          "and the paths are <name>, <name>.1, <name>.2");
+    check(generationPath(dir + L"\\", name, 1) == joinPath(dir, name) + L".1",
+          "whether or not the folder ends in a separator");
+
+    // A rotation that cannot finish changes nothing. .2 is made read-only, so the
+    // move of .1 up onto it is refused: the new copy has been written by then,
+    // and it must not be in the way of a single generation.
+    removeTree(dir);
+    makeTree(dir);
+    writeGenerations(dir, name, "P\r\n", true);
+    writeGenerations(dir, name, "Q\r\n", true);
+    writeGenerations(dir, name, "R\r\n", true);
+    SetFileAttributesW(generationPath(dir, name, 2).c_str(), FILE_ATTRIBUTE_READONLY);
+    check(!writeGenerations(dir, name, "S\r\n", true, &why),
+          "a rotation that cannot move an older copy fails");
+    check(gen(0) == "R\r\n" && gen(1) == "Q\r\n" && gen(2) == "P\r\n",
+          "with every generation exactly as it was");
+    expectEq(listing(dir), "edvr.ini, edvr.ini.1, edvr.ini.2", "and the staged copy is gone");
+    SetFileAttributesW(generationPath(dir, name, 2).c_str(), FILE_ATTRIBUTE_NORMAL);
+    check(writeGenerations(dir, name, "S\r\n", true, &why),
+          "and once the older copy can be moved the same write goes through", toUtf8(why));
+    check(gen(0) == "S\r\n" && gen(1) == "R\r\n" && gen(2) == "Q\r\n", "as three generations");
+
+    // The LAST step of a rotation being refused -- the newest is read-only, so the
+    // new copy cannot take its place -- has already kept the copy being replaced
+    // as .1. The same write tried again must not push another real copy out to
+    // make room for that duplicate.
+    removeTree(dir);
+    makeTree(dir);
+    writeGenerations(dir, name, "P\r\n", true);
+    writeGenerations(dir, name, "Q\r\n", true);
+    writeGenerations(dir, name, "R\r\n", true);
+    SetFileAttributesW(generationPath(dir, name, 0).c_str(), FILE_ATTRIBUTE_READONLY);
+    check(!writeGenerations(dir, name, "S\r\n", true, &why),
+          "a write whose last step is refused fails");
+    check(gen(0) == "R\r\n" && gen(1) == "R\r\n" && gen(2) == "Q\r\n",
+          "leaving the newest intact, with the copy it kept and the one behind that");
+    SetFileAttributesW(generationPath(dir, name, 0).c_str(), FILE_ATTRIBUTE_NORMAL);
+    check(writeGenerations(dir, name, "S\r\n", true, &why),
+          "and once the newest can be replaced the same write goes through", toUtf8(why));
+    check(gen(0) == "S\r\n" && gen(1) == "R\r\n" && gen(2) == "Q\r\n",
+          "without pushing a real copy out for the duplicate");
+    expectEq(listing(dir), "edvr.ini, edvr.ini.1, edvr.ini.2", "and no temporary file is left");
+
+    // A folder that is not there fails cleanly.
+    check(!writeGenerations(joinPath(dir, L"no-such-folder"), name, "x", true, &why),
+          "a mirror folder that is not there is a failure");
+}
+
+static void testMirrorGenerations(const std::wstring& scratch) {
+    printf("\nthe mirror survives what overwrote it\n");
+
+    const std::wstring gameDir = joinPath(scratch, L"mirrorgen-game");
+    const std::wstring root = joinPath(scratch, L"mirrorgen-root");
+    const std::wstring mirrorDir = joinPath(root, L"mirrorgen-test");
+    removeTree(gameDir);
+    removeTree(root);
+    makeTree(gameDir);
+    const std::wstring liveIni = joinPath(gameDir, L"edvr.ini");
+    auto mirrored = [&](int g) { return readAll(generationPath(mirrorDir, L"edvr.ini", g)); };
+
+    const std::string tuned = "[fix]\r\nshare_exposure = 0\r\nblack_void = 0\r\n";
+    const std::string defaults = "[fix]\r\nshare_exposure = 1\r\nblack_void = 1\r\n";
+
+    // An earlier install mirrored the settings somebody tuned.
+    writeAll(liveIni, tuned);
+    check(updateMirror(gameDir, L"", mirrorDir).ok, "the tuned settings are mirrored");
+    expectEq(mirrored(0), tuned, "as the newest copy");
+
+    // A game update wipes the folder. The person declines the restore -- or it
+    // fails -- and the install writes a fresh ini, which the mirror then takes.
+    // This is the sequence that used to erase the only saved copy.
+    DeleteFileW(liveIni.c_str());
+    writeAll(liveIni, defaults);
+    const MirrorResult afterInstall = updateMirror(gameDir, L"", mirrorDir);
+    check(afterInstall.ok && !afterInstall.saved.empty(), "the fresh install is mirrored");
+    expectEq(mirrored(0), defaults, "the newest copy is what the fresh install wrote");
+    expectEq(mirrored(1), tuned, "and the settings it replaced are still there, as edvr.ini.1");
+
+    // The same install run again, changing nothing, ages nothing.
+    check(updateMirror(gameDir, L"", mirrorDir).ok, "an install that changes nothing is mirrored");
+    expectEq(mirrored(1), tuned, "without pushing the kept copy down");
+
+    // A setting changed afterwards -- the settings window, the in-game menu --
+    // replaces the newest and leaves the kept copy where it is.
+    const std::string touched = defaults + "\r\n[hotkey]\r\nmenu = F8\r\n";
+    writeAll(liveIni, touched);
+    check(updateMirrorIni(gameDir, mirrorDir).ok, "a settings change is mirrored");
+    expectEq(mirrored(0), touched, "as the newest copy");
+    expectEq(mirrored(1), tuned, "and the tuned settings are still edvr.ini.1");
+    check(!fileExists(generationPath(mirrorDir, L"edvr.ini", 2)),
+          "with no generation made for the tweak");
+
+    // The restore reads the newest.
+    {
+        const std::wstring wiped = joinPath(scratch, L"mirrorgen-wiped");
+        removeTree(wiped);
+        makeTree(wiped);
+        const MirrorInfo info = readMirror(mirrorDir);
+        check(info.hasIni, "the mirror offers a restore");
+        std::vector<std::string> notes;
+        check(restoreFromMirror(wiped, info, &notes), "and it restores");
+        expectEq(readAll(joinPath(wiped, L"edvr.ini")), touched, "the newest copy comes back");
+    }
+
+    // Two more installs that change the ini: three generations, the oldest gone.
+    writeAll(liveIni, "[fix]\r\nshare_exposure = 2\r\n");
+    check(updateMirror(gameDir, L"", mirrorDir).ok, "a later install is mirrored");
+    writeAll(liveIni, "[fix]\r\nshare_exposure = 3\r\n");
+    check(updateMirror(gameDir, L"", mirrorDir).ok, "and another");
+    expectEq(mirrored(0), "[fix]\r\nshare_exposure = 3\r\n", "the newest is the last");
+    expectEq(mirrored(1), "[fix]\r\nshare_exposure = 2\r\n", ".1 is the one before it");
+    expectEq(mirrored(2), touched, ".2 is the copy from before that");
+    check(!fileExists(generationPath(mirrorDir, L"edvr.ini", 3)),
+          "and the copy before those is dropped: three generations");
+
+    // A restore after a crash between two writes, or a half-written newest, reads
+    // the copy behind it rather than offering nothing.
+    {
+        DeleteFileW(generationPath(mirrorDir, L"edvr.ini", 0).c_str());
+        const MirrorInfo info = readMirror(mirrorDir);
+        check(info.hasIni, "with the newest missing the mirror still offers a restore");
+        const std::wstring wiped = joinPath(scratch, L"mirrorgen-wiped2");
+        removeTree(wiped);
+        makeTree(wiped);
+        std::vector<std::string> notes;
+        check(restoreFromMirror(wiped, info, &notes), "and restores");
+        expectEq(readAll(joinPath(wiped, L"edvr.ini")), "[fix]\r\nshare_exposure = 2\r\n",
+                 "from the newest copy that is there");
+        writeAll(generationPath(mirrorDir, L"edvr.ini", 0), "");
+        check(readMirror(mirrorDir).hasIni, "an empty newest does not hide the ones behind it");
+    }
+
+    // The flat profile's settings file is kept the same way.
+    {
+        const std::wstring flat = joinPath(gameDir, L"edvr-flat.ini");
+        writeAll(flat, "[fix]\r\nflat = 1\r\n");
+        check(updateMirror(gameDir, L"", mirrorDir).ok, "a flat ini is mirrored");
+        writeAll(flat, "[fix]\r\nflat = 2\r\n");
+        check(updateMirror(gameDir, L"", mirrorDir).ok, "and again");
+        expectEq(readAll(generationPath(mirrorDir, L"edvr-flat.ini", 0)), "[fix]\r\nflat = 2\r\n",
+                 "the flat ini's newest copy");
+        expectEq(readAll(generationPath(mirrorDir, L"edvr-flat.ini", 1)), "[fix]\r\nflat = 1\r\n",
+                 "and the one it replaced");
+    }
+
+    // Read-only on a mirrored copy -- a launcher's verification does that to
+    // files it thinks are its own -- is cleared, as the copy always did.
+    {
+        SetFileAttributesW(generationPath(mirrorDir, L"edvr.ini", 0).c_str(),
+                           FILE_ATTRIBUTE_READONLY);
+        SetFileAttributesW(generationPath(mirrorDir, L"edvr.ini", 2).c_str(),
+                           FILE_ATTRIBUTE_READONLY);
+        writeAll(liveIni, "[fix]\r\nshare_exposure = 4\r\n");
+        check(updateMirror(gameDir, L"", mirrorDir).ok, "a mirror with read-only copies is updated");
+        expectEq(mirrored(0), "[fix]\r\nshare_exposure = 4\r\n", "with the new newest copy");
+    }
+
+    // No temporary file is left in the mirror by any of that.
+    {
+        const std::string files = listing(mirrorDir);
+        check(files.find("edvr-tmp") == std::string::npos, "the mirror holds no temporary file",
+              files);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the demoted field-of-view trims, through the mirror and an install
+// ---------------------------------------------------------------------------
+
+// A value somebody tuned under the OLD name has to survive the whole road an
+// update walks: mirrored outside the game folder, restored after a game update
+// wiped it, and merged into the NEW shipped file by the install that follows
+// (which is the only thing that moves it, edvr.ini's `# moved-from:`). Run end to
+// end against the real shipped file, with the shipped file's annotations taken out
+// as the control.
+static void testDemotedTrims(const std::wstring& root, const std::wstring& scratch) {
+    printf("\nthe demoted field-of-view trims through the mirror, a restore and an install\n");
+
+    const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
+    if (shipped.empty()) {
+        fail("read the repository's edvr.ini", "not found next to the repo root");
+        return;
+    }
+    const std::string tuned =
+        "pimax-openxr/pimax-crystal-super:10, virtualdesktopxr/meta-quest-3:5";
+    // Yesterday's install, as the previous version wrote it: the trims under
+    // [fix], the base copy holding the shipped (empty) defaults, and the tuning
+    // somebody did on top of them.
+    const std::string oldBase =
+        "[fix]\r\nfov_trim_vertical =\r\nfov_trim_outer =\r\nfov_trim_nasal =\r\n"
+        "black_void = 1\r\n";
+    const std::string oldUser =
+        "[fix]\r\nfov_trim_vertical = " + tuned + "\r\n"
+        "fov_trim_outer = oculus/meta-quest-3:7\r\nfov_trim_nasal =\r\n"
+        "black_void = 0\r\n";
+
+    const std::wstring gameDir = joinPath(scratch, L"trims-game");
+    const std::wstring mirrorDir = joinPath(scratch, L"trims-mirror\\trims-test");
+    removeTree(joinPath(scratch, L"trims-mirror"));
+    layOutScratchGame(gameDir);
+    makeTree(joinPath(gameDir, L"edvr_install"));
+    writeAll(joinPath(gameDir, L"edvr.ini"), oldUser);
+    writeAll(baseIniPath(gameDir), oldBase);
+    check(updateMirror(gameDir, L"", mirrorDir).ok, "the old-layout settings are mirrored");
+    expectEq(readAll(joinPath(mirrorDir, L"edvr.ini")), oldUser,
+             "the mirror keeps them verbatim, under their old names");
+
+    // Ran twice: once with the shipped file, once with its annotations removed.
+    std::string unannotated = shipped;
+    for (const char* key : {"vertical", "outer", "nasal"}) {
+        const std::string line = std::string("# moved-from: fix.fov_trim_") + key;
+        const size_t at = unannotated.find(line);
+        if (at != std::string::npos) unannotated.replace(at, line.size(), "# (annotation removed)");
+    }
+    check(unannotated != shipped && unannotated.find("moved-from: fix.fov_trim_") == std::string::npos,
+          "the control's ini really lost its three annotations");
+
+    struct Road { const char* name; const std::string* nextIni; bool annotated; };
+    const Road roads[] = {{"shipped edvr.ini", &shipped, true},
+                          {"control, annotations removed", &unannotated, false}};
+    for (const Road& road : roads) {
+        const std::string label = std::string(road.annotated ? "" : "control: ") +
+                                  (road.annotated ? "" : "without the annotation, ");
+        // A game update wipes the folder; only the mirror is left. The restore
+        // puts the old ini and its base back, and the install that follows
+        // merges them into the new file (a plan, and then the real apply).
+        const std::wstring wiped = joinPath(scratch, road.annotated ? L"trims-wiped" : L"trims-wiped-control");
+        layOutScratchGame(wiped);
+        const MirrorInfo info = readMirror(mirrorDir);
+        std::vector<std::string> notes;
+        check(restoreFromMirror(wiped, info, &notes), (label + "the restore succeeds").c_str());
+        expectEq(readAll(joinPath(wiped, L"edvr.ini")), oldUser,
+                 (label + "the restored ini is the old layout, verbatim").c_str());
+        expectEq(readAll(baseIniPath(wiped)), oldBase,
+                 (label + "and its base copy comes back beside it").c_str());
+
+        Survey s = scratchSurvey(wiped);
+        s.iniPresent = true;
+        s.iniText = readAll(joinPath(wiped, L"edvr.ini"));
+        s.baseIniText = readAll(baseIniPath(wiped));
+        const PayloadInfo payload = testPayload(*road.nextIni);
+        const Plan plan = planInstall(s, testOptions(), payload);
+        const std::string planned = plannedIni(plan);
+        check(!planned.empty(), (label + "the install plans to write an ini").c_str());
+        const ApplyResult applied = applyPlan(plan, provider(false));
+        check(applied.ok, (label + "the install applies").c_str(), applied.error);
+        const std::string installed = readAll(joinPath(wiped, L"edvr.ini"));
+        expectEq(installed, planned, (label + "and writes what it planned").c_str());
+
+        expectEq(iniValue(installed, "fix.black_void"), "0",
+                 (label + "another tuned value lands too (the merge ran)").c_str());
+        if (road.annotated) {
+            expectEq(iniValue(installed, "experimental.fov_trim_vertical", "<absent>"), tuned,
+                     "the tuned trim list is under [experimental] after the install");
+            expectEq(iniValue(installed, "experimental.fov_trim_outer", "<absent>"),
+                     "oculus/meta-quest-3:7", "and so is the single entry");
+            expectEq(iniValue(installed, "experimental.fov_trim_nasal", "<absent>"), "",
+                     "the one left empty is still empty there");
+            for (const char* key : {"fix.fov_trim_vertical", "fix.fov_trim_outer", "fix.fov_trim_nasal"}) {
+                expectEq(iniValue(installed, key, "<absent>"), "<absent>",
+                         (std::string("nothing is left under ") + key).c_str());
+            }
+            check(plan.merge.followed.size() >= 3, "the install's report says the trims followed");
+        } else {
+            check(iniValue(installed, "experimental.fov_trim_vertical", "<absent>") != tuned,
+                  "control: the tuned trim list does NOT reach [experimental] without the annotation");
+            expectEq(iniValue(installed, "fix.fov_trim_vertical", "<absent>"), tuned,
+                     "control: it is carried under the old name, where nothing reads it");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the flat edition's settings file, on real files
+// ---------------------------------------------------------------------------
+
+static void layOutFlatGame(const std::wstring& dir) {
+    removeTree(dir);
+    makeTree(dir);
+    writeAll(joinPath(dir, L"EliteDangerous64.exe"), "not really the game");
+}
+
+// The file the flat runtime reads (config.cpp): edvr-flat.ini first, edvr.ini only
+// while there is none.
+static std::wstring flatRuntimeReads(const std::wstring& dir) {
+    const std::wstring flat = joinPath(dir, L"edvr-flat.ini");
+    return fileExists(flat) ? flat : joinPath(dir, L"edvr.ini");
+}
+
+// A survey of a scratch folder as a later run would take it -- what is on disk --
+// with the facts that depend on the machine (is Elite running, which revision the
+// executable is) fixed by the case.
+static Survey diskSurvey(const std::wstring& dir) {
+    Survey s = baseSurvey(dir);
+    s.haveOpenvrDir = false;
+    const std::wstring graphics = joinPath(dir, L"d3d11.dll");
+    s.d3d11 = fileExists(graphics) ? fakeDll(DllKind::Edvr, graphics, sha256File(graphics))
+                                   : fakeDll(DllKind::Absent, graphics, "");
+    const std::wstring ini = joinPath(dir, L"edvr.ini");
+    const std::wstring flatIni = joinPath(dir, L"edvr-flat.ini");
+    s.iniPresent = fileExists(ini);
+    if (s.iniPresent) s.iniText = readAll(ini);
+    s.flatIniPresent = fileExists(flatIni);
+    if (s.flatIniPresent) s.flatIniText = readAll(flatIni);
+    s.baseIniText = readAll(baseIniPath(dir));
+    s.state = readState(dir);
+    const std::wstring descriptor = joinPath(dir, L"edvr_profile.ini");
+    s.descriptorPresent = fileExists(descriptor);
+    if (s.descriptorPresent) s.descriptorSha = sha256File(descriptor);
+    return s;
+}
+
+static void testFlatSettingsFiles(const std::wstring& scratch) {
+    printf("\nthe flat edition's settings file, on real files\n");
+    const PayloadInfo flatOld = flatPayloadFor(kFlatTemplate);
+    const PayloadInfo flatNew = flatPayloadFor(kFlatTemplateNewer);
+    const Options options = testOptions();
+    auto gameAt = [](const std::wstring& dir) {
+        GameInstall game;
+        game.dir = dir;
+        game.source = L"Test";
+        game.product = L"elite-dangerous-odyssey-64";
+        game.odyssey = true;
+        return game;
+    };
+
+    {   // The survey reads both files, each as itself.
+        const std::wstring dir = joinPath(scratch, L"flatset-survey");
+        layOutFlatGame(dir);
+        writeAll(joinPath(dir, L"edvr.ini"), kSharedIni);
+        writeAll(joinPath(dir, L"edvr-flat.ini"), kFlatOwnIni);
+        const Survey both = surveyTarget(gameAt(dir));
+        check(both.iniPresent && both.iniText == kSharedIni, "the survey reads edvr.ini as itself");
+        check(both.flatIniPresent && both.flatIniText == kFlatOwnIni,
+              "and edvr-flat.ini as itself");
+        check(hasSettingsFor(both, "vr") && hasSettingsFor(both, "flat"),
+              "each edition finds its settings");
+
+        DeleteFileW(joinPath(dir, L"edvr-flat.ini").c_str());
+        const Survey legacy = surveyTarget(gameAt(dir));
+        check(legacy.iniPresent && !legacy.flatIniPresent && legacy.flatIniText.empty(),
+              "a folder from before edvr-flat.ini has only the shared file");
+        check(hasSettingsFor(legacy, "vr") && hasSettingsFor(legacy, "flat"),
+              "which both editions read");
+
+        DeleteFileW(joinPath(dir, L"edvr.ini").c_str());
+        writeAll(joinPath(dir, L"edvr-flat.ini"), kFlatOwnIni);
+        const Survey flatOnly = surveyTarget(gameAt(dir));
+        check(!flatOnly.iniPresent && flatOnly.flatIniPresent, "a flat-only folder is read as one");
+        check(!hasSettingsFor(flatOnly, "vr") && hasSettingsFor(flatOnly, "flat"),
+              "and has settings for the flat edition alone");
+
+        DeleteFileW(joinPath(dir, L"edvr-flat.ini").c_str());
+        const Survey empty = surveyTarget(gameAt(dir));
+        check(!hasSettingsFor(empty, "vr") && !hasSettingsFor(empty, "flat"),
+              "an empty folder has settings for neither");
+    }
+
+    {   // A legacy shared-INI flat install, end to end: survey, plan, apply, and a
+        // later update and uninstall. The flat runtime read edvr.ini until now;
+        // from here on it reads edvr-flat.ini, and edvr.ini -- the VR profile's --
+        // is byte for byte what it was throughout.
+        const std::wstring dir = joinPath(scratch, L"flatset-legacy");
+        layOutFlatGame(dir);
+        writeAll(joinPath(dir, L"edvr.ini"), kSharedIni);
+        Survey s = surveyTarget(gameAt(dir));
+        s.eliteKind = EliteExeKind::OdysseyQualified;
+        s.gameRunningHere = s.gameRunningElsewhere = s.gameRunStateUnknown = false;
+        const Plan plan = planInstall(s, options, flatOld);
+        check(!plan.blocked, "a flat install over a legacy shared edvr.ini plans",
+              plan.problems.empty() ? std::string() : plan.problems.front());
+        const ApplyResult result = applyPlan(plan, flatProvider());
+        check(result.ok, "and applies", result.error);
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), kSharedIni,
+                 "edvr.ini is exactly as the VR profile left it");
+        const std::string flatText = readAll(joinPath(dir, L"edvr-flat.ini"));
+        expectEq(iniValue(flatText, "fix.temporal_aa"), "dlaa",
+                 "edvr-flat.ini carries the setting the flat runtime was reading");
+        check(flatRuntimeReads(dir) == joinPath(dir, L"edvr-flat.ini"),
+              "and it is the file the flat runtime reads from now on");
+        const InstallState state = readState(dir);
+        check(state.present && state.profile == "flat", "the record says flat");
+        check(state.iniSha == sha256Bytes(flatText.data(), flatText.size()),
+              "and holds the hash of edvr-flat.ini, the file that was written");
+        expectEq(readAll(baseIniPath(dir)), kFlatTemplate,
+                 "the kept base is the flat edition's shipped file");
+
+        // A later update, with defaults that moved: the flat file merges.
+        Options second = options;
+        second.backupStamp = L"20260827-121500";
+        const Plan update = planInstall(diskSurvey(dir), second, flatNew);
+        check(!update.blocked && !touchesLive(update, dir, L"edvr.ini"),
+              "a later flat update plans without touching edvr.ini");
+        check(applyPlan(update, flatProvider()).ok, "and applies");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), kSharedIni, "edvr.ini is still exactly as it was");
+        const std::string updated = readAll(joinPath(dir, L"edvr-flat.ini"));
+        expectEq(iniValue(updated, "fix.render_sharpness"), "0", "the flat file took the new setting");
+        expectEq(iniValue(updated, "fix.temporal_aa"), "dlaa", "and kept the one it carried over");
+        expectEq(readAll(joinPath(dir, L"edvr_backup\\20260827-121500\\edvr-flat.ini")), flatText,
+                 "with the flat file as it was in the backup folder");
+        check(!fileExists(joinPath(dir, L"edvr_backup\\20260827-121500\\edvr.ini")),
+              "and no copy of edvr.ini, which nothing replaced");
+
+        // The uninstall, asked to remove settings, removes the flat edition's.
+        Options gone = options;
+        gone.backupStamp = L"20260827-123000";
+        gone.removeSettings = true;
+        const ApplyResult removed = applyPlan(planUninstall(diskSurvey(dir), gone), flatProvider());
+        check(removed.ok, "the flat uninstall applies", removed.error);
+        check(!fileExists(joinPath(dir, L"edvr-flat.ini")), "edvr-flat.ini goes with the flat edition");
+        expectEq(readAll(joinPath(dir, L"edvr_backup\\20260827-123000\\edvr-flat.ini")), updated,
+                 "after a copy of it went to the backup folder");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), kSharedIni,
+                 "and edvr.ini, which is the VR profile's, is left exactly as it was");
+        check(!fileExists(joinPath(dir, L"d3d11.dll")), "the rest of the flat edition is gone too");
+    }
+
+    {   // Two deliberately different files, end to end: the flat install merges the
+        // flat file, and replacing settings replaces that one and only that one.
+        const std::wstring dir = joinPath(scratch, L"flatset-two");
+        layOutFlatGame(dir);
+        writeAll(joinPath(dir, L"edvr.ini"), kSharedIni);
+        writeAll(joinPath(dir, L"edvr-flat.ini"), kFlatOwnIni);
+        const Plan plan = planInstall(diskSurvey(dir), options, flatOld);
+        check(!plan.blocked && applyPlan(plan, flatProvider()).ok,
+              "a flat install over two different files applies");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), kSharedIni, "edvr.ini is byte for byte the same");
+        const std::string merged = readAll(joinPath(dir, L"edvr-flat.ini"));
+        expectEq(iniValue(merged, "fix.temporal_aa"), "fsr", "the flat file keeps its own setting");
+        expectEq(iniValue(merged, "hotkey.menu", "<absent>"), "<absent>",
+                 "and takes nothing from edvr.ini");
+
+        Options fresh = options;
+        fresh.backupStamp = L"20260827-124500";
+        fresh.keepSettings = false;
+        check(applyPlan(planInstall(diskSurvey(dir), fresh, flatOld), flatProvider()).ok,
+              "asked for fresh defaults, the run applies");
+        expectEq(iniValue(readAll(joinPath(dir, L"edvr-flat.ini")), "fix.temporal_aa"), "off",
+                 "the flat file has the shipped defaults");
+        expectEq(readAll(joinPath(dir, L"edvr_backup\\20260827-124500\\edvr-flat.ini")), merged,
+                 "with what it held in the backup folder");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), kSharedIni, "and edvr.ini is still untouched");
+    }
+
+    {   // The VR edition beside a flat profile's file: it updates edvr.ini and the
+        // flat file is exactly what it was.
+        const std::wstring dir = joinPath(scratch, L"flatset-vr");
+        layOutScratchGame(dir);
+        writeAll(joinPath(dir, L"edvr.ini"), kBaseIni);
+        writeAll(joinPath(dir, L"edvr-flat.ini"), kFlatOwnIni);
+        Survey s = scratchSurvey(dir);
+        s.iniPresent = true;
+        s.iniText = readAll(joinPath(dir, L"edvr.ini"));
+        s.flatIniPresent = true;
+        s.flatIniText = readAll(joinPath(dir, L"edvr-flat.ini"));
+        const ApplyResult result = applyPlan(planInstall(s, options, testPayload(kNextIni)), provider(false));
+        check(result.ok, "a VR install beside a flat profile's file applies", result.error);
+        expectEq(iniValue(readAll(joinPath(dir, L"edvr.ini")), "fix.sun_glare"), "vivid",
+                 "the VR file took the new setting");
+        expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), kFlatOwnIni,
+                 "and the flat file is byte for byte the same");
+    }
+}
+
+// The settings window: it reads and writes the file its edition's runtime reads.
+static void testFlatSettingsWindow(const std::wstring& root, const std::wstring& scratch) {
+    printf("\nthe settings window and the flat edition's file\n");
+    const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
+    if (shipped.empty()) {
+        fail("read the repository edvr.ini", "not found");
+        return;
+    }
+    auto rowFor = [](const SettingsModel& model, const char* key) {
+        for (size_t i = 0; i < model.rows().size(); ++i)
+            if (std::string(model.rows()[i].def->key) == key) return i;
+        return static_cast<size_t>(-1);
+    };
+    const std::string flatOwn = "[fix]\r\nblack_void = 0\r\n";
+
+    {   // Two files: the flat model shows the flat file's value and writes only
+        // there; the VR model beside it does the reverse.
+        const std::wstring dir = joinPath(scratch, L"flatset-window-two");
+        removeTree(dir);
+        makeTree(dir);
+        writeAll(joinPath(dir, L"edvr.ini"), shipped);
+        writeAll(joinPath(dir, L"edvr-flat.ini"), flatOwn);
+
+        SettingsModel flat;
+        flat.load(dir, "flat");
+        const size_t toggle = rowFor(flat, "black_void");
+        if (toggle == static_cast<size_t>(-1)) {
+            fail("find the setting to exercise", "black_void is not exposed");
+            return;
+        }
+        check(flat.iniPath() == joinPath(dir, L"edvr-flat.ini"), "the flat window's file is edvr-flat.ini");
+        expectEq(flat.rows()[toggle].value, "0", "it shows the flat file's value, not edvr.ini's");
+        check(flat.set(toggle, "1"), "a change in the flat window is written", flat.lastError());
+        expectEq(iniValue(readAll(joinPath(dir, L"edvr-flat.ini")), "fix.black_void"), "1",
+                 "to edvr-flat.ini");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), shipped, "and edvr.ini is byte for byte the same");
+        const std::wstring backups = joinPath(dir, L"edvr_backup");
+        const std::wstring stamp = firstSubdirLike(backups, L"settings-*");
+        check(!stamp.empty() && readAll(joinPath(joinPath(backups, stamp), L"edvr-flat.ini")) == flatOwn,
+              "with the flat file as it was in the settings backup");
+
+        SettingsModel vr;
+        vr.load(dir);
+        check(vr.iniPath() == joinPath(dir, L"edvr.ini"), "the VR window's file is edvr.ini");
+        const std::string flatAfter = readAll(joinPath(dir, L"edvr-flat.ini"));
+        check(vr.set(rowFor(vr, "black_void"), "0"), "a change in the VR window is written", vr.lastError());
+        expectEq(iniValue(readAll(joinPath(dir, L"edvr.ini")), "fix.black_void"), "0", "to edvr.ini");
+        expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), flatAfter,
+                 "and edvr-flat.ini is exactly what the flat window left");
+    }
+
+    {   // A legacy folder: only the shared edvr.ini. The flat window shows what the
+        // flat runtime is reading, and the first change starts edvr-flat.ini from
+        // it, leaving edvr.ini as it is.
+        const std::wstring dir = joinPath(scratch, L"flatset-window-legacy");
+        removeTree(dir);
+        makeTree(dir);
+        writeAll(joinPath(dir, L"edvr.ini"), shipped);
+        SettingsModel flat;
+        flat.load(dir, "flat");
+        const size_t toggle = rowFor(flat, "black_void");
+        if (toggle == static_cast<size_t>(-1)) {
+            fail("find the setting to exercise", "black_void is not exposed");
+            return;
+        }
+        expectEq(flat.rows()[toggle].value, iniValue(shipped, "fix.black_void"),
+                 "with no edvr-flat.ini yet the window shows the shared file's value");
+        check(flat.set(toggle, "0"), "the first change succeeds", flat.lastError());
+        check(fileExists(joinPath(dir, L"edvr-flat.ini")), "and starts edvr-flat.ini");
+        const std::string started = readAll(joinPath(dir, L"edvr-flat.ini"));
+        expectEq(iniValue(started, "fix.black_void"), "0", "with the change in it");
+        check(started.size() == shipped.size(),
+              "and every other setting carried over from the shared file: one character differs");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), shipped, "while edvr.ini is exactly as it was");
+        check(firstSubdirLike(joinPath(dir, L"edvr_backup"), L"settings-*").empty(),
+              "a file that did not exist has nothing to back up");
+        check(flat.set(toggle, "1"), "the next change succeeds too", flat.lastError());
+        expectEq(iniValue(readAll(joinPath(dir, L"edvr-flat.ini")), "fix.black_void"), "1",
+                 "and lands in the flat file");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), shipped, "with edvr.ini untouched again");
+    }
+
+    {   // Nothing at all: the window says which file is missing.
+        const std::wstring dir = joinPath(scratch, L"flatset-window-none");
+        removeTree(dir);
+        makeTree(dir);
+        SettingsModel flat;
+        flat.load(dir, "flat");
+        const size_t toggle = rowFor(flat, "black_void");
+        if (toggle == static_cast<size_t>(-1)) return;
+        check(!flat.set(toggle, "0"), "a change with no settings file anywhere fails");
+        check(flat.lastError().find("edvr-flat.ini is not there yet") != std::string::npos,
+              "and names edvr-flat.ini, the file that is missing", flat.lastError());
+        check(!fileExists(joinPath(dir, L"edvr-flat.ini")) && !fileExists(joinPath(dir, L"edvr.ini")),
+              "without creating either");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the mirror, when only the flat edition's settings were saved
+//
+// A flat install (or a menu edit under one) mirrors edvr-flat.ini alone, and
+// after a game update wipes the folder that file is all there is to recover. The
+// offer, and the copy back, used to look for edvr.ini and pass by a mirror that
+// held only this one; a flat copy that failed was ignored, and the restore could
+// report success after putting back only the shared file.
+// ---------------------------------------------------------------------------
+
+static bool noteHas(const std::vector<std::string>& notes, const char* needle) {
+    for (const std::string& note : notes)
+        if (note.find(needle) != std::string::npos) return true;
+    return false;
+}
+
+static void testFlatMirror(const std::wstring& scratch) {
+    printf("\nthe mirror, when only the flat edition's settings were saved\n");
+
+    // A fresh flat install on real files, the one this mirrors: edvr-flat.ini, the
+    // record and the base, and no edvr.ini anywhere.
+    const std::wstring dir = joinPath(scratch, L"flatmirror-game");
+    layOutFlatGame(dir);
+    const PayloadInfo flat = flatPayloadFor(kFlatTemplate);
+    const Plan plan = planInstall(diskSurvey(dir), testOptions(), flat);
+    check(!plan.blocked && applyPlan(plan, flatProvider()).ok,
+          "a fresh flat install, the one this test mirrors, applies");
+    check(fileExists(joinPath(dir, L"edvr-flat.ini")) && !fileExists(joinPath(dir, L"edvr.ini")),
+          "it leaves edvr-flat.ini and no edvr.ini");
+
+    const std::wstring root = joinPath(scratch, L"flatmirror-root");
+    removeTree(root);
+    const std::wstring mirrorDir = joinPath(root, L"flatmirror-test");
+    const MirrorResult saved = updateMirror(dir, plan.backupDir, mirrorDir);
+    check(saved.ok && !saved.saved.empty() && saved.saved.front() == "edvr-flat.ini",
+          "updateMirror saves the flat settings");
+    check(!fileExists(joinPath(mirrorDir, L"edvr.ini")), "and there is no edvr.ini in the mirror");
+    const std::string mirroredFlat = readAll(joinPath(mirrorDir, L"edvr-flat.ini"));
+    expectEq(mirroredFlat, readAll(joinPath(dir, L"edvr-flat.ini")), "the mirrored copy matches");
+
+    const MirrorInfo info = readMirror(mirrorDir);
+    check(!info.hasIni && info.hasFlatIni, "readMirror sees the flat settings alone");
+    check(info.holdsSettings(), "which is a mirror with settings in it");
+    check(info.holdsSettingsFor("flat") && !info.holdsSettingsFor("vr"),
+          "settings the flat edition can use and the VR edition cannot");
+    check(!info.savedUtc.empty(), "and it says when they were saved");
+    check(info.hasState && info.hasBaseIni, "with the record and the base beside them");
+
+    {   // The offer, asked as both installers ask it.
+        const std::wstring wipedDir = joinPath(scratch, L"flatmirror-wiped");
+        layOutFlatGame(wipedDir);
+        const Survey wiped = diskSurvey(wipedDir);
+        check(offerRestore(hasSettingsFor(wiped, "flat"), info, "flat"),
+              "a wiped flat folder is offered a mirror that holds only edvr-flat.ini");
+        check(!offerRestore(hasSettingsFor(wiped, "vr"), info, "vr"),
+              "a VR install of it is not: the VR edition cannot use that file");
+        check(!offerRestore(hasSettingsFor(diskSurvey(dir), "flat"), info, "flat"),
+              "a folder that still has its settings is offered nothing");
+
+        writeAll(joinPath(wipedDir, L"edvr.ini"), kSharedIni);
+        check(!offerRestore(hasSettingsFor(diskSurvey(wipedDir), "flat"), info, "flat"),
+              "nor is one that has only the shared edvr.ini the flat runtime falls back to");
+
+        MirrorInfo none;
+        check(!offerRestore(false, none, "flat") && !offerRestore(false, none, "vr"),
+              "an empty mirror is offered to nobody");
+        MirrorInfo vrOnly;
+        vrOnly.hasIni = true;
+        check(offerRestore(false, vrOnly, "vr") && offerRestore(false, vrOnly, "flat"),
+              "a mirror of edvr.ini is offered to a VR install and, as before, to a flat one");
+    }
+
+    {   // The copy, with the flat file alone in the mirror.
+        const std::wstring wipedDir = joinPath(scratch, L"flatmirror-restore");
+        removeTree(wipedDir);
+        makeTree(wipedDir);
+        std::vector<std::string> notes;
+        check(restoreFromMirror(wipedDir, info, &notes), "a flat-only mirror is restored");
+        expectEq(readAll(joinPath(wipedDir, L"edvr-flat.ini")), mirroredFlat,
+                 "edvr-flat.ini comes back byte for byte");
+        check(!fileExists(joinPath(wipedDir, L"edvr.ini")), "and no edvr.ini is made up");
+        check(noteHas(notes, "Restored edvr-flat.ini"), "the notes say what was restored");
+        check(fileExists(joinPath(wipedDir, L"edvr_install\\state.ini")) &&
+                  fileExists(joinPath(wipedDir, L"edvr_install\\edvr.ini.base")),
+              "with the record and the base");
+    }
+
+    {   // A flat copy that fails is a restore that failed: with a directory where the
+        // file has to go, nothing can replace it.
+        const std::wstring blocked = joinPath(scratch, L"flatmirror-blocked");
+        removeTree(blocked);
+        makeTree(joinPath(blocked, L"edvr-flat.ini"));
+        std::vector<std::string> notes;
+        check(!restoreFromMirror(blocked, info, &notes), "a failed flat copy fails a flat-only restore");
+        check(noteHas(notes, "Could not restore edvr-flat.ini"), "and the notes say which file it was");
+        check(!fileExists(joinPath(blocked, L"edvr_install\\state.ini")),
+              "nothing else of a mirror whose settings did not come back is put into the folder");
+    }
+
+    // A mirror holding both files, made by hand: the shared file and the flat one.
+    const std::wstring bothDir = joinPath(root, L"both-mirror");
+    makeTree(bothDir);
+    writeAll(joinPath(bothDir, L"edvr.ini"), kSharedIni);
+    writeAll(joinPath(bothDir, L"edvr-flat.ini"), kFlatOwnIni);
+    writeAll(joinPath(bothDir, L"state.ini"), "[edvr]\r\nversion = 1\r\n");
+    const MirrorInfo both = readMirror(bothDir);
+    check(both.hasIni && both.hasFlatIni, "a mirror can hold both files");
+
+    {
+        const std::wstring wipedDir = joinPath(scratch, L"flatmirror-both");
+        removeTree(wipedDir);
+        makeTree(wipedDir);
+        std::vector<std::string> notes;
+        check(restoreFromMirror(wipedDir, both, &notes), "a mirror of both files restores");
+        expectEq(readAll(joinPath(wipedDir, L"edvr.ini")), kSharedIni, "edvr.ini comes back");
+        expectEq(readAll(joinPath(wipedDir, L"edvr-flat.ini")), kFlatOwnIni, "and edvr-flat.ini");
+    }
+
+    {   // The shared file's success must not hide the flat file's failure.
+        const std::wstring blocked = joinPath(scratch, L"flatmirror-flatblocked");
+        removeTree(blocked);
+        makeTree(joinPath(blocked, L"edvr-flat.ini"));
+        std::vector<std::string> notes;
+        check(!restoreFromMirror(blocked, both, &notes),
+              "edvr.ini restored and edvr-flat.ini not is not a successful restore");
+        expectEq(readAll(joinPath(blocked, L"edvr.ini")), kSharedIni, "the shared file did come back");
+        check(noteHas(notes, "Restored edvr.ini") && noteHas(notes, "Could not restore edvr-flat.ini"),
+              "and the notes name both the one that did and the one that did not");
+        check(fileExists(joinPath(blocked, L"edvr_install\\state.ini")),
+              "the record is restored, since some settings came back");
+    }
+
+    {   // And the other way round.
+        const std::wstring blocked = joinPath(scratch, L"flatmirror-sharedblocked");
+        removeTree(blocked);
+        makeTree(joinPath(blocked, L"edvr.ini"));
+        std::vector<std::string> notes;
+        check(!restoreFromMirror(blocked, both, &notes),
+              "edvr-flat.ini restored and edvr.ini not is not a successful restore either");
+        expectEq(readAll(joinPath(blocked, L"edvr-flat.ini")), kFlatOwnIni, "the flat file did come back");
+        check(noteHas(notes, "Could not restore edvr.ini"), "and the notes say edvr.ini did not");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // reading a DLL to find out whose it is
 // ---------------------------------------------------------------------------
 
@@ -1434,6 +3878,21 @@ static void testRunState() {
     check(runStateOf(name.c_str(), joinPath(joinPath(dir, L"down"), L"..")) ==
               GameRunState::ThisFolder,
           "nor is a path that goes down and comes back up");
+
+    // A process list that could not be taken is not "nobody is running". It
+    // returned NotRunning for years: a failed CreateToolhelp32Snapshot read as
+    // a machine with no game on it. It cannot be made to fail on demand, so the
+    // snapshot is handed in.
+    check(runStateOfSnapshot(INVALID_HANDLE_VALUE, name.c_str(), dir) == GameRunState::Unknown,
+          "a snapshot that could not be taken is not provably stopped");
+    check(runStateOfSnapshot(nullptr, name.c_str(), dir) == GameRunState::Unknown,
+          "nor is a null one");
+    check(runStateOfSnapshot(INVALID_HANDLE_VALUE, L"a-name-nothing-on-this-machine-has.exe",
+                             dir) == GameRunState::Unknown,
+          "whatever name was asked about: with no list there is no answer");
+    check(runStateOfSnapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0), name.c_str(), dir) ==
+              GameRunState::ThisFolder,
+          "and a snapshot that was taken answers exactly as runStateOf does");
 }
 
 // ---------------------------------------------------------------------------
@@ -1662,6 +4121,35 @@ static void testLogBundle(const std::wstring& scratch) {
     check(bundleHas(names, "edvr_FATAL.txt"), "the fatal note is in");
     check(bundleHas(names, "edvr.ini"), "the settings file is in");
 
+    {   // A flat install's logs are found where ITS settings file says: edvr-flat.ini
+        // (edvr.ini only while it has none). The VR profile's log.dir, which the
+        // flat runtime never reads, does not send the bundle to the wrong folder.
+        const std::wstring flat = joinPath(scratch, L"flatlogs");
+        const std::wstring flatLogs = joinPath(flat, L"flat_logs_here");
+        removeTree(flat);
+        makeTree(flatLogs);
+        writeAll(joinPath(flat, L"EliteDangerous64.exe"), "not really the game");
+        writeAll(joinPath(flat, L"edvr_profile.ini"), "[install]\r\nschema = 1\r\nprofile = flat\r\n");
+        writeAll(joinPath(flat, L"edvr.ini"), "[log]\r\ndir = " + toUtf8(joinPath(flat, L"vr_logs_nowhere")) + "\r\n");
+        writeAll(joinPath(flat, L"edvr-flat.ini"), "[log]\r\ndir = " + toUtf8(flatLogs) + "\r\n");
+        writeAll(joinPath(flatLogs, L"edvr_gfx_20260827_140000.log"), "the flat session");
+        const LogBundle flatBundle = collectLogs(flat, scratch);
+        check(flatBundle.ok, "a flat install's bundle is written", flatBundle.error);
+        const std::vector<std::string> flatNames = zipEntryNames(flatBundle.zipPath);
+        check(bundleHas(flatNames, "edvr_gfx_20260827_140000.log"),
+              "with the log from the folder edvr-flat.ini names");
+        check(bundleHas(flatNames, "edvr-flat.ini"), "and the flat settings file");
+
+        // Without a flat file yet, the flat runtime is reading edvr.ini, so that is
+        // where log.dir comes from.
+        DeleteFileW(joinPath(flat, L"edvr-flat.ini").c_str());
+        writeAll(joinPath(flat, L"edvr.ini"), "[log]\r\ndir = " + toUtf8(flatLogs) + "\r\n");
+        const LogBundle legacyBundle = collectLogs(flat, scratch);
+        check(legacyBundle.ok, "a legacy flat install's bundle is written", legacyBundle.error);
+        check(bundleHas(zipEntryNames(legacyBundle.zipPath), "edvr_gfx_20260827_140000.log"),
+              "with the log from the folder the shared edvr.ini names");
+    }
+
     // A folder with nothing to collect says so rather than writing an empty zip.
     const std::wstring bare = joinPath(scratch, L"barelogs");
     removeTree(bare);
@@ -1705,17 +4193,28 @@ int wmain(int argc, wchar_t** argv) {
     makeTree(scratch);
     edvr::installer::test::nativeContractCases([](bool ok, const char* what) { check(ok, what); });
     edvr::installer::test::nativeBuiltContractCases([](bool ok,const char* what){check(ok,what);},root);
-    edvr::installer::native_apply_cases::run([](bool ok, const char* what) { check(ok, what); }, joinPath(scratch, L"native_apply"));
+    edvr::installer::native_apply_cases::run([](bool ok, const char* what) { check(ok, what); }, joinPath(scratch, L"native_apply"), placeFile);
 
     printf("installer_test: root %ls\n", root.c_str());
 
     testMerge();
     testShippedIni(root);
+    testChangedDefault(root);
     testPlanner();
     testNativePlanner();
     testFlatPlanner();
+    testFlatSettingsPlanner();
     testApply(scratch);
     testMirror(scratch);
+    testAtomicWrite(scratch);
+    testReplaceScripts(scratch);
+    testApplyPatience(scratch);
+    testGenerations(scratch);
+    testMirrorGenerations(scratch);
+    testDemotedTrims(root, scratch);
+    testFlatSettingsFiles(scratch);
+    testFlatSettingsWindow(root, scratch);
+    testFlatMirror(scratch);
     testProbe(scratch);
     testRunState();
     testSettings(root, scratch);

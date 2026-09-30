@@ -357,6 +357,28 @@ int run(const Options& options,PresentHost* present=nullptr) {
     std::vector<uint32_t> black(256*256,0xff000000u);
     for(auto& source:skySources){context->UpdateSubresource(source.Get(),0,nullptr,black.data(),256*4,0);source.Reset();}
   });})||!overwritten)return 3;
+  // The harness's own eye images, now that the runtime renders no scene of its
+  // own: one gradient per eye (different, so a swapped Submit shows), made on
+  // the graphics device and Submit as they are each frame.
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> eyeSources[2];
+  bool eyesCreated=true;
+  if(!backend.route.invoke([&]{eyesCreated=host.graphicsCalls.invoke([&]{
+    constexpr unsigned side=512;
+    std::vector<uint32_t> pixels(side*side);
+    for(unsigned eye=0;eye<2;++eye) {
+      for(unsigned y=0;y<side;++y)for(unsigned x=0;x<side;++x) {
+        const unsigned along=eye?side-1-x:x;
+        const bool line=x%64<2||y%64<2;
+        const unsigned rgb[3]={line?230u:along*255/(side-1),y*255/(side-1),eye?200u:60u};
+        pixels[y*side+x]=0xff000000u|rgb[0]|(rgb[1]<<8)|(rgb[2]<<16);
+      }
+      D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=side;desc.MipLevels=desc.ArraySize=1;
+      desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;
+      desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+      const D3D11_SUBRESOURCE_DATA data{pixels.data(),side*4,0};
+      if(FAILED(host.graphics.device()->CreateTexture2D(&desc,&data,&eyeSources[eye]))){eyesCreated=false;break;}
+    }
+  })&&eyesCreated;})||!eyesCreated)return 3;
   compositor->ClearLastSubmittedFrame();
   const auto cacheBeforeLoading=host.compositorRead();
   bool outsideRejected=false,outsideRan=false;
@@ -456,10 +478,7 @@ int run(const Options& options,PresentHost* present=nullptr) {
         // the other eye, then compose the private pair at the second Submit.
         for(unsigned n=0;n<2;++n) {
           const unsigned eye=n ^ unsigned(frames&1);
-          ID3D11Texture2D* source=nullptr;
-          r=host.drawDiagnosticEye(eye,source);
-          if(r!=XR_SUCCESS){result("draw_eye",r);failed=true;break;}
-          const vr::Texture_t texture{source,vr::API_DirectX,vr::ColorSpace_Gamma};
+          const vr::Texture_t texture{eyeSources[eye].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
           const auto submitted=compositor->Submit(vr::EVREye(eye),&texture);
           if(submitted!=vr::VRCompositorError_None) {
             std::printf("error,submit_eye,%u,%d,xr=%d\n",eye,int(submitted),int(host.boundary.lastResult()));failed=true;break;
@@ -650,7 +669,11 @@ int selfTest() {
     EdvrNativePresentTrace present{sizeof(present),EDVR_NATIVE_PRESENT_TRACE_VERSION_1,1,0,1,1};
     present.spans[0]={2100,2200,2400,2500,2600,7,0,0,0};
     auto w=cycleHost->frameCycles.waitCallerBegin(3000,7,&present);cycleHost->frameCycles.waitOwnerBegin(w,3001);cycleHost->frameCycles.waitOwnerEnd(w,3002);cycleHost->frameCycles.waitCallerEnd(w,3,3003,31002,7,shape,true);
-    cycleHost->reportFrameCycles();
+    cycleHost->reportFrameCycles(500);
+    check(cycleHost->frameCycleReportWork.runs()==1&&cycleHost->frameCycleReportWork.maxTicks()>=500,
+      "phase-0 timing: a finished frame-cycle report is one frame_cycle_report run, its build time included");
+    cycleHost->reportFrameCycles(500);
+    check(cycleHost->frameCycleReportWork.runs()==1,"phase-0 timing: no report ready is not a run");
     check(cycleHost->frameCycleFirstNoted.load(),"production frame-cycle report path reachable");
     check(cycleHost->postSubmitFirstNoted.load(),"production post-submit report path reachable with accepted Present sample");
   }

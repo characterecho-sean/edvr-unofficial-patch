@@ -20,7 +20,8 @@ internal sealed record FrameMarker(ulong TimestampUs, ulong Sequence, ulong Gene
                                    ulong FeatureEpoch, ulong WaitReturnUs, ulong SecondSubmitReturnUs,
                                    ulong NextWaitEntryUs, ulong NextWaitReturnUs, ulong PresentBeginUs,
                                    ulong PresentEndUs, uint CallerThread, uint NextWaitThread,
-                                   ushort Status, ushort Flags, uint SceneReady);
+                                   ushort Status, ushort Flags, uint SceneReady,
+                                   ulong GpuSequence = 0, ushort SchemaVersion = 1);
 
 internal static class Markers
 {
@@ -32,6 +33,16 @@ internal static class Markers
 
     public static void Parse(TraceEvent data, Collected result)
     {
+        if ((int)data.ID == 4)
+        {
+            GpuMarkers.Parse(data.Version, data.EventData(), data.TimeStampQPC, result);
+            return;
+        }
+        if ((int)data.ID == 3)
+        {
+            ParseFrame(data.Version, data.EventData(), result);
+            return;
+        }
         if (data.Version != Version)
         {
             result.UnsupportedMarkers++;
@@ -52,13 +63,7 @@ internal static class Markers
                                                     I64(bytes, 24), U32(bytes, 32), U16(bytes, 36),
                                                     U16(bytes, 38)));
                     break;
-                case 3 when bytes.Length == 96:
-                    result.Frames.Add(new FrameMarker(U64(bytes, 0), U64(bytes, 8), U64(bytes, 16),
-                        U64(bytes, 24), U64(bytes, 32), U64(bytes, 40), U64(bytes, 48), U64(bytes, 56),
-                        U64(bytes, 64), U64(bytes, 72), U32(bytes, 80), U32(bytes, 84), U16(bytes, 88),
-                        U16(bytes, 90), U32(bytes, 92)));
-                    break;
-                case 1 or 2 or 3:
+                case 1 or 2:
                     result.MalformedMarkers++;
                     AddError(result, $"event {data.ID}: payload length {bytes.Length}");
                     break;
@@ -72,6 +77,27 @@ internal static class Markers
             result.MalformedMarkers++;
             AddError(result, $"event {data.ID}: {ex.Message}");
         }
+    }
+
+    public static void ParseFrame(int version, byte[] bytes, Collected result)
+    {
+        if (version is not (1 or 2))
+        {
+            result.UnsupportedMarkers++; result.GpuMarkerSchemaErrors++;
+            AddError(result, $"event 3: unsupported version {version}");
+            return;
+        }
+        if (bytes.Length != (version == 1 ? 96 : 104))
+        {
+            result.MalformedMarkers++;
+            if (version == 2) result.GpuMarkerSchemaErrors++;
+            AddError(result, $"event 3: payload length {bytes.Length} for version {version}");
+            return;
+        }
+        result.Frames.Add(new FrameMarker(U64(bytes, 0), U64(bytes, 8), U64(bytes, 16),
+            U64(bytes, 24), U64(bytes, 32), U64(bytes, 40), U64(bytes, 48), U64(bytes, 56),
+            U64(bytes, 64), U64(bytes, 72), U32(bytes, 80), U32(bytes, 84), U16(bytes, 88),
+            U16(bytes, 90), U32(bytes, 92), version == 2 ? U64(bytes, 96) : 0, (ushort)version));
     }
 
     public static void AddError(Collected result, string error)

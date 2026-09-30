@@ -133,24 +133,12 @@ struct Gate {
     bool     gateHaveNextKey = false;
     bool     gateViewWarned = false;
     bool     gatePanelSeenNoted = false;
-    bool     gateViewSynced = false;
 
     // The wake edge. `wakeKnown` false means the status file has not answered
     // yet, and an unknown-to-true transition is not an edge, only the first
     // thing we happened to see.
     bool     wakeKnown = false;
     bool     wakeLast = false;
-    bool     gateViewEverRead = false;   // something has supplied a real index
-    bool     gateViewLostNoted = false;
-    // The view bridge: a read that has died is covered by the counted view
-    // for as long as it takes to come back. No expiry -- the player stays in
-    // Explorer Cam as long as they wish (stated as a product requirement,
-    // 2026-08-15), and the held value cannot go stale outside the camera
-    // because the game freezes it there. See the long note at the loss
-    // decision for the exposure this accepts.
-    bool     gateBridgeOn = true;        // fix.head_offset_view_bridge
-    bool     gateBridgeStarted = false;  // once per contiguous unreadable run
-    bool     gateSyncRefusedNoted = false;
     uint32_t gateFrameNo = 0;            // the frame Frame() last ran for
 
     // STAMPS FOR THE DURATION TESTS, each paired with the frame counter above
@@ -186,14 +174,7 @@ struct Gate {
     uint64_t gateIntentMs = 0;           // ...and when, on the clock
     uint64_t gateIntentGraceMs = 2000;   // how long a press gets to take effect
     bool     gateInCamera = false;       // in the camera, whatever the view
-    // Camera entries (the gateInCamera latch), not the OFFSET arming: the
-    // scan nudge wants the camera edge, before the player has cycled to the
-    // right view.
-    uint32_t gateCameraEnters = 0;
 
-    // Set by headOffsetGateSetView. -1 means nobody can tell us, so the
-    // keypress count stands.
-    int      viewOverride = -1;
     // The flat panel has been composited steadily. A weak signal on purpose --
     // see the header.
     bool     panelSettled = false;
@@ -252,7 +233,6 @@ void headOffsetGateConfigure() {
         cfg.getIntInRange("fix.head_offset_intent_grace_ms", 2000, 0, 100000));
     g.gateWantView = cfg.getIntInRange("advanced.head_offset_view", 2, -1, 63);
     g.gateViewCount = cfg.getIntInRange("fix.head_offset_view_count", 6, 0, 64);
-    g.gateBridgeOn = cfg.getBool("fix.head_offset_view_bridge", true);
     // KEYLESS ENTRY IS PARKED, default off (product decision 2026-08-16).
     // The entry side field-certified -- grace, window, boarding-exit all
     // landed -- but the VIEW cannot be supplied without presses when the
@@ -355,10 +335,7 @@ void headOffsetGateSetWakeLive(bool known, bool inSupercruise, bool inTunnel) {
         "preset goes with it (field, 2026-09-02). A landing does not.",
         entering ? "into" : "out of", g.gateViewIndex);
     g.gateViewIndex = 0;
-    g.gateBridgeStarted = false;
 }
-
-uint32_t headOffsetGateEnterCount() { return g.gateCameraEnters; }
 
 int headOffsetGateCountedView() { return g.gateViewIndex; }
 
@@ -391,7 +368,6 @@ void headOffsetGateNewFootSession(const char* source, bool journalSaysSo) {
     // a landing leaves the on-foot preset where it was, and the reset that
     // used to live on this line was throwing away a correct number at every
     // airlock.
-    g.gateBridgeStarted = false;   // any held view belongs to the old session
     g.liveOnFootSeenThisFoot = false;   // this session's flag not yet observed
     Log::get().note(
         "head offset: a new on-foot session (%s). The counted view stays at "
@@ -468,12 +444,11 @@ void headOffsetGateKeyPressed() {
 // and the game appears to fold a larger index back into this range rather
 // than carry it, so folding is what we do too.
 //
-// Modulo rather than a pair of clamps. Clamping is right only for a step of
-// exactly one from inside the range, which is all the count could ever do
-// while stepping was its only writer. The read is the other writer, and it
-// can hand over an index from a context with a longer ring; that is a value
-// to fold, not to clamp to 5 and quietly call the last preset. C++ keeps the
-// sign of the dividend, so the negative case needs the second line.
+// Modulo rather than a pair of clamps. The count moves one press at a time,
+// so on foot it wraps at both ends: a press past 5 rolls to 0 and a backward
+// press from 0 rolls to 5, rather than stopping at an end and leaving the
+// count one behind for the rest of the session. C++ keeps the sign of the
+// dividend, so the negative case needs the second line.
 // The on-foot ring is 6 and wraps. A vehicle's is longer and this does not
 // need to know how much longer: off foot the count simply runs on unwrapped,
 // and the transition back is where the game's own rule is applied.
@@ -527,10 +502,6 @@ void headOffsetGateStepView(int delta) {
 void headOffsetGateViewBumped() { headOffsetGateStepView(+1); }
 
 void headOffsetGateViewUnbumped() { headOffsetGateStepView(-1); }
-
-void headOffsetGateSetView(int view) { g.viewOverride = view; }
-
-bool headOffsetGateInCamera() { return g.gateInCamera; }
 
 bool headOffsetGatePanelSettled() { return g.panelSettled; }
 
@@ -798,7 +769,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         if (!g.gateInCamera && entryAsked && panelGoneAWhile &&
             sceneNow && g.gatePanelRun > 30) {
             g.gateInCamera = true;
-            ++g.gateCameraEnters;
             g.gateSinceEnter = 0;
             g.heartbeatMs = stampMs();
             Log::get().note(
@@ -1011,7 +981,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     // -- which is exactly how it is used, since the camera opens on the
     // portrait view and the useful one is the next -- could then never arm
     // it, because by then the window was long closed.
-    // The GAME's view if somebody can read it, the keypress count otherwise.
+    // The view is the keypress count, and only the count.
     //
     // The count is ANCHORED, which 6ac.6d originally denied and has been
     // corrected: the game's view resets to 0 at every launch and this
@@ -1019,142 +989,36 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     // construction. What the count cannot survive is a MISSED press, which
     // desyncs it silently for the rest of the session.
     //
-    // That is what an override is for, and it is strictly better where one
-    // exists: it needs no key bound at all, it cannot drift, and it
-    // corrects a count that already has.
-    //
-    // -1 means "do not know" -- not scanned yet, no records found, or a
-    // value outside the plausible range -- and falls back to the count
-    // rather than substituting a number that happens to be wrong.
-    const int gameView = g.viewOverride;
-    // LOSING the view is a reason to stop -- after a bridge, not instantly.
-    //
-    // The strict rule was: once something HAS been supplying the view, losing
-    // it drops the offset until it comes back, because a count with no origin
-    // cannot be trusted (6ac.6d) and riding on a stale index moves the
-    // viewpoint on a guess. That rule met the field in 6ar-6at: near a planet
-    // the game rebuilds its camera records every ten to thirty seconds, the
-    // read dies at every rebuild, and the drop lands exactly when the player
-    // is sitting still in the wanted view USING the offset -- supplying none
-    // of the presses re-certification needs. The offset blinked off mid-use,
-    // every half minute, through no input at all.
-    //
-    // THE BRIDGE: for a bounded window after the read dies, the counted view
-    // stands. It is not the originless count the strict rule refused -- it
-    // was synced to a confirmed read seconds ago, presses still advance it
-    // (where the next-view key is bound), the first successful re-read
-    // corrects it through the sync below, and expiry restores the strict
-    // behaviour. The exposure is a view change nobody could see during the
-    // window, held at most kBridgeFrames or until the next read, whichever
-    // is sooner -- chosen (by Sean, 2026-08-15) over the offset dropping at
-    // every rebuild.
-    if (gameView >= 0) {
-        g.gateViewEverRead = true;
-        g.gateViewLostNoted = false;
-        g.gateBridgeStarted = false;   // any successful read ends the episode
-    } else if (g.gateViewEverRead) {
-        if (g.gateBridgeOn && !g.gateBridgeStarted) {
-            g.gateBridgeStarted = true;
-            // NO EXPIRY, and that is a product decision, not an oversight: the
-            // player stays in Explorer Cam as long as they wish (2026-08-15),
-            // and the held value cannot go stale outside the camera because
-            // the game freezes the view there. The exposure that remains is a
-            // press nobody saw while IN the camera on a dead read -- the
-            // offset then follows the old view until any successful read, and
-            // cycling forward re-certifies in three witnessed presses. The
-            // wall-clock TTL tried first expired while the player was away
-            // and dead bridges greeted every relanding; the in-camera budget
-            // tried second contradicted indefinite camera stays.
-            Log::get().note(
-                "camera view: the read died mid-camera (the game rebuilds its "
-                "records near a planet), so the last confirmed view %d is being "
-                "held until it comes back. %s",
-                g.gateViewIndex,
-                g.gateHaveNextKey
-                    ? "Your view-key presses still count during the hold."
-                    : "No next-view key is bound, so cycling during the hold "
-                      "cannot be seen -- if you switch presets before the read "
-                      "returns, the offset follows the old one until it does.");
-        }
-        if (!g.gateBridgeOn && !g.gateViewLostNoted) {
-            g.gateViewLostNoted = true;
-            Log::get().note("head offset OFF: the camera view can no longer be "
-                            "read, so which preset you are on is unknown. It is "
-                            "coming off rather than staying on a preset it "
-                            "cannot confirm; it will come back when the view "
-                            "does.");
-        }
-    }
-    // THE SYNC TRUSTS ONLY WHAT COULD BE TRUE. A read that differs from the
-    // held view while the player is OUT of the camera is impossible for the
-    // real preset -- the game freezes the view there -- so it is evidence
-    // about the SUPPLIER, not about the view (6aw: a counter in the array
-    // certified and supplied 3-then-0 while the player stood outside; the
-    // sync took both and the bridge faithfully held the poison). In-camera
-    // reads sync as always: the player can genuinely cycle there.
-    if (gameView >= 0 && gameView != g.gateViewIndex) {
-        if (g.gateInCamera || !g.gateViewEverRead) {
-            if (!g.gateViewSynced) {
-                g.gateViewSynced = true;
-                Log::get().note("camera view: the game says %d, the keypress count "
-                                "said %d. Using the game's from here, so a missed "
-                                "press no longer desyncs anything.",
-                                gameView, g.gateViewIndex);
-            }
-            // Folded, not taken raw: a read taken while the game still
-            // holds a longer context's index would otherwise put the count
-            // somewhere the on-foot cycle cannot reach, and nothing
-            // downstream range-checks it.
-            g.gateViewIndex = normalizeView(gameView);
-        } else {
-            if (!g.gateSyncRefusedNoted) {
-                g.gateSyncRefusedNoted = true;
-                Log::get().note(
-                    "camera view: a read said %d while you were not in the camera, "
-                    "where the view cannot change -- keeping the confirmed %d and "
-                    "treating the reader as suspect. It will be believed again the "
-                    "next time it agrees, or the next time you are in the camera.",
-                    gameView, g.gateViewIndex);
-            }
-        }
-    } else if (gameView >= 0) {
-        g.gateSyncRefusedNoted = false;   // agreement: the reader is sane again
-    }
-    const bool bridging =
-        gameView < 0 && g.gateViewEverRead && g.gateBridgeOn;
-    const bool viewLost = g.gateViewEverRead && gameView < 0 && !bridging;
-    const bool viewOk = !viewLost &&
-        (g.gateWantView < 0 || g.gateViewIndex == g.gateWantView);
+    // It used to have a second source. A read of the game's own index, when
+    // one could be had, overrode the count (it needed no key bound, could not
+    // drift and corrected a count that already had), and a bridge held the
+    // last confirmed view while that read was dead. The search that supplied
+    // it was removed 2026-09-29, and the override, the bridge and the sync
+    // rules that policed them went with it. Nothing here reads the game.
+    const bool viewOk =
+        g.gateWantView < 0 || g.gateViewIndex == g.gateWantView;
 
     // Say so when the view can NEVER match, and only then.
     //
     // The conditions are checked here rather than at config time because
-    // three of them are only knowable in a frame: whether the player has
-    // actually reached the camera, whether an override is supplying an
-    // index, and whether the count has moved. A build that reads the view
-    // from the game needs no key bound at all, and telling its user to bind
-    // one -- with "the offset will never arm", while it arms -- is worse
-    // than saying nothing.
+    // two of them are only knowable in a frame: whether the player has
+    // actually reached the camera, and whether the count has moved.
     //
     // Every clause is load-bearing: in the camera (so it is the moment the
-    // player expects something), the view does not match, no key can ever
-    // change it, and nobody is supplying it. That combination is a dead
-    // configuration and nothing else is.
+    // player expects something), the view does not match, and no key can ever
+    // change it. That combination is a dead configuration and nothing else
+    // is.
     if (!g.gateViewWarned && g.gateInCamera && !viewOk && g.gateWantView > 0 &&
-        !g.gateHaveNextKey && g.viewOverride < 0) {
+        !g.gateHaveNextKey) {
         g.gateViewWarned = true;
-        // Names the CAUSE rather than a setting to change, because the setting
-        // that would change it is not the same in every build. What is true
-        // everywhere is that nothing could say which camera view this is.
+        // Names the CAUSE first: with no next-view key bound to count,
+        // nothing can say which camera view this is.
         Log::get().note(
-            "head offset: the camera view could not be read from the game, so "
-            "this cannot tell which preset you are on. It wants view %d and is "
-            "assuming %d, so the offset will not engage.\n"
-            "  The search for the view index found nothing usable -- see the "
-            "camera view lines above for how much memory it covered and how "
-            "many attempts it made. After a game update, "
-            "d3d11.camera_index_type_offset no longer points at the right "
-            "thing and needs re-measuring.\n"
+            "head offset: this cannot tell which camera preset you are on. It "
+            "wants view %d and is assuming %d, so the offset will not engage.\n"
+            "  EDVR keeps the count by following your next-camera-view key, "
+            "and none is bound: bind that control in Elite's options (EDVR "
+            "reads Elite's own binding) and it will follow.\n"
             "  advanced.head_offset_view = -1 applies the offset in every camera "
             "preset, including the one that faces back at you.",
             g.gateWantView, g.gateViewIndex);

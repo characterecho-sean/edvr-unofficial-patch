@@ -60,11 +60,9 @@ void resolveBindConfigure(Config& cfg);
 namespace detail {
 extern bool g_resolveBindOn;
 
-// The deferred resolve's PIXEL shader -- the same content hash
-// resolve_probe.cpp matches on, measured 2026-08-30 from a field shader
-// dump and confirmed by disassembly. Duplicated rather than shared because
-// the two modules stand alone: one is a probe somebody arms for an
-// evening, this is a fix that ships on.
+// The deferred resolve's PIXEL shader -- its content hash, measured
+// 2026-08-30 from a field shader dump and confirmed by disassembly (it was
+// also the key of the resolve probe, since removed).
 constexpr uint64_t kResolveBindPs = 0x7CECABDE34FFBE9EULL;
 
 // What the binding shadow's pixel shader slot says about this draw. Unknown
@@ -79,7 +77,7 @@ constexpr ResolveBindShadow resolveBindShadowMatch(bool hasShader, uint64_t hash
 inline bool resolveBindWants() { return detail::g_resolveBindOn; }
 
 // True when this eye draw is the lighting resolve (matched by PIXEL shader
-// content hash, the same key resolve_probe matches on). Uses the owner
+// content hash). Uses the owner
 // context's binding shadow when its pointer and hash are both known; otherwise
 // reads the real context and repairs that shadow slot when possible.
 //

@@ -23,7 +23,11 @@
 // the motion_source encoding (panel_tests.h) -- engine_velocity.cpp's draw
 // half linked in and driven through the flight's and the review's cases and
 // the on-foot source's slot target, plus the temporal pass's compute-state
-// save (lifecycle_tests.h). build.bat links
+// save (lifecycle_tests.h), and the primary-pool cache's lifetime -- game
+// buffers held only while the feature is live, released on stand-down, a full
+// cache logged once, a mid-session activation nominating the pool from its
+// binding (pin_tests.h), and the pool copier's observer running on job threads
+// without the engine mutex (copier_tests.h). build.bat links
 // src\d3d11\engine_velocity.cpp with EDVR_ENGINE_VELOCITY_RIG and the binding
 // shadow external; lifecycle_tests.h supplies the stubs.
 #include <windows.h>
@@ -36,6 +40,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include "allocation_counter.h"
 
 #include "shader_tests.h"
 #include "overlay_depth_gpu_tests.h"
@@ -48,6 +53,9 @@
 #include "corpus_identity.h"
 #include "actual_vs_link_test.h"
 #include "lifecycle_tests.h"
+#include "pin_tests.h"
+#include "copier_tests.h"
+#include "unkeyed_tests.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/engine_velocity_families.h"   // kSelfMarking
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
@@ -89,6 +97,15 @@ std::string g_softWhy;
 void softCheck(bool value, const char* why) {
     if (!value && g_softWhy.empty()) g_softWhy = why && *why ? why : "(no reason given)";
 }
+// --partial: the dump under test may lack some of the required pairs (each
+// install's edvr_logs\shaders holds what that install drew, and the pairs below
+// were measured across several). Strict stays the default: without the flag a
+// missing file fails the run. With it, an absent pair is listed and skipped, and
+// every pair the dump does hold must still pass whole -- so a candidate can be
+// tried on the dump that has it without a full corpus on this machine.
+bool g_partial = false;
+unsigned g_absent = 0;
+bool g_lastAbsent = false;
 // One real pair through the whole harness, `ok` deciding what a failure does:
 // `check` for a keyed pair (the run fails), softCheck for a candidate (the
 // first failure is kept and printed). Each result is taken before its check,
@@ -97,6 +114,12 @@ bool onePair(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstr
              void (*ok)(bool, const char*)) {
     const auto vs = readFile(root + L"\\shaders\\" + p.vs + L".dxbc");
     const auto ps = readFile(root + L"\\shaders\\" + p.ps + L".dxbc");
+    g_lastAbsent = false;
+    if (g_partial && (vs.empty() || ps.empty())) {
+        ++g_absent; g_lastAbsent = true;
+        std::printf("  corpus: %ls + %ls: absent from this dump (--partial), skipped\n", p.vs, p.ps);
+        return false;
+    }
     ok(!vs.empty() && !ps.empty(), "real corpus pair present");
     if (vs.empty() || ps.empty()) return false;
     edvr::EngineVelocityInputs in;
@@ -186,6 +209,11 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         // the 2026-09-27 glare_shader_dump flight, harnessed, keyed.
         {L"vs_436193B352A2897E", L"ps_51EE1F922FD220B0", false},
         {L"vs_889A5279E68F0672", L"ps_D31DCAFA7C05CB47", false},
+        // Epic 20260929, the Krait's main-menu F10 capture: the hull plating's stock
+        // pixel shader, drawn unkeyed until now (a flat-only companion, flatPs). Its
+        // 5 draws left 22.5% of the frame's slots stale. Passes whole on WARP: patched,
+        // reflected, created, o0..o3 and depth bit-identical to the stock pair.
+        {L"vs_66DE2CADB1F4AE6B", L"ps_235567BE2840B3ED", false},
     };
     for (const auto& p : pairs) onePair(device, context, root, p, &check);
     // Candidates: pairs seen drawing stock that are not keyed. Each is tried
@@ -198,10 +226,16 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         // Historical double-patch candidate: BA58 is EDVR's generated 4375
         // substitution, proven by production-patcher hashes in 162120.
         {L"vs_5B4D8E894EEDA8B4", L"ps_BA58469C3D6120A7", true},
+        // Left for later (2026-09-29, the Krait's main-menu hangar): the flat census
+        // names them when they draw. CAD1F585 is EDHM-patched (reads t120), so its
+        // hash belongs to a mod's build; 7311054A takes an SV_Position input.
+        {L"vs_AACFDCF2FB9AD809", L"ps_CAD1F585EDDC5641", false},
+        {L"vs_BBE58E40FE88EC80", L"ps_7311054AB3AAE1DC", false},
     };
     for (const auto& p : candidates) {
         g_softWhy.clear();
         const bool passed = onePair(device, context, root, p, &softCheck) && g_softWhy.empty();
+        if (g_lastAbsent) continue;   // onePair already said it was absent
         std::printf("  candidate: %ls + %ls: %s%s\n", p.vs, p.ps, passed ? "PASSES the harness" : "not keyable -- ",
                     passed ? "" : g_softWhy.c_str());
     }
@@ -216,6 +250,11 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         std::swprintf(wps, 24, L"ps_%016llX", static_cast<unsigned long long>(p.ps));
         const auto vsb = readFile(root + L"\\shaders\\" + wvs + L".dxbc");
         const auto psb = readFile(root + L"\\shaders\\" + wps + L".dxbc");
+        if (g_partial && (vsb.empty() || psb.empty())) {
+            ++g_absent;
+            std::printf("  corpus: %ls + %ls: self-marking pair absent from this dump (--partial), skipped\n", wvs, wps);
+            continue;
+        }
         check(!vsb.empty() && !psb.empty(), "self-marking pair's dxbc present");
         if (vsb.empty() || psb.empty()) continue;
         if (p.vs == 0x436193B352A2897Eull) vs4361 = vsb;
@@ -245,14 +284,15 @@ int wmain(int argc, wchar_t** argv) {
         if (a == L"--self-test" || a == L"--dry-run") selfTest = true;
         else if (a == L"--verbose") lifecycle_tests::g_verbose = true;
         else if (a == L"--corpus" && i + 1 < argc) corpusRoot = argv[++i];
+        else if (a == L"--partial") g_partial = true;
         else if (a == L"--real-link" && i + 1 < argc) realLinkRoot = argv[++i];
         else {
-            std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir>] [--real-link <edvr_logs dir>]\n");
+            std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir> [--partial]] [--real-link <edvr_logs dir>]\n");
             return 2;
         }
     }
     if (!selfTest && corpusRoot.empty() && realLinkRoot.empty()) {
-        std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir>] [--real-link <edvr_logs dir>]\n");
+        std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir> [--partial]] [--real-link <edvr_logs dir>]\n");
         return 2;
     }
     ComPtr<ID3D11Device> device;
@@ -301,6 +341,29 @@ int wmain(int argc, wchar_t** argv) {
               !edvr::engineVelocityPoolFamilyPair(0x61AE8EB05FDC18DDull, 0x06D24ACAB0DC11B3ull),
               "Coriolis: unknown pairs and the camera-following unrelated rig remain unkeyed");
     }
+    // The Krait hull pair (2026-09-29): keyed for flat through the family's flat-only
+    // companion slot, never for VR. Its sibling stays keyed everywhere, and the pixel
+    // shaders left for later (the EDHM-patched CAD1F585, BBE58E40's 7311054A) and a
+    // third 66DE2CAD pixel shader stay unkeyed in every profile.
+    constexpr uint64_t hullVs = 0x66DE2CADB1F4AE6Bull, hullPs = 0x235567BE2840B3EDull;
+    constexpr uint64_t hullSiblingPs = 0x864F1F949851B8DEull;
+    for (const auto profile : {edvr::RuntimeProfile::Vr, edvr::RuntimeProfile::LegacyVr}) {
+        edvr::g_runtimeProfile = profile;
+        check(!edvr::engineVelocityPoolFamilyPair(hullVs, hullPs) &&
+              edvr::engineVelocityPoolFamilyPair(hullVs, hullSiblingPs),
+              "VR: the hull pair stays unkeyed while its keyed sibling is untouched");
+    }
+    for (const auto profile : {edvr::RuntimeProfile::Vr, edvr::RuntimeProfile::LegacyVr, edvr::RuntimeProfile::Flat}) {
+        edvr::g_runtimeProfile = profile;
+        check(!edvr::engineVelocityPoolFamilyPair(0xAACFDCF2FB9AD809ull, 0xCAD1F585EDDC5641ull) &&
+              !edvr::engineVelocityPoolFamilyPair(0xBBE58E40FE88EC80ull, 0x7311054AB3AAE1DCull) &&
+              !edvr::engineVelocityPoolFamilyPair(hullVs, 0x818212B5F404C002ull),
+              "the pixel shaders left for later stay unkeyed in every profile");
+    }
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    check(edvr::engineVelocityPoolFamilyPair(hullVs, hullPs) &&
+          edvr::engineVelocityPoolFamilyPair(hullVs, hullSiblingPs),
+          "flat keys the hull pair beside its sibling");
     edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
     shader_tests::run({device.Get(), context.Get(), &check});
     overlay_depth_gpu_tests::run(device.Get(), context.Get(), &check);
@@ -313,14 +376,19 @@ int wmain(int argc, wchar_t** argv) {
     primary_copy_tests::run(device.Get(),context.Get(),&check);
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
+    pin_tests::run({device.Get(), context.Get(), &check});
+    copier_tests::run({device.Get(), context.Get(), &check});
+    unkeyed_tests::run({&check});
     if (!realLinkRoot.empty()) {
         const Pair edge{L"vs_DE545DC8EE4FBB87", L"ps_91F8937EDA723663", false};
         check(onePair(device.Get(), context.Get(), realLinkRoot, edge, &check),
               "captured DE54/PS91 real VS link and G-buffer equivalence");
     }
     if (!corpusRoot.empty()) corpus(device.Get(), context.Get(), corpusRoot);
-    std::printf("engine_velocity_test: %u checks passed%s%s.\n", g_checks,
-                corpusRoot.empty() ? "" : " including the real shader corpus",
-                realLinkRoot.empty() ? "" : " including the captured real VS link");
+    std::printf("engine_velocity_test: %u checks passed%s%s%s.\n", g_checks,
+                corpusRoot.empty() ? "" : (g_absent ? " including the real shader corpus (PARTIAL: some pairs absent from the dump)"
+                                                    : " including the real shader corpus"),
+                realLinkRoot.empty() ? "" : " including the captured real VS link",
+                g_absent ? (" [" + std::to_string(g_absent) + " absent]").c_str() : "");
     return 0;
 }

@@ -13,7 +13,7 @@
 //       is unwound and deduped into a small table: WHO reads the pose.
 //   B   read-only CodeHooks on the game's per-frame camera-positioner Tick
 //       and its swap-sync routine, build- and prologue-keyed like
-//       transition_flash_prevent.cpp (each stands down on its own if
+//       transition_flash_eye_base.cpp (each stands down on its own if
 //       either has moved). A swap is the cached positioner (this+0x2A0)
 //       changing across a call.
 //
@@ -33,7 +33,7 @@ namespace edvr {
 class Config;
 
 // Read on every config reload (vscreen.cpp, both call sites, beside
-// transitionFlashPreventConfigure). Off: one log line, nothing installed,
+// transitionFlashEyeBaseConfigure). Off: one log line, nothing installed,
 // and the runtime's pose-trace request flag stays clear. The first call
 // that sees "on" installs the two positioner CodeHooks and sets the
 // runtime's request flag; later calls only move the live on/off bit -- the
@@ -42,7 +42,7 @@ class Config;
 void poseReaderWatchConfigure(Config& cfg);
 
 // Once a frame, from vscreen.cpp beside glitchFrameBoundary()/
-// transitionFlashPreventFrameBoundary(). Publishes the frame number the
+// transitionFlashEyeBaseFrameBoundary(). Publishes the frame number the
 // positioner hooks (which run on whatever thread calls Tick/swap-sync, not
 // necessarily this one) read, runs the 60-frame stability gate against the
 // runtime's published render-pose pointer, arms or sweeps for newly
@@ -94,7 +94,7 @@ struct PoseReaderTableEntry {
 uint32_t poseReaderWatchTableCount();
 PoseReaderTableEntry poseReaderWatchTableEntry(uint32_t index);
 
-// Final session summary. Mirrors transitionFlashPreventShutdown's call
+// Final session summary. Mirrors transitionFlashEyeBaseShutdown's call
 // site (device_hook.cpp).
 void poseReaderWatchShutdown();
 

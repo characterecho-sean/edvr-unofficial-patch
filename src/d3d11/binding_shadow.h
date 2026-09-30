@@ -199,4 +199,26 @@ bool bindingResolve(void* view, ResourceInfo* out);
 // fix silently standing down.
 bool bindingResolveResource(void* resource, ResourceInfo* out);
 
+// THE SAME TWO RESOLVERS FOR AN INSTRUMENT, on budgets of their own.
+//
+// bindingResolve and bindingResolveResource are the FIXES' resolvers: the panel
+// distance, the interface layers, the scanner and the rest read them every draw,
+// and each has one budget of five faults. Every census, ledger and probe that
+// resolved a binding used to share those budgets, so five faults in a diagnostic --
+// a probe that resolves a stale pointer is exactly what it is for -- stopped the
+// resolver for every fix, and the notes said only "bindingShadow.resolve". An
+// instrument calls these instead: identical in every respect but which budget a
+// fault is charged to, so it can run its own out without taking anything with it.
+//
+// Which callers are instruments: the modules that exist to be looked at (the draw
+// census, the object probe, the FSS probe, the HUD layer census) and the probe
+// blocks inside vscreen.cpp's draw path. A fix that also serves a probe keeps the
+// fixes' resolver: a wrong guess costs it the old shared budget, which is where it
+// was, and never the reverse.
+//
+// Rigs that supply their own bindingResolve (EDVR_BINDING_SHADOW_EXTERNAL) never
+// call these; the modules that do are compiled only into the DLL.
+bool bindingResolveProbe(void* view, ResourceInfo* out);
+bool bindingResolveResourceProbe(void* resource, ResourceInfo* out);
+
 }  // namespace edvr

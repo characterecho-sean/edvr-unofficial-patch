@@ -1,11 +1,51 @@
 #pragma once
+#include <cstring>
+#include <string>
 #include "../../src/openxr/frame_cycle_stats.h"
+#include "../../src/openxr/long_cycle_line.h"
 
 namespace edvr::openxr::test {
 template<class Check> void runFrameCycleCases(Check check) {
   auto cStorage=std::make_unique<FrameCycleStats>();auto& c=*cStorage; FrameCycleStats::Shape shape{};shape.width[0]=shape.width[1]=2481;
   shape.height[0]=shape.height[1]=2121;shape.outputWidth[0]=shape.outputWidth[1]=3072;
   shape.outputHeight[0]=shape.outputHeight[1]=3264;shape.generation=7;shape.featureEpoch=3;shape.shouldRender=1;shape.sceneReady=1;
+  {
+    FrameCycleStats linked;FrameCycleStats::Completed completed{};
+    auto linkedWait=[&](uint64_t xr,uint64_t gpu,uint64_t base,const FrameCycleStats::Shape& scope,bool ok=true,uint32_t caller=4){
+      auto w=linked.waitCallerBegin(base,4);linked.waitOwnerBegin(w,base+10);linked.waitOwnerEnd(w,base+20);
+      linked.waitCallerEnd(w,xr,base+30,base/1000,caller,scope,ok,gpu);
+    };
+    auto linkedStereo=[&](uint64_t xr,uint64_t base){for(unsigned eye=0;eye<2;++eye){
+      const auto at=base+100+eye*100;auto s=linked.submitCallerBegin(eye,at,4);
+      linked.submitOwnerBegin(s,at+10);linked.submitOwnerEnd(s,at+20);linked.submitCallerEnd(s,eye,xr,at+30,4,0.01,true);
+    }};
+    linkedWait(100,9001,1000,shape);linkedStereo(100,1000);linkedWait(105,9017,2000,shape);
+    check(linked.takeCompleted(completed)&&completed.sequence==100&&completed.producerSequence==9001,
+      "completed cycle retains its explicit producer token, not XR or next-wait token");
+    linkedStereo(105,2000);linkedWait(106,0,3000,shape);
+    check(linked.takeCompleted(completed)&&completed.sequence==105&&completed.producerSequence==9017,
+      "divergent XR and producer counters remain independently linked");
+    linkedStereo(106,3000);linkedWait(107,9100,4000,shape);
+    check(linked.takeCompleted(completed)&&completed.sequence==106&&completed.producerSequence==0,
+      "unavailable producer mapping never inherits a previous token");
+    linkedStereo(107,4000);auto nextGeneration=shape;++nextGeneration.generation;
+    linkedWait(200,9200,5000,nextGeneration);
+    check(!linked.takeCompleted(completed),"generation transition drops previous cycle producer identity");
+    linkedStereo(200,5000);linkedWait(201,9201,6000,nextGeneration);
+    check(linked.takeCompleted(completed)&&completed.sequence==200&&completed.producerSequence==9200,
+      "new generation has only its newly opened producer mapping");
+    linked.reset();check(!linked.takeCompleted(completed),"reset drops completed producer mapping");
+    linkedWait(300,9300,7000,shape);linkedStereo(300,7000);linkedWait(301,9301,8000,shape,false);
+    check(!linked.takeCompleted(completed),"failed wait produces no linked cycle");
+    linkedWait(302,9302,9000,shape);linkedStereo(302,9000);linkedWait(303,9303,10000,shape,true,5);
+    check(!linked.takeCompleted(completed),"foreign caller produces no linked cycle");
+    auto loading=shape;loading.sceneReady=0;
+    linkedWait(400,9400,11000,loading);linkedStereo(400,11000);linkedWait(401,9401,12000,loading);
+    check(linked.takeCompleted(completed)&&completed.producerSequence==0,"loading cycle maps producer as unavailable");
+    linked.reset();auto withheld=shape;withheld.shouldRender=0;
+    linkedWait(500,9500,13000,withheld);linkedStereo(500,13000);linkedWait(501,9501,14000,withheld);
+    check(linked.takeCompleted(completed)&&completed.producerSequence==0,"withheld frame maps producer as unavailable");
+  }
   auto wait=[&](uint64_t seq,uint64_t us,uint64_t ms,uint32_t thread=11){auto t=c.waitCallerBegin(us,thread);c.waitOwnerBegin(t,us+100);c.waitOwnerEnd(t,us+300);c.waitCallerEnd(t,seq,us+500,ms,thread,shape,true);};
   auto submit=[&](uint64_t seq,unsigned eye,uint64_t us,uint32_t thread=11){auto t=c.submitCallerBegin(eye,us,thread);c.submitOwnerBegin(t,us+100);c.submitOwnerEnd(t,us+300);c.submitCallerEnd(t,eye,seq,us+500,thread,0.25,true);};
   double callerWork=-1;
@@ -175,5 +215,84 @@ template<class Check> void runFrameCycleCases(Check check) {
   auto inertStorage=std::make_unique<FrameCycleStats>();auto& inert=*inertStorage;auto i0=inert.waitCallerBegin(1000,8);inert.waitCallerEnd(i0,1,1100,1,8,shape,false);
   auto i1=inert.waitCallerBegin(2000,8);inert.waitCallerEnd(i1,2,2100,31002,8,shape,false);
   FrameCycleStats::Report inertReport{};check(inert.takeReport(inertReport)&&inertReport.valid==0&&inertReport.admitted>0,"frame-cycle zero-valid window reports failures");
+
+  // ---- native_long_cycle's Present split ----------------------------------------------------------------
+  // post_second_submit_to_next_wait cut at Elite's Present from the graphics half's trace, one cycle at a
+  // time. The fixture is the `exact` one above: second Submit returns at 1230, the hook runs 1300..1400 with
+  // its marks at 1310/1360/1370, the next wait enters at 1500. By hand: pre_present 0.07, present_hook 0.10
+  // (before the real call 0.01, the real Present 0.05, after it 0.01, the render callback 0.03),
+  // post_present 0.10 -- and 0.07+0.10+0.10 is the 0.27 the un-split phase has always reported.
+  const auto closeTo=[](double a,double b){return std::fabs(a-b)<1e-9;};
+  const auto splitCycle=[&](const EdvrNativePresentTrace* trace,FrameCycleStats::Completed& out){
+    auto storage=std::make_unique<FrameCycleStats>();auto& stats=*storage;
+    startFrame(stats,40,1000,1);closeStart(stats,41,1500,2,trace);
+    return stats.takeCompleted(out)&&out.sequence==40;
+  };
+  FrameCycleStats::Completed splitDone{};
+  auto splitOne=makeTrace();splitOne.count=1;splitOne.spans[0]={1300,1310,1360,1370,1400,4,0,0,0};
+  check(splitCycle(&splitOne,splitDone)&&splitDone.presentSplit&&splitDone.presentCount==1&&
+    closeTo(splitDone.prePresentMs,0.07)&&closeTo(splitDone.presentHookMs,0.10)&&closeTo(splitDone.postPresentMs,0.10),
+    "long-cycle Present split: pre_present, present_hook and post_present of one valid Present");
+  check(closeTo(splitDone.hookBeforeRealMs,0.01)&&closeTo(splitDone.hookRealMs,0.05)&&closeTo(splitDone.hookAfterRealMs,0.01)&&
+    closeTo(splitDone.hookCallbackMs,0.03),
+    "long-cycle Present split: the hook's own four parts, from the trace's five marks");
+  check(closeTo(splitDone.prePresentMs+splitDone.presentHookMs+splitDone.postPresentMs,splitDone.afterSecondMs)&&
+    closeTo(splitDone.hookBeforeRealMs+splitDone.hookRealMs+splitDone.hookAfterRealMs+splitDone.hookCallbackMs,splitDone.presentHookMs),
+    "long-cycle Present split adds up to post_second_submit_to_next_wait, and the hook's parts to the hook");
+  char splitLine[1024]{};
+  const size_t splitLength=formatLongCycleLine(splitLine,sizeof(splitLine),1234,11.1111,splitDone);
+  check(std::string(splitLine)==
+    "native_long_cycle,sequence=1234,cycle_ms=0.5000,period_ms=11.1111,"
+    "game_before_first_submit=0.0700,first_submit_roundtrip=0.0300,first_submit_owner_body=0.0100,"
+    "between_eye_calls=0.0700,second_submit_roundtrip=0.0300,second_submit_owner_body=0.0100,"
+    "first_submit_render_park=0.0100,second_submit_render_park=0.0100,"
+    "post_second_submit_to_next_wait=0.2700,present_split=ok,pre_present=0.0700,present_hook=0.1000,"
+    "hook_before_real=0.0100,hook_real_present=0.0500,hook_after_real=0.0100,hook_render_callback=0.0300,"
+    "post_present=0.1000,next_wait_roundtrip=0.0300,next_wait_owner_body=0.0100,units=wall_ms"&&
+    splitLength==std::strlen(splitLine),
+    "native_long_cycle line: every existing field unchanged and in place, the Present split added beside the phase it cuts");
+
+  // A cycle without a valid single-Present trace says why and prints none of the split's numbers: never a
+  // zero that reads as a free hook.
+  struct SplitCase {const char* name;const char* reason;bool valid;uint32_t count;};
+  const auto reasonOf=[&](const EdvrNativePresentTrace* trace,const SplitCase& expected){
+    FrameCycleStats::Completed done{};
+    const bool got=splitCycle(trace,done);
+    char text[1024]{};formatLongCycleLine(text,sizeof(text),7,11.0,done);
+    const bool ok=got&&!done.presentSplit&&done.postValid==expected.valid&&done.presentCount==expected.count&&
+      std::strstr(text,(std::string("present_split=")+expected.reason+",next_wait_roundtrip=").c_str())&&
+      !std::strstr(text,"pre_present=")&&!std::strstr(text,"present_hook=")&&!std::strstr(text,"post_present=")&&
+      std::strstr(text,"post_second_submit_to_next_wait=0.2700")&&std::strstr(text,"units=wall_ms");
+    check(ok,expected.name);
+  };
+  reasonOf(nullptr,{"long-cycle Present split absent without the graphics half's provider","provider_missing",false,0});
+  auto splitZero=makeTrace();
+  reasonOf(&splitZero,{"long-cycle Present split absent when the cycle held no Present","no_present",true,0});
+  auto splitTwo=makeTrace();splitTwo.count=2;
+  splitTwo.spans[0]={1240,1245,1255,1265,1280,4,0,0,0};splitTwo.spans[1]={1330,1340,1380,1390,1410,4,0,0,0};
+  reasonOf(&splitTwo,{"long-cycle Present split absent for two Presents in one cycle","multiple_present",true,2});
+  auto splitPartial=makeTrace();splitPartial.count=1;splitPartial.spans[0]={1229,1240,1250,1260,1270,4,0,0,0};
+  reasonOf(&splitPartial,{"long-cycle Present split names a partial Present","partial_present",false,0});
+  auto splitFailed=makeTrace();splitFailed.count=1;splitFailed.spans[0]={1300,1310,1360,1370,1400,4,0,0,-1};
+  reasonOf(&splitFailed,{"long-cycle Present split names a failed Present","failed_present",false,0});
+  auto splitOldProvider=makeTrace();splitOldProvider.version=99;
+  reasonOf(&splitOldProvider,{"long-cycle Present split names a provider of another version","provider_version",false,0});
+  auto splitOtherThread=makeTrace();splitOtherThread.count=1;splitOtherThread.spans[0]={1300,1310,1360,1370,1400,99,0,0,0};
+  reasonOf(&splitOtherThread,{"long-cycle Present split names a Present on another thread","other_present_thread",false,0});
+
+  // The line has room for its worst case: every number at the widest a wall-clock ms can print, split present.
+  FrameCycleStats::Completed widest=splitDone;
+  widest.cycleMs=widest.beforeFirstMs=widest.firstSubmitMs=widest.betweenEyesMs=widest.secondSubmitMs=widest.afterSecondMs=
+    widest.nextWaitMs=widest.waitOwnerMs=widest.submitOwnerMs[0]=widest.submitOwnerMs[1]=widest.renderParkMs[0]=
+    widest.renderParkMs[1]=widest.prePresentMs=widest.presentHookMs=widest.hookBeforeRealMs=widest.hookRealMs=
+    widest.hookAfterRealMs=widest.hookCallbackMs=widest.postPresentMs=123456789.1234;
+  char widestLine[1024]{};
+  const size_t widestLength=formatLongCycleLine(widestLine,sizeof(widestLine),18446744073709551615ull,123456789.1234,widest);
+  check(widestLength>0&&widestLength<sizeof(widestLine)-1&&std::strstr(widestLine,"units=wall_ms")&&
+    std::strlen(widestLine)==widestLength,"native_long_cycle line fits its buffer at the widest numbers, tail intact");
+  check(std::string(postUnavailableName(FrameCycleStats::PostAvailable))=="available"&&
+    std::string(postUnavailableName(FrameCycleStats::MalformedPresent))=="malformed_or_overlapping_present"&&
+    std::string(postUnavailableName(FrameCycleStats::PostUnavailableCount))=="unknown",
+    "post-submit rejection names cover the enum and refuse past it");
 }
 }

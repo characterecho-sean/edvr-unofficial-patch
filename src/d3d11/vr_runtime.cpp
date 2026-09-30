@@ -1,7 +1,7 @@
 #include "vr_runtime.h"
 
 #include <windows.h>
-#include <psapi.h>   // EnumProcessModules: the same census foveation's ARMED line uses
+#include <psapi.h>   // EnumProcessModules: the loaded-module census
 
 #include <cstdio>
 #include <cstring>

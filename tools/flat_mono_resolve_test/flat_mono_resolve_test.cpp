@@ -1,12 +1,14 @@
 // WARP exercises the shipped mono shaders/renderer. Backend stubs inspect their
 // real GPU inputs and deliberately clobber state; SDK image quality is separate.
 #include "../../src/d3d11/flat_mono_resolve.h"
+#include "../../src/d3d11/flat_projection_math.h"
 #include "../../src/d3d11/dlaa.h"
 #include "../../src/d3d11/fsr3_engine.h"
 #include "../../src/d3d11/engine_velocity_emit.h"
 #include <d3d11_1.h>
 #include <d3d11sdklayers.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
@@ -15,6 +17,7 @@
 #include <cmath>
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
+#include "../../src/common/system_d3d11.h"
 using Microsoft::WRL::ComPtr;
 namespace {
 int failures=0,backendCalls=0;
@@ -22,6 +25,10 @@ bool backendFail=false,backendReset=false,infiniteSeen=false;
 std::vector<std::string> resetEvents;
 float expectedJx=0,expectedJy=0;
 float observedMotion=0,observedMotionY=0,observedDepth=0;unsigned observedReject=0;
+// The whole motion texture the SDK was handed, decoded, and a hash over its raw bits: the shader's complete
+// output for the frame, so "bit-identical" can be asserted rather than sampled at one pixel.
+std::vector<float> observedMotionAll;std::vector<unsigned char> observedMaskAll;uint64_t observedMotionHash=0;uint32_t observedMotionW=0;
+std::vector<uint64_t> motionHashLog; // one entry per backend call, in call order: the key-off golden comparison reads it
 uint32_t observedInW=0,observedInH=0,observedOutW=0,observedOutH=0;
 void check(bool ok,const char* text){if(!ok){std::printf("FAIL: %s\n",text);++failures;}}
 bool readPixel(ID3D11DeviceContext* context,ID3D11Texture2D* texture,void* out,size_t bytes,UINT x=8,UINT y=8) {
@@ -38,6 +45,22 @@ float half(uint16_t value) {
     const float result=exponent?std::ldexp(1.0f+mantissa/1024.0f,int(exponent)-15):std::ldexp(float(mantissa),-24);
     return value&0x8000?-result:result;
 }
+// Every texel of a small texture, rows packed, or false.
+bool readWhole(ID3D11DeviceContext* context,ID3D11Texture2D* texture,std::vector<unsigned char>& out,size_t bytesPerTexel) {
+    ComPtr<ID3D11Device> device;context->GetDevice(device.GetAddressOf());
+    D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
+    ComPtr<ID3D11Texture2D> staging;if(FAILED(device->CreateTexture2D(&d,nullptr,staging.GetAddressOf())))return false;
+    context->CopyResource(staging.Get(),texture);D3D11_MAPPED_SUBRESOURCE map{};
+    if(FAILED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&map)))return false;
+    out.resize(size_t(d.Width)*d.Height*bytesPerTexel);
+    for(UINT y=0;y<d.Height;++y)
+        std::memcpy(out.data()+size_t(y)*d.Width*bytesPerTexel,static_cast<unsigned char*>(map.pData)+size_t(y)*map.RowPitch,size_t(d.Width)*bytesPerTexel);
+    context->Unmap(staging.Get(),0);return true;
+}
+uint64_t fnv1a(const unsigned char* bytes,size_t count,uint64_t h=1469598103934665603ull) {
+    for(size_t i=0;i<count;++i){h^=bytes[i];h*=1099511628211ull;}
+    return h;
+}
 bool backend(ID3D11DeviceContext* c,ID3D11Texture2D* depth,ID3D11Texture2D* mv,ID3D11Texture2D* mask,
              ID3D11Texture2D* out,float jx,float jy,bool reset,const char** reason) {
     ++backendCalls;backendReset=reset;
@@ -46,6 +69,15 @@ bool backend(ID3D11DeviceContext* c,ID3D11Texture2D* depth,ID3D11Texture2D* mv,I
     check(readPixel(c,mv,motion,sizeof(motion)) && readPixel(c,depth,&observedDepth,sizeof(float)) &&
           readPixel(c,mask,&reject,1),"backend inputs readable");
     observedMotion=half(motion[0]);observedMotionY=half(motion[1]);observedReject=reject;
+    {std::vector<unsigned char> all,maskAll,depthAll;D3D11_TEXTURE2D_DESC md{};mv->GetDesc(&md);
+     if(readWhole(c,mv,all,4) && readWhole(c,mask,maskAll,1) && readWhole(c,depth,depthAll,4)) {
+         // One hash over every byte the SDK was handed: motion, the reject mask and depth.
+         observedMotionHash=fnv1a(depthAll.data(),depthAll.size(),fnv1a(maskAll.data(),maskAll.size(),fnv1a(all.data(),all.size())));
+         observedMotionW=md.Width;observedMaskAll=maskAll;
+         observedMotionAll.resize(all.size()/2);
+         for(size_t i=0;i<observedMotionAll.size();++i){uint16_t v;std::memcpy(&v,all.data()+i*2,2);observedMotionAll[i]=half(v);}
+     } else {observedMotionHash=0;observedMotionAll.clear();observedMaskAll.clear();}
+     motionHashLog.push_back(observedMotionHash);}
     c->ClearState(); // Both successful and refused backends may clobber all stages.
     if(backendFail){if(reason)*reason="injected-backend-refusal";return false;}
     ComPtr<ID3D11Device> d;c->GetDevice(d.GetAddressOf());ComPtr<ID3D11UnorderedAccessView> uav;
@@ -66,6 +98,22 @@ void camera(float (&rows)[6][4]) {
     std::memset(rows,0,sizeof(rows));rows[0][0]=rows[1][1]=rows[2][3]=rows[4][2]=1;rows[3][2]=.025f;
 }
 uint32_t bits(float f){uint32_t v;std::memcpy(&v,&f,4);return v;}
+// Real rows: Epic frame 71751, b1[270..275] (also flat_projection_ownership_tests.h), the shape the game itself
+// composes for a kind-3 camera. Rows 0..2 hold three column vectors (x, y and the view direction in component 3).
+constexpr float kEpicRows[6][4]={
+    {.674860716f,-.714774430f,0,.684166729f},
+    {-.804393589f,-.069881566f,0,.664024174f},
+    {-.240084499f,-1.77504551f,0,-.301641792f},
+    {0,0,.0250000004f,0},
+    {.684166729f,.664024174f,-.301641792f,0},
+    {-21.0930309f,-24.5114784f,-1.11009693f,0}};
+// Turn the camera about world z in place: x and y of every column vector (rows 0 and 1) and of the view direction
+// (row 4) rotate; z and the position do not.
+void yawRows(float (&rows)[6][4],float theta) {
+    const float c=std::cos(theta),s=std::sin(theta);
+    for(unsigned col=0;col<4;++col){const float x=rows[0][col],y=rows[1][col];rows[0][col]=c*x-s*y;rows[1][col]=s*x+c*y;}
+    const float x=rows[4][0],y=rows[4][1];rows[4][0]=c*x-s*y;rows[4][1]=s*x+c*y;
+}
 } // namespace
 namespace edvr {
 Config& Config::get() {
@@ -104,14 +152,18 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned,ID3D11Texture2D*,ID3D11Texture
 #include "flat_pixel_capture_gpu_tests.h"
 #include "flat_draw_capture_gpu_tests.h"
 int main(int argc,char** argv) {
-    if(argc!=2 || (std::strcmp(argv[1],"--self-test") && std::strcmp(argv[1],"--dry-run"))){std::puts("usage: flat_mono_resolve_test --self-test|--dry-run");return 2;}
+    const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
+    if(argc!=2 || (std::strcmp(argv[1],"--self-test") && std::strcmp(argv[1],"--dry-run") && !printGoldens)){std::puts("usage: flat_mono_resolve_test --self-test|--dry-run|--print-goldens");return 2;}
     if(!std::strcmp(argv[1],"--dry-run")){std::puts("Would exercise mono resolve WARP shaders, backend inputs and state restoration; writes no files.");return 0;}
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
-    HRESULT hr=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,
+    // Windows' own d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+    const auto createDevice=edvr::systemD3D11CreateDevice();check(createDevice!=nullptr,"system D3D11 factory");if(!createDevice)return 1;
+    HRESULT hr=createDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,
         device.GetAddressOf(),&level,context.GetAddressOf());
-    if(FAILED(hr))hr=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
+    if(FAILED(hr))hr=createDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
         device.GetAddressOf(),&level,context.GetAddressOf());
     check(SUCCEEDED(hr),"WARP device");if(FAILED(hr))return 1;
+    check(edvr::reportSystemD3D11Only("flat_mono_resolve_test"),"the rig runs on System32's d3d11.dll and on no other d3d11.dll");
     ComPtr<ID3D11InfoQueue> messages;device.As(&messages);
     projectionScopeTests(device.Get(), context.Get());
     projectionRuntimeTests(device.Get(), context.Get());
@@ -439,6 +491,245 @@ int main(int argc,char** argv) {
               "the preflighted cut-E frame resolves on the negotiated grid");
         check(edvr::flatMonoResolveStats().allocations==cutBase.allocations+4,
               "the first treated frame hits the preflighted cache instead of reallocating");
+    }
+    // Key-off invariance (docs/design-flat-camera-integration.md, the C3 wiring). Every scenario above ran with
+    // rowsJitter = 0 -- the key-off state, where nothing removes a raster phase from the camera rows -- and the WHOLE
+    // motion texture, reject mask and depth the SDK was handed (not one pixel of it) is compared bit for bit with the
+    // hash recorded from the shader BEFORE the rows-unjitter change existed (2026-09-29, WARP on Windows 11 build
+    // 26200, the precompiled bytecode of that day's d3dcompiler). A hash is a property of WARP's arithmetic on this
+    // shader: a different WARP or compiler build may legitimately move one, and the way to re-record is to check out
+    // the commit before the change and run --print-goldens, never to paste this build's output over a failure.
+    // REAL camera rows, recorded the same way. Epic frame 71751's b1[270..275] (the composed camera the game itself
+    // produces for a kind-3 camera), moved and turned, then run at zero and at both raster phases and through a joined
+    // engine record. The fixture camera above has rows whose unjitter arithmetic is trivially neutral; these do not.
+    {
+        edvr::flatMonoResolveReset();
+        std::fill(z.begin(),z.end(),.01f);context->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);
+        context->UpdateSubresource(color.Get(),0,nullptr,red.data(),w*4,0);
+        for(size_t i=0;i<slots.size();i+=2){slots[i]=-1;slots[i+1]=.01f;}
+        context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+        auto sceneBuffer=[&](const float (&rows)[6][4]){float s[277][4]{};std::memcpy(s+270,rows,sizeof(rows));
+            const uint32_t stamp=kFixtureStamp;std::memcpy(&s[276][0],&stamp,4);
+            D3D11_BUFFER_DESC d{};d.ByteWidth=sizeof(s);d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            D3D11_SUBRESOURCE_DATA init{};init.pSysMem=s;ComPtr<ID3D11Buffer> b;
+            check(SUCCEEDED(device->CreateBuffer(&d,&init,b.GetAddressOf())),"real-camera scene buffer");return b;};
+        float epicNow[6][4],epicPrev[6][4];std::memcpy(epicPrev,kEpicRows,sizeof(epicPrev));std::memcpy(epicNow,kEpicRows,sizeof(epicNow));
+        epicNow[5][0]+=.3125f;yawRows(epicNow,.02f); // moved and turned since the previous frame
+        auto sceneNowReal=sceneBuffer(epicNow),scenePrevReal=sceneBuffer(epicPrev);
+        edvr::FlatMonoResolveFrame g{};g.color=colorView.Get();g.depth=depthView.Get();g.renderWidth=w;g.renderHeight=h;
+        g.outputWidth=g.outputHeight=32;g.deltaMs=16;g.mode=edvr::FlatMonoResolveMode::Dlss;
+        g.engine={slotView.Get(),poolView.Get(),sceneNowReal.Get(),scenePrevReal.Get()};
+        auto runReal=[&](const char* what){bindOriginal();expectedJx=g.jitterX;expectedJy=g.jitterY;
+            ComPtr<ID3D11ShaderResourceView> out;const char* why=nullptr;
+            const bool ok=edvr::flatMonoResolve(device.Get(),context.Get(),g,out.GetAddressOf(),&why);
+            if(!ok)std::printf("info: real-camera %s reason %s\n",what,why?why:"none");
+            check(ok && out && restored(),what);};
+        auto anyMotion=[&]{for(float v:observedMotionAll)if(v!=0)return true;return false;};
+        g.frame=100;g.reset=true;std::memcpy(g.camera,epicPrev,sizeof(epicPrev));std::memcpy(g.previousCamera,epicPrev,sizeof(epicPrev));
+        runReal("real camera: reset frame resolves");
+        const size_t realBase=motionHashLog.size()-1;
+        g.reset=false;++g.frame;std::memcpy(g.camera,epicNow,sizeof(epicNow));
+        runReal("real camera: moved and turned frame resolves");
+        check(anyMotion() && motionHashLog.back()!=motionHashLog[realBase],"real camera at zero phase produces motion the reset frame does not");
+        g.jitterX=.25f;g.jitterY=-.375f;g.previousJitterX=-.25f;g.previousJitterY=.375f;++g.frame;
+        runReal("real camera: both raster phases resolve");
+        check(anyMotion() && motionHashLog.back()!=motionHashLog[realBase+1],"real camera at both raster phases differs from zero phase");
+        record[1]=record[77]=bits(1);record[2]=record[78]=0x7fff7fff;record[3]=record[79]=0xfffe7fff;
+        record[4]=bits(0);record[5]=bits(0);record[6]=bits(2.5f);
+        record[73]=bits(-.3125f);record[74]=bits(0);record[75]=bits(2.5f);
+        record[72]=0x7FC0ED01u^edvr::engine_velocity_emit::markerHash(np,pp,kFixtureStamp);
+        context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
+        slots[(8*w+8)*2]=1;slots[(8*w+8)*2+1]=.01f;context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+        ++g.frame;runReal("real camera: joined engine record resolves");
+        check(observedReject==0 && motionHashLog.back()!=motionHashLog[realBase+2],
+              "real camera: the joined pixel is treated through the engine rows, not rejected");
+        g.jitterX=g.jitterY=g.previousJitterX=g.previousJitterY=0;
+        for(size_t i=0;i<slots.size();i+=2){slots[i]=-1;slots[i+1]=.01f;}
+        context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+        const size_t goldenCalls=motionHashLog.size();
+        if(printGoldens){std::printf("goldens: %zu backend calls\n",goldenCalls);
+            for(size_t i=0;i<goldenCalls;++i)std::printf("    0x%016llxull,\n",static_cast<unsigned long long>(motionHashLog[i]));}
+        // Recorded from the unmodified shader and resolver (HEAD c4bbe484 + this rig's instrumentation only), twice, identical.
+        static const uint64_t kGolden[]={
+            0xec545fd1f6ed4083ull,0xaf68111fd1178583ull,0xaf68111fd1178583ull,0x27944b19cf418803ull,
+            0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,
+            0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,
+            0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,
+            0x037fdbc33a15f783ull,0x037fdbc33a15f783ull,0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,
+            0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,0xec545fd1f6ed4083ull,
+            0x364745529d928d5dull,0xbc8fb70f9acf9b13ull,0x64db0bd0d891cf3eull};
+        check(goldenCalls==sizeof(kGolden)/sizeof(kGolden[0]),"key-off: the scenarios make the same backend calls as when the goldens were recorded");
+        for(size_t i=0;i<goldenCalls && i<sizeof(kGolden)/sizeof(kGolden[0]);++i)
+            if(motionHashLog[i]!=kGolden[i]){std::printf("FAIL: key-off golden %zu: got 0x%016llx want 0x%016llx\n",i,
+                static_cast<unsigned long long>(motionHashLog[i]),static_cast<unsigned long long>(kGolden[i]));++failures;}
+
+        // ---- Rows that carry the raster phase (the C3 wiring). ----
+        // What the game derives under the injector is the legacy scope's forward shift on rows 0..3 (c2_derive_test proves
+        // the equality on the derive model); rowsJitter* says the rows carry it, and the shader removes it. The same
+        // camera and raster phases three ways: unjittered rows (the truth), phased rows with the phase declared (must
+        // equal the truth), and phased rows with the phase NOT declared -- the negative control, which must be wrong by
+        // about the phase, or the equality proves nothing. Once through the camera term and once through a joined engine
+        // record, whose own scene snapshots carry the phase too.
+        struct PhasedRows{float r[6][4];};
+        auto phased=[&](const float (&rows)[6][4],float px,float py){PhasedRows out{};std::memcpy(out.r,rows,sizeof(out.r));
+            edvr::FlatProjectionJitter j{};float m[4][4];std::memcpy(m,out.r,sizeof(m));
+            check(edvr::flatProjectionJitter(px,py,w,h,j) && edvr::flatJitterForwardColumns(m,j),"the test rows accept a phase");
+            std::memcpy(out.r,m,sizeof(m));return out;};
+        const float jx=.25f,jy=-.375f,pjx=-.25f,pjy=.375f;
+        const auto nowPhased=phased(epicNow,jx,jy),prevPhased=phased(epicPrev,pjx,pjy);
+        auto sceneNowPhased=sceneBuffer(nowPhased.r),scenePrevPhased=sceneBuffer(prevPhased.r);
+        struct Seen{std::vector<float> motion;std::vector<unsigned char> mask;float px=0,py=0;unsigned reject=0;};
+        auto resolveWith=[&](const float (&cam)[6][4],const float (&prv)[6][4],ID3D11Buffer* sn,ID3D11Buffer* sp,
+                             float rx,float ry,float prx,float pry,const char* what){
+            std::memcpy(g.camera,cam,sizeof(g.camera));std::memcpy(g.previousCamera,prv,sizeof(g.previousCamera));
+            g.engine.sceneNow=sn;g.engine.scenePrev=sp;
+            g.jitterX=jx;g.jitterY=jy;g.previousJitterX=pjx;g.previousJitterY=pjy;
+            g.rowsJitterX=rx;g.rowsJitterY=ry;g.previousRowsJitterX=prx;g.previousRowsJitterY=pry;
+            g.reset=false;++g.frame;runReal(what);
+            return Seen{observedMotionAll,observedMaskAll,observedMotion,observedMotionY,observedReject};};
+        // Largest motion difference over the texels BOTH runs accepted (a texel one run rejects has no motion to compare;
+        // the reject masks are compared separately), so a control's number is the size of the phase error itself and not
+        // a texel flipping to rejected at the image edge.
+        auto maxDiff=[&](const Seen& a,const Seen& b){float m=0;
+            if(a.motion.size()!=b.motion.size()||a.motion.empty()||a.mask.size()!=b.mask.size()||a.mask.size()*2!=a.motion.size())return 1e9f;
+            for(size_t t=0;t<a.mask.size();++t){if(a.mask[t]!=0||b.mask[t]!=0)continue;
+                for(size_t c=0;c<2;++c)m=std::max(m,std::abs(a.motion[2*t+c]-b.motion[2*t+c]));}
+            return m;};
+        const float kSame=2e-3f,kWrong=.25f; // half-float quantum near 1 px is ~1e-3; the phases here are ~.5 and ~.75 px
+        // (0) The trivial fixture camera first, the two textbook cases: a STATIC camera has exactly zero motion, a
+        // 0.3125-unit translation exactly one render pixel (the existing fixture above), and phased rows with the
+        // phase declared must give the same numbers. Undeclared, the static case misses by the phase difference.
+        {
+            float still[6][4],moved[6][4];camera(still);camera(moved);moved[5][0]=.3125f;
+            const auto nowStill=phased(still,jx,jy),prevStill=phased(still,pjx,pjy),nowMoved=phased(moved,jx,jy);
+            auto sn=sceneBuffer(still);
+            auto stillTruth=resolveWith(still,still,sn.Get(),sn.Get(),0,0,0,0,"rows-jitter: static camera, unjittered rows");
+            auto stillFixed=resolveWith(nowStill.r,prevStill.r,sn.Get(),sn.Get(),jx,jy,pjx,pjy,"rows-jitter: static camera, phased rows, phase declared");
+            auto stillWrong=resolveWith(nowStill.r,prevStill.r,sn.Get(),sn.Get(),0,0,0,0,"rows-jitter: static camera, phased rows, phase undeclared");
+            float stillMax=0;for(float v:stillTruth.motion)stillMax=std::max(stillMax,std::abs(v));
+            check(stillMax==0,"rows-jitter: a static camera has exactly zero motion, texture-wide");
+            check(maxDiff(stillTruth,stillFixed)<=kSame && stillTruth.mask==stillFixed.mask,
+                  "rows-jitter: a static camera with phased rows and the phase declared still has zero motion");
+            check(maxDiff(stillTruth,stillWrong)>=kWrong,
+                  "rows-jitter negative control: a static camera with the phase undeclared misses by about the phase difference");
+            auto moveTruth=resolveWith(moved,still,sn.Get(),sn.Get(),0,0,0,0,"rows-jitter: translated camera, unjittered rows");
+            auto moveFixed=resolveWith(nowMoved.r,prevStill.r,sn.Get(),sn.Get(),jx,jy,pjx,pjy,"rows-jitter: translated camera, phased rows, phase declared");
+            auto moveWrong=resolveWith(nowMoved.r,prevStill.r,sn.Get(),sn.Get(),0,0,0,0,"rows-jitter: translated camera, phased rows, phase undeclared");
+            check(std::abs(moveTruth.px-1)<.001f && std::abs(moveTruth.py)<.001f,
+                  "rows-jitter: a 0.3125-unit translation is one render pixel of motion at the sampled pixel");
+            check(maxDiff(moveTruth,moveFixed)<=kSame && moveTruth.mask==moveFixed.mask,
+                  "rows-jitter: the same translation with phased rows and the phase declared gives one pixel again, texture-wide");
+            check(maxDiff(moveTruth,moveWrong)>=kWrong,
+                  "rows-jitter negative control: the translation with the phase undeclared misses by about the phase difference");
+            std::printf("flat mono resolve: rows-jitter fixture camera static error %.5f px (control %.3f px), translated error %.5f px (control %.3f px)\n",
+                        maxDiff(stillTruth,stillFixed),maxDiff(stillTruth,stillWrong),maxDiff(moveTruth,moveFixed),maxDiff(moveTruth,moveWrong));
+        }
+        // (1) the camera term alone: every texel takes cameraBefore.
+        const auto truth=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"rows-jitter: unjittered rows resolve");
+        const auto fixedRows=resolveWith(nowPhased.r,prevPhased.r,sceneNowPhased.Get(),scenePrevPhased.Get(),jx,jy,pjx,pjy,
+            "rows-jitter: phased rows with the phase declared resolve");
+        const auto wrongRows=resolveWith(nowPhased.r,prevPhased.r,sceneNowPhased.Get(),scenePrevPhased.Get(),0,0,0,0,
+            "rows-jitter: phased rows with the phase undeclared resolve");
+        bool truthMoves=false;for(float v:truth.motion)if(v!=0)truthMoves=true;
+        check(truthMoves,"rows-jitter: the unjittered scenario has motion to compare");
+        const float cameraError=maxDiff(truth,fixedRows),cameraControl=maxDiff(truth,wrongRows);
+        check(cameraError<=kSame,"rows-jitter: declared phase makes phased rows give the unjittered motion, texture-wide");
+        check(truth.mask==fixedRows.mask,"rows-jitter: declared phase gives the unjittered reject mask, texture-wide");
+        check(cameraControl>=kWrong,"rows-jitter negative control: phased rows with the phase undeclared are wrong by about the phase");
+        // (2) the joined engine record: pixel (8,8) takes the record's own rows, EN and EB, which carry the phase too.
+        slots[(8*w+8)*2]=1;slots[(8*w+8)*2+1]=.01f;context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+        const auto joinedTruth=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"rows-jitter: joined unjittered resolves");
+        const auto joinedFixed=resolveWith(nowPhased.r,prevPhased.r,sceneNowPhased.Get(),scenePrevPhased.Get(),jx,jy,pjx,pjy,
+            "rows-jitter: joined phased rows with the phase declared resolve");
+        const auto joinedWrong=resolveWith(nowPhased.r,prevPhased.r,sceneNowPhased.Get(),scenePrevPhased.Get(),0,0,0,0,
+            "rows-jitter: joined phased rows with the phase undeclared resolve");
+        check(joinedTruth.reject==0 && joinedFixed.reject==0 && joinedWrong.reject==0,
+              "rows-jitter: the joined pixel is treated through the engine rows in all three, never rejected");
+        const float engineError=std::max(std::abs(joinedTruth.px-joinedFixed.px),std::abs(joinedTruth.py-joinedFixed.py));
+        const float engineControl=std::max(std::abs(joinedTruth.px-joinedWrong.px),std::abs(joinedTruth.py-joinedWrong.py));
+        check(engineError<=kSame,"rows-jitter: declared phase makes the joined pixel's engine reprojection give the unjittered motion");
+        check(maxDiff(joinedTruth,joinedFixed)<=kSame && joinedTruth.mask==joinedFixed.mask,
+              "rows-jitter: declared phase gives the unjittered texture with a joined pixel in it");
+        check(engineControl>=kWrong,"rows-jitter negative control: the joined pixel is wrong by about the phase when the phase is undeclared");
+        size_t controlFlips=0;for(size_t t=0;t<truth.mask.size()&&t<wrongRows.mask.size();++t)controlFlips+=truth.mask[t]!=wrongRows.mask[t];
+        std::printf("flat mono resolve: rows-jitter camera term error %.5f px vs undeclared control %.3f px (%zu texels flip to rejected); "
+                    "joined pixel (8,8) error %.5f px vs undeclared control %.3f px\n",cameraError,cameraControl,controlFlips,engineError,engineControl);
+        // (3) a phase that cannot be a shift refuses the frame before any backend work, like every other invalid input.
+        for(unsigned bad=0;bad<3;++bad){
+            const int callsBeforeBad=backendCalls;
+            g.rowsJitterX=bad==0?.75f:bad==1?std::nanf(""):0;g.previousRowsJitterY=bad==2?-.625f:0;g.rowsJitterY=g.previousRowsJitterX=0;
+            bindOriginal();ComPtr<ID3D11ShaderResourceView> badOut;const char* badWhy=nullptr;++g.frame;
+            const bool badOk=edvr::flatMonoResolve(device.Get(),context.Get(),g,badOut.GetAddressOf(),&badWhy);
+            check(!badOk && !badOut && badWhy && !std::strcmp(badWhy,"flat-resolve-invalid-rows-jitter") &&
+                  backendCalls==callsBeforeBad && restored(),
+                  "rows-jitter: a rows phase outside half a pixel or not finite refuses the frame before any backend work");
+        }
+        g.rowsJitterX=g.rowsJitterY=g.previousRowsJitterX=g.previousRowsJitterY=0;
+
+        // ---- The menu's stale-slot policy (flags.w = FlatMonoResolveFrame::staticScene, 2026-09-29). ----
+        // A slot written by a keyed draw and then overdrawn by one that never wrote it (the Krait's unkeyed hull):
+        // the slot's depth is not the pixel's, so its record says nothing about it. Outside the 3D main menu that
+        // pixel's history is refused (rejection mask up, motion zero). With staticScene the pixel takes the camera
+        // term -- the very motion a pixel with no slot at all takes -- so with the policy on the whole texture must
+        // equal the no-slot texture. The real camera above is moved and turned, so the camera term is not zero and
+        // "equals the camera term" cannot be met by a refused pixel's zero. Only the stale-depth refusal is relaxed: a
+        // corrupt code, a sky pixel and the out-of-range sentinel stay refused, and a fresh joined slot keeps its record.
+        {
+            const UINT block0=4,blockSize=4;                      // the stale block: texels (4..7, 4..7)
+            auto texel=[&](UINT x,UINT y){return size_t(y)*w+x;};
+            auto put=[&](UINT x,UINT y,float code,float slotDepth){slots[texel(x,y)*2]=code;slots[texel(x,y)*2+1]=slotDepth;};
+            auto upload=[&]{context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);};
+            // Beside the block: the pixels the policy must NOT touch. Three stay refused with it on -- a corrupt (even)
+            // code, the out-of-range sentinel on a stale depth, and a sky pixel (depth 0) with a stale slot -- and one
+            // fresh joined slot keeps its record's exact motion.
+            auto others=[&]{put(2,2,2,.01f);put(13,3,4294967296.0f,.02f);put(12,12,1,.02f);put(8,8,1,.01f);};
+            z[texel(12,12)]=0.0f;context->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);
+            auto staleBlock=[&]{for(UINT y=block0;y<block0+blockSize;++y)for(UINT x=block0;x<block0+blockSize;++x)put(x,y,1,.02f);};
+            auto noSlots=[&]{for(size_t i=0;i<slots.size();i+=2){slots[i]=-1;slots[i+1]=.01f;}};
+            // The refused frames just above skipped frame numbers, so the next resolve is a counted reset
+            // (motion zero, everything refused). One warm-up frame absorbs it; the three below are continuous.
+            noSlots();others();upload();
+            resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"static scene: warm-up frame");
+            noSlots();staleBlock();others();upload();
+            g.staticScene=false;
+            const auto off=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"static scene: stale block, policy off");
+            const bool offReset=backendReset;
+            g.staticScene=true;
+            const auto on=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"static scene: stale block, policy on");
+            const bool onReset=backendReset;
+            g.staticScene=false;
+            noSlots();others();upload();                          // the same frame with no stale block: the camera term
+            const auto bare=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"static scene: no stale block, the camera term");
+            check(!offReset && !onReset && !backendReset,
+                  "static scene: the three frames are continuous, so no reset frame (everything refused) can hide the policy");
+            auto inBlock=[&](size_t t){const UINT x=UINT(t%w),y=UINT(t/w);return x>=block0 && x<block0+blockSize && y>=block0 && y<block0+blockSize;};
+            unsigned rejectedOff=0,rejectedOn=0,differOff=0,differOffOutside=0;
+            for(size_t t=0;t<off.mask.size()&&t<on.mask.size()&&t<bare.mask.size();++t){
+                if(inBlock(t)){rejectedOff+=off.mask[t]!=0;rejectedOn+=on.mask[t]!=0;}
+                if(off.mask[t]!=bare.mask[t]){++differOff;if(!inBlock(t))++differOffOutside;}}
+            const unsigned blockTexels=blockSize*blockSize;
+            check(rejectedOff==blockTexels,"static scene: with the policy off every texel of the stale block is refused");
+            check(rejectedOn==0,"static scene: with the policy on no texel of the stale block is refused");
+            check(differOff==blockTexels && differOffOutside==0,
+                  "static scene negative control: the policy off differs from the no-slot frame at the stale block's texels and nowhere else");
+            float blockMotion=0;for(UINT y=block0;y<block0+blockSize;++y)for(UINT x=block0;x<block0+blockSize;++x)
+                for(unsigned c=0;c<2;++c)blockMotion=std::max(blockMotion,std::abs(bare.motion[texel(x,y)*2+c]));
+            check(blockMotion>.05f,"static scene: the camera term at the stale block is not zero, so a refused pixel's zero cannot pass for it");
+            check(on.mask==bare.mask && maxDiff(on,bare)<=kSame,
+                  "static scene: with the policy on a stale slot is exactly a pixel with no slot, texture-wide, block motion the camera term");
+            check(off.reject==0 && on.reject==0 && on.px==off.px && on.py==off.py,
+                  "static scene: a fresh joined slot keeps its record and its exact motion with the policy on or off");
+            const size_t corrupt=texel(2,2),sentinel=texel(13,3),sky=texel(12,12);
+            check(off.mask[corrupt]!=0 && on.mask[corrupt]!=0 && off.mask[sentinel]!=0 && on.mask[sentinel]!=0 &&
+                  off.mask[sky]!=0 && on.mask[sky]!=0,
+                  "static scene: a corrupt code, the out-of-range sentinel and a sky pixel with a stale slot stay refused with the policy on");
+            std::printf("flat mono resolve: static scene: stale block %u/%u texels refused with the policy off, %u/%u with it on; "
+                        "on vs no-slot texture difference %.5f px, block camera motion %.3f px\n",
+                        rejectedOff,blockTexels,rejectedOn,blockTexels,maxDiff(on,bare),blockMotion);
+            // Leave the fixture as the pixel-capture tests below expect it.
+            noSlots();upload();z[texel(12,12)]=.01f;context->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);
+            g.staticScene=false;
+        }
     }
     context->ClearState();
     failures+=flatPixelCaptureGpuTests(device.Get(),context.Get());

@@ -1,3 +1,5 @@
+#include "fixed_shader_source.h"
+#include "temporal_shader_bytecode.h"
 #pragma once
 
 // The UI layer's depth-stencil seed (ui_layer.cpp): the game's depth and
@@ -16,39 +18,18 @@
 
 namespace edvr_layer_seed {
 using Microsoft::WRL::ComPtr;
+inline constexpr auto kVs = edvr::kUiSeedVs;
+inline constexpr auto kPsDepthStencil = edvr::kUiSeedPsDepthStencil;
+inline constexpr auto kPsDepthOnly = edvr::kUiSeedPsDepthOnly;
+inline constexpr auto kPsDepthNoStencil = edvr::kUiSeedPsDepthNoStencil;
 
-static const char* kVs = R"(
-struct V { float4 p:SV_POSITION; };
-V main(uint id:SV_VertexID) {
-  float2 p = id==0 ? float2(-1,-1) : (id==1 ? float2(-1,3) : float2(3,-1));
-  V v; v.p=float4(p,0,1); return v;
-})";
 
-static const char* kPsDepthStencil = R"(
-cbuffer C:register(b0) { uint2 inSize; uint2 outSize; float2 jitter; uint writeBit; };
-Texture2D<float> D:register(t0); Texture2D<uint4> S:register(t1);
-struct O { float d:SV_Depth; uint s:SV_StencilRef; };
-O main(float4 p:SV_POSITION) {
-  int2 q=int2(floor(p.xy*float2(inSize)/float2(outSize)+float2(jitter)));
-  q=clamp(q,int2(0,0),int2(inSize)-1); uint s=S.Load(int3(q,0)).y;
-  O o; o.d=D.Load(int3(q,0)); o.s=s; return o;
-})";
 
-static const char* kPsDepthOnly = R"(
-cbuffer C:register(b0) { uint2 inSize; uint2 outSize; float2 jitter; uint writeBit; };
-Texture2D<float> D:register(t0); Texture2D<uint4> S:register(t1);
-struct O { float d:SV_Depth; };
-O main(float4 p:SV_POSITION) {
-  int2 q=int2(floor(p.xy*float2(inSize)/float2(outSize)+float2(jitter)));
-  q=clamp(q,int2(0,0),int2(inSize)-1); uint s=S.Load(int3(q,0)).y;
-  if ((s & writeBit)==0) discard; O o; o.d=D.Load(int3(q,0)); return o;
-})";
-static const char* kPsDepthNoStencil = R"(
-cbuffer C:register(b0) { uint2 inSize; uint2 outSize; float2 jitter; uint writeBit; };
-Texture2D<float> D:register(t0); float main(float4 p:SV_POSITION):SV_Depth {
-  int2 q=int2(floor(p.xy*float2(inSize)/float2(outSize)+float2(jitter)));
-  q=clamp(q,int2(0,0),int2(inSize)-1); return D.Load(int3(q,0));
-})";
+
+
+
+
+
 
 class Seeder {
   ComPtr<ID3D11VertexShader> vs_; ComPtr<ID3D11PixelShader> ps_,psNoStencil_; ComPtr<ID3D11Buffer> cb_;
@@ -56,10 +37,7 @@ class Seeder {
   ComPtr<ID3D11Texture2D> output_; ComPtr<ID3D11DepthStencilView> outputView_; DXGI_FORMAT format_=DXGI_FORMAT_UNKNOWN;
   UINT inW_=0,inH_=0,outW_=0,outH_=0;
   struct C { UINT inSize[2], outSize[2]; float jitter[2]; UINT writeBit; };
-  static ComPtr<ID3DBlob> compile(const char* src,const char* entry,const char* profile) {
-    ComPtr<ID3DBlob> b,e; HRESULT h=D3DCompile(src,strlen(src),"ui_layer_seed",nullptr,nullptr,entry,profile,0,0,&b,&e);
-    if(FAILED(h)) throw std::runtime_error(e?std::string((char*)e->GetBufferPointer(),e->GetBufferSize()):"D3DCompile failed"); return b;
-  }
+
   void state(ID3D11Device* d) {
     D3D11_DEPTH_STENCIL_DESC x{}; x.DepthEnable=TRUE; x.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL; x.DepthFunc=D3D11_COMPARISON_ALWAYS;
     x.StencilEnable=TRUE; x.StencilReadMask=0xff; x.StencilWriteMask=0xff; x.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_COMPARISON_ALWAYS}; x.BackFace=x.FrontFace;
@@ -73,10 +51,10 @@ class Seeder {
   }
 public:
   void init(ID3D11Device* d) {
-    auto vb=compile(kVs,"main","vs_5_0"); if(FAILED(d->CreateVertexShader(vb->GetBufferPointer(),vb->GetBufferSize(),nullptr,&vs_))) throw std::runtime_error("CreateVertexShader");
+    if(FAILED(d->CreateVertexShader(edvr::kUiSeedVsBytecode,sizeof(edvr::kUiSeedVsBytecode),nullptr,&vs_))) throw std::runtime_error("CreateVertexShader");
     D3D11_FEATURE_DATA_D3D11_OPTIONS2 o{}; if(SUCCEEDED(d->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2,&o,sizeof(o)))) specified_=o.PSSpecifiedStencilRefSupported!=FALSE;
-    auto pb=compile(specified_?kPsDepthStencil:kPsDepthOnly,"main","ps_5_0"); if(FAILED(d->CreatePixelShader(pb->GetBufferPointer(),pb->GetBufferSize(),nullptr,&ps_))) throw std::runtime_error("CreatePixelShader"); state(d);
-    auto pn=compile(kPsDepthNoStencil,"main","ps_5_0"); if(FAILED(d->CreatePixelShader(pn->GetBufferPointer(),pn->GetBufferSize(),nullptr,&psNoStencil_))) throw std::runtime_error("CreateDepthOnlyPixelShader");
+    const void* pb=specified_?static_cast<const void*>(edvr::kUiSeedDepthStencilBytecode):edvr::kUiSeedDepthOnlyBytecode; const size_t pbSize=specified_?sizeof(edvr::kUiSeedDepthStencilBytecode):sizeof(edvr::kUiSeedDepthOnlyBytecode); if(FAILED(d->CreatePixelShader(pb,pbSize,nullptr,&ps_))) throw std::runtime_error("CreatePixelShader"); state(d);
+    if(FAILED(d->CreatePixelShader(edvr::kUiSeedDepthNoStencilBytecode,sizeof(edvr::kUiSeedDepthNoStencilBytecode),nullptr,&psNoStencil_))) throw std::runtime_error("CreateDepthOnlyPixelShader");
   }
   bool usesSpecifiedStencilRef() const { return specified_; }
   bool ensure(ID3D11Device* d, UINT w, UINT h, DXGI_FORMAT dsvFormat) {

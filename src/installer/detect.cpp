@@ -411,12 +411,18 @@ bool describeDir(const std::wstring& dir, const std::wstring& source, GameInstal
     return true;
 }
 
-GameRunState runStateOf(const wchar_t* exeName, const std::wstring& dir) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return GameRunState::NotRunning;
+GameRunState runStateOfSnapshot(void* snapshot, const wchar_t* exeName, const std::wstring& dir) {
+    HANDLE snap = static_cast<HANDLE>(snapshot);
+    // This used to return NotRunning: a snapshot that could not be taken read as
+    // a machine with no game on it, and the installer went on to replace files
+    // the game had open. Not knowing is not the same answer as "stopped", and
+    // the caller is told which it got.
+    if (snap == nullptr || snap == INVALID_HANDLE_VALUE) return GameRunState::Unknown;
+
     PROCESSENTRY32W pe{};
     pe.dwSize = sizeof(pe);
     GameRunState state = GameRunState::NotRunning;
+    bool listed = false;  // the list was read to its end, or the answer no longer depends on the rest
     if (Process32FirstW(snap, &pe)) {
         do {
             if (_wcsicmp(pe.szExeFile, exeName) != 0) continue;
@@ -433,13 +439,22 @@ GameRunState runStateOf(const wchar_t* exeName, const std::wstring& dir) {
             // because a refusal is the direction somebody can recover from.
             if (image.empty() || dir.empty() || sameDir(parentOf(image), dir)) {
                 state = GameRunState::ThisFolder;
+                listed = true;
                 break;  // nothing a later process says softens this
             }
             state = GameRunState::OtherFolder;
         } while (Process32NextW(snap, &pe));
+        // Read straight after the loop that ended it: ERROR_NO_MORE_FILES is the
+        // list running out; anything else is the list failing part-way, and a
+        // process in the part not read could be the game.
+        if (!listed) listed = GetLastError() == ERROR_NO_MORE_FILES;
     }
     CloseHandle(snap);
-    return state;
+    return listed ? state : GameRunState::Unknown;
+}
+
+GameRunState runStateOf(const wchar_t* exeName, const std::wstring& dir) {
+    return runStateOfSnapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0), exeName, dir);
 }
 
 GameRunState gameRunState(const std::wstring& gameDir) { return runStateOf(kGameExe, gameDir); }

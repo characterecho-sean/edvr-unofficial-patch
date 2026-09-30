@@ -184,9 +184,10 @@ struct Shared {
     // reader that remembers the value at a withhold can tell a NEW verdict
     // from the last jump's. One word, so the two never tear.
     volatile LONG     jumpVerdict;
-    // The runtime-supplied hidden-area mesh's triangle count per eye,
-    // openvr -> d3d11, headForward's packing (presence bit, two biased fields): see
-    // announceRuntimeMaskTriangles in frame_flag.h.
+    // RESERVED. It carried the runtime-supplied hidden-area mesh's triangle
+    // count per eye (openvr -> d3d11) for fix.eye_mask, removed 2026-09-29.
+    // Nothing reads or writes it; the slot stays so the layout, and the
+    // mapping version that names it, do not change.
     volatile LONG     runtimeMaskTri;
     // introRecentre  d3d11 -> openvr, requestIntroRecentre's one-shot ask:
     //                nonzero means "recentre the seated origin to the
@@ -711,25 +712,6 @@ bool headForward(float* tx, float* ty) {
     const uint32_t v = static_cast<uint32_t>(packed);
     if (tx) *tx = (static_cast<int32_t>((v >> 15) & 0x7FFFu) - 16384) / 1000.0f;
     if (ty) *ty = (static_cast<int32_t>(v & 0x7FFFu) - 16384) / 1000.0f;
-    return true;
-}
-
-void announceRuntimeMaskTriangles(uint32_t leftTri, uint32_t rightTri) {
-    Shared* s = map();
-    if (!s) return;
-    auto clamp15 = [](uint32_t n) -> uint32_t { return n > 0x7FFFu ? 0x7FFFu : n; };
-    const uint32_t packed = 0x80000000u | (clamp15(leftTri) << 15) | clamp15(rightTri);
-    InterlockedExchange(&s->runtimeMaskTri, static_cast<LONG>(packed));
-}
-
-bool runtimeMaskTriangles(uint32_t* leftTri, uint32_t* rightTri) {
-    Shared* s = map();
-    if (!s) return false;
-    const LONG packed = InterlockedCompareExchange(&s->runtimeMaskTri, 0, 0);
-    if (!(static_cast<uint32_t>(packed) & 0x80000000u)) return false;
-    const uint32_t v = static_cast<uint32_t>(packed);
-    if (leftTri) *leftTri = (v >> 15) & 0x7FFFu;
-    if (rightTri) *rightTri = v & 0x7FFFu;
     return true;
 }
 

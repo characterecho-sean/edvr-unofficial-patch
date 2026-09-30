@@ -1,11 +1,25 @@
 # Ambient occlusion that disagrees between the eyes: a design for the hunt
 
+*A design document, written before any capture. Written 2026-09-07 on
+branch `claude/asteroid-ao-inconsistency-xt19n7` off main `dc3ebad`. Claims
+about EDVR cite the source; claims about the game are labelled measured
+(this repo's censuses, dumps and disassemblies), read (taken from a
+captured shader's bytecode), or believed; what only a live session can
+settle is collected under Phase 0.*
+
 ## Status
 
 *Written 2026-09-15 from the entries dated 2026-09-07 (first worksheet and
 first capture) and 2026-09-10 (second capture). It restates the journal
 below and is not new evidence; update it whenever this doc changes.*
 
+- **State: the eye-split instrument retired 2026-09-29 (code removed,
+  d38272de).** `advanced.eye_split` (step 3 of the capture recipe),
+  `tools/diff_eye_split.py` (step 4 of the analysis) and the `eye_split.cpp`
+  and `resolve_probe.h` line cites below refer to deleted code, which is at
+  `d38272de^`. Any further dump needs that code restored or a new instrument.
+- **`hud_grain` (the noise-flatten template below) retired 2026-09-29 (code
+  removed, 0467e706):** its `hud_grain.h`/`.cpp` cites refer to `0467e706^`.
 - **State:** Issue #23, two captures in. The pass is named and measured:
   Elite's ambient occlusion is HBAO, three compute dispatches per eye per
   frame (`FB277B33F0865348`, `9347F8FC2DCE0248`, `D31E7812990B19A6`). Of
@@ -28,13 +42,9 @@ below and is not new evidence; update it whenever this doc changes.*
     re-ask, not resolved.
   - "Everywhere, or only asteroids?" — the arm, the cockpit and a station
     hangar are still unlooked at ("Beyond asteroids").
-- **Ruled out:**
-  - The eye-split dump had "probably already photographed the [occlusion]
-    buffer" — struck through in this doc; it photographed the sun-shadow
-    mask instead, proved independently two ways.
-  - "A single census settles both [A and C]" — half wrong:
-    `census_cb_watch` reads only constant buffers, and the rotation table
-    lives in an SRV-bound buffer at `s2`.
+- **Ruled out:** two claims, quoted in `## Status detail` below: the
+  eye-split dump photographed the sun-shadow mask, not the occlusion
+  buffer; and no single census settles both A and C.
 - **Next flight:** Two shipped keys, "one flight each, in this order"
   (Phase 2): `census_skip_dispatch = 9347F8FC2DCE0248` should make the
   occlusion vanish (confirms the pass); then
@@ -57,12 +67,16 @@ below and is not new evidence; update it whenever this doc changes.*
   the instruments" for tooling gaps. Linked: scanner-body.md (the
   shadow-mask connection), eye-brightness.md ("a note on method").
 
-*A design document, written before any capture. Written 2026-09-07 on
-branch `claude/asteroid-ao-inconsistency-xt19n7` off main `dc3ebad`. Claims
-about EDVR cite the source; claims about the game are labelled measured
-(this repo's censuses, dumps and disassemblies), read (taken from a
-captured shader's bytecode), or believed; what only a live session can
-settle is collected under Phase 0.*
+## Status detail (moved out of Status 2026-09-29)
+
+Ruled out, moved verbatim from Status:
+
+- The eye-split dump had "probably already photographed the [occlusion]
+  buffer" — struck through in this doc; it photographed the sun-shadow
+  mask instead, proved independently two ways.
+- "A single census settles both [A and C]" — half wrong:
+  `census_cb_watch` reads only constant buffers, and the rotation table
+  lives in an SRV-bound buffer at `s2`.
 
 ## The ask
 
@@ -307,7 +321,8 @@ one rotation: the occlusion goes banded, visibly and unpleasantly, and the
 two eyes' patterns become identical in kind. If the reporter's
 inconsistency disappears under the banding, C is the mechanism and the
 noise is the lever. This is the one instrument this document proposes
-building before any fix, and it is `hud_grain.cpp` with a key.
+building before any fix, and it is `hud_grain.cpp` with a key (deleted in
+0467e706; the file is at `0467e706^`).
 
 **Fix, C1: the transcription.** A replacement shader for the pass
 (`shader_swap.h`: vertex, pixel or compute, compiled at runtime, standing

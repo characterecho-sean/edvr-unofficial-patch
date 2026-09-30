@@ -2,10 +2,9 @@
 
 ## Status
 
-*Written 2026-09-15 from the entries dated 2026-09-11 through 2026-09-14. This
-file is itself a rolling, reverse-chronological log — newest at the top,
-"preceding"/"earlier" pointing further down — so this block restates only the
-top and the standout findings; update it as entries are added.*
+*Written 2026-09-15 from the entries dated 2026-09-11 through 2026-09-14. The
+Journal below is a rolling, newest-first log; update this block as entries are
+added.*
 
 - **State:** Goal: native OpenXR for every user, including those Elite
   currently routes through LibOVR; Windows selects the runtime. Per the top
@@ -27,26 +26,26 @@ top and the standout findings; update it as entries are added.*
   - A stationary flicker on three wing lines, deferred with its
     image-quality comparison (bottom of file, render-to-submit section).
   - The cross-runtime regression matrix and release installer migration:
-    named remaining qualification work, not yet done as one pass.
+    remaining qualification work, not yet done as one pass.
   - Matched-resolution performance/quality parity vs. the legacy path:
-    named open at several checkpoints (VDXR, native timing, DLSS).
-  - `[experimental]` features (FSS theater, gaze foveation) are explicitly
+    open at several checkpoints (VDXR, native timing, DLSS).
+  - `[experimental]` features (FSS theater, gaze foveation) were explicitly
     excluded from this parity work; supersample resolve was retired
-    2026-09-16.
-- **Ruled out:**
+    2026-09-16, and the theater and foveation were removed 2026-09-29
+    (6ecbd241, 184eee7f).
+- **Ruled out** (details in the Journal below):
   - The new outer GPU-timing instrument as the cause of head-movement
-    shimmering — "rules out the new outer instrument as a necessary
-    cause"; the real fault was temporal motion/jitter following the
-    widened raw culling frustum instead of the true projection matrix,
-    fixed in `f622cd2`.
-  - VDXR's startup abort: not a runtime incompatibility but "an unsafe
+    shimmering ("rules out the new outer instrument as a necessary
+    cause", render-to-submit section); the real fault was temporal
+    motion/jitter following the widened raw culling frustum instead of
+    the true projection matrix, fixed in `f622cd2`.
+  - VDXR's startup abort as a runtime incompatibility: it was "an unsafe
     dependency between recommended render dimensions and transient pose
     validity"; fixed by preserving validated session dimensions across
     geometry invalidation.
-  - Several early desk drafts (a GPU-timing bracket, a state-policy
-    draft whose fake driver returned canned timestamps, a hand-built ABI
-    vtable that crashed) failed review and were removed, not fixed in
-    place.
+  - Early desk drafts (a GPU-timing bracket, a state-policy draft whose
+    fake driver returned canned timestamps, a hand-built ABI vtable that
+    crashed) failed review and were removed, not fixed in place.
 - **Next flight:** The named "combined headset retest" for the feature batch
   and startup-centering change; openxr-native-only-2026-09-14.md separately
   names its own next-flight checklist for the native-only migration.
@@ -54,12 +53,14 @@ top and the standout findings; update it as entries are added.*
   one matrix: PiOpenXR + Pimax, SteamVR/OpenXR + Pimax, Meta/Air Link (Oculus
   OpenXR runtime) + Quest 3 at 180% resolution, VDXR + Quest 3. LibOVR is the
   legacy path being refused/bypassed, not a target.
-- **Detail:** Read top-down for the newest work. Later H2 sections:
-  "Implemented evidence tools", "Review decisions and remaining gates", "Query
-  foundation follow-up", "Main integration and next Frontier flight", "Existing
-  timer migration checkpoint", "Render-to-submit checkpoint" (the shimmer
-  regression and fix). Every paragraph links its own dated checkpoint doc; no
-  other file summarizes them all.
+- **Detail:** The Journal below is the rolling log, newest first. Later H2
+  sections: "Implemented evidence tools", "Review decisions and remaining
+  gates", "Query foundation follow-up", "Main integration and next Frontier
+  flight", "Existing timer migration checkpoint", "Render-to-submit checkpoint"
+  (the shimmer regression and fix). Every paragraph links its own dated
+  checkpoint doc; no other file summarizes them all.
+
+## Journal (rolling, newest first)
 
 The [branch review corrections](openxr-review-fixes-2026-09-14.md) notify Elite
 when native frame or loading work fails permanently, accept GUI startup-config

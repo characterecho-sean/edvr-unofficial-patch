@@ -185,19 +185,25 @@ float clampFraction(float value) {
 // ---------------------------------------------------------------------------
 // The field-of-view trim, per headset.
 //
-// fix.fov_trim_vertical / _outer / _nasal are per-headset lists keyed exactly
-// like fix.openxr_resolution -- `runtime[/system]:degrees`, degrees 0..30, at
-// most eight entries -- resolved against the worn headset's tokens as the last
-// v2 render-settings query saw them (nativeRenderLabels). A trim tuned on one
-// headset is wrong on another, so a headset with no entry of its own gets no
-// trim rather than somebody else's.
+// experimental.fov_trim_vertical / _outer / _nasal are per-headset lists keyed
+// exactly like fix.openxr_resolution -- `runtime[/system]:degrees`, degrees
+// 0..30, at most eight entries -- resolved against the worn headset's tokens as
+// the last v2 render-settings query saw them (nativeRenderLabels). A trim tuned
+// on one headset is wrong on another, so a headset with no entry of its own gets
+// no trim rather than somebody else's.
+//
+// They lived under [fix] until 2026-09-29, with rows on the F8 menu; edvr.ini
+// says where they went (`# moved-from: fix.fov_trim_*`) and Config reads an
+// old-layout line as the new name until the installer migrates the file. The
+// keys are set in the file only now.
 //
 // beginFrame runs on every frame, and three lists a frame is waste: the lists
 // are parsed only when a key's text or the worn headset changes, the resolved
 // triple is cached, and the log line goes out once per change of it.
 constexpr size_t kTrimCount = 3;
 const char* const kTrimKeys[kTrimCount] = {
-    "fix.fov_trim_vertical", "fix.fov_trim_outer", "fix.fov_trim_nasal"};
+    "experimental.fov_trim_vertical", "experimental.fov_trim_outer",
+    "experimental.fov_trim_nasal"};
 const char* const kTrimNames[kTrimCount] = {"vertical", "outer", "nasal"};
 // Enough distinct malformed tokens to name a hand-edited file's worth and
 // stop; past that the log would repeat itself on every edit.
@@ -230,9 +236,9 @@ void resolveTrim(uint32_t out[kTrimCount]) {
     // Read literally, one call per key: the config contract and the settings
     // schema both find a key by the string in the call that reads it.
     const std::string values[kTrimCount] = {
-        edvr::Config::get().getString("fix.fov_trim_vertical", ""),
-        edvr::Config::get().getString("fix.fov_trim_outer", ""),
-        edvr::Config::get().getString("fix.fov_trim_nasal", "")};
+        edvr::Config::get().getString("experimental.fov_trim_vertical", ""),
+        edvr::Config::get().getString("experimental.fov_trim_outer", ""),
+        edvr::Config::get().getString("experimental.fov_trim_nasal", "")};
     if (g_trim.resolved && g_trim.headset == haveHeadset && g_trim.rt == rt &&
         g_trim.sys == sys && g_trim.values[0] == values[0] &&
         g_trim.values[1] == values[1] && g_trim.values[2] == values[2]) {

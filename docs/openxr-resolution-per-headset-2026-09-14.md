@@ -58,6 +58,8 @@
   corrected here), openxr-runtime-inventory-2026-09-12.md and
   openxr-native-discovery-2026-09-13.md (fixture values).
 
+## Overview and revision history
+
 Design for setting the OpenXR render resolution per headset and runtime, so
 that a value chosen on the Quest 3 cannot follow Sean onto the Pimax, or onto
 the same Quest 3 through a different streaming app. It replaces the unreleased
@@ -623,10 +625,11 @@ rect of (720 - 2x24 - 4 - 240 - 2x18) = 392 dp by 34 dp (kClientWidth and
 kMargin at src/installer/gui.cpp:64-66; kPad and kControlWidth at
 settings_view.cpp:26-29; the rect at :234-235) in the 9-point caption font
 (ui.cpp:258) with `DT_WORDBREAK | DT_END_ELLIPSIS` (:396), and the longest
-summary it draws today is 141 characters (`fix.head_offset_view_bridge`). The
-first draft's 185-character sentence would have been ellipsised before the
-example; 116 sits under the longest existing one, and the rect is added to the
-GDI measurement list (claim 25) so it is measured, not assumed. The window
+summary it draws today is 141 characters (`fix.head_offset_view_bridge`,
+removed 2026-09-29). The first draft's 185-character sentence would have been
+ellipsised before the example; 116 sits under the longest existing one, and
+the rect is added to the GDI measurement list (claim 25) so it is measured,
+not assumed. The window
 shows this key as a text row written verbatim (src/installer/settings.cpp:
 141-147), so the grammar and an example must be in that first sentence or a
 user types `180` there and only the log says why nothing changed.

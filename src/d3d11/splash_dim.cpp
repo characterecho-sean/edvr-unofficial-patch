@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"
 #include "splash_dim.h"
 
 #include <windows.h>
@@ -22,8 +23,7 @@ namespace {
 // The scrim's measured alpha: 0x66 of 255, exactly 0.4, constant across
 // every flight of the loader-panel work. The dim is the scrim's own tint,
 // applied to the screen instead of the world.
-constexpr char kPsHlsl[] =
-    "float4 main() : SV_Target { return float4(0.0, 0.0, 0.0, 0.4); }";
+
 
 // The composite's RTV must be the eye texture: the backdrop verdict also
 // wraps the OFFSCREEN half of the still's path, and dimming both halves
@@ -58,8 +58,7 @@ void failOnce(const char* why) {
 bool ensureBuilt(ID3D11DeviceContext* ctx) {
     if (!g_ps && !g_psTried) {
         g_psTried = true;
-        g_ps = shaderSwapCompilePs(ctx, kPsHlsl, sizeof(kPsHlsl) - 1, "main",
-                                   "splash_dim_ps", nullptr, "splash dim");
+        g_ps = shaderSwapCreatePs(ctx, kSplashDimBytecode, sizeof(kSplashDimBytecode), "splash_dim_ps", "splash dim");
         if (!g_ps) failOnce("the dark shader would not compile");
     }
     if (g_ps && !g_blend && !g_blendTried) {

@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"
 #include "depth_probe.h"
 
 #include <cmath>
@@ -32,18 +33,7 @@ namespace {
 // The sampler: 256 depth values on a 16x16 grid across the target, read
 // through a view typed to the depth channel. Load, not Sample -- a depth
 // view has no filterable format, and the grid wants exact texels.
-constexpr char kSampleCsHlsl[] = R"HLSL(
-Texture2D<float> D : register(t0);
-RWStructuredBuffer<float> O : register(u0);
-cbuffer P : register(b0) { uint2 size; uint2 pad0; };
-[numthreads(16, 16, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= 16 || id.y >= 16) return;
-    uint2 p = uint2((id.x * 2 + 1) * size.x / 32, (id.y * 2 + 1) * size.y / 32);
-    p = min(p, size - 1);
-    O[id.y * 16 + id.x] = D.Load(int3(int2(p), 0));
-}
-)HLSL";
+
 
 constexpr int      kMaxTargets = 32;   // the cockpit binds shadow maps by the handful
 constexpr uint64_t kSampleIntervalMs = 10000;
@@ -343,9 +333,7 @@ void releaseGpu() {
 bool ensureGpu(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (!g_cs && !g_csTried) {
         g_csTried = true;
-        g_cs = shaderSwapCompileCs(ctx, kSampleCsHlsl, sizeof(kSampleCsHlsl) - 1,
-                                   "main", "depth_probe_cs", nullptr,
-                                   "depth probe");
+        g_cs = shaderSwapCreateCs(ctx, kDepthProbeBytecode, sizeof(kDepthProbeBytecode), "depth_probe_cs", "depth probe");
     }
     if (!g_cs) return false;
     if (!g_out) {
@@ -527,17 +515,11 @@ void mapText(const GridStats& g, char* out, size_t n) {
 
 void depthProbeConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
-    const std::string eyeMask = cfg.getString("fix.eye_mask", "off");
-    // fix.eye_mask needs the same clear-value census this probe already
-    // keeps for the temporal pass (depthProbeClearValueFor): the near value
-    // it writes must come from a recorded clear, never a guess, so the probe
-    // must be watching even on a rig with the temporal pass off.
     // advanced.eye_depth_capture needs the scene pair too, and the flight
-    // rig runs fix.temporal_aa AND fix.eye_mask both off -- the capture
-    // lights the probe itself rather than inherit either feature's switch.
+    // rig runs fix.temporal_aa off -- the capture lights the probe itself
+    // rather than inherit the temporal pass's switch.
     invalidateScenePickCache();
     g_wanted = (_stricmp(mode.c_str(), "off") != 0 && !mode.empty()) ||
-               (_stricmp(eyeMask.c_str(), "off") != 0 && !eyeMask.empty()) ||
                cfg.getBool("advanced.eye_depth_capture", false);
 }
 
@@ -686,7 +668,7 @@ static void sceneOrderFirstSecond(int* outFirst, int* outSecond) {
 // it. The pair in use is kept while it stays within half of the busiest,
 // so two pairs the game alternates between do not flap. One evaluation
 // shared by depthProbeSceneDepth (the temporal pass and the interface
-// depth ask by the eye's size) and depthProbeSceneEyeOf (fix.eye_mask
+// depth ask by the eye's size) and depthProbeSceneEyeOf (the object probe
 // asks by the bound depth view's own size), so the pick forms on a rig
 // where every other asker is off. True when a pick of this size is in
 // place afterwards; a stale pick is left alone when nothing of this size
@@ -832,7 +814,7 @@ bool depthProbeSceneTextureEye(uint32_t w, uint32_t h, const void* resource,
 #endif
 }
 
-// For fix.eye_mask: which eye (if either) THIS EXACT depth-stencil view
+// Which eye (if either) THIS EXACT depth-stencil view
 // is, using the identical scene-pair identity and first-bind ordering
 // depthProbeSceneDepth uses (sceneOrderFirstSecond, above), so the two can
 // never disagree about which target is which eye. *outTargetIndex is set
@@ -886,19 +868,6 @@ bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye,
     sceneOrderFirstSecond(&first, &second);
     if (outEye) *outEye = idx == first ? 0 : 1;
     return true;
-}
-
-// Whether target index (depthProbeSceneEyeOf's outTargetIndex) shares the
-// scene pick's own width/height -- a double-buffered twin the game
-// alternates with the chosen pair, or an unrelated stale target, for the
-// eye mask summary's "not the scene's pick" tally. False with no scene
-// pick yet or an out-of-range index.
-bool depthProbeTargetIsSceneSized(int targetIndex) {
-    if (targetIndex < 0 || targetIndex >= g_targetCount) return false;
-    if (g_scenePick[0] < 0 || g_scenePick[0] >= g_targetCount) return false;
-    const Target& t = g_targets[targetIndex];
-    const Target& ref = g_targets[g_scenePick[0]];
-    return t.dsv && t.w == ref.w && t.h == ref.h;
 }
 
 uint32_t depthProbeSceneDraws() {
@@ -1047,17 +1016,6 @@ void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth) {
     const int idx = findTarget(dsv);
     if (idx < 0) return;
     g_targets[idx].clearValue = depth;
-}
-
-bool depthProbeClearValueFor(ID3D11DepthStencilView* dsv, float* outClearValue, bool* outReversed) {
-    if (!g_wanted || !dsv) return false;
-    const int idx = findTarget(dsv);
-    if (idx < 0) return false;
-    const float c = g_targets[idx].clearValue;
-    if (c < 0.0f) return false;   // -1 sentinel: never seen (Target's own rule)
-    if (outClearValue) *outClearValue = c;
-    if (outReversed) *outReversed = c < 0.5f;
-    return true;
 }
 
 bool depthProbeDrawsAtSize(uint32_t w, uint32_t h, uint32_t* draws) {

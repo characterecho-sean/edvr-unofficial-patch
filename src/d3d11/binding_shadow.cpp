@@ -25,7 +25,7 @@ using Slot = detail::BindingSlot;
 // switches all of them off together -- which is how a bad camera offset once
 // disabled the black void fix. A fault resolving a view means views cannot be
 // resolved; it does not mean the exposure copy should stop.
-FaultBudget g_probeBudget("bindingShadow.resolve", 5);
+FaultBudget g_viewBudget("bindingShadow.resolve", 5);
 
 // And its own budget for the resource path, which is NOT the same question.
 //
@@ -39,6 +39,14 @@ FaultBudget g_probeBudget("bindingShadow.resolve", 5);
 // fix switching itself off during a census with nothing saying why. Two
 // budgets, because they are two failures.
 FaultBudget g_resourceBudget("bindingShadow.resolveResource", 5);
+
+// And the same two again for the instruments (binding_shadow.h, "THE SAME TWO
+// RESOLVERS FOR AN INSTRUMENT"). The two budgets above are the fixes'; a census
+// or a probe that faults five times used to spend them, and every fix's resolver
+// went quiet with it. The instruments' own faults are charged here, so a probe
+// can run out alone, and the note says it was a probe.
+FaultBudget g_viewProbeBudget("bindingShadow.resolveProbe", 5);
+FaultBudget g_resourceProbeBudget("bindingShadow.resolveResourceProbe", 5);
 
 Slot& slotOf(BindSlot s) { return detail::g_bindingSlots[static_cast<size_t>(s)]; }
 
@@ -107,12 +115,16 @@ void bindingFrameBoundary() {
     for (Slot& s : detail::g_bindingSlots) ++s.gen;
 }
 
-bool bindingResolve(void* view, ResourceInfo* out) {
+namespace {
+
+// The one copy of each resolver. The public entry points below differ only in
+// whose budget a fault is charged to.
+bool resolveView(FaultBudget& budget, void* view, ResourceInfo* out) {
     if (!view || !out) return false;
     *out = ResourceInfo();
 
     bool ok = false;
-    guardedBudget(g_probeBudget, [&] {
+    guardedBudget(budget, [&] {
         ID3D11Resource* res = nullptr;
         static_cast<ID3D11View*>(view)->GetResource(&res);
         if (!res) return;
@@ -133,12 +145,12 @@ bool bindingResolve(void* view, ResourceInfo* out) {
     return ok;
 }
 
-bool bindingResolveResource(void* resource, ResourceInfo* out) {
+bool resolveResource(FaultBudget& budget, void* resource, ResourceInfo* out) {
     if (!resource || !out) return false;
     *out = ResourceInfo();
 
     bool ok = false;
-    guardedBudget(g_resourceBudget, [&] {
+    guardedBudget(budget, [&] {
         // No GetResource step and so no reference taken: the caller's pointer
         // is the resource, and the caller owns whatever reference it arrived
         // with. That also means this one has no leak to document -- the
@@ -147,6 +159,24 @@ bool bindingResolveResource(void* resource, ResourceInfo* out) {
         out->resource = resource;
     });
     return ok;
+}
+
+}  // namespace
+
+bool bindingResolve(void* view, ResourceInfo* out) {
+    return resolveView(g_viewBudget, view, out);
+}
+
+bool bindingResolveResource(void* resource, ResourceInfo* out) {
+    return resolveResource(g_resourceBudget, resource, out);
+}
+
+bool bindingResolveProbe(void* view, ResourceInfo* out) {
+    return resolveView(g_viewProbeBudget, view, out);
+}
+
+bool bindingResolveResourceProbe(void* resource, ResourceInfo* out) {
+    return resolveResource(g_resourceProbeBudget, resource, out);
 }
 
 }  // namespace edvr

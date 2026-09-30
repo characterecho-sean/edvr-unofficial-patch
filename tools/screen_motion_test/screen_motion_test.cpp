@@ -21,6 +21,11 @@ ComPtr<ID3DBlob> compile(const char* s,const char* profile,const char* entry="ma
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
+ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* shader=nullptr;
+    if(FAILED(dev->CreatePixelShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
+}
+
 ID3D11ShaderResourceView* testWeaponMotion=nullptr;
 void weaponMotionConfigure(bool){}
 void weaponMotionSource(ID3D11Texture2D*){}

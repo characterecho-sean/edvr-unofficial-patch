@@ -121,8 +121,8 @@ struct Interned {
 };
 
 bool resolveByKind(void* ptr, Kind kind, ResourceInfo* out) {
-    if (kind == Kind::kView) return bindingResolve(ptr, out);
-    if (kind == Kind::kResource) return bindingResolveResource(ptr, out);
+    if (kind == Kind::kView) return bindingResolveProbe(ptr, out);
+    if (kind == Kind::kResource) return bindingResolveResourceProbe(ptr, out);
     return false;
 }
 
@@ -493,7 +493,7 @@ void cbWatchRegister(uint32_t slot, void* buf) {
     w.bytes = 0;
     ResourceInfo info;
     uint32_t full = 0;
-    if (buf && bindingResolveResource(buf, &info) && info.isBuffer) {
+    if (buf && bindingResolveResourceProbe(buf, &info) && info.isBuffer) {
         full = info.a;
         w.bytes = info.a < kCbShadowBytes ? info.a : kCbShadowBytes;
     }

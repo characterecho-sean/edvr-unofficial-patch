@@ -5,26 +5,12 @@
 - **State (2026-09-25):** the holograms, the radar, the distance digits
   and the weapons-panel text are FIXED and flown (`## Round history`
   below). Round 8 (411751ec) is flown in the hangar only, so the
-  triangles are untested:
-  - the target reticle's triangles (vs `71DD8B8B09060A81` writes z = 0
-    but keeps a real w) take depth = a + b / w from an EDVR pixel shader
-    matched to that VS's output signature (the rig proved on WARP that a
-    D3D11 pixel shader's SV_Position.w is that clip w, not 1/w);
-  - the near-light pass runs one thread per pixel; one thread scanning
-    each 8x8 block serially cost ~0.3 ms/frame in round 7.
-
-  Round 9 (d9f86b09) is flown in the hangar (dump 123118) and fixed the
-  station text. Rounds 6 and 7's dark rule had stamped the gaps around
-  the letters at the element's own depth (dumps 115012/115037). A dark
-  gap now takes a filler depth just inside the cockpit radius, and
-  GREATER leaves any nearer scene surface alone.
-
-  Round 10 BUILT, NOT FLOWN: the HEATSINK label still doubled. The
-  resolve had overwritten its UI-covered letters with another listed
-  draw's nearer footprint depth, breaking their exact record motion.
-  Now the resolve never writes a UI-covered pixel. The UI depth pass
-  owns those pixels, and their record-depth match was 100% with the
-  pass off.
+  reticle's triangles are untested. Round 9 (d9f86b09) is flown in the
+  hangar (dump 123118) and fixed the station text. Round 10 BUILT, NOT
+  FLOWN: the HEATSINK label still doubled; now the resolve never writes
+  a UI-covered pixel. The rounds 8-10 detail (the triangles' pixel
+  shader, the near-light pass cost, the filler depth, the HEATSINK
+  cause) is in `## Round history` below.
 - **Open:**
   - Which of the five radar-contact families paints the bars (listed
     from the draw ledger, not individually confirmed).
@@ -107,7 +93,25 @@ they inherit cockpit motion and stay sharp.
   of its 8 neighbours is set: roughly the 8-16 px around glyph light (sky
   MV 5-13 px/frame during rolls), not an open quad 40 px away. In the
   dump the sky beside the weapons panel is 5% stamped (35% in round 6).
-- Round 8 BUILT, NOT FLOWN (Status).
+- Round 8 (411751ec) is flown in the hangar only, so the
+  triangles are untested (moved from Status 2026-09-29):
+  - the target reticle's triangles (vs `71DD8B8B09060A81` writes z = 0
+    but keeps a real w) take depth = a + b / w from an EDVR pixel shader
+    matched to that VS's output signature (the rig proved on WARP that a
+    D3D11 pixel shader's SV_Position.w is that clip w, not 1/w);
+  - the near-light pass runs one thread per pixel; one thread scanning
+    each 8x8 block serially cost ~0.3 ms/frame in round 7.
+- Round 9 (d9f86b09) is flown in the hangar (dump 123118) and fixed the
+  station text. Rounds 6 and 7's dark rule had stamped the gaps around
+  the letters at the element's own depth (dumps 115012/115037). A dark
+  gap now takes a filler depth just inside the cockpit radius, and
+  GREATER leaves any nearer scene surface alone.
+- Round 10 BUILT, NOT FLOWN: the HEATSINK label still doubled. The
+  resolve had overwritten its UI-covered letters with another listed
+  draw's nearer footprint depth, breaking their exact record motion.
+  Now the resolve never writes a UI-covered pixel. The UI depth pass
+  owns those pixels, and their record-depth match was 100% with the
+  pass off.
 
 ## Families
 

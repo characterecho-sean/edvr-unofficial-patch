@@ -162,6 +162,14 @@ python tools\build_diff.py --self-test || exit /b 1
 python tools\build_receipt.py --self-test || exit /b 1
 python tools\build_lock.py --self-test || exit /b 1
 python tools\flash_patch_residual.py --self-test || exit /b 1
+python tools\check_status_blocks.py --self-test || exit /b 1
+python tools\check_status_blocks.py || exit /b 1
+REM The physics the black-hole shader is held to (docs\black-holes.md).
+python tools\blackhole_optics.py --self-test || exit /b 1
+REM The guard tools\run_jobs.py holds every rig to (no window, no console, no
+REM move of the keyboard focus); its own self-test, run below with the rigs,
+REM starts it on real processes, so this one fails first and fast.
+python tools\focus_watch.py --self-test || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM
@@ -237,6 +245,7 @@ set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHs /W4 /GR- %EDVR_CPU_COMPILE% ^
 echo.
 REM The runtime config audit data: known keys + the moved-from map,
 REM generated from the same sources the late contract check verifies.
+python "tools\check_config_contract.py" --self-test || exit /b 1
 python "tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
 
@@ -247,8 +256,14 @@ REM variant table and the compiler DLL, and is regenerated whenever that key
 REM changes, so stale bytecode cannot survive a source change -- while an
 REM unchanged shader costs nothing instead of the AA variant's 19 s of fxc on
 REM every build (measured 2026-09-15). The generator tests never initialize a GPU.
+REM AMD FSR 1.0 as embeddable HLSL. Generated rather than committed so the
+REM vendored headers stay byte-identical to upstream (src\d3d11\fsr\).
+python "tools\gen_fsr_hlsl.py" --self-test || exit /b 1
+python "tools\gen_fsr_hlsl.py" --root "%ROOT%" --out "%GEN%"
+if errorlevel 1 ( echo [edvr] ERROR: FSR shader embedding failed & exit /b 1 )
+
 if not exist "%OBJ%\temporalshader" mkdir "%OBJ%\temporalshader"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\temporalshader\\" /Fe"%OBJ%\temporalshader\temporal_shader_build.exe" ^
     "tools\temporal_shader_build\temporal_shader_build.cpp" ^
@@ -259,11 +274,6 @@ if errorlevel 1 ( echo [edvr] ERROR: temporal shader compiler build failed & exi
 "%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" || exit /b 1
 
 echo [edvr] === d3d11.dll ===
-REM AMD FSR 1.0 as embeddable HLSL. Generated rather than committed so the
-REM vendored headers stay byte-identical to upstream (src\d3d11\fsr\).
-python "tools\gen_fsr_hlsl.py" --root "%ROOT%" --out "%GEN%"
-if errorlevel 1 ( echo [edvr] ERROR: FSR shader embedding failed & exit /b 1 )
-
 REM The settings schema -- the installer's window AND the in-headset menu's
 REM row table (docs\settings-menu.md) -- generated from edvr.ini and the
 REM accessor calls in src\, with the gate that keeps it complete. Here,
@@ -291,6 +301,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
+python "tools\gen_exports.py" --self-test || exit /b 1
 python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
@@ -302,16 +313,11 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeGraphics ^
     --extra-export edvr_selftest_graphics_bridge ^
     --extra-export edvrFssHealLeft ^
-    --extra-export edvrFssTheater ^
     --extra-export edvrTemporalAa ^
     --extra-export edvrEyeCaptureUntreated ^
-    --extra-export edvrEyeCaptureArm ^
     --extra-export edvrTemporalAaNoteHead ^
     --extra-export edvrSharpen ^
     --extra-export edvrDepthProbeSelftest ^
-    --extra-export edvrDlaaAvailable ^
-    --extra-export edvrDlaaCounts ^
-    --extra-export edvrMenuPanel ^
     --extra-export edvrAcquireNativeMenu ^
     --extra-export edvrRegisterPluginSetting ^
     --extra-export edvrAcquireNativeTemporal ^
@@ -320,8 +326,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeFss ^
     --extra-export edvrAcquireNativeTiming ^
     --extra-export edvrReadNativePresentTrace ^
-    --extra-export edvrDoorGpuBegin ^
-    --extra-export edvrDoorGpuEnd ^
     --extra-export "edvrNativeStartupRouting DATA" ^
     --extra-export edvrQueryOculusRouting ^
     --extra-export edvrQueryNativeRenderSettings ^
@@ -356,6 +360,7 @@ REM Without any SDK the build still succeeds, since the code compiles
 REM either way, but says so loudly: that build has no DLAA and its
 REM installer carries no runtime, which is not a release (package.bat
 REM refuses it unless told --no-dlss).
+python "tools\fetch_ngx.py" --self-test || exit /b 1
 set NGX=
 if defined EDVR_NGX_SDK set NGX=%EDVR_NGX_SDK%
 if not defined NGX if exist "%ROOT%\third_party\ngx\include\nvsdk_ngx.h" set NGX=%ROOT%\third_party\ngx
@@ -491,7 +496,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
-    "src\d3d11\flat_camera_producer_probe.cpp" ^
+    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_fss.cpp" ^
@@ -504,12 +509,12 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
-    "src\d3d11\glitch_frame.cpp" "src\d3d11\transition_flash_prevent.cpp" ^
+    "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\pose_reader_watch.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
-    "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
+    "src\d3d11\journal_watch.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
     "src\d3d11\object_probe.cpp" ^
     "src\d3d11\pixel_probe.cpp" ^
@@ -519,25 +524,17 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\lod_governor.cpp" ^
     "src\d3d11\engine_velocity.cpp" ^
-    "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
-    "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
-    "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
+    "src\d3d11\fss_res.cpp" ^
+    "src\d3d11\fss_panel.cpp" ^
+    "src\d3d11\fss_reveal.cpp" ^
     "src\d3d11\fss_dump.cpp" "src\d3d11\fss_heal.cpp" ^
-    "src\d3d11\eye_split.cpp" ^
-    "src\d3d11\resolve_probe.cpp" ^
-    "src\d3d11\stencil_probe.cpp" ^
     "src\d3d11\resolve_bind_fix.cpp" ^
-    "src\d3d11\fss_theater.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
-    "src\d3d11\shader_sig.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
-    "src\d3d11\hud_sprite.cpp" ^
-    "src\d3d11\panel_upscale.cpp" ^
     "src\d3d11\wake_pulse.cpp" ^
-    "src\d3d11\hud_grain.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
@@ -554,9 +551,8 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
-    "src\d3d11\foveation.cpp" ^
-    "src\d3d11\eye_mask.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
+    "src\d3d11\flat_sharpen.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
@@ -661,7 +657,10 @@ REM does now). A rig that only wants a D3D11 device takes System32's export
 REM through src\common\system_d3d11.h and links without d3d11.lib: an
 REM imported D3D11CreateDevice resolves, for an exe in build\, to
 REM build\d3d11.dll before System32's, and the test runs under EDVR's hooks by
-REM accident.
+REM accident. run_jobs.py refuses, at the plan, any rig that links d3d11.lib
+REM into an output in %BUILD%; a rig that wants System32's checks at run time
+REM which d3d11.dll it runs on (reportSystemD3D11Only), and one that loads the
+REM proxy on purpose checks that none came with its exe (reportNoD3D11Mapped).
 REM The --quiet rigs hold wall-clock intervals to tight bounds; they run alone,
 REM after the rest, with the whole machine. Only their test runs need that, so
 REM each is split (see the rig area below): its compiles run in the pool like
@@ -669,6 +668,14 @@ REM any other rig's and only its runs wait their turn.
 REM openxr_module_test loads openxr_export_fixture.dll, which
 REM :rig_openxr_exports_test builds; --after holds the reader back until the
 REM writer has actually finished (see the rig rules below).
+REM The runner also fails the build if any process of any rig showed a window,
+REM opened a console or took the keyboard focus from whoever is typing
+REM (tools\focus_watch.py), and its log carries a "focus_watch:" line saying the
+REM guard looked; a log without one did not run it. The graphics proxy takes the
+REM foreground for a swap chain's window at launch (d3d11.focus_on_launch) only if
+REM it is a top-level window on the desktop (src\d3d11\focus_target.h), and a rig
+REM that needs a window for one uses tools\openxr_native_test\present_device.h,
+REM whose window is a child of a message-only one.
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
@@ -789,7 +796,7 @@ echo [edvr] === smoke.exe ===
 if not exist "%OBJ%\smoke" mkdir "%OBJ%\smoke"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /Fo"%OBJ%\smoke\\" /Fe"%BUILD%\smoke.exe" ^
-    "tools\smoke\smoke.cpp" /link /INCREMENTAL:NO d3d11.lib kernel32.lib
+    "tools\smoke\smoke.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\smoke.exe
 exit /b 0
@@ -816,7 +823,7 @@ if not exist "%OBJ%\vtabletest" mkdir "%OBJ%\vtabletest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vtabletest"\ ^
     /DEDVR_VTABLE_TEST /Fe"%BUILD%\vtable_test.exe" "tools\vtable_test\vtable_test.cpp" ^
-    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
+    "src\d3d11\shader_swap.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
@@ -881,7 +888,7 @@ exit /b 0
 :rig_native_fss_gpu_test
 echo [edvr] === native_fss_gpu_test.exe ===
 if not exist "%OBJ%\native_fss_gpu" mkdir "%OBJ%\native_fss_gpu"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_fss_gpu\\" /Fe"%BUILD%\native_fss_gpu_test.exe" ^
     "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\d3d11\fss_heal.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
@@ -929,7 +936,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_gpu_test.exe" ^
     "tools\native_temporal_test\native_temporal_gpu_test.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native temporal GPU test build failed & exit /b 1 )
 "%BUILD%\native_temporal_gpu_test.exe" --dry-run || exit /b 1
 exit /b 0
@@ -941,7 +948,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_sharpen_test\\" /Fe"%BUILD%\native_sharpen_test.exe" ^
     "tools\native_sharpen_test\native_sharpen_test.cpp" "src\d3d11\native_sharpen.cpp" ^
-    "src\common\config.cpp" "src\common\log.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native sharpen contract test build failed & exit /b 1 )
 "%BUILD%\native_sharpen_test.exe" --dry-run || exit /b 1
@@ -950,9 +957,52 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_sharpen_test\\" /Fe"%BUILD%\native_sharpen_gpu_test.exe" ^
     "tools\native_sharpen_test\native_sharpen_gpu_test.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native sharpen GPU test build failed & exit /b 1 )
 "%BUILD%\native_sharpen_gpu_test.exe" --dry-run || exit /b 1
+exit /b 0
+
+:rig_flat_sharpen_test
+echo [edvr] === flat_sharpen_test.exe, flat_sharpen_pass_test.exe ===
+REM The flat profile's sharpening (docs\anti-aliasing.md, "Flat sharpening"), in two
+REM rigs. flat_sharpen_test: the wrapper against a stubbed pass, and the flat panel's
+REM row table against the flat profile's key gate -- a row whose key the gate refuses
+REM reads 0 and does nothing, silently, so it fails the build here. flat_sharpen_pass_test:
+REM the shipped RCAS pass on WARP against a CPU implementation of AMD's RCAS, with five
+REM deliberately broken twins that must each fail. Neither links an import library for
+REM the D3D11 runtime: both take Windows' own d3d11 (common\system_d3d11.h).
+if not exist "%OBJ%\flat_sharpen_test" mkdir "%OBJ%\flat_sharpen_test"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\flat_sharpen_test\\" /Fe"%BUILD%\flat_sharpen_test.exe" ^
+    "tools\flat_sharpen_test\flat_sharpen_test.cpp" "src\d3d11\flat_sharpen.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat sharpen contract test build failed & exit /b 1 )
+"%BUILD%\flat_sharpen_test.exe" --dry-run || exit /b 1
+"%BUILD%\flat_sharpen_test.exe" --self-test "%ROOT%" "%GEN%" || (
+    echo [edvr] ERROR: the flat profile's sharpening or its panel row is wrong
+    exit /b 1
+)
+if not exist "%OBJ%\flat_sharpen_pass_test" mkdir "%OBJ%\flat_sharpen_pass_test"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
+    /Fo"%OBJ%\flat_sharpen_pass_test\\" /Fe"%BUILD%\flat_sharpen_pass_test.exe" ^
+    "tools\flat_sharpen_test\flat_sharpen_pass_test.cpp" "src\d3d11\flat_sharpen.cpp" ^
+    "src\d3d11\sharpen_pass.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat sharpen pass test build failed & exit /b 1 )
+"%BUILD%\flat_sharpen_pass_test.exe" --dry-run || exit /b 1
+"%BUILD%\flat_sharpen_pass_test.exe" --self-test || (
+    echo [edvr] ERROR: the sharpening pass disagrees with AMD's RCAS, or a broken twin passed
+    exit /b 1
+)
+"%BUILD%\flat_sharpen_pass_test.exe" --self-test-working || (
+    echo [edvr] ERROR: a flat session that sharpens its frames said the never-ran note
+    exit /b 1
+)
 exit /b 0
 
 :rig_openxr_trace_test
@@ -1042,7 +1092,7 @@ if not exist "%OBJ%\flat_mono_resolve_test" mkdir "%OBJ%\flat_mono_resolve_test"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\flat_mono_resolve_test\\" ^
     /Fe"%BUILD%\flat_mono_resolve_test.exe" "tools\flat_mono_resolve_test\flat_mono_resolve_test.cpp" ^
-    "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
+    "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit /b 1 )
 "%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
 "%BUILD%\flat_mono_resolve_test.exe" --self-test || exit /b 1
@@ -1067,9 +1117,20 @@ if not exist "%OBJ%\c2warp" mkdir "%OBJ%\c2warp"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\c2warp\\" ^
     /Fe"%BUILD%\c2_warp_test.exe" "tools\c2_warp_test\c2_warp_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: c2 warp test build failed & exit /b 1 )
 "%BUILD%\c2_warp_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_camera_stub_test
+echo [edvr] === flat_camera_stub_test.exe ===
+if not exist "%OBJ%\flatcamerastub" mkdir "%OBJ%\flatcamerastub"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%ROOT%" /Fo"%OBJ%\flatcamerastub\\" ^
+    /Fe"%BUILD%\flat_camera_stub_test.exe" "tools\flat_camera_stub_test\flat_camera_stub_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat camera stub test build failed & exit /b 1 )
+"%BUILD%\flat_camera_stub_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_c2_coexist_test
@@ -1089,10 +1150,12 @@ REM The real parser over the real shipped edvr.ini. The file's own layout
 REM depends on two parser properties -- repeated section headers, last value
 REM wins -- that were originally read out of config.cpp rather than observed,
 REM and every symptom of either being false shows up in the game rather than
-REM in a build.
+REM in a build. It also registers the generated config_contract_gen.h tables
+REM (the moved-from map parsed from the real edvr.ini), so a moved key's read-
+REM through is proven against what actually shipped, not a fixture.
 if not exist "%OBJ%\cfgtest" mkdir "%OBJ%\cfgtest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\cfgtest"\ ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\cfgtest"\ ^
     /Fe"%BUILD%\config_test.exe" "tools\config_test\config_test.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
@@ -1131,12 +1194,50 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "src\d3d11\head_offset_gate.cpp" "src\d3d11\vr_runtime.cpp" ^
     "src\common\config.cpp" ^
     "src\common\log.cpp" "src\common\frame_flag.cpp" ^
-    "src\d3d11\camera_view.cpp" "src\common\guard.cpp" ^
+    "src\common\guard.cpp" ^
     "src\common\proxy.cpp" "src\d3d11\journal_watch.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
 "%BUILD%\gate_test.exe" "%ROOT%" || (
     echo [edvr] ERROR: the head-offset gate arms where it should not
+    exit /b 1
+)
+exit /b 0
+
+:rig_journal_unload_test
+echo [edvr] === journal_unload_test.exe ===
+REM The graphics DLL's pin against a real FreeLibrary (RC4 review 2026-09-29, F1).
+REM d3d11.dll runs its code on threads nobody waits for -- the journal watcher's
+REM worker, and with fix.ui_quality on a fire-and-forget thread-pool callback -- and
+REM a FreeLibrary that unmaps the image under one returns it into unmapped code.
+REM gate_test links journal_watch.cpp into an exe, which is never unloaded, so it
+REM cannot ask. This builds a DLL from the REAL journal_watch.cpp and the REAL pin
+REM (src\common\module_pin.h) and, for the real worker, a CreateThread thread and a
+REM pool callback of ui_surfaces.cpp's shape, blocks each inside the module, calls
+REM FreeLibrary, and requires the module to stay mapped. Without the pin the
+REM CreateThread thread and the pool callback must lose the image, which is what
+REM shows the rig can tell; the real worker does not, because the UCRT's thread
+REM start holds its module, and the rig reports that. It then loads the real
+REM build\d3d11.dll, gives it a device, and reads its own log for the pin line, the
+REM call in initOnceCallback as shipped. Nothing here links d3d11.lib: the exe takes
+REM the proxy by path.
+if not exist "%OBJ%\junload" mkdir "%OBJ%\junload"
+if not exist "%OBJ%\junload\dll" mkdir "%OBJ%\junload\dll"
+if not exist "%OBJ%\junload\host" mkdir "%OBJ%\junload\host"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\junload\dll"\ /Fe"%BUILD%\journal_unload_dll.dll" ^
+    "tools\journal_unload_test\journal_unload_dll.cpp" "src\d3d11\journal_watch.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: journal_unload_dll build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\junload\host"\ /Fe"%BUILD%\journal_unload_test.exe" ^
+    "tools\journal_unload_test\journal_unload_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: journal_unload_test build failed & exit /b 1 )
+"%BUILD%\journal_unload_test.exe" "%BUILD%\d3d11.dll" || (
+    echo [edvr] ERROR: the graphics DLL's pin does not keep its code mapped under a running worker
     exit /b 1
 )
 exit /b 0
@@ -1209,7 +1310,7 @@ echo [edvr] === private UI depth regression ===
 REM Keep the executable away from build\d3d11.dll: these tests use system
 REM D3D11 WARP and include the production coverage pass directly.
 if not exist "%OBJ%\uidepthtest" mkdir "%OBJ%\uidepthtest"
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\uidepthtest\\" /Fe"%OBJ%\uidepthtest\ui_depth_test.exe" ^
     "tools\ui_depth_test\ui_depth_test.cpp" ^
@@ -1222,12 +1323,43 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
 )
 exit /b 0
 
+:rig_ui_holo_pass_test
+echo [edvr] === UI and hologram pass output-identity rig ===
+REM WARP, the production UI resolve bytecode from %GEN%, away from build\d3d11.dll
+REM (the rig links d3d11.lib). Goldens were recorded from the unmodified shaders.
+if not exist "%OBJ%\uiholopass" mkdir "%OBJ%\uiholopass"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\uiholopass\\" /Fe"%OBJ%\uiholopass\ui_holo_pass_test.exe" ^
+    "tools\ui_holo_pass_test\ui_holo_pass_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui_holo_pass_test build failed & exit /b 1 )
+"%OBJ%\uiholopass\ui_holo_pass_test.exe" --dry-run || exit /b 1
+"%OBJ%\uiholopass\ui_holo_pass_test.exe" --self-test || (
+    echo [edvr] ERROR: the UI and hologram passes no longer match their recorded output
+    exit /b 1
+)
+exit /b 0
+
+:rig_luma_probe_test
+echo [edvr] === compact luminance diagnostic regression ===
+if not exist "%OBJ%\lumaprobetest" mkdir "%OBJ%\lumaprobetest"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\lumaprobetest\\" /Fe"%OBJ%\lumaprobetest\luma_probe_test.exe" ^
+    "tools\luma_probe_test\luma_probe_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: luma_probe_test build failed & exit /b 1 )
+"%OBJ%\lumaprobetest\luma_probe_test.exe" --dry-run || exit /b 1
+"%OBJ%\lumaprobetest\luma_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_hologram_depth_test
 echo [edvr] === generic hologram/icon depth regression ===
 REM Same shape as :rig_ui_depth: WARP, the production coverage pass
 REM included directly, away from build\d3d11.dll.
 if not exist "%OBJ%\holodepthtest" mkdir "%OBJ%\holodepthtest"
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\holodepthtest\\" /Fe"%OBJ%\holodepthtest\hologram_depth_test.exe" ^
     "tools\hologram_depth_test\hologram_depth_test.cpp" ^
@@ -1244,7 +1376,7 @@ exit /b 0
 echo [edvr] === native motion, fusion and night-vision rigs ===
 
 if not exist "%OBJ%\holomotion" mkdir "%OBJ%\holomotion"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\holomotion\\" /Fe"%OBJ%\holomotion\holo_motion_test.exe" ^
     "tools\holo_motion_test\holo_motion_test.cpp" ^
@@ -1260,7 +1392,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
 "%OBJ%\screenmotion\screen_motion_test.exe" --self-test || exit /b 1
 if not exist "%OBJ%\weaponmotion" mkdir "%OBJ%\weaponmotion"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\weaponmotion\\" /Fe"%OBJ%\weaponmotion\weapon_motion_test.exe" ^
     "tools\weapon_motion_test\weapon_motion_test.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
@@ -1273,7 +1405,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_
 "%OBJ%\identityfusion\identity_fusion_test.exe" --self-test || exit /b 1
 python "tools\identity_fusion_capture.py" --self-test || exit /b 1
 if not exist "%OBJ%\nightvision" mkdir "%OBJ%\nightvision"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\nightvision\\" /Fe"%OBJ%\nightvision\night_vision_test.exe" ^
     "tools\night_vision_test\night_vision_test.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib || exit /b 1
@@ -1295,7 +1427,7 @@ exit /b 0
 :rig_stellar_motion
 echo [edvr] === stellar motion regression ===
 if not exist "%OBJ%\stellarmotion" mkdir "%OBJ%\stellarmotion"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\stellarmotion\\" /Fe"%OBJ%\stellarmotion\stellar_motion_test.exe" ^
     "tools\stellar_motion_test\stellar_motion_test.cpp" ^
@@ -1309,7 +1441,7 @@ exit /b 0
 :rig_terrain_motion
 echo [edvr] === terrain motion regression ===
 if not exist "%OBJ%\terrainmotion" mkdir "%OBJ%\terrainmotion"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\terrainmotion\\" /Fe"%OBJ%\terrainmotion\celestial_motion_test.exe" ^
     "tools\celestial_motion_test\celestial_motion_test.cpp" ^
@@ -1324,7 +1456,7 @@ exit /b 0
 :rig_depth_scene_pick_test
 echo [edvr] === scene depth selection cache regression ===
 if not exist "%OBJ%\depthscenepick" mkdir "%OBJ%\depthscenepick"
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\depthscenepick\\" /Fe"%OBJ%\depthscenepick\depth_scene_pick_test.exe" ^
     "tools\depth_scene_pick_test\depth_scene_pick_test.cpp" ^
@@ -1435,6 +1567,9 @@ if errorlevel 1 ( echo [edvr] ERROR: panel snapshot test build failed & exit /b 
 "%OBJ%\panelsnapshot\eye_panel_snapshot_test.exe" "%OBJ%\panelsnapshot\fixture.bin" || exit /b 1
 python "tools\eye_panel_snapshot.py" --self-test || exit /b 1
 python "tools\eye_panel_snapshot.py" "%OBJ%\panelsnapshot\fixture.bin" --verify-fixture || exit /b 1
+REM The crisp-HUD parity gate (G-F) reads both snapshot formats; gate its
+REM self-test here, after both parents' fixtures ran.
+python "tools\hud_parity.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_census_test
@@ -1634,7 +1769,7 @@ exit /b 0
 if not exist "%OBJ%\native_device_test" mkdir "%OBJ%\native_device_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\native_device_test\\" /Fe"%BUILD%\native_device_test.exe" ^
-    "tools\openxr_native_test\native_device_test.cpp" /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+    "tools\openxr_native_test\native_device_test.cpp" /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native device test build failed & exit /b 1 )
 "%BUILD%\native_device_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_device_test.exe" --self-test || exit /b 1
@@ -1647,7 +1782,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_binding_test\\" /Fe"%BUILD%\openxr_binding_test.exe" ^
     "tools\openxr_binding_test\openxr_binding_test.cpp" "src\openxr\session_binding.cpp" ^
     "src\openxr\published_session.cpp" "src\common\frame_flag.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR binding test build failed & exit /b 1 )
 "%BUILD%\openxr_binding_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_binding_test.exe" --self-test || exit /b 1
@@ -1711,7 +1846,7 @@ REM Actual owned-swapchain Present hook, foreign Init caller and private work.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_present_test\\" /Fe"%BUILD%\openxr_present_test.exe" ^
     "tools\openxr_present_test\openxr_present_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib user32.lib
+    /link /INCREMENTAL:NO dxgi.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR Present test build failed & exit /b 1 )
 "%BUILD%\openxr_present_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_present_test.exe" --self-test || exit /b 1
@@ -1726,7 +1861,7 @@ REM Stopped application Present: real graphics callback and native stop coordina
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_shutdown_test\\" /Fe"%BUILD%\openxr_shutdown_test.exe" ^
     "tools\openxr_shutdown_test\openxr_shutdown_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib user32.lib
+    /link /INCREMENTAL:NO dxgi.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR stopped-Present shutdown test build failed & exit /b 1 )
 "%BUILD%\openxr_shutdown_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_shutdown_test.exe" --self-test || exit /b 1
@@ -2018,10 +2153,12 @@ REM there and a missing key falls back to its default. Only run when python is
 REM available; a missing interpreter must not stop a build.
 echo.
 echo [edvr] === install-read check ===
+python "tools\check_install_reads.py" --self-test || exit /b 1
 python "tools\check_install_reads.py"
 if errorlevel 1 ( echo [edvr] ERROR: a config reader runs only on the reload path & exit /b 1 )
 
 echo [edvr] === exit-path check ===
+python "tools\check_exit_paths.py" --self-test || exit /b 1
 python "tools\check_exit_paths.py"
 if errorlevel 1 ( echo [edvr] ERROR: cleanup that matters runs only on FreeLibrary & exit /b 1 )
 
@@ -2077,18 +2214,6 @@ python "%ROOT%\tools\eye_run_ledger.py" --self-test || (
     exit /b 1
 )
 
-echo [edvr] === eye-split diff self-test ===
-REM The tool that compares the two eyes of one frame. It registers the
-REM eyes before it compares them, because their projections are off-centre
-REM by different amounts and far content does not land on the same pixel in
-REM both. A sign flip in that step reads as plausible either way, and once
-REM cost a fix built on tiles that had landed on the Milky Way band. It
-REM fails HERE, not in the next report somebody trusts.
-python "tools\diff_eye_split.py" --self-test || (
-    echo [edvr] ERROR: the eye-split diff tool failed its own test
-    exit /b 1
-)
-
 echo [edvr] === flat pixel capture analyzer self-test ===
 python "tools\flat_pixels_engine.py" --self-test || (
     echo [edvr] ERROR: the flat pixel engine replay failed its own test
@@ -2135,6 +2260,19 @@ python "tools\reflow_notes.py" --self-test || (
     echo [edvr] ERROR: the reflow tool failed its own test
     exit /b 1
 )
+
+echo [edvr] === desk script self-tests ===
+REM The scripts run by hand on what a session leaves behind (a shader family's
+REM HLSL, a DXBC dump, the eye run's crops, the FSS dumps). Each has a fixture
+REM test now; they need no build products, only numpy and Pillow, which the
+REM eye-snapshot readers above already need.
+python "tools\compile_variants.py" --self-test || exit /b 1
+python "tools\dxbc_disasm.py" --self-test || exit /b 1
+python "tools\eye_bmp_to_png.py" --self-test || exit /b 1
+python "tools\diff_eye_dump.py" --self-test || exit /b 1
+python "tools\eye_run_fit.py" --self-test || exit /b 1
+python "tools\eye_run_shimmer.py" --self-test || exit /b 1
+python "tools\eye_run_spin.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_kinematic_json_test
@@ -2183,6 +2321,28 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b 1 )
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --dry-run || exit /b 1
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_engine_motion_cpu_test
+echo [edvr] === engine_motion_cpu_test.exe ===
+REM Build gate for engine motion's CPU instrument (src\d3d11\engine_motion_cpu.h,
+REM docs\openxr-performance-review-2026-09-14.md, the 2026-09-29 carrier entry):
+REM the header-only accumulator and its fold, driven with a fake clock so every
+REM figure is exact -- exclusive nesting and the forward pause, thread attribution
+REM (render thread and the rest), no lost update under four writers and a cutter,
+REM the window's percentiles, "-" for code that never ran against 0.00 for code
+REM that ran, the three report lines at their worst against the log line's limit,
+REM the priming frame, the 30 s and full-window closes, the clock floor measured
+REM on the real clock. It links nothing of the DLL.
+if not exist "%OBJ%\enginemotioncpu" mkdir "%OBJ%\enginemotioncpu"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\enginemotioncpu\\" /Fe"%OBJ%\enginemotioncpu\engine_motion_cpu_test.exe" ^
+    "tools\engine_motion_cpu_test\engine_motion_cpu_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: engine motion CPU test build failed & exit /b 1 )
+"%OBJ%\enginemotioncpu\engine_motion_cpu_test.exe" --dry-run || exit /b 1
+"%OBJ%\enginemotioncpu\engine_motion_cpu_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_kinematic_probe_test
@@ -2363,6 +2523,21 @@ if errorlevel 1 ( echo [edvr] ERROR: LOD governor test build failed & exit /b 1 
 "%BUILD%\lod_governor_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_ui_layer_coverage_test
+echo [edvr] === ui_layer_coverage_test.exe ===
+REM Exercise the production coverage command cache and shaders on WARP.
+REM Keep the executable outside build so D3D11 comes from System32.
+if not exist "%OBJ%\uicoverage" mkdir "%OBJ%\uicoverage"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\uicoverage\\" /Fe"%OBJ%\uicoverage\coverage_test.exe" ^
+    "tools\ui_layer_coverage_test\coverage_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: UI layer coverage test build failed & exit /b 1 )
+"%OBJ%\uicoverage\coverage_test.exe" --dry-run || exit /b 1
+"%OBJ%\uicoverage\coverage_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_ui_quality_test
 echo [edvr] === ui_quality_test.exe ===
 REM Build gate for fix.ui_quality (docs/ui-layer-2026-09-23.md), both halves,
@@ -2388,11 +2563,11 @@ REM draws into the frame, a multiply included; a stencil-tested quad drawn
 REM against the layer's seeded copy of a stencil the game wrote matches the
 REM same quad drawn into the frame; the 1.25 box filter; the debug view.
 if not exist "%OBJ%\uiqualitytest" mkdir "%OBJ%\uiqualitytest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\uiqualitytest\\" /Fe"%BUILD%\ui_quality_test.exe" ^
     "tools\ui_quality_test\ui_quality_test.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+    /link /INCREMENTAL:NO d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: ui quality test build failed & exit /b 1 )
 "%BUILD%\ui_quality_test.exe" --dry-run || exit /b 1
 "%BUILD%\ui_quality_test.exe" --self-test || exit /b 1
@@ -2401,7 +2576,7 @@ REM depth formats, every stencil value class, a scale, a jitter and a reused
 REM seeder, read back texel for texel. Built outside build\ so its imported
 REM D3D11CreateDevice resolves to System32's, not EDVR's proxy.
 if not exist "%OBJ%\uilayerseed" mkdir "%OBJ%\uilayerseed"
-cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\uilayerseed\\" /Fe"%OBJ%\uilayerseed\seed_test.exe" ^
     "tools\ui_layer_seed_test\seed_test.cpp" ^
@@ -2431,4 +2606,19 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: pixel probe test build failed & exit /b 1 )
 "%OBJ%\pixelprobe\pixel_probe_test.exe" --dry-run || exit /b 1
 "%OBJ%\pixelprobe\pixel_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_ui_holo_test
+echo [edvr] === ui_holo_test.exe ===
+REM Actual game DXBC coordinate remap, production cache/binding faults and stock stencil replay.
+if not exist "%OBJ%\uiholo" mkdir "%OBJ%\uiholo"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\uiholo\\" /Fe"%OBJ%\uiholo\ui_holo_test.exe" ^
+    "tools\ui_holo_test\ui_holo_test.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: UI hologram test build failed & exit /b 1 )
+"%OBJ%\uiholo\ui_holo_test.exe" --dry-run || exit /b 1
+"%OBJ%\uiholo\ui_holo_test.exe" --self-test || exit /b 1
 exit /b 0

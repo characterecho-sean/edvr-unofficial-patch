@@ -70,6 +70,9 @@ Slot g_slots[static_cast<unsigned>(edvr::BindSlot::Count)];
 ID3D11DepthStencilView* g_eyeDsv[2] = {};
 bool g_hookLive = true;
 unsigned g_emitAttaches = 0, g_emitDetaches = 0;
+// The pool copier's observer as configure registers it (copier_tests.h calls it
+// the way the game's job threads do).
+edvr::EnginePoolCopyObserverFn g_poolCopyObserver = nullptr;
 std::vector<std::string> g_log;
 uint64_t g_clock = 1000;
 uint64_t fakeClock() { return g_clock; }
@@ -103,7 +106,7 @@ void kinematicEvalSetEmitObserver(EngineEmitObserverFn) noexcept {}
 void kinematicEvalSetPrimaryEmitObserver(EnginePrimaryEmitObserverFn) noexcept {}
 const char* kinematicEvalPrimaryEmitStatus() noexcept { return "rig: hooked"; }
 void kinematicEvalPrimaryEmitCounters(uint64_t& calls,uint64_t& unowned) noexcept { calls=unowned=0; }
-void kinematicEvalSetPoolCopyObserver(EnginePoolCopyObserverFn) noexcept {}
+void kinematicEvalSetPoolCopyObserver(EnginePoolCopyObserverFn fn) noexcept { lifecycle_fake::g_poolCopyObserver = fn; }
 const char* kinematicEvalPoolCopyStatus() noexcept { return "rig: hooked"; }
 void kinematicEvalSetMergeObserver(EngineMergeBeginFn,EngineMergeEndFn) noexcept {}
 const char* kinematicEvalMergeStatus() noexcept { return "rig: hooked"; }
@@ -1171,6 +1174,10 @@ inline void run(const Harness& h) {
     // gives, with MRT6 naming the slot exactly.
     mark = g_log.size();
     g.ordinaryFrame();
+    {   // the census window starts empty (earlier cases drew unkeyed shaders too)
+        char drain[600];
+        edvr::engineVelocityFormatUnkeyed(drain, sizeof(drain));
+    }
     g.beginFrame();
     g.writeScene(g.sceneA.Get(), g.rows[0]);
     g.setPs(g.unkeyed.Get(), kUnkeyedPs);
@@ -1184,6 +1191,27 @@ inline void run(const Harness& h) {
     line = lastLine(joined, mark);
     h.check(number(line, "prepared for nothing ") == 0, "P2: no eye-frame is prepared for nothing");
     h.check(number(line, "under the old order ") >= 1, "P2: the old order would have prepared the unkeyed-only eye-frame");
+    // C1 (the census, 2026-09-29): the pair that bound unkeyed in that frame is named
+    // with its vertex shader and its bind events; the keyed pair beside it, which
+    // drew in the same frame, never is (the negative control); taking the window
+    // starts the next one empty, and the line is still written.
+    {
+        char text[600];
+        edvr::engineVelocityFormatUnkeyed(text, sizeof(text));
+        const std::string census = text;
+        h.check(census.rfind("flat engine motion unkeyed 5s: live=1 ", 0) == 0,
+                "C1: the census line is written, with the engine-record velocity live");
+        h.check(number(census, "vs_EB5234DB6ADB491D/ps_1111222233334444:") >= 1 &&
+                number(census, "binds=") == number(census, "vs_EB5234DB6ADB491D/ps_1111222233334444:") &&
+                number(census, "distinct=") == 1,
+                "C1: the unkeyed pair is named with its vertex shader, and it is the only pair");
+        h.check(census.find("ps_CB9F297EFF264251") == std::string::npos &&
+                census.find("ps_3434972DB5336AA4") == std::string::npos,
+                "C1 negative control: a keyed pixel shader that drew in the same frame never enters the census");
+        edvr::engineVelocityFormatUnkeyed(text, sizeof(text));
+        h.check(std::string(text).find("binds=0 distinct=0 overflow=0 pairs=[]") != std::string::npos,
+                "C1: taking the window starts the next one empty, and the line is still written");
+    }
     mark = g_log.size();
     g.beginFrame();
     g.writeScene(g.sceneA.Get(), g.rows[0]);

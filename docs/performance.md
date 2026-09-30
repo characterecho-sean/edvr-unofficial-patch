@@ -6,23 +6,23 @@
 file's own log) and its header redirect notices. It restates the journal
 below and is not new evidence; update it whenever this doc changes.*
 
-- **2026-09-23:** feature 3's eye-tracked centre is gone from
-  foveation.cpp (frame_flag v34): its gaze came from the legacy openvr
-  half, and nothing has published one since that proxy was deleted, so the
-  rings sit where `advanced.foveation_distance` puts them. On 2026-09-24
-  `experimental.foveation_centre` retired as well; that distance now
-  defaults to 0, the value the key's shipped default (`eyes`) gave.
-- **State:** A pre-implementation design doc, now mostly historical — see
-  Detail for the three newer docs with the current picture. Within this
-  file's own log (the foveation branch, 2026-09-04 to 2026-09-06):
-  feature 1's sharpening shipped in 0.14.0 as `render_sharpness`
-  (2026-09-04 note); feature 2 (fixed-centre VRS foveation) was built,
-  flown six times, and ships OFF — measured, not a performance lever on
-  Elite; feature 3 (eye-tracked centre) is blocked by the Pimax Crystal
-  Super's SteamVR driver, not by EDVR; feature 4 is superseded by
-  settings-menu.md (2026-09-07); feature 6 (DLSS where you look) has a
-  built and flown fixed-centre fovea, while its eye-tracked-crop variant
-  was designed and dropped the same day (2026-09-05).
+- **State: Feature 2 (variable-rate shading) retired 2026-09-29 (code removed,
+  184eee7f).** foveation.cpp, `experimental.foveation` and the seven
+  `advanced.foveation_*` keys are gone. The Feature 2 and Feature 3 text below
+  (rings, distance, passes, outer rate) is history. DLSS where you look
+  (Feature 6, `temporal_aa_fovea_*`) stays.
+- **State: the desk probes retired 2026-09-29 (code removed, 72247cdf).**
+  `dlaaMotionProbe`, `dlaaCropProbe` and `edvrDlaaCostProbe`, which the smoke
+  harness ran and the Feature 6 entries below cite, are deleted with
+  tools/smoke's trained-pass block. The fovea geometry they exercised stays.
+- **State (older entries):** A pre-implementation design doc, mostly
+  historical (the older State bullet and the 2026-09-23 entry: Status detail
+  below). Feature 1's sharpening shipped in 0.14.0 as `render_sharpness`;
+  feature 2 flown six times, shipped OFF, now retired; feature 3's centre
+  gone (2026-09-23; `experimental.foveation_centre` retired 2026-09-24, the
+  distance defaults to 0); feature 4 superseded by settings-menu.md; feature
+  6's fixed-centre fovea built and flown, its eye-tracked crop dropped
+  2026-09-05.
 - **Open:**
   - Feature 6's seam blend-band width: "a headset-on judgement" not yet
     made (under "What must be measured first").
@@ -30,22 +30,10 @@ below and is not new evidence; update it whenever this doc changes.*
     measured" (Phase 0 item 4).
   - Features 1 and 5 have no flight entries in this file beyond the
     design and the 0.14.0 sharpening note.
-- **Ruled out:**
-  - Feature 2 (VRS foveation) as an Elite performance lever: culling all
-    eye-draw pixel shading bought zero fps ("Flight 6", 2026-09-06);
-    revisit only if render scale is pushed far past native.
-  - DLSS history smearing into the fovea disc, as the cause of menu-text
-    blockiness: falsified by the `fix.temporal_aa`-off flight ("The
-    preset is not a free choice, and 38 degrees is not much", 2026-09-06)
-    — the real cause is ring radius.
-  - Feature 6's eye-tracked crop: dropped 2026-09-05 ("Where the crop
-    design stands") — under upscaling a crop cannot hold history for
-    where the eyes go next; the fixed centre and feature 2 absorb the
-    gaze's value instead.
-  - Feature 3's eye-tracked centre on the Pimax Crystal Super: the
-    driver's value is a damped, mis-framed constant, not recoverable
-    gaze ("Flights 3 and 4", 2026-09-05); the probe stays in the tree to
-    re-ask later or on other headsets.
+- **Ruled out:** four items, full text and cited journal entries in Status
+  detail below: feature 2 (VRS) as a performance lever ("Flight 6"); DLSS
+  history smear as the menu-blockiness cause; feature 6's eye-tracked crop;
+  feature 3's eye-tracked centre on the Pimax Crystal Super.
 - **Next flight:** None named as still pending; the two Open items above
   are desk/headset judgements this file has not yet scheduled.
 - **Environment:** D3D11 VRS (feature 2) needs NVIDIA Turing or newer via
@@ -70,6 +58,42 @@ source; claims about runtimes, drivers and SDKs are labelled measured
 documentation or release notes), or believed; what can only be settled at
 implementation time or in a live session is collected under Phase 0.
 Nothing here is implemented yet.*
+
+## Status detail (moved out of Status 2026-09-29)
+
+- **2026-09-23:** feature 3's eye-tracked centre is gone from
+  foveation.cpp (frame_flag v34): its gaze came from the legacy openvr
+  half, and nothing has published one since that proxy was deleted, so the
+  rings sit where `advanced.foveation_distance` puts them. On 2026-09-24
+  `experimental.foveation_centre` retired as well; that distance now
+  defaults to 0, the value the key's shipped default (`eyes`) gave.
+- **State:** A pre-implementation design doc, now mostly historical — see
+  Detail for the three newer docs with the current picture. Within this
+  file's own log (the foveation branch, 2026-09-04 to 2026-09-06):
+  feature 1's sharpening shipped in 0.14.0 as `render_sharpness`
+  (2026-09-04 note); feature 2 (fixed-centre VRS foveation) was built,
+  flown six times, and ships OFF — measured, not a performance lever on
+  Elite; feature 3 (eye-tracked centre) is blocked by the Pimax Crystal
+  Super's SteamVR driver, not by EDVR; feature 4 is superseded by
+  settings-menu.md (2026-09-07); feature 6 (DLSS where you look) has a
+  built and flown fixed-centre fovea, while its eye-tracked-crop variant
+  was designed and dropped the same day (2026-09-05).
+- **Ruled out:**
+  - Feature 2 (VRS foveation) as an Elite performance lever: culling all
+    eye-draw pixel shading bought zero fps ("Flight 6", 2026-09-06);
+    revisit only if render scale is pushed far past native.
+  - DLSS history smearing into the fovea disc, as the cause of menu-text
+    blockiness: falsified by the `fix.temporal_aa`-off flight ("The
+    preset is not a free choice, and 38 degrees is not much", 2026-09-06)
+    — the real cause is ring radius.
+  - Feature 6's eye-tracked crop: dropped 2026-09-05 ("Where the crop
+    design stands") — under upscaling a crop cannot hold history for
+    where the eyes go next; the fixed centre and feature 2 absorb the
+    gaze's value instead.
+  - Feature 3's eye-tracked centre on the Pimax Crystal Super: the
+    driver's value is a damped, mis-framed constant, not recoverable
+    gaze ("Flights 3 and 4", 2026-09-05); the probe stays in the tree to
+    re-ask later or on other headsets.
 
 ## The ask
 

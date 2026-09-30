@@ -56,12 +56,12 @@ internal static class Program
 
     internal sealed record Options(string Input, int Pid, string Output, string? RuntimeLog, string Frames,
                                    string? Symbols, string? EdvrExport, int EdvrExportWindow,
-                                   string EdvrExportRegion);
+                                   string EdvrExportRegion, bool GpuCoverage = false);
 
     private const string Usage = "usage: EdvrCpuProfile --input <etl> --pid <pid> --output <report.json> " +
                                  "[--runtime-log <log>] [--frames <frames.jsonl>] [--symbols <dir>] " +
                                  "[--edvr-export <path> --edvr-export-window <n> [--edvr-export-region R1]] " +
-                                 "| --self-test";
+                                 "[--gpu-coverage] | --self-test";
 
     internal static Options ParseOptions(string[] args)
     {
@@ -69,10 +69,12 @@ internal static class Program
         string? edvrExport = null;
         var edvrExportRegion = "R1";
         var edvrExportWindow = 0;
+        var gpuCoverage = false;
         int? pid = null;
         for (var i = 0; i < args.Length; i++)
         {
-            if (args[i] == "--input" && ++i < args.Length) input = args[i];
+            if (args[i] == "--gpu-coverage") gpuCoverage = true;
+            else if (args[i] == "--input" && ++i < args.Length) input = args[i];
             else if (args[i] == "--pid" && ++i < args.Length && int.TryParse(args[i], out var parsed)) pid = parsed;
             else if (args[i] == "--output" && ++i < args.Length) output = args[i];
             else if (args[i] == "--runtime-log" && ++i < args.Length) runtimeLog = args[i];
@@ -100,7 +102,7 @@ internal static class Program
                            runtimeLog is null ? null : Path.GetFullPath(runtimeLog), framesPath,
                            symbols is null ? DefaultSymbolDirectory(input) : Path.GetFullPath(symbols),
                            edvrExport is null ? null : Path.GetFullPath(edvrExport), edvrExportWindow,
-                           edvrExportRegion);
+                           edvrExportRegion, gpuCoverage);
     }
 
     /// The capture tool drops the PDBs that match the installed DLLs beside the
@@ -126,7 +128,7 @@ internal static class Program
                                                                   new TraceEventDispatcherOptions());
             progress?.Invoke($"etlx: {new FileInfo(converted).Length / 1048576} MB");
             using var log = new TraceLog(converted);
-            var data = Collector.Collect(log, options.Pid, progress);
+            var data = Collector.Collect(log, options.Pid, progress, options.GpuCoverage);
             var symbols = options.Symbols is null
                 ? SymbolTable.Off()
                 : PdbSymbols.Load(options.Symbols, data.Stacks.Modules);

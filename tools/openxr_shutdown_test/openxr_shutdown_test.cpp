@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "../openxr_native_test/present_device.h"
+#include "../../src/common/system_d3d11.h"
 #include "../../src/openxr/native_render_binding.h"
 #include "../../src/openxr/render_route.h"
 #include "../../src/openxr/render_shutdown_coordinator.h"
@@ -512,6 +513,8 @@ int selfTest(const std::wstring& suppliedPath) {
     path = path.substr(0, slash + 1) + L"d3d11.dll";
   }
   check(absolutePath(path), "graphics proxy path is drive-absolute");
+  // The DLL loaded next is the only proxy in this process: no d3d11.dll comes with the exe.
+  check(edvr::reportNoD3D11Mapped("openxr_shutdown_test"), "no d3d11.dll is mapped before the rig loads the proxy");
   HMODULE proxy = LoadLibraryExW(path.c_str(), nullptr,
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
   check(proxy != nullptr, "load the actual graphics proxy");

@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"
 #include "fss_dump.h"
 
 #include <cstdio>
@@ -104,22 +105,7 @@ bool     g_armedNoted = false;
 // until the end. The offline diff then has the one thing every two-frame
 // dump lacked: the per-eye CADENCE of the flashes across the whole
 // window the eye actually watches.
-constexpr char kSeriesCsHlsl[] = R"HLSL(
-Texture2D<float4> src : register(t0);
-RWTexture2D<float> outt : register(u0);
-cbuffer P : register(b0) { uint4 off; }   // x = yOffset, y = tw, z = th
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= off.y || id.y >= off.z) return;
-    float s = 0;
-    for (uint j = 0; j < 16; ++j)
-        for (uint i = 0; i < 16; ++i) {
-            float4 c = src.Load(int3(id.x * 16 + i, id.y * 16 + j, 0));
-            s += dot(c.rgb, float3(0.299, 0.587, 0.114));
-        }
-    outt[uint2(id.x, off.x + id.y)] = s / 256.0;
-}
-)HLSL";
+
 
 constexpr uint32_t kSeriesMax = 48;   // atlas height 335*48 fits 16384
 uint32_t g_seriesFmt[2] = {};         // the source format, for the manifest
@@ -229,10 +215,7 @@ void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
 
     if (!g_seriesCs && !g_seriesTried) {
         g_seriesTried = true;
-        g_seriesCs = shaderSwapCompileCs(ctx, kSeriesCsHlsl,
-                                         sizeof(kSeriesCsHlsl) - 1, "main",
-                                         "fss_series_cs", nullptr,
-                                         "fss series");
+        g_seriesCs = shaderSwapCreateCs(ctx, kFssSeriesBytecode, sizeof(kFssSeriesBytecode), "fss_series_cs", "fss series");
     }
     if (!g_seriesCs) {
         dev->Release();

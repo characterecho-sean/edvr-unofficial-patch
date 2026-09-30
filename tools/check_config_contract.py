@@ -21,7 +21,8 @@ Every one of these has been wrong in a shipped build:
 None of these fail a build, produce a warning, or look any different from a fix
 that does not work. That is what this script is for.
 
-Usage:  python tools/check_config_contract.py [--quiet] [--emit PATH]
+Usage:  python tools/check_config_contract.py [--quiet] [--emit PATH [--dry-run]]
+        python tools/check_config_contract.py --self-test
 Exit:   0 all three agree, 1 they do not.
 
 --emit writes a generated header (known keys + the moved-from map parsed
@@ -30,6 +31,13 @@ falls back to a moved key's old location when the new one is absent --
 hand-copied DLLs meet old-layout inis all the time -- and names any key
 it does not read. Emit never fails the build on contract problems (the
 late check does); it fails only if the files cannot be read at all.
+--dry-run reports what --emit would write and writes nothing.
+
+--self-test runs the checks over fixtures laid out in the temp folder: every
+kind of disagreement must be reported, and the shapes that look like one but
+are not (a sentence that starts `word =`, a call the formatter wrapped, a
+file name in a message) must not be. build.bat runs it before it trusts the
+tool with the real tree.
 """
 
 import os
@@ -227,20 +235,26 @@ def emit_header(path, read, doc, moved):
         f.write('\n'.join(lines))
 
 
-def main():
-    quiet = '--quiet' in sys.argv
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if '--self-test' in argv:
+        return self_test()
+    quiet = '--quiet' in argv
+    dry_run = '--dry-run' in argv
     emit = None
-    if '--emit' in sys.argv:
-        emit = sys.argv[sys.argv.index('--emit') + 1]
+    if '--emit' in argv:
+        emit = argv[argv.index('--emit') + 1]
     read = keys_read()
     dup_sections = []
     doc = keys_documented(dup_sections)
     moved = keys_moved()
     if emit:
-        emit_header(emit, read, doc, moved)
+        if not dry_run:
+            emit_header(emit, read, doc, moved)
         if not quiet:
-            print('[edvr] config contract header: %d known keys, %d moves -> %s'
-                  % (len(set(read) | set(doc)), len(moved), emit))
+            print('[edvr] config contract header: %d known keys, %d moves -> %s%s'
+                  % (len(set(read) | set(doc)), len(moved), emit,
+                     ' (dry run: not written)' if dry_run else ''))
         return 0
     mentioned = keys_mentioned()
 
@@ -311,6 +325,223 @@ def main():
     if not quiet:
         print('[edvr] config contract ok: %d keys read, %d documented, all agree'
               % (len(read), len(doc)))
+    return 0
+
+
+def self_test():
+    """The three-way agreement, against fixtures laid out in the temp folder:
+    each kind of disagreement must be reported by name, the shapes that look
+    like one and are not must pass, and --emit must write what the runtime's
+    audit reads (and write nothing under --dry-run). build.bat runs this
+    before it trusts the tool with the real tree."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+
+    global ROOT, SRC, INI
+    saved = (ROOT, SRC, INI)
+    base = tempfile.mkdtemp(prefix='edvr-contract-')
+    failures = []
+
+    def lay(name, ini, sources):
+        root = os.path.join(base, name)
+        os.makedirs(os.path.join(root, 'src'))
+        with open(os.path.join(root, 'edvr.ini'), 'w', encoding='utf-8') as f:
+            f.write(ini)
+        for leaf, text in sources.items():
+            with open(os.path.join(root, 'src', leaf), 'w', encoding='utf-8') as f:
+                f.write(text)
+        return root
+
+    def point_at(root):
+        global ROOT, SRC, INI
+        ROOT, SRC, INI = root, os.path.join(root, 'src'), os.path.join(root, 'edvr.ini')
+
+    def run(root, *argv):
+        point_at(root)
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            code = main(list(argv))
+        return code, said.getvalue()
+
+    def expect(name, condition, what):
+        if not condition:
+            failures.append('%s: %s' % (name, what))
+
+    def expect_in(name, text, needle):
+        expect(name, needle in text, 'expected %r in\n%s' % (needle, text))
+
+    try:
+        # Everything agrees, including the look-alikes: a sentence that starts
+        # `word =` is not a documented key, a call wrapped after its paren is
+        # still one read, and a filename or a comment is not a message.
+        ini = ('[fix]\n'
+               'black_void = 1\n'
+               '# some prose = here, which is a sentence and not a setting\n'
+               '#early_key = 0\n'
+               '\n'
+               '[advanced]\n'
+               '#max_mb = 4\n')
+        src = {'a.cpp': ('bool a = cfg.getBool("fix.black_void", true);\n'
+                         'int b = cfg.getIntInRange(\n'
+                         '    "advanced.max_mb", 4, 1, 64);\n'
+                         'auto e = readConfigStringEarly(path, section, "fix.early_key");\n'),
+               'b.h': ('// fix.only_in_a_comment is not a message\n'
+                       'log("pin it with advanced.max_mb; see d3d11.dll and settings-menu.md");\n')}
+        name = 'agree'
+        root = lay(name, ini, src)
+        code, said = run(root)
+        expect(name, code == 0, 'exit %d\n%s' % (code, said))
+        expect_in(name, said, '3 keys read, 3 documented, all agree')
+        expect(name, keys_read() == {'fix.black_void': ['src/a.cpp:1'],
+                                     'advanced.max_mb': ['src/a.cpp:2'],
+                                     'fix.early_key': ['src/a.cpp:4']},
+               'keys_read() -> %r' % (keys_read(),))
+        expect(name, keys_documented() == {'fix.black_void': 2, 'fix.early_key': 4,
+                                           'advanced.max_mb': 7},
+               'keys_documented() -> %r' % (keys_documented(),))
+        code, said = run(root, '--quiet')
+        expect(name, code == 0 and said == '', '--quiet said %r' % said)
+
+        # A byte-order mark on the ini's first line is not part of its header, for the
+        # documented keys and for the moved-from map alike.
+        name = 'bom'
+        root = lay(name, '\ufeff[fix]\n# moved-from: fix.old_bom\nblack_void = 1\n',
+                   {'a.cpp': 'bool a = cfg.getBool("fix.black_void", true);\n'})
+        code, said = run(root)
+        expect(name, code == 0, 'exit %d\n%s' % (code, said))
+        expect(name, keys_moved() == {'fix.old_bom': ('fix.black_void', '')}, 'keys_moved() -> %r' % (keys_moved(),))
+
+        # Read, but nobody can learn the name from the file.
+        name = 'read-not-documented'
+        rnd = lay(name, '[fix]\nblack_void = 1\n',
+                  {'a.cpp': 'cfg.getBool("fix.black_void", true);\n'
+                            'cfg.getFloat("fix.extra", 1.0f);\n'})
+        code, said = run(rnd)
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'READ BUT NOT IN edvr.ini: fix.extra')
+        expect_in(name, said, 'src/a.cpp:2')
+        expect_in(name, said, '1 problem(s)')
+
+        # The 0.5.x shape: documented under [fix], read from [advanced]. Both
+        # halves are reported, and the second says where the code looks.
+        name = 'wrong-section'
+        code, said = run(lay(name, '[fix]\nthing = 1\n',
+                             {'a.cpp': 'cfg.getInt("advanced.thing", 1);\n'}))
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'READ BUT NOT IN edvr.ini: advanced.thing')
+        expect_in(name, said, 'IN edvr.ini BUT NEVER READ: fix.thing (line 2)')
+        expect_in(name, said, 'The code reads advanced.thing. The section is part of the key')
+
+        # A message that tells a user to set something nothing reads. A commented-out
+        # line that has the same message in it is not a message anybody can print.
+        name = 'named-in-a-message'
+        code, said = run(lay(name, '[fix]\nreal = 1\n',
+                             {'a.cpp': 'cfg.getBool("fix.real", true);\n'
+                                       '// log("set fix.comment_ghost");\n'
+                                       ' * log("set fix.block_comment_ghost");\n'
+                                       'log("set fix.ghost_key to fix it");\n'}))
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'NAMED IN A MESSAGE BUT NEVER READ: fix.ghost_key')
+        expect_in(name, said, 'src/a.cpp:4')
+        expect(name, 'comment_ghost' not in said, 'a comment was reported as a message')
+
+        # One header per section.
+        name = 'duplicate-section'
+        code, said = run(lay(name, '[fix]\na = 1\n[fix]\nb = 1\n',
+                             {'a.cpp': 'cfg.getInt("fix.a", 1); cfg.getInt("fix.b", 1);\n'}))
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'SECTION [fix] APPEARS TWICE in edvr.ini (line 3; first at line 1)')
+
+        # The moved-from map: the annotations stack onto the next key line, an
+        # old name that is still a key is ambiguous, and one that points at
+        # itself is a typo.
+        moved_ini = ('[fix]\n'
+                     '# moved-from: fix.old_a\n'
+                     '# moved-from: advanced.old_b (default 2)\n'
+                     'new_key = 1\n')
+        moved_src = {'a.cpp': 'cfg.getInt("fix.new_key", 1);\n'}
+        name = 'moved-from'
+        root = lay(name, moved_ini, moved_src)
+        code, said = run(root)
+        expect(name, code == 0, 'exit %d\n%s' % (code, said))
+        point_at(root)
+        expect(name, keys_moved() == {'fix.old_a': ('fix.new_key', ''),
+                                      'advanced.old_b': ('fix.new_key', '2')},
+               'keys_moved() -> %r' % (keys_moved(),))
+        # The annotation belongs to the NEXT key line, commented out or not, and to
+        # no later one.
+        name = 'moved-from-commented-key'
+        root = lay(name, ('[fix]\n'
+                          '# moved-from: fix.old_c\n'
+                          '#new_c = 1\n'
+                          '#other = 2\n'),
+                   {'a.cpp': 'cfg.getInt("fix.new_c", 1); cfg.getInt("fix.other", 2);\n'})
+        point_at(root)
+        expect(name, keys_moved() == {'fix.old_c': ('fix.new_c', '')}, 'keys_moved() -> %r' % (keys_moved(),))
+        # A blank line drops an annotation that has no key after it.
+        name = 'moved-from-orphan'
+        root = lay(name, ('[fix]\n'
+                          '# moved-from: fix.old_d\n'
+                          '\n'
+                          'new_d = 1\n'),
+                   {'a.cpp': 'cfg.getInt("fix.new_d", 1);\n'})
+        point_at(root)
+        expect(name, keys_moved() == {}, 'keys_moved() -> %r' % (keys_moved(),))
+        name = 'moved-from-live-and-self'
+        code, said = run(lay(name, ('[fix]\n'
+                                    '# moved-from: fix.live_old\n'
+                                    'new_key = 1\n'
+                                    'live_old = 1\n'
+                                    '# moved-from: fix.selfy\n'
+                                    'selfy = 1\n'),
+                             {'a.cpp': 'cfg.getInt("fix.new_key", 1);\n'
+                                       'cfg.getInt("fix.live_old", 1);\n'
+                                       'cfg.getInt("fix.selfy", 1);\n'}))
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'MOVED-FROM NAMES A LIVE KEY: "fix.live_old"')
+        expect_in(name, said, 'MOVED-FROM POINTS AT ITSELF: fix.selfy')
+
+        # --emit writes the audit header, never fails on contract problems, and
+        # under --dry-run writes nothing at all.
+        name = 'emit'
+        out_dir = os.path.join(base, 'emit-out')
+        os.makedirs(out_dir)
+        header = os.path.join(out_dir, 'config_contract_gen.h')
+        code, said = run(lay(name, moved_ini, moved_src), '--emit', header)
+        expect(name, code == 0, 'exit %d\n%s' % (code, said))
+        expect_in(name, said, '1 known keys, 2 moves')
+        with open(header, encoding='utf-8') as f:
+            text = f.read()
+        expect_in(name, text, 'inline constexpr const char* kKnownKeys[] = {\n    "fix.new_key",\n};')
+        expect_in(name, text, '    {"advanced.old_b", "fix.new_key", "2"},\n'
+                              '    {"fix.old_a", "fix.new_key", ""},\n')
+        name = 'emit-with-problems'
+        os.remove(header)
+        code, said = run(rnd, '--emit', header, '--quiet')
+        expect(name, code == 0 and os.path.isfile(header) and said == '',
+               'emit must not fail the build over contract problems: exit %d, %r' % (code, said))
+        name = 'emit-dry-run'
+        os.remove(header)
+        code, said = run(rnd, '--emit', header, '--dry-run')
+        expect(name, code == 0, 'exit %d\n%s' % (code, said))
+        expect_in(name, said, '(dry run: not written)')
+        expect(name, os.listdir(out_dir) == [], '--dry-run wrote %r' % os.listdir(out_dir))
+        fresh = os.path.join(base, 'never-made', 'gen.h')
+        code, said = run(rnd, '--emit', fresh, '--dry-run', '--quiet')
+        expect(name, code == 0 and not os.path.exists(os.path.dirname(fresh)),
+               '--dry-run created a directory')
+    finally:
+        ROOT, SRC, INI = saved
+        shutil.rmtree(base, ignore_errors=True)
+
+    if failures:
+        print('check_config_contract: self-test FAILED')
+        for f in failures:
+            print('  ' + f.replace('\n', '\n    '))
+        return 1
+    print('check_config_contract: self-test OK')
     return 0
 
 

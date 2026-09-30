@@ -162,6 +162,19 @@ inline void flatRuntimeDispatchObserveWritten(FlatRuntimePrefix& p, const void* 
     }
     for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == resource) p.uncertain = true;
 }
+// Whether the selected frame's contract came through the verified menu HDR copy: the HDR the
+// tone pass reads (`hdr`, the selection's) is the copy's inherited destination. That is the 3D
+// main menu -- a ship on its pedestal -- and only that: an ordinary frame's HDR is written by
+// scene draws and never inherited, so this is false for every flight, station and on-foot frame
+// the corpus holds. FlatMonoResolveFrame::staticScene is exactly this (the menu-scoped
+// stale-slot policy), so the answer has one definition, here, and the trace replay asks the same
+// function the runtime does.
+inline bool flatFrameThroughMenuCopy(const FlatRuntimePrefix& p, const void* hdr) {
+    if (!hdr || !p.menuCopiesAccepted) return false;
+    for (uint32_t i = 0; i < p.targetsUsed; ++i)
+        if (p.targets[i].resource == hdr) return p.targets[i].menuInherited;
+    return false;
+}
 // Optional sink for the copy branch's assembled fixture records: the frame
 // contract's carrier (flat_frame_contract.h). count is set only when the
 // copy branch ran, so count != 0 means the reducer produced a contract.

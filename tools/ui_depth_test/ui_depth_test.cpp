@@ -18,6 +18,15 @@
 using Microsoft::WRL::ComPtr;
 ComPtr<ID3DBlob> compile(const char*,const char*);
 namespace edvr {
+ID3D11VertexShader* shaderSwapCreateVs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11VertexShader* shader=nullptr;
+    if(FAILED(dev->CreateVertexShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
+}
+ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* shader=nullptr;
+    if(FAILED(dev->CreatePixelShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
+}
+
 ID3D11VertexShader* shaderSwapCompileVs(ID3D11DeviceContext*,const char*,size_t,const char*,const char*,const SwapMacro*,const char*) { std::abort(); }
 ID3D11Texture2D* testScene = nullptr;
 Log& Log::get() { static Log instance; return instance; }
@@ -43,6 +52,11 @@ bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
 bool bindingResolveResource(void*, ResourceInfo*) { std::abort(); }
 bool depthProbeIsSceneDepth(const void*) { std::abort(); }
 uint64_t lookupShaderHash(void*) { std::abort(); }
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx, const void* bytecode, size_t size,
+    const char*, const char*) {
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
+    if(FAILED(dev->CreateComputeShader(bytecode,size,nullptr,&shader)))std::abort();return shader;
+}
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx, const char* source, size_t,
     const char*, const char*, const SwapMacro*, const char*) {
     auto code=::compile(source,"cs_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
@@ -63,8 +77,8 @@ void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, UINT n,
     ctx->OMSetRenderTargets(n, rt, ds);
 }
 // Pass-through: this rig drives the coverage passes directly, so the hook
-// these bypass in production (the draw census, eye-draw gate, foveation,
-// probe) never needs to see them here either.
+// these bypass in production (the draw census, eye-draw gate, probe) never
+// needs to see them here either.
 void vScreenDrawRaw(ID3D11DeviceContext* ctx, UINT vertexCount, UINT startVertex) {
     ctx->Draw(vertexCount, startVertex);
 }
@@ -161,10 +175,9 @@ int main(int argc, char** argv) {
     hr(created);
     check(gpuTimingBind(dev.Get(),ctx.Get()),"bind canonical WARP timer owner");
     ComPtr<ID3D11InfoQueue> info; dev.As(&info);
-    // Compile every actual coverage shader, not a test transcription.
+    // Create every actual generated production coverage shader.
     for (DepthShader& entry : g_depthShaders) {
-        auto code = compile(entry.hlsl, "ps_5_0");
-        hr(dev->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &entry.shader));
+        hr(dev->CreatePixelShader(entry.bytecode, entry.len, nullptr, &entry.shader));
     }
     auto vsCode = compile("cbuffer C:register(b0){float4 v;} struct O{float2 uv:TEXCOORD0;float4 p:SV_Position;}; O main(uint id:SV_VertexID){O o;float2 p=float2((id<<1)&2,id&2);o.p=float4(p*float2(2,-2)+float2(-1,1),v.x,1);o.uv=p;return o;}", "vs_5_0");
     auto psCode = compile("float main():SV_Target{return 1;}", "ps_5_0");
@@ -907,8 +920,8 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
     // noninteger output ratios catch holes/overlap in block ownership.
     {
         ctx->ClearState();
-        auto code=compile(kUiResolve,"cs_5_0");ComPtr<ID3D11ComputeShader> cs;
-        hr(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cs));
+        ComPtr<ID3D11ComputeShader> cs;
+        hr(dev->CreateComputeShader(kUiResolveBytecode,sizeof(kUiResolveBytecode),nullptr,&cs));
         auto texture=[&](UINT w,UINT h,DXGI_FORMAT f){
             D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;
             d.Format=f;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;

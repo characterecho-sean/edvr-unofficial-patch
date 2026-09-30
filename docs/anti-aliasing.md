@@ -3,8 +3,7 @@
 ## Status
 
 *Restates the journal below; not new evidence -- update it whenever
-this doc changes. Last updated 2026-09-25 for the camera rows after a
-drop.*
+this doc changes. Last updated 2026-09-29 for flat sharpening.*
 
 - **State:** TAA/DLSS carries UI/smoke depth and station motion by
   default ("Current defaults", 2026-09-10). Feature A (the supersample
@@ -14,12 +13,13 @@ drop.*
   AA, DLAA/DLSS) is built and flown near-daily since 2026-09-02 (2.80
   -> 2.02 ms/eye on 09-06); the own resolve's lean variant is BUILT,
   NOT FLOWN (2026-09-16). C and D remain sketches; the rest lock shipped
-  09-03, retired 09-04. 2026-09-23: the DLSS ladder walk no longer
-  breaks on a failed query; that evening's modes line showed the floor
-  is real, and the door's output now follows an input under it (twice
-  the input, the runtime upsampling the rest) instead of DLSS standing
-  aside -- BUILT, NOT FLOWN ("The served floor", at the end).
+  09-03, retired 09-04. 2026-09-23: the DLSS ladder walk survives a
+  failed query, and the door's output follows an input under a mode's
+  floor (twice the input; the runtime upsamples the rest) -- BUILT, NOT
+  FLOWN ("The served floor", at the end).
 - **Open:**
+  - Flat sharpening (`fix.render_sharpness`, ahead of the game's output
+    copy; the UI never is): BUILT 2026-09-29, NOT FLOWN. See its section.
   - The world path's rows after a drop: a parked camera's zero was
     accepted as the view's delta and carried (eye run 050423). The gate
     now refuses it. BUILT 2026-09-25, NOT FLOWN; its own doc is
@@ -37,20 +37,13 @@ drop.*
   - `shimmer_rest_still`/`_moving` past the Quest 3's tracker floor:
     left as "the next flight's question" at retirement. The lean own
     shader's price: one flight, `advanced.temporal_aa_diagnostics` live.
-- **Ruled out:**
-  - MSAA from outside a deferred renderer: structurally unreachable.
-  - Conservative rasterisation for the menu-ship seam: flown 2026-09-03,
-    reverted the same day (no effect, new artifacts).
-  - The rest lock (`shimmer_rest`): retired 2026-09-04 (TAA integrates
-    the wander; it never engaged on the Quest 3's tracker). Five TAA
-    levers (2026-09-04 cleanup): the rest snap, HUD depth layers, the
-    assumed HUD distance, `camera` motion, the transposed-reading A/B.
-  - Full per-object motion matrices: declined (per-object-motion.md).
-  - Feature A on the native runtime: not ported (the submit blit
-    minifies an oversize eye with one bilinear tap, d3d11_stereo.cpp).
-  - A failed mid-ladder query hiding the mode that serves a 40% input
-    (the 2026-09-23 hardening's cause): the 15:34 modes line answered
-    all four, and no mode serves between a third and a half.
+- **Ruled out** (each with its reason, verbatim, in `## Status detail`
+  below): MSAA from outside a deferred renderer; conservative
+  rasterisation for the menu-ship seam (flown 2026-09-03, reverted); the
+  rest lock (retired 2026-09-04) and the five TAA levers of the
+  2026-09-04 cleanup; full per-object motion matrices (declined);
+  Feature A on the native runtime (not ported); a failed mid-ladder
+  query hiding the mode that serves a 40% input (2026-09-23 hardening).
 - **Environment:** Native SteamVR is measured; OpenComposite's OpenXR
   leg is unverified. Pimax Crystal Super (~42 px/deg, tracking floor
   0.53 arcmin/frame) vs. Quest 3 (~20-40.6 px/deg, never under 1.9).
@@ -64,6 +57,24 @@ drop.*
   "Phase 0" the unmeasured; "Phasing" the build order. Linked:
   performance.md, per-object-motion.md, rest-lock-handoff.md, and the
   two 2026-09-04 reviews (motion vectors; far-warp darkness).
+
+## Status detail (moved out of Status 2026-09-29)
+
+Ruled out, moved verbatim from Status:
+
+- MSAA from outside a deferred renderer: structurally unreachable.
+- Conservative rasterisation for the menu-ship seam: flown 2026-09-03,
+  reverted the same day (no effect, new artifacts).
+- The rest lock (`shimmer_rest`): retired 2026-09-04 (TAA integrates
+  the wander; it never engaged on the Quest 3's tracker). Five TAA
+  levers (2026-09-04 cleanup): the rest snap, HUD depth layers, the
+  assumed HUD distance, `camera` motion, the transposed-reading A/B.
+- Full per-object motion matrices: declined (per-object-motion.md).
+- Feature A on the native runtime: not ported (the submit blit
+  minifies an oversize eye with one bilinear tap, d3d11_stereo.cpp).
+- A failed mid-ladder query hiding the mode that serves a 40% input
+  (the 2026-09-23 hardening's cause): the 15:34 modes line answered
+  all four, and no mode serves between a third and a half.
 
 ## The ask
 
@@ -2171,3 +2182,185 @@ reaches the floor of the 4074x4076 output again`. If the rule never
 fired: `temporal aa: dlaa was asked for, but a 1833x1834 frame sits
 outside every DLSS mode's render range for a 4074x4076 output (...). The
 pass's own history runs instead.` and the door handing on 1833x1834.
+
+## Flat sharpening (2026-09-29)
+
+`fix.render_sharpness`, the setting VR already had (AMD's RCAS, 0 to 1),
+now works in the flat profile. BUILT, NOT FLOWN. Nothing in flat
+sharpened before: no upscaler does (FSR3 is created with sharpening off,
+`fsr3_engine.cpp`; DLSS with `InSharpness` 0, `dlaa.cpp`; the flat TAA
+shader has none), so a flat player who found TAA or DLSS soft had no
+dial. The shipped default is still 0.0.
+
+**Where.** Between the flat temporal resolve and the game's own output
+copy (`flat_runtime.cpp`, `FlatRuntimeDrawScope`: after the resolve
+hands back its view, before that view replaces the copy's first
+pixel-shader input). What the game draws after that copy, its interface
+layer, is never sharpened; what is in the world is part of the picture
+and is. VR has the same order (RCAS, then the UI layer,
+`native_sharpen.cpp`). The pass is `sharpen_pass.cpp`'s, reached through
+the same export (`edvrSharpen`), with the same shader and the same
+setting; `flat_sharpen.cpp` only decides which view goes in and which
+comes back.
+
+**Never.**
+- In place. The resolve reads its previous output back as history, so a
+  sharpened copy fed back would compound every frame. The pass writes a
+  texture of its own, in the source's format, and the view handed to the
+  copy has the format the resolve's own view had (sRGB or plain), so the
+  copy decodes it exactly as before.
+- At strength 0: the resolve's own view comes straight back, the pass is
+  not called, nothing is allocated.
+- On a frame the resolve did not produce. The plain spatial fallback
+  (what the flat runtime does when the temporal pass cannot resolve)
+  goes to the copy as it was: unsharpened this round, and the ini text
+  says so.
+- After a refusal. One refusal (the pass, or a view over its result)
+  stands the sharpening down for the session, with a line saying so; a
+  new device starts it afresh.
+
+**Environment.** Flat profile only. The own TAA, DLSS/DLAA and FSR all
+end in the same resolve output, so all reach it. With AA off the flat
+runtime returns before the resolve: nothing to sharpen, and the panel
+row dims like the DLSS preset row (it stays on the page and stops
+taking steps and typing). VR is unchanged; only the wording of the
+pass's log lines follows the profile. Cost is unmeasured in flat. VR's
+records are 0.04 ms an eye (the second build's flight, in "Feature B")
+and RCAS 0.23 ms an eye at 5792x5356 (`crisp-ui-handoff.md`); by pixel
+count that is a few hundredths of a millisecond at 1080p to 1440p, an
+estimate the "measured" line will replace.
+
+**Warm-up and ticks in flat, traced.** The pass's session hooks are in
+`vscreen.cpp` and all run in flat. `installVScreenFixes` (called from
+the device install in `device_hook.cpp`) calls `sharpenPassConfigure`;
+the Present path's `tkVscreenRest` runs `vScreenFrameBoundary` every
+owned Present in both profiles (unless the graphics runtime is disabled
+outright, when none of EDVR's graphics runs), and that runs
+`sharpenPassTick` (the shader warm-up; the 30 s never-ran note) and
+`sharpenPassNoteTotals`; `vScreenRefreshConfig` re-reads the setting;
+`shutdownVScreenFixes` ends in `sharpenPassShutdown`. Nothing needed
+calling from the flat Present branch.
+
+**The log, worded for flat (frames, not eyes).** In order: `render
+sharpening: shader warmed at session start -- the first sharpened frame
+pays no compile.`; `render sharpening: first sharpened frame -- AMD's
+RCAS at strength 0.30 (1.40 stops) over a WxH ... frame, read and
+written through ... views, on the temporal resolve's output, before the
+game's own output copy -- the interface is drawn after it and is not
+sharpened.`; after 120 timed passes `render sharpening: measured X ms
+per frame on average (max Y) at WxH -- one dispatch of AMD's RCAS ...`;
+`render sharpening totals: N frames sharpened this session ...`; and
+`flat sharpen:` lines for off, off-then-on again and any stand-down. If
+the wrapper is never reached, the tick says so after 30 s and names the
+cause: `no frame has been sharpened after 30 s: anti-aliasing is off
+(fix.temporal_aa) ...`, or with AA on, `The flat runtime has handed the
+sharpening no resolved frame -- read its 'flat runtime:' lines ...`. A
+session that does sharpen never says it. VR's version of that note
+(compositor hook, `openvr_api.dll`) no longer prints in flat, where it
+was wrong.
+
+**The panel, and the allowlist trap.** The flat panel page has a
+Sharpening row. `Config` answers 0.0 (`getFloat`) or "off" (`getString`)
+for any key the flat profile's allowlist (`runtime_profile.h`,
+`runtimeProfileAllowsKey`) does not list, without a word, so a panel row
+could ship that does nothing. `menu_flat_rows.h` is now the table the
+page is built from, and `flat_sharpen_test` fails the build if a key on
+it is refused by the allowlist, if `menu.cpp` builds the page from
+anything else, or if a row has no row in the generated schema.
+`fix.render_sharpness` is on the allowlist.
+
+**The seeding leak, accepted.** A flat install seeds `edvr-flat.ini`
+from `edvr.ini`, so a VR player's `render_sharpness = 0.3` arrives in
+flat. The setting means the same in both profiles (contrast handed back
+after the temporal pass), so it is not wrong, only not asked for; the
+ini text says so.
+
+**What it is for.** A taste control for the softness of TAA, DLSS and
+FSR, not a fix: it adds contrast at edges, not detail, does nothing with
+AA off, rings when it is too strong, and makes fine-line shimmer worse,
+not better. Do not reach for it to mask a jitter, motion-vector or
+timing fault.
+
+**Rigs** (all gated by `build.bat`). `flat_sharpen_test`, 77 checks: the
+wrapper against a stubbed pass on WARP (off, on, live and clamped, the
+two resolve textures' slots, the cached view, stand-down, a deferred
+context, a non-2D view, the log lines read back from a real file); the
+panel table against the flat gate, with negative controls; three source
+scans (`menu.cpp` builds the page from the table and dims the row in its
+three places; `flat_runtime.cpp` binds the copy to what the wrapper
+returns). `flat_sharpen_pass_test`, 37 + 5: the shipped pass on WARP
+against a CPU port of AMD's RCAS (bytes within one level, alpha exact),
+the source never written, five broken twins that must fail, the log; and
+a second run, `--self-test-working`, because the pass latches its
+never-ran note per process. `config_test`: the flat allowlist and the
+flat file's live reload. A mutation run over 44 one-line breaks of the
+shipped code kills all 44. Two survived the first pass (a view remade
+every frame; the rig compared addresses, now a tag on the object), and
+one fell only to the second run above (flat saying the never-ran note
+over a working pass).
+
+**Next flight (flat, AA on, DLSS or TAA).** Set `fix.render_sharpness`
+to 0.3 (`edvr-flat.ini` or the panel). In the log: the lines above, the
+"measured" line within a minute, and no `no frame has been sharpened`.
+In the picture: world edges crisper than at 0, and a menu or HUD edge
+unchanged between 0 and 0.3 (a halo there would mean the interface was
+sharpened, which the order rules out). Then 0.6, for the ringing. Ruled
+out: nothing yet.
+
+**The device changes (RC4 review, F5, 2026-09-29).** The pass kept its shader,
+parameter buffer, both eyes' textures and views, its price ring and its
+format-support answers on one D3D11 device until shutdown, whatever device the
+next frame came from. When the game recreates its device, the next frame got
+device A's result texture back, the wrapper's view over it on device B failed
+(0x887A0005) and the flat sharpening stood down for the session. VR's native
+provider acquires again on a new device and calls the same pass, so VR had the
+same defect. The reviewer's two-device WARP probe reproduced it line for line
+(device B: PASS_THROUGH, refusals 1, stood down); against the fix it gives a
+sharpened view made on B, refusals 0.
+
+The fix is in the pass (`sharpen_pass.cpp`, `adoptDevice`). It holds the device
+it works on, with a reference so the address cannot be recycled, and a frame
+whose source lives on another device releases everything the pass made -- the
+shader and its tried-latch, the parameter buffer, both eyes' result textures,
+cached source views and copy-through textures, the price ring, the
+format-support answers and the reason for a stand-down -- and makes it again on
+the new device, saying so (four notes at most, so two devices trading frames
+cannot fill a log). The session's counters, timing sums and once-per-session
+notes stay. Shutdown releases the reference too. The frame-boundary tick's warm
+compile follows the rule: it warms on the device the pass has, or adopts its
+context's when the pass has none, and never moves the pass.
+
+Rig (`flat_sharpen_pass_test`, the real pass: the wrapper-only two-device case
+stubs it out and could not see this): two WARP devices in one process. A, B, A
+through the pass, each correct against the CPU RCAS reference, each result made
+on the frame's device, and every kind of thing the pass holds (shader, buffer,
+both eyes' results, eye 0's view, eye 1's copy-through texture, the price ring,
+the format asks) made on the new device or gone, none left on the old. A test
+seam, `sharpenPassHeldForTest`, reports each one's device, because WARP
+tolerates a shader or buffer from another device and a stale one shows nowhere
+else. The wrapper is carried across the same changes the way the flat runtime
+carries it (sharpened on each, no stand-down); four changes are four lines and
+six alternating frames end the notes at the fourth; a tick on A then a frame
+from B is a change. CONTROL: `sharpenPassDeviceResetOffForTest` turns the reset
+off, which is the pass as it was: the pass hands B a texture made on A, the
+wrapper stands the sharpening down (sharpened 1, refusals 1), and the rig checks
+that this happens, so the checks with the reset on mean something. 96 checks (37
+before), stable over fifteen runs of both modes.
+
+Mutation run over the shipped pass, fifteen one-line breaks: thirteen killed
+(the reset never done; the shader, the buffer, the eyes, the ring, the shader
+latch and the format answers each not released; the notes uncapped and capped at
+five; the tick not adopting; shutdown keeping its reference; the seam not
+dropping state; the change never said). Two survive: the tick warming on any
+device (unreachable in one thread: a pass with an owner and no shader exists only
+between two lines of one call) and the stand-down reason not forgotten (needs a
+device whose parameter buffer or texture creation fails, which WARP does not
+offer). The rig's first version read a wrapper-owned view after the wrapper's next
+call (good only until then) and crashed one run in six; each view is read where
+it is returned now.
+
+Not flown: a device recreation in a game session has not been seen, only two WARP
+devices in one process. What to look for in a log after one: `render sharpening:
+the D3D device changed (change 1)`, a second `precompiled compute shader
+render_sharpen_cs created`, and no `flat sharpen: a view over the sharpened ...
+could not be made`.

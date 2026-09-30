@@ -201,8 +201,7 @@ bool prepareCounts(ID3D11Device* dev) {
 }
 bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,unsigned h) {
     if(!g.ps) {
-        const std::string source=screenMotionPsSource(kEngineMotionCoreHlsl);   // the compose's own arithmetic in front
-        g.ps.Attach(shaderSwapCompilePs(ctx,source.c_str(),source.size(),"main","screen motion",nullptr,"screen motion"));
+        g.ps.Attach(shaderSwapCreatePs(ctx,kScreenMotionBytecode,sizeof(kScreenMotionBytecode),"screen motion","screen motion"));
         D3D11_BLEND_DESC b{};b.RenderTarget[0].RenderTargetWriteMask=15;
         D3D11_DEPTH_STENCIL_DESC d{};d.DepthFunc=D3D11_COMPARISON_ALWAYS;
         if(!g.ps || FAILED(dev->CreateBlendState(&b,&g.blend)) || FAILED(dev->CreateDepthStencilState(&d,&g.ds)))return false;

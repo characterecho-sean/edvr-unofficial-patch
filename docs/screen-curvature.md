@@ -1,5 +1,12 @@
 # The on-foot screen: distance and curvature
 
+## Status
+
+- **State: retired 2026-09-29 (code removed, 50cc79ae).** The shader
+  input-signature reader (`shader_sig.cpp`) that settled the z question below
+  had no caller left and is deleted. The finding stands. Recover the code from
+  `50cc79ae^` (`src/d3d11/shader_sig.cpp`).
+
 Elite renders everything on foot (and in HMD Cinema Mode) to a big flat
 virtual screen hanging in space. Two EDVR settings shape that screen into
 something more comfortable to sit in front of: `panel_distance` moves it,

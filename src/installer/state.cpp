@@ -23,6 +23,13 @@ std::wstring backupRootPath(const std::wstring& gameDir) {
     return joinPath(gameDir, L"edvr_backup");
 }
 
+const wchar_t* settingsLeafFor(const std::string& profile) {
+    return profile == "flat" ? L"edvr-flat.ini" : L"edvr.ini";
+}
+std::wstring settingsPathFor(const std::wstring& gameDir, const std::string& profile) {
+    return joinPath(gameDir, settingsLeafFor(profile));
+}
+
 std::string utcNow() {
     SYSTEMTIME st{};
     GetSystemTime(&st);

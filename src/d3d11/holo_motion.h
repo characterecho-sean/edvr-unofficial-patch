@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <algorithm>
 #include "shader_swap.h"
+#include "fixed_shader_source.h"
+#include "temporal_shader_bytecode.h"
 #include "eye_draw_snapshot.h"
 
 namespace edvr {
@@ -43,140 +45,7 @@ struct HoloDraw {
     uint32_t startInstance=0;
 };
 
-constexpr char kHoloMotionBuild[] = R"HLSL(
-struct Record { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
-cbuffer Model : register(b0) { float4 model[8]; }
-cbuffer Scene : register(b1) { float4 scene[276]; }
-cbuffer Material : register(b2) { float4 material[4]; }
-cbuffer Draw : register(b3) { uint4 info; uint4 mesh[4]; float4 limits; }
-StructuredBuffer<Record> Previous : register(t0);
-struct PoolRecord { uint4 data[21]; };
-StructuredBuffer<PoolRecord> Pool : register(t1);
-ByteAddressBuffer Instance : register(t2);
-RWStructuredBuffer<Record> Current : register(u0);
-// Preserve the game's non-normalized UNORM16 quaternion operation exactly.
-float3 turn(float4 q, float3 v) {
-    return (2*q.w*q.w-1)*v + 2*dot(q.xyz,v)*q.xyz + 2*q.w*cross(q.xyz,v);
-}
-[numthreads(1,1,1)] void main(uint3 id : SV_DispatchThreadID) {
-    Record n=(Record)0;
-    // b2 animates the material's glow coordinates every frame; it does
-    // not move vertices or the primary surface UVs and is not identity.
-    [unroll] for(uint k=0;k<4;++k) n.key[k]=mesh[k];
-    bool valid=true;
-    if(info.z==1 || info.z==4 || info.z==5) {
-        [unroll] for(uint r=0;r<3;++r) n.clip[r]=model[r==2?7:4+r];
-        // Planet material constants shade the sphere; they are not geometry
-        // identity. The captured surface's mesh and texture identify it.
-        if(info.z==1) [unroll] for(uint k=0;k<4;++k) n.key[4+k]=asuint(material[k]);
-        if(info.z==5) {
-            n.key[4]=asuint(material[0].w);
-            n.key[5]=asuint(material[1].x);
-            n.key[6]=asuint(material[1].y);
-            valid=all(isfinite(material[0].w)) && all(isfinite(material[1].xy)) &&
-                  material[0].w>0 && material[1].x>0 && material[1].y>0;
-        }
-        valid=valid && all(abs(model[6].xyz)<1e-10) && model[6].w>0;
-    } else {
-        float3 scale,pos; float4 q;
-        if(info.z==2) {
-            uint at=id.x*60;
-            pos=asfloat(Instance.Load3(at))-scene[275].xyz;
-            q=asfloat(Instance.Load4(at+16)); scale=asfloat(Instance.Load3(at+32));
-            n.key[4]=Instance.Load4(at+16); n.key[5]=uint4(Instance.Load3(at+32),Instance.Load(at+12));
-            // Geometry lies at local Z=0. A comparable unused Z axis avoids
-            // an ill-conditioned inverse for billion-metre orbital ellipses.
-            scale.z=max(abs(scale.x),abs(scale.y));
-            // The RGBA float4 at byte offset 44 is the instance
-            // colour/alpha. It is useful only for disambiguating the
-            // fallback below: intensity and alpha can animate, while
-            // chromaticity identifies the stroke.
-            n.key[6]=Instance.Load4(at+44);
-        } else {
-            uint index=Instance.Load(0), count,stride; Pool.GetDimensions(count,stride);
-            if(index>=count) { Current[info.x]=n; return; }
-            PoolRecord p=Pool[index]; valid=p.data[0].x==0;
-            scale=asfloat(p.data[0].y);
-            uint2 packed=p.data[0].zw;
-            q=float4(packed.x&65535,packed.x>>16,packed.y&65535,packed.y>>16)*(2.0/65535.0)-1;
-            pos=asfloat(p.data[1].xyz)-scene[275].xyz;
-        }
-        float3 x=turn(q,float3(scale.x,0,0)),y=turn(q,float3(0,scale.y,0)),z=turn(q,float3(0,0,scale.z));
-        [unroll] for(uint r=0;r<3;++r) {
-            uint row=r==2?3:r;
-            float4 c=info.z==2 ? float4(scene[270][row],scene[271][row],scene[272][row],scene[273][row]) : model[r==2?7:4+r];
-            n.clip[r]=float4(dot(c.xyz,x),dot(c.xyz,y),dot(c.xyz,z),dot(c,float4(pos,1)));
-        }
-        valid=valid && all(isfinite(scale)) && all(abs(scale)>1e-8) && all(isfinite(pos)) && abs(dot(q,q)-1)<.002;
-        if(info.z==0) valid=valid && all(abs(model[6].xyz)<1e-10) && model[6].w>0 && n.clip[2].w<limits.x;
-        // Sprite VS uses the same pool transform and clip X/Y/W, but forces
-        // clip Z=W and may billboard at planetary distances. UV tiles name
-        // distinct atlas quads; changing brightness does not move geometry.
-        if(info.z==3) n.key[4]=asuint(material[1]);
-    }
-    valid=valid && n.clip[2].w>.025 && all(isfinite(n.clip[0])) && all(isfinite(n.clip[1])) && all(isfinite(n.clip[2]));
-    float3 a=cross(n.clip[1].xyz,n.clip[2].xyz),b=cross(n.clip[2].xyz,n.clip[0].xyz),c=cross(n.clip[0].xyz,n.clip[1].xyz);
-    float det=dot(n.clip[0].xyz,a);
-    valid=valid && isfinite(det) && abs(det)>1e-12;
-    n.meta=float4(valid?1:0,limits.yz,0);
-    uint matches=0,match=0;
-    [loop] for(uint i=0;i<info.y;++i) {
-        Record old=Previous[i]; bool same=old.meta.x==1;
-        [unroll] for(uint j=0;j<8;++j) {
-            // Mode 2 keeps key[6] as diagnostic identity data, but colour
-            // intensity/alpha changes must not make an otherwise exact
-            // orbital record miss the existing strict path.
-            if(info.z!=2 || j!=6) same=same && all(n.key[j]==old.key[j]);
-        }
-        // Identical meshes can occur on multiple panels. Require one nearby
-        // projected origin; an ambiguous match or a newly opened panel declines.
-        float2 here=float2(n.clip[0].w,n.clip[1].w)/n.clip[2].w;
-        float2 there=float2(old.clip[0].w,old.clip[1].w)/old.clip[2].w;
-        same=same && all(abs(here-there)<.2) && old.clip[2].w>n.clip[2].w*.5 && old.clip[2].w<n.clip[2].w*2;
-        if(same) {
-            // Identical ring passes may repeat the same geometry/material.
-            // They are interchangeable only when their complete transforms
-            // are identical. Cockpit ambiguity remains a hard rejection.
-            bool duplicate=(info.z==1 || info.z==4) && matches==1;
-            [unroll] for(uint row=0;row<3;++row) duplicate=duplicate && all(old.clip[row]==Previous[match].clip[row]);
-            if(!duplicate) { ++matches; match=i; }
-        }
-    }
-    // A changing orbital instance can alter its quaternion/scale while
-    // retaining the same draw/mesh, width and colour family. Only use this
-    // relaxed identity when the original exact search found no candidate;
-    // every candidate must be unique and retain the same continuity checks.
-    if(valid && info.z==2 && matches==0) {
-        uint fallbackMatches=0,fallbackMatch=0;
-        float3 newRgb=asfloat(n.key[6].xyz); float newMax=max(newRgb.x,max(newRgb.y,newRgb.z));
-        bool newRgbValid=all(isfinite(newRgb)) && isfinite(newMax) && newMax>0;
-        [loop] for(uint i=0;i<info.y;++i) {
-            Record old=Previous[i]; bool candidate=old.meta.x==1;
-            [unroll] for(uint j=0;j<4;++j) candidate=candidate && all(n.key[j]==old.key[j]);
-            candidate=candidate && n.key[5].w==old.key[5].w;
-            float3 oldRgb=asfloat(old.key[6].xyz); float oldMax=max(oldRgb.x,max(oldRgb.y,oldRgb.z));
-            bool oldRgbValid=all(isfinite(oldRgb)) && isfinite(oldMax) && oldMax>0;
-            bool sameChroma=false;
-            if(newRgbValid && oldRgbValid) sameChroma=all(abs(newRgb/newMax-oldRgb/oldMax)<=1e-6);
-            candidate=candidate && sameChroma;
-            float2 here=float2(n.clip[0].w,n.clip[1].w)/n.clip[2].w;
-            float2 there=float2(old.clip[0].w,old.clip[1].w)/old.clip[2].w;
-            candidate=candidate && all(abs(here-there)<.2) && old.clip[2].w>n.clip[2].w*.5 && old.clip[2].w<n.clip[2].w*2;
-            if(candidate) { ++fallbackMatches; fallbackMatch=i; }
-        }
-        if(fallbackMatches==1) { matches=1; match=fallbackMatch; }
-    }
-    if(valid && matches==1) {
-        Record old=Previous[match]; float3 t=float3(n.clip[0].w,n.clip[1].w,n.clip[2].w);
-        [unroll] for(uint row=0;row<3;++row) {
-            float3 v=float3(dot(old.clip[row].xyz,a),dot(old.clip[row].xyz,b),dot(old.clip[row].xyz,c))/det;
-            n.map[row]=float4(v,old.clip[row].w-dot(v,t));
-        }
-        n.meta.w=all(isfinite(n.map[0])) && all(isfinite(n.map[1])) && all(isfinite(n.map[2])) ? 1:0;
-    }
-    Current[info.x+id.x]=n;
-}
-)HLSL";
+
 
 class HoloMotion {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
@@ -231,7 +100,7 @@ class HoloMotion {
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{}; sd.Format=DXGI_FORMAT_R32_TYPELESS; sd.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
         sd.BufferEx.NumElements=1024; sd.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
         if(FAILED(dev->CreateShaderResourceView(instance.Get(),&sd,&instanceSrv))) return false;
-        shader.Attach(shaderSwapCompileCs(ctx,kHoloMotionBuild,sizeof(kHoloMotionBuild)-1,"main","holo motion",nullptr,"holo motion"));
+        shader.Attach(shaderSwapCreateCs(ctx,kHoloMotionBytecode,sizeof(kHoloMotionBytecode),"holo motion","holo motion"));
         return shader!=nullptr;
     }
 public:

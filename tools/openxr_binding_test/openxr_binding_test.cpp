@@ -4,6 +4,7 @@
 #include "../../src/openxr/geometry_locator.h"
 #include "../../src/openxr/published_session.h"
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/system_d3d11.h"
 #include <dxgi.h>
 #include <cstdio>
 #include <vector>
@@ -91,8 +92,13 @@ XrResult XRAPI_PTR locateSpace(XrSpace from,XrSpace base,XrTime time,XrSpaceLoca
 BindingDispatch dispatch(){return {requirements,createSession,destroySession,enumerateSpaces,createSpace,destroySpace};}
 struct Fixture {
   Fake runtime;SessionBinding binding;
-  Fixture(){fake=&runtime;check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.device,&runtime.level,nullptr)),"WARP candidate");
-    check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.foreign,nullptr,nullptr)),"same-adapter foreign device");
+  Fixture(){fake=&runtime;
+    // Windows' own d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+    const auto create=edvr::systemD3D11CreateDevice();check(create!=nullptr,"system D3D11 factory");
+    check(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.device,&runtime.level,nullptr)),"WARP candidate");
+    check(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.foreign,nullptr,nullptr)),"same-adapter foreign device");
+    static bool reported=false;
+    if(!reported){reported=true;check(edvr::reportSystemD3D11Only("openxr_binding_test"),"the rig runs on System32's d3d11.dll and on no other d3d11.dll");}
     ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;
     check(SUCCEEDED(runtime.device.As(&dxgi))&&SUCCEEDED(dxgi->GetAdapter(&adapter)),"fixture adapter");
     DXGI_ADAPTER_DESC desc{};check(SUCCEEDED(adapter->GetDesc(&desc)),"fixture LUID");runtime.luid=desc.AdapterLuid;
@@ -184,6 +190,8 @@ int selfTest(){
 int publishedTest(const char* path){
   // A separate process per invocation: real graphics DLL publication, fake XR.
   if(!path||std::strlen(path)<4||path[1]!=':'||(path[2]!='/'&&path[2]!='\\'))return 2;
+  // The graphics DLL below is the only d3d11 this process is meant to run: none arrives with the exe.
+  check(edvr::reportNoD3D11Mapped("openxr_binding_test"),"no d3d11.dll is mapped before the rig loads the graphics proxy");
   Fake runtime;fake=&runtime;SessionBinding binding;
   check(!edvr::gameDevice(),"fresh process has no graphics publisher");
   check(initializePublishedSession(binding,dispatch(),instance,42)==XR_ERROR_HANDLE_INVALID&&runtime.trace.empty(),"missing graphics DLL fails before XR calls");

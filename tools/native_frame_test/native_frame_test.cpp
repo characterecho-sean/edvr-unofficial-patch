@@ -111,11 +111,14 @@ int wmain(int argc, wchar_t** argv) {
     check(edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,
                                         sizeof(renderSettings), &renderSettings) == TRUE,
           "the render settings query publishes this headset's labels");
-    edvr::Config::get().set("fix.fov_trim_outer", "oculus/meta-quest-3:7");
+    // The keys live in [experimental] since 2026-09-29 (edvr.ini's
+    // `# moved-from: fix.fov_trim_*`; tools/config_test proves an old line is
+    // read as the new name and tools/installer_test that the merge carries it).
+    edvr::Config::get().set("experimental.fov_trim_outer", "oculus/meta-quest-3:7");
     // 44 is outside 0..30, so the entry is refused rather than clamped, and
     // a bare 5 (the form this key used to take) names no headset at all.
-    edvr::Config::get().set("fix.fov_trim_nasal", "oculus/meta-quest-3:44");
-    edvr::Config::get().set("fix.fov_trim_vertical", "5");
+    edvr::Config::get().set("experimental.fov_trim_nasal", "oculus/meta-quest-3:44");
+    edvr::Config::get().set("experimental.fov_trim_vertical", "5");
 
     EdvrNativeFrameRequest request{
         sizeof(request), EDVR_NATIVE_FRAME_VERSION_1, device.Get(), 41};
@@ -304,9 +307,9 @@ int wmain(int argc, wchar_t** argv) {
     // A runtime-only entry applies to any headset on that runtime with no
     // entry of its own; a key with no entry for the worn headset is no trim,
     // including one keyed on a headset that is not being worn.
-    edvr::Config::get().set("fix.fov_trim_vertical", "oculus:3");
-    edvr::Config::get().set("fix.fov_trim_outer", "");
-    edvr::Config::get().set("fix.fov_trim_nasal", "virtualdesktopxr/meta-quest-3:9");
+    edvr::Config::get().set("experimental.fov_trim_vertical", "oculus:3");
+    edvr::Config::get().set("experimental.fov_trim_outer", "");
+    edvr::Config::get().set("experimental.fov_trim_nasal", "virtualdesktopxr/meta-quest-3:9");
     EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_4};
     EdvrNativeFrameInput trimFrame = input(41, 7, 10);
     check(table.beginFrame(table.context, &trimFrame, &trimOutput) == S_OK &&
@@ -383,6 +386,33 @@ int wmain(int argc, wchar_t** argv) {
     check(table.beginFrame(table.context, &unknownFrame, &unknownChannel) ==
               S_OK && unknownChannel.cullChannel == 0,
           "an unknown channel value is both");
+
+    // The trim reader asks for the [experimental] names and no others. First the
+    // positive half, so the control below can fail: a value under the new name
+    // reaches the output (vertical 3 is still set from the runtime-only case
+    // above). Then the retired [fix] names carry a value for the worn headset
+    // and the new ones carry none, and the game is told no trim: a reader that
+    // had kept reading the old keys would tell it 9 degrees. (An old-layout LINE
+    // in a file still works -- Config reads it as the new name through the
+    // moved-from map, which this rig does not register; tools/config_test does,
+    // with the shipped tables.)
+    EdvrNativeFrameOutput newNames{sizeof(newNames), EDVR_NATIVE_FRAME_VERSION_4};
+    EdvrNativeFrameInput newNamesFrame = input(41, 7, 18);
+    check(table.beginFrame(table.context, &newNamesFrame, &newNames) == S_OK &&
+              newNames.trimVerticalDeg == 3.0f,
+          "the trim reader reads experimental.fov_trim_vertical");
+    edvr::Config::get().set("experimental.fov_trim_vertical", "");
+    edvr::Config::get().set("experimental.fov_trim_outer", "");
+    edvr::Config::get().set("experimental.fov_trim_nasal", "");
+    edvr::Config::get().set("fix.fov_trim_vertical", "oculus/meta-quest-3:9");
+    edvr::Config::get().set("fix.fov_trim_outer", "oculus/meta-quest-3:9");
+    edvr::Config::get().set("fix.fov_trim_nasal", "oculus/meta-quest-3:9");
+    EdvrNativeFrameOutput retiredNames{sizeof(retiredNames), EDVR_NATIVE_FRAME_VERSION_4};
+    EdvrNativeFrameInput retiredFrame = input(41, 7, 19);
+    check(table.beginFrame(table.context, &retiredFrame, &retiredNames) == S_OK &&
+              retiredNames.trimVerticalDeg == 0.0f && retiredNames.trimOuterDeg == 0.0f &&
+              retiredNames.trimNasalDeg == 0.0f,
+          "control: the retired fix.fov_trim_* names are not read by the trim reader");
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");

@@ -377,7 +377,10 @@ static void observeFlipPublication(uint32_t index) {
     if (vtableWatchFlipAt(index - 128, &old)) g_reusedSlotReadable = true;
 }
 
+#include "shader_create_tests.h"
+
 int main() {
+    shaderCreateFixture::run();
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("edvr vtable / wrapper collision\n");

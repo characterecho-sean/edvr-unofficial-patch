@@ -97,10 +97,10 @@ bool deviceHookAutoBiasSource(float* multiplier, float* bias);
 // means unknown; callers should show a neutral DLSS/DLAA label.
 bool deviceHookHmdQuality(float* multiplier);
 
-// The FSS theater's mode latch: true while the player is (believed to
-// be) in the Full System Scanner -- keyed by their own FSS bindings for
-// frame-exact edges, reconciled against the game's GuiFocus. vscreen's
-// frame boundary turns this into the theater's stamp.
+// The FSS mode latch: true while the player is (believed to be) in the Full
+// System Scanner -- keyed by their own FSS bindings for frame-exact edges,
+// reconciled against the game's GuiFocus. Read by the panel rect's chrome
+// skip, the reveal's jump window and the exposure pair sync.
 bool deviceHookFssModeLatch();
 
 // A zoom press was seen since the last take (stepped or held, keyboard

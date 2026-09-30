@@ -37,7 +37,9 @@ int hardwareTest() {
     DXGI_ADAPTER_DESC1 d{};if(candidate->GetDesc1(&d)==S_OK&&!(d.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)){adapter=candidate;description=d;break;}}
   check(bool(adapter),"hardware adapter available");if(!adapter)return 1;
   D3D_FEATURE_LEVEL level{};ComPtr<ID3D11Device> initial;ComPtr<ID3D11DeviceContext> initialContext;
-  check(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
+  // Windows' own d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+  const auto createDevice=edvr::systemD3D11CreateDevice();check(createDevice!=nullptr,"system D3D11 factory");
+  check(createDevice&&createDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
       &initial,&level,&initialContext)==S_OK&&initial&&initialContext,"initial hardware device");
   if(!initial)return 1;
   DXGI_ADAPTER_DESC actual{};ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> actualAdapter;
@@ -79,8 +81,11 @@ int wmain(int argc,wchar_t** argv) {
   check(NativeDevice::featureLevels(D3D_FEATURE_LEVEL_11_1)==std::vector<D3D_FEATURE_LEVEL>({D3D_FEATURE_LEVEL_11_1}),"11.1 minimum");
   check(NativeDevice::featureLevels(D3D_FEATURE_LEVEL_12_1).empty(),"unsupported minimum");
   D3D_FEATURE_LEVEL level{};Microsoft::WRL::ComPtr<ID3D11Device> device;Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
-  const HRESULT hr=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context);
+  // Windows' own d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+  const auto createDevice=edvr::systemD3D11CreateDevice();check(createDevice!=nullptr,"system D3D11 factory");
+  const HRESULT hr=createDevice?createDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context):E_FAIL;
   check(SUCCEEDED(hr)&&device&&context,"WARP creation");
+  check(edvr::reportSystemD3D11Only("native_device_test"),"the rig runs on System32's d3d11.dll and on no other d3d11.dll");
   if(device){
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     const bool found=SUCCEEDED(device.As(&dxgi))&&SUCCEEDED(dxgi->GetAdapter(&adapter));check(found,"actual WARP adapter");

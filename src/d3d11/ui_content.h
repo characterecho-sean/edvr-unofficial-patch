@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <utility>
 #include "shader_swap.h"
+#include "fixed_shader_source.h"
+#include "temporal_shader_bytecode.h"
 #include "gpu_interval.h"
 #include "vscreen.h"   // vScreenUpdateSubresourceRaw: the digest pass's constants, past the hook
 
@@ -18,50 +20,14 @@ namespace edvr {
 // the 5895x5158 panel that carries the target's distance (fix.ui_quality
 // 1.25) needs 182 MB, more than the whole 64 MiB budget; its blocks need
 // 11 MB.
-constexpr char kUiContentCs[] = R"HLSL(
-Texture2D<float4> Current:register(t0);
-Texture2D<float> AgeIn:register(t1);
-RWTexture2D<uint> Digest:register(u0);
-RWTexture2D<float> Next:register(u1);
-cbuffer C:register(b0){uint seed;uint srcW;uint srcH;uint pad0;}
-[numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){
-    uint bw,bh;Digest.GetDimensions(bw,bh);if(any(id.xy>=uint2(bw,bh)))return;
-    uint h=2166136261u;
-    [unroll]for(uint y=0;y<4;++y)[unroll]for(uint x=0;x<4;++x){
-        uint2 texel=id.xy*4+uint2(x,y);
-        if(texel.x>=srcW||texel.y>=srcH)continue; // block may overhang the surface
-        float4 c=Current.Load(int3(texel,0));
-        c.rgb*=c.a; // RGB behind zero alpha is not visible content.
-        h=(h^asuint(c.r))*16777619u;h=(h^asuint(c.g))*16777619u;
-        h=(h^asuint(c.b))*16777619u;h=(h^asuint(c.a))*16777619u;
-    }
-    // Seed still hashes the real block -- a literal 0 is not a safe "no
-    // prior content" sentinel, since nothing rules out a real block
-    // hashing to 0 too, and doing so would read as changed on the very
-    // next (comparing) frame even when nothing actually did. Seed differs
-    // from a compare only in what it reports, never in what it stores.
-    if(seed){Digest[id.xy]=h;Next[id.xy]=0;return;}
-    uint prev=Digest[id.xy]; // in-place RW: this thread owns only this block
-    Next[id.xy]=(h!=prev)?1.0:max(AgeIn.Load(int3(id.xy,0))-1.0/32.0,0.0);
-    Digest[id.xy]=h;
-}
-)HLSL";
+
 
 // Used by the existing coverage draw with exactly the game's surface UVs.
 // UiEdits is block resolution (one texel per 4x4 source block), so the
 // 2x2-tap max below covers an 8x8 source-texel neighbourhood; the grid
 // comes from GetDimensions. Max over the footprint keeps erased, low-alpha
 // and subpixel edits.
-#define EDVR_UI_CHANGE_INPUT R"HLSL(
-Texture2D<float> UiEdits:register(t14);
-float uiEdit(float2 uv){
-    uint w,h;UiEdits.GetDimensions(w,h);if(w==0||h==0)return 0;
-    int2 p=int2(floor(uv*float2(w,h)-.5));float edit=0;
-    [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
-        edit=max(edit,UiEdits.Load(int3(clamp(p+int2(x,y),0,int2(w,h)-1),0)));
-    return edit;
-}
-)HLSL"
+
 
 class UiContent {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
@@ -138,7 +104,7 @@ public:
         if(found && found->ready && found->frame==frame) {lastDecision=Decision::kHit;++totals.hits;return found->view[found->read].Get();}
         const bool isNew=!found;
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
-        if(!shader) shader.Attach(shaderSwapCompileCs(ctx,kUiContentCs,sizeof(kUiContentCs)-1,"main","UI source edits",nullptr,"ui content"));
+        if(!shader) shader.Attach(shaderSwapCreateCs(ctx,kUiContentBytecode,sizeof(kUiContentBytecode),"UI source edits","ui content"));
         if(shader && !cb) {
             D3D11_BUFFER_DESC bd{};bd.ByteWidth=16;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
             dev->CreateBuffer(&bd,nullptr,&cb);

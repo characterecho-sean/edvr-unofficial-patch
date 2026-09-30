@@ -2,19 +2,19 @@
 
 ## Status
 
+- **State: the desk self-test retired 2026-09-29 (code removed, 72247cdf).**
+  `edvrFoveaRegionSelftest` (run by tools/smoke, cited below) and the DLAA desk
+  probes are deleted. The pure fovea geometry they covered is production code
+  and stays.
 - **State (2026-09-17 15:00, PAUSED by Sean: the head lead FLOWN 13:15 on
   v0.17.0-rc.3-93-g17fc607 slides as designed but jitters the crop 1 px
   per slide (scaleTo's even-floor of the output base, eye run 131504);
   the quantum fix 2101149 is BUILT and reviewed ON THE BRANCH, not merged
-  or installed; performance gate NOT MET):** four flights, journal.
-  09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms per pair. 09:38
-  (1947c90, performance): a live sweep 20/25/7 -> 5/5, ~1.0 ms per pair
-  at 43%; 5/5 = a 99.9% crop, stood down silently by the 90% ceiling (a
-  log note since 9eab046). 10:55 (9eab046, quality, frame 8.9 ms): both
-  levers confirmed (prep 0.57 vs 0.53 full, periphery 0.22-0.36 with the
-  skip); pass per pair vs full-frame 3.87: 81% 3.93, 67% 3.63, 56% 3.32,
-  79% 3.91; frame p50 8.9 -> 8.57 at 56%; the game at 90 fps flat, CPU
-  waiting 7 ms a frame, so nothing could show as frame rate.
+  or installed; performance gate NOT MET):** four flights, journal; the
+  per-flight numbers (09:15, 09:38, 10:55 and the head-lead flight) are
+  in `## Status detail` below (the 09:15 quality flight: 20/25/7 at 43%,
+  0.36 ms per pair; the 10:55 game at 90 fps flat, so nothing could show
+  as frame rate).
 - **Cost model, holding across all three flights:** NVIDIA's price
   follows the rectangle's area (10:55: 2.96 at 100%, 2.53 at 81%, 2.18
   at 67%, 1.7 at 56%; about 0.2 + 2.75 x share); the fovea path's fixed
@@ -31,12 +31,9 @@
   upscaling and against Sean's own objection (performance.md, 2026-09-05:
   eyes jump where heads stream); gaze stays Stage 3, optional. The pooled
   "NVIDIA ms/eye" figure mixes eyes and roles; do not compare. H2, above.
-- **Stage 1 leftovers, not in the build:** the reactive mask on the crop
-  path; history committed only after a successful evaluation (the two
-  HaveHistory flags are set unconditionally each frame); the crop
-  branch's unconditional ensureNative and CPU-side stats readback (none
-  inside the timed prep); the luma probe's taps dark there; the reduced
-  periphery's reduce reading the skipped interior (journal, lever build).
+- **Stage 1 leftovers, not in the build:** five items (reactive mask on
+  the crop path, history commit, ensureNative, luma probe, reduce
+  reading the skipped interior), listed verbatim in `## Status detail`.
 - **Decision (2026-09-17, Sean):** "20 for the top, 25 for the outer and 7
   for inner. Inside that rectangle should be DLSS and outside of it should
   be TAA." Taken as degrees off the headset's field, the FOV trim's
@@ -50,7 +47,8 @@
   inverted edge mapping caught and fixed in 8e99777, journal).
   Product shape once it pays (Sean): the eye mask toggle and trim give
   way to a DLSS rectangle, wide/narrow presets, one per-headset size;
-  gaze later where the headset publishes it; fix.eye_mask keys stay.
+  gaze later where the headset publishes it; fix.eye_mask keys were to
+  stay (removed 2026-09-29, d923a6f6).
 - **Next, on resume (journal, the PAUSED entry):** merge origin/main into
   the branch, build, smoke, install 2101149 to Frontier, push HEAD:main;
   then the same hangar yaw with lead 6 against 0 flipped live: the
@@ -60,6 +58,28 @@
   (lead 0 avoids it). Performance stands as measured: ~1.1 ms per pair
   at 43%, visible only GPU-bound. Owed: retire temporal_aa_fovea_vertical;
   Stage 2 (ship).
+
+## Status detail (moved out of Status 2026-09-29)
+
+The four flights, moved verbatim from Status (the first sentence there
+read "four flights, journal."):
+
+09:15 (1947c90, quality): 20/25/7 at 43%, 0.36 ms per pair. 09:38
+(1947c90, performance): a live sweep 20/25/7 -> 5/5, ~1.0 ms per pair
+at 43%; 5/5 = a 99.9% crop, stood down silently by the 90% ceiling (a
+log note since 9eab046). 10:55 (9eab046, quality, frame 8.9 ms): both
+levers confirmed (prep 0.57 vs 0.53 full, periphery 0.22-0.36 with the
+skip); pass per pair vs full-frame 3.87: 81% 3.93, 67% 3.63, 56% 3.32,
+79% 3.91; frame p50 8.9 -> 8.57 at 56%; the game at 90 fps flat, CPU
+waiting 7 ms a frame, so nothing could show as frame rate.
+
+Stage 1 leftovers, not in the build, moved verbatim from Status: the
+reactive mask on the crop path; history committed only after a
+successful evaluation (the two HaveHistory flags are set unconditionally
+each frame); the crop branch's unconditional ensureNative and CPU-side
+stats readback (none inside the timed prep); the luma probe's taps dark
+there; the reduced periphery's reduce reading the skipped interior
+(journal, lever build).
 
 ## Investigation (2026-09-14)
 

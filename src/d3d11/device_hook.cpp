@@ -1,14 +1,14 @@
 #include "../common/vr_census.h"
 #include "device_hook.h"
-#include "game_exit_probe.h"
+#include "ui_layer.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
 
-#include "shader_sig.h"
 #include "weapon_motion.h"
 #include "input_gate.h"
+#include "focus_target.h"
 #include "oculus_route.h"
 #include "vr_runtime.h"
 
@@ -38,7 +38,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/guard.h"
 #include "../common/hotkey.h"
 #include "head_offset_gate.h"
-#include "camera_view.h"
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
@@ -67,9 +66,10 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "flat_temporal.h"   // flat profile discovery at owned Present
 #include "flat_shader_capture.h"
 #include "perf_monitor.h"
+#include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
+#include "boundary_tick.h"   // one fault budget per frame-boundary tick
 #include "vscreen.h"
 #include "glitch_frame.h"
-#include "transition_flash_prevent.h"
 #include "pose_reader_watch.h"
 #include "transition_flash_eye_base.h"
 #include "vscreen_res.h"
@@ -255,8 +255,8 @@ struct State {
     // does with the cycle.
     Hotkey extCamPrevKey;
     // The player's own FSS enter/quit keys, adopted from their Elite
-    // bindings like the camera keys above; they give the theater's mode
-    // latch its frame-exact edges.
+    // bindings like the camera keys above; they give the FSS mode latch its
+    // frame-exact edges.
     Hotkey fssEnterKey;
     Hotkey fssQuitKey;
     Hotkey fssZoomStepKey;
@@ -271,7 +271,7 @@ struct State {
     XinputBinding fssZoomStepPad;
     XinputBinding fssZoomPad;
     bool fssZoomPressPending = false;
-    bool     fssTheaterWanted = false;
+    bool     fssModeLatchWanted = false;
     bool     fssModeLatch = false;
     bool     fssLatchByKey = false;
     uint64_t fssLatchMs = 0;
@@ -289,7 +289,6 @@ struct State {
     uint64_t bindsCheckMs = 0;
     uint32_t lastJournalDisembarks = 0;
     uint32_t lastJournalEmbarks = 0;
-    uint32_t lastCameraEnters = 0;
     // THE frame number for this session, in the numbering every instrument
     // prints: frame N is everything between Present N-1 returning and Present N
     // returning, so this is the frame IN PROGRESS and it starts at 1 -- the
@@ -516,14 +515,16 @@ void readoptGameBindings();
 // One budget per thing that can fail. Shader creation runs on whatever thread
 // the game streams assets from; the frame boundary runs on the render thread and
 // carries the exposure boundary, the vScreen boundary (which hosts the flash
-// detector's per-frame work), the hotkeys and the config reload poll.
+// detector's per-frame work), the hotkeys and the config reload poll, each of
+// them on a budget of its own (boundary_tick.h, declared with the boundary).
 //
-// Sharing one meant eight faults during asset streaming permanently stopped the
-// entire frame heartbeat -- while the per-draw hooks, on their own budgets, kept
-// running and mutating state. The log said only "FEATURE-DISABLED deviceHook",
-// which does not tell anyone that the heartbeat is gone.
+// Sharing one between creation and the boundary meant eight faults during asset
+// streaming permanently stopped the entire frame heartbeat -- while the per-draw
+// hooks, on their own budgets, kept running and mutating state. The log said only
+// "FEATURE-DISABLED deviceHook", which does not tell anyone that the heartbeat is
+// gone. Sharing one across the boundary's own ticks did the same thing a level
+// down: eight faulting frames in any probe stopped the menu and the hotkeys.
 FaultBudget g_createBudget("deviceHook.createShader", 8);
-FaultBudget g_frameBudget("deviceHook.frameBoundary", 8);
 
 // Write one shader blob to the dump directory, named by its hash. Runs on
 // the game's asset-streaming threads while armed; CreateDirectory once,
@@ -690,11 +691,6 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         captureFlatShader('v', hash, bytecode, len);
         rememberFlatProbeShader('v', hash, bytecode, len);
         registerShaderHash(*out, hash);
-        // ...and its INPUT SIGNATURE, which is a different question from its
-        // identity: whether the panel composite's shader reads the z of the
-        // vertices it is handed decides whether the curved screen is possible
-        // at all. See shader_sig.h.
-        shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
         engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
@@ -721,6 +717,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         rememberFlatProbeShader('p', hash, bytecode, len);
         registerShaderHash(*out, hash);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        uiLayerRememberHoloPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11PixelShader*>(*out));
@@ -1065,9 +1062,631 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT c
     return g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
 }
 
+// ---- THE FRAME BOUNDARY, ONE FAULT BUDGET PER TICK -------------------------------
+//
+// hookedPresent's boundary runs these in order, each under a budget of its own
+// (boundary_tick.h says why, and what a tick is). The names are the marks the LONG
+// FRAME line's slowest-ticks list reports, so a note for "frameBoundary/hotkeys" and
+// a "hotkeys=1.20 ms" in that list are the same work.
+//
+// What is one group, and why. A group shares a mark and so a budget: it stands or
+// falls together.
+//   vtable_watch      the re-arm and the frame tick are one instrument; the tick
+//                     publishes the frame number the re-arm is judged against.
+//   toggle_key        the exposure fix's own key, apart from the diagnostic keys
+//                     below it: a probe's dump must not take the fix's switch along.
+//   hotkeys           the diagnostic keys (history, census, eye dump), their
+//                     missed-press notes and the delayed dump: one instrument.
+//   journal_gate      everything the journal tells the head-offset gate.
+//   camera_keys_pads  the camera keys and pads, with the two settings only they read.
+//   config_refresh    the reload and the settings derived from what it re-read.
+//   hook_reclaim      three detection-only passes over the device, swapchain and
+//                     factory hooks: one kind of pass, and none reads another's result.
+//   context_reclaim   two calls, and the second is handed the first's answer.
+// Everything else is one call and one tick. vScreenFrameBoundary is one tick here
+// (vscreen_rest); the module ticks inside it have budgets of their own, in
+// vscreen.cpp, so a faulting module stands down alone and vscreen_rest answers only
+// for the rest of that function.
+//
+// A tick whose budget is spent is skipped for the session and the others run on.
+// A fault no longer ends the frame's boundary either: the next tick runs the same
+// frame. What is not under a budget is arithmetic and flag reads that cannot
+// fault: the frame counter, the graphics-off test, whether the config poll is due.
+EDVR_BOUNDARY_TICK(tkKinematicProbe, "kinematic_probe");
+EDVR_BOUNDARY_TICK(tkEngineVelocityClock, "engine_velocity_clock");
+EDVR_BOUNDARY_TICK(tkSchedulerProbe, "scheduler_probe");
+EDVR_BOUNDARY_TICK(tkStaticPropGate, "static_prop_gate");
+EDVR_BOUNDARY_TICK(tkVtableWatch, "vtable_watch");
+EDVR_BOUNDARY_TICK(tkVrRuntime, "vr_runtime");
+EDVR_BOUNDARY_TICK(tkToggleKey, "toggle_key");
+EDVR_BOUNDARY_TICK(tkHotkeys, "hotkeys");
+EDVR_BOUNDARY_TICK(tkEliteBinds, "elite_binds");
+EDVR_BOUNDARY_TICK(tkJournalWatch, "journal_watch");
+EDVR_BOUNDARY_TICK(tkJournalGate, "journal_gate");
+EDVR_BOUNDARY_TICK(tkCameraKeysPads, "camera_keys_pads");
+EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
+EDVR_BOUNDARY_TICK(tkMenu, "menu");
+EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
+EDVR_BOUNDARY_TICK(tkExposureBoundary, "exposure_boundary");
+EDVR_BOUNDARY_TICK(tkVscreenRest, "vscreen_rest");
+EDVR_BOUNDARY_TICK(tkVscreenReclaimTick, "vscreen_reclaim_tick");
+EDVR_BOUNDARY_TICK(tkExposureReclaimTick, "exposure_reclaim_tick");
+EDVR_BOUNDARY_TICK(tkMtSample, "mt_sample");
+EDVR_BOUNDARY_TICK(tkConfigRefresh, "config_refresh");
+EDVR_BOUNDARY_TICK(tkFrameFlagPeer, "frame_flag_peer");
+EDVR_BOUNDARY_TICK(tkHookReclaim, "hook_reclaim");
+EDVR_BOUNDARY_TICK(tkContextReclaim, "context_reclaim");
+EDVR_BOUNDARY_TICK(tkProbeCensus, "probe_census");
+
+// The diagnostic keys (tkHotkeys). The exposure toggle is its own tick.
+void tickHotkeys() {
+    // The history key dumps TWICE: now, and again two seconds from now.
+    //
+    // A flash you react to sits about 300 ms back, which is the last few
+    // rows of a ring that holds only what came BEFORE the press. And a bad
+    // frame is one that leaves the line and RETURNS -- a shape that needs
+    // frames on both sides of it, which an event at the ring's edge does
+    // not have. So the one capture that is guaranteed to contain the thing
+    // being chased is also the one least able to show it.
+    //
+    // The second dump costs one more press of nothing: same ring, two
+    // seconds later, by which time the event has moved to the middle with
+    // its recovery behind it. The pair is the point -- the first is the
+    // reaction-time capture, the second is the one you read.
+    if (g_state->dumpKey.pressed()) {
+        dumpCameraRing("the history key");
+        temporalPassDumpHistory("the history key");
+        g_state->dumpDueMs = nowMs() + kDumpDelayMs;
+    }
+    // THE PRESS THAT WENT NOWHERE, said out loud.
+    //
+    // Hotkeys only fire while the game window has focus, which is correct --
+    // GetAsyncKeyState is global, and Scroll Lock typed in a browser used to
+    // toggle the brightness fix. But in VR another window holding focus is
+    // ordinary rather than exceptional, and for THIS key the silent failure
+    // is circular: the player presses the key that writes the log, nothing
+    // is written, and the log that would explain why is the one that was not
+    // written. Measured 2026-08-15: a session where the external-camera key
+    // registered twice and Pause never did, so a reported flash had no
+    // capture and the reason was invisible.
+    //
+    // Capped, because a player who keeps a browser focused could otherwise
+    // paper the log with it -- and after three the point has been made.
+    if (g_state->missedDumpNotes < kMissedDumpNotes &&
+        g_state->dumpKey.takeMissedWhileUnfocused()) {
+        ++g_state->missedDumpNotes;
+        Log::get().note(
+            "the camera history key was pressed, but another window had "
+            "focus, so nothing was written. EDVR only acts on its hotkeys "
+            "while Elite itself is the active window -- otherwise a key "
+            "typed in a browser would reach it. Click on the game window "
+            "(the flat one on your desktop) and press it again. Said at most "
+            "%u times a session.",
+            kMissedDumpNotes);
+    }
+    // The delayed dump, armed by either key.
+    if (g_state->dumpDueMs != 0 && nowMs() >= g_state->dumpDueMs) {
+        g_state->dumpDueMs = 0;
+        dumpCameraRing("a key you pressed two seconds ago",
+                       (uint32_t)(kDumpDelayMs / 1000));
+        temporalPassDumpHistory("a key you pressed two seconds ago");
+    }
+    // The draw census key (issue 69074). Same silent-failure shape as the
+    // history key, same cure: a diagnostic keypress that another window
+    // swallowed must say so, because the log it failed to write is the
+    // place anyone would look for the reason.
+    if (g_state->censusKey.pressed()) {
+        if (runtimeFlatProfile()) {
+            flatTemporalArm();
+        } else {
+            drawCensusRequest();
+            // Same key: the census says WHAT was drawn, the quad probe says
+            // WHERE. Two instruments on one press keeps the two answers on
+            // the same frame, which is the only way they can be compared.
+            quadProbeRequest();
+            perfMonitorNoteEvent(kEvCensus);
+        }
+    }
+    // The eye dump key: the next treated frame's two eyes to disk.
+    if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
+    if (g_state->missedCensusNotes < kMissedDumpNotes &&
+        g_state->censusKey.takeMissedWhileUnfocused()) {
+        ++g_state->missedCensusNotes;
+        Log::get().note(
+            "the draw census key was pressed, but another window had "
+            "focus, so nothing was captured. Click on the game window and "
+            "press it again. Said at most %u times a session.",
+            kMissedDumpNotes);
+    }
+}
+
+// The player's Elite bindings (tkEliteBinds).
+void tickEliteBinds() {
+    // The player's Elite bindings, re-read when the game rewrites them.
+    // Elite saves Options\Bindings the moment a rebind or preset switch
+    // is applied, so a slow stat notices within seconds and the adopted
+    // hotkeys follow without a restart. The change must HOLD across two
+    // checks before anything is re-read: an Apply writes several files,
+    // and half a save is not a configuration.
+    if (dueMs(g_state->bindsCheckMs, kBindsCheckMs)) {
+        g_state->bindsCheckMs = stampMs();
+        if (Config::get().getBool("hotkey.read_game_bindings", true)) {
+            const uint64_t fp = eliteBindsFingerprint();
+            if (fp == g_state->bindsFingerprint) {
+                g_state->bindsPending = 0;
+            } else if (fp == g_state->bindsPending) {
+                g_state->bindsFingerprint = fp;
+                g_state->bindsPending = 0;
+                readoptGameBindings();
+            } else {
+                g_state->bindsPending = fp;
+            }
+        }
+    }
+}
+
+// What the journal tells the head-offset gate (tkJournalGate).
+void tickJournalGate() {
+    if (journalWatchActive()) {
+        const uint32_t d = journalDisembarks();
+        if (d != g_state->lastJournalDisembarks) {
+            g_state->lastJournalDisembarks = d;
+            headOffsetGateNewFootSession(
+                "the game's journal says you disembarked",
+                /*journalSaysSo=*/true);
+        }
+        const uint32_t e = journalEmbarks();
+        if (e != g_state->lastJournalEmbarks) {
+            g_state->lastJournalEmbarks = e;
+            headOffsetGateNoteEmbark();
+        }
+    }
+    // The game's live on-foot word: what makes a KEYLESS install work at all
+    // (the gate turns it into intent, 6bb).
+    headOffsetGateSetOnFootLive(journalOnFootKnown(), journalOnFoot(),
+                                journalStatusSamples());
+    headOffsetGateSetWakeLive(journalSupercruiseKnown(), journalSupercruise(),
+                              journalInJumpTunnel());
+}
+
+// The camera keys and pads (tkCameraKeysPads), and the two settings only they read.
+void tickCameraKeysPads() {
+    // The two settings below are read by this tick alone, so they are re-read here
+    // and not beside the diagnostic keys they used to sit among.
+    //
+    // Deliberately not part of the toggle: it reports, it does not change
+    // anything, so there is no reason for it to follow the fix being off.
+    // The two diagnostic settings, re-read every frame.
+    //
+    // They were read once at install, like everything else in ensureState,
+    // and both are numbers you find by FEEL from inside a headset -- which
+    // means a relaunch per guess, which is not tuning. The same argument the
+    // head offset made when it moved onto the reload path, and vscreen.h
+    // records the same mistake before that: two settings documented as
+    // changeable while the game runs that were never re-read, reported as
+    // the fix being broken.
+    //
+    // Every frame rather than on a poll, because the cost is two lookups in
+    // a map that is already in memory -- vScreenRefreshConfig does the file
+    // check, so nothing here touches the disk.
+    g_state->dumpOnExternalCam =
+        Config::get().getBool("advanced.dump_camera_on_external_cam", false);
+    g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
+        Config::get().getIntInRange("experimental.hold_frames_on_external_cam", 0, 0, 120));
+
+    // Camera keys mean the CAMERA only once gameplay has started. Before
+    // LoadGame every press is menu navigation -- and the next-view key is
+    // typically an arrow, which menus eat by the dozen; counting those
+    // walked the view count away from reality before the game even began
+    // (6ba). Without the journal, behaviour is exactly as before.
+    const bool keysMeanGame = !journalWatchActive() || journalGameplay();
+    // Told to the gate, not acted on here. These keys are the player's OWN
+    // Elite bindings: EDVR does not send them, press them or interfere with
+    // them -- it watches for the same press the game gets, so it knows
+    // which mode the player just asked for.
+    if (keysMeanGame && g_state->externalCamKey.pressed()) {
+        headOffsetGateKeyPressed();
+        // The camera history, triggered by the press but taken AFTER it.
+        //
+        // Entering and leaving the external camera is reported as flashing,
+        // and it is a transition nobody can press Pause during: by the time
+        // they reach that key the ten seconds of history are the ten seconds
+        // after the thing they wanted.
+        //
+        // Dumping ON the press has the same fault in the other direction --
+        // the ring holds the frames BEFORE it, so it would capture ten
+        // seconds of standing still and none of the transition. The delay is
+        // the whole point: two seconds later the ring holds the press, the
+        // mode change and the flash, with eight seconds of ordinary flight
+        // in front of them for comparison.
+        if (g_state->dumpOnExternalCam) g_state->dumpDueMs = nowMs() + kDumpDelayMs;
+        // Hold the last good frame across the transition.
+        //
+        // Asked for on the PRESS, which is the earliest possible moment and
+        // the only one that is not a guess: the player has just told us a
+        // transition is starting. Everything the detector does downstream of
+        // this is inference; this is not.
+        // ON FOOT ONLY, and the same state Explorer Cam gates on.
+        //
+        // This is the player's own Elite binding and it opens the SHIP's
+        // vanity camera too. Holding frames there costs 83 ms each for a
+        // transition this was never measured against and does not claim to
+        // fix -- and a hold in the cockpit is the same shape of mistake as
+        // the head offset arming there, which is the failure the gate exists
+        // to prevent.
+        //
+        // Two ways to be in the right place, because the press means
+        // opposite things at each end: entering, the flat panel is up and
+        // settled; leaving, the gate is already published as on-foot
+        // external. Neither alone covers both directions.
+        const bool onFootContext =
+            headOffsetGatePanelSettled() || externalCameraOnFoot();
+        if (g_state->holdFramesOnExternalCam > 0 && onFootContext) {
+            requestSubmitHold(g_state->holdFramesOnExternalCam);
+        }
+    }
+    // The next-view key, promoted to the public build on 2026-08-15. With
+    // this bound, the count follows each press, so the offset drops the
+    // moment you cycle off the wanted view and returns when you cycle back.
+    if (keysMeanGame && g_state->extCamNextKey.pressed()) {
+        headOffsetGateViewBumped();
+    }
+    if (keysMeanGame && g_state->extCamPrevKey.pressed()) {
+        headOffsetGateViewUnbumped();
+    }
+    // AND THE SAME PRESSES ON A GAMEPAD. Elite binds the view cycle to
+    // the D-pad by default and the keyboard arrows only as a secondary,
+    // so watching the keyboard alone misses every press a pad player
+    // makes -- which reads downstream as a count that is quietly one or
+    // two behind, with nothing to say why (field, 2026-09-02).
+    if (keysMeanGame && xinputPressed(g_state->extCamNextPad)) {
+        headOffsetGateViewBumped();
+    }
+    if (keysMeanGame && xinputPressed(g_state->extCamPrevPad)) {
+        headOffsetGateViewUnbumped();
+    }
+}
+
+// The FSS mode latch (tkFssModeLatch).
+void tickFssModeLatch() {
+    // The same word tickCameraKeysPads reads: key presses mean the game only once
+    // gameplay has started (see there for why).
+    const bool keysMeanGame = !journalWatchActive() || journalGameplay();
+    // The FSS mode latch: the player's own FSS keys give
+    // frame-exact edges -- press enter and the screen is up THIS
+    // frame, press quit and it is gone. Underneath, the game's
+    // GuiFocus is the authority that heals every path a key cannot
+    // see: a press the game ignored (not in supercruise), an exit by
+    // ESC or an interdiction, an entry from a UI, an unbound or
+    // non-keyboard key. A key engage carries a grace while the
+    // status file catches up; once the game confirms the mode, its
+    // word alone ends it. A quit press suppresses the focus engage
+    // until the game agrees the mode ended, so stale status cannot
+    // re-open a screen the player just closed.
+    if (g_state->fssModeLatchWanted) {
+        xinputWatchTick();
+        const bool wasLatched = g_state->fssModeLatch;
+        bool byKey = false;
+        // Evaluate BOTH watchers every frame -- pressed() keeps edge
+        // state, and a short-circuited call would miss its edge.
+        bool enterPressed = g_state->fssEnterKey.pressed();
+        if (xinputPressed(g_state->fssEnterPad)) enterPressed = true;
+        bool quitPressed = g_state->fssQuitKey.pressed();
+        if (xinputPressed(g_state->fssQuitPad)) quitPressed = true;
+        if (keysMeanGame && enterPressed &&
+            (!journalSupercruiseKnown() || journalSupercruise())) {
+            g_state->fssModeLatch = true;
+            g_state->fssLatchByKey = true;
+            g_state->fssLatchMs = stampMs();
+            byKey = true;
+        }
+        if (keysMeanGame && quitPressed) {
+            g_state->fssModeLatch = false;
+            g_state->fssQuitMs = stampMs();
+            byKey = true;
+        }
+        // The zoom press: the earliest arrival marker there is --
+        // ahead of the camera jump, ahead of any render signal. The
+        // squares appear the frame the zoom begins (the field's own
+        // timing), so the reveal's window must open no later.
+        bool zoomPressed = g_state->fssZoomStepKey.pressed();
+        if (g_state->fssZoomKey.pressed()) zoomPressed = true;
+        if (xinputPressed(g_state->fssZoomStepPad)) zoomPressed = true;
+        if (xinputPressed(g_state->fssZoomPad)) zoomPressed = true;
+        if (zoomPressed && g_state->fssModeLatch) {
+            g_state->fssZoomPressPending = true;
+        }
+        if (journalFssFocus()) {
+            const bool quitRecent =
+                g_state->fssQuitMs != 0 &&
+                stampMs() - g_state->fssQuitMs < 3000;
+            if (!g_state->fssModeLatch && !quitRecent) {
+                g_state->fssModeLatch = true;
+            }
+            if (g_state->fssModeLatch) g_state->fssLatchByKey = false;
+        } else {
+            g_state->fssQuitMs = 0;
+            if (g_state->fssModeLatch && journalFssFocusKnown()) {
+                const bool grace =
+                    g_state->fssLatchByKey &&
+                    stampMs() - g_state->fssLatchMs < 4000;
+                if (!grace) g_state->fssModeLatch = false;
+            }
+        }
+        if (wasLatched != g_state->fssModeLatch &&
+            g_state->fssLatchNotes < 6) {
+            ++g_state->fssLatchNotes;
+            Log::get().note(
+                g_state->fssModeLatch
+                    ? "fss mode latch: OPEN (%s)."
+                    : "fss mode latch: closed (%s). Said at most 6 times.",
+                byKey ? "your FSS key" : "the game's GuiFocus");
+        }
+    }
+}
+
+// The multithread-protection sample (tkMtSample).
+void tickMtSample() {
+    // The multithread-protection sample. One virtual call that reads a
+    // flag, per frame, and a line only when the answer differs from last
+    // time -- so a rig where nothing moves pays a compare and says nothing,
+    // and a rig where it toggles every frame says so in the first second
+    // and then at doublings. See the State field for what it settles.
+    if (g_state->multithread) {
+        ++g_state->mtFrames;
+        const int now = g_state->multithread->GetMultithreadProtected() ? 1 : 0;
+        if (now != g_state->mtProtected) {
+            g_state->mtProtected = now;
+            ++g_state->mtChanges;
+            const uint32_t n = g_state->mtChanges;
+            if (n <= 4 || (n & (n - 1)) == 0) {
+                Log::get().note(
+                    "multithread protection CHANGED to %s (change #%u, "
+                    "frame %llu). Every one of these makes Windows re-lay "
+                    "the context's entire function table, which is what "
+                    "removes EDVR's hooks from it. Reported for the first "
+                    "few and then at doublings.",
+                    now ? "ON" : "off", n,
+                    static_cast<unsigned long long>(g_state->mtFrames));
+            }
+        }
+        // The standing answer, said once, because a NEGATIVE has to be
+        // stated to be read. A session where this never changes prints no
+        // change lines at all, and "no lines" is indistinguishable from
+        // "the probe never ran" -- which is the shape of mistake this
+        // investigation has already made three times.
+        if (g_state->mtFrames == 1800 && !g_state->mtSettledNoted) {
+            g_state->mtSettledNoted = true;
+            Log::get().note(
+                "multithread protection after 1800 frames: %s, changed %u "
+                "time(s). If that count is zero on a rig whose context "
+                "table is still being rewritten every frame, then this flag "
+                "is NOT what is causing it and the cause is something else "
+                "reaching the same routine.",
+                g_state->mtProtected ? "ON" : "off", g_state->mtChanges);
+        }
+    }
+}
+
+// frame_flag's layout check (tkFrameFlagPeer), on the config poll's cadence.
+void tickFrameFlagPeer() {
+    // frame_flag's layout check (frame_flag.h). The VR runtime half
+    // can load at any point in the session, so it is asked on this
+    // cadence; the first mismatch is said once.
+    {
+        static bool frameFlagMismatchNoted = false;
+        if (!frameFlagMismatchNoted) {
+            if (const uint32_t theirs = frameFlagPeerMismatch()) {
+                frameFlagMismatchNoted = true;
+                Log::get().note(
+                    "frame_flag: LAYOUT MISMATCH -- this d3d11.dll was built with the "
+                    "shared channel's v%u, the VR runtime half beside it with v%u. They "
+                    "come from different EDVR builds, so the channel between them is "
+                    "refused: everything that crosses it (the transition-flash hold, "
+                    "the on-foot camera, the cull guard, the intro recentre, the "
+                    "settings menu's door) is absent this session. Reinstall EDVR so "
+                    "both halves match.",
+                    kFrameFlagVersion, theirs);
+            }
+        }
+    }
+}
+
+void presentFrameBoundary() {
+    // THE FRAME NUMBER, ADVANCED AND PUBLISHED BEFORE ANYTHING USES IT.
+    //
+    // FRAME N IS EVERYTHING BETWEEN PRESENT N-1 RETURNING AND PRESENT N
+    // RETURNING. The Present that got us here has just returned, so the
+    // frame it ended is over and the one this block belongs to is the next:
+    // frameCounter is the frame IN PROGRESS, it starts at 1 (the frame the
+    // game is drawing before it has presented anything), and it advances
+    // here, at the boundary, rather than four hundred lines below.
+    //
+    // Both of those were wrong. The counter advanced at the END of this
+    // block, so every flip recorded during frame N+1 was stamped N -- and
+    // the monitor kept a SECOND counter of its own, so the long-frame line
+    // and the flips it was supposed to be ordered against were numbered in
+    // two different systems. The whole question issue #21 turns on is
+    // whether the table changed before the hang or after it, and neither
+    // number could answer it. One counter, published here, printed by both.
+    ++g_state->frameCounter;
+    // The kinematic probe's clock: exactly once per owned Present. Here,
+    // not beside vScreenFrameBoundary below -- that site sits behind the
+    // graphicsRuntimeDisabled early return and would skip those presents.
+    tkKinematicProbe.run([] {
+        kinematicEvalProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // Engine-record velocity's clock (the emit table's frame stamps and
+    // the per-eye snapshots), the same exactly-once-per-owned-present tick.
+    tkEngineVelocityClock.run([] {
+        engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // The scheduler stack probe's report tick, same call site and the
+    // same one-atomic-load-when-off cost.
+    tkSchedulerProbe.run([] {
+        schedulerStackProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // The static prop gate's frame clock, journal-boundary poll and 20 s
+    // report tick, same call site and the same one-atomic-load-when-off
+    // cost.
+    tkStaticPropGate.run([] {
+        staticPropGate.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // The write watch's per-frame work, here rather than inside
+    // vScreenReclaimTick where the re-arm used to sit behind
+    // `if (!g_state) return;`. In the two context probes vScreen never
+    // installs, so g_state is null, so neither the re-arm nor the flip
+    // timeline's drain ran at all -- in exactly the sessions the
+    // instruments exist for. Both are no-ops when nothing is armed, and the
+    // tick publishes the frame number whether or not anything is.
+    tkVtableWatch.run([] {
+        vtableWatchRearm();
+        vtableWatchFrameTick(g_state->frameCounter);
+    });
+    if (graphicsRuntimeDisabled()) return;
+    // WHICH VR BACK END THIS ACTUALLY IS, said once near the top of the
+    // log. Inside the budget because it reads the process module list;
+    // rate-limited to once a second by the module itself, and silent from
+    // the moment it has spoken. See vr_runtime.h for the session that made
+    // it necessary -- a perfect install the game never opened, and eight
+    // messages telling its owner the file was missing.
+    tkVrRuntime.run([] { vrRuntimeTick(); });
+    tkToggleKey.run([] {
+        if (g_state->toggleKey.pressed()) toggleExposureFix();
+    });
+    tkHotkeys.run(tickHotkeys);
+    tkEliteBinds.run(tickEliteBinds);
+    // The game's own journal, polled about once a second: it states the
+    // two boundaries EDVR used to infer -- gameplay starting (LoadGame)
+    // and on-foot sessions beginning (Disembark, where the game resets
+    // its camera view to 0).
+    tkJournalWatch.run([] { journalWatchTick(); });
+    tkJournalGate.run(tickJournalGate);
+    tkCameraKeysPads.run(tickCameraKeysPads);
+    tkFssModeLatch.run(tickFssModeLatch);
+    // The settings menu (docs/settings-menu.md): its summon key, its
+    // navigation keys and head-aim, its fade, the keyboard gate that
+    // follows its draw, and the upload of a fresh raster. One key poll
+    // when closed.
+    //
+    // This call holds the monitor's frame clock (perfMonitorFrame), which is
+    // where the frame-tick chain is cut: the tick named "menu_tick" ends there,
+    // "perf_monitor" is the rest of that function, and "menu" is what is left.
+    tkMenu.run([] { menuTick(g_state->device); });
+    // One per-frame invalidation for both fixes, before either boundary.
+    //
+    // This used to be two, with opposite policies: vscreen dropped its
+    // derived answers and kept its pointers, exposure_fix dropped its
+    // pointers. Each had a failure mode the other did not, and having two
+    // guaranteed the next fix would copy one of them wrongly. device_hook
+    // owns the frame; it owns this.
+    tkBindingBoundary.run([] { bindingFrameBoundary(); });
+    tkExposureBoundary.run([] { exposureFixFrameBoundary(); });
+    // vScreenFrameBoundary marks its own ticks; this is what is left of it.
+    tkVscreenRest.run([] { vScreenFrameBoundary(); });
+
+    // THE FAST PATROL on the two context hooks, every frame.
+    //
+    // Their opponent is not a tool that installs once. On issue #21's rig
+    // the D3D11 runtime rewrites the same slots about once a second for the
+    // whole session, and against a one-hertz rewriter the once-a-second
+    // pass below is the worst cadence available: our thunks end up in the
+    // table for part of every second and out of it for the rest, so the
+    // fixes do not fail, they STROBE. This closes the window to a frame.
+    //
+    // Only the two CONTEXT hooks. The device, swapchain and factory tables
+    // have never been contested by anything in the field, they carry no
+    // per-thunk counters to vouch with, and their reclaim cannot heal
+    // anything without one -- so running them at frame rate would buy a
+    // VirtualQuery per foreign entry per frame and nothing else.
+    //
+    // These passes vouch NOTHING; see vScreenReclaimTick for why that is
+    // the whole safety argument rather than a shortcut.
+    tkVscreenReclaimTick.run([] { vScreenReclaimTick(); });
+    tkExposureReclaimTick.run([] { exposureFixReclaimTick(); });
+
+    tkMtSample.run(tickMtSample);
+
+    // Polled rather than watched, twice a second by the journal watcher
+    // and once a second here. The user is wearing a
+    // headset and cannot see a text editor, so the settings that are worth
+    // tuning by feel have to take effect without a restart. Was every 90
+    // frames, which is once a second on exactly one of the three rates.
+    //
+    // (frameCounter advances at the TOP of this block now, not here; see
+    // the comment there for which frame a number means.)
+    //
+    // The menu asks for the poll NOW after each write it made, so the
+    // change lands this frame through the same configure path a hand
+    // edit takes -- nothing applies a value except the reload.
+    if (menuTakeConfigPollRequest() || dueMs(g_state->configPollMs, kConfigPollMs)) {
+        g_state->configPollMs = stampMs();
+        // The reload and what is derived from it are one group: with the reload
+        // stood down there is nothing new to derive from.
+        tkConfigRefresh.run([] {
+            vScreenRefreshConfig();
+            g_state->fssModeLatchWanted =
+                eyeSyncFromConfig(Config::get()).any();
+            journalWatchSetEagerStatus(g_state->fssModeLatchWanted);
+        });
+        tkFrameFlagPeer.run(tickFrameFlagPeer);
+        // The liveness pass, on the same once-a-second cadence. In-place
+        // patches are on a table other tools can write too, and one that
+        // installs after EDVR and resolves its "original" pointers from a
+        // clean vtable erases ours without a trace -- measured 2026-08-18:
+        // OpenXR Toolkit under OpenComposite re-pointed the draw,
+        // render-target-bind and dispatch slots at its XR session init, a
+        // few seconds after install, and four fixes starved silently while
+        // Map/Unmap kept arriving and made the log look half-alive.
+        //
+        // The three hooks here pass no vouch list, so they are DETECTION
+        // ONLY: their slots are rare calls (CreateComputeShader at asset
+        // loads, CreateSwapChain once) or the heartbeat itself (Present),
+        // and "quiet" is a normal state for all of them -- which is
+        // exactly the evidence a vouch must never be built on. A re-point
+        // of one of these gets a named log line instead of silence, and
+        // that is the whole improvement on offer for them; re-patching
+        // without call evidence risks looping a chainer, which is worse
+        // than the bypass it would heal. The context hooks below carry
+        // per-thunk counters and do vouch. See VTableHook::reclaim.
+        //
+        // This rides the swapchain hook's Present: if THAT slot is ever the
+        // one re-pointed, the heartbeat running this check dies with it.
+        // Accepted, not overlooked -- the field case left Present alone
+        // (the totals windows kept printing all session), and a watchdog
+        // thread for a hook that has never been hit is machinery this
+        // codebase would have to get right on every other axis too.
+        tkHookReclaim.run([] {
+            g_state->deviceHook.reclaim("d3d11 device");
+            g_state->swapChainHook.reclaim("game swapchain");
+            g_state->factoryHook.reclaim("dxgi factory");
+        });
+        // vScreen first: its return is the eye-draws-since-last-pass fact
+        // the exposure vouch is gated on, because compute silence during
+        // a loading screen is ordinary and only compute silence during a
+        // RENDERED SCENE is evidence of bypass.
+        tkContextReclaim.run([] {
+            const bool sceneRendered = vScreenReclaimHooks();
+            exposureFixReclaimHooks(sceneRendered);
+        });
+        // AND THE PROBE HOOK, which nothing else on this path touches.
+        //
+        // In the two context probes no installer runs, so neither reclaim
+        // tick above reaches a hook -- and the census and the recent-flip
+        // dump ride inside reclaim's private branch. The sessions whose
+        // entire purpose is to ask what the runtime does to the context's
+        // table were therefore the sessions that reported nothing about it.
+        // No-op unless a probe actually installed.
+        tkProbeCensus.run([] { g_state->bareContextHook.censusTick("probe context"); });
+    }
+}
+
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
-    const uint64_t traceBegan = self == g_state->swapChain ? edvrNativeTraceNowUs() : 0;
+    // The hook's entry, one clock read for both clocks that want it: the runtime's
+    // Present trace (microseconds) and the frame-tick chain (frame_ticks.h).
+    const int64_t hookEnter = self == g_state->swapChain ? qpcNow() : 0;
+    const uint64_t traceBegan = hookEnter ? edvrNativeTraceUs(hookEnter) : 0;
     const uint64_t traceToken = self == g_state->swapChain ?
         nativeTimingPresentBegin(g_state->device, traceBegan, GetCurrentThreadId()) : 0;
     VrCensusScope census(VrCensusEvent::PresentEnter, VrCensusEvent::PresentExit,
@@ -1078,6 +1697,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    // The frame-tick chain starts here (frame_ticks.h): what follows, to this
+    // hook's return, is EDVR's or the driver's; what came before it is the game's.
+    g_frameTicks.enter(hookEnter);
     // The Oculus probe may follow initial device creation. Drain changed
     // routing observations from ordinary execution, never from the loader.
     oculusRouteReport();
@@ -1091,6 +1713,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
     const int64_t presentT1 = qpcNow();
+    // The hook's own work before the real call is a tick; the real call is not
+    // EDVR's, so it is timed apart and kept out of the slowest three.
+    g_frameTicks.markAt("present_pre", presentT0);
+    g_frameTicks.external(presentT1);
     if (runtimeFlatProfile())
         flatTemporalAfterPresent(g_state->frameCounter, hr, flags);
     if (runtimeFlatProfile()) flatRuntimePresent(self, g_state->frameCounter, hr, flags);
@@ -1098,7 +1724,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         perfMonitorNotePresentWait(static_cast<double>(presentT1 - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
     }
-    gameExitProbePresent(hr,flags,g_state->frameCounter);
     // Bind the first successful owned, non-TEST Present thread even before
     // the paired consumer registers. Exclude registration from Present timing.
     if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
@@ -1109,6 +1734,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         gpuFramePresent(timingContext, g_state->frameCounter + 1);
         timingContext->Release();
     }
+    frameTick("gpu_frame_present");
 
     // OUTSIDE the fault budget, and that is the point. Confirming is a file
     // delete; putting it inside would mean a burst of faults anywhere in the
@@ -1140,548 +1766,32 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // just ringed inside it (menuTick runs perfMonitorFrame), so a dropped
     // frame's row says what EDVR's boundary work cost in it.
     const int64_t boundaryT0 = qpcNow();
-    guardedBudget(g_frameBudget, [&] {
-        // THE FRAME NUMBER, ADVANCED AND PUBLISHED BEFORE ANYTHING USES IT.
-        //
-        // FRAME N IS EVERYTHING BETWEEN PRESENT N-1 RETURNING AND PRESENT N
-        // RETURNING. The Present that got us here has just returned, so the
-        // frame it ended is over and the one this block belongs to is the next:
-        // frameCounter is the frame IN PROGRESS, it starts at 1 (the frame the
-        // game is drawing before it has presented anything), and it advances
-        // here, at the boundary, rather than four hundred lines below.
-        //
-        // Both of those were wrong. The counter advanced at the END of this
-        // block, so every flip recorded during frame N+1 was stamped N -- and
-        // the monitor kept a SECOND counter of its own, so the long-frame line
-        // and the flips it was supposed to be ordered against were numbered in
-        // two different systems. The whole question issue #21 turns on is
-        // whether the table changed before the hang or after it, and neither
-        // number could answer it. One counter, published here, printed by both.
-        ++g_state->frameCounter;
-        // The kinematic probe's clock: exactly once per owned Present. Here,
-        // not beside vScreenFrameBoundary below -- that site sits behind the
-        // graphicsRuntimeDisabled early return and would skip those presents.
-        kinematicEvalProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
-        // Engine-record velocity's clock (the emit table's frame stamps and
-        // the per-eye snapshots), the same exactly-once-per-owned-present tick.
-        engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
-        // The scheduler stack probe's report tick, same call site and the
-        // same one-atomic-load-when-off cost.
-        schedulerStackProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
-        // The static prop gate's frame clock, journal-boundary poll and 20 s
-        // report tick, same call site and the same one-atomic-load-when-off
-        // cost.
-        staticPropGate.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
-        // The write watch's per-frame work, here rather than inside
-        // vScreenReclaimTick where the re-arm used to sit behind
-        // `if (!g_state) return;`. In the two context probes vScreen never
-        // installs, so g_state is null, so neither the re-arm nor the flip
-        // timeline's drain ran at all -- in exactly the sessions the
-        // instruments exist for. Both are no-ops when nothing is armed, and the
-        // tick publishes the frame number whether or not anything is.
-        vtableWatchRearm();
-        vtableWatchFrameTick(g_state->frameCounter);
-        if (graphicsRuntimeDisabled()) return;
-        // WHICH VR BACK END THIS ACTUALLY IS, said once near the top of the
-        // log. Inside the budget because it reads the process module list;
-        // rate-limited to once a second by the module itself, and silent from
-        // the moment it has spoken. See vr_runtime.h for the session that made
-        // it necessary -- a perfect install the game never opened, and eight
-        // messages telling its owner the file was missing.
-        vrRuntimeTick();
-        if (g_state->toggleKey.pressed()) toggleExposureFix();
-        // Deliberately not part of the toggle: it reports, it does not change
-        // anything, so there is no reason for it to follow the fix being off.
-        // The two diagnostic settings, re-read every frame.
-        //
-        // They were read once at install, like everything else in ensureState,
-        // and both are numbers you find by FEEL from inside a headset -- which
-        // means a relaunch per guess, which is not tuning. The same argument the
-        // head offset made when it moved onto the reload path, and vscreen.h
-        // records the same mistake before that: two settings documented as
-        // changeable while the game runs that were never re-read, reported as
-        // the fix being broken.
-        //
-        // Every frame rather than on a poll, because the cost is two lookups in
-        // a map that is already in memory -- vScreenRefreshConfig does the file
-        // check, so nothing here touches the disk.
-        g_state->dumpOnExternalCam =
-            Config::get().getBool("advanced.dump_camera_on_external_cam", false);
-        g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
-            Config::get().getIntInRange("experimental.hold_frames_on_external_cam", 0, 0, 120));
-
-        // The history key dumps TWICE: now, and again two seconds from now.
-        //
-        // A flash you react to sits about 300 ms back, which is the last few
-        // rows of a ring that holds only what came BEFORE the press. And a bad
-        // frame is one that leaves the line and RETURNS -- a shape that needs
-        // frames on both sides of it, which an event at the ring's edge does
-        // not have. So the one capture that is guaranteed to contain the thing
-        // being chased is also the one least able to show it.
-        //
-        // The second dump costs one more press of nothing: same ring, two
-        // seconds later, by which time the event has moved to the middle with
-        // its recovery behind it. The pair is the point -- the first is the
-        // reaction-time capture, the second is the one you read.
-        if (g_state->dumpKey.pressed()) {
-            dumpCameraRing("the history key");
-            temporalPassDumpHistory("the history key");
-            transitionFlashPreventDumpRing("the history key");
-            g_state->dumpDueMs = nowMs() + kDumpDelayMs;
-        }
-        // THE PRESS THAT WENT NOWHERE, said out loud.
-        //
-        // Hotkeys only fire while the game window has focus, which is correct --
-        // GetAsyncKeyState is global, and Scroll Lock typed in a browser used to
-        // toggle the brightness fix. But in VR another window holding focus is
-        // ordinary rather than exceptional, and for THIS key the silent failure
-        // is circular: the player presses the key that writes the log, nothing
-        // is written, and the log that would explain why is the one that was not
-        // written. Measured 2026-08-15: a session where the external-camera key
-        // registered twice and Pause never did, so a reported flash had no
-        // capture and the reason was invisible.
-        //
-        // Capped, because a player who keeps a browser focused could otherwise
-        // paper the log with it -- and after three the point has been made.
-        if (g_state->missedDumpNotes < kMissedDumpNotes &&
-            g_state->dumpKey.takeMissedWhileUnfocused()) {
-            ++g_state->missedDumpNotes;
-            Log::get().note(
-                "the camera history key was pressed, but another window had "
-                "focus, so nothing was written. EDVR only acts on its hotkeys "
-                "while Elite itself is the active window -- otherwise a key "
-                "typed in a browser would reach it. Click on the game window "
-                "(the flat one on your desktop) and press it again. Said at most "
-                "%u times a session.",
-                kMissedDumpNotes);
-        }
-        // The delayed dump, armed by either key.
-        if (g_state->dumpDueMs != 0 && nowMs() >= g_state->dumpDueMs) {
-            g_state->dumpDueMs = 0;
-            dumpCameraRing("a key you pressed two seconds ago",
-                           (uint32_t)(kDumpDelayMs / 1000));
-            temporalPassDumpHistory("a key you pressed two seconds ago");
-            transitionFlashPreventDumpRing("a key you pressed two seconds ago");
-        }
-        // The draw census key (issue 69074). Same silent-failure shape as the
-        // history key, same cure: a diagnostic keypress that another window
-        // swallowed must say so, because the log it failed to write is the
-        // place anyone would look for the reason.
-        if (g_state->censusKey.pressed()) {
-            if (runtimeFlatProfile()) {
-                flatTemporalArm();
-            } else {
-                drawCensusRequest();
-                // Same key: the census says WHAT was drawn, the quad probe says
-                // WHERE. Two instruments on one press keeps the two answers on
-                // the same frame, which is the only way they can be compared.
-                quadProbeRequest();
-                perfMonitorNoteEvent(kEvCensus);
-            }
-        }
-        // The eye dump key: the next treated frame's two eyes to disk.
-        if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
-        if (g_state->missedCensusNotes < kMissedDumpNotes &&
-            g_state->censusKey.takeMissedWhileUnfocused()) {
-            ++g_state->missedCensusNotes;
-            Log::get().note(
-                "the draw census key was pressed, but another window had "
-                "focus, so nothing was captured. Click on the game window and "
-                "press it again. Said at most %u times a session.",
-                kMissedDumpNotes);
-        }
-        // The player's Elite bindings, re-read when the game rewrites them.
-        // Elite saves Options\Bindings the moment a rebind or preset switch
-        // is applied, so a slow stat notices within seconds and the adopted
-        // hotkeys follow without a restart. The change must HOLD across two
-        // checks before anything is re-read: an Apply writes several files,
-        // and half a save is not a configuration.
-        if (dueMs(g_state->bindsCheckMs, kBindsCheckMs)) {
-            g_state->bindsCheckMs = stampMs();
-            if (Config::get().getBool("hotkey.read_game_bindings", true)) {
-                const uint64_t fp = eliteBindsFingerprint();
-                if (fp == g_state->bindsFingerprint) {
-                    g_state->bindsPending = 0;
-                } else if (fp == g_state->bindsPending) {
-                    g_state->bindsFingerprint = fp;
-                    g_state->bindsPending = 0;
-                    readoptGameBindings();
-                } else {
-                    g_state->bindsPending = fp;
-                }
-            }
-        }
-        // The game's own journal, polled about once a second: it states the
-        // two boundaries EDVR used to infer -- gameplay starting (LoadGame)
-        // and on-foot sessions beginning (Disembark, where the game resets
-        // its camera view to 0).
-        journalWatchTick();
-        if (journalWatchActive()) {
-            const uint32_t d = journalDisembarks();
-            if (d != g_state->lastJournalDisembarks) {
-                g_state->lastJournalDisembarks = d;
-                headOffsetGateNewFootSession(
-                    "the game's journal says you disembarked",
-                    /*journalSaysSo=*/true);
-            }
-            const uint32_t e = journalEmbarks();
-            if (e != g_state->lastJournalEmbarks) {
-                g_state->lastJournalEmbarks = e;
-                headOffsetGateNoteEmbark();
-            }
-        }
-        // The game's live on-foot word, and the camera-entry edge. The first
-        // is what makes a KEYLESS install work at all (the gate turns it into
-        // intent, 6bb); the second nudges the view scanner so fresh
-        // candidates exist while the player is still cycling to their view --
-        // which is what the anchored two-step certification feeds on.
-        headOffsetGateSetOnFootLive(journalOnFootKnown(), journalOnFoot(),
-                                    journalStatusSamples());
-        headOffsetGateSetWakeLive(journalSupercruiseKnown(), journalSupercruise(),
-                                  journalInJumpTunnel());
-        {
-            const uint32_t entries = headOffsetGateEnterCount();
-            if (entries != g_state->lastCameraEnters) {
-                g_state->lastCameraEnters = entries;
-                cameraViewNudgeRescan();
-            }
-        }
-        // Camera keys mean the CAMERA only once gameplay has started. Before
-        // LoadGame every press is menu navigation -- and the next-view key is
-        // typically an arrow, which menus eat by the dozen; counting those
-        // walked the view count away from reality before the game even began
-        // (6ba). Without the journal, behaviour is exactly as before.
-        const bool keysMeanGame = !journalWatchActive() || journalGameplay();
-        // Told to the gate, not acted on here. These keys are the player's OWN
-        // Elite bindings: EDVR does not send them, press them or interfere with
-        // them -- it watches for the same press the game gets, so it knows
-        // which mode the player just asked for.
-        if (keysMeanGame && g_state->externalCamKey.pressed()) {
-            headOffsetGateKeyPressed();
-            // The camera history, triggered by the press but taken AFTER it.
-            //
-            // Entering and leaving the external camera is reported as flashing,
-            // and it is a transition nobody can press Pause during: by the time
-            // they reach that key the ten seconds of history are the ten seconds
-            // after the thing they wanted.
-            //
-            // Dumping ON the press has the same fault in the other direction --
-            // the ring holds the frames BEFORE it, so it would capture ten
-            // seconds of standing still and none of the transition. The delay is
-            // the whole point: two seconds later the ring holds the press, the
-            // mode change and the flash, with eight seconds of ordinary flight
-            // in front of them for comparison.
-            if (g_state->dumpOnExternalCam) g_state->dumpDueMs = nowMs() + kDumpDelayMs;
-            // Hold the last good frame across the transition.
-            //
-            // Asked for on the PRESS, which is the earliest possible moment and
-            // the only one that is not a guess: the player has just told us a
-            // transition is starting. Everything the detector does downstream of
-            // this is inference; this is not.
-            // ON FOOT ONLY, and the same state Explorer Cam gates on.
-            //
-            // This is the player's own Elite binding and it opens the SHIP's
-            // vanity camera too. Holding frames there costs 83 ms each for a
-            // transition this was never measured against and does not claim to
-            // fix -- and a hold in the cockpit is the same shape of mistake as
-            // the head offset arming there, which is the failure the gate exists
-            // to prevent.
-            //
-            // Two ways to be in the right place, because the press means
-            // opposite things at each end: entering, the flat panel is up and
-            // settled; leaving, the gate is already published as on-foot
-            // external. Neither alone covers both directions.
-            const bool onFootContext =
-                headOffsetGatePanelSettled() || externalCameraOnFoot();
-            if (g_state->holdFramesOnExternalCam > 0 && onFootContext) {
-                requestSubmitHold(g_state->holdFramesOnExternalCam);
-            }
-        }
-        // The next-view key, promoted to the public build on 2026-08-15. It
-        // was deliberately private-only while the game read covered
-        // everything -- but near a planet the read dies for stretches, the
-        // bridge holds the last confirmed view through them, and cycling
-        // during a hold was then INVISIBLE: the offset stayed armed on every
-        // preset the player cycled to. With this bound, the count follows
-        // each press, so the offset drops the moment you cycle off the wanted
-        // view and returns when you cycle back -- read or no read. The press
-        // is also timestamped for the watcher: a candidate record stepping
-        // exactly when the finger does is the certification no impostor has
-        // matched (6aw).
-        if (keysMeanGame && g_state->extCamNextKey.pressed()) {
-            cameraViewNotePress();
-            headOffsetGateViewBumped();
-        }
-        // The witness call is deliberately the same one: what certification
-        // needs is that the player's finger moved at this instant, not which
-        // way round the cycle it sent them.
-        if (keysMeanGame && g_state->extCamPrevKey.pressed()) {
-            cameraViewNotePress();
-            headOffsetGateViewUnbumped();
-        }
-        // AND THE SAME PRESSES ON A GAMEPAD. Elite binds the view cycle to
-        // the D-pad by default and the keyboard arrows only as a secondary,
-        // so watching the keyboard alone misses every press a pad player
-        // makes -- which reads downstream as a count that is quietly one or
-        // two behind, with nothing to say why (field, 2026-09-02).
-        if (keysMeanGame && xinputPressed(g_state->extCamNextPad)) {
-            cameraViewNotePress();
-            headOffsetGateViewBumped();
-        }
-        if (keysMeanGame && xinputPressed(g_state->extCamPrevPad)) {
-            cameraViewNotePress();
-            headOffsetGateViewUnbumped();
-        }
-        // The FSS theater's mode latch: the player's own FSS keys give
-        // frame-exact edges -- press enter and the screen is up THIS
-        // frame, press quit and it is gone. Underneath, the game's
-        // GuiFocus is the authority that heals every path a key cannot
-        // see: a press the game ignored (not in supercruise), an exit by
-        // ESC or an interdiction, an entry from a UI, an unbound or
-        // non-keyboard key. A key engage carries a grace while the
-        // status file catches up; once the game confirms the mode, its
-        // word alone ends it. A quit press suppresses the focus engage
-        // until the game agrees the mode ended, so stale status cannot
-        // re-open a screen the player just closed.
-        if (g_state->fssTheaterWanted) {
-            xinputWatchTick();
-            const bool wasLatched = g_state->fssModeLatch;
-            bool byKey = false;
-            // Evaluate BOTH watchers every frame -- pressed() keeps edge
-            // state, and a short-circuited call would miss its edge.
-            bool enterPressed = g_state->fssEnterKey.pressed();
-            if (xinputPressed(g_state->fssEnterPad)) enterPressed = true;
-            bool quitPressed = g_state->fssQuitKey.pressed();
-            if (xinputPressed(g_state->fssQuitPad)) quitPressed = true;
-            if (keysMeanGame && enterPressed &&
-                (!journalSupercruiseKnown() || journalSupercruise())) {
-                g_state->fssModeLatch = true;
-                g_state->fssLatchByKey = true;
-                g_state->fssLatchMs = stampMs();
-                byKey = true;
-            }
-            if (keysMeanGame && quitPressed) {
-                g_state->fssModeLatch = false;
-                g_state->fssQuitMs = stampMs();
-                byKey = true;
-            }
-            // The zoom press: the earliest arrival marker there is --
-            // ahead of the camera jump, ahead of any render signal. The
-            // squares appear the frame the zoom begins (the field's own
-            // timing), so the reveal's window must open no later.
-            bool zoomPressed = g_state->fssZoomStepKey.pressed();
-            if (g_state->fssZoomKey.pressed()) zoomPressed = true;
-            if (xinputPressed(g_state->fssZoomStepPad)) zoomPressed = true;
-            if (xinputPressed(g_state->fssZoomPad)) zoomPressed = true;
-            if (zoomPressed && g_state->fssModeLatch) {
-                g_state->fssZoomPressPending = true;
-            }
-            if (journalFssFocus()) {
-                const bool quitRecent =
-                    g_state->fssQuitMs != 0 &&
-                    stampMs() - g_state->fssQuitMs < 3000;
-                if (!g_state->fssModeLatch && !quitRecent) {
-                    g_state->fssModeLatch = true;
-                }
-                if (g_state->fssModeLatch) g_state->fssLatchByKey = false;
-            } else {
-                g_state->fssQuitMs = 0;
-                if (g_state->fssModeLatch && journalFssFocusKnown()) {
-                    const bool grace =
-                        g_state->fssLatchByKey &&
-                        stampMs() - g_state->fssLatchMs < 4000;
-                    if (!grace) g_state->fssModeLatch = false;
-                }
-            }
-            if (wasLatched != g_state->fssModeLatch &&
-                g_state->fssLatchNotes < 6) {
-                ++g_state->fssLatchNotes;
-                Log::get().note(
-                    g_state->fssModeLatch
-                        ? "fss theater: mode latch OPEN (%s)."
-                        : "fss theater: mode latch closed (%s). Said at "
-                          "most 6 times.",
-                    byKey ? "your FSS key" : "the game's GuiFocus");
-            }
-        }
-        // The settings menu (docs/settings-menu.md): its summon key, its
-        // navigation keys and head-aim, its fade, the keyboard gate that
-        // follows its draw, and the upload of a fresh raster. One key poll
-        // when closed.
-        menuTick(g_state->device);
-        // Reading the view the game is actually on, and telling the gate.
-        //
-        // The keypress count above stays as the fallback, for when this cannot
-        // answer: an offset a game update has moved, a record that has been
-        // reused, a scan that found nothing. cameraViewCurrent returns -1 in
-        // all of those and the gate goes back to counting.
-        headOffsetGateSetView(cameraViewCurrent());
-        // One per-frame invalidation for both fixes, before either boundary.
-        //
-        // This used to be two, with opposite policies: vscreen dropped its
-        // derived answers and kept its pointers, exposure_fix dropped its
-        // pointers. Each had a failure mode the other did not, and having two
-        // guaranteed the next fix would copy one of them wrongly. device_hook
-        // owns the frame; it owns this.
-        bindingFrameBoundary();
-        exposureFixFrameBoundary();
-        vScreenFrameBoundary();
-
-        // THE FAST PATROL on the two context hooks, every frame.
-        //
-        // Their opponent is not a tool that installs once. On issue #21's rig
-        // the D3D11 runtime rewrites the same slots about once a second for the
-        // whole session, and against a one-hertz rewriter the once-a-second
-        // pass below is the worst cadence available: our thunks end up in the
-        // table for part of every second and out of it for the rest, so the
-        // fixes do not fail, they STROBE. This closes the window to a frame.
-        //
-        // Only the two CONTEXT hooks. The device, swapchain and factory tables
-        // have never been contested by anything in the field, they carry no
-        // per-thunk counters to vouch with, and their reclaim cannot heal
-        // anything without one -- so running them at frame rate would buy a
-        // VirtualQuery per foreign entry per frame and nothing else.
-        //
-        // These passes vouch NOTHING; see vScreenReclaimTick for why that is
-        // the whole safety argument rather than a shortcut.
-        vScreenReclaimTick();
-        exposureFixReclaimTick();
-
-        // The multithread-protection sample. One virtual call that reads a
-        // flag, per frame, and a line only when the answer differs from last
-        // time -- so a rig where nothing moves pays a compare and says nothing,
-        // and a rig where it toggles every frame says so in the first second
-        // and then at doublings. See the State field for what it settles.
-        if (g_state->multithread) {
-            ++g_state->mtFrames;
-            const int now = g_state->multithread->GetMultithreadProtected() ? 1 : 0;
-            if (now != g_state->mtProtected) {
-                g_state->mtProtected = now;
-                ++g_state->mtChanges;
-                const uint32_t n = g_state->mtChanges;
-                if (n <= 4 || (n & (n - 1)) == 0) {
-                    Log::get().note(
-                        "multithread protection CHANGED to %s (change #%u, "
-                        "frame %llu). Every one of these makes Windows re-lay "
-                        "the context's entire function table, which is what "
-                        "removes EDVR's hooks from it. Reported for the first "
-                        "few and then at doublings.",
-                        now ? "ON" : "off", n,
-                        static_cast<unsigned long long>(g_state->mtFrames));
-                }
-            }
-            // The standing answer, said once, because a NEGATIVE has to be
-            // stated to be read. A session where this never changes prints no
-            // change lines at all, and "no lines" is indistinguishable from
-            // "the probe never ran" -- which is the shape of mistake this
-            // investigation has already made three times.
-            if (g_state->mtFrames == 1800 && !g_state->mtSettledNoted) {
-                g_state->mtSettledNoted = true;
-                Log::get().note(
-                    "multithread protection after 1800 frames: %s, changed %u "
-                    "time(s). If that count is zero on a rig whose context "
-                    "table is still being rewritten every frame, then this flag "
-                    "is NOT what is causing it and the cause is something else "
-                    "reaching the same routine.",
-                    g_state->mtProtected ? "ON" : "off", g_state->mtChanges);
-            }
-        }
-        // Polled rather than watched, twice a second by the journal watcher
-        // and once a second here. The user is wearing a
-        // headset and cannot see a text editor, so the settings that are worth
-        // tuning by feel have to take effect without a restart. Was every 90
-        // frames, which is once a second on exactly one of the three rates.
-        //
-        // (frameCounter advances at the TOP of this block now, not here; see
-        // the comment there for which frame a number means.)
-        //
-        // The menu asks for the poll NOW after each write it made, so the
-        // change lands this frame through the same configure path a hand
-        // edit takes -- nothing applies a value except the reload.
-        if (menuTakeConfigPollRequest() || dueMs(g_state->configPollMs, kConfigPollMs)) {
-            g_state->configPollMs = stampMs();
-            vScreenRefreshConfig();
-            // frame_flag's layout check (frame_flag.h). The VR runtime half
-            // can load at any point in the session, so it is asked on this
-            // cadence; the first mismatch is said once.
-            {
-                static bool frameFlagMismatchNoted = false;
-                if (!frameFlagMismatchNoted) {
-                    if (const uint32_t theirs = frameFlagPeerMismatch()) {
-                        frameFlagMismatchNoted = true;
-                        Log::get().note(
-                            "frame_flag: LAYOUT MISMATCH -- this d3d11.dll was built with the "
-                            "shared channel's v%u, the VR runtime half beside it with v%u. They "
-                            "come from different EDVR builds, so the channel between them is "
-                            "refused: everything that crosses it (the transition-flash hold, "
-                            "the on-foot camera, the cull guard, the intro recentre, the "
-                            "settings menu's door) is absent this session. Reinstall EDVR so "
-                            "both halves match.",
-                            kFrameFlagVersion, theirs);
-                    }
-                }
-            }
-            g_state->fssTheaterWanted =
-                Config::get().getFloat("experimental.fss_theater", 0.0f) > 0.0f ||
-                eyeSyncFromConfig(Config::get()).any();
-            journalWatchSetEagerStatus(g_state->fssTheaterWanted);
-            // The liveness pass, on the same once-a-second cadence. In-place
-            // patches are on a table other tools can write too, and one that
-            // installs after EDVR and resolves its "original" pointers from a
-            // clean vtable erases ours without a trace -- measured 2026-08-18:
-            // OpenXR Toolkit under OpenComposite re-pointed the draw,
-            // render-target-bind and dispatch slots at its XR session init, a
-            // few seconds after install, and four fixes starved silently while
-            // Map/Unmap kept arriving and made the log look half-alive.
-            //
-            // The three hooks here pass no vouch list, so they are DETECTION
-            // ONLY: their slots are rare calls (CreateComputeShader at asset
-            // loads, CreateSwapChain once) or the heartbeat itself (Present),
-            // and "quiet" is a normal state for all of them -- which is
-            // exactly the evidence a vouch must never be built on. A re-point
-            // of one of these gets a named log line instead of silence, and
-            // that is the whole improvement on offer for them; re-patching
-            // without call evidence risks looping a chainer, which is worse
-            // than the bypass it would heal. The context hooks below carry
-            // per-thunk counters and do vouch. See VTableHook::reclaim.
-            //
-            // This rides the swapchain hook's Present: if THAT slot is ever the
-            // one re-pointed, the heartbeat running this check dies with it.
-            // Accepted, not overlooked -- the field case left Present alone
-            // (the totals windows kept printing all session), and a watchdog
-            // thread for a hook that has never been hit is machinery this
-            // codebase would have to get right on every other axis too.
-            g_state->deviceHook.reclaim("d3d11 device");
-            g_state->swapChainHook.reclaim("game swapchain");
-            g_state->factoryHook.reclaim("dxgi factory");
-            // vScreen first: its return is the eye-draws-since-last-pass fact
-            // the exposure vouch is gated on, because compute silence during
-            // a loading screen is ordinary and only compute silence during a
-            // RENDERED SCENE is evidence of bypass.
-            const bool sceneRendered = vScreenReclaimHooks();
-            exposureFixReclaimHooks(sceneRendered);
-            // AND THE PROBE HOOK, which nothing else on this path touches.
-            //
-            // In the two context probes no installer runs, so neither reclaim
-            // tick above reaches a hook -- and the census and the recent-flip
-            // dump ride inside reclaim's private branch. The sessions whose
-            // entire purpose is to ask what the runtime does to the context's
-            // table were therefore the sessions that reported nothing about it.
-            // No-op unless a probe actually installed.
-            g_state->bareContextHook.censusTick("probe context");
-        }
-    });
+    // The sentinel, the frame stamps and the thread note above: one tick. From
+    // here the chain's ticks are the boundary's too (frame_ticks.h).
+    g_frameTicks.markAt("present_post", boundaryT0);
+    g_frameTicks.boundary(true);
+    // Each tick runs under a budget of its own (boundary_tick.h).
+    presentFrameBoundary();
+    const int64_t boundaryT1 = qpcNow();
+    // Whatever the boundary did after its last tick (all of it, when
+    // graphicsRuntimeDisabled cut it short), and the end of the boundary's ticks.
+    g_frameTicks.markAt("boundary_rest", boundaryT1);
+    g_frameTicks.boundary(false);
     if (qpcFrequency() > 0) {
-        perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
+        perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(boundaryT1 - boundaryT0) * 1000.0 /
                                              static_cast<double>(qpcFrequency()));
     }
     const uint64_t traceBodyEnd = edvrNativeTraceNowUs();
     if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
         renderBoundaryPresent(g_state->device);
+    // The callback's end is the trace's end and the last tick's edge: one read.
+    const int64_t callbackEnd = qpcNow();
+    g_frameTicks.markAt("render_callback", callbackEnd);
     const EdvrNativePresentSpan trace{traceBegan, edvrNativeTraceUs(presentT0),
-        edvrNativeTraceUs(presentT1), traceBodyEnd, edvrNativeTraceNowUs(),
+        edvrNativeTraceUs(presentT1), traceBodyEnd, edvrNativeTraceUs(callbackEnd),
         GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};
     nativeTimingNotePresent(g_state->device, traceToken, trace);
+    frameTick("timing_note");
     return hr;
 }
 
@@ -1820,7 +1930,6 @@ void readoptGameBindings() {
             xinputTranslate(fb, &g_state->fssQuitPad);
         }
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
-        cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
     }
     // Silence here cost a field session: the files changed, the re-read ran,
     // the answers matched -- and nothing said so, which is indistinguishable
@@ -2065,12 +2174,10 @@ State& ensureState() {
         // key and the menu's own keys, which the rules check against.
         menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
-        cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
         journalWatchConfigure();
-        g_state->fssTheaterWanted =
-            Config::get().getFloat("experimental.fss_theater", 0.0f) > 0.0f ||
+        g_state->fssModeLatchWanted =
             eyeSyncFromConfig(Config::get()).any();
-        journalWatchSetEagerStatus(g_state->fssTheaterWanted);
+        journalWatchSetEagerStatus(g_state->fssModeLatchWanted);
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);
         g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
@@ -2080,7 +2187,6 @@ State& ensureState() {
         // than falling back to a heuristic that cannot tell the external camera
         // from the inside of your own ship.
         headOffsetGateSetKeyBound(g_state->externalCamKey.key() != 0);
-        cameraViewConfigure();
     }
     return *g_state;
 }
@@ -2786,8 +2892,15 @@ void hookDevice(ID3D11Device* device) {
 // this process is no longer the one that last received input; borrowing
 // the current foreground window's input queue for the call is the
 // standard way around that guard.
+//
+// Only for a top-level window on the desktop, which the game's is (see
+// focus_target.h): a swap chain on any other kind of window is not the game.
 void forceWindowForeground(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd)) return;
+    if (!focusTargetWindow(hwnd)) {
+        Log::get().note("window: focus-on-launch skipped: the swap chain's window is not a top-level window");
+        return;
+    }
     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
 
     HWND fg = GetForegroundWindow();
@@ -3000,7 +3113,6 @@ void shutdownDeviceHooks() {
     revertVScreenModeResolution();
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     shutdownGlitchFrameFix();
-    transitionFlashPreventShutdown();
     poseReaderWatchShutdown();
     transitionFlashEyeBaseShutdown();
     shutdownVScreenFixes();

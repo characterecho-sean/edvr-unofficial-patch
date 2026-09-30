@@ -57,6 +57,11 @@ enum class GameRunState {
     NotRunning,   // no EliteDangerous64.exe anywhere on this machine
     OtherFolder,  // running, and every copy of it came from some other install
     ThisFolder,   // running from the folder about to be written into
+    // The process list could not be read (or not to its end), so "stopped" is
+    // not something anything here can say. Not "not running": that reading
+    // let a failed snapshot walk the installer into a folder the game had open.
+    // A caller treats it as a refusal, like ThisFolder, and says why.
+    Unknown,
 };
 
 // EliteDangerous64.exe, weighed against the folder about to be written into.
@@ -66,6 +71,13 @@ GameRunState gameRunState(const std::wstring& gameDir);
 // fixing it because that is the only way to test the answer: no build machine
 // has Elite running, and every one of them has the test process itself.
 GameRunState runStateOf(const wchar_t* exeName, const std::wstring& dir);
+
+// runStateOf over a process snapshot somebody else took (a TH32CS_SNAPPROCESS
+// handle, passed as void* so this header needs no windows.h). Takes ownership:
+// the handle is closed. INVALID_HANDLE_VALUE or null -- CreateToolhelp32Snapshot
+// having failed -- is Unknown, which is the one branch a test cannot reach by
+// asking Windows for a snapshot.
+GameRunState runStateOfSnapshot(void* snapshot, const wchar_t* exeName, const std::wstring& dir);
 
 // Is there an NVIDIA graphics adapter in this machine, by DXGI's vendor id,
 // software adapters skipped? NVIDIA's DLSS runtime is placed only where

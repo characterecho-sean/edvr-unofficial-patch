@@ -42,6 +42,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "holo_families.h"  // the crisp take's eight hologram VS hashes: kHoloGeneric's match list
+
 namespace edvr {
 
 // ---------------------------------------------------------------- the key --
@@ -331,6 +333,13 @@ inline UiBlendShape uiLayerBlendShape(const UiBlendRt& b) {
 // uiLayerMultiplyBlend: the composite is then out = L.rgb + F.rgb * T * M.rgb,
 // exact for any order of the accepted shapes (over: L' = c + L(1-a),
 // T' = T(1-a); additive: L' = L + c; multiply: L' = L s, M' = M s).
+// ADDITIVE (ONE, ONE) and scaled additive (SRC_ALPHA, ONE) convert exactly
+// and cover NOTHING: transmittance is untouched (T' = T), the layer's colour
+// gain is exactly the light the game's blend would have added. That is the
+// hologram families' shape -- they are additive glows drawn with depth off
+// (holo_families.h, ui_depth.cpp's generic hologram coverage) -- so their
+// crisp take adds no coverage of its own; what differs from stock is WHERE
+// the light lands (the layer, tonemapped once more), never how much.
 //
 // False for a refused shape: the draw is not redirected.
 inline bool uiLayerConvertBlend(const UiBlendRt& in, UiBlendRt* out) {
@@ -503,6 +512,34 @@ inline UiDsEffect uiLayerDsEffect(const UiDsState& s, bool dsvBound) {
     return e;
 }
 
+// A stencil-only game write cannot change an unmodified depth-only seed.
+// Keep the legacy whole-seed refresh for every other writer. In particular,
+// any private depth-writing interaction in this frame retains it across all
+// eyes/layers: its fine-grid depth or another cache's raw source may differ
+// from a fresh resampling of the game buffer. The UI-quality rig proves this
+// guard with actual differing depth/colour, not just predicate arithmetic.
+inline bool uiLayerSeedWriterInvalidates(const UiDsEffect& writer, uint8_t seededMask,
+                                        bool seededDepth, bool privateDepthWriteThisFrame) {
+    return writer.writes() && !(writer.stencilWrite && !writer.depthWrite &&
+        seededDepth && !seededMask && !privateDepthWriteThisFrame);
+}
+
+struct UiLayerPrivateDepthGuard {
+    uint64_t sequence = 0;
+    void note(uint64_t current, bool rawDepthWritePotential) {
+        if (rawDepthWritePotential && current > sequence) sequence = current;
+    }
+    void noteReplay(uint64_t captured, uint64_t lastRedirect, bool rawDepthWritePotential) {
+        // A late replay protects the current caches without advancing any
+        // rendering cache's freshness sequence.
+        note(captured > lastRedirect ? captured : lastRedirect, rawDepthWritePotential);
+    }
+    // An earlier/out-of-order cache sequence is conservative too; only a
+    // monotonically newer frame can resume preservation.
+    bool active(uint64_t current) const { return !current || current <= sequence; }
+    void reset() { sequence = 0; }
+};
+
 // ------------------------------------------------------ the composite filter --
 
 // The layer texels a footprint [x0, x1) covers along one axis, with their
@@ -553,6 +590,15 @@ enum class UiLayerFamily : uint8_t {
     kHolo,       // cockpit holo panels (vs 81216C77F90DEDD6)
     kFlightHud,  // flight HUD (vs B7790CBFC6554097)
     kSprite,     // target-time sprite (vs E508648660A352B2)
+    kHoloGeneric,  // the crisp take's eight (holo_families.h kHoloFamiliesTake:
+                   // the radar's icon core, its two stalks, and the five
+                   // contact markers -- the canopy is not one, and neither
+                   // are the three the phase-3 review refused: the target
+                   // sphere, the corona family, the world-marker reticle),
+                   // Phase 3 of the crisp-HUD design. ONE family for eight
+                   // hashes: the 30 s table prints one row, and the per-draw
+                   // first-seen lines name the VS hash (ui_layer.cpp's
+                   // noteFamily keys on (family, decision, vs, ps)).
     kAfterUi,    // not the interface at all: an owner draw that WRITES an eye
                  // target the UI was already taken from this frame
                  // (uiLayerNoteOther's 'W' case), taken into the same layer
@@ -573,6 +619,7 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kHolo: return "cockpit holo panels";
         case UiLayerFamily::kFlightHud: return "flight HUD";
         case UiLayerFamily::kSprite: return "target sprite";
+        case UiLayerFamily::kHoloGeneric: return "hologram";
         case UiLayerFamily::kAfterUi: return "after the UI";
         default: return "none";
     }
@@ -630,7 +677,15 @@ constexpr uint64_t kUiVsGuiVector = 0x666EF0C4C616F67Eull, kUiVsGuiText = 0x1012
 // menu, had the game re-create its interface surfaces: the redirects stopped
 // within a third of a second of the render-size change and never resumed,
 // though ui_depth learned one of the new surfaces a second later.
-constexpr uint64_t kUiPanelPs[] = {0x9107E72CB016CC02ull, 0x219323C8C025AD94ull};
+// 2026-09-27: the tinted and cheap variants join (ui_depth.cpp:105-115
+// documents all three: nine disassembly lines differ, none in the
+// sampling; the IN-FLIGHT menu -- the escape menu, station services -- and
+// the holo effect over the panels draw through them). The first crisp-HUD
+// flight showed the cockpit's menu composites were never recognized with
+// the two original PSes alone (30k+ draws, "no learned surface, pixel
+// shader not known"), so in-flight menus never took the layer at all.
+constexpr uint64_t kUiPanelPs[] = {0x9107E72CB016CC02ull, 0x219323C8C025AD94ull,
+                                   0x015EF9349EC097E8ull, 0xF2F872B191F656D5ull};
 constexpr uint64_t kUiLoaderPs[] = {0x85565E9261812E2Full, 0x8ADB2A81A45E8A4Bull};
 
 inline bool uiKnownPs(const uint64_t* list, size_t n, uint64_t ps) {
@@ -682,10 +737,24 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         w = UiFamilyWhy::kNotEyeTarget;
     } else if (f.targetKind == 1) {
         w = UiFamilyWhy::kNotPostTonemap;
+        // The crisp take's eight hologram families join the three named
+        // families (Phase 3): one family, matched by VS hash against
+        // holo_families.h's take-only list (kHoloFamiliesTake). The canopy
+        // is deliberately NOT on that list -- it sits in front of the whole
+        // sky, and covering it would smear the stars behind it, the depth
+        // pass's own reasoning -- and neither are the two the phase-3
+        // review refused. Two exact target-sphere pixel shaders are now
+        // considered separately: their original screen-depth address must be
+        // repaired and all dependencies prepared before redirecting. Unknown
+        // sphere variants and the shared world/cockpit corona remain stock.
+        // World-marker brackets remain in the original scene.
         out = f.vs == kUiVsHolo        ? UiLayerFamily::kHolo
               : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud
               : f.vs == kUiVsSprite    ? UiLayerFamily::kSprite
-                                       : UiLayerFamily::kNone;
+              : (uiHoloGenericHash(f.vs) ||
+                 (f.vs == kHoloTargetSphere &&
+                  (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
+                  ? UiLayerFamily::kHoloGeneric : UiLayerFamily::kNone;
         if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;
     } else if (f.excluded) {
         w = UiFamilyWhy::kExcluded;
@@ -847,11 +916,13 @@ enum class UiLayerDecision : uint8_t {
     kHdrTarget,      // drawn into the lit HDR target BEFORE exposure and the
                      // tonemap: the layer is composited after both, so taking
                      // it would lose the game's exposure, tonemap and bloom
-    kVrs,            // variable-rate shading is bound for the eye (foveation)
     kNoEye,          // the eye could not be told
     kTargetSize,     // the target is not the size of the region the game
                      // submits for that eye (the map is target-to-layer)
     kLate,           // its eye's composite already ran this frame (gate G1)
+    kToneLate,       // crisp: its eye's tonemap re-issue already ran this frame --
+                     // content taken now can never publish (the layer clears next
+                     // frame); the draw stays in the game's frame, as stock
     kNotArmed,       // no door frame for this eye last frame (first frames,
                      // key just on, pass not running)
     kMrt,            // more than one render target bound, or PS UAVs
@@ -876,11 +947,12 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
         case UiLayerDecision::kNotEyeTarget: return "not drawn into an eye target";
         case UiLayerDecision::kHdrTarget:
             return "drawn into the HDR target before the tonemap (left in the picture)";
-        case UiLayerDecision::kVrs: return "variable-rate shading bound for the eye";
         case UiLayerDecision::kNoEye: return "eye unknown";
         case UiLayerDecision::kTargetSize:
             return "its target is not the size of the eye the game submits";
         case UiLayerDecision::kLate: return "arrived after its eye's composite (gate G1)";
+        case UiLayerDecision::kToneLate:
+            return "arrived after its eye's tonemap re-issue (cannot publish this frame)";
         case UiLayerDecision::kNotArmed: return "layer not armed";
         case UiLayerDecision::kMrt: return "more than one render target, or pixel-shader UAVs";
         case UiLayerDecision::kDepthStencilTest:
@@ -902,10 +974,14 @@ struct UiLayerDrawFacts {
                                   // foot, or the screen's own depth is busy
     bool eyeTarget = false;       // an eye-sized 2D colour target
     bool ldrView = false;         // ... viewed as 8-bit UNORM (post-tonemap)
-    bool vrs = false;             // variable-rate shading bound
     int eye = -1;                 // 0 left, 1 right, -1 unknown
     bool targetMatchesEye = true; // the target is the submitted region's size
     bool late = false;            // its eye's door already ran this frame
+    bool lateTone = false;        // crisp: its eye's tonemap re-issue already ran this frame
+                                  // (content taken now can never publish -- the game's own
+                                  // tonemap ordering varies frame to frame, and the layer's
+                                  // clear next frame discards it: the missing ship/target
+                                  // mesh holograms, review crisp-hud-phase3-2026-09-28)
     bool armed = false;           // the door and the pass ran for it last frame
     bool mrt = false;            // a second render target, or PS UAVs, bound
     UiDsEffect ds;                // what it does with the bound depth target
@@ -913,6 +989,15 @@ struct UiLayerDrawFacts {
     bool substituted = false;     // drawn by a substitution's own geometry
     UiBlendShape blend = UiBlendShape::kRefused;
     bool layerReady = true;       // the eye's layer exists at the wanted size
+    // The HDR HUD take is armed (with fix.ui_quality) and this is one of the
+    // cockpit HUD families (the holo panels, the flight HUD, the target
+    // sprite, and the crisp take's eight hologram families as kHoloGeneric)
+    // drawn into the
+    // lit HDR (pre-tonemap) eye target: the draw goes to the HDR layer, and
+    // the tonemap re-issue brings it back over the finished eye. Every other
+    // test (eye known, armed, not late, no MRT/UAV, the seeded depth-stencil,
+    // the blend) applies exactly as for the LDR take.
+    bool crispHdr = false;
 };
 
 inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
@@ -922,17 +1007,31 @@ inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
     // (armed or not, late or not): the screen that shows the world stays.
     if (f.worldScreen && f.family == UiLayerFamily::kScreen) return UiLayerDecision::kWorldScreen;
     if (!f.eyeTarget) return UiLayerDecision::kNotEyeTarget;
-    if (!f.ldrView) return UiLayerDecision::kHdrTarget;
-    if (f.vrs) return UiLayerDecision::kVrs;
+    // The lit HDR target, before exposure and the tonemap: refused as stock,
+    // unless the HDR HUD take owns this family (the cockpit HUD families: the
+    // holo panels, the flight HUD, the target sprite, the holograms).
+    if (!f.ldrView && !f.crispHdr) return UiLayerDecision::kHdrTarget;
     if (f.eye < 0 || f.eye > 1) return UiLayerDecision::kNoEye;
     if (!f.targetMatchesEye) return UiLayerDecision::kTargetSize;
     if (f.late) return UiLayerDecision::kLate;
+    if (f.crispHdr && f.lateTone) return UiLayerDecision::kToneLate;
     if (!f.armed) return UiLayerDecision::kNotArmed;
     if (f.mrt) return UiLayerDecision::kMrt;
     if (f.ds.tests() && !f.dsReproducible) return UiLayerDecision::kDepthStencilTest;
     if (f.ds.writes() && f.substituted) return UiLayerDecision::kSubstitutedWrite;
     if (f.blend == UiBlendShape::kRefused) return UiLayerDecision::kBlendRefused;
     if (f.blend == UiBlendShape::kMultiply && f.substituted) return UiLayerDecision::kBlendRefused;
+    // The HDR half has no transmittance route for a multiply: the HDR take
+    // skips ensureMult (the transmittance target is the LDR layer's), and
+    // the coverage pass transfers only scalar HDR alpha, so a multiply
+    // redirected into the HDR layer would lose its destination modulation
+    // (review R5). Refuse BEFORE the redirect, kHoloGeneric included. The
+    // three named families measured premultiplied-over; the holograms are
+    // documented additive glows (depth off, mirrored blends -- ui_depth.cpp's
+    // generic hologram coverage). Their states are NOT flight-measured: an
+    // unconvertible blend or depth-stencil state is what the refusal net is
+    // for, and it names the state that refused.
+    if (f.crispHdr && f.blend == UiBlendShape::kMultiply) return UiLayerDecision::kBlendRefused;
     if (!f.layerReady) return UiLayerDecision::kLayerFailed;
     return UiLayerDecision::kRedirect;
 }
@@ -997,8 +1096,24 @@ inline bool uiLayerRegionMatches(uint32_t regionW, uint32_t regionH, const float
 // and summed per eye-frame, the unit a frame's budget is spent in: a stage
 // can run more than once in an eye's frame (a write-back per depth-writing
 // draw). The UI draws themselves, rasterised into the layer instead of the
-// eye, are the game's own work and are not timed.
-enum class UiRouteStage : uint8_t { kClear = 0, kSeed, kMultiply, kWriteBack, kComposite, kCount };
+// eye, are the game's own work. The primary HDR HUD draw has a separate,
+// diagnostic-only moved-rendering stage; it is excluded from machinery cost.
+enum class UiRouteStage : uint8_t {
+    kClear = 0,
+    kSeed,
+    kMultiply,
+    kWriteBack,
+    kComposite,
+    // the crisp-HUD half's of fix.ui_quality HDR HUD layer: its per-frame clear, its depth-stencil
+    // seed, the tonemap re-issue over the 8-bit layer, and the coverage pass
+    // that writes the HDR layer's transmittance into the 8-bit layer's alpha.
+    kHdrClear,
+    kHdrSeed,
+    kHdrTonemap,
+    kHdrCoverage,
+    kHdrMovedDraw,
+    kCount
+};
 
 inline const char* uiRouteStageName(UiRouteStage s) {
     switch (s) {
@@ -1007,6 +1122,11 @@ inline const char* uiRouteStageName(UiRouteStage s) {
         case UiRouteStage::kMultiply: return "multiply";
         case UiRouteStage::kWriteBack: return "write-back";
         case UiRouteStage::kComposite: return "composite";
+        case UiRouteStage::kHdrClear: return "HDR HUD clear";
+        case UiRouteStage::kHdrSeed: return "HDR HUD depth-stencil seed";
+        case UiRouteStage::kHdrTonemap: return "HUD tonemap re-issue";
+        case UiRouteStage::kHdrCoverage: return "HUD coverage";
+        case UiRouteStage::kHdrMovedDraw: return "HDR HUD moved draw";
         default: return "?";
     }
 }
@@ -1079,18 +1199,23 @@ inline bool uiRouteClose(UiRouteSum& s, uint64_t oldestPendingSeq, double* close
     return true;
 }
 
-// v[0..n) sorted in place, one percentile read off by linear interpolation
+// Reads an already-sorted v[0..n), one percentile by linear interpolation
 // between the two bracketing order statistics (temporal_pass.cpp's
 // windowPercentile, the definition numpy uses).
-inline double uiLayerPercentile(float* v, uint32_t n, double frac) {
+inline double uiLayerSortedPercentile(const float* v, uint32_t n, double frac) {
     if (!v || !n) return 0.0;
-    std::sort(v, v + n);
     const double pos = frac * static_cast<double>(n - 1);
     uint32_t lo = static_cast<uint32_t>(pos);
     if (lo > n - 1) lo = n - 1;
     const uint32_t hi = lo + 1 < n ? lo + 1 : lo;
     const double t = pos - static_cast<double>(lo);
     return static_cast<double>(v[lo]) * (1.0 - t) + static_cast<double>(v[hi]) * t;
+}
+
+inline double uiLayerPercentile(float* v, uint32_t n, double frac) {
+    if (!v || !n) return 0.0;
+    std::sort(v, v + n);
+    return uiLayerSortedPercentile(v, n, frac);
 }
 
 }  // namespace edvr

@@ -26,10 +26,11 @@
 // machinery (this header's reset-value compare, the writer watch) and the
 // held base as one of the render patch's candidate bases.
 //
-// off | watch | on | alternate is the same four-way shape as advanced.
-// transition_flash_prevent, so this reuses tfp::Mode/parseMode/Treatment/
-// alternateTreatmentFor/modeAllowsActing/EventTracker/ringFrameInWindow/
-// foldDumpTrigger/frameInDumpWindow directly rather than re-deriving them --
+// off | watch | on | alternate is the four-way shape advanced.
+// transition_flash_prevent had (that key was removed 2026-09-29), so this
+// reuses tfp::Mode/parseMode/Treatment/alternateTreatmentFor/
+// modeAllowsActing/EventTracker/ringFrameInWindow/foldDumpTrigger/
+// frameInDumpWindow directly rather than re-deriving them --
 // see this header's own tests for what is NOT shared (the reset-mailbox bit
 // compare and the M/F validation arithmetic both use different thresholds
 // and a different index set than transition_flash_prevent_core.h's

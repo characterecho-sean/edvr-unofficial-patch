@@ -1,5 +1,6 @@
 #include "night_vision.h"
 #include "night_vision_shader.h"
+#include "temporal_shader_bytecode.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -57,7 +58,7 @@ bool exteriorMask(ID3D11DeviceContext* ctx,UINT w,UINT h){
         if(FAILED(dev->CreateShaderResourceView(resource.Get(),&sd,&cached->stencil)))return false;
         cached->resource=resource;
     }
-    if(!state.classify)state.classify.Attach(shaderSwapCompileCs(ctx,kNightExteriorCs,sizeof(kNightExteriorCs)-1,"main","night exterior",nullptr,"night vision exterior"));
+    if(!state.classify)state.classify.Attach(shaderSwapCreateCs(ctx,kNightExteriorBytecode,sizeof(kNightExteriorBytecode),"night exterior","night vision exterior"));
     if(!state.classify){state.failed[variant()]=true;return false;}
     if(!state.exterior || state.width!=w || state.height!=h){
         state.exterior.Reset();state.exteriorView.Reset();state.exteriorUav.Reset();state.width=state.height=0;
@@ -148,8 +149,12 @@ void nightVisionBegin(ID3D11DeviceContext* ctx){
        rt.DestBlend!=D3D11_BLEND_INV_SRC_ALPHA || rt.BlendOp!=D3D11_BLEND_OP_ADD ||
        rt.RenderTargetWriteMask!=7)return;
     if(!state.shader[mode]){
-        const SwapMacro macros[]={{"EDVR_NIGHT_REALISTIC",enabled?"1":"0"},{"EDVR_NIGHT_PULSE_STABLE",pulseEnabled?"1":"0"},{nullptr,nullptr}};
-        state.shader[mode].Attach(shaderSwapCompilePs(ctx,kNightVisionPs,sizeof(kNightVisionPs)-1,"main","night_vision",macros,"night vision"));
+        const void* bytecode = mode == 1 ? static_cast<const void*>(kNightVisionRealisticBytecode)
+            : mode == 2 ? static_cast<const void*>(kNightVisionPulseBytecode)
+            : static_cast<const void*>(kNightVisionRealisticPulseBytecode);
+        const size_t bytecodeLen = mode == 1 ? sizeof(kNightVisionRealisticBytecode)
+            : mode == 2 ? sizeof(kNightVisionPulseBytecode) : sizeof(kNightVisionRealisticPulseBytecode);
+        state.shader[mode].Attach(shaderSwapCreatePs(ctx,bytecode,bytecodeLen,"night_vision","night vision"));
         if(!state.shader[mode]){state.failed[mode]=true;return;}
     }
     // Pulse-only retains the game's blend and stencil. It needs none of

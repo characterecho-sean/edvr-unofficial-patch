@@ -7,12 +7,9 @@
 Restates the journal below; not new evidence. Update it whenever this doc
 changes.*
 
-- **2026-09-23:** frame_flag is v34. The channels only the deleted legacy
-  openvr half ever wrote left the shared layout (FSS mono frames, the body
-  stamp, the servo's redo, the gaze, the compositor's frame timing, EDVR's
-  activity words), and each half now signs a version-independent roll-call:
-  a d3d11.dll and runtime from different builds refuse the channel, and
-  both logs name both versions (frame_flag.h, "The layout version").
+- **2026-09-23:** frame_flag is v34; each half signs a version-independent
+  roll-call, so a d3d11.dll and runtime from different builds refuse the
+  channel (full entry under "Status detail" below).
 - **State:** Reviewed against source 2026-09-11 (then: transport and GPU
   instrument not implemented; inventory below already historical). By
   2026-09-14 (latest): Luna agents implement under parent review, a native
@@ -35,18 +32,11 @@ changes.*
     the installed Pimax runtime, Varjo and Meta OpenXR need desk
     qualification, and upgrading every existing backend path with
     explicit rollback is named as required, not-yet-done work.
-- **Ruled out:**
-  - A live transport switch or silent runtime fallback after OpenXR
-    init fails: rejected by design.
-  - A permanent legacy-backend choice: retire the forwarding proxy
-    after acceptance gates instead (Migration decision 1).
-  - General OpenVR compatibility, controller/overlay support, other
-    graphics APIs, quad-view stereo: explicitly not promised.
-  - Sidecar timing, PDH sampling, direct swapchain output, the PP-off
-    fold, depth layers, the quad menu: excluded from initial parity.
-  - FSS theater, gaze foveation, `[experimental]` features: deferred from
-    parity, not abandoned. Supersample resolve: retired 2026-09-16 rather
-    than ported.
+- **Ruled out:** a live transport switch or silent runtime fallback, a
+  permanent legacy backend, general OpenVR compatibility, and the
+  initial-parity exclusions; the full list is under "Status detail" below.
+  FSS theater and gaze foveation were removed 2026-09-29 (6ecbd241,
+  184eee7f); supersample resolve was retired 2026-09-16 rather than ported.
 - **Next flight:** Per "Approval boundary" (2026-09-14): desktop checks
   continue while Sean is away; individual headset checks no longer gate each
   step, though "passing desktop tests does not establish a successful flight."
@@ -68,6 +58,28 @@ changes.*
   openxr-flight-2026-09-11.md (census flight),
   openxr-oculus-selection-2026-09-14.md (LibOVR routing), canted-projection.md
   (matrix-fold proposal).
+
+## Status detail (moved out of Status 2026-09-29)
+
+- **2026-09-23:** frame_flag is v34. The channels only the deleted legacy
+  openvr half ever wrote left the shared layout (FSS mono frames, the body
+  stamp, the servo's redo, the gaze, the compositor's frame timing, EDVR's
+  activity words), and each half now signs a version-independent roll-call:
+  a d3d11.dll and runtime from different builds refuse the channel, and
+  both logs name both versions (frame_flag.h, "The layout version").
+- **Ruled out:**
+  - A live transport switch or silent runtime fallback after OpenXR
+    init fails: rejected by design.
+  - A permanent legacy-backend choice: retire the forwarding proxy
+    after acceptance gates instead (Migration decision 1).
+  - General OpenVR compatibility, controller/overlay support, other
+    graphics APIs, quad-view stereo: explicitly not promised.
+  - Sidecar timing, PDH sampling, direct swapchain output, the PP-off
+    fold, depth layers, the quad menu: excluded from initial parity.
+  - FSS theater, gaze foveation, `[experimental]` features: deferred from
+    parity; the theater and foveation were then removed, 2026-09-29
+    (6ecbd241, 184eee7f). Supersample resolve: retired 2026-09-16 rather
+    than ported.
 
 ## The ask
 

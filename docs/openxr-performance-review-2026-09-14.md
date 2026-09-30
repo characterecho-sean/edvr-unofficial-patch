@@ -11,27 +11,55 @@ changes.*
   Application-render GPU timing; with the timing retired before Submit
   returns it FLEW CLEAN (flight 124504, Pimax OpenXR: invalid 5, Elite's
   second-Submit park p50 0.16-0.18 ms) and now DEFAULTS ON.
-- **Open:** issue #38's rc.1 report, 90-99% GPU against 0.16.2's 60-62%. The
-  EDVR GPU census (2026-09-25 entry) is built to split EDVR's cost from the
-  game's; its first flight caught the census itself overcounting engine
-  velocity and screen motion (2026-09-25 entry below), fixed the same day
-  but not yet flown. Separately, the overlap is flown on Pimax
-  OpenXR and SteamVR OpenXR; the Quest runtimes are unflown with it. The depth layer is set aside
-  (Sean, 2026-09-24). No controlled comparison with the old OpenVR path
-  exists; one now needs a v0.16.2 build. A second report (jntracks,
-  2026-09-25 entry) has 0.6.0 in the 90s and 0.18 in the 80s with
-  temporal AA off, at the same 2604x2644 per eye; the runtime path is
-  the only structural difference, and it is unmeasured.
+- **Long cycles and the carrier, 2026-09-29 (entries below):** phase 0 ruled
+  out the periodic jobs; flight 090608 ruled out EDVR's Present hook; 094331
+  had 138-160 ms stalls with anti-aliasing off, so the stalls are Elite's.
+  The instruments FLEW (112704): with DLSS at the carrier the GPU never
+  waits between frames (gap p50 0.06-0.10 ms; 4.5 ms with AA off), so the
+  frame is GPU-bound, and engine motion costs Elite's render thread
+  0.35-0.40 ms p50 (ruled out as the limit). The GPU frame is 12.5-12.7 ms:
+  Elite about 6.5, EDVR 6.0-6.2 (upscaler 3.08, UI and hologram passes 2.16,
+  motion 0.46, and 0.3-0.5 inside Elite's own draws). On main since, not
+  flown: the engine-motion clock sampled (about 0.12 ms a frame of its own,
+  was 1.17) and the census naming the six "other fix-wrapped draws" fix by
+  fix (entries below).
+- **Comparing with 0.16.2 in fpsVR:** under OpenVR its CPU frame time is
+  poses ready to second submit (0.16.2's `appCpuMs`); on the native runtime
+  it tracks Elite's whole frame outside the wait. Compare pre-submit windows.
+- **Open:** issue #38 (rc.1 at 90-99% GPU against 0.16.2's 60-62%) and a
+  second report (jntracks: 0.6.0 in the 90s, 0.18 in the 80s with temporal
+  AA off, same 2604x2644 per eye; the runtime path unmeasured). The census,
+  its overcount fixed 2026-09-25, has since flown (the 09-29 entries). The
+  overlap is unflown on the Quest runtimes; the depth layer is set aside
+  (Sean, 2026-09-24); a controlled OpenVR comparison needs a v0.16.2 build.
 - **Closed:** sections 5 and 6 below (the private and producer copies): the
   producer copy measured 0.039 ms p50 per eye at 4100x3962, under the
   0.1 ms bar.
-- **Ruled out:** at the end of each 2026-09-24 entry.
-- **Next flight:** any flight on a Quest runtime with the default build:
-  check the Application-render GPU invalid count stays near zero and
-  `native_frame_end_overlap_summary` reads failures=0.
+- **Ruled out:** at the end of each 2026-09-24 entry, and in the 2026-09-29
+  ones (the periodic jobs; EDVR's Present hook; EDVR's AA work as the
+  stalls' cause; engine motion's CPU as the carrier's limit; the six wrapped
+  draws as a large EDVR cost, being the pad rings the glare fix claims and
+  the scanner-body resolve; for the UI and hologram passes, every cut but
+  one, measured; the shared-pair rule as wired in 9122f31e, reverted).
+- **UI and hologram passes, 2026-09-29 (entry below):** one exact cut, the
+  UI resolve skipping inputs it was not given (about 0.09 ms a frame); a
+  tile early-out, a groupshared window, R8 history, a composite tile bound,
+  hologram scissors and one shared depth copy measured and ruled out.
+  Largest left: the HDR HUD's depth seed (about 1 ms a frame at the carrier;
+  a census section of its own since, built, not flown) and UI quality 1.25, a
+  setting (1.62x the pixels of 1.0).
+- **Next** (flight 132352 entry): the carrier sits at the budget (GPU
+  10.7-11.3 ms, EDVR about 4.8 of it). Open: fly the HUD depth seed's census
+  section (on main; then UI quality 100 against 125 in one flight) and stock
+  glare's extra 2.5 ms. The landing-pad rule was merged, flown and REVERTED
+  (flight 162819 entry): it unpinned the sun glare. Any Quest flight with
+  the default build: check the Application-render GPU invalid count stays
+  near zero and `native_frame_end_overlap_summary` reads failures=0.
 - **Environment:** the numbers in the entry are Pimax Crystal Super, 90 Hz,
   separate device: Pimax OpenXR at 2600x2514, SteamVR OpenXR (`aapvr`) at
   4100x4050 and 2665x2087.
+
+## The original review, 2026-09-14
 
 The first implementation wave is tracked in the [submission optimization
 notes](openxr-submit-performance-2026-09-14.md). The review below retains its
@@ -813,3 +841,854 @@ three newer ones run SteamVR OpenXR (`steamvr-openxr-cv`, 90 Hz).
 - Next evidence: the same place on both builds, with SteamVR's own
   frame timing (GPU and CPU per frame) for each, and main's census line
   on the new build.
+
+## 2026-09-29: phase 0 flown, and the instrument for the post-submit window
+
+Flight 07:02:41-07:09:00 local, Frontier install, build
+`v0.18.0-rc.3-94-g8fee57c2` (both logs' version lines):
+`edvr_gfx_20260929_070241.log` and
+`edvr_openxr_20260929_070243_242_48304.log`. Environment: EDVR's native
+OpenXR runtime onto SteamVR/OpenXR (headset key `steamvr-openxr-aapvr`),
+4032x3896 per eye, 90 Hz, native temporal pass on (`treated=66014`; DLSS mode
+not read for this entry). Phase 0 (`src\common\periodic_work.h`, architecture
+review P1) times each job the frame boundary runs on a timer, so the
+`periodic work:` lines can be laid against LONG FRAME lines.
+
+**Phase-0 results** (the gfx log's `periodic work:` lines):
+
+| job | runs | max | note |
+|---|---|---|---|
+| journal_reglob | 97 | 4.284 ms | every run over 2 ms, typically 2.6-2.7; 1,991-1,992 journal files |
+| journal_status | 3,267 | 39.220 ms at 07:08:22.789 | 4 slow: 39.2, 4.3, 4.3, 3.5 |
+| frame_cycle_report | 10 | 2.065 ms | |
+| luma_round | 1,121 | 0.248 ms | |
+| ui_layer_totals | | 1.033 ms | |
+| xinput_probe | | 1.559 ms | |
+| game_exit_probe | | 0.092 ms | |
+| journal_tail | | 0.059 ms | |
+
+The gfx log holds 23 `LONG FRAME` lines (rate-limited; one is the 1,117 ms
+startup frame). The runtime counted 63 long cycles (over twice the 11.1 ms
+period) and logged 54 (`native_long_cycle_summary,count=63,logged=54`; its
+four-a-second limit withheld 9). Two of the 54 coincide with a job:
+07:08:22.791, cycle 46.2 ms (gfx 50.4 ms), is the Status.json read;
+07:05:15.827, cycle 22.7 ms (gfx 26.4 ms), has a journal re-glob 3 ms away (a
+2.6 ms job cannot make 11.6 ms of excess by itself). No other long cycle is
+within 60 ms of a re-glob beat or of a slow Status read.
+
+- ruled out: EDVR's periodic render-thread jobs as the main cause of long frames, because only 2 of 54 native long cycles coincide with one (Status.json 39.2 ms at 07:08:22.79; journal re-glob at 07:05:15.83)
+
+**Where the long cycles' time is.** The largest phase of 47 of the 54 logged
+long cycles is `post_second_submit_to_next_wait` (`next_wait_roundtrip` 4,
+`game_before_first_submit` 3). That window runs from Elite's second Submit
+returning to its next WaitGetPoses, and holds Elite's Present, which d3d11.dll
+hooks: `hookedPresent` calls the real Present, then the frame boundary (about
+sixty timed calls: hotkeys, the journal poll, the menu, the vScreen boundary,
+the config poll), then the runtime's render callback.
+
+The same runtime log's own post-submit windows (`native_post_submit_phase`,
+12 windows of 30 s, 30,737 cycles, every one a single valid Present) already
+bound EDVR's share from above. Window maxima in ms, read with
+`tools\edvr_log.py --grep`; each column is that phase's own maximum, so the
+rows of one window need not be one cycle:
+
+| window (local, end) | post-submit gap | Submit to Present, outside the hook | Present to next Wait, outside the hook | EDVR hook, after the real Present |
+|---|---|---|---|---|
+| 1 (07:03:03) | 440.2 | 44.3 | 439.8 | 2.5 |
+| 2 (07:03:33) | 49.7 | 47.3 | 10.9 | 3.8 |
+| 3 (07:04:03) | 421.5 | 420.7 | 17.7 | 3.2 |
+| 4 (07:04:33) | 140.5 | 40.3 | 140.4 | 2.6 |
+| 5 (07:05:03) | 82.6 | 6.5 | 82.2 | 2.7 |
+| 6 (07:05:33) | 19.0 | 1.4 | 18.8 | 2.7 |
+| 7 (07:06:03) | 70.2 | 1.7 | 69.8 | 2.7 |
+| 8 (07:06:33) | 12.1 | 3.6 | 8.3 | 2.8 |
+| 9 (07:07:03) | 8.1 | 0.9 | 7.8 | 2.8 |
+| 10 (07:07:33) | 70.1 | 0.6 | 69.8 | 4.4 |
+| 11 (07:08:03) | 7.6 | 0.6 | 7.4 | 2.9 |
+| 12 (07:08:33) | 41.9 | 0.6 | 8.0 | 39.4 |
+
+In every window EDVR's hook before the real Present was at most 0.19 ms, the
+render callback at most 0.12 ms and the driver's Present at most 0.86 ms. In
+windows 1 to 11 the gap's maximum is time outside the hook, after the Present
+(1, 4 to 7, 9 to 11), before it (2, 3) or both (8), and EDVR's hook stays at
+4.4 ms or less. Most hook maxima are the journal re-glob plus the ordinary
+boundary (2.5 to 2.9 ms in windows 1, 4 to 9 and 11, against runs of 2.3 to
+2.8 ms, one every 4 s); windows 2 and 3 (3.8, 3.2) sit above that and are not
+attributed; window 10's 4.4 ms fits the 4.326 ms Status read at 07:07:20.289,
+and window 12's 39.4 ms the 39.220 ms read at 07:08:22.789. So the hook is the
+largest part of the gap in one window of 12.
+
+This is a bound by window. It cannot say what the hook cost in each of the 54
+cycles, or name a tick inside it. And "outside the hook" is everything on the
+render thread that is not the Present hook: Elite's own code, and EDVR's other
+hooks in the D3D11 calls Elite makes (the draw hooks' own cost is sampled one
+frame in 16; the other hooks' is not timed).
+
+**The instrument (built, gates green, not flown).**
+
+- `native_long_cycle` cuts `post_second_submit_to_next_wait` at Elite's
+  Present, per cycle, from the Present trace the runtime already reads
+  (`edvrReadNativePresentTrace`, five marks per Present): `pre_present`
+  (second Submit return to hook entry), `present_hook` (entry to exit),
+  `post_present` (exit to next WaitGetPoses entry), and the hook in four:
+  `hook_before_real`, `hook_real_present`, `hook_after_real` (the frame
+  boundary and the rest of EDVR's work), `hook_render_callback`. The three sum
+  to the phase. `present_split=ok`, or the trace's rejection reason
+  (`provider_missing`, `partial_present`, `multiple_present`, ...) with none of
+  the numbers, follows the phase. Every existing field keeps its name.
+- No interface change. The trace is versioned and size-checked
+  (`EDVR_NATIVE_PRESENT_TRACE_VERSION_1`, 928 bytes), so halves built from
+  different commits fall back as they always did, and an absent or mismatched
+  provider reads as `present_split=provider_missing` or `provider_version`.
+  The render-boundary callback carries no timing.
+- The gfx LONG FRAME line (native, and the non-native branch used when no EDVR
+  runtime is loaded) gains
+  `EDVR in this frame: X ms in the Present hook (frame boundary Y ms), Z ms in
+  the real Present, draw hooks ~D ms (sampled this frame | held from an earlier
+  sampled frame), W ms outside the hook; slowest EDVR ticks: name=ms, ...;`.
+  `src\d3d11\frame_ticks.h` keeps one chain of clock reads across
+  `hookedPresent`, the boundary and `vScreenFrameBoundary` (about 60 named
+  marks a frame, 17 ns each here). It is cut at the monitor's frame edge, so
+  the ticks, the real Present and the rest add up to the frame with nothing
+  left over; the three slowest ticks are kept per frame, the real Present
+  excluded.
+- **Correction.** The native line printed no boundary figure, and the
+  non-native branch printed `cpuBoundaryMs`, which could only read 0.00:
+  `perfMonitorNoteCpu(kCpuBoundary)` writes it at the end of the Present hook,
+  after `perfMonitorFrame` (inside the boundary) has already written the line.
+  The 2026-09-21 forensics in `docs\engine-render-performance-2026-09-19.md`
+  ("EDVR boundary/hook costs ~0.00 ms") read that field, so that reading is
+  void.
+- Rigs: `native_perf_history_test` (the chain, the partition, the top three,
+  odd clocks, the text and its worst-case length against the log's line limit)
+  and `openxr_native_test`'s frame-cycle cases (the split by hand, every
+  rejection reason, the exact line).
+
+**Next flight.** Same scene as phase 0, five minutes steady, on this build.
+Read `native_long_cycle`: `present_split=ok` everywhere, then which of
+`pre_present`, `hook_after_real` and `post_present` is the largest. If it is
+`hook_after_real` in more than a few, the LONG FRAME lines' slowest ticks name
+what; the 5 s gate on those lines will hide some, and an un-gated slow-tick
+line is the next step if it does. If it is `pre_present` or `post_present`, the
+window is Elite's and this arc moves off EDVR's hook.
+
+## 2026-09-29: flight 090608, the split flown at a busy fleet carrier
+
+Build v0.18.0-rc.3-108-gc1408551 on the Frontier install: SteamVR OpenXR
+(`aapvr`), 4032x3896 out and 2016x1948 in per eye (Elite's HMD Image Quality
+0.5), 90 Hz, DLSS performance mode with preset K, runtime pacing,
+`frame_end_overlap` on. Logs `edvr_gfx_20260929_090608.log` and
+`edvr_openxr_20260929_090610_039_12932.log`; the busy part is about two and
+a half minutes beside Sean's fleet carrier with many ships about
+(09:08-09:10:30). Sean, reading fpsVR: clearly better than before, still
+about 10.8 ms CPU and GPU with frequent spikes over 11.1; the same scene on
+0.16.2 under SteamOS read a similar GPU time and 5.4-6.2 ms CPU.
+
+- **The split.** `present_split=ok` on all 70 logged long cycles (over twice
+  the period). EDVR's hook work, before plus after the real Present, totals
+  7.4 ms across all 70 and never reaches 2 ms in one; the real Present
+  totals 4.5 ms. The time is `pre_present` (1,631 ms, 36%) and
+  `post_present` (1,594 ms, 35%), then `first_submit_roundtrip` (773 ms,
+  17%), nearly all of it one 748 ms submit at 09:06:40 as the game first
+  rendered in VR (both DLSS features were created in it, in 84 and 70 ms).
+  18 of the 70 fall in the carrier scene: 31-92 ms each, and 159 ms at
+  09:10:29.
+- **What the split cannot clear.** Those two windows hold EDVR's draw hooks
+  as well as Elite's own code. The draw-hook figure is sampled one frame in
+  16 (`kDrawSampleEvery`), each sampled frame estimated from every 64th draw
+  scaled by 64 (`kPerfMonitorDrawTimeStride`), and none of the seven LONG
+  FRAME lines in the carrier scene fell on a sampled frame. The 1800-frame
+  windows there read 0.87-1.45 ms per sampled frame, with maxima of 12.5 ms
+  (window ending 09:08:09) and 14.6 ms (ending 09:09:13); one 0.2 ms call in
+  the stride reads as 13 ms, so the maxima neither clear the hooks nor
+  convict them. One candidate: `engine_velocity.cpp`'s `patchedVsFor`,
+  `patchedPsFor` and `guardedOverlayPsFor` patch a shader and create it
+  inside Elite's draw, on the first draw of each new shader in a family,
+  which a newly arrived ship would trigger.
+- **The steady state at the carrier.** Frame-cycle windows 7-9
+  (09:09:29-09:10:29), p50s: the wait 0.09 ms (no slack; 78.5-84.1 fps);
+  poses to second submit returned 6.6-7.1 ms; the real DXGI Present 0.056 ms
+  and EDVR's hook on it 0.057 ms (`native_post_submit_phase`); then 4.4-4.8
+  ms after the Present before Elite's next WaitGetPoses; cycle 11.6-12.4 ms.
+  The GPU (census at 09:09:39 and 09:10:09): application render p50 12.18
+  and 11.29 ms, EDVR 5.35 and 5.20, the game about 6.8 and 6.1. EDVR's part,
+  same order: upscaler 2.89 and 2.87 (two a frame); UI layer reissues 0.59
+  and 0.36 (107 and 93 a frame); hologram passes 0.39 and 0.44; UI resolve
+  0.32 and 0.33; hologram resolve and celestial 0.29 and 0.27; UI layer
+  composite 0.26 and 0.27; engine velocity 0.22 and 0.26; UI depth coverage
+  0.18 and 0.23; motion prep 0.15 and 0.16. Both halves sit at the 11.1 ms
+  budget. In window 6 (09:08:59), before the scene filled, the wait still
+  had 2.6 ms of slack at 88.8 fps, with 5.2 ms pre-submit and 2.8 ms after
+  the Present, while the application render read 11.0 ms.
+- **fpsVR, 0.16.2 against this build.** Under OpenVR, fpsVR's CPU frame time
+  is poses ready to second submit plus the compositor's submit cost; 0.16.2
+  copies it as `appCpuMs` (`src\common\frame_flag.h` at the tag). The same
+  window here is 6.1-7.1 ms p50 at the carrier (windows 5-9), against
+  5.4-6.2 on 0.16.2. fpsVR's 10.8 ms on this build matches Elite's whole
+  frame outside the wait (11.6 ms) instead, so SteamVR evidently times an
+  OpenXR application over a longer window, one that takes in the 4.4-5.3 ms
+  after the Present. Like for like this build reads 0.5-1 ms higher, about
+  EDVR's sampled draw-hook cost; SteamOS runs Elite through DXVK, so that
+  gap is not cleanly EDVR's.
+- ruled out: EDVR's Present hook as a cause of the long frames, because none
+  of the 70 long cycles in flight 090608 carries 2 ms of it (7.4 ms across
+  all 70); in the steady state it is 0.057 ms p50.
+- ruled out: GPU backpressure in Elite's Present as the carrier's
+  post-submit time, because the real Present is 0.056 ms p50 (p95 0.10)
+  there; the time comes after the Present, in Elite's code and the EDVR
+  hooks its calls reach.
+- ruled out: this build doubling Elite's CPU frame against 0.16.2, because
+  the two fpsVR figures time different windows; the like-for-like window is
+  6.1-7.1 ms against 5.4-6.2.
+
+**Next.** In order of cost:
+1. Which side limits the frame. HMD Image Quality is already 0.5 in these
+   flights, the bottom of the normal DLSS range (below it the served-floor
+   path changes the output too), so there is no lower-resolution test. The
+   log cannot separate it either: when the scene thinned at 09:08:59,
+   Elite's thread fell from 11.4 to 8.1 ms and the GPU from about 11.1-12.3
+   to 10.6-10.7 ms together. Measure it instead: the GPU's idle time between
+   one frame's last EDVR pass and the next frame's first producer run, in
+   the census. Near zero means the GPU is the limit and the thread's excess
+   is waiting on it; a gap means the thread starves the GPU by that much. A
+   free alternative: EDVR's anti-aliasing off for a minute at the carrier
+   (live), reading the time after Elite's Present; it also trims some of
+   EDVR's hook work, so it is not clean.
+2. An exact per-frame figure for EDVR's draw hooks, split into the
+   pre-submit and after-Present windows and named on long frames: clock only
+   the branches that do EDVR work, as `frame_ticks.h` does for the Present
+   hook, plus the Create* hooks and the lazy engine-velocity patch. One
+   carrier flight then says how much of Elite's 11.6 ms, and of the 31-92 ms
+   frames, is EDVR's.
+3. GPU: the output-resolution UI and hologram passes (1.9-2.0 ms) cut to
+   where the UI is, and the reissues batched (architecture review P3), with
+   no change to the image. CPU: the lean per-draw thunk (review A-1) against
+   the 0.9-1.45 ms of draw hooks.
+4. Settings: the output size. 4032x3896 per eye drives the upscaler, those
+   passes and, through performance mode's half per axis, the game's render.
+
+## 2026-09-29: flights 094126 and 094331, anti-aliasing off at the carrier
+
+Same build (v0.18.0-rc.3-108-gc1408551) and install, HMD Image Quality 0.5,
+with `fix.temporal_aa` switched live from the menu. 094126: DLSS, then TAA
+at 09:41:57 (Elite's render grew to 4032x3896), off at 09:42:31, DLSS again
+at 09:43:08. 094331: DLSS, then off at 09:44:16 (the render stayed
+2016x1948) to the end at 09:45:44; its busy stretch is the last half
+minute. Sean, reading fpsVR with AA off in a similar carrier scene: GPU 2.4
+ms, CPU 4-5 ms. The mip bias (-1, `advanced.texture_lod_bias = auto`) is
+set at launch from the launch mode, so every leg had the same one.
+
+- **With AA off the carrier has headroom on both sides.** 094331's busy
+  stretch: pre-submit (benchmark CPU) 3.2-3.5 ms p50, application render
+  5.1-6.0 ms p50 (benchmark, 09:45:26-09:45:40); its last full window
+  (09:44:51-09:45:21) read 88.4 fps with 5.6 ms of slack in the wait.
+  fpsVR's 4-5 ms CPU again matches Elite's frame outside the wait; its 2.4
+  ms GPU is below EDVR's own 5-6 ms, and what fpsVR times on the native
+  runtime is not established.
+- **The census misses part of the AA cost.** 094126's TAA leg against its
+  off leg, adjacent minutes at the same 4032x3896 render: application render
+  10.95-11.12 against 7.13-7.47 ms (benchmark), about 3.7 ms, of which the
+  census itemised 1.96 (TAA window, 09:42:27). About 1.7 ms landed inside
+  Elite's own draws, where the census counts it as the game's. Candidates:
+  the pool-family draws that record EDVR's slot and depth, and Elite's UI
+  draws that EDVR takes into its output-size UI layer.
+- **Engine motion's CPU is untimed, and the carrier is its worst case.** The
+  emit hook (FUN_144312E00) ran 1,801-2,930 calls a frame, with 431-1,152
+  records joined a frame, at the carrier in flight 090608
+  (09:08:08-09:10:08), against 127 and 105 in 094126's TAA leg; with AA off
+  it does not run. No timer covers it or the copy observers: the draw-hook
+  figure is EDVR's time in Direct3D draw calls, and these relays run inside
+  Elite's own code. At 1-1.5 us a call they would be 2-4 ms of Elite's
+  thread at the carrier.
+- So the carrier's DLSS frame is either GPU-bound (EDVR's GPU work past the
+  budget, Elite's thread waiting inside its own calls) or bound by EDVR's
+  untimed CPU work (the GPU waiting on the thread). Switching AA off removes
+  both at once, and engine motion has no switch of its own (it arms with
+  the mode, `temporal_pass.cpp`).
+- ruled out: EDVR's anti-aliasing work as the cause of the long stalls,
+  because 094331 logged 160 and 138 ms stalls (09:44:56, 09:45:40) with
+  `fix.temporal_aa` off, while EDVR's draw hooks read 0.02-0.36 ms a sampled
+  frame; the stalls are Elite's. The 441 and 191 ms at 09:44:16-20 and the
+  1.2 s at 09:42:07 are the mode switches.
+
+**Next.** One instrument build, then one DLSS flight at the carrier with
+many ships about:
+1. Engine motion's CPU per frame: the emit relay, the copy observers
+   (clear, merge, copier) and the pool-family draw recording, timed on the
+   thread that runs them and summed per frame, in a 30 s line and the LONG
+   FRAME line's EDVR share.
+2. The GPU's idle time between frames, in the census: near zero means the
+   GPU is the limit; a gap means the thread is.
+3. Census sections for the Elite draws EDVR alters: the pool-family draws
+   with EDVR's slot bound, and Elite's UI draws in the UI layer.
+Then the fix follows the figures: the join's per-call cost, the UI passes
+(review P3), or the output size.
+
+## 2026-09-29: the carrier instruments, built, not flown
+
+Sean approved the instrument build the 094331 entry asked for. Branch
+`claude/carrier-instrument` (from main c4bbe484): three always-on instruments,
+no config key, each gated by a rig in `build.bat`. Nothing here has flown.
+They answer one question at the busy carrier with DLSS on: is EDVR's GPU work
+the limit (H-GPU, Elite's thread waits inside its own calls) or is EDVR's
+untimed engine-motion CPU work the limit (H-CPU, the GPU waits for the
+thread)? The environment they will be read in: SteamVR OpenXR, Pimax, 4032x3896
+out and 2016x1948 in per eye, 90 Hz, DLSS preset K, `fix.temporal_aa` on
+(engine motion arms with it), `advanced.app_gpu_timing` on (its default; the
+gap needs it).
+
+**1. Engine motion's CPU, per frame, every call clocked.** EDVR's own work in
+fifteen relays into Elite's code and in the draw side, never the game function
+a relay forwards to. A relay is bracketed enter, pause, (game code), resume,
+leave, so the forward is out and a relay the game's code calls is its own part.
+A scope inside EDVR's own work (the shader patch inside the draw side) is
+taken from its parent, so the parts add up with nothing counted twice. Each
+thread writes its own counters (relaxed load, add, store: no lock prefix, no
+shared line); the Present hook cuts the frame, and the thread that cuts is the
+render thread. The parts: emit (FUN_144312E00's bracket and the emit
+observer), rigid emit (FUN_1442B4130), copier, merge, clear, jobs (the six job
+brackets), builder (the draw-item builder, the second direct producer, the part
+test, the LOD setter), draw side (the slow half of `engineVelocityBeforeDraw`,
+lock wait included), apply (`primaryCopy::apply`, inside the draw side), tees
+(Map, Unmap and write tees on watched resources), shader patch (the three lazy
+patches, on a cache miss only). Three lines every 30 s:
+
+```
+engine motion CPU: 30 s, 2700 frames; ... Render thread 4321: total p50 0.31 / p95 0.52 / max 1.94 ms per frame over 68.0 clocked calls per frame. Other threads: 1310.00 ms per s across 7 threads over 2647.0 clocked calls per frame. Clock floor: a timed scope records 12 ns and costs 33 ns (32 and 66 ns with a forward pause; the fastest of 4 batches of 512 null pairs, measured as this window closed), so these figures include about 0.086 ms per frame of floor and the instrument costs about 0.177 ms per frame.
+engine motion CPU, render thread, ms per frame p50/p95/max (calls per frame; longest call ms), "-" = the code never ran on this thread in the window: draw side 0.20/0.35/1.20 (52.0; 0.21), apply 0.08/0.12/0.60 (2.0; 0.50), tees 0.01/0.02/0.05 (14.0; 0.02), shader patch 0.00/0.00/0.00 (0.001; 2.10), emit -, rigid emit -, ...; shader patches this window on every thread: 3, total 4.20 ms, longest 2.10 ms.
+engine motion CPU, other threads (7), ms per s (calls per frame; longest call ms), "-" = the code never ran off the render thread in the window: draw side -, ..., emit 1200.00 (2450.0; 0.04), rigid emit 30.00 (127.0; 0.01), copier 70.00 (40.0; 0.09), ..., eval 5400.0 calls per frame, not clocked (a pass-through).
+```
+
+(Numbers are the rig's sample, not a flight.) The LONG FRAME line's EDVR share
+gains ` engine motion 0.31 ms;` at its end: this frame's own render-thread
+figure, exact, or ` engine motion none this frame;` when no hook ran on the
+render thread. It is inside "outside the hook", like the draw hooks, and the
+draw side is inside the draw-hook estimate too: do not add the two. To keep the
+line under the log's limit the draw-hook freshness wording is now "(held over)"
+(its worst case was 1144 characters; with the clause it is 1154 against a gate
+of 1160 and a real limit of 1166).
+
+What is not clocked: the two evaluator relays are pass-throughs (two loads and
+a call) cheaper than one clock read, so every call is counted and only the
+probe branches are clocked; the line says "not clocked". The quick path of
+`beforeDrawSlow` and the inline half of `engineVelocityBeforeDraw` (compares,
+tens of thousands of draws a frame) are neither clocked nor counted; the
+frame-boundary work (`engineVelocityFrameBoundary`, the views, the summary
+line) is in the tick chain's "slowest EDVR ticks". The flat profile never
+reaches the monitor tick (it has no LONG FRAME line either), so none of the
+`engine motion CPU` lines print there, and its draws go through their own
+scope, so section 3 does not count them.
+
+The instrument's own price is calibrated on the real clock as each window
+closes, the way the census states its timer floor: null scopes on the render
+thread in the CPU state the window ran in (a clock that idled at the menu is
+not the flight's), both shapes, four batches each with the fastest kept (a
+batch a preemption inflated is not the floor), what a null scope records
+(every figure includes it once per call) and what it costs.
+On the build machine (QPC 10 MHz, a reading about 16 ns) a plain scope records
+12-19 ns and costs 33-35 ns; one with a forward pause records 32-33 ns and
+costs 66 ns (the rig prints it on every build). At the carrier's 2,930 emit calls a frame that is about 0.19 ms of job-
+thread time a frame; the render thread's draw side is 50-ish calls a frame,
+under 2 us. Each window prints its own figure (the last sentence of line 1); the
+calibration itself is about 0.2 ms once a window, on the render thread.
+
+**2. The GPU's gap between frames.** The Application-render span already
+brackets a frame's producer GPU work on the game's device: its first
+timestamp at the first producer command after the pose wait, its last at the
+end of the final segment, after the door work. The result now carries those two
+raw ticks and the clock's frequency. `gpu_frame_gap.h` pairs frame N's last
+tick with frame N+1's first by consecutive sequence number. The census's clock
+rules hold: validated spans only, one frequency, no negative gap, no gap over
+1 s; results complete out of order, so each pair is made once by whichever
+frame arrives second; a frame with no valid span leaves its two pairs unmade
+(fewer pairs than frames, never bridged). No new GPU work: it reads timestamps
+that already exist. On the main census line, after "application render p50":
+`frame gap p50 0.42 / p95 1.85 ms over 2650 pairs;` (`frame gap - (no pairs);`
+when nothing paired). A line of its own follows with the max, the frame count,
+rejected pairs, and the caveat. **The gap is an upper bound on GPU idle, not
+idle.** SteamVR's compositor is another process on the same GPU and takes its
+turns in that gap; so do the runtime's transfers and the mirror window's
+Present copy. A gap near 1 ms is therefore not proof of idleness. A gap near
+zero is the strong statement: nothing waited.
+
+**3. Sections for the Elite draws EDVR alters.** EDVR's own commands were
+timed; the cost it adds inside Elite's draws was counted as the game's. Four
+classes, from reading `forwardWithVerdict`, each a real per-frame count, one
+class per draw in this priority: pool-family draws with EDVR's MRT6 slot
+target bound and its shaders substituted; terrain prepasses with EDVR's motion
+target bound and a pixel shader added (celestial motion); UI draws redirected
+into EDVR's layer (`fix.ui_quality`); draws wrapped in another fix's state
+change (RemLok, holo, scrim, particles, the panel). Ordinary per-draw census
+sections: K = 8, the existing stride and rotation (21 sections now, so each
+is timed one frame in 21), the null-pair correction, their spans in the timer
+floor and the spans count. Each thunk wraps only its real draw call, so the
+weapon and screen motion reissues after it, and every other issue through the
+same lambda, are never timed as altered. A line after the main one:
+
+```
+EDVR GPU census, Elite's own draws that EDVR alters (each is the game's draw timed whole, so a figure includes the game's own work in it, not only what EDVR adds, and none of it is in EDVR ~X above): pool-family draws (EDVR's slot target and shaders) 2.000 (10.00/frame), terrain prepasses (EDVR's motion target and shader) -, UI draws (redirected to EDVR's layer) 0.020 (0.20/frame), other fix-wrapped draws -; together 2.020 ms/frame; "-" means no such draw ran this window.
+```
+
+These are the game's draws timed whole: the figure includes the game's own work
+in them. It is not EDVR's cost and is never in "EDVR ~X". The AA cost inside
+those draws is what shows when the same scene is flown with AA off and the
+figure drops.
+
+**Flight procedure.** Install the build on Frontier and check the log names it
+(`python tools\edvr_log.py --target frontier --expect-build HEAD --version`,
+exit 0). Same settings as flights 094126 and 094331 (HMD Image Quality 0.5,
+DLSS on). Fly to the busy fleet carrier with many ships about and stay steady
+for at least two minutes: four full 30 s windows, of which the first carries
+the warm-up (the first shader patches, the calibration). Then, in the same
+scene, switch `fix.temporal_aa` off from the menu for a minute: with AA off
+every engine-motion part must read "-" (the relays are closed; a job bracket or
+the evaluator can still run for another consumer of the eval gate, the static
+prop gate or the LOD governor), and the gap and the altered draws give the
+baseline. Read with
+`python tools\edvr_log.py --target frontier --grep "engine motion CPU|EDVR GPU census|LONG FRAME"`.
+
+**Reading H-GPU against H-CPU.** The thresholds are rules of thumb from the
+numbers above (a 11.1 ms period, about 1 ms the compositor and transfers can
+hold), not measurements; the flight sets them.
+
+| Line | H-GPU | H-CPU |
+|---|---|---|
+| census `frame gap` | p50 near 0 (under about 0.3 ms), application render p50 near the 11.1 ms period: the GPU never waited | p50 above the roughly 1 ms the compositor and transfers can hold, p95 several ms, application render well under the period |
+| `engine motion CPU`, render thread | total p50 under about 0.5 ms | total p50 1 ms or more; the parts say where (draw side, apply, tees) |
+| `engine motion CPU`, other threads | ms per s small against the job threads' capacity | hundreds of ms per s in emit, rigid and copier, and the render thread's pre-submit wait absorbing them |
+| LONG FRAME `engine motion X ms` | small on the long frames | large on the long frames |
+| altered draws | the AA leg's figure (the earlier estimate: 1.7 ms) is large and disappears with AA off | small |
+
+A render-thread draw side or apply with a small p50 and a large p95 or max is
+a stall inside the slow half (the engine mutex or primaryCopy's mutex behind a
+job thread, or the driver's queue), not steady work. If the gap is near zero,
+the render thread's engine-motion total is small and the altered draws are
+small, the remainder is Elite's own work at the doubled render size, and the
+output size is the lever. If the gap is large and engine motion is small, the
+wait is Elite's (a pose or job wait) and EDVR is not the limit.
+
+**What appears in the log if the code never ran.** Each figure has its own
+sign. The CPU parts print "-" and the summary reads "over 0.0 clocked calls per
+frame"; the LONG FRAME clause reads "none this frame". The gap prints "frame
+gap - (no pairs)" and the detail line says why. An altered class prints "-".
+No `engine motion CPU` lines at all means the recorder never ran (the Present
+hook's monitor tick did not), and a LONG FRAME line with no engine-motion
+clause is the priming frame or a build without this instrument.
+
+**Rigs.** `engine_motion_cpu_test` (new): exclusive nesting and the forward
+pause, thread attribution, no lost update under four writers and a cutter
+(400,000 calls exact), percentiles in a hostile order, "-" against 0.00, the
+three lines at their worst (693, 973 and 659 of 1150 allowed), the priming
+frame, the 30 s and full-window closes, per-call maxima per window, the clock
+floor exact on a clock that steps (and unmoved by a simulated preemption) and
+measured on the real one; mutation-checked (eleven mutants, all caught).
+`native_perf_history_test`: the LONG FRAME clause and its worst case.
+`gpu_census_test`: the gap saturated, starved, compositor-sized, with a missing
+and a late pair, a duplicate, another clock, an overlap, a stall, and every
+census line at its worst (914 of 1150); the class table and its priorities, the
+altered scope's counting and timing, the rotation over 21 sections, the line.
+`gpu_span_state_test`: the tick fields for three and four segments and none for
+a bad or legacy span.
+
+**Found in passing, not changed.** `beforeDrawSlow` reads the clock at entry on
+every visit, including the quick path that returns a few compares later; the
+reading is only used by the slow path. At ten thousand visits a frame that is
+about 0.16 ms of the render thread, and moving the line below the quick-path
+return changes no figure. `primaryBuildObserved` does a relaxed `fetch_add` on a
+shared counter per call from job threads; the new "rigid emit" figure will show
+what that costs.
+
+## 2026-09-29: flight 112704, the carrier instruments flown: GPU-bound
+
+Build v0.18.0-rc.3-158-gcd37e487 on the Frontier install (build matched),
+SteamVR OpenXR (`aapvr`), 4032x3896 out and 2016x1948 in per eye, HMD Image
+Quality 0.5, DLSS performance, preset K, launched in DLSS. Logs
+`edvr_gfx_20260929_112704.log` and
+`edvr_openxr_20260929_112705_668_46812.log`. At the fleet carrier with many
+ships from about 11:29 (emit 2,310-2,968 calls a frame, as busy as 090608),
+then anti-aliasing off at 11:31:36 in the same place.
+
+- **The GPU is the limit.** Census windows ending 11:30:04-11:31:34, DLSS:
+  frame gap p50 0.06-0.10 ms, p95 1.38-1.61 ms (2,297 of 2,297 frames paired
+  in the busiest); after AA off, 4.51-4.63 ms p50. With DLSS the GPU never
+  waits for the next frame's work; without it, it waits about 4.5 ms.
+  Frame-cycle windows w6-w9: cycle 12.67-13.15 ms, 75.7-77.8 fps, the wait
+  0.09 ms; after AA off (w10-w11) 11.12-11.23 ms with 4.4-4.5 ms of slack,
+  87-89 fps.
+- **Engine motion's CPU is small on Elite's thread.** Render thread p50
+  0.35-0.40 ms a frame (p95 1.10-1.22, max 1.65-2.85) over about 1,600
+  clocked calls; the largest parts are the clear observer (0.21 p50, 0.57
+  p95) and merge (0.49 p95). Other threads: 241-273 ms per second across 7
+  threads, about 3.5 ms of job-thread time a frame: clear 144.6 ms/s (702
+  calls a frame, about 2.7 us a call), builder 56.8 (13,425 calls a frame),
+  merge 45.8, emit 23.2. The clock itself costs about 1.17 ms a frame, mostly
+  on those job threads.
+- **Where the GPU frame goes, busiest window (12.726 ms p50).** EDVR ~5.732:
+  upscaler 3.078; UI resolve 0.332, UI layer composite 0.277, UI layer
+  reissues 0.428 (114 a frame), UI depth coverage 0.212; hologram passes
+  0.691 (5.5 a frame), hologram resolve and celestial 0.218; engine velocity
+  0.299, motion prep 0.157. Game ~6.99. Against the AA-off windows
+  (application render 6.46-6.56 ms) the AA path costs 6.0-6.2 ms, so about
+  0.3-0.5 ms of it lies inside Elite's own draws, against the TAA leg's 1.7
+  at twice the render size. Elite's draws that EDVR alters, timed whole:
+  pool-family 0.183 (2,314 a frame), UI draws redirected to EDVR's layer
+  0.600 (112 a frame), other fix-wrapped draws 1.021 (6 a frame).
+- The long frames in the busy windows (22-47 ms) carry engine motion
+  0.33-0.78 ms and draw hooks about 1 ms; the rest is Elite's, as before.
+- ruled out: EDVR's engine-motion CPU as the carrier's limit, because it
+  costs Elite's render thread 0.35-0.40 ms p50 a frame while the GPU never
+  waits between frames (gap p50 0.06-0.10 ms); the thread's extra time with
+  DLSS is mostly waiting on the GPU.
+
+**Next.** The GPU is the lever: EDVR needs about 1.6 ms off its ~6 ms at the
+carrier for the p50 to reach 90 Hz. In rough order of gain:
+1. The upscaler, 3.08 ms: its cost follows the output pixels, a setting;
+   foveated DLSS is built and paused by Sean.
+2. The UI and hologram passes, 2.16 ms: restrict the resolve, composite and
+   hologram passes to where the UI and holograms are (review P3), and look
+   at drawing the redirected UI and the reissues at the render size.
+3. The six "other fix-wrapped draws", 1.02 ms whole: name them and find how
+   much of it is EDVR's.
+Separately: sample the engine-motion clock (every call now, ~1.17 ms of CPU a
+frame) now that it has answered; the clear observer (2.7 us a call on job
+threads) is the CPU item for scenes that are CPU-bound.
+
+## 2026-09-29: the engine-motion clock sampled, the fix-wrapped draws named (built, not flown)
+
+Branch `claude/engine-clock-sampling`, on main 446d7e7a; both changes are the
+two Sean approved after flight 112704.
+
+**The clock costs about 0.12 ms a frame, not 1.17.** The flown instrument
+clocked every hook call on every thread: 17,499 a frame on the job threads
+(13,425 the builder) and about 1,600 on the render thread. Now
+(`engine_motion_cpu.h`):
+- The render thread (whoever calls Present) is clocked on every call of every
+  frame, so its figures and the LONG FRAME "engine motion" clause are exact and
+  unchanged.
+- Every other thread is clocked only on sampled frames, one in 32 at a random
+  place in each block of 32 (a fixed stride would alias with anything Elite
+  does every N frames). On the other 31 a hook is a load of one gate word, a
+  thread-id compare (from the TEB, no call) and a branch: no clock read, no
+  slot, no count. A scope decides once, at entry. The evaluator relays (counted,
+  never clocked) count on sampled frames only.
+- The other threads' figures are per SAMPLED frame (thread-ms mean, p50, p95,
+  max; calls per sampled frame); the window totals keep a scope that straddled a
+  cut. If the thread-id read ever disagreed with `GetCurrentThreadId` the
+  scheme drops to clocking everything and the summary says "Sampling is OFF".
+- Four 30 s lines: the scheme and totals; the clock and what the instrument
+  costs at this window's rates weighted by the sampled fraction; the render
+  thread's parts; the other threads' parts. The job bracket in
+  `kinematic_eval_hook.cpp` takes its own two readings and shares them
+  (`pauseAt`/`resumeAt`), so the L1 job statistics do not depend on sampling.
+- What a null scope RECORDS is now measured with a random wait between the
+  scopes, median batch: back to back, three 33 ns scopes make one 100 ns QPC
+  tick and one rig run read 0.2 ns where the next read 12-16, the same code.
+
+Cost, rig on this machine: a clocked scope costs 33.4 ns and records 15-16 (66
+and 32 with a forward pause); a skipped scope 0.6 ns, a counted call 0.4. At
+the 11:30:34 window's rates (render thread 1,045 plain and 557 paused calls a
+frame; job threads 702 plain and 16,797 paused; 14,850 evaluator counts) the
+model gives 1.21 ms for the flown scheme (its own line said 1.172) and 0.12 for
+one in 32 (render thread 0.072, the price of keeping it exact; others 0.05).
+One in 16, the first suggestion, gives 0.155, over the 0.15 target; one in 32
+holds 0.140 even with a skipped scope priced at 1.5 ns, 2.6 times the measured.
+The floor is a hot loop: the flight's own clock line, computed the same way
+from that window's rates, is the check.
+
+**The census names the fix-wrapped draws.** "Other fix-wrapped draws" is now
+one section per fix, 19 (the 18 verdicts that reach the altered-draw site, and
+an "unnamed" row that shows if a wrapped draw's fix has no name). They share one
+turn (the rotation stays 21 long, so nothing else is sampled less), one K of 8,
+one stride from all their calls together and one empty timer pair a turn. The
+classes' line is unchanged, its "other fix-wrapped draws" now their sum (1.021
+compares directly); a line after it gives each fix's ms and calls a frame, "-"
+where none ran (937 characters worst case). `vscreen.cpp` maps `DrawVerdict` to
+fix in a switch with C4062 an error: a verdict added without a name does not
+compile. Nothing renders differently.
+
+**Which code wraps the six: not established.** No log counts draws by verdict.
+What flight 112704 says (windows 11:27:34-11:32:34): 2.00-2.83 a frame in menus,
+4.96, 7.76, 8.03 as ships gathered, then exactly 6.00 for three windows (0.92-1.02
+ms with DLSS) and still 6.00 with AA off at 2.416 ms (0.40 ms a draw against
+0.17). The cost per draw rose 0.07 to 0.17 ms as the count fell: large
+translucent draws, fill-bound. The UI layer's line in the same window reads
+"left in the game's frame: hologram 4.00 a frame (another fix swallows or
+re-issues it)": four radar-family draws a frame (icon core, stalks, contact
+markers) arrive under a verdict that does not forward, so they are in this class.
+- ruled out: the six as the holograms redirected into EDVR's layer, because a
+  redirected draw is class UiLayer (tested before Verdict in
+  `classifyAlteredDraw`) and that is the 0.600 ms row; and as the hologram depth
+  reissues (5.5 a frame, 0.691 ms), because those are EDVR's own draws with their
+  own section, not the game's.
+- Candidates, each with the row that shows it: the sun glare train (`sun glare
+  steady`; the log has VIVID and the world variant created at 11:27:29; matcher
+  kind N, 6 indices, 2+ instances, 2048x1024 BC7 in PS slots 0 and 1); the radar's
+  contact markers caught by that same shape (instanced quads, one instance a
+  contact: also `sun glare steady`, the four hologram draws inside the six);
+  particles; night vision; the HUD and holo verdicts. `unnamed fix` above zero is
+  a verdict with no name. If `sun glare steady` reads 6.00, one live flip of
+  `fix.sun_glare` to stock in the same place separates the two: the "hologram ...
+  left" line vanishing with the redirected holograms up by 4.00 says the glare
+  matcher is catching the radar, and the row's cost stock against vivid is what
+  EDVR's substitution adds.
+
+Tests: `engine_motion_cpu_test` 144 checks (sampled frames exact; unsampled
+frames read no clock, take no slot, count nothing; gate, schedule, fold over
+sampled frames, a straddling scope, the fallback, the cost model reproducing
+1.17, the four lines' worst case 991 characters), 44 mutants, all caught;
+`gpu_census_test` 134 checks, 21 mutants, all caught.
+
+What the next flight's log must show: the summary reads "Other threads (N) are
+clocked only on the M sampled frames (one in 32" with M about 3% of the frames
+and the clock line "the instrument costs about 0.12 ms"; if sampling had not
+run it would say every frame, or "Sampling is OFF". The census line "EDVR GPU
+census, the other fix-wrapped draws above by the fix that wraps each" sums to the
+classes' "other fix-wrapped draws"; every fix "-" beside 6.00 there means the
+split is dead.
+
+## 2026-09-29: the UI and hologram passes, built, not flown
+
+Branch `claude/ui-holo-passes` from 446d7e7a. Asked for: the UI and hologram
+GPU passes cut to the work they have, the image unchanged (review P3, B-3,
+D-1, D-2, D-4). Nothing merged, installed or flown. Commits 396d8dcd (the rig
+and its goldens, recorded from the unmodified shader first), f282c056 (the
+change), 582193da (the composite bench, this entry) and 8ced6ab5 (the totals
+line). Every number below is an RTX 5090 at the eye's real size, 2016x1948
+in and 4032x3896 out, from `tools\ui_holo_pass_test` (`--bench`,
+`--bench-composite`, `--adapter nvidia`): the median of 25 interleaved rounds
+of 8 dispatches between GPU timestamps, inputs synthetic (a mixed-content
+frame, a HUD's panels over 15% of the eye).
+
+**Built: the UI resolve does not fetch what it was not given.** A load from a
+null view returns zero and is slow on this GPU. Reference (the shader as it
+was) against production, ms an eye:
+
+| state of the inputs | reference | production |
+|---|---|---|
+| everything bound, idle / HUD / menu | 0.145 / 0.143 / 0.165 | 0.144 / 0.142 / 0.170 |
+| source-edit mask unbound, idle / HUD | 0.179 / 0.175 | 0.135 / 0.131 |
+| coverage mask unbound, idle | 0.179 | 0.134 |
+| history unbound, idle | 0.155 | 0.125 |
+| all three unbound (no UI this frame) | 0.245 | 0.109 |
+
+Flight 112704's census read the resolve at 0.55-0.58 ms a frame in its first
+minute (windows ending 11:28:04 and 11:28:34) and 0.33-0.41 after, 0.33-0.37
+through the busiest; the reference's all-unbound and edit-mask-unbound rows
+doubled are 0.49 and 0.36. That is inference, not a measurement: the log does
+not say which inputs were bound. What supports it: the UI content tracker
+read `compared=0` until 11:28:51, and `g_edits[eye].marked` is set only by a
+surface composite whose source changed, so a still HUD leaves the edit mask
+null on most frames. Expected: about 0.09 ms a frame in the busy windows
+(0.357 to about 0.27), up to 0.3 in the first minute's state, nothing when
+every input is bound (parity, 0.144 against 0.145). To read it after a flight:
+`UI resolve totals: N dispatches this session; without the coverage mask a,
+without the source-edit mask b, without history c` (every 20 s while it
+moves) says how often each input was null, which settles the inference; the
+census's UI resolve in the same scene says what it bought.
+
+How: b1.z carries the unbound inputs (bits 1 coverage, 2 source edits, 4
+history; zero is all bound, what a caller with no b1 sends), derived in
+`applyUiResolve` from the views it binds. The shader body is compiled twice,
+once with the bits known zero (the checks fold away) and once asking. Same
+arithmetic, same history layout. Proof, gated in build.bat as
+`:rig_ui_holo_pass_test`: 269 fixtures byte for byte against a frozen copy of
+the shader and against goldens recorded before the change (WARP; the RTX
+passes the pairs too): the corner, tile edges, the corona's edge, none, a
+full-screen menu, jitter to 1.7 and wild, ratios 0.5 to 3, both eyes; each
+input unbound alone equals the reference over zeros (227 runs); bits of zero
+over unbound inputs still equal the reference (98); claiming a bound input
+unbound FAILS 203 of 219 fixtures with content, and each bit fails on the
+named fixture built to need it. Mutation: the marks' halo cut one texel short
+(the resolve's own margin around UI) fails 359 checks, at the corner, the tile
+edges and the goldens. Trace: a build without this has neither the
+totals line nor `UI resolve: not bound on some frames`, a run with every input
+bound shows totals with zeros, and the bytecode header is checked against the
+source, so a stale header fails the rig.
+
+- ruled out: an 8x8 tile early-out for the UI resolve, because there is no
+  corona radius to key a margin on. The corona hold applies to any faint flat
+  pixel anywhere (`corona_smear_level` 64 by default), so every tile needs
+  its raw neighbourhood, and the pass is bandwidth-bound anyway: with the hold
+  off it takes 0.112 ms, 188 MB at 1.7 TB/s, against 0.076 ms for a bare
+  compute copy of the frame.
+- ruled out: a groupshared window for the resolve's taps, because it is
+  slower with the inputs bound. Built and exact (269 fixtures, both adapters);
+  idle 0.141 to 0.149, HUD 0.139 to 0.150, menu 0.156 to 0.205 (0.129, 0.129,
+  0.178 with the fallback taken out): the taps are L1 hits and the pass sits
+  at its bandwidth floor. It only won where inputs were null, which the
+  b1 bits do without it.
+- ruled out: an R8 history for the resolve, because it buys 2-3% (0.140
+  against 0.144 idle, 0.139 against 0.142 HUD; about 0.007 ms a frame) and
+  the pair is shared with the own path's RGBA colour evidence.
+- ruled out: bounding the layer composite to the layer's tiles, because it
+  costs 0.119 ms with an EMPTY layer, 0.120 with a HUD's panels and 0.130
+  covered, against 0.076 for a bare copy of the frame: a perfect skip of
+  empty tiles saves 0.04 ms an eye at most (about 0.07-0.09 a frame), and
+  nothing exact says which tiles are empty (every redirected draw uses the
+  full-eye viewport; the draws' bounds live in the game's own vertex data).
+  The flight agrees: the layer's own composite price is 0.118-0.120 ms an
+  eye-frame in every window from 4 redirected draws a frame to 122. What a
+  skip would rely on holds: over an empty layer the composite returns the
+  frame byte for byte.
+
+Not changed, and why:
+- **Hologram passes and their scratch (D-4).** The scratch is cleared lazily,
+  once an eye-frame at the first listed draw (`holoScratchPrepare`); the
+  near-light pass and the resolve already discard on an empty element depth
+  and read the game's target and display only under flags. What costs (0.126
+  ms a call, 5.5 a frame) is each listed draw's two replays of the game's own
+  geometry, and a scissor to bounds needs bounds nothing on the CPU has.
+- **One scene-depth copy (D-2).** `ui_depth_layer.h:89` copies at the first UI
+  draw of an eye-frame; the layer's seeds copy the depth and stencil as they
+  stand at each seed, and the stencil is rewritten between them by the
+  stencil-only writers the seed arc counts (docs/dlss-performance-review-
+  2026-09-28.md, ruled out: keeping stale depth). Sharing changes pixels.
+- **The reissues (114 a frame, 0.428 ms).** About 4 us each: a small draw and
+  a render-target switch. There is no bound to take; fewer needs merging draws.
+- **"Other fix-wrapped draws" (1.02 ms, 6 a frame)** are Elite's own draws
+  under another fix's state (`AlteredVerdict`, timed as the game's draw and
+  only it), not EDVR's hologram replays: those are the "hologram passes" bucket.
+
+**Largest left, outside this brief.** The layer's HDR HUD depth-stencil seed,
+in no census section: in flight 112704's layer lines it is 0.52-0.53 ms an
+eye-frame median (p95 1.2-1.4) in every window from 11:29:34 to 11:31:34,
+1.04 ms a frame, with 80-122 redirected draws a frame, three seeds and one
+stale per eye-frame (13,782-14,520 seeds, 4,594-4,840 stale a window); at 54
+draws a frame (11:29:04) it is 0.158, and 0.156 in the quiet station flight
+of 09-28. The exact routes to fewer seeds are ruled out in
+docs/dlss-performance-review-2026-09-28.md. Second, `fix.ui_quality` 1.25
+itself: the layer holds 1.62x the pixels of 1.0, and the seed, the
+redirected draws (0.60 ms) and the composite scale with them, roughly 0.7-1.0
+ms a frame by pixel count, unmeasured. That changes the image; Sean's call.
+
+## 2026-09-29: flight 132352, the carrier again, the six draws named
+
+Build a43c94ba on the Frontier install (build matched). Launched with AA off
+(the previous flight's live switch had written it to edvr.ini), so the mip
+bias was 0 all session; DLSS from 13:25:12; at the carrier from about 13:26.
+Sun glare vivid -> stock at 13:27:28 and back at 13:28:13; UI quality
+125 -> 100 at 13:28:29, then a trip through the main menu. F10 at 13:26:45
+(the draw census and 117 eye dumps). Sean: the stock glare made frame times
+worse; CPU frame time good; GPU still hitches; 90 not held.
+
+- **The six wrapped draws, named.** Vivid: `sun glare steady` 0.30-0.46 ms
+  (about 4 a frame) and `scanner-body resolve` 0.04-0.07 ms (2 a frame),
+  both timed whole. Nothing large to cut there.
+- **Stock glare costs more than vivid.** With stock (census window ending
+  13:27:53): the redirected UI draws 2.675 ms (116 a frame) against
+  0.52-0.84 ms with vivid, the census's "game" 8.5 against about 5.9, and
+  the GPU p50 13.1-14.0 ms against about 11.3 before and 10.9-11.0 after.
+  Hypothesis, under test: the stock glare's full-screen overlays are taken
+  into the UI layer and drawn at output size times UI quality.
+- **UI quality 100 against 125: not settled.** The census's timed UI items
+  did not move (resolve 0.26-0.31, composite 0.26-0.30), the comparison
+  crossed a reload, and the part that should shrink, the HUD depth seed
+  (the layer's depth-stencil target is 5040x4870 at 125 here), is not in the
+  census yet.
+- **The end of the flight sat at the budget.** Vivid and UI 100, back at the
+  carrier: runtime window 13:29:09-13:29:39 held 89.9 fps with no late frame
+  while the scene refilled (benchmark GPU 8.8 -> 10.6 ms); the census window
+  ending 13:29:53 read 10.82 ms with the frame gap back to 0.19 ms p50.
+  EDVR 4.75-4.88 ms of it (upscaler 2.93-3.02).
+- **The hitches.** Long frames at the carrier ran 24-41 ms with EDVR's hook
+  0.04-0.28 ms and engine motion at most 0.57 ms in each: Elite's. The
+  233.6 ms at 13:26:45 was the F10 capture and eye dump. Otherwise the GPU
+  median sits at the budget, so ordinary variance crosses 11.1 ms.
+- **UI resolve totals:** 20,494 dispatches, the source-edit mask absent in
+  20,486 and the coverage mask in 15,192, so the null-fetch cut applies
+  almost always. Engine motion on the render thread: 0.12-0.15 ms p50.
+- ruled out: the six "other fix-wrapped draws" as a large EDVR cost, because
+  they are the `sun glare steady` row (0.30-0.46 ms) and the scanner-body
+  resolve (0.04-0.07 ms). corrected (the seed-census entry): that glare row
+  was the landing-pad rings, which the glare fix claims by shape, not a sun.
+- Sean's eye dump shows the landing-pad display, which Elite draws in the
+  radar's place while docking, left out of the UI layer (the radar itself is
+  handled correctly); under analysis with the stock-glare question and a
+  census section for the depth seed.
+
+## 2026-09-29: the HDR HUD depth-stencil seed in the census (built, not flown)
+
+Branch `claude/ui-seed-census` from d1eac52b. Asked for: the layer's HDR HUD
+depth-stencil seed as a census section of its own, sampled like the others, so
+the next flight measures UI quality 100 against 125 in one place. Log only:
+the seed, the image and every setting are unchanged. Commit 0a407415 (the
+section, its rig, the call site) and this entry. Nothing merged, installed or
+flown.
+
+**What the log will show.** A ninth in-frame item, last, `HDR HUD depth-stencil
+seed X (n/frame)`, in the in-frame total and in `EDVR ~`; and, only when a seed
+ran, the line after the main one (figures here are the rig's, not a flight's):
+
+    EDVR GPU census, the HDR HUD depth-stencil seed above (the copy of the
+    game's depth-stencil, then the passes that write it into the HUD layer's
+    own): 3.50 seeds a frame, 0.200 ms a seed (96 timed); target 5040x4870
+    D32_FLOAT_S8X24_UINT (196.4 MB), seeded from the game's 3024x2922.
+
+- Counted for every seed, timed on the section's turn (one frame in 22: up to
+  8 seeds and one empty pair), so the cost is a counter a seed and, on that
+  turn, at most nine timestamp pairs. `ms a seed` is the corrected mean, and
+  `seeds a frame` is what to multiply it by.
+- **UI 100 against 125:** the target is on the line (4032x3896, 125.7 MB at
+  100; 5040x4870, 196.4 MB at 125). A window the quality was changed inside
+  says `the target changed inside this window, so the figure mixes them` and
+  names both, so read two clean windows; do not read the straddled one.
+- **What shows if it never runs.** No such item at all: a build without this.
+  `HDR HUD depth-stencil seed -` and no line: no seed ran (the layer is off,
+  or no HUD draw tested the game's depth). `-` while the layer's own line shows
+  `HDR HUD depth-stencil seed .../... (N)` with N above zero: the scope is not
+  wired (the rig's scan of `ui_layer.cpp` fails the build on that).
+  `the seeds reported no target`: the scope ran without its target.
+- **Across builds.** From this build on `EDVR ~` carries the seed and `game ~`
+  no longer does, by the same amount: 0.4-1.0 ms a frame at the carrier (the
+  layer's per-eye-frame medians in flight 132352, 0.19 vivid to 0.50 stock at
+  125, times two eyes). Take it out of a new census before comparing with an
+  old one. Those medians are per eye-frame (1.75-3.0 seeds each here) and the
+  scenes differ (0.39 at UI 100), so they settle nothing about 100 against 125.
+
+Proof (`tools\gpu_census_test`, 134 checks to 180): the section, its item and
+its place; the line, the total, the line's position, its three target states;
+the never-ran control and the window after a window with seeds; the scope on a
+null context (HDR counted, noted and timed on its turn, the 8-bit layer's seed
+counted nowhere, another section's turn, the K cap) and on WARP with real
+timers; worst-case line lengths (main line 967 characters, seed line 539,
+under the 1150 the log keeps). A scan of `ui_layer.cpp` holds the call site
+(one scope, before the copy, the HDR stage, the layer's own size and format)
+with seven mutants of it. 27 mutants of the production sources, run on a
+scratch copy, are all caught, each by the check written for it (one at compile
+time: the section's place is asserted); the unmutated copy passes first.
+
+Not changed: the 8-bit layer's own seed is not in the census (its route read
+`-` in all 12 windows of 132352, so nothing is lost; it would be a section of
+its own). The layer's route timers and the `HDR seed subprice` diagnostics are
+untouched.
+
+## 2026-09-29: flight 162819, the landing-pad rule reverted
+
+Build 9122f31e on the Frontier install (build matched): the landing-pad
+shared-pair rule, merged with its stencil guard and a pad window of 400.
+Sean: the landing pad was still not taken into the layer, and the sun glare
+was no longer pinned -- it moved with the head again in vivid and in
+realistic.
+
+- The rule's first pad and radar draws were classed right: `shared pair:`
+  pad 2908 and radar 6658 per 30 s, world 1188-4784, stencil refusals 0;
+  its first pad draw had a console draw 140 back at stencil 4, its first
+  radar draw a radar family 2 back.
+- The glare train was not (found on review the same day). The glare fix
+  claimed exactly the WORLD class: "sun glare steady" 0.23, 0.61 and 1.94 a
+  frame in the windows where world read 1188, 1610 and 4784, and nothing
+  from 16:30:50, when world read 0 and radar 4574-6658 per 30 s. Sean's
+  glare test fell there (vivid -> stock -> vivid at 16:32:01-05). With the
+  radar up the glare train was classed RADAR and went unclaimed; the
+  stencil guard could not catch it (stencil 4 is state inherited from the
+  HUD's draws). Why the layer did not take the pad was not found.
+- Reverted in bad1da80 (Sean: "it's up so rarely") and installed on
+  Frontier. Flight 164011 on bad1da80 (build matched; no `shared pair:`
+  lines, glare vivid, world variant created): the glare pinned again (Sean:
+  "That fixed the sun glare").
+- ruled out: the shared-pair rule as wired in 9122f31e, because flight
+  162819 unpinned the sun glare in vivid and realistic (its RADAR class
+  took the glare train whenever the radar was up) and did not take the pad.
+- For any later attempt: a census with the sun in view and the radar up,
+  and a rig that drives the real draw path (the glare verdict and the
+  layer's decision over a recorded frame), not a scan of the wiring.

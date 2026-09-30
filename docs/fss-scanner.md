@@ -2,11 +2,79 @@
 
 ## Status
 
-*Written 2026-09-15 from the entries dated 2026-08-24 through
-2026-08-27; the 2026-09-16 items below are from a log read, not a
-journal entry. Restates the journal below; update it whenever this doc
-changes.*
+*Written 2026-09-15 from the entries of 2026-08-24 to 2026-08-27; the
+2026-09-16 items are from a log read, not a journal entry. Restates the
+journal below; update it whenever this doc changes. The status as it stood
+before 2026-09-29 is kept in "Status detail".*
 
+- **Retired 2026-09-29:** the theater (`experimental.fss_theater`, 6ecbd241;
+  the latch's tick is now `fss_mode_latch`, 73b31d3f; latch, `fss_res`,
+  `fss_eye_sync` and the rest stay) and the black-square-hunt instruments
+  (`fix.fss_scan`, `advanced.fss_scan_level`, `experimental.fss_ring_feed`,
+  `advanced.fss_composite_probe`; c61c43af, code at `c61c43af^`;
+  `fss_eye_sync` superseded all four). Full lists in "Status detail".
+- **State:** SOLVED and shipped, field-verified 2026-08-27. Findings 1-2
+  (zoomed body mono, half eye resolution) are addressed by the opt-in
+  `fix.fss_res`. The "black squares" hunt ran ~48 rounds to round 33's
+  finding: for ~10 frames at each zoom's arrival, the primary (left) eye's
+  submitted image carries not-yet-resolved tiles the right does not.
+  Shipped and on by default: `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync
+  = on`. Bug is ring-only.
+- **Fixed 2026-09-16 (Quest 3 / VirtualDesktopXR, native path, DLSS on),
+  all flown;** receipts in "Status detail" and the journal entries named there:
+  - Body double ghost while zooming with `fix.fss_eye_sync = on` (fill's
+    donor was the previous frame's right eye): same-frame donor, 10705da /
+    main e08e899, flight 3 "looks good".
+  - FSS UI shimmer under DLSS, in steps: interface on the head's path
+    (3799899 / 36a9fa1, 18:20); scene-draw floor 8 (79b1879 / cc10e79,
+    18:40); tracker learn (b43e3ce, 19:00, idle, WRONG); graph under the
+    alpha floor (653671d, 19:40, CONFIRMED); chrome depth down to one alpha
+    step (3277ba6, on main, 20:26). Sean: "while head still it was crisp".
+- **Open:**
+  - Re-verify the healed pair with the OpenXR Toolkit ON (proven Toolkit-off).
+  - `fix.fss_res` stays opt-in; a default-on ship is a release-train call.
+  - The flash detector withholds frames at every fresh FSS zoom (own arc).
+  - The census still misses `GenerateMips`, `ClearUnorderedAccessView*` and
+    command-list contents.
+  - Sky ~+0.4 px/frame more than the camera rows predict under a head turn
+    (dump 202857, not 194158): unexplained, small. "The screen follows the
+    head" is withdrawn (194158's label shortfall not reproduced).
+- **Ruled out:** eleven items with reasons in "Status detail"; the
+  refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
+  the journal chapters of those names, the ghost ones in "2026-09-16: the
+  Quest 3 ghost under the native path".
+- **Next flight:** none owed; each 2026-09-16 flight did what it said.
+  Known, not fixed ("Status detail"): the ~220 m remap under head sway;
+  the "scanner is up" bit and one-step floor firing on the loading
+  screen's panel; the sky's ~+0.4 px/frame. Toolkit-ON check stands.
+- **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
+  confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
+  under OpenComposite and native SteamVR (also via Steam Link), two
+  headsets, eye 4340x4284, 16x16-tile (272x268) grid; the body layer
+  defaults to half that and `fix.fss_res` doubles it.
+- **Detail:** "Finding 1", "Finding 2", "The fix: `fix.fss_res`" (mono,
+  half-res). Hunt: "Round four" to "Rounds forty-five through forty-eight";
+  decisive "Round thirty-three: the arrival window, measured"; shipped
+  state "The ring, and the shipping state"; "Method notes" is process
+  lessons, read first. Companion: frontier-fss-bug-report.md.
+
+## Status detail (moved out of Status 2026-09-29)
+
+*Verbatim from the Status block as it stood before 2026-09-29; the
+Status block above summarises it.*
+
+- **State: the theater retired 2026-09-29 (code removed, 6ecbd241).**
+  `experimental.fss_theater`, fss_theater.cpp and the export `edvrFssTheater`
+  are gone: the theater could only run from a door call the deleted openvr half
+  made. The FSS mode latch, `fss_panel_rect`, `fss_eye_sync`, `fss_res`,
+  `fss_panel`, `fss_dump` and `fss_reveal` stay; the latch's frame tick, once
+  `fss_theater`, is `fss_mode_latch` (73b31d3f).
+- **State: the black-square-hunt instruments retired 2026-09-29 (code removed,
+  c61c43af).** `fix.fss_scan`, `advanced.fss_scan_level`,
+  `experimental.fss_ring_feed` and `advanced.fss_composite_probe` are gone with
+  fss_scan, fss_probe and fss_ring (1,608 lines). `fss_eye_sync` (heal and
+  lockstep) superseded all four. The entries below that flew them are history;
+  the code is at `c61c43af^`.
 - **State:** SOLVED and shipped, field-verified 2026-08-27. Findings
   1-2 (the zoomed body renders mono, at half eye resolution) are
   addressed by the opt-in `fix.fss_res`. The "black squares" hunt ran
@@ -188,6 +256,8 @@ changes.*
   "The ring, and the shipping state". "Method notes -- five theories
   died here, and how" is process lessons worth reading first.
   Companion: frontier-fss-bug-report.md.
+
+## The report (moved out of Status 2026-09-29)
 
 Investigated 2026-08-24, from a field report: zooming the Full System Scanner
 onto a planet **with rings** looks wrong in a headset. The ring "tiles in" over

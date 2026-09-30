@@ -20,6 +20,7 @@ internal sealed class CpuSwitchRange
 internal sealed class Collected
 {
     public int EventsLost;
+    public GpuCoverage? GpuCoverage;
     public bool HasCallStacks;
     public long KernelFirstQpc = long.MaxValue;
     public long KernelLastQpc = long.MinValue;
@@ -30,6 +31,8 @@ internal sealed class Collected
     public readonly List<ClockMarker> Clocks = [];
     public readonly List<SpanMarker> Spans = [];
     public readonly List<FrameMarker> Frames = [];
+    public readonly List<GpuCompletionMarker> GpuCompletions = [];
+    public int GpuMarkerSchemaErrors;
     public readonly Dictionary<int, ThreadTimeline> Timelines = [];
     public readonly Dictionary<string, long> RawSwitchStates = [];
     public readonly Dictionary<string, long> WaitReasons = [];
@@ -87,15 +90,19 @@ internal static class Collector
 {
     public static readonly Guid EdvrProvider = new("D3885FA1-0B70-44F1-AF88-63B2012B111E");
 
-    public static Collected Collect(TraceLog log, int pid, Action<string>? progress = null)
+    public static Collected Collect(TraceLog log, int pid, Action<string>? progress = null, bool gpuCoverage = false)
     {
-        var result = new Collected { EventsLost = log.EventsLost, HasCallStacks = log.HasCallStacks };
+        var result = new Collected { EventsLost = log.EventsLost, HasCallStacks = log.HasCallStacks,
+            GpuCoverage = gpuCoverage ? new GpuCoverage() : null };
         // Pass 1 decodes only EDVR markers. The caller thread is not known before
         // the first completed-frame marker, and it decides whose switch-out stacks
         // are worth keeping in pass 2.
         foreach (var data in log.Events)
+        {
+            result.GpuCoverage?.Observe(data.ProviderGuid, data.ProcessID, pid);
             if (data.ProviderGuid == EdvrProvider && data.ProcessID == pid)
                 Markers.Parse(data, result);
+        }
         foreach (var frame in result.Frames)
         {
             if (frame.CallerThread != 0) result.CallerThreads.Add(checked((int)frame.CallerThread));

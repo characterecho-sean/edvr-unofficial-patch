@@ -518,9 +518,11 @@ int wmain(int argc,wchar_t** argv) {
               resolveResolutionWidth(entries,n,"","meta-quest-3",&matched)==0 && matched==0,
               "resolve: runtime/system beats runtime-only beats none");
     }
-    // The same grammar under a second range: the field-of-view trims are
-    // degrees 0..30, where 0 is a value a user may type and a width's floor of
-    // 1 is not. One implementation, two ranges, so the menu that writes a list
+    // The same grammar under a second range: the field-of-view trims
+    // (experimental.fov_trim_*, read by native_frame.cpp) are degrees 0..30,
+    // where 0 is a value a user may type and a width's floor of 1 is not. One
+    // implementation, two ranges, so a list written by hand (the trims are set
+    // in the file only since 2026-09-29) or by the menu (the resolution row)
     // and the DLL that reads it cannot disagree about what a value may be.
     {
         HeadsetEntry trims[kHeadsetEntryMax]; std::vector<std::string> skipped;

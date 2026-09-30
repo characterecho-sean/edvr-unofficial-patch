@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>  // strncmp, to tell a probing site from a D3D one
 
@@ -42,6 +44,118 @@ constexpr unsigned kMaxSites = 32;
 FaultSite g_sites[kMaxSites];
 unsigned  g_siteCount = 0;
 
+// WHERE A FAULT HAPPENED, as text, without allocating.
+//
+// A site is a string, and some sites are whole subsystems: one fault budget
+// covers the entire frame-boundary block, so a note that named only the site
+// could not say WHICH of dozens of ticks, or whose code, had faulted. The
+// address answers that, and the module and offset turn it into something a
+// map file or a disassembler can be pointed at.
+//
+// Everything here runs inside an exception filter, on whatever thread faulted
+// and part-way through whatever it was doing: stack buffers only, no heap, and
+// nothing taken on trust from EDVR's own state -- Windows is asked instead.
+constexpr size_t kWhereCap = 384;   // the whole location text
+constexpr size_t kPlaceCap = 128;   // one address: module+offset, or what it is
+constexpr size_t kLeafCap = 64;     // a module's file name, clipped
+
+// Appends printf-formatted text to a NUL-terminated buffer, clipping silently.
+void appendf(char* out, size_t cap, const char* fmt, ...) {
+    const size_t used = strlen(out);
+    if (used + 1 >= cap) return;
+    va_list args;
+    va_start(args, fmt);
+    _vsnprintf_s(out + used, cap - used, _TRUNCATE, fmt, args);
+    va_end(args);
+}
+
+// "leaf.dll+0xOFFSET" when the address lies inside a loaded image, otherwise
+// what it lies in.
+//
+// VirtualQuery -> AllocationBase -> GetModuleFileNameW: an image is mapped as
+// one allocation, so the base of that allocation IS the module handle, and the
+// distance from it is the RVA. Only the leaf of the path is kept -- a full path
+// is long and says where a player keeps their games. Memory that is not an
+// image (heap, stack, the trampolines EDVR allocates itself) has no module;
+// its region base and offset are given instead, so an address can still be
+// matched against a line that logged the allocation.
+void describeAddress(const void* address, char* out, size_t cap) {
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (address == nullptr || VirtualQuery(address, &mbi, sizeof(mbi)) != sizeof(mbi) ||
+        mbi.State == MEM_FREE) {
+        _snprintf_s(out, cap, _TRUNCATE, "no module: not mapped");
+        return;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(mbi.AllocationBase);
+    const uintptr_t offset = reinterpret_cast<uintptr_t>(address) - base;
+    if (mbi.Type == MEM_IMAGE) {
+        wchar_t path[MAX_PATH];
+        const DWORD length =
+            GetModuleFileNameW(reinterpret_cast<HMODULE>(mbi.AllocationBase), path, MAX_PATH);
+        if (length > 0 && length < MAX_PATH) {
+            const wchar_t* slash = wcsrchr(path, L'\\');
+            const wchar_t* leaf = slash ? slash + 1 : path;
+            // Narrowed by hand: a module's name is ASCII in practice, and a
+            // conversion call is one more thing to go wrong in a filter.
+            char narrow[kLeafCap];
+            size_t i = 0;
+            for (; leaf[i] != L'\0' && i + 1 < sizeof(narrow); ++i) {
+                narrow[i] = leaf[i] < 0x80 ? static_cast<char>(leaf[i]) : '?';
+            }
+            narrow[i] = '\0';
+            _snprintf_s(out, cap, _TRUNCATE, "%s+0x%llX", narrow,
+                        static_cast<unsigned long long>(offset));
+            return;
+        }
+    }
+    const char* kind = mbi.Type == MEM_IMAGE    ? "image"
+                       : mbi.Type == MEM_MAPPED ? "mapped"
+                                                : "private";
+    _snprintf_s(out, cap, _TRUNCATE, "no module: %s region 0x%016llX+0x%llX", kind,
+                static_cast<unsigned long long>(base), static_cast<unsigned long long>(offset));
+}
+
+// The location half of a note, each part with its own leading space so it can
+// be spliced after "site=%s": the faulting instruction's address with its
+// module+offset, and for a memory fault the address it touched and how.
+// Empty when the filter was reached without exception pointers -- the note is
+// then what it always was.
+void describeFault(unsigned long code, char* out, size_t cap) {
+    if (cap == 0) return;
+    out[0] = '\0';
+    const detail::GuardFaultWhere& where = detail::guardFaultWhere();
+    if (!where.valid) return;
+
+    // A stack overflow is judged on the last of the stack. A path buffer and a
+    // loader call are the wrong way to spend it, and a filter that overflows
+    // again turns a caught fault into the crash this file exists to prevent.
+    const bool stackGone = code == EXCEPTION_STACK_OVERFLOW;
+
+    char place[kPlaceCap];
+    if (stackGone) {
+        _snprintf_s(place, _TRUNCATE, "stack overflow: module lookup skipped");
+    } else {
+        describeAddress(where.ip, place, sizeof(place));
+    }
+    appendf(out, cap, " at=0x%016llX (%s)",
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(where.ip)), place);
+
+    if (where.hasData) {
+        describeAddress(where.data, place, sizeof(place));
+        const char* kind = where.access == 0   ? "read"
+                           : where.access == 1 ? "write"
+                           : where.access == 8 ? "execute"
+                                               : nullptr;
+        if (kind != nullptr) {
+            appendf(out, cap, " access=%s", kind);
+        } else {
+            appendf(out, cap, " access=%u", where.access);
+        }
+        appendf(out, cap, " data=0x%016llX (%s)",
+                static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(where.data)), place);
+    }
+}
+
 }  // namespace
 
 int guardFilter(unsigned long code, const char* site) {
@@ -56,9 +170,19 @@ int guardFilter(unsigned long code, const char* site) {
             // count that does not exist. Doubling keeps it to a handful of
             // lines however bad it gets, and makes runaway visible AS runaway.
             if ((g_sites[i].count & (g_sites[i].count - 1)) == 0) {
+                // The LATEST fault's location rides on the restatement, and
+                // only here: a shared budget's later faults may come from a
+                // different module than the first, and the first note is the
+                // only other place an address is written. Built only when the
+                // line is, so a scan that faults thousands of times a frame
+                // pays a counter increment and nothing more.
+                char where[kWhereCap];
+                describeFault(code, where, sizeof(where));
+                char latest[kWhereCap + 16] = "";
+                if (where[0] != '\0') _snprintf_s(latest, _TRUNCATE, " Latest fault%s.", where);
                 Log::get().note("FAULT TOTAL site=%s: %llu absorbed so far this "
-                                "session -- still caught, still not a crash.", key,
-                                (unsigned long long)g_sites[i].count);
+                                "session -- still caught, still not a crash.%s", key,
+                                (unsigned long long)g_sites[i].count, latest);
             }
             return EXCEPTION_EXECUTE_HANDLER;   // already reported once
         }
@@ -66,6 +190,13 @@ int guardFilter(unsigned long code, const char* site) {
     if (g_siteCount < kMaxSites) {
         g_sites[g_siteCount++] = {key, 1};
     }
+    // WHERE, spliced right after the site and before the verdict text, so it
+    // survives if a long line is ever clipped and a reader meets it before the
+    // prose. Built here and in the restated totals above and nowhere else: this
+    // is the once-per-site path, so the VirtualQuery and the module lookup are
+    // paid a handful of times a session, never once per fault.
+    char where[kWhereCap];
+    describeFault(code, where, sizeof(where));
     // SAY THE OUTCOME, NOT JUST THE EVENT.
     //
     // This line used to open with "FAULT exception=0xC0000005" and then talk
@@ -86,14 +217,14 @@ int guardFilter(unsigned long code, const char* site) {
     // and both of which are the same error it exists to correct -- a sentence
     // asserting something the code never checked.
     //
-    // The first is WHOSE fault is routine. Faulting on memory the game is free
-    // to release is by design at the nine camera_view sites, which walk
-    // gigabytes of a live heap looking for an array. It is not by design at
-    // resubmit/copy, guardCrop/device or any of the other D3D sites, where a
-    // fault means something handed us a resource that was not what it claimed.
-    // Telling the reader of one that the other is routine is how a real report
-    // gets talked out of being filed.
-    const bool scanSite = strncmp(key, "camera_view/", 12) == 0;
+    // The first is WHOSE fault is routine. It was the nine camera_view sites,
+    // which walked gigabytes of a live heap looking for an array and faulted
+    // on pages the game had released, by design; that scanner was removed
+    // 2026-09-29, so the line has no routine case left to describe. At
+    // resubmit/copy, guardCrop/device or any of the D3D sites a fault means
+    // something handed us a resource that was not what it claimed. Telling the
+    // reader of one that the other is routine is how a real report gets
+    // talked out of being filed.
     // The second is what a fault COSTS. For a read probe, abandoning it costs
     // the read. For a copy abandoned part-way, the destination holds whatever
     // got there first and is submitted anyway, so "the rest of that one
@@ -101,7 +232,7 @@ int guardFilter(unsigned long code, const char* site) {
     // more than the machinery guarantees. What is true everywhere is that the
     // operation was abandoned and the process carried on; the PR's own body
     // drew that line correctly and the log line now matches it.
-    Log::get().note("FAULT ABSORBED exception=0x%08lX site=%s. THIS DID NOT CRASH "
+    Log::get().note("FAULT ABSORBED exception=0x%08lX site=%s%s. THIS DID NOT CRASH "
                     "THE GAME. EDVR touched an address that was not there, its own "
                     "handler caught it, and the process carried on -- what the fault "
                     "cost is that one operation, abandoned. %sWhat would be worth "
@@ -109,13 +240,9 @@ int guardFilter(unsigned long code, const char* site) {
                     "FEATURE-DISABLED line. Further faults at this site are counted "
                     "rather than logged; the running total is restated as it doubles, "
                     "so a hard exit cannot eat it.",
-                    code, key,
-                    scanSite
-                        ? "A few of these are routine at this site: it probes memory "
-                          "the game is free to release, and the camera scan walks "
-                          "gigabytes of it. "
-                        : "This site does NOT fault by design -- it is not one of the "
-                          "memory probes -- so even a couple here are worth a report. ");
+                    code, key, where,
+                    "This site does NOT fault by design -- it is not one of the "
+                    "memory probes -- so even a couple here are worth a report. ");
     return EXCEPTION_EXECUTE_HANDLER;
 }
 

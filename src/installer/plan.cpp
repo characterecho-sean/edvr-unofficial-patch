@@ -10,7 +10,6 @@ namespace edvr::installer {
 namespace {
 
 const wchar_t* kD3d11 = L"d3d11.dll";
-const wchar_t* kIni = L"edvr.ini";
 const wchar_t* kProfile = L"edvr_profile.ini";
 const wchar_t* kOpenvr = L"openvr_api.dll";
 const wchar_t* kOpenvrOrig = L"openvr_api_orig.dll";
@@ -23,6 +22,14 @@ const wchar_t* kNgx = L"nvngx_dlss.dll";   // NVIDIA's DLSS runtime, beside the 
 const char* kRunningElsewhere =
     "Elite Dangerous is running, but from a different folder -- this install is not the one in "
     "use, so it can be changed.";
+
+// Said when Windows would not list the running programs. A check that could not
+// run is not a check that passed: a game that is running holds every file this
+// installer touches, and a half-replaced install is worse than none.
+const char* kRunStateUnknown =
+    "Could not tell whether Elite Dangerous is running: Windows would not list the running "
+    "programs. Nothing was changed. Close the game and try again; if this keeps happening, "
+    "restart the installer.";
 
 std::string say(const std::wstring& w) { return toUtf8(w); }
 
@@ -106,6 +113,11 @@ std::string installedProfile(const Survey& s) {
     return std::string();
 }
 
+bool hasSettingsFor(const Survey& s, const std::string& profile) {
+    if (profile == "flat") return s.flatIniPresent || s.iniPresent;
+    return s.iniPresent;
+}
+
 Survey surveyTarget(const GameInstall& game) {
     Survey s;
     s.game = game;
@@ -119,15 +131,21 @@ Survey surveyTarget(const GameInstall& game) {
     const GameRunState running = gameRunState(s.game.dir);
     s.gameRunningHere = running == GameRunState::ThisFolder;
     s.gameRunningElsewhere = running == GameRunState::OtherFolder;
+    s.gameRunStateUnknown = running == GameRunState::Unknown;
 
     s.d3d11 = probeDll(joinPath(game.dir, kD3d11));
     for (const std::wstring& name : filesLike(game.dir, L"d3d11_*.dll")) {
         s.otherD3d11.push_back(probeDll(joinPath(game.dir, name)));
     }
 
-    const std::wstring iniPath = joinPath(game.dir, kIni);
+    // Both settings files, each as itself: which one an operation works on is the
+    // planner's decision, made from the edition it is for.
+    const std::wstring iniPath = settingsPathFor(game.dir, "vr");
     s.iniPresent = fileExists(iniPath);
     if (s.iniPresent) s.iniText = readTextFile(iniPath);
+    const std::wstring flatIniPath = settingsPathFor(game.dir, "flat");
+    s.flatIniPresent = fileExists(flatIniPath);
+    if (s.flatIniPresent) s.flatIniText = readTextFile(flatIniPath);
     s.baseIniText = readTextFile(baseIniPath(game.dir));
     s.state = readState(game.dir);
     s.descriptorPresent = fileExists(joinPath(game.dir, kProfile));
@@ -192,6 +210,11 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         plan.problems.push_back(
             "Elite Dangerous is running. Close it first -- Windows will not let anything replace a "
             "file the game has open, and a half-replaced install is worse than none.");
+        return plan;
+    }
+    if (s.gameRunStateUnknown) {
+        plan.blocked = true;
+        plan.problems.push_back(kRunStateUnknown);
         return plan;
     }
     const bool flat = p.profile == "flat";
@@ -649,32 +672,68 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     }
 
     // ------------------------------------------------------------------
-    // edvr.ini. Last, because the chain decision above forces a value into it.
+    // The settings file of the edition being installed: edvr.ini for VR,
+    // edvr-flat.ini for flat. Last, because the chain decision above forces a
+    // value into it.
+    //
+    // The OTHER edition's file is neither merged from nor written. The flat
+    // runtime reads edvr-flat.ini and only falls back to edvr.ini while there is
+    // none (config.cpp), so a flat install that merged into edvr.ini reported
+    // success while the game went on reading the old flat file -- and, where
+    // there was no flat file, changed the VR profile's tuning instead.
     // ------------------------------------------------------------------
+    const std::string iniName = toUtf8(settingsLeafFor(p.profile));
+    plan.settingsFile = iniName;
     if (p.iniText.empty()) {
-        plan.problems.push_back("This installer carries no edvr.ini.");
+        plan.problems.push_back("This installer carries no " + iniName + ".");
     } else {
-        const std::wstring iniPath = joinPath(s.game.dir, kIni);
+        const std::wstring iniPath = settingsPathFor(s.game.dir, p.profile);
+        const bool ownPresent = flat ? s.flatIniPresent : s.iniPresent;
+        const std::string& ownText = flat ? s.flatIniText : s.iniText;
+
+        // A flat install that finds only the shared edvr.ini starts its own file
+        // from it, so the settings the flat runtime has been reading carry over
+        // (install_edvr.py seeds the same way); edvr.ini itself is not touched.
+        // Somebody who asked for fresh defaults gets them instead.
+        const bool seed = flat && !ownPresent && s.iniPresent && o.keepSettings;
+
+        // The base is the shipped settings of the version the record says is
+        // installed: the defaults of the file that edition wrote. Merging into this
+        // edition's OWN file, it is only a base when the record is for this
+        // edition -- another edition's shipped file is the default of nothing
+        // here, and a three-way merge against it would read a setting the person
+        // changed as one they never touched. The shared edvr.ini a flat install
+        // seeds from is different: every edition before this one wrote it, so the
+        // base describes it whichever edition the record names, and it is what
+        // tells the settings somebody chose from the VR defaults they never did.
+        const bool baseDescribesText = seed || !(s.state.present && s.state.profile != p.profile);
+        const std::string* base =
+            (s.baseIniText.empty() || !baseDescribesText) ? nullptr : &s.baseIniText;
+
         std::string merged;
-        if (!s.iniPresent) {
+        if (seed) {
+            merged = mergeIni(p.iniText, s.iniText, base, forced, &plan.merge);
+            plan.notes.push_back(
+                "Creating " + iniName + " from your edvr.ini: the flat edition keeps its own "
+                "settings now, and edvr.ini is left exactly as it is.");
+        } else if (!ownPresent) {
             merged = mergeIni(p.iniText, std::string(), nullptr, forced, &plan.merge);
-            plan.notes.push_back("Writing edvr.ini (every setting at its default).");
+            plan.notes.push_back("Writing " + iniName + " (every setting at its default).");
         } else if (!o.keepSettings) {
             merged = mergeIni(p.iniText, std::string(), nullptr, forced, &plan.merge);
-            backup(iniPath, "your edvr.ini, before it is replaced");
+            backup(iniPath, "your " + iniName + ", before it is replaced");
             plan.notes.push_back(
-                "Replacing edvr.ini with the shipped defaults. Your old file is in the backup "
-                "folder.");
+                "Replacing " + iniName + " with the shipped defaults. Your old file is in the "
+                "backup folder.");
         } else {
-            const std::string* base = s.baseIniText.empty() ? nullptr : &s.baseIniText;
-            merged = mergeIni(p.iniText, s.iniText, base, forced, &plan.merge);
-            if (merged != s.iniText) {
-                backup(iniPath, "your edvr.ini, before it is updated");
+            merged = mergeIni(p.iniText, ownText, base, forced, &plan.merge);
+            if (merged != ownText) {
+                backup(iniPath, "your " + iniName + ", before it is updated");
 
                 char line[256];
                 sprintf_s(
-                    line, "Updating edvr.ini: %zu of your settings kept, %zu new defaults adopted%s.",
-                    plan.merge.kept.size(), plan.merge.adopted.size(),
+                    line, "Updating %s: %zu of your settings kept, %zu new defaults adopted%s.",
+                    iniName.c_str(), plan.merge.kept.size(), plan.merge.adopted.size(),
                     plan.merge.twoWay ? " (no record of which version you had, so anything that "
                                         "differs from the new defaults was treated as yours)"
                                       : "");
@@ -686,14 +745,13 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 }
             }
         }
-        if (merged != s.iniText) {
-            writeText(merged, iniPath, "writes edvr.ini");
+        if (merged != ownText) {
+            writeText(merged, iniPath, "writes " + iniName);
             changed = true;
         } else {
-            // Said once, and only here: an "updating edvr.ini" note followed by
-            // "left alone" is two lines contradicting each other about the same
-            // file.
-            plan.notes.push_back("edvr.ini already says what it should -- left alone.");
+            // Said once, and only here: an "updating" note followed by "left
+            // alone" is two lines contradicting each other about the same file.
+            plan.notes.push_back(iniName + " already says what it should -- left alone.");
         }
         next.iniSha = sha256Bytes(merged.data(), merged.size());
     }
@@ -732,8 +790,8 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         base.action = Action::WriteText;
         base.text = p.iniText;
         base.to = baseIniPath(s.game.dir);
-        base.why = "keeps this version's default edvr.ini, so the next update can tell your "
-                   "changes from a changed default";
+        base.why = "keeps this version's default " + toUtf8(settingsLeafFor(p.profile)) +
+                   ", so the next update can tell your changes from a changed default";
         plan.steps.push_back(base);
 
         Step rec;
@@ -762,7 +820,23 @@ Plan planUninstall(const Survey& s, const Options& o) {
         plan.problems.push_back("Elite Dangerous is running. Close it first.");
         return plan;
     }
+    if (s.gameRunStateUnknown) {
+        plan.blocked = true;
+        plan.problems.push_back(kRunStateUnknown);
+        return plan;
+    }
     if (s.gameRunningElsewhere) plan.notes.push_back(kRunningElsewhere);
+
+    // Which edition this uninstall removes, and so which settings file is its own.
+    // A folder with no record and no descriptor counts as a VR one: the flat
+    // edition always writes a descriptor.
+    const std::string edition = installedProfile(s) == "flat" ? "flat" : "vr";
+    const bool flatEdition = edition == "flat";
+    // What that edition's runtime reads: the flat one falls back to the shared
+    // edvr.ini until it has a file of its own.
+    const bool runtimeReadsFlatFile = flatEdition && s.flatIniPresent;
+    const std::string& runtimeIniText = runtimeReadsFlatFile ? s.flatIniText : s.iniText;
+    const std::string runtimeIniName = runtimeReadsFlatFile ? "edvr-flat.ini" : "edvr.ini";
 
     std::vector<Step> body;
     bool wantBackupDir = false;
@@ -821,7 +895,7 @@ Plan planUninstall(const Survey& s, const Options& o) {
         // file is still on disk but under a name nothing loads.
         std::wstring chain = safeSiblingName(s.state.chainTarget, kD3d11);
         if (chain.empty())
-            chain = safeSiblingName(fromUtf8(iniValue(s.iniText, "advanced.real_dll")), kD3d11);
+            chain = safeSiblingName(fromUtf8(iniValue(runtimeIniText, "advanced.real_dll")), kD3d11);
         const DllInfo* target = chain.empty() ? nullptr : siblingNamed(s.otherD3d11, chain);
         if (target && target->kind != DllKind::Absent) {
             rename(target->path, d3d11Path,
@@ -835,7 +909,7 @@ Plan planUninstall(const Survey& s, const Options& o) {
             plan.notes.push_back("Removing EDVR's d3d11.dll.");
             if (!chain.empty()) {
                 plan.problems.push_back(
-                    "edvr.ini pointed at " + say(chain) +
+                    runtimeIniName + " pointed at " + say(chain) +
                     ", but that file is not there any more, so there is nothing to put back.");
             }
         }
@@ -922,16 +996,32 @@ Plan planUninstall(const Survey& s, const Options& o) {
     }
 
     // ---- settings and record ------------------------------------------
-    const std::wstring iniPath = joinPath(s.game.dir, kIni);
-    if (s.iniPresent) {
+    // The settings file of the edition being removed, and only that one: the flat
+    // profile's edvr-flat.ini and the VR profile's edvr.ini are separate people's
+    // tuning, and an uninstall that took the other edition's file with it
+    // destroyed settings it had no business touching.
+    const std::wstring iniPath = settingsPathFor(s.game.dir, edition);
+    const std::string iniName = toUtf8(settingsLeafFor(edition));
+    plan.settingsFile = iniName;
+    const bool ownPresent = flatEdition ? s.flatIniPresent : s.iniPresent;
+    if (ownPresent) {
         if (o.removeSettings) {
-            backup(iniPath, "your edvr.ini");
-            remove(iniPath, "removes edvr.ini");
-            plan.notes.push_back("Removing edvr.ini (a copy is kept in the backup folder).");
+            backup(iniPath, "your " + iniName);
+            remove(iniPath, "removes " + iniName);
+            plan.notes.push_back("Removing " + iniName + " (a copy is kept in the backup folder).");
         } else {
             plan.notes.push_back(
-                "Leaving edvr.ini in place, so a reinstall finds your settings again.");
+                "Leaving " + iniName + " in place, so a reinstall finds your settings again.");
         }
+    } else if (flatEdition && s.iniPresent) {
+        // A flat install that never got a file of its own -- one made before
+        // edvr-flat.ini existed -- has been reading the shared edvr.ini, which the
+        // VR profile uses too. It is not the flat edition's to remove.
+        plan.notes.push_back(
+            o.removeSettings
+                ? "This flat install has no edvr-flat.ini of its own: it was reading edvr.ini, "
+                  "which the VR profile uses too, so edvr.ini was left in place."
+                : "Leaving edvr.ini in place, so a reinstall finds your settings again.");
     }
     if (fileExists(statePath(s.game.dir))) remove(statePath(s.game.dir), "removes the install record");
     const std::wstring descriptorPath = joinPath(s.game.dir, kProfile);
@@ -942,7 +1032,7 @@ Plan planUninstall(const Survey& s, const Options& o) {
         plan.notes.push_back("Keeping an unverified edvr_profile.ini; its ownership could not be proved.");
     }
     if (fileExists(baseIniPath(s.game.dir)))
-        remove(baseIniPath(s.game.dir), "removes the kept default edvr.ini");
+        remove(baseIniPath(s.game.dir), "removes the kept default " + iniName);
 
     if (!changed) {
         plan.nothingToDo = true;

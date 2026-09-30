@@ -84,8 +84,8 @@ void selfTest() {
         auto old=c.acquireInterval(1); check(c.release(old,2),"abandoned borrowed lease releases");
         auto replacement=c.acquireInterval(3);
         check(bool(replacement)&&!c.endInterval(old,4)&&!c.release(old,4),"same-record index reuse rejects stale serial");
-        DisjointClock::Lease leases[31]{}; leases[0]=replacement;
-        for(unsigned i=1;i<31;++i) leases[i]=c.acquireInterval(4);
+        DisjointClock::Lease leases[DisjointClock::kLeases - 1]{}; leases[0]=replacement;
+        for(unsigned i=1;i<DisjointClock::kLeases-1;++i) leases[i]=c.acquireInterval(4);
         check(!c.acquireInterval(5)&&b.begins==1,"lease exhaustion issues no nested begin");
         for(auto t:leases) check(bool(t)&&c.endInterval(t,6),"every bounded lease ends");
         check(c.finishFrame(frame,7),"full lease record closes");

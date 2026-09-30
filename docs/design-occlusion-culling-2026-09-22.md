@@ -45,20 +45,8 @@ context; every load-bearing claim cites its evidence.
   settlement rendering from the ship; on foot is out of scope for now.
   Also to instrument: CPU frame time rises noticeably once the ship is
   within ~1 km of the settlement.
-- **Ruled out (do not re-propose; evidence in §5, §9-§12):** draw-dedup
-  culling; static/PVS culling; skip-based work gating (the change-gate
-  abort); GPU occlusion queries as the runtime mechanism (the offline
-  oracle, §3.4); same-frame depth readback; boundary-side draw-call
-  motion estimation; whole-structure boxes as occluders; single-occluder
-  rect coverage; the cockpit as the parked prize's occluder; nesting as
-  what hides the parked view; the "<0.15 ms for 3.5k draws" baseline; a
-  reject at FUN_14430EFE0 as the pool-draw cull; a record-level reject in
-  the builder's view loop; the collection mask as the admission; full
-  occluder meshes within 0.3 ms. From §12: closed solids and their
-  eroded inner boxes as the occluders; R = 1 m about the slot origin as
-  the occludee, and the R = 1 m footprint as a zero-violation truth; the
-  nearest-seen-origin association and the reader's range as occluder
-  identity and selection.
+- **Ruled out (do not re-propose; evidence in §5, §9-§12):** the full
+  list, including the §12 additions, is under "Status detail" below.
 - **Phase A (2026-09-22 evening, valid): KILL** of the job-pipeline
   prize: 5.24 ms thread-summed on seven workers, 0.81 ms on the caller
   thread's critical path (x recall = 0.78 ms against ~1.5 ms). The
@@ -67,6 +55,23 @@ context; every load-bearing claim cites its evidence.
 - **2026-09-24:** `src/d3d11/original_draw_probe.cpp`, cited in §3, §7
   and §9 as the in-tree per-draw occlusion-query truth, was deleted with
   its rig; the citations stand as history.
+
+## Status detail (moved out of Status 2026-09-29)
+
+**Ruled out (do not re-propose; evidence in §5, §9-§12):** draw-dedup
+culling; static/PVS culling; skip-based work gating (the change-gate
+abort); GPU occlusion queries as the runtime mechanism (the offline
+oracle, §3.4); same-frame depth readback; boundary-side draw-call
+motion estimation; whole-structure boxes as occluders; single-occluder
+rect coverage; the cockpit as the parked prize's occluder; nesting as
+what hides the parked view; the "<0.15 ms for 3.5k draws" baseline; a
+reject at FUN_14430EFE0 as the pool-draw cull; a record-level reject in
+the builder's view loop; the collection mask as the admission; full
+occluder meshes within 0.3 ms. From §12: closed solids and their
+eroded inner boxes as the occluders; R = 1 m about the slot origin as
+the occludee, and the R = 1 m footprint as a zero-violation truth; the
+nearest-seen-origin association and the reader's range as occluder
+identity and selection.
 
 ## 1. Context and goal
 

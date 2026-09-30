@@ -3,6 +3,8 @@
 Usage: python tools/flat_pixels.py CAPTURE_DIR [--output PREVIEW_DIR] [--dry-run]
 CAPTURE_DIR may be one session or its flat_pixels parent. A normal invocation
 prints JSON statistics only. Previews are written only with --output.
+--assume-static-scene on|off replays the engine analysis with the 3D main menu's stale-slot
+policy forced (the capture's own flag is "static_scene"; captures before it read as off).
 """
 
 from __future__ import annotations
@@ -100,8 +102,22 @@ def load_manifest(path):
         raise CaptureError(f"{path}: filename does not match frame_id")
     jitter = _number_pair(manifest.get("jitter"), "jitter")
     previous_jitter = _number_pair(manifest.get("previous_jitter"), "previous_jitter")
+    # The raster phase the camera ROWS carry (2026-09-29; the upstream camera injector,
+    # flat_camera_phase.h): same unit and sign as `jitter`, present in captures made by a
+    # build that writes it. Both or neither; the replay infers it from the rows when absent.
+    rows_jitter = previous_rows_jitter = None
+    if ("rows_jitter" in manifest) != ("previous_rows_jitter" in manifest):
+        raise CaptureError(f"{path}: rows_jitter and previous_rows_jitter come together")
+    if "rows_jitter" in manifest:
+        rows_jitter = _number_pair(manifest["rows_jitter"], "rows_jitter")
+        previous_rows_jitter = _number_pair(manifest["previous_rows_jitter"], "previous_rows_jitter")
     if type(manifest.get("reset")) is not bool:
         raise CaptureError(f"{path}: reset must be a boolean")
+    # The 3D main menu's stale-slot policy was on for this frame (2026-09-29, flags.w of the prep
+    # shader). Absent in every capture made before the field, which is the policy off.
+    static_scene = manifest.get("static_scene", False)
+    if type(static_scene) is not bool:
+        raise CaptureError(f"{path}: static_scene must be a boolean")
     if manifest.get("mode") not in ("dlss", "dlaa"):
         raise CaptureError(f"{path}: mode must be dlss or dlaa")
     for field in ("binary_version", "binary_compiled"):
@@ -218,7 +234,8 @@ def load_manifest(path):
     return {
         "path": path, "version": version, "frame_id": frame, "jitter": jitter,
         "previous_jitter": previous_jitter, "reset": manifest["reset"],
-        "mode": manifest["mode"],
+        "rows_jitter": rows_jitter, "previous_rows_jitter": previous_rows_jitter,
+        "static_scene": static_scene, "mode": manifest["mode"],
         "binary_version": manifest.get("binary_version"),
         "binary_compiled": manifest.get("binary_compiled"),
         "configured_dlss_preset": preset,
@@ -264,7 +281,10 @@ def _mask_row(rejection, geometry, y):
             (rejection[y1, x0] != 0) | (rejection[y1, x1] != 0))
 
 
-def analyze(meta, rois=None):
+def analyze(meta, rois=None, unjitter=True, static_scene=None):
+    """`static_scene` None replays the frame as the capture declares its stale-slot policy;
+    True/False forces it (flat_pixels_engine.analyze). The rejection statistics below are
+    what the GPU produced and do not change with it."""
     if np is None:
         raise CaptureError("NumPy is required for capture analysis")
     rejection = _open_texture(meta, "rejection")
@@ -312,10 +332,71 @@ def analyze(meta, rois=None):
         from flat_pixels_engine import analyze as analyze_engine
         requested = rois if rois else [("full", (0, 0, meta["render_width"], meta["render_height"]))]
         try:
-            result["engine_analysis"] = analyze_engine(meta, requested)
+            result["engine_analysis"] = analyze_engine(meta, requested, unjitter, static_scene)
         except ValueError as exc:
             raise CaptureError(str(exc)) from exc
     return result
+
+
+STABILITY_MAX_GAP = 8      # frames between the two live samples of a pair
+STABILITY_VISIBLE = 4      # a change of 4/255 or more in any colour channel is a visible change
+
+
+def _stability_pair(earlier, later):
+    """Change between the FINAL images of two live frames, split by the later frame's
+    rejection footprint (the pixels the resolver shows as the raw jittered colour)."""
+    first, second = _open_texture(earlier, "final"), _open_texture(later, "final")
+    rejection = _open_texture(later, "rejection")
+    geometry = _mask_geometry(later)
+    groups = {"rejected": [0, 0, 0], "accepted": [0, 0, 0]}   # pixels, sum of change, visible pixels
+    for y in range(later["output_height"]):
+        mask = _mask_row(rejection, geometry, y)
+        change = np.abs(first[y, :, :3].astype(np.int16) - second[y, :, :3].astype(np.int16)).max(axis=1)
+        for label, selector in (("rejected", mask), ("accepted", ~mask)):
+            count = int(np.count_nonzero(selector))
+            if count:
+                selected = change[selector]
+                group = groups[label]
+                group[0] += count
+                group[1] += int(selected.sum(dtype=np.int64))
+                group[2] += int(np.count_nonzero(selected >= STABILITY_VISIBLE))
+    total = [sum(group[i] for group in groups.values()) for i in range(3)]
+    report = {"frames": [earlier["frame_id"], later["frame_id"]],
+              "frame_gap": later["frame_id"] - earlier["frame_id"]}
+    for label, group in (("rejected", groups["rejected"]), ("accepted", groups["accepted"]), ("all", total)):
+        report[label] = {"pixels": group[0],
+                         "mean_change_of_255": group[1] / group[0] if group[0] else None,
+                         "visible_change_percent": 100 * group[2] / group[0] if group[0] else None}
+    return report
+
+
+def stability(manifests):
+    """The shimmer proxy (2026-09-29): how much the displayed image changes between two live
+    frames, inside and outside the rejection footprint. Pairs each live (non-reset) frame of a
+    session with the next live one at most STABILITY_MAX_GAP frames later, on the same grids.
+    Only meaningful for a still scene, the 3D menu: motion inflates it, so compare the same
+    ship before and after a change, not across scenes."""
+    report = {"pairs": [], "status": "ok",
+              "note": ("mean and share of the final image's change between two live frames, "
+                       "split by the later frame's rejection footprint; a still scene should "
+                       "change little outside it. Motion inflates it: only for the menu, and "
+                       "only against the same ship's earlier capture.")}
+    sessions = {}
+    for meta in manifests:
+        if not meta["reset"]:
+            sessions.setdefault(meta["path"].parent, []).append(meta)
+    for metas in sessions.values():
+        metas.sort(key=lambda m: m["frame_id"])
+        for earlier, later in zip(metas, metas[1:]):
+            gap = later["frame_id"] - earlier["frame_id"]
+            same_grids = all(earlier[k] == later[k] for k in
+                             ("render_width", "render_height", "output_width", "output_height"))
+            if 0 < gap <= STABILITY_MAX_GAP and same_grids:
+                report["pairs"].append(_stability_pair(earlier, later))
+    if not report["pairs"]:
+        report["status"] = (f"needs two live frames of one session at most {STABILITY_MAX_GAP} frames "
+                            "apart: a reset frame is not one")
+    return report
 
 
 def _png_chunk(handle, kind, payload):
@@ -388,12 +469,13 @@ def write_previews(meta, directory):
     write_png(directory / "raw_final_diff_x8.png", width, meta["output_height"], difference_rows())
 
 
-def run(capture_dir, output=None, dry_run=False, rois=None):
+def run(capture_dir, output=None, dry_run=False, rois=None, static_scene=None):
     if np is None:
         raise CaptureError("NumPy is required; use the bundled Codex Python or install NumPy")
     manifests = [load_manifest(p) for p in _manifest_paths(capture_dir)]
-    results = [analyze(m, rois) for m in manifests]
-    summary = {"frames": results, "preview_scale": "absolute RGBA difference x8; alpha difference copied into RGB"}
+    results = [analyze(m, rois, static_scene=static_scene) for m in manifests]
+    summary = {"frames": results, "stability": stability(manifests),
+               "preview_scale": "absolute RGBA difference x8; alpha difference copied into RGB"}
     if output is not None:
         summary["output"] = str(output)
         summary["dry_run"] = dry_run
@@ -423,10 +505,13 @@ def verify_fixture(capture_dir):
     if path.resolve().parent.parent.parent != capture_dir.resolve():
         raise CaptureError("fixture pointer resolves outside capture root")
     meta = load_manifest(path)
+    # A live frame (2026-09-29): the writer's first sample is never a reset frame, and it
+    # records the raster phases and the phases the camera rows carry.
     expected_metadata = {
-        "frame_id": 7, "mode": "dlss", "reset": True,
-        "configured_dlss_preset": 11, "jitter": [0.0, 0.0],
-        "previous_jitter": [0.0, 0.0],
+        "frame_id": 7, "mode": "dlss", "reset": False,
+        "configured_dlss_preset": 11, "jitter": [0.25, -0.375],
+        "previous_jitter": [-0.125, 0.5],
+        "rows_jitter": [0.25, -0.375], "previous_rows_jitter": [-0.125, 0.5],
         "render_width": 17, "render_height": 3,
         "output_width": 17, "output_height": 3,
     }
@@ -700,6 +785,54 @@ def self_test():
         assert branches["engine_joined"] == 1 and branches["camera_unmarked_record"] == 1
         assert branches["rejected_masked_record"] == 1 and branches["rejected_corrupt_code"] == 1
         assert branches["rejected_stale_or_depth"] == 1 and branches["camera_no_slot"] == 1
+        assert "camera_stale_static" not in branches and complete_meta["static_scene"] is False
+        # The 3D main menu's stale-slot policy (2026-09-29): the twin of flags.w in the prep shader.
+        # The stale pixel (1,1) takes the camera term and nothing else moves; the capture's own flag
+        # drives it, a replay override can force it either way, and a capture without the field is off.
+        whole = [("whole", (0, 0, rw, rh))]
+        static_manifest = json.loads(json.dumps(complete))
+        static_manifest["static_scene"] = True
+        v2_path.write_text(json.dumps(static_manifest), encoding="utf-8")
+        static_meta = load_manifest(v2_path)
+        assert static_meta["static_scene"] is True
+        static_engine = analyze(static_meta, whole)["engine_analysis"]
+        static_branches = static_engine["rois"][0]["branch_counts"]
+        assert static_branches.get("rejected_stale_or_depth", 0) == 0 and static_branches["camera_stale_static"] == 1
+        for kept in ("engine_joined", "camera_unmarked_record", "rejected_masked_record",
+                     "rejected_corrupt_code", "camera_no_slot"):
+            assert static_branches[kept] == 1, (kept, static_branches)
+        assert static_engine["static_scene"] == {"declared": True, "replayed_as": True}
+        # The negative control: forced off, the same capture refuses the stale pixel again.
+        forced_off = analyze(static_meta, whole, static_scene=False)["engine_analysis"]
+        assert forced_off["rois"][0]["branch_counts"] == branches
+        assert forced_off["static_scene"] == {"declared": True, "replayed_as": False}
+        # An older capture (no field) asked what the policy would have done.
+        assumed = analyze(complete_meta, whole, static_scene=True)["engine_analysis"]
+        assert assumed["rois"][0]["branch_counts"]["camera_stale_static"] == 1
+        assert assumed["static_scene"] == {"declared": False, "replayed_as": True}
+        v2_path.write_text(json.dumps({**complete, "static_scene": "yes"}), encoding="utf-8")
+        try:
+            load_manifest(v2_path)
+            raise AssertionError("a non-boolean static_scene was accepted")
+        except CaptureError:
+            pass
+        # Only the stale-depth refusal is relaxed, in the shader's order: the sky (depth 0) and the
+        # out-of-range sentinel refuse first; a stale slot with a malformed even code is stale first.
+        edge_slots = np.asarray([[[1, .4], [2, .4], [4294967296.0, .4]],
+                                 [[1, .4], [2, .5], [3, .5]]], dtype="<f4")
+        edge_depth = np.full((rh, rw), .5, dtype="<f4")
+        edge_depth[1, 0] = 0.0
+        (v2_session / "frame_7_slots.bin").write_bytes(edge_slots.tobytes())
+        (v2_session / "frame_7_depth.bin").write_bytes(edge_depth.tobytes())
+        for flag, want in ((False, {"rejected_stale_or_depth": 4, "rejected_corrupt_code": 1, "engine_joined": 1}),
+                           (True, {"camera_stale_static": 2, "rejected_stale_or_depth": 2,
+                                   "rejected_corrupt_code": 1, "engine_joined": 1})):
+            v2_path.write_text(json.dumps({**complete, "static_scene": flag}), encoding="utf-8")
+            got = analyze(load_manifest(v2_path), whole)["engine_analysis"]["rois"][0]["branch_counts"]
+            assert got == want, (flag, got, want)
+        (v2_session / "frame_7_slots.bin").write_bytes(slots.tobytes())
+        (v2_session / "frame_7_depth.bin").write_bytes(np.full((rh, rw), .5, dtype="<f4").tobytes())
+        v2_path.write_text(json.dumps(complete), encoding="utf-8")
         complete["buffers"][0]["stride"] = 168
         v2_path.write_text(json.dumps(complete), encoding="utf-8")
         stride_meta = load_manifest(v2_path)
@@ -751,8 +884,9 @@ def self_test():
                                     "width": 17, "height": 3, "row_stride": 17 * bpp,
                                     "byte_size": len(pixels)})
         fixture_manifest = {"version": 1, "frame_id": 7, "mode": "dlss",
-                            "configured_dlss_preset": 11, "reset": True,
-                            "jitter": [0, 0], "previous_jitter": [0, 0],
+                            "configured_dlss_preset": 11, "reset": False,
+                            "jitter": [0.25, -0.375], "previous_jitter": [-0.125, 0.5],
+                            "rows_jitter": [0.25, -0.375], "previous_rows_jitter": [-0.125, 0.5],
                             "render_width": 17, "render_height": 3,
                             "output_width": 17, "output_height": 3,
                             "binary_version": "fixture", "binary_compiled": "fixture",
@@ -769,7 +903,110 @@ def self_test():
             raise AssertionError("unsafe fixture pointer accepted")
         except CaptureError:
             pass
+        _self_test_rows_jitter(root)
+        _self_test_stability(root)
     print("flat_pixels self-test passed")
+
+
+def _synthetic_capture(session, frame, rw, rh, ow, oh, *, reset=False, jitter=(0, 0), previous=(0, 0),
+                       final=None, rejection=None, depth=None, camera=None, previous_camera=None, extra=None):
+    """A small version-2 capture with no engine inputs, written under `session`."""
+    session.mkdir(parents=True, exist_ok=True)
+    contents = {
+        "color": bytes(rw * rh * 4), "motion": bytes(rw * rh * 4),
+        "depth": (np.full((rh, rw), .0008 if depth is None else depth, dtype="<f4")).tobytes(),
+        "rejection": bytes(rw * rh) if rejection is None else rejection,
+        "raw": bytes(ow * oh * 4), "final": bytes(ow * oh * 4) if final is None else final,
+    }
+    records = []
+    for name, (fmt, bpp, grid) in TEXTURES.items():
+        w, h = (rw, rh) if grid == "render" else (ow, oh)
+        filename = f"frame_{frame}_{name}.bin"
+        (session / filename).write_bytes(contents[name])
+        records.append({"name": name, "filename": filename, "dxgi_format": fmt, "width": w, "height": h,
+                        "row_stride": w * bpp, "byte_size": w * h * bpp})
+    still = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, .025, 0], [0, 0, 1, 0], [1, 0, 0, 0]]
+    manifest = {"version": 2, "frame_id": frame, "mode": "dlss", "reset": reset,
+                "jitter": list(jitter), "previous_jitter": list(previous),
+                "render_width": rw, "render_height": rh, "output_width": ow, "output_height": oh,
+                "textures": records, "camera": camera or still, "previous_camera": previous_camera or camera or still,
+                "engine": {"complete": False, "status": "absent-or-partial", "slots_present": False,
+                           "pool_present": False, "scene_now_present": False, "scene_previous_present": False},
+                "buffers": []}
+    manifest.update(extra or {})
+    path = session / f"frame_{frame}.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+def _self_test_rows_jitter(root):
+    """The camera injector's rows, end to end through the loader and the replay: a still scene
+    whose rows carry the raster phase. The replay this tool made before (rows as captured)
+    reports a motion error of exactly |current phase - previous phase| on every pixel; with the
+    phase removed as the shader does it is float error."""
+    from flat_pixels_engine import jitter_rows, rows_ndc, synthetic_camera
+    rw, rh = 16, 9
+    jn, jo = [-0.125, -0.27777779], [0.125, 0.27777779]
+    base = synthetic_camera(rw, rh)
+    now_rows = jitter_rows(base, rows_ndc(jn, rw, rh))
+    old_rows = jitter_rows(base, rows_ndc(jo, rw, rh))
+    expected = math.hypot(jn[0] - jo[0], jn[1] - jo[1])
+    for label, extra, source in (("inferred", None, "inferred-carried"),
+                                 ("declared", {"rows_jitter": jn, "previous_rows_jitter": jo}, "declared")):
+        path = _synthetic_capture(root / f"rows_{label}", 9, rw, rh, rw, rh, jitter=jn, previous=jo,
+                                  camera=now_rows.tolist(), previous_camera=old_rows.tolist(), extra=extra)
+        meta = load_manifest(path)
+        window = [("all", (0, 0, rw, rh))]
+        stock = analyze(meta, window, unjitter=False)["engine_analysis"]["rois"][0]["motion_comparison"]["camera"]
+        fixed_analysis = analyze(meta, window)["engine_analysis"]
+        fixed = fixed_analysis["rois"][0]["motion_comparison"]["camera"]
+        # The stock replay's error IS the phase difference: the assertion that pins the tool defect.
+        assert abs(stock["median_error_px"] - expected) < 2e-3, (label, stock, expected)
+        assert fixed["max_error_px"] < 1e-3, (label, fixed)
+        assert fixed_analysis["rows_jitter"]["source"] == source, (label, fixed_analysis["rows_jitter"])
+    # Legacy captures (rows unjittered, no field) are left exactly as they were.
+    plain = _synthetic_capture(root / "rows_plain", 9, rw, rh, rw, rh, jitter=jn, previous=jo,
+                               camera=base.tolist(), previous_camera=base.tolist())
+    analysis = analyze(load_manifest(plain), [("all", (0, 0, rw, rh))])["engine_analysis"]
+    assert analysis["rows_jitter"]["source"] == "unjittered"
+    # A capture that declares one of the two phases is malformed.
+    lopsided = _synthetic_capture(root / "rows_lopsided", 9, rw, rh, rw, rh, extra={"rows_jitter": jn})
+    try:
+        load_manifest(lopsided)
+        raise AssertionError("a capture declaring only one rows phase was accepted")
+    except CaptureError:
+        pass
+
+
+def _self_test_stability(root):
+    """The stability report: change between two live frames' final images, split by the later
+    frame's rejection footprint; a reset frame or a wide gap is not a pair."""
+    rw, rh, ow, oh = 4, 3, 8, 6
+    # Everything rejected: a 40-level change is 100% visible and all of it lands in the footprint.
+    for frame, level in ((10, 100), (12, 140)):
+        _synthetic_capture(root / "stab_rejected", frame, rw, rh, ow, oh, final=bytes([level]) * (ow * oh * 4),
+                           rejection=bytes([255]) * (rw * rh))
+    report = stability([load_manifest(p) for p in _manifest_paths(root / "stab_rejected")])
+    assert len(report["pairs"]) == 1 and report["pairs"][0]["frames"] == [10, 12]
+    pair = report["pairs"][0]
+    assert pair["rejected"]["pixels"] == ow * oh and pair["rejected"]["mean_change_of_255"] == 40
+    assert pair["rejected"]["visible_change_percent"] == 100 and pair["accepted"]["pixels"] == 0
+    assert pair["accepted"]["mean_change_of_255"] is None
+    # Nothing rejected: a 2-level change is below the visible threshold and lands outside the footprint.
+    _synthetic_capture(root / "stab_accepted", 20, rw, rh, ow, oh, final=bytes([100]) * (ow * oh * 4))
+    _synthetic_capture(root / "stab_accepted", 21, rw, rh, ow, oh, final=bytes([102]) * (ow * oh * 4))
+    pair = stability([load_manifest(p) for p in _manifest_paths(root / "stab_accepted")])["pairs"][0]
+    assert pair["accepted"]["pixels"] == ow * oh and pair["accepted"]["mean_change_of_255"] == 2
+    assert pair["accepted"]["visible_change_percent"] == 0 and pair["rejected"]["pixels"] == 0
+    # Not pairs: a reset frame, a gap past the limit, another grid.
+    _synthetic_capture(root / "stab_none", 30, rw, rh, ow, oh, reset=True)
+    _synthetic_capture(root / "stab_none", 32, rw, rh, ow, oh)
+    _synthetic_capture(root / "stab_none", 32 + STABILITY_MAX_GAP + 1, rw, rh, ow, oh)
+    report = stability([load_manifest(p) for p in _manifest_paths(root / "stab_none")])
+    assert report["pairs"] == [] and "reset frame is not one" in report["status"]
+    _synthetic_capture(root / "stab_grid", 40, rw, rh, ow, oh)
+    _synthetic_capture(root / "stab_grid", 41, rw, rh, ow * 2, oh * 2)
+    assert stability([load_manifest(p) for p in _manifest_paths(root / "stab_grid")])["pairs"] == []
 
 
 def main(argv=None):
@@ -780,6 +1017,10 @@ def main(argv=None):
     parser.add_argument("--roi", action="append", nargs=4, metavar=("X", "Y", "W", "H"), type=int,
                         help="repeatable ROI in render/input pixels; default samples the full frame")
     parser.add_argument("--verify-fixture", action="store_true", help="verify the real WARP writer fixture")
+    parser.add_argument("--assume-static-scene", choices=("on", "off"),
+                        help="replay every frame as if the 3D main menu's stale-slot policy were on (or off) "
+                             "instead of as the capture declares it: what would it have done on a capture "
+                             "made before it existed. The rejection statistics stay what the GPU produced.")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -799,7 +1040,8 @@ def main(argv=None):
             if min(x, y) < 0 or min(width, height) < 1:
                 raise CaptureError("ROI coordinates must be nonnegative and dimensions positive")
             rois.append((f"roi_{index + 1}", (x, y, width, height)))
-        print(json.dumps(run(args.capture_dir, args.output, args.dry_run, rois), indent=2))
+        assumed = None if args.assume_static_scene is None else args.assume_static_scene == "on"
+        print(json.dumps(run(args.capture_dir, args.output, args.dry_run, rois, assumed), indent=2))
         return 0
     except (CaptureError, OSError) as exc:
         print(f"flat_pixels: {exc}", file=sys.stderr)

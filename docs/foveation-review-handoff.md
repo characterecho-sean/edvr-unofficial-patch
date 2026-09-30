@@ -2,6 +2,11 @@
 
 ## Status
 
+- **State: retired 2026-09-29 (code removed, 184eee7f).**
+  `experimental.foveation` and the seven `advanced.foveation_*` keys,
+  foveation.cpp and foveation.h and the eight probe shaders are deleted:
+  default off, zero fps gain when flown, and it could not arm under the OpenXR
+  port. This review is the record of what it was; the code is at `184eee7f^`.
 - **2026-09-24:** `experimental.foveation_centre` is retired. The
   eye-tracked centre it switched went on 2026-09-23 (frame_flag v34:
   nothing has published a gaze since the legacy openvr half was deleted),

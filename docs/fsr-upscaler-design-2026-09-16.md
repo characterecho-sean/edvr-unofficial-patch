@@ -9,48 +9,27 @@ read 2026-09-16) unless marked believed.
 ## Status
 
 - **State (2026-09-17): route 1 MERGED TO MAIN** after flights 1 to 3 on
-  Sean's rigs (Pimax and Quest 3, both clean; the VRAM figure fixed
-  first, c752ca3). `fix.temporal_aa = fsr` ships in the next release; the
-  "works on AMD" note waits on flight 4. The ask reframes on one
-  finding: AMD ships no Direct3D 11 backend for the FSR 3.1 upscaler on any
-  FidelityFX SDK tag (vendor-stated: `sdk/src/backends` holds dx12, shared
-  and vk only, at v1.1.4 and after; issue #58 "Porting to DX11" has been
-  open since 2024-02 with no AMD reply). Elite is a D3D11 game and EDVR's
-  pass runs on its device, so "the latest FSR 3" can come from only two
-  places: (1) the community D3D11 port of the SDK (metarutaiga, hardened by
-  the OptiScaler project; MIT; FSR 3.1.2; the path OptiScaler ships to D3D11
-  games), compiled into d3d11.dll; (2) a second, D3D12 device beside the
-  game's (a "sidecar") running AMD's own signed `amd_fidelityfx_upscaler.dll`
-  (FSR 4.1 on RDNA3/RDNA4, FSR 3.1.5 elsewhere), the only road to FSR 4.
+  Sean's rigs (Pimax and Quest 3, both clean; the VRAM figure fixed first,
+  c752ca3). `fix.temporal_aa = fsr` ships in the next release; the "works on
+  AMD" note waits on flight 4. AMD ships no Direct3D 11 backend for the FSR
+  3.1 upscaler (vendor-stated), so "the latest FSR 3" comes from only two
+  places: (1) the community D3D11 port (metarutaiga, hardened by OptiScaler;
+  MIT; FSR 3.1.2) compiled into d3d11.dll, which is route 1; (2) a D3D12
+  sidecar running AMD's signed DLL (FSR 4.1 on RDNA3/RDNA4, 3.1.5 elsewhere),
+  route 2, not built. The full reasoning is in Status detail below.
 - **Recommendation:** route 1 first, as `fix.temporal_aa = fsr`, a third
   engine at the seam where the pass already chooses between NVIDIA's history
   and its own (section 3); route 2 as a fourth engine (section 5) once route
   1 has flown on both rigs and an AMD supporter has reported.
-- **Route 1 IN PROGRESS (2026-09-16 evening) on branch
-  `claude/fsr3-amd-nvidia-upscaling-00b69f`, kept separate from main until
-  ready.** Sean took D1-D5 as recommended. Phase 0 landed as Track A
-  (`tools\fetch_ffx_dx11.py`, 4d0a5fb: fetch, build, stage and verify the
-  port) and Track B (b8cd3b2: the `fsr` value, the engine enum and helpers,
-  the seven readers, the seam, the ini text, the panel, and a stub engine
-  that refuses without the SDK), merged with main at 2c7c21e and green.
-  Track C landed as 6294f1f: the engine body under `EDVR_HAVE_FSR3`, the
-  build.bat block, the WARP rig `tools\fsr3_engine_test` (31 checks; the
-  jitter and motion signs settled at the engine's defaults, journal). No
-  install to any game directory without Sean's approval.
-- **Flight 1 FLOWN 2026-09-17 06:00 (e70a44e, Pimax, RTX 5090):** FSR
-  ran cleanly, on the upscale path (HMD Quality below 1: 2646x2206 and
-  3461x2884 into 4072x3394), contexts made in 2 to 4 ms, remade cleanly
-  on every size change, released on a live switch to `on`, remade on the
-  switch back; no refusal, no port messages. Price per stereo pair, full
-  region, median: fsr 1.6 to 2.1 ms against NGX's 2.9 to 3.6 at the same
-  sizes; 83 to 89 fps. Sean's verdict: slightly better than the pass's own
-  history, not as good as DLSS, as expected for FSR 3.1. Journal.
-- **Flights 2 and 3 answered the same morning (06:07, Quest 3 through
-  VirtualDesktopXR, same build):** FSR ran cleanly at 2611x2774 into
-  3072x3264 and later 3017x2160 into 3550x2542, 1.1 to 1.4 ms per stereo
-  pair, 86 to 90 fps, no refusal; Sean: the UI looks fine without the
-  reactive mask, so D3's default (off) stands and the mask stays a live
-  advanced key. Journal.
+- **Route 1 build (2026-09-16 evening, branch
+  `claude/fsr3-amd-nvidia-upscaling-00b69f`, since merged):** Track A
+  4d0a5fb, Track B b8cd3b2, merged with main 2c7c21e, Track C 6294f1f (WARP
+  rig `tools\fsr3_engine_test`, 31 checks). Full text: Status detail below.
+- **Flights (numbers in the journal):** 1 FLOWN 2026-09-17 06:00 (e70a44e,
+  Pimax, RTX 5090): clean, fsr 1.6 to 2.1 ms per stereo pair against NGX's
+  2.9 to 3.6, 83 to 89 fps; Sean: slightly better than the pass's own
+  history, not DLSS. 2 and 3 (06:07, Quest 3, VirtualDesktopXR): clean, 1.1
+  to 1.4 ms, 86 to 90 fps. Full entries: Status detail below.
 - **Next:** flight 4, an AMD supporter's log (the gate for a "works on
   AMD" release note); the exported-symbols nit in the fetch tool (Open);
   route 2 (FSR 4.1 through a D3D12 sidecar, section 5) only if DLSS-class
@@ -83,6 +62,48 @@ read 2026-09-16) unless marked believed.
   them (believed: NVIDIA before Maxwell) must get a clean refusal.
 - **Detail:** 1 what exists; 2 what AMD ships; 3 the design; 4 flights;
   5 the sidecar; 6 decisions; 7 declined; journal at the end.
+
+## Status detail (moved out of Status 2026-09-29)
+
+- **State (2026-09-17): route 1 MERGED TO MAIN** after flights 1 to 3 on
+  Sean's rigs (Pimax and Quest 3, both clean; the VRAM figure fixed
+  first, c752ca3). `fix.temporal_aa = fsr` ships in the next release; the
+  "works on AMD" note waits on flight 4. The ask reframes on one
+  finding: AMD ships no Direct3D 11 backend for the FSR 3.1 upscaler on any
+  FidelityFX SDK tag (vendor-stated: `sdk/src/backends` holds dx12, shared
+  and vk only, at v1.1.4 and after; issue #58 "Porting to DX11" has been
+  open since 2024-02 with no AMD reply). Elite is a D3D11 game and EDVR's
+  pass runs on its device, so "the latest FSR 3" can come from only two
+  places: (1) the community D3D11 port of the SDK (metarutaiga, hardened by
+  the OptiScaler project; MIT; FSR 3.1.2; the path OptiScaler ships to D3D11
+  games), compiled into d3d11.dll; (2) a second, D3D12 device beside the
+  game's (a "sidecar") running AMD's own signed `amd_fidelityfx_upscaler.dll`
+  (FSR 4.1 on RDNA3/RDNA4, FSR 3.1.5 elsewhere), the only road to FSR 4.
+- **Route 1 IN PROGRESS (2026-09-16 evening) on branch
+  `claude/fsr3-amd-nvidia-upscaling-00b69f`, kept separate from main until
+  ready.** Sean took D1-D5 as recommended. Phase 0 landed as Track A
+  (`tools\fetch_ffx_dx11.py`, 4d0a5fb: fetch, build, stage and verify the
+  port) and Track B (b8cd3b2: the `fsr` value, the engine enum and helpers,
+  the seven readers, the seam, the ini text, the panel, and a stub engine
+  that refuses without the SDK), merged with main at 2c7c21e and green.
+  Track C landed as 6294f1f: the engine body under `EDVR_HAVE_FSR3`, the
+  build.bat block, the WARP rig `tools\fsr3_engine_test` (31 checks; the
+  jitter and motion signs settled at the engine's defaults, journal). No
+  install to any game directory without Sean's approval.
+- **Flight 1 FLOWN 2026-09-17 06:00 (e70a44e, Pimax, RTX 5090):** FSR
+  ran cleanly, on the upscale path (HMD Quality below 1: 2646x2206 and
+  3461x2884 into 4072x3394), contexts made in 2 to 4 ms, remade cleanly
+  on every size change, released on a live switch to `on`, remade on the
+  switch back; no refusal, no port messages. Price per stereo pair, full
+  region, median: fsr 1.6 to 2.1 ms against NGX's 2.9 to 3.6 at the same
+  sizes; 83 to 89 fps. Sean's verdict: slightly better than the pass's own
+  history, not as good as DLSS, as expected for FSR 3.1. Journal.
+- **Flights 2 and 3 answered the same morning (06:07, Quest 3 through
+  VirtualDesktopXR, same build):** FSR ran cleanly at 2611x2774 into
+  3072x3264 and later 3017x2160 into 3550x2542, 1.1 to 1.4 ms per stereo
+  pair, 86 to 90 fps, no refusal; Sean: the UI looks fine without the
+  reactive mask, so D3's default (off) stands and the mask stays a live
+  advanced key. Journal.
 
 ## 1. What exists: the door, the inputs, the seam
 

@@ -33,7 +33,9 @@ inline const char* scatterFailureName(ScatterFailure f) {
     constexpr const char* names[]={"none","arguments","descriptor","clone_bound","shader","upload","map","view","counts","unexpected"};
     return names[static_cast<unsigned>(f)];
 }
-struct Stats { ScatterFailure lastScatterFailure=ScatterFailure::None; uint64_t emissions=0,copies=0,joined=0,declined=0,invalidated=0,overflows=0,scatterBatches=0,scatterRows=0,scatterFailed=0,scatterEmpty=0,sourceResets=0,copierNoLease=0,copierAmbiguous=0,copierInvalidRange=0,mergePlans=0,mergeFailed=0,clearCalls=0,clearedClaims=0,clearFailed=0; };
+struct Stats { ScatterFailure lastScatterFailure=ScatterFailure::None; uint64_t emissions=0,copies=0,joined=0,declined=0,invalidated=0,overflows=0,scatterBatches=0,scatterRows=0,scatterFailed=0,scatterEmpty=0,sourceResets=0,copierNoLease=0,copierAmbiguous=0,copierInvalidRange=0,mergePlans=0,mergeFailed=0,clearCalls=0,clearedClaims=0,clearFailed=0;
+    uint64_t mergeCalls=0,mergeWithoutClaims=0,clearNoClaims=0,mergeNodes=0,clearNodes=0,activeClaims=0,activePlans=0;
+};
 inline std::mutex g_mutex,g_gpuMutex;
 inline std::unordered_map<uintptr_t,Emission> g_emissions;
 inline std::unordered_map<ID3D11Buffer*,Pool> g_pools;
@@ -145,7 +147,7 @@ inline void endMap(ID3D11Buffer* resource,uint64_t sequence) noexcept {
 inline void forget(ID3D11Buffer* resource) noexcept {
     std::lock_guard<std::mutex> lock(g_mutex);g_pools.erase(resource);
 }
-inline Stats stats() {std::lock_guard<std::mutex> lock(g_mutex);return g_stats;}
+inline Stats stats();
 inline std::vector<Patch> patches(ID3D11Buffer* resource,uint32_t frame) {
     std::lock_guard<std::mutex> lock(g_mutex);std::vector<Patch> out;
     const auto i=g_pools.find(resource);
@@ -172,12 +174,22 @@ inline bool privateBound(ID3D11DeviceContext* ctx,ID3D11Buffer* buffer) {
 struct MergeTransfer { uintptr_t target=0; Emission emission; };
 struct MergePlan { std::vector<MergeTransfer> transfers; std::vector<uintptr_t> addresses; uint64_t epoch=0; uint32_t frame=0; bool invalid=false; };
 inline std::unordered_set<MergePlan*> g_mergePlans;
+inline Stats stats() {
+    std::lock_guard<std::mutex> lock(g_mutex);Stats result=g_stats;
+    result.activeClaims=g_emissions.size();result.activePlans=g_mergePlans.size();return result;
+}
 inline void invalidateClaims() {g_emissions.clear();++g_emissionEpoch;++g_stats.declined;++g_stats.mergeFailed;}
 // 36819D0 frees every list node in this typed336 dictionary. Destination
 // clear precedes a merge of unrelated source collections, so only claims in
 // nodes actually being freed may be revoked on a successful bounded walk.
-inline void invalidateDictionary(uintptr_t dictionary) noexcept {
+template<bool SkipNoClaims> inline void invalidateDictionaryImpl(uintptr_t dictionary) noexcept {
     std::lock_guard<std::mutex> lock(g_mutex);++g_stats.clearCalls;
+    // Only source claims and detached merge plans consume this walk. Copied
+    // GPU-pool certificates are independent and must stay intact. Future
+    // emissions register fresh ownership after this lock is released.
+    if constexpr(SkipNoClaims) {
+        if(g_emissions.empty() && g_mergePlans.empty()){++g_stats.clearNoClaims;return;}
+    }
     auto fail=[](){g_emissions.clear();++g_emissionEpoch;++g_stats.sourceResets;++g_stats.clearFailed;};
     try {
         uintptr_t buckets=0;uint64_t count=0;
@@ -197,6 +209,7 @@ inline void invalidateDictionary(uintptr_t dictionary) noexcept {
                     uint64_t header[4]{};
                     if(!node || node>UINTPTR_MAX-(emit::kNodeRecords+8*kBytes) || nodes.size()>=kMaxEmissions/8 ||
                        !nodes.insert(node).second || !emit::read(node,header,32) || header[1]!=previous || header[3]>8){fail();return;}
+                    ++g_stats.clearNodes;
                     for(uint32_t i=0;i<8;++i)addresses.insert(node+emit::kNodeRecords+uintptr_t(i)*kBytes);
                     previous=node;node=uintptr_t(header[0]);
                 }
@@ -210,12 +223,17 @@ inline void invalidateDictionary(uintptr_t dictionary) noexcept {
         for(auto* plan:g_mergePlans)for(auto address:plan->addresses)if(addresses.count(address)){plan->invalid=true;break;}
     }catch(...){fail();}
 }
+inline void invalidateDictionary(uintptr_t dictionary) noexcept {invalidateDictionaryImpl<true>(dictionary);}
 // 434E740: full eight-item nodes splice at the HEAD, preserving a nonempty
 // destination tail; partial nodes fill the
 // destination tail, then shift any remainder within their original node.
 // Claims are staged before ALL source slots/overwritten destinations clear.
 inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t frame) noexcept {
     std::lock_guard<std::mutex> lock(g_mutex);
+    ++g_stats.mergeCalls;
+    // Even an empty plan must retain its original clear/unwind semantics:
+    // a producer may register a claim between this callback and its end.
+    if(g_emissions.empty() && g_mergePlans.empty())++g_stats.mergeWithoutClaims;
     try {
         uintptr_t dstLinks[2]{},srcLinks[2]{};
         if(!destination || !source || destination==source ||
@@ -238,6 +256,7 @@ inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t fr
             if(!node || node==destination || node==tail || node>UINTPTR_MAX-(emit::kNodeRecords+8*kBytes) ||
                visited.size()>=kMaxEmissions/8 || !visited.insert(node).second ||
                !emit::read(node,header,sizeof(header)) || header[1]!=previous || header[3]==0 || header[3]>8) {invalidateClaims();return nullptr;}
+            ++g_stats.mergeNodes;
             const uint32_t count=uint32_t(header[3]);
             uint32_t fill=0;
             if(count!=8 && tail!=destination && tailCount!=8)fill=std::min(count,uint32_t(8-tailCount));
@@ -285,6 +304,14 @@ inline void endMergeOpaque(void* opaque,bool completed) noexcept {
         }
     } catch(...) {invalidateClaims();}
 }
+// Owned by one eye/source private pool, not by the shared compute cache:
+// left/right alternate every frame. Held resource identity prevents an old
+// view being reused for a different allocation at the same address.
+struct OutputCache {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11Buffer> pool;
+    ComPtr<ID3D11UnorderedAccessView> view;
+};
 struct GpuCache {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11ComputeShader> shader;
@@ -293,7 +320,7 @@ struct GpuCache {
     uint32_t capacity=0;
 };
 inline GpuCache g_gpu;
-inline bool apply(ID3D11DeviceContext* ctx,ID3D11Buffer* privatePool,ID3D11Buffer* sourcePool,uint32_t frame) noexcept {
+inline bool apply(ID3D11DeviceContext* ctx,ID3D11Buffer* privatePool,ID3D11Buffer* sourcePool,uint32_t frame,OutputCache& output) noexcept {
     auto fail=[](ScatterFailure why){std::lock_guard<std::mutex> lock(g_mutex);++g_stats.scatterFailed;g_stats.lastScatterFailure=why;return false;};
     if(!ctx || !privatePool || !sourcePool || privatePool==sourcePool)return fail(ScatterFailure::Arguments);
     try {
@@ -305,6 +332,7 @@ inline bool apply(ID3D11DeviceContext* ctx,ID3D11Buffer* privatePool,ID3D11Buffe
         if(privateBound(ctx,privatePool))return fail(ScatterFailure::Bound);
         ComPtr<ID3D11Device> device;ctx->GetDevice(&device);
         if(g_gpu.device.Get()!=device.Get()){g_gpu={};g_gpu.device=device;}
+        if(output.device.Get()!=device.Get() || output.pool.Get()!=privatePool)output={};
         if(!g_gpu.shader && FAILED(device->CreateComputeShader(kEnginePrimaryCopyScatterBytecode,sizeof(kEnginePrimaryCopyScatterBytecode),nullptr,&g_gpu.shader)))return fail(ScatterFailure::Shader);
         if(g_gpu.capacity<work.size()) {
             g_gpu.upload.Reset();g_gpu.input.Reset();g_gpu.capacity=0;
@@ -319,7 +347,11 @@ inline bool apply(ID3D11DeviceContext* ctx,ID3D11Buffer* privatePool,ID3D11Buffe
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if(FAILED(ctx->Map(g_gpu.upload.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(ScatterFailure::Map);
         std::memcpy(mapped.pData,work.data(),work.size()*sizeof(Patch));ctx->Unmap(g_gpu.upload.Get(),0);
-        ComPtr<ID3D11UnorderedAccessView> output;if(FAILED(device->CreateUnorderedAccessView(privatePool,nullptr,&output)))return fail(ScatterFailure::View);
+        if(!output.view) {
+            ComPtr<ID3D11UnorderedAccessView> view;
+            if(FAILED(device->CreateUnorderedAccessView(privatePool,nullptr,&view)))return fail(ScatterFailure::View);
+            output.device=device;output.pool=privatePool;output.view=std::move(view);
+        }
         const uint32_t counts[4]={UINT(work.size()),d.ByteWidth/kBytes,0,0};
         if(!g_gpu.count){D3D11_BUFFER_DESC cb{};cb.ByteWidth=16;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
             if(FAILED(device->CreateBuffer(&cb,nullptr,&g_gpu.count)))return fail(ScatterFailure::Counts);}
@@ -330,7 +362,7 @@ inline bool apply(ID3D11DeviceContext* ctx,ID3D11Buffer* privatePool,ID3D11Buffe
         ComPtr<ID3D11UnorderedAccessView> savedOutput;ctx->CSGetUnorderedAccessViews(0,1,&savedOutput);
         ComPtr<ID3D11Buffer> savedCount;ctx->CSGetConstantBuffers(0,1,&savedCount);
         ctx->CSSetShader(g_gpu.shader.Get(),nullptr,0);ctx->CSSetShaderResources(0,1,g_gpu.input.GetAddressOf());
-        ctx->CSSetUnorderedAccessViews(0,1,output.GetAddressOf(),nullptr);ctx->CSSetConstantBuffers(0,1,g_gpu.count.GetAddressOf());
+        ctx->CSSetUnorderedAccessViews(0,1,output.view.GetAddressOf(),nullptr);ctx->CSSetConstantBuffers(0,1,g_gpu.count.GetAddressOf());
         ctx->Dispatch((UINT(work.size())+63)/64,1,1);
         ID3D11UnorderedAccessView* empty=nullptr;ctx->CSSetUnorderedAccessViews(0,1,&empty,nullptr);
         ctx->CSSetShaderResources(0,1,savedInput.GetAddressOf());ctx->CSSetUnorderedAccessViews(0,1,savedOutput.GetAddressOf(),nullptr);

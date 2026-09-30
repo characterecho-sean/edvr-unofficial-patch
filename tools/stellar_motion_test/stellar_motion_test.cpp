@@ -18,6 +18,10 @@ ComPtr<ID3DBlob> compile(const char* source,const char* profile){
     if(FAILED(h)&&error)std::puts(static_cast<const char*>(error->GetBufferPointer()));hr(h);return code;
 }
 namespace edvr {
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*){
+    ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
+    hr(dev->CreateComputeShader(bytes,size,nullptr,&shader));return shader;
+}
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,const char* s,size_t,const char*,const char*,const SwapMacro*,const char*){
     auto code=compile(s,"cs_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
     hr(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader));return shader;

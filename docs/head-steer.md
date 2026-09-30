@@ -127,9 +127,9 @@ cadence:
 against the anchor-yaw delta the camera buffer reports, continuously, so a
 player changing their mouse sensitivity mid-session just changes the
 constant the loop measures. If the anchor read is unavailable (camera
-records rebuilding — the near-planet gaps the view-bridge already
-handles), the servo pauses rather than running open-loop: an unmeasured
-injection is how a view runs away.
+records rebuilding — the near-planet gaps the view-bridge used to hold
+through; it was removed 2026-09-29), the servo pauses rather than running
+open-loop: an unmeasured injection is how a view runs away.
 
 ## Phases
 
@@ -178,8 +178,8 @@ mechanism is measured-dead and its use case is `head_steer_trim_yaw`.
   SendInput); Phase 0's probe answers it in one press. If no: the
   DirectInput proxy is the fallback surface.
 - **Camera-record gaps near planets** (measured elsewhere): the anchor
-  read pauses the servo; the view-bridge lesson says expect ten-to-thirty
-  second rebuild windows.
+  read pauses the servo; the (since removed) view-bridge lesson says expect
+  ten-to-thirty second rebuild windows.
 - **Comfort**: continuous steering is vection; the defaults
   (only-while-moving, rate cap, deadband) are the standard mitigations,
   and Phase 2's snap-on-entry is the fallback UX if continuous steering

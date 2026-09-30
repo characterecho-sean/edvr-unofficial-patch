@@ -81,11 +81,26 @@ struct FlatMonoResolveFrame {
     // vendor's queried ranges; the resolver uses it only when the route
     // itself is not refused.
     uint32_t evalWidth = 0, evalHeight = 0;
-    float camera[6][4] = {}, previousCamera[6][4] = {}; // unjittered b1[270..275]
+    float camera[6][4] = {}, previousCamera[6][4] = {}; // b1[270..275], unjittered unless rowsJitter* below says otherwise
     // Actual raster phases in render pixels, positive right/down. Camera rows
     // and engine scene snapshots above remain raw and unjittered. Zero defaults
     // preserve the current runtime until projection coverage is qualified.
     float jitterX = 0, jitterY = 0, previousJitterX = 0, previousJitterY = 0;
+    // The raster phase the ROWS THEMSELVES carry, same unit and sign as the phases
+    // above. Nonzero only when the game derived b1[270..275] from a jittered
+    // frustum (the upstream camera injector, flat_camera_phase.h): rows 0..3 then
+    // hold x += ndcX*w, y += ndcY*w, and the resolver removes it from camera,
+    // previousCamera and the engine's scene snapshots before any reprojection.
+    // Zero (the default, and every path before the C3 wiring) leaves every row
+    // untouched and the shader's arithmetic bit-identical to before the field.
+    // On a reset the previous rows are the current rows, so previous is ignored.
+    float rowsJitterX = 0, rowsJitterY = 0, previousRowsJitterX = 0, previousRowsJitterY = 0;
+    // The 3D main menu (2026-09-29): the frame's contract came through the verified menu HDR copy, so
+    // the scene is a ship on its pedestal and nothing moves but the camera. Only then does a pixel whose
+    // engine slot was overdrawn by a draw that never wrote it (an unkeyed hull) take the camera term
+    // instead of refusing history. False (the default, and every frame outside that menu) leaves the
+    // shader's arithmetic bit-identical to before the field.
+    bool staticScene = false;
     EngineVelocityViews engine{};
     uint64_t frame = 0;
     float deltaMs = 0;
@@ -140,8 +155,14 @@ struct FlatMonoResolveStats {
     uint64_t invalidPreviousCameras = 0, formatChanges = 0, cameraCuts = 0;
     uint64_t backendFailures = 0;
     uint64_t currentContinueRun = 0, longestContinueRun = 0;
+    // The last resolve's EFFECTIVE reset (the requested one, or a lost history, a frame gap, an
+    // invalid previous camera, a format change or a camera cut): what the pixel capture writes
+    // as "reset" and what decides whether the frame is a live sample.
+    bool lastReset = false;
 };
 FlatMonoResolveStats flatMonoResolveStats();
+// Whether the last resolve reset (flatCaptureFrameLive, flat_pixel_capture_policy.h).
+bool flatMonoResolveLastReset();
 // Owner thread, before rasterization. Validates planned dimensions/mode/source
 // metadata, allocates renderer resources including the spatial fallback output,
 // then checks external backend availability. A Ready result proves fallback

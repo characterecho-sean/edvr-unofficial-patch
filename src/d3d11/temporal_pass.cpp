@@ -1,14 +1,17 @@
+#include "fixed_shader_source.h"
 #include "temporal_pass.h"
 #include "temporal_history.h"
 #include "../common/runtime_profile.h"
 #include "draw_census.h"
 #include "eye_engine_capture.h"
+#include "eye_final_capture.h"
 
 #include <algorithm>  // std::sort, the price report's median/p95
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>   // strtof, advanced.temporal_aa_fovea's "edges" vs a width
 #include <cstring>
+#include <string>    // the UI resolve's unbound-inputs note
 #include <utility>   // std::swap, for the depth carry's pointer swap
 #include <vector>    // the eye dump's row buffer
 #include <mutex>
@@ -80,83 +83,7 @@ namespace {
 // the own history, so content that leaves the fovea carries NVIDIA's
 // converged pixels into the periphery and decays there over frames instead
 // of stepping at the seam.
-constexpr char kFoveaCsHlsl[] = R"HLSL(
-Texture2D<float4> PERIPH : register(t0);   // the periphery: NVIDIA's reduced DLAA or the own history, any size
-Texture2D<float4> FOVEA  : register(t1);   // NVIDIA's output, native size, valid in the crop
-RWTexture2D<float4> FO   : register(u0);   // the composited native frame, game format
-RWTexture2D<float4> HIST : register(u1);   // the own history being written this frame (mode.y)
-SamplerState SMP : register(s0);           // bilinear clamp, for the periphery upscale
-cbuffer FC : register(b0) {
-    float4 crop;   // output crop x0 y0 x1 y1 in native pixels, x1/y1 exclusive
-    float4 band;   // x the blend band in pixels; y the output width, z the output height; w the periphery's width
-    float4 disc;   // xy the fovea's centre in native pixels, zw its half-extents (the ellipse's semi-axes)
-    float4 mode;   // x 1 = round fovea (else the rectangle); y 1 = write the history too; z 1 = the periphery is smaller than the output (bicubic); w the periphery's height
-};
-// Catmull-Rom through nine bilinear fetches (the pass's own kernel, C = 0.5),
-// for a periphery smaller than the output: sharper than the bilinear
-// upscale, mild ringing, the standard upscaling kernel.
-float4 periphCubic(float2 uv, float2 tsize) {
-    const float C = 0.5;
-    float2 sp = uv * tsize;
-    float2 t1 = floor(sp - 0.5) + 0.5;
-    float2 f = sp - t1;
-    float2 g0 = 1.0 + f;
-    float2 g3 = 2.0 - f;
-    float2 w0 = C * (-g0 * g0 * g0 + 5.0 * g0 * g0 - 8.0 * g0 + 4.0);
-    float2 w1 = (2.0 - C) * f * f * f + (C - 3.0) * f * f + 1.0;
-    float2 h = 1.0 - f;
-    float2 w2 = (2.0 - C) * h * h * h + (C - 3.0) * h * h + 1.0;
-    float2 w3 = C * (-g3 * g3 * g3 + 5.0 * g3 * g3 - 8.0 * g3 + 4.0);
-    float2 w12 = w1 + w2;
-    float2 o12 = w2 / w12;
-    float2 t0 = (t1 - 1.0) / tsize;
-    float2 t3 = (t1 + 2.0) / tsize;
-    float2 t12 = (t1 + o12) / tsize;
-    float4 r = 0.0;
-    r += PERIPH.SampleLevel(SMP, float2(t0.x, t0.y), 0) * w0.x * w0.y;
-    r += PERIPH.SampleLevel(SMP, float2(t12.x, t0.y), 0) * w12.x * w0.y;
-    r += PERIPH.SampleLevel(SMP, float2(t3.x, t0.y), 0) * w3.x * w0.y;
-    r += PERIPH.SampleLevel(SMP, float2(t0.x, t12.y), 0) * w0.x * w12.y;
-    r += PERIPH.SampleLevel(SMP, float2(t12.x, t12.y), 0) * w12.x * w12.y;
-    r += PERIPH.SampleLevel(SMP, float2(t3.x, t12.y), 0) * w3.x * w12.y;
-    r += PERIPH.SampleLevel(SMP, float2(t0.x, t3.y), 0) * w0.x * w3.y;
-    r += PERIPH.SampleLevel(SMP, float2(t12.x, t3.y), 0) * w12.x * w3.y;
-    r += PERIPH.SampleLevel(SMP, float2(t3.x, t3.y), 0) * w3.x * w3.y;
-    return r;
-}
-[numthreads(8, 8, 1)]
-void fovea(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= (uint)band.y || id.y >= (uint)band.z) return;
-    int2 p = int2(id.xy);
-    float b = max(band.x, 1.0);
-    float w;
-    if (mode.x != 0.0) {
-        // The disc: the normalised radius in the ellipse inscribed in the
-        // crop, turned back into pixels inside its edge along the minor axis.
-        float2 n = (float2(p) + 0.5 - disc.xy) / max(disc.zw, 1.0);
-        float d = (1.0 - length(n)) * min(disc.z, disc.w);
-        w = saturate(d / b);
-    } else {
-        float dx = min((float)p.x - crop.x, crop.z - 1.0 - (float)p.x);
-        float dy = min((float)p.y - crop.y, crop.w - 1.0 - (float)p.y);
-        w = saturate(min(dx, dy) / b);     // pixels inside the crop's nearest edge
-    }
-    w = w * w * (3.0 - 2.0 * w);           // smoothstep across the band
-    // The periphery is sampled by normalised uv, so any size lands on the
-    // native output: bicubic when it is smaller, an exact fetch at 1:1 (the
-    // uv lands on texel centres). The fovea is native, read where it is
-    // valid (strictly inside the fovea, where w > 0).
-    float2 uv = (float2(p) + 0.5) / float2(band.y, band.z);
-    float4 per = mode.z != 0.0 ? periphCubic(uv, float2(band.w, mode.w))
-                               : PERIPH.SampleLevel(SMP, uv, 0);
-    float4 fov = w > 0.0 ? FOVEA.Load(int3(p, 0)) : per;
-    float4 o = lerp(per, fov, w);
-    FO[p] = o;
-    // The hand-off into the own history (mode.y, the sharp periphery at 1:1):
-    // inside the fovea and its band the history takes the blended result.
-    if (mode.y != 0.0 && w > 0.0) HIST[p] = float4(o.rgb, 1.0);
-}
-)HLSL";
+
 
 // The steady periphery's reduction (feature 6): the render-size colour,
 // depth and motion the trained path built, resampled down to the
@@ -174,50 +101,7 @@ void fovea(uint3 id : SV_DispatchThreadID) {
 // depth-aware filter does at an edge; the motion is the vector of that
 // nearest sample, scaled into the reduced pixels, so depth and motion stay
 // the same surface's.
-constexpr char kDownCsHlsl[] = R"HLSL(
-Texture2D<float4> DC : register(t0);    // the colour, render size
-Texture2D<float>  DZ : register(t1);    // the depth copy, render size
-Texture2D<float2> DM : register(t2);    // the motion vectors, render pixels
-RWTexture2D<float4> PC : register(u0);  // the reduced colour
-RWTexture2D<float>  PZ : register(u1);  // the reduced depth
-RWTexture2D<float2> PM : register(u2);  // the reduced motion, reduced pixels
-cbuffer DS : register(b0) {
-    float4 dims;   // x reduced width, y reduced height, z render width, w render height
-    float4 par;    // x unused (was the block side), y the scale (reduced / render), zw unused
-};
-[numthreads(8, 8, 1)]
-void down(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= (uint)dims.x || id.y >= (uint)dims.y) return;
-    float2 q = dims.zw / dims.xy;                    // render pixels per reduced pixel, > 1
-    float2 x0 = float2(id.xy) * q;                   // the footprint [x0, x1) in render pixels
-    float2 x1 = x0 + q;
-    int2 k0 = int2(floor(x0));
-    int2 k1 = min(int2(ceil(x1)), int2(dims.zw));    // exclusive
-    float4 c = 0.0;
-    float wsum = 0.0;
-    float zmax = -1.0;
-    float2 mv = 0.0;
-    [loop] for (int y = k0.y; y < k1.y; ++y) {
-        float wy = min((float)y + 1.0, x1.y) - max((float)y, x0.y);
-        [loop] for (int x = k0.x; x < k1.x; ++x) {
-            float wx = min((float)x + 1.0, x1.x) - max((float)x, x0.x);
-            float w = wx * wy;
-            if (w <= 0.0) continue;
-            int2 s = int2(x, y);
-            c += DC.Load(int3(s, 0)) * w;
-            wsum += w;
-            float z = DZ.Load(int3(s, 0));
-            if (z > zmax) {
-                zmax = z;
-                mv = DM.Load(int3(s, 0));
-            }
-        }
-    }
-    PC[id.xy] = c / max(wsum, 1e-6);
-    PZ[id.xy] = max(zmax, 0.0);
-    PM[id.xy] = mv * par.y;
-}
-)HLSL";
+
 
 // The cbuffer above, laid out to match: 528 bytes, thirty-three 16-byte rows
 // (the estimated body, ship and stepped-part rows retired 2026-09-23).
@@ -1378,8 +1262,10 @@ ID3D11ComputeShader* ownShader(ID3D11DeviceContext* ctx, bool diagnostics) {
 ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
 ID3D11ComputeShader*       g_csUiResolve = nullptr;
 bool                      g_csUiResolveTried = false, g_uiResolveNoted = false;
-ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tolerance/255, corona hold, 0, 0}
+ID3D11Buffer*              g_uiResolveTolCb = nullptr;   // UI resolve b1: {tolerance/255, corona hold, inputs not bound (bits), 0}
 static bool                g_coronaHoldNoted = false;    // corona-smear hold: said once, only when the hold written is > 0
+static bool                g_uiResolveUnboundNoted[8] = {};   // one line for each combination of unbound inputs the resolve has run with
+static uint64_t            g_uiResolveDispatches = 0, g_uiResolveLacked[3] = {};   // the full-frame path's dispatches, and how many lacked coverage / source edits / history
 bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
@@ -1577,6 +1463,9 @@ int              g_eyeRunLeft = 0;    // captures still to take
 int              g_eyeRunTaken = 0;
 wchar_t          g_eyeRunStamp[16] = L"";
 bool             g_eyeRunReady = false;
+eye_final_capture::Run g_eyeFinalRun;
+eye_final_capture::Clock g_eyeFinalClock; // boundary clock also advances with AA off
+wchar_t g_eyeFinalStamp[16]=L"";
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
 bool             g_eyeTreatedWritten[kEyeRun] = {};
@@ -2242,7 +2131,51 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
 
 // The run's write after its last crop: the sixteen crops (raw C00.., or
 // treated T00..) and the first treated frame whole.
+void writeFinalEyeRun(ID3D11DeviceContext* ctx,const char* reason) {
+    if(!g_eyeFinalRun.armed)return;
+    ID3D11DeviceContext* ownedContext=nullptr;
+    if(g_eyeFinalRun.captureDevice){const bool ran=guarded("eye capture/final flush context",[&]{g_eyeFinalRun.captureDevice->GetImmediateContext(&ownedContext);});ctx=ran?ownedContext:nullptr;}
+    const std::wstring dir=Log::get().dir()+L"\\eyes";
+    CreateDirectoryW(dir.c_str(),nullptr);
+    unsigned copied=0,written=0,missing=0;
+    auto write=[&](eye_final_capture::Image& image,const wchar_t* suffix,int eye) {
+        if(!image.sequence){++missing;return;}
+        if(!image.writable())return; // published resource alone does not prove Copy completed
+        ++copied;
+        wchar_t path[MAX_PATH];
+        _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_FinalCrisp_%s.bmp",dir.c_str(),g_eyeFinalStamp,suffix);
+        bool ok=false;
+        const bool ran=guarded("eye capture/final readback",[&]{D3D11_TEXTURE2D_DESC d{};image.staging->GetDesc(&d);ok=ctx&&writeEyeBmp(ctx,image.staging,d,eye,path);});
+        ok=ran&&ok;
+        image.status=ok?"written":"readback_or_write_failed";
+        if(ok)++written;
+    };
+    for(unsigned k=0;k<eye_final_capture::Count;++k)
+        for(unsigned eye=0;eye<2;++eye){wchar_t suffix[16];_snwprintf_s(suffix,16,_TRUNCATE,L"%c%02u",eye?L'R':L'L',k);write(g_eyeFinalRun.rows[k].eye[eye],suffix,int(eye));}
+    for(unsigned eye=0;eye<2;++eye)write(g_eyeFinalRun.overview[eye],eye?L"ROverview":L"LOverview",int(eye));
+    wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_FinalCrisp.json",dir.c_str(),g_eyeFinalStamp);
+    FILE* f=nullptr;_wfopen_s(&f,path,L"wb");bool manifest=false;
+    if(f){
+        fprintf(f,"{\"schema\":1,\"stage\":\"after_ui_layer_composite_before_runtime_menu\",\"stamp\":\"%ls\",\"reason\":\"%s\",\"requested\":16,\"crop_policy\":\"centre_1400_native_pixels_per_eye\",\"crop_coordinates\":\"unflipped_texture_x0_y0_x1_y1\",\"budget_bytes\":%llu,\"reserved_bytes\":%llu,\"blob_cap_bytes\":%llu,\"unmatched\":%u,\"duplicates\":%u,\"images\":[\n",g_eyeFinalStamp,reason,(unsigned long long)eye_final_capture::Budget,(unsigned long long)g_eyeFinalRun.bytes,(unsigned long long)eye_final_capture::BlobCap,g_eyeFinalRun.unmatched,g_eyeFinalRun.duplicates);
+        bool first=true;
+        auto record=[&](const eye_final_capture::Image& image,int index,unsigned eye,uint32_t scene,const wchar_t* suffix){
+            const unsigned k=index<0?0u:unsigned(index);const EyeDecisionFrame& temporal=g_eyeDecisions[k];
+            fprintf(f,"%s{\"index\":%d,\"scheduled\":%s,\"eye\":%u,\"frame\":%u,\"capture_sequence\":%llu,\"source_size\":[%u,%u],\"format\":%u,\"crop\":[%u,%u,%u,%u],\"composite_applied\":%s,\"flip_u\":%s,\"flip_v\":%s,\"status\":\"%s\",\"file\":",first?"":",\n",index,(index<0?g_eyeFinalRun.rows[0].scheduled:g_eyeFinalRun.rows[index].scheduled)?"true":"false",eye,scene,(unsigned long long)image.sequence,image.width,image.height,image.format,image.crop[0],image.crop[1],image.crop[2],image.crop[3],image.composite?"true":"false",image.flipU?"true":"false",image.flipV?"true":"false",image.status);
+            if(!strcmp(image.status,"written"))fprintf(f,"\"eye_%ls_FinalCrisp_%ls.bmp\"",g_eyeFinalStamp,suffix);else fputs("null",f);
+            fprintf(f,",\"capture_epoch\":%u,\"submit_region\":[%u,%u,%u,%u],\"temporal_input_size\":[%u,%u],\"temporal_output_size\":[%u,%u],\"temporal_output_crop\":[%u,%u,%u,%u],\"temporal_reference_eye\":0,\"temporal_mapping\":\"temporal_xy=(native_xy-submit_region_xy0)*temporal_output_size/submit_region_size; P/T_local_xy=temporal_xy-temporal_output_crop_xy; unflipped\"}",g_eyeFinalRun.rows[k].epoch,image.submitRegion[0],image.submitRegion[1],image.submitRegion[2],image.submitRegion[3],temporal.inputW,temporal.inputH,temporal.outputW,temporal.outputH,temporal.outputCrop[0],temporal.outputCrop[1],temporal.outputCrop[2],temporal.outputCrop[3]);first=false;
+        };
+        for(unsigned k=0;k<eye_final_capture::Count;++k)
+            for(unsigned eye=0;eye<2;++eye){wchar_t suffix[16];_snwprintf_s(suffix,16,_TRUNCATE,L"%c%02u",eye?L'R':L'L',k);record(g_eyeFinalRun.rows[k].eye[eye],int(k),eye,g_eyeFinalRun.rows[k].scene,suffix);}
+        for(unsigned eye=0;eye<2;++eye)record(g_eyeFinalRun.overview[eye],-1,eye,g_eyeFinalRun.rows[0].scene,eye?L"ROverview":L"LOverview");
+        fputs("\n]}\n",f);const bool clean=!ferror(f);const int closed=fclose(f);manifest=clean&&closed==0;
+    }
+    Log::get().note("eye capture: FinalCrisp run %ls: reason=%s, scheduled=%u/16, copied=%u, written=%u, missing=%u, unmatched=%u, duplicate=%u, bytes=%llu/%llu; manifest %s. Separate native-pixel crops after crisp composition; T/P/L0 retain temporal-stage semantics.",g_eyeFinalStamp,reason,g_eyeFinalRun.count,copied,written,missing,g_eyeFinalRun.unmatched,g_eyeFinalRun.duplicates,(unsigned long long)g_eyeFinalRun.bytes,(unsigned long long)eye_final_capture::Budget,manifest?"written":"write failed");
+    g_eyeFinalRun.reset();
+    if(ownedContext)guarded("eye capture/final flush context release",[&]{ownedContext->Release();});
+}
+
 void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
+    g_eyeFinalRun.ready=true;
     const std::wstring dir = Log::get().dir() + L"\\eyes";
     if (!g_eyeDumpDirMade) {
         g_eyeDumpDirMade = true;
@@ -2322,6 +2255,7 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
                         wrote, g_eyeRunStamp, g_eyeRunTaken - 1, cw, ch, wroteTreated, g_eyeRunStamp);
     }
     g_eyeRunTaken = 0;
+    if(g_eyeFinalRun.complete())writeFinalEyeRun(ctx,"complete");
 }
 
 // Called at Submit even when temporal AA is disabled. Copies only; no
@@ -2335,6 +2269,8 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
     ID3D11Device* dev=nullptr;ID3D11DeviceContext* ctx=nullptr;
     tex->GetDevice(&dev);if(!dev)return;dev->GetImmediateContext(&ctx);dev->Release();if(!ctx)return;
     g_eyeRunUntreated=true;
+    if(eye==1&&g_eyeRunLeft>0&&g_eyeFinalRun.find(g_eyeFinalClock.epoch)<0)
+        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame);
     const uint32_t w=region[2]-region[0],h=region[3]-region[1];uint32_t cw=0,ch=0;
     if(!g_eyeOverviewTaken[eye])g_eyeOverviewTaken[eye]=stageEyeCrop(ctx,tex,&g_eyeRunStaging[eye],&cw,&ch,region,w,h);
     if(eye==0 && g_eyeRunLeft>0 && g_eyeRunTaken<kEyeRun) {
@@ -2342,6 +2278,7 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
         if(stageEyeCrop(ctx,tex,&g_eyeRawStaging[k],&cw,&ch,region)) {
             g_eyeRawTaken[k]=true;g_eyeRawInputW[k]=w;g_eyeRawInputH[k]=h;
             g_eyeRunFrames[k]=g_rowsFrame;objectProbeLedgerMark(k);
+            g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_rowsFrame);
             ++g_eyeRunTaken;--g_eyeRunLeft;
             if(g_eyeRunLeft==0){g_eyeRunReady=true;g_eyeRunWidth=cw;g_eyeRunHeight=ch;}
         }
@@ -2360,6 +2297,7 @@ void captureEyeRunRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour) {
     uint32_t cw = 0, ch = 0;
     if (!stageEyeCrop(ctx, colour, &g_eyeRawStaging[k], &cw, &ch)) { g_eyeRunLeft = 0; return; }
     objectProbeLedgerMark(k);   // the ledger's frame for this crop
+    g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_rowsFrame);
     ++g_eyeRunTaken;
     --g_eyeRunLeft;
     if (g_eyeRunLeft > 0) return;
@@ -2376,6 +2314,7 @@ void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
         return;
     }
     const int k = g_eyeRunTaken;
+    if(k>=0&&k<kEyeRun)g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_eyeCaptureFrame);
     if (!tex || k < 0 || k >= kEyeRun) {
         if (k >= 0 && k < kEyeRun) ++g_eyeRunTaken;
         g_eyeRunLeft = 0; g_eyeRunReady = g_eyeRunTaken > 0; return;
@@ -2978,14 +2917,14 @@ bool ensureNative(ID3D11Device* dev, EyeState& e, DXGI_FORMAT viewFmt) {
 
 // DLSS where you look (docs/performance.md feature 6), the crop's geometry:
 // pure, no D3D11, no globals -- cropOf below (temporalInner) is its only
-// caller in the pass, and tools\smoke's edvrFoveaRegionSelftest exercises
-// it directly with no device.
+// caller in the pass. (tools\smoke's edvrFoveaRegionSelftest used to
+// exercise it directly with no device; removed 2026-09-29.)
 //
 // An edge's own half-angle in the RENDERED frame is atan(|tangent|); the
 // region's half-angle at that edge is the frame's own angle there minus
 // reducedTrimDeg -- the caller has already reduced the fovea's edge trim by
-// however much the FOV trim (fix.fov_trim_vertical/_outer/_nasal) already
-// cut that same edge -- floored at 2 degrees so a trim cannot close or
+// however much the FOV trim (experimental.fov_trim_vertical/_outer/_nasal)
+// already cut that same edge -- floored at 2 degrees so a trim cannot close or
 // invert an edge. A trim that reaches (or passes) the frame's own angle
 // leaves the region sitting AT that edge: no periphery strip there.
 float foveaEdgeRegionDeg(float edgeTan, float reducedTrimDeg) {
@@ -3024,9 +2963,9 @@ struct FoveaRegion {
 // l,r,down,up: this eye's four frame tangents. fw,fh: the frame those
 // tangents describe, in pixels. eyeIndex: 0 the left eye (its outer edge
 // is the left/l tangent, its nasal edge the right/r), 1 the right eye (the
-// reverse) -- confirmed by foveation.cpp's own mirrored tangent build (*l
-// = eye==0 ? -outer : -inner, *r = eye==0 ? inner : outer) and
-// frame_flag.h's "0 left, 1 right". minPx: the smallest crop worth
+// reverse) -- confirmed by the mirrored tangent build of the since-removed
+// shading-rate module (*l = eye==0 ? -outer : -inner, *r = eye==0 ? inner :
+// outer) and frame_flag.h's "0 left, 1 right". minPx: the smallest crop worth
 // NVIDIA's seam (128 today, cropOf's own floor); under it, ok is false and
 // the caller runs full-frame -- same as an unreachable r<=l or up<=down
 // frame, and the same as the mode being off (widthDeg <= 0 and not
@@ -3091,7 +3030,8 @@ FoveaRegion computeFoveaRegion(float l, float r, float down, float up,
 
 // THE HEAD LEAD's geometry (advanced.temporal_aa_fovea_lead, the state and
 // the "why" are up at g_foveaLead): three pure functions, no D3D11 and no
-// globals, exercised by edvrFoveaRegionSelftest's bit 32.
+// globals (edvrFoveaRegionSelftest's bit 32 used to exercise them; removed
+// 2026-09-29).
 //
 // A far point's motion at the frame's CENTRE, in render pixels, in exactly
 // the convention the motion-vector shader writes and NGX reads
@@ -4216,14 +4156,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         bool periphOk = false;           // the periphery eval ran and accumulated this frame
         if (foveaWanted && !g_csFovea && !g_csFoveaTried) {
             g_csFoveaTried = true;
-            g_csFovea = shaderSwapCompileCs(ctx, kFoveaCsHlsl, sizeof(kFoveaCsHlsl) - 1,
-                                            "fovea", "temporal_fovea_cs", nullptr,
-                                            "temporal aa");
+            g_csFovea = shaderSwapCreateCs(ctx,kTemporalFoveaBytecode,sizeof(kTemporalFoveaBytecode),"temporal_fovea_cs","temporal aa");
         }
         if (foveaWanted && g_periphSteady && !g_csDown && !g_csDownTried) {
             g_csDownTried = true;
-            g_csDown = shaderSwapCompileCs(ctx, kDownCsHlsl, sizeof(kDownCsHlsl) - 1,
-                                           "down", "temporal_down_cs", nullptr, "temporal aa");
+            g_csDown = shaderSwapCreateCs(ctx,kTemporalDownBytecode,sizeof(kTemporalDownBytecode),"temporal_down_cs","temporal aa");
         }
         if (foveaWanted && g_csFovea) warmNoteFirstTreat();   // before NGX's first ask, below
         if (foveaWanted && g_csFovea && dlaaAvailable(dev, nullptr)) {
@@ -4260,9 +4197,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     FoveaRegionMode mode;
                     if (g_foveaEdges) {
                         // vertical, outer, nasal -- kTrimNames' own order. Top
-                        // and bottom both reduce against fovTrim[0]: fix.fov_
-                        // trim_vertical trims the top and bottom equally, so
-                        // there is only the one FOV number for either edge.
+                        // and bottom both reduce against fovTrim[0]:
+                        // experimental.fov_trim_vertical trims the top and
+                        // bottom equally, so there is only the one FOV number
+                        // for either edge.
                         uint32_t fovTrim[3] = {0, 0, 0};
                         nativeFrameFovTrimDegrees(fovTrim);
                         auto reduced = [](float foveaTrimDeg, uint32_t fovTrimDeg) {
@@ -4592,7 +4530,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         auto applyUiResolve = [&](ID3D11ShaderResourceView* nvidiaOutput, bool withHistory) -> bool {
             if (uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
                 g_csUiResolveTried = true;
-                g_csUiResolve = shaderSwapCompileCs(ctx, kUiResolve, sizeof(kUiResolve) - 1, "main", "UI resolve", nullptr, "UI resolve");
+                g_csUiResolve = shaderSwapCreateCs(ctx, kUiResolveBytecode, sizeof(kUiResolveBytecode), "UI resolve", "UI resolve");
             }
             const bool debugPaintHere = g_debugMode == 1 || g_debugMode == 3 ||
                                         g_debugMode == 6;
@@ -4621,6 +4559,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 e.dlMvSrv,
                 uiDepthContentChanges(w, h, eye),
                 resolveScreen};
+            // The inputs left unbound, for b1.z (ui_resolve.h): a fetch from a null
+            // view returns zero and costs the pass 0.04 ms an eye per input on an
+            // RTX 5090, and a still HUD leaves the source-edit mask unbound on
+            // most frames. Read off the very views bound above, so the bits cannot
+            // disagree with the bindings; a resolve whose b1 is missing reads zero
+            // and fetches everything, as it always did.
+            const uint32_t unboundBits = (srvs[2] ? 0u : 1u) | (srvs[5] ? 0u : 2u) | (srvs[3] ? 0u : 4u);
+            if (withHistory) {   // the fovea call never binds history; its lack is not news
+                ++g_uiResolveDispatches;
+                for (int k = 0; k < 3; ++k) if (unboundBits & (1u << k)) ++g_uiResolveLacked[k];
+            }
             ID3D11UnorderedAccessView* uavs[2] = {
                 e.dlSubmitUav, withHistory ? e.uiHistoryUav[1 - e.uiHistoryRead] : nullptr};
             ctx->CSSetShader(g_csUiResolve, nullptr, 0);
@@ -4637,10 +4586,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (g_uiResolveTolCb) {
                 D3D11_MAPPED_SUBRESOURCE tm{};
                 if (SUCCEEDED(ctx->Map(g_uiResolveTolCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &tm)) && tm.pData) {
-                    const float resolveData[4] = {uiDepthGhostTolerance() / 255.0f, uiDepthCoronaHold(), 0, 0};
+                    const float resolveData[4] = {uiDepthGhostTolerance() / 255.0f, uiDepthCoronaHold(),
+                                                  static_cast<float>(unboundBits), 0};
                     memcpy(tm.pData, resolveData, sizeof(resolveData));
                     ctx->Unmap(g_uiResolveTolCb, 0);
                     tolCb = g_uiResolveTolCb;
+                    if (unboundBits != 0 && !g_uiResolveUnboundNoted[unboundBits]) {
+                        g_uiResolveUnboundNoted[unboundBits] = true;
+                        std::string names;
+                        const auto add = [&](uint32_t bit, const char* name) {
+                            if (unboundBits & bit) { if (!names.empty()) names += ", "; names += name; }
+                        };
+                        add(1u, "coverage mask"); add(2u, "source-edit mask"); add(4u, "history");
+                        Log::get().note("UI resolve: not bound on some %s: %s. The pass skips those fetches rather than reading zeros from a null view (0.04 ms an eye each on an RTX 5090). Said once for each combination.",
+                                        withHistory ? "frames" : "fovea frames", names.c_str());
+                    }
                     if (!g_coronaHoldNoted && resolveData[1] > 0.0f) {
                         g_coronaHoldNoted = true;
                         Log::get().note("corona smear: the UI resolve holds faint flat glow within a step of the frame's own level, up to %d/255 (advanced.corona_smear_level; 0 turns it off). Said once.",
@@ -4767,7 +4727,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                             g_debugMode == 6;
                     if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
                         g_csUiResolveTried=true;
-                        g_csUiResolve=shaderSwapCompileCs(ctx,kUiResolve,sizeof(kUiResolve)-1,"main","UI resolve",nullptr,"UI resolve");
+                        g_csUiResolve=shaderSwapCreateCs(ctx,kUiResolveBytecode,sizeof(kUiResolveBytecode),"UI resolve","UI resolve");
                     }
                     const bool uiResolve=uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaint;
                     // luma probe stage 0: the texture the game submits.
@@ -6012,6 +5972,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     if (result && ctx && eye == 0 && g_eyeRunLeft > 0) {
         captureEyeRun(ctx, static_cast<ID3D11Texture2D*>(result));
     }
+    if(result&&ctx&&eye==1&&g_eyeRunLeft>0&&g_eyeFinalRun.find(g_eyeFinalClock.epoch)<0)
+        g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame);
     if(eye==1 && ctx && g_eyeRunReady) {
         writeEyeRun(ctx,g_eyeRunWidth,g_eyeRunHeight);g_eyeRunReady=false;
     }
@@ -6023,6 +5985,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 }
 
 }  // namespace
+
+void temporalPassCaptureFinalEye(uint64_t sequence,uint32_t eye,ID3D11Texture2D* texture,
+                                 const uint32_t region[4],bool composite,bool flipU,bool flipV) {
+    if(!g_eyeFinalRun.armed||eye>1)return;
+    const uint32_t epoch=g_eyeFinalClock.epoch;
+    const int index=g_eyeFinalRun.find(epoch);
+    // An unmatched callback is evidence of a door/scene mismatch, not permission
+    // to capture a different frame into the queued temporal slot.
+    if(index<0){++g_eyeFinalRun.unmatched;return;}
+    ID3D11Device* device=nullptr;ID3D11DeviceContext* ctx=nullptr;
+    const bool ran=guarded("eye capture/final crisp",[&]{
+        if(texture){texture->GetDevice(&device);if(device)device->GetImmediateContext(&ctx);}
+        g_eyeFinalRun.capture(epoch,sequence,eye,ctx,texture,region,composite,flipU,flipV);
+        if(g_eyeFinalRun.complete())writeFinalEyeRun(ctx,"complete");
+    });
+    if(!ran&&g_eyeFinalRun.armed){
+        auto& image=g_eyeFinalRun.rows[index].eye[eye];image.sequence=sequence;image.status="capture_fault";
+    }
+    if(g_eyeFinalRun.pendingOwner)guarded("eye capture/final pending owner release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingOwner);});
+    if(g_eyeFinalRun.pendingDevice)guarded("eye capture/final pending device release",[&]{eye_final_capture::Run::drop(g_eyeFinalRun.pendingDevice);});
+    if(ctx)guarded("eye capture/final context release",[&]{ctx->Release();});
+    if(device)guarded("eye capture/final device release",[&]{device->Release();});
+}
 
 void temporalPassDumpHistory(const char* trigger) {
     std::vector<TemporalHistoryEntry> entries;
@@ -6234,8 +6219,8 @@ void temporalPassConfigure(Config& cfg) {
     g_foveaEdgesNoted[0] = g_foveaEdgesNoted[1] = false;
     g_foveaSizeNoted[0] = g_foveaSizeNoted[1] = false;
     // Edges mode's three trims: plain degrees (not a per-headset list, unlike
-    // fix.fov_trim_vertical/_outer/_nasal, which this reduces against -- see
-    // cropOf/computeFoveaRegion in temporal_pass.cpp). 0..45, default 0.
+    // experimental.fov_trim_vertical/_outer/_nasal, which this reduces against
+    // -- see cropOf/computeFoveaRegion in temporal_pass.cpp). 0..45, default 0.
     float vertTrim = cfg.getFloat("advanced.temporal_aa_fovea_vertical", 0.0f);
     if (!std::isfinite(vertTrim) || vertTrim < 0.0f) vertTrim = 0.0f;
     if (vertTrim > 45.0f) vertTrim = 45.0f;
@@ -6581,6 +6566,8 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
+    if(ctx&&g_eyeFinalRun.armed&&g_eyeFinalRun.ready&&g_eyeFinalRun.count&&
+       g_eyeFinalClock.epoch>g_eyeFinalRun.rows[g_eyeFinalRun.count-1].epoch)writeFinalEyeRun(ctx,"next_boundary_missing_final");
     if (!ctx || (!detail::g_temporalPassWantedFssChrome && !g_eyeRunReady)) return;
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
@@ -6748,6 +6735,7 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
 }
 
 void temporalPassFrameBoundary() {
+    g_eyeFinalClock.boundary(g_eyeFinalRun.armed);
     if (!detail::g_temporalPassWantedFssChrome) return;
     for (int eye = 0; eye < 2; ++eye) {
         if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
@@ -7096,6 +7084,13 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
     return true;
 }
 
+bool temporalPassUiResolveTotals(uint64_t* dispatches, uint64_t lacked[3]) {
+    if (g_uiResolveDispatches == 0) return false;
+    if (dispatches) *dispatches = g_uiResolveDispatches;
+    if (lacked) for (int k = 0; k < 3; ++k) lacked[k] = g_uiResolveLacked[k];
+    return true;
+}
+
 bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
                                const char** engineLabel, bool* amd) {
     // The CURRENT engine's price, not "whichever one has a count". Both
@@ -7148,6 +7143,7 @@ bool temporalPassPriceWindow(double regionMedianMs[7], double* otherMedianMs,
 
 static void beginEyeRun() {
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+    if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"rearm_missing_final");
     perfMonitorNoteEvent(kEvEyeDump);
     // This request can occur after the trigger frame's scene draws. The eye
     // crops and decision controls include that frame; the accompanying draw
@@ -7158,6 +7154,7 @@ static void beginEyeRun() {
     GetLocalTime(&stm);
     _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
                  static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
+    g_eyeFinalRun.arm();g_eyeFinalClock.reset();wcscpy_s(g_eyeFinalStamp,g_eyeRunStamp);
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
     applyEngineMotionDiagnostics();   // the census runs for the run
@@ -7193,6 +7190,7 @@ static void beginEyeRun() {
 }
 
 void temporalPassShutdown() {
+    if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"shutdown_missing_final");
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     dlaaShutdown();
     fsr3Shutdown();
@@ -7206,6 +7204,8 @@ void temporalPassShutdown() {
     g_csUiResolveTried=g_uiResolveNoted=false;
     if (g_uiResolveTolCb) { g_uiResolveTolCb->Release(); g_uiResolveTolCb=nullptr; }
     g_coronaHoldNoted=false;
+    for (bool& noted : g_uiResolveUnboundNoted) noted=false;
+    g_uiResolveDispatches=0; for (uint64_t& n : g_uiResolveLacked) n=0;
     if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
     if (g_csDown) { g_csDown->Release(); g_csDown = nullptr; }
     if (g_downCb) { g_downCb->Release(); g_downCb = nullptr; }
@@ -7257,14 +7257,6 @@ void temporalPassShutdown() {
     if (g_csFast) { g_csFast->Release(); g_csFast = nullptr; }
 }
 
-bool temporalPassEyeOffset(int eye, float out[3]) {
-    if (eye < 0 || eye > 1 || !out) return false;
-    const EyeState& e = g_eye[eye];
-    if (e.eyeOff[0] == 0.0f && e.eyeOff[1] == 0.0f && e.eyeOff[2] == 0.0f) return false;
-    memcpy(out, e.eyeOff, sizeof(e.eyeOff));
-    return true;
-}
-
 }  // namespace edvr
 
 namespace edvr {
@@ -7296,8 +7288,6 @@ extern "C" __declspec(dllexport) void edvrEyeCaptureUntreated(void* texture,int 
     if (edvr::deviceHookRecoveryDisabled()) return;
     edvr::guarded("eye capture/untreated",[&]{edvr::captureUntreatedEye(static_cast<ID3D11Texture2D*>(texture),eye,bounds);});
 }
-// Also available to the diagnostic tools; the hotkey uses the same arm.
-extern "C" __declspec(dllexport) void edvrEyeCaptureArm() { edvr::temporalPassArmEyeDump(); }
 
 extern "C" __declspec(dllexport) void* edvrTemporalAa(
     void* srcTex, int eye, const float* bounds, const float* tanNow,
@@ -7335,312 +7325,8 @@ extern "C" __declspec(dllexport) void* edvrTemporalAa(
     return out;
 }
 
-// For tools/smoke: the fovea's settings set directly (the harness has no
-// ini), the failure latch cleared, and the count of composited frames so
-// far returned -- so a desk case can tell a fovea that ran from one that
-// quietly stood down to full-frame DLAA. A dev instrument; nothing else
-// calls it.
-extern "C" __declspec(dllexport) unsigned edvrTemporalAaFoveaDev(float deg, float edgeDeg, int steady,
-                                                                 float scale, int round) {
-    if (!std::isfinite(deg) || deg < 0.0f) deg = 0.0f;
-    if (deg > 0.0f && deg < 10.0f) deg = 10.0f;
-    if (deg > 120.0f) deg = 120.0f;
-    edvr::g_foveaDeg = deg;
-    if (!std::isfinite(edgeDeg) || edgeDeg < 1.0f) edgeDeg = 1.0f;
-    if (edgeDeg > 30.0f) edgeDeg = 30.0f;
-    edvr::g_foveaEdgeDeg = edgeDeg;
-    edvr::g_periphSteady = steady != 0;
-    if (!std::isfinite(scale) || scale < 0.25f) scale = 0.25f;
-    if (scale > 1.0f) scale = 1.0f;
-    edvr::g_periphScale = scale;
-    edvr::g_foveaRound = round != 0;
-    edvr::g_foveaFailed = false;
-    return edvr::g_foveaTreats;
-}
-
 extern "C" __declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const float* prevPose,
                                                              const float* nowPose,
                                                              const float* eyeOffset) {
     edvr::temporalPassNoteHead(eye, prevPose, nowPose, eyeOffset);
-}
-
-// For tools/smoke: the Stage 0 price report's last closed window, read
-// directly rather than through the menu's formatted status line. A thin
-// wrapper over temporalPassPriceWindow; medians7 must hold 7 doubles.
-// Any of the four pointers may be null.
-extern "C" __declspec(dllexport) void edvrTemporalAaPriceWindow(double* medians7, double* other,
-                                                                unsigned* pairs, unsigned* dropped) {
-    edvr::temporalPassPriceWindow(medians7, other, pairs, dropped);
-}
-
-// tools/smoke wires this in next to edvrEyeMaskSelftest, same pattern: pure
-// geometry, no device, one bit per independent check, 63 (all six) is pass.
-// Bit 1: width mode against a rectangle hand-derived from cropOf's own
-// arithmetic before this extraction, checked twice independently -- not
-// the design note's "1128px" figure, which neither derivation reproduced;
-// the figure asserted here is the one this file's own formula produces.
-// Bit 2: foveaEdgeRegionDeg's reduced-trim arithmetic, directly, on three
-// edges that do not hit the 2 degree floor.
-// Bit 4: edges mode's left/right trim-role swap between the two eyes
-// (eye 0 = left, outer edge at its l tangent -- foveation.cpp:924-925)
-// produces a mirror image of the same physical crop. y is untouched by
-// the swap and comes out bit-identical; x is checked with a small pixel
-// tolerance (two independent tangent-to-pixel paths land ~2px apart at
-// this frame size, confirmed numerically before writing this tolerance).
-// Bit 8: trims well past both the ini's 0..45 range and this frame's own
-// edge angles floor each edge at 2 degrees rather than closing or
-// inverting the rectangle; the surviving centre square is real but under
-// minPx, so this exercises the ok=false path the caller falls back to
-// full-frame on.
-// Bit 16: temporal_aa_fovea_top and _bottom split apart -- the 20/25/7
-// case's own reduced trims (outer 20, nasal 0, vertical 20 reduced by the
-// 5/5/7 FOV trim to top=bottom=15), then bottom alone re-asked at 30
-// (reduced to 25) with top left at 15, then top alone re-asked at 30
-// (reduced to 25) with bottom left at 15. Expected x/y/w/h are hand-derived
-// on paper from this file's own tan(A-B) identity, not read off the code:
-// tan(atan(E) - D) = (E - tanD) / (1 + E*tanD) for each edge's tangent
-// magnitude E and reduced trim D, then the same pixel, clamp and
-// even-round arithmetic as computeFoveaRegion. native_temporal.h:21's
-// {left,right,down,up} order puts row 0 at the up edge, so mode.topTrimDeg
-// (feeding "bo", the up tangent) bounds y; mode.bottomTrimDeg (feeding
-// "to", the down tangent) bounds y+h. Moving bottom alone must hold y and
-// move y+h; moving top alone must hold y+h (equal to the unmoved case) and
-// move y; x/w (outer/nasal) are untouched throughout.
-// Bit 32: the head lead (advanced.temporal_aa_fovea_lead) -- the base offset
-// with its even rounding and its two clamps, the lead's direction from a
-// hand case, and the centre motion's own mirror of the shader's convention
-// (no rotation is no motion; a yaw right is mv.x > 0; a pitch up is
-// mv.y < 0). The case's own comment carries the derivations.
-extern "C" __declspec(dllexport) unsigned edvrFoveaRegionSelftest() {
-    using namespace edvr;
-    unsigned bits = 0;
-
-    // Crystal Super-shaped tangents, the same worked example eye_mask.cpp
-    // uses; fw/fh a plausible per-eye render size for it. down/up match
-    // native_temporal.h:21's {left,right,down,up} frusta order.
-    const float l = -1.529f, r = 1.032f, down = -1.265f, up = 1.265f;
-    const uint32_t fw = 2576, fh = 2544;
-
-    {
-        FoveaRegionMode mode;
-        mode.edges = false;
-        mode.widthDeg = 40.0f;
-        const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
-        if (g.ok && g.x == 1170 && g.y == 906 && g.w == 734 && g.h == 732) bits |= 1u;
-    }
-
-    {
-        constexpr float kDegToRad = 0.01745329252f;
-        const float outer = foveaEdgeRegionDeg(tanf(51.8f * kDegToRad), 20.0f);
-        const float nasal = foveaEdgeRegionDeg(tanf(38.9f * kDegToRad), 0.0f);
-        const float vertical = foveaEdgeRegionDeg(tanf(46.7f * kDegToRad), 15.0f);
-        if (fabsf(outer - 31.8f) < 0.05f && fabsf(nasal - 38.9f) < 0.05f &&
-            fabsf(vertical - 31.7f) < 0.05f) {
-            bits |= 2u;
-        }
-    }
-
-    {
-        FoveaRegionMode mode;
-        mode.edges = true;
-        mode.outerTrimDeg = 10.0f;
-        mode.nasalTrimDeg = 5.0f;
-        mode.topTrimDeg = 8.0f;
-        mode.bottomTrimDeg = 8.0f;
-        const FoveaRegion g0 = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
-        const FoveaRegion g1 = computeFoveaRegion(-r, -l, down, up, fw, fh, 1, mode, 128);
-        const bool yMatch = g0.ok && g1.ok && g0.y == g1.y && g0.h == g1.h;
-        const int mirrorX0 = static_cast<int>(fw) - static_cast<int>(g0.x) - static_cast<int>(g0.w);
-        const int mirrorX1 = static_cast<int>(fw) - static_cast<int>(g0.x);
-        const int dx0 = mirrorX0 - static_cast<int>(g1.x);
-        const int dx1 = mirrorX1 - static_cast<int>(g1.x) - static_cast<int>(g1.w);
-        if (yMatch && dx0 >= -4 && dx0 <= 4 && dx1 >= -4 && dx1 <= 4) bits |= 4u;
-    }
-
-    {
-        FoveaRegionMode mode;
-        mode.edges = true;
-        mode.outerTrimDeg = 100.0f;
-        mode.nasalTrimDeg = 100.0f;
-        mode.topTrimDeg = 100.0f;
-        mode.bottomTrimDeg = 100.0f;
-        const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
-        if (!g.ok) bits |= 8u;
-    }
-
-    {
-        // The 20/25/7 case (bit 2's own scenario) split into top and bottom:
-        // outer reduced to 20 (25 - 5), nasal reduced to 0 (7 - 7, floored),
-        // vertical reduced to 15 (20 - 5) -- set on BOTH edges first (matches
-        // today's single-vertical-trim behaviour bit-for-bit); then bottom
-        // alone re-asked at 30 raw (reduced to 25) with top left at 20/15;
-        // then top alone re-asked at 30 raw (reduced to 25) with bottom left
-        // at 20/15.
-        //
-        // computeFoveaRegion's "bo" (built from the up tangent) is gated by
-        // mode.topTrimDeg and bounds y0 (row 0, native_temporal.h:21's up
-        // edge); "to" (built from the down tangent) is gated by
-        // mode.bottomTrimDeg and bounds y1 = y+h. So the bottom key alone
-        // must hold y and move y+h; the top key alone must hold y+h and
-        // move y -- re-derived here on paper, not assumed from either key's
-        // name or mirrored from a previous (wrong) wiring.
-        //
-        // Hand derivation (l=-1.529, r=1.032, down=-1.265, up=1.265,
-        // fw=2576, fh=2544, eye 0 so leftTrim=outer=20, rightTrim=nasal=0):
-        // tan(atan(E) - D) = (E - tanD) / (1 + E*tanD), tan15=0.2679492,
-        // tan20=0.3639702, tan25=0.4663077.
-        //   left  (E=1.529, D=20): lo = -0.7484882
-        //   right (E=1.032, D=0):  ro =  1.032 (unchanged, D=0)
-        //   trim=15 (E=1.265): tangent  0.7446480
-        //   trim=25 (E=1.265): tangent  0.5023604
-        // x0=int(((lo-l)/(r-l))*fw)=int(785.08)=785 -> &~1 -> 784
-        // x1=int(((ro-l)/(r-l))*fw+0.5)=int(2576.5)=2576 -> &~1 -> 2576, w=1792
-        // (x/w are the same in all three cases: outer/nasal never change.)
-        //
-        // unmoved (top=bottom=15): bo=+0.7446480 (topTrimDeg=15),
-        //   to=-0.7446480 (bottomTrimDeg=15)
-        //   y0=int(((up-bo)/(up-down))*fh)=int(523.23)=523 -> &~1 -> 522
-        //   y1=int(((up-to)/(up-down))*fh+0.5)=int(2021.27)=2021 -> &~1 -> 2020
-        //   h=2020-522=1498
-        // bottom moved (top=15, bottom=25): bo UNCHANGED (topTrimDeg still
-        //   15) -> y0=522 unchanged; to=-0.5023604 (bottomTrimDeg=25) ->
-        //   y1=int(((1.265+0.5023604)/2.530)*2544+0.5)=int(1777.64)=1777
-        //   -> &~1 -> 1776, h=1776-522=1254
-        // top moved (top=25, bottom=15): to UNCHANGED (bottomTrimDeg still
-        //   15) -> y1=2020 unchanged; bo=+0.5023604 (topTrimDeg=25) ->
-        //   y0=int(((1.265-0.5023604)/2.530)*2544)=int(766.86)=766
-        //   -> &~1 -> 766, h=2020-766=1254
-        FoveaRegionMode mode;
-        mode.edges = true;
-        mode.outerTrimDeg = 20.0f;
-        mode.nasalTrimDeg = 0.0f;
-        mode.topTrimDeg = 15.0f;
-        mode.bottomTrimDeg = 15.0f;
-        const FoveaRegion gUnmoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
-        mode.bottomTrimDeg = 25.0f;
-        const FoveaRegion gBottomMoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
-        mode.bottomTrimDeg = 15.0f;
-        mode.topTrimDeg = 25.0f;
-        const FoveaRegion gTopMoved = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
-        // Not named "near": windef.h's legacy near/far macros expand to
-        // nothing and turn "const auto near = ..." into invalid syntax.
-        const auto withinTol = [](uint32_t v, int want) {
-            const int d = static_cast<int>(v) - want;
-            return d >= -2 && d <= 2;
-        };
-        const bool unmovedOk = gUnmoved.ok && withinTol(gUnmoved.x, 784) && withinTol(gUnmoved.y, 522) &&
-                               withinTol(gUnmoved.w, 1792) && withinTol(gUnmoved.h, 1498);
-        const bool bottomMovedOk = gBottomMoved.ok && withinTol(gBottomMoved.x, 784) &&
-                                  withinTol(gBottomMoved.y, 522) && withinTol(gBottomMoved.w, 1792) &&
-                                  withinTol(gBottomMoved.h, 1254);
-        const bool topMovedOk = gTopMoved.ok && withinTol(gTopMoved.x, 784) &&
-                                withinTol(gTopMoved.y, 766) && withinTol(gTopMoved.w, 1792) &&
-                                withinTol(gTopMoved.h, 1254);
-        // Bottom key alone: x/w untouched, y bit-identical, only y+h (the
-        // bottom row) moves.
-        const bool bottomMovesOnlyBottom =
-            gUnmoved.x == gBottomMoved.x && gUnmoved.w == gBottomMoved.w &&
-            gUnmoved.y == gBottomMoved.y &&
-            (gUnmoved.y + gUnmoved.h) != (gBottomMoved.y + gBottomMoved.h);
-        // Top key alone: x/w untouched, y+h bit-identical to the unmoved
-        // case, only y (the top row) moves.
-        const bool topMovesOnlyTop =
-            gUnmoved.x == gTopMoved.x && gUnmoved.w == gTopMoved.w &&
-            (gUnmoved.y + gUnmoved.h) == (gTopMoved.y + gTopMoved.h) &&
-            gUnmoved.y != gTopMoved.y;
-        if (unmovedOk && bottomMovedOk && topMovedOk && bottomMovesOnlyBottom && topMovesOnlyTop) {
-            bits |= 16u;
-        }
-    }
-
-    {
-        // Bit 32: THE HEAD LEAD's pure parts (foveaCentreMotion,
-        // foveaLeadPixels, foveaLeadBase).
-        //
-        // The base offset: zero leaves the rectangle exactly where
-        // computeFoveaRegion put it; a lead with room moves the base by the
-        // even-rounded amount and NEVER changes w/h (a size change would
-        // recreate NVIDIA's feature); an odd lead rounds to even; a lead past
-        // the frame's edge stops at it and says it was held; a negative lead
-        // stops at 0.
-        //
-        // The direction, hand-derived from the shader's convention (previous =
-        // current + mv, render pixels): mv = (+10, 0) px with 6 frames is a
-        // +60 px move, to the RIGHT, which is where the head was turning when
-        // the content at the centre came from the right; mv = (0, -10) is -60,
-        // UP the rows, row 0 being the up edge.
-        //
-        // And the mirror itself: with equal frusta and no rotation there is no
-        // motion at all; a 2-degree yaw to the right gives mv.x > 0; a
-        // 2-degree pitch up gives mv.y < 0. The rotation rows are built the
-        // way the cbuffer's dR0..dR2 are -- the rotation taking THIS frame's
-        // view directions to last frame's -- so a yaw right puts the current
-        // forward (0,0,-1) at (sin a, 0, -cos a) in last frame's frame.
-        FoveaRegionMode mode;
-        mode.edges = false;
-        mode.widthDeg = 40.0f;
-        const FoveaRegion g = computeFoveaRegion(l, r, down, up, fw, fh, 0, mode, 128);
-        const int32_t room = static_cast<int32_t>(fw - g.w);   // 2576 - 734 = 1842
-
-        const FoveaLeadBase none = foveaLeadBase(g, 0.0f, 0.0f, fw, fh);
-        const bool zeroHolds = g.ok && none.x == g.x && none.y == g.y && none.dx == 0 &&
-                               none.dy == 0 && !none.clamped;
-
-        const FoveaLeadBase right = foveaLeadBase(g, 60.0f, 0.0f, fw, fh);
-        const bool movesRight = right.x == g.x + 60 && right.y == g.y && right.dx == 60 &&
-                                right.dy == 0 && !right.clamped;
-
-        const FoveaLeadBase odd = foveaLeadBase(g, 61.0f, -3.0f, fw, fh);
-        const bool evenRounded = (odd.dx % 2) == 0 && (odd.dy % 2) == 0 && odd.dx == 62 &&
-                                 odd.dy == -4;
-
-        const FoveaLeadBase far_ = foveaLeadBase(g, 5000.0f, 5000.0f, fw, fh);
-        const bool heldAtEdge = far_.clamped && far_.x == static_cast<uint32_t>(room) &&
-                                far_.y == static_cast<uint32_t>(fh - g.h) &&
-                                far_.x + g.w <= fw && far_.y + g.h <= fh;
-
-        const FoveaLeadBase back = foveaLeadBase(g, -5000.0f, -5000.0f, fw, fh);
-        const bool heldAtZero = back.clamped && back.x == 0 && back.y == 0 &&
-                                back.dx == -static_cast<int32_t>(g.x) &&
-                                back.dy == -static_cast<int32_t>(g.y);
-
-        const FoveaLead sideways = foveaLeadPixels(10.0f, 0.0f, 6.0f);
-        const FoveaLead upward = foveaLeadPixels(0.0f, -10.0f, 6.0f);
-        const FoveaLeadBase bySide = foveaLeadBase(g, sideways.x, sideways.y, fw, fh);
-        const FoveaLeadBase byUp = foveaLeadBase(g, upward.x, upward.y, fw, fh);
-        const bool directionOk = bySide.dx == 60 && bySide.dy == 0 && byUp.dx == 0 &&
-                                 byUp.dy == -60 && bySide.x == g.x + 60 && byUp.y == g.y - 60;
-
-        // w/h are never touched by any of the above.
-        const bool sizeHeld = g.ok && right.x + g.w <= fw && odd.x + g.w <= fw &&
-                              bySide.x + g.w <= fw && byUp.y + g.h <= fh;
-
-        const float tanSym[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
-        const float ident[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
-        float mvx = 1.0f, mvy = 1.0f;
-        const bool still = foveaCentreMotion(tanSym, tanSym, ident[0], ident[1], ident[2], 1000,
-                                             1000, &mvx, &mvy) &&
-                           fabsf(mvx) < 1e-3f && fabsf(mvy) < 1e-3f;
-        constexpr float kDegToRadSelf = 0.01745329252f;
-        const float a = 2.0f * kDegToRadSelf;
-        const float yaw[3][3] = {{cosf(a), 0.0f, -sinf(a)}, {0.0f, 1.0f, 0.0f},
-                                 {sinf(a), 0.0f, cosf(a)}};
-        float yawX = 0.0f, yawY = 0.0f;
-        const bool yawRight = foveaCentreMotion(tanSym, tanSym, yaw[0], yaw[1], yaw[2], 1000, 1000,
-                                                &yawX, &yawY) &&
-                              yawX > 1.0f && fabsf(yawY) < 1e-2f;
-        const float pitch[3][3] = {{1.0f, 0.0f, 0.0f}, {0.0f, cosf(a), -sinf(a)},
-                                   {0.0f, sinf(a), cosf(a)}};
-        float pitchX = 0.0f, pitchY = 0.0f;
-        const bool pitchUp = foveaCentreMotion(tanSym, tanSym, pitch[0], pitch[1], pitch[2], 1000,
-                                               1000, &pitchX, &pitchY) &&
-                             pitchY < -1.0f && fabsf(pitchX) < 1e-2f;
-
-        if (zeroHolds && movesRight && evenRounded && heldAtEdge && heldAtZero && directionOk &&
-            sizeHeld && still && yawRight && pitchUp) {
-            bits |= 32u;
-        }
-    }
-
-    return bits;
 }

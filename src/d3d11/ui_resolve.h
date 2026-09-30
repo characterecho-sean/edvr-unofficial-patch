@@ -5,6 +5,14 @@ namespace edvr {
 // One input-grid thread owns a disjoint rectangle of output pixels. The two
 // existing UI-history textures carry influence until stale colour is gone;
 // otherwise a model's multi-frame trail could outlive the raw coverage mask.
+//
+// Inputs the caller did not bind are not fetched: b1.z says which. A load from a
+// null view returns zero, and on an RTX 5090 that is slow -- 9 taps a thread cost
+// the pass 0.04 ms an eye for each input left null (tools\ui_holo_pass_test
+// --bench), and a still HUD leaves the source-edit mask null on most frames. The
+// body is compiled twice, once with those checks folded away (what runs when
+// everything is bound: the pass as it always ran) and once asking.
+// tools\ui_holo_pass_test holds both byte for byte to the pass as it was.
 constexpr char kUiResolve[] = R"HLSL(
 Texture2D<float4> Raw:register(t0);
 Texture2D<float4> Trained:register(t1);
@@ -16,23 +24,33 @@ Texture2D<float4> Screen:register(t6);
 RWTexture2D<float4> Output:register(u0);
 RWTexture2D<float4> Next:register(u1);
 cbuffer P:register(b0){int4 region;int2 size;int2 texSize;float4 tanNow;float4 tanPrev;float4 jit;}
-cbuffer R:register(b1){float4 resolve;} // b1 = {ghost tolerance, hold brightness limit (0 = off), 0, 0}
+cbuffer R:register(b1){float4 resolve;} // b1 = {ghost tolerance, hold brightness limit (0 = off), inputs not bound (bits), 0}
 bool marked(int2 p){uint k=uint(Coverage.Load(int3(clamp(p,0,size-1),0))*255+.5)&3u;return k==1u||k==2u;}
 float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2+1.5*t3,.5*t+2*t2-1.5*t3,-.5*t2+.5*t3);}
-[numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){
+void resolvePixel(uint3 id,uint unbound){
     if(any(id.xy>=uint2(size)))return;
     int2 q=int2(id.xy),r=int2(floor(float2(q)+jit.xy+.5));
     uint screenW,screenH;Screen.GetDimensions(screenW,screenH);
+    // An input the caller did not bind reads zero -- slowly: a fetch from a null
+    // view cost this pass 0.04 ms an eye per input on an RTX 5090. The caller says
+    // which it left out (b1.z: 1 coverage, 2 source edits, 4 history; zero = all
+    // bound, what a rig that binds no b1 gets) and the zero is used without the
+    // fetch.
     bool here=false,edited=false;
-    [unroll] for(int y=-1;y<=1;++y)[unroll] for(int x=-1;x<=1;++x){
-        int2 p=r+int2(x,y);here=here||marked(p);
-        edited=edited||Edits.Load(int3(clamp(p,0,size-1),0))>0;
-        if(screenW>0) {
-            bool screenUi=Screen.Load(int3(region.xy+clamp(p,0,size-1),0)).w==3;
+    if((unbound&1u)==0u){
+        [unroll] for(int y=-1;y<=1;++y)[unroll] for(int x=-1;x<=1;++x)here=here||marked(r+int2(x,y));
+    }
+    if((unbound&2u)==0u){
+        [unroll] for(int y=-1;y<=1;++y)[unroll] for(int x=-1;x<=1;++x)
+            edited=edited||Edits.Load(int3(clamp(r+int2(x,y),0,size-1),0))>0;
+    }
+    if(screenW>0){
+        [unroll] for(int y=-1;y<=1;++y)[unroll] for(int x=-1;x<=1;++x){
+            bool screenUi=Screen.Load(int3(region.xy+clamp(r+int2(x,y),0,size-1),0)).w==3;
             here=here||screenUi;edited=edited||screenUi;
         }
     }
-    float remaining=Previous.Load(int3(q,0)).a;
+    float remaining=(unbound&4u)==0u?Previous.Load(int3(q,0)).a:0;
     // DLSS can transport an old glyph along the newly exposed world's
     // vector, outside both its current and stationary previous footprint.
     // Follow that same vector through the unjittered influence history.
@@ -40,7 +58,7 @@ float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2
     // full influence, so a tiny motion can grow a one-pixel halo every frame.
     // Interpolate the transported age, then retain the stationary sample as
     // a separate candidate. Off-screen history is invalid.
-    if(!here && remaining<1){
+    if((unbound&4u)==0u && !here && remaining<1){
         float2 before=float2(q)+Motion.Load(int3(clamp(r,0,size-1),0));
         if(all(isfinite(before)) && all(before>=0) && all(before<=float2(size-1))){
             int2 corner=int2(floor(before));
@@ -143,6 +161,12 @@ float4 cubic(float t){float t2=t*t,t3=t2*t;return float4(-.5*t+t2-.5*t3,1-2.5*t2
     // Bound the departing footprint to 32 frames. Unrelated world detail
     // returning here must not keep an old UI clip alive indefinitely.
     Next[id.xy]=float4(0,0,0,here?1:stale?max(remaining-1.0/32.0,0):0);
+}
+// Two copies of the body: with nothing left out, the one whose checks fold away to the
+// pass as it always ran, straight-line loads and all; otherwise the one that asks.
+[numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){
+    uint unbound=uint(resolve.z+.5);
+    if(unbound==0u)resolvePixel(id,0u);else resolvePixel(id,unbound);
 }
 )HLSL";
 }

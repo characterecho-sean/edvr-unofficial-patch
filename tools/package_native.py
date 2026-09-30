@@ -1,15 +1,35 @@
 #!/usr/bin/env python3
-"""Build a native-only EDVR release archive from validated build outputs."""
+"""Build a native-only EDVR release archive from validated build outputs.
+
+Before anything is staged, the version stamped into each EDVR binary being
+packaged (d3d11.dll, openvr_api.dll, the installer: the FileVersion and
+ProductVersion strings of their VERSIONINFO, which build.bat sets from `git
+describe --tags --always --dirty`) is compared with the release version asked
+for. The rule: both strings must be exactly "v<version>" -- what git prints on
+a clean checkout of the tag v<version> -- or exactly "<version>". Anything
+that mentions "dirty" is refused first, as a build from a tree with
+uncommitted changes (the kind that has reached a field tester twice); a build
+a few commits past the tag ("v0.17.0-2-g650d8a9"), "unknown" (no git), another
+release's tag and a binary with no version stamp are refused as mismatches.
+--dry-run makes the same check and writes nothing.
+"""
 import argparse
 import hashlib
 import os
 import re
 import shutil
+import struct
 import tempfile
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# What a release carries under these archive names is stamped with EDVR's own
+# version by build.bat (tools\gen_installer_rc.py writes the VERSIONINFO); the
+# other files (NVIDIA's runtime, Microsoft's loader) are not ours to stamp.
+STAMPED = ("d3d11.dll", "openvr/openvr_api.dll", "edvr-installer.exe", "edvr-flat-installer.exe")
+STAMP_KEYS = ("FileVersion", "ProductVersion")
 
 
 def _version(value):
@@ -23,6 +43,11 @@ def _inside(path, base):
         return os.path.commonpath([os.path.realpath(path), os.path.realpath(base)]) == os.path.realpath(base)
     except ValueError:
         return False
+
+
+def _ini_name(profile):
+    """The settings file an edition ships and installs: the flat profile has its own."""
+    return "edvr-flat.ini" if profile == "flat" else "edvr.ini"
 
 
 def _files(root, no_dlss, profile="vr"):
@@ -46,7 +71,11 @@ def _files(root, no_dlss, profile="vr"):
     if not no_dlss or (build / "nvngx_dlss.dll").is_file():
         result.append((build / "nvngx_dlss.dll", "nvngx_dlss.dll"))
         result.append((build / "NVIDIA-DLSS-LICENSE.txt", "NVIDIA-DLSS-LICENSE.txt"))
-    result.extend([(build / "edvr-flat.ini" if profile == "flat" else root / "edvr.ini", "edvr.ini"),
+    # The flat edition keeps its settings in a file of its own (config.cpp reads
+    # edvr-flat.ini first), so its archive carries that name: a flat archive that
+    # shipped an "edvr.ini" told somebody unpacking it by hand to put the flat
+    # defaults over the VR profile's tuning, where the flat runtime would not read them.
+    result.extend([(build / "edvr-flat.ini" if profile == "flat" else root / "edvr.ini", _ini_name(profile)),
                    (root / "LICENSE", "LICENSE.txt")])
     result.append((root / "third_party" / "dxbc_hash" / "LICENSE.TXT", "DXBC-HASH-LICENSE.txt"))
     # AMD's FSR3 D3D11 port (MIT). Unlike NVIDIA's runtime it ships no DLL --
@@ -59,6 +88,97 @@ def _files(root, no_dlss, profile="vr"):
     if ffx_notice.is_file():
         result.append((ffx_notice, "FIDELITYFX-SDK-DX11-LICENSE.txt"))
     return result
+
+
+def version_stamp_problems(version, stamps):
+    """Why the binaries in `stamps` cannot be packaged as release `version`:
+    a list of messages, empty when they can. `stamps` is [(name, mapping)],
+    the mapping holding the FileVersion and ProductVersion strings a binary's
+    VERSIONINFO carries, or None for a binary that has no stamp. The rule is
+    in the module docstring: exactly "v<version>" or "<version>", and "dirty"
+    named for what it is before anything else."""
+    accepted = ("v" + version, version)
+    problems = []
+    for name, stamp in stamps:
+        if not stamp:
+            problems.append("%s carries no version stamp (no VERSIONINFO FileVersion or "
+                            "ProductVersion), so it cannot be told from any other build" % name)
+            continue
+        by_value = {}
+        for key in STAMP_KEYS:
+            value = stamp.get(key)
+            by_value.setdefault(None if value is None else str(value), []).append(key)
+        for value, keys in by_value.items():
+            which = "/".join(keys)
+            if value is None:
+                problems.append("%s has no %s" % (name, which))
+            elif "dirty" in value.lower():
+                problems.append("%s is stamped %s (%s): built from a tree with uncommitted "
+                                "changes" % (name, value, which))
+            elif value not in accepted:
+                problems.append("%s is stamped %s (%s), not release v%s" % (name, value, which, version))
+    return problems
+
+
+def _stamped_versions(path):
+    """{"FileVersion": ..., "ProductVersion": ...} as the VERSIONINFO of the
+    file at `path` says (a key it lacks is left out), or None when the file has
+    no version resource. Read with the Windows version API; the file is not
+    loaded or run."""
+    if os.name != "nt":
+        raise ValueError("reading a binary's version stamp requires Windows")
+    import ctypes
+    from ctypes import wintypes
+    api = ctypes.WinDLL("version", use_last_error=True)
+    api.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+    api.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+    api.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+    api.GetFileVersionInfoW.restype = wintypes.BOOL
+    api.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                   ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)]
+    api.VerQueryValueW.restype = wintypes.BOOL
+    size = api.GetFileVersionInfoSizeW(str(path), None)
+    if not size:
+        return None
+    block = ctypes.create_string_buffer(size)
+    if not api.GetFileVersionInfoW(str(path), 0, size, block):
+        return None
+    data, length = ctypes.c_void_p(), wintypes.UINT()
+
+    def query(sub_block):
+        if api.VerQueryValueW(block, sub_block, ctypes.byref(data), ctypes.byref(length)) \
+                and length.value and data.value:
+            return data.value, length.value
+        return None
+
+    languages = []
+    found = query("\\VarFileInfo\\Translation")
+    if found:
+        raw = ctypes.string_at(found[0], found[1])
+        languages = ["%04x%04x" % struct.unpack_from("<HH", raw, offset)
+                     for offset in range(0, len(raw) - 3, 4)]
+    for language in languages or ["040904b0", "040904e4", "000004b0"]:
+        stamp = {}
+        for key in STAMP_KEYS:
+            found = query("\\StringFileInfo\\%s\\%s" % (language, key))
+            if found:
+                stamp[key] = ctypes.wstring_at(found[0])
+        if stamp:
+            return stamp
+    return {}
+
+
+def _check_version_stamps(version, files):
+    """Refuse (ValueError) unless every EDVR binary in `files` is stamped as
+    release `version` (version_stamp_problems)."""
+    stamps = [(name, _stamped_versions(source)) for source, name in files if name in STAMPED]
+    problems = version_stamp_problems(version, stamps)
+    if problems:
+        raise ValueError(
+            "these binaries are not release %s:\n  %s\n  build.bat stamps them from `git describe "
+            "--tags --always --dirty`: check out the tag v%s with a clean tree, run build.bat, "
+            "then package." % (version, "\n  ".join(problems), version))
+    print("[edvr] version stamps: %s all read v%s" % (", ".join(name for name, _ in stamps), version))
 
 
 def _embedded_resource(executable, resource_id, required=True):
@@ -103,7 +223,7 @@ def _embedded_resource(executable, resource_id, required=True):
 
 def _validate_installer_resources(executable, files, profile="vr"):
     by_name = {name: source for source, name in files}
-    ids = {101: "d3d11.dll", 103: "edvr.ini", 107: "edvr_profile.ini"}
+    ids = {101: "d3d11.dll", 103: _ini_name(profile), 107: "edvr_profile.ini"}
     if profile == "vr":
         ids.update({102: "openvr/openvr_api.dll", 105: "openvr/openxr_loader.dll",
                     106: "openvr/OPENXR-LOADER-LICENSE.txt"})
@@ -140,6 +260,7 @@ def package(root, version, no_dlss=False, dry_run=False, profile="vr"):
     missing = [str(src) for src, _ in files if not src.is_file()]
     if missing:
         raise ValueError("missing release payload:\n  " + "\n  ".join(missing))
+    _check_version_stamps(version, files)
     try:
         import openxr_pe
         openxr_pe.native_graphics_exports(str(files[0][0]))
@@ -193,6 +314,49 @@ def package(root, version, no_dlss=False, dry_run=False, profile="vr"):
 
 
 def self_test():
+    def stamp(value, product=None):
+        return {"FileVersion": value, "ProductVersion": value if product is None else product}
+
+    def refused(version, stamps, *needles):
+        problems = version_stamp_problems(version, stamps)
+        text = " | ".join(problems)
+        assert problems and all(needle in text for needle in needles), (version, stamps, problems)
+        return text
+
+    # The release version check, on fixture strings (no binaries): the rule is
+    # exactly "v<version>" or "<version>" in both FileVersion and ProductVersion.
+    assert version_stamp_problems("1.2.3", [("d3d11.dll", stamp("v1.2.3")),
+                                            ("openvr/openvr_api.dll", stamp("1.2.3"))]) == []
+    assert version_stamp_problems("1.2.3-rc.1", [("d3d11.dll", stamp("v1.2.3-rc.1"))]) == []
+    assert version_stamp_problems("1.2.3", []) == []
+    text = refused("1.2.3", [("d3d11.dll", stamp("v1.2.2"))], "d3d11.dll is stamped v1.2.2",
+                   "(FileVersion/ProductVersion)", "not release v1.2.3")
+    assert "uncommitted" not in text
+    for wrong in ("v1.2.30", "v1.2.3.1", "v1.2.3-1-g0123abc", "1.2.3-rc.1", "unknown", "", " v1.2.3"):
+        refused("1.2.3", [("d3d11.dll", stamp(wrong))], "not release v1.2.3")
+    refused("1.2.3-rc.1", [("d3d11.dll", stamp("v1.2.3"))], "d3d11.dll is stamped v1.2.3 ")
+    for dirty in ("v1.2.3-dirty", "v1.2.3-2-g0123abc-dirty", "V1.2.3-DIRTY", "unknown-dirty"):
+        text = refused("1.2.3", [("d3d11.dll", stamp(dirty))], "is stamped " + dirty, "uncommitted changes")
+        assert "not release" not in text, text
+    text = refused("1.2.3", [("d3d11.dll", stamp("v1.2.3", "v1.2.3-dirty"))], "(ProductVersion)", "uncommitted")
+    assert "FileVersion" not in text, text
+    refused("1.2.3", [("d3d11.dll", None)], "d3d11.dll carries no version stamp")
+    refused("1.2.3", [("d3d11.dll", {})], "d3d11.dll carries no version stamp")
+    refused("1.2.3", [("d3d11.dll", {"FileVersion": "v1.2.3"})], "d3d11.dll has no ProductVersion")
+    text = refused("1.2.3", [("d3d11.dll", stamp("v1.2.3")), ("openvr/openvr_api.dll", stamp("v1.2.3-dirty")),
+                             ("edvr-installer.exe", None)],
+                   "openvr/openvr_api.dll is stamped", "edvr-installer.exe carries no version stamp")
+    assert "d3d11.dll" not in text, "a binary that matches is not named: " + text
+    if os.name == "nt":
+        # The real reader: a system DLL carries strings, a file with no version
+        # resource carries none.
+        system = _stamped_versions(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "kernel32.dll")
+        assert system and system.get("FileVersion") and system.get("ProductVersion"), system
+        with tempfile.TemporaryDirectory(prefix="edvr-package-stamp-") as folder:
+            bare = Path(folder) / "bare.dll"
+            bare.write_bytes(b"MZ, but no version resource")
+            assert _stamped_versions(bare) is None
+
     with tempfile.TemporaryDirectory(prefix="edvr-package-test-") as temp:
         root = Path(temp); (root / "build").mkdir(); (root / "release").mkdir()
         for source, _ in _files(root, True):
@@ -215,6 +379,25 @@ def self_test():
         openxr_pe.native_exports = lambda path: None; openxr_pe.native_graphics_exports = lambda path: None
         fetch_openxr_loader.verify = lambda path: None
         globals()['_embedded_resource'] = fake_resource
+        # The fixture binaries are not real PEs. Each reads as stamped with the
+        # release being packaged, unless a case overrides one by file name; the
+        # local package() below tells the reader which release that is, so the
+        # older cases (every version they package is different) need no change.
+        old_stamps = globals()['_stamped_versions']
+        stamps = {"version": "0.0.0", "override": {}}
+
+        def fake_stamps(path):
+            if path.name in stamps["override"]:
+                return stamps["override"][path.name]
+            return stamp("v" + stamps["version"])
+
+        real_package = globals()['package']
+
+        def package(root, version, *args, **kwargs):
+            stamps["version"] = version
+            return real_package(root, version, *args, **kwargs)
+
+        globals()['_stamped_versions'] = fake_stamps
         try:
             assert package(root, "1.2.3", no_dlss=True, dry_run=True) == 0
             assert not (root / "dist").exists()
@@ -289,6 +472,33 @@ def self_test():
             with zipfile.ZipFile(root / "dist" / "edvr-1.2.7.zip") as archive:
                 assert "FIDELITYFX-SDK-DX11-LICENSE.txt" not in set(archive.namelist())
 
+            # The release version check through package(): read before anything is
+            # staged, so a refused release writes nothing -- dry run or not -- and
+            # the message names the binary and what it is stamped.
+            graphics, runtime = "edvr_openxr_graphics.dll", "edvr_openxr_runtime.dll"
+            for label, override, needle in (
+                    ("a dirty DLL", {graphics: stamp("v3.0.0-dirty")},
+                     "d3d11.dll is stamped v3.0.0-dirty"),
+                    ("a runtime from another release", {runtime: stamp("v2.9.9")},
+                     "openvr/openvr_api.dll is stamped v2.9.9"),
+                    ("a dev-build installer", {"edvr-installer.exe": stamp("v3.0.0-4-g0123abc")},
+                     "edvr-installer.exe is stamped v3.0.0-4-g0123abc"),
+                    ("an unstamped DLL", {graphics: None}, "d3d11.dll carries no version stamp")):
+                stamps["override"] = {name: value for name, value in override.items()}
+                for dry_run in (True, False):
+                    try:
+                        package(root, "3.0.0", no_dlss=True, dry_run=dry_run)
+                        raise AssertionError("%s accepted (dry_run=%s)" % (label, dry_run))
+                    except ValueError as error:
+                        assert needle in str(error) and "3.0.0" in str(error), (label, str(error))
+                assert not (root / "dist" / "edvr-3.0.0.zip").exists(), "a refused release wrote: " + label
+                assert not (root / "dist" / ".edvr-stage-3.0.0").exists(), "a refused release staged: " + label
+                assert not (root / "dist" / "edvr-3.0.0").exists(), "a refused release staged: " + label
+            stamps["override"] = {}
+            assert package(root, "3.0.0", no_dlss=True, dry_run=True) == 0
+            assert not (root / "dist" / "edvr-3.0.0.zip").exists()
+            assert package(root, "3.0.0", no_dlss=True) == 0 and (root / "dist" / "edvr-3.0.0.zip").is_file()
+
             flat_descriptor = b"[install]\r\nschema = 1\r\nprofile = flat\r\n"
             (root / "build" / "edvr_profile_flat.ini").write_bytes(flat_descriptor)
             (root / "build" / "edvr-flat.ini").write_bytes(b"[fix]\r\ntemporal_aa = off\r\n")
@@ -301,6 +511,22 @@ def self_test():
                 names = set(archive.namelist())
                 assert "openvr/openvr_api.dll" not in names and "edvr-flat-installer.exe" in names
                 assert archive.read("edvr_profile.ini") == flat_descriptor
+                # The flat edition's settings file is edvr-flat.ini: the archive names
+                # it so, and carries no edvr.ini (the VR profile's) at all.
+                assert "edvr-flat.ini" in names and "edvr.ini" not in names, names
+                assert archive.read("edvr-flat.ini") == b"[fix]\r\ntemporal_aa = off\r\n"
+            # The installer's own copy of the settings is checked against that same
+            # file, under its own name.
+            resources[103] = b"[fix]\r\ntemporal_aa = dlss\r\n"
+            try:
+                package(root, "1.2.8", no_dlss=True, profile="flat")
+                raise AssertionError("flat installer embedding other settings than edvr-flat.ini accepted")
+            except ValueError as error:
+                assert "edvr-flat.ini" in str(error), str(error)
+            resources[103] = b"[fix]\r\ntemporal_aa = off\r\n"
+            # And the VR archive still ships edvr.ini, under that name.
+            with zipfile.ZipFile(root / "dist" / "edvr-1.2.7.zip") as archive:
+                assert "edvr.ini" in set(archive.namelist()) and "edvr-flat.ini" not in set(archive.namelist())
             with zipfile.ZipFile(root / "dist" / "edvr-flat-installer-1.2.8.zip") as installer_archive:
                 assert set(installer_archive.namelist()) == {"edvr-flat-installer.exe"}
                 assert installer_archive.read("edvr-flat-installer.exe") == b"installer"
@@ -310,10 +536,24 @@ def self_test():
                 raise AssertionError("flat installer with embedded VR runtime accepted")
             except ValueError:
                 pass
+            del resources[102]
+
+            # The flat archive carries no runtime DLL, so only what it does carry is
+            # checked: another release's runtime is not its business, its installer is.
+            stamps["override"] = {runtime: stamp("v0.0.1-dirty")}
+            assert package(root, "3.0.1", no_dlss=True, profile="flat") == 0
+            stamps["override"] = {"edvr-flat-installer.exe": stamp("v3.0.1-dirty")}
+            try:
+                package(root, "3.0.2", no_dlss=True, profile="flat")
+                raise AssertionError("flat installer stamped for another release accepted")
+            except ValueError as error:
+                assert "edvr-flat-installer.exe is stamped v3.0.1-dirty" in str(error), str(error)
+            assert not (root / "dist" / "edvr-flat-3.0.2.zip").exists()
         finally:
             openxr_pe.native_exports, openxr_pe.native_graphics_exports = old_native, old_graphics
             fetch_openxr_loader.verify = old_verify
             globals()['_embedded_resource'] = old_resource
+            globals()['_stamped_versions'] = old_stamps
     print("package_native: self-test passed"); return 0
 
 

@@ -20,6 +20,16 @@ namespace {
 // session.
 const long long kSessionWindowSeconds = 180;
 
+// The edition installed in this folder, as far as it can be told without a
+// survey: the record when there is one, else the descriptor the flat edition
+// always writes. Everything else is VR.
+std::string editionOf(const std::wstring& gameDir) {
+    const InstallState state = readState(gameDir);
+    if (state.present) return state.profile;
+    const std::string descriptor = readTextFile(joinPath(gameDir, L"edvr_profile.ini"));
+    return iniValue(descriptor, "install.profile") == "flat" ? "flat" : "vr";
+}
+
 unsigned long crc32Of(const unsigned char* data, size_t size, unsigned long running) {
     // The table is built once, on first use: 1 KB and a few microseconds
     // against carrying 256 constants in the source.
@@ -340,8 +350,14 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
         return bundle;
     }
 
-    // Where the logs are is a setting, so ask the file rather than assume.
-    const std::string iniText = readTextFile(joinPath(gameDir, L"edvr.ini"));
+    // Where the logs are is a setting, so ask the file rather than assume -- the
+    // file the installed edition's runtime reads: the flat edition's edvr-flat.ini
+    // (edvr.ini only while it has none), the VR edition's edvr.ini.
+    const bool flatEdition = editionOf(gameDir) == "flat";
+    const std::wstring flatIniPath = joinPath(gameDir, L"edvr-flat.ini");
+    const std::wstring sharedIniPath = joinPath(gameDir, L"edvr.ini");
+    const std::string iniText =
+        readTextFile(flatEdition && fileExists(flatIniPath) ? flatIniPath : sharedIniPath);
     const std::string configured = iniValue(iniText, "log.dir");
     const std::wstring logDir =
         configured.empty() ? joinPath(gameDir, L"edvr_logs") : fromUtf8(configured);
@@ -402,10 +418,12 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
     const Extra extras[] = {
         {joinPath(gameDir, L"edvr_breadcrumbs.txt"), L"edvr_breadcrumbs.txt", nullptr},
         {joinPath(gameDir, L"edvr_FATAL.txt"), L"edvr_FATAL.txt", nullptr},
-        {joinPath(gameDir, L"edvr.ini"), L"edvr.ini", "edvr.ini is not there"},
-        // The flat profile's own settings file; legitimately absent on VR-only
-        // installs, so its absence says nothing.
-        {joinPath(gameDir, L"edvr-flat.ini"), L"edvr-flat.ini", nullptr},
+        // Each edition's settings file is the one to miss when it is that
+        // edition's: a flat install that reads only edvr-flat.ini is not short of
+        // an edvr.ini, and a VR one has no use for a flat file.
+        {sharedIniPath, L"edvr.ini", flatEdition ? nullptr : "edvr.ini is not there"},
+        {flatIniPath, L"edvr-flat.ini",
+         flatEdition && !fileExists(sharedIniPath) ? "edvr-flat.ini is not there" : nullptr},
         {statePath(gameDir), L"edvr_install_state.ini", nullptr},
     };
     for (const Extra& extra : extras) {

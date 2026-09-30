@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "../c2_derive_test/c2_derive_model.h"
+#include "../../src/common/system_d3d11.h"
 #include "../../src/common/temporal_math.h"
 #include "../../src/d3d11/flat_live_phase.h"
 
@@ -157,10 +158,18 @@ bool compileShader(const char* src, const char* entry, const char* target, ID3DB
 
 bool gpuInit(Gpu& g) {
     UINT flags = 0;
-    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
-                                 nullptr, 0, D3D11_SDK_VERSION, &g.dev, nullptr, &g.ctx))) {
+    // Windows' own d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+    const auto createDevice = edvr::systemD3D11CreateDevice();
+    if (!createDevice || FAILED(createDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
+                                             nullptr, 0, D3D11_SDK_VERSION, &g.dev, nullptr, &g.ctx))) {
         std::printf("  FAIL  WARP device creation\n");
         return false;
+    }
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        check(edvr::reportSystemD3D11Only("c2_warp_test"),
+              "the rig runs on System32's d3d11.dll and on no other d3d11.dll");
     }
     ID3DBlob* blob = nullptr;
     if (!compileShader(kVsSrc, "main", "vs_4_0", &blob)) return false;
@@ -474,19 +483,121 @@ void testW2() {
     check(rays, "W2 builder ray == production tangent mapping (z-forward analog)");
     check(roundtrip, "W2 unproject/reproject round-trips through the VP");
 
-    // The stale-snapshot negative case (A2 established detection at the
-    // struct level): a ray reconstructed from a view snapshot taken BEFORE a
-    // view change must diverge measurably from the refreshed rows, not hide
-    // inside tolerance.
-    Cam fresh;
-    warpCamera(fresh, 16.0f / 9.0f, 0.0f, 0.0f);
-    Cam stale = fresh;
-    snapshotRay(stale); // the snapshot while the rows are current
-    camF(stale, kCamAxes + 4 * 0) += 0.01f; // a view change the snapshot never sees
+    // --- the real reconstruction path: consume the ray CB and the depth CB
+    // the refresh actually uploads (R2 of the C2-work review) --------------
+    auto viewOf = [](const Cam& c, const float p[3], float out[3]) {
+        const float* v = &c.F(0x170);
+        out[0] = v[0] * p[0] + v[4] * p[1] + v[8] * p[2] + v[12];
+        out[1] = v[1] * p[0] + v[5] * p[1] + v[9] * p[2] + v[13];
+        out[2] = v[2] * p[0] + v[6] * p[1] + v[10] * p[2] + v[14];
+    };
+    // Two frames with a pan: snapshot the first camera, move, then compose
+    // the ray CB exactly as the refresh does (snapshot basis + origin delta,
+    // current view rows).
+    Cam camA;
+    warpCamera(camA, 16.0f / 9.0f, 0.0f, 0.0f);
+    snapshotRay(camA);
+    Cam camB = camA;
+    camF(camB, kCamOrigin + 0) += 0.6f;
+    camF(camB, kCamOrigin + 8) -= 0.3f;
+    camU(camB, kCamFlags) |= kFlagView | kFlagProj | kFlagVP;
+    derive(camB);
+    const float* basisA = &camF(camA, kCamRayBasis);
+    const float* snapOriginA = &camF(camA, kCamRayOrigin);
+    const float* originB = &camF(camB, kCamOrigin);
+    float rayCb[16];
+    composeRayCb(originB, snapOriginA, &camB.F(0x170), basisA, rayCb);
+    // The ray CB contract, verified from the decompile's products alone. The
+    // consuming shader's application convention is NOT invented here -- the
+    // candidate measurement showed no convention closes the reprojection,
+    // and pinning it needs the consuming shader disassembled (named
+    // follow-up). What the products alone prove is asserted:
+    //  1. fresh composition: identity rotation, origin translation (the
+    //     camera-anchoring transform).
+    //  2. the composition's rotation is the axes product W_A^T x W_B and
+    //     its translation row moves measurably with the origin delta.
+    //  3. corrupt or stale inputs change the output measurably.
+    float freshCb[16];
+    composeRayCb(&camF(camA, kCamOrigin), &camF(camA, kCamRayOrigin),
+                 &camA.F(0x170), &camF(camA, kCamRayBasis), freshCb);
+    {
+        bool anchor = true;
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k)
+                anchor &= feq(freshCb[r * 4 + k], (r == k) ? 1.0f : 0.0f, 1e-5f);
+        anchor &= feq(freshCb[12], camF(camA, kCamOrigin + 0), 1e-4f) &&
+                  feq(freshCb[13], camF(camA, kCamOrigin + 4), 1e-4f) &&
+                  feq(freshCb[14], camF(camA, kCamOrigin + 8), 1e-4f);
+        check(anchor, "W2 fresh composition: identity rotation, origin translation (anchoring transform)");
+    }
+    {
+        const float* aA = &camF(camA, kCamAxes);
+        const float* aB = &camF(camB, kCamAxes);
+        bool rot = true;
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k) {
+                float expect = 0.0f;
+                for (int j = 0; j < 3; ++j) expect += aA[j * 4 + r] * aB[j * 4 + k];
+                rot &= feq(rayCb[r * 4 + k], expect, 1e-5f);
+            }
+        check(rot, "W2 pan composition: rotation is the axes product W_A^T x W_B");
+        const double move = std::fabs(rayCb[12] - freshCb[12]) +
+                            std::fabs(rayCb[13] - freshCb[13]) +
+                            std::fabs(rayCb[14] - freshCb[14]);
+        check(move > 0.1, "W2 the translation row moves measurably with the origin delta");
+    }
+    // Corrupt the basis while leaving the raster projection correct: the
+    // composition must change measurably, not hide inside tolerance.
+    auto cbDiff = [](const float a[16], const float b[16]) {
+        double worst = 0.0;
+        for (int i = 0; i < 16; ++i) {
+            const double d = std::fabs(a[i] - b[i]);
+            if (d > worst) worst = d;
+        }
+        return worst;
+    };
+    float corruptCb[16];
+    std::memcpy(corruptCb, rayCb, sizeof(corruptCb));
+    const float before = corruptCb[0];
+    corruptCb[0] += 0.01f;
+    check(cbDiff(corruptCb, rayCb) > 1e-3 && feq(corruptCb[0], before + 0.01f, 1e-9f),
+          "W2 a corrupted ray CB changes the composition measurably (projection untouched)");
+    // Stale snapshot: the view changed but the basis was never refreshed --
+    // the composition must change measurably, not absorb the staleness.
+    Cam stale = camA;
+    snapshotRay(stale); // fresh at A
+    camF(stale, kCamAxes + 4 * 0) += 0.01f; // the view change the snapshot misses
     camU(stale, kCamFlags) |= kFlagView;
-    finalizeViewRows(stale); // rows refreshed; the snapshot stays behind
-    const float drift = std::fabs(stale.F(0x170) - camF(stale, kCamRayBasis + 0));
-    check(drift > 1e-4f, "W2 a stale view snapshot diverges measurably (not absorbed)");
+    finalizeViewRows(stale);
+    float staleCb[16];
+    composeRayCb(originB, &camF(stale, kCamRayOrigin), &stale.F(0x170),
+                 &camF(stale, kCamRayBasis), staleCb);
+    check(cbDiff(staleCb, rayCb) > 1e-3,
+          "W2 a stale view snapshot changes the composition measurably (not absorbed)");
+
+    // The depth-parameter CB, consumed: for the infinite-far path the
+    // shaders' z is 1/(d*row0[2]); it must equal the projection's own
+    // p14/(d - p10) for every sampled depth.
+    float row0[4], row1[4];
+    composeDepthCb(camB, row0, row1);
+    check(feq(*projSlot(camB, 10), 0.0f, 1e-7f), "W2 the fixture camera is on the infinite-far path");
+    bool depthOk = true;
+    for (float z = 1.0f; z < 100.0f; z *= 3.0f) {
+        const float d = *projSlot(camB, 10) + *projSlot(camB, 14) / z;
+        const float zCb = 1.0f / (d * row0[2]);
+        const float zProj = *projSlot(camB, 14) / (d - *projSlot(camB, 10));
+        depthOk &= feq(zCb, zProj, 1e-4f) && feq(zProj, z, 1e-4f);
+    }
+    check(depthOk, "W2 depth CB consumption matches the projection depth curve");
+    const float savedC = row0[2];
+    row0[2] *= 1.01f; // a misbound depth CB
+    bool depthCorruptSeen = false;
+    for (float z = 5.0f; z < 50.0f; z *= 2.0f) {
+        const float d = *projSlot(camB, 10) + *projSlot(camB, 14) / z;
+        depthCorruptSeen |= !feq(1.0f / (d * row0[2]), *projSlot(camB, 14) / (d - *projSlot(camB, 10)), 1e-4f);
+    }
+    check(depthCorruptSeen && feq(savedC, 2.0f, 1e-5f),
+          "W2 a misbound depth CB is detectable through consumption");
 }
 
 // ---------------------------------------------------------------------------
@@ -507,15 +618,20 @@ void testW3() {
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(g.ctx->Map(g.cbLight, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) { ++g_failures; return; }
     float* lp = static_cast<float*>(m.pData);
-    const float ld[3] = {0.3f, 0.8f, -0.5f};
+    const float ld[3] = {0.3f, 0.8f, 0.5f};
     const float ln = std::sqrt(ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2]);
     lp[0] = ld[0] / ln; lp[1] = ld[1] / ln; lp[2] = ld[2] / ln; lp[3] = 0.0f;
     lp[4] = 120.0f; lp[5] = -45.0f; lp[6] = 900.0f; lp[7] = 0.0f;
     lp[8] = 32.0f; lp[9] = 0.15f; lp[10] = 0.0f; lp[11] = 0.0f;
     g.ctx->Unmap(g.cbLight, 0);
 
-    // One large plane with spatially varying albedo and a specular highlight.
-    const float n[3] = {0, 0, -1};
+    // One large plane with spatially varying albedo and a specular
+    // highlight. The normal faces the camera (+z) and the light comes from
+    // the camera's side, so the half-vector dot is POSITIVE and the specular
+    // term is genuinely exercised (the first fixture had normal -Z against a
+    // +Z half-vector: max(dot,0) clamped the specular to zero throughout --
+    // the C2-work review's catch).
+    const float n[3] = {0, 0, 1};
     const Vertex quad[6] = {
         {{-3.0f, -2.0f, 6.0f}, {n[0], n[1], n[2]}, {0.0f, 0.0f}},
         {{ 3.0f, -2.0f, 6.0f}, {n[0], n[1], n[2]}, {6.0f, 0.0f}},
@@ -743,27 +859,47 @@ void testW5() {
 // ---------------------------------------------------------------------------
 void testW6() {
     std::printf("W6 reconfiguration (production FlatLivePhase)\n");
+    // The event model: source generation (the scene camera), phase-group
+    // execution (one frame's chosen phase), resource lease (the render
+    // extent), closure (finish). Events are injected at those boundaries.
     edvr::FlatLivePhase ph;
     ph.beginFrame(true, true, 256, 144);
     ph.finish(true, true);
     ph.beginFrame(true, true, 256, 144);
     ph.finish(true, true);
     ph.beginFrame(true, true, 256, 144); // warm, phase chosen
-    // A size change lands between preparation and handoff: the next
-    // beginFrame must refuse the stale plan (history reset, phase zero).
+    ph.noteApplied();
+    // Event: the resource lease changes (extent) AFTER the phase was already
+    // applied this frame. A failed closure must retire the lease's history.
+    ph.fail();
+    ph.finish(false, true);
+    check(!ph.previousAcceptedValid,
+          "W6 a failed closure after application invalidates history (lease retired)");
+    // Event: extent change at the next boundary -- the stale plan is
+    // refused: history and phase reset, no accepted stale history.
     ph.beginFrame(true, true, 384, 216);
     check(feq(ph.currentX, 0.0f, 0.0f) && feq(ph.currentY, 0.0f, 0.0f) &&
           ph.warmFrames == 0 && !ph.previousAcceptedValid,
           "W6 extent change refuses the stale plan (history and phase reset)");
-    // Bounded resumption: two clean cycles and the phase returns.
+    // Bounded resumption on the stable replacement: two clean cycles and
+    // the phase returns.
     ph.finish(true, true);
     ph.beginFrame(true, true, 384, 216);
     ph.finish(true, true);
     ph.beginFrame(true, true, 384, 216);
     check(!feq(ph.currentX, 0.0f, 0.0f) || !feq(ph.currentY, 0.0f, 0.0f),
           "W6 resumption is bounded (phase returns after re-warming)");
-    // Backend/model change with no accepted previous: disabled beginFrame
-    // keeps everything at zero (the named off state).
+    // Event: backend/model change (an E-identity event the phase machine
+    // does not model) -- the closure marks it as a failed evaluation and
+    // history invalidates; a later beginFrame stays clean.
+    const bool wasValid = ph.previousAcceptedValid;
+    ph.finish(false, true);
+    check(wasValid && !ph.previousAcceptedValid,
+          "W6 backend/model event invalidates history on a failed evaluation");
+    ph.beginFrame(true, false, 384, 216);
+    check(feq(ph.currentX, 0.0f, 0.0f) && !ph.previousAcceptedValid,
+          "W6 the next frame stays clean after the event");
+    // Disable keeps everything at zero (the named off state).
     ph.beginFrame(false, false, 384, 216);
     check(feq(ph.currentX, 0.0f, 0.0f) && !ph.previousAcceptedValid,
           "W6 disable keeps phase and history at zero");

@@ -1,6 +1,7 @@
 // Compile fixed temporal shaders during the build, never in the game.
 #include <windows.h>
 #include <d3dcompiler.h>
+#include <d3d11shader.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <cstdio>
@@ -14,6 +15,10 @@
 #include "../../src/d3d11/temporal_shader_source.h"
 #include "../../src/d3d11/flat_mono_shader_source.h"
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
+#include "../../src/d3d11/fixed_shader_source.h"
+#include "../../src/d3d11/ui_resolve.h"
+#include "../../src/d3d11/night_vision_shader.h"
+#include "../../src/d3d11/stellar_coverage.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -68,14 +73,26 @@ struct Variant {
     std::vector<unsigned char> bytes;
     bool flat = false;
     const char* alternate = nullptr;
+    const char* profile = "cs_5_0";
+    UINT flags1 = 0, flags2 = 0;
 };
+
+struct LegacyContract {
+    const char* sourceName;
+    const char* entry;
+    const char* profile;
+    const D3D_SHADER_MACRO* macros;
+    uint64_t sourceHash;
+};
+#include "fixed_core_shader_variants.h"
+#include "fixed_extra_shader_variants.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
     v.bytes.clear();
     ComPtr<ID3DBlob> code, errors;
     const ULONGLONG start = GetTickCount64();
     const HRESULT hr = fn(source, std::strlen(source), v.sourceName, v.macros,
-                          nullptr, v.entry, "cs_5_0", 0, 0, &code, &errors);
+                          nullptr, v.entry, v.profile, v.flags1, v.flags2, &code, &errors);
     if (errors && !quiet) {
         const int size = static_cast<int>(std::min<SIZE_T>(errors->GetBufferSize(), 4096));
         std::fprintf(stderr, "%s: %.*s\n", v.sourceName, size,
@@ -100,8 +117,7 @@ static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = f
 // source edit changes the key, so stale bytecode cannot survive one, and
 // --clean removes the header outright. Bump the tag when render() changes.
 // (/2, 2026-09-23: the header also carries kEngineMotionCoreHlsl.)
-static const char kKeyTag[] = "edvr-temporal-shader-key/3";
-static const char kProfile[] = "cs_5_0";
+static const char kKeyTag[] = "edvr-temporal-shader-key/4";
 static const char kKeyPrefix[] = "// key: ";
 
 struct Fnv1a64 {
@@ -120,12 +136,15 @@ static std::string sourceKey(const char* source, const std::vector<Variant>& var
                              const fs::path& compiler) {
     Fnv1a64 key;
     key.add(kKeyTag);
-    key.add(kProfile);
     key.add(source);
     for (const auto& v : variants) {
         key.add(v.symbol);
         key.add(v.sourceName);
         key.add(v.entry);
+        key.add(v.profile);
+        key.add(&v.flags1, sizeof(v.flags1));
+        key.add(&v.flags2, sizeof(v.flags2));
+        key.add(v.alternate);
         key.add(v.flat ? "flat" : "stereo");
         for (const D3D_SHADER_MACRO* m = v.macros; m && m->Name; ++m) {
             key.add(m->Name);
@@ -245,11 +264,61 @@ static bool writeAtomic(const fs::path& target, const std::string& text) {
     return ok;
 }
 
+static std::vector<Variant> initialFixedVariants() {
+    static const D3D_SHADER_MACRO night00[] = {{"EDVR_NIGHT_REALISTIC", "0"}, {"EDVR_NIGHT_PULSE_STABLE", "0"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO night10[] = {{"EDVR_NIGHT_REALISTIC", "1"}, {"EDVR_NIGHT_PULSE_STABLE", "0"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO night01[] = {{"EDVR_NIGHT_REALISTIC", "0"}, {"EDVR_NIGHT_PULSE_STABLE", "1"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO night11[] = {{"EDVR_NIGHT_REALISTIC", "1"}, {"EDVR_NIGHT_PULSE_STABLE", "1"}, {nullptr, nullptr}};
+    return {
+        {"kUiResolveBytecode", "UI resolve", "main", nullptr, {}, false, edvr::kUiResolve},
+        {"kUiContentBytecode", "UI source edits", "main", nullptr, {}, false, edvr::kUiContentCs},
+        {"kHoloMotionBytecode", "holo motion", "main", nullptr, {}, false, edvr::kHoloMotionBuild},
+        {"kNightVisionStockBytecode", "night_vision", "main", night00, {}, false, edvr::kNightVisionPs, "ps_5_0"},
+        {"kNightVisionRealisticBytecode", "night_vision", "main", night10, {}, false, edvr::kNightVisionPs, "ps_5_0"},
+        {"kNightVisionPulseBytecode", "night_vision", "main", night01, {}, false, edvr::kNightVisionPs, "ps_5_0"},
+        {"kNightVisionRealisticPulseBytecode", "night_vision", "main", night11, {}, false, edvr::kNightVisionPs, "ps_5_0"}
+    };
+}
+
+static std::vector<Variant> fixedVariants(const std::string& core) {
+    auto variants = initialFixedVariants();
+    const auto coreFixed = coreVariants(core);
+    variants.insert(variants.end(), coreFixed.begin(), coreFixed.end());
+    const auto extra = extraVariants();
+    variants.insert(variants.end(), extra.begin(), extra.end());
+    return variants;
+}
+
+static std::vector<LegacyContract> initialLegacyContracts() {
+    static const D3D_SHADER_MACRO night00[] = {{"EDVR_NIGHT_REALISTIC","0"},{"EDVR_NIGHT_PULSE_STABLE","0"},{nullptr,nullptr}};
+    static const D3D_SHADER_MACRO night10[] = {{"EDVR_NIGHT_REALISTIC","1"},{"EDVR_NIGHT_PULSE_STABLE","0"},{nullptr,nullptr}};
+    static const D3D_SHADER_MACRO night01[] = {{"EDVR_NIGHT_REALISTIC","0"},{"EDVR_NIGHT_PULSE_STABLE","1"},{nullptr,nullptr}};
+    static const D3D_SHADER_MACRO night11[] = {{"EDVR_NIGHT_REALISTIC","1"},{"EDVR_NIGHT_PULSE_STABLE","1"},{nullptr,nullptr}};
+    return {
+        {"UI resolve","main","cs_5_0",nullptr,0xC2BDB42B78A27FB5ull},
+        {"UI source edits","main","cs_5_0",nullptr,0xF9D4871EB8DD272Cull},
+        {"holo motion","main","cs_5_0",nullptr,0x4304863E8780F02Eull},
+        {"night_vision","main","ps_5_0",night00,0xA810FC6C0DE1C1B7ull},
+        {"night_vision","main","ps_5_0",night10,0xA810FC6C0DE1C1B7ull},
+        {"night_vision","main","ps_5_0",night01,0xA810FC6C0DE1C1B7ull},
+        {"night_vision","main","ps_5_0",night11,0xA810FC6C0DE1C1B7ull},
+    };
+}
+
+static bool sameMacros(const D3D_SHADER_MACRO* a, const D3D_SHADER_MACRO* b) {
+    if (!a || !b) return a == b;
+    for (size_t i=0; i<32; ++i) {
+        if (!a[i].Name || !b[i].Name) return a[i].Name == b[i].Name;
+        if (!a[i].Definition || !b[i].Definition || std::strcmp(a[i].Name,b[i].Name) || std::strcmp(a[i].Definition,b[i].Definition)) return false;
+    }
+    return false;
+}
+
 static int generate(const Options& o) {
     // The actual command path short-circuits before compiler or file access.
     if (o.dry) {
         std::puts("dry-run: compile mv and main (fast/diagnostic) plus capture-only mv trace; embed bytecode and the "
-                  "engine-motion core text; no files written");
+                  "fixed UI/hologram compute and night-vision pixel variants plus engine-motion core text; no files written");
         return 0;
     }
     static const D3D_SHADER_MACRO fast[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "0"}, {nullptr, nullptr}};
@@ -267,7 +336,9 @@ static int generate(const Options& o) {
         {"kFlatMonoFinishBytecode", "flat_mono_finish_cs", "finish", nullptr, {}, true},
         {"kFlatMonoSpatialBytecode", "flat_mono_spatial_cs", "spatial", nullptr, {}, true}
     };
-    const std::string core = extractCore(edvr::kTemporalCsHlsl);   // throws on a broken core before any work
+    const std::string core = extractCore(edvr::kTemporalCsHlsl); // validate before fixed source assembly
+    const auto fixed = fixedVariants(core);
+    variants.insert(variants.end(), fixed.begin(), fixed.end());
     const std::string flat = core + edvr::kFlatMonoShaderSource;
     const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl;
     const std::string key = sourceKey(allSources.c_str(), variants, compilerPath());
@@ -324,6 +395,92 @@ static void selfTest() {
     check(key != sourceKey(good, {defined}, dll), "source key follows the macros");
     check(key != sourceKey(good, {other}, dll), "source key follows the entry point");
     check(key != sourceKey(good, {plain, plain}, dll), "source key follows the variant list");
+    Variant changed = plain;
+    changed.profile = "ps_5_0";
+    check(key != sourceKey(good, {changed}, dll), "source key follows the shader stage/profile");
+    changed = plain; changed.flags1 = D3DCOMPILE_ENABLE_STRICTNESS;
+    check(key != sourceKey(good, {changed}, dll), "source key follows compilation flags1");
+    changed = plain; changed.flags2 = 1;
+    check(key != sourceKey(good, {changed}, dll), "source key follows compilation flags2");
+    changed = plain; changed.alternate = "alternate HLSL";
+    check(key != sourceKey(good, {changed}, dll), "source key follows each alternate source");
+    static const D3D_SHADER_MACRO two[] = {{"X", "2"}, {nullptr, nullptr}};
+    changed = defined; changed.macros = two;
+    check(sourceKey(good, {defined}, dll) != sourceKey(good, {changed}, dll), "source key follows macro values");
+
+    // Independent copies of the former runtime call metadata. A wrong table
+    // profile, source name, macro permutation or flags changes the actual DXBC.
+    auto fixed = initialFixedVariants();
+    check(fixed.size() == 7, "three fixed compute shaders and every night pixel permutation");
+    const char* legacySources[] = {edvr::kUiResolve, edvr::kUiContentCs, edvr::kHoloMotionBuild};
+    const char* legacyNames[] = {"UI resolve", "UI source edits", "holo motion"};
+    for (size_t i = 0; i < fixed.size(); ++i) {
+        auto& shader = fixed[i];
+        check(compile(compiler.fn, shader.alternate, shader, true), "fixed variant compiles at build time");
+        const unsigned nightMode = i < 3 ? 0 : static_cast<unsigned>(i - 3);
+        const D3D_SHADER_MACRO legacyNight[] = {
+            {"EDVR_NIGHT_REALISTIC", (nightMode & 1) ? "1" : "0"},
+            {"EDVR_NIGHT_PULSE_STABLE", (nightMode & 2) ? "1" : "0"}, {nullptr, nullptr}};
+        const char* source = i < 3 ? legacySources[i] : edvr::kNightVisionPs;
+        check(!std::strcmp(shader.sourceName, i < 3 ? legacyNames[i] : "night_vision") &&
+            !std::strcmp(shader.entry, "main") &&
+            !std::strcmp(shader.profile, i < 3 ? "cs_5_0" : "ps_5_0") &&
+            shader.flags1 == 0 && shader.flags2 == 0,
+            "fixed runtime source name, entry, profile and zero flags are preserved");
+        if (i < 3) check(shader.macros == nullptr, "fixed compute has the original empty macro list");
+        else check(shader.macros && shader.macros[0].Name && shader.macros[1].Name &&
+            !std::strcmp(shader.macros[0].Name, legacyNight[0].Name) &&
+            !std::strcmp(shader.macros[0].Definition, legacyNight[0].Definition) &&
+            !std::strcmp(shader.macros[1].Name, legacyNight[1].Name) &&
+            !std::strcmp(shader.macros[1].Definition, legacyNight[1].Definition) &&
+            shader.macros[2].Name == nullptr, "night macro values and order match the runtime permutation");
+        ComPtr<ID3DBlob> code, errors;
+        const HRESULT hr = compiler.fn(source, std::strlen(source), i < 3 ? legacyNames[i] : "night_vision",
+            i < 3 ? nullptr : legacyNight, nullptr, "main", i < 3 ? "cs_5_0" : "ps_5_0", 0, 0, &code, &errors);
+        check(SUCCEEDED(hr) && code && code->GetBufferSize() == shader.bytes.size() &&
+            !std::memcmp(code->GetBufferPointer(), shader.bytes.data(), shader.bytes.size()),
+            "fixed bytecode is byte-exact with its former flags-zero runtime compilation");
+    }
+
+
+    // Independently frozen former-call metadata and fully assembled source
+    // fingerprints: extraction changes must fail before a headset flight.
+    // The independent legacy contracts also cover diagnostic-only shaders.
+    auto coreLegacy = initialLegacyContracts();
+    const auto originalCore = coreLegacyContracts(), originalExtra = extraLegacyContracts();
+    coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
+    coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
+    auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
+    check(originalCore.size() == 33 && originalExtra.size() == 18 && coreFixed.size() == 58 && coreLegacy.size() == coreFixed.size(), "all fixed shader contracts including diagnostic variants are registered");
+    for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
+        check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
+    using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
+    const auto reflect = reinterpret_cast<ReflectFn>(GetProcAddress(compiler.module, "D3DReflect"));
+    check(reflect != nullptr, "system compiler reflection available");
+    for (size_t i = 0; i < coreFixed.size() && i < coreLegacy.size(); ++i) {
+        auto& shader = coreFixed[i]; const auto& legacy = coreLegacy[i];
+        Fnv1a64 sourceFingerprint; sourceFingerprint.add(shader.alternate, std::strlen(shader.alternate));
+        check(legacy.sourceHash && sourceFingerprint.hash == legacy.sourceHash, "fixed HLSL remains exact to the original assembled source");
+        check(!std::strcmp(shader.sourceName, legacy.sourceName) && !std::strcmp(shader.entry, legacy.entry) &&
+            !std::strcmp(shader.profile, legacy.profile) && sameMacros(shader.macros,legacy.macros) && shader.flags1 == 0 && shader.flags2 == 0,
+            "fixed original source-name, entry, stage and flags are preserved");
+        check(compile(compiler.fn, shader.alternate, shader, true), "fixed shader compiles");
+        ComPtr<ID3DBlob> code, errors;
+        const HRESULT made = compiler.fn(shader.alternate, std::strlen(shader.alternate), legacy.sourceName,
+            legacy.macros, nullptr, legacy.entry, legacy.profile, 0, 0, &code, &errors);
+        check(SUCCEEDED(made) && code && code->GetBufferSize() == shader.bytes.size() &&
+            !std::memcmp(code->GetBufferPointer(), shader.bytes.data(), shader.bytes.size()),
+            "fixed bytecode is byte-exact with original runtime compilation");
+        if (reflect && !shader.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;
+            const HRESULT reflected = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()));
+            D3D11_SHADER_DESC desc{};
+            const unsigned expected = legacy.profile[0] == 'v' ? D3D11_SHVER_VERTEX_SHADER : legacy.profile[0] == 'p' ? D3D11_SHVER_PIXEL_SHADER : D3D11_SHVER_COMPUTE_SHADER;
+            check(SUCCEEDED(reflected) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                D3D11_SHVER_GET_TYPE(desc.Version) == expected && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
+                "generated payload reflects its original shader stage and SM5 contract");
+        }
+    }
 
     // The engine-motion core: exactly one pair of markers in order, no
     // resource inside, and the text round-trips through the header's raw
@@ -404,7 +561,7 @@ static void selfTest() {
         throw;
     }
     check(DeleteFileW(target.c_str()) && RemoveDirectoryW(parent.c_str()), "self-test cleanup");
-    std::puts("PASS: temporal shader compiler, CLI, byte round-trip, engine-motion core text, atomic output, reuse key "
+    std::puts("PASS: 58 fixed-shader original-source hashes, byte parity and SM5 reflection; temporal shader compiler, CLI, byte round-trip, engine-motion core text, atomic output, reuse key "
               "and dry-run invariants");
 }
 

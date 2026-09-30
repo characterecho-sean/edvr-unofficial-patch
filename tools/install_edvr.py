@@ -30,7 +30,12 @@ Three things it does that a `copy` does not:
   * BACKS UP under one naming scheme, `<name>.pre-<tag>-<stamp>.bak`,
     where the tag defaults to the short git hash of the tree being
     installed. A backup whose name says which commit it preceded is worth
-    keeping; `bak-skip` is not.
+    keeping; `bak-skip` is not. Once an install has landed and verified, the
+    newest 5 backups of each file stay (--keep-backups N, at least 1) and the
+    older ones are deleted and listed. Only names of exactly this scheme, in
+    the game directory and Openvr\\win64, are touched; a backup the current
+    receipt names is never deleted, and if that receipt cannot be read nothing
+    is. --dry-run lists what would go and deletes nothing.
 
 edvr.ini is NOT copied unless --ini says so. It is the one file in the
 payload that carries the settings of whoever flew last, a reinstall does
@@ -67,6 +72,13 @@ NATIVE_KIND = "edvr-native-openxr"
 LEGACY_GRAPHICS_SOURCE = "build/d3d11.dll"
 FLAT_KIND = "edvr-flat"
 PROFILE_FILE = "edvr_profile.ini"
+
+# Backup pruning (see prune_backups, below backup_name): the newest KEEP_BACKUPS
+# of each file stay after a good install. BACKUP_FILE is exactly backup_name's
+# scheme, with the ".N" a same-second collision gets (_native_backup_name).
+KEEP_BACKUPS = 5
+BACKUP_FILE = re.compile(r"^(?P<file>.+?)\.pre-(?P<tag>[^\\/]+)-(?P<stamp>\d{8}-\d{6})\.bak(?:\.(?P<n>\d+))?$")
+RECEIPT_NAMES = ("edvr_native_receipt.json", "edvr_flat_receipt.json")
 
 
 def profile_bytes(profile):
@@ -322,7 +334,7 @@ def _replace_receipt(path, receipt):
             os.remove(temp)
 
 
-def native_install(root, target, receipt_path, tag, dry_run=False):
+def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=KEEP_BACKUPS):
     if re.fullmatch(r"[A-Za-z0-9_-]+", tag) is None:
         raise SystemExit("[edvr] native backup tag must contain only letters, digits, _ or -")
     paths = _native_preflight(root, target, receipt_path)
@@ -356,6 +368,7 @@ def native_install(root, target, receipt_path, tag, dry_run=False):
         print("               replace -> %s" % os.path.basename(backups[key]))
     print("       receipt  %s" % (receipt_path or "(not requested in dry run)"))
     if dry_run:
+        _prune_quietly(target, keep_backups, dry_run=True)
         print("[edvr] dry run: wrote nothing.")
         return 0
 
@@ -434,6 +447,7 @@ def native_install(root, target, receipt_path, tag, dry_run=False):
                   "backups for recovery.")
         return 1
     print("[edvr] native package installed and receipt written: %s" % receipt_path)
+    _prune_quietly(target, keep_backups, receipts=(receipt_path,))
     return 0
 
 
@@ -671,6 +685,17 @@ def restore_native(receipt_path, dry_run=False):
         return 1
 
 
+def _rc3_flat_ini_target(target):
+    """The file an RC3 flat receipt recorded as its `ini` entry.
+
+    RC3's `--profile flat --ini` wrote the shared edvr.ini and journaled that
+    exact path in a version-2 flat receipt; the flat profile now keeps its
+    settings in edvr-flat.ini (_ini_target). Both are version 2, so the
+    receipt cannot say which it is except by the path it names, and an RC3
+    install must still be restorable with `--restore-native`."""
+    return os.path.join(target, "edvr.ini")
+
+
 def _validate_v2_receipt(r):
     if not isinstance(r, dict) or r.get("version") != 2 or r.get("kind") not in (NATIVE_KIND, FLAT_KIND) or r.get("state") != "installed":
         raise ValueError("receipt is not an installed EDVR v2 package")
@@ -683,8 +708,16 @@ def _validate_v2_receipt(r):
     required = {"runtime", "graphics", "loader", "notice", "config"} if r["kind"] == NATIVE_KIND else {"graphics", "profile"}
     targets = {key: paths[key + "_target"] for key in ("runtime", "graphics", "loader", "notice") if key + "_target" in paths}
     if r["kind"] == NATIVE_KIND: targets["config"] = paths["config"]
+    ini_target = _ini_target(target, "flat" if r["kind"] == FLAT_KIND else "vr")
+    if r["kind"] == FLAT_KIND:
+        # The one legacy shape accepted: a flat `ini` entry whose recorded
+        # target is EXACTLY <target>\edvr.ini. Every other check below still
+        # runs on it, and any other path, for any kind, is refused as before.
+        legacy = _rc3_flat_ini_target(target)
+        if any(e["key"] == "ini" and e.get("target") == os.path.abspath(legacy) for e in files):
+            ini_target = legacy
     targets.update(profile=os.path.join(target, PROFILE_FILE),
-                   ini=_ini_target(target, "flat" if r["kind"] == FLAT_KIND else "vr"),
+                   ini=ini_target,
                    dlss=os.path.join(target, "nvngx_dlss.dll"))
     for e in files:
         if isinstance(e, dict) and isinstance(e.get("key"), str) and e["key"].startswith("plugin_"):
@@ -817,6 +850,124 @@ def backup_name(dst, tag, now=None):
     """One scheme, always: <name>.pre-<tag>-<YYYYMMDD-HHMMSS>.bak"""
     now = now or datetime.datetime.now()
     return "%s.pre-%s-%s.bak" % (dst, tag, now.strftime("%Y%m%d-%H%M%S"))
+
+
+# Pruning. Every install leaves one backup per file it replaced, and a game
+# directory that has been installed into for a month carries a hundred of
+# them. After a good install the newest KEEP_BACKUPS of each file stay and the
+# rest go. Only names of exactly the scheme above are ever touched, and only in
+# the directories an install writes to.
+def _backup_dirs(target):
+    return [target, os.path.join(target, "Openvr", "win64")]
+
+
+def _backup_families(directory):
+    """{live file name, lowercased: [(stamp, n, path), ...]} for the files in
+    `directory` whose names are exactly the backup scheme -- not directories,
+    not links, not a name whose stamp is no real date."""
+    families = {}
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return families
+    for entry in entries:
+        match = BACKUP_FILE.match(entry.name)
+        if not match:
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            stamp = datetime.datetime.strptime(match.group("stamp"), "%Y%m%d-%H%M%S")
+        except (OSError, ValueError):
+            continue
+        families.setdefault(match.group("file").lower(), []).append(
+            (stamp, int(match.group("n") or 0), entry.path))
+    return families
+
+
+def _current_receipts(target, extra=()):
+    """The receipt files that are current: the newest of each kind in
+    `target` (a second install writes its receipt under the backup scheme's
+    name, so the newest of `edvr_native_receipt.json` and its `.pre-` siblings
+    is the latest install's), plus any receipt path the caller names."""
+    current = [os.path.abspath(path) for path in extra if path]
+    families = _backup_families(target)
+    for name in RECEIPT_NAMES:
+        newest = sorted(families.get(name, ()), reverse=True)[:1]
+        base = os.path.join(target, name)
+        if newest:
+            current.append(newest[0][2])
+        elif os.path.isfile(base):
+            current.append(base)
+    return current
+
+
+def _protected_by_receipts(receipts):
+    """(paths, readable): the normalized real paths of every backup the
+    receipts name, and the receipts themselves. `readable` is False when a
+    receipt cannot be read, since then what it names is not known."""
+    protected = set()
+    for receipt in receipts:
+        protected.add(os.path.normcase(os.path.realpath(receipt)))
+        try:
+            with open(receipt, "r", encoding="utf-8") as stream:
+                journal = json.load(stream)
+            entries = journal["files"]
+            if not isinstance(entries, list):
+                raise ValueError("files is not a list")
+            for entry in entries:
+                backup = entry.get("backup") if isinstance(entry, dict) else None
+                if backup:
+                    protected.add(os.path.normcase(os.path.realpath(backup)))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return protected, False
+    return protected, True
+
+
+def prune_backups(target, keep=KEEP_BACKUPS, dry_run=False, receipts=()):
+    """Remove all but the newest `keep` backups of each file in the game
+    directory and Openvr\\win64 (never fewer than one is kept; a file with
+    only one backup keeps it). A backup the current receipt names is kept
+    whatever its age, and when a current receipt cannot be read nothing is
+    pruned. Says what it removed (with dry_run, what it would remove, and
+    removes nothing) and returns those paths."""
+    keep = max(1, int(keep))
+    protected, readable = _protected_by_receipts(_current_receipts(target, receipts))
+    if not readable:
+        print("[edvr] NOTE: a current receipt could not be read, so no old backups were pruned.")
+        return []
+    doomed = []
+    for directory in _backup_dirs(target):
+        for _, items in sorted(_backup_families(directory).items()):
+            items.sort(reverse=True)          # newest first: stamp, then collision counter
+            doomed += [path for _, _, path in items[keep:]
+                       if os.path.normcase(os.path.realpath(path)) not in protected]
+    if not doomed:
+        return []
+    removed = []
+    for path in doomed:
+        if dry_run:
+            removed.append(path)
+            continue
+        try:
+            os.remove(path)
+            removed.append(path)
+        except OSError as exc:
+            print("[edvr] NOTE: could not prune %s: %s" % (path, exc))
+    print("[edvr] %s %d old backup(s), keeping the newest %d of each file%s:" % (
+        "would prune" if dry_run else "pruned", len(removed), keep, " (dry run: nothing removed)" if dry_run else ""))
+    for path in removed:
+        print("       %s" % os.path.relpath(path, target))
+    return removed
+
+
+def _prune_quietly(target, keep, dry_run=False, receipts=()):
+    """prune_backups for the end of an install: a failure to prune is said
+    and never fails an install that has already landed."""
+    try:
+        prune_backups(target, keep, dry_run, receipts)
+    except (OSError, ValueError) as exc:
+        print("[edvr] NOTE: old backups were not pruned: %s" % exc)
 
 
 def game_running():
@@ -1035,8 +1186,11 @@ def _equivalent_startup_config(actual, expected):
 
 
 def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
-                            include_dlss=False, include_ini=False, profile="vr"):
-    """Stage a profile's graphics payload and optional native components."""
+                            include_dlss=False, include_ini=False, profile="vr",
+                            keep_backups=KEEP_BACKUPS):
+    """Stage a profile's graphics payload and optional native components. A
+    good install ends by pruning old backups (prune_backups); a dry run says
+    what that would remove."""
     native = profile == "vr"
     p = _standard_native_paths(root, target) if native else _flat_paths(root, target)
     payload = ("runtime", "graphics", "loader", "notice") if native else ("graphics",)
@@ -1188,6 +1342,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         print("       seed     %s (from edvr.ini; a new file, so no backup)" % _ini_target(target, "flat"))
     print("       receipt  %s" % receipt)
     if dry_run:
+        _prune_quietly(target, keep_backups, dry_run=True)
         print("[edvr] dry run: wrote nothing."); return 0
     journal = {"version": 2, "kind": NATIVE_KIND if native else FLAT_KIND, "target": os.path.abspath(target),
                "root": os.path.abspath(root), "state": "staging", "files": entries}
@@ -1248,6 +1403,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         except OSError as exc:
             print("[edvr] WARNING: flat settings seed failed (%s); copy edvr.ini to edvr-flat.ini by hand to keep your settings" % exc)
     print("[edvr] %s package installed and verified; receipt: %s" % (profile, receipt))
+    _prune_quietly(target, keep_backups, receipts=(receipt,))
     return 0
 
 
@@ -1291,8 +1447,12 @@ def main(argv=None):
                     help="replace without keeping the previous file")
     ap.add_argument("--force", action="store_true",
                     help="install even though the game appears to be running")
+    ap.add_argument("--keep-backups", type=int, default=KEEP_BACKUPS, metavar="N",
+                    help="after a good install, keep the newest N backups of each "
+                         "file and delete the older ones (default %d; at least 1)" % KEEP_BACKUPS)
     ap.add_argument("--dry-run", action="store_true",
-                    help="print the plan and write nothing")
+                    help="print the plan and write nothing (says which old "
+                         "backups a real install would prune)")
     ap.add_argument("--verify-only", action="store_true",
                     help="compare installed against built; write nothing")
     ap.add_argument("--self-test", action="store_true",
@@ -1301,6 +1461,9 @@ def main(argv=None):
 
     if args.self_test:
         return self_test()
+
+    if args.keep_backups < 1:
+        ap.error("--keep-backups must be at least 1: the newest backup is never pruned")
 
     if (args.native_loader or args.native_runtime) and not args.native_openxr:
         ap.error("--native-loader/--native-runtime require --native-openxr")
@@ -1363,7 +1526,7 @@ def main(argv=None):
         tag = args.tag or short_hash(root)
         return native_install(root, target,
                               args.native_receipt,
-                              tag, args.dry_run)
+                              tag, args.dry_run, args.keep_backups)
 
     root = os.path.abspath(args.root) if args.root else repo_root()
     target = resolve_target(args.target)
@@ -1378,7 +1541,218 @@ def main(argv=None):
     return standard_native_install(root, target, tag, args.dry_run,
                                    args.verify_only,
                                    include_dlss=(args.dlss or (args.all and os.path.isfile(dlss_source))),
-                                   include_ini=args.ini, profile=args.profile)
+                                   include_ini=args.ini, profile=args.profile,
+                                   keep_backups=args.keep_backups)
+
+
+def _prune_self_test():
+    """Backup pruning (prune_backups): only names of exactly the scheme, the
+    newest N of each file, never the only backup, never one the current
+    receipt names, nothing at all when that receipt is unreadable, a dry run
+    that removes nothing -- and an install through main() that ends by pruning."""
+    import contextlib
+    import io
+    import stat
+
+    problems = []
+
+    def check(condition, why):
+        if not condition:
+            problems.append(why)
+            print("prune self-test: %s" % why)
+
+    def quiet(function, *args, **kwargs):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = function(*args, **kwargs)
+        return result, out.getvalue()
+
+    def named(*paths):
+        """The text of a receipt whose entries name these backups (and one that names none)."""
+        return json.dumps({"files": [{"key": "graphics", "backup": path} for path in paths]
+                           + [{"key": "none", "backup": None}]}).encode("utf-8")
+
+    tmp = tempfile.mkdtemp(prefix="edvr_prune_test_")
+    try:
+        counter = [0]
+
+        def new_game():
+            counter[0] += 1
+            game = os.path.join(tmp, "game%d" % counter[0])
+            os.makedirs(os.path.join(game, "Openvr", "win64"))
+            return game, os.path.join(game, "Openvr", "win64")
+
+        def touch(directory, name, data=b"x"):
+            path = os.path.join(directory, name)
+            with open(path, "wb") as stream:
+                stream.write(data)
+            return path
+
+        def backups(directory, live, count, tag="t", day="20260101"):
+            """`count` backups of `live`, stamped a second apart, oldest first."""
+            return [touch(directory, "%s.pre-%s-%s-%06d.bak" % (live, tag, day, second))
+                    for second in range(1, count + 1)]
+
+        def tree(game):
+            return sorted(os.path.relpath(os.path.join(base, name), game)
+                          for base, dirs, files in os.walk(game) for name in dirs + files)
+
+        # --- the scheme, the count, the only backup ----------------------------------
+        game, xr = new_game()
+        gfx = backups(game, "d3d11.dll", 8)
+        runtime = backups(xr, "openvr_api.dll", 3)
+        lone = backups(game, "edvr.ini", 1, day="20010101")
+        decoys = [touch(game, name) for name in (
+            "d3d11.dll", "d3d11.dll.bak", "d3d11.dll.bak-skip", "d3d11.dll.pre-taa-20260903",
+            "d3d11.dll.pre-x-2026-01-01.bak", "d3d11.dll.pre-x-20261399-000000.bak",
+            "d3d11.dll.pre-x-20260101-000001.bak.txt", "d3d11.dll.pre-x-20260101-000001.bak.old")]
+        os.makedirs(os.path.join(game, "d3d11.dll.pre-dir-20260101-000009.bak"))
+        os.makedirs(os.path.join(game, "sub"))
+        elsewhere = backups(os.path.join(game, "sub"), "z.dll", 7)
+        before = tree(game)
+        would, text = quiet(prune_backups, game, 5, True)
+        check(sorted(would) == sorted(gfx[:3]) and tree(game) == before,
+              "a dry run names the three oldest d3d11.dll backups and removes nothing: %r" % would)
+        check("would prune 3 old backup(s), keeping the newest 5" in text and "nothing removed" in text
+              and "d3d11.dll.pre-t-20260101-000001.bak" in text, "the dry run says so: %r" % text)
+        removed, text = quiet(prune_backups, game, 5)
+        gone = sorted(set(before) - set(tree(game)))
+        check(sorted(removed) == sorted(gfx[:3]) and gone == sorted(os.path.relpath(path, game) for path in gfx[:3]),
+              "the three oldest go and nothing else does: %r %r" % (removed, gone))
+        check("pruned 3 old backup(s), keeping the newest 5" in text, "and the real run says what it pruned: %r" % text)
+        check(all(os.path.isfile(path) for path in gfx[3:] + runtime + lone + decoys + elsewhere),
+              "the newest five, a file with fewer, the only backup, the near misses and other directories all stay")
+        check(os.path.isdir(os.path.join(game, "d3d11.dll.pre-dir-20260101-000009.bak")),
+              "a directory named like a backup is left alone")
+        again, text = quiet(prune_backups, game, 5)
+        check(again == [] and text == "", "a second run finds nothing: %r %r" % (again, text))
+
+        game, xr = new_game()
+        gfx = backups(game, "d3d11.dll", 8)
+        runtime = backups(xr, "openvr_api.dll", 3)
+        lone = backups(game, "edvr.ini", 1)
+        for keep, want in ((2, 7), (1, 9), (0, 9)):        # 0 counts as 1: the newest is never pruned
+            removed, _ = quiet(prune_backups, game, keep, True)
+            check(len(removed) == want, "keep=%d would prune %d, not %d" % (keep, want, len(removed)))
+        quiet(prune_backups, game, 0)
+        check(all(os.path.isfile(path) for path in (gfx[-1], runtime[-1], lone[0]))
+              and not any(os.path.exists(path) for path in gfx[:-1] + runtime[:-1]),
+              "keep=0 still leaves the newest backup of every file, the only one included")
+
+        # --- same-second collisions and letter case are ordered and grouped -------------
+        game, xr = new_game()
+        touch(game, "edvr.ini.pre-t-20260101-000001.bak")
+        touch(game, "edvr.ini.pre-t-20260101-000001.bak.1")
+        touch(game, "edvr.ini.pre-t-20260101-000001.bak.2")
+        for second in (2, 3, 4, 5):
+            touch(game, "edvr.ini.pre-t-20260101-00000%d.bak" % second)
+        removed, _ = quiet(prune_backups, game, 5)
+        check(sorted(os.path.basename(path) for path in removed) ==
+              ["edvr.ini.pre-t-20260101-000001.bak", "edvr.ini.pre-t-20260101-000001.bak.1"],
+              "a collision suffix orders after its base name and the oldest go first: %r" % removed)
+        game, xr = new_game()
+        spellings = ("D3D11.dll", "d3d11.DLL")
+        made = [touch(game, "%s.pre-t-20260101-%06d.bak" % (spellings[second % 2], second)) for second in range(1, 8)]
+        removed, _ = quiet(prune_backups, game, 5)
+        check(sorted(removed) == sorted(made[:2]), "letter case does not split a file's backups: %r" % removed)
+
+        # --- receipts: what the current one names stays; an unreadable one stops the run ---
+        game, xr = new_game()
+        gfx = backups(game, "d3d11.dll", 7)
+        touch(game, "edvr_native_receipt.json", named(gfx[0]))
+        current = touch(game, "edvr_native_receipt.json.pre-r-20260102-000000.bak", named(gfx[1]))
+        removed, _ = quiet(prune_backups, game, 5)
+        check(removed == [gfx[0]] and os.path.isfile(gfx[1]) and os.path.isfile(current),
+              "the backup the CURRENT receipt names stays though it is among the oldest; the superseded "
+              "receipt's does not: %r" % removed)
+        game, xr = new_game()
+        chain = [touch(game, "edvr_flat_receipt.json.pre-r-20260101-00000%d.bak" % second, named())
+                 for second in range(1, 8)]
+        removed, _ = quiet(prune_backups, game, 5)
+        check(sorted(removed) == sorted(chain[:2]) and os.path.isfile(chain[-1]),
+              "receipts follow the same count and the newest is never pruned: %r" % removed)
+        game, xr = new_game()
+        gfx = backups(game, "d3d11.dll", 7)
+        outside = touch(tmp, "elsewhere-receipt.json", named(gfx[0]))
+        removed, _ = quiet(prune_backups, game, 5, False, (outside,))
+        check(removed == [gfx[1]] and os.path.isfile(gfx[0]),
+              "a receipt the caller names (--native-receipt) protects what it names: %r" % removed)
+        for label, content in (("not JSON", b"{not json"), ("files is not a list", b'{"files": "bad"}'),
+                               ("no files", b"{}"), ("not an object", b"[1, 2]")):
+            game, xr = new_game()
+            backups(game, "d3d11.dll", 7)
+            touch(game, "edvr_native_receipt.json", content)
+            before = tree(game)
+            removed, text = quiet(prune_backups, game, 5)
+            check(removed == [] and tree(game) == before and "no old backups were pruned" in text,
+                  "an unreadable current receipt (%s) prunes nothing and says so: %r" % (label, text))
+
+        # --- a backup that cannot be removed is said and does not stop the rest --------
+        game, xr = new_game()
+        gfx = backups(game, "d3d11.dll", 7)
+        os.chmod(gfx[0], stat.S_IREAD)
+        try:
+            removed, text = quiet(prune_backups, game, 5)
+            check(removed == [gfx[1]] and not os.path.exists(gfx[1]) and os.path.exists(gfx[0])
+                  and "could not prune" in text,
+                  "an unremovable backup is reported and the others still go: %r %r" % (removed, text))
+        finally:
+            os.chmod(gfx[0], stat.S_IWRITE | stat.S_IREAD)
+
+        # --- through main(): a good install prunes; a dry run and a refused count do not ---
+        import fetch_openxr_loader as _prune_loader
+        import openxr_pe as _prune_pe
+        sroot = os.path.join(tmp, "repo")
+        os.makedirs(os.path.join(sroot, "build"))
+        for name, data in (("edvr_openxr_runtime.dll", b"RUNTIME"), ("edvr_openxr_graphics.dll", b"GRAPHICS"),
+                           ("openxr_loader.dll", b"LOADER"), ("OPENXR-LOADER-LICENSE.txt", b"LICENSE")):
+            touch(os.path.join(sroot, "build"), name, data)
+        egame, exr = new_game()
+        touch(egame, GAME_EXE, b"GAME")
+        touch(exr, "openvr_api.dll", b"OLD-RUNTIME")
+        touch(exr, "edvr_openxr.ini", b"OLD-CONFIG")
+        old_runtime = backups(exr, "openvr_api.dll", 7, tag="old", day="20250101")
+        old_config = backups(exr, "edvr_openxr.ini", 6, tag="old", day="20250101")
+        saved = (_prune_loader.verify, _prune_pe.validate_native_pair, globals()["validate_elite_game"],
+                 globals()["strict_game_running"])
+        _prune_loader.verify = lambda path: None
+        _prune_pe.validate_native_pair = lambda *args: None
+        globals()["validate_elite_game"] = lambda path: None
+        globals()["strict_game_running"] = lambda *args: (True, False)
+        try:
+            before = tree(egame)
+            code, text = quiet(main, ["--root", sroot, "--target", egame, "--tag", "e2e", "--dry-run"])
+            check(code == 0 and tree(egame) == before and "would prune 3 old backup(s)" in text
+                  and "nothing removed" in text, "an install dry run lists the prune and writes nothing: %r" % text)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    main(["--root", sroot, "--target", egame, "--keep-backups", "0"])
+                check(False, "--keep-backups 0 must be refused")
+            except SystemExit as error:
+                check(error.code == 2 and tree(egame) == before, "--keep-backups 0 is a usage error that writes nothing")
+            code, text = quiet(main, ["--root", sroot, "--target", egame, "--tag", "e2e"])
+            check(code == 0 and "pruned 5 old backup(s), keeping the newest 5" in text,
+                  "a good install ends by pruning, and says so: %d %r" % (code, text[-500:]))
+            runtime_family = sorted(name for name in os.listdir(exr) if name.startswith("openvr_api.dll.pre-"))
+            config_family = sorted(name for name in os.listdir(exr) if name.startswith("edvr_openxr.ini.pre-"))
+            check(len(runtime_family) == 5 and len(config_family) == 5
+                  and all(os.path.isfile(path) for path in old_runtime[3:] + old_config[2:])
+                  and not any(os.path.exists(path) for path in old_runtime[:3] + old_config[:2])
+                  and any("-e2e-" in name for name in runtime_family),
+                  "five of each remain, the new backup and the newest old ones: %r %r" % (runtime_family, config_family))
+            receipt = os.path.join(egame, "edvr_native_receipt.json")
+            check(verify_native_receipt(receipt, egame)["state"] == "installed",
+                  "the receipt of the install that pruned still verifies")
+            restored, _ = quiet(restore_native, receipt)
+            check(restored == 0 and Path(exr, "openvr_api.dll").read_bytes() == b"OLD-RUNTIME"
+                  and Path(exr, "edvr_openxr.ini").read_bytes() == b"OLD-CONFIG",
+                  "and restores from the backups it names, which the prune left in place")
+        finally:
+            (_prune_loader.verify, _prune_pe.validate_native_pair, globals()["validate_elite_game"],
+             globals()["strict_game_running"]) = saved
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return not problems
 
 
 def self_test():
@@ -1667,6 +2041,90 @@ def self_test():
             assert Path(fgame, "edvr-flat.ini").read_bytes() == b"[user]\nkeep=1\n"
             assert Path(fgame, "edvr.ini").read_bytes() == b"[user]\nkeep=1\n"
             assert xr_snapshot() == before_xr, "flat --ini changed Openvr"
+
+            # An RC3 flat install made with --ini journaled the shared edvr.ini
+            # as its `ini` entry (the flat profile had no file of its own
+            # then). --restore-native must still take such an install back --
+            # and only that shape: every other ini path stays refused.
+            def rc3_flat_install(name, ini_relative, installed=b"[fix]\r\ntemporal_aa = off\r\n",
+                                 user=b"[user]\nkeep=rc3\n"):
+                game = os.path.join(flat_tmp, name)
+                os.makedirs(os.path.join(game, "Openvr", "win64"))
+                Path(game, GAME_EXE).write_bytes(b"GAME")
+                live = {"graphics": (Path(game, "d3d11.dll"), b"RC3-FLAT-GRAPHICS"),
+                        "profile": (Path(game, PROFILE_FILE), profile_bytes("flat")),
+                        "ini": (Path(game, ini_relative), installed)}
+                sources = {"graphics": os.path.abspath(os.path.join(froot, "build", "d3d11.dll")),
+                           "profile": "generated",
+                           "ini": os.path.abspath(os.path.join(froot, "build", "edvr-flat.ini"))}
+                entries = []
+                for key, (path, data) in live.items():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    entry = {"key": key, "source": sources[key], "target": os.path.abspath(str(path)),
+                             "backup": None, "before_sha256": None, "installed_sha256": sha256(str(path))}
+                    if key == "ini":
+                        backup = Path(str(path) + ".pre-rc3-20260929-101500.bak")
+                        backup.write_bytes(user)
+                        entry["backup"] = os.path.abspath(str(backup))
+                        entry["before_sha256"] = sha256(str(backup))
+                    entries.append(entry)
+                receipt = os.path.join(game, "edvr_flat_receipt.json")
+                Path(receipt).write_text(json.dumps({
+                    "version": 2, "kind": FLAT_KIND, "target": os.path.abspath(game),
+                    "root": os.path.abspath(froot), "state": "installed", "files": entries}),
+                    encoding="utf-8")
+                return game, receipt
+
+            rc3_game, rc3_receipt = rc3_flat_install("rc3game", "edvr.ini")
+            assert verify_native_receipt(rc3_receipt, rc3_game)["kind"] == FLAT_KIND, \
+                "an RC3 flat receipt naming edvr.ini is refused"
+            rc3_before = sorted((str(p.relative_to(rc3_game)), p.read_bytes())
+                                for p in Path(rc3_game).rglob("*") if p.is_file())
+            assert restore_native(rc3_receipt, True) == 0
+            assert rc3_before == sorted((str(p.relative_to(rc3_game)), p.read_bytes())
+                                        for p in Path(rc3_game).rglob("*") if p.is_file()), \
+                "the RC3 restore dry run wrote files"
+            assert restore_native(rc3_receipt) == 0, "an RC3 flat install cannot be restored"
+            assert Path(rc3_game, "edvr.ini").read_bytes() == b"[user]\nkeep=rc3\n", \
+                "the RC3 restore did not put the user's edvr.ini back"
+            assert not Path(rc3_game, "d3d11.dll").exists() and not Path(rc3_game, PROFILE_FILE).exists()
+            assert not Path(rc3_game, "edvr-flat.ini").exists(), "restoring RC3 created edvr-flat.ini"
+            for name, ini_relative in (("rc3-sibling", "edvr-other.ini"),
+                                       ("rc3-nested", os.path.join("Openvr", "win64", "edvr.ini")),
+                                       ("rc3-case", "EDVR.INI")):
+                bad_game, bad_receipt = rc3_flat_install(name, ini_relative)
+                try:
+                    verify_native_receipt(bad_receipt, bad_game)
+                    raise AssertionError("a flat receipt naming %s was accepted" % ini_relative)
+                except ValueError:
+                    pass
+                assert restore_native(bad_receipt) == 1, "restored from a receipt naming " + ini_relative
+                assert Path(bad_game, "d3d11.dll").read_bytes() == b"RC3-FLAT-GRAPHICS", \
+                    "a refused receipt still changed files"
+
+            # The legacy shape is accepted on its PATH only: every other check
+            # still runs on it. A live edvr.ini that is no longer what the
+            # receipt installed, and a backup that is the live file itself, are
+            # refused as they are for any other target.
+            tamper_game, tamper_receipt = rc3_flat_install("rc3-changed", "edvr.ini")
+            Path(tamper_game, "edvr.ini").write_bytes(b"[user]\nedited=after-the-install\n")
+            try:
+                verify_native_receipt(tamper_receipt, tamper_game)
+                raise AssertionError("an RC3 receipt whose edvr.ini changed was accepted")
+            except ValueError:
+                pass
+            alias_game, alias_receipt = rc3_flat_install("rc3-alias", "edvr.ini")
+            alias = json.loads(Path(alias_receipt).read_text(encoding="utf-8"))
+            next(e for e in alias["files"] if e["key"] == "ini")["backup"] = \
+                os.path.abspath(os.path.join(alias_game, "edvr.ini"))
+            Path(alias_receipt).write_text(json.dumps(alias), encoding="utf-8")
+            try:
+                verify_native_receipt(alias_receipt, alias_game)
+                raise AssertionError("an RC3 receipt whose backup is the live edvr.ini was accepted")
+            except ValueError:
+                pass
+
             Path(fgame, "d3d11.dll").write_bytes(b"FOREIGN-GRAPHICS")
             before = snapshot()
             try:
@@ -2239,6 +2697,9 @@ def self_test():
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+    if not _prune_self_test():
+        ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1

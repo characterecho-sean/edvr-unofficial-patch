@@ -4,7 +4,62 @@
 
 *Written 2026-09-15 from the entries dated 2026-08-28, 2026-09-13 (Flights
 09:43 and 10:09; fbd8284, 2aa0c2d, 0d7251b) and 2026-09-15 (two entries).
-Restates the journal below; update it whenever this doc changes.*
+Restates the journal below; update it whenever this doc changes. The old
+State, Open and Ruled-out bullets are verbatim in "Status detail".*
+
+- **State:**
+  - `fix.intro_video` defaults to `screen` (world-lock + FSR on the
+    splash's screen), shipped since 2026-08-28 (f908be2); `skip` is the
+    off-by-default alternative, SHIPPED v0.16.2, ~6 s saved not ~20 s.
+  - Native OpenXR builds its session once inside `VR_InitInternal`, so the
+    removed `fix.vr_handover = early` has no analogue; the movie already
+    plays on the splash's screen, world-locked (2026-09-15 18:30 flight).
+  - NGX warm-up (`advanced.temporal_aa_warm`, default on): BUILT
+    2026-09-15, NOT FLOWN. First Submit cost 857 ms; eye 0's create is
+    <= 58 ms, the ~760 ms before it UNSPLIT (NGX init, five 16-MP history
+    textures, UI-resolve compile); the per-stage ms lines split it.
+  - 2026-09-17, a SKIPPED intro left the panel and resample armed, the
+    on-foot HUD passed for the movie: FIXED by retiring at the first
+    rendered scene unconditionally; built green, NOT FLOWN. Entry
+    "2026-09-17: a skipped intro left the panel armed..." (flight brief).
+  - 2026-09-17, facing the wrong way after the cut: root cause MEASURED
+    (one-shot seated-origin recentre at `VR_InitInternal` start, no settle
+    window). Sean's call: recentre once the movie plays or the splash is
+    visible; BUILT (14ec395's follow-up), NOT FLOWN. Entry "2026-09-17:
+    the intro/splash "forward"..." (flight brief).
+- **Open:** whether the movie reaches the headset earlier once the
+  warm-up flies, or the game just absorbs the stall (section 9, first
+  2026-09-15 entry); ident-open -> first-composite latency, never
+  measured natively; why the movie was visible only ~2 s in the 18:30
+  flight (keypress or otherwise, unknown); whether the recentre change
+  makes the movie or splash face you consistently (unflown).
+- **Ruled out:** ten items (panel_distance, black_void, "four vertices",
+  viewport counter-move, exe-imports-only skip, resample cache key, the
+  "DRAWING anyway" line, early handover natively, Phase A = 6.4 s, on-foot
+  panel as a vscreen regression), reasons in "Status detail".
+- **Next flight:** Steam, `fix.intro_video = screen`,
+  `advanced.intro_probe = 1`, reading `intro probe: watching the movie's
+  open`, `intro probe: the game opened <file> at +X.XXX s after the
+  device`, and `intro video lock: holding` against the device line --
+  plus section 9 (first 2026-09-15 entry) for the warm-up and the two
+  2026-09-17 entries' flight briefs.
+- **Environment:** The placement fix was measured on a Frontier
+  install, game build 330683, Pimax via OpenComposite, eye 5424x5356;
+  placement is VS cb2 (80 bytes). The skip's flights are Steam, no
+  headset needed. Both 2026-09-15 flights are Steam, Pimax Crystal
+  Super on Pimax OpenXR, eye 4068x4016 then 2644x2610 once HMD Quality
+  applies; the warm-up runs only on the native OpenXR path.
+- **Detail:** Placement is "Flight 3" through "Flight 6", "Stage one,
+  built" and "What shipped"; "What the bugs were" is process lessons;
+  the skip is "Not playing it at all", "Flight 09:43" and "Flight
+  10:09"; the warm-up is the first 2026-09-15 entry; the native-runtime
+  correction is the second. Companion: docs/loading-panel-handoff.md,
+  docs/loading-scrim.md.
+
+## Status detail (moved out of Status 2026-09-29)
+
+*Verbatim from the Status block as it stood before 2026-09-29; the
+Status block above summarises it.*
 
 - **State:** (1) `fix.intro_video` defaults to `screen` (world-lock + FSR
   on the splash's screen), shipped since 2026-08-28 (f908be2); `skip` is
@@ -54,23 +109,8 @@ Restates the journal below; update it whenever this doc changes.*
     the device.
   - The on-foot panel going flat and far as a vscreen regression: the
     intro panel's own false match (last entry).
-- **Next flight:** Steam, `fix.intro_video = screen`,
-  `advanced.intro_probe = 1`, reading `intro probe: watching the movie's
-  open`, `intro probe: the game opened <file> at +X.XXX s after the
-  device`, and `intro video lock: holding` against the device line --
-  plus the first 2026-09-15 entry's section 9 for the warm-up.
-- **Environment:** The placement fix was measured on a Frontier
-  install, game build 330683, Pimax via OpenComposite, eye 5424x5356;
-  placement is VS cb2 (80 bytes). The skip's flights are Steam, no
-  headset needed. Both 2026-09-15 flights are Steam, Pimax Crystal
-  Super on Pimax OpenXR, eye 4068x4016 then 2644x2610 once HMD Quality
-  applies; the warm-up runs only on the native OpenXR path.
-- **Detail:** Placement is "Flight 3" through "Flight 6", "Stage one,
-  built" and "What shipped"; "What the bugs were" is process lessons;
-  the skip is "Not playing it at all", "Flight 09:43" and "Flight
-  10:09"; the warm-up is the first 2026-09-15 entry; the native-runtime
-  correction is the second. Companion: docs/loading-panel-handoff.md,
-  docs/loading-scrim.md.
+
+## The report (moved out of Status 2026-09-29)
 
 Reported 2026-08-28 and **measured the same day**, across two flights, on the
 field rig. The page opened with a hypothesis; flight 1 confirmed it, flight 3

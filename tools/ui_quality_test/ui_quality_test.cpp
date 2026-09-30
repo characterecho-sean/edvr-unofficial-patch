@@ -35,6 +35,12 @@
 //     the UI, matching the game's own order; an overlay sampling an
 //     eye-sized input, or one the take path refuses (kMrt and kVerdict,
 //     the same rules as any family), is left under the UI instead.
+//   * the crisp-HUD parity model (docs/cockpit-hud-layer-design-2026-09-27.md,
+//     design point 5): stock T(F(1-a) + L) against the layer's T(F)(1-a) +
+//     T(L) on a synthetic frame through two stand-in tonemaps -- exact where
+//     the HUD is opaque or the pixel uncovered, within the G-F budget over a
+//     dark background, the translucent-over-bright cost nonzero and under
+//     its measured 113-step ceiling, and failing with the take removed.
 //
 // Exit codes: 0 pass, 1 a check failed, 2 usage. --dry-run touches nothing.
 #include <windows.h>
@@ -49,8 +55,10 @@
 #include <cstring>
 #include <vector>
 
+#include "../../src/common/system_d3d11.h"
 #include "../../src/common/temporal_math.h"
 #include "../../src/d3d11/ui_layer_seed.h"
+#include "../../src/d3d11/ui_layer_seed_census.h"
 #include "../../src/d3d11/ui_layer_math.h"
 #include "../../src/d3d11/ui_layer_shaders.h"
 #include "../../src/d3d11/ui_quality_math.h"
@@ -382,7 +390,6 @@ void testGate() {
     check(with([](UiLayerDrawFacts& g) { g.verdictForwards = false; }) == UiLayerDecision::kVerdict, "swallowed");
     check(with([](UiLayerDrawFacts& g) { g.eyeTarget = false; }) == UiLayerDecision::kNotEyeTarget, "not an eye");
     check(with([](UiLayerDrawFacts& g) { g.ldrView = false; }) == UiLayerDecision::kHdrTarget, "HDR target");
-    check(with([](UiLayerDrawFacts& g) { g.vrs = true; }) == UiLayerDecision::kVrs, "variable-rate shading");
     check(with([](UiLayerDrawFacts& g) { g.eye = -1; }) == UiLayerDecision::kNoEye, "no eye");
     check(with([](UiLayerDrawFacts& g) { g.targetMatchesEye = false; }) == UiLayerDecision::kTargetSize,
           "a target that is not the submitted eye's size");
@@ -419,6 +426,120 @@ void testGate() {
           }) == UiLayerDecision::kBlendRefused,
           "a multiply through a substitution is left (its second draw cannot be repeated)");
     check(with([](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kRefused; }) == UiLayerDecision::kBlendRefused, "blend");
+
+    // The crisp-HUD (HDR) take of the three cockpit HUD families (Phase 2:
+    // the holo panels, the flight HUD and the target sprite): every admitted
+    // blend shape must have its composition semantics end to end. A multiply
+    // has no transmittance route into the HDR layer (the HDR take skips
+    // ensureMult; the coverage pass transfers only scalar alpha), so the
+    // gate refuses it BEFORE the redirect (review R5), per family; the
+    // measured blends -- premultiplied-over and opaque -- must still be
+    // taken, with each family's MEASURED depth-stencil state (the Phase 0
+    // census, flights 1-3; the classification of those states is in
+    // testDepthStencil).
+    auto hdrWith = [&](UiLayerFamily fam, void (*edit)(UiLayerDrawFacts&)) {
+        UiLayerDrawFacts g = f;
+        g.family = fam;
+        g.ldrView = false;  // the lit pre-tonemap HDR target
+        g.crispHdr = true;
+        edit(g);
+        return uiLayerDecide(g);
+    };
+    check(hdrWith(UiLayerFamily::kHolo, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kPremulOver; }) ==
+              UiLayerDecision::kRedirect,
+          "the holo panels' premultiplied-over is taken into the HDR layer");
+    check(hdrWith(UiLayerFamily::kHolo, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kOpaque; }) ==
+              UiLayerDecision::kRedirect,
+          "an opaque holo draw is taken into the HDR layer");
+    check(hdrWith(UiLayerFamily::kFlightHud,
+                  [](UiLayerDrawFacts& g) {
+                      g.blend = UiBlendShape::kPremulOver;
+                      g.ds.depthTest = true;  // the measured GEQUAL against the scene pair, no write
+                  }) == UiLayerDecision::kRedirect,
+          "the flight HUD's premultiplied-over, testing depth, is taken into the HDR layer");
+    check(hdrWith(UiLayerFamily::kSprite,
+                  [](UiLayerDrawFacts& g) {
+                      g.blend = UiBlendShape::kPremulOver;
+                      // The measured sprite: depth OFF (no test, no write),
+                      // stencil tested (read 0x01) and written (0x05).
+                      g.ds.stencilTest = true;
+                      g.ds.stencilWrite = true;
+                  }) == UiLayerDecision::kRedirect,
+          "the target sprite, testing and writing stencil, is taken (the write-back keeps the "
+          "game's buffer)");
+    check(hdrWith(UiLayerFamily::kHolo, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kMultiply; }) ==
+              UiLayerDecision::kBlendRefused,
+          "a multiply into the HDR target is refused: the HDR half has no transmittance route");
+    check(hdrWith(UiLayerFamily::kFlightHud,
+                  [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kMultiply; }) ==
+              UiLayerDecision::kBlendRefused,
+          "...refused for the flight HUD too (R5, per family)");
+    check(hdrWith(UiLayerFamily::kSprite, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kMultiply; }) ==
+              UiLayerDecision::kBlendRefused,
+          "...and for the target sprite (R5, per family)");
+    // The crisp publication deadline (review crisp-hud-phase3-2026-09-28, the
+    // missing ship/target mesh holograms): content after the eye's tonemap
+    // re-issue can never publish -- the layer clears next frame. Refuse to
+    // stock; the fact is crisp-scoped, so an LDR draw with it set is unaffected.
+    check(hdrWith(UiLayerFamily::kHolo,
+                  [](UiLayerDrawFacts& g) {
+                      g.blend = UiBlendShape::kPremulOver;
+                      g.lateTone = true;
+                  }) == UiLayerDecision::kToneLate,
+          "a crisp draw after the eye's tonemap re-issue refuses to stock: it cannot publish");
+    check(with([](UiLayerDrawFacts& g) { g.lateTone = true; }) == UiLayerDecision::kRedirect,
+          "the tone-late fact is crisp-scoped: an LDR draw with it set is still taken");
+    // Phase 3: the crisp take's eight hologram families, the one kHoloGeneric
+    // family. Their
+    // states are NOT flight-measured; the documented shape is an additive
+    // glow with depth off (ui_depth.cpp's generic hologram coverage), and the
+    // refusal net owns anything unconvertible, with the reason named.
+    check(hdrWith(UiLayerFamily::kHoloGeneric, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kAdditive; }) ==
+              UiLayerDecision::kRedirect,
+          "a hologram's additive glow (ONE, ONE, depth off) is taken into the HDR layer");
+    check(hdrWith(UiLayerFamily::kHoloGeneric,
+                  [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kScaledAdditive; }) ==
+              UiLayerDecision::kRedirect,
+          "...a scaled-additive one (SRC_ALPHA, ONE) too");
+    check(hdrWith(UiLayerFamily::kHoloGeneric, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kMultiply; }) ==
+              UiLayerDecision::kBlendRefused,
+          "...and the R5 multiply refusal stands for the holograms");
+    check(hdrWith(UiLayerFamily::kHoloGeneric,
+                  [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kRefused; }) ==
+              UiLayerDecision::kBlendRefused,
+          "...and an unconvertible hologram blend refuses to stock, named");
+    check(hdrWith(UiLayerFamily::kHolo,
+                  [](UiLayerDrawFacts& g) {
+                      g.blend = UiBlendShape::kMultiply;
+                      g.substituted = true;
+                  }) == UiLayerDecision::kBlendRefused,
+          "...through a substitution too");
+    check(hdrWith(UiLayerFamily::kHolo,
+                  [](UiLayerDrawFacts& g) {
+                      g.blend = UiBlendShape::kMultiply;
+                      g.layerReady = false;
+                  }) == UiLayerDecision::kBlendRefused,
+          "...and the refusal is the blend's, ahead of the layer's readiness");
+    check(with([](UiLayerDrawFacts& g) {
+              g.family = UiLayerFamily::kHolo;
+              g.ldrView = false;
+              g.blend = UiBlendShape::kMultiply;
+          }) == UiLayerDecision::kHdrTarget,
+          "with the crisp take off a holo multiply is still plain HDR, left stock");
+    check(with([](UiLayerDrawFacts& g) {
+              g.family = UiLayerFamily::kFlightHud;
+              g.ldrView = false;
+          }) == UiLayerDecision::kHdrTarget &&
+              with([](UiLayerDrawFacts& g) {
+                  g.family = UiLayerFamily::kSprite;
+                  g.ldrView = false;
+              }) == UiLayerDecision::kHdrTarget &&
+              with([](UiLayerDrawFacts& g) {
+                  g.family = UiLayerFamily::kHoloGeneric;
+                  g.ldrView = false;
+              }) == UiLayerDecision::kHdrTarget,
+          "with the crisp take off the flight HUD, the sprite and the holograms stay plain HDR, "
+          "left stock");
 
     // The on-foot gate: on foot the 2D screen IS the world (flight 09:38:
     // the layer took it and the temporal pass got a black eye). The journal's
@@ -558,6 +679,17 @@ void testGate() {
         check(std::fabs(uiLayerPercentile(one, 1, 0.95) - 0.25) < 1e-6 &&
                   uiLayerPercentile(nullptr, 0, 0.5) == 0.0,
               "one sample is its own percentile; none reads 0");
+        float even[4] = {9.0f, 1.0f, 1.0f, 5.0f};
+        const double evenP95 = uiLayerPercentile(even, 4, 0.95);
+        check(std::fabs(evenP95 - 8.4) < 1e-9 && uiLayerSortedPercentile(even, 4, 0.5) == 3.0,
+              "one sorted snapshot preserves even-count median and duplicate order statistics");
+        float fullWindow[8192];
+        for (uint32_t i = 0; i < 8192; ++i) fullWindow[i] = static_cast<float>((8191 - i) / 4);
+        const double fullP95 = uiLayerPercentile(fullWindow, 8192, 0.95);
+        check(fullP95 == 1945.0 && uiLayerSortedPercentile(fullWindow, 8192, 0.5) == 1023.5 &&
+                  uiLayerSortedPercentile(nullptr, 0, 0.5) == 0.0 &&
+                  uiLayerSortedPercentile(one, 1, 0.5) == 0.25,
+              "full 8192-sample route window reuses its sort with unchanged interpolation");
         check(std::strcmp(uiRouteStageName(UiRouteStage::kSeed), "depth-stencil seed") == 0 &&
                   std::strcmp(uiRouteStageName(UiRouteStage::kComposite), "composite") == 0,
               "the price line's stage names");
@@ -906,7 +1038,13 @@ void testFamilyRule() {
           "...over a re-created surface nothing has learned: still the menu panel, by its shader pair");
     f.ps = 0x219323C8C025AD94ull;
     check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel, "...its variant pixel shader too");
-    f.ps = 0x015EF9349EC097E8ull;  // the same vertex shader drawn after the UI, unclassified
+    f.ps = 0x015EF9349EC097E8ull;  // the tinted in-flight variant (ui_depth.cpp:105-115)
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel && why == UiFamilyWhy::kShaderPair,
+          "the tinted in-flight variant is the menu panel too (the 2026-09-27 flight: never recognized, never taken)");
+    f.ps = 0xF2F872B191F656D5ull;  // and the cheap one
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kPanel && why == UiFamilyWhy::kShaderPair,
+          "the cheap variant too");
+    f.ps = 0xDEADBEEFCAFEF00Dull;  // a pixel shader that is no variant of the pair
     check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNoSurface,
           "the same vertex shader with another pixel shader and no learned surface: not UI, and said why");
     f.vs = kUiVsLoader;
@@ -923,7 +1061,63 @@ void testFamilyRule() {
           "the lit HDR target: not the composite's");
     f.vs = kUiVsHolo;
     check(uiLayerFamilyFor(f) == UiLayerFamily::kHolo, "...where the holo panels are named");
+    f.vs = kUiVsFlightHud;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kFlightHud && why == UiFamilyWhy::kDirect,
+          "...the flight HUD is named, a direct shader");
+    f.vs = kUiVsSprite;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kSprite, "...and the target sprite");
+    // Phase 3, corrected by the phase-3 review (R1/R2): the crisp take
+    // admits the eight proven-safe radar/icon families
+    // (holo_families.h's kHoloFamiliesTake); each names the one kHoloGeneric
+    // family on the lit HDR target. The depth pass's two refused families
+    // name nothing here and stay stock: the target sphere (its PSes
+    // integer-Load scene depth at SV_Position pixel coordinates, which the
+    // layer's larger viewport breaks -- R1), the corona family (one shader
+    // pair paints both the radar glow and the real sun's corona -- R2).
+    // World-marker brackets and canopy stay outside the crisp take.
+    const uint64_t kTakeVs[] = {kHoloIconCore,   kHoloIconStalkA, kHoloIconStalkB,
+                                kHoloContactA,   kHoloContactB,   kHoloContactC,
+                                kHoloContactD,   kHoloContactE};
+    for (uint64_t h : kTakeVs) {
+        f.vs = h;
+        char what[128];
+        std::snprintf(what, sizeof(what), "vs %016llX names the hologram family on the HDR target",
+                      static_cast<unsigned long long>(h));
+        check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kHoloGeneric && why == UiFamilyWhy::kDirect, what);
+    }
+    f.vs = kHoloTargetSphere;
+    for (uint64_t ps : {0xEA02FAC2BD6C643Cull, 0xE95634B0F61D218Full}) {
+        f.ps = ps;
+        check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kHoloGeneric && why == UiFamilyWhy::kDirect,
+              "exact model composite pair is considered for depth-address remap");
+    }
+    f.ps = 0;
+    const uint64_t kRefusedVs[] = {kHoloTargetSphere, kHoloCoronaFamily};
+    for (uint64_t h : kRefusedVs) {
+        f.vs = h;
+        char what[128];
+        std::snprintf(what, sizeof(what),
+                      "vs %016llX names no crisp family: the take refuses it, it stays stock",
+                      static_cast<unsigned long long>(h));
+        check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
+              what);
+    }
+    f.vs = kHoloCanopy;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
+          "the canopy is refused: not one of the take's eight, it sits in front of the whole sky");
+    f.vs = kHoloWorldMarkerReticle;
+    f.ps = 0x2D037A047171BF3Bull;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
+          "world-space bracket VS/PS pair stays outside the crisp HUD layer");
+    f.ps ^= 1;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "an unknown reticle PS stays stock");
+    f.ps = 0;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "a missing reticle PS stays stock");
+    f.ps = 0x2D037A047171BF3Bull;
+    f.targetKind = 0;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "the reticle pair on a non-eye stays stock");
     f.targetKind = 2;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "world-space brackets stay stock on the post-tone eye too");
     f.vs = kUiVsPanel;
     f.ps = 0x9107E72CB016CC02ull;
     f.excluded = true;
@@ -999,6 +1193,200 @@ void testAfterUi() {
     }
 }
 
+// ------------------------------------------------------------ the crisp HUD
+
+// The crisp-HUD parity model (docs/cockpit-hud-layer-design-2026-09-27.md,
+// "The design" point 5, Phase 1's rig sentence; gate G-F's numbers). Stock
+// Elite composites a HUD draw into the HDR frame and tonemaps:
+//   stock = T(F*(1 - a) + L)
+// with the draw's premultiplied radiance L and coverage a over the
+// background F. The HDR layer tonemaps separately and composites after:
+//   layer = T(F)*(1 - a) + T(L)
+// The two agree where the HUD is opaque or the background dark; they differ
+// where translucent glass crosses a bright background -- the accepted cost,
+// Decisions 1's lost bloom halo.
+//
+// The model is a synthetic 96x64 frame: a dark floor (~0.004 a channel, the
+// G-E dark scene's 0.003-0.012 luma), a warm gaussian sun peaking at 16 with
+// the gradient between, and a HUD element with an opaque core, an additive
+// glow over the dark field and a translucent glass band across the sun
+// (coverage 0.15..0.85, dim above the sun's centre line, lit below), plus an
+// opaque element on the disc itself. Two stand-in tonemaps:
+//   soft:  T(x) = x / (1 + x)            (Reinhard)
+//   harsh: T(x) = log1p(x) / log1p(16)   (a log shoulder, white at 16)
+// -- the point is the family of compressive curves, not Elite's exact one.
+// The metric is the gate's own (hud_parity.py): per pixel the max over RGB
+// of |stock - layer|, in 8-bit steps (x255).
+//
+// What it proves:
+//   * opaque (a == 1) and uncovered (a == 0, L == 0) pixels agree with stock
+//     to the LAST BIT, both curves -- the math identity, no epsilon;
+//   * HUD over a dark background (at most 0.0075 a channel) agrees within
+//     2.0 steps, the budget G-F chose (hud_parity.py's --budget default; the
+//     flight measured p50/p99 = 0.00 steps over ~440k HUD pixels). The bound
+//     is by construction: a compressive T keeps the error under T(F) <= F a
+//     channel, so the dark field's own ceiling is 1.9 steps, and the model
+//     measures 0.63 (soft) and 0.13 (harsh);
+//   * translucent glass over a bright background (0 < a < 1, background luma
+//     > 1 -- the gate's regime and its Rec.709 luma) differs from stock
+//     NONZERO (the model's worst is 107 steps soft, 69 harsh) and under
+//     113.0 steps, the worst restricted p99 the five flight-2 ledgers
+//     measured (40-113 steps, 5-40 pixels a frame, ledger 123104 the top).
+//     The rig documents the accepted cost; a model change that makes the
+//     regime worse than measured screams;
+//   * with the take removed the rig FAILS. The take is what moves the HUD
+//     from the HDR image into the layer; removed, the layer is empty, its
+//     composite the bare background to the last bit, and parity degenerates
+//     to stock -- it cannot see a removed take. So the block carries a
+//     presence assertion: the layer composite must differ from T(F) by 8
+//     steps somewhere the HUD is (the model's strongest contribution is
+//     169-201 steps). Its teeth are proven by construction, not by toggling
+//     code: the same assertion run on the take-removed model fails.
+//
+// What it does NOT prove: T here is a stand-in. Elite's real tonemap (the
+// exposure scalar and colour LUT, the EDHM 3D-LUT variants among them) is
+// deliberately not transcribed -- the design rules that out and re-issues
+// the game's own draw; the measured in-sim tail lives in the design doc's
+// G-F entries. And the flight's 113 is a restricted p99 over real frames
+// while the rig's is a max over a synthetic scene, so the ceiling here is a
+// bound on the model, not the in-sim budget.
+
+double toneSoft(double x) { return x / (1.0 + x); }
+double toneHarsh(double x) { return std::log1p(x) / std::log1p(16.0); }
+
+void testHudParity() {
+    // The stand-ins the exactness and the dark bound rest on.
+    bool shape = toneSoft(0.0) == 0.0 && toneHarsh(0.0) == 0.0;
+    for (int i = 1; i <= 64 && shape; ++i) {
+        const double x = i * 0.25;  // 0.25 .. 16, the frame's HDR span
+        shape = toneSoft(x) < x && toneHarsh(x) < x && toneSoft(x) > toneSoft(x - 0.25) &&
+                toneHarsh(x) > toneHarsh(x - 0.25);
+    }
+    check(shape, "parity model: both stand-in tonemaps fix T(0) = 0 and are monotone and compressive");
+
+    const int W = 96, H = 64;
+    std::vector<double> F(W * H * 3, 0.0), L(W * H * 3, 0.0), cov(W * H, 0.0);
+    auto at = [&](int x, int y) { return y * W + x; };
+    // The dark floor and a warm gaussian sun (sigma 6); its falloff is the gradient.
+    const double floorC[3] = {0.004, 0.003, 0.006};
+    const double sunC[3] = {16.0, 14.0, 11.0};
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const double dx = x - 72.0, dy = y - 24.0;
+            const double g = std::exp(-(dx * dx + dy * dy) / 72.0);
+            for (int c = 0; c < 3; ++c)
+                F[at(x, y) * 3 + c] = floorC[c] + sunC[c] * g;
+        }
+    auto set = [&](int x, int y, double a, double r, double g, double b) {
+        const int p = at(x, y) * 3;
+        cov[at(x, y)] = a;
+        L[p + 0] = r;
+        L[p + 1] = g;
+        L[p + 2] = b;
+    };
+    // An opaque core over the dark field.
+    for (int y = 40; y < 56; ++y)
+        for (int x = 8; x < 28; ++x) set(x, y, 1.0, 0.35, 0.50, 0.40);
+    // An additive glow over the dark field, a warm ramp down to a whisper.
+    for (int y = 40; y < 56; ++y)
+        for (int x = 30; x < 48; ++x) {
+            const double s = 0.05 + 0.45 * (x - 30) / 17.0;
+            set(x, y, 0.0, s, s * 0.8, s * 0.6);
+        }
+    // Translucent glass across the sun: coverage 0.15..0.85 across the band,
+    // dim above the sun's centre line, lit below it.
+    for (int y = 8; y < 40; ++y)
+        for (int x = 56; x < 88; ++x) {
+            const double a = 0.15 + 0.7 * (x - 56) / 31.0;
+            if (y < 24)
+                set(x, y, a, a * 0.08, a * 0.08, a * 0.09);
+            else
+                set(x, y, a, a * 0.50, a * 0.55, a * 0.60);
+        }
+    // An opaque element on the disc itself: exactness is F-independent.
+    for (int y = 16; y < 22; ++y)
+        for (int x = 64; x < 70; ++x) set(x, y, 1.0, 0.45, 0.35, 0.30);
+
+    // The tolerances, all in 8-bit steps: the budget G-F chose (the flight's
+    // p50/p99 measured 0.00); the measured ceiling, flight 2's worst
+    // restricted p99; the regime's cost must be plainly there; the HUD must
+    // move its own composite by this somewhere.
+    const double kBudget = 2.0, kCeiling = 113.0, kNonzero = 1.0, kPresent = 8.0;
+    const double kDarkChan = 0.0075;  // over a darker field the error is under T(F) <= F a channel
+    const double lumaW[3] = {0.2126, 0.7152, 0.0722};  // the gate's luma (hud_parity.py)
+    double (*const curves[2])(double) = {toneSoft, toneHarsh};
+    int nOpaque = 0, nUncovered = 0, nAdditive = 0, nDarkHud = 0, nRegime = 0;
+    double exactWorst[2] = {0.0, 0.0}, darkWorst[2] = {0.0, 0.0}, regimeWorst[2] = {0.0, 0.0};
+    double present[2] = {0.0, 0.0}, removed[2] = {0.0, 0.0};
+    for (int k = 0; k < 2; ++k) {
+        double (*const T)(double) = curves[k];
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const int p = at(x, y) * 3;
+                const double a = cov[at(x, y)];
+                const bool hud = a > 0.0 || L[p] > 0.0 || L[p + 1] > 0.0 || L[p + 2] > 0.0;
+                double err = 0.0, own = 0.0, gone = 0.0;
+                for (int c = 0; c < 3; ++c) {
+                    const double stock = T(F[p + c] * (1.0 - a) + L[p + c]);
+                    const double layer = T(F[p + c]) * (1.0 - a) + T(L[p + c]);
+                    err = (std::max)(err, std::fabs(stock - layer));
+                    own = (std::max)(own, std::fabs(layer - T(F[p + c])));
+                    // The take removed: an empty layer over the same frame.
+                    const double bare = T(F[p + c]) * (1.0 - 0.0) + T(0.0);
+                    gone = (std::max)(gone, std::fabs(bare - T(F[p + c])));
+                }
+                err *= 255.0;
+                own *= 255.0;
+                gone *= 255.0;
+                if (a == 1.0 || !hud) {
+                    exactWorst[k] = (std::max)(exactWorst[k], err);
+                    if (k == 0) {
+                        if (a == 1.0)
+                            ++nOpaque;
+                        else
+                            ++nUncovered;
+                    }
+                }
+                if (!hud)
+                    continue;
+                if (k == 0 && a == 0.0)
+                    ++nAdditive;
+                present[k] = (std::max)(present[k], own);
+                removed[k] = (std::max)(removed[k], gone);
+                const double fMax = (std::max)(F[p], (std::max)(F[p + 1], F[p + 2]));
+                if (fMax <= kDarkChan) {
+                    darkWorst[k] = (std::max)(darkWorst[k], err);
+                    if (k == 0)
+                        ++nDarkHud;
+                }
+                const double lu = lumaW[0] * F[p] + lumaW[1] * F[p + 1] + lumaW[2] * F[p + 2];
+                if (0.0 < a && a < 1.0 && lu > 1.0) {
+                    regimeWorst[k] = (std::max)(regimeWorst[k], err);
+                    if (k == 0)
+                        ++nRegime;
+                }
+            }
+    }
+    check(nOpaque >= 300 && nUncovered >= 4000 && nAdditive >= 200 && nDarkHud >= 500 && nRegime >= 400,
+          "parity model: the scene holds every regime -- opaque, uncovered, additive over dark, "
+          "translucent over bright");
+    check(exactWorst[0] == 0.0 && exactWorst[1] == 0.0,
+          "parity model: opaque and uncovered pixels match stock to the last bit, both curves");
+    check(darkWorst[0] <= kBudget && darkWorst[1] <= kBudget,
+          "parity model: HUD over a dark background matches stock within the G-F budget of 2 steps, "
+          "both curves");
+    check(regimeWorst[0] > kNonzero && regimeWorst[1] > kNonzero,
+          "parity model: translucent glass over a bright background differs from stock, plainly "
+          "nonzero (the accepted halo cost), both curves");
+    check(regimeWorst[0] <= kCeiling && regimeWorst[1] <= kCeiling,
+          "parity model: that difference stays under the measured 113-step ceiling, both curves");
+    check(present[0] >= kPresent && present[1] >= kPresent,
+          "parity model: the HUD is present in the layer composite where it should be");
+    check(removed[0] == 0.0 && removed[1] == 0.0,
+          "parity model: fail with the take removed -- an empty layer composites to the bare "
+          "background to the last bit, so the presence assertion fails and the rig screams");
+}
+
 void testDepthStencil() {
     D3D11_DEPTH_STENCIL_DESC d{};
     // The menu panel, its escape-menu variant and the loader (census
@@ -1036,6 +1424,36 @@ void testDepthStencil() {
     a.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
     e = uiLayerDsEffect(uiLayerDsStateFrom(&a, 0), true);
     check(!e.tests() && !e.writes(), "depth ALWAYS without a write is neither");
+    // The three crisp-HUD families' MEASURED states (Phase 0 census, flights
+    // 1-3; build/hud_census_f3.txt's "ga <family> state" lines), classified:
+    // the holo panels and the flight HUD test GEQUAL against the scene pair
+    // and write nothing; the target sprite is depth-off by construction and
+    // writes STENCIL (its footprint, ref 5, mask 0x05), so its take needs the
+    // seeded copy's bit 0x01 AND the colourless write-back into the game's
+    // own buffer.
+    D3D11_DEPTH_STENCIL_DESC hud{};
+    hud.DepthEnable = TRUE;
+    hud.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL;
+    hud.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    hud.StencilEnable = FALSE;
+    e = uiLayerDsEffect(uiLayerDsStateFrom(&hud, 0), true);
+    check(e.depthTest && !e.depthWrite && !e.stencilTest && !e.stencilWrite,
+          "the flight HUD (and the holo panels): tests GEQUAL, writes nothing -- seeded depth, no "
+          "write-back");
+    D3D11_DEPTH_STENCIL_DESC spr{};
+    spr.DepthEnable = FALSE;  // the census's "depth 0 func 2 write 1": the
+    spr.DepthFunc = D3D11_COMPARISON_LESS;  // write mask is a no-op with depth off
+    spr.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    spr.StencilEnable = TRUE;
+    spr.StencilReadMask = 0x01;
+    spr.StencilWriteMask = 0x05;
+    spr.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_REPLACE,
+                     D3D11_COMPARISON_EQUAL};
+    spr.BackFace = spr.FrontFace;
+    e = uiLayerDsEffect(uiLayerDsStateFrom(&spr, 0), true);
+    check(!e.depthTest && !e.depthWrite && e.stencilTest && e.stencilWrite,
+          "the target sprite: no depth test or write (depth is off), tests and writes stencil -- "
+          "seeded bit 0x01, and the write-back keeps the game's buffer");
     // A stencil test against a view with no stencil plane (D32_FLOAT): D3D11
     // passes it and drops the write; there is nothing to seed, so nothing is
     // (review P3-6: it re-seeded on every draw).
@@ -1129,19 +1547,23 @@ bool compile(const char* src, size_t len, const char* entry, const char* profile
 
 bool setup(Gpu& g, bool hardware) {
     D3D_FEATURE_LEVEL fl{};
-    if (FAILED(D3D11CreateDevice(nullptr, hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr,
-                                 0, nullptr, 0, D3D11_SDK_VERSION, &g.dev, &fl, &g.ctx))) {
+    // Windows' own d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+    const auto createDevice = edvr::systemD3D11CreateDevice();
+    if (!createDevice ||
+        FAILED(createDevice(nullptr, hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr,
+                            0, nullptr, 0, D3D11_SDK_VERSION, &g.dev, &fl, &g.ctx))) {
         return false;
     }
-    ComPtr<ID3DBlob> v, p, c;
+    check(edvr::reportSystemD3D11Only("ui_quality_test"),
+          "the rig runs on System32's d3d11.dll and on no other d3d11.dll");
+    ComPtr<ID3DBlob> v, p;
     if (!compile(kQuadHlsl, sizeof(kQuadHlsl) - 1, "vsMain", "vs_5_0", &v) ||
-        !compile(kQuadHlsl, sizeof(kQuadHlsl) - 1, "psMain", "ps_5_0", &p) ||
-        !compile(kUiLayerCompositeHlsl, sizeof(kUiLayerCompositeHlsl) - 1, "main", "cs_5_0", &c)) {
+        !compile(kQuadHlsl, sizeof(kQuadHlsl) - 1, "psMain", "ps_5_0", &p)) {
         return false;
     }
     if (FAILED(g.dev->CreateVertexShader(v->GetBufferPointer(), v->GetBufferSize(), nullptr, &g.vs)) ||
         FAILED(g.dev->CreatePixelShader(p->GetBufferPointer(), p->GetBufferSize(), nullptr, &g.ps)) ||
-        FAILED(g.dev->CreateComputeShader(c->GetBufferPointer(), c->GetBufferSize(), nullptr, &g.cs))) {
+        FAILED(g.dev->CreateComputeShader(kUiLayerCompositeBytecode, sizeof(kUiLayerCompositeBytecode), nullptr, &g.cs))) {
         return false;
     }
     D3D11_BUFFER_DESC bd{};
@@ -1963,6 +2385,9 @@ void testWriteBack(Gpu& g) {
     check(a == b && written > 0, "the write-back leaves the game's stencil as the original draw did");
 }
 
+#include "ui_seed_census_test.h"
+#include "ui_seed_freshness_test.h"
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1978,6 +2403,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     testRenderState();
+    testSeedCensusCpu();
+    testSeedWriterRule();
     testKey();
     testSize();
     testMap();
@@ -1988,6 +2415,7 @@ int main(int argc, char** argv) {
     testGate();
     testFamilyRule();
     testAfterUi();
+    testHudParity();
     testChains();
     testPanelScale();
     Gpu g;
@@ -2001,6 +2429,9 @@ int main(int argc, char** argv) {
         testDownsample(g);
         testSeededStencil(g);
         testWriteBack(g);
+        testSeedCensusGpu(g);
+        testPrivateDepthRefreshProof(g);
+        testSeedFreshnessGpu(g);
         testSizeChange(g);
     }
     std::printf("ui_quality_test: %u checks, %u failures\n", g_checks, g_fails);

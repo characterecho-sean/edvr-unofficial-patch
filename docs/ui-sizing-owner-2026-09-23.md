@@ -18,21 +18,15 @@ Established (read in the disassembly; high confidence):
   (`FUN_1408D25E0`, VR manager vtbl +0x110; vFOV from the OpenVR fov getter;
   k = 1 unless a mode value is 3/4 and the HMD gates pass).
 - W_ui (section 5): in the stereo branch it is VR manager vtbl +0x70
-  (`FUN_1408D2880`) = trunc(recommended x m): recommended is EDVR's
-  GetRecommendedRenderTargetSize answer, m the manager's +0x4E4 (HMD Quality
-  by the numbers). The renderer sizes its views from the same record, so W_ui
-  is the scene's render width, and `s = W*tan(0.782)/(1920*tan(vFOV/2))`
-  = 0.0010346*U: the U rule, derived. Checks: 1.9865U x 1.1174U for a
-  1920x1080 stage (census 1.9856 x 1.1167); trim 0.8596 (flight 3: 0.858);
-  Quest/Pimax 1.080.
+  (`FUN_1408D2880`) = trunc(recommended x m), so W_ui is the scene's render
+  width and `s = 0.0010346*U`: the U rule, derived. Derivation and checks
+  (1.9865U x 1.1174U, trim 0.8596, Quest/Pimax 1.080): Status detail.
 - The same (w, h) create the movie, set its viewport, and size the render
   target and its depth partner ("RenderToTexture"/"...DepthTarget").
-- The menu's 16:9 surface (6) is this path with a 1920x1080 stage:
-  1566x880 = 1995 x 0.7853; 1254x705 = the trimmed 1597 x the old k;
-  1346x757 = 1597 x the new k (0.8433). The vscreen patch cannot raise it.
-- Glyphs (7): Scaleform's raster cache rasterises outline glyphs at the
-  requested size while they fit MaxSlotHeight (stock 48 px), else vector. A
-  bigger panel requests bigger glyphs.
+- The menu's 16:9 surface (6) is this path with a 1920x1080 stage; the
+  vscreen patch cannot raise it. Glyphs (7): a bigger panel requests bigger
+  glyphs while they fit MaxSlotHeight (stock 48 px), else vector. Figures
+  and mechanism: Status detail.
 
 Not established:
 - No log carries an RVA for any panel size: the RVA line fires only on a
@@ -59,6 +53,32 @@ cache if its chain holds 0x30FC1A or 0x312450.
 Ruled out: nothing by flight. Inference: vscreen_res.h's 0x288E495 is the
 view-mode 5/6 branch of `FUN_14288E3A0`; the panels follow W, so it never
 sized them.
+
+Later the same day: the instrument is MERGED (e24959dc); the four-operand
+patch is BUILT (f229753d on the UI agent's branch), held unmerged until the
+chains read `rtt`. Flight 162703 (16:27, f05c84bf) CLOSED the cursor-window
+finding: no fifth site needed. Full paragraph: Status detail.
+
+## Status detail (moved out of Status 2026-09-29)
+
+Moved verbatim out of the Status block (the W_ui bullet, the menu-surface and
+glyph bullets, the "Later the same day" paragraph); the summary above points
+here.
+
+- W_ui (section 5): in the stereo branch it is VR manager vtbl +0x70
+  (`FUN_1408D2880`) = trunc(recommended x m): recommended is EDVR's
+  GetRecommendedRenderTargetSize answer, m the manager's +0x4E4 (HMD Quality
+  by the numbers). The renderer sizes its views from the same record, so W_ui
+  is the scene's render width, and `s = W*tan(0.782)/(1920*tan(vFOV/2))`
+  = 0.0010346*U: the U rule, derived. Checks: 1.9865U x 1.1174U for a
+  1920x1080 stage (census 1.9856 x 1.1167); trim 0.8596 (flight 3: 0.858);
+  Quest/Pimax 1.080.
+- The menu's 16:9 surface (6) is this path with a 1920x1080 stage:
+  1566x880 = 1995 x 0.7853; 1254x705 = the trimmed 1597 x the old k;
+  1346x757 = 1597 x the new k (0.8433). The vscreen patch cannot raise it.
+- Glyphs (7): Scaleform's raster cache rasterises outline glyphs at the
+  requested size while they fit MaxSlotHeight (stock 48 px), else vector. A
+  bigger panel requests bigger glyphs.
 
 Later the same day: the instrument is MERGED (e24959dc) and the four-operand
 patch is BUILT (f229753d on the UI agent's branch), held unmerged until the

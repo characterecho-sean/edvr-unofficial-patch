@@ -111,7 +111,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
 
 namespace edvr {
 
-// The worn headset's fix.fov_trim_vertical/_outer/_nasal, resolved and
+// The worn headset's experimental.fov_trim_vertical/_outer/_nasal, resolved and
 // cached by this DLL's own beginFrame (the same triple it hands the openvr
 // half above): vertical, outer, nasal degrees, in that order. Takes
 // native_frame.cpp's own g_mutex; zero in every slot until a beginFrame has

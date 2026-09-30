@@ -46,6 +46,18 @@ class NativeCpuTrace final {
     const bool written=active&&(maybeClockLocked(),writeLocked(frameDescriptor(),payload));
     ReleaseSRWLockShared(&lock_);return written;
   }
+  bool emitFrame(const EdvrNativeCpuCompletedFramePayloadV2& payload) noexcept {
+    if(!enabled())return false;
+    AcquireSRWLockShared(&lock_);const bool active=handle_&&enabled();
+    const bool written=active&&(maybeClockLocked(),writeLocked(frameDescriptorV2(),payload));
+    ReleaseSRWLockShared(&lock_);return written;
+  }
+  bool emitGpu(const EdvrNativeGpuCompletionPayload& payload) noexcept {
+    if(!enabled())return false;
+    AcquireSRWLockShared(&lock_);const bool active=handle_&&enabled();
+    const bool written=active&&(maybeClockLocked(),writeLocked(descriptor(EdvrNativeGpuCompletionEvent),payload));
+    ReleaseSRWLockShared(&lock_);return written;
+  }
   Counters counters() const noexcept {
     return {emitted_.load(std::memory_order_relaxed),failures_.load(std::memory_order_relaxed),
       lastError_.load(std::memory_order_relaxed)};
@@ -62,12 +74,16 @@ class NativeCpuTrace final {
     static const EVENT_DESCRIPTOR values[]={
       {EdvrNativeCpuClockEvent,1,0,4,0,0,1},
       {EdvrNativeCpuSpanEvent,1,0,4,0,0,1},
-      {EdvrNativeCpuCompletedFrameEvent,1,0,4,0,0,1}};
+      {EdvrNativeCpuCompletedFrameEvent,1,0,4,0,0,1},
+      {EdvrNativeGpuCompletionEvent,1,0,4,0,0,1}};
     return values[id-1];
   }
   static const EVENT_DESCRIPTOR& clockDescriptor() noexcept{return descriptor(EdvrNativeCpuClockEvent);}
   static const EVENT_DESCRIPTOR& spanDescriptor() noexcept{return descriptor(EdvrNativeCpuSpanEvent);}
   static const EVENT_DESCRIPTOR& frameDescriptor() noexcept{return descriptor(EdvrNativeCpuCompletedFrameEvent);}
+  static const EVENT_DESCRIPTOR& frameDescriptorV2() noexcept {
+    static const EVENT_DESCRIPTOR value={EdvrNativeCpuCompletedFrameEvent,2,0,4,0,0,1};return value;
+  }
   static VOID NTAPI enableCallback(LPCGUID,ULONG enabled,UCHAR level,ULONGLONG any,
       ULONGLONG,PEVENT_FILTER_DESCRIPTOR,PVOID context) noexcept {
     auto& self=*static_cast<NativeCpuTrace*>(context);

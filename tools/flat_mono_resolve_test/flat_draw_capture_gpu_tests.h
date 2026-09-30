@@ -99,6 +99,37 @@ inline int flatDrawCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* con
             ck(bytes.substr(9*16*16*4,4)==redPixel,"noncovering point remains unchanged");
         }
     }
+    // F3 (2026-09-29): a frame that reset, or ran at phase (0,0), is not a sample. The two frames after
+    // an F10 arm were exactly those and recorded only unjittered constants (the camera rows carry no
+    // phase in them). present(..., live=false) refuses the frame with its own reason and the capture
+    // stays armed for the first two LIVE frames. The control is the old behaviour: every frame live.
+    {
+        auto runBurst=[&](bool firstFrameLive,uint64_t armFrame){
+            edvr::FlatDrawCapture burst;burst.arm(armFrame);const auto burstDir=fs::path(burst.directory());
+            const uint64_t first=armFrame+1;
+            for(uint64_t frame=first;frame<=first+2;++frame){
+                context->ClearRenderTargetView(rtv.Get(),red);context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,1,0);
+                burst.begin(frame,depth.Get(),W,H);
+                burst.before(context,1,'D',3,0,0,0,0x1234,0x5678,vs.Get(),ps.Get());
+                context->Draw(3,0);burst.after(context);
+                burst.qualify(frame,depth.Get(),color.Get(),W,H);
+                burst.present(context,frame,frame!=first||firstFrameLive);
+            }
+            context->Flush();
+            auto written=[&](uint64_t frame){return fs::exists(burstDir/(L"frame_"+std::to_wstring(frame)+L".json"));};
+            const uint64_t expectFrom=firstFrameLive?first:first+1;   // the two frames the capture should take
+            for(unsigned attempt=0;attempt<120&&!(written(expectFrom)&&written(expectFrom+1));++attempt)
+                {burst.present(context,first+3+attempt);Sleep(1);}
+            struct Result{bool firstWritten,secondWritten,thirdWritten;};
+            return Result{written(first),written(first+1),written(first+2)};
+        };
+        const auto gated=runBurst(false,700);
+        ck(!gated.firstWritten&&gated.secondWritten&&gated.thirdWritten,
+           "a reset or zero-phase frame is not a draw-capture sample: the first two live frames are");
+        const auto control=runBurst(true,800);
+        ck(control.firstWritten&&control.secondWritten&&!control.thirdWritten,
+           "control: with every frame live the capture takes the very first frame, as it did");
+    }
     cap.arm(200);cap.cancel("test-cancel");ck(!cap.active(),"rearm/cancel clears capture");
     edvr::FlatDrawCapture idle;idle.arm(300);idle.present(context,1201);ck(!idle.active(),"900-frame expiry stops idle arm");
     // Exercise the 512 draw cap without issuing 513 real raster draws. The

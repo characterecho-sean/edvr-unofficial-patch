@@ -6,6 +6,57 @@ static chain: see "Flight 184826".*
 
 ## Status
 
+- **State: the module retired 2026-09-29 (code removed, 68bddaaa).**
+  transition_flash_prevent.cpp and `advanced.transition_flash_prevent` (off,
+  watch, on, alternate) are deleted: flight 184826 refuted the engine chain
+  they hooked, and the key defaulted off. The entries below describe the module
+  as it was; the code is at `68bddaaa^`. `transition_flash_prevent_core.h`
+  stays because `transition_flash_eye_base_core.h` reuses its Mode, Treatment,
+  pose classifier and guard table.
+
+- **Acting-patch history (2026-09-23/24), newest first; full text in Status
+  detail below, per-flight in the flight sections:** 160557 (c321631e): the
+  view write was corrupting (column-major w-lane translation; the finder hit
+  prev-view), fixed with w-lane read, B^-1 premultiply and an orthonormality
+  guard. 151942 (e5daea6b): the pilot block (rows 275-279) was the residual
+  flash, premultiplied by B too. Review finding FIXED 2026-09-24: one
+  latched, all-or-nothing decision at the frame's first head-only fill.
+  134813 (7eb4a536): locator VALIDATED, the selector is the decision (skip
+  22726). 125237 (e9fefca0): LIVE-READ VALIDATED to the millimetre.
+
+- **Goal (Sean, 2026-09-23):** stop trapping the bad frame and stop Elite
+  rendering it at all, by fixing the order inside the game. The trap stays
+  on as referee until the acting build verifies.
+- **What the bad frame is (measured):** `cb1[275]` of the 5376-byte scene
+  CB lands on the head pose alone for one frame (within ~14 cm of the frame
+  origin); the ship/seat transform under the head is missing because the
+  eye-base mailbox (ship+0x3330, consumer `0x28431D0`, writer `0x2874B20`)
+  is not refilled that frame. Every flash is a one-frame writer skip
+  (100043, 125237).
+- **Consume frame numbers lag render taps by ~1 wall-clock frame** (125237):
+  the refill the bad render needs is already LIVE in the mailbox at the tap;
+  the sim's window starts at N+1, not N, and the act fires at tap frame
+  skip+1 (6/6 on 134813).
+- **The render-time patch is on main** (simulation 310d9883, live read
+  e9fefca0, locator 7eb4a536, the acting build 9a243675 plus the review
+  fixes): `advanced.transition_flash_eye_base = off|watch|on|alternate`.
+  The Steam copy runs the acting build, trap OFF, `alternate` (two marked
+  ini lines). Read each flight with `--expect-build` set to the stamped
+  commit its section names.
+- **Hyperspace exits can be scene-new too** (125237): the second scene-new
+  event on record after 100043's f23338. 22726 then proved the selector is
+  NOT demotable: scene-old and scene-new both occur at hyperspace entries.
+- **Environment:** game build 332841 (PE TimeDateStamp 1788384820, image
+  104,894,464), the same exe in both installs. Independent of VR runtime,
+  headset, eye size and DLSS: the code is Elite's camera, below all of them.
+- **Old chain (compose `0x23BC8A0` / recompute `0x3CEE650`):** REFUTED
+  (flight 184826); its hooks stay inert until Sean says to remove them.
+- **Instrument history:** the journal below; each flight section carries its
+  own as-installed note.
+- **Ruled out:** see the list at the end.
+
+## Status detail (moved out of Status 2026-09-29)
+
 - **The view write was corrupting: column-major groups, and the finder was
   hitting prev-view (flight 160557).** The buffer's view groups store their
   translation in the w lanes (flat [3],[7],[11]); viewOriginMatch read
@@ -59,36 +110,6 @@ static chain: see "Flight 184826".*
   zero live=RESET taps at bad frames; the record-indexed new candidate was
   stale at every tap (refilled age=3) and is ruled out as the patch's
   source.
-- **Goal (Sean, 2026-09-23):** stop trapping the bad frame and stop Elite
-  rendering it at all, by fixing the order inside the game. The trap stays
-  on as referee until the acting build verifies.
-- **What the bad frame is (measured):** `cb1[275]` of the 5376-byte scene
-  CB lands on the head pose alone for one frame (within ~14 cm of the frame
-  origin); the ship/seat transform under the head is missing because the
-  eye-base mailbox (ship+0x3330, consumer `0x28431D0`, writer `0x2874B20`)
-  is not refilled that frame. Every flash is a one-frame writer skip
-  (100043, 125237).
-- **Consume frame numbers lag render taps by ~1 wall-clock frame** (125237):
-  the refill the bad render needs is already LIVE in the mailbox at the tap;
-  the sim's window starts at N+1, not N, and the act fires at tap frame
-  skip+1 (6/6 on 134813).
-- **The render-time patch is on main** (simulation 310d9883, live read
-  e9fefca0, locator 7eb4a536, the acting build 9a243675 plus the review
-  fixes): `advanced.transition_flash_eye_base = off|watch|on|alternate`.
-  The Steam copy runs the acting build, trap OFF, `alternate` (two marked
-  ini lines). Read each flight with `--expect-build` set to the stamped
-  commit its section names.
-- **Hyperspace exits can be scene-new too** (125237): the second scene-new
-  event on record after 100043's f23338. 22726 then proved the selector is
-  NOT demotable: scene-old and scene-new both occur at hyperspace entries.
-- **Environment:** game build 332841 (PE TimeDateStamp 1788384820, image
-  104,894,464), the same exe in both installs. Independent of VR runtime,
-  headset, eye size and DLSS: the code is Elite's camera, below all of them.
-- **Old chain (compose `0x23BC8A0` / recompute `0x3CEE650`):** REFUTED
-  (flight 184826); its hooks stay inert until Sean says to remove them.
-- **Instrument history:** the journal below; each flight section carries its
-  own as-installed note.
-- **Ruled out:** see the list at the end.
 
 ## What the trap costs
 

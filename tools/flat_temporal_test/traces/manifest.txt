@@ -1,23 +1,27 @@
-# Frame-contract trace corpus manifest: one "file frames scenario" per line.
-# The rig fails the build on a missing/unreadable entry, an empty corpus, a
-# frame-count mismatch, or any replay hash mismatch. Adding a file never
-# replaces a required scenario.
+# Frame-contract trace corpus manifest: one "file frames scenario [selected]
+# [static]" per line. The rig fails the build on a missing/unreadable entry, an
+# empty corpus, a frame-count mismatch, or any replay hash mismatch. Adding a
+# file never replaces a required scenario. "selected": every frame must replay
+# Selected. "static": the trace is the 3D main menu, so every Selected frame came
+# through the verified menu HDR copy (the menu-scoped stale-slot policy,
+# FlatMonoResolveFrame::staticScene); a trace without it must have no such
+# frame, which pins the policy off on the flight, station and on-foot traces.
 #
 # Provenance: Epic install 2026-09-26 21:15 UTC session, build
 # v0.18.0-rc.2-32-g8fe74296 (trace format EDVRFTR2), EDHM chained, DLSS
 # requested, game supersampling 0.65 (R=2496x1404, D=3840x2160), tone route
 # EDHM grade (ps EAA5F18F10533BD1). Hashes regenerated to hash schema v3 by
 # `flat_temporal_test --trace-migrate` (same events, unchanged selector).
-flat_trace_10806.bin 3 edhm-menu-ss065-dlss
+flat_trace_10806.bin 3 edhm-menu-ss065-dlss static
 flat_trace_16271.bin 3 edhm-flight-ss065-dlss
 # Epic install 2026-09-27 12:33 UTC session, build v0.18.0-rc.2-65-g1caacf14,
 # EDHM chained, DLSS requested, game supersampling 0.5 (R=1920x1080,
 # D=3840x2160), main-menu hangar. Sub-native cell of the gate-2 matrix.
-flat_trace_36807.bin 3 edhm-menu-ss050-dlss
+flat_trace_36807.bin 3 edhm-menu-ss050-dlss static
 # Epic install 2026-09-27 13:26 UTC session, build v0.18.0-rc.2-66-g0b56952d,
 # EDHM chained, DLSS requested, game supersampling 1.0 (R=D=3840x2160),
 # main-menu hangar, treated streak 6000+ at capture. Native cell.
-flat_trace_43365.bin 3 edhm-menu-native-dlss
+flat_trace_43365.bin 3 edhm-menu-native-dlss static
 # Epic install 2026-09-27 13:58-14:00 UTC session, build
 # v0.18.0-rc.2-70-g7a0415b2, EDHM chained, in flight. One line per backend
 # cell; each captured with a rebuilt treated streak (session-wide
@@ -38,3 +42,11 @@ flat_trace_49426.bin 3 edhm-flight-native-taa
 flat_trace_45992.bin 3 stock-flight-res2560x1440-dlss
 flat_trace_52244.bin 3 stock-flight-ss050-dlss
 flat_trace_60043.bin 3 stock-onfoot-station-ss050-dlss
+# Epic install 2026-09-29 12:40 local (18:40 UTC) session, build
+# v0.18.0-rc.3-163-g856e72c2 (trace format EDVRFTR3), EDHM chained, DLSS Quality
+# requested, game supersampling 0.75 (R=2880x1620, D=3840x2160), the main-menu
+# hangar with the Krait Mk II: the F10 trace of the three frames before the
+# capture. It holds the only draws of 66DE2CAD/235567BE (the hull plating, 5 a
+# frame) in the corpus, recorded UNKEYED; the re-key replay in the self-test
+# takes them under the keyed table. "selected": every frame must replay Selected.
+flat_trace_67594.bin 3 epic-menu-krait-ss075-dlss selected static

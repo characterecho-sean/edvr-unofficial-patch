@@ -1,3 +1,4 @@
+#include "temporal_shader_bytecode.h"
 #include "intro_upscale.h"
 
 #include <windows.h>
@@ -30,7 +31,7 @@
 #pragma warning(pop)
 
 // The same two files as GPU text, generated at build time.
-#include "fsr_hlsl_gen.h"
+// Fixed shader bytecode is generated during the build. //
 
 namespace edvr {
 namespace {
@@ -62,35 +63,7 @@ constexpr uint32_t kMaxWidth = 8192;
 // Sampling is by integer load, so no filtering the game chose composes with
 // ours, and the dither is a pure function of position -- one texture feeds
 // both eyes, so it cannot differ between them.
-const char kDebandHlsl[] =
-    "Texture2D<float4> S : register(t0);\n"
-    "RWTexture2D<float4> O : register(u0);\n"
-    "cbuffer P : register(b0) { float4 p; };\n"
-    "float mx3(float3 v) { return max(max(v.x, v.y), v.z); }\n"
-    "float ign(float2 q) {\n"
-    "    return frac(52.9829189 * frac(dot(q, float2(0.06711056, 0.00583715))));\n"
-    "}\n"
-    "[numthreads(8,8,1)]\n"
-    "void main(uint3 id : SV_DispatchThreadID) {\n"
-    "    uint w, h;\n"
-    "    O.GetDimensions(w, h);\n"
-    "    if (id.x >= w || id.y >= h) return;\n"
-    "    int2 c0 = int2(id.xy);\n"
-    "    int r = int(p.x);\n"
-    "    int2 lo = int2(0, 0);\n"
-    "    int2 hi = int2(int(w) - 1, int(h) - 1);\n"
-    "    float4 c = S[c0];\n"
-    "    float3 n0 = S[clamp(c0 + int2( r, 0), lo, hi)].rgb;\n"
-    "    float3 n1 = S[clamp(c0 + int2(-r, 0), lo, hi)].rgb;\n"
-    "    float3 n2 = S[clamp(c0 + int2( 0, r), lo, hi)].rgb;\n"
-    "    float3 n3 = S[clamp(c0 + int2( 0,-r), lo, hi)].rgb;\n"
-    "    float d = max(max(mx3(abs(n0 - c.rgb)), mx3(abs(n1 - c.rgb))),\n"
-    "                  max(mx3(abs(n2 - c.rgb)), mx3(abs(n3 - c.rgb))));\n"
-    "    float flatness = saturate(1.0 - d / max(p.y, 1e-6));\n"
-    "    float3 o = lerp(c.rgb, (n0 + n1 + n2 + n3) * 0.25, flatness);\n"
-    "    if (p.z > 0.0) o += (ign(float2(c0)) - 0.5) * p.z;\n"
-    "    O[id.xy] = float4(saturate(o), c.a);\n"
-    "}\n";
+
 
 // Radius and threshold multiplier per pass. backdrop_fix's ladder: five
 // passes reaching sixteen texels, because at this magnification a contour is
@@ -106,87 +79,18 @@ constexpr int kDebandCount =
 
 // EASU and RCAS, wrapped in the callbacks AMD's header asks the calling
 // shader to provide. Everything the filtering itself does is theirs.
-const char kEasuMain[] =
-    "Texture2D<float4> Src : register(t0);\n"
-    "SamplerState Smp : register(s0);\n"
-    "RWTexture2D<float4> Dst : register(u0);\n"
-    "cbuffer P : register(b0) {\n"
-    "    uint4 con0; uint4 con1; uint4 con2; uint4 con3; uint2 dstSize;\n"
-    "};\n"
-    "AF4 FsrEasuRF(AF2 p) { return Src.GatherRed(Smp, p); }\n"
-    "AF4 FsrEasuGF(AF2 p) { return Src.GatherGreen(Smp, p); }\n"
-    "AF4 FsrEasuBF(AF2 p) { return Src.GatherBlue(Smp, p); }\n"
-    "[numthreads(8,8,1)]\n"
-    "void main(uint3 id : SV_DispatchThreadID) {\n"
-    "    if (id.x >= dstSize.x || id.y >= dstSize.y) return;\n"
-    "    AF3 c;\n"
-    "    FsrEasuF(c, id.xy, con0, con1, con2, con3);\n"
-    "    Dst[id.xy] = float4(c, 1.0);\n"
-    "}\n";
 
-const char kRcasMain[] =
-    "Texture2D<float4> Src : register(t0);\n"
-    "RWTexture2D<float4> Dst : register(u0);\n"
-    "cbuffer P : register(b0) { uint4 con; uint2 dstSize; };\n"
-    "AF4 FsrRcasLoadF(ASU2 p) { return Src.Load(int3(p, 0)); }\n"
-    "void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}\n"
-    "[numthreads(8,8,1)]\n"
-    "void main(uint3 id : SV_DispatchThreadID) {\n"
-    "    if (id.x >= dstSize.x || id.y >= dstSize.y) return;\n"
-    "    AF3 c;\n"
-    "    FsrRcasF(c.r, c.g, c.b, id.xy, con);\n"
-    "    Dst[id.xy] = float4(c, 1.0);\n"
-    "}\n";
 
-const char kGpuPrologue[] =
-    "#define A_GPU 1\n"
-    "#define A_HLSL 1\n";
 
-std::string joinChunks(const char* const* chunks) {
-    std::string out;
-    for (const char* const* c = chunks; *c; ++c) out += *c;
-    return out;
-}
+
+
+
+
 
 // The Catmull-Rom fallback, for a rig where EASU will not compile. Its kernel
 // is written out so it can be checked against a reference rather than
 // trusted: the standard cubic with a = -0.5.
-const char kCubicHlsl[] =
-    "Texture2D<float4> Src : register(t0);\n"
-    "RWTexture2D<float4> Dst : register(u0);\n"
-    "cbuffer P : register(b0) { uint2 srcSize; uint2 dstSize; };\n"
-    "float w(float t) {\n"
-    "    t = abs(t);\n"
-    "    if (t <= 1.0) return 1.5*t*t*t - 2.5*t*t + 1.0;\n"
-    "    if (t <  2.0) return -0.5*t*t*t + 2.5*t*t - 4.0*t + 2.0;\n"
-    "    return 0.0;\n"
-    "}\n"
-    "[numthreads(8,8,1)]\n"
-    "void main(uint3 id : SV_DispatchThreadID) {\n"
-    "    if (id.x >= dstSize.x || id.y >= dstSize.y) return;\n"
-    "    float2 sp = (float2(id.xy) + 0.5) *\n"
-    "                (float2(srcSize) / float2(dstSize)) - 0.5;\n"
-    "    int2 b = int2(floor(sp));\n"
-    "    float2 f = sp - float2(b);\n"
-    "    float wx[4], wy[4];\n"
-    "    [unroll] for (int k = 0; k < 4; ++k) {\n"
-    "        wx[k] = w(float(k - 1) - f.x);\n"
-    "        wy[k] = w(float(k - 1) - f.y);\n"
-    "    }\n"
-    "    float4 acc = 0.0;\n"
-    "    float sum = 0.0;\n"
-    "    [unroll] for (int j = 0; j < 4; ++j) {\n"
-    "        [unroll] for (int i = 0; i < 4; ++i) {\n"
-    "            int2 q = clamp(b + int2(i - 1, j - 1), int2(0, 0),\n"
-    "                           int2(srcSize) - 1);\n"
-    "            float cw = wx[i] * wy[j];\n"
-    "            acc += Src.Load(int3(q, 0)) * cw;\n"
-    "            sum += cw;\n"
-    "        }\n"
-    "    }\n"
-    "    if (sum > 0.0) acc /= sum;\n"
-    "    Dst[id.xy] = float4(saturate(acc.rgb), acc.a);\n"
-    "}\n";
+
 
 enum class Mode { kOff, kSharp, kFsr };
 
@@ -423,13 +327,8 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
     bool ok = true;
     if (!g_csUp) {
         if (g_mode == Mode::kFsr) {
-            const std::string hlsl = std::string(kGpuPrologue) +
-                                     joinChunks(kFfxAChunks) +
-                                     "#define FSR_EASU_F 1\n" +
-                                     joinChunks(kFfxFsr1Chunks) + kEasuMain;
-            g_csUp = shaderSwapCompileCs(ctx, hlsl.c_str(), hlsl.size(), "main",
-                                         "intro easu", nullptr,
-                                         "intro video upscale");
+
+            g_csUp = shaderSwapCreateCs(ctx, kIntroEasuBytecode, sizeof(kIntroEasuBytecode), "intro easu", "intro video upscale");
             g_running = g_csUp ? Mode::kFsr : Mode::kOff;
             if (!g_csUp) {
                 Log::get().note(
@@ -439,10 +338,7 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
             }
         }
         if (!g_csUp) {
-            g_csUp = shaderSwapCompileCs(ctx, kCubicHlsl,
-                                         sizeof(kCubicHlsl) - 1, "main",
-                                         "intro cubic", nullptr,
-                                         "intro video upscale");
+            g_csUp = shaderSwapCreateCs(ctx, kIntroCubicBytecode, sizeof(kIntroCubicBytecode), "intro cubic", "intro video upscale");
             g_running = g_csUp ? Mode::kSharp : Mode::kOff;
         }
         if (!g_csUp) { ok = false; failOnce("no resampler would compile"); }
@@ -456,10 +352,7 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
         if (!ok) failOnce("the resampler's sampler could not be created");
     }
     if (ok && g_deband > 0.0f && !g_csDeband) {
-        g_csDeband = shaderSwapCompileCs(ctx, kDebandHlsl,
-                                         sizeof(kDebandHlsl) - 1, "main",
-                                         "intro deband", nullptr,
-                                         "intro video upscale");
+        g_csDeband = shaderSwapCreateCs(ctx, kIntroDebandBytecode, sizeof(kIntroDebandBytecode), "intro deband", "intro video upscale");
         if (!g_csDeband) {
             Log::get().note("intro video upscale: the deband would not "
                             "compile; the frame is resampled without it.");
@@ -467,13 +360,8 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
         }
     }
     if (ok && g_sharpen >= 0.0f && g_running == Mode::kFsr && !g_csRcas) {
-        const std::string hlsl = std::string(kGpuPrologue) +
-                                 joinChunks(kFfxAChunks) +
-                                 "#define FSR_RCAS_F 1\n" +
-                                 joinChunks(kFfxFsr1Chunks) + kRcasMain;
-        g_csRcas = shaderSwapCompileCs(ctx, hlsl.c_str(), hlsl.size(), "main",
-                                       "intro rcas", nullptr,
-                                       "intro video upscale");
+
+        g_csRcas = shaderSwapCreateCs(ctx, kIntroRcasBytecode, sizeof(kIntroRcasBytecode), "intro rcas", "intro video upscale");
         if (!g_csRcas) {
             Log::get().note("intro video upscale: RCAS would not compile; the "
                             "frame is upscaled without the sharpening pass.");

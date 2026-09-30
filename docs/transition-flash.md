@@ -2,6 +2,11 @@
 
 ## Status
 
+- **State: the in-engine fix retired 2026-09-29 (code removed, 68bddaaa).**
+  `advanced.transition_flash_prevent` and its module are deleted (see the
+  Status block of the design doc named below). The shipped fix is still the
+  trap below; `fix.transition_flash`, its detector and the other flash keys are
+  untouched.
 - **State (2026-09-23):** the shipped fix is still the trap below: detect the
   bad frame, resubmit the previous one. An in-engine fix was built and flown
   the same day (flight 184826). The flight REFUTED the engine chain it hooked;

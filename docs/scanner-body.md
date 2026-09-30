@@ -1,5 +1,12 @@
 # The black planet in one eye (DSS and FSS)
 
+## Status
+
+- **State: solved, and its instruments retired 2026-09-29 (code removed,
+  d38272de).** `advanced.eye_split`, `advanced.resolve_probe`,
+  `advanced.stencil_probe` and `tools/diff_eye_split.py`, all described below,
+  are deleted. `fix.scanner_body` stays.
+
 *Frontier issue [78021](https://issues.frontierstore.net/issue-detail/78021) —
 "Detailed surface scanner eye mismatch in VR", filed 2025-08-22 against
 4.2.0.1 and marked Confirmed. The reporter describes the planet's surface

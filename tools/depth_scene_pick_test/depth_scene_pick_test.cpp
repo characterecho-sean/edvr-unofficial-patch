@@ -66,6 +66,7 @@ ID3D11Texture2D* scene(uint32_t width, uint32_t height, int eye, bool expected) 
 }  // namespace
 
 namespace edvr {
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext*,const void*,size_t,const char*,const char*) { std::abort(); }
 Log& Log::get() { static Log log; return log; }
 Log::~Log() = default;
 void Log::note(const char*, ...) {}
@@ -73,7 +74,6 @@ void Log::note(const char*, ...) {}
 Config& Config::get() { static Config config; return config; }
 std::string Config::getString(const char* key, const char* def) const {
     if (!std::strcmp(key, "fix.temporal_aa")) return temporalMode;
-    if (!std::strcmp(key, "fix.eye_mask")) return "off";
     return def;
 }
 bool Config::getBool(const char* key, bool def) const {
@@ -630,11 +630,11 @@ int main(int argc, char** argv) {
               "reused slots form a fresh ordered pair after rollover");
 
         // advanced.eye_depth_capture lights the probe on its own: the flight
-        // rig runs fix.temporal_aa AND fix.eye_mask both off, and the eye-run
-        // depth capture's scene-pair verdict needs the probe watching anyway.
+        // rig runs fix.temporal_aa off, and the eye-run depth capture's
+        // scene-pair verdict needs the probe watching anyway.
         temporalMode = "off";
         edvr::depthProbeConfigure(edvr::Config::get());
-        check(!edvr::g_wanted, "temporal and eye mask both off leaves the probe unwatched");
+        check(!edvr::g_wanted, "temporal off leaves the probe unwatched");
         eyeDepthCaptureOn = true;
         edvr::depthProbeConfigure(edvr::Config::get());
         check(edvr::g_wanted, "the eye depth capture enables the depth probe on its own");

@@ -12,19 +12,9 @@
 namespace edvr::openxr {
 namespace {
 using Microsoft::WRL::ComPtr;
-struct Vertex { float position[3], color[4]; };
-struct Constants { float matrix[4][4]; float encodeSRGB=0, pad[3]{}; };
 struct BlitConstants { float bounds[4], clampUV[4]; float encodeSRGB=0, pad[3]{}; };
 struct SkyConstants { float orient[3][4]; float tangents[4]; float encode=0, pad[3]{}; };
 static_assert(sizeof(SkyConstants)==80,"skybox HLSL constant-buffer packing");
-const char* shader=R"(
-cbuffer Constants : register(b0) { row_major float4x4 mvp; float encodeSRGB; float3 pad; };
-struct V { float3 position:POSITION; float4 color:COLOR; };
-struct O { float4 position:SV_POSITION; float4 color:COLOR; };
-O vs(V v) { O o; o.position=mul(mvp,float4(v.position,1)); o.color=v.color; return o; }
-float3 srgb(float3 c) { return lerp(12.92*c,1.055*pow(max(c,0),1.0/2.4)-0.055,step(0.0031308,c)); }
-float4 ps(O v):SV_TARGET { return float4(encodeSRGB>0.5?srgb(v.color.rgb):v.color.rgb,1); }
-)";
 const char* blitShader=R"(
 cbuffer Constants : register(b0) { float4 bounds; float4 clampUV; float encodeSRGB; float3 pad; };
 Texture2D sourceTexture : register(t0); SamplerState linearSampler : register(s0);
@@ -88,15 +78,6 @@ bool poseValid(const XrPosef& p) {
   for(float v:a)if(!std::isfinite(v))return false;
   const auto& q=p.orientation;const double norm=double(q.x)*q.x+double(q.y)*q.y+double(q.z)*q.z+double(q.w)*q.w;
   return std::abs(norm-1.0)<0.001;
-}
-void viewMatrix(const XrPosef& p,float (&m)[4][4]) {
-  const float x=p.orientation.x,y=p.orientation.y,z=p.orientation.z,w=p.orientation.w;
-  // Inverse rigid pose, column vectors: R^T and -R^T t.
-  m[0][0]=1-2*(y*y+z*z);m[0][1]=2*(x*y+z*w);m[0][2]=2*(x*z-y*w);
-  m[1][0]=2*(x*y-z*w);m[1][1]=1-2*(x*x+z*z);m[1][2]=2*(y*z+x*w);
-  m[2][0]=2*(x*z+y*w);m[2][1]=2*(y*z-x*w);m[2][2]=1-2*(x*x+y*y);
-  for(unsigned row=0;row<3;++row)m[row][3]=-(m[row][0]*p.position.x+m[row][1]*p.position.y+m[row][2]*p.position.z);
-  m[3][3]=1;
 }
 bool compatible(DXGI_FORMAT resource,DXGI_FORMAT selected) {
   if(resource==selected)return true;
@@ -192,9 +173,9 @@ XrResult D3D11Stereo::shutdown() {
   // Release any recorded work before destroying its runtime-owned images.
   // Never clear the caller's immediate pipeline state during cleanup.
   context_.Reset();
-  constants_.Reset();blitConstants_.Reset();blitSampler_.Reset();skyboxConstants_.Reset();skyboxSampler_.Reset();vertices_.Reset();layout_.Reset();pixelShader_.Reset();vertexShader_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();skyboxPixelShader_.Reset();skyboxVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();
+  blitConstants_.Reset();blitSampler_.Reset();skyboxConstants_.Reset();skyboxSampler_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();skyboxPixelShader_.Reset();skyboxVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();
   for(auto& eye:eyes_){
-    eye.diagnosticRtv.Reset();eye.diagnosticTexture.Reset();eye.rtvs.clear();eye.images.clear();
+    eye.rtvs.clear();eye.images.clear();
     if(eye.swapchain && dispatch_.destroySwapchain){const XrResult r=dispatch_.destroySwapchain(eye.swapchain);if(r!=XR_SUCCESS && first==XR_SUCCESS)first=r;}
     eye.swapchain=XR_NULL_HANDLE;eye.width=eye.height=0;
   }
@@ -277,26 +258,12 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
     }
   }
   initSwapchainMs_=msSince(stretch);stretch=Clock::now();
-  ComPtr<ID3DBlob> vs,ps,errors,nativeVS;
-  if(FAILED(D3DCompile(shader,std::strlen(shader),"EDVR native stereo",nullptr,nullptr,"vs","vs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&vs,&errors))||
-     FAILED(D3DCompile(shader,std::strlen(shader),"EDVR native stereo",nullptr,nullptr,"ps","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&ps,&errors))||
-     FAILED(device->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&vertexShader_))||
-     FAILED(device->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&pixelShader_)))return failed(XR_ERROR_RUNTIME_FAILURE);
-  nativeVS=vs;
-  vs.Reset(); ps.Reset(); errors.Reset();
+  ComPtr<ID3DBlob> vs,ps,errors;
   if(FAILED(D3DCompile(blitShader,std::strlen(blitShader),"EDVR captured blit",nullptr,nullptr,"vs","vs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&vs,&errors))||
      FAILED(D3DCompile(blitShader,std::strlen(blitShader),"EDVR captured blit",nullptr,nullptr,"ps","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&ps,&errors))||
      FAILED(device->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&blitVertexShader_))||
      FAILED(device->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&blitPixelShader_)))return failed(XR_ERROR_RUNTIME_FAILURE);
-  D3D11_INPUT_ELEMENT_DESC layout[]={{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
-    {"COLOR",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0}};
-  if(FAILED(device->CreateInputLayout(layout,2,nativeVS->GetBufferPointer(),nativeVS->GetBufferSize(),&layout_)))return failed(XR_ERROR_RUNTIME_FAILURE);
-  const Vertex vertices[]={{{-.3f,0,-2},{1,0,0,1}},{{.3f,0,-2},{0,1,0,1}},{{0,.5f,-2},{0,0,1,1}}};
-  D3D11_BUFFER_DESC bd{sizeof(vertices),D3D11_USAGE_IMMUTABLE,D3D11_BIND_VERTEX_BUFFER,0,0,0};D3D11_SUBRESOURCE_DATA data{vertices,0,0};
-  if(FAILED(device->CreateBuffer(&bd,&data,&vertices_)))return failed(XR_ERROR_RUNTIME_FAILURE);
-  bd={sizeof(Constants),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER,0,0,0};
-  if(FAILED(device->CreateBuffer(&bd,nullptr,&constants_)))return failed(XR_ERROR_RUNTIME_FAILURE);
-  bd={sizeof(BlitConstants),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER,0,0,0};
+  D3D11_BUFFER_DESC bd{sizeof(BlitConstants),D3D11_USAGE_DEFAULT,D3D11_BIND_CONSTANT_BUFFER,0,0,0};
   if(FAILED(device->CreateBuffer(&bd,nullptr,&blitConstants_)))return failed(XR_ERROR_RUNTIME_FAILURE);
   D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
   if(FAILED(device->CreateSamplerState(&sampler,&blitSampler_)))return failed(XR_ERROR_RUNTIME_FAILURE);
@@ -315,100 +282,6 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
   edvr::plugins::PluginManager::instance().initialize(edvr::executableDirectory());
   ready_=true;return XR_SUCCESS;
 }
-XrResult D3D11Stereo::render(const XrView (&views)[2],XrSpace space,XrCompositionLayerProjection& layer) {
-  layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-  if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
-  auto failed=[&](XrResult r){ready_=false;lastResult_=r;return r;};
-  if(!space)return failed(XR_ERROR_HANDLE_INVALID);
-  if(FAILED(device_->GetDeviceRemovedReason()))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
-  Constants constants[2]{};
-  for(unsigned eye=0;eye<2;++eye){
-    vr::HmdMatrix44_t projection{};float view[4][4]{};
-    if(!poseValid(views[eye].pose)||!projectionMatrix(views[eye].fov,.025f,50000.f,vr::API_DirectX,projection))return failed(XR_ERROR_VALIDATION_FAILURE);
-    viewMatrix(views[eye].pose,view);
-    for(unsigned row=0;row<4;++row)for(unsigned col=0;col<4;++col)for(unsigned k=0;k<4;++k)
-      constants[eye].matrix[row][col]+=projection.m[row][k]*view[k][col];
-    constants[eye].encodeSRGB=(format_==DXGI_FORMAT_R8G8B8A8_UNORM||format_==DXGI_FORMAT_B8G8R8A8_UNORM)?1.f:0.f;
-  }
-  for(unsigned eye=0;eye<2;++eye){
-    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};uint32_t index=0;
-    XrResult r=dispatch_.acquireSwapchainImage(eyes_[eye].swapchain,&acquire,&index);if(r!=XR_SUCCESS)return failed(r);
-    if(index>=eyes_[eye].rtvs.size())return failed(XR_ERROR_RUNTIME_FAILURE);
-    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=1000000000LL;
-    r=dispatch_.waitSwapchainImage(eyes_[eye].swapchain,&wait);
-    // Positive timeout is not permission to draw/release. Retire this renderer;
-    // the owner destroys the swapchain without retrying an uncertain operation.
-    if(r!=XR_SUCCESS)return failed(r);
-    auto& e=eyes_[eye];ID3D11RenderTargetView* rtv=e.rtvs[index].Get();
-    context_->ClearState();
-    const float black[]={0,0,0,1};context_->ClearRenderTargetView(rtv,black);
-    context_->OMSetRenderTargets(1,&rtv,nullptr);context_->OMSetBlendState(nullptr,nullptr,~0u);context_->OMSetDepthStencilState(depth_.Get(),0);
-    context_->RSSetState(rasterizer_.Get());D3D11_VIEWPORT viewport{0,0,float(e.width),float(e.height),0,1};context_->RSSetViewports(1,&viewport);
-    UINT stride=sizeof(Vertex),offset=0;context_->IASetInputLayout(layout_.Get());
-    context_->IASetVertexBuffers(0,1,vertices_.GetAddressOf(),&stride,&offset);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context_->VSSetShader(vertexShader_.Get(),nullptr,0);context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
-    context_->VSSetConstantBuffers(0,1,constants_.GetAddressOf());context_->PSSetConstantBuffers(0,1,constants_.GetAddressOf());context_->PSSetShader(pixelShader_.Get(),nullptr,0);
-    context_->UpdateSubresource(constants_.Get(),0,nullptr,&constants[eye],0,0);context_->Draw(3,0);
-    context_->OMSetRenderTargets(0,nullptr,nullptr);
-    r=submitCommands();if(r!=XR_SUCCESS)return failed(r);
-    if(FAILED(device_->GetDeviceRemovedReason()))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
-    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    r=dispatch_.releaseSwapchainImage(e.swapchain,&release);if(r!=XR_SUCCESS)return failed(r);
-  }
-  for(unsigned eye=0;eye<2;++eye){
-    auto& view=layerViews_[eye];view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};view.pose=views[eye].pose;view.fov=views[eye].fov;
-    view.subImage={eyes_[eye].swapchain,{{0,0},{int32_t(eyes_[eye].width),int32_t(eyes_[eye].height)}},0};
-  }
-  layer.space=space;layer.viewCount=2;layer.views=layerViews_;return XR_SUCCESS;
-}
-
-XrResult D3D11Stereo::drawEye(unsigned eye, const XrView& view, ID3D11Texture2D*& out) {
-  out=nullptr;
-  if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
-  if(eye>1)return XR_ERROR_INDEX_OUT_OF_RANGE;
-  if(view.type!=XR_TYPE_VIEW||view.next||!poseValid(view.pose))return XR_ERROR_VALIDATION_FAILURE;
-  if(FAILED(device_->GetDeviceRemovedReason()))return XR_ERROR_GRAPHICS_DEVICE_INVALID;
-  vr::HmdMatrix44_t projection{};float viewMatrixData[4][4]{};
-  if(!projectionMatrix(view.fov,.025f,50000.f,vr::API_DirectX,projection))return XR_ERROR_VALIDATION_FAILURE;
-  auto& e=eyes_[eye];
-  if(!e.diagnosticTexture) {
-    D3D11_TEXTURE2D_DESC td{};td.Width=e.width;td.Height=e.height;td.MipLevels=td.ArraySize=1;
-    td.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;td.SampleDesc.Count=1;
-    td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET;
-    ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11RenderTargetView> target;
-    if(FAILED(device_->CreateTexture2D(&td,nullptr,&texture)))return XR_ERROR_RUNTIME_FAILURE;
-    D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-    rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
-    if(FAILED(device_->CreateRenderTargetView(texture.Get(),&rd,&target)))return XR_ERROR_RUNTIME_FAILURE;
-    e.diagnosticTexture=std::move(texture);e.diagnosticRtv=std::move(target);
-  }
-  viewMatrix(view.pose,viewMatrixData);Constants c{};
-  for(unsigned row=0;row<4;++row)for(unsigned col=0;col<4;++col)for(unsigned k=0;k<4;++k)
-    c.matrix[row][col]+=projection.m[row][k]*viewMatrixData[k][col];
-  // Clear only our private recording context. Command-list playback restores
-  // the immediate state without replaying setters through game feature hooks.
-  context_->ClearState();
-  const float black[]={0,0,0,1};ID3D11RenderTargetView* rtv=e.diagnosticRtv.Get();
-  context_->ClearRenderTargetView(rtv,black);context_->OMSetRenderTargets(1,&rtv,nullptr);
-  context_->OMSetBlendState(nullptr,nullptr,~0u);context_->OMSetDepthStencilState(depth_.Get(),0);
-  context_->RSSetState(rasterizer_.Get());D3D11_VIEWPORT vp{0,0,float(e.width),float(e.height),0,1};
-  context_->RSSetViewports(1,&vp);
-  UINT stride=sizeof(Vertex),offset=0;context_->IASetInputLayout(layout_.Get());
-  context_->IASetVertexBuffers(0,1,vertices_.GetAddressOf(),&stride,&offset);
-  context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  context_->VSSetShader(vertexShader_.Get(),nullptr,0);context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
-  context_->PSSetShader(pixelShader_.Get(),nullptr,0);
-  context_->VSSetConstantBuffers(0,1,constants_.GetAddressOf());
-  context_->PSSetConstantBuffers(0,1,constants_.GetAddressOf());
-  context_->UpdateSubresource(constants_.Get(),0,nullptr,&c,0,0);context_->Draw(3,0);
-  context_->OMSetRenderTargets(0,nullptr,nullptr);
-  const XrResult submitted=submitCommands();
-  if(submitted!=XR_SUCCESS){ready_=false;lastResult_=submitted;return submitted;}
-  if(FAILED(device_->GetDeviceRemovedReason()))return XR_ERROR_GRAPHICS_DEVICE_INVALID;
-  // Subsequent capture is on this same immediate context, after Draw.
-  out=e.diagnosticTexture.Get();return XR_SUCCESS;
-}
-
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
                                    StereoWallTimes* times, const StereoPlacement* placement) {
@@ -494,8 +367,8 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     drawContext->VSSetShader(blitVertexShader_.Get(),nullptr,0);drawContext->PSSetShader(blitPixelShader_.Get(),nullptr,0);
     drawContext->PSSetSamplers(0,1,blitSampler_.GetAddressOf());
     drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
-    // This scene shader writes every pixel with no discard. Diagnostics and
-    // partial rendering still clear their targets where coverage requires it.
+    // This scene shader writes every pixel with no discard. Partial rendering
+    // still clears its target where coverage requires it.
     auto* rtv=eyes_[i].rtvs[index].Get();drawContext->OMSetRenderTargets(1,&rtv,nullptr);
     if(clearFirst[i]){const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);}
     drawContext->RSSetViewports(1,&viewports[i]);

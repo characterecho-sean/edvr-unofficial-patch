@@ -2,39 +2,103 @@
 
 ## Status
 
-- State: C2 is complete and green (c2 derive, c2 warp, c2 coexist in the
-  build pool). Producer discovery, the function-level lineage, the derive
-  reducer, the WARP geometry/lighting proofs and the coexistence policy
-  are all landed and cited in the addenda; the field schema is one
-  camera-relative typed table. The auxiliary composer callers remain
-  unclassified by behavior, and the complete view/execution lineage
-  (which passes run which refresh on which thread, record vs replay) is
-  not yet joined. C3 is planned, not built — live mutation stays off.
-- Decision: investigate jittering the game's per-view camera construction
-  before it derives raster/lighting data. Preserve the existing frame
-  discovery, size negotiation, temporal backends and resource isolation.
-- Motivation: the build-verified 20260928_025912 user log reports zero renderer
-  calls; three recurring unknown projection pairs keep every frame in
-  observation. Sean reproduced non-activation with another ship; its exact
-  shader correspondence remains unverified.
-- Open hypotheses: a common producer covers the derived transforms; camera
-  domains and recording epochs can be distinguished before mutation. The
-  camera-struct hook point is a candidate, not a validated design.
-- Ruled out for that session: a backend evaluation failure as the immediate
-  cause, because no backend initialized. Missing shader coverage is proven;
-  whether quality settings or a mod produced those variants is not.
-- Next: C3, per the C3 wiring plan addendum -- the FUN_1405921f0 detour
-  behind a default-off key, the ownership policy wired into flat_runtime,
-  the classifier's jittered-encoding question answered, then one bounded
-  session against the acceptance criteria there.
+- **Retired 2026-09-29 (0fe90f09):** `camera_view.cpp/.h`, cited below as
+  the external-camera reader and settings probe, are deleted (`0fe90f09^`).
+- State 2026-09-29 (main c56e34df, FLOWN 14:58 on Epic, shimmer fixed): the
+  camera path is on whenever a temporal mode is selected on the flat profile.
+  `fix.temporal_aa_camera` and `fix.temporal_aa_camera_trace` are REMOVED
+  (contract 239 -> 237); the per-call trace path is gone, the stand-down
+  latches stay, and the draw-time row adapter is only the automatic fallback
+  (no injectable camera, a prologue mismatch, 8 failed writes in a 5 s
+  window). With Anti-aliasing off none of it runs and no `flat camera inject`
+  line is written. The injector itself FLEW clean 2026-09-29 11:35 on Epic
+  (main 856e72c2): 0 row-pair mismatches in 35,127 resolves, history valid in
+  79 of 92 ticks, legacy never applied. The view/execution lineage is not joined.
+- Krait main-menu shimmer, DIAGNOSED 2026-09-29 (last section): the dashed
+  hull lines are the stale-slot rule refusing 22.5% of the frame, because the
+  hull plating's pixel shader 66DE2CAD/235567BE is not keyed and overdraws
+  keyed draws' engine slots. Built here, none flown: 1A keys that pair for
+  flat; 1B, in the 3D main menu only, a stale slot takes the camera term
+  (`static-scene-frames=K` on the menu HDR copy line; Sean accepted its risk);
+  1C a census of unkeyed pairs; F2 the replay unjitters rows; F3 no reset
+  frame is an F10 sample. Still unkeyed, for later: CAD1F585 (EDHM-patched),
+  BBE58E40/7311054A (SV_Position input).
+- ruled out: an unjittered hull draw as the cause, because the three traced
+  frames' scene rows carry the log's phase to 1e-7 and all 340 camera-bearing
+  scene draws of frame 67592 bind them, the hull pairs are b1-only, and the one
+  other camera serves 9 UI/output draws, none a ship's.
+- ruled out: wrong or zero ship motion at the menu, because the emitted motion
+  is 0.016 px median and 0.028 px at most, the replay matches it to 6e-4 px,
+  and the camera term is valid at 1822 of 1822 sampled stale pixels
+  (0.013 px); the hangar has no turntable.
+- ruled out: a shader fault behind the replay's 0.609 px "error", because it
+  equals |current phase - previous phase| and is 1e-4 px once the rows are
+  unjittered: a tool defect (F2).
+- ruled out: sub-pixel content as the cause of the dashes, because the same
+  seams are continuous lines in DLSS's raw output and dashes in the final
+  image, which equals raw on accepted pixels (110 of 6.4M differ).
+- corrected: the eight `off -> upstream` switches in that session's log were
+  not ships: session start, one resize and six F8 AA toggles. The log holds
+  two menu visits (Cobra Mk V, Krait Mk II); the carrier swap view between
+  them is not the menu contract.
+- Decision: jitter the game's per-view camera construction before it derives
+  raster/lighting data; preserve frame discovery, size negotiation, temporal
+  backends and resource isolation. The 09-28 zero-renderer-calls log that
+  motivated it, the five crashes (root cause: the stubs' missing 32-byte
+  shadow space, fixed, flown clean) and what was ruled out: Status detail.
+- Next: flown and passed (flight 145851 entry at the end): Sean "shimmer
+  fixed"; static-scene-frames 2,480 of 2,481 accepted menu frames; the
+  unkeyed census empty in all 60 ticks; row-pair mismatches 0. Open:
+  main-versus-auxiliary camera grouping; c2_coexist C7's unbounded loop
+  (a mutation hangs the rig instead of failing it).
 - Environment: Windows x64, D3D11 flat mono; headset/runtime N/A. VR
-  comparison: EDVR's OpenVR/OpenXR route. Record GPU/driver, executable/build
-  identities, backend versions, dimensions, formats and mod chain for
-  qualification.
-- This document extends the [flat AA
-  design](design-flat-temporal-aa-2026-09-23.md) and [architecture
-  review](review-flat-temporal-aa-2026-09-26.md). Its camera milestones below
-  supplement, rather than renumber, their existing gates.
+  comparison: EDVR's OpenVR/OpenXR route. Record GPU/driver, executable and
+  build identities, backend versions, dimensions, formats and mod chain.
+- Extends the [flat AA design](design-flat-temporal-aa-2026-09-23.md) and
+  [architecture review](review-flat-temporal-aa-2026-09-26.md); the camera
+  milestones below supplement, rather than renumber, their gates.
+
+## Status detail (moved out of Status 2026-09-29)
+
+- corrected (evidence): 085700.log, 08:59:01 / 08:59:06 / 08:59:11: `flat
+  jitter: ... phase=(-0.125,-0.27778) ... state=live history-valid=1` (and
+  (0,-0.16667), (-0.25,0.16667)); `flat runtime: last=treated-jittered ...
+  accepted-history-5s=320` (419, 425); the same seconds' `flat camera inject
+  5s: ... owner=upstream history=invalid`. The tick's history= mirrored an
+  ownership close nobody called; the gaps were G1-G4 (wiring addendum).
+- ruled out (evidence): the jittered bound pair breaking the ownership
+  classifier's exact encoding (this doc's out[0][2] = 2*dbx*s8), because the
+  bound pair enters only slots [i][0] and [i][1] and c2_derive_test A8 finds
+  [i][2], the depth row and rows 273/274 bit-identical over 16 phases at 3
+  sizes.
+
+- The 09-28 motivation and its ruled-out line, moved out of Status 2026-09-29, text unchanged:
+  - Motivation: the build-verified 20260928_025912 user log reports zero
+    renderer calls; three recurring unknown projection pairs keep every frame
+    in observation. Sean reproduced non-activation with another ship.
+  - Ruled out for that session: a backend evaluation failure as the immediate
+    cause, because no backend initialized. Missing shader coverage is proven;
+    whether quality settings or a mod produced those variants is not.
+
+- The five crash bullets, moved out of Status 2026-09-29, text unchanged:
+  - Ruled out (the five C3 crashes, 2026-09-28): a compiled C detour at the
+    mid-function hook site; the relay enters by jmp with the game's live
+    stack, so a C prologue's spills land on its saved registers. The transfer
+    is generated code (stubA, a return-address redirection to stubB, TLS
+    state); see the header of src/d3d11/flat_camera_inject.cpp.
+  - Root cause of the 20:09, 03:50 and 04:23 crashes (shadow-space addendum):
+    the stubs called C with no 32-byte ABI home area reserved, so refreshPre
+    homed rcx and rdx on stubA's saved r15 and r14 and the pops handed the
+    game r15 = R0 (all three dumps: rdx = r14 = r15 = R0, read +0x4C83379).
+  - ruled out: the relay's scratch register (r11 vs rax) as the 20:09/03:50/
+    04:23 crash cause, because the r11-preserving relay (905bddd0) crashed
+    identically; the cause is stubA's missing shadow space.
+  - ruled out: call-path log I/O as the crash cause, because the 03:50 flight
+    with per-call logging gated off crashed identically.
+  - Corrected and fixed (flown clean): the pass-through was not "memory-
+    identical to unhooked"; the property is every register and stack byte at
+    and above S unchanged at the trampoline (tools/flat_camera_stub_test gates
+    it). Both stubs now reserve the home area (flat_camera_stubs.h).
 
 ## 1. Problem and acceptance requirements
 
@@ -390,30 +454,41 @@ view-group:
 
 1. Read the camera struct pointer (the refresh's third argument; the
    view+0x158 vs view+0x250 vs auxiliary distinction the setter map
-   established) and its projection kind at camera+0x264. Kind 3, kind 1
-   or the default branch: proceed. Kinds 4/5 or anything else: mark the
-   group upstreamUnsupported for the policy (named; no mutation).
-2. Apply the phase in the bound pair, absolutely: boundX = baseX + jx/R,
-   boundY = baseY - jy/R_h (the D3D sign convention W1 proved), where R is
-   the negotiated evaluation extent from the existing flat runtime state.
-   The phase comes from the production temporalJitter sequence at the
-   existing FlatLivePhase machine's phaseSequence.
-3. The base pair is captured per camera-struct pointer per phaseSequence:
-   the first detour call for a (pointer, sequence) records the current
-   values as base and applies base+phase; later calls at the same
-   (pointer, sequence) re-apply the identical absolute value (A5.1's no-
-   accumulated-offset, and A4's composition with mid-frame setters, which
-   poke different fields). A base that changes between calls at one
-   sequence without our write is a base-rewrite: count it, recapture, and
-   name it in the per-5s line.
-4. Raise dirty bits 4 and 8 (projection and cached VP; the mutation
-   protocol: the refresh copies the CACHED VP when bit 8 is clear, so a
-   projection edit without bit 8 is silently stale). Bits 2/1 are not
-   raised: a projection-only jitter leaves the view rows and the ray
-   snapshots legitimately unchanged (the consumer-lineage addendum).
-5. Call the original refresh through the trampoline. Its finalizers
+   established) and its projection kind at camera+0x264. **Kind 3 only:**
+   proceed. Every other branch is named upstreamUnsupported with no
+   mutation -- the A7 fixtures prove the bound pair is a no-op on the
+   ortho and default branches, so "treated" there would mean a requested
+   phase that never reached rasterization. A separately proven mutation
+   form can re-admit a branch later; kinds 4/5 stay refused meanwhile.
+2. Apply the phase in the bound pair, ABSOLUTELY and TRANSIENTLY, on the
+   values read at entry: boundX = entryX + jx/R_w, boundY = entryY - jy/R_h
+   (the D3D sign convention W1 proved), then raise dirty bits 4 and 8.
+   **R is the actual scene sampling viewport in RENDER pixels** (from the
+   validated early plan's render dimensions -- not the negotiated
+   evaluation extent E, which differs during upscaling and supersampled
+   TAA; E is preserved independently for the backend's allocation and
+   evaluation). The phase comes from the production temporalJitter
+   sequence at the existing FlatLivePhase machine's phaseSequence, and
+   the backend is told the same phase in E terms independently. The
+   end-to-end check (W1 plus the C3 session): measured raster
+   displacement equals the phase in RENDER pixels whenever R differs
+   from E, including crop/origin and E-only changes.
+3. Call the original refresh through the trampoline. Its finalizers
    re-derive the projection, the cached VP, the scene CB and the depth
    CBs from the mutated parameters in the same call.
+4. **Restore the entry values immediately after the original returns**
+   (the restore-after-call protocol, replacing the earlier base-capture
+   design, which accumulated prior phases across sequences and left the
+   last write behind on disable). The entry values ARE the authoritative
+   originals: no bookkeeping survives the call, nothing distinguishes
+   EDVR's last write from a game rewrite, a mid-frame setter's poke is
+   naturally next call's entry value (A4's composition), and disable
+   leaves nothing to clean up -- the last treated frame keeps its
+   committed phase (A6's boundary semantics) and the next frame derives
+   from pristine sources.
+5. Bits 2/1 are never raised: a projection-only jitter leaves the view
+   rows and the ray snapshots legitimately unchanged (the
+   consumer-lineage addendum).
 
 ### Ownership integration points
 
@@ -426,10 +501,30 @@ mutation, at the two existing decision points in flat_runtime.cpp:
   under Upstream ownership the legacy scope mutation is skipped by name
   (a counter, not silence); under Legacy ownership it runs exactly as
   today.
+- **Admission is rewired, not left unchanged**: refuseDraw (:970-986,
+  :1795-1800) consults the ownership decision BEFORE failing the phase
+  or entering observation. Under Upstream ownership with a certified
+  camera lineage, an unknown or color-only shader recipe does not fail
+  the frame's phase and does not enter observation -- the camera lineage
+  is the admission, and the frame proceeds to resolve acceptance and a
+  history streak. Legacy observation keeps collecting its own evidence
+  (its exit predicate and logs are unchanged), but its refusal holds no
+  veto over the certified route. A true late camera rewrite or an
+  uncovered secondary camera still refuses, by name. The later draw
+  cannot retroactively authorize a mutation: the decision is made from a
+  prepared, validated record before the refresh mutates anything.
 - The detour consults the same decision: it mutates only when the
-  decision named Upstream for this group. refuseDraw/observing semantics
-  (:970-986, :1830) are unchanged and feed the policy's legacyEligible /
-  legacyObserving inputs.
+  decision named Upstream for this group.
+
+**Original-camera provenance.** The injector publishes the phase applied
+at each refresh (per camera struct, per phaseSequence). The uploaded
+scene CB carries jittered rows, so the camera-table consumers that need
+ORIGINAL rows -- FlatMonoResolveFrame.camera/previousCamera, engine
+motion's original scene snapshots (flat_runtime.cpp:1811-1819,
+1981-1991) -- subtract the published phase to recover them, the same
+subtraction the reprojection already performs with the phase machine's
+own numbers, now sourced upstream. The classifier's encoding question
+below is the one deliberate exception to publishing.
 
 The per-frame close follows the production discipline: the detour marks
 "mutated at refresh N"; flat_runtime's scene-draw evidence notes applied
@@ -452,7 +547,18 @@ phase bound. Choose when wiring; the discriminating check is the C6 rig
 re-run against a jittered composed block (it currently certifies only
 the unjittered encoding). Record the choice in the commit that lands it.
 
+Settled 2026-09-29 (C3 ownership wiring addendum): the slot analysis above was
+wrong. The bound pair enters composeSceneCb only through p8/p9, which land in
+slots [i][0] and [i][1]; slot [i][2] has no bound dependence, so the encoding
+check survives the injection and nothing is subtracted or loosened.
+
 ### Config surface
+
+**Superseded 2026-09-29: the key below and its trace key were removed** (the
+camera path flew clean, so it is on whenever the flat profile has a temporal
+mode selected; the draw-time adapter is only the automatic fallback; config
+contract 239 -> 237). The text that follows is the design as first written,
+and later sections that say "with the key on" describe the flights as flown.
 
 One new key, default off, named for what the user gets (the config
 contract gate documents it): `fix.temporal_aa_camera = off | on`. `on`
@@ -762,3 +868,503 @@ context, the frustum-ray CB and the depth CBs in the same call, through
 the game's own code. What remains unproven is per-shader consumption
 (which draws bind these blocks, and whether legacy CB jitter can
 coexist) -- that is the C2 runtime evidence, not more statics.
+
+## Shadow-space addendum, 2026-09-29: why the stub build crashed
+
+The three crashes of the stub build (20:09 with a7d026af, 03:50 with
+436ed3c5, 04:23 with 905bddd0) have one cause: stubA called refreshPre, and
+stubB called refreshPost, with no 32-byte ABI home area reserved.
+
+Evidence:
+
+- The records (the Epic install's edvr_breadcrumbs.txt, lines 1177-1201,
+  1218-1242, 1250-1274): read of address 0x1D0 at EliteDangerous64.exe
+  +0x4C83379 with rbx = 0 (mov rcx,[rbx+0x1D0], rbx = [arg2+0x1A0]), on the
+  Present thread, the same eight-frame chain (+0x4C83379, +0x4C82CDE,
+  +0x594ED5, +0x58F2F4, +0x58F9CF, +0x58AF82, +0x6BF929, +0x594C3E) and the
+  same stale return addresses on the stack (+0x4ED8A4, +0x597B43,
+  +0x592755). Frame 2 (+0x594ED5) lies in FUN_140594d90 between its second
+  and third refresh returns (+0x594EAB, +0x594FE1), most likely the node
+  loop's vtable+0x78 call, which passes the view-constant context (uVar5,
+  analysis/decomp/flash/camera/camera_producer.txt lines 414-430) that the
+  caller keeps in a callee-saved register across the refresh. That use is
+  read from the decompile, not disassembled.
+- In all three, rdx = r14 = r15 = R0 (0x3A3C7FED98, 0x7C6E8FECF8,
+  0x4018FF0F8): the refresh call's return-address slot, one qword below
+  frame 2's rsp, and the first argument stubA passes refreshPre
+  (lea rcx,[rsp+0x88]). An unhooked call leaves no stack address in r15.
+- stubA pushes fifteen registers (r15 at [S-0x78] up to r12 at [S-0x60]),
+  loads the arguments and calls with nothing reserved, so the callee's four
+  home slots ([entry rsp+8, +0x28)) are exactly those four saved slots. The
+  pops restore whatever the callee left there, and the trampoline's stolen
+  push r15 then stores the popped r15 in the game's frame for the game's
+  epilogue to hand back to its caller. r14 and r13 come back from the game's
+  own earlier pushes, so only r15 escapes.
+- refreshPre does write its home slots. The shipped d3d11.dll (build
+  6ABB9147, 905bddd0; refreshPre at RVA 0x701F0, one match in the file) and
+  the compiler listing of flat_camera_inject.cpp at 8fee57c2 with build.bat's
+  flags agree:
+
+      48 8B C4         mov rax,rsp
+      48 89 50 10      mov [rax+10h],rdx    home slot 2 = stubA's saved r14
+      48 89 48 08      mov [rax+8],rcx      home slot 1 = stubA's saved r15
+      55 53 56 57 41 54 41 55 41 56 41 57   push rbp rbx rsi rdi r12-r15
+
+  The prologue does not write slots 3 and 4. refreshPost (RVA 0x70120) opens
+  with mov [rsp+8],rbx; mov [rsp+10h],rsi, which land on stubB's saved xmm0
+  (movaps [rsp],xmm0 with only 0x18 reserved).
+- The r11 theory of 905bddd0 was a coincidence: the 20:09 crash's r11
+  (0x210654F6CA0) is the camera argument the log printed, left by the
+  refresh body, not an inherited frame base.
+- Control: the 03:32 flight had no hook (TLS-index refusal) and ran the same
+  FUN_140594d90 path for 68 s (the producer probe logged the refresh call
+  sites +0x594E13, +0x594EAB and +0x594FE1 under +0x58F2F4).
+
+ruled out: the relay's scratch register (r11 vs rax) as the 20:09/03:50/04:23 crash cause, because the r11-preserving relay (905bddd0) crashed identically; the cause is stubA's missing shadow space
+ruled out: call-path log I/O in the refresh detour as the crash cause, because the 03:50 flight, with per-call logging gated off (83d55974), crashed identically
+
+The 2026-09-28 Status called the pass-through "memory-identical to unhooked".
+It was not: the callee spent memory the stub owned. The property the stubs
+keep is that every register and every stack byte at and above S is unchanged
+when the trampoline is entered (below S is scratch, as for any callee).
+
+The fix (src/d3d11/flat_camera_stubs.h, new; the emitters moved out of
+flat_camera_inject.cpp unchanged, then changed):
+
+- stubA: 48 83 EC 20 (sub rsp,0x20) before the call and 48 83 C4 20 (add
+  rsp,0x20) after it. The argument setup reads [rsp+...] before the sub, so
+  its offsets are unchanged, and 16-byte alignment holds. 111 -> 119 bytes,
+  so kStubBOffset moves 160 -> 168.
+- stubB: sub/add rsp,0x18 -> 0x38, and the xmm0 save moves to [rsp+0x20]
+  (0F 29 44 24 20 and 0F 28 44 24 20, was 0F 29 04 24 and 0F 28 04 24):
+  [rsp, rsp+0x20) is the callee's home area with xmm0 above it. 77 -> 79
+  bytes.
+
+The proof (tools/flat_camera_stub_test, build gate :rig_flat_camera_stub_test).
+The stand-in callees are compiled C++ that take the address of every register
+parameter (so MSVC homes it) and overwrite all four home slots; a calibration
+run confirms that against a caller-provided home area. A harness generated in
+executable memory loads a distinct value into every general register (and
+xmm0 for stubB), enters the real emitted stubs the way the relay and the
+game's redirected return do, and records what comes out: 134 checks over
+three rounds (all fifteen registers, rsp back to S, the three saved qwords at
+[S], [S+8], [S+0x10], the argument setup, the incoming-r11 instrument, stubB's
+TLS walk, xmm0). Against the old stubs it fails 15 checks (r12, r13, r14 and
+r15 come back as the four home-slot sentinels in every round, and xmm0 in
+stubB); against three mutants (stubA reserving only 0x18, xmm0 kept inside
+stubB's home area, a wrong argument slot) it fails 3 each; with the fix it
+passes.
+
+### 2026-09-29 08:49 flight: the stub fix flown clean (Epic, flat)
+
+Build v0.18.0-rc.3-110-g8879596a (edvr_log.py --expect-build matched),
+edvr_gfx_20260929_084913.log, 08:49:13 to 08:50:16; flat profile with
+fix.temporal_aa_camera = on and the trace key off, at the main menu. The
+refresh hook installed at +0x592200 with the fixed stubs, and the 5 s ticks
+counted refresh-calls=2538 in the last window (lastcall #21732 in all):
+roughly 21,700 calls through stubA and stubB where each of the three earlier
+fix-less flights crashed within about a second of its first calls. No crash:
+the breadcrumbs end in `gfx: alive, frame 32903`. Sean: "It did not crash and
+F8 menu works at main menu." The flat renderer treated 902 frames.
+
+What it does not show: injected=0 (warming=1269, kind-refusals=1269), because
+every camera at the main menu is kind 0, so only the pass-through path ran.
+The mutation path needs kind-3 cameras, which the next flight (cockpit and
+space) should reach.
+
+### 2026-09-29 08:57 flight: injection exercised, no crash (Epic, flat, cockpit)
+
+Same build (8879596a, matched) and settings, edvr_gfx_20260929_085700.log,
+08:57:00 to 09:00:01, into the cockpit. Over the 37 five-second ticks:
+refresh-calls=823,592, injected=552,039, warming=48,246,
+kind-refusals=223,307, unsupported=0. The first injection came at 08:57:51
+(the cockpit); steady windows ran ~56,000 calls and ~44,000 injections per
+5 s. No crash; breadcrumbs end in `gfx: alive, frame 55762`. The flat
+renderer treated 5,780 frames (longest streak 5,300). Sean: "seemed to
+behave normally".
+
+What it shows: the mutation path, the part the pass-through flight could not
+reach, runs stably at full rate through the fixed stubs. It was written as not
+showing a working temporal result from the injected phase.
+
+corrected 2026-09-29: it did show one. This paragraph read the injector tick's
+history=invalid, and the jitter=(0,0) of the last line of the log (09:00:01,
+state=warming, after the cockpit), as "the flat temporal pass does not yet take
+the phase as valid history". The ticks at 08:59:01, 08:59:06 and 08:59:11 read
+state=live history-valid=1 with last=treated-jittered and
+accepted-history-5s=320/419/425 while the injector read history=invalid; the
+quotes are in the C3 ownership wiring addendum below.
+
+## C3 ownership wiring, 2026-09-29: the gaps, the rulings, the instruments
+
+Branch claude/flat-c3-wiring (from main c4bbe484). Built and gated by the full
+build; NOT FLOWN. Everything below stays behind fix.temporal_aa_camera (default
+off; removed 2026-09-29, the path is now always on with a temporal mode) and
+the flat profile; no VR path is touched and no config key is added.
+
+corrected: the 08:57 addendum above and the earlier Status "Next" said the
+injected phase did not reach the flat temporal pass ("jitter=(0,0)", "the
+ticks read history=invalid"). It reaches it. edvr_gfx_20260929_085700.log
+(build 8879596a), three consecutive ticks, the same second in each:
+
+    08:59:01.389 flat camera inject 5s: refresh-calls=45221 injected=35012 ... owner=upstream history=invalid
+    08:59:01.389 flat jitter: enabled=1 wanted=1 phase=(-0.125,-0.27778) previous=(0.125,0.27778) warm=2 ... state=live history-valid=1
+    08:59:01.389 flat runtime: treated=779 ... last=treated-jittered ... accepted-reset-5s=2 accepted-history-5s=320 treated-streak=299
+    08:59:06.388 ... injected=47094 ... history=invalid
+    08:59:06.388 flat jitter: ... phase=(0,-0.16667) previous=(-0.4375,0.38889) warm=2 ... state=live history-valid=1
+    08:59:06.388 flat runtime: treated=1198 ... last=treated-jittered ... accepted-history-5s=419 treated-streak=718
+    08:59:11.392 ... injected=44605 ... history=invalid
+    08:59:11.392 flat jitter: ... phase=(-0.25,0.16667) previous=(0,-0.16667) warm=2 ... state=live history-valid=1
+    08:59:11.392 flat runtime: treated=1623 ... last=treated-jittered ... accepted-history-5s=425 treated-streak=1143
+
+The `jitter=(0,0)` in the 08:57 addendum came from the last line of the
+log (09:00:01, phase (0,0), state=warming, after the cockpit). The flat runtime
+was consuming the phase as valid history; the injector tick's history= was
+the ownership machine's mirror, and flatCameraOwnerClose had no caller.
+
+ruled out: the flat temporal pass not consuming the injected phase, because
+the three ticks above read state=live history-valid=1 and treated-jittered
+with accepted-history-5s=320/419/425 while the injector reads history=invalid.
+ruled out: the jittered bound pair breaking the ownership classifier's exact
+encoding, because composeSceneCb puts the bound pair only in p8/p9, which land
+in slots [i][0] and [i][1] as p8*w_i; slot [i][2], the depth row and rows
+273/274 do not involve them (c2_derive_test A8: bit-identical over 16 phases
+at three sizes), and the resolver's own copy of the exact-zero check
+(cameraValid) passed on 5,780 jittered frames (invalid-prev-camera=0).
+ruled out: the game's shift differing from the legacy scope's, because A8
+finds the game-derived rows equal to flatJitterForwardColumns's within 1e-6
+(x += ndcX*w, y += ndcY*w per row, w = component 3), so one inverse serves.
+
+### What was genuinely missing (G1-G4)
+
+- G1 row provenance. The resolver's contract is unjittered camera rows
+  (flat_mono_resolve.h; prep inverts them at rawUv = uv - jitter). The flat
+  runtime hands it the game's uploaded rows (capture(), f.camera, previous),
+  which carry the phase under injection, and nothing subtracted it: a static
+  camera would have shown SDK motion of (jPrev - jCur) px, up to ~1 px of
+  history misalignment, invisible to every accepted-history counter.
+- G2 fail-open holes. The refresh reads the phase live and beginFrame sits
+  after early returns (:1369, :1374, :1487), so a skipped Present left a
+  stale non-zero phase injecting; `|| flatCameraInjectWanted()` let frames
+  inject while observing (the resolve skips observed frames, so the raw
+  jitter would reach the screen); and a camera injected earlier and later not
+  (warm-up, F8, resize) keeps its derived jitter, because the game re-derives
+  only dirty cameras.
+- G3 legacy preparation ran, and refused, under Upstream: 08:58:57.757
+  `projection failure event ... private-first-seen-live code=9 ... returned
+  to observation reason=projection-preparation-refused`.
+- G4 no census. refresh-calls ~135/frame and injected ~83-103/frame (kind 3)
+  at 08:59: many cameras are jittered and we do not know which.
+
+### What was built
+
+- src/d3d11/flat_camera_phase.h (pure, header-only; the rigs run the same
+  code): the rows unjitter and the pair check, the route decisions, the frame
+  window (FlatCameraGate), the admission table (flatCameraAdmit), the
+  injected-camera set and flush decision, the fallback hysteresis, the frame
+  protocol (FlatCameraFrameCore), the census, and the text of every new line.
+- flat_camera_inject.{h,cpp}: refreshPre gates on the window and the thread
+  (calls off the Present thread touch nothing, counted), counts kinds 0-5,
+  feeds the census (per camera and per call site), flushes once per
+  injected-to-uninjected edge with one SEH-guarded write of the dirty bits
+  (flushed=, flush-failed=; 8 failed writes in a window stand the hook down
+  by name), and reports through the extended tick. New calls: Disarm, Arm,
+  Close, Reset, Route, TakeHistoryReset.
+- flat_runtime.cpp: disarm at every Present edge; Close after phase.finish
+  with the phase machine's own verdict (previousAcceptedValid) and the phase
+  the frame BEGAN with; the injector selects the owner BEFORE beginFrame and
+  the route decides whether a phase exists (Upstream needs no legacy plan but
+  yields to observation and to experimental.temporal_aa_jitter); a route
+  switch resets history once; resize resets the injector; the resolve frame
+  carries the phase the rows carry; the pair check runs on continuing
+  frames; qualifyProjection returns early under Upstream unless the F10 audit
+  is running; refuseDraw bypasses the legacy-only reasons
+  (projection-preparation-refused, draw-binding-refused, plus the existing
+  unknown-scene-projection-recipe); a legacy-applied-under-upstream tripwire.
+- flat_mono_resolve.{h,cpp} + flat_mono_shader_source.h: FlatMonoResolveFrame
+  gains rowsJitterX/Y and previousRowsJitterX/Y (render pixels, the same
+  unit and sign as jitter*); Constants gains one float4 (240 -> 256 B); the
+  prep shader removes the phase from now, old and the engine's EN/EB rows
+  (x -= ndc.x*w, y -= ndc.y*w on rows 0..3). All zero returns every row
+  untouched. A phase that is not finite or beyond half a pixel refuses the
+  frame (flat-resolve-invalid-rows-jitter).
+- flat_camera_ownership.h: the upstreamUnsupported -> Legacy branch now sets
+  historyReset and preserveCameraInputs when lastOwner is Upstream, as the
+  other two switch branches do (the fallback reaches Legacy through it).
+
+### Rulings
+
+1. Classifier (flat_projection_ownership.h). Its only production caller is
+   the audit-only recordProjectionReference (F10), which never gates
+   treatment. The encoding it needs survives the injection (ruled out above),
+   so nothing is subtracted and no tolerance is added; if a future consumer
+   needs unjittered rows it goes through flatCameraUnjitterRows, the same
+   inverse the resolver uses. The exact-equality matches (SceneBasisMatch)
+   compare two game-derived copies and are untouched.
+2. Row provenance: the resolver gets the game's rows raw plus the phase they
+   carry (option a); preserveCameraInputs is satisfied by construction and
+   is not consumed.
+3. Legacy fallback hysteresis, defaults Sean may override, both in
+   flat_camera_phase.h (kFlatCameraFallbackFramesOn/Off) and printed in the
+   tick as fallback-frames=3/60: ON = 3 closed scene frames with an armed
+   phase and no injection since the last one that landed (warm-up frames and
+   frames without a scene neither count nor reset); OFF = 60 consecutive
+   frames in which a kind-3 camera reached the detour, while on Legacy. It
+   feeds the ownership policy's upstreamUnsupported input, the existing
+   fail-open to Legacy. Because Legacy is reached that way, a frame with no
+   legacy plan is a named Unsupported outcome with no phase.
+4. No new config key.
+5. Auxiliary-camera grouping waits for the census: today every kind-3
+   camera the detour sees is injected, as before.
+6. The plan's "static-pair" check became a row-pair check: two consecutive
+   frames' rows differ by exactly the difference of the phases they are
+   claimed to carry, measured from the rows themselves (A8), so it covers
+   any camera motion and not only a stationary camera. Counters, not a gate.
+
+### Evidence from the rigs (no flight)
+
+- c2_derive_test A8: game shift == legacy shift <= 1e-6, unjitter recovers
+  the unjittered rows <= 1e-6, rows 4/5, [i][2] and the depth row untouched,
+  classifier verdicts unchanged, pair check error 2.7e-8 NDC for a correct
+  claim against 3.9e-4 (previous claims no phase) and 4.6e-4 (raw rows
+  claiming a phase), tolerance 2e-6.
+- flat_mono_resolve_test (WARP, real HLSL, fake backend): 26 backend calls
+  hash the WHOLE motion texture, reject mask and depth; the hashes recorded
+  from the unmodified shader (22 existing scenarios plus four with Epic frame
+  71751's real rows, moved and turned, at zero and both phases, and through a
+  joined record) are identical after the change: key-off is bit-identical.
+  Phased rows with the phase declared give motion 0.00000 px away from the
+  unjittered rows (camera term, joined engine pixel, static fixture, one-pixel
+  translation); undeclared they miss by 0.726/0.747/0.750/0.750 px. Mutations
+  (each fails the rig as designed): no unjitter at all (4 fails), engine rows
+  left jittered (only the joined-pixel fails), previous rows left jittered
+  (camera term off by 0.375 px), previous rows given the current phase (0.750).
+  The golden hashes are WARP-and-compiler specific: re-record on the commit
+  before the change with `flat_mono_resolve_test --print-goldens`.
+- c2_coexist_test C7-C12: the protocol through the real FlatCameraFrameCore
+  (clean close -> history valid and the tick text differs from a run that
+  never closes; failed close invalidates; hysteresis engages at ON and
+  releases at OFF with a one-shot history reset; no legacy plan ->
+  Unsupported), the admission table over 256 combinations (one injects),
+  the gate, the flush (never a camera never injected; exactly once per edge;
+  ineligible admissions neither flush nor consume), the census, and the
+  route decisions.
+- The full build (absolute-path build.bat behind build_lock, 192 s) passed
+  every gate: c2 derive, c2 coexist, c2 warp, flat mono resolve,
+  flat_camera_stub_test (134 checks), the config contract (240 keys) and the
+  installer check. Receipt inputs_sha256 37cf9989c7a8...e97d28, describe
+  v0.18.0-rc.3-146-gc4bbe484-dirty (the tree it validated is the one
+  committed). Not merged, not pushed, not installed.
+
+### Log lines, and what the log shows if the code never ran
+
+- `flat camera inject 5s:` keeps its first nine fields and appends closes=,
+  clean-closes=, stale=, off-thread=, not-upstream=, flushed=, flush-failed=,
+  write-failures=, history-resets=, fallback-frames=3/60, fallback=,
+  fallbacks=, set-evicted=. If the wiring never ran: history=invalid and
+  closes=0 (or no closes= field at all in an older build).
+- `flat camera census 5s:` frames, injected-per-frame, cameras=N, kinds=[0..5,
+  other, unreadable], top=[camera:kind:calls:injected ...], callers=[+0x594E13,
+  +0x594EAB, +0x594FE1, +0x58DE73, other]. Printed every window while the hook
+  is installed, cameras=0 included: an absent line means it never ran.
+- `flat camera rows 5s:` frames, unjittered-resolves, zero-phase-resolves,
+  row-pairs, row-pairs-skipped, row-pair-mismatch, max-err,
+  legacy-applied-under-upstream (cumulative), legacy-prep-skipped. Absent with
+  the key off or the wiring absent.
+- `flat camera inject owner:` at each route or fallback change (24 per
+  session), `flat camera rows mismatch:` for the first 8 disagreeing pairs.
+- flat jitter and flat runtime lines alone are NOT evidence: they read like
+  the 08:59 lines today.
+
+### Acceptance flight (Epic, flat, fix.temporal_aa_camera = on)
+
+Pass, on one steady cockpit tick, ALL of: history=valid with closes>0 and
+clean-closes close to closes; flat jitter state=live history-valid=1 with a
+non-zero phase; flat runtime last=treated-jittered with accepted-history-5s
+close to the frames; unjittered-resolves close to the treated frames;
+row-pairs>0 with row-pair-mismatch=0; legacy-applied-under-upstream=0;
+stale=0 off-thread=0. A refuted G1 premise shows as row-pair-mismatch>0. If
+the hook stood down: injected=0 plus a `standing down` line. off-thread>0
+with injected=0 means the refresh does not run on the Present thread.
+
+Procedure (path P = the Epic install; only the sanctioned tools; the ini
+changes only by the Edit tool with a diff, never through --ini): build_lock
+--wait and the absolute-path build.bat, green tail and receipt, commit;
+`python tools\install_edvr.py --target P --profile flat --dry-run`, the real
+install, `--verify-only`; confirm the build with `edvr_log.py --expect-build`.
+Flight A key off, 3 min in the cockpit, one F10 audit at a fixed spot (expect
+no injector lines). Flight B key on, trace off: menu 30 s; hangar stationary
+20 s; undock and fly 60 s; supercruise 30 s; F8 off 10 s then back (expect
+injected to collapse and flushed>0 within a tick, no residual jitter); Elite
+SS 0.5 then 1.0, 20 s each; Esc menu x3; dock; the same F10 audit spot.
+Flight C (trace on, 60 s) only if B's census shows several injected cameras
+per frame and Sean sees artifacts. Stop on a crash, row-pair-mismatch>0, or
+legacy-applied-under-upstream>0.
+
+### Adjacent findings, not folded in
+
+- After standDown (key off) a later key-on never re-opens g_gate, so a key
+  toggled off and on within a session leaves the injector inert (the
+  fallback then hands frames to Legacy); and a key-off leaves the derived
+  jitter of cameras injected before it (no drain). Both predate the wiring.
+- injected ~83-103 kind-3 cameras per frame means auxiliary cameras (shadow
+  and environment passes) are jittered too; the census names them.
+
+## C3 acceptance flight, 2026-09-29 11:35 (Epic, 856e72c2)
+
+`edvr_gfx_20260929_113516.log`, build matched (v0.18.0-rc.3-163-g856e72c2),
+flat profile, `temporal_aa = dlss`, `fix.temporal_aa_camera = on`, about 8
+minutes. Sean flew the procedure mostly as written: he did not start docked
+(so no stationary hangar leg) and had nowhere to dock at the end; the F10
+classifier audit (flight A) was not flown.
+
+- **Pass marks, all met.** 92 inject ticks: `owner=upstream history=valid`
+  in 79, `history=invalid` in 13 (warm-up at the main menu, and the resize at
+  11:40:46-11:40:59). Steady ticks close clean (434/433, 443/443).
+  `flat jitter` live with history-valid=1 in the same 79 ticks, warming in
+  the 13; `flat runtime last=treated-jittered` with accepted history equal to
+  the frames. Rows: 35,149 frames, 35,127 unjittered resolves (22 zero-phase
+  warm-up), 35,127 row pairs, **0 mismatches**, max error 3.738e-07 NDC
+  (tolerance 2e-6). `legacy-applied-under-upstream=0`; legacy preparation
+  skipped 15.4 million times. off-thread 0, not-upstream 0, flushed 19 with
+  no flush or write failure, fallbacks 0 (fallback=upstream every tick).
+- **The resize held.** Around 11:40:46 (the graphics panel and a
+  Supersampling change) the game stopped presenting for a few seconds and
+  kept calling the refresh: 102,491 kind-3 calls in one window with one
+  closed frame, all refused as `stale`, none injected; ownership came back
+  `off -> upstream` at 11:40:59 without a history reset.
+- **The census.** Steady flight (11:38:02): 444 frames, 11 cameras seen, two
+  kind-3 cameras injected: 0x241dc2e2960 at 42,144 calls (about 95 a frame)
+  and 0x241df6d0bb0 at 4,950 (about 11 a frame); kinds 0, 1 and 4 refused.
+  Callers +0x594E13, +0x594EAB and +0x594FE1 at 18,449 each, +0x58DE73 at
+  90. So the auxiliary question is one camera, not dozens; which pass the
+  second camera serves is open.
+- Found: the census line at 11:40:59 prints `injected-per-frame=34657.0` with
+  frames=1 and no injection in its top list; the field does not read
+  injections over closed frames in a one-frame window.
+- No crash; the log ends in ordinary 5 s ticks at 11:43:04.
+
+## Krait main-menu shimmer, 2026-09-29: the hull refused by the stale-slot rule
+
+Sean saw the Krait Mk II's hull lines dash and shimmer at the main menu with
+the camera path on (Epic, flat, DLSS Quality, game SS 0.75: R=2880x1620,
+D=3840x2160, EDHM chained, build v0.18.0-rc.3-163-g856e72c2), and confirmed
+afterwards it was the main menu, not the carrier shipyard. Evidence: the F10
+pixel capture (frames 67596, a reset frame, and 67611, live at phase
+-0.125/-0.278) in `edvr_logs\flat_pixels\20260929_184056_425_49100_1`, the
+draw capture, and the trace of the three frames before it (67591-67593), now
+in the corpus as flat_trace_67594.bin.
+
+**Diagnosis.**
+
+- The resolver's rejection footprint on frame 67611 is 1,051,680 px, 22.54%,
+  identical (0 mismatches) to the stale-slot set: pixels whose engine slot was
+  written but whose slot depth is not the depth buffer's. engineBefore returns
+  2, prep zeroes the motion and sets the reject, and finish() outputs the raw
+  jittered current frame instead of DLSS's. The replay agrees with the GPU
+  on every one of 8160 sampled pixels (1822 of them `rejected_stale_or_depth`).
+- The mechanism is an unkeyed pixel shader. At all 8 sample points the last
+  G-buffer draw is 66DE2CAD/235567BE where the 16x16 window is 100% stale (3
+  points) and a keyed pair where it is 0% (5 points); the stale masks of the
+  two frames overlap 98.9%, a fixed footprint: two hulls (the front ship 64%,
+  the orange hull at right 22%) plus floor markings, light strips and thin
+  parts. The family's keyed pixel shaders are 864F1F94 and BBDE4E71, not
+  235567BE. The rule is right for moving records (an unpatched occluder leaves
+  stale slots the depth test rejects) and wrong for a static hull.
+- Frame 67592's draws (344 on the render targets): 233 keyed pairs, 55 of a
+  known family vertex shader with an unkeyed pixel shader (AACFDCF2/CAD1F585 x45,
+  66DE2CAD/235567BE x5 = the hull plating, about 70,000 vertices, and
+  BBE58E40/7311054A x5), 56 outside the family. Ship draws are b1-only.
+- Not the injection, the phase or the treatment, so not "some ships" for those
+  reasons: the Cobra Mk V and the Krait match on all three (24.0 and 26.8
+  refresh calls injected a frame, treated 449/450 and 450/450 per tick, movers
+  joined 0.1 a frame) and every family line was keyed. "Some ships" is the
+  ships whose hull pixel shader is outside the table.
+- The phase does land: the three traced frames' scene rows carry (-0.375,-0.056),
+  (0.125,0.278) and (-0.125,-0.278) px, matching the log's sequence to 1e-7;
+  log rows unjittered-resolves 447/450, row-pair mismatches 0,
+  legacy-applied-under-upstream 0.
+- Correction (nothing in this doc had said it): the eight `off -> upstream`
+  lines are session start 12:33:09, a resize 12:33:53 (2560 -> 3840) and six F8
+  AA toggles (12:34:11, 12:35:52, 12:38:38, 12:39:07, 12:39:55, 12:40:46). The
+  log holds two 3D-menu visits, the Cobra Mk V 12:33:41-12:34:33 and the Krait
+  12:40:37-12:41:02; in between the player flew and docked at a fleet carrier,
+  where the Eagle (12:38:37) and Krait (12:39:08) were swapped in and AA was
+  toggled, and that view kept menuA at 4360: it is not the menu contract.
+
+**Built on claude/flat-menu-shimmer** (from main a43c94ba; main merged in
+after). None of it flown. Each item's rig carries a negative control.
+
+- 1A, 71117549: family 66DE2CAD gains `flatPs` 0x235567BE2840B3ED, flat only
+  (the VR profile sees nothing; the harness pins both). Gates: engine_velocity_test
+  (the pair required, `--partial` for corpus logs that lack one), its
+  `--corpus` on the Epic logs, `flat_temporal_test --trace-check` on the new
+  trace (every frame Selected), and a re-key replay of the whole corpus under
+  the keyed table: exactly the three Krait frames move (hull draws 5 a frame,
+  supported draws 233 -> 238, contract hashes change, outcomes do not), nothing
+  else does. Control: replayed unkeyed it reproduces today's hashes. Note:
+  `--trace-migrate` rewrites 0 of 13 files, because a trace records each draw's
+  supported flag and contract kind, so a table change cannot show in it; that
+  is why the re-key replay exists. Keying moves the draws from `screen` to
+  `pool` kind, so they become validated sources and the hash moves.
+- 1C, 2966578b: a fixed 4-entry table of unkeyed (vs, ps) pairs in
+  engine_velocity, printed in the flat 5 s block as `flat engine motion unkeyed
+  5s: live= binds= distinct= overflow= pairs=[...]`; empty prints too, so an
+  absent line means the block never ran. Lifecycle rig: counted, reset per
+  window, a keyed pair never enters.
+- F2, c24d53ff: flat_pixels_engine unjitters the rows (the phase comes from the
+  capture, or from the rows). The replay's 0.609 px "error" was
+  |delta jitter| for (-0.125,-0.278) against (0.125,0.278); on the real
+  capture it is now 8e-5 px, and the self-test asserts both. flat_pixels.py
+  gains a stability report, the shimmer number.
+- F3, 5ec467b6: a reset or zero-phase frame is never an F10 sample, for the
+  pixel and the draw capture (the first frames after an arm were both, so no
+  per-draw camera phase could be read from them).
+- Camera path always on, 54d508ca: as Status says. Rigs C11-C15 in
+  c2_coexist_test: a prologue mismatch goes to the draw-time path after the
+  3-frame hysteresis and stays; a mismatch from the first frame owes no history
+  reset (no Upstream history existed) while the same switch after a clean
+  stretch owes exactly one; the write-failure boundary is 7 keep, 8 stand down,
+  in one named constant; the AA-off predicate. The ini-merge rig carries both
+  dead lines: kept with "no longer uses it", not adopted, not duplicated.
+- 1B, 20372b55: the menu-scoped policy. engineBefore's stale-depth refusal
+  returns the camera term when flags.w is set; the runtime sets it only for a
+  frame whose selected HDR is the verified menu copy's inherited destination.
+  On the real corpus 12 of 12 Selected menu frames qualify and 0 of 27 flight,
+  station and on-foot ones do; on WARP a stale block goes from 16/16 refused to
+  0/16 with a texture equal to the no-slot one, the 26 key-off goldens are
+  unchanged, and the sentinel, sky and corrupt-code refusals stand. Replayed
+  offline on the real Krait capture with `flat_pixels.py --assume-static-scene
+  on`, all 1822 stale samples take the camera term (median 0.0108 px, max
+  0.0252 px). Risk Sean accepted: a moving surface at the menu drawn by an
+  unkeyed pair would ghost where today it aliases. Not covered: any scene that
+  does not come through the menu copy, the carrier shipyard for one.
+
+**What the flight should show.** Family line `patched [.., ps_235567BE2840B3ED]`
+with no `left stock` for it; F10 `input_rejection_percent` falling from 22.5
+(estimated 3-8% with 1A alone, the decals, and about 0 with 1B), and
+`camera_stale_static` in flat_pixels.py's branches only on a capture made with
+the policy on;
+`flat menu HDR copy: ... static-scene-frames=K` with K growing at the menu and
+0 elsewhere. If the code never ran: no `unkeyed 5s` line, or K = 0 while
+`accepted` grows. Still unkeyed and named by the census when drawn: CAD1F585
+(EDHM-patched, key only for EDHM users) and BBE58E40/7311054A (an SV_Position
+input: the harness first).
+
+## Flight 145851, 2026-09-29: the menu shimmer fixed (Epic, c56e34df)
+
+`edvr_gfx_20260929_145851.log`, build matched (v0.18.0-rc.3-202-gc56e34df),
+flat profile, DLSS. Sean flew the main menu with the Krait and other ships,
+then flew with Sharpening at 0.3: "Yep shimmer fixed".
+
+- The menu-scoped policy ran on the menu: `flat menu HDR copy:
+  accepted=2481 refused=0 static-scene-frames=2480` (15:03:48).
+- The unkeyed census ran in all 60 ticks (`live=1`) and stayed empty
+  (`distinct=0 pairs=[]`): with the Krait's hull pair keyed, no ship shown
+  used a pair the table lacks.
+- `flat camera rows 5s`: 60 ticks, row-pair mismatches 0.
+- Flat sharpening, first flight: the shader warmed at session start; the
+  first sharpened frame at 15:00:48 (RCAS strength 0.30 on 3840x2160, before
+  the game's output copy); measured 0.07 ms a frame (max 0.09).
+- The camera path ran with no key: the removed keys' dead line in Sean's
+  edvr-flat.ini is ignored.

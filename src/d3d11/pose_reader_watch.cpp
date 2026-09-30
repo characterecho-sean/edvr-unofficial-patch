@@ -16,15 +16,14 @@
 
 namespace edvr {
 // prw:: below resolves to edvr::prw (pose_reader_watch_core.h), visible
-// unqualified here the same way tfp:: is inside transition_flash_
-// prevent.cpp -- both are nested namespaces of edvr, and this file is
-// lexically inside edvr already.
+// unqualified here the same way tfp:: is inside transition_flash_eye_base.cpp
+// -- both are nested namespaces of edvr, and this file is lexically inside
+// edvr already.
 namespace {
 
-// --- Identity: build 332841, transition_flash_prevent.cpp's own pair.
-// Kept as this file's own copy rather than a shared constant -- the
-// copy-culture rule that file states for its own identity check, so
-// neither is touched by a change in the other.
+// --- Identity: build 332841, the same pair transition_flash_eye_base.cpp
+// keys on. Kept as this file's own copy rather than a shared constant --
+// the copy-culture rule -- so neither is touched by a change in the other.
 constexpr uint32_t kExpectedTimestamp = 1788384820u;
 constexpr uint32_t kExpectedImageSize = 104894464u;
 
@@ -43,7 +42,7 @@ constexpr uint8_t kSwapSyncBytes[16] = {
 // --- SEH-guarded reads. Each is its own small function, mixing __try with
 // this file's other locals (mutexes, std::string) being what CodeHook's
 // own doc calls out as refused by the compiler -- object_record_writer_
-// probe.cpp's guardedRead and transition_flash_prevent.cpp's sehReadU64
+// probe.cpp's guardedRead and transition_flash_eye_base.cpp's sehReadU64
 // are the precedent, kept to one dereference each.
 __declspec(noinline) bool sehReadU64(uintptr_t address, uint64_t& out) noexcept {
     __try {
@@ -68,9 +67,9 @@ __declspec(noinline) bool sehCheckBytes(uintptr_t address, const uint8_t* expect
         return false;
     }
 }
-// PE TimeDateStamp + SizeOfImage, read the same way transition_flash_
-// prevent.cpp's checkIdentity does (base+0x3C -> e_lfanew, +8 TimeDateStamp,
-// +0x50 SizeOfImage).
+// PE TimeDateStamp + SizeOfImage, read the same way
+// transition_flash_eye_base.cpp's checkIdentity does (base+0x3C -> e_lfanew,
+// +8 TimeDateStamp, +0x50 SizeOfImage).
 __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexcept {
     __try {
         uint32_t peOff = 0;
@@ -90,10 +89,11 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
     }
 }
 
-// --- Relay machinery, mirrored from transition_flash_prevent.cpp (itself
-// mirrored from object_record_writer_hook.cpp / kinematic_eval_hook.cpp).
-// Kept as a copy rather than a shared unit so none of the flight-proven
-// files are touched; if one changes, change all four. Needed because the
+// --- Relay machinery, mirrored from object_record_writer_hook.cpp /
+// kinematic_eval_hook.cpp (by way of the transition_flash_prevent.cpp
+// removed 2026-09-29, git 68bddaaa^). Kept as a copy rather than a shared
+// unit so none of the flight-proven files are touched; if one changes, look
+// at the others (grep kRelayBytes for the copies). Needed because the
 // target is in the GAME's module and this DLL loads more than two
 // gigabytes away -- a plain five-byte E9 patch cannot reach a replacement
 // here directly.
@@ -165,9 +165,9 @@ bool prepareRelay(void* trampoline, void* context) noexcept {
     return true;
 }
 
-// Held open unconditionally once installation starts, transition_flash_
-// prevent.cpp's g_relayGate discipline: off/on is made inside the observed
-// callbacks themselves (one atomic load), not by gating the relay.
+// Held open unconditionally once installation starts, the g_relayGate
+// discipline transition_flash_eye_base.cpp shares: off/on is made inside the
+// observed callbacks themselves (one atomic load), not by gating the relay.
 std::atomic<uintptr_t> g_relayGate{0};
 
 bool installOne(HookEntry& entry, uintptr_t base, const uint8_t* expectedBytes) noexcept {
@@ -792,9 +792,9 @@ bool poseReaderTakeSwapTrigger(uint32_t* frameOut) {
 // ring-write sites per real frame, ahead of poseReaderWatchFrameBoundary in
 // vscreen.cpp's own call order, so this -- not that function -- is where
 // "the frame that just ended" gets finalised and the accumulators cleared
-// for the next one. transition_flash_prevent.cpp's H3Accum is the same
-// finalise-then-reset shape, just triggered from its OWN frame boundary
-// instead of a sibling module's, because that one runs first here.
+// for the next one. transition_flash_eye_base.cpp's per-frame accumulators
+// are the same finalise-then-reset shape, read from the same ring-write
+// sites.
 PoseReaderFrameSnapshot poseReaderWatchFrameSnapshot() {
     PoseReaderFrameSnapshot snap;
     snap.readerMask = g_frameReaderMask.exchange(0, std::memory_order_relaxed);

@@ -11,7 +11,7 @@
 // 2026-09-23.)
 //
 // Runs only on the texture stages it is handed; never forces a device
-// wait beyond the documented 30-frame fallback; stands a stage down on
+// wait; reports a sample unavailable after 30 passes. Stands a stage down on
 // an unsupported format or a multisampled texture without touching the
 // picture.
 #pragma once
@@ -41,8 +41,8 @@ void lumaProbeSample(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye, in
 
 // Call once at the true end of the eye's pass, after the last point any
 // of the stages' textures can still change this frame. Polls any pending
-// readbacks without blocking before frame 30 of the wait (then does one
-// blocking Map so the round always eventually completes), and once every
+// readbacks without blocking, marking a sample unavailable if it remains
+// pending after 30 passes, and once every
 // stage for the round is resolved (read, absent or marked unsupported),
 // logs the report line and -- only when it changes -- the first-black-stage
 // line, then starts the throttle for the next round. Finally arms the next

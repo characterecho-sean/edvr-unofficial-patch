@@ -1,5 +1,14 @@
 # Steam missing terrain and post-VR exit stall
 
+## Status
+
+- **State: the two probes retired 2026-09-29 (code removed, d966c2ab).** The
+  game query probe (the GetData hook and its "first direct GetData caller"
+  line) and the game exit probe ("game exit probe: armed", "game exit present:
+  phase=") were armed unconditionally as a temporary investigation and are
+  deleted. The sections below that read their output are history. The rest of
+  this file is the journal of the arc.
+
 ## Session identity
 
 Sean reported that Elite remained alive after exiting, then reported invisible

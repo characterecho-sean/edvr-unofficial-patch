@@ -252,15 +252,3 @@ int menuPanelMeasureLine(const char* utf8, int emPx);
 void menuPanelShutdown();
 
 }  // namespace edvr
-
-extern "C" {
-// The door's call (the sharpen export's contract): srcTex is an
-// ID3D11Texture2D* the openvr half is about to forward, eye 0 or 1, bounds
-// the Submit's uMin, vMin, uMax, vMax or null, xf the 12 floats the theater
-// uses (a row-major 3x3 taking current-head vectors into anchor space, then
-// this eye's ray origin in anchor space). Returns the composited texture
-// (EDVR-owned, region-sized, full-span content) or null: nothing to draw,
-// or a refusal said once in the log; the caller forwards what it had.
-__declspec(dllexport) void* edvrMenuPanel(void* srcTex, int eye, const float* bounds,
-                                          const float* xf);
-}

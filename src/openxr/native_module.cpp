@@ -39,6 +39,7 @@ class ModuleBackend final : public RuntimeBackend {
     if (cancelled.load(std::memory_order_acquire)) return vr::VRInitError_Init_ShuttingDown;
     const HRESULT acquired=generation->binding.acquire(options_.graphicsProxy,[generation] {
       if (!generation->loadingAdmitted.load(std::memory_order_acquire)) return;
+      if (generation->host->consumeOverlappedPresent()) return;
       if (!generation->route.invoke([generation] { generation->host->loadingBoundary(); }))
         throw std::runtime_error("native loading boundary unavailable");
     });

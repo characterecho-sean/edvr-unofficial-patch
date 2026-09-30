@@ -19,7 +19,7 @@
 // perspective-normalised union through the LEFT eye's rows, fit-shrinks,
 // and publishes the corners for the renderer's homography -- and hands
 // vscreen a per-ordinal skip mask so the scenery draws are dropped while
-// the cinema screen is up. Every failure publishes nothing: the theater
+// the cinema screen is up. Every failure publishes nothing: the screen
 // keeps its centred band and no draw is skipped.
 #pragma once
 
@@ -36,8 +36,8 @@ void fssPanelRectDrawArgs(int32_t baseVertex, uint32_t startInstance);
 uint32_t fssPanelRectStartInstance();
 int32_t fssPanelRectBaseVertex();
 
-// Called at EVERY recognised chrome composite while the theater or the
-// heal is armed and the mode latch is open. ordinal counts matched draws
+// Called at EVERY recognised chrome composite while the heal is armed and
+// the mode latch is open. ordinal counts matched draws
 // within the frame (0-based); startInstance/baseVertex are the draw's
 // own.
 void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,

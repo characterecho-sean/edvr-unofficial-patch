@@ -1,5 +1,16 @@
 # Native OpenXR stereo diagnostic
 
+## Status
+
+- **State: the triangle retired 2026-09-29 (code removed, 0fe35e8b).**
+  `D3D11Stereo::render`, `D3D11Stereo::drawEye` and
+  `NativeRuntimeHost::drawDiagnosticEye`, with the scene they drew, are
+  deleted: the runtime renders the captured-eye and skybox paths only. The
+  harness (`tools/openxr_native_test`) now makes its own image per eye and
+  Submits it, so a real-runtime run shows a colour ramp with a grid, not a
+  triangle. The checkpoint below describes the triangle as it was, and its
+  pixel checks against triangle barycentrics went with it.
+
 For the latest owned-interface and clock-conversion changes, see the
 [System-interface checkpoint](openxr-system-interface-2026-09-12.md). Its
 additional absolute-pose and metadata checks passed a subsequent PiOpenXR run
@@ -109,12 +120,13 @@ machine paths; they are not public documentation.
 
 For the Pimax native test, close Frontier and SteamVR, leave Pimax Play
 running, and put on the headset. Run the harness against the installed PiOpenXR
-manifest, face forward and move/rotate the head slowly. Expect the colored
-triangle to remain fixed in space and appear in both eyes. The requested
-interval is 1 to 60 seconds after the session starts. A 15-second READY
-deadline, a 5-second shutdown deadline and an external watchdog cover different
-stages; a blocked runtime call is covered by the watchdog rather than a claim
-of graceful cancellation.
+manifest, face forward and move/rotate the head slowly. Expect each eye to show
+the harness's own image, a colour ramp with a 64-pixel grid that differs
+between the eyes (before 2026-09-29 it was a colored triangle fixed in space).
+The requested interval is 1 to 60 seconds after the session starts. A 15-second
+READY deadline, a 5-second shutdown deadline and an external watchdog cover
+different stages; a blocked runtime call is covered by the watchdog rather than
+a claim of graceful cancellation.
 
 The harness requests exit from a running session, submits zero layers during
 shutdown, waits for STOPPING and then ends the session. A passing process

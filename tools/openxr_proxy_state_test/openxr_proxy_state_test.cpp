@@ -3,6 +3,7 @@
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/d3d11/binding_shadow.h"
 #include "../../src/openxr/render_thread_dispatcher.h"
+#include "../../src/common/system_d3d11.h"
 #include <d3dcompiler.h>
 #include <cstdio>
 #include <cstring>
@@ -117,6 +118,23 @@ uint32_t pixel(ID3D11Texture2D* source, unsigned x, unsigned y) {
     runtime.context->Unmap(staging.Get(), 0);
     return result;
 }
+// A caller-owned eye image for the capture paths (the renderer draws no scene
+// of its own): a 4x4 quadrant pattern, none of it the game sentinel's magenta,
+// different per eye so a swapped pair shows.
+ComPtr<ID3D11Texture2D> eyeImage(unsigned eye) {
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = desc.Height = 4; desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const uint32_t colours[] = {eye ? 0xff00ff00u : 0xff0000ffu, eye ? 0xff0000ffu : 0xff00ff00u,
+                                0xffff0000u, 0xff808080u};
+    uint32_t pixels[16];
+    for (unsigned y = 0; y < 4; ++y) for (unsigned x = 0; x < 4; ++x) pixels[y * 4 + x] = colours[(y / 2) * 2 + x / 2];
+    const D3D11_SUBRESOURCE_DATA data{pixels, 16, 0};
+    ComPtr<ID3D11Texture2D> image;
+    check(SUCCEEDED(runtime.device->CreateTexture2D(&desc, &data, &image)), "eye image allocation");
+    return image;
+}
 
 using BridgeCounts = void (*)(uint64_t*, uint64_t*);
 // Fault-inject only the pre-submission GetDevice call. This object must never
@@ -183,7 +201,10 @@ void bridgeContracts(HMODULE proxy, BridgeCounts counts) {
 
     ComPtr<ID3D11Device> otherDevice;
     ComPtr<ID3D11DeviceContext> otherContext, deferred, otherDeferred;
-    check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+    // Windows' own d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
+    const auto systemCreate = edvr::systemD3D11CreateDevice();
+    check(systemCreate != nullptr, "system D3D11 factory");
+    check(systemCreate && SUCCEEDED(systemCreate(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
         D3D11_SDK_VERSION, &otherDevice, nullptr, &otherContext)), "independent same-adapter device");
     check(SUCCEEDED(runtime.device->CreateDeferredContext(0, &deferred)), "private recording context");
     if (!otherDevice || !deferred) return;
@@ -321,28 +342,23 @@ void threadedRenderer(HMODULE proxy, BridgeCounts counts) {
     if (initialized) {
         preserved();
         XrCompositionLayerProjection layer{};
-        check(render.invokeOwner([&] { check(renderer.render(views, space, layer) == XR_SUCCESS, "threaded direct stereo"); }), "direct boundary");
-        preserved();
-        const uint32_t triangle = pixel(runtime.images[0].Get(), 64, 60);
-        check((triangle >> 24) == 255 && (triangle & 255) > 60 && ((triangle >> 8) & 255) > 60 &&
-            ((triangle >> 16) & 255) > 60 && triangle != 0xffff00ff, "threaded renderer produces actual mixed triangle pixels");
         check(render.invokeOwner([&] {
             check(executor.invoke([&] {
                 check(SUCCEEDED(capture.initialize(runtime.device.Get())) && SUCCEEDED(skybox.initialize(runtime.device.Get())), "threaded capture initialize");
             }), "capture initialization boundary");
-            ID3D11Texture2D* texture = nullptr;
+            ComPtr<ID3D11Texture2D> images[2];
             for (unsigned eye = 0; eye < 2; ++eye) {
-                check(renderer.drawEye(eye, views[eye], texture) == XR_SUCCESS && texture, "threaded diagnostic source");
-                if (!texture) return;
+                images[eye] = eyeImage(eye);
+                if (!images[eye]) return;
                 check(executor.invoke([&] {
-                    const vr::Texture_t source{texture, vr::API_DirectX, vr::ColorSpace_Linear};
+                    const vr::Texture_t source{images[eye].Get(), vr::API_DirectX, vr::ColorSpace_Linear};
                     check(capture.capture(vr::EVREye(eye), &source) == vr::VRCompositorError_None, "copy eye pixels on render caller");
                 }), "eye capture boundary");
             }
             check(renderer.renderCaptured(views, space, capture, layer) == XR_SUCCESS, "threaded copied-eye stereo");
             check(executor.invoke([&] {
                 vr::Texture_t faces[6];
-                for (auto& face : faces) face = {texture, vr::API_DirectX, vr::ColorSpace_Linear};
+                for (auto& face : faces) face = {images[0].Get(), vr::API_DirectX, vr::ColorSpace_Linear};
                 check(skybox.set(faces, 6) == vr::VRCompositorError_None, "copy skybox pixels on render caller");
             }), "skybox copy boundary");
             check(renderer.renderSkybox(views, space, skybox, layer) == XR_SUCCESS, "threaded skybox stereo");
@@ -351,15 +367,15 @@ void threadedRenderer(HMODULE proxy, BridgeCounts counts) {
         check(pixel(runtime.images[0].Get(), 64, 60) != 0xffff00ff, "threaded private output differs from untouched game target");
         uint64_t privateNow = 0, unknownNow = 0;
         counts(&privateNow, &unknownNow);
-        check(privateNow == privateBefore + 8 && unknownNow == unknownBefore, "threaded private lists preserve history classification");
+        check(privateNow == privateBefore + 4 && unknownNow == unknownBefore, "threaded private lists preserve history classification");
         const auto callbacks = runtime.graphicsCallbacks;
         check(owner.invoke([&] { check(!executor.invoke([]{}), "idle owner cannot use render caller"); }), "idle owner probe completes");
         check(runtime.graphicsCallbacks == callbacks, "idle probe performs no graphics work");
         // A render attempt outside a boundary must fail before any queued list
         // can escape. A later valid boundary must not replay that failed list.
         const unsigned released = runtime.releases;
-        check(owner.invoke([&] { check(renderer.render(views, space, layer) == XR_ERROR_RUNTIME_FAILURE, "renderer fails closed without active render caller"); }), "unowned render attempt returns");
-        check(render.invokeOwner([&] { check(renderer.render(views, space, layer) == XR_ERROR_RUNTIME_FAILURE, "failed unowned pass cannot replay later"); }), "sticky failure boundary");
+        check(owner.invoke([&] { check(renderer.renderCaptured(views, space, capture, layer) == XR_ERROR_RUNTIME_FAILURE, "renderer fails closed without active render caller"); }), "unowned render attempt returns");
+        check(render.invokeOwner([&] { check(renderer.renderCaptured(views, space, capture, layer) == XR_ERROR_RUNTIME_FAILURE, "failed unowned pass cannot replay later"); }), "sticky failure boundary");
         check(runtime.graphicsCallbacks == callbacks && runtime.releases == released, "failed pass performs no execution or image release");
         check(owner.invoke([&] {
             check(renderer.needsGpuDrain(), "submitted work still needs explicit GPU completion");
@@ -389,6 +405,8 @@ void threadedRenderer(HMODULE proxy, BridgeCounts counts) {
 }
 
 int selfTest(const wchar_t* path) {
+    // The DLL loaded next is the only proxy in this process: no d3d11.dll comes with the exe.
+    check(edvr::reportNoD3D11Mapped("openxr_proxy_state_test"), "no d3d11.dll is mapped before the rig loads the proxy");
     // The actual hook-owning DLL stays loaded until this isolated child exits.
     HMODULE proxy = LoadLibraryExW(path, nullptr,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
@@ -501,32 +519,28 @@ int selfTest(const wchar_t* path) {
         session, runtime.device.Get(), sizes, proxy) == XR_SUCCESS, "renderer uses paired hooked game device");
     preserved();
     XrCompositionLayerProjection layer{};
-    check(renderer.render(views, space, layer) == XR_SUCCESS, "direct render through hooked context"); preserved();
-    const uint32_t drawn = pixel(runtime.images[0].Get(), 64, 60);
-    check((drawn >> 24) == 255 && (drawn & 255) > 60 &&
-        ((drawn >> 8) & 255) > 60 && ((drawn >> 16) & 255) > 60 &&
-        drawn != 0xffff00ff, "direct renderer produced mixed triangle color");
     EyeCapture captured; check(SUCCEEDED(captured.initialize(runtime.device.Get())), "initialize eye capture");
     SkyboxCapture skybox; check(SUCCEEDED(skybox.initialize(runtime.device.Get())), "initialize skybox capture");
-    ID3D11Texture2D* eyeTexture = nullptr;
+    ComPtr<ID3D11Texture2D> eyeImages[2];
     for (unsigned eye = 0; eye < 2; ++eye) {
-        check(renderer.drawEye(eye, views[eye], eyeTexture) == XR_SUCCESS && eyeTexture, "offscreen render through hooked context");
+        eyeImages[eye] = eyeImage(eye);
+        check(eyeImages[eye] != nullptr, "eye image on hooked device");
         preserved();
-        vr::Texture_t texture{eyeTexture, vr::API_DirectX, vr::ColorSpace_Linear};
+        vr::Texture_t texture{eyeImages[eye].Get(), vr::API_DirectX, vr::ColorSpace_Linear};
         check(captured.capture(vr::EVREye(eye), &texture) == vr::VRCompositorError_None, "capture on hooked context");
     }
     check(renderer.renderCaptured(views, space, captured, layer) == XR_SUCCESS, "copied-eye render through hooked context"); preserved();
     vr::Texture_t faces[6];
-    for (auto& face : faces) face = {eyeTexture, vr::API_DirectX, vr::ColorSpace_Linear};
+    for (auto& face : faces) face = {eyeImages[0].Get(), vr::API_DirectX, vr::ColorSpace_Linear};
     check(skybox.set(faces, 6) == vr::VRCompositorError_None, "skybox capture through hooked context");
     check(renderer.renderSkybox(views, space, skybox, layer) == XR_SUCCESS, "skybox render through hooked context"); preserved();
     check((hooks() & 2u) != 0 && (hooks() & 1u) == 0, "actual ExecuteCommandList hook ran without immediate ClearState");
-    check(runtime.releases == 6, "all composed eyes released");
+    check(runtime.releases == 4, "all composed eyes released");
     check(renderer.shutdown() == XR_SUCCESS, "renderer shutdown"); preserved();
     uint64_t privateNow = 0, unknownNow = 0;
     bridgeCounts(&privateNow, &unknownNow);
-    check(privateNow == privateBefore + 8 && unknownNow == unknownBefore,
-          "all eight renderer lists use private submission, with no history invalidation");
+    check(privateNow == privateBefore + 4 && unknownNow == unknownBefore,
+          "all four renderer lists use private submission, with no history invalidation");
 
     ComPtr<ID3D11DeviceContext> gameRecorder;
     ComPtr<ID3D11CommandList> gameList;
@@ -538,7 +552,7 @@ int selfTest(const wchar_t* path) {
     if (!gameList) return 1;
     runtime.context->ExecuteCommandList(gameList.Get(), TRUE);
     bridgeCounts(&privateNow, &unknownNow);
-    check(unknownNow == unknownBefore + 1 && privateNow == privateBefore + 8,
+    check(unknownNow == unknownBefore + 1 && privateNow == privateBefore + 4,
           "ordinary game list retains conservative history invalidation");
     check(pixel(target.Get(), 64, 60) == 0xff00ff00, "ordinary game list actually writes game target");
     for (unsigned i = 0; i < slots; ++i) {
@@ -548,7 +562,7 @@ int selfTest(const wchar_t* path) {
     }
     runtime.context->ExecuteCommandList(gameList.Get(), FALSE);
     bridgeCounts(&privateNow, &unknownNow);
-    check(unknownNow == unknownBefore + 2 && privateNow == privateBefore + 8,
+    check(unknownNow == unknownBefore + 2 && privateNow == privateBefore + 4,
           "restore FALSE remains unknown");
     for (unsigned i = 0; i < slots; ++i)
         check(binding(i, nullptr) == nullptr, "restore FALSE clears binding shadow");

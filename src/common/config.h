@@ -4,10 +4,17 @@
 // lives here and is re-read when the file's write time changes. Reload is
 // polled from the frame loop, not watched, to keep the cost to one cheap
 // GetFileAttributesEx every N frames.
+//
+// Threads: any getter may run on any thread while reloadIfChanged() runs on
+// another. The OpenXR owner thread's deferred frame end reads
+// advanced.app_gpu_timing on its own thread while the render thread reloads.
+// Reads take a shared lock and copy the value out; a reload parses the file
+// outside the lock and takes it exclusively only to swap the new map in.
 #pragma once
 
-#include <windows.h>  // FILETIME
+#include <windows.h>  // FILETIME, SRWLOCK
 
+#include <atomic>
 #include <string>
 
 namespace edvr {
@@ -67,14 +74,39 @@ public:
 private:
     Config() = default;
     void parse();
+    // Called with m_lock held exclusively; queues findings, never logs them.
     void auditResolve(void* parsedMap);
+    // Writes queued audit findings once the log is open. Takes m_lock itself,
+    // and only when there is something to write.
     void auditFlush() const;
+    // True when the note about a malformed or out-of-range value of `key`
+    // should be written now: the first time since the last successful parse
+    // that the log could take it. Takes m_lock; call it with none held.
+    bool firstNoteFor(const char* key) const;
 
     struct Impl;
     Impl*        m_impl = nullptr;
     std::wstring m_path;
     std::wstring m_logDir;
     FILETIME     m_lastWrite{};
+
+    // The one lock over everything m_impl points at, and over m_lastWrite.
+    // It lives here rather than in Impl so a read before init() is safe.
+    //
+    // Shared for a lookup, which copies the value out before releasing it;
+    // exclusive for anything that writes: parse's swap and audit bookkeeping,
+    // the audit flush's drain, the once-per-parse note set, and set().
+    //
+    // SRW locks are not recursive, so nothing that can call back into Config
+    // runs while it is held -- no getter, no Log call. Log::open reads Config,
+    // and Config never calls Log::open; Log::note takes only the log's own
+    // spin lock and reads nothing here.
+    mutable SRWLOCK m_lock = SRWLOCK_INIT;
+
+    // True while Impl::auditPending holds lines. Written under the exclusive
+    // lock; read without it, so a getter with nothing to flush -- nearly all
+    // of them -- costs one load and takes no lock.
+    mutable std::atomic<bool> m_auditPending{false};
 };
 
 // Directory containing the given loaded module, without trailing slash.

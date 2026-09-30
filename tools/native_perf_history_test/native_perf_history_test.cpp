@@ -1,6 +1,9 @@
 #include "../../src/d3d11/native_perf_history.h"
 #include "../../src/d3d11/native_benchmark_collector.h"
+#include "../../src/d3d11/frame_ticks.h"
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <cmath>
 #include <cwchar>
 #include <limits>
@@ -366,11 +369,277 @@ void benchmarkWindows() {
     check(c.ready() && c.takeReport(&report) && report.aborted && report.overflow,
           "storage overflow aborts instead of silently truncating samples");
 }
+
+// ---- frame_ticks.h: where the Present hook's time went, per frame -------------------------------------
+// The recorder is driven with explicit clock readings at one tick per microsecond, so every number below
+// is derived by hand from the timeline, never measured.
+constexpr int64_t kUs = 1000000;   // ticks a second: one tick a microsecond, so ticks/1000 is ms
+// The summary's numbers are floats, so a tolerance a float's own rounding cannot break.
+bool nearMs(double a, double b) { return std::fabs(a - b) < 1e-5; }
+
+void frameTicksChain() {
+    // Hook 1: entered at 1000; the game's own time before that is not a tick. 10 us of work before the real
+    // Present (1000..1010), the real Present 1010..1060, then 30 + 10 us of work after it, then the
+    // boundary: journal_watch 200 us (the slow one), fss_mode_latch 10 us, and the frame edge at 1500 inside the
+    // menu, which has run 190 us since the last mark.
+    FrameTicks t;
+    t.enter(1000);
+    t.markAt("present_pre", 1010);
+    t.external(1060);
+    t.markAt("gpu_frame_present", 1090);
+    t.markAt("present_post", 1100);
+    t.boundary(true);
+    t.markAt("journal_watch", 1300);
+    t.markAt("fss_mode_latch", 1310);
+    FrameTickSummary a = t.cut("menu_tick", 1500, kUs);
+    check(nearMs(a.hookMs, 0.45) && nearMs(a.boundaryMs, 0.40) && nearMs(a.realMs, 0.05) &&
+          a.marks == 6 && a.hooks == 1,
+          "frame ticks: the hook's ticks, the boundary's part of them and the real Present are kept apart");
+    check(a.top[0].name && !std::strcmp(a.top[0].name, "journal_watch") && nearMs(a.top[0].ms, 0.20) &&
+          a.top[1].name && !std::strcmp(a.top[1].name, "menu_tick") && nearMs(a.top[1].ms, 0.19) &&
+          a.top[2].name && !std::strcmp(a.top[2].name, "gpu_frame_present") && nearMs(a.top[2].ms, 0.03),
+          "frame ticks: the three slowest, slowest first, by name -- the real Present never among them");
+
+    // The chain runs on past the cut: the rest of the menu (100 us), the rest of the boundary (100 us), then
+    // out of the boundary for the render callback (20 us) and the trace note (10 us). Hook 1 returns at 1730.
+    t.markAt("menu", 1600);
+    t.markAt("boundary_rest", 1700);
+    t.boundary(false);
+    t.markAt("render_callback", 1720);
+    t.markAt("timing_note", 1730);
+    // The game runs 1730..5000. Hook 2, entered at 5000: 5 us before the real Present (5005), the real Present
+    // (5005..5055), 25 + 20 us after it, 10 us of journal, and the frame edge at 5400 in the menu.
+    t.enter(5000);
+    t.markAt("present_pre", 5005);
+    t.external(5055);
+    t.markAt("gpu_frame_present", 5080);
+    t.markAt("present_post", 5100);
+    t.boundary(true);
+    t.markAt("journal_watch", 5110);
+    FrameTickSummary b = t.cut("menu_tick", 5400, kUs);
+    // Ticks: hook 1's tail 100+100+20+10 = 230 us, hook 2's head 5+25+20+10+290 = 350 us; boundary: the
+    // tail's menu and boundary_rest (200), the head's journal_watch and menu_tick (300).
+    check(nearMs(b.hookMs, 0.58) && nearMs(b.boundaryMs, 0.50) && nearMs(b.realMs, 0.05) && b.hooks == 1 && b.marks == 9,
+          "frame ticks: a frame holds the previous hook's tail and this hook's head, cut at the frame edge");
+    // THE PARTITION: the frame is 1500..5400 = 3.90 ms and the game's own stretch between the two hooks
+    // (1730..5000) is 3.27 ms, so the hook's ticks, the real Present and the game add up to the frame.
+    check(nearMs(double(b.hookMs) + double(b.realMs) + 3.27, 3.90),
+          "frame ticks: ticks + real Present + the game between hooks are the whole frame");
+    check(b.top[0].name && !std::strcmp(b.top[0].name, "menu_tick") && nearMs(b.top[0].ms, 0.29) &&
+          !std::strcmp(b.top[1].name, "menu") && nearMs(b.top[1].ms, 0.10),
+          "frame ticks: the menu's tail after the edge lands in the next frame, its head before it in this one");
+    // A frame's summary is consumed: the next starts empty.
+    FrameTickSummary empty = t.cut("menu_tick", 5400, kUs);
+    check(empty.marks == 0 && empty.hooks == 0 && empty.hookMs == 0.0f && !empty.top[0].name,
+          "frame ticks: a cut leaves nothing behind for the next frame");
+}
+
+void frameTicksTopThree() {
+    FrameTicks t;
+    t.enter(100);
+    // Durations 5, 9, 9, 3, 12, 1, 9: the top three are 12, then the FIRST 9, then the second 9 -- a tie keeps
+    // the earlier tick ahead of the later, and 3 and 1 and the last 9 never enter.
+    const char* names[] = {"a5", "b9", "c9", "d3", "e12", "f1", "g9"};
+    const int64_t ms[] = {5, 9, 9, 3, 12, 1, 9};
+    int64_t at = 100;
+    for (int i = 0; i < 7; ++i) { at += ms[i] * 1000; t.markAt(names[i], at); }
+    FrameTickSummary s = t.cut("end", at + 1, kUs);
+    check(s.top[0].name && !std::strcmp(s.top[0].name, "e12") && s.top[1].name && !std::strcmp(s.top[1].name, "b9") &&
+          s.top[2].name && !std::strcmp(s.top[2].name, "c9") && nearMs(s.top[0].ms, 12.0) && nearMs(s.top[2].ms, 9.0),
+          "frame ticks: the slowest three of many, ties keeping the earlier");
+
+    // Fewer than three ticks: the unused slots stay null, so a printer cannot invent a name.
+    FrameTicks few;
+    few.enter(0 + 10);
+    few.markAt("only", 60);
+    FrameTickSummary f = few.cut("edge", 60, kUs);
+    check(f.marks == 1 && f.top[0].name && !std::strcmp(f.top[0].name, "only") && !f.top[1].name && !f.top[2].name,
+          "frame ticks: unused slots are null");
+}
+
+void frameTicksOddClocks() {
+    FrameTicks t;
+    // A mark before any chain starts one and records nothing: the time since an unknown start is not a tick.
+    t.markAt("before_enter", 500);
+    t.enter(1000);
+    t.markAt("late", 1000);   // no time passed: nothing recorded
+    t.markAt("back", 900);    // the clock stepped back: nothing recorded, and the chain does not move back
+    t.markAt("ok", 1040);
+    t.external(1030);         // the real Present that ends before the chain's last mark: ignored
+    FrameTickSummary s = t.cut("edge", 1040, kUs);
+    check(s.marks == 1 && nearMs(s.hookMs, 0.04) && nearMs(s.realMs, 0.0) && s.top[0].name && !std::strcmp(s.top[0].name, "ok"),
+          "frame ticks: a repeated, reversed or pre-chain reading records nothing");
+    // No clock frequency: the numbers read 0, the names stay.
+    FrameTicks noRate;
+    noRate.enter(10);
+    noRate.markAt("x", 20);
+    FrameTickSummary z = noRate.cut("edge", 30, 0);
+    check(z.hookMs == 0.0f && z.marks == 2 && z.top[0].name,
+          "frame ticks: an unknown clock rate reports zero milliseconds, not garbage");
+}
+
+void frameTicksUncut() {
+    // A profile that never cuts (the flat one) must not let the sums grow for the whole session: after eight
+    // hooks without a cut the pile is dropped, so a later cut holds only what came since.
+    FrameTicks t;
+    for (int i = 1; i <= 9; ++i) {
+        t.enter(i * 1000);
+        t.markAt("x", i * 1000 + i * 10);
+    }
+    FrameTickSummary s = t.cut("edge", 9 * 1000 + 100, kUs);
+    check(s.hooks == 1 && s.marks == 2 && nearMs(s.hookMs, 0.10),
+          "frame ticks: eight hooks without a cut are dropped, so nothing piles up unbounded");
+    // With cuts in between, nothing is ever dropped.
+    FrameTicks steady;
+    bool kept = true;
+    for (int i = 1; i <= 20; ++i) {
+        steady.enter(i * 1000);
+        steady.markAt("x", i * 1000 + 100);
+        const FrameTickSummary r = steady.cut("edge", i * 1000 + 100, kUs);
+        kept = kept && r.hooks == 1 && r.marks == 1 && nearMs(r.hookMs, 0.10);
+    }
+    check(kept, "frame ticks: a cut every hook loses nothing");
+}
+
+// A frame's LONG FRAME clause, as the log carries it.
+void frameShareText() {
+    FrameTickSummary s;
+    s.hookMs = 0.45f; s.boundaryMs = 0.40f; s.realMs = 0.05f; s.marks = 7; s.hooks = 1;
+    s.top[0] = {"journal_watch", 0.20f}; s.top[1] = {"menu_tick", 0.19f}; s.top[2] = {"gpu_frame_present", 0.02f};
+    char text[512];
+    size_t n = formatEdvrShare(text, sizeof(text), 26.4, s, 0.10, true);
+    check(std::string(text) ==
+          "EDVR in this frame: 0.45 ms in the Present hook (frame boundary 0.40 ms), 0.05 ms in the real Present, "
+          "draw hooks ~0.10 ms (sampled this frame), 25.90 ms outside the hook; "
+          "slowest EDVR ticks: journal_watch=0.20 ms, menu_tick=0.19 ms, gpu_frame_present=0.02 ms;" &&
+          n == std::strlen(text),
+          "LONG FRAME share: the hook's ms, the boundary's, the real Present's, the draw hooks', the rest, and three named ticks");
+    formatEdvrShare(text, sizeof(text), 26.4, s, 0.10, false);
+    check(std::strstr(text, "draw hooks ~0.10 ms (held over)") != nullptr,
+          "LONG FRAME share: a draw-hook figure not measured this frame says it is held over");
+
+    // Engine motion's clause (engine_motion_cpu.h): exact for the frame, at the end of the share, the
+    // rest of the text unchanged. No calls says so, never 0.00 ms; an unmeasured frame has no clause.
+    const std::string plain = [&] {
+        formatEdvrShare(text, sizeof(text), 26.4, s, 0.10, true);
+        return std::string(text);
+    }();
+    EngineMotionFrame em;
+    em.measured = true;
+    em.renderMs = 0.31;
+    em.calls = 118;
+    n = formatEdvrShare(text, sizeof(text), 26.4, s, 0.10, true, em);
+    check(std::string(text) == plain + " engine motion 0.31 ms;" && n == std::strlen(text),
+          "LONG FRAME share: engine motion's clause is this frame's render-thread ms, after the ticks");
+    em.calls = 0;
+    em.renderMs = 0.0;
+    formatEdvrShare(text, sizeof(text), 26.4, s, 0.10, true, em);
+    check(std::string(text) == plain + " engine motion none this frame;" && std::strstr(text, "0.00 ms") == nullptr,
+          "LONG FRAME share: engine motion's code that never ran on this thread says none, not 0.00 ms");
+    em.calls = 1;
+    formatEdvrShare(text, sizeof(text), 26.4, s, 0.10, true, em);
+    check(std::string(text) == plain + " engine motion 0.00 ms;",
+          "LONG FRAME share: engine motion that ran once and rounds to nothing is 0.00 ms, not none");
+    EngineMotionFrame off;
+    formatEdvrShare(text, sizeof(text), 26.4, s, 0.10, true, off);
+    check(std::string(text) == plain, "LONG FRAME share: an unmeasured frame (the priming one) has no engine motion clause");
+    FrameTickSummary none;
+    formatEdvrShare(text, sizeof(text), 12.0, none, 0.0, false);
+    check(std::strstr(text, "slowest EDVR ticks: none recorded;") != nullptr &&
+          std::strstr(text, "12.00 ms outside the hook") != nullptr,
+          "LONG FRAME share: a frame the chain never ran in says so instead of naming nothing");
+    FrameTickSummary over;
+    over.hookMs = 3.0f; over.realMs = 2.0f;
+    formatEdvrShare(text, sizeof(text), 4.0, over, 0.0, true);
+    check(std::strstr(text, "0.00 ms outside the hook") != nullptr,
+          "LONG FRAME share: the rest of the frame never reads negative");
+    char tiny[24];
+    n = formatEdvrShare(tiny, sizeof(tiny), 26.4, s, 0.10, true);
+    check(n == std::strlen(tiny) && n < sizeof(tiny), "LONG FRAME share: a short buffer is cut, never overrun");
+}
+
+// The whole native line, at its worst, must fit what Log::note keeps (about 1166 characters of message): the
+// tail -- runtime sequence and game work -- is the key that lays this line against native_long_cycle.
+void nativeLongFrameFits() {
+    FrameTickSummary worst;
+    worst.hookMs = worst.boundaryMs = worst.realMs = 4999.99f;
+    worst.marks = 60; worst.hooks = 2;
+    worst.top[0] = {"exposure_reclaim_tick", 4999.99f};
+    worst.top[1] = {"engine_velocity_clock", 4999.99f};
+    worst.top[2] = {"draw_census_boundary", 4999.99f};
+    EngineMotionFrame motion;   // the widest clause: every digit at its largest
+    motion.measured = true;
+    motion.renderMs = 4999.99;
+    motion.calls = 18446744073709551615ull;
+    // Both draw-hook wordings, each with the widest engine motion clause: whichever is longer must fit.
+    for (int fresh = 0; fresh < 2; ++fresh) {
+        char share[400];
+        formatEdvrShare(share, sizeof(share), 4999.9, worst, 4999.99, fresh != 0, motion);
+        NativeLongFrame line;
+        line.frameMs = 4999.9;
+        const std::string reference(79, 'r'), events(199, 'e'), stamp(219, 's'), gameWork(47, 'g');
+        line.reference = reference.c_str();
+        line.textures = line.buffers = line.shaders = 4294967295u;
+        line.creationMb = 123456.7;
+        line.share = share;
+        line.events = events.c_str();
+        line.stamp = stamp.c_str();
+        line.sequence = 18446744073709551615ull;
+        line.gameWork = gameWork.c_str();
+        char text[1400];
+        const size_t n = formatNativeLongFrame(text, sizeof(text), line);
+        std::printf("native_perf_history_test: the LONG FRAME line at its worst, draw hooks %s, is %zu characters "
+                    "(the log keeps about 1166; the gate is 1160)\n", fresh ? "sampled" : "held over", n);
+        check(std::strstr(share, " engine motion 4999.99 ms;") != nullptr,
+              "LONG FRAME line at its worst: the engine motion clause is in it, whole");
+        const std::string tail = std::string("runtime sequence 18446744073709551615, game work ") + gameWork + ".";
+        check(n == std::strlen(text) && n < 1160 && std::string(text).size() >= tail.size() &&
+              std::string(text).compare(std::string(text).size() - tail.size(), tail.size(), tail) == 0,
+              "LONG FRAME line at its worst fits the log's line, sequence and game work intact");
+    }
+    char text[1400];
+
+    // And the ordinary line reads as the old one did, the share added before the events.
+    NativeLongFrame plain;
+    plain.frameMs = 26.2;
+    plain.reference = "runtime predicted period 11.1 ms";
+    plain.textures = 1; plain.buffers = 22; plain.shaders = 0; plain.creationMb = 64.6;
+    plain.share = "EDVR in this frame: X;";
+    plain.events = "none";
+    plain.stamp = " This is frame 34811; the flip timeline is not armed.";
+    plain.sequence = 31151;
+    plain.gameWork = "6.58 ms";
+    formatNativeLongFrame(text, sizeof(text), plain);
+    check(std::string(text) ==
+          "monitor: LONG FRAME -- 26.2 ms between Presents (runtime predicted period 11.1 ms), no WaitGetPoses, CPU busy, "
+          "compositor, reprojection, or door samples; game creations: 1 textures, 22 buffers, 0 shaders (64.6 MB); "
+          "EDVR in this frame: X; EDVR events: none. This is frame 34811; the flip timeline is not armed. "
+          "runtime sequence 31151, game work 6.58 ms.",
+          "LONG FRAME line: the old text intact, EDVR's share between the creations and the events");
+}
+
+// What one mark costs on this machine, said out loud so a slow clock is visible in the build log. Not an
+// assertion: a loaded build machine would make any threshold a flake.
+void frameTickCostNote() {
+    FrameTicks t;
+    t.enter(FrameTicks::now());
+    const int kMarks = 200000;
+    LARGE_INTEGER a{}, b{}, f{};
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    for (int i = 0; i < kMarks; ++i) t.mark("cost");
+    QueryPerformanceCounter(&b);
+    const double ns = double(b.QuadPart - a.QuadPart) * 1e9 / double(f.QuadPart) / kMarks;
+    std::printf("native_perf_history_test: one frame-tick mark costs %.1f ns here (about 60 a frame)\n", ns);
+    const FrameTickSummary s = t.cut("edge", FrameTicks::now(), f.QuadPart);
+    check(s.marks > 0, "frame ticks: the live clock records marks");
+}
 }
 int wmain(int argc,wchar_t** argv) {
     if(argc!=2)return 2;
     if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_perf_history_test: dry-run (no runtime, device or files)");return 0;}
     if(std::wcscmp(argv[1],L"--self-test"))return 2;
     averages();invalidation();agesAndValues();displayBase();callerWorkCrossing();graphs();benchmarkWindows();benchmarkAdmission();
+    frameTicksChain();frameTicksTopThree();frameTicksOddClocks();frameTicksUncut();frameShareText();nativeLongFrameFits();frameTickCostNote();
     std::printf("native_perf_history_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

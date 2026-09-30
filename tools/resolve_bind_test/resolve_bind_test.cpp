@@ -203,6 +203,60 @@ int main() {
         context->IAGetVertexBuffers(0, 1, &lent, &lentStride, &lentOffset);
         check(!lent, "repair restores empty vertex binding");
 
+        // THE BINDING SHADOW'S RESOLVERS ARE ON FOUR BUDGETS (binding_shadow.h): the
+        // fixes' pair and the instruments' pair. A stale pointer faults inside a
+        // resolver, the fault is absorbed and charged to that resolver's budget of
+        // five, and a spent budget refuses even a live view. One direction per pair,
+        // because a budget cannot be refilled and the four are independent by
+        // construction: spending the instruments' view budget must leave the fixes'
+        // view resolver working, and spending the fixes' resource budget must leave
+        // the instruments' resource resolver working.
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = 16;
+            td.Height = 8;
+            td.MipLevels = 1;
+            td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            ComPtr<ID3D11Texture2D> texture;
+            hr(device->CreateTexture2D(&td, nullptr, &texture), "create texture");
+            ComPtr<ID3D11ShaderResourceView> view;
+            hr(device->CreateShaderResourceView(texture.Get(), nullptr, &view),
+               "create view");
+            edvr::ResourceInfo info;
+            void* stale = reinterpret_cast<void*>(0x10);   // no object there: the call faults
+
+            check(edvr::bindingResolve(view.Get(), &info) && info.isTexture2D &&
+                      info.a == 16 && info.b == 8,
+                  "a live view resolves for a fix");
+            check(edvr::bindingResolveProbe(view.Get(), &info) && info.isTexture2D &&
+                      info.resource == static_cast<ID3D11Resource*>(texture.Get()),
+                  "...and for a probe, to the same resource");
+            for (int i = 0; i < 6; ++i) {
+                check(!edvr::bindingResolveProbe(stale, &info),
+                      "a stale view is refused by the probe's resolver, its fault absorbed");
+            }
+            check(!edvr::bindingResolveProbe(view.Get(), &info),
+                  "after its five faults the probe's view budget is spent, and even a live "
+                  "view no longer resolves for it");
+            check(edvr::bindingResolve(view.Get(), &info) && info.isTexture2D,
+                  "the fixes' view resolver shares nothing with it and still resolves");
+
+            check(edvr::bindingResolveResource(texture.Get(), &info) && info.isTexture2D,
+                  "a live resource resolves for a fix");
+            for (int i = 0; i < 6; ++i) {
+                check(!edvr::bindingResolveResource(stale, &info),
+                      "a stale resource is refused by the fixes' resolver, its fault absorbed");
+            }
+            check(!edvr::bindingResolveResource(texture.Get(), &info),
+                  "after its five faults the fixes' resource budget is spent");
+            check(edvr::bindingResolveResourceProbe(texture.Get(), &info) && info.isTexture2D,
+                  "the probe's resource resolver shares nothing with it and still resolves");
+        }
+
         edvr::resolveBindShutdown();
         edvr::bindingForgetAll();
         g_resolveShader = nullptr;
