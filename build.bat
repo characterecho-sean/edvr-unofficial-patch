@@ -1834,7 +1834,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     "src\plugins\plugin_manager.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR proxy state test build failed & exit /b 1 )
 "%BUILD%\openxr_proxy_state_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_proxy_state_test.exe" --self-test || exit /b 1
