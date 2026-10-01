@@ -3840,8 +3840,6 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
             ID3D11RenderTargetView* savedRtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
             ID3D11DepthStencilView* savedDsv = nullptr;
             ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtvs, &savedDsv);
-            ID3D11RenderTargetView* nullRtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
-            ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, nullRtvs, nullptr);
 
             ID3D11ShaderResourceView* in[4] = {s.contribSrv, s.depthSrv, haveTarget ? s.targetSrv : nullptr,
                                                haveDisplay ? display : nullptr};
