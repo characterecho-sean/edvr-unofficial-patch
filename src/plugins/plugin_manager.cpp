@@ -19,6 +19,16 @@ static void EDVR_API hostLogNote(const char* msg) {
     if (msg) edvr::Log::get().note("%s", msg);
 }
 
+static void hostSetPluginInputBlock(bool block) {
+    typedef void (WINAPI *PFN_edvrSetPluginInputBlock)(int);
+    HMODULE hD3D11 = GetModuleHandleW(L"d3d11.dll");
+    if (hD3D11) {
+        auto fn = reinterpret_cast<PFN_edvrSetPluginInputBlock>(
+            GetProcAddress(hD3D11, "edvrSetPluginInputBlock"));
+        if (fn) fn(block ? 1 : 0);
+    }
+}
+
 } // namespace
 
 namespace edvr::plugins {
@@ -200,6 +210,7 @@ bool PluginManager::onFilterInput(uint32_t deviceType, const void* rawInputData)
             }
         }
     }
+    hostSetPluginInputBlock(swallowed);
     return swallowed;
 }
 

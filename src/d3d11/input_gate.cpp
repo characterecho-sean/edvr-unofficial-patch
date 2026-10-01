@@ -912,6 +912,10 @@ void inputGateSetPluginBlock(bool block) {
     g_pluginBlock.store(block, std::memory_order_relaxed);
 }
 
+extern "C" __declspec(dllexport) void WINAPI edvrSetPluginInputBlock(int block) {
+    inputGateSetPluginBlock(block != 0);
+}
+
 bool inputGateHoldsGameKeyboard() {
     if (g_private.load() == 0) return false;
     bool di = false, reached = false;
