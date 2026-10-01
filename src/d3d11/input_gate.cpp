@@ -257,7 +257,7 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
         if (!isKeyboard<Wide>(d, self)) return;
         d.stateKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
-        const bool priv = g_private.load(std::memory_order_relaxed) != 0;
+        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || g_pluginBlock.load(std::memory_order_relaxed);
         int vk = 0;
         uint8_t dik = 0;
         uint32_t mods = 0;
@@ -303,7 +303,7 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
         if (!isKeyboard<Wide>(d, self)) return;
         d.dataKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
-        const bool priv = g_private.load(std::memory_order_relaxed) != 0;
+        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || g_pluginBlock.load(std::memory_order_relaxed);
         int vk = 0;
         uint8_t dik = 0;
         uint32_t mods = 0;
