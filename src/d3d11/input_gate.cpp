@@ -355,18 +355,26 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
                                        before, priv, dik, swallow);
         } else if (priv) {
             // For joystick / HOTAS buffered device data:
-            // Filter button down/up events and POV hat changes, but let axis updates pass through
-            constexpr DWORD kPovOffset0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
-            constexpr DWORD kPovOffset3 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[3]));
-            constexpr DWORD kButtonOffset0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
-            constexpr DWORD kButtonOffset31 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[31]));
+            // Swallow button PRESS events and POV hat direction changes, but allow release (UP) events
+            // and axis updates to pass through cleanly to prevent stuck inputs or interrupted maneuvering.
+            constexpr DWORD kPovOffset0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[0]));
+            constexpr DWORD kPovOffset3 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[3]));
+            constexpr DWORD kButtonOffset0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[0]));
+            constexpr DWORD kButtonOffset127 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[127]));
             for (uint32_t i = 0; i < before; ++i) {
                 const auto& ev = rgdod[i];
-                bool isBtnOrPov = (ev.dwOfs >= kButtonOffset0 && ev.dwOfs <= kButtonOffset31) ||
-                                  (ev.dwOfs >= kPovOffset0 && ev.dwOfs <= kPovOffset3 + sizeof(DWORD));
-                if (!isBtnOrPov) {
-                    rgdod[kept++] = ev; // Keep axis events
+                const bool isButton = (ev.dwOfs >= kButtonOffset0 && ev.dwOfs <= kButtonOffset127);
+                const bool isPov = (ev.dwOfs >= kPovOffset0 && ev.dwOfs < kPovOffset3 + sizeof(DWORD));
+                if (isButton) {
+                    // DirectInput button press has high bit set (0x80); release is 0x00.
+                    // Swallow press, keep release event so the game does not leave button stuck down.
+                    if (ev.dwData & 0x80) continue;
+                } else if (isPov) {
+                    // DirectInput POV hat unpressed is 0xFFFFFFFFu (-1).
+                    // Swallow pressed angles (dwData != 0xFFFFFFFFu), allow release (dwData == 0xFFFFFFFFu).
+                    if (ev.dwData != 0xFFFFFFFFu) continue;
                 }
+                rgdod[kept++] = ev; // Keep release events and analog axis motion
             }
         } else {
             kept = before;
