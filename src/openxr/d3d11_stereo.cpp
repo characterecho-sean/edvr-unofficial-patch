@@ -389,6 +389,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
         headPose.orientation.z = hPose.orientation.z;
         headPose.orientation.w = hPose.orientation.w;
         edvr::plugins::PluginManager::instance().onUpdate(headPose, 0.016f);
+        edvr::plugins::PluginManager::instance().onFilterInput(0, nullptr);
       }
 
       EdvrEyeRenderContext eyeCtx{};
