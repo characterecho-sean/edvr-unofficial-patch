@@ -248,16 +248,33 @@ bool isKeyboard(DiDoor& d, void* self) {
 }
 
 template <bool Wide>
+bool isInputDevice(DiDoor& d, void* self) {
+    if (self == d.dummy) return true;
+    void** vt = *reinterpret_cast<void***>(self);
+    if (!vt || !vt[3]) return false;
+    DIDEVCAPS caps{};
+    caps.dwSize = sizeof(caps);
+    typedef HRESULT(STDMETHODCALLTYPE* GetCaps)(void*, LPDIDEVCAPS);
+    if (FAILED(reinterpret_cast<GetCaps>(vt[3])(self, &caps))) return false;
+    DWORD devType = GET_DIDEVICE_TYPE(caps.dwDevType);
+    return (devType == DI8DEVTYPE_KEYBOARD || devType == DI8DEVTYPE_JOYSTICK ||
+            devType == DI8DEVTYPE_GAMEPAD || devType == DI8DEVTYPE_1STPERSON);
+}
+
+template <bool Wide>
 HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     const HRESULT hr = d.origState(self, cb, data);
     d.stateCalls.fetch_add(1, std::memory_order_relaxed);
     if (self != d.dummy) d.stateForeign.fetch_add(1, std::memory_order_relaxed);
     if (d.retired || FAILED(hr) || !data) return hr;
     guardedBudget(g_budgetDi, [&] {
-        if (!isKeyboard<Wide>(d, self)) return;
+        const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
+        const bool isKbd = isKeyboard<Wide>(d, self);
+        const bool isInputDev = pluginBlock && isInputDevice<Wide>(d, self);
+        if (!isKbd && !isInputDev) return;
         d.stateKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
-        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || g_pluginBlock.load(std::memory_order_relaxed);
+        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || pluginBlock;
         int vk = 0;
         uint8_t dik = 0;
         uint32_t mods = 0;
@@ -300,10 +317,13 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     if (d.retired || FAILED(hr) || !rgdod || !inOut || *inOut == 0) return hr;
     if (cbObj != sizeof(DIDEVICEOBJECTDATA)) return hr;   // a layout this was not written for
     guardedBudget(g_budgetDi, [&] {
-        if (!isKeyboard<Wide>(d, self)) return;
+        const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
+        const bool isKbd = isKeyboard<Wide>(d, self);
+        const bool isInputDev = pluginBlock && isInputDevice<Wide>(d, self);
+        if (!isKbd && !isInputDev) return;
         d.dataKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
-        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || g_pluginBlock.load(std::memory_order_relaxed);
+        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || pluginBlock;
         int vk = 0;
         uint8_t dik = 0;
         uint32_t mods = 0;
@@ -515,7 +535,7 @@ struct CaptureLock {
 template <size_t... I>
 void captureKeyboard(void* device, std::index_sequence<I...>) {
     DiDoor unknown;
-    if (!isKeyboard<false>(unknown, device)) return;
+    if (!isInputDevice<false>(unknown, device)) return;
     static const PFN_GetDeviceState stateHooks[] = {&gameDeviceState<I>...};
     static const PFN_GetDeviceData dataHooks[] = {&gameDeviceData<I>...};
     CaptureLock lock;
