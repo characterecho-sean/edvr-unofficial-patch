@@ -281,7 +281,22 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) unpackSummon(packed, &vk, &dik, &mods);
         if (priv) {
-            memset(data, 0, cb);
+            if (isKbd && cb == 256) {
+                memset(data, 0, cb);
+            } else if (cb >= sizeof(DIJOYSTATE)) {
+                // Joystick / HOTAS: Clear buttons and reset POV hats to unpressed (-1 / 0xFFFFFFFF)
+                // Axes (lX, lY, lZ, etc.) are left untouched to prevent center snapping.
+                auto* js = static_cast<DIJOYSTATE*>(data);
+                memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
+                for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
+                if (cb >= sizeof(DIJOYSTATE2)) {
+                    auto* js2 = static_cast<DIJOYSTATE2*>(data);
+                    memset(js2->rgbButtons, 0, sizeof(js2->rgbButtons));
+                    for (int p = 0; p < 4; ++p) js2->rgdwPOV[p] = 0xFFFFFFFFu;
+                }
+            } else {
+                memset(data, 0, cb);
+            }
             d.zeroed.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -334,8 +349,28 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
         static_assert(sizeof(DiObjectData) == sizeof(DIDEVICEOBJECTDATA),
                       "DiObjectData mirrors DIDEVICEOBJECTDATA");
         const uint32_t before = *inOut;
-        uint32_t kept = inputGateFilterData(reinterpret_cast<DiObjectData*>(rgdod),
-                                                  before, priv, dik, swallow);
+        uint32_t kept = 0;
+        if (isKbd) {
+            kept = inputGateFilterData(reinterpret_cast<DiObjectData*>(rgdod),
+                                       before, priv, dik, swallow);
+        } else if (priv) {
+            // For joystick / HOTAS buffered device data:
+            // Filter button down/up events and POV hat changes, but let axis updates pass through
+            constexpr DWORD kPovOffset0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
+            constexpr DWORD kPovOffset3 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[3]));
+            constexpr DWORD kButtonOffset0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
+            constexpr DWORD kButtonOffset31 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[31]));
+            for (uint32_t i = 0; i < before; ++i) {
+                const auto& ev = rgdod[i];
+                bool isBtnOrPov = (ev.dwOfs >= kButtonOffset0 && ev.dwOfs <= kButtonOffset31) ||
+                                  (ev.dwOfs >= kPovOffset0 && ev.dwOfs <= kPovOffset3 + sizeof(DWORD));
+                if (!isBtnOrPov) {
+                    rgdod[kept++] = ev; // Keep axis events
+                }
+            }
+        } else {
+            kept = before;
+        }
         if (g_releaseTail.load()) {
             uint32_t out = 0;
             for (uint32_t i = 0; i < kept; ++i) {
