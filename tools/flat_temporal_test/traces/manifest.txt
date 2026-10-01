@@ -50,3 +50,24 @@ flat_trace_60043.bin 3 stock-onfoot-station-ss050-dlss
 # frame) in the corpus, recorded UNKEYED; the re-key replay in the self-test
 # takes them under the keyed table. "selected": every frame must replay Selected.
 flat_trace_67594.bin 3 epic-menu-krait-ss075-dlss selected static
+# The four captures of design section 81 (the HDR route): Epic install 2026-09-30
+# 09:23-09:26 local, build v0.18.0-rc.4-33-gc2a06a98 (trace format EDVRFTR3),
+# EDHM chained, DLSS, game supersampling 1.0 (R=D=3840x2160), game AA off. "on" is
+# Elite's Bloom 3 and DoF 2, "off" both 0. "star" is the cockpit facing a bright
+# star, "hangar" the 3D main menu. Cut to the frames the HDR-route rigs pin with
+# `flat_temporal_test --trace-trim <capture> <out> <frames>` (the untrimmed
+# captures are 6.2 MB, 12 frames); the kept frames' headers and events are the
+# capture's own, so each replays to the contract hash it was recorded with.
+# `--trace-chain <file>` prints what the trigger detector finds in each frame.
+# The bloom and DoF frames are refused by the copy route (no-known-tone-pass):
+# they are not marked "selected", and the HDR route selects every one.
+# star, bloom and DoF on: frames 85543 (a trigger 53 events after H's last draw)
+# and 85814 (2 after).
+flat_trace_85998.bin 2 hdr-star-bloom-dof-on
+# hangar, bloom and DoF on: 86701 is a 2D menu frame with no scene (no H, no
+# trigger: the pin for "none in a 2D menu"), 86970 the 3D hangar.
+flat_trace_87229.bin 2 hdr-hangar-bloom-dof-on-and-2d-menu
+# star, off: the copy route treats it too; the trigger is the tone pass.
+flat_trace_45737.bin 2 hdr-star-off selected
+# hangar, off: the trigger is the game's copy of H (DEF19B03/DED87960).
+flat_trace_39788.bin 1 hdr-hangar-off selected static

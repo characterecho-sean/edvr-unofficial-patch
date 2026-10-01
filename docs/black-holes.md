@@ -15,6 +15,12 @@ State, 2026-09-30: opened. No flight flown, nothing in the game identified, no
 rendering code written. Done: the physics, as a tool with a self-test in the
 build gate, and previews of the shader's own algorithm.
 
+- **First target, Sean 2026-09-30: Sagittarius A* alone**, majestic and as
+  physically accurate as current knowledge allows. Its design, with rendered
+  images: `docs\design-sagittarius-a-2026-09-30.md`. Flight 1 below still comes
+  first and still flies at HIP 63835: it identifies the draw, and the design
+  develops there with Sgr A* posed on the nearby hole, so only the last flight
+  goes 25,900 ly. The stellar holes follow on the same machinery.
 - Goal: in place of the blob, the shadow at its true size for the distance, the
   photon ring, the whole sky lensed with its secondary image, correct in each
   eye; for feeding holes, a thin disk with its Doppler and gravitational

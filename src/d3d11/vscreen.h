@@ -107,6 +107,18 @@ inline bool eyeShapedAtScale(uint32_t w, uint32_t h, uint32_t eyeW, uint32_t eye
 // is the same "disable yourself" answer it already acted on.
 bool vScreenIsEyeSized(uint32_t w, uint32_t h);
 
+// Elite's Supersampling below 1.0, from the sizes (design section 83, the VR warning; src/common/vr_supersample_notice.h): true
+// once the world was found rendered under 98% of the eye's width and height, with the measured render size and the eye's. The
+// measurement is the one this module already makes for the render-scale adoption (the render target the scene's draws go into,
+// against the size the headset is handed), never Elite's settings file, and a flat session has no eye texture and never sets it.
+// Any thread. The menu says it in the headset (a toast once, a Status line, a note on the settings pages).
+bool vScreenRenderBelowEye(uint32_t* renderW, uint32_t* renderH, uint32_t* eyeW, uint32_t* eyeH);
+
+// The draws into eye-sized colour targets this frame so far, BOTH eyes through the one counter (the draw hooks' eye branch). The
+// frame's submits come before its Present, so a door asked at Submit reads the whole frame's count. The on-foot maps gate's door
+// (ui_layer.cpp uiLayerDoorLayerOnly) compares it with the draws the layer took: when every one was taken the eye holds nothing else.
+uint32_t vScreenEyeDrawsThisFrame();
+
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and
 // puts the game's bindings back before anything else looks (ui_depth binds

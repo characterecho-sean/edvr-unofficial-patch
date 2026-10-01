@@ -130,13 +130,14 @@ std::string formatOpenxrResolutionReport(const OpenxrResolutionReport& report) {
         return line;
     }
     line += "this headset is " + key + " " + who + "; ";
+    const std::string file = report.settingsFile ? report.settingsFile : edvr::kIniNameVr;
     if (!report.matched) {
-        line += "edvr.ini has no entry for it, so it runs at 100% = " + dimensions(w, h) + " per eye (" + mp + "). Saved: " + saved +
+        line += file + " has no entry for it, so it runs at 100% = " + dimensions(w, h) + " per eye (" + mp + "). Saved: " + saved +
                 ". Set it in F8 > Performance with this headset on, or add \"" + key + ":<width>\" to fix.openxr_resolution (" +
                 number(recW) + " is 100%).";
         return line;
     }
-    line += "edvr.ini sets it to " + number(width) + " wide ";
+    line += file + " sets it to " + number(width) + " wide ";
     if (report.matched == 2) line += "from the runtime-only entry " + report.runtimeToken + ":" + number(width) + " ";
     line += "= " + dimensions(w, h) + " per eye (" + mp + ", " + formatPercent(effective * 100.f) + "% of the runtime's " +
             dimensions(recW, recH);
@@ -211,6 +212,7 @@ extern "C" BOOL WINAPI edvrQueryNativeRenderSettings(uint32_t version,
     report.matched = matched;
     report.width = resolved;
     report.eyes = in.eyes;
+    report.settingsFile = edvr::Config::get().iniName();
     const std::string line = formatOpenxrResolutionReport(report);
     edvr::Log::get().note("%s", line.c_str());
     return TRUE;

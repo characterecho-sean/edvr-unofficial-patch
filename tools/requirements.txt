@@ -1,0 +1,5 @@
+# The Python packages beyond the standard library that the build's gate and
+# analysis tools import.
+# Install them with:  pip install -r tools\requirements.txt
+numpy
+Pillow

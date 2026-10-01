@@ -166,6 +166,9 @@ python tools\check_status_blocks.py --self-test || exit /b 1
 python tools\check_status_blocks.py || exit /b 1
 REM The physics the black-hole shader is held to (docs\black-holes.md).
 python tools\blackhole_optics.py --self-test || exit /b 1
+REM Kerr optics and the hot flow the Sagittarius A* design is held to
+REM (docs\design-sagittarius-a-2026-09-30.md).
+python tools\sgra_optics.py --self-test || exit /b 1
 REM The guard tools\run_jobs.py holds every rig to (no window, no console, no
 REM move of the keyboard focus); its own self-test, run below with the rigs,
 REM starts it on real processes, so this one fails first and fast.
@@ -493,10 +496,12 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
+    "src\d3d11\stall_watch.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" ^
+    "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_fss.cpp" ^
@@ -506,12 +511,13 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\gpu_census.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
+    "src\d3d11\format_support_log.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\pose_reader_watch.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
-    "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\journal_watch.cpp" ^
@@ -543,10 +549,10 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\quad_probe.cpp" ^
     "src\d3d11\intro_probe.cpp" ^
     "src\d3d11\intro_panel.cpp" ^
+    "src\d3d11\intro_curve.cpp" ^
     "src\d3d11\intro_skip.cpp" ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
-    "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
@@ -680,7 +686,7 @@ set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
-    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test,stall_sampler_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
@@ -920,6 +926,26 @@ if errorlevel 1 ( echo [edvr] ERROR: dlaa_mode_test build failed & exit /b 1 )
 "%BUILD%\dlaa_mode_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_format_support_test
+REM The device capability log (src\d3d11\format_support_log.h): its pure decode, line
+REM formats and lock-free ledger; the two vtable slots the device hook patches, held
+REM against the SDK's ID3D11DeviceVtbl; and, in an owned child process, the very hook
+REM bodies on a real WARP device with the real log, every answer with the hook compared
+REM with the answer without it. Built outside %BUILD%, where it can only ever load
+REM System32's d3d11.dll, never the proxy beside the game DLLs.
+if not exist "%OBJ%\formatsupport" mkdir "%OBJ%\formatsupport"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\formatsupport\\" ^
+    /Fe"%OBJ%\formatsupport\format_support_test.exe" ^
+    "tools\format_support_test\format_support_test.cpp" "tools\format_support_test\device_slots.cpp" ^
+    "src\d3d11\format_support_log.cpp" "src\common\vtable_hook.cpp" "src\common\guard.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: format_support_test build failed & exit /b 1 )
+"%OBJ%\formatsupport\format_support_test.exe" --dry-run || exit /b 1
+"%OBJ%\formatsupport\format_support_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_native_temporal_test
 echo [edvr] === native_temporal_test.exe ===
 if not exist "%OBJ%\native_temporal" mkdir "%OBJ%\native_temporal"
@@ -932,6 +958,9 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: native temporal test build failed & exit /b 1 )
 "%BUILD%\native_temporal_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_temporal_test.exe" --self-test || exit /b 1
+REM The jitter phase count (experimental.temporal_aa_jitter_follows_upscale): the same channel code flown through a script of modes, sizes
+REM and live key flips in a process of its own, because the provider's channel pool holds sixteen and --self-test uses them all.
+"%BUILD%\native_temporal_test.exe" --phase-count-self-test || exit /b 1
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_gpu_test.exe" ^
@@ -1074,6 +1103,87 @@ if errorlevel 1 ( echo [edvr] ERROR: crash_context_test build failed & exit /b 1
 "%BUILD%\crash_context_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_freeze_log_test
+echo [edvr] === freeze_log_test.exe ===
+REM Build gate for the freeze logging (src\common\freeze_book.h, src\openxr\long_cycle_line.h,
+REM docs\freeze-diagnostics-2026-10-01.md, issue 63): the size buckets, the judge that tells a one-frame
+REM Present-gap blip from a stall by the runtime's cycle, the write rule (a frame of 250 ms or more always
+REM has its line), the book's counts and worst list, the runtime's rate limit and its three new lines, and by
+REM source text that the glue in perf_monitor.cpp, native_runtime_host.h and native_timing.cpp still calls them.
+REM It links nothing of the DLLs. tools\freeze_log_test\mutants.py --self-test holds the mutation list to the
+REM sources as they are; --run builds the rig against each edit and needs the MSVC toolchain.
+if not exist "%OBJ%\freezelog" mkdir "%OBJ%\freezelog"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" /I"src\openxr" ^
+    /Fo"%OBJ%\freezelog"\ /Fe"%OBJ%\freezelog\freeze_log_test.exe" ^
+    "tools\freeze_log_test\freeze_log_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: freeze_log_test build failed & exit /b 1 )
+"%OBJ%\freezelog\freeze_log_test.exe" --dry-run || exit /b 1
+"%OBJ%\freezelog\freeze_log_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\freeze_log_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_heartbeat_writer_test
+echo [edvr] === heartbeat_writer_test.exe ===
+REM Build gate for the breadcrumb heartbeat's writer thread (src\common\heartbeat_writer.h, src\common\proxy.cpp,
+REM docs\freeze-diagnostics-2026-10-01.md, issue 63): the heartbeat's file write is off the render thread, and the
+REM file still MEANS what it meant. The sink never runs on the posting thread and a sink stuck for 600 ms does not
+REM slow post(); a writer held up writes the newest post and never an older one after a newer; it writes nothing of
+REM its own (a hung render thread stops the heartbeat); a record is whole; close and closeAndDrain drop what is
+REM pending and wait, for a bounded time, for what has begun; through the real breadcrumbHeartbeat and the real
+REM breadcrumb file; a child that crashes (the file's last line is the crash filter's, never a heartbeat) and one
+REM that is killed (the last line is a whole heartbeat); and by source text that the render thread's function
+REM writes no file and DllMain and the crash filter close the heartbeat before their closing lines. The rig's
+REM exe lives in its own obj directory so edvr_breadcrumbs.txt, which is written beside the exe, is its own.
+REM tools\heartbeat_writer_test\mutants.py --self-test holds the mutation list to the sources as they are.
+if not exist "%OBJ%\heartbeat" mkdir "%OBJ%\heartbeat"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
+    /Fo"%OBJ%\heartbeat"\ /Fe"%OBJ%\heartbeat\heartbeat_writer_test.exe" ^
+    "tools\heartbeat_writer_test\heartbeat_writer_test.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: heartbeat_writer_test build failed & exit /b 1 )
+"%OBJ%\heartbeat\heartbeat_writer_test.exe" --dry-run || exit /b 1
+"%OBJ%\heartbeat\heartbeat_writer_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\heartbeat_writer_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_stall_sampler_test
+if "%EDVR_RIG_STEP%"=="run" goto stall_sampler_test_run
+echo [edvr] === stall_sampler_test.exe ===
+REM Build gate for the stall sampler (src\common\stall_sampler.h, src\d3d11\stall_watch.cpp,
+REM docs\freeze-diagnostics-2026-10-01.md, issue 63): the REAL capture, walk and naming code against threads the rig
+REM blocks in places it knows -- a Sleep, a wait, a busy loop in this exe, a busy loop in stall_target.dll (so a
+REM module that is not the exe is named), a stack 21 KB deep that uses RBP as its frame register -- and that the
+REM thread it stopped is ALWAYS running again (a failed context read, a stack pointer outside the stack, an exited
+REM thread, three hundred stops in a row); that the walk reads the COPY (the thread has run on and overwritten the
+REM stack, and the sample still names its frames); the watchdog end to end on a real clock (1.3 s of stall, three
+REM samples at 150/500/1000 ms); the policy on a fake one (thresholds, rate limit, session cap); and by source text
+REM that no injection-shaped API appears and the window between the stop and the resume is straight-line. It holds
+REM wall-clock intervals against a real thread, so it is a --quiet rig: its compiles run in the pool and its run
+REM alone, after the others. tools\stall_sampler_test\mutants.py --self-test holds the mutation list to the sources
+REM as they are; --run builds the rig against each edit (about four minutes, serial: it is judged by the clock).
+if not exist "%OBJ%\stallsampler" mkdir "%OBJ%\stallsampler"
+cl.exe /nologo /O2 /MT /LD /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\stallsampler"\ /Fe"%OBJ%\stallsampler\stall_target.dll" ^
+    "tools\stall_sampler_test\stall_target_dll.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: stall_target.dll build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
+    /Fo"%OBJ%\stallsampler"\ /Fe"%OBJ%\stallsampler\stall_sampler_test.exe" ^
+    "tools\stall_sampler_test\stall_sampler_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: stall_sampler_test build failed & exit /b 1 )
+if "%EDVR_RIG_STEP%"=="build" exit /b 0
+:stall_sampler_test_run
+"%OBJ%\stallsampler\stall_sampler_test.exe" --dry-run || exit /b 1
+"%OBJ%\stallsampler\stall_sampler_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\stall_sampler_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_flat_temporal_test
 echo [edvr] === flat_temporal_test.exe ===
 if not exist "%OBJ%\flattemporaltest" mkdir "%OBJ%\flattemporaltest"
@@ -1083,7 +1193,50 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: flat temporal test build failed & exit /b 1 )
+REM --write-fixture regenerates tools\flat_upscale_fixture.log (design doc section 83); anything that writes a file takes --dry-run,
+REM and --dry-run writes nothing at all.
+"%BUILD%\flat_temporal_test.exe" --write-fixture "%OBJ%\flattemporaltest\never_written.log" --dry-run || exit /b 1
+if exist "%OBJ%\flattemporaltest\never_written.log" ( echo [edvr] ERROR: flat_temporal_test --write-fixture --dry-run wrote a file & exit /b 1 )
 "%BUILD%\flat_temporal_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_vr_world_route_test
+echo [edvr] === vr_world_route_test.exe ===
+REM The VR on-foot world route (design doc section 82): the pure half, the detector's glue on the census retake's chain, the
+REM key-off contract and the hook pins. Pure C++ and source scans: no D3D.
+REM The curved route's pins (a curved screen does not hold the route off; the curve is named in the 5 s line and the OWNS line) hold
+REM their own controls: copies of the source with one edit that must trip the pin. tools\vr_world_route_test\mutants.py --self-test
+REM holds the mutation list of this rig, of vr_world_route_gpu_test and of ui_layer_world_test below to the sources as they are; its
+REM --run (on demand) builds each rig against one edited production file and requires a check that names the edit to fail. Its wiring rig
+REM (--run --rig wiring) proves the surface strip's wiring pins (:rig_ui_quality_test, --wiring) on edited copies of vscreen.cpp, in seconds.
+if not exist "%OBJ%\vrworldroutetest" mkdir "%OBJ%\vrworldroutetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrworldroutetest"\ ^
+    /Fe"%BUILD%\vr_world_route_test.exe" "tools\vr_world_route_test\vr_world_route_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vr world route test build failed & exit /b 1 )
+"%BUILD%\vr_world_route_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\vr_world_route_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_vr_world_route_gpu_test
+echo [edvr] === vr_world_route_gpu_test.exe ===
+REM The VR world route's runtime (vr_world_route.cpp, linked as shipped) on WARP: the real binding shadow, the real Config and
+REM the real flat resolver with its backends stubbed, a synthetic copy of the census retake's chain drawn through the same
+REM per-draw entry the hooks call. Key off, the happy path, every refusal, the internal flags, the latch, scene resets,
+REM frame gaps and the key going off while owned. The curved screen's scenarios (the route runs with fix.panel_curvature above 0, and
+REM its lines name the curve) are held by tools\vr_world_route_test\mutants.py (its --run builds this rig against an edited route).
+if not exist "%OBJ%\vrworldroutegpu" mkdir "%OBJ%\vrworldroutegpu"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\vrworldroutegpu\\" ^
+    /Fe"%BUILD%\vr_world_route_gpu_test.exe" "tools\vr_world_route_gpu_test\vr_world_route_gpu_test.cpp" ^
+    "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\flat_mono_resolve.cpp" ^
+    "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
+    "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: vr world route GPU test build failed & exit /b 1 )
+"%BUILD%\vr_world_route_gpu_test.exe" --dry-run || exit /b 1
+"%BUILD%\vr_world_route_gpu_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_flat_mono_resolve_test
@@ -1142,6 +1295,58 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: c2 coexist test build failed & exit /b 1 )
 "%BUILD%\c2_coexist_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_vr_camera_census_test
+echo [edvr] === vr_camera_census_test.exe ===
+REM The VR camera census (design doc section 82): the pure half the DLL compiles, run against the derive model, plus the
+REM source scans that hold "key off = nothing" and "the detour never writes a camera" (they read src\d3d11 from the repo
+REM root), plus tools\camera_census_fixture.log held to exactly what the formatters write -- the file that
+REM edvr_log.py --camera-census's own self-test reads.
+if not exist "%OBJ%\vrcamcensus" mkdir "%OBJ%\vrcamcensus"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrcamcensus\\" ^
+    /Fe"%BUILD%\vr_camera_census_test.exe" "tools\vr_camera_census_test\vr_camera_census_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vr camera census test build failed & exit /b 1 )
+"%BUILD%\vr_camera_census_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_vr_camera_census_glue_test
+echo [edvr] === vr_camera_census_glue_test.exe ===
+REM The census's glue (src\d3d11\vr_camera_census.cpp) compiled for real with the real Config and Log, and stubs for what it
+REM calls (the injector, the world route's draw progress, the journal, EDVR's advertised eye geometry): the observer's two
+REM halves against cameras built by the game-camera derive model (no allocation, not one byte written), the boundary's
+REM order, the eye draw's staging readback on a WARP device, the key-off path, the bounded log -- and then
+REM tools\edvr_log.py --camera-census over the log the glue wrote, which must find the two eye cameras by the content
+REM join. Needs python on PATH; runs from the repo root; takes about six seconds (one 5 s window is waited out).
+if not exist "%OBJ%\vrcamcensusglue" mkdir "%OBJ%\vrcamcensusglue"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\vrcamcensusglue\\" ^
+    /Fe"%BUILD%\vr_camera_census_glue_test.exe" "tools\vr_camera_census_glue_test\vr_camera_census_glue_test.cpp" ^
+    "src\d3d11\vr_camera_census.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vr camera census glue test build failed & exit /b 1 )
+"%BUILD%\vr_camera_census_glue_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_camera_vr_test
+echo [edvr] === flat_camera_vr_test.exe ===
+REM The VR world route's camera injection mode (design doc section 82, stage 2): the pure half the detour runs
+REM (src\d3d11\flat_camera_vr.h: the role of a kind-3 camera, the admission, the flush, the counters, the mode word) run
+REM exhaustively and through scripted call sequences -- the camera-object reuse scenario among them -- plus the source pins
+REM that hold the detour to it (src\d3d11\flat_camera_inject.cpp: the flat profile's regions byte-for-byte, the order of a
+REM call's steps, no write reachable from a pass-through or observe-only call). The pins read src\d3d11 from the repo root
+REM (the rig takes the root as its argument). tools\flat_camera_vr_test\mutants.py --self-test holds the mutation list to
+REM the sources as they are; the list itself (--run, on demand, about a minute) proves the rig fails when each rule is flipped.
+if not exist "%OBJ%\flatcameravr" mkdir "%OBJ%\flatcameravr"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\flatcameravr\\" ^
+    /Fe"%BUILD%\flat_camera_vr_test.exe" "tools\flat_camera_vr_test\flat_camera_vr_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat camera vr test build failed & exit /b 1 )
+"%BUILD%\flat_camera_vr_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\flat_camera_vr_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_config_test
@@ -1303,6 +1508,12 @@ if errorlevel 1 ( echo [edvr] ERROR: temporal_test build failed & exit /b 1 )
     echo [edvr] ERROR: the temporal pass's arithmetic is wrong
     exit /b 1
 )
+REM The jitter phase count (experimental.temporal_aa_jitter_follows_upscale, 2026-10-01) is pinned by this rig (the rule's table and
+REM the fixed eight's bit-for-bit sameness), flat_temporal_test (the phase machine and the route decision), vr_world_route_test (the
+REM window token) and native_temporal_test --phase-count-self-test (the VR eye pass flown on WARP). The self-test below holds the
+REM mutation list that proves those rigs fail on a broken source to the sources as they are and to the way build.bat compiles each
+REM rig; its --run (on demand) builds each against one edited production file. Drop it with the key.
+python "tools\temporal_test\jitter_phase_mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_ui_depth
@@ -1438,19 +1649,23 @@ if errorlevel 1 ( echo [edvr] ERROR: stellar motion test build failed & exit /b 
 "%OBJ%\stellarmotion\stellar_motion_test.exe" || exit /b 1
 exit /b 0
 
-:rig_terrain_motion
-echo [edvr] === terrain motion regression ===
-if not exist "%OBJ%\terrainmotion" mkdir "%OBJ%\terrainmotion"
-cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\terrainmotion\\" /Fe"%OBJ%\terrainmotion\celestial_motion_test.exe" ^
-    "tools\celestial_motion_test\celestial_motion_test.cpp" ^
-    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: terrain motion test build failed & exit /b 1 )
-"%OBJ%\terrainmotion\celestial_motion_test.exe" || exit /b 1
-python "tools\terrain_motion.py" --self-test || exit /b 1
-python "tools\terrain_motion.py" "%OBJ%\terrainmotion\eye_fixture_Terrain.bin" --verify-fixture || exit /b 1
+:rig_terrain_retired_test
+echo [edvr] === terrain retirement A/B ===
+REM The proof of the 2026-10-01 retirement of advanced.terrain_motion (docs\terrain-motion-dispatch-cost-2026-09-17.md): the
+REM temporal compute shader before the cut, rebuilt from the current text and the removed fragments, and after it, run on WARP over
+REM scenes that carry terrain-like pixels, give byte-identical outputs for both entries with probe.w bit 8 clear -- every player
+REM without the key. It compiles the shader twelve ways on twelve threads (the `main` entry alone is about 20 s in fxc) and runs
+REM about 20 s. It exists for that one edit and goes when its anchors move (the rig says so); --verify-old, run once by hand with the
+REM pre-retirement file, ties the rebuilt reference to the real old text.
+if not exist "%OBJ%\terrainretired" mkdir "%OBJ%\terrainretired"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\terrainretired\\" /Fe"%OBJ%\terrainretired\terrain_retired_test.exe" ^
+    "tools\terrain_retired_test\terrain_retired_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: terrain retirement test build failed & exit /b 1 )
+"%OBJ%\terrainretired\terrain_retired_test.exe" --dry-run || exit /b 1
+"%OBJ%\terrainretired\terrain_retired_test.exe" || exit /b 1
 exit /b 0
 
 :rig_depth_scene_pick_test
@@ -1678,6 +1893,64 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: GPU census test build failed & exit /b 1 )
 "%OBJ%\gpucensus\gpu_census_test.exe" --dry-run || exit /b 1
 "%OBJ%\gpucensus\gpu_census_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_vr_world_mips_test
+REM The VR on-foot world route's mipped screen (design doc section 82, src\d3d11\vr_world_mips.cpp): a real D3D11 WARP
+REM device, the production module linked in as a source, away from build\d3d11.dll. The rig takes System32's device through
+REM src\common\system_d3d11.h, so it links without d3d11.lib, and its exe sits under obj\, not directly in build\.
+REM tools\vr_world_mips_test\mutants.py --self-test holds the rig's mutation list to the source as it is; the list itself
+REM (--run, on demand, about a minute) proves the rig fails when each rule of the module is flipped.
+if not exist "%OBJ%\vrworldmips" mkdir "%OBJ%\vrworldmips"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\vrworldmips\\" /Fe"%OBJ%\vrworldmips\vr_world_mips_test.exe" ^
+    "tools\vr_world_mips_test\vr_world_mips_test.cpp" "src\d3d11\vr_world_mips.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: vr_world_mips_test build failed & exit /b 1 )
+"%OBJ%\vrworldmips\vr_world_mips_test.exe" --dry-run || exit /b 1
+"%OBJ%\vrworldmips\vr_world_mips_test.exe" --self-test || exit /b 1
+python "tools\vr_world_mips_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_vscreen_fit_test
+echo [edvr] === vscreen_fit_test.exe ===
+REM fix.vscreen_res_width = auto, fitted to what each eye shows (design doc section 82, the "vscreen auto-fit" entry): the pure half
+REM (src\common\vscreen_fit.h) run by the very code the DLL runs -- the rule, the route's conditions, the footprint geometry, the stored
+REM record, the log's text -- plus the state files on disk (src\common\vscreen_auto_state.cpp) and the source pins that hold the resolver,
+REM the instrument's hook and its D3D calls to what the pure half assumes (they read src\ and edvr.ini from the repo root, which the rig
+REM takes as its argument). tools\vscreen_fit_test\mutants.py --self-test holds the rig's mutation list to the sources as they are; the
+REM list itself (--run, on demand, about a minute) proves the rig fails when each rule of the header or each wiring pin is flipped.
+if not exist "%OBJ%\vscreenfit" mkdir "%OBJ%\vscreenfit"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\vscreenfit\\" /Fe"%OBJ%\vscreenfit\vscreen_fit_test.exe" ^
+    "tools\vscreen_fit_test\vscreen_fit_test.cpp" "src\common\vscreen_auto_state.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vscreen_fit_test build failed & exit /b 1 )
+"%OBJ%\vscreenfit\vscreen_fit_test.exe" --dry-run || exit /b 1
+"%OBJ%\vscreenfit\vscreen_fit_test.exe" --dry-run --write-fixture "%OBJ%\vscreenfit\never_written.log" || exit /b 1
+if exist "%OBJ%\vscreenfit\never_written.log" ( echo [edvr] ERROR: vscreen_fit_test --dry-run --write-fixture wrote a file & exit /b 1 )
+"%OBJ%\vscreenfit\vscreen_fit_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\vscreen_fit_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_vscreen_footprint_glue_test
+echo [edvr] === vscreen_footprint_glue_test.exe ===
+REM The footprint instrument's glue (src\d3d11\vscreen_footprint.cpp; design doc section 82, the "vscreen auto-fit" entry) compiled for
+REM real with the real Config, Log and fault guard, and stubs for what it calls (the runtime's published eye size, the hooks' bypass
+REM flag): the four sources a composite draw binds (the model rows, the clip rows at their real offsets, the quad, the SIZE record) on a
+REM WARP device read back through the staging copy and the DO_NOT_WAIT map, the 30 s line, the stored median, the sources that are not
+REM what the measurement assumes, the fault budget -- and then tools\edvr_log.py --vscreen-fit over the log the glue wrote. Needs python
+REM on PATH; runs from the repo root; takes about a second. Its exe sits under obj\ and it takes System32's device through
+REM src\common\system_d3d11.h, so it links without d3d11.lib.
+if not exist "%OBJ%\vscreenfpglue" mkdir "%OBJ%\vscreenfpglue"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
+    /Fo"%OBJ%\vscreenfpglue\\" /Fe"%OBJ%\vscreenfpglue\vscreen_footprint_glue_test.exe" ^
+    "tools\vscreen_footprint_glue_test\vscreen_footprint_glue_test.cpp" "src\d3d11\vscreen_footprint.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: vscreen_footprint_glue_test build failed & exit /b 1 )
+"%OBJ%\vscreenfpglue\vscreen_footprint_glue_test.exe" --dry-run || exit /b 1
+"%OBJ%\vscreenfpglue\vscreen_footprint_glue_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_openvr_abi_test
@@ -2561,7 +2834,14 @@ REM jittered quad through the redirected viewport lands on the unjittered
 REM pixels at all eight Halton phases; blended draws composited equal the same
 REM draws into the frame, a multiply included; a stencil-tested quad drawn
 REM against the layer's seeded copy of a stencil the game wrote matches the
-REM same quad drawn into the frame; the 1.25 box filter; the debug view.
+REM same quad drawn into the frame; the 1.25 box filter; the debug view. The
+REM after-UI identity (ui_after_ui_test.h, 2026-09-30): the follow through the
+REM game's post pass as a truth table; the recorded post-tonemap tails of two
+REM field censuses (station services, and the game's menu over it) routed
+REM through the real family rule, decide, gate and follow -- no interface draw
+REM left under the layer -- and composited stock against layered on the CPU
+REM blend model; the known limit pinned; and a scan of src\d3d11\ui_layer.cpp
+REM (the rig runs from the repo root) for the order the routing model assumes.
 if not exist "%OBJ%\uiqualitytest" mkdir "%OBJ%\uiqualitytest"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS ^
@@ -2583,6 +2863,144 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: ui layer seed test build failed & exit /b 1 )
 "%OBJ%\uilayerseed\seed_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_ui_layer_world_test
+echo [edvr] === ui_layer_world_test.exe ===
+REM The VR on-foot world route's layer half (docs\design-flat-temporal-aa-2026-09-23.md, section 82) with
+REM src\d3d11\ui_layer.cpp linked WHOLE, on WARP: its neighbours (the binding shadow, the route, the mips module,
+REM the raw OM/RS entries, the journal) are stubs in the rig, the layer's own machinery is the production code. The
+REM route's mode is never a take; the re-issue draws the screen composite into the eye's layer from the mipped
+REM screen through the trilinear sampler (a mip chain of one flat colour a level shows which level the map's
+REM minification selects) and the composite of that layer over a frame is the eye; every changed state comes back
+REM after a landed re-issue and after every refusal; every refusal is counted by reason and tells the route
+REM nothing; the raw entries run with the route's internal scope up. A curved screen's draw (the curve substitution's strip) is
+REM planned like a flat one, and a re-issue that did not land takes no eye (held by tools\vr_world_route_test\mutants.py --run).
+REM Built outside build\ like the seed rig above.
+if not exist "%OBJ%\uilayerworld" mkdir "%OBJ%\uilayerworld"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\uilayerworld\\" /Fe"%OBJ%\uilayerworld\ui_layer_world_test.exe" ^
+    "tools\ui_layer_world_test\ui_layer_world_test.cpp" "src\d3d11\ui_layer.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui layer world test build failed & exit /b 1 )
+"%OBJ%\uilayerworld\ui_layer_world_test.exe" --dry-run || exit /b 1
+"%OBJ%\uilayerworld\ui_layer_world_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_on_foot_maps_test
+echo [edvr] === on_foot_maps_test.exe ===
+REM The on-foot maps gate (experimental.on_foot_maps_sharp; docs\design-world-camera-motion-2026-09-30.md, Phase 1): the pure
+REM half, src\d3d11\ui_maps_math.h, compiled alone -- the key, the step (2 named frames hold the panel as the world, 3 unnamed
+REM release it), flight 1's runs replayed (13,044 named, 1,597 unnamed, 98, 929: a hold and four flips), the gate's combine with
+REM the key off held to a frozen copy of today's journal-OR-depth for every input, the carry, the door's predicate and the text of
+REM every line -- plus the source pins from the repo root (the key-off contract: nothing new is read, counted, logged or issued
+REM with the key off; the recognition's two call sites; the one place the naming is told). tools\on_foot_maps_test\mutants.py
+REM --self-test holds the mutation list to the header as it is; the list itself (--run, on demand, about a minute) proves the rig
+REM fails when each rule is flipped. Pure C++ and source scans: no D3D.
+if not exist "%OBJ%\onfootmaps" mkdir "%OBJ%\onfootmaps"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" /Fo"%OBJ%\onfootmaps"\ ^
+    /Fe"%BUILD%\on_foot_maps_test.exe" "tools\on_foot_maps_test\on_foot_maps_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: on foot maps test build failed & exit /b 1 )
+"%BUILD%\on_foot_maps_test.exe" --dry-run || exit /b 1
+"%BUILD%\on_foot_maps_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\on_foot_maps_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_panel_curve_test
+echo [edvr] === panel_curve_test.exe ===
+REM The curved screen's strip (src\d3d11\panel_curve.cpp; fix.panel_curvature) compiled for real with the real Config, Log and fault
+REM guard, and stubs for what it calls (the binding shadow's resolver, the screen's motion pass): on a WARP device with the game's
+REM state bound (the canonical quad and its index pattern at their offsets, the SIZE record, the placement constants, a sampler,
+REM the rasterizer state) and a recording draw function, the substitution and the VR world route's re-issue of the same strip are
+REM compared draw for draw: the arguments, the input assembler state at the draw, the buffer bytes against an independent bend,
+REM the motion pass's curve, the game's state put back (canonical, odd and empty), a live config change, a table of curvature by
+REM columns by sign by gain, the one-column identity strip against the game's quad, the SIZE read after its 50 ms lag (the clock
+REM is stepped, not slept), a faulting draw standing the feature down, panelCurveInfo() and the shutdown, and the rest of the
+REM pipeline left alone. tools\panel_curve_test\mutants.py --self-test holds the mutation list to the sources as they are; the
+REM list itself (--run, on demand, about a minute) proves the rig fails when each rule of the module is flipped. Built under obj\
+REM and taking System32's device through src\common\system_d3d11.h, so it links without d3d11.lib.
+if not exist "%OBJ%\panelcurve" mkdir "%OBJ%\panelcurve"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\panelcurve\\" /Fe"%OBJ%\panelcurve\panel_curve_test.exe" ^
+    "tools\panel_curve_test\panel_curve_test.cpp" "src\d3d11\panel_curve.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: panel_curve_test build failed & exit /b 1 )
+"%OBJ%\panelcurve\panel_curve_test.exe" --dry-run || exit /b 1
+"%OBJ%\panelcurve\panel_curve_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\panel_curve_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_intro_curve_test
+echo [edvr] === intro_curve_test.exe ===
+REM src\d3d11\intro_panel.cpp for real (movie world lock, splash refusal, screen-space test, config, retirement) on WARP, goldens bit for bit;
+REM one process per scenario because the module's latches cannot be reset. tools\intro_curve_test\mutants.py --self-test holds the mutation list to the module.
+if not exist "%OBJ%\introcurve" mkdir "%OBJ%\introcurve"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\introcurve\\" /Fe"%OBJ%\introcurve\intro_curve_test.exe" ^
+    "tools\intro_curve_test\intro_curve_test.cpp" "src\d3d11\intro_panel.cpp" "src\d3d11\panel_curve.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: intro_curve_test build failed & exit /b 1 )
+"%OBJ%\introcurve\intro_curve_test.exe" --dry-run || exit /b 1
+"%OBJ%\introcurve\intro_curve_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\intro_curve_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_intro_curve_math_test
+echo [edvr] === intro_curve_math_test.exe ===
+REM The intro composite's constants read as a world-space panel (src\d3d11\intro_curve_math.h; docs\shaders\intro-composite-vs.asm): the
+REM pure half of the intro movie and the splash following fix.panel_curvature, compiled alone. Today's screen-space rule
+REM (introCbLooksScreenSpace) against a verbatim copy of intro_panel.cpp's looksScreenSpace over every boundary and the float either
+REM side of it, one slot, two slots and a deterministic sample of whole vectors at a time, and on a table of hand-derived answers; the
+REM world-space reading (introReadWorldCb) on the game's two real splash captures (the panel in front, and behind after a 180-degree
+REM yaw: ok, half-width 4.44444, toward +1) and the movie's stock constants (screen space, refused), every refusal in its own words
+REM and in its order, NaN and infinity in each of the 20 slots, the length, w and half-size ranges at their edges, and the depth
+REM direction by the signs of cb2[3].w and cb2[4].w. tools\intro_curve_math_test\mutants.py --self-test holds the mutation list to the
+REM header as it is; the list itself (--run, on demand, about a minute) proves the rig fails when each rule is flipped. Pure C++: no D3D.
+if not exist "%OBJ%\introcurvemath" mkdir "%OBJ%\introcurvemath"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" /Fo"%OBJ%\introcurvemath"\ ^
+    /Fe"%BUILD%\intro_curve_math_test.exe" "tools\intro_curve_math_test\intro_curve_math_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: intro curve math test build failed & exit /b 1 )
+"%BUILD%\intro_curve_math_test.exe" --dry-run || exit /b 1
+"%BUILD%\intro_curve_math_test.exe" --self-test || exit /b 1
+python "tools\intro_curve_math_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_intro_curve_module_test
+echo [edvr] === intro_curve_module_test.exe ===
+REM The splash's recogniser (src\d3d11\intro_curve.cpp; fix.panel_curvature, the game-placed composite the movie's vertex shader draws)
+REM compiled for real with the real Config, Log, fault guard and the real strip (panel_curve.cpp's surface API, drawing through a
+REM recording draw function), on a WARP device with the game's state bound: 80-byte constant buffers at VS slot 2 holding the game's
+REM two real splash captures and the movie's stock constants, decoys in the slots round them, the sampled surface in the binding
+REM shadow. A pair is learned by one copy of its 80 bytes read four ticks later: unknown through the settle frames, then armed with
+REM the half-width and direction the capture gives (4.44444, toward the viewer) or left as the game drew it with the reason and the
+REM 20 floats logged; a new surface or buffer is learned afresh; at curvature 0 nothing is created, copied or logged; only the
+REM composite's shape is recognised; sixteen pairs and the least recently drawn pushed out; unseen for 180 frames forgotten; a flat pair copied again every 60;
+REM the first rendered scene retires it for good; a fault in the draw or the readback stands only this module down; every reference
+REM taken is given back (the game's buffer, the device, the readback buffers); both eyes of the splash share one strip. The module's
+REM process-wide state is reset between cases through EDVR_INTRO_CURVE_RIG's two doors. tools\intro_curve_module_test\mutants.py
+REM --self-test holds the mutation list to the sources as they are; the list itself (--run, on demand, about a minute) proves the rig
+REM fails when each rule of the module is flipped. Built under obj\ and taking System32's device through src\common\system_d3d11.h,
+REM so it links without d3d11.lib.
+if not exist "%OBJ%\introcurvemodule" mkdir "%OBJ%\introcurvemodule"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_INTRO_CURVE_RIG ^
+    /DINTRO_CURVE_RIG_REAL_STRIP /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\introcurvemodule\\" /Fe"%OBJ%\introcurvemodule\intro_curve_module_test.exe" ^
+    "tools\intro_curve_module_test\intro_curve_module_test.cpp" "src\d3d11\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: intro_curve_module_test build failed & exit /b 1 )
+"%OBJ%\introcurvemodule\intro_curve_module_test.exe" --dry-run || exit /b 1
+"%OBJ%\introcurvemodule\intro_curve_module_test.exe" --self-test || exit /b 1
+python "tools\intro_curve_module_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_pixel_probe_test

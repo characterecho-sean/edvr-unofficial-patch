@@ -1,5 +1,6 @@
 #pragma once
 #include "engine_velocity.h"
+#include "flat_mono_refusal.h"
 #include <dxgiformat.h>
 #include <cstdint>
 
@@ -8,7 +9,15 @@ struct ID3D11DeviceContext;
 struct ID3D11ShaderResourceView;
 
 namespace edvr {
+// How the resolver isolates the game's pipeline state (flat_context_isolation.h has the definition): the context state swap, or
+// the explicit state capture a DXMT device gets.
+enum class FlatContextIsolation : uint8_t;
 enum class FlatMonoResolveMode { Taa, Dlaa, Dlss, Fsr };
+// The mode as the logs and the HDR route's breadcrumbs (flat_hdr_crumbs.h) spell it.
+inline const char* flatMonoResolveModeName(FlatMonoResolveMode mode) {
+    return mode == FlatMonoResolveMode::Fsr ? "fsr" : mode == FlatMonoResolveMode::Dlss ? "dlss"
+         : mode == FlatMonoResolveMode::Dlaa ? "dlaa" : "taa";
+}
 
 // The three sizes of the staged program's gate 2 (docs/design-flat-temporal-aa-2026-09-23.md
 // section 72): the game's render size R, the temporal evaluation size E and
@@ -98,15 +107,82 @@ struct FlatMonoResolveFrame {
     // The 3D main menu (2026-09-29): the frame's contract came through the verified menu HDR copy, so
     // the scene is a ship on its pedestal and nothing moves but the camera. Only then does a pixel whose
     // engine slot was overdrawn by a draw that never wrote it (an unkeyed hull) take the camera term
-    // instead of refusing history. False (the default, and every frame outside that menu) leaves the
-    // shader's arithmetic bit-identical to before the field.
+    // instead of refusing history, whatever last frame's depth says (the blanket form). Only the flat runtime sets it, from
+    // the verified menu copy; the VR world route never does. False (the default, and every frame outside that menu)
+    // leaves the shader's arithmetic bit-identical to before the field.
     bool staticScene = false;
+    // The steady-detail rule (experimental.temporal_aa_on_foot_world_steady_detail, which defaults to ON for both readers, the VR world
+    // route and the flat profile on foot; this field is the resolver's contract and stays false until a caller sets it; design doc
+    // section 82, the depth-validated steady detail): a pixel whose engine slot a later draw overdrew takes the camera term
+    // instead of refusing its history ONLY where last frame's depth confirms the camera term -- the depth, in the best of the four
+    // texels around the previous raster position, is within 1% (floor 1e-6, kFlatMonoStaleDepthRelative) of the depth this surface would
+    // have had there had it not moved -- and is refused exactly as before wherever it does not. The check needs last frame's depth: TAA
+    // keeps it already; the other backends get a second depth image, made on the first frame that asks, and from then on the depth the
+    // backend is handed alternates between the two (never while this is false: those frames write the one image they always did). Masked
+    // records, corrupt slots, the sky and the first-person pixels are untouched. staticScene (the menu's blanket form) wins when both are
+    // set. False (the default) leaves every pixel, every resource and the prep's arithmetic exactly as before the field.
+    bool steadyDetail = false;
+    // The VR world route's refusal census and view (design doc section 82, stage 2 experiment build; flat_mono_refusal.h).
+    // Both default to off, the flat profile never sets either, and a frame that asks for neither runs the prep and the finish
+    // exactly as before (no class texture is made, bound or written, no census pass is dispatched).
+    //   refusalCensus: count this frame's refused pixels by class. One resolve in kFlatMonoRefusalEvery that asks is sampled: the
+    //     prep writes its class texture, a counting pass reduces it into a small buffer, the buffer is copied to a staging
+    //     ring and read back a few frames later without waiting. flatMonoResolveTakeRefusalCensus() hands the sums over.
+    //   refusalView: paint the prep's classes into the resolved image (the HDR route only, in the eye path's colours), so the
+    //     refused pixels can be SEEN. Painted every frame it is set. A reset frame does neither.
+    bool refusalCensus = false;
+    uint32_t refusalView = 0;
     EngineVelocityViews engine{};
     uint64_t frame = 0;
     float deltaMs = 0;
     bool reset = true;
     FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
     uint32_t configuredDlssPreset = 0; // diagnostic attribution only
+    // The HDR route (docs/design-flat-temporal-aa-2026-09-23.md section 81; flat_hdr_route.h). `color` is then the
+    // game's HDR scene target H itself -- its shader view, R11G11B10_FLOAT at the render size -- not a tone-mapped
+    // copy, and `depth`, the camera rows and the engine views are the same as on the copy route. The resolver copies H
+    // into its private input, runs prep and the backend at E = R (the route refuses any other evaluation size) with
+    // the backend in HDR mode, and writes the result BACK INTO H through a pixel-shader draw into a render-target view
+    // it makes over H, so the game's own pass that reads H next sees the anti-aliased image. *output stays null: there
+    // is nothing for the caller to swap into a binding. False, the default, is the copy route and every byte of it
+    // unchanged.
+    bool hdr = false;
+    // The upscaler feature slot the backend evaluates on (dlaa.h, kUpscalerSlots; dlaa.cpp and fsr3_engine.cpp keep one
+    // feature, one size key and one history per slot). 0 is the flat profile's and eye 0's -- the default, and every
+    // caller before the VR world route. The VR world route passes 2 (vr_world_route.h, kVrWorldFeatureSlot), because its two
+    // eyes own 0 and 1. The resolver's own continuity (its history, its TAA ping-pong) is one set: one caller per process at
+    // a time, which the flat and VR profiles already are. A slot outside 0..kUpscalerSlots-1 refuses the frame
+    // ("flat-resolve-invalid-slot") before anything is written.
+    uint32_t slot = 0;
+    // The first-person ("weapon") fold-in of the VR world route (docs/design-flat-temporal-aa-2026-09-23.md section 82).
+    // The VR weapon-motion module rebuilds motion for first-person draws from their own animated vertices; the game's depth
+    // texture carries a first-person stencil bit. Both come in as inputs of the prep kernel, both borrowed, BOTH OR NEITHER
+    // (one without the other is treated as absent, counted in stats.firstPersonPartial). Null, the default, leaves the prep's
+    // arithmetic bit-for-bit what it was.
+    //   firstPersonMotion: R16G16B16A16_FLOAT, a Texture2D the size of the render (renderWidth x renderHeight). Per texel
+    //     xy = previous minus current position in RENDER pixels, z = depth (fp16), w = 1 valid / 2 new-rejected / 0 uncovered.
+    //   firstPersonStencil: the stencil plane view of the same depth texture, DXGI_FORMAT_X32_TYPELESS_G8X24_UINT, a
+    //     Texture2D view; bit 0x10 is set where first-person draws wrote it.
+    // A pair that fails validation (format, size, view dimension) is treated as absent, counted in stats.firstPersonRefused,
+    // and named once in the log; it never refuses the frame. Where the stencil bit is set ("attached") the prep takes the
+    // map's motion when the map is valid (w == 1, finite, its depth within max(|depth| * 0.0005, 3e-8) of the pixel's, its
+    // previous position inside the frame, and the frame not a reset) and otherwise REJECTS the pixel's history; an attached
+    // pixel never takes the engine or camera term. Every other pixel is treated exactly as without the inputs.
+    ID3D11ShaderResourceView* firstPersonMotion = nullptr;
+    ID3D11ShaderResourceView* firstPersonStencil = nullptr;
+    // The phase term of the map's vector (stage 2, when the world and the first-person camera are jittered; the prep kernel's
+    // "THE SEAM for a jittered world"). The map says previous minus current at the two frames' OWN raster phases, and the
+    // backend wants both phases out of it. Read only when firstPersonMotion and firstPersonStencil are both valid:
+    //   0 (the default) the map is used as it is given (the world is unjittered, or the map was built without a phase):
+    //     bit-for-bit what the prep did before this field existed;
+    //   1 the first-person camera carried the SAME phase as the world in both frames (the injector's role test, its
+    //     Scene and FirstPerson roles): the map's vector gets (jitter.xy - jitter.zw) added, in render pixels, so the vector
+    //     the backend sees excludes both phases, as the camera and engine terms do;
+    //   2 the first-person camera's phase is not known to equal the world's in both frames (it was not injected in one of
+    //     them): attached pixels REJECT their history this frame instead of taking a vector with an unknown term.
+    // Any other value is treated as 2. The sign of mode 1 is proven on WARP against a map built from explicit positions
+    // (tools\flat_mono_resolve_test).
+    uint32_t firstPersonPhaseMode = 0;
 };
 // Planned input metadata available before the game's next raster phase. This
 // intentionally carries no frame resources: preflight can allocate the
@@ -119,6 +195,9 @@ struct FlatMonoResolvePreflight {
     // F1), because the resolve's resource cache keys on E.
     uint32_t evalWidth = 0, evalHeight = 0;
     FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
+    // The HDR route's plan (FlatMonoResolveFrame::hdr): the colour view is H's R11G11B10_FLOAT one, the resources
+    // are the route's (fp16 output, an HDR input copy), and the fallback that must be ready is the pixel-shader one.
+    bool hdr = false;
     DXGI_FORMAT colorViewFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT depthViewFormat = DXGI_FORMAT_UNKNOWN;
     bool colorViewIsTexture2D = true, depthViewIsTexture2D = true;
@@ -155,6 +234,26 @@ struct FlatMonoResolveStats {
     uint64_t invalidPreviousCameras = 0, formatChanges = 0, cameraCuts = 0;
     uint64_t backendFailures = 0;
     uint64_t currentContinueRun = 0, longestContinueRun = 0;
+    // The HDR route's resolves and its pixel-shader spatial recoveries (written into H, so no output view).
+    uint64_t hdrResolves = 0, hdrSpatial = 0;
+    // The HDR route's calls (a resolve or a spatial recovery) that got through each step, for the route's 5 s census
+    // (FlatHdrSteps, flat_hdr_route.h): the game's state swapped out, H copied into the private input, the prep dispatch,
+    // the backend's success, the draw into H, the game's state put back. Counted whatever the breadcrumbs are doing.
+    uint64_t hdrCaptured = 0, hdrCopied = 0, hdrPrepped = 0, hdrBackend = 0, hdrFinished = 0, hdrRestored = 0;
+    // Which isolation each call used (flat_context_isolation.h): the context state swap, which is every device but DXMT's, or the
+    // explicit state capture (DXMT, or advanced.flat_context_isolation=capture); and the name of the one the renderer was last
+    // initialised for ("swap" or "capture", static text; null before its first initialisation).
+    uint64_t isolationSwaps = 0, isolationCaptures = 0;
+    const char* isolation = nullptr;
+    // The first-person inputs (FlatMonoResolveFrame::firstPersonMotion and firstPersonStencil): frames whose prep took them,
+    // frames whose pair failed validation (firstPersonRefusal names the last reason, a static string, null until one has),
+    // and frames that passed only one of the two (treated as absent, and not a refusal). A frame with neither counts nowhere.
+    uint64_t firstPersonFrames = 0, firstPersonRefused = 0, firstPersonPartial = 0;
+    const char* firstPersonRefusal = nullptr;
+    // Of the frames counted in firstPersonFrames (their inputs bound), by FlatMonoResolveFrame::firstPersonPhaseMode: [0] mode 0
+    // (the map's vector as given), [1] mode 1 (the two phases' difference added to it), [2] any other value (attached pixels
+    // reject their history). The three sum to firstPersonFrames; a frame without bound inputs counts in none of them.
+    uint64_t firstPersonPhaseFrames[3] = {};
     // The last resolve's EFFECTIVE reset (the requested one, or a lost history, a frame gap, an
     // invalid previous camera, a format change or a camera cut): what the pixel capture writes
     // as "reset" and what decides whether the frame is a live sample.
@@ -163,6 +262,10 @@ struct FlatMonoResolveStats {
 FlatMonoResolveStats flatMonoResolveStats();
 // Whether the last resolve reset (flatCaptureFrameLive, flat_pixel_capture_policy.h).
 bool flatMonoResolveLastReset();
+// The refusal census's samples read back since the last take, and starts over (FlatMonoResolveFrame::refusalCensus). Owner thread:
+// it also polls the readback ring, with the resolver's own immediate context, before it hands the sums over. A census nobody asked
+// for hands back zeros.
+FlatMonoRefusalCensus flatMonoResolveTakeRefusalCensus();
 // Owner thread, before rasterization. Validates planned dimensions/mode/source
 // metadata, allocates renderer resources including the spatial fallback output,
 // then checks external backend availability. A Ready result proves fallback
@@ -171,20 +274,35 @@ bool flatMonoResolveLastReset();
 FlatMonoResolvePreflightResult flatMonoResolvePreflight(
     ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolvePreflight&);
 // Owner immediate context only. Inputs borrowed for this call; successful output
-// is AddRef'd and output-sized. The caller suppresses hook observations throughout
-// this call. D3D11.1 context-state isolation is required and restored on every exit.
-// The caller supplies only jitter that was actually rendered into these inputs.
+// is AddRef'd and output-sized (null on the HDR route, FlatMonoResolveFrame::hdr, whose
+// result is written back into the input target). The caller suppresses hook observations
+// throughout this call. The game's pipeline state is isolated from the call's own work and its
+// backends' and restored on every exit: by ID3D11DeviceContext1::SwapDeviceContextState (which
+// needs D3D11.1) on every device but DXMT's, by the explicit state capture on DXMT's
+// (flatMonoResolveSetIsolation). The caller supplies only jitter that was actually rendered into these inputs.
 bool flatMonoResolve(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&,
                      ID3D11ShaderResourceView** output, const char** reason);
+// The GPU census's timestamp pair (flat_cpu.h): begin is called just before the resolver's own
+// dispatches and backend call, end when the call returns by any path. Owner thread. Null (the
+// default, and in every rig) times nothing; installing them changes no command the resolver
+// issues except the two queries.
+using FlatMonoResolveSpanFn = void (*)(ID3D11DeviceContext*) noexcept;
+void flatMonoResolveSetSpanHooks(FlatMonoResolveSpanFn begin, FlatMonoResolveSpanFn end);
 // Recover an already rendered jittered frame after backend refusal. This
 // spatial resolve uses no temporal history or SDK and borrows the same frame
-// inputs; successful output is AddRef'd. It leaves history invalid. A normal
+// inputs; successful output is AddRef'd (on the HDR route it is written into H by a
+// pixel-shader draw and *output stays null). It leaves history invalid. A normal
 // flatMonoResolve call allocates this output before it asks a backend to run,
 // so backend refusal reuses that allocation. Future nonzero-raster callers
 // must preflight allocation before drawing; this API cannot recover from a
 // device or allocation failure by itself.
 bool flatMonoResolveSpatialFallback(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&,
                                     ID3D11ShaderResourceView** output, const char** reason);
+// advanced.flat_context_isolation (auto, swap or capture): what the renderer's next initialisation is asked for. Auto, the
+// default, takes the swap everywhere but on a device that calls itself DXMT, where SwapDeviceContextState aborts the process
+// and the explicit capture runs instead. Read once by the flat runtime before its first resolve; flatMonoResolveReset() makes
+// the next call initialise again, which a rig uses to change it.
+void flatMonoResolveSetIsolation(FlatContextIsolation request);
 // Owner thread: release renderer resources/history. Does not shut down shared SDKs.
 void flatMonoResolveReset();
 // Manual F10 diagnostic; owner-thread poll also runs when rendering is refused.

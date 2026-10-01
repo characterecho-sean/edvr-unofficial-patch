@@ -42,7 +42,6 @@
 #include "ui_resolve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
-#include "celestial_motion.h"
 #include "cs_stage_save.h"
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
@@ -1471,11 +1470,12 @@ bool             g_eyeOverviewTaken[2] = {};
 bool             g_eyeTreatedWritten[kEyeRun] = {};
 bool             g_eyeTreatedTaken[kEyeRun] = {};
 bool             g_eyeRawWritten[kEyeRun] = {};
-// Preserve the original input numbers; 16/17 append ownership snapshots.
+// Preserve the original input numbers; 16/17 append ownership snapshots. Inputs 5 and 6 were the terrain
+// patch index and depth (retired 2026-10-01 with terrain motion): nothing stages them now, the numbers stay.
 constexpr int kEyeInputs=18;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"HoloContribution",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext",L"EngineSlots",L"GameG6"};
+const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"(retired 5)",L"(retired 6)",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"HoloContribution",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext",L"EngineSlots",L"GameG6"};
 edvr::eye_engine_capture::Result g_eyeEngineInputStatus[2] = {};
 ID3D11Buffer* g_eyeEngineBuffers[2]={};
 edvr::eye_engine_capture::Result g_eyeEngineBufferStatus[2]={};
@@ -1807,15 +1807,7 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
         ID3D11Resource* res=nullptr;scene->GetResource(&res);
         if(res){res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[4]));res->Release();}
     }
-    celestialMotionStageDump(ctx,textures[4]);
     uiDepthHoloStageDump(ctx,textures[4]);
-    if(textures[4]) {
-        ID3D11ShaderResourceView* terrain[3]{}; celestialMotionViews(ctx,textures[4],terrain);
-        for(int k=0;k<2;++k)if(terrain[k]) {
-            ID3D11Resource* res=nullptr;terrain[k]->GetResource(&res);
-            if(res){res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[k+5]));res->Release();}
-        }
-    }
     if(textures[4]) {
         ID3D11ShaderResourceView* holo[2]{}; uiDepthHoloMotion(0,textures[4],holo);
         if(holo[0]) {
@@ -1952,7 +1944,6 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
         } else if(k>=16) Log::get().note("eye capture: %ls input %ls unavailable on disk: format unsupported or staging map failed.",g_eyeRunStamp,kEyeInputNames[k]);
         texture->Release();g_eyeInputs[k]=nullptr;
     }
-    celestialMotionWriteDump(ctx,dir.c_str(),g_eyeRunStamp);
     uiDepthHoloWriteDump(ctx,dir.c_str(),g_eyeRunStamp);
 }
 
@@ -3454,7 +3445,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     if (depthSrv && !uiDepthSmokeDepth(sd.Width, sd.Height, eye, &smokeSrv)) smokeSrv = nullptr;
 
     ID3D11ShaderResourceView* uiDepthSrv = nullptr;
-    ID3D11ShaderResourceView* terrainSrvs[3] = {};
     ID3D11ShaderResourceView* holoSrvs[2] = {};
     // Engine-record velocity's inputs for this eye (engine_velocity.h): MRT6,
     // the pool snapshot and the scene constants now/before; all four or none.
@@ -3485,7 +3475,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             gpuCensusBegin(ctx, GpuCensusSection::DoorHologramResolve);
             uiDepthHologramResolve(ctx, eye, scene, sd.Width, sd.Height, inSrv);
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
-            celestialMotionViews(ctx, scene, terrainSrvs);
             gpuCensusEnd(ctx, GpuCensusSection::DoorHologramResolve);
             uiDepthHoloMotion(eye,scene,holoSrvs);
             engineViewsGiven = engineVelocityViews(ctx, eye, scene, &engineViews);
@@ -3890,7 +3879,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
         auto uiFlags = [&]() {
             return static_cast<float>((uiDepthReactive()>0.0f?1u:0u) |
-                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (terrainSrvs[0]?8u:0u) | (holoSrvs[0]?16u:0u) | (screenSrv?32u:0u) |
+                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (holoSrvs[0]?16u:0u) | (screenSrv?32u:0u) |   // 8 (the terrain's) retired 2026-10-01
                 (fssInterface?128u:0u));
         };
 
@@ -3931,8 +3920,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
 
         trace.inputs=(haveDepth?1u:0u) | (e.zPrevValid?2u:0u) |
-            (haveDelta?4u:0u) | (p.tvCam[3]!=0?8u:0u) |   // 16 and 128 (the body path, the mesh records) retired 2026-09-23
-            (terrainSrvs[0]?32u:0u) | (holoSrvs[0]?64u:0u) |
+            (haveDelta?4u:0u) | (p.tvCam[3]!=0?8u:0u) |   // 16 and 128 (the body path, the mesh records) retired 2026-09-23, 32 (the terrain's) 2026-10-01
+            (holoSrvs[0]?64u:0u) |
             (screenSrv?256u:0u) | (p.holoJitter[2]!=0?512u:0u) |
             (e.haveHistory?1024u:0u) | (e.dlHaveHistory?2048u:0u) |
             (g_rowsDeltaOwn?4096u:0u) | (jumpedNow?8192u:0u) | (g_curRowsBound?16384u:0u);
@@ -4836,7 +4825,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           nullptr,   // t5: free since the body path retired (2026-09-23)
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
+                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr};
                     ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
@@ -5342,7 +5331,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           nullptr,   // t5: free since the body path retired (2026-09-23)
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
+                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
@@ -5646,7 +5635,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                      nullptr,   // t5: free since the body path retired (2026-09-23)
                                                      smokeSrv, uiDepthSrv,
                                                      uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
+                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
                 ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
@@ -6022,7 +6011,7 @@ void temporalPassDumpHistory(const char* trigger) {
         "1 native, 2 NVIDIA, 3 native/NVIDIA fovea. flags are the OpenVR request. "
         "events hex: 1 requested reset,2 size/format change,4 source-screen change,8 NVIDIA attempt,"
         "10 NVIDIA reset,20 diagnostic paint. inputs hex: 1 depth,2 previous depth,4 delta,8 world,"
-        "10 body,20 terrain,40 holo,80 mesh,100 source-screen,200 consecutive,400 native history,"
+        "10 body (retired),20 terrain (retired),40 holo,80 mesh (retired),100 source-screen,200 consecutive,400 native history,"
         "800 NVIDIA history,1000 camera rows,2000 origin step,4000 bound rows. CPU only. ---",
         entries.size(),g_rowsFrame,trigger?trigger:"diagnostic request");
     constexpr size_t kTcamEntries = 512;
@@ -6124,11 +6113,10 @@ void temporalPassConfigure(Config& cfg) {
         g_dlaaFailNoted = false;
         g_fsrFailNoted = false;
     }
-    // The two per-draw hooks inside the game's own passes can be stood down
-    // on their own while the mode stays on, so one flight can price them
-    // against the frame (the terrain frame-time arc, 2026-09-17). Off leaves
-    // the camera's motion on their pixels, which ghosts on a moving body,
-    // which is the point: a lever, not a setting to fly with.
+    // (The per-draw terrain hook that sat here, advanced.terrain_motion,
+    // retired 2026-10-01: terrain takes the camera's motion, which the
+    // engine's own camera rows now give exactly --
+    // docs/terrain-motion-dispatch-cost-2026-09-17.md.)
     // Engine-record velocity (docs/kinematic-motion-injection-2026-09-19.md)
     // is part of fix.temporal_aa in every mode, with no key of its own (the
     // separate key retired 2026-09-23): the shared kinematic eval hook set, the
@@ -6138,7 +6126,6 @@ void temporalPassConfigure(Config& cfg) {
     // mode, live; a hook that cannot install stands it down whole, logged.
     const bool engineMotionOn = runtimeFlatProfile()
         ? temporalModeEnabled(cfg.requestedTemporalMode()) : detail::g_temporalPassWantedFssChrome;
-    celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && cfg.getBool("advanced.terrain_motion", true));
     // The emit holds the shared eval hooks itself; the emit's census is
     // diagnostic-only (applyEngineMotionDiagnostics, below the debug mode's
     // read).
@@ -6776,6 +6763,12 @@ void temporalPassFrameBoundary() {
     g_curValid = false;
 }
 
+bool temporalPassChosenRows(float rows[12], bool* bound) {
+    if (!detail::g_temporalPassWantedFssChrome || !g_chosenThisFrame || !g_curValid || !rows) return false;
+    memcpy(rows, g_curRows, sizeof(g_curRows));
+    if (bound) *bound = g_curRowsBound;
+    return true;
+}
 
 bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
                         double* rejectPct, double* clipPct) {

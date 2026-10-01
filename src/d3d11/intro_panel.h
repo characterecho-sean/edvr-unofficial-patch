@@ -67,6 +67,24 @@ void introPanelNoteFill(uint32_t targetW, uint32_t targetH);
 bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                            uint32_t instances, uint32_t srvW, uint32_t srvH);
 
+// THE CURVED MOVIE (fix.panel_curvature above 0; docs\intro-video.md, 2026-10-01; panel_curve.h panelCurveSurfaceDraw is what draws it).
+// The world-locked panel's unit quad is replaced, for one draw, by the strip the on-foot screen's arc makes; this file places it. At
+// curvature above 0 -- and while the surface strip is not stood down -- the world constants it binds carry the z column in cb2[3]: the
+// view-space image of the seated +z axis (the direction from the panel toward the viewer), unit length, which is what the strip's z' is
+// measured along. At curvature 0, in the stock and head-locked modes, in the settle frames, when the lock is refused and when the surface
+// strip has stood down, cb2[3] stays exactly zero, as it always was. There is no test of the bent edges against the eye, on purpose: D3D
+// clips what is behind the eye in homogeneous space, so the part of a bent panel beside or behind the eye (nobody can see it) is clipped off
+// by itself, and a test would pop the whole bend off at about 20 degrees of head yaw, differently in the two eyes near its threshold. Only
+// the panel's centre is tested, as before, because a centre behind the eye is a silent total vanish.
+//
+// introPanelStripArmed: true from a successful bind of those constants (introPanelOnComposite returned true) until introPanelEndDraw --
+// the caller, between the two, draws the strip with panelCurveSurfaceDraw(ctx, introPanelStripGain(), +1, ...) and, when that returns true,
+// swallows the game's own quad; when it returns false it forwards the game's draw, which is flat and in the right place (a z column does
+// nothing to a quad whose z is zero). False in every other case. introPanelStripGain: the depth gain in metres, the panel's half-width.
+// +1 is the direction: a step in +z' moves toward the viewer, the same convention the splash's own constants read as.
+bool introPanelStripArmed();
+float introPanelStripGain();
+
 // Restore the game's own constant buffer. Always paired with a true above.
 void introPanelEndDraw(ID3D11DeviceContext* ctx);
 

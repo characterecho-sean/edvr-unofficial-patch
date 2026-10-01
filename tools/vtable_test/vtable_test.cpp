@@ -292,11 +292,10 @@ static bool pageIsReadOnly(const void* p) {
 
 // ONE STORE, FOREVER, until told to stop -- and no Sleep at all.
 //
-// The abandoned-catch cell needs to suspend a thread at a moment it cannot
-// choose, so it suspends and looks: with this the ONLY actor on the page, the
-// page is writable exactly when this thread is between its fault and its single
-// step. A Sleep in the loop would make that window a vanishing fraction of the
-// run; without one it is most of it.
+// The two-catch-clock cell needs a writer whose NEXT store is a fresh catch the
+// instant the last one completes -- no scheduling gap, no frame between -- so
+// the two holds it puts side by side (see StepHold) are back to back. A Sleep
+// in the loop would put a gap there.
 struct SpinJob {
     void**         table;
     size_t         slot;
@@ -317,6 +316,98 @@ static DWORD WINAPI oneStoreThread(LPVOID param) {
     const WatchStoreJob* job = static_cast<const WatchStoreJob*>(param);
     watchStore(job->table, job->slot, job->value);
     return 0;
+}
+
+// A WRITER HELD AT ITS SINGLE STEP, by handshake instead of by luck.
+//
+// The abandoned-catch cell and the two-catch-clock cell each need a thread that
+// has CLAIMED a catch -- pages open, trap flag standing, its id in the state
+// word -- and whose single step has not yet reached the watch's handler. They
+// used to get one by suspending a spinning writer at instants they could not
+// choose and looking at the page until a probe happened to land in the window.
+// A probe samples a thread that is supposed to be running, so the cells were
+// asking the scheduler for a coincidence: with the machine loaded the writer is
+// not scheduled between two probes, every probe sees the same state, and the
+// cell reports it could not reach the state it exists to test. That is a
+// failure of the cell, not of the watch, and a build gate that fails good
+// builds is worse than no gate.
+//
+// This puts the cell's own vectored handler AHEAD of the watch's. It is
+// registered after the watch armed, and a handler added first goes to the front
+// of the chain; the handshake itself proves the ordering, because a step the
+// watch consumed first would never signal `reached`. On the ONE single step the
+// named thread takes, it signals `reached`, blocks until `release`, and then
+// DECLINES the exception, so the watch's handler receives the step exactly as
+// it would have after any delay.
+//
+// What the watch can observe of the thread is what it observes of a suspended
+// one: the catch is claimed, the pages are open, the step is owed and has not
+// been consumed. The one difference is that the store has already retired,
+// and nothing in the watch reads that.
+//
+// THE TRAP FLAG IS NOT RECORDED, because it cannot be read here: the context a
+// single-step handler receives has TF already cleared (measured 2026-09-30),
+// which is why the old probe read EFlags off a thread suspended BEFORE its step
+// was delivered. It does not need reading. A STATUS_SINGLE_STEP on this thread
+// straight after its claim exists only because the claim set the flag, and the
+// watch's own claim counter says the claim completed: it is incremented in the
+// same handler call that sets the flag, so at the hold it equals the number of
+// claims made, exactly.
+struct StepHold {
+    volatile LONG thread = 0;      // the thread whose next single step is held
+    HANDLE        reached = nullptr;
+    HANDLE        release = nullptr;
+    PVOID         handler = nullptr;
+};
+static StepHold g_stepHold;
+
+// Far past any scheduling delay a full build's load can produce, and still
+// bounded: a cell that never releases must fail, not hang the gate.
+static const DWORD kStepHoldGuardMs = 30000;
+
+static LONG CALLBACK stepHoldHandler(EXCEPTION_POINTERS* ep) {
+    if (!ep || !ep->ExceptionRecord ||
+        ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // Claiming the hold clears the thread, so only the first step is held and a
+    // second writer's step goes straight through.
+    const LONG me = static_cast<LONG>(GetCurrentThreadId());
+    if (InterlockedCompareExchange(&g_stepHold.thread, 0, me) != me) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    SetEvent(g_stepHold.reached);
+    WaitForSingleObject(g_stepHold.release, kStepHoldGuardMs);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static bool stepHoldInstall() {
+    g_stepHold.thread = 0;
+    // Auto-reset, both: each hold is one `reached` and one `release`, and the
+    // same thread can be held again (the two-catch cell does exactly that) by
+    // setting `thread` once more before the release.
+    g_stepHold.reached = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_stepHold.release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_stepHold.reached && g_stepHold.release) {
+        g_stepHold.handler = AddVectoredExceptionHandler(1, stepHoldHandler);
+    }
+    return g_stepHold.handler != nullptr;
+}
+
+static bool stepHoldWaitReached(DWORD ms) {
+    return WaitForSingleObject(g_stepHold.reached, ms) == WAIT_OBJECT_0;
+}
+
+static void stepHoldRelease() { SetEvent(g_stepHold.release); }
+
+static void stepHoldRemove() {
+    if (g_stepHold.release) stepHoldRelease();              // never leave a thread held
+    if (g_stepHold.handler) RemoveVectoredExceptionHandler(g_stepHold.handler);
+    g_stepHold.handler = nullptr;
+    if (g_stepHold.reached) CloseHandle(g_stepHold.reached);
+    if (g_stepHold.release) CloseHandle(g_stepHold.release);
+    g_stepHold.reached = g_stepHold.release = nullptr;
+    g_stepHold.thread = 0;
 }
 
 // THE STALE-FORWARD CHECK, modelled exactly as vscreen.cpp runs it: one load
@@ -379,11 +470,90 @@ static void observeFlipPublication(uint32_t index) {
 
 #include "shader_create_tests.h"
 
+// The flat F8 panel's graphics-wrapper note names the file that handles a context's methods (flat_wrapper_note.h): the
+// module, other than Windows' d3d11.dll and EDVR's own, that backs most of the table's entries. A table the way a
+// wrapper lays one -- most entries in its own module, a few elsewhere -- against real modules of this process.
+static void dominantOtherModuleCells() {
+    printf("the module that handles a context's methods\n");
+    const HMODULE user32 = LoadLibraryA("user32.dll");
+    const HMODULE kernelbase = GetModuleHandleA("kernelbase.dll");
+    void* const inUser = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "GetKeyState")) : nullptr;
+    void* const inBase = kernelbase ? reinterpret_cast<void*>(GetProcAddress(kernelbase, "GetCurrentProcessId")) : nullptr;
+    void* const inSelf = reinterpret_cast<void*>(&dominantOtherModuleCells);
+    check(inUser && inBase && inSelf, "the fixture: an entry in user32, one in kernelbase, one in this image",
+          "a module or an export was not there");
+    if (!inUser || !inBase || !inSelf) return;
+    // The expected names come from the addresses themselves (an export may be a forwarder into another image).
+    auto baseOf = [](void* p) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        VirtualQuery(p, &mbi, sizeof(mbi));
+        return static_cast<HMODULE>(mbi.AllocationBase);
+    };
+    auto leafOf = [](HMODULE m, char* out, size_t cap) {
+        char path[MAX_PATH] = {};
+        GetModuleFileNameA(m, path, sizeof(path));
+        const char* leaf = path;
+        for (const char* c = path; *c; ++c) if (*c == '\\' || *c == '/') leaf = c + 1;
+        strncpy_s(out, cap, leaf, _TRUNCATE);
+    };
+    const HMODULE userImage = baseOf(inUser), baseImage = baseOf(inBase);
+    char userLeaf[64] = {}, baseLeaf[64] = {};
+    leafOf(userImage, userLeaf, sizeof(userLeaf));
+    leafOf(baseImage, baseLeaf, sizeof(baseLeaf));
+    check(userImage != baseImage && userLeaf[0] && baseLeaf[0], "the fixture's two entries are in two different images",
+          "user32 and kernelbase resolved into the same image");
+    if (userImage == baseImage) return;
+    void* table[96] = {};
+    auto fill = [&](size_t a, size_t b, size_t c) {   // a entries in user32, b in kernelbase, c in this image
+        size_t i = 0;
+        for (size_t k = 0; k < a && i < 96; ++k) table[i++] = inUser;
+        for (size_t k = 0; k < b && i < 96; ++k) table[i++] = inBase;
+        for (size_t k = 0; k < c && i < 96; ++k) table[i++] = inSelf;
+        while (i < 96) table[i++] = inSelf;
+    };
+    char name[64];
+    fill(60, 30, 6);
+    size_t hits = vtableDominantOtherModule(table, 96, nullptr, name, sizeof(name));
+    check(hits == 60 && _stricmp(name, userLeaf) == 0, "the module with the most entries is named, by file name alone",
+          "the dominant module was not user32.dll with 60 entries");
+    check(strchr(name, '\\') == nullptr && strchr(name, '/') == nullptr, "and the name carries no path",
+          "a path separator survived");
+    hits = vtableDominantOtherModule(table, 96, userImage, name, sizeof(name));
+    check(hits == 30 && _stricmp(name, baseLeaf) == 0, "an excluded module (Windows' d3d11.dll, in the shipped call) is not counted",
+          "excluding user32 did not leave kernelbase with its 30");
+    fill(0, 96, 0);
+    hits = vtableDominantOtherModule(table, 96, baseImage, name, sizeof(name));
+    check(hits == 0 && name[0] == '\0', "every entry in the excluded module: none, and an empty name",
+          "a name came back for a table wholly in the excluded module");
+    fill(0, 0, 96);
+    hits = vtableDominantOtherModule(table, 96, nullptr, name, sizeof(name));
+    check(hits == 0 && name[0] == '\0', "every entry in this image (EDVR's own hook): none",
+          "EDVR's own module was named as a wrapper");
+    void* generated = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (generated) {
+        fill(5, 0, 0);
+        for (size_t i = 5; i < 60; ++i) table[i] = static_cast<char*>(generated) + i;
+        hits = vtableDominantOtherModule(table, 96, nullptr, name, sizeof(name));
+        check(hits == 5 && _stricmp(name, userLeaf) == 0, "generated code is no module: 55 entries in a private page do not outvote 5 in user32",
+              "a private allocation was counted as a module");
+        VirtualFree(generated, 0, MEM_RELEASE);
+    }
+    strcpy_s(name, "unchanged");
+    check(vtableDominantOtherModule(nullptr, 96, nullptr, name, sizeof(name)) == 0 && name[0] == '\0' &&
+              vtableDominantOtherModule(table, 0, nullptr, name, sizeof(name)) == 0,
+          "no table, or no entries: none", "an empty question got an answer");
+    char tiny[4];
+    fill(96, 0, 0);
+    hits = vtableDominantOtherModule(table, 96, nullptr, tiny, sizeof(tiny));
+    check(hits == 96 && std::strlen(tiny) <= 3, "a name longer than the buffer is cut, not overrun", "the buffer was not respected");
+}
+
 int main() {
     shaderCreateFixture::run();
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("edvr vtable / wrapper collision\n");
+    dominantOtherModuleCells();
 
     RealThing real;
     WrapThing wrapper(&real);
@@ -1460,9 +1630,10 @@ int main() {
     // tick frames for four seconds, and the pages are still writable and a fresh
     // store is not caught, 5 runs out of 5.
     //
-    // The cell suspends a thread mid-catch on purpose. With that thread the only
-    // actor on the page, "the page is writable" IS "a catch is outstanding", so
-    // the state can be entered deterministically by suspending and looking.
+    // The cell stops a thread mid-catch on purpose, at its single step, by the
+    // handshake in StepHold. It used to suspend a spinning writer and look for
+    // an open page, and failed under load whenever the writer was not scheduled
+    // between two looks (1 run in 3 with the machine busy; 2026-09-30).
     {
         void** fake = static_cast<void**>(
             VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
@@ -1475,29 +1646,31 @@ int main() {
                   "arming refused");
             vtableWatchFrameTick(400);
 
-            volatile LONG stop = 0;
-            SpinJob job{fake, 3, reinterpret_cast<void*>(&toolkitOne), &stop};
-            HANDLE spinner = CreateThread(nullptr, 0, spinStoreThread, &job, 0, nullptr);
+            // One store, once: the hold below is what keeps the thread inside
+            // its catch, so nothing has to spin waiting to be caught there.
+            WatchStoreJob job{fake, 3, reinterpret_cast<void*>(&toolkitOne)};
+            DWORD writerId = 0;
+            HANDLE spinner = nullptr;
+            if (stepHoldInstall()) {
+                spinner = CreateThread(nullptr, 0, oneStoreThread, &job,
+                                       CREATE_SUSPENDED, &writerId);
+            }
             if (!spinner) {
                 fail("CreateThread for the abandoned-catch cell", "thread refused");
             } else {
-                // Suspend it until it is caught mid-catch: the page being
-                // writable with nobody else running is exactly that state.
-                bool midCatch = false;
-                for (int tries = 0; tries < 2000 && !midCatch; ++tries) {
-                    SuspendThread(spinner);
-                    if (!pageIsReadOnly(fake)) {
-                        midCatch = true;
-                        break;
-                    }
-                    ResumeThread(spinner);
-                    Sleep(0);
-                }
-                check(midCatch,
+                g_stepHold.thread = static_cast<LONG>(writerId);
+                ResumeThread(spinner);
+                // The writer faults, claims the catch, opens the pages, sets
+                // its trap flag, retires the store, and takes its single step
+                // into the hold. Waiting for that is waiting for the state, not
+                // sampling for it: when `reached` is signalled the page is open
+                // and exactly one claim has been made -- this writer's.
+                const bool held = stepHoldWaitReached(kStepHoldGuardMs);
+                check(held && !pageIsReadOnly(fake) && vtableWatchCatches() == 1,
                       "a writer can be stopped between its fault and its single "
                       "step",
-                      "the cell never caught the thread mid-catch, so it is not "
-                      "testing the abandoned state");
+                      "the writer never reached its single step with the catch "
+                      "open, so the cell is not testing the abandoned state");
 
                 // The frame path, for longer than the two-second escape. The
                 // suspended thread cannot re-protect anything: whatever closes
@@ -1528,22 +1701,22 @@ int main() {
                       "the pages are read-only but nothing is being caught, so "
                       "the watch is armed over a state it cannot act on");
 
-                // THE ORPHANED STEP, delivered on purpose. The pages are opened
-                // by hand first so the resumed thread's store does NOT fault a
-                // second time and re-claim: that leaves its trap flag standing
-                // over a catch the escape has already given away, which is the
-                // one state that reaches the escaped-step path.
-                DWORD prot = 0;
-                VirtualProtect(fake, 4096, PAGE_READWRITE, &prot);
-                InterlockedExchange(&stop, 1);
-                ResumeThread(spinner);
-                WaitForSingleObject(spinner, INFINITE);
-                CloseHandle(spinner);
-                check(true,
+                // THE ORPHANED STEP, delivered on purpose. Releasing the hold
+                // hands the writer's step to the watch's handler now, over a
+                // catch the escape has already given away, with its trap flag
+                // still standing: the one state that reaches the escaped-step
+                // path. The store retired before the hold, so the thread has no
+                // second store to fault on and re-claim with; it simply
+                // finishes.
+                stepHoldRelease();
+                const DWORD finished = WaitForSingleObject(spinner, kStepHoldGuardMs);
+                if (finished == WAIT_OBJECT_0) CloseHandle(spinner);
+                check(finished == WAIT_OBJECT_0,
                       "...and the abandoned thread's late step does not kill the "
                       "process",
-                      "unreachable -- an orphaned single step handed back kills "
-                      "it here");
+                      "the writer never finished after its step was handed back "
+                      "(an orphaned single step kills the process outright, so "
+                      "this is a thread left standing)");
                 check(vtableWatchChimeras() == 0,
                       "...and is counted as a step the frame path gave up on, "
                       "not as a chimera",
@@ -1554,6 +1727,7 @@ int main() {
                       "the escaped step was not counted anywhere, so the gap it "
                       "represents is silent");
             }
+            stepHoldRemove();
             vtableWatchStop();
             VirtualFree(fake, 0, MEM_RELEASE);
         }
@@ -1661,11 +1835,13 @@ int main() {
     // accumulated one clock across all of them, and the escape could give up on
     // a catch that was microseconds old, stamping ARMED over a live owner.
     //
-    // Made deterministic with the suspend trick, twice: 1.2 seconds of holding
-    // for one catch, then 1.2 seconds for the NEXT catch by the same thread,
-    // with no frame in between where the re-arm could succeed. Keyed on the
-    // thread alone that is 2.4 seconds of one clock and the escape fires; keyed
-    // on (thread, sequence) it is two clocks of 1.2 and nothing is given up on.
+    // Made deterministic with the step hold, twice: 1.2 seconds of holding for
+    // one catch, then 1.2 seconds for the NEXT catch by the same thread, with no
+    // frame in between where the re-arm could succeed. Keyed on the thread alone
+    // that is 2.4 seconds of one clock and the escape fires; keyed on (thread,
+    // sequence) it is two clocks of 1.2 and nothing is given up on. (It used to
+    // find each hold by suspending a spinning writer and looking, and failed
+    // under load the same way the abandoned-catch cell above did.)
     {
         void** fake = static_cast<void**>(
             VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
@@ -1680,68 +1856,62 @@ int main() {
 
             volatile LONG stop = 0;
             SpinJob job{fake, 3, reinterpret_cast<void*>(&toolkitOne), &stop};
-            HANDLE spinner = CreateThread(nullptr, 0, spinStoreThread, &job, 0, nullptr);
+            DWORD writerId = 0;
+            HANDLE spinner = nullptr;
+            if (stepHoldInstall()) {
+                spinner = CreateThread(nullptr, 0, spinStoreThread, &job,
+                                       CREATE_SUSPENDED, &writerId);
+            }
             if (!spinner) {
                 fail("CreateThread for the two-catch-clock cell", "thread refused");
             } else {
+                g_stepHold.thread = static_cast<LONG>(writerId);
+                ResumeThread(spinner);
                 uint64_t frame = 700;
                 bool bothHeld = true;
                 for (int round = 0; round < 2 && bothHeld; ++round) {
-                    // MID-CATCH MEANS THE TRAP FLAG IS STANDING, and here that
-                    // has to be checked rather than inferred. An open page says
-                    // a catch is outstanding; it does not say the catch is
-                    // ESTABLISHED. The claim is a compare-exchange, then a
-                    // VirtualProtect syscall, then the trap flag -- and a thread
-                    // stopped in that window has claimed a catch whose step will
-                    // never come, which is the ABANDONED state the cell above
-                    // exists for and not the one this cell is about. Left
-                    // suspended there, both rounds hold the same catch, the
-                    // escape correctly gives up on it, and this cell would
-                    // report a defect that is not there. The suspended thread's
-                    // own EFlags settle it.
-                    bool midCatch = false;
-                    for (int tries = 0; tries < 20000 && !midCatch; ++tries) {
-                        SuspendThread(spinner);
-                        CONTEXT ctx{};
-                        ctx.ContextFlags = CONTEXT_CONTROL;
-                        if (!pageIsReadOnly(fake) &&
-                            GetThreadContext(spinner, &ctx) &&
-                            (ctx.EFlags & 0x100)) {
-                            midCatch = true;
-                            break;
-                        }
-                        ResumeThread(spinner);
-                        Sleep(0);
+                    // A HELD STEP IS AN ESTABLISHED CATCH. The hold is on the
+                    // single step, and a step only exists because the claim
+                    // completed and set the trap flag: the window the old probe
+                    // had to rule out by reading the suspended thread's EFlags
+                    // -- a thread stopped between the claim and the flag holds
+                    // a catch whose step will never come, which is the
+                    // ABANDONED state the cell above is for and not this one --
+                    // cannot be entered at all. The open page is still checked,
+                    // and so is the claim count: round N is held at the step of
+                    // claim N+1 and no other, which is what makes the second
+                    // hold a second catch rather than the first one seen twice.
+                    if (!stepHoldWaitReached(kStepHoldGuardMs) ||
+                        pageIsReadOnly(fake) ||
+                        vtableWatchCatches() != static_cast<uint32_t>(round + 1)) {
+                        bothHeld = false;
+                        break;
                     }
-                    if (!midCatch) { bothHeld = false; break; }
                     const DWORD start = GetTickCount();
                     while (GetTickCount() - start < 1200) {
                         vtableWatchRearm();
                         vtableWatchFrameTick(++frame);
                         Sleep(2);
                     }
-                    // Straight back to spinning, with NO frame between the two
-                    // holds: a re-arm that succeeded here would reset the clock
-                    // even under the old keying and the cell would prove nothing.
-                    //
-                    // But it must really BE a second catch. ResumeThread only
-                    // drops the suspend count -- the thread need not have been
-                    // scheduled before the next probe suspends it again, and
-                    // then the page is still open and the trap flag still set
-                    // from the SAME catch, which the probe would accept and the
-                    // two holds would share a clock legitimately. Waiting for
-                    // the catch counter to move is waiting for a claim that
-                    // completed and a fresh one to have begun.
-                    const uint32_t before = vtableWatchCatches();
-                    ResumeThread(spinner);
-                    const DWORD progressBy = GetTickCount() + 2000;
-                    while (vtableWatchCatches() < before + 2 &&
-                           GetTickCount() < progressBy) {
-                        Sleep(0);
-                    }
-                    if (vtableWatchCatches() < before + 2) bothHeld = false;
+                    // Straight on to the next catch, with NO frame between the
+                    // two holds: a re-arm that succeeded here would reset the
+                    // clock even under the old keying and the cell would prove
+                    // nothing. Releasing lets the owner's step complete, the
+                    // spinner takes its next store and claims a fresh catch,
+                    // and arming the hold again BEFORE the release is what
+                    // catches that one's step -- it must be a second catch,
+                    // with a second sequence number, because the first one's
+                    // step is the one being released.
+                    if (round == 0) g_stepHold.thread = static_cast<LONG>(writerId);
+                    stepHoldRelease();
                 }
-                check(bothHeld,
+                // Let the writer go and finish before anything is read, so the
+                // last catch has completed and nothing is mid-step.
+                InterlockedExchange(&stop, 1);
+                stepHoldRelease();
+                const DWORD finished = WaitForSingleObject(spinner, kStepHoldGuardMs);
+                if (finished == WAIT_OBJECT_0) CloseHandle(spinner);
+                check(bothHeld && finished == WAIT_OBJECT_0,
                       "the same thread can be held mid-catch twice over, with no "
                       "successful re-arm between",
                       "the cell never reached the second hold, so the two clocks "
@@ -1751,11 +1921,8 @@ int main() {
                       "catch, not per thread",
                       "the escape fired on a catch that was milliseconds old, "
                       "because two catches by one thread shared one clock");
-                InterlockedExchange(&stop, 1);
-                ResumeThread(spinner);
-                WaitForSingleObject(spinner, INFINITE);
-                CloseHandle(spinner);
             }
+            stepHoldRemove();
             vtableWatchStop();
             VirtualFree(fake, 0, MEM_RELEASE);
         }

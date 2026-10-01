@@ -55,6 +55,7 @@ unsigned visible(const std::vector<float>& v){unsigned n=0;for(size_t i=3;i<v.si
 bool exact(const std::vector<float>& a,const std::vector<float>& b){return a.size()==b.size()&&!std::memcmp(a.data(),b.data(),a.size()*sizeof(float));}
 #include "failure_cases.h"
 #include "writeback_cases.h"
+#include "frosted_cases.h"
 int main(int argc,char** argv){try{
  if(argc==2&&!std::strcmp(argv[1],"--dry-run")){std::puts("ui_holo_test: dry-run (no files)");return 0;}
  const bool hardware=argc==2&&!std::strcmp(argv[1],"--hardware-self-test");
@@ -90,5 +91,6 @@ int main(int argc,char** argv){try{
   std::printf("%s old=4096/25600 repaired=25600/25600; %u nonuniform exact RGBA cases\n",shader==1?"EA02":"E956",cases);
   writebackCases(d.Get(),c.Get(),stock.Get(),repaired.Get(),cache.constants());
  }
+ frostedBase::run(d.Get(),c.Get());
  std::printf("PASS %u checks; production remap/cache/binding, actual game PS retained\n",checks);return 0;
  }catch(const std::exception& e){std::printf("FAIL %s (%u checks)\n",e.what(),checks);return 1;}}

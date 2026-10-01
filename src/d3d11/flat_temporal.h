@@ -13,11 +13,15 @@
 namespace edvr {
 namespace detail {
 extern std::atomic<bool> g_flatTemporalCapturing;
+extern std::atomic<bool> g_flatTemporalPaused;
 extern std::atomic<DWORD> g_flatTemporalOwnerThread;
 extern std::atomic<uint64_t> g_flatTemporalForeignCalls;
 }
 inline bool flatTemporalCapturing() {
     if (!detail::g_flatTemporalCapturing.load(std::memory_order_relaxed)) return false;
+    // The flat runtime's stand-down (flat_standdown.h) pauses the discovery observers
+    // for the frames it does not watch; a probe frame runs them.
+    if (detail::g_flatTemporalPaused.load(std::memory_order_relaxed)) return false;
     if (g_flatComputeInternal) return false;
     const DWORD owner = detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire);
     if (flatCaptureThreadEligible(true, owner, GetCurrentThreadId())) return true;
@@ -28,6 +32,9 @@ inline bool flatTemporalCapturing() {
 void flatTemporalStart(ID3D11Device* device);
 void flatTemporalArm();  // existing dump_draws hotkey starts a fresh flat window
 void flatTemporalStop();
+// Stand-down: the observers see no draw or call while paused (flatTemporalCapturing).
+// Set by the flat runtime at a frame boundary, so a frame is observed whole or not at all.
+void flatTemporalSetPaused(bool paused);
 void flatTemporalBeforePresent(IDXGISwapChain* swap, uint64_t frame, UINT flags);
 void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags);
 void flatTemporalBind(ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv);

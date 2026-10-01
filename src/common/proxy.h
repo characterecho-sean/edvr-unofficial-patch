@@ -67,8 +67,12 @@ void breadcrumb(const char* stage);
 // The two calls below are what a crash needs to land somewhere.
 
 // One line every log.breadcrumb_heartbeat_seconds (30 by default, 0 to turn it
-// off), from the frame boundary. Costs an open/append/close at that cadence and
-// a clock read on the frames between.
+// off), from the frame boundary. The render thread pays a clock read on the
+// frames between and, at that cadence, three stores and an event: the line is
+// WRITTEN by a small thread of EDVR's own (heartbeat_writer.h), because an
+// open/append/close of a file in the game folder on the render thread is a hitch
+// on a slow or filtered disk (docs/freeze-diagnostics-2026-10-01.md). It used to
+// be the render thread's own write.
 //
 // What it buys is the shape of the death, within a bound. A bare "no exit
 // crumb" says only that the process did not leave cleanly, at any point in a
@@ -83,7 +87,20 @@ void breadcrumb(const char* stage);
 // -- or its absence -- for that.
 //
 // Interval is log.breadcrumb_heartbeat_seconds; 0 turns it off.
+//
+// THE LAST LINE STILL MEANS WHAT IT MEANT. The writer thread writes only what the
+// render thread posted, so a hung render thread stops the heartbeat (a thread on
+// its own timer would have kept saying "alive"); a line carries the frame and
+// uptime of the moment it was posted; a slow disk can delay a line but never write
+// an older one after a newer; and once the crash filter has started (it closes the
+// heartbeat first), or the process is leaving, no heartbeat lands behind the
+// closing lines.
 void breadcrumbHeartbeat(uint64_t frameNo);
+
+// No heartbeat is written from now on, and a pending one is dropped. DllMain calls
+// it on both detach paths before its closing crumb; the crash filter does the same
+// itself, with a bounded wait for a write already under way. Never blocks.
+void breadcrumbHeartbeatClose();
 
 // Names the exception, the faulting address and the module it lands in, on the
 // way out.

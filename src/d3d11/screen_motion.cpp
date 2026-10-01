@@ -304,6 +304,9 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     }
     if(!copiedSource)return;
     g.sourcePrevious=g.sourceFrame;g.sourceFrame=g.frame;g.sourceWrite=next;
+    // The on-foot maps gate (ui_layer.h): a draw that reads the world camera named the screen's source in this frame. Told here, at the
+    // one place the naming is made, so the gate judges the frame that ends at the next boundary by it whichever boundary runs first.
+    uiLayerNoteScreenNamed();
     if(terrain)g.terrainFrame=g.frame;
     else if(!g.screenDepthNoted){g.screenDepthNoted=true;Log::get().note("screen motion: no terrain or scene draw names the on-foot source here (a hangar): it is named by its own depth -- the %ux%u depth that took the most pool family draws last frame (%u), at its first pool family draw this frame that is not a first-person weapon or tool shader; that draw's camera is the source camera.",w,h,g.screenDepthDraws);}
     g_gpu.noteSource(tex.Get(),td.Width,td.Height,g.frame);

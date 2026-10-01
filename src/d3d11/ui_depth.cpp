@@ -1289,6 +1289,27 @@ uint32_t g_holoMarkerSampleCount = 0;
 // one above.
 uint64_t g_holoNearLightSamples[kHoloPixelSamples];
 uint32_t g_holoNearLightSampleCount = 0;
+// The near-light pass's own inputs, per eye, for the census line. ran:
+// dispatches issued. heldTarget / heldDisplay: the game's output merger
+// still held a view over its RT0 / over the submitted image when the pass
+// began -- D3D reads a shader view over a bound output as NULL, silently, so
+// without the stage clear below t2 (the share test) or t3 (the floor) would
+// read black. The game's last eye pass is what is left bound at Submit, and
+// the draw census looks like both eyes rendered pass by pass in lockstep, so
+// the two eyes may differ (what is bound is noted per eye, below).
+// nullT2 / nullT3: the view the context actually holds after the set, read
+// back, is NULL although one was set -- nonzero after the clear is another
+// cause, and it would read the same way from the shader.
+struct HoloNearLightInputs { uint32_t ran, heldTarget, heldDisplay, nullT2, nullT3; };
+HoloNearLightInputs g_holoNearLightInputs[2] = {};
+// What the game really leaves bound at Submit is the open question behind the
+// counters above, so the pass also says so: one note per eye the first time
+// each class of output merger is seen (nothing bound, bound but neither input
+// held, RT0 held, the submitted image held, both held: five notes an eye at
+// most). A game that flips between classes while loading therefore cannot use
+// the notes up before a class with a hold shows, and the two eyes can be
+// compared. Bit c of g_holoNearLightSeen[eye] is set once class c is noted.
+uint32_t g_holoNearLightSeen[2] = {};
 // Pixel counts are census-only: they never feed the render passes. Keep
 // their queries and staging traffic out of ordinary temporal-AA frames.
 bool g_holoDiagnosticsOn = false;
@@ -1938,6 +1959,19 @@ void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
     for (uint32_t i = 0; i < g_holoNearLightSampleCount; ++i) nearLightTotal += g_holoNearLightSamples[i];
     const double nearLightMean = g_holoNearLightSampleCount
         ? static_cast<double>(nearLightTotal) / g_holoNearLightSampleCount : 0.0;
+    // What the near-light pass's own dispatch saw of the game's output
+    // merger, both eyes (the inputs struct above says what each field is).
+    // "dispatched 0 / 0" says the pass never ran; held > 0 says the stage
+    // clear was needed; null > 0 after a clear says some other cause.
+    char nearLightInputs[320];
+    _snprintf_s(nearLightInputs, sizeof(nearLightInputs), _TRUNCATE,
+                "near-light inputs (eye 0 / eye 1): dispatched %u / %u, output merger held the game's RT0 "
+                "%u / %u and the submitted image %u / %u, views read back null t2 %u / %u t3 %u / %u",
+                g_holoNearLightInputs[0].ran, g_holoNearLightInputs[1].ran,
+                g_holoNearLightInputs[0].heldTarget, g_holoNearLightInputs[1].heldTarget,
+                g_holoNearLightInputs[0].heldDisplay, g_holoNearLightInputs[1].heldDisplay,
+                g_holoNearLightInputs[0].nullT2, g_holoNearLightInputs[1].nullT2,
+                g_holoNearLightInputs[0].nullT3, g_holoNearLightInputs[1].nullT3);
     // One combined note, not two: the rig (and anything else reading the
     // last logged line) expects a single "hologram depth:" note per tick.
     // With fix.ui_quality's crisp take on, this line needs one reading
@@ -1953,7 +1987,7 @@ void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
                     "share test skipped %u (no target view), floor on contribution %u (no display "
                     "view), declined %u (%u nothing listed, %u no private copy, %u no projection, "
                     "%u fault); world markers %.2f draws/frame, element-depth samples p50 %llu "
-                    "(occlusion, %u sampled); near-light blocks/eye-frame mean %.1f (%u sampled).",
+                    "(occlusion, %u sampled); near-light blocks/eye-frame mean %.1f (%u sampled); %s.",
                     seconds, g_holoWindowFrames, static_cast<double>(g_holoWindowListed) / frames,
                     g_holoWindowResolved, static_cast<unsigned long long>(p50), n,
                     g_holoWindowNoTarget, g_holoWindowFloorFallback, declined,
@@ -1961,20 +1995,21 @@ void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
                     g_holoWindowDeclinedNoProjection, g_holoWindowDeclinedFault,
                     static_cast<double>(g_holoWindowMarkerDraws) / frames,
                     static_cast<unsigned long long>(markerP50), markerN,
-                    nearLightMean, g_holoNearLightSampleCount);
+                    nearLightMean, g_holoNearLightSampleCount, nearLightInputs);
     else Log::get().note("hologram depth: %.0f s, %u frames, listed draws %.2f/frame, resolved "
                     "eye-frames %u, share test skipped %u (no target view), floor on contribution %u "
                     "(no display view), declined %u (%u nothing listed, %u no private copy, %u no projection, "
                     "%u fault); world markers %.2f draws/frame; GPU pixel census off "
-                    "(advanced.temporal_aa_diagnostics = 0; pixel counts unavailable).",
+                    "(advanced.temporal_aa_diagnostics = 0; pixel counts unavailable); %s.",
                     seconds, g_holoWindowFrames, static_cast<double>(g_holoWindowListed) / frames,
                     g_holoWindowResolved, g_holoWindowNoTarget, g_holoWindowFloorFallback, declined,
                     g_holoWindowDeclinedNotCleared, g_holoWindowDeclinedNoPrivate,
                     g_holoWindowDeclinedNoProjection, g_holoWindowDeclinedFault,
-                    static_cast<double>(g_holoWindowMarkerDraws) / frames);
+                    static_cast<double>(g_holoWindowMarkerDraws) / frames, nearLightInputs);
     g_holoWindowStartMs = now;
     g_holoWindowFrames = g_holoWindowListed = g_holoWindowResolved = 0;
     g_holoWindowNoTarget = g_holoWindowFloorFallback = 0;
+    g_holoNearLightInputs[0] = g_holoNearLightInputs[1] = HoloNearLightInputs{};
     g_holoWindowDeclinedNotCleared = g_holoWindowDeclinedNoPrivate = 0;
     g_holoWindowDeclinedNoProjection = g_holoWindowDeclinedFault = 0;
     g_holoPixelSampleCount = 0;
@@ -2029,6 +2064,8 @@ void holoDepthShutdownImpl() {
     g_holoWindowStartMs = 0;
     g_holoWindowFrames = g_holoWindowListed = g_holoWindowResolved = 0;
     g_holoWindowNoTarget = g_holoWindowFloorFallback = 0;
+    g_holoNearLightInputs[0] = g_holoNearLightInputs[1] = HoloNearLightInputs{};
+    g_holoNearLightSeen[0] = g_holoNearLightSeen[1] = 0;
     g_holoWindowDeclinedNotCleared = g_holoWindowDeclinedNoPrivate = 0;
     g_holoWindowDeclinedNoProjection = g_holoWindowDeclinedFault = 0;
     g_holoPixelSampleCount = 0;
@@ -2344,6 +2381,49 @@ uint32_t savedRtvCount() {
 
 void restoreOm(ID3D11DeviceContext* ctx) {
     vScreenSetRenderTargetsRaw(ctx, savedRtvCount(), g_savedRtvs, g_savedDsv);
+}
+
+// What the saved output merger holds, for one log line: each bound slot's
+// texture size and DXGI format (naming the near-light pass's two inputs when
+// the slot is one of them), then the depth view; "nothing" when it holds
+// neither. Reads g_savedRtvs/g_savedDsv and compares resources by pointer,
+// never dereferencing the two inputs.
+void holoDescribeSavedOm(char* out, size_t cap, const void* targetRes, const void* displayRes) {
+    size_t len = 0;
+    out[0] = '\0';
+    auto describe = [&](ID3D11View* view, const char* lead) {
+        char text[96];
+        ID3D11Resource* res = nullptr;
+        view->GetResource(&res);
+        if (res) {
+            const char* role = (res == targetRes && res == displayRes) ? " (the game's RT0 and the submitted image)"
+                             : res == targetRes ? " (the game's RT0)"
+                             : res == displayRes ? " (the submitted image)" : "";
+            ID3D11Texture2D* tex = nullptr;
+            if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+                D3D11_TEXTURE2D_DESC td{};
+                tex->GetDesc(&td);
+                _snprintf_s(text, sizeof(text), _TRUNCATE, "%s %ux%u fmt %u%s", lead, td.Width, td.Height,
+                            static_cast<unsigned>(td.Format), role);
+                tex->Release();
+            } else {
+                _snprintf_s(text, sizeof(text), _TRUNCATE, "%s not a 2D texture%s", lead, role);
+            }
+            res->Release();
+        } else {
+            _snprintf_s(text, sizeof(text), _TRUNCATE, "%s unreadable", lead);
+        }
+        const int n = _snprintf_s(out + len, cap - len, _TRUNCATE, "%s%s", len ? ", " : "", text);
+        if (n > 0) len += static_cast<size_t>(n);
+    };
+    for (uint32_t i = 0; i < kMaxRtvs; ++i) {
+        if (!g_savedRtvs[i]) continue;
+        char lead[16];
+        _snprintf_s(lead, sizeof(lead), _TRUNCATE, "slot %u", i);
+        describe(g_savedRtvs[i], lead);
+    }
+    if (g_savedDsv) describe(g_savedDsv, "depth");
+    if (!len) _snprintf_s(out, cap, _TRUNCATE, "nothing");
 }
 
 }  // namespace
@@ -3694,10 +3774,12 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
     // eye's size; a size mismatch (or none at all) falls back to the
     // contribution's own space rather than failing the whole resolve.
     bool haveDisplay = false, displaySrgb = false;
+    const void* displayResId = nullptr;   // the display view's resource, compared and never dereferenced
     if (display) {
         ID3D11Resource* res = nullptr;
         display->GetResource(&res);
         if (res) {
+            displayResId = res;
             ID3D11Texture2D* tex = nullptr;
             if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
                 D3D11_TEXTURE2D_DESC td{};
@@ -3738,6 +3820,7 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
     // round 6 -- rather than fail the whole resolve over it.
     {
         ID3D11ComputeShader* nearLightCs = holoNearLightShader(ctx);
+        bool omCleared = false;
         guardedBudget(g_holoBudget, [&] {
             if (!nearLightCs) {
                 const FLOAT zero[4]{};
@@ -3762,13 +3845,71 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
 
             ID3D11ShaderResourceView* in[4] = {s.contribSrv, s.depthSrv, haveTarget ? s.targetSrv : nullptr,
                                                haveDisplay ? display : nullptr};
+            // The game's output merger, before any view is set: this runs at
+            // Submit, where whatever the game's last eye pass bound is still
+            // bound (the resolve's own draw clears the stage for the same
+            // reason, below). A view over a resource that is still bound as an
+            // output is set as NULL, silently, so t2 (the game's RT0, the share
+            // test) or t3 (the submitted image, the floor) would read black and
+            // the map would come out wrong with nothing to say so. The stage is
+            // cleared only when one of the two is actually held, so every other
+            // frame is exactly what it was; the census counts both the holds
+            // and, read back from the context, any input that is NULL anyway.
+            HoloNearLightInputs& counts = g_holoNearLightInputs[eye];
+            ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);
+            uint32_t boundRtvs = 0;
+            bool heldTarget = false, heldDisplay = false;
+            for (uint32_t i = 0; i < kMaxRtvs; ++i) {
+                if (!g_savedRtvs[i]) continue;
+                ++boundRtvs;
+                ID3D11Resource* bound = nullptr;
+                g_savedRtvs[i]->GetResource(&bound);
+                if (!bound) continue;
+                if (in[2] && bound == s.targetRes) heldTarget = true;
+                if (in[3] && bound == displayResId) heldDisplay = true;
+                bound->Release();
+            }
+            if (heldTarget) ++counts.heldTarget;
+            if (heldDisplay) ++counts.heldDisplay;
+            // Said the first time each class of what is bound is seen, per
+            // eye, so the log shows what the game leaves bound at Submit and
+            // whether the two eyes differ (the counters say how often).
+            const uint32_t omClass = (heldTarget ? 1u : 0u) | (heldDisplay ? 2u : 0u) | (boundRtvs ? 4u : 0u);
+            if (!(g_holoNearLightSeen[eye] & (1u << omClass))) {
+                g_holoNearLightSeen[eye] |= 1u << omClass;
+                char omText[512], consequence[256];
+                holoDescribeSavedOm(omText, sizeof(omText), s.targetRes, displayResId);
+                consequence[0] = '\0';
+                if (heldTarget || heldDisplay)
+                    _snprintf_s(consequence, sizeof(consequence), _TRUNCATE,
+                                " D3D reads a shader view over a bound output as NULL, so %s would have read "
+                                "black here; the stage is cleared around the dispatch and put back.",
+                                heldTarget ? (heldDisplay ? "both views (the share test and the floor)"
+                                                          : "the game's RT0 view (the share test)")
+                                           : "the submitted-image view (the floor)");
+                Log::get().note("hologram depth: eye %d, near-light pass: the output merger holds %s.%s",
+                                eye, omText, consequence);
+            }
+            if (heldTarget || heldDisplay) {
+                vScreenSetRenderTargetsRaw(ctx, 0, nullptr, nullptr);
+                omCleared = true;
+            }
             ctx->CSSetShader(nearLightCs, nullptr, 0);
             ctx->CSSetShaderResources(0, 4, in);
+            {
+                // What the context holds now, not what was asked for.
+                ID3D11ShaderResourceView* held[4]{};
+                ctx->CSGetShaderResources(0, 4, held);
+                if (in[2] && !held[2]) ++counts.nullT2;
+                if (in[3] && !held[3]) ++counts.nullT3;
+                for (auto* p : held) if (p) p->Release();
+            }
             ctx->CSSetUnorderedAccessViews(0, 1, &s.nearLightUav, nullptr);
             ctx->CSSetConstantBuffers(0, 1, &cb);
             // One group per 8x8 block; its 64 threads are the block's pixels.
             const uint32_t blocksW = (w + 7) / 8, blocksH = (h + 7) / 8;
             ctx->Dispatch(blocksW, blocksH, 1);
+            ++counts.ran;
 
             ID3D11UnorderedAccessView* zeroUav = nullptr;
             ID3D11ShaderResourceView* zeroSrv[4]{};
@@ -3794,6 +3935,10 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
                     if (s.nearLightStage[i] == stage) s.nearLightStagePending[i] = true;
             }
         });
+        // The stage goes back after the compute state (restored inside), and
+        // also when the dispatch faulted: a cleared stage must not outlive it.
+        if (omCleared) guarded("uiDepthHolo.nearLightRestore", [&] { restoreOm(ctx); });
+        releaseSavedOm();
     }
     const bool ran = guardedBudget(g_holoBudget, [&] {
         ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);

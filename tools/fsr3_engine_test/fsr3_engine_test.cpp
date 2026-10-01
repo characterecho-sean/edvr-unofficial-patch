@@ -47,6 +47,16 @@
 //     reset=false carrying the old history forward.
 // (f) a size change (1711x1425 -> 3422x3394) recreates the context
 //     cleanly.
+// (l) the flat HDR route's flags (design section 81): an R11G11B10F input
+//     and an fp16 output dispatch FFX_OK under ENABLE_HIGH_DYNAMIC_RANGE |
+//     ENABLE_AUTO_EXPOSURE, a still field of 40 comes back as 40, and
+//     flipping the flag remakes the context each way.
+// (m) the upscaler slots (dlaa.h, kUpscalerSlots; design section 82): the VR world route's third slot
+//     has a context of its own beside the eyes' two. All three are live at once (the backend's scratch is
+//     sized for three) and each dispatches FFX_OK; a slot no engine has is refused by name; the warm-up
+//     makes the eyes' two and not the world's; making, re-keying or flipping the HDR bit of one slot's
+//     context touches no other's (a creation counter per slot, test-only); and interleaved evaluations
+//     on two slots each keep their own history (two constant scenes come back as themselves).
 // (g) WARP's answer to IDXGIAdapter3::QueryVideoMemoryInfo, called
 //     directly against this rig's device and reported, not asserted. The
 //     engine's create line no longer uses that query (flights 1 to 3 of
@@ -59,6 +69,7 @@
 // (gpu_timing_test.cpp and native_frame_test.cpp's own convention; only
 // openxr_shared_texture_test.cpp uses the source-level form).
 #include "../../src/d3d11/fsr3_engine.h"
+#include "../../src/d3d11/hdr_backend_flags.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/config.h"
 #include "../../src/common/temporal_math.h"
@@ -74,6 +85,9 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -86,6 +100,8 @@ using Microsoft::WRL::ComPtr;
 namespace edvr {
 uint32_t fsr3TestMessageCount();
 void fsr3TestSkipBindCheck(bool on);
+uint32_t fsr3TestContextFlags(unsigned eye);   // the flags an eye's context was created with (hdr_backend_flags.h)
+uint32_t fsr3TestContextCreations(unsigned slot);   // how many contexts an upscaler slot has had made (a rekey counts again)
 }
 
 // perf_monitor.cpp is deliberately not linked here -- it pulls in
@@ -1045,6 +1061,310 @@ void testSizeChange(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 }
 
+// (l) The flat HDR route's flags (docs\design-flat-temporal-aa-2026-09-23.md section 81; hdr_backend_flags.h). The
+// route hands AMD's port the game's R11G11B10F scene colour and takes an R16G16B16A16F output, with the context made
+// under ENABLE_HIGH_DYNAMIC_RANGE | ENABLE_AUTO_EXPOSURE (the exposure resource stays null, preExposure 1). Pinned:
+// that context is made and dispatches FFX_OK with an R11G11B10F input and an fp16 output; a scene with nothing moving
+// comes back as itself in radiance (40 stays 40, finite); and flipping the flag remakes the context each way without a
+// refusal and returns what it returned before. What the same still field does under the LDR flags is printed, not
+// asserted: on a constant field the two agree (measured on WARP: 39.97 and 40.00), so this case cannot show what the flag
+// does to a hot pixel, which only a flight can.
+uint32_t packSmallFloat(float v, int mantissaBits) {   // a positive normal number into an R11G11B10F channel
+    if (!(v > 0.0f)) return 0;
+    int e = 0;
+    const float m = frexpf(v, &e);                      // v = m * 2^e, m in [0.5, 1)
+    return (static_cast<uint32_t>(e - 1 + 15) << mantissaBits) |
+           static_cast<uint32_t>((2.0f * m - 1.0f) * static_cast<float>(1u << mantissaBits) + 0.5f);
+}
+// The mean of the central quarter of an R16G16B16A16_FLOAT texture, per channel; false when a texel there is not finite.
+bool readHalfCentre(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, UINT w, UINT h, float (&mean)[3]) {
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width = w; sd.Height = h; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* stage = nullptr;
+    if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage)) || !stage) return false;
+    ctx->CopyResource(stage, tex);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    bool finite = false;
+    if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
+        double sum[3] = {0, 0, 0};
+        unsigned n = 0;
+        finite = true;
+        for (UINT y = h / 4; y < h - h / 4; ++y) {
+            const auto* row = reinterpret_cast<const uint16_t*>(static_cast<const unsigned char*>(m.pData) +
+                                                                static_cast<size_t>(y) * m.RowPitch);
+            for (UINT x = w / 4; x < w - w / 4; ++x) {
+                for (int c = 0; c < 3; ++c) {
+                    const float v = halfToFloat(row[x * 4 + c]);
+                    if (!std::isfinite(v)) finite = false;
+                    sum[c] += v;
+                }
+                ++n;
+            }
+        }
+        for (int c = 0; c < 3; ++c) mean[c] = static_cast<float>(sum[c] / (n ? n : 1));
+        ctx->Unmap(stage, 0);
+    }
+    stage->Release();
+    return finite;
+}
+constexpr float kHdrFieldTolerance = 0.02f;   // the port returns 39.97 for a constant 40: 0.08% off
+void testHdrRoute(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    constexpr UINT w = 320, h = 192;
+    constexpr float kRadiance = 40.0f;
+    ID3D11Texture2D* colour = makeTexture(dev, w, h, DXGI_FORMAT_R11G11B10_FLOAT,     D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* depth  = makeTexture(dev, w, h, DXGI_FORMAT_R32_FLOAT,           D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* mv     = makeTexture(dev, w, h, DXGI_FORMAT_R16G16_FLOAT,        D3D11_BIND_SHADER_RESOURCE);
+    ID3D11Texture2D* out    = makeTexture(dev, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                          D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
+    const bool made = colour && depth && mv && out;
+    check(made, "(l) the HDR route's textures (an R11G11B10F colour, an R16G16B16A16F output) were created");
+    if (made) {
+        const uint32_t texel = packSmallFloat(kRadiance, 6) | (packSmallFloat(kRadiance, 6) << 11) |
+                               (packSmallFloat(kRadiance, 5) << 22);
+        const std::vector<uint32_t> field(static_cast<size_t>(w) * h, texel);
+        ctx->UpdateSubresource(colour, 0, nullptr, field.data(), w * 4, 0);
+        fillDepthConstant(ctx, depth, w, h, 0.3f);
+        fillZeroMotion(ctx, mv, w, h);
+        // Six still frames, zero jitter, the first a reset: what the route sends on a scene with nothing moving.
+        const auto run = [&](bool hdr, float (&mean)[3], bool* dispatched) {
+            bool ok = true;
+            for (int f = 0; f < 6; ++f) {
+                const char* why = nullptr;
+                const bool d = edvr::fsr3Evaluate(ctx, 0, colour, depth, mv, nullptr, out, w, h, w, h, 0.0f, 0.0f, f == 0,
+                                                  11.1f, 0.1f, 10000.0f, kFovY, &why, false, hdr);
+                if (!d) std::printf("info: (l) hdr=%d frame %d refused: %s\n", hdr ? 1 : 0, f, why ? why : "?");
+                ok = ok && d;
+            }
+            *dispatched = ok;
+            mean[0] = mean[1] = mean[2] = 0.0f;
+            return ok && readHalfCentre(dev, ctx, out, w, h, mean);
+        };
+        float hdrMean[3], ldrMean[3], againMean[3];
+        bool hdrDispatched = false, ldrDispatched = false, againDispatched = false;
+        // The flags the eye's context carries are what the route asked for, bit for bit: the LDR set the copy route has
+        // always made with, or that set plus the two HDR bits (this rig runs with AMD's debug checking on, which is
+        // the same bit in both). Read from the engine's own record of desc.flags, so a flag that never reached the
+        // port, or a flip that did not remake the context, shows here and nowhere a constant field could.
+        const bool diagnostics = edvr::Config::get().getBool("advanced.temporal_aa_diagnostics", false);
+        const uint32_t ldrFlags = edvr::flatFsrCreateFlags(false, diagnostics, false);
+        const uint32_t hdrFlags = edvr::flatFsrCreateFlags(false, diagnostics, true);
+        const uint32_t messagesBefore = edvr::fsr3TestMessageCount();
+        const bool hdrOk = run(true, hdrMean, &hdrDispatched);
+        check(hdrDispatched, "(l) six frames dispatched FFX_OK under ENABLE_HIGH_DYNAMIC_RANGE | ENABLE_AUTO_EXPOSURE");
+        check(edvr::fsr3TestContextFlags(0) == hdrFlags &&
+                  (hdrFlags & (edvr::kFsrFlagHighDynamicRange | edvr::kFsrFlagAutoExposure)) ==
+                      (edvr::kFsrFlagHighDynamicRange | edvr::kFsrFlagAutoExposure),
+              "(l) the context was created with the HDR and auto-exposure bits added to the LDR set");
+        std::printf("info: (l) HDR flags 0x%X; a constant %.1f field comes back (%.3f, %.3f, %.3f); AMD's messages %u -> %u\n",
+                    edvr::fsr3TestContextFlags(0), kRadiance, hdrMean[0], hdrMean[1], hdrMean[2], messagesBefore,
+                    edvr::fsr3TestMessageCount());
+        check(edvr::fsr3TestMessageCount() == messagesBefore,
+              "(l) AMD's own debug checking says nothing about the HDR route's input (an R11G11B10F colour, null exposure)");
+        check(hdrOk && std::fabs(hdrMean[0] / kRadiance - 1.0f) < kHdrFieldTolerance &&
+                  std::fabs(hdrMean[1] / kRadiance - 1.0f) < kHdrFieldTolerance &&
+                  std::fabs(hdrMean[2] / kRadiance - 1.0f) < kHdrFieldTolerance,
+              "(l) a still HDR field of 40 comes back as itself, finite, through the port's HDR and auto-exposure flags");
+        const bool ldrOk = run(false, ldrMean, &ldrDispatched);
+        check(ldrDispatched && edvr::fsr3TestContextFlags(0) == ldrFlags,
+              "(l) flipping the flag off remade the context with exactly the LDR set, and six frames dispatched again");
+        std::printf("info: (l) LDR flags 0x%X on the same field: (%.3f, %.3f, %.3f)%s\n", edvr::fsr3TestContextFlags(0),
+                    ldrMean[0], ldrMean[1], ldrMean[2], ldrOk ? "" : " (not finite)");
+        const bool againOk = run(true, againMean, &againDispatched);
+        check(againDispatched && againOk && edvr::fsr3TestContextFlags(0) == hdrFlags &&
+                  std::fabs(againMean[0] - hdrMean[0]) <= 0.01f * kRadiance &&
+                  std::fabs(againMean[1] - hdrMean[1]) <= 0.01f * kRadiance &&
+                  std::fabs(againMean[2] - hdrMean[2]) <= 0.01f * kRadiance,
+              "(l) flipping it back on remakes the context with the HDR set, and it returns what it returned before the flip");
+    }
+    if (colour) colour->Release();
+    if (depth) depth->Release();
+    if (mv) mv->Release();
+    if (out) out->Release();
+}
+
+// (m) The upscaler slots (dlaa.h's kUpscalerSlots; docs\design-flat-temporal-aa-2026-09-23.md section 82). The eyes own slots 0 and 1; the
+// VR world route resolves the on-foot world on slot 2, beside them, so three contexts are live at once and none may touch another's
+// key, flags or history. Measured through the engine's own record of what it made (fsr3TestContextCreations, fsr3TestContextFlags) and
+// through the pictures: two interleaved constant scenes come back as themselves, which one shared history could not do.
+struct SlotRig {
+    UINT w = 0, h = 0;
+    ID3D11Texture2D *colour = nullptr, *depth = nullptr, *mv = nullptr, *out = nullptr;
+    bool made() const { return colour && depth && mv && out; }
+    void release() {
+        if (colour) colour->Release();
+        if (depth) depth->Release();
+        if (mv) mv->Release();
+        if (out) out->Release();
+        colour = depth = mv = out = nullptr;
+    }
+};
+SlotRig makeSlotRig(ID3D11Device* dev, ID3D11DeviceContext* ctx, UINT w, UINT h, unsigned char grey) {
+    SlotRig r;
+    r.w = w; r.h = h;
+    r.colour = makeTexture(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
+    r.depth = makeTexture(dev, w, h, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+    r.mv = makeTexture(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+    r.out = makeTexture(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
+    if (r.made()) {
+        fillConstant(ctx, r.colour, w, h, grey);
+        fillDepthConstant(ctx, r.depth, w, h, 0.3f);
+        fillZeroMotion(ctx, r.mv, w, h);
+    }
+    return r;
+}
+bool evalSlot(ID3D11DeviceContext* ctx, unsigned slot, const SlotRig& r, bool reset, const char** why, bool hdr = false) {
+    return edvr::fsr3Evaluate(ctx, slot, r.colour, r.depth, r.mv, nullptr, r.out, r.w, r.h, r.w, r.h, 0.0f, 0.0f, reset, 11.1f,
+                              0.1f, 10000.0f, kFovY, why, false, hdr);
+}
+// The mean of the red channel over the central half of an R8G8B8A8_UNORM output.
+double meanRed(ID3D11Device* dev, ID3D11DeviceContext* ctx, const SlotRig& r) {
+    std::vector<unsigned char> px;
+    if (!readRegion(dev, ctx, r.out, r.w / 4, r.h / 4, r.w / 2, r.h / 2, px) || px.empty()) return -1.0;
+    double sum = 0.0;
+    for (size_t i = 0; i < px.size(); i += 4) sum += px[i];
+    return sum / static_cast<double>(px.size() / 4);
+}
+void testUpscalerSlots(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    check(edvr::kUpscalerSlots == 3 && edvr::kUpscalerEyeSlots == 2,
+          "(m) two eyes' slots and the VR world's third");
+    edvr::fsr3ReleaseFeatures();   // a clean slate; every count below is a difference from here
+    const unsigned world = 2;
+    auto created = [](unsigned slot) { return edvr::fsr3TestContextCreations(slot); };
+    const uint32_t c0 = created(0), c1 = created(1), c2 = created(2);
+    SlotRig eyeRig = makeSlotRig(dev, ctx, 320, 192, 64);       // the eyes' key
+    SlotRig worldRig = makeSlotRig(dev, ctx, 256, 160, 192);    // the world's own, smaller
+    const bool made = eyeRig.made() && worldRig.made();
+    check(made, "(m) the slot cases' textures were created");
+    if (!made) { eyeRig.release(); worldRig.release(); return; }
+    const char* why = nullptr;
+
+    // A slot no engine has is refused, by name, and makes nothing.
+    static const unsigned bad[] = {edvr::kUpscalerSlots, edvr::kUpscalerSlots + 1, 99u, 0xffffffffu};
+    bool allRefused = true, named = true;
+    for (unsigned slot : bad) {
+        why = nullptr;
+        allRefused = !evalSlot(ctx, slot, eyeRig, true, &why) && allRefused;
+        named = why && std::strstr(why, "slot") != nullptr && named;
+    }
+    check(allRefused, "(m) slots 3, 4, 99 and UINT_MAX are refused");
+    check(named, "(m) and the refusal names the slot");
+    check(created(0) == c0 && created(1) == c1 && created(2) == c2, "(m) a refused slot makes no context");
+
+    // The loading-screen warm-up makes the eyes' two contexts and not the world's.
+    double ms = -1.0;
+    check(edvr::fsr3Warm(ctx, eyeRig.w, eyeRig.h, eyeRig.w, eyeRig.h, &ms, &why),
+          "(m) fsr3Warm made the eyes' two contexts");
+    check(created(0) == c0 + 1 && created(1) == c1 + 1 && created(2) == c2,
+          "(m) the warm-up made slot 0's and slot 1's context and nothing for slot 2");
+    check(edvr::fsr3TestContextFlags(world) == 0, "(m) the world's slot has no context before its first evaluation");
+
+    // The world's context is made lazily, by its first evaluation, at its own key -- the third live context, which the backend's scratch
+    // (sized for kUpscalerSlots) must hold -- and moves nothing of the eyes'.
+    why = nullptr;
+    const bool worldOk = evalSlot(ctx, world, worldRig, true, &why);
+    if (!worldOk && why) std::printf("info: (m) slot 2 refused: %s\n", why);
+    check(worldOk, "(m) slot 2 dispatched FFX_OK beside the eyes' two live contexts (the scratch holds three)");
+    check(created(0) == c0 + 1 && created(1) == c1 + 1 && created(2) == c2 + 1,
+          "(m) slot 2's first evaluation made slot 2's context and no other");
+    check(edvr::fsr3TestContextFlags(world) != 0, "(m) slot 2 has a context after it");
+    check(evalSlot(ctx, world, worldRig, false, &why) && created(world) == c2 + 1,
+          "(m) a second evaluation at the same key finds slot 2's context, creating nothing");
+
+    // The eyes' contexts stand: an eye's evaluation at its own key finds the warm-up's context and makes nothing, and the eyes' two
+    // still dispatch with slot 2 live.
+    why = nullptr;
+    const bool eye0 = evalSlot(ctx, 0, eyeRig, true, &why), eye1 = evalSlot(ctx, 1, eyeRig, true, &why);
+    check(eye0 && eye1, "(m) eye 0 and eye 1 dispatched FFX_OK with slot 2 live: three contexts at once");
+    check(created(0) == c0 + 1 && created(1) == c1 + 1 && created(2) == c2 + 1,
+          "(m) the eyes found their warm contexts: slot 2's evaluations remade neither");
+
+    // A re-key on one slot remakes that slot only.
+    check(evalSlot(ctx, world, eyeRig, true, &why) && created(world) == c2 + 2 && created(0) == c0 + 1 && created(1) == c1 + 1,
+          "(m) slot 2 at another size remade slot 2's context and the eyes' none");
+    check(evalSlot(ctx, 0, worldRig, true, &why) && created(0) == c0 + 2 && created(1) == c1 + 1 && created(world) == c2 + 2,
+          "(m) eye 0 at another size remade eye 0's context, and neither eye 1's nor the world's");
+    check(evalSlot(ctx, 0, eyeRig, true, &why) && created(0) == c0 + 3, "(m) and back again, one more for eye 0 only");
+
+    // The HDR bit is part of one slot's key, not the others'.
+    {
+        constexpr UINT hw = 320, hh = 192;
+        ID3D11Texture2D* hc = makeTexture(dev, hw, hh, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+        ID3D11Texture2D* ho = makeTexture(dev, hw, hh, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
+        check(hc && ho, "(m) the HDR textures were created");
+        if (hc && ho) {
+            const uint32_t texel = packSmallFloat(40.0f, 6) | (packSmallFloat(40.0f, 6) << 11) | (packSmallFloat(40.0f, 5) << 22);
+            const std::vector<uint32_t> field(static_cast<size_t>(hw) * hh, texel);
+            ctx->UpdateSubresource(hc, 0, nullptr, field.data(), hw * 4, 0);
+            SlotRig hdrRig = eyeRig;
+            hdrRig.colour = hc; hdrRig.out = ho;
+            const bool diagnostics = edvr::Config::get().getBool("advanced.temporal_aa_diagnostics", false);
+            const uint32_t ldrFlags = edvr::flatFsrCreateFlags(false, diagnostics, false);
+            const uint32_t hdrFlags = edvr::flatFsrCreateFlags(false, diagnostics, true);
+            const uint32_t before0 = created(0), before1 = created(1), before2 = created(world);
+            check(edvr::fsr3TestContextFlags(0) == ldrFlags && edvr::fsr3TestContextFlags(1) == ldrFlags &&
+                      edvr::fsr3TestContextFlags(world) == ldrFlags,
+                  "(m) all three slots' contexts are the LDR set before the flip");
+            check(evalSlot(ctx, world, hdrRig, true, &why, true) && created(world) == before2 + 1 &&
+                      edvr::fsr3TestContextFlags(world) == hdrFlags,
+                  "(m) slot 2 with the HDR route's bit remade slot 2's context with the HDR set");
+            check(edvr::fsr3TestContextFlags(0) == ldrFlags && edvr::fsr3TestContextFlags(1) == ldrFlags &&
+                      created(0) == before0 && created(1) == before1,
+                  "(m) and the eyes' contexts are still the LDR set they were, unremade");
+            check(evalSlot(ctx, world, eyeRig, true, &why, false) && edvr::fsr3TestContextFlags(world) == ldrFlags &&
+                      created(world) == before2 + 2,
+                  "(m) flipping the bit off remakes slot 2's context with the LDR set again");
+        }
+        if (hc) hc->Release();
+        if (ho) ho->Release();
+    }
+
+    // Independent history: two constant scenes, 64 and 192, evaluated in turn on slot 0 and slot 2 at the same key, each from its own
+    // reset. Each context accumulates only its own scene, so each output is its own grey; one shared history would pull both towards the
+    // middle. (A constant field comes back as itself to within a level or two on this engine.)
+    {
+        SlotRig dark = makeSlotRig(dev, ctx, 320, 192, 64), light = makeSlotRig(dev, ctx, 320, 192, 192);
+        check(dark.made() && light.made(), "(m) the interleaving textures were created");
+        if (dark.made() && light.made()) {
+            bool all = true;
+            for (int f = 0; f < 6; ++f) {
+                all = evalSlot(ctx, 0, dark, f == 0, &why) && all;
+                all = evalSlot(ctx, world, light, f == 0, &why) && all;
+            }
+            check(all, "(m) six interleaved frames on slot 0 and slot 2 dispatched FFX_OK");
+            const double a = meanRed(dev, ctx, dark), b = meanRed(dev, ctx, light);
+            std::printf("info: (m) interleaved slots: slot 0 (scene 64) came back %.2f, slot 2 (scene 192) %.2f\n", a, b);
+            check(a >= 0 && std::fabs(a - 64.0) <= 6.0 && b >= 0 && std::fabs(b - 192.0) <= 6.0,
+                  "(m) each slot's output is its own scene: slot 0 about 64 and slot 2 about 192, so their histories are not shared");
+        }
+        dark.release(); light.release();
+    }
+
+    // Releasing frees all three.
+    edvr::fsr3ReleaseFeatures();
+    check(edvr::fsr3TestContextFlags(0) == 0 && edvr::fsr3TestContextFlags(1) == 0 && edvr::fsr3TestContextFlags(world) == 0,
+          "(m) fsr3ReleaseFeatures freed the eyes' contexts and the world's");
+    eyeRig.release(); worldRig.release();
+
+    // What no dispatch can see: the backend's scratch is sized for the contexts the engine may make. The port does not refuse a context
+    // beyond the count it was told -- on WARP a scratch sized for two still took this case's third context, silently -- so a scratch left
+    // at two while the array is three would overrun in a flight and nowhere here. Read as source, because nothing else can see it (the
+    // rig runs from the repo root, as flat_temporal_test's source pins do).
+    {
+        std::ifstream in("src/d3d11/fsr3_engine.cpp", std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto count = [&](const char* needle) {
+            size_t n = 0, at = 0; const std::string s(needle);
+            while ((at = src.find(s, at)) != std::string::npos) { ++n; at += s.size(); }
+            return n;
+        };
+        check(!src.empty() && count("const size_t scratchSize = ffxGetScratchMemorySizeDX11(kUpscalerSlots);") == 1 &&
+                  count("g_scratch.size(), kUpscalerSlots);") == 1 && count("EyeCtx g_ctx[kUpscalerSlots];") == 1,
+              "(m) the backend's scratch is sized for kUpscalerSlots contexts and the context array is kUpscalerSlots wide (source pin)");
+    }
+}
+
 // The upscale case (the review of 2026-09-16, F3). Until now EVERY
 // fsr3Evaluate in this rig passed outW = w: the whole point of fix.temporal_aa
 // = fsr -- native_temporal.cpp sets s.upscale for it -- had never run
@@ -1575,6 +1895,8 @@ int run() {
         testRegistrationTable(device.Get(), context.Get());
         testReset(device.Get(), context.Get());
         testSizeChange(device.Get(), context.Get());
+        testHdrRoute(device.Get(), context.Get());
+        testUpscalerSlots(device.Get(), context.Get());
         testUpscaleQuest3(device.Get(), context.Get());
         testUpscaleRegistration(device.Get(), context.Get());
         testWarmAndRelease(device.Get(), context.Get());
@@ -1605,7 +1927,7 @@ int main(int argc, char** argv) {
         std::puts(
             "Would test AMD's FSR3 engine on a WARP device: availability, context creation, "
             "DEBUG_CHECKING silence, the jitter/motion-vector sign registration table, reset, a "
-            "size change, the Quest 3's own upscale and the sign table at that ratio, the "
+            "size change, the flat HDR route's flags, the three upscaler slots' own contexts and histories, the Quest 3's own upscale and the sign table at that ratio, the "
             "loading-screen warm-up and the release that frees it, a reactive mask, the "
             "bind-flag refusal and the caught throw behind it, and WARP's answer to the video "
             "memory query; no devices "

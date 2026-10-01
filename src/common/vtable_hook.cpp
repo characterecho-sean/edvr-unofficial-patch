@@ -2103,6 +2103,48 @@ size_t vtableEntriesInModule(void** vtable, size_t count, void* moduleBase) {
     return hits;
 }
 
+size_t vtableDominantOtherModule(void** vtable, size_t count, void* excludedModule, char* file, size_t fileLen) {
+    if (file && fileLen) file[0] = '\0';
+    if (!vtable || !file || !fileLen) return 0;
+    constexpr size_t kMax = 128;
+    if (count > kMax) count = kMax;
+    static HMODULE self = nullptr;
+    if (!self) {
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&vtableDominantOtherModule), &self);
+    }
+    void* bases[kMax] = {};
+    size_t hits[kMax] = {};
+    size_t modules = 0;
+    char path[MAX_PATH] = {};
+    for (size_t i = 0; i < count; ++i) {
+        void* entry = nullptr;
+        if (!guarded("vtableDominantOtherModule", [&] { entry = vtable[i]; })) break;
+        void* base = owningModule(entry);
+        if (!base || base == excludedModule || base == static_cast<void*>(self)) continue;
+        size_t at = 0;
+        while (at < modules && bases[at] != base) ++at;
+        if (at == modules) {
+            // A private allocation (generated code, a freed page) has an allocation base and no file name: not a module.
+            if (!GetModuleFileNameA(static_cast<HMODULE>(base), path, sizeof(path))) continue;
+            bases[modules] = base;
+            hits[modules] = 0;
+            ++modules;
+        }
+        ++hits[at];
+    }
+    if (!modules) return 0;
+    size_t best = 0;
+    for (size_t i = 1; i < modules; ++i) if (hits[i] > hits[best]) best = i;
+    if (!GetModuleFileNameA(static_cast<HMODULE>(bases[best]), path, sizeof(path))) return 0;
+    const char* leaf = path;
+    for (const char* c = path; *c; ++c) {
+        if (*c == '\\' || *c == '/') leaf = c + 1;
+    }
+    _snprintf_s(file, fileLen, _TRUNCATE, "%s", leaf);
+    return hits[best];
+}
+
 bool VTableHook::writeEntry(void** vtable, size_t slot, void* value,
                             const char* why) {
     DWORD oldProtect = 0;

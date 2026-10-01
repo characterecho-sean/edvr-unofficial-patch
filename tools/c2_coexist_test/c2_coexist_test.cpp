@@ -13,9 +13,12 @@
 // (src/d3d11/flat_camera_phase.h). C13-C15 (2026-09-29, the camera path on with
 // no setting): a prologue mismatch and a write-failure stand-down each hand the
 // frame to the draw-time path with a history reset, the write-failure limit's
-// boundary, and the AA-off invariant -- each with its negative control.
+// boundary, and the AA-off invariant -- each with its negative control. C16
+// (2026-09-30): the observe-only switch the VR camera census drives -- the
+// admission table cannot answer Inject with it on, and a stream of the calls
+// that inject in the flat path leaves no mutation and an empty flush set.
 //
-// --self-test runs C1-C15 and prints "c2 coexist: PASS" only when every check
+// --self-test runs C1-C16 and prints "c2 coexist: PASS" only when every check
 // holds. Exit 1 with the failures named otherwise.
 
 #include <chrono>
@@ -24,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <string>
 
 #include "../c2_derive_test/c2_derive_model.h"
 #include "../../src/d3d11/flat_camera_ownership.h"
@@ -804,6 +808,103 @@ void testC15() {
           "C15 control: a predicate that ignored the mode would want the camera path with the mode off, and the row above sees it");
 }
 
+// C16 (2026-09-30): the observe-only switch the VR camera census drives (src/d3d11/vr_camera_census.cpp, design doc
+// section 82). The same detour runs in the VR profile and must never write a camera: flatCameraAdmit cannot answer Inject
+// with observeOnly set, whatever else is true, and the flush never becomes eligible. The walk is exhaustive over the same
+// inputs as C8, with the flat path's answers held as a control (the switch must not leak into them).
+void testC16() {
+    std::printf("C16 observe-only admission: the census's detour never mutates\n");
+    const uint32_t kinds[] = {0, 1, 2, 3, 4, 5, 6, 0xFFFFFFFFu};
+    const FlatCameraGateVerdict gates[] = {FlatCameraGateVerdict::Admit, FlatCameraGateVerdict::Disarmed,
+                                           FlatCameraGateVerdict::Expired, FlatCameraGateVerdict::OffThread};
+    unsigned combos = 0, observed = 0, injects = 0, flatInjects = 0;
+    bool neverInject = true, observedIffSpec = true, namedOthers = true, offThreadAlways = true, flatUnchanged = true,
+         neverFlushEligible = true;
+    for (int readable = 0; readable < 2; ++readable)
+        for (uint32_t kind : kinds)
+            for (FlatCameraGateVerdict gate : gates)
+                for (int upstream = 0; upstream < 2; ++upstream)
+                    for (int phase = 0; phase < 2; ++phase) {
+                        FlatCameraAdmitInput in;
+                        in.readable = readable != 0; in.kind = kind; in.gate = gate;
+                        in.upstreamOwns = upstream != 0; in.phaseNonzero = phase != 0;
+                        FlatCameraAdmitInput observe = in;
+                        observe.observeOnly = true;
+                        const FlatCameraAdmit a = flatCameraAdmit(observe);
+                        const FlatCameraAdmit flat = flatCameraAdmit(in);
+                        ++combos;
+                        if (a == FlatCameraAdmit::Inject) { neverInject = false; ++injects; }
+                        if (flat == FlatCameraAdmit::Inject) ++flatInjects;
+                        const bool spec = readable && kind == 3 && gate != FlatCameraGateVerdict::OffThread;
+                        if ((a == FlatCameraAdmit::Observed) != spec) observedIffSpec = false;
+                        if (a == FlatCameraAdmit::Observed) ++observed;
+                        if (gate == FlatCameraGateVerdict::OffThread && a != FlatCameraAdmit::OffThread) offThreadAlways = false;
+                        if (gate != FlatCameraGateVerdict::OffThread) {
+                            if (!readable && a != FlatCameraAdmit::Unreadable) namedOthers = false;
+                            if (readable && (kind == 4 || kind == 5) && a != FlatCameraAdmit::Unsupported) namedOthers = false;
+                            if (readable && kind != 3 && kind != 4 && kind != 5 && a != FlatCameraAdmit::OtherKind) namedOthers = false;
+                        }
+                        if (flatCameraFlushEligible(a) && a == FlatCameraAdmit::Observed) neverFlushEligible = false;
+                        // The flat answer is the one C8 walks: the switch defaults off and changes nothing with it off.
+                        const bool flatSpec = readable && kind == 3 && gate == FlatCameraGateVerdict::Admit && upstream && phase;
+                        if ((flat == FlatCameraAdmit::Inject) != flatSpec) flatUnchanged = false;
+                    }
+    std::printf("  note  %u input combinations: %u observed, %u inject with the switch on, %u inject with it off\n", combos,
+                observed, injects, flatInjects);
+    check(neverInject && injects == 0, "C16 with the switch on, no input of the admission table answers Inject");
+    check(observedIffSpec, "C16 a readable kind-3 camera on the owner thread answers Observed, whatever the window, ownership and phase");
+    check(offThreadAlways, "C16 a call on another thread is still OffThread: counted by the detour, never touched");
+    check(namedOthers, "C16 the other kinds keep their names: unreadable, kinds 4/5 unsupported, other kinds passing through");
+    check(flatUnchanged && flatInjects == 1,
+          "C16 control: with the switch off the table is C8's (one injecting input): the switch does not leak into the flat path");
+    check(neverFlushEligible && !flatCameraFlushEligible(FlatCameraAdmit::Observed),
+          "C16 an Observed call is never eligible to flush a camera's dirty bits");
+    check(std::string(flatCameraAdmitName(FlatCameraAdmit::Observed)) == "observed" &&
+          static_cast<int>(FlatCameraAdmit::Unreadable) == 7 && static_cast<int>(FlatCameraAdmit::Observed) == 8,
+          "C16 Observed is named, and is the last enumerator (every earlier admission keeps its number)");
+
+    // The exact condition that injects in the flat path -- a kind-3 camera, armed window, Upstream owning, a non-zero
+    // phase -- driven through a detour's-eye stream with the switch on: no mutation, the injected set stays empty, the
+    // flush decides nothing, and the off-thread calls are counted as such.
+    FlatCameraInjectedSet set;
+    struct Call { uintptr_t camera; uint32_t kind; FlatCameraGateVerdict gate; };
+    const Call stream[] = {
+        {0x1000, 3, FlatCameraGateVerdict::Admit}, {0x1000, 3, FlatCameraGateVerdict::Admit}, {0x2000, 3, FlatCameraGateVerdict::Admit},
+        {0x3000, 0, FlatCameraGateVerdict::Admit}, {0x4000, 1, FlatCameraGateVerdict::Admit}, {0x5000, 4, FlatCameraGateVerdict::Admit},
+        {0x1000, 3, FlatCameraGateVerdict::OffThread}, {0x2000, 3, FlatCameraGateVerdict::OffThread},
+        {0x1000, 3, FlatCameraGateVerdict::Expired}, {0x6000, 5, FlatCameraGateVerdict::Admit}, {0x2000, 3, FlatCameraGateVerdict::Disarmed},
+    };
+    unsigned mutations = 0, flushes = 0, off = 0, seen = 0;
+    for (const Call& c : stream) {
+        FlatCameraAdmitInput in;
+        in.readable = true; in.kind = c.kind; in.gate = c.gate; in.upstreamOwns = true; in.phaseNonzero = true; in.observeOnly = true;
+        const FlatCameraAdmit a = flatCameraAdmit(in);
+        if (a == FlatCameraAdmit::Inject) { ++mutations; set.noteInjected(c.camera); }   // what the detour does on Inject
+        if (flatCameraFlushDecision(set, c.camera, a)) ++flushes;
+        if (a == FlatCameraAdmit::OffThread) ++off;
+        if (a == FlatCameraAdmit::Observed) ++seen;
+    }
+    check(mutations == 0 && set.empty() && flushes == 0,
+          "C16 a stream of kind-3 calls with the window armed, Upstream owning and a non-zero phase: no mutation, the flush set stays empty");
+    check(off == 2 && seen == 5, "C16 the stream's two off-thread calls are counted off-thread and its five kind-3 owner-thread calls observed, window open or not");
+    // CONTROL: the same stream without the switch mutates (and so a rig that never injected would see the difference).
+    FlatCameraInjectedSet flatSet;
+    unsigned flatMutations = 0;
+    for (const Call& c : stream) {
+        FlatCameraAdmitInput in;
+        in.readable = true; in.kind = c.kind; in.gate = c.gate; in.upstreamOwns = true; in.phaseNonzero = true;
+        if (flatCameraAdmit(in) == FlatCameraAdmit::Inject) { ++flatMutations; flatSet.noteInjected(c.camera); }
+    }
+    check(flatMutations == 3 && !flatSet.empty(),
+          "C16 control: the same stream with the switch off injects its three open-window kind-3 calls, so the row above can fail");
+    // A camera injected earlier in the process (a rig can do that; a VR process never does) is still never flushed by an
+    // Observed call: the observe-only detour touches no dirty bit even when the set names the camera.
+    FlatCameraInjectedSet earlier;
+    earlier.noteInjected(0x1000);
+    check(!flatCameraFlushDecision(earlier, 0x1000, FlatCameraAdmit::Observed) && earlier.contains(0x1000),
+          "C16 an Observed call does not flush a camera the set remembers, and leaves the set untouched");
+}
+
 int runSelfTest() {
     testC1();
     testC2();
@@ -820,6 +921,7 @@ int runSelfTest() {
     testC13();
     testC14();
     testC15();
+    testC16();
     if (g_failures == 0) {
         std::printf("c2 coexist: PASS\n");
         return 0;

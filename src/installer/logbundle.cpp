@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "detect.h"
+#include "../common/elite_graphics_folder.h"
 #include "../common/iniedit.h"
 #include "state.h"
 
@@ -181,11 +182,9 @@ std::wstring graphicsOptionsFolder() {
         wchar_t env[MAX_PATH]{};
         if (GetEnvironmentVariableW(L"LOCALAPPDATA", env, MAX_PATH)) base = env;
     }
-    if (base.empty()) return std::wstring();
-    return joinPath(joinPath(joinPath(joinPath(base, L"Frontier Developments"),
-                                      L"Elite Dangerous"),
-                             L"Options"),
-                    L"Graphics");
+    // The composition is shared with the flat F8 panel's settings warning
+    // (src/common/elite_graphics_folder.h): one spelling of where these files live.
+    return edvr::eliteGraphicsFolderUnder(base);
 }
 
 }  // namespace

@@ -7,40 +7,97 @@
 #include <cmath>
 #include <mutex>
 
+// The layer's SV_Position remap. A pixel shader that derives an address from the rasterizer's pixel position
+// reads, inside the layer, a position over the LAYER's pixels (4032x3898, say) where the game's own draw would
+// have read one over its target's (2620x2533). Each program below is remapped by an exact-bytecode transform that
+// gives that one address the position the game's draw would have had: game = layer * (1/scale) + jitter. The
+// programs are admitted by size and FNV hash of their bytes, never by a name or a family. Two kinds:
+//  - the hologram sphere pair (2026-09-28) loads the scene depth at ftoi(SV_Position);
+//  - the frosted base under every station-menu panel (2026-09-30) samples a blurred copy of the scene at
+//    SV_Position * a game constant. Left in the game's own frame it was fine; taken into the layer (the after-UI
+//    identity follows it there) the lookup ran past 1.0 by the layer's scale. Sean's report reads as a mirror-
+//    addressed sampler folding the blurred scene back on itself; no census line records the mode, so the first
+//    take logs it.
 namespace edvr::ui_holo_remap {
 inline constexpr uint64_t kVs=0x5559BD94B6852E83ull;
-inline constexpr uint64_t kPs[2]={0xEA02FAC2BD6C643Cull,0xE95634B0F61D218Full};
-inline int index(uint64_t ps) {return ps==kPs[0]?0:ps==kPs[1]?1:-1;}
-inline bool pair(uint64_t vs,uint64_t ps) {return vs==kVs&&index(ps)>=0;}
+enum class Kind : uint8_t {kHologramDepth,kFrostedBase};
+struct Program {uint64_t ps;uint32_t bytes;Kind kind;};
+inline constexpr Program kPrograms[]={
+    {0xEA02FAC2BD6C643Cull,7092,Kind::kHologramDepth},
+    {0xE95634B0F61D218Full,11428,Kind::kHologramDepth},
+    {0x0146ABCC53240479ull,2292,Kind::kFrostedBase},
+};
+inline constexpr size_t kProgramCount=sizeof(kPrograms)/sizeof(kPrograms[0]);
+inline constexpr uint64_t kFrostedPs=0x0146ABCC53240479ull;
+static_assert(kPrograms[2].ps==kFrostedPs,"frosted base slot");
+inline int index(uint64_t ps) {
+    for(size_t i=0;i<kProgramCount;++i)if(kPrograms[i].ps==ps)return static_cast<int>(i);
+    return -1;
+}
+inline Kind kindOf(int slot) {return kPrograms[static_cast<size_t>(slot)].kind;} // slot from index(), never negative
+inline const char* kindName(Kind k) {return k==Kind::kFrostedBase?"frosted base":"hologram depth";}
+inline bool pair(uint64_t vs,uint64_t ps) {
+    const int slot=index(ps);return vs==kVs&&slot>=0&&kindOf(slot)==Kind::kHologramDepth;
+}
+// Which taken draws need a remapped shader. The sphere VS into the HDR HUD layer: always asked for, and a PS that
+// is not one of the two exact hologram programs is refused to stock by prepare(), never taken unremapped. The
+// frosted base: whatever draws it, and whichever layer it lands in.
+inline bool needsRemap(uint64_t vs,uint64_t ps,bool hdrTake) {
+    if(hdrTake&&vs==kVs)return true;
+    const int slot=index(ps);return slot>=0&&kindOf(slot)==Kind::kFrostedBase;
+}
 inline uint64_t hash(const void* data,size_t n) {
     auto p=static_cast<const BYTE*>(data);uint64_t h=1469598103934665603ull;
     for(size_t i=0;i<n;++i)h=(h^p[i])*1099511628211ull;return h;
 }
 inline void require(bool ok,const char* why) {if(!ok)throw std::runtime_error(why);}
 
-// Restricted actual-DXBC transform: only the single screen-depth t1 address.
-// Every material/UV/derivative instruction, signature and resource stays stock.
-inline std::vector<uint32_t> patchProgram(const std::vector<uint32_t>& t) {
+// One exact edit per kind. The program has ONE instruction that reads SV_Position (v2) as its first source:
+// `target`, the exact tokens of it. `follow` is what must come straight after it, so the edit can only land on the
+// intended lookup. `operand` is the operand token that replaces v2 in the target: the new temp, with the swizzle
+// the target read v2 through. The remap itself is the same for both kinds, one instruction inserted before the
+// target: temp.xy = SV_Position.xy * cb13[0].xy + cb13[0].zw.
+struct Recipe {
+    uint32_t target[8];size_t targetLength;
+    uint32_t follow[17];size_t followLength;
+    uint32_t operand;
+    const char* notFound,*notFollowed;
+};
+inline constexpr Recipe kRecipes[]={
+    // ftoi r1.xy, v2.xyxx  then  mov r1.zw, l(0,0,0,0); ld_aoffimmi(0,0,0) r1.x, r1.xyzw, t1.xyzw
+    {{0x0500001b,0x00100032,1,0x00101046,2},5,
+     {0x08000036,0x001000c2,1,0x00004002,0,0,0,0,
+      0x8900002d,0x800000c2,0x00155543,0x00100012,1,0x00100e46,1,0x00107e46,1},17,
+     0x00100046,"one SV_Position ftoi","exact t1 load"},
+    // mul r0.zw, v2.xxxy, cb1[332].zzzw  then  sample_indexable r1.xyz, r0.zwzz, t0.xyzw, s1
+    {{0x08000038,0x001000c2,0,0x00101406,2,0x00208ea6,1,332},8,
+     {0x8b000045,0x800000c2,0x00155543,0x00100072,1,0x00100ae6,0,0x00107e46,0,0x00106000,1},11,
+     0x00100406,"one SV_Position mul","exact t0 lookup"},
+};
+static_assert(sizeof(kRecipes)/sizeof(kRecipes[0])==2,"one recipe per kind");
+
+// Restricted actual-DXBC transform: only the one address the position feeds. Every material/UV/derivative
+// instruction, signature and resource stays stock.
+inline std::vector<uint32_t> patchProgram(const std::vector<uint32_t>& t,Kind kind=Kind::kHologramDepth) {
     using namespace dxbc_container;
+    const Recipe& r=kRecipes[static_cast<size_t>(kind)];
     size_t target=0,tempAt=0;uint32_t temp=0;unsigned found=0;
     require(t.size()>2&&t[0]==0x50&&t[1]==t.size(),"pixel SM5 program");
     for(size_t a=2;a<t.size();a+=instructionLength(t,a)) {
         const unsigned op=t[a]&2047,n=instructionLength(t,a);
         if(op==89)require(n==4&&t[a+2]!=13,"private b13 occupied");
         if(op==104){require(n==2&&!tempAt,"temps declaration");tempAt=a;temp=t[a+1];}
-        const uint32_t ftoi[]={0x0500001b,0x00100032,1,0x00101046,2};
-        if(n==5&&std::equal(ftoi,ftoi+5,t.begin()+a)){target=a;++found;}
+        if(n==r.targetLength&&std::equal(r.target,r.target+n,t.begin()+a)){target=a;++found;}
     }
-    require(found==1&&tempAt&&temp<4096&&tempAt<target,"one SV_Position ftoi");
-    const uint32_t load[]={0x08000036,0x001000c2,1,0x00004002,0,0,0,0,
-        0x8900002d,0x800000c2,0x00155543,0x00100012,1,0x00100e46,1,0x00107e46,1};
-    require(target+22<=t.size()&&std::equal(load,load+17,t.begin()+target+5),"exact t1 load");
+    require(found==1&&tempAt&&temp<4096&&tempAt<target,r.notFound);
+    require(target+r.targetLength+r.followLength<=t.size()&&
+        std::equal(r.follow,r.follow+r.followLength,t.begin()+target+r.targetLength),r.notFollowed);
     const uint32_t cb[]={0x04000059,0x00208e46,13,1};
     const uint32_t mad[]={0x0b000032,0x00100032,temp,0x00101046,2,0x00208046,13,0,0x00208ae6,13,0};
     std::vector<uint32_t> out(t.begin(),t.begin()+tempAt);out.insert(out.end(),cb,cb+4);
     out.insert(out.end(),t.begin()+tempAt,t.begin()+target);out[tempAt+5]=temp+1;
     out.insert(out.end(),mad,mad+11);out.insert(out.end(),t.begin()+target,t.end());
-    out[target+18]=0x00100046;out[target+19]=temp;out[1]=static_cast<uint32_t>(out.size());
+    out[target+18]=r.operand;out[target+19]=temp;out[1]=static_cast<uint32_t>(out.size());
     require(out.size()==t.size()+15,"bounded remap");
     for(size_t i=0;i<t.size();++i){if(i==1||i==tempAt+1||i==target+3||i==target+4)continue;
         require(out[i+(i>=tempAt?4:0)+(i>=target?11:0)]==t[i],"untouched instruction");}
@@ -49,7 +106,8 @@ inline std::vector<uint32_t> patchProgram(const std::vector<uint32_t>& t) {
 inline bool patch(const void* data,size_t n,uint64_t ps,std::vector<BYTE>& output,std::string& why) {
     output.clear();
     try {
-        require(index(ps)>=0&&data&&n==(ps==kPs[0]?7092u:11428u)&&hash(data,n)==ps,"unknown pixel bytes");
+        const int slot=index(ps);
+        require(slot>=0&&data&&n==kPrograms[slot].bytes&&hash(data,n)==ps,"unknown pixel bytes");
         auto chunks=dxbc_container::parseContainer(data,n,0x50);bool position=false;
         for(const auto& c:chunks)if(c.tag==0x4e475349){
             for(const auto& e:dxbc_container::parseSignature(c.bytes))if(e.systemValue==1){
@@ -59,11 +117,15 @@ inline bool patch(const void* data,size_t n,uint64_t ps,std::vector<BYTE>& outpu
         require(position,"SV_Position missing");unsigned changed=0;
         for(auto& c:chunks)if(c.tag==0x58454853||c.tag==0x52444853){
             std::vector<uint32_t> t(c.bytes.size()/4);std::memcpy(t.data(),c.bytes.data(),c.bytes.size());
-            const auto out=patchProgram(t);c.bytes.resize(out.size()*4);std::memcpy(c.bytes.data(),out.data(),c.bytes.size());++changed;
+            const auto out=patchProgram(t,kPrograms[slot].kind);c.bytes.resize(out.size()*4);std::memcpy(c.bytes.data(),out.data(),c.bytes.size());++changed;
         }
         require(changed==1,"one program");output=dxbc_container::makeContainer(chunks);return true;
     } catch(const std::exception& e) {why=e.what();return false;}
 }
+// The private cb13 float4 the remapped shader reads: game position = layer position * (x,y) + (bx,by). x,y is the
+// game target's size over the layer's; bx,by the frame's jitter in the game's pixels (the layer's viewport moved
+// by -jitter * scale, ui_layer_math.h's uiLayerJitterCancel, so a layer pixel stands for game position
+// pixel / scale + jitter). The layer's map has no offset, so there is no other term.
 struct Params {float x,y,bx,by;};
 inline bool params(uint32_t sourceW,uint32_t sourceH,uint32_t layerW,uint32_t layerH,float jx,float jy,Params& out) {
     if(!sourceW||!sourceH||!layerW||!layerH||!std::isfinite(jx)||!std::isfinite(jy))return false;
@@ -89,12 +151,12 @@ template<class T> inline void release(T*& value) {
 inline const GUID& identityGuid(){static const GUID guid={0x941dd2b1,0x85ee,0x4f5a,{0xa5,0xe8,0xb1,0x6a,0x72,0x28,0x00,0x13}};return guid;}
 struct Identity {uint64_t ps;uintptr_t device;};
 
-// Creation remembers only two immutable patched blobs; no driver call under
+// Creation remembers only one immutable patched blob per program; no driver call under
 // its mutex. GPU state belongs exclusively to the render owner, one device.
 class Cache {
-    std::mutex mutex_;std::array<std::vector<BYTE>,2> bytes_;
-    ID3D11Device* device_=nullptr;ID3D11PixelShader* shaders_[2]{};ID3D11Buffer* cb_=nullptr;
-    bool attempted_[2]{};
+    std::mutex mutex_;std::array<std::vector<BYTE>,kProgramCount> bytes_;
+    ID3D11Device* device_=nullptr;ID3D11PixelShader* shaders_[kProgramCount]{};ID3D11Buffer* cb_=nullptr;
+    bool attempted_[kProgramCount]{};
 public:
     ~Cache(){reset();}
     bool remember(ID3D11PixelShader* shader,uint64_t ps,const void* data,size_t n,bool linked) {
@@ -108,7 +170,7 @@ public:
         }});
         release(device);return ran&&SUCCEEDED(hr);
     }
-    void reset() {for(auto& s:shaders_)release(s);release(cb_);release(device_);attempted_[0]=attempted_[1]=false;}
+    void reset() {for(auto& s:shaders_)release(s);release(cb_);release(device_);for(auto& a:attempted_)a=false;}
     ID3D11PixelShader* prepare(ID3D11DeviceContext* ctx,ID3D11PixelShader* original,uint64_t ps) {
         const int slot=index(ps);if(!ctx||!original||slot<0)return nullptr;
         Identity identity{};UINT length=sizeof(identity);HRESULT tagHr=E_FAIL;

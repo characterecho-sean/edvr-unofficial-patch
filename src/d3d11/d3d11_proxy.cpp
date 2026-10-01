@@ -14,6 +14,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 
+#include <atomic>
 #include <cstring>  // _stricmp, for the hook-mode override's spellings
 #include <string>
 
@@ -27,6 +28,8 @@
 #include "../common/native_startup.h"
 #include "../common/proxy.h"
 #include "device_hook.h"
+#include "flat_wrapper_note.h"
+#include "format_support_log.h"
 #include "input_gate.h"
 #include "intro_probe.h"   // the device stamp the intro probe's clock reads
 #include "oculus_route.h"
@@ -51,6 +54,10 @@ HMODULE g_realModule = nullptr;    // what exports currently forward to
 HMODULE g_systemModule = nullptr;  // Windows' own, always resolved, never null
 HMODULE g_selfModule = nullptr;
 std::wstring* g_moduleDir = nullptr;
+// The file name of the graphics wrapper that handles the immediate context, written once before the flag (see
+// contextHookModeFor and flat_wrapper_note.h).
+char g_wrapperFile[64] = {};
+std::atomic<bool> g_wrapperFileSet{false};
 
 typedef HRESULT(WINAPI* PFN_D3D11CreateDevice)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE,
                                                UINT, const D3D_FEATURE_LEVEL*, UINT, UINT,
@@ -93,6 +100,12 @@ void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
     edvr::guardedBudget(g_createBudget, [&] {
         logDeviceCreation(device, driverType, flags, hr);
         if (!device) return;
+        // Which adapter this device is on, and what it says about the formats the
+        // world target is chosen from: read-only questions, asked before any hook goes
+        // on, on both profiles, every session (format_support_log.h). The "created"
+        // line above has no vendor in it; under CrossOver this is what says DXMT. It
+        // contains its own faults, so nothing it does can stop the install below.
+        edvr::formatSupportLogDevice(device);
         // Published before anything is hooked, and deliberately before the
         // config is consulted: the openvr half reads this as its test for a
         // d3d11 half being present (the cull guard), and it cannot ask for
@@ -518,10 +531,10 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
         // their evening. Config's own numeric and boolean readers say this for
         // their own bad values; a string one has to say it itself.
         Log::get().note(
-            "edvr.ini: advanced.context_hook_mode = \"%s\" is not one of auto, "
+            "%s: advanced.context_hook_mode = \"%s\" is not one of auto, "
             "shared, private or live, so it was IGNORED and the probe decided as "
             "usual. Check the spelling.",
-            want.c_str());
+            Config::get().iniName(), want.c_str());
     }
 
     Log::get().note(
@@ -547,7 +560,31 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
             "to go back to the probe.",
             forced, want.c_str(), hookModeName(probed));
     }
+    // WHOSE CODE IT IS, when it is not Windows' -- for the flat F8 panel's note (flat_wrapper_note.h). The probe above says
+    // THAT a wrapper owns the methods; this names the file, because "ReShade is why it costs frame time" is the sentence a
+    // person can act on and "0 of 96" is not. The decision (only an in-place session on a probe that found no runtime
+    // code; never a live copy, never a forced mode) is the header's, so the rig can drive it.
+    {
+        char owner[sizeof(g_wrapperFile)] = {};
+        const size_t owned = edvr::vtableDominantOtherModule(vt, kSample, g_systemModule, owner, sizeof(owner));
+        if (const char* file = flatWrapperFile(mode, probed, owner)) {
+            if (!g_wrapperFileSet.load(std::memory_order_acquire)) {
+                std::memcpy(g_wrapperFile, file, std::strlen(file) + 1);
+                g_wrapperFileSet.store(true, std::memory_order_release);
+            }
+            Log::get().note(
+                "context hook mode: %s backs %zu of the %zu sampled methods of the immediate context in place of "
+                "Windows' d3d11.dll. That is a graphics wrapper (ReShade and its kind): every call EDVR makes on the "
+                "context goes through it first, and a temporal mode makes thousands of calls a frame. The F8 panel says "
+                "so while a temporal mode is selected.",
+                file, owned, kSample);
+        }
+    }
     return mode;
+}
+
+const char* contextWrapperFile() {
+    return g_wrapperFileSet.load(std::memory_order_acquire) ? g_wrapperFile : nullptr;
 }
 
 }  // namespace edvr
@@ -640,6 +677,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             // already dead and may have been holding our spinlock or the heap
             // lock. Do the minimum and leak the rest.
             if (reserved != nullptr) {
+                // First: nothing may be written behind the closing crumb (the heartbeat's writer thread is dead
+                // by now, but a post it never wrote is dropped, not left pending).
+                edvr::breadcrumbHeartbeatClose();
                 edvr::breadcrumb("gfx: process exit");
                 // Getting here at all means the game exited rather than
                 // died, so the sentinel comes down. One DeleteFileW, which
@@ -654,6 +694,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
                 // stays for a host that loads the DLL and lets go of it before
                 // that -- a tool, a rig -- where nothing detached is running yet
                 // and this is the right teardown.
+                edvr::breadcrumbHeartbeatClose();
                 edvr::breadcrumb("gfx: FreeLibrary unload");
                 shutdown();
             }

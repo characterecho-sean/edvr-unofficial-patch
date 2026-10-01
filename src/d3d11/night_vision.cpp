@@ -85,6 +85,7 @@ bool exteriorMask(ID3D11DeviceContext* ctx,UINT w,UINT h){
     return true;
 }
 }
+namespace detail{bool g_nightVisionOn=false;}
 void nightVisionConfigure(Config& cfg){
     bool pulse=cfg.getBool("fix.night_vision_stability",true);
     bool on=cfg.getBool("experimental.night_vision_realistic",false);
@@ -94,6 +95,7 @@ void nightVisionConfigure(Config& cfg){
     if(!configured || on!=enabled || pulse!=pulseEnabled || gain!=brightness)
         Log::get().note("night vision: pulse stability %s; experimental Realistic nightvision %s, exterior brightness %.2fx (realistic only). AA-independent, live A/B.",pulse?"on":"off",on?"on":"off (original appearance)",gain);
     configured=true;enabled=on;pulseEnabled=pulse;brightness=gain;
+    detail::g_nightVisionOn=variant()!=0;
 }
 bool nightVisionMatches(char kind,uint32_t count,uint32_t instances){
     return variant()!=0 && !state.failed[variant()] && nightVisionShape(kind,count,instances) &&

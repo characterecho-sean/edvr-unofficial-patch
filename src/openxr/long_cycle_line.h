@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include "../common/freeze_book.h"
 #include "frame_cycle_stats.h"
 
 namespace edvr::openxr {
@@ -50,12 +51,11 @@ inline void longCycleAppend(char* buf,size_t cap,size_t& len,const char* format,
 // hook_after_real (EDVR again: the frame boundary's ticks and the rest),
 // hook_render_callback (the call into this runtime). A cycle without a valid
 // single-Present trace prints present_split=<reason> and none of the numbers.
-inline size_t formatLongCycleLine(char* buf,size_t cap,unsigned long long sequence,double periodMs,
+// The fields of one long cycle, "sequence=..." to "units=wall_ms", appended at `len` after whatever head
+// the caller wrote: native_long_cycle's own, or native_long_cycle_worst's (formatWorstCycleLine).
+inline void formatLongCycleFields(char* buf,size_t cap,size_t& len,unsigned long long sequence,double periodMs,
                                   const FrameCycleStats::Completed& c) noexcept {
-  size_t len=0;
-  if(!buf||!cap)return 0;
-  buf[0]=0;
-  longCycleAppend(buf,cap,len,"native_long_cycle,sequence=%llu,cycle_ms=%.4f,period_ms=%.4f,"
+  longCycleAppend(buf,cap,len,"sequence=%llu,cycle_ms=%.4f,period_ms=%.4f,"
     "game_before_first_submit=%.4f,first_submit_roundtrip=%.4f,first_submit_owner_body=%.4f,"
     "between_eye_calls=%.4f,second_submit_roundtrip=%.4f,second_submit_owner_body=%.4f,"
     "first_submit_render_park=%.4f,second_submit_render_park=%.4f,"
@@ -72,6 +72,48 @@ inline size_t formatLongCycleLine(char* buf,size_t cap,unsigned long long sequen
       c.hookCallbackMs,c.postPresentMs);
   longCycleAppend(buf,cap,len,",next_wait_roundtrip=%.4f,next_wait_owner_body=%.4f,units=wall_ms",
     c.nextWaitMs,c.waitOwnerMs);
+}
+
+inline size_t formatLongCycleLine(char* buf,size_t cap,unsigned long long sequence,double periodMs,
+                                  const FrameCycleStats::Completed& c) noexcept {
+  size_t len=0;
+  if(!buf||!cap)return 0;
+  buf[0]=0;
+  longCycleAppend(buf,cap,len,"native_long_cycle,");
+  formatLongCycleFields(buf,cap,len,sequence,periodMs,c);
+  return len;
+}
+
+// The same cycle again, for the end of the session: one line per rank of the worst few cycles of the whole
+// session, written when the runtime closes (and while it runs, whenever the list changed, every few
+// minutes). `utc` is when the cycle ended, as YYYY-MM-DDTHH:MM:SS.mmmZ -- the runtime log's own clock,
+// whose line prefix is UTC. `fields` is formatLongCycleFields's text, formatted when the cycle was logged
+// and kept with its entry, so the line is the cycle's as it was: one reader takes a native_long_cycle line
+// and a native_long_cycle_worst line apart the same way.
+inline size_t formatWorstCycleLine(char* buf,size_t cap,unsigned rank,unsigned of,const char* utc,
+                                   const char* fields) noexcept {
+  size_t len=0;
+  if(!buf||!cap)return 0;
+  buf[0]=0;
+  longCycleAppend(buf,cap,len,"native_long_cycle_worst,rank=%u,of=%u,utc=%s,%s",rank,of,utc&&*utc?utc:"unknown",
+    fields?fields:"");
+  return len;
+}
+
+// The counts of the session's long cycles: the periodic line and the part of the session summary that
+// follows the three fields that line has always carried. `book` is the runtime's FreezeBook; its key=value
+// text is comma-joined here, the runtime log's own style.
+inline size_t formatLongCycleCountsLine(char* buf,size_t cap,const char* head,unsigned long long count,
+                                        unsigned long long logged,const char* reason,const FreezeBook& book) noexcept {
+  size_t len=0;
+  if(!buf||!cap)return 0;
+  buf[0]=0;
+  char kv[640];
+  book.formatCounts(kv,sizeof(kv),',',false);
+  if(reason&&*reason)
+    longCycleAppend(buf,cap,len,"%s,reason=%s,count=%llu,logged=%llu,threshold=2x_period,%s",head,reason,count,logged,kv);
+  else
+    longCycleAppend(buf,cap,len,"%s,count=%llu,logged=%llu,threshold=2x_period,%s",head,count,logged,kv);
   return len;
 }
 

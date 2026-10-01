@@ -20,6 +20,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <string>
 
 using namespace edvr;
 
@@ -275,6 +278,47 @@ int main(int argc, char** argv) {
     CHECK(!dlssRangeFloor(pointOnly, &fw, &fh));
     CHECK(!rule(pointOnly, 4074, 4076, 1833, 1834) && ow == 4074 && oh == 4076);
     CHECK(!rule(pimax, 0, 4076, 1833, 1834) && !rule(pimax, 4074, 4076, 0, 1834));
+
+    // --- The upscaler slots (dlaa.h, kUpscalerSlots; docs/design-flat-temporal-aa-2026-09-23.md section 82). The eyes own slots 0 and 1,
+    // the VR world route owns slot 2; the eyes have every role, the world the full frame only. ---
+    static_assert(kUpscalerSlots == 3 && kUpscalerEyeSlots == 2 && kUpscalerEyeSlots < kUpscalerSlots,
+                  "two eyes' slots and the VR world route's third");
+    for (int slot = -3; slot < 7; ++slot) {
+        const bool eye = slot == 0 || slot == 1, world = slot == 2;
+        CHECK(upscalerSlotHasFullFrame(slot) == (eye || world));
+        CHECK(upscalerSlotHasFoveatedRoles(slot) == eye);
+    }
+    CHECK(!upscalerSlotHasFullFrame(3) && !upscalerSlotHasFullFrame(-1) && upscalerSlotHasFullFrame(2) &&
+          !upscalerSlotHasFoveatedRoles(2));
+    // The eyes' log lines are the lines they always were ("for eye 0"); the world's names its slot.
+    CHECK(!std::strcmp(upscalerSlotLabel(0), "eye 0") && !std::strcmp(upscalerSlotLabel(1), "eye 1"));
+    CHECK(std::strstr(upscalerSlotLabel(2), "slot 2") != nullptr && std::strstr(upscalerSlotLabel(2), "world") != nullptr);
+    CHECK(std::strstr(upscalerSlotLabel(3), "unknown") != nullptr && std::strstr(upscalerSlotLabel(-1), "unknown") != nullptr);
+
+    // --- dlaa.cpp's slot wiring, read as source: NGX needs an NVIDIA GPU, so no rig can run it (tools\fsr3_engine_test runs the FSR
+    // half for real). The full-frame features are one per slot and the foveated ones the eyes' only; every entry gate takes the rules
+    // above; the loading-screen warm-up makes the eyes' two and not the world's (its feature is made lazily, on its first evaluation);
+    // and the creation lines name the slot through upscalerSlotLabel, which keeps the eyes' words. The rig runs from the repo root. ---
+    {
+        std::ifstream in("src/d3d11/dlaa.cpp", std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto count = [&](const char* needle) {
+            size_t n = 0, at = 0; const std::string s(needle);
+            while ((at = src.find(s, at)) != std::string::npos) { ++n; at += s.size(); }
+            return n;
+        };
+        CHECK(!src.empty());
+        CHECK(count("EyeFeature g_feature[kUpscalerSlots];") == 1);
+        CHECK(count("EyeFeature g_fovea[kUpscalerEyeSlots];") == 1 && count("EyeFeature g_periph[kUpscalerEyeSlots];") == 1);
+        CHECK(count("DlaaRoleStats g_roleStats[kDlaaRoles][kUpscalerSlots];") == 1);
+        CHECK(count("if (!upscalerSlotHasFullFrame(eye)) {") == 2);        // ensureFeature, the one place that indexes g_feature, and dlaaEvaluate
+        CHECK(count("if (!upscalerSlotHasFoveatedRoles(eye)) {") == 2);    // the fovea and the periphery refuse the world's slot
+        CHECK(count("for (int eye = 0; eye < 2; ++eye) {") == 1);          // dlaaWarm: the eyes' two only
+        CHECK(count("eye > 1") == 0 && count("eye == 1") == 0);             // no hard-coded two-eye bound left
+        CHECK(count("the feature is created for %s at") == 1 && count("the feature is created for %s, %ux%u in") == 1 &&
+              count("the feature for %s was created for the flat HDR route") == 1 && count("upscalerSlotLabel(eye)") == 3);
+        CHECK(count("static_cast<int>(q.role)][q.eye]") == 1 && count("roleHasSlot(q.role, q.eye)") == 1);
+    }
 
     std::printf("dlaa_mode_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -15,6 +15,8 @@ from pathlib import Path
 import struct
 import sys
 
+# 4-7 and 9 are retired paths (body, body2, stepped, terrain -- 7 went 2026-10-01 with terrain
+# motion -- and mesh), kept so an older dump still reads; the shader writes none of them now.
 PATHS = {0: 'invalid', 1: 'head', 2: 'world', 3: 'ship', 4: 'body',
          5: 'body2', 6: 'stepped', 7: 'terrain', 8: 'holo', 9: 'mesh', 10: 'screen',
          11: 'engine'}

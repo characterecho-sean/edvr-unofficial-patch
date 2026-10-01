@@ -70,6 +70,22 @@ HANDLE g_release = nullptr;   // manual-reset: let it go
 // let the image go, which is exactly what a broken pin would do to it.
 std::atomic<bool> g_stopAfterHold{false};
 
+// "This thread is inside the module" and "park here until released" as ONE kernel
+// transition. SetEvent then WaitForSingleObject is two calls the module's own code
+// makes, and in the controls the host unmaps the image the instant `entered` is
+// signalled: a thread preempted inside SetEvent, or between the two calls, returns
+// into unmapped code, and the host dies of an access violation (rawProc+0x11, the
+// return from SetEvent: about one run in four with 24 copies at once, 2026-10-01).
+// SignalObjectAndWait leaves no instruction of the module between the signal and the
+// park, so by the time the host can see `entered` the thread is already in a kernel
+// wait it never leaves in a control, which is what "a hold that is never released"
+// above relies on. Both handles are read before the call, as well: the module's data
+// is gone with the image. The released case is unchanged: the wait ends, the thread
+// carries on in a module that is mapped.
+void parkInside(HANDLE entered, HANDLE release) {
+    SignalObjectAndWait(entered, release, INFINITE, FALSE);
+}
+
 // The worker's first file call is held until the host says. Never released in the
 // control, so the worker never returns into an image that is gone.
 void holdHook(const char*) {
@@ -78,8 +94,7 @@ void holdHook(const char*) {
     bool expected = false;
     if (!held.compare_exchange_strong(expected, true)) return;
     if (g_probe) g_probe->hookThread = static_cast<LONG>(GetCurrentThreadId());
-    SetEvent(g_entered);
-    WaitForSingleObject(g_release, INFINITE);
+    parkInside(g_entered, g_release);
     if (g_stopAfterHold.load()) journalWatchShutdown();
 }
 
@@ -103,15 +118,13 @@ Job g_raw = {};
 // The shape of ui_surfaces.cpp's hmdRefresh, held: a pool thread inside this
 // module's code that nobody waits for.
 VOID CALLBACK poolCallback(PTP_CALLBACK_INSTANCE, PVOID) {
-    SetEvent(g_pool.entered);
-    WaitForSingleObject(g_pool.release, INFINITE);
+    parkInside(g_pool.entered, g_pool.release);
     SetEvent(g_pool.done);
 }
 
 // A thread made with CreateThread: nothing takes a reference on its behalf.
 DWORD WINAPI rawProc(LPVOID) {
-    SetEvent(g_raw.entered);
-    WaitForSingleObject(g_raw.release, INFINITE);
+    parkInside(g_raw.entered, g_raw.release);
     SetEvent(g_raw.done);
     return 0;
 }

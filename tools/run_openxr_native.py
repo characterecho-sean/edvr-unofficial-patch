@@ -20,8 +20,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def digest(path: Path) -> str:
+    # A chunked read, not hashlib.file_digest, which exists only from Python 3.11.
+    hasher = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def seconds(value: str) -> int:
@@ -250,7 +254,11 @@ def self_test() -> int:
         except ValueError:
             check(True)
         bootstrap_reader = [sys.executable, "-c", "import os; print(os.environ['EDVR_OPENXR_LOADER']); print(os.environ['EDVR_OPENXR_GRAPHICS'])"]
-        check(run_child(bootstrap_reader, root / "bootstrap-env", boot_env, 10, {}) == 0)
+        # On top of the real environment, as the production call in main() is
+        # (child_environment(dict(os.environ), ...)): a python.exe started with
+        # boot_env alone has no SystemRoot, and on some Windows setups it then
+        # fails during interpreter initialisation.
+        check(run_child(bootstrap_reader, root / "bootstrap-env", {**os.environ, **boot_env}, 10, {}) == 0)
         check((root / "bootstrap-env" / "output.log").read_text().splitlines() == [str(root / "loader.dll"), str(proxy)])
         for kwargs in ({"runtime_module": module}, {"graphics_proxy": proxy, "runtime_module": module}):
             try:

@@ -3,7 +3,12 @@
 #include "temporal_pass.h"
 #include "dlss_floor.h"
 #include "ui_layer.h"
+#include "ui_layer_math.h"     // the layer-only door's preflight gaps and its first-eight-reasons log
+#include "ui_layer_shaders.h"  // uiLayerFrameView: the 8-bit families a composite can run over
 #include "ui_surfaces.h"
+#include "vr_world_route.h"    // the VR world route: does it own the next frame, did the layer take this eye
+#include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
+#include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
@@ -34,6 +39,10 @@ struct History {
 };
 struct Settings {
   bool on=false,dlaa=false,upscale=false,jitter=true,lag=false; int motion=3,signX=1,signY=1;
+  // experimental.temporal_aa_jitter_follows_upscale (temporal_math.h): the jitter runs ceil(8 x ratio^2) phases instead of the fixed
+  // eight. Left out of sameHistorySettings on purpose: each frame's own jitter is what the upscaler is told, so a change of count
+  // invalidates no history and resets nothing.
+  bool jitterScaled=false;
   float blend=.90f,clamp=1.f;
   // dlaa means "an external, trained engine" (NVIDIA's or AMD's), kept under
   // its original name since flags bit 1 (edvrTemporalAa) still means exactly
@@ -60,6 +69,10 @@ struct State {
   float head[12]{}, eyes[2][12]{}, frusta[2][4]{};
   float shift[2][2]{};
   uint32_t width[2]{}, height[2]{};
+  // The output each eye's last treat() asked the pass for (floorOutput's cut included; the input's own size when the pass is not upscaling),
+  // and the jitter phase count the last begin() ran through with what it logged: jitterPhaseCount below reads the sizes.
+  uint32_t outWidth[2]{}, outHeight[2]{};
+  uint32_t jitterPhases = edvr::kTemporalJitterCount, phasesLogged = 0; bool phasesLoggedScaled = false;
   uint32_t recW=0,recH=0; bool flipped[2]{};
   uint32_t frameCounter = 0;
   bool treated[2]{};
@@ -77,6 +90,15 @@ struct State {
   bool flippedNoted=false,engagedNoted=false;
   FloorDecision floor[2]{}, floorNoted{};
   uint64_t floorCuts=0;
+  // The layer-only door (design doc section 82; vr_world_route.h): while the VR world route owns the world the UI
+  // layer holds the WHOLE eye (the game's screen draw, re-issued into it from the resolved, mipped screen), so the
+  // frame handed on is black, the size and format the upscaler's output would have been, and the layer over it is
+  // the eye. The frame is made once per (size, format) and cleared once, when made: the door's consumers (the
+  // layer's composite, the sharpen pass, the menu, the compositor's copy) only ever READ it. Both eyes share one
+  // texture while their sizes agree (a shared reference each, released at close).
+  struct Blank { ID3D11Texture2D* texture=nullptr; uint32_t w=0,h=0; DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN; } blank[2];
+  uint64_t layerOnly=0,layerOnlyDeclined=0; bool layerOnlyNoted=false;
+  edvr::UiWorldReasonLog layerOnlyReasons;
 };
 
 State pool[16]; unsigned used = 0; State* current = nullptr; std::mutex mutex;
@@ -153,6 +175,7 @@ Settings readConfig() {
   s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0;
   // getBool, as the flat profile reads it (flat_runtime.cpp): 0/false/no/off all mean off in both.
   s.jitter=c.getBool("experimental.temporal_aa_jitter",true);
+  s.jitterScaled=c.getBool("experimental.temporal_aa_jitter_follows_upscale",false);
   s.blend=c.getFloat("experimental.temporal_aa_blend",.90f); if(!std::isfinite(s.blend))s.blend=.90f;
   s.clamp=c.getFloat("experimental.temporal_aa_clamp",1.f); if(!std::isfinite(s.clamp))s.clamp=1.f;
   s.blend=(std::max)(.5f,(std::min)(.95f,s.blend)); s.clamp=(std::max)(.5f,(std::min)(3.f,s.clamp));
@@ -245,6 +268,87 @@ void floorOutput(State& s,unsigned eye,uint32_t w,uint32_t h,unsigned& outW,unsi
   s.floorNoted=f;
 }
 
+void releaseBlank(State::Blank& b) { if(b.texture)b.texture->Release(); b=State::Blank{}; }
+// The black frame the layer-only door hands on: w x h in the source's own format, cleared once to (0, 0, 0, 1) when
+// it is made. Null when it cannot be made (a format the layer's composite does not run over, or no memory).
+ID3D11Texture2D* blankFrame(State& s,unsigned eye,uint32_t w,uint32_t h,DXGI_FORMAT format) {
+  State::Blank& mine=s.blank[eye]; State::Blank& other=s.blank[1-eye];
+  if(mine.texture&&mine.w==w&&mine.h==h&&mine.format==format)return mine.texture;
+  releaseBlank(mine);
+  if(other.texture&&other.w==w&&other.h==h&&other.format==format){other.texture->AddRef();mine=other;return mine.texture;}
+  const DXGI_FORMAT view=edvr::uiLayerFrameView(format);
+  if(view==DXGI_FORMAT_UNKNOWN||!w||!h||!s.device)return nullptr;
+  D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;d.Format=format;
+  d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
+  ID3D11Texture2D* texture=nullptr;
+  if(FAILED(s.device->CreateTexture2D(&d,nullptr,&texture))||!texture)return nullptr;
+  D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=view;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
+  ID3D11RenderTargetView* rtv=nullptr;ID3D11DeviceContext* ctx=nullptr;s.device->GetImmediateContext(&ctx);
+  const bool made=ctx&&SUCCEEDED(s.device->CreateRenderTargetView(texture,&rd,&rtv))&&rtv;
+  if(made){const float black[4]={0.f,0.f,0.f,1.f};edvr::vScreenClearRenderTargetViewRaw(ctx,rtv,black);}
+  if(rtv)rtv->Release();
+  if(ctx)ctx->Release();
+  if(!made){texture->Release();return nullptr;}
+  mine.texture=texture;mine.w=w;mine.h=h;mine.format=format;return texture;
+}
+// The layer-only door: the UI layer holds this eye's whole picture this frame -- the VR world route's layer re-issued the
+// eye's screen draw, or (experimental.on_foot_maps_sharp) the layer took a map's or a menu's 2D screen and nothing else was
+// drawn into an eye-sized target (uiLayerDoorLayerOnly asks both) -- so no upscaler runs for it: the door hands on a black
+// frame of the size the upscaler's output would have had, tells the layer it was the pass's (so the layer arms for the
+// next frame), and leaves the eye's history alone (a later eye-route frame sees the continuity broken and resets it).
+// True: *output holds the frame (one reference for the caller) and outBox the full bounds; the caller returns S_OK,
+// exactly as the upscaler's path does. False: the layer does not hold this eye, or the composite that has to produce
+// the eye was not CERTAIN to run (the layer's own preflight, uiLayerWorldDoorGap) or the frame could not be made -- the
+// caller goes on through the ordinary pass in the SAME call, so the eye is never handed a black frame it cannot have a
+// picture over. The layer-only path itself has no refusal of its own: it never answers "no output" (a null from here
+// would stand the pass down for the session) and never S_FALSE with a shift (the host moves the advertised field
+// of view by the shift when there is no output).
+bool layerOnlyTreat(State& s,uint64_t seq,unsigned eye,uint32_t outW,uint32_t outH,DXGI_FORMAT format,
+    const float* b,ID3D11Texture2D** output,float* outBox) {
+  if(!edvr::uiLayerDoorLayerOnly(eye,seq))return false;
+  ID3D11Texture2D* frame=blankFrame(s,eye,outW,outH,format);
+  int gap=frame?edvr::uiLayerWorldDoorGap(seq,eye,frame):-1;
+  if(!frame||gap!=0){
+    ++s.layerOnlyDeclined;
+    const uint16_t id=frame?uint16_t(gap):uint16_t(100);
+    if(s.layerOnlyReasons.first(id))edvr::Log::get().note("native temporal: layer-only declined for eye %u (sequence %llu): %s; "
+        "the eye route serves this eye through the pass, as it does without the layer-only door.",eye,(unsigned long long)seq,
+        frame?edvr::uiWorldDoorGapName(static_cast<edvr::UiWorldDoorGap>(gap)):"the black frame could not be made");
+    return false;
+  }
+  frame->AddRef();*output=frame;
+  outBox[0]=b[0]>b[2]?1.f:0.f;outBox[2]=b[0]>b[2]?0.f:1.f;outBox[1]=b[1]>b[3]?1.f:0.f;outBox[3]=b[1]>b[3]?0.f:1.f;
+  edvr::uiLayerNoteTemporal(seq,eye,frame);
+  ++s.layerOnly;
+  if(!s.layerOnlyNoted){s.layerOnlyNoted=true;edvr::Log::get().note("native temporal: LAYER-ONLY engaged, eye %u, sequence %llu: the UI layer "
+      "holds the whole eye (the VR world route's resolved world, or a map's or a menu's 2D screen under experimental.on_foot_maps_sharp), "
+      "so no upscaler runs for it -- a black %ux%u frame is handed on and the layer is composited over it (the eye's history is left "
+      "alone).",eye,(unsigned long long)seq,outW,outH);}
+  return true;
+}
+
+// How many phases this frame's jitter runs (experimental.temporal_aa_jitter_follows_upscale; temporal_math.h): the fixed eight with the key off.
+// With it on, ceil(8 x ratio^2) of each eye's last treated frame -- the render size the game gave and the output the pass was asked for, the
+// served floor's cut included -- and the larger of the two, so both eyes keep sharing one phase (the scanner's screen relies on it,
+// docs/fss-scanner.md). An eye with no treated frame yet has no ratio and counts the fixed eight.
+uint32_t jitterPhaseCount(const State& s) {
+  uint32_t phases=edvr::kTemporalJitterCount;
+  if(!s.currentSettings.jitterScaled)return phases;
+  for(int e=0;e<2;++e)phases=(std::max)(phases,edvr::temporalJitterPhaseCount(s.width[e],s.height[e],s.outWidth[e],s.outHeight[e]));
+  return phases;
+}
+// The count in use, said once and again at every change of it or of the key, so a flight reads each state it flew (a live toggle
+// included) from the log.
+void notePhases(State& s,uint32_t phases) {
+  const bool scaled=s.currentSettings.jitterScaled;
+  s.jitterPhases=phases;
+  if(phases==s.phasesLogged&&scaled==s.phasesLoggedScaled)return;
+  s.phasesLogged=phases;s.phasesLoggedScaled=scaled;
+  edvr::Log::get().note("native temporal: jitter phases=%u (eye 0 %ux%u -> %ux%u, eye 1 %ux%u -> %ux%u; experimental.temporal_aa_jitter_follows_upscale=%s: %s)",
+      phases,s.width[0],s.height[0],s.outWidth[0],s.outHeight[0],s.width[1],s.height[1],s.outWidth[1],s.outHeight[1],scaled?"on":"off",
+      scaled?"8 x (output / input)^2 rounded up, the larger eye's, at least 8":"the fixed 8");
+}
+
 HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporalProjection* out) {
   std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
   if(!s||!s->active||s!=current||!f||!out||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||
@@ -276,12 +380,18 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   s->projectionKnown[0]=s->projectionKnown[1]=false;
   std::memset(out,0,sizeof(*out));out->size=sizeof(*out);out->version=EDVR_NATIVE_TEMPORAL_VERSION_1;
   ++s->frameCounter; float jx=0,jy=0; std::memset(s->shift,0,sizeof(s->shift));
-  if(s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter) for(int e=0;e<2;++e) if(s->width[e]&&s->height[e]&&!s->flipped[e]) {
-    edvr::temporalJitter(s->frameCounter,&jx,&jy); float dx=0,dy=0;
+  // The eye shift is advertised every frame -- except while the VR world route owns the world (vr_world_route.h: a
+  // lock-free read of what the last frame boundary left): an owned world is resolved once, in the game's flat
+  // image, the layer holds each eye's screen, and an eye shift with no eye pass to resolve it would be a shimmer.
+  // With experimental.temporal_aa_on_foot_world off the route never owns anything and this is what it always was.
+  const uint32_t phases=jitterPhaseCount(*s);bool phased=false;
+  if(s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&!edvr::vrWorldRouteOwnsNextFrame()) for(int e=0;e<2;++e) if(s->width[e]&&s->height[e]&&!s->flipped[e]) {
+    edvr::temporalJitterPhase(s->frameCounter,phases,&jx,&jy); float dx=0,dy=0;phased=true;
     edvr::temporalJitterToTangents(jx,jy,s->frusta[e],s->width[e],s->height[e],&dx,&dy);
     out->tangentShift[e][0]=dx;out->tangentShift[e][1]=dy;
     s->shift[e][0]=out->tangentShift[e][0];s->shift[e][1]=out->tangentShift[e][1];
   }
+  if(phased)notePhases(*s,phases);
   if(s->shift[0][0]||s->shift[0][1]||s->shift[1][0]||s->shift[1][1])++s->jitterFrames;
   return S_OK;
 }
@@ -341,6 +451,14 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     // than the pass standing aside (floorOutput above; FSR's ranges differ).
     if(s->currentSettings.engine==edvr::TemporalEngine::Nvidia)floorOutput(*s,eye,w,h,outW,outH);
   }
+  // The size this eye is asked to resolve to, for the next begin()'s jitter phase count (jitterPhaseCount).
+  s->outWidth[eye]=outW?outW:w;s->outHeight[eye]=outH?outH:h;
+  // The VR world route took this eye's screen draw into the layer: no upscaler, no motion prep, no UI resolve -- the
+  // layer over a black frame of the output's size is the eye (layerOnlyTreat above). After the sizing, so the frame is
+  // exactly the size the pass would have handed on (the served floor's cut included) and the layer never re-sizes
+  // between the two routes. Everything the pass would have updated for this eye -- its history, its continuity -- is
+  // left alone; the next eye-route frame finds the continuity broken and resets.
+  if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){s->treated[eye]=true;return S_OK;}
   if(s->verdictPending[eye]) {
     const uint32_t verdict=edvr::jumpVerdictPacked();
     if(verdict!=s->verdictSeen[eye] || ++s->verdictWaits[eye]>=4) {
@@ -398,6 +516,9 @@ HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
+  // The transition detector withheld this eye's frame (a glitch frame, a jump, a hold): the VR world route (docs section 82)
+  // lets go of the world and resets its resolver's history with the eyes'. A no-op with the key off.
+  edvr::vrWorldRouteNoteSceneReset();
   if(!jumpOnly||s->continuity[eye]+1!=seq) {
     s->history[eye]={};s->verdictPending[eye]=false;
   } else if(!s->verdictPending[eye]) {
@@ -407,12 +528,13 @@ HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint3
 }
 HRESULT WINAPI close(void* p){
   std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;
-  edvr::Log::get().note("native temporal totals: treated=%llu, jitter_frames=%llu, projection_reads=%llu, missing_projections=%llu, resets=%llu, stood_down=%u, floor_cuts=%llu.",
-      (unsigned long long)s->treatedCount,(unsigned long long)s->jitterFrames,(unsigned long long)s->projectionReads,
-      (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown),(unsigned long long)s->floorCuts);
+  edvr::Log::get().note("native temporal totals: treated=%llu, jitter_frames=%llu, jitter_phases=%u, projection_reads=%llu, missing_projections=%llu, resets=%llu, stood_down=%u, floor_cuts=%llu, layer_only=%llu, layer_only_declined=%llu.",
+      (unsigned long long)s->treatedCount,(unsigned long long)s->jitterFrames,s->jitterPhases,(unsigned long long)s->projectionReads,
+      (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown),(unsigned long long)s->floorCuts,
+      (unsigned long long)s->layerOnly,(unsigned long long)s->layerOnlyDeclined);
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
       (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
-  reset(*s);s->active=false;s->begun=false;s->device=nullptr;
+  reset(*s);releaseBlank(s->blank[0]);releaseBlank(s->blank[1]);s->active=false;s->begun=false;s->device=nullptr;
   if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);}return S_OK;
 }
 }
@@ -456,6 +578,21 @@ bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float
   if (jy) *jy = (s.height[eye] && bt != 0.0f) ? s.shift[eye][1] * float(s.height[eye]) / bt : 0.0f;
   if (w) *w = s.width[eye];
   if (h) *h = s.height[eye];
+  return true;
+}
+// The VR camera census (vr_camera_census.h): what EDVR advertised for `eye` this sequence, at an eye composite draw --
+// the frustum the host was given ({left, right, down, up} tangents) and the tangent shift the eye jitter moved it by
+// (zero when the pass is not jittering). The same discipline as nativeTemporalDrawJitter: the render thread, outside
+// treat(), under the channel's mutex; false before the first beginFrame, once the channel closes, or for an eye that
+// does not exist.
+bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4], float shift[2]) {
+  if (t_insideTreat) return false;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active || !current->begun || eye > 1) return false;
+  const State& s = *current;
+  if (sequence) *sequence = s.sequence;
+  if (frustum) std::memcpy(frustum, s.frusta[eye], 4 * sizeof(float));
+  if (shift) { shift[0] = s.shift[eye][0]; shift[1] = s.shift[eye][1]; }
   return true;
 }
 // fix.ui_quality's panels and instruments (ui_surfaces.h): the size, max over eyes, the

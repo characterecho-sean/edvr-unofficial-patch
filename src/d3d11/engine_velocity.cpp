@@ -29,6 +29,7 @@
 #include "engine_motion_cpu.h"   // the CPU instrument: the draw side, apply, the tees and the lazy patches are timed here
 #include "exposure_fix.h"   // lookupShaderHash: the PS shadow probe reads the registry
 #include "flat_compute_readback.h"
+#include "flat_query_cut.h"   // the flat bracket's kept answers, and the sampled check of each
 #include "kinematic_eval_hook.h"
 #include "kinematic_eval_probe.h"
 #include "vscreen.h"
@@ -55,6 +56,11 @@ template <class... A> bool timedApply(A&&... a) {
 std::atomic<bool> live{false};
 DrawCache cache;
 uint64_t familyDraws[kMaxFamilies] = {};
+uint64_t g_stateCalls = 0;
+// The flat census drains the two counts once a frame (engineVelocityTakeWrapperCounts): what was
+// already handed over, and the draws the 30 s summary zeroed out of familyDraws before it could.
+uint64_t g_stateCallsTaken = 0, g_substitutedBase = 0, g_substitutedTaken = 0;
+uint64_t g_stateCallsAtWindow = 0;   // g_stateCalls when the 30 s summary last ran: its window's share is the difference
 std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 
 // --- The keyed pool families -------------------------------------------------
@@ -388,6 +394,9 @@ struct DrawStats {
     // kinds are the compose's six (stale stamp last; see enginePixelZ).
     uint64_t panel[2][6] = {}, panelDraws[2] = {};
     uint64_t burstFrames = 0, burstGaps = 0;
+    // The flat lazy bracket (engineVelocityFlatBeginDraw): the runs of substituted draws EDVR's state was
+    // bound for, the draws that found it still bound from the one before, and why the game's was put back.
+    uint64_t flatRuns = 0, flatKept = 0, flatFlushBy[static_cast<unsigned>(EngineVelocityFlushCause::kCount)] = {};
     void clear() { *this = DrawStats{}; }
 };
 DrawStats g_draw;
@@ -665,6 +674,7 @@ bool overlayDepthState(ID3D11DeviceContext* ctx) {
     Ptr<ID3D11DepthStencilState> state;
     UINT reference = 0;
     ctx->OMGetDepthStencilState(&state, &reference);
+    engineVelocityNoteStateCalls(1);
     if (!state) return false;
     D3D11_DEPTH_STENCIL_DESC d{};
     state->GetDesc(&d);
@@ -695,13 +705,16 @@ bool snapshotOverlayBase(ID3D11DeviceContext* ctx, Eye& e) {
     // live. A later bindTarget reattaches MRT6 for this draw.
     ID3D11RenderTargetView* rt[8] = {};
     ctx->OMGetRenderTargets(8, rt, nullptr);
+    engineVelocityNoteStateCalls(1);
     std::array<Ptr<ID3D11RenderTargetView>, 8> held;
     for (unsigned i = 0; i < 8; ++i) held[i].Attach(rt[i]);
     for (auto* view : rt) if (view == e.slotsRtv.Get()) return false;
     Ptr<ID3D11ShaderResourceView> boundSrv;
     ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &boundSrv);
+    engineVelocityNoteStateCalls(1);
     if (boundSrv.Get() == e.overlayBaseSrv.Get()) return false;
     ctx->CopyResource(e.overlayBase.Get(), e.slots.Get());
+    engineVelocityNoteStateCalls(1);
     ++g_draw.overlayCopies;
     g_draw.overlayBytes += uint64_t(e.width) * e.height * 8u;
     return true;
@@ -728,28 +741,151 @@ void restore(ID3D11DeviceContext* ctx) {
     if (g_bound.guardSrv3 && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
         Ptr<ID3D11ShaderResourceView> actual;
         ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
+        engineVelocityNoteStateCalls(1);
         if (actual.Get() == g_bound.guardSrv3.Get()) {
             ID3D11ShaderResourceView* game = g_bound.gameSrv3.Get();
             FlatComputeInternalScope internal;
             ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &game);
+            engineVelocityNoteStateCalls(1);
             ++g_draw.restores;
         }
     }
     if (g_bound.patchedPs && bindingGeneration(BindSlot::Ps) == g_bound.psGen) {
         vScreenPSSetShaderRaw(ctx, g_bound.originalPs, nullptr, 0);
+        engineVelocityNoteStateCalls(1);
         ++g_draw.restores;
     }
     if (g_bound.patchedVs && bindingGeneration(BindSlot::Vs) == g_bound.vsGen) {
         vScreenVSSetShaderRaw(ctx, g_bound.originalVs, nullptr, 0);
+        engineVelocityNoteStateCalls(1);
         ++g_draw.restores;
     }
     if (g_bound.derivedBlend && bindingGeneration(BindSlot::Blend) == g_bound.blendGen) {
         vScreenOMSetBlendStateRaw(ctx, g_bound.gameBlend.Get(), g_bound.blendFactor, g_bound.sampleMask);
+        engineVelocityNoteStateCalls(1);
         ++g_draw.restores;
     }
     g_bound = Bound{};
     g_anyBound.store(false, std::memory_order_release);
     cache.family = -1;
+}
+
+// --- The flat draw bracket, lazy form (engine_velocity.h says why) -------------------------------------
+// What the game had bound at the render targets when EDVR added MRT6 over them, so the set can go back:
+// the eight views and the depth view, and the generations of the game's slot-0 and depth bindings they
+// were read at. Owner thread only; restore()'s g_bound is the other half (shaders, blend, t3).
+struct FlatGame {
+    Ptr<ID3D11RenderTargetView> rtv[8];
+    Ptr<ID3D11DepthStencilView> dsv;
+    uint32_t rtvGen = 0, dsvGen = 0;
+    bool saved = false;   // rtv and dsv are the game's set as of those generations
+    bool bound = false;   // EDVR's MRT6 is bound over it
+};
+FlatGame g_flatGame;
+bool g_flatLazy = false;   // the runtime's switch: false while a diagnostic capture is armed
+std::atomic<bool> g_flatPending{false};
+
+// Two more answers the flat bracket used to ask the context for at every run of substituted draws, and now keeps
+// (flat_query_cut.h says why, and how they are checked). Owner thread only; released with the frame.
+//
+// The game's blend state as it was last read, with the factor and mask, and the generation of the game's blend
+// binding it was read at: while that generation stands the game has set nothing since, and EDVR's own sets and
+// restores go around the shadow, so the state is what it was.
+struct GameBlendMemo {
+    Ptr<ID3D11BlendState> state;
+    float factor[4] = {};
+    UINT mask = ~0u;
+    uint32_t gen = 0;
+    bool valid = false;
+};
+GameBlendMemo g_gameBlendMemo;
+// The render-target binding (generations of slot 0 and the depth) whose set the runtime accepted with MRT6 added and
+// read back as kept: the same set under the same generations is accepted again.
+struct KeptMemo {
+    uint32_t rtvGen = 0, dsvGen = 0;
+    bool valid = false;
+};
+KeptMemo g_keptMemo;
+
+// The game's render-target set as the context holds it now: eight views and the depth view, MRT6 only when it is
+// EDVR's own (which is then not part of the set, and reported by the flag).
+struct TargetRead {
+    ID3D11RenderTargetView* rtv[8] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    bool ourMrt6 = false;
+};
+void readTargets(ID3D11DeviceContext* ctx, TargetRead* out) {
+    ctx->OMGetRenderTargets(8, out->rtv, &out->dsv);
+    engineVelocityNoteStateCalls(1);
+    ID3D11RenderTargetView*& six = out->rtv[kEngineVelocityTarget];
+    if (six && six == g_eyes[kEngineVelocitySourceEye].slotsRtv.Get()) {
+        six->Release();
+        six = nullptr;
+        out->ourMrt6 = true;
+    }
+}
+
+// The game's render-target set, read once per binding: not again while the game has not rebound the
+// targets (the generations of the two slots the hooks keep say so; a set that keeps the render targets
+// and changes UAVs does not move them, and does not move MRT6 either), and not again after a restore that put
+// the same set back. The read comes back with EDVR's own MRT6 in it only if a restore was skipped, and MRT6 is
+// never part of the game's set. A held set is checked against the context on the sampled frames.
+void flatSaveTargets(ID3D11DeviceContext* ctx) {
+    const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0), dsvGen = bindingGeneration(BindSlot::Dsv0);
+    const bool held = g_flatGame.saved && g_flatGame.rtvGen == rtvGen && g_flatGame.dsvGen == dsvGen;
+    FlatQueryPlan plan = FlatQueryPlan::Ask;
+    if (held) {
+        plan = flatQueryCut().plan(FlatQuery::GameTargets);
+        if (plan == FlatQueryPlan::Shortcut) return;
+    }
+    TargetRead now;
+    readTargets(ctx, &now);
+    if (plan == FlatQueryPlan::Sample) {
+        bool agree = now.dsv == g_flatGame.dsv.Get() && now.ourMrt6 == g_flatGame.bound;
+        for (unsigned i = 0; i < 8 && agree; ++i) agree = now.rtv[i] == g_flatGame.rtv[i].Get();
+        if (flatQueryCut().compared(FlatQuery::GameTargets, agree)) {
+            char line[400];
+            flatQueryFallbackLine(line, sizeof(line), FlatQuery::GameTargets, "the render targets it held were not the bound ones");
+            Log::get().note("%s", line);
+        }
+    }
+    g_flatGame = FlatGame{};   // a rebind by the game took MRT6 with the old set
+    for (unsigned i = 0; i < 8; ++i) g_flatGame.rtv[i].Attach(now.rtv[i]);
+    g_flatGame.dsv.Attach(now.dsv);
+    if (now.ourMrt6) g_flatGame.bound = true;   // EDVR's MRT6 is over this set already: a restore has to take it off
+    g_flatGame.rtvGen = rtvGen;
+    g_flatGame.dsvGen = dsvGen;
+    g_flatGame.saved = true;
+}
+
+// The game's state back where EDVR's is still bound: shaders, blend and t3 by generation (restore), the
+// render targets by the saved set when the game has not rebound them since. Leaves the draw cache alone:
+// slowPath calls this mid-visit, and the visit goes on to bind MRT6 over the set again. The saved set stays: the
+// context holds it again, and the generations say for how long that stays true. It does not stay past the frame
+// (engineVelocityFlatFrameEnd): a set held that long would keep the game's views alive.
+void flatRestoreLocked(ID3D11DeviceContext* ctx) {
+    restore(ctx);
+    if (g_flatGame.bound && g_flatGame.saved && ctx && bindingGeneration(BindSlot::Rtv0) == g_flatGame.rtvGen &&
+        bindingGeneration(BindSlot::Dsv0) == g_flatGame.dsvGen) {
+        ID3D11RenderTargetView* rt[8];
+        for (unsigned i = 0; i < 8; ++i) rt[i] = g_flatGame.rtv[i].Get();
+        FlatComputeInternalScope internal;   // the binding shadow does not hear EDVR's own restore
+        ctx->OMSetRenderTargets(8, rt, g_flatGame.dsv.Get());
+        engineVelocityNoteStateCalls(1);
+        ++g_draw.restores;
+    }
+    g_flatGame.bound = false;   // MRT6 is out; the game's set is still the one saved
+    g_flatPending.store(false, std::memory_order_release);
+}
+
+// The same, and the next producer draw takes the slow half and binds MRT6 again. `counted`: something of
+// EDVR's was bound, so this is a restore worth naming in the census (a declined draw with nothing kept bound
+// still resets the cache, as every flat draw always did, but restores nothing).
+void flatFlushLocked(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause, bool counted = true) {
+    if (counted) ++g_draw.flatFlushBy[static_cast<unsigned>(cause)];
+    flatRestoreLocked(ctx);
+    g_eyes[kEngineVelocitySourceEye].bindingStale = true;   // MRT6 went without a game generation
+    cache = DrawCache{};
 }
 
 // --- The watched sources --------------------------------------------------------
@@ -834,6 +970,7 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
     ctx->GetDevice(&dev);
     Ptr<ID3D11ShaderResourceView> poolView;
     ctx->VSGetShaderResources(kEngineVelocityPoolSlot, 1, &poolView);
+    engineVelocityNoteStateCalls(1);
     if (!poolView) { invalidate(e, kNoPool); return false; }
     // The slot the vertex shader indexes is relative to the view's first
     // element; the snapshot and the compose's view start at 0, so must this.
@@ -860,6 +997,7 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
                         "private-copy coverage warms up on its next observed map.",static_cast<void*>(poolBuf.Get()),frame);
     Ptr<ID3D11Buffer> scene;
     ctx->VSGetConstantBuffers(kEngineVelocitySceneSlot, 1, &scene);
+    engineVelocityNoteStateCalls(1);
     if (!scene) { invalidate(e, kNoScene); return false; }
     D3D11_BUFFER_DESC sd{};
     scene->GetDesc(&sd);
@@ -903,6 +1041,7 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
         // instead of paying two pairs' worth of overhead for it.
         GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
         ctx->CopyResource(e.pool.Get(), poolBuf.Get());
+        engineVelocityNoteStateCalls(1);
         if(timedApply(ctx,e.pool.Get(),poolBuf.Get(),frame,e.poolOutput))++g_primaryApplied;
         // The copy by region, not resource: our buffer can be a float4
         // larger than the game's (the stamp), which CopyResource would
@@ -914,6 +1053,7 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
         // stamp rides a 16-byte cell: a whole-subresource update, then a
         // boxed copy into the scene constants' shadow.
         ctx->CopySubresourceRegion(e.scene[slot].Get(), 0, 0, 0, 0, scene.Get(), 0, nullptr);
+        engineVelocityNoteStateCalls(1);
         if (!e.stampCell) {
             D3D11_BUFFER_DESC cd{};
             cd.ByteWidth = 16; cd.Usage = D3D11_USAGE_DEFAULT;
@@ -931,6 +1071,7 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
         ctx->UpdateSubresource(e.stampCell.Get(), 0, nullptr, stamp, 16, 0);
         const D3D11_BOX stampBox{0, 0, 0, 16, 1, 1};
         ctx->CopySubresourceRegion(e.scene[slot].Get(), 0, kStampFloat4 * 16u, 0, 0, e.stampCell.Get(), 0, &stampBox);
+        engineVelocityNoteStateCalls(2);
     }
     // What the snapshots copy (the performance review, item 4: measured
     // before any storage change): the whole pool buffer, whatever the view
@@ -973,6 +1114,7 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     if (bindingGet(BindSlot::VsSrv33) != e.poolView.Get()) {
         Ptr<ID3D11ShaderResourceView> poolView;
         ctx->VSGetShaderResources(kEngineVelocityPoolSlot, 1, &poolView);
+        engineVelocityNoteStateCalls(1);
         if (poolView.Get() != e.poolView.Get()) {
             if (!poolView) { invalidate(e, kPoolRebound); return; }
             Ptr<ID3D11Resource> res;
@@ -987,6 +1129,7 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
     if (bindingGet(BindSlot::VsCb1) != e.sceneBuffer.Get()) {
         Ptr<ID3D11Buffer> scene;
         ctx->VSGetConstantBuffers(kEngineVelocitySceneSlot, 1, &scene);
+        engineVelocityNoteStateCalls(1);
         if (scene.Get() != e.sceneBuffer.Get()) { invalidate(e, kSceneRebound); return; }
     }
     const WatchInfo& wp = g_watchInfo[static_cast<unsigned>(eye) * 2u];
@@ -1001,6 +1144,7 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
             // snapshot()'s pair.
             GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
             ctx->CopyResource(e.pool.Get(), e.poolBuffer.Get());
+            engineVelocityNoteStateCalls(1);
             if(timedApply(ctx,e.pool.Get(),e.poolBuffer.Get(),e.frame,e.poolOutput))++g_primaryApplied;
         }
         endCapture(ctx, refreshTimer);
@@ -1037,6 +1181,7 @@ bool sourceCameraHolds(ID3D11DeviceContext* ctx, int f, uint32_t frame) {
         // The shadow first; a different pointer is asked of the context.
         Ptr<ID3D11Buffer> scene;
         ctx->VSGetConstantBuffers(kEngineVelocitySceneSlot, 1, &scene);
+        engineVelocityNoteStateCalls(1);
         if (scene.Get() != c.scene.Get()) why = kOtherScene;
     }
     if (why < 0) {
@@ -1072,15 +1217,28 @@ bool sourceCameraHolds(ID3D11DeviceContext* ctx, int f, uint32_t frame) {
 bool bindTarget(ID3D11DeviceContext* ctx, Eye& e, ID3D11DepthStencilView* dsv) {
     ID3D11RenderTargetView* rt[8] = {};
     ID3D11DepthStencilView* bound = nullptr;
-    ctx->OMGetRenderTargets(8, rt, &bound);
     std::array<Ptr<ID3D11RenderTargetView>, 8> held;
-    for (unsigned i = 0; i < 8; ++i) held[i].Attach(rt[i]);
     Ptr<ID3D11DepthStencilView> heldDsv;
-    heldDsv.Attach(bound);
+    // The flat bracket read the game's set when this draw began (flatSaveTargets, itself checked against the context
+    // on the sampled frames) and holds it under the generations that say the game has not rebound since: that is what
+    // the context holds, with EDVR's own MRT6 on top while it is still bound. Taken from there. The context is asked
+    // only when nothing is held, which is the VR path's case always.
+    const uint32_t rtvGenNow = bindingGeneration(BindSlot::Rtv0), dsvGenNow = bindingGeneration(BindSlot::Dsv0);
+    if (g_flatGame.saved && g_flatGame.rtvGen == rtvGenNow && g_flatGame.dsvGen == dsvGenNow) {
+        for (unsigned i = 0; i < 8; ++i) rt[i] = g_flatGame.rtv[i].Get();
+        if (g_flatGame.bound) rt[kEngineVelocityTarget] = e.slotsRtv.Get();
+        bound = g_flatGame.dsv.Get();
+    } else {
+        ctx->OMGetRenderTargets(8, rt, &bound);
+        engineVelocityNoteStateCalls(1);
+        for (unsigned i = 0; i < 8; ++i) held[i].Attach(rt[i]);
+        heldDsv.Attach(bound);
+    }
     if (bound != dsv) return false;
     if (rt[kEngineVelocityTarget] && rt[kEngineVelocityTarget] != e.slotsRtv.Get()) { ++g_draw.targetOccupied; return false; }
     ID3D11UnorderedAccessView* uav[8] = {};
     ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 8, uav);
+    engineVelocityNoteStateCalls(1);
     bool anyUav = false;
     for (auto* u : uav) if (u) { anyUav = true; u->Release(); }
     if (anyUav) { ++g_draw.uavBound; return false; }
@@ -1090,21 +1248,45 @@ bool bindTarget(ID3D11DeviceContext* ctx, Eye& e, ID3D11DepthStencilView* dsv) {
     rt[kEngineVelocityTarget] = e.slotsRtv.Get();
     // All eight slots: whatever the game has at 7 stays bound.
     vScreenSetRenderTargetsRaw(ctx, 8, rt, dsv);
-    // The runtime drops a set it cannot take; then the game's own goes back.
-    ID3D11RenderTargetView* now[8] = {};
-    ID3D11DepthStencilView* nowDsv = nullptr;
-    ctx->OMGetRenderTargets(8, now, &nowDsv);
-    bool kept = nowDsv == dsv;
-    for (unsigned i = 0; i < 8; ++i) {
-        if (now[i] != rt[i]) kept = false;
-        if (now[i]) now[i]->Release();
+    engineVelocityNoteStateCalls(1);
+    // The runtime drops a set it cannot take; then the game's own goes back. It takes or drops a given set the
+    // same way every time, so the read-back that says which is made once per binding (the same set under the same
+    // generations), and again on the sampled frames to check that.
+    const bool remembered = g_flatGame.saved && g_keptMemo.valid && g_keptMemo.rtvGen == rtvGenNow && g_keptMemo.dsvGen == dsvGenNow;
+    const FlatQueryPlan plan = remembered ? flatQueryCut().plan(FlatQuery::TargetsKept) : FlatQueryPlan::Ask;
+    bool kept = true;
+    if (plan != FlatQueryPlan::Shortcut) {
+        ID3D11RenderTargetView* now[8] = {};
+        ID3D11DepthStencilView* nowDsv = nullptr;
+        ctx->OMGetRenderTargets(8, now, &nowDsv);
+        engineVelocityNoteStateCalls(1);
+        kept = nowDsv == dsv;
+        for (unsigned i = 0; i < 8; ++i) {
+            if (now[i] != rt[i]) kept = false;
+            if (now[i]) now[i]->Release();
+        }
+        if (nowDsv) nowDsv->Release();
+        if (plan == FlatQueryPlan::Sample && flatQueryCut().compared(FlatQuery::TargetsKept, kept)) {
+            char line[400];
+            flatQueryFallbackLine(line, sizeof(line), FlatQuery::TargetsKept, "the runtime dropped a set it had taken before");
+            Log::get().note("%s", line);
+        }
     }
-    if (nowDsv) nowDsv->Release();
     if (!kept) {
         ++g_draw.bindRejected;
+        g_keptMemo = KeptMemo{};
         rt[kEngineVelocityTarget] = nullptr;
         vScreenSetRenderTargetsRaw(ctx, 8, rt, dsv);
+        engineVelocityNoteStateCalls(1);
         return false;
+    }
+    // The flat lazy bracket: MRT6 is over the game's saved set from here, whichever way this visit ends (a blend it
+    // cannot derive declines the draw after this), so a restore knows to take it off.
+    if (g_flatGame.saved) {
+        g_flatGame.bound = true;
+        g_keptMemo.rtvGen = rtvGenNow;
+        g_keptMemo.dsvGen = dsvGenNow;
+        g_keptMemo.valid = true;
     }
     return true;
 }
@@ -1124,6 +1306,7 @@ bool captureGameMark(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame, 
     ID3D11RenderTargetView* rts[8] = {};
     Ptr<ID3D11DepthStencilView> dsvNow;
     ctx->OMGetRenderTargets(8, rts, &dsvNow);
+    engineVelocityNoteStateCalls(1);
     // OMGet returns owned references: adopt slot 6's, release the rest
     // (the 2026-09-27 review's F2 -- assigning the raw pointer into a smart
     // pointer that addrefs, then releasing around it, leaked one reference per
@@ -1296,6 +1479,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             // a separate call site from the snapshot below, not merged with it.
             GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
             ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+            engineVelocityNoteStateCalls(1);
         }
         endCapture(ctx, clearTimer);
         const int snapTimer = beginCapture(ctx, kCaptureSnapshot);
@@ -1310,6 +1494,19 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         if (e.invalid) { e.overlayGroup = false; restore(ctx); return; }
     }
     bool guardOverlay = false;
+    // The overlay guard's base snapshot wants the game's own bindings (no MRT6 over the slot target, no
+    // private t3): a run of substituted draws kept bound lazily is put back first, as the per-draw
+    // restore always had before this draw. The cache is left alone -- this visit is under way.
+    if (overlayPair && g_flatPending.load(std::memory_order_relaxed)) {
+        ++g_draw.flatFlushBy[static_cast<unsigned>(EngineVelocityFlushCause::kOverlay)];
+        flatRestoreLocked(ctx);
+        e.bindingStale = true;   // MRT6 went: the binding below is made again, and needs the depth texture it reads
+        if (!depthTex) {
+            Ptr<ID3D11Resource> depthRes;
+            dsv->GetResource(&depthRes);
+            if (!depthRes || FAILED(depthRes.As(&depthTex))) { restore(ctx); return; }
+        }
+    }
     if (overlayPair) {
         if (!overlayDepthState(ctx)) {
             e.overlayGroup = false;
@@ -1350,8 +1547,38 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         Ptr<ID3D11BlendState> game;
         float factor[4] = {};
         UINT mask = 0;
-        ctx->OMGetBlendState(&game, factor, &mask);
-        if (game.Get() != bindingGet(BindSlot::Blend)) ++g_draw.blendShadowDisagreed;
+        // The game's state, factor and mask: read from the context, and kept (flat only) under the generation of the
+        // game's blend binding. A later run of substituted draws under the same generation has the same state, so it
+        // does not read it again; the sampled frames read it as well and compare.
+        const uint32_t blendGenNow = bindingGeneration(BindSlot::Blend);
+        const bool flat = runtimeFlatProfile() && g_flatGame.saved;   // the lazy bracket's draw, not VR's
+        const bool remembered = flat && g_gameBlendMemo.valid && g_gameBlendMemo.gen == blendGenNow;
+        const FlatQueryPlan plan = remembered ? flatQueryCut().plan(FlatQuery::GameBlend) : FlatQueryPlan::Ask;
+        if (plan == FlatQueryPlan::Shortcut) {
+            game = g_gameBlendMemo.state;
+            std::memcpy(factor, g_gameBlendMemo.factor, sizeof(factor));
+            mask = g_gameBlendMemo.mask;
+        } else {
+            ctx->OMGetBlendState(&game, factor, &mask);
+            engineVelocityNoteStateCalls(1);
+            if (game.Get() != bindingGet(BindSlot::Blend)) ++g_draw.blendShadowDisagreed;
+            if (plan == FlatQueryPlan::Sample) {
+                const bool agree = game.Get() == g_gameBlendMemo.state.Get() && mask == g_gameBlendMemo.mask &&
+                                   std::memcmp(factor, g_gameBlendMemo.factor, sizeof(factor)) == 0;
+                if (flatQueryCut().compared(FlatQuery::GameBlend, agree)) {
+                    char line[400];
+                    flatQueryFallbackLine(line, sizeof(line), FlatQuery::GameBlend, "the blend state it held was not the bound one");
+                    Log::get().note("%s", line);
+                }
+            }
+            if (flat) {
+                g_gameBlendMemo.state = game;
+                std::memcpy(g_gameBlendMemo.factor, factor, sizeof(factor));
+                g_gameBlendMemo.mask = mask;
+                g_gameBlendMemo.gen = blendGenNow;
+                g_gameBlendMemo.valid = true;
+            }
+        }
         const char* refused = nullptr;
         ID3D11BlendState* derived = derivedBlendFor(ctx, game.Get(), &refused);
         if (!derived) {
@@ -1361,6 +1588,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             return;
         }
         vScreenOMSetBlendStateRaw(ctx, derived, factor, mask);
+        engineVelocityNoteStateCalls(1);
         g_bound.gameBlend = game;
         g_bound.derivedBlend = derived;
         std::memcpy(g_bound.blendFactor, factor, sizeof(factor));
@@ -1379,7 +1607,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
                              bindingGeneration(BindSlot::Vs) == g_bound.vsGen;
     if (useVs != vs) {
         if (vsInstalled) ++g_draw.settersSkipped;
-        else { vScreenVSSetShaderRaw(ctx, useVs, nullptr, 0); ++g_draw.settersIssued; }
+        else { vScreenVSSetShaderRaw(ctx, useVs, nullptr, 0); engineVelocityNoteStateCalls(1); ++g_draw.settersIssued; }
     }
     if (guardOverlay) {
         Ptr<ID3D11ShaderResourceView> gameSrv;
@@ -1391,6 +1619,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         }
         Ptr<ID3D11ShaderResourceView> actual;
         ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
+        engineVelocityNoteStateCalls(3);
         if (actual.Get() != privateSrv) {
             e.overlayGroup = false;
             ++g_draw.overlayDeclinedCreate;
@@ -1398,6 +1627,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             {
                 FlatComputeInternalScope internal;
                 ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &original);
+                engineVelocityNoteStateCalls(1);
             }
             usePs = patchedPsFor(ctx, f, ps);
             psInstalled = false;
@@ -1411,7 +1641,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         }
     }
     if (psInstalled) ++g_draw.settersSkipped;
-    else { vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0); ++g_draw.settersIssued; }
+    else { vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0); engineVelocityNoteStateCalls(1); ++g_draw.settersIssued; }
     g_bound.originalPs = ps; g_bound.patchedPs = usePs; g_bound.psGen = cache.ps;
     g_bound.originalVs = useVs != vs ? vs : nullptr; g_bound.patchedVs = useVs != vs ? useVs : nullptr; g_bound.vsGen = cache.vs;
     g_bound.family = f;
@@ -1533,9 +1763,7 @@ void summaryLocked(uint64_t now) {
                     "%llu; depth not single-sample %llu, slot target create failed %llu; blend: derived state bound %llu "
                     "times, refused %llu%s%s%s, shadow disagreed %llu; views asked %llu, given %llu, refused: stood down "
                     "%llu, other depth %llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene "
-                    "constants %llu; draw hook slow half %llu calls, %.2f us each, ~%.3f ms/frame on the caller thread "
-                    "(plus %llu lock-free looks); restores %llu; shader setters issued %llu, skipped %llu (ours still "
-                    "bound).",
+                    "constants %llu.",
                     double(g_emit.recordsMoving.load()) / frames,
                     u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(g_draw.eyeFramesSeen), u(g_draw.eyeFramesSubstituted),
                     u(g_draw.eyeFrames > g_draw.eyeFramesSubstituted ? g_draw.eyeFrames - g_draw.eyeFramesSubstituted : 0),
@@ -1547,10 +1775,47 @@ void summaryLocked(uint64_t now) {
                     g_draw.blendRefusedWhy ? g_draw.blendRefusedWhy : "", g_draw.blendRefusedWhy ? ")" : "",
                     u(g_draw.blendShadowDisagreed), u(g_draw.viewsAsked), u(g_draw.viewsGiven), u(g_draw.refusedNoEmit),
                     u(g_draw.refusedDepth), u(g_draw.refusedFrame), u(g_draw.refusedInvalid), u(g_draw.refusedUnwritten),
-                    u(g_draw.refusedPrevious), u(g_draw.slowPaths),
+                    u(g_draw.refusedPrevious));
+    // The draw side's CPU and driver-call figures, on a line of their own (the 2026-09-29 motion-CPU
+    // review, C5). They were the tail of the line above, past the 1,160 characters the log keeps, and
+    // no log ever showed them. The D3D calls are every Get, Set, clear and copy the draw wrapper asked
+    // of the immediate context (engineVelocityNoteStateCalls), so a slow half that costs little of its
+    // own but issues eleven driver calls a draw shows here.
+    const uint64_t stateCallsWindow = g_stateCalls - g_stateCallsAtWindow;
+    Log::get().note("engine motion: draw side over %.0f s, %.0f frames: draw hook slow half %llu calls, %.2f us each, "
+                    "~%.3f ms/frame on the caller thread (plus %llu lock-free looks); restores %llu; shader setters "
+                    "issued %llu, skipped %llu (ours still bound); D3D context calls the draw wrapper made %llu, "
+                    "%.0f a frame.",
+                    seconds, double(g_draw.frames), u(g_draw.slowPaths),
                     g_draw.slowPaths ? double(g_draw.slowTicks) * 1e6 / freq / double(g_draw.slowPaths) : 0.0,
                     double(g_draw.slowTicks) * 1e3 / freq / frames, u(g_draw.quickPaths), u(g_draw.restores),
-                    u(g_draw.settersIssued), u(g_draw.settersSkipped));
+                    u(g_draw.settersIssued), u(g_draw.settersSkipped), u(stateCallsWindow),
+                    double(stateCallsWindow) / frames);
+    // The flat draw bracket's lazy form (engine_velocity.h): how many substituted draws there were, how many runs of
+    // them EDVR's state was bound for, how many draws found it still bound from the one before, why the game's state
+    // was put back, and what a substituted draw cost the context in calls. Flat only.
+    if (runtimeFlatProfile()) {
+        uint64_t substituted = 0;
+        for (uint64_t n : familyDraws) substituted += n;
+        const auto& by = g_draw.flatFlushBy;
+        using Cause = EngineVelocityFlushCause;
+        Log::get().note("engine motion: flat draw bracket over %.0f s: %llu substituted draws in %llu runs (%llu found EDVR's state "
+                        "still bound from the draw before); the game's state put back %llu times, for: a declined draw %llu, "
+                        "another draw %llu, a dispatch %llu, a clear %llu, a copy %llu, a resolve %llu, a set keeping the targets %llu, "
+                        "a command list %llu, the present %llu, an overlay draw %llu, not lazy %llu; %.1f context calls per substituted draw.",
+                        seconds, u(substituted), u(g_draw.flatRuns), u(g_draw.flatKept),
+                        u(by[unsigned(Cause::kDeclined)] + by[unsigned(Cause::kOtherDraw)] + by[unsigned(Cause::kDispatch)] +
+                          by[unsigned(Cause::kClear)] + by[unsigned(Cause::kCopy)] + by[unsigned(Cause::kResolve)] +
+                          by[unsigned(Cause::kKeepTargets)] + by[unsigned(Cause::kCommandList)] + by[unsigned(Cause::kPresent)] +
+                          by[unsigned(Cause::kOverlay)] +
+                          by[unsigned(Cause::kEager)]),
+                        u(by[unsigned(Cause::kDeclined)]), u(by[unsigned(Cause::kOtherDraw)]), u(by[unsigned(Cause::kDispatch)]),
+                        u(by[unsigned(Cause::kClear)]), u(by[unsigned(Cause::kCopy)]), u(by[unsigned(Cause::kResolve)]),
+                        u(by[unsigned(Cause::kKeepTargets)]), u(by[unsigned(Cause::kCommandList)]), u(by[unsigned(Cause::kPresent)]),
+                        u(by[unsigned(Cause::kOverlay)]),
+                        u(by[unsigned(Cause::kEager)]),
+                        substituted ? double(stateCallsWindow) / double(substituted) : 0.0);
+    }
     // The snapshots' copy traffic (item 4, measured only): logical bytes
     // submitted, not GPU time -- a CopyResource's CPU submission prices
     // nothing on the GPU.
@@ -1679,12 +1944,14 @@ void summaryLocked(uint64_t now) {
         s.unkeyedPsDraws = 0;
         s.selfMarked = 0;
         s.selfMarkedLatched = 0;
+        g_substitutedBase += familyDraws[f];   // kept for the flat census's drain
         familyDraws[f] = 0;
     }
     g_emit.clear();
     g_primaryEmit.clear(); g_primaryAttempts.store(0,std::memory_order_relaxed);
     g_lastGaps = 0;
     g_draw.clear();
+    g_stateCallsAtWindow = g_stateCalls;
     g_windowStartMs = now;
 }
 
@@ -1715,6 +1982,8 @@ void clearLocked() {
     // (engineVelocityFrameBoundary, g_anyBound says it is owed); it holds its
     // own references to the blend states, so the cache can go.
     g_blends.clear();
+    g_gameBlendMemo = GameBlendMemo{};   // a held reference to the game's blend state must not outlive the session
+    g_keptMemo = KeptMemo{};
     cache = DrawCache{};
     if (g_table) g_table->clear();
     if (g_census) g_census->clear();
@@ -1844,6 +2113,79 @@ void engineVelocityAfterFlatDraw(ID3D11DeviceContext* ctx) {
     // eye must reattach MRT6 on the next eligible draw of this same pass.
     g_eyes[kEngineVelocitySourceEye].bindingStale = true;
     cache = DrawCache{};
+}
+
+// The lazy flat bracket (engine_velocity.h). Owner thread. What is owner-only here (g_flatGame, the cache,
+// g_bound's reads) is read without the lock, so a run of draws that changed nothing costs no mutex at all;
+// whatever puts state back takes it.
+bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6) {
+    const bool wasBound = g_flatPending.load(std::memory_order_relaxed);
+    flatSaveTargets(ctx);
+    if (gameHadTarget6) *gameHadTarget6 = g_flatGame.rtv[kEngineVelocityTarget] != nullptr;
+    engineVelocityBeforeDraw(ctx, false);
+    if (!engineVelocityDrawSubstituted()) {
+        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        flatFlushLocked(ctx, EngineVelocityFlushCause::kDeclined, wasBound);
+        return false;
+    }
+    if (wasBound) ++g_draw.flatKept; else ++g_draw.flatRuns;
+    return true;
+}
+
+void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx) {
+    g_flatGame.bound = true;   // the draw was substituted: MRT6 is bound over the game's set, kept or not
+    // An overlay guard's private t3 stays bound for its own draw only, and a diagnostic capture wants the
+    // game's state back at once: the state goes back now, as it always did.
+    if (!g_flatLazy || g_bound.guardSrv3) {
+        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        flatFlushLocked(ctx, EngineVelocityFlushCause::kEager);
+        return;
+    }
+    g_flatPending.store(true, std::memory_order_release);
+}
+
+void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause) {
+    if (!g_flatPending.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    flatFlushLocked(ctx, cause);
+}
+
+// The frame ends (the runtime's Present, after the flush): what the bracket kept for the frame -- the game's render-target
+// set, its blend state, the accepted binding -- goes with it, so no view or state the game replaces stays alive on our account.
+void engineVelocityFlatFrameEnd() noexcept {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if (g_flatPending.load(std::memory_order_relaxed)) return;   // still bound: the flush is owed first, and does this
+    g_flatGame = FlatGame{};
+    g_gameBlendMemo = GameBlendMemo{};
+    g_keptMemo = KeptMemo{};
+}
+
+void engineVelocityFlatAbandon() noexcept {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    g_bound = Bound{};   // the context lost every binding: nothing of EDVR's is left to put back
+    g_anyBound.store(false, std::memory_order_release);
+    g_flatGame = FlatGame{};
+    g_gameBlendMemo = GameBlendMemo{};
+    g_keptMemo = KeptMemo{};
+    g_flatPending.store(false, std::memory_order_release);
+    g_eyes[kEngineVelocitySourceEye].bindingStale = true;
+    cache = DrawCache{};
+}
+
+void engineVelocityFlatLazy(bool on) noexcept { g_flatLazy = on; }
+
+// The flat census's once-a-frame drain, owner thread. The substituted draws are the sum of the
+// per-family counts plus what the 30 s summary zeroed out of them (g_substitutedBase), so a
+// summary between two drains loses none.
+EngineVelocityWrapperCounts engineVelocityTakeWrapperCounts() noexcept {
+    EngineVelocityWrapperCounts out;
+    out.stateCalls = g_stateCalls - g_stateCallsTaken;
+    g_stateCallsTaken = g_stateCalls;
+    uint64_t substituted = g_substitutedBase;
+    for (uint64_t n : familyDraws) substituted += n;
+    out.substitutedDraws = substituted - g_substitutedTaken;
+    g_substitutedTaken = substituted;
+    return out;
 }
 
 namespace engine_velocity_detail {
@@ -2001,6 +2343,7 @@ void psShadowProbe(ID3D11DeviceContext* ctx) {
     ++g_draw.poolShadowProbes;
     ID3D11PixelShader* livePs = nullptr;
     ctx->PSGetShader(&livePs, nullptr, nullptr);
+    engineVelocityNoteStateCalls(1);
     if (!livePs) return;
     // EDVR's own installed substitution is not a bypass (rc-since-rc2 review
     // F7): the shadow correctly holds the game's original and g_bound owns
@@ -2041,26 +2384,32 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
         if (g_bound.guardSrv3) {
             Ptr<ID3D11ShaderResourceView> actual;
             ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual);
+            engineVelocityNoteStateCalls(1);
             if (actual.Get() == g_bound.guardSrv3.Get() &&
                 bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
                 ID3D11ShaderResourceView* game = g_bound.gameSrv3.Get();
                 FlatComputeInternalScope internal;
                 ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &game);
+                engineVelocityNoteStateCalls(1);
                 ++g_draw.restores;
             }
         }
         Ptr<ID3D11PixelShader> ps;
         ctx->PSGetShader(&ps, nullptr, nullptr);
-        if (g_bound.patchedPs && ps.Get() == g_bound.patchedPs) { vScreenPSSetShaderRaw(ctx, g_bound.originalPs, nullptr, 0); ++g_draw.restores; }
+        engineVelocityNoteStateCalls(1);
+        if (g_bound.patchedPs && ps.Get() == g_bound.patchedPs) { vScreenPSSetShaderRaw(ctx, g_bound.originalPs, nullptr, 0); engineVelocityNoteStateCalls(1); ++g_draw.restores; }
         Ptr<ID3D11VertexShader> vs;
         ctx->VSGetShader(&vs, nullptr, nullptr);
-        if (g_bound.patchedVs && vs.Get() == g_bound.patchedVs) { vScreenVSSetShaderRaw(ctx, g_bound.originalVs, nullptr, 0); ++g_draw.restores; }
+        engineVelocityNoteStateCalls(1);
+        if (g_bound.patchedVs && vs.Get() == g_bound.patchedVs) { vScreenVSSetShaderRaw(ctx, g_bound.originalVs, nullptr, 0); engineVelocityNoteStateCalls(1); ++g_draw.restores; }
         Ptr<ID3D11BlendState> blend;
         float factor[4] = {};
         UINT mask = 0;
         ctx->OMGetBlendState(&blend, factor, &mask);
+        engineVelocityNoteStateCalls(1);
         if (g_bound.derivedBlend && blend.Get() == g_bound.derivedBlend.Get()) {
             vScreenOMSetBlendStateRaw(ctx, g_bound.gameBlend.Get(), g_bound.blendFactor, g_bound.sampleMask);
+            engineVelocityNoteStateCalls(1);
             ++g_draw.restores;
         }
     }
@@ -2209,6 +2558,21 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
                            {g_draw.sourceViewsAsked, g_draw.sourceViewsGiven, g_draw.sourceRefusedNoEmit,
                             g_draw.sourceRefusedDepth, g_draw.sourceRefusedFrame, g_draw.sourceRefusedInvalid,
                             g_draw.sourceRefusedUnwritten, g_draw.sourceRefusedPrevious});
+}
+
+bool engineVelocitySourceIsNamed(const ID3D11Texture2D* depth) {
+    if (!depth || !live.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    return g_sourceDepth.Get() == depth && g_sourceNoted == frameNow();
+}
+bool engineVelocitySourceCameraRows(float (&rows)[6][4]) {
+    static_assert(sizeof(rows) == kRowsBytes, "the resolver's camera rows are the watch's rows 270..275");
+    if (!live.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const SourceCamera& c = g_sourceCamera;
+    if (c.frame != frameNow() || !c.scene || !c.rowsKnown) return false;
+    std::memcpy(rows, c.rows, sizeof(rows));
+    return true;
 }
 
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,

@@ -105,5 +105,20 @@ inline int flatLightingTests() {
     // A full pixel really does cross the next tile: rejection is material.
     check(std::floor((119.5f + 1.0f) / 120.0f) != 119 / 120,
           "larger jitter changes light worklist ownership");
+    // The phase count (2026-10-01; flat_camera_phase.h flatCameraPhaseCount): why the Legacy route keeps the fixed eight when
+    // experimental.temporal_aa_jitter_follows_upscale is on. The eight shipped phases all pass this patch's lookup test; a
+    // 32-phase Halton sequence has phases it refuses (the sixteenth's x, the ninth's y), so a Legacy frame at that count would
+    // lose its jitter to a refusal. Only the upstream route, which carries no such patch, may run the longer sequence.
+    {
+        bool eightPass = true, longerRefused = false;
+        for (uint32_t phase = 0; phase < 32; ++phase) {
+            float jitter[2]; temporalJitterPhase(phase, 32, &jitter[0], &jitter[1]);
+            const bool admitted = flatLightingLookupInvariant(jitter[0], jitter[1], 1920, 1080, 120, 16, 9, 1);
+            if (phase < kTemporalJitterCount && !admitted) eightPass = false;
+            if (!admitted) longerRefused = true;
+        }
+        check(eightPass && longerRefused,
+              "the first eight phases pass the lighting patch's lookup test and a 32-phase sequence has phases it refuses (the Legacy route keeps eight)");
+    }
     return failures;
 }

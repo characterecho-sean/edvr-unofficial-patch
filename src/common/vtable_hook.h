@@ -138,6 +138,13 @@ bool vtableInsideModule(void** vtable, void* moduleBase);
 // live, which vtableInsideModule was not.
 size_t vtableEntriesInModule(void** vtable, size_t count, void* moduleBase);
 
+// The module, other than `excludedModule` and this DLL, that backs the most of the first `count` vtable entries, as its
+// file name alone ("dxgi.dll"), and how many entries it backs. 0, and an empty name, when every entry is in the
+// excluded module, in this DLL, or in no module. For the line that names a graphics wrapper (ReShade and its kind)
+// to the person whose frame time it costs: the probe above says THAT the runtime's own code does not back the
+// methods, and this says whose does. `count` is at most 128; `file` gets at most fileLen - 1 characters.
+size_t vtableDominantOtherModule(void** vtable, size_t count, void* excludedModule, char* file, size_t fileLen);
+
 // Which loaded module a code pointer belongs to, as "<full path>+0x<offset>".
 //
 // The full path and not the basename, because "d3d11.dll" names two different

@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <string>
 
+#include "vscreen_fit.h"
+
 namespace edvr {
 
 // The last session's resolved per-eye width, or false when none is on record
@@ -27,5 +29,17 @@ bool lastKnownEyeWidth(const std::wstring& logDir, uint32_t* outWidth);
 // Called from native_render_settings.cpp once the OpenXR host resolves a
 // real size.
 void noteResolvedEyeWidthForVScreenAuto(const std::wstring& logDir, uint32_t eyeWidth);
+
+// The second fact "auto" needs once the VR world route runs: how wide the on-foot
+// screen is in the eye, measured by the footprint instrument (vscreen_footprint.cpp)
+// and stored beside the eye width as a FRACTION of the eye width at panel distance
+// 1.0, so a changed panel_distance or eye width rescales it with no new measurement
+// (vscreen_fit.h says why). False when none is on record, or the file does not hold a
+// plausible fraction.
+bool lastKnownPanelFootprint(const std::wstring& logDir, vscreenfit::Record* out);
+
+// Remembers a session's on-foot median. Called from the footprint instrument's 30 s
+// line, only with enough samples to be a median (vscreen_footprint.cpp).
+void noteMeasuredPanelFootprint(const std::wstring& logDir, const vscreenfit::Record& record);
 
 }  // namespace edvr

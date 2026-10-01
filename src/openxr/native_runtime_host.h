@@ -251,10 +251,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // DLL has no edvr::Log. Context: the samples the report sorted.
   PeriodicWork frameCycleReportWork{"frame_cycle_report","samples"};
   // native_long_cycle: count is every completed cycle past the threshold,
-  // logged or not; logged is how many printed, capped at 4/s (rateSecond/
-  // rateWindow, a GetTickCount64()/1000 bucket) and 400 a session.
-  // native_long_cycle_summary reports both at session close.
-  uint64_t longCycleCount=0,longCycleLogged=0,longCycleRateSecond=0;unsigned longCycleRateWindow=0;
+  // logged or not; logged is how many printed. A cycle of kFreezeAlwaysLogMs (250 ms) or more always prints,
+  // and is not charged to the limiter; every other one is held to cycleLimiter's 4 a wall-clock second
+  // (GetTickCount64()/1000) and 400 a session. native_long_cycle_summary reports
+  // both at session close, with the counts by size bucket (cycleBook, freeze_book.h), and the same counts
+  // are written every kFreezeCountsEveryMs as native_long_cycle_counts. The worst few cycles of the
+  // session are kept in cycleBook and written as native_long_cycle_worst at close.
+  uint64_t longCycleCount=0,longCycleLogged=0;FreezeSecondLimiter cycleLimiter;
+  std::mutex cycleBookMutex;FreezeBook cycleBook;uint64_t longCycleCountsMs=0;uint32_t longCycleWorstPrinted=0;
   TransferWallTimes transferWall;
   uint64_t submitCallbacksBegin=0;
   std::atomic<bool> submitRouteNoted[2]{};
@@ -1860,19 +1864,76 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // half's Present trace (long_cycle_line.h): pre_present, present_hook,
   // post_present, and the hook's own four parts. The line's text lives there so a
   // rig can hold it to its format.
+  //
+  // A cycle of kFreezeAlwaysLogMs or more is a freeze, and it always prints: no per-second limit, no session
+  // cap, and it is not charged to either, so a stretch of ordinary long cycles cannot starve it and it cannot
+  // starve them. (The issue 63 flight had the worst freeze of the session, 1858 ms, in this log only because
+  // the runtime's limit happened not to bite; the graphics log's five-second limiter did, and lost it.)
+  // Every long cycle, printed or not, is counted by size bucket and offered to the worst-five list, whose
+  // entry carries the cycle's own fields so its line at close is the line it had.
   void noteLongCycle(const FrameCycleStats::Completed& c) {
     const auto periodNs=boundary.lastPeriodNs();
     if(periodNs<=0)return; // no real period observed yet to compare against
     const double periodMs=double(periodNs)/1000000.0;
     if(c.cycleMs<=2.0*periodMs)return;
-    ++longCycleCount;
-    const auto second=GetTickCount64()/1000;
-    if(second!=longCycleRateSecond){longCycleRateSecond=second;longCycleRateWindow=0;}
-    if(longCycleRateWindow>=4||longCycleLogged>=400)return;
-    ++longCycleRateWindow;++longCycleLogged;
+    const bool freeze=c.cycleMs>=kFreezeAlwaysLogMs;
+    // The limiter is asked for every long cycle so its window follows the clock, but only an ordinary one
+    // is held to it and charged to it.
+    const bool limiterAllows=cycleLimiter.allows(GetTickCount64()/1000);
+    const bool write=freezeWritesLine(freeze?FreezeVerdict::Freeze:FreezeVerdict::Long,limiterAllows);
+    if(write&&!freeze)cycleLimiter.charge();
+    const unsigned long long sequence=(unsigned long long)submitSample.sequence;
+    {
+      // The counts are read from the thread that closes the session, so they move under the book's lock.
+      std::lock_guard<std::mutex> lock(cycleBookMutex);
+      ++longCycleCount;
+      if(write)++longCycleLogged;
+      cycleBook.noteLong(c.cycleMs,write);
+      if(cycleBook.wouldKeep(c.cycleMs)){
+        FreezeWorst w;
+        w.ms=c.cycleMs;w.sequence=sequence;w.cycleMs=c.cycleMs;
+        SYSTEMTIME st{};GetSystemTime(&st);
+        _snprintf_s(w.stamp,sizeof(w.stamp),_TRUNCATE,"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond,st.wMilliseconds);
+        size_t len=0;formatLongCycleFields(w.detail,sizeof(w.detail),len,sequence,periodMs,c);
+        cycleBook.offerWorst(w);
+      }
+    }
+    if(!write)return;
     char line[1024];
-    formatLongCycleLine(line,sizeof(line),(unsigned long long)submitSample.sequence,periodMs,c);
+    formatLongCycleLine(line,sizeof(line),sequence,periodMs,c);
     nativeTracePuts(line);
+  }
+  // The counts every kFreezeCountsEveryMs (native_long_cycle_counts) and, at session close, the summary and
+  // the worst few. `final` also writes the whole worst list; otherwise the list is written only when it
+  // changed since it was last written. The summary keeps the three fields it has always carried at its head
+  // (count, logged, threshold) and adds the buckets after them.
+  void writeLongCycleSummary(const char* reason,bool final) {
+    FreezeBook copy;uint32_t printed=0;uint64_t count=0,logged=0;
+    {
+      std::lock_guard<std::mutex> lock(cycleBookMutex);
+      copy=cycleBook;printed=longCycleWorstPrinted;longCycleWorstPrinted=copy.worstRevision;
+      count=longCycleCount;logged=longCycleLogged;
+    }
+    char line[1100];
+    formatLongCycleCountsLine(line,sizeof(line),final?"native_long_cycle_summary":"native_long_cycle_counts",
+      (unsigned long long)count,(unsigned long long)logged,final?nullptr:reason,copy);
+    nativeTracePuts(line);
+    if(!copy.worstCount()||(!final&&copy.worstRevision==printed))return;
+    for(unsigned i=0;i<copy.worstCount();++i){
+      const FreezeWorst& w=copy.worstAt(i);
+      // The entry's own fields were formatted when it made the list; this line is its head and them.
+      char worstLine[1280];
+      formatWorstCycleLine(worstLine,sizeof(worstLine),i+1,copy.worstCount(),w.stamp,w.detail);
+      nativeTracePuts(worstLine);
+    }
+  }
+  // Called every cycle from reportFrameCycles: the first call arms the clock and says nothing.
+  void maybeLongCycleCounts() {
+    const uint64_t now=GetTickCount64();
+    if(!longCycleCountsMs){longCycleCountsMs=now?now:1;return;}
+    if(now-longCycleCountsMs<kFreezeCountsEveryMs)return;
+    longCycleCountsMs=now;
+    writeLongCycleSummary("periodic",false);
   }
   // One finished report's cost, microseconds on the frame-cycle clock, into the phase-0 timing. The sink is
   // the runtime's trace (a "periodic work: ..." line like the graphics half's, whose `at` is local time
@@ -1884,6 +1945,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   // buildUs: what the caller spent in frameCycles.waitCallerEnd, where this report was built (0 when unknown).
   void reportFrameCycles(uint64_t buildUs=0) {
+    maybeLongCycleCounts();
     if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
     FrameCycleStats::Report r{};if(!frameCycles.takeReport(r))return;
     const uint64_t writeBegan=frameCycleUs();
@@ -2269,8 +2331,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(tracing) { const auto producerGpu=producerTiming.summary();
       nativeTracePrintf("native_producer_gpu_summary,windows=%llu,samples=%llu,disjoint_invalid=%llu\n",
         (unsigned long long)producerGpu.windows,(unsigned long long)producerGpu.samples,(unsigned long long)producerGpu.disjointInvalid); }
-    if(tracing)nativeTracePrintf("native_long_cycle_summary,count=%llu,logged=%llu,threshold=2x_period\n",
-      (unsigned long long)longCycleCount,(unsigned long long)longCycleLogged);
+    // native_long_cycle_summary: the three fields it has always had, then the counts by size bucket, and
+    // after it the worst few cycles of the session (native_long_cycle_worst).
+    if(tracing)writeLongCycleSummary(nullptr,true);
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",

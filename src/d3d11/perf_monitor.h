@@ -159,6 +159,11 @@ inline bool perfMonitorSampleDraws() { return detail::g_perfMonitorSampleDraws; 
 constexpr uint32_t kPerfMonitorDrawTimeStride = 64;
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks);
 
+// The runtime closed its timing context, so the session is over: the long-frame counts and the worst few
+// are written (docs/freeze-diagnostics-2026-10-01.md). Called from native_timing.cpp's close through
+// g_nativeTimingCloseObserver, never from DllMain's process-exit path (the other threads are dead there).
+void perfMonitorSessionEnd();
+
 void perfMonitorShutdown();
 
 }  // namespace edvr

@@ -381,9 +381,11 @@ std::string iniValue(const std::string& text, const std::string& dotted,
 
 std::string mergeIni(const std::string& next, const std::string& user, const std::string* base,
                      const std::vector<std::pair<std::string, std::string>>& forced,
-                     MergeReport* report) {
+                     MergeReport* report, const char* userFile) {
     MergeReport local;
     MergeReport& rep = report ? *report : local;
+    const std::string carriedFrom =
+        std::string("# carried over from your ") + (userFile ? userFile : kIniNameVr);
 
     IniDoc nextDoc = iniParse(next);
     const std::map<std::string, MovedTarget> moved = movedKeys(nextDoc);
@@ -505,10 +507,8 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
             // there is how a support thread starts.
             if (u.present) {
                 const std::string note = b.known
-                                             ? "# carried over from your edvr.ini; this version no "
-                                               "longer uses it"
-                                             : "# carried over from your edvr.ini; not an EDVR "
-                                               "setting this version knows";
+                                             ? carriedFrom + "; this version no longer uses it"
+                                             : carriedFrom + "; not an EDVR setting this version knows";
                 appended[lower(section)].push_back(note);
                 appended[lower(section)].push_back(key + " = " + u.value);
                 (b.known ? rep.retired : rep.carried).push_back(dotted + " = " + u.value);

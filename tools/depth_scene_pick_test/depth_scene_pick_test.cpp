@@ -678,6 +678,50 @@ int main(int argc, char** argv) {
                   "eye-draw pre-check: a new frame reaches the note again");
         }
 
+        // The draw gate (draw_gate.h) is opened for this probe by depthProbeWanted() alone
+        // (vscreen.cpp drawGateSubscribed), and both rungs below it lean on that one term:
+        // depthProbeNoteDraw behind depthProbeWanted() itself, depthProbeNoteEyeDraw behind
+        // depthProbeEyeDrawNeedsNote(). So the second must imply the first, for every view and
+        // frame state, or a config that arms only the probe leaves its eye rung behind a shut
+        // gate. And the flag must follow depthProbeConfigure's arming rule for the two configs
+        // no other gate subscriber covers: the eye depth capture on its own (TAA off), and a
+        // fix.temporal_aa value that is not a recognised mode (today's rule: any value but off
+        // arms the probe; the gate follows the flag whatever the rule is). No rig covers
+        // drawGateSubscribed itself; this is the probe's half.
+        {
+            int gateToken = 0;
+            void* const gateViews[] = {nullptr, &gateToken};
+            const bool gateSavedThisFrame = edvr::detail::g_depthProbeEyeDrawThisFrame;
+            void* const gateSavedLast = edvr::detail::g_depthProbeLastDsv;
+            const struct { const char* mode; bool capture; bool wanted; } gateArming[] = {
+                {"off", false, false}, {"off", true, true}, {"dlss", false, true},
+                {"on", false, true}, {"banana", false, true},
+            };
+            for (const auto& arm : gateArming) {
+                temporalMode = arm.mode;
+                eyeDepthCaptureOn = arm.capture;
+                edvr::depthProbeConfigure(edvr::Config::get());
+                check(edvr::depthProbeWanted() == arm.wanted,
+                      "gate: depthProbeWanted() is true exactly when fix.temporal_aa is not off or the eye depth capture is on");
+                for (const bool gateThisFrame : {false, true}) {
+                    for (void* const gateLast : gateViews) {
+                        edvr::detail::g_depthProbeEyeDrawThisFrame = gateThisFrame;
+                        edvr::detail::g_depthProbeLastDsv = gateLast;
+                        for (void* const gateView : gateViews) {
+                            check(!edvr::depthProbeEyeDrawNeedsNote(gateView) || edvr::depthProbeWanted(),
+                                  "gate: the eye rung's pre-check never passes while depthProbeWanted() is false, so one gate term covers both rungs");
+                        }
+                    }
+                }
+            }
+            temporalMode = "dlss";
+            eyeDepthCaptureOn = false;
+            edvr::depthProbeConfigure(edvr::Config::get());
+            check(edvr::depthProbeWanted(), "gate: back under the DLSS arming the rest of this rig runs with");
+            edvr::detail::g_depthProbeEyeDrawThisFrame = gateSavedThisFrame;
+            edvr::detail::g_depthProbeLastDsv = gateSavedLast;
+        }
+
         // The layout census (flight 6, 153446: "now #0 2048x1024" beside a
         // 5088x2862 viewport). A screen-sized target and a shadow atlas that
         // take turns as the busiest each keep their own record -- the atlas

@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <string>
 
+#include "../common/ini_name.h"
 #include "../common/native_render_settings.h"
 #include "../common/openxr_resolution_entries.h"
 
@@ -47,5 +48,10 @@ struct OpenxrResolutionReport {
     uint32_t matched = 0;                // 0 none, 1 runtime/system, 2 runtime-only
     uint32_t width = 0;                  // resolved width, 0 when no entry matched
     const EdvrNativeRenderViewBounds* eyes = nullptr;  // [2]
+    // The settings file the value was read from, as the line names it. This is a VR
+    // path (the native OpenXR runtime), where the file is edvr.ini, and the formatter
+    // is pure so the self-test can run it without a Config; the DLL sets it from
+    // Config::iniName() all the same.
+    const char* settingsFile = edvr::kIniNameVr;
 };
 std::string formatOpenxrResolutionReport(const OpenxrResolutionReport& report);

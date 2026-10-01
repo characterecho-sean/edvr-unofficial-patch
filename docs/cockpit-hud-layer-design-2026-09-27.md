@@ -52,6 +52,9 @@
 - **Latest journal entry (2026-09-29, built, not flown):** the hologram
   restore fence lifts at the frame boundary (Review B1); ui_holo_test now
   1059 checks on WARP (927 in the entry the Open bullet's figure came from).
+- **2026-09-30 (built, not flown):** the re-issue's eye identity now follows the
+  eye through the game's post pass, so the station menu's frosted base is taken
+  after the HUD (ui-layer-2026-09-23.md, "2026-09-30"); its Limits name the HDR-phase inversion.
 - **Design background** (the game's tonemap draw, its variants, exposure,
   bloom; measured facts): "Status detail" below, verbatim.
 - **Ruled out:** "Ruled out (do not re-propose)" below; the phase journals

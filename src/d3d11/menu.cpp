@@ -26,9 +26,13 @@
 #include "../common/proxy.h"
 #include "../common/timing.h"
 #include "../common/temporal_mode.h"
+#include "../common/vr_supersample_notice.h"
+#include "../common/vscreen_fit.h"
 #include "device_hook.h"
 #include "elite_binds.h"
+#include "flat_elite_settings.h"
 #include "flat_runtime.h"
+#include "flat_wrapper_note.h"
 #include "input_gate.h"
 #include "../plugins/plugin_manager.h"
 #include "menu_flat_rows.h"
@@ -41,6 +45,7 @@
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
+#include "vscreen.h"        // vScreenRenderBelowEye: Elite's Supersampling below 1, from the sizes
 #include "vscreen_res.h"
 // fsr3_engine.h is deliberately NOT included: the Temporal AA status line
 // reaches AMD's price and its name through temporal_pass.h's
@@ -191,6 +196,23 @@ struct State {
     bool  flatEscapeDown = false;
     bool  flatKeysReadyShown = false;
     bool  flatNativeScaleShown = false;
+    // The flat panel's settings warning (flat_elite_settings.h): Elite's graphics files, read
+    // when the menu opens and when they change; whether the warning is up and the words it
+    // was built from (a change of either rebuilds the raster and is logged, at most
+    // kFlatWarnLogMax times a session).
+    FlatSettingsWatcher flatSettings;
+    bool        flatSettingsForce = false;
+    bool        flatWarnActive = false;
+    std::string flatWarnKey;
+    // The conditions the words were built from (structure admission, a render size that does not fit, EDVR's TAA above the
+    // output, with the measured sizes): set with the key, which carries all of it, so the panel and the log say what the key says.
+    FlatWarningCause flatWarnCause;
+    int         flatWarnLogged = 0;
+    // The graphics-wrapper note (flat_wrapper_note.h): said once in the log when it is first drawn.
+    bool        flatWrapperNoteLogged = false;
+    // Elite's Supersampling below 1.0 in VR (vr_supersample_notice.h, design section 83): the headset toast is said once a
+    // session, the Status line and the settings pages' note whenever vScreen has measured it. Never in a flat session.
+    bool        vrSupersamplingToasted = false;
     float alpha = 0.0f;
     uint64_t openedMs = 0;
     uint64_t lastInputMs = 0;
@@ -738,9 +760,9 @@ std::string savedForText(const edvr::native_render::HeadsetEntry* entries, size_
         }
     }
     if (count > shown) {
-        char more[48];
-        snprintf(more, sizeof(more), " and %u more (see edvr.ini)",
-                 static_cast<unsigned>(count - shown));
+        char more[64];
+        snprintf(more, sizeof(more), " and %u more (see %s)",
+                 static_cast<unsigned>(count - shown), Config::get().iniName());
         body += more;
     }
     return body + ".";
@@ -846,7 +868,10 @@ bool parseTypedWidth(const std::string& text, uint32_t* out) {
     return true;
 }
 
-constexpr const char* kEightHeadsets = "Eight headsets saved; remove one in edvr.ini first.";
+// Names the settings file this process read (Config::iniName), never a literal one.
+std::string eightHeadsetsText() {
+    return std::string("Eight headsets saved; remove one in ") + Config::get().iniName() + " first.";
+}
 // A runtime whose name has no ASCII letter or digit yields an empty runtime
 // token, which the grammar cannot key an entry on (mergeHeadsetEntry refuses
 // it); said as such rather than as a full list.
@@ -985,6 +1010,90 @@ std::string displayValue(const MenuRowDef& d, const std::string& v) {
 }
 
 // ---------------------------------------------------------------------------
+// The flat panel's settings warning (flat_elite_settings.h). Shown only while a
+// temporal mode is selected and the runtime has stood its work down for the shape
+// of a post chain whose output copy it found, or for a render size that does not fit
+// the output (flatRuntimeStructuralRefusal, which follows the stand-down and nothing
+// else): a treated session, a session that is merely starting (no scene yet), and a
+// loading screen see nothing.
+
+constexpr int kFlatWarnLogMax = 24;
+
+// The flat page is the rows of menu_flat_rows.h and nothing else; a blank line and a full warning make up the rest of
+// the card. (The wrapper note, when there is one, takes what is left.)
+static_assert(static_cast<int>(kFlatPageRowCount) + 1 + FlatSettingsWarning::kMaxLines <= kMenuMaxLines,
+              "the flat page's rows, a blank line and a full settings warning fit the card's lines");
+
+// The selected mode as the panel names it on its Anti-aliasing row.
+std::string flatModeLabel() {
+    const std::string value = Config::get().requestedTemporalMode();
+    for (int i = 0; i < kRowDefCount; ++i)
+        if (strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, "temporal_aa") == 0)
+            return displayValue(kMenuRows[i], value);
+    return value;
+}
+
+struct FlatWarnRuler { int emPx; };
+int flatWarnMeasure(const char* text, void* context) {
+    return menuPanelMeasureLine(text, static_cast<FlatWarnRuler*>(context)->emPx);
+}
+
+// One tick: read Elite's files when they are wanted, and notice a change in what the
+// warning would say. The files are read when the menu opens, when the warning becomes
+// wanted, and then at most every couple of seconds while it is wanted or the panel is up;
+// a treated session with the panel closed never touches them.
+void flatWarningTick(uint64_t now) {
+    State& s = g_s;
+    const char* reason = "";
+    bool standing = false;
+    // The runtime's atomic first: a treated session pays a load and nothing else.
+    const bool refusing = flatRuntimeStructuralRefusal(&reason, &standing) &&
+                          temporalModeEnabled(Config::get().requestedTemporalMode());
+    if (refusing || s.open || s.flatSettingsForce) {
+        const bool force = s.flatSettingsForce || (refusing && !s.flatWarnActive);
+        s.flatSettingsForce = false;
+        if (s.flatSettings.poll(now, force)) {
+            char line[512];
+            flatFormatEliteSettings(line, sizeof(line), s.flatSettings.settings());
+            Log::get().note("%s", line);
+        }
+    }
+    const std::string label = refusing ? flatModeLabel() : std::string();
+    // Which of the warning's conditions hold (flat_elite_settings.h, flatWarningCause). The route's key being auto means the
+    // game's final copy is admitted by its structure, so a refusal is not about bloom or depth of field and those are not
+    // named. A refusal for the render size says the sizes; EDVR's TAA above the output says what to set. All of it comes from
+    // the runtime's own measurements (the scene's and the output's sizes at the final copy), never from Elite's settings file.
+    uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
+    const bool sizesKnown = refusing && flatRuntimeSceneSizes(&renderW, &renderH, &outputW, &outputH);
+    const bool renderSizeReason = refusing && std::strcmp(reason, flatMonoReasonName(FlatMonoReason::RenderSize)) == 0;
+    const FlatWarningCause cause = flatWarningCause(refusing, refusing && flatRuntimeStructureAdmission(),
+                                                    refusing && flatRuntimeTaaAboveOutput(), renderSizeReason, sizesKnown,
+                                                    renderW, renderH, outputW, outputH);
+    const std::string key = refusing ? flatSettingsWarningKey(label.c_str(), s.flatSettings.settings(), cause)
+                                     : std::string();
+    if (refusing == s.flatWarnActive && key == s.flatWarnKey) return;
+    const bool was = s.flatWarnActive;
+    s.flatWarnActive = refusing;
+    s.flatWarnKey = key;
+    s.flatWarnCause = cause;
+    s.contentDirty = true;
+    if (s.flatWarnLogged >= kFlatWarnLogMax) return;
+    ++s.flatWarnLogged;
+    if (refusing) {
+        FlatSettingsWarning w;
+        flatComposeSettingsWarning(label.c_str(), s.flatSettings.settings(), 0, nullptr, nullptr, &w, cause);
+        char line[900];
+        flatFormatSettingsWarningLog(line, sizeof(line), was, label.c_str(), reason, standing, cause, w);
+        Log::get().note("%s", line);
+    } else {
+        Log::get().note("flat settings warning: hidden (the work is not stood down for the shape of "
+                        "a post chain now, or the mode is off)");
+    }
+    if (s.flatWarnLogged == kFlatWarnLogMax)
+        Log::get().note("flat settings warning: further changes are not logged this session");
+}
+
+// ---------------------------------------------------------------------------
 // The ini write (docs/settings-menu.md, "Persistence")
 
 bool readWhole(const std::wstring& path, std::string* out) {
@@ -1081,12 +1190,18 @@ bool g_mirrorFailNoted = false;
 
 bool menuIniWrite(const std::string& dotted, const std::string& value, std::string* err) {
     const std::wstring path = Config::get().path();
+    // The file this process reads and this write replaces: edvr-flat.ini under the
+    // flat profile, edvr.ini otherwise (Config::iniName names it for the messages).
+    // Its own name, both for the safety copies below and for what a failure says.
+    const std::string fileName = Config::get().iniName();
+    const size_t leafAt = path.find_last_of(L"\\/");
+    const std::wstring leaf = leafAt == std::wstring::npos ? path : path.substr(leafAt + 1);
     std::string source;
     // Re-read before every write, the settings window's 2026-08-28 lesson:
     // the file on disk is the source, never a copy cached when the panel
     // opened.
     if (!readWhole(path, &source) || source.empty()) {
-        *err = "edvr.ini could not be read";
+        *err = fileName + " could not be read";
         return false;
     }
     if (!g_backedUp) {
@@ -1095,7 +1210,9 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
         if (!dirExistsW(root)) CreateDirectoryW(root.c_str(), nullptr);
         const std::wstring dir = root + L"\\menu-" + stampName();
         if (CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) {
-            CopyFileW(path.c_str(), (dir + L"\\edvr.ini").c_str(), FALSE);
+            // Named for the file copied: the flat profile's settings are not an edvr.ini,
+            // and a copy called that could be restored over the VR profile's.
+            CopyFileW(path.c_str(), (dir + L"\\" + leaf).c_str(), FALSE);
         }
     }
     MergeReport report;
@@ -1106,7 +1223,7 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
     // and a reload that lands between two writes cannot fail the second.
     std::wstring why;
     if (!writeFileAtomic(path, updated, &why)) {
-        *err = "edvr.ini: " + utf8Of(why);
+        *err = fileName + ": " + utf8Of(why);
         return false;
     }
     // The mirror of last resort, refreshed so an update that wipes the
@@ -1117,8 +1234,6 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
     // the mirror's edvr-flat.ini rather than over the VR profile's edvr.ini.
     const std::wstring mdir = mirrorDir();
     if (!mdir.empty()) {
-        const size_t slash = path.find_last_of(L"\\/");
-        const std::wstring leaf = slash == std::wstring::npos ? path : path.substr(slash + 1);
         std::wstring mirrorWhy;
         if (writeGenerations(mdir, leaf, updated, false, &mirrorWhy)) {
             if (!g_mirrorNoted) {
@@ -1886,6 +2001,13 @@ void buildContent(MenuContent& c) {
         c.compact = true;
         snprintf(c.hint, sizeof(c.hint), "%s",
                  "The page a support thread will ask to see. Tab or PageDown for the next page.");
+        {
+            // Elite's Supersampling below 1.0 (VR; vr_supersample_notice.h, design section 83), when vScreen has measured the
+            // world rendered under the eye texture: the open menu says it HERE, in the hint this page has anyway. A line of its
+            // own, or a note on a settings page, would take the bitmap past the 2048-px guard on the Pimax (see the header).
+            uint32_t rw = 0, rh = 0, ew = 0, eh = 0;
+            if (vScreenRenderBelowEye(&rw, &rh, &ew, &eh)) vrss::formatStatusHint(c.hint, sizeof(c.hint));
+        }
     } else {
         // The tooltip waits for the look or the hand to settle on one row:
         // it is an explanation for someone who has stopped, not something
@@ -2026,8 +2148,12 @@ void buildContent(MenuContent& c) {
                 // announce=false: this runs every frame the row is highlighted,
                 // not once at startup, so the resolver must stay silent here.
                 uint32_t vw = 0, vh = 0;
-                resolveVScreenTargetResolution(Config::get(), &vw, &vh, /*announce=*/false);
-                if (vw && vh) {
+                vscreenfit::Decision autoRule;
+                resolveVScreenTargetResolution(Config::get(), &vw, &vh, /*announce=*/false, &autoRule);
+                if (vw && vh && autoRule.width) {
+                    // "auto": which of its two rules chose it (vscreen_fit.h).
+                    vscreenfit::formatHint(c.hint, sizeof(c.hint), autoRule);
+                } else if (vw && vh) {
                     snprintf(c.hint, sizeof(c.hint), "Currently resolves to %ux%u.", vw, vh);
                 } else {
                     snprintf(c.hint, sizeof(c.hint),
@@ -2117,6 +2243,44 @@ void buildContent(MenuContent& c) {
                 }
                 body += std::string("\n\n") + (d.detail[0] ? d.detail : d.hint);
                 strncpy(c.popup, body.c_str(), sizeof(c.popup) - 1);
+            }
+        }
+        // The settings warning (flat only, and only while frames are refused for the shape
+        // of the post chain): a blank line, then the words wrapped to the note face's width.
+        if (runtimeFlatProfile() && s.flatWarnActive) {
+            FlatWarnRuler ruler{c.capPx * 8 / 7};   // the note face's em (menu_panel.cpp, Font::Hint)
+            const int width = c.cardPx - 2 * (c.capPx * 8 / 10);
+            FlatSettingsWarning warning;
+            flatComposeSettingsWarning(flatModeLabel().c_str(), s.flatSettings.settings(), width,
+                                       &flatWarnMeasure, &ruler, &warning, s.flatWarnCause);
+            if (c.lineCount < kMenuMaxLines) c.lines[c.lineCount++].style = kMenuNote;
+            for (int i = 0; i < warning.count && c.lineCount < kMenuMaxLines; ++i) {
+                MenuLine& l = c.lines[c.lineCount++];
+                strncpy(l.left, warning.line[i], sizeof(l.left) - 1);
+                l.style = kMenuNote;
+            }
+        }
+        // The graphics-wrapper note (flat only, while a temporal mode is selected, and only when the hook-mode probe found
+        // a wrapper such as ReShade handling every graphics call): the words wrapped to the note face's width, after a
+        // blank line, and said once in the log the first time they are drawn.
+        if (runtimeFlatProfile()) {
+            const char* wrapper = contextWrapperFile();
+            FlatWarnRuler ruler{c.capPx * 8 / 7};
+            FlatSettingsWarning note;
+            flatComposeWrapperNote(temporalModeEnabled(Config::get().requestedTemporalMode()), wrapper,
+                                   c.cardPx - 2 * (c.capPx * 8 / 10), &flatWarnMeasure, &ruler, &note);
+            if (note.count > 0) {
+                if (c.lineCount < kMenuMaxLines) c.lines[c.lineCount++].style = kMenuNote;
+                for (int i = 0; i < note.count && c.lineCount < kMenuMaxLines; ++i) {
+                    MenuLine& l = c.lines[c.lineCount++];
+                    strncpy(l.left, note.line[i], sizeof(l.left) - 1);
+                    l.style = kMenuNote;
+                }
+                if (!s.flatWrapperNoteLogged) {
+                    s.flatWrapperNoteLogged = true;
+                    Log::get().note("flat wrapper note: shown in the panel (mode=%s): %s handles every graphics call, so every "
+                                    "call EDVR makes goes through it first.", flatModeLabel().c_str(), wrapper);
+                }
             }
         }
         if (c.lineCount == 0) {
@@ -2291,7 +2455,7 @@ bool applyHeadsetChange(int defIndex, const HeadsetWrite& w, uint32_t value) {
     std::string list;
     if (value) {
         if (!mergeHeadsetEntry(before, w.rt, w.sys, value, &list, w.lo, w.hi)) {
-            s.lastWrite = kEightHeadsets;
+            s.lastWrite = eightHeadsetsText();
             s.contentDirty = true;
             return false;
         }
@@ -2360,17 +2524,17 @@ void drainWrites() {
                 // The per-headset row: the key and the values, then the
                 // list the file now holds.
                 s.lastWrite = w.job.headset + " = " + w.job.toValue;
-                Log::get().note("menu: %s %s %s -> %s (list now %s%s%s; written to edvr.ini; "
+                Log::get().note("menu: %s %s %s -> %s (list now %s%s%s; written to %s; "
                                 "%s).",
                                 w.job.dotted.c_str(), w.job.headset.c_str(), w.job.fromValue.c_str(),
                                 w.job.toValue.c_str(), w.job.value.empty() ? "empty" : w.job.value.c_str(),
                                 w.job.dropped.empty() ? "" : "; dropped malformed ",
-                                w.job.dropped.c_str(), when);
+                                w.job.dropped.c_str(), Config::get().iniName(), when);
             } else {
                 s.lastWrite = w.job.dotted + " = " + w.job.value;
-                Log::get().note("menu: %s %s -> %s (written to edvr.ini; %s).", w.job.dotted.c_str(),
+                Log::get().note("menu: %s %s -> %s (written to %s; %s).", w.job.dotted.c_str(),
                                 w.job.before.empty() ? "(default)" : w.job.before.c_str(),
-                                w.job.value.c_str(), when);
+                                w.job.value.c_str(), Config::get().iniName(), when);
             }
         } else {
             s.lastWrite = "FAILED: " + w.err;
@@ -3223,6 +3387,7 @@ void openMenu(uint64_t now) {
         s.lastDrawnMs = 0;
         s.flatEscapeDown = rawKeyDown(VK_ESCAPE);
         s.flatNativeScaleShown = flatRuntimeNativeScale();
+        s.flatSettingsForce = true;   // Elite's graphics files are looked at when the panel opens
         s.alpha = 1.0f;
         s.tooltipUp = false;
         s.contentDirty = true;
@@ -3348,6 +3513,7 @@ void menuConfigure(Config& cfg) {
         inputGateConfigure(cfg);
         if (!s.configured) {
             s.configured = true;
+            s.flatSettings.setFolder(flatEliteGraphicsFolder());
             initKeys();
             refreshRowValues();
             takeSnapshot();
@@ -3607,10 +3773,11 @@ void menuNoteConfigReloaded() {
             if (r.pending && !r.auditNoted) {
                 r.auditNoted = true;
                 const ResolutionView view = resolutionView(v);
-                Log::get().note("edvr.ini: %s now gives this headset (%s) %u wide on disk but is read "
+                Log::get().note("%s: %s now gives this headset (%s) %u wide on disk but is read "
                                 "when VR starts; the running value is %u wide (%s). Restart the game "
                                 "to apply it.",
-                                dotted.c_str(), view.key.c_str(), view.width, view.sizing.activeWidth[0],
+                                Config::get().iniName(), dotted.c_str(), view.key.c_str(), view.width,
+                                view.sizing.activeWidth[0],
                                 percentText(edvr::native_render::widthToScale(
                                     view.sizing.activeWidth[0], view.sizing.eyes[0].originalWidth)).c_str());
             }
@@ -3618,9 +3785,9 @@ void menuNoteConfigReloaded() {
             r.pending = rowPending(d, v, r.snapshot);
             if (r.pending && !r.auditNoted) {
                 r.auditNoted = true;
-                Log::get().note("edvr.ini: %s is now %s on disk but is read at launch; the running "
+                Log::get().note("%s: %s is now %s on disk but is read at launch; the running "
                                 "value is still %s. Restart the game to apply it.",
-                                dotted.c_str(), v.empty() ? "(default)" : v.c_str(),
+                                Config::get().iniName(), dotted.c_str(), v.empty() ? "(default)" : v.c_str(),
                                 r.snapshot.empty() ? "(default)" : r.snapshot.c_str());
             }
         }
@@ -3694,6 +3861,7 @@ void menuTick(ID3D11Device* dev) {
                 s.flatNativeScaleShown = nativeScale;
                 s.contentDirty = true;
             }
+            flatWarningTick(now);
             if (keysReady) handleKeys(now);
             if (s.open && dev && !menuPanelFlatRasterReady()) s.contentDirty = true;
             if (s.open && s.contentDirty) {
@@ -3738,6 +3906,28 @@ void menuTick(ID3D11Device* dev) {
         perfMonitorSetActive(s.open && s.pages[s.page].monitor);
         // Writes the worker finished since last frame.
         drainWrites();
+
+        // Elite's Supersampling below 1.0 (vr_supersample_notice.h, design section 83): once vScreen has measured the world
+        // rendered under the eye texture, the headset says so once a session as a toast (the menu's own notice, with the log
+        // line vScreen wrote; the open menu keeps it as the Status page's hint). Gated on menu.toasts like every toast, and
+        // this is the VR branch: the flat profile returned above and never reaches it.
+        if (!s.vrSupersamplingToasted) {
+            uint32_t rw = 0, rh = 0, ew = 0, eh = 0;
+            if (vScreenRenderBelowEye(&rw, &rh, &ew, &eh)) {
+                s.vrSupersamplingToasted = true;
+                if (s.toasts) {
+                    char toast[96];
+                    vrss::formatToast(toast, sizeof(toast));
+                    s.toastQueue.push_back(toast);
+                    Log::get().note("vr supersampling: the headset notice is queued as a toast (\"%s\"); the Status page shows the "
+                                    "advice as its hint while the menu is open.", toast);
+                } else {
+                    Log::get().note("vr supersampling: menu.toasts is off, so no toast; the Status page shows the advice as its "
+                                    "hint while the menu is open.");
+                }
+                s.contentDirty = true;
+            }
+        }
 
         // The summon key: EDVR's own, focus-gated. With Shift, recentre.
         if (s.summon.pressed()) {

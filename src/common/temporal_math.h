@@ -71,8 +71,44 @@ inline bool temporalSceneProjection(float rowA, float rowB, float nearZ,
 
 // How many frames the jitter sequence runs before repeating. Halton (2,3)
 // over eight frames covers the pixel evenly; longer sequences converge
-// finer detail but take longer to settle after a reset.
+// finer detail but take longer to settle after a reset. Eight is what every
+// path has always run, and what NVIDIA and AMD give as the count when the
+// render size is the output's; temporalJitterPhaseCount below is their rule
+// for a render smaller than the output.
 constexpr uint32_t kTemporalJitterCount = 8;
+
+// The most phases any path runs. NVIDIA's rule gives 72 at 3x, the largest
+// upscale ratio either vendor serves (ultra performance); this leaves room
+// above that and no more, so a size that is wrong for some reason cannot ask
+// for a sequence that never repeats in practice.
+constexpr uint32_t kTemporalJitterCountMax = 128;
+
+// How many phases a path whose upscaler renders `renderW x renderH` and
+// resolves to `outW x outH` runs through before the sequence repeats --
+// NVIDIA's DLSS guidance gives 8 x (output / render)^2, and AMD's
+// ffxFsr3UpscalerGetJitterPhaseCount computes the same expression (cut to an
+// integer, where this rounds it up), so the upscaler sees enough sub-pixel
+// samples of each output pixel: 8 at 1x, 18 at 1.5x, 32 at 2x, 72 at 3x. The ratio's
+// square is taken as the ratio of the two AREAS, which is the square of the
+// per-axis ratio whenever the two axes scale alike (every size EDVR has met)
+// and needs no square root or float rounding when they do not: the count is
+// the exact integer ceiling. Never fewer than eight (a render at or above the
+// output keeps the sequence every path ran before this existed) and never
+// more than kTemporalJitterCountMax; a size of zero says nothing and gives
+// eight.
+// Only the paths whose experimental.temporal_aa_jitter_follows_upscale is on
+// ask (native_temporal.cpp, flat_runtime.cpp); with the key off they keep
+// kTemporalJitterCount.
+inline uint32_t temporalJitterPhaseCount(uint32_t renderW, uint32_t renderH,
+                                         uint32_t outW, uint32_t outH) {
+    if (!renderW || !renderH || !outW || !outH) return kTemporalJitterCount;
+    const uint64_t render = static_cast<uint64_t>(renderW) * renderH;
+    const uint64_t out = static_cast<uint64_t>(outW) * outH;
+    if (out <= render) return kTemporalJitterCount;
+    const uint64_t phases = (8u * out + render - 1u) / render;
+    return phases > kTemporalJitterCountMax ? kTemporalJitterCountMax
+                                            : static_cast<uint32_t>(phases);
+}
 
 // The radical inverse of i (i >= 1) in `base`: the Halton sequence's
 // members, in [0, 1).
@@ -86,11 +122,19 @@ inline float temporalHalton(uint32_t i, uint32_t base) {
     return r;
 }
 
-// Frame n's sub-pixel offset, in render pixels, in [-0.5, 0.5).
-inline void temporalJitter(uint32_t n, float* jx, float* jy) {
-    const uint32_t i = (n % kTemporalJitterCount) + 1;
+// Frame n's sub-pixel offset, in render pixels, in [-0.5, 0.5), when the
+// sequence runs `count` phases before it repeats. A count of zero reads as
+// the fixed eight.
+inline void temporalJitterPhase(uint32_t n, uint32_t count, float* jx, float* jy) {
+    const uint32_t i = (n % (count ? count : kTemporalJitterCount)) + 1;
     *jx = temporalHalton(i, 2) - 0.5f;
     *jy = temporalHalton(i, 3) - 0.5f;
+}
+
+// Frame n's sub-pixel offset through the fixed eight phases, in render
+// pixels, in [-0.5, 0.5): exactly temporalJitterPhase(n, kTemporalJitterCount).
+inline void temporalJitter(uint32_t n, float* jx, float* jy) {
+    temporalJitterPhase(n, kTemporalJitterCount, jx, jy);
 }
 
 // A jitter of (jx, jy) pixels as the shift of every tangent: l and r move

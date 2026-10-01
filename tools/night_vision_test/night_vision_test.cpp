@@ -309,8 +309,23 @@ void independentTest(){
     check(nightVisionMatches('X',240,1) && state.shader[2],"standard pulse fix survives a failed experimental variant");
     r.clean();testOn=true;testPulse=true;
 }
+// The draw gate (draw_gate.h) asks nightVisionWantsDraws once a frame, and nightVisionMatches sits below that gate in
+// vscreen.cpp's beginPanelOverride: a fix the gate does not know about never sees a draw once every other subscriber
+// is off. Pin the answer for each combination of the two switches nightVisionConfigure reads, and against what the
+// matcher itself would do (hashes match, nothing failed): the gate may stay open for a fix that declines, but must
+// never be shut for one that would act. No rig covers drawGateSubscribed itself; this is the predicate's half.
+void gateTest(){
+    nightVisionShutdown();
+    for(int i=0;i<4;++i){
+        testOn=(i&1)!=0;testPulse=(i&2)!=0;nightVisionConfigure(Config::get());
+        const bool acts=testOn||testPulse;
+        check(nightVisionWantsDraws()==acts,"draw gate: night vision wants draws exactly when realistic or pulse stability is on");
+        check(nightVisionMatches('X',240,1)==acts,"draw gate: a fix that can match a draw is one that wanted draws");
+    }
+    testOn=true;testPulse=true;nightVisionConfigure(Config::get());
+}
 int main(int argc,char** argv){
     if(argc==3 && !strcmp(argv[2],"--hardware")){testDriver=D3D_DRIVER_TYPE_HARDWARE;--argc;}
     if(argc!=2||strcmp(argv[1],"--self-test")){std::puts("Usage: night_vision_test --self-test [--hardware]");return 2;}
-    test(true);test(false);geometryTest();brightnessTest();independentTest();std::printf("PASS: night vision (%u checks)\n",checks);
+    gateTest();test(true);test(false);geometryTest();brightnessTest();independentTest();std::printf("PASS: night vision (%u checks)\n",checks);
 }

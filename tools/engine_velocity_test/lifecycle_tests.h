@@ -1262,8 +1262,25 @@ inline void run(const Harness& h) {
     g.pass(1);
     g.endFrame(true);
     line = lastLine(joined, mark);
-    h.check(number(line, ", skipped ") >= 1, "P3: the setter a source-only visit would have repeated is skipped, counted");
-    h.check(number(line, "shader setters issued ") >= 2, "P3: each eye-frame's first substitution still sets it");
+    // The draw side's CPU and driver-call figures are a line of their own (the 2026-09-29 motion-CPU
+    // review, C5): they were the tail of the movers line, past the 1,160 characters a log line keeps.
+    const std::string drawSide = lastLine("engine motion: draw side over ", mark);
+    h.check(!drawSide.empty(), "C5: the draw side prints its own line");
+    h.check(number(drawSide, ", skipped ") >= 1, "P3: the setter a source-only visit would have repeated is skipped, counted");
+    h.check(number(drawSide, "shader setters issued ") >= 2, "P3: each eye-frame's first substitution still sets it");
+    h.check(number(drawSide, "draw hook slow half ") >= 1 && drawSide.find("us each, ~") != std::string::npos &&
+            drawSide.find("ms/frame on the caller thread (plus ") != std::string::npos && number(drawSide, "restores ") != ~0ull,
+            "C5: the slow half's calls, cost per call and per frame, lock-free looks and restores are on it");
+    h.check(number(drawSide, "D3D context calls the draw wrapper made ") >= 10 &&
+            drawSide.find(" a frame.") != std::string::npos,
+            "C5: the D3D context calls the wrapper made are counted and printed with their per-frame rate");
+    h.check(!line.empty() && line.find("draw hook slow half") == std::string::npos &&
+            line.find("shader setters") == std::string::npos && line.find("lock-free") == std::string::npos,
+            "C5: the movers line no longer carries that tail");
+    // (The movers line is still about 1,195 characters with small numbers, some 35 over what a log line
+    // keeps, so its last figure -- "no previous scene constants" -- is cut in a real log. Splitting the
+    // view refusals onto a line of their own is a separate change; C5 moved only the CPU figures.)
+    h.check(!drawSide.empty() && drawSide.size() < 400, "C5: the draw side's own line is short, far under what a log line keeps");
 
     // P4 (item 4, measure only): the snapshot copies counted, with the pool's
     // capacity and the view's exposed records.
@@ -1400,6 +1417,25 @@ inline void run(const Harness& h) {
         h.check(number(summary, "declined state ") == 0 && number(summary, "resource ") == 0 &&
                 number(summary, "shader ") == 0, "flat overlay lifecycle: no guarded path fallback");
         edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
+    }
+    // The VR world route's two reads of the on-foot naming (vr_world_route.cpp, design doc section 82): whether a depth is the
+    // source depth named in THIS present frame, and the named camera's rows 270..275 as the watch saw them written.
+    {
+        g.beginFrame(); g.writeScene(g.sceneA.Get(), g.rows[0]);
+        edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+        float camera[6][4]{};
+        h.check(edvr::engineVelocitySourceIsNamed(g.sourceDepth.Get()), "route reads: the depth named in this frame is named");
+        h.check(edvr::engineVelocitySourceCameraRows(camera) &&
+                    std::memcmp(camera, g.rows[0].data() + 270 * 4, sizeof(camera)) == 0,
+                "route reads: the named camera's rows 270..275 are the ones the game wrote to its scene constants");
+        h.check(!edvr::engineVelocitySourceIsNamed(g.depth[0].Get()) && !edvr::engineVelocitySourceIsNamed(nullptr),
+                "route reads: another depth, or none, is not the named one");
+        g.endFrame();
+        g.beginFrame();
+        float unnamed[6][4]{};
+        h.check(!edvr::engineVelocitySourceIsNamed(g.sourceDepth.Get()) && !edvr::engineVelocitySourceCameraRows(unnamed),
+                "route reads: a present frame in which nothing named the source answers neither (the naming is per frame)");
+        g.endFrame();
     }
     const unsigned detachesBefore = lifecycle_fake::g_emitDetaches;
     edvr::engineVelocityShutdown();

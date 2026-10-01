@@ -16,6 +16,12 @@
     from the draw ledger, not individually confirmed).
   - Target markers on a target inside 10 m: the holo material draws them
     at the target, so the cockpit radius stops excluding them there.
+- **Near-light pass inputs (2026-09-30, BUILT, NOT FLOWN):** the near-light
+  compute pass ran before any output-merger clear, so D3D read its t2 (game
+  RT0) or t3 (submitted image) as NULL whenever the game left either bound.
+  No counter could say; the near-light mean shows t3 sighted on average
+  only. Now the stage is cleared when held, and the census line ends with
+  per-eye `near-light inputs` counts: `## Near-light inputs, 2026-09-30`.
 - **Keys:** `advanced.temporal_aa_hologram_depth` (default on), with
   `advanced.temporal_aa_hologram_families`, `_floor` and `_share`, all
   live. The pass runs inside `fix.temporal_aa`'s interface depth
@@ -156,6 +162,12 @@ cockpit list, never this one.
   (R11G11B10_FLOAT) before tonemapping, so the contribution is about
   3.6x smaller than the displayed pixel. The test passed 2% of the
   over-sky pixels that cleared the floor (eye_155832).
+- The near-light pass reading a NULL display (t3) on BOTH eyes in play:
+  the near-light blocks/eye-frame mean was above 0 in every tick with
+  stamped pixels above 0 (76 ticks, 31 logs, 20260925_103225 to
+  20260928_160518), and a NULL display empties the map (nothing clears the
+  floor). The mean mixes the eyes, so one blind eye stays open
+  (`## Near-light inputs, 2026-09-30`).
 
 ## Evidence, 2026-09-24
 
@@ -542,3 +554,67 @@ too, and crisp in the pass-off dump 115037.
   - The resolve draw sets its own viewport and cull state and goes past
     EDVR's hooks (`vScreen*Raw`). The classifier accepts a draw with no
     depth buffer bound.
+
+## Near-light inputs, 2026-09-30 (BUILT, NOT FLOWN)
+
+The near-light compute pass (`uiDepthHologramResolve`) sets t2, a view over
+the game's RT0, and t3, the display view, and dispatches at Submit. Nothing
+cleared the output merger before it; only the resolve's pixel-shader draw
+after it does. D3D sets a shader view over a resource that is still bound
+as an output to NULL without a word (WARP and an RTX 5090 both read NULL). A
+NULL t2 makes `Target.Load` 0, so the share test always passes. A NULL t3
+makes the display 0, so nothing clears the floor and the map comes out empty.
+
+What the counters already kept could not say. `share test skipped` and
+`floor on contribution` are CPU flags (`haveTarget`, `haveDisplay`); they
+read 0 in every flight and would read 0 blind. The only evidence is the
+near-light census. In the 76 ticks with stamped pixels above 0 (31 logs,
+20260925_103225 to 20260928_160518, rc.1-19 to rc.3-56) the mean was above 0
+every time, and a NULL t3 reads 0 blocks, so t3 was seen on average. The
+mean mixes both eyes, so one blind eye is not excluded. Builds from
+20260928_164641 on flew with diagnostics off and kept no census. The
+submitted texture is viewed directly (the log has no "copied out first"
+note), so t3 was a real candidate. t2 has no evidence. The game's own
+tonemap samples RT0, so RT0 must be unbound by then; a still-bound RT0 at
+Submit would need a later re-bind (inference, not measured).
+
+What is left bound at Submit is the last eye pass's state. The draw census
+looks like both eyes rendered pass by pass in lockstep (draws #1 and #3 of
+frame 0 in 20260930_111905 are one draw on two targets), so the state at
+both Submits may be the last-rendered eye's final pass, and the eyes may
+differ.
+
+Hypotheses, and the reading that separates them (the census line's last
+sentence, `near-light inputs (eye 0 / eye 1)`, and the per-eye `near-light
+pass: the output merger holds ...` notes):
+- H1, RT0 still bound: `held the game's RT0` above 0 (before the change,
+  `null t2` the same).
+- H2, the submitted image still bound: `held ... the submitted image` above
+  0, on one eye or both.
+- H3, nothing bound: dispatched above 0, both holds 0, null 0. The pass was
+  never blind and the clear is inert.
+- H4, another NULL cause (an output-merger UAV, say): null above 0 with
+  held 0.
+- Not covered: RT0 holding something other than the scene's HDR at Submit.
+  The 2026-09-24 dump measured its content (HDR luma p50 0.078 over sky), so
+  it held the scene then.
+
+The change, in `ui_depth.cpp`: before the dispatch the pass reads the output
+merger and, only when it holds t2's or t3's resource, clears it for the
+dispatch and puts it back. Every other frame is untouched. It counts per eye
+what it saw, reads the views back from the context after setting them, and
+notes each eye's output merger (what is bound, with sizes and formats) the
+first time each class is seen: nothing bound, bound with no hold, RT0 held,
+the image held, both (five notes an eye at most, so flips while loading
+cannot use them up before a hold shows). The rig
+(`hologram_depth_test`) holds RTV0 or slot 1 on the target, the image, both
+and neither, for eye 0 and eye 1. With the clear removed those cases fail on
+WARP and the control passes, and `CSGetShaderResources` reads back the
+runtime's forced NULL there, so the `null` counters work.
+
+Next flight (Frontier, the log's build line naming this commit): a cockpit
+with holograms in view, both eyes, a minute or more. `resolved eye-frames`
+first: near 0 with `listed draws` above 0 means the ui layer's crisp take
+owns the holograms and the pass did not run (fly with `fix.ui_quality` off).
+Then `python tools\edvr_log.py --target frontier --expect-build HEAD --grep
+"near-light"`.

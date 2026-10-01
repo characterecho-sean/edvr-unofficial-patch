@@ -66,7 +66,8 @@ struct ID3D11PixelShader;
 struct ID3D11Texture2D;
 
 namespace edvr {
-// Successful CreatePS hook only: two exact originals, no disk/HLSL input.
+// Successful CreatePS hook only: three exact originals (the two hologram
+// sphere programs and the frosted base, ui_holo_remap.h), no disk/HLSL input.
 // The render-owner cache prepares their restricted DXBC remap before a take.
 void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
                            const void* bytes, size_t count, bool linked);
@@ -81,6 +82,10 @@ extern bool g_uiLayerRedirecting;
 extern bool g_uiLayerIssueBlocked;
 extern bool g_uiLayerCrispOn;
 extern bool g_uiLayerCrispPending;
+extern bool g_uiLayerWorldReissue;
+extern bool g_uiLayerMapsOn;
+extern uint64_t g_uiLayerGateFrame;
+extern uint64_t g_uiLayerNamedAt;
 }  // namespace detail
 
 // The draw path's one gate: fix.ui_quality is on, a temporal mode is on, and
@@ -191,6 +196,95 @@ inline bool uiLayerCrispPending() { return detail::g_uiLayerCrispPending; }
 bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx);
 void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx);
 
+// ---- the VR on-foot world route (vr_world_route.h; docs/design-flat-temporal-aa-2026-09-23.md, section 82) ----
+//
+// On a frame the route owns the world (it resolved the world once, at the tone, and the eye shift is off), the 2D
+// screen's composite is not TAKEN by the layer: the game's own draw lands in its eye image as it always did, which
+// the game's post pass copies on and which a refused re-issue leaves whole for the eye route. The layer draws it a
+// SECOND time, after the game's draw, into the eye's layer -- the game's own shader, opaque, from the route's mipped
+// copy of the resolved screen through a trilinear sampler like the game's -- and the door then runs layer-only for
+// that eye (native_temporal.cpp, native_sharpen.cpp): the layer's opaque screen over a black frame IS the eye.
+// With fix.panel_curvature above 0 the game's draw is the curve substitution's strip (panel_curve.h) and the second draw is that
+// strip too: vscreen.cpp issues panelCurveReissue between Begin and End, the same helper that bound the strip for the game's draw,
+// so the layer's bend and placement are the game's (the plan accepts a substituted draw as it does a flat one).
+// With experimental.temporal_aa_on_foot_world off none of this ever happens (the route never owns a frame): the
+// decision, the draws, the jitter and the door are what they were.
+//
+// The on-foot world-screen gate the layer computes at its frame boundary (the journal's on-foot reading or the
+// screen's own busy depth: the 2D screen shows the world). The gate only runs while the layer is live, so the
+// answer is stale otherwise -- read uiLayerLiveForWorldRoute beside it. Render thread.
+bool uiLayerWorldScreenHeld();
+// The layer is live and has not stood down: exactly the condition under which the gate above is computed
+// (fix.ui_quality on, a temporal mode on, the jitter switches as shipped, not stood down). A route must not run
+// with the layer off. uiLayerNotLiveReason is the one line saying why not, nullptr when it is live.
+bool uiLayerLiveForWorldRoute();
+const char* uiLayerNotLiveReason();
+
+// One load, for vscreen.cpp's draw path: the 2D screen composite just decided is the route's to RE-ISSUE. Set by
+// uiLayerDecide (which then returns false: the draw is not taken), cleared by the re-issue, by
+// uiLayerWorldReissueAbandon and at the frame boundary. While it is set the tail of the game's draw skips the
+// per-eye screen-motion reissues the layer will make unnecessary (the recognition still runs).
+inline bool uiLayerWorldReissuePending() { return detail::g_uiLayerWorldReissue; }
+// Right after the game's own issue of that draw: bind the eye's layer (cleared at the first draw of the frame as
+// ever), the viewport and scissor through the map with the jitter cancelled, the opaque blend conversion, no depth
+// target, the mipped screen at PS slot 0 and a trilinear sampler at PS slot 0 -- every other binding stays the
+// game's. False with the game's state untouched on any refusal (counted by reason; the first eight distinct
+// reasons are logged once each), and the eye route then serves the eye. The caller issues the game's draw
+// once more between Begin and End, exactly as the crisp tonemap re-issue does. All of it runs under
+// VrWorldInternalScope, so vscreen's hooks step aside.
+bool uiLayerWorldReissueBegin(ID3D11DeviceContext* ctx);
+// Puts every binding Begin changed back and, when the re-issue landed, tells the route which eye it took
+// (vrWorldRouteNoteEyeTaken). Safe without a Begin. landed false (the curved screen's strip draw faulted after Begin: panel_curve.h
+// panelCurveReissue returned false): the bindings go back, the eye is NOT taken, and the refusal is counted as a fault -- the eye
+// route serves the eye. Every other caller issues a draw that cannot fail this way and passes nothing.
+void uiLayerWorldReissueEnd(ID3D11DeviceContext* ctx, bool landed = true);
+// The decided draw went no further (the game's draw was swallowed or never issued): forget the pending re-issue.
+void uiLayerWorldReissueAbandon();
+// The door's preflight, from treat() before it commits an eye to layer-only: would the composite certainly run
+// over `frame` (the black frame the door is about to hand on) for this eye and sequence? 0 when it would; else a
+// ui_layer_math.h UiWorldDoorGap as an int, and the door leaves the eye to the eye route in the same call.
+int uiLayerWorldDoorGap(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame);
+// The route's counters for the current 30 s window (the same numbers the gates and the route's lines print), so a
+// rig or the route's own census can read them: the 2D screen draws asked of the decision and what became of them
+// (screenDecided indexes ui_layer_math.h's UiLayerDecision; a draw the route's mode let through is NOT in
+// [kRedirect] -- it is `reissued` once the re-issue ran), the draws the game left in an eye image after its screen
+// was re-issued (lost while the route owns that eye), and the route's own refusals (refused indexes UiWorldRefuse).
+struct UiLayerWorldStats {
+    uint64_t screenAsked = 0;
+    uint64_t screenDecided[16] = {};
+    uint64_t reissued = 0;
+    uint64_t lostDraws = 0;
+    uint64_t refused[16] = {};
+};
+UiLayerWorldStats uiLayerWorldStats();
+
+// ---- the on-foot maps gate (experimental.on_foot_maps_sharp; ui_maps_math.h; docs/design-world-camera-motion-2026-09-30.md) ----
+//
+// With the key on, the layer's world-screen gate is decided by the world camera alone: the 2D screen is the world only while
+// a draw that reads the world camera names its source (screen_motion.cpp), 2 frames in a row to hold, 3 to release. A map or a
+// menu on foot names nothing, so the layer takes its composite -- sharp, after the upscaler -- and an eye that holds nothing
+// else skips the upscaler (the layer-only door below). With the key off none of this is ever true or ever called.
+//
+// The key is on, the layer and screen motion are live, so the naming decides the gate (latched at the frame boundary, so every
+// draw of a frame sees one answer). One load.
+inline bool uiLayerMapsOn() { return detail::g_uiLayerMapsOn; }
+// screen_motion.cpp, once, at the draw that names the screen's source for the frame in flight (the world camera's terrain or
+// scene draw, or the pool-family fallback): the gate judges the frame that ends at the next boundary by it. Attributed to the
+// layer's own frame count, so it is right whichever boundary runs first. Two loads and a store.
+inline void uiLayerNoteScreenNamed() { detail::g_uiLayerNamedAt = detail::g_uiLayerGateFrame; }
+// Did a draw name the screen's source in the frame that has just ended? Valid at any boundary that runs AFTER the layer's (the route's, the
+// census's, screen motion's): the layer's own boundary has counted the frame by then, whether or not the layer is live. Independent of every
+// key -- screen_motion.cpp tells the layer whenever it names a source -- so the VR camera census reads the naming flips with it.
+inline bool uiLayerLastFrameNamed() { return detail::g_uiLayerGateFrame != 0 && detail::g_uiLayerNamedAt + 1 == detail::g_uiLayerGateFrame; }
+// vscreen.cpp, at a 2D screen composite the layer took while the maps gate is on: screen motion's recognition of that composite
+// matched (it is what keeps naming the world's source for the next frames; a take swallows the per-eye call that used to run it).
+void uiLayerMapsNoteRecognised();
+// The door runs layer-only for this eye in this sequence: the layer holds the eye's WHOLE picture. Either the VR world route's
+// re-issued world (vrWorldRouteDoorLayerOnly) or, with the maps gate on, a 2D screen the layer TOOK in this sequence while
+// nothing else was drawn into an eye-sized target (ui_maps_math.h uiMapsDoor). Asked by the temporal door and again by the
+// sharpen door for the same eye and sequence, with the same answer.
+bool uiLayerDoorLayerOnly(uint32_t eye, uint64_t sequence);
+
 // True between a successful uiLayerBegin and its End (owner context only):
 // the passes that ride the game's own draw -- the screen's motion and UI
 // mask, the mesh motion (screen_motion.cpp, vscreen.cpp) -- stand aside for
@@ -208,6 +302,12 @@ inline bool uiLayerRedirecting() { return detail::g_uiLayerRedirecting; }
 // bracket it with uiLayerBegin/uiLayerEnd like any other decided draw. A
 // draw that only READS the target (a full-screen pass: count <= 6 vertices)
 // is left alone and never taken; it no longer sees the UI in what it reads.
+// One exception to "left alone": in a frame the crisp re-issue opened, the
+// eye's target is the tonemap's output, and Elite's post pass reads it and
+// draws into another eye-sized 8-bit target where every interface draw lands;
+// that read carries the eye's target there (uiLayerFollowReader, once an
+// eye-frame, before any UI draw is taken), so the interface draws are writes
+// into it. The pass itself is still left in the frame.
 // verdictForwards and substituted are the same facts uiLayerDecide takes for
 // a real UI family (vscreen.cpp's forwardWithVerdict already has them to
 // hand). Every case is counted and each shader pair named once.

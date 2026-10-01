@@ -9,7 +9,12 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/proxy.h"
+#include "../common/runtime_profile.h"
+#include "../common/temporal_mode.h"
 #include "../common/vscreen_auto_state.h"
+#include "../common/vscreen_fit.h"
+#include "ui_layer_math.h"
+#include "vr_runtime.h"
 
 namespace edvr {
 namespace {
@@ -311,7 +316,16 @@ void revertVScreenModeResolution() {
     g_count = 0;
 }
 
-// --- "auto": 125% of what the runtime actually rendered per eye last time ---
+// --- "auto": what each eye actually shows, from what the runtime rendered last time ---
+//
+// TWO RULES, one reason to choose (src/common/vscreen_fit.h says all of it; docs/design-
+// flat-temporal-aa-2026-09-23.md, section 82, the "vscreen auto-fit" entry): when the VR
+// world route will run, auto is the on-foot screen's own footprint in eye pixels (the
+// instrument in vscreen_footprint.cpp measures it, the state file keeps it, the pure
+// half does the arithmetic); otherwise it is today's 125% of the eye width, unchanged.
+// The decision is made from the configuration this launch runs with plus two files of
+// the last session's, and every caller (the panel patch, the intro movie's target, the
+// menu's hint) asks this one function.
 //
 // WHY LAST SESSION'S NUMBER, NOT THIS ONE'S. The panel patch above has to run
 // at device creation, before the game builds its render chain -- that is the
@@ -332,25 +346,55 @@ void revertVScreenModeResolution() {
 // as before) until one session with VR running has completed.
 namespace {
 
-// 125%: modest headroom over the runtime's own per-eye width, not a match-or-
-// double swing -- the panel is a single flat (mono) texture, cheap to raise
-// relative to a stereo pair, but there is no reason to chase the eye width by
-// a large multiple either.
-constexpr double kAutoWidthMultiplier = 1.25;
+// The route's conditions as the configuration states them -- the same three the world
+// route needs at run time, read from the ini the way each owner reads it, because at
+// launch (and in the menu, for the next one) no owner has run yet:
+//   * experimental.temporal_aa_on_foot_world: vr_world_route.cpp's boundary, default off
+//   * (the curved screen is not a condition: the route re-issues a curved screen through
+//     the same strip the game's draw is substituted with, panel_curve.h panelCurveReissue)
+//   * the UI layer: ui_layer.cpp's uiLayerConfigure -- fix.ui_quality (default 100), a
+//     temporal mode on (fix.temporal_aa, default off) and the jitter switches as shipped;
+//     ui_layer_math.h's uiLayerNotLiveReasonFor words the failure ("stood down" is a fact
+//     of a running session, not of a launch, so it is false here)
+//   * the runtime: the module list, which at device creation usually says "none loaded
+//     yet" (the device is made about a second before openvr_api.dll is called). That is
+//     undecided, not a failure: the eye width this rule starts from is only ever written
+//     by EDVR's own OpenXR runtime (native_render_settings.cpp), so a launch that has one
+//     on record has run on it. Elite's native Oculus back end loads LibOVRRT first and
+//     is refused here.
+// tools\vscreen_fit_test pins every literal below against its owner's source.
+vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg) {
+    vscreenfit::RouteFacts f;
+    f.flatProfile = runtimeFlatProfile();
+    f.keyAuto = vscreenfit::keyTextIsAuto(
+        cfg.getString("experimental.temporal_aa_on_foot_world", "off").c_str());
 
-// Nearest multiple of 16, so width * 9 / 16 is an exact integer -- an honestly
-// 16:9 pair rather than one a fraction of a pixel off, which would trip the
-// "not 16:9" warning applyVScreenModeResolution already prints above.
-uint32_t roundTo16(double value) {
-    return static_cast<uint32_t>((value / 16.0) + 0.5) * 16;
+    const std::string quality = cfg.getString("fix.ui_quality", "100");
+    bool recognized = true;
+    const float target = uiQualityParse(quality.c_str(), &recognized, nullptr);
+    const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+    const bool jitterAsShipped =
+        _stricmp(cfg.getString("advanced.temporal_aa_jitter_sign", "as_is").c_str(), "as_is") == 0 &&
+        !(cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f) >= 0.5f);
+    f.layerWhy = uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false);
+
+    switch (vrRuntime()) {
+        case VrRuntime::NativeOpenXR:   f.runtime = vscreenfit::RuntimeKind::EdvrOpenXr; break;
+        case VrRuntime::OculusNative:   f.runtime = vscreenfit::RuntimeKind::OculusNative; break;
+        case VrRuntime::ForeignOpenvr:  f.runtime = vscreenfit::RuntimeKind::ForeignOpenvr; break;
+        case VrRuntime::NoneLoaded:
+        default:                        f.runtime = vscreenfit::RuntimeKind::NotLoadedYet; break;
+    }
+    return f;
 }
 
 }  // namespace
 
 void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,
-                                    bool announce) {
+                                    bool announce, vscreenfit::Decision* outDecision) {
     if (outWidth) *outWidth = 0;
     if (outHeight) *outHeight = 0;
+    if (outDecision) *outDecision = vscreenfit::Decision{};
     const std::string widthCfg = cfg.getString("fix.vscreen_res_width", "auto");
     uint32_t w = 0;
     if (_stricmp(widthCfg.c_str(), "auto") == 0) {
@@ -366,12 +410,23 @@ void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* o
             }
             return;
         }
-        w = roundTo16(static_cast<double>(eyeWidth) * kAutoWidthMultiplier);
+        vscreenfit::Inputs in;
+        in.eyeWidth = eyeWidth;
+        in.distance = cfg.getFloat("fix.panel_distance", 1.0f);
+        vscreenfit::Record stored;
+        if (lastKnownPanelFootprint(cfg.logDir(), &stored)) {
+            in.haveFootprint = true;
+            in.fractionAtUnit = stored.fractionAtUnit;
+            in.footprintSamples = stored.samples;
+        }
+        in.route = routeFactsFromConfig(cfg);
+        const vscreenfit::Decision d = vscreenfit::decide(in);
+        if (outDecision) *outDecision = d;
+        w = d.width;
         if (announce) {
-            Log::get().note(
-                "vScreen resolution: auto = %u wide (%.0f%% of the %u wide the runtime "
-                "last rendered per eye).",
-                w, kAutoWidthMultiplier * 100.0, eyeWidth);
+            char line[1100];
+            vscreenfit::formatRuleLine(line, sizeof(line), d, eyeWidth);
+            Log::get().note("%s", line);
         }
     } else {
         w = static_cast<uint32_t>(atoi(widthCfg.c_str()));
@@ -379,6 +434,12 @@ void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* o
     }
     if (w < kMinWidth) w = kMinWidth;
     if (w > 8192) w = 8192;
+    if (announce && _stricmp(widthCfg.c_str(), "auto") != 0) {
+        Log::get().note(
+            "vScreen resolution: explicit %u wide (fix.vscreen_res_width), %ux%u at 16:9, "
+            "used exactly: auto's rule is not in play.",
+            w, w, (w * 9 + 8) / 16);
+    }
     if (outWidth) *outWidth = w;
     if (outHeight) *outHeight = (w * 9 + 8) / 16;
 }

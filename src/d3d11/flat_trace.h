@@ -23,13 +23,31 @@ constexpr uint32_t kFlatTraceEventMarkUncertain = 3;
 // flat_runtime.cpp); each one advances the counter, so it must interleave
 // in the trace or every later draw's q is low by the capture count.
 constexpr uint32_t kFlatTraceEventCameraCapture = 4;
+// EDVRFTR4 (the HDR route, section 81): where the route resolved. key.color = the HDR target, key.vs/ps the
+// consumer's pair, key.sequence the consumer's place in the prefix (the model's q), key.count the route's
+// verdict (a FlatMonoReason value). A replay skips it: the reducer never sees it. The rig reads it to pin what
+// the live run decided against what the pure detector decides over the same draws.
+constexpr uint32_t kFlatTraceEventResolve = 5;
 
+// The EDVRFTR3 event, byte for byte: the corpus files are still this layout and are read through it.
+struct FlatTraceEventV3 {
+    FlatContractObservation key{};   // camera and projection[].bytes are null
+    unsigned char camera[kFlatCameraBytes]{};
+    uint32_t instances = 1;
+    uint32_t flags = 0;
+    uint32_t kind = kFlatTraceEventDraw;
+};
+// EDVRFTR4 adds the four pixel-shader resources a candidate consumer of the HDR target binds (t0..t3), which the
+// contract observation's own srv slots cannot carry: they are filled for tone and copy draws only, and filling them
+// for every draw would change which draws coalesce into a record. `hdrSrv` is valid only with
+// kFlatTraceHdrSrvKnown; an EDVRFTR3 event has none and the trigger rule then applies without its SRV test.
 struct FlatTraceEvent {
     FlatContractObservation key{};   // camera and projection[].bytes are null
     unsigned char camera[kFlatCameraBytes]{};
     uint32_t instances = 1;
     uint32_t flags = 0;
     uint32_t kind = kFlatTraceEventDraw;
+    const void* hdrSrv[4] = {};
 };
 constexpr uint32_t kFlatTraceHasCamera = 1u << 0;
 constexpr uint32_t kFlatTraceSupported = 1u << 1;
@@ -39,6 +57,8 @@ constexpr uint32_t kFlatTraceImageSourceVerified = 1u << 4;
 // The draw ctor observed foreign (non-owner) work this frame; the replay sets
 // prefix.uncertain before the reducer sees the draw, as the ctor does.
 constexpr uint32_t kFlatTraceForeignWork = 1u << 5;
+// The event's hdrSrv slots were read (the runtime resolved t0..t3 for this draw).
+constexpr uint32_t kFlatTraceHdrSrvKnown = 1u << 6;
 
 inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool foreignWork) {
     FlatTraceEvent e{};
@@ -64,6 +84,20 @@ inline FlatTraceEvent flatTraceEventMarker(uint32_t kind, const void* resource) 
     e.key.color = resource;
     return e;
 }
+// The HDR route's resolve marker (kFlatTraceEventResolve).
+inline FlatTraceEvent flatTraceEventResolve(const void* hdr, uint64_t vs, uint64_t ps, uint32_t sequence,
+                                            uint32_t reason) {
+    FlatTraceEvent e = flatTraceEventMarker(kFlatTraceEventResolve, hdr);
+    e.key.vs = vs; e.key.ps = ps; e.key.sequence = sequence; e.key.count = reason;
+    return e;
+}
+// The pixel-shader resources a candidate consumer binds: the runtime reads them only for the draws the trigger
+// detector asked about (flatHdrCouldConsume), so most events carry none. Null srv means "not read".
+inline void flatTraceEventSetSrv(FlatTraceEvent& e, const void* const* srv) {
+    if (!srv) return;
+    for (uint32_t i = 0; i < 4; ++i) e.hdrSrv[i] = srv[i];
+    e.flags |= kFlatTraceHdrSrvKnown;
+}
 inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
     FlatRuntimeDraw d{};
     d.key = e.key;
@@ -78,7 +112,7 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
 }
 
 struct FlatTraceHeader {
-    char magic[8] = {'E','D','V','R','F','T','R','3'};
+    char magic[8] = {'E','D','V','R','F','T','R','4'};
     uint32_t frameCount = 0;
     uint32_t reserved = 0;
 };
@@ -113,17 +147,28 @@ inline void flatTraceBeginFrame(FlatTraceRing& r, uint64_t frame, const void* ou
     h.frame = frame; h.output = output; h.width = width; h.height = height; h.format = format;
     r.slotUsed[r.slot] = true;
 }
-inline void flatTraceRecord(FlatTraceRing& r, const FlatRuntimeDraw& d, bool foreignWork) {
+inline void flatTraceRecord(FlatTraceRing& r, const FlatRuntimeDraw& d, bool foreignWork,
+                            const void* const* hdrSrv = nullptr) {
     if (!r.slotUsed[r.slot]) return;
     auto& h = r.headers[r.slot];
     if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
-    r.events[r.slot][h.eventCount++] = flatTraceEventFromDraw(d, foreignWork);
+    auto& e = r.events[r.slot][h.eventCount++];
+    e = flatTraceEventFromDraw(d, foreignWork);
+    flatTraceEventSetSrv(e, hdrSrv);
 }
 inline void flatTraceMark(FlatTraceRing& r, uint32_t kind, const void* resource) {
     if (!r.slotUsed[r.slot]) return;
     auto& h = r.headers[r.slot];
     if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
     r.events[r.slot][h.eventCount++] = flatTraceEventMarker(kind, resource);
+}
+// The HDR route's resolve marker, after the trigger draw's own event.
+inline void flatTraceResolve(FlatTraceRing& r, const void* hdr, uint64_t vs, uint64_t ps, uint32_t sequence,
+                             uint32_t reason) {
+    if (!r.slotUsed[r.slot]) return;
+    auto& h = r.headers[r.slot];
+    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
+    r.events[r.slot][h.eventCount++] = flatTraceEventResolve(hdr, vs, ps, sequence, reason);
 }
 inline void flatTraceSeal(FlatTraceRing& r, bool produced, uint64_t contractHash) {
     if (!r.slotUsed[r.slot]) return;
@@ -154,15 +199,26 @@ inline uint32_t flatTraceDump(const FlatTraceRing& r, Write&& write) {
     return bytes;
 }
 
+// An EDVRFTR3 event widened to the current layout: the new fields are zero, which is what "not read" is.
+inline FlatTraceEvent flatTraceEventFromV3(const FlatTraceEventV3& v) {
+    FlatTraceEvent e{};
+    e.key = v.key;
+    std::memcpy(e.camera, v.camera, sizeof(e.camera));
+    e.instances = v.instances; e.flags = v.flags; e.kind = v.kind;
+    return e;
+}
 // Parse one trace document, invoking onFrame(header) then onEvent(event)
-// per event in order. Returns false on any malformed input.
+// per event in order. EDVRFTR3 (the corpus) and EDVRFTR4 (the runtime's dump since the HDR route) are read;
+// an EDVRFTR3 event reaches onEvent widened, with no SRVs. Returns false on any malformed input.
 template <class OnFrame, class OnEvent>
 inline bool flatTraceParse(const unsigned char* data, size_t size,
                            OnFrame&& onFrame, OnEvent&& onEvent) {
     if (!data || size < sizeof(FlatTraceHeader)) return false;
     FlatTraceHeader header{};
     std::memcpy(&header, data, sizeof(header));
-    if (std::memcmp(header.magic, "EDVRFTR3", 8) != 0) return false;
+    const bool v4 = std::memcmp(header.magic, "EDVRFTR4", 8) == 0;
+    if (!v4 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) return false;
+    const size_t eventSize = v4 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
     size_t at = sizeof(FlatTraceHeader);
     for (uint32_t f = 0; f < header.frameCount; ++f) {
         if (size - at < sizeof(FlatTraceFrameHeader)) return false;
@@ -170,13 +226,19 @@ inline bool flatTraceParse(const unsigned char* data, size_t size,
         std::memcpy(&fh, data + at, sizeof(fh));
         at += sizeof(fh);
         if (!fh.eventCount || fh.eventCount > kFlatTraceEventsPerFrame) return false;
-        if (size - at < fh.eventCount * sizeof(FlatTraceEvent)) return false;
+        if (size - at < fh.eventCount * eventSize) return false;
         onFrame(fh);
         for (uint32_t i = 0; i < fh.eventCount; ++i) {
-            FlatTraceEvent e{};
-            std::memcpy(&e, data + at, sizeof(e));
-            at += sizeof(e);
-            onEvent(e);
+            if (v4) {
+                FlatTraceEvent e{};
+                std::memcpy(&e, data + at, sizeof(e));
+                onEvent(e);
+            } else {
+                FlatTraceEventV3 v{};
+                std::memcpy(&v, data + at, sizeof(v));
+                onEvent(flatTraceEventFromV3(v));
+            }
+            at += eventSize;
         }
     }
     return at == size;

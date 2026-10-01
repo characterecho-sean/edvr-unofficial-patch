@@ -16,6 +16,10 @@ struct FlatLivePhase {
     uint32_t warmFrames = 0;
     bool failed = false;
     bool previousAcceptedValid = false;
+    // How many phases the sequence ran through when the last frame began: what
+    // the caller asked beginFrame for, never history -- resetHistory leaves it.
+    // The 5 s lines print it, so a flight reads the count each path used.
+    uint32_t phaseCount = kTemporalJitterCount;
 
     void resetHistory() {
         currentX = currentY = previousX = previousY = 0.0f;
@@ -24,11 +28,17 @@ struct FlatLivePhase {
         renderW_ = renderH_ = 0;
     }
 
+    // `phases` is how many frames the sequence runs before it repeats: the fixed
+    // eight unless the caller follows the upscale ratio (temporalJitterPhaseCount,
+    // experimental.temporal_aa_jitter_follows_upscale). The sequence number keeps
+    // counting through a change of count; the phase is its remainder.
     void beginFrame(bool enabled, bool compatiblePreviousFrame,
-                    uint32_t renderW, uint32_t renderH) {
+                    uint32_t renderW, uint32_t renderH,
+                    uint32_t phases = kTemporalJitterCount) {
         currentX = currentY = 0.0f;
         applied = 0;
         failed = false;
+        phaseCount = phases ? phases : kTemporalJitterCount;
         if (!enabled || !renderW || !renderH) {
             resetHistory();
             return;
@@ -42,7 +52,7 @@ struct FlatLivePhase {
         renderW_ = renderW;
         renderH_ = renderH;
         if (warmFrames >= 2 && previousAcceptedValid) {
-            temporalJitter(phaseSequence++, &currentX, &currentY);
+            temporalJitterPhase(phaseSequence++, phaseCount, &currentX, &currentY);
         }
     }
 

@@ -13,7 +13,15 @@ enum class FlatMonoReason {
     NoTonePass, AmbiguousTonePass, InvalidTonePass, BrokenLineage,
     WrongOrder, MissingCamera, InvalidCamera, NoHdr,
     ConflictingHdr, NoHdrCamera, NoSupportedSource, AmbiguousSource,
-    InvalidSource
+    InvalidSource,
+    // The HDR route's own (flat_hdr_route.h, section 81). Appended, never reordered: a reason's
+    // value is part of the frame-contract hash and the stand-down's published word.
+    NoHdrConsumer, HdrExtent,
+    // The final copy's admission by structure (flat_copy_structure.h, section 83), appended the same way. RenderSize: the
+    // game renders the scene at a size that is not a uniform scale of the output between half and twice (Elite's resolution
+    // is not the screen's shape, or the supersampling takes it out of the band): the measured sizes ride the refusal.
+    // NoScene: a final copy was found and the frame has no scene at all (startup, a loading screen, a 2D menu).
+    RenderSize, NoScene
 };
 inline const char* flatMonoReasonName(FlatMonoReason reason) {
     switch (reason) {
@@ -38,6 +46,10 @@ inline const char* flatMonoReasonName(FlatMonoReason reason) {
     case FlatMonoReason::NoSupportedSource: return "no-supported-motion-source-pair";
     case FlatMonoReason::AmbiguousSource: return "source-camera-or-depth-not-unique";
     case FlatMonoReason::InvalidSource: return "invalid-source-provenance-or-viewport";
+    case FlatMonoReason::NoHdrConsumer: return "no-hdr-consumer";
+    case FlatMonoReason::HdrExtent: return "hdr-route-needs-render-at-least-output";
+    case FlatMonoReason::RenderSize: return "render-size-does-not-fit-output";
+    case FlatMonoReason::NoScene: return "no-3d-scene";
     }
     return "unknown-selector-result";
 }

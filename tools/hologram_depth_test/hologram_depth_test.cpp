@@ -107,8 +107,14 @@ bool temporalPassPlanes(float* nearZ, float* farZ) { *nearZ = .025f; *farZ = 100
 bool depthProbeSceneDepthFormat(uint32_t, uint32_t, int, ID3D11Texture2D** tex, uint32_t* fmt) {
     *tex = testScene; *fmt = DXGI_FORMAT_D32_FLOAT; return testScene != nullptr;
 }
+// Counts the one raw call that unbinds the whole output merger, no views and
+// no depth view: the near-light pass's stage clear around its dispatch. The
+// resolve's own draw keeps its depth view, and restoreOm hands over its saved
+// array, so neither is counted; the near-light cases below read this.
+unsigned g_rawOmFullClears = 0;
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, UINT n,
                                ID3D11RenderTargetView* const* rt, ID3D11DepthStencilView* ds) {
+    if (n == 0 && !rt && !ds) ++g_rawOmFullClears;
     ctx->OMSetRenderTargets(n, rt, ds);
 }
 void vScreenDrawRaw(ID3D11DeviceContext* ctx, UINT vertexCount, UINT startVertex) {
@@ -1390,6 +1396,349 @@ int main() {
         g_holoIsWorldMarker = false;
     }
 
+    // The near-light pass against the game's output merger. At Submit the
+    // game's last eye pass has left its views bound, and D3D11 answers a
+    // shader view over a resource that is still bound as an output by
+    // silently setting that view to NULL: t2 (the game's RT0, the share
+    // test) would read 0, so the share test always passed, and t3 (the
+    // submitted image, the floor test) would read 0, so no pixel cleared the
+    // floor and the map came out empty. The resolve's own pixel-shader draw
+    // clears the stage first and never saw it, which is why no scenario above
+    // can tell a blind dispatch from a sighted one. These can. Every case is
+    // one 8x8 block (any lit pixel lights the whole image's block); the
+    // game's draw adds 0.1 on the left half and nothing on the right; the
+    // submitted image is lit (0.5) on the left and dark (0) on the right.
+    //   Share cases (RT0 held): the target was pre-filled to 0.8, so the 0.1
+    //   is under half of the finished 0.9. A sighted dispatch finds no
+    //   light: the block stays dark and the dark right half stays uncovered
+    //   (all 0). A blind t2 reads the target as 0, the share test passes, the
+    //   block lights, and the right half takes the filler depth.
+    //   Floor cases (submitted image held): the target is black, so the 0.1
+    //   is the whole finished pixel. A sighted dispatch lights the block: the
+    //   left half keeps the element's depth and the right takes the filler.
+    //   A blind t3 reads the image as 0, nothing clears the floor, the map is
+    //   empty, and the right half stays 0.
+    // Each case also checks what the pass counted (g_holoNearLightInputs, the
+    // census line's own figures), that the stage was cleared exactly when an
+    // input was held, that the output merger came back as the game left it
+    // (same views, same slots, same depth view), and what the pass said: one
+    // note per eye the first time each class of output merger is seen (none
+    // bound, bound but neither input held, RT0 held, the image held, both) and
+    // never again for that class, and only a held input earns the sentence
+    // about reading black. A prelude flips eye 0 between the two classes with
+    // nothing held first, to show that noise cannot use the notes up before a
+    // class with a hold shows. The eye-1 cases run the same two holds through
+    // the other eye: its counters move and eye 0's do not, and each eye keeps
+    // its own seen set.
+    {
+        struct SplitDisplay {
+            ComPtr<ID3D11Texture2D> tex;
+            ComPtr<ID3D11ShaderResourceView> srv;
+            ComPtr<ID3D11RenderTargetView> rtv;
+        };
+        // The submitted image's stand-in: R8G8B8A8_UNORM, leftV across x < 4
+        // and rightV across x >= 4, and bindable as a render target so a case
+        // can leave it bound as an output (makeDisplay above is flat, SRV only).
+        auto makeSplitDisplay = [&](float leftV, float rightV) {
+            D3D11_TEXTURE2D_DESC dd{};
+            dd.Width = dd.Height = 8; dd.MipLevels = dd.ArraySize = 1;
+            dd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; dd.SampleDesc.Count = 1;
+            dd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; dd.Usage = D3D11_USAGE_DEFAULT;
+            const BYTE byteLeft = static_cast<BYTE>(leftV * 255.0f + 0.5f);
+            const BYTE byteRight = static_cast<BYTE>(rightV * 255.0f + 0.5f);
+            BYTE pixels[8 * 8 * 4];
+            for (int i = 0; i < 64; ++i) {
+                const BYTE b = (i % 8) < 4 ? byteLeft : byteRight;
+                pixels[i*4] = b; pixels[i*4+1] = b; pixels[i*4+2] = b; pixels[i*4+3] = 255;
+            }
+            const D3D11_SUBRESOURCE_DATA init{pixels, 8 * 4, 0};
+            SplitDisplay made;
+            hr(dev->CreateTexture2D(&dd, &init, &made.tex));
+            hr(dev->CreateShaderResourceView(made.tex.Get(), nullptr, &made.srv));
+            hr(dev->CreateRenderTargetView(made.tex.Get(), nullptr, &made.rtv));
+            return made;
+        };
+        // A depth target of the game's own, never referenced by production,
+        // so the restore check can see the depth view come back too.
+        D3D11_TEXTURE2D_DESC gameDd{};
+        gameDd.Width = gameDd.Height = 8; gameDd.MipLevels = gameDd.ArraySize = 1;
+        gameDd.Format = DXGI_FORMAT_D32_FLOAT; gameDd.SampleDesc.Count = 1; gameDd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        ComPtr<ID3D11Texture2D> gameDepthTex; hr(dev->CreateTexture2D(&gameDd, nullptr, &gameDepthTex));
+        ComPtr<ID3D11DepthStencilView> gameDsv; hr(dev->CreateDepthStencilView(gameDepthTex.Get(), nullptr, &gameDsv));
+
+        // Whether the output merger holds exactly r0 on slot 0, r1 on slot 1,
+        // nothing on the other slots, and dsv.
+        auto omHolds = [&](ID3D11RenderTargetView* r0, ID3D11RenderTargetView* r1, ID3D11DepthStencilView* dsv) {
+            ID3D11RenderTargetView* got[8] = {}; ID3D11DepthStencilView* gotDsv = nullptr;
+            ctx->OMGetRenderTargets(8, got, &gotDsv);
+            bool same = got[0] == r0 && got[1] == r1 && gotDsv == dsv;
+            for (int i = 2; i < 8; ++i) same = same && !got[i];
+            for (auto* v : got) if (v) v->Release();
+            if (gotDsv) gotDsv->Release();
+            return same;
+        };
+        auto sameInputs = [](const HoloNearLightInputs& a, const HoloNearLightInputs& b) {
+            return a.ran == b.ran && a.heldTarget == b.heldTarget && a.heldDisplay == b.heldDisplay &&
+                   a.nullT2 == b.nullT2 && a.nullT3 == b.nullT3;
+        };
+        struct Run {
+            std::vector<float> depth;    // the resolved eye's private depth copy after the resolve
+            HoloNearLightInputs seen;    // what that eye's g_holoNearLightInputs gained over this resolve
+            bool otherEyeQuiet = false;  // the other eye's counters did not move at all
+            unsigned clears = 0;         // the full stage clears this resolve issued
+            bool omBack = false;         // the output merger held exactly what was bound before it
+            std::string note;            // the last log line the resolve wrote, "" when it wrote none
+        };
+        // One eye-frame: the game's element draw into hdrTex (cleared to
+        // targetClear first), classified for `eye`, both listed reissues, then
+        // the game's views bound as given, r0 on slot 0 and r1 on slot 1 when
+        // they are not null (no render target at all when r0 is null), with a
+        // depth view -- which is where Submit finds them -- and the resolve for
+        // that eye.
+        auto nearLightRun = [&](int eye, const char* what, float targetClear, const SplitDisplay& display,
+                                ID3D11RenderTargetView* r0, ID3D11RenderTargetView* r1) {
+            char label[256];
+            g_uiDepth[0].frameBoundary(); g_uiDepth[1].frameBoundary();
+            ctx->ClearDepthStencilView(sceneDsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+            const float base[4] = {targetClear, targetClear, targetClear, 1.0f};
+            const float add[4] = {0.1f, 0.1f, 0.1f, 1.0f}, none[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            drawIntoRtv(hdrRtv.Get(), kNear5m, add, none, blendSrcAlphaOne.Get(), base, true);
+            g_holoEye = eye;   // drawIntoRtv classifies every draw for eye 0
+            listedReissue();
+            ID3D11RenderTargetView* views[2] = {r0, r1};
+            ctx->OMSetRenderTargets(r1 ? 2u : (r0 ? 1u : 0u), views, gameDsv.Get());
+            std::snprintf(label, sizeof(label), "near-light inputs, %s: setup: the output merger holds the views the case bound", what);
+            check(omHolds(r0, r1, gameDsv.Get()), label);
+            const HoloNearLightInputs was[2] = {g_holoNearLightInputs[0], g_holoNearLightInputs[1]};
+            const unsigned clearsWas = g_rawOmFullClears;
+            std::snprintf(label, sizeof(label), "resolve runs (near-light inputs, %s)", what);
+            g_lastLog.clear();
+            check(uiDepthHologramResolve(ctx.Get(), eye, sceneTex.Get(), 8, 8, display.srv.Get()), label);
+            Run run;
+            run.note = g_lastLog;
+            const HoloNearLightInputs& now = g_holoNearLightInputs[eye];
+            run.seen = HoloNearLightInputs{now.ran - was[eye].ran, now.heldTarget - was[eye].heldTarget,
+                                           now.heldDisplay - was[eye].heldDisplay, now.nullT2 - was[eye].nullT2,
+                                           now.nullT3 - was[eye].nullT3};
+            run.otherEyeQuiet = sameInputs(g_holoNearLightInputs[1 - eye], was[1 - eye]);
+            run.clears = g_rawOmFullClears - clearsWas;
+            run.omBack = omHolds(r0, r1, gameDsv.Get());
+            ID3D11ShaderResourceView* depthSrv = nullptr;
+            std::snprintf(label, sizeof(label), "private depth published (near-light inputs, %s)", what);
+            check(uiDepthTemporalDepth(8, 8, eye, sceneTex.Get(), &depthSrv), label);
+            ComPtr<ID3D11Resource> depthRes; depthSrv->GetResource(&depthRes);
+            run.depth = readDepth(dev.Get(), ctx.Get(), depthRes.Get());
+            return run;
+        };
+        // The counters, the stage clear and the output merger: the same
+        // questions for every case, the expected holds being the case's own.
+        auto expectInputs = [&](const Run& run, const char* what, uint32_t heldTarget, uint32_t heldDisplay) {
+            char label[256];
+            auto say = [&](const char* text) {
+                std::snprintf(label, sizeof(label), "near-light inputs, %s: %s", what, text);
+                return label;
+            };
+            check(run.seen.ran == 1, say("the dispatch is counted exactly once"));
+            check(run.seen.heldTarget == heldTarget,
+                  say("the census counts the game's RT0 as held exactly when it was still bound"));
+            check(run.seen.heldDisplay == heldDisplay,
+                  say("the census counts the submitted image as held exactly when it was still bound"));
+            check(run.seen.nullT2 == 0 && run.seen.nullT3 == 0,
+                  say("no input reads back NULL from the context: the stage clear let the views stick"));
+            check(run.clears == ((heldTarget || heldDisplay) ? 1u : 0u),
+                  say("the stage is cleared once when an input is held and never otherwise"));
+            check(run.otherEyeQuiet, say("the other eye's counters did not move at all"));
+            check(run.omBack, say("the output merger is put back exactly as the game left it"));
+        };
+        // What the run's resolve wrote: the note carries a piece of text, or
+        // does not. Said with the case's own name so a failure names its case.
+        auto noteHas = [&](const Run& run, const char* what, const char* piece) {
+            char label[384];
+            std::snprintf(label, sizeof(label), "near-light note, %s: the log line carries \"%s\"", what, piece);
+            check(run.note.find(piece) != std::string::npos, label);
+        };
+        auto noteLacks = [&](const Run& run, const char* what, const char* piece) {
+            char label[384];
+            std::snprintf(label, sizeof(label), "near-light note, %s: the log line does not carry \"%s\"", what, piece);
+            check(run.note.find(piece) == std::string::npos, label);
+        };
+
+        g_holoNearLightInputs[0] = g_holoNearLightInputs[1] = HoloNearLightInputs{};
+        g_holoNearLightSeen[0] = g_holoNearLightSeen[1] = 0;
+        g_holoIsWorldMarker = false; g_holoDrawVs = kHoloIconCore;
+        const SplitDisplay display = makeSplitDisplay(0.5f, 0.0f);
+        // The share cases' depth: nothing is covered. The floor cases' depth:
+        // the lit left half keeps the element's own, the dark right half takes
+        // the filler.
+        auto expectUncovered = [&](const Run& run, const char* label) {
+            for (float v : run.depth) check(v == 0.0f, label);
+        };
+        auto expectLitAndFiller = [&](const Run& run, const char* litLabel, const char* darkLabel) {
+            for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 8; ++x) {
+                const float expected = x < 4 ? kNear5m : kFillerDepth;
+                check(std::fabs(run.depth[y * 8 + x] - expected) < 1e-5f, x < 4 ? litLabel : darkLabel);
+            }
+        };
+
+        // Flip-noise prelude. A game that flips between classes with nothing
+        // held (no render target bound, an unrelated one bound) while it loads
+        // must not use the notes up before a class with a hold shows. Eye 0,
+        // eight visits alternating the two: one note per class, on its first
+        // visit, and nothing on any later one; nothing is held, cleared or
+        // counted as a hold, the share case's content covers nothing, and the
+        // output merger is put back every time. Every visit is also the
+        // no-hold control for the share case's all-uncovered result.
+        for (int visit = 0; visit < 8; ++visit) {
+            const bool noOutput = (visit % 2) == 0;   // class 0 on even visits, class 4 on odd ones
+            char what[64];
+            std::snprintf(what, sizeof(what), "flip noise %d, %s", visit,
+                          noOutput ? "no output bound" : "unrelated output bound");
+            const Run run = nearLightRun(0, what, 0.8f, display, noOutput ? nullptr : toyRtvUnorm.Get(), nullptr);
+            expectUncovered(run, noOutput ? "near-light control (no output bound): the share case's content must give the same "
+                                            "all-uncovered result with nothing held"
+                                          : "near-light control (unrelated output bound): the share case's content must give the "
+                                            "same all-uncovered result with nothing held");
+            expectInputs(run, what, 0, 0);
+            if (visit < 2) {
+                noteHas(run, what, noOutput ? "eye 0, near-light pass: the output merger holds depth 8x8 fmt 40."
+                                            : "eye 0, near-light pass: the output merger holds slot 0 8x8 fmt 27, depth 8x8 fmt 40.");
+                noteLacks(run, what, "would have read black");
+            } else {
+                noteLacks(run, what, "near-light pass: the output merger holds");
+            }
+        }
+        check(g_holoNearLightSeen[0] == 0x11u && g_holoNearLightSeen[1] == 0,
+              "near-light notes: the prelude marked exactly classes 0 and 4 as seen on eye 0 and nothing on eye 1");
+
+        // Share case, RT0 held (t2): the game's target stays bound on slot 0,
+        // its depth view with it. The first RT0-held look at eye 0 is noted
+        // although the prelude's noise came first: what the output merger
+        // holds, the game's RT0 named, and what that would cost.
+        {
+            const char* what = "RT0 held";
+            const Run run = nearLightRun(0, what, 0.8f, display, hdrRtv.Get(), nullptr);
+            expectUncovered(run, "near-light t2 (RT0 still bound): a blind share test lit the block and the dark half took "
+                                 "the filler depth; with the target seen, nothing is light and nothing is covered");
+            expectInputs(run, what, 1, 0);
+            noteHas(run, what, "eye 0, near-light pass: the output merger holds slot 0 8x8 fmt 10 (the game's RT0)");
+            noteHas(run, what, "depth 8x8");
+            noteHas(run, what, "the game's RT0 view (the share test)");
+            noteLacks(run, what, "(the submitted image)");
+        }
+
+        // Floor case, the submitted image held (t3): it is the output on slot
+        // 0. A class eye 0 has not shown yet (the image, not RT0), so the pass
+        // says so: a note, naming the image this time.
+        {
+            const char* what = "image held";
+            const Run run = nearLightRun(0, what, 0.0f, display, display.rtv.Get(), nullptr);
+            expectLitAndFiller(run, "near-light t3 (image still bound): the lit half keeps the element's own depth",
+                               "near-light t3 (image still bound): a blind floor test left the map empty and the dark "
+                               "half uncovered; with the image seen it takes the filler depth");
+            expectInputs(run, what, 0, 1);
+            noteHas(run, what, "eye 0, near-light pass: the output merger holds slot 0 8x8 fmt 28 (the submitted image)");
+            noteHas(run, what, "the submitted-image view (the floor)");
+            noteLacks(run, what, "(the game's RT0)");
+        }
+
+        // Both held, the image on slot 1: the game's target on slot 0 and the
+        // image behind it, so the hold check has to walk every slot. Another
+        // new class, another note.
+        {
+            const char* what = "both held, image on slot 1";
+            const Run run = nearLightRun(0, what, 0.0f, display, hdrRtv.Get(), display.rtv.Get());
+            expectLitAndFiller(run, "near-light, both held (image on slot 1): the lit half keeps the element's own depth",
+                               "near-light, both held (image on slot 1): the hold check missed the image on slot 1, "
+                               "the map came out empty and the dark half stayed uncovered");
+            expectInputs(run, what, 1, 1);
+            noteHas(run, what, "slot 0 8x8 fmt 10 (the game's RT0), slot 1 8x8 fmt 28 (the submitted image)");
+            noteHas(run, what, "both views (the share test and the floor)");
+        }
+
+        // The share case again with the game's target on slot 1 and an
+        // unrelated output on slot 0 (the image unbound, so a blind t3 cannot
+        // mask a blind t2). The RT0-held class was seen above, so the pass says
+        // nothing this time; the slot-1 hold check is what this case is for.
+        {
+            const char* what = "RT0 held on slot 1";
+            const Run run = nearLightRun(0, what, 0.8f, display, toyRtvUnorm.Get(), hdrRtv.Get());
+            expectUncovered(run, "near-light t2 (RT0 on slot 1): the hold check missed the target on slot 1, a blind share "
+                                 "test lit the block and the dark half took the filler depth");
+            expectInputs(run, what, 1, 0);
+            noteLacks(run, what, "near-light pass: the output merger holds");
+        }
+
+        // Aliasing: the game's target and the submitted image are ONE resource
+        // (the display view is over hdrTex itself, as the toy-target share
+        // cases above do), so the one bound slot is both inputs: both holds are
+        // counted and the slot is named as both. Class 7 was seen above, so its
+        // seen bit is cleared to let this first aliased look note again.
+        {
+            SplitDisplay aliased;
+            aliased.tex = hdrTex;
+            hr(dev->CreateShaderResourceView(hdrTex.Get(), nullptr, &aliased.srv));
+            g_holoNearLightSeen[0] &= ~(1u << 7);
+            const char* what = "target and image are one resource";
+            const Run run = nearLightRun(0, what, 0.8f, aliased, hdrRtv.Get(), nullptr);
+            expectUncovered(run, "near-light aliased (target and image are one resource): the share case's content must give "
+                                 "the same all-uncovered result");
+            expectInputs(run, what, 1, 1);
+            noteHas(run, what, "eye 0, near-light pass: the output merger holds slot 0 8x8 fmt 10 "
+                               "(the game's RT0 and the submitted image)");
+            noteHas(run, what, "both views (the share test and the floor)");
+        }
+
+        // The same two holds through eye 1. Everything the pass keeps is per
+        // eye: eye 1's counters move and eye 0's do not, and eye 1's first look
+        // at each class notes although eye 0 has shown both classes already.
+        check((g_holoNearLightSeen[0] & 0x60u) == 0x60u && g_holoNearLightSeen[1] == 0,
+              "near-light notes, setup: eye 0 has seen the RT0-held and image-held classes, and eye 1 has seen nothing");
+        {
+            const char* what = "RT0 held, eye 1";
+            const Run run = nearLightRun(1, what, 0.8f, display, hdrRtv.Get(), nullptr);
+            expectUncovered(run, "near-light t2, eye 1 (RT0 still bound): a blind share test lit the block and the dark half "
+                                 "took the filler depth; with the target seen, nothing is light and nothing is covered");
+            expectInputs(run, what, 1, 0);
+            noteHas(run, what, "eye 1, near-light pass: the output merger holds slot 0 8x8 fmt 10 (the game's RT0)");
+            noteHas(run, what, "the game's RT0 view (the share test)");
+            noteLacks(run, what, "eye 0, near-light pass");
+        }
+        {
+            const char* what = "image held, eye 1";
+            const Run run = nearLightRun(1, what, 0.0f, display, display.rtv.Get(), nullptr);
+            expectLitAndFiller(run, "near-light t3, eye 1 (image still bound): the lit half keeps the element's own depth",
+                               "near-light t3, eye 1 (image still bound): a blind floor test left the map empty and the "
+                               "dark half uncovered; with the image seen it takes the filler depth");
+            expectInputs(run, what, 0, 1);
+            noteHas(run, what, "eye 1, near-light pass: the output merger holds slot 0 8x8 fmt 28 (the submitted image)");
+            noteHas(run, what, "the submitted-image view (the floor)");
+            noteLacks(run, what, "eye 0, near-light pass");
+        }
+        // Each eye's seen set is its own: eye 0 showed classes {0, 4, 5, 6, 7}
+        // (none bound, unrelated output, RT0 held, image held, both), eye 1
+        // only {5, 6}, and eye 1's two looks left eye 0's alone. Bit c is
+        // class c.
+        check(g_holoNearLightSeen[0] == 0xF1u && g_holoNearLightSeen[1] == 0x60u,
+              "near-light notes: each eye keeps its own seen set, eye 0 {0,4,5,6,7} and eye 1 {5,6}");
+
+        // The census line carries the window's figures, eye 0 then eye 1 in
+        // every pair, and then starts over. Eye 0 dispatched thirteen times (the
+        // prelude's eight, then RT0 held, the image, both, RT0 on slot 1 and the
+        // aliased case; RT0 held in four of them, the image in three), eye 1
+        // twice (RT0 in one, the image in one), and nothing ever read back NULL.
+        g_holoWindowStartMs = GetTickCount64() - 30001;
+        g_lastLog.clear();
+        holoDepthWindowTick(ctx.Get());
+        check(g_lastLog.find("near-light inputs (eye 0 / eye 1): dispatched 13 / 2, output merger held the game's RT0 "
+                             "4 / 1 and the submitted image 3 / 1, views read back null t2 0 / 0 t3 0 / 0") != std::string::npos,
+              "census: the near-light inputs sentence counts this block's dispatches, holds and null readbacks, eye 0 then eye 1");
+        check(sameInputs(g_holoNearLightInputs[0], HoloNearLightInputs{}) &&
+              sameInputs(g_holoNearLightInputs[1], HoloNearLightInputs{}),
+              "census: the window reset clears the near-light input counters of both eyes");
+        // The per-eye seen sets are left as the cases left them: only shutdown
+        // re-arms them, checked at the end of the run.
+    }
+
     // The periodic census prints while the key is on, once the window's
     // 30 s (wall clock) elapses -- forced by backdating the window's
     // start rather than waiting -- and prints nothing while it is off
@@ -1442,7 +1791,17 @@ int main() {
             std::puts(m->pDescription); check(false, "D3D debug-layer warning/error");
         }
     }
+    // Shutdown re-arms what the near-light pass remembers across frames: each
+    // eye's seen set (still set by the cases above) and the census counters
+    // (given leftovers here, the window tick having emptied them).
+    check(g_holoNearLightSeen[0] != 0 && g_holoNearLightSeen[1] != 0,
+          "shutdown, setup: both eyes still hold a seen set from the near-light cases");
+    g_holoNearLightInputs[0].ran = 3; g_holoNearLightInputs[1].nullT3 = 2;
     ctx->ClearState(); uiDepthShutdown();
+    check(g_holoNearLightSeen[0] == 0 && g_holoNearLightSeen[1] == 0,
+          "shutdown: the near-light seen sets of both eyes are re-armed");
+    check(g_holoNearLightInputs[0].ran == 0 && g_holoNearLightInputs[1].nullT3 == 0,
+          "shutdown: the near-light census counters of both eyes are emptied");
     check(gpuTimingShutdown(ctx.Get()), "explicit shared timer shutdown before WARP release");
     std::printf("PASS: %d checks; the generic hologram/icon depth pass mirrors the game's own blend "
                 "(including alpha), gates cockpit families by the cockpit radius before accumulation "

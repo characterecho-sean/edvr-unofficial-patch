@@ -8,7 +8,16 @@ alone on it unless said.
 ## Status
 
 State: measured. Nothing has been done for speed yet; the I-8 fix and the
-backup pruning of the same day are not speed changes.
+backup pruning of the same day are not speed changes. 2026-10-01: item 2
+below is closed: the terrain_motion rig (104-115 s here, 70-158 s in the
+builds of 2026-09-29 to 10-01, longer under load) was deleted with the terrain
+motion hook (docs/terrain-motion-dispatch-cost-2026-09-17.md, top journal
+entry), and tools\terrain_retired_test, which proves the deletion, takes 20 s
+alone and 28-50 s in the pool. Measured on the first build after (198 s; a
+pool of 105 jobs, 136.5 s, other builds on the machine): the wall is now
+flat_mono_resolve_test, 136.5 s there and 33-174 s in the builds of this week
+(it has grown with main), so the saving shows as CPU seconds, not as a shorter
+wall, until that rig is looked at; it is the next item.
 
 A full build, seconds of wall time. "Cold" was measured with a generated-shader
 cache from an older tree, "warm" with the cache current; the source tree is the
@@ -35,8 +44,9 @@ Open, biggest first:
    compiles inside temporal_shader_build (temporal_aa_cs 18.4 s,
    temporal_aa_fast_cs 9.0 s), one after the other; they are independent. Any
    build after a shader-source change pays it. Seen in one cold build.
-2. The pool's wall is terrain_motion, not the CPU: 105-107 s against summed/8
-   of 96-100 s. terrain_motion is 1.73x, 1.80x and 1.88x the next rig in three
+2. (Closed 2026-10-01: the rig was deleted; see the State line.) The pool's
+   wall was terrain_motion, not the CPU: 105-107 s against summed/8 of
+   96-100 s. terrain_motion is 1.73x, 1.80x and 1.88x the next rig in three
    builds. Timed apart from the pool it is 4 s of compile, about 90 s in one
    celestial_motion_test.exe run (three passes: CPU shadow via UpdateSubresource,
    CPU shadow via Map, GPU copy) and 0.2 s of Python.

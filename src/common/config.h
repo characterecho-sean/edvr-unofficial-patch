@@ -17,18 +17,36 @@
 #include <atomic>
 #include <string>
 
+#include "ini_name.h"
+#include "runtime_profile.h"
+
 namespace edvr {
 
 class Config {
 public:
     static Config& get();
 
-    // Looks for edvr.ini next to the host module, then next to the .exe.
+    // Looks for the settings file next to the host module, then next to the
+    // .exe: edvr-flat.ini first under the flat profile, then edvr.ini (the VR
+    // profile's file, and the flat profile's whole fallback while edvr-flat.ini
+    // does not exist yet). One file is read, never a mix of the two.
     // logDir() is the ini's log.dir, else <exe dir>\edvr_logs, which the
     // environment may move: EDVR_LOG_DIR names another directory, and
     // EDVR_LOG_DIR_FOR, when set, applies it only to exes in that directory
     // (the test runner's way of giving each rig's proxies their own logs).
     void init(const std::wstring& moduleDir);
+
+    // The name of the settings file this process opened -- "edvr-flat.ini" or
+    // "edvr.ini" -- for every message that tells somebody which file to open or
+    // says which was written (ini_name.h says why none may spell it). It comes
+    // from the path init() chose, so a flat install that fell back to edvr.ini
+    // says edvr.ini, because that is the file it read. Before init() there is
+    // no path, and the profile answers. Inline, so a test that stubs some of
+    // Config's members and compiles a module which names the file still links.
+    const char* iniName() const {
+        return m_path.empty() ? (runtimeFlatProfile() ? kIniNameFlat : kIniNameVr)
+                              : iniNameOfPath(m_path);
+    }
 
     // Returns true if the file changed and values were re-read.
     bool reloadIfChanged();

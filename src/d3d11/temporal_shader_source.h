@@ -32,9 +32,7 @@ Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_de
 Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
 Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws
 Texture2D<float4> UP : register(t8);     // previous raw-raster UI colour; alpha is coverage, not opacity
-Texture2D<uint> TI : register(t9);      // terrain patch index, zero outside rasterised coverage
-Texture2D<float> TZ : register(t10);    // terrain depth, compared against final scene/UI depth
-struct TerrainRecord { uint4 key[12]; float4 q; float4 t; float4 r[3]; };
+// t9..t11 were the terrain patch index, its depth and its transform records (retired 2026-10-01: terrain takes the camera's motion).
 Texture2D<float2> HC : register(t12);
 struct HoloRecord { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
 StructuredBuffer<HoloRecord> HR : register(t13);
@@ -203,7 +201,6 @@ bool engineReproject(EnginePoolRecord r, float2 ndc, float zr, out float4 before
 )HLSL"
 R"HLSL(
 Texture2D<float4> Screen : register(t14);
-StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
 #if EDVR_TEMPORAL_TRACE
@@ -245,7 +242,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 terrain, 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path)
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
     float4 skip;        // the fovea's own-resolve early-out: x0 y0 x1 y1 in THIS render, all zero = no skip
     float4 lead;        // xy: how far the fovea crop's base slid THIS frame (render pixels, base_now - base_prev), added to the vectors written to ML for NVIDIA's crop alone; zero on every other dispatch. zw unused
@@ -616,36 +613,16 @@ bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float 
     // this frame's own footprint at p does. Only an occluder that has
     // left the neighbourhood hid this history (the hull the sky rolls
     // past). The camera path had this by construction, reprojecting the
-    // 3x3-dilated depth; the terrain path's exact depth met the dilated
-    // footprint at every terrain edge instead, 5.3% of the terrain's
-    // pixels a frame walking with the jitter -- the shimmer of the eye
-    // run of 2026-09-17 11:48 (docs/terrain-history-shimmer-2026-09-17.md).
+    // 3x3-dilated depth; the terrain path (retired 2026-10-01) had an
+    // exact depth that met the dilated footprint at every terrain edge
+    // instead, 5.3% of the terrain's pixels a frame walking with the
+    // jitter -- the shimmer of the eye run of 2026-09-17 11:48
+    // (docs/terrain-history-shimmer-2026-09-17.md).
     if(nearest<=nearestDepthNow(local,float2(q)-pp)*1.03) return false;
     // Use this pixel's depth validity, not the foreground depth used by
     // the camera fallback's 3x3 dilation beside the hull.
     if(zraw<=knobs.x) return nearest>0;
     return zPred>0 && nearest>knobs.z/zPred*1.03;
-}
-// Exact terrain coverage only. The patch transform is in DirectX view
-// space (+Z forward); the pass's rays use the runtime's -Z convention.
-bool terrainPixel(float2 p, float3 d, out float2 pp, out float zp) {
-    pp=0; zp=0;
-    if ((uint(probe.w+0.5)&8u)==0u) return false;
-    int2 q=region.xy+int2(p);
-    uint index=TI.Load(int3(q,0));
-    if (knobs.y==0 || index==0 || index>512 || uiCovered(q)) return false;
-    float zraw=TZ.Load(int3(q,0)), scene=zSceneAt(q);
-    if (zraw<=knobs.x || abs(scene-zraw)>abs(zraw)*0.00001) return false;
-    TerrainRecord rec=TR[index-1];
-    if (rec.t.w!=1) return false;
-    float z=knobs.z/(zraw-knobs.x);
-    float4 here=float4(d.xy*z,z,1);
-    float3 before=float3(dot(rec.r[0],here),dot(rec.r[1],here),dot(rec.r[2],here));
-    if (before.z<=0 || !all(isfinite(before))) return false;
-    zp=before.z;
-    pp.x=(before.x/zp-tanPrev.x)/(tanPrev.y-tanPrev.x)*size.x-0.5;
-    pp.y=(tanPrev.w-before.y/zp)/(tanPrev.w-tanPrev.z)*size.y-0.5;
-    return true;
 }
 )HLSL"
 R"HLSL(
@@ -763,11 +740,6 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     // of blend / (1 - blend) times that motion, about 0.7 px on slowly
     // drifting distant content, and differed across the image. The rest
     // lock, experimental.shimmer_rest, holds the pose at rest instead.)
-    float2 terrainP; float terrainZ;
-    if (allowWorld && terrainPixel(p,d,terrainP,terrainZ)) {
-        pp=terrainP; zPred=terrainZ; world=1;
-        if (any(pp<0) || any(pp>float2(size)-1)) return false;
-    }
     float2 holoP; float holoZ;
     if (allowWorld && holoPixel(p,jit.xy,holoP,holoZ)) {
         pp=holoP; zPred=holoZ; world=0;
@@ -915,11 +887,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             motion = pp - p;
             decisionPath = count15 != 0 ? 2u : 1u;
             projectionValid = true;
-            float2 terrainP; float terrainZ;
-            if (terrainPixel(p,d,terrainP,terrainZ)) {
-                pp=terrainP; motion=pp-p; zPred=terrainZ;
-                decisionPath=7u;
-            }
             float2 holoP; float holoZ;
             if(holoPixel(p,0,holoP,holoZ)) {
                 pp=holoP; motion=pp-p; zPred=holoZ;

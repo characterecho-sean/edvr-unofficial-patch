@@ -334,7 +334,15 @@ static int generate(const Options& o) {
         {"kFlatMonoPrepBytecode", "flat_mono_prep_cs", "prep", nullptr, {}, true},
         {"kFlatMonoTaaBytecode", "flat_mono_taa_cs", "taa", nullptr, {}, true},
         {"kFlatMonoFinishBytecode", "flat_mono_finish_cs", "finish", nullptr, {}, true},
-        {"kFlatMonoSpatialBytecode", "flat_mono_spatial_cs", "spatial", nullptr, {}, true}
+        {"kFlatMonoSpatialBytecode", "flat_mono_spatial_cs", "spatial", nullptr, {}, true},
+        // The VR world route's refusal census (design doc section 82, stage 2 experiment build): one counting pass over the class
+        // texture the prep writes on a frame that samples. Made on first use, so a profile that never asks never creates it.
+        {"kFlatMonoCensusBytecode", "flat_mono_census_cs", "census", nullptr, {}, true},
+        // The HDR route's pixel-shader half (section 81): the result goes back into the game's HDR target, a render
+        // target, so the finish and the spatial recovery are draws: one triangle vertex shader and two pixel shaders.
+        {"kFlatMonoHdrVsBytecode", "flat_mono_hdr_vs", "hdrVs", nullptr, {}, true, nullptr, "vs_5_0"},
+        {"kFlatMonoFinishHdrBytecode", "flat_mono_finish_hdr_ps", "finishHdr", nullptr, {}, true, nullptr, "ps_5_0"},
+        {"kFlatMonoSpatialHdrBytecode", "flat_mono_spatial_hdr_ps", "spatialHdr", nullptr, {}, true, nullptr, "ps_5_0"}
     };
     const std::string core = extractCore(edvr::kTemporalCsHlsl); // validate before fixed source assembly
     const auto fixed = fixedVariants(core);
@@ -451,7 +459,7 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 33 && originalExtra.size() == 18 && coreFixed.size() == 58 && coreLegacy.size() == coreFixed.size(), "all fixed shader contracts including diagnostic variants are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 55 && coreLegacy.size() == coreFixed.size(), "all fixed shader contracts including diagnostic variants are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -498,10 +506,17 @@ static void selfTest() {
           "a missing, reordered or doubled marker, or a resource inside, fails the build");
     const std::string production = extractCore(edvr::kTemporalCsHlsl);
     const std::string flat = production + edvr::kFlatMonoShaderSource;
-    static const char* flatEntries[] = {"prep", "taa", "finish", "spatial"};
+    static const char* flatEntries[] = {"prep", "taa", "finish", "spatial", "census"};
     for (const char* entry : flatEntries) {
         Variant mono{"kFlatSelfTest", "flat_mono_self_test", entry, nullptr, {}, true};
         check(compile(compiler.fn, flat.c_str(), mono), "production flat mono shader compilation");
+    }
+    // The HDR route's three graphics entry points, each under its own profile.
+    static const struct { const char* entry; const char* profile; } flatHdrEntries[] = {
+        {"hdrVs", "vs_5_0"}, {"finishHdr", "ps_5_0"}, {"spatialHdr", "ps_5_0"}};
+    for (const auto& e : flatHdrEntries) {
+        Variant mono{"kFlatSelfTest", "flat_mono_self_test_hdr", e.entry, nullptr, {}, true, nullptr, e.profile};
+        check(compile(compiler.fn, flat.c_str(), mono), "production flat HDR route shader compilation");
     }
     check(production.find("bool engineReprojectRows(") != std::string::npos &&
           production.find("uint engineRecordKind(") != std::string::npos, "the production core carries the shared arithmetic");

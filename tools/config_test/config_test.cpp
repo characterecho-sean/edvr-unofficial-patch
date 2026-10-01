@@ -35,16 +35,21 @@
 //     the reload had the file open.
 //
 // Usage: config_test.exe <dir containing edvr.ini> [scratch dir]
+//        config_test.exe --ininame-cases <scratch dir>   (its own child; see iniNameFixturesIsolated)
 #include <windows.h>
 
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "../../src/common/config.h"
+#include "../../src/common/ini_name.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
@@ -611,11 +616,436 @@ static void shareDeleteCase(const std::wstring& scratch) {
            reloads, refused, st.other.load());
 }
 
+// --- the settings file's name, in every message that carries it (2026-09-30) -------------
+//
+// Flight 052916, on an install that read edvr-flat.ini: the F8 panel said "written to
+// edvr.ini", the config audit said "edvr.ini: 1 line(s) name settings this build does not
+// read" about a line that was in edvr-flat.ini, and a chained mod stayed loaded because the
+// line that turned it off had been commented out in edvr.ini while edvr-flat.ini still had it
+// active. Config::iniName() says which file the process opened; ini_name.h says why nothing
+// else may spell the name. Held here three ways: the resolver against the four situations a
+// process can be in (real Config, real files, real log), the messages that come out of them,
+// and a scan of the sources for a message that spells a name.
+
+static void removeIniFile(const std::wstring& dir, const wchar_t* leaf) {
+    DeleteFileW((dir + L"\\" + leaf).c_str());
+}
+
+// A path as text for a failure line (ASCII paths; anything else prints as '?').
+static std::string narrow(const std::wstring& w) {
+    std::string out;
+    for (wchar_t c : w) out.push_back(c < 128 ? static_cast<char>(c) : '?');
+    return out;
+}
+
+// The pure resolver, for a path a caller already holds.
+static void iniNamePathCases() {
+    static const struct { const wchar_t* path; const char* want; const char* what; } kPaths[] = {
+        {L"C:\\Games\\Elite\\edvr-flat.ini", "edvr-flat.ini", "a path to edvr-flat.ini names it"},
+        {L"C:\\Games\\Elite\\edvr.ini", "edvr.ini", "a path to edvr.ini names it"},
+        {L"C:/Games/Elite/EDVR-FLAT.INI", "edvr-flat.ini", "the name is compared without case, and either slash"},
+        {L"edvr-flat.ini", "edvr-flat.ini", "a bare file name is a path too"},
+        {L"C:\\Games\\edvr-flat.ini.bak", "edvr.ini", "a backup's name is not the file"},
+        {L"C:\\Games\\my-edvr-flat.ini", "edvr.ini", "nor is a longer name that ends the same way"},
+        {L"", "edvr.ini", "no path at all falls back to the VR file's name"},
+    };
+    for (const auto& p : kPaths) {
+        const char* got = iniNameOfPath(p.path);
+        if (std::strcmp(got, p.want) == 0) ok(p.what);
+        else fail(p.what, std::string("\"") + got + "\", wanted \"" + p.want + "\"");
+    }
+}
+
+// The directory this process's exe is in: the other place Config::init looks for a settings file.
+static std::wstring exeDirectory() {
+    wchar_t buf[MAX_PATH * 2]{};
+    const DWORD n = GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(sizeof(buf) / sizeof(buf[0])));
+    const std::wstring path(buf, n);
+    const size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+// Four situations, each in a directory of its own with its own log. The file that is NOT read
+// carries a different dead line and a different moved key, so a message about the wrong file
+// shows in the text as well as in the name.
+//
+// Run only by iniNameFixturesIsolated(), in a process whose exe directory holds no ini: Config::init
+// looks in the exe's directory too (a flat process reads <exe dir>\edvr-flat.ini when its module
+// directory has none), and in the build that is build\, where the flat edition's staged
+// edvr-flat.ini sits. The first version of these fixtures ran in this process, asked for "flat,
+// no edvr-flat.ini yet" and was handed build\'s file: the flat-fallback fixture failed in the
+// build and passed from a scratch directory, which is how it got past the author.
+static void iniNameFixtures(const std::wstring& scratch) {
+    const RuntimeProfile savedProfile = g_runtimeProfile;
+    Config& cfg = Config::get();
+
+    // The premise, asserted rather than assumed: nothing beside this exe for the loader to find.
+    {
+        const std::wstring exeDir = exeDirectory();
+        static const wchar_t* kBeside[] = {L"edvr.ini", L"edvr-flat.ini", L"edvr_profile.ini"};
+        std::string found;
+        for (const wchar_t* leaf : kBeside) {
+            if (GetFileAttributesW((exeDir + L"\\" + leaf).c_str()) != INVALID_FILE_ATTRIBUTES)
+                found += std::string(found.empty() ? "" : ", ") + narrow(leaf);
+        }
+        if (exeDir.empty() || !found.empty()) {
+            fail("the fixtures run beside no ini of their own",
+                 "the exe's directory " + narrow(exeDir) + " holds " + (found.empty() ? "no exe path" : found));
+            return;
+        }
+        ok("the fixtures run in a directory with no ini beside the exe");
+    }
+
+    static const char* kKnown[] = {"advanced.d3d11_fixes", "experimental.new_name"};
+    static const char* kMoved[][3] = {{"fix.old_name_1", "experimental.new_name", ""},
+                                      {"fix.old_name_2", "experimental.new_name", ""},
+                                      {"fix.old_name_3", "experimental.new_name", ""}};
+    struct Fixture {
+        const wchar_t* suffix;
+        const wchar_t* tag;
+        const char* descriptor;
+        bool writeVr, writeFlat;
+        int index;                 // which dead and moved key this fixture's read file carries
+        const char* wantName;
+        const char* otherName;     // the name that must never appear as a message's file
+        const char* what;
+    };
+    static const Fixture kFixtures[] = {
+        {L"_ininame_vr", L"ininamevr", "[install]\r\nschema = 1\r\nprofile = vr\r\n", true, true, 1, "edvr.ini",
+         "edvr-flat.ini", "VR profile, with an edvr-flat.ini lying beside it"},
+        {L"_ininame_flat", L"ininameflat", "[install]\r\nschema = 1\r\nprofile = flat\r\n", true, true, 2,
+         "edvr-flat.ini", "edvr.ini", "flat profile, both files present (the flight's install)"},
+        {L"_ininame_fallback", L"ininamefall", "[install]\r\nschema = 1\r\nprofile = flat\r\n", true, false, 3,
+         "edvr.ini", "edvr-flat.ini", "flat profile, no edvr-flat.ini yet: it reads edvr.ini whole"},
+        {L"_ininame_none", L"ininamenone", "[install]\r\nschema = 1\r\nprofile = flat\r\n", false, false, 0,
+         "edvr-flat.ini", "edvr.ini", "flat profile, neither file: the one it would create"},
+    };
+
+    Log::get().close();
+    for (const Fixture& f : kFixtures) {
+        const std::wstring dir = scratch + f.suffix;
+        CreateDirectoryW(dir.c_str(), nullptr);
+        removeIniFile(dir, L"edvr.ini");
+        removeIniFile(dir, L"edvr-flat.ini");
+        deleteLogs(dir, f.tag);
+        // The read file carries: a dead line, a moved key still on its old name, a malformed
+        // yes/no. The other file carries a dead line and a moved key of its own (never reported).
+        const std::string mine = "[advanced]\r\nd3d11_fixes = maybe\r\n[fix]\r\nstale_line_" +
+                                 std::to_string(f.index) + " = on\r\nold_name_" + std::to_string(f.index) +
+                                 " = 3\r\n";
+        const std::string other = "[fix]\r\nnot_the_file_read = on\r\nold_name_9 = 4\r\n";
+        const bool flatRead = std::strcmp(f.wantName, "edvr-flat.ini") == 0;
+        bool wrote = writeIni(dir, f.descriptor, L"edvr_profile.ini");
+        if (f.writeVr) wrote = wrote && writeIni(dir, (flatRead ? other : mine).c_str(), L"edvr.ini");
+        if (f.writeFlat) wrote = wrote && writeIni(dir, (flatRead ? mine : other).c_str(), L"edvr-flat.ini");
+        if (!wrote) {
+            fail(f.what, "could not write the fixture");
+            continue;
+        }
+        cfg.setAuditTables(kKnown, 2, kMoved, 3);
+        cfg.init(dir);
+        const std::string got = cfg.iniName();
+        if (got == f.wantName) ok(f.what);
+        else fail(f.what, "iniName() said " + got + ", wanted " + f.wantName);
+        if (!f.writeVr && !f.writeFlat) {
+            // Nothing to read, nothing to say: the name is all this fixture asks.
+            cfg.setAuditTables(nullptr, 0, nullptr, 0);
+            continue;
+        }
+        if (!Log::get().open(dir, f.tag)) {
+            fail(f.what, "the log would not open");
+            cfg.setAuditTables(nullptr, 0, nullptr, 0);
+            continue;
+        }
+        (void)cfg.getBool("advanced.d3d11_fixes", true);   // says the malformed yes/no, flushes the audit's queue
+        Log::get().close();
+        cfg.setAuditTables(nullptr, 0, nullptr, 0);
+        const std::string body = readNewestLog(dir, f.tag);
+        const std::string idx = std::to_string(f.index);
+        const std::string mineName = f.wantName;
+        struct Need { std::string needle; const char* what; };
+        const Need needs[] = {
+            {mineName + ": 1 line(s) name settings this build does not read: fix.stale_line_" + idx,
+             "the config audit's dead-line note names the file it read"},
+            {mineName + ": fix.old_name_" + idx + " has moved to experimental.new_name",
+             "the moved-key note names it"},
+            {mineName + ": advanced.d3d11_fixes = \"maybe\" is not a yes/no value",
+             "a malformed yes/no names it"},
+        };
+        for (const Need& n : needs) {
+            if (body.find(n.needle) != std::string::npos) ok((std::string(f.what) + ": " + n.what).c_str());
+            else fail((std::string(f.what) + ": " + n.what).c_str(), "\"" + n.needle + "\" is not in the log");
+        }
+        // Never the other file: not at the front of a message, and nothing said about its own lines.
+        // A log line starts "[hh:mm:ss.mmm] " and then the message, so look for the other name right
+        // after that (edvr-flat.ini never matches "edvr.ini: ", the names differ before the dot).
+        const std::string otherPrefix = std::string(f.otherName) + ": ";
+        bool otherFirst = false;
+        for (size_t at = body.find(otherPrefix); at != std::string::npos; at = body.find(otherPrefix, at + 1)) {
+            if (at >= 2 && body[at - 1] == ' ' && body[at - 2] == ']') otherFirst = true;
+        }
+        if (!otherFirst) ok((std::string(f.what) + ": no message names the other file").c_str());
+        else fail((std::string(f.what) + ": a message names the other file").c_str(),
+                  std::string("\"") + otherPrefix + "\" starts a message");
+        if (body.find("not_the_file_read") == std::string::npos && body.find("old_name_9") == std::string::npos)
+            ok((std::string(f.what) + ": nothing is said about the file it did not read").c_str());
+        else fail((std::string(f.what) + ": it reported the file it did not read").c_str(), "a line of the other file is in the log");
+    }
+    g_runtimeProfile = savedProfile;
+    // The last line the parent looks for: a process that died part-way says nothing after its
+    // failures, and "no failure lines" must not read as "all four ran".
+    ok("the four situations ran to the end");
+}
+
+// Runs iniNameFixtures() in a copy of this exe kept in a directory that holds nothing else, and
+// takes its lines as this process's own. The copy is a child whose stdout goes to a file: a few
+// dozen lines, read back whole once it has exited.
+static void iniNameFixturesIsolated(const std::wstring& scratchArg) {
+    const char* const what = "the settings file's name in a process of its own";
+    wchar_t self[MAX_PATH * 2]{};
+    const DWORD selfLen = GetModuleFileNameW(nullptr, self, static_cast<DWORD>(sizeof(self) / sizeof(self[0])));
+    if (selfLen == 0 || selfLen >= sizeof(self) / sizeof(self[0])) {
+        fail(what, "could not find this exe's own path");
+        return;
+    }
+    // The child starts in a directory of its own, so it is given the scratch directory in full.
+    wchar_t full[MAX_PATH * 2]{};
+    const DWORD fullLen = GetFullPathNameW(scratchArg.c_str(), static_cast<DWORD>(sizeof(full) / sizeof(full[0])),
+                                           full, nullptr);
+    if (fullLen == 0 || fullLen >= sizeof(full) / sizeof(full[0])) {
+        fail(what, "could not make " + narrow(scratchArg) + " a full path");
+        return;
+    }
+    const std::wstring scratch(full, fullLen);
+    const std::wstring home = scratch + L"_ininame_exe";
+    const std::wstring exe = home + L"\\config_test.exe";
+    const std::wstring outPath = home + L"\\output.txt";
+    CreateDirectoryW(home.c_str(), nullptr);
+    if (!CopyFileW(self, exe.c_str(), FALSE)) {
+        fail(what, "could not copy the exe to " + narrow(home) + " (error " + std::to_string(GetLastError()) + ")");
+        return;
+    }
+
+    SECURITY_ATTRIBUTES inherit{};
+    inherit.nLength = sizeof(inherit);
+    inherit.bInheritHandle = TRUE;
+    HANDLE out = CreateFileW(outPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == INVALID_HANDLE_VALUE) {
+        fail(what, "could not open " + narrow(outPath) + " (error " + std::to_string(GetLastError()) + ")");
+        return;
+    }
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = out;
+    si.hStdError = out;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + exe + L"\" --ininame-cases \"" + scratch + L"\"";
+    const BOOL started = CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, TRUE, 0, nullptr,
+                                        home.c_str(), &si, &pi);
+    const DWORD startError = GetLastError();
+    CloseHandle(out);
+    if (!started) {
+        fail(what, "could not start " + narrow(exe) + " (error " + std::to_string(startError) + ")");
+        return;
+    }
+    DWORD code = 1;
+    if (WaitForSingleObject(pi.hProcess, 120000) != WAIT_OBJECT_0) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+        fail(what, "the process did not finish in two minutes");
+    } else {
+        GetExitCodeProcess(pi.hProcess, &code);
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    std::string text;
+    if (FILE* f = _wfopen(outPath.c_str(), L"rb")) {
+        char chunk[4096];
+        size_t got;
+        while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) text.append(chunk, got);
+        fclose(f);
+    }
+    // Its lines are this run's lines; its failures are this run's failures.
+    bool sawLast = false;
+    bool sawFailure = false;
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line.empty()) continue;
+        printf("%s\n", line.c_str());
+        if (line.compare(0, 6, "  FAIL") == 0) {
+            ++g_fails;
+            sawFailure = true;
+        } else if (line == "  ok    the four situations ran to the end") {
+            sawLast = true;
+        }
+    }
+    if (!sawLast && !sawFailure) fail(what, "the process printed no result (exit code " + std::to_string(code) + ")");
+    else if (code != 0 && !sawFailure) fail(what, "the process exited with code " + std::to_string(code));
+}
+
+static void iniNameCases(const std::wstring& scratch) {
+    iniNamePathCases();
+    iniNameFixturesIsolated(scratch);
+}
+
+// A message that spells the settings file's name is the fault; tools\config_test knows it by scanning.
+// String literals only -- a comment may name a file -- lexed, not grepped, so a quote inside a char
+// literal, an apostrophe in a comment or a raw string cannot hide one or invent one.
+static std::vector<std::string> namedLiterals(const std::string& text) {
+    std::vector<std::string> hits;
+    const size_t n = text.size();
+    size_t line = 1;
+    auto lower = [](std::string s) { for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c))); return s; };
+    auto check = [&](const std::string& literal, size_t atLine) {
+        const std::string l = lower(literal);
+        if (l.find("edvr.ini") != std::string::npos || l.find("edvr-flat.ini") != std::string::npos)
+            hits.push_back("line " + std::to_string(atLine) + ": \"" + literal.substr(0, 70) + "\"");
+    };
+    for (size_t i = 0; i < n;) {
+        const char c = text[i];
+        if (c == '\n') { ++line; ++i; continue; }
+        if (c == '/' && i + 1 < n && text[i + 1] == '/') {          // line comment
+            while (i < n && text[i] != '\n') ++i;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && text[i + 1] == '*') {          // block comment
+            i += 2;
+            while (i + 1 < n && !(text[i] == '*' && text[i + 1] == '/')) { if (text[i] == '\n') ++line; ++i; }
+            i += 2;
+            continue;
+        }
+        if (c == '\'') {                                            // char literal (or a digit separator)
+            // A separator sits inside a number (0x1'0000): the token it is in starts with a digit.
+            // L'a' and u8'a' are char literals: their token starts with a letter.
+            size_t s = i;
+            while (s > 0 && (isalnum(static_cast<unsigned char>(text[s - 1])) || text[s - 1] == '_' ||
+                             text[s - 1] == '\'' || text[s - 1] == '.'))
+                --s;
+            const bool separator = s < i && isdigit(static_cast<unsigned char>(text[s])) && i + 1 < n &&
+                                   isalnum(static_cast<unsigned char>(text[i + 1]));
+            ++i;
+            if (separator) continue;
+            while (i < n && text[i] != '\'' && text[i] != '\n') { if (text[i] == '\\') ++i; ++i; }
+            ++i;
+            continue;
+        }
+        if (c == '"') {
+            const size_t atLine = line;
+            const bool raw = i > 0 && text[i - 1] == 'R';
+            std::string literal;
+            if (raw) {                                              // R"delim( ... )delim"
+                size_t d = i + 1;
+                std::string delim;
+                while (d < n && text[d] != '(' && text[d] != '\n' && delim.size() < 17) delim += text[d++];
+                const std::string close = ")" + delim + "\"";
+                const size_t end = text.find(close, d);
+                const size_t stop = end == std::string::npos ? n : end;
+                literal = text.substr(d + 1 < n ? d + 1 : n, stop > d ? stop - d - 1 : 0);
+                for (char ch : literal) if (ch == '\n') ++line;
+                i = end == std::string::npos ? n : end + close.size();
+            } else {
+                ++i;
+                while (i < n && text[i] != '"' && text[i] != '\n') {
+                    if (text[i] == '\\' && i + 1 < n) { literal += text[i + 1]; i += 2; continue; }
+                    literal += text[i++];
+                }
+                ++i;
+            }
+            check(literal, atLine);
+            continue;
+        }
+        ++i;
+    }
+    return hits;
+}
+
+// Every source under src\ but the installer's (which manages both files and says which it means).
+static void collectSources(const std::wstring& dir, const std::wstring& relative,
+                           std::vector<std::wstring>* out) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        const std::wstring rel = relative.empty() ? name : relative + L"\\" + name;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (_wcsicmp(rel.c_str(), L"installer") == 0) continue;
+            collectSources(dir + L"\\" + name, rel, out);
+            continue;
+        }
+        const size_t dot = name.find_last_of(L'.');
+        const std::wstring ext = dot == std::wstring::npos ? L"" : name.substr(dot);
+        if (_wcsicmp(ext.c_str(), L".cpp") == 0 || _wcsicmp(ext.c_str(), L".h") == 0 ||
+            _wcsicmp(ext.c_str(), L".inc") == 0 || _wcsicmp(ext.c_str(), L".hpp") == 0)
+            out->push_back(rel);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static void iniNameScan(const std::wstring& root) {
+    // The scanner itself first: it must find what it is for, and only that.
+    const std::string violating =
+        "void f() {\n"
+        "    Log::get().note(\"edvr.ini: advanced.x is bad\");\n"      // a message: the fault
+        "    // \"edvr.ini\" in a comment is fine\n"
+        "    /* and \"edvr-flat.ini\" in a block comment */\n"
+        "    const char q = '\"'; const char* s = \"a quote \\\" and edvr-flat.ini\";\n"   // the literal ends at its own quote
+        "    const wchar_t* w = L\"\\\\EDVR.INI\";\n"                   // wide, and without case
+        "    const char* r = R\"(raw edvr.ini text)\";\n"
+        "    const char* clean = \"edvr_profile.ini and edvr_openxr.ini are other files\";\n"
+        "}\n";
+    const std::vector<std::string> control = namedLiterals(violating);
+    if (control.size() == 4 && control[0].rfind("line 2:", 0) == 0 && control[1].rfind("line 5:", 0) == 0 &&
+        control[2].rfind("line 6:", 0) == 0 && control[3].rfind("line 7:", 0) == 0)
+        ok("the source scan finds a message, a wide literal and a raw string that spell the file, and skips comments, char literals and other ini files");
+    else fail("the source scan's own control", std::to_string(control.size()) + " hits, not the four literals at lines 2, 5, 6 and 7");
+
+    std::vector<std::wstring> files;
+    collectSources(root + L"\\src", L"", &files);
+    if (files.size() < 150) {
+        fail("source scan", "found only " + std::to_string(files.size()) + " sources under " +
+                                narrow(root) + "\\src; the scan would prove nothing");
+        return;
+    }
+    // The one place the names are spelled. The installer is not scanned: it manages both files.
+    int scanned = 0, bad = 0;
+    for (const std::wstring& rel : files) {
+        if (_wcsicmp(rel.c_str(), L"common\\ini_name.h") == 0) continue;
+        const std::string text = readRepoFile(root, (L"src\\" + rel).c_str());
+        ++scanned;
+        for (const std::string& hit : namedLiterals(text)) {
+            ++bad;
+            fail("a message spells the settings file's name; use Config::iniName()",
+                 narrow(rel) + " " + hit);
+        }
+    }
+    if (!bad) {
+        ok(("no string literal in " + std::to_string(scanned) +
+            " sources under src (the installer aside) spells edvr.ini or edvr-flat.ini; ini_name.h is the one place")
+               .c_str());
+    }
+}
+
 int main(int argc, char** argv) {
     // Unbuffered, so a crash does not take the output with it: the first run of
     // this test appeared to die before its first printf, which was only the
     // buffer being discarded.
     setvbuf(stdout, nullptr, _IONBF, 0);
+
+    // The child iniNameFixturesIsolated() starts from a directory of its own: only the resolver's
+    // four real-file situations, no shipped ini read, and an exit code that says whether all held.
+    if (argc == 3 && std::strcmp(argv[1], "--ininame-cases") == 0) {
+        iniNameFixtures(widen(argv[2]));
+        return g_fails == 0 ? 0 : 1;
+    }
 
     if (argc < 2) {
         printf("usage: config_test.exe <dir containing edvr.ini> [scratch dir]\n");
@@ -651,6 +1081,8 @@ int main(int argc, char** argv) {
     expectStr("advanced.mesh_motion", "<unset>", "the retired mesh record pairing's key is absent");
     expectStr("advanced.temporal_aa_objects_reach", "<unset>", "the retired station path's reach is absent");
     expectStr("advanced.temporal_aa_objects_ships_metres", "<unset>", "the retired ship path's range is absent");
+    // The terrain patches' own recorded transforms (2026-10-01): terrain takes the camera's motion, with no key.
+    expectStr("advanced.terrain_motion", "<unset>", "the retired terrain motion key is absent");
     // The particle facing measurement (dead since 2026-08-23) retired 2026-09-23.
     expectStr("advanced.particle_face_emitter", "<unset>", "the retired particle facing key is absent");
     // The foveation's eye-tracked centre went with its gaze source (2026-09-23)
@@ -727,6 +1159,281 @@ int main(int argc, char** argv) {
                 fail("control: a fallback put back to off is caught",
                      at == std::string::npos ? "the call was not found to alter"
                                              : "the reverted source still matched the ini");
+            }
+        }
+    }
+    // The HDR route (design doc section 81, experimental.temporal_aa_before_post) is ON by default since it flew
+    // (2026-09-30): the shipped file says auto, and so must the code's fallback for an ini with no such line -- every
+    // install whose edvr.ini predates the key. The same pair of checks as ui_quality's above, because nothing else
+    // holds the two to one answer (check_config_contract.py compares names, not values).
+    expectStr("experimental.temporal_aa_before_post", "auto", "the shipped edvr.ini ships the HDR route on (auto)");
+    {
+        const std::string shippedRoute = Config::get().getString("experimental.temporal_aa_before_post", "<unset>");
+        const std::string runtimeSource = readRepoFile(dir, L"src\\d3d11\\flat_runtime.cpp");
+        if (runtimeSource.empty()) {
+            fail("flat_runtime.cpp is readable from the repo root", "could not read it");
+        } else {
+            const std::string fallback = codeFallbackOf(runtimeSource, "experimental.temporal_aa_before_post");
+            if (fallback == shippedRoute) {
+                ok("the code's fallback for experimental.temporal_aa_before_post is the shipped default");
+            } else {
+                fail("the code's fallback for experimental.temporal_aa_before_post is the shipped default",
+                     "flat_runtime.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedRoute + "\"");
+            }
+            // CONTROL: the same source with the fallback put back to off (what it was until the route flew).
+            std::string reverted = runtimeSource;
+            const std::string from = "getString(\"experimental.temporal_aa_before_post\", \"" + fallback + "\")";
+            const size_t at = reverted.find(from);
+            if (at != std::string::npos)
+                reverted.replace(at, from.size(), "getString(\"experimental.temporal_aa_before_post\", \"off\")");
+            if (at != std::string::npos && codeFallbackOf(reverted, "experimental.temporal_aa_before_post") != shippedRoute) {
+                ok("control: the HDR route's fallback put back to off is caught");
+            } else {
+                fail("control: the HDR route's fallback put back to off is caught",
+                     at == std::string::npos ? "the call was not found to alter"
+                                             : "the reverted source still matched the ini");
+            }
+        }
+    }
+
+    // The VR on-foot world route (design doc section 82, experimental.temporal_aa_on_foot_world) is OFF by default: it is
+    // unflown. The shipped file says off, and so must the code's fallback for an ini with no such line, which is every
+    // install that predates the key: the same pair of checks as above, because nothing else holds the two to one answer.
+    expectStr("experimental.temporal_aa_on_foot_world", "off", "the shipped edvr.ini ships the VR world route off");
+    {
+        const std::string shippedWorld = Config::get().getString("experimental.temporal_aa_on_foot_world", "<unset>");
+        const std::string worldSource = readRepoFile(dir, L"src\\d3d11\\vr_world_route.cpp");
+        if (worldSource.empty()) {
+            fail("vr_world_route.cpp is readable from the repo root", "could not read it");
+        } else {
+            const std::string fallback = codeFallbackOf(worldSource, "experimental.temporal_aa_on_foot_world");
+            if (fallback == shippedWorld) {
+                ok("the code's fallback for experimental.temporal_aa_on_foot_world is the shipped default");
+            } else {
+                fail("the code's fallback for experimental.temporal_aa_on_foot_world is the shipped default",
+                     "vr_world_route.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedWorld + "\"");
+            }
+            // CONTROL: the same source with the fallback turned to auto (a route that switched itself on for every install).
+            std::string flipped = worldSource;
+            const std::string from = "getString(\"experimental.temporal_aa_on_foot_world\", \"" + fallback + "\")";
+            const size_t at = flipped.find(from);
+            if (at != std::string::npos)
+                flipped.replace(at, from.size(), "getString(\"experimental.temporal_aa_on_foot_world\", \"auto\")");
+            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world") != shippedWorld) {
+                ok("control: the VR world route's fallback turned to auto is caught");
+            } else {
+                fail("control: the VR world route's fallback turned to auto is caught",
+                     at == std::string::npos ? "the call was not found to alter"
+                                             : "the flipped source still matched the ini");
+            }
+        }
+    }
+
+    // fix.vscreen_res_width = auto reads the route's key too (src\d3d11\vscreen_res.cpp: the on-foot screen is fitted to the eye only
+    // when the route will run, vscreen_fit.h). Its fallback is a second reader of the same key, and the day the route's default
+    // flips to auto the width has to follow it in the same commit: the same pair of checks, against the shipped file.
+    {
+        const std::string shippedWorld = Config::get().getString("experimental.temporal_aa_on_foot_world", "<unset>");
+        const std::string resSource = readRepoFile(dir, L"src\\d3d11\\vscreen_res.cpp");
+        if (resSource.empty()) {
+            fail("vscreen_res.cpp is readable from the repo root", "could not read it");
+        } else {
+            const std::string fallback = codeFallbackOf(resSource, "experimental.temporal_aa_on_foot_world");
+            if (fallback == shippedWorld) {
+                ok("the vscreen resolver's fallback for experimental.temporal_aa_on_foot_world is the shipped default");
+            } else {
+                fail("the vscreen resolver's fallback for experimental.temporal_aa_on_foot_world is the shipped default",
+                     "vscreen_res.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedWorld + "\"");
+            }
+            // CONTROL: the same source with the fallback turned the other way (the width fitted for a route no install has switched on).
+            std::string flipped = resSource;
+            const std::string from = "getString(\"experimental.temporal_aa_on_foot_world\", \"" + fallback + "\")";
+            const size_t at = flipped.find(from);
+            const char* other = shippedWorld == "auto" ? "off" : "auto";
+            if (at != std::string::npos)
+                flipped.replace(at, from.size(), std::string("getString(\"experimental.temporal_aa_on_foot_world\", \"") + other + "\")");
+            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world") != shippedWorld) {
+                ok("control: the vscreen resolver's fallback turned the other way is caught");
+            } else {
+                fail("control: the vscreen resolver's fallback turned the other way is caught",
+                     at == std::string::npos ? "the call was not found to alter" : "the flipped source still matched the ini");
+            }
+        }
+    }
+
+    // The world jitter's key (design doc section 82, stage 2: experimental.temporal_aa_on_foot_world_jitter) is ON by default
+    // and that is safe: it acts only while the route above, which is off by default, owns the world, and with the route key
+    // off the route never reads it (vr_world_route_test pins that). The shipped file and the code's fallback for an ini that
+    // predates the key must still say the same thing; the control turns the fallback to off (a jitter that a user who turned
+    // the route on never gets by default, which is the flight's whole point) and must be caught.
+    expectStr("experimental.temporal_aa_on_foot_world_jitter", "on", "the shipped edvr.ini ships the VR world jitter on");
+    {
+        const std::string shippedJitter = Config::get().getString("experimental.temporal_aa_on_foot_world_jitter", "<unset>");
+        const std::string worldSource = readRepoFile(dir, L"src\\d3d11\\vr_world_route.cpp");
+        if (worldSource.empty()) {
+            fail("vr_world_route.cpp is readable from the repo root (jitter key)", "could not read it");
+        } else {
+            const std::string fallback = codeFallbackOf(worldSource, "experimental.temporal_aa_on_foot_world_jitter");
+            if (fallback == shippedJitter) {
+                ok("the code's fallback for experimental.temporal_aa_on_foot_world_jitter is the shipped default");
+            } else {
+                fail("the code's fallback for experimental.temporal_aa_on_foot_world_jitter is the shipped default",
+                     "vr_world_route.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedJitter + "\"");
+            }
+            std::string flipped = worldSource;
+            const std::string from = "getString(\"experimental.temporal_aa_on_foot_world_jitter\", \"" + fallback + "\")";
+            const size_t at = flipped.find(from);
+            if (at != std::string::npos)
+                flipped.replace(at, from.size(), "getString(\"experimental.temporal_aa_on_foot_world_jitter\", \"off\")");
+            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world_jitter") != shippedJitter) {
+                ok("control: the VR world jitter's fallback turned to off is caught");
+            } else {
+                fail("control: the VR world jitter's fallback turned to off is caught",
+                     at == std::string::npos ? "the call was not found to alter"
+                                             : "the flipped source still matched the ini");
+            }
+        }
+    }
+
+    // The jitter phase count's switch (2026-10-01: experimental.temporal_aa_jitter_follows_upscale) is OFF by default: with it off
+    // every path keeps the fixed eight phases, byte for byte. The shipped file, and the code's fallback at both of its reads (the
+    // VR eye pass in native_temporal.cpp and the flat runtime), must say the same; the control turns each fallback to true (a
+    // longer sequence on every install, with nobody having asked) and must be caught.
+    expectBool("experimental.temporal_aa_jitter_follows_upscale", false, "the shipped edvr.ini ships the jitter phase count switch off");
+    for (const char* source : {"native_temporal.cpp", "flat_runtime.cpp"}) {
+        const std::string key = "experimental.temporal_aa_jitter_follows_upscale";
+        const std::string text = readRepoFile(dir, widen((std::string("src\\d3d11\\") + source).c_str()).c_str());
+        const std::string label = std::string(source) + " reads the jitter phase count switch with a false fallback";
+        if (text.empty()) {
+            const std::string readable = std::string(source) + " is readable from the repo root (jitter phase count switch)";
+            fail(readable.c_str(), "could not read it");
+            continue;
+        }
+        const std::string needle = "getBool(\"" + key + "\",";
+        const size_t at = text.find(needle);
+        // The literal after the comma, up to the closing parenthesis.
+        auto fallbackOf = [&](const std::string& s) {
+            const size_t pos = s.find(needle);
+            if (pos == std::string::npos) return std::string("<no such read>");
+            size_t begin = pos + needle.size();
+            while (begin < s.size() && s[begin] == ' ') ++begin;
+            size_t end = begin;
+            while (end < s.size() && s[end] != ')') ++end;
+            return s.substr(begin, end - begin);
+        };
+        if (at != std::string::npos && fallbackOf(text) == "false") ok(label.c_str());
+        else fail(label.c_str(), std::string(source) + " reads it with the fallback \"" + fallbackOf(text) + "\"");
+        std::string flipped = text;
+        if (at != std::string::npos) {
+            const size_t begin = flipped.find("false", at + needle.size());
+            flipped.replace(begin, 5, "true");
+        }
+        const std::string control = std::string("control: the jitter phase count switch's fallback turned to true in ") + source + " is caught";
+        if (at != std::string::npos && fallbackOf(flipped) != "false") ok(control.c_str());
+        else fail(control.c_str(), at == std::string::npos ? "the read was not found to alter" : "the flipped source still matched the ini");
+    }
+
+    // The on-foot maps gate (design-world-camera-motion-2026-09-30.md, Phase 1: experimental.on_foot_maps_sharp) is OFF by
+    // default: it is unflown, and with it on the layer takes a map's or a menu's 2D screen on foot. The shipped file and the
+    // code's fallback for an ini that predates the key must say the same thing; the control turns the fallback to on (a gate
+    // that switched itself on for every install) and must be caught.
+    expectStr("experimental.on_foot_maps_sharp", "off", "the shipped edvr.ini ships the on-foot maps gate off");
+    {
+        const std::string shippedMaps = Config::get().getString("experimental.on_foot_maps_sharp", "<unset>");
+        const std::string layerSource = readRepoFile(dir, L"src\\d3d11\\ui_layer.cpp");
+        if (layerSource.empty()) {
+            fail("ui_layer.cpp is readable from the repo root (maps key)", "could not read it");
+        } else {
+            const std::string fallback = codeFallbackOf(layerSource, "experimental.on_foot_maps_sharp");
+            if (fallback == shippedMaps) {
+                ok("the code's fallback for experimental.on_foot_maps_sharp is the shipped default");
+            } else {
+                fail("the code's fallback for experimental.on_foot_maps_sharp is the shipped default",
+                     "ui_layer.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedMaps + "\"");
+            }
+            std::string flipped = layerSource;
+            const std::string from = "getString(\"experimental.on_foot_maps_sharp\", \"" + fallback + "\")";
+            const size_t at = flipped.find(from);
+            if (at != std::string::npos)
+                flipped.replace(at, from.size(), "getString(\"experimental.on_foot_maps_sharp\", \"on\")");
+            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.on_foot_maps_sharp") != shippedMaps) {
+                ok("control: the on-foot maps gate's fallback turned to on is caught");
+            } else {
+                fail("control: the on-foot maps gate's fallback turned to on is caught",
+                     at == std::string::npos ? "the call was not found to alter"
+                                             : "the flipped source still matched the ini");
+            }
+        }
+    }
+
+    // The steady-detail key (design doc section 82: experimental.temporal_aa_on_foot_world_steady_detail) is ON by default since flight 4,
+    // the depth-validated form having passed in flat and VR, in every place that can say so: the shipped file and the code's fallback, in
+    // BOTH of its readers (the VR world route and the flat runtime, whose key it is on foot too), which must agree: an ini that predates
+    // the key must behave as one that carries it. An explicit off is the refusal as before the key existed, and stays pinned below (the
+    // flat scope, the VR profile, the route rig's parse of the word, the flat rig's scan of the reader). The control turns a fallback to
+    // off (a reader that silently refuses where the other relaxes) and must be caught.
+    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "on", "the shipped edvr.ini ships the steady-detail key on");
+    {
+        const std::string shippedSteady = Config::get().getString("experimental.temporal_aa_on_foot_world_steady_detail", "<unset>");
+        const struct { const wchar_t* file; const char* name; } readers[] = {
+            {L"src\\d3d11\\vr_world_route.cpp", "vr_world_route.cpp"}, {L"src\\d3d11\\flat_runtime.cpp", "flat_runtime.cpp"}};
+        for (const auto& reader : readers) {
+            const std::string source = readRepoFile(dir, reader.file);
+            if (source.empty()) {
+                fail((std::string(reader.name) + " is readable from the repo root (steady-detail key)").c_str(), "could not read it");
+                continue;
+            }
+            const std::string fallback = codeFallbackOf(source, "experimental.temporal_aa_on_foot_world_steady_detail");
+            const std::string label = std::string("the code's fallback for experimental.temporal_aa_on_foot_world_steady_detail in ") +
+                                      reader.name + " is the shipped default";
+            if (fallback == shippedSteady) {
+                ok(label.c_str());
+            } else {
+                fail(label.c_str(), std::string(reader.name) + " falls back to \"" + fallback + "\", the ini ships \"" + shippedSteady + "\"");
+            }
+            std::string flipped = source;
+            const std::string from = "getString(\"experimental.temporal_aa_on_foot_world_steady_detail\", \"" + fallback + "\")";
+            const size_t at = flipped.find(from);
+            if (at != std::string::npos)
+                flipped.replace(at, from.size(), "getString(\"experimental.temporal_aa_on_foot_world_steady_detail\", \"off\")");
+            const std::string control = std::string("control: the steady-detail key's fallback in ") + reader.name + " turned to off is caught";
+            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world_steady_detail") != shippedSteady) {
+                ok(control.c_str());
+            } else {
+                fail(control.c_str(), at == std::string::npos ? "the call was not found to alter" : "the flipped source still matched the ini");
+            }
+        }
+    }
+
+    // The VR camera census (design doc section 82, advanced.vr_camera_census) installs a game hook when it is on, so it
+    // is OFF by default in both places that can say so: the shipped file and the code's fallback for an ini that predates
+    // the key. The same pair of checks as the world route's, with the same control.
+    expectStr("advanced.vr_camera_census", "off", "the shipped edvr.ini ships the VR camera census off");
+    {
+        const std::string shippedCensus = Config::get().getString("advanced.vr_camera_census", "<unset>");
+        const std::string censusSource = readRepoFile(dir, L"src\\d3d11\\vr_camera_census.cpp");
+        if (censusSource.empty()) {
+            fail("vr_camera_census.cpp is readable from the repo root", "could not read it");
+        } else {
+            const std::string fallback = codeFallbackOf(censusSource, "advanced.vr_camera_census");
+            if (fallback == shippedCensus) {
+                ok("the code's fallback for advanced.vr_camera_census is the shipped default");
+            } else {
+                fail("the code's fallback for advanced.vr_camera_census is the shipped default",
+                     "vr_camera_census.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedCensus + "\"");
+            }
+            // CONTROL: the same source with the fallback turned to on (a census that installed its hook on every install).
+            std::string flipped = censusSource;
+            const std::string from = "getString(\"advanced.vr_camera_census\", \"" + fallback + "\")";
+            const size_t at = flipped.find(from);
+            if (at != std::string::npos)
+                flipped.replace(at, from.size(), "getString(\"advanced.vr_camera_census\", \"on\")");
+            if (at != std::string::npos && codeFallbackOf(flipped, "advanced.vr_camera_census") != shippedCensus) {
+                ok("control: the VR camera census's fallback turned to on is caught");
+            } else {
+                fail("control: the VR camera census's fallback turned to on is caught",
+                     at == std::string::npos ? "the call was not found to alter"
+                                             : "the flipped source still matched the ini");
             }
         }
     }
@@ -1140,10 +1847,12 @@ int main(int argc, char** argv) {
     //
     // Before the profile cases below: those switch g_runtimeProfile to flat and
     // invalid, under which these scratch keys would read as suppressed.
+    iniNameScan(dir);
     if (argc >= 3) {
         const std::wstring scratch = widen(argv[2]);
         floatCases(scratch);
         noteCases(scratch);
+        iniNameCases(scratch);
         raceCase(scratch);
         shareDeleteCase(scratch);
     }
@@ -1173,6 +1882,12 @@ int main(int argc, char** argv) {
             if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "on")
                 ok("flat jitter uses on default when absent");
             else fail("flat jitter default", "missing key was not on");
+            // The HDR route's key is read the same way with an auto default. A flat profile that did not permit it
+            // would turn that default into off, and an ini with no line (every install that predates the key) would
+            // run the copy route with nothing to say the route was never asked.
+            if (Config::get().getString("experimental.temporal_aa_before_post", "auto") == "auto")
+                ok("flat HDR route uses the auto default when the key is absent");
+            else fail("flat HDR route default", "missing key was not auto");
         }
     }
     Config::get().set("experimental.temporal_aa_jitter", "on");
@@ -1183,6 +1898,34 @@ int main(int argc, char** argv) {
     if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
         ok("flat jitter preserves explicit off");
     else fail("flat jitter override", "explicit off was not read");
+    // The HDR route's key (design doc section 81): the flat runtime reads it through getString with an "auto" default.
+    // Unlisted in runtimeProfileAllowsKey it would read off here whatever the file says -- a user who set auto, or
+    // left the default, would run the copy route with nothing in the log to say the key was refused.
+    Config::get().set("experimental.temporal_aa_before_post", "auto");
+    expectStr("experimental.temporal_aa_before_post", "auto", "flat scope permits the HDR route's key");
+    Config::get().set("experimental.temporal_aa_before_post", "off");
+    expectStr("experimental.temporal_aa_before_post", "off", "flat scope reads the HDR route's key off");
+    // The VR world route's key is a VR-profile key: unlisted in runtimeProfileAllowsKey, so a flat profile reads it off
+    // whatever the file says, and the flat runtime (which never asks) cannot be turned into it.
+    Config::get().set("experimental.temporal_aa_on_foot_world", "auto");
+    expectStr("experimental.temporal_aa_on_foot_world", "off", "flat scope refuses the VR world route's key");
+    // ... and so is its jitter key: a flat profile reads it off whatever the file says (it never asks).
+    Config::get().set("experimental.temporal_aa_on_foot_world_jitter", "on");
+    expectStr("experimental.temporal_aa_on_foot_world_jitter", "off", "flat scope refuses the VR world jitter's key");
+    // ... and the on-foot maps gate's: a VR-profile key, so a flat profile reads it off whatever the file says.
+    Config::get().set("experimental.on_foot_maps_sharp", "on");
+    expectStr("experimental.on_foot_maps_sharp", "off", "flat scope refuses the on-foot maps gate's key");
+    // ... but the steady-detail key is the one VR world key the flat runtime reads too (flat_runtime.cpp steadyReadKey: the depth-validated
+    // camera term for a stale slot, on foot): listed in runtimeProfileAllowsKey, so a flat profile reads what the file says. Unlisted it would
+    // read off here whatever the file said (and the default, on, would never reach the runtime), with nothing in the log to say the key was
+    // refused. The explicit off below is the refusal as before the key existed.
+    Config::get().set("experimental.temporal_aa_on_foot_world_steady_detail", "on");
+    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "on", "flat scope permits the steady-detail key's explicit on");
+    Config::get().set("experimental.temporal_aa_on_foot_world_steady_detail", "off");
+    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "off", "flat scope reads the steady-detail key's explicit off");
+    // The VR camera census's key is a VR-profile key too: a flat profile must never install its hook.
+    Config::get().set("advanced.vr_camera_census", "on");
+    expectStr("advanced.vr_camera_census", "off", "flat scope refuses the VR camera census's key");
     Config::get().set("fix.temporal_aa", "dlss");
     Config::get().set("fix.black_void", "on");
     Config::get().set("fix.head_offset_forward", "12");
@@ -1194,6 +1937,21 @@ int main(int argc, char** argv) {
     expectBool("fix.black_void", false, "flat profile suppresses restored unrelated fix");
     expectBool("experimental.night_vision_realistic", false,
                "flat jitter exception leaves unrelated experimental settings suppressed");
+    // Night vision's pulse stability defaults ON, and nightVisionConfigure reads it through
+    // this getter: a refused key reading off is all that keeps nightVisionWantsDraws() false on
+    // flat, so the draw gate (vscreen.cpp drawGateSubscribed) is not held open there by a fix
+    // the flat profile does not run. expectBool asks with both defaults, so it is the default-on
+    // read that is pinned.
+    Config::get().set("fix.night_vision_stability", "on");
+    expectBool("fix.night_vision_stability", false,
+               "flat profile: night vision pulse stability (default on) reads off, so it cannot hold the draw gate open");
+    // The depth probe is armed by fix.temporal_aa (read off on flat, above) or by the eye depth capture,
+    // and depthProbeConfigure reads the capture through this getter: a refused key reading off is what
+    // keeps depthProbeWanted() false on flat, so the draw gate (vscreen.cpp drawGateSubscribed) is not
+    // held open there by a probe the flat profile does not run.
+    Config::get().set("advanced.eye_depth_capture", "on");
+    expectBool("advanced.eye_depth_capture", false,
+               "flat profile: eye depth capture reads off, so it cannot arm the depth probe or hold the draw gate open");
     expectInt("fix.head_offset_forward", 0, "flat profile suppresses numeric fix");
     expectFloat("fix.head_offset_forward", 0.0f, "flat profile suppresses float fix");
     if (Config::get().getIntInRange("fix.head_offset_forward", 12, 1, 100) != 0)
@@ -1232,6 +1990,10 @@ int main(int argc, char** argv) {
     if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
         ok("invalid profile suppresses flat jitter");
     else fail("invalid profile jitter", "flat key widened invalid scope");
+    Config::get().set("experimental.temporal_aa_before_post", "auto");
+    expectStr("experimental.temporal_aa_before_post", "off", "invalid profile cannot turn the HDR route on");
+    Config::get().set("advanced.vr_camera_census", "on");
+    expectStr("advanced.vr_camera_census", "off", "invalid profile cannot turn the VR camera census on");
     g_runtimeProfile = RuntimeProfile::LegacyVr;
     expectBool("fix.black_void", true, "legacy profile retains original behavior");
     if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
@@ -1242,6 +2004,23 @@ int main(int argc, char** argv) {
     if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
         ok("VR profile reads explicit jitter setting");
     else fail("VR profile jitter", "flat exception changed VR scope");
+    Config::get().set("experimental.temporal_aa_on_foot_world", "auto");
+    expectStr("experimental.temporal_aa_on_foot_world", "auto", "VR profile reads the VR world route's key");
+    Config::get().set("experimental.temporal_aa_on_foot_world_jitter", "off");
+    expectStr("experimental.temporal_aa_on_foot_world_jitter", "off", "VR profile reads the VR world jitter's explicit off");
+    Config::get().set("experimental.temporal_aa_on_foot_world_jitter", "on");
+    expectStr("experimental.temporal_aa_on_foot_world_jitter", "on", "VR profile reads the VR world jitter's explicit on");
+    Config::get().set("experimental.on_foot_maps_sharp", "on");
+    expectStr("experimental.on_foot_maps_sharp", "on", "VR profile reads the on-foot maps gate's explicit on");
+    Config::get().set("experimental.temporal_aa_on_foot_world_steady_detail", "on");
+    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "on", "VR profile reads the VR world steady-detail key's explicit on");
+    Config::get().set("experimental.temporal_aa_on_foot_world_steady_detail", "off");
+    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "off", "VR profile reads the VR world steady-detail key's explicit off");
+    Config::get().set("advanced.vr_camera_census", "on");
+    expectStr("advanced.vr_camera_census", "on", "VR profile reads the VR camera census's explicit on");
+    g_runtimeProfile = RuntimeProfile::LegacyVr;
+    expectStr("advanced.vr_camera_census", "on", "the legacy VR profile reads it too (runtimeVrProfile covers both)");
+    g_runtimeProfile = RuntimeProfile::Vr;
     expectFloat("fix.render_sharpness", 0.3f, "VR profile still reads the sharpening setting");
 
     // The flat panel writes the Sharpening row into edvr-flat.ini and asks for a

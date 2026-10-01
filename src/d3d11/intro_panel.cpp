@@ -15,7 +15,9 @@
 #include "../common/log.h"
 #include "../common/frame_flag.h"   // headForward / eyeTangents, from the vr half
 #include "binding_shadow.h"
+#include "intro_curve_math.h"   // introCbLooksScreenSpace: the screen-space test, one rule for the movie's refusal and the splash's reading
 #include "intro_upscale.h"
+#include "panel_curve.h"        // fix.panel_curvature, and whether the surface strip is wanted
 
 namespace edvr {
 namespace {
@@ -84,6 +86,16 @@ constexpr float kScreenDistDefault = 3.35f;
 // degree. Named rather than buried so it can be corrected if it ever
 // matters.
 constexpr float kHalfIpd = 0.0315f;
+
+// THE CURVED MOVIE (fix.panel_curvature above 0; docs\intro-video.md, 2026-10-01). The world panel's unit quad is replaced, for one draw, by
+// the strip panel_curve.cpp bends -- the on-foot screen's own arc, its half-width kScreenHalfW in metres as the depth gain. What this file
+// does is the placement half of it: cb2[3], the z column of the transform, carries the seated +z axis (the direction from the panel toward
+// the viewer, unit length, which is what a bent strip's z' is measured along), and the draw is "armed" for the caller to make as the strip.
+//
+// There is NO test of the bent edges against the eye, on purpose (the only test is the centre's, in buildWorldCb): D3D clips what is behind
+// the eye in homogeneous space (clip z is w/2 here, so the plane is w = 0), the part of a bent panel beside or behind the eye is a part
+// nobody can see (90 degrees or more off the view axis, outside the frustum), and a test would pop the whole bend off at about 20 degrees
+// of head yaw -- differently in the two eyes near its threshold -- to protect a part that clipping already takes care of.
 
 // World lock (part of fix.intro_video = screen). The counter-move is the
 // retired witchstar fix's (removed 2026-09-23), which held a head-locked sprite on a world direction by shifting
@@ -161,28 +173,17 @@ uint32_t g_slotCount = 0;
 void*    g_restore = nullptr;    // the game's buffer, for endDraw
 uint32_t g_applied = 0;
 
-// Is this buffer the screen-space placement, and not a world-space one?
-//
-// The discriminator is the perspective divide. A world-placed panel -- the
-// splash, the menu, anything that goes through a view-projection -- has a
-// varying w, which means non-zero w terms in cb2[1..3] and a cb2[4].w that
-// is not 1. The movie's has neither: cb2[3] is all zeros and w is a constant
-// 1. Measured on both, 2026-08-28.
-//
-// This is why the fix cannot wander into the splash even if the draw match
-// were wrong: the splash's own numbers refuse it.
-bool looksScreenSpace(const float* f) {
-    auto zero = [](float v) { return v > -1e-9f && v < 1e-9f; };
-    if (!zero(f[7]) || !zero(f[11])) return false;       // cb2[1].w, cb2[2].w
-    for (uint32_t i = 12; i < 16; ++i) {                 // cb2[3] entirely
-        if (!zero(f[i])) return false;
-    }
-    if (f[19] < 0.999f || f[19] > 1.001f) return false;  // cb2[4].w == 1
-    // The scale must be a plausible half-size in pixels. A world-space quad
-    // measured 4.4 by 2.5 units; a screen-space one measured 512 by 288.
-    if (f[0] < 16.0f || f[1] < 16.0f) return false;
-    return true;
-}
+// The curved movie. g_stripArmed: the bind in progress (OnComposite true, EndDraw not yet called) carries the z column, so the caller draws
+// the bent strip in place of the quad. g_armedDraws: how many binds were armed, for the retirement line. The note is once per process, as
+// every line in this file is.
+bool     g_stripArmed = false;
+uint32_t g_armedDraws = 0;
+bool     g_armedNoted = false;
+
+// (Is this buffer the movie's screen-space placement, and not a world-space one? That rule lives in intro_curve_math.h now --
+// introCbLooksScreenSpace -- so the refusal below and the splash's reading share it. The discriminator is the perspective divide: a
+// world-placed panel, the splash or the menu, has a varying w, non-zero w terms in cb2[1..3] and a cb2[4].w that is not 1; the movie's has
+// neither. Measured on both, 2026-08-28. It is why this fix cannot wander into the splash even if the draw match were wrong.)
 
 // Build cb2 for a world-space panel on the splash's screen.
 //
@@ -209,8 +210,15 @@ bool isFiniteF(float v) { return v == v && v <= 3.4e38f && v >= -3.4e38f; }
 // the pose this transform was built from -- menu.cpp's reading (minus the
 // pose's third column), for the one "holding" line, so it says what the
 // game's forward was being held against.
+//
+// curved: the surface strip is wanted (fix.panel_curvature above 0 and not stood down), so the movie is drawn as the bent strip and cb2[3]
+// gets the z column -- the view-space image of the seated +z axis, unit length -- whatever the pose. False is every draw there was before
+// the curve existed, and leaves cb2[3] zero, byte for byte what this wrote then. The placement is the same either way: the movie is held on
+// the game's forward, bent or flat. A pose that puts the panel's CENTRE behind the eye is refused below, bent or flat, as always; the bent
+// edges are not tested at all (THE CURVED MOVIE note above says why).
 bool buildWorldCb(bool leftEye, float dist,
-                  float* out, const char** why, float* yawDeg = nullptr) {
+                  float* out, const char** why, float* yawDeg = nullptr,
+                  bool curved = false) {
     float pose[12];
     if (!headPose(pose)) { *why = "no head pose has been published"; return false; }
     if (yawDeg) {
@@ -306,6 +314,10 @@ bool buildWorldCb(bool leftEye, float dist,
         c0[i] = At(i, 2) * (-dist) + o;
     }
     c0[0] -= ex;
+    // The panel's +z axis in view space: the direction from the panel toward the viewer, unit length. A flat panel's quad has z = 0 on every
+    // vertex, so nothing uses it; a bent panel's strip has its z' along it, and cb2[3] carries it.
+    float cz[3];
+    for (int i = 0; i < 3; ++i) cz[i] = At(i, 2);
 
     // The panel has to be IN FRONT of this eye.
     //
@@ -332,7 +344,7 @@ bool buildWorldCb(bool leftEye, float dist,
     // column zero and w = 0. A single test here covers the pose, the
     // tangents and the arithmetic between them.
     for (int i = 0; i < 3; ++i) {
-        if (!isFiniteF(cx[i]) || !isFiniteF(cy[i]) || !isFiniteF(c0[i])) {
+        if (!isFiniteF(cx[i]) || !isFiniteF(cy[i]) || !isFiniteF(c0[i]) || !isFiniteF(cz[i])) {
             *why = "the transform came out non-finite";
             return false;
         }
@@ -353,7 +365,9 @@ bool buildWorldCb(bool leftEye, float dist,
     out[1] = 1.0f;
     col(cx, false, out + 4);
     col(cy, false, out + 8);
-    // cb2[3] stays zero: the quad's z is zero on every vertex (measured).
+    // cb2[3] stays zero for a flat panel: the quad's z is zero on every vertex (measured). A bent panel's strip has a z', in metres along cz
+    // (panel_curve.cpp: z' = gain (1 - cos(theta))/(pi c), the gain the panel's half-width), so the column is the axis itself, unit length.
+    if (curved) col(cz, false, out + 12);
     col(c0, true, out + 16);
     return true;
 }
@@ -464,6 +478,7 @@ void introPanelNoteFill(uint32_t targetW, uint32_t targetH) {
 
 bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                            uint32_t instances, uint32_t srvW, uint32_t srvH) {
+    g_stripArmed = false;   // armed is for the bind this call makes, and for no other
     if (!introPanelWants() || !ctx) return false;
     // The composite's shape, from the census: a six-index instanced quad.
     if (kind != 'X' || count != 6 || instances != 1) return false;
@@ -530,6 +545,9 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             return;
         }
         if (s->ready && s->ours) {
+            // This bind carries the curved strip's z column (cb2[3]): the
+            // caller draws the bent strip in place of the quad.
+            bool armed = false;
             // The world panel is rebuilt EVERY draw -- the view moves with
             // the head, which is the entire point -- so the buffer is
             // dynamic and written here rather than baked once.
@@ -574,10 +592,14 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 ctx->RSGetViewports(&nvp, &vp);
                 float world[kCbFloats];
                 float yawDeg = 0.0f;
+                // fix.panel_curvature above 0, and the surface strip not
+                // stood down: the movie is to be drawn bent. Not otherwise,
+                // which builds exactly what this built before the curve.
+                const bool curved = panelCurveSurfaceWanted();
                 const char* why = "the viewport is degenerate";
                 if (nvp == 0 || vp.Width <= 0.0f || vp.Height <= 0.0f ||
                     !buildWorldCb(s->leftEye, g_screenDist, world, &why,
-                                  g_anchored ? nullptr : &yawDeg)) {
+                                  g_anchored ? nullptr : &yawDeg, curved)) {
                     // No pose, no tangents, no viewport: stock rather than a
                     // panel placed on guesses.
                     if (!g_lockRefusedNoted) {
@@ -612,11 +634,29 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         static_cast<double>(yawDeg), g_frame,
                         s->leftEye ? "left" : "right");
                 }
+                armed = curved;
             }
             g_restore = cb;
             ID3D11Buffer* ours = s->ours;
             ctx->VSSetConstantBuffers(kVsSlot, 1, &ours);
             bound = true;
+            if (armed) {
+                g_stripArmed = true;
+                ++g_armedDraws;
+                if (!g_armedNoted) {
+                    g_armedNoted = true;
+                    const PanelCurveInfo ci = panelCurveInfo();
+                    Log::get().note(
+                        "intro video curve: the movie is drawn as a %d-column "
+                        "strip at curvature %.3f, gain %.3f m (the panel's "
+                        "half-width), its ends bent toward you -- the "
+                        "on-foot screen's own arc, from panel frame %u. The "
+                        "movie is still held on the game's forward. Said "
+                        "once.",
+                        ci.segments, static_cast<double>(ci.curvature),
+                        static_cast<double>(kScreenHalfW), g_frame);
+                }
+            }
             if (++g_applied == 1) {
                 Log::get().note(
                     "intro video size: engaged -- the movie's panel is drawn "
@@ -661,7 +701,12 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     return bound || upscaled;
 }
 
+bool introPanelStripArmed() { return g_stripArmed; }
+
+float introPanelStripGain() { return kScreenHalfW; }
+
 void introPanelEndDraw(ID3D11DeviceContext* ctx) {
+    g_stripArmed = false;   // the draw is made: nothing is armed past it
     if (!ctx) return;
     introUpscaleEnd(ctx);
     if (g_restore) {
@@ -698,11 +743,18 @@ void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
     if (sceneFrame && !g_retired) {
         g_retired = true;
         if (g_slotCount || g_applied) {
+            // At curvature 0 nothing was armed and the line is what it was.
+            char armedNote[96] = "";
+            if (g_armedDraws) {
+                _snprintf_s(armedNote, sizeof(armedNote), _TRUNCATE,
+                            " %u of them were armed for the curved strip.",
+                            g_armedDraws);
+            }
             Log::get().note(
                 "intro video size: a rendered scene arrived -- the intro is "
                 "over and this stands down for the session. It resized %u "
-                "draw(s).",
-                g_applied);
+                "draw(s).%s",
+                g_applied, armedNote);
         } else {
             Log::get().note(
                 "intro video: a rendered scene arrived and the movie's panel "
@@ -739,7 +791,7 @@ void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
             memcpy(f, m.pData, sizeof(f));
             ctx->Unmap(s.stage, 0);
 
-            if (!looksScreenSpace(f)) {
+            if (!introCbLooksScreenSpace(f)) {
                 // Not the movie's placement. Refusing the SESSION rather than
                 // the slot: a world-space buffer here means the draw match is
                 // reaching something it should not, and resizing that is how
@@ -822,6 +874,7 @@ void introPanelShutdown() {
     for (Slot& s : g_slot) releaseSlot(s);
     g_slotCount = 0;
     g_restore = nullptr;
+    g_stripArmed = false;
 }
 
 }  // namespace edvr

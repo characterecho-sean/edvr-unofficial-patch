@@ -144,14 +144,17 @@ void Config::init(const std::wstring& moduleDir) {
     // tuning. A flat install without edvr-flat.ini yet falls back to
     // edvr.ini, which is how existing flat installs keep their settings
     // until the installer seeds the separate file.
+    //
+    // One file is read, whole: m_path is the first candidate that exists, and iniName()
+    // (config.h) names it for every message that has to say which file it means.
     std::wstring candidates[4];
     size_t count = 0;
     if (runtimeFlatProfile()) {
-        candidates[count++] = moduleDir + L"\\edvr-flat.ini";
-        candidates[count++] = executableDirectory() + L"\\edvr-flat.ini";
+        candidates[count++] = moduleDir + L"\\" + kIniNameFlatW;
+        candidates[count++] = executableDirectory() + L"\\" + kIniNameFlatW;
     }
-    candidates[count++] = moduleDir + L"\\edvr.ini";
-    candidates[count++] = executableDirectory() + L"\\edvr.ini";
+    candidates[count++] = moduleDir + L"\\" + kIniNameVrW;
+    candidates[count++] = executableDirectory() + L"\\" + kIniNameVrW;
     m_path = candidates[0];
     for (size_t i = 0; i < count; ++i) {
         if (GetFileAttributesW(candidates[i].c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -353,6 +356,8 @@ void Config::auditResolve(void* parsedMap) {
     if (!g_auditKnown || !m_impl) return;
     auto& parsed = *static_cast<ValueMap*>(parsedMap);
 
+    // The file every finding below is about: the one this parse read.
+    const std::string file = iniName();
     std::set<std::string> movedOld;
     std::set<std::string> synthesized;
     for (size_t i = 0; i < g_auditMovedCount; ++i) {
@@ -372,7 +377,7 @@ void Config::auditResolve(void* parsedMap) {
                 // synthesized from it.
                 if (m_impl->auditNoted.insert("mv:" + oldK).second) {
                     m_impl->auditPending.push_back(
-                        "edvr.ini: " + oldK + " has moved to " + newK +
+                        file + ": " + oldK + " has moved to " + newK +
                         ", and your line still carries the retired default (" +
                         o->second + "), so it is ignored and " + newK +
                         "'s own default applies. The installer's update "
@@ -386,7 +391,7 @@ void Config::auditResolve(void* parsedMap) {
             synthesized.insert(newK);
             if (m_impl->auditNoted.insert("mv:" + oldK).second) {
                 m_impl->auditPending.push_back(
-                    "edvr.ini: " + oldK + " has moved to " + newK +
+                    file + ": " + oldK + " has moved to " + newK +
                     " -- your value (" + o->second + ") is being read from "
                     "the old line this session. The installer's update "
                     "migrates the file, or move the line yourself.");
@@ -401,7 +406,7 @@ void Config::auditResolve(void* parsedMap) {
             // for a target genuinely set in the file.
             if (m_impl->auditNoted.insert("mv2:" + oldK).second) {
                 m_impl->auditPending.push_back(
-                    "edvr.ini: both " + oldK + " and " + newK + " are set, "
+                    file + ": both " + oldK + " and " + newK + " are set, "
                     "with different values. The new name wins (" + n->second +
                     "); delete the old line.");
             }
@@ -438,7 +443,7 @@ void Config::auditResolve(void* parsedMap) {
     if (deadCount) {
         if (deadCount > deadShown) dead += ", ...";
         m_impl->auditPending.push_back(
-            "edvr.ini: " + std::to_string(deadCount) +
+            file + ": " + std::to_string(deadCount) +
             " line(s) name settings this build does not read: " + dead +
             ". A typo or a retired setting -- those lines do nothing.");
     }
@@ -563,9 +568,9 @@ bool Config::getBool(const char* key, bool def) const {
     //
     // Once per key per parse (firstNoteFor), not once per read.
     if (firstNoteFor(key)) {
-        Log::get().note("edvr.ini: %s = \"%s\" is not a yes/no value, so the default (%s) is "
+        Log::get().note("%s: %s = \"%s\" is not a yes/no value, so the default (%s) is "
                         "being used. Write 1/0, true/false, yes/no or on/off.",
-                        key, v.c_str(), def ? "on" : "off");
+                        iniName(), key, v.c_str(), def ? "on" : "off");
     }
     return def;
 }

@@ -6,6 +6,7 @@
 #include "config.h"  // executableDirectory
 #include "log.h"
 #include "crash_context.h"
+#include "heartbeat_writer.h"
 
 namespace edvr {
 namespace {
@@ -246,6 +247,23 @@ void appendStackModules(char* line, size_t& n, size_t cap, const CONTEXT* ctx) {
     if (named == 0) appendStr(line, n, cap, " no return address found");
 }
 
+// The heartbeat's writer thread (breadcrumbHeartbeat below): what the render thread posts, a thread of ours writes.
+HeartbeatWriter g_heartbeat;
+
+// Runs on the writer thread: the line the heartbeat has always written, from the frame and uptime the render
+// thread posted. Hand-built like every breadcrumb: no CRT formatting.
+void heartbeatSink(uint64_t frameNo, uint64_t uptimeSeconds) {
+    char line[128];
+    size_t n = 0;
+    appendStr(line, n, sizeof(line), "gfx: alive, frame ");
+    appendNum(line, n, sizeof(line), frameNo);
+    appendStr(line, n, sizeof(line), ", ");
+    appendNum(line, n, sizeof(line), uptimeSeconds);
+    appendStr(line, n, sizeof(line), "s uptime");
+    line[n] = 0;
+    breadcrumb(line);
+}
+
 LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;
 bool g_filterInstalled = false;
 
@@ -278,6 +296,14 @@ LONG WINAPI edvrCrashFilter(EXCEPTION_POINTERS* info) {
     if (InterlockedExchange(&entered, 1) != 0) {
         return g_prevFilter ? g_prevFilter(info) : EXCEPTION_CONTINUE_SEARCH;
     }
+
+    // THE LAST LINES OF THE TRAIL ARE THIS FILTER'S, AND NO HEARTBEAT MAY LAND BEHIND THEM. The heartbeat is written
+    // by a thread of ours now (heartbeat_writer.h), and a thread that is still running while this one reports
+    // would otherwise be free to append "alive, frame N" after the crash line, which reads as a session that
+    // survived it. Close it first: nothing new starts, a pending post is dropped, and a write already under way
+    // gets up to 20 ms to finish (bounded: a filter never waits without a bound, and a disk that is stalling is not
+    // going to be waited for while the process dies).
+    g_heartbeat.closeAndDrain(20);
 
     char line[256];
     size_t n = 0;
@@ -412,15 +438,26 @@ void breadcrumbHeartbeat(uint64_t frameNo) {
     if (now - lastMs < intervalMs) return;
     lastMs = now;
 
-    char line[128];
-    size_t n = 0;
-    appendStr(line, n, sizeof(line), "gfx: alive, frame ");
-    appendNum(line, n, sizeof(line), frameNo);
-    appendStr(line, n, sizeof(line), ", ");
-    appendNum(line, n, sizeof(line), now / 1000);
-    appendStr(line, n, sizeof(line), "s uptime");
-    line[n] = 0;
-    breadcrumb(line);
+    // THE FILE IS NOT WRITTEN HERE. This runs on the render thread, and an
+    // open/append/close of a file in the game folder goes through whatever filter
+    // driver is watching it -- on a slow disk that is a hitch in a frame, every
+    // thirty seconds, from the feature whose job is to be harmless (issue 63: a
+    // worker's file read stalled for 2.3 s at the same moment as the worst freeze
+    // of the flight). The frame and the uptime are handed to a small thread of
+    // EDVR's own (heartbeat_writer.h), which writes the line; what this does is
+    // three stores and an event. The line says what it always said and carries the
+    // frame and uptime of THIS moment; if the render thread stops, nothing more is
+    // posted and the heartbeat stops with it, which is the shape of a hang.
+    //
+    // Started on the first post, not at load: nothing here runs under the loader
+    // lock, and a session with the key at 0 never reaches this line, so it never
+    // makes the thread.
+    g_heartbeat.start(&heartbeatSink);
+    g_heartbeat.post(frameNo, now / 1000);
+}
+
+void breadcrumbHeartbeatClose() {
+    g_heartbeat.close();
 }
 
 void writeFatalNote(const std::wstring& dir, const wchar_t* text) {

@@ -31,6 +31,10 @@ struct Context {
     uint64_t firstSequence = 0;
     uint64_t waitSequence = 0;
     int64_t waitQpc = 0;
+    // The last two pose-wait RETURNS (nativeTimingWaitReturns): the runtime's cycle boundary, kept on every
+    // return, valid sample or not, so one invalid wait does not stretch a cycle to two.
+    int64_t lastReturnQpc = 0, prevReturnQpc = 0;
+    uint64_t lastReturnSequence = 0;
     bool waitOutstanding = false;
     bool waitValid = false;
     bool published = false;
@@ -218,6 +222,9 @@ HRESULT WINAPI waitEnd(void* p, uint64_t sequence, uint32_t valid, int64_t perio
     if (!c || !c->active || c != current || !c->waitOutstanding ||
         sequence != c->waitSequence) return E_INVALIDARG;
     const int64_t end = qpcNow();
+    c->prevReturnQpc = c->lastReturnQpc;
+    c->lastReturnQpc = end;
+    c->lastReturnSequence = sequence;
     const bool sensible = periodNs >= 0 && periodNs <= kMaxPeriodNs;
     double elapsedMs = 0;
     const bool ok = valid == 1 && sensible && qpcMs(c->waitQpc, end, elapsedMs) &&
@@ -448,16 +455,20 @@ HRESULT WINAPI publishDeviceGpu(void* p, const EdvrNativeDeviceGpuSample* sample
 }
 
 HRESULT WINAPI close(void* p) {
-    std::lock_guard<std::mutex> lock(lifetime);
-    Context* c = identify(p);
-    if (!c) return E_INVALIDARG;
-    if (!c->active) return S_FALSE;
-    if (!c->published) queueCompletion(*c, c->waitSequence, true);
-    poison(c->waitSequence);
-    c->active = false; c->device = nullptr; c->waitOutstanding = c->waitValid = false;
-    c->published = false;
-    if (current == c) { current = nullptr; resetPresentHistory(); edvr::mapWaitArm(false); }
-    snapshot = {};
+    {
+        std::lock_guard<std::mutex> lock(lifetime);
+        Context* c = identify(p);
+        if (!c) return E_INVALIDARG;
+        if (!c->active) return S_FALSE;
+        if (!c->published) queueCompletion(*c, c->waitSequence, true);
+        poison(c->waitSequence);
+        c->active = false; c->device = nullptr; c->waitOutstanding = c->waitValid = false;
+        c->published = false;
+        if (current == c) { current = nullptr; resetPresentHistory(); edvr::mapWaitArm(false); }
+        snapshot = {};
+    }
+    // The lock is down before anything else runs: the observer writes log lines.
+    if (edvr::g_nativeTimingCloseObserver) edvr::g_nativeTimingCloseObserver();
     return S_OK;
 }
 }
@@ -466,6 +477,16 @@ namespace edvr {
 NativeTimingSnapshot nativeTimingSnapshot() noexcept {
     std::lock_guard<std::mutex> lock(lifetime);
     return snapshot;
+}
+NativeWaitReturns nativeTimingWaitReturns() noexcept {
+    std::lock_guard<std::mutex> lock(lifetime);
+    NativeWaitReturns r;
+    if (!current || !current->active) return r;
+    r.sequence = current->lastReturnSequence;
+    r.returnQpc = current->lastReturnQpc;
+    r.previousQpc = current->prevReturnQpc;
+    r.valid = r.returnQpc > 0 && r.previousQpc > 0 && r.returnQpc > r.previousQpc;
+    return r;
 }
 unsigned nativeTimingReadCompletions(uint64_t& cursor, NativeTimingSnapshot* out,
                                      unsigned capacity, uint64_t& dropped) noexcept {

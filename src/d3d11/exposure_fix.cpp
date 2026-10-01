@@ -21,6 +21,7 @@
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
 #include "flat_runtime.h"
 #include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
+#include "vr_world_route.h"  // g_vrWorldInternal: the VR world route's own dispatches pass straight through
 #include "../common/runtime_profile.h"
 #include "gpu_frame_timing.h"
 #include "fss_dump.h"     // the reconstruction bracket, round 30
@@ -674,6 +675,10 @@ void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UI
 // them and the next unseen compute shader ran the shape probe over freed
 // memory. vscreen.cpp hit the same thing and hooks this for the same reason.
 void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
+    // The VR world route's resolver isolates the context (SwapDeviceContextState, ClearState) around its own work: the game's
+    // bindings are not forgotten by that (vscreen's hook on this slot steps aside for the same scope, and this one must not
+    // run first and wipe the shadow).
+    if (g_vrWorldInternal) { g_state->realClearState(self); return; }
     if (foreignContext(self)) {
         g_state->realClearState(self);
         return;
@@ -721,6 +726,7 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
         g_state->realDispatchIndirect(self, args, off);
         return;
     }
+    if (g_vrWorldInternal) { g_state->realDispatchIndirect(self, args, off); return; }   // the world route's own (vr_world_route.h)
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DispatchIndirect, self, static_cast<int>(self->GetType()));
     State* s = g_state;
@@ -740,10 +746,12 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         g_state->realDispatch(self, x, y, z);
         return;
     }
+    if (g_vrWorldInternal) { g_state->realDispatch(self, x, y, z); return; }   // the world route's own: not the game's exposure pass
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Dispatch, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     ++s->thunkHits[kHitDispatch];
+    if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteDispatch();   // a UAV write into H after the resolve is the latch's
     if (foreignContext(self)) {
         // Recorded, then passed straight through. Deferred contexts reach
         // this thunk (in-place patching hooks the class), and until round
@@ -946,8 +954,9 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
                 // silently ignored, on the support path where it matters most.
                 Log::get().note("exposure fix: confirmed compute shader %016llX runs "
                                 "once per eye. Pin it with exposure_shader under "
-                                "[advanced] in edvr.ini if you want to skip detection.",
-                                static_cast<unsigned long long>(hashOf(bindingGet(BindSlot::Cs))));
+                                "[advanced] in %s if you want to skip detection.",
+                                static_cast<unsigned long long>(hashOf(bindingGet(BindSlot::Cs))),
+                                Config::get().iniName());
             }
             shareExposure(self, s->firstEye, second);
             if (s->dampK > 0.0f) exposureDamp(self, s->firstEye[1]);

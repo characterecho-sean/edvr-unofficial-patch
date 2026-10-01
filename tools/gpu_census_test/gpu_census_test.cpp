@@ -323,13 +323,11 @@ void rotationAndRealTimerCase(Device& d) {
         d.ctx->ClearRenderTargetView(rtv.Get(), colour);   // stands in for the game's draw
     }
     check(pool.occurrences == 3 && g_activeTimed == 3, "altered: three pool-family draws on their section's turn are counted and selected for timing");
-    { GpuCensusAlteredScope other(d.ctx.Get(), AlteredDrawClass::TerrainOriginal); }
     { GpuCensusAlteredScope other(d.ctx.Get(), AlteredDrawClass::UiLayer); }
     { GpuCensusAlteredScope other(d.ctx.Get(), AlteredDraw(AlteredDrawClass::Verdict, AlteredFix::GlareSteady)); }
-    check(g_section[static_cast<size_t>(GpuCensusSection::AlteredTerrain)].occurrences == 1 &&
-              g_section[static_cast<size_t>(GpuCensusSection::AlteredUiLayer)].occurrences == 1 &&
+    check(g_section[static_cast<size_t>(GpuCensusSection::AlteredUiLayer)].occurrences == 1 &&
               g_section[static_cast<size_t>(alteredFixSectionOf(AlteredFix::GlareSteady))].occurrences == 1 &&
-              pool.occurrences == 3 && occurrencesEverywhere() == 6 && g_activeTimed == 3,
+              pool.occurrences == 3 && occurrencesEverywhere() == 5 && g_activeTimed == 3,
           "altered: each class, and each fix, counts in its own section only, and a section that is not on its turn is counted, not timed");
     // The rotation reaches every TURN once a cycle, the altered-draw ones included; the fix sections after the
     // first share its turn and are never landed on.
@@ -340,12 +338,15 @@ void rotationAndRealTimerCase(Device& d) {
         gpuCensusFrame(d.ctx.Get());
         visited[static_cast<size_t>(g_activeSection)] = true;
     }
-    bool ownersVisited = true, membersSkipped = true;
+    bool ownersVisited = true, membersSkipped = true, idleWorldSkipped = true;
     for (size_t i = 0; i < kSections; ++i) {
+        // The VR world route's sections are turns only once called this window (nextTurnOwner): none was here.
+        if (i >= kWorldFirst && i < kWorldFirst + kWorldSections) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
         if (turnOwnerOf(static_cast<GpuCensusSection>(i)) == static_cast<GpuCensusSection>(i)) ownersVisited = ownersVisited && visited[i];
         else membersSkipped = membersSkipped && !visited[i];
     }
-    check(ownersVisited && visited[static_cast<size_t>(GpuCensusSection::AlteredTerrain)] &&
+    check(idleWorldSkipped, "world route: with the key off (its sections never called) the rotation gives them no turn, so the census samples as it did before they existed");
+    check(ownersVisited && visited[static_cast<size_t>(GpuCensusSection::AlteredUiLayer)] &&
               visited[static_cast<size_t>(GpuCensusSection::AlteredFixFirst)],
           "altered: the frame rotation visits every turn, the altered-draw ones and the fix sections' shared one too");
     check(membersSkipped, "altered: the fix sections after the first are not turns of their own: the rotation never lands on them");
@@ -562,7 +563,7 @@ void gapCases() {
     noteApplicationCompletion(fakeSpan(1, 5000000, 5100000, kFreq));
     noteApplicationCompletion(fakeSpan(2, 5101000, 5201000, kFreq * 2));   // the clock changed
     noteApplicationCompletion(fakeSpan(3, 5100000, 5200000, kFreq * 2));   // starts before frame 2 ended: overlap
-    noteApplicationCompletion(fakeSpan(4, 5200000 + 30000000, 5300000 + 30000000, kFreq * 2));   // 3 s gap: a stall
+    noteApplicationCompletion(fakeSpan(4, 5200000 + 30000000, 5300000 + 30000000, kFreq * 2));   // 1.5 s gap: a stall
     GpuSpanResult bad = fakeSpan(5, 0, 0);
     bad.reason = GpuSpanReason::Disjoint;
     noteApplicationCompletion(bad);   // not valid: not fed at all
@@ -571,10 +572,60 @@ void gapCases() {
     noteApplicationCompletion(legacy);   // the other span: not fed
     logAndResetWindow(start + 30000);
     detail = lineWith("EDVR GPU census, frame gap:");
-    check(g_lastLog.find("frame gap - (no pairs);") != std::string::npos && detail &&
+    check(g_lastLog.find("frame gap - (no pairs), 1 over 1 s;") != std::string::npos && detail &&
               detail->find("no pairs this window (4 valid frames") != std::string::npos &&
-              detail->find("3 pairs rejected as not comparable (overlapping, another clock, or over 1 s)") != std::string::npos,
-          "gap: another clock, an overlap and a stall are rejected, an invalid span and the legacy span never fed");
+              detail->find("2 pairs rejected as not comparable (overlapping, or another clock)") != std::string::npos &&
+              detail->find("over 1 s") != std::string::npos,
+          "gap: another clock and an overlap are rejected (two pairs), an invalid span and the legacy span never fed");
+    // A GAP OVER ONE SECOND IS KEPT AND FLAGGED, not discarded (issue 63: the 1858 ms freeze was such a pair).
+    check(detail && detail->find("1 pair over 1 s KEPT as stalls (not in the percentiles or the max; longest 1500.0 ms; each is the gap "
+                                 "before that runtime sequence): sequence 4 1500.0 ms") != std::string::npos,
+          "gap: a 1.5 s gap is not rejected: it is named, with its length and the runtime sequence that ended it");
+    // Beside real pairs: the stall stays out of p50, p95 and the max, and the brief line says it in a few words.
+    freshWindow(start);
+    {
+        uint64_t t = 5000000;
+        for (unsigned i = 0; i < 20; ++i) {
+            noteApplicationCompletion(fakeSpan(100 + i, t, t + kSpanTicks));
+            // The gap after frame 109 is 2.5 s; every other gap is 0.5 ms.
+            t += kSpanTicks + (i == 9 ? 25000000 : 5000);
+        }
+    }
+    logAndResetWindow(start + 30000);
+    detail = lineWith("EDVR GPU census, frame gap:");
+    check(g_lastLog.find("frame gap p50 0.50 / p95 0.50 ms over 18 pairs, 1 over 1 s;") != std::string::npos,
+          "gap: with a stall in the window, 18 of 19 pairs are statistics, p50 and p95 are untouched, the brief line adds ', 1 over 1 s'");
+    check(detail && detail->find("max 0.50 ms over 18 pairs of 20 valid frames") != std::string::npos &&
+              detail->find("longest 2500.0 ms") != std::string::npos && detail->find("sequence 110 2500.0 ms") != std::string::npos,
+          "gap: the max stays the largest gap that was a statistic (0.50), the stall (2500 ms, before sequence 110) is beside it, not in it");
+    check(detail && detail->find("rejected as not comparable") == std::string::npos,
+          "gap: a stall is no longer counted as a rejected pair");
+    // Exactly one second is still a gap, not a stall (the boundary is strict); a hair over is a stall.
+    freshWindow(start);
+    noteApplicationCompletion(fakeSpan(1, 5000000, 5100000));
+    noteApplicationCompletion(fakeSpan(2, 5100000 + 10000000, 5200000 + 10000000));   // gap = exactly 1.000 s
+    noteApplicationCompletion(fakeSpan(3, 5200000 + 20000100, 5300000 + 20000100));   // gap = 1.00001 s
+    logAndResetWindow(start + 30000);
+    detail = lineWith("EDVR GPU census, frame gap:");
+    check(g_lastLog.find("frame gap p50 1000.00 / p95 1000.00 ms over 1 pairs, 1 over 1 s;") != std::string::npos,
+          "gap: a gap of exactly 1000 ms is a pair; one of 1000.01 ms is a stall");
+    // Many stalls: the largest three are named, the rest counted, and the longest is the longest of all.
+    freshWindow(start);
+    {
+        uint64_t t = 5000000;
+        const uint64_t gaps[6] = {12000000, 30000000, 15000000, 50000000, 11000000, 20000000};   // 1.2, 3.0, 1.5, 5.0, 1.1, 2.0 s
+        for (unsigned i = 0; i < 7; ++i) {
+            noteApplicationCompletion(fakeSpan(200 + i, t, t + kSpanTicks));
+            t += kSpanTicks + (i < 6 ? gaps[i] : 0);
+        }
+    }
+    logAndResetWindow(start + 30000);
+    detail = lineWith("EDVR GPU census, frame gap:");
+    check(g_lastLog.find("frame gap - (no pairs), 6 over 1 s;") != std::string::npos &&
+              detail && detail->find("6 pairs over 1 s KEPT as stalls") != std::string::npos &&
+              detail->find("longest 5000.0 ms") != std::string::npos &&
+              detail->find("sequence 204 5000.0 ms, sequence 202 3000.0 ms, sequence 206 2000.0 ms (and 3 more)") != std::string::npos,
+          "gap: six stalls: the three largest are named longest first, the other three are counted");
     // A span with no ticks (a result from before the fields existed, or a poisoned one) is unusable, not a zero gap.
     freshWindow(start);
     noteApplicationCompletion(fakeSpan(1, 0, 0, 0));
@@ -587,24 +638,22 @@ void gapCases() {
 // ---- 6: Elite's altered draws: which class a draw is, and the line that reports them ---------------------------
 void alteredClassCases() {
     using C = AlteredDrawClass;
-    //                      owner, verdictNone, poolSubstituted, terrainOriginal, uiLayered
-    check(classifyAlteredDraw(true, true, false, false, false) == C::None, "class: a plain draw EDVR did not touch is not altered");
-    check(classifyAlteredDraw(true, true, true, false, false) == C::PoolFamily,
+    //                      owner, verdictNone, poolSubstituted, uiLayered
+    check(classifyAlteredDraw(true, true, false, false) == C::None, "class: a plain draw EDVR did not touch is not altered");
+    check(classifyAlteredDraw(true, true, true, false) == C::PoolFamily,
           "class: a verdict-free draw with EDVR's slot target and shaders bound is a pool-family draw");
-    check(classifyAlteredDraw(true, false, true, false, false) == C::Verdict,
+    check(classifyAlteredDraw(true, false, true, false) == C::Verdict,
           "class: the pool flag is stale under a verdict (engineVelocityBeforeDraw did not run): the verdict's wrapper, not a pool-family draw");
-    check(classifyAlteredDraw(true, true, false, true, false) == C::TerrainOriginal, "class: a terrain original with the motion target bound");
-    check(classifyAlteredDraw(true, true, false, false, true) == C::UiLayer, "class: a draw redirected into the UI layer");
-    check(classifyAlteredDraw(true, false, false, false, true) == C::UiLayer,
+    check(classifyAlteredDraw(true, true, false, true) == C::UiLayer, "class: a draw redirected into the UI layer");
+    check(classifyAlteredDraw(true, false, false, true) == C::UiLayer,
           "class: a verdict draw the UI layer redirected is the redirect (its target moved)");
-    check(classifyAlteredDraw(true, false, false, false, false) == C::Verdict, "class: any other verdict's wrapper");
-    check(classifyAlteredDraw(true, true, true, true, true) == C::PoolFamily &&
-              classifyAlteredDraw(true, true, false, true, true) == C::TerrainOriginal,
-          "class: one class per draw, in the order pool family, terrain, UI layer, verdict");
-    check(classifyAlteredDraw(false, true, true, true, true) == C::None && classifyAlteredDraw(false, false, false, false, false) == C::None,
+    check(classifyAlteredDraw(true, false, false, false) == C::Verdict, "class: any other verdict's wrapper");
+    check(classifyAlteredDraw(true, true, true, true) == C::PoolFamily &&
+              classifyAlteredDraw(true, false, true, true) == C::UiLayer,
+          "class: one class per draw, in the order pool family, UI layer, verdict");
+    check(classifyAlteredDraw(false, true, true, true) == C::None && classifyAlteredDraw(false, false, false, false) == C::None,
           "class: a foreign (non-owner) context is never counted");
     check(alteredSectionOf(C::PoolFamily) == GpuCensusSection::AlteredPoolFamily &&
-              alteredSectionOf(C::TerrainOriginal) == GpuCensusSection::AlteredTerrain &&
               alteredSectionOf(C::UiLayer) == GpuCensusSection::AlteredUiLayer &&
               alteredSectionOf(AlteredDraw(C::Verdict, AlteredFix::Remlok)) == alteredFixSectionOf(AlteredFix::Remlok),
           "class: each class maps to its own section, and a Verdict draw to its fix's");
@@ -613,7 +662,7 @@ void alteredClassCases() {
 void alteredLineCases() {
     const uint64_t start = GetTickCount64() - 30000;
     // Pool-family draws: 2000 in 200 frames (10 a frame), four timed at 0.2 ms each: 2.000 ms/frame.
-    // UI-layer draws: 40 (0.20 a frame), two timed at 0.1 ms: 0.020 ms/frame. Terrain and verdict: never ran.
+    // UI-layer draws: 40 (0.20 a frame), two timed at 0.1 ms: 0.020 ms/frame. Verdict: never ran.
     freshWindow(start);
     auto& pool = g_section[static_cast<size_t>(GpuCensusSection::AlteredPoolFamily)];
     pool.occurrences = 2000;
@@ -631,8 +680,7 @@ void alteredLineCases() {
               "altered line: pool-family draws: ms/frame with their count a frame");
         check(line->find("UI draws (redirected to EDVR's layer) 0.020 (0.20/frame)") != std::string::npos,
               "altered line: UI-layer draws report too");
-        check(line->find("terrain prepasses (EDVR's motion target and shader) -") != std::string::npos &&
-                  line->find("other fix-wrapped draws -") != std::string::npos,
+        check(line->find("other fix-wrapped draws -") != std::string::npos,
               "altered line: a class that never ran prints '-', never 0.000");
         check(line->find("together 2.020 ms/frame") != std::string::npos, "altered line: the classes are disjoint draws, so together is their sum");
         check(line->find("includes the game's own work in it, not only what EDVR adds") != std::string::npos &&
@@ -644,25 +692,25 @@ void alteredLineCases() {
     check(g_section[static_cast<size_t>(GpuCensusSection::AlteredPoolFamily)].occurrences == 0,
           "altered line: the window resets the altered sections' occurrences");
 
-    // Nothing ran: all four '-', together 0.000 (a sum, not a measurement), and the wording still says what '-' means.
+    // Nothing ran: all three '-', together 0.000 (a sum, not a measurement), and the wording still says what '-' means.
     freshWindow(start);
     logAndResetWindow(start + 30000);
     line = lineWith("EDVR GPU census, Elite's own draws that EDVR alters");
-    check(line && line->find("pool-family draws (EDVR's slot target and shaders) -, terrain prepasses (EDVR's motion target and shader) -, "
+    check(line && line->find("pool-family draws (EDVR's slot target and shaders) -, "
                              "UI draws (redirected to EDVR's layer) -, other fix-wrapped draws -;") != std::string::npos &&
               line->find("\"-\" means no such draw ran this window") != std::string::npos,
-          "altered line: a window with no altered draw prints '-' for all four and says what that means");
+          "altered line: a window with no altered draw prints '-' for all three and says what that means");
     // The timer floor and the spans count include the altered sections' own timers.
     freshWindow(start);
-    auto& terrain = g_section[static_cast<size_t>(GpuCensusSection::AlteredTerrain)];
-    terrain.occurrences = 20;
-    terrain.sampler.totals.ms = 0.4;
-    terrain.sampler.totals.samples = 2;
-    terrain.nullSampler.totals.ms = 0.1;
-    terrain.nullSampler.totals.samples = 2;
+    auto& uiClass = g_section[static_cast<size_t>(GpuCensusSection::AlteredUiLayer)];
+    uiClass.occurrences = 20;
+    uiClass.sampler.totals.ms = 0.4;
+    uiClass.sampler.totals.samples = 2;
+    uiClass.nullSampler.totals.ms = 0.1;
+    uiClass.nullSampler.totals.samples = 2;
     logAndResetWindow(start + 30000);
     line = lineWith("EDVR GPU census, Elite's own draws that EDVR alters");
-    check(line && line->find("terrain prepasses (EDVR's motion target and shader) 0.015 (0.10/frame)") != std::string::npos &&
+    check(line && line->find("UI draws (redirected to EDVR's layer) 0.015 (0.10/frame)") != std::string::npos &&
               g_lastLog.find("timer floor 50.0 us/pair") != std::string::npos && g_lastLog.find("spans timed 2,") != std::string::npos,
           "altered line: a class is corrected by its own null pair ((0.4/2 - 0.1/2) x 0.1 = 0.015), and its spans count in the census's totals");
 }
@@ -717,8 +765,22 @@ void alteredFixCases() {
         ++cycle;
         onlyOwners = onlyOwners && turnOwnerOf(static_cast<GpuCensusSection>(at)) == static_cast<GpuCensusSection>(at);
     } while (at != 0 && cycle < 200);
-    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 && cycle == 22,
-          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones (22: the 21 there were before the seed section, and its own)");
+    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) && cycle == 20,
+          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route ones (20: the 22 there were before the terrain's two sections went, 2026-10-01; the key off changes nothing)");
+    // The same cycle once the VR world route's three sections have been called this window: they take turns, 23.
+    for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 1;
+    at = 0;
+    cycle = 0;
+    bool worldVisited[kWorldSections] = {};
+    do {
+        at = nextTurnOwner(at);
+        ++cycle;
+        if (static_cast<size_t>(at) >= kWorldFirst && static_cast<size_t>(at) < kWorldFirst + kWorldSections)
+            worldVisited[static_cast<size_t>(at) - kWorldFirst] = true;
+    } while (at != 0 && cycle < 200);
+    check(cycle == 23 && worldVisited[0] && worldVisited[1] && worldVisited[2],
+          "turns: a world-route section that has been called this window takes its turn (23: the 20 and the three)");
+    for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 0;
     for (auto& s : g_section) s = SectionState{};
     g_section[kAlteredFixFirst + 2].occurrences = 7;
     g_section[kAlteredFixFirst + 11].occurrences = 5;
@@ -855,18 +917,22 @@ void seedTableCases() {
     constexpr GpuCensusSection seed = GpuCensusSection::FrameUiLayerHdrSeed;
     check(!isDoorSection(seed) && occurrenceCapFor(seed) == 8 && turnOwnerOf(seed) == seed,
           "seed section: an in-frame section like the others: per draw, K = 8, a turn of its own in the rotation");
-    check(static_cast<size_t>(seed) == kDoorSections + 8 && static_cast<size_t>(seed) + 1 == kAlteredFirst &&
+    check(static_cast<size_t>(seed) == kDoorSections + 7 && static_cast<size_t>(seed) + 1 == kWorldFirst &&
+              kWorldFirst + kWorldSections == kAlteredFirst &&
               seed > GpuCensusSection::FrameUiLayerReissues && seed < GpuCensusSection::AlteredPoolFamily,
-          "seed section: the ninth and last in-frame section, so the altered-draw sections still follow the in-frame ones");
+          "seed section: the eighth in-frame section (the ninth before the terrain's went, 2026-10-01), followed by the three world-route ones, so the altered-draw sections still follow the in-frame ones");
     bool filled = true, distinct = true;
     for (size_t i = 0; i < kFrameSections; ++i) {
         filled = filled && kFrameBreakdownNames[i] && kFrameBreakdownNames[i][0];
         for (size_t j = i + 1; j < kFrameSections; ++j)
             distinct = distinct && std::strcmp(kFrameBreakdownNames[i], kFrameBreakdownNames[j]) != 0;
     }
-    check(kFrameSections == 9 && filled && distinct &&
-              std::strcmp(kFrameBreakdownNames[kFrameSections - 1], "HDR HUD depth-stencil seed") == 0,
-          "seed section: nine in-frame items, none alike, the ninth named what the UI layer's own line calls the stage");
+    check(kFrameSections == 11 && filled && distinct &&
+              std::strcmp(kFrameBreakdownNames[kSeedSection - kDoorSections], "HDR HUD depth-stencil seed") == 0 &&
+              std::strcmp(kFrameBreakdownNames[kFrameSections - 3], "world resolve") == 0 &&
+              std::strcmp(kFrameBreakdownNames[kFrameSections - 2], "world mips") == 0 &&
+              std::strcmp(kFrameBreakdownNames[kFrameSections - 1], "world layer") == 0,
+          "seed section: eleven in-frame items, none alike, the eighth named what the UI layer's own line calls the stage, the last three the world route's");
 }
 
 void seedLineCases() {

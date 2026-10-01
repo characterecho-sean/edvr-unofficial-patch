@@ -86,6 +86,11 @@ bool temporalPassWantsRigidDraw(int eye);
 void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexShaderHash);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
+// The rows the pass CHOSE for the frame in progress (chooseCameraRows' pick: float 932 of the scene block, three 3x4 rows), for the VR camera census's episodes
+// (vr_camera_census_core.h: it matches them to the calls' view axes). Side-effect free: nothing is chosen, latched or counted by asking. False when no rows stand --
+// the pass is not wanted, or the frame has not treated yet (the choice is made at the first treat) or chose none; `rows` is then untouched. `bound` says the chosen
+// write was the block bound at the scene's first draw. Valid at any boundary that runs before temporalPassFrameBoundary (the census's does); render thread.
+bool temporalPassChosenRows(float rows[12], bool* bound);
 
 // hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
 // sixteen paired raw/treated left-eye crops, a whole treated overview,

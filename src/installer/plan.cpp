@@ -726,7 +726,9 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 "Replacing " + iniName + " with the shipped defaults. Your old file is in the "
                 "backup folder.");
         } else {
-            merged = mergeIni(p.iniText, ownText, base, forced, &plan.merge);
+            // The user's text is this edition's own file, so a setting this version dropped is
+            // "carried over from your" that file: edvr-flat.ini for the flat edition.
+            merged = mergeIni(p.iniText, ownText, base, forced, &plan.merge, iniName.c_str());
             if (merged != ownText) {
                 backup(iniPath, "your " + iniName + ", before it is updated");
 

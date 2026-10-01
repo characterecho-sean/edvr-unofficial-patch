@@ -36,6 +36,12 @@ namespace edvr {
 // just orphaned. Sharing one answer removes the straddle entirely.
 HookMode contextHookModeFor(ID3D11DeviceContext* ctx);
 
+// The file name of the graphics wrapper (ReShade and its kind) that handles the immediate context's methods, when the
+// probe above found them outside Windows' d3d11.dll and the session hooks in place; null otherwise (nothing found, a
+// live copy, a forced mode). For the flat F8 panel's note (flat_wrapper_note.h). Written once by the probe, before
+// any frame.
+const char* contextWrapperFile();
+
 // Windows' own d3d11.dll, as a module base -- NOT this DLL, which the game
 // also has loaded under the name d3d11.dll.
 //

@@ -113,6 +113,7 @@ constexpr int kMaxFamilies = 10;
 extern std::atomic<bool> live;
 extern DrawCache cache;                        // owner thread only
 extern uint64_t familyDraws[kMaxFamilies];     // owner thread only: draws that ran substituted
+extern uint64_t g_stateCalls;                  // owner thread only: the draw wrapper's D3D context calls (see below)
 // The resources an open eye-frame's snapshot came from (eye0 pool, eye0
 // scene, eye1 pool, eye1 scene, then the on-foot source's pool and scene).
 // Identities only, never dereferenced here.
@@ -210,8 +211,79 @@ inline void engineVelocityResourceUnknown(const ID3D11Resource* resource) {
 void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept;
 // The owner thread's frame boundary (vscreen): rotation, the periodic lines.
 void engineVelocityFrameBoundary(ID3D11DeviceContext*);
-// Flat draw bracket: restore substituted shaders/blend; caller restores MRTs.
+// The flat runtime's per-draw restore before the lazy form below: substituted shaders/blend back, the draw cache reset,
+// and the caller put the game's render targets back. The runtime no longer calls it (engineVelocityFlatEndDraw and
+// engineVelocityFlatFlush do this, and the targets too); the lifecycle rig drives it as its model of a draw that restores
+// after itself.
 void engineVelocityAfterFlatDraw(ID3D11DeviceContext*);
+
+// ---- The flat draw bracket, lazy form (2026-09-30) ----------------------------------------------------------
+// The flat runtime put the game's state back after EVERY substituted producer draw, and bound EDVR's again for the
+// next: the game's eight render targets read, MRT6 added (read again, set, read to verify), the blend state read and
+// set, the patched pixel shader set, then the shader, the blend and the targets restored -- eleven immediate-context
+// calls a draw at least, 13,549 a frame over 1,130 draws on foot (flight 053745), each of them a driver round trip,
+// and, under a graphics wrapper (ReShade), each one dearer. It also reset the draw cache, so every next draw took the
+// slow half and its two mutex acquisitions.
+//
+// Now EDVR's state (MRT6, the derived blend, the patched shaders) stays bound across consecutive substituted producer
+// draws, as VR's always has, and the game's is put back ONCE, before anything that could observe or depend on it.
+// What that is, is flat_substitution.h's policy, called from the hooks: every hooked draw, dispatch, clear, copy,
+// resolve and command-list execution that is not a substituted producer draw, and the Present. A game setter of the
+// same state simply replaces EDVR's (the binding shadow's generations say so, as they always did: restore puts back
+// only what is still ours). A game Get* of that state is NOT seen by the hook layer -- no Get is hooked -- so it would
+// read EDVR's, exactly as it can under VR, where the state has always stayed bound between draws; that exposure is
+// the whole of what the lazy form adds, and it is why every hooked call above restores instead of guessing.
+//
+//   engineVelocityFlatBeginDraw: before a candidate producer draw. The game's render targets are saved once per
+//     binding (a read only when the game has rebound them), BeforeDraw runs, and a draw it declines puts the game's
+//     state fully back at once. True: EDVR's state is bound for this draw. *gameHadTarget6: the game's own slot 6
+//     was occupied.
+//   engineVelocityFlatEndDraw: after the draw. Lazy: nothing is restored. Eager (a diagnostic capture is armed, or the
+//     overlay guard's private t3 is bound): the game's state goes back now, as it always did.
+//   engineVelocityFlatFlush: the game's state back where EDVR's is still bound, and the bookkeeping reset. A no-op
+//     when nothing is bound.
+//   engineVelocityFlatAbandon: the context lost its state (ClearState, a resize): forget, without touching it.
+//   engineVelocityFlatLazy: the runtime's switch, owner thread, per draw.
+enum class EngineVelocityFlushCause : unsigned {
+    kDeclined = 0,   // a candidate producer draw the slow half declined
+    kOtherDraw,      // a draw that is not a substituted producer draw
+    kDispatch,
+    kClear,
+    kCopy,
+    kResolve,
+    kKeepTargets,    // the game keeps its render targets and sets UAVs beside them
+    kCommandList,
+    kPresent,
+    kOverlay,        // an overlay-guard draw's base snapshot needs the game's state bound
+    kEager,          // not lazy: a diagnostic capture is armed, or the overlay guard's t3 is bound
+    kCount
+};
+namespace engine_velocity_detail {
+extern std::atomic<bool> g_flatPending;   // EDVR's state may be bound over the game's
+}
+inline bool engineVelocityFlatPending() noexcept {
+    return engine_velocity_detail::g_flatPending.load(std::memory_order_relaxed);
+}
+bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
+void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
+void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);
+void engineVelocityFlatAbandon() noexcept;
+// The frame ends, after the Present's flush: what the bracket kept for it (the game's render-target set, its blend state, the
+// accepted binding; flat_query_cut.h) is released. A no-op while EDVR's state is still bound: the flush is owed first.
+void engineVelocityFlatFrameEnd() noexcept;
+void engineVelocityFlatLazy(bool on) noexcept;
+// The flat CPU census (flat_cpu.h): what engine motion's draw wrapper asks of the D3D
+// immediate context. Every Get and Set on it, and the clears and copies an eye-frame's
+// preparation makes, are counted at their call sites, on the owner thread (the caller of
+// the flat draw scope); the flat Present drains the count once a frame with the draws the
+// wrapper substituted. A count, not a clock: it prices nothing by itself, it says how many
+// driver round trips the wrapper is.
+inline void engineVelocityNoteStateCalls(unsigned n) noexcept { engine_velocity_detail::g_stateCalls += n; }
+struct EngineVelocityWrapperCounts {
+    uint64_t stateCalls = 0;
+    uint64_t substitutedDraws = 0;
+};
+EngineVelocityWrapperCounts engineVelocityTakeWrapperCounts() noexcept;
 // Owner-thread diagnostic, sampled after BeforeDraw and before restoring the
 // draw bracket. A source candidate alone does not prove substitution succeeded.
 inline bool engineVelocityDrawSubstituted() noexcept {
@@ -291,6 +363,12 @@ bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept;
 // does not assert that the runtime shader patch or motion views are ready.
 bool engineVelocityPoolFamilyPair(uint64_t vsHash, uint64_t psHash) noexcept;
 bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews* out);
+// The VR world route's two reads of the source's naming (vr_world_route.cpp; docs section 82): is `depth` the source depth
+// screen_motion named in THIS present frame, and the source camera's rows 270..275 (the resolver's camera[6][4]: b1's first
+// 96 bytes from row 270) as the watch last saw them written for that naming. False when nothing was named this frame, the
+// depth is another, or the rows were not seen. Pure reads under the module's own lock: no GPU work, no allocation.
+bool engineVelocitySourceIsNamed(const ID3D11Texture2D* depth);
+bool engineVelocitySourceCameraRows(float (&rows)[6][4]);
 // The screen shader's panel counts without diagnostics: one present frame in
 // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared (a grid on
 // the eye pixel), raw; pixelStride 1 = every pixel (diagnostics, motion_source).

@@ -42,6 +42,8 @@
 #include <utility>
 #include <vector>
 
+#include "ini_name.h"
+
 namespace edvr {
 
 enum class LineKind {
@@ -103,9 +105,12 @@ struct MergeReport {
 //
 // `base` is the shipped default of the version currently installed, or nullptr.
 // `forced` is dotted key -> value, applied last and always winning.
+// `userFile` names the file `user` was read from, for the note written above a setting this
+// version no longer has ("# carried over from your <userFile>; ..."): edvr.ini unless the
+// caller is merging another file, as the flat edition does with its own edvr-flat.ini.
 std::string mergeIni(const std::string& next, const std::string& user, const std::string* base,
                      const std::vector<std::pair<std::string, std::string>>& forced,
-                     MergeReport* report);
+                     MergeReport* report, const char* userFile = kIniNameVr);
 
 // Read one dotted key out of ini text, with the reader's own rules. Used to
 // find out what advanced.real_dll currently says.

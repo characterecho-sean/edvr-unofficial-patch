@@ -1686,9 +1686,9 @@ void installGlitchFrameFix() {
         s.enabled = false;
         Log::get().note(
             "transition flash fix off: camera_buffer_offset %u needs three floats inside "
-            "a %u-byte buffer, which does not fit. Check [advanced] in edvr.ini; the "
+            "a %u-byte buffer, which does not fit. Check [advanced] in %s; the "
             "defaults are 1100 and 5376.",
-            s.posOffset, s.bufferBytes);
+            s.posOffset, s.bufferBytes, Config::get().iniName());
         return;
     }
     // The geometry is sound, so there is somewhere to watch. Set on BOTH paths

@@ -67,7 +67,10 @@ ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,const char* s,si
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* c,UINT n,ID3D11RenderTargetView*const* r,ID3D11DepthStencilView* d){c->OMSetRenderTargets(n,r,d);}
 // fix.ui_quality (ui_layer.h): true while the UI layer has the draw; its
 // inline reader is the production one.
-namespace detail{bool g_uiLayerRedirecting=false;}
+namespace detail{bool g_uiLayerRedirecting=false;
+// The on-foot maps gate's naming record (ui_layer.h): uiLayerNoteScreenNamed, called by screenMotionSource at the draw that names
+// the source, stores the layer's own frame count here; the gate reads it at its boundary.
+uint64_t g_uiLayerGateFrame=0,g_uiLayerNamedAt=~0ull;}
 // The GPU census (issue #38) is cross-cutting; this rig is about screen
 // motion's own effect, not the census's rotation or its calibration
 // (tools/gpu_census_test covers those), so it is stubbed like the other
@@ -240,6 +243,60 @@ int main(int argc,char** argv){
         // motion is drawn for it and the eye has no map that frame.
         screenMotionFrameBoundary(ctx.Get());sourceDraw();detail::g_uiLayerRedirecting=true;screenDraw(0);detail::g_uiLayerRedirecting=false;
         check(!screenMotionView(0,W,H),"a composite the UI layer took draws no screen motion");
+        // The VR world route (ui_layer.h) re-issues the screen composite into the layer and the door runs layer-only for the
+        // eye, so the per-eye motion reissues are skipped (vscreen.cpp's tail: 0.24 ms, unused while the route owns the eye) --
+        // but the RECOGNITION still runs, because it is what keeps naming the world's source camera and depth for the next
+        // frames (screenMotionSource only names within two frames of the last recognised screen), and the engine slot source and
+        // the weapon map depend on the naming. screenMotionRecognize is that step alone.
+        {
+            const unsigned notes=testSourceNotes;
+            for(int f=0;f<8;++f){
+                screenMotionFrameBoundary(ctx.Get());sourceDraw();
+                testVs=0x5C36AF051B98B9F1ull;testPs=0xCFE84157BC76E921ull;testRtv=er[0].Get();
+                check(screenMotionRecognize(),"the screen composite's shader pair is recognised");
+                check(!screenMotionView(0,W,H)&&!screenMotionView(1,W,H),"a route frame draws no per-eye screen motion");
+            }
+            check(testSourceNotes==notes+8,"recognition alone keeps naming the world's source, frame after frame");
+            check(!(testVs=0x1ull,testPs=0xCFE84157BC76E921ull,screenMotionRecognize())&&!(testVs=0x5C36AF051B98B9F1ull,testPs=0x1ull,screenMotionRecognize()),"...and only the screen composite's PAIR is recognised (either half alone is not)");
+            // The control: no recognition at all -- the naming runs out two frames after the last screen.
+            const unsigned before=testSourceNotes;
+            for(int f=0;f<8;++f){screenMotionFrameBoundary(ctx.Get());sourceDraw();}
+            check(testSourceNotes==before+2,"without the recognition the source stops being named after two frames (the step is what the route keeps)");
+        }
+        // The on-foot maps gate (ui_layer.h; design-world-camera-motion-2026-09-30.md, Phase 1): while the layer TAKES the 2D screen's
+        // composite a map or a menu is not the world, but the world must be able to come back. A take swallows the per-eye call that ran
+        // the recognition (screenMotionDraw returns first at uiLayerRedirecting), and naming stops two frames after the last recognised
+        // composite -- so vscreen.cpp recognises a taken screen itself, behind uiLayerMapsOn().
+        {
+            // A composite this frame arms the naming again (the control above let it run out).
+            screenMotionFrameBoundary(ctx.Get());testVs=0x5C36AF051B98B9F1ull;testPs=0xCFE84157BC76E921ull;testRtv=er[0].Get();screenMotionRecognize();
+            const unsigned t0=testSourceNotes;
+            detail::g_uiLayerRedirecting=true;
+            for(int f=0;f<8;++f){
+                screenMotionFrameBoundary(ctx.Get());sourceDraw();
+                testVs=0x5C36AF051B98B9F1ull;testPs=0xCFE84157BC76E921ull;testRtv=er[0].Get();
+                check(screenMotionRecognize(),"a taken screen composite is recognised by the same step the route uses (it does not read uiLayerRedirecting)");
+                screenDraw(0);   // the per-eye call: stands aside for a draw the layer took
+                check(!screenMotionView(0,W,H),"...and a taken composite still draws no per-eye screen motion");
+            }
+            check(testSourceNotes==t0+8,"the recognition made for a TAKEN screen keeps the world's source named, frame after frame (the world can come back from a map)");
+            // The trap: with no recognition at all a taken screen stops the naming two frames after the last composite.
+            const unsigned t1=testSourceNotes;
+            for(int f=0;f<8;++f){screenMotionFrameBoundary(ctx.Get());sourceDraw();screenDraw(0);}
+            check(testSourceNotes==t1+2,"...and without it the naming runs out two frames into a taken screen (the trap the maps gate's recognition closes)");
+            detail::g_uiLayerRedirecting=false;
+            // The naming is told to the layer, once, attributed to the layer's own frame count; a frame that names nothing tells it nothing.
+            detail::g_uiLayerGateFrame=100;detail::g_uiLayerNamedAt=~0ull;
+            screenMotionFrameBoundary(ctx.Get());
+            testVs=0x5C36AF051B98B9F1ull;testPs=0xCFE84157BC76E921ull;testRtv=er[0].Get();
+            screenMotionRecognize();
+            const unsigned t2=testSourceNotes;
+            sourceDraw();
+            check(testSourceNotes==t2+1&&detail::g_uiLayerNamedAt==100,"the draw that names the screen's source tells the layer, attributed to the layer's frame (the maps gate's naming)");
+            detail::g_uiLayerGateFrame=101;
+            screenMotionFrameBoundary(ctx.Get());
+            check(detail::g_uiLayerNamedAt==100,"a frame in which no draw named the source leaves the layer's record alone, so the gate reads it as unnamed");
+        }
     }
     // Optional recorded source/eye matrices and double-precision expected
     // projection. No proprietary assets are committed with the test.

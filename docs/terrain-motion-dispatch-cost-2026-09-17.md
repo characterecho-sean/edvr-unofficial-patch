@@ -2,64 +2,173 @@
 
 ## Status
 
-- State: (a) FLOWN 16:34 on Frontier (log 163420, build 91d5b75, parked
-  on the planet, Pimax Crystal Super, 2646x2206 in, DLSS out 4072x3394)
-  and CONFIRMED: benchmark gpu p50 under dlss 9.0-9.6 ms against 10.2-10.6
-  on 185ceee at the same spot (app render 8.8-10.3 vs 10.0-10.4); the
-  per-patch bracket 3.5-4.0 us against 13.5-15.8; the census diff shows
-  the 306 terrain copies gone; `Constants: 256856 slots from the CPU
-  shadow, 103 by GPU copy, 3 re-watches; tee copies 0.03 us each` (the
-  mapped memory reads at cached speed); `history hidden` 0.000% of the
-  eye, so the captured constants are exact. `advanced.terrain_motion =
-  off` under dlss (windows 8-11) moved nothing -- the hook's residual is
-  below noise -- and makes the terrain flicker, as the lever must (the
-  terrain gets the camera's vectors). Journal, latest entry.
-- ATTRIBUTED (flight 150849 on 185ceee, eye dumps with the draw census
-  under dlss AND off): the gap was the SUM of EDVR's per-draw GPU syncs
-  inside the game's passes, not one carrier: +306 CopySubresourceRegion +
+- State: RETIRED 2026-10-01. `advanced.terrain_motion` and its per-patch hook
+  are deleted (Sean: "Build the jitter change and remove terrain motion
+  now"). Terrain pixels take the camera's motion, exactly what the key off
+  gave them: tools\terrain_retired_test proves it byte for byte on WARP. On
+  branch claude/jitter-phases-terrain-retire (commit 1 of 2), gated and NOT
+  FLOWN; the regression flight is in the top journal entry.
+- Why it could go: the hook predates engine-record motion, whose camera
+  rows now give the camera term; landed, the two agree to 0.002 px rms;
+  Sean's low-flight A/B, key off against on: "no smearing" either way; the
+  hook cost GPU p50 +0.27 ms, p95 +0.48 ms and CPU p50 +0.51 ms (Frontier
+  log edvr_gfx_20261001_090933.log, interleaved toggles); and it still
+  matched build 332841 (62/62 patches), so a retirement, not a fix.
+- Untested: gliding or orbiting near a fast-rotating body. Theory puts the
+  camera term's error at about v/d per frame, about 0.5 px at 10 km for
+  465 m/s. Sean accepted that.
+- Next: one low flight over terrain (the journal entry has the pass and
+  fail signs). A glide or orbit beside a fast-rotating body, if anyone
+  wants the untested case, goes in the same flight.
+- The rest of this doc is the 2026-09-17 arc that priced the hook, kept as
+  the record. FLOWN 16:34 (log 163420, build 91d5b75, Pimax Crystal Super,
+  2646x2206 in, DLSS out 4072x3394): (a) CONFIRMED, benchmark gpu p50 under
+  dlss 9.0-9.6 ms against 10.2-10.6 on 185ceee at the same spot; the
+  per-patch bracket 3.5-4.0 us against 13.5-15.8; the 306 terrain copies
+  gone; the CPU shadow served 256856 slots against 103 GPU copies;
+  `history hidden` 0.000% of the eye. The key off under dlss moved nothing
+  (the residual was below noise) and made the terrain flicker, as it must.
+- ATTRIBUTED (flight 150849 on 185ceee): the gap was the SUM of EDVR's
+  per-draw GPU syncs inside the game's passes: +306 CopySubresourceRegion +
   102 UpdateSubresource (terrain, 51 patches/eye), +37 Dispatch(1,1,1)
-  (holo, per draw) + 10 (stellar ring), ~50 mesh/probe copies, +38 query
-  Ends; draw counts equal. Offline prices on the 5090 between real draws:
-  a copy ~2 us fixed, a Dispatch(1,1,1) with CS churn 4.75 us, a
-  timestamp pair free, the whole terrain hook 0.7-0.78 ms/100 patches.
-- What is left inside the game's passes under dlss (census diff of
-  flight 163420, per frame): holo 33 Dispatch(1,1,1) + 39 UpdateSubresource
-  + 24 instance copies; stellar ring 10 dispatches; mesh 10 copies into
-  its 1 MB store + 10 uploads; terrain 106 UpdateSubresource(48 B)
-  (priced 0); 48 query Ends (free). By the offline prices 0.3-0.45 ms a
-  frame, 3-5% of the 9.2 ms frame: (b) batch the holo dispatch (needs the
-  CPU shadow generalised to its three CBs, per-record instance slots and
-  a per-record Pool binding in the CS) and (c) batch the stellar ring's.
+  (holo) + 10 (stellar ring), ~50 mesh/probe copies, +38 query Ends. Offline
+  prices on the 5090: a copy ~2 us fixed, a Dispatch(1,1,1) with CS churn
+  4.75 us, a timestamp pair free.
+- Left inside the game's passes under dlss (flight 163420, per frame): holo
+  33 Dispatch(1,1,1) + 39 UpdateSubresource + 24 instance copies; stellar
+  ring 10 dispatches; mesh 10 copies + 10 uploads. By the offline prices
+  0.3-0.45 ms a frame: (b) batch the holo dispatch and (c) the stellar
+  ring's, a rig and a flight each, still Sean's call.
 - The rest of "DLSS doubles the frame" is the door itself: NVIDIA's `full`
   2.8-3.1 + `prep` 0.2-0.5 + `ui` 0.36-0.6 = 3.5-4.0 ms per pair at
-  4072x3394, a per-output-pixel price that does not care what is on
-  screen -- Sean's loading screen (off ~1.2 ms, dlss over 5) is exactly
-  this door on a black frame. Levers: the DLSS rectangle (the foveated
-  arc, paused by Sean) or a different DLSS ratio (a smaller game render).
+  4072x3394, a per-output-pixel price. Levers: the DLSS rectangle (the
+  foveated arc, paused by Sean) or a smaller game render.
 - ruled out (by measurement, journal): the per-patch dispatch (a17c793
-  flown flat); the game's Map stalling on the GPU (reads 0.003 ms/frame);
-  the hook's CPU (0.03 ms/frame); EDVR's timestamp brackets (free); the
-  texture LOD bias (fixed at install); the PS + 2 MRTs beyond ~0.15 ms;
-  write-combined mapped memory (the tee reads 0.03 us). Open: the
-  benchmark's CPU figure under dlss (3.9-4.2 on the planet, 1.9 after
-  the runtime's wait moved from xrWaitFrame into Submit at 16:37:05).
-- Instruments: `native timing CPU ... Game Map over N frames: ...`;
-  `terrain motion GPU ... Hook CPU: ... Constants: ... tee copies ...`;
-  live levers `advanced.terrain_motion` / `advanced.mesh_motion` (on/off,
-  default on, ini edit; not on the menu; off = diagnostic only).
-- Next: Sean's call between (b)+(c) (~0.3-0.45 ms, a rig and a flight
-  each) and the foveated rectangle. Any flight: an eye dump with the
-  census under dlss and off at the same spot, and an off window parked
-  on the planet (flight 163420 had none; its 4.29 ms at 16:37:45 is the
-  exit frame).
+  flown flat); the game's Map stalling on the GPU (0.003 ms/frame); the
+  hook's CPU (0.03 ms/frame); EDVR's timestamp brackets (free); the
+  texture LOD bias; the PS + 2 MRTs beyond ~0.15 ms; write-combined mapped
+  memory. Open: the benchmark's CPU figure under dlss (3.9-4.2 on the
+  planet, 1.9 after the runtime's wait moved into Submit).
 - Report: Sean, Frontier, Pimax Crystal Super, after the terrain history
   fix (docs/terrain-history-shimmer-2026-09-17.md): "performance is now
   quite bad flying low to the surface" (log 122915, HMD quality 75%), then
   his A/B in log 124139 at 65%: "DLSS effectively doubles the gpu and cpu
   frametime numbers" (off cpu 2.8 / gpu 4.5-4.9; dlss 4.7-5.2 / 10.9-11.0;
-  fsr 4.4 / 9.3). The journal's oldest entry has the reading of those logs.
+  fsr 4.4 / 9.3). The oldest journal entry has the reading of those logs.
 
 ## Journal
+
+### 2026-10-01 -- advanced.terrain_motion RETIRED: the hook, its shaders and its rig are deleted
+
+Sean approved it on 2026-10-01 ("Build the jitter change and remove terrain
+motion now"). Branch claude/jitter-phases-terrain-retire, commit 1 of 2 (the
+second is the jitter phase count, docs/design-flat-temporal-aa-2026-09-23.md
+section 84). Gated by the full build, NOT FLOWN.
+
+The evidence for it, all from before this edit:
+
+- The hook predates engine-record motion
+  (docs/kinematic-motion-injection-2026-09-19.md). The camera term now comes
+  from the game's own camera rows, so the hook's reason to exist, a vector
+  for the terrain the camera model got wrong, is gone.
+- Landed, the camera term and the hook's motion agree to 0.002 px rms.
+- Sean's low-flight A/B, the key off against on: "no smearing" either way.
+- The hook's cost with it on (Frontier log edvr_gfx_20261001_090933.log,
+  interleaved toggles): GPU p50 +0.27 ms, p95 +0.48 ms; CPU p50 +0.51 ms.
+- It still matched on game build 332841 (62/62 patches), so this is a
+  retirement, not a fix for something broken.
+- Untested: a glide or an orbit beside a fast-rotating body. Theory puts the
+  camera term's error at about v/d per frame, about 0.5 px at 10 km for
+  465 m/s. Sean accepted that.
+
+What went, each item checked against the code before it was deleted:
+
+- src\d3d11\celestial_motion.{h,cpp}: the per-patch hook (the draw-time copy
+  of each terrain patch's three constant-buffer segments, the private coverage
+  index and depth, the batched build dispatch, the CPU shadow of the three
+  buffers, the per-eye record buffers, the eye-dump snapshot), the three
+  shaders it compiled (kCelestialBuildHlsl; kCelestialIndexHlsl and its
+  `original` entry) and their six rows in tools\temporal_shader_build (three
+  variants, three source-hash contracts; the pinned counts 33 and 58 are 30
+  and 55).
+- Its tees: vscreen.cpp's Map, Unmap, UpdateSubresource, CopyResource,
+  CopySubresourceRegion and ExecuteCommandList writes, device_hook.cpp's
+  CreateBuffer one, the draw hook's capture (null-PS prepasses) and reissue,
+  the boundary tick `celestial_motion`, its shutdown and the live read of
+  `advanced.terrain_motion` at temporal_pass.cpp:6139.
+- The motion-vector shader: terrainPixel(), TI/TZ/TR (t9..t11) and both call
+  sites, decision path 7 in `mv` and the world=1 override in fetchHistoryT.
+  probe.w bit 8 and the trace's inputs bit 32 are retired, not reused; t9..t11
+  are free in the three SRV arrays.
+- The eye dump's TerrainIndex and TerrainZ inputs (slots 5 and 6 keep their
+  numbers as "(retired 5)" and "(retired 6)": the numbering is preserved on
+  purpose) and the `Terrain` record file (EDVRTRN1).
+- The GPU bracket and its lines: `terrain motion GPU: ...` and the six
+  `terrain motion: ...` notes; in the 30 s census the in-frame item `terrain`
+  and the altered-draw class `terrain prepasses (EDVR's motion target and
+  shader)` (GpuCensusSection::FrameTerrain, AlteredTerrain,
+  AlteredDrawClass::TerrainOriginal; the rotation's cycle is 20 turns, not
+  22); the door's `hologram resolve+celestial` is `hologram resolve`.
+- tools\celestial_motion_test, tools\terrain_motion.py and build.bat's
+  :rig_terrain_motion: about 104-115 s, the pool's wall
+  (docs/build-time-2026-09-29.md, item 2). tools\terrain_retired_test
+  replaces it at about 20 s.
+- The ini block and, with the reader gone, the developer-tier row of the
+  in-headset menu (the tier lists every key the code reads).
+
+Kept on purpose: tools\eye_decisions.py still names path 7 `terrain` and
+tools\eye_inputs.py still reads format 42, so an older dump reads; both say
+retired. The planet and stellar motion hooks, mesh motion's retired key and
+the engine-record paths are separate things and untouched.
+
+What terrain gets now. Every terrain pixel takes the camera term, which is
+exactly what the key off gave it before this edit; nothing else in the shader
+changed (two comments aside). tools\terrain_retired_test is the proof, on WARP:
+it rebuilds the pre-retirement shader from the current text and the removed
+fragments (verified byte-identical to the file at 3f226fcb with --verify-old:
+82943 characters, FNV-1a-64 1e62c5d0fcb7b3c2), compiles both the production
+way (cs_5_0, flags 0, diagnostic and fast variants of `mv` and `main`, twelve
+compiles on twelve threads) and runs 316 configurations over three
+terrain-carrying scenes (an index texture, a matching depth and a record
+buffer bound to both): knobs.y, tvCam.w, probe.w {0, 1, 2, 128, 6, 7, 132},
+the debug views. Every UAV (O, N, Stats, MV, ZC, MK, UN, ML) is
+compared bytewise, the new shader twice per configuration for WARP's
+determinism: byte-identical in all. Non-vacuity: reflection shows the
+reference binds TI/TZ/TR where the new shader binds nothing, with cbuffer P
+identical; the reference with bit 8 SET moves only the pixels the old gate
+admitted (TI != 0, depth matching), to the motion a CPU model of the old
+function gives, and the new shader ignores the bit; and four one-token breaks
+of the camera term (the head path's and the world path's translation, in both
+entries) are caught in every configuration where the line runs and in none
+where it does not. 1547 checks, 20 s.
+
+An old ini that still carries the line. The installer's merge keeps it:
+`terrain_motion = off` (live, from a rig that flew the A/B) is carried into
+[advanced] under "# carried over from your edvr.ini; this version no longer
+uses it", reported as retired, not adopted and not eaten, the documentation
+block is not resurrected, and a second merge does not duplicate it; a rig
+that left it commented carries nothing. At run time the config audit names
+it in the log as a setting this build does not read ("a typo or a retired
+setting -- those lines do nothing"). tools\installer_test pins the merge,
+tools\config_test the key's absence from the shipped ini.
+
+The flight (a regression check, not a measurement of a gain). Install the
+build, verify the log's build line with
+`python tools\edvr_log.py --target frontier --expect-build HEAD`, DLSS on,
+the HMD quality of the 09:09 flight, one low flight over a planet's terrain,
+and if it is cheap a glide beside a fast-rotating body.
+
+- Pass: no smear or ghost on terrain that moves against the camera, by eye
+  and in an eye dump (`history hidden` in the dump's MV census near 0.000%,
+  what the 163420 flight read); no `terrain motion` line in the log; the 30 s
+  GPU census line has no `terrain` item and no `terrain prepasses` class;
+  the benchmark's GPU p50 over terrain at or under the key-off figure of the
+  09:09 flight, the hook's +0.27 ms gone.
+- Fail: visible terrain smear or ghosting at speed beside a rotating body (the
+  untested case: then the camera term is not enough there and the hook, or
+  its motion from the engine's own record, comes back as a decision, not as
+  a quiet revert), a `history hidden` rise above a few tenths of a percent,
+  or any `terrain motion` line (the log would be from a stale build).
 
 ### 2026-09-17 (night) -- flight 163420 on 91d5b75: (a) confirmed, the residual priced
 

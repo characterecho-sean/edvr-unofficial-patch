@@ -27,6 +27,30 @@ struct ID3D11Texture2D;
 
 namespace edvr {
 
+// The upscaler feature slots (dlaa.cpp's g_feature, fsr3_engine.cpp's g_ctx): each slot keeps its own feature, its own size
+// key and its own history, so two callers never share an accumulation. Slots 0 and 1 are the eyes' (slot 0 is also the flat
+// profile's); slot 2 is the VR world route's (vr_world_route.h, kVrWorldFeatureSlot). The eyes have every role (the full
+// frame, the fovea's centre crop, the steady periphery); the world has the full frame only, so the foveated entry points
+// refuse slot 2. fsr3_engine.h takes this constant from here. Pure, like the mode ladder below: tools\dlaa_mode_test pins it.
+constexpr uint32_t kUpscalerSlots = 3;
+constexpr uint32_t kUpscalerEyeSlots = 2;
+inline bool upscalerSlotHasFullFrame(int slot) {
+    return slot >= 0 && static_cast<uint32_t>(slot) < kUpscalerSlots;
+}
+inline bool upscalerSlotHasFoveatedRoles(int slot) {
+    return slot >= 0 && static_cast<uint32_t>(slot) < kUpscalerEyeSlots;
+}
+// How a slot is named in a log line. The eyes keep the words every log has always carried ("eye 0"), so the lines slots 0 and
+// 1 print are the lines they printed before the third slot existed.
+inline const char* upscalerSlotLabel(int slot) {
+    switch (slot) {
+        case 0:  return "eye 0";
+        case 1:  return "eye 1";
+        case 2:  return "the VR world (upscaler slot 2)";
+        default: return "an unknown upscaler slot";
+    }
+}
+
 // The DLSS quality-mode ladder's pure decision, factored out of the NGX
 // glue below so a rig with no SDK and no device (tools/dlaa_mode_test)
 // can drive it directly: four modes, largest render fraction first,
@@ -133,7 +157,10 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason);
 bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, bool features,
               double* initMs, double createMs[2], const char** reason);
 
-// One eye, one frame: colour (R8G8B8A8_UNORM, w x h, a shader view
+// One eye, one frame (`eye` is the upscaler feature slot, kUpscalerSlots above:
+// 0 and 1 the eyes', 2 the VR world route's, each with its own feature and
+// history; dlaaWarm makes the eyes' two only, the world's is made lazily on its
+// first evaluation): colour (R8G8B8A8_UNORM, w x h, a shader view
 // possible), depth (R32_FLOAT, the game's reversed-Z values copied), the
 // motion vectors (R16G16_FLOAT, pixels, current -> previous), into the
 // output (R8G8B8A8_UNORM, outW x outH, an unordered-access view
@@ -158,12 +185,17 @@ bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, bool features,
 // not passing one. The runtime takes ONE such mask, so when the temporal
 // pass's mover mask (tier 1 of docs/per-object-motion.md) is on as well, the
 // pass folds the interface's into it before calling here and hands the union.
+//
+// `hdr` (the flat HDR route, docs/design-flat-temporal-aa-2026-09-23.md section 81): the colour is HDR scene
+// radiance (R11G11B10F or fp16), the output R16G16B16A16_FLOAT, and the feature is created with IsHDR and
+// AutoExposure beside the LDR flags (hdr_backend_flags.h). The flags are creation-time, so the feature key carries
+// the bit: a flip remakes the feature and its history starts again. False is every other caller, unchanged.
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
                   ID3D11Texture2D* output, ID3D11Texture2D* reactive,
                   uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason);
+                  float frameMs, const char** reason, bool hdr = false);
 
 // One eye, one frame, but NVIDIA runs on a CROP of the frame -- the fovea,
 // docs/performance.md feature 6. The colour, depth and motion are the same
@@ -172,7 +204,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
 // NVIDIA reads and writes, through the runtime's input and output
 // sub-rectangles. DLAA only (1:1), so the output crop is the input crop; a
 // per-eye feature is created with output sub-rectangles enabled and rebuilt
-// on a size change. The crop must lie inside the frame. `output` is written
+// on a size change (`eye` is 0 or 1: the VR world's slot 2 has no fovea and
+// is refused). The crop must lie inside the frame. `output` is written
 // only in the crop region; the periphery is the caller's to fill and blend.
 // The moving-crop probe (2026-09-04) proved a crop pans cleanly through
 // NVIDIA's history; a fixed centre is the trivial case of that. False on any
@@ -205,7 +238,8 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
 // full frame never share an accumulation. The composite upscales what comes
 // back around the fovea. The inputs are the same kinds as dlaaEvaluate's, at
 // w x h; `output` (R8G8B8A8_UNORM, w x h, an unordered-access view possible)
-// is written whole. False on any refusal, with its reason.
+// is written whole. `eye` is 0 or 1: slot 2, the VR world's, has no periphery
+// and is refused. False on any refusal, with its reason.
 bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                            ID3D11Texture2D* depth, ID3D11Texture2D* motion,
                            ID3D11Texture2D* output, uint32_t w, uint32_t h, float jx, float jy,
@@ -233,7 +267,9 @@ bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
 // paid it (the full frame, the fovea's centre crop, the steady periphery)
 // and by eye, so a display can show a real per-eye figure instead of the
 // pooled average above mislabeled as one. False when that role/eye has
-// not evaluated yet. eye: 0 left, 1 right.
+// not evaluated yet. eye: 0 left, 1 right; the full-frame role alone also
+// answers for slot 2, the VR world route's (the centre and periphery roles
+// are the eyes' only, and refuse it).
 bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs);
 bool dlaaCentreTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs);
 bool dlaaPeripheryTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs);

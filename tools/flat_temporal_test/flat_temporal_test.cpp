@@ -21,6 +21,16 @@
 #include "flat_pixel_capture_tests.h"
 #include "flat_local_reject_tests.h"
 #include "flat_negotiated_eval_tests.h"
+#include "flat_standdown_tests.h"
+#include "flat_elite_settings_tests.h"
+#include "flat_cpu_tests.h"
+#include "flat_witness_bound_tests.h"
+#include "flat_camera_table_tests.h"
+#include "flat_query_cut_tests.h"
+#include "flat_wrapper_note_tests.h"
+#include "flat_hdr_route_tests.h"
+#include "flat_copy_structure_tests.h"
+#include "flat_hdr_crumbs_tests.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -1740,15 +1750,17 @@ int flatTraceMigrate(const char* dirPath) {
             FlatTraceFrameHeader fh{};
             std::memcpy(&fh, bytes.data() + at, sizeof(fh));
             at += sizeof(fh);
+            // The corpus files are EDVRFTR3: the event layout stays the V3 one here, and the rewritten file stays FTR3.
             if (!fh.eventCount || fh.eventCount > kFlatTraceEventsPerFrame ||
-                bytes.size() - at < fh.eventCount * sizeof(FlatTraceEvent)) { ok = false; break; }
+                bytes.size() - at < fh.eventCount * sizeof(FlatTraceEventV3)) { ok = false; break; }
             FlatRuntimePrefix replay{};
             replay.frame = fh.frame; replay.output = fh.output;
             replay.width = fh.width; replay.height = fh.height; replay.format = fh.format;
             FlatFrameContract rc{};
             for (uint32_t i = 0; i < fh.eventCount; ++i) {
-                FlatTraceEvent e{};
-                std::memcpy(&e, bytes.data() + at, sizeof(e)); at += sizeof(e);
+                FlatTraceEventV3 v3{};
+                std::memcpy(&v3, bytes.data() + at, sizeof(v3)); at += sizeof(v3);
+                const FlatTraceEvent e = flatTraceEventFromV3(v3);
                 if (e.kind == kFlatTraceEventWriteResource) { flatRuntimeWritten(replay, e.key.color); continue; }
                 if (e.kind == kFlatTraceEventDispatchWritten) { flatRuntimeDispatchObserveWritten(replay, e.key.color); continue; }
                 if (e.kind == kFlatTraceEventMarkUncertain) { replay.uncertain = true; continue; }
@@ -2046,8 +2058,8 @@ void testStaticSceneWiring() {
          "the flat runtime counts the frames it hands the resolver with the policy on"},
         {&runtimeCpp, "static-scene-frames=%llu",
          "the menu HDR copy line carries the static-scene-frames field"},
-        {&resolveCpp, "constants.flags[3]=f.staticScene?1u:0u;",
-         "the resolver hands the frame's staticScene to the shader as flags.w"},
+        {&resolveCpp, "constants.flags[3]=f.staticScene?1u:(depthCheck?2u:0u);",
+         "the resolver hands the frame's staticScene to the shader as flags.w (1), the steady-detail depth check's frame as 2 behind it, else 0"},
     };
     for (const Link& link : links) {
         const size_t at = link.text->find(link.needle);
@@ -2065,6 +2077,823 @@ void testStaticSceneWiring() {
           "the staticScene assignment precedes the resolve call that reads it");
 }
 
+// Replays a MonoFixture frame (plus `extra` records between the tone pass and the copy) through
+// the online prefix model, as flatRuntimePrefixTests does, and returns the copy draw's verdict.
+edvr::FlatMonoFrame standDownReplay(MonoFixture& fixture, const edvr::FlatContractRecord* extra, uint32_t extraCount) {
+    using namespace edvr;
+    auto prefix = std::make_unique<FlatRuntimePrefix>();
+    prefix->frame = fixture.input.frame; prefix->output = fixture.input.output;
+    prefix->width = 1280; prefix->height = 720; prefix->format = 28;
+    struct Event { const FlatContractRecord* r; uint32_t q; } events[240]{};
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < fixture.input.worldCount; ++i) {
+        const auto& r = fixture.world[i];
+        for (uint32_t n = 0; n < r.draws; ++n)
+            events[count++] = {&r, r.first + (r.last-r.first)*n/(r.draws>1?r.draws-1:1)};
+    }
+    for (uint32_t i = 0; i < extraCount; ++i) events[count++] = {&extra[i], extra[i].first};
+    events[count++] = {&fixture.handoff[0], fixture.handoff[0].first};
+    events[count++] = {&fixture.handoff[1], fixture.handoff[1].first};
+    std::sort(events, events + count, [](const Event& a, const Event& b) { return a.q < b.q; });
+    FlatMonoFrame selected{};
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& r = *events[i].r; FlatRuntimeDraw d{}; d.key = r.key;
+        std::memcpy(d.camera, r.camera, sizeof(d.camera));
+        d.key.writeEpoch = prefix->frame; d.key.writeSeq = prefix->sequence + 1;
+        d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
+        d.instances = r.firstInstances;
+        selected = flatRuntimeObserve(*prefix, d);
+    }
+    return selected;
+}
+
+// The stand-down against real chains: the captured frame that selects, and the two rc.4 users'
+// refused chains (section 79) built from the same fixture. The verdicts come from the online
+// prefix model, the very function the runtime's copy draw calls; the machine is driven with them
+// at 60 fps on a mock clock.
+void testStandDownAgainstModel() {
+    using namespace edvr;
+    using stand_down_test::Sim;
+    auto verdictOf = [](const FlatMonoFrame& f) { return flatFrameSeenFor(f.selected(), f.reason); };
+
+    MonoFixture stock(1280);
+    const FlatMonoFrame ok = standDownReplay(stock, nullptr, 0);
+    check(ok.selected() && verdictOf(ok) == FlatFrameSeen::Treatable,
+          "the captured stock chain selects and is treatable");
+
+    // User 1 (4K, game AA on): the tone pass has a PS the selector has never seen, and two plain
+    // image passes sit between it and the copy, the second a format-27 target the copy reads.
+    MonoFixture user1(1280);
+    user1.handoff[0].key.ps = 0x6E83D02E7422C5BAull;
+    FlatContractRecord passes1[2]{};
+    user1.fill(passes1[0], kFlatContractScreen, 0x2710, 27, 938, 938, 1,
+               0x03D186CE0EC031E3ull, 0xBAB75803059C271Dull, 0, 0, false);
+    user1.fill(passes1[1], kFlatContractScreen, 0x2720, 27, 939, 939, 1,
+               0x98E6F9986FDC9A53ull, 0x4168985B52C5D7C4ull, 0, 0, false);
+    user1.handoff[1].key.srvView[0] = MonoFixture::token(0x2722);
+    user1.handoff[1].key.srvResource[0] = MonoFixture::token(0x2720);
+    const FlatMonoFrame refused1 = standDownReplay(user1, passes1, 2);
+    check(!refused1.selected() && refused1.reason == FlatMonoReason::NoTonePass &&
+          verdictOf(refused1) == FlatFrameSeen::Structural,
+          "user 1's chain (new tone PS, two passes before the copy) is refused for no-known-tone-pass: structural");
+
+    // User 2 (EDHM chained, bloom and DoF on): a KNOWN DoF-composite tone pass, then two passes on
+    // the copy's shared VS, the second a format-27 target the copy reads.
+    MonoFixture user2(1280);
+    user2.handoff[0].key.ps = flat_mono_detail::kToneDofCompositePs;
+    user2.handoff[0].key.srvView[0] = MonoFixture::token(0x2602);
+    user2.handoff[0].key.srvResource[0] = MonoFixture::token(0x2600);
+    user2.handoff[0].key.srvView[1] = MonoFixture::token(0x2B12);
+    user2.handoff[0].key.srvResource[1] = MonoFixture::token(0x2B10);
+    FlatContractRecord passes2[2]{};
+    user2.fill(passes2[0], kFlatContractScreen, 0x2710, 27, 938, 938, 1,
+               0x20F383BBAC05C031ull, 0x5AA08A96E3C14B10ull, 0, 0, false);
+    user2.fill(passes2[1], kFlatContractScreen, 0x2720, 27, 939, 939, 1,
+               0x20F383BBAC05C031ull, 0x2375CCCCBBFE7A4Dull, 0, 0, false);
+    user2.handoff[1].key.srvView[0] = MonoFixture::token(0x2722);
+    user2.handoff[1].key.srvResource[0] = MonoFixture::token(0x2720);
+    const FlatMonoFrame refused2 = standDownReplay(user2, passes2, 2);
+    check(!refused2.selected() && refused2.reason == FlatMonoReason::NoTonePass &&
+          verdictOf(refused2) == FlatFrameSeen::Structural,
+          "user 2's chain (known tone pass, passes after it) is refused for no-known-tone-pass: structural");
+
+    // A treated session: the selecting chain, 90 s at 60 fps, never leaves Full and never probes.
+    {
+        Sim sim;
+        for (int i = 0; i < 60 * 90; ++i) sim.frame(verdictOf(ok), ok.reason);
+        check(sim.machine.entries == 0 && sim.work == FlatWork::Full && sim.machine.probes == 0,
+              "frames the selector selects never stand the runtime down");
+    }
+    // Supported, then an unsupported chain, then supported again -- the qualification lifecycle the
+    // motion-CPU review asks the stand-down to survive (reviews/flat-motion-cpu-review-2026-09-29.md,
+    // C2): nothing that pauses the work may wait for a treated frame to resume it, or warm-up
+    // deadlocks. Treated for 10 s; refused every frame until it stands down and has probed for
+    // 20 s; the chain becomes recognised again; after the resume the first frames are warm-up
+    // frames (the selector selects but the resolve refuses, or the prefix is transiently
+    // truncated), then treated frames: the runtime must never fall back into the stand-down.
+    {
+        Sim sim;
+        for (int i = 0; i < 60 * 10; ++i) sim.frame(verdictOf(ok), ok.reason);
+        check(sim.machine.entries == 0 && sim.work == FlatWork::Full, "supported: full, no stand-down");
+        FlatStandDownEvent event = FlatStandDownEvent::None;
+        while (event != FlatStandDownEvent::Entered) event = sim.frame(verdictOf(refused1), refused1.reason);
+        const uint64_t enteredAt = sim.now;
+        while (sim.now - enteredAt < 20000) sim.frame(verdictOf(refused1), refused1.reason);
+        check(sim.machine.standing && sim.work != FlatWork::Full, "unsupported: stood down and probing");
+        while (event != FlatStandDownEvent::Resumed) event = sim.frame(verdictOf(ok), ok.reason);
+        check(!sim.machine.standing && sim.work == FlatWork::Full && sim.machine.entries == 1 && sim.machine.resumes == 1,
+              "the chain becomes recognised again: the very next probe resumes, with no treated frame needed first");
+        bool fellBack = false;
+        for (int i = 0; i < 90; ++i) {   // warm-up: transient frames, then selected frames the resolve still refuses
+            const auto e = i < 45 ? sim.frame(FlatFrameSeen::Transient, FlatMonoReason::Truncated)
+                                  : sim.frame(verdictOf(ok), ok.reason);
+            if (e != FlatStandDownEvent::None || sim.work != FlatWork::Full) fellBack = true;
+        }
+        for (int i = 0; i < 60 * 30; ++i) {   // then treated frames
+            if (sim.frame(verdictOf(ok), ok.reason) != FlatStandDownEvent::None || sim.work != FlatWork::Full) fellBack = true;
+        }
+        check(!fellBack && sim.machine.entries == 1, "warm-up after the resume is never mistaken for a refusal: it stays full");
+    }
+    // Each user's session: refused every frame stands the work down after 5 s; the user turns the
+    // setting off in game (the chain becomes the stock one) at an arbitrary moment; the probe
+    // that sees it ends the stand-down within two seconds.
+    for (const FlatMonoFrame* refused : {&refused1, &refused2}) {
+        Sim sim;
+        FlatStandDownEvent event = FlatStandDownEvent::None;
+        while (event != FlatStandDownEvent::Entered)
+            event = sim.frame(verdictOf(*refused), refused->reason);
+        check(sim.machine.enteredReason == FlatMonoReason::NoTonePass && sim.work == FlatWork::Paused,
+              "a refused chain stands the work down and names the reason");
+        // 40 s stood down, probing on the cadence, every probe refused again.
+        const uint64_t enteredAt = sim.now;
+        while (sim.now - enteredAt < 40000) sim.frame(verdictOf(*refused), refused->reason);
+        check(sim.machine.standing && sim.machine.probes >= 24 && sim.machine.probes <= 27,
+              "40 s stood down is about 26 probes, each refused again");
+        const uint64_t settingChangedAt = sim.now + 333;
+        uint64_t resumedAt = 0;
+        while (!resumedAt && sim.now < settingChangedAt + 6000) {
+            const bool changed = sim.now >= settingChangedAt;
+            const FlatMonoFrame& shown = changed ? ok : *refused;
+            if (sim.frame(verdictOf(shown), shown.reason) == FlatStandDownEvent::Resumed) resumedAt = sim.now;
+        }
+        check(resumedAt && resumedAt - settingChangedAt <= 2000 && !sim.machine.standing && sim.work == FlatWork::Full,
+              "turning the setting off in game resumes the work within two seconds");
+    }
+}
+
+// The stand-down's wiring in the runtime and its neighbours, which no rig can run because the
+// flat runtime needs a game: held by a source scan of the exact lines that gate each piece, the
+// way testStaticSceneWiring holds the menu policy. Each needle is counted, and the count is
+// checked against the same text with the needle removed, so the scan is known to be able to fail.
+void testStandDownWiring() {
+    auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
+    const std::string temporalCpp = slurp("src/d3d11/flat_temporal.cpp");
+    const std::string temporalH = slurp("src/d3d11/flat_temporal.h");
+    const std::string injectCpp = slurp("src/d3d11/flat_camera_inject.cpp");
+    check(!runtimeCpp.empty() && !temporalCpp.empty() && !temporalH.empty() && !injectCpp.empty(),
+          "the runtime, discovery and injector sources are readable from the repo root");
+    auto count = [](const std::string& text, const std::string& needle) {
+        unsigned n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+        return n;
+    };
+    struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
+    const Pin pins[] = {
+        // The mode of every frame, its verdict, and the Present that decides both.
+        {&runtimeCpp, "standDownFrame(s, frame);", 1, "the Present runs the stand-down's frame boundary once"},
+        {&runtimeCpp, "const FlatFrameSeen seen = flatFrameSeenFor(selected.selected(), selected.reason);", 1,
+         "the copy draw records its verdict from the selector's own result"},
+        {&runtimeCpp, "if (s.work == FlatWork::Probe) return;", 1, "a Probe frame ends after the contract observation"},
+        // The per-draw and per-call pieces, Paused frames.
+        {&runtimeCpp, "if (s.work == FlatWork::Paused) return;", 3, "draw scope, dispatch scope and flatRuntimeUnknown return in a Paused frame"},
+        {&runtimeCpp, "if (!owner() || state().work == FlatWork::Paused) return;", 4,
+         "Written, Uavs, Unmap and Update return after owner() in a Paused frame"},
+        {&runtimeCpp, "if (!owner() || type == D3D11_MAP_READ || state().work == FlatWork::Paused) return;", 1,
+         "Map returns after owner() in a Paused frame"},
+        // The camera witness runs in Full frames only.
+        {&runtimeCpp, "capture(*c, c->mapped); if (state().work == FlatWork::Full) cameraWitness(res);", 1,
+         "Unmap's camera witness is Full-only"},
+        {&runtimeCpp, "capture(*c, bytes); if (state().work == FlatWork::Full) cameraWitness(res);", 1,
+         "Update's camera witness is Full-only"},
+        // Legacy projection readiness, coverage, jitter preparation: released, and created in Full only.
+        {&runtimeCpp, "if (s.projection) s.projection.reset();", 1, "the stand-down releases legacy projection readiness"},
+        {&runtimeCpp, "if(wanted && !s.projection && s.work == FlatWork::Full) {", 1,
+         "the Present creates legacy projection readiness in Full frames only"},
+        // Engine motion, the camera hook, the discovery observers.
+        {&runtimeCpp, "engineVelocityConfigure(enabled && !enginePausedThen);", 1, "the Present hands the pause to engine motion"},
+        {&runtimeCpp, "engineVelocityConfigure(enabled && !s.enginePaused);", 1, "and again when the stand-down changed it"},
+        {&runtimeCpp, "flatCameraInjectPause(next != FlatWork::Full);", 1, "the stand-down pauses the camera refresh hook"},
+        {&runtimeCpp, "flatTemporalSetPaused(next == FlatWork::Paused);", 1, "the stand-down pauses the discovery observers on Paused frames"},
+        // The trace ring keeps the last watched frames.
+        {&runtimeCpp, "if (s.work != FlatWork::Paused) s.prefix = FlatRuntimePrefix{};", 1, "a Paused frame does not clear the prefix"},
+        {&runtimeCpp, "if (s.work != FlatWork::Paused) {", 1, "a Paused frame neither rotates the trace ring nor resets its contract"},
+        {&temporalH, "if (detail::g_flatTemporalPaused.load(std::memory_order_relaxed)) return false;", 1,
+         "discovery observers see nothing while paused"},
+        {&temporalCpp, "flatMonoReasonStructural(mono.reason)", 1, "the chain dump asks the shared structural-reason question"},
+        {&injectCpp, "if (paused && !g_inject.injected.empty()) return;", 1,
+         "the camera hook closes only when no camera holds an injected phase"},
+        {&injectCpp, "if (g_inject.permanentlyDown.load(std::memory_order_acquire)) return;", 1,
+         "a pause never reopens a hook that stood down for good"},
+    };
+    for (const Pin& pin : pins) {
+        check(count(*pin.text, pin.needle) == pin.times, pin.what);
+        // Control: with every occurrence removed the same scan finds none.
+        std::string without = *pin.text;
+        for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
+            without.erase(at, std::strlen(pin.needle));
+        check(count(without, pin.needle) == 0, "stand-down wiring control: a source with the line removed no longer contains it");
+    }
+    // The old eight-way reason list is gone from the discovery dump: one definition of "structural".
+    check(count(temporalCpp, "mono.reason == FlatMonoReason::NoTonePass") == 0,
+          "the chain dump no longer carries its own copy of the structural reasons");
+    // ORDER in the draw scope. The Probe frame ends after the contract observation -- the menu copy
+    // verification, the online prefix model and the selector all run for it -- and before every
+    // piece of per-draw work the stand-down pauses.
+    auto at = [&](const char* needle) { return runtimeCpp.find(needle); };
+    const size_t menuVerify = at("d.menuHdrCopyVerified=verifyMenuHdrCopy(ctx,d);");
+    const size_t observe = at("? flatRuntimeObserveContract(s.prefix, d, s.traceContract)");
+    const size_t record = at("flatTraceRecord(s.traceRing, d, foreignWork.load(std::memory_order_acquire), hdrSrvKnown ? hdrSrv : nullptr);");
+    const size_t verdict = at("const FlatFrameSeen seen = flatFrameSeenFor(");
+    const size_t probeReturn = at("if (s.work == FlatWork::Probe) return;");
+    check(menuVerify != std::string::npos && observe != std::string::npos && record != std::string::npos &&
+          verdict != std::string::npos && probeReturn != std::string::npos &&
+          menuVerify < observe && observe < record && record < verdict && verdict < probeReturn,
+          "in the draw scope the menu copy verification, the model, the trace record and the verdict all precede the Probe return");
+    const char* afterProbe[] = {
+        "const bool sourceCandidate=", "engineVelocityNoteSource(", "++s.covSceneDraws;",
+        "qualifyProjection(s,recipes,", "engineVelocityFlatBeginDraw(ctx, &gameHadTarget6);",
+        "flatMonoResolve(s.device.Get(), ctx, f,", "projection.emplace(*projectionPlan);"};
+    for (const char* needle : afterProbe) {
+        const size_t where = at(needle);
+        check(where != std::string::npos && probeReturn != std::string::npos && probeReturn < where,
+              "coverage, source naming, substitution, jitter and the resolve all follow the Probe return");
+    }
+    // NO DEADLOCK: nothing that pauses or resumes the work reads whether a frame was treated or
+    // accepted. The pause is decided by the chain verdict alone, so warm-up can always start.
+    const size_t first = at("void applyWork(State& s, FlatWork next) {");
+    const size_t last = at("bool flatRuntimeStructuralRefusal(");
+    check(first != std::string::npos && last != std::string::npos && first < last,
+          "the stand-down functions can be delimited in the runtime source");
+    if (first != std::string::npos && last != std::string::npos && first < last) {
+        const std::string body = runtimeCpp.substr(first, last - first);
+        check(body.find("s.treated") == std::string::npos && body.find("s.accepted") == std::string::npos &&
+              body.find("temporalAccepted") == std::string::npos && body.find("havePrevious") == std::string::npos &&
+              body.find("previousAcceptedValid") == std::string::npos,
+              "applyWork, endStandDown and standDownFrame never read whether a frame was treated: a pause cannot wait for one");
+        check(body.find("applyWork(") != std::string::npos && body.find("wake(") != std::string::npos,
+              "(control: the delimited text is the stand-down code)");
+    }
+}
+
+// The F8 panel's settings warning in the panel and the runtime: shown only while the runtime says
+// the work is stood down for the shape of a post chain whose output copy it found, Elite's files
+// read when the panel opens, and the installer's log bundler sharing the folder's spelling. A
+// source scan, the way the stand-down pins are, with the same removal controls.
+void testFlatWarningWiring() {
+    auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string menuCpp = slurp("src/d3d11/menu.cpp");
+    const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
+    const std::string bundleCpp = slurp("src/installer/logbundle.cpp");
+    const std::string standdownH = slurp("src/d3d11/flat_standdown.h");
+    check(!menuCpp.empty() && !runtimeCpp.empty() && !bundleCpp.empty() && !standdownH.empty(),
+          "the menu, runtime, stand-down policy and log bundler sources are readable from the repo root");
+    auto count = [](const std::string& text, const std::string& needle) {
+        unsigned n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+        return n;
+    };
+    struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
+    const Pin pins[] = {
+        {&menuCpp, "const bool refusing = flatRuntimeStructuralRefusal(&reason, &standing) &&", 1,
+         "the warning follows the runtime's structural-refusal state and nothing else"},
+        {&menuCpp, "temporalModeEnabled(Config::get().requestedTemporalMode());", 1,
+         "and only while a temporal mode is selected"},
+        {&menuCpp, "if (runtimeFlatProfile() && s.flatWarnActive) {", 1, "the panel draws the warning only while it is active"},
+        {&menuCpp, "if (c.lineCount < kMenuMaxLines) c.lines[c.lineCount++].style = kMenuNote;", 2,
+         "the warning, and the wrapper note after it, are note lines below the rows"},
+        {&menuCpp, "FlatWarnRuler ruler{c.capPx * 8 / 7};", 2,
+         "wrapped with the panel's own ruler at the note face's em (the flat warning and the wrapper note: no VR note takes a line)"},
+        {&menuCpp, "flatWarningTick(now);", 1, "the flat tick runs the warning"},
+        {&menuCpp, "s.flatSettingsForce = true;", 1, "Elite's files are looked at when the panel opens"},
+        {&menuCpp, "s.flatSettings.setFolder(flatEliteGraphicsFolder());", 1, "from %LOCALAPPDATA%, resolved once"},
+        {&menuCpp, "if (s.flatWarnLogged >= kFlatWarnLogMax) return;", 1, "the state-change lines are bounded per session"},
+        {&runtimeCpp, "publishRefusal(s, true);", 1, "the Present publishes the refusal state after the stand-down's verdict"},
+        {&runtimeCpp, "publishRefusal(s, false);", 1, "and a wake clears it"},
+        {&runtimeCpp, "bool flatRuntimeStructuralRefusal(const char** reasonName, bool* standingDown) {", 1,
+         "the accessor the panel reads"},
+        {&runtimeCpp, "if (warn && s.standDown.warningActive())", 1,
+         "the runtime publishes the warning from the stand-down's own gate"},
+        {&bundleCpp, "return edvr::eliteGraphicsFolderUnder(base);", 1, "the log bundler composes the folder through the shared header"},
+        // The gate itself: the stand-down, for a reason that found an output copy, and no clock.
+        {&standdownH, "bool warningActive() const { return standing && flatMonoReasonWarrantsWarning(standReason); }", 1,
+         "the warning is on while stood down for a reason that found an output copy"},
+        {&standdownH, "return flatMonoReasonStructural(reason) && reason != FlatMonoReason::NoOutputCopy &&\n"
+                      "           reason != FlatMonoReason::NoScene;", 1,
+         "and never for no-known-output-copy or no-3d-scene: a startup or loading frame has no final copy, or no scene"},
+        {&standdownH, "standReason = runReason;", 1, "a stand-down starts with the reason that entered it"},
+        {&standdownH, "standReason = reason;", 1, "and follows each probe frame's own finding"},
+    };
+    for (const Pin& pin : pins) {
+        check(count(*pin.text, pin.needle) == pin.times, pin.what);
+        std::string without = *pin.text;
+        for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
+            without.erase(at, std::strlen(pin.needle));
+        check(count(without, pin.needle) == 0, "warning wiring control: a source with the line removed no longer contains it");
+    }
+    check(count(bundleCpp, "Frontier Developments") == 1,
+          "the log bundler no longer spells the folder itself (its comment names it once)");
+    // NO TIMER. The first version warned after a 2 s run of refusals and flickered across a
+    // transition; the gate is the stand-down now, so the constant is gone and the publisher reads no clock.
+    check(count(standdownH, "kFlatStandDownWarnMs") == 0 && count(runtimeCpp, "kFlatStandDownWarnMs") == 0 &&
+          count(menuCpp, "kFlatStandDownWarnMs") == 0,
+          "the warning has no timer of its own: its constant is gone from the policy, the runtime and the panel");
+    const size_t publishFrom = runtimeCpp.find("void publishRefusal(const State& s, bool warn) {");
+    const size_t publishTo = runtimeCpp.find("// --- Stand-down: what each mode does");
+    check(publishFrom != std::string::npos && publishTo != std::string::npos && publishFrom < publishTo,
+          "the publisher can be delimited in the runtime source");
+    if (publishFrom != std::string::npos && publishTo != std::string::npos && publishFrom < publishTo) {
+        const std::string publisher = runtimeCpp.substr(publishFrom, publishTo - publishFrom);
+        check(publisher.find("GetTickCount64") == std::string::npos && publisher.find("nowMs") == std::string::npos &&
+              publisher.find("warningActive()") != std::string::npos,
+              "the publisher reads the stand-down's gate and no clock (control: it names warningActive)");
+    }
+}
+
+// The CPU and GPU census's wiring (flat_cpu.h): which entry point carries which family's scope,
+// where the once-a-frame tick sits, that it stops with the mode, and that nothing it measures is
+// read by a decision. A source scan with removal controls, the way the stand-down pins are.
+void testFlatCpuWiring() {
+    auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
+    const std::string resolveCpp = slurp("src/d3d11/flat_mono_resolve.cpp");
+    const std::string resolveH = slurp("src/d3d11/flat_mono_resolve.h");
+    const std::string injectCpp = slurp("src/d3d11/flat_camera_inject.cpp");
+    const std::string temporalCpp = slurp("src/d3d11/flat_temporal.cpp");
+    const std::string engineCpp = slurp("src/d3d11/engine_velocity.cpp");
+    const std::string engineH = slurp("src/d3d11/engine_velocity.h");
+    const std::string cpuH = slurp("src/d3d11/flat_cpu.h");
+    const std::string menuCpp = slurp("src/d3d11/menu.cpp");
+    check(!runtimeCpp.empty() && !resolveCpp.empty() && !resolveH.empty() && !injectCpp.empty() && !temporalCpp.empty() &&
+          !engineCpp.empty() && !engineH.empty() && !cpuH.empty() && !menuCpp.empty(),
+          "the census's sources are readable from the repo root");
+    auto count = [](const std::string& text, const std::string& needle) {
+        unsigned n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+        return n;
+    };
+    struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
+    const Pin pins[] = {
+        // Every family the census names has its scope at the entry points that family stands for.
+        {&runtimeCpp, "flatcpu::Scope shell(flatcpu::kOther);", 3, "the draw scope (both halves) and the dispatch scope time their own shells"},
+        {&runtimeCpp, "flatcpu::kReduce", 2, "contract reduction times the reducer and the final copy's admission by structure"},
+        {&runtimeCpp, "flatcpu::kCopyChecks", 2, "the exact-shader verifications and the F10 captures are timed"},
+        {&runtimeCpp, "flatcpu::kCameraRows", 2, "the camera lookup and hash, and capture()"},
+        {&runtimeCpp, "flatcpu::kTrace", 5, "every trace-ring copy is timed: capture, dispatch, write, record and the HDR route's resolve marker"},
+        {&runtimeCpp, "flatcpu::kResource", 4, "Written, Map, Unmap and Update time their lookups"},
+        {&runtimeCpp, "flatcpu::kCoverage", 1, "coverage classification"},
+        {&runtimeCpp, "flatcpu::kProjection", 3, "qualifyProjection, the private binding and its restore"},
+        {&runtimeCpp, "flatcpu::kShadows", 5, "the constant-buffer shadow observers"},
+        {&runtimeCpp, "flatcpu::kWitness", 1, "the camera witness"},
+        {&runtimeCpp, "flatcpu::kEngineDraw", 4, "engine motion's draw wrapper: naming, its begin (BeforeDraw), its end, and the flush of what it kept bound"},
+        {&runtimeCpp, "flatcpu::kResolve", 2, "the treatment at the copy draw and at the HDR route's trigger"},
+        {&runtimeCpp, "flatcpu::kHdrRoute", 2, "the HDR route's trigger detector on every draw, and its selection at the trigger"},
+        {&runtimeCpp, "flatcpu::kTrackers", 5, "the state trackers"},
+        {&resolveCpp, "flatcpu::Scope backendScope(flatcpu::kBackend);", 1, "the backend evaluation inside the resolver"},
+        {&injectCpp, "flatcpu::Scope timed(flatcpu::kInject);", 2, "the camera inject callback, both halves"},
+        {&temporalCpp, "flatcpu::Scope timed(flatcpu::kDiscovery);", 16, "each discovery observer"},
+        // The resolver's GPU span: the hooks, the guard around its dispatches, and the install.
+        {&resolveH, "void flatMonoResolveSetSpanHooks(FlatMonoResolveSpanFn begin, FlatMonoResolveSpanFn end);", 1, "the resolver takes span hooks"},
+        {&resolveCpp, "SpanGuard span(context);", 1, "the resolver's dispatches and backend call are one GPU span"},
+        {&runtimeCpp, "flatMonoResolveSetSpanHooks(&resolveSpanBegin, &resolveSpanEnd);", 1, "the Present installs the span hooks"},
+        // The frame: its GPU span opens at the first game draw and closes before Present; the tick cuts it after.
+        {&runtimeCpp, "if (!s.gpuFrameTried) gpuFrameOpen(s, context);", 1, "the whole-frame GPU span opens at the frame's first game draw"},
+        {&runtimeCpp, "if (owner()) gpuFrameClose(state());", 1, "and closes just before the real Present"},
+        {&runtimeCpp, "s.census.onFrame(censusNow, censusFreq, endedPaused);", 1, "the Present cuts the census once a frame"},
+        {&runtimeCpp, "s.census.idle();", 1, "and stops it when no temporal mode is selected"},
+        {&runtimeCpp, "const EngineVelocityWrapperCounts wrapper = engineVelocityTakeWrapperCounts();", 1, "the draw wrapper's counts are drained every frame"},
+        {&runtimeCpp, "if (censusWasRunning) s.census.noteWrapper(", 1, "and handed to the census only while it runs: no backlog"},
+        {&runtimeCpp, "const FlatQueryCounts queries = flatQueryCut().take();", 1, "the query shortcuts' counts are drained every frame too"},
+        {&runtimeCpp, "if (censusWasRunning) s.census.noteQueries(queries);", 1, "and handed over only while the census runs"},
+        {&runtimeCpp, "Log::get().note(\"%s\", lines.line[i]);", 1, "the lines go to the log as they are"},
+        // The census drives engine motion's clock in the flat profile; nothing else does.
+        {&cpuH, "emcpu::g_gate.store(gate, std::memory_order_relaxed);", 1, "the census opens engine motion's gate with its own sampling decision"},
+        {&cpuH, "emcpu::g_gate.store(0, std::memory_order_relaxed);", 1, "and closes it when it stops"},
+        {&menuCpp, "perfMonitorFrame(dev);", 1, "perfMonitorFrame, which cuts engine motion's own recorder, is called once"},
+        // The draw wrapper's D3D calls are counted where they are made.
+        {&engineH, "inline void engineVelocityNoteStateCalls(unsigned n) noexcept { engine_velocity_detail::g_stateCalls += n; }", 1, "the count is one owner-thread add"},
+        {&engineCpp, "EngineVelocityWrapperCounts engineVelocityTakeWrapperCounts() noexcept {", 1, "and drained by one function"},
+        {&engineCpp, "g_substitutedBase += familyDraws[f];", 1, "a summary between two drains loses none of the substituted draws"},
+    };
+    for (const Pin& pin : pins) {
+        check(count(*pin.text, pin.needle) == pin.times, pin.what);
+        std::string without = *pin.text;
+        for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
+            without.erase(at, std::strlen(pin.needle));
+        check(count(without, pin.needle) == 0, "census wiring control: a source with the line removed no longer contains it");
+    }
+    check(count(engineCpp, "engineVelocityNoteStateCalls(") >= 30,
+          "the draw wrapper counts its D3D calls at every call site (thirty and more)");
+    // ORDER. The census's whole-frame span opens before the Paused return (a stood-down frame is
+    // still a frame), the Present's census block sits after the stand-down's frame boundary and
+    // before anything that reads the frame's draw capture, and the flat branch of the menu tick
+    // returns before perfMonitorFrame -- so the census is the only driver of engine motion's clock.
+    auto at = [&](const std::string& text, const char* needle) { return text.find(needle); };
+    const size_t open = at(runtimeCpp, "if (!s.gpuFrameTried) gpuFrameOpen(s, context);");
+    const size_t lastPausedReturn = runtimeCpp.rfind("if (s.work == FlatWork::Paused) return;");
+    check(open != std::string::npos && lastPausedReturn != std::string::npos && open < lastPausedReturn && lastPausedReturn - open < 400,
+          "the frame's GPU span opens just before the draw scope's Paused return");
+    const size_t standDown = at(runtimeCpp, "standDownFrame(s, frame);");
+    const size_t tick = at(runtimeCpp, "s.census.onFrame(censusNow, censusFreq, endedPaused);");
+    const size_t capture = at(runtimeCpp, "s.drawCapture.present(s.context.Get()");
+    check(standDown != std::string::npos && tick != std::string::npos && capture != std::string::npos &&
+          standDown < tick && tick < capture,
+          "the census tick follows the stand-down's frame boundary and precedes the draw capture");
+    const size_t flatReturn = at(menuCpp, "if (!g_budget.shouldRun()) inputGateSetPrivate(false);");
+    const size_t perf = at(menuCpp, "perfMonitorFrame(dev);");
+    check(flatReturn != std::string::npos && perf != std::string::npos && flatReturn < perf,
+          "the flat branch of the menu tick ends before perfMonitorFrame: the census is the flat profile's only driver of engine motion's clock");
+    // INSTRUMENT ONLY. The stand-down functions never read the census, and no decision in the
+    // runtime reads a figure it produced.
+    const size_t first = at(runtimeCpp, "void applyWork(State& s, FlatWork next) {");
+    const size_t last = at(runtimeCpp, "bool flatRuntimeStructuralRefusal(");
+    check(first != std::string::npos && last != std::string::npos && first < last, "the stand-down functions can be delimited");
+    if (first != std::string::npos && last != std::string::npos && first < last)
+        check(runtimeCpp.substr(first, last - first).find("census") == std::string::npos,
+              "the stand-down never reads the census: it measures, it does not decide");
+    // The same for the numbers: the runtime touches the census in eleven places and no other -- the four
+    // GPU notes and the skipped one, idle, and the block at the Present (running, onFrame, noteWrapper,
+    // noteQueries, take) -- and none of them reads a figure back into the runtime's state.
+    check(count(runtimeCpp, "s.census.") == 11,
+          "the runtime touches the census in exactly its known places (the GPU notes, idle, and the Present block)");
+}
+
+// The camera-write witness's bound in the runtime (flat_witness_bound.h holds the policy itself): a
+// walk is asked for only while the bound wants one, the bound is told what each walk learned, an F10
+// audit re-arms it, and the camera data capture is a different function that never reads any of it.
+void testFlatWitnessWiring() {
+    auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
+    check(!runtimeCpp.empty(), "the runtime source is readable from the repo root");
+    auto count = [](const std::string& text, const std::string& needle) {
+        unsigned n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+        return n;
+    };
+    struct Pin { const char* needle; unsigned times; const char* what; };
+    const Pin pins[] = {
+        {"#include \"flat_witness_bound.h\"", 1, "the runtime takes the bound from its header"},
+        {"FlatWitnessBound bound;", 1, "the witness carries the bound"},
+        {"if (w.sitesFull || !w.bound.wantsWalk()) { ++w.dedupHits; return; }", 1,
+         "a write is counted and returns before any stack walk when the witness is full or disarmed"},
+        {"const FlatWitnessStop stopped = w.bound.noteWalk(learned);", 1, "every walk tells the bound what it learned"},
+        {"witnessRearm();", 1, "an F10 audit re-arms the witness"},
+        {"CaptureStackBackTrace(", 1, "there is one stack walk in the runtime"},
+        {"witnessWalk(", 2, "and it is reached from one place: the bounded cameraWitness"},
+        {"bool learned = witnessWalk(buffer);", 1, "the walk's result is what the bound is told"},
+    };
+    for (const Pin& pin : pins) {
+        check(count(runtimeCpp, pin.needle) == pin.times, pin.what);
+        std::string without = runtimeCpp;
+        for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
+            without.erase(at, std::strlen(pin.needle));
+        check(count(without, pin.needle) == 0, "witness wiring control: a source with the line removed no longer contains it");
+    }
+    // The re-arm sits in the F10 audit's block, right after the stand-down ends.
+    const size_t audit = runtimeCpp.find("projectionAuditRequested.exchange(false");
+    const size_t rearm = runtimeCpp.find("witnessRearm();");
+    check(audit != std::string::npos && rearm != std::string::npos && audit < rearm && rearm - audit < 500,
+          "the re-arm is inside the F10 audit's block");
+    // The camera data capture is not the witness: nothing in the bounded region captures or invalidates a camera.
+    const size_t from = runtimeCpp.find("bool witnessWalk(const void* buffer) {");
+    const size_t to = runtimeCpp.find("bool depthView(ID3D11Texture2D* depth) {");
+    check(from != std::string::npos && to != std::string::npos && from < to, "the witness functions can be delimited");
+    if (from != std::string::npos && to != std::string::npos && from < to) {
+        const std::string region = runtimeCpp.substr(from, to - from);
+        check(region.find("capture(") == std::string::npos && region.find("flatCaptureCameraRows") == std::string::npos &&
+              region.find(".valid") == std::string::npos && region.find("->valid") == std::string::npos &&
+              region.find("cameras[") == std::string::npos && region.find("prefix.sequence") == std::string::npos,
+              "the witness never captures or touches a camera: the data motion correctness needs is capture(), apart from it");
+        check(region.find("cameraWitness(") != std::string::npos && region.find("witnessRearm(") != std::string::npos,
+              "(control: the delimited text is the witness code)");
+    }
+}
+
+// The camera table in the runtime (flat_camera_table.h holds the table and its kept answer, and the rig above
+// holds THEM): every entry of the table is changed through the table's own operations, each of which
+// invalidates the draw path's kept answer, and the draw path asks the table for its answer. A source scan
+// with removal controls, so a line that goes back to assigning into an entry, or a draw that goes back
+// to searching for itself, fails here and not in a flight.
+void testFlatCameraTableWiring() {
+    auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
+    check(!runtimeCpp.empty(), "the runtime source is readable from the repo root");
+    auto count = [](const std::string& text, const std::string& needle) {
+        unsigned n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+        return n;
+    };
+    struct Pin { const char* needle; unsigned times; const char* what; };
+    const Pin pins[] = {
+        {"#include \"flat_camera_table.h\"", 1, "the runtime takes the table from its header"},
+        {"using CameraTable = FlatCameraTable<Ptr<ID3D11Buffer>>;", 1, "the runtime's table is the header's, holding COM references"},
+        // The draw path asks the table, and times the search only when it is made afresh.
+        {"const uint32_t b1Binding = bindingGeneration(BindSlot::VsCb1);", 1, "the draw reads the b1 slot's binding generation"},
+        {"s.cameras.probe(k.b1, b1Binding, s.prefix.frame)", 1, "the draw asks for the kept answer"},
+        {"s.cameras.refresh(k.b1, b1Binding, s.prefix.frame)", 1, "and makes it afresh when there is none"},
+        // Every change of an entry, and where it comes from.
+        {"s.cameras.claim(std::move(buffer), d.ByteWidth, s.prefix.frame)", 1, "a buffer joins through the table"},
+        {"s.cameras.invalidate(*c)", 1, "a write into a buffer invalidates through the table"},
+        {"state().cameras.setMapped(*c, bytes)", 1, "a Map notes it through the table"},
+        {"state().cameras.setMapped(*c, nullptr)", 1, "and so does the Unmap"},
+        {"s.cameras.capture(c, bytes, s.prefix.frame, ++s.prefix.sequence)", 1, "a capture goes through the table, with the frame and the write sequence"},
+        {"s.cameras.invalidateAll();", 1, "the game's state going unknown"},
+        {"s.cameras.newFrame();", 1, "the frame boundary"},
+        {"s.cameras.clear();", 1, "the reset"},
+        {"s.cameras.find(resource)", 1, "a search for a buffer is the table's"},
+        {"const Camera* camera(ID3D11Resource* resource, bool add) {", 1, "the runtime's finder hands out entries for reading only"},
+    };
+    for (const Pin& pin : pins) {
+        check(count(runtimeCpp, pin.needle) == pin.times, pin.what);
+        std::string without = runtimeCpp;
+        for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
+            without.erase(at, std::strlen(pin.needle));
+        check(count(without, pin.needle) == 0, "camera table wiring control: a source with the line removed no longer contains it");
+    }
+    // Nothing assigns into an entry, or indexes the table, behind the table's back.
+    const char* const bypasses[] = {"->valid = false", ".valid = false", "->mapped =", ".mapped =", "Camera{}", "s.cameras[",
+                                    "cameraCount", "->frame =", "->sequence =", "->width ="};
+    for (const char* bypass : bypasses)
+        check(count(runtimeCpp, bypass) == 0, "the runtime does not change a camera entry except through the table (no such text in it)");
+    // (control: the scan does find what it looks for)
+    check(count("c->valid = false;", "->valid = false") == 1, "camera table wiring control: the bypass scan finds an assignment");
+}
+
+// The lazy draw bracket in the runtime and the hooks (flat_substitution.h holds the policy, the engine rig's
+// flat_lazy_tests.h the engine's half of it and the policy's own mistakes): every hooked call that could observe or
+// depend on engine motion's state puts the game's back first, and EDVR's own reads of the context follow a flush. A
+// source scan with removal controls, so a hook that loses its line, a flush that moves behind the real call or behind
+// what reads the context, or an event nothing raises, fails here and not in a flight.
+void testFlatSubstitutionWiring() {
+    auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
+    const std::string vscreenCpp = slurp("src/d3d11/vscreen.cpp");
+    const std::string exposureCpp = slurp("src/d3d11/exposure_fix.cpp");
+    const std::string deviceCpp = slurp("src/d3d11/device_hook.cpp");
+    const std::string policyH = slurp("src/d3d11/flat_substitution.h");
+    check(!runtimeCpp.empty() && !vscreenCpp.empty() && !exposureCpp.empty() && !deviceCpp.empty() && !policyH.empty(),
+          "the runtime, hook and policy sources are readable from the repo root");
+    auto count = [](const std::string& text, const std::string& needle) {
+        unsigned n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+        return n;
+    };
+    struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
+    const Pin pins[] = {
+        // The runtime's own sites: what each says to the policy.
+        {&runtimeCpp, "engineVelocityFlatLazy(!diagnostics);", 1, "the draw scope turns the lazy form off while a diagnostic capture is armed"},
+        {&runtimeCpp, "if (diagnostics) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);", 1, "and puts the game's state back at once"},
+        {&runtimeCpp, "if (!d.supported) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);", 1,
+         "a draw that is not a pool-family draw puts the game's state back"},
+        {&runtimeCpp, "if (d.supported && (!continuesRun || coverageReads)) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);", 1,
+         "so does a pool-family draw that is not a plain continuation of the run, or that EDVR reads the context for"},
+        {&runtimeCpp, "flatRuntimeSubstitution(ctx, FlatSubstEvent::kDispatch);", 1, "a dispatch puts the game's state back"},
+        {&runtimeCpp, "flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", 1, "the Present puts it back before the real Present"},
+        {&runtimeCpp, "flatRuntimeSubstitution(nullptr, FlatSubstEvent::kResize);", 1, "a resize forgets it, touching no context"},
+        {&runtimeCpp, "flatRuntimeSubstitution(nullptr, FlatSubstEvent::kClearState);", 1, "ClearState forgets it, touching no context"},
+        {&runtimeCpp, "if (!engineVelocityFlatPending()) return;", 1, "with nothing of engine motion's bound the policy costs one load"},
+        {&runtimeCpp, "switch (flatSubstAction(event)) {", 1, "the runtime asks the policy what to do"},
+        {&runtimeCpp, "engineVelocityFlatFlush(ctx, flushCauseOf(event));", 1, "a flush names its cause"},
+        {&runtimeCpp, "engineVelocityFlatAbandon();", 1, "an abandon"},
+        {&runtimeCpp, "producer = engineVelocityFlatBeginDraw(ctx, &gameHadTarget6);", 1, "the producer branch opens the lazy bracket"},
+        {&runtimeCpp, "engineVelocityFlatEndDraw(ctx);", 1, "and closes it"},
+        {&runtimeCpp, "case FlatSubstEvent::kDispatch: return EngineVelocityFlushCause::kDispatch;", 1, "a dispatch's cause"},
+        {&runtimeCpp, "case FlatSubstEvent::kClear: return EngineVelocityFlushCause::kClear;", 1, "a clear's cause"},
+        {&runtimeCpp, "case FlatSubstEvent::kCopy: return EngineVelocityFlushCause::kCopy;", 1, "a copy's cause"},
+        {&runtimeCpp, "case FlatSubstEvent::kResolve: return EngineVelocityFlushCause::kResolve;", 1, "a resolve's cause"},
+        {&runtimeCpp, "case FlatSubstEvent::kKeepTargets: return EngineVelocityFlushCause::kKeepTargets;", 1, "a targets-keeping set's cause"},
+        {&runtimeCpp, "case FlatSubstEvent::kExecuteCommandList: return EngineVelocityFlushCause::kCommandList;", 1, "a command list's cause"},
+        {&runtimeCpp, "case FlatSubstEvent::kPresent: return EngineVelocityFlushCause::kPresent;", 1, "the Present's cause"},
+        // Who reaches the runtime's scopes.
+        {&vscreenCpp, "FlatRuntimeDrawScope flatDraw(self,", 7, "every draw entry point (D, A, I, N, X, and the two indirect ones) opens the draw scope"},
+        {&exposureCpp, "FlatRuntimeDispatchScope flatDispatch(self);", 2, "Dispatch and DispatchIndirect open the dispatch scope"},
+        {&deviceCpp, "menuFlatResize(); flatRuntimeResize(); }", 2, "both ResizeBuffers hooks tell the runtime before the real call"},
+    };
+    for (const Pin& pin : pins) {
+        check(count(*pin.text, pin.needle) == pin.times, pin.what);
+        std::string without = *pin.text;
+        for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
+            without.erase(at, std::strlen(pin.needle));
+        check(count(without, pin.needle) == 0, "substitution wiring control: a source with the line removed no longer contains it");
+    }
+    // The hooks: one event each, ahead of the real call the hook forwards to (the last one in its body: the early returns
+    // for an internal or foreign call forward untouched, and the void fix in ClearRenderTargetView is another way out).
+    struct Hook { const char* name; const char* event; const char* real; };
+    const Hook hooks[] = {
+        {"hookedClearRtv", "kClear", "realClearRtv("},
+        {"hookedClearUavUint", "kClear", "realClearUavUint("},
+        {"hookedClearUavFloat", "kClear", "realClearUavFloat("},
+        {"hookedClearDsv", "kClear", "realClearDsv("},
+        {"hookedGenerateMips", "kCopy", "realGenerateMips("},
+        {"hookedCopyResource", "kCopy", "realCopyResource("},
+        {"hookedCopyStructureCount", "kCopy", "realCopyStructureCount("},
+        {"hookedCopySubresourceRegion", "kCopy", "realCopySubresourceRegion("},
+        {"hookedUpdateSubresource", "kCopy", "realUpdateSubresource("},
+        {"hookedResolveSubresource", "kResolve", "realResolveSubresource("},
+        {"hookedOMSetRtvAndUav", "kKeepTargets", "realOMSetRtvAndUav("},
+        {"hookedExecuteCommandList", "kExecuteCommandList", "realExecuteCommandList("},
+    };
+    for (const Hook& hook : hooks) {
+        const std::string head = std::string("void STDMETHODCALLTYPE ") + hook.name + "(";
+        const size_t from = vscreenCpp.find(head);
+        const size_t to = from == std::string::npos ? std::string::npos : vscreenCpp.find("\n}\n", from);
+        check(from != std::string::npos && to != std::string::npos, (std::string("the hook ") + hook.name + " can be delimited").c_str());
+        if (from == std::string::npos || to == std::string::npos) continue;
+        const std::string body = vscreenCpp.substr(from, to - from);
+        const std::string call = std::string("flatRuntimeSubstitution(self, FlatSubstEvent::") + hook.event + ");";
+        const size_t sub = body.find(call);
+        const size_t real = body.rfind(hook.real);
+        check(count(body, call) == 1, (std::string(hook.name) + " raises " + hook.event + " exactly once").c_str());
+        check(sub != std::string::npos && real != std::string::npos && sub < real,
+              (std::string(hook.name) + " raises it before the real call").c_str());
+        check(body.find("flatRuntimeActive()") != std::string::npos && body.find("flatRuntimeActive()") < sub,
+              (std::string(hook.name) + " raises it only while the flat runtime is active").c_str());
+    }
+    // The event the policy names all have a caller, and a caller for an event the policy does not name does not compile.
+    const char* const events[] = {"kOtherDraw", "kDispatch", "kClear", "kCopy", "kResolve", "kKeepTargets", "kExecuteCommandList", "kPresent",
+                                  "kClearState", "kResize"};
+    for (const char* event : events) {
+        const std::string enumerator = std::string("FlatSubstEvent::") + event;
+        check(count(policyH, std::string("    ") + event) >= 1 || count(policyH, std::string(event) + ",") >= 1,
+              (std::string("the policy names ") + event).c_str());
+        check(count(runtimeCpp, enumerator) + count(vscreenCpp, enumerator) >= 1, (std::string("something raises ") + event).c_str());
+    }
+    // Order inside the runtime's draw scope: the lazy switch and the flushes come before anything reads the context, and the
+    // bracket opens after the coverage classification and the qualification, which read it.
+    const size_t scope = runtimeCpp.find("FlatRuntimeDrawScope::FlatRuntimeDrawScope(");
+    const char* const order[] = {
+        "engineVelocityFlatLazy(!diagnostics);",
+        "if (diagnostics) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);",
+        "d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps);",
+        "if (!d.supported) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);",
+        "d.hdrCopyVerified=verifyHdrCopy(ctx,d);",
+        "const bool continuesRun =",
+        "if (d.supported && (!continuesRun || coverageReads)) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);",
+        "flatcpu::Scope coverage(flatcpu::kCoverage);",
+        "qualifyProjection(s,recipes,",
+        "producer = engineVelocityFlatBeginDraw(ctx, &gameHadTarget6);",
+        "flatMonoResolve(s.device.Get(), ctx, f,",
+    };
+    size_t previous = scope;
+    bool ordered = scope != std::string::npos;
+    for (const char* needle : order) {
+        const size_t where = scope == std::string::npos ? std::string::npos : runtimeCpp.find(needle, scope);
+        if (where == std::string::npos || where < previous) { ordered = false; std::printf("  out of order or missing: %s\n", needle); }
+        else previous = where;
+    }
+    check(ordered, "in the draw scope the lazy switch and the flushes precede every read of the context, and the bracket opens after the coverage reads");
+    // The frame's end: the flush comes before the census closes its span, and the menu and the real Present follow it.
+    const size_t before = runtimeCpp.find("void flatRuntimeBeforePresent() {");
+    const size_t flushAt = runtimeCpp.find("flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", before);
+    const size_t closeAt = runtimeCpp.find("gpuFrameClose(state());", before);
+    check(before != std::string::npos && flushAt != std::string::npos && closeAt != std::string::npos && flushAt < closeAt,
+          "the Present's flush comes before the census closes its span");
+    const size_t hookFrom = deviceCpp.find("HRESULT STDMETHODCALLTYPE hookedPresent(");
+    const size_t hookTo = hookFrom == std::string::npos ? std::string::npos : deviceCpp.find("\n}\n", hookFrom);
+    if (hookFrom != std::string::npos && hookTo != std::string::npos) {
+        const std::string body = deviceCpp.substr(hookFrom, hookTo - hookFrom);
+        const size_t flush = body.find("flatRuntimeBeforePresent();");
+        const size_t menu = body.find("menuFlatBeforePresent(self, flags);");
+        const size_t real = body.rfind("g_state->realPresent(self, syncInterval, flags);");   // (the first is the foreign swap chain's)
+        check(flush != std::string::npos && menu != std::string::npos && real != std::string::npos && flush < menu && menu < real,
+              "the Present hook flushes before the menu draws and before the real Present");
+    } else {
+        check(false, "the Present hook can be delimited");
+    }
+}
+
+// The graphics-wrapper note's wiring (flat_wrapper_note.h holds the decision and the words, and the rig above them):
+// the hook-mode probe names the file and publishes it once, and the panel draws the note from that name only in the
+// flat profile, and logs the first time. A source scan with removal controls.
+void testFlatWrapperNoteWiring() {
+    auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string proxyCpp = slurp("src/d3d11/d3d11_proxy.cpp");
+    const std::string menuCpp = slurp("src/d3d11/menu.cpp");
+    const std::string hookH = slurp("src/d3d11/device_hook.h");
+    check(!proxyCpp.empty() && !menuCpp.empty() && !hookH.empty(), "the proxy, panel and hook header sources are readable from the repo root");
+    auto count = [](const std::string& text, const std::string& needle) {
+        unsigned n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+        return n;
+    };
+    struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
+    const Pin pins[] = {
+        {&proxyCpp, "#include \"flat_wrapper_note.h\"", 1, "the probe takes the decision from its header"},
+        {&proxyCpp, "edvr::vtableDominantOtherModule(vt, kSample, g_systemModule, owner, sizeof(owner))", 1,
+         "the probe asks which module backs the methods, excluding Windows' d3d11.dll"},
+        {&proxyCpp, "flatWrapperFile(mode, probed, owner)", 1, "and lets the header decide from the mode it used and what it alone chose"},
+        {&proxyCpp, "g_wrapperFileSet.store(true, std::memory_order_release);", 1, "the name is published once, after it is written"},
+        {&proxyCpp, "const char* contextWrapperFile() {", 1, "and read back through one accessor"},
+        {&hookH, "const char* contextWrapperFile();", 1, "which the header declares"},
+        {&menuCpp, "#include \"flat_wrapper_note.h\"", 1, "the panel takes the words from the same header"},
+        {&menuCpp, "const char* wrapper = contextWrapperFile();", 1, "the panel reads the published name"},
+        {&menuCpp, "flatComposeWrapperNote(temporalModeEnabled(Config::get().requestedTemporalMode()), wrapper,", 1,
+         "and composes the note only for a selected temporal mode"},
+        {&menuCpp, "s.flatWrapperNoteLogged = true;", 1, "said once in the log"},
+        {&menuCpp, "flat wrapper note: shown in the panel", 1, "with its own line"},
+    };
+    for (const Pin& pin : pins) {
+        check(count(*pin.text, pin.needle) == pin.times, pin.what);
+        std::string without = *pin.text;
+        for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
+            without.erase(at, std::strlen(pin.needle));
+        check(count(without, pin.needle) == 0, "wrapper note wiring control: a source with the line removed no longer contains it");
+    }
+    // The probe publishes after it has decided and logged the mode, and the panel's block is flat-only.
+    const size_t decided = proxyCpp.find("hookModeName(mode), inSystem, kSample,");
+    const size_t named = proxyCpp.find("flatWrapperFile(mode, probed, owner)");
+    check(decided != std::string::npos && named != std::string::npos && decided < named,
+          "the probe names the wrapper after it has decided the mode");
+    // The name is written before the flag that says it is there: the panel reads it from another thread.
+    const size_t written = proxyCpp.find("std::memcpy(g_wrapperFile, file, std::strlen(file) + 1);");
+    const size_t flagged = proxyCpp.find("g_wrapperFileSet.store(true, std::memory_order_release);");
+    check(written != std::string::npos && flagged != std::string::npos && written < flagged,
+          "the probe writes the name before it publishes it");
+    const size_t block = menuCpp.find("The graphics-wrapper note (flat only");
+    const size_t flatOnly = block == std::string::npos ? std::string::npos : menuCpp.find("if (runtimeFlatProfile()) {", block);
+    const size_t reads = block == std::string::npos ? std::string::npos : menuCpp.find("contextWrapperFile()", block);
+    check(block != std::string::npos && flatOnly != std::string::npos && reads != std::string::npos && flatOnly < reads && reads - flatOnly < 200,
+          "the panel reads the wrapper's name only in the flat profile");
+}
+
+// The query shortcuts in the runtime and the engine motion wrapper (flat_query_cut.h holds the policy and the rig above
+// it, the engine rig the D3D side of each state): every question the flat path used to put to the context goes through the
+// policy, the census is told the counts, the frame's end lets go of what was kept, and the coverage classification no longer
+// reads the context itself. A source scan with removal controls.
+void testFlatQueryCutWiring() {
+    auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
+    const std::string engineCpp = slurp("src/d3d11/engine_velocity.cpp");
+    const std::string readsH = slurp("src/d3d11/flat_query_reads.h");
+    check(!runtimeCpp.empty() && !engineCpp.empty() && !readsH.empty(), "the runtime, engine motion and query sources are readable from the repo root");
+    auto count = [](const std::string& text, const std::string& needle) {
+        unsigned n = 0;
+        for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+        return n;
+    };
+    struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
+    const Pin pins[] = {
+        // The runtime.
+        {&runtimeCpp, "const void* depthResource=coverageDepthResource(ctx,k,depthHold);", 2, "both projection branches of the coverage classification ask for the depth view through the policy"},
+        {&runtimeCpp, "if(coverageShadersMatch(ctx,k)) {", 2, "and both unchanged-shader branches ask for the shaders through it"},
+        {&runtimeCpp, "flatQueryDepth(flatQueryCut(), ctx, k.depth, hold,", 1, "the depth question is the shared function's, with the draw key's depth as the shadow's answer"},
+        {&runtimeCpp, "flatQueryShaders(flatQueryCut(), context, k.vs, k.ps,", 1, "and the shader question, with the key's hashes"},
+        {&runtimeCpp, "flatQueryCut().beginFrame(frame);", 1, "the Present tells the policy which frame starts (one in 64 checks)"},
+        {&runtimeCpp, "(s.projectionFrames != 0 || !flatCameraInjectUpstreamOwns());", 1,
+         "the coverage reads that still ask the context (an F10 audit, the legacy route) put the game's state back first, and nothing else does"},
+        {&runtimeCpp, "if (owner()) engineVelocityFlatFrameEnd();", 1, "the frame's end lets go of what the bracket kept"},
+        // Engine motion's wrapper.
+        {&engineCpp, "flatQueryCut().plan(FlatQuery::GameTargets)", 1, "the game's render-target set is kept through the policy"},
+        {&engineCpp, "flatQueryCut().plan(FlatQuery::GameBlend)", 1, "and its blend state"},
+        {&engineCpp, "flatQueryCut().plan(FlatQuery::TargetsKept)", 1, "and the runtime's acceptance of MRT6"},
+        {&engineCpp, "flatQueryCut().compared(", 3, "each is compared with the context on a check"},
+        {&engineCpp, "void engineVelocityFlatFrameEnd() noexcept {", 1, "the bracket lets go of what it kept at the frame's end"},
+        // The shared reads.
+        {&readsH, "cut.plan(FlatQuery::CoverageDepth)", 1, "the depth question asks the policy"},
+        {&readsH, "cut.plan(FlatQuery::ShaderIdentity)", 1, "and the shader question"},
+        {&readsH, "cut.compared(", 2, "and each compares on a check"},
+    };
+    for (const Pin& pin : pins) {
+        check(count(*pin.text, pin.needle) == pin.times, pin.what);
+        std::string without = *pin.text;
+        for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
+            without.erase(at, std::strlen(pin.needle));
+        check(count(without, pin.needle) == 0, "query cut wiring control: a source with the line removed no longer contains it");
+    }
+    // The coverage classification no longer reads the context for what the shadow knows.
+    const size_t coverageFrom = runtimeCpp.find("flatcpu::Scope coverage(flatcpu::kCoverage);");
+    const size_t coverageTo = coverageFrom == std::string::npos ? std::string::npos : runtimeCpp.find("if (continuesRun) {", coverageFrom);
+    check(coverageFrom != std::string::npos && coverageTo != std::string::npos && coverageFrom < coverageTo,
+          "the coverage classification can be delimited");
+    if (coverageFrom != std::string::npos && coverageTo != std::string::npos && coverageFrom < coverageTo) {
+        const std::string region = runtimeCpp.substr(coverageFrom, coverageTo - coverageFrom);
+        check(count(region, "GetRenderTargets") == 0 && count(region, "GetShader") == 0,
+              "the coverage classification does not read the depth view or the shaders off the context itself");
+        check(count(region, "coverageDepthResource(") == 2 && count(region, "coverageShadersMatch(") == 2,
+              "(control: the delimited text is the classification, and asks through the policy)");
+    }
+    // The frame's end comes after the Present's flush, inside the same function.
+    const size_t before = runtimeCpp.find("void flatRuntimeBeforePresent() {");
+    const size_t flush = runtimeCpp.find("flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", before);
+    const size_t end = runtimeCpp.find("if (owner()) engineVelocityFlatFrameEnd();", before);
+    check(before != std::string::npos && flush != std::string::npos && end != std::string::npos && flush < end && end - flush < 400,
+          "the frame's end follows the Present's flush");
+}
+
 int main(int argc, char** argv) {
     if (argc == 3 && std::strcmp(argv[1], "--classify-dir") == 0)
         return flatShaderClassifierSweep(argv[2]);
@@ -2074,8 +2903,32 @@ int main(int argc, char** argv) {
         return flatTraceMigrate(argv[2]);
     if (argc == 3 && std::strcmp(argv[1], "--trace-rekey") == 0)
         return flatTraceRekey(argv[2]);
+    // The HDR route's own modes (flat_hdr_route_tests.h): what the trigger detector finds in a trace, frame by
+    // frame, and a trace cut down to the named frames.
+    if (argc == 3 && std::strcmp(argv[1], "--trace-chain") == 0)
+        return hdr_route_test::traceChain(argv[2]);
+    if (argc == 5 && std::strcmp(argv[1], "--trace-trim") == 0)
+        return hdr_route_test::traceTrim(argv[2], argv[3], argv[4]);
+    // The final copy's admission by structure (flat_copy_structure_tests.h): what it makes of each frame of a trace.
+    if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--trace-structure") == 0)
+        return copy_structure_test::traceStructure(argv[2], argc == 4 && std::strcmp(argv[3], "pretend") == 0);
+    // --write-fixture <path> [--dry-run]: regenerate tools\flat_upscale_fixture.log from the formatters. Anything that writes a file
+    // takes --dry-run, and --dry-run writes nothing at all.
+    if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--write-fixture") == 0) {
+        const std::string text = copy_structure_test::flatUpscaleFixtureText();
+        if (argc == 4 && std::strcmp(argv[3], "--dry-run") == 0) {
+            std::printf("flat_temporal_test: --dry-run: would write %zu bytes to %s; wrote nothing\n", text.size(), argv[2]);
+            return 0;
+        }
+        std::ofstream out(argv[2], std::ios::binary | std::ios::trunc);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        std::printf("flat_temporal_test: wrote %zu bytes to %s\n", text.size(), argv[2]);
+        return out ? 0 : 1;
+    }
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) {
-        std::puts("usage: flat_temporal_test --self-test | --classify-dir <dir> | --trace-check <file> | --trace-migrate <dir> | --trace-rekey <file|dir>");
+        std::puts("usage: flat_temporal_test --self-test | --classify-dir <dir> | --trace-check <file> | --trace-migrate <dir> | "
+                  "--trace-rekey <file|dir> | --trace-chain <file> | --trace-structure <file> | "
+                  "--trace-trim <in> <out> <frame[,frame...]>");
         return 2;
     }
     failures += flatProjectionViewportTests();
@@ -2113,6 +2966,26 @@ int main(int argc, char** argv) {
     testFrameContractHashCoverage();
     testHullPairKeying();
     testStaticSceneWiring();
+    failures += flatStandDownTests();
+    testStandDownAgainstModel();
+    testStandDownWiring();
+    failures += flatEliteSettingsTests();
+    testFlatWarningWiring();
+    failures += flatCpuTests();
+    testFlatCpuWiring();
+    failures += flatWitnessBoundTests();
+    testFlatWitnessWiring();
+    failures += flatCameraTableTests();
+    testFlatCameraTableWiring();
+    testFlatSubstitutionWiring();
+    failures += flatWrapperNoteTests();
+    testFlatWrapperNoteWiring();
+    failures += flatQueryCutTests();
+    testFlatQueryCutWiring();
+    failures += flatHdrRouteTests();
+    failures += flatCopyStructureTests();
+    failures += flatHdrCrumbTests();
+    failures += flatHdrCrumbWiringTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

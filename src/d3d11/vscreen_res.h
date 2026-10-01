@@ -41,6 +41,7 @@
 namespace edvr {
 
 class Config;
+namespace vscreenfit { struct Decision; }   // src/common/vscreen_fit.h
 
 // Rewrites the forced panel resolution at every site. Returns true only if all
 // of them were written. Every failure path leaves the process untouched and
@@ -56,15 +57,22 @@ void revertVScreenModeResolution();
 // "auto" has no prior session to go on yet (see ../common/vscreen_auto_state.h,
 // which is where that prior-session fact is recorded and read back). Height
 // is always DERIVED to keep 16:9; there is no independent height setting any
-// more. Called from both the panel patch (device_hook.cpp) and the intro-movie
-// upscaler (intro_upscale.cpp), which are documented as asking this exact
-// question of this exact value -- see vscreen_res.cpp for why "auto" cannot
-// use this session's own render width. `announce` logs the outcome; the panel
-// patch is the one call site that should (its caller is the only one with
-// nothing else to say about the value), so the intro upscaler -- which logs
-// its own dimensions separately -- passes false rather than printing the same
-// line twice on every reload.
+// more. Called from the panel patch (device_hook.cpp), the intro-movie
+// upscaler (intro_upscale.cpp) and the in-headset menu's hint (menu.cpp), which
+// are documented as asking this exact question of this exact value -- see
+// vscreen_res.cpp for why "auto" cannot use this session's own render width.
+// `announce` logs the outcome, the rule that chose it and why (the `vScreen
+// resolution:` line); the panel patch is the one call site that should (its
+// caller is the only one with nothing else to say about the value), so the
+// others pass false rather than printing the same line twice on every reload.
+//
+// "auto" is TWO rules (../common/vscreen_fit.h): fitted to the on-foot screen's
+// own width in the eye when the VR world route will run, today's 125% of the eye
+// width when it will not. `outDecision`, when given, receives which one and the
+// numbers it was made from for an "auto" that resolved (its width is 0 for an
+// explicit width, which is used exactly, and for an auto with nothing on record).
 void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,
-                                    bool announce = true);
+                                    bool announce = true,
+                                    vscreenfit::Decision* outDecision = nullptr);
 
 }  // namespace edvr
