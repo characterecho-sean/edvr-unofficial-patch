@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EDVR Plugin Manifest Schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for the plugin (e.g., 'cockpit-visuals')."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name of the plugin."
+    },
+    "description": {
+      "type": "string",
+      "description": "Brief explanation of plugin functionality."
+    },
+    "profiles": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["VR", "flat"] },
+      "description": "Supported profiles for this plugin."
+    },
+    "dependencies": {
+      "type": "object",
+      "properties": {
+        "hard": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Plugins that must be present."
+        },
+        "soft": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Plugins that are optionally utilized if present."
+        }
+      },
+      "additionalProperties": false
+    },
+    "conflicts": {
+      "type": "object",
+      "properties": {
+        "hard": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Plugins that cannot be installed concurrently."
+        },
+        "soft": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Plugins that degrade or disable specific features if co-installed."
+        }
+      },
+      "additionalProperties": false
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "VR": { "type": "string", "enum": ["installed", "on", "off"] },
+        "flat": { "type": "string", "enum": ["installed", "on", "off"] }
+      },
+      "description": "Default installation and activation state per profile."
+    },
+    "ini_keys_owned": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Configuration keys in edvr.ini managed by this plugin."
+    },
+    "hook_points": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Non-draw hook events subscribed to (e.g., 'init', 'configure', 'resize', 'present_before', 'present_after', 'frame_tick', 'on_render_eye', 'input')."
+    },
+    "draw_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "shader_hashes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "FNV1a64 hashes of VS/PS shaders this plugin cares about."
+          },
+          "draw_kinds": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Draw kinds (e.g. 'D', 'I', 'N', 'X')."
+          },
+          "precedence": {
+            "type": "integer",
+            "description": "Priority in the flat dispatch array (lower executes earlier)."
+          }
+        },
+        "required": ["shader_hashes", "precedence"]
+      }
+    },
+    "cost_note": {
+      "type": "string",
+      "description": "Measured CPU/GPU performance note from census (e.g. '0.02ms on foot; 2 D3D calls')."
+    },
+    "rigs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Automated test rigs that validate this plugin (e.g. 'tools/verdict_replay_test')."
+    },
+    "per_frame_budgets": {
+      "type": "object",
+      "properties": {
+        "max_microseconds": { "type": "number" },
+        "max_draw_claims": { "type": "integer" },
+        "max_d3d_calls": { "type": "integer" }
+      }
+    }
+  },
+  "required": ["id", "name", "description", "profiles", "draw_claims"]
+}
