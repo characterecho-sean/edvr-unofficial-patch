@@ -39,10 +39,11 @@
   4.1), the installer skips it and Elite stays on its stock VR path. Four
   changes first (section 10); no F8, AA, flash fix or Explorer Cam without
   the runtime; the first build needs a flight on a stock runtime.
-- **Next:** candidate `ee2628da` passed all 122 validation jobs and its clean
-  promotion, and remains installed in Steam. The longer comparison flight
-  verifies Pimax Crystal Super / Pimax OpenXR, 90 Hz, 4032x3898 per eye.
-  Sean reports unchanged visuals. Three sampled hook comparisons are lower;
+- **Next:** candidate `03049f8d` passed all 123 validation jobs and its clean
+  promotion, and is installed and verified in Steam with personal ini intact.
+  Latest flight evidence remains `ee2628da`: Pimax Crystal Super / Pimax
+  OpenXR, 90 Hz, 4032x3898 per eye; Sean reports unchanged visuals.
+  Three sampled hook comparisons are lower;
   carrier AA off is higher and drifts upward. Workload/scene matching and
   repeatable CPU improvement/GPU non-regression remain unresolved (section 11).
   NumLock captured a valid 3,892-draw selector/action stream; full predicate
@@ -51,8 +52,8 @@
   comparison reproduces it and the latest candidate looks the same.
   Three reviewed Luna slices now pass all 123 full validation jobs: the
   timed-draw denominator, Target/RemLok API coverage with an NV sampling
-  guard, and independent replay of two pure predicate families. Clean
-  promotion and production v2 capture remain next; all-module cost coverage
+  guard, and independent replay of two pure predicate families. Production
+  v2 capture remains next; all-module cost coverage
   and remaining predicate families are open. No further group migration yet.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a
@@ -976,3 +977,21 @@ reconstruct hidden predicates or serve as a historical whole-classifier
 performance baseline. The independent relative cost rig, remaining predicate
 facts, carrier-off comparison and GPU non-regression gate remain open. The
 validated extensions do not authorize Phase 2 migration or shipping.
+
+Candidate `03049f8d` is committed and pushed on `codex/plugin-architecture`;
+it is not an ancestor of main. Its clean receipt-guarded promotion passes and
+produces `v0.18.0-7-g03049f8d` in both Steam DLL product versions. The sanctioned
+installer dry-run writes nothing; install and separate `--all --verify-only`
+pass. No `--ini` is used: live `edvr.ini` SHA-256 remains
+`C09ED2FB598BDEE1CD14AED5638EC034236E289242CFAF640264F691713DA684`.
+The promotion log is `build/plugin-architecture-phase1-evidence-promotion.log`.
+These are locally installed test DLLs; the earlier full build's self-contained
+installers were not rebuilt by promotion and are not a clean-version release.
+
+Next requested capture: with the same Pimax OpenXR render size, stay stationary
+in the carrier cockpit with AA/NV off for 120 seconds, press NumLock, then
+DLSS/NV on for 30 seconds and another NumLock. Exit Elite afterward. This
+checks production v2 fact wiring, the owner-thread NV sampling guard and the
+timed-draw denominator. It cannot normalize the old baseline retroactively or
+pass the whole performance gate by itself. Pin flight reads to `03049f8d`;
+a following documentation-only commit does not change the installed DLL stamp.
