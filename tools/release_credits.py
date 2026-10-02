@@ -29,11 +29,21 @@ GitHub through `gh api` / `gh pr` / `gh issue` / `gh repo view`):
                open or closed-unmerged PRs by non-maintainers updated since
                the date of <from> go under "PRs not merged (credit needs a
                decision)".
-  3. ISSUES    `#N` and `issue N` in commit messages in the range, kept only
-               when the number exists as an issue or a PR (draw-call indices
-               do not). Lists reporter, commenters with comment counts
-               (maintainer and bots excluded) and the commits that cite it.
-               A PR cited this way is listed with its author, and its author
+  3. ISSUES    Three sources, each tagged on the row ("found by"):
+                 commit  `#N` / `issue N` in a commit message in the range;
+                 docs    `#N` / `issue N` in a line ADDED under docs\\ in
+                         <from>..<to>;
+                 window  any issue or PR created, closed, or commented on
+                         (by a real comment timestamp, so a re-label does
+                         not count) since the committer date of <from>.
+               A number is kept only when it exists as an issue or a PR
+               (draw-call indices do not; numbers above the repository's
+               newest are dropped without a lookup). Each row lists the
+               reporter, the commenters with comment counts (maintainer and
+               bots excluded) and the commits that cite it, if any. A
+               commenter is credited only for comments made since the window
+               start; a reporter is credited for any issue that is listed. A
+               PR found this way is listed with its author, and its author
                is credited by the PR sections, not as an issue reporter.
   4. DOCS      Lines added under docs\\ that mention `user N`, supporter,
                tester or the reporter: people known only by an anonymised
@@ -71,7 +81,8 @@ SCHEMA = 1
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PR_LIMIT = 200
 GH_PR_FIELDS = "number,title,author,state,mergedAt,mergeCommit,url,updatedAt"
-GH_ISSUE_FIELDS = "number,title,author,state,createdAt,comments,url"
+GH_ISSUE_FIELDS = "number,title,author,state,createdAt,closedAt,comments,url"
+GH_ISSUE_LIST_FIELDS = "number,title,author,state,updatedAt"
 AI_EMAIL = "noreply@anthropic.com"
 EXCERPT_MAX = 100
 RESOLVE_TRIES = 3
@@ -90,6 +101,7 @@ COAUTHOR_RE = re.compile(
 )
 ISSUE_HASH_RE = re.compile(r"#(\d+)\b")
 ISSUE_WORD_RE = re.compile(r"\bissues?\s+(\d+)\b", re.I)
+DOCS_ISSUE_RE = re.compile(r"(?i)\bissues? #?(\d+)\b|#(\d+)\b")
 REPORTER_RE = re.compile(r"(?i)\buser ?\d+\b|\bsupporter\b|\btester\b|\bthe reporter\b")
 NOT_FOUND_RE = re.compile(r"could not resolve|not found|\b404\b", re.I)
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -281,10 +293,9 @@ def issue_refs(message):
     return nums
 
 
-def scan_docs_diff(diff_text):
-    """Added lines of a `git diff --unified=0` that mention a reporter by a
-    label. Returns [{"file", "line", "text"}], first-seen order, no repeats."""
-    hits, seen = [], set()
+def iter_added_lines(diff_text):
+    """Yield (file, line number, text) for every line a `git diff --unified=0`
+    adds."""
     path, newline, in_hunk = None, 0, False
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
@@ -303,20 +314,38 @@ def scan_docs_diff(diff_text):
         if m:
             newline = int(m.group(1))
         elif line.startswith("+"):
-            text = line[1:]
-            hit = REPORTER_RE.search(text)
-            if hit and path:
-                key = (path, newline)
-                if key not in seen:
-                    seen.add(key)
-                    hits.append({"file": path, "line": newline,
-                                 "text": excerpt(scrub(text), scrub(text).find(hit.group(0)))})
+            if path:
+                yield path, newline, line[1:]
             newline += 1
         elif line.startswith("-") or line.startswith("\\"):
             pass
         else:
             newline += 1
+
+
+def scan_docs_diff(diff_text):
+    """Added lines of a `git diff --unified=0` that mention a reporter by a
+    label. Returns [{"file", "line", "text"}], first-seen order, no repeats."""
+    hits, seen = [], set()
+    for path, lineno, text in iter_added_lines(diff_text):
+        hit = REPORTER_RE.search(text)
+        if hit and (path, lineno) not in seen:
+            seen.add((path, lineno))
+            clean = scrub(text)
+            hits.append({"file": path, "line": lineno,
+                         "text": excerpt(clean, clean.find(hit.group(0)))})
     return hits
+
+
+def docs_issue_numbers(diff_text):
+    """Issue or PR numbers cited in the lines a docs diff adds."""
+    nums = set()
+    for _path, _lineno, text in iter_added_lines(diff_text):
+        for m in DOCS_ISSUE_RE.finditer(text):
+            n = int(m.group(1) or m.group(2))
+            if 0 < n < 10_000_000:
+                nums.add(n)
+    return nums
 
 
 def excerpt(text, centre=0):
@@ -358,6 +387,51 @@ def read_issue(gh, repo, number):
         raise ToolError("gh issue view %d failed (exit %d): %s" % (number, rc, first_line(err)))
     data = parse_json(out, "gh issue view %d" % number)
     return data if isinstance(data, dict) else None
+
+
+def read_max_number(gh, repo, warnings):
+    """The newest issue-or-PR number in the repository (they share one
+    sequence), or None. A cited number above it cannot exist."""
+    rc, out, err = gh(["api", "repos/%s/issues?state=all&per_page=1" % repo, "--jq", ".[0].number"])
+    text = out.strip()
+    if rc == 0 and text.isdigit():
+        return int(text)
+    warnings.append("could not read the newest issue number (%s); every cited number is looked up"
+                    % (first_line(err, 80) or "no output"))
+    return None
+
+
+def read_window_issues(gh, repo, from_date, warnings):
+    """Numbers of issues GitHub says were updated since the window start. A
+    superset: the real activity is judged from the comment timestamps."""
+    if from_date is None:
+        return []
+    day = from_date.astimezone(datetime.timezone.utc).date() - datetime.timedelta(days=1)
+    rc, out, err = gh(["issue", "list", "--repo", repo, "--state", "all", "--limit", str(PR_LIMIT),
+                       "--search", "updated:>=%s" % day.isoformat(), "--json", GH_ISSUE_LIST_FIELDS])
+    if rc != 0:
+        raise ToolError("gh issue list failed (exit %d): %s" % (rc, first_line(err)))
+    data = parse_json(out, "gh issue list")
+    if not isinstance(data, list):
+        raise ToolError("gh issue list did not return a list")
+    if len(data) >= PR_LIMIT:
+        warnings.append("gh issue list returned %d issues, its limit; older activity may be missing"
+                        % PR_LIMIT)
+    return [d["number"] for d in data if isinstance(d, dict) and isinstance(d.get("number"), int)]
+
+
+def stamp_since(stamp, start):
+    """True when a GitHub timestamp is present and at or after the window
+    start (an issue's creation or closing)."""
+    when = parse_iso(stamp)
+    return start is not None and when is not None and when >= start
+
+
+def comment_in_window(stamp, start):
+    """True when a comment was made since the window start. A comment whose
+    time is missing cannot be shown to predate it, so it counts."""
+    when = parse_iso(stamp)
+    return start is None or when is None or when >= start
 
 
 # ---------------------------------------------------------------------------
@@ -508,24 +582,55 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
             lst = refs.setdefault(n, [])
             if c["sha"][:8] not in lst:
                 lst.append(c["sha"][:8])
+    diff = git_out(git, ["diff", "--no-color", "--no-ext-diff", "--unified=0",
+                         "%s..%s" % (from_sha, to_sha), "--", "docs"], "diff")
+    docs_mentions = scan_docs_diff(diff)
+    docs_refs = docs_issue_numbers(diff)
+
+    # The activity window: what GitHub says was updated since <from>, issues
+    # and PRs alike. The real activity is judged below from timestamps.
+    window_nums = set(read_window_issues(gh, repo, from_date, warnings))
+    for pr in prs:
+        if isinstance(pr.get("number"), int) and stamp_since(pr.get("updatedAt"), from_date):
+            window_nums.add(pr["number"])
+    newest = read_max_number(gh, repo, warnings)
+
     issues = []
-    for n in sorted(refs):
+    for n in sorted(set(refs) | docs_refs | window_nums):
+        if newest is not None and n > newest:
+            continue  # above the repository's newest number: a draw-call index, say
         data = read_issue(gh, repo, n)
         if data is None:
-            continue  # not an issue or a PR: a draw-call index, say
+            continue  # not an issue or a PR
         is_pr = "/pull/" in str(data.get("url") or "")
         author = data.get("author") or {}
         reporter = valid_login(author.get("login"))
+        active = stamp_since(data.get("createdAt"), from_date) or stamp_since(data.get("closedAt"), from_date)
         counts = {}
         for cm in data.get("comments") or []:
             a = cm.get("author") or {}
             login = valid_login(a.get("login"))
-            if not login or is_bot_login(login, bool(a.get("is_bot"))) or login.lower() == maint:
+            if not login or is_bot_login(login, bool(a.get("is_bot"))):
                 continue
-            slot = counts.setdefault(login.lower(), [login, 0])
+            recent = comment_in_window(cm.get("createdAt"), from_date)
+            if recent:
+                active = True  # any human comment since the window start, the maintainer's included
+            if login.lower() == maint:
+                continue
+            slot = counts.setdefault(login.lower(), [login, 0, 0])
             slot[1] += 1
-        commenters = sorted(({"login": v[0], "comments": v[1]} for v in counts.values()),
-                            key=lambda d: (-d["comments"], d["login"].lower()))
+            slot[2] += 1 if recent else 0
+        found_by = []
+        if n in refs:
+            found_by.append("commit")
+        if n in docs_refs:
+            found_by.append("docs")
+        if active:
+            found_by.append("window")
+        if not found_by:
+            continue  # updated in the window, but only re-labelled or edited
+        commenters = sorted(({"login": v[0], "comments": v[1], "in_window": v[2]} for v in counts.values()),
+                            key=lambda d: (-d["in_window"], -d["comments"], d["login"].lower()))
         issues.append({
             "number": n,
             "kind": "pr" if is_pr else "issue",
@@ -534,13 +639,9 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
             "reporter": reporter,
             "reporter_bot": is_bot_login(reporter, bool(author.get("is_bot"))) if reporter else False,
             "commenters": commenters,
-            "commits": refs[n],
+            "commits": refs.get(n, []),
+            "found_by": found_by,
         })
-
-    # -- docs --------------------------------------------------------------
-    diff = git_out(git, ["diff", "--no-color", "--no-ext-diff", "--unified=0",
-                         "%s..%s" % (from_sha, to_sha), "--", "docs"], "diff")
-    docs_mentions = scan_docs_diff(diff)
 
     # -- the Thanks skeleton ------------------------------------------------
     people = {}
@@ -562,9 +663,11 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
             who.issues.add(it["number"])
             who.reported.add(it["number"])
         for cm in it["commenters"]:
+            if not cm["in_window"]:
+                continue  # only comments from before the window: credited in an earlier release
             who = person(cm["login"])
             (who.prs if it["kind"] == "pr" else who.issues).add(it["number"])
-            who.comments += cm["comments"]
+            who.comments += cm["in_window"]
     thanks = []
     for who in sorted(people.values(), key=lambda w: (w.group(), w.rank())):
         if who.login.lower() == maint and not include_maintainer:
@@ -613,6 +716,13 @@ def at(login):
     return "@" + login if login else "(no handle)"
 
 
+def comment_note(c):
+    """`3`, or `3, 1 in window` / `3, none in window` when some predate it."""
+    if c["in_window"] == c["comments"]:
+        return str(c["comments"])
+    return "%d, %s in window" % (c["comments"], c["in_window"] or "none")
+
+
 def sections(report):
     """[(title, [(head, [sub lines])])] shared by the text and markdown forms."""
     code = []
@@ -635,10 +745,14 @@ def sections(report):
         head = "#%d  [%s]%s  %s" % (it["number"], it["state"], " (PR)" if it["kind"] == "pr" else "",
                                     it["title"])
         subs = ["%s: %s" % ("PR author" if it["kind"] == "pr" else "reporter", at(it["reporter"]))]
+        found = ", ".join(it["found_by"])
+        if "commit" not in it["found_by"]:
+            found += " (in window, no commit cites it)" if "window" in it["found_by"] else " (no commit cites it)"
+        subs.append("found by: " + found)
         if it["commenters"]:
             subs.append("commenters: " + ", ".join(
-                "%s (%d)" % (at(c["login"]), c["comments"]) for c in it["commenters"]))
-        subs.append("commits: " + ", ".join(it["commits"]))
+                "%s (%s)" % (at(c["login"]), comment_note(c)) for c in it["commenters"]))
+        subs.append("commits: " + (", ".join(it["commits"]) if it["commits"] else "none"))
         issues.append((head, subs))
     docs = [("%s:%d  %s" % (d["file"], d["line"], d["text"]), []) for d in report["docs_reporter_mentions"]]
     return [
@@ -647,7 +761,7 @@ def sections(report):
         ("unmapped authors (needs a handle)", unmapped),
         ("PRs merged in range", merged),
         ("PRs not merged (credit needs a decision)", notmerged),
-        ("Issues referenced in range", issues),
+        ("Issues (cited by commits or docs, or active in the window)", issues),
         ("docs mention reporters with no handle (needs a name or consent)", docs),
     ]
 
@@ -763,7 +877,9 @@ def build_parser():
                "2 when --thanks finds unmapped authors or docs mentions of reporters with no "
                "handle (the skeleton is still printed). No email address is ever printed.",
     )
-    p.add_argument("--from", dest="from_rev", help="previous release tag or rev (exclusive)")
+    p.add_argument("--from", dest="from_rev",
+                   help="previous release tag or rev (exclusive); its committer date starts the "
+                        "issue and PR activity window")
     p.add_argument("--to", dest="to_rev", default="origin/main", help="end rev (default origin/main)")
     p.add_argument("--repo", help="owner/name (default: gh repo view)")
     p.add_argument("--maintainer", help="maintainer login (default: the repo owner)")
@@ -871,9 +987,10 @@ def _make_repo(tmp):
     commit("c3", "Carol C", "carol@example.org", "Squash merge (#7)\n")
     commit("c4", "Dave D", "dave@example.org",
            "Docs and notes, see #181\n\nCo-authored-by: Claude <noreply@anthropic.com>\n",
-           {"docs/notes.md": "# Notes\n\nuser 5 sent logs\nwrote to dave@example.org about a tester\nplain line\n"})
+           {"docs/notes.md": "# Notes\n\nuser 5 sent logs\nwrote to dave@example.org about a tester\nplain line\n"
+                             "see issue 14 and #15 for details\n"})
     commit("c5", "Claude", "claude-bot@example.org", "AI authored commit\n")
-    commit("c6", "Maint Dev", "maint@example.org", "Fix issue 10 and #11\n")
+    commit("c6", "Maint Dev", "maint@example.org", "Fix issue 10 and #11 and #16\n")
     commit("c7", "dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com", "Bump a dep\n")
     commit("c8", "Frank F", "333+frank-gh@users.noreply.github.com", "Frank's change\n")
     return shas
@@ -899,29 +1016,57 @@ def _make_fake_gh(shas, calls):
          "state": "OPEN", "mergedAt": None, "mergeCommit": None, "url": "u21", "updatedAt": far},
     ]
 
-    def comment(login, bot=False):
-        return {"author": {"login": login, "is_bot": bot}}
+    old = "2000-01-01T00:00:00Z"
+
+    def comment(login, bot=False, when=far):
+        return {"author": {"login": login, "is_bot": bot}, "createdAt": when}
 
     issues = {
+        # cited by commits; one commenter whose only comment predates the window
         10: {"number": 10, "title": "Crash on launch", "state": "OPEN", "createdAt": far,
-             "author": {"login": "ivan-gh"}, "url": "https://x/issues/10",
+             "closedAt": None, "author": {"login": "ivan-gh"}, "url": "https://x/issues/10",
              "comments": [comment("ivan-gh"), comment("ivan-gh"), comment("maint-gh"),
                           comment("maint-gh"), comment("maint-gh"), comment("judy-gh"),
-                          comment("judy-gh"), comment("github-actions[bot]", True)]},
-        11: {"number": 11, "title": "Second report", "state": "CLOSED", "createdAt": far,
-             "author": {"login": "judy-gh"}, "url": "https://x/issues/11", "comments": []},
+                          comment("judy-gh"), comment("github-actions[bot]", True),
+                          comment("old-gh", when=old)]},
+        # cited by a commit, nothing happened to it since the window start
+        11: {"number": 11, "title": "Second report", "state": "CLOSED", "createdAt": old,
+             "closedAt": old, "author": {"login": "judy-gh"}, "url": "https://x/issues/11",
+             "comments": []},
+        # in the window only: no commit and no doc cites it
+        12: {"number": 12, "title": "Window only", "state": "OPEN", "createdAt": far,
+             "closedAt": None, "author": {"login": "kate-gh"}, "url": "https://x/issues/12",
+             "comments": [comment("liam-gh"), comment("mia-gh", when=old)]},
+        # re-labelled in the window, but no real activity
+        13: {"number": 13, "title": "Only re-labelled", "state": "OPEN", "createdAt": old,
+             "closedAt": None, "author": {"login": "nina-gh"}, "url": "https://x/issues/13",
+             "comments": [comment("nina-gh", when=old)]},
+        # cited by a docs line only; the reporter wrote it before the window, a comment is in it
+        14: {"number": 14, "title": "Docs only", "state": "OPEN", "createdAt": old,
+             "closedAt": None, "author": {"login": "oscar-gh"}, "url": "https://x/issues/14",
+             "comments": [comment("pia-gh")]},
         7: {"number": 7, "title": "Carol's squash", "state": "MERGED", "createdAt": far,
-            "author": {"login": "carol-gh"}, "url": "https://x/pull/7",
+            "closedAt": far, "author": {"login": "carol-gh"}, "url": "https://x/pull/7",
             "comments": [comment("heidi-gh")]},
     }
+    issue_list = [{"number": n, "title": issues[n]["title"], "author": issues[n]["author"],
+                   "state": issues[n]["state"], "updatedAt": far} for n in (10, 11, 12, 13, 14)]
+    newest = 30  # numbers above this cannot exist, so #181 is never looked up
 
     def gh(args):
         calls.append(list(args))
         if args[:2] == ["repo", "view"]:
             return 0, json.dumps({"nameWithOwner": "maint-gh/proj"}), ""
+        if args[0] == "api" and args[1].endswith("/issues?state=all&per_page=1"):
+            return 0, "%d\n" % newest, ""
         if args[0] == "api":
             sha = args[1].rsplit("/", 1)[1]
             return 0, api_logins.get(sha, "null") + "\n", ""
+        if args[:2] == ["issue", "list"]:
+            search = args[args.index("--search") + 1]
+            if not re.fullmatch(r"updated:>=\d{4}-\d\d-\d\d", search):
+                return 1, "", "bad search %r" % search
+            return 0, json.dumps(issue_list), ""
         if args[:2] == ["pr", "list"]:
             return 0, json.dumps(prs), ""
         if args[:2] == ["issue", "view"]:
@@ -960,6 +1105,17 @@ def self_test():
         "diff --git a/docs/b.md b/docs/b.md\n--- /dev/null\n+++ b/docs/b.md\n@@ -0,0 +1 @@\n+a tester\n")
     check([(h["file"], h["line"]) for h in hits] == [("docs/a.md", 11), ("docs/a.md", 12),
                                                     ("docs/b.md", 1)], "docs diff line numbers: %r" % hits)
+    check(docs_issue_numbers(
+        "diff --git a/docs/a.md b/docs/a.md\n--- a/docs/a.md\n+++ b/docs/a.md\n@@ -1 +1,3 @@\n"
+        "+see Issue 14, PR #15 and issues #16; page#17abc issue65 #1f\n-old issue 99\n+draw #181\n"
+    ) == {14, 15, 16, 181}, "docs issue number extraction")
+    start = parse_iso("2026-10-01T21:27:14+00:00")
+    check(stamp_since("2026-10-01T21:27:14Z", start) and not stamp_since("2026-10-01T21:27:13Z", start),
+          "a stamp at the window start counts, one second before does not")
+    check(not stamp_since(None, start) and not stamp_since("2099-01-01T00:00:00Z", None),
+          "no stamp or no window is never activity")
+    check(comment_in_window(None, start) and not comment_in_window("2026-10-01T10:29:41Z", start),
+          "a comment before the window does not count; one with no time cannot be shown to predate it")
 
     with tempfile.TemporaryDirectory() as tmp:
         repo_dir = os.path.join(tmp, "repo")
@@ -996,6 +1152,11 @@ def self_test():
         def api_calls_for(sha):
             return [c for c in calls if c[0] == "api" and c[1].endswith("/" + sha)]
 
+        def window_ok(r):
+            rows = {i["number"]: i for i in r["issues"]}
+            return (not any(t["login"] in ("old-gh", "mia-gh", "nina-gh") for t in r["thanks"])
+                    and 13 not in rows and rows[12]["found_by"] == ["window"])
+
         check("alice-gh" in code, "(a) a noreply email resolves to its login")
         check(not api_calls_for(shas["c1"]), "(a) the noreply email needed no API call")
         check("bob-gh" in code, "(b) an author resolved through the commit-author API")
@@ -1013,13 +1174,31 @@ def self_test():
               "(e)(f) merged PR in range listed, merge commit outside the range not")
         check([(p["number"], p["state"]) for p in rep["prs_not_merged"]] == [(8, "OPEN")],
               "(e) open non-maintainer PR listed; stale, maintainer and merged ones not")
-        nums = [i["number"] for i in rep["issues"]]
-        check(nums == [7, 10, 11], "(g) #181 not found is dropped silently, got %r" % nums)
-        i10 = [i for i in rep["issues"] if i["number"] == 10][0]
+        rows = {i["number"]: i for i in rep["issues"]}
+        check(sorted(rows) == [7, 10, 11, 12, 14],
+              "(g) nonexistent #15 #16 and #181 dropped silently, re-labelled #13 not counted: %r" % sorted(rows))
+        viewed = [c[2] for c in calls if c[:2] == ["issue", "view"]]
+        check("15" in viewed and "16" in viewed, "nonexistent numbers below the newest are looked up and dropped")
+        check("181" not in viewed, "a number above the repository's newest is dropped without a lookup")
+        check(len(viewed) == len(set(viewed)), "each number is looked up once")
+        i10 = rows[10]
         check(i10["reporter"] == "ivan-gh" and i10["state"] == "OPEN", "(g) reporter and state kept")
-        check(i10["commenters"] == [{"login": "ivan-gh", "comments": 2}, {"login": "judy-gh", "comments": 2}],
-              "(g) commenters with counts, maintainer and bots excluded: %r" % i10["commenters"])
+        check(i10["commenters"] == [{"login": "ivan-gh", "comments": 2, "in_window": 2},
+                                    {"login": "judy-gh", "comments": 2, "in_window": 2},
+                                    {"login": "old-gh", "comments": 1, "in_window": 0}],
+              "(g) commenters with counts, maintainer and bots excluded, pre-window flagged: %r"
+              % i10["commenters"])
         check(i10["commits"] == [shas["c1"][:8], shas["c6"][:8]], "issue lists the commits citing it")
+        check(i10["found_by"] == ["commit", "window"] and rows[11]["found_by"] == ["commit"]
+              and rows[7]["found_by"] == ["commit", "window"], "commit-cited rows are tagged commit")
+        check(rows[11]["commits"] == [shas["c6"][:8]], "a commit-cited issue with no activity lists its commit")
+        check(rows[12]["found_by"] == ["window"] and rows[12]["commits"] == [] and rows[12]["reporter"] == "kate-gh"
+              and rows[12]["commenters"] == [{"login": "liam-gh", "comments": 1, "in_window": 1},
+                                             {"login": "mia-gh", "comments": 1, "in_window": 0}],
+              "an issue only in the activity window is listed with its reporter and commenters: %r" % rows[12])
+        check(rows[14]["found_by"] == ["docs", "window"] and rows[14]["reporter"] == "oscar-gh",
+              "a docs-only citation is listed and tagged: %r" % rows[14])
+        check(window_ok(rep), "re-labelled issue and pre-window commenters are not credited")
         check([(d["file"], d["line"]) for d in rep["docs_reporter_mentions"]] == [("docs/notes.md", 3), ("docs/notes.md", 4)],
               "(h) docs lines mentioning reporters listed: %r" % rep["docs_reporter_mentions"])
         check(all("@" not in d["text"] for d in rep["docs_reporter_mentions"]), "docs excerpt scrubbed")
@@ -1030,8 +1209,15 @@ def self_test():
         lines = th.splitlines()
         check(lines[0] == "## Thanks", "skeleton starts with the heading")
         who = [l.split(":")[0][3:] for l in lines[1:] if l.startswith("- @")]
-        check(who == ["carol-gh", "alice-gh", "bob-gh", "eve-gh", "frank-gh", "ivan-gh", "judy-gh", "heidi-gh"],
+        check(who == ["carol-gh", "alice-gh", "bob-gh", "eve-gh", "frank-gh", "ivan-gh", "judy-gh",
+                      "kate-gh", "oscar-gh", "heidi-gh", "liam-gh", "pia-gh"],
               "(k) order: merged-PR authors, code authors, reporters, commenters: %r" % who)
+        check(not any(x in who for x in ("old-gh", "mia-gh", "nina-gh")),
+              "a commenter whose comments predate the window and a re-labelled issue's people are not credited")
+        for name, expect in (("kate-gh", "issue #12"), ("liam-gh", "issue #12"), ("oscar-gh", "issue #14"),
+                             ("pia-gh", "issue #14")):
+            line = [l for l in lines if l.startswith("- @" + name + ":")][0]
+            check(expect in line, "window and docs people reach the skeleton: " + line)
         check(len(who) == len(set(who)) and "maint-gh" not in who, "(k) each person once, maintainer excluded")
         check(all("TODO" in l for l in lines[1:]), "(k) every skeleton line carries TODO")
         check(lines[-1] == "- TODO: AI assistance disclosure (maintainer decides)", "(k) AI disclosure line")
@@ -1051,8 +1237,9 @@ def self_test():
         check(rc == 0 and "unmapped" not in err2 and "docs mention" not in err2,
               "(m) exit 0 when nothing needs a decision: %d %r" % (rc, err2))
         check("AI assistance" not in th2, "(k) no AI line when no AI was found")
-        check([l.split(":")[0] for l in th2.splitlines()[1:]] == ["- @frank-gh", "- @ivan-gh", "- @judy-gh"],
-              "later range: %r" % th2)
+        check([l.split(":")[0] for l in th2.splitlines()[1:]] == [
+            "- @frank-gh", "- @ivan-gh", "- @judy-gh", "- @kate-gh", "- @oscar-gh", "- @heidi-gh",
+            "- @liam-gh", "- @pia-gh"], "later range: %r" % th2)
 
         # -- never an email ------------------------------------------------
         for fmt in ("text", "markdown", "json"):
@@ -1062,8 +1249,10 @@ def self_test():
         rc, body, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--format", "markdown"])
         for needle in ("Unmapped", "unmapped authors (needs a handle)", "AI co-authors, not credited as people",
                        "PRs not merged (credit needs a decision)",
-                       "docs mention reporters with no handle (needs a name or consent)"):
-            check(needle.lower() in body.lower(), "section present: " + needle)
+                       "docs mention reporters with no handle (needs a name or consent)",
+                       "found by: window (in window, no commit cites it)", "found by: docs, window (in window, no commit cites it)",
+                       "found by: commit, window", "@old-gh (1, none in window)", "commits: none"):
+            check(needle.lower() in body.lower(), "present in the report: " + needle)
 
         # -- --out ----------------------------------------------------------
         out_file = os.path.join(tmp, "newdir", "sub", "credits.md")
@@ -1105,8 +1294,14 @@ def self_test():
         # -- mutation checks: the assertions above have teeth ---------------
         # (A bot is filtered twice: by identity, and again by the login it
         # resolves to. The mutation breaks both layers.)
-        saved = {k: globals()[k] for k in ("is_ai_identity", "scrub", "is_bot_identity", "is_bot_login")}
+        saved = {k: globals()[k] for k in ("is_ai_identity", "scrub", "is_bot_identity", "is_bot_login",
+                                           "comment_in_window")}
         try:
+            globals()["comment_in_window"] = lambda stamp, start: True
+            _, js_m, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--format", "json"])
+            check(not window_ok(json.loads(js_m)),
+                  "mutation: a window that admits every comment must fail the window assertion")
+            globals()["comment_in_window"] = saved["comment_in_window"]
             globals()["is_ai_identity"] = lambda name, email: False
             _, js_m, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--format", "json"])
             check(not ai_ok(json.loads(js_m)), "mutation: a broken AI classifier must fail the AI assertion")
