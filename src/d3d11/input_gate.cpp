@@ -258,7 +258,9 @@ bool isInputDevice(DiDoor& d, void* self) {
     if (FAILED(reinterpret_cast<GetCaps>(vt[3])(self, &caps))) return false;
     DWORD devType = GET_DIDEVICE_TYPE(caps.dwDevType);
     return (devType == DI8DEVTYPE_KEYBOARD || devType == DI8DEVTYPE_JOYSTICK ||
-            devType == DI8DEVTYPE_GAMEPAD || devType == DI8DEVTYPE_1STPERSON);
+            devType == DI8DEVTYPE_GAMEPAD || devType == DI8DEVTYPE_1STPERSON ||
+            devType == DI8DEVTYPE_DRIVING || devType == DI8DEVTYPE_FLIGHT ||
+            devType == DI8DEVTYPE_SUPPLEMENTAL || devType == DI8DEVTYPE_DEVICE);
 }
 
 template <bool Wide>
@@ -284,8 +286,8 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
             if (isKbd && cb == 256) {
                 memset(data, 0, cb);
             } else if (cb >= sizeof(DIJOYSTATE)) {
-                // Joystick / HOTAS: Clear buttons and reset POV hats to unpressed (-1 / 0xFFFFFFFF)
-                // Axes (lX, lY, lZ, etc.) are left untouched to prevent center snapping.
+                // Joystick / HOTAS: Clear buttons and set all POV hats to unpressed (-1 / 0xFFFFFFFF)
+                // Analog axes (lX, lY, lZ, rRz, etc.) are preserved untouched to prevent center snapping.
                 auto* js = static_cast<DIJOYSTATE*>(data);
                 memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
                 for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
@@ -295,7 +297,15 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
                     for (int p = 0; p < 4; ++p) js2->rgdwPOV[p] = 0xFFFFFFFFu;
                 }
             } else {
+                // Custom / smaller buffer format: clear buttons and set any POV fields to 0xFFFFFFFFu
+                // NEVER use raw memset(0) on non-keyboard buffers as offset 0x18/0x1C (rgdwPOV) being 0 = North/UP (Pip UP)!
                 memset(data, 0, cb);
+                constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
+                constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
+                if (cb >= kPovEnd) {
+                    auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
+                    for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
+                }
             }
             d.zeroed.fetch_add(1, std::memory_order_relaxed);
             return;
