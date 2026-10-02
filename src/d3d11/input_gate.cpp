@@ -31,6 +31,16 @@ const GUID kIidDirectInput8W = {0xBF798031, 0x483A, 0x4DA2,
                                 {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
 const GUID kGuidSysKeyboard = {0x6F1D2B61, 0xD5A0, 0x11CF,
                                {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+const GUID kGuidSysKeyboardEm = {0x6F1D2B82, 0xD5A0, 0x11CF,
+                                 {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+const GUID kGuidSysKeyboardEm2 = {0x6F1D2B83, 0xD5A0, 0x11CF,
+                                  {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+
+inline bool isKeyboardGuid(REFGUID guid) {
+    return IsEqualGUID(guid, kGuidSysKeyboard) ||
+           IsEqualGUID(guid, kGuidSysKeyboardEm) ||
+           IsEqualGUID(guid, kGuidSysKeyboardEm2);
+}
 
 // IDirectInputDevice8's vtable, counted from dinput.h's declaration order:
 // IUnknown 0-2, GetCapabilities 3, EnumObjects 4, GetProperty 5,
@@ -554,7 +564,7 @@ template <size_t Index>
 HRESULT STDMETHODCALLTYPE factoryCreateDevice(void* self, REFGUID guid, void** device,
                                                LPUNKNOWN outer) {
     const HRESULT hr = g_factories[Index].original(self, guid, device, outer);
-    if (SUCCEEDED(hr) && device && *device && !outer) {
+    if (SUCCEEDED(hr) && device && *device && !outer && isKeyboardGuid(guid)) {
         guardedBudget(g_budgetDi, [&] {
             captureKeyboard(*device, std::make_index_sequence<kGameDeviceDoors>{});
         });
@@ -596,6 +606,9 @@ HRESULT WINAPI hookDirectInput8Create(HINSTANCE instance, DWORD version, REFIID 
                                       LPVOID* out, LPUNKNOWN outer) {
     const auto original = reinterpret_cast<PFN_DirectInput8Create>(g_createImport.original);
     const HRESULT hr = original(instance, version, iid, out, outer);
+    if (!Config::get().getBool("advanced.input_gate", true)) {
+        return hr;
+    }
     if (SUCCEEDED(hr) && out && *out && !outer &&
         (IsEqualGUID(iid, kIidDirectInput8A) || IsEqualGUID(iid, kIidDirectInput8W))) {
         guardedBudget(g_budgetDi, [&] {
@@ -845,6 +858,10 @@ void inputGateConfigure(Config& cfg) {
 void inputGateInstall() {
     if (g_installTried) return;
     g_installTried = true;
+    if (!Config::get().getBool("advanced.input_gate", true)) {
+        Log::get().note("keyboard gate: advanced.input_gate is off; input doors are not installed.");
+        return;
+    }
     guarded("inputGate/install", [&] {
         bool captured = false;
         for (const auto& d : g_gameDi) captured |= d.installed;

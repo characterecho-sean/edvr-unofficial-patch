@@ -145,6 +145,11 @@ int main() {
     factory.next = &joystick;
     createThrough(factory, &returned);
     check(joystick.refs == 1, "joystick creation adds no keyboard ownership");
+    const GUID kGuidMouse = {0x6F1D2B60, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+    Device mouse{table1.data()};
+    factory.next = &mouse;
+    reinterpret_cast<PFN_CreateDevice>(factory.table[3])(&factory, kGuidMouse, &returned, nullptr);
+    check(mouse.refs == 1, "non-keyboard GUID creation bypasses keyboard capture");
     factory.next = &keyboard;
 
     keyboard.events[0] = {DIK_TAB, 0x80, 10, 1, 0};

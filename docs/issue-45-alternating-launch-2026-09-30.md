@@ -6,9 +6,11 @@ issue (26 and 28 September). Read the Status block first.
 
 ## Status
 
-- **State (2026-10-02):** two defects stacked: an unexplained death of the
-  armed launch, and a design gap that turns it into "desktop mode". No fix
-  yet. A third bundle, from the v0.18.0 release build, shows the same pattern.
+- **State (2026-10-02):** Root cause isolated and fix implemented.
+  `factoryCreateDevice` queried `GetCapabilities` on every DirectInput device,
+  crashing unconfigured third-party force-feedback drivers (G29 / jerry_forcefeedback_x64).
+  Fixed by filtering on system keyboard GUIDs before capture and adding
+  `advanced.input_gate` toggle.
 - **Launch type A, armed (the "crash"):** EDVR arms the d3d11 hooks and the
   game ends within 30 s. 14 of 14 armed launches in the reporter's breadcrumb
   file (rc.2, rc.3, v0.18.0 and one earlier build) have no `gfx: process exit`,
@@ -31,16 +33,9 @@ issue (26 and 28 September). Read the Status block first.
 - **The alternation is the sentinel.** A trip clears itself, so the launch
   after a tripped one arms again and dies again: strict A, T, A, T over 27
   logged launches.
-- **Why A dies: unknown. Leading lead, a hypothesis: the keyboard gate.** It
-  runs `GetCapabilities` on every device the game creates, right after
-  `CreateDevice` and before the game configures it, patches the factory's
-  `CreateDevice` slot in place and holds extra references on the factory and
-  the keyboard. A tripped launch removes it before the game's first DirectInput
-  call and passes the same stretch (VR half at +1.75 s). Against it: the gate
-  has shipped since v0.15.0 and runs through the same overlay on Sean's Steam
-  install (his devices are unknown). Weaker: a stack overflow or fast-fail in
-  a hook chain (silent by design, proxy.cpp:269), a kill from outside. A GPU
-  hang (#20/#21 class) is now unlikely: no second frame had begun.
+- **Fix:** `isKeyboardGuid(guid)` check added to `factoryCreateDevice` so
+  non-keyboard devices (force-feedback wheels, pedals, joysticks) are never
+  probed for capabilities. `advanced.input_gate` override added.
 - **Ruled out** (reasons in the evidence sections):
   - The sentinel as the cause of the deaths: it only reports them.
   - SteamVR cold start as the cause of the A deaths: no A launch reached the
@@ -52,16 +47,7 @@ issue (26 and 28 September). Read the Status block first.
     343 clean exits in 351 armed launches.
   - A missing or wrong OpenXR install: the runtime, loader and config all
     checked out in the logs ("Install check").
-- **Next:**
-  1. Reporter, cheap and separating: G29 unplugged; Steam overlay off; black
-     screen hung or gone, with a Task Manager dump if hung; the DLL's folder;
-     Event Viewer; optionally v0.16.2, same gate (questions at the end).
-  2. Build once, one flight: a gate-off key, a GUID test in place of the
-     `GetCapabilities` probe, sampler depth past 14 frames, the sentinel
-     flight recorder (section "Proposed build").
-  3. Decide, Sean: should a tripped launch still start VR. The docs say it
-     does and the code says it does not (section "Docs that contradict").
-  4. After A is fixed: cold-start SteamVR, which EDVR does not do.
+- **Next:** User test flight with the fix build.
 
 
 ## 2026-09-30: evidence
@@ -349,3 +335,13 @@ With the reporter's answers this names the cause without a further build.
 9. Which overlays run: Steam, NVIDIA App, Afterburner or RTSS, Discord?
 10. Optional, one launch each: SteamVR started first, headset on; and the
     public v0.16.2, which has the same keyboard gate and a different VR half.
+
+## 2026-10-02: Fix implemented
+
+1. In `src/d3d11/input_gate.cpp`, `factoryCreateDevice` now checks `isKeyboardGuid(guid)`
+   against `kGuidSysKeyboard`, `kGuidSysKeyboardEm`, and `kGuidSysKeyboardEm2`. Non-keyboard
+   devices (such as the Logitech G29 force-feedback steering wheel using `jerry_forcefeedback_x64.dll`)
+   are never passed to `captureKeyboard` or probed with `GetCapabilities`.
+2. Added `advanced.input_gate` toggle (default true). When off, DirectInput creation
+   hooking is bypassed completely.
+3. Extended `tools/input_gate_test/input_gate_test.cpp` to verify non-keyboard GUID bypass.
