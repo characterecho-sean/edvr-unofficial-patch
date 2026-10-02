@@ -105,13 +105,19 @@ inline bool runtimeProfileAllowsKey(const char* key) {
     if (std::strncmp(key, "log.", 4) == 0 || std::strcmp(key, "advanced.real_dll") == 0)
         return true;
     return runtimeFlatProfile() && (std::strcmp(key, "advanced.d3d11_fixes") == 0 ||
+        std::strcmp(key, "advanced.input_gate") == 0 ||
         std::strcmp(key, "advanced.flat_camera_producer_probe") == 0 ||
+        std::strcmp(key, "advanced.flat_cb_map_cache") == 0 ||
         std::strcmp(key, "hotkey.menu") == 0 ||
         std::strcmp(key, "fix.temporal_aa_model") == 0 ||
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
         std::strcmp(key, "experimental.temporal_aa_jitter") == 0 ||
         std::strcmp(key, "experimental.temporal_aa_partial") == 0 ||
+        // Engine motion's draw substitution switch (flat_runtime.cpp, read at every Present; on by default).
+        std::strcmp(key, "experimental.temporal_aa_engine_motion") == 0 ||
+        // The per-draw reducer's lean path switch (flat_runtime.cpp, read at every Present; on by default).
+        std::strcmp(key, "experimental.flat_per_draw_lean") == 0 ||
         // The HDR route's key (flat_hdr_route.h, design doc section 81; auto by default); developer tier, no flat panel row.
         std::strcmp(key, "experimental.temporal_aa_before_post") == 0);
 }

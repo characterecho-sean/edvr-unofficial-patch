@@ -14,7 +14,7 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "exposure_fix.h"   // lookupShaderHash
-#include "shader_swap.h"    // shaderSwapCompileCs: the series reducer
+#include "shader_swap.h"    // shaderSwapCreateCs: the series reducer, from the build's bytecode (kFssSeriesBytecode)
 
 namespace edvr {
 

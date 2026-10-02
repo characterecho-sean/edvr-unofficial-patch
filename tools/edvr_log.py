@@ -18,6 +18,7 @@
     python tools/edvr_log.py --target frontier --ui-composites --expect-build HEAD
     python tools/edvr_log.py --target frontier --terrain-checkerboard --expect-build HEAD
     python tools/edvr_log.py --target frontier --route-curve --expect-build HEAD
+    python tools/edvr_log.py --target steam --map-bounce --expect-build HEAD
     python tools/edvr_log.py --target steam --freezes --expect-build HEAD
     python tools/edvr_log.py --target steam --draw-replay --expect-build HEAD
     python tools/edvr_log.py --list
@@ -205,6 +206,12 @@ STOP), OWNS (its sentence names the curve the next window shows) and FAULT. Like
 the log has no route line. A log from before the curved route has no curve tokens:
 that is a WARN which says so, never a PASS.
 
+--map-bounce reads issue 65's `flat map bounce 5s:` windows and one-shot decision.
+A missing line means the instrument never ran; pending windows warn, and fail-safe
+trips or verification mismatches stop. It checks verification coverage and measured
+bank-read speed when bounce is off. Exit 0 for PASS or WARN, 1 for STOP, 3 when the
+instrument never ran.
+
 --freezes reads one flight's freeze diagnostics (issue 63). A frame or runtime cycle of
 250 ms or more is a freeze and always gets a line, so the report lays them out from both
 logs (the runtime log is paired as --tally periodic pairs it; --runtime-file names one;
@@ -222,9 +229,22 @@ a graphics counts line, is a STOP; a FREEZE line with no LONG FRAME line a WARN)
 SUSPENSION (over 5000 us a WARN, over 50000 a STOP), FREEZE TEST (a log written with
 advanced.freeze_test_ms: its deliberate sleep must be a FREEZE with its LONG FRAME line, runtime
 cycle and stall samples, EDVR's own code on the stack) and NO FREEZE. A value a log does not
-carry prints `-`, never 0. Like --route-curve its exit code carries the verdict: 0 for
-PASS or WARN, 1 for STOP, 2 for a wrong build (the runtime log is checked too), 3 when the
-log holds none of the freeze lines (a build from before the freeze logging).
+carry prints `-`, never 0. It reads the headset-lock arc too (docs/headset-lock-vdxr-2026-
+10-02.md): SLOW REGIME (a run of seconds with the frame rate under 40% of the display's for 5
+s or more, the owner that held most of each frame, and the graphics memory then; read from
+the build's own native_slow_regime lines, or, for a v0.18.0 log, put back together from its
+LONG FRAME, native_long_cycle, FREEZE and vScreen totals lines and its native_submit_phases
+windows, and printed as RECONSTRUCTED), END-FRAME EPISODES (the xrEndFrame calls of 3 display
+periods or more), VENDOR EVENTS (the vendor's xrPollEvent events), VRAM (the graphics memory
+against the OS's budget) and SLOW TEST (a log written with advanced.slow_test_ms: its
+deliberate hold must be a regime held by xrEndFrame with its whole chain). A log that holds a
+slow regime the vendor runtime, EDVR's copy or EDVR's own work holds gets a SLOW verdict that
+names it and its owner, never PASS or WARN; a regime the game's own frame holds is INFO when
+the runtime says its frames were a load and WARN when they were the game's scenes, and one with
+no named owner is a WARN: none of those sets SLOW. Like --route-curve its exit code carries
+the verdict: 0 for PASS or WARN, 1 for STOP, 2 for a wrong build (the runtime log is checked
+too), 3 when the log holds none of the freeze lines and no slow regime (a build from before the
+freeze logging), 4 for a slow regime the vendor runtime or EDVR holds (and no STOP).
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
@@ -4975,13 +4995,28 @@ def print_vr_supersampling(text):
 # named and the layer did not take (the layer not armed for a frame, the world-screen gate holding the 2D screen) is also left in the scene and
 # shows with its family, beside the reasons the layer's `left in the game's frame` line already gives. A log with the layer's 30 s lines and no
 # composites line is a build from before this census, or a census that never ran: that is what the zeros are for.
+# One pair is neither taken nor a defect: the engine's NULL-OUTPUT QUAD (vs B018D143700AB803 / ps 258B95AC99520C1F), which samples a leftover interface
+# surface and writes nothing (docs/ui-layer-2026-09-23.md, 2026-10-01, "the composite the 15:09 flight left in the scene"). The census keeps it out of the
+# count of composites left and says it in a clause of its own at the end of <detail>: `vs <16 hex> ps <16 hex> (<name>, kept in the scene by design) <n>
+# draws, <rate> a frame`, after `none: ...` when nothing else is left. Builds before that (13c62cd6 to 069ebee4) counted it as a composite no family names,
+# which this reader called a STOP on every loading screen: the kept clause ends that, and a log from one of those builds is read the same way (its pair is
+# in UICOMP_KEPT_PAIRS, so its "no family" line is read as kept, with a note).
 UICOMP_STAMP_RE = re.compile(r"^\[(?P<ts>\d\d:\d\d:\d\d\.\d{3})\]\s*(?P<msg>.*)$")
 UICOMP_PREFIX = "ui quality: composites left in the scene: "
 UICOMP_RE = re.compile(r"^ui quality: composites left in the scene: (?P<left>\d+) of (?P<seen>\d+) composite draws \((?P<rate>[0-9.]+) a frame\) "
                        r"in (?P<frames>\d+) frames \((?P<live>\d+) live\) -- (?P<detail>.*)\.$")
 UICOMP_OFF_RE = re.compile(r"^ui quality: composites left in the scene: NOT COUNTED \((?P<why>.*)\) in (?P<frames>\d+) frames\.$")
 UICOMP_PAIR_RE = re.compile(r"vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) \((?P<family>[^)]*)\) (?P<rate>[0-9.]+) a frame")
+UICOMP_KEPT_RE = re.compile(r"vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) \((?P<name>[^)]*), kept in the scene by design\) (?P<n>\d+) draws, (?P<rate>[0-9.]+) a frame")
 UICOMP_PAST_RE = re.compile(r"(?P<n>\d+) draws of pairs past the table's (?P<cap>\d+) \((?P<rate>[0-9.]+) a frame\)")
+# Why each kept pair is not a defect, by the name the line gives it (the line says only "kept in the scene by design"; the reason lives here and in the doc).
+UICOMP_KEPT_WHY = {
+    "null-output quad": "its pixel shader writes zero and reads nothing, its blend is straight alpha and its depth and stencil are off, so it changes no pixel; the surface it "
+                        "samples is a leftover binding, and ui depth excludes its vertex shader by hash, so the layer never takes it",
+}
+# The pairs the DLL keeps (src/d3d11/ui_scene_composites.h kUiSceneKeptPairs; the self-test holds this table to that one). A log from a build between 13c62cd6 and
+# 069ebee4 has no kept clause and counts the pair as a composite left with no family: read as kept, with a note, so such a log does not STOP on a no-op.
+UICOMP_KEPT_PAIRS = {("B018D143700AB803", "258B95AC99520C1F"): "null-output quad"}
 UICOMP_NONE = "none: every interface composite drawn into an eye went into the layer"
 UICOMP_IDLE = "no draw into an eye sampled an interface surface in this window"
 UICOMP_NO_FAMILY = "no family"
@@ -4991,8 +5026,9 @@ UICOMP_SUSTAINED = 0.5
 
 
 def parse_ui_composites(text):
-    """{windows: [{ts, t, kind: 'count' | 'off', left, seen, rate, frames, live, state: 'none' | 'idle' | 'left', pairs: [{vs, ps, family, rate}], past: {n, cap,
-    rate} or None}], layer_windows: the layer's own 30 s lines, unparsed: [raw lines that start with the prefix and are none of the shapes]}."""
+    """{windows: [{ts, t, kind: 'count' | 'off', left, seen, rate, frames, live, state: 'none' | 'idle' | 'left', pairs: [{vs, ps, family, rate}], kept: [{vs, ps,
+    name, n, rate}], past: {n, cap, rate} or None}], layer_windows: the layer's own 30 s lines, unparsed: [raw lines that start with the prefix and are none of
+    the shapes]}. `left` is the headline's count of composites left (the kept pair, a clause of its own, is not in it); `seen` includes the kept draws."""
     out = {"windows": [], "layer_windows": 0, "unparsed": []}
     for raw in text.splitlines():
         m = UICOMP_STAMP_RE.match(raw.rstrip("\r"))
@@ -5008,7 +5044,7 @@ def parse_ui_composites(text):
         off = UICOMP_OFF_RE.match(msg)
         if off:
             out["windows"].append({"ts": ts, "t": t, "kind": "off", "left": 0, "seen": 0, "rate": 0.0, "frames": int(off.group("frames")), "live": 0,
-                                   "state": "off", "pairs": [], "past": None, "why": off.group("why")})
+                                   "state": "off", "pairs": [], "kept": [], "past": None, "why": off.group("why")})
             continue
         c = UICOMP_RE.match(msg)
         if not c:
@@ -5016,13 +5052,19 @@ def parse_ui_composites(text):
             continue
         detail = c.group("detail")
         w = {"ts": ts, "t": t, "kind": "count", "left": int(c.group("left")), "seen": int(c.group("seen")), "rate": float(c.group("rate")),
-             "frames": int(c.group("frames")), "live": int(c.group("live")), "state": "left", "pairs": [], "past": None}
-        if detail == UICOMP_NONE:
-            w["state"] = "none"
-        elif detail == UICOMP_IDLE:
+             "frames": int(c.group("frames")), "live": int(c.group("live")), "state": "left", "pairs": [], "kept": [], "past": None}
+        if detail == UICOMP_IDLE:
             w["state"] = "idle"
         else:
-            for item in detail.split("; "):
+            items = detail.split("; ")
+            if items[0] == UICOMP_NONE:
+                w["state"] = "none"
+                items = items[1:]
+            for item in items:
+                k = UICOMP_KEPT_RE.fullmatch(item)
+                if k:
+                    w["kept"].append({"vs": k.group("vs"), "ps": k.group("ps"), "name": k.group("name"), "n": int(k.group("n")), "rate": float(k.group("rate"))})
+                    continue
                 p = UICOMP_PAIR_RE.fullmatch(item)
                 if p:
                     family = p.group("family")
@@ -5037,6 +5079,18 @@ def parse_ui_composites(text):
         if w["state"] == "unreadable" or (w["state"] == "left" and not w["pairs"] and not w["past"]):
             out["unparsed"].append(raw)
             continue
+        # An older build (13c62cd6 to 069ebee4) has no kept clause: it counted the null-output quad as a composite left with no family. Read it as kept. When it was the
+        # only thing left the headline's own count is the draw count, exact; beside other pairs the draws are the rate over the frames (the line prints the rate to 0.01).
+        old = [pr for pr in w["pairs"] if pr["family"] == UICOMP_NO_FAMILY and (pr["vs"], pr["ps"]) in UICOMP_KEPT_PAIRS]
+        if old and w["state"] == "left":
+            rest = [pr for pr in w["pairs"] if pr not in old]
+            alone = not rest and not w["past"] and len(old) == 1
+            for pr in old:
+                w["kept"].append({"vs": pr["vs"], "ps": pr["ps"], "name": UICOMP_KEPT_PAIRS[(pr["vs"], pr["ps"])],
+                                  "n": w["left"] if alone else int(round(pr["rate"] * w["frames"])), "rate": pr["rate"], "legacy": True})
+            w["pairs"] = rest
+            if alone:
+                w["left"], w["rate"], w["state"] = 0, 0.0, "none"
         out["windows"].append(w)
     return out
 
@@ -5045,7 +5099,8 @@ def ui_composites_verdict(p):
     """[(tag, status, text)]: INSTRUMENT (the census ran: the line is there; zero lines beside the layer's own is a build before it or a census that never ran),
     DETECTOR (a window the interface depth pass was off), UNCLAIMED (a composite no family names, left in the scene: sustained is a STOP, a stray a WARN),
     NAMED (a family named it and it was not taken: a WARN, the layer's `left in the game's frame` line says why), OVERFLOW (more different pairs left than the
-    table names), TAKEN (every composite drawn into an eye went into the layer) and SHAPE (a line the reader could not parse)."""
+    table names), KEPT (a pair the scene keeps on purpose, the null-output quad: a PASS that says why it is not a defect), TAKEN (every composite drawn into an
+    eye went into the layer) and SHAPE (a line the reader could not parse)."""
     out = []
 
     def add(tag, status, text):
@@ -5092,13 +5147,31 @@ def ui_composites_verdict(p):
         worst = max(w["past"]["rate"] for w in past)
         add("OVERFLOW", "STOP" if worst >= UICOMP_SUSTAINED else "WARN",
             "%d window(s) left draws of more different pairs than the table names (%d), up to %.2f draws a frame unnamed" % (len(past), past[0]["past"]["cap"], worst))
+    # The pairs the scene keeps on purpose (a clause of their own, never in the count of composites left): said, with why, and never a finding.
+    kept_pairs = {}
+    for w in counted:
+        for k in w["kept"]:
+            e = kept_pairs.setdefault((k["vs"], k["ps"], k["name"]), {"windows": 0, "max": 0.0, "draws": 0, "first": w["ts"], "legacy": 0})
+            e["windows"] += 1
+            e["max"] = max(e["max"], k["rate"])
+            e["draws"] += k["n"]
+            e["legacy"] += 1 if k.get("legacy") else 0
+    for (vs, ps, name), e in sorted(kept_pairs.items(), key=lambda kv: -kv[1]["max"]):
+        add("KEPT", "PASS", "vs %s ps %s (%s): kept in the scene by design in %d of %d counted window(s), up to %.2f draws a frame (%d draws in all), first at %s; %s%s" % (
+            vs, ps, name, e["windows"], len(counted), e["max"], e["draws"], e["first"],
+            UICOMP_KEPT_WHY.get(name, "the census names it as not interface, with a pair of its own"),
+            "; %d of those window(s) are from a build whose census counted it as a composite left with no family (13c62cd6 to 069ebee4), read here as kept" % e["legacy"]
+            if e["legacy"] else ""))
     leftover = [w for w in counted if w["left"]]
     if counted and not leftover:
-        total = sum(w["seen"] for w in counted)
-        if total:
-            add("TAKEN", "PASS", "every interface composite drawn into an eye went into the layer: %d composite draws in %d window(s), none left in the scene" % (total, len(counted)))
+        kept_draws = sum(k["n"] for w in counted for k in w["kept"])
+        total = sum(w["seen"] for w in counted) - kept_draws
+        if total > 0:
+            add("TAKEN", "PASS", "every interface composite drawn into an eye went into the layer: %d composite draws in %d window(s), none left in the scene%s" % (
+                total, len(counted), " (%d more draws are the kept pair's, above, and are not interface)" % kept_draws if kept_draws else ""))
         else:
-            add("TAKEN", "WARN", "no composite was drawn into an eye in any counted window (a loading screen, or a log without a cockpit or a menu): nothing here shows the pair taken")
+            add("TAKEN", "WARN", "no composite was drawn into an eye in any counted window%s (a loading screen, or a log without a cockpit or a menu): nothing here shows the pair taken" % (
+                " but the kept pair's (%d draws, above)" % kept_draws if kept_draws else ""))
     return out
 
 
@@ -5111,9 +5184,15 @@ def print_ui_composites(text):
         if w["kind"] == "off":
             print("%s  NOT COUNTED in %d frames" % (w["ts"], w["frames"]))
             continue
-        what = "none" if w["state"] == "none" else "no composite drawn" if w["state"] == "idle" else "; ".join(
-            "%s/%s (%s) %.2f" % (pr["vs"], pr["ps"], pr["family"], pr["rate"]) for pr in w["pairs"]) + (
-            "; %d past the table (%.2f)" % (w["past"]["n"], w["past"]["rate"]) if w["past"] else "")
+        if w["state"] == "idle":
+            what = "no composite drawn"
+        else:
+            parts = ["none"] if w["state"] == "none" else []
+            parts += ["%s/%s (%s) %.2f" % (pr["vs"], pr["ps"], pr["family"], pr["rate"]) for pr in w["pairs"]]
+            if w["past"]:
+                parts.append("%d past the table (%.2f)" % (w["past"]["n"], w["past"]["rate"]))
+            parts += ["%s/%s (%s, kept by design) %d draws, %.2f" % (k["vs"], k["ps"], k["name"], k["n"], k["rate"]) for k in w["kept"]]
+            what = "; ".join(parts)
         print("%s  %d of %d composite draws (%.2f a frame) in %d frames (%d live)  %s" % (w["ts"], w["left"], w["seen"], w["rate"], w["frames"], w["live"], what))
     for tag, status, text_ in verdict:
         print("%s (%s) %s" % (status, tag, text_))
@@ -5891,6 +5970,139 @@ def print_route_curve(text, path=None):
     return 1 if stops else 0
 
 
+MAP_BOUNCE_PREFIX = "flat map bounce 5s:"
+MAP_BOUNCE_DECISION_PREFIX = "flat map bounce: decision"
+MAP_BOUNCE_PENDING_PREFIX = "flat map bounce: pending"
+MAP_BOUNCE_FIELDS = ("state", "key", "maps", "bounced", "flushes", "trips",
+                     "bank-sample-bytes",
+                     "verify-samples", "verify-mismatches", "bank-ns-per-kb")
+
+
+def _map_bounce_fields(line):
+    """Read the key=value tokens from one map-bounce summary/decision line."""
+    return dict(re.findall(r"(?<!\S)([a-z][a-z0-9-]*)=([^\s,;]+)", line))
+
+
+def parse_map_bounce(text):
+    """Return summary lines, malformed summary lines, and decisions for issue 65."""
+    summaries, malformed, decisions, pending = [], [], [], []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if MAP_BOUNCE_PREFIX in line:
+            fields = _map_bounce_fields(line)
+            missing = [key for key in MAP_BOUNCE_FIELDS if key not in fields]
+            integer_fields = MAP_BOUNCE_FIELDS[2:-1]
+            bad_numbers = [key for key in integer_fields if key in fields and
+                           (not re.fullmatch(r"\d{1,20}", fields[key]) or
+                            int(fields[key]) > 18446744073709551615)]
+            if ("bank-ns-per-kb" in fields and
+                    (len(fields["bank-ns-per-kb"]) > 64 or
+                     not re.fullmatch(r"\d+(?:\.\d*)?|\.\d+", fields["bank-ns-per-kb"]) or
+                     not math.isfinite(float(fields["bank-ns-per-kb"])))):
+                bad_numbers.append("bank-ns-per-kb")
+            if (missing or bad_numbers or
+                    fields.get("state") not in ("pending", "on", "off", "tripped") or
+                    fields.get("key") not in ("auto", "on", "off")):
+                malformed.append({"line": line_no, "text": line,
+                                  "missing": missing, "bad_numbers": bad_numbers,
+                                  "fields": fields})
+            else:
+                for key in ("maps", "bounced", "flushes", "trips",
+                            "bank-sample-bytes", "verify-samples", "verify-mismatches"):
+                    fields[key] = int(fields[key])
+                fields["bank-ns-per-kb"] = float(fields["bank-ns-per-kb"])
+                fields["line"] = line_no
+                summaries.append(fields)
+        elif MAP_BOUNCE_DECISION_PREFIX in line:
+            fields = _map_bounce_fields(line)
+            result = re.search(r"threshold\s*(?:=\s*)?([^\s,;]+)\s*->\s*(ON|OFF)\b", line)
+            if result:
+                fields["result"] = result.group(2)
+                fields["threshold"] = result.group(1)
+            fields["line"] = line_no
+            fields["text"] = line
+            decisions.append(fields)
+        elif MAP_BOUNCE_PENDING_PREFIX in line:
+            pending.append({"line": line_no, "text": line})
+    return {"summaries": summaries, "malformed": malformed,
+            "decisions": decisions, "pending": pending}
+
+
+def print_map_bounce(text, path=None):
+    """Report issue 65 map-bounce instrumentation and verdict."""
+    p = parse_map_bounce(text)
+    windows, decisions = p["summaries"], p["decisions"]
+    if not windows and not p["malformed"] and not decisions and not p["pending"]:
+        print("[edvr] map-bounce: NEVER RAN; no `flat map bounce 5s:` summary or decision line in this log. Enable the instrument and fly a full summary window.")
+        print("map-bounce verdict: NEVER RAN")
+        return 3
+
+    latest = windows[-1] if windows else None
+    print("[edvr] map-bounce: %sbuild %s; %d summary window(s), %d decision line(s), %d malformed summary line(s)" %
+          (os.path.basename(path) + ", " if path else "",
+           version_line(text)[1] or "(no version line)", len(windows),
+           len(decisions), len(p["malformed"])))
+    if decisions:
+        for d in decisions[-3:]:
+            print("  DECISION %s" % d["text"].strip())
+    if latest:
+        print("  latest window: state=%s key=%s maps=%d bounced=%d flushes=%d bank-ns-per-kb=%.3f verify-samples=%d mismatches=%d trips=%d" %
+              (latest["state"], latest["key"], latest["maps"], latest["bounced"],
+               latest["flushes"], latest["bank-ns-per-kb"],
+               latest["verify-samples"], latest["verify-mismatches"], latest["trips"]))
+
+    findings = []
+    if p["malformed"]:
+        findings.append(("WARN", "FORMAT", "%d summary line(s) have missing or malformed fields; first at line %d" %
+                         (len(p["malformed"]), p["malformed"][0]["line"])))
+        for record in p["malformed"]:
+            safety = record["fields"]
+            for field, tag in (("trips", "TRIPS"), ("verify-mismatches", "VERIFY")):
+                raw = safety.get(field)
+                if raw is None or not re.fullmatch(r"\d{1,20}", raw) or int(raw) > 0:
+                    findings.append(("STOP", tag, "unsafe or unreadable %s in malformed summary at line %d" %
+                                     (field, record["line"])))
+    if not windows:
+        findings.append(("WARN", "INSTRUMENT", "no valid 5 s summary proves the instrument ran"))
+    else:
+        states = [w["state"] for w in windows]
+        trips = max(w["trips"] for w in windows)  # C++ reports the cumulative trip count.
+        mismatches = sum(w["verify-mismatches"] for w in windows)
+        if "tripped" in states or trips:
+            findings.append(("STOP", "TRIPS", "fail-safe tripped (%d recorded trip(s))" % trips))
+        if mismatches:
+            findings.append(("STOP", "VERIFY", "%d verification mismatch(es) recorded" % mismatches))
+        if latest["state"] == "pending":
+            findings.append(("WARN", "PENDING", "the latest adaptive decision is still pending"))
+        if latest["state"] == "off":
+            measured = [w["bank-ns-per-kb"] for w in windows if w["bank-sample-bytes"] > 0 and w["bank-ns-per-kb"] > 0]
+            if latest["key"] == "auto":
+                if decisions and decisions[-1].get("result") == "OFF" and measured:
+                    findings.append(("PASS", "OFF", "adaptive decision selected OFF after sampled bank reads"))
+                else:
+                    findings.append(("WARN", "OFF", "adaptive OFF lacks both an OFF decision and sampled bank-read timing"))
+            elif latest["bank-ns-per-kb"] > 1024.0:
+                findings.append(("WARN", "SLOW OFF", "bank reads are slow at %.1f ns/KB while bouncing is off" % latest["bank-ns-per-kb"]))
+        elif latest["state"] == "on":
+            if latest["bounced"]:
+                findings.append(("PASS", "ACTIVE", "map bounce is active; %d maps bounced in the latest window" % latest["bounced"]))
+            else:
+                findings.append(("WARN", "ACTIVE", "state says on but no map bounce was counted in the latest window"))
+        # Forced-on mode verifies every 16th flush, across window boundaries.
+        if latest["key"] == "on":
+            expected = sum(w["flushes"] for w in windows) // 16
+            observed = sum(w["verify-samples"] for w in windows)
+            if observed < expected:
+                findings.append(("WARN", "VERIFY COVERAGE", "%d forced-on flushes imply at least %d verification samples; saw %d" %
+                                 (sum(w["flushes"] for w in windows), expected, observed)))
+    for status, tag, msg in findings:
+        print("  %-4s  %s: %s" % (status, tag, msg))
+    stops = sum(1 for status, _, _ in findings if status == "STOP")
+    warns = sum(1 for status, _, _ in findings if status == "WARN")
+    verdict = "STOP" if stops else "WARN" if warns else "PASS"
+    print("map-bounce verdict: %s (%d STOP, %d WARN)" % (verdict, stops, warns))
+    return 1 if stops else 0
+
+
 def self_test_route_curve():
     """--route-curve on logs built from the route's own formatter output: the 5 s lines of tools\\camera_census_fixture.log (which
     tools\\vr_world_route_test holds to the formatter) with only their curve tokens, eye-takes, owned-frames and state swapped, the flat OWNS line of
@@ -6243,8 +6455,10 @@ def self_test_route_curve():
 #                  of=N,utc=...,...` (the same fields, a cycle's end in UTC), `native_long_cycle_counts,reason=...,...` every five minutes and
 #                  `native_long_cycle_summary,...` at session close (the three old fields, then the counts by size).
 #
-# The exit code carries the verdict, as --route-curve's does: 0 for PASS or WARN, 1 for STOP, 3 when the log holds none of the freeze lines (a build
-# from before the freeze logging; main() answers 2 for a wrong build before this runs, and this answers 2 for a runtime log of another build). A line
+# The exit code carries the verdict, as --route-curve's does: 0 for PASS or WARN, 1 for STOP, 3 when the log holds none of the freeze lines and no slow
+# regime (a build from before the freeze logging; main() answers 2 for a wrong build before this runs, and this answers 2 for a runtime log of another
+# build), 4 when it holds a slow regime the vendor runtime or EDVR holds (the headset-lock arc, below: the verdict is SLOW, never PASS or WARN; a STOP
+# still outranks it; a regime the game's own frame holds sets neither). A line
 # that opens like one of these and matches none of the formats is counted and named, never dropped, because a reader that drifted from the C++ would
 # otherwise look like a quiet flight. self_test_freezes builds its logs from the exact lines the C++ writes.
 
@@ -6358,7 +6572,10 @@ def _fz_worst_add(sets, entry):
 
 def _fz_gfx_line(fz, msg, t):
     """File one graphics log line (the text after its prefix, t its time on the common clock) if it is one of the freeze lines. LONG FRAME lines are
-    scan_flight_log's own (its frames), read from there."""
+    scan_flight_log's own (its frames), read from there. The headset-lock arc's lines (vram, slow test) and the reconstruction's (a LONG FRAME's period, vScreen
+    totals) are _fz_arc_gfx_line's."""
+    if _fz_arc_gfx_line(fz, msg, t):
+        return
     if msg.startswith("monitor: FREEZE -- "):
         m = FZ_FREEZE_RE.match(msg)
         if not m:
@@ -6442,7 +6659,10 @@ def _fz_gfx_line(fz, msg, t):
 
 def _fz_rt_line(fz, msg, t):
     """File one runtime log line (the text after its UTC prefix, t its time converted to local) if it is one of the freeze lines. A worst-list
-    line's own time is when the list was written; the cycle's end is its `utc=` field, turned to local once the clock is known (parse_freezes)."""
+    line's own time is when the list was written; the cycle's end is its `utc=` field, turned to local once the clock is known (parse_freezes). The headset-lock
+    arc's lines and the older lines its reconstruction reads (native_submit_phases, display_frequency, native_producer_gpu) are _fz_arc_rt_line's."""
+    if _fz_arc_rt_line(fz, msg, t):
+        return
     if msg.startswith("native_long_cycle,") or msg.startswith("native_long_cycle_worst,"):
         worst = msg.startswith("native_long_cycle_worst,")
         f = _fz_fields(msg)
@@ -6468,15 +6688,239 @@ def _fz_rt_line(fz, msg, t):
                                 "reason": f.get("reason"), "kv": kv})
 
 
+# ---- the headset-lock arc (docs/headset-lock-vdxr-2026-10-02.md): a slow regime, and who holds it ----
+# A Quest 3 user's game ran at 10 fps for a minute, every frame's xrEndFrame held ~83 ms by the vendor's runtime, and every line before this arc was blind to it:
+# 100 ms frames are under the 250 ms FREEZE line, and the LONG FRAME line is one in five seconds. The build that follows writes, as the C++ formats them:
+#
+#   graphics log   `vram: reason=armed|periodic|pressure|over_budget|back_under_budget|cap_reached local_used_mb=N local_budget_mb=N local_pct=P
+#                  nonlocal_used_mb=N nonlocal_budget_mb=N nonlocal_pct=P[; ...]` and `vram: unavailable -- <why>. No vram: line will be written this
+#                  session.` (vram_watch.h, vram_tick.cpp); `slow test: ...` (perf_monitor.cpp slowTestTick, advanced.slow_test_ms).
+#   runtime log    `native_xr_events,armed=1,...`, `native_xr_event,n=N,type=...`, `native_xr_events_summary,...` (vendor_events.h);
+#                  `native_end_frame_episodes,armed=1,...`, `native_end_frame_episode,episode=N,...`, `native_end_frame_episode_end,...`,
+#                  `native_end_frame_episodes_summary,...` (end_frame_episodes.h); `native_slow_regime,armed=1,...`, `native_slow_regime,event=SLOW|
+#                  still_slow|end,...,summary=<words>`, `native_slow_regime_summary,...` (slow_regime.h); `native_end_frame_hold,test=1,state=began|
+#                  ended,...` (native_runtime_host.h holdEndFrame).
+#
+# A build from BEFORE them (v0.18.0) wrote none of that, but its older lines still hold the regime, and this reads it from them, labelled a reconstruction:
+# the LONG FRAME lines of 3 display periods or more (the period is on the line), the FREEZE lines, the runtime's native_long_cycle lines of 3 periods or
+# more (all three carry the runtime sequence), and the graphics log's `vScreen totals ... N frames in M ms is X fps` windows under 40% of the display's
+# rate. Marks (the first three) and slow windows within FZ_SLOW_LINK_S of each other are one run. A run of FZ_SLOW_MIN_S or more is a regime when its frame
+# rate is under 40% of the display's: the rate is how far the runtime sequence rose over the run's time, and the same for the graphics frame counter (the
+# median of the two when both are there: long frames now and then with a fine rate between them are hitches, not a regime), and the vScreen windows' own
+# rates when no counter can say. WHO comes from the runtime's native_submit_phases windows (their `first=..,last=..` sequences overlap the run), the p50
+# of each phase against the frame's length. The rate limits (LONG FRAME is one in five seconds, 60 a session) mean a run's start and end are its first
+# and last line: within a few seconds of the real ones, not sharper.
+FZ_SLOW_FRACTION = 0.40         # slow_regime.h kSlowFraction: a frame rate under this share of the display's is slow
+FZ_SLOW_PERIODS = 3.0           # end_frame_episodes.h kEndFramePeriods: a frame or call of this many display periods or more is a mark
+FZ_SLOW_LINK_S = 5.5            # marks and windows this close are one run (the LONG FRAME limiter writes one every 5 s)
+FZ_SLOW_MIN_S = 5.0             # slow_regime.h kSlowHoldSeconds: a run shorter than this is a hitch, not a regime
+FZ_SLOW_SHARE = 0.35            # slow_regime.h kSlowOwnerShare: an owner holding less of a frame than this is not named
+FZ_SLOW_EVENT_PAD_S = 10.0      # vendor events this close to a regime are listed with it
+FZ_SLOW_TEST_PAD_S = 15.0       # a regime that begins within this of the test hold's start is the test's
+FZ_SLOW_PHASE_SLACK_S = 30.0    # when no sequence says, a native_submit_phases window that ends this long after a run still covers it
+FZ_OWNER_TEXT = {               # slow_regime.h slowOwnerText, key for key
+    "vendor_end_frame": "the vendor runtime's xrEndFrame",
+    "vendor_wait_frame": "the vendor runtime's xrWaitFrame and xrBeginFrame (the pose wait)",
+    "vendor_swapchain": "the vendor runtime's swapchain calls (xrAcquire, xrWait, xrReleaseSwapchainImage)",
+    "edvr_copy": "EDVR's copy of the eyes",
+    "edvr_work": "EDVR's own work in the runtime",
+    "game": "the game's own frame",
+    "no_frames": "nothing: no frame reached xrEndFrame",
+    "none": "no single owner",
+}
+FZ_OWNER_ORDER = ("vendor_end_frame", "vendor_wait_frame", "vendor_swapchain", "edvr_copy", "edvr_work", "game")
+# Who may set SLOW. A regime the vendor runtime, EDVR's copy of the eyes or EDVR's own work holds is a finding about the runtime or EDVR. One the game's own
+# frame holds is the game's: a load (INFO) when the runtime's frames were its own loading frames or ends with no layers (slow_regime.h `context=`), a slow
+# stretch of the game's scenes (WARN) otherwise. A regime with no named owner (none, no_frames, unknown) is a WARN: nothing says whose it is.
+FZ_SLOW_OWNERS = ("vendor_end_frame", "vendor_wait_frame", "vendor_swapchain", "edvr_copy", "edvr_work")
+FZ_LOAD_CONTEXTS = ("loading", "no_layers")
+FZ_VRAM_REASON_RE = re.compile(r"^vram: reason=(?P<reason>\w+)\b")
+FZ_VRAM_KV_RE = re.compile(r"\b(?P<k>(?:local|nonlocal)_(?:used_mb|budget_mb|pct))=(?P<v>[0-9.]+|-)")
+FZ_VRAM_ADAPTER_RE = re.compile(r"; adapter (?P<name>.+?); this process's")
+FZ_VRAM_UNAVAILABLE_RE = re.compile(r"^vram: unavailable -- (?P<why>.*?)\. No vram: line")
+FZ_VRAM_KEYS = ("local_used_mb", "local_budget_mb", "local_pct", "nonlocal_used_mb", "nonlocal_budget_mb", "nonlocal_pct")
+FZ_SLOWTEST_ARMED_RE = re.compile(
+    r"^slow test: advanced\.slow_test_ms = (?P<ms>\d+)\. (?P<start>\d+) s from now the runtime holds every xrEndFrame it makes (?P<ms2>\d+) ms longer, "
+    r"for (?P<span>\d+) s")
+FZ_SLOWTEST_BEGAN_RE = re.compile(r"^slow test: the hold begins now: every xrEndFrame is held (?P<ms>\d+) ms longer for (?P<span>\d+) s\.")
+FZ_SLOWTEST_ENDED_RE = re.compile(r"^slow test: the hold ended\.")
+FZ_LF_PERIOD_RE = re.compile(r"^monitor: LONG FRAME -- (?P<ms>[0-9.]+) ms between Presents \((?:runtime predicted period|budget) (?P<p>[0-9.]+)")
+FZ_LF_FRAME_RE = re.compile(r"\bThis is frame (?P<frame>\d+)\b")
+FZ_VSCREEN_FPS_RE = re.compile(r"^vScreen totals: .*?\b(?P<n>\d+) frames in (?P<ms>\d+) ms is (?P<fps>\d+) fps")
+# The runtime's lines of the arc by the name each begins with, then the older lines the reconstruction reads (their malformed forms are ignored, not counted).
+FZ_RT_ARC_NAMES = ("native_xr_events", "native_xr_event", "native_xr_events_summary", "native_end_frame_episodes", "native_end_frame_episode",
+                   "native_end_frame_episode_end", "native_end_frame_episodes_summary", "native_slow_regime", "native_slow_regime_summary",
+                   "native_end_frame_hold", "native_submit_phases", "display_frequency", "native_producer_gpu")
+# The phases of native_submit_phases the owner attribution reads: four numbers each, p50/p95/p99/max (the line's own `percentiles=` says so).
+FZ_PHASE_KEYS = ("producer_dispatch", "receive", "xr_acquire", "xr_wait", "xr_draw_submit", "xr_release", "xr_end_frame", "wait_frame", "pacer_block")
+
+
+def _fz_arc_state():
+    """The keys parse_freezes adds for the arc: the armed lines (None until seen), the lines of each instrument, and the older lines the reconstruction reads
+    (phases, display_hz, producer_gpu, lf_marks, vscreen)."""
+    return {"xr_armed": None, "xr_events": [], "xr_summaries": [], "ep_armed": None, "episodes": [], "episode_ends": [], "ep_summaries": [],
+            "slow_armed": None, "slow_lines": [], "slow_summaries": [], "holds": [], "phases": [], "display_hz": None, "producer_gpu": [],
+            "vram": [], "vram_state": None, "vram_fail": None, "slowtests": [], "lf_marks": [], "vscreen": []}
+
+
+def _fz_int(fields, key):
+    """A field as an int, or None."""
+    try:
+        return int(fields[key])
+    except (KeyError, ValueError):
+        return None
+
+
+def _fz_p50s(fields):
+    """{phase: [p50, p95, p99, max]} of a native_submit_phases line's phases that carry four slash-separated numbers; one that does not is left out."""
+    out = {}
+    for key in FZ_PHASE_KEYS:
+        parts = str(fields.get(key, "")).split("/")
+        if len(parts) == 4:
+            try:
+                out[key] = [float(p) for p in parts]
+            except ValueError:
+                pass
+    return out
+
+
+def _fz_vram_fields(fields):
+    """The `vram_*` figures of a SLOW line as {local_used_mb: n, ...} (None for a `-`), or None when the line says `vram=unavailable`."""
+    if not any(("vram_" + k) in fields for k in FZ_VRAM_KEYS):
+        return None
+    out = {}
+    for k in FZ_VRAM_KEYS:
+        try:
+            out[k] = float(fields["vram_" + k])
+        except (KeyError, ValueError):
+            out[k] = None
+    return out
+
+
+def _fz_arc_rt_line(fz, msg, t):
+    """File one runtime log line of the arc (and of the older lines its reconstruction reads), the text after the UTC prefix, t its time on the common
+    clock. True when the line was one of these. A line that opens like one of the arc's and matches nothing is counted as unparsed, never dropped."""
+    name = msg.split(",", 1)[0]
+    if name not in FZ_RT_ARC_NAMES:
+        return False
+    f = _fz_fields(msg)
+    try:
+        if name == "native_xr_events":
+            fz["xr_armed"] = {"t": t, "f": f}
+        elif name == "native_xr_event":
+            if f.get("suppressed") == "1":
+                fz["xr_events"].append({"t": t, "f": f, "n": int(f["n"]), "type": None, "suppressed": True})
+            else:
+                fz["xr_events"].append({"t": t, "f": f, "n": int(f["n"]), "type": f["type"], "suppressed": False})
+        elif name == "native_xr_events_summary":
+            fz["xr_summaries"].append({"t": t, "f": f, "n": int(f["received"])})
+        elif name == "native_end_frame_episodes":
+            fz["ep_armed"] = {"t": t, "f": f}
+        elif name == "native_end_frame_episode":
+            fz["episodes"].append({"t": t, "f": f, "n": int(f["episode"]), "ms": float(f["ms"]), "seq": int(f["sequence"]), "periods": float(f["periods"])})
+        elif name == "native_end_frame_episode_end":
+            fz["episode_ends"].append({"t": t, "f": f, "n": int(f["episode"]), "slow": int(f["slow_calls"]), "calls": int(f["calls"]),
+                                       "duration_ms": float(f["duration_ms"]), "max_ms": float(f["max_ms"]), "p50_ms": float(f["p50_ms"])})
+        elif name == "native_end_frame_episodes_summary":
+            fz["ep_summaries"].append({"t": t, "f": f, "n": int(f["episodes"])})
+        elif name == "native_slow_regime":
+            if f.get("armed") == "1":
+                fz["slow_armed"] = {"t": t, "f": f}
+            else:
+                event = f["event"]
+                if event not in ("SLOW", "still_slow", "end"):
+                    raise ValueError(event)
+                fz["slow_lines"].append({"t": t, "f": f, "event": event, "regime": int(f["regime"]), "duration_s": float(f["duration_s"]),
+                                         "window_s": float(f["window_s"]), "frames": int(f["frames"]), "fps": float(f["fps"]), "hz": float(f["display_hz"]),
+                                         "fraction": float(f["fraction"]), "frame_ms": float(f["frame_ms"]), "owner": f["held_by"],
+                                         "share": float(f["held_share"]), "vendor_share": float(f["vendor_share"]), "vram": _fz_vram_fields(f),
+                                         "context": f.get("context"), "loading_frames": _fz_int(f, "loading_frames"), "empty_frames": _fz_int(f, "empty_frames"),
+                                         "summary": msg.partition(",summary=")[2]})
+        elif name == "native_slow_regime_summary":
+            fz["slow_summaries"].append({"t": t, "f": f, "regimes": int(f["regimes"])})
+        elif name == "native_end_frame_hold":
+            fz["holds"].append({"t": t, "f": f, "state": f["state"]})
+        elif name == "native_submit_phases":
+            p = _fz_p50s(f)
+            if "xr_end_frame" in p:
+                fz["phases"].append({"t": t, "window": f.get("window", "?"), "first": _fz_int(f, "first"), "last": _fz_int(f, "last"), "p": p})
+        elif name == "display_frequency":
+            hz = _fz_num(f, "hz")
+            if hz and f.get("source") == "runtime":
+                fz["display_hz"] = hz
+        elif name == "native_producer_gpu":
+            parts = str(f.get("copy", "")).split("/")
+            if "window" in f and len(parts) == 4:
+                fz["producer_gpu"].append({"t": t, "window": f["window"], "copy": [float(p) for p in parts]})
+    except (KeyError, ValueError):
+        if name in FZ_RT_ARC_NAMES[:10]:
+            _fz_unparsed(fz, msg)
+    return True
+
+
+def _fz_arc_gfx_line(fz, msg, t):
+    """File one graphics log line of the arc (vram, the slow test's trigger) or of the reconstruction (a LONG FRAME's period, sequence and frame; a vScreen
+    totals window), the text after the prefix. True when the line needs nothing more; a LONG FRAME line returns False, its other readers are the scan's."""
+    if msg.startswith("vram: "):
+        m = FZ_VRAM_REASON_RE.match(msg)
+        if m:
+            kv = {k: (None if v == "-" else float(v)) for k, v in FZ_VRAM_KV_RE.findall(msg.partition(";")[0])}
+            if "local_used_mb" not in kv:
+                _fz_unparsed(fz, msg)
+                return True
+            ad = FZ_VRAM_ADAPTER_RE.search(msg)
+            entry = {"t": t, "reason": m.group("reason"), "kv": kv, "adapter": ad.group("name") if ad else None}
+            if entry["reason"] == "armed":
+                fz["vram_state"] = {"t": t, "state": "armed", "adapter": entry["adapter"], "text": msg}
+            fz["vram"].append(entry)
+            return True
+        m = FZ_VRAM_UNAVAILABLE_RE.match(msg)
+        if m:
+            fz["vram_state"] = {"t": t, "state": "unavailable", "adapter": None, "text": m.group("why")}
+            return True
+        if msg.startswith("vram: QueryVideoMemoryInfo failed"):
+            fz["vram_fail"] = {"t": t, "text": msg[:160]}
+            return True
+        _fz_unparsed(fz, msg)
+        return True
+    if msg.startswith("slow test: "):
+        armed, began, ended = FZ_SLOWTEST_ARMED_RE.match(msg), FZ_SLOWTEST_BEGAN_RE.match(msg), FZ_SLOWTEST_ENDED_RE.match(msg)
+        if armed:
+            fz["slowtests"].append({"kind": "armed", "t": t, "ms": int(armed.group("ms")), "span": int(armed.group("span")), "start": int(armed.group("start"))})
+        elif began:
+            fz["slowtests"].append({"kind": "began", "t": t, "ms": int(began.group("ms")), "span": int(began.group("span")), "start": 0})
+        elif ended:
+            fz["slowtests"].append({"kind": "ended", "t": t, "ms": 0, "span": 0, "start": 0})
+        else:
+            _fz_unparsed(fz, msg)
+        return True
+    if msg.startswith("monitor: LONG FRAME -- "):
+        m = FZ_LF_PERIOD_RE.match(msg)
+        if m:
+            seq, frame = LONG_FRAME_SEQ_RE.search(msg), FZ_LF_FRAME_RE.search(msg)
+            fz["lf_marks"].append({"t": t, "ms": float(m.group("ms")), "period": float(m.group("p")), "seq": int(seq.group("seq")) if seq else 0,
+                                   "frame": int(frame.group("frame")) if frame else 0})
+        return False
+    if msg.startswith("vScreen totals: "):
+        m = FZ_VSCREEN_FPS_RE.match(msg)
+        if m and int(m.group("ms")) > 0:
+            fz["vscreen"].append({"t": t, "frames": int(m.group("n")), "ms": int(m.group("ms")), "fps": int(m.group("n")) * 1000.0 / int(m.group("ms"))})
+        return True
+    return False
+
+
 def parse_freezes(gfx_path, gfx_text, rt_path=None, rt_text=None):
     """What --freezes reads out of a flight's two logs, on the one local clock (scan_flight's). freezes: the FREEZE lines. long_frames: the LONG FRAME
     lines (scan_flight_log's, with their runtime sequence). gfx_counts / rt_counts: the counts lines (the runtime's include the summary), in file
     order. gfx_worst_sets / rt_worst_sets: the worst-list lines in sets, the last set the live one. sampler_state, stalls, stall_fails, stall_counts:
     the stall sampler's lines. gpu: the GPU census's kept stalls. tests: the freeze test trigger's lines (advanced.freeze_test_ms). cycles: the
     runtime's long cycles, one per (sequence, cycle_ms), a `native_long_cycle` line preferred over the worst-list line that repeats it. unparsed:
-    lines that open like these and match nothing. gscan, rscan, clock are scan_flight's."""
+    lines that open like these and match nothing. gscan, rscan, clock are scan_flight's. The headset-lock arc's keys are _fz_arc_state's: the armed lines
+    and each instrument's lines (xr_*, ep_*/episodes, slow_*, holds, vram*, slowtests) and the older lines the slow-regime reconstruction reads (phases,
+    display_hz, producer_gpu, lf_marks, vscreen)."""
     fz = {"freezes": [], "gfx_counts": [], "gfx_worst_sets": [], "sampler_state": None, "stalls": [], "stall_fails": [], "stall_counts": [],
           "gpu": [], "tests": [], "cycles": [], "rt_worst_sets": [], "rt_counts": [], "unparsed": {"count": 0, "samples": []}}
+    fz.update(_fz_arc_state())
     gscan, rscan, clock = scan_flight(gfx_path, gfx_text, rt_path, rt_text,
                                       lambda msg, t: _fz_gfx_line(fz, msg, t), lambda msg, t: _fz_rt_line(fz, msg, t))
     fz["gscan"], fz["rscan"], fz["clock"] = gscan, rscan, clock
@@ -6500,7 +6944,9 @@ def _fz_has_lines(fz):
     that drifted from the C++ says so instead of calling the build old."""
     return bool(fz["freezes"] or fz["gfx_counts"] or fz["gfx_worst_sets"] or fz["sampler_state"] or fz["stalls"] or fz["stall_fails"]
                 or fz["stall_counts"] or fz["gpu"] or fz["tests"] or fz["rt_worst_sets"] or fz["unparsed"]["count"]
-                or any(c["kind"] == "counts" or "candidates" in c["kv"] for c in fz["rt_counts"]))
+                or any(c["kind"] == "counts" or "candidates" in c["kv"] for c in fz["rt_counts"])
+                or any(fz[k] for k in ("xr_armed", "xr_events", "xr_summaries", "ep_armed", "episodes", "episode_ends", "ep_summaries", "slow_armed", "slow_lines",
+                                       "slow_summaries", "holds", "vram", "vram_state", "vram_fail", "slowtests")))
 
 
 def _fz_paired(freeze, cycle):
@@ -6802,6 +7248,569 @@ def _fz_print_gpu(fz, rows, clk):
         print("  (and %d more the lines did not list)" % unlisted)
 
 
+FZ_ARC_ROWS = 12                # the episode, event and VRAM sections print this many rows, then say how many more
+
+
+def _fz_clock(fz):
+    """The common-clock formatter print_freezes uses (HH:MM:SS.mmm, the day only when it is not the flight's first)."""
+    day0 = int(fz["gscan"]["first"] // DAY)
+    return lambda t: "-" if t is None else fmt_clock(t, day0)
+
+
+def _fz_median(values):
+    values = sorted(values)
+    n = len(values)
+    if not n:
+        return None
+    return values[n // 2] if n % 2 else 0.5 * (values[n // 2 - 1] + values[n // 2])
+
+
+def _fz_vram_text(v):
+    """`local 7421 of 10863 MB (68.3%), non-local 316 of 16311 MB (1.9%)` for a figures dict (None where the OS did not answer)."""
+    def seg(used, budget, pct):
+        if used is None:
+            return "no answer"
+        return "%d of %s MB%s" % (used, "%d" % budget if budget is not None else "-", " (%.1f%%)" % pct if pct is not None else "")
+    return "local %s, non-local %s" % (seg(v.get("local_used_mb"), v.get("local_budget_mb"), v.get("local_pct")),
+                                       seg(v.get("nonlocal_used_mb"), v.get("nonlocal_budget_mb"), v.get("nonlocal_pct")))
+
+
+def _fz_rate(points):
+    """(frames per second, (t1, c1, t2, c2)) from the first and last of (time, counter) points whose counter is above 0, or None when there are fewer than two,
+    they lie under FZ_SLOW_MIN_S apart, or the counter did not rise (a session that restarted its count)."""
+    pts = sorted((t, c) for t, c in points if c and c > 0)
+    if len(pts) < 2:
+        return None
+    (t1, c1), (t2, c2) = pts[0], pts[-1]
+    if t2 - t1 < FZ_SLOW_MIN_S or c2 <= c1:
+        return None
+    return (c2 - c1) / (t2 - t1), (t1, c1, t2, c2)
+
+
+def _fz_legacy_owner(fz, begin, stop, seq_range, frame_ms, period_ms, rt_read, clk):
+    """Who held the frames of a reconstructed run, from the runtime's native_submit_phases window that covers most of it (by the window's `first..last`
+    sequences against the run's, else by the time it ended): the p50 of each phase against the frame's length, grouped as slow_regime.h groups them.
+    Returns {key, share, held (the sentence), detail (printed lines)}."""
+    unknown = {"key": "unknown", "share": None, "detail": []}
+    if not rt_read:
+        unknown["held"] = "owner unknown: no runtime log was read, so no native_submit_phases window says which call held the frames"
+        return unknown
+    best = None
+    for w in fz["phases"]:
+        first, last = w["first"], w["last"]
+        if seq_range and first is not None and last is not None and last >= first:
+            inside = min(last, seq_range[1]) - max(first, seq_range[0]) + 1
+            if inside <= 0:
+                continue
+            total, rank = last - first + 1, (inside, w["t"])
+        elif begin <= w["t"] <= stop + FZ_SLOW_PHASE_SLACK_S:
+            inside, total, rank = None, None, (0, w["t"])
+        else:
+            continue
+        if best is None or rank > best[0]:
+            best = (rank, w, inside, total)
+    if best is None:
+        unknown["held"] = "owner unknown: the runtime log has no native_submit_phases window covering the run"
+        return unknown
+    _, w, inside, total = best
+    p = {k: v[0] for k, v in w["p"].items()}
+    shares = {"vendor_end_frame": p.get("xr_end_frame", 0.0), "vendor_wait_frame": p.get("wait_frame", 0.0) + p.get("pacer_block", 0.0),
+              "vendor_swapchain": p.get("xr_acquire", 0.0) + p.get("xr_wait", 0.0) + p.get("xr_release", 0.0),
+              "edvr_copy": p.get("producer_dispatch", 0.0) + p.get("receive", 0.0) + p.get("xr_draw_submit", 0.0), "edvr_work": 0.0}
+    shares["game"] = max(0.0, frame_ms - sum(shares.values()))
+    key = max(FZ_OWNER_ORDER, key=lambda k: shares[k])      # a tie goes to the first in the order, as the C++ does
+    share = shares[key] / frame_ms
+    owner = key if share >= FZ_SLOW_SHARE else "none"
+    if owner == "none":
+        held = "no single owner; the largest is %s at %.0f%% of a %.1f ms frame" % (FZ_OWNER_TEXT[key], 100.0 * share, frame_ms)
+    else:
+        held = "held by %s: %.1f ms of every %.1f ms frame (%.0f%%)" % (FZ_OWNER_TEXT[key], shares[key], frame_ms, 100.0 * share)
+    periods = " = %.1f display periods of %.3f ms" % (shares["vendor_end_frame"] / period_ms, period_ms) if period_ms else ""
+    where = "native_submit_phases window %s: sequences %s-%s, ended %s%s" % (
+        w["window"], w["first"] if w["first"] is not None else "?", w["last"] if w["last"] is not None else "?", clk(w["t"]),
+        "; %d of its %d frames are inside the run" % (inside, total) if inside is not None else "")
+    detail = ["a frame went (p50 of each phase in %s): xrEndFrame %.1f ms%s, pose wait %.1f, swapchain calls %.1f, EDVR copy %.1f, the game %.1f (the rest)"
+              % (where, shares["vendor_end_frame"], periods, shares["vendor_wait_frame"], shares["vendor_swapchain"], shares["edvr_copy"], shares["game"])]
+    return {"key": owner, "share": share, "held": held, "detail": detail}
+
+
+def _fz_legacy_gpu(fz, begin, stop, clk):
+    """One corroborating line from the runtime's native_producer_gpu windows (EDVR's copy of the eyes on the GPU clock) that close in or just after the run,
+    or None."""
+    inside = [w for w in fz["producer_gpu"] if begin <= w["t"] <= stop + FZ_SLOW_PHASE_SLACK_S]
+    if not inside:
+        return None
+    w = max(inside, key=lambda x: x["copy"][1])
+    before = [x for x in fz["producer_gpu"] if x["t"] < begin]
+    base = "; p95 %.2f ms in window %s, before it" % (before[-1]["copy"][1], before[-1]["window"]) if before else ""
+    return ("GPU clock: native_producer_gpu window %s (ended %s): EDVR's copy of the eyes took p95 %.1f ms, max %.1f ms on the GPU%s"
+            % (w["window"], clk(w["t"]), w["copy"][1], w["copy"][3], base))
+
+
+def _fz_regime_class(g):
+    """(status, words) of one regime, by who holds it. SLOW (status "SLOW") only when the vendor runtime, EDVR's copy or EDVR's own work holds most of each
+    frame: a finding about the runtime or EDVR. The game's own frame is INFO (status "note") when the runtime says the frames were a load (its own loading
+    frames, or ends with no layers: the `context=` of a native_slow_regime line), WARN when they were the game's scenes (a GPU- or CPU-bound stretch) or the
+    line has no context; no named owner (none, no_frames, unknown) is a WARN. Neither sets SLOW, and neither exits 4."""
+    owner = g["owner"]
+    if owner in FZ_SLOW_OWNERS:
+        return "SLOW", "held by %s" % ("EDVR" if owner.startswith("edvr_") else "the vendor runtime")
+    if owner == "game":
+        ctx = g.get("context")
+        if ctx in FZ_LOAD_CONTEXTS:
+            return "note", "the game's own frame during a load (the runtime's frames were %s)" % ("its own loading frames" if ctx == "loading" else "ends with no layers")
+        if ctx == "scene":
+            return "WARN", "the game's own frame while it submitted scenes: a GPU- or CPU-bound stretch of the game"
+        return "WARN", "the game's own frame (the line does not say whether it was a load)"
+    return "WARN", {"none": "no single owner holds 35% of a frame", "no_frames": "no frame reached xrEndFrame", "unknown": "no owner could be named"}.get(owner, "no named owner")
+
+
+def _fz_slow_regimes_native(fz, clk):
+    """The regimes the build wrote itself, one per `regime=N` of its native_slow_regime lines: SLOW is written once the frame rate has been under 40% for 5 s
+    (its duration_s says how far back the regime began), still_slow every 30 s after, end when the rate recovered (or the session closed) with the whole
+    regime's figures. A regime with no end line was still going when the log stopped (a crash, a kill, or the end of the file)."""
+    by = {}
+    for ln in fz["slow_lines"]:
+        by.setdefault(ln["regime"], []).append(ln)
+    out = []
+    for n in sorted(by):
+        lines = sorted(by[n], key=lambda l: l["t"])
+        first = next((l for l in lines if l["event"] == "SLOW"), lines[0])
+        end = next((l for l in lines if l["event"] == "end"), None)
+        last = end or lines[-1]
+        start = first["t"] - first["duration_s"]
+        stop = start + last["duration_s"]
+        f = last["f"]
+        detail = ["rate: %.2f fps against the display's %.2f Hz (%.1f%% of it; a regime is under %.0f%%), frames of %.1f ms"
+                  % (last["fps"], last["hz"], 100.0 * last["fraction"], 100.0 * FZ_SLOW_FRACTION, last["frame_ms"]),
+                  "owner: %s" % last["summary"],
+                  ("context: %s (%s loading frame(s) and %s end(s) with no layers of %d frames)"
+                   % (last["context"], "?" if last["loading_frames"] is None else last["loading_frames"], "?" if last["empty_frames"] is None else last["empty_frames"],
+                      last["frames"])) if last["context"] else "context: the line has none (a build from before it)",
+                  "a frame went (mean ms over %s): xrEndFrame %s (longest %s), pose wait %s, swapchain calls %s, EDVR copy %s, EDVR work %s, the game %s"
+                  % ("the whole regime" if end else "its last window", f.get("vendor_end_frame_ms", "-"), f.get("end_frame_max_ms", "-"),
+                     f.get("vendor_wait_frame_ms", "-"), f.get("vendor_swapchain_ms", "-"), f.get("edvr_copy_ms", "-"), f.get("edvr_work_ms", "-"),
+                     f.get("game_ms", "-"))]
+        v1, v2 = first["vram"], last["vram"]
+        if v1 is None and v2 is None:
+            detail.append("graphics memory: the lines say vram=unavailable")
+        else:
+            text = ("graphics memory at the SLOW line (%s): %s" % (clk(first["t"]), _fz_vram_text(v1))) if v1 is not None else "graphics memory at the SLOW line: unavailable"
+            if v2 is not None and last is not first and v2 != v1:
+                text += "; at the %s line (%s): %s" % (last["event"], clk(last["t"]), _fz_vram_text(v2))
+            detail.append(text)
+        detail.append("lines: %s" % "; ".join("%s %s" % (l["event"], clk(l["t"])) for l in lines[:6]) + ("; ..." if len(lines) > 6 else ""))
+        out.append({"src": "native", "n": n, "start": start, "end": stop, "duration": stop - start, "open": end is None,
+                    "reason": end["f"].get("reason") if end else None, "fps": last["fps"], "hz": last["hz"], "fraction": last["fraction"],
+                    "frame_ms": last["frame_ms"], "owner": last["owner"], "share": last["share"], "held": last["summary"], "lines": lines, "detail": detail,
+                    "context": last["context"], "deliberate": False})
+    return out
+
+
+def _fz_slow_regimes_legacy(fz, rt_read, clk):
+    """Regimes reconstructed from a build's older lines (see the block comment above the constants). Marks are the LONG FRAME and native_long_cycle lines of 3
+    periods or more and every FREEZE line; slow windows are the vScreen totals under 40% of the display's rate. Returns the regimes, oldest first."""
+    periods = [lf["period"] for lf in fz["lf_marks"] if lf["period"] > 0]
+    hz = fz["display_hz"] or (1000.0 / _fz_median(periods) if periods else None)
+    if not hz:
+        return []
+    period_ms = 1000.0 / hz
+    marks = []
+    for lf in fz["lf_marks"]:
+        if lf["period"] > 0 and lf["ms"] >= FZ_SLOW_PERIODS * lf["period"]:
+            marks.append({"t": lf["t"], "kind": "LONG FRAME", "seq": lf["seq"], "frame": lf["frame"]})
+    for c in fz["cycles"]:
+        p = _fz_num(c["f"], "period_ms")
+        if c["t"] is not None and p and c["ms"] >= FZ_SLOW_PERIODS * p:
+            marks.append({"t": c["t"], "kind": "native_long_cycle", "seq": c["seq"], "frame": 0})
+    for fr in fz["freezes"]:
+        marks.append({"t": fr["t"], "kind": "FREEZE", "seq": fr["seq"], "frame": fr["frame"]})
+    windows = [v for v in fz["vscreen"] if v["fps"] < FZ_SLOW_FRACTION * hz]
+    items = [(m["t"], m["t"], "mark", m) for m in marks] + [(w["t"] - w["ms"] / 1000.0, w["t"], "window", w) for w in windows]
+    items.sort(key=lambda i: (i[0], i[1]))
+    runs, cur, hi = [], [], None
+    for it in items:
+        if cur and it[0] - hi > FZ_SLOW_LINK_S:
+            runs.append(cur)
+            cur, hi = [], None
+        cur.append(it)
+        hi = it[1] if hi is None else max(hi, it[1])
+    if cur:
+        runs.append(cur)
+    out = []
+    for run in runs:
+        ms_ = [i[3] for i in run if i[2] == "mark"]
+        ws_ = [i[3] for i in run if i[2] == "window"]
+        if ms_:
+            begin = ms_[0]["t"]
+            stop = max([m["t"] for m in ms_] + [w["t"] for w in ws_ if w["t"] > ms_[-1]["t"]])
+        else:
+            begin, stop = min(w["t"] - w["ms"] / 1000.0 for w in ws_), max(w["t"] for w in ws_)
+        if stop - begin < FZ_SLOW_MIN_S or (len(ms_) < 3 and not ws_):
+            continue
+        rate_seq = _fz_rate([(m["t"], m["seq"]) for m in ms_])
+        rate_frame = _fz_rate([(m["t"], m["frame"]) for m in ms_])
+        # The runtime's sequence is what the detector counts (a frame that reached xrEndFrame). The graphics frame counter counts the game's Presents, which
+        # run at hundreds a second in a menu while the runtime's frames go at the display's rate, so it speaks only when no sequence does.
+        counted = [rate_seq[0]] if rate_seq is not None else [rate_frame[0]] if rate_frame is not None else []
+        if counted:
+            fps = counted[0]
+            if fps >= FZ_SLOW_FRACTION * hz:
+                continue                                    # long frames now and then, the rate between them fine: a hitchy run, not a regime
+        elif ws_:
+            fps = _fz_median([w["fps"] for w in ws_])
+        else:
+            continue                                        # marks and no counter and no window: the rate cannot be judged
+        frame_ms = 1000.0 / fps
+        seqs = [m["seq"] for m in ms_ if m["seq"] > 0]
+        own = _fz_legacy_owner(fz, begin, stop, (min(seqs), max(seqs)) if seqs else None, frame_ms, period_ms, rt_read, clk)
+        kinds = {}
+        for m in ms_:
+            kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
+        ev = ["%d %s line(s)" % (kinds[k], k) for k in ("LONG FRAME", "native_long_cycle", "FREEZE") if k in kinds]
+        if ws_:
+            ev.append("%d vScreen totals window(s) under %.0f%% of the display's rate (%s fps)"
+                      % (len(ws_), 100.0 * FZ_SLOW_FRACTION, ", ".join("%.0f" % w["fps"] for w in ws_[:6]) + (", ..." if len(ws_) > 6 else "")))
+        how = []
+        if rate_seq is not None:
+            how.append("runtime sequence %d to %d over %.1f s = %.2f fps" % (rate_seq[1][1], rate_seq[1][3], rate_seq[1][2] - rate_seq[1][0], rate_seq[0]))
+        if rate_frame is not None:
+            how.append("graphics frames %d to %d over %.1f s = %.2f fps" % (rate_frame[1][1], rate_frame[1][3], rate_frame[1][2] - rate_frame[1][0], rate_frame[0]))
+        if not how:
+            how.append("the median of the vScreen windows' own rates")
+        detail = ["rate: %.2f fps against the display's %g Hz (%.1f%% of it; a regime is under %.0f%%), frames of %.1f ms"
+                  % (fps, round(hz, 2), 100.0 * fps / hz, 100.0 * FZ_SLOW_FRACTION, frame_ms),
+                  "owner: %s" % own["held"]] + own["detail"]
+        gpu = _fz_legacy_gpu(fz, begin, stop, clk) if rt_read else None
+        if gpu:
+            detail.append(gpu)
+        detail += ["evidence: %s" % "; ".join(ev), "frame rate from: %s" % "; ".join(how)]
+        if not ms_:
+            detail.append("bounds: no LONG FRAME, native_long_cycle or FREEZE line is in the run (their caps ran out, or the frames stayed under 3 periods), so its start and end are "
+                          "those of the vScreen totals windows, good to about 20 s")
+        out.append({"src": "reconstructed", "n": len(out) + 1, "start": begin, "end": stop, "duration": stop - begin, "open": False, "reason": None,
+                    "fps": fps, "hz": hz, "fraction": fps / hz, "frame_ms": frame_ms, "owner": own["key"], "share": own["share"], "held": own["held"],
+                    "lines": [], "detail": detail, "context": None, "deliberate": False})
+    return out
+
+
+def _fz_slow_regimes(fz, rt_read):
+    """The slow regimes of a flight: the build's own native_slow_regime lines when its detector was armed (or wrote any), else the reconstruction from the
+    older lines. Each is marked `deliberate` when it begins within FZ_SLOW_TEST_PAD_S of the slow test's hold. Cached on fz."""
+    if "regimes" not in fz:
+        clk = _fz_clock(fz)
+        native = fz["slow_armed"] is not None or bool(fz["slow_lines"])
+        regimes = _fz_slow_regimes_native(fz, clk) if native else _fz_slow_regimes_legacy(fz, rt_read, clk)
+        began = next((x for x in fz["slowtests"] if x["kind"] == "began"), None)
+        for g in regimes:
+            g["deliberate"] = began is not None and began["t"] - 2.0 <= g["start"] <= began["t"] + FZ_SLOW_TEST_PAD_S
+            g["class"] = _fz_regime_class(g)
+        fz["regimes"] = regimes
+    return fz["regimes"]
+
+
+def _fz_regime_sentence(g, clk, verdict=False):
+    """One regime as a sentence: when, how slow, who held it. verdict=True is the shorter form the verdict line carries."""
+    tags = (" (reconstructed from the older lines)" if g["src"] == "reconstructed" else "") + (" (deliberate: advanced.slow_test_ms)" if g["deliberate"] else "") \
+        + (" (still going when the log stopped)" if g["open"] else "")
+    if verdict:
+        return "%s to %s local (%.0f s) at %.1f fps of the display's %g Hz, %s%s" % (clk(g["start"]), clk(g["end"]), g["duration"], g["fps"], round(g["hz"], 2),
+                                                                                       g["held"], tags)
+    status, words = g["class"]
+    return "%s to %s local (%.1f s), %.2f fps against the display's %g Hz (%.0f%%), %s%s%s" % (
+        clk(g["start"]), clk(g["end"]), g["duration"], g["fps"], round(g["hz"], 2), 100.0 * g["fraction"], g["held"], tags,
+        "" if status == "SLOW" else "; not a SLOW: %s" % words)
+
+
+def _fz_event_text(e):
+    """One native_xr_event line in words."""
+    f = e["f"]
+    if e["suppressed"]:
+        return "the cap of %s decoded event lines was reached; the rest are counted in native_xr_events_summary" % f.get("limit", "?")
+    if e["type"] == "session_state_changed":
+        return "session_state_changed %s -> %s (read %s ms after the runtime stamped it)" % (f.get("from", "?"), f.get("to", "?"), f.get("lag_ms", "?"))
+    if e["type"] == "unknown":
+        return "an event of type number %s that the runtime does not decode (the first of its type)" % f.get("number", "?")
+    extra = ", ".join("%s=%s" % (k, v) for k, v in f.items() if k not in ("_name", "n", "type"))
+    return "%s%s" % (e["type"], " (%s)" % extra if extra else "")
+
+
+def _fz_print_slow(fz, regimes, clk):
+    if not regimes:
+        return
+    print("SLOW REGIME%s (%d found: the frame rate under %.0f%% of the display's for %.0f s or more; a state the session was in, not one frame; SLOW is set only by a "
+          "regime the vendor runtime or EDVR holds, a load the game's frame holds is INFO, a slow stretch of its scenes or no named owner a WARN):"
+          % ("S" if len(regimes) > 1 else "", len(regimes), 100.0 * FZ_SLOW_FRACTION, FZ_SLOW_MIN_S))
+    for g in regimes:
+        status, words = g["class"]
+        print("  #%d  %s to %s local  (%.1f s%s)  [%s] %s%s" % (
+            g["n"], clk(g["start"]), clk(g["end"]), g["duration"],
+            ", ended: %s" % g["reason"] if g["reason"] else ", still going when the log stopped" if g["open"] else "",
+            {"SLOW": "SLOW", "WARN": "WARN", "note": "INFO"}[status],
+            "the build's own detector" if g["src"] == "native" else "RECONSTRUCTED from the older lines: this build has no slow-regime detector",
+            "; DELIBERATE: the slow test's hold (advanced.slow_test_ms)" if g["deliberate"] else ""))
+        for line in g["detail"]:
+            print("      %s" % line)
+        if status != "SLOW":
+            print("      not a SLOW: %s" % words)
+        near = [e for e in fz["xr_events"] if not e["suppressed"] and g["start"] - FZ_SLOW_EVENT_PAD_S <= e["t"] <= g["end"] + FZ_SLOW_EVENT_PAD_S]
+        if near:
+            print("      vendor events within %.0f s of it (%d): %s%s" % (FZ_SLOW_EVENT_PAD_S, len(near), "; ".join(
+                "%s %s" % (clk(e["t"]), _fz_event_text(e)) for e in near[:6]), "; ..." if len(near) > 6 else ""))
+        elif fz["xr_armed"] is not None:
+            print("      vendor events within %.0f s of it: none (the vendor runtime sent no event around it)" % FZ_SLOW_EVENT_PAD_S)
+
+
+def _fz_print_episodes(fz, clk):
+    eps, ends, arm, summ = fz["episodes"], fz["episode_ends"], fz["ep_armed"], fz["ep_summaries"]
+    if arm is None and not eps and not ends and not summ:
+        return
+    print("END-FRAME EPISODES (a call into the vendor's xrEndFrame of %.0f display periods or more: a start line when one begins, an end line when it is over):"
+          % FZ_SLOW_PERIODS)
+    if eps:
+        print("  %-3s %-14s %9s %10s %8s  %-11s %-8s %-10s %s" % ("#", "ended (local)", "sequence", "ms", "periods", "path", "pacing", "state", "xrAcquire/Wait/draw/Release, copy ms"))
+        for e in eps[:FZ_ARC_ROWS]:
+            f = e["f"]
+            print("  %-3d %-14s %9d %10.1f %8.2f  %-11s %-8s %-10s %s/%s/%s/%s, %s" % (
+                e["n"], clk(e["t"]), e["seq"], e["ms"], e["periods"], f.get("path", "-"), f.get("pacing", "-"), f.get("session_state", "-"),
+                f.get("xr_acquire_ms", "-"), f.get("xr_wait_ms", "-"), f.get("xr_draw_ms", "-"), f.get("xr_release_ms", "-"), f.get("copy_ms", "-")))
+        if len(eps) > FZ_ARC_ROWS:
+            print("  (and %d more start line(s))" % (len(eps) - FZ_ARC_ROWS))
+    for e in ends[:FZ_ARC_ROWS]:
+        f = e["f"]
+        print("  episode %d over at %s (%s): %d call(s), %d of them slow, %.1f s, p50 %.1f ms, max %.1f ms (%s periods), sequences %s-%s%s"
+              % (e["n"], clk(e["t"]), f.get("reason", "?"), e["calls"], e["slow"], e["duration_ms"] / 1000.0, e["p50_ms"], e["max_ms"], f.get("max_periods", "?"),
+                 f.get("first_sequence", "?"), f.get("last_sequence", "?"), "" if f.get("start_line") == "1" else "; no start line (a rate-limited start)"))
+    if len(ends) > FZ_ARC_ROWS:
+        print("  (and %d more end line(s))" % (len(ends) - FZ_ARC_ROWS))
+    if summ:
+        f = summ[-1]["f"]
+        print("  latest summary (%s%s): episodes=%s start_lines=%s end_lines=%s calls=%s slow_calls=%s longest_ms=%s open=%s"
+              % (clk(summ[-1]["t"]), ", reason=%s" % f["reason"] if "reason" in f else "", f.get("episodes", "-"), f.get("start_lines", "-"), f.get("end_lines", "-"),
+                 f.get("calls", "-"), f.get("slow_calls", "-"), f.get("longest_ms", "-"), f.get("open", "-")))
+
+
+def _fz_print_events(fz, clk):
+    evs, arm, summ = [e for e in fz["xr_events"]], fz["xr_armed"], fz["xr_summaries"]
+    if arm is None and not evs and not summ:
+        return
+    print("VENDOR EVENTS (xrPollEvent: what the vendor's runtime told the session):")
+    if summ:
+        f = summ[-1]["f"]
+        names = ("session_state_changed", "events_lost", "instance_loss_pending", "reference_space_change_pending", "interaction_profile_changed",
+                 "visibility_mask_changed", "display_refresh_rate_changed", "perf_settings", "unknown_events")
+        print("  latest summary (%s%s): received %s, logged %s, suppressed %s; %s; last session state %s" % (
+            clk(summ[-1]["t"]), ", reason=%s" % f["reason"] if "reason" in f else "", f.get("received", "-"), f.get("logged", "-"), f.get("suppressed", "-"),
+            ", ".join("%s %s" % (k, f[k]) for k in names if f.get(k, "0") != "0") or "no event of any decoded kind", f.get("last_state", "-")))
+    for e in evs[:FZ_ARC_ROWS]:
+        print("  %s  #%d  %s" % (clk(e["t"]), e["n"], _fz_event_text(e)))
+    if len(evs) > FZ_ARC_ROWS:
+        print("  (and %d more event line(s))" % (len(evs) - FZ_ARC_ROWS))
+
+
+def _fz_print_vram(fz, clk):
+    st, vr = fz["vram_state"], fz["vram"]
+    if st is None and not vr and fz["vram_fail"] is None:
+        return
+    print("VRAM (this process's graphics memory against the budget the OS gives it, DXGI QueryVideoMemoryInfo; the SLOW lines carry the same figures):")
+    if st is None:
+        print("  no armed or unavailable line (the first reading's line is missing)")
+    elif st["state"] == "unavailable":
+        print("  UNAVAILABLE: %s (no vram: line is written for the session)" % st["text"])
+    else:
+        print("  armed at %s on adapter %s" % (clk(st["t"]), st["adapter"] or "(unnamed)"))
+    if vr:
+        reasons = {}
+        for e in vr:
+            reasons[e["reason"]] = reasons.get(e["reason"], 0) + 1
+        peak = max(vr, key=lambda e: e["kv"].get("local_pct") if e["kv"].get("local_pct") is not None else -1.0)
+        print("  %d line(s) (%s); the highest local use %s at %s: %s" % (
+            len(vr), ", ".join("%s %d" % kv for kv in sorted(reasons.items())),
+            "%.1f%%" % peak["kv"]["local_pct"] if peak["kv"].get("local_pct") is not None else "-", clk(peak["t"]), _fz_vram_text(peak["kv"])))
+        marks = [e for e in vr if e["reason"] not in ("armed", "periodic")]
+        for e in marks[:FZ_ARC_ROWS]:
+            print("  %s  %-16s %s" % (clk(e["t"]), e["reason"], _fz_vram_text(e["kv"])))
+        if len(marks) > FZ_ARC_ROWS:
+            print("  (and %d more crossing or pressure line(s))" % (len(marks) - FZ_ARC_ROWS))
+    if fz["vram_fail"] is not None:
+        print("  a read failed at %s: %s" % (clk(fz["vram_fail"]["t"]), fz["vram_fail"]["text"]))
+
+
+def _fz_print_slowtest(fz, clk):
+    tests = fz["slowtests"]
+    if not tests and not fz["holds"]:
+        return
+    print("SLOW TEST (advanced.slow_test_ms: the runtime holds every xrEndFrame longer, for a while, so one flight shows the whole chain):")
+    for x in tests:
+        print("  %s  graphics log: %s" % (clk(x["t"]), {"armed": "the key was read (%d ms, the hold begins %d s in)" % (x["ms"], x["start"]),
+                                                      "began": "the hold begins now (%d ms for %d s)" % (x["ms"], x["span"]), "ended": "the hold ended"}[x["kind"]]))
+    for h in fz["holds"]:
+        print("  %s  runtime log: native_end_frame_hold state=%s%s" % (clk(h["t"]), h["state"], " ms=%s" % h["f"]["ms"] if "ms" in h["f"] else
+                                                                      " held_calls=%s" % h["f"]["held_calls"] if "held_calls" in h["f"] else ""))
+
+
+def _fz_arc_findings(fz, rt_read, clk):
+    """[(key, status, text)] for the headset-lock arc: SLOW REGIME (a row per regime, its status by who holds it: SLOW, never PASS, for the vendor runtime, EDVR's
+    copy or EDVR's own work; INFO (note) for the game's own frame in a load; WARN for the game's scenes or no named owner), INSTRUMENT notes, END-FRAME
+    EPISODES, VENDOR EVENTS, VRAM and SLOW TEST. A log with none of the arc's lines gets notes only, so an older flight's verdict is what it was."""
+    out = []
+
+    def add(key, status, text):
+        out.append((key, status, text))
+
+    regimes = _fz_slow_regimes(fz, rt_read)
+    native = fz["slow_armed"] is not None or bool(fz["slow_lines"])
+    for g in regimes:
+        add("SLOW REGIME", g["class"][0], _fz_regime_sentence(g, clk))
+    summ = fz["slow_summaries"][-1] if fz["slow_summaries"] else None
+    if native and summ is not None and summ["f"].get("reason") == "session_close":     # a periodic summary is older than the lines after it
+        numbers = {l["regime"] for l in fz["slow_lines"]}
+        if summ["regimes"] != len(numbers):
+            add("SLOW REGIME", "WARN", "the detector's summary at %s counts %d regime(s) but the log has native_slow_regime lines for %d: a line was lost, or the log was cut"
+                % (clk(summ["t"]), summ["regimes"], len(numbers)))
+    if not regimes:
+        if native:
+            seen = ("; its last summary (%s) saw %s frame(s) in %s s, %s s of them slow" % (clk(summ["t"]), summ["f"].get("frames", "?"), summ["f"].get("seconds", "?"),
+                                                                                           summ["f"].get("slow_seconds", "?"))
+                    if summ is not None else "; it wrote no summary, so the session did not close cleanly or ran under five minutes")
+            add("SLOW REGIME", "PASS", "the slow-regime detector was armed%s and wrote no SLOW line%s" % (
+                " at %s" % clk(fz["slow_armed"]["t"]) if fz["slow_armed"] else "", seen))
+        elif not rt_read and (fz["vram_state"] is not None or fz["vram"] or fz["slowtests"]):
+            add("SLOW REGIME", "note", "the slow-regime detector writes to the runtime log, which was not read, so its SLOW lines were not looked for; the graphics log's older lines "
+                "(LONG FRAME, FREEZE, vScreen totals) hold no run of %.0f s or more with the frame rate under %.0f%% of the display's, which cannot prove there was none"
+                % (FZ_SLOW_MIN_S, 100.0 * FZ_SLOW_FRACTION))
+        else:
+            add("SLOW REGIME", "note", "this build has no slow-regime detector, and its older lines (LONG FRAME, native_long_cycle, FREEZE, vScreen totals) hold no run of %.0f s or "
+                "more with the frame rate under %.0f%% of the display's; that cannot prove there was none" % (FZ_SLOW_MIN_S, 100.0 * FZ_SLOW_FRACTION))
+
+    arms = (("vendor-event log (native_xr_events)", fz["xr_armed"]), ("end-frame episodes (native_end_frame_episodes)", fz["ep_armed"]),
+            ("slow-regime detector (native_slow_regime)", fz["slow_armed"]))
+    st = fz["vram_state"]
+    if any(a is not None for _, a in arms) or st is not None:
+        for label, a in arms:
+            if a is not None:
+                add("INSTRUMENT", "note", "the %s armed at %s" % (label, clk(a["t"])))
+            elif rt_read:
+                add("INSTRUMENT", "WARN", "the runtime log has no armed line for the %s although it has others of this arc: it did not arm, or its line was lost" % label)
+        if st is None:
+            if fz["vram"] or any(a is not None for _, a in arms):
+                add("INSTRUMENT", "WARN", "the graphics log has no `vram:` armed or unavailable line although this build writes one at its first Present: the watch did not run, or its "
+                    "line was lost")
+        elif st["state"] == "armed":
+            add("INSTRUMENT", "note", "the graphics-memory watch armed at %s on adapter %s" % (clk(st["t"]), st["adapter"] or "(unnamed)"))
+        else:
+            add("INSTRUMENT", "note", "the graphics-memory watch is UNAVAILABLE on this machine (%s): no vram: line is written, and the SLOW lines carry vram=unavailable" % st["text"])
+    else:
+        add("INSTRUMENT", "note", "none of the headset-lock arc's lines (vendor events, end-frame episodes, slow-regime detector, graphics memory) is in this log: a build before them")
+
+    eps, ends = fz["episodes"], fz["episode_ends"]
+    if fz["ep_armed"] is not None or eps or ends:
+        if eps:
+            top = max(eps, key=lambda e: e["ms"])
+            add("END-FRAME EPISODES", "note", "%d start line(s) and %d end line(s); the longest xrEndFrame call %.1f ms (%.1f display periods, sequence %d, at %s)"
+                % (len(eps), len(ends), top["ms"], top["periods"], top["seq"], clk(top["t"])))
+        else:
+            add("END-FRAME EPISODES", "note", "no xrEndFrame call of %.0f display periods or more (no start line, %d end line(s))" % (FZ_SLOW_PERIODS, len(ends)))
+        open_eps = sorted({e["n"] for e in eps} - {e["n"] for e in ends})
+        if open_eps and not (fz["ep_summaries"] and fz["ep_summaries"][-1]["f"].get("reason") == "session_close"):
+            add("END-FRAME EPISODES", "note", "episode%s %s started and ha%s no end line: the session ended inside %s (a crash or a kill), or the log was cut"
+                % ("s" if len(open_eps) > 1 else "", ", ".join(str(n) for n in open_eps), "ve" if len(open_eps) > 1 else "s", "them" if len(open_eps) > 1 else "it"))
+        for g in regimes:
+            if g["src"] != "native" or g["owner"] != "vendor_end_frame":
+                continue
+            mean_end = _fz_num(g["lines"][-1]["f"], "vendor_end_frame_ms")
+            if mean_end is None or not g["hz"] or mean_end < FZ_SLOW_PERIODS * 1000.0 / g["hz"]:
+                continue        # the mean call is under 3 periods, so no call need have been: the episode instrument owes no line
+            seen = [e for e in eps if g["start"] - 3.0 <= e["t"] <= g["end"] + 3.0] + [e for e in ends if g["start"] <= e["t"] <= g["end"] + 10.0]
+            if not seen:
+                add("END-FRAME EPISODES", "WARN", "regime #%d is held by the vendor's xrEndFrame but the episode instrument wrote no start or end line in it (a call of %.0f display "
+                    "periods or more begins an episode)" % (g["n"], FZ_SLOW_PERIODS))
+
+    evs = [e for e in fz["xr_events"] if not e["suppressed"]]
+    if fz["xr_armed"] is not None or evs or fz["xr_summaries"]:
+        s = fz["xr_summaries"][-1] if fz["xr_summaries"] else None
+        changes = [e for e in evs if e["type"] == "session_state_changed"]
+        last = "last session state %s" % (s["f"].get("last_state", "?") if s else (changes[-1]["f"].get("to", "?") if changes else "not reported"))
+        add("VENDOR EVENTS", "note", "%d event line(s) in the log%s; %s" % (
+            len(evs), ", %s event(s) received by the summary at %s" % (s["f"].get("received", "?"), clk(s["t"])) if s else "", last))
+        lost = [e for e in evs if e["type"] == "events_lost"]
+        if lost:
+            add("VENDOR EVENTS", "WARN", "the vendor runtime reported events_lost %d time(s) (first at %s, lost_count=%s): events were dropped before the runtime read them"
+                % (len(lost), clk(lost[0]["t"]), lost[0]["f"].get("lost_count", "?")))
+        gone = [e for e in evs if e["type"] == "instance_loss_pending"]
+        if gone:
+            add("VENDOR EVENTS", "WARN", "the vendor runtime reported instance_loss_pending at %s (loss_time=%s): it told the session it is going away" % (clk(gone[0]["t"]), gone[0]["f"].get("loss_time", "?")))
+
+    over = [e for e in fz["vram"] if e["reason"] == "over_budget"]
+    pressure = [e for e in fz["vram"] if e["reason"] == "pressure"]
+    if over:
+        add("VRAM", "WARN", "graphics memory went over the OS's budget %d time(s), first at %s (%s): above it the OS moves this process's memory into system RAM"
+            % (len(over), clk(over[0]["t"]), _fz_vram_text(over[0]["kv"])))
+    if pressure:
+        top = max(pressure, key=lambda e: e["kv"].get("local_pct") or 0.0)
+        add("VRAM", "note", "%d pressure line(s) (local use at or above 90%% of the budget), the highest %.1f%% at %s" % (len(pressure), top["kv"].get("local_pct") or 0.0, clk(top["t"])))
+    if fz["vram_fail"] is not None:
+        add("VRAM", "note", "a graphics-memory read failed at %s and the watch retries every second: %s" % (clk(fz["vram_fail"]["t"]), fz["vram_fail"]["text"]))
+    if fz["vram"] and not over and not pressure:
+        top = max(fz["vram"], key=lambda e: e["kv"].get("local_pct") if e["kv"].get("local_pct") is not None else -1.0)
+        add("VRAM", "note", "%d vram line(s), none over the budget or at 90%% of it; the highest local use %s at %s" % (
+            len(fz["vram"]), "%.1f%%" % top["kv"]["local_pct"] if top["kv"].get("local_pct") is not None else "-", clk(top["t"])))
+
+    tests = fz["slowtests"]
+    if tests:
+        armed = [x for x in tests if x["kind"] == "armed"]
+        began = next((x for x in tests if x["kind"] == "began"), None)
+        ended = next((x for x in tests if x["kind"] == "ended"), None)
+        key = "advanced.slow_test_ms = %d" % (armed[-1]["ms"] if armed else began["ms"] if began else 0)
+        if began is None:
+            add("SLOW TEST", "WARN", "%s was read, but the log has no `the hold begins now` line: the session ended before the hold began" % key)
+        else:
+            lo, hi = began["t"] - 2.0, began["t"] + began["span"] + FZ_SLOW_TEST_PAD_S
+            missing = []
+            have = []
+            if rt_read:
+                if not any(h["state"] == "began" for h in fz["holds"]):
+                    missing.append("the runtime's native_end_frame_hold state=began line (the hold never reached the runtime)")
+                if ended is not None and not any(h["state"] == "ended" for h in fz["holds"]):
+                    missing.append("the runtime's native_end_frame_hold state=ended line")
+                eps_in = [e for e in eps if lo <= e["t"] <= hi]
+                ends_in = [e for e in ends if lo <= e["t"] <= hi + 10.0]
+                if not eps_in or max(e["ms"] for e in eps_in) < 0.9 * began["ms"]:
+                    missing.append("an end-frame episode start line of at least %d ms" % int(0.9 * began["ms"]))
+                else:
+                    have.append("an episode start line of %.1f ms" % max(e["ms"] for e in eps_in))
+                if not ends_in:
+                    missing.append("an end-frame episode end line")
+                else:
+                    have.append("%d episode end line(s)" % len(ends_in))
+                reg = next((g for g in regimes if g["deliberate"]), None)
+                if reg is None:
+                    missing.append("a SLOW regime that begins within %d s of the hold (a hold of %d ms makes the frames about %d ms; it should show)"
+                                   % (int(FZ_SLOW_TEST_PAD_S), began["ms"], began["ms"] + 14))
+                else:
+                    if reg["owner"] != "vendor_end_frame":
+                        missing.append("the regime held by the vendor's xrEndFrame (the line names %s)" % FZ_OWNER_TEXT.get(reg["owner"], reg["owner"]))
+                    events = {l["event"] for l in reg["lines"]}
+                    if reg["src"] == "native":
+                        if began["span"] >= 36 and "still_slow" not in events:
+                            missing.append("a still_slow line (the hold lasted %d s; one is written 30 s after the SLOW line)" % began["span"])
+                        if ended is not None and "end" not in events:
+                            missing.append("the regime's end line")
+                        if st is not None and st["state"] == "armed" and reg["lines"][0]["vram"] is None:
+                            missing.append("the graphics-memory figures on the SLOW line")
+                    have.append("SLOW regime #%d held by %s%s" % (reg["n"], FZ_OWNER_TEXT.get(reg["owner"], reg["owner"]), ", with a still_slow and an end line" if {"still_slow", "end"} <= events else ""))
+            if ended is None and fz["gscan"]["last"] > hi:
+                missing.append("the graphics log's `the hold ended` line")
+            head = "the deliberate %d ms hold at %s (%d s)" % (began["ms"], clk(began["t"]), began["span"])
+            if missing:
+                add("SLOW TEST", "WARN", "%s, but the chain lacks %s" % (head, "; ".join(missing)))
+            elif not rt_read:
+                add("SLOW TEST", "note", "%s began; no runtime log was read, so its half of the chain was not checked" % head)
+            else:
+                add("SLOW TEST", "PASS", "%s: %s" % (head, ", ".join(have)))
+    return out
+
+
 def freezes_judge(fz, rows, pairs, rt_read, clk):
     """[(key, status, text)] in the order of the rules: INSTRUMENT, UNWRITTEN FREEZES, FREEZE LINES, SAMPLER, SUSPENSION, NO FREEZE (and PARSE, a line
     this reader could not read). status is PASS, WARN, STOP or note; a note is a fact and never changes the verdict."""
@@ -6962,12 +7971,16 @@ def freezes_judge(fz, rows, pairs, rt_read, clk):
     if fz["unparsed"]["count"]:
         add("PARSE", "WARN", "%d line(s) open like a freeze-diagnostics line but match none of the formats this reads (the C++ wording changed?), and "
             "what is above leaves them out. First: %s" % (fz["unparsed"]["count"], " | ".join(fz["unparsed"]["samples"])))
-    return out
+    # The headset-lock arc's rows come first: a slow regime is the finding, and the freeze rows are the detail beside it.
+    return _fz_arc_findings(fz, rt_read, clk) + out
 
 
 def print_freezes(gfx_path, gfx_text, gfx_ver, want, args, native_dirs):
     """--freezes: one flight's freeze diagnostics in one report. Returns the exit code: 0 (PASS or WARN), 1 (STOP), 2 (the runtime log is of another
-    build than --expect-build named; main() has checked the graphics log's), 3 (the log holds none of the freeze lines)."""
+    build than --expect-build named; main() has checked the graphics log's), 3 (the log holds none of the freeze lines and no slow regime), 4 (SLOW: the
+    log holds a slow regime, the frame rate under 40% of the display's for 5 s or more, that the vendor runtime, EDVR's copy or EDVR's own work holds, found
+    by the build's own detector or put back together from the older lines; no STOP). A regime the game's own frame holds (INFO for a load, WARN for its
+    scenes) or that has no named owner (WARN) does not set it."""
     rt_path, rt_text, rc = open_runtime_log(gfx_path, gfx_ver, want, args.runtime_file, native_dirs,
                                             lacking="native_long_cycle lines and the runtime's counts are unavailable")
     if rc is not None:
@@ -6980,7 +7993,8 @@ def print_freezes(gfx_path, gfx_text, gfx_ver, want, args, native_dirs):
     if rscan is not None and rscan["stamped"] == 0:
         print("[edvr] WARNING: the runtime log has no 'YYYY-MM-DD HH:MM:SS.mmm UTC pid= tid=' lines; it is not used.")
         rscan = None
-    if not _fz_has_lines(fz):
+    # A log from before the freeze logging can still hold a slow regime in its older lines: that is read, and is a finding, not an old build.
+    if not _fz_has_lines(fz) and not _fz_slow_regimes(fz, rscan is not None):
         print("[edvr] freezes: none of the freeze-diagnostics lines is in this log (no FREEZE, long frame counts, worst long frame, stall sampler, "
               "native_long_cycle_worst or native_long_cycle_counts line), so it is from a build before the freeze logging.")
         return 3
@@ -7008,6 +8022,8 @@ def print_freezes(gfx_path, gfx_text, gfx_ver, want, args, native_dirs):
                   % (shared, median))
     else:
         print("[edvr] clocks: every time below is LOCAL, the graphics log's own [HH:MM:SS.mmm] prefix")
+    regimes = _fz_slow_regimes(fz, rt_read)
+    _fz_print_slow(fz, regimes, clk)
     if rows:
         _fz_print_freezes(rows, rt_read, clk)
     if pairs:
@@ -7016,16 +8032,32 @@ def print_freezes(gfx_path, gfx_text, gfx_ver, want, args, native_dirs):
     _fz_print_worst(fz, rt_read, clk)
     _fz_print_sampler(fz, rows, loose, clk)
     _fz_print_gpu(fz, rows, clk)
+    _fz_print_episodes(fz, clk)
+    _fz_print_events(fz, clk)
+    _fz_print_vram(fz, clk)
+    _fz_print_slowtest(fz, clk)
     findings = freezes_judge(fz, rows, pairs, rt_read, clk)
     for key, status, text in findings:
         print("  %-4s  %s: %s" % (status, key, text))
     stops = sum(1 for f in findings if f[1] == "STOP")
     warns = sum(1 for f in findings if f[1] == "WARN")
-    print("freezes verdict: %s (%d STOP, %d WARN). STOP: a frame of 250 ms or more that got no line, a runtime cycle of 250 ms or more the graphics half "
+    slows = sum(1 for f in findings if f[1] == "SLOW")
+    # A log that holds a regime the vendor runtime, EDVR's copy or EDVR's own work held never gets PASS or WARN, and its verdict says when, how slow and who held
+    # it. With a STOP the word stays STOP (the instrument failed), the regime still named. A regime the game's own frame holds (a load, or its scenes at a
+    # low rate) or that has no named owner is a row of its own (INFO or WARN) and does not set SLOW or exit 4; the verdict still says how many there were.
+    word = "STOP" if stops else "SLOW" if slows else "WARN" if warns else "PASS"
+    slow_regs = [g for g in regimes if g["class"][0] == "SLOW"]
+    other_regs = [g for g in regimes if g["class"][0] != "SLOW"]
+    held = (": %s" % "; ".join(_fz_regime_sentence(g, clk, True) for g in slow_regs[:3]) + ("; and %d more" % (len(slow_regs) - 3) if len(slow_regs) > 3 else "")) if slows else ""
+    if other_regs:
+        held += " [+%d slow stretch(es) the game's own frame or no named owner held, listed above: not a SLOW]" % len(other_regs)
+    print("freezes verdict: %s (%d STOP, %d WARN%s)%s. STOP: a frame of 250 ms or more that got no line, a runtime cycle of 250 ms or more the graphics half "
           "did not write, or a sample that held the render thread over %d us. WARN: the counts missing, a FREEZE line without its LONG FRAME line, an armed "
-          "sampler that named no owner, a sample over %d us, or a line this reader could not read."
-          % ("STOP" if stops else "WARN" if warns else "PASS", stops, warns, FREEZE_SUSPEND_STOP_US, FREEZE_SUSPEND_WARN_US))
-    return 1 if stops else 0
+          "sampler that named no owner, a sample over %d us, a slow stretch the game's scenes or no named owner held, or a line this reader could not read.%s"
+          % (word, stops, warns, ", %d SLOW" % slows if slows else "", held, FREEZE_SUSPEND_STOP_US, FREEZE_SUSPEND_WARN_US,
+             " SLOW: the frame rate stayed under %.0f%% of the display's for %.0f s or more, and the vendor runtime, EDVR's copy or EDVR's own work held most of each frame."
+             % (100.0 * FZ_SLOW_FRACTION, FZ_SLOW_MIN_S) if slows else ""))
+    return 1 if stops else 4 if slows else 0
 
 
 def self_test_freezes():
@@ -7710,6 +8742,683 @@ def self_test_freezes():
     return ok
 
 
+def self_test_slow_regime():
+    """--freezes on the headset-lock arc's lines (docs/headset-lock-vdxr-2026-10-02.md): logs built from the exact lines the C++ writes (vram_watch.h,
+    vendor_events.h, end_frame_episodes.h, slow_regime.h, perf_monitor.cpp's slow test, native_runtime_host.h's hold) and from a v0.18.0 flight's older
+    lines, every case asserting the printed sections, the finding rows, the verdict and the exit code through main(). A log that holds a slow regime the vendor
+    runtime, EDVR's copy or EDVR's own work holds never gets a PASS or WARN verdict, whether the build detected it itself or this reader put it back together
+    from LONG FRAME, native_long_cycle, FREEZE and vScreen totals lines; a regime the game's own frame holds (INFO in a load, WARN in its scenes) or with no
+    named owner sets neither SLOW nor exit 4, and the cases pin both sides, with a game-owned fixture. The pins tie each phrase the reader keys on to the
+    source that writes it, and the run asserts that --freezes opens nothing for writing. Returns ok."""
+    import builtins
+    import contextlib
+    import io
+    import shutil
+    ok = True
+
+    def fail(msg):
+        nonlocal ok
+        print("slow regime: %s" % msg)
+        ok = False
+
+    root = repo_root()
+    for rel, needles in (
+            (("src", "openxr", "slow_regime.h"), (
+                '"native_slow_regime,event=%s,%sregime=%u,duration_s=%.1f,window_s=%.1f,frames=%llu,fps=%.2f,display_hz=%.2f,fraction=%.3f,threshold=%.2f,frame_ms=%.2f,"',
+                '"context=%s,loading_frames=%llu,empty_frames=%llu,"', 'enum class SlowContext { None, Scene, Loading, NoLayers };',
+                'case SlowContext::Scene: return "scene";', 'case SlowContext::Loading: return "loading";', 'case SlowContext::NoLayers: return "no_layers";',
+                'r.context = s.loading * 2 >= s.frames ? SlowContext::Loading : s.empty * 2 >= s.frames ? SlowContext::NoLayers : SlowContext::Scene;',
+                '"held_by=%s,held_share=%.3f,vendor_share=%.3f,vendor_end_frame_ms=%.2f,vendor_wait_frame_ms=%.2f,vendor_swapchain_ms=%.2f,edvr_copy_ms=%.2f,"',
+                '"edvr_work_ms=%.2f,game_ms=%.2f,end_frame_max_ms=%.2f,%s,units=wall_ms,summary=%s"',
+                '"native_slow_regime,armed=1,threshold_fraction=%.2f,of=display_rate,hold_s=%u,end_s=%u,still_slow_s=%u,owner_share=%.2f,frames=xrEndFrame_returns,"',
+                '"native_slow_regime_summary,%s%s%sregimes=%u,open=%u,frames=%llu,seconds=%llu,slow_seconds=%llu,threshold=%.2f"',
+                'formatVramFigures(figures, sizeof(figures), *vram, \',\', "vram_")', 'std::snprintf(figures, sizeof(figures), "vram=unavailable")',
+                '"held by %s: %.1f ms of every %.1f ms frame (%.0f%%)"', '"no single owner; the largest is %s at %.0f%% of a %.1f ms frame"',
+                'constexpr double kSlowFraction = 0.40;', 'constexpr unsigned kSlowHoldSeconds = 5;', 'constexpr unsigned kSlowStillSlowSeconds = 30;',
+                'constexpr double kSlowOwnerShare = 0.35;', '"vendor_end_frame"', '"vendor_wait_frame"', '"vendor_swapchain"', '"edvr_copy"', '"edvr_work"',
+                '"the vendor runtime\'s xrEndFrame"', '"the game\'s own frame"', '"recovered"', '"session_close"', '"still_slow"')),
+            (("src", "openxr", "end_frame_episodes.h"), (
+                '"native_end_frame_episode,episode=%llu,sequence=%llu,ms=%.4f,periods=%.2f,period_ms=%.4f,should_render=%u,layers=%u,path=%s,pacing=%s,"',
+                '"result=%d,xr_acquire_ms=%.4f,xr_wait_ms=%.4f,xr_draw_ms=%.4f,xr_release_ms=%.4f,copy_ms=%.4f,session_state=%s,state_age_ms=%.1f,"',
+                '"native_end_frame_episode_end,episode=%llu,reason=%s,start_line=%u,calls=%llu,slow_calls=%llu,duration_ms=%.1f,p50_ms=%.2f,max_ms=%.4f,"',
+                '"mean_ms=%.4f,period_ms=%.4f,max_periods=%.2f,first_sequence=%llu,last_sequence=%llu,units=wall_ms"',
+                '"native_end_frame_episodes_summary,%s%s%sthreshold_periods=%.1f,episodes=%llu,start_lines=%llu,end_lines=%llu,calls=%llu,slow_calls=%llu,"',
+                '"native_end_frame_episodes,armed=1,threshold_periods=%.1f,period=last_real_predicted_display_period,end_after_normal_calls=%u,"',
+                'constexpr double kEndFramePeriods = 3.0;', '"loading"', '"overlapped"', '"synchronous"', '"deferred"', '"runtime"')),
+            (("src", "openxr", "vendor_events.h"), (
+                '"native_xr_event,n=%llu,type=%s%s"', '",from=%s,to=%s,event_time=%lld,lag_ms=%s"', '",lost_count=%u"',
+                '"native_xr_event,n=%llu,type=unknown,number=%d,first_of_type=1"', '"native_xr_event,n=%llu,suppressed=1,limit=%u,',
+                '"native_xr_events_summary,%s%s%sreceived=%llu,logged=%llu,suppressed=%llu,session_state_changed=%llu,events_lost=%llu,lost_events=%llu,"',
+                '"instance_loss_pending=%llu,reference_space_change_pending=%llu,interaction_profile_changed=%llu,visibility_mask_changed=%llu,"',
+                '"display_refresh_rate_changed=%llu,perf_settings=%llu,unknown_events=%llu,unknown_types=%llu,last_state=%s"',
+                '"native_xr_events,armed=1,source=xrPollEvent,line_cap=%u,unknown_types_named=%u,decoded=session_state_changed|events_lost|"',
+                '",loss_time=%lld"', '"events_lost"', '"instance_loss_pending"', '"session_state_changed"')),
+            (("src", "common", "vram_watch.h"), (
+                '"%slocal_used_mb=%s%c%slocal_budget_mb=%s%c%slocal_pct=%s%c%snonlocal_used_mb=%s%c%snonlocal_budget_mb=%s%c%snonlocal_pct=%s"',
+                '"vram: reason=%s %s"', '"vram: reason=armed %s; adapter %s; this process\'s graphics memory against the budget the OS gives it "',
+                '"vram: unavailable -- %s. No vram: line will be written this session."',
+                '"vram: QueryVideoMemoryInfo failed for the local segment group (hr 0x%08lX); no line is written until "',
+                '"over_budget"', '"back_under_budget"', '"pressure"', '"periodic"')),
+            (("src", "d3d11", "perf_monitor.cpp"), (
+                '"slow test: advanced.slow_test_ms = %d. %llu s from now the runtime holds every xrEndFrame it makes %d ms longer, "',
+                '"for %llu s, to test the end-frame episode and slow-regime lines. Set it back to 0."',
+                '"slow test: the hold begins now: every xrEndFrame is held %u ms longer for %llu s."', '"slow test: the hold ended. The runtime\'s frames are as they were."')),
+            (("src", "openxr", "native_runtime_host.h"), (
+                '"native_end_frame_hold,test=1,state=began,ms=%u,source=advanced.slow_test_ms,inside=timed_xrEndFrame_region\\n"',
+                '"native_end_frame_hold,test=1,state=ended,held_calls=%llu\\n"')),
+            (("src", "d3d11", "vscreen.cpp"), ('"vScreen totals: panel distance applied %llu time(s), void cleared to black "',)),
+            (("src", "d3d11", "perf_monitor.cpp"), ('This is frame %llu', 'runtime sequence %llu')),
+            (("src", "openxr", "producer_gpu_timing.cpp"), ('"native_producer_gpu,window=%llu,samples=%u,pending_dropped=%u,copy=%.4f/%.4f/%.4f/%.4f,units=gpu_ms\\n"',))):
+        try:
+            body = read_text(os.path.join(root, *rel))
+        except OSError:
+            fail("%s is not where the self-test looks for it" % "\\".join(rel))
+            continue
+        for needle in needles:
+            if needle not in body:
+                fail("%s no longer has %r, which --freezes reads; change this reader and its pin together" % ("\\".join(rel), needle))
+
+    VERSION = "0.18.1-4-gabcdef1"
+    ZONE_H = 1                                  # local is UTC+1: the runtime log's file name (local) against its first line (UTC) says so
+    T0 = 10 * 3600 + 50 * 60 + 12.0             # both logs open at 10:50:12 local
+    RS = 11 * 3600 + 14 * 60 + 38.1             # the regime begins at 11:14:38.1
+    CLOSE = 11 * 3600 + 20 * 60                 # the session closes at 11:20:00
+    GFX_NAME = "edvr_gfx_20261002_105012.log"
+    RT_NAME = "edvr_openxr_20261002_105014_044_12912.log"
+
+    def hms(t):
+        ms = int(round(t * 1000.0))
+        h, rest = divmod(ms, 3600000)
+        m, rest = divmod(rest, 60000)
+        s, milli = divmod(rest, 1000)
+        return "%02d:%02d:%02d.%03d" % (h, m, s, milli)
+
+    def g(t, msg):
+        return "[%s] %s" % (hms(t), msg)
+
+    def r(t, msg):
+        return "2026-10-02 %s UTC pid=12912 tid=6364 %s" % (hms(t - ZONE_H * 3600), msg)
+
+    # ---- the graphics log's lines ----
+    def vram(reason, lu=7421, lb=10863, nu=316, nb=16311, tail=""):
+        return ("vram: reason=%s local_used_mb=%d local_budget_mb=%d local_pct=%.1f nonlocal_used_mb=%d nonlocal_budget_mb=%d nonlocal_pct=%.1f%s"
+                % (reason, lu, lb, 100.0 * lu / lb, nu, nb, 100.0 * nu / nb, tail))
+
+    vram_armed = vram("armed", tail="; adapter NVIDIA GeForce RTX 4090; this process's graphics memory against the budget the OS gives it (DXGI QueryVideoMemoryInfo, local = "
+                                    "the card's own memory, non-local = system memory it uses), sampled once a second; a line every 30 s, every 5 s from 90% of the local "
+                                    "budget, and one at each crossing of the budget.")
+    vram_none = "vram: unavailable -- this device has no IDXGIAdapter3 (DXVK or Wine without it). No vram: line will be written this session."
+
+    def long_frame(ms, seq, frame, period=13.9):
+        return ("monitor: LONG FRAME -- %.1f ms between Presents (runtime predicted period %.1f ms), no WaitGetPoses, CPU busy, compositor, reprojection, or door samples; "
+                "game creations: 0 textures, 0 buffers, 0 shaders (0.0 MB); EDVR events: none. This is frame %d; the flip timeline is not armed, so there are no table "
+                "changes to order against it. runtime sequence %d, game work 4.92 ms." % (ms, period, frame, seq))
+
+    def freeze(ms, frame, seq, n):
+        if seq:
+            c = "%.1f ms (%.1f ms from the pose wait's return to this Present, the previous cycle 330.6 ms)" % (ms, ms - 240.2)
+        else:
+            c = "unavailable (no two pose-wait returns: not the native path, or no open runtime session)"
+        return ("monitor: FREEZE -- %.1f ms between Presents, ended now: frame %d, runtime sequence %d; runtime cycle %s; freeze %d of this session; stall sampler took 1 "
+                "sample, the last in EliteDangerous64.exe+0x5d6d7f. A frame of 250 ms or more always gets this line and a LONG FRAME line, with no cap and no rate limit."
+                % (ms, frame, seq, c, n))
+
+    def vscreen(frames, ms):
+        return ("vScreen totals: panel distance applied 51877 time(s), void cleared to black 51884 time(s) (2-2 per frame over the last %d frames), largest eye-draw count 2 "
+                "this window and 7041 this session. %d frames in %d ms is %d fps. Two eyes a frame, so these should climb steadily." % (frames, frames, ms, round(frames * 1000.0 / ms)))
+
+    def counts_line():
+        return ("monitor: long frame counts reason=session_close candidates=3 long=3 blips=0 written=3 unwritten=0 over_250ms=0 over_250ms_unwritten=0 long_lt50=0 "
+                "long_50_100=0 long_100_250=3 long_250_1000=0 long_ge1000=0 blip_lt50=0 blip_50_100=0 blip_100_250=0 blip_250_1000=0 blip_ge1000=0 unwritten_lt50=0 "
+                "unwritten_50_100=0 unwritten_100_250=0; candidates are Present gaps over twice the runtime's predicted period; a candidate the runtime's cycle did not "
+                "confirm is a blip, counted and not written.")
+
+    gopen = [g(T0, "EDVR log -- unofficial VR fixes for Elite Dangerous: Odyssey"),
+             g(T0 + 0.002, "version %s (build 68C0A1F2) -- this DLL was linked 2026-10-02 08:00:00 UTC" % VERSION)]
+    # The runtime's own counts at its close, so a fixture's INSTRUMENT row has what a closed session writes and the verdict is not a WARN for it.
+    rt_counts = ("native_long_cycle_summary,count=3,logged=3,threshold=2x_period,candidates=3,long=3,written=3,unwritten=0,over_250ms=0,over_250ms_unwritten=0,long_lt50=0,"
+                 "long_50_100=0,long_100_250=3,long_250_1000=0,long_ge1000=0,unwritten_lt50=0,unwritten_50_100=0,unwritten_100_250=0")
+
+    # ---- the runtime log's lines ----
+    def cycle_line(seq, ms, period=13.8889):
+        return ("native_long_cycle,sequence=%d,cycle_ms=%.4f,period_ms=%.4f,game_before_first_submit=2.4360,first_submit_roundtrip=0.8010,first_submit_owner_body=0.7730,"
+                "between_eye_calls=0.0010,second_submit_roundtrip=%.4f,second_submit_owner_body=%.4f,first_submit_render_park=0.7908,second_submit_render_park=%.4f,"
+                "post_second_submit_to_next_wait=1.1120,present_split=ok,pre_present=0.1140,present_hook=0.1670,hook_before_real=0.0010,hook_real_present=0.0820,"
+                "hook_after_real=0.0750,hook_render_callback=0.0090,post_present=0.5760,next_wait_roundtrip=0.0760,next_wait_owner_body=0.0450,units=wall_ms"
+                % (seq, ms, period, ms - 5.0, ms - 5.1, ms - 5.1))
+
+    def phases_line(window, first, last, end_p50, pacer_p50=0.0001, wait_p50=0.0, dispatch_p50=0.158):
+        return ("native_submit_phases,window=%d,first=%d,last=%d,output=2325x2392/2325x2392,treatments=6/6,feature_epoch=8,cull_stage=3,cull_factors=1.08488/1.00000,pacing=1,"
+                "separate=1,producer_dispatch=%.4f/0.2701/0.3418/0.3961,producer_acquire=0.0765/0.1489/0.1674/0.1714,producer_flush=0.0330/0.1032/0.1267/0.1953,"
+                "consumer_acquire=0.0636/0.1304/0.1787/0.2020,consumer_flush=0.0281/0.0999/0.1065/0.1209,receive=0.1266/0.1833/0.2516/0.2953,xr_acquire=0.0014/0.0018/0.0021/0.0131,"
+                "xr_wait=0.0003/0.0004/0.0006/0.0006,xr_draw_submit=0.0794/0.1203/0.1579/0.1726,xr_release=0.0007/0.0010/0.0012/0.0014,"
+                "xr_end_frame=%.4f/%.4f/%.4f/%.4f,wait_frame=%.4f/0.0000/0.0000/0.0001,pacer_block=%.4f/0.0002/0.0005/0.0006,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0,"
+                "frame_end_overlap=0" % (window, first, last, dispatch_p50, end_p50, end_p50 + 1.2, end_p50 + 1.7, end_p50 + 2.0, wait_p50, pacer_p50))
+
+    def producer_gpu(window, p50, p95, p99, mx):
+        return "native_producer_gpu,window=%d,samples=512,pending_dropped=0,copy=%.4f/%.4f/%.4f/%.4f,units=gpu_ms" % (window, p50, p95, p99, mx)
+
+    rt_head = [r(T0 + 2.4, "module_init,version=%s,durable_log=1" % VERSION), r(T0 + 2.4, "display_frequency,hz=72,source=runtime,extension_enabled=1,result=0,reason=session_created"),
+               r(T0 + 2.6, "native_perf_settings,extension=absent,cpu=n/a,gpu=n/a")]
+
+    # ---- the arc's runtime lines ----
+    xr_armed = ("native_xr_events,armed=1,source=xrPollEvent,line_cap=200,unknown_types_named=24,decoded=session_state_changed|events_lost|instance_loss_pending|"
+                "reference_space_change_pending|interaction_profile_changed|visibility_mask_changed|display_refresh_rate_changed|perf_settings,undecoded=named_once_by_number")
+    ep_armed = ("native_end_frame_episodes,armed=1,threshold_periods=3.0,period=last_real_predicted_display_period,end_after_normal_calls=8,start_lines=1_per_2000_ms_max_100,"
+                "long_episode_end_line_from_slow_calls=20,paths=synchronous|overlapped|loading,units=wall_ms")
+
+    def slow_armed(vram_state="available"):
+        return ("native_slow_regime,armed=1,threshold_fraction=0.40,of=display_rate,hold_s=5,end_s=2,still_slow_s=30,owner_share=0.35,frames=xrEndFrame_returns,"
+                "owners=vendor_end_frame|vendor_wait_frame|vendor_swapchain|edvr_copy|edvr_work|game,vram=%s" % vram_state)
+
+    def xr_event(n, kind, body=""):
+        return "native_xr_event,n=%d,type=%s%s" % (n, kind, body)
+
+    def state_event(n, frm, to, lag="2.500"):
+        return xr_event(n, "session_state_changed", ",from=%s,to=%s,event_time=1234567890123,lag_ms=%s" % (frm, to, lag))
+
+    def xr_summary(reason, received=5, logged=5, last="FOCUSED", **extra):
+        v = dict(suppressed=0, session_state_changed=received, events_lost=0, lost_events=0, instance_loss_pending=0, reference_space_change_pending=0,
+                 interaction_profile_changed=0, visibility_mask_changed=0, display_refresh_rate_changed=0, perf_settings=0, unknown_events=0, unknown_types=0)
+        v.update(extra)
+        return ("native_xr_events_summary,reason=%s,received=%d,logged=%d,suppressed=%d,session_state_changed=%d,events_lost=%d,lost_events=%d,instance_loss_pending=%d,"
+                "reference_space_change_pending=%d,interaction_profile_changed=%d,visibility_mask_changed=%d,display_refresh_rate_changed=%d,perf_settings=%d,unknown_events=%d,"
+                "unknown_types=%d,last_state=%s" % (reason, received, logged, v["suppressed"], v["session_state_changed"], v["events_lost"], v["lost_events"],
+                                                    v["instance_loss_pending"], v["reference_space_change_pending"], v["interaction_profile_changed"],
+                                                    v["visibility_mask_changed"], v["display_refresh_rate_changed"], v["perf_settings"], v["unknown_events"], v["unknown_types"], last))
+
+    def episode(n, seq, ms, path="synchronous", pacing="runtime", state="FOCUSED", period=13.8889):
+        return ("native_end_frame_episode,episode=%d,sequence=%d,ms=%.4f,periods=%.2f,period_ms=%.4f,should_render=1,layers=1,path=%s,pacing=%s,result=0,xr_acquire_ms=0.0016,"
+                "xr_wait_ms=0.0002,xr_draw_ms=0.0385,xr_release_ms=0.0005,copy_ms=0.3120,session_state=%s,state_age_ms=1204.0,units=wall_ms"
+                % (n, seq, ms, ms / period, period, path, pacing, state))
+
+    def episode_end(n, calls, slow, duration_ms, p50, mx, first, last, reason="normal_calls", start_line=1, period=13.8889):
+        return ("native_end_frame_episode_end,episode=%d,reason=%s,start_line=%d,calls=%d,slow_calls=%d,duration_ms=%.1f,p50_ms=%.2f,max_ms=%.4f,mean_ms=%.4f,period_ms=%.4f,"
+                "max_periods=%.2f,first_sequence=%d,last_sequence=%d,units=wall_ms" % (n, reason, start_line, calls, slow, duration_ms, p50, mx, p50 + 0.4, period, mx / period, first, last))
+
+    def ep_summary(reason, episodes=1, start_lines=1, end_lines=1, calls=900, slow_calls=567, longest=84.7388, open_=0):
+        return ("native_end_frame_episodes_summary,reason=%s,threshold_periods=3.0,episodes=%d,start_lines=%d,end_lines=%d,calls=%d,slow_calls=%d,longest_ms=%.4f,open=%d,units=wall_ms"
+                % (reason, episodes, start_lines, end_lines, calls, slow_calls, longest, open_))
+
+    VRAM_FIG = "vram_local_used_mb=7421,vram_local_budget_mb=10863,vram_local_pct=68.3,vram_nonlocal_used_mb=316,vram_nonlocal_budget_mb=16311,vram_nonlocal_pct=1.9"
+
+    def slow(event, regime, duration, window, frames, owner="vendor_end_frame", share=0.831, fps=9.97, hz=72.0, frame_ms=100.3, end_ms=83.10, wait_ms=0.0, swap_ms=0.04,
+             copy_ms=0.40, work_ms=0.30, game_ms=16.16, mx=84.74, figures=VRAM_FIG, summary=None, reason=None, context="scene", loading=0, empty=0, with_context=True):
+        """One native_slow_regime line. context/loading/empty are the `context=`, `loading_frames=` and `empty_frames=` fields (slow_regime.h), which a build from
+        before them does not write: with_context=False leaves them out."""
+        if summary is None:
+            summary = {"vendor_end_frame": "held by the vendor runtime's xrEndFrame: %.1f ms of every %.1f ms frame (%.0f%%)" % (end_ms, frame_ms, 100 * share),
+                       "game": "held by the game's own frame: %.1f ms of every %.1f ms frame (%.0f%%)" % (game_ms, frame_ms, 100 * share),
+                       "edvr_copy": "held by EDVR's copy of the eyes: %.1f ms of every %.1f ms frame (%.0f%%)" % (copy_ms, frame_ms, 100 * share),
+                       "none": "no single owner; the largest is the game's own frame at 31%% of a %.1f ms frame" % frame_ms,
+                       "no_frames": "held by nothing: no frame reached xrEndFrame in this window"}[owner]
+        ctx = "context=%s,loading_frames=%d,empty_frames=%d," % (context, loading, empty) if with_context else ""
+        return ("native_slow_regime,event=%s,%sregime=%d,duration_s=%.1f,window_s=%.1f,frames=%d,fps=%.2f,display_hz=%.2f,fraction=%.3f,threshold=0.40,frame_ms=%.2f,%sheld_by=%s,"
+                "held_share=%.3f,vendor_share=%.3f,vendor_end_frame_ms=%.2f,vendor_wait_frame_ms=%.2f,vendor_swapchain_ms=%.2f,edvr_copy_ms=%.2f,edvr_work_ms=%.2f,game_ms=%.2f,"
+                "end_frame_max_ms=%.2f,%s,units=wall_ms,summary=%s" % (event, "reason=%s," % reason if reason else "", regime, duration, window, frames, fps, hz, fps / hz, frame_ms, ctx,
+                                                                       owner, share, (end_ms + wait_ms + swap_ms) / frame_ms, end_ms, wait_ms, swap_ms, copy_ms, work_ms, game_ms, mx,
+                                                                       figures, summary))
+
+    def slow_summary(reason, regimes=1, open_=0, frames=82000, seconds=330, slow_seconds=57):
+        return ("native_slow_regime_summary,reason=%s,regimes=%d,open=%d,frames=%d,seconds=%d,slow_seconds=%d,threshold=0.40" % (reason, regimes, open_, frames, seconds, slow_seconds))
+
+    def native_flight(owner="vendor_end_frame", end=True, vram_mode="available", arms=("xr", "ep", "slow"), regimes=1, events=True, episodes=True, summary_regimes=None,
+                      extra_rt=(), extra_gfx=(), still=True, share=0.831, crash=False, end_ms=83.10, context="scene", loading=0, empty=0, with_context=True, summary=None):
+        """A new-build flight: the three armed lines, the vendor's session events, one regime from RS for 57.1 s with its SLOW, still_slow and end lines (and the
+        episode instrument's start and end line), the VRAM watch's lines, the summaries at the close. crash=True is a session that stopped inside the regime:
+        no end lines and no close. end_ms is the mean xrEndFrame the regime's lines carry; context, loading and empty the `context=`, `loading_frames=` and
+        `empty_frames=` fields of its lines (with_context=False: a build from before them). Returns (graphics lines, runtime lines)."""
+        ctx = dict(context=context, loading=loading, empty=empty, with_context=with_context, summary=summary)
+        fig = VRAM_FIG if vram_mode == "available" else "vram=unavailable"
+        end = end and not crash
+        gfx = list(gopen)
+        gfx.append(g(T0 + 3.0, vram_armed if vram_mode == "available" else vram_none))
+        if vram_mode == "available":
+            gfx += [g(T0 + 33.0 + 30.0 * i, vram("periodic", lu=7400 + 3 * i)) for i in range(8)]
+            gfx.append(g(RS + 5.0, vram("periodic", lu=7421)))
+        gfx += list(extra_gfx)
+        if not crash:
+            gfx.append(g(CLOSE, counts_line()))
+        rt = list(rt_head)
+        if "xr" in arms:
+            rt.append(r(T0 + 2.7, xr_armed))
+        if "ep" in arms:
+            rt.append(r(T0 + 2.7, ep_armed))
+        if "slow" in arms:
+            rt.append(r(T0 + 2.7, slow_armed("available" if vram_mode == "available" else "unavailable: this device has no IDXGIAdapter3")))
+        if events:
+            rt += [r(T0 + 3.1, state_event(1, "UNKNOWN", "IDLE")), r(T0 + 3.2, state_event(2, "IDLE", "READY")), r(T0 + 3.3, state_event(3, "READY", "SYNCHRONIZED")),
+                   r(T0 + 3.4, state_event(4, "SYNCHRONIZED", "VISIBLE")), r(T0 + 3.5, state_event(5, "VISIBLE", "FOCUSED"))]
+        if regimes:
+            if events:
+                rt.append(r(RS + 1.0, state_event(6, "FOCUSED", "VISIBLE", "1.250")))
+            if episodes:
+                rt.append(r(RS + 0.2, episode(1, 96600, 83.1)))
+            rt.append(r(RS + 5.0, slow("SLOW", 1, 5.0, 5.0, 50, owner=owner, share=share, figures=fig, end_ms=end_ms, **ctx)))
+            if still:
+                rt.append(r(RS + 35.0, slow("still_slow", 1, 35.0, 30.0, 298, owner=owner, share=share, figures=fig, end_ms=end_ms, **ctx)))
+            if end:
+                rt.append(r(RS + 59.1, slow("end", 1, 57.1, 57.1, 567, owner=owner, share=share, figures=fig, reason="recovered", end_ms=end_ms, **ctx)))
+                if episodes:
+                    rt.append(r(RS + 57.3, episode_end(1, 575, 567, 57000.0, 83.5, 84.7388, 96600, 97175)))
+        rt += list(extra_rt)
+        if not crash:
+            rt.append(r(CLOSE, rt_counts))
+            if episodes or "ep" in arms:
+                rt.append(r(CLOSE, ep_summary("session_close", episodes=1 if regimes else 0, start_lines=1 if (regimes and episodes) else 0,
+                                              end_lines=1 if (regimes and episodes and end) else 0)))
+            if events or "xr" in arms:
+                rt.append(r(CLOSE, xr_summary("session_close", received=6 if (regimes and events) else 5 if events else 0, logged=6 if (regimes and events) else 5 if events else 0)))
+            if "slow" in arms:
+                n = regimes if summary_regimes is None else summary_regimes
+                rt.append(r(CLOSE, slow_summary("session_close", regimes=n, open_=0, slow_seconds=57 if regimes else 0)))
+        return gfx, rt
+
+    # ---- the v0.18.0 form: the older lines only, modelled on the user's boarding-freeze flight ----
+    def seq_at(t):
+        return 96600 + int(round((t - RS) * 9.93))
+
+    def legacy_flight(runtime=True, hitches=False, marks_end=57.138, gfx_fps=None):
+        """A flight from before the arc: LONG FRAME lines of 100 ms every 5 s (the limiter), the runtime's native_long_cycle lines four a second until its cap, the
+        vScreen windows, a FREEZE at the end of the regime and an unrelated one 6.2 s later; or, with hitches, long frames now and then at a steady 72 fps.
+        gfx_fps makes the graphics frame counter rise that fast instead of with the runtime's sequence (a game Presenting at hundreds of frames a second in a
+        menu while the runtime's frames crawl)."""
+        gfx = list(gopen)
+        rt = list(rt_head)
+
+        def frame_at(t):
+            return seq_at(t) + 5832 if gfx_fps is None else 102431 + int(round((t - RS) * gfx_fps))
+        if hitches:
+            for k in range(13):
+                t = RS + 5.0 * k
+                seq = 96600 + int(round((t - RS) * 72.0))
+                gfx.append(g(t, long_frame(61.0, seq, seq + 5832)))
+                rt.append(r(t, cycle_line(seq, 61.0)))
+            for k in range(3):
+                t = RS - 20.0 + 20.0 * k
+                gfx.append(g(t + 0.1, vscreen(1440, 20000)))
+        else:
+            for k in range(11):
+                t = RS + 5.0 * k
+                gfx.append(g(t, long_frame(100.2, seq_at(t), frame_at(t))))
+            t = 0.0
+            while RS + t < RS + 35.5:
+                for j in range(4):
+                    s = seq_at(RS + t) + j
+                    rt.append(r(RS + t + 0.3 * j, cycle_line(s, 100.2)))
+                t += 1.0
+            gfx += [g(RS + 14.552, vscreen(519, 20094)), g(RS + 34.614, vscreen(200, 20062)), g(RS + 54.677, vscreen(200, 20063))]
+            end_t = RS + marks_end
+            end_frame = 102999 if gfx_fps is None else frame_at(end_t)
+            gfx += [g(end_t, long_frame(254.6, 97167, end_frame)), g(end_t, freeze(254.6, end_frame, 97167, 14)),
+                    g(end_t + 6.2, long_frame(539.8, 0, 103057)), g(end_t + 6.2, freeze(539.8, 103057, 0, 15))]
+            rt += [r(RS + 38.7, phases_line(49, 95547, 95802, 1.6682 / 100.0)), r(RS + 38.7, phases_line(50, 96730, 96985, 82.7130)),
+                   r(RS - 18.1, producer_gpu(48, 0.0367, 0.0408, 0.3625, 0.5921)), r(RS + 41.9, producer_gpu(49, 0.0362, 0.0409, 0.2263, 0.3707)),
+                   r(RS + 42.0, producer_gpu(50, 0.1741, 75.6131, 78.1940, 79.4299))]
+        gfx.append(g(CLOSE, counts_line()))
+        rt.append(r(CLOSE, rt_counts))
+        return gfx, (rt if runtime else None)
+
+    tmp = tempfile.mkdtemp(prefix="edvr_slow_")
+    serial = [0]
+    violations = []
+    real_open = builtins.open
+
+    @contextlib.contextmanager
+    def read_only():
+        names = ("makedirs", "mkdir", "remove", "unlink", "rename", "replace", "rmdir")
+        saved = {n: getattr(os, n) for n in names}
+
+        def guarded_open(file, mode="r", *a, **k):
+            if any(c in str(mode) for c in "wax+"):
+                violations.append("open(%r, %r)" % (file, mode))
+            return real_open(file, mode, *a, **k)
+
+        def tripwire(name):
+            def hit(*a, **k):
+                violations.append("os.%s%r" % (name, a))
+                raise OSError("--freezes must not write")
+            return hit
+        builtins.open = guarded_open
+        for n in names:
+            setattr(os, n, tripwire(n))
+        try:
+            yield
+        finally:
+            builtins.open = real_open
+            for n, fn in saved.items():
+                setattr(os, n, fn)
+
+    def put(path, lines):
+        with real_open(path, "wb") as f:
+            f.write(("\n".join(lines) + "\n").encode("utf-8"))
+
+    def run(flight, *extra):
+        """Write the flight's logs (a graphics log and, when it has one, a runtime log) to a directory of their own and run --freezes through main(); (exit code, output)."""
+        gfx, rt = flight
+        serial[0] += 1
+        d = os.path.join(tmp, "f%02d" % serial[0])
+        os.makedirs(d)
+        gp = os.path.join(d, GFX_NAME)
+        put(gp, gfx)
+        if rt is not None:
+            put(os.path.join(d, RT_NAME), rt)
+        buf = io.StringIO()
+        with read_only(), contextlib.redirect_stdout(buf):
+            rc = main(["--file", gp, "--freezes"] + list(extra))
+        return rc, buf.getvalue()
+
+    def rx(pattern):
+        return re.compile(pattern, re.M)
+
+    def seen(item, out):
+        return item.search(out) is not None if hasattr(item, "search") else item in out
+
+    def case(what, result, rc_want, verdict, *has, absent=()):
+        rc, out = result
+        problems = []
+        if rc != rc_want:
+            problems.append("exit %d, wanted %d" % (rc, rc_want))
+        if verdict and ("freezes verdict: %s (" % verdict) not in out:
+            problems.append("the verdict is not %s" % verdict)
+        problems += ["lacks %r" % getattr(h, "pattern", h) for h in has if not seen(h, out)]
+        problems += ["has %r" % getattr(a, "pattern", a) for a in absent if seen(a, out)]
+        if problems:
+            fail("%s: %s:\n%s" % (what, "; ".join(problems), out))
+
+    never_pass = ("freezes verdict: PASS", "freezes verdict: WARN")
+
+    try:
+        # ---- the parser, on the exact lines ----
+        gfx, rt = native_flight()
+        fz = parse_freezes(os.path.join(tmp, GFX_NAME), "\n".join(gfx) + "\n", os.path.join(tmp, RT_NAME), "\n".join(rt) + "\n")
+        if fz["unparsed"]["count"]:
+            fail("exact lines were left unparsed: %r" % fz["unparsed"])
+        if (fz["xr_armed"] is None or fz["ep_armed"] is None or fz["slow_armed"] is None or fz["vram_state"] is None or fz["vram_state"]["state"] != "armed"
+                or fz["vram_state"]["adapter"] != "NVIDIA GeForce RTX 4090"):
+            fail("the armed lines read as %r" % ({k: fz[k] for k in ("xr_armed", "ep_armed", "slow_armed", "vram_state")},))
+        if [e["type"] for e in fz["xr_events"]] != ["session_state_changed"] * 6 or fz["xr_events"][5]["f"]["to"] != "VISIBLE":
+            fail("the vendor events read as %r" % fz["xr_events"])
+        if len(fz["episodes"]) != 1 or fz["episodes"][0]["ms"] != 83.1 or fz["episodes"][0]["seq"] != 96600 or len(fz["episode_ends"]) != 1 or fz["episode_ends"][0]["slow"] != 567:
+            fail("the episode lines read as %r / %r" % (fz["episodes"], fz["episode_ends"]))
+        evs = [l["event"] for l in fz["slow_lines"]]
+        if evs != ["SLOW", "still_slow", "end"] or fz["slow_lines"][0]["vram"]["local_used_mb"] != 7421.0 or fz["slow_lines"][0]["owner"] != "vendor_end_frame" \
+                or fz["slow_lines"][2]["summary"] != "held by the vendor runtime's xrEndFrame: 83.1 ms of every 100.3 ms frame (83%)":
+            fail("the slow-regime lines read as %r" % fz["slow_lines"])
+        if len(fz["vram"]) != 10 or fz["vram"][0]["reason"] != "armed" or fz["vram"][1]["kv"]["local_pct"] is None:
+            fail("the vram lines read as %r" % fz["vram"][:2])
+        if fz["display_hz"] != 72.0:
+            fail("display_frequency reads as %r" % fz["display_hz"])
+        regimes = _fz_slow_regimes(fz, True)
+        day = (datetime.date(2026, 10, 2) - EPOCH.date()).days * DAY
+        if len(regimes) != 1 or abs(regimes[0]["start"] - (day + RS)) > 1e-3 or abs(regimes[0]["end"] - (day + RS + 57.1)) > 1e-3 or regimes[0]["owner"] != "vendor_end_frame":
+            fail("the native regime reads as %r" % (regimes,))
+
+        # ---- a new-build flight with a slow regime: SLOW, never PASS, the owner named ----
+        n1 = run(native_flight(), "--expect-build", VERSION)
+        case("a new-build flight with a regime held by the vendor's xrEndFrame", n1, 4, "SLOW",
+             "SLOW REGIME (1 found: the frame rate under 40% of the display's for 5 s or more; a state the session was in, not one frame; SLOW is set only by a regime "
+             "the vendor runtime or EDVR holds, a load the game's frame holds is INFO, a slow stretch of its scenes or no named owner a WARN):",
+             "  #1  11:14:38.100 to 11:15:35.200 local  (57.1 s, ended: recovered)  [SLOW] the build's own detector",
+             "rate: 9.97 fps against the display's 72.00 Hz (13.8% of it; a regime is under 40%), frames of 100.3 ms",
+             "owner: held by the vendor runtime's xrEndFrame: 83.1 ms of every 100.3 ms frame (83%)",
+             "context: scene (0 loading frame(s) and 0 end(s) with no layers of 567 frames)",
+             "a frame went (mean ms over the whole regime): xrEndFrame 83.10 (longest 84.74), pose wait 0.00, swapchain calls 0.04, EDVR copy 0.40, EDVR work 0.30, the game 16.16",
+             "graphics memory at the SLOW line (11:14:43.100): local 7421 of 10863 MB (68.3%), non-local 316 of 16311 MB (1.9%)",
+             "lines: SLOW 11:14:43.100; still_slow 11:15:13.100; end 11:15:37.200",
+             "vendor events within 10 s of it (1): 11:14:39.100 session_state_changed FOCUSED -> VISIBLE (read 1.250 ms after the runtime stamped it)",
+             "END-FRAME EPISODES (a call into the vendor's xrEndFrame of 3 display periods or more",
+             rx(r"^  1   11:14:38\.300 +96600 +83\.1 +5\.98  synchronous runtime  FOCUSED +0\.0016/0\.0002/0\.0385/0\.0005, 0\.3120$"),
+             "  episode 1 over at 11:15:35.400 (normal_calls): 575 call(s), 567 of them slow, 57.0 s, p50 83.5 ms, max 84.7 ms (6.10 periods), sequences 96600-97175",
+             "VENDOR EVENTS (xrPollEvent: what the vendor's runtime told the session):",
+             "last session state FOCUSED", "11:14:39.100  #6  session_state_changed FOCUSED -> VISIBLE",
+             "VRAM (this process's graphics memory against the budget the OS gives it",
+             "  armed at 10:50:15.000 on adapter NVIDIA GeForce RTX 4090",
+             "  SLOW  SLOW REGIME: 11:14:38.100 to 11:15:35.200 local (57.1 s), 9.97 fps against the display's 72 Hz (14%), held by the vendor runtime's xrEndFrame: 83.1 ms of every 100.3 ms frame (83%)",
+             "  note  INSTRUMENT: the slow-regime detector (native_slow_regime) armed at 10:50:14.700",
+             "  note  INSTRUMENT: the graphics-memory watch armed at 10:50:15.000 on adapter NVIDIA GeForce RTX 4090",
+             "  note  END-FRAME EPISODES: 1 start line(s) and 1 end line(s); the longest xrEndFrame call 83.1 ms (6.0 display periods, sequence 96600, at 11:14:38.300)",
+             "  PASS  INSTRUMENT: a `monitor: long frame counts` line is in the graphics log",
+             "freezes verdict: SLOW (0 STOP, 0 WARN, 1 SLOW): 11:14:38.100 to 11:15:35.200 local (57 s) at 10.0 fps of the display's 72 Hz, held by the vendor runtime's xrEndFrame: 83.1 ms of every 100.3 ms frame (83%). STOP:",
+             absent=never_pass + ("  PASS  SLOW REGIME", "reconstructed", "RECONSTRUCTED", "DELIBERATE"))
+        # The slow-regime finding is the first of the finding rows, and the SLOW rows are counted in the verdict.
+        rows = [l for l in n1[1].splitlines() if l[:6] in ("  SLOW", "  note", "  PASS", "  WARN", "  STOP")]
+        if not rows or not rows[0].startswith("  SLOW  SLOW REGIME:"):
+            fail("the SLOW REGIME row should come first among the finding rows: %r" % rows[:2])
+        case("the same flight, a session that stopped inside the regime", run(native_flight(crash=True)), 4, "SLOW",
+             "  #1  11:14:38.100 to 11:15:13.100 local  (35.0 s, still going when the log stopped)  [SLOW] the build's own detector",
+             "(still going when the log stopped)", "  note  END-FRAME EPISODES: episode 1 started and has no end line: the session ended inside it",
+             absent=never_pass + ("ended: recovered",))
+        case("no still_slow line: the regime's own end line carries the whole of it", run(native_flight(still=False)), 4, "SLOW", "lines: SLOW 11:14:43.100; end 11:15:37.200")
+        # ---- who holds it decides whether it is a SLOW: the vendor runtime and EDVR set it, the game's own frame and no named owner do not ----
+        for owner, sentence in (("edvr_copy", "held by EDVR's copy of the eyes"),
+                                ("edvr_work", "held by EDVR's own work in the runtime"), ("vendor_wait_frame", "held by the vendor runtime's xrWaitFrame and xrBeginFrame (the pose wait)"),
+                                ("vendor_swapchain", "held by the vendor runtime's swapchain calls (xrAcquire, xrWait, xrReleaseSwapchainImage)")):
+            case("a regime EDVR's or the vendor's own calls hold is a SLOW: %s" % owner,
+                 run(native_flight(owner=owner, share=0.60, episodes=False, summary="%s: 60.0 ms of every 100.3 ms frame (60%%)" % sentence)), 4, "SLOW",
+                 "  #1  11:14:38.100 to 11:15:35.200 local  (57.1 s, ended: recovered)  [SLOW] the build's own detector", "  SLOW  SLOW REGIME: 11:14:38.100 to 11:15:35.200 local (57.1 s)",
+                 "%s: 60.0 ms of every 100.3 ms frame (60%%)" % sentence, absent=never_pass + ("not a SLOW",))
+        case("an owner that holds under 35% of the frame is not named, and is a WARN, not a SLOW", run(native_flight(owner="none", share=0.31)), 0, "WARN",
+             "owner: no single owner; the largest is the game's own frame at 31% of a 100.3 ms frame",
+             "  #1  11:14:38.100 to 11:15:35.200 local  (57.1 s, ended: recovered)  [WARN] the build's own detector", "      not a SLOW: no single owner holds 35% of a frame",
+             "  WARN  SLOW REGIME: 11:14:38.100 to 11:15:35.200 local (57.1 s), 9.97 fps against the display's 72 Hz (14%), no single owner; the largest is the game's own frame at "
+             "31% of a 100.3 ms frame; not a SLOW: no single owner holds 35% of a frame",
+             "freezes verdict: WARN (0 STOP, 1 WARN) [+1 slow stretch(es) the game's own frame or no named owner held, listed above: not a SLOW]",
+             absent=("  SLOW  ", "freezes verdict: SLOW", "freezes verdict: PASS"))
+        case("a regime the game's own frame holds while it submits scenes is a WARN: a GPU- or CPU-bound stretch, not a SLOW",
+             run(native_flight(owner="game", share=0.72, episodes=False, context="scene")), 0, "WARN",
+             "  #1  11:14:38.100 to 11:15:35.200 local  (57.1 s, ended: recovered)  [WARN] the build's own detector", "context: scene (0 loading frame(s) and 0 end(s) with no layers of 567 frames)",
+             "      not a SLOW: the game's own frame while it submitted scenes: a GPU- or CPU-bound stretch of the game",
+             "  WARN  SLOW REGIME: 11:14:38.100 to 11:15:35.200 local (57.1 s), 9.97 fps against the display's 72 Hz (14%), held by the game's own frame: 16.2 ms of every 100.3 ms "
+             "frame (72%); not a SLOW: the game's own frame while it submitted scenes: a GPU- or CPU-bound stretch of the game",
+             "freezes verdict: WARN (0 STOP, 1 WARN) [+1 slow stretch(es) the game's own frame or no named owner held, listed above: not a SLOW]",
+             absent=("  SLOW  ", "freezes verdict: SLOW", "freezes verdict: PASS"))
+        case("a regime the game's own frame holds during a load is INFO: it sets neither SLOW nor WARN, and the verdict says it was there",
+             run(native_flight(owner="game", share=0.72, episodes=False, context="loading", loading=567)), 0, "PASS",
+             "  #1  11:14:38.100 to 11:15:35.200 local  (57.1 s, ended: recovered)  [INFO] the build's own detector",
+             "context: loading (567 loading frame(s) and 0 end(s) with no layers of 567 frames)",
+             "      not a SLOW: the game's own frame during a load (the runtime's frames were its own loading frames)",
+             "  note  SLOW REGIME: 11:14:38.100 to 11:15:35.200 local (57.1 s), 9.97 fps against the display's 72 Hz (14%), held by the game's own frame: 16.2 ms of every 100.3 ms "
+             "frame (72%); not a SLOW: the game's own frame during a load (the runtime's frames were its own loading frames)",
+             "freezes verdict: PASS (0 STOP, 0 WARN) [+1 slow stretch(es) the game's own frame or no named owner held, listed above: not a SLOW]",
+             absent=("  SLOW  ", "  WARN  ", "freezes verdict: SLOW", "freezes verdict: WARN"))
+        case("the same during ends with no layers: a load too", run(native_flight(owner="game", share=0.72, episodes=False, context="no_layers", empty=567)), 0, "PASS",
+             "[INFO] the build's own detector", "context: no_layers (0 loading frame(s) and 567 end(s) with no layers of 567 frames)",
+             "      not a SLOW: the game's own frame during a load (the runtime's frames were ends with no layers)", absent=("  SLOW  ", "  WARN  ", "freezes verdict: SLOW"))
+        case("a game-owned regime from a build that writes no context is a WARN: nothing says it was a load",
+             run(native_flight(owner="game", share=0.72, episodes=False, with_context=False)), 0, "WARN",
+             "[WARN] the build's own detector", "context: the line has none (a build from before it)",
+             "      not a SLOW: the game's own frame (the line does not say whether it was a load)", absent=("  SLOW  ", "freezes verdict: SLOW"))
+        case("no frame reached xrEndFrame: the owner is nothing, and a WARN", run(native_flight(owner="no_frames")), 0, "WARN",
+             "owner: held by nothing: no frame reached xrEndFrame in this window", "[WARN] the build's own detector", "      not a SLOW: no frame reached xrEndFrame",
+             absent=("  SLOW  ", "freezes verdict: SLOW"))
+        # A vendor regime and a load in one session: SLOW, naming the vendor's only, with the load a row and a count of its own.
+        both = native_flight(extra_rt=[r(RS + 125.0, slow("SLOW", 2, 5.0, 5.0, 50, owner="game", share=0.72, context="loading", loading=50)),
+                                       r(RS + 143.0, slow("end", 2, 15.0, 15.0, 150, owner="game", share=0.72, context="loading", loading=150, reason="recovered"))], summary_regimes=2)
+        case("a vendor regime and a load in one session: SLOW names the vendor's regime only, and says the other was there", run(both), 4, "SLOW",
+             "SLOW REGIMES (2 found:", "  #1  11:14:38.100 to 11:15:35.200 local  (57.1 s, ended: recovered)  [SLOW] the build's own detector",
+             rx(r"^  #2  11:16:38\.100 to 11:16:53\.100 local  \(15\.0 s, ended: recovered\)  \[INFO\] the build's own detector$"),
+             "  SLOW  SLOW REGIME: 11:14:38.100 to 11:15:35.200 local (57.1 s), 9.97 fps against the display's 72 Hz (14%), held by the vendor runtime's xrEndFrame",
+             "  note  SLOW REGIME: 11:16:38.100 to 11:16:53.100 local (15.0 s), 9.97 fps against the display's 72 Hz (14%), held by the game's own frame",
+             "freezes verdict: SLOW (0 STOP, 0 WARN, 1 SLOW): 11:14:38.100 to 11:15:35.200 local (57 s) at 10.0 fps of the display's 72 Hz, held by the vendor runtime's xrEndFrame: "
+             "83.1 ms of every 100.3 ms frame (83%) [+1 slow stretch(es) the game's own frame or no named owner held, listed above: not a SLOW]. STOP:",
+             absent=never_pass)
+
+        # ---- a new-build flight with no regime: the detector's own PASS ----
+        quiet = native_flight(regimes=0, episodes=False)
+        case("a new-build flight with no regime", run(quiet), 0, "PASS",
+             "  PASS  SLOW REGIME: the slow-regime detector was armed at 10:50:14.700 and wrote no SLOW line; its last summary (11:20:00.000) saw 82000 frame(s) in 330 s, 0 s of them slow",
+             "  note  END-FRAME EPISODES: no xrEndFrame call of 3 display periods or more (no start line, 0 end line(s))", "  note  VENDOR EVENTS: 5 event line(s) in the log",
+             absent=("SLOW REGIME (", "  SLOW  ", "  WARN  ", "  STOP  "))
+        case("a detector that wrote no summary says why", run((quiet[0], [l for l in quiet[1] if "native_slow_regime_summary" not in l])), 0, "PASS",
+             "wrote no SLOW line; it wrote no summary, so the session did not close cleanly or ran under five minutes")
+        case("a summary that counts two regimes beside one regime's lines is a WARN", run(native_flight(summary_regimes=2)), 4, "SLOW",
+             "  WARN  SLOW REGIME: the detector's summary at 11:20:00.000 counts 2 regime(s) but the log has native_slow_regime lines for 1")
+
+        # ---- the instruments' own armed lines ----
+        case("a new-build graphics log read alone: the runtime's lines are not looked for, and the report says so", run((native_flight()[0], None)), 0, "WARN",
+             "  note  SLOW REGIME: the slow-regime detector writes to the runtime log, which was not read, so its SLOW lines were not looked for",
+             "  note  INSTRUMENT: the graphics-memory watch armed at 10:50:15.000 on adapter NVIDIA GeForce RTX 4090", "  WARN  INSTRUMENT: no runtime log was read",
+             "VRAM (this process's graphics memory", absent=("  SLOW  ", "END-FRAME EPISODES (", "VENDOR EVENTS (", "this build has no slow-regime detector"))
+        case("a runtime log with the slow-regime detector's line but not the episodes'", run(native_flight(arms=("xr", "slow"))), 4, "SLOW",
+             "  WARN  INSTRUMENT: the runtime log has no armed line for the end-frame episodes (native_end_frame_episodes) although it has others of this arc")
+        case("a graphics log with no vram armed line beside a runtime log with the arc's", run((native_flight()[0][:2] + native_flight()[0][3:], native_flight()[1])), 4, "SLOW",
+             "  WARN  INSTRUMENT: the graphics log has no `vram:` armed or unavailable line")
+        case("the graphics-memory watch unavailable: a note, and the SLOW lines say so", run(native_flight(vram_mode="unavailable")), 4, "SLOW",
+             "  note  INSTRUMENT: the graphics-memory watch is UNAVAILABLE on this machine (this device has no IDXGIAdapter3 (DXVK or Wine without it))",
+             "graphics memory: the lines say vram=unavailable", "UNAVAILABLE: this device has no IDXGIAdapter3", absent=("  WARN  INSTRUMENT",))
+
+        # ---- the end-frame episodes against the regime ----
+        case("a regime held by xrEndFrame with no episode line in it is a WARN: one instrument contradicts the other", run(native_flight(episodes=False)), 4, "SLOW",
+             "  WARN  END-FRAME EPISODES: regime #1 is held by the vendor's xrEndFrame but the episode instrument wrote no start or end line in it")
+        case("a regime whose mean xrEndFrame is under 3 periods owes no episode line", run(native_flight(episodes=False, end_ms=25.0, share=0.80)), 4, "SLOW",
+             "held by the vendor runtime's xrEndFrame: 25.0 ms of every 100.3 ms frame (80%)", absent=("  WARN  END-FRAME EPISODES",))
+        case("a periodic summary older than a later regime is not a mismatch",
+             run(native_flight(crash=True, extra_rt=[r(RS - 5.0, slow_summary("periodic", regimes=0, slow_seconds=0))])), 4, "SLOW",
+             absent=("  WARN  SLOW REGIME: the detector's summary",))
+
+        # ---- the vendor's events and the graphics memory ----
+        lost = native_flight(extra_rt=[r(RS + 2.0, xr_event(7, "events_lost", ",lost_count=3")), r(RS + 3.0, xr_event(8, "instance_loss_pending", ",loss_time=1234567990123"))])
+        case("events_lost and instance_loss_pending are WARNs, listed beside the regime", run(lost), 4, "SLOW",
+             "  WARN  VENDOR EVENTS: the vendor runtime reported events_lost 1 time(s) (first at 11:14:40.100, lost_count=3)",
+             "  WARN  VENDOR EVENTS: the vendor runtime reported instance_loss_pending at 11:14:41.100", "vendor events within 10 s of it (3):", "events_lost (lost_count=3)")
+        over = native_flight(extra_gfx=[g(RS + 6.0, vram("over_budget", lu=11000)), g(RS + 20.0, vram("back_under_budget", lu=10100)), g(RS + 21.0, vram("pressure", lu=9900))])
+        case("graphics memory over the OS's budget is a WARN, listed with its crossings", run(over), 4, "SLOW",
+             "  WARN  VRAM: graphics memory went over the OS's budget 1 time(s), first at 11:14:44.100 (local 11000 of 10863 MB (101.3%), non-local 316 of 16311 MB (1.9%))",
+             "  note  VRAM: 1 pressure line(s) (local use at or above 90% of the budget), the highest 91.1% at 11:14:59.100",
+             rx(r"^  11:14:44\.100  over_budget +local 11000 of 10863 MB \(101\.3%\)"), rx(r"^  11:14:58\.100  back_under_budget +local 10100 of 10863 MB \(93\.0%\)"))
+        case("a quiet VRAM watch", run(quiet), 0, "PASS",
+             rx(r"^  note  VRAM: 10 vram line\(s\), none over the budget or at 90% of it; the highest local use 68\.3% at "))
+        case("an undecoded event type: the line the runtime writes once by number", run(native_flight(extra_rt=[r(RS + 2.0, "native_xr_event,n=7,type=unknown,number=1000047001,first_of_type=1")])),
+             4, "SLOW", "an event of type number 1000047001 that the runtime does not decode (the first of its type)")
+        case("the event cap's notice line is read, not counted as unparsed",
+             run(native_flight(extra_rt=[r(RS + 2.0, "native_xr_event,n=300,suppressed=1,limit=200,the rest of the decoded events are counted in native_xr_events_summary")])),
+             4, "SLOW", "the cap of 200 decoded event lines was reached", absent=("PARSE:",))
+
+        # ---- a line the reader cannot read ----
+        case("an arc line in a format this reader never saw", run(native_flight(extra_rt=[r(RS + 2.0, "native_slow_regime,event=BOGUS,regime=1")])), 4, "SLOW",
+             "  WARN  PARSE: 1 line(s) open like a freeze-diagnostics line but match none of the formats this reads")
+
+        # ---- the test trigger: advanced.slow_test_ms ----
+        TH = T0 + 90.0
+        t_armed = ("slow test: advanced.slow_test_ms = 80. 90 s from now the runtime holds every xrEndFrame it makes 80 ms longer, for 40 s, to test the end-frame episode and "
+                   "slow-regime lines. Set it back to 0.")
+        t_began = "slow test: the hold begins now: every xrEndFrame is held 80 ms longer for 40 s."
+        t_ended = "slow test: the hold ended. The runtime's frames are as they were."
+
+        def test_flight(hold=True, episodes=True, regime=True, still=True, end=True, fig=True, ended=True):
+            gfx, rt = native_flight(regimes=0, episodes=False)
+            gfx = gfx[:-1] + [g(T0 + 2.0, t_armed), g(TH, t_began)] + ([g(TH + 40.0, t_ended)] if ended else []) + gfx[-1:]
+            rt = [l for l in rt if "native_xr_events_summary" not in l and "native_slow_regime_summary" not in l and "native_end_frame_episodes_summary" not in l]
+            if hold:
+                rt.append(r(TH, "native_end_frame_hold,test=1,state=began,ms=80,source=advanced.slow_test_ms,inside=timed_xrEndFrame_region"))
+                rt.append(r(TH + 40.0, "native_end_frame_hold,test=1,state=ended,held_calls=392"))
+            if episodes:
+                rt.append(r(TH + 0.1, episode(1, 51000, 95.1)))
+                rt.append(r(TH + 40.2, episode_end(1, 400, 392, 40000.0, 94.8, 96.0, 51000, 51400)))
+            if regime:
+                f = VRAM_FIG if fig else "vram=unavailable"
+                rt.append(r(TH + 5.0, slow("SLOW", 1, 5.0, 5.0, 53, end_ms=94.9, frame_ms=106.4, share=0.892, fps=9.4, figures=f)))
+                if still:
+                    rt.append(r(TH + 35.0, slow("still_slow", 1, 35.0, 30.0, 282, end_ms=94.9, frame_ms=106.4, share=0.892, fps=9.4, figures=f)))
+                if end:
+                    rt.append(r(TH + 42.0, slow("end", 1, 40.0, 40.0, 376, end_ms=94.9, frame_ms=106.4, share=0.892, fps=9.4, figures=f, reason="recovered")))
+            rt.append(r(CLOSE, ep_summary("session_close", episodes=1 if episodes else 0, start_lines=1 if episodes else 0, end_lines=1 if episodes else 0)))
+            rt.append(r(CLOSE, xr_summary("session_close")))
+            rt.append(r(CLOSE, slow_summary("session_close", regimes=1 if regime else 0, slow_seconds=40 if regime else 0)))
+            return gfx, rt
+
+        case("the test hold is a SLOW regime with its whole chain: SLOW verdict, and the regime is named deliberate", run(test_flight()), 4, "SLOW",
+             "  PASS  SLOW TEST: the deliberate 80 ms hold at 10:51:42.000 (40 s): an episode start line of 95.1 ms, 1 episode end line(s), SLOW regime #1 held by the vendor "
+             "runtime's xrEndFrame, with a still_slow and an end line",
+             "(deliberate: advanced.slow_test_ms)", "; DELIBERATE: the slow test's hold (advanced.slow_test_ms)", "SLOW TEST (advanced.slow_test_ms:",
+             "10:51:42.000  graphics log: the hold begins now (80 ms for 40 s)", "10:51:42.000  runtime log: native_end_frame_hold state=began ms=80",
+             "10:52:22.000  runtime log: native_end_frame_hold state=ended held_calls=392", "10:50:14.000  graphics log: the key was read (80 ms, the hold begins 90 s in)",
+             rx(r"^freezes verdict: SLOW \(0 STOP, 0 WARN, 1 SLOW\): 10:51:42\.000 to 10:52:22\.000 local \(40 s\) at 9\.4 fps of the display's 72 Hz, held by the vendor runtime's "
+                r"xrEndFrame: 94\.9 ms of every 106\.4 ms frame \(89%\) \(deliberate: advanced\.slow_test_ms\)"), absent=never_pass + ("  WARN  ", "  STOP  "))
+        case("the hold never reached the runtime: the chain lacks it, the episode and the regime", run(test_flight(hold=False, episodes=False, regime=False)), 0, "WARN",
+             "  WARN  SLOW TEST: the deliberate 80 ms hold at 10:51:42.000 (40 s), but the chain lacks the runtime's native_end_frame_hold state=began line (the hold never reached the "
+             "runtime); the runtime's native_end_frame_hold state=ended line; an end-frame episode start line of at least 72 ms; an end-frame episode end line; a SLOW regime that "
+             "begins within 15 s of the hold")
+        case("a test with no still_slow and no end line", run(test_flight(still=False, end=False)), 4, "SLOW",
+             "  WARN  SLOW TEST: the deliberate 80 ms hold at 10:51:42.000 (40 s), but the chain lacks a still_slow line (the hold lasted 40 s; one is written 30 s after the SLOW line); "
+             "the regime's end line")
+        case("a test whose SLOW line has no graphics-memory figures beside an armed watch", run(test_flight(fig=False)), 4, "SLOW",
+             "the chain lacks the graphics-memory figures on the SLOW line")
+        case("the key read and no hold line: the session ended first", run((quiet[0][:-1] + [g(T0 + 2.0, t_armed), quiet[0][-1]], quiet[1])), 0, "WARN",
+             "  WARN  SLOW TEST: advanced.slow_test_ms = 80 was read, but the log has no `the hold begins now` line: the session ended before the hold began")
+        case("a hold the graphics log never said ended, long after it should have", run(test_flight(ended=False)), 4, "SLOW",
+             "the chain lacks the graphics log's `the hold ended` line")
+
+        # ---- a v0.18.0 flight: the older lines only, the regime put back together ----
+        legacy = run(legacy_flight(), "--expect-build", VERSION)
+        case("a v0.18.0 flight: the regime is rebuilt from LONG FRAME, native_long_cycle, FREEZE and vScreen totals lines, held by the vendor's xrEndFrame", legacy, 4, "SLOW",
+             "SLOW REGIME (1 found:",
+             "  #1  11:14:38.100 to 11:15:35.238 local  (57.1 s)  [SLOW] RECONSTRUCTED from the older lines: this build has no slow-regime detector",
+             rx(r"^      rate: 9\.9[0-9] fps against the display's 72 Hz \(13\.[0-9]% of it; a regime is under 40%\), frames of 100\.[0-9] ms$"),
+             rx(r"^      owner: held by the vendor runtime's xrEndFrame: 82\.7 ms of every 100\.[0-9] ms frame \(82%\)$"),
+             "(p50 of each phase in native_submit_phases window 50: sequences 96730-96985, ended 11:15:16.800; 256 of its 256 frames are inside the run): xrEndFrame 82.7 ms = 6.0 display "
+             "periods of 13.889 ms",
+             "GPU clock: native_producer_gpu window 50 (ended 11:15:20.100): EDVR's copy of the eyes took p95 75.6 ms, max 79.4 ms on the GPU; p95 0.04 ms in window 48, before it",
+             "evidence: 12 LONG FRAME line(s)", "native_long_cycle line(s)", "1 FREEZE line(s)", "3 vScreen totals window(s) under 40% of the display's rate (26, 10, 10 fps)",
+             rx(r"^      frame rate from: runtime sequence 96600 to 97167 over 57\.1 s = 9\.9[0-9] fps; graphics frames 102432 to 102999 over 57\.1 s = 9\.9[0-9] fps$"),
+             "  SLOW  SLOW REGIME: 11:14:38.100 to 11:15:35.238 local (57.1 s), 9.9", "(reconstructed from the older lines)",
+             "  note  INSTRUMENT: none of the headset-lock arc's lines (vendor events, end-frame episodes, slow-regime detector, graphics memory) is in this log: a build before them",
+             "freezes verdict: SLOW (0 STOP, 0 WARN, 1 SLOW): 11:14:38.100 to 11:15:35.238 local (57 s) at 9.9 fps of the display's 72 Hz, held by the vendor runtime's xrEndFrame",
+             "FREEZES (2 FREEZE line(s);", absent=never_pass + ("  PASS  SLOW REGIME", "DELIBERATE", "SLOW TEST", "VENDOR EVENTS (", "END-FRAME EPISODES ("))
+        if "11:15:41" in legacy[1].split("freezes verdict")[1].split(". STOP")[0]:
+            fail("the FREEZE 6.2 s after the regime's end is its own freeze, not the regime's:\n%s" % legacy[1])
+        case("the same flight with the graphics log alone: the regime stands, the owner is unknown, so it is a WARN and not a SLOW", run((legacy_flight()[0], None)), 0, "WARN",
+             "  #1  11:14:38.100 to 11:15:35.238 local  (57.1 s)  [WARN] RECONSTRUCTED from the older lines",
+             "owner: owner unknown: no runtime log was read, so no native_submit_phases window says which call held the frames", "      not a SLOW: no owner could be named",
+             "  WARN  SLOW REGIME: 11:14:38.100 to 11:15:35.238 local (57.1 s)", "; not a SLOW: no owner could be named", "  WARN  INSTRUMENT: no runtime log was read",
+             "freezes verdict: WARN (0 STOP, 2 WARN) [+1 slow stretch(es) the game's own frame or no named owner held, listed above: not a SLOW]",
+             absent=("  SLOW  ", "freezes verdict: SLOW"))
+        case("a runtime log with no native_submit_phases window over the run: the owner is unknown too, a WARN",
+             run((legacy_flight()[0], [l for l in legacy_flight()[1] if "native_submit_phases" not in l])), 0, "WARN",
+             "owner: owner unknown: the runtime log has no native_submit_phases window covering the run", "[WARN] RECONSTRUCTED from the older lines", absent=("  SLOW  ", "freezes verdict: SLOW"))
+        case("a menu Presenting at 300 frames a second while the runtime's frames crawl is still a regime: the runtime's sequence is the rate, not the Presents",
+             run(legacy_flight(gfx_fps=300.0)), 4, "SLOW",
+             rx(r"^      rate: 9\.9[0-9] fps against the display's 72 Hz"),
+             rx(r"^      frame rate from: runtime sequence 96600 to 97167 over 57\.1 s = 9\.9[0-9] fps; graphics frames 102431 to 119572 over 57\.1 s = (299\.99|300\.00) fps$"),
+             "[SLOW] RECONSTRUCTED from the older lines")
+        case("long frames now and then at a steady 72 fps are hitches, not a regime", run(legacy_flight(hitches=True)), 0, None,
+             "  note  SLOW REGIME: this build has no slow-regime detector, and its older lines (LONG FRAME, native_long_cycle, FREEZE, vScreen totals) hold no run of 5 s or more with "
+             "the frame rate under 40% of the display's; that cannot prove there was none", absent=("SLOW REGIME (", "  SLOW  ", "freezes verdict: SLOW"))
+        windows_only = (list(gopen) + [g(RS + 20.0 * k, vscreen(160, 20000)) for k in range(3)] + [g(CLOSE, counts_line())] + [g(RS - 100.0, long_frame(61.0, 5, 6))], None)
+        case("three vScreen windows at 8 fps and nothing else: a regime from the windows alone, with no owner to name, so a WARN", run(windows_only), 0, "WARN",
+             "[WARN] RECONSTRUCTED from the older lines", "evidence: 3 vScreen totals window(s) under 40% of the display's rate (8, 8, 8 fps)",
+             "frame rate from: the median of the vScreen windows' own rates", "bounds: no LONG FRAME, native_long_cycle or FREEZE line is in the run",
+             "good to about 20 s")
+        case("a v0.18.0 flight and a wrong --expect-build is still the build mismatch", run(legacy_flight(), "--expect-build", "0.18.1-9-g1234567"), 2, None, "BUILD MISMATCH",
+             absent=("freezes verdict",))
+
+        # ---- the command line ----
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                main(["--help"])
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    fail("--help exited %r" % (e.code,))
+        helped = " ".join(buf.getvalue().split())
+        for phrase in ("SLOW REGIME", "4 for a slow regime", "END-FRAME EPISODES", "VENDOR EVENTS", "VRAM", "SLOW TEST", "advanced.slow_test_ms"):
+            if phrase not in helped:
+                fail("--help should say %r:\n%s" % (phrase, buf.getvalue()))
+            if phrase not in " ".join((__doc__ or "").split()):
+                fail("the module docstring should say %r" % phrase)
+        if violations:
+            fail("--freezes wrote, or tried to: %s" % "; ".join(violations[:5]))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("slow regime: the checks stopped at an exception (above)")
+        ok = False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Locate and read EDVR flight logs.")
@@ -7806,6 +9515,8 @@ def main(argv=None):
                          "verdict (strips drawn against eye takes, pending, stood-down, a stale "
                          "build, the OWNS sentence, a fault); exit 0 for PASS or WARN, 1 for "
                          "STOP, 3 when the log has no route line")
+    ap.add_argument("--map-bounce", action="store_true",
+                    help="report issue 65's flat constant-buffer Map bounce: 5 s summaries, adaptive decision, verification and fail-safe trips; PASS / WARN / STOP, exit 3 when the instrument never ran")
     ap.add_argument("--freezes", action="store_true",
                     help="report a flight's freeze diagnostics (issue 63): the graphics log's "
                          "FREEZE lines (a frame of 250 ms or more, never rate limited) joined "
@@ -7815,10 +9526,20 @@ def main(argv=None):
                          "cycles of 250 ms or more with no FREEZE line; the counts by size and "
                          "the worst few of each half; the sampler's owner census; and a PASS / "
                          "WARN / STOP verdict (INSTRUMENT, UNWRITTEN FREEZES, FREEZE LINES, "
-                         "SAMPLER, SUSPENSION, FREEZE TEST, NO FREEZE). Pairs the runtime log like --tally "
+                         "SAMPLER, SUSPENSION, FREEZE TEST, NO FREEZE). Also the headset-lock "
+                         "arc: SLOW REGIME (the frame rate under 40%% of the display's for 5 s or "
+                         "more, who held it, and the graphics memory then: from the build's own "
+                         "native_slow_regime lines, or put back together from a v0.18.0 log's "
+                         "LONG FRAME, native_long_cycle, FREEZE and vScreen totals lines), "
+                         "END-FRAME EPISODES, VENDOR EVENTS, VRAM and SLOW TEST "
+                         "(advanced.slow_test_ms). A log that holds a slow regime the vendor "
+                         "runtime, EDVR's copy or EDVR's own work holds gets a SLOW verdict, never "
+                         "PASS or WARN; one the game's own frame holds is INFO (a load) or WARN "
+                         "(its scenes) and never sets SLOW. Pairs the runtime log like --tally "
                          "periodic (--runtime-file names one). Exit 0 for PASS or WARN, 1 for "
                          "STOP, 2 for a wrong build, 3 when the log holds none of the freeze "
-                         "lines (a build from before the freeze logging)")
+                         "lines (a build from before the freeze logging), 4 for a slow regime "
+                         "the vendor runtime or EDVR holds (and no STOP)")
     ap.add_argument("--window-ms", type=float, default=100.0,
                     help="with --tally periodic, a long frame coincides with a "
                          "periodic event when the event's end time is inside "
@@ -7948,6 +9669,8 @@ def main(argv=None):
         return print_maps_sharp(text)
     if args.route_curve:
         return print_route_curve(text, path)
+    if args.map_bounce:
+        return print_map_bounce(text, path)
     if args.freezes:
         return print_freezes(path, text, ver, want, args, native_dirs)
     if args.tally == "periodic":
@@ -7970,6 +9693,97 @@ def main(argv=None):
         for l in lines:
             print(l)
     return 0
+
+
+def self_test_map_bounce():
+    """Exercise map-bounce verdicts and malformed records through the CLI."""
+    import contextlib
+    import io
+    import shutil
+
+    ok = True
+    version = "0.18.0-1-g0123456"
+    header = "[10:00:00.000] version %s (build 01234567)\n" % version
+    def summary(state="off", key="auto", maps=10, bounced=0, flushes=0,
+                trips=0, samples=0, mismatches=0, bank=900, sample_bytes=8192):
+        # Same token order and spelling as reportMapBounce in flat_runtime.cpp.
+        return ("[10:00:05.000] flat map bounce 5s: state=%s key=%s maps=%s tracked=8 other-buffer=1 texture=1 bounced=%s "
+                "declined-not-discard=0 declined-foreign-context=0 declined-foreign-thread=0 declined-internal=0 "
+                "declined-paused=0 declined-untracked=0 declined-open-full=0 declined-width=0 failed=0 flushes=%s "
+                "flush-bytes=4096 flush-ns-per-kb=200.0 bank-bytes=8192 bank-sample-bytes=%s bank-ns-per-kb=%s abandoned=0 "
+                "open-at-present=0 trips=%s verify-samples=%s verify-mismatches=%s unchanged-rows=0 rows-checked=0 "
+                "width-le64=0 width-le256=0 width-le1k=0 width-le4k=0 width-le8k=0 width-le64k=0 "
+                "tracked-read=0 tracked-write=0 tracked-read-write=0 tracked-discard=0 tracked-no-overwrite=0 cb-first-nonzero=0\n" %
+                (state, key, maps, bounced, flushes, sample_bytes, bank, trips, samples, mismatches))
+
+    fixtures = (
+        ("fast adaptive OFF", summary() + "[10:00:01.000] flat map bounce: decision at frame 10, batch rates 2.000/2.000/2.000/2.000 B/ns, threshold=1.0 -> OFF, key=auto\n", 0, "map-bounce verdict: PASS", "PASS  OFF"),
+        ("adaptive OFF after sampling window", summary() + summary(sample_bytes=0, bank=0) + "[10:00:01.000] flat map bounce: decision at frame 10, batch rates 2.000/2.000/2.000/2.000 B/ns, threshold=1.0 -> OFF, key=auto\n", 0, "map-bounce verdict: PASS", "PASS  OFF"),
+        ("adaptive OFF without sample bytes", summary(sample_bytes=0, bank=0) + "[10:00:01.000] flat map bounce: decision at frame 10, batch rates 2.000/2.000/2.000/2.000 B/ns, threshold=1.0 -> OFF, key=auto\n", 0, "map-bounce verdict: WARN", "WARN  OFF"),
+        ("active bounce", summary("on", bounced=8, flushes=8, samples=8, bank=1800), 0, "map-bounce verdict: PASS", "PASS  ACTIVE"),
+        ("pending decision", summary("pending", bank=1800), 0, "map-bounce verdict: WARN", "WARN  PENDING"),
+        ("fail-safe trip", summary("tripped", trips=1, bank=1800), 1, "map-bounce verdict: STOP", "STOP  TRIPS"),
+        ("verification mismatch", summary("on", bounced=3, flushes=3, trips=0, samples=3, mismatches=1, bank=1800), 1, "map-bounce verdict: STOP", "STOP  VERIFY"),
+        ("slow bank reads while forced off", summary("off", key="off", bank=2048), 0, "map-bounce verdict: WARN", "WARN  SLOW OFF"),
+        ("missing instrument", "[10:00:00.000] nothing to report\n", 3, "map-bounce verdict: NEVER RAN", "NEVER RAN"),
+        ("missing safety fields", header + "[10:00:05.000] flat map bounce 5s: state=off key=auto maps=10\n", 1, "map-bounce verdict: STOP", "STOP  TRIPS"),
+        ("fractional counter is malformed", header + summary(maps="1.5"), 0, "map-bounce verdict: WARN", "WARN  FORMAT"),
+        ("oversized integer is malformed", header + summary(maps="9" * 5000), 0, "map-bounce verdict: WARN", "WARN  FORMAT"),
+        ("negative bank time is malformed", header + summary(bank="-1"), 0, "map-bounce verdict: WARN", "WARN  FORMAT"),
+        ("verification missing after 16 flushes", header + summary("on", key="on", bounced=16, flushes=16, bank=1800), 0, "map-bounce verdict: WARN", "WARN  VERIFY COVERAGE"),
+        ("malformed tail with trip", header + summary() + summary(maps="bad", trips=1), 1, "map-bounce verdict: STOP", "STOP  TRIPS"),
+        ("malformed tail with mismatch", header + summary() + summary(maps="bad", mismatches=1), 1, "map-bounce verdict: STOP", "STOP  VERIFY"),
+        ("auto off without measured decision", header + summary(), 0, "map-bounce verdict: WARN", "WARN  OFF"),
+        ("on with no bounce count", header + summary("on", bounced=0, flushes=0, bank=1800), 0, "map-bounce verdict: WARN", "WARN  ACTIVE"),
+    )
+    tmp = tempfile.mkdtemp(prefix="edvr_map_bounce_test_")
+    try:
+        for i, (name, body, wanted_rc, verdict, detail) in enumerate(fixtures):
+            path = os.path.join(tmp, "%02d.log" % i)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(header + body if "version " not in body else body)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = main(["--file", path, "--map-bounce", "--expect-build", version])
+            got = output.getvalue()
+            if rc != wanted_rc or verdict not in got or detail not in got:
+                print("map-bounce %s: rc=%d wanted %d, expected %r and %r:\n%s" %
+                      (name, rc, wanted_rc, verdict, detail, got))
+                ok = False
+
+        mismatch = os.path.join(tmp, "mismatch.log")
+        with open(mismatch, "w", encoding="utf-8") as f:
+            f.write(header + summary())
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = main(["--file", mismatch, "--map-bounce", "--expect-build",
+                       "0.18.0-2-g7654321"])
+        if rc != 2 or "BUILD MISMATCH" not in output.getvalue() or "map-bounce verdict" in output.getvalue():
+            print("map-bounce expected-build mismatch did not stop before report (rc=%d):\n%s" % (rc, output.getvalue()))
+            ok = False
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            try:
+                main(["--help"])
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    print("map-bounce --help exited %r" % (e.code,)); ok = False
+        help_text = " ".join(output.getvalue().split())
+        if "--map-bounce" not in help_text or "adaptive decision" not in help_text:
+            print("--help does not describe --map-bounce")
+            ok = False
+        if "flat map bounce 5s:" not in (__doc__ or ""):
+            print("module help does not describe the map-bounce log prefix")
+            ok = False
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("map-bounce: self-test stopped at an exception")
+        ok = False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
 
 
 def self_test():
@@ -8301,6 +10115,10 @@ def self_test():
         ok = False
     if not self_test_route_curve():
         ok = False
+    if not self_test_map_bounce():
+        ok = False
+    if not self_test_slow_regime():
+        ok = False
     if not self_test_freezes():
         ok = False
     if not self_test_terrain_checkerboard():
@@ -8629,7 +10447,7 @@ def self_test_ui_composites():
     lines = base.splitlines()
     p = parse_ui_composites(base)
     ws = p["windows"]
-    if [w["state"] for w in ws] != ["none", "idle", "none", "left", "left", "left", "left", "off", "none"] or p["unparsed"] or p["layer_windows"] != 2:
+    if [w["state"] for w in ws] != ["none", "idle", "none", "left", "left", "left", "left", "off", "none", "none", "left"] or p["unparsed"] or p["layer_windows"] != 2:
         fail("the fixture's windows read as %s (%d unparsed, %d layer lines)" % ([w["state"] for w in ws], len(p["unparsed"]), p["layer_windows"]))
         return False
     d = ws[3]
@@ -8644,6 +10462,26 @@ def self_test_ui_composites():
         fail("the overflow window reads as %r / %r" % (len(o["pairs"]), o["past"]))
     if (ws[7]["kind"], ws[7]["frames"]) != ("off", 2560) or ws[8]["live"] != 1280 or ws[1]["seen"] != 0:
         fail("the NOT COUNTED, half-live or idle windows read as %r / %r / %r" % (ws[7], ws[8]["live"], ws[1]["seen"]))
+    # The kept pair: a loading screen with only the null-output quad (0 left of 16182, the quad in its own clause), and a defect with the quad beside it.
+    k = ws[9]
+    if (k["ts"], k["left"], k["seen"], k["rate"], k["state"], k["pairs"], k["past"]) != ("16:05:00.001", 0, 16182, 0.0, "none", [], None) or k["kept"] != [
+            {"vs": "B018D143700AB803", "ps": "258B95AC99520C1F", "name": "null-output quad", "n": 5394, "rate": 2.0}]:
+        fail("the kept-only window reads as %r" % k)
+    b = ws[10]
+    if (b["left"], b["seen"], b["state"], b["past"]) != (56320, 66560, "left", None) or b["pairs"] != [
+            {"vs": "1989E6D3B405FDE0", "ps": "EAB8A1C95A13FFBE", "family": "no family", "rate": 22.0}] or b["kept"] != [
+            {"vs": "B018D143700AB803", "ps": "258B95AC99520C1F", "name": "null-output quad", "n": 5120, "rate": 2.0}]:
+        fail("the window with a pair left and the kept pair beside it reads as %r / %r" % (b["pairs"], b["kept"]))
+    # The table of kept pairs here is the DLL's (src/d3d11/ui_scene_composites.h kUiSceneKeptPairs): the same pairs, the same names.
+    try:
+        header = read_text(os.path.join(repo_root(), "src", "d3d11", "ui_scene_composites.h"))
+        entries = re.findall(r'\{0x([0-9A-F]{16})ull,\s*0x([0-9A-F]{16})ull,\s*"([^"]+)"\}', header)
+        if {(a, b_): n for a, b_, n in entries} != UICOMP_KEPT_PAIRS or len(entries) != len(UICOMP_KEPT_PAIRS):
+            fail("UICOMP_KEPT_PAIRS %r is not the DLL's kUiSceneKeptPairs %r" % (UICOMP_KEPT_PAIRS, entries))
+        if set(UICOMP_KEPT_WHY) != set(UICOMP_KEPT_PAIRS.values()):
+            fail("UICOMP_KEPT_WHY names %r, the kept pairs are named %r" % (sorted(UICOMP_KEPT_WHY), sorted(UICOMP_KEPT_PAIRS.values())))
+    except OSError:
+        fail("src\\d3d11\\ui_scene_composites.h is not readable from the repo root")
 
     def run(text):
         buf = io.StringIO()
@@ -8693,6 +10531,37 @@ def self_test_ui_composites():
     verdict("an idle window", pick(layer1, idle), 0, "WARN", "WARN (TAKEN) no composite was drawn into an eye in any counted window")
     # The layer live for half the window: said in the table, no verdict of its own.
     out = verdict("half live", pick(layer1, half), 0, "PASS", "0 of 30720 composite draws (0.00 a frame) in 2560 frames (1280 live)")
+    # The null-output quad kept: a loading screen with only that pair is a PASS that says the pair, why it is no defect, and that its draws are not interface; never a
+    # STOP and never a NAMED/UNCLAIMED finding. The 15:09 flight as the DLL now writes it.
+    loading, mixed = "16:05:00.001", "16:05:30.001"
+    out = verdict("a loading screen with the kept pair", pick(layer1, cockpit, loading), 0, "PASS",
+                  "PASS (KEPT) vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad): kept in the scene by design in 1 of 2 counted window(s), up to 2.00 draws a frame (5394 draws in all)",
+                  "writes zero and reads nothing", "so the layer never takes it",
+                  "PASS (TAKEN) every interface composite drawn into an eye went into the layer: 72228 composite draws in 2 window(s), none left in the scene (5394 more draws are the kept pair's, above, and are not interface)",
+                  "0 of 16182 composite draws (0.00 a frame) in 2697 frames (2697 live)  none; B018D143700AB803/258B95AC99520C1F (null-output quad, kept by design) 5394 draws, 2.00")
+    if "UNCLAIMED" in out or "NAMED" in out:
+        fail("the kept pair is read as a finding:\n%s" % out)
+    # ...and a real defect beside it is still a STOP: the kept pair hides nothing.
+    verdict("the defect with the kept pair beside it", pick(layer1, mixed), 1, "STOP", "STOP (UNCLAIMED) vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE: left in the scene in 1 of 1 counted window(s), up to 22.00 draws a frame",
+            "PASS (KEPT) vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad)")
+    # Nothing but the kept pair drawn: the zero does not show a composite taken (a WARN, as an idle window is).
+    only_kept_text = pick(layer1, loading).replace("0 of 16182 composite draws", "0 of 5394 composite draws")
+    verdict("only the kept pair drawn", only_kept_text, 0, "WARN", "WARN (TAKEN) no composite was drawn into an eye in any counted window but the kept pair's (5394 draws, above)")
+    # A build between 13c62cd6 and 069ebee4 has no kept clause: it counted the quad as a composite left with no family (the 15:10:50 window of the 15:09 flight, verbatim).
+    legacy_line = "[15:10:50.165] ui quality: composites left in the scene: 5394 of 16182 composite draws (2.00 a frame) in 2697 frames (2697 live) -- vs B018D143700AB803 ps 258B95AC99520C1F (no family) 2.00 a frame."
+    legacy = version + "\n" + legacy_line + "\n"
+    out = verdict("an older build's line", legacy, 0, "PASS", "PASS (KEPT) vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad): kept in the scene by design in 1 of 1 counted window(s)",
+                  "(5394 draws in all)", "read here as kept", "PASS (TAKEN) every interface composite drawn into an eye went into the layer: 10788 composite draws in 1 window(s)")
+    if "UNCLAIMED" in out:
+        fail("an older build's null-output quad is still read as unclaimed:\n%s" % out)
+    # ...but only that exact pair: one bit off, or with a family named, it is what it always was.
+    verdict("an older line, one bit off", version + "\n" + legacy_line.replace("B018D143700AB803", "B018D143700AB802") + "\n", 1, "STOP", "STOP (UNCLAIMED) vs B018D143700AB802 ps 258B95AC99520C1F")
+    verdict("an older line, ps one bit off", version + "\n" + legacy_line.replace("258B95AC99520C1F", "258B95AC99520C1E") + "\n", 1, "STOP", "STOP (UNCLAIMED) vs B018D143700AB803 ps 258B95AC99520C1E")
+    verdict("an older line, a family named", version + "\n" + legacy_line.replace("(no family)", "(interface composite, not taken)") + "\n", 0, "WARN", "WARN (NAMED) vs B018D143700AB803 ps 258B95AC99520C1F (interface composite)")
+    # Beside another pair an older line's kept draws are the rate over the frames, and the other pair is still said.
+    mixed_legacy = version + "\n" + ("[15:10:50.165] ui quality: composites left in the scene: 61440 of 66560 composite draws (24.00 a frame) in 2560 frames (2560 live) -- "
+                                     "vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE (no family) 22.00 a frame; vs B018D143700AB803 ps 258B95AC99520C1F (no family) 2.00 a frame.") + "\n"
+    verdict("an older line beside a defect", mixed_legacy, 1, "STOP", "STOP (UNCLAIMED) vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE", "PASS (KEPT) vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad)", "(5120 draws in all)")
     # The layer's own 30 s lines and no census line: a build before it, or a census that never ran. Exit 3 and a STOP line that says so.
     verdict("no census line", pick(layer1, layer2), 3, "STOP", "STOP (INSTRUMENT) the layer printed 2 30 s line(s) and not one `composites left in the scene` line")
     # No ui quality line at all: the key was off.
@@ -9290,7 +11159,7 @@ def self_test_vscreen_fit():
     # ---- the census verdict reads the render size from the log, never assumes it ----
     census_path = os.path.join(here, CENSUS_FIXTURE)
     if os.path.isfile(census_path):
-        census = read_text(census_path)
+        census = read_text(census_path).replace("\r\n", "\n")  # a CRLF checkout (issue 64)
         apply_line = "[00:00:01.000] vScreen resolution: 1920x1080 -> 3504x1971 at 6 site(s). This writes to game CODE\n"
         blind = census.replace("hdr=5040x2835", "hdr=0x0").replace(" px in 5040x2835,", " px in 0x0,")
         if blind == census:
@@ -9370,7 +11239,7 @@ def self_test_camera_census():
     if not os.path.isfile(fixture):
         fail("the fixture %s is missing beside this script" % CENSUS_FIXTURE)
         return False
-    text = read_text(fixture)
+    text = read_text(fixture).replace("\r\n", "\n")  # a CRLF checkout (issue 64)
 
     # ---- the parser ----
     c = parse_camera_census(text)

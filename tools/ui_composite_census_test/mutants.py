@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """The mutation proof for tools\\ui_composite_census_test: the rig fails when a rule of the pure headers is flipped.
 
-The rig (ui_composite_census_test.cpp) pins eight rules, R1..R8 (its header says which): R1 the family rule that names the cockpit
+The rig (ui_composite_census_test.cpp) pins nine rules, R1..R9 (its header says which): R1 the family rule that names the cockpit
 holo panels by both their vertex shaders (src\\d3d11\\ui_layer_math.h, with the hashes in holo_material.h), R2..R7 the census of the
 interface composites the layer leaves in the scene (src\\d3d11\\ui_scene_composites.h): the window's table, the zero line, the line
 with pairs, its length, the detector-off wording, a window with no frames, R8 the setting off changing nothing (the production rule held to
-a frozen copy of the rule as it was, over every combination of facts). A rig that passes proves little until it is seen to FAIL on
+a frozen copy of the rule as it was, over every combination of facts), R9 the pair the scene keeps on purpose (the engine's null-output
+quad: kept, not left; only the exact pair with no family; its clause; the rule's exclusion). A rig that passes proves little until it is seen to FAIL on
 a header that breaks the rule it pins. This tool does that: for each mutation below it copies the production headers into a temp
 directory OUTSIDE the repo (all of them: an include resolves in the including file's own directory first, so a copy of one header
 beside the production others would be included twice), applies one textual edit (or a few that belong together) to one of them,
 compiles the rig against that directory alone, runs it on the rule's cases, and requires the rig to fail on the check that belongs to
 the rule (the first line it prints after FAIL: starts with the label prefix the mutation names). Nothing is written inside the repo;
-the temp directory is removed at the end. The source pins (P1..P6) read the runtime's sources and are not mutated here (each carries
+the temp directory is removed at the end. The source pins (P1..P7) read the runtime's sources and are not mutated here (each carries
 controls of its own: the same predicate over copies with one edit must fail).
 
   python tools\\ui_composite_census_test\\mutants.py --self-test    text only: every anchor is found exactly once in its header as it is
@@ -87,7 +88,8 @@ MAT_PS = "constexpr uint64_t kHoloGuiFxOffPs = 0xEAB8A1C95A13FFBEull;\n"
 PAIRS = "constexpr size_t kUiSceneCompositePairs = 8;\n"
 USED = "    uint32_t used = 0;\n"
 NOTE_TAKEN = "    void noteTaken() { ++seen; }\n"
-NOTE_SEEN_LEFT = "        ++seen;\n        ++left;\n"
+NOTE_SEEN = "    void noteLeft(uint64_t vs, uint64_t ps, int family) {\n        ++seen;\n"
+NOTE_LEFT = "        ++left;\n        for (uint32_t i = 0; i < used; ++i) {\n"
 PAIR_MATCH = "            if (p.vs == vs && p.ps == ps && p.family == family) {\n"
 PAIR_ROOM = "        if (used < kUiSceneCompositePairs) {\n"
 PAST = "        ++pastTable;\n"
@@ -101,8 +103,22 @@ NO_SEEN = "    if (!w.seen) {\n"
 NO_LEFT = "    if (!w.left) {\n"
 FAMILY_NONE = '        std::snprintf(label, sizeof(label), "no family");\n'
 FAMILY_NAMED = '"%s, not taken"'
-PAIR_FMT = '"%svs %016llX ps %016llX (%s) %.2f a frame", i ? "; " : "",'
+PAIR_FMT = '"vs %016llX ps %016llX (%s) %.2f a frame",\n'
+JOIN_SEP = '        if (!first) out += "; ";\n'
 PAIR_RATE = "                      static_cast<double>(p.draws) * perFrame);\n"
+# the kept pair (R9)
+KEPT_ENTRY = '    {0xB018D143700AB803ull, 0x258B95AC99520C1Full, "null-output quad"},\n'
+KEPT_MATCH = "        if (kUiSceneKeptPairs[i].vs == vs && kUiSceneKeptPairs[i].ps == ps) return static_cast<int>(i);\n"
+KEPT_GATE = "        ++seen;\n        if (family == 0) {\n"
+KEPT_COUNT = "                ++kept;\n                ++keptDraws[k];\n                return;\n"
+KEPT_PER_PAIR = "                ++keptDraws[k];\n"
+KEPT_LOOP = "        if (!w.keptDraws[i]) continue;\n"
+KEPT_FMT = '"vs %016llX ps %016llX (%s, kept in the scene by design) %llu draws, %.2f a frame"'
+KEPT_RATE = "static_cast<double>(w.keptDraws[i]) * perFrame);\n"
+KEPT_COUNT_ARG = "                      kUiSceneKeptPairs[i].name, static_cast<unsigned long long>(w.keptDraws[i]),\n"
+NONE_TEXT = '        out += "none: every interface composite drawn into an eye went into the layer";\n'
+# ui_layer_math.h: the rule's exclusion branch
+EXCLUDED_BRANCH = "    } else if (f.excluded) {\n        w = UiFamilyWhy::kExcluded;\n"
 PAST_IF = "    if (w.pastTable) {\n"
 PAST_TEXT = "%llu draws of pairs past the table's %u (%.2f a frame)"
 FULL_STOP = '    out += ".";\n    return out;\n'
@@ -149,8 +165,8 @@ MUTANTS = [
     # ---- R2: the table ---------------------------------------------------------------------------------------------------------
     M("fresh-window-not-empty", "R2a", [(USED, "    uint32_t used = 1;\n")], "a fresh window already names a pair"),
     M("taken-not-seen", "R2b", [(NOTE_TAKEN, "    void noteTaken() {}\n")], "a taken composite is not counted as seen"),
-    M("left-not-seen", "R2c", [(NOTE_SEEN_LEFT, "        ++left;\n")], "a left composite is not counted as seen"),
-    M("left-not-left", "R2c", [(NOTE_SEEN_LEFT, "        ++seen;\n")], "a left composite is not counted as left"),
+    M("left-not-seen", "R2c", [(NOTE_SEEN, "    void noteLeft(uint64_t vs, uint64_t ps, int family) {\n")], "a left composite is not counted as seen"),
+    M("left-not-left", "R2c", [(NOTE_LEFT, "        for (uint32_t i = 0; i < used; ++i) {\n")], "a left composite is not counted as left"),
     M("pair-key-ignores-ps", "R2e", [(PAIR_MATCH, "            if (p.vs == vs && p.family == family) {\n")], "two pixel shaders of one vertex shader are one pair"),
     M("pair-key-ignores-vs", "R2e", [(PAIR_MATCH, "            if (p.ps == ps && p.family == family) {\n")], "two vertex shaders of one pixel shader are one pair"),
     M("pair-key-ignores-family", "R2e", [(PAIR_MATCH, "            if (p.vs == vs && p.ps == ps) {\n")], "one pair named by two families is one entry"),
@@ -168,11 +184,11 @@ MUTANTS = [
       "the total rate is draws a composite, not draws a frame"),
     M("live-frames-shown-as-frames", "R4a", [(HEAD_LIVE, "static_cast<unsigned long long>(frames));")], "the live frames are the window's frames"),
     M("pair-rate-raw-count", "R4a", [(PAIR_RATE, "                      static_cast<double>(p.draws));\n")], "a pair's rate is its draw count"),
-    M("hash-lowercase", "R4a", [(PAIR_FMT, '"%svs %016llx ps %016llx (%s) %.2f a frame", i ? "; " : "",')], "hashes in lower case"),
-    M("hash-unpadded", "R4d", [(PAIR_FMT, '"%svs %llX ps %llX (%s) %.2f a frame", i ? "; " : "",')], "hashes without their leading zeros"),
+    M("hash-lowercase", "R4a", [(PAIR_FMT, '"vs %016llx ps %016llx (%s) %.2f a frame",\n')], "hashes in lower case"),
+    M("hash-unpadded", "R4d", [(PAIR_FMT, '"vs %llX ps %llX (%s) %.2f a frame",\n')], "hashes without their leading zeros"),
     M("no-family-unlabelled", "R4a", [(FAMILY_NONE, '        std::snprintf(label, sizeof(label), "unknown");\n')], "a composite no family names is called something else"),
     M("named-family-not-taken-missing", "R4b", [(FAMILY_NAMED, '"%s"')], "a named family left in the scene does not say it was not taken"),
-    M("pair-separator", "R4b", [(PAIR_FMT, '"%svs %016llX ps %016llX (%s) %.2f a frame", i ? ", " : "",')], "pairs are separated by commas"),
+    M("pair-separator", "R4b", [(JOIN_SEP, '        if (!first) out += ", ";\n')], "pairs are separated by commas"),
     M("past-table-silent", "R4e", [(PAST_IF, "    if (w.pastTable && false) {\n")], "draws of pairs past the table are not said"),
     M("past-table-text", "R4e", [(PAST_TEXT, "%llu draws of unnamed pairs (%u, %.2f a frame)")], "the overflow sentence changes"),
     M("pairs-sixteen-text", "R4e", [(PAIRS, "constexpr size_t kUiSceneCompositePairs = 16;\n")], "the table holds sixteen: the sentence names a table of sixteen"),
@@ -189,6 +205,33 @@ MUTANTS = [
     M("detector-off-only-when-empty", "R6b", [(DETECTOR, "    if (!detectorOn && !w.seen) {\n")], "NOT COUNTED only when nothing was counted"),
     # ---- R7: a window with no frames ----------------------------------------------------------------------------------------------
     M("no-frames-divides", "R7a", [(PER_FRAME, "    const double perFrame = 1.0 / static_cast<double>(frames);\n")], "a window with no frames divides by zero"),
+    # ---- R9: the pair the scene keeps on purpose ------------------------------------------------------------------------------------
+    M("kept-vs-off-by-one", "R9a", [(KEPT_ENTRY, '    {0xB018D143700AB804ull, 0x258B95AC99520C1Full, "null-output quad"},\n')],
+      "the kept table's vertex shader is one bit off: the dumped null-output quad is left, and the reader STOPs on every loading screen again"),
+    M("kept-ps-off-by-one", "R9a", [(KEPT_ENTRY, '    {0xB018D143700AB803ull, 0x258B95AC99520C20ull, "null-output quad"},\n')],
+      "the kept table's pixel shader is not the dumped one"),
+    M("kept-name-changed", "R9a", [(KEPT_ENTRY, '    {0xB018D143700AB803ull, 0x258B95AC99520C1Full, "quad"},\n')],
+      "the kept pair is named something the reader and the doc do not say"),
+    M("kept-key-ignores-ps", "R9d", [(KEPT_MATCH, "        if (kUiSceneKeptPairs[i].vs == vs) return static_cast<int>(i);\n")],
+      "the vertex shader alone is kept: a real composite drawn with that vertex shader would be hidden"),
+    M("kept-key-ignores-vs", "R9d", [(KEPT_MATCH, "        if (kUiSceneKeptPairs[i].ps == ps) return static_cast<int>(i);\n")],
+      "the pixel shader alone is kept: every draw of the zero-output pixel shader would be hidden"),
+    M("kept-ignores-family", "R9e", [(KEPT_GATE, "        ++seen;\n        if (true) {\n")],
+      "a pair a family names is kept as well: the layer's own business hides in the kept count"),
+    M("kept-also-left", "R9b", [(KEPT_COUNT, "                ++kept;\n                ++left;\n                ++keptDraws[k];\n                return;\n")],
+      "a kept draw is counted as left too: the defect count the reader STOPs on includes it"),
+    M("kept-not-seen", "R9b", [(KEPT_GATE, "        if (family != 0) ++seen;\n        if (family == 0) {\n")],
+      "a kept draw is not counted as a composite draw at all"),
+    M("kept-not-per-pair", "R9b", drop(KEPT_PER_PAIR), "the kept pair's own draw count is never kept"),
+    M("kept-clause-silent", "R9f", [(KEPT_LOOP, "        continue;\n")], "the kept clause is never said: the pair is hidden, not named"),
+    M("kept-clause-wording", "R9f", [(KEPT_FMT, '"vs %016llX ps %016llX (%s, kept) %llu draws, %.2f a frame"')], "the kept clause stops saying why it is not a defect: \"kept in the scene by design\""),
+    M("kept-rate-raw", "R9f", [(KEPT_RATE, "static_cast<double>(w.keptDraws[i]));\n")], "the kept pair's rate is its draw count"),
+    M("kept-count-wrong", "R9f", [(KEPT_COUNT_ARG, "                      kUiSceneKeptPairs[i].name, static_cast<unsigned long long>(w.keptDraws[i] + 1),\n")],
+      "the kept clause's draw count is not the count"),
+    M("kept-hides-none", "R9f", [(NO_LEFT, "    if (!w.left && !w.kept) {\n")], "a window with only the kept pair no longer says none: the zero reads as missing"),
+    M("kept-none-wording", "R9f", [(NONE_TEXT, '        out += "none left";\n')], "the sentence that says every composite went into the layer changes"),
+    M("exclusion-branch-dropped", "R9j", [(EXCLUDED_BRANCH, "    } else if (false) {\n        w = UiFamilyWhy::kExcluded;\n")],
+      "the family rule ignores ui depth's exclusion: the null-output quad over a learned surface is named a generic surface and TAKEN", MATH),
 ]
 
 

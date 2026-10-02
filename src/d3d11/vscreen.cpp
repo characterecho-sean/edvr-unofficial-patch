@@ -3292,7 +3292,14 @@ __declspec(noinline) bool mapBufferDesc(ID3D11Resource* res, UINT* byteWidth,
 HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
-    if (g_flatComputeInternal) return g_state->realMap(self, res, sub, type, flags, mapped);
+    // Every Map can reuse an address whose earlier bounced mapping was
+    // abandoned. Drop that record before the driver can recycle its pointer.
+    flatRuntimeMapBouncePreMap(res);
+    if (g_flatComputeInternal) {
+        const HRESULT hr=g_state->realMap(self,res,sub,type,flags,mapped);
+        flatRuntimeMapBounceNoteMap(self,res,sub,type,true,SUCCEEDED(hr));
+        return hr;
+    }
     // Necessary, not sufficient, for gpuFrameCommand to do anything but
     // return (gpu_frame_timing.h): the ctx-matches-the-owner's-context test
     // still runs for real inside it, foreign-thread poisoning included.
@@ -3302,7 +3309,9 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (type != D3D11_MAP_READ) uiAtlasNoteWrite(res, 1);  // one load until an atlas is watched
     if (foreignContext(self)) {
         if(type!=D3D11_MAP_READ)engineVelocityResourceUnknown(res);
-        return s->realMap(self, res, sub, type, flags, mapped);
+        const HRESULT hr=s->realMap(self, res, sub, type, flags, mapped);
+        flatRuntimeMapBounceNoteMap(self,res,sub,type,false,SUCCEEDED(hr));
+        return hr;
     }
     // Timed, not touched: the wait inside the runtime's Map is the game's
     // stall on the GPU, and the native timing line reports it (map_wait.h).
@@ -3332,6 +3341,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     const bool mapData = mapOk && mapped->pData != nullptr;
     const bool mapSub0 = mapOk && sub == 0;
     const bool mapData0 = mapData && sub == 0;
+    flatRuntimeMapBounceNoteMap(self,res,sub,type,false,mapData);
+    if (mapData0) mapped->pData=flatRuntimeMapBounceInstall(self,res,sub,type,mapped->pData);
     if (mapData0 && flatRuntimeActive()) flatRuntimeMap(res, type, mapped->pData);
     if (mapData0 && flatTemporalCapturing())
         flatTemporalMap(res, sub, type, mapped->pData);
@@ -3348,6 +3359,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
     if (mapSub0 && res == s->compositeCb) {
+        flatRuntimeMapBounceNoteKind(res,true);
         // GetType FIRST here too, for the reason spelled out in the branch below.
         //
         // This branch was the one that did not do it. compositeCb is a raw
@@ -3394,6 +3406,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             mm.byteWidth = 0;
             mapBufferDesc(res, &mm.byteWidth);   // stays 0 for a texture
         }
+        flatRuntimeMapBounceNoteKind(res,mm.byteWidth != 0);
         if (mm.byteWidth && glitchFrameWantsBuffer(mm.byteWidth)) {
             s->camResource = res;
             s->camData = mapped->pData;
@@ -3453,7 +3466,10 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
 
 void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub) {
-    if (g_flatComputeInternal) { g_state->realUnmap(self, res, sub); return; }
+    // Flush independently of the current mode, owner thread, and projection
+    // lifetime. The game's pointer remains valid for every tee below.
+    auto bounceLease=flatRuntimeMapBounceBeginUnmap(self,res);
+    if (g_flatComputeInternal) { bounceLease.finish(); g_state->realUnmap(self, res, sub); return; }
     // See hookedMap: necessary, not sufficient, for gpuFrameCommand to do
     // anything but return.
     if (gpuFrameCommandMightAct()) gpuFrameCommand(self);
@@ -3461,6 +3477,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     ++s->thunkHits[kHitUnmap];
     if (foreignContext(self)) {
         engineVelocityResourceUnknown(res);
+        bounceLease.finish();
         s->realUnmap(self, res, sub);
         return;
     }
@@ -3542,6 +3559,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->bbData = nullptr;
         s->bbBytes = 0;
     }
+    bounceLease.finish();
     s->realUnmap(self, res, sub);
 }
 

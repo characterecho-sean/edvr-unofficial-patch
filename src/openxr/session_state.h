@@ -36,6 +36,11 @@ struct Frame {
 // Invoked synchronously for events outside this policy. Copy needed data;
 // the buffer is borrowed for this call only. The sink must not re-enter us.
 using UnhandledEventSink = void (*)(const XrEventDataBuffer&, void*) noexcept;
+// Invoked synchronously for EVERY event the vendor's runtime hands us through xrPollEvent, before this policy
+// looks at it (vendor_events.h logs them). Read-only: it changes nothing about how the event is handled, and it
+// is not told whether the policy then acts on it. The buffer is borrowed for this call only; the observer must not
+// re-enter us.
+using EventObserver = void (*)(const XrEventDataBuffer&, void*) noexcept;
 
 class SessionState {
  public:
@@ -68,6 +73,7 @@ class SessionState {
   // destroyed. Invalidate even an outstanding frame, and erase stale handles.
   void abandonAfterOwnerDestruction() { clear(); dispatch_ = {}; instance_ = XR_NULL_HANDLE; session_ = XR_NULL_HANDLE; }
   void setUnhandledEventSink(UnhandledEventSink sink, void* context) { eventSink_ = sink; eventContext_ = context; }
+  void setEventObserver(EventObserver observer, void* context) { observer_ = observer; observerContext_ = context; }
 
   XrResult pollEvents(std::uint32_t budget = 8) {
     if (terminal_) return lastResult_;
@@ -81,6 +87,7 @@ class SessionState {
       const XrResult r = dispatch_.pollEvent(instance_, &buffer);
       if (r == XR_EVENT_UNAVAILABLE) return lastResult_;
       if (r != XR_SUCCESS) return fail(XR_FAILED(r) ? r : XR_ERROR_RUNTIME_FAILURE);
+      if (observer_) observer_(buffer, observerContext_);
       if (buffer.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
         terminal_ = true; lifecycle_ = Lifecycle::InstanceLossPending;
         return lastResult_; // distinct lifecycle signal; not a session-loss result
@@ -280,6 +287,7 @@ class SessionState {
     ++generation_; sequence_ = 0; clearFrame(); running_ = terminal_ = hardFailure_ = false;
     lifecycle_ = Lifecycle::Uninitialized; state_ = XR_SESSION_STATE_UNKNOWN; lastResult_ = XR_SUCCESS;
     eventSink_ = nullptr; eventContext_ = nullptr;
+    observer_ = nullptr; observerContext_ = nullptr;
   }
   XrResult note(XrResult r) {
     if (r == XR_SESSION_LOSS_PENDING) {
@@ -313,6 +321,8 @@ class SessionState {
   Dispatch dispatch_{};
   UnhandledEventSink eventSink_ = nullptr;
   void* eventContext_ = nullptr;
+  EventObserver observer_ = nullptr;
+  void* observerContext_ = nullptr;
   XrInstance instance_ = XR_NULL_HANDLE;
   XrSession session_ = XR_NULL_HANDLE;
   XrEnvironmentBlendMode blend_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;

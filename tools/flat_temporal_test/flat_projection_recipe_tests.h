@@ -486,6 +486,47 @@ inline int flatProjectionRecipeTests() {
             expect(pair.vs!=epicFlight[j].vs || pair.ps!=epicFlight[j].ps,
                 "flight census has no duplicate exact pairs");
     }
+    // Elite's Disable GUI effects (Frontier 2026-10-01, docs/ui-layer-2026-09-23.md): the cockpit holo panels are drawn with vs
+    // 1989E6D3B405FDE0 / ps EAB8A1C95A13FFBE instead of the stock vs 81216C77F90DEDD6 / ps A2965EC2931A39C8. The disassembly of the
+    // new vertex shader writes SV_POSITION with the stock shader's idiom (dp4 against cb0[4..7], instructions 98..101 against the stock
+    // 118..121), so it takes the stock recipe: slot 0, ForwardDp4, row 4 -- the same layout the stock pair's recipe selects.
+    {
+        const uint64_t offVs=0x1989E6D3B405FDE0ull, offPs=0xEAB8A1C95A13FFBEull, stockVs=0x81216C77F90DEDD6ull, stockPs=0xA2965EC2931A39C8ull;
+        const auto off=flatProjectionDrawRecipes(offVs,offPs), stock=flatProjectionDrawRecipes(stockVs,stockPs);
+        expect(off.count==1 && off.requests[0].stage==FlatProjectionStage::Vertex && off.requests[0].slot==0 &&
+            off.requests[0].patchCount==1 && off.requests[0].patches[0].layout==FlatProjectionPatchLayout::ForwardDp4 &&
+            off.requests[0].patches[0].byteOffset==4*16,
+            "Disable GUI effects panel pair patches CB0[4..7] as a forward dp4 clip span");
+        expect(stock.count==1 && off.requests[0].stage==stock.requests[0].stage && off.requests[0].slot==stock.requests[0].slot &&
+            off.requests[0].patchCount==stock.requests[0].patchCount &&
+            off.requests[0].patches[0].layout==stock.requests[0].patches[0].layout &&
+            off.requests[0].patches[0].byteOffset==stock.requests[0].patches[0].byteOffset,
+            "Disable GUI effects panel pair takes exactly the stock panel pair's recipe");
+        expect(flatProjectionDrawRecipes(offVs,offPs^1ull).count==0 && flatProjectionDrawRecipes(offVs^1ull,offPs).count==0 &&
+            flatProjectionDrawRecipes(offVs,0).count==0 && flatProjectionDrawRecipes(offVs,stockPs).count==0 &&
+            flatProjectionDrawRecipes(stockVs,offPs).count==0 && flatProjectionDrawRecipes(0,offPs).count==0,
+            "Disable GUI effects panel recipe requires both exact shader identities, and the two pairs do not cross");
+        expect(!flatProjectionDrawUnchanged(offVs,offPs) && !flatProjectionDrawUnchanged(stockVs,stockPs),
+            "the panel pairs are projected geometry and cannot be classed inert");
+        // The setting off draws the stock pair and, under the EDHM chain, its mod-patched pixel shader: both answer as they did before.
+        const auto edhm=flatProjectionDrawRecipes(stockVs,0x16F88966C091FC55ull);
+        expect(edhm.count==1 && edhm.requests[0].slot==0 && edhm.requests[0].patches[0].layout==FlatProjectionPatchLayout::ForwardDp4 &&
+            edhm.requests[0].patches[0].byteOffset==4*16 && flatProjectionDrawRecipes(stockVs,0).count==0,
+            "setting off: the stock panel pair's mod-patched variant still takes the stock recipe, and the stock vertex shader alone names nothing");
+        // The algebra the layout stands on, for this pair's own idiom: with rows 4..7 patched, a point's clip xy moves by the jitter times W and
+        // its z and w do not move, so the panel jitters with the scene exactly as the stock panels do.
+        FlatProjectionJitter pj{};
+        expect(flatProjectionJitter(.375f,-.25f,1280,720,pj),"panel recipe pixel offset constructed");
+        float rows[4][4]={{1.5f,0,0,.5f},{0,2,0,-1},{0,0,1,3},{0,0,.25f,2}};
+        const float point[4]={.4f,-.2f,5,1};
+        float before[4]{}, after[4]{};
+        for (int row=0;row<4;++row) for (int col=0;col<4;++col) before[row]+=rows[row][col]*point[col];
+        expect(flatJitterForwardDp4(rows,pj),"panel clip matrix patched");
+        for (int row=0;row<4;++row) for (int col=0;col<4;++col) after[row]+=rows[row][col]*point[col];
+        expect(std::abs(after[0]/after[3]-before[0]/before[3]-pj.ndcX)<.000001f && std::abs(after[1]/after[3]-before[1]/before[3]-pj.ndcY)<.000001f &&
+            after[2]==before[2] && after[3]==before[3],
+            "panel jitter moves clip xy by the offset in NDC and leaves depth and W");
+    }
     const auto screenRay=flatProjectionDrawRecipes(0x4AEC439CEC7FFDCEull,0x87EF79B19297B8C4ull);
     expect(screenRay.count==1 && screenRay.requests[0].stage==FlatProjectionStage::Vertex &&
         screenRay.requests[0].slot==1 && screenRay.requests[0].patchCount==1 &&

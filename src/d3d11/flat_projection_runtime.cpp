@@ -267,7 +267,7 @@ FlatProjectionRuntime::Tracked* FlatProjectionRuntime::find(ID3D11Resource* reso
 void FlatProjectionRuntime::discard(Tracked& entry) {
     if (entry.buffer) shadows_.releaseBuffer(entry.buffer.Get(), entry.generation);
     entry.privateBuffer.initialize(nullptr, nullptr, 0);
-    entry.buffer.Reset(); entry.generation = 0; entry.width = 0;
+    entry.buffer.Reset(); entry.generation = 0; entry.width = 0; entry.dynamicWrite = false;
     entry.mapped = entry.promoted = entry.privateReady = entry.pending = false;
     entry.mutationSerial = 1; entry.mutationOverflow = false;
     entry.mapBytes = nullptr;
@@ -306,6 +306,9 @@ FlatProjectionRuntime::Tracked* FlatProjectionRuntime::track(ID3D11Resource* res
         free->generation = 0; refuse(FlatProjectionRuntimeRefusal::NoCapacity); return nullptr;
     }
     free->buffer = buffer; free->width = desc.ByteWidth;
+    free->dynamicWrite = desc.Usage == D3D11_USAGE_DYNAMIC &&
+        (desc.CPUAccessFlags & D3D11_CPU_ACCESS_WRITE) != 0;
+    if (bounceRegistered_) bounceRegistered_(desc);
     free->mutationSerial = 1; free->mutationOverflow = false;
     return free;
 }
@@ -328,6 +331,7 @@ void FlatProjectionRuntime::observeMap(ID3D11Resource* resource, D3D11_MAP type,
     if (!owner() || type == D3D11_MAP_READ) return;
     Tracked* entry = track(resource);
     if (!entry) return;
+    if (bounceMapped_) bounceMapped_(type);
     mutate(*entry);
     entry->privateBuffer.invalidate();
     if (!bytes || !shadows_.beginMap(entry->buffer.Get(), entry->generation)) {
@@ -337,14 +341,37 @@ void FlatProjectionRuntime::observeMap(ID3D11Resource* resource, D3D11_MAP type,
     }
     entry->mapped = true; entry->mapBytes = bytes;
 }
+FlatProjectionBounceSource FlatProjectionRuntime::bounceSource(ID3D11Resource* resource) {
+    FlatProjectionBounceSource result{};
+    if (!owner()) return result;
+    Tracked* entry = track(resource);
+    if (!entry || !entry->dynamicWrite) return result;
+    result.width = entry->width;
+    result.eligible = true;
+    FlatProjectionShadowView view{};
+    result.seedValid = shadows_.lookup(entry->buffer.Get(), entry->generation, view);
+    if (result.seedValid) result.seed = view.bytes;
+    return result;
+}
 void FlatProjectionRuntime::observeUnmap(ID3D11Resource* resource) {
     if (!owner()) return;
     Tracked* entry = find(resource);
     if (!entry || !entry->mapped) return;
+    const bool sample = bounceSampleWants_ && bounceSampleWants_(entry->width);
+    LARGE_INTEGER before{}, after{};
+    if (sample) QueryPerformanceCounter(&before);
     const bool complete = shadows_.finishMapFull(entry->buffer.Get(), entry->generation,
-                                                  entry->mapBytes, entry->width);
+                                                   entry->mapBytes, entry->width);
+    if (sample && complete) {
+        QueryPerformanceCounter(&after);
+        bounceSampleRecord_(entry->width,
+            after.QuadPart > before.QuadPart ? static_cast<uint64_t>(after.QuadPart - before.QuadPart) : 0);
+    }
     entry->mapped = false; entry->mapBytes = nullptr;
-    if (complete) ++status_.fullWrites;
+    if (complete) {
+        ++status_.fullWrites;
+        if (bounceFullWrite_) bounceFullWrite_(entry->width);
+    }
     else { ++status_.invalidations; refuse(FlatProjectionRuntimeRefusal::MissingFullWrite); }
 }
 void FlatProjectionRuntime::observeUpdate(ID3D11Resource* resource, const void* bytes,

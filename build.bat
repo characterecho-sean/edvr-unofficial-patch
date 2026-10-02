@@ -161,6 +161,7 @@ python tools\package_native.py --self-test || exit /b 1
 python tools\build_diff.py --self-test || exit /b 1
 python tools\build_receipt.py --self-test || exit /b 1
 python tools\build_lock.py --self-test || exit /b 1
+python tools\release_credits.py --self-test || exit /b 1
 python tools\flash_patch_residual.py --self-test || exit /b 1
 python tools\check_status_blocks.py --self-test || exit /b 1
 python tools\check_status_blocks.py || exit /b 1
@@ -277,9 +278,13 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     "tools\temporal_shader_build\temporal_shader_build.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: temporal shader compiler build failed & exit /b 1 )
+REM The native runtime's four stereo-renderer shaders (src\openxr\stereo_shader_source.h) are compiled here too, into a header of their own
+REM (--stereo-output), so edvr_openxr_runtime.dll creates them from bytes and carries no HLSL compiler: it imported d3dcompiler_47.dll until 2026-10-01
+REM for four D3DCompile calls. The runtime and the two rigs that compile d3d11_stereo.cpp find the header through /I"%GEN%"; the PE gate below fails the
+REM build if either DLL imports the compiler again.
 "%OBJ%\temporalshader\temporal_shader_build.exe" --self-test || exit /b 1
-"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --dry-run || exit /b 1
-"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" || exit /b 1
+"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --stereo-output "%GEN%\openxr_stereo_shader_bytecode.h" --dry-run || exit /b 1
+"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --stereo-output "%GEN%\openxr_stereo_shader_bytecode.h" || exit /b 1
 
 python "tools\check_plugin_boundaries.py" --self-test || exit /b 1
 python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visuals ^
@@ -513,7 +518,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
-    "src\d3d11\stall_watch.cpp" ^
+    "src\d3d11\stall_watch.cpp" "src\d3d11\vram_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
@@ -629,7 +634,7 @@ REM Native runtime DLL: the only supported release and installation backend.
 REM Its application fixture calls the game-imported ABI without linking the host.
 if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_CPU_COMPILE% ^
-    /I"third_party\openxr\include" /Fo"%OBJ%\openxr_module\\" ^
+    /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_module\\" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
@@ -638,7 +643,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
     "src\common\frame_flag.cpp" ^
-    /link /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\edvr_openxr_runtime.pdb" /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib d3dcompiler.lib user32.lib
+    /link /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\edvr_openxr_runtime.pdb" /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
 
 REM Shared by the installer and installer_test rigs below.
@@ -719,9 +724,11 @@ if errorlevel 1 (
 
 
 REM The native OpenXR build is the only build; nothing above ran a legacy path.
+REM --forbid-import: neither DLL may import the HLSL compiler at load time. The runtime did (four D3DCompile calls, moved to build time 2026-10-01: its link line
+REM no longer names d3dcompiler.lib either, so a compile that comes back fails to link); the d3d11 proxy loads d3dcompiler_47.dll only on demand (shader_swap.cpp).
 copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
-python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" || exit /b 1
-python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" || exit /b 1
+python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
+python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
 echo.
 REM The one line a release engineer has to see, after thousands of compiler
 REM lines: whether the installer just built carries NVIDIA's runtime.
@@ -763,8 +770,8 @@ REM ===========================================================================
 echo.
 echo [edvr] === DLL-only promotion outputs ===
 copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
-python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" || exit /b 1
-python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" || exit /b 1
+python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
+python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
 echo [edvr] DLL-only build passed: production DLLs and loader are ready to install.
 echo [edvr] Test rigs and the self-contained installer were skipped; use a full build
 echo        before distributing an installer or accepting new source changes.
@@ -1195,6 +1202,55 @@ if "%EDVR_RIG_STEP%"=="build" exit /b 0
 "%OBJ%\stallsampler\stall_sampler_test.exe" --dry-run || exit /b 1
 "%OBJ%\stallsampler\stall_sampler_test.exe" --self-test "%ROOT%" || exit /b 1
 python "tools\stall_sampler_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_vram_watch_test
+echo [edvr] === vram_watch_test.exe ===
+REM Build gate for the graphics memory watch (src\common\vram_watch.h, src\common\vram_query.h, src\d3d11\vram_tick.cpp,
+REM docs\headset-lock-vdxr-2026-10-02.md, instrument 1): the policy (a line every 30 s, every 5 s from 90% of the OS's
+REM budget for the process, one at each crossing of the budget, a cap on the two cadences that a crossing is exempt from),
+REM the lines' text, the machine the Present hook drives on a fake clock and a fake adapter (the OS is asked once a second,
+REM the armed line, the unavailable line once for a stack without IDXGIAdapter3, a failed read said once), the DXGI read
+REM against fake adapters and one real WARP adapter from System32's d3d11, and by source text that hookedPresent ticks the
+REM watch once, unconditionally (so the flat profile has it too) after the stall sampler's beat. It links nothing of the DLLs.
+REM tools\vram_watch_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig
+REM against each edit and needs the MSVC toolchain.
+if not exist "%OBJ%\vramwatch" mkdir "%OBJ%\vramwatch"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
+    /Fo"%OBJ%\vramwatch"\ /Fe"%OBJ%\vramwatch\vram_watch_test.exe" ^
+    "tools\vram_watch_test\vram_watch_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: vram_watch_test build failed & exit /b 1 )
+"%OBJ%\vramwatch\vram_watch_test.exe" --dry-run || exit /b 1
+"%OBJ%\vramwatch\vram_watch_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\vram_watch_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_slow_regime_test
+echo [edvr] === slow_regime_test.exe ===
+REM Build gate for the runtime's vendor instruments (src\openxr\vendor_events.h, end_frame_episodes.h, slow_regime.h,
+REM src\common\slow_test.h, docs\headset-lock-vdxr-2026-10-02.md, instruments 2 to 4 and the test trigger): the vendor's events
+REM decoded, one line each, bounded (200 lines, undecoded types named once, the last session state kept past the cap), and
+REM SessionState's observer seeing every event without changing how one is handled; every xrEndFrame of 3 display periods or
+REM more as an episode (the first call on its own line, ended by 8 normal calls, p50 and max from a histogram, the rate limit
+REM and the end line a long episode always gets); a frame rate under 40% of the display's held for 5 s as a regime with the
+REM owner that holds it (the vendor's xrEndFrame, the pose wait, the swapchain calls, EDVR's copy, EDVR's work, the game),
+REM its still_slow line every 30 s and its end line; FrameBoundary's hook, on a real boundary with a fake runtime, for every
+REM xrEndFrame on every path (synchronous, no-render, cleared, loading, deferred pacing, drain) and the test hold inside the
+REM timed region and nowhere else; the test trigger's schedule; and by source text the host's glue. It links nothing of the
+REM DLLs. tools\slow_regime_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the
+REM rig against each edit and needs the MSVC toolchain.
+if not exist "%OBJ%\slowregime" mkdir "%OBJ%\slowregime"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" /I"src\openxr" /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\slowregime"\ /Fe"%OBJ%\slowregime\slow_regime_test.exe" ^
+    "tools\slow_regime_test\slow_regime_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: slow_regime_test build failed & exit /b 1 )
+"%OBJ%\slowregime\slow_regime_test.exe" --dry-run || exit /b 1
+"%OBJ%\slowregime\slow_regime_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\slow_regime_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_flat_temporal_test
@@ -2180,7 +2236,7 @@ REM importing D3D11CreateDevice, which from build\ would load the proxy.
 if not exist "%OBJ%\openxr_native_tests" mkdir "%OBJ%\openxr_native_tests"
 for %%T in (native stereo) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
-        /I"third_party\openxr\include" /Fo"%OBJ%\openxr_native_tests\\" ^
+        /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_native_tests\\" ^
         /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
         "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
         "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
@@ -2283,7 +2339,7 @@ exit /b 0
 
 :rig_openxr_proxy_state_test
 if not exist "%OBJ%\openxr_proxy_state_test" mkdir "%OBJ%\openxr_proxy_state_test"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" /I"%GEN%" ^
     /Fo"%OBJ%\openxr_proxy_state_test\\" /Fe"%BUILD%\openxr_proxy_state_test.exe" ^
     "tools\openxr_proxy_state_test\openxr_proxy_state_test.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
@@ -3112,6 +3168,19 @@ if errorlevel 1 ( echo [edvr] ERROR: ui composite census test build failed & exi
 "%BUILD%\ui_composite_census_test.exe" --self-test "%ROOT%" || exit /b 1
 python "tools\ui_composite_census_test\mutants.py" --self-test || exit /b 1
 exit /b 0
+
+:rig_flat_map_bounce_test
+ echo [edvr] === flat_map_bounce_test.exe ===
+ REM Pure cached-map core and fake driver: seeded programs, C1-C8, no D3D device.
+ if not exist "%OBJ%\flatmapbounce" mkdir "%OBJ%\flatmapbounce"
+ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /I"src\d3d11" ^
+     /Fo"%OBJ%\flatmapbounce\\" /Fe"%OBJ%\flatmapbounce\flat_map_bounce_test.exe" ^
+     "tools\flat_map_bounce_test\flat_map_bounce_test.cpp" /link /INCREMENTAL:NO
+ if errorlevel 1 ( echo [edvr] ERROR: flat map bounce test build failed & exit /b 1 )
+ "%OBJ%\flatmapbounce\flat_map_bounce_test.exe" --dry-run || exit /b 1
+ "%OBJ%\flatmapbounce\flat_map_bounce_test.exe" --self-test "%ROOT%" || exit /b 1
+ python "tools\flat_map_bounce_test\mutants.py" --self-test || exit /b 1
+ exit /b 0
 
 :rig_panel_curve_test
 echo [edvr] === panel_curve_test.exe ===

@@ -1,5 +1,6 @@
 #pragma once
 #include "../../src/d3d11/flat_projection_runtime.h"
+#include "../../src/d3d11/flat_map_bounce.h"
 
 void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     using namespace edvr;
@@ -186,15 +187,48 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     ComPtr<ID3D11Buffer> dynamic;
     check(SUCCEEDED(device->CreateBuffer(&dynamicDesc,nullptr,dynamic.GetAddressOf())),"mapped source CB");
     if(dynamic){
+        struct BounceDriver {
+            void retain(uintptr_t r, uintptr_t c) {
+                reinterpret_cast<ID3D11Resource*>(r)->AddRef();
+                reinterpret_cast<ID3D11DeviceContext*>(c)->AddRef();
+            }
+            void release(uintptr_t r, uintptr_t c) {
+                reinterpret_cast<ID3D11DeviceContext*>(c)->Release();
+                reinterpret_cast<ID3D11Resource*>(r)->Release();
+            }
+            uint64_t clockTicks() { LARGE_INTEGER t{}; QueryPerformanceCounter(&t); return uint64_t(t.QuadPart); }
+            uint64_t ticksPerSecond() { LARGE_INTEGER t{}; QueryPerformanceFrequency(&t); return uint64_t(t.QuadPart); }
+            bool verify(void* real, const void* cached, size_t n) { return std::memcmp(real,cached,n)==0; }
+        } bounceDriver;
+        auto bounce=std::make_unique<flatmap::Runtime<BounceDriver>>(bounceDriver);
+        bounce->setMode(flatmap::Mode::On);
+        bounce->preMap(reinterpret_cast<uintptr_t>(dynamic.Get()));
         D3D11_MAPPED_SUBRESOURCE mapped{};
         const HRESULT hr=ctx->Map(dynamic.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
         check(SUCCEEDED(hr),"mapped source CPU write");
         if(SUCCEEDED(hr)){
+            const auto source=runtime.bounceSource(dynamic.Get());
+            check(source.eligible && source.width==sizeof(raw),
+                  "tracked dynamic WARP CB qualifies before map invalidation");
+            flatmap::MapRequest bounceRequest{};
+            bounceRequest.resource=reinterpret_cast<uintptr_t>(dynamic.Get());
+            bounceRequest.context=reinterpret_cast<uintptr_t>(ctx.Get());
+            bounceRequest.real=mapped.pData;bounceRequest.width=source.width;bounceRequest.frame=1;
+            bounceRequest.discard=bounceRequest.eligible=bounceRequest.success=true;
+            bounceRequest.seed=source.seed;bounceRequest.seedValid=source.seedValid;
+            mapped.pData=bounce->install(bounceRequest);
+            check(mapped.pData!=bounceRequest.real && reinterpret_cast<uintptr_t>(mapped.pData)%64==0,
+                  "WARP map bounce gives the observer an aligned cached pointer");
             runtime.observeMap(dynamic.Get(),D3D11_MAP_WRITE_DISCARD,mapped.pData);
             check(!runtime.copyConstants(dynamic.Get(),0,sizeof(copied),copied),
                   "mapped transaction cannot publish diagnostic bytes");
             std::memcpy(mapped.pData,raw,sizeof(raw));
+            auto bounceLease=bounce->beginUnmap(bounceRequest.resource,bounceRequest.context);
+            check(bounceLease.bounced() &&
+                  std::memcmp(bounceRequest.real,raw,sizeof(raw))==0,
+                  "bounce flushes game bytes to real WARP mapping before observers");
             runtime.observeUnmap(dynamic.Get()); // before real Unmap
+            bounceLease.finish();
             ctx->Unmap(dynamic.Get(),0);
             check(runtime.copyConstants(dynamic.Get(),0,sizeof(copied),copied) &&
                   std::memcmp(copied,raw,sizeof(copied))==0,

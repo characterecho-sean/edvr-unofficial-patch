@@ -20,6 +20,7 @@ struct Device {
     DWORD type = DI8DEVTYPE_KEYBOARD;
     HRESULT result = DI_OK;
     unsigned calls = 0;
+    unsigned capsCalls = 0;
     BYTE keys[256]{};
     DIDEVICEOBJECTDATA events[4]{};
     DWORD count = 0;
@@ -27,6 +28,7 @@ struct Device {
 ULONG STDMETHODCALLTYPE retainDevice(Device* d) { return ++d->refs; }
 ULONG STDMETHODCALLTYPE releaseDevice(Device* d) { return --d->refs; }
 HRESULT STDMETHODCALLTYPE caps(Device* d, DIDEVCAPS* c) {
+    ++d->capsCalls;
     if (!c || c->dwSize != sizeof(*c)) return DIERR_INVALIDPARAM;
     c->dwDevType = d->type;
     return DI_OK;
@@ -145,7 +147,23 @@ int main() {
     factory.next = &joystick;
     createThrough(factory, &returned);
     check(joystick.refs == 1, "joystick creation adds no keyboard ownership");
+    const GUID kGuidMouse = {0x6F1D2B60, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+    auto mouseTable = deviceTable();
+    Device mouse{mouseTable.data()};
+    mouse.type = DI8DEVTYPE_MOUSE;
+    factory.next = &mouse;
+    reinterpret_cast<PFN_CreateDevice>(factory.table[3])(&factory, kGuidMouse, &returned, nullptr);
+    check(mouse.refs == 1 && mouse.capsCalls == 0,
+          "non-keyboard GUID creation bypasses keyboard capture without querying capabilities");
     factory.next = &keyboard;
+
+    const auto savedProfile = g_runtimeProfile;
+    g_runtimeProfile = RuntimeProfile::Flat;
+    check(runtimeProfileAllowsKey("advanced.input_gate"),
+          "flat profile allowlist includes advanced.input_gate");
+    check(Config::get().getBool("advanced.input_gate", true),
+          "flat profile preserves default input_gate enablement");
+    g_runtimeProfile = savedProfile;
 
     keyboard.events[0] = {DIK_TAB, 0x80, 10, 1, 0};
     keyboard.events[1] = {DIK_A, 0, 11, 2, 0};

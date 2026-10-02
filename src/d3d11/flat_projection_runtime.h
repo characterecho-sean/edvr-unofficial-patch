@@ -62,6 +62,11 @@ struct FlatProjectionShadowMetadata {
     uint32_t width = 0;
     uint64_t generation = 0, mutationSerial = 0, writeGeneration = 0, bankEpoch = 0;
 };
+struct FlatProjectionBounceSource {
+    uint32_t width = 0;
+    const void* seed = nullptr;
+    bool eligible = false, seedValid = false;
+};
 class FlatProjectionRuntime {
 public:
     // initialize adopts the current thread as owner. Earlier or foreign
@@ -73,6 +78,19 @@ public:
     bool observeCreateBuffer(ID3D11Buffer* buffer, const void* initialData);
     void observeMap(ID3D11Resource* resource, D3D11_MAP type, const void* bytes);
     void observeUnmap(ID3D11Resource* resource);
+    // Called after the real Map and before observeMap invalidates the shadow.
+    FlatProjectionBounceSource bounceSource(ID3D11Resource* resource);
+    bool containsTracked(ID3D11Resource* resource) { return find(resource) != nullptr; }
+    void setBounceSampleHooks(bool (*wants)(uint32_t),
+                              void (*record)(uint32_t,uint64_t)) {
+        bounceSampleWants_ = wants; bounceSampleRecord_ = record;
+    }
+    void setBounceTelemetryHooks(void (*mapped)(D3D11_MAP),
+                                 void (*fullWrite)(uint32_t),
+                                 void (*registered)(const D3D11_BUFFER_DESC&)) {
+        bounceMapped_ = mapped; bounceFullWrite_ = fullWrite;
+        bounceRegistered_ = registered;
+    }
     void observeUpdate(ID3D11Resource* resource, const void* bytes, const D3D11_BOX* box);
     void invalidate(ID3D11Resource* resource);
     void invalidateAll();
@@ -108,6 +126,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
         uint64_t generation = 0;
         uint32_t width = 0;
+        bool dynamicWrite = false;
         bool mapped = false, promoted = false, privateReady = false, pending = false;
         bool mutationOverflow = false;
         uint64_t mutationSerial = 1;
@@ -146,6 +165,11 @@ private:
     uint64_t nextUseSerial_ = 1;
     uint32_t coldAttempts_ = 0;
     bool coldEnabled_ = false;
+    bool (*bounceSampleWants_)(uint32_t) = nullptr;
+    void (*bounceSampleRecord_)(uint32_t,uint64_t) = nullptr;
+    void (*bounceMapped_)(D3D11_MAP) = nullptr;
+    void (*bounceFullWrite_)(uint32_t) = nullptr;
+    void (*bounceRegistered_)(const D3D11_BUFFER_DESC&) = nullptr;
     bool planCapabilityReady_ = false;
     FlatProjectionRuntimeStatus status_{};
     FlatProjectionRuntimeFailure failure_{};

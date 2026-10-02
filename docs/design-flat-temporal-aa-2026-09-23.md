@@ -5,7 +5,7 @@
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
   build `d0898e1b`. The chronology (26-77) is verbatim in Status detail below;
-  the evidence is in sections 1-84.
+  the evidence is in sections 1-85.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,11 +33,11 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** fly section 83's plan (SS 0.75 and 0.85 with bloom and DoF on and
-  off, a mismatched resolution, TAA at 1.25, game AA, VR at 0.85). The HDR route
-  flew (section 81; FSR, TAA at R = D, ReShade still to fly). Then the open
-  items above (older: Status detail). Existing
-  evidence does not justify ignoring the alternate projection.
+- **Next:** section 85: all three supporters confirm working after updating.
+  User2 also log-confirmed. Then 83: SS 0.75/0.85, bloom/DoF, mismatched
+  resolution, TAA at 1.25, game AA, VR at 0.85. HDR flew (81); FSR reported
+  working (85). TAA at R = D and ReShade still to fly. Then open items above.
+  Existing evidence does not justify ignoring the alternate projection.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
   open. VR still needs regression tests; the concourse NPC observation on
@@ -58,7 +58,7 @@
   identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
   checkerboard rendering (halves distant terrain's horizontal samples; turning
   it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
-- **Compatibility decision, environment:** moved to Status detail 2026-10-01.
+- **Temporary measuring keys:** `experimental.temporal_aa_engine_motion`, `experimental.flat_per_draw_lean`.
 
 ## Status detail (moved out of Status 2026-09-29)
 
@@ -8659,3 +8659,462 @@ checkerboard: ... ON`, one toast in the headset and the hint on the Status page;
 the option off in Elite's graphics options and Apply: within about 6 s the log says
 OFF and the hint is gone; turn it on again and the toast comes again. Read with the
 command above; the distant hills' shimmer is Sean's eye.
+
+## 85. RX 9070 XT: FSR works in the menu, remains stood down in game (2026-10-02)
+
+Evidence: `edvr-logs-20261002-190903.zip`, graphics log
+`edvr_gfx_20261002_190718.log`. Flat profile, RX 9070 XT, FSR 3.1.2,
+3440x1440 render and output, SS 1.0, game AA/bloom/DoF off. No VR runtime
+loaded. Version v0.18.0, PE link stamp 6ABED11D (2026-10-01 21:31:09 UTC).
+`edvr_log.py --expect-build HEAD --version` accepts the release tag as a
+substring of HEAD's description; that does not prove exact HEAD. The tag's
+flat runtime, camera, HDR and copy-selection code matches this checkout.
+
+Timeline from `edvr_log.py --flat-upscale` and targeted `--grep`:
+
+- Startup/loading: no-3d-scene; stand-down entered 19:07:25.464.
+- 19:07:38.982: a probe selected and resumed. FSR initialized and made its
+  context. The next two windows treated 975 and 296 HDR frames (1271 total).
+  Only two engine-source-not-ready and one incomplete-jitter-frame refusals.
+- Loading/transition: stand-down entered 19:07:50.261 after 6666 frames over
+  5 s refused for no-3d-scene. This reason remains the entry reason.
+- From 19:08:03.776, every HDR probe finds a 3440x1440 target and consumer,
+  but selects conflicting-hdr-target-or-camera; admitted/backend/treated
+  stay zero. HDR image continuation refused rises to 35, accepted stays 0.
+  At 19:08:50.261, the last probe explicitly names the HDR conflict.
+- F8 at 19:08:50.858 says no-known-tone-pass. That copy/discovery warning
+  does not establish the HDR conflict's cause. No manual F10 audit occurred:
+  details=not-manually-armed, audit-pairs=0, bytecode-stages-saved=0.
+
+ruled out: FSR backend initialization or unsupported AMD hardware as the
+cause of this stand-down, because the same session resolves 1271 HDR frames.
+ruled out: supersampling below 1 as this report's cause, because R = E = D.
+
+Open hypotheses: a Probe recovery artifact, or a real viewport/depth/write/
+camera mismatch in the gameplay HDR image continuation. `flat_runtime.cpp`
+applyWork pauses camera injection and projection shadows in Probe, but
+flatRuntimeMap/Unmap/Update still capture runtime camera rows. Thus zero
+camera-refresh calls does not prove missing camera data. `flat_camera_table.h`
+newFrame invalidates rows until fresh writes; `flat_runtime_model.h` imageCopy
+requires current matching source/HDR provenance. Its rejection sets
+ImageCopySource/hdrBad, which `flat_hdr_route.h` flatSelectHdrPrefix returns
+as ConflictingHdr. The bundle does not identify which prerequisite failed.
+Late passive discovery also drops contract/edge observations; do not treat
+its truncation as the earlier conflict's explanation.
+
+Instrumentation limit: reportConflict runs on copy treatment, not at the
+HDR trigger; Probe returns before that reporting path. Thus no detailed
+conflict witness in this bundle is not evidence of no conflict.
+
+Next flight, unchanged settings/build: in the cockpit while F8 reports FSR
+inactive, close F8, press F10 and note whether FSR resumes. After about 2 s,
+press F10 again, wait at least 5 s, then bundle logs with the installer.
+F10 ends stand-down, restores Full work, arms the 900-frame audit and dumps
+the trace ring; the installer includes traces/shaders. The second arm keeps
+a trace of Full work as well as the first arm's prior probes. If Full treats
+while Probe did not, investigate probe camera provenance/recovery. If Full
+still refuses, replay the traces for the first conflicting draw and its
+depth/viewport/camera provenance before changing admission. Verify the
+version again and check both trace dumps have frames/events and no SHORT
+WRITE. No rendering code, config, or installed files changed for this review.
+
+### Second capture: Full work also refuses the source (2026-10-02)
+
+`edvr-logs-20261002-202354.zip`, graphics log
+`edvr_gfx_20261002_202027.log`: same v0.18.0 / 6ABED11D binary. FSR selected
+at 20:22:10.241. Multiple F10 arms restore Full and complete 900-frame
+audits; treated remains 0. At 20:22:59.078, image-copy-source conflicts
+number 570 in 5 s. Copy provenance completes two samples per arm, with no
+missing source/destination records or actual-shader mismatch.
+
+ruled out: Probe-only recovery failure as the sole cause, because Full
+work after repeated F10 arms still treats zero frames with the same conflict.
+
+The failed prerequisite is now identified. At 20:22:55.384 (frame 60522),
+the format-9 source has exactly one write: VS CFA91824129ECBBC / PS
+07B3F82100F29401, scene-sized depth/DSV, b1=null and camera-present=0.
+Its image-source-bad=1, hdr-bad=1, bad-cause=image-copy-source. The HDR
+destination is otherwise unmarked before the copy; cached/actual copy
+shader hashes match. Frame 60612 repeats the same evidence. The conflict
+witness has an empty reference and this source draw as current, rather
+than two disagreeing cameras or depths.
+
+`flat_runtime_model.h` exempts only PS FCFAD73924BF45B9 on this VS (and
+only after bridge verification). Therefore this source fails the first
+format-9 write's cameraCurrent requirement, and the later HDR copy fails
+the source bad-state checks. The log classifies the pair generic-inert,
+but that proves the VS has no CB/projection; it is not proof the PS reads
+no camera. `ambient-occlusion.md`'s earlier disassembly identifies this PS
+as a depth-aware upsample of half-resolution colour. Inspect exact bytes
+before extending the camera-independent exemption; retain depth/DSV,
+extent, viewport and current-frame source checks.
+
+Existing evidence to retrieve, no new flight: the log records successful
+trace dumps, including traces/flat_trace_60521.bin (3 frames, 7277 events,
+3667768 bytes, no SHORT WRITE). None of the traces or shaders are in this
+ZIP. The source bundler accepts same-session files within 180 s and below
+64 MiB/file, so this trace is below its size cap; the installed bundler's
+version/path/timestamps are unverified. Obtain the existing edvr_logs/traces
+files and ps_07B3F82100F29401.dxbc if present under edvr_logs/shaders. Replay
+the Full trace and inspect the pixel shader before changing admission.
+
+### Trace replay: the exact source exemption is sufficient (2026-10-02)
+
+`flat_trace_all.zip` provides flat_trace_55758, _56705, _58750, _59615 and
+_60521.bin: 3 complete frames each, 15 total, matching the logged F10 dumps.
+The current unchanged flat_temporal_test rig was compiled with build.bat's
+recipe. All 15 --trace-check results match the live contract hashes;
+--trace-chain finds one 3440x1440 HDR candidate, an unambiguous known
+consumer and zero late writes, refused for conflicting-hdr-target-or-camera.
+The relevant source/model is unchanged from the supporter's v0.18.0.
+
+Focused replay confirms the first bad copied source in every frame: the
+single scene-sized format-9 CFA91824129ECBBC/07B3F82100F29401 draw, same
+depth/DSV, full viewport, no camera and no image-source-verified flag. The
+copy is rejected 0 accepted / 1 refused. Three other format-9 writes per
+frame are half-sized with no DSV; they are not the copied source.
+
+An offline counterfactual changes only this source's PS identity to the
+already admitted FCFAD73924BF45B9 and sets the verified-source flag. All
+15 frames then accept the HDR copy (1 accepted / 0 refused) and select
+observed-mono-input-candidate. Motion-source aggregation is rechecked below.
+Setting the
+verified bit alone does not help: exact-pair admission is required too.
+This proves sufficiency at selection, conditional on the actual PS being
+camera-independent and passing the live verifier. It does not test FSR
+dispatch or raster-phase qualification, and does not authorize a blind
+exemption. No production source or installed files changed.
+
+ruled out: ambiguous HDR ownership or late HDR writes as the captured
+failure, because all 15 chain replays have one candidate, ambiguity=0 and
+late-writes=0. The exact source camera requirement is the admission blocker.
+
+The archive contains no shader bytes. A local historical VS capture hashes
+to CFA91824129ECBBC and disassembles to position/UV forwarding, no CB reads;
+the exact PS is absent from the project trees and local Epic shader folder.
+The older AO journal's summary is not a substitute for its disassembly.
+Next evidence: ps_07B3F82100F29401.dxbc from the supporter's shader folder if
+it exists. Current F10's named stage probes omit this PS and generic-inert
+classification does not trigger unknown-pair saving, so another unchanged
+F10 run cannot be relied on to supply it. If absent, add a bounded named
+creation-cache capture for this PS before scheduling the next flight.
+
+### Supplied pixel shaders and targeted capture (2026-10-02)
+
+`ps_all.zip`: 40 DXBC files, 141116 bytes. Every filename matches the
+actual EDVR FNV64 hash; no file, including a mislabeled one, hashes to
+07B3F82100F29401. `ps_1F64463B15189104.zip` contains the same verified
+1F64463B15189104 file included in ps_all. It is the separate documented
+CE24A73943632F55/1F64463B15189104 scene pair: depth/G-buffer inputs t0..t3,
+discard and two render-target outputs, CB2[46].x and CB2[0].x. It does not
+qualify the missing image-source pass. The HDR copy PS DFCBA0EC70B03C9B
+is present; the existing exempted source PS FCFAD73924BF45B9 is absent.
+
+Diagnostic change: the existing bounded F10 arm in flatRuntimePresent
+requests PS 07B3F82100F29401 through captureFlatProbeShader. No admission
+rule or config changes. This runs once per manual arm, after the audit
+ends stand-down and initializes the projection runtime. The helper looks
+up exact creation bytes by stage/hash, writes the named DXBC through
+dumpShaderBlob and logs succeeded/failed/missing with the requested hash.
+Thus a missing cache entry or a failed write is distinguishable from the
+request never executing; generic-inert classification in the prior log
+already establishes that this pair's bytes were retained then.
+
+Validation: full absolute-path `build.bat --jobs 2` passed every gate,
+including production FSR/DLSS DLLs, rigs and installer resource checks.
+Receipt status full-pass, stamp v0.18.0-26-gb5df4ff4-dirty. Re-read the
+F10 block and capture helper: one request for this PS, no new shader entry
+point or duplicated census. No rendering change or flight qualification.
+
+Two default-parallelism builds failed the heartbeat rig's combined H5
+assertions. An isolated run passed. A temporary diagnostic copy under
+32-way load reproduced H5.whole failures with seen=1, bad=0 and torn=0;
+reader counts remained millions. This establishes sample-count starvation
+for those reproductions. Lower parallelism ran all gates successfully;
+no heartbeat source/test change or gate bypass was made.
+
+Next flight uses the diagnostic build: cockpit, F10 once, then obtain
+edvr_logs/shaders/ps_07B3F82100F29401.dxbc. Check the version and
+`flat producer shader:` line for stage=ps hash=07B3F82100F29401. A succeeded
+line confirms a saved or already-existing file; missing/failed names the
+failure, and no line means the diagnostic arm did not run. Do not extend
+camera-independent admission before inspecting the actual pixel shader.
+
+### Additional flat AA report: output chain undiscovered (2026-10-02)
+
+Evidence: `edvr-logs-20261002-230831.zip`, graphics log
+`edvr_gfx_20261002_220635.log` (18234 lines). Literal v0.18.0, build
+6ABED11D, linked 2026-10-01 21:31:09 UTC: the same release as the first
+supporter, before the targeted capture. HEAD's release-prefix acceptance
+again does not prove exact HEAD. Relevant flat model/camera/HDR route code
+is unchanged from the tag. Flat profile, Odyssey-64, output 1440x900 fmt28,
+captured game AA off and SS1.0. No measured scene/render size or adapter
+identity; no VR runtime log, traces or shader dumps in this bundle.
+
+The live menu changes requests between DLSS, FSR and off. Every reported
+runtime window has treated=0 and temporal calls=0; 742 copy-structure
+windows have copies=admitted=0 and no source VS/PS identity. Stand-down
+enters for no-known-output-copy at 22:06:44. At 23:08:10 it has persisted
+3300 s, with 2171 probes and 188043 frames skipped. HDR route and image
+continuation counters stay zero. This differs from the earlier recognized
+HDR/source chain that fails conflicting-hdr-target-or-camera.
+
+The passive discovery final at 22:08:36.995 (frame6661, request=off) has
+1488 useful frames, 1487 depth/output frames, 967654 draws, 930519 depth
+draws, 7692 copies and 23587 dispatches; unknown lists/foreign-thread calls
+and frame-dropped-observation counters are zero. Its selector refuses
+relevant-observations-truncated: world-retained=224/224, 13 dropped world
+draw observations, handoff=12/32. Camera-buffer availability is 607/11.
+This proves live rendering was observed and identifies a passive capacity
+limit, but cannot establish the active runtime's exact missing-copy cause.
+There are no later passive samples. Earlier samples also refuse missing
+HDR writes/camera or tone; their zero identities are not a draw witness.
+
+ruled out: the menu failing to forward the AA selection, because live
+discovery requests explicitly show FSR, DLSS and off.
+ruled out: no rendering observed throughout the capture, because the
+passive final records substantial depth/output draw work.
+
+Open: unfamiliar final-copy/post chain, different output/context path, or
+incomplete Probe recovery. Passive capacity is a separate limitation.
+No manual F10 audit occurred: all details
+are not-manually-armed, audit-pairs=0 and saved bytecode=0. This bundle
+does not establish the earlier PS07 image-source rejection in this user.
+Next: keep settings, select the intended AA mode in the cockpit, close F8,
+press F10, then again after about 2 s; wait at least 5 s and collect the
+log, both trace dumps and saved shaders. Full work with a recognized chain
+would implicate recovery; persistent refusal plus draw/overflow witnesses
+would distinguish an unfamiliar chain from capacity. Use the diagnostic
+build's literal stamp and verify successful trace writes. No rendering
+code, config or installation changed for this comparison.
+
+### Sean's 1440x1080 reproduction: render/output mismatch (2026-10-02)
+
+Local Epic `edvr_gfx_20261002_102905.log`, literal
+v0.18.0-29-g31f8aee7, linked 2026-10-02 15:04:04 UTC; the exact-ref version
+check passes. Relevant runtime/selector/stand-down files match HEAD
+5c70e1c8 (the intervening source changes are none; commits add docs).
+At 10:31:10.537, scene=1440x1080 but output=3840x2160, last refusal
+render-size-does-not-fit-output. Prior treatment total 2365 is historical;
+the current window has no accepted reset/history and treated-streak=0.
+At 10:31:14.693 stand-down has lasted 60s and 39 probes for that mismatch.
+
+The mapping is X=0.375, Y=0.5: not uniform, and X is below the supported
+half-output minimum. flatRenderFitsOutput requires both uniform scaling
+(allowing integer rounding) and each axis within 0.5..2.0. This confirms
+that reproduction's refusal; it does not establish a general 4:3 ban.
+Test 4:3 with a matching 4:3 backbuffer to discriminate that claim.
+
+ruled out: the aspect/render-size gate directly causing user2's
+no-known-output-copy, because frameSeen is set only when an output-resource
+draw uses exact final-copy VS20F383BBAC05C031/PSDED8796049C7BB4A; a watched
+frame with no such draw gets no-known-output-copy at frame end. Aspect,
+projection and camera checks run later after a recognized copy. Passive
+world-record truncation does not explain that runtime verdict either.
+
+### User1's target shader received and qualified (2026-10-02)
+
+`edvr-logs-20261002-162950.zip` repackages the previous second flight:
+graphics log SHA256 22690CA230F5F9C2E91287E1FB9990AAE74D6A97C50A1EA6CDC7FBEC06FE9071,
+1098516 bytes, byte-identical to edvr_gfx_20261002_202027.log. No traces or
+shaders are bundled. It adds no new flight evidence.
+
+The separate `ps_07B3F82100F29401.zip` supplies new exact bytes: 3668B,
+EDVR FNV hash 07B3F82100F29401, SHA256
+6c283938fea3ffa9118023c84e387850395d5b61f19e4b0b66d3e7e87e15b7de.
+DXBC structure and tools/dxbc_disasm.py succeed. Its PS5.0 takes
+TEXCOORD1.xy, emits SV_TARGET0, and reads only CB2[3].x, [4].zw, [5].xy,
+[6].x; t0/t2 depths and t1 colour through s0/s1. It caps/compares depth
+differences, chooses/interpolates colour samples, remaps alpha and may
+discard. No b1, projection matrix, SV_Position input, depth output or UAV
+write. Paired VS CFA91824129ECBBC independently hashes correctly (332B),
+only forwarding input position to SV_POSITION and UV to TEXCOORD1.xy.
+This establishes camera-constant independence, not sampled-texture
+freshness or complete pixel coverage; those are not inferred from bytes.
+
+Narrow fix: one shared exact-pair predicate admits this PS and the existing
+FCFAD73924BF45B9 with the same VS. Runtime live verification must match
+actual bound shader hashes to the observed pair, and all existing format9,
+RT/depth/DSV/viewport/dimension/frame and HDR copy guards remain. No broad
+generic-inert exemption, aspect relaxation, config key or new SRV freshness
+claim. Both pairs now run existing positive and rejecting model scenarios;
+the focused rig compiles/passes. All 15 recorded trace frames replay
+byte-identically: their saved verified flags remain false, so those stored
+recordings still reject, as they should. Full production build passed;
+live verification/admission and FSR dispatch still require a new flight.
+
+With the fixed predicate, a verifier-bit-only replay (no PS remap) changes
+exactly one format9 CFA/07 draw in each of the 15 frames. All accept one
+HDR copy, refuse zero copies, and select the 3440x1440 mono candidate at
+the final-output copy. Five contract records include one aggregated
+motion-source record; supported draw counts vary by trace. Original flags
+still replay the recorded refusal with identical contract hashes.
+
+Replay correction: EDVRFTR4 resolve markers are passive data, not draws.
+The old --trace-check omitted their early return and could fabricate a
+late HDR write after tone when the source became valid, falsely reporting
+inconsistent-draw-order. Correcting only the ignored replay harness made
+the verifier-bit-only and old PS-remap results agree. Official replay now
+skips/counts resolve markers; a round-trip regression places a marker
+between tone and final copy and requires the same Selected contract/hash.
+The focused self-test and all 15 baseline frame hashes pass. This changes
+diagnostic replay, not runtime rendering.
+
+### User2's F10 capture: passive/runtime divergence (2026-10-02)
+
+`edvr-logs-20261002-233240.zip`, edvr_gfx_20261002_232737.log, is new:
+diagnostic v0.18.0-26-gb5df4ff4-dirty, linked 2026-10-02 14:41:48 UTC,
+stamp 6ABFC2AC. Relevant observer/runtime logic matches its source base;
+the later named capture does not change admission. Flat EDHM chain,
+1440x900 observed output; GPU identity still absent. FSR changes to DLSS
+at 23:29:38 and remains requested. At 23:32:17.547 and 23:32:23.448 F10
+ends stand-down and restores Full work. All 60 runtime windows nevertheless
+report treated=refused=0, last=warming-current-frame. Renderer calls/init
+and jitter frames/draws/dispatches remain zero. Camera injection reports
+26748 refresh calls in one Full window; observation hooks are partly live.
+
+Passive contracts at 23:32:34.839 frame 16560 and 23:32:36.362 frame 16643
+contain exact final-copy VS 20F383BBAC05C031/PS DED8796049C7BB4A on output
+000001A27A2B21E0, fmt28, 1440x900, one full-viewport draw, no depth/camera.
+The later sample has no observation drops and refuses no-known-tone-pass.
+Earlier passive samples truncate records/edges. A passive output-class
+draw is now proven; runtime copy recognition is not. No trace files or
+shaders are bundled, and no flat trace dump line occurs in this log.
+
+ruled out: no final-copy pair exists anywhere in user2's captured scene,
+because the passive output contracts name that exact pair and output.
+ruled out: AA selection is off at the F10 arms, because live requests are
+DLSS and enabled/wanted counters are 1. This is not Sean's render/output
+aspect mismatch, and does not establish user1's PS07 image-source failure.
+
+The Full CPU windows at 23:32:20 and :25 have zero calls for other,
+contract reduction, copy checks and coverage; the GPU frame scope counts
+neither timed nor skipped frames. Every accepted runtime draw enters the
+other scope before reducing cached state. Thus no draw passed the early
+active/thread/context guards during those windows; missing downstream
+shader/view metadata cannot by itself explain these zero entry counters.
+Camera Map observation checks thread ownership but not context equality,
+so its positive refresh count does not clear the draw's context guard.
+GPU timing names context 000001A279D931C8, camera injection names
+000001A2085A6B40; draw self and runtime's expected context are not logged.
+
+Open: draw-time liveness/internal scope, thread ownership or context
+identity mismatch. A bounded F10 audit will count each early gate and
+sample self/expected contexts with canonical COM identities; only an
+accepted scope reaches a live-versus-cached output witness. Report zero
+entries distinctly. No repair before this discrimination. Passive tone
+refusal and capacity limits are separate witnesses.
+
+Implemented instrument: an F10-only 900-Present ingress audit counts scope
+entries, inactive live-off/internal scopes, wrong thread, wrong context,
+Paused and accepted scopes. Independent bounded witnesses sample inactive
+state, wrong thread/context and one first accepted draw; at most three
+copy-pair/non-null-output witnesses compare cached and actual shader/RT
+state, viewport and canonical resource identities. Context witnesses use
+canonical IUnknown/device identities to distinguish pointer aliases from
+different objects; foreign-thread samples query self only, never runtime's
+raw context. The off path adds one atomic flag load, with no queries/logs.
+Armed, 5s, rearmed, complete and resize/stop summaries include zero entries,
+so the guard audit cannot be hidden behind the guard it diagnoses. No
+runtime guard is bypassed. No new config switch. Full absolute-path
+build.bat --jobs 2 passed all gates, including production FSR/DLSS DLLs,
+test rigs, installer/export/resource checks and the full-pass receipt.
+Stamp v0.18.0-31-g5c70e1c8-dirty; receipt inputs SHA256
+ce5929a93d9678818ec2793efac7b075ad7d82a83c4116bbedddd554b01b2d9a.
+Next user2 flight: select AA in the cockpit, close F8, F10 once, wait at
+least 5s and capture the new ingress summary/witness lines; a second F10
+reports the prior arm before rearming. No need to infer a repair from the
+passive source/tone or compute probes while runtime scopes are excluded.
+
+### Both supporters report working; user2 DLSS is log-confirmed (2026-10-02)
+
+Sean reports user1's FSR issue fixed, then user2 confirms working too.
+User1's new-build success is human confirmation; no additional successful
+flight log was supplied for that user. The exact shader, model replay and
+validated fix remain the qualification evidence above.
+
+User2 `edvr-logs-20261003-001741.zip` contains two distinct sessions:
+000825 is the old -26-gb5df4ff4-dirty build and remains idle through its
+startup/menu capture; 001112 is the relevant -31-g5c70e1c8-dirty build,
+stamp 6ABFE356, linked 2026-10-02 17:01:10 UTC. This is the validated
+pre-commit artifact whose source was committed as 0b59f0d4; HEAD's literal
+version mismatch is expected, not evidence of a stale fix. The successful
+log is edvr_gfx_20261003_001112.log (6508 lines).
+
+Environment: flat EDHM chain, NVIDIA GeForce RTX 3060 (12,113 MiB), output
+1440x900. Live FSR selection briefly returns to DLSS; NGX initializes at
+00:11:53.944 and creates the flat HDR DLSS feature at 00:11:54.258. A
+separate DLAA feature is created at output size. Driver and DLSS runtime
+version are not supplied. Conflicting game AA snapshots (AAMode=4 and =0)
+do not identify the final live game AA mode. No VR runtime is in this log.
+
+At 00:17:39.686 cumulative runtime treatment is 18398, refused 2526, renderer
+calls 18398 and backend-failure 0. Longest treated streak 16115. In the last
+window, 147 scene HDR frames complete every route stage with zero declines;
+the other 92 frames have no 3D scene. HDR is 1440x900, consumer target 720x450,
+trigger VS DFED8E1C9E191BEC/PS 143AAE0597E2F7BF. Earlier full windows treat
+every HDR frame (e.g. 267/267 at 00:17:34). Source image continuation counters
+remain accepted 0/refused 0, so PS07's special path is not demonstrated here.
+
+At 00:17:39.685 the active F10 arm has 3527079 entries, 3526426 accepted,
+653 inactive-internal; live-off, wrong-thread, wrong-context and Paused all 0.
+The output witness at 00:17:16.687 matches cached and actual VS/PS/RTV for
+20F383BBAC05C031/DED8796049C7BB4A; actual colour and output canonical
+IUnknown both 000002879C5C4780, viewport 1440x900. Thus the current draw gate
+and output identity work. The internal exclusions are EDVR's own scope,
+not an observed current game-context failure. Trace dumps are empty
+(16B, frames 0/events 0); no trace or shader binaries are bundled.
+
+ruled out: an ongoing thread/context gate or stale output/shader identity
+failure in this successful session, because the new audit admits millions
+of entries and the live output witness agrees with the cached state.
+Outcome CLOSED for both reported AA failures on the tested build. User2's
+earlier entry-path failure is not causally isolated: the new build/launch
+works, no runtime guard was relaxed, and the source-exemption subroute is
+unused. Do not attribute that older failure to PS07 from this confirmation.
+No further rendering change or test flight requested. F10 ingress remains
+a bounded manual diagnostic, with no temporary config key to retire.
+
+### Third supporter: rc.4 no-tone-pass refusal (2026-10-02)
+
+`edvr-logs-20261002-213417.zip`, edvr_gfx_20261002_212356.log (4790 lines):
+literal v0.18.0-rc.4, stamp 6ABC3FAC, linked 2026-09-29 22:46:04 UTC.
+Installation record also says rc.4. Exact HEAD version check mismatches;
+this predates section 83 structural-copy admission and section 85's exact
+image-source fix and ingress audit. It is not evidence of those failing.
+
+Flat EDHM chain, output 2560x1440, GPU not identified. The flat INI sets
+temporal_aa=on (TAA), model k, real_dll=d3d11_edhm.dll. No explicit
+experimental.temporal_aa_before_post key, so no preserved off value blocks
+the newer build's default auto route. Live F8 briefly selects DLSS at
+21:27:59.511, returns to on at 21:28:00.630, and finishes in TAA.
+Captured game AA snapshots disagree (AAMode=4 versus =0); final active game
+AA and render/scene extent are not established. Output size is measured.
+
+At 21:34:17.270, treated=0, refused=30046, last=no-known-tone-pass. The final
+5s refusal count is 271. Renderer calls/init/backend-failures all 0: the AA
+request is enabled, and the runtime attempts frame selection, but the old
+selector never finds the required tone pass, so the backend is not called.
+This differs from user2's idle draw-entry failure and does not identify
+user1's exact PS07 image-source conflict. Automatic unknown projection
+capture sees 11 pairs; manual audit pairs 0. No traces or shader binaries
+are bundled.
+
+ruled out: AA left off as the final request, because the live mode is on
+and frame selection attempts/refusals accumulate.
+ruled out: a demonstrated backend/driver failure in this capture, because
+the backend has zero calls and fails before dispatch at no-known-tone-pass.
+
+Recommendation: update to the fully validated flat build v0.18.0-31-g5c70e1c8-dirty
+(source 0b59f0d4), retaining the user's settings and EDHM chain. Its auto HDR
+and structural-copy routing supersedes this old tone-only prerequisite;
+the exact filter fix is included. Do not promise a complete cure from an
+obsolete capture. If still inactive on that literal build, arm F10 in the
+cockpit, wait at least 5s and return a current log with the new route/ingress
+witnesses. No rendering code, config or installation changed for review.
+
+Outcome (2026-10-02): Sean reports that updating fixed it for this user as
+well. This closes the third support case by user confirmation; no updated
+flight log was supplied. The old capture establishes the rc.4 selector
+refusal, but does not identify which newer routing change resolved it.
+All three supporters now report working. No further flight requested.

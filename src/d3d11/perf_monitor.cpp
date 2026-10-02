@@ -22,6 +22,7 @@
 #include "../common/log.h"
 #include "../common/perf_math.h"
 #include "../common/plugin_cost.h"
+#include "../common/slow_test.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"  // vtableWatchDumpRecent, the flip timeline
 #include "device_hook.h"
@@ -215,6 +216,9 @@ struct State {
     bool     freezeTestDone = false;
     int      freezeTestMs = 0;
     uint64_t freezeTestArmedMs = 0;
+    // advanced.slow_test_ms (slowTestTick): read at the first frame; the hold runs 40 s from 90 s in (slow_test.h).
+    bool     slowTestRead = false;
+    SlowTestSchedule slowTest;
 
     // The drop log's rate limit, and the last drop for the page.
     uint64_t dropLogMs = 0;
@@ -804,6 +808,43 @@ void freezeTestTick() {
     Sleep(static_cast<DWORD>(s.freezeTestMs));
 }
 
+// A TEST-ONLY TRIGGER, advanced.slow_test_ms (0 = off, the default): ninety seconds into the session the runtime is
+// asked (frame_flag's requestEndFrameHold) to hold every xrEndFrame it makes that many milliseconds longer, inside the
+// call's timed region, and forty seconds later the request is withdrawn. From outside that is a vendor runtime that
+// stalls in xrEndFrame: the runtime's log shows native_end_frame_episode lines (the first call of the stall, then the
+// episode's end) and the slow regime's SLOW, still_slow and end lines naming the vendor's xrEndFrame as the owner
+// (slow_regime.h), and `edvr_log.py --freezes` reads them. It slows the game on purpose; it is not a feature, and a
+// value above 0 is logged when it is read. The schedule is slow_test.h's; the runtime half only obeys the request.
+void slowTestTick() {
+    State& s = g_s;
+    if (s.slowTest.done()) return;
+    if (!s.slowTestRead) {
+        s.slowTestRead = true;
+        // The bounds are literals: gen_settings_schema reads them for the menu (slow_test.h's kSlowTestMaxMs is the same 500, pinned by tools\slow_regime_test).
+        const int ms = Config::get().getIntInRange("advanced.slow_test_ms", 0, 0, 500);
+        s.slowTest.arm(stampMs(), ms);
+        if (s.slowTest.on()) {
+            Log::get().note("slow test: advanced.slow_test_ms = %d. %llu s from now the runtime holds every xrEndFrame it makes %d ms longer, "
+                            "for %llu s, to test the end-frame episode and slow-regime lines. Set it back to 0.",
+                            ms, static_cast<unsigned long long>(kSlowTestStartMs / 1000), ms, static_cast<unsigned long long>(kSlowTestForMs / 1000));
+        }
+        return;
+    }
+    switch (s.slowTest.tick(nowMs())) {
+        case SlowTestSchedule::Step::Began:
+            requestEndFrameHold(s.slowTest.holdNowMs());
+            Log::get().note("slow test: the hold begins now: every xrEndFrame is held %u ms longer for %llu s.", s.slowTest.holdNowMs(),
+                            static_cast<unsigned long long>(kSlowTestForMs / 1000));
+            break;
+        case SlowTestSchedule::Step::Ended:
+            requestEndFrameHold(0);
+            Log::get().note("slow test: the hold ended. The runtime's frames are as they were.");
+            break;
+        case SlowTestSchedule::Step::None:
+            break;
+    }
+}
+
 float budgetNow() {
     const State& s = g_s;
     if (nativeMenuActive()) return static_cast<float>(s.nativeHistory.predictedPeriod(GetTickCount64()));
@@ -1230,6 +1271,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
         writeFreezeSummary("periodic", false);
     }
     freezeTestTick();
+    slowTestTick();
 
     if (s.active || (s.activeUntilMs && nowMs() < s.activeUntilMs)) {
         if (dueMs(s.slowMs, kSlowEveryMs)) {

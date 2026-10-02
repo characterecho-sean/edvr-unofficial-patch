@@ -24,7 +24,7 @@ namespace edvr {
 //
 // Both DLLs compile frame_flag.cpp, and the shared block's layout changes
 // with it, so the block's name carries the version
-// (Local\edvr_glitch_frame_v35_<pid>): halves from different builds never
+// (Local\edvr_glitch_frame_v36_<pid>): halves from different builds never
 // share one. That kept a mismatched pair inert, but silently. Since v34
 // each half also signs a small version-independent roll-call with the
 // version it was built with, and looks for the last unsigned layout's
@@ -32,7 +32,7 @@ namespace edvr {
 // version REFUSES the channel -- from then on every call here reads as "no
 // answer" and writes nothing -- and frameFlagPeerMismatch() names the
 // partner's version so the caller's log can say both.
-constexpr uint32_t kFrameFlagVersion = 35;
+constexpr uint32_t kFrameFlagVersion = 36;
 
 // The partner half's layout version when it differs from kFrameFlagVersion,
 // else 0. Nonzero means the channel is refused. Each half asks on a cadence
@@ -273,6 +273,16 @@ void clearIntroRecentreRequest();
 // until somebody has actually turned the key on).
 void requestPoseReaderTrace(bool on);
 bool poseReaderTraceRequested();
+
+// advanced.slow_test_ms (docs/headset-lock-vdxr-2026-10-02.md, the test trigger of the end-frame episode and
+// slow-regime instruments): d3d11.dll asks the runtime to hold every xrEndFrame it makes for `ms` more
+// milliseconds, INSIDE the call's timed region, so the runtime's own xr_end_frame phase, its long-call episodes
+// and its slow-regime detector see what a vendor runtime that stalls in xrEndFrame would show them. 0 withdraws
+// it. A TEST: it exists to make that stall happen on purpose, for a fixed stretch of one session (the d3d11 half
+// sets it 90 s in and withdraws it 40 s later), and nothing else writes it. Polled by the runtime's end-frame
+// path once per call (one load); a mismatched pair reads 0, which is "no hold".
+void requestEndFrameHold(uint32_t ms);
+uint32_t endFrameHoldMs();
 
 // Published by openvr_api.dll at EVERY WaitGetPoses/GetLastPoses call: the
 // caller-supplied render/game array pointers and counts -- Elite's OWN

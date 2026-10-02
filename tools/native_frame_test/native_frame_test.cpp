@@ -420,10 +420,20 @@ int wmain(int argc, wchar_t** argv) {
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");
 
+    // advanced.slow_test_ms's end-frame hold (frame_flag.h, v36): d3d11 -> openvr, 0 is no hold, and the
+    // runtime never holds a frame for more than five seconds whatever is asked.
+    check(edvr::endFrameHoldMs() == 0, "no end-frame hold until the d3d11 half asks for one");
+    edvr::requestEndFrameHold(80);
+    check(edvr::endFrameHoldMs() == 80, "the end-frame hold carries its milliseconds");
+    edvr::requestEndFrameHold(60000);
+    check(edvr::endFrameHoldMs() == 5000, "a hold over five seconds is clamped to five");
+    edvr::requestEndFrameHold(0);
+    check(edvr::endFrameHoldMs() == 0, "and is withdrawn by asking for 0");
+
     // frame_flag's layout check (the roll-call, since v34). Last, because a refusal it provokes
     // is meant to outlast it. This process holds one half, so the roll-call
     // has one signature and there is nothing to name...
-    check(edvr::kFrameFlagVersion == 35, "frame_flag layout is v35");
+    check(edvr::kFrameFlagVersion == 36, "frame_flag layout is v36");
     check(edvr::frameFlagPeerMismatch() == 0, "one half alone is no mismatch");
     {
         wchar_t name[64];

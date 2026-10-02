@@ -71,6 +71,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "flat_shader_capture.h"
 #include "perf_monitor.h"
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
+#include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
 #include "vscreen.h"
@@ -1731,6 +1732,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // compare; the first call starts the watchdog thread, or says that advanced.freeze_location turned it off.
     // frameCounter is the frame this Present ended, the number the long-frame lines call "frame".
     stallWatchBeat(presentT1, g_state->frameCounter);
+    // The graphics memory watch (vram_watch.h): this process's GPU memory against the OS's budget for it, a line
+    // on a clock, under pressure and at each crossing. One compare of two integers per frame; the OS is asked once
+    // a second. Here because this is the one hook the VR and the flat profile share.
+    vramWatchTick(presentT1, g_state->device);
     if (routeCrumbs)
         hdrCrumbWrite("present", "end", "hr=0x%08X removed=0x%08X", static_cast<unsigned>(hr),
                       static_cast<unsigned>(g_state->device->GetDeviceRemovedReason()));

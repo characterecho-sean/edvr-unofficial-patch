@@ -42,6 +42,10 @@
 #include "submission_stats.h"
 #include "frame_cycle_stats.h"
 #include "long_cycle_line.h"
+#include "vendor_events.h"
+#include "end_frame_episodes.h"
+#include "slow_regime.h"
+#include "../common/vram_query.h"
 #include "native_cpu_trace.h"
 #include "render_route.h"
 #include "shutdown_trace.h"
@@ -259,6 +263,26 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // session are kept in cycleBook and written as native_long_cycle_worst at close.
   uint64_t longCycleCount=0,longCycleLogged=0;FreezeSecondLimiter cycleLimiter;
   std::mutex cycleBookMutex;FreezeBook cycleBook;uint64_t longCycleCountsMs=0;uint32_t longCycleWorstPrinted=0;
+  // The vendor instruments of the headset-lock arc (docs/headset-lock-vdxr-2026-10-02.md), all owner-thread state:
+  // the vendor's events (vendor_events.h, fed by SessionState's observer), every xrEndFrame of three display periods
+  // or more as an episode (end_frame_episodes.h), and a frame rate under 40% of the display's held for 5 s as a
+  // slow regime with the owner that holds it (slow_regime.h). Each writes an armed line at startup (startInstruments).
+  VendorEventLog vendorEvents;
+  EndFrameEpisodes endFrameEpisodes;
+  EndFrameEpisodes::Lines endFrameLines;
+  SlowRegime slowRegime;
+  // The adapter the runtime's own device sits on, for the figures beside a SLOW line (vram_query.h). Null, with the
+  // reason, on a stack that does not offer IDXGIAdapter3.
+  Microsoft::WRL::ComPtr<IDXGIAdapter3> vramAdapter;
+  const char* vramWhy="the runtime's device was not opened";
+  // True while finishPendingFrameEndBody runs: the end-frame call is then the overlapped one.
+  bool finishingOverlapped=false;
+  // The test hold (frame_flag's endFrameHoldMs, advanced.slow_test_ms): whether one is running and how many calls it held.
+  bool endFrameHoldActive=false;
+  uint64_t endFrameHeldCalls=0;
+  // The display rate the vendor reported (0 when it did not: the SLOW detector then judges by the predicted period).
+  double instrumentDisplayHz=0;
+  uint64_t instrumentSummaryMs=0;
   TransferWallTimes transferWall;
   uint64_t submitCallbacksBegin=0;
   std::atomic<bool> submitRouteNoted[2]{};
@@ -434,6 +458,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void publishDisplayFrequency(float hz,bool estimated,const char* reason,XrResult status) {
     if(GetCurrentThreadId()!=ownerThread||!geometry.displayFrequency(geometryGeneration,hz,estimated))return;
+    instrumentDisplayHz=!estimated&&std::isfinite(hz)&&hz>0?double(hz):0.0;
     nativeTracePrintf("display_frequency,hz=%.9g,source=%s,extension_enabled=%u,result=%d,reason=%s\n",
       double(hz),estimated?"compatibility_90hz":"runtime",unsigned(displayRefreshExtension),int(status),reason);
   }
@@ -678,6 +703,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto openBegan=StepClock::now();
     if(!open(startupOptions))return vr::VRInitError_Init_Internal;
     const double openMs=stepMs(openBegan);
+    startInstruments();
     const auto loopBegan=StepClock::now();
     const auto began=GetTickCount64();
     while(!cancelled.load(std::memory_order_acquire)&&GetTickCount64()-began<15000) {
@@ -729,6 +755,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           nativeTracePrintf("runtime_startup_steps,instance=%.1f,device=%.1f,session=%.1f,swapchains=%.1f,shaders=%.1f,other=%.1f,frames=%.1f,centre=%.1f,total=%.1f,units=wall_ms\n",
             startupSteps.instance,startupSteps.device,startupSteps.session,swapchains,shaders,other,
             startupSteps.frames,startupSteps.centre,openMs+loopMs);
+          // The stereo renderer's four shaders are created from bytecode the build compiled (stereo_shader_source.h); the runtime carries no compiler. `stretch_ms` is the
+          // `shaders` stretch above: the four creations and the blit's buffer and sampler. (Until 2026-10-01 it held four D3DCompile calls, ~443 ms in the 2026-09-15 flight.)
+          nativeTracePrintf("runtime_shaders,source=precompiled,created=4,stretch_ms=%.2f,units=wall_ms\n",shaders);
         }
         return vr::VRInitError_None;
       }
@@ -1360,7 +1389,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // captured at deferral -- published because publishSubmitTimingCpu already
   // ran there (or didn't) and this must not publish the CPU record again.
   void finishPendingFrameEndBody(vr::EVREye eye,uint64_t sequence,bool published) {
+    finishingOverlapped=true; // endFrameReturned names the path
     const auto r=boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture;
+    finishingOverlapped=false;
     lastCompositorResult=boundary.lastResult();
     finishSubmitTail(eye,r);
     if(published&&r==vr::VRCompositorError_None)publishSubmitTimingDevice(sequence);
@@ -1713,7 +1744,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     vr::VRTextureBounds_t treatedBounds{},temporalBounds{},deferredTreatedBounds{};
     bool menuTreated=false,deferred=false,finishingDeferred=false,deferredMenuTreated=false;
     LARGE_INTEGER dispatchBegan{},dispatchEnded{},workBegan{},workEnded{};
-    const bool measure=!submitStats.full()&&counterNow(&dispatchBegan);
+    // Always measured, not only while the 30 s window has room (submitStats.full()): the end-frame episodes and the
+    // slow-regime detector attribute every frame's time (end_frame_episodes.h, slow_regime.h), and a frame that
+    // is slow for a minute must not be the frame the window was full for. The window itself still takes only what
+    // it has room for. About 38 more QueryPerformanceCounter reads a frame across this path, about a microsecond.
+    const bool measure=counterNow(&dispatchBegan);
     bool workClock=false;
     const auto treat=[&]{
       workClock=measure&&counterNow(&workBegan);
@@ -1815,7 +1850,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         deferredR=captured.capture(deferredEye.eye,&deferredProcessed,&deferredTreatedBounds,deferredEye.flags,true,
           nullptr,true,nullptr,&producerTiming);
         r=captured.capture(eye,selected,region,flags,true,
-          nullptr,true,submitStats.full()?nullptr:&transferWall,&producerTiming);
+          nullptr,true,&transferWall,&producerTiming);
       } else if(!graphicsCalls.invoke([&]{
           deferredR=captured.capture(deferredEye.eye,&deferredProcessed,&deferredTreatedBounds,deferredEye.flags,true);
           r=captured.capture(eye,selected,region,flags,true);
@@ -1836,7 +1871,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(separateGraphics()) {
       pollDeviceTiming();
       r=captured.capture(eye,selected,region,flags,true,
-        nullptr,true,submitStats.full()?nullptr:&transferWall,&producerTiming);
+        nullptr,true,&transferWall,&producerTiming);
     }
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
     const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
@@ -1934,6 +1969,111 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(now-longCycleCountsMs<kFreezeCountsEveryMs)return;
     longCycleCountsMs=now;
     writeLongCycleSummary("periodic",false);
+  }
+  // ---- the vendor instruments (docs/headset-lock-vdxr-2026-10-02.md): events, long xrEndFrame episodes, the slow regime.
+  // All on the owner thread. startInstruments writes the three armed lines; a log without them did not run the code.
+  void startInstruments() {
+    char line[800];
+    VendorEventLog::formatArmed(line,sizeof(line));nativeTracePuts(line);
+    EndFrameEpisodes::formatArmed(line,sizeof(line));nativeTracePuts(line);
+    char vramState[240];
+    if(vramAdapter)std::snprintf(vramState,sizeof(vramState),"available");
+    else std::snprintf(vramState,sizeof(vramState),"unavailable: %s",vramWhy);
+    formatSlowArmed(line,sizeof(line),vramState);nativeTracePuts(line);
+  }
+  // The vendor's events, from SessionState's observer: every one decoded and written within the bounds of
+  // vendor_events.h. A session state change carries its own time, so the line says how long ago the vendor made it.
+  static void vendorEvent(const XrEventDataBuffer& buffer,void* context) noexcept {
+    auto& host=*static_cast<NativeRuntimeHost*>(context);
+    if(GetCurrentThreadId()!=host.ownerThread)return;
+    double lagMs=std::numeric_limits<double>::quiet_NaN();
+    if(buffer.type==XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED&&host.api.convertTime&&host.instance) {
+      const auto& event=*reinterpret_cast<const XrEventDataSessionStateChanged*>(&buffer);
+      LARGE_INTEGER counter{};XrTime now=0;
+      if(QueryPerformanceCounter(&counter)&&XR_SUCCEEDED(host.api.convertTime(host.instance,&counter,&now))&&now>=event.time)
+        lagMs=double(now-event.time)/1.0e6;
+    }
+    char line[640];
+    if(host.vendorEvents.note(buffer,lagMs,GetTickCount64(),line,sizeof(line)))nativeTracePuts(line);
+  }
+  // FrameSink, inside finish()'s timed xrEndFrame region: the TEST hold. advanced.slow_test_ms makes the d3d11 half
+  // ask (frame_flag) for every call to be held this long, for 40 s starting 90 s into the session; 0, the default and
+  // the whole of normal life, is one load and a branch. The hold is the point: xr_end_frame, the episodes and the slow
+  // regime then see it as the vendor's own time.
+  void holdEndFrame() override {
+    const uint32_t ms=endFrameHoldMs();
+    if(!ms) {
+      if(endFrameHoldActive) {
+        endFrameHoldActive=false;
+        nativeTracePrintf("native_end_frame_hold,test=1,state=ended,held_calls=%llu\n",(unsigned long long)endFrameHeldCalls);
+      }
+      return;
+    }
+    if(!endFrameHoldActive) {
+      endFrameHoldActive=true;endFrameHeldCalls=0;
+      nativeTracePrintf("native_end_frame_hold,test=1,state=began,ms=%u,source=advanced.slow_test_ms,inside=timed_xrEndFrame_region\n",unsigned(ms));
+    }
+    ++endFrameHeldCalls;
+    Sleep(ms);
+  }
+  void writeSlowLine(const SlowReport& report) {
+    VramFigures figures;
+    const VramFigures* vram=nullptr;
+    if(vramAdapter){figures=vramRead(vramAdapter.Get());vram=&figures;}
+    char line[1100];
+    formatSlowLine(line,sizeof(line),report,vram);
+    nativeTracePuts(line);
+  }
+  void writeInstrumentSummaries(const char* reason) {
+    char line[800];
+    vendorEvents.formatSummary(line,sizeof(line),reason);nativeTracePuts(line);
+    endFrameEpisodes.formatSummary(line,sizeof(line),reason);nativeTracePuts(line);
+    formatSlowSummary(line,sizeof(line),reason,slowRegime);nativeTracePuts(line);
+  }
+  // Session close: an episode or a regime still open ends here, and the summaries (the proof the instruments ran,
+  // zeros included) are written.
+  void finishInstruments() {
+    endFrameEpisodes.finish(endFrameLines);
+    if(endFrameLines.endLen)nativeTracePuts(endFrameLines.end);
+    slowRegime.finish([&](const SlowReport& report){writeSlowLine(report);});
+    writeInstrumentSummaries("session_close");
+  }
+  // FrameSink: every xrEndFrame the boundary made, the moment it returned (owner thread). Feeds the episodes and the
+  // slow regime with that frame's own figures: the end-frame call, the pose wait, the swapchain calls, our copy and
+  // our treatments, each measured where the runtime calls it. A loading frame, or the empty end of a frame the game
+  // never submitted, has none of the eyes' work: its figures are zero and not the last scene frame's.
+  void endFrameReturned(const EndFrameInfo& info) override {
+    const uint64_t nowMs=GetTickCount64();
+    const double periodMs=double(info.periodNs)/1000000.0;
+    const bool scene=info.layers&&!info.background;
+    const double acquire=scene?submitSample.xrAcquireMs:0.0,wait=scene?submitSample.xrWaitMs:0.0,
+      draw=scene?submitSample.xrDrawMs:0.0,release=scene?submitSample.xrReleaseMs:0.0;
+    // transferWall's producerDispatch holds the producer's acquire and flush, and receiveMs the consumer's: the nested
+    // phases native_submit_phases prints, so the copy is these two and not their sum with the parts.
+    const double copy=scene?transferWall.producerDispatch+submitSample.receiveMs:0.0;
+    EndFrameCall call;
+    call.sequence=scene&&submitSample.sequence?submitSample.sequence:info.sequence+frameSequenceOffset;
+    call.ms=info.ms;call.periodMs=periodMs;call.nowMs=nowMs;call.shouldRender=info.shouldRender;call.layers=info.layers;
+    call.background=info.background;call.turbo=info.turbo;call.overlapped=finishingOverlapped&&!info.background;
+    call.result=int(info.result);
+    call.acquireMs=acquire;call.waitMs=wait;call.drawMs=draw;call.releaseMs=release;call.copyMs=copy;
+    char stateScratch[24];
+    call.sessionState=xrSessionStateName(vendorEvents.lastState(),stateScratch);
+    call.stateAgeMs=vendorEvents.stateAgeMs(nowMs);
+    endFrameEpisodes.observe(call,endFrameLines);
+    if(endFrameLines.startLen)nativeTracePuts(endFrameLines.start);
+    if(endFrameLines.endLen)nativeTracePuts(endFrameLines.end);
+    SlowFrame frame;
+    frame.nowMs=nowMs;frame.refHz=instrumentDisplayHz;frame.periodMs=periodMs;frame.background=info.background;
+    frame.noLayers=!info.layers&&!info.background; // an empty end (clear, drain): the context field tells a load from a slow scene
+    frame.vendorWaitMs=boundary.waitBlockMs()+boundary.pacerBlockMs();
+    frame.vendorEndMs=info.ms;
+    frame.vendorSwapMs=acquire+wait+release;
+    frame.copyMs=copy+draw;
+    frame.edvrMs=scene?submitSample.treatmentMs:0.0;
+    slowRegime.observe(frame,[&](const SlowReport& report){writeSlowLine(report);});
+    if(!instrumentSummaryMs)instrumentSummaryMs=nowMs?nowMs:1;
+    else if(nowMs-instrumentSummaryMs>=kFreezeCountsEveryMs){instrumentSummaryMs=nowMs;writeInstrumentSummaries("periodic");}
   }
   // One finished report's cost, microseconds on the frame-cycle clock, into the phase-0 timing. The sink is
   // the runtime's trace (a "periodic work: ..." line like the graphics half's, whose `at` is local time
@@ -2040,13 +2180,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     LARGE_INTEGER composeBegan{},composeEnded{}; const auto composeClock=QueryPerformanceCounter(&composeBegan);
     auto* observer=timingFrameActive&&deviceTimingReady?&deviceTiming:nullptr;
     if(!frameWithheld&&separateGraphics()) {
-      SubmissionWallScope measured(submitStats.full()?nullptr:&submitSample.receiveMs);
-      if(captured.completePending(observer,submitStats.full()?nullptr:&transferWall)!=S_OK)
+      SubmissionWallScope measured(&submitSample.receiveMs);
+      if(captured.completePending(observer,&transferWall)!=S_OK)
         return XR_ERROR_RUNTIME_FAILURE;
     }
     StereoWallTimes wall{};
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,submitStats.full()?nullptr:&wall,framePlacement);
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
@@ -2334,6 +2474,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // native_long_cycle_summary: the three fields it has always had, then the counts by size bucket, and
     // after it the worst few cycles of the session (native_long_cycle_worst).
     if(tracing)writeLongCycleSummary(nullptr,true);
+    // The vendor instruments close: an episode or a regime still open ends, and their summaries are written.
+    if(tracing)finishInstruments();
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",
@@ -2577,6 +2719,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return result("device_render_boundary",XR_ERROR_INITIALIZATION_FAILED);
     if(FAILED(hr)) {nativeTracePrintf("error,D3D11Device,%08lx\n",(unsigned long)hr);return false;}
     nativeTracePrintf("device,adapter=%08lx:%08lx,feature=%x\n",(unsigned long)req.adapterLuid.HighPart,(unsigned long)req.adapterLuid.LowPart,unsigned(graphics.device()->GetFeatureLevel()));
+    // The figures beside a SLOW line (slow_regime.h) come from this device's adapter: the game's own adapter, since
+    // the two devices must share one for the eye textures to cross. A stack without IDXGIAdapter3 says so (armed line).
+    {const char* why=nullptr;vramAdapter.Attach(vramAdapterOf(graphics.device(),&why));vramWhy=why?why:"";}
     if(!captureRenderSettings()) return false;
     applyRenderScale();
     if(!validSize(sizes[0]) || !validSize(sizes[1]))
@@ -2626,6 +2771,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     pacer.bind(api.frames.waitFrame,session);
     if(!seated.begin({api.createSpace,api.destroySpace},session,local)||!changes.begin(session)||!resetEvents.begin(geometryGeneration))return false;
     state.setUnhandledEventSink(referenceEvent,this);
+    state.setEventObserver(vendorEvent,this);
     runtimeGeneration=gate.beginGeneration();
     compositorGeneration=poses.begin();
     if(runtimeGeneration&&compositorGeneration&&options.graphicsProvider&&externalDevice) {

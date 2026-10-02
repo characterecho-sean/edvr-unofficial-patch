@@ -1149,7 +1149,9 @@ still stands).
 pairs to shrink `VR_InitInternal`'s ~443 ms shader stretch; an EDVR
 holding layer during the ~2.2 s between `runtime_startup` and the first
 Submit (the first pre-game `xrEndFrame` layer on third-party runtimes).
-Both wait on the warm-up's own measurement landing first.
+Both wait on the warm-up's own measurement landing first. (The first of the two
+was built 2026-10-01: the four compiles are now build-time bytecode, see
+docs/startup-delay-2026-09-12.md, last entry.)
 
 ## 2026-09-17: a skipped intro left the panel armed, and the on-foot HUD passed for the movie
 

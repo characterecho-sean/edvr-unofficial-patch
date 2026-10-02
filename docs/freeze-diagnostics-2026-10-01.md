@@ -4,56 +4,61 @@
 
 *Written 2026-10-01. Update whenever this doc changes.*
 
-- **State:** BUILT in three commits on branch `claude/stall-diagnostics` (cut from
-  main 2b734be2), full build green, NOT merged, NOT installed, NOT FLOWN. Diagnostics
-  only: nothing here changes what the game draws or how the headset runs.
+- **State:** SHIPPED in v0.18.0 (merged 1c42ebdf). First field log 2026-10-02, a Quest 3
+  user on Virtual Desktop: 15 FREEZE lines, the sampler naming the game, the NVIDIA driver
+  and NGX. No issue 63 log yet; the test plan below has not been run. Diagnostics only.
+- **Blind spot (2026-10-02), closed for the next flight:** a sustained slow regime under
+  the 250 ms and 150 ms lines was invisible (a Quest 3 game at 10 fps for a minute,
+  `--freezes` PASS). Built on branch `claude/slow-regime-tools`, not flown: VRAM, vendor
+  events, long xrEndFrame episodes, a slow-regime detector; `--freezes` says SLOW (exit 4)
+  for a vendor or EDVR hold, not a game load. See `docs\headset-lock-vdxr-2026-10-02.md`.
 - **Why:** issue 63, 1-2 s freezes in VR on Index + SteamVR with EDHM chained. The rc.5
   flight showed EDVR's own work under 2 ms in every freeze, SteamVR answering, the GPU
   idle, and the render thread stopping at a different point of the game's frame each
-  time (before the first submit, between the eyes, in the real Present, after it).
-  Nothing recorded where. The worst freeze, 1858 ms (runtime sequence 44415, ending
+  time; nothing recorded where. The worst freeze, 1858 ms (runtime sequence 44415, ending
   23:24:19.790), reached the runtime log only: 44 of the graphics log's 59 mid-session
-  LONG FRAME lines were one-frame Present-gap blips (22-58 ms while the runtime's cycle
-  stayed under 2x) that spent the 60-line cap, and the 5 s limiter kept the freeze out.
+  LONG FRAME lines were one-frame blips (22-58 ms) that spent the 60-line cap, and the 5 s
+  limiter kept the freeze out.
 - **1. Freeze logging.** The graphics half judges a Present gap over 2x the period by the
-  runtime's cycle (the wait-return stamps `native_timing.cpp` now keeps): a gap the cycle
-  does not confirm is a blip, counted by size and never written. Any frame of 250 ms or
-  more is a freeze: its LONG FRAME line is not capped or rate limited, and a new
-  `monitor: FREEZE` line follows it. The runtime's `native_long_cycle` is likewise
-  unlimited from 250 ms. Long frames not written are counted by size bucket, printed
-  every 5 min and at session close, with the worst five and their times. GPU-clock gap
-  pairs over 1 s are kept and named (sequence, ms) instead of discarded.
+  runtime's cycle (`native_timing.cpp`'s wait-return stamps): a gap the cycle does not
+  confirm is a blip, counted by size and never written. A frame of 250 ms or more is a
+  freeze: its LONG FRAME line is not capped or rate limited, and a `monitor: FREEZE` line
+  follows; the runtime's `native_long_cycle` likewise. Long frames not written are counted
+  by size bucket (every 5 min and at close, with the worst five). GPU-clock gap pairs over
+  1 s are kept and named (sequence, ms) instead of discarded.
 - **2. Stall sampler** (`stall_sampler.h`, `stall_watch.cpp`). A watchdog notices no
   Present for 150 ms; at 150, 500 and 1000 ms of a stall it stops the render thread for
   about 25 us (copy of registers and 32 KB of stack, nothing else while stopped),
   resumes it, then walks the copy and logs `stall:` lines naming module+RVA. Rate
   limited (6 back to back, 1 per 2 s, 200 a session). Key `advanced.freeze_location`
   (on/off, default on). Safety and why it should not look like an injector: below.
-- **3. Heartbeat off the render thread** (`heartbeat_writer.h`, `proxy.cpp`). The 30 s
-  breadcrumb write is made by a small thread; the render thread posts three stores and an
-  event. The last line before a crash or kill keeps its meaning (below), pinned by a rig
-  that crashes and kills real child processes.
-- **Test trigger:** `advanced.freeze_test_ms` (0 = off): 60 s into a session the render
-  thread sleeps that long once, so one flight shows the whole chain. Test only.
+- **3. Heartbeat off the render thread** (`heartbeat_writer.h`, `proxy.cpp`). A small
+  thread writes the 30 s breadcrumb; the render thread posts three stores and an event.
+  The last line before a crash or kill keeps its meaning (below), pinned by a rig.
+- **Test triggers:** `advanced.freeze_test_ms` (0 = off): 60 s into a session the render
+  thread sleeps that long once, so one flight shows the whole chain. `advanced.slow_test_ms`
+  (0 = off): 90 s in, the runtime holds every xrEndFrame that long for 40 s. Test only.
 - **New log lines:** `monitor: FREEZE`, `monitor: long frame counts reason=`, `monitor:
   worst long frame N of M`, `stall sampler: armed|off`, `stall:`, `stall sampler counts`,
   runtime `native_long_cycle_counts`, `native_long_cycle_worst`, and `native_long_cycle_
-  summary` extended; read with `python tools\edvr_log.py --target steam --freezes`.
+  summary` extended; read with `python tools\edvr_log.py --target steam --freezes`. Added
+  2026-10-02: `vram:`, `slow test:`, `native_xr_event(s)`, `native_end_frame_episode(s)`,
+  `native_slow_regime`, `native_end_frame_hold`.
 - **Gates:** rigs `freeze_log_test` (41 mutants), `stall_sampler_test` (32),
-  `heartbeat_writer_test` (24), `gpu_census_test` updated, each with `mutants.py`.
+  `heartbeat_writer_test` (24), `gpu_census_test` updated, each with `mutants.py`; for
+  the 2026-10-02 lines `vram_watch_test` and `slow_regime_test`, and the reader's self-test.
 - **Ruled out:** a deferred (next-frame) judgement of the gap: a freeze must be written
-  at the Present that ends it. Unwinding while the thread is stopped: `RtlLookupFunctionEntry`
-  takes ntdll locks the stopped thread may hold. A heartbeat on a timer: it would say
-  "alive" through a hang.
-- **Not built (named in the investigation, not asked for):** render-thread CPU time on the
-  line; logging affinity, priority and power scheme on change.
+  at the Present that ends it. Unwinding while the thread is stopped (`RtlLookupFunctionEntry`
+  takes ntdll locks it may hold). A heartbeat on a timer: it would say "alive" in a hang.
+- **Not built:** render-thread CPU time on the line; affinity, priority, power scheme.
 - **Watch:** `log.max_mb` defaulted to 4 and defaults to 16 since 2026-10-01 (branch
   `claude/key-cleanup-defaults`; an ini that says `max_mb = 4` keeps 4). The reporter's
   graphics log was 3.9 MB for 70 minutes; past the cap nothing is written, freeze lines
-  included, and 16 MB is about 4.8 hours at that rate. Not changed in this arc's commits.
-  The flat profile gets the stall sampler (the beat is in the Present hook) but not the
-  FREEZE lines or counts: the monitor ticks in VR only.
-- **Next flight:** the test plan below. Read with `--freezes --expect-build HEAD`.
+  included, and 16 MB is about 4.8 hours at that rate. The flat profile gets the stall
+  sampler and the `vram:` lines (both in the Present hook) but not the FREEZE lines or
+  counts: the monitor ticks in VR only.
+- **Next flight:** the test plan below. Read with `--freezes --expect-build HEAD`; a log
+  that holds a slow regime exits 4 with the verdict SLOW.
 
 ## Evidence
 
@@ -155,3 +160,44 @@ already stuck in a stalled disk for longer than 20 ms can still land behind the 
    lines unchanged.
 7. The reporter's setup (EDHM chained): ask for one session with the build and the freeze
    lines; the owner module of a freeze is the answer to issue 63.
+
+The headset-lock instruments (2026-10-02, `docs\headset-lock-vdxr-2026-10-02.md`), one
+flight, steps 8-12. Needs the OpenXR runtime (the hold is inside its xrEndFrame call), any
+vendor.
+
+8. Set `advanced.slow_test_ms = 80` under `[advanced]` in the live edvr.ini (Edit tool,
+   diff before and after) and leave `freeze_test_ms = 0`, so the two tests do not overlap.
+   One VR session of at least 135 s; the game runs at about 10 fps from 90 s to 130 s, on
+   purpose. Expect, in order:
+   - graphics log, within 2 s: `vram: reason=armed local_used_mb=... adapter ...` (or `vram:
+     unavailable -- <why>`: DXVK and Wine may lack `IDXGIAdapter3`, a valid outcome, and
+     the SLOW lines then say `vram=unavailable`) and `slow test: advanced.slow_test_ms =
+     80. 90 s from now ...`; then `vram: reason=periodic` every 30 s.
+   - runtime log, at startup: three armed lines, `native_xr_events,armed=1`,
+     `native_end_frame_episodes,armed=1` and `native_slow_regime,armed=1`, then
+     `native_xr_event,n=1,type=session_state_changed,from=...,to=...` as the session goes
+     READY, SYNCHRONIZED, VISIBLE, FOCUSED. A missing armed line is an instrument that did
+     not run.
+   - at 90 s: graphics `slow test: the hold begins now`; runtime
+     `native_end_frame_hold,test=1,state=began,ms=80` and at once
+     `native_end_frame_episode,episode=1,...,ms=9x.xxxx,periods=6.x,...`.
+   - about 5 s later `native_slow_regime,event=SLOW,regime=1,...,context=scene,
+     loading_frames=0,empty_frames=0,held_by=vendor_end_frame,...,vram_local_used_mb=...,
+     summary=held by the vendor runtime's xrEndFrame: ...`; about 30 s after that
+     `event=still_slow`.
+   - at 130 s: `slow test: the hold ended`, `native_end_frame_hold,...,state=ended,
+     held_calls=N`, `native_end_frame_episode_end,episode=1,...`, and about 2 s later
+     `native_slow_regime,event=end,...,reason=recovered`.
+9. Quit from the menu. Expect `native_slow_regime_summary,reason=session_close,regimes=1`,
+   `native_end_frame_episodes_summary` and `native_xr_events_summary` in the runtime log.
+10. `python tools\edvr_log.py --target steam --freezes --expect-build HEAD`: a SLOW REGIME
+    section marked DELIBERATE, `SLOW  SLOW REGIME`, `PASS  SLOW TEST` (a WARN names what
+    the chain lacks), the verdict SLOW, exit 4; END-FRAME EPISODES, VENDOR EVENTS and VRAM
+    sections. A verdict of PASS here would be the bug.
+11. Set the key back to 0. A normal session ends with `native_slow_regime_summary` at
+    `regimes=0` and the reader's `PASS  SLOW REGIME`.
+12. A log from v0.18.0 or earlier has none of these lines: `python tools\edvr_log.py --file
+    <edvr_gfx_*.log> --runtime-file <edvr_openxr_*.log> --freezes` rebuilds a regime from
+    its LONG FRAME, `native_long_cycle`, FREEZE and `vScreen totals` lines and prints it
+    as RECONSTRUCTED; the 2026-10-02 bundle reads 11:14:38.1 to 11:15:35.2, the vendor's
+    xrEndFrame.

@@ -1035,7 +1035,7 @@ void flatRuntimeImageCopyTests() {
                     MixedGeometryFirst, InertUnverified, InertWrongPair,
                     InertDepth, InertViewport, MixedStaleGeometry,
                     MixedChangedGeometry, InertExplicitWrite };
-    auto replay = [](Scenario scenario) {
+    auto replay = [](Scenario scenario, uint64_t imagePs = 0xFCFAD73924BF45B9ull) {
         MonoFixture fixture;
         FlatContractRecord source[2]{}, imageCopy{};
         for (uint32_t i = 0; i < 2; ++i)
@@ -1050,7 +1050,7 @@ void flatRuntimeImageCopyTests() {
             scenario == MixedGeometryFirst;
         for (uint32_t i = 0; i < 2; ++i) if ((i == 0 && firstInert) || (i == 1 && secondInert)) {
             source[i].key.vs = 0xCFA91824129ECBBCull;
-            source[i].key.ps = 0xFCFAD73924BF45B9ull;
+            source[i].key.ps = imagePs;
             source[i].key.camera = nullptr;
             source[i].key.cameraHash = 0;
             if (scenario == AllInertAbsent) source[i].key.b1 = nullptr;
@@ -1126,19 +1126,21 @@ void flatRuntimeImageCopyTests() {
               result.first->imageCopiesRefused == 0 && result.second.hdr == MonoFixture::token(0x2600),
               "verified image copy continues prior HDR lineage despite unused copy VS camera");
     }
-    for (Scenario s : {AllInertAbsent, AllInertArbitrary, MixedInertFirst, MixedGeometryFirst}) {
-        auto result = replay(s);
-        check(result.second.selected() && result.first->imageCopiesAccepted == 1 &&
-              result.first->imageCopiesRefused == 0,
-              "verified inert image writes qualify with absent/arbitrary b1 in either order");
-    }
-    for (Scenario s : {InertUnverified, InertWrongPair, InertDepth, InertViewport, InertExplicitWrite,
-                       MixedStaleGeometry, MixedChangedGeometry}) {
-        auto result = replay(s);
-        check(!result.second.selected() && result.first->imageCopiesAccepted == 0 &&
-              result.first->imageCopiesRefused == 1 &&
-              result.first->selectedConflict.cause == FlatRuntimeConflict::ImageCopySource,
-              "inert exception keeps verification, shader, view, depth and geometry camera gates");
+    for (uint64_t imagePs : {0xFCFAD73924BF45B9ull, 0x07B3F82100F29401ull}) {
+        for (Scenario s : {AllInertAbsent, AllInertArbitrary, MixedInertFirst, MixedGeometryFirst}) {
+            auto result = replay(s, imagePs);
+            check(result.second.selected() && result.first->imageCopiesAccepted == 1 &&
+                  result.first->imageCopiesRefused == 0,
+                  "both exact image pairs qualify with absent/arbitrary b1 in either order");
+        }
+        for (Scenario s : {InertUnverified, InertWrongPair, InertDepth, InertViewport, InertExplicitWrite,
+                           MixedStaleGeometry, MixedChangedGeometry}) {
+            auto result = replay(s, imagePs);
+            check(!result.second.selected() && result.first->imageCopiesAccepted == 0 &&
+                  result.first->imageCopiesRefused == 1 &&
+                  result.first->selectedConflict.cause == FlatRuntimeConflict::ImageCopySource,
+                  "both exact image pairs retain verification, shader, depth and camera gates");
+        }
     }
     for (Scenario s : {SourceDepth, SourceCamera, SourceViewport, MissingSource,
                        SourceExplicitWrite, SourceStale, Unverified, Alias}) {
@@ -1330,6 +1332,10 @@ void testFrameContractTrace() {
             d.key.writeEpoch = prefix->frame; d.key.writeSeq = prefix->sequence + 1;
             d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
             d.instances = r.firstInstances;
+            if (isCopy(d, *prefix))
+                flatTraceResolve(*ring, flat_mono_detail::toneHdrInput(fixture.handoff[0].key),
+                    fixture.handoff[0].key.vs, fixture.handoff[0].key.ps, prefix->sequence,
+                    static_cast<uint32_t>(FlatMonoReason::Selected));
             if (isCopy(d, *prefix)) flatRuntimeObserveContract(*prefix, d, *contract);
             else flatRuntimeObserve(*prefix, d);
             flatTraceRecord(*ring, d, false);
@@ -1350,7 +1356,7 @@ void testFrameContractTrace() {
             const auto* p = static_cast<const unsigned char*>(data);
             bytes.insert(bytes.end(), p, p + n); return n;
         });
-        uint32_t framesReplayed = 0, framesMatched = 0;
+        uint32_t framesReplayed = 0, framesMatched = 0, resolveMarkers = 0, copiesAfterResolve = 0;
         FlatRuntimePrefix replay{};
         FlatFrameContract rc{};
         FlatTraceFrameHeader cur{};
@@ -1372,17 +1378,22 @@ void testFrameContractTrace() {
                 if (e.kind == kFlatTraceEventDispatchWritten) { flatRuntimeDispatchObserveWritten(replay, e.key.color); return; }
                 if (e.kind == kFlatTraceEventMarkUncertain) { replay.uncertain = true; return; }
                 if (e.kind == kFlatTraceEventCameraCapture) { ++replay.sequence; return; }
+                if (e.kind == kFlatTraceEventResolve) { ++resolveMarkers; return; }
                 FlatRuntimeDraw d = flatTraceEventToDraw(e);
                 // The traced writeEpoch/writeSeq are the online-resolved
                 // values; replaying them verbatim keeps the shared camera/
                 // draw sequence counter's online interleaving intact.
                 if (e.flags & kFlatTraceForeignWork) replay.uncertain = true;
-                if (isCopy(d, replay)) flatRuntimeObserveContract(replay, d, rc);
+                if (isCopy(d, replay)) {
+                    if (resolveMarkers == 1) ++copiesAfterResolve;
+                    flatRuntimeObserveContract(replay, d, rc);
+                }
                 else flatRuntimeObserve(replay, d);
             });
         finishFrame();
-        check(parsed && framesReplayed == 1 && framesMatched == 1 && wantHash == cur.contractHash,
-              "trace round-trip replays to an identical frame contract");
+        check(parsed && framesReplayed == 1 && framesMatched == 1 && wantHash == cur.contractHash &&
+              resolveMarkers == 1 && copiesAfterResolve == 1 && rc.copies[0].selected(),
+              "resolve marker before final copy is parsed but does not change selected contract or draw order");
     }
 }
 
@@ -1643,6 +1654,7 @@ int flatTraceCheck(const char* path) {
             if (e.kind == kFlatTraceEventDispatchWritten) { flatRuntimeDispatchObserveWritten(replay, e.key.color); ++markers; return; }
             if (e.kind == kFlatTraceEventMarkUncertain) { replay.uncertain = true; ++markers; return; }
             if (e.kind == kFlatTraceEventCameraCapture) { ++replay.sequence; ++markers; return; }
+            if (e.kind == kFlatTraceEventResolve) { ++markers; return; }
             FlatRuntimeDraw d = flatTraceEventToDraw(e);
             if (e.flags & kFlatTraceForeignWork) replay.uncertain = true;
             const bool copy = d.key.vs == flat_mono_detail::kCopyVs &&
@@ -2492,7 +2504,7 @@ void testFlatCpuWiring() {
         {&runtimeCpp, "flatcpu::kResource", 4, "Written, Map, Unmap and Update time their lookups"},
         {&runtimeCpp, "flatcpu::kCoverage", 1, "coverage classification"},
         {&runtimeCpp, "flatcpu::kProjection", 3, "qualifyProjection, the private binding and its restore"},
-        {&runtimeCpp, "flatcpu::kShadows", 5, "the constant-buffer shadow observers"},
+        {&runtimeCpp, "flatcpu::kShadows", 7, "the constant-buffer shadow observers and map-cache install/flush"},
         {&runtimeCpp, "flatcpu::kWitness", 1, "the camera witness"},
         {&runtimeCpp, "flatcpu::kEngineDraw", 4, "engine motion's draw wrapper: naming, its begin (BeforeDraw), its end, and the flush of what it kept bound"},
         {&runtimeCpp, "flatcpu::kResolve", 2, "the treatment at the copy draw and at the HDR route's trigger"},

@@ -55,10 +55,12 @@
 #include <wrl/client.h>
 
 #include <cstdint>
+#include <atomic>
 
 #include "flat_hdr_crumbs.h"
 
 namespace edvr {
+inline std::atomic<uint64_t> g_flatCbFirstNonzero{0};
 
 constexpr UINT kCtxSrvSlots = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
 constexpr UINT kCtxCbSlots = D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;
@@ -331,6 +333,9 @@ private:
             c->CSGetSamplers(0, kCtxSamplerSlots, d.sampler);
             break;
         }
+        // Count offset bindings from the state query already made above.
+        for (UINT i=3;i<kCtxCbSlots;++i)
+            if (d.cb[i] && d.cbFirst[i]) ++g_flatCbFirstNonzero;
     }
     void restoreStage(ID3D11DeviceContext1* c, unsigned s) {
         Slots& d = stage_[s];

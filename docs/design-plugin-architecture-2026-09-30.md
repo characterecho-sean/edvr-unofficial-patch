@@ -39,22 +39,21 @@
   4.1), the installer skips it and Elite stays on its stock VR path. Four
   changes first (section 10); no F8, AA, flash fix or Explorer Cam without
   the runtime; the first build needs a flight on a stock runtime.
-- **Next:** candidate `03049f8d` passed all 123 validation jobs and its clean
-  promotion, and is installed and verified in Steam with personal ini intact.
-  Latest flight evidence remains `ee2628da`: Pimax Crystal Super / Pimax
-  OpenXR, 90 Hz, 4032x3898 per eye; Sean reports unchanged visuals.
-  Three sampled hook comparisons are lower;
-  carrier AA off is higher and drifts upward. Workload/scene matching and
-  repeatable CPU improvement/GPU non-regression remain unresolved (section 11).
-  NumLock captured a valid 3,892-draw selector/action stream; full predicate
-  equivalence is still open. Actual NV API counts now have flight evidence.
-  Ruled out: migration introduced NV blur, because Sean's verified baseline
-  comparison reproduces it and the latest candidate looks the same.
-  Three reviewed Luna slices now pass all 123 full validation jobs: the
-  timed-draw denominator, Target/RemLok API coverage with an NV sampling
-  guard, and independent replay of two pure predicate families. Production
-  v2 capture remains next; all-module cost coverage
-  and remaining predicate families are open. No further group migration yet.
+- **Next:** `03049f8d` passed all 123 validation jobs and clean promotion;
+  Steam's latest capture verifies that code version. Pimax OpenXR, 90 Hz,
+  4032x3898 per eye. Both captures were NV off: Sean forgot the NV toggle
+  and held DLSS on for two minutes. The new NV guard lacks flight coverage.
+  Production v2 replay passes 13,058 supported predicate comparisons across
+  two captures, with no missing inputs, mismatches or unobserved mutations.
+  These cover draw-gate and eye-range predicates; full equivalence stays open.
+  The timed-draw denominator works; all-module cost coverage and repeatable
+  CPU improvement/GPU non-regression remain unresolved (section 11).
+  Earlier matched NV visual checks ruled out migration-induced blur because
+  verified `14a7ff70` reproduces it. Latest visual confirmation is pending.
+  Main `743c5dc0` is integrated at Sean's request; all 126 validation jobs
+  pass. Pre-merge flights cannot validate the merged binary's performance.
+  Temporary instrument key: `advanced.draw_replay` (off by default); propose
+  removing it when this arc closes, subject to Scope control. No Phase 2 yet.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a
   stable ABI for first-party plugins (they ship with the core; freezing
@@ -995,3 +994,55 @@ checks production v2 fact wiring, the owner-thread NV sampling guard and the
 timed-draw denominator. It cannot normalize the old baseline retroactively or
 pass the whole performance gate by itself. Pin flight reads to `03049f8d`;
 a following documentation-only commit does not change the installed DLL stamp.
+
+### Production predicate capture and main integration, 2026-10-02
+
+The exact graphics log `edvr_gfx_20261002_163955.log` and paired runtime
+`edvr_openxr_20261002_163957_464_57928.log` both verify `03049f8d`, product
+version `v0.18.0-7-g03049f8d`, graphics PE stamp `6ABFB378`. The environment
+remains Pimax Crystal Super / Pimax OpenXR, 90 Hz, 4032x3898 per eye.
+Sean corrected the flight plan afterward: NV stayed off and DLSS ran for
+two minutes. Do not describe either capture as NV-on evidence.
+
+NumLock completed two schema-v2 owner-frame sidecars: frame 27806 has
+3,831 draws, 125,734 sites and 11,505 actions; frame 40494 has 3,583 draws,
+114,886 sites and 11,208 actions. Independent replay reports 6,821 and
+6,237 supported selector matches respectively, with zero unknown inputs,
+mismatches or unobserved mutations. Every captured draw-gate fact is known
+and enabled; eye-range facts cover known-empty ranges and zero counter delta
+on the VR-eye route. This verifies production fact wiring for these cases,
+not range-hit or disabled-gate flight coverage. Whole-ladder predicate
+equivalence remains false. The runtime exits cleanly with owner joined,
+cleanup complete, callback retired, retained=0 and exception=0.
+
+Steady AA-off hook windows measure 0.270-0.403 ms per sampled frame and
+0.114-0.123 microseconds per timed draw across 3,916-6,002 timed samples.
+Steady DLSS windows measure 1.124-1.364 ms and 0.307-0.353 microseconds
+across 6,130-7,110 samples. Transition and manual-capture windows are excluded.
+The new denominator exposes different draw workloads; the old baseline has
+no denominator and these modes cannot isolate an AA cost or pass the
+improvement gate. Direct GPU coverage remains partial (DLSS 8/14 temporal
+scopes). No Target/RemLok/NV API owner rows or wrapped draws were observed.
+Site 50 is NotEligible throughout both eye-route captures. In particular,
+the new NV owner-thread/context guard still needs an actual NV-on flight.
+Latest stationary-view and visual confirmation remain unreported.
+
+Sean requested merging main into this branch when appropriate. Fetched
+main is `743c5dc0`; its 48 commits are integrated for validation. The sole
+text conflict was adjacent `plugin_cost.h` and `slow_test.h` includes,
+resolved by preserving both. Luna and the independent reviewer identified
+five newly documented keys requiring manifest ownership: Core owns
+`advanced.input_gate`; Diagnostics owns `advanced.slow_test_ms`; Temporal AA
+owns `advanced.flat_cb_map_cache`, `experimental.temporal_aa_engine_motion`
+and `experimental.flat_per_draw_lean` in its flat adapter. Catalog validation
+now covers 237 keys across nine plugins. Defaults and runtime behavior are
+unchanged by those assignments. Main's Map/Unmap and runtime instrumentation
+changes make this flight evidence specific to the pre-merge binary; a full
+merged-source build and later version-verified flight are separate gates.
+The merge goes only into `codex/plugin-architecture`, with no shipping merge
+to main. All 126 validation jobs pass (120 pool jobs, six quiet), as do both
+production profiles, the 237-key contract and both self-contained installer
+checks. Receipt input SHA-256 is
+`a084fdad7453beb738eaff531625f4150f9f55c66e90324a66ca7aa9e89d6a94`;
+the log is `build/plugin-main-merge-full-build.log`. No merged build is
+installed yet; Steam remains on the validated `03049f8d` test candidate.

@@ -139,59 +139,6 @@ void compileInnerPs(ID3D11DeviceContext* ctx, const char* hlsl,
                     *out ? "compiled" : "creation FAILED; drawing stock");
 }
 
-// The compute form: cs_5_0, CreateComputeShader, same contract.
-void compileInnerCs(ID3D11DeviceContext* ctx, const char* hlsl,
-                    size_t hlslLen, const char* entry, const char* name,
-                    const SwapMacro* macros, const char* who,
-                    ID3D11ComputeShader** out) {
-    // Timed end to end (the load, the compile, the create): the UI-resolve
-    // compile runs inside the first submitted frame and was one of the
-    // unsplit suspects for its 857 ms (docs/intro-video.md, 2026-09-15).
-    const int64_t t0 = qpcNow();
-    HMODULE mod = LoadLibraryW(L"d3dcompiler_47.dll");
-    if (!mod) {
-        Log::get().note("%s: d3dcompiler_47.dll not found; the swap stands "
-                        "down and the game draws stock.", who);
-        return;
-    }
-    PFN_D3DCompile compile =
-        reinterpret_cast<PFN_D3DCompile>(GetProcAddress(mod, "D3DCompile"));
-    if (!compile) {
-        Log::get().note("%s: d3dcompiler_47.dll has no D3DCompile; the swap "
-                        "stands down and the game draws stock.", who);
-        return;
-    }
-    void* blob = nullptr;
-    void* errors = nullptr;
-    const HRESULT hr = compile(hlsl, hlslLen, name, macros, nullptr, entry,
-                               "cs_5_0", 0, 0, &blob, &errors);
-    if (errors) {
-        Log::get().note("%s: shader compiler said: %.400s", who,
-                        static_cast<const char*>(blobPtr(errors)));
-        blobRelease(errors);
-    }
-    if (FAILED(hr) || !blob) {
-        Log::get().note("%s: shader compile failed (0x%08X); the swap stands "
-                        "down and the game draws stock.", who,
-                        static_cast<unsigned>(hr));
-        if (blob) blobRelease(blob);
-        return;
-    }
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (dev) {
-        dev->CreateComputeShader(blobPtr(blob), blobSize(blob), nullptr, out);
-        dev->Release();
-    }
-    blobRelease(blob);
-    const double ms = qpcFrequency() > 0
-                          ? static_cast<double>(qpcNow() - t0) * 1000.0 /
-                                static_cast<double>(qpcFrequency())
-                          : 0.0;
-    Log::get().note("%s: replacement compute shader %s (%.0f ms).", who,
-                    *out ? "compiled" : "creation FAILED; standing down", ms);
-}
-
 }  // namespace
 
 ID3D11VertexShader* shaderSwapCreateVs(ID3D11DeviceContext* ctx,
@@ -317,20 +264,6 @@ struct CompileClock {
     }
 };
 }  // namespace
-
-ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,
-                                         const char* hlsl, size_t hlslLen,
-                                         const char* entry, const char* name,
-                                         const SwapMacro* macros,
-                                         const char* who) {
-    if (!ctx || !hlsl || !hlslLen) return nullptr;
-    ID3D11ComputeShader* out = nullptr;
-    CompileClock clock;
-    guardedBudget(g_budget, [&] {
-        compileInnerCs(ctx, hlsl, hlslLen, entry, name, macros, who, &out);
-    });
-    return out;
-}
 
 ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,
                                        const char* hlsl, size_t hlslLen,

@@ -270,6 +270,18 @@ anything.
 Building needs Visual Studio 2022 with the C++ workload, and Python.
 [docs/building.md](docs/building.md) has the steps.
 
+## Contributor credit
+
+[arturbac](https://github.com/arturbac) diagnosed the Linux/Proton
+constant-buffer readback cost in [issue
+#65](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/65),
+confirmed it through PDB/perf/LBR profiling, and supplied the cached mapping
+approach, working staging patch and Proton A/B tests in [PR
+#66](https://github.com/characterecho-sean/edvr-unofficial-patch/pull/66). The
+adaptive map cache on main builds on that work. The
+[investigation](docs/issue-65-proton-cb-shadows-2026-10-02.md#contribution-and-attribution-2026-10-02)
+records the contribution and measurements.
+
 ## Antivirus
 
 A DLL that sits next to a game executable and intercepts graphics calls looks,

@@ -5,8 +5,29 @@
 #include "flat_compute_readback.h"
 #include "flat_projection_scope.h"
 #include "flat_substitution.h"
+#include "flat_map_bounce.h"
 #include <optional>
 namespace edvr {
+struct FlatMapBounceD3DDriver {
+    void retain(uintptr_t resource, uintptr_t context);
+    void release(uintptr_t resource, uintptr_t context);
+    uint64_t clockTicks();
+    uint64_t ticksPerSecond();
+    bool verify(void* real, const void* cached, size_t bytes);
+};
+using FlatMapBounce = flatmap::Runtime<FlatMapBounceD3DDriver>;
+void flatRuntimeMapBouncePreMap(ID3D11Resource*);
+void flatRuntimeMapBounceNoteMap(ID3D11DeviceContext*, ID3D11Resource*, UINT,
+                                 D3D11_MAP, bool internal, bool success);
+void* flatRuntimeMapBounceInstall(ID3D11DeviceContext*, ID3D11Resource*, UINT,
+                                  D3D11_MAP, void* real);
+FlatMapBounce::Lease flatRuntimeMapBounceBeginUnmap(ID3D11DeviceContext*, ID3D11Resource*);
+bool flatRuntimeMapBounceSamplePending(uint32_t width);
+void flatRuntimeMapBounceObserveCopy(uint32_t width, uint64_t ticks);
+void flatRuntimeMapBounceTrackedMap(D3D11_MAP type);
+void flatRuntimeMapBounceBankWrite(uint32_t width);
+void flatRuntimeMapBounceRegistered(const D3D11_BUFFER_DESC& desc);
+void flatRuntimeMapBounceNoteKind(ID3D11Resource*, bool buffer);
 struct FlatMonoFrame;   // flat_mono_frame.h: the selector's result, passed by reference to the HDR route's treatment
 extern std::atomic<bool> g_flatRuntimeLive;
 inline bool flatRuntimeActive() { return g_flatRuntimeLive.load(std::memory_order_relaxed) && !g_flatComputeInternal; }

@@ -214,6 +214,10 @@ struct Shared {
     // bit0 render ptr on the calling thread's stack, bit1 game ptr on it,
     // bit2 this publish came from GetLastPoses rather than WaitGetPoses.
     volatile LONG     poseReaderFlags;
+    // advanced.slow_test_ms: d3d11 -> openvr, the milliseconds the runtime
+    // holds every xrEndFrame for, inside the call's timed region, while the
+    // test is running; 0 is no hold (requestEndFrameHold, frame_flag.h).
+    volatile LONG     endFrameHold;
 };
 
 // Per PROCESS, not per logon session.
@@ -230,6 +234,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v36 because the end-frame hold joined (endFrameHold), the test trigger of
+// the end-frame episode and slow-regime instruments (advanced.slow_test_ms,
+// docs/headset-lock-vdxr-2026-10-02.md).
 // _v35 because the pose-reader hunt joined (poseReaderRequest and the
 // poseReader* call snapshot), for advanced.eye_origin_readers (docs/design-
 // transition-flash-engine-fix-2026-09-23.md). Two branches each took _v34
@@ -300,7 +307,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v35_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v36_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -824,6 +831,19 @@ void requestPoseReaderTrace(bool on) {
 bool poseReaderTraceRequested() {
     Shared* s = map();
     return s && InterlockedCompareExchange(&s->poseReaderRequest, 0, 0) != 0;
+}
+
+void requestEndFrameHold(uint32_t ms) {
+    Shared* s = map();
+    if (!s) return;
+    InterlockedExchange(&s->endFrameHold, static_cast<LONG>(ms > 5000u ? 5000u : ms));
+}
+
+uint32_t endFrameHoldMs() {
+    Shared* s = map();
+    if (!s) return 0;
+    const LONG v = InterlockedCompareExchange(&s->endFrameHold, 0, 0);
+    return v > 0 ? static_cast<uint32_t>(v) : 0u;
 }
 
 void publishPoseReaderCall(const PoseReaderCall& call) {

@@ -10,15 +10,22 @@
 //   R8       the setting off changes nothing: the production family rule against a FROZEN copy of the rule as it stood before the
 //            second shader was named, over every combination of target, vertex shader, pixel shader and SRV facts -- the same family
 //            and the same reason for everything but the new shader, which answers exactly as the stock one does.
+//   R9       the pair the scene keeps on purpose (2026-10-01, the flight of 15:09): the engine's null-output quad (vs B018D143700AB803 /
+//            ps 258B95AC99520C1F, a pixel shader that writes zero and reads nothing, which ui depth excludes by hash) is KEPT, not left:
+//            seen, in its own table and its own clause, never in the pairs left, and only the exact pair with no family; the line
+//            with it, with a pair left beside it and with the overflow; the rule's answer for it (nothing, when excluded -- and what
+//            it would be if the exclusion went, the generic surface family, so the exclusion is the only thing keeping it out).
 //   tools\ui_composite_census_test\mutants.py compiles this rig against copies of the headers with ONE rule flipped and requires
 //   the rig to fail on the case that belongs to the rule (the label of its first FAIL starts with the mutation's label prefix);
-//   that is why every check of R1..R8 carries a label "R<n><letter>: ...".
+//   that is why every check of R1..R9 carries a label "R<n><letter>: ...".
 //   P1..P6   the pins, by source scan from the repo root: where the census is wired -- the flag ui_depth publishes and where it is
 //            cleared and set, the scope that consumes it, the count after BOTH takes (and that it only reads), the line once a
 //            window with its zeros, the frames the count could run in -- that depth is left out for the new pair on purpose, the
 //            eye-run diagnostic's watch list, and that the reader's fixture is the formatter's own output (--emit-fixture
-//            regenerates it). Each wiring pin carries a control: the same predicate over copies of the source with one edit must
-//            fail (--self-test <repo root>; skipped when no root is given, and never run by the mutation tool).
+//            regenerates it). P7: the kept pair's vertex shader is the one ui depth's built-in exclusion list holds, and the layer's
+//            family code asks that list -- the census never calls "kept" a draw the layer could take. Each wiring pin carries a
+//            control: the same predicate over copies of the source with one edit must fail (--self-test <repo root>; skipped when
+//            no root is given, and never run by the mutation tool).
 //
 // Usage: --self-test [<repo root>] [--only R1,R5,...]   |   --dry-run (no checks run)   |   --emit-fixture
 #include "ui_layer_math.h"
@@ -52,6 +59,9 @@ void check(bool ok, const char* label) {
 // The pair the disassembly named (docs\ui-layer-2026-09-23.md, 2026-10-01) and the stock pair it replaces.
 constexpr uint64_t kGuiFxVs = 0x1989E6D3B405FDE0ull, kGuiFxPs = 0xEAB8A1C95A13FFBEull;
 constexpr uint64_t kStockVs = 0x81216C77F90DEDD6ull, kStockPs = 0xA2965EC2931A39C8ull;
+// The null-output quad (Frontier shader dump of 2026-09-06: vs_B018D143700AB803.dxbc a position-only mesh vertex shader, ps_258B95AC99520C1F.dxbc `mov o0.xyzw, l(0,0,0,0)` with
+// no input): the pair the 15:09 flight's census named as a composite left in the scene (log edvr_gfx_20261001_150919.log, 2.00 draws a frame on the loading screen).
+constexpr uint64_t kNullVs = 0xB018D143700AB803ull, kNullPs = 0x258B95AC99520C1Full;
 
 // ---- R1: the family rule --------------------------------------------------------------------------------------------------------
 UiFamilyFacts hdr(uint64_t vs) {
@@ -136,9 +146,11 @@ void caseR2() {
               full.left == kUiSceneCompositePairs + 3,
           "R2g: a pair past the table is counted in pastTable, a named one still aggregates, and the pairs and the overflow add up to every left draw");
     w.framesLive = 77;
+    w.noteLeft(kNullVs, kNullPs, 0);
     w.reset();
-    check(w.seen == 0 && w.left == 0 && w.pastTable == 0 && w.framesLive == 0 && w.used == 0 && w.pairs[0].draws == 0 && w.pairs[0].vs == 0,
-          "R2h: a window's reset zeroes every counter and the table");
+    check(w.seen == 0 && w.left == 0 && w.kept == 0 && w.keptDraws[0] == 0 && w.pastTable == 0 && w.framesLive == 0 && w.used == 0 && w.pairs[0].draws == 0 &&
+              w.pairs[0].vs == 0,
+          "R2h: a window's reset zeroes every counter and the tables, the kept pair's included");
 }
 
 // ---- R3: the zero line ----------------------------------------------------------------------------------------------------------
@@ -203,8 +215,10 @@ void caseR5() {
     for (uint64_t i = 0; i < kUiSceneCompositePairs; ++i)
         for (int k = 0; k < 123456; ++k) w.noteLeft(0xFFFFFFFFFFFFFFF0ull + i, 0xFFFFFFFFFFFFFF00ull + i, static_cast<int>(UiLayerFamily::kGuiDirect));
     for (int k = 0; k < 123456; ++k) w.noteLeft(1, 2, 0);
+    for (int k = 0; k < 123456; ++k) w.noteLeft(kNullVs, kNullPs, 0);   // ...and the kept pair's clause at the end
     const std::string text = uiSceneCompositeText(w, 1, true);
-    check(text.size() < 1100, "R5a: the longest line a full table makes is under 1100 characters (the Log's line holds 1200)");
+    check(text.size() < 1100 && text.find("(null-output quad, kept in the scene by design) 123456 draws, 123456.00 a frame.") != std::string::npos,
+          "R5a: the longest line a full table makes, with the overflow and the kept pair's clause, is under 1100 characters (the layer's buffer holds 1100, the Log's line 1200)");
     // The buffer form never overruns and always terminates.
     char guarded[64 + 8];
     std::memset(guarded, 0x5A, sizeof(guarded));
@@ -336,6 +350,98 @@ void caseR8() {
           "R8b: the frozen rule never named the new shader a holo panel, on any target and with any facts: the field's defect, kept in the rig as its control");
 }
 
+// ---- R9: the pair the scene keeps on purpose ----------------------------------------------------------------------------------------
+// The engine's null-output quad is a composite only by a leftover binding: ui depth calls a draw a composite when a learned surface is bound at a
+// pixel slot, and this draw's pixel shader writes zero and reads nothing. It is KEPT: seen, not left, said in a clause of its own -- so the census does
+// not call a no-op a defect, and the reader does not STOP on it -- and only the exact pair with no family is kept.
+void caseR9() {
+    check(kUiSceneKeptCount == 1 && kUiSceneKeptPairs[0].vs == kNullVs && kUiSceneKeptPairs[0].ps == kNullPs &&
+              std::strcmp(kUiSceneKeptPairs[0].name, "null-output quad") == 0,
+          "R9a: the kept table names exactly one pair, the null-output quad: vs B018D143700AB803 / ps 258B95AC99520C1F (the dumped shaders' hashes)");
+    UiSceneCompositeWindow w;
+    w.noteLeft(kNullVs, kNullPs, 0);
+    check(w.seen == 1 && w.left == 0 && w.kept == 1 && w.keptDraws[0] == 1 && w.used == 0 && w.pastTable == 0,
+          "R9b: the null-output quad with no family is seen and KEPT: not left, and it takes no row of the table of pairs left");
+    w.noteLeft(kNullVs, kNullPs, 0);
+    w.noteTaken();
+    check(w.seen == 3 && w.left == 0 && w.kept == 2 && w.keptDraws[0] == 2, "R9c: every draw of it adds to its own count, and a taken composite is still only seen");
+    // Nothing else is kept: the exact pair, with no family, is the key.
+    UiSceneCompositeWindow o;
+    o.noteLeft(kNullVs ^ 1ull, kNullPs, 0);
+    o.noteLeft(kNullVs, kNullPs ^ 1ull, 0);
+    o.noteLeft(kNullVs, 0, 0);
+    o.noteLeft(0, kNullPs, 0);
+    o.noteLeft(kNullPs, kNullVs, 0);   // swapped
+    o.noteLeft(kGuiFxVs, kGuiFxPs, 0);
+    check(o.seen == 6 && o.left == 6 && o.kept == 0 && o.keptDraws[0] == 0 && o.used == 6,
+          "R9d: a vertex shader one bit away, a pixel shader one bit away, the vertex shader with no pixel shader or another, the pair swapped, and the panels with "
+          "Disable GUI effects on are all LEFT and named, never kept");
+    UiSceneCompositeWindow f;
+    f.noteLeft(kNullVs, kNullPs, static_cast<int>(UiLayerFamily::kSurface));
+    check(f.seen == 1 && f.left == 1 && f.kept == 0 && f.used == 1 && f.pairs[0].family == static_cast<int>(UiLayerFamily::kSurface),
+          "R9e: the pair with a family named is the layer's business: left (and not taken) like any named composite, never kept");
+    // The lines. The loading screen of the 15:09 flight, as it reads now: 2.00 quads a frame, kept; every other composite taken.
+    UiSceneCompositeWindow l;
+    l.framesLive = 2697;
+    for (int i = 0; i < 10788; ++i) l.noteTaken();
+    for (int i = 0; i < 5394; ++i) l.noteLeft(kNullVs, kNullPs, 0);
+    check(uiSceneCompositeText(l, 2697, true) ==
+              "ui quality: composites left in the scene: 0 of 16182 composite draws (0.00 a frame) in 2697 frames (2697 live) -- none: every interface composite drawn into "
+              "an eye went into the layer; vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad, kept in the scene by design) 5394 draws, 2.00 a frame.",
+          "R9f: with only the kept pair left the line says 0 left and none, then its own clause with its draws and draws a frame -- the headline counts the left, the clause the kept");
+    UiSceneCompositeWindow m;
+    m.framesLive = 100;
+    for (int i = 0; i < 100; ++i) m.noteTaken();
+    for (int i = 0; i < 50; ++i) m.noteLeft(kGuiFxVs, kGuiFxPs, 0);
+    for (int i = 0; i < 200; ++i) m.noteLeft(kNullVs, kNullPs, 0);
+    check(uiSceneCompositeText(m, 100, true) ==
+              "ui quality: composites left in the scene: 50 of 350 composite draws (0.50 a frame) in 100 frames (100 live) -- vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE (no family) "
+              "0.50 a frame; vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad, kept in the scene by design) 200 draws, 2.00 a frame.",
+          "R9g: a pair left beside the kept one: the pair left leads and the kept clause follows, no \"none\"; the headline's left count and rate leave the kept out");
+    UiSceneCompositeWindow p;
+    p.framesLive = 10;
+    for (uint64_t i = 0; i < kUiSceneCompositePairs; ++i) p.noteLeft(0x1000 + i, 0x2000 + i, 0);
+    for (int i = 0; i < 40; ++i) p.noteLeft(0x7777, 0x6666, 0);
+    for (int i = 0; i < 10; ++i) p.noteLeft(kNullVs, kNullPs, 0);
+    const std::string past = uiSceneCompositeText(p, 10, true);
+    check(past.find("; 40 draws of pairs past the table's 8 (4.00 a frame); vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad, kept in the scene by design) 10 draws, 1.00 a frame.") !=
+              std::string::npos && past.find("(null-output quad") == past.rfind("(null-output quad"),
+          "R9h: the kept clause follows the overflow clause, once, and the kept pair takes no room of the table (the overflow counts only draws of pairs left)");
+    UiSceneCompositeWindow n;
+    n.framesLive = 10;
+    for (int i = 0; i < 10; ++i) n.noteLeft(kNullVs, kNullPs, 0);
+    const std::string kept = uiSceneCompositeText(n, 10, true);
+    check(kept.find("0 of 10 composite draws (0.00 a frame)") != std::string::npos && kept.find("none: every interface composite drawn into an eye went into the layer; vs B018D143700AB803") != std::string::npos &&
+              uiSceneCompositeText(n, 10, false).find("NOT COUNTED") != std::string::npos && uiSceneCompositeText(n, 10, false).find("null-output") == std::string::npos,
+          "R9i: a window of nothing but the kept pair is 0 left of its draws and \"none\"; with the detector off the line is NOT COUNTED and names nothing");
+    // The rule's side: the layer never takes the pair because its vertex shader is on ui depth's exclusion list. Excluded, the rule names nothing on any target; were
+    // the exclusion to go, the very same draw over a learned surface is the generic interface-surface family and would be TAKEN -- the exclusion is the only thing between them.
+    bool never = true;
+    for (int kind = 0; kind <= 2; ++kind)
+        for (int bits = 0; bits < 4; ++bits) {
+            UiFamilyFacts e;
+            e.targetKind = kind;
+            e.vs = kNullVs;
+            e.ps = kNullPs;
+            e.excluded = true;
+            e.panelSized = (bits & 1) != 0;
+            e.learnedSurface = (bits & 2) != 0;
+            never = never && uiLayerFamilyFor(e) == UiLayerFamily::kNone;
+        }
+    UiFamilyFacts open;
+    open.targetKind = 2;
+    open.vs = kNullVs;
+    open.ps = kNullPs;
+    open.learnedSurface = true;
+    UiFamilyWhy why = UiFamilyWhy::kOther;
+    UiFamilyFacts shut = open;
+    shut.excluded = true;
+    check(never && uiLayerFamilyFor(shut, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kExcluded &&
+              uiLayerFamilyFor(open, &why) == UiLayerFamily::kSurface && why == UiFamilyWhy::kLearnedSurface,
+          "R9j: with its vertex shader excluded the family rule names the null-output quad nothing on every target and every state of the facts (on the post-tonemap target: "
+          "excluded); without the exclusion the same draw over a learned surface is the generic surface family, which is why the pin on the exclusion list (P7) exists");
+}
+
 // ---- the reader's fixture ---------------------------------------------------------------------------------------------------------
 // tools\ui_composites_fixture.log is the synthetic flight the reader's self-test (tools\edvr_log.py --ui-composites) parses: every
 // "composites left in the scene" line in it is the formatter's own output for the numbers below (the rig compares the file to this text,
@@ -346,6 +452,7 @@ void caseR8() {
 //   16:02:00  the defect: the Disable-GUI-effects panels left, no family names them (22.00 a frame), and again at 16:02:30
 //   16:03:00  a named family left (the layer was not armed for a few frames)         16:03:30  more pairs than the table holds
 //   16:04:00  the interface depth pass off, NOT COUNTED                               16:04:30  the layer live for half the window
+//   16:05:00  a loading screen: the null-output quad KEPT (2.00 a frame), nothing left  16:05:30  a defect left with the kept pair beside it
 std::string fixtureText() {
     std::string out;
     auto add = [&](const char* ts, const std::string& text) {
@@ -401,6 +508,19 @@ std::string fixtureText() {
     w.framesLive = 1280;
     for (int i = 0; i < 30720; ++i) w.noteTaken();
     add("16:04:30.001", uiSceneCompositeText(w, 2560, true));
+    // A loading screen on the build that names the null-output quad (the 15:09 flight's 15:10:50 window, as it reads now): the quad is kept, nothing is left.
+    w = UiSceneCompositeWindow{};
+    w.framesLive = 2697;
+    for (int i = 0; i < 10788; ++i) w.noteTaken();
+    for (int i = 0; i < 5394; ++i) w.noteLeft(kNullVs, kNullPs, 0);
+    add("16:05:00.001", uiSceneCompositeText(w, 2697, true));
+    // The defect with the kept pair beside it: the pair left leads, the kept clause follows, and the kept pair does not hide the defect.
+    w = UiSceneCompositeWindow{};
+    w.framesLive = 2560;
+    for (int i = 0; i < 5120; ++i) w.noteTaken();
+    for (int i = 0; i < 56320; ++i) w.noteLeft(kGuiFxVs, kGuiFxPs, 0);
+    for (int i = 0; i < 5120; ++i) w.noteLeft(kNullVs, kNullPs, 0);
+    add("16:05:30.001", uiSceneCompositeText(w, 2560, true));
     return out;
 }
 
@@ -715,6 +835,31 @@ void pins() {
     check(has(snap, "case kHolo: case kHoloGuiFxOff: case kHud:") && has(snap, "if (vs==kHolo || vs==kHoloGuiFxOff || vs==kSprite") &&
               has(snap, "(vs==kHolo || vs==kHoloGuiFxOff)?holoSurfaceSlot(ps)"),
           "P6: the eye-run snapshot watches and captures the Disable-GUI-effects holo vertex shader beside the stock one");
+
+    // P7: the kept pair is a pair the layer can never take. Its vertex shader is the one ui depth's BUILT-IN exclusion list holds (kNullPsMesh, the list's first entry whenever it
+    // is configured), the layer's family code asks that list for every post-tonemap draw, and the census's kept table names that same vertex shader with the dumped pixel shader.
+    // The census must never call "kept" a draw the layer could take: R9j shows the generic surface family would take it the moment the exclusion went.
+    const std::string censusHdr = squeeze(readFile("src\\d3d11\\ui_scene_composites.h"));
+    const std::string vscAll = squeeze(vsc);
+    const auto keptPlaces = [](const std::string& depthSrc, const std::string& vscSrc, const std::string& hdr) {
+        return has(depthSrc, "constexpr uint64_t kNullPsMesh = 0xB018D143700AB803ull;") && countOf(depthSrc, "g_exclude[g_excludeCount++]=kNullPsMesh;") == 1 &&
+               countOf(depthSrc, "kNullPsMesh") == 2 && countOf(vscSrc, "f.excluded=uiDepthIsExcluded(f.vs);") == 1 &&
+               has(hdr, "{0xB018D143700AB803ull, 0x258B95AC99520C1Full, \"null-output quad\"},");
+    };
+    check(!censusHdr.empty() && keptPlaces(depthAll, vscAll, censusHdr),
+          "P7: the kept pair's vertex shader (B018D143700AB803) is ui depth's built-in exclusion entry (kNullPsMesh, added first when the list is configured) and the layer's family code "
+          "asks that list (f.excluded = uiDepthIsExcluded(f.vs)); the census names the same pair");
+    {
+        const std::string wrongConst = edited(depthAll, "constexpr uint64_t kNullPsMesh = 0xB018D143700AB803ull;", "constexpr uint64_t kNullPsMesh = 0xB018D143700AB804ull;");
+        const std::string notListed = edited(depthAll, "g_exclude[g_excludeCount++] = kNullPsMesh;", "");
+        const std::string twice = edited(depthAll, "g_exclude[g_excludeCount++] = kNullPsMesh;", "g_exclude[g_excludeCount++] = kNullPsMesh; g_exclude[g_excludeCount++] = kNullPsMesh;");
+        const std::string notAsked = edited(vscAll, "f.excluded = uiDepthIsExcluded(f.vs);", "f.excluded = false;");
+        const std::string hdrOff = edited(censusHdr, "{0xB018D143700AB803ull, 0x258B95AC99520C1Full, \"null-output quad\"},", "{0xB018D143700AB804ull, 0x258B95AC99520C1Full, \"null-output quad\"},");
+        check(!keptPlaces(wrongConst, vscAll, censusHdr) && !keptPlaces(notListed, vscAll, censusHdr) && !keptPlaces(twice, vscAll, censusHdr) &&
+                  !keptPlaces(depthAll, notAsked, censusHdr) && !keptPlaces(depthAll, vscAll, hdrOff),
+              "P7 control: with the exclusion's constant another hash, the entry never added or added twice, the layer's family code not asking the list, or the census's kept "
+              "table naming another vertex shader, the pin fails");
+    }
 }
 
 // ---- the runner ------------------------------------------------------------------------------------------------------------
@@ -723,7 +868,7 @@ struct Case {
     void (*run)();
 };
 const Case kCases[] = {{"R1", caseR1}, {"R2", caseR2}, {"R3", caseR3}, {"R4", caseR4},
-                       {"R5", caseR5}, {"R6", caseR6}, {"R7", caseR7}, {"R8", caseR8}};
+                       {"R5", caseR5}, {"R6", caseR6}, {"R7", caseR7}, {"R8", caseR8}, {"R9", caseR9}};
 
 bool selected(const std::string& only, const char* id) {
     if (only.empty()) return true;

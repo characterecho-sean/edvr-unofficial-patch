@@ -9,11 +9,32 @@
 
 namespace edvr::openxr {
 
+// What the boundary knows about one xrEndFrame call the moment it has returned
+// (FrameSink::endFrameReturned): every end the boundary makes, the layered one
+// of finish(), a loading frame's, and the empty ends clear() and drain() make.
+struct EndFrameInfo {
+  uint64_t sequence = 0;      // the frame token's own sequence (the host adds its offset)
+  double ms = 0;              // the timed region: the call itself and anything holdEndFrame() held inside it
+  XrDuration periodNs = 0;    // the last real predicted display period (0 until the vendor has told us one)
+  bool shouldRender = false;  // the vendor's own answer for the frame
+  bool layers = false;        // layers went with the call
+  bool background = false;    // a loading frame the runtime made itself
+  bool turbo = false;         // deferred pacing was latched for this frame
+  XrResult result = XR_SUCCESS;
+};
+
 // Callbacks execute on the frame owner's thread, under its runtime operation
 // lease. They must not re-enter the boundary. The source owns copied pixels,
 // located views and layer backing storage until endFrame returns.
 struct FrameSink {
   virtual ~FrameSink() = default;
+  // Called inside finish()'s timed xrEndFrame region, after the call has returned, and nowhere else. Nothing
+  // here may change what is sent to the runtime or when it is called: it exists so a TEST can hold the region
+  // open (advanced.slow_test_ms), which is how a vendor that stalls in xrEndFrame looks from outside.
+  virtual void holdEndFrame() {}
+  // Called after every xrEndFrame the boundary makes, on the owner thread (end_frame_episodes.h and
+  // slow_regime.h read it). Observes only.
+  virtual void endFrameReturned(const EndFrameInfo&) {}
   virtual vr::EVRCompositorError capture(vr::EVREye, const vr::Texture_t*,
       const vr::VRTextureBounds_t*, vr::EVRSubmitFlags, bool copyPixels) = 0;
   virtual XrResult compose(XrCompositionLayerProjection&) = 0;
@@ -175,6 +196,18 @@ class FrameBoundary final {
   bool canSynthesize() const {
     return lastReal_ > 0 && lastPeriod_ > 0 && lastRealAt_ != Clock::time_point{};
   }
+  // An end with nothing for the vendor to show (clear(), drain()): timed here, apart from endFrameMs_ (which is
+  // finish()'s), and reported to the sink like every other xrEndFrame.
+  XrResult endEmpty(Frame& frame) {
+    const XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
+    const bool shouldRender = frame.shouldRender; // end() clears it
+    const uint64_t sequence = frame.sequence;
+    double ms = 0;
+    XrResult r;
+    { SubmissionWallScope measured(&ms); r = session_.end(frame, empty, {false, false}); }
+    sink_.endFrameReturned({sequence, ms, lastPeriod_, shouldRender, false, false, turbo_, r});
+    return r;
+  }
   // OpenXR Toolkit's formula: the last real predicted time plus how long it
   // has been since that value was learned, clamped to between one and two
   // periods. In steady turbo the game asks again right after the previous
@@ -249,8 +282,12 @@ class FrameBoundary final {
     const auto* header = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
     XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
     end.layerCount = pixels ? 1u : 0u; end.layers = pixels ? &header : nullptr;
+    const bool shouldRender = frame_.shouldRender; // end() below clears it
+    const uint64_t sequence = frame_.sequence;
     { SubmissionWallScope measured(&endFrameMs_);
-      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels}); }
+      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});
+      sink_.holdEndFrame(); }
+    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_});
     if (!background) sink_.sceneFinished(pixels, lastResult_);
     if (lastResult_ != XR_SUCCESS) failed_ = true;
     // Kick the next frame's wait now, as the toolkit does right after its
@@ -283,8 +320,7 @@ class FrameBoundary final {
         }
         ++drainedFrames_;
       }
-      const XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
-      lastResult_ = session_.end(frame_, empty, {false, false});
+      lastResult_ = endEmpty(frame_);
       if (lastResult_ != XR_SUCCESS) { failed_ = true; return lastResult_; }
     }
     accepted_[0] = accepted_[1] = geometryReady_ = false;
@@ -317,8 +353,7 @@ class FrameBoundary final {
         noteReal(waited, fs.predictedDisplayTime, fs.predictedDisplayPeriod);
         Frame scratch{};
         if (session_.beginWaited(waited, fs, scratch) == XR_SUCCESS) {
-          const XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
-          const auto ended = session_.end(scratch, empty, {false, false});
+          const auto ended = endEmpty(scratch);
           if (XR_FAILED(ended)) failed_ = true;
           lastResult_ = ended;
         }

@@ -6,63 +6,49 @@ issue (26 and 28 September). Read the Status block first.
 
 ## Status
 
-- **State (2026-09-30):** two defects stacked: an unexplained death of the
-  armed launch, and a design gap that turns it into "desktop mode". No fix yet.
+- **State (2026-10-02):** Root cause isolated and fix implemented.
+  `factoryCreateDevice` queried `GetCapabilities` on every DirectInput device,
+  crashing unconfigured third-party force-feedback drivers (G29 / jerry_forcefeedback_x64).
+  Fixed by filtering on system keyboard GUIDs before capture and adding
+  `advanced.input_gate` toggle.
 - **Launch type A, armed (the "crash"):** EDVR arms the d3d11 hooks and the
-  game dies within 30 s. 11 of 11 armed launches in the reporter's breadcrumb
-  file ended with no `gfx: process exit`, no `gfx: alive` heartbeat and no
-  `UNHANDLED` line. The reporter's first launch after install was one, by
-  their account; the install record and the tripped first log agree. The two
-  armed logs in the bundles stop at the same line, the keyboard-gate capture,
-  0.70 to 0.78 s after attach. No `edvr_openxr_*.log` exists for either, so in
-  those launches the game never reached `VR_InitInternal`: the death precedes
-  the game's first call into the VR half.
+  game ends within 30 s. 14 of 14 armed launches in the reporter's breadcrumb
+  file (rc.2, rc.3, v0.18.0 and one earlier build) have no `gfx: process exit`,
+  no heartbeat and no `UNHANDLED` line. The armed logs in the bundles stop in
+  the game's first long frame and no `edvr_openxr_*.log` exists for them, so
+  the game never reached `VR_InitInternal`.
+- **What the v0.18.0 logs add:** after its first Present the render thread
+  spends 1.0 s and more in DirectInput device creation: a WMI query, device
+  enumeration (CfgMgr32, HID, SetupAPI) and a third-party force-feedback
+  driver (`jerry_forcefeedback_x64`; the reporter guesses his G29 wheel), all
+  through the Steam overlay's hooks. No later Present or log line follows.
+  The sampler checks 14 frames for EDVR code: the callers above are unseen.
 - **Launch type T, tripped (the "desktop"):** the sentinel finds the previous
   armed launch unconfirmed and keeps every d3d11 hook off for this launch. The
   VR half needs the graphics owner that `installVScreenFixes` registers,
   finds none, logs `module_startup,graphics_unavailable=80004002` and returns
   `HmdNotFound` to Elite before `xrCreateInstance`. Elite then runs flat and
-  SteamVR is never touched. 10 of 10 tripped launches exited cleanly after 31
-  to 128 s.
+  SteamVR is never touched. 13 of 13 tripped launches exited cleanly after 31
+  to 199 s.
 - **The alternation is the sentinel.** A trip clears itself, so the launch
-  after a tripped one arms again and dies again: strict A, T, A, T over 21
+  after a tripped one arms again and dies again: strict A, T, A, T over 27
   logged launches.
-- **Why A dies: unknown.** EDVR's crash filter writes `UNHANDLED` for an
-  ordinary access violation (Sean's Steam install has six) and is silent on
-  stack overflow by design (proxy.cpp:269-272). A fast-fail or an outside kill
-  leaves nothing either, so these are silent deaths. Candidates, with what
-  separates each (none is evidenced yet):
-  1. Stack overflow from hooks chaining into each other (an overlay, EDVR's
-     live stubs, the keyboard gate's capture through the Steam overlay's
-     table). Application log 1000, code 0xC00000FD.
-  2. Fast-fail (CFG, shadow stack, CRT abort): code 0xC0000409 or 0xC00001B2.
-     The PR 33 review flagged the unregistered LiveCopy stub pages.
-  3. A GPU hang once the hooks run (the #20/#21 class). System log Display
-     4101 or LiveKernelEvent 141; EDVR's DEVICE_HUNG line could be lost in the
-     250 ms flush gap. Not excluded: neither bundle shows a forced hook mode,
-     so the reporter's `shared` trial is unevidenced.
-  4. Killed from outside (antivirus behaviour monitor after the CodeHook
-     trampolines). No Application Error entry; Windows Security history.
-- **Ruled out** (reasons in the evidence section):
+- **Fix:** `isKeyboardGuid(guid)` check added to `factoryCreateDevice` so
+  non-keyboard devices (force-feedback wheels, pedals, joysticks) are never
+  probed for capabilities. `advanced.input_gate` override added.
+- **Ruled out** (reasons in the evidence sections):
   - The sentinel as the cause of the deaths: it only reports them.
   - SteamVR cold start as the cause of the A deaths: no A launch reached the
     VR half. Still open for after A is fixed.
-  - An rc.2 to rc.3 regression: same death point, one extra log line.
-  - The game build and the config: Sean's healthy sessions run 332841 with the
-    same CodeHook sites; neither ini sets a hook mode, ignore_sentinel or
-    d3d11_fixes.
+  - An rc.2, rc.3 or v0.18.0 regression: the same death point in all three.
+  - The game build (Sean's healthy runs use 332841) and the config (no hook
+    mode, ignore_sentinel or d3d11_fixes set).
   - Steam plus its overlay as a sufficient cause: Sean's Steam install has
     343 clean exits in 351 armed launches.
   - A missing or wrong OpenXR install: the runtime, loader and config all
-    checked out in the logs and install records ("Install check").
-- **Next:**
-  1. Ask the reporter for the Event Viewer entries of one A launch and the
-     whole edvr_logs folder (questions at the end).
-  2. Build the sentinel flight recorder (section "Proposed build") and fly it
-     once on their rig. It dates the death to 100 ms and names the stage.
-  3. Decide, Sean: should a tripped launch still start VR. The docs say it
-     does and the code says it does not (section "Docs that contradict").
-  4. After A is fixed: cold-start SteamVR, which EDVR does not do.
+    checked out in the logs ("Install check").
+- **Next:** User test flight with the fix build.
+
 
 ## 2026-09-30: evidence
 
@@ -205,40 +191,160 @@ installer ran for both builds and that the OpenXR parts are in place.
   `xrGetSystem` is one call with no retry (native_runtime_host.h:2444).
 - How Elite or the launcher choose VR or flat before any `openvr_api` call.
 
-## Proposed build: the sentinel flight recorder
+## 2026-10-02: third bundle, the v0.18.0 release build
 
-Not built. Each line below exists to separate the candidates:
+The reporter reinstalled from `edvr-installer-0.18.0.zip` and says the
+symptoms are the same ("previously I'd been using the zip with individual
+files in it"). Bundle edvr-logs-20261002-090639.zip, 300,953 bytes, from the
+issue comment. All three gfx logs read `v0.18.0 (build 6ABED11D)`, linked
+2026-10-01 21:31 UTC, the tag's release build; `edvr_log.py --expect-build
+v0.18.0` passed. Local time is UTC+1.
 
-- Keep the `.armed` file handle open after `arm()`. Write a fixed-size record
-  into it: stage number, tick, frame count. Stages: hooks attached, code hooks
-  installed, first Present, keyboard gate, temporal warm, first frame.
-- After the first Present, refresh the record every 100 ms for 10 s from a
-  tiny thread, then stop. Cost is negligible and bounded.
-- The `SENTINEL TRIPPED` line then prints the record: "the previous launch was
-  last seen at stage N, T ms after attach, frame F". That arrives in the log
-  the reporter already posts from the tripped launch.
-- Add `gfx: alive` crumbs at 1, 2, 3 and 5 s.
+### The three launches
 
-With the Event Viewer entry this names the cause without a further build.
+| Start | Type | What the files show |
+|---|---|---|
+| 2 Oct 09:03:19 | A | 152 lines, last at +1.68 s, a 1005 ms stall sample |
+| 2 Oct 09:03:57 | T | SENTINEL TRIPPED; VR half at +1.75 s, `graphics_unavailable`, gone in 0 ms |
+| 2 Oct 09:05:16 | A | 149 lines, last at +1.40 s, a 1003 ms stall sample |
+
+The breadcrumb file now holds 27 launches: 14 armed, none with an exit crumb,
+heartbeat or UNHANDLED line; 13 tripped, all with an exit crumb, lives 31 to
+199 s. Strictly alternating, first and last armed.
+
+### What the stall sampler caught
+
+The sampler (stall_sampler.h at v0.18.0; `advanced.freeze_location`) stops the
+render thread briefly at 150, 500 and 1000 ms without a Present, copies its
+stack and walks at most 14 frames (`kMaxFrames`, line 162). In both armed
+launches every sample says "last Present returned in frame 1".
+
+| Sample | A at 09:03:19 | A at 09:05:16 |
+|---|---|---|
+| 150 ms | WMI wait (combase, fastprox) under the Steam overlay, from EliteDangerous64.exe+0x5C952D and +0x5C74D3 | the same stack |
+| 500 ms | CfgMgr32 enumeration under DINPUT8, under the overlay | HID.DLL under the overlay under DINPUT8, then jerry_forcefeedback_x64 |
+| 1000 ms | wait in DINPUT8 under jerry_forcefeedback_x64, which called back through the overlay into DINPUT8 | SetupAPI and CfgMgr32 under the overlay under DINPUT8 |
+
+- The 150 ms sample reaches the game's own frames. The other four stop at the
+  14-frame cap inside DirectInput, so what called DirectInput is not on
+  record. "EDVR code on the stack: no" holds for those 14 frames only; EDVR's
+  `CreateDevice` thunk, which would sit above them, was never examined.
+- The keyboard-gate capture line falls inside the first stall (+1.02 s and
+  +0.65 s). The last sample lands at +1.68 s and +1.40 s. Nothing follows: no
+  fourth sample (the sampler takes three per episode, so a hung thread gives
+  exactly this), no later Present, no `LONG FRAME` line, no openxr log. At its
+  last sample the thread was still in DirectInput, which makes a GPU hang of
+  EDVR's passes unlikely: no second frame had begun.
+- The tripped launch passed the same stretch: its VR half loaded at +1.75 s,
+  while the armed launches were still inside DirectInput at +1.4 to +1.7 s.
+- A second-long first frame is normal. Sean's seven sampler logs on the
+  Frontier install carry 12 startup samples at 1000 ms. What differs is where
+  the time goes: his startup stalls are in COM, the game, NVAPI and the VR
+  runtime, and 7 of 53 lines carry any DirectInput, HID, device-enumeration,
+  overlay or WMI frame.
+
+### The keyboard gate, read at v0.18.0
+
+input_gate.cpp is identical in rc.3 and v0.18.0. The capture design (commit
+188ffbdf) has shipped since v0.15.0, so v0.16.2 has it too.
+
+- Always on: `inputGateInstallEarly` (DllMain) swaps the exe's
+  `DirectInput8Create` import for `hookDirectInput8Create` (lines 1017-1023,
+  595-606).
+- On the game's `DirectInput8Create`: `captureFactory` patches slot 3
+  (`CreateDevice`) of the returned object's vtable in place and `AddRef`s the
+  object (566-593).
+- On every `CreateDevice`: `factoryCreateDevice` calls the original, then
+  `captureKeyboard`, whose `isKeyboard` calls `GetCapabilities` through the
+  new device's vtable (554-563, 500-503, 235-244). The keyboard gets its
+  `GetDeviceState` and `GetDeviceData` patched and one more `AddRef`
+  (516-547). Every other device, the wheel included, is probed and left alone.
+- The trip path calls `inputGateShutdown` (device_hook.cpp:2608 at v0.18.0),
+  which removes the import hook (987-1015). That happens at device creation,
+  +0.37 s in the tripped launch, before the game's DirectInput calls. A
+  tripped launch has no gate in this stretch. The gate is the one armed piece
+  that calls into DirectInput.
+- Why it could matter, as a mechanism and not as evidence: `GetCapabilities`
+  on a force-feedback device asks the vendor driver for its version and
+  timing. The game would make that call later, after configuring the device,
+  if at all. The driver's own `DirectInput8Create` is in the samples.
+
+### The reporter's answers, and an oddity
+
+- Asked about the DLL, he says: perhaps his G29 racing wheel; he usually runs
+  Thrustmaster TARGET as a HID remapper but has tried without it, no change.
+  The TARGET test does not bear on the gate, since the wheel stayed plugged
+  in. A web search could not place `jerry_forcefeedback_x64.dll`, so the wheel
+  is his guess.
+- There is no `edvr_install_state.ini` in this bundle, although edvr.ini was
+  rewritten at 09:02:40, 39 s before the first launch. The bundler adds the
+  record only if `edvr_install\state.ini` exists (logbundle.cpp:426-429) and
+  the installer writes it as the last step of its plan (plan.cpp:799-804). An
+  interrupted install or a removed folder would look like this. The runtime
+  log says `source=local` again, so the OpenXR files are in place.
+
+## Proposed build: gate switch, deeper stacks, flight recorder
+
+Not built. One flight on the reporter's rig should separate the candidates:
+
+- `advanced.input_gate = off`: `hookDirectInput8Create` forwards without
+  capturing and `inputGateInstall` does nothing. The key is read at device
+  creation, before the game's first DirectInput call. If an armed launch then
+  survives, the gate is the cause. The menu loses its private keyboard.
+- A second switch value that keeps the gate but replaces the `GetCapabilities`
+  probe with a test on the GUID given to `CreateDevice` (the system keyboard
+  GUIDs), falling back to the existing dummy-device path. If armed launches
+  then survive, the probe is the cause; if they still die, look at the extra
+  references and the `CreateDevice` patch. Neither ships without the flight.
+- Raise the sampler's walk past 14 frames for the first episode, print the
+  outermost frames and say whether EDVR's `CreateDevice` thunk is among them.
+  Add samples at 2000 and 5000 ms.
+- The sentinel flight recorder: keep the `.armed` file open after `arm()`;
+  write stage, tick and frame count into it; refresh every 100 ms for 10 s
+  from a tiny thread; print it in the `SENTINEL TRIPPED` line. Add
+  `gfx: alive` crumbs at 1, 2, 3 and 5 s.
+
+With the reporter's answers this names the cause without a further build.
 
 ## Questions for the reporter (a draft, not posted)
 
-1. After a launch where the screen goes black and returns, in Event Viewer
-   under Windows Logs, Application: any Error for EliteDangerous64.exe
-   (Application Error 1000 or Windows Error Reporting 1001). The faulting
-   module, exception code and offset are what is needed.
-2. Under Windows Logs, System, near the same minute: Display (nvlddmkm 4101),
-   LiveKernelEvent, Kernel-Power.
-3. Windows Security, Protection history, and Event Viewer, Applications and
+1. Unplug the G29 and any other force-feedback or racing device, keep the
+   headset and the HOTAS, and launch Elite from Steam. Does the first launch
+   reach VR?
+2. Separately: Steam, Library, Elite Dangerous, Properties, General, untick
+   "Enable the Steam Overlay while in-game". Launch again.
+3. On a launch where the screen goes black: does the Elite window stay up and
+   go "Not responding", or vanish by itself, and after how many seconds? Is
+   EliteDangerous64.exe still on Task Manager's Details tab? If it is, right
+   click it there, choose "Create memory dump file", and either send it or
+   open it in WinDbg or Visual Studio and send the stacks of all threads.
+4. Where is `jerry_forcefeedback_x64.dll`? Search System32, Program Files and
+   Program Files (x86), then Properties, Details: product name and company.
+5. In Event Viewer, Windows Logs, Application: any Error for
+   EliteDangerous64.exe (Application Error 1000 or 1001), with the faulting
+   module, exception code and offset. Under System, near the same minute:
+   Display (nvlddmkm 4101), LiveKernelEvent, Kernel-Power.
+6. Windows Security, Protection history, and Event Viewer, Applications and
    Services, Microsoft, Windows, Windows Defender, Operational (1116, 1117).
-4. Right after one crash launch, before starting the game again: zip the whole
-   `edvr_logs` folder and `edvr_breadcrumbs.txt`, and list the folder contents
-   (a stale `d3d11_hooks.armed` or `vscreen_auto_eye_width.txt` matters). Also
-   list `Openvr\win64` with file sizes; it should hold openvr_api.dll,
-   openvr_api_orig.dll, openxr_loader.dll and edvr_openxr.ini.
-5. Whether `context_hook_mode = shared` was saved under `[advanced]` before
-   the launch; neither bundle shows it.
-6. Which overlays run: Steam, NVIDIA App, Afterburner or RTSS, Discord.
-7. Optional, one launch: start SteamVR first, headset on, then start Elite.
-   It does not bear on the death but it tells whether a cold start is a second
-   problem.
+7. Right after one crash launch, before starting the game again: zip the
+   whole `edvr_logs` folder and `edvr_breadcrumbs.txt`, and list the contents
+   of `edvr_install`, `edvr_logs` and `Openvr\win64` with file sizes. Say
+   whether the installer ended on its "done" page.
+8. Was `context_hook_mode = shared` saved under `[advanced]` before a launch?
+   No bundle shows it.
+9. Which overlays run: Steam, NVIDIA App, Afterburner or RTSS, Discord?
+10. Optional, one launch each: SteamVR started first, headset on; and the
+    public v0.16.2, which has the same keyboard gate and a different VR half.
+
+## 2026-10-02: Fix implemented
+
+1. In `src/d3d11/input_gate.cpp`, `factoryCreateDevice` now checks `isKeyboardGuid(guid)`
+   against `kGuidSysKeyboard`, `kGuidSysKeyboardEm`, and `kGuidSysKeyboardEm2`. Non-keyboard
+   devices (such as the Logitech G29 force-feedback steering wheel using `jerry_forcefeedback_x64.dll`)
+   are never passed to `captureKeyboard` or probed with `GetCapabilities`.
+2. Added `advanced.input_gate` toggle (default true), permitted in both VR and flat
+   profiles (`src/common/runtime_profile.h`), and documented under `[advanced]` in `edvr.ini`.
+   When off, DirectInput creation hooking is bypassed completely.
+3. Extended `tools/input_gate_test/input_gate_test.cpp` with a fresh unhooked device table
+   asserting that `GetCapabilities` is never invoked for non-keyboard GUIDs, and verified flat
+   profile default gating. Added flat profile scope assertions in `tools/config_test/config_test.cpp`.

@@ -4,6 +4,7 @@
 #include "flat_copy_structure.h"
 #include "flat_hdr_crumbs.h"
 #include "flat_context_isolation.h"
+#include "flat_context_state.h"
 #include "flat_mono_resolve.h"
 #include "flat_projection_recipes.h"
 #include "flat_shader_classifier.h"
@@ -46,12 +47,119 @@
 #include <memory>
 
 namespace edvr {
+void FlatMapBounceD3DDriver::retain(uintptr_t resource, uintptr_t context) {
+    reinterpret_cast<ID3D11Resource*>(resource)->AddRef();
+    reinterpret_cast<ID3D11DeviceContext*>(context)->AddRef();
+}
+void FlatMapBounceD3DDriver::release(uintptr_t resource, uintptr_t context) {
+    reinterpret_cast<ID3D11DeviceContext*>(context)->Release();
+    reinterpret_cast<ID3D11Resource*>(resource)->Release();
+}
+uint64_t FlatMapBounceD3DDriver::clockTicks() {
+    LARGE_INTEGER value{}; QueryPerformanceCounter(&value);
+    return static_cast<uint64_t>(value.QuadPart);
+}
+uint64_t FlatMapBounceD3DDriver::ticksPerSecond() {
+    static const uint64_t frequency = [] { LARGE_INTEGER value{}; QueryPerformanceFrequency(&value);
+        return static_cast<uint64_t>(value.QuadPart); }();
+    return frequency;
+}
+bool FlatMapBounceD3DDriver::verify(void* real, const void* cached, size_t bytes) {
+    return std::memcmp(real, cached, bytes) == 0;
+}
 std::atomic<bool> g_flatRuntimeLive{false};
 namespace {
 std::atomic<bool> nativeScale{false};
+std::atomic<uint64_t> mapBouncePresentEpoch{1};
 std::atomic<bool> foreignWork{false};
 std::atomic<bool> projectionAuditRequested{false};
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
+// F10-only ingress audit. Keep the counters outside State: a draw on a foreign
+// thread must still explain why the runtime did not see it. All draw-side work
+// before the bounded witnesses is an atomic load and, while armed, one add.
+struct DrawIngressAudit {
+    std::atomic<bool> active{false};
+    std::atomic<uint64_t> entered{0}, inactive{0}, inactiveLiveOff{0}, inactiveInternal{0};
+    std::atomic<uint64_t> wrongThread{0}, wrongContext{0};
+    std::atomic<uint64_t> paused{0}, accepted{0}, relevant{0};
+    std::atomic<uint32_t> inactiveWitnesses{0}, wrongThreadWitnesses{0}, wrongContextWitnesses{0};
+    std::atomic<uint32_t> firstAcceptedWitness{0}, relevantWitnesses{0};
+    uint32_t framesLeft = 0; // Present-owner only
+};
+DrawIngressAudit drawIngressAudit;
+void reportDrawIngress(const char* event, bool finish = true) {
+    auto& a = drawIngressAudit;
+    if (finish) {
+        if (!a.active.exchange(false, std::memory_order_acq_rel)) return;
+    } else if (!a.active.load(std::memory_order_acquire)) return;
+    const auto wrongThread = a.wrongThread.load(std::memory_order_relaxed);
+    const auto wrongContext = a.wrongContext.load(std::memory_order_relaxed);
+    const auto relevant = a.relevant.load(std::memory_order_relaxed);
+    Log::get().note("flat draw ingress audit: event=%s entered=%llu inactive=%llu inactive-live-off=%llu inactive-internal=%llu wrong-thread=%llu wrong-context=%llu paused=%llu accepted=%llu relevant=%llu inactive-witnesses=%u wrong-thread-witnesses=%u wrong-context-witnesses=%u wrong-thread-suppressed=%llu wrong-context-suppressed=%llu first-accepted-witness=%u relevant-witnesses=%u relevant-suppressed=%llu; F10-only, counts include early exits before frame reduction",
+        event,
+        (unsigned long long)a.entered.load(std::memory_order_relaxed),
+        (unsigned long long)a.inactive.load(std::memory_order_relaxed),
+        (unsigned long long)a.inactiveLiveOff.load(std::memory_order_relaxed),
+        (unsigned long long)a.inactiveInternal.load(std::memory_order_relaxed),
+        (unsigned long long)wrongThread, (unsigned long long)wrongContext,
+        (unsigned long long)a.paused.load(std::memory_order_relaxed),
+        (unsigned long long)a.accepted.load(std::memory_order_relaxed),
+        (unsigned long long)relevant,
+        std::min(1u, a.inactiveWitnesses.load(std::memory_order_relaxed)),
+        std::min(1u, a.wrongThreadWitnesses.load(std::memory_order_relaxed)),
+        std::min(2u, a.wrongContextWitnesses.load(std::memory_order_relaxed)),
+        (unsigned long long)(wrongThread > 1 ? wrongThread - 1 : 0),
+        (unsigned long long)(wrongContext > 2 ? wrongContext - 2 : 0),
+        std::min(1u, a.firstAcceptedWitness.load(std::memory_order_relaxed)),
+        std::min(3u, a.relevantWitnesses.load(std::memory_order_relaxed)),
+        (unsigned long long)(relevant > 3 ? relevant - 3 : 0));
+    if (finish) a.framesLeft = 0;
+}
+void armDrawIngress() {
+    auto& a = drawIngressAudit;
+    reportDrawIngress("rearmed");
+    a.entered.store(0, std::memory_order_relaxed);
+    a.inactive.store(0, std::memory_order_relaxed);
+    a.inactiveLiveOff.store(0, std::memory_order_relaxed);
+    a.inactiveInternal.store(0, std::memory_order_relaxed);
+    a.wrongThread.store(0, std::memory_order_relaxed);
+    a.wrongContext.store(0, std::memory_order_relaxed);
+    a.paused.store(0, std::memory_order_relaxed);
+    a.accepted.store(0, std::memory_order_relaxed);
+    a.relevant.store(0, std::memory_order_relaxed);
+    a.inactiveWitnesses.store(0, std::memory_order_relaxed);
+    a.wrongThreadWitnesses.store(0, std::memory_order_relaxed);
+    a.wrongContextWitnesses.store(0, std::memory_order_relaxed);
+    a.firstAcceptedWitness.store(0, std::memory_order_relaxed);
+    a.relevantWitnesses.store(0, std::memory_order_relaxed);
+    a.framesLeft = 900;
+    a.active.store(true, std::memory_order_release);
+    Log::get().note("flat draw ingress audit: event=armed frames=900; F10 scope entries and guard reasons are counted even when no draw reaches the reducer");
+}
+void drawIngressIdentity(ID3D11DeviceContext* context, const char* reason, DWORD ownerThread,
+                         ID3D11DeviceContext* runtimeContext, uint64_t frame, uint32_t work,
+                         bool live, bool internal,
+                         std::atomic<uint32_t>& witnessCount, uint32_t limit) {
+    if (witnessCount.fetch_add(1, std::memory_order_relaxed) >= limit) return;
+    Ptr<IUnknown> selfIdentity, runtimeIdentity, selfDeviceIdentity, runtimeDeviceIdentity;
+    Ptr<ID3D11Device> selfDevice, runtimeDevice;
+    if (context) {
+        context->QueryInterface(IID_PPV_ARGS(&selfIdentity));
+        context->GetDevice(&selfDevice);
+        if (selfDevice) selfDevice->QueryInterface(IID_PPV_ARGS(&selfDeviceIdentity));
+    }
+    if (runtimeContext) {
+        runtimeContext->QueryInterface(IID_PPV_ARGS(&runtimeIdentity));
+        runtimeContext->GetDevice(&runtimeDevice);
+        if (runtimeDevice) runtimeDevice->QueryInterface(IID_PPV_ARGS(&runtimeDeviceIdentity));
+    }
+    Log::get().note("flat draw ingress witness: reason=%s frame=%llu self=%p runtime-context=%p draw-thread=%lu owner-thread=%lu work=%u live=%u internal=%u self-IUnknown=%p runtime-IUnknown=%p self-device=%p runtime-device=%p self-device-IUnknown=%p runtime-device-IUnknown=%p; COM identities distinguish pointer aliases from different contexts/devices; null runtime fields on a foreign thread are deliberately not queried",
+        reason, (unsigned long long)frame, context, runtimeContext,
+        (unsigned long)GetCurrentThreadId(), (unsigned long)ownerThread, work,
+        live ? 1u : 0u, internal ? 1u : 0u,
+        selfIdentity.Get(), runtimeIdentity.Get(), selfDevice.Get(), runtimeDevice.Get(),
+        selfDeviceIdentity.Get(), runtimeDeviceIdentity.Get());
+}
 // The camera table (flat_camera_table.h): the constant buffers bound to VS b1 that can carry the camera rows, and
 // the draw path's kept answer from them. An entry is read through a const pointer here and changed only through
 // the table's own operations, each of which invalidates that kept answer: nothing below assigns to one.
@@ -183,6 +291,9 @@ struct State {
     // to observation until a refusal-free frame requalifies the contract;
     // it is never claimed as treated. See docs/design-flat-temporal-aa-2026-09-23.md.
     bool partialWanted = true;
+    // experimental.temporal_aa_engine_motion, read at every Present: off lets no draw continue a run of
+    // substituted producer draws, so the game draws with its own shaders and motion comes from depth and camera only.
+    bool engineMotionWanted = true;
     // The returned-to-observation state: set by a per-draw-local refusal,
     // cleared by a refusal-free frame. While set, frames run unjittered and
     // the copy-draw treatment is skipped; the contract observation that
@@ -272,7 +383,7 @@ struct State {
     // the whole frame, first game draw to Present, and the resolver's dispatches plus
     // backend call. A timer is owned until its sample is read; with none free the
     // frame is skipped and counted.
-    flatcpu::Census census;
+    flatcpu::Census census{flatcpu::kRenderPeriod, flatcpu::clocksWanted()};
     static constexpr int kGpuFrameTimers = 4, kGpuResolveTimers = 2;
     GpuTimer gpuFrameTimer[kGpuFrameTimers];
     GpuTimer gpuResolveTimer[kGpuResolveTimers];
@@ -286,6 +397,115 @@ struct State {
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
 bool owner() { return state().thread == GetCurrentThreadId(); }
+FlatMapBounce& mapBounce() {
+    static FlatMapBounceD3DDriver* driver = new FlatMapBounceD3DDriver;
+    static FlatMapBounce* bounce = new FlatMapBounce(*driver);
+    return *bounce;
+}
+struct MapBounceWindow {
+    std::atomic<uint64_t> maps{0}, tracked{0}, otherBuffer{0}, texture{0};
+    std::atomic<uint64_t> notDiscard{0}, foreignContext{0}, foreignThread{0};
+    std::atomic<uint64_t> internal{0}, paused{0}, untracked{0}, failed{0};
+    std::atomic<uint64_t> bankBytes{0}, bankTicks{0};
+    std::atomic<uint64_t> bankSamples{0}, totalBankBytes{0};
+    std::atomic<uint64_t> widthBuckets[6]{};
+    std::atomic<uint64_t> trackedTypes[6]{};
+};
+MapBounceWindow& mapBounceWindow() { static MapBounceWindow* window = new MapBounceWindow; return *window; }
+const char* bounceKeyName(flatmap::Mode mode) {
+    return mode == flatmap::Mode::On ? "on" : mode == flatmap::Mode::Off ? "off" : "auto";
+}
+const char* bounceStateName(flatmap::State state) {
+    switch (state) {
+    case flatmap::State::On: return "on";
+    case flatmap::State::Off: return "off";
+    case flatmap::State::Tripped: return "tripped";
+    default: return "pending";
+    }
+}
+void reportMapBounce(uint64_t frame, uint64_t now, bool periodic) {
+    auto& bounce = mapBounce();
+    auto& w = mapBounceWindow();
+    static flatmap::Counters previous{};
+    static uint64_t lastMaps=0,lastTracked=0,lastOther=0,lastTexture=0;
+    static uint64_t lastNotDiscard=0,lastForeignCtx=0,lastForeignThread=0;
+    static uint64_t lastInternal=0,lastPaused=0,lastUntracked=0,lastFailed=0;
+    static uint64_t lastBankBytes=0,lastBankTicks=0,lastTotalBankBytes=0;
+    static uint64_t lastWidth[6]{},lastTypes[6]{};
+    static uint64_t lastCbFirst=0;
+    static flatmap::Trip lastTrip=flatmap::Trip::None;
+    static bool decided=false,pendingNoted=false;
+    static uint64_t began=0;
+    if (!began) began=now;
+    if (!decided && bounce.samples() == 32) {
+        decided=true;
+        const auto* r=bounce.rates();
+        Log::get().note("flat map bounce: decision at frame %llu, batch rates %.3f/%.3f/%.3f/%.3f B/ns, threshold=1.0 -> %s, key=%s",
+            (unsigned long long)frame,r[0],r[1],r[2],r[3],
+            bounce.decision()==flatmap::State::On?"ON":"OFF",bounceKeyName(bounce.mode()));
+    }
+    if (!pendingNoted && !decided && now-began>=30000 && bounce.decision()==flatmap::State::Pending) {
+        pendingNoted=true;
+        Log::get().note("flat map bounce: pending %u/32 qualifying copies at frame %llu",
+            bounce.samples(),(unsigned long long)frame);
+    }
+    if (bounce.tripReason()!=lastTrip) {
+        lastTrip=bounce.tripReason();
+        const char* reason=lastTrip==flatmap::Trip::Remap?"remap":
+            lastTrip==flatmap::Trip::Present?"open-at-present":
+            lastTrip==flatmap::Trip::Context?"context-mismatch":
+            lastTrip==flatmap::Trip::Verify?"verify-mismatch":"none";
+        Log::get().note("flat map bounce: tripped reason=%s frame=%llu; new maps pass through",
+            reason,(unsigned long long)frame);
+    }
+    if (!periodic) return;
+    const auto c=bounce.counters();
+    const uint64_t maps=w.maps.load(),tracked=w.tracked.load(),other=w.otherBuffer.load(),texture=w.texture.load();
+    const uint64_t nd=w.notDiscard.load(),fc=w.foreignContext.load(),ft=w.foreignThread.load();
+    const uint64_t in=w.internal.load(),pa=w.paused.load(),un=w.untracked.load(),failed=w.failed.load();
+    const uint64_t bb=w.bankBytes.load(),bt=w.bankTicks.load();
+    const uint64_t totalBankBytes=w.totalBankBytes.load();
+    const uint64_t cbFirst=g_flatCbFirstNonzero.load();
+    uint64_t bucket[6]{},type[6]{};
+    for (unsigned i=0;i<6;++i) {
+        const uint64_t b=w.widthBuckets[i].load(),t=w.trackedTypes[i].load();
+        bucket[i]=b-lastWidth[i];type[i]=t-lastTypes[i];
+        lastWidth[i]=b;lastTypes[i]=t;
+    }
+    const uint64_t flushBytes=c.flushBytes-previous.flushBytes,flushTicks=c.flushTicks-previous.flushTicks;
+    const uint64_t bankBytes=bb-lastBankBytes,bankTicks=bt-lastBankTicks;
+    const double nsPerKb=!bankBytes ? 0.0 :
+        double(bankTicks)*1e9*1024.0/(double(bankBytes)*double(FlatMapBounceD3DDriver{}.ticksPerSecond()));
+    const double flushNsPerKb=!flushBytes ? 0.0 :
+        double(flushTicks)*1e9*1024.0/(double(flushBytes)*double(FlatMapBounceD3DDriver{}.ticksPerSecond()));
+    Log::get().note("flat map bounce 5s: state=%s key=%s maps=%llu tracked=%llu other-buffer=%llu texture=%llu bounced=%llu declined-not-discard=%llu declined-foreign-context=%llu declined-foreign-thread=%llu declined-internal=%llu declined-paused=%llu declined-untracked=%llu declined-open-full=%llu declined-width=%llu failed=%llu flushes=%llu flush-bytes=%llu flush-ns-per-kb=%.1f bank-bytes=%llu bank-sample-bytes=%llu bank-ns-per-kb=%.1f abandoned=%llu open-at-present=%llu trips=%llu verify-samples=%llu verify-mismatches=%llu unchanged-rows=%llu rows-checked=%llu width-le64=%llu width-le256=%llu width-le1k=%llu width-le4k=%llu width-le8k=%llu width-le64k=%llu tracked-read=%llu tracked-write=%llu tracked-read-write=%llu tracked-discard=%llu tracked-no-overwrite=%llu cb-first-nonzero=%llu",
+        bounceStateName(bounce.decision()),bounceKeyName(bounce.mode()),
+        (unsigned long long)(maps-lastMaps),(unsigned long long)(tracked-lastTracked),
+        (unsigned long long)(other-lastOther),
+        (unsigned long long)(texture-lastTexture),
+        (unsigned long long)(c.bounced-previous.bounced),(unsigned long long)(nd-lastNotDiscard),
+        (unsigned long long)(fc-lastForeignCtx),(unsigned long long)(ft-lastForeignThread),
+        (unsigned long long)(in-lastInternal),(unsigned long long)(pa-lastPaused),
+        (unsigned long long)(un-lastUntracked),(unsigned long long)(c.full-previous.full),
+        (unsigned long long)(c.width-previous.width),(unsigned long long)(failed-lastFailed),
+        (unsigned long long)(c.flushes-previous.flushes),(unsigned long long)flushBytes,flushNsPerKb,
+        (unsigned long long)(totalBankBytes-lastTotalBankBytes),
+        (unsigned long long)bankBytes,nsPerKb,(unsigned long long)(c.abandoned-previous.abandoned),
+        (unsigned long long)(c.openAtPresent-previous.openAtPresent),(unsigned long long)c.trips,
+        (unsigned long long)(c.verifySamples-previous.verifySamples),(unsigned long long)c.verifyMismatches,
+        (unsigned long long)(c.unchangedRows-previous.unchangedRows),
+        (unsigned long long)(c.rowsChecked-previous.rowsChecked),
+        (unsigned long long)bucket[0],(unsigned long long)bucket[1],(unsigned long long)bucket[2],
+        (unsigned long long)bucket[3],(unsigned long long)bucket[4],(unsigned long long)bucket[5],
+        (unsigned long long)type[1],(unsigned long long)type[2],
+        (unsigned long long)type[3],
+        (unsigned long long)type[4],(unsigned long long)type[5],
+        (unsigned long long)(cbFirst-lastCbFirst));
+    previous=c;lastMaps=maps;lastTracked=tracked;lastOther=other;lastTexture=texture;
+    lastNotDiscard=nd;lastForeignCtx=fc;lastForeignThread=ft;lastInternal=in;
+    lastPaused=pa;lastUntracked=un;lastFailed=failed;lastBankBytes=bb;lastBankTicks=bt;
+    lastTotalBankBytes=totalBankBytes;lastCbFirst=cbFirst;
+}
 bool nonzeroPhase(const State& s) { return s.phase.currentX!=0 || s.phase.currentY!=0; }
 void reportProjectionFailure(const State& s, const FlatProjectionRecipes& recipes,
     uint64_t vs, uint64_t ps, uint64_t cs) {
@@ -518,7 +738,6 @@ void reportProjection(State& s, const char* event) {
 // This HDR copy is distinct from the final-output copy admitted by the resolver.
 constexpr uint64_t kHdrCopyVs=0xCFA91824129ECBBCull;
 constexpr uint64_t kHdrCopyPs=0xDFCBA0EC70B03C9Bull;
-constexpr uint64_t kImageFilterPs=0xFCFAD73924BF45B9ull;
 constexpr uint64_t kMenuCopyVs=0xDEF19B035D5EDEDCull;
 constexpr uint64_t kMenuCopyPs=0xDED8796049C7BB4Aull;
 bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
@@ -555,13 +774,13 @@ bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
 }
 bool verifyCameraIndependentImageSource(ID3D11DeviceContext* ctx,const FlatRuntimeDraw& draw) {
     const auto& k=draw.key;
-    if(k.format!=9 || k.vs!=kHdrCopyVs || k.ps!=kImageFilterPs)return false;
+    if(k.format!=9 || !flatRuntimeCameraIndependentImageSourcePair(k.vs,k.ps))return false;
     FlatComputeInternalScope guard;
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
     Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
     ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
     ctx->OMGetRenderTargets(1,&rt,&ds);
-    if(lookupShaderHash(vs.Get())!=kHdrCopyVs || lookupShaderHash(ps.Get())!=kImageFilterPs ||
+    if(lookupShaderHash(vs.Get())!=k.vs || lookupShaderHash(ps.Get())!=k.ps ||
        !rt || !ds || rt.Get()!=k.rtv || ds.Get()!=k.dsv)return false;
     Ptr<ID3D11Resource> color,depth;rt->GetResource(&color);ds->GetResource(&depth);
     if(color.Get()!=k.color || depth.Get()!=k.depth)return false;
@@ -1596,6 +1815,7 @@ bool flatRuntimeSceneSizes(uint32_t* renderWidth, uint32_t* renderHeight, uint32
 }
 
 void flatRuntimeResize() {
+    reportDrawIngress("resize-or-stop");
     g_flatRuntimeLive.store(false, std::memory_order_release);
     nativeScale.store(false, std::memory_order_release);
     // The swap chain or the device went: engine motion's bound state (the game's render targets among it, held by
@@ -1630,6 +1850,9 @@ void flatRuntimeResize() {
 }
 void flatRuntimeBeforePresent() {
     g_flatRuntimeLive.store(false, std::memory_order_release);
+    // Open mappings survive a stand-down or resize. Watch them at every frame
+    // boundary, even when the projection runtime no longer exists.
+    mapBounce().present(mapBouncePresentEpoch.fetch_add(1,std::memory_order_acq_rel)+1);
     // The flat HDR route's crash-safe breadcrumbs (flat_hdr_crumbs.h): engine motion's state going back and the census span
     // closing are the last work before the real Present, for a frame the resolver has had.
     HdrCrumbSpan routeBeforePresent(hdrCrumbPresentSide(), "before-present");
@@ -1844,6 +2067,9 @@ static FlatMonoFrame copyAdmit(State& s, const FlatRuntimeDraw& d, const FlatMon
 void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {
     if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;
     auto& s = state(); if (s.thread && !owner()) return;
+    if (drawIngressAudit.active.load(std::memory_order_acquire) &&
+        drawIngressAudit.framesLeft && --drawIngressAudit.framesLeft == 0)
+        reportDrawIngress("complete");
     // The flat HDR route's crash-safe breadcrumbs (flat_hdr_crumbs.h): "frame-end begin" now (the real Present has just
     // returned `hr`), "frame-end end" on every path out of this function, and the gate closed until the route admits
     // another frame. The next frame's preflight, with its resource creations, runs inside it.
@@ -1899,6 +2125,17 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     engineVelocityConfigure(enabled && !enginePausedThen);
     // No temporal mode selected: the census stops (its gates close, a scope costs a load and a compare).
     if (!enabled) { s.census.idle(); if (s.device || s.output || s.cameras.count()) flatRuntimeResize(); return; }
+    static bool bounceKeyRead=false;
+    if (!bounceKeyRead) {
+        bounceKeyRead=true;
+        const std::string key=Config::get().getString("advanced.flat_cb_map_cache","auto");
+        const flatmap::Mode mode=_stricmp(key.c_str(),"on")==0 ? flatmap::Mode::On :
+            _stricmp(key.c_str(),"off")==0 ? flatmap::Mode::Off : flatmap::Mode::Auto;
+        if (_stricmp(key.c_str(),"auto")!=0 && _stricmp(key.c_str(),"on")!=0 &&
+            _stricmp(key.c_str(),"off")!=0)
+            Log::get().note("flat map bounce: invalid advanced.flat_cb_map_cache=%s; using auto",key.c_str());
+        mapBounce().setMode(mode);
+    }
     FlatComputeInternalScope guard;
     Ptr<ID3D11Device> actualDevice; swap->GetDevice(IID_PPV_ARGS(&actualDevice));
     if (s.device && actualDevice.Get() != s.device.Get()) { flatRuntimeResize(); s.thread = GetCurrentThreadId(); }
@@ -1987,6 +2224,20 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat coverage: observation ended by setting change at frame=%llu; per-frame attempts resume",
             (unsigned long long)frame);
     s.observing = observingAfterToggle; s.partialWanted = partialWanted;
+    // Engine motion's draw substitution: read live, same idiom. No history reset: a mover simply loses its exact
+    // motion from the next frame, as a draw the substitution declines does today.
+    const bool engineMotionWanted=Config::get().getBool("experimental.temporal_aa_engine_motion",true);
+    if (engineMotionWanted != s.engineMotionWanted)
+        Log::get().note("flat engine motion: experimental.temporal_aa_engine_motion=%s at frame=%llu",
+            engineMotionWanted ? "on" : "off", (unsigned long long)frame);
+    s.engineMotionWanted = engineMotionWanted;
+    // The per-draw reducer's lean path (flat_runtime_model.h): read live, same idiom. Off makes every draw's
+    // contract record up front again; the reducer's state is the same either way, only its cost differs.
+    const bool perDrawLean=Config::get().getBool("experimental.flat_per_draw_lean",true);
+    if (perDrawLean == g_flatRuntimeEagerRecord)
+        Log::get().note("flat per-draw lean: experimental.flat_per_draw_lean=%s at frame=%llu",
+            perDrawLean ? "on" : "off", (unsigned long long)frame);
+    g_flatRuntimeEagerRecord = !perDrawLean;
     // Local refusal's observation exit: a positively qualified handoff on a
     // completely covered frame (the same coverage trio phase.finish used
     // above) requalifies the contract and resumes warm-up. Empty, failed,
@@ -2001,6 +2252,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // a resume creates it fresh here, as after a resize.
     if(wanted && !s.projection && s.work == FlatWork::Full) {
         s.projection.reset(new(std::nothrow) FlatProjectionRuntime);
+        if (s.projection) s.projection->setBounceSampleHooks(
+            &flatRuntimeMapBounceSamplePending,&flatRuntimeMapBounceObserveCopy);
+        if (s.projection) s.projection->setBounceTelemetryHooks(
+            &flatRuntimeMapBounceTrackedMap,&flatRuntimeMapBounceBankWrite,
+            &flatRuntimeMapBounceRegistered);
         s.context.As(&s.projectionContext);
         if(!s.projection || !s.projectionContext || !s.projection->initialize(s.context.Get())) {
             s.projection.reset();s.projectionContext.Reset();
@@ -2011,6 +2267,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         reportProjection(s,"complete");
     }
     if(projectionAuditRequested.exchange(false,std::memory_order_acq_rel)) {
+        armDrawIngress();
         // A diagnostic asks for everything, refused frames included: the stand-down ends.
         endStandDown(s, frame, "an F10 audit asked for everything");
         witnessRearm();   // the camera-write witness walks stacks again, bounded (flat_witness_bound.h)
@@ -2022,6 +2279,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             reportUnknownProjection(s,"manual-rearm");
         if(!s.projection) {
             s.projection.reset(new(std::nothrow) FlatProjectionRuntime);
+            if (s.projection) s.projection->setBounceSampleHooks(
+                &flatRuntimeMapBounceSamplePending,&flatRuntimeMapBounceObserveCopy);
+            if (s.projection) s.projection->setBounceTelemetryHooks(
+                &flatRuntimeMapBounceTrackedMap,&flatRuntimeMapBounceBankWrite,
+                &flatRuntimeMapBounceRegistered);
             s.context.As(&s.projectionContext);
             if(s.projection && !s.projection->initialize(s.context.Get()))s.projection.reset();
         }
@@ -2052,6 +2314,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             captureFlatProbeShader('p',0xDD371C57C9093BB8ull);
             captureFlatProbeShader('v',kHdrCopyVs);
             captureFlatProbeShader('p',kHdrCopyPs);
+            // The gameplay HDR source rejected in the FSR conflict audit.
+            // Its creation bytes identify whether camera-free admission is safe.
+            captureFlatProbeShader('p',0x07B3F82100F29401ull);
             // Exact unknown scene pairs observed in build 0150638a. These
             // creation-cache probes run once per manual F10 arm, never per draw.
             constexpr uint64_t unknownVs[]={0xA1B7CFCD0BE7493Eull,0xCE24A73943632F55ull,
@@ -2144,6 +2409,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.cameras.newFrame();
     const auto now = GetTickCount64();
     if (now - s.lastReport >= 5000) {
+        reportDrawIngress("progress", false);
+        reportMapBounce(frame,now,true);
         reportPhaseCensus(s,"5s");
         if(s.projectionFrames)reportProjection(s,"progress");
         else reportUnknownProjection(s,"5s");
@@ -2293,6 +2560,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.covRefusedPairsUsed = 0;
         s.lastReport = now;
     }
+    reportMapBounce(frame,now,false);
     // The frame that starts now is watched unless it is a Paused one (flat_standdown.h).
     s.frameLive = s.work != FlatWork::Paused;
     g_flatRuntimeLive.store(true, std::memory_order_release);
@@ -2429,6 +2697,90 @@ void flatRuntimeWritten(ID3D11Resource* res) {
     flatcpu::Scope lookup(flatcpu::kResource);   // prefix target and source lookup, camera lookup
     resourceWritten(state(), res);
 }
+void flatRuntimeMapBouncePreMap(ID3D11Resource* resource) {
+    mapBounce().preMap(reinterpret_cast<uintptr_t>(resource));
+}
+void flatRuntimeMapBounceNoteMap(ID3D11DeviceContext* context, ID3D11Resource* resource, UINT sub,
+                                 D3D11_MAP type, bool internal, bool success) {
+    auto& w=mapBounceWindow();
+    ++w.maps;
+    if (internal) { ++w.internal; return; }
+    if (!success || sub!=0) { ++w.failed; return; }
+    // READ maps bypass flatRuntimeMap's write observer. This read-only lookup
+    // recovers their tracked-CB map type without a descriptor or driver call.
+    if (type==D3D11_MAP_READ && owner() && state().projection &&
+        state().projection->containsTracked(resource))
+        flatRuntimeMapBounceTrackedMap(type);
+    if (type!=D3D11_MAP_WRITE_DISCARD) { ++w.notDiscard; return; }
+    if (context!=state().context.Get()) { ++w.foreignContext; return; }
+    if (!owner()) { ++w.foreignThread; return; }
+    if (state().work!=FlatWork::Full || !state().jitterWanted || !state().projection) {
+        ++w.paused; return;
+    }
+}
+void* flatRuntimeMapBounceInstall(ID3D11DeviceContext* context, ID3D11Resource* resource,
+                                  UINT sub, D3D11_MAP type, void* real) {
+    auto& bounce=mapBounce();
+    if (bounce.decision()!=flatmap::State::On || !flatRuntimeActive() || !real || sub!=0 ||
+        type!=D3D11_MAP_WRITE_DISCARD || context!=state().context.Get() ||
+        !owner() || state().work!=FlatWork::Full || !state().jitterWanted ||
+        !state().projection) return real;
+    const auto source=state().projection->bounceSource(resource);
+    if (!source.eligible) {
+        ++mapBounceWindow().untracked;
+        return real;
+    }
+    flatmap::MapRequest request{};
+    request.resource=reinterpret_cast<uintptr_t>(resource);
+    request.context=reinterpret_cast<uintptr_t>(context);
+    request.real=real; request.width=source.width;
+    request.frame=mapBouncePresentEpoch.load(std::memory_order_acquire);
+    request.discard=true; request.eligible=true; request.success=true;
+    request.seed=source.seed; request.seedValid=source.seedValid;
+    flatcpu::Scope shadows(flatcpu::kShadows);
+    return bounce.install(request);
+}
+FlatMapBounce::Lease flatRuntimeMapBounceBeginUnmap(ID3D11DeviceContext* context,
+                                                     ID3D11Resource* resource) {
+    flatcpu::Scope shadows(flatcpu::kShadows);
+    return mapBounce().beginUnmap(reinterpret_cast<uintptr_t>(resource),
+                                  reinterpret_cast<uintptr_t>(context));
+}
+bool flatRuntimeMapBounceSamplePending(uint32_t width) {
+    return width>=256 && mapBounceWindow().bankSamples.load()<32;
+}
+void flatRuntimeMapBounceObserveCopy(uint32_t width, uint64_t ticks) {
+    mapBounce().observeCopy(width,ticks);
+    auto& w=mapBounceWindow();
+    w.bankBytes+=width; w.bankTicks+=ticks; ++w.bankSamples;
+}
+void flatRuntimeMapBounceTrackedMap(D3D11_MAP type) {
+    auto& w=mapBounceWindow();
+    const unsigned index=static_cast<unsigned>(type);
+    if (index<6) ++w.trackedTypes[index];
+}
+void flatRuntimeMapBounceBankWrite(uint32_t width) {
+    auto& w=mapBounceWindow();
+    w.totalBankBytes+=width;
+    const unsigned bucket=width<=64?0:width<=256?1:width<=1024?2:
+        width<=4096?3:width<=8192?4:5;
+    ++w.widthBuckets[bucket];
+}
+void flatRuntimeMapBounceRegistered(const D3D11_BUFFER_DESC& desc) {
+    static unsigned lines=0;
+    if (lines>=64) return;
+    ++lines;
+    Log::get().note("flat map bounce: tracked CB %u/64 width=%u usage=%u cpu-access=0x%x bind=0x%x",
+        lines,desc.ByteWidth,static_cast<unsigned>(desc.Usage),
+        desc.CPUAccessFlags,desc.BindFlags);
+}
+void flatRuntimeMapBounceNoteKind(ID3D11Resource* resource, bool buffer) {
+    auto& w=mapBounceWindow();
+    if (!buffer) { ++w.texture; return; }
+    if (owner() && state().projection && state().projection->containsTracked(resource))
+        ++w.tracked;
+    else ++w.otherBuffer;
+}
 void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
     if (!owner() || type == D3D11_MAP_READ || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
@@ -2467,15 +2819,53 @@ static bool coverageShadersMatch(ID3D11DeviceContext* context, const FlatContrac
 }
 
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
-                                           char kind, uint32_t count, uint32_t start,
-                                           int32_t base, uint32_t startInstance) {
-    if (!flatRuntimeActive()) return;
-    auto& s = state(); if (!owner() || context != s.context.Get()) { foreignWork.store(true, std::memory_order_release); return; }
+                                            char kind, uint32_t count, uint32_t start,
+                                            int32_t base, uint32_t startInstance) {
+    auto& ingress = drawIngressAudit;
+    const bool auditing = ingress.active.load(std::memory_order_relaxed);
+    if (auditing) ingress.entered.fetch_add(1, std::memory_order_relaxed);
+    if (!flatRuntimeActive()) {
+        if (auditing) {
+            ingress.inactive.fetch_add(1, std::memory_order_relaxed);
+            const bool live = g_flatRuntimeLive.load(std::memory_order_relaxed);
+            const bool internal = g_flatComputeInternal;
+            if (!live) ingress.inactiveLiveOff.fetch_add(1, std::memory_order_relaxed);
+            if (internal) ingress.inactiveInternal.fetch_add(1, std::memory_order_relaxed);
+            drawIngressIdentity(context, "inactive", 0, nullptr, 0, 0, live, internal,
+                                ingress.inactiveWitnesses, 1);
+        }
+        return;
+    }
+    auto& s = state();
+    if (!owner()) {
+        if (auditing) {
+            ingress.wrongThread.fetch_add(1, std::memory_order_relaxed);
+            // Present may resize and release its context on another thread.
+            // Query only the live draw argument here, not State's COM pointer.
+            drawIngressIdentity(context, "wrong-thread", s.thread, nullptr, 0, 0, true, false,
+                                ingress.wrongThreadWitnesses, 1);
+        }
+        foreignWork.store(true, std::memory_order_release);
+        return;
+    }
+    if (context != s.context.Get()) {
+        if (auditing) {
+            ingress.wrongContext.fetch_add(1, std::memory_order_relaxed);
+            drawIngressIdentity(context, "wrong-context", s.thread, s.context.Get(), s.prefix.frame,
+                                static_cast<uint32_t>(s.work), true, false,
+                                ingress.wrongContextWitnesses, 2);
+        }
+        foreignWork.store(true, std::memory_order_release);
+        return;
+    }
     // The census's whole-frame GPU span opens at the frame's first game draw, watched or not.
     if (!s.gpuFrameTried) gpuFrameOpen(s, context);
     // A Paused frame (flat_standdown.h) watches nothing: the scope is a no-op, ctx stays
     // null and the destructor returns at its first line.
+    if (s.work == FlatWork::Paused && auditing)
+        ingress.paused.fetch_add(1, std::memory_order_relaxed);
     if (s.work == FlatWork::Paused) return;
+    if (auditing) ingress.accepted.fetch_add(1, std::memory_order_relaxed);
     flatcpu::Scope shell(flatcpu::kOther);   // the scope's own time; the named families below are carved out of it
     ctx = context; FlatRuntimeDraw d{}; auto& k = d.key;
     // Lazy substitution (engine_velocity.h): engine motion's state may still be bound from the producer draw before this
@@ -2491,6 +2881,46 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     k.color = rt.resource; k.rtv = bindingGet(BindSlot::Rtv0); k.width = rt.a; k.height = rt.b; k.format = rt.fmt;
     k.depth = ds.resource; k.dsv = bindingGet(BindSlot::Dsv0); k.depthWidth = ds.a; k.depthHeight = ds.b; k.depthFormat = ds.fmt;
     k.vs = bindingShaderHash(BindSlot::Vs); k.ps = bindingShaderHash(BindSlot::Ps);
+    if (auditing) {
+        const bool relevant = (k.vs == flat_mono_detail::kCopyVs &&
+                               k.ps == flat_mono_detail::kCopyPs) ||
+                              (s.prefix.output && k.color == s.prefix.output);
+        if (relevant) ingress.relevant.fetch_add(1, std::memory_order_relaxed);
+        const bool firstAccepted = ingress.firstAcceptedWitness.load(std::memory_order_relaxed) == 0 &&
+            ingress.firstAcceptedWitness.exchange(1, std::memory_order_relaxed) == 0;
+        const bool sampleRelevant = relevant &&
+            ingress.relevantWitnesses.fetch_add(1, std::memory_order_relaxed) < 3;
+        if (firstAccepted || sampleRelevant) {
+            FlatComputeInternalScope guard;
+            Ptr<ID3D11VertexShader> actualVs;
+            Ptr<ID3D11PixelShader> actualPs;
+            Ptr<ID3D11RenderTargetView> actualRtv;
+            Ptr<ID3D11DepthStencilView> actualDsv;
+            Ptr<ID3D11Resource> actualColor;
+            Ptr<IUnknown> actualColorIdentity, outputIdentity;
+            D3D11_VIEWPORT actualVp{};
+            UINT actualVpCount = 1;
+            context->VSGetShader(&actualVs, nullptr, nullptr);
+            context->PSGetShader(&actualPs, nullptr, nullptr);
+            context->OMGetRenderTargets(1, &actualRtv, &actualDsv);
+            if (actualRtv) actualRtv->GetResource(&actualColor);
+            if (actualColor) actualColor->QueryInterface(IID_PPV_ARGS(&actualColorIdentity));
+            if (s.output) s.output->QueryInterface(IID_PPV_ARGS(&outputIdentity));
+            context->RSGetViewports(&actualVpCount, &actualVp);
+            Log::get().note("flat draw ingress binding witness: frame=%llu kind=%s cached-VS=%016llX cached-PS=%016llX cached-RTV=%p cached-color=%p output=%p cached-viewport-count=%u cached-viewport=(%.1f,%.1f,%.1f,%.1f,%.2f,%.2f) actual-VS=%016llX actual-PS=%016llX actual-RTV=%p actual-color=%p actual-color-IUnknown=%p output-IUnknown=%p actual-DSV=%p actual-viewport-count=%u actual-viewport=(%.1f,%.1f,%.1f,%.1f,%.2f,%.2f); F10 bounded",
+                (unsigned long long)s.prefix.frame, relevant ? "relevant" : "first-accepted",
+                (unsigned long long)k.vs, (unsigned long long)k.ps, k.rtv, k.color,
+                s.prefix.output, s.viewportCount,
+                s.viewport.TopLeftX, s.viewport.TopLeftY, s.viewport.Width, s.viewport.Height,
+                s.viewport.MinDepth, s.viewport.MaxDepth,
+                (unsigned long long)lookupShaderHash(actualVs.Get()),
+                (unsigned long long)lookupShaderHash(actualPs.Get()),
+                actualRtv.Get(), actualColor.Get(), actualColorIdentity.Get(), outputIdentity.Get(),
+                actualDsv.Get(), actualVpCount,
+                actualVp.TopLeftX, actualVp.TopLeftY, actualVp.Width, actualVp.Height,
+                actualVp.MinDepth, actualVp.MaxDepth);
+        }
+    }
     // Partial temporal AA's current-draw identities (see refuseDraw): the
     // pair a per-draw reason refuses, named in the coverage census. Cheap
     // POD stores, done for every draw so qualifyProjection (State& only) can
@@ -2510,7 +2940,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             flatcpu::Scope rows(flatcpu::kCameraRows);   // camera table lookup, rows copy and hash: a fresh lookup
             kept = &s.cameras.refresh(k.b1, b1Binding, s.prefix.frame);
         }
-        if (kept->have) { std::memcpy(d.camera, kept->rows, sizeof(d.camera)); k.camera = d.camera; k.cameraHash = kept->hash; k.writeEpoch = kept->epoch; k.writeSeq = kept->sequence; }
+        if (kept->have) { std::memcpy(d.camera, kept->rows, sizeof(d.camera)); k.camera = d.camera; k.cameraHash = kept->hash; d.cameraHashTrusted = true; k.writeEpoch = kept->epoch; k.writeSeq = kept->sequence; }
     }
     d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps); d.instances = instances;
     // A draw that is not a pool-family draw cannot be a substituted producer: it sees the game's state, and so does
@@ -2629,7 +3059,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // flushing where the answer would be EDVR's. Two routes still read what is bound themselves, and so want the game's
     // state first: an F10 audit's captures (s.projectionFrames), and the legacy route's qualification of the projection
     // (qualifyProjection reads the shaders, the viewport and the constant buffers, and is skipped under Upstream).
-    const bool continuesRun = sourceCandidate && s.namedDepth == k.depth && s.namedConstants == k.b1 &&
+    const bool continuesRun = s.engineMotionWanted && sourceCandidate && s.namedDepth == k.depth && s.namedConstants == k.b1 &&
         std::memcmp(s.namedCamera, d.camera, sizeof(d.camera)) == 0;
     const bool coverageReads = s.projection && sceneExtent && k.color != s.prefix.output &&
         (k.format==9 || k.format==23 || k.format==26 || k.format==60) &&
