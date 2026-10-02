@@ -56,10 +56,10 @@ merged in the range: `- @handle: TODO describe (sources: PR #N, N commits)`.
 A code author with no merged PR, an issue reporter, an issue commenter and the
 author of an unmerged PR are not named. The maintainer is shown in the code
 summary but left out of the skeleton unless --include-maintainer. After the
-named lines comes `- TODO: AI assistance disclosure (maintainer decides)`,
-only when AI co-authors were found, then a blank line and one fixed general
-line thanking everyone who opened an issue or sent logs (it has no TODO).
-No email address is ever printed.
+named lines comes a blank line and one fixed general line thanking everyone
+who opened an issue or sent logs (it has no TODO). AI co-authors are listed
+in the full report as reference data and never produce a Thanks line, a TODO
+or an exit code. No email address is ever printed.
 
 --thanks prints only that skeleton. What the maintainer may want to look at
 (unmapped authors, docs mentions of reporters with no handle, PRs not merged)
@@ -664,7 +664,6 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
         "docs_reporter_mentions": docs_mentions,
         "thanks": thanks,
         "thanks_general_line": GENERAL_THANKS,
-        "ai_disclosure_needed": bool(ai),
         "warnings": warnings,
     }
 
@@ -771,8 +770,6 @@ def render_thanks(report):
     lines = ["## Thanks"]
     for t in report["thanks"]:
         lines.append("- %s: TODO describe (sources: %s)" % (at(t["login"]), ", ".join(t["sources"])))
-    if report["ai_disclosure_needed"]:
-        lines.append("- TODO: AI assistance disclosure (maintainer decides)")
     lines += ["", report["thanks_general_line"]]
     return "\n".join(lines) + "\n"
 
@@ -1194,9 +1191,11 @@ def self_test():
         # one commit and appears once; everyone else is reference data in the full report.
         check(th == "## Thanks\n"
                     "- @carol-gh: TODO describe (sources: PR #7, PR #22, 1 commit)\n"
-                    "- TODO: AI assistance disclosure (maintainer decides)\n"
                     "\n" + general + "\n",
-              "(k) the skeleton: merged-PR authors, the AI line, then the general line: %r" % th)
+              "(k) the skeleton: merged-PR authors, then the general line; no AI line though AI co-authored: %r"
+              % th)
+        check(rep["ai_coauthors"] and "AI" not in th and "assistance" not in th and "disclosure" not in th,
+              "AI co-authors are reference data only: they never reach the skeleton")
         check(th.count(general) == 1 and "TODO" not in general, "(k) the general line appears once, without TODO")
         lines = th.splitlines()
         check(all("TODO" in l for l in lines[1:] if l.startswith("- ")), "(k) every named line carries TODO")
@@ -1212,9 +1211,9 @@ def self_test():
               "notes for the maintainer go to stderr")
         check("Dave" not in th and "Claude" not in th, "(c)(d) no unmapped or AI name in the skeleton")
         rc, th_m, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks", "--include-maintainer"])
-        check(th_m.splitlines()[1:4] == ["- @carol-gh: TODO describe (sources: PR #7, PR #22, 1 commit)",
-                                         "- @maint-gh: TODO describe (sources: PR #23, 1 commit)",
-                                         "- TODO: AI assistance disclosure (maintainer decides)"],
+        check(th_m.splitlines()[1:3] == ["- @carol-gh: TODO describe (sources: PR #7, PR #22, 1 commit)",
+                                         "- @maint-gh: TODO describe (sources: PR #23, 1 commit)"]
+              and th_m.splitlines()[3:] == ["", general],
               "--include-maintainer keeps the maintainer, after Carol by PR number: %r" % th_m)
 
         # -- a range with docs mentions and an unmerged PR, but no unmapped author --
@@ -1224,7 +1223,17 @@ def self_test():
         check("docs mention reporters" in err2 and "PRs not merged" in err2,
               "those stay informational on stderr: %r" % err2)
         check(th2 == "## Thanks\n- @carol-gh: TODO describe (sources: PR #22)\n\n" + general + "\n",
-              "(k) no AI line when no AI was found; a PR author with no commit in the range: %r" % th2)
+              "(k) a PR author with no commit in the range is named by PR alone: %r" % th2)
+
+        # -- a range that holds only an AI-authored commit: listed, never a Thanks line or an exit code --
+        rc, th3, err3 = run(["--from", shas["c4"], "--to", shas["c5"], "--thanks"])
+        check(rc == 0 and th3 == "## Thanks\n\n" + general + "\n",
+              "(m) AI authorship alone gives no Thanks line and exit 0: %d %r" % (rc, th3))
+        rc, js3, _ = run(["--from", shas["c4"], "--to", shas["c5"], "--format", "json"])
+        rep3 = json.loads(js3)
+        check(rep3["ai_coauthors"] == [{"name": "Claude", "commits": 1}] and rep3["thanks"] == []
+              and rep3["unmapped_authors"] == [] and "ai_disclosure_needed" not in rep3,
+              "the AI author is reference data in the full report: %r" % rep3["ai_coauthors"])
 
         # -- never an email ------------------------------------------------
         for fmt in ("text", "markdown", "json"):
