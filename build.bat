@@ -272,9 +272,13 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     "tools\temporal_shader_build\temporal_shader_build.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: temporal shader compiler build failed & exit /b 1 )
+REM The native runtime's four stereo-renderer shaders (src\openxr\stereo_shader_source.h) are compiled here too, into a header of their own
+REM (--stereo-output), so edvr_openxr_runtime.dll creates them from bytes and carries no HLSL compiler: it imported d3dcompiler_47.dll until 2026-10-01
+REM for four D3DCompile calls. The runtime and the two rigs that compile d3d11_stereo.cpp find the header through /I"%GEN%"; the PE gate below fails the
+REM build if either DLL imports the compiler again.
 "%OBJ%\temporalshader\temporal_shader_build.exe" --self-test || exit /b 1
-"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --dry-run || exit /b 1
-"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" || exit /b 1
+"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --stereo-output "%GEN%\openxr_stereo_shader_bytecode.h" --dry-run || exit /b 1
+"%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --stereo-output "%GEN%\openxr_stereo_shader_bytecode.h" || exit /b 1
 
 echo [edvr] === d3d11.dll ===
 REM The settings schema -- the installer's window AND the in-headset menu's
@@ -520,7 +524,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
-    "src\d3d11\journal_watch.cpp" ^
+    "src\d3d11\journal_watch.cpp" "src\d3d11\terrain_checkerboard.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
     "src\d3d11\object_probe.cpp" ^
     "src\d3d11\pixel_probe.cpp" ^
@@ -612,7 +616,7 @@ REM Native runtime DLL: the only supported release and installation backend.
 REM Its application fixture calls the game-imported ABI without linking the host.
 if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_CPU_COMPILE% ^
-    /I"third_party\openxr\include" /Fo"%OBJ%\openxr_module\\" ^
+    /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_module\\" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
@@ -703,9 +707,11 @@ if errorlevel 1 (
 
 
 REM The native OpenXR build is the only build; nothing above ran a legacy path.
+REM --forbid-import: neither DLL may import the HLSL compiler at load time. The runtime did (four D3DCompile calls, moved to build time 2026-10-01: its link line
+REM no longer names d3dcompiler.lib either, so a compile that comes back fails to link); the d3d11 proxy loads d3dcompiler_47.dll only on demand (shader_swap.cpp).
 copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
-python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" || exit /b 1
-python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" || exit /b 1
+python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
+python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
 echo.
 REM The one line a release engineer has to see, after thousands of compiler
 REM lines: whether the installer just built carries NVIDIA's runtime.
@@ -747,8 +753,8 @@ REM ===========================================================================
 echo.
 echo [edvr] === DLL-only promotion outputs ===
 copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
-python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" || exit /b 1
-python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" || exit /b 1
+python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
+python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
 echo [edvr] DLL-only build passed: production DLLs and loader are ready to install.
 echo [edvr] Test rigs and the self-contained installer were skipped; use a full build
 echo        before distributing an installer or accepting new source changes.
@@ -958,9 +964,6 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: native temporal test build failed & exit /b 1 )
 "%BUILD%\native_temporal_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_temporal_test.exe" --self-test || exit /b 1
-REM The jitter phase count (experimental.temporal_aa_jitter_follows_upscale): the same channel code flown through a script of modes, sizes
-REM and live key flips in a process of its own, because the provider's channel pool holds sixteen and --self-test uses them all.
-"%BUILD%\native_temporal_test.exe" --phase-count-self-test || exit /b 1
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_gpu_test.exe" ^
@@ -1508,12 +1511,6 @@ if errorlevel 1 ( echo [edvr] ERROR: temporal_test build failed & exit /b 1 )
     echo [edvr] ERROR: the temporal pass's arithmetic is wrong
     exit /b 1
 )
-REM The jitter phase count (experimental.temporal_aa_jitter_follows_upscale, 2026-10-01) is pinned by this rig (the rule's table and
-REM the fixed eight's bit-for-bit sameness), flat_temporal_test (the phase machine and the route decision), vr_world_route_test (the
-REM window token) and native_temporal_test --phase-count-self-test (the VR eye pass flown on WARP). The self-test below holds the
-REM mutation list that proves those rigs fail on a broken source to the sources as they are and to the way build.bat compiles each
-REM rig; its --run (on demand) builds each against one edited production file. Drop it with the key.
-python "tools\temporal_test\jitter_phase_mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_ui_depth
@@ -1933,6 +1930,28 @@ if exist "%OBJ%\vscreenfit\never_written.log" ( echo [edvr] ERROR: vscreen_fit_t
 python "tools\vscreen_fit_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_terrain_checkerboard_test
+echo [edvr] === terrain_checkerboard_test.exe ===
+REM Elite's terrain checkerboard rendering in VR, said in the headset (design doc section 84, the VR hint): the words and the pure picks
+REM (src\common\terrain_checkerboard_notice.h), the reader on fixture folders and the monitor's rule for a half-written file
+REM (src\d3d11\terrain_checkerboard_reader.h), the worker thread on a real log (src\d3d11\terrain_checkerboard.cpp, linked with the real
+REM Log, Config and fault guard, and then tools\edvr_log.py --terrain-checkerboard over the log it wrote: needs python on PATH) and the
+REM wiring in menu.cpp as source pins (they read src\ from the repo root, which the rig takes as its argument). The fixtures are written
+REM to a temp directory and removed. tools\terrain_checkerboard_test\mutants.py --self-test holds the rig's mutation list to the sources as
+REM they are; the list itself (--run, on demand, about a minute) proves the rig fails when each rule of the headers, the worker or the
+REM wiring is broken.
+if not exist "%OBJ%\terraincheckerboard" mkdir "%OBJ%\terraincheckerboard"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\terraincheckerboard\\" /Fe"%OBJ%\terraincheckerboard\terrain_checkerboard_test.exe" ^
+    "tools\terrain_checkerboard_test\terrain_checkerboard_test.cpp" "src\d3d11\terrain_checkerboard.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: terrain_checkerboard_test build failed & exit /b 1 )
+"%OBJ%\terraincheckerboard\terrain_checkerboard_test.exe" --dry-run || exit /b 1
+"%OBJ%\terraincheckerboard\terrain_checkerboard_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\terrain_checkerboard_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_vscreen_footprint_glue_test
 echo [edvr] === vscreen_footprint_glue_test.exe ===
 REM The footprint instrument's glue (src\d3d11\vscreen_footprint.cpp; design doc section 82, the "vscreen auto-fit" entry) compiled for
@@ -1996,7 +2015,7 @@ REM importing D3D11CreateDevice, which from build\ would load the proxy.
 if not exist "%OBJ%\openxr_native_tests" mkdir "%OBJ%\openxr_native_tests"
 for %%T in (native stereo) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
-        /I"third_party\openxr\include" /Fo"%OBJ%\openxr_native_tests\\" ^
+        /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_native_tests\\" ^
         /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
         "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
         "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
@@ -2100,7 +2119,7 @@ exit /b 0
 
 :rig_openxr_proxy_state_test
 if not exist "%OBJ%\openxr_proxy_state_test" mkdir "%OBJ%\openxr_proxy_state_test"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" /I"%GEN%" ^
     /Fo"%OBJ%\openxr_proxy_state_test\\" /Fe"%BUILD%\openxr_proxy_state_test.exe" ^
     "tools\openxr_proxy_state_test\openxr_proxy_state_test.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
@@ -2911,6 +2930,27 @@ if errorlevel 1 ( echo [edvr] ERROR: on foot maps test build failed & exit /b 1 
 python "tools\on_foot_maps_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_ui_composite_census_test
+echo [edvr] === ui_composite_census_test.exe ===
+REM The cockpit holo panels' second shader pair and the census of the interface composites the layer leaves in the scene (docs\ui-layer-2026-09-23.md,
+REM "2026-10-01: Disable GUI effects"): the pure halves, src\d3d11\ui_layer_math.h's family rule (the vertex shader Elite switches in with Disable GUI
+REM effects on names the cockpit holo panels, on the lit HDR target and on the post-tonemap one, exactly as the stock one does) and
+REM src\d3d11\ui_scene_composites.h's window, zero line, line with pairs, cap and detector-off wording, compiled alone -- plus the source pins from the repo
+REM root (where ui_depth publishes the composite flag, the scope that consumes it, the count after both takes, the line once a window with its zeros, depth
+REM left out for the new pair on purpose, the eye-run diagnostic's watch list, and the reader's fixture byte for byte; each pin carries a control).
+REM tools\ui_composite_census_test\mutants.py --self-test holds the mutation list to the headers as they are; the list itself (--run, on demand, about a
+REM minute) proves the rig fails when each rule is flipped. Pure C++ and source scans: no D3D.
+if not exist "%OBJ%\uicompositecensus" mkdir "%OBJ%\uicompositecensus"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" /Fo"%OBJ%\uicompositecensus"\ ^
+    /Fe"%BUILD%\ui_composite_census_test.exe" "tools\ui_composite_census_test\ui_composite_census_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui composite census test build failed & exit /b 1 )
+"%BUILD%\ui_composite_census_test.exe" --dry-run || exit /b 1
+"%BUILD%\ui_composite_census_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\ui_composite_census_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_panel_curve_test
 echo [edvr] === panel_curve_test.exe ===
 REM The curved screen's strip (src\d3d11\panel_curve.cpp; fix.panel_curvature) compiled for real with the real Config, Log and fault
@@ -3001,6 +3041,30 @@ if errorlevel 1 ( echo [edvr] ERROR: intro_curve_module_test build failed & exit
 "%OBJ%\introcurvemodule\intro_curve_module_test.exe" --dry-run || exit /b 1
 "%OBJ%\introcurvemodule\intro_curve_module_test.exe" --self-test || exit /b 1
 python "tools\intro_curve_module_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_surface_strip_render_test
+echo [edvr] === surface_strip_render_test.exe ===
+REM Which way the curved intro picture faces, looked at in pixels (the surface strip of src\d3d11\panel_curve.cpp; fix.panel_curvature). The
+REM production strip, the movie's wiring (intro_panel.cpp) and the splash's (intro_curve.cpp) are compiled for real with the real Config, Log
+REM and fault guard and drawn on a WARP device through a vertex shader that is the intro composite's own (docs\shaders\intro-composite-vs.asm,
+REM written out as HLSL in the rig), a point-sampling pixel shader and the game's rasterizer state (cull back) onto a 128x72 target, from a
+REM texture whose corners are red, green, blue and white: left stays left and up stays up for the on-foot screen, the movie and the splash
+REM (the first flight showed the movie and the splash mirrored: the composite's +x runs to the viewer's left and the strip's u ran with x).
+REM The same draws with the other flag come out mirrored (the controls that prove the rig can see it), and a placement whose +x runs right
+REM comes out upright with the flag the other way. tools\surface_strip_render_test\mutants.py --self-test holds the mutation list to the
+REM sources as they are; the list itself (--run, on demand) proves the rig fails when each rule that decides the direction is flipped.
+REM Built under obj\ and taking System32's device through src\common\system_d3d11.h, so it links without d3d11.lib.
+if not exist "%OBJ%\surfacestrip" mkdir "%OBJ%\surfacestrip"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\surfacestrip\\" /Fe"%OBJ%\surfacestrip\surface_strip_render_test.exe" ^
+    "tools\surface_strip_render_test\surface_strip_render_test.cpp" "src\d3d11\intro_panel.cpp" "src\d3d11\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO user32.lib version.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: surface_strip_render_test build failed & exit /b 1 )
+"%OBJ%\surfacestrip\surface_strip_render_test.exe" --dry-run || exit /b 1
+"%OBJ%\surfacestrip\surface_strip_render_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\surface_strip_render_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_pixel_probe_test

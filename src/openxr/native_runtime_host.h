@@ -729,6 +729,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           nativeTracePrintf("runtime_startup_steps,instance=%.1f,device=%.1f,session=%.1f,swapchains=%.1f,shaders=%.1f,other=%.1f,frames=%.1f,centre=%.1f,total=%.1f,units=wall_ms\n",
             startupSteps.instance,startupSteps.device,startupSteps.session,swapchains,shaders,other,
             startupSteps.frames,startupSteps.centre,openMs+loopMs);
+          // The stereo renderer's four shaders are created from bytecode the build compiled (stereo_shader_source.h); the runtime carries no compiler. `stretch_ms` is the
+          // `shaders` stretch above: the four creations and the blit's buffer and sampler. (Until 2026-10-01 it held four D3DCompile calls, ~443 ms in the 2026-09-15 flight.)
+          nativeTracePrintf("runtime_shaders,source=precompiled,created=4,stretch_ms=%.2f,units=wall_ms\n",shaders);
         }
         return vr::VRInitError_None;
       }

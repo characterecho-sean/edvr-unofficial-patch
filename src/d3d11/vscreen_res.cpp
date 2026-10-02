@@ -320,9 +320,10 @@ void revertVScreenModeResolution() {
 //
 // TWO RULES, one reason to choose (src/common/vscreen_fit.h says all of it; docs/design-
 // flat-temporal-aa-2026-09-23.md, section 82, the "vscreen auto-fit" entry): when the VR
-// world route will run, auto is the on-foot screen's own footprint in eye pixels (the
-// instrument in vscreen_footprint.cpp measures it, the state file keeps it, the pure
-// half does the arithmetic); otherwise it is today's 125% of the eye width, unchanged.
+// world route will run, auto is 70% (vscreenfit::kMultiplier) of the on-foot screen's
+// head-on footprint in eye pixels (the instrument in vscreen_footprint.cpp measures it,
+// the state file keeps its 10th percentile, the pure half does the arithmetic); otherwise
+// it is today's 125% of the eye width, unchanged.
 // The decision is made from the configuration this launch runs with plus two files of
 // the last session's, and every caller (the panel patch, the intro movie's target, the
 // menu's hint) asks this one function.
@@ -349,7 +350,7 @@ namespace {
 // The route's conditions as the configuration states them -- the same three the world
 // route needs at run time, read from the ini the way each owner reads it, because at
 // launch (and in the menu, for the next one) no owner has run yet:
-//   * experimental.temporal_aa_on_foot_world: vr_world_route.cpp's boundary, default off
+//   * experimental.temporal_aa_on_foot_world: vr_world_route.cpp's boundary, default auto
 //   * (the curved screen is not a condition: the route re-issues a curved screen through
 //     the same strip the game's draw is substituted with, panel_curve.h panelCurveReissue)
 //   * the UI layer: ui_layer.cpp's uiLayerConfigure -- fix.ui_quality (default 100), a
@@ -367,7 +368,7 @@ vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg) {
     vscreenfit::RouteFacts f;
     f.flatProfile = runtimeFlatProfile();
     f.keyAuto = vscreenfit::keyTextIsAuto(
-        cfg.getString("experimental.temporal_aa_on_foot_world", "off").c_str());
+        cfg.getString("experimental.temporal_aa_on_foot_world", "auto").c_str());
 
     const std::string quality = cfg.getString("fix.ui_quality", "100");
     bool recognized = true;

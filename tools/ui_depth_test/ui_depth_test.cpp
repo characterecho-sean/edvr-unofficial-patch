@@ -332,6 +332,20 @@ int main(int argc, char** argv) {
         check((read(dev.Get(),ctx.Get(),g_mask[0].tex)[1]>0)==visible,"holo mask follows physical coverage");
         check(read(dev.Get(),ctx.Get(),scene.tex.Get())[1]==0,"holo coverage leaves game depth untouched");
     }
+    // The panels with Elite's Disable GUI effects on (vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE) have NO stand-in, and none is adopted for them
+    // by vertex family or by slot: kHoloDepthHlsl reads TEXCOORD4, TEXCOORD7 and TEXCOORD8, and that vertex shader writes TEXCOORD0 and
+    // TEXCOORD6 only (docs/ui-layer-2026-09-23.md, 2026-10-01), so any stand-in bound to it would be drawn through a mismatched signature. The
+    // layer takes these panels out of the scene instead; a draw it does not take is left alone, as before.
+    {
+        const bool variants=g_variants;
+        for(bool on:{true,false}) {
+            g_variants=on;
+            check(depthShaderFor(ctx.Get(),kHoloGuiFxOffPs,kHoloGuiFxOffVs,2)==nullptr && depthShaderFor(ctx.Get(),kHoloGuiFxOffPs,kHoloGuiFxOffVs,1)==nullptr,
+                  "the Disable-GUI-effects holo pair has no depth stand-in, with or without the variant fallback (its output signature is not the stand-in's input)");
+        }
+        g_variants=variants;
+        check(depthShaderFor(ctx.Get(),kHoloLitPs,kHoloPanel,2)!=nullptr,"(control) the stock holo pair still has its stand-in");
+    }
     surface[3]=1;
     ctx->UpdateSubresource(surf.Get(),0,nullptr,surface,sizeof(surface),0);
     uiDepthFrameBoundary(ctx.Get());

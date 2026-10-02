@@ -23,8 +23,10 @@ subdirectories for log files. The installer bundles everything automatically:
    in Task Manager (`Ctrl+Shift+Esc`) that `EliteDangerous64.exe` is not hung
    in the background.
 2. **Open the installer:**
-   - **Flat screen players:** Run `edvr-flat-installer.exe`.
-   - **VR players:** Run `edvr-installer.exe`.
+   - **Flat screen players:** Unzip `edvr-flat-installer-<version>.zip` and run
+     `edvr-flat-installer.exe`.
+   - **VR players:** Unzip `edvr-installer-<version>.zip` and run
+     `edvr-installer.exe`.
 3. **Click "Save logs"** on the bottom bar of the installer window.
 4. A zip file is written directly to your Desktop:
    `edvr-logs-YYYYMMDD_HHMMSS.zip`.

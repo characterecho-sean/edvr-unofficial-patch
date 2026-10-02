@@ -19,6 +19,10 @@ constexpr wchar_t kAutoWidthFile[] = L"vscreen_auto_eye_width.txt";
 // the other.
 constexpr wchar_t kAutoFootprintFile[] = L"vscreen_auto_footprint.txt";
 
+// The footprint is saved through a temp file BESIDE it that is then moved over it in one step: a save that fails at any point leaves
+// the destination exactly as it was, where CREATE_ALWAYS on the destination itself could leave it empty or cut short.
+constexpr wchar_t kAutoFootprintTempSuffix[] = L".tmp";
+
 // A render width below this is implausible enough that a corrupt or hand-
 // edited state file should be ignored rather than trusted.
 constexpr uint32_t kMinPlausibleWidth = 640;
@@ -83,18 +87,39 @@ bool lastKnownPanelFootprint(const std::wstring& logDir, vscreenfit::Record* out
     return vscreenfit::parseRecord(buf, out);
 }
 
-void noteMeasuredPanelFootprint(const std::wstring& logDir, const vscreenfit::Record& record) {
-    if (logDir.empty() || !vscreenfit::plausibleFraction(record.fractionAtUnit)) return;
-    CreateDirectoryW(logDir.c_str(), nullptr);   // log.enabled = 0 never made it (see above)
-    HANDLE f = CreateFileW(autoFootprintStatePath(logDir).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
-                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return;
+bool noteMeasuredPanelFootprint(const std::wstring& logDir, const vscreenfit::Record& record, uint32_t* win32Error) {
+    if (win32Error) *win32Error = 0;
+    auto refused = [win32Error](DWORD error) {
+        if (win32Error) *win32Error = static_cast<uint32_t>(error);
+        return false;
+    };
+    auto lastError = [] {   // never 0: a failure with no error set is still a failure
+        const DWORD error = GetLastError();
+        return error ? error : static_cast<DWORD>(ERROR_WRITE_FAULT);
+    };
+    if (logDir.empty()) return refused(ERROR_INVALID_PARAMETER);
+    if (!vscreenfit::plausibleFraction(record.fractionAtUnit)) return refused(ERROR_INVALID_DATA);
     char text[160];
     const int n = vscreenfit::formatRecord(text, sizeof(text), record);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(text)) return refused(ERROR_INSUFFICIENT_BUFFER);
+    CreateDirectoryW(logDir.c_str(), nullptr);   // log.enabled = 0 never made it (see above)
+    const std::wstring dest = autoFootprintStatePath(logDir);
+    const std::wstring tmp = dest + kAutoFootprintTempSuffix;
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return refused(lastError());
     DWORD written = 0;
-    if (n > 0 && static_cast<size_t>(n) < sizeof(text))
-        WriteFile(f, text, static_cast<DWORD>(n), &written, nullptr);
+    DWORD error = ERROR_SUCCESS;
+    if (!WriteFile(f, text, static_cast<DWORD>(n), &written, nullptr)) error = lastError();
+    else if (written != static_cast<DWORD>(n)) error = ERROR_WRITE_FAULT;   // a short write is a failed save, not a shorter record
+    else if (!FlushFileBuffers(f)) error = lastError();
     CloseHandle(f);
+    if (error == ERROR_SUCCESS && !MoveFileExW(tmp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        error = lastError();   // the destination held open with no sharing, or a directory in its place: it stays as it was
+    if (error != ERROR_SUCCESS) {
+        DeleteFileW(tmp.c_str());   // nothing of a failed save is left behind
+        return refused(error);
+    }
+    return true;
 }
 
 }  // namespace edvr

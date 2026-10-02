@@ -6,14 +6,18 @@
 // placement of its own and bends that itself. The splash's constants are the GAME's world-space placement, which EDVR never touches
 // (docs\intro-video.md).
 // With fix.panel_curvature above 0 the splash bends like the on-foot screen: vscreen.cpp draws it as the surface strip
-// (panel_curve.h, panelCurveSurfaceDraw) in place of the game's flat quad. The strip takes two numbers from its caller -- the panel's
-// half-width in metres and which way its placement matrix moves +z -- and this module is where they come from.
+// (panel_curve.h, panelCurveSurfaceDraw) in place of the game's flat quad. The strip takes three numbers from its caller -- the panel's
+// half-width in metres, which way its placement matrix moves +z, and which way the picture's u must run (reverseU: against the strip's own
+// x when the placement's +x runs to the viewer's LEFT, as the intro composite's does) -- and this module is where they come from.
 //
 // HOW IT KNOWS. Nothing is read off the draw but its shape. The constants are on the GPU, so this does what intro_panel.cpp has flown:
 // the first time a (VS b2 buffer, PS slot 0 view) pair is seen, copy its 80 bytes to a staging buffer, and read them kSettleFrames
 // frames later, when the copy cannot stall the render thread. intro_curve_math.h says what 20 floats must look like to be a world-space
-// panel and what to take from them (introReadWorldCb). A pair that reads as one is `world` and its draws are handed to the strip from
-// then on; anything else is `flat` and stays as the game drew it, with the reason and the 20 floats in the log for the next flight.
+// panel and what to take from them (introReadWorldCb): the half-width, the depth direction and which way the placement's +x runs on the
+// screen (introPlacementXDir; a reading that cannot say -- the panel seen edge-on -- is no reading). A pair that reads as one is `world`
+// and its draws are handed to the strip from then on, each pair with the u direction it was read with; anything else is `flat` and stays
+// as the game drew it, with the reason and the 20 floats in the log for the next flight (a pair read edge-on is one more flat pair, and
+// is read again like any other).
 //
 //   per pair:   (first seen) -> copying -> world
 //                                      \-> flat -> (copied again every kFlatRecheckFrames) -> world | flat
@@ -35,8 +39,8 @@
 // most one staging buffer a pair, one re-read a pair per kFlatRecheckFrames drawn frames, and none of it at fix.panel_curvature 0.
 //
 // KNOWN LIMIT: A WORLD VERDICT IS FOR THE LIFE OF THE PAIR. A world pair is never read again, so a world pair the game later reuses for
-// another placement (the same buffer and view, other constants) keeps its first reading -- the strip's old half-width and direction --
-// until the pair is forgotten (evicted, or unseen for kExpireFrames). Nothing in the intro is known to do that.
+// another placement (the same buffer and view, other constants) keeps its first reading -- the strip's old half-width, depth direction and
+// u direction -- until the pair is forgotten (evicted, or unseen for kExpireFrames). Nothing in the intro is known to do that.
 //
 // WHAT IT NEVER CLAIMS. The movie (its placement is intro_panel's own, and a draw intro_panel claims is drawn before this is asked: the
 // wiring puts this right after that claim. The few settle frames before intro_panel has a placement of its own do reach this, and the
@@ -54,9 +58,9 @@
 //
 // then in forwardWithVerdict, after the verdict's Begin and in place of the game's own issue:
 //
-//     panelCurveSurfaceDraw(self, introCurveGain(), introCurveToward(), realDraw);   // false: the game's own quad is issued, flat
+//     panelCurveSurfaceDraw(self, introCurveGain(), introCurveToward(), introCurveReverseU(), realDraw);   // false: the game's own quad, flat
 //
-// the splash dim's re-issue draws the strip again with the same two numbers, and the thunk puts them away after the draw and the dim:
+// the splash dim's re-issue draws the strip again with the same three numbers, and the thunk puts them away after the draw and the dim:
 // introCurveEndDraw(). Once a frame, from the frame boundary: introCurveTick(ownerCtx, eyeDrawsLastFrame >= kSceneEyeDraws).
 #pragma once
 
@@ -86,6 +90,11 @@ bool introCurveOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count, 
 // when nothing is armed.
 float introCurveGain();
 int introCurveToward();
+
+// For the armed draw: whether the strip's u must run AGAINST its x (the placement's +x runs to the viewer's left: both of the splash's real
+// captures, both eyes of each). Read from the pair's own constants and kept with the pair, never a constant. False when nothing is armed,
+// and cleared with the gain and the direction by introCurveEndDraw and by every call that does not arm.
+bool introCurveReverseU();
 
 // Disarm. vscreen calls it after the draw (and after the splash dim's re-issue of it).
 void introCurveEndDraw();

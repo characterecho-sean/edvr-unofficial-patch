@@ -37,8 +37,8 @@ second — so tune by eye from there.
   untouched — the same texels, on bent geometry.
 
 **With the VR on-foot world route** (`experimental.temporal_aa_on_foot_world =
-auto`; design-flat-temporal-aa-2026-09-23.md, section 82, "The curved route",
-2026-10-01) the curve stays on. The route hands each eye its own resolved copy of
+auto`, its default since 2026-10-01; design-flat-temporal-aa-2026-09-23.md,
+section 82, "The curved route") the curve stays on. The route hands each eye its own resolved copy of
 the screen through the UI layer, and for a curved screen the layer draws that
 copy through the very same bent strip the game's own draw uses, by the same code,
 so the bend and the placement are identical with the route on or off. The route's
@@ -49,17 +49,22 @@ than the middle does; if they look softer than the middle at
 
 **The intro movie and the splash screen follow the same setting** (design:
 intro-video.md, 2026-10-01). EDVR places the movie's quad itself
-(`fix.intro_video = screen`), so above 0 it is drawn as the same bent strip, with
-the depth axis added to the placement it builds. The splash is the game's own
-world-space panel: EDVR copies its placement constants (again every 60 frames
-while they read as anything but a world-space panel), reads from them the
-panel's half-width and which way its depth runs, and then draws the same strip
-through the game's own constants. Both draw the strip without back-face culling,
-because nobody has recorded that composite's index order. At curvature 0 none of
-this runs and a rig holds the movie's and the splash's draws byte for byte. What
-has no depth to bend stays flat: the movie in `stock` and `head` modes (head-locked
-screen space) and any composite whose constants do not read as a world-space
-panel; the log says which and why.
+(`fix.intro_video = screen`), so above 0 it is drawn as the same bent strip,
+with the depth axis added to the placement it builds. The splash is the game's
+own world-space panel: EDVR copies its placement constants (again every 60
+frames while they read as anything but a world-space panel), reads from them the
+panel's half-width, which way its depth runs and which way its +x runs on the
+screen, and then draws the same strip through the game's own constants. The last
+one matters for the picture: the intro composite's +x runs to the viewer's left
+(the game's own quad compensates in its vertex data), so the strip's u runs
+against x there -- with x, as it always did, for the on-foot screen -- and it is
+read from each placement, never assumed (the first flight of the curved intro
+came out mirrored because it was). Both draw the strip without back-face
+culling, because nobody has recorded that composite's index order. At curvature
+0 none of this runs and a rig holds the movie's and the splash's draws byte for
+byte. What has no depth to bend stays flat: the movie in `stock` and `head`
+modes (head-locked screen space) and any composite whose constants do not read
+as a world-space panel; the log says which and why.
 
 Under `[advanced]`: `panel_curvature_segments` (how finely the screen is
 tessellated; 64 is past what the eye can see, and below ~8 the bend visibly

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """The mutation proof for tools\\vscreen_fit_test: the rig fails when a rule of the fit, or a wiring pin, is flipped.
 
-The rig (vscreen_fit_test.cpp) pins the rules of src\\common\\vscreen_fit.h (R1..R10) and the wiring of the resolver, the footprint
-instrument and its hooks (R12; R11 is the state files on disk and is not mutated here). A rig that passes proves little until it
-is seen to FAIL on a source that breaks the rule it pins. This tool does that, for two kinds of mutation:
+The rig (vscreen_fit_test.cpp) pins the rules of src\\common\\vscreen_fit.h (R1..R10), the state files on disk (R11) and the wiring of
+the resolver, the footprint instrument and its hooks (R12). A rig that passes proves little until it is seen to FAIL on a source
+that breaks the rule it pins. This tool does that, for three kinds of mutation:
 
   code   one textual edit of the header, compiled into the rig in a temp directory OUTSIDE the repo (the rig takes the header
          through -DVSCREEN_FIT_HEADER and is built with -DVSCREEN_FIT_MUTANT, which leaves out the one case that needs another
          source linked), and the rig run on the rule's case;
+  state  one textual edit of a COPY of src\\common\\vscreen_auto_state.cpp (the state-file writer and reader), the rig built WITH its
+         state-file case against the copy (the real headers are found through /I), and the rig run on the rule's case: R11 runs
+         the writer against a destination held open, a reader's handle, a directory in the way, and so on, on disk;
   pin    one textual edit of a COPY of a source file the rig's source pins read, in a temp root, and the rig (built once, from
          the real header) run with --root on the rule's case.
 
@@ -41,6 +44,7 @@ ROOT = HERE.parents[1]
 HEADER = "src/common/vscreen_fit.h"
 HEADER2 = "src/common/vr_supersample_notice.h"   # R13: Elite's Supersampling below 1 (the rig takes it through -DVR_SUPERSAMPLE_HEADER)
 HEADERS = {HEADER: "VSCREEN_FIT_HEADER", HEADER2: "VR_SUPERSAMPLE_HEADER"}
+STATE_SRC = "src/common/vscreen_auto_state.cpp"   # R11: the state files on disk (the rig links the real one; a state mutation links an edited copy)
 RIG = HERE / "vscreen_fit_test.cpp"
 BUILD_BAT = ROOT / "build.bat"
 RIG_LABEL = ":rig_vscreen_fit_test"
@@ -64,6 +68,7 @@ PIN_FILES = [
     "src/d3d11/vscreen.cpp",
     "src/d3d11/vscreen_footprint.cpp",
     "src/d3d11/flat_runtime.cpp",
+    "src/common/vscreen_auto_state.cpp",
     "edvr.ini",
 ]
 
@@ -76,7 +81,12 @@ class Mutant:
         self.why = why
         self.target = target                                                    # the file edited; the header means a code mutant
         self.rule = re.match(r"R\d+", self.caught[0]).group(0)                  # the rig's case to run
-        self.kind = "code" if target in HEADERS and not name.startswith("pin-") else "pin"
+        if target in HEADERS and not name.startswith("pin-"):
+            self.kind = "code"
+        elif target == STATE_SRC and name.startswith("state-"):
+            self.kind = "state"    # the state-file source, edited and LINKED into the rig (a pin- name edits it as text the pins read instead)
+        else:
+            self.kind = "pin"
 
 
 def M(name, caught, edits, why, target=HEADER):
@@ -90,11 +100,16 @@ def drop(old):
 H = HEADER
 MUTANTS = [
     # ---- R1: the constants and today's rule -------------------------------------------------------------------------------
-    M("m-is-125", "R1a", [("constexpr double kMultiplier = 1.0;", "constexpr double kMultiplier = 1.25;")], "the screen's texels per eye pixel is 1.25"),
+    M("m-is-125", "R1a", [("constexpr double kMultiplier = 0.70;", "constexpr double kMultiplier = 1.25;")], "the screen's texels per eye pixel is 1.25"),
+    M("m-back-to-1", ("R1a", "R3a"), [("constexpr double kMultiplier = 0.70;", "constexpr double kMultiplier = 1.0;")], "m is back at 1.0: the fitted width is the whole footprint, 5006 on Sean's rig, not his 3504"),
+    M("m-moved-a-little", "R1a", [("constexpr double kMultiplier = 0.70;", "constexpr double kMultiplier = 0.665;")], "m is the plan's 0.665: the three calibration constants no longer agree"),
     M("legacy-is-150", "R1a", [("constexpr double kLegacyMultiplier = 1.25;", "constexpr double kLegacyMultiplier = 1.5;")], "today's rule is 150% of the eye"),
     M("floor-is-1920", "R1a", [("constexpr uint32_t kFloorWidth = 2880;", "constexpr uint32_t kFloorWidth = 1920;")], "the floor is the stock width"),
     M("step-is-8", "R1a", [("constexpr uint32_t kStep = 16;", "constexpr uint32_t kStep = 8;")], "widths are multiples of 8"),
-    M("seed-width-moved", "R1a", [("constexpr double kSeedWidthPx = 3504.0;", "constexpr double kSeedWidthPx = 3520.0;")], "the calibration point is not the width Sean flew"),
+    M("chosen-width-moved", "R1a", [("constexpr double kChosenWidthPx = 3504.0;", "constexpr double kChosenWidthPx = 3520.0;")], "the calibration point is not the width Sean chose"),
+    M("seed-footprint-moved", "R1a", [("constexpr double kSeedFootprintPx = 5006.0;", "constexpr double kSeedFootprintPx = 5200.0;")], "the seed footprint is not the one that gives his width at m 0.70"),
+    M("seed-footprint-is-the-width", "R3a", [("constexpr double kSeedFootprintPx = 5006.0;", "constexpr double kSeedFootprintPx = 3504.0;")],
+      "the seed is left at the chosen WIDTH: the first launch fits 0.70 x 3504 = 2453 and floors to 2880, not 3504"),
     M("seed-distance-moved", "R1a", [("constexpr double kSeedDistance = 0.7;", "constexpr double kSeedDistance = 0.75;")], "the calibration point is at another distance"),
     M("round-down", ("R1b", "R1d"), [("(value / static_cast<double>(kStep)) + 0.5)", "(value / static_cast<double>(kStep)))")], "rounding to 16 goes down instead of to nearest"),
     M("round-accepts-nan", "R1d", [("    if (!(value > 0.0) || value > 1.0e6) return 0;\n", "")], "rounding takes a NaN or a negative"),
@@ -128,8 +143,9 @@ MUTANTS = [
     M("distance-not-divided", ("R3a", "R3b"), [("static_cast<double>(in.eyeWidth) / d.distance;", "static_cast<double>(in.eyeWidth);")], "the footprint does not rescale with the panel distance"),
     M("distance-multiplied", ("R3a", "R3b"), [("static_cast<double>(in.eyeWidth) / d.distance;", "static_cast<double>(in.eyeWidth) * d.distance;")], "the footprint rescales the wrong way with the panel distance"),
     M("m-from-legacy", ("R3a", "R3e"), [("d.targetPx = kMultiplier * d.footprintPx;", "d.targetPx = kLegacyMultiplier * d.footprintPx;")], "the fit takes 125% of the footprint"),
-    M("floor-ignores-small-eyes", "R3d", [("const double lo = (std::min)(static_cast<double>(kFloorWidth), hi);", "const double lo = static_cast<double>(kFloorWidth);")], "the floor is above the cap on a small eye"),
-    M("no-floor", "R3b", [("    if (v < lo) { v = lo; d.floored = true; }\n", "")], "no floor"),
+    # (R3a's seed table runs first and has a floored row and a small-eye row, so it is what trips first; R3b / R3d pin the same rules from the measured side.)
+    M("floor-ignores-small-eyes", ("R3a", "R3d"), [("const double lo = (std::min)(static_cast<double>(kFloorWidth), hi);", "const double lo = static_cast<double>(kFloorWidth);")], "the floor is above the cap on a small eye"),
+    M("no-floor", ("R3a", "R3b"), [("    if (v < lo) { v = lo; d.floored = true; }\n", "")], "no floor"),
     M("no-cap", "R3b", [("    if (v > hi) { v = hi; d.capped = true; }\n", "")], "no cap: a fit may ask for more than the legacy rule did"),
     M("junk-footprint-trusted", "R3f", [("const bool measured = in.haveFootprint && plausibleFraction(in.fractionAtUnit);", "const bool measured = in.haveFootprint;")], "a stored fraction of 0.01 is believed"),
     M("distance-unbounded", "R3g", [("    if (!(d > 0.0)) return 1.0;   // NaN, zero or negative: the shipped distance\n", "")], "a zero panel distance is divided by"),
@@ -153,16 +169,42 @@ MUTANTS = [
     # ---- R7: the sample store ---------------------------------------------------------------------------------------------
     M("median-index", "R7a", [("const uint32_t mid = n_ / 2;", "const uint32_t mid = n_ / 3;")], "the median is the third, not the middle"),
     M("even-median-not-averaged", "R7a", [("            m = (m + lower) * 0.5;\n", "")], "an even count's median is not averaged"),
-    M("thinning-stride-stuck", "R7c", [("            stride_ *= 2;\n", "")], "after thinning the store keeps every sample (a recent-biased median)"),
-    M("thinning-keeps-first-half", "R7c", [("v_[i] = v_[i * 2];", "v_[i] = v_[i];")], "thinning keeps the first half of the session (an early-biased median)"),
+    M("thinning-stride-stuck", ("R7c", "R7g"), [("            stride_ *= 2;\n", "")], "after thinning the store keeps every sample (a recent-biased median and p10)"),
+    M("thinning-keeps-first-half", ("R7c", "R7g"), [("v_[i] = v_[i * 2];", "v_[i] = v_[i];")], "thinning keeps the first half of the session (an early-biased median and p10)"),
+    # The percentile a session stores (the head-on floor, p10).
+    M("quantile-is-median", "R7e", [("constexpr double kFootprintQuantile = 0.10;", "constexpr double kFootprintQuantile = 0.50;")], "the session stores the median again, not the 10th percentile"),
+    M("quantile-is-minimum", "R7e", [("constexpr double kFootprintQuantile = 0.10;", "constexpr double kFootprintQuantile = 0.0;")], "the session stores its single lowest reading"),
+    M("percentile-no-interpolation", "R7f", [("        if (out) *out = a + (b - a) * (pos - static_cast<double>(lo));\n", "        if (out) *out = a;\n")],
+      "a percentile between two samples is the lower one, not the interpolation"),
+    M("percentile-position-halved", "R7f", [("        const double pos = q * static_cast<double>(n_ - 1);\n", "        const double pos = q * static_cast<double>(n_ - 1) * 0.5;\n")],
+      "the percentile is read at half the position it should be"),
+    M("percentile-reads-the-wrong-neighbour", "R7f", [("const uint32_t hi = lo + 1 < n_ ? lo + 1 : lo;", "const uint32_t hi = lo;")],
+      "a percentile never looks at the next order statistic"),
     # ---- R8: the stored record --------------------------------------------------------------------------------------------
-    M("record-precision", "R8a", [('"fraction=%.6f eye=%u distance=%.3f samples=%u\\n"', '"fraction=%.1f eye=%u distance=%.3f samples=%u\\n"')], "the record keeps one decimal"),
-    M("record-implausible-accepted", "R8c", [("    if (!haveFraction || !plausibleFraction(r.fractionAtUnit)) return false;", "    if (!haveFraction) return false;")], "an implausible stored fraction is accepted"),
+    M("record-precision", "R8a", [('"fraction=%.6f est=p10 eye=%u distance=%.3f samples=%u\\n"', '"fraction=%.1f est=p10 eye=%u distance=%.3f samples=%u\\n"')], "the record keeps one decimal"),
+    M("record-tag-not-written", "R8a", [('"fraction=%.6f est=p10 eye=%u distance=%.3f samples=%u\\n"', '"fraction=%.6f eye=%u distance=%.3f samples=%u\\n"')], "the record is written without its est=p10 tag"),
+    M("record-implausible-accepted", "R8c", [("    if (!haveFraction || !haveEstimator || !plausibleFraction(r.fractionAtUnit)) return false;", "    if (!haveFraction || !haveEstimator) return false;")], "an implausible stored fraction is accepted"),
+    M("record-without-est-accepted", "R8d", [("    if (!haveFraction || !haveEstimator || !plausibleFraction(r.fractionAtUnit)) return false;", "    if (!haveFraction || !plausibleFraction(r.fractionAtUnit)) return false;")],
+      "a record with no est tag (an older build's median, Sean's own file) is read as a p10"),
+    M("record-any-est-accepted", "R8d", [('        haveEstimator = (end - (eq + 1)) == 3 && std::strncmp(eq + 1, "p10", 3) == 0;', "        haveEstimator = true;")],
+      "a record that says est=median (or anything) is read as a p10"),
+    M("record-est-prefix-accepted", "R8d", [('(end - (eq + 1)) == 3 && std::strncmp(eq + 1, "p10", 3) == 0;', 'std::strncmp(eq + 1, "p10", 3) == 0;')],
+      "est=p10x, or any value that starts with p10, is read as a p10"),
     # ---- R9: the log's text -----------------------------------------------------------------------------------------------
     M("rule-names-swapped", "R9b", [('return r == Rule::Fitted ? "fitted" : "legacy";', 'return r == Rule::Fitted ? "legacy" : "fitted";')], "the line says legacy for a fitted width"),
     M("legacy-reason-lost", "R9d", [('d.route.why[0] ? d.route.why : "no eye width is on record");', '"no eye width is on record");')], "the legacy line does not name the failed condition"),
-    M("footprint-token-renamed", "R9b", [('" footprint=%.0f m=%.2f floor=%u cap=%u clamp=%s%s -- FITTED:', '" fp=%.0f m=%.2f floor=%u cap=%u clamp=%s%s -- FITTED:')], "the footprint token the reader parses is renamed"),
+    M("footprint-token-renamed", "R9b", [('" footprint=%.0f m=%.3f floor=%u cap=%u clamp=%s%s -- FITTED:', '" fp=%.0f m=%.3f floor=%u cap=%u clamp=%s%s -- FITTED:')], "the footprint token the reader parses is renamed"),
+    M("m-rounded-in-rule-line", "R9b", [('" footprint=%.0f m=%.3f floor=%u cap=%u clamp=%s%s -- FITTED:', '" footprint=%.0f m=%.2f floor=%u cap=%u clamp=%s%s -- FITTED:')],
+      "the rule line prints m at two decimals (a retuned 0.665 would print 0.67 and the reader's recomputed width would not match)"),
+    M("m-rounded-in-window-line", "R9f", [('"fit=%u legacy=%u m=%.3f floor=%u"', '"fit=%u legacy=%u m=%.2f floor=%u"')], "the 30 s line prints m at two decimals"),
+    M("prose-says-the-width-is-the-footprint", "R9c", [('so the width is %.3f x that (rounded to a multiple of 16', 'so that is the width (%.3f x it, rounded to a multiple of 16')],
+      "the rule line says the fitted width IS the footprint (it is 0.70 of it)"),
+    M("measured-source-says-median", "R9c", [("The footprint is the head-on floor (p10) of the on-foot widths a previous session measured", "The footprint is the on-foot median a previous session measured")],
+      "the rule line says the stored footprint is a median"),
+    M("hint-says-the-whole-width", "R9e", [("fitted to about %.0f%% of the on-foot screen's width in your view%s.", "fitted to %.0f%% of the on-foot screen's width in your view%s.")],
+      "the menu hint drops its 'about'"),
     M("hint-no-estimate", "R9e", [('" (an estimate until a session on foot has measured it)"', '""')], "the hint does not say a seed is an estimate"),
+    M("arming-line-says-median", "R9i", [("the on-foot head-on floor (p10) is stored ", "the on-foot median is stored ")], "the arming line says a median is stored"),
     M("window-token-renamed", "R9f", [('"vscreen footprint 30s: window=%u samples=%u on-foot=%u other=%u', '"vscreen footprint 30s: window=%u samples=%u foot=%u other=%u')], "the on-foot token of the 30 s line is renamed"),
     M("at1-not-normalised", "R9f", [('const double f1 = w.footFrac * d;', 'const double f1 = w.footFrac / d;')], "the footprint at distance 1 is divided, not multiplied"),
     # ---- R10: the route's key parse ----------------------------------------------------------------------------------------
@@ -197,18 +239,63 @@ MUTANTS = [
     M("pin-skip-uncounted", "R12m", [("{ skip(kSkipVb0); return false; }", "{ return false; }")], "a source that is not what the measurement assumes is skipped without being counted", "src/d3d11/vscreen_footprint.cpp"),
     M("pin-static-com-pointer", "R12p", [("    ID3D11Buffer* staging = nullptr;\n", "    ComPtr<ID3D11Buffer> staging;\n")], "a COM smart pointer in the static state releases at DLL detach", "src/d3d11/vscreen_footprint.cpp"),
     M("pin-flat-reads-config", "R12q", [("    if (!runtimeVrProfile()) {\n        detail::g_footprintWanted = false;\n        return;\n    }\n", "")], "the flat profile reads its arming condition at the boundary", "src/d3d11/vscreen_footprint.cpp"),
+    M("pin-footprint-stores-median", "R12n", [("    if (s.session.percentile(vscreenfit::kFootprintQuantile, &frac1)) {", "    if (s.session.median(&frac1)) {")],
+      "the instrument stores the session's median again, not its p10", "src/d3d11/vscreen_footprint.cpp"),
+    M("pin-footprint-stores-another-quantile", "R12n", [("s.session.percentile(vscreenfit::kFootprintQuantile, &frac1)", "s.session.percentile(0.25, &frac1)")],
+      "the instrument stores a quantile of its own instead of the header's", "src/d3d11/vscreen_footprint.cpp"),
     M("pin-resolver-reads-curve", "R12e", [("    f.flatProfile = runtimeFlatProfile();\n", "    f.flatProfile = runtimeFlatProfile();\n    (void)cfg.getFloat(\"fix.panel_curvature\", 0.0f);\n")],
       "the resolver reads the curvature again (a curved screen is not a condition of the route)", "src/d3d11/vscreen_res.cpp"),
     M("pin-resolver-includes-curve", "R12e", [('#include "ui_layer_math.h"\n', '#include "panel_curve.h"\n#include "ui_layer_math.h"\n')],
       "the resolver includes panel_curve.h again", "src/d3d11/vscreen_res.cpp"),
     M("pin-quality-default-drifts", "R12c", [('cfg.getString("fix.ui_quality", "100")', 'cfg.getString("fix.ui_quality", "125")')], "the resolver's fix.ui_quality default is not the layer's", "src/d3d11/vscreen_res.cpp"),
-    M("pin-route-default-drifts", "R12b", [('cfg.getString("experimental.temporal_aa_on_foot_world", "off")', 'cfg.getString("experimental.temporal_aa_on_foot_world", "auto")')], "the resolver's route key default is not the route's", "src/d3d11/vscreen_res.cpp"),
+    M("pin-route-default-drifts", "R12b", [('cfg.getString("experimental.temporal_aa_on_foot_world", "auto")', 'cfg.getString("experimental.temporal_aa_on_foot_world", "off")')], "the resolver's route key default is not the route's (auto since 2026-10-01)", "src/d3d11/vscreen_res.cpp"),
     M("pin-layer-reason-dropped", "R12c", [("uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false)", "nullptr")], "the resolver does not ask why the layer is not live", "src/d3d11/vscreen_res.cpp"),
     M("pin-ini-forgets-the-rule", "R12o", [("#   fitted   when the VR on-foot world route will run (it needs", "#   fitted   when the VR on-foot route will run (it needs")], "the ini's text no longer names the world route", "edvr.ini"),
     M("pin-ini-forgets-the-restart", "R12o", [("# while it runs (never any file on disk). Needs a game restart; typing the", "# while it runs (never any file on disk). Takes effect later; typing the")], "the ini's text no longer says a restart is needed", "edvr.ini"),
     M("pin-ini-curve-stops-it", "R12o", [("fix.panel_curvature, does not stop it)", "fix.panel_curvature at 0)")], "the ini's text says a curved screen holds the route off again", "edvr.ini"),
     M("pin-ini-curve-at-zero-added", "R12o", [("#            layer on, and EDVR's own OpenXR runtime; a curved screen,", "#            layer on, fix.panel_curvature at 0, and EDVR's own OpenXR runtime; a curved screen,")],
       "the ini's text lists the old condition beside the new sentence", "edvr.ini"),
+    M("pin-ini-says-it-is-the-width", "R12o", [("does not stop it): about 70% of the\n#            width the screen has in your eyes head-on", "does not stop it): the width the screen has in your eyes head-on")],
+      "the ini's text says the fitted width is the screen's width, not about 70% of it", "edvr.ini"),
+    M("pin-ini-forgets-the-floor", "R12o", [("remembers its head-on floor", "remembers its median")], "the ini's text says a median is remembered, not the head-on floor", "edvr.ini"),
+    M("pin-ini-calibration-forgotten", "R12o", [("# starts from a calibration (3504 wide at panel_distance 0.7 on a 4032 wide\n# eye, where", "# starts from a calibration (3200 wide at panel_distance 0.7 on a 4032 wide\n# eye, where")],
+      "the ini's text quotes another calibration width", "edvr.ini"),
+    # ---- a save that fails (R11 runs the writer on disk against obstacles: a state mutation links an edited copy of vscreen_auto_state.cpp) ----------
+    M("state-failure-reported-as-success", "R11g", [("        return refused(error);\n    }\n    return true;\n}", "        refused(error);\n        return true;\n    }\n    return true;\n}")],
+      "the writer says true although the record did not reach the file", STATE_SRC),
+    M("state-error-not-reported", "R11g", [("        if (win32Error) *win32Error = static_cast<uint32_t>(error);\n", "")],
+      "the writer fails but gives no Win32 error for the log", STATE_SRC),
+    M("state-write-straight-to-destination", ("R11i", "R11j"), [("CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS", "CreateFileW(dest.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS"),
+                                                                ("!MoveFileExW(tmp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))", "false)")],
+      "the record is written into the destination itself (as before): a reader holding the file, or a temp name in the way, no longer stops the save", STATE_SRC),
+    M("state-no-temp-cleanup", "R11g", [("        DeleteFileW(tmp.c_str());   // nothing of a failed save is left behind\n", "")],
+      "a failed save leaves its temp file behind", STATE_SRC),
+    M("state-implausible-accepted", "R11l", [("    if (!vscreenfit::plausibleFraction(record.fractionAtUnit)) return refused(ERROR_INVALID_DATA);\n", "")],
+      "the writer stores a fraction the record cannot hold", STATE_SRC),
+    M("pin-save-bytecount-unchecked", "R12s", [("    else if (written != static_cast<DWORD>(n)) error = ERROR_WRITE_FAULT;   // a short write is a failed save, not a shorter record\n", "")],
+      "the writer does not compare the bytes written with the record's length", STATE_SRC),
+    M("pin-save-no-flush", "R12s", [("    else if (!FlushFileBuffers(f)) error = lastError();\n", "")], "the writer does not flush the temp file before it replaces the destination", STATE_SRC),
+    M("pin-save-no-write-through", "R12s", [("MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))", "MOVEFILE_REPLACE_EXISTING))")],
+      "the replace does not wait for the disk", STATE_SRC),
+    M("pin-save-result-ignored", "R12r", [("                if (noteMeasuredPanelFootprint(cfg.logDir(), r, &saveError)) {\n                    s.wroteOnce = true;\n                    s.lastWrittenFrac1 = frac1;\n                } else {\n",
+                                           "                noteMeasuredPanelFootprint(cfg.logDir(), r, &saveError);\n                s.wroteOnce = true;\n                s.lastWrittenFrac1 = frac1;\n                if (false) {\n")],
+      "the instrument does not look at what the save returned: what it has written advances either way (the old behaviour)", "src/d3d11/vscreen_footprint.cpp"),
+    M("pin-state-advanced-before-save", "R12r", [("                if (noteMeasuredPanelFootprint(cfg.logDir(), r, &saveError)) {\n                    s.wroteOnce = true;\n                    s.lastWrittenFrac1 = frac1;\n                } else {\n",
+                                                  "                s.wroteOnce = true;\n                s.lastWrittenFrac1 = frac1;\n                if (noteMeasuredPanelFootprint(cfg.logDir(), r, &saveError)) {\n                } else {\n")],
+      "what has been written advances before the save says whether it happened", "src/d3d11/vscreen_footprint.cpp"),
+    M("pin-persisted-always-true", "R12r", [("            w.persisted = s.wroteOnce;\n", "            w.persisted = true;\n")], "the 30 s line says persisted whether or not anything reached the file", "src/d3d11/vscreen_footprint.cpp"),
+    M("pin-failed-save-not-retried", "R12r", [("!s.wroteOnce || std::fabs(frac1 - s.lastWrittenFrac1) > kPersistDelta * s.lastWrittenFrac1;", "std::fabs(frac1 - s.lastWrittenFrac1) > kPersistDelta * s.lastWrittenFrac1;")],
+      "a first save that failed is not tried again until the p10 moves", "src/d3d11/vscreen_footprint.cpp"),
+    M("pin-failed-save-not-counted", "R12r", [("                    ++s.saveFailed;\n", "")], "a failed save is not counted", "src/d3d11/vscreen_footprint.cpp"),
+    M("pin-failed-save-line-unbounded", "R12r", [("if (s.saveFailed <= vscreenfit::kSaveFailedLineCap) {", "if (true) {")], "a save that fails every window logs a line every window", "src/d3d11/vscreen_footprint.cpp"),
+    M("pin-failed-save-not-on-the-line", "R12r", [("    w.saveFailed = s.saveFailed;\n", "")], "the 30 s line never carries save-failed", "src/d3d11/vscreen_footprint.cpp"),
+    M("save-failed-token-always-printed", "R9j", [("    if (w.saveFailed) {   // only after a failure: a line with none is byte for byte what it was", "    if (true) {   // only after a failure: a line with none is byte for byte what it was")],
+      "every 30 s line carries save-failed (a line with no failure is no longer what it was)"),
+    M("save-failed-token-renamed", "R9j", [('" save-failed=%u"', '" save_failed=%u"')], "the token the reader parses by key is renamed"),
+    M("save-failed-line-forgets-the-retry", "R9k", [("and the next 30 s window tries again.", "and that is the end of it.")], "the failure line does not say the next window tries again"),
+    M("save-failed-cap-raised", "R9k", [("constexpr uint32_t kSaveFailedLineCap = 3;", "constexpr uint32_t kSaveFailedLineCap = 30;")], "a failing save may log thirty lines a session, not three"),
+    M("save-failed-line-reads-as-arming", "R9k", [('"vscreen footprint: SAVE FAILED (Win32 error %u) -- the on-foot footprint did not reach', '"vscreen footprint: armed (Win32 error %u) -- the on-foot footprint did not reach')],
+      "the failure line starts with the reader's arming word"),
     # ---- R13: Elite's Supersampling below 1.0 in VR (the second header, and the wiring the pins read) -----------------------------
     M("ss-threshold-90", "R13a", [("constexpr uint32_t kBelowPercent = 98;", "constexpr uint32_t kBelowPercent = 90;")], "the world must render under 90% of the eye, not 98%", HEADER2),
     M("ss-one-axis-is-enough", "R13a", [("kBelowPercent &&\n           static_cast<uint64_t>(renderH)", "kBelowPercent ||\n           static_cast<uint64_t>(renderH)")], "one axis under the eye's is a Supersampling below 1", HEADER2),
@@ -424,8 +511,27 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, out=sys.stdout):
             outcome, detail = run_rig(control_exe, m.rule, tc, root=root)
             return m, outcome, detail
 
+        def state_mutant(m):
+            try:
+                text = apply_edits(read_source(m.target), m.edits, m.name)
+            except ValueError as error:
+                return m, "badedit", str(error)
+            d = work / ("state_" + m.name)
+            d.mkdir()
+            mutated = d / Path(m.target).name
+            mutated.write_text(text, encoding="utf-8", newline="\n")
+            # The rig is built WITH its state-file case (no -DVSCREEN_FIT_MUTANT) and the real header, linked against the edited copy of the
+            # state-file source, which finds the real vscreen_auto_state.h (and through it vscreen_fit.h) along /I.
+            code, output, exe = build_rig(tc, d, extra=["/I" + str(ROOT / "src" / "common")], sources=[RIG, mutated])
+            if code != 0:
+                return m, "nocompile", (output.strip().splitlines()[-1] if output.strip() else "")
+            outcome, detail = run_rig(exe, m.rule, tc)
+            return m, outcome, detail
+
         def one(m):
-            return code_mutant(m) if m.kind == "code" else pin_mutant(m)
+            if m.kind == "code":
+                return code_mutant(m)
+            return state_mutant(m) if m.kind == "state" else pin_mutant(m)
 
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs or min(8, os.cpu_count() or 2)) as pool:
@@ -495,9 +601,11 @@ def self_test():
         check(m.rule in cases, "%s: the rig has no case %s" % (m.name, m.rule))
         if m.kind == "pin":
             check(m.target in PIN_FILES, "%s: %s is not a file the pins' temp root copies" % (m.name, m.target))
+        if m.kind == "state":
+            check(m.target == STATE_SRC and m.rule == "R11", "%s: a state mutation edits %s and is caught by the rig's R11" % (m.name, STATE_SRC))
     rules = {m.rule for m in MUTANTS}
-    check(rules == cases - {"R11"}, "every rule of the rig has a mutation (R11, the state files on disk, is not mutated), and only rules of the rig: %s vs %s"
-          % (sorted(rules), sorted(cases - {"R11"})))
+    check(rules == cases, "every rule of the rig has a mutation (R11, the state files on disk, through the linked copy of the state-file source), and only "
+          "rules of the rig: %s vs %s" % (sorted(rules), sorted(cases)))
 
     # build.bat compiles the rig the way this tool does, and runs this tool's self-test
     bat = BUILD_BAT.read_bytes().decode("utf-8", errors="replace")

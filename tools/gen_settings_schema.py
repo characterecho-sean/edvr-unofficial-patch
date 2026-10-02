@@ -21,7 +21,7 @@ and which value is RECOMMENDED (often the shipped default, sometimes not -- a
 0.3 curve with a 0.7 distance is a tested pairing, and neither number is the
 default). That lives in edvr.ini too, on one annotation line above the key:
 
-    # ui: On-foot screen curve | recommended 0.3
+    # ui: Screen curve (on foot, intro, splash) | recommended 0.3
     panel_curvature = 0.0
 
     # ui: Sun glare | choices vivid, realistic, stock

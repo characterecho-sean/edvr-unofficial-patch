@@ -47,8 +47,10 @@
   "alive" through a hang.
 - **Not built (named in the investigation, not asked for):** render-thread CPU time on the
   line; logging affinity, priority and power scheme on change.
-- **Watch:** `log.max_mb` defaults to 4. The reporter's graphics log was 3.9 MB for 70
-  minutes; past the cap nothing is written, freeze lines included. Not changed here.
+- **Watch:** `log.max_mb` defaulted to 4 and defaults to 16 since 2026-10-01 (branch
+  `claude/key-cleanup-defaults`; an ini that says `max_mb = 4` keeps 4). The reporter's
+  graphics log was 3.9 MB for 70 minutes; past the cap nothing is written, freeze lines
+  included, and 16 MB is about 4.8 hours at that rate. Not changed in this arc's commits.
   The flat profile gets the stall sampler (the beat is in the Present hook) but not the
   FREEZE lines or counts: the monitor ticks in VR only.
 - **Next flight:** the test plan below. Read with `--freezes --expect-build HEAD`.

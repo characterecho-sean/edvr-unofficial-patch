@@ -93,7 +93,7 @@ void vrWorldRouteNoteSceneReset();
 bool vrWorldRouteDrawProgress(uint32_t* drawOrdinal, bool* toneSeen, uint64_t* frame);
 // STAGE 2 (the camera injector, flat_camera_inject.h "THE VR WORLD ROUTE'S INJECTION MODE"). The raster phase the route
 // asked the injector to put into this frame's world cameras, in render pixels (positive right/down), and whether the
-// route is jittering this frame at all (injection wanted: the route key is auto, the state is Warming or Owned, the world
+// route is jittering this frame at all (injection wanted: the route key is auto, the state is Warming or Owned, the global
 // jitter key is on, the hook is live). False, with *x = *y = 0, when it is not. The value is the frame's CHOICE: it is zero
 // for the first frames of a warm-up even while jittering, and the census reads it to sample frames whose phase is non-zero,
 // the ones that can show a leak into the eyes.

@@ -40,16 +40,21 @@
 //                         the sampler, the rasterizer state and viewport, the output merger and vertex slots 1..3 are the game's at draw time
 //                         and afterwards.
 //   C12 THE SURFACE STRIP panelCurveSurfaceWanted / Draw / Info, the strip of the intro movie and the splash (a composite that is not the
-//                         screen): the arc of the screen over the CALLER's gain and direction (toward +1 is sign -1 in the screen's terms),
-//                         the vertex bytes equal an independent recomputation (curvature 0.1..1 x columns 8/64/256 x toward +1/-1 x gain
-//                         1/4.44444/100), one build per change of curvature, columns, gain or direction and none otherwise, nothing wanted
+//                         screen): the arc of the screen over the CALLER's gain, direction and way for u to run (toward +1 is sign -1 in
+//                         the screen's terms; reverseU true is u = (1 - x)/2 and nothing else of the strip -- the placement's +x runs to the
+//                         viewer's left, as the intro composite's does), the vertex bytes equal an independent recomputation (curvature
+//                         0.1..1 x columns 8/64/256 x toward +1/-1 x gain 1/4.44444/100 x reverseU false/true), one build per change of
+//                         curvature, columns, gain, direction or reverseU and none otherwise (the info says which way the strip in hand
+//                         runs, false once the shutdown has released it), nothing wanted
 //                         or built at curvature 0 (the identity test's one column included) or above 1 or below 0, no SIZE and no override
 //                         needed, no motion pass; drawn with the game's rasterizer state with the cull OFF and every other field the game's,
 //                         that state created once per distinct description of the game's (and one that culls nothing, or none bound, left
 //                         alone), the game's state back and no reference left on it; a null context or draw, a gain that is not a positive
 //                         number and a direction that is not +-1 draw nothing and stand nothing down; the shutdown releases the strip.
 //   C13 SURFACE VS SCREEN the two strips side by side: the surface leaves the screen's strip, gain, ready flag and counters alone; one generator
-//                         builds both (the screen at sign -1 is the surface at toward +1, byte for byte); a fault of the screen's stands only
+//                         builds both (the screen at sign -1 is the surface at toward +1, byte for byte, u along x); the screen, rebuilt after
+//                         a surface strip that runs u against x, is still the strip it first drew (the screen never reverses); each build
+//                         line of the surface says which way u runs; a fault of the screen's stands only
 //                         the screen down, a fault of the surface's only the surface (the input assembler AND the rasterizer state back, the
 //                         surface off for the session whatever the configuration or the shutdown does), each in its own log line.
 //
@@ -575,6 +580,7 @@ struct Spec {
     int columns;
     int sign;
     float gain;
+    bool reverseU = false;   // u = (1 - x)/2 instead of (x + 1)/2: a surface whose placement has +x running to the viewer's left (never the screen's)
 };
 Spec specOf(const char* curvature, int columns, int sign, const char* gain) {
     return Spec{std::strtof(curvature, nullptr), columns, sign, std::strtof(gain, nullptr)};
@@ -595,15 +601,16 @@ struct Vtx {
 };
 static_assert(sizeof(Vtx) == 20, "the composite's stride is 20 bytes");
 
-// theta = pi c x; x' = sin(theta)/(pi c); z' = -sign * gain * (1 - cos(theta))/(pi c); the UV from the UNBENT x (u = (x+1)/2, v = 1 on the
-// bottom row and 0 on the top); bottom row first, then the top row; per quad bl,tr,br then bl,tl,tr (the game's own pattern).
+// theta = pi c x; x' = sin(theta)/(pi c); z' = -sign * gain * (1 - cos(theta))/(pi c); the UV from the UNBENT x (u = (x+1)/2, or (1-x)/2 for a
+// reversed surface; v = 1 on the bottom row and 0 on the top); bottom row first, then the top row; per quad bl,tr,br then bl,tl,tr (the
+// game's own pattern).
 void expectedStrip(const Spec& s, std::vector<Vtx>* verts, std::vector<uint16_t>* idx) {
     const int n = s.columns;
     const double c = s.curvature;
     verts->assign(static_cast<size_t>(2 * (n + 1)), Vtx{});
     for (int i = 0; i <= n; ++i) {
         const double x = -1.0 + 2.0 * i / n;
-        const double u = (x + 1.0) / 2.0;
+        const double u = s.reverseU ? (1.0 - x) / 2.0 : (x + 1.0) / 2.0;
         double bx = x, bz = 0.0;
         if (c > 0.0) {
             const double k = kPiD * c, theta = k * x;
@@ -1291,8 +1298,9 @@ void case11(Gpu& g) {
 // ---------------------------------------------------------------------------------------------------------------------------------
 constexpr float kSurfaceGain = 4.44444f;   // the panel's half-width in metres: the caller's, the same for the movie and the splash
 
-// The strip a surface asks for, in the generator's own terms: toward +1 (a step in +z' moves toward the viewer) is sign -1 there.
-Spec surfaceSpec(float curvature, int columns, int toward, float gain) { return Spec{curvature, columns, -toward, gain}; }
+// The strip a surface asks for, in the generator's own terms: toward +1 (a step in +z' moves toward the viewer) is sign -1 there, and
+// reverseU (the caller's placement has +x running to the viewer's left) is u = (1 - x)/2.
+Spec surfaceSpec(float curvature, int columns, int toward, float gain, bool reverseU = false) { return Spec{curvature, columns, -toward, gain, reverseU}; }
 
 // Everything but the cull: what the cull-off copy of a game's rasterizer state must keep.
 bool sameButCull(const D3D11_RASTERIZER_DESC& a, const D3D11_RASTERIZER_DESC& b) {
@@ -1339,19 +1347,30 @@ bool surfaceMoved(const PanelCurveSurfaceInfo& from, uint64_t built, uint64_t dr
     return i.built == from.built + built && i.drawn == from.drawn + drawn && i.rasterStates == from.rasterStates + states;
 }
 
+// Two vertex buffers of 20-byte vertices that are the same strip but for u: the same positions, the same v, and u + u' = 1 at every vertex.
+bool onlyUDiffers(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+    if (a.empty() || a.size() != b.size() || a.size() % sizeof(Vtx) != 0) return false;
+    std::vector<Vtx> va(a.size() / sizeof(Vtx)), vb(b.size() / sizeof(Vtx));
+    std::memcpy(va.data(), a.data(), a.size());
+    std::memcpy(vb.data(), b.data(), b.size());
+    for (size_t i = 0; i < va.size(); ++i)
+        if (va[i].x != vb[i].x || va[i].y != vb[i].y || va[i].z != vb[i].z || va[i].v != vb[i].v || !closeTo(static_cast<double>(va[i].u) + static_cast<double>(vb[i].u), 1.0, 1e-6)) return false;
+    return true;
+}
+
 // A call to panelCurveSurfaceDraw with everything around it measured: the snapshots, the references, the recorder.
 struct SurfaceCall {
     bool returned = false;
     Snapshot before, after;
     Refs refs0, refs1;
 };
-SurfaceCall surfaceCall(Gpu& g, float gain, int toward, edvr::PanelCurveDrawFn draw = recordingDraw) {
+SurfaceCall surfaceCall(Gpu& g, float gain, int toward, bool reverseU = false, edvr::PanelCurveDrawFn draw = recordingDraw) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     SurfaceCall c;
     resetRecorders();
     c.before = takeSnapshot(ctx);
     c.refs0 = takeRefs(g);
-    c.returned = panelCurveSurfaceDraw(ctx, gain, toward, draw);
+    c.returned = panelCurveSurfaceDraw(ctx, gain, toward, reverseU, draw);
     c.refs1 = takeRefs(g);   // (the recorders' own references on the game's state are taken out there)
     c.after = takeSnapshot(ctx);
     return c;
@@ -1392,40 +1411,68 @@ void case12(Gpu& g) {
         if (g_draws.size() == 1) verifySurfaceDraw(tag, "first", g_draws[0], base, g, ctx, c.before, nullptr);
         verifyRestored(tag, "first", c.before, c.after, &c.refs0, &c.refs1);
         check(surfaceMoved(start, 1, 1, 1) && !panelCurveSurfaceInfo().standDown, "C12.first-counters", "one strip, one draw, one rasterizer state");
+        check(!panelCurveSurfaceInfo().reversed, "C12.first-direction", "the info says the strip in hand runs u against x, and the caller asked for u with x");
         const PanelCurveInfo si = panelCurveInfo();
         check(si.standDown == screen0.standDown && si.ready == screen0.ready && si.gain == screen0.gain && si.reissues == screen0.reissues && panelCurveReissueReady() == reissueReady0,
               "C12.screen-untouched",
               fmt("the screen's own state moved: standDown=%d ready=%d gain=%g reissues=%llu", si.standDown, si.ready, si.gain, static_cast<unsigned long long>(si.reissues)));
     }
 
-    // ---- the table: curvature x columns x direction x gain; each combination changes the key, so each builds exactly one strip.
+    // ---- which way u runs is the caller's: reverseU true is u = (1 - x)/2 and nothing else of the strip; a flip rebuilds, the same value does not,
+    //      the info says which way the strip in hand runs, and flipping back gives the first strip's bytes again.
+    {
+        const PanelCurveSurfaceInfo i0 = panelCurveSurfaceInfo();
+        std::vector<uint8_t> forward;   // the strip with u running with x, as the caller first asked
+        {
+            const SurfaceCall c = surfaceCall(g, kSurfaceGain, 1, false);
+            if (g_draws.size() == 1) forward = g_draws[0].vbBytes;
+            check(c.returned && surfaceMoved(i0, 0, 1, 0) && !panelCurveSurfaceInfo().reversed, "C12.forward-kept", "the same key (u with x) rebuilt the strip, or the info reads reversed");
+        }
+        const SurfaceCall r1 = surfaceCall(g, kSurfaceGain, 1, true);
+        check(r1.returned && g_draws.size() == 1, "C12.reverse-drawn", fmt("returned %d, %zu draws", r1.returned, g_draws.size()));
+        if (g_draws.size() == 1) verifySurfaceDraw(tag, "reverse", g_draws[0], surfaceSpec(0.3f, 64, 1, kSurfaceGain, true), g, ctx, r1.before, nullptr);
+        verifyRestored(tag, "reverse", r1.before, r1.after, &r1.refs0, &r1.refs1);
+        check(surfaceMoved(i0, 1, 2, 0) && panelCurveSurfaceInfo().reversed, "C12.reverse-counters", "flipping reverseU did not build exactly one strip, or the info does not say the strip in hand runs u against x");
+        if (g_draws.size() == 1)   // only u differs: the same positions and the same v (the index buffer is checked by verifySurfaceDraw above)
+            check(onlyUDiffers(forward, g_draws[0].vbBytes), "C12.reverse-only-u", "reversing changed more than u (or u is not 1 - u): the positions and v must be the same strip's");
+        const SurfaceCall r2 = surfaceCall(g, kSurfaceGain, 1, true);   // the same value again
+        check(r2.returned && surfaceMoved(i0, 1, 3, 0) && panelCurveSurfaceInfo().reversed, "C12.reverse-kept", "an unchanged reverseU rebuilt the strip");
+        const SurfaceCall r3 = surfaceCall(g, kSurfaceGain, 1, false);   // and flipped back
+        check(r3.returned && surfaceMoved(i0, 2, 4, 0) && !panelCurveSurfaceInfo().reversed, "C12.reverse-back", "flipping reverseU back did not build exactly one strip, or the info still reads reversed");
+        if (g_draws.size() == 1) check(g_draws[0].vbBytes == forward, "C12.reverse-back-bytes", "the strip after flipping back is not the first strip's, byte for byte");
+    }
+
+    // ---- the table: curvature x columns x direction x gain x which way u runs; each combination changes the key, so each builds exactly one strip.
     {
         const char* curvatures[] = {"0.1", "0.3", "0.7", "1.0"};
         const int columns[] = {8, 64, 256};
         const int directions[] = {1, -1};
         const float gains[] = {1.0f, kSurfaceGain, 100.0f};
+        const bool reverses[] = {false, true};
         const PanelCurveSurfaceInfo i0 = panelCurveSurfaceInfo();
         unsigned combos = 0;
         for (const char* cv : curvatures)
             for (int n : columns)
                 for (int dir : directions)
-                    for (float gn : gains) {
-                        g_note = fmt("curvature %s, %d columns, toward %+d, gain %g", cv, n, dir, static_cast<double>(gn));
-                        applyConfig(cv, n, 1, "0");
-                        const SurfaceCall c = surfaceCall(g, gn, dir);
-                        check(c.returned && g_draws.size() == 1, "C12.table-drawn", fmt("returned %d, %zu draws", c.returned, g_draws.size()));
-                        if (g_draws.size() == 1) verifySurfaceDraw(tag, "table", g_draws[0], surfaceSpec(std::strtof(cv, nullptr), n, dir, gn), g, ctx, c.before, nullptr);
-                        verifyRestored(tag, "table", c.before, c.after, &c.refs0, &c.refs1);
-                        ++combos;
-                    }
+                    for (float gn : gains)
+                        for (bool rev : reverses) {
+                            g_note = fmt("curvature %s, %d columns, toward %+d, gain %g, reverseU %d", cv, n, dir, static_cast<double>(gn), rev);
+                            applyConfig(cv, n, 1, "0");
+                            const SurfaceCall c = surfaceCall(g, gn, dir, rev);
+                            check(c.returned && g_draws.size() == 1, "C12.table-drawn", fmt("returned %d, %zu draws", c.returned, g_draws.size()));
+                            if (g_draws.size() == 1) verifySurfaceDraw(tag, "table", g_draws[0], surfaceSpec(std::strtof(cv, nullptr), n, dir, gn, rev), g, ctx, c.before, nullptr);
+                            verifyRestored(tag, "table", c.before, c.after, &c.refs0, &c.refs1);
+                            check(panelCurveSurfaceInfo().reversed == rev, "C12.table-direction", "the info does not say which way the strip in hand runs u");
+                            ++combos;
+                        }
         g_note.clear();
         const PanelCurveSurfaceInfo i1 = panelCurveSurfaceInfo();
-        check(combos == 4 * 3 * 2 * 3 && surfaceMoved(i0, combos, combos, 0), "C12.table-counters",
+        check(combos == 4 * 3 * 2 * 3 * 2 && surfaceMoved(i0, combos, combos, 0), "C12.table-counters",
               fmt("%u combinations built %llu strips, drew %llu times and created %llu rasterizer states (the game's one state was derived by the first draw)", combos,
                   static_cast<unsigned long long>(i1.built - i0.built), static_cast<unsigned long long>(i1.drawn - i0.drawn), static_cast<unsigned long long>(i1.rasterStates - i0.rasterStates)));
     }
 
-    // ---- a strip is built when curvature, columns, gain or direction changes, and not otherwise.
+    // ---- a strip is built when curvature, columns, gain, direction or reverseU changes, and not otherwise.
     {
         applyConfig("0.3", 64, 1, "0");
         SurfaceCall c = surfaceCall(g, kSurfaceGain, 1);   // the base key (rebuilt: the table ended on another)
@@ -1439,17 +1486,19 @@ void case12(Gpu& g) {
             int columns;
             float gain;
             int toward;
+            bool reverseU;
         };
-        const Change changes[] = {{"curvature", "0.5", 64, kSurfaceGain, 1}, {"columns", "0.3", 32, kSurfaceGain, 1}, {"gain", "0.3", 64, 5.0f, 1}, {"direction", "0.3", 64, kSurfaceGain, -1}};
+        const Change changes[] = {{"curvature", "0.5", 64, kSurfaceGain, 1, false}, {"columns", "0.3", 32, kSurfaceGain, 1, false}, {"gain", "0.3", 64, 5.0f, 1, false},
+                                  {"direction", "0.3", 64, kSurfaceGain, -1, false},   {"reverse", "0.3", 64, kSurfaceGain, 1, true}};
         uint64_t built = b0;
         for (const Change& ch : changes) {
             const std::string w = std::string("C12.key-") + ch.what;
             applyConfig(ch.curvature, ch.columns, 1, "0");
-            c = surfaceCall(g, ch.gain, ch.toward);
+            c = surfaceCall(g, ch.gain, ch.toward, ch.reverseU);
             ++built;
             check(c.returned && panelCurveSurfaceInfo().built == built, w, fmt("a changed %s did not build exactly one new strip (built %llu, want %llu)", ch.what,
                   static_cast<unsigned long long>(panelCurveSurfaceInfo().built), static_cast<unsigned long long>(built)));
-            if (g_draws.size() == 1) verifySurfaceDraw(tag, ch.what, g_draws[0], surfaceSpec(std::strtof(ch.curvature, nullptr), ch.columns, ch.toward, ch.gain), g, ctx, c.before, nullptr);
+            if (g_draws.size() == 1) verifySurfaceDraw(tag, ch.what, g_draws[0], surfaceSpec(std::strtof(ch.curvature, nullptr), ch.columns, ch.toward, ch.gain, ch.reverseU), g, ctx, c.before, nullptr);
             applyConfig("0.3", 64, 1, "0");
             c = surfaceCall(g, kSurfaceGain, 1);   // and back: the base strip again, one more build
             ++built;
@@ -1538,11 +1587,11 @@ void case12(Gpu& g) {
         applyConfig("0.3", 64, 1, "0");
         const PanelCurveSurfaceInfo i0 = panelCurveSurfaceInfo();
         resetRecorders();
-        const bool refused[] = {panelCurveSurfaceDraw(nullptr, kSurfaceGain, 1, recordingDraw), panelCurveSurfaceDraw(ctx, kSurfaceGain, 1, nullptr),
-                                panelCurveSurfaceDraw(ctx, 0.0f, 1, recordingDraw), panelCurveSurfaceDraw(ctx, -4.0f, 1, recordingDraw),
-                                panelCurveSurfaceDraw(ctx, std::nanf(""), 1, recordingDraw), panelCurveSurfaceDraw(ctx, HUGE_VALF, 1, recordingDraw),
-                                panelCurveSurfaceDraw(ctx, kSurfaceGain, 0, recordingDraw), panelCurveSurfaceDraw(ctx, kSurfaceGain, 2, recordingDraw),
-                                panelCurveSurfaceDraw(ctx, kSurfaceGain, -2, recordingDraw)};
+        const bool refused[] = {panelCurveSurfaceDraw(nullptr, kSurfaceGain, 1, false, recordingDraw), panelCurveSurfaceDraw(ctx, kSurfaceGain, 1, false, nullptr),
+                                panelCurveSurfaceDraw(ctx, 0.0f, 1, false, recordingDraw), panelCurveSurfaceDraw(ctx, -4.0f, 1, true, recordingDraw),
+                                panelCurveSurfaceDraw(ctx, std::nanf(""), 1, false, recordingDraw), panelCurveSurfaceDraw(ctx, HUGE_VALF, 1, true, recordingDraw),
+                                panelCurveSurfaceDraw(ctx, kSurfaceGain, 0, false, recordingDraw), panelCurveSurfaceDraw(ctx, kSurfaceGain, 2, true, recordingDraw),
+                                panelCurveSurfaceDraw(ctx, kSurfaceGain, -2, false, recordingDraw)};
         bool any = false;
         for (bool b : refused) any = any || b;
         const PanelCurveSurfaceInfo i1 = panelCurveSurfaceInfo();
@@ -1574,14 +1623,16 @@ void case12(Gpu& g) {
         };
         ctx->RSSetState(g.rs.Get());
         {
-            const SurfaceCall w = surfaceCall(g, kSurfaceGain, 1);
+            const SurfaceCall w = surfaceCall(g, kSurfaceGain, 1, true);   // the strip in hand runs u against x when the shutdown comes
             const bool drew = w.returned;
             resetRecorders();   // the recorder's snapshot of the draw holds the derived state too, and is the rig's
             check(drew && cacheRefs() == 1, "C12.cache-holds-the-state", fmt("the module holds %lu references on the derived state of the game's, want 1", cacheRefs()));
+            check(panelCurveSurfaceInfo().reversed, "C12.live-direction", "the info does not say the strip in hand runs u against x");
         }
         const PanelCurveSurfaceInfo i0 = panelCurveSurfaceInfo();
         panelCurveShutdown();
         check(cacheRefs() == 0, "C12.shutdown-releases-the-states", fmt("the module still holds %lu references on the derived state after the shutdown", cacheRefs()));
+        check(!panelCurveSurfaceInfo().reversed, "C12.shutdown-direction", "the info still says the strip in hand runs u against x after the shutdown released it");
         const SurfaceCall d = surfaceCall(g, kSurfaceGain, 1);
         const PanelCurveSurfaceInfo i1 = panelCurveSurfaceInfo();
         check(d.returned && g_draws.size() == 1, "C12.after-shutdown", "the surface did not draw after a shutdown");
@@ -1648,12 +1699,17 @@ void case13(Gpu& g) {
         const SurfaceCall c2 = surfaceCall(g, kSurfaceGain, -1);
         check(sub2 && c2.returned && g_draws.size() == 1 && !sv2.empty() && sv2 == g_draws[0].vbBytes && sv2 != sv, "C13.same-generator-away",
               "the screen's strip (sign +1) and the surface's (toward -1) at the same gain are not byte for byte the same, or the two directions gave the same strip");
+        // and reversed: the surface with u running against x is the same strip but for u, and it is the ONE build here that says so in the log; the
+        // screen, which never reverses, is rebuilt next with the surface's last strip running u against x -- and must not notice
+        const SurfaceCall c3 = surfaceCall(g, kSurfaceGain, -1, true);
+        check(c3.returned && g_draws.size() == 1 && onlyUDiffers(sv2, g_draws[0].vbBytes) && panelCurveSurfaceInfo().reversed, "C13.reversed-surface",
+              "the surface drawn with u against x is not the same strip as with u along x but for u, or the info does not say it runs against x");
         // the screen as it was, rebuilt: the same strip as its first substitution's, byte for byte
         applyConfig("0.3", 64, 1, "35.556");
         resetRecorders();
         const bool sub3 = panelCurveSubstitute(ctx, recordingDraw, true);
         check(sub3 && g_draws.size() == 1 && g_draws[0].vbBytes == screenSub.vbBytes && g_draws[0].ibBytes == screenSub.ibBytes, "C13.screen-rebuilt",
-              "the screen's strip, rebuilt after the surface's was drawn at other settings, is not the one it first drew");
+              "the screen's strip, rebuilt after the surface's was drawn at other settings (u against x among them), is not the one it first drew");
     }
 
     // ---- a fault of the screen's stands the screen down and not the surface; the surface keeps drawing, with the strip it had.
@@ -1684,7 +1740,7 @@ void case13(Gpu& g) {
         ctx->RSSetState(g.rs.Get());   // a state that culls, so the surface swaps its own in before the fault and owes the game's back
         const PanelCurveInfo screen0 = panelCurveInfo();
         const PanelCurveSurfaceInfo s0 = panelCurveSurfaceInfo();
-        const SurfaceCall c = surfaceCall(g, kSurfaceGain, 1, faultingDraw);
+        const SurfaceCall c = surfaceCall(g, kSurfaceGain, 1, false, faultingDraw);
         const PanelCurveSurfaceInfo s1 = panelCurveSurfaceInfo();
         check(!c.returned && g_faultDraws == 1, "C13.surface-fault", fmt("the faulting surface draw returned %d after %u call(s)", c.returned, g_faultDraws));
         check(s1.standDown && !panelCurveSurfaceWanted(), "C13.surface-standdown", "a fault in the surface's draw did not stand the surface down");
@@ -1695,7 +1751,7 @@ void case13(Gpu& g) {
         check(!screen1.standDown && screen1.ready == screen0.ready && screen1.gain == screen0.gain && screen1.reissues == screen0.reissues && panelCurveWants() && panelCurveReissueReady(),
               "C13.surface-fault-screen-untouched", "a fault in the surface's draw moved the screen's flags, gain or counters");
         resetRecorders();
-        const bool again = panelCurveSurfaceDraw(ctx, kSurfaceGain, 1, recordingDraw);
+        const bool again = panelCurveSurfaceDraw(ctx, kSurfaceGain, 1, false, recordingDraw);
         check(!again && g_draws.empty() && panelCurveSurfaceInfo().drawn == s1.drawn, "C13.surface-later", "a stood-down surface drew again");
         resetRecorders();
         const bool sub = panelCurveSubstitute(ctx, recordingDraw, true);
@@ -1706,7 +1762,7 @@ void case13(Gpu& g) {
         check(!panelCurveSurfaceWanted(), "C13.surface-stays-down", "reconfiguring brought a stood-down surface back");
         applyConfig("0.5", 32, 1, "35.556");
         resetRecorders();
-        check(!panelCurveSurfaceWanted() && !panelCurveSurfaceDraw(ctx, kSurfaceGain, 1, recordingDraw) && g_draws.empty(), "C13.surface-stays-down-changed", "a changed configuration brought a stood-down surface back");
+        check(!panelCurveSurfaceWanted() && !panelCurveSurfaceDraw(ctx, kSurfaceGain, 1, false, recordingDraw) && g_draws.empty(), "C13.surface-stays-down-changed", "a changed configuration brought a stood-down surface back");
         // ... and neither does the shutdown: the stand-down is the session's
         panelCurveShutdown();
         check(panelCurveSurfaceInfo().standDown && !panelCurveSurfaceWanted(), "C13.surface-shutdown-keeps-standdown", "the shutdown cleared the surface's stand-down");
@@ -1721,6 +1777,9 @@ void case13(Gpu& g) {
               fmt("%zu lines for the surface's fault", count(log, "the surface strip (the intro movie and the splash) faulted, so those two are flat for the rest of this session")));
         const uint64_t builds = panelCurveSurfaceInfo().built - surf0.built;
         check(builds >= 3 && count(log, "-column SURFACE strip") == builds, "C13.log-built", fmt("%zu surface-strip lines for %llu builds", count(log, "-column SURFACE strip"), static_cast<unsigned long long>(builds)));
+        // which way u runs is in each build line: against x for the one reversed build, with x for every other
+        check(count(log, "u running against x: the placement's +x runs to the viewer's left") == 1 && count(log, "u running with x") == builds - 1, "C13.log-direction",
+              fmt("%zu lines say u runs against x and %zu with x, for %llu builds of which one was reversed", count(log, "u running against x"), count(log, "u running with x"), static_cast<unsigned long long>(builds)));
     }
     applyConfig("0", 64, 1, "35.556");
 }

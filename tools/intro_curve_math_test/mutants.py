@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The mutation proof for tools\\intro_curve_math_test: the rig fails when a rule of the intro composite's constants is flipped.
 
-The rig (intro_curve_math_test.cpp) pins the rules of src\\d3d11\\intro_curve_math.h, cases C1..C11 (its header says which). A rig that
+The rig (intro_curve_math_test.cpp) pins the rules of src\\d3d11\\intro_curve_math.h, cases C1..C15 (its header says which). A rig that
 passes proves little until it is seen to FAIL on a header that breaks the rule it pins. This tool does that: for each mutation below
 it copies the production header into a temp directory OUTSIDE the repo, applies one textual edit (or a few that belong together),
 compiles the rig against that copy, runs it on the rule's case alone, and requires the rig to fail on a check that belongs to the rule
@@ -101,6 +101,20 @@ X_TEST = "if (!(f[0] >= kIntroCbMinHalf && f[0] <= kIntroCbMaxHalf)) {"
 Y_TEST = "if (!(f[1] >= kIntroCbMinHalf && f[1] <= kIntroCbMaxHalf)) {"
 TOWARD = "    r.toward = (f[15] > 0.0f) != (f[19] > 0.0f) ? 1 : -1;\n"
 
+# The x direction (introPlacementXDir) and the gate that asks it.
+XA = "    const double a = static_cast<double>(f[4]) * static_cast<double>(f[19]);    // cb2[1].x * cb2[4].w\n"
+XB = "    const double b = static_cast<double>(f[16]) * static_cast<double>(f[7]);    // cb2[4].x * cb2[1].w\n"
+XMINOR = "    const double minor = a - b;\n"
+XSCALE = "    const double scale = std::fabs(a) + std::fabs(b);\n"
+XFINITE = "    if (!std::isfinite(minor) || !std::isfinite(scale)) return IntroXDir::kUnknown;"
+XTEST = "    if (!(scale > 0.0) || !(std::fabs(minor) >= kIntroXDirMargin * scale)) return IntroXDir::kUnknown;"
+XRETURN = "    return minor < 0.0 ? IntroXDir::kLeft : IntroXDir::kRight;\n"
+XMARGIN = "constexpr double kIntroXDirMargin = 0.05;"
+XGATE = "    if (dir == IntroXDir::kUnknown) {"
+XCARRY = "    r.xDir = dir;\n"
+XWHY = '"the placement\'s +x cannot be told to run left or right (the panel is seen edge-on, or its x column and its centre cancel)"'
+XSCREEN = "    if (introCbLooksScreenSpace(f)) {\n"
+
 # The reader's blocks, as written, for the mutations that put two of them in the other order.
 BLOCK_FINITE = ('    for (int i = 0; i < 20; ++i) {\n        if (!introCbFinite(f[i])) {\n            r.why = "a constant is not a finite number";\n'
                 '            return r;\n        }\n    }\n')
@@ -112,6 +126,7 @@ BLOCK_W3 = ('    ' + W3_TEST + '\n        r.why = "cb2[3].w is too close to zero
 BLOCK_W4 = ('    ' + W4_TEST + '\n        r.why = "cb2[4].w is too close to zero to tell which way the panel\'s depth runs";\n        return r;\n    }\n')
 BLOCK_X = ('    ' + X_TEST + '\n        r.why = "cb2[0].x is not a plausible half-width in metres (outside 0.5 to 50)";\n        return r;\n    }\n')
 BLOCK_Y = ('    ' + Y_TEST + '\n        r.why = "cb2[0].y is not a plausible half-height in metres (outside 0.5 to 50)";\n        return r;\n    }\n')
+BLOCK_DIR = ('    const IntroXDir dir = introPlacementXDir(f);\n' + XGATE + '\n        r.why = ' + XWHY + ';\n        return r;\n    }\n')
 MARK = "    /*@@swap@@*/\n"
 
 
@@ -250,6 +265,45 @@ MUTANTS = [
     M("sweep-w-upper-up", "C11", [("f[19] > 1.001f", "f[19] > " + lit(next_up(1.001)))], "the w's upper bound is one float higher"),
     M("sweep-half-x-down", "C11", [("f[0] < 16.0f", "f[0] < " + lit(next_down(16.0)))], "the half-width's bound is one float lower than 16"),
     M("sweep-half-y-down", "C11", [("f[1] < 16.0f", "f[1] < " + lit(next_down(16.0)))], "the half-height's bound is one float lower than 16"),
+    # ---- C12: which way +x runs, on the real readings ---------------------------------------------------------------------------------
+    M("xdir-sign-flipped", "C12", [(XRETURN, "    return minor < 0.0 ? IntroXDir::kRight : IntroXDir::kLeft;\n")], "+x is said to run right where it runs left"),
+    M("xdir-always-left", "C12", [(XRETURN, "    return IntroXDir::kLeft;\n")], "+x is always said to run left"),
+    M("xdir-always-right", "C12", [(XRETURN, "    return IntroXDir::kRight;\n")], "+x is always said to run right"),
+    M("xdir-margin-0.9", "C12", [(XMARGIN, "constexpr double kIntroXDirMargin = 0.9;")], "capture 1's reading (a ratio of 0.87) is unknown"),
+    M("xdir-not-carried", "C12", [(XCARRY, "")], "an ok reading does not say which way +x runs"),
+    M("xdir-carried-inverted", "C12", [(XCARRY, "    r.xDir = dir == IntroXDir::kLeft ? IntroXDir::kRight : IntroXDir::kLeft;\n")], "an ok reading says the opposite of what was read"),
+    # ---- C13: the margin, float rounding, the degenerate inputs ------------------------------------------------------------------------
+    M("xdir-margin-0", "C13", [(XMARGIN, "constexpr double kIntroXDirMargin = 0.0;")], "no cancellation is too much"),
+    M("xdir-margin-half", "C13", [(XMARGIN, "constexpr double kIntroXDirMargin = 0.5;")], "anything under half is unknown"),
+    M("xdir-margin-edge-exclusive", "C13", [(XTEST, XTEST.replace(">=", ">"))], "a ratio exactly on the margin is unknown"),
+    M("xdir-margin-absolute", "C13", [(XTEST, XTEST.replace("kIntroXDirMargin * scale", "kIntroXDirMargin"))], "the margin is on the size of the minor, not on its share of the terms"),
+    M("xdir-scale-max", "C13", [(XSCALE, "    const double scale = std::fmax(std::fabs(a), std::fabs(b));\n")], "the margin is held against the larger term, not the two together"),
+    M("xdir-minor-sum", "C13", [(XMINOR, "    const double minor = a + b;\n")], "the terms are added, not subtracted"),
+    M("xdir-minor-a-only", "C13", [(XMINOR, "    const double minor = a;\n")], "the second term is left out of the minor"),
+    M("xdir-sign-from-a-alone", "C13", [(XRETURN, "    return a < 0.0 ? IntroXDir::kLeft : IntroXDir::kRight;\n")], "the sign comes from the first term alone"),
+    M("xdir-zero-scale-known", "C13", [(XTEST, XTEST.replace("!(scale > 0.0) || ", ""))], "no term at all reads as known"),
+    M("xdir-finite-guard-dropped", "C13", [(XFINITE, "    if (false) return IntroXDir::kUnknown;")], "an infinity outruns the margin and reads as known"),
+    M("xdir-a-reads-f5", "C13", [("static_cast<double>(f[4])", "static_cast<double>(f[5])")], "cb2[1].y is read for cb2[1].x"),
+    M("xdir-b-reads-f17", "C13", [("static_cast<double>(f[16])", "static_cast<double>(f[17])")], "cb2[4].y is read for cb2[4].x"),
+    M("xdir-float-arithmetic", "C13", [(XA, "    const float a = f[4] * f[19];\n"), (XB, "    const float b = f[16] * f[7];\n"),
+                                       (XMINOR, "    const float minor = a - b;\n"), (XSCALE, "    const float scale = std::fabs(a) + std::fabs(b);\n")],
+      "the arithmetic is done in float"),
+    # ---- C14: a direction that cannot be told -----------------------------------------------------------------------------------------
+    M("gate-dropped", "C14", [(XGATE, "    if (false) {")], "a placement whose +x cannot be told is read ok"),
+    # ---- C15: the answer against independent geometry ---------------------------------------------------------------------------------
+    M("xdir-a-reads-f18", "C15", [("static_cast<double>(f[19])", "static_cast<double>(f[18])")], "cb2[4].z is read for cb2[4].w"),
+    M("xdir-b-reads-f6", "C15", [("static_cast<double>(f[7])", "static_cast<double>(f[6])")], "cb2[1].z is read for cb2[1].w"),
+    M("xdir-margin-0.06", "C15", [(XMARGIN, "constexpr double kIntroXDirMargin = 0.06;")], "a ratio under 0.06 is unknown"),
+    M("xdir-margin-0.04", "C15", [(XMARGIN, "constexpr double kIntroXDirMargin = 0.04;")], "a ratio under 0.04 is unknown"),
+]
+# Mutations of the reader's gate, in the groups above: their rules are C1, C3 and C9.
+MUTANTS += [
+    M("gate-inverted", "C1", [(XGATE, "    if (dir != IntroXDir::kUnknown) {")], "every placement whose +x can be told is refused"),
+    M("gate-reason-reworded", "C3", [(XWHY, '"the placement\'s x is unclear"')], "the direction reason is reworded"),
+    M("gate-reason-is-length", "C3", [(XWHY, '"cb2[3] is not a unit-scale column (its length is outside 0.5 to 2)"')], "the direction reason is the length one"),
+    M("refusal-default-xdir-left", "C3", [(RESULT_INIT, '    IntroWorldCb r = {false, 0.0f, 0, "", IntroXDir::kLeft};\n')], "a refusal reports a direction"),
+    M("refusal-sets-xdir-early", "C3", [(XSCREEN, "    r.xDir = introPlacementXDir(f);\n" + XSCREEN)], "a refusal after the finite check carries the direction"),
+    M("order-y-after-direction", "C9", swap(BLOCK_Y, BLOCK_DIR), "the direction reason is asked before the half-height one"),
 ]
 
 

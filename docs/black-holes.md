@@ -206,8 +206,9 @@ question afterwards, as always: `python tools\edvr_log.py --target steam
 
 Settings (edvr.ini; set before launch, the first two need a restart):
 
-    [log]      max_mb = 64                the log STOPS at 4 MB by default, and
-                                          one offscreen census is about 4 MB
+    [log]      max_mb = 64                the log STOPS at 16 MB by default (4 MB
+                                          before 2026-10-01), and one offscreen
+                                          census is about 4 MB
     [advanced] glare_shader_dump = 1      every VS/PS/CS to edvr_logs\shaders
                census_offscreen = 1       a lens built offscreen shows as DCO
                census_lines = 16384       offscreen draws spend the cap fast

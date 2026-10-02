@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """The mutation proof for tools\\intro_curve_module_test: the rig fails when a rule of the splash's recogniser is flipped.
 
-The rig (intro_curve_module_test.cpp) runs the REAL src\\d3d11\\intro_curve.cpp on a WARP device, in sixteen cases C1..C16 (its header says
+The rig (intro_curve_module_test.cpp) runs the REAL src\\d3d11\\intro_curve.cpp on a WARP device, in seventeen cases C1..C17 (its header says
 which); every check it makes carries a label "C<case>.<what>". A rig that passes proves little until it is seen to FAIL on a module that
 breaks the rule it pins. This tool does that: for each mutation below it copies intro_curve.cpp (and intro_curve.h where the rule lives
-there) into a temp directory OUTSIDE the repo, applies one textual edit (or a few that belong together), compiles the module (and the rig,
-when the header changed) against that copy, links the rig with the unmutated common sources, runs the rule's case alone, and requires the
+there, and intro_curve_math.h for a mutation of the pure reading the module is built on) into a temp directory OUTSIDE the repo, applies one
+textual edit (or a few that belong together), compiles the module (and the rig, when intro_curve.h changed) against that copy, links the rig
+with the unmutated common sources, runs the rule's case alone, and requires the
 rig to fail on a check of the case that belongs to the rule (a FAIL label starting with the case's id and a dot: "C7." and not "C70."). A
 mutation whose case raises a fault on purpose may also count a crash as caught (crash_ok). Nothing is written inside the repo; the temp
 directory is removed at the end.
@@ -41,7 +42,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SRC = ROOT / "src" / "d3d11"
-FILES = {"cpp": SRC / "intro_curve.cpp", "h": SRC / "intro_curve.h"}
+FILES = {"cpp": SRC / "intro_curve.cpp", "h": SRC / "intro_curve.h", "math": SRC / "intro_curve_math.h"}
 RIG = HERE / "intro_curve_module_test.cpp"
 BUILD_BAT = ROOT / "build.bat"
 RIG_LABEL = ":rig_intro_curve_module_test"
@@ -77,7 +78,7 @@ class Mutant:
         self.caught = tuple([caught] if isinstance(caught, str) else caught)   # case ids whose checks must report it
         self.edits = list(edits)                                                # (old, new) pairs, applied in order, to `file`
         self.why = why
-        self.file = file                                                        # "cpp" or "h"
+        self.file = file                                                        # "cpp", "h" or "math" (intro_curve_math.h)
         self.crash_ok = crash_ok                                                # a crash of the rig counts as caught
         self.rule = self.caught[0]                                              # the case run for it
 
@@ -209,14 +210,23 @@ RET_CLAUSE_CHANGES = "static_cast<unsigned long long>(g_flatToWorld));"
 
 WANTS = "    return !g_retired && g_budget.shouldRun() && panelCurveSurfaceWanted();"
 
-ONC_CLEAR = "    g_armedGain = 0.0f;\n    g_armedToward = 0;\n    if (!ctx || !introCurveWants()) return false;"
+ONC_CLEAR = "    g_armedGain = 0.0f;\n    g_armedToward = 0;\n    g_armedReverseU = false;\n    if (!ctx || !introCurveWants()) return false;"
+ONC_CLEAR_REVERSE = "    g_armedReverseU = false;\n    if (!ctx || !introCurveWants()) return false;"
 ONC_GATE = "    if (!ctx || !introCurveWants()) return false;"
 ONC_SHAPE = "    if (kind != 'X' || count != 6 || instances != 1) return false;"
 ONC_HASH = "    if (bindingShaderHash(BindSlot::Vs) != kIntroCompositeVsHash) return false;\n"
 ONC_GUARD = "    if (!guardedBudget(g_budget, [&] { armed = recognise(ctx); })) {\n        noteStandDown();\n        return false;\n    }"
 ONC_RETURN = "    return armed;\n"
 
-END_DRAW = "void introCurveEndDraw() {\n    g_armedGain = 0.0f;\n    g_armedToward = 0;\n}"
+END_DRAW = "void introCurveEndDraw() {\n    g_armedGain = 0.0f;\n    g_armedToward = 0;\n    g_armedReverseU = false;\n}"
+
+# The u direction: stored with the pair when it is read, handed over when it is armed.
+ENTRY_REVERSE = "    e.reverseU = w.xDir == IntroXDir::kLeft;\n"
+ARM_REVERSE = "    g_armedReverseU = e->reverseU;\n"
+ARMED_REVERSE_DECL = "bool  g_armedReverseU = false;\n"
+WORLD_DIRECTION = "+x runs to the viewer's %s, so u runs %s x;"
+WORLD_DIRECTION_ARGS = 'e.reverseU ? "left" : "right", e.reverseU ? "against" : "with"'
+GETTER = "bool introCurveReverseU() {\n    return g_armedReverseU;\n}"
 
 TICK_FRAME = "    ++g_frame;\n    if (g_retired) return;"
 TICK_RETIRED = "    if (g_retired) return;\n    if (!g_wantedSeen && panelCurveSurfaceWanted()) g_wantedSeen = true;"
@@ -406,8 +416,24 @@ MUTANTS = [
     M("arm-gain-constant", "C12", [(REC_GAIN, "    g_armedGain = 4.44444f;\n")], "an armed draw is handed a constant gain"),
     M("arm-toward-constant", "C12", [(REC_TOWARD, "    g_armedToward = 1;\n")], "an armed draw is handed a constant direction"),
     M("onc-numbers-not-cleared", "C12", [(ONC_CLEAR, ONC_GATE)], "a draw that is not armed leaves the last one's numbers"),
-    M("enddraw-gain-kept", "C12", [(END_DRAW, "void introCurveEndDraw() {\n    g_armedToward = 0;\n}")], "disarming leaves the gain"),
-    M("enddraw-toward-kept", "C12", [(END_DRAW, "void introCurveEndDraw() {\n    g_armedGain = 0.0f;\n}")], "disarming leaves the direction"),
+    M("enddraw-gain-kept", "C12", [(END_DRAW, "void introCurveEndDraw() {\n    g_armedToward = 0;\n    g_armedReverseU = false;\n}")], "disarming leaves the gain"),
+    M("enddraw-toward-kept", "C12", [(END_DRAW, "void introCurveEndDraw() {\n    g_armedGain = 0.0f;\n    g_armedReverseU = false;\n}")], "disarming leaves the direction"),
+    M("enddraw-reverse-kept", "C1", [(END_DRAW, "void introCurveEndDraw() {\n    g_armedGain = 0.0f;\n    g_armedToward = 0;\n}")], "disarming leaves the u direction"),
+    M("onc-reverse-not-cleared", "C12", [(ONC_CLEAR_REVERSE, "    if (!ctx || !introCurveWants()) return false;")], "a draw that is not armed leaves the last one's u direction"),
+    M("reverse-always-false", "C1", [(ARM_REVERSE, "    g_armedReverseU = false;\n")], "every armed draw is handed a u direction of with x"),
+    M("reverse-always-true", "C17", [(ARM_REVERSE, "    g_armedReverseU = true;\n")], "every armed draw is handed a u direction of against x, whichever way +x runs"),
+    M("reverse-stored-inverted", "C1", [(ENTRY_REVERSE, "    e.reverseU = w.xDir == IntroXDir::kRight;\n")], "a pair keeps the opposite of the direction it was read with"),
+    M("reverse-not-stored-per-pair", "C17", [(ENTRY_REVERSE, "    g_lastReverseU = w.xDir == IntroXDir::kLeft;\n"), (ARM_REVERSE, "    g_armedReverseU = g_lastReverseU;\n"),
+                                              (ARMED_REVERSE_DECL, ARMED_REVERSE_DECL + "bool  g_lastReverseU = false;\n")],
+      "the direction is the last pair learned's, not the pair's own"),
+    M("reverse-getter-always-false", "C12", [(GETTER, "bool introCurveReverseU() {\n    return false;\n}")], "the getter never says against x"),
+    M("reverse-getter-ignores-arming", "C12", [(GETTER, "bool introCurveReverseU() {\n    return true;\n}")], "the getter says against x whether or not anything is armed"),
+    M("world-line-direction-dropped", "C1", [(WORLD_DIRECTION + " drawn", "drawn")], "the learn line does not say which way +x runs"),
+    M("world-line-direction-inverted", "C17", [(WORLD_DIRECTION_ARGS, 'e.reverseU ? "right" : "left", e.reverseU ? "with" : "against"')], "the learn line says the opposite of what was read"),
+    M("world-line-direction-reworded", "C1", [(WORLD_DIRECTION, "+x runs to the viewer's %s, so u runs %s the x axis;")], "the learn line's direction clause is reworded"),
+    M("math-gate-dropped-unknown-armed", "C17", [("    if (dir == IntroXDir::kUnknown) {", "    if (false) {")], "a placement whose +x cannot be told is armed all the same", file="math"),
+    M("math-sign-flipped-direction-wrong", "C1", [("    return minor < 0.0 ? IntroXDir::kLeft : IntroXDir::kRight;\n", "    return minor < 0.0 ? IntroXDir::kRight : IntroXDir::kLeft;\n")],
+      "the pure reading says right where the placement runs left", file="math"),
     # ---- C13: a flat pair is copied again: the cut -----------------------------------------------------------------------------
     M("reread-never", "C13", [(REREAD_START, "")], "a flat pair is never copied again"),
     M("reread-never-read-back", "C13", [(SVC_READ, "if (e.state == State::kCopying && g_frame >= e.dueFrame && ctx) readBack(ctx, e);")],

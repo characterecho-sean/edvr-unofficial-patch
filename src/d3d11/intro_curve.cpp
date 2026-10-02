@@ -70,6 +70,7 @@ struct Entry {
     const char*   flatWhy = nullptr;   // a flat pair: the CLASS of the reason last said for it (a static string; a re-read for the same one says nothing)
     float         halfWidth = 0.0f;    // kWorld only: cb2[0].x, the strip's gain
     int           toward = 0;          // kWorld only: +1 or -1, the strip's direction
+    bool          reverseU = false;    // kWorld only: the placement's +x runs to the viewer's LEFT, so the strip's u must run against x
 };
 
 // The module's own reasons a pair is left as the game drew it, beside introReadWorldCb's. Each static string is the reason's class.
@@ -96,6 +97,7 @@ uint32_t g_flatLines = 0;
 // The armed draw's numbers, copied out of the entry so that nothing the table does can move them under the caller.
 float g_armedGain = 0.0f;
 int   g_armedToward = 0;
+bool  g_armedReverseU = false;
 
 uint64_t g_learnedWorld = 0;
 uint64_t g_learnedFlat = 0;
@@ -194,19 +196,23 @@ void noteStillFlat(Entry& e, const char* cls, const char* why, const float* f) {
     flatLine(kLeadAgain, why, f);
 }
 
-// A world reading, a first one or a flat pair's re-read: the same line, and never capped.
+// A world reading, a first one or a flat pair's re-read: the same line, and never capped. The reading is ok only when introReadWorldCb could say
+// which way the placement's +x runs on the screen (w.xDir is then kLeft or kRight); the pair keeps what it said, and the strip's u runs against
+// x when +x runs to the viewer's left -- the intro composite's own placement does, and the game's six-index quad compensates in its vertex data.
 void settleWorld(Entry& e, const IntroWorldCb& w, const float* f) {
     e.state = State::kWorld;
     e.flatWhy = nullptr;
     e.halfWidth = w.halfWidth;
     e.toward = w.toward;
+    e.reverseU = w.xDir == IntroXDir::kLeft;
     ++g_learnedWorld;
     const PanelCurveInfo strip = panelCurveInfo();
     Log::get().note(
         "splash curve: the game-placed composite (VS %08X) reads as a world-space panel: half-width %.3f m, depth toward the viewer %+d "
-        "(cb2[3].w %.3f, cb2[4].w %.3f); drawn as a %d-column strip at curvature %.3f.",
+        "(cb2[3].w %.3f, cb2[4].w %.3f); +x runs to the viewer's %s, so u runs %s x; drawn as a %d-column strip at curvature %.3f.",
         static_cast<unsigned>(kIntroCompositeVsHash >> 32), static_cast<double>(w.halfWidth), w.toward, static_cast<double>(f[15]),
-        static_cast<double>(f[19]), strip.segments, static_cast<double>(strip.curvature));
+        static_cast<double>(f[19]), e.reverseU ? "left" : "right", e.reverseU ? "against" : "with", strip.segments,
+        static_cast<double>(strip.curvature));
 }
 
 Entry* findEntry(void* buffer, void* surface) {
@@ -357,6 +363,7 @@ bool recognise(ID3D11DeviceContext* ctx) {
     if (e->state != State::kWorld) return false;
     g_armedGain = e->halfWidth;
     g_armedToward = e->toward;
+    g_armedReverseU = e->reverseU;
     ++g_armedDraws;
     return true;
 }
@@ -379,6 +386,7 @@ void retire() {
     g_retired = true;
     g_armedGain = 0.0f;
     g_armedToward = 0;
+    g_armedReverseU = false;
     const char* fault = g_budget.shouldRun() ? "" : "; a fault had already stood it down";
     if (g_learnedWorld + g_learnedFlat || g_armedDraws) {
         // The re-reads are said only when there were any: with none the line is what it always was.
@@ -411,6 +419,7 @@ bool introCurveOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count, 
     // Whatever this call decides, a draw it does not arm leaves nothing armed.
     g_armedGain = 0.0f;
     g_armedToward = 0;
+    g_armedReverseU = false;
     if (!ctx || !introCurveWants()) return false;
     // The composite's shape, from the census: a six-index instanced quad, through the intro composite's vertex shader.
     if (kind != 'X' || count != 6 || instances != 1) return false;
@@ -431,9 +440,14 @@ int introCurveToward() {
     return g_armedToward;
 }
 
+bool introCurveReverseU() {
+    return g_armedReverseU;
+}
+
 void introCurveEndDraw() {
     g_armedGain = 0.0f;
     g_armedToward = 0;
+    g_armedReverseU = false;
 }
 
 void introCurveTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
@@ -456,6 +470,7 @@ void introCurveTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
 void introCurveShutdown() {
     g_armedGain = 0.0f;
     g_armedToward = 0;
+    g_armedReverseU = false;
     guarded("introCurve.shutdown", [] { releaseAll(); });
 }
 
@@ -497,6 +512,7 @@ void introCurveResetForTest() {
     g_flatLines = 0;
     g_armedGain = 0.0f;
     g_armedToward = 0;
+    g_armedReverseU = false;
     g_learnedWorld = 0;
     g_learnedFlat = 0;
     g_rereads = 0;

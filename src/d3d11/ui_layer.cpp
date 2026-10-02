@@ -15,6 +15,7 @@
 #include "ui_layer.h"
 
 #include "ui_layer_math.h"
+#include "ui_scene_composites.h"  // the census of the interface composites left in the scene, and its line
 #include "ui_maps_math.h"   // the on-foot maps gate: the key, the step, the door's predicate, the lines
 #include "ui_holo_remap.h"
 #include "ui_layer_draw_timing.h"
@@ -459,6 +460,9 @@ struct Window {
     // The family census: the menu panel's (0) and the loading screen's (1)
     // composite vertex shader, by how the family rule answered.
     uint64_t probe[2][static_cast<size_t>(UiFamilyWhy::kCount)] = {};
+    // The composite census (ui_scene_composites.h): every draw into an eye that samples a learned
+    // interface surface, taken or left in the game's frame, the left ones by shaders and family.
+    UiSceneCompositeWindow scene;
 };
 Window g_win;
 
@@ -2631,6 +2635,15 @@ void logTotals(double seconds) {
     }
     Log::get().note("ui quality: left in the game's frame: %s.",
                     left.empty() ? "nothing classified" : left.c_str());
+    // The composites no decision above covers (ui_scene_composites.h): every draw into an eye that
+    // samples a learned interface surface, taken or left in the game's frame, the left ones named by
+    // shaders and family. Printed with zeros, every window the layer prints at all, so a log without
+    // this line is a build, or a code path, that never ran it.
+    {
+        char composites[1100];
+        uiSceneCompositeFormat(composites, sizeof(composites), g_win.scene, g_win.frames, uiDepthWantsDraws());
+        Log::get().note("%s", composites);
+    }
     // The family census: what the family rule made of the two composites'
     // draws -- the ones it turned away never reach a decision above.
     {
@@ -2719,8 +2732,9 @@ bool crispTakeReady(ID3D11DeviceContext* ctx, int eye);
 // --------------------------------------------------------------- the API
 
 void uiLayerConfigure(Config& cfg) {
-    // The on-foot maps gate's key, live: the boundary latches it. A value that is not "on" reads as off.
-    g_maps.keyCfg = uiMapsKeyFromText(cfg.getString("experimental.on_foot_maps_sharp", "off").c_str());
+    // The on-foot maps gate's key, live: the boundary latches it. On for an ini with no line (the shipped default since 2026-10-01,
+    // which tools\config_test holds the fallback to); a value that is not "on" reads as off.
+    g_maps.keyCfg = uiMapsKeyFromText(cfg.getString("experimental.on_foot_maps_sharp", "on").c_str());
     g_hdrDrawTimingOn = cfg.getBool("advanced.temporal_aa_diagnostics", false);
     detail::g_uiSeedDiagnostics = g_hdrDrawTimingOn;
     g_seedCensus.configure(g_hdrDrawTimingOn);
@@ -3215,6 +3229,10 @@ void uiLayerNoteFamilyProbe(uint64_t vs, uint64_t ps, int family, int why) {
         }
     }
 }
+
+void uiLayerNoteCompositeTaken() { g_win.scene.noteTaken(); }
+
+void uiLayerNoteCompositeLeft(uint64_t vs, uint64_t ps, int family) { g_win.scene.noteLeft(vs, ps, family); }
 
 bool uiLayerBegin(ID3D11DeviceContext* ctx) { return beginGuarded(ctx, 0); }
 
@@ -4481,6 +4499,7 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     // ...nor does the VR world route's pending re-issue (a screen draw the game's frame never issued).
     worldReissueReset();
     ++g_win.frames;
+    if (detail::g_uiLayerLive) ++g_win.scene.framesLive;  // the frames the composite census could run in
     g_frameTakenDraws = 0;  // the door's emptiness test (uiLayerDoorLayerOnly) counts this frame's takes alone
     // The route's timers read back (the door reads them too).
     routePoll(ctx);

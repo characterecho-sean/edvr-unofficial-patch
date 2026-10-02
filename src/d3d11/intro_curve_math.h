@@ -60,13 +60,50 @@ inline bool introCbLooksScreenSpace(const float f[20]) {
     return true;
 }
 
+// WHICH WAY THE PLACEMENT'S +x RUNS ON THE SCREEN (docs\intro-video.md, 2026-10-01, the mirror fix).
+//
+// The strip that bends the intro composite assigns its own texture coordinates, so the picture comes out the right way round only if u runs
+// to the viewer's RIGHT. Which way that is in the strip's own x depends on the placement the strip is drawn through, and the intro composite's
+// placement is not the on-foot screen's: its +x axis runs to the viewer's LEFT. The game's own constants say so, in every reading we have --
+// the movie's stock cb2[1].x is -1/2712 (the pixels-to-NDC term, negative), the splash's -0.7807 and -0.7803 against an m00 of +0.7807, in
+// both of the 2026-08-28 captures and both eyes -- and the first flight of the world-locked movie (16948cda) came out mirrored until its x
+// column was built the same way. The game's own six-index quad compensates in its vertex data (u runs against x), which is why the game's
+// flat draw is the right way round; the strip, built by the on-foot generator, ran u WITH x and came out mirrored (flight 2026-10-01 12:59, the
+// movie and the splash both, and neither upside down).
+//
+// The number that says it, from the 20 floats alone: the 2x2 minor of cb2[1] and cb2[4] over the clip x and w rows,
+//     minor = cb2[1].x * cb2[4].w - cb2[4].x * cb2[1].w
+// which is the sign of d(NDC x)/d(local x) at the panel's centre. With a = the view-space direction of the panel's +x axis and p = the view-space
+// position of its centre, minor = m00 * (a x p).y (m00 the projection's positive x scale; its m02 term cancels), so it is the vertical component,
+// in the head's frame, of a vector that is vertical in the world: it does not change with the head's yaw, not even through 180 degrees where the
+// panel is behind the viewer (the first capture), and keeps its sign until the head is tilted a quarter turn. Negative: +x runs left. 1750 poses
+// (yaw +-180, pitch +-60, roll +-60) of a panel of either handedness at the splash's size and distance: no wrong answer.
+//
+// Unknown when the two terms nearly cancel -- the panel seen edge-on, a head tilted a quarter turn -- and when a float is not a number or is
+// infinite (a term of infinity would otherwise outrun the margin and read as known): the reading is then not ok and the pair stays as the
+// game drew it.
+enum class IntroXDir { kUnknown, kRight, kLeft };
+
+constexpr double kIntroXDirMargin = 0.05;   // |minor| must be at least this fraction of the two terms' magnitudes (the real readings: 0.87 to 1.0)
+
+inline IntroXDir introPlacementXDir(const float f[20]) {
+    const double a = static_cast<double>(f[4]) * static_cast<double>(f[19]);    // cb2[1].x * cb2[4].w
+    const double b = static_cast<double>(f[16]) * static_cast<double>(f[7]);    // cb2[4].x * cb2[1].w
+    const double minor = a - b;
+    const double scale = std::fabs(a) + std::fabs(b);
+    if (!std::isfinite(minor) || !std::isfinite(scale)) return IntroXDir::kUnknown;                    // NaN and infinity: nothing to read
+    if (!(scale > 0.0) || !(std::fabs(minor) >= kIntroXDirMargin * scale)) return IntroXDir::kUnknown;   // zero and cancellation fall out here
+    return minor < 0.0 ? IntroXDir::kLeft : IntroXDir::kRight;
+}
+
 // What a world-space panel's constants say. ok only when every condition below holds; otherwise `why` names the first one that
-// failed (a static string, for one log line) and halfWidth and toward are 0.
+// failed (a static string, for one log line) and halfWidth and toward are 0 (and xDir is kUnknown).
 struct IntroWorldCb {
     bool ok;
     float halfWidth;   // cb2[0].x, the panel's half-width in metres
     int toward;        // +1: a step in +z moves toward the viewer; -1: away
     const char* why;   // "" when ok
+    IntroXDir xDir = IntroXDir::kUnknown;   // kLeft or kRight when ok: where the placement's +x runs on the screen (introPlacementXDir)
 };
 
 constexpr float kIntroCbMinLength = 0.5f;   // cb2[3]'s length: unit scale, within a factor of two either way
@@ -79,7 +116,8 @@ constexpr float kIntroCbMaxHalf = 50.0f;
 inline bool introCbFinite(float v) { return v == v && v <= 3.4e38f && v >= -3.4e38f; }
 
 // In this order: all 20 floats finite; not the screen-space placement; cb2[3] of unit-scale length; |cb2[3].w| and |cb2[4].w| clear
-// of zero; cb2[0].x and cb2[0].y plausible half-sizes. The first to fail is named.
+// of zero; cb2[0].x and cb2[0].y plausible half-sizes; the placement's +x readable as running left or right (introPlacementXDir). The
+// first to fail is named.
 inline IntroWorldCb introReadWorldCb(const float f[20]) {
     IntroWorldCb r = {false, 0.0f, 0, ""};
     for (int i = 0; i < 20; ++i) {
@@ -114,9 +152,15 @@ inline IntroWorldCb introReadWorldCb(const float f[20]) {
         r.why = "cb2[0].y is not a plausible half-height in metres (outside 0.5 to 50)";
         return r;
     }
+    const IntroXDir dir = introPlacementXDir(f);
+    if (dir == IntroXDir::kUnknown) {
+        r.why = "the placement's +x cannot be told to run left or right (the panel is seen edge-on, or its x column and its centre cancel)";
+        return r;
+    }
     r.ok = true;
     r.halfWidth = f[0];
     r.toward = (f[15] > 0.0f) != (f[19] > 0.0f) ? 1 : -1;
+    r.xDir = dir;
     return r;
 }
 

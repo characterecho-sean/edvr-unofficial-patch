@@ -44,6 +44,7 @@
 #include <cstring>
 
 #include "holo_families.h"  // the crisp take's eight hologram VS hashes: kHoloGeneric's match list
+#include "holo_material.h"  // the cockpit holo panels' second vertex shader (Disable GUI effects)
 
 namespace edvr {
 
@@ -588,7 +589,8 @@ enum class UiLayerFamily : uint8_t {
     kLoader,     // the loading screen's composite (vs 4EF6DDB075A927FA)
     kSurface,    // any other eye draw sampling a learned interface surface
     kGuiDirect,  // a GUI-family draw (vector/text/icon) straight into an eye
-    kHolo,       // cockpit holo panels (vs 81216C77F90DEDD6)
+    kHolo,       // cockpit holo panels (vs 81216C77F90DEDD6; with Elite's Disable
+                 // GUI effects on, vs 1989E6D3B405FDE0: uiVsIsHoloPanel)
     kFlightHud,  // flight HUD (vs B7790CBFC6554097)
     kSprite,     // target-time sprite (vs E508648660A352B2)
     kHoloGeneric,  // the crisp take's eight (holo_families.h kHoloFamiliesTake:
@@ -724,6 +726,13 @@ inline bool uiLayerFollowReader(bool chainOpen, const void* identity, const void
 constexpr uint64_t kUiVsPanel = 0xA888D51024D9798Eull;   // menu / modal panel composite
 constexpr uint64_t kUiVsLoader = 0x4EF6DDB075A927FAull;  // loading screen composite
 constexpr uint64_t kUiVsHolo = 0x81216C77F90DEDD6ull;
+// The same cockpit panels with Elite's "Disable GUI effects" on: another vertex shader (and pixel
+// shader, holo_material.h) with the stock one's draw state and a smaller output signature. Without
+// this the HDR take never named them -- it keys the cockpit families by vertex shader alone -- and
+// they stayed in the scene, upscaled with it (docs/ui-layer-2026-09-23.md, "2026-10-01: Disable GUI
+// effects", user 5 on rc.5: soft panels, ghosting text; the pair in 3 of 3 field logs with the
+// setting on and 0 of 11 with it off).
+constexpr uint64_t kUiVsHoloGuiFxOff = kHoloGuiFxOffVs;
 constexpr uint64_t kUiVsFlightHud = 0xB7790CBFC6554097ull;
 constexpr uint64_t kUiVsSprite = 0xE508648660A352B2ull;
 constexpr uint64_t kUiVsGuiVector = 0x666EF0C4C616F67Eull, kUiVsGuiText = 0x1012E00B3CB44469ull,
@@ -753,6 +762,11 @@ inline bool uiKnownPs(const uint64_t* list, size_t n, uint64_t ps) {
         if (list[i] == ps) return true;
     return false;
 }
+
+// The cockpit holo panels' vertex shaders: the stock one's, and the one the game draws them with
+// while Disable GUI effects is on. The ONE place that says so: both of uiLayerFamilyFor's
+// branches ask it, so a panel the HDR take names is named on the post-tonemap target too.
+constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }
 
 struct UiFamilyFacts {
     int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
@@ -807,8 +821,13 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         // considered separately: their original screen-depth address must be
         // repaired and all dependencies prepared before redirecting. Unknown
         // sphere variants and the shared world/cockpit corona remain stock.
-        // World-marker brackets remain in the original scene.
-        out = f.vs == kUiVsHolo        ? UiLayerFamily::kHolo
+        // World-marker brackets remain in the original scene. The cockpit holo
+        // panels are two vertex shaders (uiVsIsHoloPanel): the stock one and the
+        // one the game switches in with Disable GUI effects on. An unnamed pair
+        // gets no decision and no refusal line (2026-10-01: soft, ghosting panels
+        // for a user with the setting on), which is why ui_scene_composites.h
+        // counts the composites left in the scene.
+        out = uiVsIsHoloPanel(f.vs)    ? UiLayerFamily::kHolo
               : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud
               : f.vs == kUiVsSprite    ? UiLayerFamily::kSprite
               : (uiHoloGenericHash(f.vs) ||
@@ -823,11 +842,11 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         out = UiLayerFamily::kScreen;
     } else if (f.learnedSurface) {
         w = UiFamilyWhy::kLearnedSurface;
-        out = f.vs == kUiVsPanel    ? UiLayerFamily::kPanel
-              : f.vs == kUiVsLoader ? UiLayerFamily::kLoader
-              : f.vs == kUiVsHolo   ? UiLayerFamily::kHolo
-              : f.vs == kUiVsSprite ? UiLayerFamily::kSprite
-                                    : UiLayerFamily::kSurface;
+        out = f.vs == kUiVsPanel       ? UiLayerFamily::kPanel
+              : f.vs == kUiVsLoader    ? UiLayerFamily::kLoader
+              : uiVsIsHoloPanel(f.vs)  ? UiLayerFamily::kHolo
+              : f.vs == kUiVsSprite    ? UiLayerFamily::kSprite
+                                       : UiLayerFamily::kSurface;
     } else if (f.vs == kUiVsPanel && uiKnownPs(kUiPanelPs, sizeof(kUiPanelPs) / sizeof(kUiPanelPs[0]), f.ps)) {
         w = UiFamilyWhy::kShaderPair;
         out = UiLayerFamily::kPanel;

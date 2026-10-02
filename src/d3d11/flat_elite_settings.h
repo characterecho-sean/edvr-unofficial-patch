@@ -464,6 +464,56 @@ inline FlatWarningCause flatWarningCause(bool refusing, bool structureAdmission,
     return c;
 }
 
+// A warning on show keeps the cause it shows until a different one has persisted. WHY. The scene's size, which the render-size
+// words name, moves only when a final copy is evaluated: every frame while the work is treated, but only at the stand-down's
+// probe frames (kFlatStandDownProbeMs, 1500 ms) while it is stood down. A loading screen's 256x256 seen by one probe is then the
+// computed cause for exactly one probe interval, and in the flight of 2026-10-01 (10:38:16 to 10:38:36, Elite rendering 1440x810
+// on a 3840x2160 screen) the words flipped five times in nine seconds, the transients lasting 1.509 s and 1.521 s. No real state
+// that carries a message lasted under 3.0 s (the stand-down has already waited five seconds before the warning shows), and two
+// agreeing probes are 2000 ms: that is the hold. It is a hold and not a size filter, because a transient size dropped as "no
+// scene" would HIDE the warning, which is a different flicker. A show and a hide stay immediate. The hold is the panel's: the
+// stand-down's gate (FlatStandDown::warningActive) keeps no clock and still keeps none, and nothing here reads one either, the
+// caller hands it the time.
+constexpr uint64_t kFlatWarnHoldMs = 2000;
+
+struct FlatWarnHold {
+    // True when the computed state may be acted on this tick; false while a computed cause that differs from the one on show
+    // waits out its hold, and the caller then leaves what is on show alone. `refusing` is whether a warning is wanted now,
+    // `active` whether one is on show, `shownKey` the key on show and `computedKey` this tick's. Asked every tick and before the
+    // caller's own comparison: a computed key that comes back to the shown one drops the change that was waiting, and one that
+    // changes to a third key starts that key's own wait. A show (refusing, nothing on show) and a hide (on show, no longer
+    // refusing) pass at once and clear any wait. `holdMs` is the constant everywhere but the rig's controls.
+    bool admit(bool refusing, bool active, const std::string& shownKey, const std::string& computedKey, uint64_t nowMs,
+               uint64_t holdMs = kFlatWarnHoldMs) {
+        began_ = false;
+        if (!refusing || !active || computedKey == shownKey) {
+            pending_ = false;
+            return true;
+        }
+        if (!pending_ || computedKey != pendingKey_) {
+            pending_ = true;
+            pendingKey_ = computedKey;
+            sinceMs_ = nowMs;
+            began_ = true;
+        } else if (nowMs < sinceMs_) {
+            sinceMs_ = nowMs;   // a clock that stepped back restarts the wait; it never stretches it
+        }
+        if (nowMs - sinceMs_ < holdMs) return false;
+        pending_ = false;
+        return true;
+    }
+    // True after the call that started holding a cause (a first one or a third), so the caller says so once.
+    bool began() const { return began_; }
+    bool pending() const { return pending_; }
+    const std::string& pendingKey() const { return pendingKey_; }
+    uint64_t sinceMs() const { return sinceMs_; }
+
+private:
+    bool pending_ = false, began_ = false;
+    std::string pendingKey_;
+    uint64_t sinceMs_ = 0;
+};
+
 // The log line for a shown or changed warning: the conditions in the brackets, then the composed paragraphs as the panel would
 // say them (unwrapped, one per line, joined with " | " so the Custom list, which has no final period, does not run into the
 // next), so the log carries every paragraph the panel does.
@@ -485,6 +535,34 @@ inline int flatFormatSettingsWarningLog(char* out, size_t size, bool changed, co
         if (more > 0) n += more;
     }
     return n;
+}
+
+// How a cause names itself when a held change is logged: by the sizes the key carries (the warning's own words), else only as the
+// post chain's refusal.
+inline void flatDescribeWarnCause(char* out, size_t size, const FlatWarningCause& c) {
+    if (c.renderSize)
+        std::snprintf(out, size, "render %ux%u on output %ux%u", c.renderW, c.renderH, c.outputW, c.outputH);
+    else if (c.taaAbove)
+        std::snprintf(out, size, "TAA above the output, render %ux%u on output %ux%u", c.renderW, c.renderH, c.outputW,
+                      c.outputH);
+    else
+        std::snprintf(out, size, "the post chain, no sizes");
+}
+
+// The log line for a change that has started to be held (FlatWarnHold): what is on show and what is waiting. It does not begin
+// with shown, changed or hidden, the three words tools\edvr_log.py's F8 reader parses after "flat settings warning: ", so it is
+// neither counted as a warning nor mistaken for one. A `changed` line about two seconds after it is that cause being adopted;
+// none is the change coming back before the hold ran out.
+inline int flatFormatWarnHeldLog(char* out, size_t size, const FlatWarningCause& onShow, const FlatWarningCause& computed) {
+    char before[128], after[128];
+    flatDescribeWarnCause(before, sizeof(before), onShow);
+    flatDescribeWarnCause(after, sizeof(after), computed);
+    // The key also carries the mode, Elite's settings and the route's key: when the sizes read the same, one of those moved.
+    const char* tail = std::strcmp(before, after) == 0 ? "; the mode, an Elite setting or the route's key differs" : "";
+    return std::snprintf(out, size,
+                         "flat settings warning: a change of cause is held for %llu ms before it replaces the one on show "
+                         "(on show: %s; computed now: %s%s)",
+                         static_cast<unsigned long long>(kFlatWarnHoldMs), before, after, tail);
 }
 
 // The log line for what was read.

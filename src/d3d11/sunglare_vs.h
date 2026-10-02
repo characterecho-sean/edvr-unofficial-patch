@@ -16,9 +16,10 @@
 // charm is sliding along the flare axis -- keep the original flat path,
 // selected by the same per-instance anchor weights the original used.
 //
-// Compiled at runtime through d3dcompiler_47.dll (present on every
-// Windows 10/11), once per session; any failure stands the swap down
-// and the game draws stock.
+// Compiled by the build (tools/temporal_shader_build; kSunglareDefaultBytecode and
+// its three macro variants) and created from those bytes once per session; any
+// failure stands the swap down and the game draws stock. It was compiled at
+// runtime through d3dcompiler_47.dll until the build learned it.
 #pragma once
 
 namespace edvr {

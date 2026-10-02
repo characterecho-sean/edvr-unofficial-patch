@@ -84,7 +84,7 @@ BEND_X = "    *xOut = sinf(theta) / k;\n"
 BEND_Z_SIGN = "    *zOut = kTowardViewer * static_cast<float>(sign) * gain *\n"
 BEND_Z_COS = "            (1.0f - cosf(theta)) / k;\n"
 STRIP_X = "        const float x = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(n);\n"
-STRIP_U = "        const float u = (x + 1.0f) * 0.5f;\n"
+STRIP_U = "        const float u = reverseU ? (1.0f - x) * 0.5f : (x + 1.0f) * 0.5f;\n"
 STRIP_BOTTOM = "        vb[i] = Vertex{bx, -1.0f, bz, u, 1.0f};\n"
 STRIP_TOP = "        vb[(n + 1) + i] = Vertex{bx, 1.0f, bz, u, 0.0f};\n"
 WIND_1 = "        ib[w++] = bl; ib[w++] = tr; ib[w++] = br;\n"
@@ -141,9 +141,14 @@ S_DRAW_GUARD = "    if (!ctx || !draw || !g_sWanted) return false;\n"
 S_ARG_GUARD = "    if (!(gain > 0.0f && gain < 1.0e6f) || (toward != 1 && toward != -1)) return false;\n"
 S_BUDGET = "    const bool ok = guardedBudget(g_sBudget, [&] {\n"
 S_CURRENT_ALL = ("    return g_sVb && g_sIb && g_sBuiltCurvature == detail::g_panelCurveCurvature && g_sBuiltSegments == detail::g_panelCurveSegments &&\n"
-                 "           g_sBuiltGain == gain && g_sBuiltToward == toward;\n")
-S_REBUILD = "        if (!surfaceCurrent(gain, toward)) {\n            if (!buildSurface(ctx, gain, toward)) return;\n        }\n"
-S_FILL = "    fillStrip(n, detail::g_panelCurveCurvature, -toward, gain, vb, ib);\n"
+                 "           g_sBuiltGain == gain && g_sBuiltToward == toward && g_sBuiltReverseU == reverseU;\n")
+S_REBUILD = "        if (!surfaceCurrent(gain, toward, reverseU)) {\n            if (!buildSurface(ctx, gain, toward, reverseU)) return;\n        }\n"
+S_FILL = "    fillStrip(n, detail::g_panelCurveCurvature, -toward, gain, reverseU, vb, ib);\n"
+# the way u runs (job 4, the mirror fix)
+ONFOOT_FILL = "    fillStrip(n, detail::g_panelCurveCurvature, g_sign, activeGain(), false, vb, ib);   // the screen's u runs with x: its +x runs to the viewer's right\n"
+S_BUILT_REVERSE = "    g_sBuiltReverseU = reverseU;\n"
+S_LOG_DIR = '        reverseU ? "against x: the placement\'s +x runs to the viewer\'s left" : "with x");\n'
+S_INFO_REVERSED = "    i.reversed = g_sVb && g_sBuiltReverseU;   // the direction of the strip in hand: false with none in hand\n"
 S_BUILT_COUNT = "    ++g_sBuilt;\n"
 S_RS_CULL = "            if (game.CullMode != D3D11_CULL_NONE) {\n"
 S_RS_SWAP = "                ctx->RSSetState(off);\n                g_sRsSwapped = true;\n"
@@ -177,7 +182,7 @@ MUTANTS = [
     M("bend-ignores-gain", "C2", [(BEND_Z_SIGN, "    *zOut = kTowardViewer * static_cast<float>(sign) * 1.0f *\n")], "the gain does not reach the bend"),
     M("learned-beats-override", "C2", [(GAIN_OVERRIDE, "")], "a gain read from the game wins over the override (what C8 learned is used from then on)"),
     M("bend-z-uses-sin", "C2", [(BEND_Z_COS, "            (1.0f - sinf(theta)) / k;\n")], "z' is 1 - sin(theta)"),
-    M("uv-from-bent-x", "C2", [(STRIP_U, "        const float u = (bx + 1.0f) * 0.5f;\n")], "the UV follows the bent x, so the bend moves texels"),
+    M("uv-from-bent-x", "C2", [(STRIP_U, "        const float u = reverseU ? (1.0f - bx) * 0.5f : (bx + 1.0f) * 0.5f;\n")], "the UV follows the bent x, so the bend moves texels"),
     M("winding-first-flipped", ("C2", "C7"), [(WIND_1, "        ib[w++] = bl; ib[w++] = br; ib[w++] = tr;\n")], "the first triangle of each quad is wound the other way"),
     M("winding-second-flipped", ("C2", "C7"), [(WIND_2, "        ib[w++] = bl; ib[w++] = tr; ib[w++] = tl;\n")], "the second triangle of each quad is wound the other way"),
     M("index-format-r32", "C2", [(BIND_IB, "    ctx->IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);\n")], "the strip's indices are bound as 32-bit"),
@@ -287,9 +292,22 @@ MUTANTS = [
     M("surface-key-ignores-columns", "C12", [(S_CURRENT_ALL, S_CURRENT_ALL.replace(" g_sBuiltSegments == detail::g_panelCurveSegments &&", ""))], "a changed column count does not make the surface strip stale"),
     M("surface-key-ignores-gain", "C12", [(S_CURRENT_ALL, S_CURRENT_ALL.replace("g_sBuiltGain == gain && ", ""))], "a changed gain does not make the surface strip stale"),
     M("surface-key-ignores-direction", "C12", [(S_CURRENT_ALL, S_CURRENT_ALL.replace(" && g_sBuiltToward == toward", ""))], "a changed direction does not make the surface strip stale"),
-    M("surface-always-rebuilds", "C12", [(S_REBUILD, "        if (true) {\n            if (!buildSurface(ctx, gain, toward)) return;\n        }\n")], "the surface strip is rebuilt at every draw"),
-    M("surface-direction-inverted", "C12", [(S_FILL, "    fillStrip(n, detail::g_panelCurveCurvature, toward, gain, vb, ib);\n")], "toward +1 bends away from the viewer (the sign is not flipped)"),
-    M("surface-gain-ignored", "C12", [(S_FILL, "    fillStrip(n, detail::g_panelCurveCurvature, -toward, 1.0f, vb, ib);\n")], "the caller's gain does not reach the strip"),
+    M("surface-key-ignores-the-way-u-runs", "C12", [(S_CURRENT_ALL, S_CURRENT_ALL.replace(" && g_sBuiltReverseU == reverseU", ""))], "a flip of reverseU does not make the surface strip stale"),
+    M("surface-always-rebuilds", "C12", [(S_REBUILD, "        if (true) {\n            if (!buildSurface(ctx, gain, toward, reverseU)) return;\n        }\n")], "the surface strip is rebuilt at every draw"),
+    M("surface-direction-inverted", "C12", [(S_FILL, "    fillStrip(n, detail::g_panelCurveCurvature, toward, gain, reverseU, vb, ib);\n")], "toward +1 bends away from the viewer (the sign is not flipped)"),
+    M("surface-gain-ignored", "C12", [(S_FILL, "    fillStrip(n, detail::g_panelCurveCurvature, -toward, 1.0f, reverseU, vb, ib);\n")], "the caller's gain does not reach the strip"),
+    # which way u runs (the mirror fix): the flag reaches the strip, rightly oriented, is part of the key, and never touches the on-foot strip
+    M("surface-u-ignores-the-flag", "C12", [(STRIP_U, "        const float u = (x + 1.0f) * 0.5f;\n")], "u always runs with x: a placement whose +x runs left is mirrored"),
+    M("surface-u-flag-inverted", ("C12", "C2"), [(STRIP_U, "        const float u = reverseU ? (x + 1.0f) * 0.5f : (1.0f - x) * 0.5f;\n")], "the generator runs u against x when it is told to run it with x"),
+    M("surface-u-reversed-wrongly", "C12", [(STRIP_U, "        const float u = reverseU ? (1.0f - x) : (x + 1.0f) * 0.5f;\n")], "the reversed u is 1 - x, not (1 - x)/2: it leaves 0..1"),
+    M("surface-flag-inverted-at-the-build", "C12", [(S_FILL, "    fillStrip(n, detail::g_panelCurveCurvature, -toward, gain, !reverseU, vb, ib);\n")], "the surface builds the strip the other way round from the one asked for"),
+    M("surface-flag-never-reaches-the-build", "C12", [(S_FILL, "    fillStrip(n, detail::g_panelCurveCurvature, -toward, gain, false, vb, ib);\n")], "the surface strip always runs u with x"),
+    M("surface-key-flag-never-recorded", "C12", [(S_BUILT_REVERSE, "")], "the key never learns which way u runs: a reversed strip is rebuilt at every draw"),
+    M("onfoot-u-reversed", "C2", [(ONFOOT_FILL, ONFOOT_FILL.replace("activeGain(), false,", "activeGain(), true,"))], "the screen's own strip runs u against x"),
+    M("onfoot-follows-the-surfaces-flag", "C13", [(ONFOOT_FILL, ONFOOT_FILL.replace("activeGain(), false,", "activeGain(), g_sBuiltReverseU,"))], "the screen's strip picks up the way the surface strip in hand runs u"),
+    M("surface-log-direction-swapped", "C13", [(S_LOG_DIR, '        reverseU ? "with x" : "against x: the placement\'s +x runs to the viewer\'s left");\n')], "the build line says u runs the way it does not"),
+    M("info-reversed-never", "C12", [(S_INFO_REVERSED, "    i.reversed = false;\n")], "the info never says the strip in hand runs u against x"),
+    M("info-reversed-inverted", "C12", [(S_INFO_REVERSED, "    i.reversed = g_sVb && !g_sBuiltReverseU;\n")], "the info says the opposite of the way the strip in hand runs u"),
     M("surface-build-uncounted", "C12", [(S_BUILT_COUNT, "")], "a built strip is not counted"),
     M("surface-draw-uncounted", "C12", [(S_DRAWN, "        drawn = true;\n")], "a drawn strip is not counted"),
     M("surface-draws-the-screens-strip", "C12", [(S_DRAW_TAIL, S_DRAW_TAIL.replace("drawStripHeld(ctx, draw, g_sVb, g_sIb, g_sIndexCount);", "drawStripHeld(ctx, draw);"))],

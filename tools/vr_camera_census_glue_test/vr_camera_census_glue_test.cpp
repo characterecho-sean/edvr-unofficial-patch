@@ -938,13 +938,16 @@ int run() {
         vrWorldFormatInjectWindow(text, sizeof(text), rw.inject);
         Log::get().note("%s", text);
         // The refusal census's line (the experiment build): the census key is on here, three samples were read back, 3.0% of their pixels refused (2.0% stale, 1.0% sky).
+        // This window models the log of an older build whose steady-detail key was set off (a current build always says on): every stale pixel refused, none
+        // kept, no depth check. The reader's off-state logic has to keep reading such a log, so the token is set to off here on purpose.
         VrWorldRefusalWindow rf;
         rf.census = true; rf.every = kFlatMonoRefusalEvery; rf.treated = 12; rf.asked = 12; rf.sampled = 3; rf.read = 3; rf.dropped = 0;
+        rf.steady = "off";
         rf.width = 5040; rf.height = 2835; rf.pixels = 3ull * 5040ull * 2835ull;
         rf.counts[kFlatMonoClassStale] = 857304; rf.counts[kFlatMonoClassSentinel] = 428652;
         vrWorldFormatRefusalWindow(text, sizeof(text), rf);
         Log::get().note("%s", text);
-        // The same window with the steady-detail key on (the depth-validated form): the 857304 stale pixels split in two, 90% kept (last frame's depth
+        // The same window with the steady detail on, as a current build always writes it (the depth-validated form): the 857304 stale pixels split in two, 90% kept (last frame's depth
         // confirmed the camera term) and 10% refused (it did not), and the resolver's depth check counted twelve frames, eleven that ran and one that could not.
         VrWorldRefusalWindow ro = rf;
         ro.steady = "on";

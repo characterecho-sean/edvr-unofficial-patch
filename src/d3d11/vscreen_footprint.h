@@ -4,7 +4,8 @@
 // fix.vscreen_res_width = auto sizes the on-foot screen's texture from this number when the VR world route will run
 // (src/common/vscreen_fit.h has the rule, vscreen_res.cpp applies it at launch). The width is restart-only -- the game
 // allocates at startup -- so a launch is the only time it can change, and the number it needs has to come from a SESSION
-// BEFORE: this module measures it while the game runs, logs it every 30 s, and stores the on-foot median beside the eye
+// BEFORE: this module measures it while the game runs, logs it every 30 s, and stores the on-foot head-on floor (the 10th
+// percentile of the session's widths, not their median: a head not square on to the screen only widens it) beside the eye
 // width (vscreen_auto_state.cpp) for the next launch.
 //
 // WHAT IT MEASURES. At the 2D screen's composite draw (vs 5C36AF05 ps CFE84157, two draws a frame, one an eye) the four
@@ -50,7 +51,7 @@ inline bool vscreenFootprintWanted() { return detail::g_footprintWanted; }
 void vscreenFootprintCompositeDraw(ID3D11DeviceContext* ctx, float appliedDistance, int baseVertex, unsigned startInstance);
 
 // Once a frame at the Present boundary, on the render thread: reads the arming condition (at most once a second), maps a
-// sample whose copy has had time to run, and every 30 s prints the window's line and stores the on-foot median. onFoot is
+// sample whose copy has had time to run, and every 30 s prints the window's line and stores the on-foot p10. onFoot is
 // the world-screen gate (the layer's, else the journal's): the screen shows the world.
 void vscreenFootprintFrameBoundary(ID3D11DeviceContext* ownerCtx, bool onFoot);
 

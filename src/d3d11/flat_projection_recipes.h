@@ -91,6 +91,12 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0xE904D334BC8B11EAull: if (ps == 0x095030F27D2C362Aull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     case 0xB7790CBFC6554097ull: if (ps == 0x8DEF46452FA459F5ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     case 0x81216C77F90DEDD6ull: if (ps == 0xA2965EC2931A39C8ull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
+    // The same cockpit holo panels with Elite's Disable GUI effects on (holo_material.h). Disassembled from the Frontier shader
+    // dump of 2026-10-01: the VS writes SV_POSITION with the stock VS's idiom, `dp4 o2.x..w, cb0[4..7].xyzw, r0` at instructions
+    // 98..101 (the stock VS: o5 at 118..121; both declare CB0[12]), and the view-space TEXCOORD6 from cb0[9..11]. The PS reads
+    // TEXCOORD0 and TEXCOORD6 only: no SV_Position, no depth, no clip row (its CB1 reads are the shadow cascades, 298..326). The
+    // companion is exact: log 135211 draws this VS 127 times, each with this PS, and this PS with no other VS.
+    case 0x1989E6D3B405FDE0ull: if (ps == 0xEAB8A1C95A13FFBEull) result.add(S::Vertex,0,L::ForwardDp4,4); break;
     case 0x0357BBB2DEE43C1Full: if (ps == 0x81812EF97FB4A361ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
     case 0x8289669D93A18C1Dull: if (ps == 0xC6E6E419DA9F6FADull) result.add(S::Vertex,2,L::ForwardDp4,10); break;
     case 0x963B52C73B4143ACull: if (ps == 0x50364C9D994141D5ull) result.add(S::Vertex,2,L::ForwardDp4,10); break;

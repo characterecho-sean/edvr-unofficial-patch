@@ -126,7 +126,12 @@ minutes after a flight finally reproduced the effect being chased.
   and a matching full-build receipt, rebuilds and validates the production
   DLLs, and skips the test rigs and self-contained installer. It is a
   promotion step, never a substitute for validating changed source; if its
-  receipt check fails, run the full build again.
+  receipt check fails, run the full build again. The receipt fingerprints
+  tracked files, untracked files git does not ignore, and the ignored
+  dependency folders (`third_party\ngx`, `third_party\ffx-dx11`,
+  `third_party\openxr\loader`); `docs\`, `reviews\` and other ignored paths
+  are not inputs, so writing a review or a doc does not stale it
+  (`tools\build_receipt.py` states the rule and its self-test pins it).
 - After editing, re-read the changed region for the things that have bitten
   here: declaration order, a duplicated census or log string, a shader
   entry-point name collision that would silently disable a new instrument.
@@ -155,6 +160,13 @@ minutes after a flight finally reproduced the effect being chased.
 - **Config values name the functionality, never the mechanism.** A key
   says what the user gets — `on`, `off`, `auto` — not the name of the
   technique inside.
+- **Every key is one a user would set.** A key added to chase an effect
+  (an A/B switch, an instrument switch, a threshold tuned by a flight) is
+  temporary: list it in the arc's `## Status` block, and when the arc
+  closes, ship the winning value as the behaviour and propose removing the
+  key, quoted, as Scope control requires. A fix that always helps gets no
+  toggle. The holo config sweep and the jitter and steady keys in the
+  2026-10 cleanup build were both this debt, paid late.
 
 ## Scope control
 

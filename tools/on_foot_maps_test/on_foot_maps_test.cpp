@@ -401,8 +401,8 @@ void pins() {
           "P1c: the gate's tick still steps the journal and the depth every frame, hands today's verdict to mapsGate and keeps its own flip lines for the frames mapsGate does not decide");
     check(has(tick, "const bool named = detail::g_uiLayerNamedAt == gateFrame;") || has(gate, "const bool named = detail::g_uiLayerNamedAt == gateFrame;"),
           "P1d: a frame is named when a draw attributed itself to the frame that is ending");
-    check(has(all, "g_maps.keyCfg = uiMapsKeyFromText(cfg.getString(\"experimental.on_foot_maps_sharp\", \"off\").c_str());"),
-          "P1e: the key is read in uiLayerConfigure with the default off");
+    check(has(all, "g_maps.keyCfg = uiMapsKeyFromText(cfg.getString(\"experimental.on_foot_maps_sharp\", \"on\").c_str());"),
+          "P1e: the key is read in uiLayerConfigure with the default on (since 2026-10-01; tools\\config_test holds it to the shipped file)");
 
     // P2: the take. Only a TAKE of the 2D screen composite, not the route's re-issue, marks the eye, and only with the gate on.
     check(has(all, "if (g_draw.family == UiLayerFamily::kScreen && !g_draw.hdr && !g_draw.reissue && detail::g_uiLayerMapsOn) { e.screenTakenSeq = g_draw.seq;") &&

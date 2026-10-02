@@ -12,7 +12,9 @@
 // The curved-* scenarios pin the new part: at curvature above 0 -- the surface strip wanted and not stood down -- the world constants carry the
 // z column in cb2[3] (the seated +z axis through the projection), every other float the flat panel's to the bit; the strip is armed from a
 // successful bind until introPanelEndDraw; stock, head, the refusals, the settle frames, a stood-down surface and curvature 0 never arm
-// anything. There is NO test of the bent edges against the eye (round 3 removed the one round 2 had: D3D clips what is behind the eye in
+// anything. MIRROR FIX (job 4): every step also says which way the strip's u runs -- introPanelStripReverseU() is true at exactly the armed draws
+// (the movie's placement has its +x running to the viewer's LEFT, so u runs against x: it agrees with introPlacementXDir and with a minor of the rig's
+// own over the bound bytes) and false everywhere else and after introPanelEndDraw. There is NO test of the bent edges against the eye (round 3 removed the one round 2 had: D3D clips what is behind the eye in
 // homogeneous space, a test popped the whole bend off at about 20 degrees of head yaw): the centre's is the only one, and curved-no-edge-test
 // pins the absence where a test would bite hardest.
 //
@@ -52,6 +54,10 @@
 //   curved-no-edge-test   the worst places for a test of the bent edges that is not there: distance at its 1 m floor with curvature 1.0 and a
 //                         head yawed 40 degrees, one at 0.3 and 25 degrees, both ways round, the centre in front: armed, cb2[3] = col(cz), every
 //                         time (the rig's own arithmetic shows a nearer edge would be behind the eye in each)
+//   curved-unknown-xdir   (the mirror fix) a placement whose +x cannot be told to run left or right (a head rolled a quarter turn; the panel seen
+//                         edge-on): bound and flat, cb2[3] exactly zero, not armed, one line; the draws around it, bent as ever
+//   curved-right-running  (the mirror fix) a placement whose +x runs to the viewer's right (a reflected pose: the movie's own never does): armed,
+//                         and u runs WITH x -- the flag is read from the constants, it is not a constant of the movie
 //   curved-live           the curvature switched live: flat, bent (every float but cb2[3] the flat panel's), flat again to the bit; the z column
 //                         does not depend on the curvature; the retirement line's armed count against its resized count
 //   curved-stood-down     a faulting strip draw stands the surface down: the movie is flat from then on whatever the configuration
@@ -90,6 +96,7 @@
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/system_d3d11.h"
 #include "binding_shadow.h"
+#include "intro_curve_math.h"   // introPlacementXDir: the rule the module reads the movie's own placement with; the rig checks it against a minor of its own
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "panel_curve.h"
@@ -420,6 +427,20 @@ const float kPoseYaw40Pos[12] = {0.76604444f, 0.0f, 0.64278761f, 0.0f,   0.0f, 1
 const float kPoseYaw40Neg[12] = {0.76604444f, 0.0f, -0.64278761f, 0.0f,   0.0f, 1.0f, 0.0f, 0.0f,   0.64278761f, 0.0f, 0.76604444f, 0.0f};
 const float kPoseYaw25Pos[12] = {0.90630779f, 0.0f, 0.42261826f, 0.0f,   0.0f, 1.0f, 0.0f, 0.0f,   -0.42261826f, 0.0f, 0.90630779f, 0.0f};
 const float kPoseYaw25Neg[12] = {0.90630779f, 0.0f, -0.42261826f, 0.0f,   0.0f, 1.0f, 0.0f, 0.0f,   0.42261826f, 0.0f, 0.90630779f, 0.0f};
+
+// Poses at which the movie's placement cannot be told to run its +x left or right (IntroXDir::kUnknown; docs\intro-video.md, the mirror fix):
+//   Roll90: the head rolled a quarter turn about its view axis, so the panel's x axis is vertical on the screen: cb2[1].x and cb2[1].w are exactly
+//      zero, and so are both terms of the rule (the centre is still straight ahead at 3.35 m)
+//   EdgeOn: the head standing IN the panel's own plane, 3 m to one side and looking at its centre (yaw 90 degrees, at (3, 0, -3.35)): the panel is seen
+//      edge-on, the two terms nearly cancel -- 2 % of their size in either eye, under the 5 % margin -- and the centre is still 3 m ahead
+const float kPoseRoll90[12] = {0.0f, -1.0f, 0.0f, 0.0f,   1.0f, 0.0f, 0.0f, 0.0f,   0.0f, 0.0f, 1.0f, 0.0f};
+
+// REFLECTED poses (a mirror in x, determinant -1: not a head -- the module takes any 12 floats): the panel's +x axis, which the movie builds as
+// minus the head's x axis, is then the viewer's RIGHT. The movie's own placement never runs that way, so this is how the rig gets the other half of
+// the rule: Mirror is the identity reflected, MirrorYaw is pose C reflected (the same yaw and offsets, x reversed).
+const float kPoseMirror[12] = {-1.0f, 0.0f, 0.0f, 0.0f,   0.0f, 1.0f, 0.0f, 0.0f,   0.0f, 0.0f, 1.0f, 0.0f};
+const float kPoseMirrorYaw[12] = {-0.96f, 0.0f, -0.28f, 0.10f,   0.0f, 1.0f, 0.0f, 0.05f,   -0.28f, 0.0f, 0.96f, -0.20f};
+const float kPoseEdgeOn[12] = {0.0f, 0.0f, 1.0f, 3.0f,   0.0f, 1.0f, 0.0f, 0.0f,   -1.0f, 0.0f, 0.0f, -3.35f};
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 // The goldens: the 80 bytes of cb2 the draw sees at VS b2, from the module's output (see the header). Emitted by --emit-golden.
@@ -880,6 +901,8 @@ struct Step {
     bool bound = false;
     bool armed = false;        // introPanelStripArmed() between the module's answer and the game's draw: the strip is to be drawn, not the quad
     bool armedAfter = false;   // ... and after introPanelEndDraw, or after the answer when it was false (nothing is armed past a draw)
+    bool reverseU = false;       // introPanelStripReverseU() at the draw: the strip's u runs against its x (the bound placement's +x runs left)
+    bool reverseUAfter = false;  // ... and after introPanelEndDraw
     DrawRecord draw;
     Snapshot before, after;
     Refs refs0, refs1;
@@ -899,10 +922,12 @@ Step compositeWith(Gpu& g, ID3D11Buffer* cb, uint32_t srvW = kFillW, uint32_t sr
     s.refs0 = takeRefs(g);
     s.bound = introPanelOnComposite(ctx, kind, count, instances, srvW, srvH);
     s.armed = introPanelStripArmed();
+    s.reverseU = introPanelStripReverseU();
     recordDraw(ctx, count, instances, 0, 0, 0);   // the game's own draw, forwarded either way
     s.draw = g_draws.back();
     if (s.bound) introPanelEndDraw(ctx);
     s.armedAfter = introPanelStripArmed();
+    s.reverseUAfter = introPanelStripReverseU();
     s.refs1 = takeRefs(g);
     s.after = takeSnapshot(ctx);
     if (g_trace)
@@ -929,12 +954,28 @@ FrameResult runFrame(Gpu& g, bool fill = true, bool scene = false) {
 // `wantBound`; 0 says VS b2 is the game's even though the call returned true (the resampler alone matched); 1 says ours. wantArmed: the strip is
 // armed at the draw (the movie is bent) -- false everywhere at curvature 0, in every refused, stock, head and settling step at any curvature, and
 // after the draw in every case.
-void expectStep(const Step& s, bool wantBound, const char* what, Gpu& g, int cb2 = -1, bool wantArmed = false) {
+void expectStep(const Step& s, bool wantBound, const char* what, Gpu& g, int cb2 = -1, bool wantArmed = false, int wantReverse = -1) {
     const std::string w = lab(what);
+    const bool reverse = wantReverse < 0 ? wantArmed : wantReverse != 0;   // only curved-right-running says otherwise: its placement's +x runs right
     const bool ours = cb2 < 0 ? wantBound : cb2 != 0;
     check(s.bound == wantBound, w + "-returned", fmt("introPanelOnComposite returned %d, want %d", s.bound, wantBound));
     check(s.armed == wantArmed, w + "-armed", fmt("introPanelStripArmed() was %d at the draw, want %d", s.armed, wantArmed));
     check(!s.armedAfter, w + "-armed-after", "introPanelStripArmed() was still true after the draw (introPanelEndDraw) was made");
+    // Which way the strip's u runs. An armed draw is the movie's own placement, whose +x runs to the viewer's LEFT (cb2[1].x is negative: the game's
+    // convention on both of its panels), so u runs AGAINST x: introPanelStripReverseU() is true at the draw, and agrees with what the 20 bytes bound
+    // say by the module's own rule (introPlacementXDir) and by a minor computed here, in double, from the same floats. Everywhere else it is
+    // false -- at curvature 0, at stock and head, in the settle frames, when the lock is refused, for a draw that is not armed -- and false after
+    // introPanelEndDraw in every case.
+    check(s.reverseU == reverse, w + "-reverse", fmt("introPanelStripReverseU() was %d at the draw, want %d (true exactly for an armed draw: the movie's +x runs left)", s.reverseU, reverse));
+    check(!s.reverseUAfter, w + "-reverse-after", "introPanelStripReverseU() was still true after the draw (introPanelEndDraw) was made");
+    if (wantArmed && ours && s.draw.cb2Bytes.size() == 80) {
+        float f[20];
+        std::memcpy(f, s.draw.cb2Bytes.data(), 80);
+        const double minor = static_cast<double>(f[4]) * f[19] - static_cast<double>(f[16]) * f[7];   // cb2[1].x * cb2[4].w - cb2[4].x * cb2[1].w
+        const IntroXDir dir = introPlacementXDir(f);
+        check((reverse ? minor < 0.0 : minor > 0.0) && dir == (reverse ? IntroXDir::kLeft : IntroXDir::kRight) && s.reverseU == (dir == IntroXDir::kLeft), w + "-xdir",
+              fmt("the bound constants do not read as running +x to the %s (minor %.6g, introPlacementXDir %d), or the flag disagrees with the reading", reverse ? "left" : "right", minor, static_cast<int>(dir)));
+    }
     check(s.draw.count == s.reqCount && s.draw.instances == s.reqInstances && s.draw.start == 0 && s.draw.base == 0 && s.draw.startInstance == 0, w + "-arguments",
           fmt("the game's draw was (%u, %u, %u, %d, %u)", s.draw.count, s.draw.instances, s.draw.start, s.draw.base, s.draw.startInstance));
     const unsigned d = diffBits(s.before, s.draw.snap);
@@ -1710,6 +1751,9 @@ void scnCurved(Gpu& g) {
     const std::string log = endLog();
     check(count(log, "intro video curve: the movie is drawn as a 48-column strip at curvature 0.300, gain 4.444 m") == 1, lab("log-armed"),
           "the first-armed line is not written once, with the live column count, the curvature and the gain");
+    check(count(log, "placement's +x runs to the viewer's left, so the strip's u runs against x") == 1, lab("log-armed-direction"),
+          "the first-armed line does not say, once, that the placement's +x runs to the viewer's left and the strip's u against x");
+    check(!has(log, "does not read as running left or right"), lab("log-no-unknown"), "the line about a placement that cannot be read was written for a movie whose frame always can");
     expectNoEdgeLine(log);
     check(count(log, "intro video lock: holding") == 1 && count(log, "intro video size: engaged") == 1, lab("log-lock"), "the 'holding' or 'engaged' line is not written once");
     check(has(log, "It resized 12 draw(s). 12 of them were armed for the curved strip."), lab("log-retired"), "the retirement line does not count 12 draws, 12 of them armed");
@@ -1788,6 +1832,93 @@ void scnCurvedNoEdgeTest(Gpu& g) {
           "the first-armed line is not written once, at the first row's curvature");
 }
 
+// curved-unknown-xdir: a placement whose +x cannot be told to run left or right (the head rolled a quarter turn; the panel seen edge-on) is not bent for
+// that draw -- the movie stays held on the game's forward, bound and flat, cb2[3] exactly zero, nothing armed, introPanelStripReverseU() false -- and the
+// draws before and after it, at an ordinary pose, are bent as ever. One line says it, once, however many draws. A draw that cannot be told is flat, not
+// mirrored.
+void scnCurvedUnknownXDir(Gpu& g) {
+    ID3D11DeviceContext* ctx = g.ctx.Get();
+    check(beginLog(), lab("log"), "the scratch log opens");
+    configure("screen", nullptr, "0.3");
+    setPose(kPoseI);
+    settle(g, "settle");
+    struct Row {
+        const char* name;
+        const float* pose;
+        bool unknown;
+    };
+    const Row rows[] = {{"bent-first", kPoseI, false}, {"roll90", kPoseRoll90, true}, {"edge-on", kPoseEdgeOn, true}, {"bent-again", kPoseI, false}, {"roll90-again", kPoseRoll90, true}};
+    unsigned binds = 0, armedBinds = 0;
+    for (const Row& r : rows) {
+        g_note = r.name;
+        for (int e = 0; e < 2; ++e) {
+            // the fixture: by the rig's own arithmetic (the bent panel's constants, in double, rounded to the floats the module writes) the placement reads
+            // the way the row says, and the centre is in front of the eye (this is not the centre's own refusal)
+            const std::array<double, 20> want = expectedWorld(r.pose, e == 0, 3.35, stub::outer, stub::inner, stub::top, stub::bot, true);
+            float f[20];
+            for (int i = 0; i < 20; ++i) f[i] = static_cast<float>(want[static_cast<size_t>(i)]);
+            check(introPlacementXDir(f) == (r.unknown ? IntroXDir::kUnknown : IntroXDir::kLeft), lab("fixture-xdir"),
+                  fmt("the rig's own arithmetic reads the %s eye's placement as %d", e ? "right" : "left", static_cast<int>(introPlacementXDir(f))));
+            check(expectedBasis(r.pose, e == 0, 3.35).c0[2] < 0.0, lab("fixture-centre"), "the rig's own arithmetic puts the centre behind the eye");
+        }
+        FrameResult fr = boundFrame(g, r.pose, r.name, 3.35, true, r.unknown ? 0.0 : 0.3);   // an unknown row is expected flat: bound, cb2[3] zero, not armed
+        for (int e = 0; e < 2; ++e) {
+            if (fr.eye[e].bound) ++binds;
+            if (fr.eye[e].armed) ++armedBinds;
+            if (!r.unknown || fr.eye[e].draw.cb2Bytes.size() != 80) continue;
+            float f[20];
+            std::memcpy(f, fr.eye[e].draw.cb2Bytes.data(), 80);
+            g_note = fmt("%s, %s eye", r.name, e ? "right" : "left");
+            check(column3IsZero(fr.eye[e].draw.cb2Bytes), lab("column3-zero"), "cb2[3] is not exactly zero in a draw whose placement cannot be read");
+            check(introPlacementXDir(f) == IntroXDir::kUnknown, lab("bound-xdir"), "the constants bound for an unreadable row read as running left or right");
+        }
+    }
+    g_note.clear();
+    check(binds == 10 && armedBinds == 4, lab("counts"), fmt("%u binds, %u armed, want 10 and 4 (five frames of two eyes, two of them ordinary)", binds, armedBinds));
+    introPanelTick(ctx, true);   // the first rendered scene: the intro is over
+    const std::string log = endLog();
+    check(count(log, "does not read as running left or right on the screen") == 1, lab("log-unknown"), "the line about a placement that cannot be read is not written exactly once over six draws");
+    check(count(log, "intro video curve: the movie is drawn as a 64-column strip at curvature 0.300") == 1, lab("log-armed"), "the first-armed line is not written once");
+    check(has(log, "It resized 10 draw(s). 4 of them were armed for the curved strip."), lab("log-retired"), "the retirement line does not count 10 draws resized, 4 of them armed");
+    expectNoEdgeLine(log);
+}
+
+// curved-right-running: a placement whose +x runs to the viewer's RIGHT, which the movie's own never does, so the rig feeds the module a REFLECTED pose
+// (kPoseMirror, kPoseMirrorYaw: not a head, but the module takes any 12 floats). The bound constants read as running right, the strip is armed, and
+// u runs WITH x -- introPanelStripReverseU() false -- in both eyes, so the flag is derived from the constants and is not a constant of the movie.
+// Bytes against the rig's arithmetic, cb2[3] = col(cz) as for any bent draw; the first-armed line says right and with.
+void scnCurvedRightRunning(Gpu& g) {
+    ID3D11DeviceContext* ctx = g.ctx.Get();
+    check(beginLog(), lab("log"), "the scratch log opens");
+    configure("screen", nullptr, "0.3");
+    setPose(kPoseMirror);
+    settle(g, "settle");
+    const float* const poses[] = {kPoseMirror, kPoseMirrorYaw, kPoseMirror};
+    unsigned binds = 0, armedBinds = 0;
+    for (size_t k = 0; k < sizeof(poses) / sizeof(poses[0]); ++k) {
+        setPose(poses[k]);
+        FrameResult fr = runFrame(g);
+        for (int e = 0; e < 2; ++e) {
+            const Step& s = fr.eye[e];
+            g_note = fmt("frame %zu, %s eye", k, e ? "right" : "left");
+            check(expectedBasis(poses[k], e == 0, 3.35).c0[2] < 0.0, lab("fixture-centre"), "the rig's own arithmetic puts the centre behind the eye");
+            expectStep(s, true, "bound", g, -1, true, 0);   // armed, and u runs WITH x
+            if (s.bound) {
+                ++binds;
+                if (s.armed) ++armedBinds;
+                expectWorldBytes(s, poses[k], e == 0, 3.35, "arithmetic", true);
+            }
+        }
+    }
+    g_note.clear();
+    check(binds == 6 && armedBinds == 6, lab("counts"), fmt("%u binds, %u armed, want 6 and 6", binds, armedBinds));
+    introPanelTick(ctx, true);
+    const std::string log = endLog();
+    check(count(log, "placement's +x runs to the viewer's right, so the strip's u runs with x") == 1, lab("log-armed-direction"),
+          "the first-armed line does not say, once, that the placement's +x runs to the viewer's right and the strip's u with x");
+    check(!has(log, "u runs against x") && !has(log, "does not read as running left or right"), lab("log-clean"), "a line about u running against x, or about an unreadable placement, was written");
+}
+
 // curved-live: the curvature switched while the movie plays -- the same pose at 0 (flat), 0.3 (bent: every float but cb2[3] the flat panel's, to the
 // bit), 0 again (the flat bytes exactly: nothing lingers), 0.5, 0.7 and 1.0 -- a bent z column that does not depend on the curvature (0.7 and 1.0
 // give the same bytes), and the retirement line's count of armed draws against the draws it resized (the two curvature-0 frames are resized, not armed).
@@ -1863,7 +1994,7 @@ void scnCurvedStoodDown(Gpu& g) {
     settle(g, "settle");
     boundFrame(g, kPoseI, "bent");   // bent, by the arithmetic at curvature 0.3
     check(panelCurveSurfaceWanted(), lab("wanted"), "the surface strip is not wanted at curvature 0.3");
-    const bool drew = panelCurveSurfaceDraw(ctx, introPanelStripGain(), 1, [](ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT) {
+    const bool drew = panelCurveSurfaceDraw(ctx, introPanelStripGain(), 1, true, [](ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT) {
         *reinterpret_cast<volatile int*>(static_cast<uintptr_t>(0x10)) = 1;
     });
     check(!drew && panelCurveSurfaceInfo().standDown && !panelCurveSurfaceWanted(), lab("faulted"), "the faulting strip draw did not stand the surface strip down");
@@ -1896,16 +2027,17 @@ void scnCurvedArmedScope(Gpu& g) {
     introPanelNoteFill(kFillW, kFillH);
     ID3D11Buffer* game = g.eyeCb[0].Get();
     ctx->VSSetConstantBuffers(2, 1, &game);
-    check(introPanelOnComposite(ctx, 'X', 6, 1, kFillW, kFillH) && introPanelStripArmed(), lab("armed"), "a bent bind did not arm the strip");
+    check(introPanelOnComposite(ctx, 'X', 6, 1, kFillW, kFillH) && introPanelStripArmed() && introPanelStripReverseU(), lab("armed"), "a bent bind did not arm the strip, with u running against x");
     // the caller forgot introPanelEndDraw; the next composite is one of the wrong shape: it binds nothing and nothing is armed any longer
-    check(!introPanelOnComposite(ctx, 'N', 6, 1, kFillW, kFillH) && !introPanelStripArmed(), lab("cleared-by-the-next-call"), "a call that did not bind left the previous bind's strip armed");
+    check(!introPanelOnComposite(ctx, 'N', 6, 1, kFillW, kFillH) && !introPanelStripArmed() && !introPanelStripReverseU(), lab("cleared-by-the-next-call"),
+          "a call that did not bind left the previous bind's strip armed, or its direction for u standing");
     introPanelEndDraw(ctx);
     ctx->VSSetConstantBuffers(2, 1, &game);
-    check(introPanelOnComposite(ctx, 'X', 6, 1, kFillW, kFillH) && introPanelStripArmed(), lab("armed-again"), "the second bent bind did not arm the strip");
+    check(introPanelOnComposite(ctx, 'X', 6, 1, kFillW, kFillH) && introPanelStripArmed() && introPanelStripReverseU(), lab("armed-again"), "the second bent bind did not arm the strip, with u running against x");
     introPanelShutdown();
-    check(!introPanelStripArmed(), lab("cleared-by-shutdown"), "the shutdown left the strip armed");
+    check(!introPanelStripArmed() && !introPanelStripReverseU(), lab("cleared-by-shutdown"), "the shutdown left the strip armed, or its direction for u standing");
     ctx->VSSetConstantBuffers(2, 1, &game);
-    check(!introPanelStripArmed(), lab("idle"), "the strip is armed with no bind in progress");
+    check(!introPanelStripArmed() && !introPanelStripReverseU(), lab("idle"), "the strip is armed, or u is said to run against x, with no bind in progress");
 }
 
 // curved-refused: at curvature 0.3 and a pose that bends, every refusal of the lock leaves the movie as the game drew it with nothing armed, and the
@@ -1992,6 +2124,8 @@ const Scenario kScenarios[] = {
     {"curved", scnCurved},
     {"curved-asymmetric", scnCurvedAsymmetric},
     {"curved-no-edge-test", scnCurvedNoEdgeTest},
+    {"curved-unknown-xdir", scnCurvedUnknownXDir},
+    {"curved-right-running", scnCurvedRightRunning},
     {"curved-live", scnCurvedLive},
     {"curved-stood-down", scnCurvedStoodDown},
     {"curved-armed-scope", scnCurvedArmedScope},

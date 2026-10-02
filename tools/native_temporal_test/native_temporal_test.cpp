@@ -11,8 +11,6 @@
 #include "../../src/common/native_temporal.h"
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
-#include "../../src/common/log.h"
-#include "../../src/common/temporal_math.h"
 #include "../../src/d3d11/temporal_pass.h"
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/ui_surfaces.h"
@@ -465,100 +463,7 @@ void run(){
     }
   }
 }
-// The jitter phase count's cases run in a process of their own (--phase-count-self-test): the provider's channel pool holds sixteen and
-// never recycles one, and run() above uses every one of them.
-void runPhaseCases(){
-  Device d;
-  // ---- The jitter phase count follows the upscale ratio (2026-10-01; experimental.temporal_aa_jitter_follows_upscale; temporal_math.h) ----
-  // One channel (the pool holds sixteen and never recycles one) flown through a script of segments, each a mode, the key, an input size
-  // and a run of real frames through begin() and treat(). What is read back is the jitter the game was told (begin's tangent shift, in
-  // pixels over eye 0's 1.9-wide and eye 1's 2.2-wide frustum) and the line the channel logged. With the key off (the default) the
-  // sequence is the fixed eight, bit for bit what it was; with it on it is ceil(8 x ratio^2) of the input and the output the pass was
-  // asked for (the door asks 480x360 of frame()'s recommendation). The key is read by each treat() and acts from the next begin(), so the
-  // first frame of a segment still runs its predecessor's count (two frames, where the mode or the size changed) and is not judged.
-  {
-    wchar_t tmp[MAX_PATH]{};GetTempPathW(MAX_PATH,tmp);
-    const std::wstring logDir=std::wstring(tmp)+L"edvr_nt_phases_"+std::to_wstring(GetCurrentProcessId());
-    const wchar_t* tag=L"ntphases";
-    auto deleteLogs=[&]{WIN32_FIND_DATAW fd{};HANDLE h=FindFirstFileW((logDir+L"\\edvr_"+tag+L"_*.log").c_str(),&fd);
-      if(h==INVALID_HANDLE_VALUE)return;do{DeleteFileW((logDir+L"\\"+fd.cFileName).c_str());}while(FindNextFileW(h,&fd));FindClose(h);};
-    auto readLog=[&]{std::string body;WIN32_FIND_DATAW fd{};HANDLE h=FindFirstFileW((logDir+L"\\edvr_"+tag+L"_*.log").c_str(),&fd);
-      if(h==INVALID_HANDLE_VALUE)return body;std::wstring newest=fd.cFileName;while(FindNextFileW(h,&fd))newest=fd.cFileName;FindClose(h);
-      HANDLE f=CreateFileW((logDir+L"\\"+newest).c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
-      if(f==INVALID_HANDLE_VALUE)return body;char chunk[65536];DWORD got=0;while(ReadFile(f,chunk,sizeof(chunk),&got,nullptr)&&got)body.append(chunk,got);CloseHandle(f);return body;};
-    auto countIn=[](const std::string& hay,const char* needle){unsigned n=0;for(size_t at=hay.find(needle);at!=std::string::npos;at=hay.find(needle,at+1))++n;return n;};
-    edvr::Log::get().close();deleteLogs();
-    require(edvr::Log::get().open(logDir,tag),"the phase-count cases' log opens in a scratch directory");
-    struct Segment{const char* what;const char* mode;const char* key;unsigned w,h,frames,phases;bool keyOnly;};
-    const Segment script[]={
-      {"key off (the default), DLSS 320x240 into 480x360 (1.5x)","dlss","off",320,240,40,8,false},
-      {"key on, the same 1.5x upscale: ceil(8 x 2.25)","dlss","on",320,240,60,18,false},
-      {"key on, 240x180 into 480x360 (2x)","dlss","on",240,180,80,32,false},
-      {"key on under DLAA (the output is the input: ratio 1)","dlaa","on",320,240,40,8,false},
-      {"key on under the pass's own TAA (no upscale)","on","on",320,240,40,8,false},
-      {"key off again, DLSS 1.5x","dlss","off",320,240,40,8,false},
-      {"key flipped on live","dlss","on",320,240,60,18,true},
-      {"key flipped off live again","dlss","off",320,240,40,8,true},
-    };
-    auto ch=acquire(d,31,"dlss");
-    unsigned k=0;bool shared=true,noReset=true;
-    for(const Segment& sg:script){
-      edvr::Config::get().set("fix.temporal_aa",sg.mode);edvr::Config::get().set("experimental.temporal_aa_jitter_follows_upscale",sg.key);
-      auto src=d.texture(sg.w,sg.h);std::vector<std::pair<float,float>> seen;bool follows=true;
-      for(unsigned i=0;i<sg.frames;++i){
-        ++k;auto fr=frame(31,k);auto pr=begin(ch,fr);
-        const float x=-pr.tangentShift[0][0]*float(sg.w)/1.9f,y=pr.tangentShift[0][1]*float(sg.h)/2.f,x1=-pr.tangentShift[1][0]*float(sg.w)/2.2f;
-        treat(ch,k,1,src.Get());treat(ch,k,0,src.Get());
-        // The key is no part of any history: a frame of a key-only segment never asks the pass for a reset (a mode or a size change does,
-        // once, at its own boundary).
-        if(sg.keyOnly&&!calls.empty()&&(calls.back().flags&1u))noReset=false;
-        if(k==1){check(x==0&&y==0,"phase count: the first frame has no size and no jitter");continue;}
-        // The key acts from the next begin; a change of mode or size takes one frame more (the output each eye was sized for is the last
-        // treat()'s, made under the previous mode), so those frames still run the previous count and are not judged.
-        if(i<(sg.keyOnly?1u:2u))continue;
-        float ex=0,ey=0;edvr::temporalJitterPhase(k,sg.phases,&ex,&ey);
-        if(!closeFloat(x,ex,2e-5f)||!closeFloat(y,ey,2e-5f)){if(follows)std::printf("  first offset off the sequence: frame %u (segment frame %u): got (%g,%g), temporalJitterPhase(%u, %u) = (%g,%g)\n",k,i,x,y,k,sg.phases,ex,ey);follows=false;}
-        if(!closeFloat(x,x1,2e-5f))shared=false;
-        bool dup=false;for(auto& s:seen)if(closeFloat(s.first,x,1e-6f)&&closeFloat(s.second,y,1e-6f))dup=true;if(!dup)seen.push_back({x,y});
-      }
-      char what[256];std::snprintf(what,sizeof(what),"phase count: %s runs %u phases: every frame's offset is temporalJitterPhase(frame, %u) and %zu distinct offsets are seen",sg.what,sg.phases,sg.phases,seen.size());
-      check(follows&&seen.size()==sg.phases,what);
-    }
-    check(shared,"phase count: both eyes share one phase in every segment");
-    check(noReset,"phase count: flipping the key live resets no history (no frame of a key-only segment asks the pass for a reset)");
-    check(ch.close(ch.context)==S_OK,"phase-count channel close");
-    edvr::Config::get().set("experimental.temporal_aa_jitter_follows_upscale","off");edvr::Config::get().set("fix.temporal_aa","on");
-    edvr::Log::get().close();
-    const std::string log=readLog();
-    check(!log.empty(),"phase count: the log was written and read back");
-    // A line at the start and again each time the count or the key changes, read back as (phases, key) in order: off/8; on/18; on/32; on/18 --
-    // the frame after DLAA is asked for still holds the output the eye was last sized for under DLSS, so the count passes through 18 before
-    // it settles; on/8 (DLAA); nothing for the pass's own TAA (the same state); off/8 -- the same, one frame early, on the way back to
-    // DLSS, where the sizes are still the TAA's; on/18; off/8.
-    std::vector<std::pair<unsigned,bool>> logged;
-    for(size_t at=log.find("native temporal: jitter phases=");at!=std::string::npos;at=log.find("native temporal: jitter phases=",at+1)){
-      const unsigned n=unsigned(std::strtoul(log.c_str()+at+std::strlen("native temporal: jitter phases="),nullptr,10));
-      const size_t keyAt=log.find("follows_upscale=",at);
-      logged.push_back({n,keyAt!=std::string::npos&&log.compare(keyAt+std::strlen("follows_upscale="),2,"on")==0});
-    }
-    const std::vector<std::pair<unsigned,bool>> wantLogged={{8,false},{18,true},{32,true},{18,true},{8,true},{8,false},{18,true},{8,false}};
-    if(logged!=wantLogged){   // say what was logged, so a surprise is readable from the build output
-      for(size_t at=log.find("native temporal: jitter phases=");at!=std::string::npos;at=log.find("native temporal: jitter phases=",at+1))std::printf("  logged: %.*s\n",int((std::min)(size_t(230),log.find('\n',at)-at)),log.c_str()+at);}
-    check(logged==wantLogged,"phase count: the channel logs its count at the start and again at each change of the count or the key, and only then");
-    check(countIn(log,"native temporal: jitter phases=8 (eye 0 320x240 -> 480x360, eye 1 320x240 -> 480x360; experimental.temporal_aa_jitter_follows_upscale=off: the fixed 8)")==2,
-          "phase count: the key off logs eight with both eyes' sizes and says it is the fixed 8 (the start and the return after the live flip)");
-    check(countIn(log,"native temporal: jitter phases=18 (eye 0 320x240 -> 480x360, eye 1 320x240 -> 480x360; experimental.temporal_aa_jitter_follows_upscale=on: 8 x (output / input)^2 rounded up")>=2,
-          "phase count: the key on logs 18 with the sizes it came from, and says how the count is worked out");
-    check(countIn(log,"native temporal: jitter phases=32 (eye 0 240x180 -> 480x360, eye 1 240x180 -> 480x360; experimental.temporal_aa_jitter_follows_upscale=on:")==1,
-          "phase count: the 2x upscale logs 32");
-    check(countIn(log,"native temporal: jitter phases=8 (eye 0 320x240 -> 320x240, eye 1 320x240 -> 320x240; experimental.temporal_aa_jitter_follows_upscale=on:")==1,
-          "phase count: DLAA with the key on logs eight, its output the input's size");
-    check(countIn(log,"native temporal totals:")==1&&countIn(log,"jitter_phases=8,")==1,"phase count: the close totals carry the count in use");
-    deleteLogs();RemoveDirectoryW(logDir.c_str());
-  }
-}
 int wmain(int argc,wchar_t** argv){SetErrorMode(3);if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_temporal_test: dry-run (no device or files)");return 0;}
-  const bool phases=argc==2&&!wcscmp(argv[1],L"--phase-count-self-test");
-  if(argc!=2||(wcscmp(argv[1],L"--self-test")&&!phases))return 2;try{if(phases)runPhaseCases();else run();}catch(const std::exception& e){std::printf("FAIL: %s\n",e.what());if(!failures)++failures;}
+  if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;try{run();}catch(const std::exception& e){std::printf("FAIL: %s\n",e.what());if(!failures)++failures;}
   std::printf("native_temporal_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

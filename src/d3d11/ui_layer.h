@@ -135,6 +135,16 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int family, bool verdictForwards, b
 // family never reaches uiLayerDecide.
 void uiLayerNoteFamilyProbe(uint64_t vs, uint64_t ps, int family, int why);
 
+// The composite census (ui_scene_composites.h; vscreen.cpp forwardWithVerdict, owner draws
+// while live): one draw into an eye target that samples a learned interface surface, settled
+// after both takes -- taken into the layer, or left in the game's frame, in which case it is
+// named by its shaders and the family the rule gave it (UiLayerFamily as an int; 0 none).
+// Counted per window and reported every 30 s, zeros included: the composites no family names
+// reach no decision and no refusal line, which is how user 5's cockpit panels (Disable GUI
+// effects on) stayed in the scene unseen.
+void uiLayerNoteCompositeTaken();
+void uiLayerNoteCompositeLeft(uint64_t vs, uint64_t ps, int family);
+
 // Around one issue of a decided draw: bind the eye's layer as the only
 // render target (with the layer's own seeded depth-stencil target when the
 // draw tests depth or stencil), the viewports and scissors through the map

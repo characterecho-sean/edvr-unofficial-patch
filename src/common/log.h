@@ -42,6 +42,9 @@ public:
 
     bool isOpen() const { return m_open; }
     uint64_t dropped() const { return m_dropped.load(std::memory_order_relaxed); }
+    // The size cap in force, in bytes (log.max_mb, read when the log opened); 0 means no cap. For the rigs: the default is pinned
+    // by tools\config_test, and the cap's behaviour at a small explicit value with it.
+    uint64_t maxBytes() const { return m_maxBytes; }
     const std::wstring& dir() const { return m_dir; }
 
 private:

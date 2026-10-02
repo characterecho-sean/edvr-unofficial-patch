@@ -531,7 +531,8 @@ bool pass(Session& s, char* buf) {
                     // short-circuits on INVALID_HANDLE_VALUE and does not wait
                     // the four seconds -- so a persistent failure comes back
                     // every poll, twice a second. Unlatched, that is 7000 log
-                    // lines an hour and the 4 MB cap inside three hours, which is
+                    // lines an hour and the 4 MB cap inside three hours (the default
+                    // is 16 MB since 2026-10-01: twelve), which is
                     // the instrument destroying the evidence for the third time
                     // in this codebase. Uncharged, the watcher never retires
                     // either, because kMaxFaults is what retires it.

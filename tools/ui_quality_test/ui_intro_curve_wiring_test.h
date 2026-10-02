@@ -12,8 +12,10 @@
 //     answer), and `originalIssued` still means "something was issued";
 //   * the strip sits AFTER the verdict's Begin (kBackdrop's slot swap is in place) and INSIDE the layer's bracket, replaces the game's issue and not
 //     the dim, and the dim follows it (the same arguments, the game's draw when the strip did not draw);
-//   * the movie's numbers are (introPanelStripGain(), +1), the splash's (introCurveGain(), introCurveToward()), the call is made through the thunk's
-//     REAL draw behind the same refusal observedDraw makes, and there are exactly two panelCurveSurfaceDraw call sites;
+//   * the movie's numbers are (introPanelStripGain(), +1, introPanelStripReverseU()), the splash's (introCurveGain(), introCurveToward(),
+//     introCurveReverseU()) -- the u direction (the mirror fix) is each caller's own, read only while its strip is armed and never from the other's
+//     placement -- the call, and the dim's re-issue of it, pass all three, through the thunk's REAL draw behind the same refusal observedDraw makes,
+//     and there are exactly two panelCurveSurfaceDraw call sites;
 //   * the splash's flag is its own (NOT curveThisDraw, whose branch returns before the verdict's Begin and the dim): cleared at the top of every
 //     beginPanelOverride, set only behind introCurveWants() and right AFTER the movie's claim (a draw the movie claims never reaches the
 //     recogniser), put away by the thunk after the draw and the dim;
@@ -39,8 +41,10 @@ const char* const kGuard =
     "if(panelCurveWants()&&srv0IsPanelSized(s,kind,count)&&!(kind=='X'&&count==6&&bindingShaderHash(BindSlot::Vs)==kIntroCompositeVsHash)){s->curveThisDraw=true;}";
 const char* const kCandidate = "if((v==DrawVerdict::kIntroPanel||g_state->introCurveThisDraw)&&owner&&panelCurveSurfaceWanted()){";
 const char* const kNumbers =
-    "if(v==DrawVerdict::kIntroPanel){if(introPanelStripArmed()){stripGain=introPanelStripGain();stripToward=1;}}else{stripGain=introCurveGain();stripToward=introCurveToward();}";
-const char* const kStripCall = "if(stripToward!=0&&!uiLayerIssueBlocked()){stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,g_state->realDrawIndexedInstanced);";
+    "if(v==DrawVerdict::kIntroPanel){if(introPanelStripArmed()){stripGain=introPanelStripGain();stripToward=1;stripReverseU=introPanelStripReverseU();}}"
+    "else{stripGain=introCurveGain();stripToward=introCurveToward();stripReverseU=introCurveReverseU();}";
+const char* const kStripCall =
+    "if(stripToward!=0&&!uiLayerIssueBlocked()){stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);";
 const char* const kObserved =
     "constbooloriginalIssued=observedDraw(alteredClass==AlteredDrawClass::Verdict?AlteredDraw(alteredClass,alteredFixOf(v)):AlteredDraw(alteredClass));";
 const char* const kLambda =
@@ -48,7 +52,7 @@ const char* const kLambda =
     "if(seedOutcome.on)seedOutcome.original=seedOutcome.original||issued;returnissued;};";
 const char* const kDim =
     "if((v==DrawVerdict::kBackdrop||v==DrawVerdict::kIntroPanel)&&splashDimBegin(self)){if(!(stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,"
-    "g_state->realDrawIndexedInstanced))){draw(AlteredDrawClass::None);}splashDimEnd(self);}";
+    "stripReverseU,g_state->realDrawIndexedInstanced))){draw(AlteredDrawClass::None);}splashDimEnd(self);}";
 const char* const kTick =
     "tkIntroCurve.run([&]{constboolsceneFrame=g_state->eyeDrawsLastFrame>=kSceneEyeDraws;introCurveTick(g_state->ownerCtx,sceneFrame);"
     "if(sceneFrame)introCurveNoteRetired();});";
@@ -111,14 +115,15 @@ std::vector<WirePin> wiringPins(const std::string& text) {
     // The strip's site: after the verdict's Begin and the layer's Begin, before the game's own issue, the layer's End and the dim; the dim follows.
     pins.push_back({"strip-site",
                     inOrder(fwd, {"boolstripIssued=false;", "autoobservedDraw=[&](AlteredDrawaltered){", "if(v!=DrawVerdict::kNone)forwardVerdictBegin(self,v);",
-                                  "constboollayered=uiLayer&&uiLayerBegin(self);", "floatstripGain=0.0f;intstripToward=0;", kCandidate,
-                                  "stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,g_state->realDrawIndexedInstanced);", "constbooloriginalIssued=observedDraw(",
-                                  "if(layered){uiLayerEnd(self);", "if(v==DrawVerdict::kBackdrop)backdropEnd(self);", "splashDimBegin(self)",
-                                  "panelCurveSurfaceDraw(self,stripGain,stripToward,g_state->realDrawIndexedInstanced)", "draw(AlteredDrawClass::None);", "splashDimEnd(self);",
-                                  "forwardVerdictEnd(self,v);"}) &&
+                                  "constboollayered=uiLayer&&uiLayerBegin(self);", "floatstripGain=0.0f;intstripToward=0;boolstripReverseU=false;", kCandidate,
+                                  "stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);",
+                                  "constbooloriginalIssued=observedDraw(", "if(layered){uiLayerEnd(self);", "if(v==DrawVerdict::kBackdrop)backdropEnd(self);",
+                                  "splashDimBegin(self)", "panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced)",
+                                  "draw(AlteredDrawClass::None);", "splashDimEnd(self);", "forwardVerdictEnd(self,v);"}) &&
                         countOf(fwd, "panelCurveSurfaceDraw(") == 2 && countOf(all, "panelCurveSurfaceDraw(") == 2,
                     "intro curve wiring [strip-site]: the strip is drawn after forwardVerdictBegin (kBackdrop's slot swap is in place) and the layer's Begin, before the game's own "
-                    "issue and the layer's End, and the splash dim draws it again (the same arguments) before forwardVerdictEnd; panelCurveSurfaceDraw has two call sites"});
+                    "issue and the layer's End, and the splash dim draws it again (the same arguments, the u direction included) before forwardVerdictEnd; "
+                    "panelCurveSurfaceDraw has two call sites, and the u direction starts false"});
     // The unarmed path is today's text: the game's own issue, the lambda it goes through (one early return added), and the dim's own draw.
     pins.push_back({"unarmed-text",
                     has(fwd, kObserved) && has(fwd, kLambda) && has(fwd, kDim),
@@ -130,9 +135,11 @@ std::vector<WirePin> wiringPins(const std::string& text) {
                     "is asked last"});
     // The numbers, the refusal, the real draw pointer.
     pins.push_back({"strip-args", has(fwd, kNumbers) && has(fwd, kStripCall) && countOf(all, "introPanelStripArmed()") == 1 && countOf(all, "introPanelStripGain()") == 1 &&
-                                      countOf(all, "introCurveGain()") == 1 && countOf(all, "introCurveToward()") == 1,
-                    "intro curve wiring [strip-args]: the movie's numbers are (introPanelStripGain(), +1) and only while introPanelStripArmed(), the splash's (introCurveGain(), "
-                    "introCurveToward()); the strip is asked only when a direction is set and observedDraw's own refusal passes, through the thunk's real draw"});
+                                      countOf(all, "introCurveGain()") == 1 && countOf(all, "introCurveToward()") == 1 && countOf(all, "introPanelStripReverseU()") == 1 &&
+                                      countOf(all, "introCurveReverseU()") == 1,
+                    "intro curve wiring [strip-args]: the movie's numbers are (introPanelStripGain(), +1, introPanelStripReverseU()) and only while introPanelStripArmed(), the splash's "
+                    "(introCurveGain(), introCurveToward(), introCurveReverseU()), each u direction read once and from its own placement; the strip is asked only when a direction "
+                    "is set and observedDraw's own refusal passes, through the thunk's real draw"});
     // Flat, never missing: stripIssued is the strip's own answer and nothing else.
     pins.push_back({"fallback", has(fwd, "boolstripIssued=false;") && !has(fwd, "stripIssued=true") && countOf(fwd, "stripIssued=") == 2,
                     "intro curve wiring [fallback]: stripIssued starts false and is assigned only from panelCurveSurfaceDraw's answer, so a strip that cannot be drawn leaves the "
@@ -188,7 +195,7 @@ const char* const kRawStripStart = "    float stripGain = 0.0f;\n";
 const char* const kRawGuard = R"x(    if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
         !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)) {
 )x";
-const char* const kRawDim = R"x(            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced))) {
+const char* const kRawDim = R"x(            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {
                 draw(AlteredDrawClass::None);
             }
 )x";
@@ -255,13 +262,22 @@ void testIntroCurveControls(const std::string& text) {
          "strip-site"},
         {"the dim draws the game's quad only", {{kRawDim, "            draw(AlteredDrawClass::None);\n"}}, "strip-site"},
         {"the dim has no fallback",
-         {{kRawDim, "            if (stripIssued) panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced);\n"}}, "strip-site"},
+         {{kRawDim, "            if (stripIssued) panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);\n"}}, "strip-site"},
         {"the dim draws the strip whatever the main draw did",
-         {{"if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced))) {",
-           "if (!(panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced))) {"}},
+         {{"if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {",
+           "if (!(panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {"}},
          "unarmed-text"},
         {"a third place draws the strip",
-         {{kRawEnd, std::string(kRawEnd) + "    panelCurveSurfaceDraw(self, 1.0f, 1, g_state->realDrawIndexedInstanced);\n"}}, "strip-site"},
+         {{kRawEnd, std::string(kRawEnd) + "    panelCurveSurfaceDraw(self, 1.0f, 1, false, g_state->realDrawIndexedInstanced);\n"}}, "strip-site"},
+        {"the dim drops the u direction",
+         {{"panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {",
+           "panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced))) {"}},
+         "strip-site"},
+        {"the dim hard-codes the u direction",
+         {{"panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {",
+           "panelCurveSurfaceDraw(self, stripGain, stripToward, false, g_state->realDrawIndexedInstanced))) {"}},
+         "strip-site"},
+        {"the u direction starts true", {{"bool stripReverseU = false;", "bool stripReverseU = true;"}}, "strip-site"},
         // ---- unarmed-text
         {"observedDraw's early return comes before its refusal",
          {{"        if (owner && uiLayerIssueBlocked()) return false;\n        if (stripIssued) return true;   // the strip was issued in its place: nothing more, and something was\n",
@@ -286,18 +302,36 @@ void testIntroCurveControls(const std::string& text) {
         {"the movie is drawn whether or not its strip is armed", {{"if (introPanelStripArmed()) {", "if (true) {"}}, "strip-args"},
         {"the splash is drawn at the movie's gain", {{"stripGain = introCurveGain();", "stripGain = introPanelStripGain();"}}, "strip-args"},
         {"the splash's direction is a constant", {{"stripToward = introCurveToward();", "stripToward = 1;"}}, "strip-args"},
+        {"the movie passes a constant u direction", {{"stripReverseU = introPanelStripReverseU();", "stripReverseU = true;"}}, "strip-args"},
+        {"the splash passes a constant u direction", {{"stripReverseU = introCurveReverseU();", "stripReverseU = true;"}}, "strip-args"},
+        {"the splash passes the movie's u direction", {{"stripReverseU = introCurveReverseU();", "stripReverseU = introPanelStripReverseU();"}}, "strip-args"},
+        {"the movie passes the splash's u direction", {{"stripReverseU = introPanelStripReverseU();", "stripReverseU = introCurveReverseU();"}}, "strip-args"},
+        {"the movie's u direction is read before its strip is armed",
+         {{"                stripReverseU = introPanelStripReverseU();\n", ""},
+          {"            if (introPanelStripArmed()) {\n", "            stripReverseU = introPanelStripReverseU();\n            if (introPanelStripArmed()) {\n"}},
+         "strip-args"},
+        {"the strip's call drops the u direction",
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
+           "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced);"}},
+         "strip-args"},
+        {"the strip's call hard-codes the u direction",
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
+           "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, false, g_state->realDrawIndexedInstanced);"}},
+         "strip-args"},
         {"the strip is drawn through no draw function",
-         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced);", "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, nullptr);"}},
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
+           "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, nullptr);"}},
          "strip-args"},
         {"the strip is drawn through the thunk's wrapper",
-         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced);", "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, draw);"}},
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
+           "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, draw);"}},
          "strip-args"},
         {"the strip is asked past the refusal", {{"if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (stripToward != 0) {"}}, "strip-args"},
         {"the strip is asked with no direction set", {{"if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (!uiLayerIssueBlocked()) {"}}, "strip-args"},
         // ---- fallback
         {"the strip counts as issued whatever it returned",
-         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced);",
-           "panelCurveSurfaceDraw(self, stripGain, stripToward, g_state->realDrawIndexedInstanced);\n            stripIssued = true;"}},
+         {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);",
+           "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);\n            stripIssued = true;"}},
          "fallback"},
         {"every draw starts as the strip's", {{"bool stripIssued = false;", "bool stripIssued = true;"}}, "fallback"},
         // ---- not-on-foot-flag

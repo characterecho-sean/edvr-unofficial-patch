@@ -111,8 +111,8 @@ struct FlatMonoResolveFrame {
     // the verified menu copy; the VR world route never does. False (the default, and every frame outside that menu)
     // leaves the shader's arithmetic bit-identical to before the field.
     bool staticScene = false;
-    // The steady-detail rule (experimental.temporal_aa_on_foot_world_steady_detail, which defaults to ON for both readers, the VR world
-    // route and the flat profile on foot; this field is the resolver's contract and stays false until a caller sets it; design doc
+    // The steady-detail rule (always on in both callers, the VR world route and the flat profile on foot, which set it with no key; this
+    // field is the resolver's contract and stays false until a caller sets it, and the rigs drive it both ways; design doc
     // section 82, the depth-validated steady detail): a pixel whose engine slot a later draw overdrew takes the camera term
     // instead of refusing its history ONLY where last frame's depth confirms the camera term -- the depth, in the best of the four
     // texels around the previous raster position, is within 1% (floor 1e-6, kFlatMonoStaleDepthRelative) of the depth this surface would

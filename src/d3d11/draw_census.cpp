@@ -33,7 +33,8 @@ namespace {
 
 // Three frames: enough that "present in every frame of one census and no
 // frame of the other" separates a steady overlay from frame-to-frame churn,
-// while two censuses stay near one percent of the default 4 MB log cap.
+// while two censuses stay near one percent of the log's size cap (4 MB when this was
+// sized; the default is 16 MB since 2026-10-01).
 //
 // The DEFAULT, no longer the law: advanced.census_frames raises it to 30 for
 // a capture that has to span a progressive build (the FSS body takes longer
@@ -50,8 +51,9 @@ constexpr uint32_t kCensusFramesMax = 30;
 // count have to move together: 30 offscreen frames under a 4096-line cap
 // records the first eleven and silently drops the tail, which in a BUILD
 // capture is the half where the build finishes. The ceiling keeps a typo
-// from spending the whole 4 MB log; at ~140 bytes a line, 16384 lines is
-// about 2.3 MB, paid only on the sessions that ask for it.
+// from spending the whole log (a 4 MB cap when this was sized, 16 MB by default
+// since 2026-10-01); at ~140 bytes a line, 16384 lines is about 2.3 MB, paid only
+// on the sessions that ask for it.
 constexpr uint32_t kMaxLines = 4096;
 constexpr uint32_t kMaxLinesCeiling = 16384;
 

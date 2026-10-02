@@ -1083,6 +1083,15 @@ void testFamilyRule() {
           "the lit HDR target: not the composite's");
     f.vs = kUiVsHolo;
     check(uiLayerFamilyFor(f) == UiLayerFamily::kHolo, "...where the holo panels are named");
+    // The same panels with Elite's Disable GUI effects on are drawn with another vertex shader
+    // (vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE, holo_material.h; docs/ui-layer-2026-09-23.md, 2026-10-01):
+    // named exactly as the stock pair is, and a hash one bit away names nothing.
+    f.vs = kUiVsHoloGuiFxOff;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kDirect,
+          "...and the panels with Disable GUI effects on (vs 1989E6D3B405FDE0), a direct shader like the stock pair's");
+    f.vs = kUiVsHoloGuiFxOff ^ 1ull;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
+          "...a vertex shader one bit from that names nothing");
     f.vs = kUiVsFlightHud;
     check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kFlightHud && why == UiFamilyWhy::kDirect,
           "...the flight HUD is named, a direct shader");
@@ -1158,6 +1167,14 @@ void testFamilyRule() {
     g.learnedSurface = false;
     check(uiLayerFamilyFor(g, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kOther,
           "anything else: none");
+    // A holo panel over a learned surface on the post-tonemap eye is a holo panel, whichever of the two
+    // vertex shaders the setting Disable GUI effects gave it.
+    g.learnedSurface = true;
+    for (uint64_t vs : {kUiVsHolo, kUiVsHoloGuiFxOff}) {
+        g.vs = vs;
+        check(uiLayerFamilyFor(g, &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kLearnedSurface,
+              "a holo panel over a learned surface on the post-tonemap eye, either vertex shader");
+    }
 }
 
 // fix.ui_quality's after-UI take (uiLayerNoteOther, vscreen.cpp): a draw
@@ -2453,6 +2470,7 @@ int main(int argc, char** argv) {
     afterui::testIdentity();
     afterui::testRecordedTails();
     afterui::testStationPixels();
+    afterui::testGuiFxOffCockpit();
     afterui::testWiring();
     worldroute::testAll();
     worldroute::testWiring();

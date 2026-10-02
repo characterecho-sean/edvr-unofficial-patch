@@ -59,6 +59,11 @@ about to do and waits for a yes, and it copies every file it replaces into
 `edvr_backup\` first. [docs/installer.md](docs/installer.md) covers its buttons
 and explains what it decides and why.
 
+Players on a flat screen, with no headset, use
+`edvr-flat-installer-<version>.zip` the same way: unzip it and run
+`edvr-flat-installer.exe`. It installs the flat edition only and carries no VR
+support.
+
 Because the installer is unsigned, Windows will say the program is
 unrecognised; choose **More info → Run anyway**. Every release lists the
 installer's SHA-256, and without a signature that hash is the only way to check

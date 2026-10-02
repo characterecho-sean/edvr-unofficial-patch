@@ -66,6 +66,11 @@ static void fail(const char* what, const std::string& detail) {
     ++g_fails;
 }
 
+static void check(bool condition, const char* what, const std::string& detail = std::string()) {
+    if (condition) ok(what);
+    else fail(what, detail.empty() ? std::string("the condition did not hold") : detail);
+}
+
 static void expectStr(const char* key, const char* want, const char* what) {
     const std::string got = Config::get().getString(key, "<unset>");
     if (got == want) ok(what);
@@ -966,9 +971,9 @@ static std::vector<std::string> namedLiterals(const std::string& text) {
     return hits;
 }
 
-// Every source under src\ but the installer's (which manages both files and says which it means).
+// Every source under src\ but the installer's (which manages both files and says which it means); withInstaller reads those too.
 static void collectSources(const std::wstring& dir, const std::wstring& relative,
-                           std::vector<std::wstring>* out) {
+                           std::vector<std::wstring>* out, bool withInstaller = false) {
     WIN32_FIND_DATAW fd{};
     HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -977,8 +982,8 @@ static void collectSources(const std::wstring& dir, const std::wstring& relative
         if (name == L"." || name == L"..") continue;
         const std::wstring rel = relative.empty() ? name : relative + L"\\" + name;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (_wcsicmp(rel.c_str(), L"installer") == 0) continue;
-            collectSources(dir + L"\\" + name, rel, out);
+            if (!withInstaller && _wcsicmp(rel.c_str(), L"installer") == 0) continue;
+            collectSources(dir + L"\\" + name, rel, out, withInstaller);
             continue;
         }
         const size_t dot = name.find_last_of(L'.');
@@ -1034,6 +1039,79 @@ static void iniNameScan(const std::wstring& root) {
     }
 }
 
+// The three experimental keys retired on 2026-10-01 chose behaviour that is now permanent: the VR world route's jitter (always on
+// while the route owns the world; experimental.temporal_aa_jitter off still stops it), the depth-validated steady detail (always on,
+// in the VR world route and in the flat runtime) and the switch that made the jitter phases follow the upscale ratio (they always
+// do). Nothing may still spell their names. A reader left behind would let a user's old line act, a log message would send people
+// to a setting that does nothing, and the shipped file would document one. The installer carries an old line over under "this
+// version no longer uses it" (installer_test holds that), so only the two tests spell the names.
+static const char* const kRetiredKeys[] = {
+    "temporal_aa_on_foot_world_jitter",
+    "temporal_aa_on_foot_world_steady_detail",
+    "temporal_aa_jitter_follows_upscale",
+};
+
+// The first retired name `text` spells, or nullptr.
+static const char* spellsRetiredKey(const std::string& text) {
+    for (const char* name : kRetiredKeys)
+        if (text.find(name) != std::string::npos) return name;
+    return nullptr;
+}
+
+static void retiredKeyScan(const std::wstring& root) {
+    // The scan itself first: it must find each name wherever it sits, and pass the live keys that sit beside them.
+    int found = 0;
+    for (const char* name : kRetiredKeys) {
+        const std::string read = std::string("Config::get().getString(\"experimental.") + name + "\", \"on\")";
+        const std::string logged = std::string("the log says experimental.") + name + " has nothing to act on";
+        const std::string commented = std::string("# experimental.") + name + " = on\n";
+        const char* a = spellsRetiredKey(read);
+        const char* b = spellsRetiredKey(logged);
+        const char* c = spellsRetiredKey(commented);
+        if (a && b && c && std::strcmp(a, name) == 0 && std::strcmp(b, name) == 0 && std::strcmp(c, name) == 0) ++found;
+    }
+    const std::string live =
+        "experimental.temporal_aa_on_foot_world = auto\n"    // the live route key: the retired names start with it
+        "experimental.temporal_aa_jitter = on\n";             // the live global jitter key: one retired name starts with it
+    if (found == 3 && !spellsRetiredKey(live))
+        ok("the retired-key scan finds each of the three names in a read, a message and a comment, and passes the live keys beside them");
+    else
+        fail("the retired-key scan's own control", std::to_string(found) + " of 3 names found, or a live key was flagged");
+
+    // The shipped file: no template, no comment, no mention.
+    const std::string ini = readRepoFile(root, L"edvr.ini");
+    if (ini.empty()) {
+        fail("edvr.ini is readable from the repo root (retired keys)", "could not read it");
+    } else if (const char* name = spellsRetiredKey(ini)) {
+        fail("the shipped edvr.ini names none of the three retired keys", std::string("it spells ") + name);
+    } else {
+        ok("the shipped edvr.ini defines, documents and mentions none of the three retired keys");
+    }
+
+    // Every production source, the installer's included: no reader, no allow-list entry, no log line.
+    std::vector<std::wstring> files;
+    collectSources(root + L"\\src", L"", &files, true);
+    if (files.size() < 150) {
+        fail("retired-key scan", "found only " + std::to_string(files.size()) + " sources under " + narrow(root) +
+                                     "\\src; the scan would prove nothing");
+        return;
+    }
+    int scanned = 0, bad = 0;
+    for (const std::wstring& rel : files) {
+        const std::string text = readRepoFile(root, (L"src\\" + rel).c_str());
+        ++scanned;
+        if (const char* name = spellsRetiredKey(text)) {
+            ++bad;
+            fail("a production source spells a retired key", narrow(rel) + " spells " + name);
+        }
+    }
+    if (!bad) {
+        ok(("none of the " + std::to_string(scanned) +
+            " sources under src (the installer's included) spells a retired key: no reader, no allow-list entry, no message")
+               .c_str());
+    }
+}
+
 int main(int argc, char** argv) {
     // Unbuffered, so a crash does not take the output with it: the first run of
     // this test appeared to die before its first printf, which was only the
@@ -1083,6 +1161,12 @@ int main(int argc, char** argv) {
     expectStr("advanced.temporal_aa_objects_ships_metres", "<unset>", "the retired ship path's range is absent");
     // The terrain patches' own recorded transforms (2026-10-01): terrain takes the camera's motion, with no key.
     expectStr("advanced.terrain_motion", "<unset>", "the retired terrain motion key is absent");
+    // The three experimental switches retired 2026-10-01: the world route's jitter A/B, its depth-checked steady detail (also the flat
+    // runtime's) and the jitter-phase count's follow-the-upscale switch. The behaviour each chose is permanent, with no key; the file's
+    // text and every source are held clear of the names by retiredKeyScan, and these three read the file as the parser sees it.
+    expectStr("experimental.temporal_aa_on_foot_world_jitter", "<unset>", "the retired world jitter key is absent");
+    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "<unset>", "the retired steady-detail key is absent");
+    expectStr("experimental.temporal_aa_jitter_follows_upscale", "<unset>", "the retired jitter-phase switch is absent");
     // The particle facing measurement (dead since 2026-08-23) retired 2026-09-23.
     expectStr("advanced.particle_face_emitter", "<unset>", "the retired particle facing key is absent");
     // The foveation's eye-tracked centre went with its gaze source (2026-09-23)
@@ -1196,10 +1280,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The VR on-foot world route (design doc section 82, experimental.temporal_aa_on_foot_world) is OFF by default: it is
-    // unflown. The shipped file says off, and so must the code's fallback for an ini with no such line, which is every
-    // install that predates the key: the same pair of checks as above, because nothing else holds the two to one answer.
-    expectStr("experimental.temporal_aa_on_foot_world", "off", "the shipped edvr.ini ships the VR world route off");
+    // The VR on-foot world route (design doc section 82, experimental.temporal_aa_on_foot_world) is AUTO by default since
+    // 2026-10-01: it has flown, and Sean made it the default (the key stays for one release candidate as the way back). The shipped
+    // file says auto, and so must the code's fallback for an ini with no such line, which is every install that predates the
+    // key: the same pair of checks as above, because nothing else holds the two to one answer. The vscreen resolver's fallback
+    // (below) is held to the same answer in the same commit: a width fitted for a route that does not run would be wrong.
+    expectStr("experimental.temporal_aa_on_foot_world", "auto", "the shipped edvr.ini ships the VR world route auto");
     {
         const std::string shippedWorld = Config::get().getString("experimental.temporal_aa_on_foot_world", "<unset>");
         const std::string worldSource = readRepoFile(dir, L"src\\d3d11\\vr_world_route.cpp");
@@ -1213,16 +1299,17 @@ int main(int argc, char** argv) {
                 fail("the code's fallback for experimental.temporal_aa_on_foot_world is the shipped default",
                      "vr_world_route.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedWorld + "\"");
             }
-            // CONTROL: the same source with the fallback turned to auto (a route that switched itself on for every install).
+            // CONTROL: the same source with the fallback turned the other way (a route that switched itself off for every install).
             std::string flipped = worldSource;
             const std::string from = "getString(\"experimental.temporal_aa_on_foot_world\", \"" + fallback + "\")";
             const size_t at = flipped.find(from);
+            const char* other = shippedWorld == "auto" ? "off" : "auto";
             if (at != std::string::npos)
-                flipped.replace(at, from.size(), "getString(\"experimental.temporal_aa_on_foot_world\", \"auto\")");
+                flipped.replace(at, from.size(), std::string("getString(\"experimental.temporal_aa_on_foot_world\", \"") + other + "\")");
             if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world") != shippedWorld) {
-                ok("control: the VR world route's fallback turned to auto is caught");
+                ok("control: the VR world route's fallback turned the other way is caught");
             } else {
-                fail("control: the VR world route's fallback turned to auto is caught",
+                fail("control: the VR world route's fallback turned the other way is caught",
                      at == std::string::npos ? "the call was not found to alter"
                                              : "the flipped source still matched the ini");
             }
@@ -1230,8 +1317,8 @@ int main(int argc, char** argv) {
     }
 
     // fix.vscreen_res_width = auto reads the route's key too (src\d3d11\vscreen_res.cpp: the on-foot screen is fitted to the eye only
-    // when the route will run, vscreen_fit.h). Its fallback is a second reader of the same key, and the day the route's default
-    // flips to auto the width has to follow it in the same commit: the same pair of checks, against the shipped file.
+    // when the route will run, vscreen_fit.h). Its fallback is a second reader of the same key, and it flipped to auto with the
+    // route's default in the same commit (2026-10-01), as it must every time: the same pair of checks, against the shipped file.
     {
         const std::string shippedWorld = Config::get().getString("experimental.temporal_aa_on_foot_world", "<unset>");
         const std::string resSource = readRepoFile(dir, L"src\\d3d11\\vscreen_res.cpp");
@@ -1245,7 +1332,8 @@ int main(int argc, char** argv) {
                 fail("the vscreen resolver's fallback for experimental.temporal_aa_on_foot_world is the shipped default",
                      "vscreen_res.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedWorld + "\"");
             }
-            // CONTROL: the same source with the fallback turned the other way (the width fitted for a route no install has switched on).
+            // CONTROL: the same source with the fallback turned the other way (a width fitted for a route that does not run, or the
+            // legacy width for a route that does).
             std::string flipped = resSource;
             const std::string from = "getString(\"experimental.temporal_aa_on_foot_world\", \"" + fallback + "\")";
             const size_t at = flipped.find(from);
@@ -1261,83 +1349,15 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The world jitter's key (design doc section 82, stage 2: experimental.temporal_aa_on_foot_world_jitter) is ON by default
-    // and that is safe: it acts only while the route above, which is off by default, owns the world, and with the route key
-    // off the route never reads it (vr_world_route_test pins that). The shipped file and the code's fallback for an ini that
-    // predates the key must still say the same thing; the control turns the fallback to off (a jitter that a user who turned
-    // the route on never gets by default, which is the flight's whole point) and must be caught.
-    expectStr("experimental.temporal_aa_on_foot_world_jitter", "on", "the shipped edvr.ini ships the VR world jitter on");
-    {
-        const std::string shippedJitter = Config::get().getString("experimental.temporal_aa_on_foot_world_jitter", "<unset>");
-        const std::string worldSource = readRepoFile(dir, L"src\\d3d11\\vr_world_route.cpp");
-        if (worldSource.empty()) {
-            fail("vr_world_route.cpp is readable from the repo root (jitter key)", "could not read it");
-        } else {
-            const std::string fallback = codeFallbackOf(worldSource, "experimental.temporal_aa_on_foot_world_jitter");
-            if (fallback == shippedJitter) {
-                ok("the code's fallback for experimental.temporal_aa_on_foot_world_jitter is the shipped default");
-            } else {
-                fail("the code's fallback for experimental.temporal_aa_on_foot_world_jitter is the shipped default",
-                     "vr_world_route.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedJitter + "\"");
-            }
-            std::string flipped = worldSource;
-            const std::string from = "getString(\"experimental.temporal_aa_on_foot_world_jitter\", \"" + fallback + "\")";
-            const size_t at = flipped.find(from);
-            if (at != std::string::npos)
-                flipped.replace(at, from.size(), "getString(\"experimental.temporal_aa_on_foot_world_jitter\", \"off\")");
-            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world_jitter") != shippedJitter) {
-                ok("control: the VR world jitter's fallback turned to off is caught");
-            } else {
-                fail("control: the VR world jitter's fallback turned to off is caught",
-                     at == std::string::npos ? "the call was not found to alter"
-                                             : "the flipped source still matched the ini");
-            }
-        }
-    }
+    // The world jitter has no key of its own any more (retired 2026-10-01; retiredKeyScan below holds every name out of the
+    // shipped file and the sources): while the route owns the world it always jitters, and the global jitter key off is
+    // the one thing that stops it (vr_world_route_test and vr_world_route_gpu_test pin both).
 
-    // The jitter phase count's switch (2026-10-01: experimental.temporal_aa_jitter_follows_upscale) is OFF by default: with it off
-    // every path keeps the fixed eight phases, byte for byte. The shipped file, and the code's fallback at both of its reads (the
-    // VR eye pass in native_temporal.cpp and the flat runtime), must say the same; the control turns each fallback to true (a
-    // longer sequence on every install, with nobody having asked) and must be caught.
-    expectBool("experimental.temporal_aa_jitter_follows_upscale", false, "the shipped edvr.ini ships the jitter phase count switch off");
-    for (const char* source : {"native_temporal.cpp", "flat_runtime.cpp"}) {
-        const std::string key = "experimental.temporal_aa_jitter_follows_upscale";
-        const std::string text = readRepoFile(dir, widen((std::string("src\\d3d11\\") + source).c_str()).c_str());
-        const std::string label = std::string(source) + " reads the jitter phase count switch with a false fallback";
-        if (text.empty()) {
-            const std::string readable = std::string(source) + " is readable from the repo root (jitter phase count switch)";
-            fail(readable.c_str(), "could not read it");
-            continue;
-        }
-        const std::string needle = "getBool(\"" + key + "\",";
-        const size_t at = text.find(needle);
-        // The literal after the comma, up to the closing parenthesis.
-        auto fallbackOf = [&](const std::string& s) {
-            const size_t pos = s.find(needle);
-            if (pos == std::string::npos) return std::string("<no such read>");
-            size_t begin = pos + needle.size();
-            while (begin < s.size() && s[begin] == ' ') ++begin;
-            size_t end = begin;
-            while (end < s.size() && s[end] != ')') ++end;
-            return s.substr(begin, end - begin);
-        };
-        if (at != std::string::npos && fallbackOf(text) == "false") ok(label.c_str());
-        else fail(label.c_str(), std::string(source) + " reads it with the fallback \"" + fallbackOf(text) + "\"");
-        std::string flipped = text;
-        if (at != std::string::npos) {
-            const size_t begin = flipped.find("false", at + needle.size());
-            flipped.replace(begin, 5, "true");
-        }
-        const std::string control = std::string("control: the jitter phase count switch's fallback turned to true in ") + source + " is caught";
-        if (at != std::string::npos && fallbackOf(flipped) != "false") ok(control.c_str());
-        else fail(control.c_str(), at == std::string::npos ? "the read was not found to alter" : "the flipped source still matched the ini");
-    }
-
-    // The on-foot maps gate (design-world-camera-motion-2026-09-30.md, Phase 1: experimental.on_foot_maps_sharp) is OFF by
-    // default: it is unflown, and with it on the layer takes a map's or a menu's 2D screen on foot. The shipped file and the
-    // code's fallback for an ini that predates the key must say the same thing; the control turns the fallback to on (a gate
-    // that switched itself on for every install) and must be caught.
-    expectStr("experimental.on_foot_maps_sharp", "off", "the shipped edvr.ini ships the on-foot maps gate off");
+    // The on-foot maps gate (design-world-camera-motion-2026-09-30.md, Phase 1: experimental.on_foot_maps_sharp) is ON by
+    // default since 2026-10-01 (the key stays for one release candidate as the way back): the layer takes a map's or a menu's 2D
+    // screen on foot. The shipped file and the code's fallback for an ini that predates the key must say the same thing; the
+    // control turns the fallback the other way (a gate that switched itself off for every install) and must be caught.
+    expectStr("experimental.on_foot_maps_sharp", "on", "the shipped edvr.ini ships the on-foot maps gate on");
     {
         const std::string shippedMaps = Config::get().getString("experimental.on_foot_maps_sharp", "<unset>");
         const std::string layerSource = readRepoFile(dir, L"src\\d3d11\\ui_layer.cpp");
@@ -1354,56 +1374,22 @@ int main(int argc, char** argv) {
             std::string flipped = layerSource;
             const std::string from = "getString(\"experimental.on_foot_maps_sharp\", \"" + fallback + "\")";
             const size_t at = flipped.find(from);
+            const char* other = shippedMaps == "on" ? "off" : "on";
             if (at != std::string::npos)
-                flipped.replace(at, from.size(), "getString(\"experimental.on_foot_maps_sharp\", \"on\")");
+                flipped.replace(at, from.size(), std::string("getString(\"experimental.on_foot_maps_sharp\", \"") + other + "\")");
             if (at != std::string::npos && codeFallbackOf(flipped, "experimental.on_foot_maps_sharp") != shippedMaps) {
-                ok("control: the on-foot maps gate's fallback turned to on is caught");
+                ok("control: the on-foot maps gate's fallback turned the other way is caught");
             } else {
-                fail("control: the on-foot maps gate's fallback turned to on is caught",
+                fail("control: the on-foot maps gate's fallback turned the other way is caught",
                      at == std::string::npos ? "the call was not found to alter"
                                              : "the flipped source still matched the ini");
             }
         }
     }
 
-    // The steady-detail key (design doc section 82: experimental.temporal_aa_on_foot_world_steady_detail) is ON by default since flight 4,
-    // the depth-validated form having passed in flat and VR, in every place that can say so: the shipped file and the code's fallback, in
-    // BOTH of its readers (the VR world route and the flat runtime, whose key it is on foot too), which must agree: an ini that predates
-    // the key must behave as one that carries it. An explicit off is the refusal as before the key existed, and stays pinned below (the
-    // flat scope, the VR profile, the route rig's parse of the word, the flat rig's scan of the reader). The control turns a fallback to
-    // off (a reader that silently refuses where the other relaxes) and must be caught.
-    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "on", "the shipped edvr.ini ships the steady-detail key on");
-    {
-        const std::string shippedSteady = Config::get().getString("experimental.temporal_aa_on_foot_world_steady_detail", "<unset>");
-        const struct { const wchar_t* file; const char* name; } readers[] = {
-            {L"src\\d3d11\\vr_world_route.cpp", "vr_world_route.cpp"}, {L"src\\d3d11\\flat_runtime.cpp", "flat_runtime.cpp"}};
-        for (const auto& reader : readers) {
-            const std::string source = readRepoFile(dir, reader.file);
-            if (source.empty()) {
-                fail((std::string(reader.name) + " is readable from the repo root (steady-detail key)").c_str(), "could not read it");
-                continue;
-            }
-            const std::string fallback = codeFallbackOf(source, "experimental.temporal_aa_on_foot_world_steady_detail");
-            const std::string label = std::string("the code's fallback for experimental.temporal_aa_on_foot_world_steady_detail in ") +
-                                      reader.name + " is the shipped default";
-            if (fallback == shippedSteady) {
-                ok(label.c_str());
-            } else {
-                fail(label.c_str(), std::string(reader.name) + " falls back to \"" + fallback + "\", the ini ships \"" + shippedSteady + "\"");
-            }
-            std::string flipped = source;
-            const std::string from = "getString(\"experimental.temporal_aa_on_foot_world_steady_detail\", \"" + fallback + "\")";
-            const size_t at = flipped.find(from);
-            if (at != std::string::npos)
-                flipped.replace(at, from.size(), "getString(\"experimental.temporal_aa_on_foot_world_steady_detail\", \"off\")");
-            const std::string control = std::string("control: the steady-detail key's fallback in ") + reader.name + " turned to off is caught";
-            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world_steady_detail") != shippedSteady) {
-                ok(control.c_str());
-            } else {
-                fail(control.c_str(), at == std::string::npos ? "the call was not found to alter" : "the flipped source still matched the ini");
-            }
-        }
-    }
+    // The depth-validated steady detail has no key any more either (retired 2026-10-01): both routes, the VR world route and the
+    // flat runtime on foot, always ask the resolver for it (vr_world_route_test and flat_temporal_test pin both call sites), and
+    // retiredKeyScan below holds the old key's name out of the shipped file and the sources.
 
     // The VR camera census (design doc section 82, advanced.vr_camera_census) installs a game hook when it is on, so it
     // is OFF by default in both places that can say so: the shipped file and the code's fallback for an ini that predates
@@ -1843,11 +1829,127 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- log.max_mb: the default is 16 (2026-10-01; it was 4), and the cap does what it says --------------------------------------
+    //
+    // The shipped edvr.ini documents the default commented out ("#max_mb = 16"), so for every install that has not written the line the
+    // CODE's fallback is the cap; tools\check_config_contract.py holds a commented default to the code's in the build. This pins the
+    // number itself and then what the log does with it, at sizes that keep the test fast: the default must not stop a 1.3 MB session
+    // (past a 1 MB cap), an explicit max_mb = 1 must stop it with the one line that says so, and an explicit max_mb = 4 keeps 4 and
+    // 0 is no cap (those two by the cap in force, with no writing). The writer has no rotation: a log that reaches its cap says so
+    // once and stops, and the next session opens a new file; the flat profile reads this key the same way (the "log." keys are
+    // allowed in both profiles, and the fallback is one line of one class).
+    {
+        const std::string iniText = readRepoFile(dir, L"edvr.ini");
+        const std::string logSource = readRepoFile(dir, L"src\\common\\log.cpp");
+        if (iniText.empty() || logSource.empty()) {
+            fail("log.max_mb pins", "could not read edvr.ini or src\\common\\log.cpp from the repo root");
+        } else {
+            check(iniText.find("\n#max_mb = 16") != std::string::npos && iniText.find("\n#max_mb = 4") == std::string::npos,
+                  "the shipped edvr.ini documents log.max_mb at 16, commented out (the code's fallback is the default)");
+            check(logSource.find("getInt(\"log.max_mb\", 16)") != std::string::npos &&
+                      logSource.find("getInt(\"log.max_mb\", 4)") == std::string::npos,
+                  "the log's fallback for log.max_mb is 16");
+        }
+    }
+    if (argc >= 3) {
+        const std::wstring scratch = widen(argv[2]);
+        struct CapRun {
+            bool opened = false;
+            uint64_t maxBytes = ~0ull;
+            std::string body;
+        };
+        // One session in the scratch directory: the given [log] lines (a max_mb line or none), one 1.3 MB burst (the flusher's first pass
+        // writes all of it), then a marker line a second pass can only write if the cap has not been reached. `write` false opens and
+        // closes without writing, to read the cap in force.
+        const auto session = [&](const char* maxMbLine, const wchar_t* tag, bool write) {
+            CapRun run;
+            std::string ini = "[log]\r\nenabled = 1\r\nbuffer_mb = 16\r\n";
+            ini += maxMbLine;
+            if (!writeIni(scratch, ini.c_str())) return run;
+            Config::get().init(scratch);
+            Log::get().close();
+            const std::wstring pattern = std::wstring(L"edvr_") + tag + L"_*.log";
+            {
+                WIN32_FIND_DATAW old{};
+                HANDLE oh = FindFirstFileW((scratch + L"\\" + pattern).c_str(), &old);
+                if (oh != INVALID_HANDLE_VALUE) {
+                    do {
+                        DeleteFileW((scratch + L"\\" + old.cFileName).c_str());
+                    } while (FindNextFileW(oh, &old));
+                    FindClose(oh);
+                }
+            }
+            if (!Log::get().open(scratch, tag)) return run;
+            run.opened = true;
+            run.maxBytes = Log::get().maxBytes();
+            if (write) {
+                const std::string filler(1000, 'y');
+                for (int i = 0; i < 1300; ++i) Log::get().note("capfill %d %s", i, filler.c_str());
+                Sleep(700);   // the flusher passes every 250 ms: one writes the burst, the next has to decide about the marker
+                Log::get().note("capmarker after the first burst");
+                Sleep(700);
+            }
+            Log::get().close();
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((scratch + L"\\" + pattern).c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                const std::wstring name = fd.cFileName;
+                FindClose(h);
+                HANDLE f = CreateFileW((scratch + L"\\" + name).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                       FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (f != INVALID_HANDLE_VALUE) {
+                    char chunk[65536];
+                    DWORD got = 0;
+                    while (ReadFile(f, chunk, sizeof(chunk), &got, nullptr) && got) run.body.append(chunk, got);
+                    CloseHandle(f);
+                }
+            }
+            return run;
+        };
+        const auto count = [](const std::string& text, const char* needle) {
+            size_t n = 0, from = 0;
+            while ((from = text.find(needle, from)) != std::string::npos) {
+                ++n;
+                from += 1;
+            }
+            return n;
+        };
+        const char* const kCapLine = "log size cap reached; nothing further will be written";
+        const uint64_t kMiB = 1024ull * 1024ull;
+
+        const CapRun byDefault = session("", L"capdefault", true);
+        if (!byDefault.opened) {
+            fail("log.max_mb default", "the log would not open in the scratch dir");
+        } else {
+            check(byDefault.maxBytes == 16 * kMiB, "with no max_mb line the cap in force is 16 MB",
+                  std::to_string(byDefault.maxBytes) + " bytes");
+            check(count(byDefault.body, "capmarker after the first burst") == 1 && count(byDefault.body, kCapLine) == 0,
+                  "...and a 1.3 MB session is not stopped by it (the old 4 MB default would not have stopped it either; a 1 MB cap does)");
+        }
+        const CapRun small = session("max_mb = 1\r\n", L"capsmall", true);
+        if (!small.opened) {
+            fail("log.max_mb = 1", "the log would not open in the scratch dir");
+        } else {
+            check(small.maxBytes == 1 * kMiB, "an explicit max_mb = 1 is a 1 MB cap", std::to_string(small.maxBytes) + " bytes");
+            check(count(small.body, kCapLine) == 1 && count(small.body, "capmarker after the first burst") == 0,
+                  "a session past its cap says so exactly once and writes nothing after it (the cap is the truncation: there is no rotation)");
+            check(small.body.size() > 1 * kMiB && small.body.size() < 2 * kMiB,
+                  "...and the file ends at the burst that crossed the cap (past 1 MB, under 2 MB), not at the default's 16 MB",
+                  std::to_string(small.body.size()) + " bytes");
+        }
+        const CapRun four = session("max_mb = 4\r\n", L"capfour", false);
+        check(four.opened && four.maxBytes == 4 * kMiB, "an ini that says max_mb = 4 keeps 4 MB", std::to_string(four.maxBytes) + " bytes");
+        const CapRun none = session("max_mb = 0\r\n", L"capnone", false);
+        check(none.opened && none.maxBytes == 0, "max_mb = 0 is no cap", std::to_string(none.maxBytes) + " bytes");
+        Log::get().close();
+    }
+
     // --- floats, notes and threads (2026-09-29) ----------------------------
     //
     // Before the profile cases below: those switch g_runtimeProfile to flat and
     // invalid, under which these scratch keys would read as suppressed.
     iniNameScan(dir);
+    retiredKeyScan(dir);
     if (argc >= 3) {
         const std::wstring scratch = widen(argv[2]);
         floatCases(scratch);
@@ -1909,20 +2011,9 @@ int main(int argc, char** argv) {
     // whatever the file says, and the flat runtime (which never asks) cannot be turned into it.
     Config::get().set("experimental.temporal_aa_on_foot_world", "auto");
     expectStr("experimental.temporal_aa_on_foot_world", "off", "flat scope refuses the VR world route's key");
-    // ... and so is its jitter key: a flat profile reads it off whatever the file says (it never asks).
-    Config::get().set("experimental.temporal_aa_on_foot_world_jitter", "on");
-    expectStr("experimental.temporal_aa_on_foot_world_jitter", "off", "flat scope refuses the VR world jitter's key");
     // ... and the on-foot maps gate's: a VR-profile key, so a flat profile reads it off whatever the file says.
     Config::get().set("experimental.on_foot_maps_sharp", "on");
     expectStr("experimental.on_foot_maps_sharp", "off", "flat scope refuses the on-foot maps gate's key");
-    // ... but the steady-detail key is the one VR world key the flat runtime reads too (flat_runtime.cpp steadyReadKey: the depth-validated
-    // camera term for a stale slot, on foot): listed in runtimeProfileAllowsKey, so a flat profile reads what the file says. Unlisted it would
-    // read off here whatever the file said (and the default, on, would never reach the runtime), with nothing in the log to say the key was
-    // refused. The explicit off below is the refusal as before the key existed.
-    Config::get().set("experimental.temporal_aa_on_foot_world_steady_detail", "on");
-    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "on", "flat scope permits the steady-detail key's explicit on");
-    Config::get().set("experimental.temporal_aa_on_foot_world_steady_detail", "off");
-    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "off", "flat scope reads the steady-detail key's explicit off");
     // The VR camera census's key is a VR-profile key too: a flat profile must never install its hook.
     Config::get().set("advanced.vr_camera_census", "on");
     expectStr("advanced.vr_camera_census", "off", "flat scope refuses the VR camera census's key");
@@ -2006,16 +2097,8 @@ int main(int argc, char** argv) {
     else fail("VR profile jitter", "flat exception changed VR scope");
     Config::get().set("experimental.temporal_aa_on_foot_world", "auto");
     expectStr("experimental.temporal_aa_on_foot_world", "auto", "VR profile reads the VR world route's key");
-    Config::get().set("experimental.temporal_aa_on_foot_world_jitter", "off");
-    expectStr("experimental.temporal_aa_on_foot_world_jitter", "off", "VR profile reads the VR world jitter's explicit off");
-    Config::get().set("experimental.temporal_aa_on_foot_world_jitter", "on");
-    expectStr("experimental.temporal_aa_on_foot_world_jitter", "on", "VR profile reads the VR world jitter's explicit on");
     Config::get().set("experimental.on_foot_maps_sharp", "on");
     expectStr("experimental.on_foot_maps_sharp", "on", "VR profile reads the on-foot maps gate's explicit on");
-    Config::get().set("experimental.temporal_aa_on_foot_world_steady_detail", "on");
-    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "on", "VR profile reads the VR world steady-detail key's explicit on");
-    Config::get().set("experimental.temporal_aa_on_foot_world_steady_detail", "off");
-    expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "off", "VR profile reads the VR world steady-detail key's explicit off");
     Config::get().set("advanced.vr_camera_census", "on");
     expectStr("advanced.vr_camera_census", "on", "VR profile reads the VR camera census's explicit on");
     g_runtimeProfile = RuntimeProfile::LegacyVr;

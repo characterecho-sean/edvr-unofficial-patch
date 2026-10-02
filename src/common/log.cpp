@@ -133,8 +133,18 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
     if (m_open) return true;
     if (!Config::get().getBool("log.enabled", true)) return false;
 
-    const int maxMb = Config::get().getInt("log.max_mb", 4);
+    // The session's size cap, in megabytes: 16 since 2026-10-01 (it was 4). The issue 63 reporter's graphics log reached 3.9 MB, so a
+    // longer session would have gone silent at the cap and lost the freeze lines (docs/freeze-diagnostics-2026-10-01.md). 0 is no cap.
+    // One class and one default for both profiles: the flat profile allows the "log." keys and reads this one from edvr-flat.ini
+    // first, then edvr.ini. An ini that says max_mb = 4 keeps 4; the shipped edvr.ini only documents the default, commented out.
+    // There is no rotation: a log that reaches the cap says so once and stops (below), and the next session opens a new file.
+    const int maxMb = Config::get().getInt("log.max_mb", 16);
     m_maxBytes = maxMb > 0 ? static_cast<uint64_t>(maxMb) * 1024ull * 1024ull : 0ull;
+    // The cap is per file: a reopened log counts from zero. (Only the rigs reopen the singleton; a process opens its log once. Without
+    // this, the second open in one process inherited the first one's byte count, and a cap smaller than it stopped the new file at
+    // its first flush.)
+    m_bytesWritten = 0;
+    m_capped = false;
 
     // Clamped rather than trusted: 0 here would drop every line silently, and
     // the value is read once at open so a typo cannot be walked back mid

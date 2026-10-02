@@ -68,6 +68,21 @@ int wmain(int argc, wchar_t** argv) {
     unlitSnap.capture(ctx.Get(),102,0,edvr::EyeDrawSnapshot::kHolo,edvr::kHoloUnlitPs,'X',6,1,0);
     check(unlitSnap.draws.size()==1 && unlitSnap.surfaces.size()==1 && unlitSnap.draws[0].texture==0,"unlit hologram captures t1 with no t2 surface");
     ctx->PSSetShaderResources(2,1,&s);
+    // The same panels with Elite's Disable GUI effects on (vs 1989E6D3B405FDE0 / ps EAB8A1C95A13FFBE, holo_material.h) are watched and their
+    // interface surface captured from t2 (holoSurfaceSlot's lit slot), exactly as the stock pair's is: an eye run on such a rig otherwise
+    // misses the panels and the vertex shader's bytes. t1 is cleared so only t2 can be the source.
+    check(edvr::EyeDrawSnapshot::watches(edvr::kHoloGuiFxOffVs) && edvr::EyeDrawSnapshot::watches(edvr::EyeDrawSnapshot::kHolo) &&
+              !edvr::EyeDrawSnapshot::watches(edvr::kHoloGuiFxOffPs) && !edvr::EyeDrawSnapshot::watches(edvr::kHoloGuiFxOffVs ^ 1ull),
+          "the eye run watches the Disable-GUI-effects holo vertex shader beside the stock one, and no neighbouring hash");
+    ctx->PSSetShaderResources(1,1,&none);
+    edvr::EyeDrawSnapshot fxSnap;
+    fxSnap.capture(ctx.Get(),104,0,edvr::kHoloGuiFxOffVs,edvr::kHoloGuiFxOffPs,'X',6,1,0);
+    check(fxSnap.draws.size()==1 && fxSnap.surfaces.size()==1 && fxSnap.draws[0].texture==0 && fxSnap.draws[0].vs==edvr::kHoloGuiFxOffVs &&
+              fxSnap.draws[0].ps==edvr::kHoloGuiFxOffPs,
+          "the Disable-GUI-effects holo draw is captured with its interface surface from t2");
+    edvr::EyeDrawSnapshot fxMiss;
+    fxMiss.capture(ctx.Get(),105,0,edvr::kHoloGuiFxOffVs ^ 1ull,edvr::kHoloGuiFxOffPs,'X',6,1,0);
+    check(fxMiss.draws.empty() && fxMiss.surfaces.empty(), "a vertex shader one bit from it is not watched");
     // Exit-profile/menu and direct-screen composites use t1 and t0,
     // respectively. They were previously absent from an otherwise valid
     // eye dump, leaving the profile's actual source resolution unknown.

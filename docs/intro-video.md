@@ -28,8 +28,8 @@ State, Open and Ruled-out bullets are verbatim in "Status detail".*
     visible; BUILT (14ec395's follow-up), NOT FLOWN. Entry "2026-09-17:
     the intro/splash "forward"..." (flight brief).
   - 2026-10-01, the movie and the splash follow `fix.panel_curvature` (no
-    new key; byte-identical at 0): BUILT, NOT FLOWN. Entry "2026-10-01:
-    the movie and the splash follow..." (flight leg: 0.3, then 0).
+    new key): FLOWN, both MIRRORED (u ran with x); fix BUILT, NOT FLOWN.
+    Entries "...follow..." and "...mirrored, and why" (leg: 0.3, then 0).
 - **Open:** whether the movie reaches the headset earlier once the
   warm-up flies, or the game just absorbs the stall (section 9, first
   2026-09-15 entry); ident-open -> first-composite latency, never
@@ -1149,7 +1149,9 @@ still stands).
 pairs to shrink `VR_InitInternal`'s ~443 ms shader stretch; an EDVR
 holding layer during the ~2.2 s between `runtime_startup` and the first
 Submit (the first pre-game `xrEndFrame` layer on third-party runtimes).
-Both wait on the warm-up's own measurement landing first.
+Both wait on the warm-up's own measurement landing first. (The first of the two
+was built 2026-10-01: the four compiles are now build-time bytecode, see
+docs/startup-delay-2026-09-12.md, last entry.)
 
 ## 2026-09-17: a skipped intro left the panel armed, and the on-foot HUD passed for the movie
 
@@ -1466,3 +1468,117 @@ line says 0 world-space: read its flat reasons), N = 0 with the lines
 present (never reached the draw). At 0 none of those lines appears, the
 `intro video size:` retirement line has no "armed" clause, and the intro
 looks as it did.
+
+## 2026-10-01 (flight): the movie and the splash came out mirrored, and why (FIXED, NOT FLOWN)
+
+Flown the same day: Frontier, build v0.18.0-rc.5-62-g73e02a7b (main
+73e02a7b), `fix.panel_curvature = 0.3`, log `edvr_gfx_20261001_125905.log`
+(the build matches HEAD of that merge). Sean: "looks good except the
+image is left-right flipped (mirrored)"; asked which surface, the answer
+was both, the movie and the splash, and neither upside down. The log says
+what drew: `intro video curve` at 12:59:11 (panel frame 3111, 1670 armed
+draws), eight splash composites read as world-space panels from 12:59:20
+(1886 armed draws), 4726 strip draws in all. So the strip, the bend, the
+direction and the cull choice were right, and one thing was wrong: which
+way u runs.
+
+**Root cause.** One generator builds both strips (`fillStrip`), columns
+left to right in local x, bottom row first, and gives column i the
+texture coordinate u = (x + 1) / 2: u runs WITH x. That is the on-foot
+composite's quad to the byte (the identity test, C7), and the on-foot
+placement maps +x to the viewer's right, so the on-foot screen is the
+right way round. The intro composite's placement maps +x to the viewer's
+LEFT:
+
+| composite | placement's +x on the screen | u in the vertex data | picture |
+|---|---|---|---|
+| on-foot, the game's quad or our strip | right | with x | right way round |
+| intro, the game's flat draw | left (movie stock cb2[1].x = -1/2712, splash -0.7807 and -0.7803 in both 2026-08-28 captures and both eyes) | against x (inferred: the game's own draw is right) | right way round |
+| intro, our strip as flown | left | with x | MIRRORED |
+
+The same fact had cost the first flight of the world-locked movie
+(16948cda, 2026-08-28: "I built the basis as +x to +x, which mirrors
+it"); the strip took the on-foot quad's convention for a composite whose
+convention was readable in its own constants. Of the game's real vertex
+data one number has been read: the 2026-08-28 quad probe printed the
+movie composite's first vertex as z = 0, u = 0, v = 1 and never its x and
+y, so it cannot say which side u = 0 sits on. Under the placement above
+that vertex is the bottom-right corner, which agrees, and nothing read
+contradicts it. v is right (up stayed up): both placements map +y to up
+and the strip's v is the on-foot one.
+
+**The fix** does not copy the game's vertex data and does not flip u
+blindly: the strip's u follows the placement it is drawn through. u runs
+against x when the placement's +x runs left, with x when it runs right
+(the on-foot case, unchanged to the byte). The reading is one number
+from the 20 floats of VS b2, `cb2[1].x * cb2[4].w - cb2[4].x * cb2[1].w`
+(`introPlacementXDir`, `intro_curve_math.h`): the sign of d(NDC x) /
+d(local x) at the panel's centre. With a the view-space direction of
+the panel's +x and p the position of its centre it is m00 * (a x p).y,
+the head-frame vertical component of a world-vertical vector, so it does
+not move with head yaw, even through 180 degrees (the first capture has
+the panel behind the viewer and reads the same), and holds until the
+head is rolled a quarter turn. Negative is left. Both captures, both
+eyes, and the movie's stock constants all read left. It answers unknown
+(and the pair stays as the game drew it) when the two terms nearly
+cancel. The movie takes its flag from the world constants it binds, the
+splash from the constants it copied; `panelCurveSurfaceDraw` takes it as
+an argument and keys its strip on it. Nothing changes at curvature 0.
+
+**Proved** (all in the build's gates; each pin is held to mutations that
+must trip it):
+
+- `tools\surface_strip_render_test` (new) draws the production strip on
+  WARP through a vertex shader that is `docs\shaders\intro-composite-vs.asm`
+  written back as HLSL, with an explicit cull-back rasterizer state (the
+  game's) and an 8x8 texture with a different colour in each quadrant,
+  and reads the picture back at 25 % and 75 % of what was drawn. The
+  movie (production `introPanelOnComposite`, both eyes, head turned 0
+  and +-10 degrees, curvature 0.05, 0.3 and 0.6), the splash (production
+  recogniser on the 2026-08-28 capture, both eyes) and the on-foot strip
+  (a standard +x-right transform) all come out with left staying left and
+  up staying up. The same movie and splash draws with the flag forced the
+  other way come out mirrored (asserted), and a placement whose +x runs
+  right (the capture with its x column negated, the movie with a
+  reflected pose) is read as running right and drawn with u along x,
+  upright. 199 checks, 20 mutants.
+- `tools\intro_curve_math_test`: the rule against both captures, both
+  eyes, the stock constants, a 3500-pose family of either handedness (no
+  wrong answer, none unknown), a panel turned edge-on (4014 known, 2142
+  unknown, no wrong answer), the margin to 4e-9, non-finite floats.
+  96615 checks, 145 mutants.
+- `tools\panel_curve_test`: the strip's bytes with and without the flag,
+  one build per change of it, the on-foot bytes unchanged: 4950 checks,
+  144 mutants. `tools\intro_curve_test`: every curved movie scenario
+  reads left and sets the flag, the flag is gone after the draw, a head
+  rolled a quarter turn gives a flat movie rather than a wrong one, a
+  right-running placement is not reversed: 10413 checks, 145 mutants.
+  `tools\intro_curve_module_test`: each pair keeps its own direction, all
+  four real vectors arm reversed, an edge-on pair arms when a later
+  reading is good: 657 checks, 190 mutants. The vscreen wiring pins carry
+  the new argument at both strip sites and never mix the movie's flag
+  with the splash's: 257 checks, 50 end-to-end mutations of the real file.
+
+**Not known, and said so.** The game's quad vertex data beyond the first
+vertex; the derivation does not need it. The strip's picture against the
+game's own flat picture: the render rig draws through the disassembled
+vertex shader and its own texture, so whether the two agree is for the
+flight to say, as is whether a second thing about the picture is off.
+
+ruled out: the strip's column order or index winding as the cause,
+because the winding only decides which faces are culled (the surface
+strip is drawn with the cull off, and the whole picture was there) and the
+order of the columns changes nothing about which texel lands where; only
+u and x do. ruled out: either surface's placement as the cause, because
+both mirrored together and both placements are the game's own convention
+(the movie's was flight-verified in 16948cda). ruled out: the on-foot
+strip's u for the intro composite, because the intro placement runs +x
+left (this entry). Rejected without flying: a blind flip of u for the
+surface strip, because it would break any placement that runs right.
+
+**Next flight:** the unchanged leg (0.3, then 0, the same grep) with one
+more thing to read: the ident and the splash have lettering, so mirrored
+text is unmistakable. PASS adds: not mirrored and not upside down, in the
+movie and the splash; the SURFACE strip line says `u running against x`,
+the movie's line and the splash learn lines say that +x runs to the
+viewer's left.

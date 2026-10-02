@@ -163,15 +163,26 @@ ISFINITE = "bool isFiniteF(float v) { return v == v && v <= 3.4e38f && v >= -3.4
 COL_CZ = "    if (curved) col(cz, false, out + 12);\n"
 ARMED_RESET = "    g_stripArmed = false;   // armed is for the bind this call makes, and for no other\n"
 ARMED_INIT = "            bool armed = false;\n"
-ARMED_SET = "                armed = curved;\n"
+ARMED_SET = "                armed = curvedNow;\n"
 GATE = "                const bool curved = panelCurveSurfaceWanted();\n"
 CURVED_ARG = "                                  g_anchored ? nullptr : &yawDeg, curved)) {\n"
-ARMED_ON = "                g_stripArmed = true;\n                ++g_armedDraws;\n"
+ARMED_ON = "                g_stripArmed = true;\n                g_stripReverseU = reverseU;\n                ++g_armedDraws;\n"
 ARMED_NOTED = "                    g_armedNoted = true;\n"
 ARMED_LOG_COLS = "                        ci.segments, static_cast<double>(ci.curvature),\n"
-ARMED_LOG_GAIN = "                        static_cast<double>(kScreenHalfW), g_frame);\n"
+ARMED_LOG_GAIN = "                        static_cast<double>(kScreenHalfW), g_frame,\n"
 END_DRAW_CLEAR = "    g_stripArmed = false;   // the draw is made: nothing is armed past it\n"
-SHUTDOWN_CLEAR = "    g_restore = nullptr;\n    g_stripArmed = false;\n}"
+SHUTDOWN_CLEAR = "    g_restore = nullptr;\n    g_stripArmed = false;\n    g_stripReverseU = false;\n}"
+# which way u runs (job 4, the mirror fix)
+XDIR_CALL = "                    const IntroXDir dir = introPlacementXDir(world);\n"
+DIR_UNKNOWN_IF = "                    if (dir == IntroXDir::kUnknown) {\n                        curvedNow = false;\n"
+UNKNOWN_ZERO = "                        world[12] = world[13] = world[14] = world[15] = 0.0f;\n"
+UNKNOWN_NOTED = "                            g_xDirUnknownNoted = true;\n"
+DIR_REVERSE = "                        reverseU = dir == IntroXDir::kLeft;\n"
+REVERSE_SET = "                g_stripReverseU = reverseU;\n"
+REVERSE_RESET_TOP = "    g_stripReverseU = false;\n    if (!introPanelWants() || !ctx) return false;\n"
+REVERSE_RESET_END = "    g_stripArmed = false;   // the draw is made: nothing is armed past it\n    g_stripReverseU = false;\n"
+LOG_DIR_SIDE = '                        reverseU ? "left" : "right",\n'
+LOG_DIR_WAY = '                        reverseU ? "against" : "with");\n'
 GAIN_RET = "float introPanelStripGain() { return kScreenHalfW; }\n"
 RETIRE_ARMED_IF = "            if (g_armedDraws) {\n"
 RETIRE_ARMED_ARG = "                            g_armedDraws);\n"
@@ -334,21 +345,35 @@ MUTANTS = [
     M("gate-follows-the-screens-wants", "curved-stood-down", [(GATE, "                const bool curved = panelCurveWants();\n")], "the screen's own flag decides, not the surface's"),
     M("gate-always-bends", ("golden", "golden-zero"), [(GATE, "                const bool curved = true;\n")], "curvature 0 still bends the movie"),
     # armed, and its scope
-    M("armed-never", "curved", [(ARMED_ON, "                ++g_armedDraws;\n")], "the strip is never armed"),
+    M("armed-never", "curved", [(ARMED_ON, "                g_stripReverseU = reverseU;\n                ++g_armedDraws;\n")], "the strip is never armed"),
     M("armed-in-every-bind", "curved-head", [(ARMED_INIT, "            bool armed = panelCurveSurfaceWanted();\n")], "a size-only bind arms the strip too"),
     M("armed-not-cleared-by-endDraw", "curved", [(END_DRAW_CLEAR, "")], "the strip stays armed after the draw"),
     M("armed-not-reset-by-the-next-call", "curved-armed-scope", [(ARMED_RESET, "")], "a call that binds nothing leaves the last bind's strip armed"),
-    M("armed-survives-shutdown", "curved-armed-scope", [(SHUTDOWN_CLEAR, "    g_restore = nullptr;\n}")], "the shutdown leaves the strip armed"),
+    M("armed-survives-shutdown", "curved-armed-scope", [(SHUTDOWN_CLEAR, "    g_restore = nullptr;\n    g_stripReverseU = false;\n}")], "the shutdown leaves the strip armed"),
     M("armed-from-the-top", ("curved-stock", "curved-head", "curved-splash", "curved-eyes-alike", "curved-refused"),
       [(ARMED_RESET, "    g_stripArmed = panelCurveSurfaceWanted();   // armed is for the bind this call makes, and for no other\n")], "the strip is armed by the curvature alone, bind or no bind"),
     M("gain-is-the-half-height", "curved", [(GAIN_RET, "float introPanelStripGain() { return kScreenHalfH; }\n")], "the strip's depth gain is the panel's half-height"),
     # the lines
     M("armed-line-repeats", "curved-live", [(ARMED_NOTED, "")], "the first-armed line is written at every armed draw"),
     M("armed-line-constant-columns", "curved", [(ARMED_LOG_COLS, "                        64, static_cast<double>(ci.curvature),\n")], "the line says 64 columns whatever is configured"),
-    M("armed-line-gain", "curved", [(ARMED_LOG_GAIN, "                        static_cast<double>(kScreenHalfH), g_frame);\n")], "the line names the panel's half-height as the gain"),
-    M("retirement-count-dropped", ("curved", "curved-live"), [(ARMED_ON, "                g_stripArmed = true;\n")], "the retirement line's count of armed draws is never counted"),
+    M("armed-line-gain", "curved", [(ARMED_LOG_GAIN, "                        static_cast<double>(kScreenHalfH), g_frame,\n")], "the line names the panel's half-height as the gain"),
+    M("retirement-count-dropped", ("curved", "curved-live"), [(ARMED_ON, "                g_stripArmed = true;\n                g_stripReverseU = reverseU;\n")], "the retirement line's count of armed draws is never counted"),
     M("retirement-count-always", "retire-used", [(RETIRE_ARMED_IF, "            if (true) {\n")], "the retirement line counts armed draws even when there were none"),
     M("retirement-count-wrong", ("curved-live", "curved-stood-down"), [(RETIRE_ARMED_ARG, "                            g_applied);\n")], "the armed count in the retirement line is the resized count"),
+    # which way the strip's u runs (job 4, the mirror fix): read from the bound constants, true for the movie's own left-running placement, false for a
+    # right-running one (a reflected pose), a draw that cannot be told is flat and not armed, and the flag is for the armed bind and no other
+    M("reverse-flag-constant-false", "curved", [(REVERSE_SET, "                g_stripReverseU = false;\n")], "u never runs against x: the movie comes out mirrored"),
+    M("reverse-flag-constant-true", "curved-right-running", [(REVERSE_SET, "                g_stripReverseU = true;\n")], "u always runs against x, a placement whose +x runs right included"),
+    M("reverse-flag-inverted", ("curved", "curved-right-running"), [(DIR_REVERSE, "                        reverseU = dir == IntroXDir::kRight;\n")], "u runs with x when +x runs left, and against it when it runs right"),
+    M("direction-assumed-left", ("curved-unknown-xdir", "curved-right-running"), [(XDIR_CALL, "                    const IntroXDir dir = IntroXDir::kLeft;\n")], "the direction is assumed, never read from the constants"),
+    M("unknown-still-armed", "curved-unknown-xdir", [(DIR_UNKNOWN_IF, DIR_UNKNOWN_IF.replace("                        curvedNow = false;\n", ""))], "a placement that cannot be read is armed anyway"),
+    M("unknown-keeps-the-z-column", "curved-unknown-xdir", [(UNKNOWN_ZERO, "")], "an unreadable placement keeps cb2[3] (and is not armed)"),
+    M("unknown-line-repeats", "curved-unknown-xdir", [(UNKNOWN_NOTED, "")], "the unreadable-placement line is written at every such draw"),
+    M("reverse-not-reset-by-the-next-call", "curved-armed-scope", [(REVERSE_RESET_TOP, "    if (!introPanelWants() || !ctx) return false;\n")], "a call that binds nothing leaves the previous bind's direction for u standing"),
+    M("reverse-not-cleared-by-endDraw", "curved", [(REVERSE_RESET_END, END_DRAW_CLEAR)], "the direction for u is still said to be against x after the draw"),
+    M("reverse-survives-shutdown", "curved-armed-scope", [(SHUTDOWN_CLEAR, "    g_restore = nullptr;\n    g_stripArmed = false;\n}")], "the shutdown leaves the direction for u standing"),
+    M("armed-line-side-swapped", ("curved", "curved-right-running"), [(LOG_DIR_SIDE, '                        reverseU ? "right" : "left",\n')], "the first-armed line names the other side for the placement's +x"),
+    M("armed-line-way-swapped", ("curved", "curved-right-running"), [(LOG_DIR_WAY, '                        reverseU ? "with" : "against");\n')], "the first-armed line says u runs the way it does not"),
 ]
 
 # Scenarios no mutation is tied to, and why: they pin something no one-rule edit of the module can break.

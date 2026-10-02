@@ -244,7 +244,7 @@ the choices where the value is a word, and the bounds where they are documented
 in prose rather than declared in code.
 
 ```ini
-# ui: On-foot screen curve | recommended 0.3 | range 0..1
+# ui: Screen curve (on foot, intro, splash) | recommended 0.3 | range 0..1
 panel_curvature = 0.0
 
 # ui: Sun glare | choices vivid, realistic, stock

@@ -39,6 +39,9 @@ public:
     static constexpr uint32_t kSpriteImageCount = 20;
     static constexpr uint32_t kSpriteCrop = 1400;
     static constexpr uint64_t kHolo = 0x81216C77F90DEDD6ull;
+    // The same panels with Elite's Disable GUI effects on (holo_material.h): the pair a run on such a
+    // rig would otherwise miss, vertex shader bytes and surface included.
+    static constexpr uint64_t kHoloGuiFxOff = kHoloGuiFxOffVs;
     static constexpr uint64_t kHud = 0xB7790CBFC6554097ull, kSprite=0xE508648660A352B2ull;
     static constexpr uint64_t kSpritePs=0x63ABD86359B57D01ull;
     static constexpr uint64_t kPanel=0xA888D51024D9798Eull,kScreen=0x4EF6DDB075A927FAull;
@@ -146,6 +149,7 @@ public:
         if(solarDraw(vs))return true;
         switch (vs) {
         case kHolo:
+        case kHoloGuiFxOff:
         case kHud:
         case kSprite:
         case kPanel:
@@ -725,10 +729,10 @@ public:
             if(stride==8 && offset==0)d.mesh[2]=captureMeshBuffer(ctx,dev.Get(),ids.Get(),frame,stride,eyeMesh?d.target:0);
             else ++meshDeclined;
         }
-        if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen || vs==kVscreen) {
+        if (vs==kHolo || vs==kHoloGuiFxOff || vs==kSprite || vs==kPanel || vs==kScreen || vs==kVscreen) {
             const bool spriteSource = vs==kSprite && ps==kSpritePs;
             d.texture=captureSurface(ctx,dev.Get(),frame,
-                                     vs==kHolo?holoSurfaceSlot(ps):vs==kPanel?1:0,
+                                     (vs==kHolo || vs==kHoloGuiFxOff)?holoSurfaceSlot(ps):vs==kPanel?1:0,
                                      vs==kVscreen,spriteSource?kSpriteTextureBytes:0);
         }
         if(vs==kVscreen && sourceFrame==frame && sourceDepth && d.texture!=UINT32_MAX) {

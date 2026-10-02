@@ -836,7 +836,8 @@ Four things about that block:
   census that records offscreen draws whatever `census_offscreen` says
   (`draw_census.cpp:1320-1322`), which is what a compute chain needs.
 - `log.max_mb = 32` is the line Phase 0 above should have carried and did
-  not. The default cap is 4 MB (`log.cpp:105-106`) and a census at 16384
+  not. The default cap was 4 MB when this was written (`log.cpp:105-106`; 16 MB
+  since 2026-10-01) and a census at 16384
   lines is about 2.3 MB (`draw_census.cpp:40-41`), so two or three of them
   plus an ordinary session's log silently stops the writer; a census that
   loses its end line is dropped by the differ rather than half-trusted

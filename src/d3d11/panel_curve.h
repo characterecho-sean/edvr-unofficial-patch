@@ -136,7 +136,7 @@ bool panelCurveReissue(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw);
 // panelCurveSurfaceWanted: fix.panel_curvature above 0 (live) and this consumer has not stood down. False at curvature 0 whatever else is
 // set -- NOT panelCurveWants(), which is also true for the identity test and would swap a placement at 0. One load of a flag that
 // panelCurveConfigure and a stand-down keep (a call, not an inline: a rig that does not link panel_curve.cpp supplies its own).
-// panelCurveSurfaceDraw: build (or rebuild, when curvature, columns, gain or direction changed) the strip, bind it through the same helper
+// panelCurveSurfaceDraw: build (or rebuild, when curvature, columns, gain, direction or reverseU changed) the strip, bind it through the same helper
 // the screen uses, issue (indices, 1, 0, 0, 0) through `draw` -- the thunk's real draw, as for the screen -- and put the game's input
 // assembler state back. The strip is drawn with the game's rasterizer state but CullMode NONE (nobody has recorded this composite's index
 // order or cull mode, and a wrong guess makes the surface vanish): a state equal to the game's in every field but the cull is created once
@@ -146,17 +146,27 @@ bool panelCurveReissue(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw);
 // in +z' moves toward the viewer (the splash's measured convention); -1: a step in -z' does. The strip is the screen's own arc (one
 // generator builds both, so for the same curvature, columns, gain and sign the two are byte for byte the same): x' = sin(theta)/(pi c) and
 // |z'| = gain (1 - cos(theta))/(pi c) with theta = pi c x, the UV from the unbent x, bottom row first, the screen's own index pattern.
+// WHICH WAY u RUNS is the caller's, as the gain and the depth direction are (docs\intro-video.md, the mirror fix). The strip assigns its
+// own texture coordinates, so the picture comes out the right way round only if u runs to the viewer's RIGHT, and that depends on the
+// placement the strip is drawn through. reverseU false: u = (x + 1) / 2, running WITH the strip's local x -- the on-foot screen's, whose +x
+// runs to the viewer's right, byte for byte what the screen's own strip has always been. reverseU true: u = (1 - x) / 2, running AGAINST x
+// -- a placement whose +x runs to the viewer's LEFT, which the intro composite's does (the movie's cb2[1].x is -1/2712, the splash's
+// -0.7807); the game's own six-index quad compensates in its vertex data, and the strip has to do the same. reverseU is derived from the
+// caller's own placement constants (intro_curve_math.h, introPlacementXDir), NEVER a constant, and is part of the strip's key: a flip
+// rebuilds the strip, an unchanged value does not. Nothing but u changes with it (the vertices' positions, v and the index pattern are
+// the same, so the cull-off draw below applies to both).
 // Returns false and draws NOTHING when it cannot -- at curvature 0, stood down, a null argument, a gain that is not a positive number, a
 // direction that is not +-1, a strip or a state that could not be built (the caller then draws the game's own quad: flat, never missing); a
 // fault stands THIS consumer down for the session and puts the game's state back; the screen's strip, gain, ready flag, stand-down and
 // counters are never touched, and a fault of the screen's never stands this down.
 bool panelCurveSurfaceWanted();
-bool panelCurveSurfaceDraw(ID3D11DeviceContext* ctx, float gain, int toward, PanelCurveDrawFn draw);
+bool panelCurveSurfaceDraw(ID3D11DeviceContext* ctx, float gain, int toward, bool reverseU, PanelCurveDrawFn draw);
 struct PanelCurveSurfaceInfo {
-    uint64_t built = 0;          // strips built (a change of curvature, columns, gain or direction builds another)
+    uint64_t built = 0;          // strips built (a change of curvature, columns, gain, direction or reverseU builds another)
     uint64_t drawn = 0;          // strip draws issued, cumulative
     bool standDown = false;      // a fault stood this consumer down for the session
     uint64_t rasterStates = 0;   // rasterizer states created for the cull-off draw (once per distinct state of the game's, not per draw)
+    bool reversed = false;       // the strip in hand runs u against x (reverseU true when it was built); false with none in hand
 };
 PanelCurveSurfaceInfo panelCurveSurfaceInfo();
 

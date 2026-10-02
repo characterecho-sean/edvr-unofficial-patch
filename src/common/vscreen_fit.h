@@ -12,24 +12,30 @@
 // running (experimental.temporal_aa_on_foot_world = auto) the world is RESOLVED at the screen's size and shown to the eye
 // through mips, so a width past what the eye can show only costs: the game renders every on-foot pixel of it (G-buffer,
 // depth, HDR, HUD) and the route resolves and mips it. Sean flew 4032 ("looks fine") and 3504 ("looks great still")
-// with the route on. So when the route will run, the width is the screen's own footprint in eye pixels, A.
+// with the route on. So when the route will run, the width is a share of the screen's own footprint in eye pixels, A: the
+// screen's texture is allowed to be coarser than the eye by the factor 1/m, because the route anti-aliases it.
 //
 // THE RULE.
 //   route will run  ->  width = roundTo16(clamp(m x A, floor, cap)), 16:9, nudged off any size another target has
 //   otherwise       ->  today's rule, unchanged: roundTo16(1.25 x the eye width the runtime last rendered)
-// with m = 1.0 (kMultiplier), floor = 2880 (just over twice the stock detail, the width edvr.ini has always named as the
-// useful minimum), cap = the legacy width (a fit never asks for MORE than the old rule did).
+// with m = 0.70 (kMultiplier: the width is 70% of the screen's head-on footprint, about 1.4 eye pixels per texel; the
+// derivation is at the constants below), floor = 2880 (just over twice the stock detail, the width edvr.ini has always named
+// as the useful minimum), cap = the legacy width (a fit never asks for MORE than the old rule did).
 //
 // A, the screen's width in eye pixels, is MEASURED by the footprint instrument at the composite draw: the four corners of
 // the quad through the composite VS's own constants, horizontal extent in NDC / 2 = the fraction of the eye's width the
 // screen spans. A is that fraction times the eye width. fix.panel_distance scales one float of the composite's
 // placement (its z translation), so the fraction varies as 1/d: the state stores the fraction AT DISTANCE 1.0 and a
-// different panel_distance rescales it without a new measurement. With nothing measured yet the fraction is derived from
-// Sean's calibration point (3504 px at distance 0.7 on a 4032 px eye), which makes the first launch on his rig exactly
-// the width he flew.
+// different panel_distance rescales it without a new measurement. What is stored is the HEAD-ON FLOOR, the 10th percentile
+// (kFootprintQuantile) of the session's on-foot widths, not their median: a head that is not square on to the screen only
+// ever makes it look wider (about 6% at the median), so the low end is the pose-free number. With nothing measured yet the
+// footprint is the calibration point (5006 px at distance 0.7 on a 4032 px eye), which makes the first launch on Sean's
+// rig the 3504 he chose.
 //
 // THE ROUTE'S CONDITIONS at launch (all three, plus what the layer itself needs):
-//   * experimental.temporal_aa_on_foot_world is auto
+//   * experimental.temporal_aa_on_foot_world is auto (its default since 2026-10-01; the resolver's fallback in
+//     vscreen_res.cpp, the route's in vr_world_route.cpp and the shipped edvr.ini say the same, and tools\config_test and
+//     tools\vscreen_fit_test hold them to one answer)
 //   * the UI layer is live: fix.ui_quality is not off, and a temporal mode is on (the layer composites at that pass's door)
 //   * the runtime is EDVR's own OpenXR (not Elite's native Oculus back end, not a foreign openvr_api.dll)
 // and the flat profile never fits (the world route is a VR route).
@@ -56,19 +62,39 @@ namespace edvr {
 namespace vscreenfit {
 
 // ---- the constants of the rule (each pinned by tools\vscreen_fit_test) --------------------------------------------------
-constexpr double kMultiplier = 1.0;          // m: the screen's texels per eye pixel at the middle of the panel
+constexpr double kMultiplier = 0.70;         // m: the screen's texels per eye pixel at the middle of the panel (1/m = 1.43 eye pixels per texel)
 constexpr double kLegacyMultiplier = 1.25;   // today's rule, and the fit's cap
 constexpr uint32_t kFloorWidth = 2880;       // never fit below this (edvr.ini: "just over twice the stock detail")
 constexpr uint32_t kMinWidth = 640;          // vscreen_res.cpp's own bounds
 constexpr uint32_t kMaxWidth = 8192;
 constexpr uint32_t kStep = 16;               // widths are multiples of 16, so width * 9 / 16 is an exact integer
 
-// Sean's calibration point: flown with the route on, "looks great still" -- 3504 px wide (3504x1971) at panel distance
-// 0.7 on a 4032 px per-eye width (Pimax Crystal Super). The footprint at distance 1.0 as a fraction of the eye width.
-constexpr double kSeedWidthPx = 3504.0;
+// THE CALIBRATION. Sean, 2026-10-01: "for my current openxr resolution 3504 should = auto". His rig is a Pimax Crystal Super
+// (4032 px per eye) at fix.panel_distance 0.7 with fix.panel_curvature 0.3, and on the first launch, with nothing stored,
+// auto gives 3504x1971 there; the same arithmetic gives every other eye and distance.
+//   kChosenWidthPx     the width he chose: 3504 (3504x1971), flown with the route on ("looks great still")
+//   kSeedFootprintPx   what the screen spans head-on at that eye and distance, in eye pixels: 5006
+//   kMultiplier        m = 3504 / 5000 = 0.7008, kept as 0.70, so that 0.70 x 5006 = 3504.2, which rounds to 3504
+// Where 5000 and 5006 come from. Sean's two reader logs from that rig (Frontier 20261001_082459 and _100155), the 15 on-foot
+// windows with 12 or more on-foot samples, each normalised to distance 0.7 by the 1/d law: the per-window MINIMA have a median
+// of 4951 (range 4651..5175, one outlier below 4880) and the per-window MEDIANS a median of 5267 (range 5000..6135). A window
+// of about 50 samples has its minimum near its 2nd percentile and its median at its 50th, and head pose only ever inflates
+// the width, so the low end is the number with the head level. A window logs its median and range, not its samples, so the
+// 10th percentile (what is stored) cannot be read back from a log; it is bracketed: a skew above the floor fitted to (min,
+// median) gives p10 = 4991 (an exponential skew) and 5000 (half-normal), and 4985..5002 for 30 to 60 samples a window. The
+// working value is 5000 px at distance 0.7, so m = 3504 / 5000 = 0.7008 -> 0.70, and the seed footprint is the width that
+// makes 0.70 give the chosen 3504: 3504 / 0.70 = 5006 px. The unit fraction below is that footprint at distance 1.0 as a
+// fraction of the eye: 5006 x 0.7 / 4032 = 0.86910. The first session's own p10 replaces the seed; tools\edvr_log.py
+// --vscreen-fit says how far the two are apart (within 5% passes). (A seed left at the WIDTH, 3504, would fit 2453 and floor.)
+constexpr double kChosenWidthPx = 3504.0;
+constexpr double kSeedFootprintPx = 5006.0;
 constexpr double kSeedDistance = 0.7;
 constexpr double kSeedEyeWidthPx = 4032.0;
-constexpr double kSeedFractionAtUnit = kSeedWidthPx * kSeedDistance / kSeedEyeWidthPx;
+constexpr double kSeedFractionAtUnit = kSeedFootprintPx * kSeedDistance / kSeedEyeWidthPx;
+
+// What is stored for the next launch: the 10th percentile of the session's on-foot widths (the head-on floor), tagged `est=p10` in
+// the record so a file written when the median was stored (no tag) is never read as one.
+constexpr double kFootprintQuantile = 0.10;
 
 // What a stored or measured fraction may be: a screen narrower than a twentieth of the eye, or several eyes wide, is a
 // misread, not a screen. The panel distance the rule will rescale by is bounded the same way (edvr.ini asks for 0.5..2.0).
@@ -196,7 +222,7 @@ struct Inputs {
     double distance = 1.0;           // fix.panel_distance
     bool haveFootprint = false;      // a stored measurement
     double fractionAtUnit = 0.0;     // ... as a fraction of the eye width, at panel distance 1.0
-    uint32_t footprintSamples = 0;   // ... and how many samples its session median had
+    uint32_t footprintSamples = 0;   // ... and how many on-foot samples the session's p10 it holds was taken over
     RouteFacts route;
 };
 
@@ -206,7 +232,7 @@ struct Decision {
     uint32_t width = 0, height = 0;
     uint32_t legacyWidth = 0;        // what the old rule gives for this eye, always
     double distance = 1.0;           // the (sanitised) distance the fit was made at
-    double footprintPx = 0.0;        // A: the screen's width in eye pixels at that distance (0 for legacy)
+    double footprintPx = 0.0;        // A: the screen's head-on width in eye pixels at that distance (0 for legacy)
     double targetPx = 0.0;           // m x A, before the floor and the cap
     bool floored = false, capped = false;
     uint32_t nudgedFrom = 0;         // nonzero: the rounded width was this, another target's size, and moved
@@ -288,8 +314,8 @@ inline Footprint footprintOfQuad(const float model[12], const float clip[16], co
 }
 
 // ---- the session's samples -------------------------------------------------------------------------------------------------
-// A bounded store of footprint fractions whose median survives a long session: when it fills, every second sample is dropped
-// and only every second new one is kept after that, so what it holds is an even thinning of the whole session.
+// A bounded store of footprint fractions whose median and percentiles survive a long session: when it fills, every second
+// sample is dropped and only every second new one is kept after that, so what it holds is an even thinning of the whole session.
 class FractionStore {
 public:
     static constexpr uint32_t kCap = 2048;
@@ -321,6 +347,25 @@ public:
         if (out) *out = m;
         return true;
     }
+    // The q-quantile, q in [0, 1] (a NaN or an out-of-range q is the nearest end): linear interpolation between the order
+    // statistics at position q x (n - 1), numpy's default, so a reader can reproduce it from the samples. False, and *out left
+    // alone, for an empty store. percentile(0.5) is the median; percentile(0.10) is what a session stores (kFootprintQuantile).
+    bool percentile(double q, double* out) const {
+        if (!n_) return false;
+        if (!(q > 0.0)) q = 0.0;
+        else if (q > 1.0) q = 1.0;
+        float tmp[kCap];
+        std::memcpy(tmp, v_, n_ * sizeof(float));
+        const double pos = q * static_cast<double>(n_ - 1);
+        const uint32_t lo = static_cast<uint32_t>(pos);
+        const uint32_t hi = lo + 1 < n_ ? lo + 1 : lo;
+        std::nth_element(tmp, tmp + lo, tmp + n_);
+        const double a = tmp[lo];
+        // After nth_element everything past `lo` is at least tmp[lo], so the next order statistic is the smallest of the rest.
+        const double b = hi == lo ? a : static_cast<double>(*std::min_element(tmp + hi, tmp + n_));
+        if (out) *out = a + (b - a) * (pos - static_cast<double>(lo));
+        return true;
+    }
     bool range(double* lo, double* hi) const {
         if (!n_) return false;
         const float* a = std::min_element(v_, v_ + n_);
@@ -337,15 +382,19 @@ private:
 };
 
 // ---- the stored measurement (vscreen_auto_footprint.txt, beside vscreen_auto_eye_width.txt) ----------------------------
+// One line of key=value text, `fraction=0.869097 est=p10 eye=4032 distance=0.700 samples=188`. The `est=p10` tag says WHICH
+// estimate the fraction is: a build that stored the session's median wrote the same line without it, and that number is about
+// 6% above the head-on floor this one stores, so parseRecord refuses a record that does not carry the tag (the seed applies
+// until a session measures a p10).
 struct Record {
-    double fractionAtUnit = 0.0;   // the footprint as a fraction of the eye width, at panel distance 1.0
+    double fractionAtUnit = 0.0;   // the footprint (p10) as a fraction of the eye width, at panel distance 1.0
     uint32_t eyeWidth = 0;         // the eye width it was measured against (informational: the fraction does not depend on it)
     double distance = 1.0;         // the panel distance of the draws it was measured at (informational)
-    uint32_t samples = 0;          // the on-foot samples its median had
+    uint32_t samples = 0;          // the on-foot samples its p10 was taken over
 };
 
 inline int formatRecord(char* out, size_t size, const Record& r) {
-    return std::snprintf(out, size, "fraction=%.6f eye=%u distance=%.3f samples=%u\n", r.fractionAtUnit, r.eyeWidth, r.distance,
+    return std::snprintf(out, size, "fraction=%.6f est=p10 eye=%u distance=%.3f samples=%u\n", r.fractionAtUnit, r.eyeWidth, r.distance,
                          r.samples);
 }
 
@@ -353,6 +402,7 @@ inline bool parseRecord(const char* text, Record* out) {
     if (!text) return false;
     Record r;
     bool haveFraction = false;
+    bool haveEstimator = false;    // the last `est=` token says exactly p10
     for (const char* p = text; *p;) {
         while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
         if (!*p) break;
@@ -365,6 +415,8 @@ inline bool parseRecord(const char* text, Record* out) {
         if (keyLen == 8 && std::strncmp(p, "fraction", 8) == 0) {
             r.fractionAtUnit = std::strtod(eq + 1, &tail);
             haveFraction = tail != eq + 1;
+        } else if (keyLen == 3 && std::strncmp(p, "est", 3) == 0) {
+            haveEstimator = (end - (eq + 1)) == 3 && std::strncmp(eq + 1, "p10", 3) == 0;
         } else if (keyLen == 3 && std::strncmp(p, "eye", 3) == 0) {
             r.eyeWidth = static_cast<uint32_t>(std::strtoul(eq + 1, &tail, 10));
         } else if (keyLen == 8 && std::strncmp(p, "distance", 8) == 0) {
@@ -374,7 +426,7 @@ inline bool parseRecord(const char* text, Record* out) {
         }
         p = end;
     }
-    if (!haveFraction || !plausibleFraction(r.fractionAtUnit)) return false;
+    if (!haveFraction || !haveEstimator || !plausibleFraction(r.fractionAtUnit)) return false;
     if (out) *out = r;
     return true;
 }
@@ -389,19 +441,26 @@ inline int formatRuleLine(char* out, size_t size, const Decision& d, uint32_t ey
     std::snprintf(head, sizeof(head), "vScreen resolution: auto = %u wide: rule=%s source=%s route=%s eye=%u distance=%.3f legacy=%u", d.width,
                   ruleName(d.rule), sourceName(d.source), d.route.runs ? "run" : "no", eyeWidth, d.distance, d.legacyWidth);
     if (d.rule == Rule::Fitted) {
-        char tail[640];
+        char source[320];
+        if (d.source == Source::Measured)
+            std::snprintf(source, sizeof(source),
+                          "The footprint is the head-on floor (p10) of the on-foot widths a previous session measured (vscreen footprint lines), "
+                          "rescaled to this distance.");
+        else
+            std::snprintf(source, sizeof(source),
+                          "Nothing has been measured on this install yet, so the footprint is the calibration point (%.0f px head-on at distance "
+                          "%.1f on a %.0f px eye, which fits %.0f wide) scaled to this eye and distance; this session's vscreen footprint lines "
+                          "measure it.",
+                          kSeedFootprintPx, kSeedDistance, kSeedEyeWidthPx, kChosenWidthPx);
+        char tail[800];
         std::snprintf(tail, sizeof(tail),
-                      " footprint=%.0f m=%.2f floor=%u cap=%u clamp=%s%s -- FITTED: the on-foot screen spans about %.0f px of the %u px each eye shows "
-                      "at fix.panel_distance %.3f, so that is the width (%.2f x it, rounded to a multiple of 16, never under %u or over the "
-                      "legacy %u). The world route will run, so the 125%% oversample the legacy rule adds is not needed. %s",
+                      " footprint=%.0f m=%.3f floor=%u cap=%u clamp=%s%s -- FITTED: the on-foot screen spans about %.0f px of the %u px each eye "
+                      "shows, head-on at fix.panel_distance %.3f, so the width is %.3f x that (rounded to a multiple of 16, never under %u or over "
+                      "the legacy %u), about %.2f eye pixels per texel. The world route will run, so the 125%% oversample the legacy rule adds is "
+                      "not needed. %s",
                       d.footprintPx, kMultiplier, kFloorWidth, d.legacyWidth,
                       d.floored ? "floor" : (d.capped ? "cap" : "none"), d.nudgedFrom ? " nudged=yes" : "", d.footprintPx, eyeWidth,
-                      d.distance, kMultiplier, kFloorWidth, d.legacyWidth,
-                      d.source == Source::Measured
-                          ? "The footprint is the on-foot median a previous session measured (vscreen footprint lines) rescaled to this "
-                            "distance."
-                          : "Nothing has been measured on this install yet, so the footprint is the calibration point (3504 px at distance "
-                            "0.7 on a 4032 px eye) scaled to this eye and distance; this session's vscreen footprint lines measure it.");
+                      d.distance, kMultiplier, kFloorWidth, d.legacyWidth, 1.0 / kMultiplier, source);
         const int n = std::snprintf(out, size, "%s%s", head, tail);
         if (d.nudgedFrom && n > 0 && static_cast<size_t>(n) + 200 < size)
             return n + std::snprintf(out + n, size - static_cast<size_t>(n),
@@ -418,7 +477,8 @@ inline int formatRuleLine(char* out, size_t size, const Decision& d, uint32_t ey
 // The in-headset menu's hint for the row (a 200 byte buffer): what auto resolves to and under which rule.
 inline int formatHint(char* out, size_t size, const Decision& d) {
     if (d.rule == Rule::Fitted)
-        return std::snprintf(out, size, "Currently resolves to %ux%u: fitted to the width the on-foot screen has in your view%s.", d.width, d.height,
+        return std::snprintf(out, size, "Currently resolves to %ux%u: fitted to about %.0f%% of the on-foot screen's width in your view%s.", d.width,
+                             d.height, kMultiplier * 100.0,
                              d.source == Source::Measured ? "" : " (an estimate until a session on foot has measured it)");
     return std::snprintf(out, size, "Currently resolves to %ux%u: 125%% of the eye width (the world route will not run).", d.width, d.height);
 }
@@ -429,9 +489,9 @@ inline int formatArmedLine(char* out, size_t size) {
     return std::snprintf(out, size,
                          "vscreen footprint: armed -- fix.vscreen_res_width is auto. Sampling the 2D screen's composite (vs 5C36AF05 ps CFE84157) about "
                          "twice a second: the quad's four corners through the composite's own constants (cb0 rows 9..11, cb1 rows 270..273, the quad and "
-                         "its SIZE), a width in eye pixels. Every 30 s: a `vscreen footprint 30s:` line; the on-foot median is stored beside the eye "
-                         "width, and the next launch's auto width fits it when the world route will run (the `vScreen resolution:` line says which "
-                         "rule).");
+                         "its SIZE), a width in eye pixels. Every 30 s: a `vscreen footprint 30s:` line; the on-foot head-on floor (p10) is stored "
+                         "beside the eye width, and the next launch's auto width fits it when the world route will run (the `vScreen resolution:` "
+                         "line says which rule).");
 }
 inline int formatNotArmedLine(char* out, size_t size, const char* width) {
     return std::snprintf(out, size,
@@ -443,6 +503,19 @@ inline int formatStoodDownLine(char* out, size_t size) {
     return std::snprintf(out, size,
                          "vscreen footprint: STOOD DOWN after faults in the instrument -- no more samples this session; the stored footprint, if any, "
                          "stands.");
+}
+
+// A save of the stored record that did not reach the file (vscreen_footprint.cpp prints this for the first kSaveFailedLineCap failures of a
+// session and then stays quiet; every 30 s line from the first failure on carries save-failed=N, the count so far). Its first words are not
+// the reader's arming words (armed / not armed / STOOD DOWN), so it never reads as an arming line. win32Error is what the writer reported
+// (vscreen_auto_state.cpp: the Win32 error of the step that failed; ERROR_INVALID_DATA for a fraction it refuses to store).
+constexpr uint32_t kSaveFailedLineCap = 3;
+inline int formatSaveFailedLine(char* out, size_t size, uint32_t win32Error, uint32_t failedSoFar) {
+    return std::snprintf(out, size,
+                         "vscreen footprint: SAVE FAILED (Win32 error %u) -- the on-foot footprint did not reach vscreen_auto_footprint.txt: the file keeps its "
+                         "previous value, and the next 30 s window tries again. Failed saves this session: %u; the 30 s lines carry save-failed=N from now on, "
+                         "and persisted=no (or the last value that did reach the file) until a save succeeds.%s",
+                         win32Error, failedSoFar, failedSoFar >= kSaveFailedLineCap ? " No more of these lines this session." : "");
 }
 
 struct WindowLine {
@@ -459,12 +532,13 @@ struct WindowLine {
     double footFrac = 0, footLo = 0, footHi = 0, footH = 0;
     bool haveOther = false;
     double otherFrac = 0;
-    // the session's on-foot median at distance 1.0, how many samples, and what the file holds
+    // the session's on-foot p10 (the head-on floor, kFootprintQuantile) at distance 1.0, how many samples, and what the file holds
     bool haveSession = false;
     double sessionFrac1 = 0;
     uint32_t sessionN = 0;
-    bool persisted = false;
+    bool persisted = false;          // something has reached the file this session (persistedFrac1 is the last value that did)
     double persistedFrac1 = 0;
+    uint32_t saveFailed = 0;         // saves that failed so far this session; the token is printed only when this is above 0
     uint32_t fitWidth = 0, legacyWidth = 0;
 };
 
@@ -490,10 +564,14 @@ inline int formatWindowLine(char* out, size_t size, const WindowLine& w) {
         else std::snprintf(other, sizeof(other), " other-frac=%.4f", w.otherFrac);
     }
     if (w.haveSession) std::snprintf(sess, sizeof(sess), "session-n=%u session-frac1=%.4f", w.sessionN, w.sessionFrac1);
-    char persisted[40] = "persisted=no";
+    char persisted[72] = "persisted=no";
     if (w.persisted) std::snprintf(persisted, sizeof(persisted), "persisted=%.4f", w.persistedFrac1);
+    if (w.saveFailed) {   // only after a failure: a line with none is byte for byte what it was
+        const size_t used = std::strlen(persisted);
+        std::snprintf(persisted + used, sizeof(persisted) - used, " save-failed=%u", w.saveFailed);
+    }
     char fit[96] = "fit=-";
-    if (w.fitWidth) std::snprintf(fit, sizeof(fit), "fit=%u legacy=%u m=%.2f floor=%u", w.fitWidth, w.legacyWidth, kMultiplier, kFloorWidth);
+    if (w.fitWidth) std::snprintf(fit, sizeof(fit), "fit=%u legacy=%u m=%.3f floor=%u", w.fitWidth, w.legacyWidth, kMultiplier, kFloorWidth);
     char why[110] = "";
     if (w.skipWhy[0]) std::snprintf(why, sizeof(why), " why=%s", w.skipWhy);
     char applied[24] = "-";

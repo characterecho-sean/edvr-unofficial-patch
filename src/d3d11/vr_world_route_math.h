@@ -8,7 +8,7 @@
 //
 // WHAT IS HERE, all pure (tools\vr_world_route_test drives every function, and the runtime calls the very same
 // code):
-//   - the key: experimental.temporal_aa_on_foot_world, off (the default) or auto;
+//   - the key: experimental.temporal_aa_on_foot_world, auto (the default since 2026-10-01) or off;
 //   - the ownership machine: the route treats frames, is WARM after kVrWorldWarmFrames treated frames in a row,
 //     OWNS the world from then on, and is released by the gate, the layer, a scene reset, a run of frames it did not
 //     treat, or the late-write latch. Only an owned route moves the eye shift and the screen draws;
@@ -21,7 +21,6 @@
 // leaves Off, owned() is false, the eye shift is never suppressed, the layer is never told the world is the route's,
 // and the door never runs layer-only. The rig pins each answer.
 #pragma once
-#include "../common/temporal_math.h"   // kTemporalJitterCount: the window's default phase count
 #include "flat_hdr_route.h"
 #include "flat_mono_refusal.h"   // the stage 2 experiment build's pixel classes and the census's counters (pure)
 #include <cstdint>
@@ -32,9 +31,9 @@
 namespace edvr {
 
 // ---- the key ---------------------------------------------------------------------------------------------
-// experimental.temporal_aa_on_foot_world: auto (the route where it applies) or off. Off by default: the route has
-// not flown. A key that is absent reads as the default; a value that is present and is not "auto" reads as off, so a
-// typo leaves on-foot VR exactly as it was and never switches the route on by accident.
+// experimental.temporal_aa_on_foot_world: auto (the route where it applies) or off. Auto by default since 2026-10-01 (the
+// route has flown; off is kept for one release candidate as the way back). A key that is absent reads as the default; a
+// value that is present and is not "auto" reads as off, so a typo leaves on-foot VR exactly as it was before the route.
 enum class VrWorldKey : uint8_t { Off, Auto };
 inline VrWorldKey vrWorldKeyFromText(const char* text) {
     if (!text) return VrWorldKey::Off;
@@ -277,15 +276,11 @@ struct VrWorldWindow {
     // phase its rows carried (render pixels, positive right/down), and the fold-in's mode counts.
     const char* jitter = "idle";
     float phaseX = 0.0f, phaseY = 0.0f, rowsX = 0.0f, rowsY = 0.0f;
-    // How many phases the route's sequence ran through (temporal_math.h): the route resolves at the game's render size, render ==
-    // output, so the ratio rule gives the fixed eight whatever experimental.temporal_aa_jitter_follows_upscale says. A default-
-    // constructed window says eight, the count every path has always run.
-    uint32_t phases = kTemporalJitterCount;
     uint64_t foldMode[3] = {};    // frames whose resolve ran the weapon fold-in with mode 0, 1, 2 (FlatMonoResolveFrame::firstPersonPhaseMode)
-    // The stage 2 experiment build: the state of experimental.temporal_aa_on_foot_world_steady_detail at the boundary that printed the
-    // line (vrWorldSteadyKeyName: "on" or "off"; the key defaults to on, and off is the route as flight 2 flew it). A window nothing has
-    // set (a default-constructed one) says off: the boundary sets it from the key before every line.
-    const char* steady = "off";
+    // The steady-detail token of the 5 s line. The depth-checked steady detail is always on in this build (its key is retired), so the
+    // route never sets this and every line it prints says "on". The token stays because tools\edvr_log.py parses "on" and "off" and has
+    // to keep reading the logs of builds that had the key; only a rig that models such a log sets "off".
+    const char* steady = "on";
     // The screen's curve at the boundary that printed the line (vrWorldFormatCurve: "off", "pending", "stood-down" or "C/S/G") and
     // how many strips the route's layer re-issued in the window (panel_curve.h panelCurveReissue). A default-constructed window says
     // off and 0: the boundary sets both before every line.
@@ -315,7 +310,7 @@ inline int vrWorldFormatWindow(char* out, size_t size, VrWorldKey key, VrWorldSt
         "vr world route 5s: key=%s state=%s layer=%s gate=%s frames=%llu gate-frames=%llu gate-flips=%llu hdr-frames=%llu trigger=%llu "
         "none=%llu ambiguous=%llu treated=%llu declined=%llu owned-frames=%llu eye-takes=%llu door-layer-only=%llu "
         "enters=%llu releases=%llu (last=%s) scene-resets=%llu late-hdr-writes=%llu (in %llu frames) last=%s "
-        "phases=%u jitter=%s phase=%.4f,%.4f rows=%.4f,%.4f fp-mode=%llu/%llu/%llu steady-detail=%s curve=%s curve-reissues=%llu "
+        "jitter=%s phase=%.4f,%.4f rows=%.4f,%.4f fp-mode=%llu/%llu/%llu steady-detail=%s curve=%s curve-reissues=%llu "
         "last-trigger=VS=%016llX PS=%016llX target=%ux%u hdr=%ux%u selection=",
         vrWorldKeyName(key), vrWorldStateName(state), layerLive ? "live" : "not-live", gate ? "held" : "no",
         static_cast<unsigned long long>(w.hdr.frames), static_cast<unsigned long long>(w.gateFrames),
@@ -327,7 +322,7 @@ inline int vrWorldFormatWindow(char* out, size_t size, VrWorldKey key, VrWorldSt
         static_cast<unsigned long long>(w.layerOnly), static_cast<unsigned long long>(w.enters),
         static_cast<unsigned long long>(w.releases), w.lastRelease, static_cast<unsigned long long>(w.resets),
         static_cast<unsigned long long>(w.hdr.lateWrites), static_cast<unsigned long long>(w.hdr.lateWriteFrames),
-        w.hdr.lastVerdict, w.phases, w.jitter, static_cast<double>(w.phaseX), static_cast<double>(w.phaseY),
+        w.hdr.lastVerdict, w.jitter, static_cast<double>(w.phaseX), static_cast<double>(w.phaseY),
         static_cast<double>(w.rowsX), static_cast<double>(w.rowsY), static_cast<unsigned long long>(w.foldMode[0]),
         static_cast<unsigned long long>(w.foldMode[1]), static_cast<unsigned long long>(w.foldMode[2]), w.steady,
         w.curve, static_cast<unsigned long long>(w.curveReissues),
@@ -409,29 +404,15 @@ inline int vrWorldFormatFirstTrigger(char* out, size_t size, uint64_t frame, con
 }
 
 // ---- stage 2: the world jitter (design doc section 82, stage 2) ---------------------------------------------------------
-// experimental.temporal_aa_on_foot_world_jitter: on (the default) or off. While the route owns the world, "on" puts the
-// sub-pixel phase into the world's cameras through the camera injector (flat_camera_inject.h), and the resolver gets that
-// phase for its jitter input and for the rows; "off" keeps the route and zeroes the phase, which is flight 1's unjittered
-// world, so one session can compare the two at the same spot. A value that is present and is not "on" reads as off: a typo
-// can never start writing the game's cameras. (experimental.temporal_aa_jitter, the global jitter key, off also means off.)
-enum class VrWorldJitterKey : uint8_t { Off, On };
-inline VrWorldJitterKey vrWorldJitterKeyFromText(const char* text) {
-    if (!text) return VrWorldJitterKey::Off;
-    const char* on = "on";
-    for (; *on; ++on, ++text) {
-        char c = *text;
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-        if (c != *on) return VrWorldJitterKey::Off;
-    }
-    return *text == 0 ? VrWorldJitterKey::On : VrWorldJitterKey::Off;
-}
-inline const char* vrWorldJitterKeyName(VrWorldJitterKey key) { return key == VrWorldJitterKey::On ? "on" : "off"; }
+// The route has no jitter key of its own. While it owns the world (Warming or Owned) it puts the sub-pixel phase into the world's
+// cameras through the camera injector (flat_camera_inject.h), and the resolver gets that phase for its jitter input and for the
+// rows. The one thing that stops it is the global jitter key: experimental.temporal_aa_jitter off keeps the route and zeroes the
+// phase, which is flight 1's unjittered world.
 
 // What the route decides about the world phase for the frame that starts. Only On asks the injector to write a camera.
 enum class VrWorldJitter : uint8_t {
     On,         // inject kind-3 screen-view calls before the trigger with this frame's phase
-    KeyOff,     // experimental.temporal_aa_on_foot_world_jitter is off: the route runs unjittered (nothing is installed for it)
-    GlobalOff,  // experimental.temporal_aa_jitter is off
+    GlobalOff,  // experimental.temporal_aa_jitter is off: the route runs unjittered (nothing is installed for it)
     Idle,       // the route is not Warming or Owned (or its key is off): nothing to jitter
     Unnamed,    // the route is Warming or Owned but the last frame named no source for the screen (a map, a menu, a transition):
                 // the window stays shut, through the route's grace frames, until a frame names one again
@@ -443,22 +424,20 @@ enum class VrWorldJitter : uint8_t {
 // refreshed before the pass that draws with it), so the frame that starts cannot be asked;
 // a map frame refreshes about thirty kind-3 cameras and must never pick up the world's phase, so the window opens only after
 // a frame that named its source and stays shut after one that did not (design-world-camera-motion-2026-09-30.md section 5).
-inline VrWorldJitter vrWorldJitterDecide(bool routeKeyAuto, VrWorldJitterKey jitterKey, bool globalJitter,
+inline VrWorldJitter vrWorldJitterDecide(bool routeKeyAuto, bool globalJitter,
                                          bool routeWantsInjection, bool namedLast, bool hookLive, bool fault) {
     if (!routeKeyAuto) return VrWorldJitter::Idle;
     if (fault) return VrWorldJitter::Fault;
-    if (jitterKey != VrWorldJitterKey::On) return VrWorldJitter::KeyOff;
     if (!globalJitter) return VrWorldJitter::GlobalOff;
     if (!routeWantsInjection) return VrWorldJitter::Idle;
     if (!namedLast) return VrWorldJitter::Unnamed;
     if (!hookLive) return VrWorldJitter::NoHook;
     return VrWorldJitter::On;
 }
-// The token of the 5 s line (jitter=): on, off (either key), idle, unnamed, no-hook, fault.
+// The token of the 5 s line (jitter=): on, off (the global jitter key off), idle, unnamed, no-hook, fault.
 inline const char* vrWorldJitterName(VrWorldJitter j) {
     switch (j) {
         case VrWorldJitter::On: return "on";
-        case VrWorldJitter::KeyOff:
         case VrWorldJitter::GlobalOff: return "off";
         case VrWorldJitter::Idle: return "idle";
         case VrWorldJitter::Unnamed: return "unnamed";
@@ -595,7 +574,7 @@ inline int vrWorldFormatUnnamedOpen(char* out, size_t size, uint64_t frame, cons
         static_cast<unsigned long long>(frame), f.sceneInjected, f.firstPersonInjected);
 }
 // STOP: camera calls were injected on a frame whose window the route had shut (an unnamed frame before it, a route that was not
-// Warming or Owned, a jitter key off). The route switches the injector off for the session.
+// Warming or Owned, the global jitter key off). The route switches the injector off for the session.
 inline int vrWorldFormatStopShut(char* out, size_t size, uint64_t frame, const char* decision, const VrWorldInjectFrame& f) {
     return std::snprintf(out, size,
         "vr world route: STOP at frame=%llu: %u scene and %u first-person camera call(s) were INJECTED on a frame whose window the "
@@ -616,42 +595,15 @@ inline int vrWorldFormatRowsMismatch(char* out, size_t size, uint64_t frame, flo
 }
 
 // ---- the stage 2 experiment build (design doc section 82) ------------------------------------------------------------------
-// experimental.temporal_aa_on_foot_world_steady_detail: on (the default since flight 4) or off. Flight 2's shimmer on fine patterns is the prep
-// refusing the history of a pixel whose engine slot a LATER draw overdrew (the slot's depth is no longer the pixel's) and the finish
-// then showing the raw jittered input there (flight 3 confirmed it at the main menu: 5.674% of the pixels, all stale, calm with the key
-// on). "on" gives those pixels the camera term instead, but only where last frame's depth confirms it (the depth at the position the
-// camera term sends the pixel to matches the depth this surface would have had there had it not moved, within 1%: the depth-validated
-// steady detail; the blanket form was flight 3's experiment); where it does not the pixel is refused as before. Only the stale-slot
-// refusal is relaxed: a masked record, a corrupt slot, the sky and the weapon's pixels stay refused. A lateral mover's interior can
-// still pass the depth test and ghost while it is on (flight 4: none seen). Read only while the route key is auto. A file with no line
-// reads on (the reader's fallback); a value that is present and is not "on" reads as off, a typo included, which is the refusal exactly
-// as before the key existed. The in-headset menu's developer mode flips it live, like the jitter key.
-enum class VrWorldSteadyKey : uint8_t { Off, On };
-inline VrWorldSteadyKey vrWorldSteadyKeyFromText(const char* text) {
-    if (!text) return VrWorldSteadyKey::Off;
-    const char* on = "on";
-    for (; *on; ++on, ++text) {
-        char c = *text;
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-        if (c != *on) return VrWorldSteadyKey::Off;
-    }
-    return *text == 0 ? VrWorldSteadyKey::On : VrWorldSteadyKey::Off;
-}
-inline const char* vrWorldSteadyKeyName(VrWorldSteadyKey key) { return key == VrWorldSteadyKey::On ? "on" : "off"; }
-// The key's state at the boundary that first read it with the route on, and each change after: one line, saying what the state does.
-inline int vrWorldFormatSteadyChanged(char* out, size_t size, uint64_t frame, VrWorldSteadyKey key) {
-    if (key == VrWorldSteadyKey::On)
-        return std::snprintf(out, size,
-            "vr world route: steady-detail is ON from frame=%llu (experimental.temporal_aa_on_foot_world_steady_detail): a pixel whose "
-            "engine slot a later draw overdrew takes the camera term instead of refusing its history where last frame's depth confirms "
-            "it, and is refused where it does not; masked records and corrupt slots stay refused; a lateral mover's interior can still "
-            "pass the depth test and ghost",
-            static_cast<unsigned long long>(frame));
-    return std::snprintf(out, size,
-        "vr world route: steady-detail is OFF from frame=%llu (experimental.temporal_aa_on_foot_world_steady_detail): a pixel whose "
-        "engine slot a later draw overdrew refuses its history, as in flight 2",
-        static_cast<unsigned long long>(frame));
-}
+// The depth-validated steady detail is always on: the key that once chose it (on by default since flight 4) is retired, and the route's
+// resolve is handed steadyDetail = true. Flight 2's shimmer on fine patterns is the prep refusing the history of a pixel whose engine
+// slot a LATER draw overdrew (the slot's depth is no longer the pixel's) and the finish then showing the raw jittered input there
+// (flight 3 confirmed it at the main menu: 5.674% of the pixels, all stale, calm with the rule on). The rule gives those pixels the
+// camera term instead, but only where last frame's depth confirms it (the depth at the position the camera term sends the pixel to
+// matches the depth this surface would have had there had it not moved, within 1%: the depth-validated steady detail; the blanket form
+// was flight 3's experiment); where it does not the pixel is refused as before. Only the stale-slot refusal is relaxed: a masked
+// record, a corrupt slot, the sky and the weapon's pixels stay refused. A lateral mover's interior can still pass the depth test and
+// ghost (flight 4: none seen).
 // The refusal view (advanced.temporal_aa_debug = motion_source while the route resolves): said when it comes on and when it goes off.
 inline int vrWorldFormatViewChanged(char* out, size_t size, uint64_t frame, bool on) {
     if (on)
@@ -663,14 +615,16 @@ inline int vrWorldFormatViewChanged(char* out, size_t size, uint64_t frame, bool
     return std::snprintf(out, size, "vr world route: the refusal view is OFF from frame=%llu", static_cast<unsigned long long>(frame));
 }
 // The third line of a 5 s window, printed while the refusal census is wanted (advanced.vr_camera_census on), while samples of a census
-// that has just gone off are still draining, and while the steady-detail key is on (its depth check's own frames are counted
-// whatever the census asks): an absent line is "the census and the key were off", and a line with sampled=0 is "on, and no sample was
-// read back" -- the two are never the same text, and a census that ran and found nothing says so with pixels > 0 and refused=0.
-// `treated` is the route's own count of treated frames in the window; asked, sampled, dropped and read are the resolver's
-// (flat_mono_refusal.h FlatMonoRefusalCensus). The stale pixels are two numbers: `stale-refused` (refused: with the key off all of
-// them, with it on the ones last frame's depth did not confirm) and `stale-kept` (not refused: the camera term, confirmed). `depth-check`
-// is ran/skipped: the resolves with the key on whose prep ran the depth check, and those that could not (no last-frame depth). The
-// reader (edvr_log.py --camera-census) parses this text; it still reads the flight-3 spellings `stale=` and `forgiven=`.
+// that has just gone off are still draining, and while the steady detail's depth check has frames to count (they are counted whatever
+// the census asks): an absent line is "the census was off and the resolver counted no frame", and a line with sampled=0 is "on, and no
+// sample was read back" -- the two are never the same text, and a census that ran and found nothing says so with pixels > 0 and
+// refused=0. `treated` is the route's own count of treated frames in the window; asked, sampled, dropped and read are the resolver's
+// (flat_mono_refusal.h FlatMonoRefusalCensus). The stale pixels are two numbers: `stale-refused` (refused: the ones last frame's depth
+// did not confirm; in the log of a build that had the key set off, all of them) and `stale-kept` (not refused: the camera term,
+// confirmed). `depth-check` is ran/skipped: the resolves whose prep ran the depth check, and those that could not (no last-frame depth).
+// The `steady-detail=` token says "on" in every line this build writes (the rule has no key now). The reader (edvr_log.py
+// --camera-census) parses it, "on" and "off", so it still reads the logs of builds that had the key, and the flight-3 spellings
+// `stale=` and `forgiven=`.
 struct VrWorldRefusalWindow {
     bool census = false;                  // the census key is on at the boundary that printed the line
     uint64_t treated = 0;
@@ -680,7 +634,7 @@ struct VrWorldRefusalWindow {
     uint64_t pixels = 0;                  // what the read-back samples examined
     uint64_t counts[kFlatMonoRefusalSlots] = {};
     uint64_t checked = 0, skipped = 0;    // the resolver's depth-check frames this window (FlatMonoRefusalCensus::checked, skipped)
-    const char* steady = "off";           // vrWorldSteadyKeyName at the boundary
+    const char* steady = "on";            // always on in this build; only a rig that models an older log sets "off"
     const char* view = "off";             // "on" while the refusal view is painting
 };
 inline uint64_t vrWorldRefusalTotal(const VrWorldRefusalWindow& w) {

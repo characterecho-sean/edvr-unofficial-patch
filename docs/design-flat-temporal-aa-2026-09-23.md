@@ -5,7 +5,7 @@
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
   build `d0898e1b`. The chronology (26-77) is verbatim in Status detail below;
-  the evidence is in sections 1-83.
+  the evidence is in sections 1-84.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -45,17 +45,19 @@
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
-  lost ~23 ms (ReShade). 80-81 flown. 82: (f') CONFIRMED; fix FLOWN, DEFAULT ON;
-  vscreen auto-fit (fitted width) and the curved route BUILT 10-01, unflown.
+  lost ~23 ms (ReShade). 80-81 flown. 82: (f') CONFIRMED; fix FLOWN, DEFAULT ON.
+  10-01 BUILT, NOT FLOWN: the vscreen auto-fit (3504 on Sean's rig: m 0.70 on
+  the p10 floor), the curved route, and the cleanup (three experimental keys
+  retired, the route auto and the maps gate on by default; sections 82, 84).
   83 (an rc.5 user, SS 0.85 on a 16:10 screen): flat R < D by structure, the
   real cause in the messages, a VR Supersampling warning: BUILT 10-01
-  (claude/flat-upscale), NOT FLOWN.
-- **Jitter phases (section 84, 2026-10-01):** suspect (g) of section 82 as a
-  switch, `experimental.temporal_aa_jitter_follows_upscale` (off by default,
-  byte-identical): ceil(8 x ratio^2) phases for the VR eye pass and the flat
-  upstream route, eight for the world route. ON MAIN 08b48036; FLOWN 10-01:
-  no visible change on the distant hills (section 84's end), so suspect (g)
-  is ruled out for the hills.
+  (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
+  changes cause (a loading screen's size flipped it five times in 9 s).
+- **Jitter phases (section 84, 2026-10-01):** the phase-count switch flew with
+  no visible change on the hills and is REMOVED (fixed eight phases, byte-
+  identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
+  checkerboard rendering (halves distant terrain's horizontal samples; turning
+  it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
 - **Compatibility decision, environment:** moved to Status detail 2026-10-01.
 
 ## Status detail (moved out of Status 2026-09-29)
@@ -7576,14 +7578,15 @@ and mips it, and the eye shows about 3500 of it. Flown with the route on: 4032
 wide "looked fine", 3504x1971 "looks great still" (Frontier, 02c1c456, log
 060703). `fix.vscreen_res_width = auto` now fits the screen to what the eye
 shows whenever the route will run and keeps today's rule otherwise. Explicit
-widths are exact; the flat profile never arms any of it.
+widths are exact; the flat profile never arms any of it. CALIBRATED 2026-10-01
+(THE CALIBRATION, below): auto is 3504 on Sean's rig, the width he chose.
 
 THE RULE (`src\common\vscreen_fit.h`, pure; `tools\vscreen_fit_test` runs the
 very code the DLL runs).
 - The route will run, at launch, when ALL hold: `experimental.
-  temporal_aa_on_foot_world` is auto; `fix.panel_curvature` is 0 (the route
-  stands aside for a curved screen; ONE named function, `routeStandsAsideFor
-  Curve`, delete it with the curve-aware re-issue); the UI layer is live
+  temporal_aa_on_foot_world` is auto (its default since 2026-10-01); the curve
+  is NOT a condition (the curved route dropped it, below: the route re-issues a
+  curved screen, and `routeStandsAsideForCurve` is gone); the UI layer is live
   (`fix.ui_quality` on, a temporal mode on, the jitter switches as shipped:
   the layer's own `uiLayerNotLiveReasonFor`); the runtime is EDVR's OpenXR.
   That last one cannot be read at device creation (the module list is empty
@@ -7591,27 +7594,70 @@ very code the DLL runs).
   undecided, not a failure: the eye width on record is only ever written by
   EDVR's runtime. Elite's native Oculus back end, or a foreign openvr_api.dll,
   fails it. Else: today's rule, unchanged: roundTo16(1.25 x the eye).
-- Fitted width = roundTo16(clamp(m x A, 2880, cap)), 16:9, m = 1.0, cap = the
-  legacy width (a fit never asks for more than the old rule did), nudged off
+- Fitted width = roundTo16(clamp(m x A, 2880, cap)), 16:9, m = 0.70 (2026-10-01;
+  it was 1.0), A the screen's head-on footprint in eye pixels, cap = the legacy
+  width (a fit never asks for more than the old rule did), nudged off
   1920x1080 and 3840x2160 (the only 16:9 sizes the game's own targets took in
   four flights' logs; the world-screen gate and the panel recognition key on
   the panel's size). A small eye whose cap is under 2880 gets the legacy width.
-- A = fraction x eye width / d. The fraction is the screen's width as a share of
-  the eye's at panel distance 1.0: the distance override scales one float of
-  the composite's placement (its z translation), so the footprint varies as
-  1/d, and the stored fraction rescales to a changed `fix.panel_distance` or
-  eye width with no new measurement.
-- Nothing measured yet: the fraction is Sean's calibration point (3504 px at
-  0.7 on a 4032 eye = 0.6083), so the FIRST launch on his rig is 3504x1971,
-  the width he flew. m = 1.0 is that by construction. His measured A is not
-  known until the flight: if it reads other than 3504 (3%), the reader prints
-  the m that reproduces 3504 (`kMultiplier`, one constant; his call).
+- A = fraction x eye width / d. The fraction is the screen's head-on width as a
+  share of the eye's at panel distance 1.0: the distance override scales one
+  float of the composite's placement (its z translation), so the footprint
+  varies as 1/d, and the stored fraction rescales to a changed
+  `fix.panel_distance` or eye width with no new measurement.
+- Nothing measured yet: the seed is a footprint, 5006 px at 0.7 on a 4032 eye
+  (0.8691 of the eye at distance 1.0), which is Sean's chosen 3504 divided by m,
+  so the FIRST launch on his rig is 3504x1971. (Until 2026-10-01 the seed was the
+  width itself with m = 1.0; measured, the screen spans 5000-6100 px on that rig at
+  0.7, so a measured footprint at m = 1.0 would have fitted 5040.)
 
 THE LINE. `vScreen resolution: auto = N wide: rule=fitted|legacy source=seed|
 measured|none route=run|no eye= distance= legacy= [footprint= m= floor= cap=
-clamp= nudged=] -- prose`. It names the rule, the numbers it was made from and,
-for legacy, EVERY route condition that failed. An explicit width prints
-`vScreen resolution: explicit N wide`. The in-headset menu's hint says the same.
+clamp= nudged=] -- prose`, m printed to three decimals (the reader recomputes the
+width from it). It names the rule, the numbers it was made from and, for legacy,
+EVERY route condition that failed. An explicit width prints
+`vScreen resolution: explicit N wide`. The in-headset menu's hint says the same
+(about 70% of the screen's width in your view).
+
+THE CALIBRATION (2026-10-01; BUILT, NOT FLOWN). Sean: "for my current openxr
+resolution 3504 should = auto". His rig: Pimax Crystal Super, eye 4032 px,
+`fix.panel_distance` 0.7, curvature 0.3. The measurement is trustworthy: it repeats
+across sessions, follows 1/d to 1.1%, and is inflated about 6% by head pose (the 15
+on-foot windows with 12 or more samples in Frontier 082459 and 100155, normalised to
+0.7: window medians 5000-6135, median 5267; the lowest sample of each window 4651-5175,
+median 4951; the stored session medians 0.889 and 0.939). So the plan's m = 1.0
+could not give 3504 (5267 px against 3504), and the reader's SHAPE STOP was the
+check's fault, not the instrument's: head pose inflates the height at first order
+(+2.3% per degree of yaw) and the width at second order, the eye's pixels are square
+(1894 against 1893 px per unit tangent, so 16:9 is the right reference), and the 10746
+px "window 10" was ONE sample, which alone drove the 102% "between windows" figure.
+DECIDED (Sean's 3504; the overseer's choice of estimator): store the 10th percentile of
+the session's on-foot widths (the head-on floor, `kFootprintQuantile`) instead of the
+median, which removes the pose inflation and most of the scatter (a median file gave
+3408 or 3600 at m = 0.665 from session to session). A window logs its median and
+range, not its samples, so p10 cannot be read back from a log; it is bracketed from
+(min, median) of each window: an exponential skew above the floor gives 4991, a
+half-normal one 5000, 4985..5002 for 30 to 60 samples a window. Working value 5000
+px at 0.7, so m = 3504 / 5000 = 0.7008, kept as 0.70, and the seed footprint is
+3504 / 0.70 = 5006 px (0.8691 of the eye at distance 1). The rig pins m 0.70, seed
+5006, chosen 3504; the auto width from the seed on a 4032 eye is 3504 at 0.7, 3776 at
+0.65, 4096 at 0.6, 3072 at 0.8, 2880 from 0.85 up (the floor); a 2064 px eye is the
+legacy 2576 either way. The first session's own p10 replaces the seed, and
+CALIBRATION says how far apart they are (within 5% passes).
+ruled out: the instrument as the cause of the SHAPE STOP, because the aspect reads
+1.55-1.80 only through head pose (the median shape is -5% to -7% off 16:9).
+ruled out: the curved composite as the shape cause (the instrument reads the game's
+flat quad and curvature 0 shows the same spread), clipping (the corners come from
+unclipped arithmetic), and "other" samples mixing in.
+ruled out: m = 1.0 with the median, because the median is pose-inflated and noisy
+(5121-5409 across two stored sessions) and 3504 is 0.665 of it, not 1.0; and m =
+0.665 with the median, because it still scatters 3408-3600 session to session.
+ruled out: a seed left at the width (3504), because m x 3504 = 2453 floors at 2880.
+An OLD stored file (written when the median was stored) is never read as a p10:
+the record carries `est=p10` and `parseRecord` refuses one without it, so Sean's
+file (`fraction=0.889105`, a median; honoured it would fit 3584 at 0.7 and 3856 at
+0.65) reads as no record and the seed applies until a session on foot measures a
+p10. The reader's changes are under THE READER.
 
 THE INSTRUMENT (`src\d3d11\vscreen_footprint.cpp`). At the 2D screen's
 composite (vs 5C36AF05, ps CFE84157; after the game's own issue) the quad's four
@@ -7636,37 +7682,57 @@ skipped= late= [why=reason:n,..] draws= distance= applied= eye=WxH fp= frac=
 range=lo..hi h= shape= [other-fp=] at1= frac1= session-n= session-frac1=
 persisted= fit= legacy= m= floor=`. fp: the on-foot median in eye pixels;
 shape: its pixel aspect, 1.778 when the corner arithmetic and the eye size
-agree; at1/frac1: at panel distance 1; persisted: what the file holds; fit:
-what the next launch fits if the route runs. Menu and on-foot samples are kept
+agree; at1/frac1: at panel distance 1; session-n/session-frac1: the session's
+on-foot p10 (the head-on floor) at distance 1; persisted: what the file holds;
+fit: what the next launch fits if the route runs. Menu and on-foot samples are kept
 apart (the layer's world-screen gate, else the journal's); only on foot is
 stored, from 12 samples up. If it never ran there is no `vscreen footprint`
 line at all, not even `vscreen footprint: armed --`; armed with no composite
 seen prints draws=0; seen but unreadable prints skipped= with why=.
 
 PERSISTENCE. `edvr_logs\vscreen_auto_footprint.txt`, beside
-`vscreen_auto_eye_width.txt`: `fraction=0.608333 eye=4032 distance=0.700
-samples=177`, the session's on-foot median at distance 1.0, rewritten when it
-moves 0.2%. A garbled or implausible (outside 0.05..3.0) file is no measurement.
+`vscreen_auto_eye_width.txt`: `fraction=0.869097 est=p10 eye=4032 distance=0.700
+samples=177`, the session's on-foot p10 at distance 1.0, rewritten when it moves
+0.2%. A garbled or implausible (outside 0.05..3.0) file is no measurement, and so
+is one without `est=p10` (a median, written before 2026-10-01). A save is a temp file
+(`vscreen_auto_footprint.txt.tmp`) moved over the file in one write-through step and
+is acknowledged (`persisted=`) only when the whole record reached it; a failed save (a
+locked destination, a directory in its place) leaves the old file exactly as it was,
+logs `vscreen footprint: SAVE FAILED (Win32 error N)` (three a session), adds
+`save-failed=N` to the 30 s lines and is retried at the next window even when the p10
+has not moved (release review R2, confirmed on main 73e02a7b; the reader's STORED
+WARNs on the token). A build before this printed `persisted=<value>` whether or not
+the write happened.
 
 THE READER. `python tools\edvr_log.py --target frontier --vscreen-fit
---expect-build HEAD`: RULE (the width recomputed from the line's own tokens, and
-what the panel patch applied), INSTRUMENT, ON FOOT, STABLE (under 2%), SHAPE
-(16:9 within 3%), DISTANCE LAW (frac1 within 2% across distances), CALIBRATION
-(3504 within 3% at the calibration point), STORED. The census verdict's NDC
-figure read a literal 5040x2835; it now takes the route lines' hdr=, else the
-JITTERED line, else the panel patch's size, else says it does not know.
+--expect-build HEAD`: RULE (the width recomputed from the line's own tokens, to
+16 px, and what the panel patch applied), INSTRUMENT, ON FOOT, STABLE (the windows'
+distance-normalised medians within 8%), SHAPE (the median window shape against
+16:9 x fx/fy, from the graphics log's `native benchmark workload: ... game FOV
+radians` line, else square pixels: PASS from -9% to +3%, WARN to +-15%, STOP beyond),
+DISTANCE LAW (frac1 within 2% across distances), CALIBRATION (the stored p10 against
+the seed footprint, 5% at a 4032 px eye), STORED. ON FOOT, STABLE and SHAPE use only
+windows with 12 or more on-foot samples. A log from a build before the calibration
+(its windows print m=1.00 and stored a median) reads CALIBRATION n/a and STORED
+"MEDIAN" rather than a false PASS. On Sean's two older logs: 100155 STABLE PASS 7.3%,
+SHAPE PASS -5.1%; 082459 STABLE WARN 18.3% (head turning), SHAPE PASS -7.1%. The
+census verdict's NDC figure read a literal 5040x2835; it now takes the route lines'
+hdr=, else the JITTERED line, else the panel patch's size, else says it does not
+know.
 
-GATES. `tools\vscreen_fit_test` (201 checks; `mutants.py --run`: 76 mutants of
-the header and the wiring pins, all caught), `tools\vscreen_footprint_glue_test`
-(the real glue on WARP with the four sources at their real offsets, the stored
-file, the defective sources, the fault budget, then the real reader over its
-log), `config_test` pins the resolver's route-key fallback to the shipped
-default, the reader's self-test, `tools\vscreen_fit_fixture.log` held to the
-formatters.
+GATES. `tools\vscreen_fit_test` (293 checks; `mutants.py --run`: 147 mutants of
+the header, the state writer and the wiring pins, all caught),
+`tools\vscreen_footprint_glue_test` (57 checks: the real glue on WARP with the four
+sources at their real offsets, the stored file, the defective sources, the fault
+budget, a skewed session whose p10 is 0.67 f where the median would be 0.85 f, a
+locked destination in the first persisting window, then the real reader over its
+log), `config_test`
+pins the resolver's route-key fallback to the shipped default, the reader's
+self-test, `tools\vscreen_fit_fixture.log` held to the formatters.
 
-NOT KNOWN, and which line reads it. (1) The footprint's absolute value on
-Sean's rig: the seed is the width he flew, not a measurement (`fp=`,
-CALIBRATION). (2) That the on-foot and menu footprints agree (`other-fp=` against
+NOT KNOWN, and which line reads it. (1) The p10 itself on Sean's rig: it is
+estimated from the windows' minima and medians (THE CALIBRATION), and the first
+session after this build measures it (`session-frac1=`, CALIBRATION). (2) That the on-foot and menu footprints agree (`other-fp=` against
 `fp=`). (3) The 1/d law (`frac1=` across a leg at another distance). (4) The
 quad's corners at +-1 with SIZE in a float2 slot, from panel_curve's flights
 (`shape=`). (5) What a narrower screen costs elsewhere: it sizes every
@@ -7683,8 +7749,10 @@ A. Delete `edvr_logs\vscreen_auto_footprint.txt`, `vscreen_res_width = auto`.
    3504x1971, the armed line, then windows with `on-foot` above 0, `skipped=0`,
    `late=0`, `persisted=` a number. Exit.
 A2. Restart, same ini, no edits. Expect `source=measured` and the width the
-   measurement gives: roundTo16(A) (3504 when A is 3504 +-8; 3520 at 3512..3527).
-   CALIBRATION is the verdict on m. This is the leg that matters.
+   measurement gives: roundTo16(0.70 x the stored p10) (3504 when the p10 reads
+   5000-5012 px at 0.7). CALIBRATION is the verdict on m. This is the leg that
+   matters. (The old stored file is a median and is ignored; delete or rename it
+   for a clean leg A anyway.)
 B. Restart with `vscreen_res_width = 5040` (explicit; the cost leg): the same
    spot and view. Compare the `EDVR GPU census:` lines (the world resolve, the
    mips, the world layer, ms a frame) and the `native benchmark:` windows
@@ -7692,8 +7760,9 @@ B. Restart with `vscreen_res_width = 5040` (explicit; the cost leg): the same
    and Sean's eye on the text: 3504 against 5040.
 C. Restart with `panel_curvature = 0.3`, auto: expect `rule=legacy route=no`,
    5040x2835, the prose naming `fix.panel_curvature is above 0`, and no route.
-D. (cheap, same spot) Restart at `panel_distance = 1.0`: `footprint=` near 2450
-   under the 2880 floor (clamp=floor), DISTANCE LAW PASS: frac1 matches A2's.
+D. (cheap, same spot) Restart at `panel_distance = 1.0`: the target near 2450
+   under the 2880 floor (clamp=floor), `footprint=` near 3500, DISTANCE LAW PASS:
+   frac1 matches A2's.
 PASS: A shows the fitted seed line and a stored measurement; A2's CALIBRATION is
 PASS (else Sean picks 3504 or the measurement); STABLE and SHAPE PASS; C names
 the failed condition. FAIL: no `vscreen footprint` line (never ran), draws=0 (the
@@ -7966,6 +8035,53 @@ pin, `panel_curve_test` C2); the one addition is the footprint call, armed only
 when the fit is. NOT COVERED by a rig: the draw in the game (no flight yet), and
 the strip's index order against the game's culling (flown at 0.3 in August on
 the on-foot composite, not re-proved here).
+
+THE CLEANUP (2026-10-01; branch `claude/key-cleanup-defaults`, BUILT, NOT FLOWN).
+Sean approved each item after its key and its behaviour were quoted to him.
+REMOVED, the behaviour each one chose is now permanent and has no key.
+`experimental.temporal_aa_on_foot_world_jitter` (on|off, default on): the route
+always jitters the world's cameras while it is Warming or Owned; only the global
+`experimental.temporal_aa_jitter` off stops it (`jitter=off` on the 5 s line, the
+route then resolves an unjittered world as flight 1 did).
+`experimental.temporal_aa_on_foot_world_steady_detail` (on|off, default on; read
+by this route and by the flat runtime on foot): the depth-checked steady detail
+is always on, in VR and in flat. Both callers hand the resolver `steadyDetail =
+true`; the resolver's own field and shader contract stay (the rigs drive it both
+ways) and so does the flat 3D menu's blanket `staticScene` policy. The
+`steady-detail=on` tokens of the 5 s lines stay, constant, because the reader
+parses them and has to keep reading the logs of builds that had the key; the
+key-change log lines are gone. Section 84's phase switch
+(`experimental.temporal_aa_jitter_follows_upscale`) is removed in the same
+commit, with the finding that made it pointless (section 84, end).
+DEFAULTS FLIPPED, the keys kept for one release candidate as the way back:
+`experimental.temporal_aa_on_foot_world` is auto (was off) and
+`experimental.on_foot_maps_sharp` is on (was off; the maps arc, design-world-
+camera-motion-2026-09-30.md). Both still need the UI layer live (`fix.ui_quality`
+on, a temporal mode on), so an install with `fix.temporal_aa = off`, the shipped
+default, keeps the two-eye route; it now logs the route's 5 s lines (zeros) and
+one line saying why the route stays off. The vscreen auto-fit's route condition
+flipped in the same commit (a width fitted for a route that does not run would be
+wrong; config_test and R12b hold the resolver's and the route's fallbacks to the
+shipped file).
+WHAT AN EXISTING INI SEES (installer_test pins each). The three removed keys were
+live lines under [experimental] in every install, so the merge carries each with
+its value under "# carried over from your edvr.ini; this version no longer uses
+it", reports it as a retired setting (a hand-installed file with no base copy
+reports it as a key this version never shipped), and the runtime's config audit
+names it in the log as a line this build does not read. An install whose route
+and maps lines still say what the previous version shipped (off), with the
+installer's base copy kept, moves to auto and on and the report says so. A
+hand-installed file with no base copy keeps its off (the merge over-preserves, as
+it did for `fix.ui_quality`), and so does a value somebody chose; a deleted line
+stays deleted and the code's fallback then answers auto and on.
+PINS. `retiredKeyScan` in config_test (the three names appear in no source, the
+installer's included, and not in the shipped ini, with its own control); the
+key-on rigs became the permanent pins: vr_world_route_test (the decision takes no
+key; steady detail unconditional), vr_world_route_gpu_test (the world is jittered
+with the route on, the global key off still zeroes it, the refusal line appears
+with the census off), flat_hdr_route_tests (both resolver-frame fill sites set
+steadyDetail true, no key read); `vr_world_route_test\mutants.py` 46 mutants, 8
+new, all caught.
 
 ## 83. Flat upscaling: the final copy admitted by structure (build, 2026-10-01)
 
@@ -8268,6 +8384,44 @@ for `dlaa` below the output (it stays refused with the old words).
   the panel would keep a stale bitmap on the headsets that run Supersampling
   below 1. The toast, the log line and the Status hint add no line.
 
+F8 WARNING DEBOUNCE (2026-10-01; claude/key-cleanup-defaults, BUILT, NOT FLOWN).
+Sean's flat flight on the Epic install (`edvr_gfx_20261001_103559.log`, build
+6ABE8A79) showed the render-size warning flipping five times in nine seconds,
+10:38:16.516 to 10:38:25.594, between "Elite renders 1440x810 on a 3840x2160
+screen" and a transient 256x256, a loading screen's target. The scene's size moves
+only when a final copy is evaluated: every frame while the work is treated, but
+only on the stand-down's probe frames (every 1500 ms) while it is stood down, so
+each transient was the computed cause for exactly one probe interval (1.509 s and
+1.521 s). No real state that carries a message lasted under 3.0 s in that session
+(1440x810 shown for 3.01, 3.04 and 10.58 s; the show already waits 5 s).
+THE RULE (`flat_elite_settings.h` `FlatWarnHold`, asked by `menu.cpp`
+`flatWarningTick` once a tick, before its own comparison): while a warning is on
+show and the runtime is still refusing, a different computed warning key is adopted
+only after it has been the computed key on every tick for 2000 ms
+(`kFlatWarnHoldMs`, two agreeing probes: 0.48 s above the transients, 1.0 s below
+the shortest real shown state). A key that comes back to the shown one drops the
+change; a third key restarts the clock; show and hide stay immediate. Replayed at
+the log's stamps the rig gives zero adoptions and the shown key never leaves
+1440x810 (tick steps of 1, 7, 16 and 33 ms); controls: a hold of 0 reproduces the
+log's four changes, 1500 lets both transients through, 1999 ms holds and 2000
+adopts; 19 mutants of the header and menu.cpp, each caught. The log: a bounded
+line (8 a session, beside the 24 of the shown, changed and hidden lines) when a
+change starts being held, "flat settings warning: a change of cause is held for
+2000 ms before it replaces the one on show (on show: ...; computed now: ...)"; it
+starts with neither shown, changed nor hidden, so the `--flat-upscale` reader counts
+no warning from it. If the hold never ran, a flight like 103559 shows one `shown`
+and four `changed` lines in nine seconds and no `held` line; with it, two `held`
+lines and no `changed`. A flight with no transient shows neither.
+ruled out: a loading-screen size filter, because 256x256 is square on a 16:9 output
+and every other size seen is exactly 16:9, so the aspect cannot tell a transient from a
+mis-shaped real resolution, and a size floor alone would make those probes "no
+scene", which HIDES the warning: a different flicker.
+ruled out: a hold of 1.5 s or less, because the transients last one probe interval, so
+1.5 s passes both (a 10-20 ms margin) and 1.0 s passes half of one.
+Residual, recorded: two consecutive transient probes would pass; a no-scene probe
+still hides and re-shows; a change the user makes (the mode, an Elite setting) also
+waits 2 s before the words change. Neither of the first two was seen.
+
 ## 84. Jitter phases follow the upscale ratio: a switch to fly (build, 2026-10-01)
 
 Suspect (g) of section 82. Sean's VR cockpit, landed: an eye render of
@@ -8401,3 +8555,107 @@ input resolution, about 21.6 input px per degree. HMD Image Quality 0.65
 helped, and the flat game at about 32 px per degree does not shimmer. Proposed: the
 switch goes in the cleanup build and the fixed 8 stays, since there is no
 visible benefit and the flat light-grid risk above is unflown.
+
+ROOT CAUSE, 2026-10-01 (ruled in): Elite's own terrain checkerboard rendering.
+The game option is `TerrainCheckerboardRenderingEnabled` in the active graphics
+preset's fxcfg (Sean's `Custom.4.4.fxcfg`, line 4). With it on, distant terrain
+reaches EDVR with half its horizontal samples: neighbours in the raw input pair
+up beyond about 20 m. There is no pairing in y, in the cockpit or in the sky.
+DLSS cannot steady an input that is paired like that, so the distant hills
+shimmer. Sean turned the option off in the game and the shimmer went: "That fixed
+it!". His flat game did not shimmer with the same settings folder, which is why
+the hint that follows is VR only. The option's default per preset, read from the
+Epic install's `OptionDefaults\*.fxcfg`: true in Low, Mid, VRLow, VRMedium,
+VRHigh and VRUltra, false in High and Ultra, so a VR player on any stock VR preset
+has it on until they change it. Settings.xml carries a tag of the same name that
+reads true on every machine seen, Sean's included, and is not the toggle: the
+game's options screen fills its UI key from the active preset's file (read from
+the exe's disassembly, 4.4.1.1; no consumer of the Settings.xml tag was found).
+ruled in: Elite's terrain checkerboard rendering as the cause of the VR distant
+hills' shimmer, because turning it off removed the shimmer with nothing else
+changed.
+ruled out (stays): too few jitter phases as the cause (suspect (g)), because 32
+phases at the same spot made no visible difference (above).
+
+THE SWITCH IS REMOVED (claude/key-cleanup-defaults, 2026-10-01).
+`experimental.temporal_aa_jitter_follows_upscale` and the ratio-based phase path
+are gone: the source of 2630bdfd reverted (`temporalJitterPhaseCount`,
+`temporalJitterPhase(n, count)`, `flatCameraPhaseCount`, the phase machine's
+count, the VR eye pass's count and its log lines, the `phases=` tokens), and
+`jitter_phase_mutants.py` with its `build.bat` lines. The fixed eight Halton
+(2,3) phases stay, byte-identical to the switch off, and no log carries a phase
+count now (nothing in `tools\edvr_log.py` read one). It flew with no visible
+change, and the shimmer it was built for was the checkerboard. The unflown flat
+light-grid risk above (a phase out to 0.496 under the 120-pixel tiles) goes with
+it. An existing ini that carries the line keeps it as a retired setting ("carried
+over from your edvr.ini; this version no longer uses it", pinned in
+`installer_test`).
+
+THE VR HINT (2026-10-01; claude/key-cleanup-defaults, BUILT, NOT FLOWN). With the
+option on in VR, EDVR now says so: a headset toast once per raise of the option, the
+Status page's hint, and one log line. VR only (the flat game did not shimmer), no new
+key. WHAT IS READ: the toggle is the ACTIVE PRESET's file, never Settings.xml's tag of
+the same name. Settings.xml is asked for `<PresetName>` and nothing else. Custom: the
+highest `Custom.<major>.<minor>.fxcfg` in `Options\Graphics`, only names of exactly
+that shape (the lookalikes `-Custom.4.0.fxcfg`, `Custom.4.0.fxcfg-backup`,
+`Custom.4.4.fxcfg.baseline-bak-...` and `TomCatT.4.0.fxcfg0` are never read). A stock
+preset: `<game folder>\OptionDefaults\<Preset>.fxcfg` (the exe's folder), where Low,
+Mid and every VR preset (VRLow, VRMedium, VRHigh, VRUltra) have it ON and High and
+Ultra OFF: a VR player on a stock VR preset has the shimmer until they change it.
+Unknown, with the reason in words and no notice: no folder, no Settings.xml, no
+PresetName, no Custom file, an unreadable file, a user-made preset, an absent tag, an
+odd value. The reader calls `flat_elite_settings.h`'s helpers and copies none.
+WHERE IT RUNS: a detached worker thread polls every 3 s (the render thread loads one
+atomic word holding the state and a version) with the journal worker's lifetime
+(exception net, stop flag, wake event, never-freed session, the pinned module). The
+game rewrites Settings.xml and then the preset in place at Apply, so a read can catch
+a half-written file: the worker reads again every poll and leaves a known state for
+Unknown only when two reads in a row say Unknown. It starts from the first VR frame
+boundary (the menu's tick); the flat profile never starts it. THE NOTICE (the VR
+supersampling notice's path): the toast, once per RAISE (Off and then On says it
+again; the latch is set before the `menu.toasts` test), "Distant terrain shimmers:
+turn off terrain checkerboard" (55 characters); the Status hint, which REPLACES the
+existing hint text and adds no line, "Turn off terrain checkerboard rendering in
+Elite's graphics options." (68 of the 78); the log sentence "Elite's terrain
+checkerboard rendering makes distant terrain shimmer with DLSS. Turn it off in
+Elite's graphics options." The hint is a live predicate, so it ends when the option
+does. One hint slot, two possible hints: the one that applies shows, and when the
+supersampling notice applies too they alternate every 6 s. The words say "terrain
+checkerboard rendering": no game file names the option's label (the UI strings are in
+compressed assets; the exe has the phrase only as a GPU profiler pass name), so the
+real label is not confirmed. The hint shows on any VR run with the option on:
+nothing checks the selected temporal mode.
+THE LOG: `vr terrain checkerboard:` lines, the worker's start, the first read and each
+change (16 at most, then a limit line). No such line at all means the worker never
+started (a flat session, an older build, or no VR menu tick); "read, off" is a line
+too. `python tools\edvr_log.py --target frontier --expect-build HEAD
+--terrain-checkerboard` reads them (exit 1 with no line).
+GATES. `tools\terrain_checkerboard_test`: 188 checks over 6 cases (fixtures written to
+a temp directory: Custom true and false, the highest version winning with the
+lookalikes ignored, preset Custom with no Custom file, a missing Settings.xml or
+folder, stock VR and non-VR presets, a stock preset with no file, an absent tag, value
+spellings, CRLF, BOM, indentation, Settings.xml's own tag not changing the answer,
+rewriting the file flipping the state and re-arming the toast, the worker on a real
+log, the texts' lengths, the alternation) and 102 mutants, all caught; the `menu.cpp`
+wiring is held by source pins. On Sean's real files the reader says OFF (Custom,
+`Custom.4.4.fxcfg`, false); on the Epic install's OptionDefaults Low, Mid and VR* say
+ON and High and Ultra OFF.
+ruled out: Settings.xml's own `TerrainCheckerboardRenderingEnabled` as the toggle,
+because it reads true on every machine seen (Sean's, with the option off, included)
+and the options screen fills its UI key from the preset's file.
+ruled out: reading the files on the render thread; the worker is the only reader.
+ruled out: a note on every settings page or a Status line, because of the menu bitmap's
+2048-px height guard (section 83); the hint replaces text and adds no line.
+ruled out: guessing the game's default for an absent tag, because the default (true
+for a fresh preset struct) is inferred from the exe, never seen in a file, and an
+inference raises no notice. Section 83's "Elite's settings file for the VR
+Supersampling warning" is not contradicted: that was about a fact the runtime
+measures (the sizes); this option's state can be read only from the file.
+NOT KNOWN: the option's label in the game's menu; the game's own version, so the
+highest Custom file stands in for the exact `Custom.<major>.<minor>` match.
+FLIGHT (Frontier, VR, the on-foot or cockpit view): with the option ON in the active
+preset (a stock VR preset, or the Custom file with true) expect `vr terrain
+checkerboard: ... ON`, one toast in the headset and the hint on the Status page; turn
+the option off in Elite's graphics options and Apply: within about 6 s the log says
+OFF and the hint is gone; turn it on again and the toast comes again. Read with the
+command above; the distant hills' shimmer is Sean's eye.

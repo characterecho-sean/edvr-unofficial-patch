@@ -174,11 +174,14 @@ void*    g_restore = nullptr;    // the game's buffer, for endDraw
 uint32_t g_applied = 0;
 
 // The curved movie. g_stripArmed: the bind in progress (OnComposite true, EndDraw not yet called) carries the z column, so the caller draws
-// the bent strip in place of the quad. g_armedDraws: how many binds were armed, for the retirement line. The note is once per process, as
-// every line in this file is.
+// the bent strip in place of the quad. g_stripReverseU: and the strip's texture coordinate u runs AGAINST its x, because the placement just
+// bound has its +x running to the viewer's left (introPlacementXDir; the movie's always does, the game's own convention on both of its panels).
+// g_armedDraws: how many binds were armed, for the retirement line. The notes are once per process, as every line in this file is.
 bool     g_stripArmed = false;
+bool     g_stripReverseU = false;
 uint32_t g_armedDraws = 0;
 bool     g_armedNoted = false;
+bool     g_xDirUnknownNoted = false;
 
 // (Is this buffer the movie's screen-space placement, and not a world-space one? That rule lives in intro_curve_math.h now --
 // introCbLooksScreenSpace -- so the refusal below and the splash's reading share it. The discriminator is the perspective divide: a
@@ -479,6 +482,7 @@ void introPanelNoteFill(uint32_t targetW, uint32_t targetH) {
 bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                            uint32_t instances, uint32_t srvW, uint32_t srvH) {
     g_stripArmed = false;   // armed is for the bind this call makes, and for no other
+    g_stripReverseU = false;
     if (!introPanelWants() || !ctx) return false;
     // The composite's shape, from the census: a six-index instanced quad.
     if (kind != 'X' || count != 6 || instances != 1) return false;
@@ -546,8 +550,10 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
         if (s->ready && s->ours) {
             // This bind carries the curved strip's z column (cb2[3]): the
-            // caller draws the bent strip in place of the quad.
+            // caller draws the bent strip in place of the quad, with its
+            // texture coordinate u running against x when reverseU.
             bool armed = false;
+            bool reverseU = false;
             // The world panel is rebuilt EVERY draw -- the view moves with
             // the head, which is the entire point -- so the buffer is
             // dynamic and written here rather than baked once.
@@ -613,6 +619,40 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     cb->Release();
                     return;
                 }
+                // WHICH WAY u RUNS. The strip assigns its own texture
+                // coordinates, so the picture comes out the right way round
+                // only if u runs to the viewer's right, and the movie's
+                // placement has its +x running to the viewer's LEFT (the
+                // game's convention on both of its panels). Read from the
+                // floats about to be bound -- the same two terms the
+                // splash's reading uses -- never assumed: left means u runs
+                // against x, right means with it. A placement that reads as
+                // neither (the panel seen edge-on, a head tilted a quarter
+                // turn) is not bent for this draw: cb2[3] stays zero, the
+                // draw is flat and not armed, and a draw that cannot be
+                // told is better flat than mirrored.
+                bool curvedNow = curved;
+                if (curvedNow) {
+                    const IntroXDir dir = introPlacementXDir(world);
+                    if (dir == IntroXDir::kUnknown) {
+                        curvedNow = false;
+                        world[12] = world[13] = world[14] = world[15] = 0.0f;
+                        if (!g_xDirUnknownNoted) {
+                            g_xDirUnknownNoted = true;
+                            Log::get().note(
+                                "intro video curve: the movie's placement "
+                                "does not read as running left or right on "
+                                "the screen (the panel is seen edge-on, or "
+                                "the head is tilted a quarter turn), so the "
+                                "movie is flat for this draw rather than "
+                                "bent the wrong way round. The movie is "
+                                "still held on the game's forward. Said "
+                                "once.");
+                        }
+                    } else {
+                        reverseU = dir == IntroXDir::kLeft;
+                    }
+                }
                 D3D11_MAPPED_SUBRESOURCE m{};
                 if (FAILED(ctx->Map(s->ours, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) ||
                     !m.pData) {
@@ -634,7 +674,7 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         static_cast<double>(yawDeg), g_frame,
                         s->leftEye ? "left" : "right");
                 }
-                armed = curved;
+                armed = curvedNow;
             }
             g_restore = cb;
             ID3D11Buffer* ours = s->ours;
@@ -642,6 +682,7 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             bound = true;
             if (armed) {
                 g_stripArmed = true;
+                g_stripReverseU = reverseU;
                 ++g_armedDraws;
                 if (!g_armedNoted) {
                     g_armedNoted = true;
@@ -651,10 +692,13 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         "strip at curvature %.3f, gain %.3f m (the panel's "
                         "half-width), its ends bent toward you -- the "
                         "on-foot screen's own arc, from panel frame %u. The "
-                        "movie is still held on the game's forward. Said "
-                        "once.",
+                        "placement's +x runs to the viewer's %s, so the "
+                        "strip's u runs %s x. The movie is still held on the "
+                        "game's forward. Said once.",
                         ci.segments, static_cast<double>(ci.curvature),
-                        static_cast<double>(kScreenHalfW), g_frame);
+                        static_cast<double>(kScreenHalfW), g_frame,
+                        reverseU ? "left" : "right",
+                        reverseU ? "against" : "with");
                 }
             }
             if (++g_applied == 1) {
@@ -703,10 +747,13 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 bool introPanelStripArmed() { return g_stripArmed; }
 
+bool introPanelStripReverseU() { return g_stripReverseU; }
+
 float introPanelStripGain() { return kScreenHalfW; }
 
 void introPanelEndDraw(ID3D11DeviceContext* ctx) {
     g_stripArmed = false;   // the draw is made: nothing is armed past it
+    g_stripReverseU = false;
     if (!ctx) return;
     introUpscaleEnd(ctx);
     if (g_restore) {
@@ -875,6 +922,7 @@ void introPanelShutdown() {
     g_slotCount = 0;
     g_restore = nullptr;
     g_stripArmed = false;
+    g_stripReverseU = false;
 }
 
 }  // namespace edvr

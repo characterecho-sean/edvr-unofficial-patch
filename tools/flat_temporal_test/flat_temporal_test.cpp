@@ -2342,8 +2342,9 @@ void testFlatWarningWiring() {
     const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
     const std::string bundleCpp = slurp("src/installer/logbundle.cpp");
     const std::string standdownH = slurp("src/d3d11/flat_standdown.h");
-    check(!menuCpp.empty() && !runtimeCpp.empty() && !bundleCpp.empty() && !standdownH.empty(),
-          "the menu, runtime, stand-down policy and log bundler sources are readable from the repo root");
+    const std::string settingsH = slurp("src/d3d11/flat_elite_settings.h");
+    check(!menuCpp.empty() && !runtimeCpp.empty() && !bundleCpp.empty() && !standdownH.empty() && !settingsH.empty(),
+          "the menu, runtime, stand-down policy, settings header and log bundler sources are readable from the repo root");
     auto count = [](const std::string& text, const std::string& needle) {
         unsigned n = 0;
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
@@ -2353,6 +2354,23 @@ void testFlatWarningWiring() {
     const Pin pins[] = {
         {&menuCpp, "const bool refusing = flatRuntimeStructuralRefusal(&reason, &standing) &&", 1,
          "the warning follows the runtime's structural-refusal state and nothing else"},
+        // The hold on a changed cause (flat_elite_settings.h, FlatWarnHold; the rule and its controls are in flat_elite_settings_tests.h).
+        {&menuCpp, "if (!s.flatWarnHold.admit(refusing, s.flatWarnActive, s.flatWarnKey, key, now)) {", 1,
+         "a cause that differs from the one on show waits out its hold: the helper is asked once a tick with the shown key, the computed "
+         "one and the tick's own time"},
+        {&menuCpp, "if (refusing == s.flatWarnActive && key == s.flatWarnKey) return;", 1,
+         "and a tick with nothing to change still leaves before the switch"},
+        {&menuCpp, "if (s.flatWarnHold.began() && s.flatWarnHeldLogged < kFlatWarnHeldLogMax) {", 1,
+         "a hold that begins is logged once, within its own bound"},
+        {&menuCpp, "flatFormatWarnHeldLog(held, sizeof(held), s.flatWarnCause, cause);", 1,
+         "the line names the cause on show and the one waiting"},
+        {&menuCpp, "Log::get().note(\"%s\", held);", 1, "and is written to the log: it is the one trace that the hold ran"},
+        {&menuCpp, "char held[360];", 1, "in a buffer the longest such line fits (the rig formats the longest one against 360)"},
+        {&menuCpp, "constexpr int kFlatWarnHeldLogMax = 8;", 1, "at most eight times a session, apart from the panel's own 24"},
+        {&menuCpp, "flat settings warning: further held changes are not logged this session", 1,
+         "and the bound says so (a line that is not shown, changed or hidden, the three the log's reader counts)"},
+        {&settingsH, "constexpr uint64_t kFlatWarnHoldMs = 2000;", 1,
+         "the hold is 2000 ms: more than one stand-down probe interval, under two"},
         {&menuCpp, "temporalModeEnabled(Config::get().requestedTemporalMode());", 1,
          "and only while a temporal mode is selected"},
         {&menuCpp, "if (runtimeFlatProfile() && s.flatWarnActive) {", 1, "the panel draws the warning only while it is active"},
@@ -2386,6 +2404,38 @@ void testFlatWarningWiring() {
         for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "warning wiring control: a source with the line removed no longer contains it");
+    }
+    // ORDER of the hold on a changed cause. It is asked after the key is computed and before the comparison that leaves the tick:
+    // asked on every tick, so a cause that comes back to the one on show drops the change that was waiting, and a held change
+    // returns before the switch, so it neither replaces what is on show nor is logged as changed. Two controls: the same text with
+    // the hold asked after the early return, and with the held branch falling through to the switch, must fail the check.
+    {
+        const char* keyLine = "const std::string key = refusing ? flatSettingsWarningKey(";
+        const char* askLine = "if (!s.flatWarnHold.admit(refusing, s.flatWarnActive, s.flatWarnKey, key, now)) {";
+        const char* sameLine = "if (refusing == s.flatWarnActive && key == s.flatWarnKey) return;";
+        const char* switchLine = "s.flatWarnActive = refusing;";
+        const auto holdOrderOk = [&](const std::string& text) {
+            const size_t key = text.find(keyLine), ask = text.find(askLine), same = text.find(sameLine), sw = text.find(switchLine);
+            if (key == std::string::npos || ask == std::string::npos || same == std::string::npos || sw == std::string::npos)
+                return false;
+            if (!(key < ask && ask < same && same < sw)) return false;
+            return text.substr(ask, same - ask).find("\n        return;\n    }\n") != std::string::npos;
+        };
+        check(holdOrderOk(menuCpp),
+              "the hold is asked after the key is computed and before the comparison that leaves the tick, and a held change returns before the switch");
+        std::string late = menuCpp;
+        const size_t ask = late.find(askLine), same = late.find(sameLine);
+        if (ask != std::string::npos && same != std::string::npos && ask < same) {
+            const std::string block = late.substr(ask, same - ask);
+            late.erase(ask, same - ask);
+            late.insert(late.find(sameLine) + std::strlen(sameLine), "\n    " + block);
+        }
+        check(late != menuCpp && !holdOrderOk(late), "(control) the order check fails with the hold asked after the early return");
+        std::string falls = menuCpp;
+        const std::string heldReturn = "\n        return;\n    }\n    if (refusing == s.flatWarnActive && key == s.flatWarnKey) return;";
+        const size_t tail = falls.find(heldReturn);
+        if (tail != std::string::npos) falls.erase(tail, std::strlen("\n        return;"));
+        check(falls != menuCpp && !holdOrderOk(falls), "(control) the order check fails with the held branch falling through to the switch");
     }
     check(count(bundleCpp, "Frontier Developments") == 1,
           "the log bundler no longer spells the folder itself (its comment names it once)");

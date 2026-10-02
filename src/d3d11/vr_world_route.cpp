@@ -11,9 +11,9 @@
 // a frame (four COM calls under the shadow's own guard and budget), never per draw. No allocation, no lock and no D3D call
 // per draw. FlatContractObservation is ~360 bytes: one static instance, eleven fields written.
 //
-// THE JITTER (stage 2). The route jitters the world's cameras through the camera injector while it is Warming or Owned and
-// experimental.temporal_aa_on_foot_world_jitter is on (the default); with that key off it resolves an unjittered world, which is
-// what flight 1 measured.
+// THE JITTER (stage 2). The route jitters the world's cameras through the camera injector while it is Warming or Owned, with no
+// key of its own; only the global experimental.temporal_aa_jitter off stops it, and the route then resolves an unjittered
+// world, which is what flight 1 measured.
 #include "vr_world_route.h"
 #include "vr_world_route_math.h"
 #include "binding_shadow.h"
@@ -73,11 +73,10 @@ bool g_gatePrev = false, g_gateSeen = false; // the on-foot gate at the last bou
 
 // ---- stage 2: the world jitter (design doc section 82) ---------------------------------------------------------------------
 // The route puts the flat profile's phase into the game's own kind-3 world cameras through the camera injector, only while it
-// is Warming or Owned and experimental.temporal_aa_on_foot_world_jitter is on. The injector is driven from the frame boundary
+// is Warming or Owned and the global experimental.temporal_aa_jitter is on. The injector is driven from the frame boundary
 // (driveInjector) and told at the trigger that the window is over; the route reads what it did at the trigger and at the next
 // boundary. With the route key off from the start nothing below is ever called.
 FlatLivePhase g_phase;                          // picks the frame's phase after two warm zero-phase frames
-VrWorldJitterKey g_jitterKey = VrWorldJitterKey::On;
 VrWorldJitter g_jitter = VrWorldJitter::Idle;   // this frame's decision (the frame that is running)
 bool g_injectorEngaged = false;                 // flatCameraVrFrame was called with inject = true and the injector is not yet quiet again
 bool g_injectFault = false;                     // a STOP line switched the injector off for the session
@@ -95,14 +94,10 @@ uint32_t g_missRun = 0;                         // consecutive untreated frames 
 uint32_t g_declineRunLines = 0, g_declineLinesSession = 0;   // decline lines logged in this run of declines / this session
 
 // ---- the stage 2 experiment build (design doc section 82) -----------------------------------------------------------------------
-// Read at the frame boundary, only while the route key is auto (readExperimentKeys), and used by the resolve at the trigger. The steady-detail
-// key defaults to ON (design doc section 82, flight 4); the debug key's motion_source and advanced.vr_camera_census default to off. With
-// experimental.temporal_aa_on_foot_world_steady_detail set off, advanced.temporal_aa_debug anything but motion_source and
-// advanced.vr_camera_census off, treatWorld hands the resolver exactly what it handed it in flight 2.
-// The steady key starts Off here only as the state before a boundary has read the file: the first boundary with the route on reads it (on, by
-// default) and says so once.
-VrWorldSteadyKey g_steadyKey = VrWorldSteadyKey::Off;   // experimental.temporal_aa_on_foot_world_steady_detail: stale slots take the camera term where last frame's depth confirms it
-VrWorldSteadyKey g_steadyReported = VrWorldSteadyKey::Off;   // the state the log last said: a change logs once
+// Read at the frame boundary, only while the route key is auto (readExperimentKeys), and used by the resolve at the trigger. The depth-checked
+// steady detail (stale slots take the camera term where last frame's depth confirms it) has no key: treatWorld always hands the resolver
+// steadyDetail = true (design doc section 82, flight 4). The debug key's motion_source and advanced.vr_camera_census default to off, and with
+// both off treatWorld hands the resolver exactly what it handed it in flight 4.
 bool g_viewOn = false, g_viewReported = false;          // advanced.temporal_aa_debug = motion_source: the resolver paints the prep's classes into H
 
 // ---- the per-frame detector state ------------------------------------------------------------------------------------
@@ -340,12 +335,12 @@ void treatWorld(ID3D11DeviceContext* ctx) {
     const bool resetExtent = g_prev.valid && (g_prev.w != t.hdrWidth || g_prev.h != t.hdrHeight);
     const bool resetScene = g_sceneResetPending;
     f.reset = resetMissing || resetGap || resetDepth || resetColor || resetExtent || resetScene;
-    // THE EXPERIMENT BUILD. The steady-detail key sends a pixel whose engine slot a later draw overdrew to the camera term instead of
+    // THE EXPERIMENT BUILD. The steady detail, always on, sends a pixel whose engine slot a later draw overdrew to the camera term instead of
     // refusing its history, but only where last frame's depth confirms the camera term (FlatMonoResolveFrame::steadyDetail, the
     // depth-validated form; the blanket form, staticScene, is the flat 3D menu's alone and this route never sets it); the census key
-    // counts the refused pixels by cause and the debug key's motion_source paints them. Each is the resolver's own contract and each
-    // is off by default, so a frame with all three off is the frame flight 2 resolved.
-    f.steadyDetail = g_steadyKey == VrWorldSteadyKey::On;
+    // counts the refused pixels by cause and the debug key's motion_source paints them. Each of those two is the resolver's own
+    // contract and off by default, so a frame with both off is the frame flight 4 resolved.
+    f.steadyDetail = true;
     f.refusalCensus = g_census;
     f.refusalView = g_viewOn ? 1u : 0u;
     // THE PHASE (stage 2). What the injector did to the world's cameras BEFORE the trigger is final: the route closed its window
@@ -609,20 +604,16 @@ void logNewExcluded(float screenAspect) {
 // The frame boundary's injector step for a route that is on (key auto): decide the phase of the frame that starts, hand it to
 // the injector, or wind the injector down. wantsInjection: the route is Warming or Owned, the gate holds and the layer is live.
 void driveInjector(bool wantsInjection) {
-    g_jitterKey = vrWorldJitterKeyFromText(
-        Config::get().getString("experimental.temporal_aa_on_foot_world_jitter", "on").c_str());
     const bool globalJitter = Config::get().getBool("experimental.temporal_aa_jitter", true);
     uint32_t w = 0, h = 0;
     vScreenPanelSize(&w, &h);
-    VrWorldJitter want = vrWorldJitterDecide(true, g_jitterKey, globalJitter, wantsInjection && w && h, g_namedLast, true, g_injectFault);
+    VrWorldJitter want = vrWorldJitterDecide(true, globalJitter, wantsInjection && w && h, g_namedLast, true, g_injectFault);
     g_framePhaseX = g_framePhaseY = 0.0f;
     g_frameCoverageOk = true;
     g_frameWorldApplied = VrWorldAppliedPhase{};
     if (want == VrWorldJitter::On) {
-        // The phase machine yields a zero phase for its first two frames (warm-up), then the flat profile's Halton sequence. The
-        // route resolves at the game's render size (render == output: extentOk), so the ratio rule (temporal_math.h) gives the fixed
-        // eight with or without experimental.temporal_aa_jitter_follows_upscale: the route does not read the key.
-        g_phase.beginFrame(true, g_prev.valid && g_f.treated, w, h, temporalJitterPhaseCount(w, h, w, h));
+        // The phase machine yields a zero phase for its first two frames (warm-up), then the flat profile's Halton sequence.
+        g_phase.beginFrame(true, g_prev.valid && g_f.treated, w, h);
         g_framePhaseX = g_phase.currentX;
         g_framePhaseY = g_phase.currentY;
         FlatCameraVrFrame vf;
@@ -641,8 +632,8 @@ void driveInjector(bool wantsInjection) {
             g_phase.resetHistory();
             if (!g_hookUnavailableLogged) {
                 g_hookUnavailableLogged = true;
-                Log::get().note("vr world route: the camera hook is not available (%s): the world stays unjittered; "
-                                "experimental.temporal_aa_on_foot_world_jitter has nothing to act on", flatCameraVrStatus());
+                Log::get().note("vr world route: the camera hook is not available (%s): the world stays unjittered",
+                                flatCameraVrStatus());
             }
         }
     } else {
@@ -670,19 +661,11 @@ void curveTextNow(char* out, size_t size, uint64_t* reissues) {
     if (reissues) *reissues = pc.reissues;
 }
 
-// The stage 2 experiment build's three keys, read at the boundary while the route key is auto (design doc section 82): the
-// steady-detail key (default on since flight 4; any word but on reads off), the debug key's motion_source (the refusal view), and what the
-// census key said at the top of the boundary (g_census). A change is said once, in the log, with what the state does.
+// The stage 2 experiment build's keys, read at the boundary while the route key is auto (design doc section 82): the debug key's
+// motion_source (the refusal view) and, beside it, what the census key said at the top of the boundary (g_census). A change of the view
+// is said once, in the log, with what the state does. The steady detail is not read here: it has no key, treatWorld always asks for it.
 void readExperimentKeys() {
-    g_steadyKey = vrWorldSteadyKeyFromText(
-        Config::get().getString("experimental.temporal_aa_on_foot_world_steady_detail", "on").c_str());
     g_viewOn = _stricmp(Config::get().getString("advanced.temporal_aa_debug", "off").c_str(), "motion_source") == 0;
-    if (g_steadyKey != g_steadyReported) {
-        g_steadyReported = g_steadyKey;
-        char line[512];
-        vrWorldFormatSteadyChanged(line, sizeof(line), g_frameNo, g_steadyKey);
-        Log::get().note("%s", line);
-    }
     if (g_viewOn != g_viewReported) {
         g_viewReported = g_viewOn;
         char line[768];
@@ -709,8 +692,9 @@ void windDownInjector() {
 
 // ---- the frame boundary ------------------------------------------------------------------------------------------------------------
 void vrWorldRouteFrameBoundary() {
-    // The key, live: read here, so the frame that starts now is the first to see a change. Off unless "auto".
-    const VrWorldKey key = vrWorldKeyFromText(Config::get().getString("experimental.temporal_aa_on_foot_world", "off").c_str());
+    // The key, live: read here, so the frame that starts now is the first to see a change. Auto for an ini with no line (the shipped
+    // edvr.ini says auto too, and tools\config_test holds the two to one answer); any other word reads as off.
+    const VrWorldKey key = vrWorldKeyFromText(Config::get().getString("experimental.temporal_aa_on_foot_world", "auto").c_str());
     g_key = key;
     g_census = vrCameraCensusWanted();
     if (key == VrWorldKey::Off && g_machine.state == VrWorldState::Off && !g_census && !g_injectorEngaged) {
@@ -775,7 +759,6 @@ void vrWorldRouteFrameBoundary() {
         }
         g_namedLast = g_frameNamed;
         g_win.phaseX = g_framePhaseX; g_win.phaseY = g_framePhaseY;
-        g_win.phases = g_phase.phaseCount;
         g_win.rowsX = g_f.treated ? g_frameWorldApplied.x : 0.0f;
         g_win.rowsY = g_f.treated ? g_frameWorldApplied.y : 0.0f;
         if (g_jitter == VrWorldJitter::On) g_phase.finish(g_f.treated, g_frameCoverageOk);
@@ -849,7 +832,6 @@ void vrWorldRouteFrameBoundary() {
         if (g_windowStartMs && now - g_windowStartMs >= 5000) {
             char line[1200];
             g_win.jitter = vrWorldJitterName(g_jitter);
-            g_win.steady = vrWorldSteadyKeyName(g_steadyKey);
             uint64_t curveReissues = 0;
             curveTextNow(g_win.curve, sizeof(g_win.curve), &curveReissues);
             g_win.curveReissues = curveReissues - g_curveReissuesSeen;
@@ -859,9 +841,10 @@ void vrWorldRouteFrameBoundary() {
             char injectLine[512];
             vrWorldFormatInjectWindow(injectLine, sizeof(injectLine), g_win.inject);
             Log::get().note("%s", injectLine);
-            // The refusal census's line (the census key on, samples still in flight from before it went off, or the steady-detail key on,
-            // whose depth check counts its own frames): the resolver's sums since the last window beside the route's own treated count.
-            // Absent when neither the census nor the key was wanted.
+            // The refusal census's line (the census key on, samples still in flight from before it went off, or the steady detail's depth
+            // check, which counts its own frames whatever the census asks): the resolver's sums since the last window beside the route's
+            // own treated count. Absent when the census was not wanted and the resolver counted no frame. Its steady-detail= token is
+            // the window's default, "on": the route has nothing to tell it.
             const FlatMonoRefusalCensus rc = flatMonoResolveTakeRefusalCensus();
             if (g_census || rc.asked || rc.sampled || rc.frames || rc.checked || rc.skipped) {
                 VrWorldRefusalWindow rw;
@@ -872,7 +855,6 @@ void vrWorldRouteFrameBoundary() {
                 rw.width = rc.width; rw.height = rc.height; rw.pixels = rc.pixels;
                 for (uint32_t i = 0; i < kFlatMonoRefusalSlots; ++i) rw.counts[i] = rc.counts[i];
                 rw.checked = rc.checked; rw.skipped = rc.skipped;
-                rw.steady = vrWorldSteadyKeyName(g_steadyKey);
                 rw.view = g_viewOn ? "on" : "off";
                 char refusalLine[1024];
                 vrWorldFormatRefusalWindow(refusalLine, sizeof(refusalLine), rw);
@@ -892,7 +874,7 @@ void vrWorldRouteFrameBoundary() {
         }
         g_ownedFramesEpisode = 0; g_tookNoted = false; g_win.reset(); g_windowStartMs = 0;
         g_sceneResetPending = g_sceneResetEvent = false; g_prev.valid = false; g_declineRunLines = g_declineLinesSession = 0;
-        g_steadyKey = g_steadyReported = VrWorldSteadyKey::Off; g_viewOn = g_viewReported = false;   // the experiment build's keys are only read while the key is auto
+        g_viewOn = g_viewReported = false;   // the experiment build's view key is only read while the key is auto
         g_missRun = 0; g_missWhy = nullptr; g_declineWhy = nullptr;
         windDownInjector();
         if (g_resourcesLive) {

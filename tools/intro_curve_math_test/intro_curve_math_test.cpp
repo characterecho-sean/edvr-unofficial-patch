@@ -16,6 +16,14 @@
 //   C10  today's screen-space rule on a table of vectors with hand-derived answers (the boundary values, the quirks)
 //   C11  that rule against a VERBATIM copy of intro_panel.cpp's looksScreenSpace, over every boundary and its neighbours, one slot,
 //        two slots and a deterministic sample of whole vectors at a time
+//   C12  which way the placement's +x runs (introPlacementXDir), on the real readings: both captures, both eyes of each, and the movie's stock
+//        constants, either eye, all run LEFT; the same constants with the x column negated run RIGHT; introReadWorldCb carries the answer
+//   C13  the same rule's margin (just above and just below 0.05 of the two terms' magnitudes, in the four signs, at any scale), the exact edge,
+//        float rounding that only double arithmetic gets right, and the degenerate inputs (every term zero, NaN, infinity); only the four floats
+//        it reads are read
+//   C14  introReadWorldCb with a direction that cannot be told: not ok, the new reason, nothing left behind; every refusal leaves xDir unknown
+//   C15  the answer against geometry computed independently in double (a head turned through every yaw, pitch and roll, both eyes, a panel of
+//        either frame), and a panel turned toward edge-on: a known answer is always the right one, an unknown one always has a ratio under 0.05
 //
 // Usage: --self-test [--only C1,C4,...]   |   --dry-run (no checks run)
 #include "intro_curve_math.h"
@@ -75,6 +83,15 @@ Cb stockRight() {   // the other eye: the frustum centre cb2[4].x flips sign (me
     c.f[16] = -0.1940f;
     return c;
 }
+// The other eye of each capture (the same log, the second `DCW read` line of each pair: q=41 and q=42 against q=37).
+Cb capture2Eye2() {   // the panel in front of the viewer, the other eye: cb2[1].x -0.780317, cb2[4].x -1.57885
+    return make({4.44444f, 2.5f, 0.0f, 0.0f, -0.780317f, -0.0197438f, 9.48621e-08f, -0.000948464f, -0.0342501f, 0.788105f, -7.60756e-06f, 0.076063f,
+                 0.192659f, 0.0601386f, 9.97268e-05f, -0.997103f, -1.57885f, -0.247872f, 0.0996338f, 3.76108f});
+}
+Cb capture1Eye2() {   // the panel behind the viewer, the other eye: cb2[1].x +0.759143, cb2[4].x -0.338754
+    return make({4.44444f, 2.5f, 0.0f, 0.0f, 0.759143f, 0.0141897f, -9.32133e-06f, 0.0931979f, -0.0344499f, 0.788078f, -7.64753e-06f, 0.0764627f,
+                 -0.264007f, -0.0620333f, -9.92872e-05f, 0.992707f, -0.338754f, 18.4664f, 0.100169f, -1.5911f});
+}
 // capture 2 with cb2[3] replaced (the z column: slots 12..15)
 Cb withCol3(float a, float b, float c, float d) {
     Cb v = capture2();
@@ -90,6 +107,34 @@ Cb withW(float w3, float w4) {
     v.f[19] = w4;
     return v;
 }
+// The two terms of the x direction, written out as the header's rule forms them: a = cb2[1].x * cb2[4].w, b = cb2[4].x * cb2[1].w, each a
+// product of two floats (exact in double), and the ratio |a - b| / (|a| + |b|) it holds against its margin.
+double termA(const Cb& c) { return static_cast<double>(c.f[4]) * static_cast<double>(c.f[19]); }
+double termB(const Cb& c) { return static_cast<double>(c.f[16]) * static_cast<double>(c.f[7]); }
+double ratioOf(const Cb& c) {
+    const double a = termA(c), b = termB(c);
+    const double scale = std::fabs(a) + std::fabs(b);
+    return scale > 0.0 ? std::fabs(a - b) / scale : 0.0;
+}
+// capture 2 with the four floats the x direction reads replaced (cb2[1].x, cb2[4].w, cb2[4].x, cb2[1].w): every other rule still passes it
+Cb withTerms(float f4, float f19, float f16, float f7) {
+    Cb v = capture2();
+    v.f[4] = f4;
+    v.f[19] = f19;
+    v.f[16] = f16;
+    v.f[7] = f7;
+    return v;
+}
+// capture 2 with its centre's x moved until the two terms cancel: a panel seen edge-on. Every rule before the direction passes it.
+Cb edgeOn() {
+    Cb c = capture2();
+    c.f[16] = static_cast<float>(termA(c) / static_cast<double>(c.f[7]));
+    return c;
+}
+Cb negatedX(Cb c) {   // cb2[1] = -cb2[1]: the x column run the other way
+    for (int i = 4; i < 8; ++i) c.f[i] = -c.f[i];
+    return c;
+}
 
 // The reasons, as the header words them (the later log line prints one of these).
 const char* const kWhyFinite = "a constant is not a finite number";
@@ -99,13 +144,18 @@ const char* const kWhyW3 = "cb2[3].w is too close to zero to tell which way the 
 const char* const kWhyW4 = "cb2[4].w is too close to zero to tell which way the panel's depth runs";
 const char* const kWhyX = "cb2[0].x is not a plausible half-width in metres (outside 0.5 to 50)";
 const char* const kWhyY = "cb2[0].y is not a plausible half-height in metres (outside 0.5 to 50)";
+const char* const kWhyDir = "the placement's +x cannot be told to run left or right (the panel is seen edge-on, or its x column and its centre cancel)";
 
-// Refused for exactly this reason, and nothing left behind (half-width 0, direction 0).
+// Refused for exactly this reason, and nothing left behind (half-width 0, depth direction 0, x direction unknown).
 bool refused(const Cb& c, const char* why) {
     const IntroWorldCb r = introReadWorldCb(c.f);
-    return !r.ok && r.halfWidth == 0.0f && r.toward == 0 && r.why != nullptr && std::strcmp(r.why, why) == 0;
+    return !r.ok && r.halfWidth == 0.0f && r.toward == 0 && r.xDir == IntroXDir::kUnknown && r.why != nullptr && std::strcmp(r.why, why) == 0;
 }
-bool readsOk(const Cb& c) { return introReadWorldCb(c.f).ok; }
+// An ok reading, which always says which way +x runs (left or right, never unknown).
+bool readsOk(const Cb& c) {
+    const IntroWorldCb r = introReadWorldCb(c.f);
+    return r.ok && (r.xDir == IntroXDir::kLeft || r.xDir == IntroXDir::kRight);
+}
 
 // ---- C1: the two real captures ---------------------------------------------------------------------------------------------
 void caseC1() {
@@ -152,12 +202,13 @@ void caseC3() {
         check(refused(c, kWhyY), "C3.cb2[0].y 60: the half-height reason");
     }
     check(refused(make({}), kWhyLength), "C3.all zeros: finite, not screen space (the half-size is under 16), and cb2[3] has no length: the length reason");
-    // the seven reasons are seven different texts
-    const char* all[] = {kWhyFinite, kWhyScreen, kWhyLength, kWhyW3, kWhyW4, kWhyX, kWhyY};
+    check(refused(edgeOn(), kWhyDir), "C3.a placement whose x column and centre cancel (seen edge-on): the direction reason");
+    // the eight reasons are eight different texts
+    const char* all[] = {kWhyFinite, kWhyScreen, kWhyLength, kWhyW3, kWhyW4, kWhyX, kWhyY, kWhyDir};
     bool distinct = true;
-    for (size_t i = 0; i < 7; ++i)
-        for (size_t j = i + 1; j < 7; ++j) distinct = distinct && std::strcmp(all[i], all[j]) != 0;
-    check(distinct, "C3.the seven reasons are seven different texts");
+    for (size_t i = 0; i < 8; ++i)
+        for (size_t j = i + 1; j < 8; ++j) distinct = distinct && std::strcmp(all[i], all[j]) != 0;
+    check(distinct, "C3.the eight reasons are eight different texts");
 }
 
 // ---- C4: NaN and infinity in every slot ------------------------------------------------------------------------------------
@@ -326,6 +377,24 @@ void caseC9() {
         Cb c = make({});
         c.f[5] = kInf;
         check(refused(c, kWhyFinite), "C9.all zeros but one infinity: finite is named first, though the length fails too");
+    }
+    // The direction is asked LAST: a placement that cannot say which way +x runs, and fails anything else too, is refused for the other reason.
+    {
+        Cb c = edgeOn();
+        c.f[1] = 60.0f;
+        check(refused(c, kWhyY), "C9.the direction cannot be told and the half-height is out: the half-height is named");
+        c = edgeOn();
+        c.f[0] = 0.4f;
+        check(refused(c, kWhyX), "C9.the direction cannot be told and the half-width is out: the half-width is named");
+        c = edgeOn();
+        c.f[19] = 0.0005f;
+        c.f[16] = static_cast<float>(termA(c) / static_cast<double>(c.f[7]));   // still cancelling
+        check(refused(c, kWhyW4), "C9.the direction cannot be told and cb2[4].w is near zero: cb2[4].w is named");
+        c = edgeOn();
+        c.f[12] = c.f[13] = c.f[14] = 0.0f;
+        c.f[15] = 0.1f;
+        check(refused(c, kWhyLength), "C9.the direction cannot be told and cb2[3] is too short: the length is named");
+        check(refused(edgeOn(), kWhyDir), "C9.the direction cannot be told and nothing else is wrong: the direction reason");
     }
 }
 
@@ -499,13 +568,375 @@ void caseC11() {
     check(compared > 50000, "C11.the sweep compared every vector (a short sweep proves nothing)");
 }
 
+// ---- C12: which way +x runs, on the real readings --------------------------------------------------------------------------
+void caseC12() {
+    struct Real {
+        const char* name;
+        Cb cb;
+    };
+    const Real real[] = {{"capture 2 (the panel in front), eye 1", capture2()},
+                         {"capture 2, eye 2", capture2Eye2()},
+                         {"capture 1 (the panel behind), eye 1", capture1()},
+                         {"capture 1, eye 2", capture1Eye2()}};
+    for (const Real& r : real) {
+        const std::string name = r.name;
+        check(introPlacementXDir(r.cb.f) == IntroXDir::kLeft, "C12." + name + ": +x runs to the viewer's left");
+        const IntroWorldCb read = introReadWorldCb(r.cb.f);
+        check(read.ok && read.xDir == IntroXDir::kLeft && read.halfWidth == 4.44444f && read.toward == 1,
+              "C12." + name + " reads ok: xDir left, half-width 4.44444, toward +1");
+        check(ratioOf(r.cb) >= 0.87 && ratioOf(r.cb) <= 1.0, "C12." + name + ": the ratio is in the 0.87 to 1.0 the header quotes");
+        const Cb flipped = negatedX(r.cb);
+        check(introPlacementXDir(flipped.f) == IntroXDir::kRight, "C12." + name + " with the x column negated: +x runs to the right");
+        const IntroWorldCb back = introReadWorldCb(flipped.f);
+        check(back.ok && back.xDir == IntroXDir::kRight && back.halfWidth == read.halfWidth && back.toward == read.toward,
+              "C12." + name + " with the x column negated reads ok, xDir right, and nothing else changes");
+        check(ratioOf(flipped) == ratioOf(r.cb), "C12." + name + ": negating the x column leaves the ratio alone");
+    }
+    // the movie's stock constants, either eye: cb2[1].x is -1/2712, so +x runs left (the first flight of the world-locked movie came out mirrored
+    // until its x column was built so), and the reading is refused as a screen-space placement before the direction is asked
+    for (int eye = 0; eye < 2; ++eye) {
+        const Cb s = eye == 0 ? stockLeft() : stockRight();
+        const std::string name = eye == 0 ? "the movie's stock constants, left eye" : "the movie's stock constants, right eye";
+        check(introPlacementXDir(s.f) == IntroXDir::kLeft, "C12." + name + ": +x runs to the viewer's left");
+        check(introPlacementXDir(negatedX(s).f) == IntroXDir::kRight, "C12." + name + " with the x column negated: +x runs to the right");
+        check(ratioOf(s) == 1.0, "C12." + name + ": cb2[1].w is zero, so one term decides and the ratio is exactly 1");
+        check(refused(s, kWhyScreen), "C12." + name + " are refused as screen space first, with xDir left unknown");
+    }
+    // the answer is the sign of cb2[1].x * cb2[4].w - cb2[4].x * cb2[1].w: the real numbers, written out
+    {
+        const Cb c = capture2();
+        check(termA(c) < 0.0 && termB(c) > 0.0 && termA(c) - termB(c) < 0.0, "C12.capture 2: a is -2.936, b is +0.0000688, the minor is negative");
+        const Cb b = capture1();
+        check(termA(b) < 0.0 && termB(b) < 0.0 && termA(b) - termB(b) < 0.0, "C12.capture 1: a is -1.265, b is -0.0847, the minor is still negative");
+    }
+}
+
+// ---- C13: the margin, float rounding and the degenerate inputs ----------------------------------------------------------------
+void caseC13() {
+    // The margin, in the four signs, at five scales: the same vector multiplied through by a power of ten reads the same (the margin is
+    // relative). a = cb2[1].x * cb2[4].w = +-2 s^2 and b = cb2[4].x * cb2[1].w a little over or under 0.05 of the two magnitudes from it.
+    struct Pat {
+        const char* name;
+        float f4;
+        bool bSmaller;
+        float bSign;
+        IntroXDir known;
+    };
+    const Pat pats[] = {{"a and b positive, b the smaller", 1.0f, true, 1.0f, IntroXDir::kRight},
+                        {"a and b positive, b the larger", 1.0f, false, 1.0f, IntroXDir::kLeft},
+                        {"a and b negative, |b| the smaller", -1.0f, true, -1.0f, IntroXDir::kLeft},
+                        {"a and b negative, |b| the larger", -1.0f, false, -1.0f, IntroXDir::kRight}};
+    const float scales[] = {1.0f, 1e-30f, 1e-15f, 1e15f, 1e30f};
+    for (const Pat& p : pats) {
+        for (int side = 0; side < 2; ++side) {   // 0: just above the margin, known; 1: just below it, unknown
+            for (float s : scales) {
+                const double r = side == 0 ? 0.0501 : 0.0499;
+                const double bMag = p.bSmaller ? 2.0 * (1.0 - r) / (1.0 + r) : 2.0 * (1.0 + r) / (1.0 - r);
+                const Cb c = withTerms(p.f4 * s, 2.0f * s, static_cast<float>(p.bSign * bMag * s), s);
+                char label[200];
+                std::snprintf(label, sizeof(label), "C13.%s, scale %g, %s the margin", p.name, static_cast<double>(s), side == 0 ? "just above" : "just below");
+                check(std::fabs(ratioOf(c) - r) < 2e-4 && (side == 0 ? ratioOf(c) > kIntroXDirMargin : ratioOf(c) < kIntroXDirMargin),
+                      std::string(label) + ": the rig's own ratio is on the intended side");
+                check(introPlacementXDir(c.f) == (side == 0 ? p.known : IntroXDir::kUnknown), label);
+                if (s == 1.0f) {   // and through the whole reader
+                    if (side == 0) {
+                        const IntroWorldCb w = introReadWorldCb(c.f);
+                        check(w.ok && w.xDir == p.known, std::string(label) + ": reads ok through introReadWorldCb with that direction");
+                    } else {
+                        check(refused(c, kWhyDir), std::string(label) + ": refused through introReadWorldCb with the direction reason");
+                    }
+                }
+            }
+        }
+    }
+    // The margin is inclusive: a = 21, b = 19 has a minor of 2 and a scale of 40, and 0.05 * 40 is exactly 2 in double.
+    check(kIntroXDirMargin * 40.0 == 2.0 && ratioOf(withTerms(21.0f, 1.0f, 19.0f, 1.0f)) == kIntroXDirMargin, "C13.the edge vector sits exactly on the margin (2 of 40)");
+    check(introPlacementXDir(withTerms(21.0f, 1.0f, 19.0f, 1.0f).f) == IntroXDir::kRight, "C13.exactly on the margin the direction is known (the edge is inclusive)");
+    check(introPlacementXDir(withTerms(-21.0f, 1.0f, -19.0f, 1.0f).f) == IntroXDir::kLeft, "C13.and mirrored (a -21, b -19), known the other way");
+    // One term far under the other, in either order and either sign: the ratio is near 1, always known, and the larger term decides.
+    check(introPlacementXDir(withTerms(1.0f, 2.0f, -0.001f, 1.0f).f) == IntroXDir::kRight, "C13.a +2, b -0.001: opposite signs, known, right");
+    check(introPlacementXDir(withTerms(-1.0f, 2.0f, 0.001f, 1.0f).f) == IntroXDir::kLeft, "C13.a -2, b +0.001: opposite signs, known, left");
+    check(introPlacementXDir(withTerms(1.0f, 2.0f, 0.0f, 1.0f).f) == IntroXDir::kRight, "C13.b zero, a +2: the other term decides, right");
+    check(introPlacementXDir(withTerms(0.0f, 2.0f, 5.0f, 1.0f).f) == IntroXDir::kLeft, "C13.a zero, b +5: the minor is -5, left");
+    check(introPlacementXDir(withTerms(0.0f, 2.0f, -5.0f, 1.0f).f) == IntroXDir::kRight, "C13.a zero, b -5: the minor is +5, right");
+    // Float rounding. These two sit within 4e-9 of the margin (found by a search against a copy of the rule that does the arithmetic in float):
+    // double arithmetic reads them right, float arithmetic reads the first as unknown and the second as known.
+    {
+        const Cb above = withTerms(0.556243479f, 1.15046847f, 0.578993857f, 1.0f);   // ratio 0.0500000040
+        const Cb below = withTerms(0.68570292f, 0.834858418f, 0.517944396f, 1.0f);   // ratio 0.0499999969
+        check(ratioOf(above) > kIntroXDirMargin && ratioOf(above) < kIntroXDirMargin * (1.0 + 1e-6), "C13.the first float-rounding vector is just above the margin");
+        check(ratioOf(below) < kIntroXDirMargin && ratioOf(below) > kIntroXDirMargin * (1.0 - 1e-6), "C13.the second float-rounding vector is just below the margin");
+        check(introPlacementXDir(above.f) == IntroXDir::kRight, "C13.a ratio 4e-9 above the margin is known (float arithmetic loses it)");
+        check(introPlacementXDir(below.f) == IntroXDir::kUnknown, "C13.a ratio 3e-9 below the margin is unknown (float arithmetic finds it known)");
+    }
+    // Nothing to read: every term zero, by any two floats that make both products zero, on either capture.
+    check(introPlacementXDir(make({}).f) == IntroXDir::kUnknown, "C13.all zeros: no term at all, unknown");
+    const int aSlots[2] = {4, 19};
+    const int bSlots[2] = {16, 7};
+    for (int base = 0; base < 2; ++base) {
+        for (int sa : aSlots) {
+            for (int sb : bSlots) {
+                Cb c = base == 0 ? capture2() : capture1();
+                c.f[sa] = 0.0f;
+                c.f[sb] = 0.0f;
+                char label[160];
+                std::snprintf(label, sizeof(label), "C13.capture %d with f[%d] and f[%d] zero: both terms vanish, unknown", base == 0 ? 2 : 1, sa, sb);
+                check(introPlacementXDir(c.f) == IntroXDir::kUnknown, label);
+            }
+        }
+    }
+    // One term zero is no reason to refuse: the other decides (the movie's stock constants have cb2[1].w = 0).
+    {
+        Cb c = capture2();
+        c.f[7] = 0.0f;   // b = 0: a alone, -2.936
+        check(introPlacementXDir(c.f) == IntroXDir::kLeft, "C13.capture 2 with cb2[1].w zero: a alone decides, left");
+        c = capture2();
+        c.f[4] = 0.0f;   // a = 0: the minor is -b, b being +0.0000688
+        check(introPlacementXDir(c.f) == IntroXDir::kLeft, "C13.capture 2 with cb2[1].x zero: -b decides, left");
+    }
+    // Not a number, or infinite, in any of the four floats it reads: unknown, on either capture.
+    const int read[4] = {4, 7, 16, 19};
+    const float bad[3] = {kNan, kInf, -kInf};
+    const char* const badName[3] = {"NaN", "+infinity", "-infinity"};
+    for (int base = 0; base < 2; ++base) {
+        for (int slot : read) {
+            for (int k = 0; k < 3; ++k) {
+                Cb c = base == 0 ? capture2() : capture1();
+                c.f[slot] = bad[k];
+                char label[160];
+                std::snprintf(label, sizeof(label), "C13.%s in f[%d] of capture %d: unknown", badName[k], slot, base == 0 ? 2 : 1);
+                check(introPlacementXDir(c.f) == IntroXDir::kUnknown, label);
+            }
+        }
+    }
+    // Only those four floats are read: the other sixteen can hold anything at all, and the answer is the same.
+    const float poison[4] = {kNan, kInf, -kInf, 1e30f};
+    for (int base = 0; base < 2; ++base) {
+        for (int slot = 0; slot < 20; ++slot) {
+            if (slot == 4 || slot == 7 || slot == 16 || slot == 19) continue;
+            for (float v : poison) {
+                Cb c = base == 0 ? capture2() : capture1();
+                c.f[slot] = v;
+                char label[160];
+                std::snprintf(label, sizeof(label), "C13.f[%d] = %g does not change what capture %d reads", slot, static_cast<double>(v), base == 0 ? 2 : 1);
+                check(introPlacementXDir(c.f) == IntroXDir::kLeft, label);
+            }
+        }
+    }
+}
+
+// ---- C14: a direction that cannot be told ------------------------------------------------------------------------------------
+void caseC14() {
+    const Cb edge = edgeOn();
+    check(ratioOf(edge) < 1e-6, "C14.the edge-on vector's two terms cancel to within a millionth");
+    check(introPlacementXDir(edge.f) == IntroXDir::kUnknown, "C14.edge-on: the direction cannot be told");
+    const IntroWorldCb r = introReadWorldCb(edge.f);
+    check(!r.ok, "C14.edge-on is not an ok reading");
+    check(r.why != nullptr && std::strcmp(r.why, kWhyDir) == 0, "C14.and the reason is the new one, in its words");
+    check(r.halfWidth == 0.0f && r.toward == 0 && r.xDir == IntroXDir::kUnknown, "C14.nothing is left behind: half-width 0, depth direction 0, xDir unknown");
+    // Every rule before the gate passes it: move one term and the same vector reads ok.
+    {
+        Cb c = edge;
+        c.f[16] = 0.0f;   // b = 0: a alone decides
+        const IntroWorldCb ok = introReadWorldCb(c.f);
+        check(ok.ok && ok.xDir == IntroXDir::kLeft && ok.toward == 1 && ok.halfWidth == 4.44444f, "C14.the same vector with cb2[4].x zeroed reads ok, xDir left");
+    }
+    // Every kind of refusal leaves xDir unknown (and every ok reading, in C12, says left or right).
+    struct Row {
+        const char* name;
+        Cb cb;
+    };
+    std::vector<Row> rows;
+    {
+        Cb c = capture2();
+        c.f[2] = kNan;
+        rows.push_back({"not finite", c});
+    }
+    rows.push_back({"screen space", stockLeft()});
+    rows.push_back({"cb2[3] of the wrong length", withCol3(0.1f, 0.0f, 0.0f, -0.4f)});
+    rows.push_back({"cb2[3].w near zero", withW(0.0005f, 3.76108f)});
+    rows.push_back({"cb2[4].w near zero", withW(-0.5f, 0.0005f)});
+    {
+        Cb c = capture2();
+        c.f[0] = 0.4f;
+        rows.push_back({"half-width out of range", c});
+        c = capture2();
+        c.f[1] = 60.0f;
+        rows.push_back({"half-height out of range", c});
+    }
+    rows.push_back({"the direction cannot be told", edge});
+    for (const Row& row : rows) {
+        const IntroWorldCb x = introReadWorldCb(row.cb.f);
+        check(!x.ok && x.xDir == IntroXDir::kUnknown, std::string("C14.a refusal (") + row.name + ") leaves xDir unknown");
+    }
+    check(rows.size() == 8, "C14.one row for each of the eight rules");
+}
+
+// ---- C15: the answer against geometry computed independently ---------------------------------------------------------------------
+struct V3 {
+    double x, y, z;
+};
+struct M3 {
+    double m[3][3];
+};
+M3 matMul(const M3& a, const M3& b) {
+    M3 r = {};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) r.m[i][j] += a.m[i][k] * b.m[k][j];
+    return r;
+}
+V3 matVec(const M3& a, const V3& v) {
+    return {a.m[0][0] * v.x + a.m[0][1] * v.y + a.m[0][2] * v.z, a.m[1][0] * v.x + a.m[1][1] * v.y + a.m[1][2] * v.z,
+            a.m[2][0] * v.x + a.m[2][1] * v.y + a.m[2][2] * v.z};
+}
+M3 transposed(const M3& a) {
+    M3 r = {};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) r.m[i][j] = a.m[j][i];
+    return r;
+}
+constexpr double kPi = 3.14159265358979323846;
+M3 rotAboutY(double deg) {
+    const double c = std::cos(deg * kPi / 180.0), s = std::sin(deg * kPi / 180.0);
+    return {{{c, 0, s}, {0, 1, 0}, {-s, 0, c}}};
+}
+M3 rotAboutX(double deg) {
+    const double c = std::cos(deg * kPi / 180.0), s = std::sin(deg * kPi / 180.0);
+    return {{{1, 0, 0}, {0, c, -s}, {0, s, c}}};
+}
+M3 rotAboutZ(double deg) {
+    const double c = std::cos(deg * kPi / 180.0), s = std::sin(deg * kPi / 180.0);
+    return {{{c, -s, 0}, {s, c, 0}, {0, 0, 1}}};
+}
+// An asymmetric frustum: the m02 and m12 terms (the frustum's centre is off the axis) are what a careless rule trips on, so they are not zero. The
+// depth row is a reverse-Z one with an infinite far plane, as the captures' z terms (about 1e-4 in every column) say: m22 is tiny, so a rule that
+// reads a z term where it means a w term is not forgiven.
+constexpr double kM00 = 0.7807, kM02 = 0.05, kM11 = 0.788, kM12 = -0.02, kM22 = 0.0001, kM23 = 0.1;
+// The projection acting on a direction in view space, and on a point (whose depth has the near-plane offset): cb2[1..3] and cb2[4].
+void putColumn(Cb& c, int at, const V3& d) {
+    c.f[at + 0] = static_cast<float>(kM00 * d.x + kM02 * d.z);
+    c.f[at + 1] = static_cast<float>(kM11 * d.y + kM12 * d.z);
+    c.f[at + 2] = static_cast<float>(kM22 * d.z);
+    c.f[at + 3] = static_cast<float>(-d.z);
+}
+void putPoint(Cb& c, int at, const V3& p) {
+    c.f[at + 0] = static_cast<float>(kM00 * p.x + kM02 * p.z);
+    c.f[at + 1] = static_cast<float>(kM11 * p.y + kM12 * p.z);
+    c.f[at + 2] = static_cast<float>(kM22 * p.z + kM23);
+    c.f[at + 3] = static_cast<float>(-p.z);
+}
+struct Pose {
+    Cb cb;
+    IntroXDir truth;   // which way a step along the panel's +x moves its centre on the screen, from the vectors in double, before any rounding
+};
+// One pose, the 20 floats the way the shader's reader sees them: view = R^T * world (R the head's rotation: yaw about up, then pitch, then roll),
+// cb2[1..3] = the projection acting on the panel's axes in view space, cb2[4] = the projection acting on its centre. The centre is 3.76108 m in
+// front of the head at yaw 0 (capture 2's distance); the eyes sit 31.5 mm either side of the head's middle. The intro composite's axes are
+// (-X, Y, +Z toward the viewer), the on-foot screen's (+X, Y, -Z away from the viewer); panelYaw turns the panel about the world's up.
+Pose makePose(double yaw, double pitch, double roll, double panelYaw, bool introFrame, int eye) {
+    const M3 head = matMul(matMul(rotAboutY(yaw), rotAboutX(pitch)), rotAboutZ(roll));   // view -> world
+    const M3 toView = transposed(head);
+    const M3 turn = rotAboutY(panelYaw);
+    const V3 axisX = matVec(toView, matVec(turn, introFrame ? V3{-1, 0, 0} : V3{1, 0, 0}));
+    const V3 axisY = matVec(toView, matVec(turn, V3{0, 1, 0}));
+    const V3 axisZ = matVec(toView, matVec(turn, introFrame ? V3{0, 0, 1} : V3{0, 0, -1}));
+    V3 centre = matVec(toView, V3{0, 0, -3.76108});
+    centre.x -= eye * 0.0315;
+    Pose p = {};
+    p.cb.f[0] = 4.44444f;
+    p.cb.f[1] = 2.5f;
+    putColumn(p.cb, 4, axisX);
+    putColumn(p.cb, 8, axisY);
+    putColumn(p.cb, 12, axisZ);
+    putPoint(p.cb, 16, centre);
+    // d(x_clip / w_clip)/d(step along +x) at the centre has the sign of x_clip' w - x_clip w' (w^2 is positive), in double, from the unrounded vectors
+    const double minor = (kM00 * axisX.x + kM02 * axisX.z) * (-centre.z) - (kM00 * centre.x + kM02 * centre.z) * (-axisX.z);
+    p.truth = minor < 0.0 ? IntroXDir::kLeft : IntroXDir::kRight;
+    return p;
+}
+void caseC15() {
+    // (1) Every yaw (+-180, step 15), pitch (+-60, step 20) and roll (+-60, step 30), both eyes, both frames: 3500 poses. The intro frame is always
+    // left and the on-foot frame always right, whatever the head does, a panel behind the viewer included; the whole reader says the same, and
+    // the depth direction is the frame's (+1 toward the viewer for the intro composite, -1 for the on-foot screen's).
+    unsigned total = 0, unknown = 0;
+    for (int frame = 0; frame < 2; ++frame) {
+        const bool intro = frame == 0;
+        const IntroXDir frameDir = intro ? IntroXDir::kLeft : IntroXDir::kRight;
+        for (int eye = -1; eye <= 1; eye += 2) {
+            for (int yaw = -180; yaw <= 180; yaw += 15) {
+                for (int pitch = -60; pitch <= 60; pitch += 20) {
+                    for (int roll = -60; roll <= 60; roll += 30) {
+                        const Pose p = makePose(yaw, pitch, roll, 0.0, intro, eye);
+                        char label[220];
+                        std::snprintf(label, sizeof(label), "C15.%s frame, eye %d, yaw %d, pitch %d, roll %d (ratio %.4f)", intro ? "intro" : "on-foot", eye, yaw, pitch, roll,
+                                      ratioOf(p.cb));
+                        ++total;
+                        check(p.truth == frameDir, std::string(label) + ": the rig's own geometry says the frame's direction");
+                        const IntroXDir got = introPlacementXDir(p.cb.f);
+                        if (got == IntroXDir::kUnknown) {
+                            ++unknown;
+                            check(ratioOf(p.cb) < kIntroXDirMargin, std::string(label) + ": answers unknown with a ratio at or above the margin");
+                        } else {
+                            check(got == frameDir, std::string(label) + ": the wrong direction");
+                        }
+                        const IntroWorldCb r = introReadWorldCb(p.cb.f);
+                        if (r.ok) check(r.xDir == frameDir && r.toward == (intro ? 1 : -1), std::string(label) + ": the whole reader's answer");
+                    }
+                }
+            }
+        }
+    }
+    check(total == 3500, "C15.the grid is 3500 poses");
+    check(unknown * 100 <= total, "C15.at most one pose in a hundred answers unknown");
+
+    // (2) A panel turned about the world's up toward edge-on (19 angles, out to 89.9 degrees either side), with nine yaws, three pitches and three
+    // rolls of the head, both eyes, both frames: 6156 poses. The truth comes from the vectors (the eye's offset moves the exact edge-on angle by half
+    // a degree, so the frame no longer says it): a known answer is always the true one, an unknown answer always has a ratio under the margin, and a
+    // ratio at or above the margin is never unknown.
+    const double panelYaws[] = {-89.9, -89.7, -89.5, -89.0, -88.0, -85.0, -80.0, -60.0, -30.0, 0.0, 30.0, 60.0, 80.0, 85.0, 88.0, 89.0, 89.5, 89.7, 89.9};
+    const int yaws[] = {-180, -135, -90, -45, 0, 45, 90, 135, 180};
+    const int tilts[] = {-60, 0, 60};
+    unsigned sweepTotal = 0, sweepUnknown = 0, sweepKnown = 0;
+    for (int frame = 0; frame < 2; ++frame) {
+        const bool intro = frame == 0;
+        for (int eye = -1; eye <= 1; eye += 2) {
+            for (int yaw : yaws) {
+                for (int pitch : tilts) {
+                    for (int roll : tilts) {
+                        for (double py : panelYaws) {
+                            const Pose p = makePose(yaw, pitch, roll, py, intro, eye);
+                            char label[240];
+                            std::snprintf(label, sizeof(label), "C15.edge-on sweep, %s frame, eye %d, yaw %d, pitch %d, roll %d, panel turned %.1f (ratio %.4f)",
+                                          intro ? "intro" : "on-foot", eye, yaw, pitch, roll, py, ratioOf(p.cb));
+                            ++sweepTotal;
+                            const IntroXDir got = introPlacementXDir(p.cb.f);
+                            if (got == IntroXDir::kUnknown) {
+                                ++sweepUnknown;
+                                check(ratioOf(p.cb) < kIntroXDirMargin, std::string(label) + ": unknown with a ratio at or above the margin");
+                            } else {
+                                ++sweepKnown;
+                                check(ratioOf(p.cb) >= kIntroXDirMargin, std::string(label) + ": known with a ratio under the margin");
+                                check(got == p.truth, std::string(label) + ": the wrong direction");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    check(sweepTotal == 6156, "C15.the edge-on sweep is 6156 poses");
+    check(sweepKnown == 4014 && sweepUnknown == 2142, "C15.the sweep splits 4014 known to 2142 unknown at the margin of 0.05");
+}
+
 // ---- the runner ------------------------------------------------------------------------------------------------------------
 struct Case {
     const char* id;
     void (*run)();
 };
-const Case kCases[] = {{"C1", caseC1}, {"C2", caseC2}, {"C3", caseC3},   {"C4", caseC4},   {"C5", caseC5},   {"C6", caseC6},
-                       {"C7", caseC7}, {"C8", caseC8}, {"C9", caseC9}, {"C10", caseC10}, {"C11", caseC11}};
+const Case kCases[] = {{"C1", caseC1}, {"C2", caseC2}, {"C3", caseC3},   {"C4", caseC4},   {"C5", caseC5},   {"C6", caseC6},   {"C7", caseC7},
+                       {"C8", caseC8}, {"C9", caseC9}, {"C10", caseC10}, {"C11", caseC11}, {"C12", caseC12}, {"C13", caseC13}, {"C14", caseC14},
+                       {"C15", caseC15}};
 
 bool selected(const std::string& only, const char* id) {
     if (only.empty()) return true;

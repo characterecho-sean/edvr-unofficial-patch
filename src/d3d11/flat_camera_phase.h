@@ -17,7 +17,6 @@
 #include <cstdio>
 #include <cstring>
 
-#include "../common/temporal_math.h"   // kTemporalJitterCount, temporalJitterPhaseCount: flatCameraPhaseCount
 #include "flat_camera_ownership.h"
 #include "flat_projection_math.h"
 
@@ -163,24 +162,6 @@ inline FlatCameraRowsPhase flatCameraRowsPhase(FlatCameraRoute route, uint32_t a
     FlatCameraRowsPhase out;
     if (route == FlatCameraRoute::Upstream && applied != 0) { out.x = phaseX; out.y = phaseY; }
     return out;
-}
-
-// How many jitter phases the flat route's sequence runs this frame
-// (experimental.temporal_aa_jitter_follows_upscale, 2026-10-01). Off, and every
-// route but Upstream, run the fixed eight. The reason is the Legacy route's
-// lighting patch (flat_lighting_contract.h): it refuses a phase outside +-7/16 of
-// a pixel, which the eight shipped Halton phases stay inside and the ninth
-// onward (and the sixteenth's x) do not -- a Legacy frame at a longer count
-// would lose its jitter to a refusal. Only the injector's rows (Upstream) carry
-// any phase to the game, with no such bound. With the key on and Upstream the
-// count is temporalJitterPhaseCount over the render size and the size the
-// upscaler resolves to (E, flat_mono_resolve.h's flatResolveRoute), which is the
-// fixed eight whenever the render is at or above it.
-inline uint32_t flatCameraPhaseCount(FlatCameraRoute route, bool followsUpscale,
-                                     uint32_t renderW, uint32_t renderH,
-                                     uint32_t evalW, uint32_t evalH) {
-    if (!followsUpscale || route != FlatCameraRoute::Upstream) return kTemporalJitterCount;
-    return temporalJitterPhaseCount(renderW, renderH, evalW, evalH);
 }
 
 // ---------------------------------------------------------------------------

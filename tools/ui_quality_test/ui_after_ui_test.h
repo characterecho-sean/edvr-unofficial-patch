@@ -644,6 +644,73 @@ void testStationPixels() {
     }
 }
 
+// ------------------------- 6. the cockpit with Disable GUI effects on (2026-10-01)
+
+// The cockpit's side and centre panels with Elite's Disable GUI effects on: vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE instead of the stock vs
+// 81216C77F90DEDD6 / ps A2965EC2931A39C8 (holo_material.h; docs/ui-layer-2026-09-23.md, "2026-10-01: Disable GUI effects"). The holo-panel
+// draws of the NumLock census at 13:54:24 in edvr_gfx_20261001_135211.log (build 73e02a7b, Sean's Frontier install, eye 2016x1949), frame 0,
+// both eyes -- r=@117 and r=@745, the two eyes' lit HDR targets, twelve draws each -- transcribed from the DC lines: n= and q=, and the draw
+// state of every one of them, ds=17wZ st=14 so=r00/w04/f8/1,1,3+f8/1,1,1 bm=7 bl=12,6,1/2,6,1, which is the stock pair's own (the 11:28
+// census of build 08b48036 draws vs 81216C77F90DEDD6 with the same fields). The build that census came from named no family for them:
+// "cockpit holo panels" never appeared in its 30 s lines, and ui depth counted 22 draws a frame "left alone".
+struct PanelRow {
+    uint32_t n, q;
+};
+const PanelRow kGuiFxOffEyeA[12] = {{12, 1432}, {12, 1433}, {6, 1466}, {279, 1467}, {435, 1468}, {435, 1469},
+                                    {6, 1470},  {12, 1471}, {6, 1486}, {6, 1488},   {18, 1489},  {6, 1490}};
+const PanelRow kGuiFxOffEyeB[12] = {{12, 1588}, {12, 1589}, {6, 1622}, {279, 1623}, {435, 1624}, {435, 1625},
+                                    {6, 1626},  {12, 1627}, {6, 1642}, {6, 1644},   {18, 1645},  {6, 1646}};
+
+std::vector<GDraw> guiFxOffFrame(uint64_t vs, uint64_t ps) {
+    std::vector<GDraw> f;
+    for (int eye = 0; eye < 2; ++eye) {
+        for (const PanelRow& p : eye ? kGuiFxOffEyeB : kGuiFxOffEyeA)
+            f.push_back(row("holo panel (GUI effects off)", p.q, vs, ps, p.n, eye ? kHdr1 : kHdr0, {}, bPremul(), dsHolo(), true));
+    }
+    return f;
+}
+
+void testGuiFxOffCockpit() {
+    unsigned counted = 0;
+    auto takenCount = [&](const std::vector<GDraw>& frame, Router* out) {
+        Router r;
+        const std::vector<Verdict> v = route(frame, true, &r);
+        unsigned n = 0;
+        for (Verdict x : v) n += x == Verdict::kHdrTaken ? 1u : 0u;
+        if (out) *out = r;
+        counted += n;
+        return n;
+    };
+    // The recorded frame: every one of the 24 panel draws is taken into the HDR layer, both eyes.
+    {
+        const std::vector<GDraw> frame = guiFxOffFrame(kUiVsHoloGuiFxOff, kHoloGuiFxOffPs);
+        Router r;
+        check(frame.size() == 24, "the recorded Disable-GUI-effects cockpit frame has 12 panel draws an eye (the census's 24)");
+        check(takenCount(frame, &r) == 24 && r.eye[0].hdrTaken && r.eye[1].hdrTaken,
+              "Disable GUI effects on: every one of the 24 recorded panel draws is named by the family rule, decided a redirect and taken into the "
+              "HDR layer, both eyes (the field's build named none of them)");
+    }
+    // The stock pair through the same structure: taken the same way, so the two are one family to the layer.
+    check(takenCount(guiFxOffFrame(kUiVsHolo, kHoloPs), nullptr) == 24,
+          "the stock pair through the same recorded structure is taken the same way: 24 of 24");
+    // The pair's shaders are not interchangeable halves: the new vertex shader is named by itself (the pixel shader is not asked on the
+    // HDR target), so a variant pixel shader of it -- the unlit material, say -- is the family too.
+    check(takenCount(guiFxOffFrame(kUiVsHoloGuiFxOff, kHoloUnlitPs), nullptr) == 24,
+          "the new vertex shader names the family by itself on the HDR target, whichever pixel shader it draws with");
+    // The controls: a vertex shader one bit away from either names nothing, so nothing is taken and every draw stays in the game's frame --
+    // the field's picture, "cockpit holo panels" absent and 22-24 draws a frame left in the scene.
+    for (uint64_t vs : {kUiVsHoloGuiFxOff ^ 1ull, kUiVsHolo ^ 1ull, kHoloGuiFxOffPs}) {
+        Router r;
+        const std::vector<GDraw> frame = guiFxOffFrame(vs, kHoloGuiFxOffPs);
+        const std::vector<Verdict> v = route(frame, true, &r);
+        unsigned left = 0;
+        for (Verdict x : v) left += x == Verdict::kLeftFrame ? 1u : 0u;
+        check(left == 24 && !r.eye[0].hdrTaken && !r.eye[1].hdrTaken,
+              "control: a vertex shader the rule does not name leaves all 24 draws in the game's frame (the teeth)");
+    }
+    check(counted == 72, "(the three taken frames counted 24 each)");
+}
+
 // --------------------------------------------------------- 5. the wiring
 
 // The code with its comments and whitespace removed, so a check reads statements,

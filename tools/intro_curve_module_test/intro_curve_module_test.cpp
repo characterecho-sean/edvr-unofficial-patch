@@ -2,19 +2,19 @@
 //
 // With fix.panel_curvature above 0 the splash is drawn as a bent strip in place of the game's flat quad. The splash is the SAME composite as the
 // intro movie (VS EF103A7CB4A8369A, six indices) with the game's own world-space placement in VS b2, so the module has to tell, from the shape of a
-// draw and a one-shot copy of the 80 bytes the game bound, whether THIS draw is a world-space panel -- and if so what half-width and which depth
-// direction to hand the strip. This rig compiles the REAL intro_curve.cpp with the real Config, Log and fault guard, puts a WARP device behind it
+// draw and a one-shot copy of the 80 bytes the game bound, whether THIS draw is a world-space panel -- and if so what half-width, which depth
+// direction and which way the picture's u must run to hand the strip. This rig compiles the REAL intro_curve.cpp with the real Config, Log and fault guard, puts a WARP device behind it
 // with the game's state (a constant buffer at VS slot 2 holding real captures, a stand-in for the surface at PS slot 0 in the binding shadow), and
 // drives it the way vscreen.cpp will: ask, recognise, hand the numbers to the strip, disarm, and once a frame tick.
 //
-// The strip itself (panel_curve.cpp, panelCurveSurfaceWanted / Draw / Info) is not linked yet: its definitions come from another change. Until they
-// land this rig supplies inert doubles of the three, and of the variables panelCurveInfo() reads, in the rig itself; the double of Draw records the
-// gain and direction it is handed. Building with INTRO_CURVE_RIG_REAL_STRIP (and panel_curve.cpp in the link) leaves the doubles out.
+// The strip itself (panel_curve.cpp, panelCurveSurfaceWanted / Draw / Info) is linked for real in build.bat's rig; the doubles of the three, and of
+// the variables panelCurveInfo() reads, are for building without it (the double of Draw records the gain, direction and u direction it is handed).
+// Building with INTRO_CURVE_RIG_REAL_STRIP (and panel_curve.cpp in the link) leaves the doubles out.
 //
-//   C1  THE CAPTURES      the game's two real splash captures (docs: edvr_gfx_20260828_182818.log, the panel in front and behind): the first draw of a
-//                         pair is the game's own and issues the copy; the pair stays unknown through the settle frames and is read on the fourth tick,
-//                         not before; then every draw of it is armed with gain 4.44444 and direction +1 and the staging buffer is gone; the
-//                         copy, not the buffer's later content, is what is read; one line says so.
+//   C1  THE CAPTURES      the game's two real splash captures, both eyes of each (docs: edvr_gfx_20260828_182818.log, the panel in front and behind):
+//                         the first draw of a pair is the game's own and issues the copy; the pair stays unknown through the settle frames and is
+//                         read on the fourth tick, not before; then every draw of it is armed with gain 4.44444, direction +1 and the strip's u running
+//                         against x, and the staging buffer is gone; the copy, not the buffer's later content, is what is read; one line says so.
 //   C2  FLAT VERDICTS     the movie's stock constants and several constants that cannot be a world-space panel (NaN, a short column, a w of zero, a
 //                         half-width of 100) are read and left as the game drew them, once, with the reason and the 20 floats in the log; a constant
 //                         buffer under 80 bytes is flat at first sight without a copy.
@@ -35,8 +35,8 @@
 //   C11 THE LOG           the world line and the flat line word for word; one line per learned pair; a cap on the lines about FLAT pairs that a
 //                         turning-over table writes, said once -- and none on the world lines, the one learned after the cap included.
 //   C12 THE WIRING        what the strip is handed: the snapshot's half-width (not a constant) and its direction, the opposite one for a matrix whose
-//                         w terms share a sign, both eyes on their own numbers; the numbers hold until the draw is disarmed and are zero after; a draw
-//                         that is not armed leaves nothing armed.
+//                         w terms share a sign, and the u direction, both eyes on their own numbers; the numbers hold until the draw is disarmed and
+//                         are zero after (the u direction too); a draw that is not armed leaves nothing armed.
 //   C13 THE CUT           a flat pair is copied again 60 frames after its last copy: the movie's own buffer and surface reused for the splash (the
 //                         same objects, stock bytes and then the world capture) draw as the game's until the re-read has settled, on a frame asserted
 //                         exactly for six write times, then armed with 4.44444 and +1, one world line, no flicker before it, a flat pair that stays
@@ -48,7 +48,10 @@
 //   C15 FAILED RE-READS   a re-read whose map fails leaves the pair flat, gives the buffer back, says so once and is tried again a period later; one
 //                         whose readback faults, or whose draw faults, stands this down (the game's draws) and lets go.
 //   C16 A WORLD IS FINAL  a world pair is never copied again, whatever its buffer comes to hold (the known limit intro_curve.h says); expiry is how
-//                         its verdict ends.
+//                         its verdict ends, and its u direction stays with the verdict.
+//   C17 THE DIRECTION     which way u runs, per pair: every real placement (+x to the viewer's left) is armed with reverseU true, the same placements
+//                         with the x column negated with it false, eight pairs drawn in turn, the strip in hand and the log following; a pair read
+//                         edge-on is flat with the reason and arms, with its own direction, when a re-read finds a good placement in the buffer.
 //
 // tools\intro_curve_module_test\mutants.py compiles this rig against a copy of the module with ONE rule flipped and requires the rig to fail on the
 // case that belongs to the rule: every check below carries a label "C<case>.<what>", and that prefix is what the tool looks for.
@@ -143,6 +146,11 @@ const float kCap2[20] = {4.44444f, 2.5f, 0, 0,  -0.780684f, -0.0197438f, 9.48621
                          -0.194148f, 0.0601386f, 9.97268e-05f, -0.997103f,  -0.0725725f, -0.247872f, 0.0996338f, 3.76108f};
 const float kCap1[20] = {4.44444f, 2.5f, 0, 0,  0.795297f, 0.0141897f, -9.32133e-06f, 0.0931979f,  -0.0047877f, 0.788078f, -7.64753e-06f, 0.0764627f,
                          0.121095f, -0.0620333f, -9.92872e-05f, 0.992707f,  -0.908756f, 18.4664f, 0.100169f, -1.5911f};
+// The other eye of each capture (the same log, the second `DCW read` line of each pair): cb2[1].x and cb2[4].x differ, everything else is alike.
+const float kCap2b[20] = {4.44444f, 2.5f, 0, 0,  -0.780317f, -0.0197438f, 9.48621e-08f, -0.000948464f,  -0.0342501f, 0.788105f, -7.60756e-06f, 0.076063f,
+                          0.192659f, 0.0601386f, 9.97268e-05f, -0.997103f,  -1.57885f, -0.247872f, 0.0996338f, 3.76108f};
+const float kCap1b[20] = {4.44444f, 2.5f, 0, 0,  0.759143f, 0.0141897f, -9.32133e-06f, 0.0931979f,  -0.0344499f, 0.788078f, -7.64753e-06f, 0.0764627f,
+                          -0.264007f, -0.0620333f, -9.92872e-05f, 0.992707f,  -0.338754f, 18.4664f, 0.100169f, -1.5911f};
 const float kStock[20] = {512, 288, 0, 0,  -0.000368732f, 0, 0, 0,  0, 0.000373413f, 0, 0,  0, 0, 0, 0,  0.193907f, 0, 0, 1};
 
 struct Cb {
@@ -151,6 +159,18 @@ struct Cb {
 Cb cbOf(const float* base) {
     Cb c;
     std::memcpy(c.f, base, sizeof(c.f));
+    return c;
+}
+// The same placement with the x column run the other way (cb2[1] = -cb2[1]): +x then runs to the viewer's RIGHT, as the on-foot screen's does.
+Cb cbRunningRight(const float* base) {
+    Cb c = cbOf(base);
+    for (int i = 4; i < 8; ++i) c.f[i] = -c.f[i];
+    return c;
+}
+// A placement whose x column and centre cancel (cb2[4].x * cb2[1].w = cb2[1].x * cb2[4].w): the panel seen edge-on, +x running neither way.
+Cb cbEdgeOn(const float* base) {
+    Cb c = cbOf(base);
+    c.f[16] = static_cast<float>((static_cast<double>(c.f[4]) * static_cast<double>(c.f[19])) / static_cast<double>(c.f[7]));
     return c;
 }
 
@@ -165,6 +185,7 @@ struct StripCall {
     ID3D11DeviceContext* ctx;
     float gain;
     int toward;
+    bool reverseU;
 };
 std::vector<StripCall> g_strip;      // every panelCurveSurfaceDraw the rig's wiring made
 bool g_stripStoodDown = false;       // the strip's own stand-down, which the module must never cause
@@ -182,8 +203,8 @@ uint64_t g_panelCurveReissues = 0;
 
 bool panelCurveSurfaceWanted() { return detail::g_panelCurveCurvature > 0.0f && !g_stripStoodDown; }
 
-bool panelCurveSurfaceDraw(ID3D11DeviceContext* ctx, float gain, int toward, PanelCurveDrawFn) {
-    g_strip.push_back(StripCall{ctx, gain, toward});
+bool panelCurveSurfaceDraw(ID3D11DeviceContext* ctx, float gain, int toward, bool reverseU, PanelCurveDrawFn) {
+    g_strip.push_back(StripCall{ctx, gain, toward, reverseU});
     return true;
 }
 
@@ -191,6 +212,7 @@ PanelCurveSurfaceInfo panelCurveSurfaceInfo() {
     PanelCurveSurfaceInfo i;
     i.drawn = g_strip.size();
     i.standDown = g_stripStoodDown;
+    i.reversed = !g_strip.empty() && g_strip.back().reverseU;   // the strip in hand, as the real one reports it
     return i;
 }
 }  // namespace edvr
@@ -376,12 +398,14 @@ void fresh() {
 // One eye draw the way vscreen.cpp's wiring makes it: ask, recognise, hand the numbers to the strip, disarm. The result carries what the strip
 // was handed and what the accessors say once the draw is disarmed.
 struct Wired {
-    bool asked = false;       // introCurveWants()
-    bool armed = false;       // introCurveOnComposite()
-    float gain = 0.0f;        // introCurveGain() while armed
-    int toward = 0;           // introCurveToward() while armed
-    float gainAfter = 1.0f;   // ... after introCurveEndDraw()
+    bool asked = false;         // introCurveWants()
+    bool armed = false;         // introCurveOnComposite()
+    float gain = 0.0f;          // introCurveGain() while armed
+    int toward = 0;             // introCurveToward() while armed
+    bool reverseU = false;      // introCurveReverseU() while armed: the strip's u runs against its x
+    float gainAfter = 1.0f;     // ... after introCurveEndDraw()
     int towardAfter = 1;
+    bool reverseUAfter = true;
 };
 
 bool rawDraw(Gpu& g, ID3D11Buffer* cb, void* surface, char kind = 'X', uint32_t count = 6, uint32_t instances = 1,
@@ -401,10 +425,12 @@ Wired wired(Gpu& g, ID3D11Buffer* cb, void* surface) {
     if (w.armed) {
         w.gain = introCurveGain();
         w.toward = introCurveToward();
-        panelCurveSurfaceDraw(g.ctx.Get(), w.gain, w.toward, recordingDraw);
+        w.reverseU = introCurveReverseU();
+        panelCurveSurfaceDraw(g.ctx.Get(), w.gain, w.toward, w.reverseU, recordingDraw);
         introCurveEndDraw();
         w.gainAfter = introCurveGain();
         w.towardAfter = introCurveToward();
+        w.reverseUAfter = introCurveReverseU();
     }
     return w;
 }
@@ -494,7 +520,9 @@ void case1(Gpu& g) {
         const char* w4;   // cb2[4].w
     };
     const Cap caps[] = {{"capture 2, the panel in front", kCap2, L"ic_c1a", "-0.997", "3.761"},
-                        {"capture 1, the panel behind", kCap1, L"ic_c1b", "0.993", "-1.591"}};
+                        {"capture 1, the panel behind", kCap1, L"ic_c1b", "0.993", "-1.591"},
+                        {"capture 2, the other eye", kCap2b, L"ic_c1c", "-0.997", "3.761"},
+                        {"capture 1, the other eye", kCap1b, L"ic_c1d", "0.993", "-1.591"}};
     for (const Cap& cap : caps) {
         g_note = cap.name;
         fresh();
@@ -534,11 +562,12 @@ void case1(Gpu& g) {
         check(w.armed, "C1.armed-after-the-read: the next draw is handed to the strip");
         check(w.gain == kHalfWidth, "C1.gain-is-the-half-width: cb2[0].x", fmt("%.7f", static_cast<double>(w.gain)));
         check(w.toward == 1, "C1.toward-is-plus-one: cb2[3].w and cb2[4].w have opposite signs in this capture", fmt("%d", w.toward));
-        check(w.gainAfter == 0.0f && w.towardAfter == 0, "C1.end-draw-disarms");
+        check(w.reverseU, "C1.reverse-u: every real capture's +x runs to the viewer's left, so the strip's u runs against x");
+        check(w.gainAfter == 0.0f && w.towardAfter == 0 && !w.reverseUAfter, "C1.end-draw-disarms: the gain, the direction and the u direction");
         for (int n = 0; n < 10; ++n) {
             tick(g);
             w = wired(g, cb.Get(), view(0));
-            check(w.armed && w.gain == kHalfWidth && w.toward == 1, "C1.stays-armed: every later draw of the pair, with the same numbers");
+            check(w.armed && w.gain == kHalfWidth && w.toward == 1 && w.reverseU, "C1.stays-armed: every later draw of the pair, with the same numbers");
         }
         i = introCurveInfo();
         check(i.armed == 11, "C1.armed-count: the draws handed to the strip", fmt("%llu", static_cast<unsigned long long>(i.armed)));
@@ -549,7 +578,8 @@ void case1(Gpu& g) {
         const std::string log = endLog(cap.tag);
         check(count(log, "splash curve:") == 1, "C1.one-line: one line for the learned pair", fmt("%zu lines", count(log, "splash curve:")));
         check(has(log, fmt("splash curve: the game-placed composite (VS EF103A7C) reads as a world-space panel: half-width 4.444 m, depth toward the "
-                           "viewer +1 (cb2[3].w %s, cb2[4].w %s); drawn as a 64-column strip at curvature 0.300.", cap.w3, cap.w4)),
+                           "viewer +1 (cb2[3].w %s, cb2[4].w %s); +x runs to the viewer's left, so u runs against x; drawn as a 64-column strip at "
+                           "curvature 0.300.", cap.w3, cap.w4)),
               "C1.world-line: the line that says what was read");
     }
 
@@ -1190,7 +1220,7 @@ void case11(Gpu& g) {
                     "w is a constant 1), not a world-space panel. Its cb2: 512 288 0 0 | -0.000368732 0 0 0 | 0 0.000373413 0 0 | 0 0 0 0 | 0.193907 0 0 1."),
           "C11.flat-line: the reason and the 20 floats, word for word");
     check(has(logA, "splash curve: the game-placed composite (VS EF103A7C) reads as a world-space panel: half-width 3.000 m, depth toward the viewer -1 "
-                    "(cb2[3].w 0.997, cb2[4].w 3.761); drawn as a 64-column strip at curvature 0.300."),
+                    "(cb2[3].w 0.997, cb2[4].w 3.761); +x runs to the viewer's left, so u runs against x; drawn as a 64-column strip at curvature 0.300."),
           "C11.world-line-with-minus-one: half-width and direction from the buffer, not constants");
     check(count(logA, "splash curve:") == 2, "C11.one-line-per-pair", fmt("%zu lines", count(logA, "splash curve:")));
 
@@ -1267,12 +1297,16 @@ void case12(Gpu& g) {
     check(l.armed && l.gain == kHalfWidth && l.toward == 1, "C12.left-eye-numbers: 4.44444 m, toward the viewer");
     check(r.armed && r.gain == 3.0f && r.toward == 1, "C12.right-eye-its-own-half-width: 3 m, not a constant", fmt("%.5f", static_cast<double>(r.gain)));
     check(o.armed && o.gain == kHalfWidth && o.toward == -1, "C12.same-sign-w-the-other-direction: -1", fmt("%d", o.toward));
+    check(l.reverseU && r.reverseU && o.reverseU && !l.reverseUAfter && !r.reverseUAfter && !o.reverseUAfter,
+          "C12.the-u-direction-is-handed-with-them: against x for each, and cleared by the end of the draw");
     const PanelCurveSurfaceInfo after = panelCurveSurfaceInfo();
     check(after.drawn - before.drawn == 3, "C12.each-armed-draw-is-one-strip-draw", fmt("%llu", static_cast<unsigned long long>(after.drawn - before.drawn)));
+    check(after.reversed, "C12.the-strip-in-hand-runs-u-against-x");
 #ifndef INTRO_CURVE_RIG_REAL_STRIP
     check(g_strip.size() == 3 && g_strip[0].gain == kHalfWidth && g_strip[0].toward == 1 && g_strip[1].gain == 3.0f && g_strip[1].toward == 1 &&
               g_strip[2].gain == kHalfWidth && g_strip[2].toward == -1,
           "C12.the-strip-is-handed-the-numbers: in the order the draws were made", fmt("%zu calls", g_strip.size()));
+    check(g_strip[0].reverseU && g_strip[1].reverseU && g_strip[2].reverseU, "C12.the-strip-is-handed-the-u-direction: all three, against x");
 #else
     // The real strip: three different numbers, three builds; each draw is one (indices, 1, 0, 0, 0) through the draw function it was handed;
     // and the two eyes of the splash -- the same numbers -- share ONE strip, as the movie's do (nothing rebuilds at the cut from the movie).
@@ -1295,25 +1329,27 @@ void case12(Gpu& g) {
     bindCb(g, left.Get());
     setShadow(kVsHash, view(0));
     check(introCurveOnComposite(g.ctx.Get(), 'X', 6, 1), "C12.armed");
-    check(introCurveGain() == kHalfWidth && introCurveToward() == 1 && introCurveGain() == kHalfWidth && introCurveToward() == 1,
-          "C12.numbers-hold-inside-the-draw: asked twice, the same");
+    check(introCurveGain() == kHalfWidth && introCurveToward() == 1 && introCurveReverseU() && introCurveGain() == kHalfWidth && introCurveToward() == 1 &&
+              introCurveReverseU(),
+          "C12.numbers-hold-inside-the-draw: asked twice, the same, the u direction with them");
     introCurveEndDraw();
-    check(introCurveGain() == 0.0f && introCurveToward() == 0, "C12.zero-after-end-draw");
+    check(introCurveGain() == 0.0f && introCurveToward() == 0 && !introCurveReverseU(), "C12.zero-after-end-draw");
     introCurveEndDraw();   // twice is fine
-    check(introCurveGain() == 0.0f && introCurveToward() == 0, "C12.end-draw-twice-is-fine");
+    check(introCurveGain() == 0.0f && introCurveToward() == 0 && !introCurveReverseU(), "C12.end-draw-twice-is-fine");
 
     // A draw that is not armed leaves nothing armed, even after one that was left armed.
     g_note = "a draw after an armed one that was not disarmed";
-    check(introCurveOnComposite(g.ctx.Get(), 'X', 6, 1), "C12.armed-again");
+    check(introCurveOnComposite(g.ctx.Get(), 'X', 6, 1) && introCurveReverseU(), "C12.armed-again");
     check(!rawDraw(g, left.Get(), view(0), 'N', 6, 1), "C12.not-the-composite");
-    check(introCurveGain() == 0.0f && introCurveToward() == 0, "C12.a-draw-that-is-not-armed-clears-the-numbers");
+    check(introCurveGain() == 0.0f && introCurveToward() == 0 && !introCurveReverseU(), "C12.a-draw-that-is-not-armed-clears-the-numbers");
     ComPtr<ID3D11Buffer> st = makeCb(g, kStock);
     learn(g, st.Get(), view(4));
-    check(rawDraw(g, left.Get(), view(0)), "C12.armed-once-more");
+    check(rawDraw(g, left.Get(), view(0)) && introCurveReverseU(), "C12.armed-once-more");
     check(!rawDraw(g, st.Get(), view(4)), "C12.a-flat-pair-is-not-armed");
-    check(introCurveGain() == 0.0f && introCurveToward() == 0, "C12.a-flat-pair-clears-the-numbers");
+    check(introCurveGain() == 0.0f && introCurveToward() == 0 && !introCurveReverseU(), "C12.a-flat-pair-clears-the-numbers");
+    check(rawDraw(g, left.Get(), view(0)) && introCurveReverseU(), "C12.armed-yet-again");
     check(!rawDraw(g, left.Get(), view(9)), "C12.a-new-pair-is-not-armed");
-    check(introCurveGain() == 0.0f && introCurveToward() == 0, "C12.a-new-pair-clears-the-numbers");
+    check(introCurveGain() == 0.0f && introCurveToward() == 0 && !introCurveReverseU(), "C12.a-new-pair-clears-the-numbers");
     g_note.clear();
     introCurveEndDraw();
 }
@@ -1354,6 +1390,7 @@ void case13(Gpu& g) {
         bool prev = false;
         float gain = 0.0f;
         int toward = 0;
+        unsigned notReversed = 0;
         for (uint32_t f = 0; f < last; ++f) {
             if (f == cut.s) setCb(g, cb.Get(), kCap2);   // the game writes the splash's capture into the movie's own buffer
             const Wired w = fl.draw();
@@ -1365,6 +1402,7 @@ void case13(Gpu& g) {
                 ++armedDraws;
                 gain = w.gain;
                 toward = w.toward;
+                if (!w.reverseU) ++notReversed;
             }
             const bool landed = f >= armedFrom;
             const uint32_t k = f / kRecheck;
@@ -1388,6 +1426,7 @@ void case13(Gpu& g) {
               fmt("%u changes, %u armed draws", flips, armedDraws));
         check(wrongState == UINT32_MAX, "C13.flat-while-the-copy-is-pending: no change of state until a read says otherwise", stateDetail);
         check(gain == kHalfWidth && toward == 1, "C13.numbers-of-the-capture: 4.44444 m, toward the viewer", fmt("%.7f %d", static_cast<double>(gain), toward));
+        check(notReversed == 0, "C13.the-reread-carries-the-u-direction: against x, as a first learn of the same capture does", fmt("%u armed draws with u with x", notReversed));
         check(fin.worlds == 1 && fin.flats == 0 && fin.learned == 2 && fin.staging == 0, "C13.learned-twice-and-nothing-held: a flat reading, then a world one",
               fmt("%u worlds %u flats %llu learned %u staging", fin.worlds, fin.flats, static_cast<unsigned long long>(fin.learned), fin.staging));
         check(fin.rereads == due / kRecheck && fin.flatToWorld == 1, "C13.counters: the re-reads, and the one verdict that changed",
@@ -1409,7 +1448,8 @@ void case13(Gpu& g) {
               fmt("%zu lines", count(log, "splash curve:")));
         check(count(log, "this composite stays as the game drew it, because the constants read as a screen-space placement") == 1, "C13.the-flat-line-once");
         check(count(log, "splash curve: the game-placed composite (VS EF103A7C) reads as a world-space panel: half-width 4.444 m, depth toward the viewer +1 "
-                         "(cb2[3].w -0.997, cb2[4].w 3.761); drawn as a 64-column strip at curvature 0.300.") == 1,
+                         "(cb2[3].w -0.997, cb2[4].w 3.761); +x runs to the viewer's left, so u runs against x; drawn as a 64-column strip at "
+                         "curvature 0.300.") == 1,
               "C13.the-world-line-once: the same line a first learn writes");
         check(has(log, fmt("It learned 2 composite(s) (1 world-space, 1 flat) and armed 20 strip draw(s), %u re-read(s), 1 flat-to-world change(s).", due / kRecheck)),
               "C13.retirement-clause: the re-reads and the change, said when there were re-reads");
@@ -1730,10 +1770,11 @@ void case16(Gpu& g) {
     unsigned armed = 0, missed = 0, wrongNumbers = 0;
     for (uint32_t f = 0; f <= 600; ++f) {
         if (f == 100) setCb(g, cb.Get(), kStock);   // the buffer is reused for another placement: the pair keeps what it read
+        if (f == 150) setCb(g, cb.Get(), cbRunningRight(kCap2).f);   // and again, for a placement whose +x runs the other way: its u direction stays too
         const Wired w = fl.draw();
         if (w.armed) {
             ++armed;
-            if (w.gain != kHalfWidth || w.toward != 1) ++wrongNumbers;
+            if (w.gain != kHalfWidth || w.toward != 1 || !w.reverseU) ++wrongNumbers;
         } else if (f >= kSettle) {
             ++missed;
         }
@@ -1756,8 +1797,10 @@ void case16(Gpu& g) {
           fmt("%u copies", fl.watch.copies));
     for (uint32_t n = 0; n < kSettle; ++n) fl.next();
     i = introCurveInfo();
-    check(i.flats == 1 && i.worlds == 0 && !fl.draw().armed, "C16.and-reads-what-the-buffer-holds-now: the stock bytes, flat",
-          fmt("%u flats %u worlds", i.flats, i.worlds));
+    const Wired again = fl.draw();
+    check(i.flats == 0 && i.worlds == 1 && again.armed && !again.reverseU && again.gain == kHalfWidth && again.toward == 1,
+          "C16.and-reads-what-the-buffer-holds-now: the placement running right, a world again with the u direction it has now, not the old one",
+          fmt("%u flats %u worlds, armed %d, reverseU %d", i.flats, i.worlds, again.armed ? 1 : 0, again.reverseU ? 1 : 0));
     tick(g, 1, true);
     fl.watch.look();
     fl.watch.done();
@@ -1765,10 +1808,114 @@ void case16(Gpu& g) {
     check(refs(cb.Get()) == refsBefore, "C16.no-reference-left-on-the-games-buffer", fmt("%lu then %lu", refsBefore, refs(cb.Get())));
     check(refs(g.dev.Get()) == devBefore, "C16.no-reference-left-on-the-device", fmt("%lu then %lu", devBefore, refs(g.dev.Get())));
     const std::string log = endLog(L"ic_c16");
-    check(count(log, "splash curve:") == 3 && count(log, "reads as a world-space panel") == 1 && count(log, "read again") == 0,
-          "C16.three-lines: the world line, the flat one for the same objects later, the retirement", fmt("%zu lines", count(log, "splash curve:")));
-    check(has(log, "It learned 2 composite(s) (1 world-space, 1 flat) and armed 597 strip draw(s)."),
+    check(count(log, "splash curve:") == 3 && count(log, "reads as a world-space panel") == 2 && count(log, "read again") == 0 &&
+              count(log, "+x runs to the viewer's left, so u runs against x") == 1 && count(log, "+x runs to the viewer's right, so u runs with x") == 1,
+          "C16.three-lines: the world line, the world line for the same objects later (running the other way), the retirement",
+          fmt("%zu lines", count(log, "splash curve:")));
+    check(has(log, "It learned 2 composite(s) (2 world-space, 0 flat) and armed 598 strip draw(s)."),
           "C16.retirement-line-has-no-clause-without-re-reads: the text it always had");
+    g_note.clear();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// C17  THE DIRECTION: which way u runs
+// ---------------------------------------------------------------------------------------------------------------------------------
+void case17(Gpu& g) {
+    // (a) Every real placement runs +x to the viewer's left, and is armed with reverseU true (C1 holds each of the four against the whole line). The
+    // same placements with the x column negated -- what the on-foot screen's would be -- run it to the right and are armed with reverseU false. Seven
+    // pairs (four running left, three running right) side by side, drawn in turn again and again: each draw has ITS pair's direction, the strip in hand
+    // follows it, and the log says each.
+    g_note = "left-running and right-running pairs side by side";
+    fresh();
+    check(beginLog(L"ic_c17a"), "C17.log: the scratch log opens");
+    {
+        // Four left-running pairs (every real vector) and THREE right-running ones, so that a log line that says the opposite is not a count that
+        // happens to come out alike.
+        const float* const bases[4] = {kCap2, kCap2b, kCap1, kCap1b};
+        std::vector<ComPtr<ID3D11Buffer>> lefts, rights;
+        for (const float* b : bases) lefts.push_back(makeCb(g, b));
+        for (size_t k = 0; k < 3; ++k) rights.push_back(makeCb(g, cbRunningRight(bases[k]).f));
+        for (size_t k = 0; k < 4; ++k) {
+            wired(g, lefts[k].Get(), view(0));
+            if (k < 3) wired(g, rights[k].Get(), view(1));
+        }
+        tick(g, kSettle);
+        unsigned wrong = 0, drawn = 0, stripWrong = 0;
+        for (int round = 0; round < 3; ++round) {
+            tick(g);
+            for (size_t k = 0; k < 4; ++k) {
+                const Wired l = wired(g, lefts[k].Get(), view(0));
+                const bool leftStrip = panelCurveSurfaceInfo().reversed;
+                ++drawn;
+                if (!(l.armed && l.reverseU && !l.reverseUAfter)) ++wrong;
+                if (!leftStrip) ++stripWrong;
+                if (k < 3) {
+                    const Wired r = wired(g, rights[k].Get(), view(1));
+                    const bool rightStrip = panelCurveSurfaceInfo().reversed;
+                    ++drawn;
+                    if (!(r.armed && !r.reverseU && !r.reverseUAfter)) ++wrong;
+                    if (rightStrip) ++stripWrong;
+                }
+            }
+        }
+        check(drawn == 21 && wrong == 0, "C17.each-pair-keeps-its-own-direction: four running left (against x), three running right (with x), drawn in turn",
+              fmt("%u draws, %u wrong", drawn, wrong));
+        check(stripWrong == 0, "C17.the-strip-in-hand-follows-the-draw: against x after a left-running pair, with x after a right-running one", fmt("%u wrong", stripWrong));
+        const IntroCurveInfo i = introCurveInfo();
+        check(i.worlds == 7 && i.armed == 21, "C17.all-seven-pairs-are-worlds", fmt("%u worlds %llu armed", i.worlds, static_cast<unsigned long long>(i.armed)));
+        releaseStrip();
+    }
+    const std::string logA = endLog(L"ic_c17a");
+    check(count(logA, "+x runs to the viewer's left, so u runs against x; drawn as a 64-column strip") == 4 &&
+              count(logA, "+x runs to the viewer's right, so u runs with x; drawn as a 64-column strip") == 3 && count(logA, "reads as a world-space panel") == 7,
+          "C17.the-log-says-which-way: four left, three right, one line a pair", fmt("%zu left, %zu right", count(logA, "so u runs against x"), count(logA, "so u runs with x")));
+
+    // (b) A pair read edge-on (the x column and the centre cancel) is no reading: it stays as the game drew it, with the reason and the 20 floats in the
+    // log, and is read again like any flat pair. When the game then writes a good placement into the same buffer -- running either way -- the re-read
+    // arms it, with that placement's own u direction, on the frame its copy settles (the copy of frame 60 lands at 64). A pair that stays edge-on
+    // says nothing more, however often it is read.
+    g_note = "a pair read edge-on";
+    fresh();
+    check(beginLog(L"ic_c17b"), "C17.log: the scratch log opens");
+    {
+        const Cb edge = cbEdgeOn(kCap2);
+        ComPtr<ID3D11Buffer> toLeft = makeCb(g, edge.f), toRight = makeCb(g, edge.f), stays = makeCb(g, edge.f);
+        unsigned wrongEarly = 0, wrongLate = 0;
+        for (uint32_t f = 0; f < 140; ++f) {
+            if (f == 30) {
+                setCb(g, toLeft.Get(), kCap2);                        // a good placement, +x running left
+                setCb(g, toRight.Get(), cbRunningRight(kCap2).f);     // a good placement, +x running right
+            }
+            const Wired a = wired(g, toLeft.Get(), view(0));
+            const Wired b = wired(g, toRight.Get(), view(1));
+            const Wired c = wired(g, stays.Get(), view(2));
+            if (f < 64) {
+                if (a.armed || b.armed || c.armed || a.reverseU || b.reverseU || c.reverseU) ++wrongEarly;
+            } else if (!(a.armed && a.reverseU && b.armed && !b.reverseU && !c.armed && !c.reverseU)) {
+                ++wrongLate;
+            }
+            if (f == 10) {
+                const IntroCurveInfo i = introCurveInfo();
+                check(i.flats == 3 && i.worlds == 0 && i.learned == 3, "C17.edge-on-is-flat: three pairs, none armed", fmt("%u flats %u worlds", i.flats, i.worlds));
+            }
+            tick(g);
+        }
+        check(wrongEarly == 0, "C17.nothing-armed-until-the-reread-has-settled: frames 0 to 63", fmt("%u wrong draws", wrongEarly));
+        check(wrongLate == 0, "C17.armed-from-frame-64-each-with-its-own-direction: left-running against x, right-running with x, the one still edge-on flat",
+              fmt("%u wrong draws", wrongLate));
+        const IntroCurveInfo i = introCurveInfo();
+        check(i.worlds == 2 && i.flats == 1 && i.flatToWorld == 2, "C17.two-changed-one-stayed", fmt("%u worlds %u flats %llu changes", i.worlds, i.flats,
+                                                                                                    static_cast<unsigned long long>(i.flatToWorld)));
+        releaseStrip();
+    }
+    const std::string logB = endLog(L"ic_c17b");
+    check(count(logB, "this composite stays as the game drew it, because the placement's +x cannot be told to run left or right (the panel is seen "
+                      "edge-on, or its x column and its centre cancel). Its cb2: ") == 3,
+          "C17.edge-on-says-why-and-says-its-floats: one line a pair", fmt("%zu lines", count(logB, "cannot be told to run left or right")));
+    check(count(logB, "read again") == 0, "C17.and-the-reads-after-that-say-nothing-more: the same reason is not said again");
+    check(count(logB, "+x runs to the viewer's left, so u runs against x; drawn as a 64-column strip") == 1 &&
+              count(logB, "+x runs to the viewer's right, so u runs with x; drawn as a 64-column strip") == 1,
+          "C17.the-pairs-that-recovered-say-which-way: one line each");
     g_note.clear();
 }
 
@@ -1780,7 +1927,8 @@ struct Case {
     void (*run)(Gpu&);
 };
 const Case kCases[] = {{"C1", case1}, {"C2", case2}, {"C3", case3}, {"C4", case4}, {"C5", case5},   {"C6", case6},   {"C7", case7},   {"C8", case8},
-                       {"C9", case9}, {"C10", case10}, {"C11", case11}, {"C12", case12}, {"C13", case13}, {"C14", case14}, {"C15", case15}, {"C16", case16}};
+                       {"C9", case9}, {"C10", case10}, {"C11", case11}, {"C12", case12}, {"C13", case13}, {"C14", case14}, {"C15", case15}, {"C16", case16},
+                       {"C17", case17}};
 
 void removeScratch() {
     WIN32_FIND_DATAW fd{};

@@ -6,7 +6,9 @@
 // users (AA on, bloom and DoF on, everything off), a non-Custom preset, missing files, the
 // wrapping, and the watcher's re-read on change. The files are real files in a temporary
 // directory, so the folder reading is the code the DLL runs; the panel's wiring is pinned by the
-// source scan in flat_temporal_test.cpp.
+// source scan in flat_temporal_test.cpp. The hold on a changed cause (FlatWarnHold) is driven here
+// too: the flight it was made for, replayed at the log's own stamps, and the controls that make
+// the replay a test (a wait of 0 ms, 1500 ms or none, and four defective copies of the rule).
 
 #include <windows.h>
 
@@ -17,6 +19,7 @@
 #include <vector>
 #include "../../src/d3d11/flat_elite_settings.h"
 #include "../../src/d3d11/flat_hdr_route.h"   // flatHdrSupersamplingAdvice: the key and sizes that decide the extra paragraph
+#include "../../src/d3d11/flat_standdown.h"   // kFlatStandDownProbeMs: the hold is measured against the probe cadence
 
 namespace elite_settings_test {
 
@@ -76,6 +79,221 @@ inline int ruler(const char* text, void*) { return static_cast<int>(std::strlen(
 constexpr int kPanelWidthPx = 806;   // the flat card less its padding, at the default size
 
 }  // namespace elite_settings_test
+
+// The hold on a changed cause (FlatWarnHold): the panel's side of it, the real helper under the waits the controls vary, four
+// copies of the rule with one defect each, and the scenarios that must pass the real helper and fail every one of those.
+namespace warn_hold_test {
+
+using namespace edvr;
+
+// A log stamp as milliseconds of the day. The last argument is decimal: write 50, not 050 (octal).
+constexpr uint64_t stamp(int h, int m, int s, int ms) {
+    return ((static_cast<uint64_t>(h) * 60 + static_cast<uint64_t>(m)) * 60 + static_cast<uint64_t>(s)) * 1000 +
+           static_cast<uint64_t>(ms);
+}
+
+// What flatWarningTick keeps and does with the hold, in its order: the hold is asked first, every tick; then the comparison; then
+// the switch (shown, changed, hidden: the three lines the log's reader counts). `held` counts the ticks on which a hold began.
+template <class Hold>
+struct Panel {
+    Hold hold;
+    bool active = false;
+    std::string key;
+    int shown = 0, changed = 0, hidden = 0, held = 0;
+    std::vector<uint64_t> changedAt;
+    void tick(bool refusing, const std::string& computed, uint64_t now) {
+        if (!hold.admit(refusing, active, key, computed, now)) {
+            if (hold.began()) ++held;
+            return;
+        }
+        if (refusing == active && computed == key) return;
+        if (!active) ++shown;
+        else if (!refusing) ++hidden;
+        else { ++changed; changedAt.push_back(now); }
+        active = refusing;
+        key = computed;
+    }
+};
+
+// The real helper, called as menu.cpp calls it: five arguments, the constant's wait.
+struct ProductionHold {
+    FlatWarnHold h;
+    bool admit(bool refusing, bool active, const std::string& shown, const std::string& computed, uint64_t now) {
+        return h.admit(refusing, active, shown, computed, now);
+    }
+    bool began() const { return h.began(); }
+    bool pending() const { return h.pending(); }
+    const std::string& pendingKey() const { return h.pendingKey(); }
+    uint64_t sinceMs() const { return h.sinceMs(); }
+};
+// The same helper with another wait, for the controls: 0 ms is the panel as it was before the hold, 1500 ms is one stand-down
+// probe interval, UINT64_MAX is a hold that never expires.
+template <uint64_t Ms>
+struct WaitHold : ProductionHold {
+    bool admit(bool refusing, bool active, const std::string& shown, const std::string& computed, uint64_t now) {
+        return h.admit(refusing, active, shown, computed, now, Ms);
+    }
+};
+
+// The rule written out again with one defect at a time (this rig has no mutants.py, so its controls live in it, as the source
+// pins' do): StaleAfterReturn leaves a wait standing when the cause comes back to the one on show, ThirdKeyKeepsClock lets a third
+// cause inherit the second one's clock, ShowAndHideHeld makes a show and a hide wait like any change, and ShowAndHideKeepPending
+// leaves a waiting change standing across a show or a hide.
+enum class Defect { StaleAfterReturn, ThirdKeyKeepsClock, ShowAndHideHeld, ShowAndHideKeepPending };
+template <Defect D>
+struct DefectiveHold {
+    bool pending_ = false, began_ = false;
+    std::string pendingKey_;
+    uint64_t since_ = 0;
+    bool admit(bool refusing, bool active, const std::string& shown, const std::string& computed, uint64_t now) {
+        began_ = false;
+        if constexpr (D != Defect::ShowAndHideHeld) {
+            if (!refusing || !active) {
+                if constexpr (D != Defect::ShowAndHideKeepPending) pending_ = false;
+                return true;
+            }
+        }
+        if (computed == shown) {
+            if constexpr (D != Defect::StaleAfterReturn) pending_ = false;
+            return true;
+        }
+        if (!pending_ || computed != pendingKey_) {
+            if constexpr (D == Defect::ThirdKeyKeepsClock) {
+                if (!pending_) since_ = now;
+            } else {
+                since_ = now;
+            }
+            pending_ = true;
+            pendingKey_ = computed;
+            began_ = true;
+        }
+        if (now - since_ < kFlatWarnHoldMs) return false;
+        pending_ = false;
+        return true;
+    }
+    bool began() const { return began_; }
+    bool pending() const { return pending_; }
+    const std::string& pendingKey() const { return pendingKey_; }
+    uint64_t sinceMs() const { return since_; }
+};
+
+// ---- the flight (edvr_gfx_20261001_103559.log: Epic, DLSS, the route's key auto, a 3840x2160 screen) --------------------------
+// The computed cause across the stand-down that entered at 10:38:16.516 with Elite rendering 1440x810: the loading screen's
+// 256x256 that the stand-down's probes saw twice (it stood for 1521 ms and 1509 ms, one probe interval each), the resume at
+// 10:38:36.172, and the panel's hide a millisecond later. The stamps are the log's: its four `changed` lines are the four flips of
+// the computed cause, with no hold at all.
+constexpr uint64_t kEntered = stamp(10, 38, 16, 516);   // the stand-down enters and the warning is shown
+constexpr uint64_t kLow1 = stamp(10, 38, 19, 529);      // the computed cause moves to 256x256 ...
+constexpr uint64_t kUp1 = stamp(10, 38, 21, 50);        // ... and back to 1440x810 (1521 ms later)
+constexpr uint64_t kLow2 = stamp(10, 38, 24, 85);       // ... to 256x256 again ...
+constexpr uint64_t kUp2 = stamp(10, 38, 25, 594);       // ... and back (1509 ms later)
+constexpr uint64_t kResumed = stamp(10, 38, 36, 172);   // the stand-down resumes; the panel hides at kResumed + 1
+
+struct Replay {
+    int shown = 0, changed = 0, hidden = 0, held = 0;
+    std::vector<uint64_t> changedAt;
+    bool stayed = true;   // the key on show was the 1440x810 one at every tick
+};
+
+// The panel ticking every `step` ms over the flight (1 ms is the finest the log's stamps allow; 16 ms is a 60 fps frame).
+template <class Hold>
+Replay replayFlight(const std::string& k1440, const std::string& k256, uint64_t step) {
+    Panel<Hold> p;
+    Replay r;
+    for (uint64_t t = kEntered; t <= kResumed; t += step) {
+        const bool low = (t >= kLow1 && t < kUp1) || (t >= kLow2 && t < kUp2);
+        p.tick(true, low ? k256 : k1440, t);
+        if (p.active && p.key != k1440) r.stayed = false;
+    }
+    p.tick(false, std::string(), kResumed + 1);
+    r.shown = p.shown;
+    r.changed = p.changed;
+    r.hidden = p.hidden;
+    r.held = p.held;
+    r.changedAt = p.changedAt;
+    return r;
+}
+
+// Each scenario returns nullptr when the rule holds, else the first thing that did not. S is on show; X, Y are other causes.
+
+// A change that persists is adopted at 2000 ms and not before: 1999 ms holds, 2000 ms adopts.
+template <class Hold>
+const char* persists(const std::string& S, const std::string& X) {
+    Panel<Hold> p;
+    const uint64_t T = 10000;
+    p.tick(true, S, T - 1);
+    for (uint64_t t = T; t < T + 2000; ++t) {
+        p.tick(true, X, t);
+        if (p.key != S || p.changed) return "a change replaced the one on show before it had persisted 2000 ms";
+    }
+    p.tick(true, X, T + 2000);
+    if (p.key != X || p.changed != 1 || p.changedAt[0] != T + 2000) return "a change that persisted 2000 ms was not adopted at 2000 ms";
+    return nullptr;
+}
+
+// A change that flips back before 2000 ms is dropped, and the next flip starts a new wait.
+template <class Hold>
+const char* flipBack(const std::string& S, const std::string& X) {
+    Panel<Hold> p;
+    const uint64_t T = 70000;
+    p.tick(true, S, T - 1);
+    for (uint64_t t = T; t < T + 1500; ++t) p.tick(true, X, t);
+    if (!p.hold.pending() || p.key != S) return "a change was not waiting after 1500 ms";
+    for (uint64_t t = T + 1500; t < T + 1600; ++t) p.tick(true, S, t);
+    if (p.hold.pending() || p.changed) return "a change that came back to the one on show before its wait was up was not dropped";
+    for (uint64_t t = T + 1600; t < T + 3600; ++t) {
+        p.tick(true, X, t);
+        if (p.key != S || p.changed) return "a change that flipped back and came again was adopted before 2000 ms of its new wait";
+    }
+    p.tick(true, X, T + 3600);
+    if (p.key != X || p.changed != 1 || p.changedAt[0] != T + 3600) return "the restarted wait was not 2000 ms";
+    return nullptr;
+}
+
+// A third cause starts its own 2000 ms, from the tick it appears; the second one is never adopted.
+template <class Hold>
+const char* thirdKey(const std::string& S, const std::string& X, const std::string& Y) {
+    Panel<Hold> p;
+    const uint64_t T = 90000;
+    p.tick(true, S, T - 1);
+    for (uint64_t t = T; t < T + 1500; ++t) p.tick(true, X, t);
+    for (uint64_t t = T + 1500; t < T + 3500; ++t) {
+        p.tick(true, Y, t);
+        if (p.key != S || p.changed) return "a third cause was adopted before 2000 ms of its own wait";
+        if (t == T + 1500 && (p.hold.pendingKey() != Y || p.hold.sinceMs() != T + 1500))
+            return "the wait did not restart, from the tick it appeared, on a third cause";
+    }
+    p.tick(true, Y, T + 3500);
+    if (p.key != Y || p.changed != 1 || p.changedAt[0] != T + 3500 || p.held != 2)
+        return "the third cause was not adopted at its own 2000 ms as the only change (two waits begun)";
+    return nullptr;
+}
+
+// A show and a hide are immediate, and either clears a waiting change.
+template <class Hold>
+const char* showHide(const std::string& S, const std::string& X) {
+    Panel<Hold> p;
+    const uint64_t T = 50000;
+    p.tick(true, S, T);
+    if (!p.active || p.shown != 1 || p.key != S) return "a show did not take effect on the tick that wanted it";
+    p.tick(false, std::string(), T + 40);
+    if (p.active || p.hidden != 1) return "a hide did not take effect on the tick that wanted it";
+    p.tick(true, S, T + 80);
+    if (!p.active || p.shown != 2) return "a second show was not immediate";
+    p.tick(true, X, T + 100);
+    p.tick(false, std::string(), T + 1500);
+    if (p.active || p.hidden != 2 || p.hold.pending()) return "a hide did not take effect at once, or left a change waiting";
+    p.tick(true, S, T + 1600);
+    for (uint64_t t = T + 1700; t < T + 3700; ++t) {
+        p.tick(true, X, t);
+        if (p.key != S || p.changed) return "a change that was waiting before a hide was adopted early: its clock was not cleared";
+    }
+    p.tick(true, X, T + 3700);
+    if (p.key != X || p.changed != 1) return "the change after a hide and a show was not adopted at 2000 ms";
+    return nullptr;
+}
+
+}  // namespace warn_hold_test
 
 inline int flatEliteSettingsTests() {
     using namespace edvr;
@@ -375,6 +593,104 @@ inline int flatEliteSettingsTests() {
                                     "down): DLSS is not active: Elite's post-processing is not recognised. | Turn off in Elite's "
                                     "graphics options: Bloom, Depth of field",
                "with the key off the log line is what it always was, but for the separator between paragraphs");
+    }
+
+    // ---- the hold on a changed cause (FlatWarnHold) ------------------------------------------------------------------------
+    // The flat F8 warning flipped five times in nine seconds in the flight of 2026-10-01 (10:38:16.516 to 10:38:25.594): the computed
+    // cause moved between "Elite renders 1440x810 on a 3840x2160 screen" and a loading screen's 256x256 at the stand-down's probe
+    // frames, one probe interval (1521 ms, 1509 ms) apart. A cause that differs from the one on show is adopted only after it has
+    // been the computed one on every tick for 2000 ms; a show and a hide stay immediate. The replay is the log's own sequence at
+    // the log's own stamps. Each scenario below passes the real helper and fails the controls that break the rule it pins.
+    {
+        using namespace warn_hold_test;
+        EliteGraphics sean;
+        sean.folderFound = sean.presetKnown = sean.custom = sean.fileRead = true;
+        std::strcpy(sean.preset, "Custom");
+        std::strcpy(sean.file, "Custom.4.4.fxcfg");
+        sean.aaMode = 0; sean.bloomQuality = 0; sean.dofEnabled = 0;
+        // The keys are the panel's own: the cause the runtime publishes for a render-size refusal (route's key auto), DLSS selected.
+        auto keyOf = [&](uint32_t w, uint32_t h) {
+            return flatSettingsWarningKey("DLSS", sean, flatWarningCause(true, true, false, true, true, w, h, 3840, 2160));
+        };
+        const std::string k1440 = keyOf(1440, 810), k256 = keyOf(256, 256), k1024 = keyOf(1024, 576);
+        expect(k1440 != k256 && k256 != k1024 && k1440 != k1024, "the three causes the hold is driven with are three different keys");
+        expect(kFlatWarnHoldMs == 2000 && kFlatWarnHoldMs > kFlatStandDownProbeMs && kFlatWarnHoldMs < 2 * kFlatStandDownProbeMs,
+               "the hold is 2000 ms: more than one stand-down probe interval (a transient is one), under two (a second probe confirms)");
+        auto passes = [&](const char* failed, const char* what) {
+            expect(failed == nullptr, (std::string(what) + (failed ? std::string(" -- ") + failed : std::string())).c_str());
+        };
+        auto catches = [&](const char* failed, const char* what) {
+            expect(failed != nullptr, (std::string("(control) ") + what).c_str());
+        };
+        const auto clean = [](const Replay& r) { return r.shown == 1 && r.changed == 0 && r.hidden == 1 && r.stayed; };
+
+        // (a) The replay: zero adoptions, whatever the frame time, and the key on show never leaves 1440x810.
+        for (const uint64_t step : {1ull, 7ull, 16ull, 33ull}) {
+            const Replay r = replayFlight<ProductionHold>(k1440, k256, step);
+            const std::string at = " (ticks every " + std::to_string(step) + " ms)";
+            expect(clean(r), ("the flight replayed: shown once, zero changes, the key on show never leaves 1440x810, hidden once" + at).c_str());
+            expect(r.held == 2, ("the flight replayed: a hold begins at each 256x256 the probes saw, and no other" + at).c_str());
+        }
+        // The controls. With no hold the replay IS the log: one shown, the four changes at the log's own stamps, one hidden. A hold of
+        // 0 ms or of one probe interval lets the real transients through, so the replay discriminates the 2000 ms.
+        const Replay none = replayFlight<WaitHold<0>>(k1440, k256, 1);
+        expect(none.shown == 1 && none.hidden == 1 && none.changed == 4 && !none.stayed &&
+                   none.changedAt == std::vector<uint64_t>({kLow1, kUp1, kLow2, kUp2}),
+               "(control) with no hold the replay reproduces the log: one shown, four changes at 19.529, 21.050, 24.085 and 25.594, one hidden");
+        const Replay probe = replayFlight<WaitHold<1500>>(k1440, k256, 1);
+        expect(!clean(probe) && probe.changed == 4, "(control) a hold of 1500 ms, one probe interval, lets both transients through");
+        expect(!clean(replayFlight<DefectiveHold<Defect::StaleAfterReturn>>(k1440, k256, 1)),
+               "(control) a wait left standing when the cause returns is adopted by the next transient: the flight catches it");
+        expect(!clean(replayFlight<DefectiveHold<Defect::ShowAndHideHeld>>(k1440, k256, 1)),
+               "(control) a hold that also delays the hide is caught by the flight");
+
+        // (b) A change that persists is adopted at 2000 ms, not before; the controls that move the wait are caught.
+        passes(persists<ProductionHold>(k1440, k256), "a change that persists 1999 ms holds and at 2000 ms is adopted");
+        catches(persists<WaitHold<0>>(k1440, k256), "no hold at all is caught: 1999 ms must hold");
+        catches(persists<WaitHold<1500>>(k1440, k256), "a hold of 1500 ms is caught: 1999 ms must hold");
+        catches(persists<WaitHold<1999>>(k1440, k256), "a hold of 1999 ms is caught: 1999 ms must hold");
+        catches(persists<WaitHold<2001>>(k1440, k256), "a hold of 2001 ms is caught: 2000 ms must adopt");
+        catches(persists<WaitHold<UINT64_MAX>>(k1440, k256), "a hold that never expires is caught: 2000 ms must adopt");
+        // (c) A change that flips back before 2000 ms is dropped; the next flip starts a new clock.
+        passes(flipBack<ProductionHold>(k1440, k256), "a change that returns to the one on show before 2000 ms is dropped and the next flip restarts the clock");
+        catches(flipBack<DefectiveHold<Defect::StaleAfterReturn>>(k1440, k256), "a wait left standing when the cause returns is caught");
+        catches(flipBack<WaitHold<1500>>(k1440, k256), "a hold of 1500 ms is caught by the restarted clock");
+        // (d) A third cause restarts the clock.
+        passes(thirdKey<ProductionHold>(k1440, k256, k1024), "a third cause starts its own 2000 ms from the tick it appears, and the second is never adopted");
+        catches(thirdKey<DefectiveHold<Defect::ThirdKeyKeepsClock>>(k1440, k256, k1024), "a third cause that inherits the second's clock is caught");
+        // (e) Show and hide are immediate and clear a waiting change.
+        passes(showHide<ProductionHold>(k1440, k256), "a show and a hide are immediate and a hide clears the waiting change");
+        catches(showHide<DefectiveHold<Defect::ShowAndHideHeld>>(k1440, k256), "a show or a hide that waits is caught");
+        catches(showHide<DefectiveHold<Defect::ShowAndHideKeepPending>>(k1440, k256), "a hide that leaves a change waiting is caught");
+
+        // The held line (menu.cpp says it once when a hold begins): what is on show and what is waiting, in the sizes the key carries.
+        // It never begins with shown, changed or hidden, the three words tools\edvr_log.py's F8 reader parses after the prefix.
+        const FlatWarningCause c1440 = flatWarningCause(true, true, false, true, true, 1440, 810, 3840, 2160);
+        const FlatWarningCause c256 = flatWarningCause(true, true, false, true, true, 256, 256, 3840, 2160);
+        const FlatWarningCause taa = flatWarningCause(true, true, true, false, true, 3840, 2160, 2560, 1440);
+        const FlatWarningCause chain = flatWarningCause(true, true, false, false, true, 0, 0, 0, 0);
+        char held[360];   // menu.cpp's buffer for it
+        const int n = flatFormatWarnHeldLog(held, sizeof(held), c1440, c256);
+        expect(n > 0 && std::string(held) ==
+                   "flat settings warning: a change of cause is held for 2000 ms before it replaces the one on show (on show: render "
+                   "1440x810 on output 3840x2160; computed now: render 256x256 on output 3840x2160)",
+               "the held line names the cause on show and the one waiting, with the sizes the key carries");
+        const std::string heldLine(held);
+        const char* parsed[] = {"flat settings warning: shown", "flat settings warning: changed", "flat settings warning: hidden"};
+        bool clear = true;
+        for (const char* prefix : parsed) clear = clear && heldLine.rfind(prefix, 0) != 0;
+        expect(clear && heldLine.rfind("flat settings warning: ", 0) == 0,
+               "the held line is a flat settings warning line that is none of shown, changed or hidden: the log's reader does not count it");
+        expect(flatFormatWarnHeldLog(held, sizeof(held), c1440, taa) > 0 &&
+                   std::string(held).find("(on show: render 1440x810 on output 3840x2160; computed now: TAA above the output, render "
+                                          "3840x2160 on output 2560x1440)") != std::string::npos,
+               "the held line names a TAA-above-the-output cause by its sizes");
+        expect(flatFormatWarnHeldLog(held, sizeof(held), chain, chain) > 0 &&
+                   std::string(held).find("(on show: the post chain, no sizes; computed now: the post chain, no sizes; the mode, an "
+                                          "Elite setting or the route's key differs)") != std::string::npos,
+               "when the sizes read the same the held line says the mode, a setting or the key is what moved");
+        const int longest = flatFormatWarnHeldLog(held, sizeof(held), taa, taa);
+        expect(longest > 0 && longest < static_cast<int>(sizeof(held)), "the longest held line fits menu.cpp's buffer untruncated");
     }
 
     // ---- real files ------------------------------------------------------------------------

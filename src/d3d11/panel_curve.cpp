@@ -188,10 +188,11 @@ FaultBudget g_budget("panelCurve.substitute", 5);
 ID3D11Buffer* g_sVb = nullptr;
 ID3D11Buffer* g_sIb = nullptr;
 uint32_t      g_sIndexCount = 0;
-float         g_sBuiltCurvature = -1.0f;   // the key: curvature, columns, gain and direction
+float         g_sBuiltCurvature = -1.0f;   // the key: curvature, columns, gain, direction and which way u runs
 int           g_sBuiltSegments = -1;
 float         g_sBuiltGain = -1.0f;
 int           g_sBuiltToward = 0;
+bool          g_sBuiltReverseU = false;
 bool          g_sStoodDown = false;
 bool          g_sWanted = false;           // curvature above 0 and not stood down -- the one flag panelCurveSurfaceWanted() loads
 uint64_t      g_sBuilt = 0;
@@ -338,10 +339,10 @@ ID3D11RasterizerState* cullOffFor(ID3D11DeviceContext* ctx, const D3D11_RASTERIZ
     return off;
 }
 
-// The surface strip in hand is the one the live curvature and columns and the caller's gain and direction ask for.
-bool surfaceCurrent(float gain, int toward) {
+// The surface strip in hand is the one the live curvature and columns and the caller's gain, direction and way for u ask for.
+bool surfaceCurrent(float gain, int toward, bool reverseU) {
     return g_sVb && g_sIb && g_sBuiltCurvature == detail::g_panelCurveCurvature && g_sBuiltSegments == detail::g_panelCurveSegments &&
-           g_sBuiltGain == gain && g_sBuiltToward == toward;
+           g_sBuiltGain == gain && g_sBuiltToward == toward && g_sBuiltReverseU == reverseU;
 }
 
 // Which way +z points in the panel's local space. MEASURED 2026-08-23, and
@@ -579,16 +580,17 @@ bool learnSize(ID3D11DeviceContext* ctx) {
 }
 
 // THE STRIP'S GEOMETRY, one generator for the screen and for the surfaces (panelCurveSurfaceDraw) so that the two cannot differ: for the
-// same column count, curvature, sign and gain they are byte for byte the same vertices and indices. n columns are 2(n+1) vertices and 6n
-// indices, vb and ib sized for the most there are.
-void fillStrip(int n, float curvature, int sign, float gain, Vertex* vb, unsigned short* ib) {
+// same column count, curvature, sign and gain (and reverseU false) they are byte for byte the same vertices and indices. n columns are
+// 2(n+1) vertices and 6n indices, vb and ib sized for the most there are. reverseU is the one thing a surface chooses that the screen never
+// does: which way u runs along x (the screen's strip always passes false; panel_curve.h says who decides it for a surface and why).
+void fillStrip(int n, float curvature, int sign, float gain, bool reverseU, Vertex* vb, unsigned short* ib) {
     for (int i = 0; i <= n; ++i) {
         // The ORIGINAL x drives the UV, and the bent one only the position:
         // the bend moves where a column is, never which texel it shows.
         const float x = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(n);
         float bx = 0.0f, bz = 0.0f;
         bend(x, curvature, sign, gain, &bx, &bz);
-        const float u = (x + 1.0f) * 0.5f;
+        const float u = reverseU ? (1.0f - x) * 0.5f : (x + 1.0f) * 0.5f;
 
         // Bottom row first, then the top -- the game's own ordering, which is
         // what makes segments = 1 come out byte-identical to its quad. The
@@ -665,7 +667,7 @@ bool build(ID3D11DeviceContext* ctx) {
     Vertex vb[2 * (kMaxSegments + 1)];
     unsigned short ib[6 * kMaxSegments];
 
-    fillStrip(n, detail::g_panelCurveCurvature, g_sign, activeGain(), vb, ib);
+    fillStrip(n, detail::g_panelCurveCurvature, g_sign, activeGain(), false, vb, ib);   // the screen's u runs with x: its +x runs to the viewer's right
 
     if (!createStrip(ctx, vb, verts, ib, idxs, g_vb, g_ib)) return false;
 
@@ -686,8 +688,9 @@ bool build(ID3D11DeviceContext* ctx) {
 
 // Build the surface strip: the same generator as the screen's, with the caller's gain and the sign its direction asks for. toward = +1
 // means a step in +z' moves toward the viewer; the generator's z is -sign * gain * (1 - cos)/(pi c) (negative is toward the viewer for the
-// screen, whose measured convention that is), so +z' toward the viewer is sign -1. False if the buffers cannot be made.
-bool buildSurface(ID3D11DeviceContext* ctx, float gain, int toward) {
+// screen, whose measured convention that is), so +z' toward the viewer is sign -1. reverseU: u runs against x (the caller's placement has
+// +x running to the viewer's left). False if the buffers cannot be made.
+bool buildSurface(ID3D11DeviceContext* ctx, float gain, int toward, bool reverseU) {
     const int n = detail::g_panelCurveSegments;
     const uint32_t verts = static_cast<uint32_t>(2 * (n + 1));
     const uint32_t idxs = static_cast<uint32_t>(6 * n);
@@ -695,7 +698,7 @@ bool buildSurface(ID3D11DeviceContext* ctx, float gain, int toward) {
     Vertex vb[2 * (kMaxSegments + 1)];
     unsigned short ib[6 * kMaxSegments];
 
-    fillStrip(n, detail::g_panelCurveCurvature, -toward, gain, vb, ib);
+    fillStrip(n, detail::g_panelCurveCurvature, -toward, gain, reverseU, vb, ib);
 
     if (!createStrip(ctx, vb, verts, ib, idxs, g_sVb, g_sIb)) return false;
 
@@ -704,11 +707,13 @@ bool buildSurface(ID3D11DeviceContext* ctx, float gain, int toward) {
     g_sBuiltSegments = detail::g_panelCurveSegments;
     g_sBuiltGain = gain;
     g_sBuiltToward = toward;
+    g_sBuiltReverseU = reverseU;
     ++g_sBuilt;
     Log::get().note(
         "panel curvature: built a %d-column SURFACE strip -- %u vertices, %u indices -- at curvature %.3f, gain %.3f m, a step in +z' moving "
-        "%s the viewer. It serves the intro movie and the splash; the on-foot screen's strip is separate.",
-        n, verts, idxs, detail::g_panelCurveCurvature, gain, toward > 0 ? "toward" : "away from");
+        "%s the viewer, u running %s. It serves the intro movie and the splash; the on-foot screen's strip is separate.",
+        n, verts, idxs, detail::g_panelCurveCurvature, gain, toward > 0 ? "toward" : "away from",
+        reverseU ? "against x: the placement's +x runs to the viewer's left" : "with x");
     return true;
 }
 
@@ -849,7 +854,7 @@ bool panelCurveSurfaceWanted() {
     return g_sWanted;
 }
 
-bool panelCurveSurfaceDraw(ID3D11DeviceContext* ctx, float gain, int toward, PanelCurveDrawFn draw) {
+bool panelCurveSurfaceDraw(ID3D11DeviceContext* ctx, float gain, int toward, bool reverseU, PanelCurveDrawFn draw) {
     if (!ctx || !draw || !g_sWanted) return false;
     // A gain that is not a positive number of metres, or a direction that is not one of the two, is a caller that does not know its
     // surface: flat is the honest answer, and nothing is built from it.
@@ -857,8 +862,8 @@ bool panelCurveSurfaceDraw(ID3D11DeviceContext* ctx, float gain, int toward, Pan
 
     bool drawn = false;
     const bool ok = guardedBudget(g_sBudget, [&] {
-        if (!surfaceCurrent(gain, toward)) {
-            if (!buildSurface(ctx, gain, toward)) return;
+        if (!surfaceCurrent(gain, toward, reverseU)) {
+            if (!buildSurface(ctx, gain, toward, reverseU)) return;
         }
 
         // The game's rasterizer state, with the cull off for this draw (panel_curve.h says why). Nothing bound, or a state that culls
@@ -900,6 +905,7 @@ PanelCurveSurfaceInfo panelCurveSurfaceInfo() {
     i.drawn = g_sDrawn;
     i.standDown = g_sStoodDown;
     i.rasterStates = g_sRasterStates;
+    i.reversed = g_sVb && g_sBuiltReverseU;   // the direction of the strip in hand: false with none in hand
     return i;
 }
 
@@ -925,6 +931,7 @@ void panelCurveShutdown() {
     g_sBuiltSegments = -1;
     g_sBuiltGain = -1.0f;
     g_sBuiltToward = 0;
+    g_sBuiltReverseU = false;
     g_saveHeld = false;
     if (g_savedVb) { g_savedVb->Release(); g_savedVb = nullptr; }
     if (g_savedIb) { g_savedIb->Release(); g_savedIb = nullptr; }

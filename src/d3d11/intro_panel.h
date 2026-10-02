@@ -77,12 +77,21 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 // by itself, and a test would pop the whole bend off at about 20 degrees of head yaw, differently in the two eyes near its threshold. Only
 // the panel's centre is tested, as before, because a centre behind the eye is a silent total vanish.
 //
+// WHICH WAY u RUNS (the mirror fix). The strip assigns its own texture coordinates, and the movie's placement has its +x running to the
+// viewer's LEFT (the game's convention on both of its panels), so the strip's u must run against its x for the picture to come out the
+// right way round. That is read from the 20 floats bound (intro_curve_math.h, introPlacementXDir), never assumed: left means u runs
+// against x, right means with it. A placement that reads as neither -- the panel seen edge-on, a head tilted a quarter turn -- is not bent
+// for that draw: cb2[3] stays zero, nothing is armed, one line says so once.
+//
 // introPanelStripArmed: true from a successful bind of those constants (introPanelOnComposite returned true) until introPanelEndDraw --
-// the caller, between the two, draws the strip with panelCurveSurfaceDraw(ctx, introPanelStripGain(), +1, ...) and, when that returns true,
-// swallows the game's own quad; when it returns false it forwards the game's draw, which is flat and in the right place (a z column does
-// nothing to a quad whose z is zero). False in every other case. introPanelStripGain: the depth gain in metres, the panel's half-width.
-// +1 is the direction: a step in +z' moves toward the viewer, the same convention the splash's own constants read as.
+// the caller, between the two, draws the strip with panelCurveSurfaceDraw(ctx, introPanelStripGain(), +1, introPanelStripReverseU(), ...)
+// and, when that returns true, swallows the game's own quad; when it returns false it forwards the game's draw, which is flat and in the
+// right place (a z column does nothing to a quad whose z is zero). False in every other case. introPanelStripGain: the depth gain in
+// metres, the panel's half-width. +1 is the direction: a step in +z' moves toward the viewer, the same convention the splash's own
+// constants read as. introPanelStripReverseU: valid between a successful ARMED bind and introPanelEndDraw -- true when the bound
+// placement's +x runs to the viewer's left, so u runs against x; false in every other case, an armed draw whose +x runs right included.
 bool introPanelStripArmed();
+bool introPanelStripReverseU();
 float introPanelStripGain();
 
 // Restore the game's own constant buffer. Always paired with a true above.

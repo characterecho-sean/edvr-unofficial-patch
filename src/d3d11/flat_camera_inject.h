@@ -137,7 +137,8 @@ const char* flatCameraInjectObserveStatus();
 // The route drives it ONCE A FRAME on the thread that runs Present (vrWorldRouteFrameBoundary, which runs before the
 // census's boundary), and once more when the trigger draw is seen. It is the only writer of the injection switch, and it
 // asks for injection only while experimental.temporal_aa_on_foot_world is auto, the route is Warming or Owned and the
-// world jitter key is on: with the route key off nothing in this section is ever called with inject = true.
+// global experimental.temporal_aa_jitter is on: with the route key off nothing in this section is ever called with
+// inject = true.
 // ---------------------------------------------------------------------------
 struct FlatCameraVrFrame {
     bool inject = false;      // inject kind-3 screen-view calls before the trigger, with the phase below

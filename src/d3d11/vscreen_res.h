@@ -66,9 +66,9 @@ void revertVScreenModeResolution();
 // caller is the only one with nothing else to say about the value), so the
 // others pass false rather than printing the same line twice on every reload.
 //
-// "auto" is TWO rules (../common/vscreen_fit.h): fitted to the on-foot screen's
-// own width in the eye when the VR world route will run, today's 125% of the eye
-// width when it will not. `outDecision`, when given, receives which one and the
+// "auto" is TWO rules (../common/vscreen_fit.h): fitted to 70% of the on-foot
+// screen's head-on width in the eye when the VR world route will run, today's 125%
+// of the eye width when it will not. `outDecision`, when given, receives which one and the
 // numbers it was made from for an "auto" that resolved (its width is 0 for an
 // explicit width, which is used exactly, and for an auto with nothing on record).
 void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,

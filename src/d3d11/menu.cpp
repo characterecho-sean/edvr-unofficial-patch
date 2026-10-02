@@ -45,6 +45,7 @@
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
+#include "terrain_checkerboard.h"   // Elite's terrain checkerboard rendering in VR: the worker's tick and the word it publishes
 #include "vscreen.h"        // vScreenRenderBelowEye: Elite's Supersampling below 1, from the sizes
 #include "vscreen_res.h"
 // fsr3_engine.h is deliberately NOT included: the Temporal AA status line
@@ -207,12 +208,19 @@ struct State {
     // The conditions the words were built from (structure admission, a render size that does not fit, EDVR's TAA above the
     // output, with the measured sizes): set with the key, which carries all of it, so the panel and the log say what the key says.
     FlatWarningCause flatWarnCause;
+    // A cause that differs from the one on show waits kFlatWarnHoldMs before it replaces it (flat_elite_settings.h, FlatWarnHold);
+    // each hold that starts is logged, at most kFlatWarnHeldLogMax times a session.
+    FlatWarnHold flatWarnHold;
+    int         flatWarnHeldLogged = 0;
     int         flatWarnLogged = 0;
     // The graphics-wrapper note (flat_wrapper_note.h): said once in the log when it is first drawn.
     bool        flatWrapperNoteLogged = false;
     // Elite's Supersampling below 1.0 in VR (vr_supersample_notice.h, design section 83): the headset toast is said once a
     // session, the Status line and the settings pages' note whenever vScreen has measured it. Never in a flat session.
     bool        vrSupersamplingToasted = false;
+    // Elite's terrain checkerboard rendering in VR (terrain_checkerboard_notice.h, design section 84): the published version that
+    // last toasted, 0 for never. The toast is said once per RAISE of the option, so it follows the file and can be said again.
+    uint32_t    terrainCheckerboardToasted = 0;
     float alpha = 0.0f;
     uint64_t openedMs = 0;
     uint64_t lastInputMs = 0;
@@ -1018,6 +1026,9 @@ std::string displayValue(const MenuRowDef& d, const std::string& v) {
 // loading screen see nothing.
 
 constexpr int kFlatWarnLogMax = 24;
+// The held-change lines (a cause that waits out kFlatWarnHoldMs before it replaces the one on show) are bounded on their own: a
+// run of transients must not use up the budget that says what the panel showed, and the other way round.
+constexpr int kFlatWarnHeldLogMax = 8;
 
 // The flat page is the rows of menu_flat_rows.h and nothing else; a blank line and a full warning make up the rest of
 // the card. (The wrapper note, when there is one, takes what is left.)
@@ -1071,6 +1082,22 @@ void flatWarningTick(uint64_t now) {
                                                     renderW, renderH, outputW, outputH);
     const std::string key = refusing ? flatSettingsWarningKey(label.c_str(), s.flatSettings.settings(), cause)
                                      : std::string();
+    // A cause that differs from the one on show waits kFlatWarnHoldMs before it replaces it (flat_elite_settings.h, FlatWarnHold).
+    // The scene's size moves only when a final copy is evaluated, at the stand-down's probe frames while stood down, so a loading
+    // screen's size stood as the computed cause for one probe interval and the words flipped back and forth; a show and a hide
+    // stay immediate. Asked every tick and before the comparison below, so a cause that returns to the one on show drops the
+    // change that was waiting.
+    if (!s.flatWarnHold.admit(refusing, s.flatWarnActive, s.flatWarnKey, key, now)) {
+        if (s.flatWarnHold.began() && s.flatWarnHeldLogged < kFlatWarnHeldLogMax) {
+            ++s.flatWarnHeldLogged;
+            char held[360];
+            flatFormatWarnHeldLog(held, sizeof(held), s.flatWarnCause, cause);
+            Log::get().note("%s", held);
+            if (s.flatWarnHeldLogged == kFlatWarnHeldLogMax)
+                Log::get().note("flat settings warning: further held changes are not logged this session");
+        }
+        return;
+    }
     if (refusing == s.flatWarnActive && key == s.flatWarnKey) return;
     const bool was = s.flatWarnActive;
     s.flatWarnActive = refusing;
@@ -2007,6 +2034,13 @@ void buildContent(MenuContent& c) {
             // own, or a note on a settings page, would take the bitmap past the 2048-px guard on the Pimax (see the header).
             uint32_t rw = 0, rh = 0, ew = 0, eh = 0;
             if (vScreenRenderBelowEye(&rw, &rh, &ew, &eh)) vrss::formatStatusHint(c.hint, sizeof(c.hint));
+            // Elite's terrain checkerboard rendering (VR; terrain_checkerboard_notice.h, design section 84) writes this SAME hint and
+            // the page has one slot: the one that applies shows, and when both do they take turns every 6 s (the page rebuilds every
+            // 500 ms). The supersampling answer is the one the line above just asked: vrss::below of the sizes it filled in, which
+            // stay zero when it said no. This one is a live predicate on an atomic the worker publishes (VR profile only), so the hint
+            // ends when the option is turned off in the game. No line of its own, for the reason above.
+            if (tcn::pickStatusHint(vrss::below(rw, rh, ew, eh), terrainCheckerboardOn(), s.tickMs) == tcn::Hint::Checkerboard)
+                tcn::formatStatusHint(c.hint, sizeof(c.hint));
         }
     } else {
         // The tooltip waits for the look or the hand to settle on one row:
@@ -3929,6 +3963,28 @@ void menuTick(ID3D11Device* dev) {
             }
         }
 
+        // Elite's terrain checkerboard rendering (terrain_checkerboard_notice.h, design section 84), VR only like the rest of this
+        // branch. The tick starts the reader on its own thread at the first VR frame boundary, once; everything after that loads the
+        // word it publishes and never a file. A toast once per RAISE of the option: toastOnRaise sets the latch (the published
+        // version) before the toasts test, so turning the option off and on again says it again and an option that stays on says it
+        // once. Gated on menu.toasts like every toast and logged either way; the open menu has it as the Status page's hint, a live
+        // predicate that ends when the option does.
+        terrainCheckerboardTick();
+        {
+            tcn::State cbState = tcn::State::Unknown;
+            uint32_t cbVersion = 0;
+            terrainCheckerboardPublished(&cbState, &cbVersion);
+            if (tcn::toastOnRaise(&s.terrainCheckerboardToasted, cbState, cbVersion)) {
+                char terrainToast[96];
+                char terrainNote[400];
+                tcn::formatToast(terrainToast, sizeof(terrainToast));
+                if (s.toasts) s.toastQueue.push_back(terrainToast);
+                tcn::formatQueuedLog(terrainNote, sizeof(terrainNote), s.toasts, terrainToast);
+                Log::get().note("%s", terrainNote);
+                s.contentDirty = true;
+            }
+        }
+
         // The summon key: EDVR's own, focus-gated. With Shift, recentre.
         if (s.summon.pressed()) {
             const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -4179,6 +4235,8 @@ void menuShutdown() {
     stopWriter();
     menuPanelShutdown();
     perfMonitorShutdown();
+    // The terrain checkerboard reader's stop flag and wake event (it only reads, so nothing about it needs to run at process exit).
+    terrainCheckerboardShutdown();
 }
 
 }  // namespace edvr

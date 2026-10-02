@@ -11,7 +11,7 @@
 // nothing else skips the upscaler altogether (the layer-only door the VR world route already uses).
 //
 // WHAT IS HERE, all pure (tools\on_foot_maps_test drives every function, with a mutation list for the rules):
-//   - the key, experimental.on_foot_maps_sharp: off (the default) or on, and a typo reads as off;
+//   - the key, experimental.on_foot_maps_sharp: on (the default since 2026-10-01) or off, and a typo reads as off;
 //   - the step: 2 frames in a row that named the source hold the panel as the world, 3 in a row that did not release it
 //     (3 is the VR world route's grace, kVrWorldGraceFrames: the route lets go on the same boundary);
 //   - the gate's combine: with the key off the gate is today's byJournal || byDepth for every input;
@@ -31,8 +31,9 @@
 namespace edvr {
 
 // ---- the key ----------------------------------------------------------------------------------------------------------
-// experimental.on_foot_maps_sharp: on or off. Off by default (unflown). A key that is absent reads as the default and a
-// value that is present and is not "on" reads as off, so a typo leaves on-foot VR exactly as it was.
+// experimental.on_foot_maps_sharp: on or off. On by default since 2026-10-01 (off is kept for one release candidate as the way
+// back). A key that is absent reads as the default and a value that is present and is not "on" reads as off, so a typo
+// leaves on-foot VR exactly as it was before the gate.
 enum class UiMapsKey : uint8_t { Off, On };
 inline UiMapsKey uiMapsKeyFromText(const char* text) {
     if (!text) return UiMapsKey::Off;

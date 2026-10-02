@@ -7,7 +7,7 @@ cbuffer Mono : register(b0) {
     float4 now[6]; float4 old[6];
     uint4 size; // render width/height, output width/height
     uint4 flags; // reset, complete engine views, TAA, stale-slot policy (w: 0 refuse, 1 camera term for every stale slot, only ever set in the
-                 // 3D main menu, 2 camera term for a stale slot where last frame's depth (t8) confirms it, the steady-detail key)
+                 // 3D main menu, 2 camera term for a stale slot where last frame's depth (t8) confirms it, the steady detail)
     float4 jitter; // current xy, previous zw; actual raster phase in render pixels
     float4 rowsJitter; // NDC shift the camera rows themselves carry: current xy, previous zw; all zero = unjittered rows
     uint4 route; // x: the HDR route (section 81): Color is R11G11B10F scene radiance and OutColor is fp16; y: with x, the
@@ -110,7 +110,7 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before,out uint cls) {
     // knowable and history is refused. In the 3D main menu (flags.w==1, set by the runtime only for a frame
     // whose contract came through the verified menu copy) nothing on screen moves but the camera, so the
     // pixel takes the camera term -- an unkeyed hull that overdraws a keyed one no longer aliases. With
-    // experimental.temporal_aa_on_foot_world_steady_detail on (flags.w==2: the VR world route and the flat
+    // the steady detail on (flags.w==2: both routes always set it, the VR world route and the flat
     // profile on foot) the pixel takes the camera term only where last frame's depth confirms it (return 3: the
     // caller asks stalePreviousDepthMatches) and is refused everywhere else, as by default. Only this refusal is
     // relaxed, either way: a masked record stays refused.

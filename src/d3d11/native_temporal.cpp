@@ -39,10 +39,6 @@ struct History {
 };
 struct Settings {
   bool on=false,dlaa=false,upscale=false,jitter=true,lag=false; int motion=3,signX=1,signY=1;
-  // experimental.temporal_aa_jitter_follows_upscale (temporal_math.h): the jitter runs ceil(8 x ratio^2) phases instead of the fixed
-  // eight. Left out of sameHistorySettings on purpose: each frame's own jitter is what the upscaler is told, so a change of count
-  // invalidates no history and resets nothing.
-  bool jitterScaled=false;
   float blend=.90f,clamp=1.f;
   // dlaa means "an external, trained engine" (NVIDIA's or AMD's), kept under
   // its original name since flags bit 1 (edvrTemporalAa) still means exactly
@@ -69,10 +65,6 @@ struct State {
   float head[12]{}, eyes[2][12]{}, frusta[2][4]{};
   float shift[2][2]{};
   uint32_t width[2]{}, height[2]{};
-  // The output each eye's last treat() asked the pass for (floorOutput's cut included; the input's own size when the pass is not upscaling),
-  // and the jitter phase count the last begin() ran through with what it logged: jitterPhaseCount below reads the sizes.
-  uint32_t outWidth[2]{}, outHeight[2]{};
-  uint32_t jitterPhases = edvr::kTemporalJitterCount, phasesLogged = 0; bool phasesLoggedScaled = false;
   uint32_t recW=0,recH=0; bool flipped[2]{};
   uint32_t frameCounter = 0;
   bool treated[2]{};
@@ -175,7 +167,6 @@ Settings readConfig() {
   s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0;
   // getBool, as the flat profile reads it (flat_runtime.cpp): 0/false/no/off all mean off in both.
   s.jitter=c.getBool("experimental.temporal_aa_jitter",true);
-  s.jitterScaled=c.getBool("experimental.temporal_aa_jitter_follows_upscale",false);
   s.blend=c.getFloat("experimental.temporal_aa_blend",.90f); if(!std::isfinite(s.blend))s.blend=.90f;
   s.clamp=c.getFloat("experimental.temporal_aa_clamp",1.f); if(!std::isfinite(s.clamp))s.clamp=1.f;
   s.blend=(std::max)(.5f,(std::min)(.95f,s.blend)); s.clamp=(std::max)(.5f,(std::min)(3.f,s.clamp));
@@ -327,28 +318,6 @@ bool layerOnlyTreat(State& s,uint64_t seq,unsigned eye,uint32_t outW,uint32_t ou
   return true;
 }
 
-// How many phases this frame's jitter runs (experimental.temporal_aa_jitter_follows_upscale; temporal_math.h): the fixed eight with the key off.
-// With it on, ceil(8 x ratio^2) of each eye's last treated frame -- the render size the game gave and the output the pass was asked for, the
-// served floor's cut included -- and the larger of the two, so both eyes keep sharing one phase (the scanner's screen relies on it,
-// docs/fss-scanner.md). An eye with no treated frame yet has no ratio and counts the fixed eight.
-uint32_t jitterPhaseCount(const State& s) {
-  uint32_t phases=edvr::kTemporalJitterCount;
-  if(!s.currentSettings.jitterScaled)return phases;
-  for(int e=0;e<2;++e)phases=(std::max)(phases,edvr::temporalJitterPhaseCount(s.width[e],s.height[e],s.outWidth[e],s.outHeight[e]));
-  return phases;
-}
-// The count in use, said once and again at every change of it or of the key, so a flight reads each state it flew (a live toggle
-// included) from the log.
-void notePhases(State& s,uint32_t phases) {
-  const bool scaled=s.currentSettings.jitterScaled;
-  s.jitterPhases=phases;
-  if(phases==s.phasesLogged&&scaled==s.phasesLoggedScaled)return;
-  s.phasesLogged=phases;s.phasesLoggedScaled=scaled;
-  edvr::Log::get().note("native temporal: jitter phases=%u (eye 0 %ux%u -> %ux%u, eye 1 %ux%u -> %ux%u; experimental.temporal_aa_jitter_follows_upscale=%s: %s)",
-      phases,s.width[0],s.height[0],s.outWidth[0],s.outHeight[0],s.width[1],s.height[1],s.outWidth[1],s.outHeight[1],scaled?"on":"off",
-      scaled?"8 x (output / input)^2 rounded up, the larger eye's, at least 8":"the fixed 8");
-}
-
 HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporalProjection* out) {
   std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
   if(!s||!s->active||s!=current||!f||!out||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||
@@ -384,14 +353,12 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   // lock-free read of what the last frame boundary left): an owned world is resolved once, in the game's flat
   // image, the layer holds each eye's screen, and an eye shift with no eye pass to resolve it would be a shimmer.
   // With experimental.temporal_aa_on_foot_world off the route never owns anything and this is what it always was.
-  const uint32_t phases=jitterPhaseCount(*s);bool phased=false;
   if(s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&!edvr::vrWorldRouteOwnsNextFrame()) for(int e=0;e<2;++e) if(s->width[e]&&s->height[e]&&!s->flipped[e]) {
-    edvr::temporalJitterPhase(s->frameCounter,phases,&jx,&jy); float dx=0,dy=0;phased=true;
+    edvr::temporalJitter(s->frameCounter,&jx,&jy); float dx=0,dy=0;
     edvr::temporalJitterToTangents(jx,jy,s->frusta[e],s->width[e],s->height[e],&dx,&dy);
     out->tangentShift[e][0]=dx;out->tangentShift[e][1]=dy;
     s->shift[e][0]=out->tangentShift[e][0];s->shift[e][1]=out->tangentShift[e][1];
   }
-  if(phased)notePhases(*s,phases);
   if(s->shift[0][0]||s->shift[0][1]||s->shift[1][0]||s->shift[1][1])++s->jitterFrames;
   return S_OK;
 }
@@ -451,8 +418,6 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     // than the pass standing aside (floorOutput above; FSR's ranges differ).
     if(s->currentSettings.engine==edvr::TemporalEngine::Nvidia)floorOutput(*s,eye,w,h,outW,outH);
   }
-  // The size this eye is asked to resolve to, for the next begin()'s jitter phase count (jitterPhaseCount).
-  s->outWidth[eye]=outW?outW:w;s->outHeight[eye]=outH?outH:h;
   // The VR world route took this eye's screen draw into the layer: no upscaler, no motion prep, no UI resolve -- the
   // layer over a black frame of the output's size is the eye (layerOnlyTreat above). After the sizing, so the frame is
   // exactly the size the pass would have handed on (the served floor's cut included) and the layer never re-sizes
@@ -528,8 +493,8 @@ HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint3
 }
 HRESULT WINAPI close(void* p){
   std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;
-  edvr::Log::get().note("native temporal totals: treated=%llu, jitter_frames=%llu, jitter_phases=%u, projection_reads=%llu, missing_projections=%llu, resets=%llu, stood_down=%u, floor_cuts=%llu, layer_only=%llu, layer_only_declined=%llu.",
-      (unsigned long long)s->treatedCount,(unsigned long long)s->jitterFrames,s->jitterPhases,(unsigned long long)s->projectionReads,
+  edvr::Log::get().note("native temporal totals: treated=%llu, jitter_frames=%llu, projection_reads=%llu, missing_projections=%llu, resets=%llu, stood_down=%u, floor_cuts=%llu, layer_only=%llu, layer_only_declined=%llu.",
+      (unsigned long long)s->treatedCount,(unsigned long long)s->jitterFrames,(unsigned long long)s->projectionReads,
       (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown),(unsigned long long)s->floorCuts,
       (unsigned long long)s->layerOnly,(unsigned long long)s->layerOnlyDeclined);
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",

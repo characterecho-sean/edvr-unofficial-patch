@@ -16,9 +16,9 @@
   section 82; `edvr_gfx_20260930_161545.log`, v0.18.0-rc.4-104-gbde47f81).
   Sean's direction: every view's temporal-AA motion comes from the game camera
   that renders it, not head heuristics.
-- **Keys:** `experimental.on_foot_maps_sharp = off|on` (default off, live;
-  covers menus too, a better name is `on_foot_panels_sharp`) and the existing
-  `advanced.vr_camera_census` (episodes, naming runs and the detour's CPU ride
+- **Keys:** `experimental.on_foot_maps_sharp = off|on` (default ON since 2026-10-01;
+  off is the way back; covers menus too, a better name is `on_foot_panels_sharp`)
+  and `advanced.vr_camera_census` (episodes, naming runs and the detour's CPU ride
   it). No other key. Key off is today's gate for every input, pinned.
 - **Trigger (Sean's correction):** the maps smear when dragged ON FOOT,
   where the game draws them into the 2D panel. The gate keeps the panel in
@@ -56,7 +56,7 @@
   flight 1 (`fix.vscreen_res_width` auto, the legacy rule; main's auto-fit,
   merged here, fits it to the eye when the game LAUNCHES with the route auto:
   section 9); DLSS preset K. Phase 1 needs the UI layer
-  live (`fix.ui_quality` above 0 and `fix.temporal_aa` on, the defaults);
+  live (`fix.ui_quality` above 0, on by default, and `fix.temporal_aa` on);
   with it off, or under the Oculus native SDK, the on-foot map keeps its
   smear.
 
@@ -672,3 +672,21 @@ aa price|LONG FRAME"`.
   in leg 1's launch state: the cure is the route's mipped screen), ringing on
   menu text (8.9a), `door-not-empty` above 0, a TAKES in a stretch of world in
   any mode (a world that does not name).
+
+## 10. The key ships on (2026-10-01)
+
+Sean approved the default flip on 2026-10-01 after the key and its behaviour were
+quoted to him (branch `claude/key-cleanup-defaults`, BUILT, NOT FLOWN):
+`experimental.on_foot_maps_sharp` is on by default, in the shipped `edvr.ini` and
+in the code's fallback for an ini with no line (`uiLayerConfigure`;
+`tools\config_test` holds the two to one answer, with a control that flips the
+fallback). The key stays for one release candidate as the way back; off is today's
+gate for every input, pinned as before. The gate still needs the UI layer and
+screen motion live (`fix.ui_quality` on, a temporal mode on), so an install with
+`fix.temporal_aa = off`, the shipped default, is unchanged and says once in the
+log that the key is on but the layer is not live. An existing ini: a line that
+still says what the previous version shipped (off), with the installer's base
+copy kept, moves to on and the report says so; a hand-installed file with no base
+copy keeps its off, and so does a value somebody chose (`installer_test`
+`testChangedDefaultsOn`). The VR world route's key flipped to auto in the same
+commit (design-flat-temporal-aa-2026-09-23.md, section 82, "The cleanup").

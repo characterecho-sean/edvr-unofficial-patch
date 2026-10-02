@@ -270,7 +270,13 @@ void closeCases() {
         const double t0 = nowMs();
         const bool drained = w->closeAndDrain(30);
         const double waited = nowMs() - t0;
-        check(!drained && waited >= 25.0 && waited < 500.0, "H6.bounded: closeAndDrain(30) against a write stuck for 600 ms gives up after about 30 ms (not 600) and says so");
+        // The ordering is the proof: it returned false while the sink was still inside its 600 ms stall, so it gave up
+        // and did not wait the write out (a wait for the stall returns true, an unbounded one outlives the sink). The
+        // wall-clock windows are loose on purpose: closeAndDrain counts GetTickCount64, whose step is the system timer
+        // tick (about 15.6 ms unless some process has raised the resolution, which a loaded machine does and an idle
+        // one does not), so a 30 ms bound can return after as little as ~14 ms and, loaded, after far more than 30.
+        const bool stillStalled = w->writing() && g_inSink.load() > 0;
+        check(!drained && stillStalled && waited >= 10.0, "H6.bounded: closeAndDrain(30) against a write stuck for 600 ms gives up (the write is still under way) and says so, and not after the whole stall");
         Sleep(800);
         w->stop();
     }

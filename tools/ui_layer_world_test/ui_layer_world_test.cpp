@@ -131,6 +131,13 @@ namespace detail {
 bool g_screenMotionEnabled = true;
 bool g_screenMotionFailed = false;
 }  // namespace detail
+
+// ui_depth.h's two flags (uiDepthWantsDraws is inline over them): the layer's 30 s composite line says NOT COUNTED when the interface depth
+// pass is off or stood down (ui_scene_composites.h). The pass is on here, as fix.temporal_aa = dlss would have it.
+namespace detail {
+bool g_uiDepthOn = true;
+bool g_uiDepthStoodDown = false;
+}  // namespace detail
 bool vrWorldRouteEnabled() { return g_stubs.enabled; }
 bool vrWorldRouteLayerMayTake() { return g_stubs.mayTake; }
 bool vrWorldRouteDoorLayerOnly(uint32_t, uint64_t) { return g_stubs.routeDoor; }
@@ -1688,6 +1695,11 @@ int main(int argc, char** argv) {
     cfg.set("fix.temporal_aa", "dlss");
     cfg.set("advanced.temporal_aa_jitter_sign", "as_is");
     cfg.set("advanced.temporal_aa_jitter_lag", "0");
+    // The on-foot maps gate ships ON since 2026-10-01 (an ini with no line reads on: tools\config_test and tools\on_foot_maps_test
+    // hold the fallback). The cases before the maps section pin the world-screen gate as the journal and the screen's own depth
+    // give it, which is the maps key off, and the maps section sets the key itself, so the rig starts with it off: the new default
+    // must not leak in and make the first maps case start from a gate that is already on.
+    cfg.set("experimental.on_foot_maps_sharp", "off");
     uiLayerConfigure(cfg);
     check(uiLayerLive(), "the layer is live for the rig (fix.ui_quality 100, dlss, jitter as shipped)");
     // The first boundary computes the world-screen gate (the journal: on foot) and warms the layer's shaders.

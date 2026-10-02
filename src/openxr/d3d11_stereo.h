@@ -84,8 +84,9 @@ class D3D11Stereo final {
   XrResult shutdown();
   int64_t format() const { return format_; }
   // Wall time the last initialize spent creating the two swapchains (format
-  // enumeration through the image views) and building the runtime shaders
-  // (the two D3DCompile pairs and their shader objects). Measured with
+  // enumeration through the image views) and creating the runtime shaders
+  // (the four shader objects, from the build's bytecode, and the blit's
+  // buffer and sampler; it held two D3DCompile pairs until 2026-10-01). Measured with
   // std::chrono::steady_clock around each stretch, for the host's startup
   // trace; 0 when initialize has not run or the clock was unavailable.
   double initSwapchainMs() const { return initSwapchainMs_; }

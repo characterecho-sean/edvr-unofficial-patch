@@ -163,7 +163,7 @@ inline void refusalGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) 
                 static_cast<unsigned long long>(a.counts[kFlatMonoClassStale]), static_cast<unsigned long long>(a.counts[kFlatMonoClassMasked]),
                 static_cast<unsigned long long>(a.counts[kFlatMonoClassCorrupt]), static_cast<unsigned long long>(a.counts[kFlatMonoClassSentinel]));
 
-    // Key on (FlatMonoResolveFrame::steadyDetail, which the steady-detail key sets): the scene is still (last frame's depth is this frame's), so
+    // Steady detail on (FlatMonoResolveFrame::steadyDetail, which both routes always set; this rig drives it both ways): the scene is still (last frame's depth is this frame's), so
     // the stale block takes the camera term where last frame's depth confirms it, is no longer refused and is counted as kept; the masked
     // record, the corrupt code and the sentinel stay refused. The depth-check cases themselves are flat_steady_depth_gpu_tests.h's.
     f.steadyDetail = true;

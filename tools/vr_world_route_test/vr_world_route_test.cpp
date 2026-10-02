@@ -21,10 +21,10 @@
 //      key-off contract (the boundary's early return keeps today's single test; nothing of stage 2 runs before it), and for the
 //      curved route (a curved screen does not hold the route off; its curve is named in two lines), each held by controls: copies of
 //      the source with one edit that must trip the pin named.
-//   7. STAGE 2, THE PURE HALF (design doc section 82, stage 2): the A/B key and the decision table that turns it, the
-//      weapon fold-in's mode, the injector counters' window and its line, the STOP on an injected kind other than 3, the
-//      excluded-call, no-scene and rows-mismatch lines, the decline log's cap per run of declines, and the RELEASED line's
-//      last decline.
+//   7. STAGE 2, THE PURE HALF (design doc section 82, stage 2): the jitter decision table (the route has no jitter key of
+//      its own; the global jitter key off is the one setting that stops the world's jitter), the weapon fold-in's mode, the
+//      injector counters' window and its line, the STOP on an injected kind other than 3, the excluded-call, no-scene and
+//      rows-mismatch lines, the decline log's cap per run of declines, and the RELEASED line's last decline.
 //   8. THE ON-FOOT MAPS GATE AND THE ROUTE (docs/design-world-camera-motion-2026-09-30.md, Phase 1): the gate's release count is
 //      the route's grace, so a map's opening releases both on one boundary; the gate holds the world again two named frames
 //      after the map closes and the route, which needs the gate, owns again kVrWorldWarmFrames treated frames after that, and is
@@ -41,6 +41,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -484,19 +485,10 @@ void lineCases() {
     n = vrWorldFormatWindow(line, sizeof(line), VrWorldKey::Auto, VrWorldState::Owned, true, true, w);
     check(n > 0 && n < 1100 && std::strstr(line, "jitter=on phase=0.4375,-0.3125 rows=0.4375,-0.3125 fp-mode=4/300/2"),
           "line: the 5 s line carries the jitter decision, the world phase in use, the rows' phase and the fold-in's modes");
-    // The phase count (2026-10-01; temporal_math.h): the route resolves at the game's render size, so it runs the fixed eight, and its
-    // 5 s line says so before the jitter decision -- a window nothing has set prints eight, one handed another count prints that one.
-    check(n > 0 && std::strstr(line, " phases=8 jitter=on phase=0.4375,-0.3125 "),
-          "line: the 5 s line carries the phase count the route ran, eight by default, just before the jitter decision");
-    w.phases = 32;
-    n = vrWorldFormatWindow(line, sizeof(line), VrWorldKey::Auto, VrWorldState::Owned, true, true, w);
-    check(n > 0 && n < 1100 && std::strstr(line, " phases=32 jitter=on phase=0.4375,-0.3125 "),
-          "line: ...and prints the window's own count, not a constant");
     VrWorldWindow idle;
     n = vrWorldFormatWindow(line, sizeof(line), VrWorldKey::Auto, VrWorldState::Observing, true, true, idle);
     check(n > 0 && std::strstr(line, "jitter=idle phase=0.0000,0.0000 rows=0.0000,0.0000 fp-mode=0/0/0"),
           "line: a route that does not jitter prints jitter=idle and a zero phase (an absent token would read as 'never built')");
-    check(n > 0 && std::strstr(line, " phases=8 jitter=idle "), "line: ...and the fixed eight (a default window says what every path has always run)");
     char buf[512];
     n = vrWorldFormatEntered(buf, sizeof(buf), 1234, kVrWorldWarmFrames);
     check(n > 0 && std::strstr(buf, "OWNS the world from frame=1234") && std::strstr(buf, "8 treated frames"), "line: the ownership line names the frame and the warm-up");
@@ -639,62 +631,53 @@ void curveCases() {
 
 // ---- 7. stage 2, the pure half ---------------------------------------------------------------------------------------------
 void stage2Cases() {
-    // The A/B key. Present-but-not-"on" is off, so a typo can never start writing the game's cameras.
-    check(vrWorldJitterKeyFromText("on") == VrWorldJitterKey::On && vrWorldJitterKeyFromText("ON") == VrWorldJitterKey::On &&
-              vrWorldJitterKeyFromText("On") == VrWorldJitterKey::On,
-          "jitter key: on, in any case, reads on");
-    const char* notOn[] = {"off", "", "auto", "onx", "o", " on", "on ", "true", "1", "yes", "dlss", "of"};
-    bool allOff = true;
-    for (const char* t : notOn) allOff = allOff && vrWorldJitterKeyFromText(t) == VrWorldJitterKey::Off;
-    check(allOff && vrWorldJitterKeyFromText(nullptr) == VrWorldJitterKey::Off,
-          "jitter key: anything that is not exactly on, a typo included, reads off: a typo can never start writing the game's cameras");
-    check(std::strcmp(vrWorldJitterKeyName(VrWorldJitterKey::On), "on") == 0 && std::strcmp(vrWorldJitterKeyName(VrWorldJitterKey::Off), "off") == 0,
-          "jitter key: the names are the ini's words");
+    // There is no jitter key of the route's own (retired 2026-10-01; it once sat between the fault and the global key and read a
+    // typo as off). While the route is Warming or Owned the world is always jittered, and the decision is made from the route key,
+    // the global jitter key, the route's want, the naming rule, the hook and a fault, and from nothing else. The signature is the
+    // proof: six booleans, the global jitter key (experimental.temporal_aa_jitter) the only one that is a setting beside the route's.
+    check(std::is_same<decltype(&vrWorldJitterDecide), VrWorldJitter (*)(bool, bool, bool, bool, bool, bool)>::value,
+          "jitter: the decision takes six booleans (route auto, global jitter, route wants, last frame named, hook live, fault) and no key of its own");
 
     // The decision table: the reasons in order, each alone. Only On asks the injector to write a camera. `named`: the frame that
     // just ended named the screen's source (the window's rule: the scene camera refreshes before the draws that name the source, so the frame that starts
     // cannot be asked, and a map frame refreshes about thirty kind-3 cameras that must never pick up the world's phase).
     using J = VrWorldJitter;
-    const auto decide = [](bool auto_, bool keyOn, bool global, bool wants, bool named, bool hook, bool fault) {
-        return vrWorldJitterDecide(auto_, keyOn ? VrWorldJitterKey::On : VrWorldJitterKey::Off, global, wants, named, hook, fault);
+    const auto decide = [](bool auto_, bool global, bool wants, bool named, bool hook, bool fault) {
+        return vrWorldJitterDecide(auto_, global, wants, named, hook, fault);
     };
-    check(decide(true, true, true, true, true, true, false) == J::On,
-          "jitter: route auto, key on, global on, route wants, last frame named, hook live, no fault: On");
-    check(decide(false, true, true, true, true, true, false) == J::Idle && decide(false, true, true, true, true, true, true) == J::Idle,
+    check(decide(true, true, true, true, true, false) == J::On,
+          "jitter: route auto, global on, route wants, last frame named, hook live, no fault: On (nothing else is asked: the route jitters the world it owns)");
+    check(decide(false, true, true, true, true, false) == J::Idle && decide(false, true, true, true, true, true) == J::Idle,
           "jitter: the route key not auto is Idle, a fault included (nothing is asked of the injector with the route off)");
-    check(decide(true, true, true, true, true, true, true) == J::Fault, "jitter: a fault (a STOP) is Fault whatever else holds");
-    check(decide(true, false, true, true, true, true, false) == J::KeyOff,
-          "A/B: experimental.temporal_aa_on_foot_world_jitter off is KeyOff with everything else holding: the route stays, the phase is zero");
-    check(decide(true, true, false, true, true, true, false) == J::GlobalOff,
-          "jitter: experimental.temporal_aa_jitter off is GlobalOff (one key that stops every jitter the profile would apply)");
-    check(decide(true, true, true, false, true, true, false) == J::Idle,
+    check(decide(true, true, true, true, true, true) == J::Fault, "jitter: a fault (a STOP) is Fault whatever else holds");
+    check(decide(true, false, true, true, true, false) == J::GlobalOff,
+          "jitter: experimental.temporal_aa_jitter off is GlobalOff with everything else holding: the route stays, the phase is zero (the one setting that stops the world's jitter)");
+    check(decide(true, true, false, true, true, false) == J::Idle,
           "jitter: a route that is not Warming or Owned (or not watching) is Idle: nothing is written");
-    check(decide(true, true, true, true, true, false, false) == J::NoHook,
+    check(decide(true, true, true, true, false, false) == J::NoHook,
           "jitter: a camera hook that is not live is NoHook: the world stays unjittered and the line says so");
-    check(decide(true, true, true, true, false, true, false) == J::Unnamed,
+    check(decide(true, true, true, false, true, false) == J::Unnamed,
           "NAMING: a route that is Warming or Owned after a frame that named no source for the screen (a map, a menu, a transition) is Unnamed: the window stays shut");
-    check(decide(true, true, true, true, false, false, false) == J::Unnamed,
+    check(decide(true, true, true, false, false, false) == J::Unnamed,
           "NAMING: the naming rule ranks above the hook: an unnamed frame is shut whether or not the hook is live");
-    check(decide(true, true, true, false, false, true, false) == J::Idle,
+    check(decide(true, true, false, false, true, false) == J::Idle,
           "NAMING: a route that is neither Warming nor Owned is Idle, named or not (the rule only shuts a window the route would have opened)");
-    check(decide(true, false, true, true, false, true, false) == J::KeyOff && decide(true, true, false, true, false, true, false) == J::GlobalOff &&
-              decide(true, true, true, true, false, true, true) == J::Fault,
-          "NAMING: the key, the global key and a fault keep their own reasons on an unnamed frame");
+    check(decide(true, false, true, false, true, false) == J::GlobalOff && decide(true, true, true, false, true, true) == J::Fault,
+          "NAMING: the global key and a fault keep their own reasons on an unnamed frame");
     bool onlyOnInjects = true, namedOrShut = true;
-    for (int mask = 0; mask < 128; ++mask) {
-        const bool a = mask & 1, k = mask & 2, g = mask & 4, w = mask & 8, n = mask & 16, h = mask & 32, f = mask & 64;
-        const J d = decide(a, k, g, w, n, h, f);
-        onlyOnInjects = onlyOnInjects && (d == J::On) == (a && k && g && w && n && h && !f);
+    for (int mask = 0; mask < 64; ++mask) {
+        const bool a = mask & 1, g = mask & 2, w = mask & 4, n = mask & 8, h = mask & 16, f = mask & 32;
+        const J d = decide(a, g, w, n, h, f);
+        onlyOnInjects = onlyOnInjects && (d == J::On) == (a && g && w && n && h && !f);
         // The invariant the flight plan's STOP reads: no combination in which the last frame named nothing ever decides On.
         namedOrShut = namedOrShut && (n || d != J::On);
     }
-    check(onlyOnInjects, "jitter: over all 128 combinations the decision is On exactly when every condition holds, the last frame named its source and no fault is set");
-    check(namedOrShut, "NAMING: over all 128 combinations a frame after an unnamed one is never On (no combination of keys, route state or hook opens the window)");
-    check(std::strcmp(vrWorldJitterName(J::On), "on") == 0 && std::strcmp(vrWorldJitterName(J::KeyOff), "off") == 0 &&
-              std::strcmp(vrWorldJitterName(J::GlobalOff), "off") == 0 && std::strcmp(vrWorldJitterName(J::Idle), "idle") == 0 &&
-              std::strcmp(vrWorldJitterName(J::Unnamed), "unnamed") == 0 &&
+    check(onlyOnInjects, "jitter: over all 64 combinations the decision is On exactly when every condition holds, the last frame named its source and no fault is set: nothing but the global key can keep the jitter off");
+    check(namedOrShut, "NAMING: over all 64 combinations a frame after an unnamed one is never On (no combination of key, route state or hook opens the window)");
+    check(std::strcmp(vrWorldJitterName(J::On), "on") == 0 && std::strcmp(vrWorldJitterName(J::GlobalOff), "off") == 0 &&
+              std::strcmp(vrWorldJitterName(J::Idle), "idle") == 0 && std::strcmp(vrWorldJitterName(J::Unnamed), "unnamed") == 0 &&
               std::strcmp(vrWorldJitterName(J::NoHook), "no-hook") == 0 && std::strcmp(vrWorldJitterName(J::Fault), "fault") == 0,
-          "jitter: the tokens of the 5 s line are on, off, idle, unnamed, no-hook and fault");
+          "jitter: the tokens of the 5 s line are on, off (the global key off), idle, unnamed, no-hook and fault");
 
     // The weapon fold-in's mode (decision (a): the first-person camera takes the world's phase).
     const VrWorldAppliedPhase z, p{0.25f, -0.125f}, q{-0.375f, 0.0625f};
@@ -955,30 +938,26 @@ void mapsGateCases() {
 }
 
 // ---- 9. the stage 2 experiment build, the pure half ----------------------------------------------------------------------------
-// experimental.temporal_aa_on_foot_world_steady_detail (on by default since flight 4: the stale-slot refusal relaxed on foot where last
-// frame's depth confirms it; an explicit off, or any word but on, is the refusal as before), the refusal census's
-// line and the two lines that say a key or the view changed. The reader parses these texts, so the line pins here are the contract.
+// The depth-validated steady detail (the stale-slot refusal relaxed on foot where last frame's depth confirms it) is always on in this
+// build, with no key (retired 2026-10-01). The route's lines still carry a steady-detail= token, which says on in everything this build
+// writes, because the log reader parses "on" and "off" and has to keep reading the logs of builds that had the key. Here: that token,
+// the refusal census's line and the line that says the view changed. The reader parses these texts, so the line pins here are the contract.
 void experimentCases() {
-    check(vrWorldSteadyKeyFromText("on") == VrWorldSteadyKey::On && vrWorldSteadyKeyFromText("ON") == VrWorldSteadyKey::On &&
-              vrWorldSteadyKeyFromText("On") == VrWorldSteadyKey::On,
-          "steady-detail key: on, in any case, reads on");
-    const char* notOn[] = {"off", "", "auto", "onx", "o", " on", "on ", "true", "1", "yes", "steady", "of"};
-    bool allOff = true;
-    for (const char* t : notOn) allOff = allOff && vrWorldSteadyKeyFromText(t) == VrWorldSteadyKey::Off;
-    check(allOff && vrWorldSteadyKeyFromText(nullptr) == VrWorldSteadyKey::Off,
-          "steady-detail key: anything that is not exactly on, an explicit off and a typo included, reads off: the file's off is the refusal exactly as before the key existed");
-    check(std::strcmp(vrWorldSteadyKeyName(VrWorldSteadyKey::On), "on") == 0 && std::strcmp(vrWorldSteadyKeyName(VrWorldSteadyKey::Off), "off") == 0,
-          "steady-detail key: the names are the ini's words");
-
-    // The route line names the key's state, off in a window that never set it (the default window is the flight 2 route).
+    // The route line's steady-detail token: a window nothing has touched says on (the route never sets it), the token is passed through as
+    // the window holds it (a rig that models the log of a build that had the key set off says off), and the curve tokens follow it.
     char line[1200];
     VrWorldWindow w;
     int n = vrWorldFormatWindow(line, sizeof(line), VrWorldKey::Auto, VrWorldState::Owned, true, true, w);
-    check(n > 0 && std::strstr(line, " fp-mode=0/0/0 steady-detail=off curve=off curve-reissues=0 last-trigger="),
-          "route line: steady-detail=off sits after fp-mode in a window that never turned it on (a default window is flight 2's route), with curve=off curve-reissues=0 after it");
-    w.steady = vrWorldSteadyKeyName(VrWorldSteadyKey::On);
+    check(n > 0 && std::strstr(line, " fp-mode=0/0/0 steady-detail=on curve=off curve-reissues=0 last-trigger="),
+          "route line: steady-detail=on sits after fp-mode in a window nothing has touched (the steady detail is always on, so the route has nothing to set), with curve=off curve-reissues=0 after it");
+    check(std::strcmp(w.steady, "on") == 0 && std::strcmp(VrWorldRefusalWindow{}.steady, "on") == 0,
+          "route line: both windows' steady-detail token defaults to on");
+    w.steady = "off";
     n = vrWorldFormatWindow(line, sizeof(line), VrWorldKey::Auto, VrWorldState::Owned, true, true, w);
-    check(n > 0 && std::strstr(line, " steady-detail=on curve=off curve-reissues=0 last-trigger="), "route line: steady-detail=on when the key is on");
+    check(n > 0 && std::strstr(line, " steady-detail=off curve=off curve-reissues=0 last-trigger="),
+          "route line: the token is what the window holds: a rig that models a build that had the key set off reads steady-detail=off");
+    w.reset();
+    check(std::strcmp(w.steady, "on") == 0, "route line: reset() takes a window back to steady-detail=on (each 5 s window starts as this build writes it)");
 
     // The refusal line: "ran, nothing refused" and "never ran" are different texts.
     VrWorldRefusalWindow r;
@@ -986,26 +965,29 @@ void experimentCases() {
     n = vrWorldFormatRefusalWindow(rl, sizeof(rl), r);
     check(n > 0 && std::strstr(rl, "vr world route refusal 5s: census=off every=0 treated=0 asked=0 sampled=0 read=0 dropped=0 size=0x0 pixels=0 refused=0 "
                                    "refused-pct=0.000 stale-refused=0 masked=0 corrupt=0 sentinel=0 unreprojectable=0 camera=0 range=0 depth=0 weapon=0 other=0 "
-                                   "stale-kept=0 depth-check=0/0 steady-detail=off view=off"),
-          "refusal line: every counter is printed, zero included, and an empty window reads census=off pixels=0");
+                                   "stale-kept=0 depth-check=0/0 steady-detail=on view=off"),
+          "refusal line: every counter is printed, zero included, an empty window reads census=off pixels=0, and the steady detail reads on");
     r.census = true; r.every = kFlatMonoRefusalEvery; r.treated = 450; r.asked = 450; r.sampled = 113; r.read = 112; r.dropped = 1;
     r.width = 5040; r.height = 2835; r.pixels = 112ull * 5040 * 2835;
     r.counts[kFlatMonoClassStale] = 1200000; r.counts[kFlatMonoClassMasked] = 3000; r.counts[kFlatMonoClassSentinel] = 11;
     r.counts[kFlatMonoClassRange] = 1200; r.counts[kFlatMonoClassWeaponRefused] = 2000; r.counts[kFlatMonoClassReset] = 7;
+    // This one models the log of a build that had the key set off (every stale pixel refused, none kept, no depth check): the token
+    // is passed through as given, which is what lets the reader's off-state logic be tested against a real formatter's text.
     r.counts[kFlatMonoRefusalStaleKept] = 0; r.steady = "off"; r.view = "on";
     n = vrWorldFormatRefusalWindow(rl, sizeof(rl), r);
     check(n > 0 && n < 700 && std::strstr(rl, "census=on every=4 treated=450 asked=450 sampled=113 read=112 dropped=1 size=5040x2835 pixels=1600300800 ") &&
               std::strstr(rl, "refused=1206218 refused-pct=0.075 stale-refused=1200000 masked=3000 corrupt=0 sentinel=11 unreprojectable=0 camera=0 range=1200 depth=0 "
                               "weapon=2000 other=7 stale-kept=0 depth-check=0/0 steady-detail=off view=on"),
           "refusal line: a sampled window prints its size, the pixels examined, the refused total and its share, each cause, the unnamed remainder as other, "
-          "the key's state and the view");
-    // The key on (the depth-validated form): the stale pixels are two numbers, the ones last frame's depth confirmed (stale-kept: not refused,
-    // not in the refused total) and the ones it did not (stale-refused: refused, in the total), and the line says how many frames ran the check.
+          "the steady-detail token and the view");
+    // The steady detail on, as this build always runs it (the depth-validated form): the stale pixels are two numbers, the ones last frame's
+    // depth confirmed (stale-kept: not refused, not in the refused total) and the ones it did not (stale-refused: refused, in the total), and
+    // the line says how many frames ran the check.
     r.steady = "on"; r.counts[kFlatMonoClassStale] = 10000; r.counts[kFlatMonoRefusalStaleKept] = 1190000; r.checked = 448; r.skipped = 2;
     n = vrWorldFormatRefusalWindow(rl, sizeof(rl), r);
     check(n > 0 && std::strstr(rl, "stale-refused=10000 ") && std::strstr(rl, "stale-kept=1190000 depth-check=448/2 steady-detail=on") &&
               std::strstr(rl, "refused=16218 refused-pct=0.001 "),
-          "refusal line: with the key on the stale pixels split in two: stale-kept (confirmed by last frame's depth, not refused) and stale-refused (refused, counted), and the depth check's ran/skipped frames");
+          "refusal line: with the steady detail on the stale pixels split in two: stale-kept (confirmed by last frame's depth, not refused) and stale-refused (refused, counted), and the depth check's ran/skipped frames");
     {   // The old spellings are gone from the text: a reader that wants them reads the flight-3 logs by its own table.
         const bool oldSpellings = std::strstr(rl, " stale=") || std::strstr(rl, "forgiven=");
         check(!oldSpellings, "refusal line: the flight-3 tokens (stale=, forgiven=) are no longer printed: the new line has stale-refused= and stale-kept=");
@@ -1035,16 +1017,8 @@ void experimentCases() {
     check(kFlatMonoStaleDepthRelative == 0.01 && kFlatMonoStaleDepthFloor == 1e-6,
           "steady detail: the depth check's tolerance is 1% (floor 1e-6), the resolver's own TAA's");
 
-    // The two change lines.
+    // The change line: the view's. (The steady detail has no change line any more: there is no key to change.)
     char cl[768];
-    n = vrWorldFormatSteadyChanged(cl, sizeof(cl), 4242, VrWorldSteadyKey::On);
-    check(n > 0 && std::strstr(cl, "vr world route: steady-detail is ON from frame=4242") && std::strstr(cl, "where last frame's depth confirms it") &&
-              std::strstr(cl, "is refused where it does not") && std::strstr(cl, "masked records and corrupt slots stay refused") &&
-              std::strstr(cl, "pass the depth test and ghost"),
-          "steady-detail line: coming on says what it does (only where last frame's depth confirms it) and what it costs (a lateral mover's interior can ghost), and that masked records stay refused");
-    n = vrWorldFormatSteadyChanged(cl, sizeof(cl), 4300, VrWorldSteadyKey::Off);
-    check(n > 0 && std::strstr(cl, "vr world route: steady-detail is OFF from frame=4300") && std::strstr(cl, "refuses its history, as in flight 2"),
-          "steady-detail line: going off says the route is flight 2's again");
     n = vrWorldFormatViewChanged(cl, sizeof(cl), 77, true);
     check(n > 0 && n < 768 && std::strstr(cl, "vr world route: the refusal view is ON from frame=77 (advanced.temporal_aa_debug = motion_source)") &&
               std::strstr(cl, "yellow stale slot") && std::strstr(cl, "red masked record") && std::strstr(cl, "before the game's tone pass"),
@@ -1251,9 +1225,11 @@ void sourcePins() {
     // THE KEY-OFF CONTRACT. With the key off, from the start, the boundary's first test returns and nothing below it runs: no
     // camera detour, no phase, no extra counter. Stage 2 adds exactly one thing to that test, the flag that says the injector
     // still has to be wound down after the key went off live; it is false from the start and set only by driveInjector.
-    check(boundary.find("getString(\"experimental.temporal_aa_on_foot_world\", \"off\")") != std::string::npos &&
+    // The key's default is auto since 2026-10-01 (tools\config_test holds the fallback to the shipped file); a key set off, or any word
+    // that is not auto, is still this early return.
+    check(boundary.find("getString(\"experimental.temporal_aa_on_foot_world\", \"auto\")") != std::string::npos &&
               before(boundary, "if (key == VrWorldKey::Off && g_machine.state == VrWorldState::Off && !g_census && !g_injectorEngaged)", "++g_frameNo"),
-          "key off: the boundary reads the key with the default off and returns before doing anything when nothing is to be accounted");
+          "key off: the boundary reads the key with the default auto and, with the key set off, returns before doing anything when nothing is to be accounted");
     check(rt.find("bool g_injectorEngaged = false;") != std::string::npos && count(rt, "g_injectorEngaged = true;") == 1 &&
               before(rt, "void driveInjector(", "g_injectorEngaged = true;") && before(rt, "g_injectorEngaged = true;", "void windDownInjector("),
           "key off: the flag that keeps the boundary running starts false and is set in exactly one place, inside driveInjector");
@@ -1270,11 +1246,17 @@ void sourcePins() {
     check(count(rt, "driveInjector(") == 2 && count(rt, "windDownInjector(") == 2,
           "jitter: driveInjector is called once (the boundary) and windDownInjector once (the key-off branch), each defined once");
     const std::string drive = functionBody(rt, "void driveInjector(");
-    check(!drive.empty() && drive.find("getString(\"experimental.temporal_aa_on_foot_world_jitter\", \"on\")") != std::string::npos &&
-              drive.find("getBool(\"experimental.temporal_aa_jitter\", true)") != std::string::npos,
-          "A/B: the jitter is decided from experimental.temporal_aa_on_foot_world_jitter (default on) and the global experimental.temporal_aa_jitter");
+    // NO JITTER KEY (retired 2026-10-01): the route jitters the world it owns, and the global experimental.temporal_aa_jitter is the one
+    // setting that stops it. driveInjector reads exactly that one setting; the decision is handed no key of the route's own; and nothing
+    // in the route's source names a setting that starts with the route key's name and goes on (the two retired keys did).
+    check(!drive.empty() && count(drive, "Config::get()") == 1 && drive.find("Config::get().getBool(\"experimental.temporal_aa_jitter\", true)") != std::string::npos &&
+              drive.find("getString(") == std::string::npos,
+          "jitter: driveInjector reads one setting, the global experimental.temporal_aa_jitter (default on), and nothing else: the route has no jitter key of its own");
+    check(rt.find("experimental.temporal_aa_on_foot_world_") == std::string::npos && rt.find("g_jitterKey") == std::string::npos &&
+              rt.find("vrWorldJitterKey") == std::string::npos,
+          "jitter: the route's source names no setting that starts with the route key's name and goes on, and holds no jitter key's state or parser");
     // NAMING (design-world-camera-motion-2026-09-30.md section 5): the window opens only after a frame that named the screen's source.
-    check(drive.find("vrWorldJitterDecide(true, g_jitterKey, globalJitter, wantsInjection && w && h, g_namedLast, true, g_injectFault)") != std::string::npos,
+    check(drive.find("vrWorldJitterDecide(true, globalJitter, wantsInjection && w && h, g_namedLast, true, g_injectFault)") != std::string::npos,
           "NAMING: the window is decided from the last frame's naming (g_namedLast); no other input can open it after an unnamed frame");
     check(count(rt, "vf.inject = true;") == 1 && before(drive, "if (want == VrWorldJitter::On) {", "vf.inject = true;") &&
               before(drive, "vrWorldJitterDecide(", "vf.inject = true;"),
@@ -1355,58 +1337,48 @@ void sourcePins() {
           "door: the layer's predicate answers the route's question first and the maps gate's only when the key is on");
     check(nt.find("&&!edvr::vrWorldRouteOwnsNextFrame()") != std::string::npos,
           "eye shift: native_temporal advertises the shift only while the route does not own the next frame");
-    // The phase count (2026-10-01; temporal_math.h): the route resolves at the game's render size (render == output), so it hands its
-    // phase machine the count the ratio rule gives for that -- the fixed eight, with experimental.temporal_aa_jitter_follows_upscale
-    // on or off, and the route reads no such key -- and its 5 s window carries what the machine ran.
-    const std::string routeCpp = readFile("src\\d3d11\\vr_world_route.cpp");
-    check(!routeCpp.empty() &&
-              count(routeCpp, "g_phase.beginFrame(true, g_prev.valid && g_f.treated, w, h, temporalJitterPhaseCount(w, h, w, h));") == 1 &&
-              count(routeCpp, "g_win.phases = g_phase.phaseCount;") == 1 &&
-              routeCpp.find("temporal_aa_jitter_follows_upscale\"") == std::string::npos,
-          "phase count: the route's phase machine is given the ratio rule's count for render == output, its window prints what the machine ran, and the route reads no key for it");
     const std::string skip = functionBody(nt, "HRESULT WINAPI skipEye(");
     check(!skip.empty() && before(skip, "edvr::vrWorldRouteNoteSceneReset();", "s->history[eye]={}"),
           "scene reset: a withheld eye frame tells the route before it touches the eye's history");
 
-    // THE STAGE 2 EXPERIMENT BUILD (design doc section 82). Three keys, read only while the route key is auto, and each handed to the
-    // resolver as the resolver's own contract: the steady-detail key defaults to ON since flight 4, the debug view and the census to off;
-    // with all three off the frame is flight 2's frame.
+    // THE STAGE 2 EXPERIMENT BUILD (design doc section 82). The depth-checked steady detail has no key any more (retired 2026-10-01): the
+    // route hands the resolver steadyDetail = true, unconditionally, in one place. The debug view and the census, the resolver's own
+    // contract, are off by default and read only while the route key is auto; with both off the frame is flight 4's frame.
     {
         const std::string keys = functionBody(rt, "void readExperimentKeys(");
-        check(!keys.empty() && keys.find("getString(\"experimental.temporal_aa_on_foot_world_steady_detail\", \"on\")") != std::string::npos &&
-                  keys.find("getString(\"experimental.temporal_aa_on_foot_world_steady_detail\", \"off\")") == std::string::npos &&
-                  keys.find("getString(\"advanced.temporal_aa_debug\", \"off\")") != std::string::npos &&
-                  keys.find("\"motion_source\"") != std::string::npos && keys.find("vrWorldSteadyKeyFromText(") != std::string::npos,
-              "experiment: the steady-detail key (default on, parsed by vrWorldSteadyKeyFromText so an explicit off or a typo reads off) and the view (the debug key's motion_source, default off) are read in one place");
-        check(count(rt, "getString(\"experimental.temporal_aa_on_foot_world_steady_detail\"") == 1 && count(rt, "readExperimentKeys();") == 1,
-              "experiment: the steady-detail key is read once, by readExperimentKeys, which the boundary calls once");
+        check(!keys.empty() && count(keys, "getString(") == 1 && keys.find("getString(\"advanced.temporal_aa_debug\", \"off\")") != std::string::npos &&
+                  keys.find("\"motion_source\"") != std::string::npos && keys.find("steady") == std::string::npos,
+              "experiment: readExperimentKeys reads one key, the view (the debug key's motion_source, default off), and has nothing to say about the steady detail");
+        check(count(rt, "getString(\"advanced.temporal_aa_debug\"") == 1 && count(rt, "readExperimentKeys();") == 1,
+              "experiment: the view's key is read once, by readExperimentKeys, which the boundary calls once");
         const size_t callAt = boundary.find("readExperimentKeys();");
         const size_t guardAt = callAt == std::string::npos ? callAt : boundary.rfind("if (key == VrWorldKey::Auto) {", callAt);
         check(callAt != std::string::npos && guardAt != std::string::npos && callAt - guardAt < 80 &&
                   before(boundary, "if (key == VrWorldKey::Off && g_machine.state == VrWorldState::Off && !g_census && !g_injectorEngaged)", "readExperimentKeys();") &&
                   before(boundary, "readExperimentKeys();", "g_vrWorldWants = g_census ||"),
-              "key off: the experiment keys are read only inside the key-auto branch, after the boundary's early return, before the frame that starts is armed");
-        check(!treat.empty() && treat.find("f.steadyDetail = g_steadyKey == VrWorldSteadyKey::On;") != std::string::npos &&
+              "key off: the experiment's view key is read only inside the key-auto branch, after the boundary's early return, before the frame that starts is armed");
+        // THE STEADY DETAIL IS ALWAYS ON. One line, unconditional, before the resolve; no key, no state, no parser, no change line.
+        check(!treat.empty() && treat.find("    f.steadyDetail = true;\n") != std::string::npos &&
                   treat.find("f.refusalCensus = g_census;") != std::string::npos && treat.find("f.refusalView = g_viewOn ? 1u : 0u;") != std::string::npos &&
                   count(rt, "f.steadyDetail") == 1 && count(rt, "f.refusalCensus") == 1 && count(rt, "f.refusalView") == 1 &&
-                  before(treat, "f.reset = resetMissing", "f.steadyDetail = g_steadyKey") && before(treat, "f.steadyDetail = g_steadyKey", "flatMonoResolve(device.Get()"),
-              "experiment: the resolver's stale-slot rule (the depth-validated form), census and view are set from the three keys in one place, before the resolve, and nowhere else (off is false, false, 0)");
+                  before(treat, "f.reset = resetMissing", "f.steadyDetail = true;") && before(treat, "f.steadyDetail = true;", "flatMonoResolve(device.Get()"),
+              "steady detail: the route resolves with the depth-validated steady detail unconditionally, in one place and before the resolve; the census and the view are set beside it from their keys (off is false, 0)");
+        check(rt.find("g_steady") == std::string::npos && rt.find("VrWorldSteady") == std::string::npos && rt.find("vrWorldSteady") == std::string::npos &&
+                  rt.find("vrWorldFormatSteadyChanged") == std::string::npos && count(rt, "g_win.steady") == 0 && count(rt, "rw.steady") == 0,
+              "steady detail: the route holds no key state, parser or change line for it and never sets the lines' steady-detail token (a window's default says on)");
         check(count(rt, "f.staticScene") == 0,
-              "experiment: the route never sets the resolver's blanket form (staticScene is the flat 3D menu's alone): the key is the depth-checked form");
+              "experiment: the route never sets the resolver's blanket form (staticScene is the flat 3D menu's alone): the route's rule is the depth-checked form");
         check(boundary.find("flatMonoResolveTakeRefusalCensus()") != std::string::npos && count(rt, "flatMonoResolveTakeRefusalCensus()") == 1 &&
                   before(boundary, "vrWorldFormatInjectWindow(", "flatMonoResolveTakeRefusalCensus()") &&
                   before(boundary, "flatMonoResolveTakeRefusalCensus()", "vrWorldFormatRefusalWindow(") &&
                   before(boundary, "vrWorldFormatRefusalWindow(", "g_win.reset();") && boundary.find("if (g_census || rc.asked || rc.sampled || rc.frames || rc.checked || rc.skipped) {") != std::string::npos &&
                   boundary.find("rw.checked = rc.checked; rw.skipped = rc.skipped;") != std::string::npos,
-              "experiment: the census's sums are taken once, in the 5 s window, and its line is printed only while the census key is on, samples are still in flight, or the steady-detail key's depth check counted frames");
-        check(boundary.find("g_win.steady = vrWorldSteadyKeyName(g_steadyKey);") != std::string::npos &&
-                  before(boundary, "g_win.steady = vrWorldSteadyKeyName(g_steadyKey);", "vrWorldFormatWindow("),
-              "experiment: the route line names the steady-detail key's state");
-        check(boundary.find("g_steadyKey = g_steadyReported = VrWorldSteadyKey::Off; g_viewOn = g_viewReported = false;") != std::string::npos &&
-                  before(boundary, "g_steadyKey = g_steadyReported = VrWorldSteadyKey::Off;", "windDownInjector();"),
-              "key off live: the experiment keys' state is cleared with the route's, so a later episode logs its state again");
-        check(rt.find("VrWorldSteadyKey g_steadyKey = VrWorldSteadyKey::Off;") != std::string::npos && rt.find("bool g_viewOn = false, g_viewReported = false;") != std::string::npos,
-              "experiment: both start off (nothing is relaxed or painted before a boundary has read the keys)");
+              "experiment: the census's sums are taken once, in the 5 s window, and its line is printed only while the census key is on, samples are still in flight, or the steady detail's depth check counted frames");
+        check(boundary.find("g_viewOn = g_viewReported = false;") != std::string::npos &&
+                  before(boundary, "g_viewOn = g_viewReported = false;", "windDownInjector();"),
+              "key off live: the view's state is cleared with the route's, so a later episode logs its state again");
+        check(rt.find("bool g_viewOn = false, g_viewReported = false;") != std::string::npos,
+              "experiment: the view starts off (nothing is painted before a boundary has read the key)");
         const std::string readInj = functionBody(rt, "VrWorldInjectFrame readInjectFrame(");
         check(!readInj.empty() && readInj.find("f.fovNarrowest = c.fovNarrowest; f.fovWidest = c.fovWidest;") != std::string::npos &&
                   count(rt, "vrWorldAddInjectFrame(g_win.inject, inj);") == 1,
@@ -1414,11 +1386,19 @@ void sourcePins() {
         check(treat.find("fpApplied = !fp.motion ? worldApplied") != std::string::npos &&
                   treat.find("((inj.firstPersonInjected > 0 && inj.firstPersonRefused == 0) ? worldApplied : VrWorldAppliedPhase{});") != std::string::npos,
               "weapon: a weapon drawn is credited the world's phase only when a first-person call was injected and none was refused (the injector's role, not a guess); otherwise mode 2 as before");
+        // The pure half and the shipped file hold no key for either behaviour: no parser, no decision row, no change line, no ini key (config_test
+        // holds the retired names out of both by name; this holds the shape: nothing starts with the route key's name and goes on).
+        const std::string math = readFile("src\\d3d11\\vr_world_route_math.h");
+        const size_t enumAt = math.find("enum class VrWorldJitter : uint8_t {");
+        const std::string jitterEnum = enumAt == std::string::npos ? std::string() : math.substr(enumAt, math.find("};", enumAt) - enumAt);
+        check(!jitterEnum.empty() && jitterEnum.find("KeyOff") == std::string::npos && math.find("VrWorldJitterKey") == std::string::npos &&
+                  math.find("vrWorldJitterKey") == std::string::npos && math.find("VrWorldSteadyKey") == std::string::npos &&
+                  math.find("vrWorldSteadyKey") == std::string::npos && math.find("vrWorldFormatSteadyChanged") == std::string::npos &&
+                  math.find("experimental.temporal_aa_on_foot_world_") == std::string::npos,
+              "jitter and steady detail: the pure half holds no key, parser, key-change line or decision row for either (the jitter decision has no KeyOff)");
         const std::string cfgSource = readFile("edvr.ini");
-        const size_t keyAt = cfgSource.find("\ntemporal_aa_on_foot_world_steady_detail = on");
-        const size_t choicesAt = keyAt == std::string::npos ? keyAt : cfgSource.rfind("# dev: choices on, off", keyAt);
-        check(keyAt != std::string::npos && choicesAt != std::string::npos && keyAt - choicesAt < 40,
-              "experiment: the shipped edvr.ini ships the key on, with the developer tier's choices (the in-headset menu's Experimental page flips it live)");
+        check(!cfgSource.empty() && cfgSource.find("temporal_aa_on_foot_world_") == std::string::npos,
+              "jitter and steady detail: the shipped edvr.ini has no key that starts with the route key's name and goes on: there is nothing to flip");
     }
 }
 

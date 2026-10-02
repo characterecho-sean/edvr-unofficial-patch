@@ -281,6 +281,31 @@ def game_openvr_imports(path):
     return _game_imports(Image(Path(path).read_bytes()))
 
 
+def static_dll_imports(im):
+    """The lower-case file names of every DLL the image imports at load time or through its delay-import table (descriptors only; no thunk is decoded)."""
+    names = set()
+    for index, kind, width in ((1, 'import', 20), (13, 'delay', 32)):
+        rva, size = im.directory(index)
+        if not rva:
+            continue
+        for off in range(0, size - width + 1, width):
+            values = [im.number(rva + off + i, 4) for i in range(0, width, 4)]
+            if not any(values):
+                break
+            if kind == 'delay' and values[0] != 1:
+                raise PEError('delay import VA attributes unsupported')
+            name_rva = values[1] if kind == 'delay' else values[3]
+            names.add(im.string(name_rva).replace('\\', '/').rsplit('/', 1)[-1].lower())
+    return names
+
+
+def forbidden_imports(path, forbidden):
+    """Which of the forbidden DLL names (case-insensitive) the image at `path` imports statically, sorted. The d3d11 proxy and the native runtime must not import
+    d3dcompiler_47.dll: the runtime did, for four D3DCompile calls moved to build time on 2026-10-01 (src/openxr/stereo_shader_source.h), and the proxy loads it
+    only on demand (shader_swap.cpp), never at load."""
+    return sorted(static_dll_imports(Image(Path(path).read_bytes())) & {name.lower() for name in forbidden})
+
+
 def _validate_rows(rows):
     for row in rows:
         if 'ordinal' in row or row.get('name') not in GAME:
@@ -442,6 +467,45 @@ def self_test():
     d, put, rv = fixture(True)
     rv(0x2000, 0)
     refused(lambda: _game_imports(Image(d)))
+    # The imported DLLs by name, for --forbid-import: both tables, any case, a path in the name, and a third descriptor added to the fixture's two.
+    for delay, fallback in ((False, False), (False, True), (True, False)):
+        d, put, rv = fixture(delay, fallback)
+        check(static_dll_imports(Image(d)) == {'kernel32.dll', 'openvr_api.dll'})
+    d, put, rv = fixture()
+    kind, width = 1, 20
+    put(0x98 + 112 + 8 * kind + 4, width * 4)
+    string_at = 0x2280 - 0x1000 + 0x200
+    d[string_at:string_at + 19] = b'D3DCOMPILER_47.dll\0'
+    descriptor = 0x2000 + 2 * width
+    for j, value in enumerate((0x2400, 0, 0, 0x2280, 0x2400)):
+        rv(descriptor + j * 4, value)
+    check(static_dll_imports(Image(d)) == {'kernel32.dll', 'openvr_api.dll', 'd3dcompiler_47.dll'})
+    import tempfile
+    fd, with_compiler = tempfile.mkstemp(suffix='.dll')
+    os.close(fd)
+    fd, without_compiler = tempfile.mkstemp(suffix='.dll')
+    os.close(fd)
+    try:
+        Path(with_compiler).write_bytes(d)
+        Path(without_compiler).write_bytes(fixture()[0])
+        check(forbidden_imports(with_compiler, ['D3DCompiler_47.DLL']) == ['d3dcompiler_47.dll'])
+        check(forbidden_imports(with_compiler, ['d3dcompiler_47.dll', 'kernel32.dll']) == ['d3dcompiler_47.dll', 'kernel32.dll'])
+        check(forbidden_imports(without_compiler, ['d3dcompiler_47.dll']) == [])
+        check(forbidden_imports(without_compiler, []) == [] and forbidden_imports(with_compiler, []) == [])
+        import contextlib
+        import io
+
+        def quiet(argv):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return main(argv)
+        # The command line: a forbidden import fails the check (exit 1), its absence passes, and without --forbid-import nothing changes.
+        check(quiet(['--native', without_compiler, '--forbid-import', 'D3DCompiler_47.dll']) == 0)
+        check(quiet(['--native', with_compiler, '--forbid-import', 'D3DCompiler_47.dll']) == 1)
+        check(quiet(['--native', with_compiler, '--forbid-import', 'kernel32.dll', '--forbid-import', 'x.dll']) == 1)
+        check(quiet(['--native', with_compiler]) == 0)
+    finally:
+        os.remove(with_compiler)
+        os.remove(without_compiler)
     print('openxr_pe: %d checks, 0 failures' % checks)
     return 0
 
@@ -452,6 +516,8 @@ def main(argv=None):
     ap.add_argument('--native')
     ap.add_argument('--graphics',
                     help='native graphics proxy to inspect without loading it')
+    ap.add_argument('--forbid-import', action='append', default=[], metavar='DLL',
+                    help='fail if --native or --graphics imports this DLL (by file name, any case) at load time or by delay import; repeatable')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args(argv)
     if args.self_test:
@@ -468,6 +534,10 @@ def main(argv=None):
             result['imports'] = validate_frontier_imports(args.game, args.native)
         if args.graphics:
             result['graphics'] = native_graphics_exports(args.graphics)
+        for path in (args.native, args.graphics):
+            found = forbidden_imports(path, args.forbid_import) if path and args.forbid_import else []
+            if found:
+                raise PEError('%s imports %s, which this build must not link against (a runtime compile has come back?)' % (path, ', '.join(found)))
         print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, PEError) as exc:

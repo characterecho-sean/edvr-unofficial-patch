@@ -44,6 +44,7 @@ bool g_uiDepthOn = false;          // the key and the pass, both
 bool g_uiDepthStoodDown = false;
 bool g_uiDepthPlanetPending = false, g_uiDepthPlanetSolarPending = false;
 bool g_holoDepthOn = false;        // advanced.temporal_aa_hologram_depth
+bool g_uiDepthDrawComposite = false;  // the last eye draw sampled a learned interface surface (ui_depth.h)
 }  // namespace detail
 
 namespace {
@@ -2785,6 +2786,7 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
 }
 
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
+    detail::g_uiDepthDrawComposite = false;   // this draw's answer, set below; false on every early return
     detail::g_uiDepthPlanetPending=false;detail::g_uiDepthPlanetSolarPending=false;
     g_coronaPending=false;g_coronaMotion=false;
     g_holoDraw=draw;
@@ -2814,6 +2816,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         }
     }
     const bool composite = surfaceSlot >= 0;
+    detail::g_uiDepthDrawComposite = composite;   // for the layer's census of composites left in the scene
     // The hash: for a composite, the family line and the exclude list
     // (a couple of dozen a frame); otherwise the direct list, which is the
     // only test left for the other draws.
@@ -2941,9 +2944,16 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     DepthShader* shader = depthShaderFor(ctx, ph, h, surfaceSlot);
     if (!shader) {
         ++g_wNoShader;
-        noteFamily(h, ph, "samples a learned surface but has no depth shader of "
-                          "its own yet, and none of this build's stands in; "
-                          "left alone -- this composite still swims");
+        // The cockpit panels with Disable GUI effects on (holo_material.h) have NO stand-in, on purpose: the UI layer takes them out of the
+        // scene instead (docs/ui-layer-2026-09-23.md, 2026-10-01), and a line that says "still swims" for a pair the layer took would send the
+        // next reader after a fault that is not there. With fix.ui_quality off they are left alone, and do swim.
+        noteFamily(h, ph, h == kHoloGuiFxOffVs
+                              ? "the cockpit holo panel with Disable GUI effects on: no depth stand-in (its output "
+                                "signature is not the stand-in's input); the UI layer takes it out of the scene, and "
+                                "with fix.ui_quality off it is left alone and still swims"
+                              : "samples a learned surface but has no depth shader of "
+                                "its own yet, and none of this build's stands in; "
+                                "left alone -- this composite still swims");
         return false;
     }
     // Every decline below counts as "no pair or planes" in the totals, and

@@ -15,6 +15,8 @@
     python tools/edvr_log.py --target frontier --vscreen-fit --expect-build HEAD
     python tools/edvr_log.py --target epic --flat-upscale --expect-build HEAD
     python tools/edvr_log.py --target frontier --vr-supersampling --expect-build HEAD
+    python tools/edvr_log.py --target frontier --ui-composites --expect-build HEAD
+    python tools/edvr_log.py --target frontier --terrain-checkerboard --expect-build HEAD
     python tools/edvr_log.py --target frontier --route-curve --expect-build HEAD
     python tools/edvr_log.py --target steam --freezes --expect-build HEAD
     python tools/edvr_log.py --list
@@ -134,14 +136,20 @@ auto = N wide: rule=fitted|legacy ...`: the rule that chose the width and why, f
 which footprint, and which world-route condition failed when it is legacy), the
 width the panel patch applied, the footprint instrument's arming line and every
 `vscreen footprint 30s:` window (samples on foot and elsewhere, the screen's width in
-eye pixels, its range and shape, the footprint at panel distance 1, the session
-median, what is stored for the next launch and the width it would fit), then the
-verdict lines, PASS / WARN / STOP / n/a: RULE (the width follows the rule's own
-tokens and is what was applied), INSTRUMENT (it ran, saw the composite and read its
-sources), ON FOOT, STABLE, SHAPE (the footprint's pixel aspect is 16:9), DISTANCE LAW
-(the footprint at distance 1 agrees across panel distances), CALIBRATION (Sean's
-3504 at distance 0.7 on a 4032 px eye) and STORED. A log with none of these lines
-exits 1; the verdict never changes the exit code (read its lines).
+eye pixels, its range and shape, the footprint at panel distance 1, the session's
+head-on floor (its p10), what is stored for the next launch and the width it would
+fit), then the verdict lines, PASS / WARN / STOP / n/a: RULE (the width follows the
+rule's own tokens, to a step of 16, and is what was applied), INSTRUMENT (it ran, saw
+the composite and read its sources), ON FOOT, STABLE (the windows' widths at distance
+1 agree to 8%) and SHAPE (the median window's shape is 16:9 in the eye's own pixels,
+from the log's game FOV when it carries one), which judge only the windows with 12 or
+more on-foot samples, DISTANCE LAW (the footprint at distance 1 agrees across panel
+distances), CALIBRATION (the session's stored p10 against the 5006 px head-on
+footprint behind Sean's 3504 at distance 0.7 on a 4032 px eye, within 5%) and STORED
+(a WARN when any window carries save-failed=N: a save of the footprint that did not
+reach the file; the log's `vscreen footprint: SAVE FAILED (Win32 error N)` line, the
+first three of a session, names the error). A log with none of these lines exits 1; the
+verdict never changes the exit code (read its lines).
 
 --flat-upscale reads a flat-profile flight (design doc section 83): the game's final copy admitted by
 its structure, so DLSS, FSR and TAA resolve below the output (Elite's supersampling under 1.0) whatever bloom,
@@ -158,6 +166,28 @@ supersampling paragraph must be gone). --vr-supersampling reads a VR flight: the
 Supersampling below 1, from the measured render size against the eye texture), vScreen's own adoption line it
 follows and the menu's note that the headset notice was queued, with NOTICE / CONSISTENT / HEADSET / FLAT lines
 (a flat log carrying the notice is a STOP). Neither verdict changes the exit code (read its lines).
+
+--ui-composites reads one flight's census of the interface composites the UI layer left in the scene
+(docs/ui-layer-2026-09-23.md, "2026-10-01: Disable GUI effects"). The layer names an interface draw by its
+vertex shader, and a draw into the lit HDR eye that samples an interface surface under a vertex shader no
+family names reached no decision and no refusal line: user 5's cockpit panels, with Elite's Disable GUI
+effects on, stayed in the scene upscaled with it. Every 30 s the layer now prints one `composites left in
+the scene` line, zeros included: how many composite draws of how many were left, a frame's worth, and each
+pair left by vertex shader, pixel shader and family (`no family` = nothing named it), or NOT COUNTED when the
+interface depth pass was off. The report lays the windows out and judges INSTRUMENT (the census ran: a log
+with the layer's 30 s lines and none of these is a build before it or a census that never ran), DETECTOR (a
+NOT COUNTED window), UNCLAIMED (a composite no family names, left in the scene: 0.5 draws a frame or more is a
+STOP, less a WARN), NAMED (a family named it and the layer did not take it: a WARN, the layer's `left in the
+game's frame` line says why), OVERFLOW (more different pairs than the table names) and TAKEN (every composite
+went into the layer). Its exit code carries the verdict: 0 for PASS or WARN, 1 for STOP, 3 when the log has
+no census line (main() answers 2 for a wrong build before this runs).
+
+--terrain-checkerboard reads a VR flight's Elite terrain checkerboard rendering notice (design doc section 84): the
+worker's start line, one line for the first read and each change (ON, OFF or unknown with its reason, read from the
+game's active graphics preset on a worker thread), the log's bound line and the menu's note that the headset notice
+was queued as a toast, once per raise, with READER / NOTICE / CHANGES / LIMIT / HEADSET / FLAT lines (a flat log
+carrying them is a STOP). A log with none of the lines means the reader never started, which is not "read, off": an
+OFF or an unknown read writes a line too. Its verdict does not change the exit code either.
 
 --route-curve reads a flight with the curved VR world route (design doc section 82,
 "The curved route": fix.panel_curvature above 0, experimental.temporal_aa_on_foot_world
@@ -197,10 +227,10 @@ log holds none of the freeze lines (a build from before the freeze logging).
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
---vr-supersampling no VR line), 2 when --expect-build did not match (--tally periodic
-and --freezes check the runtime log against it too). --maps-sharp's, --route-curve's and
---freezes's codes for a log they read are their own (above): 0, 1 and 3 mean a verdict,
-not "no log".
+--vr-supersampling no VR line, or --terrain-checkerboard no terrain checkerboard line), 2 when --expect-build did not match (--tally periodic
+and --freezes check the runtime log against it too). --maps-sharp's, --route-curve's,
+--ui-composites's and --freezes's codes for a log they read are their own (above): 0, 1 and
+3 mean a verdict, not "no log".
 """
 
 import argparse
@@ -1374,8 +1404,9 @@ def print_refusal_census(windows, events=None):
           "of the resolves that ask; shares are of the pixels the samples examined) ==" % (every or "?"))
     if not windows:
         print("none: no `vr world route refusal 5s:` line in this log (the route never engaged, or this build predates the census; with the "
-              "route on the line is printed while advanced.vr_camera_census is on, and while "
-              "experimental.temporal_aa_on_foot_world_steady_detail is on, which is its default)")
+              "route on the line is printed while advanced.vr_camera_census is on, and in every window where the steady-detail depth check "
+              "counted frames, which a current build always does: its steady detail is always on, and only a log from a build that had the "
+              "setting may say off)")
         return []
     states = [refusal_state(w) for w in windows]
     off_windows = [w for w, s in zip(windows, states) if s == "census-off"]
@@ -4061,24 +4092,34 @@ def resolve_target(spec):
 # src/common/vscreen_fit.h writes the `vScreen resolution: auto = ...` rule line and the `vscreen footprint 30s:` line; the armed line
 # is src/d3d11/vscreen_footprint.cpp's. tools\vscreen_fit_test holds the formatters to tools\vscreen_fit_fixture.log, the file this
 # reader's own self-test reads. The constants below are that header's (kMultiplier, kFloorWidth, kLegacyMultiplier, the calibration
-# point); the rig pins the header, and self_test_vscreen_fit pins this copy of it to the header's text.
+# point, the stored quantile); the rig pins the header, and self_test_vscreen_fit pins this copy of it to the header's text.
+# What the log's session-frac1= and persisted= tokens carry is the session's p10 (the head-on floor), not a median: a window's own
+# fp / range / h / shape stay a median and a min..max.
 # ---------------------------------------------------------------------------------------------------------------------------------------
-VSCREEN_M = 1.0                 # kMultiplier
+VSCREEN_M = 0.70                # kMultiplier: the fitted width is this share of the screen's head-on footprint
 VSCREEN_FLOOR = 2880            # kFloorWidth
 VSCREEN_LEGACY_M = 1.25         # kLegacyMultiplier
-VSCREEN_SEED = (3504.0, 0.7, 4032.0)   # kSeedWidthPx, kSeedDistance, kSeedEyeWidthPx: Sean's calibration point
+VSCREEN_CHOSEN = 3504.0         # kChosenWidthPx: the width Sean chose for his rig (4032 px eye, panel distance 0.7)
+VSCREEN_SEED = (5006.0, 0.7, 4032.0)   # kSeedFootprintPx, kSeedDistance, kSeedEyeWidthPx: the calibration point (the screen's head-on px there)
+VSCREEN_QUANTILE = 0.10         # kFootprintQuantile: the stored estimator, p10
 VSCREEN_SHAPE = 16.0 / 9.0
-VSCREEN_STABLE = 0.02           # the screen's width may move this much (relative) between windows, and inside one
-VSCREEN_SHAPE_WARN = 0.03
-VSCREEN_SHAPE_STOP = 0.15
+VSCREEN_MIN_FOOT = 12           # a window with fewer on-foot samples than this is a transition (a menu, a map), not a measurement of the screen
+VSCREEN_STABLE = 0.08           # the windows' widths at distance 1 may differ this much, (max - min) / median (head turning moves a window by a few %)
+VSCREEN_SHAPE_PASS = (-0.09, 0.03)   # the median window shape may sit this far below / above its reference and pass: a turned head stretches the height
+VSCREEN_SHAPE_STOP = 0.15       # beyond this far either way the corner arithmetic or the eye size is wrong; between is a WARN
 VSCREEN_LAW = 0.02              # footprint at distance 1 may differ this much between windows at different distances
-VSCREEN_CALIBRATION = 0.03      # the measured footprint may differ this much from the calibration point before m is re-derived
+VSCREEN_CALIBRATION = 0.05      # the session's stored p10 may differ this much from the calibration point before m is re-derived
+VSCREEN_RULE_TOL = 16           # the width a rule line prints may differ this much from the one its own tokens give (the footprint prints rounded)
 
 VSCREEN_RULE_RE = re.compile(r"^(?:\[(?P<ts>[0-9:.]+)\] )?vScreen resolution: auto = (?P<w>\d+) wide: (?P<rest>.*)$")
 VSCREEN_APPLY_RE = re.compile(r"^(?:\[(?P<ts>[0-9:.]+)\] )?vScreen resolution: (?P<sw>\d+)x(?P<sh>\d+) -> (?P<w>\d+)x(?P<h>\d+) at (?P<sites>\d+) site")
 VSCREEN_EXPLICIT_RE = re.compile(r"^(?:\[(?P<ts>[0-9:.]+)\] )?vScreen resolution: explicit (?P<w>\d+) wide")
 VSCREEN_FOOT_RE = re.compile(r"^(?:\[(?P<ts>[0-9:.]+)\] )?vscreen footprint 30s: (?P<rest>.*)$")
 VSCREEN_ARMED_RE = re.compile(r"^(?:\[(?P<ts>[0-9:.]+)\] )?vscreen footprint: (?P<what>armed|not armed|STOOD DOWN)")
+# The graphics log's one line that carries the eyes' FOV (src/d3d11/perf_monitor.cpp, logNativeBenchmark, once a benchmark window):
+# `native benchmark workload: window N, ... game FOV radians L l/r/u/d R l/r/u/d; order left/right/up/down; ...`. Angles, not
+# tangents; the left eye's are the eye the footprint instrument's eye size comes from.
+VSCREEN_FOV_RE = re.compile(r"native benchmark workload: .*?game FOV radians L (?P<l>-?\d+\.\d+)/(?P<r>-?\d+\.\d+)/(?P<u>-?\d+\.\d+)/(?P<d>-?\d+\.\d+) R ")
 
 
 def _vround16(value):
@@ -4094,10 +4135,18 @@ def _vnum(text):
 def parse_vscreen_fit(text):
     """The log's vscreen auto-fit lines: {rule: {ts, width, kv, prose} (the launch's first auto line) or None, explicit: width or None,
     no_eye: bool (auto with no eye width on record), off: bool, applied: {ts, src, w, h, sites} or None, armed: [(ts, what)],
-    windows: [{ts, kv}]}. A line cut short or garbled is skipped, never fatal."""
-    f = {"rule": None, "explicit": None, "no_eye": False, "off": False, "applied": None, "armed": [], "windows": []}
+    windows: [{ts, kv}], fov: (left, right, up, down) in radians of the left eye from the log's first `native benchmark workload:`
+    line, or None}. A line cut short or garbled is skipped, never fatal."""
+    f = {"rule": None, "explicit": None, "no_eye": False, "off": False, "applied": None, "armed": [], "windows": [], "fov": None}
     for raw in text.splitlines():
         try:
+            if f["fov"] is None and "game FOV radians" in raw:
+                m = VSCREEN_FOV_RE.search(raw)
+                if m:
+                    l, r, u, d = (float(m.group(k)) for k in "lrud")
+                    if l < 0.0 < r and d < 0.0 < u and max(abs(l), r, u, abs(d)) < 1.5:   # a real FOV: a flat log's zeros are none
+                        f["fov"] = (l, r, u, d)
+                continue
             m = VSCREEN_RULE_RE.match(raw)
             if m:
                 head, _, prose = m.group("rest").partition(" -- ")
@@ -4134,7 +4183,9 @@ def parse_vscreen_fit(text):
 
 def vscreen_fit_windows(f):
     """Each window's tokens as numbers: [{window, samples, on_foot, other, skipped, late, draws, why, distance, applied, eye (w, h) or None,
-    fp, frac, lo, hi, h, shape, other_fp, at1, frac1, session_n, session_frac1, persisted, fit, legacy}]."""
+    fp, frac, lo, hi, h, shape, other_fp, at1, frac1, session_n, session_frac1, persisted, fit, legacy, m (the m of the fit= token: a build
+    that stored the session's median, before the p10, printed 1.00 here), save_failed (the save-failed= token, read by key: the saves that
+    failed so far this session, 0 when the token is absent, as in every log from a build without it and every window before the first failure)}]."""
     out = []
     for w in f["windows"]:
         kv = w["kv"]
@@ -4148,16 +4199,33 @@ def vscreen_fit_windows(f):
             "lo": float(rng.group(1)) if rng else None, "hi": float(rng.group(2)) if rng else None, "h": _vnum(kv.get("h")),
             "shape": _vnum(kv.get("shape")), "other_fp": _vnum(kv.get("other-fp")), "at1": _vnum(kv.get("at1")), "frac1": _vnum(kv.get("frac1")),
             "session_n": _cint(kv.get("session-n")) or 0, "session_frac1": _vnum(kv.get("session-frac1")), "persisted": _vnum(kv.get("persisted")),
-            "fit": _vnum(kv.get("fit")), "legacy": _vnum(kv.get("legacy"))})
+            "fit": _vnum(kv.get("fit")), "legacy": _vnum(kv.get("legacy")), "m": _vnum(kv.get("m")), "save_failed": _cint(kv.get("save-failed")) or 0})
     return out
+
+
+def _vscreen_shape_ref(f, eye):
+    """(reference shape, how it was got) for the SHAPE check: 16:9 for square eye pixels, and 16/9 x fx/fy when the log carries the
+    eye's FOV (the `native benchmark workload:` line, f["fov"]) and the eye's size: fx and fy are the pixels per unit tangent across and
+    down, so a screen that is 16:9 on the page reads 16/9 x fx/fy in an eye whose pixels are not square. Without a FOV the reference is
+    16:9 and says so."""
+    fov = f.get("fov")
+    if fov and eye:
+        l, r, u, d = (math.tan(a) for a in fov)
+        if r - l > 0.0 and u - d > 0.0 and eye[0] and eye[1]:
+            ratio = (eye[0] / (r - l)) / (eye[1] / (u - d))
+            return VSCREEN_SHAPE * ratio, "16:9 in this eye's pixels = %.3f (16:9 x fx/fy %.4f, from the log's game FOV)" % (VSCREEN_SHAPE * ratio, ratio)
+    return VSCREEN_SHAPE, "16:9 = %.3f (square eye pixels assumed: this log carries no per-eye FOV line)" % VSCREEN_SHAPE
 
 
 def vscreen_fit_verdict(f):
     """The verdict on one flight: [(tag, status, text)], status PASS, WARN, STOP or n/a (what the log cannot say). The tags are the
     questions the flight plan asks: RULE (did auto choose by the rule it names, and was that what was applied), INSTRUMENT (did the
-    footprint instrument run, see the composite and read its sources), ON FOOT (was the screen measured on foot), STABLE, SHAPE (the
-    corner arithmetic and the eye size agree that the screen is 16:9), DISTANCE LAW (A varies as 1/d), CALIBRATION (does m = 1.0 give
-    Sean's 3504), STORED (what the next launch will fit)."""
+    footprint instrument run, see the composite and read its sources), ON FOOT (was the screen measured on foot), STABLE (the windows'
+    widths at distance 1 agree), SHAPE (the median window's shape is 16:9 in the eye's own pixels), DISTANCE LAW (A varies as 1/d),
+    CALIBRATION (is the session's stored head-on floor, p10, the 5006 px behind Sean's 3504), STORED (what the next launch will fit; a WARN
+    when any window carries save-failed=N, a save that did not reach the file).
+    ON FOOT, STABLE and SHAPE judge only the windows with VSCREEN_MIN_FOOT or more on-foot samples (a window of one or six samples is a
+    transition: it is what made a flight read 102% unstable and 1.43 shaped). DISTANCE LAW is unchanged: it keeps every on-foot window."""
     out = []
 
     def add(tag, status, text):
@@ -4189,13 +4257,15 @@ def vscreen_fit_verdict(f):
                 lo = min(floor, cap)
                 want = _vround16(min(max(m * fp, lo), cap))
                 nudged = kv.get("nudged") == "yes"
-                if width == want or (nudged and 0 < abs(width - want) <= 16 * 8):
-                    text = ("FITTED to %d wide from a %s footprint of %.0f px at fix.panel_distance %s on a %d px eye (m=%.2f, floor %d, cap %d, clamp %s%s); "
+                # The footprint prints rounded to a whole pixel, so m x footprint can sit a hair either side of a rounding edge: one step (16)
+                # of difference is that, not a wrong width. A nudge off another target's size moves the width by several steps.
+                if abs(width - want) <= VSCREEN_RULE_TOL or (nudged and abs(width - want) <= 16 * 8):
+                    text = ("FITTED to %d wide from a %s footprint of %.0f px at fix.panel_distance %s on a %d px eye (m=%.3f, floor %d, cap %d, clamp %s%s); "
                             "legacy would have been %s"
                             % (width, kv.get("source", "?"), fp, kv.get("distance", "?"), eye or 0, m, floor, cap, kv.get("clamp", "?"),
                                ", nudged off another target's size" if nudged else "", kv.get("legacy", "?")))
                 else:
-                    status, text = "STOP", ("the line says %d wide but its own tokens (footprint %.0f, m %.2f, floor %d, cap %d) give %d" % (width, fp, m, floor, cap, want))
+                    status, text = "STOP", ("the line says %d wide but its own tokens (footprint %.0f, m %.3f, floor %d, cap %d) give %d" % (width, fp, m, floor, cap, want))
         elif name == "legacy":
             want = _vround16((eye or 0) * VSCREEN_LEGACY_M) if eye else None
             why = rule["prose"].partition("because the world route will not run:")[2].partition(". Without the route")[0].strip()
@@ -4254,38 +4324,59 @@ def vscreen_fit_verdict(f):
             add("INSTRUMENT", "PASS", base)
 
     # ---- ON FOOT ----
-    foot_wins = [w for w in wins if w["on_foot"] and w["fp"] is not None]
+    # foot_any: every window that saw the screen on foot. foot_wins: those with enough samples to judge. A window of one or six on-foot
+    # samples is a transition (a menu or a map came up, the commander got off the ship): its median is the head's pose, not the screen.
+    foot_any = [w for w in wins if w["on_foot"] and w["fp"] is not None]
+    foot_wins = [w for w in foot_any if w["on_foot"] >= VSCREEN_MIN_FOOT]
     if wins:
-        if not foot_wins:
+        if not foot_any:
             others = [w["other_fp"] for w in wins if w["other_fp"] is not None]
             add("ON FOOT", "WARN", "no on-foot sample: the screen was measured at the menu only%s, and nothing on foot was stored for the next launch"
                 % (" (%.0f px)" % statistics.median(others) if others else ""))
+        elif not foot_wins:
+            add("ON FOOT", "WARN", "on-foot samples in %d window(s), but no window has %d: %d sample(s) in all is too thin to judge the screen's width, stability or shape"
+                % (len(foot_any), VSCREEN_MIN_FOOT, sum(w["on_foot"] for w in foot_any)))
         else:
             fps = [w["fp"] for w in foot_wins]
-            add("ON FOOT", "PASS", "%d on-foot window(s), %d sample(s); the screen spans %.0f px (median of the windows' medians %.0f..%.0f) of the eye"
-                % (len(foot_wins), sum(w["on_foot"] for w in foot_wins), statistics.median(fps), min(fps), max(fps)))
+            thin = len(foot_any) - len(foot_wins)
+            add("ON FOOT", "PASS", "%d on-foot window(s), %d sample(s); the screen spans %.0f px (median of the windows' medians %.0f..%.0f) of the eye%s"
+                % (len(foot_wins), sum(w["on_foot"] for w in foot_wins), statistics.median(fps), min(fps), max(fps),
+                   "; %d thinner window(s) (under %d on-foot samples) left out" % (thin, VSCREEN_MIN_FOOT) if thin else ""))
             # ---- STABLE ----
-            med = statistics.median(fps)
-            spread = (max(fps) - min(fps)) / med if med else 0.0
-            inside = max(((w["hi"] - w["lo"]) / w["fp"] for w in foot_wins if w["lo"] is not None and w["hi"] is not None and w["fp"]), default=0.0)
-            if spread > VSCREEN_STABLE or inside > VSCREEN_STABLE:
-                add("STABLE", "WARN", "the screen's width moved: %.1f%% between windows, up to %.1f%% inside one (over %.0f%%): the head, a menu, or the panel distance "
-                    "changed during the flight" % (spread * 100.0, inside * 100.0, VSCREEN_STABLE * 100.0))
+            # Each window's median in eye pixels at distance 1 (fp x the distance its constants carried), so a window flown at another panel
+            # distance compares with the rest; the spread of those, (max - min) / median. What is inside a window (its lo..hi) is the head
+            # moving, which is what a floor estimator is for: it is not judged.
+            at1 = [w["fp"] * w["applied"] for w in foot_wins if w["applied"]]
+            if len(at1) < 2:
+                add("STABLE", "n/a", "one window with %d or more on-foot samples: nothing to compare it with" % VSCREEN_MIN_FOOT)
             else:
-                add("STABLE", "PASS", "the screen's width held: %.1f%% between windows, up to %.1f%% inside one (under %.0f%%)" % (spread * 100.0, inside * 100.0, VSCREEN_STABLE * 100.0))
+                spread = (max(at1) - min(at1)) / statistics.median(at1)
+                if spread > VSCREEN_STABLE:
+                    add("STABLE", "WARN", "the screen's width moved: %.1f%% between %d windows (%.0f..%.0f px at distance 1; over %.0f%%): the head turned, a menu was up, "
+                        "or the screen itself changed during the flight" % (spread * 100.0, len(at1), min(at1), max(at1), VSCREEN_STABLE * 100.0))
+                else:
+                    add("STABLE", "PASS", "the screen's width held: %.1f%% between %d windows (%.0f..%.0f px at distance 1; under %.0f%%)"
+                        % (spread * 100.0, len(at1), min(at1), max(at1), VSCREEN_STABLE * 100.0))
             # ---- SHAPE ----
+            # The MEDIAN of the windows' shapes against 16:9 (in the eye's own pixels: _vscreen_shape_ref). A head that is not square on to
+            # the screen stretches its height at first order and its width at second, so the shape reads under 16:9 and the pass band is
+            # lopsided; a window's own lowest sample is the closest to head-on and is not what is judged.
             shapes = [w["shape"] for w in foot_wins if w["shape"] is not None]
             if not shapes:
                 add("SHAPE", "n/a", "no shape= token: the eye's height was not known (the runtime had not published its sizing)")
             else:
-                worst = max(abs(s / VSCREEN_SHAPE - 1.0) for s in shapes)
-                status = "STOP" if worst > VSCREEN_SHAPE_STOP else ("WARN" if worst > VSCREEN_SHAPE_WARN else "PASS")
-                add("SHAPE", status, "the footprint's pixel aspect reads %.3f..%.3f against 16:9 = %.3f (worst %.1f%% off)%s"
-                    % (min(shapes), max(shapes), VSCREEN_SHAPE, worst * 100.0,
+                ref, ref_how = _vscreen_shape_ref(f, foot_wins[0]["eye"])
+                med_shape = statistics.median(shapes)
+                dev = med_shape / ref - 1.0
+                lo_ok, hi_ok = VSCREEN_SHAPE_PASS
+                status = "STOP" if abs(dev) > VSCREEN_SHAPE_STOP else ("PASS" if lo_ok <= dev <= hi_ok else "WARN")
+                add("SHAPE", status, "the median of the windows' footprint shapes reads %.3f against %s: %+.1f%% (the windows run %.3f..%.3f; pass %+.0f%% to %+.0f%%, "
+                    "stop past %.0f%% either way)%s"
+                    % (med_shape, ref_how, dev * 100.0, min(shapes), max(shapes), lo_ok * 100.0, hi_ok * 100.0, VSCREEN_SHAPE_STOP * 100.0,
                        "" if status == "PASS" else ": the corner arithmetic, the eye size or the screen's stretch is not what the instrument assumes"))
             # ---- DISTANCE LAW ----
             by_d = {}
-            for w in foot_wins:
+            for w in foot_any:
                 if w["applied"] and w["frac1"] is not None:
                     by_d.setdefault(round(w["applied"], 2), []).append(w["frac1"])
             if len(by_d) < 2:
@@ -4299,27 +4390,52 @@ def vscreen_fit_verdict(f):
                     "the footprint at distance 1 over %d distances (%s): %.1f%% apart (%s %.0f%%): A %s 1/d"
                     % (len(meds), ", ".join("%.2f -> %.4f" % (d, meds[d]) for d in sorted(meds)), spread * 100.0,
                        "under" if spread <= VSCREEN_LAW else "over", VSCREEN_LAW * 100.0, "varies as" if spread <= VSCREEN_LAW else "does NOT vary as"))
-            # ---- CALIBRATION ----
-            seed_w, seed_d, seed_e = VSCREEN_SEED
-            at_seed = [w for w in foot_wins if w["eye"] and w["eye"][0] == int(seed_e) and w["applied"] and abs(w["applied"] - seed_d) < 0.011]
-            if at_seed:
-                got = statistics.median([w["fp"] for w in at_seed])
-                ratio = got / seed_w
-                if abs(ratio - 1.0) <= VSCREEN_CALIBRATION:
-                    add("CALIBRATION", "PASS", "at Sean's calibration point (a %d px eye at distance %.1f) the screen spans %.0f px against the 3504 he flew (%.1f%%): m = 1.0 "
-                        "reproduces his width" % (int(seed_e), seed_d, got, ratio * 100.0))
-                else:
-                    add("CALIBRATION", "WARN", "at Sean's calibration point the screen spans %.0f px, not the 3504 he flew (%.1f%%): m = 1.0 would fit %d wide there; "
-                        "m = %.3f reproduces 3504 -- his call whether 3504 or the measurement is right (vscreen_fit.h kMultiplier, kSeed*)"
-                        % (got, ratio * 100.0, _vround16(got), seed_w / got))
+    # ---- CALIBRATION ----
+    # Not the window medians: the session's STORED value, the p10 the next launch will fit from (session-frac1 of the last window with
+    # 12 or more samples in the session), at the calibration point's eye (a 4032 px one). session-frac1 is a fraction of the eye at distance
+    # 1, so x eye / the calibration distance is the screen's head-on footprint at that distance whatever distance was flown (the 1/d law).
+    if wins and foot_any:
+        seed_fp, seed_d, seed_e = VSCREEN_SEED
+        stored = [w for w in wins if w["session_frac1"] is not None and w["session_n"] >= VSCREEN_MIN_FOOT and w["eye"] and w["eye"][0] == int(seed_e)]
+        # A build from before the p10 calibration stored the session's MEDIAN and printed m=1.00 on its window lines: its session-frac1 is about 6%
+        # above the head-on floor, so it is not held against the calibration point (a window with no m token, an eye not yet known, passes).
+        current = [w for w in stored if w["m"] is None or abs(w["m"] - VSCREEN_M) < 1e-6]
+        if stored and not current:
+            add("CALIBRATION", "n/a", "this log's windows fit at m=%.3f, not %.3f: a build from before the p10 calibration, whose session value is a median, not the head-on "
+                "floor the %.0f px calibration point is held against" % (stored[-1]["m"], VSCREEN_M, VSCREEN_SEED[0]))
+        elif current:
+            s = current[-1]
+            got = s["session_frac1"] * int(seed_e) / seed_d
+            ratio = got / seed_fp
+            if abs(ratio - 1.0) <= VSCREEN_CALIBRATION:
+                add("CALIBRATION", "PASS", "at Sean's calibration point (a %d px eye) the session's stored head-on floor (p10) is %.0f px at distance %.1f against the %.0f px "
+                    "his %.0f is fitted from (%.1f%%, within %.0f%%): m = %.2f fits %d wide there"
+                    % (int(seed_e), got, seed_d, seed_fp, VSCREEN_CHOSEN, ratio * 100.0, VSCREEN_CALIBRATION * 100.0, VSCREEN_M, _vround16(VSCREEN_M * got)))
             else:
-                add("CALIBRATION", "n/a", "not at the calibration point (a %d px eye at panel distance %.1f)" % (int(seed_e), seed_d))
+                add("CALIBRATION", "WARN", "at Sean's calibration point (a %d px eye) the session's stored head-on floor (p10) is %.0f px at distance %.1f, not the %.0f px his %.0f "
+                    "is fitted from (%.1f%%, over %.0f%% apart): m = %.2f would fit %d wide there; m = %.3f reproduces %.0f -- his call whether the seed or the "
+                    "measurement is right (vscreen_fit.h kMultiplier, kSeedFootprintPx)"
+                    % (int(seed_e), got, seed_d, seed_fp, VSCREEN_CHOSEN, ratio * 100.0, VSCREEN_CALIBRATION * 100.0, VSCREEN_M, _vround16(VSCREEN_M * got),
+                       VSCREEN_CHOSEN / got, VSCREEN_CHOSEN))
+        elif any(w["eye"] and w["eye"][0] == int(seed_e) for w in wins):
+            add("CALIBRATION", "n/a", "the session has fewer than %d on-foot samples: no stored head-on floor to hold against the calibration point yet" % VSCREEN_MIN_FOOT)
+        else:
+            add("CALIBRATION", "n/a", "not at the calibration point (a %d px eye)" % int(seed_e))
 
     # ---- STORED ----
     if wins:
         last = wins[-1]
         persisted = [w for w in wins if w["persisted"] is not None]
-        if persisted:
+        # A save that failed: the 30 s line carries save-failed=N (read by key; the count so far this session, absent before the first failure and in
+        # every log from a build without it) and the log has a `vscreen footprint: SAVE FAILED (Win32 error N)` line for the first three. The file kept
+        # what it held, so nothing below may claim the session's value is what the next launch will read.
+        failed = [w for w in wins if w["save_failed"] > 0]
+        if failed:
+            reached = ("the last value that did reach it is %.4f of the eye at panel distance 1 (window %s)" % (persisted[-1]["persisted"], persisted[-1]["window"])
+                       if persisted else "nothing from this session has reached it (persisted=no on every window)")
+            add("STORED", "WARN", "%d save(s) of the on-foot footprint FAILED (first in window %s; the log's `vscreen footprint: SAVE FAILED` line names the Win32 error): "
+                "the file keeps its previous value and a later window tries again; %s" % (max(w["save_failed"] for w in wins), failed[0]["window"], reached))
+        elif persisted:
             p = persisted[-1]
             fit = p["fit"]
             note = ""
@@ -4328,10 +4444,14 @@ def vscreen_fit_verdict(f):
                     "; the next launch fits %d wide, the width this launch ran at (%d)" % (fit, applied["w"])
             if rule is not None and rule["kv"].get("route") == "no":
                 note += " -- this launch's route=no (legacy), so a launch fits only once the world route will run"
-            add("STORED", "PASS", "the on-foot median is stored: %.4f of the eye at panel distance 1 (%d sample(s))%s" % (p["persisted"], p["session_n"], note))
-        elif foot_wins:
+            # The window lines of a build from before the p10 calibration print m=1.00, and what that build stored is the session's median.
+            old_m = next((w["m"] for w in wins if w["m"] is not None and abs(w["m"] - VSCREEN_M) > 1e-6), None)
+            what = "the on-foot head-on floor (p10)" if old_m is None else \
+                "the on-foot MEDIAN (this log is from a build before the p10 calibration: m=%.3f on its window lines)" % old_m
+            add("STORED", "PASS", "%s is stored: %.4f of the eye at panel distance 1 (%d sample(s))%s" % (what, p["persisted"], p["session_n"], note))
+        elif foot_any:
             add("STORED", "WARN", "on-foot samples were taken (%d) but nothing was stored: the file needs at least 12 on-foot samples in the session"
-                % sum(w["on_foot"] for w in foot_wins))
+                % sum(w["on_foot"] for w in foot_any))
         else:
             add("STORED", "n/a", "nothing was stored: no on-foot samples")
     return out
@@ -4365,11 +4485,12 @@ def print_vscreen_fit(text):
                  "; applied %dx%d" % (f["applied"]["w"], f["applied"]["h"]) if f["applied"] else ""))
     for w in wins:
         print("window %s: samples %d (on foot %d, other %d), draws %d, skipped %d, late %d; eye %s distance %s applied %s; on foot fp=%s frac=%s range=%s..%s "
-              "shape=%s; at distance 1 %s px (%s); session n=%d median %s persisted %s; next launch fits %s (legacy %s)"
+              "shape=%s; at distance 1 %s px (%s); session n=%d session-frac1 %s persisted %s%s; next launch fits %s (legacy %s)"
               % (w["window"], w["samples"], w["on_foot"], w["other"], w["draws"], w["skipped"], w["late"],
                  "%dx%d" % w["eye"] if w["eye"] else "-", w["distance"], w["applied"], "%.0f" % w["fp"] if w["fp"] is not None else "-",
                  w["frac"], "%.0f" % w["lo"] if w["lo"] is not None else "-", "%.0f" % w["hi"] if w["hi"] is not None else "-", w["shape"],
                  "%.0f" % w["at1"] if w["at1"] is not None else "-", w["frac1"], w["session_n"], w["session_frac1"], w["persisted"],
+                 " save-failed %d" % w["save_failed"] if w["save_failed"] else "",
                  "%.0f" % w["fit"] if w["fit"] is not None else "-", "%.0f" % w["legacy"] if w["legacy"] is not None else "-"))
     verdict = vscreen_fit_verdict(f)
     for tag, status, text_ in verdict:
@@ -4795,6 +4916,547 @@ def print_vr_supersampling(text):
     worst = "STOP" if counts["STOP"] else ("WARN" if counts["WARN"] else ("PASS" if counts["PASS"] else "n/a"))
     print("vr supersampling verdict: %s (%d PASS, %d WARN, %d STOP, %d n/a)" % (worst, counts["PASS"], counts["WARN"], counts["STOP"], counts["n/a"]))
     return 0
+
+
+# --ui-composites: the interface composites the UI layer left in the scene (docs/ui-layer-2026-09-23.md, "2026-10-01: Disable GUI effects").
+# The layer names an interface draw by its vertex shader; a draw into the lit HDR eye that samples an interface surface and has a vertex shader
+# no family names gets no decision and no refusal line, so it stays in the scene, upscaled with it, and the log said nothing: user 5's cockpit
+# panels (Elite's Disable GUI effects switches the holo panels to vs 1989E6D3B405FDE0 / ps EAB8A1C95A13FFBE) for a month. Every 30 s the layer
+# prints ONE line, zeros included (src/d3d11/ui_scene_composites.h uiSceneCompositeText; tools\ui_composite_census_test holds the formatter and
+# tools\ui_composites_fixture.log to each other byte for byte):
+#   ui quality: composites left in the scene: <left> of <seen> composite draws (<rate> a frame) in <frames> frames (<live> live) -- <detail>.
+# <detail> is `none: every interface composite drawn into an eye went into the layer`, `no draw into an eye sampled an interface surface in
+# this window`, or the pairs left -- `vs <16 hex> ps <16 hex> (<family, not taken | no family>) <rate> a frame`, `;`-separated, then `<n> draws
+# of pairs past the table's <cap> (<rate> a frame)`; or the line says NOT COUNTED when the interface depth pass was not running (no surface is
+# learned, so no draw is a composite and a zero would mean nothing). A composite NO FAMILY names is the defect this reads for; one a family
+# named and the layer did not take (the layer not armed for a frame, the world-screen gate holding the 2D screen) is also left in the scene and
+# shows with its family, beside the reasons the layer's `left in the game's frame` line already gives. A log with the layer's 30 s lines and no
+# composites line is a build from before this census, or a census that never ran: that is what the zeros are for.
+# One pair is neither taken nor a defect: the engine's NULL-OUTPUT QUAD (vs B018D143700AB803 / ps 258B95AC99520C1F), which samples a leftover interface
+# surface and writes nothing (docs/ui-layer-2026-09-23.md, 2026-10-01, "the composite the 15:09 flight left in the scene"). The census keeps it out of the
+# count of composites left and says it in a clause of its own at the end of <detail>: `vs <16 hex> ps <16 hex> (<name>, kept in the scene by design) <n>
+# draws, <rate> a frame`, after `none: ...` when nothing else is left. Builds before that (13c62cd6 to 069ebee4) counted it as a composite no family names,
+# which this reader called a STOP on every loading screen: the kept clause ends that, and a log from one of those builds is read the same way (its pair is
+# in UICOMP_KEPT_PAIRS, so its "no family" line is read as kept, with a note).
+UICOMP_STAMP_RE = re.compile(r"^\[(?P<ts>\d\d:\d\d:\d\d\.\d{3})\]\s*(?P<msg>.*)$")
+UICOMP_PREFIX = "ui quality: composites left in the scene: "
+UICOMP_RE = re.compile(r"^ui quality: composites left in the scene: (?P<left>\d+) of (?P<seen>\d+) composite draws \((?P<rate>[0-9.]+) a frame\) "
+                       r"in (?P<frames>\d+) frames \((?P<live>\d+) live\) -- (?P<detail>.*)\.$")
+UICOMP_OFF_RE = re.compile(r"^ui quality: composites left in the scene: NOT COUNTED \((?P<why>.*)\) in (?P<frames>\d+) frames\.$")
+UICOMP_PAIR_RE = re.compile(r"vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) \((?P<family>[^)]*)\) (?P<rate>[0-9.]+) a frame")
+UICOMP_KEPT_RE = re.compile(r"vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) \((?P<name>[^)]*), kept in the scene by design\) (?P<n>\d+) draws, (?P<rate>[0-9.]+) a frame")
+UICOMP_PAST_RE = re.compile(r"(?P<n>\d+) draws of pairs past the table's (?P<cap>\d+) \((?P<rate>[0-9.]+) a frame\)")
+# Why each kept pair is not a defect, by the name the line gives it (the line says only "kept in the scene by design"; the reason lives here and in the doc).
+UICOMP_KEPT_WHY = {
+    "null-output quad": "its pixel shader writes zero and reads nothing, its blend is straight alpha and its depth and stencil are off, so it changes no pixel; the surface it "
+                        "samples is a leftover binding, and ui depth excludes its vertex shader by hash, so the layer never takes it",
+}
+# The pairs the DLL keeps (src/d3d11/ui_scene_composites.h kUiSceneKeptPairs; the self-test holds this table to that one). A log from a build between 13c62cd6 and
+# 069ebee4 has no kept clause and counts the pair as a composite left with no family: read as kept, with a note, so such a log does not STOP on a no-op.
+UICOMP_KEPT_PAIRS = {("B018D143700AB803", "258B95AC99520C1F"): "null-output quad"}
+UICOMP_NONE = "none: every interface composite drawn into an eye went into the layer"
+UICOMP_IDLE = "no draw into an eye sampled an interface surface in this window"
+UICOMP_NO_FAMILY = "no family"
+UICOMP_LAYER_RE = re.compile(r"^ui quality: layer: \d+ s, \d+ frames, ")
+# Draws a frame at or above which a composite left in the scene is the finding (one draw every other frame); below it a stray at a transition.
+UICOMP_SUSTAINED = 0.5
+
+
+def parse_ui_composites(text):
+    """{windows: [{ts, t, kind: 'count' | 'off', left, seen, rate, frames, live, state: 'none' | 'idle' | 'left', pairs: [{vs, ps, family, rate}], kept: [{vs, ps,
+    name, n, rate}], past: {n, cap, rate} or None}], layer_windows: the layer's own 30 s lines, unparsed: [raw lines that start with the prefix and are none of
+    the shapes]}. `left` is the headline's count of composites left (the kept pair, a clause of its own, is not in it); `seen` includes the kept draws."""
+    out = {"windows": [], "layer_windows": 0, "unparsed": []}
+    for raw in text.splitlines():
+        m = UICOMP_STAMP_RE.match(raw.rstrip("\r"))
+        if not m:
+            continue
+        ts, msg = m.group("ts"), m.group("msg")
+        t = _clock_s(ts)
+        if UICOMP_LAYER_RE.match(msg):
+            out["layer_windows"] += 1
+            continue
+        if not msg.startswith(UICOMP_PREFIX):
+            continue
+        off = UICOMP_OFF_RE.match(msg)
+        if off:
+            out["windows"].append({"ts": ts, "t": t, "kind": "off", "left": 0, "seen": 0, "rate": 0.0, "frames": int(off.group("frames")), "live": 0,
+                                   "state": "off", "pairs": [], "kept": [], "past": None, "why": off.group("why")})
+            continue
+        c = UICOMP_RE.match(msg)
+        if not c:
+            out["unparsed"].append(raw)
+            continue
+        detail = c.group("detail")
+        w = {"ts": ts, "t": t, "kind": "count", "left": int(c.group("left")), "seen": int(c.group("seen")), "rate": float(c.group("rate")),
+             "frames": int(c.group("frames")), "live": int(c.group("live")), "state": "left", "pairs": [], "kept": [], "past": None}
+        if detail == UICOMP_IDLE:
+            w["state"] = "idle"
+        else:
+            items = detail.split("; ")
+            if items[0] == UICOMP_NONE:
+                w["state"] = "none"
+                items = items[1:]
+            for item in items:
+                k = UICOMP_KEPT_RE.fullmatch(item)
+                if k:
+                    w["kept"].append({"vs": k.group("vs"), "ps": k.group("ps"), "name": k.group("name"), "n": int(k.group("n")), "rate": float(k.group("rate"))})
+                    continue
+                p = UICOMP_PAIR_RE.fullmatch(item)
+                if p:
+                    family = p.group("family")
+                    w["pairs"].append({"vs": p.group("vs"), "ps": p.group("ps"), "family": UICOMP_NO_FAMILY if family == UICOMP_NO_FAMILY else family.replace(", not taken", ""),
+                                       "rate": float(p.group("rate"))})
+                    continue
+                q = UICOMP_PAST_RE.fullmatch(item)
+                if q:
+                    w["past"] = {"n": int(q.group("n")), "cap": int(q.group("cap")), "rate": float(q.group("rate"))}
+                    continue
+                w["state"] = "unreadable"
+        if w["state"] == "unreadable" or (w["state"] == "left" and not w["pairs"] and not w["past"]):
+            out["unparsed"].append(raw)
+            continue
+        # An older build (13c62cd6 to 069ebee4) has no kept clause: it counted the null-output quad as a composite left with no family. Read it as kept. When it was the
+        # only thing left the headline's own count is the draw count, exact; beside other pairs the draws are the rate over the frames (the line prints the rate to 0.01).
+        old = [pr for pr in w["pairs"] if pr["family"] == UICOMP_NO_FAMILY and (pr["vs"], pr["ps"]) in UICOMP_KEPT_PAIRS]
+        if old and w["state"] == "left":
+            rest = [pr for pr in w["pairs"] if pr not in old]
+            alone = not rest and not w["past"] and len(old) == 1
+            for pr in old:
+                w["kept"].append({"vs": pr["vs"], "ps": pr["ps"], "name": UICOMP_KEPT_PAIRS[(pr["vs"], pr["ps"])],
+                                  "n": w["left"] if alone else int(round(pr["rate"] * w["frames"])), "rate": pr["rate"], "legacy": True})
+            w["pairs"] = rest
+            if alone:
+                w["left"], w["rate"], w["state"] = 0, 0.0, "none"
+        out["windows"].append(w)
+    return out
+
+
+def ui_composites_verdict(p):
+    """[(tag, status, text)]: INSTRUMENT (the census ran: the line is there; zero lines beside the layer's own is a build before it or a census that never ran),
+    DETECTOR (a window the interface depth pass was off), UNCLAIMED (a composite no family names, left in the scene: sustained is a STOP, a stray a WARN),
+    NAMED (a family named it and it was not taken: a WARN, the layer's `left in the game's frame` line says why), OVERFLOW (more different pairs left than the
+    table names), KEPT (a pair the scene keeps on purpose, the null-output quad: a PASS that says why it is not a defect), TAKEN (every composite drawn into an
+    eye went into the layer) and SHAPE (a line the reader could not parse)."""
+    out = []
+
+    def add(tag, status, text):
+        out.append((tag, status, text))
+
+    ws = p["windows"]
+    if p["unparsed"]:
+        add("SHAPE", "WARN", "%d line(s) start with the census prefix and are none of its shapes (the formatter changed? read them): %s" % (len(p["unparsed"]), p["unparsed"][0][:160]))
+    if not ws:
+        if p["layer_windows"]:
+            add("INSTRUMENT", "STOP", "the layer printed %d 30 s line(s) and not one `composites left in the scene` line: a build from before this census, or a census that never ran "
+                                      "(check --expect-build; a current build prints it every window, zeros included)" % p["layer_windows"])
+        else:
+            add("INSTRUMENT", "n/a", "no `ui quality:` 30 s line at all: fix.ui_quality was off in this log (the census prints only while the layer does)")
+        return out
+    counted = [w for w in ws if w["kind"] == "count"]
+    off = [w for w in ws if w["kind"] == "off"]
+    add("INSTRUMENT", "PASS", "%d window(s) of the census line: %d counted, %d NOT COUNTED (zeros are printed, so a line saying 0 is the count having run)" % (len(ws), len(counted), len(off)))
+    if off:
+        add("DETECTOR", "WARN", "%d window(s) say NOT COUNTED (the interface depth pass was not running -- fix.temporal_aa off or stood down -- so no draw there could be "
+                                "recognised as a composite); read the others" % len(off))
+    # The pairs left, by (vs, ps, family) across the windows.
+    seen_pairs = {}
+    for w in counted:
+        for pr in w["pairs"]:
+            key = (pr["vs"], pr["ps"], pr["family"])
+            e = seen_pairs.setdefault(key, {"windows": 0, "max": 0.0, "sum": 0.0, "first": w["ts"]})
+            e["windows"] += 1
+            e["max"] = max(e["max"], pr["rate"])
+            e["sum"] += pr["rate"]
+    unclaimed = {k: v for k, v in seen_pairs.items() if k[2] == UICOMP_NO_FAMILY}
+    named = {k: v for k, v in seen_pairs.items() if k[2] != UICOMP_NO_FAMILY}
+    if unclaimed:
+        for (vs, ps, _), e in sorted(unclaimed.items(), key=lambda kv: -kv[1]["max"]):
+            text_ = ("vs %s ps %s: left in the scene in %d of %d counted window(s), up to %.2f draws a frame (mean %.2f), first at %s; no family names it, so the layer "
+                     "never decides it and the scene upscales it with everything else" % (vs, ps, e["windows"], len(counted), e["max"], e["sum"] / e["windows"], e["first"]))
+            add("UNCLAIMED", "STOP" if e["max"] >= UICOMP_SUSTAINED else "WARN", text_)
+    if named:
+        for (vs, ps, family), e in sorted(named.items(), key=lambda kv: -kv[1]["max"]):
+            add("NAMED", "WARN", "vs %s ps %s (%s): named and not taken in %d window(s), up to %.2f draws a frame; the layer's `left in the game's frame` line gives the reason "
+                                 "(not armed, a world-screen gate, another fix swallowing it)" % (vs, ps, family, e["windows"], e["max"]))
+    past = [w for w in counted if w["past"]]
+    if past:
+        worst = max(w["past"]["rate"] for w in past)
+        add("OVERFLOW", "STOP" if worst >= UICOMP_SUSTAINED else "WARN",
+            "%d window(s) left draws of more different pairs than the table names (%d), up to %.2f draws a frame unnamed" % (len(past), past[0]["past"]["cap"], worst))
+    # The pairs the scene keeps on purpose (a clause of their own, never in the count of composites left): said, with why, and never a finding.
+    kept_pairs = {}
+    for w in counted:
+        for k in w["kept"]:
+            e = kept_pairs.setdefault((k["vs"], k["ps"], k["name"]), {"windows": 0, "max": 0.0, "draws": 0, "first": w["ts"], "legacy": 0})
+            e["windows"] += 1
+            e["max"] = max(e["max"], k["rate"])
+            e["draws"] += k["n"]
+            e["legacy"] += 1 if k.get("legacy") else 0
+    for (vs, ps, name), e in sorted(kept_pairs.items(), key=lambda kv: -kv[1]["max"]):
+        add("KEPT", "PASS", "vs %s ps %s (%s): kept in the scene by design in %d of %d counted window(s), up to %.2f draws a frame (%d draws in all), first at %s; %s%s" % (
+            vs, ps, name, e["windows"], len(counted), e["max"], e["draws"], e["first"],
+            UICOMP_KEPT_WHY.get(name, "the census names it as not interface, with a pair of its own"),
+            "; %d of those window(s) are from a build whose census counted it as a composite left with no family (13c62cd6 to 069ebee4), read here as kept" % e["legacy"]
+            if e["legacy"] else ""))
+    leftover = [w for w in counted if w["left"]]
+    if counted and not leftover:
+        kept_draws = sum(k["n"] for w in counted for k in w["kept"])
+        total = sum(w["seen"] for w in counted) - kept_draws
+        if total > 0:
+            add("TAKEN", "PASS", "every interface composite drawn into an eye went into the layer: %d composite draws in %d window(s), none left in the scene%s" % (
+                total, len(counted), " (%d more draws are the kept pair's, above, and are not interface)" % kept_draws if kept_draws else ""))
+        else:
+            add("TAKEN", "WARN", "no composite was drawn into an eye in any counted window%s (a loading screen, or a log without a cockpit or a menu): nothing here shows the pair taken" % (
+                " but the kept pair's (%d draws, above)" % kept_draws if kept_draws else ""))
+    return out
+
+
+def print_ui_composites(text):
+    """The --ui-composites report. Exit 0 for PASS or WARN, 1 for STOP, 3 when the log has no census line (a build before it, the layer off, or a census that never ran)."""
+    p = parse_ui_composites(text)
+    verdict = ui_composites_verdict(p)
+    ws = p["windows"]
+    for w in ws:
+        if w["kind"] == "off":
+            print("%s  NOT COUNTED in %d frames" % (w["ts"], w["frames"]))
+            continue
+        if w["state"] == "idle":
+            what = "no composite drawn"
+        else:
+            parts = ["none"] if w["state"] == "none" else []
+            parts += ["%s/%s (%s) %.2f" % (pr["vs"], pr["ps"], pr["family"], pr["rate"]) for pr in w["pairs"]]
+            if w["past"]:
+                parts.append("%d past the table (%.2f)" % (w["past"]["n"], w["past"]["rate"]))
+            parts += ["%s/%s (%s, kept by design) %d draws, %.2f" % (k["vs"], k["ps"], k["name"], k["n"], k["rate"]) for k in w["kept"]]
+            what = "; ".join(parts)
+        print("%s  %d of %d composite draws (%.2f a frame) in %d frames (%d live)  %s" % (w["ts"], w["left"], w["seen"], w["rate"], w["frames"], w["live"], what))
+    for tag, status, text_ in verdict:
+        print("%s (%s) %s" % (status, tag, text_))
+    counts = {"PASS": 0, "WARN": 0, "STOP": 0, "n/a": 0}
+    for _, status, _ in verdict:
+        counts[status] = counts.get(status, 0) + 1
+    worst = "STOP" if counts["STOP"] else ("WARN" if counts["WARN"] else ("PASS" if counts["PASS"] else "n/a"))
+    print("ui-composites verdict: %s (%d PASS, %d WARN, %d STOP, %d n/a)" % (worst, counts["PASS"], counts["WARN"], counts["STOP"], counts["n/a"]))
+    if not ws:
+        return 3
+    return 1 if counts["STOP"] else 0
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------------
+# --terrain-checkerboard: Elite's terrain checkerboard rendering in VR, read from the game's active graphics preset on a worker thread (design
+# doc section 84, the VR hint). The lines are src/common/terrain_checkerboard_notice.h's: the worker's start line, one line for the first read
+# and one for each change (ON, OFF or unknown with its reason), the bound's line, a failed start or a fault, and the menu's note that the
+# headset notice was queued as a toast, once per raise. tools\terrain_checkerboard_test holds the formatter, the reader and the wiring, and
+# runs this reader over the log the real worker wrote; this reader's self-test builds its lines from the header's own text.
+#
+# A log WITHOUT the lines means the reader never started: a flat session, a build from before section 84, or a VR frame boundary that never
+# reached the menu's tick. A read that found the option off, or found nothing, writes a line too (OFF, unknown), so no line is never "read, off".
+# ---------------------------------------------------------------------------------------------------------------------------------------
+TCB_START_RE = re.compile(FLATU_TS + r"vr terrain checkerboard: reading Elite's graphics settings on its own thread \((?P<tid>\d+)\), every (?P<secs>\d+) s, off the render thread\.")
+TCB_FAILED_RE = re.compile(FLATU_TS + r"vr terrain checkerboard: could not start the reader thread")
+TCB_READ_RE = re.compile(FLATU_TS + r"vr terrain checkerboard: (?P<state>ON|OFF|unknown) \((?P<detail>.*)\)(?:: (?P<tail>.*))?$")
+TCB_DETAIL_RE = re.compile(r"^preset (?P<preset>.*?), (?P<source>[^,]+?): TerrainCheckerboardRenderingEnabled=(?P<value>.*)$")
+TCB_LIMIT_RE = re.compile(FLATU_TS + r"vr terrain checkerboard: (?P<n>\d+) lines logged; further changes")
+TCB_FAULT_RE = re.compile(FLATU_TS + r"vr terrain checkerboard: the reader faulted repeatedly")
+TCB_QUEUED_RE = re.compile(FLATU_TS + r"vr terrain checkerboard: (?:the headset notice is queued as a toast|menu\.toasts is off, so no toast)")
+TCB_LOG_MAX = 16    # kLogMax in src/common/terrain_checkerboard_notice.h
+
+
+def parse_terrain_checkerboard(text):
+    """{start: {ts, tid, secs} or None, failed: ts or None, reads: [{ts, state, preset, source, value, reason, tail}], limit: ts or None, fault: ts or None,
+    queued: [{ts, toast}], flat: bool}: the lines in the order the log has them."""
+    f = {"start": None, "failed": None, "reads": [], "limit": None, "fault": None, "queued": [], "flat": False}
+    for raw in text.splitlines():
+        try:
+            m = TCB_READ_RE.match(raw)
+            if m:
+                state = m.group("state")
+                d = TCB_DETAIL_RE.match(m.group("detail")) if state != "unknown" else None
+                f["reads"].append({"ts": m.group("ts") or "", "state": state, "tail": m.group("tail") or "",
+                                   "preset": d.group("preset") if d else "", "source": d.group("source") if d else "", "value": d.group("value") if d else "",
+                                   "reason": m.group("detail") if state == "unknown" else ""})
+                continue
+            m = TCB_START_RE.match(raw)
+            if m:
+                if f["start"] is None:
+                    f["start"] = {"ts": m.group("ts") or "", "tid": int(m.group("tid")), "secs": int(m.group("secs"))}
+                continue
+            m = TCB_FAILED_RE.match(raw)
+            if m:
+                if f["failed"] is None:
+                    f["failed"] = m.group("ts") or "?"
+                continue
+            m = TCB_LIMIT_RE.match(raw)
+            if m:
+                if f["limit"] is None:
+                    f["limit"] = m.group("ts") or "?"
+                continue
+            m = TCB_FAULT_RE.match(raw)
+            if m:
+                if f["fault"] is None:
+                    f["fault"] = m.group("ts") or "?"
+                continue
+            m = TCB_QUEUED_RE.match(raw)
+            if m:
+                f["queued"].append({"ts": m.group("ts") or "?", "toast": "queued as a toast" in raw})
+                continue
+            if FLATU_RUNTIME_RE.match(raw) or FLATU_KEY_RE.match(raw):
+                f["flat"] = True
+        except (ValueError, TypeError):
+            continue
+    return f
+
+
+def terrain_checkerboard_raises(reads):
+    """How many times the option RAISED: an ON read whose predecessor was not ON (the first read counts). Each one is a new published version in the
+    state On, which is what queues one toast; an ON read after an ON read is a change of preset or file with the option still on, not a raise."""
+    return sum(1 for i, r in enumerate(reads) if r["state"] == "ON" and (i == 0 or reads[i - 1]["state"] != "ON"))
+
+
+def tcb_verdict_reader(f, add):
+    """FLAT (a flat log never carries the lines) and READER (the worker started, and read): the first two questions about any such log."""
+    reads = f["reads"]
+    anything = f["start"] or f["failed"] or reads or f["limit"] or f["fault"] or f["queued"]
+    if f["flat"] and anything:
+        add("FLAT", "STOP", "a flat-profile log carries the VR terrain checkerboard lines: it must never")
+    elif f["flat"]:
+        add("FLAT", "PASS", "a flat-profile log, and no terrain checkerboard line in it")
+    if f["failed"]:
+        add("READER", "STOP", "the reader thread could not be started (%s): the option was not read, so no notice can have been raised" % f["failed"])
+    elif f["fault"]:
+        add("READER", "STOP", "the reader faulted repeatedly and stopped (%s): the notice kept the last state it published" % f["fault"])
+    elif f["start"] and reads:
+        add("READER", "PASS", "the worker started (%s, thread %d, every %d s) and read %d time(s) logged, the first at %s"
+            % (f["start"]["ts"] or "?", f["start"]["tid"], f["start"]["secs"], len(reads), reads[0]["ts"] or "?"))
+    elif f["start"]:
+        add("READER", "STOP", "the worker started (%s) and no read line followed: it died, hung or was never given a pass" % (f["start"]["ts"] or "?"))
+    elif reads:
+        add("READER", "WARN", "read lines but no start line (a log cut at the front?)")
+
+
+def tcb_verdict_notice(f, add):
+    """NOTICE (what the last read says), CHANGES (the reads in order) and LIMIT (the log's bound was reached)."""
+    reads = f["reads"]
+    if reads:
+        last = reads[-1]
+        if last["state"] == "ON":
+            add("NOTICE", "PASS", "terrain checkerboard rendering is ON (preset %s, %s, =%s): distant terrain shimmers in VR with DLSS, and the notice is due"
+                % (last["preset"] or "?", last["source"] or "?", last["value"] or "?"))
+        elif last["state"] == "OFF":
+            add("NOTICE", "n/a", "terrain checkerboard rendering is OFF (preset %s, %s, =%s): not the cause of any distant terrain shimmer in this log, and no notice is right"
+                % (last["preset"] or "?", last["source"] or "?", last["value"] or "?"))
+        else:
+            add("NOTICE", "WARN", "terrain checkerboard rendering is unknown (%s): it cannot be ruled in or out from this log" % (last["reason"] or "no reason"))
+    if len(reads) > 1:
+        add("CHANGES", "PASS", "%d read line(s) in the order they were logged: %s" % (len(reads), ", ".join("%s %s" % (r["ts"] or "?", r["state"]) for r in reads)))
+    if f["limit"]:
+        add("LIMIT", "WARN", "the bound of %d logged reads was reached at %s: later changes are not in this log" % (TCB_LOG_MAX, f["limit"]))
+
+
+def tcb_verdict_headset(f, add):
+    """HEADSET: one queued line per RAISE of the option (a raise is an ON read after a read that was not ON)."""
+    raises = terrain_checkerboard_raises(f["reads"])
+    toasts = len(f["queued"])
+    if not (raises or toasts):
+        return
+    what = "the headset notice was queued as a toast" if all(q["toast"] for q in f["queued"]) else "queued (menu.toasts off for some: no toast)"
+    if f["limit"]:
+        add("HEADSET", "WARN", "%d queued line(s), but reads past the bound are not logged, so the raises cannot be counted" % toasts)
+    elif toasts == raises:
+        add("HEADSET", "PASS", "%d raise(s) of the option, %d queued line(s) (%s): once per raise; the Status page shows the advice as its hint while the menu is open" % (raises, toasts, what))
+    elif toasts == 0:
+        add("HEADSET", "WARN", "no `vr terrain checkerboard:` menu line: the headset notice was not queued (the menu may not have ticked yet)")
+    elif toasts < raises:
+        add("HEADSET", "WARN", "%d raise(s) of the option but %d queued line(s): a toast was not said" % (raises, toasts))
+    else:
+        add("HEADSET", "STOP", "%d queued line(s) for %d raise(s) of the option: a raise was said more than once" % (toasts, raises))
+
+
+def terrain_checkerboard_verdict(f):
+    """[(tag, status, text)]: FLAT, READER, NOTICE, CHANGES, LIMIT, HEADSET (see the three functions above)."""
+    out = []
+    add = lambda tag, status, text: out.append((tag, status, text))
+    tcb_verdict_reader(f, add)
+    tcb_verdict_notice(f, add)
+    tcb_verdict_headset(f, add)
+    return out
+
+
+def print_terrain_checkerboard(text):
+    """The --terrain-checkerboard report. Returns 0 when the log has any of the lines, 1 when it has none; the verdict never changes the exit code."""
+    f = parse_terrain_checkerboard(text)
+    if not (f["start"] or f["failed"] or f["reads"] or f["limit"] or f["fault"] or f["queued"]):
+        print("[edvr] no `vr terrain checkerboard:` line in this log: the reader never started (a flat session, a build from before section 84, or a VR frame "
+              "boundary that never reached the menu's tick), so Elite's terrain checkerboard rendering cannot be ruled in or out from it. A read that found the "
+              "option off, or found nothing, writes a line too: no line is not \"read, off\".")
+        return 1
+    if f["start"]:
+        print("worker %s: reading Elite's graphics settings on its own thread (%d), every %d s" % (f["start"]["ts"] or "?", f["start"]["tid"], f["start"]["secs"]))
+    for r in f["reads"]:
+        if r["state"] == "unknown":
+            print("read %s: unknown (%s)" % (r["ts"] or "?", r["reason"]))
+        else:
+            print("read %s: %s in preset %s (%s), TerrainCheckerboardRenderingEnabled=%s" % (r["ts"] or "?", r["state"], r["preset"] or "?", r["source"] or "?", r["value"] or "?"))
+    for q in f["queued"]:
+        print("queued %s: %s" % (q["ts"], "as a toast" if q["toast"] else "no toast (menu.toasts is off)"))
+    verdict = terrain_checkerboard_verdict(f)
+    for tag, status, text_ in verdict:
+        print("%s (%s) %s" % (status, tag, text_))
+    counts = {"PASS": 0, "WARN": 0, "STOP": 0, "n/a": 0}
+    for _, status, _ in verdict:
+        counts[status] = counts.get(status, 0) + 1
+    worst = "STOP" if counts["STOP"] else ("WARN" if counts["WARN"] else ("PASS" if counts["PASS"] else "n/a"))
+    print("vr terrain checkerboard verdict: %s (%d PASS, %d WARN, %d STOP, %d n/a)" % (worst, counts["PASS"], counts["WARN"], counts["STOP"], counts["n/a"]))
+    return 0
+
+
+def self_test_terrain_checkerboard():
+    """--terrain-checkerboard on lines built from src/common/terrain_checkerboard_notice.h's own text: every format the reader parses is checked against
+    the header's string literals, then a good flight (read ON, one toast, then OFF) and logs altered to break each thing the verdict judges. Returns ok."""
+    import contextlib
+    import io
+    ok = True
+
+    def fail(msg):
+        nonlocal ok
+        print("terrain checkerboard: %s" % msg)
+        ok = False
+
+    def report(text):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = print_terrain_checkerboard(text)
+        return rc, buf.getvalue()
+
+    def statuses(text):
+        _, out = report(text)
+        found = {}
+        for row in out.splitlines():
+            m = re.match(r"^(PASS|WARN|STOP|n/a) \(([A-Z0-9 -]+)\) ", row)
+            if m:
+                found[m.group(2)] = m.group(1)
+        return found, out
+
+    def want(text, wanted, label, absent=()):
+        got, out = statuses(text)
+        for tag, status in wanted.items():
+            if got.get(tag) != status:
+                fail("%s: %s is %r, wanted %r:\n%s" % (label, tag, got.get(tag), status, out))
+        for tag in absent:
+            if tag in got:
+                fail("%s: %s should not be judged, and is %r:\n%s" % (label, tag, got.get(tag), out))
+
+    def literals(source):
+        """The C string literals of a source text, adjacent ones joined the way the compiler does, with \\\" and \\\\ undone."""
+        out = []
+        for run in re.finditer(r'(?:"(?:[^"\\\n]|\\.)*"[ \t\r\n]*)+', source):
+            joined = "".join(re.findall(r'"((?:[^"\\\n]|\\.)*)"', run.group(0)))
+            out.append(re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), joined))
+        return out
+
+    header = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "common", "terrain_checkerboard_notice.h")
+    if not os.path.isfile(header):
+        fail("src\\common\\terrain_checkerboard_notice.h is not where the self-test looks for it (%s)" % header)
+        return False
+    source = read_text(header)
+    have = set(literals(source))
+    fmt_on = "vr terrain checkerboard: ON (preset %s, %s: TerrainCheckerboardRenderingEnabled=%s): %s"
+    fmt_off = "vr terrain checkerboard: OFF (preset %s, %s: TerrainCheckerboardRenderingEnabled=%s): no notice."
+    fmt_unknown = "vr terrain checkerboard: unknown (%s): no notice."
+    fmt_start = "vr terrain checkerboard: reading Elite's graphics settings on its own thread (%lu), every %u s, off the render thread."
+    fmt_failed = "vr terrain checkerboard: could not start the reader thread, so Elite's terrain checkerboard rendering is not being read: no notice."
+    fmt_fault = "vr terrain checkerboard: the reader faulted repeatedly and has stopped; the notice keeps the last state it published."
+    fmt_limit = "vr terrain checkerboard: %d lines logged; further changes are followed by the notice but no longer logged."
+    fmt_queued = 'vr terrain checkerboard: the headset notice is queued as a toast ("%s"); the Status page shows the advice as its hint while the menu is open.'
+    fmt_notoast = "vr terrain checkerboard: menu.toasts is off, so no toast; the Status page shows the advice as its hint while the menu is open."
+    sentence = "Elite's terrain checkerboard rendering makes distant terrain shimmer with DLSS. Turn it off in Elite's graphics options."
+    toast = "Distant terrain shimmers: turn off terrain checkerboard"
+    for text in (fmt_on, fmt_off, fmt_unknown, fmt_start, fmt_failed, fmt_fault, fmt_limit, fmt_queued, fmt_notoast, sentence, toast):
+        if text not in have:
+            fail("src\\common\\terrain_checkerboard_notice.h has no string literal %r: this reader parses text the DLL no longer writes" % text)
+    if "(" in sentence or ")" in sentence:
+        fail("the sentence has a parenthesis, which the reader takes as the end of the detail")
+    k = re.search(r"constexpr int kLogMax = (\d+);", source)
+    if not k or int(k.group(1)) != TCB_LOG_MAX:
+        fail("this reader's TCB_LOG_MAX (%d) is not the header's kLogMax (%s)" % (TCB_LOG_MAX, k.group(1) if k else "missing"))
+
+    def row(ts, text):
+        return "[%s] %s\n" % (ts, text)
+
+    version = "[09:29:00.000] version v0.18.0-rc.5 (build 5EC0DE01) -- this DLL was linked 2026-10-01 20:05:44 UTC\n"
+    start = row("09:29:10.100", fmt_start % (4242, 3))
+    on = row("09:29:10.102", fmt_on % ("VRHigh", "OptionDefaults\\VRHigh.fxcfg", "true", sentence))
+    queued = row("09:29:10.300", fmt_queued % toast)
+    off = row("09:31:00.500", fmt_off % ("Custom", "Custom.4.4.fxcfg", "false"))
+    on2 = row("09:33:00.500", fmt_on % ("Custom", "Custom.4.4.fxcfg", "True", sentence))
+    queued2 = row("09:33:00.700", fmt_queued % toast)
+    unknown = row("09:35:00.000", fmt_unknown % "preset Custom but the folder has no Custom.<major>.<minor>.fxcfg")
+    good = version + start + on + queued
+
+    # ---- the parser, on a good flight ----
+    p = parse_terrain_checkerboard(good)
+    r0 = p["reads"][0] if p["reads"] else {}
+    if not p["start"] or (p["start"]["tid"], p["start"]["secs"]) != (4242, 3) or len(p["reads"]) != 1 or \
+            (r0.get("state"), r0.get("preset"), r0.get("source"), r0.get("value")) != ("ON", "VRHigh", "OptionDefaults\\VRHigh.fxcfg", "true") or \
+            len(p["queued"]) != 1 or not p["queued"][0]["toast"] or p["flat"] or p["limit"] or p["fault"] or p["failed"]:
+        fail("the good flight parsed as %r" % (p,))
+    g = parse_terrain_checkerboard("vr terrain checkerboard: ON (\nvr terrain checkerboard: reading Elite's graphics settings on its own thread (x)\nnothing\n")
+    if g["reads"] or g["start"]:
+        fail("a cut-short line was mis-parsed: %r" % (g,))
+
+    # ---- the report on a good flight ----
+    rc, out = report(good)
+    flat = re.sub(r"[ ]+", " ", out)
+    for needle in ("worker 09:29:10.100: reading Elite's graphics settings on its own thread (4242), every 3 s",
+                   "read 09:29:10.102: ON in preset VRHigh (OptionDefaults\\VRHigh.fxcfg), TerrainCheckerboardRenderingEnabled=true",
+                   "queued 09:29:10.300: as a toast",
+                   "PASS (READER) the worker started (09:29:10.100, thread 4242, every 3 s) and read 1 time(s) logged, the first at 09:29:10.102",
+                   "PASS (NOTICE) terrain checkerboard rendering is ON (preset VRHigh, OptionDefaults\\VRHigh.fxcfg, =true)",
+                   "PASS (HEADSET) 1 raise(s) of the option, 1 queued line(s) (the headset notice was queued as a toast): once per raise",
+                   "vr terrain checkerboard verdict: PASS (3 PASS, 0 WARN, 0 STOP, 0 n/a)"):
+        if needle not in flat:
+            fail("the good flight's report lacks %r:\n%s" % (needle, out))
+    if rc != 0:
+        fail("the good flight reported exit %d" % rc)
+    want(good, {"READER": "PASS", "NOTICE": "PASS", "HEADSET": "PASS"}, "the good flight", absent=("CHANGES", "LIMIT", "FLAT"))
+
+    # ---- what the last read says, and the changes ----
+    want(good + off, {"NOTICE": "n/a", "CHANGES": "PASS", "HEADSET": "PASS"}, "turned off after the toast")
+    want(good + off + on2 + queued2, {"NOTICE": "PASS", "CHANGES": "PASS", "HEADSET": "PASS"}, "off and on again: two raises, two toasts")
+    want(good + off + on2, {"HEADSET": "WARN"}, "a second raise with no second toast")
+    want(good + row("09:30:00.000", fmt_on % ("VRUltra", "OptionDefaults\\VRUltra.fxcfg", "true", sentence)), {"HEADSET": "PASS", "CHANGES": "PASS"}, "a preset change with the option still on is no raise")
+    want(good + off + unknown + on2 + queued2, {"HEADSET": "PASS", "NOTICE": "PASS"}, "unknown between two raises is also a re-arm")
+    want(version + start + unknown, {"READER": "PASS", "NOTICE": "WARN"}, "an unknown read", absent=("HEADSET",))
+    want(version + start + off, {"READER": "PASS", "NOTICE": "n/a"}, "a read that found it off", absent=("HEADSET",))
+    _, out = statuses(version + start + unknown)
+    if "unknown (preset Custom but the folder has no Custom.<major>.<minor>.fxcfg)" not in out:
+        fail("an unknown read's reason is not in the report:\n%s" % out)
+
+    # ---- the headset line ----
+    want(version + start + on, {"HEADSET": "WARN"}, "no menu line")
+    want(good + queued, {"HEADSET": "STOP"}, "one raise said twice")
+    want(version + start + off + queued, {"HEADSET": "STOP"}, "a toast with no raise")
+    want(version + start + on + row("09:29:10.300", fmt_notoast), {"HEADSET": "PASS"}, "menu.toasts off: no toast, still once")
+    _, out = statuses(version + start + on + row("09:29:10.300", fmt_notoast))
+    if "queued (menu.toasts off for some: no toast)" not in out:
+        fail("a log with menu.toasts off should say so:\n%s" % out)
+
+    # ---- the reader: started, read, failed, faulted, bounded ----
+    want(version + start, {"READER": "STOP"}, "started and never read")
+    want(version + on, {"READER": "WARN"}, "reads without the start line")
+    want(version + row("09:29:10.100", fmt_failed), {"READER": "STOP"}, "a thread that could not start")
+    want(good + row("09:40:00.000", fmt_fault), {"READER": "STOP"}, "a reader that faulted")
+    want(good + row("09:40:00.000", fmt_limit % TCB_LOG_MAX), {"LIMIT": "WARN", "HEADSET": "WARN"}, "the log's bound")
+
+    # ---- flat, and no lines at all ----
+    flat_run = "[09:31:00.000] flat runtime: treated=1 refused=0 last=treated-jittered\n"
+    want(good + flat_run, {"FLAT": "STOP"}, "a flat log carrying the VR lines")
+    for text, label in ((version, "an empty log"), (version + flat_run, "a flat log with no lines"), (version + "[09:29:10.100] vr supersampling: something\n", "another notice's lines")):
+        rc, out = report(text)
+        if rc != 1 or "no `vr terrain checkerboard:` line" not in out or "not \"read, off\"" not in out:
+            fail("%s should exit 1 and say that no line is not \"read, off\": rc=%d %r" % (label, rc, out))
+    return ok
 
 
 # --route-curve: the curved VR world route (docs/design-flat-temporal-aa-2026-09-23.md, section 82, "The curved route").
@@ -7123,9 +7785,9 @@ def main(argv=None):
                          "resolution:` rule line (fitted or legacy, and why) and the "
                          "width applied, the footprint instrument's arming line and "
                          "its 30 s lines (the on-foot screen's width in eye pixels, "
-                         "its stability, shape and 1/d law, against Sean's 3504 "
-                         "calibration point) and what is stored for the next launch; "
-                         "PASS / WARN / STOP lines")
+                         "its stability, shape and 1/d law, and the session's stored "
+                         "head-on floor against the 5006 px behind Sean's 3504) and what "
+                         "is stored for the next launch; PASS / WARN / STOP lines")
     ap.add_argument("--flat-upscale", action="store_true",
                     help="report a flat-profile flight (design doc section 83): the final copy admitted by "
                          "structure, so DLSS, FSR and TAA resolve below the output whatever the post chain; the "
@@ -7136,6 +7798,19 @@ def main(argv=None):
                     help="report a VR flight's Elite-supersampling-below-1 notice (design doc section 83): "
                          "the `vr supersampling:` line from the measured render size, vScreen's adoption line "
                          "and the headset notice; NOTICE / CONSISTENT / HEADSET / FLAT lines")
+    ap.add_argument("--ui-composites", action="store_true",
+                    help="report the interface composites the UI layer left in the scene (fix.ui_quality on; "
+                         "docs/ui-layer-2026-09-23.md, 2026-10-01): the layer's 30 s `composites left in the "
+                         "scene` lines (zeros printed, so a 0 is the count having run), the pairs left by vertex "
+                         "and pixel shader and family, and INSTRUMENT / DETECTOR / UNCLAIMED / NAMED / OVERFLOW / "
+                         "TAKEN lines (a composite no family names, left in the scene, is a STOP); exit 0 for "
+                         "PASS or WARN, 1 for STOP, 3 when the log has no such line")
+    ap.add_argument("--terrain-checkerboard", action="store_true",
+                    help="report a VR flight's Elite-terrain-checkerboard-rendering notice (design doc section 84): the worker's "
+                         "start line, one line for the first read and each change (ON, OFF or unknown with its reason, read from "
+                         "the game's active graphics preset on a worker thread) and the menu's queued-toast line; READER / NOTICE / "
+                         "CHANGES / LIMIT / HEADSET / FLAT lines. No line at all means the reader never started, which is not "
+                         "\"read, off\"")
     ap.add_argument("--route-curve", action="store_true",
                     help="report a curved VR world route flight (fix.panel_curvature above 0 "
                          "with experimental.temporal_aa_on_foot_world = auto): the route's 5 s "
@@ -7269,6 +7944,10 @@ def main(argv=None):
         return print_flat_upscale(text)
     if args.vr_supersampling:
         return print_vr_supersampling(text)
+    if args.ui_composites:
+        return print_ui_composites(text)
+    if args.terrain_checkerboard:
+        return print_terrain_checkerboard(text)
     if args.camera_census:
         return print_camera_census(text)
     if args.maps_sharp:
@@ -7620,6 +8299,8 @@ def self_test():
         ok = False
     if not self_test_maps_sharp():
         ok = False
+    if not self_test_ui_composites():
+        ok = False
     if not self_test_vscreen_fit():
         ok = False
     if not self_test_flat_upscale():
@@ -7627,6 +8308,8 @@ def self_test():
     if not self_test_route_curve():
         ok = False
     if not self_test_freezes():
+        ok = False
+    if not self_test_terrain_checkerboard():
         ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
@@ -7877,6 +8560,162 @@ def self_test_flat_upscale():
     rc, out = report("[09:00:00.000] version v0.18.0 (build 1)\n", print_vr_supersampling)
     if rc != 1 or "no `vr supersampling:`" not in out:
         fail("a log with no VR line should exit 1 and say so: rc=%d %r" % (rc, out))
+    return ok
+
+
+UICOMP_FIXTURE = "ui_composites_fixture.log"
+
+
+def self_test_ui_composites():
+    """--ui-composites on the checked-in synthetic catalogue (tools\\ui_composites_fixture.log, which tools\\ui_composite_census_test holds to exactly what the
+    DLL's formatter writes): every shape of the census line parsed, then logs picked from it by clock time to make each verdict, and logs altered to break the
+    things the reader keys on. Returns ok."""
+    import contextlib
+    import io
+    ok = True
+
+    def fail(msg):
+        nonlocal ok
+        print("ui-composites: %s" % msg)
+        ok = False
+
+    path = os.path.join(repo_root(), "tools", UICOMP_FIXTURE)
+    try:
+        base = read_text(path)
+    except OSError:
+        fail("the fixture %s is missing" % path)
+        return False
+    lines = base.splitlines()
+    p = parse_ui_composites(base)
+    ws = p["windows"]
+    if [w["state"] for w in ws] != ["none", "idle", "none", "left", "left", "left", "left", "off", "none", "none", "left"] or p["unparsed"] or p["layer_windows"] != 2:
+        fail("the fixture's windows read as %s (%d unparsed, %d layer lines)" % ([w["state"] for w in ws], len(p["unparsed"]), p["layer_windows"]))
+        return False
+    d = ws[3]
+    if (d["ts"], d["left"], d["seen"], d["rate"], d["frames"], d["live"]) != ("16:02:00.001", 56320, 61440, 22.0, 2560, 2560) or d["pairs"] != [
+            {"vs": "1989E6D3B405FDE0", "ps": "EAB8A1C95A13FFBE", "family": "no family", "rate": 22.0}] or d["past"] is not None:
+        fail("the defect window reads as %r" % d)
+    n = ws[5]
+    if n["pairs"] != [{"vs": "81216C77F90DEDD6", "ps": "A2965EC2931A39C8", "family": "cockpit holo panels", "rate": 0.01}]:
+        fail("the named-family window reads as %r" % n["pairs"])
+    o = ws[6]
+    if len(o["pairs"]) != 8 or o["past"] != {"n": 4000, "cap": 8, "rate": 1.56} or o["left"] != 4160 or o["pairs"][0]["vs"] != "0000000000005000":
+        fail("the overflow window reads as %r / %r" % (len(o["pairs"]), o["past"]))
+    if (ws[7]["kind"], ws[7]["frames"]) != ("off", 2560) or ws[8]["live"] != 1280 or ws[1]["seen"] != 0:
+        fail("the NOT COUNTED, half-live or idle windows read as %r / %r / %r" % (ws[7], ws[8]["live"], ws[1]["seen"]))
+    # The kept pair: a loading screen with only the null-output quad (0 left of 16182, the quad in its own clause), and a defect with the quad beside it.
+    k = ws[9]
+    if (k["ts"], k["left"], k["seen"], k["rate"], k["state"], k["pairs"], k["past"]) != ("16:05:00.001", 0, 16182, 0.0, "none", [], None) or k["kept"] != [
+            {"vs": "B018D143700AB803", "ps": "258B95AC99520C1F", "name": "null-output quad", "n": 5394, "rate": 2.0}]:
+        fail("the kept-only window reads as %r" % k)
+    b = ws[10]
+    if (b["left"], b["seen"], b["state"], b["past"]) != (56320, 66560, "left", None) or b["pairs"] != [
+            {"vs": "1989E6D3B405FDE0", "ps": "EAB8A1C95A13FFBE", "family": "no family", "rate": 22.0}] or b["kept"] != [
+            {"vs": "B018D143700AB803", "ps": "258B95AC99520C1F", "name": "null-output quad", "n": 5120, "rate": 2.0}]:
+        fail("the window with a pair left and the kept pair beside it reads as %r / %r" % (b["pairs"], b["kept"]))
+    # The table of kept pairs here is the DLL's (src/d3d11/ui_scene_composites.h kUiSceneKeptPairs): the same pairs, the same names.
+    try:
+        header = read_text(os.path.join(repo_root(), "src", "d3d11", "ui_scene_composites.h"))
+        entries = re.findall(r'\{0x([0-9A-F]{16})ull,\s*0x([0-9A-F]{16})ull,\s*"([^"]+)"\}', header)
+        if {(a, b_): n for a, b_, n in entries} != UICOMP_KEPT_PAIRS or len(entries) != len(UICOMP_KEPT_PAIRS):
+            fail("UICOMP_KEPT_PAIRS %r is not the DLL's kUiSceneKeptPairs %r" % (UICOMP_KEPT_PAIRS, entries))
+        if set(UICOMP_KEPT_WHY) != set(UICOMP_KEPT_PAIRS.values()):
+            fail("UICOMP_KEPT_WHY names %r, the kept pairs are named %r" % (sorted(UICOMP_KEPT_WHY), sorted(UICOMP_KEPT_PAIRS.values())))
+    except OSError:
+        fail("src\\d3d11\\ui_scene_composites.h is not readable from the repo root")
+
+    def run(text):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = print_ui_composites(text)
+        return rc, buf.getvalue()
+
+    version = next(l for l in lines if "version v0.0.0-fixture" in l)
+
+    def pick(*stamps):
+        """The version line and the lines at these clock times (exactly 'hh:mm:ss.mmm')."""
+        chosen = [l for l in lines if any(l.startswith("[" + s + "]") for s in stamps)]
+        if len(chosen) != len(stamps):
+            fail("pick %s found %d line(s)" % (stamps, len(chosen)))
+        return "\n".join([version] + chosen) + "\n"
+
+    def verdict(what, text, want_rc, want_verdict, *want_in):
+        rc, out = run(text)
+        if rc != want_rc or ("ui-composites verdict: " + want_verdict) not in out or any(w not in out for w in want_in):
+            fail("%s: rc=%d, wanted %d %s mentioning %r:\n%s" % (what, rc, want_rc, want_verdict, want_in, out))
+        return out
+
+    layer1, layer2 = "16:00:30.000", "16:01:30.000"
+    menu, idle, cockpit, defect1, defect2, named, overflow, off, half = ("16:00:30.001", "16:01:00.001", "16:01:30.001", "16:02:00.001", "16:02:30.001",
+                                                                       "16:03:00.001", "16:03:30.001", "16:04:00.001", "16:04:30.001")
+    # A healthy flight: a menu, nothing drawn, a cockpit with the pair taken -- every window a zero, and the zeros are said.
+    healthy = pick(layer1, menu, idle, layer2, cockpit)
+    verdict("a healthy flight", healthy, 0, "PASS", "PASS (INSTRUMENT) 3 window(s) of the census line: 3 counted, 0 NOT COUNTED",
+            "PASS (TAKEN) every interface composite drawn into an eye went into the layer: 66840 composite draws in 3 window(s)", "0 of 61440 composite draws (0.00 a frame)")
+    # The defect: the Disable-GUI-effects panels left in the scene, nothing names them (the field's 22 draws a frame) -- twice a window apart.
+    out = verdict("the defect", healthy + pick(defect1, defect2).split("\n", 1)[1], 1, "STOP",
+                  "STOP (UNCLAIMED) vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE: left in the scene in 2 of 5 counted window(s), up to 22.00 draws a frame (mean 22.00), first at 16:02:00.001",
+                  "no family names it")
+    if "(TAKEN)" in out:
+        fail("a flight with composites left says every composite went into the layer:\n%s" % out)
+    # The same pair below the line a sustained composite is: a stray at a transition, a WARN.
+    stray = pick(layer1, cockpit, defect1).replace("22.00 a frame", "0.40 a frame").replace("(22.00 a frame)", "(0.40 a frame)")
+    verdict("a stray", stray, 0, "WARN", "WARN (UNCLAIMED)", "up to 0.40 draws a frame")
+    # A named family left: a WARN that says where the reason is, never a STOP.
+    verdict("a named family left", pick(layer2, cockpit, named), 0, "WARN", "WARN (NAMED) vs 81216C77F90DEDD6 ps A2965EC2931A39C8 (cockpit holo panels): named and not taken in 1 window(s)",
+            "left in the game's frame")
+    # More pairs than the table names: the overflow is a STOP at a sustained rate, and the eight named pairs are strays.
+    verdict("overflow", pick(layer2, overflow), 1, "STOP", "STOP (OVERFLOW)", "WARN (UNCLAIMED) vs 0000000000005000 ps 0000000000006000", "up to 1.56 draws a frame unnamed")
+    # The interface depth pass off: a window that says NOT COUNTED is not a zero.
+    verdict("NOT COUNTED", pick(layer2, off), 0, "WARN", "WARN (DETECTOR) 1 window(s) say NOT COUNTED", "NOT COUNTED in 2560 frames")
+    # No composite drawn into an eye at all: the zero does not show the pair taken.
+    verdict("an idle window", pick(layer1, idle), 0, "WARN", "WARN (TAKEN) no composite was drawn into an eye in any counted window")
+    # The layer live for half the window: said in the table, no verdict of its own.
+    out = verdict("half live", pick(layer1, half), 0, "PASS", "0 of 30720 composite draws (0.00 a frame) in 2560 frames (1280 live)")
+    # The null-output quad kept: a loading screen with only that pair is a PASS that says the pair, why it is no defect, and that its draws are not interface; never a
+    # STOP and never a NAMED/UNCLAIMED finding. The 15:09 flight as the DLL now writes it.
+    loading, mixed = "16:05:00.001", "16:05:30.001"
+    out = verdict("a loading screen with the kept pair", pick(layer1, cockpit, loading), 0, "PASS",
+                  "PASS (KEPT) vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad): kept in the scene by design in 1 of 2 counted window(s), up to 2.00 draws a frame (5394 draws in all)",
+                  "writes zero and reads nothing", "so the layer never takes it",
+                  "PASS (TAKEN) every interface composite drawn into an eye went into the layer: 72228 composite draws in 2 window(s), none left in the scene (5394 more draws are the kept pair's, above, and are not interface)",
+                  "0 of 16182 composite draws (0.00 a frame) in 2697 frames (2697 live)  none; B018D143700AB803/258B95AC99520C1F (null-output quad, kept by design) 5394 draws, 2.00")
+    if "UNCLAIMED" in out or "NAMED" in out:
+        fail("the kept pair is read as a finding:\n%s" % out)
+    # ...and a real defect beside it is still a STOP: the kept pair hides nothing.
+    verdict("the defect with the kept pair beside it", pick(layer1, mixed), 1, "STOP", "STOP (UNCLAIMED) vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE: left in the scene in 1 of 1 counted window(s), up to 22.00 draws a frame",
+            "PASS (KEPT) vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad)")
+    # Nothing but the kept pair drawn: the zero does not show a composite taken (a WARN, as an idle window is).
+    only_kept_text = pick(layer1, loading).replace("0 of 16182 composite draws", "0 of 5394 composite draws")
+    verdict("only the kept pair drawn", only_kept_text, 0, "WARN", "WARN (TAKEN) no composite was drawn into an eye in any counted window but the kept pair's (5394 draws, above)")
+    # A build between 13c62cd6 and 069ebee4 has no kept clause: it counted the quad as a composite left with no family (the 15:10:50 window of the 15:09 flight, verbatim).
+    legacy_line = "[15:10:50.165] ui quality: composites left in the scene: 5394 of 16182 composite draws (2.00 a frame) in 2697 frames (2697 live) -- vs B018D143700AB803 ps 258B95AC99520C1F (no family) 2.00 a frame."
+    legacy = version + "\n" + legacy_line + "\n"
+    out = verdict("an older build's line", legacy, 0, "PASS", "PASS (KEPT) vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad): kept in the scene by design in 1 of 1 counted window(s)",
+                  "(5394 draws in all)", "read here as kept", "PASS (TAKEN) every interface composite drawn into an eye went into the layer: 10788 composite draws in 1 window(s)")
+    if "UNCLAIMED" in out:
+        fail("an older build's null-output quad is still read as unclaimed:\n%s" % out)
+    # ...but only that exact pair: one bit off, or with a family named, it is what it always was.
+    verdict("an older line, one bit off", version + "\n" + legacy_line.replace("B018D143700AB803", "B018D143700AB802") + "\n", 1, "STOP", "STOP (UNCLAIMED) vs B018D143700AB802 ps 258B95AC99520C1F")
+    verdict("an older line, ps one bit off", version + "\n" + legacy_line.replace("258B95AC99520C1F", "258B95AC99520C1E") + "\n", 1, "STOP", "STOP (UNCLAIMED) vs B018D143700AB803 ps 258B95AC99520C1E")
+    verdict("an older line, a family named", version + "\n" + legacy_line.replace("(no family)", "(interface composite, not taken)") + "\n", 0, "WARN", "WARN (NAMED) vs B018D143700AB803 ps 258B95AC99520C1F (interface composite)")
+    # Beside another pair an older line's kept draws are the rate over the frames, and the other pair is still said.
+    mixed_legacy = version + "\n" + ("[15:10:50.165] ui quality: composites left in the scene: 61440 of 66560 composite draws (24.00 a frame) in 2560 frames (2560 live) -- "
+                                     "vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE (no family) 22.00 a frame; vs B018D143700AB803 ps 258B95AC99520C1F (no family) 2.00 a frame.") + "\n"
+    verdict("an older line beside a defect", mixed_legacy, 1, "STOP", "STOP (UNCLAIMED) vs 1989E6D3B405FDE0 ps EAB8A1C95A13FFBE", "PASS (KEPT) vs B018D143700AB803 ps 258B95AC99520C1F (null-output quad)", "(5120 draws in all)")
+    # The layer's own 30 s lines and no census line: a build before it, or a census that never ran. Exit 3 and a STOP line that says so.
+    verdict("no census line", pick(layer1, layer2), 3, "STOP", "STOP (INSTRUMENT) the layer printed 2 30 s line(s) and not one `composites left in the scene` line")
+    # No ui quality line at all: the key was off.
+    verdict("the key off", version + "\n", 3, "n/a", "n/a (INSTRUMENT) no `ui quality:` 30 s line at all")
+    # A line that starts with the prefix and is none of its shapes is said, and no window is made of it.
+    drift = pick(layer1, defect1).replace("composite draws", "composite draw")
+    out = verdict("a drifted line", drift, 3, "STOP", "WARN (SHAPE) 1 line(s) start with the census prefix and are none of its shapes")
+    if parse_ui_composites(drift)["windows"]:
+        fail("a drifted line made a window")
+    # The reader's own shapes: the pair regex wants sixteen upper-case hex digits, and a hash that is not is not a pair.
+    short = pick(layer1, defect1).replace("vs 1989E6D3B405FDE0", "vs 1989E6D3B405FDE")
+    if parse_ui_composites(short)["windows"]:
+        fail("a pair with a fifteen-digit hash made a window")
     return ok
 
 
@@ -8173,51 +9012,67 @@ def self_test_vscreen_fit():
     if os.path.isfile(header):
         h = read_text(header)
         for name, value in (("kMultiplier", VSCREEN_M), ("kFloorWidth", VSCREEN_FLOOR), ("kLegacyMultiplier", VSCREEN_LEGACY_M),
-                            ("kSeedWidthPx", VSCREEN_SEED[0]), ("kSeedDistance", VSCREEN_SEED[1]), ("kSeedEyeWidthPx", VSCREEN_SEED[2])):
+                            ("kChosenWidthPx", VSCREEN_CHOSEN), ("kSeedFootprintPx", VSCREEN_SEED[0]), ("kSeedDistance", VSCREEN_SEED[1]),
+                            ("kSeedEyeWidthPx", VSCREEN_SEED[2]), ("kFootprintQuantile", VSCREEN_QUANTILE)):
             m = re.search(r"constexpr (?:double|uint32_t) %s = ([0-9.]+);" % name, h)
             if not m or abs(float(m.group(1)) - value) > 1e-9:
                 fail("this reader's constant for %s (%r) is not src\\common\\vscreen_fit.h's (%r)" % (name, value, m.group(1) if m else None))
     else:
         fail("src\\common\\vscreen_fit.h is not where the self-test looks for it (%s)" % header)
+    if abs(VSCREEN_M * VSCREEN_SEED[0] - VSCREEN_CHOSEN) > 1.0 or _vround16(VSCREEN_M * VSCREEN_SEED[0]) != int(VSCREEN_CHOSEN):
+        fail("this reader's m (%r) x seed footprint (%r) is not the chosen width (%r): the three move together" % (VSCREEN_M, VSCREEN_SEED[0], VSCREEN_CHOSEN))
 
     # ---- the parser ----
     f = parse_vscreen_fit(text)
     kv = f["rule"]["kv"] if f["rule"] else {}
     if not f["rule"] or f["rule"]["width"] != 3504 or kv.get("rule") != "fitted" or kv.get("source") != "seed" or kv.get("route") != "run" or \
-            kv.get("eye") != "4032" or kv.get("distance") != "0.700" or kv.get("legacy") != "5040" or kv.get("footprint") != "3504" or \
-            kv.get("m") != "1.00" or kv.get("floor") != "2880" or kv.get("cap") != "5040" or kv.get("clamp") != "none":
+            kv.get("eye") != "4032" or kv.get("distance") != "0.700" or kv.get("legacy") != "5040" or kv.get("footprint") != "5006" or \
+            kv.get("m") != "0.700" or kv.get("floor") != "2880" or kv.get("cap") != "5040" or kv.get("clamp") != "none":
         fail("the fixture's rule line parsed as %r" % (f["rule"],))
     if not f["applied"] or (f["applied"]["w"], f["applied"]["h"], f["applied"]["sites"]) != (3504, 1971, 6) or len(f["armed"]) != 1 or \
             f["armed"][0][1] != "armed" or len(f["windows"]) != 4:
         fail("the fixture parsed as applied %r, %d arming line(s), %d window(s)" % (f["applied"], len(f["armed"]), len(f["windows"])))
     w = vscreen_fit_windows(f)
-    if len(w) != 4 or (w[0]["samples"], w[0]["on_foot"], w[0]["other"], w[0]["draws"], w[0]["fp"], w[0]["other_fp"], w[0]["applied"]) != (44, 0, 44, 5280, None, 3503.0, None) or \
-            (w[1]["fp"], w[1]["lo"], w[1]["hi"], w[1]["shape"], w[1]["at1"], w[1]["persisted"], w[1]["fit"], w[1]["legacy"], w[1]["eye"]) != \
-            (3497.0, 3489.0, 3505.0, 1.778, 2448.0, 0.6071, 3504.0, 5040.0, (4032, 3898)) or w[3]["session_n"] != 177:
+    if len(w) != 4 or (w[0]["samples"], w[0]["on_foot"], w[0]["other"], w[0]["draws"], w[0]["fp"], w[0]["other_fp"], w[0]["applied"]) != (44, 0, 44, 5280, None, 5640.0, None) or \
+            (w[1]["fp"], w[1]["lo"], w[1]["hi"], w[1]["shape"], w[1]["at1"], w[1]["session_frac1"], w[1]["persisted"], w[1]["fit"], w[1]["legacy"], w[1]["eye"]) != \
+            (5262.0, 5011.0, 5890.0, 1.71, 3683.0, 0.8694, 0.8694, 3504.0, 5040.0, (4032, 3898)) or w[3]["session_n"] != 177 or w[3]["session_frac1"] != 0.8691 or \
+            w[3]["persisted"] != 0.8694:
         fail("the fixture's windows parsed as %r" % (w,))
+    if f["fov"] is not None:
+        fail("the fixture carries no FOV line, but the parser read one: %r" % (f["fov"],))
     # A line cut short or garbled is skipped, never fatal.
     g = parse_vscreen_fit("vscreen footprint 30s: window=x samples=y on-foot=\nvScreen resolution: auto = 12 wide\n"
                           "vScreen resolution: 1920x1080 -> 3504x1971 at\nnothing at all\nvscreen footprint: armed -- x\n")
     if g["rule"] is not None or g["applied"] is not None or len(g["armed"]) != 1 or len(g["windows"]) != 1:
         fail("a cut-short line was mis-parsed: %r" % (g,))
+    # The eyes' FOV is read from the graphics log's benchmark line (angles in radians, order left/right/up/down): the first real one.
+    fov_line = ("[06:07:04.100] native benchmark workload: window 1, feature epoch 0, treatments 14/14, game FOV radians L -0.89775/0.71858/0.79986/-0.79986 "
+                "R -0.71858/0.89775/0.79986/-0.79986; order left/right/up/down; input is submitted ROI, output is active XR target.")
+    flat_zero = ("[06:07:04.000] native benchmark workload: window 1, feature epoch 0, treatments 0/0, game FOV radians L 0.00000/0.00000/0.00000/0.00000 "
+                 "R 0.00000/0.00000/0.00000/0.00000; order left/right/up/down; input is submitted ROI, output is active XR target.")
+    want_fov = (-0.89775, 0.71858, 0.79986, -0.79986)
+    if parse_vscreen_fit(fov_line)["fov"] != want_fov or parse_vscreen_fit(flat_zero + "\n" + fov_line)["fov"] != want_fov or \
+            parse_vscreen_fit(flat_zero)["fov"] is not None:
+        fail("the FOV was not read from the benchmark line (or a flat log's zeros were taken for one): %r" % (parse_vscreen_fit(fov_line)["fov"],))
 
     # ---- the report on the fixture: every question PASSes, the one the log cannot answer says so ----
     rc, out = report(text)
     flat = re.sub(r"[ ]+", " ", out)
     for want in (
             "vscreen fit: the rule line, an apply line, 1 arming line(s), 4 footprint window(s)",
-            "launch: auto = 3504 wide, rule=fitted source=seed route=run eye=4032 distance=0.700 footprint=3504 clamp=none legacy=5040; applied 3504x1971",
+            "launch: auto = 3504 wide, rule=fitted source=seed route=run eye=4032 distance=0.700 footprint=5006 clamp=none legacy=5040; applied 3504x1971",
             "window 1: samples 44 (on foot 0, other 44), draws 5280, skipped 0, late 0; eye 4032x3898",
-            "window 4: samples 59 (on foot 59, other 0), draws 5400, skipped 0, late 0; eye 4032x3898 distance 0.7 applied 0.7; on foot fp=3499",
-            "PASS (RULE) FITTED to 3504 wide from a seed footprint of 3504 px at fix.panel_distance 0.700 on a 4032 px eye (m=1.00, floor 2880, cap 5040, "
+            "window 4: samples 59 (on foot 59, other 0), draws 5400, skipped 0, late 0; eye 4032x3898 distance 0.7 applied 0.7; on foot fp=5270",
+            "PASS (RULE) FITTED to 3504 wide from a seed footprint of 5006 px at fix.panel_distance 0.700 on a 4032 px eye (m=0.700, floor 2880, cap 5040, "
             "clamp none); legacy would have been 5040; applied 3504x1971 at 6 site(s)",
             "PASS (INSTRUMENT) 4 window(s): 221 sample(s) (177 on foot, 44 other), 21480 composite draw(s) seen, 0 skipped, 0 late",
-            "PASS (ON FOOT) 3 on-foot window(s), 177 sample(s); the screen spans 3499 px",
-            "PASS (STABLE) the screen's width held",
-            "PASS (SHAPE) the footprint's pixel aspect reads 1.778..1.778 against 16:9 = 1.778",
+            "PASS (ON FOOT) 3 on-foot window(s), 177 sample(s); the screen spans 5270 px (median of the windows' medians 5262..5281) of the eye",
+            "PASS (STABLE) the screen's width held: 0.4% between 3 windows (3683..3697 px at distance 1; under 8%)",
+            "PASS (SHAPE) the median of the windows' footprint shapes reads 1.700 against 16:9 = 1.778 (square eye pixels assumed: this log carries no per-eye FOV line): -4.4%",
             "n/a (DISTANCE LAW) one panel distance in this log (0.70)",
-            "PASS (CALIBRATION) at Sean's calibration point (a 4032 px eye at distance 0.7) the screen spans 3499 px against the 3504 he flew (99.9%): m = 1.0 reproduces his width",
-            "PASS (STORED) the on-foot median is stored: 0.6075 of the eye at panel distance 1 (177 sample(s)); the next launch fits 3504 wide, the width this launch ran at (3504)",
+            "PASS (CALIBRATION) at Sean's calibration point (a 4032 px eye) the session's stored head-on floor (p10) is 5006 px at distance 0.7 against the 5006 px his 3504 is "
+            "fitted from (100.0%, within 5%): m = 0.70 fits 3504 wide there",
+            "PASS (STORED) the on-foot head-on floor (p10) is stored: 0.8694 of the eye at panel distance 1 (177 sample(s)); the next launch fits 3504 wide, the width this launch ran at (3504)",
             "vscreen fit verdict: PASS (7 PASS, 0 WARN, 0 STOP, 1 n/a)"):
         if want not in flat:
             fail("the fixture's report lacks %r:\n%s" % (want, out))
@@ -8245,12 +9100,28 @@ def self_test_vscreen_fit():
     st, out = statuses(sub(text, "auto = 3504 wide", "auto = 3600 wide"))
     if st.get("RULE") != "STOP" or "its own tokens" not in out:
         fail("a width that is not what its own tokens give did not STOP: %r\n%s" % (st, out))
-    st, out = statuses(sub(text, "footprint=3504 m=1.00", "footprint=3504 m=0.95"))
-    if st.get("RULE") != "STOP":
-        fail("a different m in the tokens did not change the recomputed width: %r" % (st,))
-    st, out = statuses(sub(sub(text, "clamp=none", "clamp=floor nudged=yes"), "auto = 3504 wide", "auto = 3520 wide").replace("-> 3504x1971", "-> 3520x1980"))
+    st, out = statuses(sub(text, "footprint=5006 m=0.700", "footprint=5006 m=0.650"))
+    if st.get("RULE") != "STOP" or "m 0.650" not in out:
+        fail("a different m in the tokens did not change the recomputed width (and print at three decimals): %r\n%s" % (st, out))
+    # The footprint prints rounded to a pixel, so a printed width one step (16) from the recomputed one is rounding, and two are not.
+    one_step = lambda t: sub(sub(t, "auto = 3504 wide", "auto = 3520 wide"), "-> 3504x1971", "-> 3520x1980")
+    st, out = statuses(one_step(text))
+    if st.get("RULE") != "PASS":
+        fail("a width one step (16) from the one its own tokens give was refused: that is the rounding of the printed footprint: %r\n%s" % (st, out))
+    st, out = statuses(sub(sub(text, "auto = 3504 wide", "auto = 3536 wide"), "-> 3504x1971", "-> 3536x1989"))
+    if st.get("RULE") != "STOP" or "its own tokens" not in out:
+        fail("a width two steps (32) from the one its own tokens give was accepted: %r\n%s" % (st, out))
+    # A nudge off another target's size moves a width by several steps: allowed only when the line says nudged=yes, and only up to eight.
+    nudged = lambda t, w, h: sub(sub(sub(t, "clamp=none", "clamp=none nudged=yes"), "auto = 3504 wide", "auto = %d wide" % w), "-> 3504x1971", "-> %dx%d" % (w, h))
+    st, out = statuses(nudged(text, 3584, 2016))
     if st.get("RULE") != "PASS":
         fail("a nudged width within a few steps of the recomputed one was refused: %r\n%s" % (st, out))
+    st, out = statuses(sub(sub(text, "auto = 3504 wide", "auto = 3584 wide"), "-> 3504x1971", "-> 3584x2016"))
+    if st.get("RULE") != "STOP":
+        fail("a width five steps from the recomputed one passed without the nudged=yes that would explain it: %r" % (st,))
+    st, out = statuses(nudged(text, 3664, 2061))
+    if st.get("RULE") != "STOP":
+        fail("a nudged width ten steps from the recomputed one passed: %r" % (st,))
     st, out = statuses("\n".join(l for l in text.splitlines() if "-> 3504x1971" not in l))
     if st.get("RULE") != "PASS" or "no `vScreen resolution: ... ->` apply line" not in out:
         fail("a log with no apply line did not say so: %r" % (st,))
@@ -8291,48 +9162,137 @@ def self_test_vscreen_fit():
     # ---- on foot, stable, shape, the distance law, the calibration point, what is stored ----
     menu_only = "\n".join(l for l in text.splitlines() if "window=2 " not in l and "window=3 " not in l and "window=4 " not in l)
     st, out = statuses(menu_only)
-    if st.get("ON FOOT") != "WARN" or st.get("STORED") != "n/a" or "menu only (3503 px)" not in out:
+    if st.get("ON FOOT") != "WARN" or st.get("STORED") != "n/a" or "menu only (5640 px)" not in out:
         fail("a menu-only session did not WARN on foot and store nothing: %r\n%s" % (st, out))
-    st, out = statuses(sub(text, "fp=3501 frac=0.8683 range=3493..3509", "fp=3700 frac=0.9177 range=3693..3709"))
-    if st.get("STABLE") != "WARN" or "the screen's width moved" not in out:
-        fail("a window that moved by 5%% did not WARN stable: %r" % (st,))
-    st, out = statuses(sub(text, "fp=3501 frac=0.8683 range=3493..3509", "fp=3501 frac=0.8683 range=3300..3709"))
-    if st.get("STABLE") != "WARN":
-        fail("a wide range inside a window did not WARN stable: %r" % (st,))
-    st, out = statuses(text.replace("shape=1.778", "shape=1.700"))
-    if st.get("SHAPE") != "WARN":
-        fail("a shape 4%% off 16:9 did not WARN: %r" % (st,))
-    st, out = statuses(text.replace("shape=1.778", "shape=1.200"))
-    if st.get("SHAPE") != "STOP" or "not what the instrument assumes" not in out:
-        fail("a shape 32%% off 16:9 did not STOP: %r\n%s" % (st, out))
-    st, out = statuses(text.replace(" shape=1.778", ""))
+    # STABLE: the windows' widths at distance 1 (fp x applied), (max - min) / median, against 8%. What is inside a window is not judged.
+    st, out = statuses(sub(text, "fp=5281 frac=1.3098 range=5004..6044", "fp=5800 frac=1.4385 range=5004..6044"))
+    if st.get("STABLE") != "WARN" or "the screen's width moved" not in out or "10.2% between 3 windows" not in out:
+        fail("a window 10%% wider than the others did not WARN stable: %r\n%s" % (st, out))
+    st, out = statuses(sub(text, "fp=5281 frac=1.3098 range=5004..6044", "fp=5500 frac=1.3641 range=5004..6044"))
+    if st.get("STABLE") != "PASS" or "4.5% between 3 windows" not in out:
+        fail("a window 4%% wider than the others (a head turning) did not hold: %r\n%s" % (st, out))
+    st, out = statuses(sub(text, "fp=5281 frac=1.3098 range=5004..6044", "fp=5281 frac=1.3098 range=3300..9000"))
+    if st.get("STABLE") != "PASS":
+        fail("a wide range inside one window was judged unstable (it is the head moving, not the screen): %r" % (st,))
+    # Thin windows (a transition: one on-foot sample, or six) are left out of ON FOOT, STABLE and SHAPE, and ON FOOT says how many.
+    thin3 = sub(sub(text, "window=3 samples=58 on-foot=58 other=0", "window=3 samples=58 on-foot=1 other=57"),
+                "fp=5281 frac=1.3098 range=5004..6044 h=0.8017 shape=1.690", "fp=10746 frac=2.6652 range=10746..10746 h=1.9283 shape=1.430")
+    st, out = statuses(thin3)
+    if st.get("ON FOOT") != "PASS" or st.get("STABLE") != "PASS" or st.get("SHAPE") != "PASS" or "2 on-foot window(s), 119 sample(s)" not in out or \
+            "1 thinner window(s) (under 12 on-foot samples) left out" not in out:
+        fail("a window of one on-foot sample (fp 10746, shape 1.43) was not left out of ON FOOT, STABLE and SHAPE: %r\n%s" % (st, out))
+    all_thin = re.sub(r"on-foot=(60|58|59) other=0", r"on-foot=6 other=\1", text)
+    st, out = statuses(all_thin)
+    if st.get("ON FOOT") != "WARN" or "no window has 12" not in out or "STABLE" in st or "SHAPE" in st or st.get("STORED") != "PASS":
+        fail("windows that all have fewer than 12 on-foot samples were judged: %r\n%s" % (st, out))
+    # SHAPE: the MEDIAN of the windows' shapes against 16:9: -9% to +3% passes, to +-15% WARNs, beyond STOPs.
+    for shape, want, why in (("1.650", "PASS", "-7.2%"), ("1.800", "PASS", "+1.3%"), ("1.600", "WARN", "-10.0%"), ("1.850", "WARN", "+4.1%"),
+                             ("1.500", "STOP", "-15.6%"), ("2.100", "STOP", "+18.1%")):
+        st, out = statuses(re.sub(r"shape=\d\.\d{3}", "shape=" + shape, text))
+        if st.get("SHAPE") != want or (why not in out):
+            fail("every window's shape %s (%s off 16:9) did not read %s: %r\n%s" % (shape, why, want, st, out))
+        if want != "PASS" and "not what the instrument assumes" not in out:
+            fail("a shape that did not pass did not say what is wrong: %r\n%s" % (st, out))
+    st, out = statuses(sub(text, "range=5004..6044 h=0.8017 shape=1.690", "range=5004..6044 h=1.0000 shape=1.200"))
+    if st.get("SHAPE") != "PASS" or "reads 1.700 against" not in out:
+        fail("one window of an odd shape (1.2) beside two good ones moved the median verdict: %r\n%s" % (st, out))
+    st, out = statuses(re.sub(r" shape=\d\.\d{3}", "", text))
     if st.get("SHAPE") != "n/a":
         fail("windows with no shape token did not read n/a: %r" % (st,))
+    # SHAPE in the eye's own pixels: the log's game FOV, when it carries one, gives fx/fy and the reference 16/9 x fx/fy.
+    st, out = statuses(text + "\n" + fov_line)
+    if st.get("SHAPE") != "PASS" or "16:9 in this eye's pixels = 1.778 (16:9 x fx/fy 1.0003, from the log's game FOV)" not in re.sub(r"[ ]+", " ", out):
+        fail("a square-pixel FOV did not give the reference 1.778 from the log: %r\n%s" % (st, out))
+    wide_pixels = fov_line.replace("L -0.89775/0.71858/0.79986/-0.79986 R -0.71858/0.89775/0.79986/-0.79986",
+                                   "L -0.74692/0.74692/0.79986/-0.79986 R -0.74692/0.74692/0.79986/-0.79986")
+    st, out = statuses(text + "\n" + wide_pixels)
+    if st.get("SHAPE") != "STOP" or "16:9 x fx/fy 1.1500" not in re.sub(r"[ ]+", " ", out) or "-16.8%" not in out:
+        fail("an eye whose pixels are 15%% wider than tall did not move the reference to 2.044 (shape 1.700 reads -16.8%% off it): %r\n%s" % (st, out))
+    tall_pixels = fov_line.replace("L -0.89775/0.71858/0.79986/-0.79986 R -0.71858/0.89775/0.79986/-0.79986",
+                                   "L -0.89708/0.89708/0.79986/-0.79986 R -0.89708/0.89708/0.79986/-0.79986")
+    st, out = statuses(text + "\n" + tall_pixels)
+    if st.get("SHAPE") != "WARN" or "16:9 x fx/fy 0.8500" not in re.sub(r"[ ]+", " ", out) or "+12.5%" not in out:
+        fail("an eye whose pixels are 15%% taller than wide did not move the reference to 1.511 (shape 1.700 reads +12.5%% off it): %r\n%s" % (st, out))
     # Two distances: the last window flown at 1.0 with the footprint scaled by 1/d (A at distance 1 unchanged): the law holds; if it did not
     # scale (the screen the same width at another distance) it does not.
     w4 = next(l for l in text.splitlines() if "window=4 " in l)
-    w4d = (w4.replace("distance=0.700 applied=0.700", "distance=1.000 applied=1.000").replace("fp=3499 frac=0.8678 range=3491..3507 h=0.5049",
-                                                                                             "fp=2449 frac=0.6074 range=2441..2457 h=0.3533"))
+    w4d = (w4.replace("distance=0.700 applied=0.700", "distance=1.000 applied=1.000").replace("fp=5270 frac=1.3070 range=5009..5961 h=0.7953",
+                                                                                             "fp=3689 frac=0.9149 range=3506..4173 h=0.5567"))
     st, out = statuses(text.replace(w4, w4d))
-    if st.get("DISTANCE LAW") != "PASS" or "varies as 1/d" not in out:
-        fail("a window flown at another panel distance with the footprint scaled by 1/d did not PASS the law: %r\n%s" % (st, out))
-    w4bad = w4d.replace("at1=2449 frac1=0.6075", "at1=3499 frac1=0.8678")
+    if st.get("DISTANCE LAW") != "PASS" or "varies as 1/d" not in out or st.get("STABLE") != "PASS":
+        fail("a window flown at another panel distance with the footprint scaled by 1/d did not PASS the law (and hold): %r\n%s" % (st, out))
+    w4bad = w4d.replace("at1=3689 frac1=0.9149", "at1=5270 frac1=1.3070")
     st, out = statuses(text.replace(w4, w4bad))
     if st.get("DISTANCE LAW") != "STOP" or "does NOT vary as 1/d" not in out:
         fail("a footprint that did not scale with the distance did not STOP the law: %r\n%s" % (st, out))
-    off = text.replace("fp=3497", "fp=3200").replace("fp=3501", "fp=3200").replace("fp=3499", "fp=3200")
-    st, out = statuses(off)
-    if st.get("CALIBRATION") != "WARN" or "m = 1.095" not in out:
-        fail("a measurement 9%% under Sean's 3504 did not WARN and name the m that reproduces it: %r\n%s" % (st, out))
+    # CALIBRATION is the session's STORED value (the last window's session-frac1, the p10) at a 4032 px eye: x 4032 / 0.7 is the screen's
+    # head-on footprint at the calibration distance, whatever distance was flown; within 5% of 5006 passes.
+    st, out = statuses(sub(text, "session-frac1=0.8691", "session-frac1=0.7909"))
+    if st.get("CALIBRATION") != "WARN" or "m = 0.769 reproduces 3504" not in out or "4556 px" not in out or "91.0%" not in out:
+        fail("a stored floor 9%% under the calibration point did not WARN and name the m that reproduces 3504 (0.769): %r\n%s" % (st, out))
+    st, out = statuses(sub(text, "session-frac1=0.8691", "session-frac1=0.8300"))
+    if st.get("CALIBRATION") != "PASS" or "95.5%" not in out:
+        fail("a stored floor 4.5%% under the calibration point did not PASS: %r\n%s" % (st, out))
+    st, out = statuses(sub(text, "session-frac1=0.8691", "session-frac1=0.8170"))
+    if st.get("CALIBRATION") != "WARN" or "94.0%" not in out:
+        fail("a stored floor 6%% under the calibration point did not WARN: %r\n%s" % (st, out))
+    st, out = statuses(re.sub(r"(?<![-\w])fp=\d+", "fp=3200", text))
+    if st.get("CALIBRATION") != "PASS":
+        fail("the calibration read the windows' medians (all 3200 here) instead of the session's stored value: %r\n%s" % (st, out))
     st, out = statuses(text.replace("eye=4032x3898", "eye=3296x3186"))
-    if st.get("CALIBRATION") != "n/a":
-        fail("another eye did not read n/a at the calibration point: %r" % (st,))
+    if st.get("CALIBRATION") != "n/a" or "not at the calibration point (a 4032 px eye)" not in out:
+        fail("another eye did not read n/a at the calibration point: %r\n%s" % (st, out))
+    st, out = statuses(re.sub(r"session-n=\d+", "session-n=6", text))
+    if st.get("CALIBRATION") != "n/a" or "fewer than 12 on-foot samples" not in out:
+        fail("a session of fewer than 12 on-foot samples did not read n/a at the calibration point: %r\n%s" % (st, out))
+    # A log from a build before the p10 calibration (its window lines print m=1.00; it stored the session's median) is not held against the
+    # p10 calibration point, and says what it stored.
+    st, out = statuses(text.replace("legacy=5040 m=0.700", "legacy=5040 m=1.00"))
+    if st.get("CALIBRATION") != "n/a" or "from before the p10 calibration" not in out or st.get("STORED") != "PASS" or \
+            "the on-foot MEDIAN (this log is from a build before the p10 calibration: m=1.000 on its window lines) is stored" not in out:
+        fail("a log whose window lines print m=1.00 was held against the p10 calibration point as if it stored a p10: %r\n%s" % (st, out))
     st, out = statuses(re.sub(r"persisted=[0-9.]+", "persisted=no", text))
     if st.get("STORED") != "WARN" or "needs at least 12 on-foot samples" not in out:
         fail("on-foot samples with nothing stored did not WARN: %r" % (st,))
-    st, out = statuses(sub(text, "persisted=0.6075 fit=3504", "persisted=0.6075 fit=3856"))
-    if st.get("STORED") != "PASS" or "the next launch fits 3856 wide (this launch: 3504)" not in out:
+    st, out = statuses(sub(text, "persisted=0.8694 fit=3504", "persisted=0.8694 fit=3856"))
+    if st.get("STORED") != "PASS" or "the next launch fits 3856 wide (this launch: 3504)" not in out or "head-on floor (p10) is stored: 0.8694" not in out:
         fail("a next launch that would change the width did not say so: %r\n%s" % (st, out))
+    # A save that failed: the window lines carry save-failed=N (the count so far this session; read by key, absent in every log before the first
+    # failure and from a build without it), and STORED WARNs, whichever window it was and whatever the later windows managed to save.
+    def with_line(t, window, old, new):
+        return "\n".join(l.replace(old, new) if (" window=%d " % window) in l else l for l in t.splitlines())
+    if any(x["save_failed"] for x in vscreen_fit_windows(parse_vscreen_fit(text))):
+        fail("the fixture has no save-failed token, but a window reads one")
+    failed_first = with_line(with_line(with_line(text, 2, "persisted=0.8694 fit=", "persisted=no save-failed=1 fit="),
+                                       3, "persisted=0.8694 fit=", "persisted=0.8694 save-failed=1 fit="), 4, "persisted=0.8694 fit=", "persisted=0.8694 save-failed=1 fit=")
+    wf = vscreen_fit_windows(parse_vscreen_fit(failed_first))
+    if [x["save_failed"] for x in wf] != [0, 1, 1, 1] or [x["persisted"] for x in wf] != [None, None, 0.8694, 0.8694]:
+        fail("save-failed was not read by key from the window lines (or persisted=no read as a number): %r" % ([(x["save_failed"], x["persisted"]) for x in wf],))
+    st, out = statuses(failed_first)
+    flat_out = re.sub(r"[ ]+", " ", out)
+    if st.get("STORED") != "WARN" or "1 save(s) of the on-foot footprint FAILED (first in window 2;" not in flat_out or \
+            "`vscreen footprint: SAVE FAILED` line names the Win32 error" not in flat_out or \
+            "the last value that did reach it is 0.8694 of the eye at panel distance 1 (window 4)" not in flat_out or "persisted None save-failed 1;" not in flat_out or \
+            "persisted 0.8694 save-failed 1;" not in flat_out:
+        fail("a first save that failed and was retried did not WARN STORED, naming the window, the log line and the last value that reached the file: %r\n%s" % (st, out))
+    never = text
+    for win, n in ((2, 1), (3, 2), (4, 3)):
+        never = with_line(never, win, "persisted=0.8694 fit=", "persisted=no save-failed=%d fit=" % n)
+    st, out = statuses(never)
+    if st.get("STORED") != "WARN" or "3 save(s) of the on-foot footprint FAILED (first in window 2;" not in out or \
+            "nothing from this session has reached it (persisted=no on every window)" not in out:
+        fail("saves that failed in every window did not WARN STORED, saying nothing reached the file: %r\n%s" % (st, out))
+    # The failure line of the log is no arming line (the reader tells those apart by their first words), and changes no other verdict.
+    failure_line = ("[06:08:05.500] vscreen footprint: SAVE FAILED (Win32 error 5) -- the on-foot footprint did not reach vscreen_auto_footprint.txt: the file keeps its "
+                    "previous value, and the next 30 s window tries again. Failed saves this session: 1; the 30 s lines carry save-failed=N from now on, and persisted=no "
+                    "(or the last value that did reach the file) until a save succeeds.")
+    pf = parse_vscreen_fit(failed_first + "\n" + failure_line)
+    if len(pf["armed"]) != 1 or pf["armed"][0][1] != "armed" or len(pf["windows"]) != 4:
+        fail("the SAVE FAILED line was read as an arming or a window line: %r" % (pf["armed"],))
+    st_with, _ = statuses(failed_first + "\n" + failure_line)
+    st_without, _ = statuses(failed_first)
+    if st_with != st_without or st_with.get("INSTRUMENT") != "PASS":
+        fail("the SAVE FAILED line changed a verdict: %r vs %r" % (st_with, st_without))
     rc, out = report("nothing of the kind\nvr camera census: x\n")
     if rc != 1 or "no vscreen auto-fit line" not in out:
         fail("a log with none of the lines did not exit 1 and say so:\n%s" % out)
@@ -9145,7 +10105,7 @@ def self_test_camera_census():
     _, out = report(text + refusal_line(view="on", steady="on", stale=0, kept=1, ran=1))
     if "the refusal view was painting: the headset showed the prep's classification, not the world" not in out:
         fail("a window with the refusal view on was not noted:\n%s" % out)
-    _, out = report(text + "[00:00:10.000] vr world route: steady-detail is ON from frame=100 (experimental.temporal_aa_on_foot_world_steady_detail): x\n"
+    _, out = report(text + "[00:00:10.000] vr world route: steady-detail is ON from frame=100 (the line an older build printed when it read its key): x\n"
                     "[00:00:11.000] vr world route: the refusal view is ON from frame=200 (advanced.temporal_aa_debug = motion_source): y\n")
     if "route log: [00:00:10.000] vr world route: steady-detail is ON from frame=100" not in out or "route log: [00:00:11.000] vr world route: the refusal view is ON" not in out:
         fail("the route's state lines were not quoted in the refusal section:\n%s" % out)

@@ -2226,6 +2226,9 @@ std::string fixtureLog() {
     // Three lines of the world route's 5 s window, written by the route's OWN formatters (vr_world_route_math.h: vrWorldFormatWindow,
     // vrWorldFormatInjectWindow and, while the census is on, vrWorldFormatRefusalWindow), so the fixture the reader's self-test parses is
     // what the route prints and a change to any line fails this rig's fixture pin until the fixture is regenerated and the reader parses it.
+    // The route's steady-detail token says "on" in every line a current build writes (the steady detail has no key now), and these windows
+    // say "off" on purpose: the fixture models a flight of an older build whose key was set off, because the reader's off-state logic (its
+    // WARN for a stale pixel kept or a depth check counted while the line says off) has to keep reading such logs and is tested on this file.
     auto routeWindow = [&](VrWorldState state, bool gate, const VrWorldWindow& win, const VrWorldRefusalWindow& refusal) {
         char text[1400];
         vrWorldFormatWindow(text, sizeof(text), VrWorldKey::Auto, state, true, gate, win);
@@ -2240,9 +2243,9 @@ std::string fixtureLog() {
     // nothing is sampled.
     {
         VrWorldWindow rw;
-        rw.hdr.frames = 448; rw.gateFrames = 448; rw.hdr.lastVerdict = "none"; rw.jitter = "idle";
+        rw.hdr.frames = 448; rw.gateFrames = 448; rw.hdr.lastVerdict = "none"; rw.jitter = "idle"; rw.steady = "off";
         VrWorldRefusalWindow rf;   // the census is on and the route treats nothing: "on, and nothing asked" (treated=0 asked=0 sampled=0 pixels=0)
-        rf.census = true; rf.every = kFlatMonoRefusalEvery;
+        rf.census = true; rf.every = kFlatMonoRefusalEvery; rf.steady = "off";
         routeWindow(VrWorldState::Observing, false, rw, rf);
     }
     {
@@ -2520,6 +2523,7 @@ std::string fixtureLog() {
         rw.hdr.frames = 450; rw.gateFrames = 450; rw.gateFlips = 1; rw.hdr.hdrFrames = 450; rw.hdr.triggerFrames = 450;
         rw.hdr.treated = 450; rw.ownedFrames = 450; rw.takes = 900; rw.layerOnly = 900; rw.enters = 1;
         rw.hdr.lastVerdict = "treated"; rw.jitter = "on"; rw.phaseX = -0.2520f; rw.phaseY = -0.0630f; rw.rowsX = 0.1260f; rw.rowsY = 0.2520f;
+        rw.steady = "off";
         rw.foldMode[1] = 450;
         rw.hdr.lastTriggerVs = 0xDFED8E1C9E191BECull; rw.hdr.lastTriggerPs = 0x143AAE0597E2F7BFull;
         rw.hdr.lastTargetWidth = 2520; rw.hdr.lastTargetHeight = 1417; rw.hdr.lastHdrWidth = 5040; rw.hdr.lastHdrHeight = 2835;
@@ -2533,6 +2537,7 @@ std::string fixtureLog() {
         // out-of-range reprojections; the first-person pixels are credited (mode 1), so almost none are refused for the weapon.
         VrWorldRefusalWindow rf;
         rf.census = true; rf.every = kFlatMonoRefusalEvery; rf.treated = 450; rf.asked = 450; rf.sampled = 113; rf.read = 112; rf.dropped = 0;
+        rf.steady = "off";
         rf.width = 5040; rf.height = 2835; rf.pixels = 112ull * 5040ull * 2835ull;
         rf.counts[kFlatMonoClassStale] = 40007520; rf.counts[kFlatMonoClassMasked] = 800150; rf.counts[kFlatMonoClassSentinel] = 16003008;
         rf.counts[kFlatMonoClassRange] = 1600300; rf.counts[kFlatMonoClassWeaponRefused] = 0;

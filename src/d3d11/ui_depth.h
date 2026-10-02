@@ -60,12 +60,25 @@ extern bool g_uiDepthPlanetSolarPending;
 // advanced.temporal_aa_hologram_depth: the generic contribution-based
 // coverage below, independent of g_uiDepthOn's own per-family shaders.
 extern bool g_holoDepthOn;
+// Whether the eye draw uiDepthOnEyeDraw last classified samples a learned
+// interface surface -- the test that makes a draw a composite -- rewritten at
+// the top of every call (false before any early return), so it is only ever
+// the answer for the draw that call was about. Published for the layer's
+// census of the composites it leaves in the scene (ui_scene_composites.h): the
+// loop that finds the surface already runs for every eye draw with a depth
+// target, and a second one in the layer would double its cost.
+extern bool g_uiDepthDrawComposite;
 }  // namespace detail
 inline bool uiDepthWantsDraws() {
     return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown;
 }
 inline bool uiDepthPlanetPending() {
     return detail::g_uiDepthPlanetPending || detail::g_uiDepthPlanetSolarPending;
+}
+// True when the draw uiDepthOnEyeDraw has just classified samples a learned
+// interface surface. Read right after that call, for the same draw.
+inline bool uiDepthDrawSampledSurface() {
+    return detail::g_uiDepthDrawComposite;
 }
 // The hologram/icon depth pass's own draw-path bool, read inline for the
 // same reason uiDepthWantsDraws() is (ui_depth.h's header comment): a
