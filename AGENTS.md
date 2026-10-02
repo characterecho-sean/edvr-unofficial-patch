@@ -70,9 +70,11 @@ corrupted. Do not regenerate the one-liner — extend the script.
 | Credit contributors in release notes | `python tools\release_credits.py --from <previous-tag> --thanks` | writing the credits from memory or ad-hoc `gh` queries |
 
 Every release's notes carry a `## Thanks` section built from
-`release_credits.py` and finished by hand: the tool lists who appears where
-and a person writes each sentence. People known only by an anonymised label
-("user 2", "the reporter") are not named without the maintainer's consent.
+`release_credits.py --thanks` and finished by hand. It names only the authors
+of PRs merged in the release; everyone who opened an issue or sent logs gets
+the tool's one general line and is not named. A person writes each sentence.
+People known only by an anonymised label ("user 2", "the reporter") are not
+named without the maintainer's consent.
 
 ```bash
 python tools\install_edvr.py --target steam --dry-run

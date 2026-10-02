@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Build the contributor-credit list for a release, from sources.
 
-Maintainer's rule (2026-10-02): every release's notes credit ALL contributors
-by public GitHub handle, built from sources and not from memory. This tool
-reads the commits, the pull requests, the issues and the docs diff of a
-range, and lists WHO appears WHERE. It never writes a description of anyone's
-contribution: a human writes the sentence.
+Maintainer's rule (2026-10-02): every release's notes carry a Thanks section
+built from sources and not from memory. It NAMES, by public GitHub handle,
+only the authors of pull requests merged in the release; everyone who opened
+an issue or sent logs gets one general line and is not named. This tool reads
+the commits, the pull requests, the issues and the docs diff of a range and
+lists WHO appears WHERE (the full report keeps every reporter and commenter as
+reference data). It never writes a description of anyone's contribution: a
+human writes the sentence.
 
     python tools\\release_credits.py --from v0.18.0 --thanks
     python tools\\release_credits.py --from v0.18.0 --to origin/main
@@ -40,31 +43,36 @@ GitHub through `gh api` / `gh pr` / `gh issue` / `gh repo view`):
                (draw-call indices do not; numbers above the repository's
                newest are dropped without a lookup). Each row lists the
                reporter, the commenters with comment counts (maintainer and
-               bots excluded) and the commits that cite it, if any. A
-               commenter is credited only for comments made since the window
-               start; a reporter is credited for any issue that is listed. A
-               PR found this way is listed with its author, and its author
-               is credited by the PR sections, not as an issue reporter.
+               bots excluded; a comment from before the window start is
+               shown as such) and the commits that cite it, if any. All of
+               this is reference data: none of these people is named in the
+               Thanks skeleton.
   4. DOCS      Lines added under docs\\ that mention `user N`, supporter,
                tester or the reporter: people known only by an anonymised
-               label. A prompt for the maintainer, never a credit.
+               label. Informational, never a credit.
 
-The maintainer is shown in the code summary but left out of the Thanks
-skeleton unless --include-maintainer. No email address is ever printed.
+The Thanks skeleton (--thanks) names one person per pull request author
+merged in the range: `- @handle: TODO describe (sources: PR #N, N commits)`.
+A code author with no merged PR, an issue reporter, an issue commenter and the
+author of an unmerged PR are not named. The maintainer is shown in the code
+summary but left out of the skeleton unless --include-maintainer. After the
+named lines comes `- TODO: AI assistance disclosure (maintainer decides)`,
+only when AI co-authors were found, then a blank line and one fixed general
+line thanking everyone who opened an issue or sent logs (it has no TODO).
+No email address is ever printed.
 
---thanks prints only the `## Thanks` skeleton (one TODO line per resolved
-person, merged-PR authors first, then other code authors, issue reporters,
-issue commenters; `- TODO: AI assistance disclosure` only when AI co-authors
-were found). What needs a decision (unmapped authors, docs mentions, PRs not
-merged) goes to stderr so stdout stays pasteable. --format json always
-carries the whole report, with a `thanks` array.
+--thanks prints only that skeleton. What the maintainer may want to look at
+(unmapped authors, docs mentions of reporters with no handle, PRs not merged)
+goes to stderr so stdout stays pasteable. --format json always carries the
+whole report, with a `thanks` array of the named people and the general line.
 
 --out FILE writes the report as UTF-8 without BOM, LF endings. With --dry-run
 it prints what it would write and creates no file and no directory.
 
 Exit codes: 0 ok; 1 usage or tool failure (git or gh missing or failing, bad
-rev); 2 when --thanks finds unmapped authors or docs mentions of reporters
-with no handle (so a script can notice; the skeleton is still printed).
+rev); 2 when --thanks finds a human code author with no resolved handle (so a
+script can notice; the skeleton is still printed). Docs mentions of reporters
+and unmerged PRs are informational and never force exit 2.
 """
 import argparse
 import contextlib
@@ -438,45 +446,10 @@ def comment_in_window(stamp, start):
 # The report
 # ---------------------------------------------------------------------------
 
-class Person:
-    def __init__(self, login):
-        self.login = login
-        self.prs = set()        # PR numbers: authored (merged) or commented on
-        self.issues = set()     # issue numbers: reported or commented on
-        self.commits = 0
-        self.merged_prs = set()
-        self.reported = set()
-        self.comments = 0
-
-    def group(self):
-        if self.merged_prs:
-            return 0
-        if self.commits:
-            return 1
-        if self.reported:
-            return 2
-        return 3
-
-    def rank(self):
-        g = self.group()
-        key = self.login.lower()
-        if g == 0:
-            return (min(self.merged_prs), key)
-        if g == 1:
-            return (-self.commits, key)
-        if g == 2:
-            return (min(self.reported), key)
-        return (-self.comments, key)
-
-    def sources(self):
-        out = ["PR #%d" % n for n in sorted(self.prs)]
-        out += ["issue #%d" % n for n in sorted(self.issues)]
-        if self.commits:
-            out.append(plural(self.commits, "commit"))
-        return out
-
-
-GROUP_NAMES = ("merged_pr_author", "code_author", "issue_reporter", "issue_commenter")
+# The one line that thanks everyone who is not named. It carries no TODO: it
+# is final text, the same in every release.
+GENERAL_THANKS = ("Thanks as well to everyone who opened an issue or sent logs for this release. "
+                  "Those reports are how the fixes above were found and checked.")
 
 
 def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer):
@@ -644,36 +617,23 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
         })
 
     # -- the Thanks skeleton ------------------------------------------------
-    people = {}
-
-    def person(login):
-        return people.setdefault(login.lower(), Person(login))
-
+    # Policy: only the authors of PRs merged in the range are named. Issue
+    # reporters and commenters, and code authors with no merged PR, stay in
+    # the reference sections above and get the general line instead.
+    authors = {}  # casefolded login -> {login, prs}
     for p in prs_merged:
         if p["author"] and not p["bot"]:
-            who = person(p["author"])
-            who.prs.add(p["number"])
-            who.merged_prs.add(p["number"])
-    for slot in by_login.values():
-        who = person(slot["login"])
-        who.commits = len(slot["shas"])
-    for it in issues:
-        if it["kind"] == "issue" and it["reporter"] and not it["reporter_bot"]:
-            who = person(it["reporter"])
-            who.issues.add(it["number"])
-            who.reported.add(it["number"])
-        for cm in it["commenters"]:
-            if not cm["in_window"]:
-                continue  # only comments from before the window: credited in an earlier release
-            who = person(cm["login"])
-            (who.prs if it["kind"] == "pr" else who.issues).add(it["number"])
-            who.comments += cm["in_window"]
+            slot = authors.setdefault(p["author"].lower(), {"login": p["author"], "prs": []})
+            slot["prs"].append(p["number"])
     thanks = []
-    for who in sorted(people.values(), key=lambda w: (w.group(), w.rank())):
-        if who.login.lower() == maint and not include_maintainer:
+    for key, slot in sorted(authors.items(), key=lambda kv: (min(kv[1]["prs"]), kv[0])):
+        if key == maint and not include_maintainer:
             continue
-        thanks.append({"login": who.login, "group": GROUP_NAMES[who.group()],
-                       "sources": who.sources(), "commits": who.commits})
+        commit_count = len(by_login.get(key, {}).get("shas", ()))
+        sources = ["PR #%d" % n for n in sorted(slot["prs"])]
+        if commit_count:
+            sources.append(plural(commit_count, "commit"))
+        thanks.append({"login": slot["login"], "sources": sources, "commits": commit_count})
 
     code = sorted(
         ({"login": s["login"], "commits": len(s["shas"]), "maintainer": s["login"].lower() == maint}
@@ -703,6 +663,7 @@ def build_report(git, gh, repo, from_rev, to_rev, maintainer, include_maintainer
         "issues": [{k: v for k, v in it.items() if k != "reporter_bot"} for it in issues],
         "docs_reporter_mentions": docs_mentions,
         "thanks": thanks,
+        "thanks_general_line": GENERAL_THANKS,
         "ai_disclosure_needed": bool(ai),
         "warnings": warnings,
     }
@@ -812,11 +773,14 @@ def render_thanks(report):
         lines.append("- %s: TODO describe (sources: %s)" % (at(t["login"]), ", ".join(t["sources"])))
     if report["ai_disclosure_needed"]:
         lines.append("- TODO: AI assistance disclosure (maintainer decides)")
+    lines += ["", report["thanks_general_line"]]
     return "\n".join(lines) + "\n"
 
 
 def needs_decision(report):
-    return bool(report["unmapped_authors"] or report["docs_reporter_mentions"])
+    """Exit code 2: a human code author has no resolved handle. Docs mentions
+    and unmerged PRs are informational."""
+    return bool(report["unmapped_authors"])
 
 
 def decision_notes(report):
@@ -863,7 +827,7 @@ def emit(text, out, dry_run, stdout):
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):
-        # argparse exits 2 by default; here 2 means "needs a decision".
+        # argparse exits 2 by default; here 2 means "an unmapped code author".
         self.print_usage(sys.stderr)
         sys.stderr.write("release_credits: error: %s\n" % message)
         raise SystemExit(1)
@@ -873,9 +837,12 @@ def build_parser():
     p = Parser(
         prog="release_credits.py",
         description="Build the contributor-credit list for a release, from sources.",
-        epilog="Exit codes: 0 ok; 1 usage or tool failure (git or gh missing or failing, bad rev); "
-               "2 when --thanks finds unmapped authors or docs mentions of reporters with no "
-               "handle (the skeleton is still printed). No email address is ever printed.",
+        epilog="The Thanks skeleton names only the authors of PRs merged in the range; everyone "
+               "who opened an issue or sent logs gets one general line and is not named. "
+               "Exit codes: 0 ok; 1 usage or tool failure (git or gh missing or failing, bad rev); "
+               "2 when --thanks finds a human code author with no resolved handle (the skeleton is "
+               "still printed; docs mentions of reporters and unmerged PRs never force it). "
+               "No email address is ever printed.",
     )
     p.add_argument("--from", dest="from_rev",
                    help="previous release tag or rev (exclusive); its committer date starts the "
@@ -887,7 +854,8 @@ def build_parser():
                    help="keep the maintainer in the Thanks skeleton")
     p.add_argument("--format", choices=("text", "markdown", "json"), default="text")
     p.add_argument("--thanks", action="store_true",
-                   help="print only the ## Thanks skeleton (json: the full report as usual)")
+                   help="print only the ## Thanks skeleton: merged-PR authors by name, one general "
+                        "line for issue and log submitters (json: the full report as usual)")
     p.add_argument("--out", help="write the report to FILE (UTF-8, no BOM, LF)")
     p.add_argument("--dry-run", action="store_true",
                    help="with --out: print what would be written; create no file and no directory")
@@ -933,7 +901,7 @@ def main(argv=None, git=None, gh=None, stdout=None, stderr=None):
     if args.thanks:
         decisions = decision_notes(report)
         if decisions:
-            stderr.write("release_credits: needs a decision before publishing:\n")
+            stderr.write("release_credits: for the maintainer before publishing:\n")
             stderr.write("\n".join("  " + n for n in decisions) + "\n")
         if needs_decision(report):
             return 2
@@ -993,6 +961,8 @@ def _make_repo(tmp):
     commit("c6", "Maint Dev", "maint@example.org", "Fix issue 10 and #11 and #16\n")
     commit("c7", "dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com", "Bump a dep\n")
     commit("c8", "Frank F", "333+frank-gh@users.noreply.github.com", "Frank's change\n")
+    commit("c9", "Frank F", "333+frank-gh@users.noreply.github.com", "More notes\n",
+           {"docs/zeta.md": "the reporter sent a log\n"})
     return shas
 
 
@@ -1014,6 +984,13 @@ def _make_fake_gh(shas, calls):
          "updatedAt": "2000-01-01T00:00:00Z"},
         {"number": 21, "title": "Maintainer draft", "author": {"login": "maint-gh", "is_bot": False},
          "state": "OPEN", "mergedAt": None, "mergeCommit": None, "url": "u21", "updatedAt": far},
+        # a second merged PR by Carol, and a merged PR by the maintainer
+        {"number": 22, "title": "Carol again", "author": {"login": "carol-gh", "is_bot": False},
+         "state": "MERGED", "mergedAt": far, "mergeCommit": {"oid": shas["c8"]}, "url": "u22",
+         "updatedAt": far},
+        {"number": 23, "title": "Maintainer fix", "author": {"login": "maint-gh", "is_bot": False},
+         "state": "MERGED", "mergedAt": far, "mergeCommit": {"oid": shas["c6"]}, "url": "u23",
+         "updatedAt": far},
     ]
 
     old = "2000-01-01T00:00:00Z"
@@ -1147,14 +1124,16 @@ def self_test():
                     and all("claude" not in c["login"].lower() for c in r["code"]))
 
         def bot_ok(r):
-            return not any("dependabot" in t["login"].lower() for t in r["thanks"])
+            return not any("dependabot" in c["login"].lower() for c in r["code"] + r["thanks"])
 
         def api_calls_for(sha):
             return [c for c in calls if c[0] == "api" and c[1].endswith("/" + sha)]
 
         def window_ok(r):
+            # reference data: a comment from before the window is flagged, a re-label is not activity
             rows = {i["number"]: i for i in r["issues"]}
-            return (not any(t["login"] in ("old-gh", "mia-gh", "nina-gh") for t in r["thanks"])
+            before = [c for n in (10, 12) for c in rows[n]["commenters"] if c["login"] in ("old-gh", "mia-gh")]
+            return (len(before) == 2 and all(c["in_window"] == 0 for c in before)
                     and 13 not in rows and rows[12]["found_by"] == ["window"])
 
         check("alice-gh" in code, "(a) a noreply email resolves to its login")
@@ -1170,8 +1149,9 @@ def self_test():
         check([b["name"] for b in rep["bots_skipped"]] == ["dependabot[bot]"], "bot listed as skipped")
         check(not api_calls_for(shas["c5"]), "AI identity never mapped")
         check(len(api_calls_for(shas["c2"])) == 1, "one API lookup per unresolved author")
-        check([p["number"] for p in rep["prs_merged"]] == [7] and rep["prs_merged"][0]["author"] == "carol-gh",
-              "(e)(f) merged PR in range listed, merge commit outside the range not")
+        check([(p["number"], p["author"]) for p in rep["prs_merged"]]
+              == [(7, "carol-gh"), (22, "carol-gh"), (23, "maint-gh")],
+              "(e)(f) merged PRs in range listed, the one whose merge commit is outside the range not")
         check([(p["number"], p["state"]) for p in rep["prs_not_merged"]] == [(8, "OPEN")],
               "(e) open non-maintainer PR listed; stale, maintainer and merged ones not")
         rows = {i["number"]: i for i in rep["issues"]}
@@ -1198,48 +1178,53 @@ def self_test():
               "an issue only in the activity window is listed with its reporter and commenters: %r" % rows[12])
         check(rows[14]["found_by"] == ["docs", "window"] and rows[14]["reporter"] == "oscar-gh",
               "a docs-only citation is listed and tagged: %r" % rows[14])
-        check(window_ok(rep), "re-labelled issue and pre-window commenters are not credited")
-        check([(d["file"], d["line"]) for d in rep["docs_reporter_mentions"]] == [("docs/notes.md", 3), ("docs/notes.md", 4)],
+        check(window_ok(rep), "re-labelled issue not counted, pre-window comments flagged in the reference data")
+        check([(d["file"], d["line"]) for d in rep["docs_reporter_mentions"]]
+              == [("docs/notes.md", 3), ("docs/notes.md", 4), ("docs/zeta.md", 1)],
               "(h) docs lines mentioning reporters listed: %r" % rep["docs_reporter_mentions"])
         check(all("@" not in d["text"] for d in rep["docs_reporter_mentions"]), "docs excerpt scrubbed")
 
         # -- Thanks --------------------------------------------------------
         rc, th, err = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks"])
         check(rc == 2, "(m) exit 2 when --thanks finds unmapped authors, got %d" % rc)
+        general = ("Thanks as well to everyone who opened an issue or sent logs for this release. "
+                   "Those reports are how the fixes above were found and checked.")
+        check(GENERAL_THANKS == general, "the general line is the agreed text")
+        # Policy: only the authors of PRs merged in the range are named. Carol has two merged PRs and
+        # one commit and appears once; everyone else is reference data in the full report.
+        check(th == "## Thanks\n"
+                    "- @carol-gh: TODO describe (sources: PR #7, PR #22, 1 commit)\n"
+                    "- TODO: AI assistance disclosure (maintainer decides)\n"
+                    "\n" + general + "\n",
+              "(k) the skeleton: merged-PR authors, the AI line, then the general line: %r" % th)
+        check(th.count(general) == 1 and "TODO" not in general, "(k) the general line appears once, without TODO")
         lines = th.splitlines()
-        check(lines[0] == "## Thanks", "skeleton starts with the heading")
-        who = [l.split(":")[0][3:] for l in lines[1:] if l.startswith("- @")]
-        check(who == ["carol-gh", "alice-gh", "bob-gh", "eve-gh", "frank-gh", "ivan-gh", "judy-gh",
-                      "kate-gh", "oscar-gh", "heidi-gh", "liam-gh", "pia-gh"],
-              "(k) order: merged-PR authors, code authors, reporters, commenters: %r" % who)
-        check(not any(x in who for x in ("old-gh", "mia-gh", "nina-gh")),
-              "a commenter whose comments predate the window and a re-labelled issue's people are not credited")
-        for name, expect in (("kate-gh", "issue #12"), ("liam-gh", "issue #12"), ("oscar-gh", "issue #14"),
-                             ("pia-gh", "issue #14")):
-            line = [l for l in lines if l.startswith("- @" + name + ":")][0]
-            check(expect in line, "window and docs people reach the skeleton: " + line)
-        check(len(who) == len(set(who)) and "maint-gh" not in who, "(k) each person once, maintainer excluded")
-        check(all("TODO" in l for l in lines[1:]), "(k) every skeleton line carries TODO")
-        check(lines[-1] == "- TODO: AI assistance disclosure (maintainer decides)", "(k) AI disclosure line")
-        carol = [l for l in lines if l.startswith("- @carol-gh")][0]
-        check(carol == "- @carol-gh: TODO describe (sources: PR #7, 1 commit)", "carol line: " + carol)
-        judy = [l for l in lines if l.startswith("- @judy-gh")][0]
-        check(judy == "- @judy-gh: TODO describe (sources: issue #10, issue #11)", "(k) merged sources: " + judy)
-        heidi = [l for l in lines if l.startswith("- @heidi-gh")][0]
-        check("PR #7" in heidi, "a PR commenter is credited as a commenter: " + heidi)
-        check("Dave D" in err and "docs mention reporters" in err, "decision notes go to stderr")
+        check(all("TODO" in l for l in lines[1:] if l.startswith("- ")), "(k) every named line carries TODO")
+        for name in ("alice-gh", "bob-gh", "eve-gh", "frank-gh", "ivan-gh", "judy-gh", "kate-gh", "oscar-gh",
+                     "heidi-gh", "liam-gh", "pia-gh", "old-gh", "mia-gh", "nina-gh", "maint-gh"):
+            check("@" + name not in th, "not named in the skeleton: " + name)
+        check(rows[10]["reporter"] == "ivan-gh" and rows[12]["reporter"] == "kate-gh"
+              and [c["login"] for c in rows[12]["commenters"]] == ["liam-gh", "mia-gh"],
+              "the full report keeps the reporters and commenters the skeleton does not name")
+        check(rep["thanks"] == [{"login": "carol-gh", "sources": ["PR #7", "PR #22", "1 commit"], "commits": 1}]
+              and rep["thanks_general_line"] == general, "json carries the named people and the general line")
+        check("Dave D" in err and "docs mention reporters" in err and "PRs not merged" in err,
+              "notes for the maintainer go to stderr")
         check("Dave" not in th and "Claude" not in th, "(c)(d) no unmapped or AI name in the skeleton")
         rc, th_m, _ = run(["--from", "v0.1.0", "--to", "HEAD", "--thanks", "--include-maintainer"])
-        check("- @maint-gh:" in th_m, "--include-maintainer keeps the maintainer")
+        check(th_m.splitlines()[1:4] == ["- @carol-gh: TODO describe (sources: PR #7, PR #22, 1 commit)",
+                                         "- @maint-gh: TODO describe (sources: PR #23, 1 commit)",
+                                         "- TODO: AI assistance disclosure (maintainer decides)"],
+              "--include-maintainer keeps the maintainer, after Carol by PR number: %r" % th_m)
 
-        # -- a range with nothing to decide and no AI ---------------------
+        # -- a range with docs mentions and an unmerged PR, but no unmapped author --
         rc, th2, err2 = run(["--from", shas["c5"], "--to", "HEAD", "--thanks"])
-        check(rc == 0 and "unmapped" not in err2 and "docs mention" not in err2,
-              "(m) exit 0 when nothing needs a decision: %d %r" % (rc, err2))
-        check("AI assistance" not in th2, "(k) no AI line when no AI was found")
-        check([l.split(":")[0] for l in th2.splitlines()[1:]] == [
-            "- @frank-gh", "- @ivan-gh", "- @judy-gh", "- @kate-gh", "- @oscar-gh", "- @heidi-gh",
-            "- @liam-gh", "- @pia-gh"], "later range: %r" % th2)
+        check(rc == 0 and "unmapped" not in err2,
+              "(m) exit 0 with no unmapped author, even with docs mentions and an unmerged PR: %d %r" % (rc, err2))
+        check("docs mention reporters" in err2 and "PRs not merged" in err2,
+              "those stay informational on stderr: %r" % err2)
+        check(th2 == "## Thanks\n- @carol-gh: TODO describe (sources: PR #22)\n\n" + general + "\n",
+              "(k) no AI line when no AI was found; a PR author with no commit in the range: %r" % th2)
 
         # -- never an email ------------------------------------------------
         for fmt in ("text", "markdown", "json"):
